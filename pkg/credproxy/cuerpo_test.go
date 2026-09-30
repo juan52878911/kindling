@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -18,7 +19,7 @@ import (
 // El sustituidor cambia el marcador aunque llegue partido byte a byte, y lo
 // que no es marcador sale igual.
 func TestSustituidorMarcadorPartido(t *testing.T) {
-	cs := []Credential{{Placeholder: testPlace, Secret: testSecret}, {Placeholder: testPlace2, Secret: testSecret2}}
+	cs := []Credential{{Placeholder: testPlace, Secret: testSecret, Body: true}, {Placeholder: testPlace2, Secret: testSecret2, Body: true}}
 	in := testPlace + " medio kling-cred-no-es " + testPlace2 + " kling-" + testPlace
 	want := testSecret + " medio kling-cred-no-es " + testSecret2 + " kling-" + testSecret
 	got, err := io.ReadAll(nuevoSustituidor(iotest.OneByteReader(strings.NewReader(in)), cs))
@@ -90,10 +91,13 @@ func TestProxySustituyeEnUnCuerpoChunkedGrande(t *testing.T) {
 func TestProxyCuerpoConYSinLongitud(t *testing.T) {
 	var recibido []byte
 	var declarada int64
-	srv, _ := proxyContra(t, func(w http.ResponseWriter, r *http.Request) {
+	srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
 		declarada = r.ContentLength
 		recibido, _ = io.ReadAll(r.Body)
-	})
+	}, []Credential{
+		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Body: true},
+		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2, Body: true},
+	}, func(p *Proxy) { p.tempDir = t.TempDir() })
 	enviar := func(body io.Reader, largo int64) {
 		t.Helper()
 		req, _ := http.NewRequest("POST", srv.URL+"/", body)
@@ -154,7 +158,7 @@ func TestProxyCuerpoGrandeConLongitudLlegaPorFicheroYSeBorra(t *testing.T) {
 		return d.DialContext(ctx, network, up.Listener.Addr().String())
 	}
 	p := New(Options{Transport: tr, TempDir: dir})
-	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Body: true}}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(p)
@@ -200,7 +204,7 @@ func (fallaSiempre) RoundTrip(*http.Request) (*http.Response, error) {
 func TestProxyBorraElTemporalSiElProveedorFalla(t *testing.T) {
 	dir := t.TempDir()
 	p := New(Options{Transport: fallaSiempre{}, TempDir: dir})
-	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Body: true}}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(p)
@@ -220,5 +224,63 @@ func TestProxyBorraElTemporalSiElProveedorFalla(t *testing.T) {
 	}
 	if f := ficherosEn(t, dir); len(f) != 0 {
 		t.Errorf("el temporal no se borró tras el fallo: quedan %v en %s", f, dir)
+	}
+}
+
+// Sin TempDir el cuerpo con la clave no se derrama nunca a disco: ni a
+// os.TempDir() (/tmp, compartido con el resto del host y donde se queda si el
+// daemon muere a mitad) ni a ningún otro sitio. Un cuerpo grande sale chunked.
+func TestProxySinTempDirNoEscribeLaClaveEnDisco(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var recibido []byte
+	var declarada int64
+	srv, _ := proxyContra(t, func(w http.ResponseWriter, r *http.Request) {
+		declarada = r.ContentLength
+		recibido, _ = io.ReadAll(r.Body)
+	})
+	raw := cuerpoGrande(2<<20, testPlace)
+	req, _ := http.NewRequest("POST", srv.URL+"/", bytes.NewReader(raw))
+	req.Host = "example.com"
+	req.ContentLength = int64(len(raw))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	want := bytes.ReplaceAll(raw, []byte(testPlace), []byte(testSecret))
+	if !bytes.Equal(recibido, want) || declarada != -1 {
+		t.Errorf("%d bytes con Content-Length %d; quería %d chunked", len(recibido), declarada, len(want))
+	}
+	if f := ficherosEn(t, tmp); len(f) != 0 {
+		t.Fatalf("se escribió en os.TempDir(): %v", f)
+	}
+}
+
+// PrepararTempDir crea el directorio 0700 y borra lo que dejó un proceso que
+// murió a mitad de una petición (un temporal con la clave dentro).
+func TestPrepararTempDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "credtmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resto := filepath.Join(dir, "kindling-credproxy-123.tmp")
+	ajeno := filepath.Join(dir, "otra-cosa")
+	for _, f := range []string{resto, ajeno} {
+		if err := os.WriteFile(f, []byte(testSecret), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := PrepararTempDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(resto); !os.IsNotExist(err) {
+		t.Errorf("el temporal que quedó sigue ahí: %v", err)
+	}
+	if _, err := os.Stat(ajeno); err != nil {
+		t.Errorf("borró lo que no era suyo: %v", err)
+	}
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("permisos %v, %v; quería 0700", fi.Mode().Perm(), err)
 	}
 }

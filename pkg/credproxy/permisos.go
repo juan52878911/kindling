@@ -210,6 +210,34 @@ func rutaAmbigua(u *url.URL) string {
 			return "dot segment in the path"
 		}
 	}
+	return rutaDecodificadaAmbigua(u.Path)
+}
+
+// rutaDecodificadaAmbigua mira la ruta YA decodificada una vez (u.Path): lo
+// crudo puede esconder con percent-encoding lo que rutaAmbigua busca, y al
+// salir la ruta va decodificada y reescapada (urlSaliente), así que un %3B
+// llega al proveedor como ";" (/public/..%3B/admin sale como /public/..;/admin,
+// que Tomcat o Spring leen como /admin). Un "%" que quede tras decodificar es
+// una doble codificación (%252e): un proveedor que decodifique otra vez vería
+// otra ruta. Y un carácter de control (%00, %0A) no tiene lectura única.
+func rutaDecodificadaAmbigua(dec string) string {
+	switch {
+	case strings.Contains(dec, ";"):
+		return "encoded path parameter (%3B) in the path"
+	case strings.Contains(dec, "%"):
+		return "double encoding (%25) in the path"
+	case strings.Contains(dec, "\\"):
+		return "backslash in the decoded path"
+	case strings.Contains(dec, "//"):
+		return "double slash in the decoded path"
+	case strings.IndexFunc(dec, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0:
+		return "control character in the path"
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(dec, "/"), "/") {
+		if seg == "." || seg == ".." {
+			return "dot segment in the decoded path"
+		}
+	}
 	return ""
 }
 

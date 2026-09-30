@@ -134,6 +134,14 @@ type Daemon struct {
 	// 0 = una cuarta parte del disco libre, con un máximo de 16 GiB. Se reserva
 	// entero al crearlo (sin sobreasignar). KLING_COW_STORE_GIB lo sustituye.
 	CoWStoreGiB int `json:"cow_store_gib,omitempty"`
+
+	// CredAuditMiB y CredAuditGenerations son el tamaño de cada fichero del
+	// registro de auditoría del proxy de credenciales y cuántos rotados se
+	// guardan por máquina. 0 = 4 MiB y 3 (~80 000 peticiones antes de que la
+	// más antigua se caiga, y se cuenta en dropped). KLING_CREDAUDIT
+	// ("MIB:GENERACIONES") lo sustituye. Se lee al arrancar el daemon.
+	CredAuditMiB         int `json:"credaudit_max_mib,omitempty"`
+	CredAuditGenerations int `json:"credaudit_generations,omitempty"`
 }
 
 // Modos de daemon.cow.
@@ -464,6 +472,19 @@ func (c *Config) Set(key, value string) error {
 				return fmt.Errorf("daemon.cow_store_gib can't be negative")
 			}
 			c.Daemon.CoWStoreGiB = n
+		case "credaudit_max_mib", "credaudit_generations":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < 0 || (field == "credaudit_max_mib" && n > 1024) || (field == "credaudit_generations" && n > 99) {
+				return fmt.Errorf("daemon.%s out of range (0-1024 MiB, 0-99 generations; 0 is the default)", field)
+			}
+			if field == "credaudit_max_mib" {
+				c.Daemon.CredAuditMiB = n
+			} else {
+				c.Daemon.CredAuditGenerations = n
+			}
 		default:
 			return fmt.Errorf("unknown field daemon.%s", field)
 		}
@@ -557,6 +578,8 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.share_copy_max_mib", itoa(c.Daemon.ShareCopyMaxMiB)},
 		{"daemon.cow", c.Daemon.CoW},
 		{"daemon.cow_store_gib", itoa(c.Daemon.CoWStoreGiB)},
+		{"daemon.credaudit_max_mib", itoa(c.Daemon.CredAuditMiB)},
+		{"daemon.credaudit_generations", itoa(c.Daemon.CredAuditGenerations)},
 	}
 }
 

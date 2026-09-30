@@ -63,6 +63,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -76,6 +77,23 @@ const (
 	// misma maestra. Cambiarla invalidaría todo almacén existente.
 	credInfo = "kindling credential store v1"
 )
+
+// credAuditCfg es el tamaño y las generaciones del registro de auditoría de
+// los proxies de credenciales (credproxy.AuditConfig; cero = por defecto).
+var credAuditCfg atomic.Value
+
+// SetCredAuditConfig fija el registro de auditoría de los proxies que se
+// creen a partir de ahora: en Linux los del daemon, en macOS cada kling-vz
+// (por KLING_VZ_CREDAUDIT). El daemon lo llama antes de crear el manager.
+func SetCredAuditConfig(c credproxy.AuditConfig) {
+	credAuditCfg.Store(c)
+	fijarAuditoriaPlataforma(c)
+}
+
+func credAuditConfig() credproxy.AuditConfig {
+	c, _ := credAuditCfg.Load().(credproxy.AuditConfig)
+	return c
+}
 
 // registrarCredenciales entrega el juego completo al proxy de la máquina:
 // en Linux, knet.SetCredentials (proxy y resolver del daemon); en macOS, PUT
@@ -336,6 +354,7 @@ func sinUpstreamMaquina(specs []api.CredentialSpec) error {
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
+		Headers: s.Headers, Query: s.Query, Body: s.Body,
 		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
 		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName,
 		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner}

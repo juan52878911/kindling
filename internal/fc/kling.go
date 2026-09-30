@@ -48,6 +48,12 @@ type KlingCredential struct {
 	Placeholder string   `json:"placeholder"`
 	Secret      string   `json:"secret"`
 	Allow       []string `json:"allow,omitempty"`
+	// Headers, Query y Body: dónde se cambia el marcador (credproxy.Credential).
+	// Solo a un kling-vz que anuncia credproxy.CapHTTPPlaces: uno anterior los
+	// ignoraría y lo cambiaría en todas partes.
+	Headers     []string `json:"headers,omitempty"`
+	Query       bool     `json:"query,omitempty"`
+	Body        bool     `json:"body,omitempty"`
 	Kind        string   `json:"kind,omitempty"`
 	Port        int      `json:"port,omitempty"`
 	User        string   `json:"user,omitempty"`

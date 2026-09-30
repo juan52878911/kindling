@@ -146,8 +146,8 @@ var coreTree = []section{
                                                    swaps for the key towards http://D
                                                    (needs -egress allowlist; stdin if
                                                    no -f; -clear removes them all;
-                                                   -allow-request as in machine
-                                                   credential)
+                                                   -allow-request, -header, -query and
+                                                   -body as in machine credential)
   template credential <name> -type postgres        the same for a database password
       -domain D -user R -database B [-port P]      (see machine credential)
       (-any-database instead of -database: any base)
@@ -243,7 +243,12 @@ var coreTree = []section{
                                                    which requests get the key, the rest
                                                    is a 403 (repeatable; * = a segment,
                                                    final /** = any rest); it goes with
-                                                   the key: repeat it when rotating
+                                                   the key: repeat it when rotating.
+                                                   The key goes only in Authorization
+                                                   and X-Api-Key; -header X adds a
+                                                   header, -query the query string and
+                                                   -body the body (unsafe if the
+                                                   provider echoes it: an LLM)
   machine credential <ref> -type postgres          a database password: the guest
       -domain D -user R -database B [-port P]      connects in plain text to D (any
       [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as

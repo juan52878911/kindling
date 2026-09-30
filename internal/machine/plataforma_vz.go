@@ -279,9 +279,12 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
 	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
 	// así que sin "postgres-upstream" no se le da ninguna que lo use.
-	var pg, my, upstream, maquina bool
+	// Y con las HTTP: uno sin "http-places" cambiaría el marcador también en el
+	// cuerpo y la query de toda petición, lo que la credencial no pidió.
+	var pg, my, upstream, maquina, httpc bool
 	for _, cr := range creds {
 		maquina = maquina || cr.UpstreamMachine != ""
+		httpc = httpc || cr.Kind == "" || cr.Kind == credproxy.KindHTTP
 		if cr.Kind == credproxy.KindPostgres || cr.Kind == credproxy.KindMySQL {
 			pg = pg || cr.Kind == credproxy.KindPostgres
 			my = my || cr.Kind == credproxy.KindMySQL
@@ -305,10 +308,13 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 		upstreams[i] = ip
 	}
-	if pg || my {
+	if pg || my || httpc {
 		info, err := c.KlingInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+		}
+		if httpc && !slices.Contains(info.CredentialKinds, credproxy.CapHTTPPlaces) {
+			return errors.New("this kling-vz would put the key in every request body and query, not only where the credential says: rebuild kling-vz")
 		}
 		if pg && !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
 			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
@@ -329,8 +335,9 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	for i, cr := range creds {
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
-			Allow: append([]string(nil), cr.Allow...),
-			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
+			Allow:   append([]string(nil), cr.Allow...),
+			Headers: append([]string(nil), cr.Headers...), Query: cr.Query, Body: cr.Body,
+			Kind: cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
 			Upstream: upstreams[i], UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 			UpstreamMachine: cr.UpstreamMachine, UpstreamOwner: cr.UpstreamOwner,
 		})
@@ -557,6 +564,10 @@ func memoriaFisicaMiB() int64 {
 	return int64(leerUint64LE(s) >> 20)
 }
 
+// fijarAuditoriaPlataforma: en macOS cada kling-vz lleva su proxy; la
+// configuración le llega en entornoVMM.
+func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
+
 // entornoVMM es lo que kling-vz recibe además del entorno del daemon: la raíz
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
 // (vz/cmd/kling-vz/kling-vz.sb): lee y escribe su directorio de máquina y,
@@ -567,6 +578,10 @@ func memoriaFisicaMiB() int64 {
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.
 func (m *Manager) entornoVMM() []string {
 	env := []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
+	// El registro de auditoría de su proxy: tamaño y generaciones.
+	if c := credAuditConfig(); c != (credproxy.AuditConfig{}) {
+		env = append(env, "KLING_VZ_CREDAUDIT="+c.String())
+	}
 	if m.brokerRuta != "" {
 		env = append(env, "KLING_VZ_BROKER="+m.brokerRuta)
 	}
