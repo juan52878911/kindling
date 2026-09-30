@@ -120,15 +120,25 @@ func TestPGMaquinaResuelveEnCadaDial(t *testing.T) {
 	if n := r.llamas.Load(); n != 3 {
 		t.Fatalf("el resolvedor se llamó %d veces, esperaba 3 (una por conexión)", n)
 	}
+	// Cada sesión se audita al cerrarse, y la primera se cierra por su lado:
+	// su registro puede llegar después del de la denegada. Se cuenta, no se
+	// fía del orden.
 	recs, _ := e.registro(t)
 	var motivos []string
+	denegadas := 0
 	for _, rec := range recs {
 		motivos = append(motivos, rec.Reason)
 		if rec.Upstream != "machine:"+maqID {
 			t.Errorf("upstream auditado %q", rec.Upstream)
 		}
+		if rec.Denied {
+			denegadas++
+			if rec.Reason != ReasonMachineUnavailable {
+				t.Errorf("denegada con motivo %q", rec.Reason)
+			}
+		}
 	}
-	if len(recs) != 3 || recs[1].Reason != ReasonMachineUnavailable || !recs[1].Denied {
+	if len(recs) != 3 || denegadas != 1 {
 		t.Fatalf("registro: %v", motivos)
 	}
 }
