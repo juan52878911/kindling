@@ -4,11 +4,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // LA RED SOBREVIVE AL FREEZE.
@@ -104,7 +104,7 @@ func (m *Manager) desmontarRed(n *knet.Net, id string) {
 
 // nsValido: solo nombres que el propio daemon genera. Lo que lista `ip netns`
 // acaba en una ruta bajo la raíz.
-var nsValido = regexp.MustCompile(`^kl-[0-9a-f]{1,16}$`)
+var nsValido = lazyre.New(`^kl-[0-9a-f]{1,16}$`)
 
 func (m *Manager) dirRedPropia() string { return filepath.Join(m.root, "net") }
 

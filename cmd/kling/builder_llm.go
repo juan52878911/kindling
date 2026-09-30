@@ -16,12 +16,12 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/von"
 )
 
@@ -44,7 +44,7 @@ import (
 // llama-server, las bibliotecas que enlaza y TODAS las variantes de CPU de ggml,
 // que se eligen al arrancar según la CPU. Lo demás (otras herramientas, el
 // backend RPC) no se usa y engordaría la capa.
-var llamaKeep = regexp.MustCompile(`^(llama-server|LICENSE|libllama-server-impl\.so|libllama-common\.so.*|libmtmd\.so.*|libllama\.so.*|libggml\.so.*|libggml-base\.so.*|libggml-cpu-[A-Za-z0-9._-]+\.so)$`)
+var llamaKeep = lazyre.New(`^(llama-server|LICENSE|libllama-server-impl\.so|libllama-common\.so.*|libmtmd\.so.*|libllama\.so.*|libggml\.so.*|libggml-base\.so.*|libggml-cpu-[A-Za-z0-9._-]+\.so)$`)
 
 func builderLLM(dir string) error {
 	b, err := os.ReadFile(filepath.Join(dir, "request.json"))

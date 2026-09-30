@@ -26,9 +26,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Tipos de modelo.
@@ -189,7 +190,7 @@ const (
 	maxGenTokens   = 4096 // de una generación
 )
 
-var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var nameRE = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // LoadConfig lee y valida el registro.
 func LoadConfig(path string) (*Config, error) {

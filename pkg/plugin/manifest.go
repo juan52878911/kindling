@@ -24,9 +24,10 @@ package plugin
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // ManifestVersion es la versión del formato del manifiesto que escriben las
@@ -161,13 +162,13 @@ type ConfigKey struct {
 }
 
 var (
-	reName    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	reCommand = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	reKey     = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
-	reUnit    = regexp.MustCompile(`^[a-zA-Z0-9@_.-]+\.(service|timer|socket|path)$`)
+	reName    = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
+	reCommand = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
+	reKey     = lazyre.New(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
+	reUnit    = lazyre.New(`^[a-zA-Z0-9@_.-]+\.(service|timer|socket|path)$`)
 	// Un companion acaba siendo un nombre de fichero y parte de una URL: nada
 	// de barras, puntos ni mayúsculas que permitan salirse del directorio.
-	reCompanion = regexp.MustCompile(`^kling-[a-z][a-z0-9-]{0,40}$`)
+	reCompanion = lazyre.New(`^kling-[a-z][a-z0-9-]{0,40}$`)
 )
 
 // ValidName dice si name sirve como nombre de extensión (kling-<name>).

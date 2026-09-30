@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // MEJORA CONTINUA: que Chispa aprenda lo que otros resolvieron por él.
@@ -156,7 +156,7 @@ func (l LearnConfig) capturing() bool {
 	return l.Capture == CaptureText || l.Capture == CaptureHash
 }
 
-var teacherRE = regexp.MustCompile(`^(ext:)?[a-z0-9][a-z0-9._-]{0,63}$`)
+var teacherRE = lazyre.New(`^(ext:)?[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // validateLearn comprueba el bloque learn de una tarea (de clasificación o de
 // intención; quien llama ya rechazó las de generación).
@@ -469,7 +469,7 @@ func (l *learner) write(ws map[string]*taskWriter, j learnJob) {
 	l.count(rec.Task, "written")
 }
 
-var dayFileRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\.jsonl$`)
+var dayFileRE = lazyre.New(`^\d{4}-\d{2}-\d{2}\.jsonl$`)
 
 // pruneCaptures borra los ficheros de captura más viejos que maxDays y, si
 // hace falta, los más antiguos hasta que el total quepa en maxB (nunca el del
@@ -541,28 +541,28 @@ func pruneCaptures(dir string, maxB int64, maxDays int, today string) int64 {
 // Es un filtro, no una garantía: con datos sensibles, capture "hash". Corre en
 // el escritor, nunca en el camino de la petición.
 var (
-	secretAuthHeader = regexp.MustCompile(`(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:([A-Za-z][A-Za-z0-9-]*)\s+)?([^\s,;"']+)`)
-	secretAuthScheme = regexp.MustCompile(`(?i)\b(basic|bearer|digest|token)\s+([A-Za-z0-9+/=._~-]{8,})`)
-	secretURLUser    = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)@`)
-	secretKV         = regexp.MustCompile(`(?i)(["']?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|private[_-]?key|access[_-]?key|secret[_-]?key|credentials?|auth)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)`)
-	secretKSpace     = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey)(\s+)([^\s,;]+)`)
-	secretProse      = regexp.MustCompile(`(?i)\b((?:password|passwd|passphrase|contraseña|clave|pin)\s+(?:is|was|es|era|será)\s+)(\S+)`)
-	secretLong       = regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`)
-	secretFixed      = []*regexp.Regexp{
-		regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
-		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}`),
-		regexp.MustCompile(`\b(?:sk|pk|rk)-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}`),
-		regexp.MustCompile(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}`),
-		regexp.MustCompile(`\bwhsec_[A-Za-z0-9+/=]{10,}`),
-		regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{10,}`),
-		regexp.MustCompile(`\bhf_[A-Za-z0-9]{10,}`),
-		regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{10,}`),
-		regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
-		regexp.MustCompile(`\bnpm_[A-Za-z0-9]{20,}`),
-		regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-		regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{16,}\b`),
-		regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
-		regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`),
+	secretAuthHeader = lazyre.New(`(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:([A-Za-z][A-Za-z0-9-]*)\s+)?([^\s,;"']+)`)
+	secretAuthScheme = lazyre.New(`(?i)\b(basic|bearer|digest|token)\s+([A-Za-z0-9+/=._~-]{8,})`)
+	secretURLUser    = lazyre.New(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)@`)
+	secretKV         = lazyre.New(`(?i)(["']?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|private[_-]?key|access[_-]?key|secret[_-]?key|credentials?|auth)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)`)
+	secretKSpace     = lazyre.New(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey)(\s+)([^\s,;]+)`)
+	secretProse      = lazyre.New(`(?i)\b((?:password|passwd|passphrase|contraseña|clave|pin)\s+(?:is|was|es|era|será)\s+)(\S+)`)
+	secretLong       = lazyre.New(`[A-Za-z0-9+/_=-]{32,}`)
+	secretFixed      = []*lazyre.Regexp{
+		lazyre.New(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
+		lazyre.New(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}`),
+		lazyre.New(`\b(?:sk|pk|rk)-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}`),
+		lazyre.New(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}`),
+		lazyre.New(`\bwhsec_[A-Za-z0-9+/=]{10,}`),
+		lazyre.New(`\bglpat-[A-Za-z0-9_-]{10,}`),
+		lazyre.New(`\bhf_[A-Za-z0-9]{10,}`),
+		lazyre.New(`\bAIza[0-9A-Za-z_-]{10,}`),
+		lazyre.New(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
+		lazyre.New(`\bnpm_[A-Za-z0-9]{20,}`),
+		lazyre.New(`\bAKIA[0-9A-Z]{16}\b`),
+		lazyre.New(`\bgh[pousr]_[A-Za-z0-9]{16,}\b`),
+		lazyre.New(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
+		lazyre.New(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`),
 	}
 )
 
@@ -779,7 +779,7 @@ type FeedbackResponse struct {
 	Recorded int    `json:"recorded"`
 }
 
-var idRE = regexp.MustCompile(`^[0-9a-f]{12}-[0-9a-z]{1,13}$`)
+var idRE = lazyre.New(`^[0-9a-f]{12}-[0-9a-z]{1,13}$`)
 
 // Feedback guarda etiquetas de personas o de maestros externos. human dice si
 // quien llama puede hablar como persona (el token principal): un token de

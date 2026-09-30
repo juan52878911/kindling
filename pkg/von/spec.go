@@ -3,9 +3,10 @@ package von
 import (
 	"fmt"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Spec es lo que el constructor "llm" recibe en el spec de POST /images. O un
@@ -72,11 +73,11 @@ type Resolved struct {
 }
 
 var (
-	reSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	reSHA256 = lazyre.New(`^[0-9a-f]{64}$`)
 	// https://huggingface.co/<org>/<repo>/resolve/<commit>/<fichero>.gguf, sin
 	// subdirectorios: el nombre del fichero acaba en una ruta del invitado y en
 	// un argumento de llama-server, y así no hay nada que escapar.
-	reHFURL = regexp.MustCompile(`^https://huggingface\.co/([A-Za-z0-9][A-Za-z0-9._-]{0,95})/([A-Za-z0-9][A-Za-z0-9._-]{0,95})/resolve/([0-9a-f]{40})/([A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gguf)$`)
+	reHFURL = lazyre.New(`^https://huggingface\.co/([A-Za-z0-9][A-Za-z0-9._-]{0,95})/([A-Za-z0-9][A-Za-z0-9._-]{0,95})/resolve/([0-9a-f]{40})/([A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gguf)$`)
 )
 
 // Resolve valida el spec y rellena los valores por defecto.

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,10 +17,11 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // reVolume acota el nombre: es un componente de ruta.
-var reVolume = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var reVolume = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // defaultVolumeMount es dónde se monta un volumen si no se dice otra cosa.
 const defaultVolumeMount = "/data"

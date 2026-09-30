@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +25,7 @@ import (
 	hostshare "github.com/juan52878911/kindling/internal/share"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/share"
 )
 
@@ -78,7 +78,7 @@ const (
 	uploadTTL = time.Hour
 )
 
-var reUploadID = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var reUploadID = lazyre.New(`^[0-9a-f]{32}$`)
 
 func (m *Manager) uploadsDir() string          { return filepath.Join(m.root, "shares", "uploads") }
 func (m *Manager) uploadPath(id string) string { return filepath.Join(m.uploadsDir(), id+".ext4") }

@@ -60,7 +60,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -69,6 +68,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -107,7 +107,7 @@ func credAuditConfig() credproxy.AuditConfig {
 var registrarCredenciales = registrarCredencialesPlataforma
 
 // reEnvCredencial es el nombre de la variable de entorno que recibe el marcador.
-var reEnvCredencial = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+var reEnvCredencial = lazyre.New(`^[A-Z_][A-Z0-9_]{0,63}$`)
 
 // claveCredenciales deriva la clave de cifrado del almacén.
 func (m *Manager) claveCredenciales() ([]byte, error) {

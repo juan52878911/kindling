@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +19,12 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/digest"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
 
-var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+var validName = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
 func (m *Manager) snapDir(name string) string {
 	return filepath.Join(m.root, "snapshots", name)

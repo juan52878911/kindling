@@ -94,13 +94,14 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -194,7 +195,7 @@ type Credential struct {
 	UpstreamOwner   string `json:",omitempty"`
 }
 
-var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+var reDominio = lazyre.New(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 
 // ValidarDominio exige un nombre de host exacto: sin comodines, sin puerto, sin
 // IP. Una credencial para "*.ejemplo.com" o para una IP abriría el marcador a

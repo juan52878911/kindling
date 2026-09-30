@@ -44,8 +44,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"regexp"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // ResolveMachineFunc da la dirección ("ip:puerto") por la que el proxy llega
@@ -72,10 +73,10 @@ const ReasonMachineUnavailable = "machine_unavailable"
 var (
 	// reIDMaquina es un ID de máquina de kindling: hexadecimal en minúsculas.
 	// Ni puntos ni dos puntos: una IP o un host:puerto no casan nunca.
-	reIDMaquina = regexp.MustCompile(`^[0-9a-f]{16,64}$`)
+	reIDMaquina = lazyre.New(`^[0-9a-f]{16,64}$`)
 	// reDueño es api.KeyPattern (el valor de kling.db.owner). Copiado: este
 	// paquete solo depende de la biblioteca estándar.
-	reDueño = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	reDueño = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
 // errMaquinaNoDisponible marca los fallos de resolución de UpstreamMachine.

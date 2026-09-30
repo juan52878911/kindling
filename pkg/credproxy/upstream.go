@@ -72,10 +72,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -163,7 +164,7 @@ func UpstreamIPProhibida(ip netip.Addr) bool {
 
 // reNombreHost es un nombre de host para Upstream y TLSServerName: etiquetas
 // DNS, sin exigir dominio de primer nivel ("localhost", "db", "postgres.lan").
-var reNombreHost = regexp.MustCompile(`^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)*$`)
+var reNombreHost = lazyre.New(`^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)*$`)
 
 // validarNombreHost acepta un nombre DNS (hasta 253 bytes) o una IP.
 func validarNombreHost(h string) error {

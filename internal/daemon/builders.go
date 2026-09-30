@@ -11,13 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CONSTRUCTORES DE IMÁGENES.
@@ -45,7 +45,7 @@ import (
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
 // KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW.
 
-var reBuilder = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // constructoresSinRoot son los constructores del núcleo escritos en Go de
 // punta a punta (sin loop, chroot ni root): corren también en el daemon de

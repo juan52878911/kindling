@@ -6,7 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"regexp"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // ANOTACIONES Y STORE: los dos sitios donde una extensión guarda estado en el
@@ -25,7 +26,7 @@ import (
 // KeyPattern valida nombres de anotación, espacios de nombres y claves del
 // store. Minúsculas, sin barras ni "..", para que nunca puedan salir del
 // directorio en el que se guardan.
-var KeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var KeyPattern = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 const (
 	// MaxAnnotations es el máximo de anotaciones por snapshot.

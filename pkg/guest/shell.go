@@ -18,13 +18,13 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // maxShells acota las sesiones simultáneas por microVM. Cada una es una shell y
@@ -39,7 +39,7 @@ const hangupGrace = 2 * time.Second
 
 // reTerm valida el TERM que llega de fuera. Acaba en el entorno de un proceso,
 // así que no se acepta cualquier cosa.
-var reTerm = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+var reTerm = lazyre.New(`^[A-Za-z0-9._-]{1,64}$`)
 
 type shellLimiter struct {
 	mu sync.Mutex
