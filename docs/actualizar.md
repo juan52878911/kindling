@@ -77,7 +77,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
 | `secrets/snapshot.key` | `internal/machine/firma.go` | ninguna, 32 bytes | firma y, por HKDF, cifra. Si se pierde o se regenera, **ningún dorado firmado ni almacén de credenciales vuelve a abrirse** |
-| `credentials.enc` (máquinas y plantillas) | `internal/machine/credenciales.go` | la cadena HKDF `"kindling credential store v1"`, **ningún byte de versión en el fichero** | `NormalizarAlmacen` arregla los postgres viejos. Un binario viejo que funde y vuelve a sellar **pierde los campos que no conoce** |
+| `credentials.enc` (máquinas, plantillas y secretos de grafo) | `internal/machine/credenciales.go` | **cabecera `KLCS` + `0x01`** delante del nonce desde el PR 3 (y la cadena HKDF `"kindling credential store v1"`) | sin cabecera es v0: se lee y, al volver a sellarlo, se copia a `<fichero>.v0.bak` (quitar todas las credenciales borra también la copia). Con una versión mayor no se descifra, no se pisa y no se borra. Un kling ≤ v0.17 no descifra un v1. `NormalizarAlmacen` sigue arreglando los postgres viejos. Un binario de la misma versión que funde y vuelve a sellar **pierde los campos que no conoce**: añadir uno que importe sube el byte |
 | `credaudit` | `audit/<id>.jsonl` (Linux), `machines/<id>/credaudit.jsonl` (Mac) | ninguna, JSONL | el lector salta las líneas que no entiende; `prepararAuditoria` mueve el sitio viejo al nuevo |
 
 ### Extensiones, configuración y servicios
@@ -121,9 +121,12 @@ del host solo se actualizan con `make deploy`.
 1. **Un binario viejo que reescribe un fichero nuevo pierde campos en
    silencio**: `meta.json` (`editMeta`), `credentials.enc` (la fusión) y
    `state.json` en la misma versión de esquema. Es el fallo que no avisa.
+   *Desde el PR 2, `editMeta` conserva lo que no conoce; en `credentials.enc`
+   y `state.json` la defensa es subir la versión (§3.1).*
 2. **Dorados contra otro Firecracker**: no se sabe con cuál se hicieron, y el
    fallo sale al despertar, lejos de la causa. Es el patrón exacto de §2 de
-   [`estabilidad.md`](estabilidad.md).
+   [`estabilidad.md`](estabilidad.md). *Resuelto para los dorados nuevos en el
+   PR 2: el meta lo guarda y salen `stale`; los de antes no lo guardan.*
 3. **`snapshot.key`**: todo lo firmado y cifrado depende de 32 bytes sin copia.
    Una reinstalación que la regenere deja inservibles dorados y credenciales.
 4. **`kling-guest` horneado sin handshake**: nadie sabe qué agente lleva cada
@@ -154,8 +157,13 @@ Qué hace cada uno según lo que encuentre:
 | **versión mayor** | **no arranca / no toca ese fichero**, con mensaje | se ignora, **sin escribir encima** |
 | ilegible | cuarentena (`.corrupt-*`) y modo protegido, como ya hace `state.json` | se tira |
 
-`credentials.enc` es binario: la versión va en un byte de cabecera delante del
-nonce (`0x01`), no dentro del JSON cifrado, para poder rechazar sin descifrar.
+`credentials.enc` es binario: la versión va en una cabecera delante del nonce
+(`KLCS` y el byte `0x01`), no dentro del JSON cifrado, para poder rechazar sin
+descifrar; y va también en el dato autenticado, para que no se pueda cambiar.
+La magia de cuatro bytes es porque un v0 empieza por un nonce aleatorio: con un
+byte solo, uno de cada 256 almacenes viejos parecería llevar versión. Con
+cuatro es uno en 2^32, y aun ese se cubre: una cabecera v1 que no descifra se
+prueba como v0 antes de dar el error.
 
 **Campos desconocidos en la misma versión.** Es el riesgo 1. Dos defensas,
 baratas: (a) **subir la versión cuando se añade un campo que un binario viejo
@@ -329,7 +337,7 @@ su prueba para siempre.
 |---|---|---|
 | **P0** | `schema` en `state.json` | **hecho** en este cambio: sin él no hay forma de rechazar un fichero del futuro |
 | **P0** | `schema` en `meta.json` y versión de Firecracker/kling-vz/macOS y de kling en el dorado | **hecho** (PR 2): es lo que permite marcar obsoletos en vez de fallar al despertar |
-| **P0** | byte de versión en `credentials.enc` | es binario: añadirlo después obliga a adivinar si un fichero lo tiene |
+| **P0** | byte de versión en `credentials.enc` | **hecho** (PR 3): es binario, y añadirlo después obliga a adivinar si un fichero lo tiene |
 | **P0** | el agente y el puente ignoran `kling.*` desconocidos | cada imagen que se construye con el agente de hoy lleva el pánico dentro para siempre |
 | **P1** | `/healthz` del agente con `version` y `caps` | mismo motivo: lo que se hornea hoy es lo que habrá que soportar |
 | **P1** | `api` en `/info` y `max_api` en el manifiesto | el manifiesto ya tiene versión; añadir el campo ahora es gratis |
@@ -354,7 +362,7 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 |---|---|---|---|
 | 1 | **`pkg/esquema` y `state.json` v1** | helper común, `schema` en `state.json`, copia `.v0.bak`, el daemon no arranca con uno del futuro. Tests: versión 0 migra con copia; futura se rechaza sin pisarla | S — **hecho** |
 | 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0`), `macos` y `kling_version` en el meta; `stale` con causa en `kling template ls`/`inspect` (en `doctor`, pendiente); `run -from` y `thaw` se niegan con la orden; conservar claves desconocidas en `editMeta` | M — **hecho** |
-| 3 | `credentials.enc` con byte de versión | `0x01` delante del nonce; sin él es v0 y se reescribe al abrir; un byte mayor se rechaza | S |
+| 3 | `credentials.enc` con byte de versión | `KLCS` + `0x01` delante del nonce, también en plantillas y secretos de grafo; sin él es v0 y se reescribe (con copia) en el siguiente sellado; un byte mayor se rechaza sin tocar el fichero | S — **hecho** |
 | 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge`; `/healthz` JSON si se pide con `Accept`; versión del agente en la receta | M |
 | 5 | `api` en `/info` y `max_api` en extensiones | cliente con aviso claro; `kling plugins` marca las que no casan; `kling_vz` a 2 | S |
 | 6 | guarda de structs persistidos | test que compara campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` con una lista comiteada y exige subir la versión | S |
@@ -383,6 +391,13 @@ sudo rm /var/lib/kindling/state.json.corrupt-*   # si el viejo llegó a arrancar
 # instalar el binario anterior
 sudo systemctl start kling
 ```
+
+Los almacenes de credenciales (PR 3) sí: un kling ≤ v0.17 no descifra uno v1.
+Los que se volvieron a sellar tienen su `<fichero>.v0.bak` al lado
+(`machines/<id>/credentials.enc.v0.bak`, `secrets/credentials/<plantilla>.enc.v0.bak`,
+`store/graph/<id>.secrets.enc.v0.bak`); con el daemon parado, cada copia vuelve
+a su nombre. Lo que se selló por primera vez después de migrar no tiene copia:
+hay que volver a darlo.
 
 Los `meta.json` de los dorados (PR 2) no hace falta restaurarlos: un kling
 ≤ v0.17 los lee, e ignora `schema` y los campos nuevos. Si llega a anotar uno,

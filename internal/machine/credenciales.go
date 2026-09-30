@@ -47,6 +47,7 @@ package machine
 // a eso; se quitan explícitamente con Clear.
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -68,6 +69,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -137,7 +139,38 @@ func (m *Manager) credSnapPath(name string) string {
 	return filepath.Join(m.root, "secrets", "credentials", name+".enc")
 }
 
+// FORMATO DEL ALMACÉN. Desde la v1, el fichero empieza por una cabecera en
+// claro: magiaAlmacen y un byte de versión, delante del nonce. Va fuera del
+// cifrado a propósito, para poder rechazar un almacén de un kling más nuevo
+// sin descifrarlo, y dentro del dato autenticado, para que no se pueda cambiar
+// sin que el descifrado falle.
+//
+//	v0 (hasta v0.17): nonce(12) | AES-GCM(json)             aad = dueño
+//	v1:               "KLCS" 0x01 | nonce(12) | AES-GCM(json) aad = cabecera + dueño
+//
+// La magia es de cuatro bytes y no uno solo porque el v0 empieza por un nonce
+// aleatorio: con un byte, uno de cada 256 almacenes viejos parecería llevar
+// versión. Con cuatro, el caso es de uno en 2^32, y aun así se cubre: una
+// cabecera v1 que no descifra se prueba como v0 antes de dar el error.
+var magiaAlmacen = []byte("KLCS")
+
+// versionAlmacen es la versión que escribe sellar.
+const versionAlmacen = 1
+
+// cabeceraAlmacen es lo que va delante del nonce en la versión actual.
+func cabeceraAlmacen() []byte { return append(append([]byte(nil), magiaAlmacen...), versionAlmacen) }
+
+// versionSellada dice qué versión declara un almacén: la de su cabecera, o 0
+// si no la tiene (v0).
+func versionSellada(b []byte) int {
+	if len(b) > len(magiaAlmacen) && bytes.HasPrefix(b, magiaAlmacen) {
+		return int(b[len(magiaAlmacen)])
+	}
+	return 0
+}
+
 // sellar cifra v con la clave del almacén; aad ata el resultado a su dueño.
+// Escribe siempre la versión actual (versionAlmacen).
 func (m *Manager) sellar(v any, aad string) ([]byte, error) {
 	key, err := m.claveCredenciales()
 	if err != nil {
@@ -151,15 +184,21 @@ func (m *Manager) sellar(v any, aad string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	cab := cabeceraAlmacen()
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
-	return aead.Seal(nonce, nonce, plain, []byte(aad)), nil
+	out := append(cab, nonce...)
+	return aead.Seal(out, nonce, plain, append(cab, aad...)), nil
 }
 
-// abrir descifra lo que selló sellar con el mismo aad.
-func (m *Manager) abrir(sellado []byte, aad string, v any) error {
+// abrir descifra lo que selló sellar con el mismo aad, de la versión que sea:
+// un almacén v0 (sin cabecera) se lee igual, y la siguiente vez que se selle
+// quedará en v1 (escribirSellado guarda antes la copia). Uno con una versión
+// mayor es de un kling más nuevo: *esquema.ErrMasNuevo, sin descifrar nada.
+// ruta solo sirve para los mensajes.
+func (m *Manager) abrir(ruta string, sellado []byte, aad string, v any) error {
 	key, err := m.claveCredenciales()
 	if err != nil {
 		return err
@@ -168,11 +207,33 @@ func (m *Manager) abrir(sellado []byte, aad string, v any) error {
 	if err != nil {
 		return err
 	}
-	if len(sellado) < aead.NonceSize() {
-		return errors.New("credential store: truncated")
+	// abrirCon descifra cuerpo (nonce + cifrado) con el dato autenticado dado.
+	abrirCon := func(cuerpo, datos []byte) ([]byte, bool) {
+		if len(cuerpo) < aead.NonceSize() {
+			return nil, false
+		}
+		plain, err := aead.Open(nil, cuerpo[:aead.NonceSize()], cuerpo[aead.NonceSize():], datos)
+		return plain, err == nil
 	}
-	plain, err := aead.Open(nil, sellado[:aead.NonceSize()], sellado[aead.NonceSize():], []byte(aad))
-	if err != nil {
+	var plain []byte
+	ok := false
+	switch ver := versionSellada(sellado); {
+	case ver > versionAlmacen:
+		return &esquema.ErrMasNuevo{Ruta: ruta, Leida: ver, Soportada: versionAlmacen}
+	case ver == versionAlmacen:
+		cab := sellado[:len(magiaAlmacen)+1]
+		plain, ok = abrirCon(sellado[len(cab):], append(append([]byte(nil), cab...), aad...))
+		if !ok {
+			// Un v0 cuyo nonce aleatorio empieza, por azar, como una cabecera.
+			plain, ok = abrirCon(sellado, []byte(aad))
+		}
+	default:
+		if len(sellado) < aead.NonceSize() {
+			return errors.New("credential store: truncated")
+		}
+		plain, ok = abrirCon(sellado, []byte(aad))
+	}
+	if !ok {
 		return fmt.Errorf("credential store of %s: can't decrypt it (another host's key, or the file was moved or tampered with)", aad)
 	}
 	return json.Unmarshal(plain, v)
@@ -180,9 +241,28 @@ func (m *Manager) abrir(sellado []byte, aad string, v any) error {
 
 // escribirSellado deja el fichero con 0600 y por rename: o está el almacén
 // anterior entero o el nuevo entero. Con sellado vacío lo borra.
+//
+// Mira antes qué hay: un almacén de un kling más nuevo no se pisa ni se borra
+// (*esquema.ErrMasNuevo), y uno v0 se copia a <ruta>.v0.bak antes de quedar
+// en v1, para poder volver al binario anterior. Borrar el almacén borra
+// también esa copia: quien quita sus credenciales no quiere que sigan en
+// disco, ni siquiera cifradas.
 func escribirSellado(ruta string, sellado []byte) error {
+	if previo, err := os.ReadFile(ruta); err == nil {
+		switch v := versionSellada(previo); {
+		case v > versionAlmacen:
+			return &esquema.ErrMasNuevo{Ruta: ruta, Leida: v, Soportada: versionAlmacen}
+		case v < versionAlmacen && sellado != nil:
+			if err := esquema.Respaldar(ruta, v); err != nil {
+				return fmt.Errorf("backing up the credential store before migrating it: %w", err)
+			}
+		}
+	}
 	if sellado == nil {
 		if err := os.Remove(ruta); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err := os.Remove(esquema.RutaRespaldo(ruta, 0)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil
@@ -253,7 +333,7 @@ func (m *Manager) cargarCredenciales(id string) ([]credproxy.Credential, error) 
 		return nil, err
 	}
 	var creds []credproxy.Credential
-	if err := m.abrir(sellado, id, &creds); err != nil {
+	if err := m.abrir(m.credPath(id), sellado, id, &creds); err != nil {
 		return nil, err
 	}
 	for i := range creds {
@@ -567,7 +647,7 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 		return nil, err
 	}
 	var specs []api.CredentialSpec
-	if err := m.abrir(sellado, "snapshot:"+name, &specs); err != nil {
+	if err := m.abrir(m.credSnapPath(name), sellado, "snapshot:"+name, &specs); err != nil {
 		return nil, err
 	}
 	// Igual que en cargarCredenciales.

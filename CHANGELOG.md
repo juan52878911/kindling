@@ -30,6 +30,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   con un `schema` mayor no se restaura, no se anota y no se borra. **Incompatible**: un
   kling ≤ v0.17 lee un meta v1 sin quejarse, pero al anotarlo pierde `schema` y los campos
   nuevos (restaurar la copia `.v0.bak` para volver).
+- **Los almacenes de credenciales llevan cabecera de versión.** `credentials.enc` de las
+  máquinas, el de las plantillas (`secrets/credentials/<plantilla>.enc`) y el de los
+  secretos de grafo empiezan por `KLCS` y un byte de versión (`0x01`) delante del nonce,
+  fuera del cifrado para poder rechazar sin descifrar y dentro del dato autenticado. Uno
+  sin cabecera (hasta v0.17) se sigue leyendo y, al volver a sellarlo, se copia antes a
+  `<fichero>.v0.bak`; quitar todas las credenciales borra también esa copia. Uno con una
+  versión mayor no se descifra, no se pisa y no se borra. **Incompatible**: un kling
+  ≤ v0.17 no descifra un almacén v1 ("can't decrypt it"); para volver, restaurar las
+  copias `.v0.bak`.
 - **Un paquete DNS perdido ya no tumba una petición del proxy de credenciales.** El proxy
   y la allowlist resolvían con un plazo total de 5 s, el mismo que el resolver de Go da a
   un solo intento: si se perdía el datagrama, no había reintento y la petición salía con

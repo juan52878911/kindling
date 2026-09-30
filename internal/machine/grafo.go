@@ -40,6 +40,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/share"
 )
 
@@ -265,11 +266,7 @@ func (m *Manager) guardarGrafo(id string) error {
 // id (por GraphEdge.Key). Sin claves, borra el fichero.
 func (m *Manager) guardarSecretosGrafo(id string, secretos map[string]string) error {
 	if len(secretos) == 0 {
-		err := os.Remove(m.rutaSecretosGrafo(id))
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return err
+		return escribirSellado(m.rutaSecretosGrafo(id), nil)
 	}
 	if err := os.MkdirAll(m.dirGrafos(), 0o700); err != nil {
 		return err
@@ -291,7 +288,7 @@ func (m *Manager) cargarSecretosGrafo(id string) (map[string]string, error) {
 		return nil, err
 	}
 	var out map[string]string
-	if err := m.abrir(sellado, "graph:"+id, &out); err != nil {
+	if err := m.abrir(m.rutaSecretosGrafo(id), sellado, "graph:"+id, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -753,7 +750,8 @@ func (m *Manager) eliminarGrafo(ctx context.Context, gid string) error {
 		}
 		m.virtuales.Delete(n.MachineID)
 	}
-	for _, p := range []string{m.rutaGrafo(gid), m.rutaSecretosGrafo(gid)} {
+	// Con la copia del almacén de antes de v1, si la hay (escribirSellado).
+	for _, p := range []string{m.rutaGrafo(gid), m.rutaSecretosGrafo(gid), esquema.RutaRespaldo(m.rutaSecretosGrafo(gid), 0)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) && primero == nil {
 			primero = err
 		}
