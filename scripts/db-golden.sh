@@ -258,6 +258,15 @@ SQL
   say "VACUUM, CHECKPOINT y comprobaciones antes de congelar"
   quiet "${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
     "psql -X -q -v ON_ERROR_STOP=1 -d $db -c 'VACUUM (ANALYZE)'"
+  # También postgres y template1: sus catálogos de initdb no se han analizado
+  # nunca, y sin esto el autovacuum lo hace en CADA copia al minuto o dos de
+  # arrancar (11 transacciones medidas en template1). Eso cambia la huella con
+  # la que kling db branch decide si una copia de reserva sigue valiendo.
+  for d in postgres template1; do
+    [ "$d" = "$db" ] && continue
+    quiet "${K[@]}" exec -timeout 10m "$m" -- su -s /bin/sh postgres -c \
+      "psql -X -q -v ON_ERROR_STOP=1 -d $d -c 'VACUUM (ANALYZE)'"
+  done
   quiet "${K[@]}" exec "$m" -- su -s /bin/sh postgres -c \
     "psql -X -q -v ON_ERROR_STOP=1 -d postgres -c CHECKPOINT"
 
