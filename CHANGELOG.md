@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Un paquete DNS perdido ya no tumba una petición del proxy de credenciales.** El proxy
+  y la allowlist resolvían con un plazo total de 5 s, el mismo que el resolver de Go da a
+  un solo intento: si se perdía el datagrama, no había reintento y la petición salía con
+  502 a los 5 000 ms (o el dominio no entraba en el ipset). Visto con la API paper de
+  Alpaca: 1 de las primeras peticiones de una máquina nueva; desde el lab se pierden 2 de
+  cada 60 consultas a 1.1.1.1. Ahora son tres intentos de 2 s, solo registros A, y un
+  NXDOMAIN no se reintenta.
 - **`kling up`**: busca `ip`, `iptables`, `nft` y `systemctl` también en `/usr/sbin` y
   `/sbin` (en local y por SSH), que el PATH de un usuario no trae; comprueba el kernel
   del invitado y la imagen base, y `-check` sale con código 1 si algo sale ✗ (antes,
