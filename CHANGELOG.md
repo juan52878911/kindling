@@ -38,6 +38,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   log del daemon da el desglose de cada commit y fork.
 - **Núcleo: el `mem.file` de una máquina congelada se queda en caché hasta 256 MiB**
   (antes 128): una copia del golden de Postgres despierta en ~13 ms en vez de 40-130.
+- **macOS: sin techo de CPU por defecto** (#87). Una máquina de vz que no pide
+  `cpu_pct` (ni por flag, ni su dorado, ni su receta, ni `defaults.cpu_pct`) corre con
+  todas sus vCPU en vez del 50 % de siempre. Regular una VM de vz la detiene a
+  ráfagas, y con el Mac bajo presión eso multiplica la pérdida de páginas de la RAM del
+  invitado que hace macOS: con `-cpu-pct 50`, 38 lecturas malas, 125 páginas de canario
+  y 3 pánicos, frente a 3/0/0 sin techo, con la misma carga (`prototypes/android/docs/sigill.md`).
+  Quien quiera techo lo pide. Linux no cambia (media vCPU con el cgroup).
 - **`kling phone`** (`ext/phone`, #91): teléfonos Android en microVMs por la API del
   daemon, sin `allow_exec`. `up`/`ls`/`pause`/`resume`/`rm`/`adb`/`api`, identidad por
   clon con `machine secret -hooks`, `pool` de repuestos pausados (`-watch` congela los

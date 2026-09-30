@@ -1083,7 +1083,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	if mc.CPUPct <= 0 {
 		m.mu.Lock()
-		mc.CPUPct = defaultCPUPct
+		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 		m.mu.Unlock()
 	}
 	// Un núcleo entero mientras arranca el kernel del invitado, que es lo que
@@ -2326,7 +2326,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// de arranque, que se baja al configurado en cuanto contesta el agente
 	// (resync) o, en cualquier otra salida, en el defer. Ver arranque_cpu.go.
 	if mc.CPUPct <= 0 {
-		mc.CPUPct = defaultCPUPct
+		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 	}
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
 	defer impulso.fin()

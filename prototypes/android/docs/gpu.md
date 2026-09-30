@@ -172,3 +172,6 @@ contenedor con `renderD128` compartido; da ~9× los fps de SwiftShader en 3D por
 teléfono y gasta 5× menos CPU en UI. Si hace falta frontera de VM, el siguiente
 paso es crosvm con virtio-gpu (virgl o venus). Nada de esto cambió la
 configuración de arranque de `pve`; GVT-g queda como recomendación no aplicada.
+
+Diseño y plan por fases para GPU con frontera de VM (crosvm + virtio-gpu, sin
+dorados con GPU 3D en ningún VMM hoy): [`gpu-proxmox.md`](gpu-proxmox.md).

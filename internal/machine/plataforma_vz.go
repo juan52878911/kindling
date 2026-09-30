@@ -373,8 +373,9 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 		return err
 	}
 	m.mu.Lock()
-	pct := defaultCPUPct
+	pct := 0
 	if cur := m.byID[id]; cur != nil {
+		pct = techoDelDaemon(cur.VCPUs)
 		cur.Forwards = fwd
 		if cur.CPUPct > 0 {
 			pct = cur.CPUPct
@@ -569,4 +570,18 @@ func (m *Manager) entornoVMM() []string {
 		env = append(env, "KLING_VZ_BROKER="+m.brokerRuta)
 	}
 	return env
+}
+
+// techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
+// flag, ni su dorado, ni su receta, ni la configuración). En macOS, sin techo
+// (todas sus vCPU): regular una VM de vz la detiene a ráfagas, y con el Mac
+// bajo presión eso multiplica la pérdida de páginas de la RAM del invitado que
+// hace macOS (#87: con -cpu-pct 50, 38 lecturas malas, 125 páginas de canario y
+// 3 pánicos, frente a 3/0/0 sin techo, con la misma carga). Perder datos en
+// silencio es peor que un núcleo ocupado; quien quiera techo lo pide.
+func techoDelDaemon(vcpus int) int {
+	if vcpus < 1 {
+		vcpus = 1
+	}
+	return vcpus * 100
 }
