@@ -109,6 +109,9 @@ func evictarSirve(antes, despues, alta int) bool {
 }
 
 func (m *Manager) gcDisk(ctx context.Context) {
+	if m.barridoBloqueado() {
+		return
+	}
 	// En pausa: la pasada anterior no consiguio nada y el disco no es nuestro.
 	if !m.gcPausadoHasta.IsZero() && time.Now().Before(m.gcPausadoHasta) {
 		return
@@ -207,7 +210,7 @@ func failedRetention() time.Duration {
 // diferencia entre recoger basura y borrar algo que quizá falló hace un minuto.
 func (m *Manager) gcFailed() {
 	retention := failedRetention()
-	if retention <= 0 {
+	if retention <= 0 || m.barridoBloqueado() {
 		return
 	}
 	now := time.Now()

@@ -334,6 +334,9 @@ func (m *Manager) forkEnUso(name string) bool {
 // desde su propio volcado, sigue figurando como instancia del snapshot, y
 // removeSnapshot la cuenta.
 func (m *Manager) barrerForks() {
+	if m.barridoBloqueado() {
+		return // sin estado fiable, "sin copias" puede ser falso
+	}
 	base := filepath.Join(m.root, "snapshots")
 	entries, err := os.ReadDir(base)
 	if err != nil {
