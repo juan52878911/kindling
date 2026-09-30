@@ -94,6 +94,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   el título o falsear líneas ya escritas. Con la salida en un terminal, los caracteres
   de control (salvo `\n`, `\r` y `\t`) salen escapados (`\x1b`); `-raw` los deja como
   están, y a un fichero o una tubería salen tal cual.
+- **El token del gateway MCP no pasa por stdout ni por argv.** El gateway que lo genera
+  ya no lo imprime entero (bajo systemd acababa en el journal): lo guarda en la
+  configuración 0600 y enseña un prefijo. `kling config set <clave> -` lee el valor de
+  stdin y `kling config get <clave> -reveal` lo da entero para una tubería (`ssh gw
+  kling config get gateway.token -reveal | kling config set gateway.token -`).
+  `kling connect` con token ya no llama a `claude mcp add --header` ni a `code
+  --add-mcp` (el token en su argv): parchea el fichero del cliente o enseña el
+  fragmento, y el de Zed pasa el token por el entorno de `mcp-remote`.
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora

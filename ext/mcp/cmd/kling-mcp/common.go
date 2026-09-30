@@ -220,7 +220,7 @@ func servicesLine(url, token string) string {
 	if resp.StatusCode == http.StatusUnauthorized {
 		if token == "" {
 			return "✗ requires a token and none is configured here\n" +
-				"              copy it from the host:  kling config set gateway.token <t>"
+				"              copy it from the host:  " + tokenPipeHint
 		}
 		return "✗ the gateway rejects the token from gateway.token (401)"
 	}

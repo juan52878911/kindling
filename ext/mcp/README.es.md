@@ -632,7 +632,10 @@ curl http://127.0.0.1:8080/healthz              # abierto: es la sonda de vida
 ```
 
 El token se guarda en `gateway.token` en el host donde corre el gateway, y se copia al
-cliente con `kling config set gateway.token …` (`kling connect` lo hace por ti). Para
+cliente por una tubería, nunca como argumento (quedaría en `ps` y en el historial):
+`ssh <host-del-gateway> kling config get gateway.token -reveal | kling config set gateway.token -`
+(`kling connect` lo escribe luego en el fichero de configuración de cada cliente, no en
+una línea de comandos). Para
 saltárselo en desarrollo existe `-no-auth`, que insiste en escuchar en loopback. El
 gateway **nunca reenvía su propio token** a invitados ni a URLs de terceros — un servidor
 MCP comprometido no debe llevarse la credencial del agregador. Cuando un mismo token lo

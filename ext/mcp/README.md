@@ -621,7 +621,9 @@ curl http://127.0.0.1:8080/healthz              # open: it is the liveness probe
 ```
 
 The token is stored in `gateway.token` on the host the gateway runs on, and copied to the
-client with `kling config set gateway.token …` (`kling connect` does it for you). To skip it
+client through a pipe, never as an argument (it would show in `ps` and the shell history):
+`ssh <gateway-host> kling config get gateway.token -reveal | kling config set gateway.token -`
+(`kling connect` then writes it into each client's config file, not onto a command line). To skip it
 during development there is `-no-auth`, which insists on listening on loopback. The
 gateway **never forwards its own token** to guests or third-party URLs — a compromised
 MCP server must not walk away with the aggregator's credential. When one token is shared

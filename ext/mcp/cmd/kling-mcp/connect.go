@@ -171,7 +171,7 @@ func probeMCP(url, token string) (string, []string, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		if token == "" {
 			return "", nil, fmt.Errorf("the gateway requires a token and I don't have one.\n" +
-				"           Copy it from the gateway host:  kling config set gateway.token <t>")
+				"           Copy it from the gateway host:  " + tokenPipeHint)
 		}
 		return "", nil, fmt.Errorf("the gateway rejects the token (401)")
 	}

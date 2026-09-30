@@ -195,8 +195,9 @@ var coreTree = []section{
   context use <name>                               switches daemon
   context rm <name>                                removes it
 `},
-		{Name: "config", Summary: "current configuration", Subcommands: []string{"show", "set", "path"}, Usage: `  config [show [-json]|path]                       current configuration
-  config set <key> <value>                         e.g. defaults.image min
+		{Name: "config", Summary: "current configuration", Subcommands: []string{"show", "get", "set", "path"}, Usage: `  config [show [-json]|path]                       current configuration
+  config get <key> [-reveal]                       one key (-reveal: secrets in full, for a pipe)
+  config set <key> <value|->                       e.g. defaults.image min; - reads stdin
 `},
 		{Name: "plugin", Summary: "installed extensions", Subcommands: []string{"ls", "install", "rm", "enable", "disable"}, Usage: `  plugin [ls] [-json]                              installed extensions, their status
                                                    and source
