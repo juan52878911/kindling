@@ -152,6 +152,27 @@ nada; con ella, ni un admin que ponga el mismo `kling.db.owner` a máquinas de d
 inquilinos cruza la frontera. Cambiar `kling.owner` de una máquina corta sus
 sesiones como cambiar sus etiquetas de `kling db`.
 
+## Plantillas compartidas: lo que llevan, lo reciben todos
+
+Compartir una plantilla (`shared_templates`) es dar a **cada** inquilino lo que viaja
+con ella (`SECURITY.md` §23):
+
+- **Sus credenciales de plantilla** (`kling template credential`): cada instancia las
+  recibe, la de un inquilino también. La clave no entra en el invitado, pero el
+  inquilino la **usa**: sus peticiones a esos dominios salen con ella. Las que se aten
+  después de compartirla también.
+- **Lo que hay en su memoria y su disco**: se lee desde dentro de la instancia (con
+  `exec` si la plantilla tiene `allow_exec`).
+- **Sus volúmenes**, que se reenganchan (abajo).
+- La lista va **por nombre**: otro snapshot sin dueño que un admin cree con el mismo
+  nombre queda compartido sin tocar la política.
+
+Comparta solo plantillas preparadas para eso: sin secretos dentro y, si llevan
+credenciales, de una cuenta de fuera que pueda usar cualquier inquilino (solo lectura,
+cuota propia, `-allow-request`). Lo que es de un inquilino, en una plantilla suya o en
+credenciales de máquina (`kling machine credential`) de cada instancia. `kling template
+inspect <plantilla>` enseña los dominios con credencial y si lleva volúmenes o `exec`.
+
 ## Lo que un inquilino no puede usar (todavía)
 
 - **Volúmenes** (`-volume`, `volumes`): no tienen dueño, y un volumen compartido
@@ -190,9 +211,19 @@ error: uid 1003 has no role in the daemon's authz policy (/etc/kling/authz.json)
 
 ## Límites de este MVP
 
-- **Los nombres son globales.** Dos inquilinos no pueden tener una máquina, un
-  snapshot o un grafo con el mismo nombre, y el `409` de un nombre ocupado dice que
-  existe. No dice de quién ni deja tocarlo.
+- **Los nombres son globales y únicos.** Dos inquilinos no pueden tener una máquina,
+  un snapshot o un grafo con el mismo nombre, y el `409` de un nombre ocupado dice
+  que existe. No dice de quién ni deja tocarlo. En las máquinas lo impone el daemon
+  al crear (`run`, `sandbox`, `run -from`, `fork`, los nodos de un grafo): un nombre
+  que ya lleva otra máquina, o que es el ID de otra, es un `409`, también para un
+  admin. Así la autorización por nombre (`/machines/{ref}`) siempre mira la misma
+  máquina sobre la que luego actúa el handler, que recibe su ID exacto.
+- **Cómo se resuelve `{ref}`.** ID exacto, luego nombre exacto, luego prefijo de ID
+  (4 caracteres o más). Un nombre o un prefijo que casa con más de una máquina no
+  resuelve a ninguna (`404`): solo pasa con estados de antes de que los nombres
+  fueran únicos, y se deshace con el ID completo. Un nombre gana a un prefijo: quien
+  quiera la máquina de un prefijo que coincide con el nombre de otra usa el ID
+  completo.
 - **La política se lee al arrancar.** Cambiarla pide reiniciar el daemon.
 - **Sin cuotas.** Un inquilino puede llenar el host de máquinas hasta los topes del
   daemon (`KLING_MAX_MACHINES`, memoria, disco). El reparto por inquilino con cuotas

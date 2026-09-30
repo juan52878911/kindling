@@ -1534,7 +1534,7 @@ instances share pages.
 | `scripts/install.sh` | curl-pipe-sh installer: downloads the release binary and verifies SHA256 |
 | `scripts/release.sh` | Creates the tag and pushes it; triggers the release workflow |
 | `scripts/10-provision-lab.sh` | Creates the lab VM on Proxmox |
-| `scripts/20-install-firecracker.sh` | Installs Firecracker and jailer from the latest release |
+| `scripts/20-install-firecracker.sh` | Installs Firecracker and jailer from a pinned release, checking its sha256 (`FC_VERSION` + `FC_SHA256` for another) |
 | `scripts/30-fetch-artifacts.sh` | Discovers and downloads kernel + rootfs from CI |
 | `scripts/40-bench-boot.sh` | Measures cold boot, snapshot and restore |
 | `scripts/50-prepare-image.sh` | Injects `overlay-init` and registers the base image |

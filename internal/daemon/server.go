@@ -338,23 +338,14 @@ func (s *Server) Listen(ctx context.Context) error {
 	if n := len(s.socket); n >= 104 {
 		return fmt.Errorf("socket path is %d bytes and a unix socket allows about 104: %s", n, s.socket)
 	}
-	ln, err := net.Listen("unix", s.socket)
+	// 0660, y el daemon necesita root por KVM, pero el CLI entra como usuario
+	// normal (por SSH, `kling dial-stdio`): el socket se cede a ese usuario y a
+	// su grupo en lugar de obligar a que todo el CLI vaya con sudo. Sin seguir
+	// enlaces: ver escucharSocket.
+	uid, gid, ceder := s.socketOwner()
+	ln, err := escucharSocket(s.socket, ceder, uid, gid)
 	if err != nil {
 		return err
-	}
-	// 0660: el acceso al daemon equivale a root en este host.
-	if err := os.Chmod(s.socket, 0o660); err != nil {
-		return err
-	}
-	// El daemon necesita root por KVM, pero el CLI entra como usuario normal
-	// (por SSH, `kling dial-stdio`). Cedemos el socket a ese usuario en lugar de
-	// obligar a que todo el CLI vaya con sudo.
-	if uid, gid, ok := s.socketOwner(); ok {
-		if err := os.Chown(s.socket, uid, gid); err != nil {
-			log.Printf("warning: couldn't hand off the socket to uid %d: %v", uid, err)
-		} else {
-			log.Printf("socket handed off to uid %d gid %d", uid, gid)
-		}
 	}
 
 	// Vigilancia de vida: una microVM puede morir sola (pánico del invitado, OOM
@@ -595,6 +586,8 @@ func runStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, machine.ErrShareRequest):
 		return http.StatusBadRequest
+	case errors.Is(err, machine.ErrNameTaken):
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }

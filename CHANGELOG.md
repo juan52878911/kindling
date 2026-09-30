@@ -10,6 +10,26 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling up`**: busca `ip`, `iptables`, `nft` y `systemctl` también en `/usr/sbin` y
+  `/sbin` (en local y por SSH), que el PATH de un usuario no trae; comprueba el kernel
+  del invitado y la imagen base, y `-check` sale con código 1 si algo sale ✗ (antes,
+  sin kernel ni imagen, todo era ✓); y las órdenes con privilegios llevan la ruta
+  absoluta de este `kling` en vez de un `sudo kling` que sudo no encuentra en su PATH.
+- **Scripts: descargas con versión y sha256 fijados.** `20-install-firecracker.sh`
+  (Firecracker v1.17.0), `70-build-minimal-image.sh` (minirootfs de Alpine 3.24.2) y
+  `71-build-glibc-base.sh` (Node v22.23.3) ya no instalan "la última" sin comprobar nada:
+  comprueban el sha256 fijado (el que publica cada proyecto) y paran si no coincide.
+  Otra versión se pide con su hash (`FC_VERSION`/`FC_SHA256`, `ALPINE_VERSION`/
+  `ALPINE_SHA256`, `NODE_VERSION`/`NODE_SHA256`). Chrome for Testing no publica hashes:
+  la base `chrome` exige `CHROME_SHA256` del zip de `CHROME_VERSION` (154.0.8037.92).
+- **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
+  a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
+  y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
+- **Núcleo: los nombres de máquina son únicos.** Crear (`run`, `sandbox`, `run -from`,
+  `fork`, nodos de grafo) con un nombre que ya lleva otra máquina, o que es su ID, es
+  un `409`. Un nombre o un prefijo de ID que casa con varias máquinas ya no resuelve
+  a la primera del mapa, al azar, sino a ninguna: la autorización por nombre podía
+  caer sobre otra máquina (de otro inquilino) que se llamaba igual.
 - **`kling image build <nombre> ... -spec -` ya no lee el nombre como fichero de spec.** Un flag
   con valor se lleva el siguiente argumento aunque empiece por `-` (como hace `flag`), así que
   el nombre puede ir delante o detrás de los flags también con `-spec -` (stdin); antes fallaba
