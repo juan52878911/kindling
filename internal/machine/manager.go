@@ -1468,7 +1468,14 @@ func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File, entorno ...stri
 // cacheTibiaMaxBytes es hasta qué tamaño (bloques asignados) se deja en la caché
 // de página el mem.file de una máquina recién congelada. Una tarea Chispa pesa
 // ~70 MiB; un VON, más de un GiB, y ese sí se suelta al congelar.
-const cacheTibiaMaxBytes = 128 << 20
+//
+// 256 y no 128 MiB por las copias de kling db branch: una copia del golden de
+// Postgres (1 GiB configurado) deja ~211 MiB asignados, y cada `git checkout`
+// descongela una. Medido en fc-test con la misma copia: despertar en 12,7 ms
+// con el mem.file en caché frente a 69-129 ms sin él (casi todo en el resync,
+// con el invitado leyendo sus páginas del disco). La caché es recuperable y se
+// suelta con la red a los redDormidaMax.
+const cacheTibiaMaxBytes = 256 << 20
 
 // precargaMaxBytes es hasta qué tamaño (bloques asignados) se precarga el
 // mem.file de una máquina al descongelarla.

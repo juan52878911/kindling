@@ -376,3 +376,17 @@ func TestSweepSnapshotLeftoversOlvidaLaCache(t *testing.T) {
 		t.Error("sweepSnapshotLeftovers no olvidó el tamaño cacheado")
 	}
 }
+
+// Una copia de kling db branch del golden de Postgres (~211 MiB asignados)
+// tiene que quedarse en caché al congelarla: es lo que hace que volver a una
+// rama cueste ~13 ms de despertar y no ~100 (ver cacheTibiaMaxBytes).
+func TestCacheTibiaCubreUnaCopiaDePostgres(t *testing.T) {
+	const copiaPG = 211 << 20
+	if copiaPG > cacheTibiaMaxBytes {
+		t.Fatalf("cacheTibiaMaxBytes = %d MiB: una copia de Postgres de %d MiB se soltaría de la caché al congelarla",
+			cacheTibiaMaxBytes>>20, copiaPG>>20)
+	}
+	if cacheTibiaMaxBytes > precargaMaxBytes {
+		t.Fatal("lo que se deja en caché al congelar no puede pasar de lo que el thaw precargaría")
+	}
+}
