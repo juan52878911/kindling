@@ -143,8 +143,8 @@ detect_platform
 EXTS=""
 for e in $(printf '%s' "$WITH" | tr ',' ' '); do
     case "$e" in
-        mcp|sandbox) ;;
-        *) echo "extensión desconocida en --with: $e (válidas: mcp, sandbox)" >&2; exit 2 ;;
+        mcp|sandbox|db|phone) ;;
+        *) echo "extensión desconocida en --with: $e (válidas: mcp, sandbox, db, phone)" >&2; exit 2 ;;
     esac
     # Sin repetidas: --bridge y --with mcp a la vez no la instalan dos veces.
     case " $EXTS " in *" $e "*) ;; *) EXTS="${EXTS:+$EXTS }$e" ;; esac
