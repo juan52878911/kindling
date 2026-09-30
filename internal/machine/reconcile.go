@@ -480,6 +480,30 @@ func (m *Manager) sweep() {
 		muertas = append(muertas, v)
 	}
 
+	// Una máquina con su cerrojo de ciclo de vida tomado está en manos de
+	// alguien: Freeze mata el VMM (killPaused) y solo después, con el volcado
+	// ya sellado, la apunta warm con PID 0. En ese hueco el proceso ya no
+	// existe y la máquina sigue "running" con el PID de antes, así que el
+	// vigilante la daba por muerta: la marcaba failed, le desmontaba la red
+	// que el thaw iba a reutilizar y publicaba un EvFailed falso, y luego
+	// Freeze la pisaba con warm. Si está ocupada se deja para la próxima
+	// vuelta; quien la tiene sabrá lo que pasó. TryLock y no Lock: el
+	// vigilante no debe esperar a un volcado de segundos.
+	var soltar []func()
+	defer func() {
+		for _, s := range soltar {
+			s()
+		}
+	}()
+	libres := muertas[:0]
+	for _, v := range muertas {
+		if s, ok := m.tryLock(v.mc.ID); ok {
+			soltar = append(soltar, s)
+			libres = append(libres, v)
+		}
+	}
+	muertas = libres
+
 	m.mu.Lock()
 	for _, v := range muertas {
 		mc := v.mc
