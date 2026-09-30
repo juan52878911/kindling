@@ -91,13 +91,18 @@ func upHere(root string, checkOnly bool) error {
 		return fmt.Errorf("missing prerequisites without which there are no microVMs; see above, with the command that installs them")
 	}
 	if checkOnly {
-		return nil
+		return checkResult(warn)
 	}
 
 	fmt.Println()
 	if err := materialize(root); err != nil {
 		return err
 	}
+	// Lo que materialize acaba de escribir ya no está pendiente.
+	p.kernel = fileExists(filepath.Join(root, "images", "vmlinux"))
+	p.baseImage = fileExists(filepath.Join(root, "images", "min.ext4"))
+	cs = checksOf(p)
+	warn = len(onlyFailed(cs))
 
 	fmt.Println()
 	if err := startServices(p); err != nil {
@@ -148,6 +153,10 @@ func upRemote(endpoint, root string, checkOnly bool) error {
 		fmt.Printf("The daemon isn't installed as a service on %s. Deploy it from this repo:\n", target)
 		fmt.Printf("  make deploy HOST=%s\n", endpoint)
 	case checkOnly:
+		if err := checkResult(len(onlyFailed(checksOf(p)))); err != nil {
+			fmt.Println()
+			return err
+		}
 	default:
 		fmt.Printf("Everything's ready. Start it there (needs sudo, and sudo needs your terminal):\n")
 		fmt.Printf("  ssh -t %s 'sudo systemctl enable --now %s'\n", target, strings.Join(append([]string{"kling"}, p.extUnits...), " "))
@@ -236,6 +245,8 @@ type check struct {
 	why   string   // qué se rompe si no está
 	fix   []string // qué teclear; NO lo ejecutamos por ti
 	fatal bool     // sin esto no hay runtime; lo demás degrada
+	// artifact: el kernel o la imagen base, que materialize puede escribir.
+	artifact bool
 }
 
 func localProbe(root string) probe {
@@ -246,12 +257,12 @@ func localProbe(root string) probe {
 		root:   root,
 	}
 	p.firecracker = lookFirecracker()
-	p.ip = inPath("ip")
-	p.iptables = inPath("iptables")
-	p.nft = inPath("nft")
+	p.ip = inPathOrSbin("ip")
+	p.iptables = inPathOrSbin("iptables")
+	p.nft = inPathOrSbin("nft")
 	_, err := user.Lookup(p.runAs)
 	p.runAsExists = err == nil
-	p.systemd = inPath("systemctl")
+	p.systemd = inPathOrSbin("systemctl")
 	p.unit = fileExists("/etc/systemd/system/kling.service")
 	for _, u := range extensionUnits() {
 		if fileExists("/etc/systemd/system/" + u) {
@@ -274,6 +285,9 @@ func localProbe(root string) probe {
 // con dos niveles de comillas; sus variables (RUNAS, ROOT, UNITS) van delante,
 // en el mismo guion (ver remoteProbeScript).
 const remoteScript = `
+# ip, iptables y nft viven en /usr/sbin o /sbin, que una shell de ssh sin
+# terminal no suele tener en el PATH: sin esto se daban por ausentes.
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
 si() { [ "$1" ] && echo si || echo no; }
 echo "system=$(uname -s)/$(uname -m)"
 echo "kvm=$(si "$([ -e /dev/kvm ] && echo 1)")"
@@ -341,6 +355,20 @@ func checksOf(p probe) []check {
 	if p.firecracker != "" {
 		firecrackerFound = p.firecracker
 	}
+	images := filepath.Join(p.root, "images")
+	// El kernel y la imagen base no son fatales aquí: un binario que los lleva
+	// dentro los escribe al seguir (materialize). Pero faltan, y se dice: antes
+	// no se comprobaban y `kling up -check` salía todo en verde sin ellos.
+	artifactFix := func(script, what string) []string {
+		if !p.remote && assets.Embedded() {
+			return []string{"kling up (without -check) writes it from this binary"}
+		}
+		fix := []string{"sudo ./scripts/" + script + "   # in the kindling repo, on the daemon host"}
+		if what == "vmlinux" {
+			fix = append(fix, "sudo install -m644 /opt/fc/vmlinux "+filepath.Join(images, "vmlinux"))
+		}
+		return fix
+	}
 
 	return []check{
 		{
@@ -401,6 +429,18 @@ func checksOf(p probe) []check {
 				"sudo usermod -aG kvm " + p.runAs,
 			},
 		},
+		{
+			label: "guest kernel", ok: p.kernel, artifact: true,
+			found: presence(p.kernel, "present", "missing from "+images),
+			why:   "every microVM boots this kernel: without it no microVM starts",
+			fix:   artifactFix("30-fetch-artifacts.sh", "vmlinux"),
+		},
+		{
+			label: "base image", ok: p.baseImage, artifact: true,
+			found: presence(p.baseImage, "min.ext4 present", "min.ext4 missing from "+images),
+			why:   "the base rootfs of `kling run` and of every layered image",
+			fix:   artifactFix("70-build-minimal-image.sh", "min.ext4"),
+		},
 	}
 }
 
@@ -431,6 +471,16 @@ func printChecks(cs []check, host string) (fatal, warn int) {
 		}
 	}
 	return fatal, warn
+}
+
+// checkResult es cómo termina `kling up -check` sin fallos fatales: con error
+// si algo salió ✗, para que un script (o quien mira el código de salida) no lo
+// tome por un "todo bien".
+func checkResult(failed int) error {
+	if failed == 0 {
+		return nil
+	}
+	return &errConCodigo{code: 1, err: fmt.Errorf("%d check(s) failed; see above, with the command that fixes each", failed)}
 }
 
 // onlyFailed filtra las que no pasaron, para poder repetirlas al final.
@@ -466,7 +516,7 @@ func materialize(root string) error {
 	written, err := assets.Materialize(dir)
 	if err != nil {
 		if os.IsPermission(err) {
-			return fmt.Errorf("can't write to %s: %w\nrun it again with sudo", dir, err)
+			return fmt.Errorf("can't write to %s: %w\nrun it again as root:  %s", dir, err, privilegedSelf("up", "-root", root))
 		}
 		return err
 	}
@@ -492,7 +542,7 @@ func startServices(p probe) error {
 		fmt.Println("    make deploy HOST=ssh://user@this-host")
 		fmt.Println()
 		fmt.Println("  Or start it by hand:")
-		fmt.Printf("    sudo kling daemon -root %s\n", p.root)
+		fmt.Printf("    %s\n", privilegedSelf("daemon", "-root", p.root))
 		return nil
 	}
 
@@ -537,6 +587,27 @@ func waitDaemon(ctx context.Context) *api.Info {
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+// privilegedSelf es la orden para correr ESTE kling con privilegios. `sudo
+// kling` a secas falla justo en la instalación habitual: sudo busca en su
+// secure_path (/usr/sbin:/usr/bin:/sbin:/bin), y kling suele estar en
+// ~/.local/bin o ~/go/bin. Con la ruta absoluta del binario no depende del PATH
+// de root.
+func privilegedSelf(args ...string) string {
+	self, err := os.Executable()
+	if err != nil {
+		self = "kling"
+	} else if r, err := filepath.EvalSymlinks(self); err == nil {
+		self = r
+	}
+	argv := privileged(append([]string{self}, args...)...)
+	for i, a := range argv {
+		if strings.ContainsAny(a, " \t'\"$`\\;&|<>()*?[]{}!#~") {
+			argv[i] = shQuote(a)
+		}
+	}
+	return strings.Join(argv, " ")
 }
 
 // privileged antepone sudo si no somos root. Si ya lo somos, sudo sobra y
@@ -692,6 +763,25 @@ func fileExists(p string) bool {
 func inPath(bin string) bool {
 	_, err := exec.LookPath(bin)
 	return err == nil
+}
+
+// sbinDirs son los directorios de herramientas de administración que el PATH
+// de un usuario normal (y el de una shell no interactiva) no suele traer. El
+// daemon corre como root, con ellos en su PATH: buscar solo en el del usuario
+// daba por ausentes ip, iptables y nft que el daemon sí encontraría.
+var sbinDirs = []string{"/usr/local/sbin", "/usr/sbin", "/sbin"}
+
+// inPathOrSbin es inPath, mirando también en sbinDirs.
+func inPathOrSbin(bin string) bool {
+	if inPath(bin) {
+		return true
+	}
+	for _, d := range sbinDirs {
+		if fi, err := os.Stat(filepath.Join(d, bin)); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // lookFirecracker busca el VMM. Además del PATH mira /usr/local/bin, que es

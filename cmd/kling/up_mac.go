@@ -178,7 +178,7 @@ func upMac(root string, checkOnly bool) error {
 		return fmt.Errorf("missing prerequisites without which there are no microVMs; see above, with the command that fixes each")
 	}
 	if checkOnly {
-		return nil
+		return checkResult(warn)
 	}
 	fmt.Println()
 

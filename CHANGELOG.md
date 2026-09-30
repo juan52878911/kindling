@@ -10,6 +10,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling up`**: busca `ip`, `iptables`, `nft` y `systemctl` también en `/usr/sbin` y
+  `/sbin` (en local y por SSH), que el PATH de un usuario no trae; comprueba el kernel
+  del invitado y la imagen base, y `-check` sale con código 1 si algo sale ✗ (antes,
+  sin kernel ni imagen, todo era ✓); y las órdenes con privilegios llevan la ruta
+  absoluta de este `kling` en vez de un `sudo kling` que sudo no encuentra en su PATH.
 - **Scripts: descargas con versión y sha256 fijados.** `20-install-firecracker.sh`
   (Firecracker v1.17.0), `70-build-minimal-image.sh` (minirootfs de Alpine 3.24.2) y
   `71-build-glibc-base.sh` (Node v22.23.3) ya no instalan "la última" sin comprobar nada:
