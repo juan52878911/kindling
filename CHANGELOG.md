@@ -60,6 +60,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling-phoned`: `POST /v1/verify-cache` (el `--verify-cache` de `android-sh` sin
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
+- `kling sbx renew <id> -ttl 30m` funciona en el orden que enseña su ayuda (antes daba
+  el error de uso), y `-ttl` por debajo de 1 s es un error en `sbx new` y `sbx renew`
+  (`-ttl 500ms` se truncaba a 0 y se omitía sin avisar).
 
 ### Seguridad
 

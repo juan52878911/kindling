@@ -103,7 +103,7 @@ func nuevoCliente() (*cliente, error) {
 		a.Token = v
 	}
 	if a.Token == "" {
-		return nil, errors.New("no gateway token: kling config set sandbox.token <token> (or $KLING_SANDBOX_TOKEN)")
+		return nil, errors.New("no gateway token: kling config set sandbox.token - < token-file (or $KLING_SANDBOX_TOKEN)")
 	}
 	return &cliente{url: strings.TrimSuffix(a.URL, "/"), token: a.Token,
 		http: &http.Client{Timeout: 0}}, nil
@@ -202,8 +202,10 @@ func sbxNew(args []string) error {
 	if *img != "" {
 		cuerpo["image"] = *img
 	}
-	if *ttl > 0 {
-		cuerpo["ttl_seconds"] = int(ttl.Seconds())
+	if s, err := ttlSegundos(*ttl); err != nil {
+		return err
+	} else if s > 0 {
+		cuerpo["ttl_seconds"] = s
 	}
 	if *onTTL != "" {
 		cuerpo["on_ttl"] = *onTTL
@@ -301,14 +303,48 @@ func sbxRm(args []string) error {
 	return nil
 }
 
+// ttlSegundos pasa -ttl a los segundos del API. 0 es "no lo pidas" (vale el
+// del frontal); menos de un segundo es un error y no un 0 callado: -ttl 500ms
+// se truncaba a 0 y se omitía sin avisar.
+func ttlSegundos(d time.Duration) (int, error) {
+	switch {
+	case d == 0:
+		return 0, nil
+	case d < time.Second:
+		return 0, fmt.Errorf("-ttl %s: the minimum is 1s", d)
+	}
+	return int(d.Seconds()), nil
+}
+
+// parsearIntercalado es fs.Parse admitiendo flags detrás de los argumentos
+// (`renew <id> -ttl 30m`): flag.Parse para en el primero que no es flag.
+func parsearIntercalado(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return pos, nil
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
 func sbxRenew(args []string) error {
 	fs := flag.NewFlagSet("sbx renew", flag.ExitOnError)
 	ttl := fs.Duration("ttl", 0, "new idle time from now")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parsearIntercalado(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return errors.New("usage: kling sbx renew <id> [-ttl 30m]")
+	}
+	segs, err := ttlSegundos(*ttl)
+	if err != nil {
+		return err
 	}
 	c, err := nuevoCliente()
 	if err != nil {
@@ -317,11 +353,11 @@ func sbxRenew(args []string) error {
 	ctx, stop := ctxSenales()
 	defer stop()
 	cuerpo := map[string]any{}
-	if *ttl > 0 {
-		cuerpo["ttl_seconds"] = int(ttl.Seconds())
+	if segs > 0 {
+		cuerpo["ttl_seconds"] = segs
 	}
 	var sb sandbox
-	if err := c.llamar(ctx, http.MethodPost, "/v1/sandboxes/"+fs.Arg(0)+"/renew", cuerpo, &sb); err != nil {
+	if err := c.llamar(ctx, http.MethodPost, "/v1/sandboxes/"+pos[0]+"/renew", cuerpo, &sb); err != nil {
 		return err
 	}
 	if sb.ExpiresAt != nil {
