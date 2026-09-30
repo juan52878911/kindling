@@ -63,6 +63,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **macOS: el sandbox de `kling-vz` ya no deja a una máquina tocar las de las demás.**
+  Leía toda la raíz (también `secrets/snapshot.key`, de la que salen las claves de todos
+  los `credentials.enc`), escribía en `snapshots/` y `volumes/` enteros y conectaba a
+  `localhost:*` sin red: un fallo en su pila de red daba las credenciales de todas, los
+  dorados y el agente de las demás por sus reenvíos. Ahora lee y escribe solo su
+  directorio y los ficheros exactos de su VM, nunca `secrets/` ni escribe en
+  `snapshots/` (el dorado de `kling commit` lo coloca un proceso custodio que no pisa
+  nada), escucha solo en el rango de reenvíos y nunca conecta a él.
+  `vz/scripts/sandbox-perfil.sh` lo comprueba con `sandbox-exec`. `SECURITY.md` §22.
 - **macOS: un reenvío de `127.0.0.1` ya no acepta a otro usuario que reutilice el puerto
   de una conexión del daemon.** `vz/internal/peercred` comparaba solo puertos, y
   `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` desde otra cuenta pasaba por del daemon y
