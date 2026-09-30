@@ -966,7 +966,10 @@ enmascarado mal hecho filtra datos. Qué garantiza:
   el golden se construye con `db-golden.sh` en una máquina nueva con `egress none`, sin
   credencial ni ruta a producción. El golden no contiene ni una página ni un byte de RAM
   que haya visto un dato sin enmascarar.
-- **Bloqueo por defecto.** Una columna sospechosa por su nombre o su tipo sin regla
+- **Bloqueo por defecto.** Una columna sospechosa por su nombre (datos personales en
+  inglés, español, portugués y francés, y credenciales: `password_hash`, `api_key`,
+  `access_token`, `client_secret`, `totp_seed`, `salt`…) o por su tipo (`jsonb`,
+  `hstore`, `tsvector`, geométricos, arrays de texto, direcciones de red) sin regla
   para la construcción; una regla que no casa con ninguna columna, también (una errata
   no deja una columna sin tratar en silencio).
 - **Errores e informe sin valores.** Los psql del volcado, del catálogo y del
@@ -977,8 +980,10 @@ enmascarado mal hecho filtra datos. Qué garantiza:
 Qué **no** garantiza:
 
 - **La detección es heurística.** Por nombre y tipo, no por contenido: un correo dentro
-  de una columna `notes` o de un JSON pasa si nadie pone regla (`-strict` obliga a
-  decidir sobre toda columna de texto, JSON o array). `keep` y `-allow-unmasked` son
+  de una columna de texto con un nombre neutro (`summary`) pasa si nadie pone regla
+  (`-strict` obliga a decidir sobre toda columna de texto, JSON o array). Un `tsvector`
+  mantenido por disparador no se regenera al enmascarar su fuente (los disparadores
+  van apagados): necesita su propia regla, y el clon la exige. `keep` y `-allow-unmasked` son
   decisiones de quien construye, y el informe las deja escritas.
 - **Enmascarar no es anonimizar.** Los tipos con hash conservan la igualdad (quién
   comparte correo con quién), las columnas sin regla (fechas, importes, ciudades) siguen

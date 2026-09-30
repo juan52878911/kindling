@@ -74,7 +74,7 @@ what the alternative is, instead of failing halfway through the build. Useful fl
 
 | Flag | What it does |
 |---|---|
-| `-bundle` | collapses `node_modules` into **one** file with esbuild — measured 1205 files → 1, cold `initialize` ~7 s → ~2.5 s. The main lever on Mac/arm64 |
+| `-bundle` | collapses `node_modules` into **one** file with esbuild — measured 1205 files → 1, cold `initialize` ~7 s → ~2.5 s. The main lever on Mac/arm64. esbuild is pinned and its binary checked by sha512 (`ESBUILD_TGZ=<tarball>` to build offline) |
 | `-base node` / `-base python` | builds a small **layer** on a shared runtime base instead of a monolithic image ([layered images](https://github.com/juan52878911/kindling#layered-images-one-base-per-runtime-family)); picked automatically when a base named after the runtime family exists |
 | `-env KEY=value` | bakes environment switches into the entrypoint (plain text: for toggles, **not secrets** — an API key goes through the [credential proxy](https://github.com/juan52878911/kindling#keys-the-guest-never-sees-the-credential-proxy): `kling template credential <service> -domain api.x.com -env X_API_KEY -f key` with `-egress allowlist`, and every replica gets a placeholder the server never can read the key from; other session secrets go [via MMDS](https://github.com/juan52878911/kindling#secrets-that-never-touch-a-snapshot-mmds)) |
 | `-cmd "..."` | overrides the inferred start command (PyPI entry points are inferred by convention and verified at build time) |
@@ -621,7 +621,9 @@ curl http://127.0.0.1:8080/healthz              # open: it is the liveness probe
 ```
 
 The token is stored in `gateway.token` on the host the gateway runs on, and copied to the
-client with `kling config set gateway.token …` (`kling connect` does it for you). To skip it
+client through a pipe, never as an argument (it would show in `ps` and the shell history):
+`ssh <gateway-host> kling config get gateway.token -reveal | kling config set gateway.token -`
+(`kling connect` then writes it into each client's config file, not onto a command line). To skip it
 during development there is `-no-auth`, which insists on listening on loopback. The
 gateway **never forwards its own token** to guests or third-party URLs — a compromised
 MCP server must not walk away with the aggregator's credential. When one token is shared
@@ -641,10 +643,14 @@ and RAM, and the next call brings it back in milliseconds.
 ### Surviving reboots
 
 ```sh
-sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
+U=$(. /etc/default/kling; echo "$KLING_SOCKET_USER")   # who the daemon hands its socket to
+sed -e "s/@KLING_USER@/$U/" -e "s/@KLING_GROUP@/$(id -gn "$U")/" packaging/kling-gateway.service \
+  | sudo tee /etc/systemd/system/kling-gateway.service >/dev/null
 sudo systemctl enable --now kling-gateway
 ```
 
+The unit ships with `User=@KLING_USER@` (`make deploy` fills it in the same way): it has to
+run as the user that owns the daemon socket, and left unfilled it refuses to start.
 The gateway **does not run as root**: it only talks to the daemon over its socket and
 proxies. All the privileged work stays in `kling.service`.
 

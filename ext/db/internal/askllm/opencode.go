@@ -9,9 +9,10 @@ package askllm
 //   - directorio temporal NUEVO y vacío (0700) como cwd, borrado al acabar:
 //     opencode no ve ni el proyecto ni nada del usuario por ahí.
 //   - NUNCA --auto: si opencode pidiera un permiso, nadie lo concede.
-//   - el prompt va por argumento (hasta 100 KiB; si no cabe, en un fichero
-//     adjunto de ese directorio). Lleva esquema y pregunta, no secretos; por
-//     argumento lo puede ver con ps cualquier usuario del equipo.
+//   - el prompt (esquema y pregunta) va SIEMPRE por stdin: `opencode run` lee
+//     de ahí el mensaje cuando no es un terminal. Por argumento lo vería con ps
+//     cualquier usuario del equipo, y un fichero adjunto hace que el modelo a
+//     veces intente la herramienta de lectura, lo que aborta.
 //   - solo se aceptan eventos text y step_start/step_finish; cualquier otro
 //     (uso de herramientas, permisos, errores) aborta y mata al proceso.
 //   - plazo por contexto, matando el GRUPO de procesos entero.
@@ -44,12 +45,6 @@ const (
 
 	maxOpenCodeOut  = 4 << 20
 	maxOpenCodeLine = 1 << 20
-	promptFile      = "prompt.txt"
-	// maxArgPrompt es lo más que se manda por argumento (visible con ps: es
-	// esquema y pregunta, no secretos); más va en un fichero adjunto.
-	maxArgPrompt = 100 << 10
-	// openCodeMessage acompaña al fichero adjunto.
-	openCodeMessage = "The attached file contains your instructions. Do what it says. Reply with text only."
 )
 
 var errNoFinish = errors.New("opencode's output ended without a finished step")
@@ -133,19 +128,9 @@ func (o *OpenCode) attempt(ctx context.Context, system, prompt string) (string, 
 		return "", err
 	}
 	full := system + "\n\n" + prompt
-	args := []string{"run", "--pure", "-m", o.Model, "--format", "json"}
-	if len(full) <= maxArgPrompt {
-		// Lo normal: el prompt por argumento. Un modelo al que se le pide "leer"
-		// un adjunto a veces intenta la herramienta de lectura, y eso aborta.
-		args = append(args, "--", full)
-	} else {
-		// Esquemas grandes: no caben en un argumento (128 KiB en Linux).
-		if err := os.WriteFile(filepath.Join(dir, promptFile), []byte(full), 0o600); err != nil {
-			return "", err
-		}
-		args = append(args, "-f", promptFile, "--", openCodeMessage)
-	}
-	cmd := exec.CommandContext(ctx, o.Bin, args...)
+	// Sin mensaje en los argumentos: opencode lo lee de stdin (ver arriba).
+	cmd := exec.CommandContext(ctx, o.Bin, "run", "--pure", "-m", o.Model, "--format", "json")
+	cmd.Stdin = strings.NewReader(full)
 	cmd.Dir = dir
 	setProcessGroup(cmd)
 	var stderr limitBuf

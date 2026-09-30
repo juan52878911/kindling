@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -518,36 +519,131 @@ func pruneCaptures(dir string, maxB int64, maxDays int, today string) int64 {
 // ---- filtro de secretos
 
 // Lo que parece un secreto se cambia por [redacted] antes de tocar el disco.
-// Es un filtro básico y conservador (claves con nombre, tokens con prefijo
-// conocido, JWT, claves privadas, tiras largas que parecen credenciales,
-// correos), no una garantía: con datos sensibles, capture "hash". Corre en el
-// escritor, nunca en el camino de la petición.
+// Las reglas van por FORMA, no por palabra suelta: una palabra como token o
+// password en prosa ("token expired", "reset your password please") no tapa
+// nada, y un hash (SHA de commit, sha256) o un UUID tampoco son secretos. Se
+// tapa:
+//
+//   - la credencial de un esquema de autorización (Authorization: Basic …,
+//     Bearer …), con la cabecera o sin ella;
+//   - la contraseña del userinfo de una URL (postgres://u:[redacted]@host);
+//   - el valor de un par clave=valor o "clave": "valor" cuya clave TERMINE en
+//     password, passwd, pwd, secret, token, api_key, private_key,
+//     access_key, credential(s) o auth (PGPASSWORD=, MYSQL_PWD=, access_token=,
+//     client_secret=, "password": "…"); con espacio en vez de = o :, solo si
+//     el valor parece una credencial (letras y cifras, 12+);
+//   - "password is X" y parecidas en prosa, si X lleva algo que no es letra;
+//   - prefijos conocidos de proveedores, con longitud mínima (sk-, sk_live_,
+//     whsec_, glpat-, hf_, AIza, ghp_, xox…, AKIA), JWT y claves privadas;
+//   - tiras de 32+ que mezclan mayúsculas, minúsculas y cifras (base64 o
+//     base62 al azar; el hex de un hash no las mezcla) y correos.
+//
+// Es un filtro, no una garantía: con datos sensibles, capture "hash". Corre en
+// el escritor, nunca en el camino de la petición.
 var (
-	secretKV    = lazyre.New(`(?i)\b(authorization|bearer|token|api[_-]?key|secret|password|passwd|pwd)(\s*[:=]\s*|\s+)("[^"]*"|'[^']*'|[^\s,;]+)`)
-	secretLong  = lazyre.New(`[A-Za-z0-9+/_=-]{32,}`)
-	secretFixed = []*lazyre.Regexp{
+	secretAuthHeader = lazyre.New(`(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?:([A-Za-z][A-Za-z0-9-]*)\s+)?([^\s,;"']+)`)
+	secretAuthScheme = lazyre.New(`(?i)\b(basic|bearer|digest|token)\s+([A-Za-z0-9+/=._~-]{8,})`)
+	secretURLUser    = lazyre.New(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)@`)
+	secretKV         = lazyre.New(`(?i)(["']?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|private[_-]?key|access[_-]?key|secret[_-]?key|credentials?|auth)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)`)
+	secretKSpace     = lazyre.New(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey)(\s+)([^\s,;]+)`)
+	secretProse      = lazyre.New(`(?i)\b((?:password|passwd|passphrase|contraseña|clave|pin)\s+(?:is|was|es|era|será)\s+)(\S+)`)
+	secretLong       = lazyre.New(`[A-Za-z0-9+/_=-]{32,}`)
+	secretFixed      = []*lazyre.Regexp{
 		lazyre.New(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
-		lazyre.New(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+`),
 		lazyre.New(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}`),
-		lazyre.New(`\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}`),
+		lazyre.New(`\b(?:sk|pk|rk)-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}`),
+		lazyre.New(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}`),
+		lazyre.New(`\bwhsec_[A-Za-z0-9+/=]{10,}`),
+		lazyre.New(`\bglpat-[A-Za-z0-9_-]{10,}`),
+		lazyre.New(`\bhf_[A-Za-z0-9]{10,}`),
+		lazyre.New(`\bAIza[0-9A-Za-z_-]{10,}`),
+		lazyre.New(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
+		lazyre.New(`\bnpm_[A-Za-z0-9]{20,}`),
 		lazyre.New(`\bAKIA[0-9A-Z]{16}\b`),
-		lazyre.New(`\bgh[pousr]_[A-Za-z0-9]{30,}\b`),
+		lazyre.New(`\bgh[pousr]_[A-Za-z0-9]{16,}\b`),
 		lazyre.New(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
 		lazyre.New(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`),
 	}
 )
 
+// credLike dice si una palabra parece una credencial y no prosa: 12+
+// caracteres con letras y cifras.
+func credLike(v string) bool {
+	return len(v) >= 12 && strings.ContainsAny(v, "0123456789") &&
+		strings.IndexFunc(v, func(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' }) >= 0
+}
+
+// schemeCred dice si lo que sigue a Basic/Bearer parece una credencial: 8+
+// y no una palabra corriente (solo minúsculas: "bearer of", "basic understanding").
+func schemeCred(v string) bool {
+	return strings.IndexFunc(v, func(r rune) bool { return !(r >= 'a' && r <= 'z') }) >= 0
+}
+
 func redact(s string) string {
 	for _, re := range secretFixed {
 		s = re.ReplaceAllString(s, "[redacted]")
 	}
-	s = secretKV.ReplaceAllString(s, "$1$2[redacted]")
-	// Una tira de 32+ caracteres sin espacios que mezcla letras y dígitos es
-	// casi siempre una credencial o un hash; una palabra de verdad no.
+	s = secretURLUser.ReplaceAllString(s, "${1}[redacted]@")
+	s = secretAuthHeader.ReplaceAllStringFunc(s, func(m string) string {
+		sm := secretAuthHeader.FindStringSubmatch(m)
+		if sm[3] == "[redacted]" {
+			return m
+		}
+		if sm[2] != "" {
+			return sm[1] + sm[2] + " [redacted]"
+		}
+		return sm[1] + "[redacted]"
+	})
+	s = secretAuthScheme.ReplaceAllStringFunc(s, func(m string) string {
+		sm := secretAuthScheme.FindStringSubmatch(m)
+		if sm[2] == "[redacted]" || !schemeCred(sm[2]) {
+			return m
+		}
+		return sm[1] + " [redacted]"
+	})
+	s = secretKV.ReplaceAllStringFunc(s, func(m string) string {
+		sm := secretKV.FindStringSubmatch(m)
+		v := sm[2]
+		if strings.Contains(v, "[redacted]") {
+			return m
+		}
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
+			return sm[1] + v[:1] + "[redacted]" + v[:1]
+		}
+		return sm[1] + "[redacted]"
+	})
+	s = secretKSpace.ReplaceAllStringFunc(s, func(m string) string {
+		sm := secretKSpace.FindStringSubmatch(m)
+		if !credLike(sm[3]) {
+			return m
+		}
+		return sm[1] + sm[2] + "[redacted]"
+	})
+	s = secretProse.ReplaceAllStringFunc(s, func(m string) string {
+		// "the password is Hunter2!" sí; "the password was wrong" no: una
+		// contraseña lleva algo que no es letra.
+		sm := secretProse.FindStringSubmatch(m)
+		if strings.IndexFunc(sm[2], func(r rune) bool { return !unicode.IsLetter(r) }) < 0 {
+			return m
+		}
+		return sm[1] + "[redacted]"
+	})
+	// Una tira de 32+ que mezcla mayúsculas, minúsculas y cifras es casi
+	// siempre una credencial al azar; el hex de un hash o de un UUID no mezcla
+	// mayúsculas y minúsculas, y una palabra de verdad no lleva cifras.
 	return secretLong.ReplaceAllStringFunc(s, func(m string) string {
-		if strings.ContainsAny(m, "0123456789") && strings.IndexFunc(m, func(r rune) bool {
-			return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-		}) >= 0 {
+		var up, low, dig bool
+		for _, r := range m {
+			switch {
+			case r >= 'A' && r <= 'Z':
+				up = true
+			case r >= 'a' && r <= 'z':
+				low = true
+			case r >= '0' && r <= '9':
+				dig = true
+			}
+		}
+		if up && low && dig {
 			return "[redacted]"
 		}
 		return m

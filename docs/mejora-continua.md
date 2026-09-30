@@ -107,11 +107,18 @@ directorio 0700, ficheros 0600):
 - La petición solo **encola** (sin bloquear; cola llena = se pierde y se
   cuenta). Filtrar secretos, serializar y escribir lo hace un único escritor
   en segundo plano. Dedup por texto dentro del día.
-- **Filtro de secretos**: claves con nombre (`password: …`, `token=…`,
-  `Authorization: Bearer …`), tokens con prefijo conocido (`sk-`, `AKIA`,
-  `ghp_`, `xox*-`), JWT, claves privadas PEM, tiras de 32+ caracteres que
-  mezclan letras y dígitos, y correos → `[redacted]`. Es básico, no una
-  garantía: con datos sensibles, `capture: "hash"`.
+- **Filtro de secretos**, por forma y no por palabra suelta: la credencial de un
+  esquema de autorización (`Authorization: Basic …`, `Bearer …`), la contraseña del
+  userinfo de una URL (`postgres://u:…@host`), el valor de un `clave=valor` o
+  `"clave": "valor"` cuya clave **termina** en `password`, `pwd`, `secret`, `token`,
+  `api_key`, `private_key`, `credentials`… (`PGPASSWORD=`, `MYSQL_PWD=`,
+  `access_token=`, `client_secret=`), `password is X` en prosa si X no es solo letras,
+  prefijos de proveedores con longitud mínima (`sk-`, `sk_live_`, `whsec_`, `glpat-`,
+  `hf_`, `AIza`, `AKIA`, `ghp_`, `xox*-`), JWT, claves privadas PEM, tiras de 32+ que
+  mezclan mayúsculas, minúsculas y cifras, y correos → `[redacted]`. La prosa ("token
+  expired", "reset your password please"), los hashes (SHA de commit, sha256) y los
+  UUID se quedan. Es un filtro, no una garantía: con datos sensibles,
+  `capture: "hash"`.
 
 ## Feedback: personas y maestros externos
 

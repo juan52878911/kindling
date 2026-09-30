@@ -173,7 +173,7 @@ func mcpHeal(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	var rotos, curados int
+	var rotos, curados, sinGrabar int
 
 	// En serie a proposito. Reconstruir arranca una microVM que reserva su
 	// memoria por adelantado; en paralelo competirian por la RAM que necesitan
@@ -188,9 +188,12 @@ func mcpHeal(args []string) error {
 		}
 
 		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo, s.Egress)
+		// No poder grabar el veredicto se dice y se cuenta, pero NO salta el
+		// resto: antes el `continue` de aquí se saltaba el rotos++ y un
+		// servicio caído acababa en "all healthy" con código 0.
 		if err := mcp.SetHealth(ctx, c, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
+			sinGrabar++
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", nombre, err)
-			continue
 		}
 		if probeErr == nil {
 			fmt.Fprintf(tw, "  %s\t✓ healthy\n", nombre)
@@ -247,6 +250,13 @@ func mcpHeal(args []string) error {
 		fmt.Printf("\n%d of %d service(s) were stale after a host reboot; all rebuilt\n", curados, len(snaps))
 	default:
 		fmt.Printf("\n%d unhealthy, %d rebuilt\n", rotos, curados)
+	}
+	// No poder grabar la salud no es el 3 (sondeé y grabé, algo sigue roto): el
+	// vigía no hizo su trabajo y la unidad tiene que fallar, con el 1.
+	if sinGrabar > 0 {
+		return fmt.Errorf("the health of %d service(s) couldn't be recorded", sinGrabar)
+	}
+	if rotos > curados {
 		// Codigo propio: el vigia SI hizo su trabajo —sondeo todo y grabo la
 		// salud de cada uno—, solo que algo sigue roto por una causa que no se
 		// cura reconstruyendo. Eso no es un fallo de la unidad; que no pudiera

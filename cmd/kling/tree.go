@@ -98,6 +98,8 @@ var coreTree = []section{
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{
 		{Name: "exec", Summary: "runs a command inside, streaming its output", MachineArgs: []string{""}, Usage: `  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming
       <ref> [--] <cmd> [args...]                   its output; exits with its code
+      [-e K] [-env-file F]                         secrets: from this env or a file
+                                                   (K=V shows in ps)
 `},
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [--] [cmd [args...]]                         (Ctrl-C reaches the program)
@@ -195,8 +197,9 @@ var coreTree = []section{
   context use <name>                               switches daemon
   context rm <name>                                removes it
 `},
-		{Name: "config", Summary: "current configuration", Subcommands: []string{"show", "set", "path"}, Usage: `  config [show [-json]|path]                       current configuration
-  config set <key> <value>                         e.g. defaults.image min
+		{Name: "config", Summary: "current configuration", Subcommands: []string{"show", "get", "set", "path"}, Usage: `  config [show [-json]|path]                       current configuration
+  config get <key> [-reveal]                       one key (-reveal: secrets in full, for a pipe)
+  config set <key> <value|->                       e.g. defaults.image min; - reads stdin
 `},
 		{Name: "plugin", Summary: "installed extensions", Subcommands: []string{"ls", "install", "rm", "enable", "disable"}, Usage: `  plugin [ls] [-json]                              installed extensions, their status
                                                    and source

@@ -126,6 +126,13 @@ func cacheDir() string {
 // Sin `version=latest` el registro devuelve TODAS las versiones publicadas, así
 // que una búsqueda de "filesystem" saldría con el mismo servidor cinco veces.
 func (c *Client) Search(ctx context.Context, query string, limit int) ([]Server, error) {
+	servers, _, err := c.searchPage(ctx, query, limit, "")
+	return servers, err
+}
+
+// searchPage es una página de la búsqueda y el cursor de la siguiente ("" si
+// es la última).
+func (c *Client) searchPage(ctx context.Context, query string, limit int, cursor string) ([]Server, string, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -134,16 +141,23 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]Server,
 		"version": {"latest"},
 		"limit":   {fmt.Sprint(limit)},
 	}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
 	var out listResponse
 	if err := c.get(ctx, "/v0/servers?"+q.Encode(), &out); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	servers := make([]Server, 0, len(out.Servers))
 	for _, e := range out.Servers {
 		servers = append(servers, e.Server)
 	}
-	return servers, nil
+	return servers, out.Metadata.NextCursor, nil
 }
+
+// maxGetPages es cuántas páginas recorre Get antes de rendirse: un nombre
+// corto tan común que no se acaba de listar no se da por inequívoco.
+const maxGetPages = 50
 
 // Get resuelve un servidor por nombre.
 //
@@ -152,10 +166,28 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]Server,
 // gente teclea: `kling add filesystem`. En ese caso se busca y se exige que la
 // coincidencia sea inequívoca, porque instalar el servidor equivocado de otro
 // autor es un fallo silencioso y desagradable.
+//
+// Se recorren TODAS las páginas antes de decidir: con solo la primera, `github`
+// (630 resultados) daba por inequívoco el único que salía ahí con ese final, y
+// había más de otros autores en las siguientes.
 func (c *Client) Get(ctx context.Context, name string, limit int) (*Server, []Server, error) {
-	servers, err := c.Search(ctx, name, limit)
-	if err != nil {
-		return nil, nil, err
+	var servers []Server
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxGetPages {
+			return nil, nil, fmt.Errorf("%q matches more than %d pages of the registry; use the full name", name, maxGetPages)
+		}
+		ss, next, err := c.searchPage(ctx, name, limit, cursor)
+		if err != nil {
+			return nil, nil, err
+		}
+		servers = append(servers, ss...)
+		if next == "" || seen[next] {
+			break
+		}
+		seen[next] = true
+		cursor = next
 	}
 	if len(servers) == 0 {
 		return nil, nil, fmt.Errorf("cannot find %q in the official registry", name)

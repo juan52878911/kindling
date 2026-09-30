@@ -16,7 +16,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -31,19 +30,19 @@ const shellChunk = 32 << 10
 // daemon o la máquina desaparecieron a media sesión.
 var errShellClosed = errors.New("connection closed")
 
-// cmdShell es `kling shell [-e K=V] [-w DIR] [-t TERM] <ref> [--] [cmd args...]`.
+// cmdShell es `kling shell [-e K=V|K] [-env-file F] [-w DIR] [-t TERM] <ref> [--] [cmd args...]`.
 //
 // Termina con el código de la shell remota, igual que exec: un `kling shell sb
 // -- make test` sirve en un script tanto como fuera de él.
 func cmdShell(args []string) (int, error) {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	host := hostFlag(fs)
-	var env stringsFlag
-	fs.Var(&env, "e", "environment variable KEY=value (repeatable)")
+	var ef envFlags
+	ef.register(fs)
 	dir := fs.String("w", "", "working directory inside the machine")
 	term := fs.String("t", "", "TERM seen by the program inside (default $TERM, or xterm)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling shell [-e K=V] [-w DIR] [-t TERM] <machine|sandbox> [--] [cmd [args...]]")
+		fmt.Fprintln(os.Stderr, "usage: kling shell [-e K=V|K] [-env-file F] [-w DIR] [-t TERM] <machine|sandbox> [--] [cmd [args...]]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -58,10 +57,9 @@ func cmdShell(args []string) (int, error) {
 	if len(cmd) > 0 && cmd[0] == "--" {
 		cmd = cmd[1:]
 	}
-	for _, kv := range env {
-		if !strings.Contains(kv, "=") {
-			return 2, fmt.Errorf("-e %q: use KEY=value", kv)
-		}
+	env, err := ef.resolve()
+	if err != nil {
+		return 2, err
 	}
 	if err := termUnsupported(); err != nil {
 		return 1, err

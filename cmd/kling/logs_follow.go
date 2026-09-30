@@ -8,11 +8,12 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// kling logs [-f] <ref>.
+// kling logs [-f] [-raw] <ref>.
 //
 // El daemon no tiene un flujo de la consola: solo sirve las últimas N líneas.
 // Seguirla es sondear esa ventana y escribir lo que no se había escrito. Se
@@ -33,6 +34,7 @@ func cmdLogs(args []string) error {
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N lines (0 = all)")
 	follow := fs.Bool("f", false, "keep printing new lines until Ctrl-C or until the machine stops running")
+	raw := fs.Bool("raw", false, "print the console as is, escape sequences included (by default, on a terminal, control characters are shown escaped)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -49,14 +51,20 @@ func cmdLogs(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(out)
+	// La consola la escribe el invitado: en un terminal, una secuencia OSC o
+	// CSI suya cambiaría el portapapeles (OSC 52), el título o lo ya escrito.
+	var w io.Writer = os.Stdout
+	if !*raw && isTerminal(os.Stdout.Fd()) {
+		w = consoleWriter{os.Stdout}
+	}
+	fmt.Fprint(w, out)
 	if !*follow {
 		return nil
 	}
 	if out != "" && !strings.HasSuffix(out, "\n") {
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
-	err = followLogs(ctx, os.Stdout, logSource{c: c, ref: ref}, splitLines(out), followEvery)
+	err = followLogs(ctx, w, logSource{c: c, ref: ref}, splitLines(out), followEvery)
 	if ctx.Err() != nil {
 		return nil // Ctrl-C es la forma normal de terminar
 	}
@@ -120,6 +128,60 @@ func followLogs(ctx context.Context, w io.Writer, src logFetcher, printed []stri
 			return nil
 		}
 	}
+}
+
+// consoleWriter escribe la consola del invitado con los caracteres de control
+// neutralizados (ver cleanConsole).
+type consoleWriter struct{ w io.Writer }
+
+func (c consoleWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(c.w, cleanConsole(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// cleanConsole cambia cada carácter de control (C0 salvo \n, \r y \t, DEL y
+// C1, que algunos terminales leen como ESC [) por su forma escapada visible:
+// ESC sale como \x1b y no empieza ninguna secuencia. Los bytes que no son UTF-8
+// válido salen también escapados.
+func cleanConsole(s string) string {
+	clean := true
+	for _, r := range s {
+		if r == utf8.RuneError || controlRune(r) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n <= 1:
+			fmt.Fprintf(&b, "\\x%02x", s[i])
+		case controlRune(r):
+			if r < 0x80 {
+				fmt.Fprintf(&b, "\\x%02x", r)
+			} else {
+				fmt.Fprintf(&b, "\\u%04x", r)
+			}
+		default:
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
+}
+
+func controlRune(r rune) bool {
+	switch r {
+	case '\n', '\r', '\t':
+		return false
+	}
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 func splitLines(s string) []string {

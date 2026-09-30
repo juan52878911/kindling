@@ -218,7 +218,7 @@ func pickBase(ctx context.Context, c *api.Client, family string) string {
 }
 
 func addOne(ctx context.Context, rc *registry.Client, host, want string, o addOpts) error {
-	srv, candidates, err := rc.Get(ctx, want, 30)
+	srv, candidates, err := rc.Get(ctx, want, 100)
 	if err != nil {
 		if len(candidates) > 0 {
 			fmt.Printf("%v:\n", err)

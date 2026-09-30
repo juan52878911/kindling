@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"encoding/json"
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
@@ -16,7 +17,8 @@ func TestLaLineaDeSaludNoFingeSaludSinDatos(t *testing.T) {
 	snap := func(name, health string) *api.Snapshot {
 		s := &api.Snapshot{Name: name}
 		if health != "" {
-			b, _ := json.Marshal(mcp.Health{Status: health})
+			ahora := time.Now()
+			b, _ := json.Marshal(mcp.Health{Status: health, At: &ahora})
 			s.Annotations = map[string]json.RawMessage{mcp.HealthKey: b}
 		}
 		return s

@@ -91,6 +91,103 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling-phoned`: `POST /v1/verify-cache` (el `--verify-cache` de `android-sh` sin
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
+- `kling sbx renew <id> -ttl 30m` funciona en el orden que enseña su ayuda (antes daba
+  el error de uso), y `-ttl` por debajo de 1 s es un error en `sbx new` y `sbx renew`
+  (`-ttl 500ms` se truncaba a 0 y se omitía sin avisar).
+- `kling memory install-service`: el comando va como lista (tras `--`, argumento a
+  argumento, o con `-cmd` respetando comillas) y el plist del LaunchAgent escapa cada
+  valor; antes `strings.Fields` partía los argumentos con espacios y un `&` o un `<`
+  dejaba un plist que launchd no leía.
+- `kling mcp health` sale con error si un servicio no responde aunque no se pueda
+  grabar su salud (antes el fallo al grabar saltaba la cuenta y salía con 0), y dice
+  siempre el fallo de la sonda.
+- `kling mcp heal` ya no dice "all healthy" con un servicio caído cuando no puede
+  grabar su salud: lo cuenta como roto, intenta curarlo y, si no pudo grabar, sale con
+  1 (la unidad falla; el 3 sigue siendo "sondeé y grabé, algo sigue roto").
+- El gateway MCP reintenta anotar la salud de un servicio si la escritura falló (antes
+  la daba por hecha y, con el daemon ya bien, los fallos siguientes no se anotaban), y
+  la línea de salud de `kling status` ya no pinta ✓ con un veredicto de más de 12 h
+  (el doble del intervalo de `kling-heal.timer`) o sin fecha: cuenta como desconocido.
+- `tools/list` sigue `nextCursor` en el catálogo del gateway y en `kling mcp import`
+  (antes, de un servidor que pagina solo se veía la primera página), con tope de 64
+  páginas y 4096 herramientas; un cursor repetido es un error.
+- `mcp/links` ya no pierde enlaces con altas o bajas simultáneas en el mismo proceso
+  (ocho `SetLink` a la vez dejaban dos): el leer-modificar-escribir va con cerrojo. El
+  store no tiene escritura condicional, así que dos procesos a la vez aún pueden
+  pisarse.
+
+### Seguridad
+
+- **`kling db clone` ya no copia credenciales sin enmascarar.** La heurística de
+  columnas sospechosas solo miraba datos personales: `password_hash`,
+  `encrypted_password`, `api_key`, `access_token`, `client_secret`, `totp_seed`,
+  `private_key`, `jwt`, `salt`… pasaban tal cual al dorado. Ahora son sospechosas
+  (motivo `credential`) y, sin regla, la construcción se para salvo `-allow-unmasked`.
+- **`kling db clone` reconoce datos personales en español, portugués y francés y por
+  su tipo.** `correo`, `telefono`, `nombre`, `domicilio`… salían tal cual; también
+  `login`, `handle`, `owner`, `notes` en columnas de texto y, se llamaran como se
+  llamaran, `jsonb`, `hstore`, `tsvector` (sus lexemas no se regeneran con los
+  disparadores apagados), `point` y los arrays de texto. **Cambio de comportamiento:**
+  un clon que antes pasaba puede pararse ahora; se resuelve con una regla por columna
+  (`keep` si no es personal) o con `-allow-unmasked`.
+- **`kindling-sandbox` no reparte máquinas ni grafos de otro inquilino del daemon.**
+  Reconocía las precalentadas, los sandboxes de un cliente, los grafos del fondo y el
+  snapshot de una plantilla solo por etiquetas y nombres que cualquier inquilino puede
+  poner: un inquilino A creaba un sandbox con `kind=sandbox,template=py`, el frontal se
+  lo daba al cliente B y A conservaba exec y ficheros. Ahora exige `kling.owner` vacío
+  en todos esos caminos ([authz.md](docs/authz.md#el-dueño-klingowner)).
+- **El filtro de secretos del gateway de IA, reescrito por forma.** Dejaba pasar
+  `Authorization: Basic <b64>`, contraseñas en URLs (`postgres://u:pw@host`),
+  `PGPASSWORD=`, `MYSQL_PWD=`, `access_token=`, `client_secret=`, `"password": "…"` y
+  prefijos como `sk_live_`, `whsec_`, `glpat-`, `hf_` o `AIza`; y borraba prosa ("token
+  expired", "reset your password please"), SHA de commit, sha256 y UUID. Ahora tapa la
+  credencial de un esquema de autorización, el userinfo de una URL, los pares cuya
+  clave termina en password/secret/token/key y los prefijos de proveedores con longitud
+  mínima, y deja la prosa y los hashes ([mejora-continua.md](docs/mejora-continua.md)).
+- **`kling logs` no pasa en crudo la consola del invitado a un terminal.** Una
+  secuencia OSC o CSI del invitado podía escribir en el portapapeles (OSC 52), cambiar
+  el título o falsear líneas ya escritas. Con la salida en un terminal, los caracteres
+  de control (salvo `\n`, `\r` y `\t`) salen escapados (`\x1b`); `-raw` los deja como
+  están, y a un fichero o una tubería salen tal cual.
+- **El token del gateway MCP no pasa por stdout ni por argv.** El gateway que lo genera
+  ya no lo imprime entero (bajo systemd acababa en el journal): lo guarda en la
+  configuración 0600 y enseña un prefijo. `kling config set <clave> -` lee el valor de
+  stdin y `kling config get <clave> -reveal` lo da entero para una tubería (`ssh gw
+  kling config get gateway.token -reveal | kling config set gateway.token -`).
+  `kling connect` con token ya no llama a `claude mcp add --header` ni a `code
+  --add-mcp` (el token en su argv): parchea el fichero del cliente o enseña el
+  fragmento, y el de Zed pasa el token por el entorno de `mcp-remote`.
+- **`kling exec` y `kling shell`: `-e KEY` y `-env-file`.** Solo aceptaban `-e
+  KEY=valor`, que deja el secreto en el argv de `kling` (`ps`, historial). `-e KEY`
+  toma el valor del entorno del CLI y `-env-file F` de un fichero `KEY=valor`
+  ([exec-sandbox.md](docs/exec-sandbox.md#kling-exec)).
+- **`kling db ask` con opencode pasa el prompt por stdin.** Esquema y pregunta iban en
+  el argv de `opencode run` (visibles con `ps` para cualquier usuario del equipo) hasta
+  100 KiB; ahora van siempre por stdin, también los grandes (sin fichero adjunto).
+- **`kling mcp image -bundle` ya no ejecuta esbuild sin fijar ni deja inyectar
+  órdenes como root en el host.** `80-mcp-image.sh` corría `npx --yes esbuild` en el
+  chroot del host (versión cualquiera y con sus scripts de instalación activos, justo
+  lo que el `--ignore-scripts` del resto prohíbe) y metía la ruta del entry entre
+  comillas simples en un `sh -c`: una ruta con `'` ejecutaba lo que llevara. Ahora baja
+  solo el binario nativo de `@esbuild/linux-<arch>` 0.25.10, comprueba su sha512
+  contra el fijado en el script (`ESBUILD_TGZ` para un tarball local), lo ejecuta sin
+  shell con la ruta como argumento, y la ruta tiene que ser absoluta y de caracteres
+  de ruta (también en `ValidateBuild`).
+- **Las unidades de systemd de `mcp` y `sandbox` ya no llevan `User=juan`.** Las
+  publicadas (`kindling-*-host.tar.gz`) y las de `make deploy` corrían con un usuario
+  personal grabado, que en otro host podía no existir o ser otra persona. Ahora llevan
+  `User=@KLING_USER@`/`Group=@KLING_GROUP@`, que `make deploy` rellena con el
+  `KLING_SOCKET_USER` de `/etc/default/kling` (o el usuario de la conexión SSH), y sin
+  rellenar no arrancan ([releases.md](docs/releases.md)). El `make deploy` también
+  sugiere pasar el token por una tubería (`... | kling config set gateway.token -`).
+- **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
+  las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
+  entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
+  pasado `8 MiB` (el tope del proxy por servicio) la llamada falla, sin truncar.
+- **`kling add <nombre>` ya no puede instalar el servidor de otro autor por mirar solo
+  la primera página del registro.** Con un nombre corto (`github`, 630 resultados) daba
+  por inequívoco el único `*/github` de la página 1 aunque hubiera más en las
+  siguientes. Ahora recorre todas (hasta 50) y, con varios, pide el nombre completo.
 
 ### Seguridad
 
