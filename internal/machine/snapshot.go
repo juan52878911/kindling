@@ -168,12 +168,10 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// Una plantilla jailed corre chrooteada: no ve snapDir. El overlay dorado y
 	// el volcado se escriben en el jail (en su path absoluto) y se recuperan al
 	// host después. goldDst es dónde se copia el overlay para que firecracker lo
-	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot.
+	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot
+	// (se fija al crear ese directorio, más abajo).
 	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	goldDst := goldOverlay
-	if jailed {
-		goldDst = m.jailPath(mc.ID, goldOverlay)
-	}
 
 	c := fc.New(sock)
 	// El volcado escribe la memoria entera: con varios GiB no cabe en los 30 s
@@ -264,8 +262,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			m.invalidateSnapCache(name)
 			if jailed {
 				// Las réplicas en el chroot de la plantilla: el volcado y el
-				// overlay dorado que no llegaron a recuperarse.
-				os.RemoveAll(m.jailPath(mc.ID, dir))
+				// overlay dorado que no llegaron a recuperarse. Sin seguir
+				// enlaces: el chroot es del VMM (ver enjaulado.go).
+				if err := borrarEnJail(m.jailRoot(mc.ID), dir); err != nil {
+					log.Printf("commit %s: cleaning up the jail: %v", mc.Name, err)
+				}
 			}
 		}
 	}()
@@ -281,12 +282,23 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		return nil, err
 	}
 	if jailed {
-		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
+		// La réplica del directorio dentro del chroot se crea y se cede por
+		// descriptor, sin seguir enlaces: la raíz del chroot es del VMM, que
+		// pudo cambiar cualquier componente de esa ruta por un enlace al host,
+		// y un MkdirAll y un Chown por ruta, como root, lo seguirían. El overlay
+		// dorado se crea después dentro de ESTE directorio (rutaEnDir), no en
+		// lo que la ruta resuelva entonces.
+		dj, err := abrirDirSinEnlaces(m.jailRoot(mc.ID), dir, true)
+		if err != nil {
 			return nil, err
 		}
+		defer dj.Close()
 		if m.priv.Enabled {
-			_ = os.Chown(filepath.Dir(goldDst), m.priv.UID, m.priv.GID)
+			if err := dj.Chown(m.priv.UID, m.priv.GID); err != nil {
+				return nil, fmt.Errorf("granting the snapshot directory in the jail: %w", err)
+			}
 		}
+		goldDst = rutaEnDir(dj, "overlay.ext4")
 	}
 
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
@@ -350,11 +362,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	t.marca("dump")
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
-		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
-		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
-			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
-			}
+		// los replica de vuelta en el próximo jail). Rename, mismo filesystem,
+		// sin seguir enlaces y solo si es el fichero que escribió el VMM (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), dir, dir, m.uidJail(), "snap.file", "mem.file", "overlay.ext4"); err != nil {
+			return nil, err
 		}
 		// El overlay dorado estuvo en un directorio del VMM: lo que se recupera
 		// tiene que ser el fichero que copió el daemon, no un enlace ni otro
