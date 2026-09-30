@@ -183,17 +183,17 @@ func Discover(ctx context.Context, o Options) *Registry {
 		path = SearchPath()
 	}
 	for _, dir := range path {
-		entries, err := os.ReadDir(dir)
+		names, err := klingNames(dir)
 		if err != nil {
 			continue
 		}
-		companions := companionsIn(dir)
-		for _, e := range entries {
-			name, ok := strings.CutPrefix(e.Name(), "kling-")
-			if !ok || notPlugins[e.Name()] || companions[e.Name()] || strings.ContainsAny(name, ".") || seen[name] {
+		companions := companionsFrom(dir, names)
+		for _, base := range names {
+			name, _ := strings.CutPrefix(base, "kling-")
+			if notPlugins[base] || companions[base] || strings.ContainsAny(name, ".") || seen[name] {
 				continue
 			}
-			full := filepath.Join(dir, e.Name())
+			full := filepath.Join(dir, base)
 			if !isExecutable(full) {
 				continue
 			}
@@ -315,16 +315,47 @@ func (r *Registry) DisabledFor(cmd string) *Plugin {
 // declararon como compañeros (leídos de sus kling-<n>.json): no son
 // extensiones y no se les pide manifiesto.
 func companionsIn(dir string) map[string]bool {
+	names, _ := klingNames(dir)
+	return companionsFrom(dir, names)
+}
+
+// companionsFrom es companionsIn con el directorio ya leído (names, de
+// klingNames): Discover recorre todo el PATH y leerlo dos veces se nota.
+func companionsFrom(dir string, names []string) map[string]bool {
 	out := map[string]bool{}
-	matches, _ := filepath.Glob(filepath.Join(dir, "kling-*.json"))
-	for _, m := range matches {
-		if s, err := readSidecar(m); err == nil {
+	for _, n := range names {
+		if !strings.HasSuffix(n, ".json") {
+			continue
+		}
+		if s, err := readSidecar(filepath.Join(dir, n)); err == nil {
 			for _, c := range s.Companions {
 				out[c] = true
 			}
 		}
 	}
 	return out
+}
+
+// klingNames son, ordenados, los nombres kling-* de dir. Solo ordena esos: un
+// /usr/bin tiene miles de entradas y ninguna interesa.
+func klingNames(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	all, err := f.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, n := range all {
+		if strings.HasPrefix(n, "kling-") {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // CompanionsIn son, ordenados, los compañeros que declaran las extensiones
