@@ -1359,7 +1359,10 @@ SQL
   { [ "$rc" != 0 ] && contiene "$out" "would block" && contiene "$out" ": FAILED"; } && ok "rehearse: la migración que se bloquea falla por lock_timeout (would block)" || bad "rehearse bloqueo" "FAILED con would block, salida != 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
   rm -rf "$RHDIR" "$RHBLK"
 
-  # golden -template crm-demo: se construye y se consulta.
+  # golden -template crm-demo: se construye y se consulta. kling db no busca
+  # db-golden.sh en el directorio actual (a propósito); fuera de una
+  # instalación con el script al lado del plugin, se le da el de este checkout.
+  export KLING_DB_GOLDEN_SCRIPT="${KLING_DB_GOLDEN_SCRIPT:-$(cd "$(dirname "$0")" && pwd)/db-golden.sh}"
   GTN="e2e-crm-$$"
   out=$(dbk golden build -template crm-demo "$GTN"); rc=$?
   if [ "$rc" != 0 ]; then
