@@ -57,7 +57,7 @@ type DebianSpec struct {
 	// Lock fija los .deb exactos (el built.lock de una construcción
 	// anterior): no se resuelve nada.
 	Lock []imagen.DebPin `json:"lock,omitempty"`
-	// Env son variables KEY=VALUE que exporta el /entrypoint.
+	// Env son variables KEY=VALUE que el /entrypoint carga de /etc/kling/env (0600).
 	Env []string `json:"env,omitempty"`
 	// Service es un ejecutable de la imagen que el /entrypoint arranca (y
 	// relanza) antes de ceder el PID 1 al agente. Vacío: solo el agente.
@@ -250,6 +250,12 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 			base.Image, lock.Snapshot, strings.Join(added, " "), t.Format("2006-01-02T15:04:05Z")), 0o644},
 	} {
 		if err := imagen.Put(upper, f.p, []byte(f.data), f.mode, t); err != nil {
+			return err
+		}
+	}
+	if env := imagen.EnvFile(spec.Env); env != "" {
+		// 0600 de root: el entrypoint es 0755 y lo leería cualquier proceso.
+		if err := imagen.Put(upper, imagen.EnvPath, []byte(env), 0o600, t); err != nil {
 			return err
 		}
 	}

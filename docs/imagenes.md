@@ -46,7 +46,7 @@ El spec:
 |---|---|
 | `packages` | paquetes de trixie (hasta 64), con sus dependencias y sin Recommends |
 | `lock` | los `.deb` exactos (`name`, `version`, `url`, `sha256`, `size`): el `built.lock` de una construcción anterior. Con él no se baja ningún índice. Las URL solo pueden ser de `deb.debian.org`, `security.debian.org` o `snapshot.debian.org`: el constructor corre como root en el host del daemon |
-| `env`, `service` | como en `81-base-image.sh`: variables que exporta el `/entrypoint` y un ejecutable que arranca (y relanza) antes de ceder el PID 1 al agente. Sin `service`, solo el agente |
+| `env`, `service` | como en `81-base-image.sh`: variables que el `/entrypoint` carga de `/etc/kling/env` (0600 de root, no legible por el resto del invitado) y un ejecutable que arranca (y relanza) antes de ceder el PID 1 al agente. Sin `service`, solo el agente |
 | `verity`, `fec_roots` | la capa detrás de dm-verity, con 2 raíces de FEC por defecto (0 = sin FEC) |
 | `arch`, `base_name` | `amd64` o `arm64` (por defecto la del host; para otra, `KLING_GUEST_AGENT_<arch>`) y el nombre de la base (`<nombre>-base`) |
 

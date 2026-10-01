@@ -197,8 +197,11 @@ func TestBuildDebian(t *testing.T) {
 	if cat(up, "/var/lib/dpkg/info/libhello1:amd64.list") == "" {
 		t.Fatal("dpkg list")
 	}
-	if e := cat(up, "/entrypoint"); !strings.Contains(e, "export GREETING='hi'") || !strings.Contains(e, "'/usr/bin/hello'") {
+	if e := cat(up, "/entrypoint"); strings.Contains(e, "GREETING") || !strings.Contains(e, ". /etc/kling/env\n") || !strings.Contains(e, "'/usr/bin/hello'") {
 		t.Fatalf("entrypoint:\n%s", e)
+	}
+	if n := up.Lookup("/etc/kling/env"); n == nil || n.Mode&0o777 != 0o600 || n.UID != 0 || cat(up, "/etc/kling/env") != "export GREETING='hi'\n" {
+		t.Fatalf("env file: %+v %q", n, cat(up, "/etc/kling/env"))
 	}
 	if up.Lookup("/usr/local/bin/kling-guest") == nil {
 		t.Fatal("agent")
