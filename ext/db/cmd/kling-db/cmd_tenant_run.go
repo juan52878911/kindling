@@ -572,6 +572,11 @@ func sinLiterales(expr string) string {
 		if reNombreAjuste.MatchString(lit) {
 			return lit
 		}
+		// Uno vacío o de un carácter es estructura, no un dato que proteger,
+		// y a veces es lo que importa: el "= ''" de una política fail-open.
+		if n := len([]rune(strings.ReplaceAll(lit[1:len(lit)-1], "''", "'"))); n <= 1 {
+			return lit
+		}
 		return "'…'"
 	})
 }

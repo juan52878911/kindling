@@ -293,3 +293,97 @@ func TestDiffRechazos(t *testing.T) {
 		t.Errorf("state: %v", err)
 	}
 }
+
+// Funciones, triggers, grants, extensiones e hypertables entran en el diff;
+// de funciones y vistas no se enseña el cuerpo. La política fail-open enseña
+// su "= ”".
+func TestDiffObjetos(t *testing.T) {
+	ta, k, a, b := newDiffApp(t)
+	pol := func(lit string) dbDef {
+		return dbDef{Name: "aislamiento", Def: "ALL PERMISSIVE TO public USING ((current_setting('app.tenant_id', true) = " + lit + ") OR (tenant_id = 'acme')) WITH CHECK ()"}
+	}
+	t1, t2 := tbl("prospects", []string{"id"}, 1), tbl("prospects", []string{"id"}, 1)
+	t1.Policies, t2.Policies = []dbDef{pol("'x-y'")}, []dbDef{pol("''")}
+	k.schema[a] = dbSchema{Tables: []*dbTable{t1}, Objects: map[string][]dbDef{
+		"extension":     {{Name: "timescaledb", Def: "2.25.2"}},
+		"function":      {{Name: "public.f(integer)", Def: "aaa"}, {Name: "public.g()", Def: "bbb"}},
+		"trigger":       {{Name: "public.prospects.outbox", Def: "CREATE TRIGGER outbox AFTER INSERT ON public.prospects FOR EACH ROW EXECUTE FUNCTION f()"}},
+		"grant":         {{Name: "table public.prospects", Def: "{crm_user=arwdDxt/crm_user}"}},
+		"hypertable":    {{Name: "public.events", Def: "dimensions 1, compression off"}},
+		"timescale-job": {},
+	}}
+	k.schema[b] = dbSchema{Tables: []*dbTable{t2}, Objects: map[string][]dbDef{
+		"extension":     {{Name: "timescaledb", Def: "2.30.2"}, {Name: "vector", Def: "0.8.0"}},
+		"function":      {{Name: "public.f(integer)", Def: "ccc"}},
+		"trigger":       {{Name: "public.prospects.outbox", Def: "CREATE TRIGGER outbox AFTER INSERT OR UPDATE ON public.prospects FOR EACH ROW EXECUTE FUNCTION f()"}},
+		"grant":         {{Name: "table public.prospects", Def: "{crm_user=arwdDxt/crm_user,app_user=arwd/crm_user}"}},
+		"hypertable":    {{Name: "public.events", Def: "dimensions 1, compression on"}},
+		"timescale-job": {{Name: "policy_compression on public.events", Def: "every 12:00:00 {...}"}},
+	}}
+	k.rows[a] = map[string]fakeRows{"public.prospects": {"1": "a"}}
+	k.rows[b] = map[string]fakeRows{"public.prospects": {"1": "a"}}
+	rep, err := ta.app.diff(context.Background(), "before", "after", "local", diffOpts{maxRows: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	if err := writeDiffReport(&buf, rep, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	t.Log("\n" + out)
+	for _, want := range []string{
+		"~ extension timescaledb: 2.25.2 -> 2.30.2", "+ extension vector",
+		"~ function public.f(integer): definition changed", "- function public.g()",
+		"~ trigger public.prospects.outbox", "~ grant table public.prospects", "app_user=arwd",
+		"~ hypertable public.events", "+ timescale-job policy_compression on public.events",
+		"= '')", // el fail-open, visible
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("falta %q", want)
+		}
+	}
+	for _, no := range []string{"aaa", "ccc", "acme", "x-y"} {
+		if strings.Contains(out, no) {
+			t.Errorf("sobra %q (cuerpo o literal)", no)
+		}
+	}
+	if rep.Same {
+		t.Error("Same con objetos distintos")
+	}
+}
+
+// Entre goldens independientes las claves aleatorias hacen ruido: se avisa,
+// se marca la tabla sin claves en común y -ignore-rows la deja en recuentos.
+func TestDiffRuidoEntreGoldens(t *testing.T) {
+	ta, k, a, b := newDiffApp(t)
+	ta.f.find(b).Labels[labelGolden] = "pg-dev"
+	k.schema[a] = dbSchema{Tables: []*dbTable{tbl("plans", []string{"id"}, 2), tbl("users", []string{"id"}, 1)}}
+	k.schema[b] = dbSchema{Tables: []*dbTable{tbl("plans", []string{"id"}, 2), tbl("users", []string{"id"}, 1)}}
+	k.rows[a] = map[string]fakeRows{"public.plans": {"u1": "free", "u2": "pro"}, "public.users": {"1": "x"}}
+	k.rows[b] = map[string]fakeRows{"public.plans": {"u3": "free", "u4": "pro"}, "public.users": {"1": "x"}}
+	rep, err := ta.app.diff(context.Background(), "before", "after", "local", diffOpts{maxRows: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "different goldens") {
+		t.Errorf("avisos: %v", rep.Warnings)
+	}
+	for _, r := range rep.Rows {
+		if r.Table == "public.plans" && !strings.Contains(r.Note, "no key in common") {
+			t.Errorf("plans sin nota: %+v", r)
+		}
+	}
+	rep, err = ta.app.diff(context.Background(), "before", "after", "local", diffOpts{maxRows: 100, ignoreRows: []string{"plans"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rep.Rows {
+		if r.Table == "public.plans" && (r.Status != "counts-only" || r.New != 0) {
+			t.Errorf("-ignore-rows plans: %+v", r)
+		}
+	}
+	if !rep.Same {
+		t.Errorf("con plans ignorada y el resto igual, Same debería ser true: %+v", rep)
+	}
+}
