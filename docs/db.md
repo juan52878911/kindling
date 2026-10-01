@@ -195,6 +195,19 @@ En CI, después de `kling db up` y las migraciones:
 kling db tenant-check "$COPY" -json > tenant-check.json   # salida 1 si hay fugas
 ```
 
+## Muchas copias a la vez: la admisión
+
+El daemon reserva la memoria de cada microVM **antes** de pasar por la puerta de
+arranque (`KLING_MAX_PARALLEL_BOOT`), para cerrar la carrera entre leer la memoria libre
+y ocuparla. Con 64 `kling db up` a la vez, las 64 reservas se sumaban mientras esperaban
+turno y la admisión rechazaba a las últimas ("doesn't fit: the microVM asks for N MiB")
+con el host casi vacío: 58 de 64 en la nota 18, con ~14 MiB de uso real por copia.
+`fork -n 64` no lo veía porque restaura de una en una. Ahora, si lo que no cabe son solo
+las reservas **en vuelo**, el arranque espera a que se liberen (hasta 60 s) en vez de
+rechazar; la falta de memoria de verdad se sigue rechazando al momento. Medido en el
+laboratorio con el golden de AuraCRM: **64 de 64 en 4,6 s** (antes, 58 de 64 en 7,2 s), y
+la memoria disponible del host bajó 893 MiB (~14 MiB por copia).
+
 ## Diff entre copias (diff)
 
 `kling db diff <copia1> <copia2>` dice qué cambió de la primera a la segunda: "esta

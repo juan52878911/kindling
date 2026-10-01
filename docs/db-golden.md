@@ -204,6 +204,25 @@ seeds, reparto en esquemas, RLS y demo-seed) el golden sale en **un comando y 28
 el laboratorio; antes eran ~200 s y una docena de pasos a mano. El alembic de los 10
 servicios, 11,6 s. Ver la nota de diagnóstico enlazada en `docs/db.md`.
 
+**Por qué el alembic de la nota 18 tardaba 32 s (y Docker 8,5 s).** Medido en el
+laboratorio con el de `main` de AuraCRM sobre una copia de `aura-dev` (`rehearse -step`):
+
+| Agente | alembic de los 10 servicios |
+|---|---|
+| 2 vCPU, `cpu_pct` 50 (el techo por defecto en Linux: media vCPU) | 18,6 s |
+| 2 vCPU, `cpu_pct` 100 | 9,6 s |
+
+- Es la **CPU**: importar sqlalchemy, alembic, asyncpg, psycopg2, fastapi y pydantic
+  cuesta 0,7–1,2 s con `cpu_pct` 100 y 1,5–2,2 s con 50, y cada servicio arranca un
+  Python nuevo (dos, si el primer driver falla). La plantilla del agente de la nota 18 se
+  hizo con el techo por defecto.
+- **No es la red**: por el proxy de credenciales, una conexión con `select 1` cuesta
+  15,6 ms y 200 consultas en una sesión, 107 ms (0,54 ms cada una frente a 0,35 ms
+  directas desde el host). Las 390 sentencias del alembic suman ~75 ms de proxy.
+- Por eso el agente de `-step` arranca con **toda su CPU** (`cpu_pct` = 100 × vCPUs):
+  con una plantilla de techo 50, 9,6 s en vez de 18,6 s. Lo que queda frente a Docker
+  (8,5 s) es el arranque en frío de cada Python en una microVM.
+
 `kling exec` y `kling shell` llevan además en su entorno los **marcadores** de las
 credenciales de la máquina (los de `kling db attach`, por ejemplo `PGPASSWORD`): antes solo
 los veía el servidor de la imagen (por MMDS) y un comando lanzado con `exec` tenía que

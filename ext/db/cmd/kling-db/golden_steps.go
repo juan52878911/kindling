@@ -359,8 +359,15 @@ func (a *app) startAgent(ctx context.Context, o stepOpts, cp *api.Machine, say f
 	name := o.name + "-agent"
 	_, _ = a.k.Run(ctx, nil, "rm", "-f", name)
 	// allowlist: el proxy de credenciales lo exige; sin -allow no sale a
-	// ningún sitio más que a la copia.
-	if _, err := a.k.Run(ctx, nil, "run", "-from", o.agent, "-name", name, "-egress", "allowlist", "-allow-exec"); err != nil {
+	// ningún sitio más que a la copia. Y con toda su CPU: el techo por
+	// defecto es media vCPU (defaultCPUPct en Linux), y con él el alembic de
+	// AuraCRM tardaba el doble (18,6 s frente a 9,6 s medidos; los 32 s de la
+	// nota 18 eran eso). Es una máquina de construcción, de vida corta.
+	pct := "100"
+	if snap, err := a.template(ctx, o.agent); err == nil && snap.VCPUs > 1 {
+		pct = strconv.Itoa(100 * snap.VCPUs)
+	}
+	if _, err := a.k.Run(ctx, nil, "run", "-from", o.agent, "-name", name, "-egress", "allowlist", "-allow-exec", "-cpu-pct", pct); err != nil {
 		return nil, fmt.Errorf("starting the agent from %s: %w", o.agent, err)
 	}
 	ag, err := a.inspect(ctx, name)
