@@ -113,9 +113,34 @@ KLING="kling -H ssh://lab" scripts/db-golden.sh build -seed-mb 20 prueba
 
 `-migrations` aplica los `*.sql` del directorio en orden alfabético y `-seed` un SQL de
 datos después; `-seed-mb N` los sustituye por una tabla `seed_events` de ~N MiB.
-Corren como el rol de la aplicación (así los objetos son suyos); `-as-super` los corre
-como superusuario, para migraciones con `CREATE EXTENSION` de extensiones que no son
-"trusted".
+Corren como el rol de la aplicación (así los objetos son suyos). Para las extensiones
+que solo crea un superusuario (TimescaleDB, PostGIS, pgvector...) está `-extension`:
+
+```sh
+kling db golden build -from pg16-ext \
+  -extension timescaledb,vector,uuid-ossp,pgcrypto -preload timescaledb \
+  -conf work_mem=16MB -migrations infrastructure/postgres/init -role crm_user -database crm_db aura
+```
+
+- `-extension A,B` hace `CREATE EXTENSION IF NOT EXISTS ... CASCADE` **como superusuario
+  y antes de las migraciones**, que siguen corriendo como el rol de la aplicación: el
+  `CREATE EXTENSION IF NOT EXISTS` de las migraciones pasa a no hacer nada, los objetos
+  siguen siendo del rol y el rol **no** es superusuario.
+- `-preload A,B` va a `shared_preload_libraries`, sumado a lo que ya traiga la plantilla
+  (`pg16-ext` precarga `timescaledb`). Cada librería se comprueba antes de arrancar.
+- `-conf CLAVE=VALOR` (repetible) añade una línea a `postgresql.conf`. Las que sostienen
+  la seguridad y la auditoría del golden (`listen_addresses`, `password_encryption`,
+  `ssl*`, `log_*`, ficheros de configuración...) se rechazan.
+- **Antes de ejecutar nada** se comprueban todas las extensiones: las de `-extension` y
+  las que crean las migraciones (`CREATE EXTENSION` fuera de comentarios). Si faltan, el
+  error las lista **todas**, con el fichero y la línea que las pide, y dice cómo tener
+  una plantilla que las traiga. Si una migración crea una que solo puede crear un
+  superusuario y no está en `-extension`, también se dice antes de empezar.
+- Si una migración falla, el error de psql sale con **el fichero y la línea de verdad**
+  (no la copia numerada dentro de la microVM).
+
+`-as-super` sigue existiendo (todo como superusuario, objetos del superusuario), para
+migraciones que de verdad lo necesitan.
 
 Qué hace, en orden:
 
