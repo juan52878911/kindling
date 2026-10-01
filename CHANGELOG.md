@@ -53,6 +53,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway token stays out of stdout and argv; `kling logs` escapes control codes (#135)
 - Unique machine names; the daemon no longer follows symlinks in jails or sockets (#129, #134)
 - Downloads of Firecracker, Alpine, Node, Chrome and esbuild are pinned by sha256 (#134, #135, #139)
+- `kling add -env` values stay out of the host process list while building (#159)
 - Internal: scheduler races, silent state losses and `make deploy` without fixed `/tmp` paths (#130, #132, #139)
 
 ## [0.17.0] - 2026-09-29

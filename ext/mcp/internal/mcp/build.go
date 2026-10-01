@@ -126,6 +126,8 @@ func ValidateBuild(r BuildRequest) error {
 }
 
 // BuildScriptArgs traduce la petición a los argumentos de 80-mcp-image.sh.
+// Las variables de entorno NO van aquí: el argv de un proceso root lo ve
+// cualquiera con ps. Viajan en el fichero de EnvFile (ENV_FILE del script).
 func BuildScriptArgs(req BuildRequest) []string {
 	args := []string{"stdio", req.Name}
 	if len(req.Packages) > 0 {
@@ -137,12 +139,19 @@ func BuildScriptArgs(req BuildRequest) []string {
 	if len(req.PIP) > 0 {
 		args = append(args, "-P", strings.Join(req.PIP, " "))
 	}
-	for _, e := range req.Env {
-		args = append(args, "-e", e)
-	}
 	if req.Bundle {
 		args = append(args, "-bundle")
 	}
 	args = append(args, "--")
 	return append(args, req.Cmd...)
+}
+
+// EnvFile es el contenido de ENV_FILE para 80-mcp-image.sh: una línea KEY=valor
+// por variable. Nil si no hay ninguna. ValidateBuild ya garantiza que ningún
+// valor lleva saltos de línea, así que una línea es una variable.
+func EnvFile(req BuildRequest) []byte {
+	if len(req.Env) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(req.Env, "\n") + "\n")
 }

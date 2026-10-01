@@ -44,6 +44,14 @@ func cmdBuilder(args []string) error {
 	cmd := exec.Command("bash", append([]string{script}, mcp.BuildScriptArgs(r)...)...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Env = os.Environ()
+	if env := mcp.EnvFile(r); env != nil {
+		f, err := writeEnvFile(args[1], env)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(f)
+		cmd.Env = append(cmd.Env, "ENV_FILE="+f)
+	}
 	if r.Base != "" {
 		cmd.Env = append(cmd.Env, "BASE_IMAGE="+r.Base)
 	}
@@ -54,6 +62,29 @@ func cmdBuilder(args []string) error {
 		cmd.Env = append(cmd.Env, "BRIDGE="+b)
 	}
 	return cmd.Run()
+}
+
+// writeEnvFile deja las variables de `kling add -env` en un fichero 0600 del
+// directorio de trabajo, para que no viajen en el argv del script (ps las
+// enseñaría a cualquier usuario del host). Quien llama lo borra al acabar.
+func writeEnvFile(dir string, env []byte) (string, error) {
+	// CreateTemp ya crea con 0600; el Chmod lo deja explícito.
+	f, err := os.CreateTemp(dir, "env-*")
+	if err != nil {
+		return "", err
+	}
+	err = f.Chmod(0o600)
+	if err == nil {
+		_, err = f.Write(env)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("env file: %w", err)
+	}
+	return f.Name(), nil
 }
 
 // imageScript localiza 80-mcp-image.sh: donde lo deja `make deploy`, o donde

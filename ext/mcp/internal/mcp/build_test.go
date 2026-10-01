@@ -42,17 +42,18 @@ func TestBuildScriptArgs(t *testing.T) {
 	}
 }
 
-// El caso Python del traductor: -P y -e también tienen que caer ANTES de `--`,
-// y -e una vez POR variable — un valor puede llevar espacios, y unirlos con
-// espacios como -p/-n/-P los partiría al llegar al array EXTRA_ENV del script.
+// El caso Python del traductor: -P tiene que caer ANTES de `--`. Las variables
+// de entorno NO van en el argv (ps las enseña a cualquiera del host): viajan en
+// EnvFile, una por línea y con el valor intacto (espacios incluidos).
 func TestBuildScriptArgsPython(t *testing.T) {
-	got := BuildScriptArgs(BuildRequest{
+	req := BuildRequest{
 		Name:     "semgrep",
 		Packages: []string{"python3", "py3-pip"},
 		PIP:      []string{"semgrep-mcp==1.0.0"},
 		Env:      []string{"SEMGREP_SEND_METRICS=off", "A=b c"},
 		Cmd:      []string{"semgrep-mcp"},
-	})
+	}
+	got := BuildScriptArgs(req)
 	sep := indexOf(got, "--")
 	if sep == -1 {
 		t.Fatalf("falta el separador --: %v", got)
@@ -64,15 +65,16 @@ func TestBuildScriptArgsPython(t *testing.T) {
 	if pi != -1 && got[pi+1] != "semgrep-mcp==1.0.0" {
 		t.Errorf("-P debe llevar el paquete pip: %v", got)
 	}
-	// Cada variable con su propio -e, valor intacto (espacios incluidos).
-	var envs []string
-	for i, a := range got[:sep] {
-		if a == "-e" {
-			envs = append(envs, got[i+1])
+	for _, a := range got {
+		if a == "-e" || strings.Contains(a, "SEMGREP_SEND_METRICS") || strings.Contains(a, "b c") {
+			t.Errorf("una variable de entorno se coló en el argv: %v", got)
 		}
 	}
-	if len(envs) != 2 || envs[0] != "SEMGREP_SEND_METRICS=off" || envs[1] != "A=b c" {
-		t.Errorf("-e no conserva las variables una a una: %v", envs)
+	if f := string(EnvFile(req)); f != "SEMGREP_SEND_METRICS=off\nA=b c\n" {
+		t.Errorf("EnvFile = %q", f)
+	}
+	if EnvFile(BuildRequest{}) != nil {
+		t.Error("sin variables, EnvFile debe ser nil (no se pasa ENV_FILE)")
 	}
 }
 
@@ -95,6 +97,10 @@ func TestBuildScriptEntiendeLosFlags(t *testing.T) {
 	// `echo "export $kv"` ejecutaría la mitad de un valor con espacios.
 	if !strings.Contains(s, `printf 'export %s=%q\n'`) {
 		t.Error("80-mcp-image.sh no cita los valores de -e (printf con formato q) en el entrypoint")
+	}
+	// Y lee ENV_FILE, que es por donde le llegan ahora las variables.
+	if !strings.Contains(s, `done < "$ENV_FILE"`) {
+		t.Error("80-mcp-image.sh no lee ENV_FILE: las variables de kling add -env se perderían")
 	}
 }
 
