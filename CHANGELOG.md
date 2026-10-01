@@ -29,6 +29,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Base images provide `/dev/fd`, `/dev/shm` and `/etc/hosts`, as Docker images expect (#156)
 - Extension manifests are cached, so extension commands start faster (#127, #128)
 - Short README; the full guide moves to `docs/guide.md` (#152)
+- Guest kernel ships dm-verity: verity layers boot and verify on Linux and macOS (#161)
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
 
 ### Fixed
