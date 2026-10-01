@@ -16,6 +16,10 @@
 #   entre los servidores MCP open source:
 #     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-P "pip"] [-d dir] [-bundle] -- <comando>
 #
+#     -e KEY=valor (repetible) hornea una variable en /etc/kling/env (0600). El
+#        valor queda en el argv: para secretos, ENV_FILE=<fichero> con una línea
+#        KEY=valor por variable (lo que hace `kling add -env`).
+#
 #     -bundle (servidores node): empaqueta el servidor en UN fichero con esbuild al
 #        construir. Acelera mucho el arranque en frío en la microVM (sobre todo arm64/Mac):
 #        carga 1 fichero en vez de cientos de node_modules. Medido: ~7 s -> ~2.5 s.
@@ -46,6 +50,10 @@ ROOT="${KLING_ROOT:-/var/lib/kindling}"
 BASE="${BASE_IMAGE:-min}"
 GROW="${GROW:-0}"
 BRIDGE="${BRIDGE:-./kling-bridge}"
+# ENV_FILE: fichero con una línea KEY=valor por variable, como -e pero sin dejar
+# el valor en el argv de un proceso root (ps lo enseña a cualquiera del host).
+# Es lo que usa `kling add -env`; -e sigue valiendo para valores no secretos.
+ENV_FILE="${ENV_FILE:-}"
 
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo como root" >&2; exit 1; }
 [ -f "$ROOT/images/$BASE.ext4" ] || {
@@ -222,6 +230,20 @@ case "$MODE" in
     ;;
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
+
+# Las variables de ENV_FILE se suman a las de -e. Nunca se imprimen: un error
+# dice el número de línea, no su contenido.
+if [ -n "$ENV_FILE" ]; then
+  [ -f "$ENV_FILE" ] || { echo "ENV_FILE $ENV_FILE is not a file" >&2; exit 1; }
+  env_n=0
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    env_n=$((env_n + 1))
+    [ -n "$kv" ] || continue
+    [[ "$kv" == *=* && "${kv%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+      echo "ENV_FILE line $env_n: expected KEY=value" >&2; exit 1; }
+    EXTRA_ENV+=("$kv")
+  done < "$ENV_FILE"
+fi
 
 # ── Imagen por CAPAS ────────────────────────────────────────────────────────
 # En vez de copiar la base entera (~110-130 MiB reales duplicados por servicio),
