@@ -313,8 +313,16 @@ SQL
   # error las lista todas con dónde se piden. Antes, psql paraba en la primera
   # y la segunda no se veía hasta arreglar aquella.
   local avail mencion falta="" super="" nombre donde
-  declare -A pedida=()
-  for e in ${ext_list[@]+"${ext_list[@]}"}; do pedida[$e]="-extension"; done
+  # pedida_n[i] es una extensión y pedida_d[i] quién la pide (-extension o
+  # fichero:línea). Dos arrays y no uno asociativo: la bash de macOS (3.2) no
+  # los tiene.
+  local -a pedida_n=() pedida_d=()
+  pedir() {
+    local i
+    for i in ${pedida_n[@]+"${!pedida_n[@]}"}; do [ "${pedida_n[$i]}" = "$1" ] && return 0; done
+    pedida_n+=("$1"); pedida_d+=("$2")
+  }
+  for e in ${ext_list[@]+"${ext_list[@]}"}; do pedir "$e" "-extension"; done
   if [ "${#files[@]}" -gt 0 ]; then
     while IFS= read -r mencion; do
       donde="$(printf '%s' "$mencion" | cut -d: -f1-2)"
@@ -322,21 +330,23 @@ SQL
       [[ "$(printf '%s' "${mencion#"$donde":}" | sed 's/^[[:space:]]*//')" != --* ]] || continue
       nombre="$(printf '%s' "$mencion" | sed -E 's/.*[Ee][Xx][Tt][Ee][Nn][Ss][Ii][Oo][Nn][[:space:]]+([Ii][Ff][[:space:]]+[Nn][Oo][Tt][[:space:]]+[Ee][Xx][Ii][Ss][Tt][Ss][[:space:]]+)?"?([A-Za-z0-9_-]+).*/\2/' | tr 'A-Z' 'a-z')"
       [[ "$nombre" =~ ^[a-z0-9_][a-z0-9_-]{0,62}$ ]] || continue
-      [ -n "${pedida[$nombre]:-}" ] || pedida[$nombre]="$donde"
+      pedir "$nombre" "$donde"
     done < <(grep -HniE 'create[[:space:]]+extension[[:space:]]' "${files[@]}" 2>/dev/null || true)
   fi
-  if [ "${#pedida[@]}" -gt 0 ]; then
+  if [ "${#pedida_n[@]}" -gt 0 ]; then
     avail="$("${K[@]}" exec "$m" -- su -s /bin/sh postgres -c \
       "psql -X -At -d postgres -c \"SELECT name || ' ' || bool_or(trusted) FROM pg_available_extension_versions GROUP BY name\"")" \
       || die "no se pudo leer pg_available_extension_versions"
-    for e in "${!pedida[@]}"; do
+    local i
+    for i in "${!pedida_n[@]}"; do
+      e="${pedida_n[$i]}"
       case $'\n'"$avail"$'\n' in
         *$'\n'"$e "*) ;;
-        *) falta+=$'\n'"  $e  (${pedida[$e]})"; continue ;;
+        *) falta+=$'\n'"  $e  (${pedida_d[$i]})"; continue ;;
       esac
       # Una no confiable (timescaledb, postgis...) solo la crea un superusuario:
       # sin -extension ni -as-super, la migración fallaría como el rol de la app.
-      if [ "${pedida[$e]}" != "-extension" ] && [ "$as_super" -eq 0 ] && ! printf '%s\n' "$avail" | grep -qx "$e true"; then
+      if [ "${pedida_d[$i]}" != "-extension" ] && [ "$as_super" -eq 0 ] && ! printf '%s\n' "$avail" | grep -qx "$e true"; then
         super+=",$e"
       fi
     done
