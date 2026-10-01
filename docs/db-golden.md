@@ -142,37 +142,6 @@ kling db golden build -from pg16-ext \
 `-as-super` sigue existiendo (todo como superusuario, objetos del superusuario), para
 migraciones que de verdad lo necesitan.
 
-### Extensiones que Alpine no trae: `pg16-ext`
-
-La imagen `pg16` es Alpine con `postgresql16-contrib` (uuid-ossp, pgcrypto, pg_trgm,
-hstore...). Alpine no tiene TimescaleDB ni pgvector para PG16 o PG17, y su TimescaleDB
-es la build Apache, sin compresión. `scripts/db-image-ext.sh` las compila contra el
-Postgres de la imagen y deja una **plantilla** de la que sale el golden:
-
-```sh
-kling db golden image -ext                       # pg16-ext: las cinco
-kling db golden image -ext -pg 17                # pg17-ext
-kling db golden image -ext -only timescaledb,vector
-kling db golden build -from pg16-ext -extension timescaledb,vector ... <golden>
-```
-
-| Extensión | Versión | Notas |
-|---|---|---|
-| timescaledb | 2.30.2 | licencia TSL: compresión (`add_compression_policy`), agregados continuos |
-| vector (pgvector) | 0.8.0 | sin `-march=native`: el binario vale en cualquier CPU |
-| postgis | 3.6.4 | sin raster (GDAL), topology ni protobuf (`ST_AsMVT`) |
-| pg_cron | 1.6.8 | necesita `-preload pg_cron` |
-| pg_partman | 5.5.0 | |
-
-Cómo: una microVM de construcción con salida a internet y un volumen de 3 GiB (el
-overlay de 512 MiB no cabe la toolchain), la toolchain en una raíz `apk --root` del
-volumen (firmas comprobadas con las claves de la imagen) y cada fuente clonada por su
-etiqueta **y comprobada por commit**. La plantilla no tiene red (la heredan sus copias):
-las librerías de PostGIS se bajan como `.apk` en la de construcción y se instalan sin red
-en la de la plantilla. Antes de guardarla se crea cada extensión en un cluster de usar
-y tirar y se prueba la compresión de TimescaleDB. El resultado: ver
-[Medidas](#medidas-de-pg16-ext).
-
 Qué hace, en orden:
 
 1. arranca `<nombre>-build` desde `pg16` con `-egress none -allow-exec`;
