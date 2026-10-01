@@ -455,6 +455,7 @@ func cmdRun(args []string) error {
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
+	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -504,6 +505,15 @@ func cmdRun(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(mc); err != nil {
+			return err
+		}
+		if *waitReady && (mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed) {
+			return fmt.Errorf("%s is running but not ready (%s)", mc.Name, mc.Ready)
+		}
+		return nil
 	}
 	if mc.From != "" {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)

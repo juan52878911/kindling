@@ -1,8 +1,12 @@
 package guest
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -84,7 +88,15 @@ func newTestService(t *testing.T, spec api.ServiceSpec) *Service {
 	if err := checkServiceSpec(spec); err != nil {
 		t.Fatal(err)
 	}
+	// Start lo deja en el estado global (el de /service y las capacidades).
+	t.Cleanup(resetServiceState)
 	return &Service{spec: spec, root: "/", logPath: filepath.Join(t.TempDir(), "svc.log")}
+}
+
+func resetServiceState() {
+	serviceState.mu.Lock()
+	serviceState.svc = nil
+	serviceState.mu.Unlock()
 }
 
 func waitUntil(t *testing.T, what string, f func() bool) {
@@ -183,5 +195,39 @@ func TestRotatingLog(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	if string(a) != "12345678" || string(b) != "abcdef" {
 		t.Fatalf("%q %q", a, b)
+	}
+}
+
+func TestServiceStopHandlerAndCaps(t *testing.T) {
+	resetServiceState()
+	a := &Agent{}
+	if slices.Contains(a.Caps(), api.GuestCapService) {
+		t.Fatal("service announced without a service")
+	}
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "trap 'echo bye; exit 0' TERM; echo up; while :; do sleep 0.05; done"}})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	if !slices.Contains(a.Caps(), api.GuestCapService) {
+		t.Fatal("service not announced")
+	}
+	waitUntil(t, "the service", func() bool { return strings.Contains(s.Status(1<<10).Log, "up") })
+
+	// Dos paradas a la vez (el daemon y el apagado del agente): las dos
+	// vuelven cuando el servicio ya salió.
+	other := make(chan struct{})
+	go func() { StopService(); close(other) }()
+	rec := httptest.NewRecorder()
+	ServiceStopHandler()(rec, httptest.NewRequest(http.MethodPost, api.GuestServiceStopPath, nil))
+	<-other
+	var st api.GuestService
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || rec.Code != 200 || st.Running || !st.Declared {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(s.Status(1<<10).Log, "bye") {
+		t.Fatal("not stopped with its signal")
+	}
+	rec = httptest.NewRecorder()
+	ServiceStopHandler()(rec, httptest.NewRequest(http.MethodGet, api.GuestServiceStopPath, nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /service/stop: %d", rec.Code)
 	}
 }

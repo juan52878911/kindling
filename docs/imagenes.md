@@ -118,9 +118,20 @@ la variante v8; en amd64, la que no pide v2/v3).
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
 (resuelto con su `/etc/passwd`, sin libc), en su propio grupo de procesos, y lo
 relanza si muere (de 1 a 30 s de espera). Su salida va a la consola (`kling
-logs`) y a `/var/log/kling-service.log`; `GET /service` del agente da su estado y
-la cola del log. Al apagarse el agente le manda su `STOPSIGNAL` y, pasados 10 s,
-SIGKILL al grupo, antes de desmontar los volúmenes.
+logs`) y a `/var/log/kling-service.log`, que es lo que enseña `kling logs
+-service` (con `-f` para seguirla); `GET /service` del agente da su estado y la
+cola del log.
+
+**Parada limpia.** El agente anuncia la capacidad `service` en `/healthz` solo si
+la imagen declara un servicio. A esas máquinas, `kling stop` y `kling rm` les
+piden antes `POST /service/stop`: el agente manda la `STOPSIGNAL` de la imagen
+(SIGINT en Postgres: "fast shutdown" con su checkpoint) y, pasados 10 s, SIGKILL
+al grupo; después el daemon vacía los volúmenes y mata la VM. Las demás no pagan
+ese viaje.
+
+**Para agentes.** `kling image import <ref> -json` y `kling run ... -wait-ready
+-json` dan lo que hace falta para seguir sin leer texto: el digest, los puertos y
+la sonda; el id, la IP y si está lista.
 
 El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image import`):
 
@@ -147,6 +158,7 @@ ready, service}`).
 | `kling run -image ... -mem 512M -cpus 2 -wait-ready` | 3,6 s del comando hasta "listo" (arranque 32 ms; initdb, el servidor temporal del entrypoint y el definitivo) |
 | El servicio | `docker-entrypoint.sh postgres` original; postgres como uid 70 (`su-exec`); `scram-sha-256` desde el host con la contraseña de `-e`, rechazada la mala |
 | `kill -9` del postmaster | relanzado en ~1 s, recuperación del WAL y listo; `GET /service` da `starts: 2`, `last_exit: signal: killed` |
+| `kling stop` con Postgres sobre un volumen | servicio parado en 20 ms ("fast shutdown", checkpoint); otra máquina con el mismo volumen arranca con "database system was shut down", sin recuperación, y con los datos |
 | `kling save` + `kling run -from` | plantilla de 151 MiB de memoria; instanciar 8–51 ms ya "listo"; `select count(*)` de 100 000 filas desde el host, 60–100 ms con el arranque de psql |
 | `kling image import docker.io/timescale/timescaledb:latest-pg16` en frío | 41 s: 18 capas, 575 MiB comprimidos → ext4 de 1825 MiB, 7200 ficheros |
 | `kling run -image tsdb -mem 1G -cpus 2 -wait-ready` | 9,1 s hasta "listo" (initdb, `timescaledb-tune` y arranque); `timescaledb` 2.30.2 con licencia `timescale` (TSL), `CREATE EXTENSION vector` → 0.8.1, hypertable de 100 000 filas con 71 chunks comprimidos |
@@ -161,12 +173,15 @@ falta en la evaluación del 2026-09-30) ni `chroot`.
   `pivot_root`, `mkdir`, `ln`, `cat` y `grep` (cualquier Alpine o Debian). Una
   imagen *distroless* se rechaza al construir, igual que una que ya traiga
   `/entrypoint`.
-- **`kling stop` no avisa al servicio**: el daemon vacía los volúmenes y mata la
-  VM. Postgres se recupera por el WAL, pero no es una parada limpia.
 - **Sin dm-verity**: la imagen es la raíz, no una capa.
 - **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
-  máquina (512 MiB). La ruta va en la receta (`built.volumes`) y `kling image
-  import` sugiere el `-volume` en el siguiente paso.
+  máquina (512 MiB). La ruta va en la receta (`built.volumes`). Un volumen de
+  kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
+  niega ("directory not empty"), igual que en Docker con un punto de montaje.
+  Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
+  subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata` al importar).
+- **El entorno es de la imagen, no de la máquina**: `-e` va en `kling image
+  import`; dos máquinas con contraseñas distintas son dos imágenes.
 - **El `HEALTHCHECK` corre como root**, con el entorno de la imagen; en Docker
   corre con el `USER` de la imagen.
 - **Sin zstd**: solo capas `tar` y `tar+gzip`.

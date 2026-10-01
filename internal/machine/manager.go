@@ -3023,6 +3023,8 @@ func (m *Manager) killMachine(id string, flush bool) {
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
+		// El servicio primero: es quien escribe en los volúmenes.
+		m.stopService(mc)
 		m.flushVolume(mc)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
