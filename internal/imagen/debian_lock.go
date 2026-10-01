@@ -2,10 +2,10 @@
 
 package imagen
 
-// Generado el 2026-09-29 con los paquetes "iptables procps iproute2 dmsetup ca-certificates".
+// Generado el 2026-10-01 con los paquetes "iptables procps iproute2 dmsetup ca-certificates".
 var DebianLock = map[string]DebianBase{
 	"arm64": {
-		Image: "debian", Index: "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a", Manifest: "sha256:da496358bd6934d2bd6a563a33176a2e50eff5490c54b4ac6fb051b69fef4071", Snapshot: "20260929T192314Z",
+		Image: "debian", Index: "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a", Manifest: "sha256:da496358bd6934d2bd6a563a33176a2e50eff5490c54b4ac6fb051b69fef4071", Snapshot: "20261001T075234Z",
 		Packages: []DebPin{
 			{"ca-certificates", "20250419", "https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_20250419_all.deb", "ef590f89563aa4b46c8260d49d1cea0fc1b181d19e8df3782694706adf05c184", 161704},
 			{"dmsetup", "2:1.02.205-2", "https://deb.debian.org/debian/pool/main/l/lvm2/dmsetup_1.02.205-2_arm64.deb", "f802c1ec2d6f45a6544f09c5da72f9688e06208d12bb76ac9b25f2cfa8033306", 76072},
@@ -28,17 +28,20 @@ var DebianLock = map[string]DebianBase{
 			{"libnetfilter-conntrack3", "1.1.0-1", "https://deb.debian.org/debian/pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.1.0-1_arm64.deb", "25593af074c89564f903aa34acb7828a47171e232dfb4ea3457f5319c98d0a4c", 39704},
 			{"libnfnetlink0", "1.0.2-3", "https://deb.debian.org/debian/pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-3_arm64.deb", "327e3137c7a454a1fcd0eb1369745a94c3170dc075ff9d0d438d9470526ee298", 13888},
 			{"libnftnl11", "1.2.9-1", "https://deb.debian.org/debian/pool/main/libn/libnftnl/libnftnl11_1.2.9-1_arm64.deb", "070278465783af9f3c38a9465d3dec8ad51468a87b8c3a52f6451d4e95e08875", 60580},
+			{"libpcre2-8-0", "10.46-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u3_arm64.deb", "1a02b7129990690ea095fd35d7ace6853742923d158019e1fb4ef27efd2c51a7", 262648},
 			{"libproc2-0", "2:4.0.4-9", "https://deb.debian.org/debian/pool/main/p/procps/libproc2-0_4.0.4-9_arm64.deb", "e81069b58fe82223c71fcd74c760cb0fd3b0e61792fbaf2e5675fd948dc16dba", 62752},
+			{"libssl3t64", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl3t64_3.5.7-1~deb13u3_arm64.deb", "d0681293a160392186c6ef85a165e40603d1628a099936137d24d391bd591f97", 2770200},
 			{"libtirpc-common", "1.3.6+ds-1", "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc-common_1.3.6+ds-1_all.deb", "300f582e2c9151a8d329568c705cadc76252c417147312fe331c4560d2c7a6c3", 11004},
 			{"libtirpc3t64", "1.3.6+ds-1", "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc3t64_1.3.6+ds-1_arm64.deb", "ae390ce96435829f0d5252305fb9b22001f5bcc85477e452373ddb2a4fa4dbc1", 79084},
 			{"libxtables12", "1.8.11-2", "https://deb.debian.org/debian/pool/main/i/iptables/libxtables12_1.8.11-2_arm64.deb", "b200a559a4ae1b4ebcee4fb0fcaef6a16ef01abbe3da8887de15e800b1a6440d", 30648},
 			{"netbase", "6.5", "https://deb.debian.org/debian/pool/main/n/netbase/netbase_6.5_all.deb", "76bafa92947ebd37b0a6f9ec6570412041f56edebc1c66d323731216d318471e", 12436},
-			{"openssl", "3.5.7-1~deb13u2", "https://deb.debian.org/debian/pool/main/o/openssl/openssl_3.5.7-1~deb13u2_arm64.deb", "ff38f9e4fdbfef72d9cb31088e5e42f58c83c2fb1d1bbb4e4b4c9adc53c17100", 1472236},
+			{"openssl", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.5.7-1~deb13u3_arm64.deb", "68f226057a7a1c1f23e2ffde0075ea16e27e646d829c8d3c63414c49b839c258", 1472692},
+			{"openssl-provider-legacy", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u3_arm64.deb", "dae4ab96be3a1fc8fd490bbeb3938ecd102d360555d4af8ee2728b42ce9f1059", 313896},
 			{"procps", "2:4.0.4-9", "https://deb.debian.org/debian/pool/main/p/procps/procps_4.0.4-9_arm64.deb", "9afd4ad2e8da92322715114fb9555c63ce92f6c72bf72867e76ab2d6a7a3b541", 871348},
 		},
 	},
 	"amd64": {
-		Image: "debian", Index: "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a", Manifest: "sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc1635634368b878189e8221c", Snapshot: "20260929T192314Z",
+		Image: "debian", Index: "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a", Manifest: "sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc1635634368b878189e8221c", Snapshot: "20261001T075234Z",
 		Packages: []DebPin{
 			{"ca-certificates", "20250419", "https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_20250419_all.deb", "ef590f89563aa4b46c8260d49d1cea0fc1b181d19e8df3782694706adf05c184", 161704},
 			{"dmsetup", "2:1.02.205-2", "https://deb.debian.org/debian/pool/main/l/lvm2/dmsetup_1.02.205-2_amd64.deb", "4771f7ab0a907a8e5d02a6358ff016ae7cb49124906bada02fa882e141b615a0", 82344},
@@ -61,12 +64,15 @@ var DebianLock = map[string]DebianBase{
 			{"libnetfilter-conntrack3", "1.1.0-1", "https://deb.debian.org/debian/pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.1.0-1_amd64.deb", "ffbac5d06fbe432d5171f2eb5b2504968377f27be133f72c81e71250a9957506", 42064},
 			{"libnfnetlink0", "1.0.2-3", "https://deb.debian.org/debian/pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-3_amd64.deb", "5e4c3c40a04ffdb4139e4bef1136585e151a8eb8c71efa6c7250b636b3c0d1b1", 14416},
 			{"libnftnl11", "1.2.9-1", "https://deb.debian.org/debian/pool/main/libn/libnftnl/libnftnl11_1.2.9-1_amd64.deb", "1b3eae46bfb9c6ab44e404797fb45278045f926d73974a84097ad47a3e27d983", 65012},
+			{"libpcre2-8-0", "10.46-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u3_amd64.deb", "e226f661d918f04daf38cdbc4806b7ed7d6ef95c7eb0ade692fc350e31970040", 299148},
 			{"libproc2-0", "2:4.0.4-9", "https://deb.debian.org/debian/pool/main/p/procps/libproc2-0_4.0.4-9_amd64.deb", "c9d61caab1b2ddfc3f17edb95be31b9809fcb2daf27d853dff615bc4ebd08b4b", 65596},
+			{"libssl3t64", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl3t64_3.5.7-1~deb13u3_amd64.deb", "ff16bc048bcd7d1b256094450b79c77947d8e76fe2a24bd99b91021d591fa074", 2458176},
 			{"libtirpc-common", "1.3.6+ds-1", "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc-common_1.3.6+ds-1_all.deb", "300f582e2c9151a8d329568c705cadc76252c417147312fe331c4560d2c7a6c3", 11004},
 			{"libtirpc3t64", "1.3.6+ds-1", "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc3t64_1.3.6+ds-1_amd64.deb", "ef4536c09bf5063554310e22d586ae90990100ba66d2fe7c35660e9e658913b6", 83300},
 			{"libxtables12", "1.8.11-2", "https://deb.debian.org/debian/pool/main/i/iptables/libxtables12_1.8.11-2_amd64.deb", "4de5aa59faef5e98d6ba9f5f521a915be5641f224f597862f8d29e8319e8db16", 31896},
 			{"netbase", "6.5", "https://deb.debian.org/debian/pool/main/n/netbase/netbase_6.5_all.deb", "76bafa92947ebd37b0a6f9ec6570412041f56edebc1c66d323731216d318471e", 12436},
-			{"openssl", "3.5.7-1~deb13u2", "https://deb.debian.org/debian/pool/main/o/openssl/openssl_3.5.7-1~deb13u2_amd64.deb", "4ff006f431d8c2e69fa736885a3b6e779f2448535f69dbde821d9f0ff87ad8ea", 1507300},
+			{"openssl", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.5.7-1~deb13u3_amd64.deb", "43a9cbcf2a8a0e1f0a1c3f5a33ee1f56b269690e7a2129f2b2d0582e789589d7", 1508068},
+			{"openssl-provider-legacy", "3.5.7-1~deb13u3", "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u3_amd64.deb", "c12e0266c4780749a4702b8959ac979689f4182e18eed85a8a5eb90ed0e16eab", 316452},
 			{"procps", "2:4.0.4-9", "https://deb.debian.org/debian/pool/main/p/procps/procps_4.0.4-9_amd64.deb", "4db90bb6776772fc52585d6b1fbfc52ec2a85480e1b4363b743fbb2ffa2a5375", 882088},
 		},
 	},

@@ -102,3 +102,31 @@ func TestResolve(t *testing.T) {
 		t.Fatal("re-added an installed package")
 	}
 }
+
+func TestUpgrades(t *testing.T) {
+	ix := NewIndex()
+	if err := ix.Add(strings.NewReader(testIndex), "https://deb.debian.org/debian"); err != nil {
+		t.Fatal(err)
+	}
+	// python3.13-minimal tiene una versión más alta en el índice, libexpat1
+	// ya está al día y lo que no está instalado no se actualiza.
+	status := `Package: python3.13-minimal
+Status: install ok installed
+Version: 3.13.5-1
+
+Package: libexpat1
+Status: install ok installed
+Version: 2.7.1-2
+
+Package: libpython3.13-minimal
+Status: deinstall ok config-files
+Version: 3.13.5-1
+`
+	got, err := ix.Upgrades(strings.NewReader(status))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, " ") != "python3.13-minimal" {
+		t.Fatalf("upgrades = %v", got)
+	}
+}

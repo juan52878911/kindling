@@ -1,8 +1,10 @@
 // lockgen fija los paquetes de Debian que la base Debian de kindling (la de
 // los constructores android y debian, internal/imagen) añade encima de
 // debian:trixie-slim: resuelve las dependencias contra lo que
-// ya trae la imagen (su /var/lib/dpkg/status), baja cada .deb, comprueba su
-// sha256 con el índice y escribe internal/imagen/debian_lock.go.
+// ya trae la imagen (su /var/lib/dpkg/status), añade lo que la imagen trae y
+// tiene versión más nueva en los índices (seguridad y punto de Debian, como
+// apt-get upgrade), baja cada .deb, comprueba su sha256 con el índice y
+// escribe internal/imagen/debian_lock.go.
 //
 //	go run ./internal/imagen/lockgen                  # arm64 y amd64
 //	go run ./internal/imagen/lockgen -image debian@sha256:<índice>
@@ -76,7 +78,11 @@ func run(image string, archs, want []string, out, cache string) error {
 		if err != nil {
 			return err
 		}
-		installed, err := installedPackages(img)
+		status, err := baseStatus(img)
+		if err != nil {
+			return err
+		}
+		installed, err := deb.Installed(bytes.NewReader(status))
 		if err != nil {
 			return err
 		}
@@ -86,7 +92,17 @@ func run(image string, archs, want []string, out, cache string) error {
 				return err
 			}
 		}
-		sel, err := ix.Resolve(want, installed)
+		// Lo que la imagen ya trae y tiene una versión más nueva (seguridad o
+		// punto de Debian) se fija también: sin esto, un DSA de una biblioteca
+		// de la base (libssl3t64) no llegaría nunca a la imagen.
+		ups, err := ix.Upgrades(bytes.NewReader(status))
+		if err != nil {
+			return err
+		}
+		for _, u := range ups {
+			delete(installed, u)
+		}
+		sel, err := ix.Resolve(append(append([]string{}, want...), ups...), installed)
 		if err != nil {
 			return fmt.Errorf("%s: %w", arch, err)
 		}
@@ -108,8 +124,10 @@ func run(image string, archs, want []string, out, cache string) error {
 	return os.WriteFile(out, src, 0o644)
 }
 
-func installedPackages(img *oci.Image) (map[string]string, error) {
-	out := map[string]string{} // nombre y lo que provee -> versión
+// baseStatus es el /var/lib/dpkg/status de la imagen (el de la última capa
+// que lo trae).
+func baseStatus(img *oci.Image) ([]byte, error) {
+	var status []byte
 	for _, l := range img.Layers {
 		rc, err := oci.OpenLayer(l)
 		if err != nil {
@@ -128,21 +146,17 @@ func installedPackages(img *oci.Image) (map[string]string, error) {
 			if strings.TrimPrefix(h.Name, "./") != "var/lib/dpkg/status" {
 				continue
 			}
-			inst, err := deb.Installed(tr)
-			if err != nil {
+			if status, err = io.ReadAll(io.LimitReader(tr, 64<<20)); err != nil {
 				rc.Close()
 				return nil, err
-			}
-			for k, v := range inst {
-				out[k] = v
 			}
 		}
 		rc.Close()
 	}
-	if len(out) == 0 {
+	if len(status) == 0 {
 		return nil, errors.New("no /var/lib/dpkg/status in the image")
 	}
-	return out, nil
+	return status, nil
 }
 
 func get(url string) (b []byte, err error) {

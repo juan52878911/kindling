@@ -171,6 +171,12 @@ func (d Debs) Install(ctx context.Context, root *ext4.Node, streams []ext4.Strea
 			para.Keys = append(para.Keys, "Conffiles")
 			para.Values["Conffiles"] = "\n" + strings.Join(cl, "\n")
 		}
+		// Si el paquete ya estaba (una actualización de seguridad de algo que
+		// trae la imagen base), su párrafo viejo sale del status: dpkg no
+		// admite dos párrafos del mismo paquete y arquitectura.
+		if kept := dropStatus(st.Bytes(), para.Get("Package"), arch); len(kept) != st.Len() {
+			st = bytes.NewBuffer(kept)
+		}
 		st.WriteString("\n")
 		st.WriteString(para.String())
 		lines := []string{"/."}
@@ -206,6 +212,29 @@ func (d Debs) Install(ctx context.Context, root *ext4.Node, streams []ext4.Strea
 		return nil, nil, err
 	}
 	return streams, names, nil
+}
+
+// dropStatus quita de status los párrafos de pkg con arquitectura arch; el
+// resto queda tal cual, byte a byte.
+func dropStatus(status []byte, pkg, arch string) []byte {
+	needle := []byte("Package: " + pkg + "\n")
+	if !bytes.HasPrefix(status, needle) && !bytes.Contains(status, append([]byte("\n"), needle...)) {
+		return status
+	}
+	paras := bytes.Split(status, []byte("\n\n"))
+	out := paras[:0]
+	for _, p := range paras {
+		if !bytes.Contains(p, needle) {
+			out = append(out, p)
+			continue
+		}
+		if ps, err := deb.ParseParagraphs(bytes.NewReader(p)); err == nil && len(ps) == 1 &&
+			ps[0].Get("Package") == pkg && ps[0].Get("Architecture") == arch {
+			continue
+		}
+		out = append(out, p)
+	}
+	return bytes.Join(out, []byte("\n\n"))
 }
 
 func without(keys []string, k string) []string {
