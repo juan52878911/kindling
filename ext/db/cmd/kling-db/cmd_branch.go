@@ -338,7 +338,15 @@ func usable(mc *api.Machine, owner string) bool {
 // defecto del repo, que solo se pregunta a git si hay que crear la copia. Si
 // el fork descongeló al padre, refreeze lo vuelve a congelar aquí; si no, se
 // queda en marcha para quien congele después (settle).
-func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, golden, owner string, refreeze bool) (*api.Machine, bool, error) {
+//
+// golden explícito (-golden en `kling db branch`) se obedece o falla, nunca se
+// ignora: con la copia de la rama ya hecha desde otro golden, error; con la
+// copia del padre de OTRO golden, la rama nace del golden pedido (sin los
+// datos del padre). Antes se bifurcaba el padre en silencio y la rama dev
+// quedaba con el esquema de main (nota 18, AuraCRM). El -golden del hook
+// (-switch) es otra cosa: el respaldo para una rama sin padre; si no se usa
+// porque hay padre, se dice.
+func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, golden, owner string, refreeze, goldenExplicit bool) (*api.Machine, bool, error) {
 	key := branchKey(branch)
 	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
@@ -349,6 +357,10 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	} else if mc != nil {
 		if mc.Labels[labelState] != stateReady {
 			return nil, false, fmt.Errorf("the copy %s of branch %s is not ready: remove it (kling db branch -rm %s) and try again", mc.Name, branch, branch)
+		}
+		if g := mc.Labels[labelGolden]; goldenExplicit && golden != "" && g != golden {
+			return nil, false, fmt.Errorf("the copy of branch %s already exists and comes from the golden %s, not %s: kling db branch -rm %s, then kling db branch %s -golden %s",
+				branch, g, golden, branch, branch, golden)
 		}
 		return mc, false, nil
 	}
@@ -362,6 +374,18 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	if parentKey != key {
 		if parent, err = one(copies, parentKey); err != nil {
 			return nil, false, err
+		}
+	}
+	avisado := false
+	if parent != nil && usable(parent, owner) && golden != "" && parent.Labels[labelGolden] != golden {
+		if goldenExplicit {
+			avisado = true
+			fmt.Fprintf(a.stderr, "branch %s: the copy of %s comes from the golden %s; starting from %s as asked (without %s's data)\n",
+				branch, from, parent.Labels[labelGolden], golden, from)
+			parent = nil
+		} else {
+			fmt.Fprintf(a.stderr, "branch %s: forking the copy of %s (golden %s); the hook's -golden %s is only used for a branch whose parent has no copy\n",
+				branch, from, parent.Labels[labelGolden], golden)
 		}
 	}
 	if parent != nil && usable(parent, owner) {
@@ -405,9 +429,13 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	if golden == "" {
 		return nil, false, fmt.Errorf("no ready copy of %s to fork and no golden to start from: kling db branch -golden <template>", from)
 	}
-	if parent == nil {
+	switch {
+	case avisado:
+	case goldenExplicit && parent == nil:
+		fmt.Fprintf(a.stderr, "branch %s: starting from the golden %s\n", branch, golden)
+	case parent == nil:
 		fmt.Fprintf(a.stderr, "branch %s: no copy of %s; starting from the golden %s\n", branch, from, golden)
-	} else {
+	default:
 		fmt.Fprintf(a.stderr, "branch %s: the copy of %s is not ready; starting from the golden %s\n", branch, from, golden)
 	}
 	if snap, err := a.template(ctx, golden); err != nil {
@@ -659,22 +687,35 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 		return err
 	}
 	defer un()
-	mc, created, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, true)
+	mc, created, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, true, golden != "")
 	if err != nil {
 		return err
 	}
-	if mc, err = a.activate(ctx, mc, owner); err != nil {
-		return err
-	}
+	cur, curErr := a.currentBranch(ctx)
+	actual := curErr == nil && cur == branch
 	verb := "ready"
 	if created {
 		verb = "created"
+	}
+	switch {
+	case actual:
+		if mc, err = a.activate(ctx, mc, owner); err != nil {
+			return err
+		}
+	case created && mc.State == api.StateRunning:
+		// Una rama que no es la de ahora no gasta RAM: como haría el hook con
+		// las demás. kling db connect (o el checkout) la despierta.
+		if _, ferr := a.k.Run(ctx, nil, "freeze", mc.ID); ferr != nil {
+			fmt.Fprintf(a.stderr, "warning: could not freeze %s: %v\n", mc.Name, ferr)
+		} else {
+			verb = "created, frozen (not the current branch; connect or checkout wakes it)"
+		}
 	}
 	fmt.Fprintf(a.stdout, "branch %s  %s  (copy %s, machine %s)\n", branch, verb, mc.Name, shortID(mc.ID))
 	// Si es la rama actual, la app ya puede conectar: se escribe la conexión en
 	// .git como haría el hook (antes solo -switch lo hacía y, hasta el primer
 	// checkout, la app no tenía con qué conectar; lo vio la prueba en el lab).
-	if cur, err := a.currentBranch(ctx); err == nil && cur == branch {
+	if actual {
 		envPath := filepath.Join(ri.gitDir, branchEnvFile)
 		if err := a.writeBranchEnv(mc, envPath); err != nil {
 			return err
@@ -736,7 +777,7 @@ func (a *app) switchActivate(ctx context.Context, owner, golden string) (*repoIn
 		return nil, fmt.Errorf("removing the previous %s: %w", envPath, err)
 	}
 	end = a.tr.span("phase ensure")
-	mc, _, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, false)
+	mc, _, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, false, false)
 	end()
 	if err != nil {
 		return nil, err

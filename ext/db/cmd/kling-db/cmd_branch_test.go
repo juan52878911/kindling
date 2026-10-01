@@ -543,3 +543,90 @@ func TestHookScriptSintaxis(t *testing.T) {
 		t.Fatalf("sh -n: %v\n%s", err, out)
 	}
 }
+
+// -golden explícito se obedece: con la copia del padre de OTRO golden, la rama
+// nace del golden pedido (antes se bifurcaba el padre en silencio y dev tenía
+// el esquema de main); con la copia de la rama ya hecha de otro, error claro.
+func TestBranchGoldenExplicitoSeObedece(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ta.f.snaps["pg-dev"] = &api.Snapshot{Name: "pg-dev", Labels: map[string]string{api.LabelPorts: "8080"}}
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, dir, "checkout", "-q", "-b", "dev")
+	ta.f.calls = nil
+	ta.err.Reset()
+	if err := ta.branch(ctx, "", "", "pg-dev", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	dev := ta.copyOf(t, "dev")
+	if dev == nil || dev.Labels[labelGolden] != "pg-dev" {
+		t.Fatalf("dev: %+v", dev)
+	}
+	for _, c := range ta.f.calls {
+		if len(c.args) > 1 && c.args[0] == "sandbox" && c.args[1] == "fork" {
+			t.Fatalf("forked main instead of starting from pg-dev: %v", c.args)
+		}
+	}
+	if !strings.Contains(ta.err.String(), "comes from the golden pg") {
+		t.Errorf("no note about the parent's golden:\n%s", ta.err)
+	}
+	// La copia de dev ya existe y es de pg-dev: pedir otro golden es un error.
+	err := ta.branch(ctx, "", "", "pg", defaultOwner)
+	if err == nil || !strings.Contains(err.Error(), "comes from the golden pg-dev") || !strings.Contains(err.Error(), "-rm dev") {
+		t.Fatalf("err = %v", err)
+	}
+	// El mismo golden que el padre: se bifurca, como siempre.
+	gitT(t, dir, "checkout", "-q", "-b", "feat")
+	ta.f.calls = nil
+	if err := ta.branch(ctx, "", "main", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	forked := false
+	for _, c := range ta.f.calls {
+		forked = forked || (len(c.args) > 1 && c.args[0] == "sandbox" && c.args[1] == "fork")
+	}
+	if !forked {
+		t.Error("same golden as the parent: it should fork")
+	}
+}
+
+// El -golden del hook es un respaldo: con padre, se bifurca, y se dice.
+func TestBranchSwitchGoldenDelHookAvisa(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ta.f.snaps["pg-dev"] = &api.Snapshot{Name: "pg-dev", Labels: map[string]string{api.LabelPorts: "8080"}}
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, dir, "checkout", "-q", "-b", "dev")
+	ta.err.Reset()
+	if _, err := ta.switchActivate(ctx, defaultOwner, "pg-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if dev := ta.copyOf(t, "dev"); dev == nil || dev.Labels[labelGolden] != "pg" {
+		t.Fatalf("dev: %+v", dev)
+	}
+	if !strings.Contains(ta.err.String(), "only used for a branch whose parent has no copy") {
+		t.Errorf("silently ignored the hook's -golden:\n%s", ta.err)
+	}
+}
+
+// Una rama que no es la actual nace congelada: no se queda gastando RAM.
+func TestBranchNuevaDeOtraRamaQuedaCongelada(t *testing.T) {
+	ta, _ := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	if err := ta.branch(ctx, "otra", "", "", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	if mc := ta.copyOf(t, "otra"); mc == nil || mc.State != api.StateWarm {
+		t.Fatalf("otra: %+v", mc)
+	}
+	if mc := ta.copyOf(t, "main"); mc.State != api.StateRunning {
+		t.Errorf("main (the current branch) is %s", mc.State)
+	}
+}
