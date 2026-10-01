@@ -4,6 +4,8 @@
 // hash para no volver a bajarlas.
 //
 // Solo lectura y solo por digest: una etiqueta se puede mover, un digest no.
+// La única traducción etiqueta → digest es Resolve (ref.go), y el digest que
+// da sale del manifiesto bajado, no de lo que diga el registro.
 package oci
 
 import (
@@ -35,6 +37,12 @@ const (
 
 var reDigest = lazyre.New(`^sha256:[0-9a-f]{64}$`)
 
+// manifestAccept son los tipos de manifiesto que se piden.
+var manifestAccept = strings.Join([]string{MediaOCIManifest, MediaDockerManifest, MediaOCIIndex, MediaDockerList}, ", ")
+
+// maxManifest es el tamaño máximo de un manifiesto o un índice.
+const maxManifest = 4 << 20
+
 // Descriptor es una pieza referida por digest.
 type Descriptor struct {
 	MediaType string `json:"mediaType"`
@@ -57,13 +65,35 @@ type Manifest struct {
 
 // Config es lo que interesa de la configuración de la imagen.
 type Config struct {
-	Architecture string `json:"architecture"`
-	OS           string `json:"os"`
-	Config       struct {
-		Entrypoint []string `json:"Entrypoint"`
-		Cmd        []string `json:"Cmd"`
-		Env        []string `json:"Env"`
-	} `json:"config"`
+	Architecture string      `json:"architecture"`
+	OS           string      `json:"os"`
+	Variant      string      `json:"variant,omitempty"`
+	Config       ImageConfig `json:"config"`
+}
+
+// ImageConfig es la parte "config" de la configuración de una imagen: lo
+// que Docker usa para ejecutarla (docker run).
+type ImageConfig struct {
+	Entrypoint   []string            `json:"Entrypoint"`
+	Cmd          []string            `json:"Cmd"`
+	Env          []string            `json:"Env"`
+	User         string              `json:"User,omitempty"`
+	WorkingDir   string              `json:"WorkingDir,omitempty"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+	Volumes      map[string]struct{} `json:"Volumes,omitempty"`
+	StopSignal   string              `json:"StopSignal,omitempty"`
+	Healthcheck  *Healthcheck        `json:"Healthcheck,omitempty"`
+	Labels       map[string]string   `json:"Labels,omitempty"`
+}
+
+// Healthcheck es el HEALTHCHECK de un Dockerfile. Test es ["NONE"],
+// ["CMD", arg...] o ["CMD-SHELL", "orden"]; los plazos en nanosegundos.
+type Healthcheck struct {
+	Test        []string `json:"Test,omitempty"`
+	Interval    int64    `json:"Interval,omitempty"`
+	Timeout     int64    `json:"Timeout,omitempty"`
+	StartPeriod int64    `json:"StartPeriod,omitempty"`
+	Retries     int      `json:"Retries,omitempty"`
 }
 
 // Image es una imagen bajada y verificada.
@@ -90,6 +120,10 @@ type Client struct {
 	Log io.Writer
 	// HTTP para las pruebas; nil = uno con plazos.
 	HTTP *http.Client
+	// MaxBytes es el tope de lo que se baja de una imagen (las capas
+	// comprimidas, por lo que declara el manifiesto): 0 = sin tope. Con
+	// tope, una capa sin tamaño declarado no se acepta.
+	MaxBytes int64
 
 	tokens map[string]string
 }
@@ -147,8 +181,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	if b, err := os.ReadFile(c.BlobPath(digest)); err == nil && sha(b) == digest {
 		body = b
 	} else {
-		body, mt, err = c.get(ctx, registry, repo, "manifests/"+digest,
-			strings.Join([]string{MediaOCIManifest, MediaDockerManifest, MediaOCIIndex, MediaDockerList}, ", "), 4<<20)
+		body, mt, err = c.get(ctx, registry, repo, "manifests/"+digest, manifestAccept, maxManifest)
 		if err != nil {
 			return nil, err
 		}
@@ -170,13 +203,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		m.MediaType = mt
 	}
 	if len(m.Manifests) > 0 {
-		var pick *Descriptor
-		for i, d := range m.Manifests {
-			if d.Platform != nil && d.Platform.OS == "linux" && d.Platform.Architecture == arch {
-				pick = &m.Manifests[i]
-				break
-			}
-		}
+		pick := pickPlatform(m.Manifests, arch)
 		if pick == nil {
 			return nil, fmt.Errorf("%s@%s has no linux/%s image", ref, digest, arch)
 		}
@@ -185,6 +212,18 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	}
 	if len(m.Layers) == 0 {
 		return nil, fmt.Errorf("manifest %s has no layers (media type %s)", digest, m.MediaType)
+	}
+	if c.MaxBytes > 0 {
+		var total int64
+		for _, l := range m.Layers {
+			if l.Size <= 0 {
+				return nil, fmt.Errorf("layer %s has no declared size", l.Digest)
+			}
+			total += l.Size
+		}
+		if total > c.MaxBytes {
+			return nil, fmt.Errorf("image %s is %d MiB compressed, over the %d MiB limit", digest, total>>20, c.MaxBytes>>20)
+		}
 	}
 	img := &Image{Ref: registry + "/" + repo + "@" + digest, ManifestDigest: digest, Manifest: m}
 	cfgPath, err := c.blob(ctx, registry, repo, m.Config)
@@ -212,6 +251,27 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		img.Layers = append(img.Layers, Layer{Descriptor: l, Path: p})
 	}
 	return img, nil
+}
+
+// pickPlatform elige la imagen linux/arch de un índice. En arm64 vale la
+// variante v8 o ninguna; en amd64, la que no declara variante antes que una
+// v2/v3 (que pide instrucciones que puede no haber). Las atestaciones
+// (unknown/unknown) no casan nunca.
+func pickPlatform(ds []Descriptor, arch string) *Descriptor {
+	var pick *Descriptor
+	for i, d := range ds {
+		p := d.Platform
+		if p == nil || p.OS != "linux" || p.Architecture != arch {
+			continue
+		}
+		if p.Variant == "" || (arch == "arm64" && p.Variant == "v8") {
+			return &ds[i]
+		}
+		if pick == nil {
+			pick = &ds[i]
+		}
+	}
+	return pick
 }
 
 func sha(b []byte) string {
@@ -348,14 +408,22 @@ func (c *Client) get(ctx context.Context, registry, repo, path, accept string, m
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	b, err := readMax(resp.Body, max)
 	if err != nil {
-		return nil, "", err
-	}
-	if int64(len(b)) > max {
-		return nil, "", fmt.Errorf("%s: response too large", path)
+		return nil, "", fmt.Errorf("%s: %w", path, err)
 	}
 	return b, resp.Header.Get("Content-Type"), nil
+}
+
+func readMax(r io.Reader, max int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, errors.New("response too large")
+	}
+	return b, nil
 }
 
 // do hace la petición y, si el registro pide un token (401 con Bearer),

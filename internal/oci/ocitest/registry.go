@@ -24,15 +24,19 @@ type Registry struct {
 	mu    sync.Mutex
 	blobs map[string][]byte
 	types map[string]string
+	tags  map[string]string
 	// Hits cuenta las peticiones a /v2/ (para ver qué salió de la caché).
 	Hits int
 	// Corrupt, si no está vacío, es un digest cuyo contenido se sirve mal.
 	Corrupt string
+	// LieDigest, si no está vacío, es lo que dice Docker-Content-Digest al
+	// pedir un manifiesto por etiqueta.
+	LieDigest string
 }
 
 // New arranca el registro.
 func New() *Registry {
-	r := &Registry{blobs: map[string][]byte{}, types: map[string]string{}}
+	r := &Registry{blobs: map[string][]byte{}, types: map[string]string{}, tags: map[string]string{}}
 	r.Server = httptest.NewServer(http.HandlerFunc(r.serve))
 	return r
 }
@@ -43,6 +47,13 @@ func (r *Registry) Host() string { return strings.TrimPrefix(r.URL, "http://") }
 func digest(b []byte) string {
 	s := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(s[:])
+}
+
+// Tag apunta la etiqueta tag (de cualquier repositorio) al digest.
+func (r *Registry) Tag(tag, digest string) {
+	r.mu.Lock()
+	r.tags[tag] = digest
+	r.mu.Unlock()
 }
 
 // Put guarda un blob y devuelve su digest.
@@ -71,6 +82,14 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	i := strings.LastIndex(req.URL.Path, "/")
 	d := req.URL.Path[i+1:]
 	r.mu.Lock()
+	if t, ok := r.tags[d]; ok && strings.Contains(req.URL.Path, "/manifests/") {
+		d = t
+		h := d
+		if r.LieDigest != "" {
+			h = r.LieDigest
+		}
+		w.Header().Set("Docker-Content-Digest", h)
+	}
 	b, ok := r.blobs[d]
 	mt := r.types[d]
 	r.mu.Unlock()
@@ -139,8 +158,13 @@ func TarGz(files []File) []byte {
 // entrypoint, y un índice que la contiene. Devuelve los digests del
 // manifiesto y del índice.
 func (r *Registry) Image(arch string, entrypoint []string, layers ...[]byte) (manifest, index string) {
-	cfg, _ := json.Marshal(map[string]any{"architecture": arch, "os": "linux",
-		"config": map[string]any{"Entrypoint": entrypoint}})
+	return r.ImageConfig(arch, map[string]any{"Entrypoint": entrypoint}, layers...)
+}
+
+// ImageConfig es Image con la parte "config" de la configuración entera
+// (Entrypoint, Cmd, Env, User, ExposedPorts...).
+func (r *Registry) ImageConfig(arch string, config map[string]any, layers ...[]byte) (manifest, index string) {
+	cfg, _ := json.Marshal(map[string]any{"architecture": arch, "os": "linux", "config": config})
 	cd := r.Put(cfg, "")
 	var ls []map[string]any
 	for _, l := range layers {
