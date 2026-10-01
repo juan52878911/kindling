@@ -16,6 +16,7 @@
 //	                         lanza los ganchos de la imagen (ready.go)
 //	GET  /ready              ¿terminó de arrancar según su imagen? (ready.go)
 //	POST /hooks              vuelve a lanzar los ganchos tras restaurar
+//	GET  /service            el servicio que declara la imagen (service.go)
 //	GET  /meminfo            MemTotal y MemAvailable del invitado (squeeze en macOS)
 //	POST /volume/sync        vacía la caché del invitado a los volúmenes
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
@@ -66,7 +67,7 @@ type Agent struct {
 // en este proceso y las que añade quien lo embebe.
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
-		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt}
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapService}
 	if ExecEnabled() {
 		caps = append(caps, api.GuestCapExec)
 	}
@@ -126,6 +127,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	mux.HandleFunc(api.GuestReadyPath, ReadyHandler())
 	mux.HandleFunc(api.GuestHooksPath, HooksHandler())
 	mux.HandleFunc(api.GuestMemInfoPath, MemInfoHandler())
+	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
+	// solo lee su estado y su salida.
+	mux.HandleFunc(api.GuestServicePath, ServiceHandler())
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
@@ -169,6 +173,8 @@ func (a *Agent) Register(mux *http.ServeMux) {
 // escribiendo en ellos: desmontar por debajo de un proceso vivo pierde sus
 // escrituras.
 func (a *Agent) Close() {
+	// El servicio primero: es quien escribe en los volúmenes.
+	StopService()
 	shareState.Close()
 	a.Volumes.Release()
 }

@@ -21,6 +21,7 @@ const (
 	GuestCapExec    = "exec"     // /exec, /exec/stream, /exec/pty, /files (con kling.exec=1)
 	GuestCapMCP     = "mcp"      // el puente MCP: / y /mcp
 	GuestCapBootOpt = "boot-opt" // ignora los kling.* y las opciones de volumen que no conoce
+	GuestCapService = "service"  // GET /service: el servicio supervisado (guest_service.go)
 )
 
 // GuestHealth es la respuesta JSON de GET /healthz.

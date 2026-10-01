@@ -50,6 +50,9 @@ func main() {
 	agent.Name, agent.Version = "kling-guest", Version
 	mux := http.NewServeMux()
 	agent.Register(mux)
+	// El servicio de la imagen, si declara uno (/etc/kindling/service.json):
+	// con los volúmenes ya montados.
+	agent.StartService()
 
 	srv := &http.Server{
 		Addr:    *listen,
