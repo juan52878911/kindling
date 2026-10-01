@@ -42,7 +42,7 @@ func cmdGolden(args []string) error {
 		return usageErr("usage: kling db golden [-script P] [-H host] image [-ext [-pg 17] [-only A,B]] | build [options] <name>\n" +
 			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -role R  -database B\n" +
 			"                 -extension A,B  -preload A,B  -conf K=V  -as-super  -env-file F\n" +
-			"                 -step CMD -agent T [-workdir DIR] [-step-timeout 30m] | -sql FILE   (in order, after the SQL)\n" +
+			"                 -step CMD -agent T [-workdir DIR] [-step-timeout 30m] | -super-step CMD | -sql FILE   (in order, after the SQL)\n" +
 			"                 -image I | -from T  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
 			"  image -ext: the pg16-ext template, with TimescaleDB, pgvector, PostGIS, pg_cron and pg_partman\n" +
 			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)\n" +

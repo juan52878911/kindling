@@ -95,7 +95,10 @@ func (a *app) rehearseStep(ctx context.Context, mc *api.Machine, o stepOpts, loc
 	if err != nil {
 		return err
 	}
-	f := rehearseFile{File: "step: " + o.steps[0].cmd, SizeBefore: size, SizeAfter: size}
+	// En la tabla, la primera línea del comando, recortada: puede ser un
+	// script entero.
+	label, _, _ := strings.Cut(strings.TrimSpace(o.steps[0].cmd), "\n")
+	f := rehearseFile{File: "step: " + clip(label, 60), SizeBefore: size, SizeAfter: size}
 	stopSampling := a.lockSampler(ctx, mc.ID)
 	start := nowFn()
 	err = a.runStepCmd(ctx, agent, o, o.steps[0].cmd, defaultAttachHost(mc), role, db)

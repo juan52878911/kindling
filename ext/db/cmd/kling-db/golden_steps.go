@@ -12,6 +12,9 @@ package main
 //  1. db-golden.sh construye <nombre>-base con todo lo de siempre (extensiones,
 //     -migrations, -init...).
 //  2. Una copia de ese golden (kling db up), con su clave rotada.
+//     -super-step "<cmd>" corre DENTRO de la copia, como el superusuario por el
+//     socket local (con -workdir en /tmp/kdb-work): lo que en Docker hacía un
+//     script como POSTGRES_USER superusuario y el rol de la app no puede.
 //  3. Si hay -step: una microVM del agente (-agent, con egress allowlist) a la
 //     que se sube -workdir en /work y se le da la copia por attach. Cada paso
 //     corre con `sh -c` en /work con PGHOST, PGPORT, PGUSER, PGDATABASE,
@@ -44,8 +47,9 @@ import (
 // goldenStep es un paso tras el golden base: un comando en el agente o un
 // fichero SQL en la copia.
 type goldenStep struct {
-	cmd string // -step
-	sql string // -sql
+	cmd   string // -step (en el agente) o -super-step (en la copia)
+	sql   string // -sql
+	super bool   // -super-step
 }
 
 // stepOpts son los flags de los pasos, sacados de los de db-golden.sh.
@@ -106,7 +110,7 @@ func parseSteps(args []string) (rest []string, o stepOpts, ok bool, err error) {
 			return v, err
 		}
 		switch f {
-		case "step", "sql", "agent", "workdir", "step-timeout":
+		case "step", "super-step", "sql", "agent", "workdir", "step-timeout":
 			v, err := get()
 			if err != nil {
 				return nil, o, false, err
@@ -117,6 +121,11 @@ func parseSteps(args []string) (rest []string, o stepOpts, ok bool, err error) {
 					return nil, o, false, usageErr("-step needs a command")
 				}
 				o.steps = append(o.steps, goldenStep{cmd: v})
+			case "super-step":
+				if strings.TrimSpace(v) == "" {
+					return nil, o, false, usageErr("-super-step needs a command")
+				}
+				o.steps = append(o.steps, goldenStep{cmd: v, super: true})
 			case "sql":
 				o.steps = append(o.steps, goldenStep{sql: v})
 			case "agent":
@@ -160,7 +169,7 @@ func parseSteps(args []string) (rest []string, o stepOpts, ok bool, err error) {
 	}
 	hayCmd := false
 	for _, s := range o.steps {
-		if s.cmd != "" {
+		if s.cmd != "" && !s.super {
 			hayCmd = true
 		}
 		if s.sql != "" {
@@ -274,9 +283,15 @@ func (a *app) buildWithSteps(ctx context.Context, o stepOpts, runScript func([]s
 		return err
 	}
 
-	hayCmd := false
+	hayCmd, haySuper := false, false
 	for _, s := range o.steps {
-		hayCmd = hayCmd || s.cmd != ""
+		hayCmd = hayCmd || (s.cmd != "" && !s.super)
+		haySuper = haySuper || s.super
+	}
+	if haySuper {
+		if err := a.prepareSuperSteps(ctx, cp, o); err != nil {
+			return err
+		}
 	}
 	if hayCmd {
 		if agent, err = a.startAgent(ctx, o, cp, say); err != nil {
@@ -294,6 +309,13 @@ func (a *app) buildWithSteps(ctx context.Context, o stepOpts, runScript func([]s
 			continue
 		}
 		say("step %d: %s", i+1, s.cmd)
+		if s.super {
+			if err := a.runSuperStep(ctx, cp, o, s.cmd, db); err != nil {
+				return fmt.Errorf("step %d (%s): %w; nothing was saved", i+1, s.cmd, err)
+			}
+			say("step %d: ok in %.1fs", i+1, time.Since(st).Seconds())
+			continue
+		}
 		if err := a.runStepCmd(ctx, agent, o, s.cmd, host, role, db); err != nil {
 			return fmt.Errorf("step %d (%s): %w; nothing was saved", i+1, s.cmd, err)
 		}
@@ -374,6 +396,60 @@ func (a *app) startAgent(ctx context.Context, o stepOpts, cp *api.Machine, say f
 		return ag, err
 	}
 	return ag, nil
+}
+
+// prepareSuperSteps sube -workdir y -env-file a la copia, para los
+// -super-step: en /tmp/kdb-work y /tmp/kdb-step.env, del usuario postgres, y
+// finishCopy los borra antes de congelar (todo /tmp/kdb-*).
+func (a *app) prepareSuperSteps(ctx context.Context, cp *api.Machine, o stepOpts) error {
+	if _, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "rm -rf /tmp/kdb-work && install -d -o postgres -g postgres -m 700 /tmp/kdb-work"); err != nil {
+		return err
+	}
+	if o.workdir != "" {
+		tgz, _, err := tarDir(o.workdir)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tgz)
+		if _, err := a.k.Run(ctx, nil, "cp", tgz, cp.ID+":/tmp/kdb-work.tgz"); err != nil {
+			return err
+		}
+		if _, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c",
+			"cd /tmp/kdb-work && tar xzf /tmp/kdb-work.tgz && rm /tmp/kdb-work.tgz && chown -R postgres:postgres /tmp/kdb-work"); err != nil {
+			return err
+		}
+	}
+	if o.envFile != "" {
+		if _, err := a.k.Run(ctx, nil, "cp", o.envFile, cp.ID+":/tmp/kdb-step.env"); err != nil {
+			return err
+		}
+		if _, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "chown postgres:postgres /tmp/kdb-step.env && chmod 600 /tmp/kdb-step.env"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// superStepScript corre un -super-step dentro de la copia, como el usuario
+// del sistema postgres: psql entra como el superusuario por el socket local
+// (pg_hba: local all postgres peer), como los scripts de init de Docker. Lo
+// que el rol de la aplicación no puede hacer (ALTER ROLE ... NOSUPERUSER,
+// por ejemplo), sin hacerlo superusuario a él.
+const superStepScript = `set -e
+cd /tmp/kdb-work
+if [ -f /tmp/kdb-step.env ]; then
+  while IFS= read -r l || [ -n "$l" ]; do
+    case "$l" in ''|'#'*) continue ;; esac
+    export "${l%%=*}=${l#*=}"
+  done < /tmp/kdb-step.env
+fi
+export PGHOST=/run/postgresql PGUSER=postgres PGDATABASE="$KDB_DB"
+exec sh -c "$1"`
+
+func (a *app) runSuperStep(ctx context.Context, cp *api.Machine, o stepOpts, cmd, db string) error {
+	args := []string{"exec", "-timeout", strconv.Itoa(int(o.timeout.Seconds())) + "s", "-e", "KDB_DB=" + db,
+		cp.ID, "--", "su", "-s", "/bin/sh", "postgres", "-c", `sh -c "$0" kdb-super "$1"`, superStepScript, cmd}
+	return a.runKling(ctx, args)
 }
 
 // waitExec espera a que el agente del invitado conteste.
@@ -571,4 +647,3 @@ func tarDir(dir string) (string, int, error) {
 	}
 	return name, n, nil
 }
-

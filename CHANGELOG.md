@@ -10,6 +10,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling db golden build` hace el golden de un proyecto real en un comando.** `-step "<cmd>"
+  -agent <plantilla> -workdir <dir>` corre un programa (alembic, prisma...) en una microVM
+  con la copia por `attach`; `-super-step` corre dentro de la base como superusuario por el
+  socket local; `-sql` corre SQL como el rol; `-init DIR` ejecuta un directorio al estilo
+  `docker-entrypoint-initdb.d` (`.sql`, `.sh`, `\i`) como el rol de la aplicación, con
+  `CREATEROLE` solo mientras dura; `-env-file` lleva las claves fuera de argv. El golden se
+  guarda con su contraseña y su `conn.env`. Con AuraCRM `main`: 28 s y un comando (antes,
+  ~200 s y una docena de pasos a mano). `rehearse -step` ensaya un programa y lista sus
+  sentencias y los locks fuertes que pide. `kling exec` y `kling shell` llevan los
+  marcadores de las credenciales de la máquina (`PGPASSWORD` tras `kling db attach`).
 - **`kling db golden image -ext`: Postgres con extensiones que Alpine no trae.** La plantilla
   `pg16-ext` (o `pg17-ext`) lleva TimescaleDB 2.30.2 con licencia TSL (compresión),
   pgvector 0.8.0, PostGIS 3.6.4, pg_cron y pg_partman compiladas contra el Postgres de la
