@@ -69,7 +69,11 @@ const (
   JOIN pg_attribute a ON a.attrelid = c.oid
   WHERE a.attname = 'tenant_id' AND NOT a.attisdropped AND c.relkind IN ('r', 'p')
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND n.nspname NOT LIKE 'pg\_toast%') t`
+    AND n.nspname NOT LIKE 'pg\_toast%'
+    -- Las de una extensión (el catálogo de TimescaleDB tiene un tenant_id) no
+    -- son de la aplicación.
+    AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e')
+    AND n.nspname NOT LIKE '\_timescaledb%') t`
 )
 
 type roleRow struct {
