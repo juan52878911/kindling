@@ -98,8 +98,9 @@ Laboratorio (CT 105: i7-8700T, 4 vCPU, 8 GiB), 2026-10-01:
 
 | | |
 |---|---|
-| Construcción completa | 466 s (TimescaleDB ~4,5 min; PostGIS ~2,5 min; pgvector, pg_cron y pg_partman, segundos) |
+| Construcción completa | 466 s (TimescaleDB ~4,5 min; PostGIS ~2,5 min; pgvector, pg_cron y pg_partman, segundos); `pg17-ext`, 477 s |
 | Plantilla `pg16-ext` | **50 MiB de memoria, 104 MiB de disco** (con temporales en el overlay, Postgres arrancado dentro y los scripts de actualización: 350 y 475 MiB) |
+| Plantilla `pg17-ext` | 50 MiB de memoria, 109 MiB de disco |
 | Compilado | 5,4 MiB de extensiones y 14 MiB de librerías de ejecución (`.apk`) |
 
 ## Construir el dorado
