@@ -37,7 +37,7 @@ antes para comparar. Probado en arm64 (vz) y amd64 (Firecracker) con
 
 ## Estado (2026-09-29): con el núcleo de "listo" y ganchos
 
-El núcleo trae ya lo que pedía el prototipo (`CHANGELOG.md`, "Sin publicar";
+El núcleo trae ya lo que pedía el prototipo (`CHANGELOG.md`, v0.17.0;
 `docs/api.md`, "Listo y ganchos tras restaurar"): la imagen declara la sonda
 `/etc/kindling/ready` (`sys.boot_completed=1`) y el gancho
 `/etc/kindling/post-restore.d/10-identity`; la receta, `cpu_pct_per_vcpu: 100`

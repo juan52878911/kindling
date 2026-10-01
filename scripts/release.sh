@@ -15,13 +15,17 @@
 #   - Working tree limpio (sin cambios sin commitear)
 #   - main al día con origin/main
 #   - Permisos para pushear tags al repo
+#   - CHANGELOG.md con la sección "## [X.Y.Z] - AAAA-MM-DD" (inglés, una
+#     línea por cambio): es lo único que llevan las notas de la release
 #
 # Lo que hace:
 #   1. Verifica que el working tree esté limpio
 #   2. Verifica que ext/*/go.mod requieran kindling en esa misma versión
-#   3. Crea un tag anotado vX.Y.Z con mensaje corto
-#   4. Push del tag → activa .github/workflows/release.yml
-#   5. (Opcional) espera a que el workflow termine y abre la release en el browser
+#   3. Verifica que CHANGELOG.md tenga el bloque de la versión
+#      (scripts/release-notes.sh, el mismo que usa el workflow)
+#   4. Crea un tag anotado vX.Y.Z con mensaje corto
+#   5. Push del tag → activa .github/workflows/release.yml
+#   6. (Opcional) espera a que el workflow termine y abre la release en el browser
 
 set -u
 
@@ -31,14 +35,13 @@ WAIT=0
 
 usage() {
     cat <<EOF
-Uso: scripts/release.sh [--dry-run] [--wait] [VERSION]
+Usage: scripts/release.sh [--dry-run] [--wait] [VERSION]
 
-  --dry-run   muestra qué haría sin tocar nada
-  --wait      espera a que el workflow de release termine
-  VERSION     tag a crear (ej. v0.2.0). Si se omite, sugiere el siguiente
-              SemVer a partir del último tag usando VERSION del entorno.
+  --dry-run   show what would happen, and the release notes, without changing anything
+  --wait      wait for the release workflow to finish
+  VERSION     tag to create (e.g. v0.2.0); CHANGELOG.md needs a "## [0.2.0]" section
 
-Variables de entorno: VERSION.
+Environment: VERSION.
 EOF
 }
 
@@ -53,23 +56,23 @@ done
 
 # ── preflight ──────────────────────────────────────────────────────────────
 if ! command -v git >/dev/null 2>&1; then
-    echo "git no encontrado" >&2; exit 1
+    echo "git not found" >&2; exit 1
 fi
 # En modo dry-run saltamos las verificaciones de repo/working tree.
 if [ "$DRY_RUN" = "0" ]; then
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "no estamos en un repo git" >&2; exit 1
+        echo "not inside a git repository" >&2; exit 1
     fi
 fi
 
 if [ -z "$VERSION" ]; then
     LAST=$(git tag --list 'v*' --sort=-v:refname | head -1)
     if [ -z "$LAST" ]; then
-        echo "no hay tags previos y no se pasó VERSION. Empezamos en v0.1.0" >&2
+        echo "no previous tags and no VERSION given: starting at v0.1.0" >&2
         VERSION="v0.1.0"
     else
-        echo "último tag: $LAST"
-        echo "pasa VERSION=vX.Y.Z explícito (no se incrementa automáticamente a propósito)" >&2
+        echo "last tag: $LAST"
+        echo "pass VERSION=vX.Y.Z explicitly (no automatic bump, on purpose)" >&2
         exit 1
     fi
 fi
@@ -81,14 +84,14 @@ case "$VERSION" in
 esac
 
 if git tag --list "$VERSION" | grep -q "^${VERSION}\$"; then
-    echo "el tag $VERSION ya existe localmente" >&2
+    echo "tag $VERSION already exists locally" >&2
     exit 1
 fi
 
 # Working tree limpio (--dry-run lo permite)
 if [ "$DRY_RUN" = "0" ]; then
     if ! git diff --quiet --ignore-submodules HEAD 2>/dev/null; then
-        echo "hay cambios sin commitear. Haz commit o usa --dry-run." >&2
+        echo "uncommitted changes: commit them or use --dry-run" >&2
         git status --short >&2
         exit 1
     fi
@@ -102,7 +105,7 @@ for m in ext/*/go.mod; do
     [ -f "$m" ] || continue
     REQ=$(awk '$1=="require" && $2=="github.com/juan52878911/kindling" {print $3}' "$m")
     if [ "$REQ" != "$VERSION" ]; then
-        echo "$m requiere kindling ${REQ:-(nada)}, no $VERSION. Actualízalo antes de etiquetar." >&2
+        echo "$m requires kindling ${REQ:-(nothing)}, not $VERSION; update it before tagging" >&2
         [ "$DRY_RUN" = "1" ] || exit 1
     fi
 done
@@ -111,38 +114,46 @@ done
 LOCAL=$(git rev-parse --verify main 2>/dev/null || git rev-parse --verify HEAD)
 REMOTE=$(git rev-parse --verify origin/main 2>/dev/null || echo "")
 if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-    echo "main local ($LOCAL) != origin/main ($REMOTE). Haz fetch/merge primero." >&2
+    echo "local main ($LOCAL) != origin/main ($REMOTE): fetch/merge first" >&2
+    exit 1
+fi
+
+# ── notas ──────────────────────────────────────────────────────────────────
+# Las notas son el bloque de esta versión en CHANGELOG.md y una línea de
+# instalación. Sin bloque el workflow fallaría tras compilar: se para aquí.
+if ! NOTES=$(sh "$(dirname "$0")/release-notes.sh" "$VERSION"); then
+    echo "add a \"## [${VERSION#v}] - YYYY-MM-DD\" section to CHANGELOG.md before tagging" >&2
     exit 1
 fi
 
 # ── crear tag ──────────────────────────────────────────────────────────────
-MSG="release $VERSION — ver CHANGELOG.md"
+MSG="release $VERSION — see CHANGELOG.md"
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo "(dry-run) haría:"
+    echo "(dry-run) would run:"
     echo "  git tag -a $VERSION -m \"$MSG\""
     echo "  git push origin $VERSION"
-    echo "  GitHub Actions compila y publica la release con los binarios,"
-    echo "  las extensiones de ext/ y la imagen del operador."
+    echo "GitHub Actions then builds and publishes the release with these notes:"
+    echo ""
+    printf '%s\n' "$NOTES"
     exit 0
 fi
 
-echo "creando tag anotado $VERSION..."
+echo "creating annotated tag $VERSION..."
 git tag -a "$VERSION" -m "$MSG"
 
-echo "pusheando $VERSION a origin (esto activa el workflow)..."
+echo "pushing $VERSION to origin (this starts the workflow)..."
 git push origin "$VERSION"
 
 cat <<EOF
 
-  ✓ tag $VERSION pusheado.
+  ✓ tag $VERSION pushed.
 
-  El workflow .github/workflows/release.yml ya está corriendo.
-  Mira el progreso en:
+  .github/workflows/release.yml is running. Progress:
 
       https://github.com/$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')/actions
 
-  Cuando termine, la release queda en:
+  When it finishes, the release is at:
 
       https://github.com/$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')/releases/tag/$VERSION
 EOF
@@ -150,16 +161,16 @@ EOF
 # ── esperar al workflow (opcional) ─────────────────────────────────────────
 if [ "$WAIT" = "1" ]; then
     if ! command -v gh >/dev/null 2>&1; then
-        echo "gh CLI no encontrado, no puedo esperar al workflow" >&2
+        echo "gh CLI not found, cannot wait for the workflow" >&2
         exit 0
     fi
-    echo "esperando a que termine el workflow..."
+    echo "waiting for the workflow..."
     REPO=$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')
     gh run watch --exit-status --repo "$REPO" || {
-        echo "el workflow terminó con error. Revisa:" >&2
+        echo "the workflow failed. See:" >&2
         echo "  https://github.com/$REPO/actions" >&2
         exit 1
     }
-    echo "✓ release publicada"
+    echo "✓ release published"
     gh release view "$VERSION" --repo "$REPO" --web
 fi

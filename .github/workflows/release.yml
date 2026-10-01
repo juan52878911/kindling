@@ -214,26 +214,9 @@ jobs:
       - name: generate release notes
         shell: bash
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          # El bloque de esta versión del CHANGELOG; si no lo hay, unas notas
-          # mínimas con la instalación.
-          awk -v ver="${VERSION#v}" '
-            /^## / { if (seen) exit; if (index($0, ver)) seen=1 }
-            seen { print }
-          ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            {
-              echo "## ${VERSION}"
-              echo ""
-              echo "Binarios para Linux y macOS (amd64, arm64). Todos los de esta release son compatibles entre sí."
-              echo ""
-              echo '```sh'
-              echo "curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh"
-              echo "# con extensiones:"
-              echo "curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh -s -- --with mcp,sandbox"
-              echo '```'
-            } > notes.md
-          fi
+          # El bloque de esta versión del CHANGELOG y una línea de instalación;
+          # sin bloque, la release no se publica.
+          scripts/release-notes.sh "${{ steps.ver.outputs.version }}" CHANGELOG.md > notes.md
           cat notes.md
 
       - name: create GitHub release
