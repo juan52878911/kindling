@@ -13,6 +13,7 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -60,11 +61,62 @@ func (d *Dialer) Dial(ctx context.Context) (net.Conn, error) {
 }
 
 func dialUnix(ctx context.Context, path string) (net.Conn, error) {
-	c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", path)
+	addr, err := shortPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot talk to the daemon at %s: %w", path, err)
+	}
+	c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", addr)
 	if err != nil {
 		return nil, fmt.Errorf("cannot talk to the daemon at %s: %w", path, err)
 	}
 	return c, nil
+}
+
+// shortPath devuelve path si cabe en sun_path y, si no, un enlace simbólico
+// corto en /tmp/kling-<uid> que apunta a él: connect() sigue el enlace y el
+// tope se aplica a la ruta que se le pasa, no a la resuelta. Sin esto, un
+// socket con una ruta larga (un HOME largo en macOS, un -socket hondo) daba
+// un "connect: invalid argument" que no decía nada. Es el mismo truco, y el
+// mismo directorio y nombre de enlace, que usa el daemon con los sockets de
+// sus máquinas (internal/fc).
+func shortPath(path string) (string, error) {
+	if len(path) < maxSunPath {
+		return path, nil
+	}
+	dir := filepath.Join(tmpBase, fmt.Sprintf("kling-%d", os.Getuid()))
+	link, err := shortLink(dir, path)
+	if err != nil {
+		return "", fmt.Errorf("the socket path is %d bytes, a unix socket allows %d, and no short link could be made in %s: %w",
+			len(path), maxSunPath-1, dir, err)
+	}
+	return link, nil
+}
+
+// shortLink devuelve un enlace corto en dir hacia destino, creándolo si
+// falta. El directorio tiene que ser solo nuestro: un enlace plantado por
+// otro usuario nos haría hablar con SU socket. El nombre sale de un hash del
+// destino, y el enlace se crea al lado y se renombra encima para que dos
+// clientes a la vez no vean uno a medias.
+func shortLink(dir, destino string) (string, error) {
+	if err := privateDir(dir); err != nil {
+		return "", err
+	}
+	h := sha256.Sum256([]byte(destino))
+	link := filepath.Join(dir, hex.EncodeToString(h[:8])+".sock")
+	if actual, err := os.Readlink(link); err == nil && actual == destino {
+		return link, nil
+	}
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	tmp := link + "." + hex.EncodeToString(rnd[:])
+	if err := os.Symlink(destino, tmp); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return link, nil
 }
 
 // userCacheDir y tmpBase son os.UserCacheDir y /tmp en producción; las
@@ -218,7 +270,11 @@ func (p *pipeConn) SetWriteDeadline(t time.Time) error { return nil }
 // ServeStdio conecta stdin/stdout con el socket local del daemon. Es el extremo
 // remoto de dialSSH y no está pensado para uso manual.
 func ServeStdio(socket string, in io.Reader, out io.Writer) error {
-	c, err := net.Dial("unix", socket)
+	addr, err := shortPath(socket)
+	if err != nil {
+		return fmt.Errorf("daemon socket %s: %w", socket, err)
+	}
+	c, err := net.Dial("unix", addr)
 	if err != nil {
 		return err
 	}
