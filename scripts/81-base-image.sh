@@ -116,17 +116,32 @@ if [ -n "$SERVICE" ] && [ ! -x "$mnt$SERVICE" ]; then
   echo "SERVICE $SERVICE is not an executable inside the image" >&2; exit 1
 fi
 
+# Las variables del spec NO van en /entrypoint: este es 0755 y cualquier
+# proceso del invitado lo leería. Van a /etc/kling/env, 0600 de root, que el
+# entrypoint (PID 1, root) carga con `.`. Siguen dentro de la capa, compartida
+# por todas las máquinas de la imagen: para secretos, MMDS o credenciales.
+has_env=0
+if [ -n "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
+  mkdir -p "$mnt/etc/kling"
+  rm -f "$mnt/etc/kling/env"
+  (
+    umask 077
+    while IFS= read -r kv; do
+      [ -n "$kv" ] || continue
+      printf 'export %s=%s\n' "${kv%%=*}" "$(sq "${kv#*=}")"
+    done < "$ENV_FILE" > "$mnt/etc/kling/env"
+  )
+  chown 0:0 "$mnt/etc/kling/env"
+  chmod 600 "$mnt/etc/kling/env"
+  has_env=1
+fi
+
 {
   echo '#!/bin/sh'
   echo '# Generado por el constructor base de kindling: el agente de invitado es PID 1.'
   echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
   echo 'export HOME=/root'
-  if [ -n "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
-    while IFS= read -r kv; do
-      [ -n "$kv" ] || continue
-      printf 'export %s=%s\n' "${kv%%=*}" "$(sq "${kv#*=}")"
-    done < "$ENV_FILE"
-  fi
+  [ "$has_env" = 0 ] || echo '. /etc/kling/env'
   if [ -n "$SERVICE" ]; then
     # El servicio arranca ANTES que el agente y en segundo plano: el agente es
     # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda

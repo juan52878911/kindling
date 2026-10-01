@@ -1235,7 +1235,7 @@ The guest is third-party code: assume it is hostile. The full threat model — i
 | No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
 | No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine; CPU cgroup per machine; cap of 256 |
 | No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
-| No secrets in snapshots | secrets are injected per session via MMDS, into the live machine only |
+| No secrets in snapshots | secrets are injected via MMDS (shared by every session of the machine), into the live machine only |
 
 Verified **from inside the guest**, which is the only measurement that counts:
 

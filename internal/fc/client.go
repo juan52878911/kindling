@@ -288,11 +288,11 @@ func (c *Client) SetMMDS(ctx context.Context, ifaceIDs []string) error {
 
 // PutMMDSData escribe el store JSON del MMDS. Es lo que el invitado lee luego por
 // 169.254.169.254. A diferencia de SetMMDS (config, pre-boot), esto se hace sobre
-// una microVM VIVA: es la inyección del secreto de sesión.
+// una microVM VIVA: es la inyección de secretos.
 //
 // El store es un único documento JSON que PISA por completo al anterior (PUT, no
 // merge). El esquema lo define kindling (ver bridge): un objeto con "env" (comunes
-// a todas las sesiones) y "sessions" keyed por Mcp-Session-Id.
+// a todas las sesiones; "sessions" se retiró, ver pkg/guest/mmds.go).
 func (c *Client) PutMMDSData(ctx context.Context, data any) error {
 	return c.do(ctx, http.MethodPut, "/mmds", data)
 }

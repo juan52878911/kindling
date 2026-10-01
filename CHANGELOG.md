@@ -17,6 +17,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `docker-entrypoint.sh` de Postgres moría en initdb (`/dev/fd/63`) y `shared_memory` de
   Python con `FileNotFoundError`. Mismo arranque en frío (~30 ms). Llega al reconstruir la
   base.
+- **Lo pasado con `-env` al construir ya no lo lee cualquier proceso del invitado.** Los
+  constructores `base`, `android` y `mcp` (`kling add -env`) lo escribían como `export` en el
+  `/entrypoint`, que es 0755; ahora va en `/etc/kling/env`, 0600 de root, y el entrypoint lo
+  carga con `.`. Comprobado en el lab: `nobody` recibe `Permission denied` y PID 1 sigue
+  teniendo las variables. Siguen dentro de la capa, compartida por todas las máquinas de la
+  imagen: los secretos van por MMDS o por el proxy de credenciales. Y la documentación ya no
+  promete secretos MMDS por sesión: el almacén es común a todas las sesiones de la máquina.
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`

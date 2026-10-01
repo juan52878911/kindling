@@ -1242,7 +1242,7 @@ incluido **lo que no está resuelto** — está en [SECURITY.md](SECURITY.md).
 | Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
 | Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; cgroup de CPU por máquina; tope de 256 |
 | Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
-| Sin secretos en snapshots | los secretos se inyectan por sesión vía MMDS, solo en la máquina viva |
+| Sin secretos en snapshots | los secretos se inyectan vía MMDS (comunes a todas las sesiones de la máquina), solo en la máquina viva |
 
 Verificado **desde dentro del invitado**, que es la única medición que cuenta:
 

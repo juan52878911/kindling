@@ -223,7 +223,7 @@ var coreTree = []section{
   machine squeeze [-force] <ref>...                balloon: returns the guest's free
                                                    memory to the host (-force: also a
                                                    copy sharing its template's memory)
-  machine secret <ref> [-f store.json] [-hooks]    injects a session secret via MMDS
+  machine secret <ref> [-f store.json] [-hooks]    injects secrets via MMDS (shared by all sessions)
                                                    (stdin if no -f); it can no longer
                                                    be frozen. -hooks: then runs the
                                                    image's post-restore hooks; after

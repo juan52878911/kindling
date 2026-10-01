@@ -225,9 +225,12 @@ Dos diferencias con npm que hay que conocer:
   caza el propio build: `80-mcp-image.sh` comprueba con `chroot ... command -v`
   que el comando exista dentro de la imagen y falla ANTES de importar, no en el
   import como "el servidor no abrió el puerto".
-- **`kling mcp add -env KEY=value`** hornea variables de entorno en el entrypoint
+- **`kling mcp add -env KEY=value`** hornea variables de entorno en la imagen
   (en texto plano: para interruptores, no para secretos). Existía `-e` en el
-  script y ningún camino del CLI llegaba a él.
+  script y ningún camino del CLI llegaba a él. Van en `/etc/kling/env`, 0600 de
+  root, que el entrypoint carga con `.`; no en el `/entrypoint`, que es 0755 y
+  cualquier proceso del invitado leería. Siguen en la capa, compartida por todas
+  las máquinas de la imagen.
 
 ### El caso que lo justifica: semgrep
 

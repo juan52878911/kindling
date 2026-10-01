@@ -210,6 +210,7 @@ func TestBuild(t *testing.T) {
 		Files: []File{{Path: "/usr/local/bin/kling-phoned", Src: launcher},
 			{Path: "/etc/kindling/ready", Content: &ready, Mode: "0755"}},
 		Conf:        map[string]string{"ANDROID_NET": "veth"},
+		Env:         []string{"TOKEN=s3cr'eto"},
 		DataExt4MiB: 64,
 		Slim:        &Slim{Prop: "ro.config.low_ram=true # comentario\n", Services: []string{"wifi"}, Apps: []string{"/system/app/Browser2"}, FeaturesXML: "<permissions/>\n"},
 	}
@@ -279,6 +280,16 @@ func TestBuild(t *testing.T) {
 	}
 	if e := cat(up, "/entrypoint"); !strings.Contains(e, "'/usr/local/bin/kling-phoned'") || !strings.Contains(e, "exec /usr/local/bin/kling-guest -listen :8080") {
 		t.Fatalf("entrypoint:\n%s", e)
+	}
+	// -env no va en el /entrypoint (0755): va en /etc/kling/env, 0600 de root.
+	if e := cat(up, "/entrypoint"); strings.Contains(e, "TOKEN") || !strings.Contains(e, ". /etc/kling/env\n") {
+		t.Fatalf("entrypoint con el entorno dentro o sin cargarlo:\n%s", e)
+	}
+	if n := up.Lookup("/etc/kling/env"); n == nil || n.Mode != ext4.ModeReg|0o600 || n.UID != 0 || n.GID != 0 {
+		t.Fatalf("/etc/kling/env %+v", n)
+	}
+	if got := cat(up, "/etc/kling/env"); got != "export TOKEN='s3cr'\\''eto'\n" {
+		t.Fatalf("/etc/kling/env %q", got)
 	}
 	if !strings.Contains(cat(up, "/usr/local/lib/kindling-android/android.conf"), "ANDROID_NET=veth") {
 		t.Fatal("android.conf")

@@ -27,7 +27,7 @@ type Spec struct {
 	// Service es la ruta, dentro de la imagen, de lo que el entrypoint
 	// arranca y relanza antes de ceder el PID 1 al agente.
 	Service string `json:"service"`
-	// Env son variables KEY=VALUE que exporta el entrypoint.
+	// Env son variables KEY=VALUE que exporta el entrypoint (desde /etc/kling/env, 0600).
 	Env []string `json:"env,omitempty"`
 	// Files son los ficheros que se añaden a la imagen (en la capa).
 	Files []File `json:"files,omitempty"`

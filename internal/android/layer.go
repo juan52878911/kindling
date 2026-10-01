@@ -213,6 +213,10 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 	for _, f := range files {
 		b.putFile(upper, f.spec.Path, f.node)
 	}
+	if env := b.envFile(); env != "" {
+		// 0600 de root: el entrypoint es 0755 y lo leería cualquier proceso.
+		b.put(upper, envPath, []byte(env), 0o600)
+	}
 	b.put(upper, "/entrypoint", []byte(b.entrypoint()), 0o755)
 	b.put(upper, "/etc/resolv.conf", []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0o644)
 	if len(b.errs) > 0 {
@@ -297,14 +301,29 @@ func touchParent(root *ext4.Node, p string, t time.Time) {
 // sq entrecomilla para sh.
 func sq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
+// envPath guarda las variables del spec, como en 81-base-image.sh: fuera del
+// /entrypoint (0755, legible por todo el invitado), en un fichero 0600 de root
+// que el entrypoint (PID 1, root) carga. Siguen en la capa, compartida por las
+// máquinas de la imagen: para secretos, MMDS o credenciales.
+const envPath = "/etc/kling/env"
+
+// envFile son los `export` de spec.Env ("" si no hay ninguna).
+func (b *builder) envFile() string {
+	var e strings.Builder
+	for _, kv := range b.spec.Env {
+		k, v, _ := strings.Cut(kv, "=")
+		fmt.Fprintf(&e, "export %s=%s\n", k, sq(v))
+	}
+	return e.String()
+}
+
 // entrypoint es el /entrypoint de 81-base-image.sh con SERVICE.
 func (b *builder) entrypoint() string {
 	var e strings.Builder
 	e.WriteString("#!/bin/sh\n# Generado por el constructor android de kindling: el agente de invitado es PID 1.\n")
 	e.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nexport HOME=/root\n")
-	for _, kv := range b.spec.Env {
-		k, v, _ := strings.Cut(kv, "=")
-		fmt.Fprintf(&e, "export %s=%s\n", k, sq(v))
+	if len(b.spec.Env) > 0 {
+		e.WriteString(". " + envPath + "\n")
 	}
 	fmt.Fprintf(&e, "( while :; do %s; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &\n", sq(b.spec.Service))
 	e.WriteString("exec /usr/local/bin/kling-guest -listen :8080\n")
