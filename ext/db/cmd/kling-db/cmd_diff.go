@@ -650,7 +650,8 @@ func (a *app) diffRows(ctx context.Context, rep *diffReport, s1, s2 *diffSide, c
 		}
 		// Ni una clave en común con filas en las dos: casi seguro claves
 		// aleatorias (uuid) de dos seeds distintos, no un cambio de datos.
-		if rd.Unchanged == 0 && rd.Changed == 0 && rd.New > 0 && rd.Deleted > 0 && rd.Note == "" {
+		// Con una fila (alembic_version: otra revisión) no: eso es un cambio.
+		if rd.Unchanged == 0 && rd.Changed == 0 && rd.New > 1 && rd.Deleted > 1 && rd.Note == "" {
 			rd.Note = "no key in common: probably random keys (uuid) from separate seeds; -ignore-rows " + t1.display() + " if that is the case"
 		}
 	}
