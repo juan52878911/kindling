@@ -192,7 +192,16 @@ func Write(f *os.File, root *Node, streams []Stream, opt Options) (Stats, error)
 		}
 	}
 	for i, s := range streams {
+		if i >= len(keys) {
+			// Ningún fichero tiene los datos en este flujo ni en los
+			// siguientes (una capa OCI de solo directorios y whiteouts, o
+			// tapada entera por las de encima): no hace falta leerlos.
+			break
+		}
 		m := keys[i]
+		if len(m) == 0 {
+			continue
+		}
 		err := s(func(key int, r io.Reader) error {
 			n := m[key]
 			if n == nil || w.info[n].written {

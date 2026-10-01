@@ -165,6 +165,7 @@ deploy: daemon guest chispa-guest
 	scp -q scripts/builders/chispa $(TARGET):$$D/builder-chispa; \
 	scp -q scripts/builders/android $(TARGET):$$D/builder-android; \
 	scp -q scripts/builders/debian $(TARGET):$$D/builder-debian; \
+	scp -q scripts/builders/oci $(TARGET):$$D/builder-oci; \
 	scp -q packaging/$(BIN).service $(TARGET):$$D/; \
 	ssh $(TARGET) "D=$$D; "'sudo install -m755 "$$D/$(BIN)" /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
@@ -180,6 +181,7 @@ deploy: daemon guest chispa-guest
 		sudo install -m755 "$$D/builder-chispa" /usr/local/lib/kindling/builders/chispa && \
 		sudo install -m755 "$$D/builder-android" /usr/local/lib/kindling/builders/android && \
 		sudo install -m755 "$$D/builder-debian" /usr/local/lib/kindling/builders/debian && \
+		sudo install -m755 "$$D/builder-oci" /usr/local/lib/kindling/builders/oci && \
 		sudo install -m644 "$$D/$(BIN).service" /etc/systemd/system/ && \
 		if [ ! -f /etc/default/kling ]; then \
 			printf "%s\n" "# Config de kling propia de este host; make deploy la crea una vez y no la vuelve a tocar." "KLING_SOCKET_USER=$(HOST_USER)" "#KLING_RUN_AS=kindling" | sudo tee /etc/default/kling >/dev/null && \

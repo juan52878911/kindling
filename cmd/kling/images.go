@@ -15,7 +15,7 @@ import (
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|cat|put|copy> [...]")
+		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|import|cat|put|copy> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -31,6 +31,8 @@ func cmdImages(args []string) error {
 		return imagesRecipe(args[1:])
 	case "build":
 		return imagesBuild(args[1:])
+	case "import":
+		return imagesImport(args[1:])
 	case "cat":
 		return imagesCat(args[1:])
 	case "put":
@@ -38,7 +40,7 @@ func cmdImages(args []string) error {
 	case "copy", "cp":
 		return imagesCopy(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, cat, put or copy", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, import, cat, put or copy", args[0])
 	}
 }
 
@@ -213,11 +215,42 @@ func imagesRecipe(args []string) error {
 	}
 	if len(rec.Spec) > 0 && string(rec.Spec) != "null" {
 		var buf bytes.Buffer
-		if json.Indent(&buf, rec.Spec, "             ", "  ") == nil {
+		if json.Indent(&buf, maskSpecEnv(rec.Spec), "             ", "  ") == nil {
 			fmt.Printf("  spec:      %s\n", buf.String())
 		}
 	}
+	// Lo que se construyó de verdad, si el constructor lo fijó (oci: la
+	// etiqueta resuelta a digest).
+	var built struct{ Ref, Digest string }
+	if json.Unmarshal(rec.Built, &built) == nil && built.Digest != "" {
+		fmt.Printf("  image:     %s\n  digest:    %s\n", built.Ref, built.Digest)
+	}
 	return nil
+}
+
+// maskSpecEnv tapa los valores del "env" de un spec (KEY=valor → KEY=***):
+// los constructores oci y debian los guardan en la receta y pueden ser
+// contraseñas. Si el spec no tiene esa forma, va tal cual.
+func maskSpecEnv(spec json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(spec, &m) != nil {
+		return spec
+	}
+	var env []string
+	if json.Unmarshal(m["env"], &env) != nil || len(env) == 0 {
+		return spec
+	}
+	for i, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			env[i] = k + "=***"
+		}
+	}
+	m["env"], _ = json.Marshal(env)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return spec
+	}
+	return out
 }
 
 // imagesRm retira una imagen que ya no usa nadie.
