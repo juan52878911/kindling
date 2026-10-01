@@ -46,6 +46,9 @@ type Target struct {
 	CAFile        string
 	TLSServerName string
 	Insecure      bool
+	// All enseña cada hallazgo por separado; sin él, los de una misma regla
+	// sobre muchos objetos se agrupan en una línea con el recuento.
+	All bool
 }
 
 // Severity ordena los hallazgos. Info no cuenta como problema.
@@ -76,6 +79,11 @@ type Finding struct {
 	Sev  Severity
 	Msg  string
 	Fix  string
+	// Obj es el objeto del hallazgo (esquema.tabla) cuando la misma regla se
+	// repite por objeto, y GroupFix el arreglo para todos ("" = Fix): con
+	// ellos el informe agrupa (ver write).
+	Obj      string
+	GroupFix string
 }
 
 // querier lanza una consulta que devuelve un único valor de texto (las de la
@@ -88,11 +96,24 @@ type querier interface {
 type report struct {
 	target   string
 	findings []Finding
+	all      bool
 }
 
 func (r *report) add(rule string, sev Severity, fix, format string, args ...any) {
 	r.findings = append(r.findings, Finding{Rule: rule, Sev: sev, Msg: fmt.Sprintf(format, args...), Fix: fix})
 }
+
+// addObj es add para un hallazgo que se repite por objeto (ver Finding.Obj).
+func (r *report) addObj(rule string, sev Severity, fix, groupFix, obj, format string, args ...any) {
+	r.findings = append(r.findings, Finding{Rule: rule, Sev: sev, Msg: fmt.Sprintf(format, args...), Fix: fix, Obj: obj, GroupFix: groupFix})
+}
+
+// agruparDesde es cuántos hallazgos de una regla sobre objetos distintos
+// hacen falta para agruparlos; objetosEnGrupo, cuántos se nombran.
+const (
+	agruparDesde   = 3
+	objetosEnGrupo = 8
+)
 
 func (r *report) problems() int {
 	n := 0
@@ -109,8 +130,31 @@ func (r *report) write(w io.Writer) {
 	sort.SliceStable(fs, func(i, j int) bool { return fs[i].Sev > fs[j].Sev })
 	fmt.Fprintf(w, "kling db doctor: %s\n", r.target)
 	var cuenta [Critical + 1]int
+	// Los de una regla con objeto, por regla y severidad: 138 líneas de DB010
+	// (una por política y cláusula) dicen lo mismo que una con el recuento.
+	type clave struct {
+		rule string
+		sev  Severity
+	}
+	grupos := map[clave][]Finding{}
 	for _, f := range fs {
 		cuenta[f.Sev]++
+		if f.Obj != "" && !r.all {
+			k := clave{f.Rule, f.Sev}
+			grupos[k] = append(grupos[k], f)
+		}
+	}
+	hecho := map[clave]bool{}
+	for _, f := range fs {
+		k := clave{f.Rule, f.Sev}
+		if g := grupos[k]; f.Obj != "" && len(g) >= agruparDesde && !r.all {
+			if hecho[k] {
+				continue
+			}
+			hecho[k] = true
+			writeGroup(w, g)
+			continue
+		}
 		fmt.Fprintf(w, "  %-8s %s  %s\n", f.Sev, f.Rule, f.Msg)
 		if f.Fix != "" {
 			fmt.Fprintf(w, "  %-8s        fix: %s\n", "", f.Fix)
@@ -121,6 +165,40 @@ func (r *report) write(w io.Writer) {
 	}
 	fmt.Fprintf(w, "summary: %d critical, %d high, %d warn, %d info; %d problem(s)\n",
 		cuenta[Critical], cuenta[High], cuenta[Warn], cuenta[Info], r.problems())
+	if len(hecho) > 0 {
+		fmt.Fprintln(w, "(repeated findings are grouped: kling db doctor -all lists each one)")
+	}
+}
+
+// writeGroup escribe un grupo: el recuento, el primero entero como ejemplo,
+// los objetos (sin repetir) y el arreglo común.
+func writeGroup(w io.Writer, g []Finding) {
+	var objs []string
+	visto := map[string]bool{}
+	for _, f := range g {
+		if !visto[f.Obj] {
+			visto[f.Obj] = true
+			objs = append(objs, f.Obj)
+		}
+	}
+	f := g[0]
+	fmt.Fprintf(w, "  %-8s %s  %d findings on %d objects; e.g. %s\n", f.Sev, f.Rule, len(g), len(objs), f.Msg)
+	lista := objs
+	if len(lista) > objetosEnGrupo {
+		lista = lista[:objetosEnGrupo]
+	}
+	mas := ""
+	if n := len(objs) - len(lista); n > 0 {
+		mas = fmt.Sprintf(" (+%d more)", n)
+	}
+	fmt.Fprintf(w, "  %-8s        on: %s%s\n", "", strings.Join(lista, ", "), mas)
+	fix := f.GroupFix
+	if fix == "" {
+		fix = f.Fix
+	}
+	if fix != "" {
+		fmt.Fprintf(w, "  %-8s        fix: %s\n", "", fix)
+	}
 }
 
 // Run revisa t, escribe el informe en w y devuelve cuántos problemas encontró.
@@ -130,7 +208,7 @@ func Run(ctx context.Context, k klingc.Kling, t Target, w io.Writer) (problems i
 	if (t.Machine == "") == (t.URL == "") {
 		return 0, errors.New("doctor: give exactly one of a machine or a URL")
 	}
-	r := &report{}
+	r := &report{all: t.All}
 	if t.Machine != "" {
 		if k == nil {
 			return 0, errors.New("doctor: no kling client")

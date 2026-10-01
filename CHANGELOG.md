@@ -46,6 +46,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   se ramificaba el padre en silencio (la rama `dev` quedaba con el esquema de `main`).
   En el hook (`-switch -golden`), que es un respaldo, se avisa cuando no se usa. Una
   rama nueva que no es la actual nace congelada.
+- **`kling db doctor`**: el rol de la aplicación sale de la etiqueta `kling.db.role` (como en
+  MySQL), sin DB052/DB020 falsos con un golden sin `conn.env`; y lo repetido se agrupa
+  (con AuraCRM, 138 líneas DB010 pasan a una con el recuento; `-all` las lista).
 - **`kling db ls`** (o `ps`): las copias de un dueño con su motor, dorado, estado y avisos
   (`-json` para scripts).
 - **Reiniciar el daemon o congelar la máquina ya no mata a quien escribe en una carpeta

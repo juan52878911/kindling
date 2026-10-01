@@ -69,7 +69,11 @@ const (
   JOIN pg_attribute a ON a.attrelid = c.oid
   WHERE a.attname = 'tenant_id' AND NOT a.attisdropped AND c.relkind IN ('r', 'p')
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND n.nspname NOT LIKE 'pg\_toast%') t`
+    AND n.nspname NOT LIKE 'pg\_toast%'
+    -- Las de una extensión (el catálogo de TimescaleDB tiene un tenant_id) no
+    -- son de la aplicación.
+    AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e')
+    AND n.nspname NOT LIKE '\_timescaledb%') t`
 )
 
 type roleRow struct {
@@ -246,7 +250,7 @@ func policyChecks(ctx context.Context, qr querier, db string, env *sqlEnv, r *re
 				vars[v] = true
 			}
 			if why, bad := failOpen(e.expr); bad {
-				r.add("DB010", Critical, FailOpenFix,
+				r.addObj("DB010", Critical, FailOpenFix, "", safe(p.Schema, 64)+"."+safe(p.Table, 64),
 					"policy %s on %s.%s%s is fail-open in %s: %s, so every row is visible without a tenant; expression: %s",
 					q(p.Name), q(p.Schema), q(p.Table), where, e.kind, safe(why, 120), safe(e.expr, 160))
 			}
@@ -261,10 +265,13 @@ func policyChecks(ctx context.Context, qr querier, db string, env *sqlEnv, r *re
 		name := q(t.Schema) + "." + q(t.Table)
 		switch {
 		case !t.RLS:
-			r.add("DB011", High, fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY; and add a fail-closed policy", name),
+			r.addObj("DB011", High, fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY; and add a fail-closed policy", name),
+				"ALTER TABLE <table> ENABLE ROW LEVEL SECURITY on each one, and add a fail-closed policy (better: in the migration that creates it)",
+				safe(t.Schema, 64)+"."+safe(t.Table, 64),
 				"table %s%s has a tenant_id column but row level security is off", name, where)
 		case !t.Force && t.Owner == env.appRole:
-			r.add("DB012", High, fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", name),
+			r.addObj("DB012", High, fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", name),
+				"ALTER TABLE <table> FORCE ROW LEVEL SECURITY on each one", safe(t.Schema, 64)+"."+safe(t.Table, 64),
 				"table %s%s is owned by the application role %s without FORCE ROW LEVEL SECURITY: the owner skips its policies",
 				name, where, q(t.Owner))
 		}

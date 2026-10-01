@@ -19,11 +19,11 @@ import (
 // doctorTarget es lo que se diagnostica: una copia o una URL.
 type doctorTarget struct {
 	Machine, URL, CAFile, TLSServerName string
-	Insecure                            bool
+	Insecure, All                       bool
 }
 
 func runDoctor(ctx context.Context, k klingc.Kling, t doctorTarget, w io.Writer) (int, error) {
-	return doctor.Run(ctx, k, doctor.Target{Machine: t.Machine, URL: t.URL, CAFile: t.CAFile, TLSServerName: t.TLSServerName, Insecure: t.Insecure}, w)
+	return doctor.Run(ctx, k, doctor.Target{Machine: t.Machine, URL: t.URL, CAFile: t.CAFile, TLSServerName: t.TLSServerName, Insecure: t.Insecure, All: t.All}, w)
 }
 
 func runAudit(ctx context.Context, k klingc.Kling, machine, engine string, since time.Duration, jsonOut bool, w io.Writer) error {
