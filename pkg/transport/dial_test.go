@@ -218,3 +218,68 @@ func TestSSHMultiplexArgsSinDirectorioCaeAlModoDeSiempre(t *testing.T) {
 		t.Errorf("perdio los argumentos base al no poder multiplexar: %v", args)
 	}
 }
+
+// Un socket con una ruta que no cabe en sun_path se alcanza por un enlace
+// corto, tanto desde el cliente como desde dial-stdio; antes daba un
+// "connect: invalid argument" sin explicación.
+func TestDialRutaLargaPorEnlaceCorto(t *testing.T) {
+	base, err := os.MkdirTemp("/tmp", "trl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(base) })
+	oldTmp := tmpBase
+	t.Cleanup(func() { tmpBase = oldTmp })
+	tmpBase = base
+
+	hondo := filepath.Join(base, strings.Repeat("d", 60), strings.Repeat("e", 60))
+	if err := os.MkdirAll(hondo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(hondo, "kling.sock")
+	if len(sock) < maxSunPath {
+		t.Fatalf("la ruta de prueba mide %d bytes, debería pasar de %d", len(sock), maxSunPath)
+	}
+	// Escuchar con una ruta relativa corta: lo mismo que hace kling-vz.
+	t.Chdir(hondo)
+	ln, err := net.Listen("unix", "kling.sock")
+	if err != nil {
+		t.Skipf("no se puede abrir un socket unix aqui: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("ok"))
+			c.Close()
+		}
+	}()
+
+	for i := 0; i < 2; i++ { // la segunda reutiliza el enlace
+		c, err := New("unix://" + sock).Dial(context.Background())
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		b := make([]byte, 2)
+		if _, err := c.Read(b); err != nil || string(b) != "ok" {
+			t.Fatalf("leido %q, %v", b, err)
+		}
+		c.Close()
+	}
+	var out strings.Builder
+	if err := ServeStdio(sock, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("ServeStdio: %v", err)
+	}
+
+	// Si el directorio de enlaces no es privado, el error lo explica.
+	if err := os.Chmod(filepath.Join(base, fmt.Sprintf("kling-%d", os.Getuid())), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = New(sock).Dial(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "a unix socket allows") {
+		t.Fatalf("esperaba un error que explicara el tope, no %v", err)
+	}
+}

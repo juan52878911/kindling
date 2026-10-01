@@ -24,6 +24,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   teniendo las variables. Siguen dentro de la capa, compartida por todas las máquinas de la
   imagen: los secretos van por MMDS o por el proxy de credenciales. Y la documentación ya no
   promete secretos MMDS por sesión: el almacén es común a todas las sesiones de la máquina.
+- **El cliente llega a un socket con una ruta larga.** Un `unix://` de más de 103 bytes
+  (un HOME largo en macOS, un `-socket` hondo) daba `connect: invalid argument` sin más.
+  Ahora el cliente y `dial-stdio` conectan por un enlace corto en `/tmp/kling-<uid>/`, el
+  mismo truco que ya usaba el daemon con los sockets de sus máquinas; si no puede crearlo,
+  el error dice el tope y por qué.
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`
