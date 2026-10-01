@@ -27,6 +27,7 @@
 #     en chroot. apk comprueba las firmas con las claves de la imagen.
 #   - Cada fuente se clona por su etiqueta y se comprueba el commit: una
 #     etiqueta movida en el origen no cuela otro código.
+#   - Lleva bash, para los .sh de init al estilo Docker (golden build -init).
 #   - La plantilla NO tiene red (egress none: lo heredan sus copias). Las
 #     librerías que necesita PostGIS (geos, proj...) se bajan como .apk en la
 #     máquina de construcción y se instalan sin red en la de la plantilla, con
@@ -127,7 +128,9 @@ done
 
 # Paquetes de compilación y, solo con postgis, sus librerías de ejecución.
 build_pkgs="alpine-baselayout busybox build-base git postgresql$pg postgresql$pg-dev"
-run_pkgs=""
+# bash: los scripts de init al estilo de Docker (-init DIR con .sh) lo suelen
+# pedir, y la imagen pgNN solo trae el sh de busybox.
+run_pkgs="bash"
 for e in "${lista[@]}"; do
   case "$e" in
     timescaledb) build_pkgs+=" cmake openssl-dev" ;;
@@ -143,13 +146,23 @@ R=/build/root
 mkdir -p \$R/etc/apk
 cp -r /etc/apk/keys \$R/etc/apk/
 cp /etc/apk/repositories \$R/etc/apk/
-apk add --root \$R --initdb --update-cache $build_pkgs >/build/apk.log 2>&1 || { tail -20 /build/apk.log; exit 1; }
+# Con reintentos: un índice que no bajó entero da "no such package" de
+# paquetes que existen (visto en el laboratorio).
+ok=0
+for i in 1 2 3; do
+  apk add --root \$R --initdb --update-cache $build_pkgs >/build/apk.log 2>&1 && { ok=1; break; }
+  sleep 5
+done
+[ \$ok = 1 ] || { tail -20 /build/apk.log; exit 1; }
 mount -t proc proc \$R/proc
 mount --bind /dev \$R/dev
 cp /etc/resolv.conf \$R/etc/
 mkdir -p \$R/stage \$R/src /build/apks
 if [ -n "$run_pkgs" ]; then
-  cd /build/apks && apk fetch --recursive $run_pkgs >/build/fetch.log 2>&1 || { tail -20 /build/fetch.log; exit 1; }
+  cd /build/apks
+  ok=0
+  for i in 1 2 3; do apk fetch --recursive $run_pkgs >/build/fetch.log 2>&1 && { ok=1; break; }; sleep 5; done
+  [ \$ok = 1 ] || { tail -20 /build/fetch.log; exit 1; }
 fi
 EOF
 
@@ -171,7 +184,9 @@ EOF
         echo 'cd /src/vector && make OPTFLAGS="" with_llvm=no -j4 >/tmp/vector.log 2>&1 && make install with_llvm=no DESTDIR=/stage >>/tmp/vector.log 2>&1 || { tail -30 /tmp/vector.log; exit 1; }' ;;
       postgis)
         echo 'cd /src/postgis && ./autogen.sh >/tmp/postgis.log 2>&1 && ./configure --without-raster --without-topology --without-protobuf --without-gui --without-interrupt-tests --with-pgconfig=$PG_CONFIG >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }'
-        echo 'make -j4 >>/tmp/postgis.log 2>&1 && make install DESTDIR=/stage >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }' ;;
+        # Su make en paralelo tiene carreras al generar los scripts de
+        # actualización (topology.sql.tmp): si falla, se acaba en serie.
+        echo '{ make -j4 >>/tmp/postgis.log 2>&1 || make >>/tmp/postgis.log 2>&1; } && make install DESTDIR=/stage >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }' ;;
       pg_cron)
         echo 'cd /src/pg_cron && make with_llvm=no -j4 >/tmp/cron.log 2>&1 && make install with_llvm=no DESTDIR=/stage >>/tmp/cron.log 2>&1 || { tail -30 /tmp/cron.log; exit 1; }' ;;
       pg_partman)
@@ -181,9 +196,30 @@ EOF
 } > "$TMP/compile.sh"
 "${K[@]}" cp "$TMP/compile.sh" "$B:/build/root/compile.sh" >/dev/null
 t "compiling ${exts//,/, } against PostgreSQL $pg"
-"${K[@]}" exec -timeout 60m "$B" -- chroot /build/root /bin/sh /compile.sh
+# Desacoplada del exec: una conexión de minutos sin salida se cayó en el
+# laboratorio (read: connection timed out) a media compilación. Corre con
+# setsid y deja su código en compile.rc; aquí se mira cada 10 s.
+"${K[@]}" exec "$B" -- sh -c 'rm -f /build/compile.rc; setsid sh -c "chroot /build/root /bin/sh /compile.sh >/build/compile.log 2>&1; echo \$? >/build/compile.rc" </dev/null >/dev/null 2>&1 &'
+visto=""
+for i in $(seq 1 360); do
+  sleep 10
+  rc="$("${K[@]}" exec -timeout 30s "$B" -- sh -c 'cat /build/compile.rc 2>/dev/null; true' 2>/dev/null || true)"
+  ult="$("${K[@]}" exec -timeout 30s "$B" -- sh -c "grep '^== ' /build/compile.log | tail -n1" 2>/dev/null || true)"
+  if [ -n "$ult" ] && [ "$ult" != "$visto" ]; then t "  ${ult#== }"; visto="$ult"; fi
+  [ -z "$rc" ] || break
+  [ "$i" -lt 360 ] || die "the build did not finish in 60 min"
+done
+if [ "$rc" != 0 ]; then
+  "${K[@]}" exec "$B" -- tail -n 40 /build/compile.log >&2 || true
+  die "compiling failed (exit $rc)"
+fi
 
-# Lo instalado, sin cabeceras ni bitcode; y los .apk de ejecución.
+# Lo instalado, sin cabeceras, bitcode, documentación ni símbolos de
+# depuración; ni los scripts de ACTUALIZACIÓN entre versiones (nombre--a--b.sql:
+# solo sirven para ALTER EXTENSION UPDATE desde una versión que esta imagen
+# nunca tuvo, y en TimescaleDB y PostGIS son decenas de MiB). Y los .apk de
+# ejecución.
+"${K[@]}" exec "$B" -- chroot /build/root sh -c 'cd /stage && find usr/share -path "*/extension/*--*--*.sql" -delete && rm -rf usr/share/doc usr/share/man && find usr/lib -name "*.so" -exec strip --strip-unneeded {} +'
 "${K[@]}" exec "$B" -- sh -c 'cd /build/root/stage && tar czf /build/ext.tgz --exclude=usr/include --exclude="*.bc" usr && cd /build && tar czf /build/apks.tgz apks'
 "${K[@]}" cp "$B:/build/ext.tgz" "$TMP/ext.tgz" >/dev/null
 "${K[@]}" cp "$B:/build/apks.tgz" "$TMP/apks.tgz" >/dev/null
@@ -198,34 +234,45 @@ for i in $(seq 1 60); do
   [ "$i" -lt 60 ] || die "the guest agent does not answer"
   sleep 1
 done
-"${K[@]}" cp "$TMP/ext.tgz" "$P:/root/ext.tgz" >/dev/null
-"${K[@]}" cp "$TMP/apks.tgz" "$P:/root/apks.tgz" >/dev/null
-"${K[@]}" exec -i -timeout 10m "$P" -- sh -s <<EOF
+# Lo de paso va a un tmpfs: en el overlay de la plantilla solo queda lo
+# instalado (un fichero borrado del overlay sigue ocupando su disco).
+"${K[@]}" exec "$P" -- sh -c 'mkdir -p /run/kdb && mount -t tmpfs -o size=256m tmpfs /run/kdb'
+"${K[@]}" cp "$TMP/ext.tgz" "$P:/run/kdb/ext.tgz" >/dev/null
+"${K[@]}" cp "$TMP/apks.tgz" "$P:/run/kdb/apks.tgz" >/dev/null
+"${K[@]}" exec -i -timeout 10m "$P" -- sh -s <<INSTALAR
 set -eu
-cd /root
+cd /run/kdb
 tar xzf apks.tgz
 set -- apks/*.apk
 if [ -e "\$1" ]; then
   # Sin red y con la firma comprobada (las claves de la imagen).
-  apk add --no-network --repositories-file /dev/null "\$@" >/root/apk.log 2>&1 || { cat /root/apk.log; exit 1; }
+  apk add --no-network --no-cache --repositories-file /dev/null "\$@" >/run/kdb/apk.log 2>&1 || { cat /run/kdb/apk.log; exit 1; }
 fi
 tar xzf ext.tgz -C /
-rm -rf apks apks.tgz ext.tgz apk.log
 C=/usr/share/postgresql$pg/postgresql.conf.sample
-[ -f "\$C" ] || C=\$(ls /usr/share/postgresql*/postgresql.conf.sample | head -n1)
-if grep -q '^timescaledb' /root/.exts 2>/dev/null || [ -f /usr/lib/postgresql$pg/timescaledb.so ]; then
+if [ -f /usr/lib/postgresql$pg/timescaledb.so ]; then
   sed -i "s/^#shared_preload_libraries = ''/shared_preload_libraries = 'timescaledb'/" "\$C"
   grep -q "^shared_preload_libraries = 'timescaledb'" "\$C" || echo "shared_preload_libraries = 'timescaledb'" >> "\$C"
   echo "timescaledb.telemetry_level = off" >> "\$C"
 fi
 # Lo que hay, para que se pueda preguntar sin arrancar Postgres.
 ls /usr/share/postgresql$pg/extension/*.control 2>/dev/null | sed 's#.*/##; s#\.control##' | sort > /usr/share/kling-db-extensions
-sync
-EOF
+cd /; umount /run/kdb
+sync; echo 3 > /proc/sys/vm/drop_caches
+INSTALAR
+# La RAM que la instalación tocó, de vuelta al host antes de congelar: el
+# volcado de la plantilla queda con huecos en vez de caché de ficheros.
+"${K[@]}" squeeze "$P" >/dev/null 2>&1 || true
 
-# Comprobación: un cluster de usar y tirar con cada extensión creada, y la
-# compresión de TimescaleDB (la que la build Apache no tiene).
-t "checking: CREATE EXTENSION of each one, and timescaledb compression"
+t "saving template $name"
+"${K[@]}" save -replace -warm=false "$P" "$name" >/dev/null
+"${K[@]}" rm -f "$P" >/dev/null 2>&1 || true
+
+# Comprobación en una instancia de usar y tirar de la plantilla (no en ella:
+# arrancar Postgres llenaría su memoria): un cluster en un tmpfs con cada
+# extensión creada y la compresión de TimescaleDB, la que la build Apache no
+# tiene. Si falla, la plantilla se borra.
+t "checking a throwaway instance: CREATE EXTENSION of each one, and timescaledb compression"
 {
   for e in "${lista[@]}"; do
     case "$e" in
@@ -241,16 +288,20 @@ t "checking: CREATE EXTENSION of each one, and timescaledb compression"
   fi
   echo "SELECT extname || ' ' || extversion FROM pg_extension ORDER BY 1;"
 } > "$TMP/check.sql"
-"${K[@]}" cp "$TMP/check.sql" "$P:/tmp/check.sql" >/dev/null
-"${K[@]}" exec -timeout 5m "$P" -- sh -c '
-  set -e; chmod 644 /tmp/check.sql; D=/tmp/kdbcheck; rm -rf $D; install -d -o postgres -g postgres -m 700 $D; mkdir -p /run/postgresql; chown postgres /run/postgresql
-  su -s /bin/sh postgres -c "initdb -D $D -E UTF8 --locale=C.UTF-8 >/tmp/kdbcheck.log 2>&1 && pg_ctl -D $D -o \"-c listen_addresses= -c dynamic_shared_memory_type=mmap\" -l /tmp/kdbcheck.pg -w start >>/tmp/kdbcheck.log 2>&1" || { cat /tmp/kdbcheck.log /tmp/kdbcheck.pg; exit 1; }
-  ok=0; su -s /bin/sh postgres -c "psql -X -q -At -v ON_ERROR_STOP=1 -d postgres -f /tmp/check.sql" || ok=$?
-  su -s /bin/sh postgres -c "pg_ctl -D $D -m fast -w stop" >/dev/null 2>&1 || true
-  rm -rf $D /tmp/check.sql /tmp/kdbcheck.log /tmp/kdbcheck.pg; sync; exit $ok'
-
-t "saving template $name"
-"${K[@]}" save -replace -warm=false "$P" "$name" >/dev/null
+P="$name-check"
 "${K[@]}" rm -f "$P" >/dev/null 2>&1 || true
+"${K[@]}" run -name "$P" -from "$name" -egress none -allow-exec >/dev/null
+"${K[@]}" cp "$TMP/check.sql" "$P:/tmp/check.sql" >/dev/null
+ok=0
+"${K[@]}" exec -timeout 5m "$P" -- sh -c '
+  set -e; chmod 644 /tmp/check.sql; D=/run/kdbcheck; mkdir -p $D; mount -t tmpfs -o size=256m tmpfs $D; chown postgres $D; chmod 700 $D
+  mkdir -p /run/postgresql; chown postgres /run/postgresql
+  su -s /bin/sh postgres -c "initdb -D $D -E UTF8 --locale=C.UTF-8 >/tmp/kdbcheck.log 2>&1 && pg_ctl -D $D -o \"-c listen_addresses= -c dynamic_shared_memory_type=mmap\" -l /tmp/kdbcheck.pg -w start >>/tmp/kdbcheck.log 2>&1" || { cat /tmp/kdbcheck.log /tmp/kdbcheck.pg; exit 1; }
+  su -s /bin/sh postgres -c "psql -X -q -At -v ON_ERROR_STOP=1 -d postgres -f /tmp/check.sql"' || ok=$?
+"${K[@]}" rm -f "$P" >/dev/null 2>&1 || true
+if [ "$ok" -ne 0 ]; then
+  "${K[@]}" template rm -f "$name" >/dev/null 2>&1 || true
+  die "the check failed: template $name removed"
+fi
 "${K[@]}" template ls 2>/dev/null | awk -v n="$name" '$1 == n'
 t "done: kling db golden build -from $name [-extension ...] -migrations DIR <golden>"

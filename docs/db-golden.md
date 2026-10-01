@@ -17,6 +17,7 @@ siguientes.
 | `scripts/recipes/pg16.recipe.json` | receta de la imagen `pg16`: Alpine + `postgresql16` + `postgresql16-contrib` |
 | `scripts/db-golden.sh image` | construye la imagen con el constructor `base` del núcleo |
 | `scripts/db-golden.sh build` | arranca, inicializa, carga, hace CHECKPOINT y guarda la plantilla |
+| `scripts/db-image-ext.sh` (`kling db golden image -ext`) | la plantilla `pg16-ext` (o `pg17-ext`): Postgres con TimescaleDB (TSL), pgvector, PostGIS, pg_cron y pg_partman compiladas |
 | `scripts/db-post-thaw.sh` | paso tras instanciar una copia: espera, comprueba el reloj y avisa |
 | `scripts/db-golden-verify.sh` | las comprobaciones de las copias, para correr en el lab |
 
@@ -40,6 +41,66 @@ sobre `min` y mete `kling-guest` como PID 1: es el mismo mecanismo que la imagen
 en la microVM. Si `apk` no encuentra `postgresql16`, la Alpine de `min` es demasiado
 nueva o vieja para esa versión: `apk search postgresql` dentro de la base dice cuáles
 hay, y basta cambiar los nombres en la receta.
+
+## Extensiones que Alpine no trae: la plantilla `pg16-ext`
+
+La imagen `pg16` es Alpine con `postgresql16-contrib` (uuid-ossp, pgcrypto, pg_trgm,
+hstore...). Alpine no tiene TimescaleDB ni pgvector para PG16 o PG17 (solo para PG18), y
+su TimescaleDB es la build Apache, sin compresión: `add_compression_policy` falla con
+"not supported under the current apache license". `scripts/db-image-ext.sh` compila las
+extensiones contra el Postgres de la imagen y deja una **plantilla** de la que sale el
+golden (`-from`):
+
+```sh
+kling db golden image -ext                       # pg16-ext: las cinco
+kling db golden image -ext -pg 17                # pg17-ext
+kling db golden image -ext -only timescaledb,vector
+kling db golden build -from pg16-ext -as-super -migrations init/ <golden>
+```
+
+| Extensión | Versión | Notas |
+|---|---|---|
+| timescaledb | 2.30.2 | licencia TSL: compresión (`add_compression_policy`), agregados continuos; precargada |
+| vector (pgvector) | 0.8.0 | sin `-march=native`: el binario vale en cualquier CPU |
+| postgis | 3.6.4 | sin raster (GDAL), topology ni protobuf (`ST_AsMVT`) |
+| pg_cron | 1.6.8 | necesita precargarse |
+| pg_partman | 5.5.0 | |
+
+Además lleva `bash` (para scripts de init al estilo Docker) y la lista de extensiones en
+`/usr/share/kling-db-extensions`.
+
+Cómo:
+
+- Una microVM de construcción con salida a internet y un volumen de 3 GiB (el overlay de
+  512 MiB no cabe la toolchain). La toolchain va en una raíz `apk --root` del volumen,
+  con las firmas comprobadas con las claves de la imagen y reintentos (un índice que no
+  bajó entero da "no such package" de paquetes que existen).
+- Cada fuente se clona por su etiqueta **y se comprueba por commit**: una etiqueta
+  movida en el origen no cuela otro código.
+- La compilación corre desacoplada en el invitado (`setsid`) y el host la sondea con
+  `exec` cortos: en el laboratorio, una conexión de `exec` de minutos sin salida se caía
+  a media compilación. El `make -j4` de PostGIS tiene carreras al generar sus scripts:
+  si falla, se acaba en serie.
+- No se instala ni la documentación, ni los símbolos de depuración, ni los scripts de
+  **actualización** entre versiones (`timescaledb--2.x--2.30.2.sql`...: solo sirven para
+  `ALTER EXTENSION UPDATE` desde una versión que la imagen nunca tuvo, y eran 50 MiB).
+- La plantilla **no tiene red** (sus copias heredan el egress): las librerías de PostGIS
+  se bajan como `.apk` en la de construcción y se instalan sin red, con la firma
+  comprobada. Lo de paso va a un tmpfs, se vacía la caché y se aprieta el globo antes de
+  guardarla: así su volcado y su disco son solo lo instalado.
+- La comprobación se hace en una **instancia de usar y tirar** de la plantilla ya
+  guardada: un cluster en un tmpfs, `CREATE EXTENSION` de cada una y una hypertable con
+  `add_compression_policy`. Si falla, la plantilla se borra.
+
+### Medidas de pg16-ext
+
+Laboratorio (CT 105: i7-8700T, 4 vCPU, 8 GiB), 2026-10-01:
+
+| | |
+|---|---|
+| Construcción completa | 466 s (TimescaleDB ~4,5 min; PostGIS ~2,5 min; pgvector, pg_cron y pg_partman, segundos) |
+| Plantilla `pg16-ext` | **50 MiB de memoria, 104 MiB de disco** (con temporales en el overlay, Postgres arrancado dentro y los scripts de actualización: 350 y 475 MiB) |
+| Compilado | 5,4 MiB de extensiones y 14 MiB de librerías de ejecución (`.apk`) |
 
 ## Construir el dorado
 
