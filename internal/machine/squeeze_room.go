@@ -118,10 +118,48 @@ func (m *Manager) reserveMemoryMakingRoom(ctx context.Context, wantMiB int, shar
 	if err == nil || !api.IsInsufficientMemory(err) {
 		return release, err
 	}
-	if m.makeRoom(ctx, skip) <= 0 {
-		return nil, err
+	if m.makeRoom(ctx, skip) > 0 {
+		if release, err = m.reserveMemory(wantMiB, shareKey); err == nil || !api.IsInsufficientMemory(err) {
+			return release, err
+		}
 	}
-	return m.reserveMemory(wantMiB, shareKey)
+	return m.esperarReservas(ctx, wantMiB, shareKey, err)
+}
+
+// esperaReservasMax es lo más que espera un arranque a que se liberen las
+// reservas de otros arranques en vuelo (ver esperarReservas).
+var esperaReservasMax = 60 * time.Second
+
+// esperarReservas reintenta mientras lo que no cabe sean las reservas EN
+// VUELO: las de arranques que aún no han terminado y que se liberan en
+// cuanto terminan. Cada arranque reserva su memoria antes de pasar por la
+// puerta de arranque (launch.go), así que 64 `kling db up` a la vez dejaban
+// 64 reservas pendientes mientras esperaban turno, y la admisión rechazaba a
+// los últimos ("doesn't fit") con 7 GiB libres y ~14 MiB de uso real por
+// copia (nota 18 de AuraCRM: 58 de 64). `fork -n 64` no lo veía: restaura de
+// una en una. Si sin las reservas pendientes tampoco cabría, no se espera: es
+// falta de memoria de verdad.
+func (m *Manager) esperarReservas(ctx context.Context, wantMiB int, shareKey string, err error) (func(), error) {
+	limite := time.Now().Add(esperaReservasMax)
+	for api.IsInsufficientMemory(err) && time.Now().Before(limite) {
+		m.mu.Lock()
+		pendiente := m.pendingMiB
+		hot := m.hotMemFilesMiBLocked()
+		m.mu.Unlock()
+		if pendiente <= 0 || checkHostMemory(wantMiB/shareReserveDiv(), hot) != nil {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(25 * time.Millisecond):
+		}
+		var release func()
+		if release, err = m.reserveMemory(wantMiB, shareKey); err == nil {
+			return release, nil
+		}
+	}
+	return nil, err
 }
 
 // maxMachines es el tope de máquinas por daemon. Ver defaultMaxMachines: es un

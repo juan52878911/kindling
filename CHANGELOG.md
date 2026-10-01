@@ -10,6 +10,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
+  por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
+  de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`
+  arranca con toda su CPU: el alembic de AuraCRM, 9,6 s en vez de 18,6 s (los 32 s de la
+  nota 18 eran el techo por defecto de media vCPU).
 - **`kling db golden build` hace el golden de un proyecto real en un comando.** `-step "<cmd>"
   -agent <plantilla> -workdir <dir>` corre un programa (alembic, prisma...) en una microVM
   con la copia por `attach`; `-super-step` corre dentro de la base como superusuario por el
