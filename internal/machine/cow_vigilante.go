@@ -142,7 +142,10 @@ func (m *Manager) vueltaVigiaAlmacen(ctx context.Context, v *vigia) bool {
 	switch marca := v.marca(); {
 	case libre < marca:
 		pausadas := m.pausarPorAlmacen(ctx)
-		if len(pausadas) > 0 || !v.lleno {
+		// Sin nada que pausar, se avisa solo si de verdad está lleno: por la
+		// tasa, la marca puede estar en cientos de MiB, y "store full (310
+		// MiB free)" sin más confundía.
+		if len(pausadas) > 0 || (!v.lleno && libre < marcaPausaAlmacen) {
 			msg := (&errAlmacenLleno{libre: libre}).Error()
 			if len(pausadas) > 0 {
 				log.Printf("%s: paused %d instance(s) writing to it (%d MiB/s) so their guests don't get I/O errors (%s); they resume on their own once there is room",
