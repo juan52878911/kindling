@@ -29,6 +29,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   Ahora el cliente y `dial-stdio` conectan por un enlace corto en `/tmp/kling-<uid>/`, el
   mismo truco que ya usaba el daemon con los sockets de sus máquinas; si no puede crearlo,
   el error dice el tope y por qué.
+- **`pg17-ext` medida con las 4 vCPU enteras: 181 s en vez de 477 s.** Misma cifra que
+  `pg16-ext` (180 s); plantilla de 49 MiB de memoria y 109 MiB de disco
+  (`docs/db-golden.md`).
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`
