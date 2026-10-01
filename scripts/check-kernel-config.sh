@@ -14,6 +14,8 @@
 #     de solo lectura bajo un overlay), devtmpfs automontado (overlay-init no
 #     monta /dev y usa /dev/vdb), FUSE (pkg/guest/fuse_linux.go, carpetas
 #     compartidas), PTYs Unix98 (pkg/guest/pty_linux.go monta devpts);
+#   - dm-verity: las capas con "verity": true se montan por /dev/mapper y,
+#     sin él, el init se niega a montarlas (internal/imagen, verityBlock);
 #   - ip= por línea de comandos (IP_PNP): la red la configura el kernel, sin
 #     herramientas en la imagen (internal/net/net.go);
 #   - consola 8250 (console=ttyS0 en internal/machine/manager.go);
@@ -88,6 +90,8 @@ REQUIRED_COMMON=(
   NET UNIX INET IP_PNP
   # sistemas de ficheros
   EXT4_FS OVERLAY_FS FUSE_FS TMPFS PROC_FS SYSFS DEVTMPFS DEVTMPFS_MOUNT
+  # capas con verity (internal/imagen): sin dm-verity el init se para
+  BLK_DEV_DM DM_VERITY CRYPTO_SHA256
   # consola
   TTY UNIX98_PTYS SERIAL_8250 SERIAL_8250_CONSOLE
 )
