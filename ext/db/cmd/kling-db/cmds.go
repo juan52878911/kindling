@@ -627,12 +627,13 @@ func cmdDoctor(args []string) error {
 	caFile := fs.String("ca-file", "", "with -url: PEM file of extra trusted roots (added to the system's; wins over sslrootcert)")
 	tlsName := fs.String("tls-server-name", "", "with -url: name to verify in the certificate, if it is not the URL's host")
 	insecure := fs.Bool("insecure", false, "with -url: allow sslmode=disable or require on a non-loopback server (unencrypted or unauthenticated; the report says so)")
+	all := fs.Bool("all", false, "list every finding; by default the ones a rule repeats on many tables are grouped")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if (len(pos) == 1) == (*u != "") || len(pos) > 1 {
-		return usageErr("usage: kling db doctor <copy> | -url postgres://...")
+		return usageErr("usage: kling db doctor <copy> | -url postgres://... [-all]")
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -643,7 +644,7 @@ func cmdDoctor(args []string) error {
 	if *u == "" && (*caFile != "" || *tlsName != "" || *insecure) {
 		return usageErr("-ca-file, -tls-server-name and -insecure only go with -url")
 	}
-	t := doctorTarget{URL: *u, CAFile: *caFile, TLSServerName: *tlsName, Insecure: *insecure}
+	t := doctorTarget{URL: *u, CAFile: *caFile, TLSServerName: *tlsName, Insecure: *insecure, All: *all}
 	if len(pos) == 1 {
 		mc, err := a.inspect(ctx, pos[0])
 		if err != nil {

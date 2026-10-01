@@ -127,7 +127,7 @@ func runCopy(ctx context.Context, k klingc.Kling, ref string, r *report) error {
 	case "sqlite":
 		return sqliteCopy(ctx, k, &mc, state, r)
 	}
-	appRole, err := appRoleOf(state, golden)
+	appRole, err := appRoleOf(state, golden, mc.Labels)
 	if err != nil {
 		return err
 	}
@@ -180,8 +180,12 @@ func diskChecks(mc *api.Machine, r *report) {
 		"the copy's guest got %d disk I/O error(s)%s: \"%s\"", mc.DiskErrors, cuando, safe(mc.DiskError, 160))
 }
 
-// appRoleOf lee el rol de la aplicación del conn.env del dorado ("app" si no hay).
-func appRoleOf(state, golden string) (string, error) {
+// appRoleOf es el rol de la aplicación: la etiqueta kling.db.role de la copia
+// (la pone kling db up desde la plantilla, y la lleva también un golden
+// guardado con kling save, que no tiene conn.env), o PGUSER del conn.env del
+// dorado, o "app". Antes solo miraba el conn.env: con un golden sin él,
+// "app", y DB052/DB020 falsos (role "app" does not exist).
+func appRoleOf(state, golden string, labels map[string]string) (string, error) {
 	role := "app"
 	if golden != "" && reGolden.MatchString(golden) {
 		b, err := readSmall(filepath.Join(state, golden, "conn.env"))
@@ -193,6 +197,9 @@ func appRoleOf(state, golden string) (string, error) {
 				}
 			}
 		}
+	}
+	if v := labels["kling.db.role"]; v != "" {
+		role = v
 	}
 	if !reRole.MatchString(role) {
 		return "", fmt.Errorf("doctor: application role %q is not a plain identifier", safe(role, 64))
