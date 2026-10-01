@@ -10,6 +10,22 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Imágenes de Docker en kling: `kling image import <ref>`.** Una imagen de Docker/OCI
+  (`postgres:17-alpine`, `timescale/timescaledb:latest-pg16`, `ghcr.io/...`) se convierte en
+  imagen de kindling sin Docker ni root, con el constructor del núcleo `oci`: se aplana entera
+  como base propia y se añaden solo el init, el agente y su configuración. La etiqueta se
+  resuelve una vez a digest (verificado por sha256) y queda en la receta; cada capa se
+  comprueba por sha256 y se guarda por hash, así que reimportar no baja nada. El `ENTRYPOINT`
+  lo arranca y vigila `kling-guest` con el `USER`, el `WORKDIR` y la `STOPSIGNAL` de la imagen,
+  después de montar los volúmenes, y lo relanza si muere. "Listo" es el `HEALTHCHECK` o que
+  acepte conexiones el primer puerto de `EXPOSE`. `kling stop` y `kling rm` paran el servicio
+  con su señal antes de vaciar los volúmenes (Postgres: "fast shutdown"). Nuevos `kling logs
+  -service` y `-json` en `kling image import` y `kling run`, para agentes. En el lab, Postgres
+  17 queda listo en frío en 3,6 s y desde una plantilla en 8–51 ms; Timescale, en 9,1 s. Ver
+  [`docs/imagenes.md`](docs/imagenes.md).
+- **`ext4.Write` ya no entra en pánico con una capa sin datos** (solo directorios y
+  whiteouts, frecuente en las imágenes de Docker): esos flujos ni se leen.
+
 - **Las imágenes de Docker encuentran `/dev/fd`, `/dev/shm` y `/etc/hosts`.** El init de
   las bases (`minimal-init.sh`: `min`, glibc y Android) crea `/dev/fd` y `/dev/std*`, monta
   `/dev/shm` en tmpfs, pone el nombre `kindling` (antes era la IP del invitado) y añade a
