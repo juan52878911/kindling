@@ -49,28 +49,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "db-image-ext: $*" >&2; exit 1; }
 say() { echo "db-image-ext: $*"; }
 
-# VERSIONES: etiqueta y commit de cada fuente.
-declare -A REPO=(
-  [timescaledb]=https://github.com/timescale/timescaledb.git
-  [vector]=https://github.com/pgvector/pgvector.git
-  [postgis]=https://github.com/postgis/postgis.git
-  [pg_cron]=https://github.com/citusdata/pg_cron.git
-  [pg_partman]=https://github.com/pgpartman/pg_partman.git
-)
-declare -A TAG=(
-  [timescaledb]=2.30.2
-  [vector]=v0.8.0
-  [postgis]=3.6.4
-  [pg_cron]=v1.6.8
-  [pg_partman]=v5.5.0
-)
-declare -A COMMIT=(
-  [timescaledb]=b0977bf2d3a5014ee870247be09bc19d3e9f7a5f
-  [vector]=2627c5ff775ae6d7aef0c430121ccf857842d2f2
-  [postgis]=94d984bd083635c1d253db0f87cf80b32548e406
-  [pg_cron]=5cedfa472ccc83567aa23ec645925ed8489a7797
-  [pg_partman]=f7e83b9c441c7e97066d815bbe14e02a9dc5ff94
-)
+# VERSIONES: repositorio, etiqueta y commit de cada fuente. Una función y no
+# arrays asociativos: la bash de macOS (3.2) no los tiene.
+fuente() {
+  case "$1" in
+    timescaledb) echo "https://github.com/timescale/timescaledb.git 2.30.2 b0977bf2d3a5014ee870247be09bc19d3e9f7a5f" ;;
+    vector)      echo "https://github.com/pgvector/pgvector.git v0.8.0 2627c5ff775ae6d7aef0c430121ccf857842d2f2" ;;
+    postgis)     echo "https://github.com/postgis/postgis.git 3.6.4 94d984bd083635c1d253db0f87cf80b32548e406" ;;
+    pg_cron)     echo "https://github.com/citusdata/pg_cron.git v1.6.8 5cedfa472ccc83567aa23ec645925ed8489a7797" ;;
+    pg_partman)  echo "https://github.com/pgpartman/pg_partman.git v5.5.0 f7e83b9c441c7e97066d815bbe14e02a9dc5ff94" ;;
+    *) return 1 ;;
+  esac
+}
 TODAS=timescaledb,vector,postgis,pg_cron,pg_partman
 
 pg=16 exts=$TODAS name="" keep=0
@@ -89,7 +79,7 @@ case "$pg" in 16|17) ;; *) die "-pg must be 16 or 17" ;; esac
 [[ "$name" =~ ^[a-z0-9][a-z0-9_-]{0,40}$ ]] || die "invalid template name: $name"
 IFS=, read -r -a lista <<<"$exts"
 for e in "${lista[@]}"; do
-  [ -n "${TAG[$e]:-}" ] || die "unknown extension $e (known: $TODAS)"
+  fuente "$e" >/dev/null || die "unknown extension $e (known: $TODAS)"
 done
 image="pg$pg"
 
@@ -172,8 +162,9 @@ EOF
   echo "export PATH=/usr/libexec/postgresql$pg:\$PATH PG_CONFIG=/usr/libexec/postgresql$pg/pg_config"
   echo 'fetch() { git -c advice.detachedHead=false clone -q --depth 1 --branch "$2" "$1" "/src/$4"; got=$(git -C "/src/$4" rev-parse HEAD); [ "$got" = "$3" ] || { echo "$4: tag $2 is $got, expected $3" >&2; exit 1; }; }'
   for e in "${lista[@]}"; do
-    echo "fetch ${REPO[$e]} ${TAG[$e]} ${COMMIT[$e]} $e"
-    echo "echo '== $e ${TAG[$e]}'"
+    read -r repo tag commit <<<"$(fuente "$e")"
+    echo "fetch $repo $tag $commit $e"
+    echo "echo '== $e $tag'"
     case "$e" in
       timescaledb)
         echo 'cd /src/timescaledb && mkdir -p build && cd build'
