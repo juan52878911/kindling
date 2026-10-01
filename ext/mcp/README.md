@@ -75,10 +75,10 @@ what the alternative is, instead of failing halfway through the build. Useful fl
 | Flag | What it does |
 |---|---|
 | `-bundle` | collapses `node_modules` into **one** file with esbuild — measured 1205 files → 1, cold `initialize` ~7 s → ~2.5 s. The main lever on Mac/arm64. esbuild is pinned and its binary checked by sha512 (`ESBUILD_TGZ=<tarball>` to build offline) |
-| `-base node` / `-base python` | builds a small **layer** on a shared runtime base instead of a monolithic image ([layered images](https://github.com/juan52878911/kindling#layered-images-one-base-per-runtime-family)); picked automatically when a base named after the runtime family exists |
+| `-base node` / `-base python` | builds a small **layer** on a shared runtime base instead of a monolithic image ([layered images](https://github.com/juan52878911/kindling/blob/main/docs/guide.md#layered-images-one-base-per-runtime-family)); picked automatically when a base named after the runtime family exists |
 | `-env KEY=value` | bakes environment switches into the image (`/etc/kling/env`, root-only 0600; plain text: for toggles, **not secrets** — an API key goes through the [credential proxy](https://github.com/juan52878911/kindling/blob/main/docs/guide.md#keys-the-guest-never-sees-the-credential-proxy): `kling template credential <service> -domain api.x.com -env X_API_KEY -f key` with `-egress allowlist`, and every replica gets a placeholder the server never can read the key from; other secrets go [via MMDS](https://github.com/juan52878911/kindling/blob/main/docs/guide.md#secrets-that-never-touch-a-snapshot-mmds)) |
 | `-cmd "..."` | overrides the inferred start command (PyPI entry points are inferred by convention and verified at build time) |
-| `-volume name[:/mount][:ro]` | attach [persistent storage](https://github.com/juan52878911/kindling#volumes-what-outlives-the-microvm), repeatable |
+| `-volume name[:/mount][:ro]` | attach [persistent storage](https://github.com/juan52878911/kindling/blob/main/docs/guide.md#volumes-what-outlives-the-microvm), repeatable |
 | `-dry-run` | show what it would do without doing it |
 
 kindling also **auto-detects capabilities**: if a server needs a browser, internet egress
@@ -506,7 +506,7 @@ aggregator, where names change.
 
 ## Bring your own memory service
 
-A [volume](https://github.com/juan52878911/kindling#volumes-what-outlives-the-microvm) gives one service durable storage, but it
+A [volume](https://github.com/juan52878911/kindling/blob/main/docs/guide.md#volumes-what-outlives-the-microvm) gives one service durable storage, but it
 has **one writer**: it cannot be shared read-write across microVMs (an ext4 mounted twice
 read-write corrupts itself — NFS or virtio-fs would add a lot of machinery for something
 an MCP server already solves). For state that many tools and the model itself should
