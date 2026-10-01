@@ -184,9 +184,11 @@ EOF
         echo 'cd /src/vector && make OPTFLAGS="" with_llvm=no -j4 >/tmp/vector.log 2>&1 && make install with_llvm=no DESTDIR=/stage >>/tmp/vector.log 2>&1 || { tail -30 /tmp/vector.log; exit 1; }' ;;
       postgis)
         echo 'cd /src/postgis && ./autogen.sh >/tmp/postgis.log 2>&1 && ./configure --without-raster --without-topology --without-protobuf --without-gui --without-interrupt-tests --with-pgconfig=$PG_CONFIG >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }'
-        # Su make en paralelo tiene carreras al generar los scripts de
-        # actualización (topology.sql.tmp): si falla, se acaba en serie.
-        echo '{ make -j4 >>/tmp/postgis.log 2>&1 || make >>/tmp/postgis.log 2>&1; } && make install DESTDIR=/stage >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }' ;;
+        # Su make -j tiene carreras al generar los scripts SQL (topology.sql,
+        # rtpostgis.sql: en el laboratorio salieron rotos, y un reintento en
+        # serie no los rehace). En paralelo solo lo pesado en C; el resto, en
+        # serie.
+        echo 'make -j4 -C liblwgeom >>/tmp/postgis.log 2>&1 && make -j4 -C libpgcommon >>/tmp/postgis.log 2>&1 && make -j4 -C postgis >>/tmp/postgis.log 2>&1 && make >>/tmp/postgis.log 2>&1 && make install DESTDIR=/stage >>/tmp/postgis.log 2>&1 || { tail -40 /tmp/postgis.log; exit 1; }' ;;
       pg_cron)
         echo 'cd /src/pg_cron && make with_llvm=no -j4 >/tmp/cron.log 2>&1 && make install with_llvm=no DESTDIR=/stage >>/tmp/cron.log 2>&1 || { tail -30 /tmp/cron.log; exit 1; }' ;;
       pg_partman)
