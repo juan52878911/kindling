@@ -8,7 +8,9 @@
 // VERITY=1: una capa (Redroid en /android, el agente de invitado, el lanzador
 // y lo que se pida) y una base glibc con el init que monta la capa a través de
 // dm-verity. Todo lo que se descarga está fijado por sha256 (pins.go y
-// debian_lock.go) y se comprueba antes de usarlo.
+// internal/imagen/debian_lock.go) y se comprueba antes de usarlo. Lo que no
+// es de Android (la base Debian, el ext4, verity, el agente y el init) está
+// en internal/imagen, que comparte con el constructor debian.
 package android
 
 // Redroid 13 "64only" (sin bibliotecas de 32 bits: Apple Silicon no ejecuta
@@ -33,26 +35,6 @@ var redroidPins = map[string]redroidPin{
 		Layer:    "sha256:2824b019a4a8a038e79392f80302a3ddca69fdfdd6acb8c37b16e1461b2a6168",
 	},
 }
-
-// debianBase es la base glibc: debian:trixie-slim por digest más los .deb
-// fijados en debian_lock.go (internal/android/lockgen).
-type debianBase struct {
-	Image, Index, Manifest string
-	// Snapshot es la marca de snapshot.debian.org del día en que se fijó: si
-	// deb.debian.org ya no tiene un paquete, se busca ahí.
-	Snapshot string
-	Packages []debPin
-}
-
-type debPin struct {
-	Name, Version string
-	URL           string // deb.debian.org o security.debian.org + Filename
-	SHA256        string
-	Size          int64
-}
-
-// elfMachine es el e_machine de los binarios de cada arquitectura.
-var elfMachine = map[string]uint16{"arm64": 0xb7, "amd64": 0x3e}
 
 // libndkPin es de dónde sale libndk_translation con arm_translation
 // "libndk": la imagen de sistema x86_64 del emulador de Android 14 (API 34,

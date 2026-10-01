@@ -1,10 +1,8 @@
 package android
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +10,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 )
 
@@ -57,17 +55,17 @@ func (b *builder) prepareFiles() ([]inputFile, error) {
 			if st.Mode()&0o111 != 0 {
 				mode = 0o755
 			}
-			if sum, err = sha256Path(src); err != nil {
+			if sum, err = imagen.SHA256File(src); err != nil {
 				return nil, err
 			}
 			n.Size, n.Data = st.Size(), ext4.HostFile{Path: src}
 		case f.Content != nil:
 			n.Size, n.Data = int64(len(*f.Content)), ext4.Bytes(*f.Content)
-			sum = sha256Hex([]byte(*f.Content))
+			sum = imagen.SHA256Hex([]byte(*f.Content))
 		default:
 			d, _ := base64.StdEncoding.DecodeString(f.ContentBase64)
 			n.Size, n.Data = int64(len(d)), ext4.Bytes(d)
-			sum = sha256Hex(d)
+			sum = imagen.SHA256Hex(d)
 		}
 		if f.Mode != "" {
 			m, _ := strconv.ParseUint(f.Mode, 8, 32)
@@ -185,14 +183,9 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 	b.logf("ABIs after arm_translation %v: %s (native bridge %q)", tr["mode"], abis, bridge)
 
 	// Lo que genera el constructor.
-	agent, err := os.ReadFile(b.agent)
-	if err != nil {
-		return nil, fmt.Errorf("guest agent: %w", err)
+	if err := imagen.PutAgent(upper, b.agent, b.spec.Arch, b.t); err != nil {
+		return nil, err
 	}
-	if err := checkELF(agent, b.spec.Arch); err != nil {
-		return nil, fmt.Errorf("guest agent %s: %w", b.agent, err)
-	}
-	b.putFile(upper, "/usr/local/bin/kling-guest", &ext4.Node{Mode: ext4.ModeReg | 0o755, Size: int64(len(agent)), Data: ext4.HostFile{Path: b.agent}})
 	b.put(upper, libDir+"/entrypoint.args", []byte(strings.Join(args, "\n")+"\n"), 0o644)
 	b.put(upper, libDir+"/android.conf", []byte(b.spec.confText()), 0o644)
 	var imgtxt strings.Builder
@@ -213,9 +206,9 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 	for _, f := range files {
 		b.putFile(upper, f.spec.Path, f.node)
 	}
-	if env := b.envFile(); env != "" {
+	if env := imagen.EnvFile(b.spec.Env); env != "" {
 		// 0600 de root: el entrypoint es 0755 y lo leería cualquier proceso.
-		b.put(upper, envPath, []byte(env), 0o600)
+		b.put(upper, imagen.EnvPath, []byte(env), 0o600)
 	}
 	b.put(upper, "/entrypoint", []byte(b.entrypoint()), 0o755)
 	b.put(upper, "/etc/resolv.conf", []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0o644)
@@ -278,57 +271,8 @@ func (b *builder) redroidTag() string {
 	return redroidPins[b.spec.Arch].Tag
 }
 
-func (b *builder) putFile(root *ext4.Node, p string, n *ext4.Node) {
-	if n.Mtime.IsZero() {
-		n.Mtime = b.t
-	}
-	if err := root.Put(p, n, b.t); err != nil {
-		b.errs = append(b.errs, fmt.Errorf("%s: %w", p, err))
-		return
-	}
-	touchParent(root, p, b.t)
-}
-
-// touchParent pone la hora del directorio donde se añadió algo, como haría
-// el sistema de ficheros (install en un directorio del rootfs de Android le
-// cambia la mtime).
-func touchParent(root *ext4.Node, p string, t time.Time) {
-	if d, _ := root.Resolve(path.Dir(p)); d != nil && d.IsDir() {
-		d.Mtime = t
-	}
-}
-
-// sq entrecomilla para sh.
-func sq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
-// envPath guarda las variables del spec, como en 81-base-image.sh: fuera del
-// /entrypoint (0755, legible por todo el invitado), en un fichero 0600 de root
-// que el entrypoint (PID 1, root) carga. Siguen en la capa, compartida por las
-// máquinas de la imagen: para secretos, MMDS o credenciales.
-const envPath = "/etc/kling/env"
-
-// envFile son los `export` de spec.Env ("" si no hay ninguna).
-func (b *builder) envFile() string {
-	var e strings.Builder
-	for _, kv := range b.spec.Env {
-		k, v, _ := strings.Cut(kv, "=")
-		fmt.Fprintf(&e, "export %s=%s\n", k, sq(v))
-	}
-	return e.String()
-}
-
 // entrypoint es el /entrypoint de 81-base-image.sh con SERVICE.
-func (b *builder) entrypoint() string {
-	var e strings.Builder
-	e.WriteString("#!/bin/sh\n# Generado por el constructor android de kindling: el agente de invitado es PID 1.\n")
-	e.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nexport HOME=/root\n")
-	if len(b.spec.Env) > 0 {
-		e.WriteString(". " + envPath + "\n")
-	}
-	fmt.Fprintf(&e, "( while :; do %s; echo \"service exited with $?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &\n", sq(b.spec.Service))
-	e.WriteString("exec /usr/local/bin/kling-guest -listen :8080\n")
-	return e.String()
-}
+func (b *builder) entrypoint() string { return imagen.Entrypoint(marca, b.spec.Env, b.spec.Service) }
 
 // checkAndroid comprueba lo mismo que build-image.sh: /init es un ELF de la
 // arquitectura, hay build.prop y es Android 13.
@@ -342,7 +286,7 @@ func (b *builder) checkAndroid(android *ext4.Node) (map[string]any, error) {
 		return nil, fmt.Errorf("no /init in the Redroid rootfs")
 	}
 	if data, ok := init.Data.(ext4.Bytes); ok {
-		if err := checkELF(data, b.spec.Arch); err != nil {
+		if err := imagen.CheckELF(data, b.spec.Arch); err != nil {
 			return nil, fmt.Errorf("/init: %w: is this really the %s image?", err, b.spec.Arch)
 		}
 	}
@@ -424,20 +368,6 @@ func androidABIs(android *ext4.Node) (abis, bridge string) {
 		bridge = ""
 	}
 	return abis, bridge
-}
-
-func checkELF(b []byte, arch string) error {
-	if len(b) < 20 || !bytes.Equal(b[:4], []byte{0x7f, 'E', 'L', 'F'}) {
-		return fmt.Errorf("not an ELF binary")
-	}
-	if m := binary.LittleEndian.Uint16(b[18:]); m != elfMachine[arch] {
-		return fmt.Errorf("ELF machine %#x is not %s", m, arch)
-	}
-	return nil
-}
-
-func sha256Hex(b []byte) string {
-	return fmt.Sprintf("%x", sha256Sum(b))
 }
 
 // slim hace lo de prototypes/android/image/slim/apply.sh sobre el árbol.
@@ -526,7 +456,7 @@ func (b *builder) slim(android *ext4.Node) error {
 	for _, app := range s.Apps {
 		if n, p := android.Resolve(app); n != nil && n.IsDir() {
 			android.Remove(p)
-			touchParent(android, p, b.t)
+			imagen.TouchParent(android, p, b.t)
 		}
 	}
 	if s.FeaturesXML != "" {

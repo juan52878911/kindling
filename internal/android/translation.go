@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 )
 
 // LA TRADUCCIÓN ARM (issue #93, prototypes/android/docs/traduccion-arm.md).
@@ -203,7 +204,7 @@ func (b *builder) armTranslation(ctx context.Context, android *ext4.Node) (map[s
 		if err := b.binfmtWrapper(android); err != nil {
 			return nil, err
 		}
-		sum, err := sha256Path(tp)
+		sum, err := imagen.SHA256File(tp)
 		if err != nil {
 			return nil, err
 		}

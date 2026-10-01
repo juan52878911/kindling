@@ -32,6 +32,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - **`pg17-ext` medida con las 4 vCPU enteras: 181 s en vez de 477 s.** Misma cifra que
   `pg16-ext` (180 s); plantilla de 49 MiB de memoria y 109 MiB de disco
   (`docs/db-golden.md`).
+- **Constructor `debian`: imágenes Debian fijadas sin root, también en macOS.** `kling image
+  build py -builder debian -spec py.json` con `{"packages":["python3-minimal"],"verity":true}`
+  arma en Go (sin loop, chroot, debootstrap ni apt) una base `debian:trixie-slim` por digest
+  con la base fijada de kindling y una capa con los paquetes pedidos, resueltos contra el
+  snapshot de `snapshot.debian.org` del mismo día y comprobados por sha256; el lockfile queda
+  en la receta (`built.lock`) y con `lock` en el spec sale la misma imagen, bit a bit. Con
+  `verity: true` la capa va detrás de dm-verity (necesita un núcleo con device-mapper, como el
+  de Android). Lo que no era de Android sale de `internal/android` a `internal/imagen` (base
+  Debian, `.deb` como los deja dpkg, agente, init, verity) y Android lo usa sin cambiar lo que
+  construye. En el laboratorio: python3 en 55 s en frío y 4,9 s con caché, arranca y `kling
+  exec` responde; en el Mac, 75 s y reproducible. `docs/imagenes.md`.
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`

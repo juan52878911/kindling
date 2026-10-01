@@ -20,26 +20,11 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
 	"github.com/juan52878911/kindling/internal/verity"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/scripts"
 )
-
-func TestVerityInit(t *testing.T) {
-	s, err := verityInit(scripts.MinimalInit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	i := strings.Index(s, "dmsetup create android-layer")
-	j := strings.Index(s, verityAnchor)
-	if i < 0 || j < i || strings.Count(s, verityAnchor) != 1 {
-		t.Fatal("the verity block is not right before the layer mount")
-	}
-	if _, err := verityInit("#!/bin/sh\n"); err == nil {
-		t.Fatal("an init without the anchor was accepted")
-	}
-}
 
 func TestCommentService(t *testing.T) {
 	rc := "service a /bin/a\n    class main\n\n    user root\nservice b /bin/b\n    class late\non boot\n    start a\n"
@@ -187,11 +172,11 @@ func TestBuild(t *testing.T) {
 	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(deb) }))
 	defer pool.Close()
 
-	oldR, oldD := redroidPins["arm64"], debianLock["arm64"]
-	defer func() { redroidPins["arm64"], debianLock["arm64"] = oldR, oldD }()
+	oldR, oldD := redroidPins["arm64"], imagen.DebianLock["arm64"]
+	defer func() { redroidPins["arm64"], imagen.DebianLock["arm64"] = oldR, oldD }()
 	redroidPins["arm64"] = redroidPin{Repo: reg.Host() + "/redroid/redroid", Tag: "test", Manifest: man}
-	debianLock["arm64"] = debianBase{Image: reg.Host() + "/library/debian", Manifest: dman,
-		Packages: []debPin{{"iptables", "1.8.11-2", pool.URL + "/pool/iptables.deb", hex.EncodeToString(sum[:]), int64(len(deb))}}}
+	imagen.DebianLock["arm64"] = imagen.DebianBase{Image: reg.Host() + "/library/debian", Manifest: dman,
+		Packages: []imagen.DebPin{{Name: "iptables", Version: "1.8.11-2", URL: pool.URL + "/pool/iptables.deb", SHA256: hex.EncodeToString(sum[:]), Size: int64(len(deb))}}}
 
 	root := t.TempDir()
 	work := t.TempDir()

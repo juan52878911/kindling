@@ -1,4 +1,4 @@
-package android
+package imagen
 
 import (
 	"bytes"
@@ -46,7 +46,7 @@ func TestFetchVerifiedHashCorrecto(t *testing.T) {
 	dst := filepath.Join(dir, "a.bin")
 	ctx := context.Background()
 
-	if err := fetchVerified(ctx, srv.URL+"/f", sha256Hex(body), int64(len(body)), dst); err != nil {
+	if err := FetchVerified(ctx, srv.URL+"/f", SHA256Hex(body), int64(len(body)), dst); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(dst)
@@ -56,7 +56,7 @@ func TestFetchVerifiedHashCorrecto(t *testing.T) {
 	sinRestos(t, dir)
 
 	// Ya está y cuadra: no se vuelve a bajar.
-	if err := fetchVerified(ctx, srv.URL+"/f", sha256Hex(body), int64(len(body)), dst); err != nil {
+	if err := FetchVerified(ctx, srv.URL+"/f", SHA256Hex(body), int64(len(body)), dst); err != nil {
 		t.Fatal(err)
 	}
 	if c := n.Load(); c != 1 {
@@ -65,7 +65,7 @@ func TestFetchVerifiedHashCorrecto(t *testing.T) {
 
 	// Sin tamaño (0) también vale, con el hash.
 	dst2 := filepath.Join(dir, "b.bin")
-	if err := fetchVerified(ctx, srv.URL+"/f", sha256Hex(body), 0, dst2); err != nil {
+	if err := FetchVerified(ctx, srv.URL+"/f", SHA256Hex(body), 0, dst2); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -77,8 +77,8 @@ func TestFetchVerifiedHashMalo(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "a.bin")
 
-	otro := sha256Hex([]byte("lo que se esperaba"))
-	err := fetchVerified(context.Background(), srv.URL+"/f", otro, int64(len(body)), dst)
+	otro := SHA256Hex([]byte("lo que se esperaba"))
+	err := FetchVerified(context.Background(), srv.URL+"/f", otro, int64(len(body)), dst)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("err = %v, want a sha256 mismatch", err)
 	}
@@ -91,7 +91,7 @@ func TestFetchVerifiedHashMalo(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("viejo"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := fetchVerified(context.Background(), srv.URL+"/f", otro, int64(len(body)), dst); err == nil {
+	if err := FetchVerified(context.Background(), srv.URL+"/f", otro, int64(len(body)), dst); err == nil {
 		t.Fatal("a stale dst with another hash was accepted")
 	}
 	if b, _ := os.ReadFile(dst); string(b) != "viejo" {
@@ -109,7 +109,7 @@ func TestFetchVerifiedTope(t *testing.T) {
 	ctx := context.Background()
 
 	dst := filepath.Join(dir, "grande.bin")
-	err := fetchVerified(ctx, srv.URL+"/f", sha256Hex(body[:100]), 100, dst)
+	err := FetchVerified(ctx, srv.URL+"/f", SHA256Hex(body[:100]), 100, dst)
 	if err == nil || !strings.Contains(err.Error(), "101 bytes, expected 100") {
 		t.Fatalf("err = %v, want the read cut at size+1", err)
 	}
@@ -118,7 +118,7 @@ func TestFetchVerifiedTope(t *testing.T) {
 	}
 
 	dst = filepath.Join(dir, "corto.bin")
-	err = fetchVerified(ctx, srv.URL+"/f", sha256Hex(body), int64(len(body))+1, dst)
+	err = FetchVerified(ctx, srv.URL+"/f", SHA256Hex(body), int64(len(body))+1, dst)
 	if err == nil || !strings.Contains(err.Error(), "expected") {
 		t.Fatalf("err = %v, want a short-body error", err)
 	}
@@ -128,7 +128,7 @@ func TestFetchVerifiedTope(t *testing.T) {
 func TestFetchVerifiedNo200(t *testing.T) {
 	srv, _ := servidorFijo(t, nil)
 	dst := filepath.Join(t.TempDir(), "a.bin")
-	err := fetchVerified(context.Background(), srv.URL+"/no-esta", sha256Hex(nil), 0, dst)
+	err := FetchVerified(context.Background(), srv.URL+"/no-esta", SHA256Hex(nil), 0, dst)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("err = %v, want the 404", err)
 	}

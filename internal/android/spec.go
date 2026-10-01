@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/internal/imagen"
 )
 
 // Spec es el spec del constructor android (el "spec" de POST /images).
@@ -50,7 +52,7 @@ type Spec struct {
 	// tabla de ESTA capa: es suya.
 	BaseName string `json:"base_name,omitempty"`
 	// Packages sustituye a la lista de .deb fijados que van en la base
-	// (subconjunto de debian_lock.go, por nombre; vacío = todos).
+	// (subconjunto de internal/imagen/debian_lock.go, por nombre; vacío = todos).
 	Packages []string `json:"packages,omitempty"`
 	// ARMTranslation es la traducción ARM de una imagen amd64 (issue #93,
 	// prototypes/android/docs/traduccion-arm.md): "none" (por defecto) quita
@@ -259,14 +261,14 @@ func (s *Spec) Validate() error {
 	default:
 		return fmt.Errorf("arm_translation must be none, libndk or redroid, not %q", s.ARMTranslation)
 	}
-	lock := debianLock[s.Arch]
+	lock := imagen.DebianLock[s.Arch]
 	for _, p := range s.Packages {
 		found := false
 		for _, d := range lock.Packages {
 			found = found || d.Name == p
 		}
 		if !found {
-			return fmt.Errorf("package %q is not in the pinned set (internal/android/debian_lock.go)", p)
+			return fmt.Errorf("package %q is not in the pinned set (internal/imagen/debian_lock.go)", p)
 		}
 	}
 	return nil
