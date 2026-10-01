@@ -1,4 +1,4 @@
-# Imágenes sin root: `internal/imagen` y el constructor `debian`
+# Imágenes sin root: `internal/imagen` y los constructores `debian` y `oci`
 
 Los constructores de siempre (`base`, `mcp`, `llm`) montan un loopback, hacen
 chroot y llaman a apt o apk: necesitan root, `mkfs.ext4` y un núcleo que monte
@@ -79,6 +79,100 @@ antes de ir a snapshot). En el laboratorio la imagen sin verity arranca con el n
 Firecracker de siempre y `kling exec` responde (`bash 5.2.37`); la de verity
 arranca con el núcleo de Android (`6.1.140-kindling`, `CONFIG_DM_VERITY`):
 `dmsetup status` da `kindling-layer: ... verity V` y `python3` (3.13.5) corre.
+
+## Imágenes de Docker: el constructor `oci`
+
+Una imagen de Docker/OCI tal cual, sin Docker en el host:
+
+```sh
+kling image import postgres:17-alpine -e POSTGRES_PASSWORD     # el valor, del entorno
+kling run -image postgres-17-alpine -mem 512M -wait-ready
+kling save <id> pg-warm && kling run -from pg-warm             # plantilla ya inicializada
+```
+
+**La imagen es su propia base.** No va encima de la base de kindling (Alpine):
+se aplanan todas sus capas, con sus whiteouts, en un ext4 monolítico. No se
+mezclan dos `/lib` (glibc y musl) ni dos `/etc`. Lo que se añade es lo de
+kindling y nada más:
+
+| Dónde | Qué |
+|---|---|
+| `/sbin/overlay-init` | `minimal-init.sh`, con el contrato de runtime de Docker (`/dev/fd`, `/dev/std*`, `/dev/shm`, `/etc/hosts`, nombre) |
+| `/usr/local/bin/kling-guest`, `/entrypoint` | el agente de invitado como PID 1 |
+| `/etc/kling/env` (0600 de root) | el `Env` de la imagen con el del spec encima |
+| `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente |
+| `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`) |
+| `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
+| `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
+
+**Fijada por digest.** La etiqueta se resuelve una vez: el digest sale del
+sha256 del manifiesto bajado (si el registro dice otro en
+`Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al
+del manifiesto de la plataforma y cada capa). Cada capa se comprueba por sha256
+y se guarda en la caché por hash (`$KLING_ROOT/cache/oci`): reimportar el mismo
+digest no baja ninguna capa, y con la misma `SOURCE_DATE_EPOCH` sale la misma
+imagen bit a bit. De un índice multiplataforma se elige `linux/<arch>` (en arm64,
+la variante v8; en amd64, la que no pide v2/v3).
+
+**El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
+shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
+(resuelto con su `/etc/passwd`, sin libc), en su propio grupo de procesos, y lo
+relanza si muere (de 1 a 30 s de espera). Su salida va a la consola (`kling
+logs`) y a `/var/log/kling-service.log`; `GET /service` del agente da su estado y
+la cola del log. Al apagarse el agente le manda su `STOPSIGNAL` y, pasados 10 s,
+SIGKILL al grupo, antes de desmontar los volúmenes.
+
+El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image import`):
+
+| Campo | |
+|---|---|
+| `ref` | `postgres:17-alpine`, `ghcr.io/o/r:tag`, `repo@sha256:...` |
+| `digest` | fija la imagen (del índice o del manifiesto); tiene que cuadrar con el de `ref` si trae uno |
+| `arch` | `amd64` o `arm64` (por defecto la del host) |
+| `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`) |
+| `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
+| `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
+
+`kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
+`-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
+`-env-file`, `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
+para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
+ready, service}`).
+
+### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
+
+| Qué | |
+|---|---|
+| `kling image import postgres:17-alpine` en frío | 11,2 s: 10 capas, 111 MiB comprimidos → ext4 de 331 MiB, 2910 ficheros |
+| `kling run -image ... -mem 512M -cpus 2 -wait-ready` | 3,6 s del comando hasta "listo" (arranque 32 ms; initdb, el servidor temporal del entrypoint y el definitivo) |
+| El servicio | `docker-entrypoint.sh postgres` original; postgres como uid 70 (`su-exec`); `scram-sha-256` desde el host con la contraseña de `-e`, rechazada la mala |
+| `kill -9` del postmaster | relanzado en ~1 s, recuperación del WAL y listo; `GET /service` da `starts: 2`, `last_exit: signal: killed` |
+| `kling save` + `kling run -from` | plantilla de 151 MiB de memoria; instanciar 8–51 ms ya "listo"; `select count(*)` de 100 000 filas desde el host, 60–100 ms con el arranque de psql |
+| `kling image import docker.io/timescale/timescaledb:latest-pg16` en frío | 41 s: 18 capas, 575 MiB comprimidos → ext4 de 1825 MiB, 7200 ficheros |
+| `kling run -image tsdb -mem 1G -cpus 2 -wait-ready` | 9,1 s hasta "listo" (initdb, `timescaledb-tune` y arranque); `timescaledb` 2.30.2 con licencia `timescale` (TSL), `CREATE EXTENSION vector` → 0.8.1, hypertable de 100 000 filas con 71 chunks comprimidos |
+| plantilla de Timescale | 211 MiB de memoria; instanciar 9–57 ms; `count(*)` sobre los chunks comprimidos desde el host, 0,3 s (0,5 s la primera) |
+
+Sin una línea de código por imagen: ni enlaces a mano en `/dev` (lo que hizo
+falta en la evaluación del 2026-09-30) ni `chroot`.
+
+### Límites del constructor `oci`
+
+- **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
+  `pivot_root`, `mkdir`, `ln`, `cat` y `grep` (cualquier Alpine o Debian). Una
+  imagen *distroless* se rechaza al construir, igual que una que ya traiga
+  `/entrypoint`.
+- **`kling stop` no avisa al servicio**: el daemon vacía los volúmenes y mata la
+  VM. Postgres se recupera por el WAL, pero no es una parada limpia.
+- **Sin dm-verity**: la imagen es la raíz, no una capa.
+- **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
+  máquina (512 MiB). La ruta va en la receta (`built.volumes`) y `kling image
+  import` sugiere el `-volume` en el siguiente paso.
+- **El `HEALTHCHECK` corre como root**, con el entorno de la imagen; en Docker
+  corre con el `USER` de la imagen.
+- **Sin zstd**: solo capas `tar` y `tar+gzip`.
+- **No cambia la licencia**: convertir una imagen no la redistribuye, pero
+  tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
+  de datos gestionada). No publiques imágenes convertidas.
 
 ## Límites
 

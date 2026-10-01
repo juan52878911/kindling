@@ -51,7 +51,7 @@ var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 // punta a punta (sin loop, chroot ni root): corren también en el daemon de
 // macOS, y si no están instalados en el directorio de constructores el
 // daemon se ejecuta a sí mismo como `kling builder <nombre>`.
-var constructoresSinRoot = map[string]bool{"android": true, "debian": true}
+var constructoresSinRoot = map[string]bool{"android": true, "debian": true, "oci": true}
 
 // maxRecipeHints es el tamaño máximo del recipe.json que deja un constructor.
 const maxRecipeHints = 256 << 10

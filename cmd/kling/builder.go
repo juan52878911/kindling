@@ -48,7 +48,7 @@ var (
 
 func cmdBuilder(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: kling builder base|llm|chispa|android|debian <workdir>  (the daemon runs it; see docs/api.md)")
+		return fmt.Errorf("usage: kling builder base|llm|chispa|android|debian|oci <workdir>  (the daemon runs it; see docs/api.md)")
 	}
 	switch args[0] {
 	case "base":
@@ -64,6 +64,9 @@ func cmdBuilder(args []string) error {
 	case "debian":
 		// También en Go (internal/imagen) y sin root: ver builder_debian.go.
 		return builderDebian(args[1])
+	case "oci":
+		// Una imagen de Docker/OCI como base propia, en Go: builder_oci.go.
+		return builderOCI(args[1])
 	default:
 		return fmt.Errorf("unknown builder %q", args[0])
 	}

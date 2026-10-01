@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +29,9 @@ var Version = "dev"
 func main() {
 	listen := flag.String("listen", ":8080", "where to listen")
 	version := flag.Bool("version", false, "print the version and exit")
+	// La sonda de "listo" de las imágenes del constructor oci: que el puerto
+	// de EXPOSE acepte conexiones. Aquí y no con nc, que no todas traen.
+	probeTCP := flag.String("probe-tcp", "", "exit 0 if host:port accepts a TCP connection, 1 if not (a readiness probe)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "kling-guest — kindling's guest agent (PID 1 inside a microVM)\n\n  kling-guest [options]\n\nOptions:\n")
 		flag.PrintDefaults()
@@ -35,6 +39,15 @@ func main() {
 	flag.Parse()
 	if *version {
 		fmt.Println(Version)
+		return
+	}
+	if *probeTCP != "" {
+		c, err := net.DialTimeout("tcp", *probeTCP, 2*time.Second)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		c.Close()
 		return
 	}
 
