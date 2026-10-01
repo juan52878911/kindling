@@ -10,6 +10,23 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Un almacén de copia al escribir lleno ya no llega al invitado como un EIO.** Con el
+  almacén al 100 %, `kling db fork -n 8` decía OK y las copias hacían PANIC al escribir.
+  Ahora el daemon mide el espacio **asignable** de verdad (en Btrfs, chunks de datos y de
+  metadatos con `BTRFS_IOC_SPACE_INFO`), no clona ni despierta instancias del almacén sin
+  256 MiB (`copy-on-write store full (N MiB free): kling cow grow +4G`; una nueva va a una
+  copia completa en la raíz solo si allí cabe entera), y un vigilante **pausa** las
+  instancias del almacén por debajo de 128 MiB y las **reanuda solo** tras
+  `kling cow grow`. Las retenidas (`hold`) y las que vieron errores de disco en su consola
+  (`disk_errors`) salen marcadas en `kling ps`, `kling cow`, `kling db ls` (nuevo) y
+  `kling db doctor` (DB055). Un almacén lleno al arrancar se monta igual. docs/cow.md,
+  «Almacén lleno».
+- **El GC de disco ya no borra copias congeladas que no sean de un servicio.** Con el disco
+  de la raíz al 88 % borraba copias de `kling db branch` congeladas («recreates from…»),
+  y con ellas el trabajo de la rama: el dorado no tiene lo que escribieron. Ahora solo
+  recoge las de la etiqueta `service`, que el planificador recrea igual.
+- **`kling db ls`** (o `ps`): las copias de un dueño con su motor, dorado, estado y avisos
+  (`-json` para scripts).
 - **Reiniciar el daemon o congelar la máquina ya no mata a quien escribe en una carpeta
   compartida en vivo.** El daemon salía con las sesiones de las carpetas abiertas, y
   congelar las cortaba a secas: el invitado recibía EIO en la operación que tuviera en

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -113,6 +114,7 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 	// Las operaciones leen a.fs al llamarlas (con a.mu tomado): el tipo puede
 	// cambiar si el primero no monta (crearYMontar).
 	a.estaMontado = func(dir string) (bool, error) { return estaMontadoTipo(dir, a.fs) }
+	a.libreAlmacen = func(dir string) (int64, int64, error) { return libreAlmacenDir(a.fs)(dir) }
 	a.crear = func(ctx context.Context, img string, bytes int64) error {
 		return crearImagenAlmacen(ctx, a.fs, img, bytes)
 	}
@@ -522,4 +524,49 @@ func (m *Manager) barrerBindsJail() {
 			log.Printf("warning: couldn't unmount the leftover %s: %v", mt.punto, err)
 		}
 	}
+}
+
+// ioctlBtrfsSpaceInfo es BTRFS_IOC_SPACE_INFO (_IOWR(0x94, 20, 16 bytes)),
+// igual en amd64 y arm64.
+const ioctlBtrfsSpaceInfo = 0xC0109414
+
+// libreAlmacenDir es libreEnDir para el punto de montaje del almacén: en un
+// Btrfs, lo de verdad asignable (ver cow_asignable.go); en XFS, statfs, que
+// ahí es exacto.
+func libreAlmacenDir(fs string) func(dir string) (int64, int64, error) {
+	return func(dir string) (int64, int64, error) {
+		total, libre, err := libreEnDir(dir)
+		if err != nil || fs != "btrfs" {
+			return total, libre, err
+		}
+		grupos, err := espacioBtrfs(dir)
+		if err != nil {
+			return total, libre, nil // sin el ioctl, al menos statfs
+		}
+		return total, asignableBtrfs(total, libre, grupos), nil
+	}
+}
+
+// espacioBtrfs lee los grupos de BTRFS_IOC_SPACE_INFO del Btrfs montado en dir.
+func espacioBtrfs(dir string) ([]grupoBtrfs, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// struct btrfs_ioctl_space_args: space_slots, total_spaces y luego las
+	// entradas (flags, total_bytes, used_bytes). Hay como mucho una por tipo y
+	// perfil más la reserva global: 16 sobran.
+	const huecos = 16
+	var buf [2 + 3*huecos]uint64
+	buf[0] = huecos
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), ioctlBtrfsSpaceInfo, uintptr(unsafe.Pointer(&buf[0]))); e != 0 {
+		return nil, e
+	}
+	n := min(int(buf[1]), huecos)
+	grupos := make([]grupoBtrfs, n)
+	for i := range grupos {
+		grupos[i] = grupoBtrfs{flags: buf[2+3*i], total: buf[3+3*i], usado: buf[4+3*i]}
+	}
+	return grupos, nil
 }

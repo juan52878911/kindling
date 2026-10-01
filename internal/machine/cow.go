@@ -250,7 +250,17 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 			}
 			m.alm.borrarInstancia(id)
 		}
-		if errors.Is(err, errAlmacenNoDisponible) {
+		var lleno *errAlmacenLleno
+		if errors.As(err, &lleno) {
+			// Sin sitio en el almacén, la copia completa en la raíz solo si
+			// cabe ENTERA con el margen de la raíz: una copia dispersa que
+			// luego no puede crecer da el mismo EIO en el invitado, solo que
+			// más tarde.
+			if cabe := m.alm.cabeCopiaEnRaiz(src); cabe != nil {
+				return "", fmt.Errorf("%v; %v", err, cabe)
+			}
+			log.Printf("warning: %v; copying the overlay of %s to the data root instead", err, shortID(id))
+		} else if errors.Is(err, errAlmacenNoDisponible) {
 			m.cow.degradar(fmt.Sprintf("copy-on-write store unavailable (%v): copying overlays until the daemon restarts", err))
 		} else {
 			log.Printf("warning: copy-on-write store: %v; copying the overlay of %s instead", err, shortID(id))
@@ -428,10 +438,55 @@ func (m *Manager) barrerAlmacen() {
 // instancia.
 var errAlmacenNoDisponible = errors.New("store unavailable")
 
-// libreMinimaAlmacen es lo que tiene que quedar libre en el almacén para
-// clonar en él: un reflink no ocupa nada, pero la instancia va a escribir.
-// Por debajo, la instancia va a una copia completa en la raíz, como antes.
+// libreMinimaAlmacen es lo que tiene que quedar ASIGNABLE en el almacén para
+// clonar en él o despertar a una instancia que vive en él: un reflink no
+// ocupa nada, pero la instancia va a escribir. Por debajo, una instancia nueva
+// va a una copia completa en la raíz si allí cabe entera (clonarOverlayInstancia),
+// y una que ya vive en el almacén no se despierta (comprobarAlmacenPara).
 const libreMinimaAlmacen = 256 << 20
+
+// marcaPausaAlmacen es por debajo de cuánto espacio asignable el vigilante del
+// almacén pausa las instancias que escriben en él (ver vigilarAlmacen). Menor
+// que libreMinimaAlmacen: una instancia recién admitida no se pausa al nacer, y
+// entre las dos marcas está la histéresis de la reanudación.
+const marcaPausaAlmacen = 128 << 20
+
+// errAlmacenLleno es el almacén sin espacio asignable para una instancia más.
+// El mensaje dice cuánto queda y qué hacer, en vez de dejar que el invitado lo
+// descubra con un EIO.
+type errAlmacenLleno struct{ libre int64 }
+
+func (e *errAlmacenLleno) Error() string {
+	return fmt.Sprintf("copy-on-write store full (%d MiB free): kling cow grow +%dG", max(e.libre, 0)>>20, crecimientoSugeridoGiB)
+}
+
+// crecimientoSugeridoGiB es lo que proponen los mensajes de almacén lleno.
+const crecimientoSugeridoGiB = 4
+
+// cabeCopiaEnRaiz dice por qué una copia completa del overlay src no cabe en
+// la raíz (su tamaño lógico más margenRaizAlmacen), o nil si cabe.
+func (a *almacenCoW) cabeCopiaEnRaiz(src string) error {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	_, libre, err := a.libreEn(a.root)
+	if err != nil {
+		return err
+	}
+	if libre < fi.Size()+margenRaizAlmacen {
+		return fmt.Errorf("and a full copy (%d MiB) doesn't fit on the data root (%d MiB free)", fi.Size()>>20, libre>>20)
+	}
+	return nil
+}
+
+// libreDentro es el espacio del almacén montado, asignable de verdad.
+func (a *almacenCoW) libreDentro() (total, libre int64, err error) {
+	if a.libreAlmacen != nil {
+		return a.libreAlmacen(a.dir)
+	}
+	return a.libreEn(a.dir)
+}
 
 // almacenCoW es el almacén propio: un XFS con reflink (o un Btrfs, ver
 // elegirFSAlmacen) en un fichero, montado por loop dentro de la raíz de
@@ -460,6 +515,9 @@ type almacenCoW struct {
 	clonar      func(src, dst string) error
 	copiar      func(ctx context.Context, src, dst string) error
 	libreEn     func(dir string) (total, libre int64, err error)
+	// libreAlmacen es libreEn para el punto de montaje del almacén: lo de
+	// verdad asignable (cow_asignable.go). nil = libreEn.
+	libreAlmacen func(dir string) (total, libre int64, err error)
 
 	// Para no dejar atrás un almacén que no monta y para hacerlo crecer
 	// (cow_fc.go). nil en un test que no los usa:
@@ -817,13 +875,24 @@ func (a *almacenCoW) probar() error {
 	dst := src + "-clone"
 	defer os.Remove(src)
 	defer os.Remove(dst)
-	if err := os.WriteFile(src, make([]byte, 4096), 0o600); err != nil {
-		return err
+	err := os.WriteFile(src, make([]byte, 4096), 0o600)
+	if err == nil {
+		err = a.clonar(src, dst)
+		if err != nil && !errors.Is(err, syscall.ENOSPC) {
+			return fmt.Errorf("the store does not reflink: %w", err)
+		}
 	}
-	if err := a.clonar(src, dst); err != nil {
-		return fmt.Errorf("the store does not reflink: %w", err)
+	// Lleno no es roto: el almacén ya clonó cuando se creó, y sus instancias
+	// lo necesitan montado para despertar (o para que se vea que no caben).
+	// Si se diera por no disponible, el daemon pasaría a copiar hasta
+	// reiniciarse y nadie miraría ya cuánto sitio le queda. Visto en el
+	// laboratorio: un Btrfs lleno al arrancar el daemon, liberado segundos
+	// después por su limpiador de subvolúmenes borrados.
+	if errors.Is(err, syscall.ENOSPC) {
+		log.Printf("warning: copy-on-write store %s is full (%v): mounted anyway; new instances copy until there is room (kling cow grow)", a.dir, err)
+		return nil
 	}
-	return nil
+	return err
 }
 
 // preparar crea (si hace falta) y monta el almacén. Con a.mu tomado.
@@ -951,8 +1020,8 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 	if err := a.preparar(ctx, gib); err != nil {
 		return "", err
 	}
-	if _, libre, err := a.libreEn(a.dir); err == nil && libre < libreMinimaAlmacen {
-		return "", fmt.Errorf("the store is almost full (%d MiB free)", libre>>20)
+	if _, libre, err := a.libreDentro(); err == nil && libre < libreMinimaAlmacen {
+		return "", &errAlmacenLleno{libre: libre}
 	}
 	base, err := a.base(ctx, snap, src)
 	if err != nil {
@@ -1120,7 +1189,7 @@ func (a *almacenCoW) info() *api.CoWStore {
 	}
 	a.mu.Unlock()
 	if s.Mounted {
-		if total, libre, err := a.libreEn(a.dir); err == nil {
+		if total, libre, err := a.libreDentro(); err == nil {
 			s.SizeMiB, s.FreeMiB = total>>20, libre>>20
 		}
 	}

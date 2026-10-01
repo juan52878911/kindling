@@ -37,6 +37,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | comando | qué hace |
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
+| `ls [-owner T] [-json]` (o `ps`) | las copias del dueño: motor, golden, estado y edad. Marca con `!` y explica debajo la que el daemon retuvo porque el almacén de copia al escribir se llenó (se reanuda sola tras `kling cow grow`) y la que vio errores de disco ([cow.md](cow.md#almacén-lleno)) |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
 | `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
@@ -50,7 +51,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
 | `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
 | `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
-| `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
+| `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB055, `ext/db/internal/doctor`; DB055: errores de disco del invitado o copia retenida por el almacén lleno); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `tenant-check <copia> [-role R] [-column tenant_id] [-setting app.tenant_id] [-max 5] [-json]` | prueba que cada inquilino solo ve sus filas y que sin inquilino no ve ninguna; sale con 1 si algo falla. Ver [Aislamiento entre inquilinos](#aislamiento-entre-inquilinos-tenant-check) |
 | `diff <copia1> <copia2> [-json] [-schema-only] [-max-rows 100000]` | diferencias de esquema y, por tabla, filas nuevas, borradas y cambiadas por clave primaria, sin volcar datos. Ver [Diff entre copias](#diff-entre-copias-diff) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |

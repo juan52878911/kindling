@@ -38,6 +38,11 @@ const (
 	TransitionRemoving = "removing"
 )
 
+// HoldStoreFull es el Hold de una máquina pausada porque el almacén de copia
+// al escribir, donde vive su disco, se quedó sin sitio: el daemon la reanuda
+// solo cuando vuelve a haberlo (kling cow grow).
+const HoldStoreFull = "copy-on-write store full"
+
 // UnmarshalJSON acepta el nombre antiguo del estado congelado: un CLI nuevo
 // contra un daemon 0.13, o un daemon nuevo leyendo el estado que guardó el
 // anterior, ven "warm" y lo entienden como "frozen".
@@ -140,6 +145,20 @@ type Machine struct {
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
 	Ready string `json:"ready,omitempty"`
+
+	// Hold dice por qué el daemon la tiene parada y la despertará él mismo en
+	// cuanto se pueda (HoldStoreFull). Vacío en el caso normal.
+	Hold string `json:"hold,omitempty"`
+
+	// DiskErrors cuenta las líneas de error de disco que su invitado escribió
+	// en la consola (un EIO del host que le llegó como "I/O error, dev vdb",
+	// un journal de ext4 abortado...); DiskErrorAt es cuándo se vio la última
+	// y DiskError su texto, recortado. Sus datos pueden estar dañados: lo
+	// dicen `kling ps` y `kling db doctor`. Las escribe el invitado, así que
+	// solo sirven para avisar de SU máquina, nunca para decidir nada más.
+	DiskErrors  int        `json:"disk_errors,omitempty"`
+	DiskErrorAt *time.Time `json:"disk_error_at,omitempty"`
+	DiskError   string     `json:"disk_error,omitempty"`
 
 	// Agent es el agente de invitado que contestó a su /healthz: qué binario,
 	// qué versión y qué capacidades anuncia (GuestAgent). nil = no se le ha

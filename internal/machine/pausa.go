@@ -104,6 +104,7 @@ func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cr
 	live.State = api.StateRunning
 	live.StartedAt = &now
 	live.FrozenAt = nil
+	live.Hold = ""
 	m.persist()
 	out := *live
 	m.mu.Unlock()
