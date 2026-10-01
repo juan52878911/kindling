@@ -39,9 +39,11 @@ func cmdGolden(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 || (rest[0] != "image" && rest[0] != "build") {
-		return usageErr("usage: kling db golden [-script P] [-H host] image | build [options] <name>\n" +
-			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -as-super  -role R  -database B\n" +
-			"                 -image I  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
+		return usageErr("usage: kling db golden [-script P] [-H host] image [-ext [-pg 17] [-only A,B]] | build [options] <name>\n" +
+			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -role R  -database B\n" +
+			"                 -extension A,B  -preload A,B  -conf K=V  -as-super\n" +
+			"                 -image I | -from T  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
+			"  image -ext: the pg16-ext template, with TimescaleDB, pgvector, PostGIS, pg_cron and pg_partman\n" +
 			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)\n" +
 			"  -engine redis | -engine sqlite: Redis or SQLite (see docs/db-engines.md)")
 	}

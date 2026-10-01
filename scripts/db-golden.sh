@@ -19,7 +19,11 @@
 #   -migrations DIR   ficheros *.sql, en orden alfabético (como el rol de la app)
 #   -seed FILE        SQL de datos, después de las migraciones
 #   -seed-mb N        en vez de -seed: datos sintéticos de ~N MiB (generate_series)
-#   -as-super         migraciones y seed como superusuario (CREATE EXTENSION...)
+#   -as-super         migraciones y seed como superusuario (todo o nada; mejor -extension)
+#   -extension A,B    CREATE EXTENSION como superusuario ANTES de las migraciones,
+#                     que siguen como el rol de la app (repetible)
+#   -preload A,B      shared_preload_libraries (se suma a lo que ya traiga la plantilla)
+#   -conf CLAVE=VALOR una línea más en postgresql.conf (repetible)
 #   -role R           rol de la aplicación (app)     -database B   base (appdb)
 #   -image I          imagen (pg16)                  -mem M        RAM de la VM (1G)
 #   -from T           plantilla con Postgres instalado en vez de -image (macOS: ver docs/db-golden.md)
@@ -81,12 +85,16 @@ cmd_image() {
 cmd_build() {
   local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16 from=""
   local mem=1G cpus=2 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
+  local exts="" preload="" confs=()
   while [ $# -gt 0 ]; do
     case "$1" in
       -migrations) migrations="${2:?falta valor}"; shift 2 ;;
       -seed)       seed="${2:?falta valor}"; shift 2 ;;
       -seed-mb)    seed_mb="${2:?falta valor}"; shift 2 ;;
       -as-super)   as_super=1; shift ;;
+      -extension)  exts="${exts:+$exts,}${2:?falta valor}"; shift 2 ;;
+      -preload)    preload="${preload:+$preload,}${2:?falta valor}"; shift 2 ;;
+      -conf)       confs+=("${2:?falta valor}"); shift 2 ;;
       -role)       role="${2:?falta valor}"; shift 2 ;;
       -database)   db="${2:?falta valor}"; shift 2 ;;
       -image)      image="${2:?falta valor}"; shift 2 ;;
@@ -112,6 +120,30 @@ cmd_build() {
   [[ "$mem" =~ ^[0-9]+[MG]?$ ]] || die "-mem no válido: $mem"
   [[ "$cpus" =~ ^[0-9]+$ ]] || die "-cpus no válido: $cpus"
   [[ "$seed_mb" =~ ^[0-9]+$ ]] || die "-seed-mb no válido: $seed_mb"
+  local e
+  local -a ext_list=() pre_list=()
+  [ -z "$exts" ] || IFS=, read -r -a ext_list <<<"$exts"
+  [ -z "$preload" ] || IFS=, read -r -a pre_list <<<"$preload"
+  for e in ${ext_list[@]+"${ext_list[@]}"}; do
+    [[ "$e" =~ ^[a-z0-9_][a-z0-9_-]{0,62}$ ]] || die "-extension no válida: $e"
+  done
+  for e in ${pre_list[@]+"${pre_list[@]}"}; do
+    [[ "$e" =~ ^[a-z0-9_]{1,63}$ ]] || die "-preload no válido: $e"
+  done
+  # -conf: CLAVE=VALOR, con la clave de un GUC y el valor en una línea. Las
+  # que sostienen la seguridad y la auditoría del golden no se tocan.
+  local c k v q="'" conf_text=""
+  for c in ${confs[@]+"${confs[@]}"}; do
+    [[ "$c" =~ ^([a-z_][a-z0-9_.]{0,62})=(.*)$ ]] || die "-conf no válido (CLAVE=VALOR): $c"
+    k="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+    [[ "$v" != *[[:cntrl:]]* && "$v" != *\\* ]] || die "-conf $k: el valor no puede llevar caracteres de control ni barras invertidas"
+    case "$k" in
+      shared_preload_libraries) die "-conf $k: usa -preload (se suma a lo que traiga la plantilla)" ;;
+      listen_addresses|port|unix_socket_*|password_encryption|ssl*|hba_file|ident_file|data_directory|config_file|include*|log_*|logging_collector)
+        die "-conf $k: lo fija el golden (seguridad, conexión o auditoría)" ;;
+    esac
+    conf_text+="$k = $q${v//$q/$q$q}$q"$'\n'
+  done
   [ "$seed_mb" -le "$SEED_MB_MAX" ] || die "-seed-mb máximo $SEED_MB_MAX: el overlay de la máquina es de 512 MiB"
   [ -z "$seed" ] || [ "$seed_mb" -eq 0 ] || die "-seed y -seed-mb son excluyentes"
   [ -z "$seed" ] || [ -f "$seed" ] || die "no existe el seed: $seed"
@@ -170,6 +202,15 @@ cmd_build() {
   ip="$(printf '%s' "$cmdline" | tr ' ' '\n' | sed -n 's/^ip=\([0-9.]*\)::.*/\1/p' | head -n1)"
   [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "no encuentro la IP del invitado en /proc/cmdline"
 
+  # Lo de -conf y -preload, a un fichero que SETUP añade a postgresql.conf
+  # (por kling cp: ningún valor pasa por una línea de shell del invitado).
+  if [ -n "$conf_text" ] || [ "${#pre_list[@]}" -gt 0 ]; then
+    printf '%s' "$conf_text" > "$BUILD_TMP/extra.conf"
+    printf '%s\n' ${pre_list[@]+"${pre_list[@]}"} > "$BUILD_TMP/preload"
+    quiet "${K[@]}" cp "$BUILD_TMP/extra.conf" "$m:/tmp/kdb-extra.conf"
+    quiet "${K[@]}" cp "$BUILD_TMP/preload" "$m:/tmp/kdb-preload"
+  fi
+
   say "initdb en el overlay y arranque de Postgres en $ip"
   # PGDATA va en la raíz de la máquina (overlay), NO en un volumen: Freeze
   # desmonta los volúmenes y Fork rechaza los de escritura (puedeRamificarse).
@@ -213,6 +254,23 @@ log_connections = on
 log_disconnections = on
 log_line_prefix = '%m [%p] u=%u d=%d h=%h '
 CONF
+# -preload: lo pedido se SUMA a lo que ya traiga la plantilla (pg16-ext precarga
+# timescaledb), y cada librería tiene que existir: si no, Postgres no arranca y
+# el error llega tarde y críptico.
+if [ -f /tmp/kdb-preload ]; then
+  LIBDIR=\$(dirname "\$(ls /usr/lib/postgresql*/plpgsql.so | head -n1)")
+  FALTAN=""
+  for L in \$(cat /tmp/kdb-preload); do [ -f "\$LIBDIR/\$L.so" ] || FALTAN="\$FALTAN \$L"; done
+  [ -z "\$FALTAN" ] || { echo "db-golden: -preload: not installed in this image:\$FALTAN (kling db golden image -ext builds pg16-ext)" >&2; exit 1; }
+  CUR=\$(su -s /bin/sh postgres -c "postgres -D \$D -C shared_preload_libraries" | tr -d "' ")
+  ALL=\$( { echo "\$CUR" | tr ',' '\n'; cat /tmp/kdb-preload; } | grep -v '^\$' | awk '!v[\$0]++' | paste -sd, -)
+  echo "shared_preload_libraries = '\$ALL'" >> "\$D/postgresql.conf"
+  rm -f /tmp/kdb-preload
+fi
+if [ -f /tmp/kdb-extra.conf ]; then
+  cat /tmp/kdb-extra.conf >> "\$D/postgresql.conf"
+  rm -f /tmp/kdb-extra.conf
+fi
 chown postgres:postgres "\$D/pg_hba.conf" "\$D/postgresql.conf"
 # El postmaster hereda las tuberías del exec: a fichero y sin stdin, o el
 # exec no termina nunca.
@@ -250,6 +308,54 @@ SQL
     files+=("$BUILD_TMP/seed-synth.sql")
   fi
 
+  # Extensiones: TODAS las que hacen falta (las de -extension y las que crean
+  # las migraciones) se comprueban de una vez, antes de ejecutar nada, y el
+  # error las lista todas con dónde se piden. Antes, psql paraba en la primera
+  # y la segunda no se veía hasta arreglar aquella.
+  local avail mencion falta="" super="" nombre donde
+  declare -A pedida=()
+  for e in ${ext_list[@]+"${ext_list[@]}"}; do pedida[$e]="-extension"; done
+  if [ "${#files[@]}" -gt 0 ]; then
+    while IFS= read -r mencion; do
+      donde="$(printf '%s' "$mencion" | cut -d: -f1-2)"
+      # Comentarios fuera: "-- CREATE EXTENSION x" no pide nada.
+      [[ "$(printf '%s' "${mencion#"$donde":}" | sed 's/^[[:space:]]*//')" != --* ]] || continue
+      nombre="$(printf '%s' "$mencion" | sed -E 's/.*[Ee][Xx][Tt][Ee][Nn][Ss][Ii][Oo][Nn][[:space:]]+([Ii][Ff][[:space:]]+[Nn][Oo][Tt][[:space:]]+[Ee][Xx][Ii][Ss][Tt][Ss][[:space:]]+)?"?([A-Za-z0-9_-]+).*/\2/' | tr 'A-Z' 'a-z')"
+      [[ "$nombre" =~ ^[a-z0-9_][a-z0-9_-]{0,62}$ ]] || continue
+      [ -n "${pedida[$nombre]:-}" ] || pedida[$nombre]="$donde"
+    done < <(grep -HniE 'create[[:space:]]+extension[[:space:]]' "${files[@]}" 2>/dev/null || true)
+  fi
+  if [ "${#pedida[@]}" -gt 0 ]; then
+    avail="$("${K[@]}" exec "$m" -- su -s /bin/sh postgres -c \
+      "psql -X -At -d postgres -c \"SELECT name || ' ' || bool_or(trusted) FROM pg_available_extension_versions GROUP BY name\"")" \
+      || die "no se pudo leer pg_available_extension_versions"
+    for e in "${!pedida[@]}"; do
+      case $'\n'"$avail"$'\n' in
+        *$'\n'"$e "*) ;;
+        *) falta+=$'\n'"  $e  (${pedida[$e]})"; continue ;;
+      esac
+      # Una no confiable (timescaledb, postgis...) solo la crea un superusuario:
+      # sin -extension ni -as-super, la migración fallaría como el rol de la app.
+      if [ "${pedida[$e]}" != "-extension" ] && [ "$as_super" -eq 0 ] && ! printf '%s\n' "$avail" | grep -qx "$e true"; then
+        super+=",$e"
+      fi
+    done
+    [ -z "$falta" ] || die "extensions not available in this image:$falta
+  build a template that has them:  kling db golden image -ext   (then: golden build -from pg16-ext)"
+    [ -z "$super" ] || die "the migrations create extensions that only a superuser can create: ${super#,}
+  add:  -extension ${super#,}   (created as superuser before the migrations, which still run as $role)"
+  fi
+  if [ "${#ext_list[@]}" -gt 0 ]; then
+    say "creando extensiones como superusuario: ${ext_list[*]}"
+    local esql=""
+    for e in "${ext_list[@]}"; do esql+="CREATE EXTENSION IF NOT EXISTS \"$e\" CASCADE;"$'\n'; done
+    printf '%s' "$esql" > "$BUILD_TMP/extensions.sql"
+    quiet "${K[@]}" cp "$BUILD_TMP/extensions.sql" "$m:/var/lib/dbgolden/in/000-extensions.sql"
+    quiet "${K[@]}" exec "$m" -- chmod 644 /var/lib/dbgolden/in/000-extensions.sql
+    quiet "${K[@]}" exec -timeout 10m "$m" -- su -s /bin/sh postgres -c \
+      "psql -X -q -v ON_ERROR_STOP=1 -d $db -f /var/lib/dbgolden/in/000-extensions.sql"
+  fi
+
   local n=0 dest who="PGOPTIONS='-c role=$role'"
   [ "$as_super" -eq 0 ] || who="PGOPTIONS=''"
   for f in "${files[@]}"; do
@@ -260,8 +366,15 @@ SQL
     # kling cp conserva el modo del host (0600 bajo nuestro umask) y el dueño root:
     # postgres no lo podría leer. Migraciones y seed no son secretos.
     quiet "${K[@]}" exec "$m" -- chmod 644 "$dest"
-    quiet "${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
-      "$who psql -X -q -v ON_ERROR_STOP=1 -d $db -f $dest"
+    # El error de psql cita la ruta de la copia (/var/lib/dbgolden/in/007.sql)
+    # y la línea: se cambia por la del fichero de verdad.
+    local out
+    if ! out="$("${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
+      "$who psql -X -q -v ON_ERROR_STOP=1 -d $db -f $dest" 2>&1)"; then
+      out="${out//psql:$dest:/$f:}"
+      printf '%s\n' "${out//$dest/$f}" >&2
+      die "$(basename "$f") failed (file and line above); nothing was saved"
+    fi
   done
 
   say "VACUUM, CHECKPOINT y comprobaciones antes de congelar"
