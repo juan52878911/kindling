@@ -123,12 +123,13 @@ func imagesImport(args []string) error {
 	if built.Ready != "" {
 		fmt.Printf("  ready    %s\n", built.Ready)
 	}
-	run := "kling run -image " + res.Name + " -mem 512M -wait-ready"
-	for _, v := range built.Volumes {
-		run += " -volume " + path.Base(v) + ":" + v
-		break
+	if len(built.Volumes) > 0 {
+		// No se sugiere montar el volumen justo ahí: un volumen de kling
+		// trae lost+found, y initdb (y otros) no aceptan un directorio que
+		// no esté vacío. En el padre, o con un subdirectorio (PGDATA).
+		fmt.Printf("  volumes  %s  (keep data with -volume NAME:<a parent dir>)\n", strings.Join(built.Volumes, " "))
 	}
-	next("%s", run)
+	next("kling run -image %s -mem 512M -wait-ready", res.Name)
 	return nil
 }
 

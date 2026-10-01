@@ -411,6 +411,34 @@ func parseSignal(s string) (syscall.Signal, error) {
 	return 0, fmt.Errorf("unknown stop signal %q", s)
 }
 
+// ServiceDeclared dice si la imagen declaró un servicio (y se lanzó).
+func ServiceDeclared() bool {
+	serviceState.mu.Lock()
+	defer serviceState.mu.Unlock()
+	return serviceState.svc != nil
+}
+
+// ServiceStopHandler sirve POST /service/stop: para el servicio y contesta
+// su estado cuando ya salió.
+func ServiceStopHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		StopService()
+		serviceState.mu.Lock()
+		s := serviceState.svc
+		serviceState.mu.Unlock()
+		st := api.GuestService{}
+		if s != nil {
+			st = s.Status(0)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(st)
+	}
+}
+
 // StopService para el servicio, si hay uno (ver Service.Stop).
 func StopService() {
 	serviceState.mu.Lock()
@@ -425,8 +453,15 @@ func StopService() {
 // SIGKILL a su grupo. No vuelve a arrancarlo.
 func (s *Service) Stop() {
 	s.mu.Lock()
-	if s.stopping || s.done == nil {
+	if s.done == nil {
 		s.mu.Unlock()
+		return
+	}
+	if s.stopping {
+		// Otro ya lo está parando (el daemon y luego el apagado): esperar
+		// a que acabe, no volver como si ya hubiera salido.
+		s.mu.Unlock()
+		<-s.done
 		return
 	}
 	s.stopping = true

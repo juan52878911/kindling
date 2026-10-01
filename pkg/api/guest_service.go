@@ -13,8 +13,14 @@ package api
 const GuestServiceSpec = "/etc/kindling/service.json"
 
 // GuestServicePath (GET) es el estado del servicio supervisado (GuestService).
-// Ruta de control: el gateway no la reenvía.
-const GuestServicePath = "/service"
+// GuestServiceStopPath (POST) lo para con su señal y espera a que salga (con
+// SIGKILL al grupo pasado su plazo); ya no se relanza. Lo llama el daemon
+// antes de vaciar los volúmenes y matar la máquina. Rutas de control: el
+// gateway no las reenvía.
+const (
+	GuestServicePath     = "/service"
+	GuestServiceStopPath = "/service/stop"
+)
 
 // GuestServiceLog es el fichero (dentro del invitado) con la salida del
 // servicio; al pasar de GuestServiceLogMax se rota a .1.

@@ -124,12 +124,12 @@ func TestResyncRegistradaEnElAgente(t *testing.T) {
 }
 
 func TestIsControlPath(t *testing.T) {
-	for _, p := range []string{"/resync", "/resync/x", "/volume/release", "/volume", "/exec", "/exec/pty", "/files", "/dns"} {
+	for _, p := range []string{"/resync", "/resync/x", "/volume/release", "/volume", "/exec", "/exec/pty", "/files", "/dns", "/service", "/service/stop"} {
 		if !IsControlPath(p) {
 			t.Errorf("%s debería ser de control", p)
 		}
 	}
-	for _, p := range []string{"/", "/mcp", "/mcp/resync", "/resyncx", "/executor", "/healthz", "/sse"} {
+	for _, p := range []string{"/", "/mcp", "/mcp/resync", "/resyncx", "/executor", "/healthz", "/sse", "/services"} {
 		if IsControlPath(p) {
 			t.Errorf("%s no debería ser de control", p)
 		}
