@@ -14,9 +14,16 @@ import (
 type fake struct {
 	logOut, evOut []byte
 	logErr        error
+	inspectOut    []byte // nil: inspect falla
 }
 
 func (f *fake) Run(_ context.Context, _ io.Reader, args ...string) ([]byte, error) {
+	if args[0] == "inspect" {
+		if f.inspectOut == nil {
+			return nil, errors.New("no inspect")
+		}
+		return f.inspectOut, nil
+	}
 	if args[0] == "events" {
 		return f.evOut, errors.New("deadline exceeded")
 	}
@@ -100,5 +107,25 @@ func TestRunErrores(t *testing.T) {
 	}
 	if err := Run(context.Background(), f, "x", 0, false, io.Discard); err == nil {
 		t.Error("since 0")
+	}
+}
+
+// Lo de antes de que existiera la copia es de la construcción del golden
+// (su log viaja dentro): no sale en el audit de la copia.
+func TestRunSinLoDelGolden(t *testing.T) {
+	setNow(t)
+	f := &fake{logOut: []byte(sampleLog), inspectOut: []byte(`{"created_at":"2026-09-28T10:00:05.5Z"}`)}
+	var b bytes.Buffer
+	if err := Run(context.Background(), f, "copia1", time.Hour, true, &b); err != nil {
+		t.Fatal(err)
+	}
+	var es []Entry
+	if err := json.Unmarshal(b.Bytes(), &es); err != nil {
+		t.Fatal(err)
+	}
+	// Con 2 s de margen: se quedan la desconexión de las 10:00:05 y el fallo
+	// de las 10:00:06; la conexión de las 10:00:00 era del golden.
+	if len(es) != 2 || es[0].Event != "disconnect" {
+		t.Fatalf("%+v", es)
 	}
 }

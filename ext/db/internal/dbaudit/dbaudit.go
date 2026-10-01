@@ -59,6 +59,19 @@ func RunEngine(ctx context.Context, k klingc.Kling, machine, engine string, sinc
 		return fmt.Errorf("since must be positive")
 	}
 	cutoff := now().Add(-since)
+	// Nada de antes de que la copia existiera: el log de Postgres viaja dentro
+	// del golden, con las conexiones de su construcción (563 líneas en una
+	// copia de AuraCRM que nadie había usado). 2 s de margen por el reloj.
+	if out, err := k.Run(ctx, nil, "inspect", machine); err == nil {
+		var mc struct {
+			CreatedAt time.Time `json:"created_at"`
+		}
+		if json.Unmarshal(out, &mc) == nil && !mc.CreatedAt.IsZero() {
+			if born := mc.CreatedAt.Add(-2 * time.Second); born.After(cutoff) {
+				cutoff = born
+			}
+		}
+	}
 
 	var entries []Entry
 	switch engine {

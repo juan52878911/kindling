@@ -138,9 +138,14 @@ func TestRehearseLockTimeoutYFallo(t *testing.T) {
 	if !strings.Contains(buf.String(), "would block 3 s in production") {
 		t.Fatalf("table:\n%s", buf.String())
 	}
-	// El error no cita la sentencia (LINE 1: ...).
-	if strings.Contains(buf.String(), "secretos") {
-		t.Fatalf("the report quotes the statement:\n%s", buf.String())
+	// El error no cita la sentencia (LINE 1: ...): puede llevar datos. La
+	// lista de sentencias con locks fuertes sí la nombra, normalizada (sin
+	// literales), como observe.
+	if strings.Contains(f.Error, "secretos") {
+		t.Fatalf("the error quotes the statement: %q", f.Error)
+	}
+	if len(f.StrongStatements) != 1 || !strings.Contains(f.StrongStatements[0], "ACCESS EXCLUSIVE") {
+		t.Fatalf("strong statements: %v", f.StrongStatements)
 	}
 	// Se destruyó igual.
 	if len(oa.f.machines) != 0 {

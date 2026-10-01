@@ -1,8 +1,10 @@
 package main
 
-// `kling db role`: roles extra dentro de una copia. Hoy solo el de SOLO
-// LECTURA (-ro), pensado para darle un agente o una herramienta de análisis
-// sin darle la base entera.
+// `kling db role`: roles extra dentro de una copia. El de SOLO LECTURA (-ro),
+// pensado para darle un agente o una herramienta de análisis sin darle la base
+// entera; y -login, que deja entrar desde el host a un rol que ya existe (los
+// que crean las migraciones: app_user, uno por servicio...) con una clave
+// nueva solo de esta copia.
 //
 // Qué hace que sea de solo lectura de verdad: no es la bandera
 // default_transaction_read_only (un cliente puede apagarla con SET), sino que
@@ -90,6 +92,7 @@ func qIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `
 func cmdRole(args []string) error {
 	fs, host, owner := newFlags("role")
 	ro := fs.Bool("ro", false, "a read-only login role")
+	login := fs.Bool("login", false, "let an EXISTING role of the copy (made by your migrations) log in from this host, with a fresh password of its own")
 	name := fs.String("name", defaultRoleRO, "name of the role")
 	schemas := fs.String("schemas", "", "comma-separated schemas it can read (default: all but the system ones)")
 	timeout := fs.Duration("timeout", defaultRoleTmo, "statement_timeout and idle_in_transaction_session_timeout of the role")
@@ -98,8 +101,9 @@ func cmdRole(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 || (!*ro && !*rm) {
-		return usageErr("usage: kling db role <copy> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]")
+	if len(pos) != 1 || (!*ro && !*rm && !*login) || (*ro && *login) {
+		return usageErr("usage: kling db role <copy> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]\n" +
+			"       kling db role <copy> -login -name <existing role> [-rm]")
 	}
 	if *rm && (*schemas != "") {
 		return usageErr("-rm takes no -schemas")
@@ -110,6 +114,15 @@ func cmdRole(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
+	if *login {
+		if *name == defaultRoleRO {
+			return usageErr("-login needs -name <existing role>")
+		}
+		if *rm {
+			return a.roleLoginRemove(ctx, pos[0], *owner, *name)
+		}
+		return a.roleLogin(ctx, pos[0], *owner, *name)
+	}
 	if *rm {
 		return a.roleRemove(ctx, pos[0], *owner, *name)
 	}
@@ -390,5 +403,95 @@ func (a *app) roleRemove(ctx context.Context, ref, owner, name string) error {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "%s  role %s removed\n", mc.Name, name)
+	return nil
+}
+
+// roleLogin deja entrar desde el host a un rol que ya existe en la copia (no
+// lo crea este comando: lo crearon las migraciones). Clave nueva generada aquí
+// (al invitado, solo su verificador), LOGIN, y su línea de pg_hba.conf. Un
+// superusuario no: por red solo entran roles sin poderes de administración.
+// No le cambia ni un privilegio. Las copias que nacen de esta no heredan la
+// línea (purgeInheritedRoles) ni la clave (es de este host y esta copia).
+func (a *app) roleLogin(ctx context.Context, ref, owner, name string) error {
+	mc, _, db, err := a.roleTarget(ctx, ref, owner, name)
+	if err != nil {
+		return err
+	}
+	exists, comment, err := a.roleState(ctx, mc.ID, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("role %s does not exist in %s (-login is for roles your migrations made; kling db role %s -ro -name %s makes a read-only one)", name, mc.Name, mc.Name, name)
+	}
+	if comment == roleComment {
+		return fmt.Errorf("role %s was made by kling db role -ro: it can already log in (kling db connect %s -role %s)", name, mc.Name, name)
+	}
+	super, err := a.sqlSuper(ctx, mc.ID, fmt.Sprintf("SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = '%s';\n", name), "looking up the role")
+	if err != nil {
+		return err
+	}
+	if lastLine(super) == "t" {
+		return fmt.Errorf("role %s is a superuser (or replication role): it only gets in through the local socket, never from the host", name)
+	}
+	pw, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	ver, err := newVerifier(pw)
+	if err != nil {
+		return err
+	}
+	if err := dbstate.WriteRolePassword(mc.ID, name, pw); err != nil {
+		return fmt.Errorf("storing the password of role %s: %w", name, err)
+	}
+	undo := func(cause error) error {
+		_ = a.hba(context.Background(), mc.ID, db, name, false)
+		_ = dbstate.RemoveRolePassword(mc.ID, name)
+		return fmt.Errorf("role %s: %w", name, cause)
+	}
+	res, err := a.sqlSuper(ctx, mc.ID, fmt.Sprintf("ALTER ROLE %s LOGIN PASSWORD '%s';\nSELECT rolpassword = '%s' FROM pg_authid WHERE rolname = '%s';\n",
+		qIdent(name), ver, ver, name), "setting the password")
+	if err != nil {
+		return undo(err)
+	}
+	if lastLine(res) != "t" {
+		return undo(errors.New("the role does not hold the new verifier"))
+	}
+	if err := a.hba(ctx, mc.ID, db, name, true); err != nil {
+		return undo(err)
+	}
+	res, err = a.sqlSuper(ctx, mc.ID, fmt.Sprintf(
+		"SELECT pg_reload_conf();\nSELECT count(*) FROM pg_hba_file_rules WHERE user_name @> ARRAY['%s'] AND database @> ARRAY['%s'] AND error IS NULL;\n", name, db),
+		"reloading pg_hba.conf")
+	if err != nil {
+		return undo(err)
+	}
+	if lastLine(res) != "1" {
+		return undo(errors.New("pg_hba.conf does not hold a valid rule for the role"))
+	}
+	p, _ := dbstate.RolePasswordPath(mc.ID, name)
+	fmt.Fprintf(a.stdout, "%s  role %s  can log in from this host (its privileges are untouched)\n", mc.Name, name)
+	fmt.Fprintf(a.stdout, "  password  %s\n  kling db connect %s -role %s [-psql | -dsn]\n", p, mc.Name, name)
+	return nil
+}
+
+// roleLoginRemove deshace -login: fuera la línea de pg_hba.conf y la clave
+// del host. El rol se queda (es de las migraciones).
+func (a *app) roleLoginRemove(ctx context.Context, ref, owner, name string) error {
+	mc, _, db, err := a.roleTarget(ctx, ref, owner, name)
+	if err != nil {
+		return err
+	}
+	if err := a.hba(ctx, mc.ID, db, name, false); err != nil {
+		return err
+	}
+	if _, err := a.sqlSuper(ctx, mc.ID, "SELECT pg_reload_conf();\n", "reloading pg_hba.conf"); err != nil {
+		return err
+	}
+	if err := dbstate.RemoveRolePassword(mc.ID, name); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "%s  role %s no longer logs in from this host (the role stays)\n", mc.Name, name)
 	return nil
 }

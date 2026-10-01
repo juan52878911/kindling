@@ -181,3 +181,16 @@ func TestStrongLock(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitStatements(t *testing.T) {
+	sql := "CREATE TABLE a (b text DEFAULT 'x;y'); -- c; d\n/* e; f */ ALTER TABLE a ADD c int;\n" +
+		"CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;\nCREATE INDEX i ON a (b)"
+	got := splitStatements(sql)
+	if len(got) != 4 || !strings.HasPrefix(got[1], "ALTER TABLE") || !strings.Contains(got[2], "SELECT 1;") {
+		t.Fatalf("%q", got)
+	}
+	st := strongStatements(sql)
+	if len(st) != 2 || strings.Contains(strings.Join(st, " "), "x;y") {
+		t.Fatalf("%q", st)
+	}
+}

@@ -433,7 +433,7 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		readPW = func() (string, error) {
 			pw, err := dbstate.ReadRolePassword(mc.ID, role)
 			if errors.Is(err, dbstate.ErrNoPassword) {
-				return "", fmt.Errorf("this host has no password for role %s of %s (kling db role %s -ro -name %s creates it)", role, mc.Name, mc.Name, role)
+				return "", fmt.Errorf("this host has no password for role %s of %s (kling db role %s -ro -name %s creates a read-only one; for a role your migrations made: kling db role %s -login -name %s)", role, mc.Name, mc.Name, role, mc.Name, role)
 			}
 			return pw, err
 		}
@@ -595,19 +595,34 @@ func cmdRm(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
+	// Una que no se puede borrar no deja a las demás sin borrar: se sigue, y
+	// al final se dice cuáles fallaron (y la salida no es 0).
+	var fallos []string
 	for _, ref := range pos {
-		mc, err := a.inspect(ctx, ref)
-		if err != nil {
-			return err
+		if err := a.rmOne(ctx, ref, *owner); err != nil {
+			fmt.Fprintf(a.stderr, "%s: %v\n", ref, err)
+			fallos = append(fallos, ref)
 		}
-		if err := owned(mc, *owner); err != nil {
-			return err
-		}
-		if err := a.remove(ctx, mc); err != nil {
-			return err
-		}
-		fmt.Fprintln(a.stdout, mc.Name)
 	}
+	if len(fallos) > 0 {
+		return &plugin.ExitError{Code: 1, Err: fmt.Errorf("%d of %d not removed: %s", len(fallos), len(pos), strings.Join(fallos, " "))}
+	}
+	return nil
+}
+
+// rmOne borra una copia de owner (y sus puntos de restauración).
+func (a *app) rmOne(ctx context.Context, ref, owner string) error {
+	mc, err := a.inspect(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if err := owned(mc, owner); err != nil {
+		return err
+	}
+	if err := a.removeWithSnapshots(ctx, mc, owner); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stdout, mc.Name)
 	return nil
 }
 
