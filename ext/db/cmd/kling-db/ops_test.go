@@ -34,7 +34,7 @@ func TestRehearseCopiaNoTocaOrigenYDestruye(t *testing.T) {
 		"002_b.sql": "ALTER TABLE t ADD c int; -- GROW",
 		"001_a.sql": "CREATE TABLE t(); -- GROW",
 	})
-	rep, err := oa.rehearse(ctx, "c1", "local", dir, 5*time.Second, false)
+	rep, err := oa.rehearse(ctx, "c1", "local", dir, nil, 5*time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestRehearseCopiaNoTocaOrigenYDestruye(t *testing.T) {
 func TestRehearseGoldenYKeep(t *testing.T) {
 	oa := newOpsApp(t)
 	dir := writeMigs(t, map[string]string{"1.sql": "SELECT 1;"})
-	rep, err := oa.rehearse(ctx, "pg", "local", dir, time.Second, true)
+	rep, err := oa.rehearse(ctx, "pg", "local", dir, nil, time.Second, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestRehearseLockTimeoutYFallo(t *testing.T) {
 		"2_lock.sql": "ALTER TABLE secretos ...; -- LOCK",
 		"3_next.sql": "SELECT 2;",
 	})
-	rep, err := oa.rehearse(ctx, "pg", "local", dir, 3*time.Second, false)
+	rep, err := oa.rehearse(ctx, "pg", "local", dir, nil, 3*time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestRehearseLockTimeoutYFallo(t *testing.T) {
 func TestRehearseErrorSQLSinSentencia(t *testing.T) {
 	oa := newOpsApp(t)
 	dir := writeMigs(t, map[string]string{"1.sql": "BOOM 'clave-secreta' -- BAD"})
-	rep, err := oa.rehearse(ctx, "pg", "local", dir, time.Second, false)
+	rep, err := oa.rehearse(ctx, "pg", "local", dir, nil, time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestRehearseMuestreoDeLocks(t *testing.T) {
 	lockSampleEvery = 5 * time.Millisecond
 	oa.o.waiters = 1
 	dir := writeMigs(t, map[string]string{"1.sql": "SELECT pg_sleep(1); -- SLOW"})
-	rep, err := oa.rehearse(ctx, "pg", "local", dir, time.Second, false)
+	rep, err := oa.rehearse(ctx, "pg", "local", dir, nil, time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestRehearseValidaAntesDeCrear(t *testing.T) {
 		"lock demasiado": {good, time.Millisecond},
 		"lock enorme":    {good, 24 * time.Hour},
 	} {
-		if _, err := oa.rehearse(ctx, "pg", "local", tc.dir, tc.lt, false); err == nil {
+		if _, err := oa.rehearse(ctx, "pg", "local", tc.dir, nil, tc.lt, false); err == nil {
 			t.Fatalf("%s: want error", name)
 		}
 	}
@@ -211,11 +211,11 @@ func TestRehearseOrigenAjenoOCongelado(t *testing.T) {
 	oa := newOpsApp(t)
 	mc := oa.copyReady(t, "c1")
 	dir := writeMigs(t, map[string]string{"1.sql": "SELECT 1;"})
-	if _, err := oa.rehearse(ctx, "c1", "otro", dir, time.Second, false); err == nil {
+	if _, err := oa.rehearse(ctx, "c1", "otro", dir, nil, time.Second, false); err == nil {
 		t.Fatal("foreign copy accepted")
 	}
 	oa.f.machines[mc.ID].State = api.StatePaused
-	if _, err := oa.rehearse(ctx, "c1", "local", dir, time.Second, false); err == nil || !strings.Contains(err.Error(), "thaw it first") {
+	if _, err := oa.rehearse(ctx, "c1", "local", dir, nil, time.Second, false); err == nil || !strings.Contains(err.Error(), "thaw it first") {
 		t.Fatalf("paused source: %v", err)
 	}
 	if oa.f.machines[mc.ID].State != api.StatePaused {

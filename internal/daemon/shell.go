@@ -54,6 +54,7 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	// Primero el invitado y después el secuestro: mientras la respuesta siga
 	// siendo HTTP normal, un fallo se cuenta con un código y un mensaje. Después
 	// del 101 ya no hay forma de decir nada que el cliente entienda como error.
+	req.Env = append(s.mgr.EnvCredenciales(mc.ID), req.Env...)
 	guest, err := openGuestShell(r.Context(), guestBase(mc), req)
 	if err != nil {
 		code := http.StatusBadGateway

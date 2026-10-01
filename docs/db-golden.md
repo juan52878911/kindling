@@ -142,6 +142,74 @@ kling db golden build -from pg16-ext \
 `-as-super` sigue existiendo (todo como superusuario, objetos del superusuario), para
 migraciones que de verdad lo necesitan.
 
+### Un directorio de init al estilo Docker: `-init`
+
+`-init DIR` ejecuta un directorio como `docker-entrypoint-initdb.d`: `*.sql`, `*.sql.gz` y
+`*.sh` en orden, desde el propio directorio (un `\i` a un `.psql` hermano funciona), con
+`POSTGRES_USER`, `POSTGRES_DB`, `PGHOST`, `PGUSER` y `PGDATABASE` en el entorno, más lo
+de `-env-file F` (líneas `CLAVE=VALOR`, 0600: las claves no van por argv; cada valor se
+toma literal, como `docker --env-file`, sin ejecutar nada del fichero). Los `.sh` con
+`#!/bin/bash` necesitan bash: `pg16-ext` lo trae. Va después de `-extension` y antes de
+`-migrations`.
+
+Diferencia a propósito con Docker: allí corre como el superusuario (que es
+`POSTGRES_USER`). Aquí corre **como el rol de la aplicación**, que no es superusuario: los
+objetos son suyos y la RLS le aplica. Para lo que un init suele hacer además (crear roles:
+`app_user`, uno por servicio), el rol tiene `CREATEROLE` **solo mientras dura `-init`** y
+el socket local le deja entrar sin clave **solo mientras dura** (la máquina de preparación
+no tiene red); después se le quita y se borra la línea de `pg_hba.conf`.
+
+### Migraciones que hace un programa: `-step`, `-super-step`, `-sql`
+
+Cuando el esquema lo hace un programa (alembic, prisma, flyway, `manage.py migrate`) y no
+un `.sql`, `golden build` encadena lo que antes se hacía a mano:
+
+```sh
+kling db golden build -from pg16-ext -extension timescaledb,vector,uuid-ossp,pgcrypto \
+  -role crm_user -database crm_db -init infrastructure/postgres/init -env-file ~/aura.env \
+  -agent aura-py -workdir . \
+  -step 'for s in backend/*/; do (cd $s && alembic upgrade head) || exit 1; done' \
+  -super-step 'bash infrastructure/rls/aplicar_rls.sh --confirmar' \
+  -sql infrastructure/demo-seed.sql \
+  aura-main
+```
+
+1. `db-golden.sh` construye `<nombre>-base` con todo lo de siempre (extensiones, `-init`,
+   `-migrations`...).
+2. Una copia de ese golden (`kling db up`), con su clave rotada.
+3. Si hay `-step`: una microVM de `-agent` (una plantilla con el programa y sus
+   dependencias; egress `allowlist`, así que solo llega a la copia) a la que se sube
+   `-workdir` en `/work` (sin `.git`, `node_modules`, `__pycache__` ni enlaces; hasta 64
+   MiB comprimido) y `-env-file`, y que recibe la copia por `kling db attach`. Cada
+   `-step` corre con `sh -c` en `/work` con `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`,
+   `PGSSLMODE=disable`, `PGPASSWORD` (un **marcador**: la clave no entra en el agente; el
+   proxy la pone) y `DATABASE_URL`. Su salida se ve al momento. Plazo: `-step-timeout`
+   (30 min).
+4. `-super-step "<cmd>"` corre **dentro de la copia**, como el superusuario por el
+   socket local (`-workdir` en `/tmp/kdb-work`): lo que en Docker hacía un script como
+   `POSTGRES_USER` superusuario y el rol de la aplicación no puede hacer
+   (`ALTER ROLE ... NOSUPERUSER`, por ejemplo), sin hacerlo superusuario a él.
+5. `-sql FILE` corre SQL en la copia como el rol de la aplicación, con el error en el
+   fichero y la línea de verdad.
+6. Pasos, `-super-step` y `-sql`, **en el orden en que se dan**. Si uno falla no se
+   guarda nada (y sin `-keep` se borra todo).
+7. `detach`, fuera el agente, `VACUUM (ANALYZE)`, `CHECKPOINT`, ningún cliente vivo, el
+   log de Postgres vacío, y la copia se guarda como la plantilla `<nombre>` **con su
+   contraseña y su `conn.env`**, como cualquier golden (antes, guardar a mano con `kling
+   save` dejaba un golden sin ellos, y `doctor` y `diff` no sabían qué rol mirar). La
+   copia y `<nombre>-base` se borran.
+
+Para AuraCRM (`main`: 96 tablas, 69 políticas, 4 hypertables, 10 servicios con alembic,
+seeds, reparto en esquemas, RLS y demo-seed) el golden sale en **un comando y 28 s** en
+el laboratorio; antes eran ~200 s y una docena de pasos a mano. El alembic de los 10
+servicios, 11,6 s. Ver la nota de diagnóstico enlazada en `docs/db.md`.
+
+`kling exec` y `kling shell` llevan además en su entorno los **marcadores** de las
+credenciales de la máquina (los de `kling db attach`, por ejemplo `PGPASSWORD`): antes solo
+los veía el servidor de la imagen (por MMDS) y un comando lanzado con `exec` tenía que
+leerlos de MMDS a mano. Un marcador no es la clave: solo vale a través del proxy de esa
+máquina.
+
 Qué hace, en orden:
 
 1. arranca `<nombre>-build` desde `pg16` con `-egress none -allow-exec`;

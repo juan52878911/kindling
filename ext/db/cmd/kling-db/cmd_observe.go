@@ -207,7 +207,8 @@ var (
 	logStmtRe   = regexp.MustCompile(`(?s)^\S+ \S+ \S+ \[\d+\] u=\S* d=(\S*) h=\S* LOG:  duration: ([0-9.]+) ms  (?:statement|execute [^:]*): (.*)$`)
 )
 
-// analyzeObserveLog agrupa las sentencias de la base db que nombran la tabla.
+// analyzeObserveLog agrupa las sentencias de la base db que nombran la tabla
+// (todas, con table vacía: rehearse -step).
 func analyzeObserveLog(log, db, schema, table string, limit int) *observeReport {
 	rep := &observeReport{Statements: []observeStmt{}, Warning: statsWarning}
 	byText := map[string]*observeStmt{}
@@ -223,7 +224,7 @@ func analyzeObserveLog(log, db, schema, table string, limit int) *observeReport 
 		}
 		rep.Logged++
 		norm := normalizeSQL(m[3])
-		if !touchesTable(norm, schema, table) {
+		if table != "" && !touchesTable(norm, schema, table) {
 			return
 		}
 		ms, err := strconv.ParseFloat(m[2], 64)
