@@ -80,11 +80,17 @@ type rehearseReport struct {
 	OK                 bool           `json:"ok"`
 	Files              []rehearseFile `json:"files"`
 	KeptCopy           string         `json:"kept_copy,omitempty"`
+	Step               *stepRehearse  `json:"step,omitempty"`
 }
 
 func cmdRehearse(args []string) error {
 	fs, host, owner := newFlags("rehearse")
-	dir := fs.String("migrations", "", "directory with the .sql files, applied in name order (required)")
+	dir := fs.String("migrations", "", "directory with the .sql files, applied in name order")
+	step := fs.String("step", "", "instead of -migrations: a command that migrates (alembic upgrade head...), run in a -agent microVM against the copy")
+	agent := fs.String("agent", "", "with -step: the template of the microVM where it runs")
+	workdir := fs.String("workdir", "", "with -step: directory uploaded to /work in the agent")
+	envFile := fs.String("env-file", "", "with -step: KEY=VALUE lines for its environment (0600)")
+	stepTimeout := fs.Duration("step-timeout", stepTimeoutDefault, "with -step: how long it may run")
 	lockTimeout := fs.Duration("lock-timeout", 5*time.Second, "lock_timeout for each statement (a hit is reported as \"would block\")")
 	keep := fs.Bool("keep", false, "keep the throwaway copy instead of destroying it")
 	asJSON := fs.Bool("json", false, "JSON report")
@@ -92,8 +98,22 @@ func cmdRehearse(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 || *dir == "" {
-		return usageErr("usage: kling db rehearse <copy|template> -migrations DIR [-lock-timeout 5s] [-keep] [-json]")
+	if len(pos) != 1 || (*dir == "") == (*step == "") {
+		return usageErr("usage: kling db rehearse <copy|template> -migrations DIR [-lock-timeout 5s] [-keep] [-json]\n" +
+			"       kling db rehearse <copy|template> -step CMD -agent T [-workdir DIR] [-env-file F] [-lock-timeout 5s] [-keep] [-json]")
+	}
+	var so *stepOpts
+	if *step != "" {
+		if *agent == "" || !namePattern.MatchString(*agent) {
+			return usageErr("-step needs -agent <template>")
+		}
+		if *envFile != "" {
+			if err := checkEnvFile(*envFile); err != nil {
+				return err
+			}
+		}
+		so = &stepOpts{steps: []goldenStep{{cmd: *step}}, agent: *agent, workdir: *workdir, envFile: *envFile,
+			timeout: *stepTimeout, name: "rehearse-" + randomSuffix()}
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -101,7 +121,7 @@ func cmdRehearse(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
-	rep, err := a.rehearse(ctx, pos[0], *owner, *dir, *lockTimeout, *keep)
+	rep, err := a.rehearse(ctx, pos[0], *owner, *dir, so, *lockTimeout, *keep)
 	if rep != nil {
 		if werr := writeRehearse(a.stdout, rep, *asJSON); werr != nil && err == nil {
 			err = werr
@@ -158,16 +178,19 @@ func readMigrations(dir string) ([]migration, error) {
 // rehearse crea la copia desechable, aplica las migraciones y la destruye
 // (salvo keep). Devuelve el informe aunque una migración falle: el error solo
 // es no nil si no se pudo ni ensayar.
-func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout time.Duration, keep bool) (*rehearseReport, error) {
+func (a *app) rehearse(ctx context.Context, ref, owner, dir string, so *stepOpts, lockTimeout time.Duration, keep bool) (*rehearseReport, error) {
 	if err := validOwner(owner); err != nil {
 		return nil, err
 	}
 	if lockTimeout < 100*time.Millisecond || lockTimeout > time.Hour {
 		return nil, errors.New("-lock-timeout must be between 100ms and 1h")
 	}
-	migs, err := readMigrations(dir)
-	if err != nil {
-		return nil, err
+	var migs []migration
+	if so == nil {
+		var err error
+		if migs, err = readMigrations(dir); err != nil {
+			return nil, err
+		}
 	}
 	rep := &rehearseReport{Source: ref, LockTimeoutSeconds: lockTimeout.Seconds()}
 
@@ -211,6 +234,9 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 		rep.KeptCopy = mc.Name
 	} else {
 		defer a.destroy(mc.ID)
+	}
+	if so != nil {
+		return rep, a.rehearseStep(ctx, mc, *so, lockTimeout, rep)
 	}
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
@@ -266,12 +292,14 @@ func migrationCmd(role, db string, lockTimeout time.Duration) string {
 		lockTimeout.Milliseconds(), role, db)
 }
 
-// runMigration aplica un fichero y rellena f.
-func (a *app) runMigration(ctx context.Context, id, role, db string, lockTimeout time.Duration, m migration, f *rehearseFile) {
-	sampleCtx, stopSampling := context.WithCancel(ctx)
+// lockSampler muestrea, hasta que se le llama a la función que devuelve, si
+// alguna sesión de cliente de la copia id espera por un lock; esa función
+// dice en cuántas muestras la hubo.
+func (a *app) lockSampler(ctx context.Context, id string) func() int {
+	sampleCtx, stop := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	var lockSamples int
 	var mu sync.Mutex
+	samples := 0
 	if lockSampleEvery > 0 {
 		wg.Add(1)
 		go func() {
@@ -286,25 +314,32 @@ func (a *app) runMigration(ctx context.Context, id, role, db string, lockTimeout
 					"su", "-s", "/bin/sh", "postgres", "-c", psqlSuper)
 				if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && perr == nil && n > 0 {
 					mu.Lock()
-					lockSamples++
+					samples++
 					mu.Unlock()
 				}
 			}
 		}()
 	}
+	return func() int {
+		stop()
+		wg.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		return samples
+	}
+}
+
+// runMigration aplica un fichero y rellena f.
+func (a *app) runMigration(ctx context.Context, id, role, db string, lockTimeout time.Duration, m migration, f *rehearseFile) {
+	stopSampling := a.lockSampler(ctx, id)
 	start := nowFn()
 	_, err := a.k.Run(ctx, strings.NewReader(string(m.SQL)), "exec", "-i", "-timeout", migrationTimeout, id, "--",
 		"su", "-s", "/bin/sh", "postgres", "-c", migrationCmd(role, db, lockTimeout))
 	f.DurationMS = nowFn().Sub(start).Milliseconds()
-	stopSampling()
-	wg.Wait()
-
-	mu.Lock()
-	if lockSamples > 0 {
+	if n := stopSampling(); n > 0 {
 		f.WaitedForLocks = true
-		f.LockWaitSeconds = float64(lockSamples) * lockSampleEvery.Seconds()
+		f.LockWaitSeconds = float64(n) * lockSampleEvery.Seconds()
 	}
-	mu.Unlock()
 	if err == nil {
 		f.Status = "ok"
 		return
@@ -401,6 +436,7 @@ func writeRehearse(w io.Writer, rep *rehearseReport, asJSON bool) error {
 			fmt.Fprintf(w, "\n%s: %s\n", f.File, f.Error)
 		}
 	}
+	writeStepReport(w, rep.Step)
 	verdict := "OK"
 	if !rep.OK {
 		verdict = "FAILED"

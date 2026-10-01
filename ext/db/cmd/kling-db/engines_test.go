@@ -362,8 +362,8 @@ func TestRedisSQLiteRechazan(t *testing.T) {
 			_, errs["tenant-check"] = ta.tenantCheck(ctx, "c1", "local", tcOpts{column: "tenant_id", setting: "app.tenant_id", max: 5})
 			_, errs["ask"] = ta.askPrepare(ctx, "c1", "local", "")
 			_, errs["diff"] = ta.diff(ctx, "c1", "c2", "local", diffOpts{maxRows: 10})
-			_, errs["rehearse copy"] = ta.rehearse(ctx, "c1", "local", migs, time.Second, false)
-			_, errs["rehearse template"] = ta.rehearse(ctx, tpl, "local", migs, time.Second, false)
+			_, errs["rehearse copy"] = ta.rehearse(ctx, "c1", "local", migs, nil, time.Second, false)
+			_, errs["rehearse template"] = ta.rehearse(ctx, tpl, "local", migs, nil, time.Second, false)
 			o := envOptsT("tienda")
 			o.golden = tpl
 			_, errs["env"] = ta.envUp(ctx, o)

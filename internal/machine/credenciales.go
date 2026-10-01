@@ -527,6 +527,26 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	return creds, nuevas, nil
 }
 
+// EnvCredenciales son las variables VAR=marcador de las credenciales de la
+// máquina id, para el entorno de `kling exec` y `kling shell`. El servidor
+// que arranca la imagen las recibe por MMDS; un comando lanzado con exec no
+// las tenía, y tras `kling db attach` había que leerlas de MMDS a mano. Un
+// marcador no es la clave (la clave no sale del host): solo vale a través del
+// proxy de esta máquina. Sin credenciales, o sin poder leerlas, nil.
+func (m *Manager) EnvCredenciales(id string) []string {
+	creds, err := m.cargarCredenciales(id)
+	if err != nil || len(creds) == 0 {
+		return nil
+	}
+	env := make([]string, 0, len(creds))
+	for _, cr := range creds {
+		if cr.Env != "" && cr.Placeholder != "" {
+			env = append(env, cr.Env+"="+cr.Placeholder)
+		}
+	}
+	return env
+}
+
 // ponerMarcadoresMMDS deja en MMDS (clave "env") el marcador de cada
 // credencial. PATCH fusiona con lo que otro inyectara antes; Firecracker lo
 // rechaza si el almacén aún no existe, y entonces se crea con PUT.

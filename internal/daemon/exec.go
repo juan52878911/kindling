@@ -85,6 +85,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusGatewayTimeout, err)
 		return
 	}
+	// Los marcadores de sus credenciales, delante: lo que pida el exec manda.
+	req.Env = append(s.mgr.EnvCredenciales(mc.ID), req.Env...)
 	body, code, err := openGuestExec(r.Context(), guestBase(mc), req)
 	if err != nil {
 		if code == http.StatusNotImplemented {

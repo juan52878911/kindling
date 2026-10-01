@@ -24,6 +24,10 @@
 #                     que siguen como el rol de la app (repetible)
 #   -preload A,B      shared_preload_libraries (se suma a lo que ya traiga la plantilla)
 #   -conf CLAVE=VALOR una línea más en postgresql.conf (repetible)
+#   -init DIR         un directorio al estilo docker-entrypoint-initdb.d: *.sql,
+#                     *.sql.gz y *.sh en orden, con \i a ficheros hermanos;
+#                     como el rol de la app (con CREATEROLE solo mientras dura)
+#   -env-file F       KEY=VALUE para los .sh de -init (0600; claves fuera de argv)
 #   -role R           rol de la aplicación (app)     -database B   base (appdb)
 #   -image I          imagen (pg16)                  -mem M        RAM de la VM (1G)
 #   -from T           plantilla con Postgres instalado en vez de -image (macOS: ver docs/db-golden.md)
@@ -82,10 +86,81 @@ cmd_image() {
   "${K[@]}" image recipe pg16
 }
 
+# run_init ejecuta el directorio de -init (lo llama cmd_build, con sus
+# variables: m, role, db, init, init_files, env_file).
+#
+# Como docker-entrypoint-initdb.d: *.sql y *.sql.gz con psql, *.sh con bash
+# (o sh), en orden, desde el propio directorio (un \i de un .psql hermano
+# funciona) y con POSTGRES_USER, POSTGRES_DB y lo de -env-file en el entorno.
+# Lo demás (.psql, .md...) solo se usa si un script lo incluye.
+#
+# Diferencia a propósito con Docker: allí corre como el superusuario (que es
+# POSTGRES_USER). Aquí corre como el rol de la aplicación, que NO es
+# superusuario: los objetos son suyos y la RLS le aplica. Para lo que un init
+# suele hacer además (crear roles: app_user, uno por servicio), el rol tiene
+# CREATEROLE solo mientras dura -init, y el socket local le deja entrar sin
+# clave solo mientras dura -init (la máquina de preparación no tiene red).
+# Las extensiones van antes, con -extension.
+run_init() {
+  say "-init $(basename "$init"): ${#init_files[@]} script(s) como $role"
+  tar -C "$init" -czf "$BUILD_TMP/init.tgz" .
+  quiet "${K[@]}" cp "$BUILD_TMP/init.tgz" "$m:/var/lib/dbgolden/init.tgz"
+  if [ -n "$env_file" ]; then
+    quiet "${K[@]}" cp "$env_file" "$m:/var/lib/dbgolden/init.env"
+  fi
+  "${K[@]}" exec -i -timeout 5m "$m" -- sh -s <<PREP >/dev/null || die "no se pudo preparar -init"
+set -eu
+D=/var/lib/postgresql/data
+mkdir -p /var/lib/dbgolden/init
+tar xzf /var/lib/dbgolden/init.tgz -C /var/lib/dbgolden/init
+rm /var/lib/dbgolden/init.tgz
+chown -R postgres:postgres /var/lib/dbgolden/init
+[ ! -f /var/lib/dbgolden/init.env ] || { chown postgres:postgres /var/lib/dbgolden/init.env; chmod 600 /var/lib/dbgolden/init.env; }
+# El rol entra por el socket sin clave mientras dura -init (primera línea).
+sed -i '1i local all $role trust # kling-db-init' "\$D/pg_hba.conf"
+su -s /bin/sh postgres -c "pg_ctl -D \$D reload" >/dev/null
+su -s /bin/sh postgres -c "psql -X -q -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE $role CREATEROLE'"
+PREP
+  local f base out shell
+  for f in "${init_files[@]}"; do
+    base="$(basename "$f")"
+    say "  $base"
+    case "$base" in
+      *.sql)    out="$("${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
+                  "cd /var/lib/dbgolden/init && psql -X -q -v ON_ERROR_STOP=1 -h /run/postgresql -U $role -d $db -f ./$base" 2>&1)" ;;
+      *.sql.gz) out="$("${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
+                  "cd /var/lib/dbgolden/init && gunzip -c ./$base | psql -X -q -v ON_ERROR_STOP=1 -h /run/postgresql -U $role -d $db" 2>&1)" ;;
+      *.sh)
+        shell="sh"
+        if head -n1 "$f" | grep -q bash; then
+          "${K[@]}" exec "$m" -- sh -c 'command -v bash' >/dev/null 2>&1 \
+            || die "$base needs bash and this image has none: build the golden from pg16-ext (kling db golden image -ext), which has it"
+          shell=bash
+        fi
+        out="$("${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
+          "cd /var/lib/dbgolden/init && if [ -f ../init.env ]; then while IFS= read -r l || [ -n \"\$l\" ]; do case \"\$l\" in ''|'#'*) continue ;; esac; export \"\${l%%=*}=\${l#*=}\"; done < ../init.env; fi; POSTGRES_USER=$role POSTGRES_DB=$db PGHOST=/run/postgresql PGUSER=$role PGDATABASE=$db $shell ./$base" 2>&1)" ;;
+    esac || {
+      out="${out//psql:.\//psql:$init/}"
+      out="${out//\/var\/lib\/dbgolden\/init\//$init/}"
+      printf '%s\n' "$out" >&2
+      die "-init $base failed (file and line above); nothing was saved"
+    }
+    [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/    /'
+  done
+  "${K[@]}" exec -i -timeout 5m "$m" -- sh -s <<POST >/dev/null || die "no se pudo cerrar -init"
+set -eu
+D=/var/lib/postgresql/data
+su -s /bin/sh postgres -c "psql -X -q -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE $role NOCREATEROLE'"
+sed -i '/ # kling-db-init\$/d' "\$D/pg_hba.conf"
+su -s /bin/sh postgres -c "pg_ctl -D \$D reload" >/dev/null
+rm -rf /var/lib/dbgolden/init /var/lib/dbgolden/init.env
+POST
+}
+
 cmd_build() {
   local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16 from=""
   local mem=1G cpus=2 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
-  local exts="" preload="" confs=()
+  local exts="" preload="" confs=() init="" env_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       -migrations) migrations="${2:?falta valor}"; shift 2 ;;
@@ -95,6 +170,8 @@ cmd_build() {
       -extension)  exts="${exts:+$exts,}${2:?falta valor}"; shift 2 ;;
       -preload)    preload="${preload:+$preload,}${2:?falta valor}"; shift 2 ;;
       -conf)       confs+=("${2:?falta valor}"); shift 2 ;;
+      -init)       init="${2:?falta valor}"; shift 2 ;;
+      -env-file)   env_file="${2:?falta valor}"; shift 2 ;;
       -role)       role="${2:?falta valor}"; shift 2 ;;
       -database)   db="${2:?falta valor}"; shift 2 ;;
       -image)      image="${2:?falta valor}"; shift 2 ;;
@@ -147,6 +224,19 @@ cmd_build() {
   [ "$seed_mb" -le "$SEED_MB_MAX" ] || die "-seed-mb máximo $SEED_MB_MAX: el overlay de la máquina es de 512 MiB"
   [ -z "$seed" ] || [ "$seed_mb" -eq 0 ] || die "-seed y -seed-mb son excluyentes"
   [ -z "$seed" ] || [ -f "$seed" ] || die "no existe el seed: $seed"
+  [ -z "$init" ] || [ -d "$init" ] || die "no existe el directorio de -init: $init"
+  if [ -n "$env_file" ]; then
+    [ -f "$env_file" ] && [ ! -L "$env_file" ] || die "-env-file no es un fichero: $env_file"
+    case "$(stat -c %a "$env_file" 2>/dev/null || stat -f %Lp "$env_file")" in
+      600|400) ;;
+      *) die "-env-file $env_file: puede llevar claves; chmod 600" ;;
+    esac
+  fi
+  local -a init_files=()
+  if [ -n "$init" ]; then
+    while IFS= read -r f; do init_files+=("$f"); done < <(find "$init" -maxdepth 1 -type f \( -name '*.sql' -o -name '*.sql.gz' -o -name '*.sh' \) | LC_ALL=C sort)
+    [ "${#init_files[@]}" -gt 0 ] || die "-init $init: no hay *.sql, *.sql.gz ni *.sh"
+  fi
   local files=() f
   if [ -n "$migrations" ]; then
     [ -d "$migrations" ] || die "no existe el directorio de migraciones: $migrations"
@@ -323,7 +413,11 @@ SQL
     pedida_n+=("$1"); pedida_d+=("$2")
   }
   for e in ${ext_list[@]+"${ext_list[@]}"}; do pedir "$e" "-extension"; done
-  if [ "${#files[@]}" -gt 0 ]; then
+  local -a scan=(${files[@]+"${files[@]}"})
+  if [ -n "$init" ]; then
+    while IFS= read -r f; do scan+=("$f"); done < <(find "$init" -maxdepth 1 -type f \( -name '*.sql' -o -name '*.psql' -o -name '*.sh' \) | LC_ALL=C sort)
+  fi
+  if [ "${#scan[@]}" -gt 0 ]; then
     while IFS= read -r mencion; do
       donde="$(printf '%s' "$mencion" | cut -d: -f1-2)"
       # Comentarios fuera: "-- CREATE EXTENSION x" no pide nada.
@@ -331,7 +425,7 @@ SQL
       nombre="$(printf '%s' "$mencion" | sed -E 's/.*[Ee][Xx][Tt][Ee][Nn][Ss][Ii][Oo][Nn][[:space:]]+([Ii][Ff][[:space:]]+[Nn][Oo][Tt][[:space:]]+[Ee][Xx][Ii][Ss][Tt][Ss][[:space:]]+)?"?([A-Za-z0-9_-]+).*/\2/' | tr 'A-Z' 'a-z')"
       [[ "$nombre" =~ ^[a-z0-9_][a-z0-9_-]{0,62}$ ]] || continue
       pedir "$nombre" "$donde"
-    done < <(grep -HniE 'create[[:space:]]+extension[[:space:]]' "${files[@]}" 2>/dev/null || true)
+    done < <(grep -HniE 'create[[:space:]]+extension[[:space:]]' "${scan[@]}" 2>/dev/null || true)
   fi
   if [ "${#pedida_n[@]}" -gt 0 ]; then
     avail="$("${K[@]}" exec "$m" -- su -s /bin/sh postgres -c \
@@ -364,6 +458,10 @@ SQL
     quiet "${K[@]}" exec "$m" -- chmod 644 /var/lib/dbgolden/in/000-extensions.sql
     quiet "${K[@]}" exec -timeout 10m "$m" -- su -s /bin/sh postgres -c \
       "psql -X -q -v ON_ERROR_STOP=1 -d $db -f /var/lib/dbgolden/in/000-extensions.sql"
+  fi
+
+  if [ -n "$init" ]; then
+    run_init
   fi
 
   local n=0 dest who="PGOPTIONS='-c role=$role'"
