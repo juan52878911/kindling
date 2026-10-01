@@ -79,10 +79,10 @@ construcción. Flags útiles:
 | Flag | Qué hace |
 |---|---|
 | `-bundle` | colapsa `node_modules` en **un** fichero con esbuild — medido: 1205 ficheros → 1, `initialize` en frío de ~7 s → ~2,5 s. La palanca mayor en Mac/arm64. esbuild va con versión fija y su binario se comprueba por sha512 (`ESBUILD_TGZ=<tarball>` para construir sin red) |
-| `-base node` / `-base python` | construye una **capa** pequeña sobre una base de runtime compartida en vez de una imagen monolítica ([imágenes por capas](https://github.com/juan52878911/kindling/blob/main/README.es.md#imágenes-por-capas-una-base-por-familia-de-runtime)); se elige sola si existe una base con el nombre de la familia |
-| `-env KEY=value` | hornea interruptores de entorno en la imagen (`/etc/kling/env`, 0600 de root; texto plano: para toggles, **no para secretos** — esos van [por MMDS](https://github.com/juan52878911/kindling/blob/main/README.es.md#secretos-que-nunca-tocan-un-snapshot-mmds)) |
+| `-base node` / `-base python` | construye una **capa** pequeña sobre una base de runtime compartida en vez de una imagen monolítica ([imágenes por capas](https://github.com/juan52878911/kindling/blob/main/docs/guia.md#imágenes-por-capas-una-base-por-familia-de-runtime)); se elige sola si existe una base con el nombre de la familia |
+| `-env KEY=value` | hornea interruptores de entorno en la imagen (`/etc/kling/env`, 0600 de root; texto plano: para toggles, **no para secretos** — esos van [por MMDS](https://github.com/juan52878911/kindling/blob/main/docs/guia.md#secretos-que-nunca-tocan-un-snapshot-mmds)) |
 | `-cmd "..."` | sustituye el comando de arranque inferido (los entry points de PyPI se infieren por convención y se verifican al construir) |
-| `-volume nombre[:/punto][:ro]` | engancha [almacenamiento persistente](https://github.com/juan52878911/kindling/blob/main/README.es.md#volúmenes-lo-que-sobrevive-a-la-microvm), repetible |
+| `-volume nombre[:/punto][:ro]` | engancha [almacenamiento persistente](https://github.com/juan52878911/kindling/blob/main/docs/guia.md#volúmenes-lo-que-sobrevive-a-la-microvm), repetible |
 | `-dry-run` | enseña qué haría sin hacerlo |
 
 kindling además **auto-detecta capacidades**: si un servidor necesita navegador, salida a
@@ -515,7 +515,7 @@ agregador, donde los nombres cambian.
 
 ## Traer tu propio servicio de memoria
 
-Un [volumen](https://github.com/juan52878911/kindling/blob/main/README.es.md#volúmenes-lo-que-sobrevive-a-la-microvm) da almacenamiento durable a un
+Un [volumen](https://github.com/juan52878911/kindling/blob/main/docs/guia.md#volúmenes-lo-que-sobrevive-a-la-microvm) da almacenamiento durable a un
 servicio, pero tiene **un solo escritor**: no puede compartirse en lectura-escritura
 entre microVMs (un ext4 montado dos veces en escritura se corrompe solo — NFS o virtio-fs
 añadirían mucha maquinaria para algo que un servidor MCP ya resuelve). Para el estado que

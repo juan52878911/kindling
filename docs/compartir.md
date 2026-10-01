@@ -14,7 +14,7 @@ recibe un disco más, igual que un volumen de solo lectura. `ro` y `rw` son un
 sistema de ficheros servido por el daemon, y por eso exigen que el operador haya
 dicho qué directorios del host se pueden servir (`daemon.share_roots`).
 
-Este documento es el diseño. Para usarlo basta con la sección del README; la
+Este documento es el diseño. Para usarlo basta con [su sección de la guía](guia.md#compartir-una-carpeta-del-host); la
 API está en [api.md](api.md).
 
 ## Por qué así

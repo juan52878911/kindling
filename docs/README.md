@@ -1,14 +1,17 @@
 # Documentación de kindling
 
 Punto de entrada: el [README](../README.md) ([English](../README.md) ·
-[Español](../README.es.md)). Lo que hay aquí es lo que no cabe en él: recetas
-reproducibles, auditorías con números, y las notas de campo que evitan repetir horas de
-depuración.
+[Español](../README.es.md)), que es una introducción corta; la web publicada está en
+[kindling.asccilabs.com](https://kindling.asccilabs.com). Lo que hay aquí es lo que no
+cabe en él: la guía completa, recetas reproducibles, auditorías con números, y las notas
+de campo que evitan repetir horas de depuración.
 
 ## Guías
 
 | Documento | Qué cubre | Léelo si… |
 |---|---|---|
+| [`guia.md`](guia.md) · [`guide.md`](guide.md) | La guía completa (el README largo de antes): arquitectura, el CLI entero, almacenamiento, extensiones, rendimiento, seguridad y operación, con las cifras medidas | quieres el recorrido completo antes de entrar en un tema |
+| [`mac.md`](mac.md) | kindling nativo en macOS con el backend `vz`: requisitos, instalación, imágenes copiadas desde Linux, launchd y límites | vas a correrlo en un Mac sin VM Linux |
 | [`mac-arm64.md`](mac-arm64.md) | kindling en Apple Silicon: la VM Lima con virtualización anidada, los límites honestos (M3+, ~16 s de arranque en frío) y las tres palancas medidas para bajarlo a ~2,5 s (`-bundle`, `-cpu-pct 100`, http-proxy) | vas a correrlo en un Mac |
 | [`releases.md`](releases.md) | Una etiqueta, una release: todos los assets (núcleo y extensiones), el `SHA256SUMS` único, los módulos del repo y cómo crear una release | mantienes el proyecto o quieres compilar desde fuentes |
 | [`actualizar.md`](actualizar.md) | Qué persiste kindling y qué rompe un cambio de versión, el `schema` de cada fichero, la política de compatibilidad, `kling upgrade` y lo que conviene romper antes de tener usuarios | vas a actualizar un host o a cambiar un formato en disco |

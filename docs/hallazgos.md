@@ -2,6 +2,12 @@
 
 Cosas descubiertas a golpes, para no repetirlas.
 
+> Contexto: kindling corre microVMs Firecracker (Linux) y Virtualization.framework
+> (macOS) que se congelan en disco y despiertan en milisegundos; la visión general está
+> en la [guía completa](guia.md). Esta página no es una guía: es la lista de trampas
+> reales (overlays, ficheros dispersos, namespaces, cgroups, mediciones) que costaron
+> horas, cada una con su porqué. Léela cuando algo se comporte raro.
+
 ## Los artefactos del CI cambiaron de sitio
 
 Todos los tutoriales y buena parte de la documentación apuntan a:
