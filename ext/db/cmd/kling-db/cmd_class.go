@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -101,6 +102,35 @@ func cmdClass(args []string) error {
 	ctx, stop := signalCtx()
 	defer stop()
 	o := classOpts{prefix: *prefix, owner: *owner, parallel: *parallel, passwords: *passwords}
+	prefixSet := false
+	fs.Visit(func(f *flag.Flag) { prefixSet = prefixSet || f.Name == "prefix" })
+	if !prefixSet && sub != "up" {
+		// Sin -prefix, la clase que haya: la de las copias nombradas, la única
+		// del dueño o, en ls, todas. Antes había que repetir el -prefix de la
+		// creación y, sin él, "student has no copies".
+		classes, err := a.classPrefixes(ctx, o.owner, pos)
+		if err != nil {
+			return err
+		}
+		switch {
+		case len(classes) == 1:
+			o.prefix = classes[0]
+		case len(classes) > 1 && sub == "ls" && len(pos) == 0:
+			for i, c := range classes {
+				if i > 0 {
+					fmt.Fprintln(a.stdout)
+				}
+				oc := o
+				oc.prefix = c
+				if err := a.classLs(ctx, oc, *asJSON); err != nil {
+					return err
+				}
+			}
+			return nil
+		case len(classes) > 1:
+			return fmt.Errorf("there are %d classes (%s): say which one with -prefix", len(classes), strings.Join(classes, ", "))
+		}
+	}
 	switch sub {
 	case "ls":
 		return a.classLs(ctx, o, *asJSON)
@@ -153,6 +183,34 @@ func (a *app) classMembers(ctx context.Context, o classOpts) ([]*api.Machine, er
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// classPrefixes son las clases (kling.db.class) de owner: las de las copias
+// names, o todas si no nombra ninguna. Ordenadas.
+func (a *app) classPrefixes(ctx context.Context, owner string, names []string) ([]string, error) {
+	all, err := a.machines(ctx)
+	if err != nil {
+		return nil, err
+	}
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, mc := range all {
+		c := mc.Labels[labelClass]
+		if c == "" || mc.Labels[labelOwner] != owner || mc.Labels[labelGolden] == "" || seen[c] {
+			continue
+		}
+		if len(names) > 0 && !want[mc.Name] && !want[mc.ID] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -539,7 +597,7 @@ func (a *app) classRm(ctx context.Context, o classOpts, names []string) error {
 		list[i] = mc.Name
 	}
 	errs := bounded(ctx, len(sel), o.parallel, func(i int) error {
-		if err := pa.remove(ctx, sel[i]); err != nil {
+		if err := pa.removeWithSnapshots(ctx, sel[i], o.owner); err != nil {
 			return err
 		}
 		fmt.Fprintln(pa.stdout, sel[i].Name)

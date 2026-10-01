@@ -53,6 +53,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   hypertables y jobs de TimescaleDB; enseña los literales vacíos o de un carácter (el
   `= ''` de una política fail-open); `-ignore-rows` y aviso del ruido entre goldens
   independientes.
+- **Ergonomía de `kling db`**: `role -login -name app_user` (un rol de las migraciones entra
+  desde el host: `connect -role app_user`); `rm` sigue con el resto si una falla y borra los
+  puntos de restauración de la copia (antes quedaban huérfanos); `class ls/reset/rm` sin
+  `-prefix`; `audit` sin las conexiones de la construcción del golden; `observe -report` ya
+  no habla de "slice" en una copia normal; `rehearse` informa de los locks fuertes;
+  `golden build -from` avisa de que `-mem/-cpus` no aplican; un build fallido no deja estado.
 - **`kling db ls`** (o `ps`): las copias de un dueño con su motor, dorado, estado y avisos
   (`-json` para scripts).
 - **Reiniciar el daemon o congelar la máquina ya no mata a quien escribe en una carpeta

@@ -1084,7 +1084,7 @@ func (a *app) removeKey(ctx context.Context, copies map[string][]*api.Machine, k
 		if err := owned(mc, owner); err != nil {
 			return false, err
 		}
-		if err := a.remove(ctx, mc); err != nil {
+		if err := a.removeWithSnapshots(ctx, mc, owner); err != nil {
 			return false, err
 		}
 		fmt.Fprintln(a.stdout, mc.Name)

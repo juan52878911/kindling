@@ -44,7 +44,7 @@ func cmdObserve(args []string) error {
 	fs, host, owner := newFlags("observe")
 	off := fs.Bool("off", false, "turn the observation off")
 	report := fs.Bool("report", false, "report the observed statements that touch the table")
-	table := fs.String("table", "", "table of the report, [schema.]name (default: the table of the slice the copy comes from)")
+	table := fs.String("table", "", "table of the report, [schema.]name (required, except in copies of a kling db slice golden: its table)")
 	limit := fs.Int("limit", 20, "statements in the report, by total time")
 	asJSON := fs.Bool("json", false, "JSON report")
 	pos, err := parse(fs, args)
@@ -169,7 +169,7 @@ func (a *app) observeReport(ctx context.Context, ref, owner, table string, limit
 			return nil, err
 		}
 		if m == nil || m.Table == "" {
-			return nil, fmt.Errorf("%s does not come from a kling db slice golden known to this host: pass -table", name)
+			return nil, fmt.Errorf("-report needs the table: kling db observe -report %s -table [schema.]name", name)
 		}
 		table = m.Table
 	}

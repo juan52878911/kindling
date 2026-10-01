@@ -103,10 +103,12 @@ func (a *app) rehearseStep(ctx context.Context, mc *api.Machine, o stepOpts, loc
 	start := nowFn()
 	err = a.runStepCmd(ctx, agent, o, o.steps[0].cmd, defaultAttachHost(mc), role, db)
 	f.DurationMS = nowFn().Sub(start).Milliseconds()
-	if n := stopSampling(); n > 0 {
+	ls := stopSampling()
+	if ls.waits > 0 {
 		f.WaitedForLocks = true
-		f.LockWaitSeconds = float64(n) * lockSampleEvery.Seconds()
+		f.LockWaitSeconds = float64(ls.waits) * lockSampleEvery.Seconds()
 	}
+	f.StrongLocks = heldLocks(ls)
 	f.Status = "ok"
 	if err != nil {
 		f.Status = "failed"

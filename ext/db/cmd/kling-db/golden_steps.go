@@ -541,7 +541,7 @@ func (a *app) finishCopy(ctx context.Context, cp *api.Machine, db string) error 
 	if _, err := psql("postgres", "CHECKPOINT;"); err != nil {
 		return err
 	}
-	_, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "rm -f /tmp/kdb-*; sync")
+	_, err := a.k.Run(ctx, nil, "exec", cp.ID, "--", "sh", "-c", "rm -f /tmp/kdb-*; : > /var/log/postgresql/pg.log; sync")
 	return err
 }
 

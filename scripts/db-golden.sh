@@ -159,7 +159,7 @@ POST
 
 cmd_build() {
   local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16 from=""
-  local mem=1G cpus=2 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
+  local mem=1G cpus=2 mem_cpus_set=0 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
   local exts="" preload="" confs=() init="" env_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -176,8 +176,8 @@ cmd_build() {
       -database)   db="${2:?falta valor}"; shift 2 ;;
       -image)      image="${2:?falta valor}"; shift 2 ;;
       -from)       from="${2:?falta valor}"; shift 2 ;;
-      -mem)        mem="${2:?falta valor}"; shift 2 ;;
-      -cpus)       cpus="${2:?falta valor}"; shift 2 ;;
+      -mem)        mem="${2:?falta valor}"; mem_cpus_set=1; shift 2 ;;
+      -cpus)       cpus="${2:?falta valor}"; mem_cpus_set=1; shift 2 ;;
       -state)      state="${2:?falta valor}"; shift 2 ;;
       -keep)       BUILD_KEEP=1; shift ;;
       -*)          die "opción desconocida: $1" ;;
@@ -247,8 +247,10 @@ cmd_build() {
   [ -z "$seed" ] || files+=("$seed")
 
   local m="$name-build" sdir="$state/$name"
-  mkdir -p "$sdir"
-  chmod 700 "$state" "$sdir"
+  # El directorio de la plantilla se crea al final, con la plantilla ya
+  # guardada: un build que falla no deja un "golden" a medias en el estado.
+  mkdir -p "$state"
+  chmod 700 "$state"
   BUILD_TMP="$(mktemp -d)"
   BUILD_M="$m"
   # Limpieza al salir, por éxito o por fallo. En fallo NO se toca la contraseña
@@ -270,6 +272,12 @@ cmd_build() {
     # pueden construir imágenes: toolchain + apk add postgresql16, guardada con
     # kling save). La memoria y las CPU son las del snapshot; el egress se fuerza
     # a none aunque la plantilla tuviera salida.
+    # La memoria y las CPU de una máquina que nace de una plantilla son las de
+    # su snapshot: no se pueden cambiar al restaurar. Se dice, en vez de
+    # ignorar -mem/-cpus en silencio.
+    if [ "$mem_cpus_set" -eq 1 ]; then
+      echo "db-golden: warning: -mem and -cpus don't apply with -from: the golden gets the memory and CPUs of the template $from (kling template ls); build the template with the size you want" >&2
+    fi
     say "arrancando $m desde la plantilla $from (egress none)"
     "${K[@]}" run -name "$m" -from "$from" -egress none -allow-exec >/dev/null
   else
@@ -516,14 +524,18 @@ SQL
     "psql -X -At -d postgres -c \"SELECT pg_size_pretty(pg_database_size('$db'))\"")"
   say "base $db: $size · disco del overlay al ${usage}%"
 
-  # Fuera los ficheros de entrada (pueden llevar datos) y a disco lo pendiente.
-  quiet "${K[@]}" exec "$m" -- sh -c 'rm -rf /var/lib/dbgolden; sync'
+  # Fuera los ficheros de entrada (pueden llevar datos), el log de Postgres de
+  # la construcción (si no, `kling db audit` de cada copia lo mezclaría con lo
+  # suyo) y a disco lo pendiente.
+  quiet "${K[@]}" exec "$m" -- sh -c 'rm -rf /var/lib/dbgolden; : > /var/log/postgresql/pg.log; sync'
 
   say "guardando la máquina viva como plantilla $name"
   "${K[@]}" save -replace -warm=false "$m" "$name"
 
   # La contraseña se escribe al final y en un solo paso: un intento fallido no
   # deja el fichero a medias ni pisa el de la plantilla anterior.
+  mkdir -p "$sdir"
+  chmod 700 "$sdir"
   install -m 600 "$BUILD_TMP/password" "$sdir/password.new"
   mv -f "$sdir/password.new" "$sdir/password"
   {

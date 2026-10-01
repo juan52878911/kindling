@@ -327,6 +327,27 @@ func (a *app) snapshotRemove(ctx context.Context, ref, name, owner string) error
 	return fmt.Errorf("%s has no snapshot called %q", mc.Name, name)
 }
 
+// removeWithSnapshots borra la copia y sus puntos de guardado: borrada la
+// copia, nada los puede volver a usar (son de su nombre y su linaje) y cada
+// uno guarda memoria y disco. Antes quedaban huérfanos tras rm (también tras
+// un undo y un rm): solo kling template rm los quitaba. Lo usan rm, branch
+// -rm/-prune y class rm; undo y reset NO (undo los necesita).
+func (a *app) removeWithSnapshots(ctx context.Context, mc *api.Machine, owner string) error {
+	var snaps []*api.Snapshot
+	if engineOf(mc.Labels) == enginePostgres {
+		snaps, _ = a.copySnapshots(ctx, mc, owner)
+	}
+	if err := a.remove(ctx, mc); err != nil {
+		return err
+	}
+	for _, s := range snaps {
+		if _, err := a.k.Run(ctx, nil, "template", "rm", "-f", s.Name); err != nil {
+			fmt.Fprintf(a.stderr, "warning: the restore point %s of %s was not removed: %v\n", s.Name, mc.Name, err)
+		}
+	}
+	return nil
+}
+
 // ── undo ─────────────────────────────────────────────────────────────────────
 
 func cmdUndo(args []string) error {

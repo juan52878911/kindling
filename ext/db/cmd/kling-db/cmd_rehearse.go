@@ -37,6 +37,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/db/internal/doctor"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -71,6 +72,13 @@ type rehearseFile struct {
 	SizeBefore        int64   `json:"size_before_bytes"`
 	SizeAfter         int64   `json:"size_after_bytes"`
 	Error             string  `json:"error,omitempty"`
+	// StrongLocks son los locks fuertes que la migración tuvo concedidos
+	// mientras corría (pg_locks, muestreado: ~segundos que se vio cada uno);
+	// StrongStatements, las sentencias del fichero que los piden (también las
+	// que duran menos que una muestra). En producción, mientras duran,
+	// bloquean a las demás sesiones.
+	StrongLocks      []string `json:"strong_locks,omitempty"`
+	StrongStatements []string `json:"strong_statements,omitempty"`
 }
 
 type rehearseReport struct {
@@ -292,14 +300,22 @@ func migrationCmd(role, db string, lockTimeout time.Duration) string {
 		lockTimeout.Milliseconds(), role, db)
 }
 
-// lockSampler muestrea, hasta que se le llama a la función que devuelve, si
-// alguna sesión de cliente de la copia id espera por un lock; esa función
-// dice en cuántas muestras la hubo.
-func (a *app) lockSampler(ctx context.Context, id string) func() int {
+// lockSample es lo que vio el muestreo de una migración: en cuántas muestras
+// alguna sesión esperaba por un lock, y qué locks fuertes de relación tenían
+// concedidos las sesiones de cliente ("AccessExclusiveLock public.orders"),
+// con en cuántas muestras se vio cada uno.
+type lockSample struct {
+	waits  int
+	strong map[string]int
+}
+
+// lockSampler muestrea, hasta que se llama a la función que devuelve, las
+// esperas por locks y los locks fuertes concedidos en la copia id.
+func (a *app) lockSampler(ctx context.Context, id string) func() lockSample {
 	sampleCtx, stop := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	samples := 0
+	res := lockSample{strong: map[string]int{}}
 	if lockSampleEvery > 0 {
 		wg.Add(1)
 		go func() {
@@ -312,21 +328,45 @@ func (a *app) lockSampler(ctx context.Context, id string) func() int {
 				}
 				out, err := a.k.Run(sampleCtx, strings.NewReader(lockWaitersSQL), "exec", "-i", "-timeout", "10s", id, "--",
 					"su", "-s", "/bin/sh", "postgres", "-c", psqlSuper)
-				if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && perr == nil && n > 0 {
-					mu.Lock()
-					samples++
-					mu.Unlock()
+				if err != nil {
+					continue
 				}
+				n, locks := parseLockSample(string(out))
+				mu.Lock()
+				if n > 0 {
+					res.waits++
+				}
+				for _, l := range locks {
+					res.strong[l]++
+				}
+				mu.Unlock()
 			}
 		}()
 	}
-	return func() int {
+	return func() lockSample {
 		stop()
 		wg.Wait()
 		mu.Lock()
 		defer mu.Unlock()
-		return samples
+		return res
 	}
+}
+
+// parseLockSample lee la salida de lockWaitersSQL: el recuento de esperas y,
+// en las líneas siguientes, un lock fuerte por línea.
+func parseLockSample(out string) (int, []string) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	n, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+	if err != nil {
+		return 0, nil
+	}
+	var locks []string
+	for _, l := range lines[1:] {
+		if l = strings.TrimSpace(l); l != "" {
+			locks = append(locks, doctor.Safe(l, 200))
+		}
+	}
+	return n, locks
 }
 
 // runMigration aplica un fichero y rellena f.
@@ -336,10 +376,13 @@ func (a *app) runMigration(ctx context.Context, id, role, db string, lockTimeout
 	_, err := a.k.Run(ctx, strings.NewReader(string(m.SQL)), "exec", "-i", "-timeout", migrationTimeout, id, "--",
 		"su", "-s", "/bin/sh", "postgres", "-c", migrationCmd(role, db, lockTimeout))
 	f.DurationMS = nowFn().Sub(start).Milliseconds()
-	if n := stopSampling(); n > 0 {
+	ls := stopSampling()
+	if ls.waits > 0 {
 		f.WaitedForLocks = true
-		f.LockWaitSeconds = float64(n) * lockSampleEvery.Seconds()
+		f.LockWaitSeconds = float64(ls.waits) * lockSampleEvery.Seconds()
 	}
+	f.StrongLocks = heldLocks(ls)
+	f.StrongStatements = strongStatements(string(m.SQL))
 	if err == nil {
 		f.Status = "ok"
 		return
@@ -385,7 +428,117 @@ func ctxErr(err error) string {
 	return ""
 }
 
-const lockWaitersSQL = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND backend_type = 'client backend';\n"
+const lockWaitersSQL = `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND backend_type = 'client backend';
+SELECT DISTINCT l.mode || ' ' || n.nspname || '.' || c.relname
+  FROM pg_locks l
+  JOIN pg_stat_activity a ON a.pid = l.pid
+  JOIN pg_class c ON c.oid = l.relation
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE l.granted AND l.locktype = 'relation' AND a.backend_type = 'client backend' AND a.pid <> pg_backend_pid()
+   AND l.mode IN ('AccessExclusiveLock', 'ExclusiveLock', 'ShareRowExclusiveLock', 'ShareLock')
+   AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema';
+`
+
+// heldLocks es la lista de locks fuertes vistos, con los segundos aproximados.
+func heldLocks(ls lockSample) []string {
+	var out []string
+	for l, n := range ls.strong {
+		out = append(out, fmt.Sprintf("%s (~%s s)", l, trimFloat(float64(n)*lockSampleEvery.Seconds())))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// strongStatements son las sentencias de sql que piden un lock fuerte (ver
+// strongLock), normalizadas (sin literales) y con el lock que piden.
+func strongStatements(sql string) []string {
+	var out []string
+	for _, st := range splitStatements(sql) {
+		norm := normalizeSQL(st)
+		if l := strongLock(norm); l != "" {
+			out = append(out, clip(norm, 160)+"  ["+l+"]")
+		}
+	}
+	return out
+}
+
+// splitStatements parte un .sql en sentencias por ';' fuera de comillas,
+// comentarios y bloques $$: para clasificarlas, no para ejecutarlas.
+func splitStatements(sql string) []string {
+	var out []string
+	var b strings.Builder
+	inQ, inLine, inBlock := false, false, false
+	dollar := ""
+	r := []rune(sql)
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		next := rune(0)
+		if i+1 < len(r) {
+			next = r[i+1]
+		}
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+			}
+			continue
+		case inBlock:
+			if c == '*' && next == '/' {
+				inBlock = false
+				i++
+			}
+			continue
+		case dollar != "":
+			b.WriteRune(c)
+			if c == '$' && strings.HasPrefix(string(r[i:]), dollar) {
+				b.WriteString(dollar[1:])
+				i += len([]rune(dollar)) - 1
+				dollar = ""
+			}
+			continue
+		case inQ:
+			b.WriteRune(c)
+			if c == '\'' {
+				inQ = false
+			}
+			continue
+		}
+		switch {
+		case c == '-' && next == '-':
+			inLine = true
+			i++
+		case c == '/' && next == '*':
+			inBlock = true
+			i++
+		case c == '\'':
+			inQ = true
+			b.WriteRune(c)
+		case c == '$':
+			j := i + 1
+			for j < len(r) && (r[j] == '_' || r[j] >= 'a' && r[j] <= 'z' || r[j] >= 'A' && r[j] <= 'Z' || r[j] >= '0' && r[j] <= '9') {
+				j++
+			}
+			if j < len(r) && r[j] == '$' {
+				dollar = string(r[i : j+1])
+				b.WriteString(dollar)
+				i = j
+			} else {
+				b.WriteRune(c)
+			}
+		case c == ';':
+			if t := strings.TrimSpace(b.String()); t != "" {
+				out = append(out, t)
+			}
+			b.Reset()
+		default:
+			b.WriteRune(c)
+		}
+	}
+	if t := strings.TrimSpace(b.String()); t != "" {
+		out = append(out, t)
+	}
+	return out
+}
 
 // dbSize es pg_database_size de la base de la copia, en bytes.
 func (a *app) dbSize(ctx context.Context, id, db string) (int64, error) {
@@ -434,6 +587,15 @@ func writeRehearse(w io.Writer, rep *rehearseReport, asJSON bool) error {
 	for _, f := range rep.Files {
 		if f.Error != "" {
 			fmt.Fprintf(w, "\n%s: %s\n", f.File, f.Error)
+		}
+		if len(f.StrongLocks)+len(f.StrongStatements) > 0 {
+			fmt.Fprintf(w, "\n%s takes strong locks (in production they block other sessions while they last):\n", f.File)
+			for _, l := range f.StrongLocks {
+				fmt.Fprintf(w, "  held: %s\n", l)
+			}
+			for _, st := range f.StrongStatements {
+				fmt.Fprintf(w, "  %s\n", st)
+			}
 		}
 	}
 	writeStepReport(w, rep.Step)

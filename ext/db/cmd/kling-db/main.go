@@ -51,8 +51,9 @@ func manifest() plugin.Manifest {
 			{Name: "detach", Group: "COPIES", Summary: "withdraws an attach and cuts its sessions",
 				Usage:       usage("detach <agent> <copy> [-env PGPASSWORD]", "the agent no longer reaches the copy"),
 				MachineArgs: []string{""}},
-			{Name: "role", Group: "COPIES", Summary: "a read-only role inside a copy",
-				Usage:       usage("role <copy> -ro [-name agent] [-schemas a,b] [-rm]", "a login role that can only read"),
+			{Name: "role", Group: "COPIES", Summary: "a read-only role, or host login for a role your migrations made",
+				Usage: usage("role <copy> -ro [-name agent] [-schemas a,b] [-rm]", "a login role that can only read") +
+					usage("role <copy> -login -name R [-rm]", "R (e.g. app_user) logs in from the host: kling db connect -role R"),
 				MachineArgs: []string{""}},
 			{Name: "branch", Group: "COPIES", Summary: "one database per git branch",
 				Usage: usage("branch [<branch>] [-from P] [-golden G] [-env T]", "the copy of a git branch, forked from its parent") +
