@@ -41,6 +41,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   de la raíz al 88 % borraba copias de `kling db branch` congeladas («recreates from…»),
   y con ellas el trabajo de la rama: el dorado no tiene lo que escribieron. Ahora solo
   recoge las de la etiqueta `service`, que el planificador recrea igual.
+- **`kling db branch -golden` se obedece o falla.** Con la copia del padre de otro golden,
+  la rama nace del golden pedido; con la de la rama ya hecha de otro, error claro. Antes
+  se ramificaba el padre en silencio (la rama `dev` quedaba con el esquema de `main`).
+  En el hook (`-switch -golden`), que es un respaldo, se avisa cuando no se usa. Una
+  rama nueva que no es la actual nace congelada.
 - **`kling db ls`** (o `ps`): las copias de un dueño con su motor, dorado, estado y avisos
   (`-json` para scripts).
 - **Reiniciar el daemon o congelar la máquina ya no mata a quien escribe en una carpeta

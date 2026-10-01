@@ -608,6 +608,16 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   se niega). El padre es `-from` o la rama por defecto del repo (`origin/HEAD`, o
   `main`). Sin copia del padre ni `-golden`, se usa el golden de cualquier otra copia
   del repo; si no hay ninguno, falla y pide `-golden`.
+- **`-golden` se obedece o falla, nunca se ignora.** Si la copia del padre viene de
+  **otro** golden, la rama nace del golden pedido (sin los datos del padre) y se dice;
+  si viene del mismo, se ramifica como siempre. Si la rama ya tiene copia de otro
+  golden, error con el arreglo (`branch -rm <rama>` y otra vez). Antes se ramificaba
+  el padre en silencio: con `main` de `aura-main`, `branch dev -golden aura-dev` daba
+  a `dev` el esquema de `main`. El `-golden` del hook (`-switch`) es otra cosa: el de
+  respaldo para una rama cuyo padre no tiene copia; si hay padre se ramifica, y se
+  avisa de que ese `-golden` no se usó.
+- **Una rama que no es la actual nace congelada** (`kling db branch feat/x` estando en
+  `main`): no se queda gastando RAM. `connect` o el checkout la despiertan.
 - **`-switch`** es lo que llama el hook. Deja **activa** la copia de la rama actual
   (`thaw` si estaba congelada) y escribe la conexión en `.git/kling-db.env` (0600).
   Antes de nada borra el fichero de la rama anterior: si algo falla, la aplicación no
