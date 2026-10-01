@@ -2,6 +2,9 @@
 # kling db, nodo N1: un Postgres CALIENTE congelado como plantilla dorada.
 #
 #   scripts/db-golden.sh image                     construye la imagen pg16
+#   scripts/db-golden.sh image -ext [-pg 17] [-only timescaledb,vector]
+#                                                  plantilla pg16-ext con extensiones compiladas
+#                                                  (db-image-ext.sh; golden build -from pg16-ext)
 #   scripts/db-golden.sh build [opciones] <nombre> arranca, carga y congela
 #   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
 #   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
@@ -63,6 +66,12 @@ quiet() {
 }
 
 cmd_image() {
+  # -ext: la plantilla con extensiones compiladas (TimescaleDB TSL, pgvector,
+  # PostGIS, pg_cron, pg_partman), con su propio script.
+  if [ "${1:-}" = -ext ]; then
+    shift
+    exec bash "$HERE/db-image-ext.sh" "$@"
+  fi
   [ -f "$HERE/recipes/pg16.recipe.json" ] || die "falta scripts/recipes/pg16.recipe.json"
   say "construyendo la imagen pg16 (Alpine + postgresql16); tarda unos minutos"
   "${K[@]}" image build pg16 -builder base -base min -grow 512 -spec "$HERE/recipes/pg16.recipe.json"
