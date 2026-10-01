@@ -109,7 +109,9 @@ fi
 "${K[@]}" volume rm -f "$V" >/dev/null 2>&1 || true
 "${K[@]}" volume create "$V" -size 3G >/dev/null
 t "build microVM from $image (internet egress, 3 GiB volume)"
-"${K[@]}" run -name "$B" -image "$image" -egress internet -allow-exec -mem 3G -cpus 4 -cpu-pct 100 -volume "$V:/build" >/dev/null
+# -cpu-pct es de UN núcleo: 400 son las 4 vCPU enteras (con 100, make -j4
+# compartía un núcleo y TimescaleDB tardaba el triple).
+"${K[@]}" run -name "$B" -image "$image" -egress internet -allow-exec -mem 3G -cpus 4 -cpu-pct 400 -volume "$V:/build" >/dev/null
 for i in $(seq 1 60); do
   "${K[@]}" exec -timeout 5s "$B" -- true >/dev/null 2>&1 && break
   [ "$i" -lt 60 ] || die "the guest agent does not answer"

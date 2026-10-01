@@ -15,7 +15,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   pgvector 0.8.0, PostGIS 3.6.4, pg_cron y pg_partman compiladas contra el Postgres de la
   imagen, comprobadas por commit, sin red en la plantilla, y verificadas (`CREATE
   EXTENSION` de cada una y `add_compression_policy`) antes de darla por buena. 50 MiB de
-  memoria y 104 MiB de disco; 466 s de construcción en el laboratorio. `docs/db-golden.md`.
+  memoria y 104 MiB de disco; 180 s de construcción en el laboratorio. `docs/db-golden.md`.
 - **Un almacén de copia al escribir lleno ya no llega al invitado como un EIO.** Con el
   almacén al 100 %, `kling db fork -n 8` decía OK y las copias hacían PANIC al escribir.
   Ahora el daemon mide el espacio **asignable** de verdad (en Btrfs, chunks de datos y de
