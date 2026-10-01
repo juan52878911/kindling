@@ -34,6 +34,15 @@ func cmdCoW(args []string) error {
 		return errors.New("this daemon does not report its disk clones (it predates daemon.cow)")
 	}
 	fmt.Println(lineaCoW(info.CoW))
+	// Las que el daemon pausó porque el almacén se llenó (y las que vieron
+	// errores de disco): es lo primero que hay que saber con el almacén lleno.
+	if list, err := api.NewClient(hostOf(*host)).List(ctx); err == nil {
+		for _, mc := range list {
+			for _, a := range avisosMaquina(mc) {
+				fmt.Println("! " + a)
+			}
+		}
+	}
 	if c := casiLlenoCoW(info.CoW.Store); c != "" {
 		next("kling cow grow +8G   (%s)", c)
 	}

@@ -10,8 +10,8 @@ package machine
 // memoria por adelantado.
 //
 // La política: cuando el disco pasa de una marca alta, se ELIMINAN las
-// instancias warm que se pueden recrear —las que vienen de un snapshot dorado
-// que sigue existiendo—, de más antigua a más nueva, hasta bajar de una marca
+// instancias warm que se pueden recrear —las de un servicio (etiqueta
+// service) que vienen de un snapshot dorado que sigue existiendo—, de más antigua a más nueva, hasta bajar de una marca
 // objetivo. Eliminar no es perder: su estado vive en el snapshot, y volver
 // cuesta ~200 ms. Lo que NO se toca es una warm sin snapshot de respaldo: ahí el
 // mem.file ES el único estado, y borrarlo sería perder datos.
@@ -128,12 +128,24 @@ func (m *Manager) gcDisk(ctx context.Context) {
 	type cand struct {
 		id    string
 		name  string
+		from  string
 		since int64
 	}
 	m.mu.RLock()
 	var cands []cand
 	for _, mc := range m.byID {
 		if mc.State != api.StateWarm || mc.From == "" {
+			continue
+		}
+		// Solo las de un servicio (la etiqueta service: el planificador las
+		// crea y las recrea igual desde el dorado del servicio). Cualquier
+		// otra que haya corrido desde su dorado tiene en su overlay y en su
+		// volcado lo que escribió desde entonces, y eso no está en ningún
+		// otro sitio: una copia de kling db congelada al cambiar de rama, una
+		// copia de fork, una máquina de run -from. El dorado no la "recrea":
+		// la devuelve al principio. Se observó en el laboratorio: con el
+		// disco al 88 % el GC borró copias congeladas de ramas de kling db.
+		if mc.Service() == "" {
 			continue
 		}
 		// Con volúmenes no es "recreable desde su snapshot": es una máquina
@@ -150,7 +162,7 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		if mc.FrozenAt != nil {
 			since = mc.FrozenAt.UnixNano()
 		}
-		cands = append(cands, cand{mc.ID, mc.Name, since})
+		cands = append(cands, cand{mc.ID, mc.Name, mc.From, since})
 	}
 	m.mu.RUnlock()
 
@@ -180,7 +192,7 @@ func (m *Manager) gcDisk(ctx context.Context) {
 			continue
 		}
 		log.Printf("gc: disk at %d%%, removed dormant instance %s (recreates from %s)",
-			m.diskUsedPct(), c.name, c.name)
+			m.diskUsedPct(), c.name, c.from)
 	}
 
 	if p := m.diskUsedPct(); p >= high {

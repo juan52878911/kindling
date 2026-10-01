@@ -335,6 +335,54 @@ quitarlo (abajo) y dejar que se cree de nuevo con `daemon.cow_store_gib`. Solo L
 root; el crecimiento de verdad sobre un loop, XFS y Btrfs, está en
 `TestCrecerAlmacenDeVerdad` (root y `KLING_TEST_MOUNTS=1`, en el laboratorio).
 
+## Almacén lleno
+
+Un clon no ocupa nada al nacer y la cuota de cada instancia es una cota, no una reserva:
+varias instancias que escriben a la vez pueden llenar el almacén aunque cada una cupiera
+al crearla. Lleno, el VMM recibe `ENOSPC` del host y se lo da al invitado como un error
+de E/S: ext4 aborta su journal y Postgres hace PANIC. Visto en el laboratorio con
+`kling db fork -n 8`, que decía OK mientras las copias morían al escribir. Ahora:
+
+- **Espacio asignable de verdad.** En Btrfs, `statfs` no basta: el espacio va por chunks
+  de datos y de metadatos, y un almacén con cientos de MiB libres en sus chunks de datos
+  falla igual si los metadatos se llenaron y no queda nada sin asignar. El daemon lo
+  calcula con `BTRFS_IOC_SPACE_INFO` (`internal/machine/cow_asignable.go`): datos libres
+  más lo sin asignar, 0 si los metadatos no tienen ni 16 MiB, y nunca más que `statfs`.
+  En XFS, `statfs` es exacto. Es la cifra que enseñan `kling cow` y `kling info`.
+- **Admisión.** Con menos de 256 MiB asignables no se clona en el almacén: la instancia
+  nueva va a una copia completa en la raíz **solo si cabe entera** con los 2 GiB de margen
+  de la raíz; si no, `run -from` (y `fork`, `kling db up`...) falla con
+  `copy-on-write store full (N MiB free): kling cow grow +4G`. Lo mismo al descongelar o
+  reanudar una instancia cuyo disco vive en el almacén.
+- **El vigilante del almacén** mira lo asignable cada vez más a menudo cuanto menos queda
+  (de 1 s a 10 ms: las escrituras van a la caché del host a velocidad de memoria). Por
+  debajo de 128 MiB **pausa** a la vez todas las instancias en marcha del almacén (las que
+  tienen carpetas vivas se congelan) y les pone `hold: copy-on-write store full`. Una base
+  de datos que espera no pierde nada; una que vio EIO, quizá sí. En cuanto vuelve a haber
+  256 MiB (`kling cow grow`, o al borrar otras instancias) las **reanuda solo**. `kling ps`,
+  `kling cow` y `kling db ls` las marcan con `!` y lo explican.
+- **Si aun así el invitado ve errores de disco** (un almacén que se llena más rápido de lo
+  que se pausa, un disco del host que falla), el vigilante de máquinas los encuentra en
+  la consola del invitado (`I/O error, dev vdb`, `EXT4-fs error`, `Aborting journal`) y
+  los anota en la máquina (`disk_errors`, `disk_error_at`, `disk_error`): lo dicen
+  `kling ps`, `kling db ls` y `kling db doctor` (DB055, CRITICAL). El texto es del
+  invitado: solo avisa de su propia máquina.
+- **Un almacén lleno al arrancar** se monta igual (antes el daemon lo daba por roto y
+  copiaba hasta reiniciarse): sus instancias lo necesitan para despertar, y se libera solo
+  en cuanto el limpiador de Btrfs termina de borrar los subvolúmenes de las borradas.
+
+`scripts/e2e-cow-lleno.sh` lo prueba de punta a punta contra un daemon de pruebas con un
+almacén pequeño (`KLING_COW_STORE_GIB=1`): cinco copias de Postgres escribiendo hasta
+llenarlo, una rama congelada, un reinicio del daemon y `kling cow grow`. En el laboratorio
+(Btrfs de 1 GiB, 5 copias escribiendo ~1,5 GiB): 0 errores de disco, 0 PANIC, la rama
+rechazada al descongelar con el almacén lleno y con sus datos tras crecer. Antes del
+vigilante, las cinco hacían PANIC. El pico medido fue de 336 MiB consumidos en 50 ms: por
+eso la marca de pausa crece con la tasa de llenado.
+
+El GC de disco (`gc.go`) ya no borra congeladas que no sean de un servicio: una copia de
+`kling db` congelada al cambiar de rama tiene en su disco lo que escribió desde su dorado,
+y el dorado no la "recrea" (se perdían ramas con el disco de la raíz al 88 %).
+
 ## Desmontar o quitar el almacén
 
 Con el daemon parado y sin microVMs vivas:

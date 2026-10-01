@@ -37,6 +37,8 @@ func manifest() plugin.Manifest {
 		Commands: []plugin.Command{
 			{Name: "up", Group: "COPIES", Summary: "a ready copy of a Postgres, MySQL, Redis or SQLite template",
 				Usage: usage("up <template> [-name N] [-ttl D] [-owner T]", "a new copy with its own password")},
+			{Name: "ls", Group: "COPIES", Summary: "lists your copies, with disk and hold warnings",
+				Usage: usage("ls [-owner T] [-json]", "your copies; ! marks one on hold or with disk errors")},
 			{Name: "fork", Group: "COPIES", Summary: "branches a live copy into N copies",
 				Usage:       usage("fork <copy> [-n N]", "N copies of a copy, all or none"),
 				MachineArgs: []string{""}},
@@ -132,6 +134,8 @@ func usage(cmd, desc string) string { return fmt.Sprintf("  db %-45s %s\n", cmd,
 func main() {
 	plugin.Main(manifest(), map[string]func([]string) error{
 		"up":           cmdUp,
+		"ls":           cmdLs,
+		"ps":           cmdLs,
 		"fork":         cmdFork,
 		"branch":       cmdBranch,
 		"env":          cmdEnv,

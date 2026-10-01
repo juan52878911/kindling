@@ -427,6 +427,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// siguiente reinicio, invisible para `kling ps` y para la
 				// contabilidad de memoria que decide si cabe la siguiente microVM.
 				m.sweepOrphanVMMs()
+				// Errores de disco que el invitado vio (errores_disco.go),
+				// antes de rotar: si no, se perderían.
+				m.revisarErroresDisco()
 				// Consolas serie que se han pasado de consolaMaxBytes (M-07): un
 				// invitado hostil escribiendo a /dev/ttyS0 sin tope llenaría el
 				// disco y degradaría a las demás microVMs (SECURITY.md §4).
@@ -556,6 +559,7 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	// a la primera vuelta del vigilante.
 	go m.ensureShares()
 	go m.watch(ctx, every)
+	go m.vigilarAlmacen(ctx)
 }
 
 // ttlDesde es cuándo empezó a contar el TTL de mc.

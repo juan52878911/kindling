@@ -146,7 +146,7 @@ func TestGCDiskNoBorraUnaCongeladaQueSeDesperto(t *testing.T) {
 	id := newID()
 	congelada := time.Now().Add(-time.Hour)
 	m.byID[id] = &api.Machine{ID: id, Name: "dormida", State: api.StateWarm,
-		From: "dorado", FrozenAt: &congelada}
+		From: "dorado", FrozenAt: &congelada, Labels: map[string]string{api.LabelService: "s"}}
 
 	soltar := m.lock(id)
 	hecho := make(chan struct{})

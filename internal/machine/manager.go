@@ -115,6 +115,13 @@ type Manager struct {
 	// las microVMs corren sin la barrera de chroot/pivot_root.
 	JailerWarning string
 
+	// consolaLeida es hasta dónde leyó revisarErroresDisco la consola de cada
+	// máquina (errores_disco.go), con consolaMu; inicioDaemon, cuándo arrancó
+	// este Manager.
+	consolaMu    sync.Mutex
+	consolaLeida map[string]posConsola
+	inicioDaemon time.Time
+
 	// cow es el modo de copia de discos en uso (daemon.cow) y alm el almacén
 	// XFS propio, si la plataforma lo tiene (nil en macOS). Ver cow.go.
 	cow estadoCoW
@@ -425,6 +432,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	restringirRaiz(root, priv)
+	m.inicioDaemon = time.Now()
 	// El almacén de discos, si existe, se monta ANTES de readoptar: las
 	// instancias con su overlay dentro lo necesitan para descongelarse. Y los
 	// binds que un daemon anterior dejó en jails de máquinas ya borradas.
@@ -2495,6 +2503,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Pausada: solo reanudar (ver pausa.go).
 	if ok && cur.State == api.StatePaused {
 		crono.p.Tier = "paused"
+		// Pausada por el almacén lleno (cow_vigilante.go): reanudarla sin
+		// sitio la devolvería a escribir en un almacén que da EIO.
+		if err := m.comprobarAlmacenPara(mc.ID); err != nil {
+			return nil, fmt.Errorf("machine %q can't be resumed: %w", cur.Name, err)
+		}
 		out, err := m.reanudarLocked(ctx, cur, crono)
 		if err != nil {
 			return nil, err
@@ -2515,6 +2528,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	if mc.State != api.StateWarm {
 		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
+	}
+	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
+	// que el invitado lo descubra con un EIO al escribir.
+	if err := m.comprobarAlmacenPara(mc.ID); err != nil {
+		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 	}
 
 	dir := m.dir(mc.ID)
@@ -2782,6 +2800,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.State = api.StateRunning
 	cur.StartedAt = &now
 	cur.FrozenAt = nil
+	cur.Hold = ""
 	cur.ThawMS = elapsed
 	cur.PID = pid
 	// El techo por defecto se decidió sobre la copia (arriba); se anota en la

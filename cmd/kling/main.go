@@ -715,11 +715,13 @@ func cmdPS(args []string) error {
 	}
 	fmt.Fprintln(tw, head)
 	var totalDisk int64
+	var avisos []string
 	for _, mc := range list {
 		if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
 			continue
 		}
 		totalDisk += mc.DiskBytes
+		avisos = append(avisos, avisosMaquina(mc)...)
 		eg := mc.Egress
 		if eg == "" {
 			eg = "none"
@@ -730,8 +732,12 @@ func cmdPS(args []string) error {
 		if mc.From != "" {
 			origin = mc.From
 		}
+		estado := string(mc.State)
+		if mc.Hold != "" || mc.DiskErrors > 0 {
+			estado += "!"
+		}
 		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s",
-			mc.ID[:12], mc.Name, origin, mc.State,
+			mc.ID[:12], mc.Name, origin, estado,
 			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), eg, since(mc.CreatedAt), lastOp(mc))
 		if conListo {
 			listo := mc.Ready
@@ -751,7 +757,30 @@ func cmdPS(args []string) error {
 	if totalDisk > 0 {
 		fmt.Printf("\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
 	}
+	if len(avisos) > 0 {
+		fmt.Println()
+		for _, a := range avisos {
+			fmt.Println("! " + a)
+		}
+	}
 	return nil
+}
+
+// avisosMaquina son las líneas de aviso de mc bajo la tabla de ps: parada por
+// el daemon (Hold) o con errores de disco en su invitado.
+func avisosMaquina(mc *api.Machine) []string {
+	var out []string
+	if mc.Hold != "" {
+		out = append(out, fmt.Sprintf("%s: on hold (%s); it resumes on its own once there is room (kling cow grow)", mc.Name, mc.Hold))
+	}
+	if mc.DiskErrors > 0 {
+		cuando := ""
+		if mc.DiskErrorAt != nil {
+			cuando = ", last " + since(*mc.DiskErrorAt) + " ago"
+		}
+		out = append(out, fmt.Sprintf("%s: its guest got %d disk I/O error(s)%s: %q; its data may be damaged", mc.Name, mc.DiskErrors, cuando, mc.DiskError))
+	}
+	return out
 }
 
 // human formatea bytes de forma compacta.

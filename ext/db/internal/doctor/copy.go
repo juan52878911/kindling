@@ -100,6 +100,16 @@ func runCopy(ctx context.Context, k klingc.Kling, ref string, r *report) error {
 		return fmt.Errorf("doctor: kling inspect %s: unexpected machine id %q", safe(ref, 64), safe(mc.ID, 64))
 	}
 	r.target = fmt.Sprintf("machine %s (%s)", safe(mc.Name, 64), mc.ID)
+	diskChecks(&mc, r)
+	if mc.Hold != "" {
+		r.add("DB055", High, "make room in the copy-on-write store (kling cow grow +4G): the copy resumes on its own",
+			"the copy is on hold: %s; the rest of the checks need it running", safe(mc.Hold, 64))
+		return nil
+	}
+	if mc.State != "" && mc.State != api.StateRunning && mc.DiskErrors > 0 {
+		r.add("DB059", Info, "", "machine is %s: the rest of the checks need it running", safe(string(mc.State), 32))
+		return nil
+	}
 	if mc.State != "" && mc.State != api.StateRunning {
 		return fmt.Errorf("doctor: machine %s is %s; the doctor needs it running", safe(mc.Name, 64), safe(string(mc.State), 32))
 	}
@@ -152,6 +162,22 @@ func runCopy(ctx context.Context, k klingc.Kling, ref string, r *report) error {
 	}
 	copyChecks(ctx, k, qr, &mc, state, golden, appRole, r)
 	return nil
+}
+
+// diskChecks avisa de los errores de disco que vio el invitado de la copia
+// (api.Machine.DiskErrors): un almacén de copia al escribir lleno, o un disco
+// del host que falla, le llegan como EIO, y Postgres hace PANIC o deja datos
+// a medias.
+func diskChecks(mc *api.Machine, r *report) {
+	if mc.DiskErrors == 0 {
+		return
+	}
+	cuando := ""
+	if mc.DiskErrorAt != nil {
+		cuando = " (last at " + mc.DiskErrorAt.Format("2006-01-02 15:04:05") + ")"
+	}
+	r.add("DB055", Critical, "check the copy-on-write store (kling cow; kling cow grow +4G) and the host disk, then destroy this copy and create it again: its data may be damaged",
+		"the copy's guest got %d disk I/O error(s)%s: \"%s\"", mc.DiskErrors, cuando, safe(mc.DiskError, 160))
 }
 
 // appRoleOf lee el rol de la aplicación del conn.env del dorado ("app" si no hay).
