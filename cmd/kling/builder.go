@@ -48,7 +48,7 @@ var (
 
 func cmdBuilder(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: kling builder base|llm|chispa|android <workdir>  (the daemon runs it; see docs/api.md)")
+		return fmt.Errorf("usage: kling builder base|llm|chispa|android|debian <workdir>  (the daemon runs it; see docs/api.md)")
 	}
 	switch args[0] {
 	case "base":
@@ -61,6 +61,9 @@ func cmdBuilder(args []string) error {
 		// Todo en Go (internal/android): sin root, loop ni chroot, así que
 		// también corre en el daemon de macOS.
 		return android.Build(args[1], os.Stdout)
+	case "debian":
+		// También en Go (internal/imagen) y sin root: ver builder_debian.go.
+		return builderDebian(args[1])
 	default:
 		return fmt.Errorf("unknown builder %q", args[0])
 	}

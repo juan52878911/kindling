@@ -34,6 +34,7 @@ depuración.
 
 | Documento | Qué cubre | Léelo si… |
 |---|---|---|
+| [`imagenes.md`](imagenes.md) | Imágenes sin root: `internal/imagen` (lo que comparten los constructores en Go) y el constructor `debian` (Debian fijada con paquetes de la receta, lockfile y dm-verity opcional) | quieres construir una imagen en macOS o sin loop, o fijar paquetes de Debian |
 | [`three-layers.md`](three-layers.md) | Imágenes por capas (base por familia de runtime + capa de servicio + overlay): diseño, decisiones, y el parque real reimportado — 1300 → 433 MiB | quieres entender `-base`, las familias `node`/`python` o el camino PyPI |
 | [`estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo sobre el sistema vivo: el commit prematuro, los seis fallos de robustez, el hasheo que costaba el 67% del despertar, y la prueba de estrés de 142 microVMs | quieres saber por qué v0.4 es 9,5× más rápida bajo carga, o cómo se depuró |
 | [`chispa.md`](chispa.md) | Chispa, el clasificador lineal diminuto de `kling ai chispa`: características hasheadas, pesos int16, calibración y umbral por clase, formato `.chispa`, y cómo lo usará la cascada Chispa → VON | quieres clasificar o enrutar algo en microsegundos sin un modelo de lenguaje |
