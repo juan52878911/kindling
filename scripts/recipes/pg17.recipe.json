@@ -1,0 +1,3 @@
+{
+  "packages": ["postgresql17", "postgresql17-client", "postgresql17-contrib", "tzdata"]
+}
