@@ -62,7 +62,9 @@ mkdir -p /overlay/merged/rom
 cd /overlay/merged
 pivot_root . rom
 
-# Rehacer los montajes dentro de la nueva raíz.
+# Rehacer los montajes dentro de la nueva raíz. Una imagen aplanada desde OCI
+# puede no traer los puntos de montaje: sin ellos el mount falla en silencio.
+mkdir -p /proc /sys /dev /tmp /run 2>/dev/null || true
 mount -t proc     proc     /proc     2>/dev/null || true
 mount -t sysfs    sysfs    /sys      2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev      2>/dev/null || true
@@ -70,6 +72,44 @@ mount -t tmpfs    tmpfs    /tmp      2>/dev/null || true
 mount -t tmpfs    tmpfs    /run      2>/dev/null || true
 
 umount /rom/proc /rom/sys /rom/dev 2>/dev/null || true
+
+# CONTRATO DE RUNTIME. Lo que Docker (y systemd en la base con systemd) da por
+# hecho y devtmpfs no crea: /dev/fd y /dev/std* (la sustitución de procesos de
+# bash, <(...), abre /dev/fd/N; el initdb de las imágenes de Postgres muere sin
+# él), /dev/shm (la memoria compartida POSIX de Postgres, Chromium, Python
+# multiprocessing) y un /etc/hosts que resuelva localhost y el propio nombre.
+# Nada de esto pisa lo que la imagen ya traiga.
+for l in fd:/proc/self/fd stdin:/proc/self/fd/0 stdout:/proc/self/fd/1 stderr:/proc/self/fd/2; do
+  [ -e "/dev/${l%%:*}" ] || [ -L "/dev/${l%%:*}" ] || ln -s "${l#*:}" "/dev/${l%%:*}" 2>/dev/null || true
+done
+if mkdir -p /dev/shm 2>/dev/null; then
+  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null || true
+fi
+
+# El nombre: el que fije el kernel (ip=...:<nombre>:...) manda. Sin él, el
+# kernel deja la IP del invitado (172.16.0.2) o "(none)", que no es un nombre:
+# entonces "kindling". Se escribe en /proc y no con hostname(1), que no está en
+# todas las imágenes.
+HN=""
+read -r HN < /proc/sys/kernel/hostname 2>/dev/null || true
+case "$HN" in
+  "(none)") HN="" ;;
+  *[!0-9.]*) ;;   # un nombre de verdad
+  *) HN="" ;;     # vacío o una IPv4
+esac
+if [ -z "$HN" ]; then
+  HN=kindling
+  echo "$HN" > /proc/sys/kernel/hostname 2>/dev/null || true
+fi
+
+# Solo IPv4: el invitado arranca con IPv6 apagado (ipv6.disable=1 o
+# disable_ipv6=1, ver internal/net), así que ::1 no existe y un "::1 localhost"
+# haría que un cliente probara primero una dirección inalcanzable. El nombre va
+# a 127.0.1.1, como en Debian: siempre alcanzable, también con -egress none.
+{
+  grep -qsE '^127\.0\.0\.1[[:space:]]+([^#]*[[:space:]])?localhost([[:space:]]|$)' /etc/hosts || echo "127.0.0.1	localhost" >> /etc/hosts
+  grep -qswF "$HN" /etc/hosts || echo "127.0.1.1	$HN" >> /etc/hosts
+} 2>/dev/null || true
 
 # /entrypoint es lo que convierte esta microVM en "una herramienta". Se
 # reemplaza al construir la imagen de cada servidor MCP.

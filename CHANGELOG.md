@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Las imágenes de Docker encuentran `/dev/fd`, `/dev/shm` y `/etc/hosts`.** El init de
+  las bases (`minimal-init.sh`: `min`, glibc y Android) crea `/dev/fd` y `/dev/std*`, monta
+  `/dev/shm` en tmpfs, pone el nombre `kindling` (antes era la IP del invitado) y añade a
+  `/etc/hosts` `localhost` y ese nombre si faltan, sin pisar lo que traiga la imagen. El
+  `docker-entrypoint.sh` de Postgres moría en initdb (`/dev/fd/63`) y `shared_memory` de
+  Python con `FileNotFoundError`. Mismo arranque en frío (~30 ms). Llega al reconstruir la
+  base.
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`
