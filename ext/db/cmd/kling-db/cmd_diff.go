@@ -63,6 +63,20 @@ const (
 type diffOpts struct {
 	schemaOnly bool
 	maxRows    int
+	// ignoreRows son tablas ([esquema.]nombre) cuyas filas no se comparan
+	// (solo el recuento): seeds con claves aleatorias entre goldens
+	// independientes.
+	ignoreRows []string
+}
+
+// ignored dice si las filas de t no se comparan.
+func (o diffOpts) ignored(t *dbTable) bool {
+	for _, n := range o.ignoreRows {
+		if n == t.Name || n == t.Schema+"."+t.Name {
+			return true
+		}
+	}
+	return false
 }
 
 func (o diffOpts) validate() error {
@@ -76,7 +90,15 @@ func (o diffOpts) validate() error {
 
 type dbSchema struct {
 	Tables []*dbTable `json:"tables"`
+	// Objects son los objetos que no cuelgan de una tabla, por clase
+	// (function, view, trigger, sequence, grant, extension, hypertable,
+	// timescale-job): nombre y definición (de funciones y vistas, su md5: el
+	// cuerpo puede llevar literales).
+	Objects map[string][]dbDef `json:"objects"`
 }
+
+// objectKinds es el orden de las clases de objects en el informe.
+var objectKinds = []string{"extension", "function", "view", "trigger", "sequence", "grant", "hypertable", "timescale-job"}
 
 type dbTable struct {
 	Schema      string   `json:"schema"`
@@ -145,9 +167,53 @@ SELECT jsonb_build_object('tables', coalesce((SELECT jsonb_agg(t ORDER BY t.sche
   WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
     AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
     AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e')
-) t), '[]'::jsonb))::text;
+) t), '[]'::jsonb), 'objects', `+diffObjectsSQL+`)::text;
 `, count)
 }
+
+// diffObjectsSQL es el jsonb de dbSchema.Objects. Lo de una extensión
+// (pg_depend 'e') no cuenta: es de la extensión, y su versión ya sale. Lo de
+// TimescaleDB, solo si está: sus vistas se nombran dentro de query_to_xml, que
+// no se resuelve hasta llamarlo.
+const diffObjectsSQL = `jsonb_build_object(
+  'extension', (SELECT coalesce(jsonb_agg(jsonb_build_object('name', extname::text, 'def', extversion) ORDER BY extname), '[]'::jsonb) FROM pg_extension),
+  'function', (SELECT coalesce(jsonb_agg(f ORDER BY f->>'name'), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object('name', n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+      'def', md5(pg_get_functiondef(p.oid))) AS f
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE p.prokind IN ('f', 'p') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname !~ '^_timescaledb'
+      AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_proc'::regclass AND e.objid = p.oid AND e.deptype = 'e')) x),
+  'view', (SELECT coalesce(jsonb_agg(v ORDER BY v->>'name'), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object('name', n.nspname || '.' || c.relname || CASE c.relkind WHEN 'm' THEN ' (materialized)' ELSE '' END,
+      'def', md5(pg_get_viewdef(c.oid))) AS v
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('v', 'm') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname !~ '^_timescaledb' AND n.nspname <> 'timescaledb_information' AND n.nspname <> 'timescaledb_experimental'
+      AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e')) x),
+  'trigger', (SELECT coalesce(jsonb_agg(g ORDER BY g->>'name'), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object('name', n.nspname || '.' || c.relname || '.' || t.tgname, 'def', pg_get_triggerdef(t.oid)) AS g
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT t.tgisinternal AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname !~ '^_timescaledb') x),
+  'sequence', (SELECT coalesce(jsonb_agg(q ORDER BY q->>'name'), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object('name', s.schemaname || '.' || s.sequencename,
+      'def', s.data_type::text || ' increment ' || s.increment_by || ' min ' || s.min_value || ' max ' || s.max_value || CASE WHEN s.cycle THEN ' cycle' ELSE '' END) AS q
+    FROM pg_sequences s WHERE s.schemaname <> 'information_schema' AND s.schemaname !~ '^pg_' AND s.schemaname !~ '^_timescaledb') x),
+  'grant', (SELECT coalesce(jsonb_agg(a ORDER BY a->>'name'), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object('name', CASE c.relkind WHEN 'S' THEN 'sequence ' WHEN 'v' THEN 'view ' WHEN 'm' THEN 'view ' ELSE 'table ' END || n.nspname || '.' || c.relname,
+      'def', coalesce(c.relacl::text, '(default)')) AS a
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S') AND NOT c.relispartition AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname !~ '^_timescaledb' AND n.nspname <> 'timescaledb_information' AND n.nspname <> 'timescaledb_experimental'
+    UNION ALL
+    SELECT jsonb_build_object('name', 'schema ' || n.nspname, 'def', coalesce(n.nspacl::text, '(default)'))
+    FROM pg_namespace n WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname !~ '^_timescaledb' AND n.nspname <> 'timescaledb_information' AND n.nspname <> 'timescaledb_experimental') x),
+  'hypertable', CASE WHEN to_regclass('timescaledb_information.hypertables') IS NULL THEN '[]'::jsonb ELSE (
+    SELECT coalesce(jsonb_agg(jsonb_build_object('name', u.n::text, 'def', u.d::text) ORDER BY u.n::text), '[]'::jsonb)
+    FROM (SELECT query_to_xml('SELECT hypertable_schema || ''.'' || hypertable_name AS n, ''dimensions '' || num_dimensions || '', compression '' || CASE WHEN compression_enabled THEN ''on'' ELSE ''off'' END AS d FROM timescaledb_information.hypertables', true, false, '') AS x) q,
+      unnest(xpath('/table/row/n/text()', q.x), xpath('/table/row/d/text()', q.x)) AS u(n, d)) END,
+  'timescale-job', CASE WHEN to_regclass('timescaledb_information.jobs') IS NULL THEN '[]'::jsonb ELSE (
+    SELECT coalesce(jsonb_agg(jsonb_build_object('name', u.n::text, 'def', u.d::text) ORDER BY u.n::text), '[]'::jsonb)
+    FROM (SELECT query_to_xml('SELECT proc_name || '' on '' || coalesce(hypertable_schema || ''.'' || hypertable_name, ''-'') AS n, ''every '' || schedule_interval || '' '' || coalesce(config::text, ''-'') AS d FROM timescaledb_information.jobs WHERE job_id >= 1000', true, false, '') AS x) q,
+      unnest(xpath('/table/row/n/text()', q.x), xpath('/table/row/d/text()', q.x)) AS u(n, d)) END
+)`
 
 // diffRowsSQL: las huellas de las filas de una tabla. cols (ya ordenadas) y pk
 // son nombres de la base: van citados. salt es hexadecimal; k es 1 (todas las
@@ -182,12 +248,14 @@ type diffReport struct {
 	Schema     diffSchemaRep `json:"schema"`
 	Rows       []*rowDiff    `json:"rows"`
 	Same       bool          `json:"same"` // sin diferencias de esquema ni de filas
+	Warnings   []string      `json:"warnings,omitempty"`
 }
 
 type diffSchemaRep struct {
 	TablesAdded   []string     `json:"tables_added"` // en la segunda y no en la primera
 	TablesRemoved []string     `json:"tables_removed"`
-	Tables        []*tableDiff `json:"tables"` // tablas comunes que cambiaron
+	Tables        []*tableDiff `json:"tables"`  // tablas comunes que cambiaron
+	Objects       []diffChange `json:"objects"` // funciones, vistas, triggers, grants... (Kind = su clase)
 }
 
 type tableDiff struct {
@@ -222,14 +290,16 @@ func cmdDiff(args []string) error {
 	asJSON := fs.Bool("json", false, "JSON output")
 	schemaOnly := fs.Bool("schema-only", false, "compare only the schema, not the rows")
 	maxRows := fs.Int("max-rows", defaultDiffRows, fmt.Sprintf("rows fingerprinted per table before sampling (1-%d)", maxDiffRows))
+	var ignore listFlag
+	fs.Var(&ignore, "ignore-rows", "[schema.]table whose rows are not compared, only counted (repeatable or comma-separated): seeds with random keys")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 2 {
-		return usageErr("usage: kling db diff <copy1> <copy2> [-json] [-schema-only] [-max-rows N]")
+		return usageErr("usage: kling db diff <copy1> <copy2> [-json] [-schema-only] [-max-rows N] [-ignore-rows T,...]")
 	}
-	o := diffOpts{schemaOnly: *schemaOnly, maxRows: *maxRows}
+	o := diffOpts{schemaOnly: *schemaOnly, maxRows: *maxRows, ignoreRows: ignore}
 	if err := o.validate(); err != nil {
 		return &plugin.ExitError{Code: 2, Err: err}
 	}
@@ -351,12 +421,23 @@ func (a *app) diff(ctx context.Context, r1, r2, owner string, o diffOpts) (*diff
 			rep.Schema.Tables = append(rep.Schema.Tables, &tableDiff{Table: s1.tables[k].display(), Changes: ch})
 		}
 	}
+	rep.Schema.Objects = []diffChange{}
+	for _, kind := range objectKinds {
+		rep.Schema.Objects = append(rep.Schema.Objects, diffObjects(kind, s1.schema.Objects[kind], s2.schema.Objects[kind])...)
+	}
+	// Dos goldens hechos por separado no tienen las mismas claves aunque
+	// tengan los mismos datos (uuid aleatorios, secuencias): sus filas salen
+	// nuevas y borradas sin que cambie nada.
+	if g1, g2 := s1.mc.Labels[labelGolden], s2.mc.Labels[labelGolden]; !o.schemaOnly && g1 != g2 {
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf("the copies come from different goldens (%s, %s): rows seeded with random keys show up as new and deleted even when the data is the same; -ignore-rows <table> or -schema-only",
+			doctor.Safe(g1, 64), doctor.Safe(g2, 64)))
+	}
 	if !o.schemaOnly {
 		if err := a.diffRows(ctx, rep, s1, s2, common, o); err != nil {
 			return nil, err
 		}
 	}
-	rep.Same = len(rep.Schema.TablesAdded) == 0 && len(rep.Schema.TablesRemoved) == 0 && len(rep.Schema.Tables) == 0
+	rep.Same = len(rep.Schema.TablesAdded) == 0 && len(rep.Schema.TablesRemoved) == 0 && len(rep.Schema.Tables) == 0 && len(rep.Schema.Objects) == 0
 	for _, r := range rep.Rows {
 		if r.New+r.Deleted+r.Changed > 0 || (r.Status == "counts-only" && r.Rows1 != r.Rows2) {
 			rep.Same = false
@@ -436,6 +517,23 @@ func diffDefs(kind string, a, b []dbDef) []diffChange {
 	return out
 }
 
+// diffObjects compara una clase de objetos. De funciones y vistas solo se
+// guarda el md5 de la definición: "changed" sin enseñarla.
+func diffObjects(kind string, a, b []dbDef) []diffChange {
+	out := diffDefs(kind, a, b)
+	if kind == "function" || kind == "view" {
+		for i := range out {
+			switch out[i].Change {
+			case "changed":
+				out[i].Detail = "definition changed"
+			default:
+				out[i].Detail = ""
+			}
+		}
+	}
+	return out
+}
+
 func onOff(rls, force bool) string {
 	switch {
 	case rls && force:
@@ -492,6 +590,10 @@ func (a *app) diffRows(ctx context.Context, rep *diffReport, s1, s2 *diffSide, c
 		rd := &rowDiff{Table: t1.display(), Rows1: count(t1), Rows2: count(t2)}
 		rep.Rows = append(rep.Rows, rd)
 		switch {
+		case o.ignored(t1):
+			rd.Status = "counts-only"
+			rd.Note = "-ignore-rows: only row counts are compared"
+			continue
 		case len(t1.PK) == 0 || len(t2.PK) == 0:
 			rd.Status = "counts-only"
 			rd.Note = "no primary key: only row counts are compared"
@@ -545,6 +647,12 @@ func (a *app) diffRows(ctx context.Context, rep *diffReport, s1, s2 *diffSide, c
 			if _, ok := f1[pk]; !ok {
 				rd.New++
 			}
+		}
+		// Ni una clave en común con filas en las dos: casi seguro claves
+		// aleatorias (uuid) de dos seeds distintos, no un cambio de datos.
+		// Con una fila (alembic_version: otra revisión) no: eso es un cambio.
+		if rd.Unchanged == 0 && rd.Changed == 0 && rd.New > 1 && rd.Deleted > 1 && rd.Note == "" {
+			rd.Note = "no key in common: probably random keys (uuid) from separate seeds; -ignore-rows " + t1.display() + " if that is the case"
 		}
 	}
 	sort.SliceStable(rep.Rows, func(i, j int) bool { return rep.Rows[i].Table < rep.Rows[j].Table })
@@ -613,7 +721,7 @@ func writeDiffReport(w io.Writer, rep *diffReport, asJSON bool) error {
 	fmt.Fprintln(w, "schema:")
 	s := rep.Schema
 	if len(s.TablesAdded)+len(s.TablesRemoved)+len(s.Tables) == 0 {
-		fmt.Fprintln(w, "  no differences")
+		fmt.Fprintln(w, "  no differences in tables")
 	}
 	for _, t := range s.TablesAdded {
 		fmt.Fprintf(w, "  + table %s\n", t)
@@ -629,6 +737,16 @@ func writeDiffReport(w io.Writer, rep *diffReport, asJSON bool) error {
 			if c.Name != "" {
 				line += " " + c.Name
 			}
+			if c.Detail != "" {
+				line += ": " + c.Detail
+			}
+			fmt.Fprintln(w, line)
+		}
+	}
+	if len(s.Objects) > 0 {
+		fmt.Fprintln(w, "objects:")
+		for _, c := range s.Objects {
+			line := fmt.Sprintf("  %s %s %s", sym[c.Change], c.Kind, c.Name)
 			if c.Detail != "" {
 				line += ": " + c.Detail
 			}
@@ -662,11 +780,28 @@ func writeDiffReport(w io.Writer, rep *diffReport, asJSON bool) error {
 		}
 		fmt.Fprintf(w, "rows in tables compared by key: %d new, %d deleted, %d changed\n", nNew, nDel, nChg)
 	}
+	for _, wn := range rep.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", wn)
+	}
 	if rep.Same {
 		fmt.Fprintln(w, "summary: identical")
 	} else {
-		fmt.Fprintf(w, "summary: %d table(s) added, %d dropped, %d changed in the schema\n",
-			len(s.TablesAdded), len(s.TablesRemoved), len(s.Tables))
+		fmt.Fprintf(w, "summary: %d table(s) added, %d dropped, %d changed in the schema; %d other object(s) changed\n",
+			len(s.TablesAdded), len(s.TablesRemoved), len(s.Tables), len(s.Objects))
+	}
+	return nil
+}
+
+// listFlag es un flag repetible que además admite valores separados por comas.
+type listFlag []string
+
+func (l *listFlag) String() string { return strings.Join(*l, ",") }
+
+func (l *listFlag) Set(v string) error {
+	for _, x := range strings.Split(v, ",") {
+		if x = strings.TrimSpace(x); x != "" {
+			*l = append(*l, x)
+		}
 	}
 	return nil
 }
