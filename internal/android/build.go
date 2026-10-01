@@ -3,7 +3,6 @@ package android
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,8 +13,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
-	"github.com/juan52878911/kindling/internal/verity"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -43,16 +42,7 @@ func (b *builder) logf(format string, a ...any) {
 	fmt.Fprintf(b.log, format+"\n", a...)
 }
 
-func (b *builder) uuid(kind string) [16]byte {
-	s := sha256.Sum256(append([]byte("kindling-android-uuid\x00"+kind+"\x00"), b.id[:]...))
-	var u [16]byte
-	copy(u[:], s[:16])
-	u[6] = u[6]&0x0f | 0x40
-	u[8] = u[8]&0x3f | 0x80
-	return u
-}
-
-func sha256Sum(b []byte) [32]byte { return sha256.Sum256(b) }
+func (b *builder) uuid(kind string) [16]byte { return imagen.UUID("kindling-android", kind, b.id) }
 
 func evalSymlinks(p string) (string, error) {
 	r, err := filepath.EvalSymlinks(p)
@@ -136,18 +126,14 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 		return err
 	}
 	baseImg := filepath.Join(images, b.baseName+".ext4")
-	if _, err := os.Stat(baseImg); err == nil {
-		var rec api.ImageRecipe
-		rb, _ := os.ReadFile(filepath.Join(images, b.baseName+".recipe.json"))
-		if json.Unmarshal(rb, &rec) != nil || rec.Builder != BaseBuilder {
-			return fmt.Errorf("base image %q already exists and was not written by the android builder; choose another base_name", b.baseName)
-		}
+	if err := imagen.CheckBaseOwner(images, b.baseName, BaseBuilder, "android"); err != nil {
+		return err
 	}
 	files, err := b.prepareFiles()
 	if err != nil {
 		return err
 	}
-	agentSum, err := sha256Path(b.agent)
+	agentSum, err := imagen.SHA256File(b.agent)
 	if err != nil {
 		return fmt.Errorf("guest agent: %w (set KLING_GUEST_AGENT or install it with make deploy)", err)
 	}
@@ -156,7 +142,7 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 	// raíz de verity.
 	h := sha256.New()
 	fmt.Fprintf(h, "kindling-android-v1\x00%s\x00%s\x00%s\x00%s\x00%d\x00", b.name, b.baseName, rawSpec, agentSum, b.t.Unix())
-	fmt.Fprintf(h, "%+v\x00%+v\x00", b.redroid(), debianLock[b.spec.Arch])
+	fmt.Fprintf(h, "%+v\x00%+v\x00", b.redroid(), imagen.DebianLock[b.spec.Arch])
 	if tr := b.spec.translation(); tr != "" {
 		fmt.Fprintf(h, "arm_translation=%s\x00", tr)
 		if tr == TranslationLibndk {
@@ -182,27 +168,14 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 	table := ""
 	built := map[string]any{"arch": b.spec.Arch, "layer": info, "base": b.baseName}
 	if b.spec.verity() {
-		f, err := os.OpenFile(layerTmp, os.O_RDWR, 0)
+		res, err := imagen.Verity(layerTmp, uint64(info["layer_blocks"].(int64)), "kindling-android", b.id, b.spec.fecRoots())
 		if err != nil {
 			return err
-		}
-		salt := sha256.Sum256(append([]byte("kindling-android-salt\x00"), b.id[:]...))
-		res, err := verity.Append(f, uint64(info["layer_blocks"].(int64)), salt[:], b.spec.fecRoots())
-		if err == nil {
-			err = f.Sync()
-		}
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("dm-verity: %w", err)
 		}
 		table = res.Table("@DEV@")
 		b.logf("dm-verity: %d data blocks, %d hash blocks, %d FEC blocks (%d roots), root %x (%.1f s)",
 			res.DataBlocks, res.HashBlocks, res.FECBlocks, res.FECRoots, res.RootHash, time.Since(t1).Seconds())
-		built["verity_root_hash"] = hex.EncodeToString(res.RootHash)
-		built["verity_salt"] = hex.EncodeToString(res.Salt)
-		built["verity_fec_roots"] = res.FECRoots
-		built["verity_hash"] = "sha256"
-		built["verity_table"] = table
+		imagen.VerityInfo(built, res, table)
 	}
 	t2 := time.Now()
 	baseInfo, err := b.buildBase(ctx, baseTmp, table)

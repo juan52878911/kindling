@@ -26,7 +26,7 @@ digests de lo descargado y la raíz, la sal y la tabla de verity.
 | Redroid | `curl` + `python3` o Docker; sha256 de cada pieza | `oci`: manifiesto por digest, configuración y capas con sha256 y tamaño, token anónimo del registro, caché de blobs (manifiestos incluidos: reconstruir no necesita red) |
 | capa | `mkfs.ext4` + overlay sobre la base montada + `tar -x` + `cp -a` + `resize2fs -M` | `ext4`: el tar se lee dos veces (estructura, luego datos directos a sus bloques), sin extraer nada al disco del host |
 | dm-verity + FEC | `veritysetup format` + `veritysetup open` para sacar la tabla | `verity`: árbol sha256 y RS(255,253) bit a bit iguales a los de `veritysetup` (prueba con el resultado de cryptsetup 2.7) |
-| base | `debootstrap` trixie + `apt-get install` en chroot | `debian:trixie-slim` por digest (`oci`) + los `.deb` fijados en `debian_lock.go` (`deb`, `xz`) |
+| base | `debootstrap` trixie + `apt-get install` en chroot | `debian:trixie-slim` por digest (`oci`) + los `.deb` fijados en `internal/imagen/debian_lock.go` (`imagen`, `deb`, `xz`) |
 | init de la base | `python3` que parchea `/sbin/overlay-init` en la base montada | el mismo bloque sobre `scripts/minimal-init.sh` (embebido) |
 | receta | escrita a mano por el script | el daemon, con lo que el constructor deja en `recipe.json` (`api.BuildRecipeHints`) |
 
@@ -47,8 +47,10 @@ hcsshim) arrastra el módulo entero de hcsshim.
 `debian:trixie-slim` (la imagen oficial, que ya trae util-linux: `nsenter`,
 `unshare`, `mount`, `pivot_root`) y se le ponen encima 28 `.deb` fijados por
 sha256: `iptables procps iproute2 dmsetup ca-certificates` y sus dependencias
-(`go run ./internal/android/lockgen` las resuelve contra el `dpkg/status` de
-la imagen y reescribe `debian_lock.go`). Si `deb.debian.org` ya no tiene un
+(`go run ./internal/imagen/lockgen` las resuelve contra el `dpkg/status` de
+la imagen y reescribe `internal/imagen/debian_lock.go`). La base, el ext4, el
+agente, el init y verity están en `internal/imagen`, que comparte con el
+constructor `debian` ([`docs/imagenes.md`](../../../docs/imagenes.md)). Si `deb.debian.org` ya no tiene un
 paquete, se busca en `snapshot.debian.org` con la marca del día en que se
 fijó.
 

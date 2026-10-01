@@ -19,6 +19,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 )
 
 // LIBNDK_TRANSLATION DESDE LA IMAGEN DEL EMULADOR (arm_translation "libndk").
@@ -81,7 +82,7 @@ func (b *builder) libndkTar(ctx context.Context) (string, error) {
 	zipPath := filepath.Join(dir, path.Base(libndkPin.URL))
 	t0 := time.Now()
 	b.logf("arm translation: downloading %s (%d MiB, sha256 %s...)", libndkPin.URL, libndkPin.Size>>20, libndkPin.SHA256[:12])
-	if err := fetchVerified(ctx, libndkPin.URL, libndkPin.SHA256, libndkPin.Size, zipPath); err != nil {
+	if err := imagen.FetchVerified(ctx, libndkPin.URL, libndkPin.SHA256, libndkPin.Size, zipPath); err != nil {
 		return "", fmt.Errorf("libndk_translation: %w", err)
 	}
 	b.logf("arm translation: sha256 verified (%.1f s); extracting %s from partition %q", time.Since(t0).Seconds(), libndkPin.Entry, libndkPin.Partition)
