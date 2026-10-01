@@ -160,6 +160,31 @@ func TestStreams(t *testing.T) {
 	checkBack(t, img, want)
 }
 
+// TestStreamsWithoutData: flujos de los que ningún fichero del árbol saca
+// datos (una capa OCI de solo directorios y whiteouts, o tapada entera por
+// las de encima), en medio y al final. No se leen.
+func TestStreamsWithoutData(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	root := NewDir(0o755, 0, 0, now)
+	root.Put("/a", &Node{Mode: ModeReg | 0o644, Mtime: now, Size: 3, Data: StreamKey{0, 0}}, now)
+	root.Put("/c", &Node{Mode: ModeReg | 0o644, Mtime: now, Size: 3, Data: StreamKey{2, 0}}, now)
+	one := func(b string) Stream {
+		return func(emit func(int, io.Reader) error) error { return emit(0, strings.NewReader(b)) }
+	}
+	unread := func(emit func(int, io.Reader) error) error {
+		t.Error("a stream with no data in the tree was read")
+		return nil
+	}
+	img := filepath.Join(t.TempDir(), "s.ext4")
+	f, _ := os.Create(img)
+	if _, err := Write(f, root, []Stream{one("aaa"), unread, one("ccc"), unread}, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	fsck(t, img)
+	checkBack(t, img, map[string][]byte{"/a": []byte("aaa"), "/c": []byte("ccc")})
+}
+
 func TestEmptyBig(t *testing.T) {
 	// El data.ext4 de DATA_MODE=tmpfs: 2 GiB vacío y disperso.
 	root := NewDir(0o755, 0, 0, time.Now())
