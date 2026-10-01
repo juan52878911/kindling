@@ -1,7 +1,7 @@
 # Benchmarks
 
-Every performance number that appears in [`README.md`](../README.md) (and the equivalent
-ones in [`README.es.md`](../README.es.md)), with the hardware and rough date it was
+Every performance number that appears in the [full guide](guide.md) (formerly the README, and the equivalent
+ones in [`guia.md`](guia.md)), with the hardware and rough date it was
 measured on, and the script that reproduces it. Where no dedicated script exists, the
 table says so — those numbers come from a one-off run of `kling` itself, shown for
 context, not as a benchmark claim.

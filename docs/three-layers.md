@@ -1,5 +1,10 @@
 # Imágenes por capas (base compartida + capa de servicio + overlay)
 
+> Contexto: cada microVM de kindling arranca de una imagen ext4; con muchos servicios
+> (los MCP de `kling mcp`, sobre todo) casi todos sus bytes eran la misma base repetida.
+> Este documento es el diseño y la medición de las imágenes por capas (`-base node`,
+> `-base python`); el resumen de uso está en la [guía completa](guia.md#imágenes-por-capas-una-base-por-familia-de-runtime).
+
 Objetivo: dejar de duplicar la base (~110–130 MiB reales, ~810 MiB lógicos) en
 cada imagen de servicio. Hoy `scripts/80-mcp-image.sh` hace `cp base → $NAME.ext4`
 y el resultado es un ext4 monolítico donde casi todo son bytes idénticos entre

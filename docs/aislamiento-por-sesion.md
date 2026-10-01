@@ -28,7 +28,7 @@ como upperdir dentro del invitado. Una instancia de un snapshot dorado (`runFrom
 el `mem.file` en vez de copiarlo, y apunta el overlay a su copia con `PatchDrive` antes de
 reanudarla. Como el `mem.file` está mapeado y es el mismo para todas, el kernel comparte
 esas páginas: 10 instancias del mismo dorado suman +68 MiB de RAM, frente a +824 MiB
-arrancándolas en frío (README, "Density"). Cada una solo paga lo que escribe. `kling save`
+arrancándolas en frío ([guía](guia.md), "Densidad"). Cada una solo paga lo que escribe. `kling save`
 es ese mismo Commit con un "hijo caliente" dentro (`/reset?warm=1`), para que el primer
 `initialize` tras restaurar no pague el arranque de node.
 

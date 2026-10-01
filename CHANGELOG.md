@@ -43,6 +43,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   Debian, `.deb` como los deja dpkg, agente, init, verity) y Android lo usa sin cambiar lo que
   construye. En el laboratorio: python3 en 55 s en frío y 4,9 s con caché, arranca y `kling
   exec` responde; en el Mac, 75 s y reproducible. `docs/imagenes.md`.
+- **README corto.** `README.md` y `README.es.md` pasan de ~1.600 líneas a menos de 90:
+  qué es kindling, instalación en Linux con KVM y en Mac con Apple Silicon, un ejemplo
+  de cuatro órdenes, las extensiones en una línea y el enlace a
+  [kindling.asccilabs.com](https://kindling.asccilabs.com). El README largo no se pierde:
+  vive entero en [`docs/guide.md`](docs/guide.md) y [`docs/guia.md`](docs/guia.md), con
+  los enlaces reescritos, y los que apuntaban a sus secciones (`ext/mcp`, `benchmarks.md`,
+  `compartir.md`) apuntan ahora a la guía.
+
 - **64 `kling db up` a la vez ya no chocan con la admisión.** Un arranque que no cabe solo
   por las reservas de otros arranques en vuelo espera a que se liberen (hasta 60 s) en vez
   de rechazar: 64 de 64 en 4,6 s (antes 58 de 64). Y el agente de `golden build -step`
