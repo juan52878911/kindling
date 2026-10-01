@@ -67,7 +67,7 @@ resolver o dar el lock de esa resolución da la misma imagen, bit a bit, con
 
 | Dónde | Qué | Tiempo | Tamaño |
 |---|---|---|---|
-| lab (CT 105, amd64), daemon privado | `bash` (ya en slim: capa sin paquetes), en frío | 85 s | base 129 MiB, capa 26 MiB (el agente) |
+| lab (CT 105, amd64), daemon privado | `bash` (ya en slim: capa sin paquetes), en frío (base y sus 28 `.deb` incluidos) | 85–108 s | base 129 MiB, capa 26 MiB (el agente) |
 | lab | `bash python3-minimal` + verity, en frío | 55–60 s | capa 39 MiB, 4 paquetes, 331 ficheros; verity 81 bloques de hash + 82 de FEC (0,1 s) |
 | lab | lo mismo, caché caliente | 4,9 s | |
 | Mac M4 (`kling builder debian`, sin daemon ni root), arm64 | `python3-minimal` + verity, en frío | 75 s | base 157 MiB, capa 38 MiB; `e2fsck -fn` limpio |
