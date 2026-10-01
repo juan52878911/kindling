@@ -120,7 +120,7 @@ func (p *Privileges) OwnFile(f *os.File) error {
 //
 // Antes esto era `chmod -R a+rX`, que es una forma cómoda de decir "legible para
 // todo el mundo". Y aquí dentro puede haber secretos: `kling add -env` los hornea
-// como líneas `export CLAVE=valor` en el /entrypoint de la imagen, así que
+// como líneas `export CLAVE=valor` en la capa de la imagen (/etc/kling/env), así que
 // cualquier cuenta del anfitrión los sacaba con `strings *.layer.ext4 | grep
 // export`, sin root y sin montar nada. Después fue dueño = usuario del VMM, que
 // es lectura Y escritura para él: un Firecracker comprometido podía reescribir

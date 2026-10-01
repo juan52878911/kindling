@@ -2253,13 +2253,14 @@ func procRSSMiB(pid int) int {
 	return 0
 }
 
-// PutMMDS inyecta el store MMDS en una microVM VIVA: es la entrega del secreto de
-// sesión (un token, una credencial) a una instancia ya arrancada, sin haberlo
+// PutMMDS inyecta el store MMDS en una microVM VIVA: es la entrega de secretos
+// (un token, una credencial) a una instancia ya arrancada, sin haberlos
 // horneado en la imagen compartida ni en el snapshot dorado.
 //
 // Resuelve la máquina, coge su socket de Firecracker —igual que Squeeze— y hace
 // PUT /mmds con el documento JSON tal cual. El esquema del store lo entiende el
-// bridge de dentro (objeto con "env" comunes y "sessions" por Mcp-Session-Id).
+// bridge de dentro: un objeto con "env", comunes a TODAS las sesiones de la
+// máquina ("sessions" se retiró: ver pkg/guest/mmds.go).
 //
 // Al inyectar marca la máquina con HasSecrets: a partir de aquí Freeze se niega a
 // congelarla, para que el secreto no acabe en un mem.file compartido.

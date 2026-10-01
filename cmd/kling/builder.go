@@ -33,7 +33,8 @@ type BaseSpec struct {
 	// glibc).
 	Packages []string `json:"packages,omitempty"`
 	// Env son variables KEY=VALUE que el entrypoint exporta antes de arrancar el
-	// agente.
+	// agente. 81-base-image.sh las deja en /etc/kling/env (0600 de root), no en
+	// el /entrypoint (0755); siguen en la capa: no son sitio para secretos.
 	Env []string `json:"env,omitempty"`
 }
 

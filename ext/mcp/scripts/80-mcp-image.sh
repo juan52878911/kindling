@@ -261,15 +261,32 @@ cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; 
 trap cleanup EXIT
 ov_up
 
-# emit_env escribe los `export` de las variables de -e en el entrypoint. El
-# VALOR va con %q y no con un `echo "export $kv"`: llega tal cual del operador
+# write_env deja los `export` de las variables de -e en /etc/kling/env, 0600 de
+# root, y NO en el entrypoint: este es 0755 y cualquier proceso del invitado lo
+# leería (un -env con una clave quedaba a la vista de todos). El entrypoint (PID
+# 1, root) lo carga con `.` (emit_env). Sigue dentro de la capa, compartida por
+# todas las máquinas de la imagen: para secretos, MMDS o credenciales.
+# El VALOR va con %q y no con un `echo "export $kv"`: llega tal cual del operador
 # (o de `kling add -env`) y puede llevar espacios o caracteres que el shell
 # interpretaría — un valor "a b" exportaría a y ejecutaría b.
-emit_env() {
+write_env() {
+  [ ${#EXTRA_ENV[@]} -gt 0 ] || return 0
   local kv
-  for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
-    printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
-  done
+  mkdir -p "$mnt/etc/kling"
+  rm -f "$mnt/etc/kling/env"
+  (
+    umask 077
+    for kv in "${EXTRA_ENV[@]}"; do
+      printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
+    done > "$mnt/etc/kling/env"
+  )
+  chown 0:0 "$mnt/etc/kling/env"
+  chmod 600 "$mnt/etc/kling/env"
+}
+
+# emit_env escribe en el entrypoint la línea que carga /etc/kling/env.
+emit_env() {
+  [ ${#EXTRA_ENV[@]} -eq 0 ] || echo '. /etc/kling/env'
 }
 
 # install_bridge deja el puente donde el entrypoint lo invoca, pero SIN escribirlo
@@ -762,6 +779,7 @@ fi
 
 if [ "$MODE" = "stdio" ]; then
   install_bridge
+  write_env
   # El entrypoint es PID 1 de la microVM: si muere, el kernel entra en pánico.
   # `exec` evita dejar un shell intermedio que no aporta nada.
   {
@@ -792,6 +810,7 @@ elif [ "$HTTP_PROXY" = 1 ]; then
   # stdio. Si el servidor mezclara estado entre sesiones, el puente ya no lo
   # impediría. Es el precio de correr un servidor HTTP multi-sesión tal cual.
   install_bridge
+  write_env
   # Marcador que lee el puente al arrancar para entrar en modo proxy.
   mkdir -p "$mnt/etc/kling"
   cat > "$mnt/etc/kling/service.json" <<SJSON

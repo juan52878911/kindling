@@ -619,12 +619,11 @@ func (b *bridge) oldestReclaimableLocked() *session {
 func (b *bridge) spawn() (*session, error) {
 	// argv del servidor + los sessionArgs del modo navegador (vacío en el resto
 	// de servicios): apuntan esta sesión al Chromium compartido por CDP.
-	// El id se genera ANTES del comando: sessionEnv lo necesita para buscar los
-	// secretos de MMDS de ESTA sesión (sessions[<id>]) y añadirlos a su entorno.
+	// El id se genera ANTES del comando: sessionEnv lo usa en sus logs.
 	id := newID()
 
-	// Entorno base del puente MÁS los secretos de sesión que MMDS traiga (comunes
-	// + los de esta sesión). Sin MMDS, es exactamente b.env.
+	// Entorno base del puente MÁS los secretos comunes que MMDS traiga (los
+	// mismos para todas las sesiones). Sin MMDS, es exactamente b.env.
 	env, secrets := b.sessionEnv(id)
 
 	// Si /reset dejó un hijo caliente y esta sesión puede adoptarlo —vivo y sin
