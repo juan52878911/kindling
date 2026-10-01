@@ -798,3 +798,30 @@ No es promesa, es palanca a medir: la descompresión mete latencia en el p99 del
 compresor gasta CPU. La entrega (`packaging/zram-kindling.{conf,sh,service}`) va con un plan
 de medición antes/después con `kling top` (PSS) y `free -m`. Recomendación zram sobre zswap y
 el detalle completo en [densidad-zram.md](densidad-zram.md).
+
+## El contrato de runtime que Docker da por hecho
+
+Una imagen de Docker supone cosas que no están en su capa: `/dev/fd` y `/dev/std*`, un
+`/dev/shm` de tmpfs, un nombre de máquina y un `/etc/hosts` que resuelva `localhost` y ese
+nombre. Las pone el runtime (Docker, o systemd en una base con systemd), y `devtmpfs` no
+crea ninguna. Al probar `timescale/timescaledb` en una microVM, su `docker-entrypoint.sh`
+moría en initdb con `could not open file "/dev/fd/63"` (la sustitución de procesos de bash)
+hasta crear los enlaces a mano.
+
+`minimal-init.sh` —el `/sbin/overlay-init` de `min`, de la glibc y de la base Android— los
+crea tras `pivot_root` y antes de `/entrypoint`, sin pisar lo que la imagen ya traiga:
+
+- `/dev/fd -> /proc/self/fd` y `/dev/stdin|stdout|stderr -> /proc/self/fd/0|1|2`.
+- `/dev/shm` como tmpfs `1777,nosuid,nodev` (lo usan Postgres, Chromium y el
+  `multiprocessing.shared_memory` de Python, que fallaba con `FileNotFoundError`).
+- El nombre: sin `ip=...:<nombre>:...` el kernel deja la IP del invitado (`172.16.0.2`) como
+  nombre; el init pone `kindling`. Va a `127.0.1.1` en `/etc/hosts`, como en Debian, y si
+  no hay una línea `127.0.0.1 localhost` se añade. Sin `::1`: el invitado arranca con IPv6
+  apagado y esa dirección no existe.
+
+Medido en el lab con `toolchain` (base `min`): mismo arranque en frío (mediana 29,5 ms
+frente a 31 ms con el init anterior, 8 arranques cada uno) y el agente listo a los mismos
+~216 ms. Las bases ya construidas llevan el init viejo dentro: el cambio llega al
+reconstruirlas (`70-build-minimal-image.sh`, `71-build-glibc-base.sh`, el constructor
+Android). La base con systemd (`overlay-init.sh`) no lo necesita: cede a systemd, que ya
+monta todo esto.

@@ -332,7 +332,8 @@ unix_socket_directories = '/run/postgresql'
 password_encryption = 'scram-sha-256'
 max_connections = 50
 shared_buffers = 128MB
-# Sin /dev/shm en el invitado: la memoria dinámica compartida va a ficheros.
+# Las bases anteriores al contrato de runtime de minimal-init no tienen
+# /dev/shm: la memoria dinámica compartida va a ficheros, que vale en todas.
 dynamic_shared_memory_type = mmap
 huge_pages = off
 # Sin réplicas ni archivado: menos WAL en un overlay de 512 MiB.
