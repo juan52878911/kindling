@@ -71,3 +71,9 @@ CONFIG_PCI_MSI=y
 
 # CONFIG_KEYBOARD_ATKBD is not set
 # CONFIG_MOUSE_PS2 is not set
+
+# SHA-256 de dm-verity con las instrucciones criptográficas de ARMv8 (M4,
+# Graviton).
+CONFIG_KERNEL_MODE_NEON=y
+CONFIG_CRYPTO_SHA256_ARM64=y
+CONFIG_CRYPTO_SHA2_ARM64_CE=y
