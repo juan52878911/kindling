@@ -11,7 +11,7 @@ loop o en un contenedor, y salen iguales bit a bit con las mismas entradas.
 
 | Pieza | Qué hace |
 |---|---|
-| `DebianLock` (`debian_lock.go`, de `go run ./internal/imagen/lockgen`) | la base Debian fijada: `debian:trixie-slim` por digest y 28 `.deb` (`iptables procps iproute2 dmsetup ca-certificates` y dependencias) con su sha256 y la marca de `snapshot.debian.org` del día |
+| `DebianLock` (`debian_lock.go`, de `go run ./internal/imagen/lockgen`) | la base Debian fijada: `debian:trixie-slim` por digest y 31 `.deb` (`iptables procps iproute2 dmsetup ca-certificates` y dependencias, más las actualizaciones de seguridad o del punto de Debian de lo que ya trae la imagen, como `apt-get upgrade`) con su sha256 y la marca de `snapshot.debian.org` del día |
 | `PrepareBase` / `Base.Write` | la base: capas OCI + `.deb` encima, como lo dejaría dpkg (`status`, `.list`, md5sums, conffiles), `iptables` → legacy, `ca-certificates.crt`, adelgazada; luego el init (`minimal-init.sh`), con o sin verity, y el ext4 con 32 MiB de holgura |
 | `Debs.Install` / `Debs.Ajustar` | lo mismo sobre cualquier árbol: la base o el `/upper` de una capa (partiendo del `status` de la base) |
 | `Debs.Resolve` | resuelve paquetes nuevos (Depends y Pre-Depends, sin Recommends) contra los índices de `snapshot.debian.org` del MISMO instante que la base; da un lockfile |

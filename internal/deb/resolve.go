@@ -162,3 +162,26 @@ func (ix *Index) Resolve(want []string, installed map[string]string) ([]*Package
 	sort.SliceStable(order, func(i, j int) bool { return order[i].Name < order[j].Name })
 	return order, nil
 }
+
+// Upgrades son los paquetes de status (un /var/lib/dpkg/status) de los que el
+// índice tiene una versión más alta: lo que haría apt-get upgrade con los
+// índices de trixie, trixie-updates y trixie-security, o sea las
+// actualizaciones de seguridad y del punto de Debian de la imagen base.
+// Ordenados por nombre.
+func (ix *Index) Upgrades(status io.Reader) ([]string, error) {
+	ps, err := ParseParagraphs(status)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range ps {
+		if !strings.Contains(p.Get("Status"), "installed") || strings.Contains(p.Get("Status"), "not-installed") {
+			continue
+		}
+		if a := ix.avail[p.Get("Package")]; a != nil && CompareVersions(a.Version, p.Get("Version")) > 0 {
+			out = append(out, a.Name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
