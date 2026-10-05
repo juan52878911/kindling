@@ -1854,6 +1854,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if sock == "" {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
+	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
+	// sigue corriendo como si nada (ver checkDiskParaVolcado).
+	if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB), "freeze"); err != nil {
+		return nil, err
+	}
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
@@ -1908,6 +1913,10 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
 	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
 	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).Snapshot(ctx, snapPath, memPath); err != nil {
+		// Lo que Firecracker llegó a escribir no vale: un mem.file a medias
+		// (típico: se acabó el disco) del tamaño de la RAM que nadie borraría,
+		// porque la máquina sigue running y reconcile solo mira las warm.
+		m.borrarVolcadoParcial(mc.ID, jailed, dir)
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y

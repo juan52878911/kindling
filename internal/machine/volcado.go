@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -77,6 +78,27 @@ func sellarVolcado(dir, kernelSHA, vmm string) error {
 		return err
 	}
 	return os.Remove(filepath.Join(dir, marcaEnCurso))
+}
+
+// borrarVolcadoParcial retira lo que dejó un volcado que falló a medias: el
+// snap.file y el mem.file que Firecracker llegó a escribir (en la raíz de su
+// chroot si está enjaulada, en dir si no) y la marca de volcado en curso. La
+// máquina sigue running, así que nada de esto vale ni lo recogería nadie:
+// reconcile y el GC solo miran las warm, y un mem.file del tamaño de la RAM se
+// quedaba ahí hasta el rm. Lo que no se pueda borrar se avisa y no bloquea.
+func (m *Manager) borrarVolcadoParcial(id string, jailed bool, dir string) {
+	for _, f := range []string{"snap.file", "mem.file"} {
+		var err error
+		if jailed {
+			err = borrarEnJail(m.jailRoot(id), "/"+f)
+		} else if err = os.Remove(filepath.Join(dir, f)); errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		if err != nil {
+			log.Printf("warning: %s: could not remove the partial %s of a failed freeze: %v", id[:12], f, err)
+		}
+	}
+	_ = os.Remove(filepath.Join(dir, marcaEnCurso))
 }
 
 // errVolcadoIncompleto es que el volcado no se puede usar.

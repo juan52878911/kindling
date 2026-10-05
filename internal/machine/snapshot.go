@@ -125,6 +125,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, err
 		}
 	}
+	// El dorado es un volcado de la RAM entera más una copia del overlay: si
+	// no cabe, mejor saberlo antes de soltar volúmenes y pausar (ver
+	// checkDiskParaVolcado).
+	if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB)+int(allocatedBytes(filepath.Join(m.dir(mc.ID), "overlay.ext4"))>>20), "save"); err != nil {
+		return nil, err
+	}
 	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
 	// o un disco que no viaja con el snapshot (las copias): cada instancia
 	// restaurada despertaría con un montaje que no le corresponde.

@@ -161,6 +161,30 @@ func (m *Manager) checkDisk() error {
 			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, tope)}
 }
 
+// checkDiskParaVolcado rechaza un volcado (freeze, save) que no cabe: Firecracker
+// escribe un mem.file del tamaño de la RAM de la máquina ANTES de que
+// perforarHuecos lo adelgace, y si el disco se acaba a medias deja el fichero
+// parcial, la máquina pausada y el resto del host sin disco. Medido en el
+// laboratorio con una microVM de 2 GiB y 1,9 GiB libres: el disco llegó al 100 %
+// y el daemon de al lado dejó de admitir máquinas. Hace falta la RAM entera más
+// el mínimo de siempre, para que el host siga admitiendo máquinas después.
+func (m *Manager) checkDiskParaVolcado(memMiB int, que string) error {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(m.root, &st); err != nil {
+		return nil // sin poder medirlo no se bloquea nada
+	}
+	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
+	necesario := int64(memMiB) + minFreeDiskMiB()
+	if libre >= necesario {
+		return nil
+	}
+	return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
+		"only %d MiB of disk left under %s: %s dumps the machine's %d MiB of RAM to disk first and "+
+			"needs %d MiB free (the RAM plus the %d MiB minimum).\n"+
+			"Remove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
+			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, que, memMiB, necesario, minFreeDiskMiB())}
+}
+
 // admitir es la admisión completa, antes de reservar memoria.
 func (m *Manager) admitir() error {
 	if err := m.checkDisk(); err != nil {

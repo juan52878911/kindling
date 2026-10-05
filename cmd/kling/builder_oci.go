@@ -352,7 +352,13 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		built["labels"] = cfg.Labels
 	}
 	bj, _ := json.Marshal(built)
-	hb, _ := json.MarshalIndent(api.BuildRecipeHints{Built: bj}, "", "  ")
+	// Un contenedor de Docker corre con los núcleos enteros salvo que se le
+	// ponga --cpus; el 50 % de un núcleo del daemon está pensado para un
+	// servidor MCP que atiende una llamada cada tanto. Con él, un servicio con
+	// modelos (Hindsight, medido en el laboratorio) tardaba 43 s en arrancar y
+	// 1,4 s por consulta; con un núcleo por vCPU, 19 s y 0,37 s, lo mismo que
+	// en Docker. -cpu-pct sigue mandando sobre la receta.
+	hb, _ := json.MarshalIndent(api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj}, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "recipe.json"), append(hb, '\n'), 0o644); err != nil {
 		return err
 	}
