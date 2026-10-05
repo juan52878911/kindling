@@ -161,12 +161,18 @@ func TestFreezeFallidaPeroReanudadaSigueRunning(t *testing.T) {
 	for _, l := range llamadas {
 		orden = append(orden, l.Metodo+" "+l.Ruta)
 	}
+	// La consulta al globo de antes del volcado (apreton_volcado.go) solo se
+	// hace donde el apretón está encendido; el falso contesta todo a cero y
+	// no se infla nada.
 	want := []string{"PATCH /vm", "PUT /snapshot/create", "PATCH /vm"}
+	if !globoSinEstadisticas {
+		want = append([]string{"GET /balloon/statistics"}, want...)
+	}
 	if strings.Join(orden, ",") != strings.Join(want, ",") {
 		t.Errorf("llamadas = %v, quería %v", orden, want)
 	}
-	if len(llamadas) == 3 && !strings.Contains(string(llamadas[2].Cuerpo), "Resumed") {
-		t.Errorf("la última llamada no reanuda: %s", llamadas[2].Cuerpo)
+	if n := len(llamadas); n == len(want) && !strings.Contains(string(llamadas[n-1].Cuerpo), "Resumed") {
+		t.Errorf("la última llamada no reanuda: %s", llamadas[n-1].Cuerpo)
 	}
 }
 
