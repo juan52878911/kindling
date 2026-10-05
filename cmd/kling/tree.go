@@ -62,7 +62,8 @@ var coreTree = []section{
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of
                                                    freezing
-      [-mem-max 2G]                                ceiling for machine resize
+      [-mem-max 2G] [-disk 4G]                     ceiling for machine resize; its
+                                                   writable disk (default 512M)
       [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only
                                                    copy (default), or live
       [-wait-ready] [-ready-timeout 2m]            return once ready by the image's

@@ -65,6 +65,14 @@ func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6
 // disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
 const defaultOverlayMiB = 512
 
+// minOverlayMiB y maxOverlayMiB acotan RunRequest.DiskMiB: por debajo del
+// mínimo ext4 no deja sitio ni para el agente; el máximo es solo cordura (el
+// fichero es disperso) frente a un cero de más.
+const (
+	minOverlayMiB = 64
+	maxOverlayMiB = 256 << 10
+)
+
 // Límites de seguridad. El código que corre dentro se considera hostil, así que
 // una sola microVM no debe poder degradar el host ni a las demás.
 const (
@@ -1115,6 +1123,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.VCPUs <= 0 {
 		req.VCPUs = 1
 	}
+	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
+	// hasta que se escribe, pero uno diminuto no monta ni el agente.
+	if req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > maxOverlayMiB {
+		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d)",
+			req.DiskMiB, minOverlayMiB, maxOverlayMiB, defaultOverlayMiB)
+	}
 	if req.MemMiB <= 0 {
 		req.MemMiB = 256
 	}
@@ -1250,7 +1264,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if err := m.newOverlay(ctx, overlay); err != nil {
+	if err := m.newOverlay(ctx, overlay, req.DiskMiB); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -1272,7 +1286,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
-		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, CreatedAt: creada,
+		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, DiskMiB: req.DiskMiB, CreatedAt: creada,
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
@@ -1462,13 +1476,20 @@ func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 	return nil
 }
 
-// newOverlay deja listo el disco escribible de una microVM.
+// newOverlay deja listo el disco escribible de una microVM, de sizeMiB (0: el
+// de siempre, defaultOverlayMiB).
 //
 // Copiar la plantilla ahorra el mkfs.ext4 por máquina, que son decenas de
 // milisegundos sobre un arranque que aspira a estar en el orden de los 30 ms.
 // Si la plantilla no se puede construir se formatea directamente: más lento,
-// pero nadie se queda sin arrancar por una optimización.
-func (m *Manager) newOverlay(ctx context.Context, dst string) error {
+// pero nadie se queda sin arrancar por una optimización. Un tamaño distinto
+// del de la plantilla se formatea directamente también: es la excepción (una
+// imagen de Docker que escribe GiB en su propio disco) y esos milisegundos
+// no cuentan frente a lo que esa máquina va a hacer.
+func (m *Manager) newOverlay(ctx context.Context, dst string, sizeMiB int) error {
+	if sizeMiB > 0 && sizeMiB != defaultOverlayMiB {
+		return createOverlay(ctx, dst, sizeMiB)
+	}
 	if err := m.ensureOverlayTemplate(ctx); err != nil {
 		log.Printf("overlay template not available (%v): formatting directly", err)
 		return createOverlay(ctx, dst, defaultOverlayMiB)

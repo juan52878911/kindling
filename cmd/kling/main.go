@@ -436,6 +436,7 @@ func cmdRun(args []string) error {
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
+	disk := units.MiBVar(fs, "disk", 0, "writable disk of the machine: 2G, 8G (bare number = MiB; default: 512; ignored with -from)")
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	var allow domainsFlag
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
@@ -485,6 +486,7 @@ func cmdRun(args []string) error {
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		MemMaxMiB:    *memMax,
+		DiskMiB:      *disk,
 		Egress:       egressReq,
 		AllowDomains: allowReq,
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),

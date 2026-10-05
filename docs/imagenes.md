@@ -175,7 +175,8 @@ falta en la evaluación del 2026-09-30) ni `chroot`.
   `/entrypoint`.
 - **Sin dm-verity**: la imagen es la raíz, no una capa.
 - **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
-  máquina (512 MiB). La ruta va en la receta (`built.volumes`). Un volumen de
+  máquina (512 MiB; `kling run -disk 4G` lo agranda, y es disperso: solo cuesta
+  lo que se escribe). La ruta va en la receta (`built.volumes`). Un volumen de
   kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
