@@ -349,6 +349,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 		}
 
+		// Con la plantilla aún en marcha: que suelte lo que no usa, y el
+		// dorado lleve solo lo que está en uso (apreton_volcado.go). Es el
+		// mem.file que mapearán todas las copias.
+		if n := apretarAntesDeVolcar(ctx, c, mc); n > 0 {
+			log.Printf("commit %s: the guest handed back ~%d MiB before the dump", mc.Name, n)
+		}
+
 		pausaPedida = true
 		if err := c.Pause(ctx); err != nil {
 			return nil, err

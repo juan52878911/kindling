@@ -1900,6 +1900,10 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// el puerto puede tardar segundos en contestar (ver resyncSinAgenteTTL).
 	sinAgente := !m.agenteEscucha(ctx, mc.ID)
 
+	// Con el invitado aún en marcha: que suelte lo que no usa, y el volcado
+	// lleve solo lo que está en uso (apreton_volcado.go).
+	apretado := apretarAntesDeVolcar(ctx, c, mc)
+
 	// Desde aquí, lo que haya en disco deja de valer hasta el sello final: si el
 	// daemon muere a mitad del volcado, reconcile y Thaw lo sabrán (volcado.go).
 	if err := volcadoEnCurso(dir); err != nil {
@@ -2051,8 +2055,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		m.resyncSinAgente.Delete(claveThaw(mc.ID))
 	}
 
-	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)})
+	msg := fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)
+	if apretado > 0 {
+		msg = fmt.Sprintf("frozen in %d ms (%d MiB on disk; the guest handed back ~%d MiB before the dump)", elapsed, size>>20, apretado)
+	}
+	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name, Message: msg})
 	return &out, nil
 }
 
