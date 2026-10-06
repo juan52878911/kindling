@@ -16,6 +16,7 @@ package machine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -77,8 +78,19 @@ func borrarEntornoMMDS(ctx context.Context, c *fc.Client) error {
 // que se lance después dentro (un exec como otro usuario) ya no lo encuentra
 // allí. Si el agente no anuncia que sabe leerlo (una imagen de antes), lo
 // dice: su servicio arrancó sin ese entorno.
-func (m *Manager) retirarEntornoMMDS(id, nombre string) {
+func (m *Manager) retirarEntornoMMDS(id, nombre string, env map[string]string) {
+	m.mu.Lock()
+	if m.entornoPendiente == nil {
+		m.entornoPendiente = map[string]map[string]string{}
+	}
+	m.entornoPendiente[id] = env
+	m.mu.Unlock()
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.entornoPendiente, id)
+			m.mu.Unlock()
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), plazoEntornoMMDS)
 		defer cancel()
 		go func() {
@@ -140,4 +152,36 @@ func (m *Manager) esperarAgente(ctx context.Context, id string) *api.GuestAgent 
 		}
 	}
 	return nil
+}
+
+// conEntornoPendiente añade a doc, el almacén MMDS que va a sustituir al
+// actual (PutMMDS), el entorno de la máquina si su agente aún no lo ha leído:
+// un `kling machine secret` en los primeros segundos se lo llevaba por delante
+// y el servicio no arrancaba. Si doc no es un objeto no hay dónde ponerlo, y
+// se pide repetir en unos segundos.
+func (m *Manager) conEntornoPendiente(id string, doc any) (any, error) {
+	m.mu.RLock()
+	env, pendiente := m.entornoPendiente[id]
+	m.mu.RUnlock()
+	if !pendiente {
+		return doc, nil
+	}
+	// Llega como JSON sin decodificar (el daemon no lo interpreta) o ya como
+	// objeto (conMarcadores): se normaliza a objeto.
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		b, err := json.Marshal(doc)
+		if err == nil && string(b) != "null" {
+			err = json.Unmarshal(b, &obj)
+		}
+		if err != nil {
+			return nil, errors.New("the machine is still reading its environment from MMDS; try again in a few seconds")
+		}
+	}
+	out := make(map[string]any, len(obj)+1)
+	for k, v := range obj {
+		out[k] = v
+	}
+	out[api.MachineEnvMMDSKey] = env
+	return out, nil
 }

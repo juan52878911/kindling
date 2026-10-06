@@ -148,6 +148,9 @@ type Manager struct {
 	// pisaran y una se perdiera sin error.
 	metaMu sync.Mutex
 	socket map[string]string // id -> ruta del socket de firecracker
+	// entornoPendiente es el entorno de las máquinas cuyo agente aún no lo
+	// ha leído de MMDS (entorno.go): un PutMMDS en ese rato lo conserva.
+	entornoPendiente map[string]map[string]string
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
 	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
@@ -1477,7 +1480,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.olvidarAgente(id)
 	m.conocerAgente(id)
 	if len(env) > 0 {
-		m.retirarEntornoMMDS(id, mc.Name)
+		m.retirarEntornoMMDS(id, mc.Name, env)
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
@@ -2525,6 +2528,9 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	vacio := almacenVacio(data)
 	doc, err := m.conMarcadores(mc.ID, data)
 	if err != nil {
+		return nil, err
+	}
+	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
 		return nil, err
 	}
 	c := fc.New(sock)

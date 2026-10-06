@@ -108,7 +108,7 @@ func TestRetirarEntornoTrasContestarElAgente(t *testing.T) {
 	m.socket["abc"] = f.Sock
 	m.mu.Unlock()
 
-	m.retirarEntornoMMDS("abc", "abc")
+	m.retirarEntornoMMDS("abc", "abc", map[string]string{"PW": "x"})
 	time.Sleep(3 * pasoListo)
 	if n := len(f.llamadasA(http.MethodPatch, "/mmds")); n != 0 {
 		t.Fatalf("borró el entorno (%d PATCH) antes de que contestara el agente", n)
@@ -164,7 +164,7 @@ func TestEntornoConAgenteViejoFalla(t *testing.T) {
 	m.socket["abc"] = f.Sock
 	m.mu.Unlock()
 
-	m.retirarEntornoMMDS("abc", "abc")
+	m.retirarEntornoMMDS("abc", "abc", map[string]string{"PW": "x"})
 	plazo := time.Now().Add(5 * time.Second)
 	for {
 		m.mu.RLock()
@@ -180,5 +180,30 @@ func TestEntornoConAgenteViejoFalla(t *testing.T) {
 			t.Fatalf("la máquina sigue %s con un agente que no leyó su entorno", st)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Un PutMMDS mientras el agente aún no ha leído su entorno lo conserva.
+func TestConEntornoPendiente(t *testing.T) {
+	m := newTestManager(t)
+	doc, err := m.conEntornoPendiente("abc", map[string]any{"token": "t"})
+	if err != nil || len(doc.(map[string]any)) != 1 {
+		t.Fatalf("sin entorno pendiente no se toca: %v %v", doc, err)
+	}
+	m.entornoPendiente = map[string]map[string]string{"abc": {"PW": "x"}}
+	doc, err = m.conEntornoPendiente("abc", map[string]any{"token": "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj := doc.(map[string]any)
+	if obj["token"] != "t" || obj[api.MachineEnvMMDSKey].(map[string]string)["PW"] != "x" {
+		t.Fatalf("no conservó el entorno: %v", obj)
+	}
+	doc, err = m.conEntornoPendiente("abc", json.RawMessage(`{"token":"r"}`))
+	if err != nil || doc.(map[string]any)["token"] != "r" || doc.(map[string]any)[api.MachineEnvMMDSKey] == nil {
+		t.Fatalf("el JSON tal cual del daemon: %v %v", doc, err)
+	}
+	if _, err := m.conEntornoPendiente("abc", "texto"); err == nil {
+		t.Fatal("un almacén que no es un objeto pisaría el entorno")
 	}
 }
