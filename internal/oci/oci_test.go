@@ -1,9 +1,9 @@
 package oci_test
 
 import (
-	"encoding/json"
 	"archive/tar"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
