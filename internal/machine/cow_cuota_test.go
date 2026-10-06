@@ -177,7 +177,7 @@ func probarCuotaReal(t *testing.T, fs, cuota string) {
 	if _, err := os.Lstat(a.dirInstancia("id1")); !os.IsNotExist(err) {
 		t.Errorf("borrarInstancia: %v", err)
 	}
-	a.barrer(func(string) bool { return false }, func(string) string { return src })
+	a.barrer(func(string) bool { return false }, func(string) string { return src }, func(string) string { return "" })
 	if _, err := os.Lstat(a.dirInstancia("id2")); !os.IsNotExist(err) {
 		t.Errorf("barrer: %v", err)
 	}

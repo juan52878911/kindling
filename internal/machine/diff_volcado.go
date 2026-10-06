@@ -170,6 +170,12 @@ func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine,
 	}
 	full := filepath.Join(dir, memFull)
 	_ = os.Remove(full)
+	m.borrarMemoriaAlmacen(mc.ID)
+	// Primero el almacén (cow_memoria.go): un clon del espejo del dorado, que
+	// no cuesta ni tiempo ni más disco que el diff.
+	if enlace := m.memoriaEnAlmacen(ctx, mc.ID, dir, base); enlace != "" {
+		return enlace, nil
+	}
 	if err := clonarFichero(base, full); err != nil {
 		if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB), "thaw"); err != nil {
 			return "", err

@@ -2038,6 +2038,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// fundir; uno completo (tras un commit, con el diff apagado o sin base) lo
 	// dejaría ahí, y son GiB por copia dormida en ext4.
 	_ = os.Remove(filepath.Join(dir, memFull))
+	m.borrarMemoriaAlmacen(mc.ID)
 	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
 	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
 	if jailed {
