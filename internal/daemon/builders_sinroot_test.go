@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -263,6 +264,68 @@ func TestResolverUsuarioConstructor(t *testing.T) {
 	}
 	if u, aviso := resolverUsuarioConstructor("kindling", 990, true); u != nil || !strings.Contains(aviso, "Firecracker") {
 		t.Fatalf("el mismo usuario que el VMM: %+v %s", u, aviso)
+	}
+	// Un usuario de persona (o nobody): cada construcción mataría sus procesos.
+	for _, uid := range []string{"1000", "65534"} {
+		lookupUser = func(string) (*user.User, error) { return &user.User{Uid: uid, Gid: "1000"}, nil }
+		if u, aviso := resolverUsuarioConstructor("juan", 991, true); u != nil || !strings.Contains(aviso, "system user") {
+			t.Fatalf("uid %s aceptado: %+v %s", uid, u, aviso)
+		}
+	}
+}
+
+// El constructor tiene que poder llegar a la raíz de datos.
+func TestAtravesable(t *testing.T) {
+	base := t.TempDir()
+	abierto := filepath.Join(base, "srv", "kt")
+	cerrado := filepath.Join(base, "root", "kt")
+	for _, d := range []string{abierto, cerrado} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(base, "root"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(base, "root"), 0o755) })
+	_ = os.Chmod(base, 0o755)
+	otro := &usuarioConstructor{Nombre: "kb", UID: 4242, GID: 4242}
+	if !atravesable(abierto, otro) {
+		t.Skip("algún directorio por encima del temporal no deja pasar a otros")
+	}
+	if atravesable(cerrado, otro) {
+		t.Fatal("un directorio 0700 de otro dueño se dio por atravesable")
+	}
+}
+
+// El cerrojo de host pone en fila las construcciones de dos daemons.
+func TestBloquearConstructorHost(t *testing.T) {
+	viejo := dirCerrojoConstructor
+	dirCerrojoConstructor = t.TempDir()
+	t.Cleanup(func() { dirCerrojoConstructor = viejo })
+	uid := uint32(4242)
+	soltar, err := bloquearConstructorHost(uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tomado := make(chan struct{})
+	go func() {
+		s2, err := bloquearConstructorHost(uid)
+		if err == nil {
+			s2()
+		}
+		close(tomado)
+	}()
+	select {
+	case <-tomado:
+		t.Fatal("dos construcciones a la vez con el mismo usuario")
+	case <-time.After(200 * time.Millisecond):
+	}
+	soltar()
+	select {
+	case <-tomado:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el cerrojo no se soltó")
 	}
 }
 

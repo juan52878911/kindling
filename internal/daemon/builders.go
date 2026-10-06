@@ -140,8 +140,16 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		dueño = u.UID
 		s.muConstructor.Lock()
 		defer s.muConstructor.Unlock()
+		// En fila también frente a otros daemons del host con el mismo
+		// usuario (uno privado de pruebas junto al de systemd): el barrido
+		// mataría el constructor en curso del otro.
+		soltar, err := bloquearConstructorHost(u.UID)
+		if err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("builder lock: %w", err))
+			return
+		}
+		defer soltar()
 		barrerProcesos(u.UID)
-		defer barrerProcesos(u.UID)
 	}
 	b, _ := json.MarshalIndent(req, "", "  ")
 	work, err := prepararTrabajo(s.root, req.Name, b, u)
@@ -149,7 +157,14 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer os.RemoveAll(work)
+	defer func() {
+		// Primero lo que el constructor dejara vivo, después su directorio:
+		// al revés, sus hijos seguirían escribiendo mientras se borra.
+		if u != nil {
+			barrerProcesos(u.UID)
+		}
+		os.RemoveAll(work)
+	}()
 
 	var cache string
 	if u != nil {

@@ -199,10 +199,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// de 8 veces MaxMB; cada tar se borra en cuanto el ext4 lo ha leído.
 	unpacked := filepath.Join(dir, "layers")
 	defer os.RemoveAll(unpacked)
-	// Sin privilegios (el daemon nos bajó de root), la caché es nuestra: lo
-	// que no sea de root se rehashea (oci.Client.SoloRootSinRehash).
+	// Sin privilegios (el daemon nos bajó de root), la caché es nuestra: todo lo
+	// cacheado se rehashea siempre (oci.Client.SiempreRehash).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
-		SoloRootSinRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0}
+		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {

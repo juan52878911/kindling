@@ -78,6 +78,15 @@ func resolverUsuarioConstructor(nombre string, uidVMM int, hayVMM bool) (*usuari
 	if err1 != nil || err2 != nil || uid == 0 || gid == 0 {
 		return nil, fmt.Sprintf("the builder user %q is root or has no numeric uid/gid: the oci builder runs as root", nombre)
 	}
+	if max := uidSistemaMax(); uid > max {
+		// Al acabar cada construcción se matan TODOS los procesos de este uid:
+		// con un usuario de persona (o nobody, que usan otros servicios) eso
+		// cerraría su sesión. Tiene que ser un usuario de sistema dedicado.
+		return nil, fmt.Sprintf("the builder user %q (uid %d) is not a system user (uid <= %d): every build kills "+
+			"all its processes, so it must be a dedicated one "+
+			"(sudo useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build); the oci builder runs as root",
+			nombre, uid, max)
+	}
 	if hayVMM && int(uid) == uidVMM {
 		return nil, fmt.Sprintf("the builder user %q is the Firecracker user: give the builders their own "+
 			"(sudo useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build); the oci builder runs as root", nombre)
@@ -85,11 +94,55 @@ func resolverUsuarioConstructor(nombre string, uidVMM int, hayVMM bool) (*usuari
 	return &usuarioConstructor{Nombre: nombre, UID: uint32(uid), GID: uint32(gid)}, ""
 }
 
+// uidSistemaMax es el mayor uid de sistema: SYS_UID_MAX de /etc/login.defs,
+// o 999.
+func uidSistemaMax() uint64 {
+	if f, err := os.Open("/etc/login.defs"); err == nil {
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			campos := strings.Fields(sc.Text())
+			if len(campos) == 2 && campos[0] == "SYS_UID_MAX" {
+				if n, err := strconv.ParseUint(campos[1], 10, 32); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 999
+}
+
+// atravesable dice si el usuario u puede llegar a dir: cada directorio desde
+// la raíz tiene que dejarle pasar (x para otros, o para su dueño o su grupo
+// si son los de u). Una raíz de datos bajo /root (0700) no lo deja, y el
+// constructor fallaría con un "permission denied" sin explicación.
+func atravesable(dir string, u *usuarioConstructor) bool {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		fi, err := os.Stat(d)
+		if err != nil {
+			return false
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		m := fi.Mode().Perm()
+		pasa := m&0o001 != 0 || (ok && st.Uid == u.UID && m&0o100 != 0) || (ok && st.Gid == u.GID && m&0o010 != 0)
+		if !pasa {
+			return false
+		}
+		if d == filepath.Dir(d) {
+			return true
+		}
+	}
+}
+
 // SetBuildUser fija el usuario de los constructores sin root. Se llama antes
 // de Listen.
 func (s *Server) SetBuildUser(nombre string) {
 	uidVMM, hay := s.mgr.UIDVMM()
 	u, aviso := resolverUsuarioConstructor(nombre, uidVMM, hay)
+	if u != nil && !atravesable(s.root, u) {
+		u, aviso = nil, fmt.Sprintf("the builder user %q can't reach the data root %s (a parent directory doesn't let "+
+			"it through, e.g. /root): the oci builder runs as root. Use a data root under /var/lib or /srv", nombre, s.root)
+	}
 	if aviso != "" {
 		log.Printf("SECURITY WARNING: %s", aviso)
 	}
@@ -361,4 +414,27 @@ func procesoDeUID(status string, uid uint32) bool {
 		}
 	}
 	return false
+}
+
+// dirCerrojoConstructor es dónde vive el cerrojo (variable para los tests).
+var dirCerrojoConstructor = "/run"
+
+// bloquearConstructorHost toma el cerrojo de todo el host de las
+// construcciones del uid: /run/kindling-build-<uid>.lock, de root. Devuelve
+// cómo soltarlo.
+func bloquearConstructorHost(uid uint32) (func(), error) {
+	dir := dirCerrojoConstructor
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		dir = os.TempDir()
+	}
+	ruta := filepath.Join(dir, fmt.Sprintf("kindling-build-%d.lock", uid))
+	fd, err := syscall.Open(ruta, syscall.O_RDWR|syscall.O_CREAT|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+	return func() { syscall.Close(fd) }, nil
 }

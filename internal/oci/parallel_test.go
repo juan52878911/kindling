@@ -184,12 +184,9 @@ func TestPullUnpackLimit(t *testing.T) {
 	}
 }
 
-// Con SoloRootSinRehash (el constructor sin privilegios), un blob de la caché
-// que no es de root se rehashea: uno cambiado se vuelve a bajar.
-func TestPullSoloRootSinRehash(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("los blobs de esta prueba serían de root")
-	}
+// Con SiempreRehash (el constructor sin privilegios), un blob de la caché se
+// rehashea: uno cambiado se vuelve a bajar.
+func TestPullSiempreRehash(t *testing.T) {
 	r := ocitest.New()
 	defer r.Close()
 	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: strings.Repeat("z", 4000)}})
@@ -208,11 +205,11 @@ func TestPullSoloRootSinRehash(t *testing.T) {
 		t.Fatal(err)
 	}
 	hits := r.Hits
-	if _, err := (&oci.Client{Cache: c.Cache, SoloRootSinRehash: true}).Pull(context.Background(), ref, man, "amd64"); err != nil {
+	if _, err := (&oci.Client{Cache: c.Cache, SiempreRehash: true}).Pull(context.Background(), ref, man, "amd64"); err != nil {
 		t.Fatal(err)
 	}
 	if r.Hits == hits {
-		t.Fatal("a blob not owned by root was trusted without rehashing")
+		t.Fatal("a cached blob was trusted without rehashing")
 	}
 	if b, _ := os.ReadFile(p); string(b) != string(orig) {
 		t.Fatal("the tampered blob stayed in the cache")

@@ -141,13 +141,14 @@ type Client struct {
 	// descomprimido no puede pasar de maxUnpackRatio veces el tope (una
 	// bomba gzip llenaría el disco).
 	Unpack string
-	// SoloRootSinRehash: los blobs de la caché solo se usan sin rehashear si
-	// son de root. Para el constructor que corre sin privilegios (ver
+	// SiempreRehash: los blobs de la caché se rehashean siempre antes de
+	// usarlos. Para el constructor que corre sin privilegios (ver
 	// internal/daemon/builders_sinroot.go): la caché es suya, y un constructor
-	// comprometido por una imagen podría cambiar un blob para envenenar los
-	// imports siguientes de otras imágenes. Los blobs heredados de la caché de
-	// root siguen sin rehashearse.
-	SoloRootSinRehash bool
+	// comprometido por una imagen podría cambiar un blob —o renombrar uno de
+	// root heredado al nombre de otro del mismo tamaño— para envenenar los
+	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
+	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
+	SiempreRehash bool
 
 	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
 	authMu sync.Mutex // un solo token pedido a la vez
@@ -499,7 +500,7 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 		return "", fmt.Errorf("invalid digest %q", d.Digest)
 	}
 	dst := c.BlobPath(d.Digest)
-	if cached(dst, d.Size, c.SoloRootSinRehash) {
+	if !c.SiempreRehash && cached(dst, d.Size) {
 		return dst, nil
 	}
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
@@ -540,17 +541,13 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 // se confía sin hashear en un fichero regular (no un enlace), sin escritura
 // para grupo ni otros (como los deja download) y con el tamaño que declara el
 // manifiesto (un fichero cortado no pasa); si no, se rehashea entero como
-// antes. Sin tamaño declarado, también. Con soloRoot, además tiene que ser
-// de root (ver Client.SoloRootSinRehash).
-func cached(p string, size int64, soloRoot bool) bool {
+// antes. Sin tamaño declarado, también. Con Client.SiempreRehash, nunca.
+func cached(p string, size int64) bool {
 	if size <= 0 {
 		return false
 	}
 	st, err := os.Lstat(p)
-	if err != nil || !st.Mode().IsRegular() || st.Size() != size || st.Mode().Perm()&0o022 != 0 {
-		return false
-	}
-	return !soloRoot || duenoRoot(st)
+	return err == nil && st.Mode().IsRegular() && st.Size() == size && st.Mode().Perm()&0o022 == 0
 }
 
 func fileHas(p, digest string, size int64) (bool, error) {
