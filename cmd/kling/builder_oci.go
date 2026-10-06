@@ -363,6 +363,14 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// modelos (Hindsight, medido en el laboratorio) tardaba 43 s en arrancar y
 	// 1,4 s por consulta; con un núcleo por vCPU, 19 s y 0,37 s, lo mismo que
 	// en Docker. -cpu-pct sigue mandando sobre la receta.
+	//
+	// El arranque ya lo cubre el impulso hasta la sonda de listo
+	// (internal/machine/arranque_cpu.go): con el 50 %, Hindsight está listo en
+	// 17,6 s igual que con 200 (44 s sin impulso). Pero la receta se queda por
+	// el reposo, que el impulso no toca: cada consulta gasta CPU, y con el 50 %
+	// tarda el doble (medido en el lab: recall de Hindsight 0,09 s frente a
+	// 0,05 s; una consulta de Postgres que suma 3 M filas, 0,93 s frente a
+	// 0,49 s).
 	hb, _ := json.MarshalIndent(api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj}, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "recipe.json"), append(hb, '\n'), 0o644); err != nil {
 		return err

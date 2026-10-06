@@ -212,7 +212,11 @@ Y lo que hubo que cambiar para llegar ahí:
   corre con los núcleos enteros salvo que se le ponga `--cpus`, y con medio
   núcleo Hindsight tardaba 43 s en arrancar y 1,4 s por consulta. El
   constructor `oci` deja en la receta `cpu_pct_per_vcpu: 100` (un núcleo por
-  vCPU); `-cpu-pct` sigue mandando.
+  vCPU); `-cpu-pct` sigue mandando. Hoy el arranque lo cubre también el
+  impulso hasta la sonda de listo (todas las vCPU enteras hasta que pasa, ver
+  `api.md`), pero la receta se queda por el reposo: con medio núcleo, una
+  consulta de Postgres que suma 3 M filas tarda 0,93 s en vez de 0,49 s, y un
+  recall de Hindsight 0,09 s en vez de 0,05 s.
 - **Disco de la máquina.** Era fijo, de 512 MiB: un modelo de 470 MB no cabía.
   `kling run -disk 4G` lo agranda (de 64 MiB a 256 GiB; disperso, así que solo
   cuesta lo que se escribe). Las copias de una plantilla heredan el del dorado.
