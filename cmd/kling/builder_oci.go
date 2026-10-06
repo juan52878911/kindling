@@ -186,6 +186,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 
 	c := &oci.Client{Cache: filepath.Join(root, "cache", "oci"), Log: log, MaxBytes: int64(maxMB) << 20}
+	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", ref, err)
@@ -195,6 +196,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		return err
 	}
 	cfg := img.Config.Config
+	dPull := time.Since(tPull)
 	var compressed int64
 	for _, l := range img.Layers {
 		compressed += l.Size
@@ -202,6 +204,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	logf("%s: %s, %d layer(s), %d MiB compressed", ref, img.ManifestDigest, len(img.Layers), compressed>>20)
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
+	tTree := time.Now()
 	tree := ext4.NewDir(0o755, 0, 0, t)
 	var streams []ext4.Stream
 	// Tope de entradas mientras se leen: las capas se pisan unas a otras, así
@@ -222,6 +225,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		l := l
 		streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) { return oci.OpenLayer(l) }))
 	}
+	dTree := time.Since(tTree)
 	var files, bytes int64
 	_ = tree.Walk(func(_ string, n *ext4.Node) error {
 		files++
@@ -331,6 +335,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 
 	tmp := filepath.Join(images, "."+req.Name+".ext4.tmp")
 	defer os.Remove(tmp)
+	tWrite := time.Now()
 	stats, err := writeExt4(tmp, tree, streams, ext4.Options{
 		Time: t, UUID: imagen.UUID("kindling-oci", "root", id), LostFound: true, ZeroHoles: true,
 		SlackBlocks: 32 << 20 / ext4.BlockSize, SlackInodes: 1024,
@@ -345,6 +350,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		return err
 	}
 	logf("image: %d MiB, %d files", stats.Bytes()>>20, stats.Files)
+	logf("times: pull %.1f s, layers %.1f s, ext4 %.1f s", dPull.Seconds(), dTree.Seconds(), time.Since(tWrite).Seconds())
 
 	var layers []map[string]any
 	for _, l := range img.Layers {
