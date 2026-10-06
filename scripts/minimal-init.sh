@@ -69,7 +69,11 @@ mount -t proc     proc     /proc     2>/dev/null || true
 mount -t sysfs    sysfs    /sys      2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev      2>/dev/null || true
 mount -t tmpfs    tmpfs    /tmp      2>/dev/null || true
-mount -t tmpfs    tmpfs    /run      2>/dev/null || true
+# /run: en una imagen de Docker (constructor oci, /etc/kindling/oci.json) se
+# deja el de la imagen, como hace Docker: hay imágenes que traen ahí
+# directorios con su dueño (mariadb, /run/mysqld del usuario mysql) y su
+# entrypoint falla si un tmpfs vacío los tapa. En las bases de kindling, tmpfs.
+[ -e /etc/kindling/oci.json ] || mount -t tmpfs tmpfs /run 2>/dev/null || true
 
 umount /rom/proc /rom/sys /rom/dev 2>/dev/null || true
 
