@@ -231,3 +231,12 @@ func cerrarVolcadosExistentes(root string) {
 		}
 	}
 }
+
+// UIDVMM es el usuario sin privilegios de Firecracker, si lo hay. El daemon
+// lo usa para no aceptar como usuario de los constructores el mismo del VMM.
+func (m *Manager) UIDVMM() (int, bool) {
+	if m.priv == nil || !m.priv.Enabled {
+		return 0, false
+	}
+	return m.priv.UID, true
+}

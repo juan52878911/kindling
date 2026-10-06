@@ -20,6 +20,9 @@ Type=simple
 # Para crear el usuario sin privilegios de KLING_RUN_AS (por defecto "kindling"):
 #   useradd --system --no-create-home --shell /usr/sbin/nologin kindling
 #   usermod -aG kvm kindling
+# Y el de los constructores sin root (KLING_BUILD_AS, por defecto
+# "kindling-build"; sin él, el constructor oci corre como root):
+#   useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
 EnvironmentFile=-/etc/default/kling
 ExecStart=/usr/local/bin/kling daemon
 Restart=on-failure

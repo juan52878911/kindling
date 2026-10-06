@@ -188,6 +188,26 @@ func TestBuildOCI(t *testing.T) {
 	if e.reg.Hits != hits {
 		t.Fatalf("a pinned re-import hit the registry %d times", e.reg.Hits-hits)
 	}
+
+	// Como lo corre el daemon sin root: la imagen en KLING_OUT_DIR y la caché
+	// en KLING_CACHE_DIR, nada en $KLING_ROOT.
+	out, cache := filepath.Join(e.work, "out"), t.TempDir()
+	t.Setenv("KLING_OUT_DIR", out)
+	t.Setenv("KLING_CACHE_DIR", cache)
+	pinned, _ := os.ReadFile(img)
+	os.Remove(img)
+	if _, log, err := e.build("pg", spec); err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	if sum3, _ := os.ReadFile(filepath.Join(out, "pg.ext4")); !bytes.Equal(pinned, sum3) {
+		t.Fatal("KLING_OUT_DIR: not the same image")
+	}
+	if _, err := os.Stat(img); err == nil {
+		t.Fatal("KLING_OUT_DIR: the image also landed in $KLING_ROOT/images")
+	}
+	if blobs, _ := os.ReadDir(filepath.Join(cache, "oci", "sha256")); len(blobs) == 0 {
+		t.Fatal("KLING_CACHE_DIR: no blobs in <cache>/oci")
+	}
 }
 
 func TestBuildOCIRejects(t *testing.T) {
