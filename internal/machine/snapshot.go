@@ -535,6 +535,10 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// pudo dejar cacheado con el mismo nombre (M-08, M-12).
 	m.invalidateSnapCache(name)
 	hecho = true
+	// Un volcado completo deja a cero el mapa de páginas sucias del VMM: si la
+	// plantilla era una copia con seguimiento, su siguiente freeze ya no puede
+	// ser "desde el dorado" (diff_volcado.go).
+	m.olvidarDiffBase(mc.ID)
 	// Los digests se acaban de calcular sobre estos mismos ficheros: la
 	// primera restauración no tiene que volver a leerlos (1,4 s medidos en la
 	// de un fork). Tras reiniciar el daemon se verifican otra vez, como
@@ -1552,9 +1556,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
 	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
 	// entera (F-01).
-	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshot(ctx,
+	// Con seguimiento de páginas sucias si la copia se va a congelar en
+	// diferencial (diff_volcado.go): solo lo que escriba desde el dorado.
+	enDiff := congelarEnDiff()
+	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
 		filepath.Join(snapDir, "snap.file"),
-		filepath.Join(snapDir, "mem.file"), false); err != nil {
+		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
 		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
 		// texto crudo de Firecracker no le dice a nadie qué hacer.
@@ -1661,6 +1668,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// En Firecracker la RAM de la copia es el mem.file del dorado, MAP_PRIVATE:
 	// compartida con las demás copias hasta que la escriben (ver Squeeze).
 	mc.MemShared = restaurarComparteMemoria
+	if enDiff {
+		mc.DiffBase = filepath.Join(snapDir, "mem.file")
+	}
 	m.socket[id] = sock
 	m.persist()
 	m.mu.Unlock()

@@ -70,11 +70,16 @@ type Machine struct {
 	LastErr string `json:"last_error,omitempty"`
 	// MemMaxMiB es el techo al que se puede subir MemMiB en caliente (resize).
 	// 0 = sin elasticidad: MemMiB es fija, como siempre.
-	MemMaxMiB int   `json:"mem_max_mib,omitempty"`
+	MemMaxMiB int `json:"mem_max_mib,omitempty"`
 	// DiskMiB es el tamaño lógico de su disco escribible, si no es el de
 	// siempre (ver RunRequest.DiskMiB).
 	DiskMiB int `json:"disk_mib,omitempty"`
-	SnapSize  int64 `json:"snapshot_bytes,omitempty"`
+	// DiffBase, en una copia de un dorado que corre con seguimiento de
+	// páginas sucias, es el mem.file del dorado respecto al que se congelará
+	// en diferencial (solo lo que cambió). Vacío: el siguiente freeze vuelca
+	// la RAM entera.
+	DiffBase string `json:"diff_base,omitempty"`
+	SnapSize int64  `json:"snapshot_bytes,omitempty"`
 
 	// DiskBytes es la ocupación REAL en disco de esta máquina: bloques asignados,
 	// no tamaño lógico. Con overlays dispersos la diferencia es de dos órdenes de

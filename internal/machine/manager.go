@@ -1877,13 +1877,28 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	}
 	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
 	// sigue corriendo como si nada (ver checkDiskParaVolcado).
-	if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB), "freeze"); err != nil {
+	// Diferencial (diff_volcado.go): una copia con seguimiento de páginas
+	// sucias vuelca solo lo escrito desde el dorado. Lo que ocupa no se sabe
+	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
+	// GiB) y mucho menos que exigir la RAM entera a cada copia dormida.
+	enDiff := mc.DiffBase != "" && congelarEnDiff() && existe(mc.DiffBase)
+	necesario := max(mc.MemMiB, mc.MemMaxMiB)
+	if enDiff {
+		necesario /= 4
+	}
+	if err := m.checkDiskParaVolcado(necesario, "freeze"); err != nil {
 		return nil, err
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
-	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+	// El diferencial se vuelca aparte (mem.diff) y se funde después sobre el
+	// mem.file que ya hubiera; el completo es el mem.file directamente.
+	memName := "mem.file"
+	if enDiff {
+		memName = memDiff
+	}
+	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
 
 	// Una instancia jailed corre chrooteada: no puede escribir en el dir del
 	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
@@ -1891,7 +1906,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// mem.file conserva su inodo —y su caché de páginas—.
 	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	if jailed {
-		snapPath, memPath = "/snap.file", "/mem.file"
+		snapPath, memPath = "/snap.file", "/"+memName
 	}
 
 	c := fc.New(sock)
@@ -1937,11 +1952,21 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	}
 	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
 	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).Snapshot(ctx, snapPath, memPath); err != nil {
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	var verr error
+	if enDiff {
+		verr = lento.SnapshotDiff(ctx, snapPath, memPath)
+	} else {
+		verr = lento.Snapshot(ctx, snapPath, memPath)
+	}
+	if err := verr; err != nil {
 		// Lo que Firecracker llegó a escribir no vale: un mem.file a medias
 		// (típico: se acabó el disco) del tamaño de la RAM que nadie borraría,
 		// porque la máquina sigue running y reconcile solo mira las warm.
 		m.borrarVolcadoParcial(mc.ID, jailed, dir)
+		// Y un diff a medias pudo dejar a cero el mapa de sucias: lo que se
+		// escriba desde aquí ya no se distinguiría. El siguiente vuelca entero.
+		m.olvidarDiffBase(mc.ID)
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
@@ -1967,11 +1992,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
 		// daemon a perforar, precargar y ceder un fichero del host (ver
 		// recuperarDelJail).
-		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", "mem.file"); err != nil {
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", memName); err != nil {
 			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
 			// figurando como running, sin contestar a nada, y sin que el
 			// vigilante la viera, porque el proceso existe. Mismo trato que
 			// un fallo del propio snapshot, más arriba.
+			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
@@ -1979,7 +2005,25 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
-		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
+	}
+	if enDiff {
+		// Todo lo escrito desde el dorado, en un solo mem.file
+		// (diff_volcado.go). Si no se puede, la máquina sigue como estaba —
+		// pausada, con su VMM— y se reanuda como tras un volcado fallido; su
+		// siguiente freeze vuelca entero, porque el mapa de sucias ya se
+		// reinició con este diff.
+		if err := fusionarDiff(ctx, dir); err != nil {
+			m.borrarVolcadoParcial(mc.ID, false, dir)
+			m.olvidarDiffBase(mc.ID)
+			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
+				return nil, err
+			}
+			_ = m.acquireVolumes(mc)
+			return nil, err
+		}
+		memPath = filepath.Join(dir, "mem.file")
 	}
 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
@@ -2004,8 +2048,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// la mayor parte son páginas a cero. Perforarlas deja el fichero disperso: el
 	// kernel devuelve ceros al leer un agujero, que es exactamente lo que había,
 	// así que la restauración no se entera. Mide ~3x menos en disco.
-	if out, err := perforarHuecos(ctx, memPath); err != nil {
-		log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
+	//
+	// Un diferencial NO se perfora: sus ceros son páginas que el invitado puso
+	// a cero, y un hueco diría "como en el dorado" (diff_volcado.go).
+	if !enDiff {
+		if out, err := perforarHuecos(ctx, memPath); err != nil {
+			log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
+		}
 	}
 
 	// El fichero de memoria queda entero en caché tras escribirlo y releerlo para
@@ -2037,7 +2086,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
 	}
 	cerrarVolcado(dir)
-	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm); err != nil {
+	base := ""
+	if enDiff {
+		base = mc.DiffBase
+	}
+	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -2635,6 +2688,16 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
+	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
+	// fichero, base + diff, que se construye aquí y vive mientras corra.
+	base := leerSello(dir).DiffBase
+	if base != "" {
+		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
+		if err != nil {
+			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+		}
+		memPath = full
+	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
 	// invitado no toca todo al despertar, y leerla entera competiría con el
@@ -2771,7 +2834,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	crono.marca(&crono.p.NetMS)
 	start := time.Now()
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
+	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
+	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
@@ -2846,6 +2911,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.CPUPct = mc.CPUPct
 	// Descongelada de SU mem.file: ya no comparte páginas con un dorado.
 	cur.MemShared = false
+	// Pero si venía en diferencial, sigue midiéndose contra él.
+	cur.DiffBase = base
 	// Lo que reentregarCredenciales anotó en la copia.
 	cur.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	m.socket[mc.ID] = sock

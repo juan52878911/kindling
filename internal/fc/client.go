@@ -198,8 +198,21 @@ func (c *Client) Resume(ctx context.Context) error {
 
 // Snapshot congela la máquina en disco. Requiere haberla pausado antes.
 func (c *Client) Snapshot(ctx context.Context, snapPath, memPath string) error {
+	return c.snapshot(ctx, "Full", snapPath, memPath)
+}
+
+// SnapshotDiff es Snapshot, pero el fichero de memoria lleva SOLO las páginas
+// escritas desde el último snapshot (o desde la carga, si se pidió con
+// seguimiento: LoadSnapshotTracking); el resto son huecos. Firecracker deja el
+// mapa de páginas sucias a cero al hacerlo. Para restaurarlo hay que ponerlo
+// encima de su base (ver internal/machine/diff_volcado.go).
+func (c *Client) SnapshotDiff(ctx context.Context, snapPath, memPath string) error {
+	return c.snapshot(ctx, "Diff", snapPath, memPath)
+}
+
+func (c *Client) snapshot(ctx context.Context, tipo, snapPath, memPath string) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/create", map[string]string{
-		"snapshot_type": "Full",
+		"snapshot_type": tipo,
 		"snapshot_path": snapPath,
 		"mem_file_path": memPath,
 	})
@@ -216,11 +229,23 @@ func (c *Client) Snapshot(ctx context.Context, snapPath, memPath string) error {
 // resume=false deja la microVM pausada para poder reapuntar discos antes de
 // arrancarla.
 func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string, resume bool) error {
-	return c.do(ctx, http.MethodPut, "/snapshot/load", map[string]any{
+	return c.LoadSnapshotTracking(ctx, snapPath, memPath, resume, false)
+}
+
+// LoadSnapshotTracking es LoadSnapshot y, con track, KVM lleva la cuenta de
+// las páginas que el invitado escribe desde ahora: lo que hace posible un
+// SnapshotDiff después. Cuesta ciclos en cada primera escritura de una
+// página, así que solo se pide cuando se va a usar.
+func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath string, resume, track bool) error {
+	body := map[string]any{
 		"snapshot_path": snapPath,
 		"mem_backend":   map[string]string{"backend_path": memPath, "backend_type": "File"},
 		"resume_vm":     resume,
-	})
+	}
+	if track {
+		body["track_dirty_pages"] = true
+	}
+	return c.do(ctx, http.MethodPut, "/snapshot/load", body)
 }
 
 // SetBalloon configura el globo de memoria (virtio-balloon) del invitado.

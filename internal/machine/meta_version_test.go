@@ -262,7 +262,7 @@ func TestThawSeNiegaConOtroVMM(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir, "", "firecracker 1.12.0"); err != nil {
+	if err := sellarVolcado(dir, "", "firecracker 1.12.0", ""); err != nil {
 		t.Fatal(err)
 	}
 	_, err := m.Thaw(context.Background(), mc.ID)

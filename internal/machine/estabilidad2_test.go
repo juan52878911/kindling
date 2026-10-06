@@ -39,7 +39,7 @@ func TestVolcadoValido(t *testing.T) {
 	}
 
 	// Terminó: vale, y la marca de en curso desaparece.
-	if err := sellarVolcado(dir, "", ""); err != nil {
+	if err := sellarVolcado(dir, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := volcadoValido(dir); err != nil {
@@ -64,7 +64,7 @@ func TestVolcadoValido(t *testing.T) {
 
 	// Y empezar otro volcado invalida el sello anterior.
 	escribir(t, filepath.Join(dir, "snap.file"), "estado")
-	_ = sellarVolcado(dir, "", "")
+	_ = sellarVolcado(dir, "", "", "")
 	_ = volcadoEnCurso(dir)
 	if err := volcadoValido(dir); err == nil {
 		t.Fatal("un volcado nuevo a medias no puede heredar el sello del anterior")
