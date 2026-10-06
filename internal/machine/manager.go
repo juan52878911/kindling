@@ -1122,6 +1122,13 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	default:
 		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
+	// El entorno de la máquina (entorno.go): validado antes de reservar
+	// nada. Desde aquí solo viaja en env, nunca en la máquina.
+	env, err := entornoDePeticion(req)
+	if err != nil {
+		return nil, err
+	}
+	req.Env = nil
 	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
 	// llevar siempre a la misma máquina (docs/authz.md).
 	soltarNombre, err := m.reservarNombre(req.Name)
@@ -1321,7 +1328,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
-		TTLAt: &creada,
+		TTLAt:   &creada,
+		EnvKeys: api.MachineEnvKeys(env),
 	}
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
@@ -1387,7 +1395,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image))
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -1457,6 +1465,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
 	m.conocerAgente(id)
+	if len(env) > 0 {
+		m.retirarEntornoMMDS(id, mc.Name)
+	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
@@ -1563,7 +1574,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1620,7 +1631,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack)}); err != nil {
+	// El entorno de la máquina va por MMDS, que cuelga de la red.
+	if len(env) > 0 && n == nil {
+		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrEnvRequest)
+	}
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0)
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -1689,7 +1705,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		// invitado no trae ruta a 169.254.169.254, la microVM arranca igual y solo se
 		// pierde la inyección de secretos por MMDS.
 		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
+			// Sin MMDS el entorno de la máquina no llega: el agente no
+			// arrancaría el servicio. Mejor no arrancar.
+			if len(env) > 0 {
+				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment: %w", err)
+			}
 			log.Printf("warning: could not configure MMDS on %s: %v (no session secrets available)", id, err)
+		} else if len(env) > 0 {
+			if err := ponerEntornoMMDS(ctx, c, env); err != nil {
+				return pid, err
+			}
 		}
 	}
 	// virtio-rng: sin esto, las instancias de un mismo snapshot clonarían el

@@ -104,15 +104,45 @@ que `-wait-ready` se rinde. La capa nunca se monta sin verificar.
 Una imagen de Docker/OCI tal cual, sin Docker en el host:
 
 ```sh
-kling image import postgres:17-alpine -e POSTGRES_PASSWORD     # el valor, del entorno
-kling run -image postgres-17-alpine -mem 512M -wait-ready
+kling image import postgres:17-alpine
+kling run -image postgres-17-alpine -mem 512M -wait-ready -e POSTGRES_PASSWORD   # el valor, del entorno
 kling save <id> pg-warm && kling run -from pg-warm             # plantilla ya inicializada
 
 kling run -image redis:7-alpine -mem 256M -wait-ready          # o en un paso: una referencia
-kling run -image postgres:17-alpine -e POSTGRES_PASSWORD=x     # se importa la primera vez;
-                                                               # el nombre lleva un sufijo de
-                                                               # la referencia y del entorno
+kling run -image postgres:17-alpine -e POSTGRES_PASSWORD       # se importa la primera vez;
+                                                               # una imagen por referencia
 ```
+
+### El entorno es de la máquina
+
+`kling run -e KEY=valor`, `-e KEY` (el valor sale del entorno de `kling`: no
+queda en `ps`) y `-env-file F` dan el entorno a **esa máquina**, no a la
+imagen. Dos máquinas con contraseñas distintas son dos máquinas sobre la misma
+imagen. Vale para cualquier imagen con un agente que lo sepa leer (las de
+ahora; una de antes lo ignora, el daemon lo avisa en su log y en los eventos).
+
+Cómo viaja, y dónde **no** está:
+
+| Tramo | |
+|---|---|
+| CLI → daemon | en el cuerpo de `POST /machines` (`env`), nunca en un argv. Si el daemon no anuncia la capacidad `machine-env`, el CLI no lo manda |
+| daemon | valida (≤ 256 variables, ≤ 32 KiB, claves `[A-Za-z_][A-Za-z0-9_]*`, sin NUL) y lo escribe en el almacén MMDS del VMM antes de arrancar, con `kling.env=1` en la línea del kernel. No va a `state.json`, ni a un log, ni a `kling inspect`/`ps`: la máquina guarda solo los nombres (`env_keys`). Un error nombra la clave, nunca el valor |
+| invitado | `kling-guest` lo lee de MMDS (169.254.169.254, v2 con token) antes de escuchar y lo guarda solo en su memoria, encima del entorno de la imagen (con la misma clave gana la máquina). Lo reciben el servicio, la sonda de listo, los ganchos y `kling exec`. Ningún fichero del invitado lo lleva |
+| después | el daemon lo borra de MMDS en cuanto el agente contesta (`/healthz`): un proceso lanzado luego ya no lo encuentra allí. Si `kling.env=1` y el agente no lo pudo leer, el servicio **no arranca** (`kling logs -service` dice por qué) |
+
+Lo que sí queda: el entorno del proceso del servicio (como en Docker, legible
+por su usuario y por root en `/proc/<pid>/environ`) y, por tanto, la memoria
+de la máquina. **`kling save` congela esa memoria**: una plantilla lleva el
+entorno de la máquina de la que se hizo, y sus copias (`run -from`) arrancan
+con él (`env_keys` se hereda). Con `-from`, `-e` es un error: la copia es la
+memoria del dorado, su servicio ya arrancó con el entorno de aquel, y uno
+nuevo no le llegaría (un `POSTGRES_PASSWORD` solo cuenta en el `initdb`). Para
+otro entorno, otra máquina en frío con `-image`. La plantilla, como el
+`mem.file` de cualquier dorado, es 0600 del daemon.
+
+`kling image import -e` sigue horneando valores en `/etc/kling/env` por
+compatibilidad, con un aviso en stderr: sirve para lo que es de la imagen
+(`PGDATA`), no para una contraseña.
 
 **La imagen es su propia base.** No va encima de la base de kindling (Alpine):
 se aplanan todas sus capas, con sus whiteouts, en un ext4 monolítico. No se
@@ -164,13 +194,13 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 | `ref` | `postgres:17-alpine`, `ghcr.io/o/r:tag`, `repo@sha256:...` |
 | `digest` | fija la imagen (del índice o del manifiesto); tiene que cuadrar con el de `ref` si trae uno |
 | `arch` | `amd64` o `arm64` (por defecto la del host) |
-| `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`) |
+| `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`): para lo que es de cada máquina, `kling run -e` (arriba) |
 | `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
 | `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
 
 `kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
-`-env-file`, `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
+`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
 ready, service}`).
 
@@ -289,9 +319,9 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
   kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
-  subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata` al importar).
-- **El entorno es de la imagen, no de la máquina**: `-e` va en `kling image
-  import`; dos máquinas con contraseñas distintas son dos imágenes.
+  subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata`).
+- **El entorno de una plantilla es el suyo**: `run -from` no admite `-e` (ver
+  "El entorno es de la máquina").
 - **El `HEALTHCHECK` corre con el `USER` de la imagen** (o el de `-user`), como
   en Docker; si ese usuario no existe en la imagen, la máquina no llega a lista.
 - **El constructor `oci` corre como root dentro del daemon**: lee los tar sin

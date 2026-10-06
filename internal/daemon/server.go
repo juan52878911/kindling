@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -601,7 +601,7 @@ func runStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
 		return http.StatusConflict
-	case errors.Is(err, machine.ErrShareRequest):
+	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest):
 		return http.StatusBadRequest
 	case errors.Is(err, machine.ErrNameTaken):
 		return http.StatusConflict

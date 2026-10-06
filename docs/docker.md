@@ -12,7 +12,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Quieres | Cómo |
 |---|---|
 | Correr una imagen tal cual | `kling run -image redis:7-alpine -mem 256M -wait-ready` (se importa la primera vez) |
-| Con entorno (`-e` de Docker) | `kling run -image postgres:17-alpine -e POSTGRES_PASSWORD=x`: el entorno va dentro de la imagen importada, y entornos distintos son imágenes distintas |
+| Con entorno (`-e` de Docker) | `kling run -image postgres:17-alpine -e POSTGRES_PASSWORD` (el valor, del entorno; o `-e K=V`, `-env-file F`): el entorno es de la máquina, llega por MMDS y no entra en la imagen; una imagen por referencia ([imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
 | Importar con nombre, usuario, entrypoint o comando propios | `kling image import <ref> -name N [-user U] [-entrypoint E] [-- cmd...]` |
 | Datos que sobrevivan a la máquina | `-volume nombre:/ruta` (un `VOLUME` de la imagen no crea nada solo) |
 | Más disco para la propia máquina | `-disk 4G` (disperso: cuesta lo que se escribe) |
@@ -106,9 +106,6 @@ espejo de la memoria en el almacén y `-disk`.
 
 - **Importar una imagen local** (`docker save`, un directorio OCI): hoy
   `image import` solo baja de un registro.
-- **`-e` por máquina**: el entorno va dentro de la imagen; dos entornos son
-  dos imágenes (el nombre lleva un HMAC de la referencia y el entorno, con una clave local). Lo que es secreto debería ir por el
-  proxy de credenciales o por MMDS, no en el entorno.
 - **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
   se entra por el gateway o con `kling exec`.
 - **Imágenes sin `sh`** (distroless): el init es un script y se rechazan.

@@ -319,7 +319,7 @@ func TestVZBootMandaRedAntesDeArrancarYReenviaDespues(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
 	defer matarVMM(pid)
 	if err != nil {
 		t.Fatalf("boot: %v", err)
@@ -507,7 +507,7 @@ func TestVZBootConRaizLarga(t *testing.T) {
 	_ = os.WriteFile(disco, nil, 0o644)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, disco, "", disco, knet.Plan(1, id), nil, false, false)
+	pid, err := m.boot(ctx, id, 1, 256, 0, disco, "", disco, knet.Plan(1, id), nil, false, false, nil)
 	defer matarVMM(pid)
 	if err != nil {
 		t.Fatalf("boot con raíz larga: %v", err)
@@ -558,7 +558,7 @@ func squeezeVZ(t *testing.T, libera bool) ([]string, *api.SqueezeResult) {
 	_ = os.WriteFile(disco, nil, 0o644)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 1024, 0, disco, "", disco, knet.Plan(1, id), nil, false, false)
+	pid, err := m.boot(ctx, id, 1, 1024, 0, disco, "", disco, knet.Plan(1, id), nil, false, false, nil)
 	defer matarVMM(pid)
 	if err != nil {
 		t.Fatal(err)
@@ -741,7 +741,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
 			defer matarVMM(pid)
 			if err != nil {
 				t.Fatalf("boot: %v", err)
@@ -791,7 +791,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
 			defer matarVMM(pid)
 			if err != nil {
 				t.Fatalf("boot: %v", err)
@@ -838,7 +838,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
 			defer matarVMM(pid)
 			if err != nil {
 				t.Fatalf("boot: %v", err)
@@ -934,7 +934,7 @@ func arrancarVZFalso(t *testing.T, m *Manager, id string) *fc.Client {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
 	t.Cleanup(func() { matarVMM(pid) })
 	if err != nil {
 		t.Fatalf("boot: %v", err)

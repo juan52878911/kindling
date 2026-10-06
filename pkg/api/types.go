@@ -149,6 +149,11 @@ type Machine struct {
 	// eso Freeze se niega a congelar una máquina marcada así (ver Freeze).
 	HasSecrets bool `json:"has_secrets,omitempty"`
 
+	// EnvKeys son los nombres de las variables del entorno de la máquina
+	// (RunRequest.Env); los valores no se guardan en ninguna parte del host.
+	// Una copia de un dorado hereda los del dorado: lleva su memoria.
+	EnvKeys []string `json:"env_keys,omitempty"`
+
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
@@ -326,6 +331,14 @@ type RunRequest struct {
 	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
 
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// Env es el entorno de la máquina, KEY=valor (ver machine_env.go): llega
+	// al invitado por MMDS y su agente lo pone encima del de la imagen para el
+	// servicio, la sonda de listo y exec. Viaja solo en el cuerpo de esta
+	// petición: el daemon no lo guarda ni lo enseña (Machine.EnvKeys son los
+	// nombres). Solo en frío: con From se rechaza, porque la copia es la
+	// memoria del dorado y su servicio ya arrancó con el entorno de aquel.
+	Env []string `json:"env,omitempty"`
 }
 
 // GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en
@@ -550,6 +563,11 @@ type Snapshot struct {
 	// AllowExec: la plantilla tenía la ejecución encendida, y por tanto la
 	// tienen todas sus instancias (la puerta se congeló con la memoria).
 	AllowExec bool `json:"allow_exec,omitempty"`
+
+	// EnvKeys son los nombres del entorno con que arrancó la máquina de la que
+	// se hizo commit (Machine.EnvKeys): sus valores están en la memoria
+	// congelada y las instancias los heredan.
+	EnvKeys []string `json:"env_keys,omitempty"`
 
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
