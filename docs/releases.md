@@ -109,18 +109,20 @@ make -C ext/sandbox test cross
 # 1. main al día y limpio
 git checkout main && git pull --rebase && git status
 
-# 2. CHANGELOG.md: la sección "## vX.Y.Z — AAAA-MM-DD" con sus subsecciones
-#    ### Núcleo · ### kling-mcp · ### kling-sandbox y operador · ### Ejemplos
+# 2. CHANGELOG.md: "## [Unreleased]" pasa a "## [X.Y.Z] - AAAA-MM-DD"
+#    (y su enlace al final del fichero)
 git commit -am "changelog: vX.Y.Z"
 
 # 3. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```
 
-`scripts/release.sh --wait` espera al workflow y abre la release. A mano:
+`scripts/release.sh` se niega a etiquetar sin ese bloque, `--dry-run` enseña
+las notas que saldrán y `--wait` espera al workflow y abre la release. A mano:
 
 ```sh
-git tag -a vX.Y.Z -m "release vX.Y.Z — ver CHANGELOG.md"
+scripts/release-notes.sh vX.Y.Z   # las notas, como las publicará el workflow
+git tag -a vX.Y.Z -m "release vX.Y.Z — see CHANGELOG.md"
 git push origin vX.Y.Z
 ```
 
@@ -130,8 +132,9 @@ git push origin vX.Y.Z
    `kling-mcp`, `kling-bridge`, `kling-sandbox` y, en Linux,
    `kindling-operator`; empaqueta los tres `.tar.gz`.
 2. **vz** (macos-14): compila y firma `kling-vz-darwin-arm64`.
-3. **release**: junta todo, genera **un** `SHA256SUMS`, extrae el bloque de
-   `CHANGELOG.md` como notas y publica.
+3. **release**: junta todo, genera **un** `SHA256SUMS`, publica como notas el
+   bloque de la versión en `CHANGELOG.md` más una línea de instalación
+   (`scripts/release-notes.sh`) y nada más.
 4. **imagen** (tras `release`, con `packages: write`): construye la imagen del
    operador con `context: .` y `file: ext/sandbox/Dockerfile.operator` (el
    `replace ../..` necesita el núcleo en el contexto) y la empuja a GHCR.
@@ -150,8 +153,25 @@ una extensión oficial lleva la del núcleo con el que salió.
 Qué se promete al pasar de una versión a otra (formatos en disco con `schema`,
 migraciones con copia, dorados obsoletos, qué pasa al mezclar versiones) y el
 plan de `kling upgrade`, en [`actualizar.md`](actualizar.md). Un cambio que
-sube la versión de un formato persistido va en una MINOR y dice en el
-CHANGELOG cómo volver atrás.
+sube la versión de un formato persistido va en una MINOR, con su línea en
+`Changed` del CHANGELOG; cómo volver atrás va en `actualizar.md`.
+
+## Cómo escribir el CHANGELOG
+
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), **en inglés y una
+línea por cambio**:
+
+- Cada versión, `## [X.Y.Z] - AAAA-MM-DD`; lo pendiente, en `## [Unreleased]`.
+- Secciones `### Added`, `### Changed`, `### Fixed`, `### Security`, solo las
+  que haya.
+- Una línea de ≤ ~15 palabras, para quien usa kindling, con el PR al final:
+  `` - `kling db ls` lists copies with engine, golden and state (#143) ``.
+- Sin cifras de laboratorio salvo una si es lo que importa; el detalle va en
+  el PR y en `docs/`.
+- ≤ ~10 líneas por sección; lo interno se agrupa en una línea
+  `Internal: …`.
+
+Esas líneas son las notas de la release, tal cual.
 
 ## Qué no automatizamos (todavía)
 

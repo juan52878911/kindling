@@ -11,7 +11,7 @@ loop o en un contenedor, y salen iguales bit a bit con las mismas entradas.
 
 | Pieza | Qué hace |
 |---|---|
-| `DebianLock` (`debian_lock.go`, de `go run ./internal/imagen/lockgen`) | la base Debian fijada: `debian:trixie-slim` por digest y 28 `.deb` (`iptables procps iproute2 dmsetup ca-certificates` y dependencias) con su sha256 y la marca de `snapshot.debian.org` del día |
+| `DebianLock` (`debian_lock.go`, de `go run ./internal/imagen/lockgen`) | la base Debian fijada: `debian:trixie-slim` por digest y 31 `.deb` (`iptables procps iproute2 dmsetup ca-certificates` y dependencias, más las actualizaciones de seguridad o del punto de Debian de lo que ya trae la imagen, como `apt-get upgrade`) con su sha256 y la marca de `snapshot.debian.org` del día |
 | `PrepareBase` / `Base.Write` | la base: capas OCI + `.deb` encima, como lo dejaría dpkg (`status`, `.list`, md5sums, conffiles), `iptables` → legacy, `ca-certificates.crt`, adelgazada; luego el init (`minimal-init.sh`), con o sin verity, y el ext4 con 32 MiB de holgura |
 | `Debs.Install` / `Debs.Ajustar` | lo mismo sobre cualquier árbol: la base o el `/upper` de una capa (partiendo del `status` de la base) |
 | `Debs.Resolve` | resuelve paquetes nuevos (Depends y Pre-Depends, sin Recommends) contra los índices de `snapshot.debian.org` del MISMO instante que la base; da un lockfile |
@@ -79,6 +79,25 @@ antes de ir a snapshot). En el laboratorio la imagen sin verity arranca con el n
 Firecracker de siempre y `kling exec` responde (`bash 5.2.37`); la de verity
 arranca con el núcleo de Android (`6.1.140-kindling`, `CONFIG_DM_VERITY`):
 `dmsetup status` da `kindling-layer: ... verity V` y `python3` (3.13.5) corre.
+
+### Verity en kling-vz (Mac M4, 2026-10-01)
+
+Primera vez en Virtualization.framework. Núcleo: el de
+`scripts/builders/kernel` (6.1.140, ahora con `CONFIG_DM_VERITY`), compilado
+en arm64; daemon vz propio y la imagen `python3-minimal` de arriba, con FEC
+(2 raíces) y sin él (`"fec_roots": 0`).
+
+| Caso | Resultado |
+|---|---|
+| capa intacta, con y sin FEC | arranca en frío en 157–197 ms; `dmsetup status` da `kindling-layer: 0 79512 verity V`, la capa está montada desde `/dev/mapper/kindling-layer`, el SHA-256 usa `sha256-ce` y `python3` corre |
+| un byte cambiado en el superbloque de la capa, sin FEC | `verity: data block 0 is corrupted`, `mount: can't read superblock on /dev/mapper/kindling-layer`, el init sale y el núcleo entra en pánico: el agente no llega a escuchar |
+| el mismo byte, con FEC | `verity-fec: FEC 0: corrected 1 errors` y arranca normal (es para lo que está el FEC) |
+| capa intacta con el núcleo de Firecracker CI (6.1.177, sin device-mapper) | `refusing to mount the layer unverified` y pánico |
+
+En vz un pánico del invitado no deja la máquina `failed` como en Firecracker:
+`panic=1` reinicia y Virtualization.framework vuelve a arrancar el invitado,
+así que la máquina sigue `running` y el pánico se repite (7 en un minuto) hasta
+que `-wait-ready` se rinde. La capa nunca se monta sin verificar.
 
 ## Imágenes de Docker: el constructor `oci`
 
@@ -282,11 +301,14 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
 
 ## Límites
 
-- **Verity necesita device-mapper en el núcleo del invitado.** El `vmlinux` de
-  Firecracker del laboratorio no lo trae; el de Android sí (`prototypes/android/kernel`).
-  Con un núcleo sin dm-verity el init no monta la capa sin verificar: se para
-  (`dm-verity on /dev/vdc failed; refusing to mount the layer unverified`) y la
-  máquina queda `failed`. Es lo que se quiere, pero hay que saberlo.
+- **Verity necesita device-mapper en el núcleo del invitado.** El núcleo de
+  kindling (`scripts/builders/kernel`) lo trae desde que `config-common` activa
+  `CONFIG_DM_VERITY` (y `check-kernel-config.sh` lo exige); el de Android
+  también (`prototypes/android/kernel`). El `vmlinux` de Firecracker CI que usan
+  hoy el laboratorio y `kling image copy` no lo trae: con él el init no monta la
+  capa sin verificar, se para (`dm-verity on /dev/vdc failed; refusing to mount
+  the layer unverified`) y la máquina queda `failed` en Firecracker (en vz, en
+  bucle de pánicos; ver arriba). Es lo que se quiere, pero hay que saberlo.
 - **El constructor `base` no tiene `verity`**: su base (`min`, Alpine) se comparte
   entre capas y no trae `dmsetup`; la tabla de cada capa no tiene dónde ir.
 - **No se ejecutan los scripts de los paquetes** (postinst) ni se regenera
