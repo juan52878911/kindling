@@ -669,6 +669,18 @@ por defecto de la configuración del CLI, que ya no viaja como si fuera un flag)
 el del daemon (50). En vz el regulador pausa la VM entera: un Android de 2 vCPU
 con el 50 % iba a ¼.
 
+**Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
+`thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
+del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
+o cuando contesta su agente si no declara sonda; como mucho 60 s. Mientras dura,
+`GET /machines/{ref}` trae `cpu_boost_pct` (el techo de ese momento; `kling ps`
+lo enseña en READY) y al acabar se publica `machine.boost_ended` con el motivo.
+Un `cpu_pct` pedido explícitamente (`cpu_pct_fixed` en la máquina y en el
+dorado) no lleva impulso. En el daemon, `KLING_READY_BOOST=0` vuelve al impulso
+de antes (un núcleo hasta que contesta el agente, 10 s como mucho) y una
+duración (`KLING_READY_BOOST=2m`) cambia el plazo. La admisión no lo cuenta: es
+un techo de cgroup, no una reserva.
+
 **Pila IPv6 por imagen.** `"guest_ipv6_stack": true` en la receta arranca el
 invitado en frío con `ipv6.disable_ipv6=1` en vez de `ipv6.disable=1`: hay
 sockets `AF_INET6` pero ninguna interfaz con IPv6. Para lo que no escucha sin

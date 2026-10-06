@@ -182,7 +182,12 @@ func (m *Manager) nuevoImpulso(id string, pct, vcpus int, fijo bool) *impulsoCPU
 
 // impulsoVigente es el techo de arranque que lleva ahora la máquina id, o 0.
 // Para Machine.CPUBoostPct en List y Get.
-func (m *Manager) impulsoVigente(id string) int {
+// Solo de una que corre: una congelada o parada a mitad del impulso ya no lo
+// gasta, aunque su goroutine tarde un paso en darse cuenta.
+func (m *Manager) impulsoVigente(id string, estado api.State) int {
+	if estado != api.StateRunning {
+		return 0
+	}
 	m.impulsosMu.Lock()
 	defer m.impulsosMu.Unlock()
 	if i := m.impulsos[id]; i != nil {

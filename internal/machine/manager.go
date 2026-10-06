@@ -858,7 +858,7 @@ func (m *Manager) List() []*api.Machine {
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
-		c.CPUBoostPct = m.impulsoVigente(mc.ID)
+		c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -966,7 +966,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
-		c.CPUBoostPct = m.impulsoVigente(mc.ID)
+		c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 		return &c, true
 	}
 	var porNombre, porPrefijo []*api.Machine
@@ -985,7 +985,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 		case 1:
 			c := *l[0]
 			c.Transition = m.transicion[c.ID]
-			c.CPUBoostPct = m.impulsoVigente(c.ID)
+			c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 			return &c, true
 		}
 		return nil, false

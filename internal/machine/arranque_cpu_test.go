@@ -418,7 +418,7 @@ func TestImpulsoSeLimpiaSiSeBorraLaMaquina(t *testing.T) {
 	m.mu.Unlock()
 
 	limite := time.Now().Add(5 * time.Second)
-	for m.impulsoVigente(id) != 0 {
+	for m.impulsoVigente(id, api.StateRunning) != 0 {
 		if time.Now().After(limite) {
 			t.Fatal("el impulso de una máquina borrada sigue vigente")
 		}
@@ -462,7 +462,7 @@ func TestImpulsoNuevoJubilaAlAnterior(t *testing.T) {
 	if got := cg.de(id); len(got) != 0 {
 		t.Fatalf("el impulso jubilado escribió cpu.max = %v", got)
 	}
-	if got := m.impulsoVigente(id); got != 200 {
+	if got := m.impulsoVigente(id, api.StateRunning); got != 200 {
 		t.Fatalf("impulso vigente = %d, quería 200", got)
 	}
 	nuevo.bajar("ready probe passed")
