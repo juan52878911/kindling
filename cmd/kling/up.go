@@ -42,6 +42,9 @@ import (
 // Firecracker. Coincide con el valor por defecto de `kling daemon -run-as`.
 const runAsDefault = "kindling"
 
+// buildAsDefault es el usuario del constructor oci (ver -build-as del daemon).
+const buildAsDefault = "kindling-build"
+
 // ── kling up ──────────────────────────────────────────────────────────────────
 
 func cmdUp(args []string) error {
@@ -225,13 +228,17 @@ type probe struct {
 	nft         bool   // el backend real de iptables en las distros modernas
 	runAs       string // nombre del usuario sin privilegios
 	runAsExists bool
-	systemd     bool
-	unit        bool     // /etc/systemd/system/kling.service
-	extUnits    []string // unidades de extensiones instaladas (kling-gateway.service...)
-	active      string   // salida de systemctl is-active kling
-	kernel      bool     // $root/images/vmlinux
-	baseImage   bool     // $root/images/min.ext4
-	root        string
+	// buildAs es el usuario sin privilegios del constructor oci
+	// (KLING_BUILD_AS); sin él, el constructor corre como root.
+	buildAs       string
+	buildAsExists bool
+	systemd       bool
+	unit          bool     // /etc/systemd/system/kling.service
+	extUnits      []string // unidades de extensiones instaladas (kling-gateway.service...)
+	active        string   // salida de systemctl is-active kling
+	kernel        bool     // $root/images/vmlinux
+	baseImage     bool     // $root/images/min.ext4
+	root          string
 }
 
 // check es una comprobación con su porqué y su remedio.
@@ -251,10 +258,11 @@ type check struct {
 
 func localProbe(root string) probe {
 	p := probe{
-		system: runtime.GOOS + "/" + runtime.GOARCH,
-		kvm:    hasKVM(),
-		runAs:  envOr("KLING_RUN_AS", runAsDefault),
-		root:   root,
+		system:  runtime.GOOS + "/" + runtime.GOARCH,
+		kvm:     hasKVM(),
+		runAs:   envOr("KLING_RUN_AS", runAsDefault),
+		buildAs: envOr("KLING_BUILD_AS", buildAsDefault),
+		root:    root,
 	}
 	p.firecracker = lookFirecracker()
 	p.ip = inPathOrSbin("ip")
@@ -262,6 +270,8 @@ func localProbe(root string) probe {
 	p.nft = inPathOrSbin("nft")
 	_, err := user.Lookup(p.runAs)
 	p.runAsExists = err == nil
+	_, err = user.Lookup(p.buildAs)
+	p.buildAsExists = err == nil
 	p.systemd = inPathOrSbin("systemctl")
 	p.unit = fileExists("/etc/systemd/system/kling.service")
 	for _, u := range extensionUnits() {
@@ -283,7 +293,8 @@ func localProbe(root string) probe {
 // remoteScript es lo mismo que hace localProbe, pero en sh y en el host del
 // contexto. Se manda por la entrada estándar de `ssh ... sh -s` para no pelearse
 // con dos niveles de comillas; sus variables (RUNAS, ROOT, UNITS) van delante,
-// en el mismo guion (ver remoteProbeScript).
+// en el mismo guion (ver remoteProbeScript). BUILDAS es el usuario del
+// constructor oci.
 const remoteScript = `
 # ip, iptables y nft viven en /usr/sbin o /sbin, que una shell de ssh sin
 # terminal no suele tener en el PATH: sin esto se daban por ausentes.
@@ -296,6 +307,7 @@ echo "ip=$(si "$(command -v ip 2>/dev/null)")"
 echo "iptables=$(si "$(command -v iptables 2>/dev/null)")"
 echo "nft=$(si "$(command -v nft 2>/dev/null)")"
 echo "runas=$(si "$(id -u "$RUNAS" 2>/dev/null)")"
+echo "buildas=$(si "$(id -u "$BUILDAS" 2>/dev/null)")"
 echo "systemd=$(si "$(command -v systemctl 2>/dev/null)")"
 echo "unit=$(si "$([ -f /etc/systemd/system/kling.service ] && echo 1)")"
 echo "units=$(for u in $UNITS; do [ -f "/etc/systemd/system/$u" ] && printf '%s ' "$u"; done)"
@@ -309,20 +321,21 @@ echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
 // entera a una shell: un -root, un KLING_RUN_AS o una unidad del manifiesto de
 // una extensión con `;` o `$(...)` se ejecutaba allí. Ahora la línea de ssh es
 // fija (`sh -s`) y los valores son datos de una asignación.
-func remoteProbeScript(runAs, root string, units []string) string {
+func remoteProbeScript(runAs, buildAs, root string, units []string) string {
 	return "RUNAS=" + shQuote(runAs) + "\n" +
+		"BUILDAS=" + shQuote(buildAs) + "\n" +
 		"ROOT=" + shQuote(root) + "\n" +
 		"UNITS=" + shQuote(strings.Join(units, " ")) + "\n" +
 		remoteScript
 }
 
 func remoteProbe(target, root string) (probe, error) {
-	p := probe{remote: true, runAs: envOr("KLING_RUN_AS", runAsDefault), root: root}
+	p := probe{remote: true, runAs: envOr("KLING_RUN_AS", runAsDefault), buildAs: envOr("KLING_BUILD_AS", buildAsDefault), root: root}
 
 	// BatchMode: si las claves no están puestas queremos un error inmediato, no
 	// una petición de contraseña en mitad de un diagnóstico.
 	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "sh", "-s")
-	cmd.Stdin = strings.NewReader(remoteProbeScript(p.runAs, root, extensionUnits()))
+	cmd.Stdin = strings.NewReader(remoteProbeScript(p.runAs, p.buildAs, root, extensionUnits()))
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
@@ -341,6 +354,7 @@ func remoteProbe(target, root string) (probe, error) {
 	p.firecracker = vals["firecracker"]
 	p.ip, p.iptables, p.nft = yes("ip"), yes("iptables"), yes("nft")
 	p.runAsExists = yes("runas")
+	p.buildAsExists = yes("buildas")
 	p.systemd = yes("systemd")
 	p.unit = yes("unit")
 	p.extUnits = strings.Fields(vals["units"])
@@ -427,6 +441,17 @@ func checksOf(p probe) []check {
 			fix: []string{
 				"sudo useradd --system --no-create-home --shell /usr/sbin/nologin " + p.runAs,
 				"sudo usermod -aG kvm " + p.runAs,
+			},
+		},
+		{
+			// Como el anterior, pero del constructor de imágenes de Docker:
+			// lee tars bajados de internet, y sin él lo hace como root.
+			label: "user " + p.buildAs, ok: p.buildAsExists,
+			found: presence(p.buildAsExists, "exists", "doesn't exist"),
+			why: "without it the oci image builder (kling image import) runs as ROOT\n" +
+				"      and parses layers downloaded from the internet with full privileges",
+			fix: []string{
+				"sudo useradd --system --no-create-home --shell /usr/sbin/nologin " + p.buildAs,
 			},
 		},
 		{
