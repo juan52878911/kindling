@@ -3065,7 +3065,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
 	// Fin del impulso de arranque: ya, si su memoria trae el "listo" (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada()
+	impulso.entregarRestaurada(listo)
 
 	fases := crono.cerrar()
 	out.Wake = fases

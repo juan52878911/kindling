@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -67,7 +68,30 @@ func managerConCgroupFalso(t *testing.T) (*Manager, *cgroupFalso, chan struct{})
 		},
 		nucleos: 8,
 	}
+	// GET /ready del agente: lo que diga fijarListo; antes, nadie contesta.
+	m.pruebasListo = func(_ context.Context, id string) (api.GuestReady, error) {
+		v, ok := listosFalsos.Load(id)
+		if !ok {
+			return api.GuestReady{}, errListoConexion
+		}
+		return v.(api.GuestReady), nil
+	}
 	return m, cg, contesta
+}
+
+// listosFalsos es la respuesta de GET /ready de cada máquina de prueba (los
+// ids no se repiten entre pruebas).
+var listosFalsos sync.Map
+
+// addConIP da de alta una máquina que el host alcanza (WaitReady no pregunta
+// a una sin IP).
+func addConIP(m *Manager, id string) *api.Machine {
+	mc := m.addForTest(id)
+	listosFalsos.Delete(id) // lo de una pasada anterior (-count)
+	m.mu.Lock()
+	mc.IP = "10.0.0.2"
+	m.mu.Unlock()
+	return mc
 }
 
 // esperarSecuencia espera (sin sleeps fijos) a que el cgroup de id tenga la
@@ -85,11 +109,20 @@ func esperarSecuencia(t *testing.T, cg *cgroupFalso, id string, want []int) {
 	}
 }
 
-// fijarListo pone Machine.Ready como lo haría la vigía.
-func fijarListo(m *Manager, id, estado string) {
-	m.mu.Lock()
-	m.byID[id].Ready = estado
-	m.mu.Unlock()
+// fijarListo hace que el agente de id conteste a /ready con el estado dado.
+func fijarListo(_ *Manager, id, estado string) {
+	var st api.GuestReady
+	switch estado {
+	case api.ReadyUnknown: // sin sonda
+		st = api.GuestReady{Ready: true}
+	case api.ReadyWaiting:
+		st = api.GuestReady{Probe: true, Detail: "not yet"}
+	case api.ReadyYes:
+		st = api.GuestReady{Probe: true, Ready: true}
+	case api.ReadyFailed:
+		st = api.GuestReady{HasHooks: true, Hooks: api.HooksFailed, Detail: "boom"}
+	}
+	listosFalsos.Store(id, st)
 }
 
 // impulsoQueSeVe es el CPUBoostPct que devuelve Get (lo que ven ps e inspect).
@@ -173,7 +206,7 @@ func TestPoliticaImpulso(t *testing.T) {
 func TestImpulsoSinSondaBajaCuandoContestaElAgente(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	id := "a2c00001000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 2, false, nil); err != nil {
 		t.Fatal(err)
@@ -202,14 +235,14 @@ func TestImpulsoConSondaBajaAlPasarLaSonda(t *testing.T) {
 	evs, baja := m.bus.Subscribe()
 	defer baja()
 	id := "a2c00002000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 4, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	fijarListo(m, id, api.ReadyWaiting)
 	close(contesta)
-	time.Sleep(3 * pasoImpulsoListo)
+	time.Sleep(3 * 100 * time.Millisecond)
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{400}) {
 		t.Fatalf("con la sonda en waiting cpu.max = %v, quería [400]", got)
 	}
@@ -233,7 +266,7 @@ func TestImpulsoBajaAlAgotarElPlazoDeLaSonda(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	t.Setenv("KLING_READY_BOOST", "300ms")
 	id := "a2c00003000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
 		t.Fatal(err)
@@ -249,7 +282,7 @@ func TestImpulsoBajaAlAgotarElPlazoSinAgente(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	m.pruebasCPU.plazo = 50 * time.Millisecond
 	id := "a2c00004000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 30, 1, false, nil); err != nil {
 		t.Fatal(err)
@@ -263,7 +296,7 @@ func TestImpulsoDesactivadoEsElDeAntes(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	t.Setenv("KLING_READY_BOOST", "0")
 	id := "a2c00005000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 4, false, nil); err != nil {
 		t.Fatal(err)
@@ -278,7 +311,7 @@ func TestImpulsoDesactivadoEsElDeAntes(t *testing.T) {
 func TestImpulsoNoPisaUnCPUPctExplicito(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	id := "a2c00006000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 30, 4, true, nil); err != nil {
 		t.Fatal(err)
@@ -298,7 +331,7 @@ func TestImpulsoNoPisaUnCPUPctExplicito(t *testing.T) {
 func TestImpulsoCaminoDeErrorBajaElTope(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c00007000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 1, false, errors.New("boom")); err == nil {
 		t.Fatal("quería el error del arranque")
@@ -315,7 +348,7 @@ func TestImpulsoCaminoDeErrorBajaElTope(t *testing.T) {
 func TestImpulsoPanicoBajaElTope(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c00008000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	func() {
 		defer func() { _ = recover() }()
@@ -334,14 +367,14 @@ func TestImpulsoPanicoBajaElTope(t *testing.T) {
 func TestImpulsoBajaSiLaMaquinaSeCongelaEsperandoLaSonda(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	id := "a2c00009000000000"
-	mc := m.addForTest(id)
+	mc := addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 2, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	fijarListo(m, id, api.ReadyWaiting)
 	close(contesta)
-	time.Sleep(2 * pasoImpulsoListo)
+	time.Sleep(2 * 100 * time.Millisecond)
 	m.mu.Lock()
 	mc.State = api.StateWarm
 	m.mu.Unlock()
@@ -352,7 +385,7 @@ func TestImpulsoBajaSiLaMaquinaSeCongelaEsperandoLaSonda(t *testing.T) {
 func TestImpulsoBajaSiLaMaquinaDejaDeCorrer(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c0000a000000000"
-	mc := m.addForTest(id)
+	mc := addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
 		t.Fatal(err)
@@ -368,7 +401,7 @@ func TestImpulsoBajaSiLaMaquinaDejaDeCorrer(t *testing.T) {
 func TestImpulsoSeLimpiaSiSeBorraLaMaquina(t *testing.T) {
 	m, cg, contesta := managerConCgroupFalso(t)
 	id := "a2c0000b000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 2, false, nil); err != nil {
 		t.Fatal(err)
@@ -404,7 +437,7 @@ func TestImpulsoSeLimpiaSiSeBorraLaMaquina(t *testing.T) {
 func TestImpulsoBajaAlCerrarElManager(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c0000c000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
 		t.Fatal(err)
@@ -418,7 +451,7 @@ func TestImpulsoBajaAlCerrarElManager(t *testing.T) {
 func TestImpulsoNuevoJubilaAlAnterior(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c0000d000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 	if err := os.MkdirAll(m.dirCgroup(id), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +480,7 @@ func TestImpulsoComoThawYaListo(t *testing.T) {
 	}
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c0000e000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 2, false)
@@ -460,8 +493,8 @@ func TestImpulsoComoThawYaListo(t *testing.T) {
 		if got := cg.de(id); !reflect.DeepEqual(got, []int{200}) {
 			t.Fatalf("al nacer cpu.max = %v, quería [200]", got)
 		}
-		fijarListo(m, id, api.ReadyYes) // trasRestaurar
-		impulso.entregarRestaurada()
+		// Lo que contestó al resync: listo, sin ganchos.
+		impulso.entregarRestaurada(&api.GuestReady{Probe: true, Ready: true})
 	}()
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{200, 50}) {
 		t.Fatalf("tras el thaw cpu.max = %v, quería [200 50]", got)
@@ -473,21 +506,71 @@ func TestImpulsoComoThawYaListo(t *testing.T) {
 func TestImpulsoComoThawEsperandoLosGanchos(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c0000f000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 1, false)
 		defer impulso.fin()
 		m.limitCPU(id, os.Getpid(), impulso.tope)
 		fijarListo(m, id, api.ReadyWaiting)
-		impulso.entregarRestaurada()
+		impulso.entregarRestaurada(&api.GuestReady{Probe: true, Ready: true, HasHooks: true})
 	}()
-	time.Sleep(2 * pasoImpulsoListo)
+	time.Sleep(2 * 100 * time.Millisecond)
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{100}) {
 		t.Fatalf("con ganchos en marcha cpu.max = %v, quería [100]", got)
 	}
 	fijarListo(m, id, api.ReadyYes)
 	esperarSecuencia(t, cg, id, []int{100, 50})
+}
+
+// El fallo que vio el laboratorio: el agente escucha, pero su /ready aún no
+// ha contestado nada (Machine.Ready vacío, que también es "sin sonda"). Eso
+// no es fin del arranque: el impulso sigue hasta que /ready lo dice.
+func TestImpulsoAgenteSinRespuestaDeListoNoBaja(t *testing.T) {
+	m, cg, contesta := managerConCgroupFalso(t)
+	id := "a2c00014000000000"
+	addConIP(m, id)
+
+	if err := arranqueComoRun(m, id, 50, 2, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	close(contesta)
+	time.Sleep(300 * time.Millisecond)
+	if got := cg.de(id); !reflect.DeepEqual(got, []int{200}) {
+		t.Fatalf("sin respuesta de /ready cpu.max = %v, quería [200]", got)
+	}
+	fijarListo(m, id, api.ReadyYes)
+	esperarSecuencia(t, cg, id, []int{200, 50})
+}
+
+// Unos ganchos que fallan terminan el arranque: el impulso baja.
+func TestImpulsoBajaSiFallanLosGanchos(t *testing.T) {
+	m, cg, contesta := managerConCgroupFalso(t)
+	id := "a2c00015000000000"
+	addConIP(m, id)
+
+	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	fijarListo(m, id, api.ReadyFailed)
+	close(contesta)
+	esperarSecuencia(t, cg, id, []int{100, 50})
+}
+
+// Restaurada sin agente (o con uno anterior a /ready): no hay sonda que
+// esperar, baja en el acto.
+func TestImpulsoRestauradaSinAgenteBajaYa(t *testing.T) {
+	m, cg, _ := managerConCgroupFalso(t)
+	id := "a2c00016000000000"
+	addConIP(m, id)
+
+	impulso := m.nuevoImpulso(id, 50, 2, false)
+	m.limitCPU(id, os.Getpid(), impulso.tope)
+	impulso.entregarRestaurada(nil)
+	impulso.fin()
+	if got := cg.de(id); !reflect.DeepEqual(got, []int{200, 50}) {
+		t.Fatalf("cpu.max = %v, quería [200 50]", got)
+	}
 }
 
 // Thaw o runFrom que fallan tras nacer en el cgroup (LoadSnapshot con el TSC
@@ -520,7 +603,7 @@ func TestImpulsoComoThawFallido(t *testing.T) {
 func TestImpulsoConTopeQueYaCubreLasVCPUNoEscribeDosVeces(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	id := "a2c00011000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 200, 2, false, nil); err != nil {
 		t.Fatal(err)
@@ -536,7 +619,7 @@ func TestImpulsoSinCgroupsNoHaceNada(t *testing.T) {
 	m, cg, _ := managerConCgroupFalso(t)
 	m.cgroupRoot = ""
 	id := "a2c00012000000000"
-	m.addForTest(id)
+	addConIP(m, id)
 
 	if err := arranqueComoRun(m, id, 50, 2, false, nil); err != nil {
 		t.Fatal(err)

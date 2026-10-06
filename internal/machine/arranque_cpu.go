@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -27,9 +28,12 @@ import (
 // cuanto termina de arrancar:
 //
 //   - Si su imagen declara sonda de listo o ganchos (api.GuestReadyProbe), al
-//     pasar la sonda (Machine.Ready deja de ser "waiting"), como mucho
-//     plazoImpulsoListo desde que empezó (KLING_READY_BOOST lo cambia).
-//   - Si no declara nada, en cuanto contesta su agente, como antes.
+//     pasar la sonda (se pregunta como `run -wait-ready`, con WaitReady), como
+//     mucho plazoImpulsoListo desde que empezó (KLING_READY_BOOST lo cambia).
+//   - Si no declara nada, en cuanto contesta su agente (y a /ready, que dice
+//     que no hay nada que esperar).
+//   - Tras restaurar (thaw, run -from), en el acto si la memoria ya estaba
+//     lista, que es lo normal; si traía ganchos, cuando terminan.
 //   - En todo caso, si el agente no contesta en plazoImpulsoCPU (imagen sin
 //     agente), si la máquina deja de correr (freeze, rm, VMM caído) o si se
 //     cierra el Manager.
@@ -73,11 +77,6 @@ const plazoImpulsoListo = 60 * time.Second
 // "connection refused" contesta en microsegundos; el paso acota lo que dura
 // el impulso de más.
 const pasoImpulsoCPU = 20 * time.Millisecond
-
-// pasoImpulsoListo es cada cuánto se mira Machine.Ready mientras se espera a la
-// sonda. Solo lee memoria: quien ejecuta la sonda es la vigía (vigilarListo) o
-// un WaitReady.
-const pasoImpulsoListo = 100 * time.Millisecond
 
 // ganchosCPU sustituye piezas del techo de arranque en las pruebas. nil en
 // producción.
@@ -236,53 +235,34 @@ func (i *impulsoCPU) fin() {
 // termine de hacerlo: es justo ese arranque el que el impulso acelera.
 func (i *impulsoCPU) entregar() { i.entregarDesde(false) }
 
-// entregarRestaurada es entregar() tras una restauración (thaw, run -from): el
-// agente ya contestó o no lo hay (resync) y trasRestaurar ya anotó el "listo"
-// que trae su memoria, así que solo queda, si acaso, esperar a la sonda.
-func (i *impulsoCPU) entregarRestaurada() { i.entregarDesde(true) }
+// entregarRestaurada es entregar() tras una restauración (thaw, run -from):
+// el agente ya contestó o no lo hay. listo es lo que contestó al resync (nil:
+// sin agente, o uno anterior a /ready). Si ya está listo y no trae ganchos —lo
+// normal: el "listo" viaja en la memoria—, baja aquí mismo, sin goroutine.
+func (i *impulsoCPU) entregarRestaurada(listo *api.GuestReady) {
+	if i.tope == i.pct {
+		return
+	}
+	switch {
+	case !i.hastaListo:
+		i.bajar("guest agent answered")
+	case listo == nil:
+		i.bajar("restored, no ready probe to wait for")
+	case listo.Ready && !listo.HasHooks:
+		i.bajar("restored ready")
+	default:
+		i.entregarDesde(true)
+	}
+}
 
 func (i *impulsoCPU) entregarDesde(trasAgente bool) {
 	if i.tope == i.pct {
 		return // no hay nada que bajar: que fin() lo resuelva sin goroutine
 	}
-	if trasAgente && !i.hastaListo {
-		i.bajar("guest agent answered")
-		return
-	}
-	if trasAgente {
-		if motivo, ok := i.m.finArranque(i.id); ok {
-			i.bajar(motivo) // lo normal en un thaw: el "listo" viaja en la memoria
-			return
-		}
-	}
 	i.entregado = true
 	go func() {
 		i.bajar(i.m.esperarFinArranque(i, trasAgente))
 	}()
-}
-
-// finArranque dice si la máquina id ya terminó de arrancar según su "listo",
-// y por qué. Una que ya no corre también terminó.
-func (m *Manager) finArranque(id string) (string, bool) {
-	m.mu.RLock()
-	mc := m.byID[id]
-	var estado api.State
-	var listo string
-	if mc != nil {
-		estado, listo = mc.State, mc.Ready
-	}
-	m.mu.RUnlock()
-	switch {
-	case mc == nil || estado != api.StateRunning:
-		return "machine is no longer running", true
-	case listo == api.ReadyYes:
-		return "ready probe passed", true
-	case listo == api.ReadyFailed:
-		return "post-restore hooks failed", true
-	case listo == api.ReadyUnknown:
-		return "guest agent answered, no ready probe", true
-	}
-	return "", false // "waiting", o aún nadie lo ha mirado
 }
 
 // esperarFinArranque vuelve, con el motivo, cuando la máquina del impulso i
@@ -331,22 +311,35 @@ func (m *Manager) esperarFinArranque(i *impulsoCPU, trasAgente bool) string {
 			return "guest agent answered"
 		}
 	}
-	// El agente contestó: ahora, la sonda. La vigía (vigilarListo) o un
-	// WaitReady la ejecutan y anotan Machine.Ready; aquí solo se lee.
-	limite := time.NewTimer(max(i.plazoListo-time.Since(i.inicio), 0))
-	defer limite.Stop()
-	for {
-		if motivo, ok := m.finArranque(id); ok {
-			return motivo
-		}
+	// El agente contestó: ahora, la sonda. Se pregunta como `run -wait-ready`
+	// (WaitReady): Machine.Ready no basta, porque "" es a la vez "no declara
+	// nada" y "aún nadie lo ha mirado". Una imagen sin sonda contesta listo a
+	// la primera; un agente anterior a /ready, también.
+	ctx, cancel := context.WithTimeout(context.Background(), max(i.plazoListo-time.Since(i.inicio), time.Millisecond))
+	defer cancel()
+	go func() {
 		select {
-		case <-limite.C:
-			return fmt.Sprintf("not ready after %s", i.plazoListo)
 		case <-m.quit:
-			return "daemon closing"
-		case <-time.After(pasoImpulsoListo):
+			cancel()
+		case <-ctx.Done():
 		}
+	}()
+	res, err := m.WaitReady(ctx, id, OpcionesListo{Plazo: i.plazoListo})
+	switch {
+	case err == nil && res.Ready == api.ReadyYes:
+		return "ready probe passed"
+	case err == nil:
+		return "guest agent answered, no ready probe"
+	case errors.Is(err, ErrNoMachine) || errors.Is(err, ErrNotRunning):
+		return "machine is no longer running"
+	case res.Ready == api.ReadyFailed:
+		return "post-restore hooks failed"
+	case ctx.Err() != nil && isClosed(m.quit):
+		return "daemon closing"
+	case ctx.Err() != nil:
+		return fmt.Sprintf("not ready after %s", i.plazoListo)
 	}
+	return err.Error()
 }
 
 // reaplicarTopesCPU devuelve a su techo configurado toda máquina viva al

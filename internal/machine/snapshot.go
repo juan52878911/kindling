@@ -1685,7 +1685,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.trasRestaurar(ctx, id, api.ResyncInstance, listo)
 	// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada()
+	impulso.entregarRestaurada(listo)
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
