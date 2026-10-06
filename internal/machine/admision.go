@@ -98,6 +98,34 @@ func minFreeDiskMiB() int64 {
 	return minDiscoLibrePlataforma
 }
 
+// maxDiskMiB es el tope de RunRequest.DiskMiB: KLING_MAX_DISK_MIB, que solo
+// puede bajarlo (entre minOverlayMiB y maxOverlayMiB).
+func maxDiskMiB() int {
+	if v := os.Getenv("KLING_MAX_DISK_MIB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= minOverlayMiB && n <= maxOverlayMiB {
+			return n
+		}
+	}
+	return maxOverlayMiB
+}
+
+// checkDiskParaOverlay rechaza un disco escribible (-disk) que no cabe en lo
+// que queda libre más el mínimo: es disperso, pero un invitado que lo llene
+// dejaría al host sin disco.
+func (m *Manager) checkDiskParaOverlay(diskMiB int) error {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(m.root, &st); err != nil {
+		return nil // sin poder medirlo no se bloquea nada
+	}
+	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
+	if necesario := int64(diskMiB) + minFreeDiskMiB(); libre < necesario {
+		return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
+			"only %d MiB of disk left under %s: a %d MiB writable disk needs %d MiB free (the disk plus the %d MiB minimum)",
+			libre, m.root, diskMiB, necesario, minFreeDiskMiB())}
+	}
+	return nil
+}
+
 // defaultMaxSwapPct es el tope de swap usado (ver evaluarSwap) por encima del
 // cual no se admiten máquinas: KLING_MAX_SWAP_PCT, 0 lo apaga.
 const defaultMaxSwapPct = 85

@@ -201,12 +201,12 @@ func (a *almacenCoW) borrarMemoriaInstancia(id string) {
 // devuelve esa ruta; nil error y "" si el almacén no está en uso. Cualquier
 // fallo del almacén se dice y devuelve "", para que quien llama siga por el
 // camino de siempre.
-func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base string) string {
+func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff string) string {
 	if m.alm == nil || m.cow.actual() != cowModoStore {
 		return ""
 	}
 	snap := filepath.Base(filepath.Dir(base))
-	ruta, err := m.alm.memoriaInstancia(ctx, snap, base, filepath.Join(dir, "mem.file"), id, m.cow.gibs())
+	ruta, err := m.alm.memoriaInstancia(ctx, snap, base, diff, id, m.cow.gibs())
 	if err == nil {
 		enlace := filepath.Join(dir, memFull)
 		_ = os.Remove(enlace)
@@ -252,8 +252,7 @@ func (a *almacenCoW) dirParaInstancia(id string) (string, bool, error) {
 }
 
 // ampliarCuotaMemoria sube la cuota del directorio de la instancia para que
-// quepa su memoria (el clon del espejo y el diff, que como mucho suman la RAM
-// lógica) además del overlay. Solo en Btrfs, donde la cuota es del
+// quepa su memoria además del overlay. Solo en Btrfs, donde la cuota es del
 // subvolumen y cuenta lo referenciado; en XFS es un proyecto por fichero y se
 // fija sobre cada uno. Si el almacén impone cuota y no se puede aplicar, es
 // un error: sin ella un VMM comprometido podría llenarlo.
@@ -261,7 +260,11 @@ func (a *almacenCoW) ampliarCuotaMemoria(d string, memBytes int64) error {
 	if a.cuota != "qgroup" || a.limitar == nil {
 		return nil
 	}
-	total := cuotaInstancia(memBytes)
+	// Dos veces la memoria: al congelar conviven el mem.full (el clon del
+	// espejo con el diff anterior encima, que Btrfs cuenta entero), el diff
+	// acumulado y el mem.diff nuevo. Con una sola, una copia que escribe mucha
+	// memoria daba EDQUOT al congelar y se comía la cuota de su overlay.
+	total := 2 * cuotaInstancia(memBytes)
 	if fi, err := os.Stat(filepath.Join(d, "overlay.ext4")); err == nil {
 		total += cuotaInstancia(fi.Size())
 	}

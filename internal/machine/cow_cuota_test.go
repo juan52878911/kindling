@@ -287,3 +287,46 @@ func TestCuotaXFSNoLaCambiaElVMM(t *testing.T) {
 		t.Errorf("proyecto %d → %d (%v)", antes, despues, err)
 	}
 }
+
+// En XFS cada fichero de memoria de una copia (mem.full, mem.diff) tiene su
+// propio proyecto. Un overlay nuevo no puede recibir el id de uno de ellos:
+// su límite ya estaría gastado y el invitado vería EDQUOT.
+func TestCuotaXFSMemoriaYOverlayNoComparten(t *testing.T) {
+	a := almacenReal(t, "xfs")
+	src := doradoDe(t, a.root, 64)
+	ctx := context.Background()
+	if _, err := a.clonarInstancia(ctx, "d", src, "id1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if a.cuota != "prjquota" {
+		t.Skipf("el almacén no impone cuota (%q)", a.cuota)
+	}
+	mem := filepath.Join(a.dirInstancia("id1"), memFull)
+	if err := os.WriteFile(mem, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.limitar(a.dirInstancia("id1"), mem, 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	f, err := abrirSinSeguir(mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idMem, err := proyectoDe(f)
+	f.Close()
+	if err != nil || idMem == 0 {
+		t.Fatalf("proyecto de mem.full: %d %v", idMem, err)
+	}
+	r2, err := a.clonarInstancia(ctx, "d", src, "id2", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := abrirSinSeguir(r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if id2, err := proyectoDe(g); err != nil || id2 == idMem {
+		t.Fatalf("el overlay nuevo tiene el proyecto %d (%v), el mismo que el mem.full de otra copia", id2, err)
+	}
+}

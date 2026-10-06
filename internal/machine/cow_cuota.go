@@ -109,25 +109,41 @@ func proyectoLibre(usados map[uint32]bool) uint32 {
 	return id
 }
 
-// proyectosEnUso recorre los overlays de las instancias del almacén y devuelve
-// los ids de proyecto que ya tienen. Sin estado en memoria: sobrevive a un
-// reinicio del daemon y libera el id de una instancia borrada sin llevar
-// cuentas.
+// proyectosEnUso recorre los ficheros de las instancias del almacén (el
+// overlay y los de memoria: mem.full, mem.diff, el diff acumulado, cada uno
+// con su proyecto) y devuelve los ids que ya tienen. Sin estado en memoria:
+// sobrevive a un reinicio del daemon y libera el id de una instancia borrada
+// sin llevar cuentas. Mirar solo los overlays repartía a un overlay nuevo el
+// id del mem.full de otra copia, y el límite del overlay se encontraba ya
+// gastado: EDQUOT en el disco del invitado.
 func proyectosEnUso(dirM string) map[uint32]bool {
 	usados := map[uint32]bool{}
-	entradas, err := os.ReadDir(dirM)
+	instancias, err := os.ReadDir(dirM)
 	if err != nil {
 		return usados
 	}
-	for _, e := range entradas {
-		f, err := abrirSinSeguir(filepath.Join(dirM, e.Name(), "overlay.ext4"))
+	for _, inst := range instancias {
+		if !inst.IsDir() {
+			continue
+		}
+		dir := filepath.Join(dirM, inst.Name())
+		ficheros, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		if id, err := proyectoDe(f); err == nil && id != 0 {
-			usados[id] = true
+		for _, e := range ficheros {
+			if !e.Type().IsRegular() {
+				continue
+			}
+			f, err := abrirSinSeguir(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			if id, err := proyectoDe(f); err == nil && id != 0 {
+				usados[id] = true
+			}
+			f.Close()
 		}
-		f.Close()
 	}
 	return usados
 }

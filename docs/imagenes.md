@@ -110,8 +110,8 @@ kling save <id> pg-warm && kling run -from pg-warm             # plantilla ya in
 
 kling run -image redis:7-alpine -mem 256M -wait-ready          # o en un paso: una referencia
 kling run -image postgres:17-alpine -e POSTGRES_PASSWORD=x     # se importa la primera vez;
-                                                               # con -e, el nombre lleva un
-                                                               # sufijo del hash del entorno
+                                                               # el nombre lleva un sufijo de
+                                                               # la referencia y del entorno
 ```
 
 **La imagen es su propia base.** No va encima de la base de kindling (Alpine):

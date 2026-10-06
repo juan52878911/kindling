@@ -189,7 +189,7 @@ func TestFreezeDiferencial(t *testing.T) {
 			t.Fatal(err)
 		}
 		base := filepath.Join(m.root, "dorado.mem")
-		escribirPaginas(t, base, paginaDe('A'), paginaDe('B'))
+		escribirPaginas(t, base, paginaDe('A'), paginaDe('B'), paginaDe('C'))
 		falso := nuevoFcFalso(t)
 		mc := m.addForTest(id)
 		m.mu.Lock()
@@ -207,7 +207,9 @@ func TestFreezeDiferencial(t *testing.T) {
 			if apagado {
 				escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('A'), paginaDe('D'))
 			} else {
-				escribirPaginas(t, filepath.Join(dir, memDiff), nil, paginaDe('D'))
+				// La tercera, puesta a cero por el invitado: tiene que
+				// seguir siendo datos (ceros), no un hueco.
+				escribirPaginas(t, filepath.Join(dir, memDiff), nil, paginaDe('D'), make([]byte, pagina))
 			}
 		})
 
@@ -246,8 +248,11 @@ func TestFreezeDiferencial(t *testing.T) {
 		}
 		if sabeDeHuecos(t, dir) {
 			f, _ := os.Open(filepath.Join(dir, "mem.file"))
-			if ini, _ := siguientesDatos(f, 0, 2*pagina); ini != pagina {
+			if ini, _ := siguientesDatos(f, 0, 3*pagina); ini != pagina {
 				t.Errorf("el diff se perforó o se rellenó: los datos empiezan en %d", ini)
+			}
+			if ini, _ := siguientesDatos(f, 2*pagina, 3*pagina); ini != 2*pagina {
+				t.Errorf("la página que el invitado puso a cero se perforó: despertaría con la del dorado")
 			}
 			f.Close()
 		}
@@ -427,5 +432,97 @@ func TestFreezeCompletoNoEscribeEnElAlmacen(t *testing.T) {
 	}
 	if existe(acum) {
 		t.Fatal("el acumulado del almacén sigue ahí (o el volcado se escribió dentro del almacén)")
+	}
+}
+
+// Sin jailer, machines/<id> es del VMM: el daemon no abre ahí enlaces ni
+// ficheros con más de un nombre.
+func TestAbrirPropio(t *testing.T) {
+	dir := t.TempDir()
+	bueno := filepath.Join(dir, "mem.file")
+	escribirPaginas(t, bueno, paginaDe('A'))
+	if f, err := abrirPropio(bueno, os.O_RDWR); err != nil {
+		t.Fatal(err)
+	} else {
+		f.Close()
+	}
+	host := filepath.Join(dir, "del-host")
+	escribirPaginas(t, host, paginaDe('H'))
+	enlace := filepath.Join(dir, "enlace")
+	if err := os.Symlink(host, enlace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := abrirPropio(enlace, os.O_RDWR); err == nil {
+		t.Error("siguió un enlace simbólico")
+	}
+	duro := filepath.Join(dir, "duro")
+	if err := os.Link(host, duro); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := abrirPropio(duro, os.O_RDWR); err == nil {
+		t.Error("abrió un fichero con dos nombres (enlace duro)")
+	}
+	// Y aplicarDiff tampoco escribe a través de un enlace.
+	if err := aplicarDiff(context.Background(), bueno, enlace); err == nil {
+		t.Error("aplicarDiff escribió a través de un enlace")
+	}
+	if got := leerPaginas(t, host, 1); !bytes.Equal(got[0], paginaDe('H')) {
+		t.Error("el fichero del host cambió")
+	}
+}
+
+// El diff acumulado es mem.file o un enlace EXACTAMENTE a su sitio en el
+// almacén; un enlace a otro lado no se sigue.
+func TestFuenteDiff(t *testing.T) {
+	m := newTestManager(t)
+	id := "0123456789abcdef"
+	dir := filepath.Join(m.root, "machines", id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mem := filepath.Join(dir, "mem.file")
+	escribirPaginas(t, mem, paginaDe('D'))
+	if got, err := m.fuenteDiff(id, dir); err != nil || got != mem {
+		t.Fatalf("fichero regular: %q %v", got, err)
+	}
+	_ = os.Remove(mem)
+	if err := os.Symlink("/etc/passwd", mem); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := m.fuenteDiff(id, dir); err == nil {
+		t.Fatalf("siguió un enlace a %q", got)
+	}
+}
+
+// La base que dice el sello tiene que ser la memoria del dorado de la copia.
+func TestBaseDiffValida(t *testing.T) {
+	m := newTestManager(t)
+	mc := &api.Machine{ID: "0123456789abcdef", From: "pg-warm"}
+	if err := m.baseDiffValida(mc, filepath.Join(m.snapDir("pg-warm"), "mem.file")); err != nil {
+		t.Fatal(err)
+	}
+	for _, mala := range []string{"/etc/shadow", filepath.Join(m.snapDir("otro"), "mem.file"), ""} {
+		if err := m.baseDiffValida(mc, mala); err == nil {
+			t.Errorf("aceptó la base %q", mala)
+		}
+	}
+	if err := m.baseDiffValida(&api.Machine{ID: "x"}, filepath.Join(m.snapDir(""), "mem.file")); err == nil {
+		t.Error("una máquina sin dorado aceptó una base")
+	}
+}
+
+// La prueba de huecos no deja nada detrás y dice que no donde no puede probar.
+func TestHuecosFiables(t *testing.T) {
+	dir := t.TempDir()
+	got := probarHuecos(dir)
+	if sabeDeHuecos(t, dir) && !got {
+		t.Log("este sistema de ficheros sabe de huecos pero no guarda las páginas de ceros escritas como datos")
+	}
+	_ = os.Remove(filepath.Join(dir, "sonda"))
+	if es, _ := os.ReadDir(dir); len(es) != 0 {
+		t.Errorf("la prueba dejó %v", es)
+	}
+	if probarHuecos(filepath.Join(dir, "no-existe")) {
+		t.Error("un directorio que no existe tiene huecos fiables")
 	}
 }

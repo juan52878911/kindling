@@ -163,3 +163,22 @@ func TestDiscoDeMaquinaConTamanoPropio(t *testing.T) {
 		t.Error("un disco de tamaño propio no necesita la plantilla y la construyó")
 	}
 }
+
+// -disk tiene que caber en lo libre, y KLING_MAX_DISK_MIB baja el tope.
+func TestDiskAdmision(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.checkDiskParaOverlay(maxOverlayMiB * 1024); err == nil {
+		t.Fatal("un disco de 256 TiB cupo en el disco de pruebas")
+	}
+	if err := m.checkDiskParaOverlay(minOverlayMiB); err != nil {
+		t.Fatalf("un disco de %d MiB: %v", minOverlayMiB, err)
+	}
+	t.Setenv("KLING_MAX_DISK_MIB", "2048")
+	if maxDiskMiB() != 2048 {
+		t.Fatalf("KLING_MAX_DISK_MIB=2048 da %d", maxDiskMiB())
+	}
+	t.Setenv("KLING_MAX_DISK_MIB", "999999999")
+	if maxDiskMiB() != maxOverlayMiB {
+		t.Fatal("KLING_MAX_DISK_MIB subió el tope por encima del máximo")
+	}
+}

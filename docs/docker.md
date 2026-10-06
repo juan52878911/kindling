@@ -107,7 +107,7 @@ espejo de la memoria en el almacén y `-disk`.
 - **Importar una imagen local** (`docker save`, un directorio OCI): hoy
   `image import` solo baja de un registro.
 - **`-e` por máquina**: el entorno va dentro de la imagen; dos entornos son
-  dos imágenes (con sufijo de hash). Lo que es secreto debería ir por el
+  dos imágenes (el nombre lleva un HMAC de la referencia y el entorno, con una clave local). Lo que es secreto debería ir por el
   proxy de credenciales o por MMDS, no en el entorno.
 - **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
   se entra por el gateway o con `kling exec`.

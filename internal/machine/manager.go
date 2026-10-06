@@ -528,7 +528,7 @@ func (m *Manager) load() {
 	var list []*api.Machine
 	var version int
 	if err == nil {
-		version, err = esquema.Comprobar(m.statePath(), b, versionEstado)
+		version, err = esquema.Comprobar(m.statePath(), b, versionEstadoMax)
 	}
 	if esquema.EsMasNuevo(err) {
 		// Lo dejó un kling más nuevo: no está roto, así que no se aparta, y
@@ -572,7 +572,30 @@ func (m *Manager) load() {
 //
 //	0: un array JSON de máquinas, sin campo (hasta v0.17).
 //	1: {"schema": 1, "machines": [...]}.
+//	2: el mismo formato, con alguna copia congelada en diferencial
+//	   (diff_volcado.go). Un kling anterior cargaría su mem.file disperso como
+//	   si fuera la RAM entera y la copia despertaría con la memoria rota: con
+//	   el 2 se niega a arrancar. Sin copias en diferencial se sigue escribiendo
+//	   el 1 y volver atrás es posible.
 const versionEstado = 1
+
+// versionEstadoDiff es el esquema que se escribe si alguna máquina tiene
+// DiffBase; versionEstadoMax, el más nuevo que este binario sabe leer.
+const (
+	versionEstadoDiff = 2
+	versionEstadoMax  = versionEstadoDiff
+)
+
+// esquemaParaEscribir es versionEstado, o versionEstadoDiff si alguna
+// máquina depende de un diferencial.
+func esquemaParaEscribir(list []api.Machine) int {
+	for i := range list {
+		if list[i].DiffBase != "" {
+			return versionEstadoDiff
+		}
+	}
+	return versionEstado
+}
 
 // ficheroEstado es state.json desde la versión 1.
 type ficheroEstado struct {
@@ -587,7 +610,7 @@ func decodificarEstado(b []byte, version int) ([]*api.Machine, error) {
 		var list []*api.Machine
 		err := json.Unmarshal(b, &list)
 		return list, err
-	case 1:
+	case 1, 2:
 		var f ficheroEstado
 		err := json.Unmarshal(b, &f)
 		return f.Machines, err
@@ -605,7 +628,7 @@ func comprobarVersionEstado(root string) error {
 	if err != nil {
 		return nil // que no exista es la primera arrancada; ilegible lo trata load
 	}
-	if _, err := esquema.Comprobar(ruta, b, versionEstado); esquema.EsMasNuevo(err) {
+	if _, err := esquema.Comprobar(ruta, b, versionEstadoMax); esquema.EsMasNuevo(err) {
 		return err
 	}
 	return nil
@@ -769,7 +792,7 @@ func (m *Manager) writePending() {
 	f := struct {
 		esquema.Cabecera
 		Machines []api.Machine `json:"machines"`
-	}{esquema.Cabecera{Schema: versionEstado}, list}
+	}{esquema.Cabecera{Schema: esquemaParaEscribir(list)}, list}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		log.Printf("state: could not serialize it: %v", err)
@@ -1125,9 +1148,16 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
 	// hasta que se escribe, pero uno diminuto no monta ni el agente.
-	if req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > maxOverlayMiB {
-		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d)",
-			req.DiskMiB, minOverlayMiB, maxOverlayMiB, defaultOverlayMiB)
+	if tope := maxDiskMiB(); req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > tope {
+		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
+			req.DiskMiB, minOverlayMiB, tope, defaultOverlayMiB)
+	}
+	// Disperso, pero el invitado puede llenarlo: uno más grande que el de
+	// siempre tiene que caber en lo que queda libre.
+	if req.DiskMiB > defaultOverlayMiB {
+		if err := m.checkDiskParaOverlay(req.DiskMiB); err != nil {
+			return nil, err
+		}
 	}
 	if req.MemMiB <= 0 {
 		req.MemMiB = 256
@@ -1882,6 +1912,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
 	// GiB) y mucho menos que exigir la RAM entera a cada copia dormida.
 	enDiff := mc.DiffBase != "" && congelarEnDiff() && existe(mc.DiffBase)
+	if enDiff && !huecosFiables(filepath.Dir(m.dir(mc.ID))) {
+		// Sin huecos fiables un diff no se puede aplicar bien (huecos_fiables.go).
+		log.Printf("warning: %s: %s does not tell holes from zero pages; freezing the whole memory",
+			mc.Name, filepath.Dir(m.dir(mc.ID)))
+		m.olvidarDiffBase(mc.ID)
+		enDiff = false
+	}
 	necesario := max(mc.MemMiB, mc.MemMaxMiB)
 	if enDiff {
 		necesario /= 4
@@ -1901,6 +1938,10 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// Si puede, el diff va al almacén (cow_memoria.go): ahí despertar
 		// es clonar sus extents sobre el espejo del dorado, no copiarlos.
 		diffAlmacen = m.diffEnAlmacen(ctx, mc.ID, max(mc.MemMiB, mc.MemMaxMiB))
+		if diffAlmacen != "" && !huecosFiables(m.alm.dir) {
+			m.borrarDiffParcialAlmacen(mc.ID)
+			diffAlmacen = ""
+		}
 		if diffAlmacen == "" {
 			if fi, err := os.Lstat(filepath.Join(dir, "mem.file")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 				// El acumulado vive en el almacén pero el almacén ya no
@@ -1921,6 +1962,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
 	if diffAlmacen != "" {
 		memPath = diffAlmacen
+	}
+	if enDiff && diffAlmacen == "" {
+		// Un mem.diff viejo (un crash a mitad de otro freeze) no se reutiliza:
+		// Firecracker escribe encima solo las páginas sucias y las demás
+		// serían de entonces.
+		_ = os.Remove(filepath.Join(dir, memDiff))
 	}
 
 	// Una instancia jailed corre chrooteada: no puede escribir en el dir del
@@ -1966,7 +2013,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 
 	// Con el invitado aún en marcha: que suelte lo que no usa, y el volcado
 	// lleve solo lo que está en uso (apreton_volcado.go).
-	apretado := apretarAntesDeVolcar(ctx, c, mc)
+	// No antes de un diferencial: las páginas que el invitado soltara se
+	// vuelcan igual (están sucias) y costaría hasta 2 s y su caché.
+	apretado := 0
+	if !enDiff {
+		apretado = apretarAntesDeVolcar(ctx, c, mc)
+	}
 
 	// Desde aquí, lo que haya en disco deja de valer hasta el sello final: si el
 	// daemon muere a mitad del volcado, reconcile y Thaw lo sabrán (volcado.go).
@@ -2745,11 +2797,22 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
 	base := leerSello(dir).DiffBase
 	if base != "" {
+		if err := m.baseDiffValida(mc, base); err != nil {
+			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+		}
 		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
 		if err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
 		memPath = full
+	}
+	// El mem.full de este despertar, si algo falla antes de abortar (que lo
+	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
+	soltarFull := func() {
+		if base != "" {
+			_ = os.Remove(filepath.Join(dir, memFull))
+			m.borrarMemoriaAlmacen(mc.ID)
+		}
 	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
@@ -2766,6 +2829,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// no tiene por qué esperar turno.
 	release, glErr := m.enterLaunch(ctx)
 	if glErr != nil {
+		soltarFull()
 		return nil, glErr
 	}
 	defer release()
@@ -2783,10 +2847,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if !m.redLista(netcfg, mc.ID) {
 		n, err := m.redParaRehacer(mc)
 		if err != nil {
+			soltarFull()
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
 		netcfg = n
 		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
+			soltarFull()
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
 	}

@@ -90,13 +90,18 @@ func (m *Manager) olvidarDiffBase(id string) {
 // que hace que despertar de un diferencial de cientos de MiB cueste
 // milisegundos. Si el sistema de ficheros no clona (ext4, otro sistema de
 // ficheros, tramos no alineados) se copia, tramo a tramo.
+//
+// Los dos se abren sin seguir enlaces y tienen que ser ficheros regulares con
+// un solo nombre: sin jailer, machines/<id> es del VMM, y un enlace plantado
+// ahí llevaría al daemon (root) a escribir datos del invitado en un fichero
+// del host, o a meter uno del host en la RAM del invitado.
 func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
-	in, err := os.Open(diffPath)
+	in, err := abrirPropio(diffPath, os.O_RDONLY)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dstPath, os.O_RDWR, 0)
+	out, err := abrirPropio(dstPath, os.O_RDWR)
 	if err != nil {
 		return err
 	}
@@ -119,7 +124,10 @@ func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		ini, fin := siguientesDatos(in, off, tam)
+		ini, fin, err := siguientesDatosEstricto(in, off, tam)
+		if err != nil {
+			return fmt.Errorf("finding the diff's data: %w", err)
+		}
 		if ini >= tam {
 			break
 		}
@@ -187,7 +195,10 @@ func fusionarDiff(ctx context.Context, dir, diff, acum string) error {
 	if acum != mem {
 		// Ya fundido, el VMM no vuelve a escribirlo: solo lectura por grupo,
 		// como mem.full. Lo que escriba, lo escribe en un mem.diff nuevo.
-		_ = os.Chmod(acum, 0o640)
+		if f, err := abrirPropio(acum, os.O_RDONLY); err == nil {
+			_ = f.Chmod(0o640)
+			f.Close()
+		}
 		_ = os.Remove(mem)
 		if err := os.Symlink(acum, mem); err != nil {
 			return fmt.Errorf("linking the diff from the store: %w", err)
@@ -227,12 +238,16 @@ func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine,
 	if !existe(base) {
 		return "", fmt.Errorf("it was frozen as a diff against the golden snapshot's memory (%s), which is gone", base)
 	}
+	diff, err := m.fuenteDiff(mc.ID, dir)
+	if err != nil {
+		return "", err
+	}
 	full := filepath.Join(dir, memFull)
 	_ = os.Remove(full)
 	m.borrarMemoriaAlmacen(mc.ID)
 	// Primero el almacén (cow_memoria.go): un clon del espejo del dorado, que
 	// no cuesta ni tiempo ni más disco que el diff.
-	if enlace := m.memoriaEnAlmacen(ctx, mc.ID, dir, base); enlace != "" {
+	if enlace := m.memoriaEnAlmacen(ctx, mc.ID, dir, base, diff); enlace != "" {
 		return enlace, nil
 	}
 	if err := clonarFichero(base, full); err != nil {
@@ -245,11 +260,17 @@ func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine,
 		}
 	}
 	// Lo abre el VMM, que corre sin privilegios: como el mem.file de un
-	// freeze, que escribe él mismo.
-	if err := os.Chmod(full, 0o640); err == nil && m.priv != nil {
-		_ = m.priv.Own(full)
+	// freeze, que escribe él mismo. Por descriptor: el directorio es suyo.
+	f, err := abrirPropio(full, os.O_RDONLY)
+	if err != nil {
+		_ = os.Remove(full)
+		return "", err
 	}
-	if err := aplicarDiff(ctx, filepath.Join(dir, "mem.file"), full); err != nil {
+	if err := f.Chmod(0o640); err == nil && m.priv != nil {
+		_ = m.priv.OwnFile(f)
+	}
+	f.Close()
+	if err := aplicarDiff(ctx, diff, full); err != nil {
 		_ = os.Remove(full)
 		return "", fmt.Errorf("applying the diff onto the golden memory: %w", err)
 	}
@@ -272,4 +293,54 @@ func copiarFicheroDisperso(ctx context.Context, src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// fuenteDiff es la ruta del diff acumulado de la copia id: machines/<id>/mem.file
+// si es un fichero, o el acumulado del almacén si es un enlace a él. Un
+// enlace a cualquier otro sitio no se sigue: ese directorio es del VMM.
+func (m *Manager) fuenteDiff(id, dir string) (string, error) {
+	mem := filepath.Join(dir, "mem.file")
+	fi, err := os.Lstat(mem)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode().IsRegular() {
+		return mem, nil
+	}
+	if fi.Mode()&os.ModeSymlink != 0 && m.alm != nil && nombreSeguro(id) == nil {
+		if dst, err := os.Readlink(mem); err == nil && dst == m.alm.acumuladoDiff(id) {
+			return dst, nil
+		}
+	}
+	return "", fmt.Errorf("%s is neither the frozen diff nor a link to it in the store", mem)
+}
+
+// abrirPropio abre ruta sin seguir enlaces y solo si es un fichero regular
+// con un nombre (un enlace duro plantado en un directorio del VMM tendría dos).
+func abrirPropio(ruta string, flag int) (*os.File, error) {
+	fd, err := syscall.Open(ruta, flag|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: ruta, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), ruta)
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || (ok && uint64(st.Nlink) != 1) {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file with a single name", ruta)
+	}
+	return f, nil
+}
+
+// baseDiffValida dice si base es el mem.file del dorado del que viene la
+// copia: el sello vive en un directorio del VMM y no se le cree otra ruta.
+func (m *Manager) baseDiffValida(mc *api.Machine, base string) error {
+	if mc.From == "" || base != filepath.Join(m.snapDir(mc.From), "mem.file") {
+		return fmt.Errorf("its seal points at %q, which is not the memory of its golden snapshot", base)
+	}
+	return nil
 }

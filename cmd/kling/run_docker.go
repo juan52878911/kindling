@@ -5,18 +5,25 @@ package main
 // Con `kling image import` el flujo era de dos pasos, y el nombre de la
 // imagen importada, otra cosa que recordar. Como en `docker run`, una
 // referencia (`redis:7-alpine`, `ghcr.io/o/r:tag`, `postgres@sha256:...`) se
-// importa la primera vez y después se reutiliza por su nombre de siempre
-// (imageNameFor). El entorno de -e va DENTRO de la imagen (ver imagenes.md),
-// así que dos entornos distintos son dos imágenes: el nombre lleva un sufijo
-// con el hash del entorno, y ni las claves ni los valores aparecen en él.
+// importa la primera vez y después se reutiliza. El nombre es el de
+// imageNameFor más un sufijo que sale de la referencia ENTERA (registro,
+// repositorio, etiqueta y digest) y del entorno de -e, que va DENTRO de la
+// imagen (ver imagenes.md): ni `ghcr.io/x/redis:7` se hace pasar por
+// `redis:7`, ni fijar un digest reutiliza otra cosa, y dos entornos son dos
+// imágenes. El sufijo es un HMAC con una clave local (claveRunImage): sin ella
+// no se puede comprobar una contraseña probando un diccionario contra el
+// nombre.
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -36,17 +43,53 @@ func esRefDocker(image string) bool {
 }
 
 // nombreParaRef es el nombre de la imagen de kindling para una referencia y
-// un entorno: el de imageNameFor y, con entorno, "-" y seis hexadecimales del
-// hash de sus líneas ordenadas.
-func nombreParaRef(r oci.ImageRef, env []string) string {
-	name := imageNameFor(r)
-	if len(env) == 0 {
-		return name
-	}
+// un entorno: el de imageNameFor, "-" y ocho hexadecimales del HMAC de la
+// referencia normalizada y las líneas del entorno ordenadas.
+func nombreParaRef(r oci.ImageRef, env []string, clave []byte) string {
 	lineas := append([]string(nil), env...)
 	sort.Strings(lineas)
-	sum := sha256.Sum256([]byte(strings.Join(lineas, "\n")))
-	return name + "-" + hex.EncodeToString(sum[:3])
+	mac := hmac.New(sha256.New, clave)
+	mac.Write([]byte(r.String() + "\x00" + strings.Join(lineas, "\n")))
+	base := imageNameFor(r)
+	if len(base) > 55 { // los nombres de imagen tienen 64 como mucho
+		base = strings.TrimRight(base[:55], "-_")
+	}
+	return base + "-" + hex.EncodeToString(mac.Sum(nil)[:4])
+}
+
+// claveRunImage es la clave local del HMAC de nombreParaRef: 32 bytes en
+// <config>/kling/run-image.key (0600), creada la primera vez. Si no se puede
+// leer ni crear, nil: el sufijo es entonces un hash sin clave, y lo único que
+// se pierde es la protección frente al diccionario.
+func claveRunImage() []byte {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil
+	}
+	ruta := filepath.Join(dir, "kling", "run-image.key")
+	if b, err := os.ReadFile(ruta); err == nil && len(b) == 32 {
+		return b
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(ruta), 0o700); err != nil {
+		return nil
+	}
+	f, err := os.OpenFile(ruta, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		// Otro proceso la creó a la vez: la suya.
+		if b2, err := os.ReadFile(ruta); err == nil && len(b2) == 32 {
+			return b2
+		}
+		return nil
+	}
+	defer f.Close()
+	if _, err := f.Write(b); err != nil {
+		return nil
+	}
+	return b
 }
 
 // asegurarImagenDocker devuelve el nombre de la imagen de kindling de la
@@ -64,7 +107,7 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string, env []
 			return "", fmt.Errorf("invalid environment entry %q: use KEY=value, one line", k)
 		}
 	}
-	name := nombreParaRef(r, env)
+	name := nombreParaRef(r, env, claveRunImage())
 	imgs, err := c.Images(ctx)
 	if err != nil {
 		return "", err
