@@ -1,6 +1,7 @@
 package oci_test
 
 import (
+	"encoding/json"
 	"archive/tar"
 	"context"
 	"io"
@@ -170,5 +171,24 @@ func TestPullMaxBytes(t *testing.T) {
 	c.MaxBytes = int64(len(layer))
 	if _, err := c.Pull(context.Background(), r.Host()+"/x/y", man, "arm64"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Un blob de configuración se lee entero a memoria: sin tamaño declarado, o
+// con uno enorme, no se baja.
+func TestPullRejectsConfigSize(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: "x"}})
+	cfg := r.Put([]byte(`{"architecture":"arm64","os":"linux"}`), "")
+	for _, size := range []int64{0, 1 << 30} {
+		m, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cfg, "size": size},
+			"layers": []map[string]any{{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": r.Put(layer, ""), "size": len(layer)}}})
+		man := r.Put(m, "application/vnd.oci.image.manifest.v1+json")
+		c := &oci.Client{Cache: t.TempDir(), Log: io.Discard}
+		if _, err := c.Pull(context.Background(), r.Host()+"/x/y", man, "arm64"); err == nil || !strings.Contains(err.Error(), "declared size") {
+			t.Fatalf("config de tamaño %d: %v", size, err)
+		}
 	}
 }

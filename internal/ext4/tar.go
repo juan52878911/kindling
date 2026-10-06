@@ -26,6 +26,12 @@ type TarOptions struct {
 	// OnEntry recibe la ruta (relativa a Prefix, con "/" delante) de cada
 	// entrada que se mete (la lista de ficheros de un paquete .deb).
 	OnEntry func(rel string, h *tar.Header)
+	// Entries, si no es nil, cuenta las entradas leídas (se comparte entre
+	// varias llamadas: las capas de una imagen) y MaxEntries es su tope: un
+	// tar con millones de entradas falla al pasarlo, antes de llenar la
+	// memoria de nodos. 0 = sin tope.
+	Entries    *int64
+	MaxEntries int64
 }
 
 const maxKeep = 16 << 20
@@ -48,6 +54,12 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		}
 		if err != nil {
 			return fmt.Errorf("tar entry %d: %w", idx, err)
+		}
+		if o.Entries != nil {
+			*o.Entries++
+			if o.MaxEntries > 0 && *o.Entries > o.MaxEntries {
+				return fmt.Errorf("more than %d tar entries", o.MaxEntries)
+			}
 		}
 		name := path.Clean("/" + h.Name)
 		if name == "/" {

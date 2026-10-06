@@ -111,7 +111,7 @@ func imagesImport(args []string) error {
 	fmt.Print(res.Output)
 	fmt.Printf("image %s: %s\n", res.Name, built.Digest)
 	if len(built.Service.Argv) > 0 {
-		fmt.Printf("  runs     %s", strings.Join(built.Service.Argv, " "))
+		fmt.Printf("  runs     %s", runsLine(built.Service.Argv, len(spec.Cmd)+len(spec.Entrypoint) > 0))
 		if built.Service.User != "" {
 			fmt.Printf("  (as %s)", built.Service.User)
 		}
@@ -150,4 +150,14 @@ func imageNameFor(r oci.ImageRef) string {
 		n = "image"
 	}
 	return n
+}
+
+// runsLine es la orden del servicio para la salida. Los argumentos que puso
+// quien importa (-entrypoint, después de --) no se repiten: pueden llevar una
+// contraseña que no debe acabar en un log de CI.
+func runsLine(argv []string, fromCommandLine bool) string {
+	if !fromCommandLine || len(argv) < 2 {
+		return strings.Join(argv, " ")
+	}
+	return fmt.Sprintf("%s … (%d arguments from the command line)", argv[0], len(argv)-1)
 }

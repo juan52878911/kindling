@@ -43,6 +43,10 @@ var manifestAccept = strings.Join([]string{MediaOCIManifest, MediaDockerManifest
 // maxManifest es el tamaño máximo de un manifiesto o un índice.
 const maxManifest = 4 << 20
 
+// maxConfig es el tamaño máximo del blob de configuración: se lee entero a
+// memoria (los de Docker Hub rondan los 10 KiB).
+const maxConfig = 8 << 20
+
 // Descriptor es una pieza referida por digest.
 type Descriptor struct {
 	MediaType string `json:"mediaType"`
@@ -137,7 +141,34 @@ func (c *Client) client() *http.Client {
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
-	}}
+	}, CheckRedirect: checkRedirect}
+}
+
+// checkRedirect sigue las redirecciones de los registros (las capas suelen
+// estar en un CDN) pero nunca de https a http: el contenido se verifica por
+// sha256, pero el token de la petición no debe viajar en claro.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "https" && !(req.URL.Scheme == "http" && isLocalHost(req.URL.Hostname()) && isLocalHost(via[0].URL.Hostname())) {
+		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// isLocalHost dice si host (sin puerto) es esta máquina: solo ahí se habla
+// http (un registro de pruebas). "localhost.example.com" no lo es.
+func isLocalHost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// registryHost quita el puerto de "registro[:puerto]".
+func registryHost(registry string) string {
+	if h, _, err := net.SplitHostPort(registry); err == nil {
+		return h
+	}
+	return strings.Trim(registry, "[]")
 }
 
 func (c *Client) logf(format string, a ...any) {
@@ -226,6 +257,9 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		}
 	}
 	img := &Image{Ref: registry + "/" + repo + "@" + digest, ManifestDigest: digest, Manifest: m}
+	if m.Config.Size <= 0 || m.Config.Size > maxConfig {
+		return nil, fmt.Errorf("config %s: declared size %d, want 1..%d bytes", m.Config.Digest, m.Config.Size, maxConfig)
+	}
 	cfgPath, err := c.blob(ctx, registry, repo, m.Config)
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -430,7 +464,7 @@ func readMax(r io.Reader, max int64) ([]byte, error) {
 // lo consigue y repite.
 func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*http.Response, error) {
 	u := "https://" + registry + "/v2/" + repo + "/" + path
-	if strings.HasPrefix(registry, "localhost") || strings.HasPrefix(registry, "127.0.0.1") {
+	if isLocalHost(registryHost(registry)) {
 		u = "http://" + registry + "/v2/" + repo + "/" + path
 	}
 	for try := 0; try < 2; try++ {
@@ -486,7 +520,7 @@ func (c *Client) token(ctx context.Context, challenge, repo string) (string, err
 	}
 	realm := params["realm"]
 	ru, err := url.Parse(realm)
-	if err == nil && ru.Scheme == "http" && (strings.HasPrefix(ru.Host, "127.0.0.1:") || strings.HasPrefix(ru.Host, "localhost:")) {
+	if err == nil && ru.Scheme == "http" && isLocalHost(ru.Hostname()) {
 		err = nil // un registro local de pruebas
 	} else if err == nil && ru.Scheme != "https" {
 		err = errors.New("not https")

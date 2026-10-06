@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -57,6 +58,9 @@ type readiness struct {
 	// run ejecuta un programa con plazo y devuelve su salida recortada.
 	// Sustituible en tests.
 	run func(ctx context.Context, path string, env []string) (string, error)
+	// probe ejecuta la sonda; nil = run. Por defecto, con el usuario del
+	// servicio de la imagen (como el HEALTHCHECK de Docker); los ganchos, root.
+	probe func(ctx context.Context, path string, env []string) (string, error)
 
 	probeMu sync.Mutex // una sonda a la vez: dos /ready seguidos esperan a la misma
 	mu      sync.Mutex // protege lo de abajo
@@ -72,6 +76,7 @@ var readyState = &readiness{
 	probePath: api.GuestReadyProbe,
 	hooksDir:  api.GuestPostRestoreDir,
 	run:       runWithTimeout,
+	probe:     runProbeAsService,
 }
 
 // setEnv fija el entorno de la sonda y los ganchos (el de los servicios).
@@ -125,7 +130,11 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 		r.mu.Unlock()
 		if need {
 			pctx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
-			out, err := r.run(pctx, r.probePath, env)
+			run := r.probe
+			if run == nil {
+				run = r.run
+			}
+			out, err := run(pctx, r.probePath, env)
 			cancel()
 			r.mu.Lock()
 			if err == nil {
@@ -224,9 +233,36 @@ func (r *readiness) startHooks(kind string, done func()) bool {
 // salida (stdout y stderr juntos, con tope). Al agotarse el plazo mata al grupo
 // entero: una sonda que lanza un `sh -c` no deja nietos.
 func runWithTimeout(ctx context.Context, path string, env []string) (string, error) {
+	return runAs(ctx, path, env, nil)
+}
+
+// runProbeAsService ejecuta la sonda con el usuario del servicio, si la
+// imagen declara uno con USER; si no, como root. Si el usuario no se
+// resuelve, la sonda no corre (mejor "no listo" que root por accidente).
+func runProbeAsService(ctx context.Context, path string, env []string) (string, error) {
+	serviceState.mu.Lock()
+	svc := serviceState.svc
+	serviceState.mu.Unlock()
+	if svc == nil || svc.spec.User == "" {
+		return runAs(ctx, path, env, nil)
+	}
+	u, err := lookupUser(svc.root, svc.spec.User)
+	if err != nil {
+		return "", err
+	}
+	if u.home != "" {
+		env = setEnv(env, "HOME", u.home)
+	}
+	return runAs(ctx, path, env, &syscall.Credential{Uid: u.uid, Gid: u.gid, Groups: u.groups})
+}
+
+func runAs(ctx context.Context, path string, env []string, cred *syscall.Credential) (string, error) {
 	cmd := exec.CommandContext(ctx, path)
 	cmd.Dir = "/"
 	cmd.Env = env
+	if cred != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
 	cmd.Cancel = func() error { KillGroup(cmd); return nil }
 	cmd.WaitDelay = 2 * time.Second
 	out := newCappedBuffer(16 << 10)

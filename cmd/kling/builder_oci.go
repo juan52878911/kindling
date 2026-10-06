@@ -204,12 +204,17 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
 	tree := ext4.NewDir(0o755, 0, 0, t)
 	var streams []ext4.Stream
+	// Tope de entradas mientras se leen: las capas se pisan unas a otras, así
+	// que el de ficheros de la raíz final (abajo) es el que cuenta; este solo
+	// impide que una capa con millones de entradas agote la memoria antes.
+	var entries int64
 	for i, l := range img.Layers {
 		rc, err := oci.OpenLayer(l)
 		if err != nil {
 			return err
 		}
-		err = tree.AddTar(rc, ext4.TarOptions{Stream: len(streams), Whiteouts: true, Time: t})
+		err = tree.AddTar(rc, ext4.TarOptions{Stream: len(streams), Whiteouts: true, Time: t,
+			Entries: &entries, MaxEntries: 2 * ociMaxFiles})
 		rc.Close()
 		if err != nil {
 			return fmt.Errorf("layer %d (%s): %w", i, l.Digest, err)

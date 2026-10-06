@@ -292,8 +292,11 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
   subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata` al importar).
 - **El entorno es de la imagen, no de la máquina**: `-e` va en `kling image
   import`; dos máquinas con contraseñas distintas son dos imágenes.
-- **El `HEALTHCHECK` corre como root**, con el entorno de la imagen; en Docker
-  corre con el `USER` de la imagen.
+- **El `HEALTHCHECK` corre con el `USER` de la imagen** (o el de `-user`), como
+  en Docker; si ese usuario no existe en la imagen, la máquina no llega a lista.
+- **El constructor `oci` corre como root dentro del daemon**: lee los tar sin
+  escribir nada fuera de su directorio de trabajo (las rutas se resuelven en un
+  árbol en memoria y `..` se rechaza), pero aún no baja de privilegios.
 - **Sin zstd**: solo capas `tar` y `tar+gzip`.
 - **No cambia la licencia**: convertir una imagen no la redistribuye, pero
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
