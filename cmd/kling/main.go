@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -479,21 +480,37 @@ func cmdRun(args []string) error {
 		return err
 	}
 	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
-	// Una referencia de Docker en -image se importa sola (run_docker.go); el
-	// entorno de -e solo tiene sentido ahí, porque va dentro de la imagen.
+	// Una referencia de Docker en -image se importa sola (run_docker.go). El
+	// entorno de -e es de la máquina, no de la imagen: viaja en el cuerpo de
+	// la petición y el daemon se lo da al invitado por MMDS
+	// (pkg/api/machine_env.go). Con -from no hay: la copia lleva el del dorado.
 	imagen := config.Or(*image, cfg.Defaults.Image, "default")
 	env, err := ef.resolve()
 	if err != nil {
 		return err
 	}
-	switch {
-	case *from == "" && esRefDocker(imagen):
-		if imagen, err = asegurarImagenDocker(ctx, client, imagen, env); err != nil {
+	if len(env) > 0 && *from != "" {
+		return fmt.Errorf("-e and -env-file don't apply with -from: the copy runs with the environment of the machine " +
+			"the template was saved from (its service is already running with it)")
+	}
+	if _, err := api.MachineEnvMap(env); err != nil {
+		return err
+	}
+	if len(env) > 0 {
+		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
+		// su entorno, sin un solo error.
+		info, err := client.Info(ctx)
+		if err != nil {
 			return err
 		}
-	case len(env) > 0:
-		return fmt.Errorf("-e and -env-file only apply when -image is a Docker reference (the environment is baked into " +
-			"the imported image); for a kindling image, import it with them: kling image import <ref> -e KEY=value -name N")
+		if !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
+			return fmt.Errorf("the daemon (%s) does not take -e at run: update it", info.Version)
+		}
+	}
+	if *from == "" && esRefDocker(imagen) {
+		if imagen, err = asegurarImagenDocker(ctx, client, imagen); err != nil {
+			return err
+		}
 	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
@@ -522,6 +539,7 @@ func cmdRun(args []string) error {
 		Shares:    shareSpecs,
 		AllowExec: *allowExec,
 		OnTTL:     *onTTL,
+		Env:       env,
 	})
 	if err != nil {
 		return err

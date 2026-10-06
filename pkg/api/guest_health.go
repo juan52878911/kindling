@@ -22,6 +22,7 @@ const (
 	GuestCapMCP     = "mcp"      // el puente MCP: / y /mcp
 	GuestCapBootOpt = "boot-opt" // ignora los kling.* y las opciones de volumen que no conoce
 	GuestCapService = "service"  // la imagen declara un servicio: GET /service, POST /service/stop (guest_service.go)
+	GuestCapEnv     = "env"      // lee el entorno de la máquina de MMDS con kling.env=1 (machine_env.go)
 )
 
 // GuestHealth es la respuesta JSON de GET /healthz.

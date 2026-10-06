@@ -108,6 +108,20 @@ func (a *Agent) StartService() {
 	if svc == nil {
 		return
 	}
+	a.startService(svc)
+}
+
+// startService arranca svc con el entorno del agente, salvo que falte el de
+// la máquina (machine_env.go).
+func (a *Agent) startService(svc *Service) {
+	if a.envErr != nil {
+		// Declarado pero sin arrancar: GET /service enseña por qué.
+		svc.err = a.envErr.Error()
+		serviceState.mu.Lock()
+		serviceState.svc = svc
+		serviceState.mu.Unlock()
+		return
+	}
 	svc.Start(a.Env)
 }
 

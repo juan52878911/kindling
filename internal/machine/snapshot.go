@@ -505,6 +505,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// La puerta de exec se congela con la memoria: las instancias la tendrán
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
 		AllowExec:      mc.AllowExec,
+		EnvKeys:        mc.EnvKeys,
 		RootfsSHA256:   rootfsSHA,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
@@ -1408,6 +1409,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct,
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
+		// El entorno es el del dorado: está en su memoria (entorno.go).
+		EnvKeys: snap.EnvKeys,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
 		CreatedAt: creada,

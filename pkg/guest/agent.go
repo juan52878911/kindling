@@ -62,13 +62,17 @@ type Agent struct {
 	// ExtraCaps son las capacidades que añade quien embebe al agente (el
 	// puente: api.GuestCapMCP). Se fijan antes de Register.
 	ExtraCaps []string
+
+	// envErr: el host arrancó la máquina con entorno propio (kling.env=1) y
+	// no se pudo leer. El servicio no arranca sin él (machine_env.go).
+	envErr error
 }
 
 // Caps son las capacidades que anuncia /healthz: las rutas que Register sirve
 // en este proceso y las que añade quien lo embebe.
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
-		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt}
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -109,6 +113,9 @@ func New() (*Agent, error) {
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
 	// saber cuáles traen paquetes.
 	a.Env = LibraryEnv(os.Environ(), a.Volumes.Specs())
+	// El entorno de la máquina, encima del de la imagen: antes de escuchar,
+	// que es cuando el daemon lo borra de MMDS.
+	a.applyMachineEnv(MachineEnvRequired(), FetchMMDS)
 	readyState.setEnv(a.Env)
 	for _, kv := range a.Env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
