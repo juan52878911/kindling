@@ -167,6 +167,56 @@ ready, service}`).
 Sin una línea de código por imagen: ni enlaces a mano en `/dev` (lo que hizo
 falta en la evaluación del 2026-09-30) ni `chroot`.
 
+### Imágenes grandes: RAM, CPU y disco
+
+Lo que salió de correr Hindsight (memoria de agentes: API en Python, Postgres
+embebido y dos modelos locales; 2,6 GiB de imagen, ~1 GiB de proceso) en el
+laboratorio, Docker y kindling en el mismo host con 2 CPU:
+
+| | Docker | kindling |
+|---|---|---|
+| Arranque en frío hasta listo | 17,6 s | 19 s |
+| Instancia nueva con sus datos, hasta la primera respuesta | 17,6 s (y sin datos) | **0,55 s** desde la plantilla |
+| Respuesta en caliente | 0,33 s | 0,37 s |
+| RAM por instancia | 825–925 MiB | **~100 MiB propios** + ~440 MiB compartidos entre todas |
+| Puertos en el host | los que se publiquen | ninguno |
+
+Y lo que hubo que cambiar para llegar ahí:
+
+- **CPU.** El techo por defecto del daemon es medio núcleo, pensado para un
+  servidor MCP que atiende una llamada cada tanto. Un contenedor de Docker
+  corre con los núcleos enteros salvo que se le ponga `--cpus`, y con medio
+  núcleo Hindsight tardaba 43 s en arrancar y 1,4 s por consulta. El
+  constructor `oci` deja en la receta `cpu_pct_per_vcpu: 100` (un núcleo por
+  vCPU); `-cpu-pct` sigue mandando.
+- **Disco de la máquina.** Era fijo, de 512 MiB: un modelo de 470 MB no cabía.
+  `kling run -disk 4G` lo agranda (de 64 MiB a 256 GiB; disperso, así que solo
+  cuesta lo que se escribe). Las copias de una plantilla heredan el del dorado.
+- **Apretar antes de volcar.** `save` y `freeze` inflan el globo del invitado
+  justo antes de volcar, para que suelte lo que tiene libre y su caché de
+  página (en Hindsight, 0,9 GiB de los ficheros del modelo que el proceso ya
+  tiene en memoria), y lo desinflan a la línea base: el volcado lleva solo lo
+  que está en uso, y es lo que las copias y los thaw faultean. Solo en
+  Firecracker; `KLING_SQUEEZE_BEFORE_DUMP=0` lo apaga.
+- **Congelado diferencial.** Una copia de un dorado se carga con seguimiento
+  de páginas sucias, y al congelarla el VMM vuelca solo lo que escribió desde
+  el dorado (en vez de los 1,9 GiB de la RAM entera, 6–8 s por copia). Al
+  descongelar se construye base + diff en `mem.full` (un clon en btrfs o XFS,
+  una copia dispersa en ext4: ahí el disco lo paga mientras la copia corre) y
+  el siguiente freeze funde lo nuevo sobre el diff que había. Un `commit` o un
+  `fork` de esa copia (volcados completos) hacen que su siguiente freeze
+  vuelque entero. `KLING_DIFF_FREEZE=0` lo apaga.
+- **Un volcado que no cabe se rechaza antes de pausar** (la RAM más el mínimo
+  de disco de siempre), y uno que falla a medias borra lo que escribió. Antes
+  llenaba el disco y dejaba un `mem.file` parcial del tamaño de la RAM.
+
+Los dos últimos puntos están medidos solo en pruebas unitarias; las cifras de
+arriba son de ANTES de ellos. Lo que no cambia: el supervisor de `kling-guest`
+no ve morir al API de una imagen cuyo script de arranque sigue vivo (el de
+Hindsight se queda con la interfaz web), y una imagen que llama a Hugging Face
+al arrancar se cuelga sin salida a internet hasta que se le pone
+`HF_HUB_OFFLINE=1`.
+
 ### Límites del constructor `oci`
 
 - **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,

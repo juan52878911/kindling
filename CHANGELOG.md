@@ -10,6 +10,21 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Sleeping copies cost what they changed.** A copy restored from a golden now
+  freezes as a diff: only the pages it wrote since the golden, instead of its whole
+  RAM (1.9 GiB and 6–8 s per copy measured with Hindsight). Thaw rebuilds base + diff
+  (a clone on btrfs/XFS, a sparse copy on ext4) and the next freeze merges what
+  changed since. `KLING_DIFF_FREEZE=0` turns it off. Firecracker only.
+- **Dumps carry only pages in use.** `save` and `freeze` squeeze the guest's balloon
+  right before dumping, so free memory and page cache do not end up in the mem.file
+  that every copy maps. `KLING_SQUEEZE_BEFORE_DUMP=0` turns it off.
+- **A dump that does not fit is refused before pausing**, and a failed dump removes
+  what it wrote; it used to fill the disk and leave a partial mem.file the size of
+  the RAM behind.
+- **`kling run -disk 4G`** sizes the machine's writable disk (was a fixed 512 MiB).
+- **Docker images get a full core per vCPU** by default (`cpu_pct_per_vcpu: 100` in
+  the recipe): with the daemon's half a core, Hindsight booted in 43 s and answered
+  in 1.4 s instead of 19 s and 0.37 s. See [`docs/imagenes.md`](docs/imagenes.md).
 - **Imágenes de Docker en kling: `kling image import <ref>`.** Una imagen de Docker/OCI
   (`postgres:17-alpine`, `timescale/timescaledb:latest-pg16`, `ghcr.io/...`) se convierte en
   imagen de kindling sin Docker ni root, con el constructor del núcleo `oci`: se aplana entera
