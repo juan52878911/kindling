@@ -398,6 +398,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
 		return nil, fmt.Errorf("repointing overlay to golden copy: %w", err)
 	}
+	// Un volcado completo deja a cero el mapa de páginas sucias del VMM: si la
+	// plantilla era una copia con seguimiento, su siguiente freeze ya no puede
+	// ser "desde el dorado" (diff_volcado.go). Se olvida ANTES de pedirlo, y
+	// no solo si el commit sale bien: falle lo que falle a partir de aquí, la
+	// plantilla se reanuda con el mapa ya reiniciado.
+	m.olvidarDiffBase(mc.ID)
 	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
 		return nil, err
 	}
@@ -535,10 +541,6 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// pudo dejar cacheado con el mismo nombre (M-08, M-12).
 	m.invalidateSnapCache(name)
 	hecho = true
-	// Un volcado completo deja a cero el mapa de páginas sucias del VMM: si la
-	// plantilla era una copia con seguimiento, su siguiente freeze ya no puede
-	// ser "desde el dorado" (diff_volcado.go).
-	m.olvidarDiffBase(mc.ID)
 	// Los digests se acaban de calcular sobre estos mismos ficheros: la
 	// primera restauración no tiene que volver a leerlos (1,4 s medidos en la
 	// de un fork). Tras reiniciar el daemon se verifican otra vez, como

@@ -178,6 +178,15 @@ func (m *Manager) checkDiskParaVolcado(memMiB int, que string) error {
 	if libre >= necesario {
 		return nil
 	}
+	if que == "thaw" {
+		// Descongelar un diferencial sin reflink: la base se copia entera
+		// (diff_volcado.go), y el fichero vive mientras la copia corra.
+		return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
+			"only %d MiB of disk left under %s: thawing this copy rebuilds its %d MiB of memory from the "+
+				"golden snapshot (this filesystem cannot share blocks) and needs %d MiB free (the RAM plus the "+
+				"%d MiB minimum).\nRemove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
+				"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, memMiB, necesario, minFreeDiskMiB())}
+	}
 	return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
 		"only %d MiB of disk left under %s: %s dumps the machine's %d MiB of RAM to disk first and "+
 			"needs %d MiB free (the RAM plus the %d MiB minimum).\n"+

@@ -269,3 +269,39 @@ func TestOlvidarDiffBase(t *testing.T) {
 	}
 	m.olvidarDiffBase("no-existe")
 }
+
+// Un freeze completo de una copia que despertó de un diferencial (y perdió su
+// base por un commit, o con el diff apagado) retira el mem.full que mapeaba
+// el VMM: muerto este, son GiB por copia dormida que nadie lee.
+func TestFreezeCompletoRetiraMemFull(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	id := newID()
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escribirPaginas(t, filepath.Join(dir, memFull), paginaDe('F'))
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	m.mu.Lock()
+	mc.MemMiB = 1
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo == http.MethodPut && ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("snap"), 0o644)
+			escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('A'))
+		}
+	})
+	if _, err := m.Freeze(context.Background(), id); err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	if existe(filepath.Join(dir, memFull)) {
+		t.Fatal("mem.full sigue ahí tras un freeze completo")
+	}
+	if leerSello(dir).DiffBase != "" {
+		t.Fatal("un freeze completo no lleva base")
+	}
+}

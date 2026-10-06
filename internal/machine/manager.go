@@ -1997,6 +1997,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			// figurando como running, sin contestar a nada, y sin que el
 			// vigilante la viera, porque el proceso existe. Mismo trato que
 			// un fallo del propio snapshot, más arriba.
+			m.borrarVolcadoParcial(mc.ID, jailed, dir)
 			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
@@ -2032,6 +2033,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
 	m.killPaused(mc.ID)
+	// Si despertó de un diferencial, el VMM mapeaba mem.full (base + diff):
+	// muerto el VMM no lo lee nadie. Un freeze diferencial ya lo retiró al
+	// fundir; uno completo (tras un commit, con el diff apagado o sin base) lo
+	// dejaría ahí, y son GiB por copia dormida en ext4.
+	_ = os.Remove(filepath.Join(dir, memFull))
 	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
 	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
 	if jailed {
