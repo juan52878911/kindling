@@ -54,7 +54,10 @@ var coreTree = []section{
 	}},
 	{title: "MACHINES", cmds: []plugin.Command{
 		{Name: "run", Summary: "creates and starts a microVM", Usage: `  run [-name N] [-image I | -from T]               creates and starts a microVM from
-      [-cpus N] [-mem 256M]                        an image (cold boot) or a template
+      [-cpus N] [-mem 256M]                        an image (cold boot) or a template;
+      [-e K=V] [-env-file F]                       a Docker reference (redis:7-alpine,
+                                                   ghcr.io/o/r:tag) is imported first,
+                                                   with that environment baked in
       [-egress none|internet|allowlist]            (~ms); network egress (default:
       [-allow dom1,dom2]                           none) and domains allowed
       [-ttl 10m] [-cpu-pct PCT]                    auto-freeze and CPU ceiling

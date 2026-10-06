@@ -437,6 +437,8 @@ func cmdRun(args []string) error {
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
 	disk := units.MiBVar(fs, "disk", 0, "writable disk of the machine: 2G, 8G (bare number = MiB; default: 512; ignored with -from)")
+	var ef envFlags
+	ef.register(fs)
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	var allow domainsFlag
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
@@ -477,10 +479,26 @@ func cmdRun(args []string) error {
 		return err
 	}
 	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
+	// Una referencia de Docker en -image se importa sola (run_docker.go); el
+	// entorno de -e solo tiene sentido ahí, porque va dentro de la imagen.
+	imagen := config.Or(*image, cfg.Defaults.Image, "default")
+	env, err := ef.resolve()
+	if err != nil {
+		return err
+	}
+	switch {
+	case *from == "" && esRefDocker(imagen):
+		if imagen, err = asegurarImagenDocker(ctx, client, imagen, env); err != nil {
+			return err
+		}
+	case len(env) > 0:
+		return fmt.Errorf("-e and -env-file only apply when -image is a Docker reference (the environment is baked into " +
+			"the imported image); for a kindling image, import it with them: kling image import <ref> -e KEY=value -name N")
+	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
-		Image: config.Or(*image, cfg.Defaults.Image, "default"),
+		Image: imagen,
 		// El flag gana; si no se dio, manda la configuración; y si tampoco,
 		// el valor incorporado.
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
