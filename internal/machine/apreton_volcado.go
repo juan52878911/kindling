@@ -54,7 +54,16 @@ func apretarAntesDeVolcar(ctx context.Context, c *fc.Client, mc *api.Machine) in
 	if avail := int(stats.AvailableMemory >> 20); avail > reclaim {
 		reclaim = avail
 	}
-	target := stats.ActualMiB + reclaim - balloonSqueezeMarginMiB
+	// ActualMiB puede venir OBSOLETO: el driver reporta cada segundo, y una
+	// copia recién restaurada trae en el dorado el valor que el invitado vio
+	// la última vez (medido: el inflado de un apretón anterior, ya desinflado).
+	// Lo disponible nunca supera el total menos el globo, así que el objetivo
+	// se acota al total: con un actual obsoleto, pedir más daba un 400 del VMM.
+	target := stats.ActualMiB + reclaim
+	if tot := int(stats.TotalMemory >> 20); tot > 0 && target > tot {
+		target = tot
+	}
+	target -= balloonSqueezeMarginMiB
 	if target <= stats.ActualMiB {
 		return 0
 	}

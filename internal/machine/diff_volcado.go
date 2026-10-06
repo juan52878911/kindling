@@ -42,6 +42,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
+	"unsafe"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -81,6 +83,13 @@ func (m *Manager) olvidarDiffBase(id string) {
 // aplicarDiff escribe sobre dst, en su sitio, los tramos con datos de diff:
 // ceros incluidos, que en un diferencial son páginas que el invitado puso a
 // cero y no "nada que decir". Los huecos de diff no se tocan.
+//
+// Si los dos ficheros están en el mismo Btrfs o XFS (el almacén), cada tramo
+// se CLONA (FICLONERANGE) en vez de copiarse: los bloques del diff pasan a
+// estar referenciados también desde dst, sin leer ni escribir datos. Es lo
+// que hace que despertar de un diferencial de cientos de MiB cueste
+// milisegundos. Si el sistema de ficheros no clona (ext4, otro sistema de
+// ficheros, tramos no alineados) se copia, tramo a tramo.
 func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
 	in, err := os.Open(diffPath)
 	if err != nil {
@@ -104,6 +113,7 @@ func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
 			return err
 		}
 	}
+	clonar := true
 	buf := make([]byte, 1<<20)
 	for off := int64(0); off < tam; {
 		if err := ctx.Err(); err != nil {
@@ -112,6 +122,20 @@ func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
 		ini, fin := siguientesDatos(in, off, tam)
 		if ini >= tam {
 			break
+		}
+		if clonar && fin-ini >= bloqueDisperso && ini%bloqueDisperso == 0 {
+			// El tramo entero menos la cola no alineada (en un volcado de
+			// páginas no la hay).
+			l := (fin - ini) / bloqueDisperso * bloqueDisperso
+			if err := clonarTramo(in, out, ini, l); err == nil {
+				if fin-ini == l {
+					off = fin
+					continue
+				}
+				ini += l
+			} else {
+				clonar = false // no en este sistema de ficheros: el resto se copia
+			}
 		}
 		for p := ini; p < fin; {
 			n := min(int64(len(buf)), fin-p)
@@ -135,30 +159,62 @@ func aplicarDiff(ctx context.Context, diffPath, dstPath string) error {
 	return out.Sync()
 }
 
-// fusionarDiff deja en dir/mem.file todo lo escrito desde el dorado: el diff
-// que acaba de volcar el VMM (mem.diff) sobre el que ya hubiera de un freeze
-// anterior, o él solo si es el primero. Retira mem.full, que ya no mapea
-// nadie.
-func fusionarDiff(ctx context.Context, dir string) error {
-	diff, mem := filepath.Join(dir, memDiff), filepath.Join(dir, "mem.file")
-	switch _, err := os.Stat(mem); {
+// fusionarDiff deja en acum todo lo escrito desde el dorado: el diff que
+// acaba de volcar el VMM (diff) sobre el que ya hubiera, o él solo si es el
+// primero (un rename: los dos están en el mismo sitio, el directorio de la
+// máquina o el almacén). Si acum no es machines/<id>/mem.file (vive en el
+// almacén), machines/<id>/mem.file pasa a ser un enlace a él, como el overlay
+// (cow_memoria.go). Retira mem.full, que ya no mapea nadie.
+func fusionarDiff(ctx context.Context, dir, diff, acum string) error {
+	mem := filepath.Join(dir, "mem.file")
+	switch fi, err := os.Lstat(acum); {
 	case errors.Is(err, os.ErrNotExist):
-		if err := os.Rename(diff, mem); err != nil {
+		if err := os.Rename(diff, acum); err != nil {
 			return fmt.Errorf("keeping the diff: %w", err)
 		}
 	case err != nil:
 		return err
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", acum)
 	default:
-		if err := aplicarDiff(ctx, diff, mem); err != nil {
+		if err := aplicarDiff(ctx, diff, acum); err != nil {
 			return fmt.Errorf("merging the diff onto the previous one: %w", err)
 		}
 		if err := os.Remove(diff); err != nil {
 			return err
 		}
 	}
+	if acum != mem {
+		_ = os.Remove(mem)
+		if err := os.Symlink(acum, mem); err != nil {
+			return fmt.Errorf("linking the diff from the store: %w", err)
+		}
+	}
 	_ = os.Remove(filepath.Join(dir, memFull))
 	return nil
 }
+
+// clonarTramo hace que out comparta con in los bloques de [off, off+l):
+// FICLONERANGE, que exige los dos ficheros en el mismo sistema de ficheros
+// con reflink y tramos alineados a bloque. Lo que no se pueda clonar da
+// error y quien llama copia.
+func clonarTramo(in, out *os.File, off, l int64) error {
+	arg := struct {
+		srcFd     int64
+		srcOffset uint64
+		srcLength uint64
+		dstOffset uint64
+	}{int64(in.Fd()), uint64(off), uint64(l), uint64(off)}
+	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, out.Fd(), ioctlFICLONERANGE, uintptr(unsafe.Pointer(&arg)))
+	if e != 0 {
+		return e
+	}
+	return nil
+}
+
+// ioctlFICLONERANGE es FICLONERANGE (_IOW(0x94, 13, struct file_clone_range
+// de 32 bytes)), igual en amd64 y arm64.
+const ioctlFICLONERANGE = 0x4020940d
 
 // prepararMemoriaDesdeDiff construye dir/mem.full (base + diff) para cargar
 // una copia congelada en diferencial, y devuelve su ruta. Clona la base si el

@@ -1895,18 +1895,30 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// El diferencial se vuelca aparte (mem.diff) y se funde después sobre el
 	// mem.file que ya hubiera; el completo es el mem.file directamente.
 	memName := "mem.file"
+	diffAlmacen := ""
 	if enDiff {
 		memName = memDiff
+		// Si puede, el diff va al almacén (cow_memoria.go): ahí despertar
+		// es clonar sus extents sobre el espejo del dorado, no copiarlos.
+		diffAlmacen = m.diffEnAlmacen(ctx, mc.ID, max(mc.MemMiB, mc.MemMaxMiB))
 	}
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
+	if diffAlmacen != "" {
+		memPath = diffAlmacen
+	}
 
 	// Una instancia jailed corre chrooteada: no puede escribir en el dir del
 	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
 	// dir real. Mismo filesystem, así que el traslado es un rename atómico y el
-	// mem.file conserva su inodo —y su caché de páginas—.
+	// mem.file conserva su inodo —y su caché de páginas—. El diff del almacén
+	// no: su ruta absoluta resuelve dentro del chroot al bind del directorio
+	// de la instancia (prepararBindsJail).
 	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	if jailed {
-		snapPath, memPath = "/snap.file", "/"+memName
+		snapPath = "/snap.file"
+		if diffAlmacen == "" {
+			memPath = "/" + memName
+		}
 	}
 
 	c := fc.New(sock)
@@ -1964,6 +1976,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// (típico: se acabó el disco) del tamaño de la RAM que nadie borraría,
 		// porque la máquina sigue running y reconcile solo mira las warm.
 		m.borrarVolcadoParcial(mc.ID, jailed, dir)
+		m.borrarDiffParcialAlmacen(mc.ID)
 		// Y un diff a medias pudo dejar a cero el mapa de sucias: lo que se
 		// escriba desde aquí ya no se distinguiría. El siguiente vuelca entero.
 		m.olvidarDiffBase(mc.ID)
@@ -1992,12 +2005,17 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
 		// daemon a perforar, precargar y ceder un fichero del host (ver
 		// recuperarDelJail).
-		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", memName); err != nil {
+		recuperar := []string{"snap.file"}
+		if diffAlmacen == "" {
+			recuperar = append(recuperar, memName)
+		}
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), recuperar...); err != nil {
 			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
 			// figurando como running, sin contestar a nada, y sin que el
 			// vigilante la viera, porque el proceso existe. Mismo trato que
 			// un fallo del propio snapshot, más arriba.
 			m.borrarVolcadoParcial(mc.ID, jailed, dir)
+			m.borrarDiffParcialAlmacen(mc.ID)
 			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
@@ -2006,7 +2024,10 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
-		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
+		snapPath = filepath.Join(dir, "snap.file")
+		if diffAlmacen == "" {
+			memPath = filepath.Join(dir, memName)
+		}
 	}
 	if enDiff {
 		// Todo lo escrito desde el dorado, en un solo mem.file
@@ -2014,8 +2035,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// pausada, con su VMM— y se reanuda como tras un volcado fallido; su
 		// siguiente freeze vuelca entero, porque el mapa de sucias ya se
 		// reinició con este diff.
-		if err := fusionarDiff(ctx, dir); err != nil {
+		acum := filepath.Join(dir, "mem.file")
+		if diffAlmacen != "" {
+			acum = m.alm.acumuladoDiff(mc.ID)
+		}
+		if err := fusionarDiff(ctx, dir, memPath, acum); err != nil {
 			m.borrarVolcadoParcial(mc.ID, false, dir)
+			m.borrarDiffParcialAlmacen(mc.ID)
 			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))

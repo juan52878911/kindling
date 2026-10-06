@@ -106,7 +106,7 @@ func TestFusionarDiffAcumula(t *testing.T) {
 		t.Skip("este sistema de ficheros no distingue huecos")
 	}
 	escribirPaginas(t, filepath.Join(dir, memDiff), nil, paginaDe('1'), nil)
-	if err := fusionarDiff(context.Background(), dir); err != nil {
+	if err := fusionarDiff(context.Background(), dir, filepath.Join(dir, memDiff), filepath.Join(dir, "mem.file")); err != nil {
 		t.Fatal(err)
 	}
 	if existe(filepath.Join(dir, memDiff)) {
@@ -114,7 +114,7 @@ func TestFusionarDiffAcumula(t *testing.T) {
 	}
 	escribirPaginas(t, filepath.Join(dir, memFull), paginaDe('f'))
 	escribirPaginas(t, filepath.Join(dir, memDiff), nil, nil, paginaDe('2'))
-	if err := fusionarDiff(context.Background(), dir); err != nil {
+	if err := fusionarDiff(context.Background(), dir, filepath.Join(dir, memDiff), filepath.Join(dir, "mem.file")); err != nil {
 		t.Fatal(err)
 	}
 	if existe(filepath.Join(dir, memDiff)) || existe(filepath.Join(dir, memFull)) {
@@ -303,5 +303,37 @@ func TestFreezeCompletoRetiraMemFull(t *testing.T) {
 	}
 	if leerSello(dir).DiffBase != "" {
 		t.Fatal("un freeze completo no lleva base")
+	}
+}
+
+// Con el diff en el almacén, machines/<id>/mem.file es un enlace a él, y el
+// acumulado se funde allí.
+func TestFusionarDiffEnElAlmacen(t *testing.T) {
+	dir := t.TempDir()
+	if !sabeDeHuecos(t, dir) {
+		t.Skip("este sistema de ficheros no distingue huecos")
+	}
+	alm := filepath.Join(dir, "almacen")
+	if err := os.MkdirAll(alm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diff, acum := filepath.Join(alm, memDiff), filepath.Join(alm, "mem.file")
+	escribirPaginas(t, diff, nil, paginaDe('1'))
+	if err := fusionarDiff(context.Background(), dir, diff, acum); err != nil {
+		t.Fatal(err)
+	}
+	if dest, err := os.Readlink(filepath.Join(dir, "mem.file")); err != nil || dest != acum {
+		t.Fatalf("machines/<id>/mem.file = %q (%v), quería un enlace a %s", dest, err, acum)
+	}
+	escribirPaginas(t, diff, paginaDe('0'), nil)
+	if err := fusionarDiff(context.Background(), dir, diff, acum); err != nil {
+		t.Fatal(err)
+	}
+	got := leerPaginas(t, filepath.Join(dir, "mem.file"), 2)
+	if !bytes.Equal(got[0], paginaDe('0')) || !bytes.Equal(got[1], paginaDe('1')) {
+		t.Error("el acumulado del almacén no tiene las dos escrituras")
+	}
+	if existe(diff) {
+		t.Error("mem.diff sigue en el almacén tras fundirlo")
 	}
 }

@@ -113,25 +113,9 @@ func (a *almacenCoW) memoriaInstancia(ctx context.Context, snap, src, diff, id s
 	if err != nil {
 		return "", err
 	}
-	d := a.dirInstancia(id)
-	nuevo := false
-	if _, err := os.Lstat(d); err != nil {
-		// Su overlay no vive en el almacén (una copia de antes del almacén, o
-		// que no cupo): el directorio es solo para la memoria.
-		if err := a.mkdirInstancia(d); err != nil {
-			return "", err
-		}
-		nuevo = true
-		if a.priv != nil && a.priv.Enabled {
-			if err := os.Lchown(d, os.Geteuid(), a.priv.GID); err != nil {
-				a.rmdirInstancia(d)
-				return "", fmt.Errorf("securing %s: %w", d, err)
-			}
-			if err := os.Chmod(d, 0o750); err != nil {
-				a.rmdirInstancia(d)
-				return "", err
-			}
-		}
+	d, nuevo, err := a.dirParaInstancia(id)
+	if err != nil {
+		return "", err
 	}
 	ruta := filepath.Join(d, memFull)
 	_ = os.Remove(ruta)
@@ -152,15 +136,9 @@ func (a *almacenCoW) memoriaInstancia(ctx context.Context, snap, src, diff, id s
 	// sobre el clon. Si el almacén la impone y no se puede aplicar, la memoria
 	// no va al almacén.
 	cuotaMem := cuotaInstancia(fiBase.Size())
-	if a.cuota == "qgroup" && a.limitar != nil {
-		total := cuotaMem
-		if fi, err := os.Stat(filepath.Join(d, "overlay.ext4")); err == nil {
-			total += cuotaInstancia(fi.Size())
-		}
-		if err := a.limitar(d, ruta, total); err != nil {
-			deshacer()
-			return "", fmt.Errorf("applying the disk quota (%s): %w", a.cuota, err)
-		}
+	if err := a.ampliarCuotaMemoria(d, fiBase.Size()); err != nil {
+		deshacer()
+		return "", err
 	}
 	if err := a.clonar(base, ruta); err != nil {
 		deshacer()
@@ -246,5 +224,155 @@ func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base string) st
 func (m *Manager) borrarMemoriaAlmacen(id string) {
 	if m.alm != nil {
 		m.alm.borrarMemoriaInstancia(id)
+	}
+}
+
+// dirParaInstancia devuelve el directorio de la instancia id en el almacén,
+// creándolo (y asegurándolo como clonarInstancia) si su overlay no vive aquí:
+// una copia de antes del almacén, o que no cupo. Con a.mu tomado.
+func (a *almacenCoW) dirParaInstancia(id string) (string, bool, error) {
+	d := a.dirInstancia(id)
+	if _, err := os.Lstat(d); err == nil {
+		return d, false, nil
+	}
+	if err := a.mkdirInstancia(d); err != nil {
+		return "", false, err
+	}
+	if a.priv != nil && a.priv.Enabled {
+		if err := os.Lchown(d, os.Geteuid(), a.priv.GID); err != nil {
+			a.rmdirInstancia(d)
+			return "", false, fmt.Errorf("securing %s: %w", d, err)
+		}
+		if err := os.Chmod(d, 0o750); err != nil {
+			a.rmdirInstancia(d)
+			return "", false, err
+		}
+	}
+	return d, true, nil
+}
+
+// ampliarCuotaMemoria sube la cuota del directorio de la instancia para que
+// quepa su memoria (el clon del espejo y el diff, que como mucho suman la RAM
+// lógica) además del overlay. Solo en Btrfs, donde la cuota es del
+// subvolumen y cuenta lo referenciado; en XFS es un proyecto por fichero y se
+// fija sobre cada uno. Si el almacén impone cuota y no se puede aplicar, es
+// un error: sin ella un VMM comprometido podría llenarlo.
+func (a *almacenCoW) ampliarCuotaMemoria(d string, memBytes int64) error {
+	if a.cuota != "qgroup" || a.limitar == nil {
+		return nil
+	}
+	total := cuotaInstancia(memBytes)
+	if fi, err := os.Stat(filepath.Join(d, "overlay.ext4")); err == nil {
+		total += cuotaInstancia(fi.Size())
+	}
+	if err := a.limitar(d, "", total); err != nil {
+		return fmt.Errorf("applying the disk quota (%s): %w", a.cuota, err)
+	}
+	return nil
+}
+
+// acumuladoDiff es dónde vive en el almacén el diff acumulado de la copia id
+// (lo escrito desde el dorado, en un solo nivel): machines/<id>/mem.file es
+// un enlace a él. Así aplicarlo sobre el clon del espejo al despertar es
+// clonar extents dentro del mismo Btrfs o XFS, sin copiar nada.
+func (a *almacenCoW) acumuladoDiff(id string) string {
+	return filepath.Join(a.dirInstancia(id), "mem.file")
+}
+
+// prepararDiff deja en el almacén un mem.diff vacío, escribible por el VMM,
+// para que SnapshotDiff vuelque ahí lo sucio desde el dorado; devuelve su
+// ruta. La cuota se amplía antes con la memoria de la copia (memMiB), que es
+// lo más que puede ocupar un diff.
+func (a *almacenCoW) prepararDiff(ctx context.Context, id string, memMiB, gib int) (string, error) {
+	if err := nombreSeguro(id); err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.preparar(ctx, gib); err != nil {
+		return "", err
+	}
+	// Lo que ocupa un diff no se sabe hasta volcarlo: un cuarto de la RAM es
+	// más de lo medido y deja sitio para las demás.
+	if _, libre, err := a.libreDentro(); err == nil && libre < int64(memMiB)<<20/4+libreMinimaAlmacen {
+		return "", &errAlmacenLleno{libre: libre}
+	}
+	d, nuevo, err := a.dirParaInstancia(id)
+	if err != nil {
+		return "", err
+	}
+	deshacer := func() {
+		if nuevo {
+			a.rmdirInstancia(d)
+		}
+	}
+	if err := a.ampliarCuotaMemoria(d, int64(memMiB)<<20); err != nil {
+		deshacer()
+		return "", err
+	}
+	ruta := filepath.Join(d, memDiff)
+	_ = os.Remove(ruta)
+	f, err := os.OpenFile(ruta, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o660)
+	if err != nil {
+		deshacer()
+		return "", err
+	}
+	f.Close()
+	if a.cuota == "prjquota" && a.limitar != nil {
+		if err := a.limitar(d, ruta, cuotaInstancia(int64(memMiB)<<20)); err != nil {
+			_ = os.Remove(ruta)
+			deshacer()
+			return "", fmt.Errorf("applying the disk quota (%s): %w", a.cuota, err)
+		}
+	}
+	if a.priv != nil && a.priv.Enabled {
+		// Como el overlay: del daemon, y el VMM lo escribe por grupo.
+		if err := cederPorGrupo(ruta, os.Geteuid(), a.priv.GID); err != nil {
+			_ = os.Remove(ruta)
+			deshacer()
+			return "", err
+		}
+	}
+	return ruta, nil
+}
+
+// borrarDiffParcial quita el mem.diff de la copia id del almacén (un volcado
+// que falló a medias).
+func (a *almacenCoW) borrarDiffParcial(id string) {
+	if nombreSeguro(id) != nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.montado {
+		_ = os.Remove(filepath.Join(a.dirInstancia(id), memDiff))
+	}
+}
+
+// diffEnAlmacen dice dónde debe volcar el VMM el diferencial de la copia id:
+// en el almacén, si está en uso y el overlay de la copia vive en él (en el
+// jail, solo ese directorio está montado), o "" para el camino de siempre
+// (el directorio de la máquina). Un diff que YA se acumula fuera del almacén
+// (machines/<id>/mem.file regular, de antes de esto) sigue fuera: no se
+// mezclan los dos sitios.
+func (m *Manager) diffEnAlmacen(ctx context.Context, id string, memMiB int) string {
+	if m.alm == nil || m.cow.actual() != cowModoStore || !m.alm.contiene(id) {
+		return ""
+	}
+	if fi, err := os.Lstat(filepath.Join(m.dir(id), "mem.file")); err == nil && fi.Mode().IsRegular() {
+		return ""
+	}
+	ruta, err := m.alm.prepararDiff(ctx, id, memMiB, m.cow.gibs())
+	if err != nil {
+		log.Printf("warning: copy-on-write store: %v; %s dumps its diff to its own directory instead", err, shortID(id))
+		return ""
+	}
+	return ruta
+}
+
+// borrarDiffParcialAlmacen es borrarDiffParcial desde el Manager.
+func (m *Manager) borrarDiffParcialAlmacen(id string) {
+	if m.alm != nil {
+		m.alm.borrarDiffParcial(id)
 	}
 }
