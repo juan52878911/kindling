@@ -37,6 +37,7 @@ de campo que evitan repetir horas de depuración.
 
 | Documento | Qué cubre | Léelo si… |
 |---|---|---|
+| [`docker.md`](docker.md) | kindling y las imágenes de Docker: qué hay (`run -image <ref>`, `-e`, plantillas, copias que duermen), lo que Docker no hace y el caso medido de Hindsight (memoria de agentes por proyecto) | quieres correr una imagen de Docker en kindling, o saber qué gana frente a Docker |
 | [`imagenes.md`](imagenes.md) | Imágenes sin root: `internal/imagen` (lo que comparten los constructores en Go) y el constructor `debian` (Debian fijada con paquetes de la receta, lockfile y dm-verity opcional) | quieres construir una imagen en macOS o sin loop, o fijar paquetes de Debian |
 | [`three-layers.md`](three-layers.md) | Imágenes por capas (base por familia de runtime + capa de servicio + overlay): diseño, decisiones, y el parque real reimportado — 1300 → 433 MiB | quieres entender `-base`, las familias `node`/`python` o el camino PyPI |
 | [`estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo sobre el sistema vivo: el commit prematuro, los seis fallos de robustez, el hasheo que costaba el 67% del despertar, y la prueba de estrés de 142 microVMs | quieres saber por qué v0.4 es 9,5× más rápida bajo carga, o cómo se depuró |
