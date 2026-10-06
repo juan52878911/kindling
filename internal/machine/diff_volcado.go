@@ -185,6 +185,9 @@ func fusionarDiff(ctx context.Context, dir, diff, acum string) error {
 		}
 	}
 	if acum != mem {
+		// Ya fundido, el VMM no vuelve a escribirlo: solo lectura por grupo,
+		// como mem.full. Lo que escriba, lo escribe en un mem.diff nuevo.
+		_ = os.Chmod(acum, 0o640)
 		_ = os.Remove(mem)
 		if err := os.Symlink(acum, mem); err != nil {
 			return fmt.Errorf("linking the diff from the store: %w", err)

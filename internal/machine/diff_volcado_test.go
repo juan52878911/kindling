@@ -337,3 +337,95 @@ func TestFusionarDiffEnElAlmacen(t *testing.T) {
 		t.Error("mem.diff sigue en el almacén tras fundirlo")
 	}
 }
+
+// Antes de un volcado completo, o cuando un diff deja de valer, el acumulado
+// del almacén y su enlace se retiran: si no, el volcado entero iría al
+// almacén a través del enlace y el acumulado quedaría huérfano bajo la cuota.
+func TestBorrarAcumuladoDiff(t *testing.T) {
+	m := newTestManager(t)
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, m.root, f)
+	m.alm = a
+	if _, err := a.memoriaInstancia(context.Background(), "x", "", "", "", 0); err == nil {
+		t.Fatal("no debía poder sin fuentes")
+	}
+	a.mu.Lock()
+	if err := a.preparar(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Unlock()
+	id := newID()
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.dirInstancia(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	acum := a.acumuladoDiff(id)
+	escribirPaginas(t, acum, paginaDe('d'))
+	if err := os.Symlink(acum, filepath.Join(dir, "mem.file")); err != nil {
+		t.Fatal(err)
+	}
+	m.borrarAcumuladoDiff(id, dir)
+	if existe(acum) || existe(filepath.Join(dir, "mem.file")) {
+		t.Fatal("el acumulado o su enlace siguen ahí")
+	}
+	// Un mem.file regular (un diff fuera del almacén) no se toca aquí.
+	escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('r'))
+	m.borrarAcumuladoDiff(id, dir)
+	if !existe(filepath.Join(dir, "mem.file")) {
+		t.Fatal("borró un diff regular que no es del almacén")
+	}
+}
+
+// Un freeze completo de una copia cuyo acumulado vivía en el almacén quita
+// el enlace ANTES de volcar: el mem.file del volcado es un fichero propio y
+// el acumulado del almacén desaparece.
+func TestFreezeCompletoNoEscribeEnElAlmacen(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, m.root, f)
+	m.alm = a
+	a.mu.Lock()
+	if err := a.preparar(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Unlock()
+	id := newID()
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.dirInstancia(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	acum := a.acumuladoDiff(id)
+	escribirPaginas(t, acum, paginaDe('d'))
+	if err := os.Symlink(acum, filepath.Join(dir, "mem.file")); err != nil {
+		t.Fatal(err)
+	}
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	m.mu.Lock()
+	mc.MemMiB = 1 // sin DiffBase: volcado completo
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo == http.MethodPut && ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("snap"), 0o644)
+			escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('A'))
+		}
+	})
+	if _, err := m.Freeze(context.Background(), id); err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, "mem.file")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("el volcado completo no es un fichero propio: %v %v", fi, err)
+	}
+	if existe(acum) {
+		t.Fatal("el acumulado del almacén sigue ahí (o el volcado se escribió dentro del almacén)")
+	}
+}

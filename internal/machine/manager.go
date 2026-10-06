@@ -1901,6 +1901,22 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// Si puede, el diff va al almacén (cow_memoria.go): ahí despertar
 		// es clonar sus extents sobre el espejo del dorado, no copiarlos.
 		diffAlmacen = m.diffEnAlmacen(ctx, mc.ID, max(mc.MemMiB, mc.MemMaxMiB))
+		if diffAlmacen == "" {
+			if fi, err := os.Lstat(filepath.Join(dir, "mem.file")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				// El acumulado vive en el almacén pero el almacén ya no
+				// está en uso: no se mezclan los dos sitios. Entero, y la
+				// próxima vez diferencial desde cero.
+				m.borrarAcumuladoDiff(mc.ID, dir)
+				m.olvidarDiffBase(mc.ID)
+				enDiff, memName = false, "mem.file"
+			}
+		}
+	}
+	if !enDiff {
+		// Un volcado completo pisa machines/<id>/mem.file: lo que hubiera
+		// acumulado de diferenciales anteriores (y su enlace al almacén, que
+		// mandaría la RAM entera dentro del almacén) sobra.
+		m.borrarAcumuladoDiff(mc.ID, dir)
 	}
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
 	if diffAlmacen != "" {
@@ -1978,7 +1994,9 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		m.borrarVolcadoParcial(mc.ID, jailed, dir)
 		m.borrarDiffParcialAlmacen(mc.ID)
 		// Y un diff a medias pudo dejar a cero el mapa de sucias: lo que se
-		// escriba desde aquí ya no se distinguiría. El siguiente vuelca entero.
+		// escriba desde aquí ya no se distinguiría. El siguiente vuelca entero,
+		// así que el acumulado de antes tampoco vale.
+		m.borrarAcumuladoDiff(mc.ID, dir)
 		m.olvidarDiffBase(mc.ID)
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
@@ -2016,6 +2034,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			// un fallo del propio snapshot, más arriba.
 			m.borrarVolcadoParcial(mc.ID, jailed, dir)
 			m.borrarDiffParcialAlmacen(mc.ID)
+			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
@@ -2042,6 +2061,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		if err := fusionarDiff(ctx, dir, memPath, acum); err != nil {
 			m.borrarVolcadoParcial(mc.ID, false, dir)
 			m.borrarDiffParcialAlmacen(mc.ID)
+			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
@@ -2811,6 +2831,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		m.desmontarRed(netcfg, mc.ID)
+		if base != "" {
+			// El mem.full de este despertar (diff_volcado.go): el siguiente
+			// lo rehace, y mientras tanto ocuparía lo que el diff.
+			_ = os.Remove(filepath.Join(dir, memFull))
+			m.borrarMemoriaAlmacen(mc.ID)
+		}
 		return nil, err
 	}
 

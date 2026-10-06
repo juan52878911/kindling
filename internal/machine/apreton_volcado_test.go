@@ -139,3 +139,21 @@ func TestApretonAntesDeVolcarSinGloboNoHaceNada(t *testing.T) {
 		g.mu.Unlock()
 	}
 }
+
+// Una copia recién restaurada puede traer un actual_mib obsoleto (el inflado
+// de un apretón anterior, ya desinflado): sumarle lo disponible pasaba del
+// total y el VMM contestaba 400. El objetivo se acota al total del invitado.
+func TestApretonAntesDeVolcarAcotaUnActualObsoleto(t *testing.T) {
+	if globoSinEstadisticas {
+		t.Skip("en esta plataforma el apretón previo al volcado está apagado")
+	}
+	t.Setenv("KLING_SQUEEZE_BEFORE_DUMP", "")
+	g, c := nuevoGloboFalso(t, &fc.BalloonStats{ActualMiB: 305, FreeMemory: 355 << 20, AvailableMemory: 433 << 20, TotalMemory: 481 << 20})
+	mc := &api.Machine{ID: "0123456789abcdef", MemMiB: 512}
+	apretarAntesDeVolcar(context.Background(), c, mc)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.patches) != 2 || g.patches[0] != 481-balloonSqueezeMarginMiB || g.patches[1] != 0 {
+		t.Fatalf("globo: %v, esperaba inflar a %d (total menos colchón) y volver a 0", g.patches, 481-balloonSqueezeMarginMiB)
+	}
+}

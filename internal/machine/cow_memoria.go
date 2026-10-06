@@ -376,3 +376,26 @@ func (m *Manager) borrarDiffParcialAlmacen(id string) {
 		m.alm.borrarDiffParcial(id)
 	}
 }
+
+// borrarAcumuladoDiff retira el diff acumulado de la copia id: el fichero del
+// almacén (si vive ahí) y el enlace o fichero de machines/<id>/mem.file. Para
+// cuando ese diff ya no vale: la copia va a volcar entero (un commit, un diff
+// que falló, el diff apagado, la base desaparecida) y lo que quedara sería un
+// huérfano bajo su cuota que barrer no recoge mientras la máquina viva. Y sin
+// quitar el enlace antes de un volcado completo, Firecracker escribiría la
+// RAM entera DENTRO del almacén a través de él.
+func (m *Manager) borrarAcumuladoDiff(id, dir string) {
+	mem := filepath.Join(dir, "mem.file")
+	if fi, err := os.Lstat(mem); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		_ = os.Remove(mem)
+	}
+	if m.alm != nil && nombreSeguro(id) == nil {
+		m.alm.mu.Lock()
+		if m.alm.montado {
+			if err := os.Remove(m.alm.acumuladoDiff(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("warning: copy-on-write store: removing the diff of %s: %v", shortID(id), err)
+			}
+		}
+		m.alm.mu.Unlock()
+	}
+}
