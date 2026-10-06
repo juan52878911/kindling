@@ -10,6 +10,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
+- `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference, values never stored on the host
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`
 - `kling logs -service`, and `-json` on `kling run` and `kling image import`, for agents
 - `debian` image builder: pinned, reproducible Debian images without root, also on macOS (#157)
