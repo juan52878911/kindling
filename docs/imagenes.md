@@ -138,6 +138,20 @@ digest no baja ninguna capa, y con la misma `SOURCE_DATE_EPOCH` sale la misma
 imagen bit a bit. De un índice multiplataforma se elige `linux/<arch>` (en arm64,
 la variante v8; en amd64, la que no pide v2/v3).
 
+**Rápido sin dejar de verificar.** Las capas se bajan de 4 en 4 y cada una se
+descomprime una sola vez, en paralelo y después de comprobar su sha256, a un
+tar en el directorio de trabajo de la construcción: el árbol se arma leyendo
+solo las cabeceras y el ext4 lee los datos de ahí (cada tar se borra en cuanto
+se ha leído). Cuesta en disco, mientras dura, el tamaño descomprimido de las
+capas, con tope de 8 veces `max_mb` (una bomba gzip no llena el disco). Un blob
+de la caché no se vuelve a hashear en cada import: solo llega a su ruta con un
+`rename` después de verificarlo, así que estar ahí, con el tamaño del
+manifiesto, siendo un fichero regular sin escritura para
+grupo ni otros, es estar verificado; si algo de eso falla, se rehashea entero.
+La caché es del daemon: quien pueda escribir en ella puede cambiar también las
+imágenes y los binarios. Una capa dañada después en disco la caza además el
+CRC32 del gzip al descomprimirla.
+
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
 (resuelto con su `/etc/passwd`, sin libc), en su propio grupo de procesos, y lo

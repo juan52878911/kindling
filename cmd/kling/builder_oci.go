@@ -185,7 +185,15 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		return err
 	}
 
-	c := &oci.Client{Cache: filepath.Join(root, "cache", "oci"), Log: log, MaxBytes: int64(maxMB) << 20}
+	// Cada capa se descomprime una sola vez, a un tar en el directorio de
+	// trabajo: el árbol se arma leyendo solo las cabeceras (archive/tar salta
+	// los datos con Seek) y el ext4 lee los datos de ahí. Cuesta, mientras
+	// dura la construcción, el tamaño descomprimido de las capas en disco (lo
+	// que ocupa la imagen, más lo que unas capas pisan de otras), con un tope
+	// de 8 veces MaxMB; cada tar se borra en cuanto el ext4 lo ha leído.
+	unpacked := filepath.Join(dir, "layers")
+	defer os.RemoveAll(unpacked)
+	c := &oci.Client{Cache: filepath.Join(root, "cache", "oci"), Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
@@ -223,7 +231,13 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			return fmt.Errorf("layer %d (%s): %w", i, l.Digest, err)
 		}
 		l := l
-		streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) { return oci.OpenLayer(l) }))
+		streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) {
+			rc, err := oci.OpenLayer(l)
+			if err != nil || l.Tar == "" {
+				return rc, err
+			}
+			return removeOnClose{rc, l.Tar}, nil
+		}))
 	}
 	dTree := time.Since(tTree)
 	var files, bytes int64
@@ -350,7 +364,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		return err
 	}
 	logf("image: %d MiB, %d files", stats.Bytes()>>20, stats.Files)
-	logf("times: pull %.1f s, layers %.1f s, ext4 %.1f s", dPull.Seconds(), dTree.Seconds(), time.Since(tWrite).Seconds())
+	logf("times: pull and unpack %.1f s, layers %.1f s, ext4 %.1f s", dPull.Seconds(), dTree.Seconds(), time.Since(tWrite).Seconds())
 
 	var layers []map[string]any
 	for _, l := range img.Layers {
@@ -378,6 +392,19 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	logf("image %s ready (%s) in %.1f s", req.Name, digest, time.Since(t0).Seconds())
 	return nil
+}
+
+// removeOnClose borra el tar descomprimido de una capa al cerrarlo: el ext4
+// ya no lo vuelve a leer.
+type removeOnClose struct {
+	io.ReadCloser
+	path string
+}
+
+func (r removeOnClose) Close() error {
+	err := r.ReadCloser.Close()
+	os.Remove(r.path)
+	return err
 }
 
 var marcaOCI = imagen.Marca{Constructor: "oci", Dir: "/etc/kindling", DM: "kindling-layer"}

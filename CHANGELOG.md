@@ -8,7 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
-- `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256
+- `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`
 - `kling logs -service`, and `-json` on `kling run` and `kling image import`, for agents
