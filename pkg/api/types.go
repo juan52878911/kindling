@@ -117,6 +117,15 @@ type Machine struct {
 
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
+	// CPUPctFixed: CPUPct lo pidió quien la arrancó (-cpu-pct), no salió de
+	// la receta ni del daemon. Entonces no hay impulso de arranque: manda
+	// también mientras arranca. Viaja con la máquina para que un thaw lo sepa.
+	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
+	// CPUBoostPct es el techo con el que corre AHORA mientras termina de
+	// arrancar (impulso hasta la sonda de listo; ver
+	// internal/machine/arranque_cpu.go); 0 = su techo de siempre. Como
+	// Transition, solo existe en las respuestas del daemon.
+	CPUBoostPct int `json:"cpu_boost_pct,omitempty"`
 
 	// AllowExec: la máquina acepta exec y ficheros (ver RunRequest.AllowExec).
 	AllowExec bool `json:"allow_exec,omitempty"`
@@ -540,6 +549,9 @@ type Snapshot struct {
 	// node (medido: 16 s a 50 % → 6.9 s a 100 %)—. 0 = usar el defecto del daemon
 	// (compatibilidad con snapshots anteriores a este campo).
 	CPUPct int `json:"cpu_pct,omitempty"`
+	// CPUPctFixed: CPUPct lo pidió quien creó el dorado (-cpu-pct). Sus
+	// instancias lo heredan, y con él, arrancar sin impulso (Machine.CPUPctFixed).
+	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
 
 	// AllowDomains es la lista de dominios permitidos cuando Egress es
 	// "allowlist". Se graba junto al snapshot por la misma razón que Egress: las
@@ -685,6 +697,9 @@ const (
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
 	EvResized   = "machine.resized"
+	// EvBoostEnded: la máquina volvió de su impulso de CPU de arranque a su
+	// techo configurado; el mensaje dice tras cuánto y por qué.
+	EvBoostEnded = "machine.boost_ended"
 	// EvGuestIPv6 se publica una vez por dorado, la primera vez que se
 	// instancia (runFrom) uno sin GuestIPv6Off: el invitado conserva el
 	// módulo IPv6 de su kernel, aunque el namespace del host lo tenga

@@ -730,8 +730,9 @@ func cmdPS(args []string) error {
 		if len(mc.Shares) > 0 {
 			conShares = true
 		}
-		// Igual con READY: solo si alguna imagen declara sonda o ganchos.
-		if mc.Ready != "" {
+		// Igual con READY: solo si alguna imagen declara sonda o ganchos, o
+		// alguna arranca con impulso de CPU.
+		if mc.Ready != "" || mc.CPUBoostPct > 0 {
 			conListo = true
 		}
 	}
@@ -773,6 +774,11 @@ func cmdPS(args []string) error {
 			listo := mc.Ready
 			if listo == "" || mc.State != api.StateRunning {
 				listo = "-"
+			}
+			// Hasta que termina de arrancar corre con más CPU que su techo
+			// (internal/machine/arranque_cpu.go): que se vea.
+			if mc.CPUBoostPct > 0 && mc.State == api.StateRunning {
+				listo += fmt.Sprintf(" (cpu boost %d%%)", mc.CPUBoostPct)
 			}
 			row += "\t" + listo
 		}

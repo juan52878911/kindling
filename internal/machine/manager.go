@@ -298,6 +298,12 @@ type Manager struct {
 	// techo de arranque (arranque_cpu.go). Solo lo ponen las pruebas.
 	pruebasCPU *ganchosCPU
 
+	// impulsos es el impulso de CPU de arranque vigente de cada máquina
+	// (arranque_cpu.go), con su candado: bajo él se registra uno nuevo y se
+	// escribe el techo al deshacerlo. No toma m.mu dentro.
+	impulsosMu sync.Mutex
+	impulsos   map[string]*impulsoCPU
+
 	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
 	// una nueva jubila a la anterior.
 	vigiasListo sync.Map
@@ -852,6 +858,7 @@ func (m *Manager) List() []*api.Machine {
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
+		c.CPUBoostPct = m.impulsoVigente(mc.ID)
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -959,6 +966,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
+		c.CPUBoostPct = m.impulsoVigente(mc.ID)
 		return &c, true
 	}
 	var porNombre, porPrefijo []*api.Machine
@@ -977,6 +985,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 		case 1:
 			c := *l[0]
 			c.Transition = m.transicion[c.ID]
+			c.CPUBoostPct = m.impulsoVigente(c.ID)
 			return &c, true
 		}
 		return nil, false
@@ -1170,6 +1179,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	// El techo de CPU: el flag > la receta de la imagen > el valor por defecto
 	// de quien pide > el del daemon (este último, tras arrancar).
+	// Un flag explícito, además, no lleva impulso de arranque (arranque_cpu.go).
+	cpuFijo := req.CPUPct > 0
 	if req.CPUPct <= 0 {
 		req.CPUPct = m.techoCPUPorDefecto(req.Image, req.VCPUs, req.CPUPctDefault)
 	}
@@ -1317,7 +1328,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, DiskMiB: req.DiskMiB, CreatedAt: creada,
-		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
+		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
@@ -1405,14 +1416,14 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 		m.mu.Unlock()
 	}
-	// Un núcleo entero mientras arranca el kernel del invitado, que es lo que
-	// viene ahora (boot() vuelve tras Start); el techo configurado, en cuanto
-	// contesta su agente. El defer lo baja en cualquier salida de aquí en
-	// adelante, salvo la de éxito, que se lo entrega a quien espera al agente.
-	// Ver arranque_cpu.go.
-	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	// El impulso de arranque mientras arranca el invitado, que es lo que viene
+	// ahora (boot() vuelve tras Start); el techo configurado, en cuanto pasa su
+	// sonda de listo (o contesta su agente, si no declara sonda). El defer lo
+	// baja en cualquier salida de aquí en adelante, salvo la de éxito, que se
+	// lo entrega a quien espera el fin del arranque. Ver arranque_cpu.go.
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, topeArranque(mc.CPUPct)); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -1447,8 +1458,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.decorarShares(&out)
 	}
 
-	// Desde aquí baja el techo la goroutine que espera al agente: con carpetas
-	// vivas ya contestó (waitShares) y lo bajará en su primer sondeo.
+	// Desde aquí baja el techo la goroutine que espera el fin del arranque:
+	// con carpetas vivas el agente ya contestó (waitShares).
 	impulso.entregar()
 	// Para `kling ps`: si la imagen declara una sonda, cuándo termina de
 	// arrancar (listo.go). En segundo plano; -wait-ready espera aparte.
@@ -2870,14 +2881,15 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	var err error
 
 	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar): el
-	// de arranque, que se baja al configurado en cuanto contesta el agente
-	// (resync) o, en cualquier otra salida, en el defer. Ver arranque_cpu.go.
+	// de arranque, que se baja al configurado en cuanto termina de arrancar
+	// (al final, tras los ganchos) o, en cualquier otra salida, en el defer.
+	// Ver arranque_cpu.go.
 	if mc.CPUPct <= 0 {
 		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 	}
-	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(mc.ID, topeArranque(mc.CPUPct))
+	cg := m.cgroupParaLanzar(mc.ID, impulso.tope)
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -2992,8 +3004,6 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		resyncT, resyncOK, listo = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
-	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
-	impulso.bajar()
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -3003,7 +3013,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
 	// que mover.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
@@ -3053,6 +3063,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.startShares(mc.ID)
 	// Los ganchos de la imagen, con credenciales y red ya en su sitio.
 	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
+	// Fin del impulso de arranque: ya, si su memoria trae el "listo" (lo
+	// normal) o no declara sonda; si no, cuando la pase.
+	impulso.entregarRestaurada()
 
 	fases := crono.cerrar()
 	out.Wake = fases
