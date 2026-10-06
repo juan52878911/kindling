@@ -141,6 +141,13 @@ type Client struct {
 	// descomprimido no puede pasar de maxUnpackRatio veces el tope (una
 	// bomba gzip llenaría el disco).
 	Unpack string
+	// SoloRootSinRehash: los blobs de la caché solo se usan sin rehashear si
+	// son de root. Para el constructor que corre sin privilegios (ver
+	// internal/daemon/builders_sinroot.go): la caché es suya, y un constructor
+	// comprometido por una imagen podría cambiar un blob para envenenar los
+	// imports siguientes de otras imágenes. Los blobs heredados de la caché de
+	// root siguen sin rehashearse.
+	SoloRootSinRehash bool
 
 	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
 	authMu sync.Mutex // un solo token pedido a la vez
@@ -492,7 +499,7 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 		return "", fmt.Errorf("invalid digest %q", d.Digest)
 	}
 	dst := c.BlobPath(d.Digest)
-	if cached(dst, d.Size) {
+	if cached(dst, d.Size, c.SoloRootSinRehash) {
 		return dst, nil
 	}
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
@@ -533,13 +540,17 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 // se confía sin hashear en un fichero regular (no un enlace), sin escritura
 // para grupo ni otros (como los deja download) y con el tamaño que declara el
 // manifiesto (un fichero cortado no pasa); si no, se rehashea entero como
-// antes. Sin tamaño declarado, también.
-func cached(p string, size int64) bool {
+// antes. Sin tamaño declarado, también. Con soloRoot, además tiene que ser
+// de root (ver Client.SoloRootSinRehash).
+func cached(p string, size int64, soloRoot bool) bool {
 	if size <= 0 {
 		return false
 	}
 	st, err := os.Lstat(p)
-	return err == nil && st.Mode().IsRegular() && st.Size() == size && st.Mode().Perm()&0o022 == 0
+	if err != nil || !st.Mode().IsRegular() || st.Size() != size || st.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	return !soloRoot || duenoRoot(st)
 }
 
 func fileHas(p, digest string, size int64) (bool, error) {

@@ -183,3 +183,38 @@ func TestPullUnpackLimit(t *testing.T) {
 		t.Fatalf("left %d files in the unpack dir", len(es))
 	}
 }
+
+// Con SoloRootSinRehash (el constructor sin privilegios), un blob de la caché
+// que no es de root se rehashea: uno cambiado se vuelve a bajar.
+func TestPullSoloRootSinRehash(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("los blobs de esta prueba serían de root")
+	}
+	r := ocitest.New()
+	defer r.Close()
+	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: strings.Repeat("z", 4000)}})
+	man, _ := r.Image("amd64", nil, layer)
+	ref := r.Host() + "/x/y"
+	c := &oci.Client{Cache: t.TempDir(), Log: io.Discard}
+	img, err := c.Pull(context.Background(), ref, man, "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := img.Layers[0].Path
+	orig, _ := os.ReadFile(p)
+	flipped := append([]byte{}, orig...)
+	flipped[len(flipped)-3] ^= 0xff
+	if err := os.WriteFile(p, flipped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hits := r.Hits
+	if _, err := (&oci.Client{Cache: c.Cache, SoloRootSinRehash: true}).Pull(context.Background(), ref, man, "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	if r.Hits == hits {
+		t.Fatal("a blob not owned by root was trusted without rehashing")
+	}
+	if b, _ := os.ReadFile(p); string(b) != string(orig) {
+		t.Fatal("the tampered blob stayed in the cache")
+	}
+}
