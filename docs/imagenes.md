@@ -221,13 +221,32 @@ Medido después (2026-10-06, mismo lab, `/root` en ext4, sin reflink):
 | Despertar hasta el primer recall | 1,75 s | 4,7–5,5 s |
 | RAM propia por copia viva | ~100 MiB | ~200 MiB |
 
-Las dos últimas filas son el precio: sin reflink, despertar copia los 1,3 GiB de
-la base a `mem.full` (unos 4 s de disco), y el dorado apretado lleva menos
-caché de página, así que cada copia vuelve a leer del disco de la imagen lo que
-toca y eso es memoria propia. En btrfs o XFS el clon es gratis y el despertar
-volvería a ser de milisegundos: el siguiente paso es un espejo del dorado en el
-almacén de copia al escribir (`cow.btrfs`), que ya existe para los discos.
-Lo que no cambia: el supervisor de `kling-guest`
+La última fila es el precio del apretón: el dorado lleva menos caché de
+página, así que cada copia vuelve a leer del disco de la imagen lo que toca y
+eso es memoria propia (`KLING_SQUEEZE_BEFORE_DUMP=0` lo cambia por un dorado
+más grande).
+
+La penúltima fila era el precio de ext4: sin reflink, despertar copiaba los
+1,3 GiB de la base. Ya no: **el almacén de copia al escribir guarda un espejo
+de la memoria de cada dorado** (`cow/bases/<dorado>/<clave>.mem`, una copia
+por versión del dorado), la copia congela su diff dentro de su directorio del
+almacén (`cow/m/<id>/mem.file`) y despertar es clonar el espejo y clonar
+encima los tramos del diff (FICLONERANGE), sin mover datos. Con un diff de
+cientos de MiB lo que cuesta son los tramos: medido, 24 614 tramos (la mayoría
+de una página) a ~40 µs cada uno; ni paralelizarlo ni escribir en vez de
+clonar lo mejora en ese Btrfs. Si el almacén no está, no cabe, o el overlay de
+la copia no vive en él, todo sigue por el camino de siempre.
+
+| Imagen de Docker (2026-10-06, lab, almacén Btrfs) | Dorado | Congelar una copia | Despertar | Estado comprobado tras dos ciclos |
+|---|---|---|---|---|
+| `postgres:17-alpine` (512 MiB) | 157 MiB | 0,25–0,5 s, 13–17 MiB | **0,10–0,14 s** | `count(*)` 1000 → 1500 → 2000 |
+| `redis:7-alpine` (256 MiB) | 55 MiB | 0,12–0,15 s, 7 MiB | **0,08–0,19 s** | `GET k1`, `INCR n` 1 → 2 |
+| `nginx:alpine` (256 MiB) | 52 MiB | 0,11–0,15 s, 6 MiB | **0,09–0,18 s** | fichero servido con 1 → 2 → 3 líneas |
+| Hindsight 0.10.2 (3 GiB) | 1288 MiB | 1,5–1,9 s, 250–280 MiB | **1,1–1,5 s** | memorias 64 → 65 → 66 → 67 y recall |
+
+Cuatro copias de Hindsight dormidas cuestan en el almacén 58–70 MiB
+exclusivos cada una (la que pasó tres ciclos, 464 MiB), y despertarlas
+seguidas tarda 0,5–1,3 s cada una. Lo que no cambia: el supervisor de `kling-guest`
 no ve morir al API de una imagen cuyo script de arranque sigue vivo (el de
 Hindsight se queda con la interfaz web), y una imagen que llama a Hugging Face
 al arrancar se cuelga sin salida a internet hasta que se le pone

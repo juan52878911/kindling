@@ -12,9 +12,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 - **Sleeping copies cost what they changed.** A copy restored from a golden now
   freezes as a diff: only the pages it wrote since the golden, instead of its whole
-  RAM (1.9 GiB and 6–8 s per copy measured with Hindsight). Thaw rebuilds base + diff
-  (a clone on btrfs/XFS, a sparse copy on ext4) and the next freeze merges what
-  changed since. `KLING_DIFF_FREEZE=0` turns it off. Firecracker only.
+  RAM (1.9 GiB and 6–8 s per copy measured with Hindsight). The copy-on-write store
+  keeps a mirror of each golden's memory and the copy's diff, so thaw is a clone of
+  the mirror plus the diff's extents cloned on top: Postgres, Redis and nginx copies
+  wake in 0.1–0.2 s and a Hindsight copy with a 280 MiB diff in 1.1 s, with four
+  sleeping Hindsight copies costing 58–70 MiB each. Without the store, thaw copies
+  the base (sparse) into the data root. `KLING_DIFF_FREEZE=0` turns it off.
+  Firecracker only.
 - **Dumps carry only pages in use.** `save` and `freeze` squeeze the guest's balloon
   right before dumping, so free memory and page cache do not end up in the mem.file
   that every copy maps. `KLING_SQUEEZE_BEFORE_DUMP=0` turns it off.
