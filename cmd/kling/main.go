@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -311,6 +312,7 @@ func cmdDaemon(args []string) error {
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
+	buildAs := fs.String("build-as", envOr("KLING_BUILD_AS", "kindling-build"), "unprivileged user the oci image builder runs as (not the Firecracker one)")
 	authzPath := fs.String("authz", os.Getenv("KLING_AUTHZ"), "authz policy file (default "+daemon.RutaAuthzPorDefecto+" if it exists; see docs/authz.md)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -337,6 +339,7 @@ func cmdDaemon(args []string) error {
 	srv.SetShareConfig(shareConfig)
 	srv.SetCoW(cowConfig())
 	srv.SetAuthz(pol)
+	srv.SetBuildUser(*buildAs)
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -479,21 +482,37 @@ func cmdRun(args []string) error {
 		return err
 	}
 	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
-	// Una referencia de Docker en -image se importa sola (run_docker.go); el
-	// entorno de -e solo tiene sentido ahí, porque va dentro de la imagen.
+	// Una referencia de Docker en -image se importa sola (run_docker.go). El
+	// entorno de -e es de la máquina, no de la imagen: viaja en el cuerpo de
+	// la petición y el daemon se lo da al invitado por MMDS
+	// (pkg/api/machine_env.go). Con -from no hay: la copia lleva el del dorado.
 	imagen := config.Or(*image, cfg.Defaults.Image, "default")
 	env, err := ef.resolve()
 	if err != nil {
 		return err
 	}
-	switch {
-	case *from == "" && esRefDocker(imagen):
-		if imagen, err = asegurarImagenDocker(ctx, client, imagen, env); err != nil {
+	if len(env) > 0 && *from != "" {
+		return fmt.Errorf("-e and -env-file don't apply with -from: the copy runs with the environment of the machine " +
+			"the template was saved from (its service is already running with it)")
+	}
+	if _, err := api.MachineEnvMap(env); err != nil {
+		return err
+	}
+	if len(env) > 0 {
+		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
+		// su entorno, sin un solo error.
+		info, err := client.Info(ctx)
+		if err != nil {
 			return err
 		}
-	case len(env) > 0:
-		return fmt.Errorf("-e and -env-file only apply when -image is a Docker reference (the environment is baked into " +
-			"the imported image); for a kindling image, import it with them: kling image import <ref> -e KEY=value -name N")
+		if !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
+			return fmt.Errorf("the daemon (%s) does not take -e at run: update it", info.Version)
+		}
+	}
+	if *from == "" && esRefDocker(imagen) {
+		if imagen, err = asegurarImagenDocker(ctx, client, imagen); err != nil {
+			return err
+		}
 	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
@@ -522,6 +541,7 @@ func cmdRun(args []string) error {
 		Shares:    shareSpecs,
 		AllowExec: *allowExec,
 		OnTTL:     *onTTL,
+		Env:       env,
 	})
 	if err != nil {
 		return err
@@ -730,8 +750,9 @@ func cmdPS(args []string) error {
 		if len(mc.Shares) > 0 {
 			conShares = true
 		}
-		// Igual con READY: solo si alguna imagen declara sonda o ganchos.
-		if mc.Ready != "" {
+		// Igual con READY: solo si alguna imagen declara sonda o ganchos, o
+		// alguna arranca con impulso de CPU.
+		if mc.Ready != "" || mc.CPUBoostPct > 0 {
 			conListo = true
 		}
 	}
@@ -773,6 +794,11 @@ func cmdPS(args []string) error {
 			listo := mc.Ready
 			if listo == "" || mc.State != api.StateRunning {
 				listo = "-"
+			}
+			// Hasta que termina de arrancar corre con más CPU que su techo
+			// (internal/machine/arranque_cpu.go): que se vea.
+			if mc.CPUBoostPct > 0 && mc.State == api.StateRunning {
+				listo += fmt.Sprintf(" (cpu boost %d%%)", mc.CPUBoostPct)
 			}
 			row += "\t" + listo
 		}

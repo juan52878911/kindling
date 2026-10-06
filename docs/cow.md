@@ -107,6 +107,14 @@ el dorado desaparece o se reemplaza (`barrer`). Sin almacén, o si el overlay de
 la copia no vive en él, el diff se queda en `machines/<id>` y despertar copia
 la base en la raíz.
 
+`scripts/e2e-diff-freeze.sh` lo prueba de punta a punta en el host con KVM, con
+daemons privados que levanta él mismo (almacén con jailer, `KLING_COW=off` con
+jailer y sin él): un dorado de Postgres, una copia que pone a cero páginas
+heredadas y tres vueltas de freeze→thaw comprobando filas, RAM, el sello
+(`diff_base`), el tamaño del diff, el `schema` de `state.json` y que no quedan
+restos. En el laboratorio: freeze 0,1–0,2 s, thaw 0,1–0,4 s, diff de 27 MiB
+sobre 512.
+
 - **Una copia completa por dorado, no por instancia.** La primera instancia de un
   dorado copia su overlay dentro del almacén (la "base"); todas las demás son clones de
   esa base. La base se identifica por dispositivo, inodo, tamaño y fecha del overlay

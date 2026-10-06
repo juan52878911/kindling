@@ -1268,6 +1268,54 @@ en credenciales de máquina que se atan a cada instancia (`POST
 <plantilla>` (dominios con credencial, volúmenes, `allow_exec`) antes de añadirla a
 `shared_templates`.
 
+### 24. El constructor `oci` no corre como root
+
+Importar una imagen de Docker baja de internet y parsea tars hostiles
+(`internal/oci`, `internal/ext4`). Los demás constructores del daemon corren como root;
+`oci` no lo necesita, así que en Linux corre con un usuario propio (`-build-as`,
+`KLING_BUILD_AS`, por defecto `kindling-build`). Medido en el lab importando
+`postgres:17-alpine`:
+
+```
+Uid:         996   996   996   996
+Groups:      (ninguno)
+CapEff:      0000000000000000
+NoNewPrivs:  1
+Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file size 0
+```
+
+- **Otro usuario que el del VMM**, y el daemon rechaza que sean el mismo: el VMM no toca
+  la caché de blobs ni los builds en curso, y el constructor no manda señales a los VMM
+  ni escribe en los volúmenes.
+- **Solo escribe lo suyo**: su directorio de trabajo (`build/` es de root 0711) y su
+  caché, `cache/builder` (0700), aparte de la de los constructores que corren como root.
+- **El daemon valida lo que deja**: la imagen sin seguir enlaces, regular, suya y con un
+  enlace duro, y la mueve él a `images/`; `recipe.json` también sin seguir enlaces.
+- **Entorno de lista blanca**: el del daemon no llega (puede llevar secretos).
+- **De uno en uno, y barrido**: antes y después de cada construcción el daemon mata los
+  procesos que queden con ese uid. Por eso tiene que ser un usuario de sistema dedicado
+  (uid ≤ `SYS_UID_MAX`; uno de persona o `nobody` se rechaza), y las construcciones van
+  en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
+- **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
+  antes de usarlo; un constructor comprometido no envenena los imports siguientes.
+
+Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
+al arrancar. `debian` y `android` siguen como root. Detalle en
+[docs/imagenes.md](docs/imagenes.md).
+
+### 25. El entorno de `run -e` va por MMDS, y se congela con la máquina
+
+`kling run -e` da el entorno a la máquina, no a la imagen: viaja en el cuerpo de la
+petición, el daemon lo deja en MMDS antes de arrancar y lo borra en cuanto el agente
+contesta, y solo guarda los nombres (`env_keys`); no va a argv, `state.json`, logs ni
+`inspect`. Pero vive en la RAM del invitado (el entorno del servicio), así que `freeze`
+(también el de `on_ttl`), `fork` y `save` lo escriben en el `mem.file` (0600 del
+daemon), y las copias de una plantilla lo heredan. Es distinto de los secretos de
+sesión (`kling machine secret`), que marcan la máquina (`has_secrets`) y no dejan
+congelarla: el entorno es configuración. Un secreto que no deba tocar nunca el disco
+va por `machine secret` o por el proxy de credenciales. Una imagen cuyo agente no sabe
+leer el entorno hace fallar la máquina en vez de arrancar su servicio sin él.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

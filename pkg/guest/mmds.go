@@ -68,6 +68,9 @@ const (
 type MMDSStore struct {
 	Env      map[string]string            `json:"env"`
 	Sessions map[string]map[string]string `json:"sessions"`
+	// MachineEnv es el entorno de la máquina (api.MachineEnvMMDSKey): solo
+	// está hasta que el agente contesta por primera vez (machine_env.go).
+	MachineEnv map[string]string `json:"machine_env,omitempty"`
 }
 
 // setupMMDSRoute añade la ruta a 169.254.169.254 por eth0. El bridge es PID 1 y

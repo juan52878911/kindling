@@ -117,6 +117,15 @@ type Machine struct {
 
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
+	// CPUPctFixed: CPUPct lo pidió quien la arrancó (-cpu-pct), no salió de
+	// la receta ni del daemon. Entonces no hay impulso de arranque: manda
+	// también mientras arranca. Viaja con la máquina para que un thaw lo sepa.
+	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
+	// CPUBoostPct es el techo con el que corre AHORA mientras termina de
+	// arrancar (impulso hasta la sonda de listo; ver
+	// internal/machine/arranque_cpu.go); 0 = su techo de siempre. Como
+	// Transition, solo existe en las respuestas del daemon.
+	CPUBoostPct int `json:"cpu_boost_pct,omitempty"`
 
 	// AllowExec: la máquina acepta exec y ficheros (ver RunRequest.AllowExec).
 	AllowExec bool `json:"allow_exec,omitempty"`
@@ -148,6 +157,11 @@ type Machine struct {
 	// es o llega a ser un snapshot dorado, se COMPARTE con todas las copias—. Por
 	// eso Freeze se niega a congelar una máquina marcada así (ver Freeze).
 	HasSecrets bool `json:"has_secrets,omitempty"`
+
+	// EnvKeys son los nombres de las variables del entorno de la máquina
+	// (RunRequest.Env); los valores no se guardan en ninguna parte del host.
+	// Una copia de un dorado hereda los del dorado: lleva su memoria.
+	EnvKeys []string `json:"env_keys,omitempty"`
 
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
@@ -326,6 +340,14 @@ type RunRequest struct {
 	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
 
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// Env es el entorno de la máquina, KEY=valor (ver machine_env.go): llega
+	// al invitado por MMDS y su agente lo pone encima del de la imagen para el
+	// servicio, la sonda de listo y exec. Viaja solo en el cuerpo de esta
+	// petición: el daemon no lo guarda ni lo enseña (Machine.EnvKeys son los
+	// nombres). Solo en frío: con From se rechaza, porque la copia es la
+	// memoria del dorado y su servicio ya arrancó con el entorno de aquel.
+	Env []string `json:"env,omitempty"`
 }
 
 // GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en
@@ -540,6 +562,9 @@ type Snapshot struct {
 	// node (medido: 16 s a 50 % → 6.9 s a 100 %)—. 0 = usar el defecto del daemon
 	// (compatibilidad con snapshots anteriores a este campo).
 	CPUPct int `json:"cpu_pct,omitempty"`
+	// CPUPctFixed: CPUPct lo pidió quien creó el dorado (-cpu-pct). Sus
+	// instancias lo heredan, y con él, arrancar sin impulso (Machine.CPUPctFixed).
+	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
 
 	// AllowDomains es la lista de dominios permitidos cuando Egress es
 	// "allowlist". Se graba junto al snapshot por la misma razón que Egress: las
@@ -550,6 +575,11 @@ type Snapshot struct {
 	// AllowExec: la plantilla tenía la ejecución encendida, y por tanto la
 	// tienen todas sus instancias (la puerta se congeló con la memoria).
 	AllowExec bool `json:"allow_exec,omitempty"`
+
+	// EnvKeys son los nombres del entorno con que arrancó la máquina de la que
+	// se hizo commit (Machine.EnvKeys): sus valores están en la memoria
+	// congelada y las instancias los heredan.
+	EnvKeys []string `json:"env_keys,omitempty"`
 
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
@@ -685,6 +715,9 @@ const (
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
 	EvResized   = "machine.resized"
+	// EvBoostEnded: la máquina volvió de su impulso de CPU de arranque a su
+	// techo configurado; el mensaje dice tras cuánto y por qué.
+	EvBoostEnded = "machine.boost_ended"
 	// EvGuestIPv6 se publica una vez por dorado, la primera vez que se
 	// instancia (runFrom) uno sin GuestIPv6Off: el invitado conserva el
 	// módulo IPv6 de su kernel, aunque el namespace del host lo tenga

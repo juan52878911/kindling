@@ -21,7 +21,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -114,6 +117,9 @@ type Image struct {
 type Layer struct {
 	Descriptor
 	Path string
+	// Tar, si no está vacío, es la capa ya descomprimida (Client.Unpack):
+	// OpenLayer la lee de ahí en vez de descomprimir otra vez.
+	Tar string
 }
 
 // Client habla con los registros.
@@ -128,20 +134,53 @@ type Client struct {
 	// comprimidas, por lo que declara el manifiesto): 0 = sin tope. Con
 	// tope, una capa sin tamaño declarado no se acepta.
 	MaxBytes int64
+	// Unpack, si no está vacío, es un directorio donde Pull deja además cada
+	// capa gzip descomprimida (Layer.Tar), una vez y en paralelo, para que
+	// quien la recorre dos veces (el árbol y luego los datos del ext4) no
+	// la descomprima dos. Es de quien llama: lo borra él. Con MaxBytes, lo
+	// descomprimido no puede pasar de maxUnpackRatio veces el tope (una
+	// bomba gzip llenaría el disco).
+	Unpack string
+	// SiempreRehash: los blobs de la caché se rehashean siempre antes de
+	// usarlos. Para el constructor que corre sin privilegios (ver
+	// internal/daemon/builders_sinroot.go): la caché es suya, y un constructor
+	// comprometido por una imagen podría cambiar un blob —o renombrar uno de
+	// root heredado al nombre de otro del mismo tamaño— para envenenar los
+	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
+	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
+	SiempreRehash bool
 
+	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
+	authMu sync.Mutex // un solo token pedido a la vez
 	tokens map[string]string
+	hc     *http.Client
 }
+
+// parallel es cuántas capas se bajan a la vez (docker pull baja 3).
+const parallel = 4
+
+// maxUnpackRatio es cuánto puede crecer una imagen al descomprimirla,
+// respecto a MaxBytes: lo mismo que deja el constructor oci al aplanado.
+const maxUnpackRatio = 8
 
 func (c *Client) client() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-	}, CheckRedirect: checkRedirect}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hc == nil {
+		// Uno para todo el Pull: las capas reutilizan las conexiones (y el
+		// TLS) del manifiesto y del token.
+		c.hc = &http.Client{Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			MaxIdleConnsPerHost:   parallel,
+		}, CheckRedirect: checkRedirect}
+	}
+	return c.hc
 }
 
 // checkRedirect sigue las redirecciones de los registros (las capas suelen
@@ -173,7 +212,9 @@ func registryHost(registry string) string {
 
 func (c *Client) logf(format string, a ...any) {
 	if c.Log != nil {
+		c.mu.Lock()
 		fmt.Fprintf(c.Log, format+"\n", a...)
+		c.mu.Unlock()
 	}
 }
 
@@ -278,13 +319,140 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		if !strings.Contains(l.MediaType, "tar") || strings.Contains(l.MediaType, "zstd") {
 			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar and tar+gzip)", l.Digest, l.MediaType)
 		}
-		p, err := c.blob(ctx, registry, repo, l)
-		if err != nil {
-			return nil, fmt.Errorf("layer %s: %w", l.Digest, err)
-		}
-		img.Layers = append(img.Layers, Layer{Descriptor: l, Path: p})
+	}
+	img.Layers, err = c.layers(ctx, registry, repo, m.Layers)
+	if err != nil {
+		return nil, err
 	}
 	return img, nil
+}
+
+// layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
+// descomprime según van llegando (tantas a la vez como núcleos). Cada una se
+// descomprime solo después de verificar su sha256. El primer error para las
+// demás.
+func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor) ([]Layer, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if c.Unpack != "" {
+		if err := os.MkdirAll(c.Unpack, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	var budget *atomic.Int64
+	if c.MaxBytes > 0 {
+		budget = new(atomic.Int64)
+		budget.Store(c.MaxBytes * maxUnpackRatio)
+	}
+	// Una descarga por digest: una imagen puede repetir una capa (las vacías)
+	// y dos descargas a la vez al mismo .part se pisarían.
+	type fetch struct {
+		once sync.Once
+		path string
+		err  error
+	}
+	fetches := map[string]*fetch{}
+	for _, d := range ds {
+		fetches[d.Digest] = &fetch{}
+	}
+	out := make([]Layer, len(ds))
+	dl, cpu := make(chan struct{}, parallel), make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	var once sync.Once
+	var first error
+	fail := func(err error) {
+		once.Do(func() { first = err; cancel() })
+	}
+	for i, d := range ds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f := fetches[d.Digest]
+			f.once.Do(func() {
+				select {
+				case dl <- struct{}{}:
+					f.path, f.err = c.blob(ctx, registry, repo, d)
+					<-dl
+				case <-ctx.Done():
+					f.err = ctx.Err()
+				}
+			})
+			if f.err != nil {
+				fail(fmt.Errorf("layer %s: %w", d.Digest, f.err))
+				return
+			}
+			l := Layer{Descriptor: d, Path: f.path}
+			if c.Unpack != "" && strings.Contains(d.MediaType, "gzip") {
+				select {
+				case cpu <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				tar := filepath.Join(c.Unpack, fmt.Sprintf("layer-%d.tar", i))
+				err := unpack(ctx, l, tar, budget, c.MaxBytes*maxUnpackRatio)
+				<-cpu
+				if err != nil {
+					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
+					return
+				}
+				l.Tar = tar
+			}
+			out[i] = l
+		}()
+	}
+	wg.Wait()
+	if first == nil {
+		first = ctx.Err()
+	}
+	if first != nil {
+		return nil, first
+	}
+	return out, nil
+}
+
+// unpack deja la capa l (ya verificada) descomprimida en dst. El CRC32 del
+// gzip, que se comprueba al llegar al final, es una segunda defensa contra
+// una capa dañada en la caché después de verificarla.
+func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
+	rc, err := OpenLayer(l)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(dst)
+		return fmt.Errorf("unpacking: %w", err)
+	}
+	return nil
+}
+
+// unpackReader para si se cancela ctx (otra capa falló) y, con left, descuenta
+// lo leído de un presupuesto compartido por todas las capas de la imagen y
+// falla al agotarlo.
+type unpackReader struct {
+	ctx  context.Context
+	r    io.Reader
+	left *atomic.Int64
+	max  int64
+}
+
+func (u *unpackReader) Read(p []byte) (int, error) {
+	if err := u.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := u.r.Read(p)
+	if u.left != nil && u.left.Add(-int64(n)) < 0 {
+		return n, fmt.Errorf("the image unpacks to more than %d MiB", u.max>>20)
+	}
+	return n, err
 }
 
 // pickPlatform elige la imagen linux/arch de un índice. En arm64 vale la
@@ -332,6 +500,9 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 		return "", fmt.Errorf("invalid digest %q", d.Digest)
 	}
 	dst := c.BlobPath(d.Digest)
+	if !c.SiempreRehash && cached(dst, d.Size) {
+		return dst, nil
+	}
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
 		return dst, nil
 	}
@@ -342,7 +513,11 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 	for try := 0; try < 3; try++ {
 		if try > 0 {
 			c.logf("retrying %s: %v", short(d.Digest), last)
-			time.Sleep(time.Duration(try) * 2 * time.Second)
+			select {
+			case <-time.After(time.Duration(try) * 2 * time.Second):
+			case <-ctx.Done():
+				return "", last
+			}
 		}
 		last = c.download(ctx, registry, repo, d, dst)
 		if last == nil {
@@ -353,6 +528,26 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 		}
 	}
 	return "", last
+}
+
+// cached dice si el blob de la caché se puede usar sin volver a hashearlo.
+//
+// Un blob solo llega a su ruta definitiva con un rename después de comprobar
+// su sha256 y hacer fsync (download): estar ahí es estar verificado, y
+// rehashear cientos de MiB en cada import no protege de nada que no pueda
+// hacer ya quien escriba en la caché. La caché es del daemon (root, dentro de
+// KLING_ROOT): quien pueda escribir en ella puede cambiar también las
+// imágenes ya construidas, el agente o el propio binario. Por si acaso, solo
+// se confía sin hashear en un fichero regular (no un enlace), sin escritura
+// para grupo ni otros (como los deja download) y con el tamaño que declara el
+// manifiesto (un fichero cortado no pasa); si no, se rehashea entero como
+// antes. Sin tamaño declarado, también. Con Client.SiempreRehash, nunca.
+func cached(p string, size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	st, err := os.Lstat(p)
+	return err == nil && st.Mode().IsRegular() && st.Size() == size && st.Mode().Perm()&0o022 == 0
 }
 
 func fileHas(p, digest string, size int64) (bool, error) {
@@ -475,8 +670,9 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		if t := c.tokens[registry+"/"+repo]; t != "" {
-			req.Header.Set("Authorization", "Bearer "+t)
+		used := c.tokenFor(registry + "/" + repo)
+		if used != "" {
+			req.Header.Set("Authorization", "Bearer "+used)
 		}
 		resp, err := c.client().Do(req)
 		if err != nil && ctx.Err() == nil {
@@ -495,19 +691,42 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusUnauthorized && try == 0 && strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			tok, err := c.token(ctx, auth, repo)
-			if err != nil {
+			if err := c.refreshToken(ctx, auth, registry, repo, used); err != nil {
 				return nil, fmt.Errorf("registry token: %w", err)
 			}
-			if c.tokens == nil {
-				c.tokens = map[string]string{}
-			}
-			c.tokens[registry+"/"+repo] = tok
 			continue
 		}
 		return nil, fmt.Errorf("GET %s: %s: %s", u, resp.Status, strings.TrimSpace(string(b)))
 	}
 	return nil, errors.New("unauthorized")
+}
+
+func (c *Client) tokenFor(key string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tokens[key]
+}
+
+// refreshToken pide un token nuevo, salvo que otra descarga en paralelo ya
+// haya cambiado el que se usó (used) mientras se esperaba.
+func (c *Client) refreshToken(ctx context.Context, challenge, registry, repo, used string) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	key := registry + "/" + repo
+	if c.tokenFor(key) != used {
+		return nil
+	}
+	tok, err := c.token(ctx, challenge, repo)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.tokens == nil {
+		c.tokens = map[string]string{}
+	}
+	c.tokens[key] = tok
+	c.mu.Unlock()
+	return nil
 }
 
 // token pide un token anónimo de lectura al servicio que indica el 401.
@@ -593,8 +812,13 @@ func splitChallenge(s string) []string {
 	return out
 }
 
-// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip).
+// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip,
+// o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
+// salta con Seek los datos que no se leen.
 func OpenLayer(l Layer) (io.ReadCloser, error) {
+	if l.Tar != "" {
+		return os.Open(l.Tar)
+	}
 	f, err := os.Open(l.Path)
 	if err != nil {
 		return nil, err

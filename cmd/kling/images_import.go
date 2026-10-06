@@ -25,6 +25,8 @@ import (
 // en /proc/<pid>/cmdline): para una contraseña, -e KEY (del entorno) o
 // -env-file. En todos los casos quedan en la imagen (/etc/kling/env, 0600
 // de root) y viajan al daemon en el cuerpo de la petición, no en un argv.
+// Se mantiene por compatibilidad, con un aviso: lo que es de cada máquina
+// va en `kling run -e`, que no lo hornea (pkg/api/machine_env.go).
 func imagesImport(args []string) error {
 	fs := flag.NewFlagSet("image import", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -51,6 +53,10 @@ func imagesImport(args []string) error {
 	env, err := ef.resolve()
 	if err != nil {
 		return err
+	}
+	if len(env) > 0 {
+		fmt.Fprintln(os.Stderr, "warning: -e and -env-file bake the values into the image (/etc/kling/env) and every copy of it; "+
+			"for a password or anything per machine, use kling run -image <image> -e KEY instead")
 	}
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env}
 	if len(entrypoint) > 0 {

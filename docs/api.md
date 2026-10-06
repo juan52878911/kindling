@@ -37,6 +37,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
 | `authz` | sin publicar | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
 | `ready` | sin publicar | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
+| `machine-env` | sin publicar | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
 | `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
@@ -128,7 +129,12 @@ en él `request.json` y ejecuta `<constructor> <dir>` con `KLING_ROOT`,
 constructor tiene que dejar `$KLING_ROOT/images/<name>.ext4` o
 `<name>.layer.ext4` y salir con 0; su salida vuelve a quien pidió la construcción.
 Tiene que ser de root y nadie más puede escribirlo, ni a él ni a su directorio,
-porque el daemon lo ejecuta como root. La receta la escribe el daemon, con
+porque el daemon lo ejecuta como root. Excepción: `oci` (el del núcleo o uno
+instalado con ese nombre) corre con el usuario de construcción
+(`kindling-build`, ver `docs/imagenes.md`) cuando existe: recibe además
+`KLING_OUT_DIR` (deja ahí la imagen; el daemon la valida y la mueve a
+`images/`) y `KLING_CACHE_DIR` (su caché), y del entorno del daemon solo una
+lista blanca. La receta la escribe el daemon, con
 permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
@@ -668,6 +674,18 @@ el del dorado (`from`) > la receta > `cpu_pct_default` de la petición (el valor
 por defecto de la configuración del CLI, que ya no viaja como si fuera un flag) >
 el del daemon (50). En vz el regulador pausa la VM entera: un Android de 2 vCPU
 con el 50 % iba a ¼.
+
+**Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
+`thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
+del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
+o cuando contesta su agente si no declara sonda; como mucho 60 s. Mientras dura,
+`GET /machines/{ref}` trae `cpu_boost_pct` (el techo de ese momento; `kling ps`
+lo enseña en READY) y al acabar se publica `machine.boost_ended` con el motivo.
+Un `cpu_pct` pedido explícitamente (`cpu_pct_fixed` en la máquina y en el
+dorado) no lleva impulso. En el daemon, `KLING_READY_BOOST=0` vuelve al impulso
+de antes (un núcleo hasta que contesta el agente, 10 s como mucho) y una
+duración (`KLING_READY_BOOST=2m`) cambia el plazo. La admisión no lo cuenta: es
+un techo de cgroup, no una reserva.
 
 **Pila IPv6 por imagen.** `"guest_ipv6_stack": true` en la receta arranca el
 invitado en frío con `ipv6.disable_ipv6=1` en vez de `ipv6.disable=1`: hay

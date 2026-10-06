@@ -32,6 +32,11 @@ type Registry struct {
 	// LieDigest, si no está vacío, es lo que dice Docker-Content-Digest al
 	// pedir un manifiesto por etiqueta.
 	LieDigest string
+	// BlobDelay retrasa cada respuesta de /blobs/, y MaxInFlight apunta
+	// cuántas hubo a la vez como mucho (para ver las descargas en paralelo).
+	BlobDelay   time.Duration
+	MaxInFlight int
+	inFlight    int
 }
 
 // New arranca el registro.
@@ -100,6 +105,19 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	if d == r.Corrupt {
 		b = append([]byte{}, b...)
 		b[len(b)/2] ^= 1
+	}
+	if strings.Contains(req.URL.Path, "/blobs/") {
+		r.mu.Lock()
+		r.inFlight++
+		r.MaxInFlight = max(r.MaxInFlight, r.inFlight)
+		delay := r.BlobDelay
+		r.mu.Unlock()
+		time.Sleep(delay)
+		defer func() {
+			r.mu.Lock()
+			r.inFlight--
+			r.mu.Unlock()
+		}()
 	}
 	if mt != "" && strings.Contains(req.URL.Path, "/manifests/") {
 		w.Header().Set("Content-Type", mt)

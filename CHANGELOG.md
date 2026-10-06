@@ -8,8 +8,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
-- `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256
+- `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
+- `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`
 - `kling logs -service`, and `-json` on `kling run` and `kling image import`, for agents
 - `debian` image builder: pinned, reproducible Debian images without root, also on macOS (#157)
@@ -28,6 +29,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
 - Docker images get a full core per vCPU by default
+- A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
 - `kling db branch`: `git checkout` switches databases in tens of milliseconds (#125)
 - Concurrent `kling db up` calls wait for admission instead of being rejected (#150)
 - Daemon API, `state.json`, golden `meta.json` and credential stores are versioned (#138, #140, #141)
@@ -59,10 +61,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Diff freeze: the daemon never follows links in a machine's directory, checks the seal's base is the golden's memory, and only freezes as a diff where the filesystem tells holes from zero pages
 - `state.json` is written with schema 2 while a copy is frozen as a diff, so an older kling refuses to start instead of loading it as full memory
 - `run -disk` must fit in the free disk; `KLING_MAX_DISK_MIB` lowers the maximum
-- `run -image` names images by a keyed hash of the whole reference and the environment, so another registry's image is never reused
+- `run -image` names images by a keyed hash of the whole reference, so another registry's image is never reused
 - Docker images: the config blob must declare a size (max 8 MiB); tar entries are capped while reading layers
 - Docker images: registries never redirect to plain http, and only `localhost`/`127.0.0.1`/`::1` are spoken to over http
 - Docker images: the `HEALTHCHECK` runs as the image's `USER`; arguments given after `--` are not echoed
+- Docker images: the `oci` builder runs as its own unprivileged user (`-build-as`, default `kindling-build`), not root; the daemon checks and moves what it leaves
 - `-env` build variables move out of the world-readable `/entrypoint` into a 0600 file (#155)
 - Credential proxy: keys never go to another host; substitution only where declared (#133)
 - macOS: per-machine `kling-vz` sandbox, stricter peer checks, DNS limits, public DNS (#131)

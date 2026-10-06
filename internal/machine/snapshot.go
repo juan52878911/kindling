@@ -501,10 +501,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: sinEtiquetasGrafo(mc.Labels),
 		Egress:       mc.Egress,
 		CPUPct:       mc.CPUPct,
+		CPUPctFixed:  mc.CPUPctFixed,
 		AllowDomains: mc.AllowDomains,
 		// La puerta de exec se congela con la memoria: las instancias la tendrán
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
 		AllowExec:      mc.AllowExec,
+		EnvKeys:        mc.EnvKeys,
 		RootfsSHA256:   rootfsSHA,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
@@ -1254,6 +1256,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// tortuga— no apunta al snapshot.
 	// Precedencia: el flag > el dorado > la receta de la imagen > el valor
 	// por defecto de quien pide > el del daemon (ver techoCPUPorDefecto).
+	// Fijo (sin impulso de arranque) si lo fijó quien hizo el dorado, o si
+	// quien pide trae uno distinto del del dorado: el planificador del gateway
+	// manda siempre el del dorado, y eso no es pedirlo.
+	cpuFijo := snap.CPUPctFixed || (req.CPUPct > 0 && req.CPUPct != snap.CPUPct)
 	if req.CPUPct <= 0 {
 		req.CPUPct = snap.CPUPct
 	}
@@ -1405,9 +1411,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB, MemMaxMiB: snap.MemMaxMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
-		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct,
+		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo,
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
+		// El entorno es el del dorado: está en su memoria (entorno.go).
+		EnvKeys: snap.EnvKeys,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
 		CreatedAt: creada,
@@ -1457,9 +1465,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 		m.mu.Unlock()
 	}
-	impulso := m.nuevoImpulso(id, mc.CPUPct)
+	impulso := m.nuevoImpulso(id, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(id, topeArranque(mc.CPUPct))
+	cg := m.cgroupParaLanzar(id, impulso.tope)
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1624,8 +1632,6 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
 	resyncT, resyncOK, listo := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
-	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
-	impulso.bajar()
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -1652,10 +1658,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	elapsed := time.Since(start).Milliseconds()
 
-	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, ya con el
-	// techo configurado (el arranque terminó arriba).
+	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, con el techo
+	// de arranque: lo baja entregarRestaurada, abajo.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
@@ -1680,6 +1686,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
 	// imagen (identidad por copia, etc.), en segundo plano.
 	m.trasRestaurar(ctx, id, api.ResyncInstance, listo)
+	// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
+	// normal) o no declara sonda; si no, cuando la pase.
+	impulso.entregarRestaurada(listo)
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()

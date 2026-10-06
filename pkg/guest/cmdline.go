@@ -19,15 +19,18 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // knownBootParams son los kling.* que este agente sabe leer. kling.layer lo lee
 // overlay-init antes de que el agente exista, pero es del mismo contrato y no
 // merece aviso.
 var knownBootParams = map[string]bool{
-	volumeBootParam: true,
-	execBootParam:   true,
-	"kling.layer":   true,
+	volumeBootParam:         true,
+	execBootParam:           true,
+	api.MachineEnvBootParam: true,
+	"kling.layer":           true,
 }
 
 // bootParams es lo que se leyó de /proc/cmdline: los kling.* conocidos con su

@@ -148,6 +148,9 @@ type Manager struct {
 	// pisaran y una se perdiera sin error.
 	metaMu sync.Mutex
 	socket map[string]string // id -> ruta del socket de firecracker
+	// entornoPendiente es el entorno de las máquinas cuyo agente aún no lo
+	// ha leído de MMDS (entorno.go): un PutMMDS en ese rato lo conserva.
+	entornoPendiente map[string]map[string]string
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
 	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
@@ -297,6 +300,12 @@ type Manager struct {
 	// pruebasCPU sustituye la escritura de cpu.max y la espera al agente del
 	// techo de arranque (arranque_cpu.go). Solo lo ponen las pruebas.
 	pruebasCPU *ganchosCPU
+
+	// impulsos es el impulso de CPU de arranque vigente de cada máquina
+	// (arranque_cpu.go), con su candado: bajo él se registra uno nuevo y se
+	// escribe el techo al deshacerlo. No toma m.mu dentro.
+	impulsosMu sync.Mutex
+	impulsos   map[string]*impulsoCPU
 
 	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
 	// una nueva jubila a la anterior.
@@ -852,6 +861,7 @@ func (m *Manager) List() []*api.Machine {
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
+		c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -959,6 +969,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
 		c.Transition = m.transicion[mc.ID]
+		c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 		return &c, true
 	}
 	var porNombre, porPrefijo []*api.Machine
@@ -977,6 +988,7 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 		case 1:
 			c := *l[0]
 			c.Transition = m.transicion[c.ID]
+			c.CPUBoostPct = m.impulsoVigente(c.ID, c.State)
 			return &c, true
 		}
 		return nil, false
@@ -1122,6 +1134,13 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	default:
 		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
+	// El entorno de la máquina (entorno.go): validado antes de reservar
+	// nada. Desde aquí solo viaja en env, nunca en la máquina.
+	env, err := entornoDePeticion(req)
+	if err != nil {
+		return nil, err
+	}
+	req.Env = nil
 	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
 	// llevar siempre a la misma máquina (docs/authz.md).
 	soltarNombre, err := m.reservarNombre(req.Name)
@@ -1170,6 +1189,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	// El techo de CPU: el flag > la receta de la imagen > el valor por defecto
 	// de quien pide > el del daemon (este último, tras arrancar).
+	// Un flag explícito, además, no lleva impulso de arranque (arranque_cpu.go).
+	cpuFijo := req.CPUPct > 0
 	if req.CPUPct <= 0 {
 		req.CPUPct = m.techoCPUPorDefecto(req.Image, req.VCPUs, req.CPUPctDefault)
 	}
@@ -1317,11 +1338,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, DiskMiB: req.DiskMiB, CreatedAt: creada,
-		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
+		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
-		TTLAt: &creada,
+		TTLAt:   &creada,
+		EnvKeys: api.MachineEnvKeys(env),
 	}
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
@@ -1387,7 +1409,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image))
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -1405,14 +1427,14 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 		m.mu.Unlock()
 	}
-	// Un núcleo entero mientras arranca el kernel del invitado, que es lo que
-	// viene ahora (boot() vuelve tras Start); el techo configurado, en cuanto
-	// contesta su agente. El defer lo baja en cualquier salida de aquí en
-	// adelante, salvo la de éxito, que se lo entrega a quien espera al agente.
-	// Ver arranque_cpu.go.
-	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	// El impulso de arranque mientras arranca el invitado, que es lo que viene
+	// ahora (boot() vuelve tras Start); el techo configurado, en cuanto pasa su
+	// sonda de listo (o contesta su agente, si no declara sonda). El defer lo
+	// baja en cualquier salida de aquí en adelante, salvo la de éxito, que se
+	// lo entrega a quien espera el fin del arranque. Ver arranque_cpu.go.
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, topeArranque(mc.CPUPct)); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -1447,8 +1469,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.decorarShares(&out)
 	}
 
-	// Desde aquí baja el techo la goroutine que espera al agente: con carpetas
-	// vivas ya contestó (waitShares) y lo bajará en su primer sondeo.
+	// Desde aquí baja el techo la goroutine que espera el fin del arranque:
+	// con carpetas vivas el agente ya contestó (waitShares).
 	impulso.entregar()
 	// Para `kling ps`: si la imagen declara una sonda, cuándo termina de
 	// arrancar (listo.go). En segundo plano; -wait-ready espera aparte.
@@ -1457,6 +1479,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
 	m.conocerAgente(id)
+	if len(env) > 0 {
+		m.retirarEntornoMMDS(id, mc.Name, env)
+	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
@@ -1563,7 +1588,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1620,7 +1645,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack)}); err != nil {
+	// El entorno de la máquina va por MMDS, que cuelga de la red.
+	if len(env) > 0 && n == nil {
+		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrEnvRequest)
+	}
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0)
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -1689,7 +1719,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		// invitado no trae ruta a 169.254.169.254, la microVM arranca igual y solo se
 		// pierde la inyección de secretos por MMDS.
 		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
+			// Sin MMDS el entorno de la máquina no llega: el agente no
+			// arrancaría el servicio. Mejor no arrancar.
+			if len(env) > 0 {
+				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment: %w", err)
+			}
 			log.Printf("warning: could not configure MMDS on %s: %v (no session secrets available)", id, err)
+		} else if len(env) > 0 {
+			if err := ponerEntornoMMDS(ctx, c, env); err != nil {
+				return pid, err
+			}
 		}
 	}
 	// virtio-rng: sin esto, las instancias de un mismo snapshot clonarían el
@@ -2491,6 +2530,9 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if err != nil {
 		return nil, err
 	}
+	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
+		return nil, err
+	}
 	c := fc.New(sock)
 	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
@@ -2870,14 +2912,15 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	var err error
 
 	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar): el
-	// de arranque, que se baja al configurado en cuanto contesta el agente
-	// (resync) o, en cualquier otra salida, en el defer. Ver arranque_cpu.go.
+	// de arranque, que se baja al configurado en cuanto termina de arrancar
+	// (al final, tras los ganchos) o, en cualquier otra salida, en el defer.
+	// Ver arranque_cpu.go.
 	if mc.CPUPct <= 0 {
 		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 	}
-	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(mc.ID, topeArranque(mc.CPUPct))
+	cg := m.cgroupParaLanzar(mc.ID, impulso.tope)
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -2992,8 +3035,6 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		resyncT, resyncOK, listo = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
-	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
-	impulso.bajar()
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -3003,7 +3044,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
 	// que mover.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
@@ -3053,6 +3094,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.startShares(mc.ID)
 	// Los ganchos de la imagen, con credenciales y red ya en su sitio.
 	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
+	// Fin del impulso de arranque: ya, si su memoria trae el "listo" (lo
+	// normal) o no declara sonda; si no, cuando la pase.
+	impulso.entregarRestaurada(listo)
 
 	fases := crono.cerrar()
 	out.Wake = fases

@@ -104,15 +104,53 @@ que `-wait-ready` se rinde. La capa nunca se monta sin verificar.
 Una imagen de Docker/OCI tal cual, sin Docker en el host:
 
 ```sh
-kling image import postgres:17-alpine -e POSTGRES_PASSWORD     # el valor, del entorno
-kling run -image postgres-17-alpine -mem 512M -wait-ready
+kling image import postgres:17-alpine
+kling run -image postgres-17-alpine -mem 512M -wait-ready -e POSTGRES_PASSWORD   # el valor, del entorno
 kling save <id> pg-warm && kling run -from pg-warm             # plantilla ya inicializada
 
 kling run -image redis:7-alpine -mem 256M -wait-ready          # o en un paso: una referencia
-kling run -image postgres:17-alpine -e POSTGRES_PASSWORD=x     # se importa la primera vez;
-                                                               # el nombre lleva un sufijo de
-                                                               # la referencia y del entorno
+kling run -image postgres:17-alpine -e POSTGRES_PASSWORD       # se importa la primera vez;
+                                                               # una imagen por referencia
 ```
+
+### El entorno es de la máquina
+
+`kling run -e KEY=valor`, `-e KEY` (el valor sale del entorno de `kling`: no
+queda en `ps`) y `-env-file F` dan el entorno a **esa máquina**, no a la
+imagen. Dos máquinas con contraseñas distintas son dos máquinas sobre la misma
+imagen. Vale para cualquier imagen con un agente que lo sepa leer (las de
+ahora). Con una de antes, que lo ignoraría, la máquina **falla** en cuanto su
+agente contesta: su servicio habría corrido sin la contraseña o la clave que
+se le dio. Hay que reconstruirla o reimportarla. Las importadas antes con
+`run -image <ref> -e` llevan la contraseña horneada en `/etc/kling/env`:
+bórralas (`kling image rm`).
+
+Cómo viaja, y dónde **no** está:
+
+| Tramo | |
+|---|---|
+| CLI → daemon | en el cuerpo de `POST /machines` (`env`), nunca en un argv. Si el daemon no anuncia la capacidad `machine-env`, el CLI no lo manda |
+| daemon | valida (≤ 256 variables, ≤ 32 KiB, claves `[A-Za-z_][A-Za-z0-9_]*`, sin NUL) y lo escribe en el almacén MMDS del VMM antes de arrancar, con `kling.env=1` en la línea del kernel. No va a `state.json`, ni a un log, ni a `kling inspect`/`ps`: la máquina guarda solo los nombres (`env_keys`). Un error nombra la clave, nunca el valor |
+| invitado | `kling-guest` lo lee de MMDS (169.254.169.254, v2 con token) antes de escuchar y lo guarda solo en su memoria, encima del entorno de la imagen (con la misma clave gana la máquina). Lo reciben el servicio, la sonda de listo, los ganchos y `kling exec`. Ningún fichero del invitado lo lleva |
+| después | el daemon lo borra de MMDS en cuanto el agente contesta (`/healthz`): un proceso lanzado luego ya no lo encuentra allí. Si `kling.env=1` y el agente no lo pudo leer, el servicio **no arranca** (`kling logs -service` dice por qué) |
+
+Lo que sí queda: el entorno del proceso del servicio (como en Docker, legible
+por su usuario y por root en `/proc/<pid>/environ`) y, por tanto, la memoria
+de la máquina. Todo lo que vuelca la RAM a disco la lleva: `kling freeze`
+(también el de `on_ttl`, que por defecto congela), `kling fork` y `kling save`.
+A diferencia de los secretos de sesión (`kling machine secret`, que marcan la
+máquina y no dejan congelarla), el entorno se trata como configuración: se
+congela con ella, en ficheros 0600 del daemon. **`kling save` congela esa memoria**: una plantilla lleva el
+entorno de la máquina de la que se hizo, y sus copias (`run -from`) arrancan
+con él (`env_keys` se hereda). Con `-from`, `-e` es un error: la copia es la
+memoria del dorado, su servicio ya arrancó con el entorno de aquel, y uno
+nuevo no le llegaría (un `POSTGRES_PASSWORD` solo cuenta en el `initdb`). Para
+otro entorno, otra máquina en frío con `-image`. La plantilla, como el
+`mem.file` de cualquier dorado, es 0600 del daemon.
+
+`kling image import -e` sigue horneando valores en `/etc/kling/env` por
+compatibilidad, con un aviso en stderr: sirve para lo que es de la imagen
+(`PGDATA`), no para una contraseña.
 
 **La imagen es su propia base.** No va encima de la base de kindling (Alpine):
 se aplanan todas sus capas, con sus whiteouts, en un ext4 monolítico. No se
@@ -133,10 +171,28 @@ kindling y nada más:
 sha256 del manifiesto bajado (si el registro dice otro en
 `Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al
 del manifiesto de la plataforma y cada capa). Cada capa se comprueba por sha256
-y se guarda en la caché por hash (`$KLING_ROOT/cache/oci`): reimportar el mismo
+y se guarda en la caché por hash (`$KLING_ROOT/cache/builder/oci`, la del
+usuario de construcción; `$KLING_ROOT/cache/oci` si corre como root): reimportar el mismo
 digest no baja ninguna capa, y con la misma `SOURCE_DATE_EPOCH` sale la misma
 imagen bit a bit. De un índice multiplataforma se elige `linux/<arch>` (en arm64,
 la variante v8; en amd64, la que no pide v2/v3).
+
+**Rápido sin dejar de verificar.** Las capas se bajan de 4 en 4 y cada una se
+descomprime una sola vez, en paralelo y después de comprobar su sha256, a un
+tar en el directorio de trabajo de la construcción: el árbol se arma leyendo
+solo las cabeceras y el ext4 lee los datos de ahí (cada tar se borra en cuanto
+se ha leído). Cuesta en disco, mientras dura, el tamaño descomprimido de las
+capas, con tope de 8 veces `max_mb` (una bomba gzip no llena el disco). Un blob
+de la caché no se vuelve a hashear en cada import cuando el constructor corre
+como root: solo llega a su ruta con un `rename` después de verificarlo, así
+que estar ahí, con el tamaño del manifiesto, siendo un fichero regular sin
+escritura para grupo ni otros, es estar verificado; si algo de eso falla, se
+rehashea entero. Esa caché es del daemon: quien pueda escribir en ella puede
+cambiar también las imágenes y los binarios. Con el usuario de construcción
+(abajo) la caché es suya, y lo cacheado se rehashea **siempre**: un
+constructor comprometido por una imagen no puede envenenar los imports
+siguientes cambiando o renombrando un blob. Una capa dañada después en disco la caza además el
+CRC32 del gzip al descomprimirla.
 
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
@@ -164,13 +220,13 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 | `ref` | `postgres:17-alpine`, `ghcr.io/o/r:tag`, `repo@sha256:...` |
 | `digest` | fija la imagen (del índice o del manifiesto); tiene que cuadrar con el de `ref` si trae uno |
 | `arch` | `amd64` o `arm64` (por defecto la del host) |
-| `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`) |
+| `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`): para lo que es de cada máquina, `kling run -e` (arriba) |
 | `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
 | `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
 
 `kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
-`-env-file`, `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
+`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
 ready, service}`).
 
@@ -212,7 +268,11 @@ Y lo que hubo que cambiar para llegar ahí:
   corre con los núcleos enteros salvo que se le ponga `--cpus`, y con medio
   núcleo Hindsight tardaba 43 s en arrancar y 1,4 s por consulta. El
   constructor `oci` deja en la receta `cpu_pct_per_vcpu: 100` (un núcleo por
-  vCPU); `-cpu-pct` sigue mandando.
+  vCPU); `-cpu-pct` sigue mandando. Hoy el arranque lo cubre también el
+  impulso hasta la sonda de listo (todas las vCPU enteras hasta que pasa, ver
+  `api.md`), pero la receta se queda por el reposo: con medio núcleo, una
+  consulta de Postgres que suma 3 M filas tarda 0,93 s en vez de 0,49 s, y un
+  recall de Hindsight 0,09 s en vez de 0,05 s.
 - **Disco de la máquina.** Era fijo, de 512 MiB: un modelo de 470 MB no cabía.
   `kling run -disk 4G` lo agranda (de 64 MiB a 256 GiB; disperso, así que solo
   cuesta lo que se escribe). Las copias de una plantilla heredan el del dorado.
@@ -289,18 +349,73 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
   kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
-  subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata` al importar).
-- **El entorno es de la imagen, no de la máquina**: `-e` va en `kling image
-  import`; dos máquinas con contraseñas distintas son dos imágenes.
+  subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata`).
+- **El entorno de una plantilla es el suyo**: `run -from` no admite `-e` (ver
+  "El entorno es de la máquina").
 - **El `HEALTHCHECK` corre con el `USER` de la imagen** (o el de `-user`), como
   en Docker; si ese usuario no existe en la imagen, la máquina no llega a lista.
-- **El constructor `oci` corre como root dentro del daemon**: lee los tar sin
-  escribir nada fuera de su directorio de trabajo (las rutas se resuelven en un
-  árbol en memoria y `..` se rechaza), pero aún no baja de privilegios.
+- **El constructor `oci` corre como root si no hay usuario de construcción**:
+  ver abajo.
 - **Sin zstd**: solo capas `tar` y `tar+gzip`.
 - **No cambia la licencia**: convertir una imagen no la redistribuye, pero
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
   de datos gestionada). No publiques imágenes convertidas.
+
+### El constructor `oci` no corre como root
+
+Baja de internet y parsea tars que no son de fiar, y no necesita root para
+nada. En Linux, con el daemon como root, corre con un usuario propio sin
+privilegios: `-build-as` / `KLING_BUILD_AS`, por defecto `kindling-build`.
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
+```
+
+Es otro usuario que el de Firecracker (`-run-as`, `kindling`), y el daemon no
+acepta el mismo: con un uid compartido, un VMM comprometido reescribiría la
+caché de blobs y los builds en curso (y metería su código en las imágenes de
+otros), y un constructor comprometido podría mandar señales o `ptrace` a los
+VMM vivos y escribir en los volúmenes.
+
+| Qué | Dueño y permisos | Para qué |
+| --- | --- | --- |
+| `<root>/build/` | root, 0711 | se atraviesa; no se lista ni se escribe |
+| `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json`; la imagen sale en `out/` |
+| `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
+
+La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya
+hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, se
+comprueban por sha256 cada vez que se usan y reimportar lo bajado antes no
+baja nada.
+
+El usuario tiene que ser **de sistema y dedicado** (uid ≤ `SYS_UID_MAX`): al
+acabar cada construcción el daemon mata todos sus procesos, y con varios
+daemons en el mismo host (uno de pruebas junto al de systemd) las
+construcciones de ese usuario van en fila con un cerrojo de host
+(`/run/kindling-build-<uid>.lock`). La raíz de datos tiene que poder
+atravesarla (no bajo `/root`); si no, el daemon lo avisa al arrancar y el
+constructor corre como root.
+
+El proceso nace con su uid y su gid, sin grupos suplementarios ni capacidades,
+y antes de leer la petición se pone `no_new_privs` y topes: 4096 descriptores,
+8 GiB de datos (`RLIMIT_DATA`, el montón de Go), 512 procesos del usuario y sin
+volcados de memoria; el plazo de 15 minutos es el de siempre. Del entorno del
+daemon solo le llega una lista blanca (proxy, certificados, el agente,
+`SOURCE_DATE_EPOCH`): el resto puede llevar secretos.
+
+Lo que deja, el daemon lo comprueba antes de usarlo: `out/<name>.ext4` se abre
+sin seguir enlaces y tiene que ser un fichero regular, suyo y con un solo
+enlace duro; pasa a root 0644 y se mueve a `images/` (después, root y grupo del
+VMM, 0640). `recipe.json` también se lee sin seguir enlaces: uno que apuntara a
+la receta 0600 de otra imagen la colaría en ésta. Las construcciones de este
+usuario van de una en una, y antes y después el daemon mata cualquier proceso
+que quede con su uid: lo que un constructor comprometido dejara en segundo
+plano no llega a la siguiente.
+
+Sin usuario (macOS, daemon sin root, `kindling-build` inexistente) corre como
+hasta ahora, con el uid del daemon, y el daemon lo avisa al arrancar. `debian`
+y `android` también son Go puro, pero leen y escriben bases y recetas de
+`images/`: siguen corriendo como root.
 
 ## Límites
 

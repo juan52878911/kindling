@@ -7,12 +7,14 @@ package main
 // referencia (`redis:7-alpine`, `ghcr.io/o/r:tag`, `postgres@sha256:...`) se
 // importa la primera vez y después se reutiliza. El nombre es el de
 // imageNameFor más un sufijo que sale de la referencia ENTERA (registro,
-// repositorio, etiqueta y digest) y del entorno de -e, que va DENTRO de la
-// imagen (ver imagenes.md): ni `ghcr.io/x/redis:7` se hace pasar por
-// `redis:7`, ni fijar un digest reutiliza otra cosa, y dos entornos son dos
-// imágenes. El sufijo es un HMAC con una clave local (claveRunImage): sin ella
-// no se puede comprobar una contraseña probando un diccionario contra el
-// nombre.
+// repositorio, etiqueta y digest): ni `ghcr.io/x/redis:7` se hace pasar por
+// `redis:7`, ni fijar un digest reutiliza otra cosa.
+//
+// Una imagen por referencia: el entorno de -e ya no va dentro de la imagen
+// sino en la máquina (pkg/api/machine_env.go), así que dos contraseñas son
+// dos máquinas sobre la misma imagen. El sufijo sigue siendo un HMAC con una
+// clave local (claveRunImage) y con el mismo formato que cuando llevaba el
+// entorno, vacío: así las imágenes ya importadas sin -e conservan su nombre.
 
 import (
 	"context"
@@ -24,7 +26,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/oci"
@@ -42,14 +43,12 @@ func esRefDocker(image string) bool {
 	return err == nil
 }
 
-// nombreParaRef es el nombre de la imagen de kindling para una referencia y
-// un entorno: el de imageNameFor, "-" y ocho hexadecimales del HMAC de la
-// referencia normalizada y las líneas del entorno ordenadas.
-func nombreParaRef(r oci.ImageRef, env []string, clave []byte) string {
-	lineas := append([]string(nil), env...)
-	sort.Strings(lineas)
+// nombreParaRef es el nombre de la imagen de kindling para una referencia:
+// el de imageNameFor, "-" y ocho hexadecimales del HMAC de la referencia
+// normalizada (y un entorno vacío, por compatibilidad: ver arriba).
+func nombreParaRef(r oci.ImageRef, clave []byte) string {
 	mac := hmac.New(sha256.New, clave)
-	mac.Write([]byte(r.String() + "\x00" + strings.Join(lineas, "\n")))
+	mac.Write([]byte(r.String() + "\x00"))
 	base := imageNameFor(r)
 	if len(base) > 55 { // los nombres de imagen tienen 64 como mucho
 		base = strings.TrimRight(base[:55], "-_")
@@ -59,8 +58,9 @@ func nombreParaRef(r oci.ImageRef, env []string, clave []byte) string {
 
 // claveRunImage es la clave local del HMAC de nombreParaRef: 32 bytes en
 // <config>/kling/run-image.key (0600), creada la primera vez. Si no se puede
-// leer ni crear, nil: el sufijo es entonces un hash sin clave, y lo único que
-// se pierde es la protección frente al diccionario.
+// leer ni crear, nil: el sufijo es entonces un hash sin clave. Ya no protege
+// nada (el nombre solo depende de la referencia); se conserva para que los
+// nombres de lo ya importado no cambien.
 func claveRunImage() []byte {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -93,21 +93,14 @@ func claveRunImage() []byte {
 }
 
 // asegurarImagenDocker devuelve el nombre de la imagen de kindling de la
-// referencia ref con el entorno env, importándola si el daemon no la tiene.
-// Lo que dice mientras importa va a stderr: la salida normal del run puede
-// ser JSON.
-func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string, env []string) (string, error) {
+// referencia ref, importándola si el daemon no la tiene. Lo que dice
+// mientras importa va a stderr: la salida normal del run puede ser JSON.
+func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (string, error) {
 	r, err := oci.ParseImageRef(ref)
 	if err != nil {
 		return "", err
 	}
-	for _, kv := range env {
-		if !reBuildEnv.MatchString(kv) {
-			k, _, _ := strings.Cut(kv, "=")
-			return "", fmt.Errorf("invalid environment entry %q: use KEY=value, one line", k)
-		}
-	}
-	name := nombreParaRef(r, env, claveRunImage())
+	name := nombreParaRef(r, claveRunImage())
 	imgs, err := c.Images(ctx)
 	if err != nil {
 		return "", err
@@ -117,7 +110,7 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string, env []
 			return name, nil
 		}
 	}
-	sb, _ := json.Marshal(OCISpec{Ref: ref, Env: env})
+	sb, _ := json.Marshal(OCISpec{Ref: ref})
 	fmt.Fprintf(os.Stderr, "importing %s as %s (the first time downloads it)...\n", r, name)
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Builder: "oci", Spec: sb})
 	if err != nil {
