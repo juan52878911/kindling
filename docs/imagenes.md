@@ -88,6 +88,11 @@ Una imagen de Docker/OCI tal cual, sin Docker en el host:
 kling image import postgres:17-alpine -e POSTGRES_PASSWORD     # el valor, del entorno
 kling run -image postgres-17-alpine -mem 512M -wait-ready
 kling save <id> pg-warm && kling run -from pg-warm             # plantilla ya inicializada
+
+kling run -image redis:7-alpine -mem 256M -wait-ready          # o en un paso: una referencia
+kling run -image postgres:17-alpine -e POSTGRES_PASSWORD=x     # se importa la primera vez;
+                                                               # con -e, el nombre lleva un
+                                                               # sufijo del hash del entorno
 ```
 
 **La imagen es su propia base.** No va encima de la base de kindling (Alpine):

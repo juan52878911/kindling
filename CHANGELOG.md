@@ -25,6 +25,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - **A dump that does not fit is refused before pausing**, and a failed dump removes
   what it wrote; it used to fill the disk and leave a partial mem.file the size of
   the RAM behind.
+- **`kling run -image redis:7-alpine -e K=V`** imports a Docker reference on first use
+  (named as `kling image import` would, plus a short hash of the environment) and
+  reuses it afterwards.
 - **`kling run -disk 4G`** sizes the machine's writable disk (was a fixed 512 MiB).
 - **Docker images get a full core per vCPU** by default (`cpu_pct_per_vcpu: 100` in
   the recipe): with the daemon's half a core, Hindsight booted in 43 s and answered
