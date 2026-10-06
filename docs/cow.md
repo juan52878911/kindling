@@ -83,9 +83,29 @@ pero sí Btrfs, el fichero es `$root/cow.btrfs` y se formatea Btrfs (ver
 ├── cow.xfs                      # el almacén: reservado entero con fallocate
 ├── cow/                         # su punto de montaje (nodev,nosuid,noexec)
 │   ├── bases/<dorado>/<clave>.ext4   # UNA copia del overlay de cada dorado (0400, root)
+│   ├── bases/<dorado>/<clave>.mem    # y UNA de su memoria (el espejo; ver abajo)
 │   └── m/<id>/overlay.ext4          # el overlay de cada instancia: un clon de su base
+│       m/<id>/mem.file              # su diff congelado (lo escrito desde el dorado)
+│       m/<id>/mem.full              # base + diff mientras la copia corre tras un thaw
 └── machines/<id>/overlay.ext4   # enlace simbólico ABSOLUTO a cow/m/<id>/overlay.ext4
+    machines/<id>/mem.file, mem.full   # ídem
 ```
+
+**La memoria también.** Una copia de un dorado se congela en diferencial (solo
+las páginas que escribió; [imagenes.md](imagenes.md#imágenes-grandes-ram-cpu-y-disco))
+y para despertarla el VMM necesita base + diff en un solo fichero. El almacén
+guarda un espejo del `mem.file` de cada dorado (`.mem`, una copia por versión,
+como la base del overlay), el VMM vuelca el diff de la copia directamente en
+`m/<id>/mem.diff` (un fichero que el daemon deja creado, 0660 por grupo, bajo la
+cuota de la instancia) y el daemon lo funde en `m/<id>/mem.file`. Despertar es
+clonar el espejo a `m/<id>/mem.full` (FICLONE) y clonar encima los tramos con
+datos del diff (FICLONERANGE): no se mueve ningún dato, solo metadatos, así que
+cuesta lo que cuesten los tramos (medido: ~40 µs cada uno en Btrfs). `mem.full`
+es del daemon y el VMM solo lo lee (0640): lo mapea MAP_PRIVATE y nunca escribe
+en él. Se retira al congelar otra vez o al borrar la máquina; el espejo, cuando
+el dorado desaparece o se reemplaza (`barrer`). Sin almacén, o si el overlay de
+la copia no vive en él, el diff se queda en `machines/<id>` y despertar copia
+la base en la raíz.
 
 - **Una copia completa por dorado, no por instancia.** La primera instancia de un
   dorado copia su overlay dentro del almacén (la "base"); todas las demás son clones de

@@ -103,7 +103,7 @@ func TestAlmacenAplicaCuota(t *testing.T) {
 	if _, err := a.clonarInstancia(context.Background(), "dorado", src, "id3", 0); err != nil {
 		t.Fatal(err)
 	}
-	a.barrer(func(string) bool { return false }, func(string) string { return src })
+	a.barrer(func(string) bool { return false }, func(string) string { return src }, func(string) string { return "" })
 	if _, err := os.Lstat(a.dirInstancia("id3")); !os.IsNotExist(err) {
 		t.Errorf("barrer con cuota: %v", err)
 	}

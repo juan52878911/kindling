@@ -135,3 +135,50 @@ func TestPlantillaDeOverlayEsIdempotente(t *testing.T) {
 		t.Error("rehízo una plantilla que ya existía")
 	}
 }
+
+// Un disco de otro tamaño (kling run -disk) se formatea aparte y no toca la
+// plantilla de 512 MiB: es disperso, así que el tamaño lógico es el pedido y
+// lo asignado, casi nada.
+func TestDiscoDeMaquinaConTamanoPropio(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(filepath.Join(m.root, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(m.root, "overlay-grande.ext4")
+	err := m.newOverlay(t.Context(), dst, 2048)
+	if err != nil {
+		t.Skipf("no hay mkfs.ext4 en esta máquina: %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != 2048<<20 {
+		t.Errorf("tamaño lógico %d, quería %d", fi.Size(), 2048<<20)
+	}
+	if a := allocatedBytes(dst); a > 64<<20 {
+		t.Errorf("asignados %d bytes: el disco tenía que ser disperso", a)
+	}
+	if _, err := os.Stat(m.overlayTemplatePath()); err == nil {
+		t.Error("un disco de tamaño propio no necesita la plantilla y la construyó")
+	}
+}
+
+// -disk tiene que caber en lo libre, y KLING_MAX_DISK_MIB baja el tope.
+func TestDiskAdmision(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.checkDiskParaOverlay(maxOverlayMiB * 1024); err == nil {
+		t.Fatal("un disco de 256 TiB cupo en el disco de pruebas")
+	}
+	if err := m.checkDiskParaOverlay(minOverlayMiB); err != nil {
+		t.Fatalf("un disco de %d MiB: %v", minOverlayMiB, err)
+	}
+	t.Setenv("KLING_MAX_DISK_MIB", "2048")
+	if maxDiskMiB() != 2048 {
+		t.Fatalf("KLING_MAX_DISK_MIB=2048 da %d", maxDiskMiB())
+	}
+	t.Setenv("KLING_MAX_DISK_MIB", "999999999")
+	if maxDiskMiB() != maxOverlayMiB {
+		t.Fatal("KLING_MAX_DISK_MIB subió el tope por encima del máximo")
+	}
+}

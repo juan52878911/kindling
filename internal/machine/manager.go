@@ -65,6 +65,14 @@ func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6
 // disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
 const defaultOverlayMiB = 512
 
+// minOverlayMiB y maxOverlayMiB acotan RunRequest.DiskMiB: por debajo del
+// mínimo ext4 no deja sitio ni para el agente; el máximo es solo cordura (el
+// fichero es disperso) frente a un cero de más.
+const (
+	minOverlayMiB = 64
+	maxOverlayMiB = 256 << 10
+)
+
 // Límites de seguridad. El código que corre dentro se considera hostil, así que
 // una sola microVM no debe poder degradar el host ni a las demás.
 const (
@@ -520,7 +528,7 @@ func (m *Manager) load() {
 	var list []*api.Machine
 	var version int
 	if err == nil {
-		version, err = esquema.Comprobar(m.statePath(), b, versionEstado)
+		version, err = esquema.Comprobar(m.statePath(), b, versionEstadoMax)
 	}
 	if esquema.EsMasNuevo(err) {
 		// Lo dejó un kling más nuevo: no está roto, así que no se aparta, y
@@ -564,7 +572,30 @@ func (m *Manager) load() {
 //
 //	0: un array JSON de máquinas, sin campo (hasta v0.17).
 //	1: {"schema": 1, "machines": [...]}.
+//	2: el mismo formato, con alguna copia congelada en diferencial
+//	   (diff_volcado.go). Un kling anterior cargaría su mem.file disperso como
+//	   si fuera la RAM entera y la copia despertaría con la memoria rota: con
+//	   el 2 se niega a arrancar. Sin copias en diferencial se sigue escribiendo
+//	   el 1 y volver atrás es posible.
 const versionEstado = 1
+
+// versionEstadoDiff es el esquema que se escribe si alguna máquina tiene
+// DiffBase; versionEstadoMax, el más nuevo que este binario sabe leer.
+const (
+	versionEstadoDiff = 2
+	versionEstadoMax  = versionEstadoDiff
+)
+
+// esquemaParaEscribir es versionEstado, o versionEstadoDiff si alguna
+// máquina depende de un diferencial.
+func esquemaParaEscribir(list []api.Machine) int {
+	for i := range list {
+		if list[i].DiffBase != "" {
+			return versionEstadoDiff
+		}
+	}
+	return versionEstado
+}
 
 // ficheroEstado es state.json desde la versión 1.
 type ficheroEstado struct {
@@ -579,7 +610,7 @@ func decodificarEstado(b []byte, version int) ([]*api.Machine, error) {
 		var list []*api.Machine
 		err := json.Unmarshal(b, &list)
 		return list, err
-	case 1:
+	case 1, 2:
 		var f ficheroEstado
 		err := json.Unmarshal(b, &f)
 		return f.Machines, err
@@ -597,7 +628,7 @@ func comprobarVersionEstado(root string) error {
 	if err != nil {
 		return nil // que no exista es la primera arrancada; ilegible lo trata load
 	}
-	if _, err := esquema.Comprobar(ruta, b, versionEstado); esquema.EsMasNuevo(err) {
+	if _, err := esquema.Comprobar(ruta, b, versionEstadoMax); esquema.EsMasNuevo(err) {
 		return err
 	}
 	return nil
@@ -761,7 +792,7 @@ func (m *Manager) writePending() {
 	f := struct {
 		esquema.Cabecera
 		Machines []api.Machine `json:"machines"`
-	}{esquema.Cabecera{Schema: versionEstado}, list}
+	}{esquema.Cabecera{Schema: esquemaParaEscribir(list)}, list}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		log.Printf("state: could not serialize it: %v", err)
@@ -1115,6 +1146,19 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.VCPUs <= 0 {
 		req.VCPUs = 1
 	}
+	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
+	// hasta que se escribe, pero uno diminuto no monta ni el agente.
+	if tope := maxDiskMiB(); req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > tope {
+		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
+			req.DiskMiB, minOverlayMiB, tope, defaultOverlayMiB)
+	}
+	// Disperso, pero el invitado puede llenarlo: uno más grande que el de
+	// siempre tiene que caber en lo que queda libre.
+	if req.DiskMiB > defaultOverlayMiB {
+		if err := m.checkDiskParaOverlay(req.DiskMiB); err != nil {
+			return nil, err
+		}
+	}
 	if req.MemMiB <= 0 {
 		req.MemMiB = 256
 	}
@@ -1250,7 +1294,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if err := m.newOverlay(ctx, overlay); err != nil {
+	if err := m.newOverlay(ctx, overlay, req.DiskMiB); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -1272,7 +1316,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
-		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, CreatedAt: creada,
+		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, DiskMiB: req.DiskMiB, CreatedAt: creada,
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
@@ -1462,13 +1506,20 @@ func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 	return nil
 }
 
-// newOverlay deja listo el disco escribible de una microVM.
+// newOverlay deja listo el disco escribible de una microVM, de sizeMiB (0: el
+// de siempre, defaultOverlayMiB).
 //
 // Copiar la plantilla ahorra el mkfs.ext4 por máquina, que son decenas de
 // milisegundos sobre un arranque que aspira a estar en el orden de los 30 ms.
 // Si la plantilla no se puede construir se formatea directamente: más lento,
-// pero nadie se queda sin arrancar por una optimización.
-func (m *Manager) newOverlay(ctx context.Context, dst string) error {
+// pero nadie se queda sin arrancar por una optimización. Un tamaño distinto
+// del de la plantilla se formatea directamente también: es la excepción (una
+// imagen de Docker que escribe GiB en su propio disco) y esos milisegundos
+// no cuentan frente a lo que esa máquina va a hacer.
+func (m *Manager) newOverlay(ctx context.Context, dst string, sizeMiB int) error {
+	if sizeMiB > 0 && sizeMiB != defaultOverlayMiB {
+		return createOverlay(ctx, dst, sizeMiB)
+	}
 	if err := m.ensureOverlayTemplate(ctx); err != nil {
 		log.Printf("overlay template not available (%v): formatting directly", err)
 		return createOverlay(ctx, dst, defaultOverlayMiB)
@@ -1854,18 +1905,83 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if sock == "" {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
+	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
+	// sigue corriendo como si nada (ver checkDiskParaVolcado).
+	// Diferencial (diff_volcado.go): una copia con seguimiento de páginas
+	// sucias vuelca solo lo escrito desde el dorado. Lo que ocupa no se sabe
+	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
+	// GiB) y mucho menos que exigir la RAM entera a cada copia dormida.
+	enDiff := mc.DiffBase != "" && congelarEnDiff() && existe(mc.DiffBase)
+	if enDiff && !huecosFiables(filepath.Dir(m.dir(mc.ID))) {
+		// Sin huecos fiables un diff no se puede aplicar bien (huecos_fiables.go).
+		log.Printf("warning: %s: %s does not tell holes from zero pages; freezing the whole memory",
+			mc.Name, filepath.Dir(m.dir(mc.ID)))
+		m.olvidarDiffBase(mc.ID)
+		enDiff = false
+	}
+	necesario := max(mc.MemMiB, mc.MemMaxMiB)
+	if enDiff {
+		necesario /= 4
+	}
+	if err := m.checkDiskParaVolcado(necesario, "freeze"); err != nil {
+		return nil, err
+	}
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
-	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+	// El diferencial se vuelca aparte (mem.diff) y se funde después sobre el
+	// mem.file que ya hubiera; el completo es el mem.file directamente.
+	memName := "mem.file"
+	diffAlmacen := ""
+	if enDiff {
+		memName = memDiff
+		// Si puede, el diff va al almacén (cow_memoria.go): ahí despertar
+		// es clonar sus extents sobre el espejo del dorado, no copiarlos.
+		diffAlmacen = m.diffEnAlmacen(ctx, mc.ID, max(mc.MemMiB, mc.MemMaxMiB))
+		if diffAlmacen != "" && !huecosFiables(m.alm.dir) {
+			m.borrarDiffParcialAlmacen(mc.ID)
+			diffAlmacen = ""
+		}
+		if diffAlmacen == "" {
+			if fi, err := os.Lstat(filepath.Join(dir, "mem.file")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				// El acumulado vive en el almacén pero el almacén ya no
+				// está en uso: no se mezclan los dos sitios. Entero, y la
+				// próxima vez diferencial desde cero.
+				m.borrarAcumuladoDiff(mc.ID, dir)
+				m.olvidarDiffBase(mc.ID)
+				enDiff, memName = false, "mem.file"
+			}
+		}
+	}
+	if !enDiff {
+		// Un volcado completo pisa machines/<id>/mem.file: lo que hubiera
+		// acumulado de diferenciales anteriores (y su enlace al almacén, que
+		// mandaría la RAM entera dentro del almacén) sobra.
+		m.borrarAcumuladoDiff(mc.ID, dir)
+	}
+	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, memName)
+	if diffAlmacen != "" {
+		memPath = diffAlmacen
+	}
+	if enDiff && diffAlmacen == "" {
+		// Un mem.diff viejo (un crash a mitad de otro freeze) no se reutiliza:
+		// Firecracker escribe encima solo las páginas sucias y las demás
+		// serían de entonces.
+		_ = os.Remove(filepath.Join(dir, memDiff))
+	}
 
 	// Una instancia jailed corre chrooteada: no puede escribir en el dir del
 	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
 	// dir real. Mismo filesystem, así que el traslado es un rename atómico y el
-	// mem.file conserva su inodo —y su caché de páginas—.
+	// mem.file conserva su inodo —y su caché de páginas—. El diff del almacén
+	// no: su ruta absoluta resuelve dentro del chroot al bind del directorio
+	// de la instancia (prepararBindsJail).
 	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	if jailed {
-		snapPath, memPath = "/snap.file", "/mem.file"
+		snapPath = "/snap.file"
+		if diffAlmacen == "" {
+			memPath = "/" + memName
+		}
 	}
 
 	c := fc.New(sock)
@@ -1895,6 +2011,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// el puerto puede tardar segundos en contestar (ver resyncSinAgenteTTL).
 	sinAgente := !m.agenteEscucha(ctx, mc.ID)
 
+	// Con el invitado aún en marcha: que suelte lo que no usa, y el volcado
+	// lleve solo lo que está en uso (apreton_volcado.go).
+	// No antes de un diferencial: las páginas que el invitado soltara se
+	// vuelcan igual (están sucias) y costaría hasta 2 s y su caché.
+	apretado := 0
+	if !enDiff {
+		apretado = apretarAntesDeVolcar(ctx, c, mc)
+	}
+
 	// Desde aquí, lo que haya en disco deja de valer hasta el sello final: si el
 	// daemon muere a mitad del volcado, reconcile y Thaw lo sabrán (volcado.go).
 	if err := volcadoEnCurso(dir); err != nil {
@@ -1907,7 +2032,24 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	}
 	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
 	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).Snapshot(ctx, snapPath, memPath); err != nil {
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	var verr error
+	if enDiff {
+		verr = lento.SnapshotDiff(ctx, snapPath, memPath)
+	} else {
+		verr = lento.Snapshot(ctx, snapPath, memPath)
+	}
+	if err := verr; err != nil {
+		// Lo que Firecracker llegó a escribir no vale: un mem.file a medias
+		// (típico: se acabó el disco) del tamaño de la RAM que nadie borraría,
+		// porque la máquina sigue running y reconcile solo mira las warm.
+		m.borrarVolcadoParcial(mc.ID, jailed, dir)
+		m.borrarDiffParcialAlmacen(mc.ID)
+		// Y un diff a medias pudo dejar a cero el mapa de sucias: lo que se
+		// escriba desde aquí ya no se distinguiría. El siguiente vuelca entero,
+		// así que el acumulado de antes tampoco vale.
+		m.borrarAcumuladoDiff(mc.ID, dir)
+		m.olvidarDiffBase(mc.ID)
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
@@ -1933,11 +2075,19 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
 		// daemon a perforar, precargar y ceder un fichero del host (ver
 		// recuperarDelJail).
-		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", "mem.file"); err != nil {
+		recuperar := []string{"snap.file"}
+		if diffAlmacen == "" {
+			recuperar = append(recuperar, memName)
+		}
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), recuperar...); err != nil {
 			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
 			// figurando como running, sin contestar a nada, y sin que el
 			// vigilante la viera, porque el proceso existe. Mismo trato que
 			// un fallo del propio snapshot, más arriba.
+			m.borrarVolcadoParcial(mc.ID, jailed, dir)
+			m.borrarDiffParcialAlmacen(mc.ID)
+			m.borrarAcumuladoDiff(mc.ID, dir)
+			m.olvidarDiffBase(mc.ID)
 			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
@@ -1945,7 +2095,34 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
-		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+		snapPath = filepath.Join(dir, "snap.file")
+		if diffAlmacen == "" {
+			memPath = filepath.Join(dir, memName)
+		}
+	}
+	if enDiff {
+		// Todo lo escrito desde el dorado, en un solo mem.file
+		// (diff_volcado.go). Si no se puede, la máquina sigue como estaba —
+		// pausada, con su VMM— y se reanuda como tras un volcado fallido; su
+		// siguiente freeze vuelca entero, porque el mapa de sucias ya se
+		// reinició con este diff.
+		acum := filepath.Join(dir, "mem.file")
+		if diffAlmacen != "" {
+			acum = m.alm.acumuladoDiff(mc.ID)
+		}
+		if err := fusionarDiff(ctx, dir, memPath, acum); err != nil {
+			m.borrarVolcadoParcial(mc.ID, false, dir)
+			m.borrarDiffParcialAlmacen(mc.ID)
+			m.borrarAcumuladoDiff(mc.ID, dir)
+			m.olvidarDiffBase(mc.ID)
+			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
+				return nil, err
+			}
+			_ = m.acquireVolumes(mc)
+			return nil, err
+		}
+		memPath = filepath.Join(dir, "mem.file")
 	}
 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
@@ -1954,6 +2131,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
 	m.killPaused(mc.ID)
+	// Si despertó de un diferencial, el VMM mapeaba mem.full (base + diff):
+	// muerto el VMM no lo lee nadie. Un freeze diferencial ya lo retiró al
+	// fundir; uno completo (tras un commit, con el diff apagado o sin base) lo
+	// dejaría ahí, y son GiB por copia dormida en ext4.
+	_ = os.Remove(filepath.Join(dir, memFull))
+	m.borrarMemoriaAlmacen(mc.ID)
 	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
 	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
 	if jailed {
@@ -1970,8 +2153,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// la mayor parte son páginas a cero. Perforarlas deja el fichero disperso: el
 	// kernel devuelve ceros al leer un agujero, que es exactamente lo que había,
 	// así que la restauración no se entera. Mide ~3x menos en disco.
-	if out, err := perforarHuecos(ctx, memPath); err != nil {
-		log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
+	//
+	// Un diferencial NO se perfora: sus ceros son páginas que el invitado puso
+	// a cero, y un hueco diría "como en el dorado" (diff_volcado.go).
+	if !enDiff {
+		if out, err := perforarHuecos(ctx, memPath); err != nil {
+			log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
+		}
 	}
 
 	// El fichero de memoria queda entero en caché tras escribirlo y releerlo para
@@ -2003,7 +2191,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
 	}
 	cerrarVolcado(dir)
-	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm); err != nil {
+	base := ""
+	if enDiff {
+		base = mc.DiffBase
+	}
+	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -2042,8 +2234,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		m.resyncSinAgente.Delete(claveThaw(mc.ID))
 	}
 
-	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)})
+	msg := fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)
+	if apretado > 0 {
+		msg = fmt.Sprintf("frozen in %d ms (%d MiB on disk; the guest handed back ~%d MiB before the dump)", elapsed, size>>20, apretado)
+	}
+	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name, Message: msg})
 	return &out, nil
 }
 
@@ -2598,6 +2793,27 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
+	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
+	// fichero, base + diff, que se construye aquí y vive mientras corra.
+	base := leerSello(dir).DiffBase
+	if base != "" {
+		if err := m.baseDiffValida(mc, base); err != nil {
+			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+		}
+		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
+		if err != nil {
+			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+		}
+		memPath = full
+	}
+	// El mem.full de este despertar, si algo falla antes de abortar (que lo
+	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
+	soltarFull := func() {
+		if base != "" {
+			_ = os.Remove(filepath.Join(dir, memFull))
+			m.borrarMemoriaAlmacen(mc.ID)
+		}
+	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
 	// invitado no toca todo al despertar, y leerla entera competiría con el
@@ -2613,6 +2829,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// no tiene por qué esperar turno.
 	release, glErr := m.enterLaunch(ctx)
 	if glErr != nil {
+		soltarFull()
 		return nil, glErr
 	}
 	defer release()
@@ -2630,10 +2847,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if !m.redLista(netcfg, mc.ID) {
 		n, err := m.redParaRehacer(mc)
 		if err != nil {
+			soltarFull()
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
 		netcfg = n
 		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
+			soltarFull()
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
 	}
@@ -2678,6 +2897,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		m.desmontarRed(netcfg, mc.ID)
+		if base != "" {
+			// El mem.full de este despertar (diff_volcado.go): el siguiente
+			// lo rehace, y mientras tanto ocuparía lo que el diff.
+			_ = os.Remove(filepath.Join(dir, memFull))
+			m.borrarMemoriaAlmacen(mc.ID)
+		}
 		return nil, err
 	}
 
@@ -2734,7 +2959,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	crono.marca(&crono.p.NetMS)
 	start := time.Now()
-	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
+	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
+	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
@@ -2809,6 +3036,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.CPUPct = mc.CPUPct
 	// Descongelada de SU mem.file: ya no comparte páginas con un dorado.
 	cur.MemShared = false
+	// Pero si venía en diferencial, sigue midiéndose contra él.
+	cur.DiffBase = base
 	// Lo que reentregarCredenciales anotó en la copia.
 	cur.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	m.socket[mc.ID] = sock
@@ -3023,6 +3252,8 @@ func (m *Manager) killMachine(id string, flush bool) {
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
+		// El servicio primero: es quien escribe en los volúmenes.
+		m.stopService(mc)
 		m.flushVolume(mc)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)

@@ -436,6 +436,9 @@ func cmdRun(args []string) error {
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
+	disk := units.MiBVar(fs, "disk", 0, "writable disk of the machine: 2G, 8G (bare number = MiB; default: 512; ignored with -from)")
+	var ef envFlags
+	ef.register(fs)
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	var allow domainsFlag
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
@@ -455,6 +458,7 @@ func cmdRun(args []string) error {
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
+	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -475,15 +479,32 @@ func cmdRun(args []string) error {
 		return err
 	}
 	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
+	// Una referencia de Docker en -image se importa sola (run_docker.go); el
+	// entorno de -e solo tiene sentido ahí, porque va dentro de la imagen.
+	imagen := config.Or(*image, cfg.Defaults.Image, "default")
+	env, err := ef.resolve()
+	if err != nil {
+		return err
+	}
+	switch {
+	case *from == "" && esRefDocker(imagen):
+		if imagen, err = asegurarImagenDocker(ctx, client, imagen, env); err != nil {
+			return err
+		}
+	case len(env) > 0:
+		return fmt.Errorf("-e and -env-file only apply when -image is a Docker reference (the environment is baked into " +
+			"the imported image); for a kindling image, import it with them: kling image import <ref> -e KEY=value -name N")
+	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
-		Image: config.Or(*image, cfg.Defaults.Image, "default"),
+		Image: imagen,
 		// El flag gana; si no se dio, manda la configuración; y si tampoco,
 		// el valor incorporado.
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		MemMaxMiB:    *memMax,
+		DiskMiB:      *disk,
 		Egress:       egressReq,
 		AllowDomains: allowReq,
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
@@ -504,6 +525,15 @@ func cmdRun(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(mc); err != nil {
+			return err
+		}
+		if *waitReady && (mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed) {
+			return fmt.Errorf("%s is running but not ready (%s)", mc.Name, mc.Ready)
+		}
+		return nil
 	}
 	if mc.From != "" {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)

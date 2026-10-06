@@ -235,3 +235,40 @@ func TestParseMeminfo(t *testing.T) {
 		t.Error("sin MemAvailable no vale")
 	}
 }
+
+// La sonda corre con el USER del servicio (como el HEALTHCHECK de Docker); si
+// ese usuario no existe no corre como root por accidente: falla.
+func TestSondaConUsuarioDelServicio(t *testing.T) {
+	dir := t.TempDir()
+	marca := filepath.Join(dir, "corrio")
+	sonda := filepath.Join(dir, "ready")
+	script(t, sonda, "touch "+marca)
+	if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "etc/passwd"), []byte("root:x:0:0::/root:/bin/sh\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "etc/group"), []byte("root:x:0:\n"), 0o644)
+
+	serviceState.mu.Lock()
+	serviceState.svc = &Service{spec: api.ServiceSpec{Argv: []string{"x"}, User: "postgres"}, root: dir}
+	serviceState.mu.Unlock()
+	defer func() { serviceState.mu.Lock(); serviceState.svc = nil; serviceState.mu.Unlock() }()
+
+	if _, err := runProbeAsService(context.Background(), sonda, []string{"PATH=/usr/bin:/bin"}); err == nil {
+		t.Fatal("la sonda corrió con un USER que no existe")
+	}
+	if _, err := os.Stat(marca); err == nil {
+		t.Fatal("la sonda se ejecutó como root en vez de con el usuario del servicio")
+	}
+
+	// Sin servicio, la sonda corre como siempre.
+	serviceState.mu.Lock()
+	serviceState.svc = nil
+	serviceState.mu.Unlock()
+	if out, err := runProbeAsService(context.Background(), sonda, []string{"PATH=/usr/bin:/bin"}); err != nil {
+		t.Fatalf("sin servicio: %v: %s", err, out)
+	}
+	if _, err := os.Stat(marca); err != nil {
+		t.Fatal("sin servicio la sonda no corrió")
+	}
+}

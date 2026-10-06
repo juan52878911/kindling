@@ -355,6 +355,8 @@ func TestAlmacenBarrer(t *testing.T) {
 	}
 	a.barrer(func(id string) bool { return id == "viva" }, func(s string) string {
 		return filepath.Join(root, "snapshots", s, "overlay.ext4")
+	}, func(s string) string {
+		return filepath.Join(root, "snapshots", s, "mem.file")
 	})
 	existe := func(p string) bool { _, err := os.Lstat(p); return err == nil }
 	if !existe(a.dirInstancia("viva")) {
@@ -381,7 +383,7 @@ func TestAlmacenSinMontarNoBorra(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.borrarInstancia("id1")
-	a.barrer(func(string) bool { return false }, func(string) string { return "" })
+	a.barrer(func(string) bool { return false }, func(string) string { return "" }, func(string) string { return "" })
 	if _, err := os.Stat(d); err != nil {
 		t.Errorf("borró sin estar montado: %v", err)
 	}

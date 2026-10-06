@@ -125,6 +125,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, err
 		}
 	}
+	// El dorado es un volcado de la RAM entera más una copia del overlay: si
+	// no cabe, mejor saberlo antes de soltar volúmenes y pausar (ver
+	// checkDiskParaVolcado).
+	if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB)+int(allocatedBytes(filepath.Join(m.dir(mc.ID), "overlay.ext4"))>>20), "save"); err != nil {
+		return nil, err
+	}
 	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
 	// o un disco que no viaja con el snapshot (las copias): cada instancia
 	// restaurada despertaría con un montaje que no le corresponde.
@@ -343,6 +349,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 		}
 
+		// Con la plantilla aún en marcha: que suelte lo que no usa, y el
+		// dorado lleve solo lo que está en uso (apreton_volcado.go). Es el
+		// mem.file que mapearán todas las copias.
+		if n := apretarAntesDeVolcar(ctx, c, mc); n > 0 {
+			log.Printf("commit %s: the guest handed back ~%d MiB before the dump", mc.Name, n)
+		}
+
 		pausaPedida = true
 		if err := c.Pause(ctx); err != nil {
 			return nil, err
@@ -385,6 +398,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
 		return nil, fmt.Errorf("repointing overlay to golden copy: %w", err)
 	}
+	// Un volcado completo deja a cero el mapa de páginas sucias del VMM: si la
+	// plantilla era una copia con seguimiento, su siguiente freeze ya no puede
+	// ser "desde el dorado" (diff_volcado.go). Se olvida ANTES de pedirlo, y
+	// no solo si el commit sale bien: falle lo que falle a partir de aquí, la
+	// plantilla se reanuda con el mapa ya reiniciado.
+	m.olvidarDiffBase(mc.ID)
 	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
 		return nil, err
 	}
@@ -1539,9 +1558,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
 	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
 	// entera (F-01).
-	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshot(ctx,
+	// Con seguimiento de páginas sucias si la copia se va a congelar en
+	// diferencial (diff_volcado.go): solo lo que escriba desde el dorado.
+	enDiff := congelarEnDiff()
+	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
 		filepath.Join(snapDir, "snap.file"),
-		filepath.Join(snapDir, "mem.file"), false); err != nil {
+		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
 		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
 		// texto crudo de Firecracker no le dice a nadie qué hacer.
@@ -1648,6 +1670,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// En Firecracker la RAM de la copia es el mem.file del dorado, MAP_PRIVATE:
 	// compartida con las demás copias hasta que la escriben (ver Squeeze).
 	mc.MemShared = restaurarComparteMemoria
+	if enDiff {
+		mc.DiffBase = filepath.Join(snapDir, "mem.file")
+	}
 	m.socket[id] = sock
 	m.persist()
 	m.mu.Unlock()

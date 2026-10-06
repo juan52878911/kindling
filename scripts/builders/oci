@@ -1,0 +1,4 @@
+#!/bin/sh
+# Constructor "oci" del núcleo: una imagen de Docker/OCI como base propia,
+# todo en Go y sin root (cmd/kling/builder_oci.go). Ver docs/imagenes.md.
+exec /usr/local/bin/kling builder oci "$@"

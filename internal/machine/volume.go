@@ -673,6 +673,34 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	return nil
 }
 
+// stopService pide al invitado que pare el servicio de su imagen (el
+// ENTRYPOINT de una imagen de Docker) con su señal de parada antes de
+// matarlo: Postgres sin esto se recupera por el WAL, pero no se para limpio.
+// Solo si el agente anuncia que hay servicio; el plazo cubre los 10 s que el
+// agente le da antes del SIGKILL.
+func (m *Manager) stopService(mc *api.Machine) {
+	if mc == nil || !mc.Reachable() || mc.State != api.StateRunning || !mc.Agent.Has(api.GuestCapService) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceStopTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+mc.Addr(api.GuestPort)+api.GuestServiceStopPath, nil)
+	if err != nil {
+		return
+	}
+	t0 := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("%s: guest did not stop its service before dying: %v", mc.Name, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("%s: service stopped in %d ms", mc.Name, time.Since(t0).Milliseconds())
+}
+
+// serviceStopTimeout es cuánto se espera a que el invitado pare su servicio.
+var serviceStopTimeout = 15 * time.Second
+
 func (m *Manager) flushVolume(mc *api.Machine) {
 	if mc == nil || !mc.Reachable() || mc.State != api.StateRunning {
 		return

@@ -3,10 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func TestNewLines(t *testing.T) {
@@ -80,5 +85,37 @@ func TestFollowLogsSeCancela(t *testing.T) {
 	cancel()
 	if err := followLogs(ctx, &bytes.Buffer{}, src, nil, time.Millisecond); err != context.Canceled {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestServiceLogSource(t *testing.T) {
+	body := `{"declared":true,"argv":["postgres"],"running":true,"starts":1,"log":"cortada\nuno\ndos\n"}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /machines/{ref}/guest", func(w http.ResponseWriter, r *http.Request) {
+		var req api.GuestRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		switch {
+		case r.PathValue("ref") == "old":
+			json.NewEncoder(w).Encode(api.GuestResponse{Status: 404, Body: "404 page not found"})
+		case r.PathValue("ref") == "none":
+			json.NewEncoder(w).Encode(api.GuestResponse{Status: 200, Body: `{"declared":false}`})
+		case req.Path == fmt.Sprintf("/service?tail=%d", serviceLogWindow) && req.Method == "GET":
+			json.NewEncoder(w).Encode(api.GuestResponse{Status: 200, Body: body})
+		default:
+			http.Error(w, "unexpected "+req.Path, 400)
+		}
+	})
+	c := fakeDaemon(t, mux)
+	out, err := serviceLogSource{c: c, ref: "pg"}.fetch(context.Background())
+	if err != nil || out != "cortada\nuno\ndos\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+	if got := lastLines(out, 2); got != "uno\ndos\n" {
+		t.Fatalf("lastLines %q", got)
+	}
+	for ref, want := range map[string]string{"old": "no /service", "none": "declares no service"} {
+		if _, err := (serviceLogSource{c: c, ref: ref}).fetch(context.Background()); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", ref, err)
+		}
 	}
 }

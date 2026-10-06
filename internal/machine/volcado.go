@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -50,6 +51,10 @@ type sello struct {
 	// VMM es con qué VMM y versión se volcó ("firecracker 1.12.0"), como el
 	// de los dorados (meta.go). Opcional: sin él no se compara.
 	VMM string `json:"vmm,omitempty"`
+	// DiffBase: el mem.file es un diferencial (solo las páginas escritas
+	// desde el dorado) y este es el mem.file del dorado sobre el que va
+	// (diff_volcado.go). Vacío: la RAM entera, como siempre.
+	DiffBase string `json:"diff_base,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -62,8 +67,9 @@ func volcadoEnCurso(dir string) error {
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
 // y en su sitio, y retira la marca de volcado en curso. kernelSHA es el
 // sha256 del vmlinux instalado y vmm el VMM que volcó; vacíos, el sello no
-// los lleva.
-func sellarVolcado(dir, kernelSHA, vmm string) error {
+// los lleva. diffBase, si el mem.file es un diferencial, es su base
+// (diff_volcado.go).
+func sellarVolcado(dir, kernelSHA, vmm, diffBase string) error {
 	snapSHA, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
@@ -72,11 +78,32 @@ func sellarVolcado(dir, kernelSHA, vmm string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm})
+	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}
 	return os.Remove(filepath.Join(dir, marcaEnCurso))
+}
+
+// borrarVolcadoParcial retira lo que dejó un volcado que falló a medias: el
+// snap.file y el mem.file que Firecracker llegó a escribir (en la raíz de su
+// chroot si está enjaulada, en dir si no) y la marca de volcado en curso. La
+// máquina sigue running, así que nada de esto vale ni lo recogería nadie:
+// reconcile y el GC solo miran las warm, y un mem.file del tamaño de la RAM se
+// quedaba ahí hasta el rm. Lo que no se pueda borrar se avisa y no bloquea.
+func (m *Manager) borrarVolcadoParcial(id string, jailed bool, dir string) {
+	for _, f := range []string{"snap.file", "mem.file", memDiff} {
+		var err error
+		if jailed {
+			err = borrarEnJail(m.jailRoot(id), "/"+f)
+		} else if err = os.Remove(filepath.Join(dir, f)); errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		if err != nil {
+			log.Printf("warning: %s: could not remove the partial %s of a failed freeze: %v", id[:12], f, err)
+		}
+	}
+	_ = os.Remove(filepath.Join(dir, marcaEnCurso))
 }
 
 // errVolcadoIncompleto es que el volcado no se puede usar.

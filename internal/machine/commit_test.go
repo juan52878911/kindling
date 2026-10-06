@@ -517,3 +517,24 @@ func TestCommitSeNiegaSiLeInyectaronSecretosMientrasEsperaba(t *testing.T) {
 		t.Errorf("quedó un directorio de snapshot: %v", err)
 	}
 }
+
+// Una copia con seguimiento de páginas sucias que pasa por commit pierde su
+// base AUNQUE el commit falle: el volcado completo ya reinició el mapa del VMM
+// y un diff posterior perdería lo escrito antes (diff_volcado.go).
+func TestCommitFallidoOlvidaLaBaseDelDiff(t *testing.T) {
+	m := newTestManager(t)
+	id := "c0aa170000000009"
+	falso, muerto := plantillaParaCommit(t, m, id)
+	m.mu.Lock()
+	m.byID[id].DiffBase = "/dorado/mem.file"
+	m.mu.Unlock()
+	falso.fallar(http.MethodPut, "/snapshot/create", http.StatusBadRequest, "No space left on device")
+
+	if _, err := m.Commit(context.Background(), id, "dorado", false); err == nil {
+		t.Fatal("Commit con el volcado roto no devolvió error")
+	}
+	comprobarReanudada(t, m, falso, id, muerto)
+	if v := vivaDe(t, m, id); v.DiffBase != "" {
+		t.Fatalf("tras un commit fallido sigue con base %q: su siguiente freeze diferencial sería corrupto", v.DiffBase)
+	}
+}

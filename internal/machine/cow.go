@@ -428,7 +428,10 @@ func (m *Manager) barrerAlmacen() {
 	overlayDorado := func(snap string) string {
 		return filepath.Join(m.snapDir(snap), "overlay.ext4")
 	}
-	m.alm.barrer(viva, overlayDorado)
+	memoriaDorado := func(snap string) string {
+		return filepath.Join(m.snapDir(snap), "mem.file")
+	}
+	m.alm.barrer(viva, overlayDorado, memoriaDorado)
 }
 
 // ── el almacén ────────────────────────────────────────────────────────────────
@@ -997,10 +1000,11 @@ func (a *almacenCoW) base(ctx context.Context, snap, src string) (string, error)
 	}
 	// Las bases de versiones anteriores de este dorado sobran. Sus bloques
 	// siguen vivos en las instancias que se clonaron de ellas: XFS y Btrfs
-	// cuentan las referencias.
+	// cuentan las referencias. Los espejos de memoria (.mem) son de
+	// baseMemoria y no se tocan aquí.
 	if entradas, err := os.ReadDir(dir); err == nil {
 		for _, e := range entradas {
-			if e.Name() != filepath.Base(ruta) {
+			if e.Name() != filepath.Base(ruta) && strings.HasSuffix(e.Name(), ".ext4") {
 				_ = os.Remove(filepath.Join(dir, e.Name()))
 			}
 		}
@@ -1129,8 +1133,9 @@ func (a *almacenCoW) borrarInstancia(id string) {
 }
 
 // barrer quita las instancias sin máquina y las bases sin dorado (o de una
-// versión anterior del dorado).
-func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado func(snap string) string) {
+// versión anterior del dorado): el overlay (.ext4) y el espejo de la memoria
+// (.mem, cow_memoria.go), cada uno con la clave de su fichero del dorado.
+func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado, memoriaDorado func(snap string) string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.montado {
@@ -1165,9 +1170,13 @@ func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado func(snap s
 			continue
 		}
 		vigente := claveBase(fi) + ".ext4"
+		vigenteMem := ""
+		if fm, err := os.Stat(memoriaDorado(e.Name())); err == nil {
+			vigenteMem = claveBase(fm) + sufijoBaseMemoria
+		}
 		hijos, _ := os.ReadDir(dir)
 		for _, h := range hijos {
-			if h.Name() != vigente {
+			if h.Name() != vigente && h.Name() != vigenteMem {
 				_ = os.Remove(filepath.Join(dir, h.Name()))
 			}
 		}

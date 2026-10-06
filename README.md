@@ -56,7 +56,12 @@ kling try -- uname -a        # throwaway microVM: create, run, print, delete
 kling run -name demo         # boot a machine
 kling freeze demo            # freeze it to disk: 0 CPU, 0 RAM
 kling thaw demo              # back in tens of milliseconds
+
+kling image import postgres:17-alpine -e POSTGRES_PASSWORD   # a Docker image, pinned by digest
+kling run -image postgres-17-alpine -mem 512M -wait-ready     # its ENTRYPOINT, supervised
 ```
+
+Docker images run as they are, each as its own base: [`docs/imagenes.md`](docs/imagenes.md).
 
 `kling doctor` checks the daemon, versions and extensions and gives the fix for every
 failure; `kling help <command>` shows one command's help.

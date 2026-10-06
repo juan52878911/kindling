@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
@@ -85,5 +86,40 @@ func TestEstadoVersion0SeMigraConCopia(t *testing.T) {
 	m2.load()
 	if m2.barridoBloqueado() || m2.byID["aa11bb22cc33dd44"] == nil {
 		t.Fatalf("no relee lo que escribe: %s %+v", m2.estadoIlegible, m2.byID)
+	}
+}
+
+// Con una copia congelada en diferencial el estado se escribe con el esquema
+// 2: un kling anterior se niega a arrancar en vez de cargar su mem.file
+// disperso como si fuera la RAM entera. Sin ninguna, sigue siendo el 1.
+func TestEstadoEsquemaConDiff(t *testing.T) {
+	m := newTestManager(t)
+	m.mu.Lock()
+	m.byID["aa11bb22cc33dd44"] = &api.Machine{ID: "aa11bb22cc33dd44", Name: "copia", State: api.StateWarm}
+	m.persist()
+	m.mu.Unlock()
+	m.writePending()
+	b, _ := os.ReadFile(m.statePath())
+	if v, _ := esquema.Version(b); v != versionEstado {
+		t.Fatalf("sin diferenciales, schema %d; quería %d", v, versionEstado)
+	}
+
+	m.mu.Lock()
+	m.byID["aa11bb22cc33dd44"].DiffBase = "/x/snapshots/dorado/mem.file"
+	m.persist()
+	m.mu.Unlock()
+	m.writePending()
+	b, _ = os.ReadFile(m.statePath())
+	if v, _ := esquema.Version(b); v != versionEstadoDiff {
+		t.Fatalf("con un diferencial, schema %d; quería %d", v, versionEstadoDiff)
+	}
+	if _, err := esquema.Comprobar(m.statePath(), b, versionEstado); !esquema.EsMasNuevo(err) {
+		t.Fatalf("un binario que solo conoce el esquema %d lo aceptaría: %v", versionEstado, err)
+	}
+	m2 := newTestManager(t)
+	m2.root = m.root
+	m2.load()
+	if m2.barridoBloqueado() || m2.byID["aa11bb22cc33dd44"] == nil || m2.byID["aa11bb22cc33dd44"].DiffBase == "" {
+		t.Fatalf("no relee el esquema 2: %s %+v", m2.estadoIlegible, m2.byID)
 	}
 }

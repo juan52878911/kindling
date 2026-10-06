@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -34,12 +36,13 @@ func cmdLogs(args []string) error {
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N lines (0 = all)")
 	follow := fs.Bool("f", false, "keep printing new lines until Ctrl-C or until the machine stops running")
+	service := fs.Bool("service", false, "the output of the image's service (the ENTRYPOINT of a Docker image) instead of the serial console")
 	raw := fs.Bool("raw", false, "print the console as is, escape sequences included (by default, on a terminal, control characters are shown escaped)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling logs [-f] <ref> [-tail N]")
+		return fmt.Errorf("usage: kling logs [-f] [-service] <ref> [-tail N]")
 	}
 	ref := fs.Arg(0)
 
@@ -47,7 +50,16 @@ func cmdLogs(args []string) error {
 	defer stop()
 
 	c := api.NewClient(hostOf(*host))
-	out, err := c.Logs(ctx, ref, *tail)
+	var src logFetcher = logSource{c: c, ref: ref}
+	var out string
+	var err error
+	if *service {
+		src = serviceLogSource{c: c, ref: ref}
+		out, err = src.fetch(ctx)
+		out = lastLines(out, *tail)
+	} else {
+		out, err = c.Logs(ctx, ref, *tail)
+	}
 	if err != nil {
 		return err
 	}
@@ -64,7 +76,7 @@ func cmdLogs(args []string) error {
 	if out != "" && !strings.HasSuffix(out, "\n") {
 		fmt.Fprintln(w)
 	}
-	err = followLogs(ctx, w, logSource{c: c, ref: ref}, splitLines(out), followEvery)
+	err = followLogs(ctx, w, src, splitLines(out), followEvery)
 	if ctx.Err() != nil {
 		return nil // Ctrl-C es la forma normal de terminar
 	}
@@ -95,6 +107,61 @@ func (s logSource) running(ctx context.Context) (bool, string, error) {
 	// created cuenta como viva: es la máquina que está arrancando, justo la
 	// que uno quiere ver con -f.
 	return mc.State == api.StateRunning || mc.State == api.StateCreated, string(mc.State), nil
+}
+
+// serviceLogSource es la salida del servicio de la imagen: la cola de su log
+// que da GET /service del agente, a través del daemon.
+type serviceLogSource struct {
+	c   *api.Client
+	ref string
+}
+
+// serviceLogWindow es cuánto de la cola del log se pide cada vez.
+const serviceLogWindow = 256 << 10
+
+func (s serviceLogSource) fetch(ctx context.Context) (string, error) {
+	resp, err := s.c.Guest(ctx, s.ref, api.GuestRequest{Method: "GET",
+		Path: fmt.Sprintf("%s?tail=%d", api.GuestServicePath, serviceLogWindow), MaxBodyBytes: 4 * serviceLogWindow})
+	if err != nil {
+		return "", err
+	}
+	if resp.Status == http.StatusNotFound {
+		return "", fmt.Errorf("%s: its guest agent has no /service (an image built before kindling's service supervisor)", s.ref)
+	}
+	var st api.GuestService
+	if resp.Status != http.StatusOK || json.Unmarshal([]byte(resp.Body), &st) != nil {
+		return "", fmt.Errorf("%s: GET /service answered %d", s.ref, resp.Status)
+	}
+	if !st.Declared {
+		return "", fmt.Errorf("%s: its image declares no service; try kling logs without -service", s.ref)
+	}
+	log := st.Log
+	if len(log) >= serviceLogWindow {
+		// La primera línea viene cortada por la ventana.
+		if i := strings.IndexByte(log, '\n'); i >= 0 {
+			log = log[i+1:]
+		}
+	}
+	return log, nil
+}
+
+func (s serviceLogSource) running(ctx context.Context) (bool, string, error) {
+	return logSource(s).running(ctx)
+}
+
+// lastLines deja las n últimas líneas de s (0 = todas).
+func lastLines(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
+	l := splitLines(s)
+	if len(l) > n {
+		l = l[len(l)-n:]
+	}
+	if len(l) == 0 {
+		return ""
+	}
+	return strings.Join(l, "\n") + "\n"
 }
 
 // followLogs sondea hasta que se cancele ctx o la máquina deje de correr, y

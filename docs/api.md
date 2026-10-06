@@ -37,6 +37,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
 | `authz` | sin publicar | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
 | `ready` | sin publicar | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
+| `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
@@ -102,7 +103,7 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | Ruta | Qué hace |
 |---|---|
 | `GET /images` | lista, con receta y snapshots que salen de cada una |
-| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base`, `llm` (modelos VON, [`von.md`](von.md)) `android` (Redroid + base Debian + dm-verity, todo en Go: [`prototypes/android/docs/constructor.md`](../prototypes/android/docs/constructor.md)) y `debian` (Debian fijada con los paquetes del spec, lockfile y dm-verity opcional, todo en Go: [`imagenes.md`](imagenes.md)), y kindling-mcp instala `mcp` |
+| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base`, `llm` (modelos VON, [`von.md`](von.md)) `android` (Redroid + base Debian + dm-verity, todo en Go: [`prototypes/android/docs/constructor.md`](../prototypes/android/docs/constructor.md)) `debian` (Debian fijada con los paquetes del spec, lockfile y dm-verity opcional, todo en Go: [`imagenes.md`](imagenes.md)) y `oci` (una imagen de Docker/OCI como base propia, con su ENTRYPOINT supervisado: [`imagenes.md`](imagenes.md#imágenes-de-docker-el-constructor-oci)), y kindling-mcp instala `mcp` |
 | `GET /images/{name}/recipe` | cómo se construyó |
 | `GET /images/{name}/files?path=/p[&max=N]` | el contenido de un fichero de dentro (1 MiB por defecto, hasta 64) |
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |
@@ -119,7 +120,7 @@ capas encima; para el kernel, cualquier máquina que no esté parada. La receta 
 una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
 `kling image copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
 uno de macOS, donde `POST /images` contesta `501` salvo para los constructores
-escritos en Go de punta a punta (hoy `android` y `debian`), que no montan ni hacen chroot.
+escritos en Go de punta a punta (hoy `android`, `debian` y `oci`), que no montan ni hacen chroot.
 
 **El protocolo del constructor.** El daemon crea un directorio de trabajo, deja
 en él `request.json` y ejecuta `<constructor> <dir>` con `KLING_ROOT`,
@@ -132,7 +133,7 @@ permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
 lo que apuntó de lo construido) y el daemon lo lleva a la receta. Los del núcleo
-en Go (`android`, `debian`) no hace falta instalarlos: si no están en el directorio de
+en Go (`android`, `debian`, `oci`) no hace falta instalarlos: si no están en el directorio de
 constructores, el daemon se ejecuta a sí mismo como `kling builder <nombre>`.
 
 ### Volúmenes

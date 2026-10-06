@@ -70,8 +70,16 @@ type Machine struct {
 	LastErr string `json:"last_error,omitempty"`
 	// MemMaxMiB es el techo al que se puede subir MemMiB en caliente (resize).
 	// 0 = sin elasticidad: MemMiB es fija, como siempre.
-	MemMaxMiB int   `json:"mem_max_mib,omitempty"`
-	SnapSize  int64 `json:"snapshot_bytes,omitempty"`
+	MemMaxMiB int `json:"mem_max_mib,omitempty"`
+	// DiskMiB es el tamaño lógico de su disco escribible, si no es el de
+	// siempre (ver RunRequest.DiskMiB).
+	DiskMiB int `json:"disk_mib,omitempty"`
+	// DiffBase, en una copia de un dorado que corre con seguimiento de
+	// páginas sucias, es el mem.file del dorado respecto al que se congelará
+	// en diferencial (solo lo que cambió). Vacío: el siguiente freeze vuelca
+	// la RAM entera.
+	DiffBase string `json:"diff_base,omitempty"`
+	SnapSize int64  `json:"snapshot_bytes,omitempty"`
 
 	// DiskBytes es la ocupación REAL en disco de esta máquina: bloques asignados,
 	// no tamaño lógico. Con overlays dispersos la diferencia es de dos órdenes de
@@ -247,6 +255,12 @@ type RunRequest struct {
 	// diferencia con MemMiB, para poder subirla o bajarla sin reiniciar
 	// (POST /machines/{ref}/resize). 0 = memoria fija.
 	MemMaxMiB int `json:"mem_max_mib,omitempty"`
+	// DiskMiB es el tamaño lógico del disco escribible de la máquina (su
+	// overlay; disperso, así que solo cuesta lo que se escribe). 0 = el de
+	// siempre (512). Una imagen de Docker que descarga un modelo o inicializa
+	// una base de datos en su propio disco lo necesita; con -from no se
+	// aplica: la copia hereda el disco del dorado.
+	DiskMiB int `json:"disk_mib,omitempty"`
 
 	// Egress: "none" (por defecto), "internet" o "allowlist". Nunca hay acceso a
 	// redes privadas: el código de dentro se considera hostil.

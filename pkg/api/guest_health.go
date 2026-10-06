@@ -21,6 +21,7 @@ const (
 	GuestCapExec    = "exec"     // /exec, /exec/stream, /exec/pty, /files (con kling.exec=1)
 	GuestCapMCP     = "mcp"      // el puente MCP: / y /mcp
 	GuestCapBootOpt = "boot-opt" // ignora los kling.* y las opciones de volumen que no conoce
+	GuestCapService = "service"  // la imagen declara un servicio: GET /service, POST /service/stop (guest_service.go)
 )
 
 // GuestHealth es la respuesta JSON de GET /healthz.
@@ -44,6 +45,12 @@ type GuestAgent struct {
 // Announces dice si el agente anuncia sus capacidades. Si no, Has no sabe
 // nada y quien pregunta tiene que sondear como antes.
 func (g *GuestAgent) Announces() bool { return g != nil && g.Caps != nil }
+
+// Has dice si el agente anuncia cap. Un agente que no anuncia nada no tiene
+// ninguna: para lo que es opcional (parar el servicio), no se le pregunta.
+func (g *GuestAgent) Has(cap string) bool {
+	return g.Announces() && slices.Contains(g.Caps, cap)
+}
 
 // Lacks dice si el agente anuncia sus capacidades y cap no está entre ellas:
 // entonces no hace falta ni preguntarle por la ruta.
