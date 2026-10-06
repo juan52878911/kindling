@@ -210,8 +210,24 @@ Y lo que hubo que cambiar para llegar ahí:
   de disco de siempre), y uno que falla a medias borra lo que escribió. Antes
   llenaba el disco y dejaba un `mem.file` parcial del tamaño de la RAM.
 
-Los dos últimos puntos están medidos solo en pruebas unitarias; las cifras de
-arriba son de ANTES de ellos. Lo que no cambia: el supervisor de `kling-guest`
+Medido después (2026-10-06, mismo lab, `/root` en ext4, sin reflink):
+
+| | Antes | Después |
+|---|---|---|
+| Arranque en frío sin flags (techo de la receta) | 43 s | 18 s |
+| Dorado de Hindsight (3 GiB de RAM) | 1896 MiB | 1288 MiB (el invitado devolvió ~1,7 GiB antes del volcado) |
+| Congelar una copia | 6–8 s, 1905 MiB | **0,4–0,6 s, 230–350 MiB** |
+| Cuatro copias dormidas | 7,6 GiB | 1,1 GiB |
+| Despertar hasta el primer recall | 1,75 s | 4,7–5,5 s |
+| RAM propia por copia viva | ~100 MiB | ~200 MiB |
+
+Las dos últimas filas son el precio: sin reflink, despertar copia los 1,3 GiB de
+la base a `mem.full` (unos 4 s de disco), y el dorado apretado lleva menos
+caché de página, así que cada copia vuelve a leer del disco de la imagen lo que
+toca y eso es memoria propia. En btrfs o XFS el clon es gratis y el despertar
+volvería a ser de milisegundos: el siguiente paso es un espejo del dorado en el
+almacén de copia al escribir (`cow.btrfs`), que ya existe para los discos.
+Lo que no cambia: el supervisor de `kling-guest`
 no ve morir al API de una imagen cuyo script de arranque sigue vivo (el de
 Hindsight se queda con la interfaz web), y una imagen que llama a Hugging Face
 al arrancar se cuelga sin salida a internet hasta que se le pone
