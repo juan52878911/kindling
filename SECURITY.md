@@ -1293,11 +1293,28 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   enlace duro, y la mueve él a `images/`; `recipe.json` también sin seguir enlaces.
 - **Entorno de lista blanca**: el del daemon no llega (puede llevar secretos).
 - **De uno en uno, y barrido**: antes y después de cada construcción el daemon mata los
-  procesos que queden con ese uid.
+  procesos que queden con ese uid. Por eso tiene que ser un usuario de sistema dedicado
+  (uid ≤ `SYS_UID_MAX`; uno de persona o `nobody` se rechaza), y las construcciones van
+  en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
+- **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
+  antes de usarlo; un constructor comprometido no envenena los imports siguientes.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en
 [docs/imagenes.md](docs/imagenes.md).
+
+### 25. El entorno de `run -e` va por MMDS, y se congela con la máquina
+
+`kling run -e` da el entorno a la máquina, no a la imagen: viaja en el cuerpo de la
+petición, el daemon lo deja en MMDS antes de arrancar y lo borra en cuanto el agente
+contesta, y solo guarda los nombres (`env_keys`); no va a argv, `state.json`, logs ni
+`inspect`. Pero vive en la RAM del invitado (el entorno del servicio), así que `freeze`
+(también el de `on_ttl`), `fork` y `save` lo escriben en el `mem.file` (0600 del
+daemon), y las copias de una plantilla lo heredan. Es distinto de los secretos de
+sesión (`kling machine secret`), que marcan la máquina (`has_secrets`) y no dejan
+congelarla: el entorno es configuración. Un secreto que no deba tocar nunca el disco
+va por `machine secret` o por el proxy de credenciales. Una imagen cuyo agente no sabe
+leer el entorno hace fallar la máquina en vez de arrancar su servicio sin él.
 
 ## Lo que NO está resuelto
 

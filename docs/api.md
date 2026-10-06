@@ -129,7 +129,12 @@ en él `request.json` y ejecuta `<constructor> <dir>` con `KLING_ROOT`,
 constructor tiene que dejar `$KLING_ROOT/images/<name>.ext4` o
 `<name>.layer.ext4` y salir con 0; su salida vuelve a quien pidió la construcción.
 Tiene que ser de root y nadie más puede escribirlo, ni a él ni a su directorio,
-porque el daemon lo ejecuta como root. La receta la escribe el daemon, con
+porque el daemon lo ejecuta como root. Excepción: `oci` (el del núcleo o uno
+instalado con ese nombre) corre con el usuario de construcción
+(`kindling-build`, ver `docs/imagenes.md`) cuando existe: recibe además
+`KLING_OUT_DIR` (deja ahí la imagen; el daemon la valida y la mueve a
+`images/`) y `KLING_CACHE_DIR` (su caché), y del entorno del daemon solo una
+lista blanca. La receta la escribe el daemon, con
 permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,

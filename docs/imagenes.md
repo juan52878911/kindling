@@ -119,7 +119,11 @@ kling run -image postgres:17-alpine -e POSTGRES_PASSWORD       # se importa la p
 queda en `ps`) y `-env-file F` dan el entorno a **esa máquina**, no a la
 imagen. Dos máquinas con contraseñas distintas son dos máquinas sobre la misma
 imagen. Vale para cualquier imagen con un agente que lo sepa leer (las de
-ahora; una de antes lo ignora, el daemon lo avisa en su log y en los eventos).
+ahora). Con una de antes, que lo ignoraría, la máquina **falla** en cuanto su
+agente contesta: su servicio habría corrido sin la contraseña o la clave que
+se le dio. Hay que reconstruirla o reimportarla. Las importadas antes con
+`run -image <ref> -e` llevan la contraseña horneada en `/etc/kling/env`:
+bórralas (`kling image rm`).
 
 Cómo viaja, y dónde **no** está:
 
@@ -132,7 +136,11 @@ Cómo viaja, y dónde **no** está:
 
 Lo que sí queda: el entorno del proceso del servicio (como en Docker, legible
 por su usuario y por root en `/proc/<pid>/environ`) y, por tanto, la memoria
-de la máquina. **`kling save` congela esa memoria**: una plantilla lleva el
+de la máquina. Todo lo que vuelca la RAM a disco la lleva: `kling freeze`
+(también el de `on_ttl`, que por defecto congela), `kling fork` y `kling save`.
+A diferencia de los secretos de sesión (`kling machine secret`, que marcan la
+máquina y no dejan congelarla), el entorno se trata como configuración: se
+congela con ella, en ficheros 0600 del daemon. **`kling save` congela esa memoria**: una plantilla lleva el
 entorno de la máquina de la que se hizo, y sus copias (`run -from`) arrancan
 con él (`env_keys` se hereda). Con `-from`, `-e` es un error: la copia es la
 memoria del dorado, su servicio ya arrancó con el entorno de aquel, y uno
@@ -175,12 +183,15 @@ tar en el directorio de trabajo de la construcción: el árbol se arma leyendo
 solo las cabeceras y el ext4 lee los datos de ahí (cada tar se borra en cuanto
 se ha leído). Cuesta en disco, mientras dura, el tamaño descomprimido de las
 capas, con tope de 8 veces `max_mb` (una bomba gzip no llena el disco). Un blob
-de la caché no se vuelve a hashear en cada import: solo llega a su ruta con un
-`rename` después de verificarlo, así que estar ahí, con el tamaño del
-manifiesto, siendo un fichero regular sin escritura para
-grupo ni otros, es estar verificado; si algo de eso falla, se rehashea entero.
-La caché es del daemon: quien pueda escribir en ella puede cambiar también las
-imágenes y los binarios. Una capa dañada después en disco la caza además el
+de la caché no se vuelve a hashear en cada import cuando el constructor corre
+como root: solo llega a su ruta con un `rename` después de verificarlo, así
+que estar ahí, con el tamaño del manifiesto, siendo un fichero regular sin
+escritura para grupo ni otros, es estar verificado; si algo de eso falla, se
+rehashea entero. Esa caché es del daemon: quien pueda escribir en ella puede
+cambiar también las imágenes y los binarios. Con el usuario de construcción
+(abajo) la caché es suya, y lo cacheado se rehashea **siempre**: un
+constructor comprometido por una imagen no puede envenenar los imports
+siguientes cambiando o renombrando un blob. Una capa dañada después en disco la caza además el
 CRC32 del gzip al descomprimirla.
 
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
@@ -373,9 +384,17 @@ VMM vivos y escribir en los volúmenes.
 | `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
 
 La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya
-hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, el
-cliente los comprueba por sha256 al usarlos y reimportar lo bajado antes no
+hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, se
+comprueban por sha256 cada vez que se usan y reimportar lo bajado antes no
 baja nada.
+
+El usuario tiene que ser **de sistema y dedicado** (uid ≤ `SYS_UID_MAX`): al
+acabar cada construcción el daemon mata todos sus procesos, y con varios
+daemons en el mismo host (uno de pruebas junto al de systemd) las
+construcciones de ese usuario van en fila con un cerrojo de host
+(`/run/kindling-build-<uid>.lock`). La raíz de datos tiene que poder
+atravesarla (no bajo `/root`); si no, el daemon lo avisa al arrancar y el
+constructor corre como root.
 
 El proceso nace con su uid y su gid, sin grupos suplementarios ni capacidades,
 y antes de leer la petición se pone `no_new_privs` y topes: 4096 descriptores,

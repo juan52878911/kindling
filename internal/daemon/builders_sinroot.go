@@ -229,7 +229,7 @@ func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (stri
 // escribir en un directorio de un usuario sin privilegios (le plantaría
 // enlaces), ni fiarse de lo que haya dejado. La primera vez enlaza (hard
 // link) los blobs de la caché de root: siguen siendo de root y de solo lectura
-// para él, el cliente OCI los comprueba por sha256 al usarlos, y reimportar
+// para él, el cliente OCI los rehashea cada vez (SiempreRehash), y reimportar
 // lo que ya se bajó como root no vuelve a bajar nada.
 func prepararCache(root string, u *usuarioConstructor) (string, error) {
 	cache := filepath.Join(root, "cache")

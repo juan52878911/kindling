@@ -132,7 +132,9 @@ limpiar_montaje() {
   desmontar
   # La caché OCI sobrevive entre montajes: el pull de la imagen no es lo que
   # se prueba.
-  sudo sh -c "mkdir -p '$BASE/keep' && if [ -d '$R/cache/oci' ]; then rm -rf '$BASE/keep/oci'; mv '$R/cache/oci' '$BASE/keep/oci'; fi; rm -rf '$R'"
+  # La caché entera: cache/oci (constructores como root) y cache/builder/oci
+  # (el oci sin root, con su dueño: mv lo conserva).
+  sudo sh -c "mkdir -p '$BASE/keep' && if [ -d '$R/cache' ]; then rm -rf '$BASE/keep/cache'; mv '$R/cache' '$BASE/keep/cache'; fi; rm -rf '$R'"
 }
 limpiar() {
   limpiar_montaje
@@ -149,7 +151,7 @@ escenario() { # $1 = nombre, $2.. = entorno del daemon
   step "== $modo ($*)"
   local libre; libre=$(libre_mib)
   if [ "$libre" -lt "$MIN_FREE_MIB" ]; then bad "$modo: free disk" ">= $MIN_FREE_MIB MiB" "$libre MiB"; return; fi
-  if [ -d "$BASE/keep/oci" ]; then sudo mkdir -p "$R/cache" && sudo mv "$BASE/keep/oci" "$R/cache/oci"; fi
+  if [ -d "$BASE/keep/cache" ]; then sudo mkdir -p "$R" && sudo mv "$BASE/keep/cache" "$R/cache"; fi
   : >"$TMPC/daemon.log"
   if ! arrancar "$@"; then bad "$modo: daemon" "started" "$(tail -3 "$TMPC/daemon.log")"; limpiar_montaje; return; fi
   ok "daemon started (pid ${DPID:-?})"

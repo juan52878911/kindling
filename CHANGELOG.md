@@ -10,7 +10,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
-- `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference, values never stored on the host
+- `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`
 - `kling logs -service`, and `-json` on `kling run` and `kling image import`, for agents
 - `debian` image builder: pinned, reproducible Debian images without root, also on macOS (#157)
@@ -61,7 +61,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Diff freeze: the daemon never follows links in a machine's directory, checks the seal's base is the golden's memory, and only freezes as a diff where the filesystem tells holes from zero pages
 - `state.json` is written with schema 2 while a copy is frozen as a diff, so an older kling refuses to start instead of loading it as full memory
 - `run -disk` must fit in the free disk; `KLING_MAX_DISK_MIB` lowers the maximum
-- `run -image` names images by a keyed hash of the whole reference and the environment, so another registry's image is never reused
+- `run -image` names images by a keyed hash of the whole reference, so another registry's image is never reused
 - Docker images: the config blob must declare a size (max 8 MiB); tar entries are capped while reading layers
 - Docker images: registries never redirect to plain http, and only `localhost`/`127.0.0.1`/`::1` are spoken to over http
 - Docker images: the `HEALTHCHECK` runs as the image's `USER`; arguments given after `--` are not echoed
