@@ -29,6 +29,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
 - Docker images get a full core per vCPU by default
+- A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
 - `kling db branch`: `git checkout` switches databases in tens of milliseconds (#125)
 - Concurrent `kling db up` calls wait for admission instead of being rejected (#150)
 - Daemon API, `state.json`, golden `meta.json` and credential stores are versioned (#138, #140, #141)
