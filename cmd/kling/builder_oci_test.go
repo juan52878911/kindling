@@ -105,6 +105,9 @@ func TestBuildOCI(t *testing.T) {
 	}
 
 	img := filepath.Join(e.root, "images", "pg.ext4")
+	if _, err := os.Stat(filepath.Join(e.work, "layers")); !os.IsNotExist(err) {
+		t.Fatalf("the unpacked layers stayed in the work dir: %v", err)
+	}
 	fsckImage(t, img)
 	f, err := os.Open(img)
 	if err != nil {
