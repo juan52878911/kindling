@@ -64,6 +64,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Docker images: the config blob must declare a size (max 8 MiB); tar entries are capped while reading layers
 - Docker images: registries never redirect to plain http, and only `localhost`/`127.0.0.1`/`::1` are spoken to over http
 - Docker images: the `HEALTHCHECK` runs as the image's `USER`; arguments given after `--` are not echoed
+- Docker images: the `oci` builder runs as its own unprivileged user (`-build-as`, default `kindling-build`), not root; the daemon checks and moves what it leaves
 - `-env` build variables move out of the world-readable `/entrypoint` into a 0600 file (#155)
 - Credential proxy: keys never go to another host; substitution only where declared (#133)
 - macOS: per-machine `kling-vz` sandbox, stricter peer checks, DNS limits, public DNS (#131)

@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -170,6 +171,12 @@ type Server struct {
 	// identificar lee quién está al otro lado de una conexión. nil =
 	// credencialesPar (SO_PEERCRED / LOCAL_PEERCRED); los tests ponen uno falso.
 	identificar func(net.Conn) (Llamante, error)
+
+	// constructor es el usuario sin privilegios de los constructores
+	// aislados (builders_sinroot.go); nil = corren con el uid del daemon.
+	// muConstructor los pone en fila: ver barrerProcesos.
+	constructor   *usuarioConstructor
+	muConstructor sync.Mutex
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de

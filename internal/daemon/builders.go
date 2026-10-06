@@ -25,7 +25,9 @@ import (
 // Construir una imagen monta un loopback y hace chroot: es trabajo de root en el
 // host del daemon. El núcleo no sabe cómo se empaqueta un servidor MCP, ni un
 // entorno de sandbox, ni lo que venga después; sabe ejecutar, como root y con
-// plazo, un constructor que el administrador instaló a propósito:
+// plazo, un constructor que el administrador instaló a propósito (los del
+// núcleo que no necesitan root, como "oci", con un usuario sin privilegios:
+// ver builders_sinroot.go):
 //
 //	/usr/local/lib/kindling/builders/<nombre>   (o $KLING_BUILDERS_DIR)
 //
@@ -43,7 +45,9 @@ import (
 // la receta.
 //
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
-// KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW.
+// KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW. Los aislados
+// (constructoresAislados) reciben además KLING_OUT_DIR, donde dejan la imagen
+// en vez de en images/, y sin root KLING_CACHE_DIR, su caché.
 
 var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -124,49 +128,63 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 
-	work, err := os.MkdirTemp(filepath.Join(s.root, "build"), req.Name+".")
-	if os.IsNotExist(err) {
-		_ = os.MkdirAll(filepath.Join(s.root, "build"), 0o700)
-		work, err = os.MkdirTemp(filepath.Join(s.root, "build"), req.Name+".")
+	// Los aislados dejan la imagen en out/ y, con usuario de construcción,
+	// corren con él (builders_sinroot.go).
+	aislado := constructoresAislados[req.Builder]
+	var u *usuarioConstructor
+	if aislado {
+		u = s.constructor
 	}
+	dueño := uint32(os.Geteuid())
+	if u != nil {
+		dueño = u.UID
+		s.muConstructor.Lock()
+		defer s.muConstructor.Unlock()
+		barrerProcesos(u.UID)
+		defer barrerProcesos(u.UID)
+	}
+	b, _ := json.MarshalIndent(req, "", "  ")
+	work, err := prepararTrabajo(s.root, req.Name, b, u)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer os.RemoveAll(work)
-	b, _ := json.MarshalIndent(req, "", "  ")
-	if err := os.WriteFile(filepath.Join(work, "request.json"), b, 0o600); err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
+
+	var cache string
+	if u != nil {
+		if cache, err = prepararCache(s.root, u); err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("builder cache: %w", err))
+			return
+		}
 	}
 
 	// Sin cancelación del cliente, como el constructor de MCP: matar un chroot
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, append(binArgs, work)...)
-	cmd.Dir = work
-	cmd.Env = append(os.Environ(),
-		"KLING_ROOT="+s.root,
-		"KLING_IMAGE_NAME="+req.Name,
-		"KLING_BUILD_DIR="+work)
-	if req.Base != "" {
-		cmd.Env = append(cmd.Env, "BASE_IMAGE="+req.Base)
-	}
-	if req.GrowMB > 0 {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("GROW=%d", req.GrowMB))
-	}
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache)
+	out := filepath.Join(work, "out")
+	var salida bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &salida, &salida
 	if err := cmd.Run(); err != nil {
 		fail(w, http.StatusInternalServerError,
-			fmt.Errorf("builder %s failed: %w\n%s", req.Builder, err, strings.TrimSpace(out.String())))
+			fmt.Errorf("builder %s failed: %w\n%s", req.Builder, err, strings.TrimSpace(salida.String())))
 		return
+	}
+	if aislado {
+		if u != nil {
+			barrerProcesos(u.UID) // nada del constructor sigue vivo mientras se valida
+		}
+		if _, err := adoptarSalida(out, filepath.Join(s.root, "images"), req.Name, dueño); err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w", req.Builder, err))
+			return
+		}
 	}
 
 	hints, err := readRecipeHints(filepath.Join(work, "recipe.json"))
 	if err != nil {
-		fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w\n%s", req.Builder, err, strings.TrimSpace(out.String())))
+		fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w\n%s", req.Builder, err, strings.TrimSpace(salida.String())))
 		return
 	}
 	base := req.Base
@@ -185,7 +203,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	if _, err := os.Stat(img); err != nil {
 		if _, lerr := os.Stat(filepath.Join(s.root, "images", req.Name+".layer.ext4")); lerr != nil {
 			fail(w, http.StatusInternalServerError,
-				fmt.Errorf("builder %s finished but left no image %s\n%s", req.Builder, req.Name, strings.TrimSpace(out.String())))
+				fmt.Errorf("builder %s finished but left no image %s\n%s", req.Builder, req.Name, strings.TrimSpace(salida.String())))
 			return
 		}
 	}
@@ -200,21 +218,55 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	if err := durable.Escribir(s.recipePath(req.Name), append(rb, '\n'), 0o600); err != nil {
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
-	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: out.String()})
+	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: salida.String()})
+}
+
+// comandoConstructor prepara el proceso del constructor: su entorno y, con
+// usuario de construcción, su identidad (u.credencial) y un entorno de lista
+// blanca en vez del del daemon.
+func comandoConstructor(ctx context.Context, bin string, binArgs []string, root, work string,
+	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, append(append([]string{}, binArgs...), work)...)
+	cmd.Dir = work
+	cmd.Env = os.Environ()
+	if u != nil {
+		cmd.Env = append(entornoConstructor(work), "KLING_CACHE_DIR="+cache, "KLING_BUILD_LIMITS=1")
+		cmd.SysProcAttr = u.credencial()
+	}
+	cmd.Env = append(cmd.Env,
+		"KLING_ROOT="+root,
+		"KLING_IMAGE_NAME="+req.Name,
+		"KLING_BUILD_DIR="+work)
+	if aislado {
+		cmd.Env = append(cmd.Env, "KLING_OUT_DIR="+filepath.Join(work, "out"))
+	}
+	if req.Base != "" {
+		cmd.Env = append(cmd.Env, "BASE_IMAGE="+req.Base)
+	}
+	if req.GrowMB > 0 {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("GROW=%d", req.GrowMB))
+	}
+	return cmd
 }
 
 // readRecipeHints lee el recipe.json que puede dejar un constructor
 // (api.BuildRecipeHints). Sin fichero no es error: la receta es la de siempre.
+// Sin seguir enlaces y solo un fichero regular: el directorio de trabajo puede
+// ser de un constructor sin privilegios, y un recipe.json que apunte a la
+// receta 0600 de otra imagen la colaría en ésta.
 func readRecipeHints(p string) (api.BuildRecipeHints, error) {
 	var h api.BuildRecipeHints
-	f, err := os.Open(p)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if os.IsNotExist(err) {
 		return h, nil
 	}
 	if err != nil {
-		return h, err
+		return h, fmt.Errorf("recipe.json: %w", err)
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return h, fmt.Errorf("recipe.json is not a regular file")
+	}
 	b, err := io.ReadAll(io.LimitReader(f, maxRecipeHints+1))
 	if err != nil {
 		return h, err

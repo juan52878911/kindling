@@ -163,7 +163,8 @@ kindling y nada más:
 sha256 del manifiesto bajado (si el registro dice otro en
 `Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al
 del manifiesto de la plataforma y cada capa). Cada capa se comprueba por sha256
-y se guarda en la caché por hash (`$KLING_ROOT/cache/oci`): reimportar el mismo
+y se guarda en la caché por hash (`$KLING_ROOT/cache/builder/oci`, la del
+usuario de construcción; `$KLING_ROOT/cache/oci` si corre como root): reimportar el mismo
 digest no baja ninguna capa, y con la misma `SOURCE_DATE_EPOCH` sale la misma
 imagen bit a bit. De un índice multiplataforma se elige `linux/<arch>` (en arm64,
 la variante v8; en amd64, la que no pide v2/v3).
@@ -338,13 +339,60 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
   "El entorno es de la máquina").
 - **El `HEALTHCHECK` corre con el `USER` de la imagen** (o el de `-user`), como
   en Docker; si ese usuario no existe en la imagen, la máquina no llega a lista.
-- **El constructor `oci` corre como root dentro del daemon**: lee los tar sin
-  escribir nada fuera de su directorio de trabajo (las rutas se resuelven en un
-  árbol en memoria y `..` se rechaza), pero aún no baja de privilegios.
+- **El constructor `oci` corre como root si no hay usuario de construcción**:
+  ver abajo.
 - **Sin zstd**: solo capas `tar` y `tar+gzip`.
 - **No cambia la licencia**: convertir una imagen no la redistribuye, pero
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
   de datos gestionada). No publiques imágenes convertidas.
+
+### El constructor `oci` no corre como root
+
+Baja de internet y parsea tars que no son de fiar, y no necesita root para
+nada. En Linux, con el daemon como root, corre con un usuario propio sin
+privilegios: `-build-as` / `KLING_BUILD_AS`, por defecto `kindling-build`.
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
+```
+
+Es otro usuario que el de Firecracker (`-run-as`, `kindling`), y el daemon no
+acepta el mismo: con un uid compartido, un VMM comprometido reescribiría la
+caché de blobs y los builds en curso (y metería su código en las imágenes de
+otros), y un constructor comprometido podría mandar señales o `ptrace` a los
+VMM vivos y escribir en los volúmenes.
+
+| Qué | Dueño y permisos | Para qué |
+| --- | --- | --- |
+| `<root>/build/` | root, 0711 | se atraviesa; no se lista ni se escribe |
+| `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json`; la imagen sale en `out/` |
+| `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
+
+La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya
+hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, el
+cliente los comprueba por sha256 al usarlos y reimportar lo bajado antes no
+baja nada.
+
+El proceso nace con su uid y su gid, sin grupos suplementarios ni capacidades,
+y antes de leer la petición se pone `no_new_privs` y topes: 4096 descriptores,
+8 GiB de datos (`RLIMIT_DATA`, el montón de Go), 512 procesos del usuario y sin
+volcados de memoria; el plazo de 15 minutos es el de siempre. Del entorno del
+daemon solo le llega una lista blanca (proxy, certificados, el agente,
+`SOURCE_DATE_EPOCH`): el resto puede llevar secretos.
+
+Lo que deja, el daemon lo comprueba antes de usarlo: `out/<name>.ext4` se abre
+sin seguir enlaces y tiene que ser un fichero regular, suyo y con un solo
+enlace duro; pasa a root 0644 y se mueve a `images/` (después, root y grupo del
+VMM, 0640). `recipe.json` también se lee sin seguir enlaces: uno que apuntara a
+la receta 0600 de otra imagen la colaría en ésta. Las construcciones de este
+usuario van de una en una, y antes y después el daemon mata cualquier proceso
+que quede con su uid: lo que un constructor comprometido dejara en segundo
+plano no llega a la siguiente.
+
+Sin usuario (macOS, daemon sin root, `kindling-build` inexistente) corre como
+hasta ahora, con el uid del daemon, y el daemon lo avisa al arrancar. `debian`
+y `android` también son Go puro, pero leen y escriben bases y recetas de
+`images/`: siguen corriendo como root.
 
 ## Límites
 

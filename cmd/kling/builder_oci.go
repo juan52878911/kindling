@@ -180,9 +180,15 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			t = time.Unix(s, 0).UTC()
 		}
 	}
-	images := filepath.Join(root, "images")
+	// El daemon da KLING_OUT_DIR (y, sin root, KLING_CACHE_DIR): la imagen se
+	// deja ahí y él la valida y la mueve a images/ (builders_sinroot.go).
+	images := envOr("KLING_OUT_DIR", filepath.Join(root, "images"))
 	if err := os.MkdirAll(images, 0o755); err != nil {
 		return err
+	}
+	cache := filepath.Join(root, "cache", "oci")
+	if d := os.Getenv("KLING_CACHE_DIR"); d != "" {
+		cache = filepath.Join(d, "oci")
 	}
 
 	// Cada capa se descomprime una sola vez, a un tar en el directorio de
@@ -193,7 +199,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// de 8 veces MaxMB; cada tar se borra en cuanto el ext4 lo ha leído.
 	unpacked := filepath.Join(dir, "layers")
 	defer os.RemoveAll(unpacked)
-	c := &oci.Client{Cache: filepath.Join(root, "cache", "oci"), Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked}
+	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {

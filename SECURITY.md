@@ -1268,6 +1268,37 @@ en credenciales de máquina que se atan a cada instancia (`POST
 <plantilla>` (dominios con credencial, volúmenes, `allow_exec`) antes de añadirla a
 `shared_templates`.
 
+### 24. El constructor `oci` no corre como root
+
+Importar una imagen de Docker baja de internet y parsea tars hostiles
+(`internal/oci`, `internal/ext4`). Los demás constructores del daemon corren como root;
+`oci` no lo necesita, así que en Linux corre con un usuario propio (`-build-as`,
+`KLING_BUILD_AS`, por defecto `kindling-build`). Medido en el lab importando
+`postgres:17-alpine`:
+
+```
+Uid:         996   996   996   996
+Groups:      (ninguno)
+CapEff:      0000000000000000
+NoNewPrivs:  1
+Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file size 0
+```
+
+- **Otro usuario que el del VMM**, y el daemon rechaza que sean el mismo: el VMM no toca
+  la caché de blobs ni los builds en curso, y el constructor no manda señales a los VMM
+  ni escribe en los volúmenes.
+- **Solo escribe lo suyo**: su directorio de trabajo (`build/` es de root 0711) y su
+  caché, `cache/builder` (0700), aparte de la de los constructores que corren como root.
+- **El daemon valida lo que deja**: la imagen sin seguir enlaces, regular, suya y con un
+  enlace duro, y la mueve él a `images/`; `recipe.json` también sin seguir enlaces.
+- **Entorno de lista blanca**: el del daemon no llega (puede llevar secretos).
+- **De uno en uno, y barrido**: antes y después de cada construcción el daemon mata los
+  procesos que queden con ese uid.
+
+Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
+al arrancar. `debian` y `android` siguen como root. Detalle en
+[docs/imagenes.md](docs/imagenes.md).
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
