@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -143,5 +144,41 @@ func TestEstadoSoloLlevaNombres(t *testing.T) {
 	st := readState(t, m)
 	if strings.Contains(string(b), "valor-secreto") || len(st) != 1 || len(st[0].EnvKeys) != 1 || st[0].EnvKeys[0] != "PW" {
 		t.Fatalf("state.json: %s", b)
+	}
+}
+
+// Con un agente que no sabe leer el entorno (una imagen de antes de run -e),
+// la máquina falla: su servicio arrancó sin la contraseña que se le pasó.
+func TestEntornoConAgenteViejoFalla(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	f := nuevoFcFalso(t)
+	agente := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: "kling-guest"})
+	}))
+	defer agente.Close()
+	mc := m.addForTest("abc")
+	m.mu.Lock()
+	mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+	m.socket["abc"] = f.Sock
+	m.mu.Unlock()
+
+	m.retirarEntornoMMDS("abc", "abc")
+	plazo := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.RLock()
+		st, causa := m.byID["abc"].State, m.byID["abc"].LastErr
+		m.mu.RUnlock()
+		if st == api.StateFailed {
+			if !strings.Contains(causa, "environment") {
+				t.Fatalf("falló sin decir por qué: %q", causa)
+			}
+			return
+		}
+		if time.Now().After(plazo) {
+			t.Fatalf("la máquina sigue %s con un agente que no leyó su entorno", st)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

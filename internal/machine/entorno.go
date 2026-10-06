@@ -100,11 +100,15 @@ func (m *Manager) retirarEntornoMMDS(id, nombre string) {
 			bcancel()
 		}
 		if ag != nil && !ag.Has(api.GuestCapEnv) {
-			msg := "its guest agent does not read the machine environment (an image from before kling run -e): " +
-				"the service started without it; rebuild or reimport the image"
-			log.Printf("warning: %s: %s", nombre, msg)
-			if m.bus != nil {
-				m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: id, Name: nombre, Message: "warning: " + msg})
+			// Un servicio que esperaba su contraseña o su clave corriendo sin
+			// ella es peor que no arrancar: la máquina falla (y -wait-ready con
+			// ella) en vez de quedarse "lista" con el entorno equivocado.
+			m.mu.RLock()
+			mc := m.byID[id]
+			m.mu.RUnlock()
+			if mc != nil {
+				m.fail(mc, errors.New("its guest agent does not read the machine environment (an image from "+
+					"before kling run -e), so the service would run without it: rebuild or reimport the image"))
 			}
 		}
 	}()
