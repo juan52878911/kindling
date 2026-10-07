@@ -63,7 +63,7 @@ trap cleanup EXIT
 
 wait_daemon() {
   for _ in $(seq 1 60); do
-    "$KLING" info >/dev/null 2>&1 && return 0
+    "$KLING" status -v >/dev/null 2>&1 && return 0
     sleep 0.5
   done
   die "the daemon did not come back after restarting $UNIT"
@@ -112,7 +112,7 @@ echo
 printf '%-6s %-9s %5s %9s %9s %9s %9s %11s\n' mode actual N first_ms mean_ms p50_ms max_ms disk_MiB
 for mode in $MODES; do
   restart_with "$mode"
-  actual=$("$KLING" info 2>/dev/null | awk -F': *' '/^disk clones:/ {split($2, a, " "); print a[1]}')
+  actual=$("$KLING" status -v 2>/dev/null | awk -F': *' '/^disk clones:/ {split($2, a, " "); print a[1]}')
   remove_ours
   # One warm-up instance, not measured: in store mode it creates the store
   # (first time ever) and the golden's base copy inside it.

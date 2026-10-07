@@ -56,15 +56,15 @@ image="$(jq -r .image <<<"$info")"
 vcpus="$(jq -r .vcpus <<<"$info")"
 mem="$(jq -r .mem_mib <<<"$info")"
 cpupct="$(jq -r '.cpu_pct // 0' <<<"$info")"
-backend="$("$KLING" info -json | jq -r '.backend // "?"')"
+backend="$("$KLING" status -v -json | jq -r '.backend // "?"')"
 
 step "Model $model  (snapshot $SNAP, image $image, $vcpus vCPU, $mem MiB, backend $backend)"
 row "snapshot memory file (allocated)" "$(jq -r '.mem_bytes/1048576|floor' <<<"$info") MiB"
 row "snapshot on disk (memory + state + overlay)" "$(jq -r '.disk_bytes/1048576|floor' <<<"$info") MiB"
-row "image layer on disk" "$("$KLING" images ls -json | jq -r --arg i "$image" '.[]|select(.name==$i)|.disk_bytes/1048576|floor') MiB"
+row "image layer on disk" "$("$KLING" image ls -json | jq -r --arg i "$image" '.[]|select(.name==$i)|.disk_bytes/1048576|floor') MiB"
 
 ask() { # ask <machine> <max_tokens> <temperature> <prompt>
-  "$KLING" models ask -json -max-tokens "$2" -temperature "$3" "$1" "$4"
+  "$KLING" ai model ask -json -max-tokens "$2" -temperature "$3" "$1" "$4"
 }
 
 # ── 1. frío ───────────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ if [ "$COLD" = 1 ]; then
   [ "$cpupct" -gt 0 ] && args+=(-cpu-pct "$cpupct")
   if "$KLING" run "${args[@]}" >/dev/null; then
     t1=$(now_ms)
-    out="$("$KLING" models ask -json -wait 30m -max-tokens 1 -temperature 0 "$m" "Hi")"
+    out="$("$KLING" ai model ask -json -wait 30m -max-tokens 1 -temperature 0 "$m" "Hi")"
     t2=$(now_ms)
     row "boot (kling run returns)" "$((t1 - t0)) ms"
     row "boot to first token" "$((t2 - t0)) ms"

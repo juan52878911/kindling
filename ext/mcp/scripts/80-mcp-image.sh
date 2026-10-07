@@ -902,7 +902,7 @@ if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
         [ -n "$MODS" ] && echo "  otros módulos con -m: $(echo "$MODS" | paste -sd' ' -)" >&2
       done
     fi
-    echo "  Repite pasando el comando bueno tras --, o con 'kling add -cmd \"...\"'." >&2
+    echo "  Repite pasando el comando bueno tras --, o con 'kling mcp add -cmd \"...\"'." >&2
     echo "  (SKIP_CMD_CHECK=1 salta esta comprobación.)" >&2
     exit 1
   fi
