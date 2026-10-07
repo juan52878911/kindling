@@ -66,7 +66,7 @@ func TestVerificadaSinRehash(t *testing.T) {
 	os.WriteFile(capa, bytes.Repeat([]byte{'z'}, len(b)), 0o644)
 
 	propia := t.TempDir()
-	c := &Client{Cache: propia, Verificada: v, Log: io.Discard, SiempreRehash: true}
+	c := &Client{Cache: propia, Verificadas: []string{v}, Log: io.Discard, SiempreRehash: true}
 	hits := r.Hits
 	img, err := c.Pull(context.Background(), ref, man, "arm64")
 	if err != nil {
@@ -123,7 +123,7 @@ func TestVerificadaDesconfia(t *testing.T) {
 			v := verificadaDe(t, primero)
 			estropear(t, v)
 			propia := t.TempDir()
-			c := &Client{Cache: propia, Verificada: v, Log: io.Discard, SiempreRehash: true}
+			c := &Client{Cache: propia, Verificadas: []string{v}, Log: io.Discard, SiempreRehash: true}
 			img, err := c.Pull(context.Background(), ref, man, "arm64")
 			if err != nil {
 				t.Fatal(err)
@@ -132,5 +132,46 @@ func TestVerificadaDesconfia(t *testing.T) {
 				t.Fatalf("capa de %s, quiero la propia %s", img.Layers[0].Path, want)
 			}
 		})
+	}
+}
+
+// Con varias verificadas (la de lo público y la del origen de la
+// construcción), cada blob sale de la que lo tenga, sin rehashear ni pedir
+// nada al registro.
+func TestVerificadasVarias(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: strings.Repeat("v", 4096)}})
+	man, _ := r.Image("arm64", nil, layer)
+	ref := r.Host() + "/x/y"
+	capaHex := strings.TrimPrefix(r.Put(layer, ""), "sha256:")
+	primero := &Client{Cache: t.TempDir(), Log: io.Discard}
+	if _, err := primero.Pull(context.Background(), ref, man, "arm64"); err != nil {
+		t.Fatal(err)
+	}
+	publica, origen := verificadaDe(t, primero), verificadaDe(t, primero)
+	// La capa, solo en la del origen; el manifiesto y la config, solo en la
+	// pública.
+	if err := os.Remove(filepath.Join(publica, "sha256", capaHex)); err != nil {
+		t.Fatal(err)
+	}
+	es, _ := os.ReadDir(filepath.Join(origen, "sha256"))
+	for _, e := range es {
+		if e.Name() != capaHex {
+			os.Remove(filepath.Join(origen, "sha256", e.Name()))
+		}
+	}
+	propia := t.TempDir()
+	c := &Client{Cache: propia, Verificadas: []string{publica, origen}, Log: io.Discard, SiempreRehash: true}
+	hits := r.Hits
+	img, err := c.Pull(context.Background(), ref, man, "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Hits != hits {
+		t.Fatalf("%d peticiones al registro", r.Hits-hits)
+	}
+	if want := filepath.Join(origen, "sha256", capaHex); img.Layers[0].Path != want {
+		t.Fatalf("capa de %s, quiero %s", img.Layers[0].Path, want)
 	}
 }

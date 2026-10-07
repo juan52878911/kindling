@@ -1325,17 +1325,32 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   si el barrido de sus procesos acabó limpio); uno cambiado no entra, ni uno disperso, ni
   más bytes por pasada que el tope de la caché. El constructor la
   lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
-  puede escribir, renombrar ni borrar nada en ella. Lo que usó de la caché de blobs de
-  root (lo subido por `image import -archive`) pasa con un enlace duro: solo root la
-  escribe y cada blob entró comprobado. Las cachés se barren con tope
+  puede escribir, renombrar ni borrar nada en ella. Las cachés se barren con tope
   (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado;
   lo que la construcción dice haber usado se guarda solo mientras quepa en el tope.
-- **Las capas no son de las demás cuentas del host**: la verificada y la caché de
-  blobs de root (`cache/oci`, la de lo subido y de los constructores que corren como
-  root) son de root con el grupo del usuario de construcción, directorios 0750 y blobs
-  0640 (sin usuario de construcción, 0700/0600). Una imagen privada (`kling registry
-  login`) o de un archivo no se puede listar ni leer desde otra cuenta. Lo de versiones
-  anteriores (0755/0644) se cierra la primera vez que se usa cada caché.
+- **Las capas privadas no son de las demás construcciones**: solo lo bajado sin
+  credenciales (lo que cualquier construcción, que tiene red, podría bajar) va a la
+  verificada de todos, `cache/verified/oci`. Lo bajado con `kling registry login` va a
+  `cache/verified/registry-<sha256 del host>` y lo de un archivo a
+  `cache/verified/archive-<digest del manifiesto>`; cada una es de root 0700 y el daemon
+  solo la abre (0750, del grupo del constructor) mientras construye una imagen de ese
+  mismo origen, y la vuelve a cerrar con el constructor ya barrido. Esas construcciones
+  tampoco escriben en la caché compartida del constructor (`cache/builder`), sino en
+  una dentro de su directorio de trabajo, que se borra al acabar; y la caché de blobs de
+  root (`cache/oci`, donde espera lo subido) es solo de root: antes de construir un
+  archivo, el daemon enlaza en su verificada los blobs que nombra su manifiesto (que lee
+  como JSON acotado, comprobado por su sha256). Así un constructor comprometido por una
+  imagen pública no lee las capas de una privada ni de un archivo, ni uno de un registro
+  las de otro. Lo que sigue viendo: las de su propio origen (las de otras imágenes del
+  mismo registro privado, o de ese mismo archivo) y las públicas. El daemon tampoco pasa
+  a la verificada de todos nada que no estuviera en la caché del propio constructor
+  (la lista de lo usado la escribe él, y con un digest sacaría lo ajeno). `kling registry
+  logout` borra la verificada de su registro.
+- **Las capas no son de las demás cuentas del host**: la verificada (todas sus partes)
+  es de root con el grupo del usuario de construcción, directorios 0750 y blobs 0640
+  (sin usuario de construcción, 0700/0600), y `cache/oci`, 0700/0600 siempre. Una
+  imagen privada o de un archivo no se puede listar ni leer desde otra cuenta. Lo de
+  versiones anteriores (0755/0644) se cierra la primera vez que se usa cada caché.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en
@@ -1385,9 +1400,10 @@ fiar más que una imagen de un registro:
 - **El constructor comprueba la cadena entera**, sin red: el manifiesto por su digest
   (el que fija la receta), la configuración y cada capa por los suyos, y en las capas sin
   comprimir que su digest sea el `diff_id` de la configuración. Con el usuario de
-  construcción (24) lee lo subido de la caché de root (de su grupo, 0640, de solo
-  lectura para él) y lo rehashea; si la construcción acaba bien, el daemon lo pasa a la
-  caché verificada y las siguientes no lo rehashean.
+  construcción (24) no lee la caché de root (solo de root): el daemon enlaza antes, en
+  la verificada de ese archivo, los blobs que nombra su manifiesto, y solo esa
+  construcción (y las siguientes del mismo archivo) la lee. Otra construcción, aunque
+  la comprometa una imagen hostil, no llega a las capas del archivo.
 - **El constructor de un archivo no recibe credenciales**: su `ref` sale del propio
   archivo (las etiquetas que escribió quien lo hizo), así que un `source: archive` no
   lleva las de ningún registro aunque la etiqueta nombre uno privado.

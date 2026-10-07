@@ -59,13 +59,14 @@ func TestPrepararTrabajo(t *testing.T) {
 	}
 }
 
-func TestPrepararCacheMigra(t *testing.T) {
+// La caché del constructor es suya y 0700, y nace vacía: nada de la de blobs
+// de root pasa a ella (ahí hay capas de archivos y de registros privados, que
+// leerían todas sus construcciones).
+func TestPrepararCache(t *testing.T) {
 	root := t.TempDir()
 	vieja := filepath.Join(root, "cache", "oci", "sha256")
 	os.MkdirAll(vieja, 0o755)
-	os.WriteFile(filepath.Join(vieja, "aaaa"), []byte("blob"), 0o644)
-	os.WriteFile(filepath.Join(vieja, "bbbb.part"), []byte("a medias"), 0o644)
-	os.Symlink("/etc/passwd", filepath.Join(vieja, "cccc"))
+	os.WriteFile(filepath.Join(vieja, "aaaa"), []byte("capa de un archivo"), 0o600)
 
 	d, err := prepararCache(root, yo())
 	if err != nil {
@@ -77,23 +78,11 @@ func TestPrepararCacheMigra(t *testing.T) {
 	if fi, _ := os.Lstat(d); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("caché del constructor %o, quiero 0700", fi.Mode().Perm())
 	}
-	a, _ := os.Stat(filepath.Join(vieja, "aaaa"))
-	b, err := os.Lstat(filepath.Join(d, "oci", "sha256", "aaaa"))
-	if err != nil || !os.SameFile(a, b) {
-		t.Fatalf("el blob de la caché de root tiene que estar enlazado: %v", err)
+	if es, _ := os.ReadDir(d); len(es) != 0 {
+		t.Fatalf("la caché del constructor no nace vacía: %v", es)
 	}
-	for _, n := range []string{"bbbb.part", "cccc"} {
-		if _, err := os.Lstat(filepath.Join(d, "oci", "sha256", n)); err == nil {
-			t.Fatalf("%s no se migra", n)
-		}
-	}
-	// La segunda vez no migra ni falla.
-	os.WriteFile(filepath.Join(vieja, "dddd"), []byte("nuevo"), 0o644)
 	if _, err := prepararCache(root, yo()); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Lstat(filepath.Join(d, "oci", "sha256", "dddd")); err == nil {
-		t.Fatal("solo se migra al crear la caché")
 	}
 
 	// Un enlace en el sitio de la caché se rechaza.
@@ -197,7 +186,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	u := &usuarioConstructor{Nombre: "kindling-build", UID: 990, GID: 989}
 	req := api.BuildImageRequest{Name: "pg", Builder: "oci"}
 	cmd := comandoConstructor(context.Background(), "/bin/kling", []string{"builder", "oci"}, "/var/lib/kindling",
-		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder", "/var/lib/kindling/cache/verified")
+		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder", "/var/lib/kindling/cache/verified", "")
 
 	c := cmd.SysProcAttr.Credential
 	if c == nil || c.Uid != 990 || c.Gid != 989 || c.Groups == nil || len(c.Groups) != 0 || c.NoSetGroups {
@@ -214,12 +203,21 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	if strings.Contains(env, "secreto-del-daemon") {
 		t.Fatalf("el entorno del daemon llega al constructor:\n%s", env)
 	}
+	if strings.Contains(env, "KLING_VERIFIED_SCOPE_DIR") {
+		t.Fatalf("una imagen pública recibe la verificada de un origen:\n%s", env)
+	}
+	priv := comandoConstructor(context.Background(), "/bin/kling", []string{"builder", "oci"}, "/var/lib/kindling",
+		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/build/pg.1/cache", "/var/lib/kindling/cache/verified",
+		"/var/lib/kindling/cache/verified/registry-x")
+	if env := strings.Join(priv.Env, "\n") + "\n"; !strings.Contains(env, "KLING_VERIFIED_SCOPE_DIR=/var/lib/kindling/cache/verified/registry-x\n") {
+		t.Fatalf("falta la verificada del origen:\n%s", env)
+	}
 	if got := strings.Join(cmd.Args, " "); got != "/bin/kling builder oci /var/lib/kindling/build/pg.1" {
 		t.Fatalf("argv %s", got)
 	}
 
 	// Sin usuario: el entorno del daemon y su identidad, como siempre.
-	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "", "")
+	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "", "", "")
 	if cmd.SysProcAttr != nil || !strings.Contains(strings.Join(cmd.Env, "\n"), "secreto-del-daemon") ||
 		strings.Contains(strings.Join(cmd.Env, "\n"), "KLING_OUT_DIR") {
 		t.Fatalf("sin usuario: %+v %v", cmd.SysProcAttr, cmd.Env)
@@ -238,7 +236,7 @@ func TestConstructorCredencialDeVerdad(t *testing.T) {
 	os.Chmod(work, 0o755)
 	script := `grep -E "^(Uid|Gid|Groups|CapEff):" /proc/self/status; true`
 	cmd := comandoConstructor(context.Background(), "/bin/sh", []string{"-c", script},
-		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c", "/v")
+		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c", "/v", "")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)

@@ -17,13 +17,14 @@ package daemon
 // digest: lo que hay en la caché con ese nombre es siempre ese contenido, lo
 // suba quien lo suba. Nada se ejecuta ni se interpreta aquí.
 //
-// PERMISOS Y TOPE: la caché es de root con el grupo del usuario de
-// construcción (directorios 0750, blobs 0640; ver builders_cache.go), no de
-// todo el host: un archivo puede traer una imagen privada. Lo subido cuenta
+// PERMISOS Y TOPE: la caché es solo de root (directorios 0700, blobs 0600):
+// un archivo puede traer una imagen privada, y ni las demás cuentas del host
+// ni las construcciones de otras imágenes la leen. Al construir el archivo,
+// el daemon pasa sus blobs a la verificada de ese archivo (enlazarArchivo en
+// builders_cache.go), la única que lee esa construcción. Lo subido cuenta
 // para daemon.build_cache_max_gib: si la caché de root ya pasa del tope, se
 // barre (lo que lleve más de graciaCacheOCI) y, si sigue sin caber, la subida
-// es un 507. Se barre también después de cada construcción, y lo que usa una
-// construcción sin root pasa a la caché verificada (y sale de ésta).
+// es un 507. Se barre también después de cada construcción.
 
 import (
 	"crypto/rand"
@@ -65,13 +66,20 @@ func ociBlobPresente(p string) (int64, bool) {
 
 // ociBlobTenido dice si el daemon ya tiene el blob para una construcción
 // desde un archivo: en la caché de root o, si los constructores corren sin
-// root (que la leen), en la verificada, adonde pasa lo que usan. Le pone la
-// fecha de hoy: quien pregunta va a construir con él, y el barrido empieza
-// por lo más viejo.
+// root, en la verificada de todos o en la de otro archivo (de donde
+// enlazarArchivo lo toma). La de un registro con credenciales no: lo de ahí
+// no pasa a un archivo. Le pone la fecha de hoy: quien pregunta va a
+// construir con él, y el barrido empieza por lo más viejo.
 func (s *Server) ociBlobTenido(p string) (int64, bool) {
 	cands := []string{p}
 	if s.constructor != nil {
-		cands = append(cands, filepath.Join(s.root, "cache", "verified", "oci", "sha256", filepath.Base(p)))
+		v := filepath.Join(s.root, "cache", "verified")
+		cands = append(cands, filepath.Join(v, "oci", "sha256", filepath.Base(p)))
+		for _, a := range ambitos(v) {
+			if strings.HasPrefix(filepath.Base(a), "archive-") {
+				cands = append(cands, filepath.Join(a, "oci", "sha256", filepath.Base(p)))
+			}
+		}
 	}
 	for _, c := range cands {
 		if n, ok := ociBlobPresente(c); ok {
@@ -155,7 +163,7 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the blob is %d bytes and the limit is %d", size, api.MaxBlobBytes))
 		return
 	}
-	if err := cerrarCacheOCI(s.root, s.constructor); err != nil {
+	if err := cerrarCacheOCI(s.root); err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -176,7 +184,6 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 	// Sin el plazo de lectura de 30 s del servidor: gigas por SSH no caben, y
 	// el tamaño ya está acotado.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
-	gid, modoDir := grupoCaches(s.constructor)
 	// Un temporal propio por subida (dos a la vez del mismo blob no se pisan),
 	// en el mismo directorio para que el renombrado sea atómico, y acabado en
 	// .part como los de las descargas: nadie lo toma por un blob.
@@ -217,15 +224,16 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Del grupo del constructor, que lo lee (como Seed), y de nadie más.
+	// De root y de nadie más: el constructor lo recibe en la verificada del
+	// archivo que lo nombra (enlazarArchivo).
 	if os.Geteuid() == 0 {
-		if err := os.Lchown(tmp, 0, int(gid)); err != nil {
+		if err := os.Lchown(tmp, 0, 0); err != nil {
 			_ = os.Remove(tmp)
 			fail(w, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	if err := os.Chmod(tmp, modoBlob(modoDir)); err != nil {
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		_ = os.Remove(tmp)
 		fail(w, http.StatusInternalServerError, err)
 		return

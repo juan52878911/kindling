@@ -50,8 +50,10 @@ import (
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
 // KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW. Los aislados
 // (constructoresAislados) reciben además KLING_OUT_DIR, donde dejan la imagen
-// en vez de en images/, y sin root KLING_CACHE_DIR, su caché, y
-// KLING_VERIFIED_CACHE_DIR, la que verificó el daemon (builders_cache.go).
+// en vez de en images/, y sin root KLING_CACHE_DIR, su caché,
+// KLING_VERIFIED_CACHE_DIR, la que verificó el daemon, y, si la imagen es de
+// un registro con credenciales o de un archivo, KLING_VERIFIED_SCOPE_DIR, la
+// de ese origen (builders_cache.go).
 
 var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -199,19 +201,21 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		barrerProcesos(u.UID)
 	}
 	b, _ := json.MarshalIndent(req, "", "  ")
-	auth, err := s.credencialesConstructor(req)
+	auth, host, err := s.credencialesConstructor(req)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, fmt.Errorf("registry credentials: %w", err))
 		return
 	}
+	ambito, manifiesto := ambitoConstruccion(req, host)
 	work, err := prepararTrabajo(s.root, req.Name, b, auth, u)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	// cache es la caché del constructor y verificada la de root que lee sin
-	// rehashear (builders_cache.go); bien, que la construcción acabó bien.
-	var cache, verificada string
+	// cache es la caché del constructor, verificada la de root que lee sin
+	// rehashear y deOrigen la de su origen, si no es público
+	// (builders_cache.go); bien, que la construcción acabó bien.
+	var cache, verificada, deOrigen string
 	bien := false
 	defer func() {
 		// Primero lo que el constructor dejara vivo, después su directorio:
@@ -221,7 +225,16 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		if u != nil {
 			limpio = barrerProcesos(u.UID)
 		}
-		s.cacheConstruccion(work, cache, verificada, u, bien, limpio)
+		destino := verificada
+		if deOrigen != "" {
+			destino = deOrigen
+		}
+		s.cacheConstruccion(work, cache, verificada, destino, u, bien, limpio)
+		if deOrigen != "" {
+			if err := cerrarAmbito(deOrigen); err != nil {
+				log.Printf("WARNING: builder cache: closing %s: %v", deOrigen, err)
+			}
+		}
 		os.RemoveAll(work)
 	}()
 
@@ -234,20 +247,40 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 			fail(w, http.StatusInternalServerError, fmt.Errorf("verified builder cache: %w", err))
 			return
 		}
+		if ambito != "" {
+			// Lo privado (de un registro con credenciales, de un archivo) no
+			// pasa por la caché compartida del constructor, que leen todas sus
+			// construcciones: la suya está en su directorio de trabajo y se
+			// borra con él. Lo verificado de su origen, solo abierto ahora.
+			cache = filepath.Join(work, "cache")
+			if deOrigen, err = abrirAmbito(verificada, ambito, u); err != nil {
+				fail(w, http.StatusInternalServerError, fmt.Errorf("verified builder cache: %w", err))
+				return
+			}
+			if manifiesto != "" {
+				s.muCacheOCI.Lock()
+				err := enlazarArchivo(s.root, verificada, deOrigen, manifiesto, u.GID, time.Now())
+				s.muCacheOCI.Unlock()
+				if err != nil {
+					fail(w, http.StatusInternalServerError, fmt.Errorf("archive blobs: %w", err))
+					return
+				}
+			}
+		}
 	}
 
 	// Sin cancelación del cliente, como el constructor de MCP: matar un chroot
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
-	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache, verificada)
+	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache, verificada, deOrigen)
 	out := filepath.Join(work, "out")
 	var salida bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &salida, &salida
 	// La caché de blobs de root, cerrada a las demás cuentas antes de que un
 	// constructor como root (debian, android, oci sin usuario) la cree con su
 	// umask, y sin barrer mientras alguno la usa (builders_cache.go).
-	if err := cerrarCacheOCI(s.root, s.constructor); err != nil {
+	if err := cerrarCacheOCI(s.root); err != nil {
 		fail(w, http.StatusInternalServerError, fmt.Errorf("blob cache: %w", err))
 		return
 	}
@@ -396,7 +429,7 @@ func mismoJSON(a, b json.RawMessage) bool {
 // usuario de construcción, su identidad (u.credencial) y un entorno de lista
 // blanca en vez del del daemon.
 func comandoConstructor(ctx context.Context, bin string, binArgs []string, root, work string,
-	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache, verificada string) *exec.Cmd {
+	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache, verificada, deOrigen string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, bin, append(append([]string{}, binArgs...), work)...)
 	cmd.Dir = work
 	cmd.Env = os.Environ()
@@ -404,6 +437,9 @@ func comandoConstructor(ctx context.Context, bin string, binArgs []string, root,
 		cmd.Env = append(entornoConstructor(work), "KLING_CACHE_DIR="+cache, "KLING_BUILD_LIMITS=1")
 		if verificada != "" {
 			cmd.Env = append(cmd.Env, "KLING_VERIFIED_CACHE_DIR="+verificada)
+		}
+		if deOrigen != "" {
+			cmd.Env = append(cmd.Env, "KLING_VERIFIED_SCOPE_DIR="+deOrigen)
 		}
 		cmd.SysProcAttr = u.credencial()
 	}

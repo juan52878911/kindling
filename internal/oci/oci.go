@@ -174,30 +174,27 @@ type Client struct {
 	// root heredado al nombre de otro del mismo tamaño— para envenenar los
 	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
 	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
-	// No vale para Verificada.
+	// No vale para Verificadas.
 	SiempreRehash bool
 	// Auth son las credenciales de los registros privados, por CredentialKey
 	// (auth.go). Sin ellas, tokens anónimos.
 	Auth map[string]Credential
-	// Offline: nada se pide a un registro. Lo que no esté en la caché (o en
-	// Seed) es un error. Para lo importado de un archivo (archive.go): el
-	// daemon dejó sus blobs en la caché, comprobados, y la referencia no es de
-	// ningún registro.
+	// Offline: nada se pide a un registro. Lo que no esté en las cachés es un
+	// error. Para lo importado de un archivo (archive.go): el daemon dejó sus
+	// blobs en la caché (o en la verificada de ese archivo), comprobados, y la
+	// referencia no es de ningún registro.
 	Offline bool
-	// Seed, si no está vacío, es otra caché de blobs (la de root, adonde sube
-	// el daemon lo importado), solo para leer: lo que se use de ahí se
-	// rehashea siempre y no se copia.
-	Seed string
-	// Verificada, si no está vacío, es una caché de SOLO LECTURA (el
-	// directorio que tiene sha256/ dentro) que llena otro, el daemon como
-	// root, después de comprobar cada blob por sha256 (ver
-	// internal/daemon/builders_cache.go). Se mira antes que Cache, y un blob
-	// de ahí se usa sin rehashear aunque SiempreRehash: solo si el fichero,
-	// sha256/, el directorio y su padre son de root sin escritura para grupo
-	// ni otros (quien construye no puede cambiarlo ni renombrarlo) y el
-	// fichero es regular con el tamaño del manifiesto. Si no, cuenta como si
-	// no estuviera. En ella no se escribe nunca.
-	Verificada string
+	// Verificadas son cachés de SOLO LECTURA (cada una, el directorio que
+	// tiene sha256/ dentro) que llena otro, el daemon como root, después de
+	// comprobar cada blob por sha256 (ver internal/daemon/builders_cache.go):
+	// la de lo público y, si la construcción tiene una, la de su origen (un
+	// registro con credenciales, un archivo). Se miran antes que Cache, en
+	// orden, y un blob de ahí se usa sin rehashear aunque SiempreRehash: solo
+	// si el fichero, sha256/, el directorio y su padre son de root sin
+	// escritura para grupo ni otros (quien construye no puede cambiarlo ni
+	// renombrarlo) y el fichero es regular con el tamaño del manifiesto. Si
+	// no, cuenta como si no estuviera. En ellas no se escribe nunca.
+	Verificadas []string
 
 	mu     sync.Mutex // tokens, hc, Log y usados: las capas se bajan en paralelo
 	usados map[string]bool
@@ -320,15 +317,10 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	// (reconstruir sin red).
 	var body []byte
 	var mt string
-	for _, p := range []string{c.rutaVerificada(digest), c.BlobPath(digest)} {
+	for _, p := range append(c.rutasVerificadas(digest), c.BlobPath(digest)) {
 		if b, err := leerMax(p, maxManifest); err == nil && sha(b) == digest {
 			body = b
 			break
-		}
-	}
-	if body == nil {
-		if b, err := c.readSeed(digest, maxManifest); err == nil && sha(b) == digest {
-			body = b
 		}
 	}
 	if body == nil {
@@ -628,12 +620,13 @@ func (c *Client) BlobPath(digest string) string {
 	return filepath.Join(c.Cache, "sha256", strings.TrimPrefix(digest, "sha256:"))
 }
 
-// rutaVerificada es dónde estaría el blob en la caché verificada ("" sin ella).
-func (c *Client) rutaVerificada(digest string) string {
-	if c.Verificada == "" {
-		return ""
+// rutasVerificadas es dónde estaría el blob en cada caché verificada.
+func (c *Client) rutasVerificadas(digest string) []string {
+	out := make([]string, 0, len(c.Verificadas))
+	for _, v := range c.Verificadas {
+		out = append(out, filepath.Join(v, "sha256", strings.TrimPrefix(digest, "sha256:")))
 	}
-	return filepath.Join(c.Verificada, "sha256", strings.TrimPrefix(digest, "sha256:"))
+	return out
 }
 
 // Usados son los digests de los blobs que se han leído o dejado en las
@@ -672,8 +665,10 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 }
 
 func (c *Client) blobSinApuntar(ctx context.Context, registry, repo string, d Descriptor) (string, error) {
-	if p := c.rutaVerificada(d.Digest); p != "" && verificado(c.Verificada, p, d.Size) {
-		return p, nil
+	for i, p := range c.rutasVerificadas(d.Digest) {
+		if verificado(c.Verificadas[i], p, d.Size) {
+			return p, nil
+		}
 	}
 	dst := c.BlobPath(d.Digest)
 	if !c.SiempreRehash && cached(dst, d.Size) {
@@ -681,13 +676,6 @@ func (c *Client) blobSinApuntar(ctx context.Context, registry, repo string, d De
 	}
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
 		return dst, nil
-	}
-	if c.Seed != "" {
-		if p := c.seedPath(d.Digest); p != "" {
-			if ok, _ := fileHas(p, d.Digest, d.Size); ok {
-				return p, nil
-			}
-		}
 	}
 	if c.Offline {
 		return "", errOffline(d.Digest)
@@ -722,33 +710,6 @@ func errOffline(digest string) error {
 		"import the archive again (kling image import -archive)", digest)
 }
 
-// seedPath es dónde estaría digest en Seed ("" sin Seed). Solo un fichero
-// regular: un enlace no se sigue.
-func (c *Client) seedPath(digest string) string {
-	if c.Seed == "" || !reDigest.MatchString(digest) {
-		return ""
-	}
-	p := filepath.Join(c.Seed, "sha256", strings.TrimPrefix(digest, "sha256:"))
-	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
-		return ""
-	}
-	return p
-}
-
-// readSeed lee un blob pequeño de Seed.
-func (c *Client) readSeed(digest string, max int64) ([]byte, error) {
-	p := c.seedPath(digest)
-	if p == "" {
-		return nil, os.ErrNotExist
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return readMax(f, max)
-}
-
 // cached dice si el blob de la caché se puede usar sin volver a hashearlo.
 //
 // Un blob solo llega a su ruta definitiva con un rename después de comprobar
@@ -774,7 +735,7 @@ func cached(p string, size int64) bool {
 var dueñoVerificada uint32 = 0
 
 // verificado dice si el blob p de la caché verificada dir se puede usar sin
-// rehashear (Client.Verificada): el fichero, regular, con el tamaño del
+// rehashear (Client.Verificadas): el fichero, regular, con el tamaño del
 // manifiesto; y él, dir/sha256, dir y el padre de dir, de dueñoVerificada y
 // sin escritura para grupo ni otros, sin seguir enlaces. Así quien lo usa no
 // puede haberlo escrito, ni cambiado, ni puesto otro con su nombre.

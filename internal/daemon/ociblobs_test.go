@@ -132,8 +132,9 @@ func TestOCIBlobNotALink(t *testing.T) {
 }
 
 // Lo subido no es legible para las demás cuentas del host (una imagen
-// privada): con usuario de construcción, directorios 0750 y blobs 0640 de su
-// grupo; lo de una versión anterior (0755 y 0644) se cierra al subir.
+// privada) ni para el constructor: solo de root, directorios 0700 y blobs
+// 0600; lo de una versión anterior (0755 y 0644, o 0750 y 0640 del grupo del
+// constructor) se cierra al subir.
 func TestPutOCIBlobSinLecturaParaOtros(t *testing.T) {
 	s, root := servidorBlobs(t)
 	s.constructor = yo()
@@ -147,9 +148,17 @@ func TestPutOCIBlobSinLecturaParaOtros(t *testing.T) {
 	if rr := putOCIBlob(s, d, strings.NewReader(body), int64(len(body))); rr.Code != http.StatusCreated {
 		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
 	}
-	sinLecturaParaOtros(t, filepath.Join(root, "cache", "oci"))
-	if fi, _ := os.Lstat(filepath.Join(dir, shaHex([]byte(body)))); fi.Mode().Perm() != 0o640 {
-		t.Fatalf("blob %o, want 0640", fi.Mode().Perm())
+	filepath.Walk(filepath.Join(root, "cache", "oci"), func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s is %o: only root may reach it", p, fi.Mode().Perm())
+		}
+		return nil
+	})
+	if fi, _ := os.Lstat(filepath.Join(dir, shaHex([]byte(body)))); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("blob %o, want 0600", fi.Mode().Perm())
 	}
 }
 
@@ -233,5 +242,36 @@ func TestOCIBlobEnLaVerificada(t *testing.T) {
 	if rr := putOCIBlob(s, "sha256:"+h, strings.NewReader(body), int64(len(body))); rr.Code != http.StatusOK ||
 		!strings.Contains(rr.Body.String(), `"unchanged":true`) {
 		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
+	}
+}
+
+// Lo que pasó a la verificada de otro archivo también cuenta como "ya está"
+// (enlazarArchivo lo toma de ahí); lo de un registro con credenciales no: no
+// pasa a un archivo.
+func TestOCIBlobEnLaVerificadaDeOtroArchivo(t *testing.T) {
+	s, root := servidorBlobs(t)
+	s.constructor = yo()
+	os.MkdirAll(filepath.Join(root, "cache"), 0o755)
+	v, err := prepararVerificada(root, yo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		ambito string
+		quiero int
+	}{
+		{ambitoArchivo("sha256:" + strings.Repeat("1", 64)), http.StatusOK},
+		{ambitoRegistro("localhost:5000"), http.StatusNotFound},
+	} {
+		body := "capa de " + c.ambito
+		h := shaHex([]byte(body))
+		d, err := abrirAmbito(v, c.ambito, yo())
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(d, "oci", "sha256", h), []byte(body), 0o640)
+		if rr := getOCIBlob(s, "sha256:"+h); rr.Code != c.quiero {
+			t.Errorf("%s: GET = %d, quiero %d", c.ambito, rr.Code, c.quiero)
+		}
 	}
 }

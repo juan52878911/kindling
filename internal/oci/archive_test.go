@@ -387,37 +387,3 @@ func TestPullChecksDiffIDs(t *testing.T) {
 		t.Fatalf("a layer that is not its diff_id: %v", err)
 	}
 }
-
-// Seed es otra caché, solo para leer: se usa sin copiar, rehasheada.
-func TestPullSeed(t *testing.T) {
-	a, err := oci.OpenArchive(escribir(t, ocitest.TarFiles(ocitest.DockerSave(dosImagenes()[:1]...))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
-	img, err := a.Image("", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed := t.TempDir()
-	subir(t, a, img, seed)
-	c := &oci.Client{Cache: t.TempDir(), Seed: seed, Offline: true, SiempreRehash: true}
-	got, err := c.Pull(context.Background(), "x/y", img.ManifestDigest, "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(got.Layers[0].Path, seed) {
-		t.Fatalf("layer from %s, not from the seed", got.Layers[0].Path)
-	}
-	if es, _ := os.ReadDir(filepath.Join(c.Cache, "sha256")); len(es) > 0 {
-		t.Fatalf("the seed was copied into the cache: %d files", len(es))
-	}
-	// Uno cambiado en la semilla no se usa.
-	p := filepath.Join(seed, "sha256", strings.TrimPrefix(shaOf(capaPG), "sha256:"))
-	b, _ := os.ReadFile(p)
-	b[len(b)-1] ^= 1
-	os.WriteFile(p, b, 0o644)
-	if _, err := c.Pull(context.Background(), "x/y", img.ManifestDigest, "amd64"); err == nil || !strings.Contains(err.Error(), "not in the daemon's cache") {
-		t.Fatalf("a changed seed blob: %v", err)
-	}
-}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,24 +44,35 @@ import (
 // más bytes por pasada que el tope (el constructor no llena el disco del
 // host a través de root).
 //
-// Lo que usó sin tenerlo en su caché, leído de la de blobs de root
-// (<root>/cache/oci: lo que sube `kling image import -archive`, que el
-// constructor lee como Seed), pasa con un enlace duro y sale de allí: esa
-// caché solo la escribe root y cada blob llegó comprobado (handlePutOCIBlob,
-// o una descarga como root). Así reconstruir una imagen de un archivo no
-// rehashea sus capas cada vez.
-//
 // El constructor la lee (KLING_VERIFIED_CACHE_DIR) y no puede escribir en ella
 // ni renombrar nada: los directorios no son suyos ni tienen escritura para
 // grupo ni otros. El cliente OCI usa un blob de ahí sin rehashear solo si lo
 // comprueba así (oci.verificado); si no, es como si no estuviera.
 //
-// PERMISOS. Las capas de una imagen privada (kling registry login) o de un
-// archivo no son para las demás cuentas del host: como images/ (0750), las
-// dos cachés de root, la verificada y la de blobs (<root>/cache/oci), son de
-// root con el grupo del usuario de construcción, que las lee: directorios
-// 0750 y blobs 0640. Sin usuario de construcción, del grupo de root, 0700 y
-// 0600 (cerrarDirsCache).
+// ORÍGENES. Lo que se bajó sin credenciales lo podría bajar cualquier
+// construcción, que tiene red: va a la verificada de todos. Lo demás, aparte:
+//
+//	<root>/cache/verified/registry-<sha256 del host>/oci/sha256/   lo bajado con `kling registry login`
+//	<root>/cache/verified/archive-<digest del manifiesto>/oci/sha256/   lo subido con `image import -archive`
+//
+// Cada uno de esos directorios es de root y 0700, y solo se abre (0750, del
+// grupo del constructor) mientras se construye una imagen de ese mismo origen
+// (KLING_VERIFIED_SCOPE_DIR): las construcciones sin root van de una en una y
+// lo que quede vivo del constructor se mata al acabar, así que uno
+// comprometido por una imagen pública no lee las capas de las privadas ni de
+// los archivos, ni una privada las de otro registro. Esas construcciones
+// tampoco usan la caché compartida del constructor sino una suya dentro del
+// directorio de trabajo, que se borra al acabar. Lo subido de un archivo
+// espera en la caché de blobs de root (<root>/cache/oci, solo de root); antes
+// de construirlo, el daemon pasa a la verificada del archivo, con un enlace
+// duro, los blobs que nombra su manifiesto (enlazarArchivo). `kling registry
+// logout` borra la verificada de su registro (purgarRegistro).
+//
+// PERMISOS. Las capas tampoco son para las demás cuentas del host: la
+// verificada es de root con el grupo del usuario de construcción, que la lee:
+// directorios 0750 y blobs 0640. Sin usuario de construcción, del grupo de
+// root, 0700 y 0600 (cerrarDirsCache). La de blobs de root, siempre 0700 y
+// 0600.
 //
 // Las cachés crecían sin límite. Después de cada construcción se barren
 // (barrerCachesConstruccion): fuera los .part y lo que no es un blob, lo que
@@ -210,26 +222,204 @@ func ajustarBlobs(dir string, gid uint32, modo os.FileMode, raiz bool) {
 // prepararVerificada deja <root>/cache/verified/oci/sha256 de root, con el
 // grupo de u y 0750 en cada nivel (cerrarDirsCache), y devuelve
 // <root>/cache/verified (lo que recibe el constructor).
+//
+// Cierra también la de cada origen (cerrarAmbito): una construcción que se
+// cortó (el daemon murió) pudo dejar abierta la suya.
 func prepararVerificada(root string, u *usuarioConstructor) (string, error) {
 	v := filepath.Join(root, "cache", "verified")
 	gid, modo := grupoCaches(u)
-	return v, cerrarDirsCache([]string{v, filepath.Join(v, "oci"), filepath.Join(v, "oci", "sha256")}, gid, modo)
+	if err := cerrarDirsCache([]string{v, filepath.Join(v, "oci"), filepath.Join(v, "oci", "sha256")}, gid, modo); err != nil {
+		return v, err
+	}
+	for _, a := range ambitos(v) {
+		if err := cerrarAmbito(a); err != nil {
+			return v, err
+		}
+	}
+	return v, nil
+}
+
+// reAmbito es el nombre del directorio de la verificada de un origen.
+var reAmbito = lazyre.New(`^(registry|archive)-[0-9a-f]{64}$`)
+
+// ambitoRegistro es el de lo bajado con las credenciales de host (una
+// CredentialKey); ambitoArchivo, el de lo subido con un archivo cuyo
+// manifiesto es digest.
+func ambitoRegistro(host string) string {
+	h := sha256.Sum256([]byte(host))
+	return "registry-" + hex.EncodeToString(h[:])
+}
+
+func ambitoArchivo(digest string) string { return "archive-" + strings.TrimPrefix(digest, "sha256:") }
+
+// ambitos son los directorios de origen que hay en la verificada v.
+func ambitos(v string) []string {
+	es, err := os.ReadDir(v)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range es {
+		if reAmbito.MatchString(e.Name()) {
+			out = append(out, filepath.Join(v, e.Name()))
+		}
+	}
+	return out
+}
+
+// abrirAmbito deja la verificada del origen ambito (dentro de v) abierta
+// para el constructor, como la de todos (0750 y su grupo), y devuelve su
+// directorio: lo que recibe como KLING_VERIFIED_SCOPE_DIR.
+func abrirAmbito(v, ambito string, u *usuarioConstructor) (string, error) {
+	if !reAmbito.MatchString(ambito) {
+		return "", fmt.Errorf("invalid cache scope %q", ambito)
+	}
+	d := filepath.Join(v, ambito)
+	gid, modo := grupoCaches(u)
+	return d, cerrarDirsCache([]string{d, filepath.Join(d, "oci"), filepath.Join(d, "oci", "sha256")}, gid, modo)
+}
+
+// cerrarAmbito deja d, la verificada de un origen, de root y 0700: nadie más
+// que root pasa de ahí. Lo de dentro no se toca (se queda 0750 y 0640 para
+// cuando se vuelva a abrir). Un enlace no es un ámbito: se borra.
+func cerrarAmbito(d string) error {
+	fi, err := os.Lstat(d)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return os.Remove(d)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(d, 0, 0); err != nil {
+			return err
+		}
+	}
+	return os.Chmod(d, 0o700)
+}
+
+// purgarRegistro borra lo que se bajó con las credenciales de host.
+func purgarRegistro(root, host string) error {
+	return os.RemoveAll(filepath.Join(root, "cache", "verified", ambitoRegistro(host)))
+}
+
+// maxManifiestoArchivo es lo más que se lee del manifiesto de un archivo.
+const maxManifiestoArchivo = 4 << 20
+
+// enlazarArchivo deja en dir, la verificada del archivo cuyo manifiesto es
+// digest, los blobs que necesita su construcción: el manifiesto, su
+// configuración y sus capas. Los saca, con un enlace duro y sin copiar, de la
+// caché de blobs de root (adonde los subió el CLI, comprobados; de ahí
+// salen) o de la verificada de otro archivo (de ahí no). Lo que ya está en la
+// verificada de todos no hace falta; lo que no esté en ninguna parte lo dirá
+// el constructor. v es la verificada, ahora la fecha que se les pone.
+//
+// El manifiesto lo lee root, pero solo como JSON acotado y con su sha256
+// comprobado: los tars (lo hostil) los parsea el constructor.
+func enlazarArchivo(root, v, dir, digest string, gid uint32, ahora time.Time) error {
+	if !reDigestBlob.MatchString(digest) {
+		return fmt.Errorf("invalid manifest digest %q", digest)
+	}
+	dst := filepath.Join(dir, "oci", "sha256")
+	publica := filepath.Join(v, "oci", "sha256")
+	poner := func(h string) error {
+		if fi, err := os.Lstat(filepath.Join(dst, h)); err == nil && fi.Mode().IsRegular() {
+			_ = os.Chtimes(filepath.Join(dst, h), ahora, ahora)
+			return nil
+		}
+		if fi, err := os.Lstat(filepath.Join(publica, h)); err == nil && fi.Mode().IsRegular() {
+			return nil
+		}
+		if ok, err := enlazarDeRoot(filepath.Join(dirCacheOCI(root), h), filepath.Join(dst, h), gid, ahora, true); ok || err != nil {
+			return err
+		}
+		for _, otro := range ambitos(v) {
+			if !strings.HasPrefix(filepath.Base(otro), "archive-") || otro == dir {
+				continue
+			}
+			if ok, _ := enlazarDeRoot(filepath.Join(otro, "oci", "sha256", h), filepath.Join(dst, h), gid, ahora, false); ok {
+				return nil
+			}
+		}
+		return nil
+	}
+	h := strings.TrimPrefix(digest, "sha256:")
+	if err := poner(h); err != nil {
+		return err
+	}
+	var b []byte
+	for _, d := range []string{dst, publica} {
+		if leido, err := leerBlobAcotado(filepath.Join(d, h), maxManifiestoArchivo); err == nil && "sha256:"+hexSha(leido) == digest {
+			b = leido
+			break
+		}
+	}
+	if b == nil {
+		return nil // el constructor dirá que falta
+	}
+	var m struct {
+		Config struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+		Layers []struct {
+			Digest string `json:"digest"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return fmt.Errorf("manifest %s: %w", digest, err)
+	}
+	ds := []string{m.Config.Digest}
+	for _, l := range m.Layers {
+		ds = append(ds, l.Digest)
+	}
+	var errs []error
+	for _, d := range ds {
+		if !reDigestBlob.MatchString(d) {
+			continue // el constructor lo rechazará con su nombre
+		}
+		if err := poner(strings.TrimPrefix(d, "sha256:")); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", d, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// leerBlobAcotado lee un fichero regular de hasta max bytes sin seguir un
+// enlace.
+func leerBlobAcotado(p string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || fi.Size() > max {
+		return nil, errors.New("not a small regular file")
+	}
+	return io.ReadAll(io.LimitReader(f, max))
+}
+
+func hexSha(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }
 
 // dirCacheOCI es la caché de blobs de root: la de los constructores que
 // corren como root y adonde suben los imports de un archivo.
 func dirCacheOCI(root string) string { return filepath.Join(root, "cache", "oci", "sha256") }
 
-// cerrarCacheOCI deja <root>/cache/oci y su sha256/ de root, con el grupo de
-// u y 0750 (o 0700 sin él). Antes de cada subida y de cada construcción: un
-// constructor como root la crearía 0755 con su umask.
-func cerrarCacheOCI(root string, u *usuarioConstructor) error {
+// cerrarCacheOCI deja <root>/cache/oci y su sha256/ de root y 0700 (y sus
+// blobs 0600): el constructor sin root no la lee (lo de un archivo lo recibe
+// en la verificada del archivo, enlazarArchivo). Antes de cada subida y de
+// cada construcción: un constructor como root la crearía 0755 con su umask.
+func cerrarCacheOCI(root string) error {
 	if err := os.MkdirAll(filepath.Join(root, "cache"), 0o755); err != nil {
 		return err
 	}
-	gid, modo := grupoCaches(u)
 	d := dirCacheOCI(root)
-	return cerrarDirsCache([]string{filepath.Dir(d), d}, gid, modo)
+	return cerrarDirsCache([]string{filepath.Dir(d), d}, 0, 0o700)
 }
 
 // leerUsados lee la lista de blobs de una construcción: sin seguir enlaces,
@@ -297,16 +487,20 @@ func abrirPropia(cache string, uid uint32) *os.Root {
 	return sub
 }
 
-// promoverCache pasa a la caché verificada (verificada/oci) los blobs que
-// usó una construcción correcta (la lista de work) y que aún están solo en la
-// del constructor (cache/oci) o en la de root (subidos, "" sin ella); a los
-// que ya estaban les pone la fecha de hoy (para el barrido). Devuelve los
-// digests usados (lo que el barrido no toca) y cuántos pasó. Un blob de la
-// del constructor que no cuadra se borra de ella y no entra. maxBytes es el
-// tope de las cachés: en una pasada no se copian más bytes que eso (el
-// constructor no llena el disco del host a través de root); lo que no cabe se
-// queda en la suya, sin verificar. Lo de root se enlaza: no ocupa más.
-func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructor, maxBytes int64) (usados []string, n int, err error) {
+// promoverCache pasa a la caché verificada verificada (la de todos o la de un
+// origen) los blobs que usó una construcción correcta (la lista de work) y
+// que aún están solo en la del constructor (cache/oci); a los que ya estaban
+// les pone la fecha de hoy (para el barrido). Devuelve los digests usados (lo
+// que el barrido no toca) y cuántos pasó. Un blob de la del constructor que
+// no cuadra se borra de ella y no entra. maxBytes es el tope de las cachés:
+// en una pasada no se copian más bytes que eso (el constructor no llena el
+// disco del host a través de root); lo que no cabe se queda en la suya, sin
+// verificar.
+//
+// Solo se copia lo que el constructor tiene en su caché: nada de la de root
+// ni de otra verificada. La lista la escribe él, y con un digest que supiera
+// sacaría de ahí lo que no puede leer.
+func promoverCache(work, cache, verificada string, u *usuarioConstructor, maxBytes int64) (usados []string, n int, err error) {
 	usados, err = leerUsados(filepath.Join(work, ficheroUsados))
 	if err != nil || len(usados) == 0 {
 		return nil, 0, err
@@ -319,13 +513,6 @@ func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructo
 	ahora := time.Now()
 	var errs []error
 	var copiados int64
-	// Lo que ya está en la verificada sobra en la de root: las construcciones
-	// sin root lo leen de la verificada (y GET /oci/blobs lo da por tenido).
-	sobraDeRoot := func(h string) {
-		if subidos != "" {
-			_ = os.Remove(filepath.Join(subidos, h))
-		}
-	}
 	for _, d := range usados {
 		h := strings.TrimPrefix(d, "sha256:")
 		dst := filepath.Join(dstDir, h)
@@ -334,46 +521,34 @@ func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructo
 			if propia != nil {
 				_ = propia.Remove(h) // ya no hace falta allí
 			}
-			sobraDeRoot(h)
 			continue
 		}
-		if propia != nil {
-			tam, cerr := copiarVerificado(propia, h, dst, d, u, maxBytes-copiados)
-			if cerr != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", d, cerr))
-			}
-			if tam >= 0 && cerr == nil {
-				n++
-				copiados += tam
-				sobraDeRoot(h)
-			}
-			if tam >= 0 && !errors.Is(cerr, errSinSitio) {
-				// Verificado ya está en la otra; dañado no sirve: fuera de la suya.
-				_ = propia.Remove(h)
-			}
-			if tam >= 0 {
-				continue
-			}
+		if propia == nil {
+			continue
 		}
-		if subidos != "" {
-			ok, lerr := enlazarDeRoot(filepath.Join(subidos, h), dst, u.GID, ahora)
-			if lerr != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", d, lerr))
-			}
-			if ok {
-				n++
-			}
+		tam, cerr := copiarVerificado(propia, h, dst, d, u, maxBytes-copiados)
+		if cerr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", d, cerr))
+		}
+		if tam >= 0 && cerr == nil {
+			n++
+			copiados += tam
+		}
+		if tam >= 0 && !errors.Is(cerr, errSinSitio) {
+			// Verificado ya está en la otra; dañado no sirve: fuera de la suya.
+			_ = propia.Remove(h)
 		}
 	}
 	return usados, n, errors.Join(errs...)
 }
 
-// enlazarDeRoot pasa src, un blob de la caché de root, a dst en la
-// verificada con un enlace duro (mismo sistema de ficheros, sin copiar) y lo
-// quita de src. false y nil si no está. Solo un fichero regular del daemon
-// sin escritura para grupo ni otros: lo que dejan ahí handlePutOCIBlob y las
-// descargas como root, después de comprobar su sha256.
-func enlazarDeRoot(src, dst string, gid uint32, ahora time.Time) (bool, error) {
+// enlazarDeRoot pasa src, un blob de una caché de root (la de blobs o la
+// verificada de otro archivo), a dst en una verificada con un enlace duro
+// (mismo sistema de ficheros, sin copiar) y, si mover, lo quita de src. false
+// y nil si no está. Solo un fichero regular del daemon sin escritura para
+// grupo ni otros: lo que dejan ahí handlePutOCIBlob, las descargas como root
+// y el propio daemon, después de comprobar su sha256.
+func enlazarDeRoot(src, dst string, gid uint32, ahora time.Time, mover bool) (bool, error) {
 	fi, err := os.Lstat(src)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -393,7 +568,9 @@ func enlazarDeRoot(src, dst string, gid uint32, ahora time.Time) (bool, error) {
 	}
 	_ = os.Chmod(dst, 0o640)
 	_ = os.Chtimes(dst, ahora, ahora)
-	_ = os.Remove(src)
+	if mover {
+		_ = os.Remove(src)
+	}
 	return true, nil
 }
 
@@ -506,7 +683,7 @@ type entradaCache struct {
 
 // barrerCachesConstruccion barre las cachés de blobs (ver arriba): cache es
 // la del constructor (<root>/cache/builder), verificada la verificada
-// (<root>/cache/verified) y subidos la de root (<root>/cache/oci/sha256); la
+// (<root>/cache/verified, con las de cada origen) y subidos la de root (<root>/cache/oci/sha256); la
 // que vaya vacía no se barre. conservar son los digests que acaba de usar
 // una construcción; maxBytes y maxEdad, los topes (LimitesCacheConstruccion).
 // Devuelve cuántos ficheros borró y cuántos bytes liberó. Corre con los
@@ -577,12 +754,25 @@ func barrerCachesConstruccion(cache, verificada, subidos string, uid uint32, max
 			recorrer(r, cacheDeRoot)
 		}
 	}
+	var deOrigen []string
 	if verificada != "" {
-		if v, err := os.OpenRoot(filepath.Join(verificada, "oci", "sha256")); err == nil {
-			defer v.Close()
-			recorrer(v, cacheVerificada)
+		deOrigen = ambitos(verificada)
+		for _, d := range append([]string{verificada}, deOrigen...) {
+			if v, err := os.OpenRoot(filepath.Join(d, "oci", "sha256")); err == nil {
+				defer v.Close()
+				recorrer(v, cacheVerificada)
+			}
 		}
 	}
+	// La verificada de un origen que se quedó vacía sobra (se crea otra vez
+	// si vuelve a hacer falta). Remove no borra un directorio con algo.
+	defer func() {
+		for _, d := range deOrigen {
+			if os.Remove(filepath.Join(d, "oci", "sha256")) == nil && os.Remove(filepath.Join(d, "oci")) == nil {
+				_ = os.Remove(d)
+			}
+		}
+	}()
 
 	// Lo usado se guarda mientras quepa en el tope, primero lo verificado
 	// (lo que la próxima construcción lee sin rehashear); lo que no cabe se
@@ -622,13 +812,13 @@ func barrerCachesConstruccion(cache, verificada, subidos string, uid uint32, max
 }
 
 // cacheConstruccion es lo que hace el daemon con las cachés al acabar una
-// construcción: si fue sin root y bien, pasar a la verificada lo que usó; y
-// siempre, barrer. limpio dice si el barrido de sus procesos acabó sin
+// construcción: si fue sin root y bien, pasar a destino (la verificada de
+// todos o la de su origen) lo que usó; y siempre, barrer. limpio dice si el barrido de sus procesos acabó sin
 // ninguno vivo (barrerProcesos): si no, su caché no se toca (ni se promueve
 // ni se barre). Con u nil (el constructor corrió como el daemon) solo hay la
 // de root. La de root se usa y se barre solo si nadie la está usando
 // (muCacheOCI). Nada de esto hace fallar la construcción: se avisa.
-func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioConstructor, bien, limpio bool) {
+func (s *Server) cacheConstruccion(work, cache, verificada, destino string, u *usuarioConstructor, bien, limpio bool) {
 	maxBytes, maxEdad := s.limitesCacheConstruccion().efectivos()
 	subidos := ""
 	if s.root != "" && s.muCacheOCI.TryLock() {
@@ -636,7 +826,7 @@ func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioCon
 		subidos = dirCacheOCI(s.root)
 	}
 	uid := uint32(os.Geteuid())
-	if u == nil || cache == "" || verificada == "" {
+	if u == nil || cache == "" || verificada == "" || destino == "" {
 		cache, verificada, bien = "", "", false
 	} else {
 		uid = u.UID
@@ -650,12 +840,12 @@ func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioCon
 		t0 := time.Now()
 		var n int
 		var err error
-		usados, n, err = promoverCache(work, cache, verificada, subidos, u, maxBytes)
+		usados, n, err = promoverCache(work, cache, destino, u, maxBytes)
 		if err != nil {
 			log.Printf("builder cache: %v", err)
 		}
 		if n > 0 {
-			log.Printf("builder cache: %d blob(s) verified into %s in %s", n, verificada, time.Since(t0).Round(time.Millisecond))
+			log.Printf("builder cache: %d blob(s) verified into %s in %s", n, destino, time.Since(t0).Round(time.Millisecond))
 		}
 	}
 	if b, lib := barrerCachesConstruccion(cache, verificada, subidos, uid, maxBytes, maxEdad, usados, time.Now()); b > 0 {

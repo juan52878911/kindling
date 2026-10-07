@@ -234,10 +234,8 @@ func prepararTrabajo(root, name string, req, auth []byte, u *usuarioConstructor)
 // construcción: suya y 0700. Aparte de <root>/cache/oci, que siguen usando
 // los constructores que corren como root (debian, android): root no debe
 // escribir en un directorio de un usuario sin privilegios (le plantaría
-// enlaces), ni fiarse de lo que haya dejado. La primera vez enlaza (hard
-// link) los blobs de la caché de root: siguen siendo de root y de solo lectura
-// para él, el cliente OCI los rehashea cada vez (SiempreRehash), y reimportar
-// lo que ya se bajó como root no vuelve a bajar nada.
+// enlaces), ni fiarse de lo que haya dejado. Nada de la de root pasa a ésta:
+// ahí hay capas de archivos y de registros privados (builders_cache.go).
 func prepararCache(root string, u *usuarioConstructor) (string, error) {
 	cache := filepath.Join(root, "cache")
 	if err := os.MkdirAll(cache, 0o755); err != nil {
@@ -260,7 +258,6 @@ func prepararCache(root string, u *usuarioConstructor) (string, error) {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			return "", err
 		}
-		migrarCacheOCI(filepath.Join(cache, "oci"), filepath.Join(d, "oci"), u)
 	case err != nil:
 		return "", err
 	case !fi.IsDir():
@@ -270,35 +267,6 @@ func prepararCache(root string, u *usuarioConstructor) (string, error) {
 		return "", err
 	}
 	return d, os.Chmod(d, 0o700)
-}
-
-// migrarCacheOCI enlaza los blobs de la caché OCI de root en la nueva. Corre
-// con el directorio nuevo aún de root (nadie más puede tocarlo); lo que falle
-// se baja otra vez, sin más.
-func migrarCacheOCI(vieja, nueva string, u *usuarioConstructor) {
-	entradas, err := os.ReadDir(filepath.Join(vieja, "sha256"))
-	if err != nil {
-		return
-	}
-	dst := filepath.Join(nueva, "sha256")
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return
-	}
-	n := 0
-	for _, e := range entradas {
-		if !e.Type().IsRegular() || strings.HasSuffix(e.Name(), ".part") {
-			continue
-		}
-		if os.Link(filepath.Join(vieja, "sha256", e.Name()), filepath.Join(dst, e.Name())) == nil {
-			n++
-		}
-	}
-	for _, p := range []string{nueva, dst} {
-		_ = os.Lchown(p, int(u.UID), int(u.GID))
-	}
-	if n > 0 {
-		log.Printf("builder cache: linked %d blob(s) from %s", n, vieja)
-	}
 }
 
 // adoptarSalida mueve a images/ la imagen que dejó un constructor en out/:

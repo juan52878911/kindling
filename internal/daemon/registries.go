@@ -171,17 +171,23 @@ func (s *Server) handleRegistryLogout(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	log.Printf("registry credentials for %s removed", host)
+	// Y lo que se bajó con ellas: sin credenciales no se volvería a dar a
+	// nadie, pero sigue siendo de quien las tenía.
+	if err := purgarRegistro(s.root, host); err != nil {
+		log.Printf("registry credentials for %s removed, but not its cached layers: %v", host, err)
+	} else {
+		log.Printf("registry credentials for %s removed, with its cached layers", host)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // credencialesConstructor da, para una construcción oci, las credenciales
 // del registro de su referencia ya en el formato del fichero que lee el
-// constructor; nil si no hay (o si el spec no se entiende: el constructor
-// dará el error).
-func (s *Server) credencialesConstructor(req api.BuildImageRequest) ([]byte, error) {
+// constructor, y ese registro (su CredentialKey); nil si no hay (o si el spec
+// no se entiende: el constructor dará el error).
+func (s *Server) credencialesConstructor(req api.BuildImageRequest) ([]byte, string, error) {
 	if req.Builder != "oci" || len(req.Spec) == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 	var spec struct {
 		Ref    string `json:"ref"`
@@ -192,27 +198,53 @@ func (s *Server) credencialesConstructor(req api.BuildImageRequest) ([]byte, err
 		// registro, y su ref sale del propio archivo (sus RepoTags, que
 		// escribe quien lo hizo): con ella se pedirían las credenciales del
 		// registro que nombre a un proceso que va a parsear tars hostiles.
-		return nil, nil
+		return nil, "", nil
 	}
 	ref, err := oci.ParseImageRef(spec.Ref)
 	if err != nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	host, err := oci.CredentialKey(ref.Registry)
 	if err != nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	s.muRegistros.Lock()
 	m, err := s.leerRegistros()
 	s.muRegistros.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	c, ok := m[host]
 	if !ok {
-		return nil, nil
+		return nil, "", nil
 	}
-	return json.Marshal(map[string]oci.Credential{host: c})
+	b, err := json.Marshal(map[string]oci.Credential{host: c})
+	return b, host, err
+}
+
+// ambitoConstruccion dice de qué origen son los blobs de una construcción oci
+// (builders_cache.go): "" si lo que baja lo podría bajar cualquiera; el de su
+// registro si lleva credenciales (host, de credencialesConstructor); el de su
+// archivo si es de uno, y entonces también el digest de su manifiesto.
+func ambitoConstruccion(req api.BuildImageRequest, host string) (ambito, manifiesto string) {
+	if req.Builder != "oci" {
+		return "", ""
+	}
+	var spec struct {
+		Source string `json:"source"`
+		Digest string `json:"digest"`
+	}
+	if len(req.Spec) > 0 && json.Unmarshal(req.Spec, &spec) == nil && spec.Source != "" {
+		if reDigestBlob.MatchString(spec.Digest) {
+			return ambitoArchivo(spec.Digest), spec.Digest
+		}
+		// Sin un digest válido el constructor no construye: que no lea nada.
+		return ambitoArchivo("sha256:" + strings.Repeat("0", 64)), ""
+	}
+	if host != "" {
+		return ambitoRegistro(host), ""
+	}
+	return "", ""
 }
 
 // escribirCredencialesConstructor deja auth en el directorio de trabajo, 0600

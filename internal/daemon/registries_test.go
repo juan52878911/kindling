@@ -129,3 +129,56 @@ echo img > "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
 		t.Fatal("una construcción de un archivo recibió credenciales")
 	}
 }
+
+// El origen de una construcción oci: lo público no tiene; lo de un registro
+// con credenciales, el de su registro; lo de un archivo, el de su
+// manifiesto (aunque su etiqueta nombre un registro con credenciales).
+func TestAmbitoConstruccion(t *testing.T) {
+	man := "sha256:" + strings.Repeat("b", 64)
+	casos := []struct {
+		spec, host, ambito, manifiesto string
+	}{
+		{`{"ref":"redis:7"}`, "", "", ""},
+		{`{"ref":"localhost:5000/a:1"}`, "localhost:5000", ambitoRegistro("localhost:5000"), ""},
+		{`{"ref":"localhost:5000/a:1","source":"archive","digest":"` + man + `"}`, "", ambitoArchivo(man), man},
+		{`{"source":"archive","digest":"../x"}`, "", ambitoArchivo("sha256:" + strings.Repeat("0", 64)), ""},
+	}
+	for _, c := range casos {
+		a, m := ambitoConstruccion(api.BuildImageRequest{Builder: "oci", Spec: json.RawMessage(c.spec)}, c.host)
+		if a != c.ambito || m != c.manifiesto {
+			t.Errorf("%s: %q %q", c.spec, a, m)
+		}
+		if a != "" && !reAmbito.MatchString(a) {
+			t.Errorf("%s: ámbito %q no vale como directorio", c.spec, a)
+		}
+	}
+	if a, _ := ambitoConstruccion(api.BuildImageRequest{Builder: "debian"}, "x"); a != "" {
+		t.Errorf("otro constructor: %q", a)
+	}
+	if ambitoRegistro("ghcr.io") == ambitoRegistro("quay.io") {
+		t.Error("dos registros con el mismo ámbito")
+	}
+}
+
+// kling registry logout se lleva también lo que se bajó con esas
+// credenciales; lo de otro registro se queda.
+func TestLogoutPurgaSusCapas(t *testing.T) {
+	s, h := testServer(t)
+	call(t, h, "POST", "/registries", `{"host":"localhost:5000","username":"a","password":"b"}`)
+	v := filepath.Join(s.root, "cache", "verified")
+	suya := filepath.Join(v, ambitoRegistro("localhost:5000"), "oci", "sha256")
+	otra := filepath.Join(v, ambitoRegistro("ghcr.io"), "oci", "sha256")
+	for _, d := range []string{suya, otra} {
+		os.MkdirAll(d, 0o750)
+		os.WriteFile(filepath.Join(d, strings.Repeat("c", 64)), []byte("capa"), 0o640)
+	}
+	if rr := call(t, h, "DELETE", "/registries/localhost:5000", ""); rr.Code != 204 {
+		t.Fatalf("logout: %d %s", rr.Code, rr.Body)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(suya))); !os.IsNotExist(err) {
+		t.Fatal("el logout dejó las capas de su registro")
+	}
+	if _, err := os.Stat(otra); err != nil {
+		t.Fatal("el logout se llevó las de otro registro")
+	}
+}

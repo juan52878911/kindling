@@ -307,15 +307,16 @@ la arquitectura del daemon, y sube **solo los blobs que el daemon no tenga**, de
 uno en uno y en flujo, sin leerlos enteros a memoria (`PUT /oci/blobs/{digest}`,
 [api.md](api.md#imágenes)). El daemon comprueba cada uno con su sha256 antes de
 dejarlo en su caché de blobs (`$KLING_ROOT/cache/oci`); después el constructor
-`oci` construye desde ahí sin red, comprobando la cadena manifiesto →
-configuración → capas → `diff_ids` como con un registro (el usuario de
-construcción los lee de esa caché y los rehashea). Si la construcción acaba
-bien, el daemon pasa esos blobs a la caché verificada (con un enlace duro, sin
-copiar: abajo), así que reconstruir la imagen no vuelve a rehashear sus capas.
-Reimportar el mismo archivo no sube nada. Esa caché, como la verificada, es de
-root con el grupo del usuario de construcción (0750/0640): una imagen privada
-no la lee nadie más del host. Tiene el tope de las del constructor (abajo): una
-subida que no cabe ni barriendo lo viejo es un `507`.
+`oci` construye sin red, comprobando la cadena manifiesto →
+configuración → capas → `diff_ids` como con un registro. Con el usuario de
+construcción (abajo), esa caché es solo de root (0700/0600) y el constructor no
+la lee: antes de construir, el daemon pasa con un enlace duro (sin copiar) a la
+**verificada de ese archivo** (`cache/verified/archive-<digest del
+manifiesto>`) los blobs que nombra su manifiesto, y solo esa construcción la
+abre. Ninguna otra, aunque la comprometa una imagen hostil, lee las capas del
+archivo; reconstruirlo no las rehashea. Reimportar el mismo archivo no sube
+nada. Tiene el tope de las del constructor (abajo): una subida que no cabe ni
+barriendo lo viejo es un `507`.
 
 `docker save` clásico no trae un manifiesto OCI: su `manifest.json` solo dice
 qué fichero es la configuración y cuáles las capas, que van **sin comprimir** y
@@ -521,9 +522,10 @@ Dónde viven y por dónde pasan:
 No se comprueban al guardarlas: el primer import desde el registro es la
 prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
 
-Las capas que se bajan con ellas quedan en las cachés de root, que no lee
-ninguna otra cuenta del host (directorios 0750 y blobs 0640 del grupo del
-usuario de construcción; ver [abajo](#el-constructor-oci-no-corre-como-root)).
+Las capas que se bajan con ellas quedan en la verificada de ese registro, que
+no lee ninguna otra cuenta del host ni ninguna construcción de otro origen
+(solo se abre mientras se construye una imagen de ese registro; ver
+[abajo](#el-constructor-oci-no-corre-como-root)), y `logout` las borra.
 
 Comprobado el 2026-10-07 en el lab (CT 105, amd64, daemon privado, constructor
 con `kindling-build`) contra un `registry:2` con htpasswd en `127.0.0.1:5093`,
@@ -628,19 +630,33 @@ VMM vivos y escribir en los volúmenes.
 | --- | --- | --- |
 | `<root>/build/` | root, 0711 | se atraviesa; no se lista ni se escribe |
 | `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json` y, para un registro privado, `registry-auth.json` (0600, lo borra al leerlo); la imagen sale en `out/` |
-| `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
-| `<root>/cache/oci/sha256/` | root, grupo de `kindling-build`; directorios 0750, ficheros 0640 | la caché de blobs de root: lo subido por `image import -archive` (lo lee y lo rehashea) y lo de los constructores que corren como root. Sin usuario de construcción, 0700/0600 |
-| `<root>/cache/verified/oci/sha256/` | root, grupo de `kindling-build`; directorios 0750, ficheros 0640 | la caché verificada: la lee sin rehashear, no puede escribir, renombrar ni borrar nada |
+| `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs para lo público, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje). Una imagen de un registro con credenciales o de un archivo usa otra, `<trabajo>/cache`, que se borra con su directorio |
+| `<root>/cache/oci/sha256/` | root, 0700, ficheros 0600 | la caché de blobs de root: lo subido por `image import -archive` y lo de los constructores que corren como root. El constructor sin root no la lee |
+| `<root>/cache/verified/oci/sha256/` | root, grupo de `kindling-build`; directorios 0750, ficheros 0640 | la caché verificada de lo público: la lee sin rehashear, no puede escribir, renombrar ni borrar nada |
+| `<root>/cache/verified/registry-<sha256 del host>/`, `.../archive-<digest>/` | root, 0700; abierta (0750, su grupo) solo mientras construye una imagen de ese origen | la verificada de un registro con credenciales o de un archivo: como la de lo público, pero solo para las construcciones de ese origen |
 
 Ninguna de las cachés de root deja leer, listar ni atravesar a las demás
 cuentas del host: las capas de una imagen privada (`kling registry login`) o de
 un archivo son tan privadas como `images/` (0750). Lo que dejaron versiones
 anteriores (0755/0644) se cierra la primera vez que se usa cada caché.
 
-La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya
-hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, se
-comprueban por sha256 hasta que pasan a la verificada y reimportar lo bajado
-antes no baja nada.
+**Las capas privadas, por origen.** El constructor parsea tars hostiles y tiene
+red: uno comprometido por una imagen pública podría leer lo que haya en las
+cachés que lee y mandarlo fuera. Por eso solo lo que se bajó **sin
+credenciales** (lo que él mismo podría bajar) va a las cachés que leen todas
+las construcciones. Lo bajado con las de `kling registry login` va a la
+verificada de ese registro, y lo de un archivo a la de ese archivo; cada una es
+de root 0700 y solo se abre mientras se construye una imagen de ese mismo
+origen (las construcciones van de una en una y, al acabar, se matan los
+procesos del constructor y se vuelve a cerrar). Esas construcciones usan una
+caché propia en su directorio de trabajo, no `cache/builder`. Lo que una
+construcción sí ve: las capas públicas y las de su propio origen (las de otras
+imágenes del mismo registro privado, o de ese archivo). `kling registry logout`
+borra la verificada de su registro; las de un archivo se van con el barrido
+(abajo). La caché del constructor nace vacía: nada de `cache/oci` pasa a ella.
+Sin usuario de construcción no hay nada que separar (el constructor corre como
+el daemon y lee todo): lo privado queda en `cache/oci`, solo de root, hasta que
+lo barre el tope.
 
 **La caché verificada.** Lo que el constructor saca de su caché se rehashea
 cada vez (1-3 s por GiB). Por eso, al acabar **bien** una construcción, con sus
@@ -654,11 +670,11 @@ borra y no entra. Copiar, y no mover ni enlazar, es a propósito: el inodo nace
 de root, sin ACL, sin otros enlaces duros ni descriptores del constructor, y lo
 hasheado es exactamente lo que queda. No se sigue ningún enlace (ni en la lista
 ni en los blobs ni en los directorios de su caché); un blob tiene que ser
-regular y suyo, o de root y legible por él (los enlazados de `cache/oci`, de su
-grupo y 0640). Lo que usó y no estaba en su caché sino en `cache/oci` (lo subido
-de un archivo, que lee como `Seed`) pasa con un **enlace duro** y sale de allí:
-esa caché solo la escribe root, y cada blob entró comprobado por sha256 (la
-subida, o una descarga como root).
+regular y suyo, o de root y legible por él (de su grupo y 0640). Solo se copia
+lo que está en su caché: nada de `cache/oci` ni de la verificada de otro
+origen, aunque la lista lo nombre (la escribe él). Lo de una imagen de un
+registro con credenciales o de un archivo va a la verificada de su origen, no a
+la de todos.
 Su caché se abre una vez como `os.Root` y todo (listar, abrir, borrar) va
 relativo a ese directorio: aunque cambiara `cache/oci` por un enlace a `/etc`
 después de mirarlo, no se sale de ella. Si el barrido de sus procesos no acaba
@@ -667,7 +683,8 @@ Tampoco llena el disco del host a través de root: un fichero disperso no se
 copia, y en una pasada no se copian más bytes que `daemon.build_cache_max_gib`;
 lo que no cabe se queda en la suya, sin verificar.
 
-El cliente OCI del constructor (`KLING_VERIFIED_CACHE_DIR`) mira primero ahí y
+El cliente OCI del constructor (`KLING_VERIFIED_CACHE_DIR` y, si su imagen es
+de un origen privado, `KLING_VERIFIED_SCOPE_DIR`) mira primero ahí y
 usa un blob sin rehashear solo si el fichero, `sha256/`, `oci/` y `verified/`
 son de root sin escritura para grupo ni otros, sin enlaces, y el fichero es
 regular con el tamaño del manifiesto; si no, como si no estuviera: se baja a su
@@ -682,7 +699,8 @@ de 6); en timescaledb (unos 10 s) queda dentro del ruido. La primera
 construcción que verifica paga una copia: 0,4 s y 2 s.
 
 **Las cachés tienen tope.** Después de cada construcción el daemon barre las
-tres (la del constructor, `cache/oci` y la verificada): fuera los `.part` y lo
+tres (la del constructor, `cache/oci` y la verificada, con las de cada origen;
+la de un origen que se queda vacía se borra): fuera los `.part` y lo
 que no es un blob, lo que lleva más de `daemon.build_cache_max_days` días sin
 usarse (30 por defecto; cada uso pone la fecha a un blob verificado o de
 `cache/oci`) y, si entre todas pasan de `daemon.build_cache_max_gib` (20 por

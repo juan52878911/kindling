@@ -213,7 +213,8 @@ var coreTree = []section{
 		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
                                                    the daemon; the password or token is
                                                    read from stdin (no echo on a tty)
-  registry logout <registry>...                    removes them
+  registry logout <registry>...                    removes them and the layers pulled
+                                                   with them
   registry ls [-json]                              registries with credentials (no
                                                    secrets)
   registry import [-config F] [registry...]        copies them from ~/.docker/config.json

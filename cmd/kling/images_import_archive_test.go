@@ -79,11 +79,23 @@ func dockerSaveDe(t *testing.T, imgs ...ocitest.Saved) string {
 func TestImportArchiveBuild(t *testing.T) {
 	for _, aislado := range []bool{false, true} {
 		t.Run(map[bool]string{false: "root", true: "builder user"}[aislado], func(t *testing.T) {
+			if aislado && os.Geteuid() != 0 {
+				t.Skip("la verificada del archivo tiene que ser de root")
+			}
 			e := newOCITest(t)
+			var deOrigen string
 			if aislado {
-				// El constructor sin privilegios tiene su caché: lo subido
-				// lo lee de la de root (Seed), sin copiarlo.
+				// El constructor sin privilegios tiene su caché y no lee la de
+				// root: lo subido se lo deja el daemon en la verificada del
+				// archivo (KLING_VERIFIED_SCOPE_DIR), y de ahí lo lee sin
+				// copiarlo.
 				t.Setenv("KLING_CACHE_DIR", t.TempDir())
+				v := filepath.Join(t.TempDir(), "verified")
+				deOrigen = filepath.Join(v, "archive-x")
+				os.MkdirAll(filepath.Join(v, "oci", "sha256"), 0o755)
+				os.MkdirAll(filepath.Join(deOrigen, "oci", "sha256"), 0o755)
+				t.Setenv("KLING_VERIFIED_CACHE_DIR", v)
+				t.Setenv("KLING_VERIFIED_SCOPE_DIR", deOrigen)
 			}
 			archivo := dockerSaveDe(t, ocitest.Saved{Tags: []string{"postgres:17-alpine"}, Arch: "amd64",
 				Config: map[string]any{"Cmd": []string{"postgres"}, "ExposedPorts": map[string]any{"5432/tcp": map[string]any{}}},
@@ -102,6 +114,14 @@ func TestImportArchiveBuild(t *testing.T) {
 			// Otra vez: el daemon ya los tiene, no se manda nada.
 			if n, _, err := ai.subir(ctx, c, nil); err != nil || n != 0 {
 				t.Fatalf("second upload: %d %v", n, err)
+			}
+			if aislado {
+				// Lo que hace enlazarArchivo en el daemon.
+				subidos := filepath.Join(e.root, "cache", "oci", "sha256")
+				es, _ := os.ReadDir(subidos)
+				for _, b := range es {
+					os.Rename(filepath.Join(subidos, b.Name()), filepath.Join(deOrigen, "oci", "sha256", b.Name()))
+				}
 			}
 			spec := OCISpec{Ref: ai.img.Ref, Digest: ai.img.ManifestDigest, Source: ociSourceArchive, Arch: ai.arch}
 			hints, log, err := e.build(nombreArchivo(ai.img), spec)
@@ -132,6 +152,28 @@ func TestImportArchiveBuild(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// El constructor sin root no lee la caché de blobs de root: lo subido, si el
+// daemon no se lo dejó en la verificada del archivo, no está.
+func TestImportArchiveBuildNoLeeLaCacheDeRoot(t *testing.T) {
+	e := newOCITest(t)
+	t.Setenv("KLING_CACHE_DIR", t.TempDir())
+	archivo := dockerSaveDe(t, ocitest.Saved{Tags: []string{"x:1"}, Arch: "amd64", Layers: [][]byte{ocitest.Tar(alpineLike())}})
+	d := &blobsMux{cache: filepath.Join(e.root, "cache", "oci"), caps: []string{api.CapabilityOCIBlobs}}
+	c := fakeDaemon(t, d.handler())
+	ai, err := abrirArchivoImport(context.Background(), c, archivo, "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ai.a.Close()
+	if _, _, err := ai.subir(context.Background(), c, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, log, err := e.build("x", OCISpec{Ref: ai.img.Ref, Digest: ai.img.ManifestDigest, Source: ociSourceArchive, Arch: ai.arch})
+	if err == nil || !strings.Contains(err.Error(), "import the archive again") {
+		t.Fatalf("leyó la caché de root: %v\n%s", err, log)
 	}
 }
 

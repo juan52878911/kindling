@@ -164,7 +164,7 @@ func registryLogout(args []string) error {
 		if err := c.RegistryLogout(ctx, reg); err != nil {
 			return errSinRegistros(err)
 		}
-		fmt.Printf("%s  credentials removed from the daemon\n", reg)
+		fmt.Printf("%s  credentials and their cached layers removed from the daemon\n", reg)
 	}
 	return nil
 }

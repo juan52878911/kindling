@@ -276,16 +276,20 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	archive := spec.Source == ociSourceArchive
 	if archive {
 		// Los blobs los subió el CLI a la caché de root (PUT /oci/blobs): sin
-		// red, y desde ahí si esta caché es otra (la del usuario de
-		// construcción), rehasheados.
+		// red. Sin root, el daemon los dejó en la verificada de este archivo
+		// (KLING_VERIFIED_SCOPE_DIR); la de root no la leemos.
 		c.Offline = true
-		if subidos := filepath.Join(root, "cache", "oci"); subidos != cache {
-			c.Seed = subidos
-		}
 	}
 	shown := ociShown(spec, ref)
-	if d := os.Getenv("KLING_VERIFIED_CACHE_DIR"); d != "" && os.Getenv("KLING_CACHE_DIR") != "" {
-		c.Verificada = filepath.Join(d, "oci")
+	if os.Getenv("KLING_CACHE_DIR") != "" {
+		// La de lo público y, si la hay, la del origen de esta imagen (su
+		// registro con credenciales, o el archivo): las de otros orígenes
+		// están cerradas para nosotros (builders_cache.go).
+		for _, k := range []string{"KLING_VERIFIED_CACHE_DIR", "KLING_VERIFIED_SCOPE_DIR"} {
+			if d := os.Getenv(k); d != "" {
+				c.Verificadas = append(c.Verificadas, filepath.Join(d, "oci"))
+			}
+		}
 	}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)

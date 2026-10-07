@@ -136,7 +136,7 @@ registro de su referencia (ver [imagenes.md](imagenes.md#registros-privados)).
 |---|---|
 | `GET /registries` | `[{"host", "username"}]`, sin contraseñas |
 | `POST /registries` | guarda o sustituye (`{"host", "username", "password"}`; `host` es `registro[:puerto]`, sin esquema ni ruta, y los nombres de Docker Hub son `docker.io`; `password` hasta 16 KiB, una línea). Devuelve `{"host", "username"}`. No se comprueban contra el registro: se ve en el primer import |
-| `DELETE /registries/{host}` | las borra; `404` si no había |
+| `DELETE /registries/{host}` | las borra, y con ellas las capas que se bajaron con ellas (`cache/verified/registry-<sha256 del host>`); `404` si no había |
 
 **Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
 (`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
