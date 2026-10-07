@@ -271,6 +271,16 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		}
 	}
 
+	// Sin usuario de construcción (macOS, o un daemon sin kindling-build) el
+	// constructor usa la caché de root de todos (cache/oci): lo bajado con las
+	// credenciales de un registro se quedaría ahí, a la vista de cualquier
+	// otra construcción, y kling registry logout no lo borraría. Va a una
+	// caché propia en su directorio de trabajo, que se borra con él (se vuelve
+	// a bajar la próxima vez: es lo que cuesta no tener usuario aparte).
+	if u == nil && strings.HasPrefix(ambito, "registry-") {
+		cache = filepath.Join(work, "cache")
+	}
+
 	// Sin cancelación del cliente, como el constructor de MCP: matar un chroot
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
@@ -444,6 +454,8 @@ func comandoConstructor(ctx context.Context, bin string, binArgs []string, root,
 			cmd.Env = append(cmd.Env, "KLING_VERIFIED_SCOPE_DIR="+deOrigen)
 		}
 		cmd.SysProcAttr = u.credencial()
+	} else if cache != "" {
+		cmd.Env = append(cmd.Env, "KLING_CACHE_DIR="+cache)
 	}
 	cmd.Env = append(cmd.Env,
 		"KLING_ROOT="+root,

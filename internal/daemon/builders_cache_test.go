@@ -836,3 +836,30 @@ func TestCacheConstruccionBarreLaDeRoot(t *testing.T) {
 		t.Fatal("la caché de root no se barrió")
 	}
 }
+
+// Una construcción con ámbito marca como usados los blobs que leyó de la
+// verificada pública, para que no caduquen por edad.
+func TestRefrescarUsadosDeLaPublica(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "oci", "sha256")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := strings.Repeat("ab", 32)
+	p := filepath.Join(dir, h)
+	if err := os.WriteFile(p, []byte("capa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	viejo := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(p, viejo, viejo); err != nil {
+		t.Fatal(err)
+	}
+	ahora := time.Now()
+	refrescarUsados(dir, []string{"sha256:" + h, "sha256:" + strings.Repeat("cd", 32)}, ahora)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime().Before(ahora.Add(-time.Minute)) {
+		t.Fatalf("el blob usado sigue con fecha %s", fi.ModTime())
+	}
+}

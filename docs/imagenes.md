@@ -525,7 +525,10 @@ prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
 Las capas que se bajan con ellas quedan en la verificada de ese registro, que
 no lee ninguna otra cuenta del host ni ninguna construcción de otro origen
 (solo se abre mientras se construye una imagen de ese registro; ver
-[abajo](#el-constructor-oci-no-corre-como-root)), y `logout` las borra.
+[abajo](#el-constructor-oci-no-corre-como-root)), y `logout` las borra. Sin
+usuario de construcción (macOS, o un daemon sin `kindling-build`) no hay
+verificada: van a una caché del directorio de trabajo de esa construcción, que
+se borra al acabar, y no a la de todos (se vuelven a bajar cada vez).
 
 Comprobado el 2026-10-07 en el lab (CT 105, amd64, daemon privado, constructor
 con `kindling-build`) contra un `registry:2` con htpasswd en `127.0.0.1:5093`,

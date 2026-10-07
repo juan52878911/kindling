@@ -429,3 +429,29 @@ func TestPrepararTrabajoCedeCredenciales(t *testing.T) {
 		t.Fatalf("%s: uid %d gid %d modo %o", FicheroCredencialesConstructor, st.Uid, st.Gid, fi.Mode().Perm())
 	}
 }
+
+// Sin usuario de construcción, una caché propia (la de un registro con
+// credenciales) también le llega al constructor: si no, usaría la de todos.
+func TestComandoConstructorCacheSinUsuario(t *testing.T) {
+	cmd := comandoConstructor(context.Background(), "/bin/true", nil, "/r", "/w",
+		api.BuildImageRequest{Name: "x"}, true, nil, "/w/cache", "", "")
+	var hay bool
+	for _, e := range cmd.Env {
+		if e == "KLING_CACHE_DIR=/w/cache" {
+			hay = true
+		}
+	}
+	if !hay {
+		t.Fatal("sin usuario de construcción, la caché propia no llega al constructor")
+	}
+	cmd = comandoConstructor(context.Background(), "/bin/true", nil, "/r", "/w",
+		api.BuildImageRequest{Name: "x"}, true, nil, "", "", "")
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "KLING_CACHE_DIR=") && e != "KLING_CACHE_DIR=" {
+			// Heredado del entorno del test: no lo pone el daemon.
+			if os.Getenv("KLING_CACHE_DIR") == "" {
+				t.Fatalf("sin caché propia no debe poner KLING_CACHE_DIR: %s", e)
+			}
+		}
+	}
+}

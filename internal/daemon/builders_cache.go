@@ -844,6 +844,12 @@ func (s *Server) cacheConstruccion(work, cache, verificada, destino string, u *u
 		if err != nil {
 			log.Printf("builder cache: %v", err)
 		}
+		if destino != verificada {
+			// Una construcción con ámbito (registro con credenciales) también
+			// lee capas de la verificada pública: se marcan como usadas, o
+			// caducarían por edad mientras solo las usen imágenes privadas.
+			refrescarUsados(filepath.Join(verificada, "oci", "sha256"), usados, time.Now())
+		}
 		if n > 0 {
 			log.Printf("builder cache: %d blob(s) verified into %s in %s", n, destino, time.Since(t0).Round(time.Millisecond))
 		}
@@ -858,4 +864,21 @@ func (s *Server) ajustesCache(a map[string]string) {
 	b, edad := s.limitesCacheConstruccion().efectivos()
 	a["KLING_BUILD_CACHE_MAX_GIB"] = strconv.FormatInt(b>>30, 10)
 	a["KLING_BUILD_CACHE_MAX_DAYS"] = strconv.Itoa(int(edad / (24 * time.Hour)))
+}
+
+// refrescarUsados pone la fecha ahora a los blobs usados que estén en dir
+// (ficheros regulares del daemon), para que el barrido por edad no los tome
+// por olvidados.
+func refrescarUsados(dir string, usados []string, ahora time.Time) {
+	for _, d := range usados {
+		p := filepath.Join(dir, strings.TrimPrefix(d, "sha256:"))
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != uint32(os.Geteuid()) {
+			continue
+		}
+		_ = os.Chtimes(p, ahora, ahora)
+	}
 }
