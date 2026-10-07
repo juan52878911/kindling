@@ -135,17 +135,21 @@ func TestPromoverCacheRechaza(t *testing.T) {
 		t.Fatalf("una FIFO promovida: %d %v", n, err)
 	}
 
-	// De otro dueño (ni el constructor ni root): fuera.
+	// De otro dueño (ni el constructor ni root): fuera. Como root, los
+	// ficheros de prueba son de root, que vale: lo cubre
+	// TestVerificadaIntocableParaElConstructor.
 	c2, v2, w2 := cachesDePrueba(t)
 	cuerpo := []byte("ajeno")
 	d2 := digestDe(cuerpo)
 	blobDelConstructor(t, c2, d2, cuerpo)
 	os.WriteFile(filepath.Join(w2, ficheroUsados), []byte(d2+"\n"), 0o600)
-	if _, n, _ := promoverCache(w2, c2, v2, uint32(os.Getuid())+1); n != 0 {
-		t.Fatalf("de otro dueño promovido: %d", n)
-	}
-	if _, err := os.Lstat(verificadoEn(v2, d2)); !os.IsNotExist(err) {
-		t.Fatal("de otro dueño entró en la verificada")
+	if os.Geteuid() != 0 {
+		if _, n, _ := promoverCache(w2, c2, v2, uint32(os.Getuid())+1); n != 0 {
+			t.Fatalf("de otro dueño promovido: %d", n)
+		}
+		if _, err := os.Lstat(verificadoEn(v2, d2)); !os.IsNotExist(err) {
+			t.Fatal("de otro dueño entró en la verificada")
+		}
 	}
 
 	// La lista como enlace no se sigue.
@@ -286,6 +290,7 @@ func TestVerificadaIntocableParaElConstructor(t *testing.T) {
 		t.Skip("solo como root en Linux")
 	}
 	root := t.TempDir()
+	os.Chmod(filepath.Dir(root), 0o755) // nobody tiene que poder llegar
 	os.Chmod(root, 0o755)
 	u := &usuarioConstructor{Nombre: "nobody", UID: 65534, GID: 65534}
 	cache, err := prepararCache(root, u)
@@ -311,6 +316,12 @@ func TestVerificadaIntocableParaElConstructor(t *testing.T) {
 	}
 	dst := verificadoEn(verificada, dg)
 	dir := filepath.Dir(dst)
+	// Leerla sí puede: lo que falla abajo no es que no llegue.
+	leer := exec.Command("/bin/cat", dst)
+	leer.SysProcAttr = u.credencial()
+	if out, err := leer.CombinedOutput(); err != nil || string(out) != "capa" {
+		t.Fatalf("el constructor no puede leer la verificada: %q %v", out, err)
+	}
 	for _, script := range []string{
 		"echo x > " + dst,
 		"echo x >> " + dst,
