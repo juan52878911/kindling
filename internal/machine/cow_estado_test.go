@@ -17,7 +17,7 @@ func TestCoWInfoPendienteHastaElPrimerUso(t *testing.T) {
 	if !info.Pending || info.Store != nil {
 		t.Fatalf("antes de usarlo: %+v", info)
 	}
-	if !strings.Contains(info.Reason, "btrfs store, created on the first run -from") {
+	if !strings.Contains(info.Reason, "btrfs store, created on the first save or run -from") {
 		t.Errorf("motivo: %q", info.Reason)
 	}
 	src := escribirDorado(t, m.root, "d", "x")

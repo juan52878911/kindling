@@ -848,7 +848,7 @@ type CoWInfo struct {
 	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
 	Reason string `json:"reason,omitempty"`
 	// Pending: el modo es "store" pero el almacén aún no se ha creado ni
-	// montado; se crea en el primer run -from, y si entonces falla el modo
+	// montado; se crea en el primer save o run -from, y si entonces falla el modo
 	// pasa a "copy" con el motivo en Reason.
 	Pending bool `json:"pending,omitempty"`
 	// Store describe el almacén propio, si existe (aunque el modo sea otro:

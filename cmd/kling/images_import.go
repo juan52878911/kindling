@@ -140,7 +140,11 @@ func imagesImport(args []string) error {
 			"ready": built.Ready, "service": built.Service})
 	}
 	if already {
-		fmt.Printf("image %s: already imported from %s (-replace re-resolves the tag and rebuilds it)\n", *name, ref)
+		dmn := ""
+		if in, err := c.Info(ctx); err == nil {
+			dmn = in.Version
+		}
+		fmt.Println(alreadyImportedLine(*name, ref.String(), rec.KlingVer, dmn))
 	}
 	fmt.Print(output)
 	fmt.Printf("image %s: %s\n", *name, built.Digest)
@@ -187,10 +191,10 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 	if img == nil {
 		return false, nil
 	}
-	other := fmt.Errorf("image %s already exists and wasn't imported from a Docker image; "+
-		"pick another -name, or pass -replace to overwrite it", name)
+	// Sin receta no se sabe de dónde salió (puede que sí de una imagen de
+	// Docker, con un kling que no las guardaba): no se dice que no.
 	if !img.HasRecipe {
-		return false, other
+		return false, fmt.Errorf("image %s already exists and has no recipe; pick another -name, or pass -replace to overwrite it", name)
 	}
 	rec, err := c.ImageRecipe(ctx, name)
 	if err != nil {
@@ -198,7 +202,8 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 	}
 	var prev OCISpec
 	if rec.Builder != "oci" || json.Unmarshal(rec.Spec, &prev) != nil {
-		return false, other
+		return false, fmt.Errorf("image %s already exists and wasn't imported from a Docker image; "+
+			"pick another -name, or pass -replace to overwrite it", name)
 	}
 	pr, perr := oci.ParseImageRef(prev.Ref)
 	nr, nerr := oci.ParseImageRef(spec.Ref)
@@ -225,6 +230,24 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 			"pass -replace to rebuild it with these", name, nr)
 	}
 	return true, nil
+}
+
+// alreadyImportedLine es lo que se dice cuando la importación ya estaba. Si la
+// construyó otra versión del daemon (otro init, otro agente), se dice cuál y
+// que -replace la rehace con esta: si no, una imagen importada hace varias
+// versiones se queda así para siempre sin que nadie lo note. Con una versión
+// de desarrollo, o sin saber la del daemon, no se compara (como doctor).
+func alreadyImportedLine(name, ref, builtBy, daemon string) string {
+	b, d := strings.TrimPrefix(builtBy, "v"), strings.TrimPrefix(daemon, "v")
+	if d == "" || d == "dev" || b == "dev" || b == d {
+		return fmt.Sprintf("image %s: already imported from %s (-replace re-resolves the tag and rebuilds it)", name, ref)
+	}
+	by := "an earlier kling"
+	if b != "" {
+		by = "kling " + builtBy
+	}
+	return fmt.Sprintf("image %s: already imported from %s, built by %s; -replace rebuilds it with this version (%s, and re-resolves the tag)",
+		name, ref, by, daemon)
 }
 
 var reNameJunk = lazyre.New(`[^a-z0-9_-]+`)

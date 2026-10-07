@@ -39,8 +39,8 @@ func TestLineaCoW(t *testing.T) {
 // clona dentro de él, sino que está pendiente, y qué se va a crear.
 func TestLineaCoWPendiente(t *testing.T) {
 	l := lineaCoW(&api.CoWInfo{Setting: "auto", Mode: "store", Pending: true,
-		Reason: "no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first run -from)"})
-	for _, w := range []string{"store pending (created on first use)", "daemon.cow=auto", "xfs store, created on the first run -from"} {
+		Reason: "no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first save or run -from)"})
+	for _, w := range []string{"store pending (created on first use)", "daemon.cow=auto", "xfs store, created on the first save or run -from"} {
 		if !strings.Contains(l, w) {
 			t.Errorf("falta %q en %q", w, l)
 		}

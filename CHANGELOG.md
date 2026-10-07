@@ -70,6 +70,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - A failed freeze no longer asks the resumed guest to remount volumes it never released (up to 50 s holding the machine's lock)
 - OCI layer whiteouts under a directory symlink (`bin/.wh.x` with `bin -> usr/bin`) now delete the file instead of being ignored
 - `PUT /images/{name}/blob` decides "identical, 200 unchanged" with cold boots held, so a concurrent upload can no longer make it answer for content that is gone
+- The first golden saved on a fresh daemon gets its memory mirrored too: the save creates the copy-on-write store if it doesn't exist yet; if it can't, `kling info` shows copy mode and why right away
+- `kling run -image` warns when it reuses an image imported before restart policies (its service restarts even after exiting 0) and says how to rebuild it
+- `kling image import` says which kling built an existing import and that `-replace` rebuilds it; an existing image without a recipe is no longer called "not from Docker"
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
