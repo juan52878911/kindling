@@ -196,8 +196,9 @@ var coreTree = []section{
                                                    docker save (manifest.json) or an OCI
                                                    layout (tar or dir). Only the missing
                                                    blobs go to the daemon, each checked by
-                                                   sha256; no registry. -image repo:tag
-                                                   picks one in an archive with several
+                                                   sha256, within the same cache limit;
+                                                   no registry. -image repo:tag picks one
+                                                   in an archive with several
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
