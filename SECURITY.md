@@ -1308,8 +1308,15 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   procesos que queden con ese uid. Por eso tiene que ser un usuario de sistema dedicado
   (uid ≤ `SYS_UID_MAX`; uno de persona o `nobody` se rechaza), y las construcciones van
   en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
-- **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
-  antes de usarlo; un constructor comprometido no envenena los imports siguientes.
+- **Su caché no se cree**: como la puede escribir, lo que saca de ella se rehashea
+  siempre antes de usarlo; un constructor comprometido no envenena los imports
+  siguientes.
+- **La caché verificada es de root**: tras una construcción correcta, con el constructor
+  ya barrido, el daemon copia a `cache/verified/oci` (root, 0755/0644) los blobs que usó,
+  hasheando lo que copia y sin seguir enlaces; uno cambiado no entra. El constructor la
+  lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
+  puede escribir, renombrar ni borrar nada en ella. Las dos cachés se barren con tope
+  (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en

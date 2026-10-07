@@ -144,8 +144,10 @@ porque el daemon lo ejecuta como root. Excepción: `oci` (el del núcleo o uno
 instalado con ese nombre) corre con el usuario de construcción
 (`kindling-build`, ver `docs/imagenes.md`) cuando existe: recibe además
 `KLING_OUT_DIR` (deja ahí la imagen; el daemon la valida y la mueve a
-`images/`) y `KLING_CACHE_DIR` (su caché), y del entorno del daemon solo una
-lista blanca. La receta la escribe el daemon, con
+`images/`), `KLING_CACHE_DIR` (su caché) y `KLING_VERIFIED_CACHE_DIR` (la
+que verificó el daemon, de solo lectura; deja en `<dir>/cache-used` los blobs
+que usó y, si acaba bien, el daemon pasa ahí los nuevos), y del entorno del
+daemon solo una lista blanca. La receta la escribe el daemon, con
 permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,

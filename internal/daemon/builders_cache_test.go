@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -122,6 +123,16 @@ func TestPromoverCacheRechaza(t *testing.T) {
 	}
 	if _, err := os.Lstat(verificadoEn(verificada, d)); !os.IsNotExist(err) {
 		t.Fatal("un enlace entró en la verificada")
+	}
+
+	// Una FIFO con el nombre del blob vacío: no es un fichero regular.
+	vacio := digestDe(nil)
+	if err := syscall.Mkfifo(filepath.Join(cache, "oci", "sha256", strings.TrimPrefix(vacio, "sha256:")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(vacio+"\n"), 0o600)
+	if _, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid())); n != 0 || err == nil {
+		t.Fatalf("una FIFO promovida: %d %v", n, err)
 	}
 
 	// De otro dueño (ni el constructor ni root): fuera.

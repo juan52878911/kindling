@@ -175,7 +175,9 @@ var coreTree = []section{
       [-entrypoint ARG]... [-restart R]            digest, every layer is checked by
       [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
                                                    values into the image (per machine:
-                                                   kling run -image <ref> -e KEY)
+                                                   kling run -image <ref> -e KEY).
+                                                   Blobs stay cached, bounded by
+                                                   daemon.build_cache_max_gib/_days
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
