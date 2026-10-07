@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,5 +53,58 @@ func TestArgsRemotos(t *testing.T) {
 	}
 	if got := argsRemotos("", true); !strings.Contains(got, "-rollback") {
 		t.Errorf("%q", got)
+	}
+}
+
+// El daemon del socket tiene que ser el del servicio: con KLING_HOST en un
+// daemon privado, upgrade no puede reiniciar el de producción.
+func TestMismoProceso(t *testing.T) {
+	if err := mismoProceso("/run/kling.sock", "kling.service", 42, 42); err != nil {
+		t.Error(err)
+	}
+	if err := mismoProceso("/run/kt/kling.sock", "kling.service", 42, 77); err == nil || !strings.Contains(err.Error(), "pid 77") {
+		t.Errorf("another daemon accepted: %v", err)
+	}
+	if err := mismoProceso("/run/kt/kling.sock", "kling.service", 0, 77); err == nil {
+		t.Error("a unit that is not running accepted")
+	}
+}
+
+// pidDelPar lo dice el kernel: un socket que escucha este proceso da su PID.
+func TestPidDelPar(t *testing.T) {
+	dir, err := os.MkdirTemp("", "kp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			c.Read(make([]byte, 1))
+		}
+	}()
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	pid, err := pidDelPar(c.(*net.UnixConn))
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("pid %d, %v; want %d", pid, err, os.Getpid())
+	}
+}
+
+func TestPidLaunchd(t *testing.T) {
+	if got := pidLaunchd([]byte("gui/501/dev.kindling.daemon = {\n\tstate = running\n\tpid = 4242\n")); got != 4242 {
+		t.Errorf("got %d", got)
+	}
+	if got := pidLaunchd([]byte("state = not running\n")); got != 0 {
+		t.Errorf("got %d", got)
 	}
 }

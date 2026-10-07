@@ -17,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
+	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 func cmdUpgrade(args []string) error {
@@ -190,9 +192,9 @@ func prepararDaemon(o *upgrade.Opciones, endpoint, unit string) error {
 	arch := config0(info.Arch, runtime.GOARCH)
 	switch runtime.GOOS {
 	case "linux":
-		return prepararSystemd(o, unit, arch)
+		return prepararSystemd(o, c, unit, arch)
 	case "darwin":
-		return prepararLaunchd(o, arch)
+		return prepararLaunchd(o, c, arch)
 	}
 	return fmt.Errorf("kling upgrade does not know how to restart a daemon on %s", runtime.GOOS)
 }
@@ -227,7 +229,7 @@ func correrOrden(ctx context.Context, argv ...string) error {
 	return nil
 }
 
-func prepararSystemd(o *upgrade.Opciones, unit, arch string) error {
+func prepararSystemd(o *upgrade.Opciones, c *api.Client, unit, arch string) error {
 	if !reNombreUnidad.MatchString(unit) {
 		return fmt.Errorf("invalid unit name %q", unit)
 	}
@@ -240,6 +242,10 @@ func prepararSystemd(o *upgrade.Opciones, unit, arch string) error {
 		return &errWithHint{
 			err:  fmt.Errorf("the daemon answering on the socket is not run by %s.service", unit),
 			hint: "-unit NAME picks the unit that runs it; without one, stop it, replace the binary by hand and start it"}
+	}
+	if err := esElDelSocket(c, unit+".service", pid); err != nil {
+		return &errWithHint{err: err,
+			hint: "-unit NAME picks the unit that runs it, and -host (or KLING_HOST) the socket of the daemon to upgrade"}
 	}
 	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
@@ -264,6 +270,40 @@ func prepararSystemd(o *upgrade.Opciones, unit, arch string) error {
 	}
 	if yo, err := ejecutableReal(); err == nil && yo != exe {
 		fmt.Printf("note: this kling (%s) is not the daemon's (%s); upgrade it afterwards with: kling upgrade -cli\n\n", yo, exe)
+	}
+	return nil
+}
+
+// esElDelSocket comprueba que el daemon que contesta en el socket de c es el
+// proceso pid que arranca servicio. Sin esto, con KLING_HOST apuntando a un
+// daemon privado, upgrade cambiaría y reiniciaría el del servicio (otro) y
+// verificaría, y al volver atrás restauraría, la raíz del privado.
+func esElDelSocket(c *api.Client, servicio string, pid int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := transport.New(c.Endpoint()).Dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return fmt.Errorf("%s is not a local socket", c.Endpoint())
+	}
+	par, err := pidDelPar(uc)
+	if err != nil {
+		return fmt.Errorf("finding the process behind %s: %v", c.Endpoint(), err)
+	}
+	return mismoProceso(c.Endpoint(), servicio, pid, par)
+}
+
+// mismoProceso es la comparación de esElDelSocket.
+func mismoProceso(endpoint, servicio string, pidServicio, pidSocket int) error {
+	if pidServicio <= 0 {
+		return fmt.Errorf("%s is not running, but a daemon answers on %s (pid %d)", servicio, endpoint, pidSocket)
+	}
+	if pidSocket != pidServicio {
+		return fmt.Errorf("the daemon answering on %s (pid %d) is not the one %s runs (pid %d)", endpoint, pidSocket, servicio, pidServicio)
 	}
 	return nil
 }
@@ -299,7 +339,7 @@ func (a agenteLaunchd) Arrancar(ctx context.Context) error {
 	return correrOrden(ctx, "launchctl", "bootstrap", a.dominio, a.plist)
 }
 
-func prepararLaunchd(o *upgrade.Opciones, arch string) error {
+func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -313,6 +353,10 @@ func prepararLaunchd(o *upgrade.Opciones, arch string) error {
 		return &errWithHint{
 			err:  errors.New("the daemon is not run by launchd here, so kling upgrade cannot restart it"),
 			hint: "install the launchd agent (docs/mac.md), or stop the daemon and use: kling upgrade -cli"}
+	}
+	if err := esElDelSocket(c, launchAgentLabel, pidLaunchd(out)); err != nil {
+		return &errWithHint{err: err,
+			hint: "-host (or KLING_HOST) picks the socket of the daemon to upgrade; a daemon not run by launchd: stop it and use kling upgrade -cli"}
 	}
 	exe := programaLaunchd(out)
 	if exe == "" {
@@ -334,6 +378,18 @@ func prepararLaunchd(o *upgrade.Opciones, arch string) error {
 		o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe("kling-vz", "darwin", "arm64"), Destino: vz})
 	}
 	return nil
+}
+
+// pidLaunchd saca de `launchctl print` el PID del agente (0 si no corre).
+func pidLaunchd(out []byte) int {
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "pid = "); ok {
+			n, _ := strconv.Atoi(strings.TrimSpace(v))
+			return n
+		}
+	}
+	return 0
 }
 
 // programaLaunchd saca de `launchctl print` el binario que lanza el agente.
