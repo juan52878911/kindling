@@ -473,7 +473,10 @@ las barre: fuera los `.part` y lo que no es un blob, lo que lleva más de
 fecha a un blob verificado) y, si entre las dos pasan de
 `daemon.build_cache_max_gib` (20 por defecto), lo más viejo, **primero lo no
 verificado** (su fecha la pone el constructor). Lo que acaba de usar la
-construcción no se toca. `KLING_BUILD_CACHE_MAX_GIB` y
+construcción no se toca mientras quepa en el tope: la lista la escribe el
+constructor, y uno comprometido no mantiene así la verificada por encima de él.
+Como mucho 1048576 GiB y 36500 días (más desbordaría); por entorno, un valor
+mayor se avisa y queda el de por defecto. `KLING_BUILD_CACHE_MAX_GIB` y
 `KLING_BUILD_CACHE_MAX_DAYS` mandan sobre el fichero; se leen en cada
 construcción y `GET /info` (y `kling doctor`) dice los efectivos. `cache/oci`, la
 de los constructores que corren como root, no se barre todavía.

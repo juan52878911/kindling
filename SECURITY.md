@@ -1318,7 +1318,8 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   más bytes por pasada que el tope de la caché. El constructor la
   lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
   puede escribir, renombrar ni borrar nada en ella. Las dos cachés se barren con tope
-  (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado.
+  (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado;
+  lo que la construcción dice haber usado se guarda solo mientras quepa en el tope.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en

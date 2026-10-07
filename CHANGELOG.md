@@ -9,7 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - The rootless oci builder reads a root-owned verified blob cache without rehashing: after a successful build the daemon copies the blobs it used there, checked by sha256 (never sparse files, never past the cache limit)
-- `daemon.build_cache_max_gib` and `daemon.build_cache_max_days` (`KLING_BUILD_CACHE_MAX_GIB`, `KLING_BUILD_CACHE_MAX_DAYS`) bound the builder's blob caches; unverified blobs go first
+- `daemon.build_cache_max_gib` and `daemon.build_cache_max_days` (`KLING_BUILD_CACHE_MAX_GIB`, `KLING_BUILD_CACHE_MAX_DAYS`) bound the builder's blob caches; unverified blobs go first; values are capped at 1048576 GiB and 36500 days, and blobs the builder lists as used are kept only up to the limit
 - Per-tenant quotas in the authz policy (`quotas`: `max_machines`, `max_mem_mib`, `max_disk_mib`, `"*"` for everyone); exceeding one is a `429` that names the limit and the usage, decided without races
 - `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
