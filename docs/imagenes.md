@@ -658,6 +658,22 @@ Sin usuario de construcción no hay nada que separar (el constructor corre como
 el daemon y lee todo): lo privado queda en `cache/oci`, solo de root, hasta que
 lo barre el tope.
 
+Comprobado el 2026-10-07 en el lab (CT 105, daemon privado, constructor con
+`kindling-build`), con un `registry:2` con htpasswd en `127.0.0.1:5194`, una
+imagen privada hecha con `docker commit` (una capa con un fichero propio) y un
+`docker save` de otra: el import privado deja sus 14 blobs en
+`cache/verified/registry-<sha256>` (ninguno en la verificada de todos ni en
+`cache/builder`), cerrada en `700 root:root` al acabar; el del archivo, sus 14
+en `cache/verified/archive-<digest>` y `cache/oci` vacía y en `700 root:root`.
+Como `kindling-build`, ni listar ni leer un blob de la verificada del registro
+ni listar `cache/oci`; un import público después (`traefik/whoami`) llena la
+de todos y no abre la del registro. Las dos imágenes arrancan y dan su fichero;
+reconstruir el archivo (`-replace`) no sube nada y tarda 0,71 s; `kling registry
+logout` borra la del registro y el import siguiente es un 401. El test
+`TestConstruccionSoloLeeSuOrigen` (como root, con un constructor sin
+privilegios de verdad) comprueba lo mismo desde dentro: qué puede leer cada
+construcción y adónde va lo que baja.
+
 **La caché verificada.** Lo que el constructor saca de su caché se rehashea
 cada vez (1-3 s por GiB). Por eso, al acabar **bien** una construcción, con sus
 procesos ya barridos y el cerrojo de host aún tomado, el daemon lee la lista de
