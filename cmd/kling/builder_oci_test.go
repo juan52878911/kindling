@@ -92,15 +92,15 @@ func TestBuildOCI(t *testing.T) {
 		t.Fatalf("the build log shows an env value:\n%s", log)
 	}
 	var built struct {
-		Ref, Digest, Manifest, Ready string
-		Ports, Volumes               []string
-		Service                      api.ServiceSpec
-		Layers                       []struct{ Digest string }
+		Ref, Digest, Manifest, Ready, Init string
+		Ports, Volumes                     []string
+		Service                            api.ServiceSpec
+		Layers                             []struct{ Digest string }
 	}
 	if err := json.Unmarshal(hints.Built, &built); err != nil {
 		t.Fatal(err)
 	}
-	if built.Digest != idx || built.Ready != "tcp 5432" || len(built.Layers) != 2 || hints.Base != "" ||
+	if built.Digest != idx || built.Ready != "tcp 5432" || built.Init != "sh" || len(built.Layers) != 2 || hints.Base != "" ||
 		strings.Join(built.Service.Argv, " ") != "docker-entrypoint.sh postgres" || built.Service.StopSignal != "SIGINT" ||
 		built.Service.Restart != api.RestartOnFailure || built.Service.ProbeTimeoutSeconds != 0 {
 		t.Fatalf("built %s", hints.Built)
@@ -158,7 +158,7 @@ func TestBuildOCI(t *testing.T) {
 	if err := json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc); err != nil || svc.WorkingDir != "/var/lib/postgresql" || svc.Argv[0] != "docker-entrypoint.sh" {
 		t.Fatalf("service %+v %v", svc, err)
 	}
-	if p := cat(api.GuestReadyProbe); !strings.Contains(p, "-probe-tcp 127.0.0.1:5432") {
+	if p := cat(api.GuestReadyProbe); !strings.HasPrefix(p, "#!/bin/sh\n") || !strings.Contains(p, "-probe-tcp 127.0.0.1:5432") {
 		t.Fatalf("ready probe:\n%s", p)
 	}
 	if n := tree.Lookup("/tmp"); n == nil || n.Mode&0o1777 != 0o1777 {
@@ -266,19 +266,125 @@ func TestOCIReadyTimes(t *testing.T) {
 	}
 }
 
+// readImage lee la imagen construida como árbol, con cat de un fichero.
+func readImage(t *testing.T, img string) (*ext4.Node, func(string) string) {
+	t.Helper()
+	fsckImage(t, img)
+	f, err := os.Open(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	tree, err := ext4.Read(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree, func(p string) string {
+		t.Helper()
+		n, _ := tree.Resolve(p)
+		if n == nil {
+			t.Fatalf("%s missing", p)
+		}
+		b, err := n.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+
+// Una imagen sin sh (distroless, scratch): arranca con el init en Go. Sin
+// script de init ni /entrypoint; /sbin/overlay-init es el agente, y las
+// sondas son #! al agente que el kernel ejecuta sin shell.
+func TestBuildOCIDistroless(t *testing.T) {
+	e := newOCITest(t)
+	distroless := ocitest.TarGz([]ocitest.File{
+		{Name: "app", Body: testELF(0x3e), Mode: 0o755},
+		{Name: "etc/", Dir: true, Mode: 0o755},
+		{Name: "etc/passwd", Body: "root:x:0:0:root:/root:/sbin/nologin\nnonroot:x:65532:65532::/home/nonroot:/sbin/nologin\n"},
+	})
+	build := func(hc map[string]any) (string, *ext4.Node, func(string) string, string) {
+		t.Helper()
+		cfg := map[string]any{"Entrypoint": []string{"/app"}, "User": "65532", "Env": []string{"MSG=it's"},
+			"ExposedPorts": map[string]any{"80/tcp": map[string]any{}}}
+		if hc != nil {
+			cfg["Healthcheck"] = hc
+		}
+		_, idx := e.reg.ImageConfig("amd64", cfg, distroless)
+		hints, log, err := e.build("whoami", OCISpec{Ref: e.reg.Host() + "/x/whoami@" + idx, Arch: "amd64"})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, log)
+		}
+		var built struct{ Init, Ready string }
+		json.Unmarshal(hints.Built, &built)
+		if built.Init != "go" || !strings.Contains(log, "no sh, mount, pivot_root, mkdir, ln") {
+			t.Fatalf("init %q, log:\n%s", built.Init, log)
+		}
+		tree, cat := readImage(t, filepath.Join(e.root, "images", "whoami.ext4"))
+		return built.Ready, tree, cat, log
+	}
+
+	ready, tree, cat, log := build(map[string]any{"Test": []string{"CMD-SHELL", "wget -q localhost"}, "Timeout": 30e9})
+	if n := tree.Lookup("/sbin/overlay-init"); n == nil || !n.IsLink() || n.Target != "/usr/local/bin/kling-guest" {
+		t.Fatalf("/sbin/overlay-init: %+v", n)
+	}
+	if tree.Lookup("/entrypoint") != nil {
+		t.Fatal("an /entrypoint (a sh script) in an image without sh")
+	}
+	if !strings.Contains(cat("/etc/kindling/IMAGE.txt"), "\ninit=go\n") || cat("/etc/kling/env") != "export MSG='it'\\''s'\n" {
+		t.Fatalf("IMAGE.txt or env:\n%s%s", cat("/etc/kindling/IMAGE.txt"), cat("/etc/kling/env"))
+	}
+	// El CMD-SHELL no se puede correr: la sonda de EXPOSE, sin sus plazos.
+	if p := cat(api.GuestReadyProbe); p != "#!/usr/local/bin/kling-guest -probe-tcp=127.0.0.1:80\n" || ready != "tcp 80" ||
+		!strings.Contains(log, "HEALTHCHECK needs a shell") {
+		t.Fatalf("ready %q, probe:\n%s", ready, p)
+	}
+	var svc api.ServiceSpec
+	if err := json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc); err != nil || svc.User != "65532" || svc.ProbeTimeoutSeconds != 0 {
+		t.Fatalf("service %+v %v", svc, err)
+	}
+	if !strings.Contains(cat("/etc/kindling/oci.json"), "wget -q localhost") {
+		t.Fatal("oci.json lost the image's HEALTHCHECK")
+	}
+
+	// HEALTHCHECK CMD: el argv en JSON, con su plazo.
+	ready, _, cat, _ = build(map[string]any{"Test": []string{"CMD", "/app", "-health", "it's"}, "Timeout": 30e9})
+	if p := cat(api.GuestReadyProbe); p != "#!/usr/local/bin/kling-guest -exec-json\n[\"/app\",\"-health\",\"it's\"]\n" ||
+		ready != "healthcheck: /app -health it's" {
+		t.Fatalf("ready %q, probe:\n%s", ready, p)
+	}
+	var svc2 api.ServiceSpec
+	if json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc2); svc2.ProbeTimeoutSeconds != 30 {
+		t.Fatalf("service %+v", svc2)
+	}
+}
+
+// Una imagen con sh y su propio /entrypoint arranca con el init en Go, que no
+// lo ejecuta: se queda tal cual, para su ENTRYPOINT.
+func TestBuildOCIOwnEntrypoint(t *testing.T) {
+	e := newOCITest(t)
+	own := ocitest.TarGz(append(alpineLike(), ocitest.File{Name: "entrypoint", Body: "#!/bin/sh\nexec \"$@\"\n", Mode: 0o755}))
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/entrypoint"}, "Cmd": []string{"redis-server"},
+		"ExposedPorts": map[string]any{"6379/tcp": map[string]any{}}}, own)
+	hints, log, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	var built struct{ Init string }
+	json.Unmarshal(hints.Built, &built)
+	tree, cat := readImage(t, filepath.Join(e.root, "images", "x.ext4"))
+	if built.Init != "go" || !tree.Lookup("/sbin/overlay-init").IsLink() || cat("/entrypoint") != "#!/bin/sh\nexec \"$@\"\n" {
+		t.Fatalf("init %q, /entrypoint %q", built.Init, cat("/entrypoint"))
+	}
+	// Con sh, la sonda sigue siendo la de siempre.
+	if p := cat(api.GuestReadyProbe); !strings.HasPrefix(p, "#!/bin/sh\n") || !strings.Contains(p, "-probe-tcp 127.0.0.1:6379") {
+		t.Fatalf("probe:\n%s", p)
+	}
+}
+
 func TestBuildOCIRejects(t *testing.T) {
 	e := newOCITest(t)
-	distroless := ocitest.TarGz([]ocitest.File{{Name: "app", Body: testELF(0x3e), Mode: 0o755}})
-	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/app"}}, distroless)
-	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "distroless") {
-		t.Fatalf("distroless: %v", err)
-	}
-	own := ocitest.TarGz(append(alpineLike(), ocitest.File{Name: "entrypoint", Body: "#!/bin/sh\n", Mode: 0o755}))
-	_, idx = e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/entrypoint"}}, own)
-	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "/entrypoint") {
-		t.Fatalf("own /entrypoint: %v", err)
-	}
-	_, idx = e.reg.ImageConfig("arm64", nil, ocitest.TarGz(alpineLike()))
+	_, idx := e.reg.ImageConfig("arm64", nil, ocitest.TarGz(alpineLike()))
 	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "no linux/amd64") {
 		t.Fatalf("wrong arch: %v", err)
 	}
