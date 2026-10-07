@@ -122,7 +122,7 @@ func TestCalibrarRechazaMicroVM(t *testing.T) {
 	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "kling chispa deploy") || !strings.Contains(err.Error(), "retraining") {
+	if !strings.Contains(err.Error(), "kling ai chispa deploy") || !strings.Contains(err.Error(), "retraining") {
 		t.Fatalf("error should point at retrain+redeploy: %v", err)
 	}
 }

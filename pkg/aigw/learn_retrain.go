@@ -39,7 +39,7 @@ import (
 // queda en <ruta>.prev y la ruta del registro se sustituye con un rename (un
 // lector nunca ve medio fichero). Con backend microvm el gateway no puede
 // hornear una imagen: deja la versión PENDIENTE y `kling ai retrain` (el CLI)
-// hace el dorado <snapshot>-vN con `kling chispa deploy` y lo confirma con
+// hace el dorado <snapshot>-vN con `kling ai chispa deploy` y lo confirma con
 // /v1/admin/promote, que comprueba que el sha256 del dorado es el de la
 // versión. La tarea pasa a apuntar a ese dorado (versions.json manda sobre el
 // "snapshot" del registro) y el anterior sigue ahí para `kling ai rollback`.
@@ -721,7 +721,7 @@ func (g *Gateway) Retrain(ctx context.Context, req RetrainRequest) (*RetrainRepo
 		return rep, nil
 	}
 
-	// Validación: la del fichero, o un 10 % del oro (como `kling chispa
+	// Validación: la del fichero, o un 10 % del oro (como `kling ai chispa
 	// train` sin -valid); y un 20 % estable de lo humano, para que la
 	// calibración vea también tráfico de verdad. Lo de los maestros nunca
 	// calibra: no es verdad.
@@ -870,7 +870,7 @@ func (g *Gateway) promote(ctx context.Context, lt *learnTask, rep *RetrainReport
 			return err
 		}
 		rep.Pending, rep.Snapshot, rep.CandidateModel = true, e.Snapshot, nb
-		rep.Note = fmt.Sprintf("passed the gate; backend microvm: deploy it as %s (kling chispa deploy %s -model <file>) and confirm with /v1/admin/promote; `kling ai retrain` does both", e.Snapshot, e.Snapshot)
+		rep.Note = fmt.Sprintf("passed the gate; backend microvm: deploy it as %s (kling ai chispa deploy %s -model <file>) and confirm with /v1/admin/promote; `kling ai retrain` does both", e.Snapshot, e.Snapshot)
 		return nil
 	}
 	before := g.cascade(lt.task)

@@ -80,7 +80,7 @@ func mountVolume(v VolumeSpec) error {
 		if errors.Is(err, syscall.EACCES) && !v.readOnly {
 			return fmt.Errorf("mounting %s at %s: %w.\n"+
 				"The disk appears to be READ-ONLY and this bridge requested it writable.\n"+
-				"Usually means an image with an old bridge: rebuild it with `kling add`",
+				"Usually means an image with an old bridge: rebuild it with `kling mcp add`",
 				v.device, v.mount, err)
 		}
 		return fmt.Errorf("mounting %s at %s: %w", v.device, v.mount, err)

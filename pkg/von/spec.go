@@ -217,7 +217,7 @@ func (r Resolved) ServerArgs() []string {
 func (r Resolved) RunScript() string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
-	b.WriteString("# Generado por el constructor llm de kindling (kling models add).\n")
+	b.WriteString("# Generado por el constructor llm de kindling (kling ai model add).\n")
 	b.WriteString("export LD_LIBRARY_PATH=/opt/llama.cpp\n")
 	if r.Threads > 0 {
 		fmt.Fprintf(&b, "THREADS=%d\n", r.Threads)

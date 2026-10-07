@@ -99,7 +99,7 @@ func cmdChispaDeploy(args []string) error {
 	return nil
 }
 
-// chispaDeployOptions es lo que necesita un despliegue: lo usan `kling chispa
+// chispaDeployOptions es lo que necesita un despliegue: lo usan `kling ai chispa
 // deploy` y `kling ai retrain` (una versión nueva de una tarea microvm es un
 // dorado nuevo, <snapshot>-vN).
 type chispaDeployOptions struct {

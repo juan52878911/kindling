@@ -65,6 +65,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
 - Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first
 - A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
+- Error hints name the current commands (`kling ai chispa deploy`, `kling ai model add`, `kling mcp add`), so following them no longer prints the old-name warning
 - `kling start` over a tenant's quota is refused before memory admission, instead of squeezing other machines or waiting up to 60 s first
 - A failed post-restore hooks batch no longer outlives the restore: after `kling stop` + `kling start` the machine is not reported as failed
 - With `-e`, a lost first health check of the guest agent is retried after 15 s instead of holding the environment in MMDS for up to 2 minutes

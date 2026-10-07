@@ -27,7 +27,7 @@ import (
 //
 // La decisión es la cascada de pkg/intent: las plantillas del dominio
 // (capa 1), Chispa + Chispa-slots (capa 2: en proceso, microsegundos; o
-// serverless, una réplica de `kling chispa deploy` que se despierta con la
+// serverless, una réplica de `kling ai chispa deploy` que se despierta con la
 // orden si el modelo de intención es backend "microvm", ver guestIntent) y,
 // para lo que esas dudan, el codificador de frases (capa 3): una réplica de
 // un dorado kind embed que pkg/scheduler despierta con la primera petición y

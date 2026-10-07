@@ -66,7 +66,7 @@ var embedCatalog = []Model{
 	},
 }
 
-// Los codificadores entran en el catálogo común: Find, IDs y `kling models`
+// Los codificadores entran en el catálogo común: Find, IDs y `kling ai model`
 // los tratan como a cualquier otro modelo.
 func init() { Catalog = append(Catalog, embedCatalog...) }
 
@@ -129,7 +129,7 @@ type EmbedResponse struct {
 }
 
 // Embed pide los vectores de inputs a una réplica por el proxy del daemon
-// (`kling models embed`, el calentamiento). El gateway y el entrenamiento
+// (`kling ai model embed`, el calentamiento). El gateway y el entrenamiento
 // hablan con la réplica directamente (pkg/codificador).
 func Embed(ctx context.Context, c *api.Client, ref string, inputs []string) (*EmbedResponse, time.Duration, error) {
 	body, err := json.Marshal(map[string]any{"input": inputs})

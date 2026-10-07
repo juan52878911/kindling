@@ -141,7 +141,7 @@ type RemoteAnswer struct {
 	Label     string
 	Prob      float64
 	Confident bool
-	// HasSlots dice si la réplica lleva modelo de huecos (kling chispa deploy
+	// HasSlots dice si la réplica lleva modelo de huecos (kling ai chispa deploy
 	// -slots); entonces Spans son sus huecos (quizá ninguno).
 	HasSlots bool
 	Spans    []slots.Span

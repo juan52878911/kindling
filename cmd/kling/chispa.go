@@ -20,7 +20,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/chispa/train"
 )
 
-// kling chispa: el clasificador lineal diminuto (pkg/chispa). Es del núcleo porque no
+// kling ai chispa: el clasificador lineal diminuto (pkg/chispa). Es del núcleo porque no
 // necesita daemon ni microVM: entrena y predice en la máquina donde corre el
 // CLI, y el gateway futuro lo usará como primer escalón de la cascada Chispa → VON.
 // Ver docs/chispa.md.

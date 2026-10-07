@@ -26,7 +26,7 @@ import (
 // por tarea, coste cero mientras nadie la usa).
 //
 // EL INVITADO NO ES DE FIAR. kling-chispa corre dentro de una microVM que sirvió
-// una imagen que alguien construyó (`kling chispa deploy`); nada impide que esa
+// una imagen que alguien construyó (`kling ai chispa deploy`); nada impide que esa
 // imagen esté corrompida, desincronizada con el registro del gateway tras un
 // redeploy, o (si algún día una tarea la sirve un tercero) directamente sea
 // hostil. Antes esto solo acotaba el TAMAÑO de la respuesta
@@ -76,7 +76,7 @@ const maxChispaGuestAnswerBytes = 256 << 10
 const maxGuestEvidence = 64
 
 // ChispaDeployAnnotation es la anotación (pkg/api/annotations.go) que
-// `kling chispa deploy` graba en el dorado de una tarea backend microvm: las
+// `kling ai chispa deploy` graba en el dorado de una tarea backend microvm: las
 // etiquetas del .chispa horneado dentro y su sha256. Es la fuente de verdad de
 // esas etiquetas para el gateway, que no tiene el .chispa de origen a mano (puede
 // vivir en otra máquina, o el daemon estar al otro lado de un SSH) y que, sobre
@@ -118,7 +118,7 @@ func (d clientDeployLookup) chispaLabels(ctx context.Context, snapshot string) (
 	}
 	if !ok || len(rec.Labels) == 0 {
 		return ChispaDeployRecord{}, fmt.Errorf(
-			"snapshot %q has no %s annotation with labels (deployed before this gateway could pin them; redeploy with kling chispa deploy)",
+			"snapshot %q has no %s annotation with labels (deployed before this gateway could pin them; redeploy with kling ai chispa deploy)",
 			snapshot, ChispaDeployAnnotation)
 	}
 	return rec, nil
@@ -132,7 +132,7 @@ type deployCacheEntry struct {
 
 // deployCacheTTL es cuánto se confía en una entrada de la caché antes de
 // volver a preguntar al daemon. El dorado no cambia salvo un redeploy
-// (`kling chispa deploy -replace`), así que no hace falta preguntar en cada
+// (`kling ai chispa deploy -replace`), así que no hace falta preguntar en cada
 // clasificación; este plazo acota cuánto tarda el gateway en enterarse de uno.
 const deployCacheTTL = 30 * time.Second
 
@@ -353,7 +353,7 @@ func guestConfident(p chispa.Prediction, thresholds map[string]float64) (tau flo
 	return tau, p.Prob >= tau
 }
 
-// classifyGuest pregunta a una réplica del dorado snap (kling chispa deploy),
+// classifyGuest pregunta a una réplica del dorado snap (kling ai chispa deploy),
 // valida su respuesta contra el registro de despliegue y devuelve la
 // predicción en la misma forma que chispa.Model.Predict/PredictFull, más las
 // etiquetas válidas del modelo (para escalar), para que Classify no tenga que

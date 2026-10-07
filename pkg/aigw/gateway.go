@@ -136,7 +136,7 @@ type Gateway struct {
 	repAt    time.Time
 	repCache map[string]replicaCount
 
-	// deploy consulta ChispaDeployAnnotation (el registro de `kling chispa deploy`):
+	// deploy consulta ChispaDeployAnnotation (el registro de `kling ai chispa deploy`):
 	// la fuente de verdad de las etiquetas de un modelo chispa backend microvm, ya
 	// que el invitado no es de fiar (chispaguest.go). deployMu/deployCache lo
 	// cachean deployCacheTTL para no preguntar al daemon en cada clasificación.
@@ -454,7 +454,7 @@ func chispaDecide(m *chispa.Model, tc *TaskConfig, in chispa.Input, full bool) (
 // escalation arma la pregunta a VON de una escalada: con top_k, VON solo elige
 // entre los candidatos de Chispa. p tiene que traer la distribución (PredictFull),
 // y labels todas las etiquetas del modelo (chispa.Model.Labels en proceso; en una
-// tarea con backend microvm, las del registro de `kling chispa deploy`, no las
+// tarea con backend microvm, las del registro de `kling ai chispa deploy`, no las
 // que mande el invitado: ver chispaguest.go).
 func (g *Gateway) escalation(tc *TaskConfig, labels []string, in chispa.Input, p chispa.Prediction) ([]string, chatReq) {
 	allowed := labels
@@ -517,7 +517,7 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	escalar := casc.On() && req.Mode != "chispa"
 
 	// La predicción sale de dos sitios: dentro de este proceso (chispaCache, el
-	// camino de siempre) o de una réplica en una microVM (kling chispa deploy,
+	// camino de siempre) o de una réplica en una microVM (kling ai chispa deploy,
 	// docs/chispa-serverless.md). A partir de aquí el resto de la función no sabe
 	// cuál fue: p, tau, confident y labels ya bastan.
 	var p chispa.Prediction
@@ -916,7 +916,7 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 		// desplegar.
 		return nil, statusf(http.StatusBadRequest,
 			"task %q: chispa model %q has backend microvm; calibrate needs the model file, and a microvm model has none locally (it lives baked into the replica's image). "+
-				"Recalibrate by retraining and redeploying: kling chispa train ... -o new.chispa && kling chispa deploy %s -model new.chispa -replace",
+				"Recalibrate by retraining and redeploying: kling ai chispa train ... -o new.chispa && kling ai chispa deploy %s -model new.chispa -replace",
 			req.Task, tc.Chispa, tc.Chispa)
 	}
 	path := mc.Path

@@ -269,7 +269,7 @@ func Labels(ref, service string, extra map[string]string) map[string]string {
 }
 
 // MakeGolden arranca una microVM de la imagen, espera a que el modelo cargue,
-// la calienta, la congela como dorado y la borra. Es lo que hace `kling models
+// la calienta, la congela como dorado y la borra. Es lo que hace `kling ai model
 // add` tras construir la imagen, y lo que hará un gateway que (re)cree
 // dorados: por ejemplo tras reiniciar el host, que invalida los snapshots.
 func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenResult, error) {
