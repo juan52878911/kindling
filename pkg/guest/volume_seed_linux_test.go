@@ -47,7 +47,12 @@ func mustChmod(t *testing.T, path string, mode uint32) {
 // subdirectorio, un fichero, un enlace que no hay que seguir y una fifo.
 func imagenGrafana(t *testing.T) string {
 	t.Helper()
-	src := filepath.Join(t.TempDir(), "grafana")
+	return imagenGrafanaEn(t, t.TempDir())
+}
+
+func imagenGrafanaEn(t *testing.T, parent string) string {
+	t.Helper()
+	src := filepath.Join(parent, "grafana")
 	if err := os.MkdirAll(filepath.Join(src, "plugins", "ro"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -238,9 +243,10 @@ func TestSeedVolumeSkipsImageLostFound(t *testing.T) {
 	}
 }
 
-// El camino de verdad: un ext4 recién hecho, en un loop, montado aparte para
-// copiar y desmontado después. Necesita root.
-func TestSeedFromImageOnExt4(t *testing.T) {
+// loopExt4 hace un ext4 de 32 MiB en un loop y devuelve el dispositivo. Salta
+// el test si no corre como root o faltan las herramientas.
+func loopExt4(t *testing.T) string {
+	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (loop mounts)")
 	}
@@ -265,6 +271,71 @@ func TestSeedFromImageOnExt4(t *testing.T) {
 	}
 	dev := strings.TrimSpace(string(out))
 	t.Cleanup(func() { exec.Command("losetup", "-d", dev).Run() })
+	return dev
+}
+
+// mountExt4 monta un loopExt4 nuevo en un directorio temporal y lo desmonta al
+// acabar el test.
+func mountExt4(t *testing.T) string {
+	t.Helper()
+	dev := loopExt4(t)
+	mnt := t.TempDir()
+	if err := syscall.Mount(dev, mnt, "ext4", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Unmount(mnt, syscall.MNT_DETACH) })
+	return mnt
+}
+
+// La raíz del invitado es un overlay de dos ext4 sin xino (minimal-init.sh y un
+// kernel sin CONFIG_OVERLAY_FS_XINO_AUTO). Ahí solo los directorios llevan el
+// st_dev del overlay: los ficheros, los enlaces y las fifos llevan el de la
+// capa de abajo, y nada de eso puede tomarse por otro montaje.
+func TestSeedVolumeFromOverlayWithoutXino(t *testing.T) {
+	lower := mountExt4(t)
+	upper := mountExt4(t)
+	src := imagenGrafanaEn(t, lower)
+	for _, d := range []string{"u", "w"} {
+		if err := os.Mkdir(filepath.Join(upper, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	merged := t.TempDir()
+	opts := "lowerdir=" + lower + ",upperdir=" + filepath.Join(upper, "u") +
+		",workdir=" + filepath.Join(upper, "w") + ",xino=off"
+	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		t.Skipf("no overlayfs with xino=off: %v", err)
+	}
+	t.Cleanup(func() { syscall.Unmount(merged, syscall.MNT_DETACH) })
+	src = filepath.Join(merged, filepath.Base(src))
+	if dir, file := statT(t, src), statT(t, filepath.Join(src, "grafana.ini")); dir.Dev == file.Dev {
+		t.Logf("this kernel gives files the overlay's st_dev (dir %d, file %d)", dir.Dev, file.Dev)
+	}
+
+	root := nuevoVolumen(t)
+	t.Cleanup(func() { os.Chmod(filepath.Join(root, "plugins", "ro"), 0o755) })
+	img := statImageDir(src)
+	if seeded, err := seedVolume(root, img.path, img); err != nil || !seeded {
+		t.Fatalf("seedVolume = %v, %v", seeded, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "grafana.ini")); err != nil || string(b) != "[server]\n" {
+		t.Errorf("file from the overlay's lower layer not copied: %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "plugins", "ro", "a.txt")); err != nil || string(b) != "hola" {
+		t.Errorf("nested file not copied: %q, %v", b, err)
+	}
+	if l, err := os.Readlink(filepath.Join(root, "fuera")); err != nil || l != "/etc/passwd" {
+		t.Errorf("symlink not copied: %q, %v", l, err)
+	}
+	if st := statT(t, filepath.Join(root, "tubo")); st.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+		t.Errorf("fifo not copied: mode %o", st.Mode)
+	}
+}
+
+// El camino de verdad: un ext4 recién hecho, en un loop, montado aparte para
+// copiar y desmontado después. Necesita root.
+func TestSeedFromImageOnExt4(t *testing.T) {
+	dev := loopExt4(t)
 
 	src := imagenGrafana(t)
 	seedFromImage(dev, statImageDir(src))

@@ -175,12 +175,8 @@ func seedFits(src string, dev uint64) (bool, error) {
 		if err := syscall.Lstat(path, &st); err != nil {
 			return err
 		}
-		if uint64(st.Dev) != dev {
-			// Otro montaje colgado dentro: no es de la imagen.
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		if isOtherMount(&st, dev) {
+			return filepath.SkipDir
 		}
 		entries++
 		if st.Mode&syscall.S_IFMT == syscall.S_IFREG {
@@ -197,9 +193,22 @@ func seedFits(src string, dev uint64) (bool, error) {
 	return err == nil, err
 }
 
+// isOtherMount dice si la entrada es la raíz de otro montaje colgado dentro del
+// directorio de la imagen, que no es de la imagen y no se copia.
+//
+// Solo mira los directorios, que es donde va un punto de montaje. Mirar el
+// st_dev de todo dejaría el volumen sin un solo fichero: la raíz del invitado
+// es un overlay sin xino (el kernel no trae CONFIG_OVERLAY_FS_XINO_AUTO), y ahí
+// los directorios llevan el st_dev del overlay pero los ficheros, enlaces y
+// fifos el de la capa de abajo. Un fichero suelto montado con bind se copiaría
+// con lo que el bind enseña; en el arranque de una máquina no los hay.
+func isOtherMount(st *syscall.Stat_t, dev uint64) bool {
+	return st.Mode&syscall.S_IFMT == syscall.S_IFDIR && uint64(st.Dev) != dev
+}
+
 // copyTree copia src en dst (que no debe existir) conservando tipo, dueño,
-// modo y fechas, sin seguir nunca un enlace. Las entradas de otro dispositivo
-// (montajes colgados dentro de src) y los sockets se omiten; los enlaces duros
+// modo y fechas, sin seguir nunca un enlace. Los montajes colgados dentro de src (ver
+// isOtherMount) y los sockets se omiten; los enlaces duros
 // se copian como ficheros independientes. Los atributos extendidos no se
 // copian.
 func copyTree(src, dst string, dev uint64) error {
@@ -232,11 +241,8 @@ func copyTree(src, dst string, dev uint64) error {
 		if err := syscall.Lstat(path, &st); err != nil {
 			return err
 		}
-		if uint64(st.Dev) != dev {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		if isOtherMount(&st, dev) {
+			return filepath.SkipDir
 		}
 		target := filepath.Join(dst, rel)
 		switch st.Mode & syscall.S_IFMT {
