@@ -285,6 +285,7 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 	// Todo lo que va tras `--` son los argumentos de Firecracker. El socket es
 	// relativo al chroot: jailer lo crea en /run dentro del jail.
 	argv = append(argv, "--", "--api-sock", "/run/firecracker.socket")
+	argv = append(argv, argsVMM()...)
 	return argv, nil
 }
 

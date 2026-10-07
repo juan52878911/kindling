@@ -683,7 +683,7 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 // entrega a Firecracker. No se interpreta aquí: el esquema lo entiende el bridge.
 func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 	var data json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, api.MaxMMDSBytes)).Decode(&data); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}

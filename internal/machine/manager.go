@@ -1798,7 +1798,7 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 	}
 	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
 	// Orden: primero el namespace (necesita privilegios), después soltarlos.
-	argv := m.priv.Wrap([]string{m.fcBin, "--api-sock", sock})
+	argv := m.priv.Wrap(append([]string{m.fcBin, "--api-sock", sock}, argsVMM()...))
 	if n != nil {
 		argv = n.Wrap(argv[0], argv[1:]...)
 	}
@@ -2540,6 +2540,14 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	}
 	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
 		return nil, err
+	}
+	// Con los marcadores y el entorno pendiente puede pasarse del almacén
+	// del VMM: se dice aquí, con el tope, y no con el error crudo del VMM.
+	if b, err := json.Marshal(doc); err != nil {
+		return nil, err
+	} else if len(b) > api.MaxMMDSBytes {
+		return nil, fmt.Errorf("the MMDS store would be %d bytes with the machine's credential placeholders, "+
+			"over the limit of %d", len(b), api.MaxMMDSBytes)
 	}
 	c := fc.New(sock)
 	if err := c.PutMMDSData(ctx, doc); err != nil {

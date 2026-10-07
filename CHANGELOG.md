@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Firecracker starts with a 1 MiB MMDS store (was its 50 KiB default), so a 32 KiB `-e` environment plus session secrets fits; a larger store is refused with the limit (Linux)
 - Simultaneous freezes and saves reserve their disk: they no longer all pass a free-space check that only one of them fits
 - A full copy-on-write store no longer pauses a machine that is in the middle of freezing
 - A network setup that fails halfway no longer leaves its namespace and veth behind until the daemon restarts (Linux)
