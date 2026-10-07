@@ -804,7 +804,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.Start(r.Context(), r.PathValue("ref"), req.Env)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)

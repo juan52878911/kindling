@@ -63,10 +63,10 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 	defer m.mu.Unlock()
 	live := m.byID[id]
 	if live == nil {
-		return nil, fmt.Errorf("machine %q doesn't exist", id)
+		return nil, noExiste(id)
 	}
 	if !arrancable(live) {
-		return nil, fmt.Errorf("only a stopped machine can be started (it is %s)", live.State)
+		return nil, estadoInvalido("only a stopped machine can be started (it is %s)", live.State)
 	}
 	var vols []resolvedVolume
 	if len(live.Volumes) > 0 {
@@ -95,12 +95,12 @@ func arrancable(mc *api.Machine) bool {
 func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StateRunning {
 		return cur, nil
@@ -110,7 +110,7 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		if cur.State == api.StateWarm || cur.State == api.StatePaused {
 			hint = " (kling thaw wakes it with its memory)"
 		}
-		return nil, fmt.Errorf("only a stopped machine can be started (it is %s)%s", cur.State, hint)
+		return nil, estadoInvalido("only a stopped machine can be started (it is %s)%s", cur.State, hint)
 	}
 	mc = cur
 	// Lo que no necesita nada del host, primero: un entorno incompleto no
@@ -291,7 +291,7 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		m.mu.Unlock()
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		m.desmontarRed(netcfg, mc.ID)
-		return nil, fmt.Errorf("machine %q was removed while it was being started", mc.Name)
+		return nil, retiradaDurante(mc.Name, "started")
 	}
 	now := time.Now()
 	live.State = api.StateRunning
