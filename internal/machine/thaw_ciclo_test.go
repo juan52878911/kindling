@@ -110,7 +110,7 @@ func TestThawPasaPorLaAdmisionDeMemoria(t *testing.T) {
 
 // Thaw seguía con la copia de antes del cerrojo si la máquina se borró
 // mientras esperaba: lanzaba un VMM para algo que ya no existe. Como Freeze y
-// Commit, ahora lo dice.
+// Commit, ahora lo dice, y como un "no existe".
 func TestThawDeUnaBorradaMientrasEsperaba(t *testing.T) {
 	t.Setenv("KLING_MAX_MEM_PRESSURE", "0")
 	m := newTestManager(t)
@@ -133,6 +133,12 @@ func TestThawDeUnaBorradaMientrasEsperaba(t *testing.T) {
 	case err := <-res:
 		if err == nil || !strings.Contains(err.Error(), "doesn't exist") {
 			t.Fatalf("Thaw de una borrada = %v; quería que dijera que no existe", err)
+		}
+		// Y que sea un "no existe" de verdad: el daemon lo contesta con un
+		// 404, que es como el planificador (pkg/scheduler/aislada.go) da por
+		// perdida una sesión aislada. Con un error sin marcar era un 400.
+		if !errors.Is(err, ErrNoMachine) {
+			t.Fatalf("Thaw de una borrada = %v; quería ErrNoMachine", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Thaw no volvió")
