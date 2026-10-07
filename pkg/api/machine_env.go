@@ -35,6 +35,11 @@ const CapabilityMachineEnv = "machine-env"
 // POST /machines/{ref}/start (arrancar otra vez una máquina parada).
 const CapabilityStart = "start"
 
+// CapabilityDisk es la capacidad de GET /info que dice que el daemon entiende
+// RunRequest.DiskMiB. Un daemon anterior ignoraría el campo y daría el disco
+// fijo de 512 MiB sin un solo error.
+const CapabilityDisk = "disk"
+
 // MachineEnvBootParam le dice al agente que hay entorno de la máquina en MMDS
 // y que no arranque el servicio sin él.
 const MachineEnvBootParam = "kling.env"

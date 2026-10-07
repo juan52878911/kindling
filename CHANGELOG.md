@@ -27,6 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `/metrics`: operations by result (run, thaw, freeze, start), admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
 - `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
+- `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
 
 ### Changed
 

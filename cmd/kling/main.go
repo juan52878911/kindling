@@ -501,15 +501,18 @@ func cmdRun(args []string) error {
 	if _, err := api.MachineEnvMap(env); err != nil {
 		return err
 	}
-	if len(env) > 0 {
+	if len(env) > 0 || (*disk > 0 && *from == "") {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
-		// su entorno, sin un solo error.
+		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
+		if len(env) > 0 && !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
 			return fmt.Errorf("the daemon (%s) does not take -e at run: update it", info.Version)
+		}
+		if *disk > 0 && *from == "" && !slices.Contains(info.Capabilities, api.CapabilityDisk) {
+			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {

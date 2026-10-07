@@ -29,7 +29,7 @@ kling db fork t1 -n 4                    # 4 copias de t1 tal como está ahora
 kling db reset t1                        # t1 vuelve a salir de la plantilla
 kling db rm t1
 kling db doctor t1        ·   kling db audit t1 -since 1h
-kling db attach agente t1 -role agent    # otro agente, otra microVM, por el proxy (Linux)
+kling db attach agente t1 -role agent    # otro agente, otra microVM, por el proxy
 ```
 
 ## Subcomandos
@@ -40,7 +40,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `ls [-owner T] [-json]` (o `ps`) | las copias del dueño: motor, golden, estado y edad. Marca con `!` y explica debajo la que el daemon retuvo porque el almacén de copia al escribir se llenó (se reanuda sola tras `kling cow grow`) y la que vio errores de disco ([cow.md](cow.md#almacén-lleno)) |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
 | `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
-| `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
+| `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña (en macOS, por el broker de enlaces del daemon); ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `role <copia> -login -name R [-rm]` | deja entrar desde el host a un rol que **ya existe** (los que crean las migraciones: `app_user`, uno por servicio): clave nueva solo de esa copia (al invitado, su verificador), `LOGIN` y su línea de `pg_hba.conf`; no le cambia ningún privilegio. Un superusuario no. Después, `connect <copia> -role R`. `-rm` quita la línea y la clave (el rol se queda) |

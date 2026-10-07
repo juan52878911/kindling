@@ -832,7 +832,7 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   memoria de la plantilla.
 - **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
   RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
-  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
+  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling template rm`. El `mem.file`
   de un nodo con aristas `credential` contiene los marcadores que el invitado tenía en
   memoria (en su entorno, en la memoria de su aplicación). **No son las claves**: la
   clave nunca entra al invitado ni al volcado, y la plantilla no se lleva ni el almacén
@@ -1333,9 +1333,12 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   (ver 11): arrancar sin él exige `KLING_JAILER=0` a propósito, y eso deja un aviso en el
   log. Quien lo pone y no lo lee sigue corriendo el VMM con el sistema de ficheros del
   host y los permisos de su usuario.
-- **Cuota de disco por overlay, no por host.** Cada overlay son 512 MiB lógicos; la
-  admisión por disco (ver 12) impide crear máquinas nuevas con el disco casi lleno, pero
-  las que ya corren pueden seguir llenando los suyos.
+- **Cuota de disco por overlay, no por host.** Cada overlay es disperso y de tamaño
+  lógico fijo al nacer: 512 MiB por defecto, de 64 MiB a 256 GiB con `run -disk`
+  (`KLING_MAX_DISK_MIB` baja el máximo). La admisión por disco (ver 12) rechaza una
+  máquina cuyo `-disk` no quepa en el disco libre y crear máquinas nuevas con el disco
+  casi lleno, pero no reserva: las que ya corren pueden seguir llenando los suyos hasta
+  su tamaño, y entre todas pasar de lo libre.
 - **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
   `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
   microVMs. Receta en `docs/cifrado.md`.
@@ -1399,7 +1402,8 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   o un rol de solo lectura por agente con `-role`). Las consultas viajan en claro por el
   veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
   o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
-  repetirlos. Solo Linux por ahora (ver 7).
+  repetirlos. En Linux y en macOS; en macOS el `kling-vz` del agente pide cada conexión
+  al broker de enlaces del daemon (ver 7).
 - **El registro de auditoría es observabilidad, no prueba.** En Linux vive en
   `<root>/audit`, fuera del alcance del VMM (ver 7), pero lo migrado desde versiones
   anteriores estuvo en un directorio que el VMM podía tocar. En macOS lo escribe

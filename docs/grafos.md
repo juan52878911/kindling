@@ -159,7 +159,7 @@ Receta para ramificar un grafo con un volumen en escritura (p. ej. la `db`):
 Cada rama escribe en el suyo, y el original sigue con el que tenía.
 
 Las plantillas de un snapshot son **persistentes**: no se borran con el grafo (`graph
-rm` solo quita las temporales de un fork); se quitan con `kling snapshot rm`. La de un
+rm` solo quita las temporales de un fork); se quitan con `kling template rm`. La de un
 nodo con aristas `credential` lleva en su memoria los **marcadores** que tenía el
 invitado, no las claves: ni la plantilla ni sus instancias reciben el almacén de
 credenciales del nodo, y un marcador solo sirve en el proxy de la máquina a la que se

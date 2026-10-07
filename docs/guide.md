@@ -363,11 +363,11 @@ $ kling run -name mcp-demo
 efad9e5f7003  mcp-demo  booted cold in 54 ms
 
 $ kling freeze mcp-demo
-efad9e5f7003  warm  (754 ms, 256 MiB on disk)
+efad9e5f7003  frozen  (754 ms, 256 MiB on disk)
 
 $ kling ps
 ID             NAME       IMAGE     STATE   CPU/MEM    DISK   EGRESS   AGE   LAST OP
-efad9e5f7003   mcp-demo   default   warm    1/256MiB   81M    none     17s   freeze 754ms, 256MiB
+efad9e5f7003   mcp-demo   default   frozen  1/256MiB   81M    none     17s   freeze 754ms, 256MiB
 
 $ kling thaw mcp-demo
 efad9e5f7003  running  (22 ms)
@@ -458,7 +458,7 @@ kindling  ssh://juan@192.168.2.60
    └─◆ (booted cold)
       └── plantilla      running  172.30.0.6      ⌀     8M  boot 46ms
 
-  4 running · 0 warm · 0 stopped   disk: 9M own + 83M shared
+  4 running · 0 frozen · 0 stopped   disk: 9M own + 83M shared
   egress:  ⌀ isolated   → internet (private networks are always blocked)
 ```
 
@@ -688,7 +688,7 @@ kling run -name jottings -volume notes:/data
 **Consistent without freezing the filesystem.** There is no live `fsfreeze` inside the
 guest, so the same rule that decides who mounts decides when a copy is safe: a snapshot is
 taken only while nobody **writes** (readers are fine, they do not change a block), and a
-restore only while nobody uses the volume at all. A frozen or warm machine counts: it still
+restore only while nobody uses the volume at all. A frozen machine counts: it still
 has the volume mounted, with its ext4 cache inside the frozen memory. While the copy runs,
 the volume is reserved the same way a booting machine reserves it, so a `run` that arrives
 halfway is turned down with "being snapshotted" or "being restored".
@@ -1347,7 +1347,8 @@ them, and they survive a daemon restart — they live encrypted in the machine's
 placeholder stays, so the running process needs no restart.
 
 Every request through the proxy, and every refusal, is logged per machine (0600, rotated
-at 1 MiB; on Linux in `<root>/audit/<id>.jsonl`, out of the VMM's reach; on macOS in the
+at 4 MiB keeping 3 generations — `daemon.credaudit_max_mib`, `daemon.credaudit_generations` or
+`KLING_CREDAUDIT=MIB:GENS`; on Linux in `<root>/audit/<id>.jsonl`, out of the VMM's reach; on macOS in the
 machine's directory, `credaudit.jsonl`):
 
 ```sh
@@ -1527,8 +1528,9 @@ instances share pages.
 - A host with KVM and `cpu: host` (or equivalent) so the virtualization extensions get through
 - If it runs nested, nested virtualization enabled on the parent host
 - `firecracker` + `jailer`, `e2fsprogs`, `squashfs-tools`, `curl`, `jq`
-- On **macOS**: Apple Silicon M3+ with macOS 15+, via a Linux VM with nested
-  virtualization — see [On a Mac](#on-a-mac-apple-silicon)
+- On **macOS**: Apple Silicon with macOS 14+, natively with the `vz` backend (`kling-vz`,
+  no root, no Linux VM); or M3+ with macOS 15+ running Firecracker inside a Linux VM with
+  nested virtualization — see [On a Mac](#on-a-mac-apple-silicon)
 
 ## Scripts
 
