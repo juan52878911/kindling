@@ -306,17 +306,21 @@ v0.17.0; usa `kling upgrade`" y solo sigue con `--force`.
 ### 3.5 Pruebas
 
 - **Fijaciones de estado viejo en `testdata/`.** Por cada formato versionado,
-  un fichero real de cada versión anterior (`testdata/estado/state.v0.json`,
-  `…/meta.v0.json`), y un test que lo carga con el binario actual y comprueba
-  que no pierde nada. Se generan una vez, con el binario de esa versión, y no
-  se tocan: son la definición de "lo que había".
+  un fichero real de cada versión anterior (los de v0.17 en
+  `internal/machine/testdata/esquema/v0.17/`), y un test que lo carga con el
+  binario actual y comprueba que no pierde nada
+  (`internal/machine/fijaciones_v017_test.go`). Se generan una vez, con el
+  `pkg/api` de esa versión, y no se tocan: son la definición de "lo que había".
 - **Un fichero del futuro por formato**: `schema` = actual + 1 con un campo
   inventado, y el test de que se rechaza sin pisarlo (como
   `TestEstadoMasNuevoSeRechazaSinPisarlo`).
 - **Guarda de CI:** un test que falla si cambia un struct persistido
-  (`api.Machine`, `api.Snapshot`, `credproxy.Credential`) sin tocar su
-  constante de versión, comparando los campos con una lista comiteada. Es lo
-  que impide el riesgo 1 por descuido.
+  (`api.Machine`, `api.Snapshot`, `credproxy.Credential`, `api.CredentialSpec`)
+  sin tocar su constante de versión, comparando los campos con una lista
+  comiteada (`TestCamposPersistidos`, `internal/machine/campos_persistidos_test.go`).
+  Es lo que impide el riesgo 1 por descuido. Si solo se añaden campos, se
+  regenera la lista con `go test ./internal/machine -run TestCamposPersistidos
+  -update` después de decidir si un kling anterior los puede ignorar.
 - **e2e "desde la anterior"** (`scripts/94-e2e-upgrade.sh`): instalar la
   etiqueta N-1 con `install.sh --tag`, crear estado (una máquina parada, una
   congelada, un dorado, un volumen, una credencial, un enlace de MCP), `kling
@@ -366,8 +370,8 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 3 | `credentials.enc` con byte de versión | `KLCS` + `0x01` delante del nonce, también en plantillas y secretos de grafo; sin él es v0 y se reescribe (con copia) en el siguiente sellado; un byte mayor se rechaza sin tocar el fichero | S — **hecho** |
 | 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge` (y las opciones de volumen que no conocen: solo lectura); `/healthz` JSON si se pide con `Accept`; versión y `caps` del agente en la máquina (`api.Machine.Agent`), no en la receta: construir no arranca el invitado | M — **hecho** |
 | 5 | `api` en `/info` y `max_api` en extensiones | `api` en `/info` y `X-Kling-API` en cada respuesta, que `pkg/api` compara (aviso si el daemon es más nuevo, error si es más viejo que el mínimo); `kling plugins` avisa de las que no casan; `kling_vz` a 2 | S — **hecho** |
-| 6 | guarda de structs persistidos | test que compara campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` con una lista comiteada y exige subir la versión | S |
-| 7 | fijaciones de `testdata/` | los ficheros de v0.17 de cada formato y sus tests de carga | S |
+| 6 | guarda de structs persistidos | `TestCamposPersistidos` compara nombre JSON y tipo de los campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` y `api.CredentialSpec` (y de los structs del módulo que cuelgan de ellos) con `internal/machine/testdata/esquema/campos-persistidos.txt`, que también apunta la versión de cada fichero. Quitar o cambiar de tipo un campo sin subir la versión falla y `-update` se niega; añadir uno se registra con `-update` | S — **hecho** |
+| 7 | fijaciones de `testdata/` | `internal/machine/testdata/esquema/v0.17/`: `state.json`, `meta.json` y `recipe.json` con todos los campos de v0.17.0 (generados con su `pkg/api`); `fijaciones_v017_test.go` comprueba que se leen, que migran con su `.v0.bak` y que ningún campo se pierde ni cambia, tanto en el fichero reescrito como al leerlo al struct. `credentials.v0.enc` ya estaba (PR 3) | S — **hecho** |
 | 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L |
 | 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M |
 | 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M |
