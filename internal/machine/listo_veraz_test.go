@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -214,5 +215,68 @@ func TestGanchosPendientesNoSobrevivenAParar(t *testing.T) {
 	}
 	if _, ok := m.ganchosPendientes.Load(id); ok {
 		t.Fatal("el arranque en frío heredó la tanda pendiente")
+	}
+}
+
+// agenteTardio sirve a en una dirección que no escucha hasta pasado tarde: un
+// invitado cuyo agente tarda en contestar la primera vez.
+func agenteTardio(t *testing.T, h http.Handler, tarde time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	srv := &http.Server{Handler: h}
+	t.Cleanup(func() { srv.Close() })
+	go func() {
+		time.Sleep(tarde)
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			_ = srv.Serve(ln)
+		}
+	}()
+	return addr
+}
+
+// Sin poder mirar la imagen, la gracia para la primera respuesta del agente
+// sale del plazo del commit (tres cuartos), no de un fijo: un agente que
+// contesta pasada la gracia mínima, pero dentro del plazo, no se toma por una
+// imagen sin agente y se espera a su sonda.
+func TestListoParaCongelarAgenteTardio(t *testing.T) {
+	antes := graciaAgenteMin
+	graciaAgenteMin = 100 * time.Millisecond
+	t.Cleanup(func() { graciaAgenteMin = antes })
+	for _, c := range []struct {
+		nombre string
+		a      *agenteListo
+		listo  bool
+	}{
+		{"listo", &agenteListo{listoEn: 1}, true},
+		{"aún arrancando", &agenteListo{listoEn: 1 << 30}, false},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			m := &Manager{byID: map[string]*api.Machine{}}
+			id := "abcdef0123456789"
+			m.byID[id] = &api.Machine{ID: id, Name: "x", State: api.StateRunning, Image: "img",
+				Forwards: map[string]string{"8080": agenteTardio(t, c.a, 500*time.Millisecond)}}
+			err := m.listoParaCongelar(context.Background(), id, 2*time.Second)
+			c.a.mu.Lock()
+			llamadas := c.a.llamadas
+			c.a.mu.Unlock()
+			if llamadas == 0 {
+				t.Fatalf("congeló sin esperar al agente (%v)", err)
+			}
+			if c.listo != (err == nil) || (!c.listo && !errors.Is(err, ErrNotReady)) {
+				t.Fatalf("listoParaCongelar = %v; listo %v", err, c.listo)
+			}
+		})
+	}
+	if g := graciaAgente(0); g != DefaultReadyWait*3/4 {
+		t.Errorf("gracia con el plazo por defecto = %s", g)
+	}
+	graciaAgenteMin = vigiaAgenteMax
+	if g := graciaAgente(5 * time.Second); g != vigiaAgenteMax {
+		t.Errorf("gracia con un plazo corto = %s; nunca menos de %s", g, vigiaAgenteMax)
 	}
 }

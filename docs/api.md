@@ -675,8 +675,9 @@ Compatibilidad: un agente anterior (`404`, o el `400` del puente viejo) o una
 imagen sin nada de esto cuentan como "nada que esperar", y una imagen sin agente
 no retrasa un commit (se sondea el puerto antes): lo de siempre. Si el daemon no
 puede mirar la imagen (sin `debugfs`) y su agente aún no ha contestado nunca,
-commit y fork esperan hasta 30 s a que conteste antes de darla por imagen sin
-agente.
+commit y fork esperan a que conteste tres cuartos de su plazo (`-wait`; 90 s con
+los 2 min por defecto, nunca menos de 30 s) antes de darla por imagen sin agente.
+Si el plazo no da para eso, fallan en vez de congelar a ciegas.
 
 Si el `/resync` de una restauración falla, la copia aún dice lo que se guardó en
 el dorado (ganchos `done`): el daemon lanza igualmente sus ganchos en cuanto el

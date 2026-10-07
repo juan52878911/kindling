@@ -356,14 +356,15 @@ func (m *Manager) vigilarListo(id string, inicial *api.GuestReady) {
 //
 // Si no se puede saber (sin debugfs, imagen ilegible), ante la duda se espera
 // como si declarara: a que el agente conteste y diga si está listo. Solo si
-// en GraciaAgente no contesta nadie se da por imagen sin agente; sin eso, una
-// imagen sin agente no se podría congelar nunca en un host sin debugfs.
+// en la gracia (graciaAgente) no contesta nadie se da por imagen sin agente;
+// sin eso, una imagen sin agente no se podría congelar nunca en un host sin
+// debugfs.
 func (m *Manager) listoParaCongelar(ctx context.Context, ref string, plazo time.Duration) error {
 	o := OpcionesListo{Plazo: plazo}
 	if decl, seguro := m.declaraListo(ctx, ref); seguro {
 		o.SinAgenteVale = !decl
 	} else {
-		o.GraciaAgente = vigiaAgenteMax
+		o.GraciaAgente = graciaAgente(plazo)
 	}
 	_, err := m.WaitReady(ctx, ref, o)
 	if err == nil || errors.Is(err, ErrNoMachine) || errors.Is(err, ErrNotRunning) {
@@ -371,6 +372,26 @@ func (m *Manager) listoParaCongelar(ctx context.Context, ref string, plazo time.
 	}
 	return fmt.Errorf("%w.\nFreezing it now would give every copy a guest that has not finished booting. "+
 		"Check it with `kling machine ready %s`, or skip the check (kling save -force, skip_ready)", err, ref)
+}
+
+// graciaAgenteMin es lo menos que se espera la primera respuesta del agente
+// antes de dar una imagen por sin agente (ver graciaAgente). Variable para
+// los tests.
+var graciaAgenteMin = vigiaAgenteMax
+
+// graciaAgente es la gracia de listoParaCongelar ante la duda: tres cuartos
+// del plazo del commit, y nunca menos de graciaAgenteMin. Atada al plazo y no
+// fija: un agente que tarda más de 30 s en contestar la primera vez (un
+// invitado lento arrancando) no se toma por una imagen sin agente mientras
+// quien congela aún está dispuesto a esperar. Con un plazo corto la gracia lo
+// alcanza, y entonces se falla (ErrNotReady) en vez de congelar a ciegas.
+// El precio: una imagen sin agente, en un host sin debugfs, espera esos tres
+// cuartos antes de congelarse.
+func graciaAgente(plazo time.Duration) time.Duration {
+	if plazo <= 0 {
+		plazo = DefaultReadyWait
+	}
+	return max(graciaAgenteMin, plazo*3/4)
 }
 
 // declaraListo dice si la máquina ref tiene sonda o ganchos que esperar antes
