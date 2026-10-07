@@ -6,7 +6,7 @@
 // varios marcos seguidos y salta los marcos saltables. La memoria está
 // acotada: la ventana que declara un marco no puede pasar de MaxWindow
 // (128 MiB, la de zstd --long), y lo que se guarda de historia nunca pasa
-// de vez y media la ventana más un bloque. Una entrada mala da un error, no
+// de la ventana, más media ventana (o 1 MiB) y un bloque. Una entrada mala da un error, no
 // un pánico ni un bucle: cada longitud y cada desplazamiento se comprueban
 // antes de usarlos. Si el marco lleva su xxhash64, se comprueba al final;
 // de todos modos, quien llama ya verificó el sha256 de la capa entera.

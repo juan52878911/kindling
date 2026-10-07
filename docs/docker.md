@@ -17,6 +17,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Datos que sobrevivan a la máquina | `-volume nombre:/ruta` (un `VOLUME` de la imagen no crea nada solo) |
 | Más disco para la propia máquina | `-disk 4G` (disperso: cuesta lo que se escribe) |
 | Fijar la imagen | la etiqueta se resuelve una vez a digest y queda en la receta; `kling image recipe N` |
+| Capas `tar+zstd` | igual que las gzip: se leen con un descompresor propio, sin dependencias ([imagenes.md](imagenes.md#imágenes-de-docker-el-constructor-oci)) |
 | Saber que está lista | el `HEALTHCHECK` de la imagen, o el primer puerto de `EXPOSE`; `-wait-ready`, `kling machine ready N` |
 | Ver qué dice el servicio | `kling logs -service N` |
 | Pararla como Docker | `kling stop` manda la `STOPSIGNAL` de la imagen antes de apagar; el disco de la máquina se queda |

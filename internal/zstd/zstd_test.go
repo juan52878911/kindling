@@ -382,7 +382,8 @@ func TestHistoryBound(t *testing.T) {
 }
 
 // benchInput es una capa de verdad si ZSTD_BENCH apunta a un .tar (en el
-// lab, la de una imagen), y si no, texto de mentira.
+// lab, la de una imagen; si hay un .tar.zst al lado, se usa en vez de
+// comprimirla con la herramienta), y si no, texto de mentira.
 func benchInput(b *testing.B) []byte {
 	if p := os.Getenv("ZSTD_BENCH"); p != "" {
 		in, err := os.ReadFile(p)
@@ -398,11 +399,13 @@ func benchInput(b *testing.B) []byte {
 // nivel por defecto) y gzip -6 (el de docker push).
 func BenchmarkDecode(b *testing.B) {
 	in := benchInput(b)
-	cmd := exec.Command("zstd", "-q", "-c", "-3")
-	cmd.Stdin = bytes.NewReader(in)
-	comp, err := cmd.Output()
+	comp, err := os.ReadFile(os.Getenv("ZSTD_BENCH") + ".zst")
 	if err != nil {
-		b.Skip("no zstd tool")
+		cmd := exec.Command("zstd", "-q", "-c", "-3")
+		cmd.Stdin = bytes.NewReader(in)
+		if comp, err = cmd.Output(); err != nil {
+			b.Skip("no zstd tool")
+		}
 	}
 	b.SetBytes(int64(len(in)))
 	b.ReportMetric(float64(len(comp))/float64(len(in)), "ratio")

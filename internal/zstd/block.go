@@ -316,11 +316,25 @@ func (z *Reader) sequences(nseq int, lits, b []byte) error {
 		if llen > len(lits) || mlen > end-n-llen || off > n+llen || off > z.window {
 			return errCorrupt
 		}
-		n += copy(h[n:], lits[:llen])
+		// Lo corto (lo más común) se copia de 8 en 8 bytes, aunque se pase:
+		// lo que sobra cae más allá de lo escrito y lo pisa lo siguiente.
+		if llen <= 16 && len(lits) >= 16 && n+16 <= end {
+			binary.LittleEndian.PutUint64(h[n:], binary.LittleEndian.Uint64(lits))
+			binary.LittleEndian.PutUint64(h[n+8:], binary.LittleEndian.Uint64(lits[8:]))
+			n += llen
+		} else {
+			n += copy(h[n:], lits[:llen])
+		}
 		lits = lits[llen:]
+		src, stop := n-off, n+mlen
+		if off >= 8 && mlen <= 16 && n+16 <= end {
+			binary.LittleEndian.PutUint64(h[n:], binary.LittleEndian.Uint64(h[src:]))
+			binary.LittleEndian.PutUint64(h[n+8:], binary.LittleEndian.Uint64(h[src+8:]))
+			n = stop
+			continue
+		}
 		// Copia que se solapa consigo misma si off < mlen: cada vuelta
 		// duplica el trozo de patrón ya escrito.
-		src, stop := n-off, n+mlen
 		for n < stop {
 			n += copy(h[n:stop], h[src:n])
 		}
