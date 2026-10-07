@@ -140,7 +140,10 @@ func (m *Manager) esperarAgente(ctx context.Context, id string) *api.GuestAgent 
 		if addr == "" {
 			return nil
 		}
-		pctx, pcancel := context.WithTimeout(ctx, plazoPeticionListo)
+		// El plazo de /healthz, no el de /ready: no hay sonda detrás, y una
+		// petición perdida (el agente aún no escuchaba) con 125 s se comía la
+		// espera entera en vez de repetirse.
+		pctx, pcancel := context.WithTimeout(ctx, plazoPeticionAgente)
 		ag, err := preguntarAgente(pctx, "http://"+addr)
 		pcancel()
 		if err == nil {

@@ -2206,15 +2206,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
 		// ninguna responde jamás.
 		//
-		// Y hay que devolverle sus volúmenes, que se soltaron arriba para poder
-		// congelar: si no, seguiría corriendo escribiendo en su overlay.
+		// Sus volúmenes siguen montados: Freeze solo los vacía (flushVolume),
+		// no los suelta, así que no hay nada que devolverle. Pedírselo era un
+		// viaje al agente de hasta 50 s con el cerrojo tomado y el error tirado.
 		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			// Si tampoco se puede reanudar, la máquina no es recuperable y
 			// dejarla como running sería mentir. Se marca fallida.
 			m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 			return nil, err
 		}
-		_ = m.acquireVolumes(mc)
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
@@ -2243,7 +2243,6 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
-			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
 		snapPath = filepath.Join(dir, "snap.file")
@@ -2270,7 +2269,6 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
-			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
 		memPath = filepath.Join(dir, "mem.file")

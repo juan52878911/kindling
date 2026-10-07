@@ -180,7 +180,8 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 	pausadas, soltadas, despertadas := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	// deshacer devuelve cada nodo a como estaba: reanudar antes de devolver
 	// los volúmenes (un invitado pausado no contesta) y devolverlos antes de
-	// congelar (Freeze los vuelve a soltar, como con cualquier máquina).
+	// congelar: Freeze no los suelta, y la copia congelada los tiene que
+	// llevar montados, como cualquier otra.
 	deshacer := func() {
 		for _, n := range nodos {
 			if !pausadas[n.id] {

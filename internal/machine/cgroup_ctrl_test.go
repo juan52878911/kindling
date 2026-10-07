@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -126,6 +127,40 @@ func TestCgroupSinTechoDeMemoriaSigueConElDeCPU(t *testing.T) {
 		t.Errorf("cpu.max=%q", cpu)
 	}
 	if procs, _ := os.ReadFile(filepath.Join(m.dirCgroup(id), "cgroup.procs")); string(procs) != "4242" {
+		t.Errorf("cgroup.procs=%q: el VMM se quedó fuera del cgroup", procs)
+	}
+}
+
+// Cada techo va por su lado: un memory.max que no se puede escribir no deja al
+// VMM sin el de swap ni sin el de procesos (antes, el primer fallo cortaba los
+// demás).
+func TestCgroupUnTechoFallidoNoSeLlevaLosDemas(t *testing.T) {
+	m := &Manager{cgroupRoot: t.TempDir(), cgroupMemoria: true, cgroupProcesos: true}
+	id := "abcdef0123456789"
+	dir := m.dirCgroup(id)
+	// memory.max que no se puede escribir; memory.swap.max existe, como en
+	// cgroupfs con contabilidad de swap.
+	if err := os.MkdirAll(filepath.Join(dir, "memory.max"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memory.swap.max"), []byte("max"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := m.escribirLimitesMemoria(dir, 512)
+	if err == nil || !strings.Contains(err.Error(), "memory.max") {
+		t.Errorf("err = %v: no cuenta el memory.max que falló", err)
+	}
+	quiero := strconv.Itoa((512 + margenMemoriaVMM(512)) << 20)
+	if swap, _ := os.ReadFile(filepath.Join(dir, "memory.swap.max")); string(swap) != quiero {
+		t.Errorf("memory.swap.max=%q, quería %s", swap, quiero)
+	}
+	if pids, _ := os.ReadFile(filepath.Join(dir, "pids.max")); string(pids) != strconv.Itoa(pidsMaxVMM) {
+		t.Errorf("pids.max=%q: el fallo de memory.max se llevó el techo de procesos", pids)
+	}
+	if warn := m.limitCPU(id, 4242, 50, 512); warn != "" {
+		t.Fatalf("aviso: %s", warn)
+	}
+	if procs, _ := os.ReadFile(filepath.Join(dir, "cgroup.procs")); string(procs) != "4242" {
 		t.Errorf("cgroup.procs=%q: el VMM se quedó fuera del cgroup", procs)
 	}
 }

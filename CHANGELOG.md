@@ -60,6 +60,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
 - Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first
 - A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
+- With `-e`, a lost first health check of the guest agent is retried after 15 s instead of holding the environment in MMDS for up to 2 minutes
+- A VMM cgroup whose `memory.max` cannot be written still gets its swap and pids limits (Linux)
+- A failed freeze no longer asks the resumed guest to remount volumes it never released (up to 50 s holding the machine's lock)
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
