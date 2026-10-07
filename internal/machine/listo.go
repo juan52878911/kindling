@@ -52,14 +52,17 @@ const (
 	// plazoPeticionListo acota UNA pregunta a /ready: la sonda corre dentro
 	// con su plazo (10 s, o el de la imagen hasta api.MaxReadyTimeoutSeconds).
 	plazoPeticionListo = api.MaxReadyTimeoutSeconds*time.Second + 5*time.Second
-	// plazoPeticionAgente acota una pregunta a / (las capacidades del agente).
-	plazoPeticionAgente = 15 * time.Second
 	// vigiaListoMax es cuánto sigue mirando, como mucho, la vigía de fondo.
 	vigiaListoMax = 10 * time.Minute
 	// vigiaAgenteMax: si en este tiempo el agente no ha contestado ni una vez
 	// (imagen sin agente), la vigía se rinde.
 	vigiaAgenteMax = 30 * time.Second
 )
+
+// plazoPeticionAgente acota una pregunta a /healthz (las capacidades del
+// agente): no corre ninguna sonda, así que una que no contesta en esto se da
+// por perdida y se repite. Variable para las pruebas.
+var plazoPeticionAgente = 15 * time.Second
 
 var (
 	errListoViejo    = errors.New("guest agent has no /ready route")

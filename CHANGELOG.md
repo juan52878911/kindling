@@ -57,6 +57,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- With `-e`, a lost first health check of the guest agent is retried after 15 s instead of holding the environment in MMDS for up to 2 minutes
 - A VMM cgroup whose `memory.max` cannot be written still gets its swap and pids limits (Linux)
 - A failed freeze no longer asks the resumed guest to remount volumes it never released (up to 50 s holding the machine's lock)
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"

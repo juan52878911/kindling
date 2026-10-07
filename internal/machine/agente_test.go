@@ -91,3 +91,32 @@ func TestSinCapacidadNoSeSondea(t *testing.T) {
 		t.Fatal("a un agente viejo hay que seguir preguntándole")
 	}
 }
+
+// esperarAgente acota cada /healthz con el plazo de /healthz, no con el de
+// /ready (125 s): una primera petición que se pierde (el agente aún no
+// escuchaba) se repite en vez de comerse la espera entera.
+func TestEsperarAgenteRepiteUnaPeticionPerdida(t *testing.T) {
+	antes := plazoPeticionAgente
+	plazoPeticionAgente = 100 * time.Millisecond
+	t.Cleanup(func() { plazoPeticionAgente = antes })
+
+	var pedidas atomic.Int32
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pedidas.Add(1) == 1 {
+			// La primera no contesta: el cliente la corta por su plazo.
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: "kling-guest", Version: "v0.18.0",
+			Caps: []string{api.GuestCapEnv}})
+	}))
+	m.byID[id].State = api.StateRunning
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ag := m.esperarAgente(ctx, id)
+	if ag == nil || ag.Lacks(api.GuestCapEnv) {
+		t.Fatalf("agente = %+v tras %d peticiones: la primera, perdida, se comió la espera", ag, pedidas.Load())
+	}
+}
