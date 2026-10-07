@@ -1473,7 +1473,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	impulso := m.nuevoImpulso(id, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(id, impulso.tope)
+	cg := m.cgroupParaLanzar(id, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1667,7 +1667,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, con el techo
 	// de arranque: lo baja entregarRestaurada, abajo.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}

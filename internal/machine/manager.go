@@ -103,6 +103,9 @@ type Manager struct {
 	// cgroupRoot vacío = sin límite de CPU; el motivo queda en CgroupWarning.
 	cgroupRoot    string
 	CgroupWarning string
+	// cgroupMemoria y cgroupProcesos: los cgroups de las microVMs tienen los
+	// controladores de memoria y de procesos (memory.max, pids.max).
+	cgroupMemoria, cgroupProcesos bool
 
 	// jailerJailed dice si las microVMs de este proceso arrancan dentro de
 	// jailer (ver decidirJailer). Se decide UNA vez al construir el Manager y
@@ -437,6 +440,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		m.CgroupWarning = err.Error()
 	} else {
 		m.cgroupRoot = cg
+		m.cgroupMemoria, m.cgroupProcesos = controladoresDelegados(cg)
+		if !m.cgroupMemoria {
+			log.Printf("warning: the memory cgroup controller is not available: no memory.max per microVM")
+		}
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
@@ -1434,7 +1441,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// lo entrega a quien espera el fin del arranque. Ver arranque_cpu.go.
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -2922,7 +2929,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(mc.ID, impulso.tope)
+	cg := m.cgroupParaLanzar(mc.ID, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -3046,7 +3053,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
 	// que mover.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}

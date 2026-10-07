@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // cgroupBase es un árbol propio, FUERA del cgroup del servicio.
@@ -49,7 +51,66 @@ func ensureDelegation() (string, error) {
 		[]byte("+cpu"), 0o644); err != nil {
 		return "", fmt.Errorf("enabling cpu on %s: %w", cgroupBase, err)
 	}
+	// Memoria y procesos, si se puede: sin ellos queda el techo de CPU, que
+	// es lo que no se puede perder. Quién los tiene lo dice después
+	// controladoresDelegados, leyendo lo que de verdad quedó.
+	for _, c := range []string{"memory", "pids"} {
+		if !controladorPresente(readFile(filepath.Join(root, "cgroup.subtree_control")), c) {
+			_ = os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte("+"+c), 0o644)
+		}
+		_ = os.WriteFile(filepath.Join(cgroupBase, "cgroup.subtree_control"), []byte("+"+c), 0o644)
+	}
 	return cgroupBase, nil
+}
+
+// controladoresDelegados dice si los cgroups de las microVMs, hijos de root,
+// tendrán los controladores de memoria y de procesos.
+func controladoresDelegados(root string) (memoria, procesos bool) {
+	lista := readFile(filepath.Join(root, "cgroup.subtree_control"))
+	return controladorPresente(lista, "memory"), controladorPresente(lista, "pids")
+}
+
+// margenMemoriaVMM es lo que el cgroup de un VMM admite por encima de la RAM
+// del invitado: el propio Firecracker (su montón, las colas virtio, los
+// búferes de red y disco), lo que el kernel le cobra por KVM (tablas de
+// páginas del invitado, estructuras de cada vCPU) y su caché de página. La
+// caché limpia se reclama sola al tocar el techo; lo demás no. Medido en el
+// laboratorio (docs/seguridad.md): con el invitado tocando toda su RAM, el
+// cgroup llega a la RAM más 20-40 MiB.
+func margenMemoriaVMM(memMiB int) int {
+	return 64 + memMiB/16
+}
+
+// memoriaCgroup es la RAM máxima del invitado de mc, la que acota su cgroup:
+// el techo si arrancó con globo para crecer (MemMaxMiB), su memoria si no.
+func memoriaCgroup(mc *api.Machine) int {
+	return max(mc.MemMiB, mc.MemMaxMiB)
+}
+
+// pidsMaxVMM es el techo de procesos e hilos del cgroup de un VMM: un hilo
+// por vCPU (32 como mucho en Firecracker), el de la API, el principal y los
+// de E/S. Firecracker no crea procesos (su seccomp no le deja), así que esto
+// solo frena a uno comprometido que lo intentara.
+const pidsMaxVMM = 128
+
+// escribirLimitesMemoria fija memory.max y pids.max en el cgroup dir, según
+// estén delegados. memMiB es la RAM máxima del invitado (MemMaxMiB si tiene
+// techo, MemMiB si no); 0 no pone límite de memoria.
+func (m *Manager) escribirLimitesMemoria(dir string, memMiB int) error {
+	if m.cgroupMemoria && memMiB > 0 {
+		lim := int64(memMiB+margenMemoriaVMM(memMiB)) << 20
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"),
+			[]byte(strconv.FormatInt(lim, 10)), 0o644); err != nil {
+			return fmt.Errorf("could not set memory.max: %w", err)
+		}
+	}
+	if m.cgroupProcesos {
+		if err := os.WriteFile(filepath.Join(dir, "pids.max"),
+			[]byte(strconv.Itoa(pidsMaxVMM)), 0o644); err != nil {
+			return fmt.Errorf("could not set pids.max: %w", err)
+		}
+	}
+	return nil
 }
 
 func readFile(p string) string {
@@ -57,16 +118,20 @@ func readFile(p string) string {
 	return string(b)
 }
 
-// limitCPU mete el proceso de una microVM en su propio cgroup con techo de CPU.
+// limitCPU mete el proceso de una microVM en su propio cgroup con techo de CPU
+// y, si están delegados, de memoria y de procesos (memMiB es la RAM máxima
+// del invitado).
 //
 // Firecracker acota la RAM del invitado y el caudal de E/S, pero nada impide que
 // consuma su vCPU al 100% indefinidamente. Sin esto, una herramienta con un bucle
-// infinito degrada a todas las vecinas del host.
-func (m *Manager) limitCPU(id string, pid int, quotaPct int) string {
+// infinito degrada a todas las vecinas del host. Y un VMM comprometido no
+// tiene, sin el cgroup, nada que le impida reservar memoria del host fuera de
+// la del invitado: memory.max es lo que hace cierta la "RAM fija".
+func (m *Manager) limitCPU(id string, pid int, quotaPct, memMiB int) string {
 	if m.cgroupRoot == "" {
 		return "" // ya se avisó al arrancar; no repetirlo en cada máquina
 	}
-	dir, warn := m.crearCgroup(id, quotaPct)
+	dir, warn := m.crearCgroup(id, quotaPct, memMiB)
 	if warn != "" {
 		return warn
 	}
@@ -77,15 +142,19 @@ func (m *Manager) limitCPU(id string, pid int, quotaPct int) string {
 	return ""
 }
 
-// crearCgroup crea el cgroup de una microVM con su techo de CPU, sin meter
-// ningún proceso. Devuelve su directorio, o el aviso si no se pudo.
-func (m *Manager) crearCgroup(id string, quotaPct int) (string, string) {
+// crearCgroup crea el cgroup de una microVM con sus techos (CPU, y memoria y
+// procesos si están delegados), sin meter ningún proceso. Devuelve su
+// directorio, o el aviso si no se pudo.
+func (m *Manager) crearCgroup(id string, quotaPct, memMiB int) (string, string) {
 	dir := m.dirCgroup(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Sprintf("could not create cgroup: %v", err)
 	}
 	if err := m.escribirCPUMax(dir, quotaPct); err != nil {
 		return "", fmt.Sprintf("could not set cpu.max: %v", err)
+	}
+	if err := m.escribirLimitesMemoria(dir, memMiB); err != nil {
+		return "", err.Error()
 	}
 	return dir, ""
 }
@@ -99,11 +168,11 @@ func (m *Manager) crearCgroup(id string, quotaPct int) (string, string) {
 // el candado de escritura de los grupos de hilos del kernel, que espera un
 // periodo de gracia de RCU: 4-13 ms medidos por thaw en un i7-8700T, y hasta
 // 30 ms con el host ocupado. Nacer dentro solo toma el de lectura.
-func (m *Manager) cgroupParaLanzar(id string, quotaPct int) *os.File {
+func (m *Manager) cgroupParaLanzar(id string, quotaPct, memMiB int) *os.File {
 	if m.cgroupRoot == "" || !cloneEnCgroup {
 		return nil
 	}
-	dir, warn := m.crearCgroup(id, quotaPct)
+	dir, warn := m.crearCgroup(id, quotaPct, memMiB)
 	if warn != "" {
 		return nil
 	}
