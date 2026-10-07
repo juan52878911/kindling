@@ -319,6 +319,13 @@ func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructo
 	ahora := time.Now()
 	var errs []error
 	var copiados int64
+	// Lo que ya está en la verificada sobra en la de root: las construcciones
+	// sin root lo leen de la verificada (y GET /oci/blobs lo da por tenido).
+	sobraDeRoot := func(h string) {
+		if subidos != "" {
+			_ = os.Remove(filepath.Join(subidos, h))
+		}
+	}
 	for _, d := range usados {
 		h := strings.TrimPrefix(d, "sha256:")
 		dst := filepath.Join(dstDir, h)
@@ -327,6 +334,7 @@ func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructo
 			if propia != nil {
 				_ = propia.Remove(h) // ya no hace falta allí
 			}
+			sobraDeRoot(h)
 			continue
 		}
 		if propia != nil {
@@ -337,6 +345,7 @@ func promoverCache(work, cache, verificada, subidos string, u *usuarioConstructo
 			if tam >= 0 && cerr == nil {
 				n++
 				copiados += tam
+				sobraDeRoot(h)
 			}
 			if tam >= 0 && !errors.Is(cerr, errSinSitio) {
 				// Verificado ya está en la otra; dañado no sirve: fuera de la suya.

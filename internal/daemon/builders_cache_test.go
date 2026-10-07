@@ -618,6 +618,26 @@ func TestPromoverDesdeCacheDeRoot(t *testing.T) {
 	if _, err := os.Lstat(verificadoEn(verificada, dAbierto)); !os.IsNotExist(err) {
 		t.Fatal("uno con escritura para el grupo entró en la verificada")
 	}
+
+	// Uno que está en las dos (la primera vez, la caché del constructor
+	// enlaza lo de root): se copia de la suya y sobra también en la de root;
+	// y uno ya verificado, igual.
+	cuerpo2 := []byte("enlazado a la caché del constructor")
+	d2 := digestDe(cuerpo2)
+	enRoot := filepath.Join(subidos, strings.TrimPrefix(d2, "sha256:"))
+	os.WriteFile(enRoot, cuerpo2, 0o640)
+	blobDelConstructor(t, cache, d2, cuerpo2)
+	yaV := filepath.Join(subidos, strings.TrimPrefix(d, "sha256:"))
+	os.WriteFile(yaV, cuerpo, 0o640)
+	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(d+"\n"+d2+"\n"), 0o600)
+	if _, n, err := promoverCache(work, cache, verificada, subidos, yo(), 1<<30); n != 1 || err != nil {
+		t.Fatalf("promovidos %d: %v", n, err)
+	}
+	for _, p := range []string{enRoot, yaV} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s sigue en la caché de root ya verificado", filepath.Base(p))
+		}
+	}
 }
 
 // En la caché de root no se barre lo reciente (una subida que espera a su
