@@ -115,6 +115,13 @@ func cachedSHA256(path string) (string, error) {
 // un `images copy` verifica contra ESE hash. El ctime no se puede poner a mano
 // (cambia con cualquier escritura, chmod o utimes), y el inodo cambia si
 // alguien sustituye el fichero por otro.
+//
+// Límite: el ctime es de grano grueso (un jiffy en Linux, 1 s en sistemas de
+// ficheros con segundos), así que una reescritura en el mismo tic en que se
+// guardó el hash no se nota. Se acepta: el único que escribe aquí es el
+// daemon, y no tratar como dudoso lo reciente (lo que hace git) sí costaría:
+// el sidecar de un PUT se escribe en el mismo tic que su rename, y la primera
+// copia rehashearía GiB.
 func huellaBlob(fi os.FileInfo) string {
 	ino, ctime := identidadFichero(fi)
 	return fmt.Sprintf("%d:%d:%d:%d", fi.Size(), fi.ModTime().UnixNano(), ino, ctime)
