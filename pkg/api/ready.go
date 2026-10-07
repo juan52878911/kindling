@@ -89,6 +89,9 @@ type ReadyResult struct {
 	// Guest es lo que contestó el agente; nil si no hay agente o es anterior
 	// a /ready.
 	Guest *GuestReady `json:"guest,omitempty"`
+	// Detail explica un "no listo" que el agente no pudo explicar: no
+	// contestó, o contestó un error (con Guest, el motivo va en Guest.Detail).
+	Detail string `json:"detail,omitempty"`
 	// WaitedMS es cuánto se esperó en esta llamada.
 	WaitedMS int64 `json:"waited_ms"`
 }

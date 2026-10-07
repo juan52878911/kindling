@@ -234,6 +234,12 @@ type Manager struct {
 	// listoDeclarado memoriza, igual, qué imágenes declaran sonda o ganchos
 	// de "listo" (ver imagenDeclaraListo).
 	listoDeclarado sync.Map
+	// listoDudaAvisado: imágenes de las que ya se avisó de que no se sabe si
+	// declaran "listo" (declaraListo): un aviso por imagen.
+	listoDudaAvisado sync.Map
+	// ganchosPendientes: restauraciones cuyo /resync falló y cuyos ganchos
+	// aún no se han lanzado (ver ganchosTrasResyncFallido). Remove la poda.
+	ganchosPendientes sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -3463,6 +3469,7 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	if v, ok := m.vigiasListo.LoadAndDelete(mc.ID); ok {
 		v.(*atomic.Uint64).Add(1)
 	}
+	m.ganchosPendientes.Delete(mc.ID)
 	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil

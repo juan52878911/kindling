@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -167,8 +168,14 @@ type OpcionesListo struct {
 	// esto, se espera a que conteste dentro del plazo.
 	SinAgenteVale bool
 	// UnaVez: preguntar una sola vez y devolver lo que haya, sin error por no
-	// estar listo (GET /machines/{ref}/ready sin ?wait).
+	// estar listo (GET /machines/{ref}/ready sin ?wait). Que el agente no
+	// conteste (o conteste un 5xx) es "waiting" con el motivo en Detail, no
+	// "nada que esperar": solo lo es si la imagen seguro que no declara nada.
 	UnaVez bool
+	// GraciaAgente: sin SinAgenteVale, si en este tiempo el agente no ha
+	// contestado ni una vez, se da por imagen sin agente. Es para cuando no se
+	// sabe si la imagen declara algo (sin debugfs): ver listoParaCongelar.
+	GraciaAgente time.Duration
 }
 
 // WaitReady espera a que la máquina ref esté lista según su imagen. Devuelve
@@ -199,9 +206,18 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 	ctx, cancel := context.WithTimeout(ctx, plazo)
 	defer cancel()
 	var ultimo error
+	contestó := false
 	paso := pasoListoPrimero
 	for {
 		st, err := m.consultarListo(ctx, mc.ID)
+		if err == nil {
+			// Una copia cuyo /resync falló trae el estado de los ganchos del
+			// dorado: antes de creérselo, se lanzan los suyos.
+			st = m.ganchosPendientesAhora(ctx, mc.ID, st)
+		}
+		if !errors.Is(err, errListoConexion) {
+			contestó = true
+		}
 		switch {
 		case errors.Is(err, errListoViejo):
 			m.anotarListo(mc.ID, api.ReadyUnknown)
@@ -222,9 +238,20 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 		case errors.Is(err, errListoConexion) && o.SinAgenteVale && !m.agenteEscucha(ctx, mc.ID):
 			// Contestó antes y ya no: no es un invitado arrancando.
 			return res, nil
+		case errors.Is(err, errListoConexion) && o.GraciaAgente > 0 && !contestó && time.Since(start) > o.GraciaAgente:
+			log.Printf("warning: %s: no guest agent answered in %s; assuming its image has none",
+				mc.Name, o.GraciaAgente.Round(time.Second))
+			return res, nil
 		default:
 			ultimo = err
 			if o.UnaVez {
+				// Sin respuesta no se sabe si está listo, y decir que sí
+				// es mentir; salvo que la imagen seguro que no declara nada
+				// (una imagen sin agente): lo de siempre.
+				if decl, seguro := m.declaraListo(ctx, mc.ID); errors.Is(err, errListoConexion) && seguro && !decl {
+					return res, nil
+				}
+				res.Ready, res.Detail = api.ReadyWaiting, err.Error()
 				return res, nil
 			}
 		}
@@ -242,6 +269,9 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 			}
 			if res.Ready == api.ReadyUnknown {
 				res.Ready = api.ReadyWaiting
+			}
+			if res.Guest == nil {
+				res.Detail = motivo
 			}
 			return res, fmt.Errorf("%w: %s after %s: %s", ErrNotReady, mc.Name, plazo, motivo)
 		case <-time.After(paso):
@@ -320,8 +350,19 @@ func (m *Manager) vigilarListo(id string, inicial *api.GuestReady) {
 // es un invitado que aún arranca (o cuyo agente se cayó), no uno listo: dar
 // eso por bueno congelaba el dorado a medio arrancar, que es justo lo que la
 // sonda existe para impedir.
+//
+// Si no se puede saber (sin debugfs, imagen ilegible), ante la duda se espera
+// como si declarara: a que el agente conteste y diga si está listo. Solo si
+// en GraciaAgente no contesta nadie se da por imagen sin agente; sin eso, una
+// imagen sin agente no se podría congelar nunca en un host sin debugfs.
 func (m *Manager) listoParaCongelar(ctx context.Context, ref string, plazo time.Duration) error {
-	_, err := m.WaitReady(ctx, ref, OpcionesListo{Plazo: plazo, SinAgenteVale: !m.declaraListo(ctx, ref)})
+	o := OpcionesListo{Plazo: plazo}
+	if decl, seguro := m.declaraListo(ctx, ref); seguro {
+		o.SinAgenteVale = !decl
+	} else {
+		o.GraciaAgente = vigiaAgenteMax
+	}
+	_, err := m.WaitReady(ctx, ref, o)
 	if err == nil || errors.Is(err, ErrNoMachine) || errors.Is(err, ErrNotRunning) {
 		return nil // el commit dará su propio error, con su mensaje de siempre
 	}
@@ -333,21 +374,28 @@ func (m *Manager) listoParaCongelar(ctx context.Context, ref string, plazo time.
 // de congelarla. Lo sabe por dos lados: lo que ya contestó su agente
 // (Machine.Ready distinto de "desconocido" solo sale de una imagen que
 // declara algo) y, si aún no ha contestado nunca, su imagen en disco.
-// Sin poder saberlo, false: lo de siempre.
-func (m *Manager) declaraListo(ctx context.Context, ref string) bool {
+// seguro es false si no se pudo saber (sin debugfs, imagen ilegible): quien
+// pregunta decide qué hacer con la duda; se avisa una vez por imagen.
+func (m *Manager) declaraListo(ctx context.Context, ref string) (decl, seguro bool) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return false
+		return false, true
 	}
 	switch mc.Ready {
 	case api.ReadyWaiting, api.ReadyYes, api.ReadyFailed:
-		return true
+		return true, true
 	}
 	if mc.Image == "" {
-		return false
+		return false, true
 	}
 	decl, err := m.imagenDeclaraListo(ctx, mc.Image)
-	return err == nil && decl
+	if err != nil {
+		if _, ya := m.listoDudaAvisado.LoadOrStore(mc.Image, true); !ya {
+			log.Printf("warning: cannot tell whether image %s declares a readiness probe or hooks: %v", mc.Image, err)
+		}
+		return false, false
+	}
+	return decl, true
 }
 
 // imagenDeclaraListo mira en el rootfs de la imagen (capa y base) si trae
