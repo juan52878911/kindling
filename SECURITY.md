@@ -1315,6 +1315,19 @@ Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se
 al arrancar. `debian` y `android` siguen como root. Detalle en
 [docs/imagenes.md](docs/imagenes.md).
 
+**Credenciales de registros privados** (`kling registry login`): viven en el daemon,
+`$KLING_ROOT/registries.json` (root 0600, en claro como `~/.docker/config.json`), no en
+el `spec` de la construcción, que va a la receta. La contraseña llega al CLI por stdin
+(sin eco en una terminal), nunca por argv; `GET /registries` no la devuelve. Cada
+construcción `oci` recibe solo las del registro de su referencia, en un fichero 0600
+suyo en su directorio de trabajo que borra al leerlo, ni por argv ni por el entorno; no
+salen en el log de la construcción, la receta, `state.json` ni los eventos. El cliente
+OCI solo las manda a ese registro (por https salvo localhost) y a su servicio de tokens
+si está en su dominio, y quita `Authorization` en cualquier redirección a otro
+host:puerto (el CDN de las capas). Un constructor comprometido por una imagen de ese
+registro las ve: tienen que ser de solo lectura (un token con `read:packages`, no la
+contraseña de la cuenta).
+
 ### 25. El entorno de `run -e` va por MMDS, y se congela con la máquina
 
 `kling run -e` da el entorno a la máquina, no a la imagen: viaja en el cuerpo de la

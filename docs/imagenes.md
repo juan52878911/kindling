@@ -364,6 +364,55 @@ Hindsight se queda con la interfaz web), y una imagen que llama a Hugging Face
 al arrancar se cuelga sin salida a internet hasta que se le pone
 `HF_HUB_OFFLINE=1`.
 
+### Registros privados
+
+Sin credenciales, el constructor pide tokens anónimos de lectura, como `docker
+pull` sin `docker login`. Para un registro privado (ghcr.io privado, un
+`registry:2` con contraseña, ECR o GCR con token), las credenciales se guardan
+**en el daemon**, que es quien construye:
+
+```sh
+echo "$GITHUB_TOKEN" | kling registry login ghcr.io -u juan
+kling registry login registry.example.com:5000 -u juan     # en una terminal la pide sin eco
+aws ecr get-login-password | kling registry login 123.dkr.ecr.eu-west-1.amazonaws.com -u AWS
+kling registry import                # las de ~/.docker/config.json (auths con "auth")
+kling registry ls                    # registros y usuarios, sin contraseñas
+kling registry logout ghcr.io
+```
+
+La contraseña o el token se leen de stdin, nunca de un argumento (`ps` y el
+historial los verían). `import` solo entiende las que el `config.json` lleva en
+claro (`auths.<registro>.auth`, base64 de `usuario:contraseña`); las de un
+`credsStore` o un `credHelpers` (el llavero de macOS, `ecr-login`) no están en
+el fichero, y lo dice.
+
+Dónde viven y por dónde pasan:
+
+- **En `$KLING_ROOT/registries.json`, root 0600**, en claro (como
+  `~/.docker/config.json`): quien lee la raíz de datos ya es root. No en el
+  `spec` de la construcción, que va entero a la receta (`kling image recipe`,
+  `kling image copy`). `GET /registries` no devuelve nunca la contraseña.
+- **El constructor recibe solo las del registro de su referencia**, en
+  `registry-auth.json` (0600, suyo) dentro de su directorio de trabajo: lo lee
+  y lo borra antes de bajar nada, y el directorio se borra al acabar. Ni por
+  argv ni por el entorno (el de un constructor sin root es de lista blanca, y
+  el de un proceso se lee en `/proc/<pid>/environ`). No salen en el log de la
+  construcción, en la receta, en `state.json` ni en los eventos.
+- **Solo hacia su registro**: Basic directo si el registro lo pide (un 401 con
+  `Basic`: `registry:2` con htpasswd, ECR), o el flujo Bearer: el token se pide
+  con Basic al servicio que indica el 401, que tiene que ser https y estar en
+  el dominio del registro (`auth.docker.io` para Docker Hub, `gitlab.com` para
+  `registry.gitlab.com`); a uno de otro dominio no se le mandan y el import
+  falla diciéndolo. Tras una redirección a otro host (las capas suelen ir a un
+  CDN con la URL ya firmada) la cabecera `Authorization` se quita, también
+  hacia otro puerto del mismo host o un subdominio, que Go sí dejaría pasar.
+  Siempre por https, salvo `localhost`/`127.0.0.1`/`::1`.
+- **Sin ellas, o rechazadas, el error lo dice**: `kling registry login
+  <registro>` si no hay, o que las guardadas se rechazaron.
+
+No se comprueban al guardarlas: el primer import desde el registro es la
+prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
+
 ### Límites del constructor `oci`
 
 - **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
@@ -420,7 +469,7 @@ VMM vivos y escribir en los volúmenes.
 | Qué | Dueño y permisos | Para qué |
 | --- | --- | --- |
 | `<root>/build/` | root, 0711 | se atraviesa; no se lista ni se escribe |
-| `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json`; la imagen sale en `out/` |
+| `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json` y, para un registro privado, `registry-auth.json` (0600, lo borra al leerlo); la imagen sale en `out/` |
 | `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
 
 La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya

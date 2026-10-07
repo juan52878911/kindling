@@ -79,6 +79,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `secrets/snapshot.key` | `internal/machine/firma.go` | ninguna, 32 bytes | firma y, por HKDF, cifra. Si se pierde o se regenera, **ningún dorado firmado ni almacén de credenciales vuelve a abrirse** |
 | `credentials.enc` (máquinas, plantillas y secretos de grafo) | `internal/machine/credenciales.go` | **cabecera `KLCS` + `0x01`** delante del nonce desde el PR 3 (y la cadena HKDF `"kindling credential store v1"`) | sin cabecera es v0: se lee y, al volver a sellarlo, se copia a `<fichero>.v0.bak` (quitar todas las credenciales borra también la copia). Con una versión mayor no se descifra, no se pisa y no se borra. Un kling ≤ v0.17 no descifra un v1. `NormalizarAlmacen` sigue arreglando los postgres viejos. Un binario de la misma versión que funde y vuelve a sellar **pierde los campos que no conoce**: añadir uno que importe sube el byte |
 | `credaudit` | `audit/<id>.jsonl` (Linux), `machines/<id>/credaudit.jsonl` (Mac) | ninguna, JSONL | el lector salta las líneas que no entiende; `prepararAuditoria` mueve el sitio viejo al nuevo |
+| `registries.json` | `internal/daemon/registries.go` | ninguna; `{"auths": {"<registro>": {"username", "password"}}}`, root 0600, en claro | un daemon anterior no lo lee: importa solo de registros públicos, como siempre. Los campos que no conoce se pierden al guardar otro `kling registry login` |
 
 ### Extensiones, configuración y servicios
 

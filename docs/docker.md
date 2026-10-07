@@ -25,6 +25,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Dormir y despertar copias | `kling freeze`, `kling thaw` (o `-ttl 10m`): una copia dormida cuesta en disco solo lo que cambió |
 | Salir a internet, o no | `-egress none` (por defecto), `allowlist -allow dominio`, `internet`; nunca a redes privadas |
 | Secretos que no entren en la máquina | el proxy de credenciales (`kling machine credential`): el invitado ve un marcador |
+| Una imagen de un registro privado (`docker login`) | `echo "$TOKEN" \| kling registry login ghcr.io -u <usuario>` (o `kling registry import`, desde `~/.docker/config.json`): las credenciales se quedan en el daemon, no en la receta ([imagenes.md](imagenes.md#registros-privados)) |
 | Una imagen tuya sin registro | aún no: `image import` baja de un registro (ver "Lo que falta") |
 
 Lo que la imagen no decide: la CPU (un núcleo por vCPU, como un contenedor;
