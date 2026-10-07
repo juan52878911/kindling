@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/upgrade"
+	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
 // `upgrade -schemas` es lo que otro kling le pregunta a este antes de
@@ -48,10 +56,15 @@ func TestProgramaLaunchd(t *testing.T) {
 }
 
 func TestArgsRemotos(t *testing.T) {
-	if got := argsRemotos("v0.18.0", false); got != " -tag v0.18.0" {
+	if got := argsRemotos("v0.18.0", false, false, false, "kling", ""); got != " -tag v0.18.0" {
 		t.Errorf("%q", got)
 	}
-	if got := argsRemotos("", true); !strings.Contains(got, "-rollback") {
+	if got := argsRemotos("", true, false, false, "kling", ""); got != " -rollback" {
+		t.Errorf("%q", got)
+	}
+	// Lo que cambia lo que hace no se pierde: un -dry-run olvidado es una
+	// actualización de verdad al pegar la orden.
+	if got := argsRemotos("v0.18.0", false, true, true, "kt", "/srv/kt"); got != " -tag v0.18.0 -dry-run -force -unit kt -root /srv/kt" {
 		t.Errorf("%q", got)
 	}
 }
@@ -106,5 +119,126 @@ func TestPidLaunchd(t *testing.T) {
 	}
 	if got := pidLaunchd([]byte("state = not running\n")); got != 0 {
 		t.Errorf("got %d", got)
+	}
+}
+
+// extFalsa es una extensión de mentira: un sh que imprime su manifiesto.
+func extFalsa(version string) []byte {
+	return []byte("#!/bin/sh\nif [ \"$1\" = --kling-manifest ]; then echo '" +
+		`{"manifest_version":1,"name":"demo","version":"` + version + `","commands":[{"name":"demo"}],"companions":["kling-demo-helper"]}` +
+		"'; exit 0; fi\n")
+}
+
+// Tras actualizar el núcleo a una release (que se llama vX.Y.Z aunque el
+// binario diga X.Y.Z, como lo construye release.yml), las extensiones
+// instaladas pasan a esa release con sus compañeros, y lo de antes queda en
+// la copia: -rollback lo devuelve también.
+func TestActualizarExtensiones(t *testing.T) {
+	sum := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+	asset := func(n string) string { return n + "-" + runtime.GOOS + "-" + runtime.GOARCH }
+	nueva, ayudaNueva := extFalsa("1.1.0"), []byte("#!/bin/sh\necho helper 1.1.0\n")
+	rel := map[string][]byte{asset("kling-demo"): nueva, asset("kling-demo-helper"): ayudaNueva}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, ok := strings.CutPrefix(r.URL.Path, "/v1.1.0/")
+		switch {
+		case !ok:
+			http.NotFound(w, r)
+		case n == "SHA256SUMS":
+			for a, b := range rel {
+				fmt.Fprintf(w, "%s  %s\n", sum(b), a)
+			}
+		case rel[n] != nil:
+			w.Write(rel[n])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	// El núcleo: un kling 1.0.0 que se actualiza a 1.1.0 desde un directorio.
+	base := t.TempDir()
+	bin, nuevos := filepath.Join(base, "kling"), filepath.Join(base, "nuevo")
+	os.Mkdir(nuevos, 0o755)
+	klingSh := func(v string) []byte {
+		return []byte("#!/bin/sh\n[ \"$1\" = version ] && echo 'kling " + v + "' && exit 0\nexit 2\n")
+	}
+	os.WriteFile(bin, klingSh("1.0.0"), 0o755)
+	os.WriteFile(filepath.Join(nuevos, "kling"), klingSh("1.1.0"), 0o755)
+	o := upgrade.Opciones{Dir: filepath.Join(base, "upgrade"), Fuente: &upgrade.Fuente{Dir: nuevos}, Actual: "1.0.0",
+		Piezas: []upgrade.Pieza{{Asset: assetDe("kling", runtime.GOOS, runtime.GOARCH), Destino: bin}}}
+	res, err := upgrade.Actualizar(context.Background(), o)
+	if err != nil || res.Hacia != "1.1.0" {
+		t.Fatalf("%+v %v", res, err)
+	}
+
+	// La extensión instalada, en 1.0.0.
+	dir := filepath.Join(base, "plugins")
+	os.Mkdir(dir, 0o755)
+	vieja, ayudaVieja := extFalsa("1.0.0"), []byte("#!/bin/sh\necho helper 1.0.0\n")
+	ext := filepath.Join(dir, "kling-demo")
+	os.WriteFile(ext, vieja, 0o755)
+	os.WriteFile(filepath.Join(dir, "kling-demo-helper"), ayudaVieja, 0o755)
+	scViejo := `{"name":"demo","version":"1.0.0","companions":["kling-demo-helper"]}`
+	os.WriteFile(plugin.SidecarPath(ext), []byte(scViejo), 0o644)
+
+	var hechas []string
+	out, _ := salida(t, func() error {
+		hechas = actualizarExtensionesEn(dir, o.Dir, res.Hacia, "", plugin.InstallOptions{Client: srv.Client(), ReleaseURL: srv.URL})
+		return nil
+	})
+	if strings.Join(hechas, ",") != "demo" {
+		t.Fatalf("upgraded %v\n%s", hechas, out)
+	}
+	if b, _ := os.ReadFile(ext); string(b) != string(nueva) {
+		t.Error("the extension was not replaced")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "kling-demo-helper")); string(b) != string(ayudaNueva) {
+		t.Error("its companion was not replaced")
+	}
+	if sc, err := plugin.ReadSidecar(ext); err != nil || sc.Version != "1.1.0" {
+		t.Errorf("sidecar %+v %v", sc, err)
+	}
+
+	if _, err := upgrade.VolverAtras(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{ext: string(vieja), filepath.Join(dir, "kling-demo-helper"): string(ayudaVieja), plugin.SidecarPath(ext): scViejo} {
+		if b, _ := os.ReadFile(p); string(b) != want {
+			t.Errorf("%s not rolled back: %s", filepath.Base(p), b)
+		}
+	}
+}
+
+// Sin daemon que conteste, -rollback saca la raíz y el socket de cómo lo
+// arranca su unidad, igual que cmdDaemon: -root/-socket, si no el entorno
+// (el fichero manda sobre Environment=), si no los de siempre.
+func TestRaizDeLaUnidad(t *testing.T) {
+	env := filepath.Join(t.TempDir(), "kling")
+	os.WriteFile(env, []byte("KLING_TOKEN=secreto\nexport KLING_SOCKET=\"/run/f/kling.sock\"\n"), 0o600)
+	out := []byte("ExecStart={ path=/srv/kt/bin/kling ; argv[]=/srv/kt/bin/kling daemon -root /srv/kt/root -socket=/run/kt/kling.sock ; ignore_errors=no ; start_time=[n/a] }\n" +
+		"Environment=KLING_LIB_DIR=/srv/kt/lib KLING_ROOT=/otra\nEnvironmentFiles=" + env + " (ignore_errors=yes)\n")
+	argv, entorno, ficheros := leerUnidadSystemd(out)
+	if strings.Join(argv, " ") != "/srv/kt/bin/kling daemon -root /srv/kt/root -socket=/run/kt/kling.sock" || entorno["KLING_ROOT"] != "/otra" || len(ficheros) != 1 || ficheros[0] != env {
+		t.Fatalf("%q %v %v", argv, entorno, ficheros)
+	}
+	if r, s := raizYSocket(argv, entorno, "/var/lib/kindling", "/run/kling.sock"); r != "/srv/kt/root" || s != "/run/kt/kling.sock" {
+		t.Errorf("root %s socket %s", r, s)
+	}
+	f := claveDeEntorno(env)
+	if f["KLING_SOCKET"] != "/run/f/kling.sock" || f["KLING_TOKEN"] != "" {
+		t.Errorf("from the env file: %v", f)
+	}
+	if r, s := raizYSocket([]string{"/usr/local/bin/kling", "daemon"}, map[string]string{"KLING_ROOT": "/otra"}, "/var/lib/kindling", "/run/kling.sock"); r != "/otra" || s != "/run/kling.sock" {
+		t.Errorf("root %s socket %s", r, s)
+	}
+	argv, entorno, err := leerPlist([]byte(`{"ProgramArguments":["/Users/j/.local/bin/kling","daemon","--root","/Users/j/kr"],"EnvironmentVariables":{"KLING_SOCKET":"/tmp/k.sock"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, s := raizYSocket(argv, entorno, "/def", "/def.sock"); r != "/Users/j/kr" || s != "/tmp/k.sock" {
+		t.Errorf("plist: root %s socket %s", r, s)
+	}
+	if rutaSocket("unix:///run/kt/kling.sock") != rutaSocket("/run/kt//kling.sock") {
+		t.Error("the same socket compares different")
 	}
 }

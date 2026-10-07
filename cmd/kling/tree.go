@@ -44,7 +44,8 @@ var coreTree = []section{
                                                    on Linux; -unit must run the daemon
                                                    on the socket; -cli: only this
                                                    binary)
-  upgrade -rollback                                back to the last backup
+  upgrade -rollback [-root DIR]                    back to the last backup, also with
+                                                   the daemon down
 `},
 		{Name: "status", Summary: "which piece is up and which is missing", Usage: `  status [-v] [-json]                              which piece is up and which is
                                                    missing (-v: daemon details)
