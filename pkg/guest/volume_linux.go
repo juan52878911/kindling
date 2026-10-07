@@ -79,6 +79,10 @@ func mountVolumes() ([]VolumeSpec, error) {
 // saber que hay al menos uno escribible. No puede fallar ni bloquear
 // indefinidamente sobre discos virtio locales, y por eso no devuelve error: no
 // habría nada que hacer con él.
+// syncDiscos vacía todos los sistemas de ficheros del invitado. Variable
+// para los tests.
+var syncDiscos = syscall.Sync
+
 func syncVolumes(specs []VolumeSpec) {
 	for _, v := range specs {
 		if !v.readOnly {

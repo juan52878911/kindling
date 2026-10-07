@@ -15,5 +15,7 @@ func mountVolumes() ([]VolumeSpec, error) {
 	return nil, nil
 }
 
+var syncDiscos = func() {}
+
 func syncVolumes([]VolumeSpec)    {}
 func unmountVolumes([]VolumeSpec) {}

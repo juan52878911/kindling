@@ -207,6 +207,19 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		return nil, err
 	}
 
+	// Su overlay se revisa antes de montarlo: es ext4 SIN journal
+	// (createOverlay) y overlay-init lo monta sin fsck. Un stop de una pausada,
+	// o una que murió con el anfitrión, lo deja sucio, y arrancar encima sin
+	// mirar puede corromper lo que guarda (una base de datos en su disco). Lo
+	// que e2fsck -p no arregla solo no se monta: la máquina sigue parada y se
+	// dice. En el almacén de copia al escribir es un enlace, y e2fsck lo sigue.
+	reparado, salida, err := revisarExt4(ctx, overlay)
+	if err != nil {
+		return devolver(fmt.Errorf("machine %q can't be started: checking its disk: %w", mc.Name, err))
+	}
+	if reparado {
+		log.Printf("start: %s: disk repaired before booting: %s", mc.Name, strings.TrimSpace(string(salida)))
+	}
 	for _, v := range vols {
 		if !v.readOnly {
 			repairVolume(ctx, v.path)

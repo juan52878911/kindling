@@ -152,7 +152,11 @@ otro entorno, otra máquina en frío con `-image`. La plantilla, como el
 máquina y suelta su memoria; `kling start` la arranca en frío sobre ese disco.
 Como el daemon no guardó los valores, `start` exige otra vez todas las claves
 de `env_keys` (`kling start -e POSTGRES_PASSWORD pg`, o `-env-file`) y, si falta
-alguna, dice cuáles en vez de arrancar el servicio sin ellas.
+alguna, dice cuáles en vez de arrancar el servicio sin ellas. Al pararla, el
+invitado vacía su caché al disco; al arrancarla, el daemon pasa `e2fsck -p`
+por ese disco (no lleva journal) por si se paró a la brava —pausada, o con el
+anfitrión caído—, y si queda algo que no sabe arreglar solo no arranca y lo
+dice.
 
 `kling image import -e` sigue horneando valores en `/etc/kling/env` por
 compatibilidad, con un aviso en stderr: sirve para lo que es de la imagen

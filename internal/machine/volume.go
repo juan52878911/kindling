@@ -701,21 +701,15 @@ func (m *Manager) stopService(mc *api.Machine) {
 // serviceStopTimeout es cuánto se espera a que el invitado pare su servicio.
 var serviceStopTimeout = 15 * time.Second
 
-func (m *Manager) flushVolume(mc *api.Machine) {
+// conservaDisco dice que el overlay sobrevive al VMM (Stop: kling start
+// arranca otra vez sobre él). Entonces se pide aunque no haya volúmenes: el
+// overlay no lleva journal, y lo que quedase en la caché del invitado se
+// perdía con el SIGKILL.
+func (m *Manager) flushVolume(mc *api.Machine, conservaDisco bool) {
 	if mc == nil || !mc.Reachable() || mc.State != api.StateRunning {
 		return
 	}
-	// Solo si hay algo que pueda haberse escrito. Un invitado con únicamente
-	// volúmenes de solo lectura no tiene nada en caché que perder, y pedirle un
-	// vaciado retrasaría su apagado a cambio de nada.
-	escribible := false
-	for _, v := range mc.Volumes {
-		if !v.ReadOnly {
-			escribible = true
-			break
-		}
-	}
-	if !escribible {
+	if !hayQueVaciar(mc, conservaDisco) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -731,6 +725,24 @@ func (m *Manager) flushVolume(mc *api.Machine) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// hayQueVaciar dice si pedirle al invitado que vacíe su caché antes de
+// matarlo. Solo si hay algo que pueda haberse escrito y vaya a seguir ahí:
+// un volumen escribible, o el overlay de una máquina que se para (no de una
+// que se borra). Un invitado con únicamente volúmenes de solo lectura que se
+// borra no tiene nada que perder, y pedirle un vaciado retrasaría su apagado
+// a cambio de nada.
+func hayQueVaciar(mc *api.Machine, conservaDisco bool) bool {
+	if conservaDisco {
+		return true
+	}
+	for _, v := range mc.Volumes {
+		if !v.ReadOnly {
+			return true
+		}
+	}
+	return false
 }
 
 // volumeDriveID nombra el disco i-ésimo de volumen.

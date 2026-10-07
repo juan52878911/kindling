@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,11 @@ func paradaParaStart(t *testing.T, m *Manager, id string) (*api.Machine, *[]stri
 		return nil
 	}
 	desmontarRedHost = func(n *knet.Net) { red = append(red, "-"+n.NS) }
+	// e2fsck de pega: el overlay de aquí no es un ext4 (ver
+	// TestStartRevisaSuDiscoAntesDeArrancar).
+	orden := ordenE2fsck
+	t.Cleanup(func() { ordenE2fsck = orden })
+	ordenE2fsck = func(ctx context.Context, _ string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
 
 	parada := time.Now().Add(-time.Minute)
 	mc := &api.Machine{ID: id, Name: "parada-" + id[:4], Image: img, State: api.StateStopped,
@@ -218,5 +224,70 @@ func TestStartSinImagenDiceComoVolver(t *testing.T) {
 	}
 	if p := pendiente(m); p != 0 {
 		t.Fatalf("pendingMiB = %d", p)
+	}
+}
+
+// Start revisa el overlay antes de arrancar sobre él: es ext4 sin journal, y
+// una parada a la brava (pausada, o muerta con el anfitrión) lo deja sucio.
+// Lo que e2fsck no arregla solo no se monta: la máquina sigue parada, con el
+// motivo, y sin red ni memoria colgadas.
+func TestStartRevisaSuDiscoAntesDeArrancar(t *testing.T) {
+	m := newTestManager(t)
+	m.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
+	mc, red := paradaParaStart(t, m, "5a5a000000000007")
+	overlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
+
+	var revisados []string
+	codigo := "0"
+	ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
+		revisados = append(revisados, path)
+		return exec.CommandContext(ctx, "sh", "-c", "echo e2fsck dijo algo; exit "+codigo)
+	}
+	// Sano: se revisa y el arranque sigue (y falla luego, sin VMM).
+	if _, err := m.Start(context.Background(), mc.ID, nil); err == nil || strings.Contains(err.Error(), "checking its disk") {
+		t.Fatalf("Start con el disco sano = %v; quería que siguiera hasta el VMM", err)
+	}
+	if len(revisados) != 1 || revisados[0] != overlay {
+		t.Fatalf("e2fsck revisó %v; quería solo el overlay %s", revisados, overlay)
+	}
+
+	// Errores sin corregir: no arranca, sigue parada y no montó la red.
+	revisados, codigo, *red = nil, "4", nil
+	_, err := m.Start(context.Background(), mc.ID, nil)
+	if err == nil || !strings.Contains(err.Error(), "checking its disk") || !strings.Contains(err.Error(), "uncorrected") {
+		t.Fatalf("Start con el disco roto = %v; quería el error de e2fsck", err)
+	}
+	viva := vivaDe(t, m, mc.ID)
+	if viva.State != api.StateStopped || viva.LastErr == "" {
+		t.Fatalf("tras el fallo: estado %s, LastErr %q; quería stopped con el motivo", viva.State, viva.LastErr)
+	}
+	for _, r := range *red {
+		if strings.HasPrefix(r, "+") {
+			t.Fatalf("red = %v; con el disco roto no tenía que montarla", *red)
+		}
+	}
+	if p := pendiente(m); p != 0 {
+		t.Fatalf("pendingMiB = %d; la reserva de memoria quedó colgada", p)
+	}
+}
+
+// Parar vacía la caché del invitado aunque no tenga volúmenes: el overlay
+// sobrevive (kling start) y no lleva journal. Borrar sin volúmenes
+// escribibles no la pide.
+func TestHayQueVaciarElOverlayAlParar(t *testing.T) {
+	sinVol := &api.Machine{}
+	soloLectura := &api.Machine{Volumes: []api.VolumeAttachment{{ReadOnly: true}}}
+	escribible := &api.Machine{Volumes: []api.VolumeAttachment{{}}}
+	for _, c := range []struct {
+		mc      *api.Machine
+		conserv bool
+		quiero  bool
+	}{
+		{sinVol, true, true}, {soloLectura, true, true}, {escribible, true, true},
+		{sinVol, false, false}, {soloLectura, false, false}, {escribible, false, true},
+	} {
+		if got := hayQueVaciar(c.mc, c.conserv); got != c.quiero {
+			t.Errorf("hayQueVaciar(%d volúmenes, conservaDisco=%v) = %v; quería %v", len(c.mc.Volumes), c.conserv, got, c.quiero)
+		}
 	}
 }

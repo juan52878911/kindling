@@ -2037,8 +2037,9 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// caminos. Un invitado pausado no atiende HTTP: la petición se comía su
 	// plazo entero en CADA congelación, y lo que quedara sin vaciar solo vivía
 	// en mem.file — si luego se elimina la máquina warm, esas escrituras
-	// desaparecen sin dejar rastro.
-	m.flushVolume(mc)
+	// desaparecen sin dejar rastro. Con el overlay también: un stop de la
+	// congelada tira mem.file, y kling start arranca sobre el overlay solo.
+	m.flushVolume(mc, true)
 
 	// Las carpetas vivas se desconectan ANTES de pausar: la conexión muere con
 	// el VMM, y si no se cortara aquí el daemon no se enteraría hasta que
@@ -3227,7 +3228,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc = cur
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
-	m.kill(mc.ID)
+	m.killConservandoDisco(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -3336,7 +3337,11 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) { m.killMachine(id, true) }
+func (m *Manager) kill(id string) { m.killMachine(id, true, false) }
+
+// killConservandoDisco es kill para Stop: el overlay sigue después (kling
+// start), así que el invitado vacía su caché aunque no tenga volúmenes.
+func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true) }
 
 // killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
 //
@@ -3344,9 +3349,9 @@ func (m *Manager) kill(id string) { m.killMachine(id, true) }
 // el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
 // morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
 // pausar, que es el único momento en que el invitado podía responder.
-func (m *Manager) killPaused(id string) { m.killMachine(id, false) }
+func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
 
-func (m *Manager) killMachine(id string, flush bool) {
+func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
@@ -3373,7 +3378,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	if flush && mc.State != api.StatePaused {
 		// El servicio primero: es quien escribe en los volúmenes.
 		m.stopService(mc)
-		m.flushVolume(mc)
+		m.flushVolume(mc, conservaDisco)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	defer func() {

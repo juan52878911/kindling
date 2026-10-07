@@ -97,7 +97,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	// El vaciado a disco se lo pide Remove() al matar, pero aquí se pide antes
 	// de mirar el tamaño: si no, el "en disco" que se informa sería el de antes
 	// de que la caché del invitado llegara al fichero.
-	m.flushVolume(mc)
+	m.flushVolume(mc, false)
 
 	res := &api.PopulateResult{ExitCode: out.ExitCode, Output: out.Output, Machine: mc.ID}
 	if v, err := m.statVolume(req.Volume); err == nil {

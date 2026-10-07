@@ -8,7 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
-- `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named
+- `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
