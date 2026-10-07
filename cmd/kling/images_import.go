@@ -67,7 +67,10 @@ func imagesImport(args []string) error {
 	default:
 		return fmt.Errorf("-restart must be always, on-failure or no, not %q", *restart)
 	}
-	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, Restart: *restart}
+	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env,
+		// Explícita en la receta: una sin ella es de antes de las políticas
+		// (ver existingImport).
+		Restart: cmp.Or(*restart, api.RestartOnFailure)}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}
@@ -207,8 +210,13 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 		return false, fmt.Errorf("image %s already exists, imported from %s; pick another -name, or pass -replace to overwrite it", name, from)
 	}
 	prev.Ref, spec.Ref = "", ""
-	// Sin -restart la política es on-failure: "" y on-failure son lo mismo.
-	prev.Restart = cmp.Or(prev.Restart, api.RestartOnFailure)
+	// Sin -restart la política es on-failure. Una receta sin política es de
+	// antes de que existieran, y su servicio se relanza siempre: darla por
+	// la misma dejaba relanzando un CMD que acaba con 0 (python:3.12-slim).
+	if prev.Restart == "" {
+		return false, fmt.Errorf("image %s was imported before restart policies (its service always restarts); "+
+			"pass -replace to rebuild it", name)
+	}
 	spec.Restart = cmp.Or(spec.Restart, api.RestartOnFailure)
 	a, _ := json.Marshal(prev)
 	b, _ := json.Marshal(spec)

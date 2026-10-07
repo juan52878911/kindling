@@ -110,7 +110,7 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (strin
 			return name, nil
 		}
 	}
-	sb, _ := json.Marshal(OCISpec{Ref: ref})
+	sb, _ := json.Marshal(OCISpec{Ref: ref, Restart: api.RestartOnFailure})
 	fmt.Fprintf(os.Stderr, "importing %s as %s (the first time downloads it)...\n", r, name)
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Builder: "oci", Spec: sb})
 	if err != nil {

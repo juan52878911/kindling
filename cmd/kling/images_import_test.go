@@ -66,7 +66,7 @@ func fakeImagesMux(builder, spec string) *http.ServeMux {
 // el segundo no pisa en silencio el primero.
 func TestExistingImport(t *testing.T) {
 	ctx := context.Background()
-	c := fakeDaemon(t, fakeImagesMux("oci", `{"ref":"redis:7","env":["A=secreto"]}`))
+	c := fakeDaemon(t, fakeImagesMux("oci", `{"ref":"redis:7","env":["A=secreto"],"restart":"on-failure"}`))
 	mismo := OCISpec{Ref: "docker.io/library/redis:7", Env: []string{"A=secreto"}}
 	if ok, err := existingImport(ctx, c, "redis-7", mismo); err != nil || !ok {
 		t.Fatalf("la misma importación: %v %v", ok, err)
@@ -95,6 +95,12 @@ func TestExistingImport(t *testing.T) {
 	}
 	if _, err := existingImport(ctx, c, "vieja", mismo); err == nil || !strings.Contains(err.Error(), "wasn't imported") {
 		t.Fatalf("sin receta: %v", err)
+	}
+	// Una receta sin política es de antes de las políticas: su servicio se
+	// relanza siempre, y darla por la misma lo dejaba así.
+	c = fakeDaemon(t, fakeImagesMux("oci", `{"ref":"redis:7","env":["A=secreto"]}`))
+	if _, err := existingImport(ctx, c, "redis-7", mismo); err == nil || !strings.Contains(err.Error(), "before restart policies") || !strings.Contains(err.Error(), "-replace") {
+		t.Fatalf("receta de antes de las políticas: %v", err)
 	}
 	c = fakeDaemon(t, fakeImagesMux("debian", `{"packages":["redis"]}`))
 	if _, err := existingImport(ctx, c, "redis-7", mismo); err == nil || !strings.Contains(err.Error(), "wasn't imported") {
