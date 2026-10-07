@@ -303,7 +303,8 @@ orden de `ssh` en vez de ejecutarla. En Mac el daemon y el CLI son el mismo
 host y todo es local.
 
 `install.sh` sobre una instalación existente pasa a decir "ya hay un kling
-v0.17.0; usa `kling upgrade`" y solo sigue con `--force`.
+v0.17.0; usa `kling upgrade`" y solo sigue con `--force`. Con `--with` y sin
+`--tag` sí sigue: añade esas extensiones y deja kling como está.
 
 **Cómo quedó (PR 8-9).** `internal/upgrade` es el flujo, con lo que se puede
 probar sin host (un servidor de releases falso, un daemon y un servicio de
@@ -344,7 +345,15 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   que solo lee cabeceras). Algo que el nuevo no sabría leer para **antes** de
   tocar nada, diciendo qué fichero; lo que migrará sale en el plan. Un kling
   anterior sin `-schemas` (≤ v0.17) se trata como lo que era: esquemas 0, y los
-  `meta.json` sin mirar.
+  `meta.json` sin mirar. Uno con `-schemas` ya no trae las migraciones de PR 11:
+  un `state.json` de v0.13, un `meta.json` de v0.4 o un `links.json` sin
+  migrar también lo paran antes (`machine.ObsoletosEnDisco`), con el mensaje
+  con el que el daemon se negaría.
+- **Qué daemon.** El que contesta en el socket (`-host`, `KLING_HOST`) tiene que
+  ser el proceso de la unidad (`-unit`, por defecto `kling`) o del agente de
+  launchd: se compara su PID con el del otro lado del socket (`SO_PEERCRED`,
+  `LOCAL_PEERPID`). Con `KLING_HOST` en un daemon privado, sin esto se
+  reiniciaría el de producción y se verificaría el privado.
 - **Prueba en seco.** Es ese `-schemas` (o `version`) del binario bajado, sin
   hablar con ningún daemon. No se corre `kling up -check`: diagnostica el host,
   que no cambia, y sale en rojo por avisos que no tienen que ver.
@@ -359,11 +368,19 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   `kling.service` (lo instala `make deploy`), y lo que no se cambia no hace
   falta copiarlo.
 - **Verificar.** `/info` con la versión del binario nuevo dentro del plazo
-  (`-timeout`, 60 s), y que siguen todas las máquinas, las congeladas
-  congeladas, y todos los dorados. Si no, vuelve sola: para, devuelve binarios,
+  (`-timeout`, 60 s), y que siguen las máquinas congeladas (congeladas, o
+  despiertas si un cliente las pidió) y las paradas, y todos los dorados. Las
+  que corrían no se exigen: el gateway crea y borra las de cada sesión. La foto
+  de antes se toma justo antes de parar, no al empezar: la descarga puede durar
+  minutos. Desde que se para, una señal no corta nada a medias: las órdenes
+  van sin cancelar (con su plazo) y Ctrl-C solo acorta la espera, que entonces
+  vuelve atrás entera. Si algo falla, vuelve sola: para, devuelve binarios,
   el `state.json` de la copia y cada `.v<N>.bak` que no estaba antes (y lo
   borra, para que la siguiente migración la vuelva a hacer), arranca y espera
-  a la versión de antes. El gancho `status` de las extensiones no se corre.
+  a la versión de antes; esa copia ya no sirve y se borra (las copias se podan
+  solo tras una actualización buena, así que dos intentos fallidos no se
+  llevan la del último bueno). El gancho `status` de las extensiones no se
+  corre.
 - **`-rollback`.** Lo mismo con la última copia, menos el `state.json`
   guardado (se usa el `.bak` de la migración, que es lo que dice §6); la copia
   usada se borra, así que el siguiente `-rollback` va a la anterior.

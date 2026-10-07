@@ -31,6 +31,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
 - `kling upgrade`: verified download, schema check, backup, daemon restart (systemd or launchd), check and automatic rollback; `-rollback`, `-dry-run`, `-from-dir`, `-cli`
 - `scripts/94-e2e-upgrade.sh`: upgrade from the previous release and back on a private daemon
+- `kling upgrade` checks that the daemon on the socket is the one the unit (or launchd agent) runs, refuses state the target no longer reads before stopping anything, and finishes the restart or rollback on Ctrl-C
+- `kling upgrade` tolerates what the gateway does meanwhile: frozen machines woken by clients, session machines removed
 
 ### Changed
 
@@ -61,7 +63,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
 - Lifecycle operations (`freeze`, `thaw`, `pause`, `stop`, `rm`) answer 404 for an unknown machine and 409 for a wrong state (was 400)
 - The watcher scans VMM processes once per round and re-measures disk only for running machines or after a state change
-- `install.sh` refuses to overwrite an existing kling without `--force` and points to `kling upgrade`
+- `install.sh` refuses to overwrite an existing kling without `--force` and points to `kling upgrade`; `--with` without `--tag` still adds extensions
 - v0.4 `links.json` and golden MCP fields and v0.13 `warm` state are no longer migrated: they are refused with how to pass through v0.17
 
 ### Fixed

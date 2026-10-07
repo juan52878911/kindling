@@ -41,7 +41,9 @@ var coreTree = []section{
                                                    restarts the daemon with it, checks
                                                    /info, machines and templates, and
                                                    rolls back by itself if not (sudo
-                                                   on Linux; -cli: only this binary)
+                                                   on Linux; -unit must run the daemon
+                                                   on the socket; -cli: only this
+                                                   binary)
   upgrade -rollback                                back to the last backup
 `},
 		{Name: "status", Summary: "which piece is up and which is missing", Usage: `  status [-v] [-json]                              which piece is up and which is
