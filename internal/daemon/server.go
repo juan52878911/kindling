@@ -546,6 +546,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
+	// Los ajustes del host no son de ningún inquilino.
+	if _, filtra := inquilinoDe(r); !filtra {
+		info.Tuning = s.ajustes()
+	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
 	}
@@ -556,6 +560,18 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info = api.Info{Version: Version, API: api.APIVersion, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// ajustes son los del manager más los que viven en el daemon: de dónde salen
+// los constructores y con qué usuario corren los que lo admiten.
+func (s *Server) ajustes() map[string]string {
+	a := s.mgr.Ajustes()
+	a["KLING_BUILDERS_DIR"] = buildersDir()
+	a["builder_user"] = "daemon"
+	if s.constructor != nil {
+		a["builder_user"] = s.constructor.Nombre
+	}
+	return a
 }
 
 // contarMaquinas es cuántas máquinas ve quien pregunta.

@@ -793,6 +793,12 @@ type Info struct {
 	// Authz dice si el daemon aplica una política de autorización y con qué
 	// rol ve a quien pregunta (docs/authz.md). nil = daemon anterior.
 	Authz *AuthzInfo `json:"authz,omitempty"`
+	// Tuning son los ajustes EFECTIVOS del daemon que se cambian por entorno
+	// (KLING_MAX_MACHINES, KLING_MIN_FREE_DISK_MIB...), con el nombre de su
+	// variable como clave: lo que aplica, no lo que se escribió (un valor
+	// fuera de rango deja el defecto). Solo a un admin o sin política; nil =
+	// daemon anterior.
+	Tuning map[string]string `json:"tuning,omitempty"`
 }
 
 // AuthzInfo es el estado de la autorización del daemon visto por quien llama.
