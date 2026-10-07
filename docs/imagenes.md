@@ -515,7 +515,9 @@ Dónde viven y por dónde pasan:
   falla diciéndolo. Tras una redirección a otro host (las capas suelen ir a un
   CDN con la URL ya firmada) la cabecera `Authorization` se quita, también
   hacia otro puerto del mismo host o un subdominio, que Go sí dejaría pasar.
-  Siempre por https, salvo `localhost`/`127.0.0.1`/`::1`.
+  Siempre por https. Uno de esta máquina (`localhost`, `127.0.0.1`, `::1`)
+  se prueba primero por https, por si lleva TLS, y si contesta en claro se
+  le habla por http, como hace docker.
 - **Sin ellas, o rechazadas, el error lo dice**: `kling registry login
   <registro>` si no hay, o que las guardadas se rechazaron.
 

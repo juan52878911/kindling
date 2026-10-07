@@ -196,13 +196,15 @@ type Client struct {
 	// no, cuenta como si no estuviera. En ellas no se escribe nunca.
 	Verificadas []string
 
-	mu     sync.Mutex // tokens, hc, Log y usados: las capas se bajan en paralelo
+	mu     sync.Mutex // tokens, plain, hc, Log y usados: las capas se bajan en paralelo
 	usados map[string]bool
 	authMu sync.Mutex // un solo token pedido a la vez
 	// tokens es la cabecera Authorization de cada registro/repo: "Bearer
 	// <token>" o, si el registro pide Basic, "Basic <credencial>".
 	tokens map[string]string
-	hc     *http.Client
+	// plain son los registros de esta máquina que hablan http (scheme).
+	plain map[string]bool
+	hc    *http.Client
 }
 
 // parallel es cuántas capas se bajan a la vez (docker pull baja 3).
@@ -261,6 +263,18 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 		req.Header.Del("Authorization")
 	}
 	return nil
+}
+
+// scheme es "https", salvo para un registro de esta máquina que ya contestó
+// en claro a https (un registry:2 de pruebas sin TLS): "http". Como docker,
+// uno de esta máquina se prueba primero con https, por si lleva TLS.
+func (c *Client) scheme(registry string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.plain[registry] {
+		return "http"
+	}
+	return "https"
 }
 
 // isLocalHost dice si host (sin puerto) es esta máquina: solo ahí se habla
@@ -889,23 +903,42 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		_, digest, _ := strings.Cut(path, "/")
 		return nil, errOffline(digest)
 	}
-	u := "https://" + registry + "/v2/" + repo + "/" + path
-	if isLocalHost(registryHost(registry)) {
-		u = "http://" + registry + "/v2/" + repo + "/" + path
-	}
 	for try := 0; try < 2; try++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		u := c.scheme(registry) + "://" + registry + "/v2/" + repo + "/" + path
+		used := c.tokenFor(registry + "/" + repo)
+		newReq := func(u string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+			if err != nil {
+				return nil, err
+			}
+			if accept != "" {
+				req.Header.Set("Accept", accept)
+			}
+			if used != "" {
+				req.Header.Set("Authorization", used)
+			}
+			return req, nil
+		}
+		req, err := newReq(u)
 		if err != nil {
 			return nil, err
 		}
-		if accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		used := c.tokenFor(registry + "/" + repo)
-		if used != "" {
-			req.Header.Set("Authorization", used)
-		}
 		resp, err := c.client().Do(req)
+		if errors.Is(err, http.ErrSchemeMismatch) && isLocalHost(registryHost(registry)) && req.URL.Scheme == "https" {
+			// Un registro de esta máquina que habla en claro: http desde
+			// ahora, como docker.
+			c.mu.Lock()
+			if c.plain == nil {
+				c.plain = map[string]bool{}
+			}
+			c.plain[registry] = true
+			c.mu.Unlock()
+			u = "http://" + strings.TrimPrefix(u, "https://")
+			if req, err = newReq(u); err != nil {
+				return nil, err
+			}
+			resp, err = c.client().Do(req)
+		}
 		if err != nil && ctx.Err() == nil {
 			// Un corte de red (el TLS de Docker Hub a veces no contesta):
 			// otra vez, una sola.
