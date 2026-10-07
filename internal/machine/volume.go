@@ -662,6 +662,22 @@ func (m *Manager) acquireVolumes(mc *api.Machine) error {
 	return m.guestVolumeOp(mc, "acquire", 30*time.Second)
 }
 
+// errPuenteSinVolumenes es el 404 de un puente que no conoce /volume/<op>:
+// la petición NO se aplicó. Quien soltó volúmenes lo mira para saber que no
+// hay nada que devolver (y que una máquina viva no se quedó sin ellos).
+type errPuenteSinVolumenes struct{ op string }
+
+func (e errPuenteSinVolumenes) Error() string {
+	return fmt.Sprintf("this image's bridge does not know how to %s volumes: "+
+		"it predates unmounted snapshots. Update it with `kling mcp refresh-bridge`", e.op)
+}
+
+// sinOperacionesDeVolumen dice si err es ese 404.
+func sinOperacionesDeVolumen(err error) bool {
+	var e errPuenteSinVolumenes
+	return errors.As(err, &e)
+}
+
 func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration) error {
 	if mc == nil || !mc.Reachable() || len(mc.Volumes) == 0 {
 		return nil
@@ -684,8 +700,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("this image's bridge does not know how to %s volumes: "+
-				"it predates unmounted snapshots. Update it with `kling mcp refresh-bridge`", op)
+			return errPuenteSinVolumenes{op}
 		}
 		return fmt.Errorf("guest could not %s its volumes: %s", op, strings.TrimSpace(string(b)))
 	}

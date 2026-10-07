@@ -1464,3 +1464,55 @@ func TestGrafoShareSoloConSuContexto(t *testing.T) {
 		t.Fatalf("con su contexto: %+v %v", rs, err)
 	}
 }
+
+// Si a un nodo no se le pueden devolver los volúmenes tras el volcado, no
+// sigue en marcha sin ellos: queda fallido, no se vuelve a congelar, y el
+// snapshot (que vale) lo avisa.
+func TestGrafoSnapshotSinDevolverVolumenesFallaElNodo(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerVolumenes(g.ID, "api", api.VolumeAttachment{Name: "datos", Mount: "/data"})
+	e.ponerEstado(g.ID, "api", api.StateWarm)
+	prev := devolverVolumenesNodo
+	devolverVolumenesNodo = func(ctx context.Context, m *Manager, id string) error {
+		_ = prev(ctx, m, id)
+		return errors.New("mount: no such device")
+	}
+	e.olvidar()
+	snap, err := e.m.GraphSnapshot(context.Background(), "tienda", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Warnings) != 1 || !strings.Contains(snap.Warnings[0], "node api could not mount its volumes") {
+		t.Errorf("avisos = %q, quería el del nodo api", snap.Warnings)
+	}
+	e.comprobarEventos(
+		"thaw api",
+		"release api",
+		"pause api", "pause web",
+		"commit api tienda-api-1", "commit web tienda-web-1",
+		"resume api", "resume web",
+		"acquire api",
+	)
+	mc, _ := e.m.Get(e.maquina(g.ID, "api"))
+	if mc == nil || mc.State != api.StateFailed || !strings.Contains(mc.LastErr, "volumes back") {
+		t.Errorf("nodo api = %+v, quería failed diciendo por qué", mc)
+	}
+}
+
+// Un puente sin /volume/release (404) no soltó nada: no se le devuelve nada.
+func TestGrafoSnapshotPuenteSinVolumenesNoDevuelve(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerVolumenes(g.ID, "web", api.VolumeAttachment{Name: "datos", Mount: "/data"})
+	prev := soltarVolumenesNodo
+	soltarVolumenesNodo = func(ctx context.Context, m *Manager, id string) error {
+		_ = prev(ctx, m, id)
+		return errPuenteSinVolumenes{"release"}
+	}
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err == nil || !strings.Contains(err.Error(), "refresh-bridge") {
+		t.Fatalf("esperaba el consejo de refresh-bridge, llegó %v", err)
+	}
+	e.comprobarEventos("release web")
+}

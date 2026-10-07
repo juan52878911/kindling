@@ -283,8 +283,14 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			soltados = false
 			// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay
 			// que devolvérselos, o seguirá corriendo escribiendo en su overlay.
+			// Si no se le pueden devolver, la plantilla no sigue en marcha: sin
+			// volumen, lo que escriba acaba en su overlay y muere con ella sin
+			// que nadie lo note. El dorado sí vale (se volcó con los volúmenes
+			// soltados), así que el commit sigue: lo que se pierde es la
+			// plantilla, y queda dicho por qué.
 			if err := m.acquireVolumes(mc); err != nil {
-				log.Printf("warning: template %s ended up without its volumes after commit: %v", mc.Name, err)
+				log.Printf("commit %s: the template could not mount its volumes again: %v", mc.Name, err)
+				m.fail(mc, fmt.Errorf("commit could not give the template its volumes back: %w", err))
 			}
 		}
 		return nil
@@ -348,6 +354,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if !yaPausada {
 		soltados = true
 		if err := m.releaseVolumes(mc); err != nil {
+			// Un puente que no conoce la ruta no soltó nada: no hay que
+			// devolverle nada, ni darla por perdida al no poder hacerlo.
+			soltados = !sinOperacionesDeVolumen(err)
 			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 		}
 
@@ -1650,7 +1659,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	resyncT, resyncOK, listo := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+	resync := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -1705,16 +1714,16 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 
 	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
 	// imagen (identidad por copia, etc.), en segundo plano.
-	m.trasRestaurar(ctx, id, api.ResyncInstance, listo)
+	m.trasRestaurar(ctx, id, api.ResyncInstance, resync)
 	// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada(listo)
+	impulso.entregarRestaurada(resync.listo)
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resyncT, resyncOK))})
+		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))})
 	return &out, nil
 }
 

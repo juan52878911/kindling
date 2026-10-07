@@ -159,7 +159,8 @@ func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
 // en orden de parada. Lo mismo si algo falla: el grafo queda como estaba.
 //
 // avisos son los nodos que no se pudieron volver a congelar tras un volcado
-// bueno: siguen en marcha, y quien pidió el snapshot tiene que saberlo.
+// bueno (siguen en marcha) o a los que no se pudo devolver sus volúmenes
+// (quedan fallidos), y quien pidió el snapshot tiene que saberlo.
 func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre func(nodo string) string) (hechas map[string]string, avisos []string, err error) {
 	nodos, err := m.nodosParaVolcar(gid)
 	if err != nil {
@@ -196,7 +197,13 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 				continue
 			}
 			if err := devolverVolumenesNodo(limpio, m, n.id); err != nil {
-				log.Printf("warning: graph %s: node %s ended up without its volumes after the snapshot: %v", shortID(gid), n.nodo, err)
+				// Como en Commit: un nodo sin sus volúmenes no sigue en marcha
+				// escribiendo en su overlay. Las plantillas valen; el nodo no.
+				log.Printf("graph %s: node %s could not mount its volumes again after the snapshot: %v", shortID(gid), n.nodo, err)
+				if mc, ok := m.Get(n.id); ok {
+					m.fail(mc, fmt.Errorf("graph snapshot could not give the node its volumes back: %w", err))
+				}
+				avisos = append(avisos, fmt.Sprintf("node %s could not mount its volumes again after the snapshot and was marked failed: %v", n.nodo, err))
 			}
 		}
 		for _, n := range porParada {
@@ -235,6 +242,8 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		soltadas[n.id] = true
 		if err := soltarVolumenesNodo(ctx, m, n.id); err != nil {
+			// Un puente que no conoce la ruta no soltó nada (ver Commit).
+			soltadas[n.id] = !sinOperacionesDeVolumen(err)
 			deshacer()
 			return nil, nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
 		}
