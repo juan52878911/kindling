@@ -142,7 +142,7 @@ func impulsoQueSeVe(t *testing.T, m *Manager, id string) int {
 func arranqueComoRun(m *Manager, id string, pct, vcpus int, fijo bool, err error) error {
 	impulso := m.nuevoImpulso(id, pct, vcpus, fijo)
 	defer impulso.fin()
-	if warn := m.limitCPU(id, os.Getpid(), impulso.tope); warn != "" {
+	if warn := m.limitCPU(id, os.Getpid(), impulso.tope, 0); warn != "" {
 		return errors.New(warn)
 	}
 	if err != nil {
@@ -390,7 +390,7 @@ func TestImpulsoPanicoBajaElTope(t *testing.T) {
 		defer func() { _ = recover() }()
 		impulso := m.nuevoImpulso(id, 50, 1, false)
 		defer impulso.fin()
-		m.limitCPU(id, os.Getpid(), impulso.tope)
+		m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 		panic("boom")
 	}()
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{100, 50}) {
@@ -521,7 +521,7 @@ func TestImpulsoComoThawYaListo(t *testing.T) {
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 2, false)
 		defer impulso.fin()
-		f := m.cgroupParaLanzar(id, impulso.tope)
+		f := m.cgroupParaLanzar(id, impulso.tope, 0)
 		if f == nil {
 			t.Fatal("cgroupParaLanzar no preparó el cgroup")
 		}
@@ -547,7 +547,7 @@ func TestImpulsoComoThawEsperandoLosGanchos(t *testing.T) {
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 1, false)
 		defer impulso.fin()
-		m.limitCPU(id, os.Getpid(), impulso.tope)
+		m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 		fijarListo(m, id, api.ReadyWaiting)
 		impulso.entregarRestaurada(&api.GuestReady{Probe: true, Ready: true, HasHooks: true})
 	}()
@@ -601,7 +601,7 @@ func TestImpulsoRestauradaSinAgenteBajaYa(t *testing.T) {
 	addConIP(m, id)
 
 	impulso := m.nuevoImpulso(id, 50, 2, false)
-	m.limitCPU(id, os.Getpid(), impulso.tope)
+	m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 	impulso.entregarRestaurada(nil)
 	impulso.fin()
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{200, 50}) {
@@ -621,7 +621,7 @@ func TestImpulsoComoThawFallido(t *testing.T) {
 	thaw := func() error {
 		impulso := m.nuevoImpulso(id, 20, 1, false)
 		defer impulso.fin()
-		if f := m.cgroupParaLanzar(id, impulso.tope); f != nil {
+		if f := m.cgroupParaLanzar(id, impulso.tope, 0); f != nil {
 			defer f.Close()
 		}
 		return errors.New("loading snapshot: TSC")

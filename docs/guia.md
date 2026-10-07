@@ -1192,6 +1192,15 @@ misma página compartida N veces y exagera el uso una barbaridad. El gateway exp
 páginas que no está usando de verdad vuelvan al host — útil tras el pico de arranque de
 un servicio, cuando su régimen permanente es mucho menor que su pico.
 
+En Firecracker, una máquina arrancada en frío cuya imagen declara sonda de listo lo hace
+sola una vez, al pasar la sonda: infla el globo hasta todo lo disponible y lo desinfla,
+así que lo que vuelve al host es la caché de página del arranque. Medido en el
+laboratorio (512 MiB): Postgres en reposo de 167 a 89 MiB de RSS (99 MiB a los 30 s),
+nginx de 65 a 60 MiB. `KLING_SQUEEZE_ON_READY=0` lo apaga. Además el globo pide el
+informe de páginas libres (Firecracker 1.14+, kernel con `CONFIG_PAGE_REPORTING`): lo que
+el invitado libera vuelve al host solo, sin apretar; `KLING_FREE_PAGE_REPORTING=0` lo
+apaga.
+
 ```sh
 kling run -image toolchain -mem 512 -mem-max 2048 -name trabajo
 kling machine resize trabajo -mem 1536   # sube o baja, sin reiniciar

@@ -55,7 +55,7 @@ func TestAlmacenEspejaLaMemoriaDelDorado(t *testing.T) {
 		diff := filepath.Join(mdir, "mem.file")
 		escribirPaginas(t, diff, nil, paginaDe(letra))
 		diffs[id] = diff
-		ruta, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, id, 0)
+		ruta, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, id, 0, nil)
 		if err != nil {
 			t.Fatalf("copia %d: %v", i, err)
 		}
@@ -100,7 +100,7 @@ func TestAlmacenEspejaLaMemoriaDelDorado(t *testing.T) {
 	// del overlay no se toca.
 	time.Sleep(10 * time.Millisecond)
 	src = escribirMemoriaDorada(t, root, "dorado", paginaDe('X'), paginaDe('Y'))
-	ruta, err := a.memoriaInstancia(context.Background(), "dorado", src, diffs["copia2"], "copia2", 0)
+	ruta, err := a.memoriaInstancia(context.Background(), "dorado", src, diffs["copia2"], "copia2", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestAlmacenBarrerConservaElEspejoVigente(t *testing.T) {
 	}
 	src := escribirMemoriaDorada(t, root, "dorado", paginaDe('A'))
 	a.mu.Lock()
-	espejo, err := a.baseMemoria(context.Background(), "dorado", src)
+	espejo, err := a.baseMemoria(context.Background(), "dorado", src, nil)
 	a.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -171,11 +171,11 @@ func TestAlmacenSinSitioNoEspeja(t *testing.T) {
 	diff := filepath.Join(root, "diff")
 	escribirPaginas(t, diff, paginaDe('D'))
 	// Con el almacén ya montado (si no, el fallo sería "no disponible").
-	if _, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, "primera", 0); err != nil {
+	if _, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, "primera", 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.libre = 64 << 20
-	_, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, "copia", 0)
+	_, err := a.memoriaInstancia(context.Background(), "dorado", src, diff, "copia", 0, nil)
 	var lleno *errAlmacenLleno
 	if !errors.As(err, &lleno) {
 		t.Fatalf("con 64 MiB libres tenía que decir almacén lleno: %v", err)

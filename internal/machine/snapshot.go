@@ -550,6 +550,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	m.anotarIntegridad(name, dir)
 	t.marca("meta")
 	log.Printf("commit %s -> %s: %s", mc.Name, name, t)
+	// El espejo de su memoria en el almacén, ya, en segundo plano: si no, lo
+	// copia entero el primer thaw de una copia congelada en diferencial
+	// (cow_memoria.go). No el de un fork: su dorado es temporal.
+	if !deFork {
+		m.espejarMemoriaDorado(name)
+	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
@@ -1467,7 +1473,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	impulso := m.nuevoImpulso(id, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(id, impulso.tope)
+	cg := m.cgroupParaLanzar(id, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1661,7 +1667,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, con el techo
 	// de arranque: lo baja entregarRestaurada, abajo.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}

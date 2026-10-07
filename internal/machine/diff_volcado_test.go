@@ -147,7 +147,7 @@ func TestPrepararMemoriaDesdeDiff(t *testing.T) {
 	escribirPaginas(t, base, paginaDe('A'), paginaDe('B'))
 	escribirPaginas(t, filepath.Join(dir, "mem.file"), nil, paginaDe('D'))
 	mc := &api.Machine{ID: "0123456789abcdef", MemMiB: 1}
-	full, err := m.prepararMemoriaDesdeDiff(context.Background(), mc, dir, base)
+	full, err := m.prepararMemoriaDesdeDiff(context.Background(), mc, dir, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestPrepararMemoriaDesdeDiff(t *testing.T) {
 	if b := leerPaginas(t, base, 2); !bytes.Equal(b[1], paginaDe('B')) {
 		t.Error("se escribió sobre la base del dorado")
 	}
-	if _, err := m.prepararMemoriaDesdeDiff(context.Background(), mc, dir, filepath.Join(m.root, "no-esta")); err == nil || !strings.Contains(err.Error(), "gone") {
+	if _, err := m.prepararMemoriaDesdeDiff(context.Background(), mc, dir, filepath.Join(m.root, "no-esta"), nil); err == nil || !strings.Contains(err.Error(), "gone") {
 		t.Fatalf("sin la base tenía que decirlo: %v", err)
 	}
 }
@@ -351,7 +351,7 @@ func TestBorrarAcumuladoDiff(t *testing.T) {
 	f := &almacenFalso{}
 	a := nuevoAlmacenFalso(t, m.root, f)
 	m.alm = a
-	if _, err := a.memoriaInstancia(context.Background(), "x", "", "", "", 0); err == nil {
+	if _, err := a.memoriaInstancia(context.Background(), "x", "", "", "", 0, nil); err == nil {
 		t.Fatal("no debía poder sin fuentes")
 	}
 	a.mu.Lock()

@@ -233,8 +233,9 @@ const ioctlFICLONERANGE = 0x4020940d
 // prepararMemoriaDesdeDiff construye dir/mem.full (base + diff) para cargar
 // una copia congelada en diferencial, y devuelve su ruta. Clona la base si el
 // sistema de ficheros sabe; si no, la copia dispersa, que es lo que cuesta un
-// thaw sin reflink (el disco lo paga solo mientras la copia corre).
-func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine, dir, base string) (string, error) {
+// thaw sin reflink (el disco lo paga solo mientras la copia corre). t, si no
+// es nil, suma lo que costaron el almacén y su espejo (memoriaEnAlmacen).
+func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine, dir, base string, t *tiemposMemoria) (string, error) {
 	if !existe(base) {
 		return "", fmt.Errorf("it was frozen as a diff against the golden snapshot's memory (%s), which is gone", base)
 	}
@@ -247,7 +248,7 @@ func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine,
 	m.borrarMemoriaAlmacen(mc.ID)
 	// Primero el almacén (cow_memoria.go): un clon del espejo del dorado, que
 	// no cuesta ni tiempo ni más disco que el diff.
-	if enlace := m.memoriaEnAlmacen(ctx, mc.ID, dir, base, diff); enlace != "" {
+	if enlace := m.memoriaEnAlmacen(ctx, mc.ID, dir, base, diff, t); enlace != "" {
 		return enlace, nil
 	}
 	if err := clonarFichero(base, full); err != nil {

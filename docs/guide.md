@@ -1187,6 +1187,14 @@ actually using go back to the host — useful after a service's startup spike, w
 steady state is much smaller than its peak. The daemon also does it on its own before
 refusing a new machine for lack of memory.
 
+On Firecracker, a cold-booted machine whose image declares a ready probe does it once on
+its own when the probe passes: it inflates the balloon to everything available and
+deflates it, so the boot-time page cache goes back to the host. Measured in the lab
+(512 MiB): Postgres at rest from 167 to 89 MiB RSS (99 MiB after 30 s), nginx from 65 to
+60 MiB. `KLING_SQUEEZE_ON_READY=0` turns it off. The balloon also asks for free page
+reporting (Firecracker 1.14+, guest kernel with `CONFIG_PAGE_REPORTING`): what the guest
+frees goes back to the host without a squeeze; `KLING_FREE_PAGE_REPORTING=0` turns it off.
+
 ```sh
 kling run -image toolchain -mem 512 -mem-max 2048 -name job
 kling machine resize job -mem 1536   # up or down, without restarting

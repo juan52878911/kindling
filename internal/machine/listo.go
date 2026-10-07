@@ -248,8 +248,9 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 
 // vigilarListo sigue en segundo plano el "listo" de la máquina id para que
 // `kling ps` lo enseñe. inicial es lo que ya se sabe (la respuesta del
-// /resync), o nil para preguntar. Una vigía nueva de la misma máquina (un
-// thaw) jubila a la anterior.
+// /resync), o nil para preguntar: un arranque en frío (Run), y entonces, si
+// la sonda pasa, se aprieta el globo una vez (apretarAlEstarLista). Una vigía
+// nueva de la misma máquina (un thaw) jubila a la anterior.
 func (m *Manager) vigilarListo(id string, inicial *api.GuestReady) {
 	if inicial != nil {
 		estado := estadoListo(*inicial)
@@ -289,6 +290,9 @@ func (m *Manager) vigilarListo(id string, inicial *api.GuestReady) {
 					return
 				}
 				m.anotarListo(id, estado)
+				if estado == api.ReadyYes && inicial == nil {
+					m.apretarAlEstarLista(id)
+				}
 				if estado != api.ReadyWaiting {
 					return
 				}

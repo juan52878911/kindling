@@ -1359,5 +1359,5 @@ func wakeNote(p *api.WakePhases) string {
 	}
 	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f, other %.1f",
 		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS,
-		p.WaitMS+p.CheckMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
+		p.WaitMS+p.CheckMS+p.StoreMS+p.MirrorMS+p.MemoryMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
 }

@@ -103,6 +103,9 @@ type Manager struct {
 	// cgroupRoot vacío = sin límite de CPU; el motivo queda en CgroupWarning.
 	cgroupRoot    string
 	CgroupWarning string
+	// cgroupMemoria y cgroupProcesos: los cgroups de las microVMs tienen los
+	// controladores de memoria y de procesos (memory.max, pids.max).
+	cgroupMemoria, cgroupProcesos bool
 
 	// jailerJailed dice si las microVMs de este proceso arrancan dentro de
 	// jailer (ver decidirJailer). Se decide UNA vez al construir el Manager y
@@ -445,6 +448,13 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		m.CgroupWarning = err.Error()
 	} else {
 		m.cgroupRoot = cg
+		m.cgroupMemoria, m.cgroupProcesos = controladoresDelegados(cg)
+		if !m.cgroupMemoria {
+			log.Printf("warning: the memory cgroup controller is not available: no memory.max per microVM")
+		}
+		if !m.cgroupProcesos {
+			log.Printf("warning: the pids cgroup controller is not available: no pids.max per microVM")
+		}
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
@@ -1446,7 +1456,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// lo entrega a quien espera el fin del arranque. Ver arranque_cpu.go.
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -1765,7 +1775,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// del snapshot dorado, heredado por las copias. No es fatal: si el kernel
 	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
 	// microVM arranca igual y solo se pierde el squeeze.
-	if err := c.SetBalloon(ctx, globo, true, balloonStatsPollSec); err != nil {
+	if err := m.configurarGlobo(ctx, c, id, globo); err != nil {
 		if globo > 0 {
 			// Sin globo no hay forma de retener la diferencia: el invitado
 			// vería el techo entero, que no es lo que se pidió.
@@ -2303,6 +2313,10 @@ const balloonStatsPollSec = 1
 // del OOM justo después.
 const balloonSqueezeMarginMiB = 128
 
+// sueloSqueezeMiB es lo que el globo nunca le quita al invitado, sea cual sea
+// el margen: el kernel necesita memoria propia para atender al driver.
+const sueloSqueezeMiB = 32
+
 // squeezeMinRetenerMiB: por debajo de esto, en macOS, el apretón no ha devuelto
 // nada que valga la pena retener y el globo vuelve a la línea base.
 const squeezeMinRetenerMiB = 16
@@ -2333,13 +2347,17 @@ func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
-	return m.squeezeLocked(ctx, mc.ID, ref, force)
+	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB, true)
 }
 
 // squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
 // tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
-// las ocupadas).
-func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool) (*api.SqueezeResult, error) {
+// las ocupadas). margen es lo que se le deja disponible al invitado mientras el
+// globo está inflado (balloonSqueezeMarginMiB, salvo el apretón al estar lista).
+// publicar anuncia el apretón en el bus como EvFrozen, como siempre han hecho
+// squeeze y makeRoom; el apretón al estar lista no, que no es congelar nada y
+// quien lee los eventos vería un "freeze" justo después de arrancar.
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool, margen int, publicar bool) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
@@ -2391,7 +2409,13 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 		reclaimMiB = avail
 	}
 
-	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
+	target := stats.ActualMiB + reclaimMiB - margen
+	// Como en apretarAntesDeVolcar: con un ActualMiB obsoleto la suma puede
+	// pasar del total, y el VMM rechaza un globo mayor que la RAM. Nunca a
+	// menos de un suelo del total, por pequeño que sea el margen.
+	if tot := int(stats.TotalMemory >> 20); tot > 0 && target > tot-sueloSqueezeMiB {
+		target = tot - sueloSqueezeMiB
+	}
 	sinEstadisticas := globoSinEstadisticas && estadisticasDesconocidas(stats)
 	if sinEstadisticas {
 		// macOS: el framework no dice cuánta memoria tiene libre el invitado
@@ -2450,8 +2474,10 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 		}
 	}
 
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
-		Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	if publicar {
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
+			Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	}
 
 	return &api.SqueezeResult{ID: id, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
 }
@@ -2854,11 +2880,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.baseDiffValida(mc, base); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
-		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
+		var tm tiemposMemoria
+		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base, &tm)
 		if err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
 		memPath = full
+		crono.marcaMemoria(tm)
 	}
 	// El mem.full de este despertar, si algo falla antes de abortar (que lo
 	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
@@ -2932,7 +2960,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(mc.ID, impulso.tope)
+	cg := m.cgroupParaLanzar(mc.ID, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -3056,7 +3084,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
 	// que mover.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
