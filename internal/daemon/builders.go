@@ -50,7 +50,8 @@ import (
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
 // KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW. Los aislados
 // (constructoresAislados) reciben además KLING_OUT_DIR, donde dejan la imagen
-// en vez de en images/, y sin root KLING_CACHE_DIR, su caché.
+// en vez de en images/, y sin root KLING_CACHE_DIR, su caché, y
+// KLING_VERIFIED_CACHE_DIR, la que verificó el daemon (builders_cache.go).
 
 var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -203,19 +204,28 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	// cache es la caché del constructor y verificada la de root que lee sin
+	// rehashear (builders_cache.go); bien, que la construcción acabó bien.
+	var cache, verificada string
+	bien := false
 	defer func() {
 		// Primero lo que el constructor dejara vivo, después su directorio:
-		// al revés, sus hijos seguirían escribiendo mientras se borra.
+		// al revés, sus hijos seguirían escribiendo mientras se borra. Las
+		// cachés, con él ya barrido y antes de borrar la lista de lo usado.
 		if u != nil {
 			barrerProcesos(u.UID)
+			s.cacheConstruccion(work, cache, verificada, u, bien)
 		}
 		os.RemoveAll(work)
 	}()
 
-	var cache string
 	if u != nil {
 		if cache, err = prepararCache(s.root, u); err != nil {
 			fail(w, http.StatusInternalServerError, fmt.Errorf("builder cache: %w", err))
+			return
+		}
+		if verificada, err = prepararVerificada(s.root); err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("verified builder cache: %w", err))
 			return
 		}
 	}
@@ -224,7 +234,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
-	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache)
+	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache, verificada)
 	out := filepath.Join(work, "out")
 	var salida bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &salida, &salida
@@ -260,6 +270,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 			fail(w, status, fmt.Errorf("builder %s: %w", req.Builder, err))
 			return
 		}
+		bien = true
 	}
 
 	hints, err := readRecipeHints(filepath.Join(work, "recipe.json"))
@@ -369,12 +380,15 @@ func mismoJSON(a, b json.RawMessage) bool {
 // usuario de construcción, su identidad (u.credencial) y un entorno de lista
 // blanca en vez del del daemon.
 func comandoConstructor(ctx context.Context, bin string, binArgs []string, root, work string,
-	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache string) *exec.Cmd {
+	req api.BuildImageRequest, aislado bool, u *usuarioConstructor, cache, verificada string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, bin, append(append([]string{}, binArgs...), work)...)
 	cmd.Dir = work
 	cmd.Env = os.Environ()
 	if u != nil {
 		cmd.Env = append(entornoConstructor(work), "KLING_CACHE_DIR="+cache, "KLING_BUILD_LIMITS=1")
+		if verificada != "" {
+			cmd.Env = append(cmd.Env, "KLING_VERIFIED_CACHE_DIR="+verificada)
+		}
 		cmd.SysProcAttr = u.credencial()
 	}
 	cmd.Env = append(cmd.Env,

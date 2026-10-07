@@ -213,9 +213,14 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	unpacked := filepath.Join(dir, "layers")
 	defer os.RemoveAll(unpacked)
 	// Sin privilegios (el daemon nos bajó de root), la caché es nuestra: todo lo
-	// cacheado se rehashea siempre (oci.Client.SiempreRehash).
+	// cacheado se rehashea siempre (oci.Client.SiempreRehash). Lo que el daemon
+	// ya verificó está en KLING_VERIFIED_CACHE_DIR, suya y de solo lectura
+	// para nosotros: eso no se rehashea (internal/daemon/builders_cache.go).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
 		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0}
+	if d := os.Getenv("KLING_VERIFIED_CACHE_DIR"); d != "" && os.Getenv("KLING_CACHE_DIR") != "" {
+		c.Verificada = filepath.Join(d, "oci")
+	}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
@@ -224,6 +229,14 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	img, err := c.Pull(ctx, ref.Name(), digest, spec.Arch)
 	if err != nil {
 		return err
+	}
+	if os.Getenv("KLING_CACHE_DIR") != "" {
+		// Para el daemon: qué blobs de la caché usó esta construcción. Si
+		// acaba bien, los comprueba él y pasa a la verificada los nuevos.
+		usados := strings.Join(c.Usados(), "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "cache-used"), []byte(usados), 0o600); err != nil {
+			return err
+		}
 	}
 	cfg := img.Config.Config
 	dPull := time.Since(tPull)

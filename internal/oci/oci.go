@@ -22,9 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -168,9 +170,21 @@ type Client struct {
 	// root heredado al nombre de otro del mismo tamaño— para envenenar los
 	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
 	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
+	// No vale para Verificada.
 	SiempreRehash bool
+	// Verificada, si no está vacío, es una caché de SOLO LECTURA (el
+	// directorio que tiene sha256/ dentro) que llena otro, el daemon como
+	// root, después de comprobar cada blob por sha256 (ver
+	// internal/daemon/builders_cache.go). Se mira antes que Cache, y un blob
+	// de ahí se usa sin rehashear aunque SiempreRehash: solo si el fichero,
+	// sha256/, el directorio y su padre son de root sin escritura para grupo
+	// ni otros (quien construye no puede cambiarlo ni renombrarlo) y el
+	// fichero es regular con el tamaño del manifiesto. Si no, cuenta como si
+	// no estuviera. En ella no se escribe nunca.
+	Verificada string
 
-	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
+	mu     sync.Mutex // tokens, hc, Log y usados: las capas se bajan en paralelo
+	usados map[string]bool
 	authMu sync.Mutex // un solo token pedido a la vez
 	tokens map[string]string
 	hc     *http.Client
@@ -270,9 +284,14 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	// (reconstruir sin red).
 	var body []byte
 	var mt string
-	if b, err := os.ReadFile(c.BlobPath(digest)); err == nil && sha(b) == digest {
-		body = b
-	} else {
+	for _, p := range []string{c.rutaVerificada(digest), c.BlobPath(digest)} {
+		if b, err := leerMax(p, maxManifest); err == nil && sha(b) == digest {
+			body = b
+			break
+		}
+	}
+	if body == nil {
+		var err error
 		body, mt, err = c.get(ctx, registry, repo, "manifests/"+digest, manifestAccept, maxManifest)
 		if err != nil {
 			return nil, err
@@ -287,6 +306,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 			}
 		}
 	}
+	c.usar(digest)
 	if schema1(body, mt) {
 		return nil, errSchema1(ref + "@" + digest)
 	}
@@ -517,10 +537,52 @@ func (c *Client) BlobPath(digest string) string {
 	return filepath.Join(c.Cache, "sha256", strings.TrimPrefix(digest, "sha256:"))
 }
 
+// rutaVerificada es dónde estaría el blob en la caché verificada ("" sin ella).
+func (c *Client) rutaVerificada(digest string) string {
+	if c.Verificada == "" {
+		return ""
+	}
+	return filepath.Join(c.Verificada, "sha256", strings.TrimPrefix(digest, "sha256:"))
+}
+
+// Usados son los digests de los blobs que se han leído o dejado en las
+// cachés (manifiestos, configuración y capas), ordenados: lo que el daemon
+// verifica y pasa a la caché verificada al acabar bien una construcción.
+func (c *Client) Usados() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.usados))
+	for d := range c.usados {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (c *Client) usar(digest string) {
+	c.mu.Lock()
+	if c.usados == nil {
+		c.usados = map[string]bool{}
+	}
+	c.usados[digest] = true
+	c.mu.Unlock()
+}
+
 // blob deja el blob en la caché, verificado, y devuelve su ruta.
 func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) (string, error) {
 	if !reDigest.MatchString(d.Digest) {
 		return "", fmt.Errorf("invalid digest %q", d.Digest)
+	}
+	p, err := c.blobSinApuntar(ctx, registry, repo, d)
+	if err == nil {
+		c.usar(d.Digest)
+	}
+	return p, err
+}
+
+func (c *Client) blobSinApuntar(ctx context.Context, registry, repo string, d Descriptor) (string, error) {
+	if p := c.rutaVerificada(d.Digest); p != "" && verificado(c.Verificada, p, d.Size) {
+		return p, nil
 	}
 	dst := c.BlobPath(d.Digest)
 	if !c.SiempreRehash && cached(dst, d.Size) {
@@ -571,6 +633,53 @@ func cached(p string, size int64) bool {
 	}
 	st, err := os.Lstat(p)
 	return err == nil && st.Mode().IsRegular() && st.Size() == size && st.Mode().Perm()&0o022 == 0
+}
+
+// dueñoVerificada es el dueño que tiene que tener la caché verificada: root
+// (variable para los tests, que no corren como root).
+var dueñoVerificada uint32 = 0
+
+// verificado dice si el blob p de la caché verificada dir se puede usar sin
+// rehashear (Client.Verificada): el fichero, regular, con el tamaño del
+// manifiesto; y él, dir/sha256, dir y el padre de dir, de dueñoVerificada y
+// sin escritura para grupo ni otros, sin seguir enlaces. Así quien lo usa no
+// puede haberlo escrito, ni cambiado, ni puesto otro con su nombre.
+func verificado(dir, p string, size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() != size || !deDueño(st) {
+		return false
+	}
+	for _, d := range []string{filepath.Join(dir, "sha256"), dir, filepath.Dir(dir)} {
+		st, err := os.Lstat(d)
+		if err != nil || !st.IsDir() || !deDueño(st) {
+			return false
+		}
+	}
+	return true
+}
+
+func deDueño(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == dueñoVerificada && fi.Mode().Perm()&0o022 == 0
+}
+
+// leerMax lee un fichero de hasta max bytes, sin seguir un enlace al final.
+func leerMax(p string, max int64) ([]byte, error) {
+	if p == "" {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	return readMax(f, max)
 }
 
 func fileHas(p, digest string, size int64) (bool, error) {

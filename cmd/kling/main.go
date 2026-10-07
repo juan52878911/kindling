@@ -347,6 +347,7 @@ func cmdDaemon(args []string) error {
 	srv.SetCoW(cowConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
+	srv.SetBuildCache(buildCacheConfig)
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -373,6 +374,30 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// buildCacheConfig lee daemon.build_cache_max_gib y
+// daemon.build_cache_max_days; KLING_BUILD_CACHE_MAX_GIB y
+// KLING_BUILD_CACHE_MAX_DAYS mandan sobre el fichero. Se llama en cada
+// construcción: cambiarlos no pide reiniciar el daemon. 0 o un valor que no
+// se entiende = el de por defecto.
+func buildCacheConfig() daemon.LimitesCacheConstruccion {
+	cfg := loadConfig()
+	l := daemon.LimitesCacheConstruccion{MaxGiB: cfg.Daemon.BuildCacheMaxGiB, MaxDays: cfg.Daemon.BuildCacheMaxDays}
+	for _, v := range []struct {
+		env string
+		dst *int
+	}{{"KLING_BUILD_CACHE_MAX_GIB", &l.MaxGiB}, {"KLING_BUILD_CACHE_MAX_DAYS", &l.MaxDays}} {
+		if s := os.Getenv(v.env); s != "" {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 0 {
+				log.Printf("warning: %s=%q is not a whole number (using the default)", v.env, s)
+				n = 0
+			}
+			*v.dst = n
+		}
+	}
+	return l
 }
 
 // credAuditConfig lee daemon.credaudit_max_mib y daemon.credaudit_generations;

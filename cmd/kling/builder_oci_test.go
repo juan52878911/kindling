@@ -213,6 +213,12 @@ func TestBuildOCI(t *testing.T) {
 	if blobs, _ := os.ReadDir(filepath.Join(cache, "oci", "sha256")); len(blobs) == 0 {
 		t.Fatal("KLING_CACHE_DIR: no blobs in <cache>/oci")
 	}
+	// Y deja al daemon la lista de blobs que usó, para pasarlos a la caché
+	// verificada (internal/daemon/builders_cache.go).
+	usados, err := os.ReadFile(filepath.Join(e.work, "cache-used"))
+	if err != nil || !strings.Contains(string(usados), idx+"\n") || strings.Count(string(usados), "sha256:") != 5 {
+		t.Fatalf("cache-used (índice, manifiesto, config y 2 capas): %q %v", usados, err)
+	}
 }
 
 // El servicio que sale de la configuración de la imagen: un STOPSIGNAL que no

@@ -246,6 +246,9 @@ type Server struct {
 	// muConstructor los pone en fila: ver barrerProcesos.
 	constructor   *usuarioConstructor
 	muConstructor sync.Mutex
+	// limitesCache da los topes de sus cachés (builders_cache.go); nil = los
+	// de por defecto.
+	limitesCache func() LimitesCacheConstruccion
 
 	// construyendo es un cerrojo por nombre de imagen: dos construcciones
 	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.
@@ -660,6 +663,7 @@ func (s *Server) ajustes() map[string]string {
 	if s.constructor != nil {
 		a["builder_user"] = s.constructor.Nombre
 	}
+	s.ajustesCache(a)
 	return a
 }
 
