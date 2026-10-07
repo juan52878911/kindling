@@ -345,7 +345,7 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
 ### Límites del constructor `oci`
 
 - **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
-  `pivot_root`, `mkdir`, `ln`, `cat` y `grep` (cualquier Alpine o Debian). Una
+  `pivot_root`, `mkdir` y `ln` (cualquier Alpine o Debian). Una
   imagen *distroless* se rechaza al construir, igual que una que ya traiga
   `/entrypoint`.
 - **Sin dm-verity**: la imagen es la raíz, no una capa.

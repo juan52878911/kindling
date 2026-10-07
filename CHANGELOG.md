@@ -29,6 +29,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
 - Docker images get a full core per vCPU by default
+- Docker images only need `sh`, `mount`, `pivot_root`, `mkdir` and `ln` for the init (no longer `cat` and `grep`)
 - A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
 - `kling db branch`: `git checkout` switches databases in tens of milliseconds (#125)
 - Concurrent `kling db up` calls wait for admission instead of being rejected (#150)
@@ -44,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
+- The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
 - `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
