@@ -26,6 +26,7 @@ bench-*.json
 /kling-bridge
 /kling-bridge-local
 /kling-linux-amd64
+/kling-unpack
 /kindling-domotica
 
 # Informes generados (las páginas de los ejemplos y la de kling db ask-web sí

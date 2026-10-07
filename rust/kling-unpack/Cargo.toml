@@ -1,0 +1,18 @@
+[package]
+name = "kling-unpack"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Descomprime una capa OCI (gzip o zstd) de stdin a stdout"
+publish = false
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+zstd = { version = "0.13", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

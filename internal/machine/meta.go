@@ -37,7 +37,11 @@ import (
 )
 
 // metaSchema es la versión de meta.json que escribe este binario.
-const metaSchema = 1
+//
+// v2: el overlay va en rootfs_digest (sha256 en árbol, pkg/digest.Tree) y no
+// en rootfs_sha256. Un kling de v1 no lo comprobaría y su firma no casaría:
+// por eso sube la versión, y ese kling se niega diciendo cuál encontró.
+const metaSchema = 2
 
 // ErrDoradoObsoleto es que el dorado se hizo con un VMM que el de ahora no
 // sabe restaurar: hay que rehacerlo.

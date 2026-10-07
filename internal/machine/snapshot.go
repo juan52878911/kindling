@@ -468,9 +468,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// quedan copias (barrerForks). Sin digest se trata como un dorado antiguo
 	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
 	// pequeño, se sigue grabando y comprobando.
-	var rootfsSHA string
+	var rootfsDigest string
 	if !deFork {
-		if rootfsSHA, err = digest.File(goldOverlay); err != nil {
+		if rootfsDigest, err = digest.Tree(goldOverlay); err != nil {
 			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
 		}
 	}
@@ -520,7 +520,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
 		AllowExec:      mc.AllowExec,
 		EnvKeys:        mc.EnvKeys,
-		RootfsSHA256:   rootfsSHA,
+		RootfsDigest:   rootfsDigest,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
 		GuestIPv6Off:   guestIPv6Off,
@@ -785,31 +785,44 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 // Los snapshots anteriores a esta comprobación no tienen digests grabados: se
 // saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
 func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
-	if snap.RootfsSHA256 == "" && snap.SnapSHA256 == "" {
+	if snap.RootfsSHA256 == "" && snap.RootfsDigest == "" && snap.SnapSHA256 == "" {
 		return nil // snapshot legacy: no hay digests que comprobar
 	}
 	if m.integridadYaVista(snap.Name, snapDir) {
 		return nil
 	}
+	rootfs := snap.RootfsDigest // v2: en árbol; los dorados de antes, sha256 plano
+	if rootfs == "" {
+		rootfs = snap.RootfsSHA256
+	}
 	for _, chk := range []struct{ file, want string }{
-		{"overlay.ext4", snap.RootfsSHA256},
+		{"overlay.ext4", rootfs},
 		{"snap.file", snap.SnapSHA256},
 	} {
 		if chk.want == "" {
 			continue
 		}
-		got, err := digest.File(filepath.Join(snapDir, chk.file))
+		got, ok, err := digest.Matches(filepath.Join(snapDir, chk.file), chk.want)
 		if err != nil {
 			return fmt.Errorf("couldn't read %s to verify its integrity: %w", chk.file, err)
 		}
-		if got != chk.want {
+		if !ok {
 			return fmt.Errorf("snapshot %q is corrupt: %s doesn't match what was frozen "+
 				"(sha256 expected %s…, found %s…). Reimport it with `kling mcp import %s -force`",
-				snap.Name, chk.file, chk.want[:12], got[:12], snap.Name)
+				snap.Name, chk.file, digestCorto(chk.want), digestCorto(got), snap.Name)
 		}
 	}
 	m.anotarIntegridad(snap.Name, snapDir)
 	return nil
+}
+
+// digestCorto da los 12 primeros caracteres del hex de un digest, con o sin
+// prefijo de algoritmo.
+func digestCorto(d string) string {
+	if i := strings.LastIndexByte(d, ':'); i >= 0 {
+		d = d[i+1:]
+	}
+	return d[:min(12, len(d))]
 }
 
 // huellaSnapshot describe los ficheros verificados sin leerlos: tamaño y fecha de

@@ -1,7 +1,7 @@
 # Campos que kindling persiste en disco. Generado por TestCamposPersistidos
 # (internal/machine/campos_persistidos_test.go): léelo antes de tocarlo.
 version state.json 2
-version meta.json 1
+version meta.json 2
 version credentials.enc 1
 state.json api.GuestAgent agent string
 state.json api.GuestAgent caps []string
@@ -105,6 +105,7 @@ meta.json api.Snapshot mem_bytes int64
 meta.json api.Snapshot mem_max_mib int
 meta.json api.Snapshot mem_mib int
 meta.json api.Snapshot name string
+meta.json api.Snapshot rootfs_digest string
 meta.json api.Snapshot rootfs_sha256 string
 meta.json api.Snapshot signature string
 meta.json api.Snapshot snap_sha256 string
