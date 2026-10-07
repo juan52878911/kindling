@@ -197,6 +197,14 @@ func TestArchiveOCILayout(t *testing.T) {
 	one := dosImagenes()[:1]
 	one[0].Tags = nil
 	files, mans = ocitest.OCILayout(one...)
+	// Con una atestación al lado, como las que guarda docker save desde la
+	// 25: no cuenta como otra imagen.
+	var idx map[string]any
+	json.Unmarshal(files["index.json"], &idx)
+	idx["manifests"] = append(idx["manifests"].([]any), map[string]any{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+		"digest": "sha256:" + strings.Repeat("0", 64), "size": 840,
+		"annotations": map[string]string{"io.containerd.manifest.subject": mans[0]}})
+	files["index.json"], _ = json.Marshal(idx)
 	a, err := oci.OpenArchive(escribir(t, ocitest.TarFiles(files)))
 	if err != nil {
 		t.Fatal(err)

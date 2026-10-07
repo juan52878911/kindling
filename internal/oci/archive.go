@@ -167,10 +167,17 @@ func (a *Archive) load() error {
 		if err := a.readJSON("index.json", maxManifest, &idx); err != nil {
 			return err
 		}
-		if len(idx.Manifests) == 0 || len(idx.Manifests) > maxArchiveImages {
-			return fmt.Errorf("index.json lists %d images (want 1..%d)", len(idx.Manifests), maxArchiveImages)
+		if len(idx.Manifests) > maxArchiveImages {
+			return fmt.Errorf("index.json lists %d images (max %d)", len(idx.Manifests), maxArchiveImages)
 		}
-		a.index = idx.Manifests
+		for _, e := range idx.Manifests {
+			if !attestation(e) {
+				a.index = append(a.index, e)
+			}
+		}
+		if len(a.index) == 0 {
+			return errors.New("index.json lists no images")
+		}
 		return nil
 	default:
 		if _, err := a.fs.size("manifest.json"); err != nil {
@@ -228,6 +235,15 @@ func (a *Archive) Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// attestation dice si una entrada de index.json es una atestación (la
+// procedencia o el SBOM que docker save, desde la 25, guarda junto a la
+// imagen) y no una imagen.
+func attestation(e indexEntry) bool {
+	return e.Annotations["io.containerd.manifest.subject"] != "" ||
+		e.Annotations["vnd.docker.reference.type"] == "attestation-manifest" ||
+		(e.Platform != nil && e.Platform.OS == "unknown")
 }
 
 // entryName es el nombre de una entrada de index.json: el completo que pone
