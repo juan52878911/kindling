@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -206,10 +207,13 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 		return false, fmt.Errorf("image %s already exists, imported from %s; pick another -name, or pass -replace to overwrite it", name, from)
 	}
 	prev.Ref, spec.Ref = "", ""
+	// Sin -restart la política es on-failure: "" y on-failure son lo mismo.
+	prev.Restart = cmp.Or(prev.Restart, api.RestartOnFailure)
+	spec.Restart = cmp.Or(spec.Restart, api.RestartOnFailure)
 	a, _ := json.Marshal(prev)
 	b, _ := json.Marshal(spec)
 	if string(a) != string(b) {
-		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch or size limit); "+
+		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit or restart policy); "+
 			"pass -replace to rebuild it with these", name, nr)
 	}
 	return true, nil

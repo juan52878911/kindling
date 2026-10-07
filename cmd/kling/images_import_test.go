@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/oci"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Los argumentos que puso quien importa no se repiten en la salida.
@@ -80,6 +81,13 @@ func TestExistingImport(t *testing.T) {
 	_, err = existingImport(ctx, c, "redis-7", OCISpec{Ref: "redis:7", Env: []string{"A=otro"}})
 	if err == nil || !strings.Contains(err.Error(), "other options") || strings.Contains(err.Error(), "secreto") || strings.Contains(err.Error(), "otro") {
 		t.Fatalf("misma referencia, otras opciones: %v", err)
+	}
+	// Sin -restart es on-failure: pedirlo explícito es la misma importación.
+	if ok, err := existingImport(ctx, c, "redis-7", OCISpec{Ref: "redis:7", Env: []string{"A=secreto"}, Restart: api.RestartOnFailure}); err != nil || !ok {
+		t.Fatalf("on-failure explícito: %v %v", ok, err)
+	}
+	if _, err := existingImport(ctx, c, "redis-7", OCISpec{Ref: "redis:7", Env: []string{"A=secreto"}, Restart: api.RestartAlways}); err == nil || !strings.Contains(err.Error(), "restart policy") {
+		t.Fatalf("otra política: %v", err)
 	}
 	_, err = existingImport(ctx, c, "redis-7", OCISpec{Ref: "redis:7@sha256:" + strings.Repeat("a", 64), Env: []string{"A=secreto"}})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
