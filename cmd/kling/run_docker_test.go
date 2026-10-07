@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -62,5 +64,31 @@ func TestNombreParaRef(t *testing.T) {
 	}
 	if nombreParaRef(r, []byte("otra clave")) == sin {
 		t.Error("el sufijo no depende de la clave")
+	}
+}
+
+// run -image avisa si la imagen que reutiliza es de antes de las políticas
+// de reinicio (su servicio se relanza siempre) y dice cómo rehacerla; con
+// política, o de otro constructor, no dice nada.
+func TestAvisoImportAntiguo(t *testing.T) {
+	ctx := context.Background()
+	c := fakeDaemon(t, fakeImagesMux("oci", `{"ref":"redis:7"}`))
+	aviso := avisoImportAntiguo(ctx, c, "redis-7", "docker.io/library/redis:7")
+	for _, w := range []string{"before restart policies", "kling image import docker.io/library/redis:7 -name redis-7 -replace"} {
+		if !strings.Contains(aviso, w) {
+			t.Errorf("aviso %q no dice %q", aviso, w)
+		}
+	}
+	for _, mux := range []*http.ServeMux{
+		fakeImagesMux("oci", `{"ref":"redis:7","restart":"on-failure"}`),
+		fakeImagesMux("debian", `{"packages":["redis"]}`),
+	} {
+		if a := avisoImportAntiguo(ctx, fakeDaemon(t, mux), "redis-7", "redis:7"); a != "" {
+			t.Errorf("avisó sin motivo: %q", a)
+		}
+	}
+	// Sin receta (404), el run sigue sin avisar.
+	if a := avisoImportAntiguo(ctx, fakeDaemon(t, http.NewServeMux()), "redis-7", "redis:7"); a != "" {
+		t.Errorf("sin receta: %q", a)
 	}
 }
