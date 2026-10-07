@@ -416,6 +416,14 @@ func TestBuildOCIAgenteSinInit(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.root, "images", "d.ext4")); !os.IsNotExist(err) {
 		t.Fatalf("an image was left behind: %v", err)
 	}
+	// Uno de otra arquitectura dice eso primero, que es lo que hay que arreglar.
+	otra := filepath.Join(t.TempDir(), "kling-guest-arm64")
+	os.WriteFile(otra, []byte(testELF(0xb7)), 0o755)
+	t.Setenv("KLING_GUEST_AGENT_amd64", otra)
+	if _, _, err := e.build("d", OCISpec{Ref: e.reg.Host() + "/x/d@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "not amd64") {
+		t.Fatalf("an arm64 agent for an amd64 image: %v", err)
+	}
+	t.Setenv("KLING_GUEST_AGENT_amd64", viejo)
 
 	_, idx = e.reg.ImageConfig("amd64", map[string]any{"Cmd": []string{"sh"}}, ocitest.TarGz(alpineLike()))
 	if _, log, err := e.build("a", OCISpec{Ref: e.reg.Host() + "/x/a@" + idx, Arch: "amd64"}); err != nil {

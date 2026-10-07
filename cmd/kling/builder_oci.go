@@ -379,11 +379,6 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	case goInit:
 		logf("the image has its own /entrypoint: it boots with kindling's init in Go, which leaves it alone")
 	}
-	if goInit {
-		if err := agentIsInit(agent); err != nil {
-			return err
-		}
-	}
 	// Las sondas de listo son scripts con #!/bin/sh si la imagen lo tiene.
 	hasSh := treeExec(tree, "/bin/sh")
 	probeCfg := cfg
@@ -425,6 +420,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 
 	if err := imagen.PutAgent(tree, agent, spec.Arch, t); err != nil {
 		return err
+	}
+	if goInit {
+		// Después de PutAgent, que ya dijo si es de otra arquitectura.
+		if err := agentIsInit(agent); err != nil {
+			return err
+		}
 	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure)}
