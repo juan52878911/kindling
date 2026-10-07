@@ -654,7 +654,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("asking guest to %s its volumes: %w", op, err)
 	}
@@ -689,7 +689,7 @@ func (m *Manager) stopService(mc *api.Machine) {
 		return
 	}
 	t0 := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		log.Printf("%s: guest did not stop its service before dying: %v", mc.Name, err)
 		return
@@ -719,7 +719,7 @@ func (m *Manager) flushVolume(mc *api.Machine, conservaDisco bool) {
 	if err != nil {
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		log.Printf("%s: guest did not flush its volumes before dying: %v", mc.Name, err)
 		return

@@ -217,6 +217,10 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
 	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.
 	mgr.FijarOrigen(Version, fcVersion)
+	// Una máquina parada o borrada deja su IP a la siguiente (kling start
+	// conserva la suya): lo que guardara guestClient contra ella es un TCP
+	// muerto, y el primer exec del VMM nuevo se comía un RST.
+	mgr.OnGuestGone(guestClient.CloseIdleConnections)
 	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
 		fcVersion: fcVersion}, nil
 }

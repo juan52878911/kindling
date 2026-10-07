@@ -67,6 +67,10 @@ var (
 )
 
 // listoClient, como resyncClient: sin conexiones guardadas hacia invitados.
+// Lo usan todas las peticiones del daemon al agente desde este paquete (parar
+// el servicio, vaciar y montar volúmenes, poblar): una conexión guardada a la
+// IP de una máquina parada la heredaba el siguiente VMM con la misma IP (kling
+// start la conserva), y la petición se comía un RST del invitado nuevo.
 var listoClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 // consultarListo pregunta GET /ready al agente de la máquina id.

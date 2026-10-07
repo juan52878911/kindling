@@ -153,6 +153,10 @@ type Manager struct {
 	// imgMu es el cerrojo de sustituir una imagen o el kernel (blobs.go).
 	imgMu sync.Mutex
 
+	// redCaida es lo que se llama al desmontar la red de una máquina (ver
+	// OnGuestGone).
+	redCaida atomic.Pointer[func()]
+
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
 	// simultáneas —el gateway marcando salud y el CLI guardando el catálogo— se

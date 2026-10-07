@@ -102,7 +102,18 @@ func (m *Manager) desmontarRed(n *knet.Net, id string) {
 	m.redMontada.Delete(id)
 	desmontarRedHost(n)
 	m.olvidarRedPropia(n.NS)
+	if f := m.redCaida.Load(); f != nil {
+		(*f)()
+	}
 }
+
+// OnGuestGone registra f para cuando la red de una máquina se desmonta: su
+// invitado ya no va a contestar en esa IP, y la siguiente máquina que la
+// reciba (kling start la conserva) es otro TCP. El daemon suelta ahí las
+// conexiones que guarda hacia los invitados: una guardada contra la IP de una
+// parada se la comía el primer exec tras el start, con un RST. La red
+// sobrevive al freeze, así que un thaw conserva las suyas.
+func (m *Manager) OnGuestGone(f func()) { m.redCaida.Store(&f) }
 
 // DE QUIÉN ES CADA NAMESPACE.
 //

@@ -57,6 +57,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
 - The daemon builds `oci`, `debian` and `android` images with its own binary, not the `kling` installed on the host (unless `KLING_BUILDERS_DIR` is set)
 - Replacing an image or the kernel (`PUT /images/{name}/blob`) can no longer race a machine that is booting from it
