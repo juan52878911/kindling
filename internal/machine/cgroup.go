@@ -99,30 +99,33 @@ const pidsMaxVMM = 128
 // escribirLimitesMemoria fija memory.max y pids.max en el cgroup dir, según
 // estén delegados. memMiB es la RAM máxima del invitado (MemMaxMiB si tiene
 // techo, MemMiB si no); 0 no pone límite de memoria.
+//
+// Cada techo va por su lado: uno que no se puede escribir se cuenta en el
+// error y los demás se escriben igual. Antes, un memory.max fallido dejaba al
+// VMM también sin swap.max y sin pids.max.
 func (m *Manager) escribirLimitesMemoria(dir string, memMiB int) error {
+	var errs []error
 	if m.cgroupMemoria && memMiB > 0 {
-		lim := int64(memMiB+margenMemoriaVMM(memMiB)) << 20
-		if err := os.WriteFile(filepath.Join(dir, "memory.max"),
-			[]byte(strconv.FormatInt(lim, 10)), 0o644); err != nil {
-			return fmt.Errorf("could not set memory.max: %w", err)
+		lim := strconv.FormatInt(int64(memMiB+margenMemoriaVMM(memMiB))<<20, 10)
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(lim), 0o644); err != nil {
+			errs = append(errs, fmt.Errorf("could not set memory.max: %w", err))
 		}
 		// memory.max no cuenta el swap: en un host con swap, un VMM
 		// comprometido pasaría del techo mandando lo demás al swap. El
 		// mismo techo para el swap deja que el host le saque páginas como
 		// a cualquiera bajo presión, pero acotado. Sin contabilidad de
 		// swap en el kernel el fichero no existe y no hay nada que acotar.
-		if err := escribirSiExiste(filepath.Join(dir, "memory.swap.max"),
-			strconv.FormatInt(lim, 10)); err != nil {
-			return fmt.Errorf("could not set memory.swap.max: %w", err)
+		if err := escribirSiExiste(filepath.Join(dir, "memory.swap.max"), lim); err != nil {
+			errs = append(errs, fmt.Errorf("could not set memory.swap.max: %w", err))
 		}
 	}
 	if m.cgroupProcesos {
 		if err := os.WriteFile(filepath.Join(dir, "pids.max"),
 			[]byte(strconv.Itoa(pidsMaxVMM)), 0o644); err != nil {
-			return fmt.Errorf("could not set pids.max: %w", err)
+			errs = append(errs, fmt.Errorf("could not set pids.max: %w", err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // escribirSiExiste escribe v en el fichero p solo si ya existe (en cgroupfs,
@@ -186,7 +189,7 @@ func (m *Manager) crearCgroup(id string, quotaPct, memMiB int) (string, string) 
 	// si uno no se puede escribir se avisa y se sigue, que abortar dejaba al
 	// VMM fuera del cgroup y sin el techo de CPU que tenía antes de ellos.
 	if err := m.escribirLimitesMemoria(dir, memMiB); err != nil {
-		log.Printf("warning: cgroup %s: %v", filepath.Base(dir), err)
+		log.Printf("warning: cgroup %s: %s", filepath.Base(dir), strings.ReplaceAll(err.Error(), "\n", "; "))
 	}
 	return dir, ""
 }
