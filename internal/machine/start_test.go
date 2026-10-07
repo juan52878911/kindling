@@ -291,3 +291,38 @@ func TestHayQueVaciarElOverlayAlParar(t *testing.T) {
 		}
 	}
 }
+
+// Start reserva su imagen mientras la lee, como Run: una sustitución en curso
+// (ConImagenesQuietas, la de PUT /images/{name}/blob) hace esperar al
+// arranque, y no arranca con la base de antes bajo la capa de después.
+func TestStartEsperaAUnaSustitucionDeSuImagen(t *testing.T) {
+	m := newTestManager(t)
+	m.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
+	mc, _ := paradaParaStart(t, m, "5a5a00000000000a")
+	hecho := make(chan error, 1)
+	if err := m.ConImagenesQuietas(func() error {
+		go func() {
+			_, err := m.Start(context.Background(), mc.ID, nil)
+			hecho <- err
+		}()
+		select {
+		case err := <-hecho:
+			t.Errorf("Start acabó (%v) en medio de la sustitución de su imagen", err)
+			hecho <- err
+		case <-time.After(300 * time.Millisecond):
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hecho:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start no siguió tras la sustitución")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.arrancando[mc.Image] != 0 || m.arrancandoTotal != 0 {
+		t.Fatalf("la reserva de la imagen quedó colgada: %v %d", m.arrancando, m.arrancandoTotal)
+	}
+}

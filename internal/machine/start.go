@@ -133,6 +133,11 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 	if err := m.comprobarAlmacenPara(mc.ID); err != nil {
 		return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
 	}
+	// Desde que se mira la imagen hasta que la máquina deja de estar parada
+	// (reclamarParada; desde ahí ImageReplaceable ya la cuenta), nadie la
+	// sustituye por debajo: con una capa, la base y la capa se resuelven por
+	// separado y se podía arrancar una base vieja bajo una capa nueva.
+	defer m.reservarImagen(mc.Image)()
 	// La imagen pudo borrarse mientras estaba parada (una parada no la
 	// retiene, ver blobs.go): se dice antes de reservar nada, y con cómo
 	// salir. El disco sigue ahí; basta con volver a traer la imagen con el
