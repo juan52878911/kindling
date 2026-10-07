@@ -2449,7 +2449,7 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
+		return nil, estadoInvalido("only a running machine can be squeezed (it is %s)", cur.State)
 	}
 	// Una copia de un dorado en Firecracker mapea su mem.file MAP_PRIVATE: la
 	// caché de páginas del invitado son páginas LIMPIAS y COMPARTIDAS con las
@@ -2633,7 +2633,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("MMDS can only be injected into a running machine (it is %s)", cur.State)
+		return nil, estadoInvalido("MMDS can only be injected into a running machine (it is %s)", cur.State)
 	}
 
 	m.mu.RLock()
@@ -2815,7 +2815,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("credentials can only be given to a running machine (it is %s)", cur.State)
+		return nil, estadoInvalido("credentials can only be given to a running machine (it is %s)", cur.State)
 	}
 	if cur.Egress != string(knet.EgressAllowlist) {
 		return nil, fmt.Errorf("credentials need -egress allowlist (the machine has %q)", cur.Egress)

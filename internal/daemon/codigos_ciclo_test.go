@@ -49,8 +49,14 @@ func TestCodigosCicloDeVida(t *testing.T) {
 		{"POST", "/machines/dormida/pause", 409},
 		{"POST", "/machines/nadie/start", 404},
 		{"POST", "/machines/dormida/start", 409},
+		{"POST", "/machines/dormida/squeeze", 409},
+		{"POST", "/machines/parada/mmds", 409},
 	} {
-		rr := call(t, h, c.method, c.path, "")
+		body := ""
+		if c.path == "/machines/parada/mmds" {
+			body = "{}"
+		}
+		rr := call(t, h, c.method, c.path, body)
 		if rr.Code != c.want {
 			t.Errorf("%s %s = %d (%s), quería %d", c.method, c.path, rr.Code, rr.Body, c.want)
 		}
