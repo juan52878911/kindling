@@ -691,6 +691,11 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	fmt.Printf("checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
 		fmt.Println("✗")
+		if api.IsNotFound(err) {
+			// No hay máquina: ni puerto ni plazo que explicar (fallaba en
+			// milisegundos diciendo "not serving ... after 2m0s").
+			return fmt.Errorf("%s: %w", ref, err)
+		}
 		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
 	}
 	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que

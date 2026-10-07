@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
+)
 
 // El mensaje de rechazo tiene que explicar el fallo QUE NO HA OCURRIDO TODAVIA.
 //
@@ -32,4 +40,19 @@ func contiene(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// Una máquina que no existe no es un invitado que "no sirve tras 2m0s": el
+// rechazo dice solo eso, sin el plazo ni el puerto.
+func TestSaveDeUnaMaquinaQueNoExiste(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /machines/{ref}/guest", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"that machine doesn't exist"}`))
+	})
+	c := fakeDaemon(t, mux)
+	err := listoParaCongelar(context.Background(), c, "nadie", 2*time.Minute, true)
+	if err == nil || !api.IsNotFound(err) || strings.Contains(err.Error(), "not serving") || strings.Contains(err.Error(), "2m0s") {
+		t.Fatalf("save de una que no existe = %v", err)
+	}
 }
