@@ -173,7 +173,7 @@ func TestForkCreaCopiasYElSnapshotVivePorEllas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.RootfsSHA256 != "" || meta.SnapSHA256 == "" {
+	if meta.RootfsSHA256 != "" || meta.RootfsDigest != "" || meta.SnapSHA256 == "" {
 		t.Errorf("digests del snapshot de fork: rootfs=%q snap=%q; quería rootfs vacío y snap grabado", meta.RootfsSHA256, meta.SnapSHA256)
 	}
 	if !m.integridadYaVista(snap, dir) {

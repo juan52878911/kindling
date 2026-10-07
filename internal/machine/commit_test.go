@@ -16,6 +16,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // Pruebas del nodo N2 del plan de remediación: Commit bajo el cerrojo de ciclo
@@ -287,7 +288,8 @@ func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if snap.RootfsSHA256 == "" || snap.SnapSHA256 == "" {
+	// Desde meta.json v2 el overlay va en árbol, no en sha256 plano.
+	if !strings.HasPrefix(snap.RootfsDigest, digest.TreePrefix) || snap.RootfsSHA256 != "" || snap.SnapSHA256 == "" {
 		t.Errorf("snapshot sin digests: %+v", snap)
 	}
 	comprobarReanudada(t, m, falso, id, muerto)
