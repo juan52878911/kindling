@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -39,12 +40,13 @@ func imagesImport(args []string) error {
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
+	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) == 0 || rest[0] == "--" {
-		return fmt.Errorf("usage: kling image import <ref> [-name N] [-e K=V] [-env-file F] [-json] [-- cmd args...]")
+		return fmt.Errorf("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]")
 	}
 	ref, err := oci.ParseImageRef(rest[0])
 	if err != nil {
@@ -84,17 +86,30 @@ func imagesImport(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
-	if !*asJSON {
-		fmt.Printf("importing %s as %s (the first time downloads it)...\n", ref, *name)
-	}
-	res, err := c.BuildImage(ctx, req)
-	if err != nil {
-		if res != nil && res.Output != "" && !*asJSON {
-			fmt.Print(res.Output)
+	// El nombre por defecto sale solo del repositorio y la etiqueta: redis:7
+	// y ghcr.io/x/redis:7 dan los dos redis-7. Sin -replace no se pisa una
+	// imagen que no sea esta misma importación.
+	output := ""
+	already := false
+	if !*replace {
+		if already, err = existingImport(ctx, c, *name, spec); err != nil {
+			return err
 		}
-		return err
 	}
-	rec, err := c.ImageRecipe(ctx, res.Name)
+	if !already {
+		if !*asJSON {
+			fmt.Printf("importing %s as %s (the first time downloads it)...\n", ref, *name)
+		}
+		res, err := c.BuildImage(ctx, req)
+		if err != nil {
+			if res != nil && res.Output != "" && !*asJSON {
+				fmt.Print(res.Output)
+			}
+			return err
+		}
+		*name, output = res.Name, res.Output
+	}
+	rec, err := c.ImageRecipe(ctx, *name)
 	if err != nil {
 		return err
 	}
@@ -110,12 +125,15 @@ func imagesImport(args []string) error {
 	}
 	_ = json.Unmarshal(rec.Built, &built)
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"name": res.Name, "ref": built.Ref, "digest": built.Digest,
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"name": *name, "already_imported": already, "ref": built.Ref, "digest": built.Digest,
 			"manifest": built.Manifest, "arch": built.Arch, "ports": built.Ports, "volumes": built.Volumes,
 			"ready": built.Ready, "service": built.Service})
 	}
-	fmt.Print(res.Output)
-	fmt.Printf("image %s: %s\n", res.Name, built.Digest)
+	if already {
+		fmt.Printf("image %s: already imported from %s (-replace re-resolves the tag and rebuilds it)\n", *name, ref)
+	}
+	fmt.Print(output)
+	fmt.Printf("image %s: %s\n", *name, built.Digest)
 	if len(built.Service.Argv) > 0 {
 		fmt.Printf("  runs     %s", runsLine(built.Service.Argv, len(spec.Cmd)+len(spec.Entrypoint) > 0))
 		if built.Service.User != "" {
@@ -135,8 +153,60 @@ func imagesImport(args []string) error {
 		// no esté vacío. En el padre, o con un subdirectorio (PGDATA).
 		fmt.Printf("  volumes  %s  (keep data with -volume NAME:<a parent dir>)\n", strings.Join(built.Volumes, " "))
 	}
-	next("kling run -image %s -mem 512M -wait-ready", res.Name)
+	next("kling run -image %s -mem 512M -wait-ready", *name)
 	return nil
+}
+
+// existingImport mira si ya hay una imagen con ese nombre. Sin ella, false.
+// Si es esta misma importación (constructor oci y el mismo spec, con la
+// referencia normalizada), true: no hace falta rehacerla. Cualquier otra
+// cosa es un error: pisarla en silencio cambiaría lo que arrancan las
+// máquinas y plantillas que la usan. Los valores del spec (puede llevar una
+// contraseña en env) no salen en ningún mensaje.
+func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpec) (bool, error) {
+	imgs, err := c.Images(ctx)
+	if err != nil {
+		return false, err
+	}
+	var img *api.Image
+	for i := range imgs {
+		if imgs[i].Name == name {
+			img = &imgs[i]
+		}
+	}
+	if img == nil {
+		return false, nil
+	}
+	other := fmt.Errorf("image %s already exists and wasn't imported from a Docker image; "+
+		"pick another -name, or pass -replace to overwrite it", name)
+	if !img.HasRecipe {
+		return false, other
+	}
+	rec, err := c.ImageRecipe(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	var prev OCISpec
+	if rec.Builder != "oci" || json.Unmarshal(rec.Spec, &prev) != nil {
+		return false, other
+	}
+	pr, perr := oci.ParseImageRef(prev.Ref)
+	nr, nerr := oci.ParseImageRef(spec.Ref)
+	if perr != nil || nerr != nil || pr.String() != nr.String() || prev.Digest != spec.Digest {
+		from := prev.Ref
+		if perr == nil {
+			from = pr.String()
+		}
+		return false, fmt.Errorf("image %s already exists, imported from %s; pick another -name, or pass -replace to overwrite it", name, from)
+	}
+	prev.Ref, spec.Ref = "", ""
+	a, _ := json.Marshal(prev)
+	b, _ := json.Marshal(spec)
+	if string(a) != string(b) {
+		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch or size limit); "+
+			"pass -replace to rebuild it with these", name, nr)
+	}
+	return true, nil
 }
 
 var reNameJunk = lazyre.New(`[^a-z0-9_-]+`)

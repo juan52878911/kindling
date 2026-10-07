@@ -228,7 +228,13 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
 `-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
-ready, service}`).
+ready, service, already_imported}`).
+
+El nombre por defecto sale del repositorio y la etiqueta, así que `redis:7` y
+`ghcr.io/x/redis:7` dan los dos `redis-7`. Si ya hay una imagen con ese nombre,
+`import` no la pisa: si es la misma importación (misma referencia y mismas
+opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
+`-replace` la reconstruye (y vuelve a resolver la etiqueta).
 
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
