@@ -3,6 +3,7 @@ package machine
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -181,8 +182,11 @@ func (m *Manager) crearCgroup(id string, quotaPct, memMiB int) (string, string) 
 	if err := m.escribirCPUMax(dir, quotaPct); err != nil {
 		return "", fmt.Sprintf("could not set cpu.max: %v", err)
 	}
+	// Los techos de memoria y procesos se suman al de CPU, no lo sustituyen:
+	// si uno no se puede escribir se avisa y se sigue, que abortar dejaba al
+	// VMM fuera del cgroup y sin el techo de CPU que tenía antes de ellos.
 	if err := m.escribirLimitesMemoria(dir, memMiB); err != nil {
-		return "", err.Error()
+		log.Printf("warning: cgroup %s: %v", filepath.Base(dir), err)
 	}
 	return dir, ""
 }

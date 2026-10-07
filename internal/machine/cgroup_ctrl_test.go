@@ -106,3 +106,26 @@ func TestMemoriaCgroupEsElTecho(t *testing.T) {
 		t.Errorf("margen de %d MiB para 512 MiB: fuera de lo razonable", m)
 	}
 }
+
+// Un techo de memoria o de procesos que no se puede escribir no deja al VMM
+// sin cgroup: el de CPU, que ya tenía antes de ellos, se sigue aplicando y el
+// proceso entra en el cgroup.
+func TestCgroupSinTechoDeMemoriaSigueConElDeCPU(t *testing.T) {
+	m := &Manager{cgroupRoot: t.TempDir(), cgroupMemoria: true, cgroupProcesos: true}
+	id := "abcdef0123456789"
+	// memory.max y pids.max que no se pueden escribir.
+	for _, f := range []string{"memory.max", "pids.max"} {
+		if err := os.MkdirAll(filepath.Join(m.dirCgroup(id), f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if warn := m.limitCPU(id, 4242, 50, 512); warn != "" {
+		t.Fatalf("aviso: %s", warn)
+	}
+	if cpu, _ := os.ReadFile(filepath.Join(m.dirCgroup(id), "cpu.max")); string(cpu) != "50000 100000" {
+		t.Errorf("cpu.max=%q", cpu)
+	}
+	if procs, _ := os.ReadFile(filepath.Join(m.dirCgroup(id), "cgroup.procs")); string(procs) != "4242" {
+		t.Errorf("cgroup.procs=%q: el VMM se quedó fuera del cgroup", procs)
+	}
+}
