@@ -312,6 +312,17 @@ dentro del archivo se resuelve por nombre en el propio índice del tar (docker
 enlaza un `layer.tar` repetido al primero), nunca en el disco; en un directorio
 no se sigue ninguno.
 
+Medido el 2026-10-07 en el lab (CT 105, amd64, daemon privado, constructor con
+`kindling-build`): `docker save postgres:17-alpine` (Docker 20.10, formato
+clásico, 10 capas, 286 MiB sin comprimir) se importa en frío en 2,5 s (subir los
+12 blobs por el socket y 1,4 s de construcción) y arranca lista en 34-42 ms de
+arranque; reimportarlo no sube nada (10 ms). Un `docker save` con esa imagen y
+otra de 12 capas construida encima (con un whiteout) solo sube los 4 blobs
+nuevos y la construye en 1,5 s; los compartidos van como enlaces dentro del tar.
+Desde el Mac por SSH, el layout OCI de Docker 29 de `redis:7-alpine` (con su
+atestación al lado) se sube y construye en 2,2 s, con el mismo digest de
+manifiesto que en Docker Hub.
+
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
 | Qué | |

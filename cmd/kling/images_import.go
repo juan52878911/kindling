@@ -198,7 +198,13 @@ func imagesImport(args []string) error {
 		if in, err := c.Info(ctx); err == nil {
 			dmn = in.Version
 		}
-		fmt.Println(alreadyImportedLine(*name, shown, rec.KlingVer, dmn))
+		line := alreadyImportedLine(*name, shown, rec.KlingVer, dmn)
+		if arc != nil {
+			// De un archivo no hay etiqueta que resolver: -replace reconstruye
+			// desde la caché del daemon.
+			line = archiveAlreadyLine(line)
+		}
+		fmt.Println(line)
 	}
 	fmt.Print(output)
 	fmt.Printf("image %s: %s\n", *name, built.Digest)

@@ -217,3 +217,12 @@ func TestExistingImportArchive(t *testing.T) {
 		t.Fatalf("from a registry over an archive import: %v", err)
 	}
 }
+
+func TestArchiveAlreadyLine(t *testing.T) {
+	for _, c := range [][2]string{{"dev", "dev"}, {"v0.17.0", "v0.18.0"}} {
+		got := archiveAlreadyLine(alreadyImportedLine("pg", "the archive (postgres:17)", c[0], c[1]))
+		if strings.Contains(got, "tag") || !strings.Contains(got, "-replace rebuilds it") {
+			t.Fatalf("%q", got)
+		}
+	}
+}

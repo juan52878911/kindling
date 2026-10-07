@@ -103,6 +103,13 @@ func (ai *archivoImport) subir(ctx context.Context, c *api.Client, log io.Writer
 	return subidos, bytes, nil
 }
 
+// archiveAlreadyLine adapta la línea de "ya importada" a una imagen de un
+// archivo: no hay etiqueta que volver a resolver.
+func archiveAlreadyLine(line string) string {
+	line = strings.Replace(line, "-replace re-resolves the tag and rebuilds it", "-replace rebuilds it", 1)
+	return strings.Replace(line, ", and re-resolves the tag)", ")", 1)
+}
+
 func shortDigest(d string) string {
 	d = strings.TrimPrefix(d, "sha256:")
 	if len(d) > 12 {
