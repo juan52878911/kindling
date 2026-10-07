@@ -639,7 +639,7 @@ puente MCP) lo ejecuta él mismo, **sin `allow_exec`** y sin argumentos de nadie
 
 | Ruta del invitado | Qué es |
 |---|---|
-| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `ready_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s) |
+| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `probe_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s) |
 | `/etc/kindling/post-restore.d/*` | ejecutables que corren en orden (como `run-parts`: sin ocultos, `*~` ni `*.disabled`) al final de cada restauración, con el reloj y la entropía resincronizados, los volúmenes montados y las credenciales en MMDS. `KLING_RESTORE` dice de qué: `instance` (`run -from`, fork), `thaw` o `manual` (`POST .../hooks`). Plazo de 60 s cada uno; el primero que falla para la tanda y deja `failed`. Mientras corren, el invitado no está listo. Su salida va a la consola (`kling logs`) |
 
 Rutas del agente, de control (el gateway no las reenvía):
