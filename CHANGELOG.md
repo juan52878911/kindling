@@ -57,6 +57,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- The first golden saved on a fresh daemon gets its memory mirrored too: the save creates the copy-on-write store if it doesn't exist yet
+- `kling run -image` warns when it reuses an image imported before restart policies (its service restarts even after exiting 0) and says how to rebuild it
+- `kling image import` says which kling built an existing import and that `-replace` rebuilds it; an existing image without a recipe is no longer called "not from Docker"
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
