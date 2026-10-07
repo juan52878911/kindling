@@ -22,7 +22,7 @@ func yo() *usuarioConstructor {
 
 func TestPrepararTrabajo(t *testing.T) {
 	root := t.TempDir()
-	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), nil, yo())
+	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), []byte(`{"ghcr.io":{}}`), yo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestPrepararTrabajo(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(work), "pg.") {
 		t.Fatalf("directorio de trabajo %s", work)
 	}
-	for _, p := range []string{work, filepath.Join(work, "request.json")} {
+	for _, p := range []string{work, filepath.Join(work, "request.json"), filepath.Join(work, FicheroCredencialesConstructor)} {
 		fi, err := os.Lstat(p)
 		if err != nil {
 			t.Fatal(err)
@@ -43,6 +43,10 @@ func TestPrepararTrabajo(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(work, "request.json")); string(b) != `{"name":"pg"}` {
 		t.Fatalf("request.json: %s", b)
+	}
+
+	if fi, _ := os.Lstat(filepath.Join(work, FicheroCredencialesConstructor)); fi == nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v, quiero 0600", FicheroCredencialesConstructor, fi)
 	}
 
 	// Sin usuario, como siempre: build/ cerrado.
@@ -405,5 +409,25 @@ echo "$CONTENIDO" > "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
 	}
 	if b, _ := os.ReadFile(filepath.Join(s.root, "images", "pg.ext4")); string(b) != "v1\n" {
 		t.Fatalf("la imagen en uso cambió: %q", b)
+	}
+}
+
+// Como root, las credenciales del registro se ceden al usuario de construcción
+// (0600, suyas): solo él las lee.
+func TestPrepararTrabajoCedeCredenciales(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ceder un fichero a otro uid necesita root")
+	}
+	u := &usuarioConstructor{Nombre: "x", UID: 54321, GID: 54321}
+	work, err := prepararTrabajo(t.TempDir(), "pg", []byte(`{}`), []byte(`{"ghcr.io":{}}`), u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(work, FicheroCredencialesConstructor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != u.UID || st.Gid != u.GID || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: uid %d gid %d modo %o", FicheroCredencialesConstructor, st.Uid, st.Gid, fi.Mode().Perm())
 	}
 }
