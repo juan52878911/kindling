@@ -320,16 +320,29 @@ func (m *Manager) esperarFinArranque(i *impulsoCPU, trasAgente bool) string {
 	// (WaitReady): Machine.Ready no basta, porque "" es a la vez "no declara
 	// nada" y "aún nadie lo ha mirado". Una imagen sin sonda contesta listo a
 	// la primera; un agente anterior a /ready, también.
-	ctx, cancel := context.WithTimeout(context.Background(), max(i.plazoListo-time.Since(i.inicio), time.Millisecond))
-	defer cancel()
-	go func() {
-		select {
-		case <-m.quit:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	res, err := m.WaitReady(ctx, id, OpcionesListo{Plazo: i.plazoListo})
+	//
+	// Una imagen cuyo HEALTHCHECK declara un StartPeriod (el agente lo dice en
+	// /ready) tiene ese tiempo de más: si el plazo se agota sin que pase la
+	// sonda, se sigue esperando hasta plazoListo + StartPeriod.
+	hasta := i.plazoListo
+	esperar := func() (res api.ReadyResult, agotado bool, err error) {
+		ctx, cancel := context.WithTimeout(context.Background(), max(hasta-time.Since(i.inicio), time.Millisecond))
+		defer cancel()
+		go func() {
+			select {
+			case <-m.quit:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		res, err = m.WaitReady(ctx, id, OpcionesListo{Plazo: hasta})
+		return res, ctx.Err() != nil, err
+	}
+	res, agotado, err := esperar()
+	if err != nil && agotado && !isClosed(m.quit) && res.Guest != nil && res.Guest.StartPeriodSeconds > 0 {
+		hasta += time.Duration(min(res.Guest.StartPeriodSeconds, api.MaxReadyTimeoutSeconds)) * time.Second
+		res, agotado, err = esperar()
+	}
 	switch {
 	case err == nil && res.Ready == api.ReadyYes:
 		return "ready probe passed"
@@ -339,10 +352,10 @@ func (m *Manager) esperarFinArranque(i *impulsoCPU, trasAgente bool) string {
 		return "machine is no longer running"
 	case res.Ready == api.ReadyFailed:
 		return "post-restore hooks failed"
-	case ctx.Err() != nil && isClosed(m.quit):
+	case agotado && isClosed(m.quit):
 		return "daemon closing"
-	case ctx.Err() != nil:
-		return fmt.Sprintf("not ready after %s", i.plazoListo)
+	case agotado:
+		return fmt.Sprintf("not ready after %s", hasta)
 	}
 	return err.Error()
 }

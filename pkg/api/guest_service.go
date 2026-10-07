@@ -46,13 +46,26 @@ type ServiceSpec struct {
 	// WorkingDir es el directorio de trabajo (vacío = /).
 	WorkingDir string `json:"working_dir,omitempty"`
 	// StopSignal es la señal con la que se le pide parar ("SIGTERM" por
-	// defecto, "SIGINT", "15"...). Pasado StopTimeoutSeconds (10 por
-	// defecto), SIGKILL a todo su grupo.
+	// defecto, "SIGINT", "15", "SIGRTMIN+3"...: ParseSignal). Una que no se
+	// entiende es SIGTERM, con un aviso: no deja la imagen sin servicio.
+	// Pasado StopTimeoutSeconds (10 por defecto), SIGKILL a todo su grupo.
 	StopSignal         string `json:"stop_signal,omitempty"`
 	StopTimeoutSeconds int    `json:"stop_timeout_seconds,omitempty"`
 	// Restart es RestartAlways, RestartOnFailure o RestartNo.
 	Restart string `json:"restart,omitempty"`
+	// ReadyTimeoutSeconds es el plazo de cada ejecución de la sonda de listo
+	// (GuestReadyProbe; 0 = 10 s, como mucho MaxReadyTimeoutSeconds), y
+	// ReadyStartPeriodSeconds lo que se le da de más al arranque antes de
+	// darlo por lento (el impulso de CPU dura eso de más). Son el Timeout y
+	// el StartPeriod del HEALTHCHECK de Docker.
+	ReadyTimeoutSeconds     int `json:"ready_timeout_seconds,omitempty"`
+	ReadyStartPeriodSeconds int `json:"ready_start_period_seconds,omitempty"`
 }
+
+// MaxReadyTimeoutSeconds acota ReadyTimeoutSeconds y ReadyStartPeriodSeconds:
+// el HEALTHCHECK los admite de horas, pero "listo" es "terminó de arrancar" y
+// una sonda colgada no puede tener esperando a quien la pregunta más que esto.
+const MaxReadyTimeoutSeconds = 120
 
 // GuestService es la respuesta de GET /service.
 type GuestService struct {

@@ -16,3 +16,11 @@ func TestRunsLine(t *testing.T) {
 		t.Fatalf("de la línea de órdenes: %q", got)
 	}
 }
+
+// -restart se comprueba antes de hablar con el daemon (no hay ninguno).
+func TestImagesImportRestartFlag(t *testing.T) {
+	err := imagesImport([]string{"-H", "/nonexistent/kling.sock", "-restart", "sometimes", "redis:7"})
+	if err == nil || !strings.Contains(err.Error(), "-restart must be") {
+		t.Fatalf("err = %v", err)
+	}
+}

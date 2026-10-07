@@ -272,3 +272,34 @@ func TestSondaConUsuarioDelServicio(t *testing.T) {
 		t.Fatal("sin servicio la sonda no corrió")
 	}
 }
+
+// El plazo de la sonda y el periodo de arranque son los del servicio (el
+// HEALTHCHECK de la imagen), acotados; sin servicio, 10 s y nada.
+func TestSondaConPlazosDelServicio(t *testing.T) {
+	r, _ := nuevoReadiness(t)
+	script(t, r.probePath, "sleep 30")
+	poner := func(spec api.ServiceSpec) {
+		serviceState.mu.Lock()
+		serviceState.svc = &Service{spec: spec, root: "/"}
+		serviceState.mu.Unlock()
+	}
+	defer resetServiceState()
+
+	if d := probeTimeout(); d != readyProbeTimeout {
+		t.Fatalf("sin servicio: %s", d)
+	}
+	poner(api.ServiceSpec{Argv: []string{"x"}, ReadyTimeoutSeconds: 1000, ReadyStartPeriodSeconds: -5})
+	if d, sp := probeTimeout(), serviceReadySpec().ReadyStartPeriodSeconds; d != api.MaxReadyTimeoutSeconds*time.Second || sp != 0 {
+		t.Fatalf("acotado: %s, %d", d, sp)
+	}
+
+	poner(api.ServiceSpec{Argv: []string{"x"}, ReadyTimeoutSeconds: 1, ReadyStartPeriodSeconds: 40})
+	t0 := time.Now()
+	st := r.check(context.Background())
+	if d := time.Since(t0); st.Ready || d < 900*time.Millisecond || d > 5*time.Second || !strings.Contains(st.Detail, "timed out") {
+		t.Fatalf("sonda con plazo de 1 s: %+v en %s", st, d)
+	}
+	if st.StartPeriodSeconds != 40 {
+		t.Fatalf("StartPeriodSeconds = %d, quiero 40", st.StartPeriodSeconds)
+	}
+}

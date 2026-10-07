@@ -37,6 +37,7 @@ func imagesImport(args []string) error {
 	user := fs.String("user", "", "run the entrypoint as uid[:gid] or name[:group] instead of the image's USER")
 	var entrypoint stringsFlag
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
+	restart := fs.String("restart", "", "restart the service when it exits: always, on-failure or no (default on-failure)")
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -58,7 +59,12 @@ func imagesImport(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: -e and -env-file bake the values into the image (/etc/kling/env) and every copy of it; "+
 			"for a password or anything per machine, use kling run -image <image> -e KEY instead")
 	}
-	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env}
+	switch *restart {
+	case "", api.RestartAlways, api.RestartOnFailure, api.RestartNo:
+	default:
+		return fmt.Errorf("-restart must be always, on-failure or no, not %q", *restart)
+	}
+	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, Restart: *restart}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}

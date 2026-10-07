@@ -619,13 +619,13 @@ puente MCP) lo ejecuta él mismo, **sin `allow_exec`** y sin argumentos de nadie
 
 | Ruta del invitado | Qué es |
 |---|---|
-| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución |
+| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `ready_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s) |
 | `/etc/kindling/post-restore.d/*` | ejecutables que corren en orden (como `run-parts`: sin ocultos, `*~` ni `*.disabled`) al final de cada restauración, con el reloj y la entropía resincronizados, los volúmenes montados y las credenciales en MMDS. `KLING_RESTORE` dice de qué: `instance` (`run -from`, fork), `thaw` o `manual` (`POST .../hooks`). Plazo de 60 s cada uno; el primero que falla para la tanda y deja `failed`. Mientras corren, el invitado no está listo. Su salida va a la consola (`kling logs`) |
 
 Rutas del agente, de control (el gateway no las reenvía):
 
 ```
-GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"..."}
+GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"...","start_period_seconds":N}
 POST /hooks?restore=instance|thaw|manual → 202 (409 si ya corren)
 GET  /meminfo → {"total_mib":N,"available_mib":N}
 ```
@@ -678,7 +678,9 @@ con el 50 % iba a ¼.
 **Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
 `thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
 del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
-o cuando contesta su agente si no declara sonda; como mucho 60 s. Mientras dura,
+o cuando contesta su agente si no declara sonda; como mucho 60 s, más el
+`start_period_seconds` que diga el agente (el `StartPeriod` del `HEALTHCHECK`,
+hasta 120 s). Mientras dura,
 `GET /machines/{ref}` trae `cpu_boost_pct` (el techo de ese momento; `kling ps`
 lo enseña en READY) y al acabar se publica `machine.boost_ended` con el motivo.
 Un `cpu_pct` pedido explícitamente (`cpu_pct_fixed` en la máquina y en el

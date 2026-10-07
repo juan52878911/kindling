@@ -29,6 +29,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
 - Docker images get a full core per vCPU by default
+- Docker images restart their service only when it fails, like `docker run --restart on-failure`; `kling image import -restart` picks `always`, `on-failure` or `no`
+- Docker images: the `HEALTHCHECK` timeout bounds each ready probe and its start period extends the boot CPU boost (up to 120 s each)
 - A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
 - `kling db branch`: `git checkout` switches databases in tens of milliseconds (#125)
 - Concurrent `kling db up` calls wait for admission instead of being rejected (#150)
@@ -44,6 +46,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
+- Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
+- Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
 - `ext4.Write` no longer panics on layers without data

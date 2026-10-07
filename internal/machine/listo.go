@@ -49,8 +49,11 @@ const (
 	// esperar el paso entero sumaba 250 ms a cada `run -from -wait-ready`.
 	// Se dobla hasta pasoListo.
 	pasoListoPrimero = 25 * time.Millisecond
-	// plazoPeticionListo acota UNA pregunta: la sonda tiene 10 s dentro.
-	plazoPeticionListo = 15 * time.Second
+	// plazoPeticionListo acota UNA pregunta a /ready: la sonda corre dentro
+	// con su plazo (10 s, o el de la imagen hasta api.MaxReadyTimeoutSeconds).
+	plazoPeticionListo = api.MaxReadyTimeoutSeconds*time.Second + 5*time.Second
+	// plazoPeticionAgente acota una pregunta a / (las capacidades del agente).
+	plazoPeticionAgente = 15 * time.Second
 	// vigiaListoMax es cuánto sigue mirando, como mucho, la vigía de fondo.
 	vigiaListoMax = 10 * time.Minute
 	// vigiaAgenteMax: si en este tiempo el agente no ha contestado ni una vez
