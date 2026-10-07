@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Per-tenant quotas in the authz policy (`quotas`: `max_machines`, `max_mem_mib`, `max_disk_mib`, `"*"` for everyone); exceeding one is a `429` that names the limit and the usage, decided without races
 - `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
@@ -31,6 +32,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- A machine made from a snapshot reports the snapshot's writable disk size in `disk_mib` (it was left out)
 - `kling stop` drops a machine's memory dump and keeps its disk; stopped service instances from a template are collected after `KLING_STOPPED_RETENTION` (24 h)
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored

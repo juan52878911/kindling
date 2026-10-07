@@ -470,6 +470,21 @@ func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]
 		return nil, &api.StatusError{Code: api.StatusMachineLimit, Message: fmt.Sprintf(
 			"graph %s needs %d machines and there are %d of %d: %s (KLING_MAX_MACHINES)", g.Name, eager, total, tope, machineLimitMarkText)}
 	}
+	// La cuota de cada dueño, antes de arrancar el primero: solo un filtro
+	// (cada nodo se decide al publicarlo), con lo que se sabe sin mirar sus
+	// discos.
+	porDueño := map[string]UsoCuota{}
+	for nombre := range arrancar {
+		n := g.Nodes[nombre]
+		u := porDueño[n.Labels[api.LabelOwner]]
+		u.sumar(UsoCuota{Maquinas: 1, MemMiB: m.memoriaDeNodo(n)})
+		porDueño[n.Labels[api.LabelOwner]] = u
+	}
+	for dueño, u := range porDueño {
+		if err := m.comprobarCuota(dueño, u); err != nil {
+			return nil, fmt.Errorf("graph %s: %w", g.Name, err)
+		}
+	}
 	if memoria > 0 {
 		soltar, err := m.reserveMemory(memoria, "")
 		if err != nil {

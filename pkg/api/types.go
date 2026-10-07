@@ -1173,6 +1173,24 @@ func IsMachineLimit(err error) bool {
 // reconocerlos: 409 lo usan más cosas.
 const machineLimitMark = "machine limit"
 
+// StatusTenantQuota es la negativa por la cuota de un inquilino (la de la
+// política de autorización, docs/authz.md). 429 y no 403: no es que no pueda
+// hacerlo, es que ya ocupa lo que se le dio, y se resuelve liberando (parar o
+// borrar lo suyo) sin tocar permisos. Tampoco 507 ni 409: quien escala
+// respondería congelando o retirando máquinas de otros, y lo que sobra aquí
+// es suyo.
+const StatusTenantQuota = 429
+
+// IsTenantQuota dice si un error es la negativa por la cuota de un inquilino.
+func IsTenantQuota(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusTenantQuota && strings.Contains(se.Message, TenantQuotaMark)
+}
+
+// TenantQuotaMark marca los errores de cuota de inquilino: 429 lo usan más
+// cosas (el gateway, el frontal).
+const TenantQuotaMark = "quota exceeded"
+
 // StatusDiskFull es la negativa por quedar poco disco en el anfitrión. 503 y no
 // 507: quien recibe un 507 congela instancias para hacer sitio, y congelar
 // escribe en disco justo lo que falta.

@@ -45,8 +45,9 @@ var (
 	opsTelemetria = []string{OpRun, OpThaw, OpFreeze, OpStart}
 	durTelemetria = []string{DurBoot, DurRestore, DurThaw, DurResume, DurFreeze}
 	// codigosRechazo son las negativas de admisión: tope de máquinas (409),
-	// disco (503) y memoria (507). Ver admision.go.
-	codigosRechazo = []int{api.StatusMachineLimit, api.StatusDiskFull, api.StatusInsufficientMemory}
+	// cuota de un inquilino (429), disco (503) y memoria (507). Ver
+	// admision.go y cuota_inquilino.go.
+	codigosRechazo = []int{api.StatusMachineLimit, api.StatusTenantQuota, api.StatusDiskFull, api.StatusInsufficientMemory}
 )
 
 type contadorOp struct{ ok, fallos atomic.Int64 }

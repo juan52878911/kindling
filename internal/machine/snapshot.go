@@ -1286,6 +1286,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La clave de compartición es el snapshot de origen: todas sus instancias
 	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
 	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
+	// Las etiquetas del snapshot se heredan; las de la petición mandan. Se
+	// calculan aquí porque el dueño que sale de ellas es el de la cuota.
+	etiquetas := api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels)
+	// Su disco es una copia del overlay del dorado: su tamaño lógico.
+	discoMiB := tamañoLogicoMiB(filepath.Join(m.snapDir(req.From), "overlay.ext4"))
+	if err := m.comprobarCuota(etiquetas[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(snap.MemMiB, snap.MemMaxMiB), DiscoMiB: discoCuota(discoMiB)}); err != nil {
+		return nil, err
+	}
 	if err := m.admitir(); err != nil {
 		return nil, err
 	}
@@ -1417,15 +1426,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB, MemMaxMiB: snap.MemMaxMiB,
-		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
+		DiskMiB: discoMiB,
+		IP:      netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo,
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// El entorno es el del dorado: está en su memoria (entorno.go).
-		EnvKeys: snap.EnvKeys,
-		// Las etiquetas del snapshot se heredan; las de la petición mandan.
-		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
+		EnvKeys:   snap.EnvKeys,
+		Labels:    etiquetas,
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
@@ -1436,10 +1445,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// nombrarla (ver doc.go).
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
-	m.mu.Lock()
-	m.byID[id] = mc
-	m.persist()
-	m.mu.Unlock()
+	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
+	if err := m.publicar(mc); err != nil {
+		m.desmontarRed(netcfg, id)
+		os.RemoveAll(dir)
+		return nil, err
+	}
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios

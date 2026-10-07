@@ -254,8 +254,17 @@ type Server struct {
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
-// Listen: la política no cambia con el daemon en marcha.
-func (s *Server) SetAuthz(p *Politica) { s.authz = p }
+// Listen: la política no cambia con el daemon en marcha. Sus cuotas las
+// aplica el manager, que es quien puede contarlas sin carreras
+// (internal/machine/cuota_inquilino.go).
+func (s *Server) SetAuthz(p *Politica) {
+	s.authz = p
+	if p != nil && p.tieneCuotas() {
+		s.mgr.SetCuotas(p.cuotaDe)
+	} else {
+		s.mgr.SetCuotas(nil)
+	}
+}
 
 // SetShareConfig fija de dónde lee el daemon su configuración de carpetas
 // compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en

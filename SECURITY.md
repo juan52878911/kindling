@@ -38,7 +38,10 @@ filtran por dueño. Volúmenes, carpetas del host, el store, construir imágenes
 del host son de admin. El fichero tiene que ser regular, de root o del usuario del daemon y no
 escribible por otros; uno pedido que falta, o mal escrito, impide arrancar. root y el usuario
 del daemon son siempre admin (pueden reescribir la política). Tokens de inquilino opcionales
-(`KLING_AUTHZ_TOKEN`, guardados como sha256) que solo dan roles de inquilino.
+(`KLING_AUTHZ_TOKEN`, guardados como sha256) que solo dan roles de inquilino. Cuotas por
+inquilino opcionales (`quotas`: máquinas, memoria y disco lógico de lo que lleva su
+`kling.owner`), que decide el manager en el mismo cerrojo en que da de alta la máquina:
+dos creaciones a la vez no pasan las dos el tope; pasarse es un `429`.
 
 Ese socket incluye `POST /machines/{ref}/guest`, que reenvía una petición HTTP al servidor
 que corre dentro de una microVM. Es lo que permite importar un servicio desde un CLI remoto,
@@ -1347,8 +1350,9 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   puedes con todo. Con política ([docs/authz.md](docs/authz.md)) quien no tiene regla no
   puede nada y un inquilino solo lo suyo, pero es un MVP: los nombres de máquinas,
   snapshots y grafos son globales (un `409` dice que un nombre ajeno existe, no de quién
-  es), no hay cuotas por inquilino (topes del host y nada más), los inquilinos no usan
-  volúmenes ni carpetas del host, y la política se lee al arrancar. Dos inquilinos siguen
+  es), las cuotas por inquilino son opcionales y miden lo declarado (máquinas, memoria
+  y tamaño lógico de los discos escribibles; no lo escrito, ni snapshots, ni CPU), los
+  inquilinos no usan volúmenes ni carpetas del host, y la política se lee al arrancar. Dos inquilinos siguen
   compartiendo host y kernel: lo que separa sus microVMs es lo de las barreras de arriba.
 - **El proxy al invitado no filtra la ruta.** Solo llega a los puertos permitidos (ver
   10), pero dentro de ellos a cualquier ruta. No es una escalada: sin política quien
