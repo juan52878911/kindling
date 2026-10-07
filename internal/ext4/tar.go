@@ -127,7 +127,15 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		case tar.TypeSymlink:
 			n = &Node{Mode: ModeLink, Target: h.Linkname}
 		case tar.TypeLink:
-			t := base.Lookup(path.Clean("/" + h.Linkname))
+			// El directorio del destino se resuelve siguiendo enlaces
+			// (dentro de base, como MkdirAll): con /usr unificado,
+			// bin/busybox vive en usr/bin. El último componente no se
+			// sigue: un enlace duro a un enlace simbólico enlaza a este.
+			var t *Node
+			ld, lf := path.Split(path.Clean("/" + h.Linkname))
+			if d, _ := base.Resolve(ld); d != nil && d.IsDir() && lf != "" {
+				t = d.Child(lf)
+			}
 			if t == nil || t.IsDir() {
 				return fmt.Errorf("%s: hard link to missing %q", full, h.Linkname)
 			}

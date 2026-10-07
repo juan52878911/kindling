@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Image layers: a hard link whose target path goes through a directory symlink (`bin/busybox` with `bin -> usr/bin`) no longer fails as "hard link to missing"
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
