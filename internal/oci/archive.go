@@ -391,7 +391,7 @@ func (a *Archive) plainTar(name string) error {
 	case n >= 2 && head[0] == 0x1f && head[1] == 0x8b:
 		return errors.New("compressed (gzip) layers in a docker save archive are not supported")
 	case n == 4 && bytes.Equal(head[:], []byte{0x28, 0xb5, 0x2f, 0xfd}):
-		return errors.New("compressed (zstd) layers are not supported")
+		return errors.New("compressed (zstd) layers in a docker save archive are not supported")
 	}
 	return nil
 }
@@ -496,8 +496,8 @@ func (a *Archive) ociImage(want, arch string) (*ArchiveImage, error) {
 		if !reDigest.MatchString(l.Digest) {
 			return nil, fmt.Errorf("layer %d: invalid digest %q", i+1, l.Digest)
 		}
-		if !strings.Contains(l.MediaType, "tar") || strings.Contains(l.MediaType, "zstd") {
-			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar and tar+gzip)", l.Digest, l.MediaType)
+		if !strings.Contains(l.MediaType, "tar") {
+			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar, tar+gzip and tar+zstd)", l.Digest, l.MediaType)
 		}
 		n, err := a.fs.size(blobName(l.Digest))
 		if err != nil {

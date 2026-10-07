@@ -296,8 +296,9 @@ Sirve para una imagen que no está en ningún registro (construida en local, en
 una red sin salida) y lee los dos formatos de `docker save`: el clásico, hasta
 Docker 24 (`manifest.json`, `repositories`, `<id>.json` y `<capa>/layer.tar`), y
 el layout OCI de Docker 25 en adelante y de skopeo (`index.json`, `oci-layout`,
-`blobs/sha256/`), en un tar o en un directorio. Un tar comprimido no: hay que
-descomprimirlo antes (`docker save` sin `| gzip`).
+`blobs/sha256/`), en un tar o en un directorio, con capas sin comprimir, en
+gzip o en zstd (`docker buildx --output type=oci,compression=zstd`). Un tar
+comprimido no: hay que descomprimirlo antes (`docker save` sin `| gzip`).
 
 El archivo está en la máquina del CLI y el daemon puede estar en otra (`-host`
 por SSH): el CLI lo abre, valida su estructura, elige la imagen (`-image
@@ -329,8 +330,8 @@ un `docker save` clásico).
 
 Lo que se rechaza del archivo antes de subir nada: entradas con nombre absoluto
 o con `..`, enlaces (simbólicos o duros) que salgan del archivo, entradas
-repetidas, ficheros dispersos, capas comprimidas en un `docker save` clásico
-(no serían su `diff_id`) o en zstd, una capa que falte (guardada para otra
+repetidas, ficheros dispersos, capas comprimidas (gzip o zstd) en un `docker
+save` clásico (no serían su `diff_id`), una capa que falte (guardada para otra
 plataforma) y un manifiesto o un índice que no sea el de su digest. Un enlace
 dentro del archivo se resuelve por nombre en el propio índice del tar (docker
 enlaza un `layer.tar` repetido al primero), nunca en el disco; en un directorio

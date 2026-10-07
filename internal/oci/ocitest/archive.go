@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/zstd"
 )
 
 // Saved es una imagen para DockerSave y OCILayout.
@@ -22,7 +24,7 @@ type Saved struct {
 	// Config es la parte "config" de la configuración (Entrypoint, Cmd...).
 	Config map[string]any
 	// Layers son las capas: tars sin comprimir para DockerSave; para
-	// OCILayout, sin comprimir o con gzip.
+	// OCILayout, sin comprimir, con gzip o con zstd.
 	Layers [][]byte
 }
 
@@ -38,21 +40,29 @@ func SavedConfig(s Saved) []byte {
 	return b
 }
 
-// plain descomprime una capa con gzip; una sin comprimir, tal cual.
+// plain descomprime una capa con gzip o zstd; una sin comprimir, tal cual.
 func plain(l []byte) []byte {
-	if len(l) < 2 || l[0] != 0x1f || l[1] != 0x8b {
+	var r io.Reader
+	switch {
+	case esZstd(l):
+		r = zstd.NewReader(bytes.NewReader(l))
+	case len(l) >= 2 && l[0] == 0x1f && l[1] == 0x8b:
+		zr, err := gzip.NewReader(bytes.NewReader(l))
+		if err != nil {
+			panic(err)
+		}
+		r = zr
+	default:
 		return l
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(l))
-	if err != nil {
-		panic(err)
-	}
-	b, err := io.ReadAll(zr)
+	b, err := io.ReadAll(r)
 	if err != nil {
 		panic(err)
 	}
 	return b
 }
+
+func esZstd(l []byte) bool { return bytes.HasPrefix(l, []byte{0x28, 0xb5, 0x2f, 0xfd}) }
 
 // DockerSave es lo que deja `docker save` hasta la versión 24: por imagen,
 // <id>.json (la configuración), <capa>/layer.tar sin comprimir, manifest.json
@@ -113,7 +123,9 @@ func OCILayout(imgs ...Saved) (map[string][]byte, []string) {
 		var ls []map[string]any
 		for _, l := range s.Layers {
 			mt := "application/vnd.oci.image.layer.v1.tar"
-			if !bytes.Equal(plain(l), l) {
+			if esZstd(l) {
+				mt += "+zstd"
+			} else if !bytes.Equal(plain(l), l) {
 				mt += "+gzip"
 			}
 			ls = append(ls, map[string]any{"mediaType": mt, "digest": put(l), "size": len(l)})

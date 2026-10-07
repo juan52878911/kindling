@@ -148,7 +148,8 @@ func TestArchiveDockerSave(t *testing.T) {
 }
 
 // El layout OCI: en un tar (docker save desde la 25) o en un directorio, con
-// capas comprimidas o no.
+// capas sin comprimir, en gzip o en zstd (docker buildx --output
+// type=oci,compression=zstd), y se construye sin red.
 func TestArchiveOCILayout(t *testing.T) {
 	gz := func(b []byte) []byte {
 		var buf bytes.Buffer
@@ -158,7 +159,7 @@ func TestArchiveOCILayout(t *testing.T) {
 		return buf.Bytes()
 	}
 	imgs := dosImagenes()
-	imgs[1].Layers = [][]byte{gz(capaBase), gz(capaRedis)}
+	imgs[1].Layers = [][]byte{gz(capaBase), ocitest.Zstd(capaRedis)}
 	files, mans := ocitest.OCILayout(imgs...)
 	dir := t.TempDir()
 	if err := ocitest.WriteDir(dir, files); err != nil {
@@ -188,8 +189,8 @@ func TestArchiveOCILayout(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if primeraEntrada(t, got.Layers[1]) != "redis" {
-			t.Fatal("redis layer")
+		if primeraEntrada(t, got.Layers[1]) != "redis" || !strings.Contains(got.Layers[1].MediaType, "zstd") {
+			t.Fatalf("redis layer (zstd): %+v", got.Layers[1])
 		}
 		a.Close()
 	}
@@ -296,6 +297,7 @@ func TestArchiveMalformed(t *testing.T) {
 		{"bad manifest.json", save(func(f map[string][]byte) { f["manifest.json"] = []byte("{") }), "manifest.json", ""},
 		{"no images", save(func(f map[string][]byte) { f["manifest.json"] = []byte("[]") }), "0 images", ""},
 		{"gzip layer", save(func(f map[string][]byte) { f[layer0] = gzipped(f[layer0]) }), "", "compressed (gzip)"},
+		{"zstd layer", save(func(f map[string][]byte) { f[layer0] = ocitest.Zstd(f[layer0]) }), "", "compressed (zstd)"},
 		{"missing layer", save(func(f map[string][]byte) { delete(f, layer0) }), "", "not in the archive"},
 		{"config out", save(func(f map[string][]byte) {
 			f["manifest.json"] = bytes.Replace(f["manifest.json"], []byte(cfgName), []byte("../"+cfgName), 1)
