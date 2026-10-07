@@ -327,7 +327,13 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   `manifest.json`, las dos últimas), no en `~/.local/state`: en Linux corre con
   `sudo` (y entonces `~` es el de root o el del usuario según la distribución),
   y la copia es de ese daemon, no de quien teclea. Un CLI sin daemon (`-cli`, o
-  un contexto remoto) sí usa `~/.local/state/kling/upgrade/`.
+  un contexto remoto) sí usa `~/.local/state/kling/upgrade/`. Dos `kling
+  upgrade` a la vez sobre la misma raíz no pueden correr: comparten la descarga
+  (que cada uno borra al acabar) y el servicio, así que el segundo se niega con
+  un `flock` sin espera sobre `upgrade/.lock` (también `-rollback` y
+  `-dry-run`). Con un contexto `ssh://` se imprime la orden para el host del
+  daemon con sus banderas (`-dry-run`, `-force`, `-unit`, `-root`): un
+  `-dry-run` que se perdiera por el camino sería una actualización de verdad.
 - **Qué se cambia.** El binario que ejecuta el daemon (`/proc/<MainPID>/exe` de
   la unidad, o el `program` de launchd), y a su lado lo que ya esté instalado:
   `kling-guest` y `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux),
@@ -374,16 +380,37 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   de antes se toma justo antes de parar, no al empezar: la descarga puede durar
   minutos. Desde que se para, una señal no corta nada a medias: las órdenes
   van sin cancelar (con su plazo) y Ctrl-C solo acorta la espera, que entonces
-  vuelve atrás entera. Si algo falla, vuelve sola: para, devuelve binarios,
+  vuelve atrás entera. El `state.json` va a la copia ya parado el daemon, y no
+  con los binarios: lo que el viejo escribió entre tanto no se pierde al volver.
+  Si algo falla, vuelve sola: para, devuelve binarios,
   el `state.json` de la copia y cada `.v<N>.bak` que no estaba antes (y lo
   borra, para que la siguiente migración la vuelva a hacer), arranca y espera
   a la versión de antes; esa copia ya no sirve y se borra (las copias se podan
   solo tras una actualización buena, así que dos intentos fallidos no se
   llevan la del último bueno). El gancho `status` de las extensiones no se
   corre.
+- **Congeladas que el nuevo despertó.** Volver atrás deja un `state.json` (el
+  de la copia, o el `.bak` de la migración) donde siguen congeladas máquinas
+  que un cliente despertó en cuanto el daemon nuevo contestó, y que desde
+  entonces escriben en su disco. El viejo las despertaría cargando el
+  `mem.file` de antes sobre un disco cambiado después: memoria y disco ya no
+  casan y el sistema de ficheros del invitado puede romperse en silencio. Así
+  que, antes de parar para volver, se comparan con el `List` del daemon nuevo y
+  se congelan otra vez con él (el VMM no cambia, así que su `mem.file` lo lee
+  el viejo). Si no se puede (no contesta y su `state.json` dice que corren, o
+  el freeze falla), no se vuelve atrás y se dice cuáles: el nuevo sigue
+  corriendo, la copia se queda, y `-rollback -force` vuelve igualmente. Lo
+  creado después sí se pierde, como dice §6.
 - **`-rollback`.** Lo mismo con la última copia, menos el `state.json`
   guardado (se usa el `.bak` de la migración, que es lo que dice §6); la copia
-  usada se borra, así que el siguiente `-rollback` va a la anterior.
+  usada se borra, así que el siguiente `-rollback` va a la anterior. Funciona
+  también con el daemon caído, que es cuando más falta hace (el nuevo no
+  arranca tras un reinicio, o la vuelta atrás sola falló): la raíz y el socket
+  salen de cómo lo arranca su servicio (`-root`/`-socket` del `ExecStart`, si
+  no `KLING_ROOT`/`KLING_SOCKET` de `Environment=` o del `EnvironmentFile`, de
+  los que solo se leen esas dos claves; en el Mac, del plist), o de `-root DIR`;
+  lo que se restaura, del `manifest.json` de la copia. No hay PID que comparar:
+  en su lugar, el socket del servicio tiene que ser el que se espera.
 
 ### 3.5 Pruebas
 

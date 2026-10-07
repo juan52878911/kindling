@@ -205,13 +205,16 @@ contiene "$out" "up-from-gold" && ok "run -from the old template" || bad "run -f
 out=$(kn start up-stopped 2>&1)
 contiene "$out" "running" && ok "start of the old stopped machine" || bad "start" "running" "$out"
 kn rm up-from-gold >/dev/null 2>&1
-kn freeze up-frozen >/dev/null 2>&1
 kn stop up-stopped >/dev/null 2>&1
+# up-frozen se queda despierta: en el state.json al que vuelve -rollback está
+# congelada, y upgrade tiene que congelarla otra vez con el nuevo antes de parar.
 
 # ── 5. -rollback a mano ───────────────────────────────────────────────────────
 step "5. kling upgrade -rollback"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "rolled back to $OLD_TAG" && ok "rollback" || bad "rollback" "rolled back to $OLD_TAG" "rc=$rc: $out"
+contiene "$out" "freezing $FROZEN again" && ok "the machine the new daemon woke was frozen again first" \
+  || bad "refreeze before rollback" "freezing $FROZEN again" "$out"
 v=$(k version 2>&1 | sed -n 2p)
 contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
 schema=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('schema',0) if isinstance(d,dict) else 0)" "$ROOT/state.json")
@@ -220,6 +223,23 @@ schema=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.ge
 st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen under $OLD_TAG" || bad "frozen" frozen "$st"
 out=$(k thaw up-frozen 2>&1)
 contiene "$out" "running" && ok "and $OLD_TAG thaws it" || bad "thaw under $OLD_TAG" "running" "$out"
+if [ -n "$EXEC" ]; then
+  out=$(k exec up-frozen -- cat /tmp/mark 2>&1)
+  [ "$out" = before-upgrade ] && ok "its RAM came back through both freezes" || bad "RAM under $OLD_TAG" before-upgrade "$out"
+fi
+k freeze up-frozen >/dev/null 2>&1
+
+# ── 6. -rollback con el daemon caído ─────────────────────────────────────────
+step "6. kling upgrade -rollback with the daemon down"
+out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" 2>&1); rc=$?
+[ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again" || bad "second upgrade" "upgraded" "rc=$rc: $out"
+systemctl stop "$NAME"
+out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
+[ $rc = 0 ] && contiene "$out" "no daemon answers" && contiene "$out" "rolled back to $OLD_TAG" \
+  && ok "rollback found the backup through the unit" || bad "rollback without a daemon" "rolled back to $OLD_TAG" "rc=$rc: $out"
+v=$(k version 2>&1 | sed -n 2p)
+contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
+st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" || bad "frozen" frozen "$st"
 
 echo
 echo "upgrade e2e: $pass ok, $fail failed"

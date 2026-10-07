@@ -30,6 +30,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
 - `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
 - `kling upgrade`: verified download, schema check, backup, daemon restart (systemd or launchd), check and automatic rollback; `-rollback`, `-dry-run`, `-from-dir`, `-cli`
+- `kling upgrade` rolls back without corrupting frozen machines the new daemon woke (it freezes them again first), `-rollback` works with the daemon down (`-root`), and only one upgrade runs per root
 - `scripts/94-e2e-upgrade.sh`: upgrade from the previous release and back on a private daemon
 - `kling upgrade` checks that the daemon on the socket is the one the unit (or launchd agent) runs, refuses state the target no longer reads before stopping anything, and finishes the restart or rollback on Ctrl-C
 - `kling upgrade` tolerates what the gateway does meanwhile: frozen machines woken by clients, session machines removed

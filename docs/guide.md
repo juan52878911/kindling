@@ -187,7 +187,8 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 # With extensions from the same release (MCP servers, sandboxes):
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
-# A specific version (it installs the latest release by default):
+# A specific version (it installs the latest release by default; on top of an
+# existing install it needs --force, or use kling upgrade -tag):
 curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
 
 # Custom prefix:
@@ -207,13 +208,18 @@ disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Ki
 sudo kling upgrade               # Linux: the daemon of kling.service, to the latest release
 kling upgrade -tag v0.18.0       # macOS (launchd agent), or a specific release
 kling upgrade -dry-run           # download, verify and print the plan
-kling upgrade -rollback          # back to the binaries saved by the last upgrade
+kling upgrade -rollback          # back to the binaries saved by the last upgrade,
+                                 # also with the daemon down (it reads its unit)
 ```
 
 It verifies every binary against the release's `SHA256SUMS`, checks that the new kling
 reads the state on disk, backs up the current binaries, restarts the daemon (running
 microVMs keep running), checks `/info`, the machines and the templates, and rolls back by
-itself if anything fails. On top of an existing install, `install.sh` points here and only
+itself if anything fails. Before rolling back it freezes again, through the new daemon,
+the machines that were frozen before and that the new one woke up, so the old one never
+thaws a memory snapshot older than its disk. Only one upgrade runs at a time on a data
+directory. Run it on the daemon's host: with an `ssh://` context it prints the command to
+paste there, flags included. On top of an existing install, `install.sh` points here and only
 reinstalls with `--force`. Details: [docs/actualizar.md](actualizar.md).
 
 **From source — `make`:**

@@ -1342,10 +1342,14 @@ ejecuta y se instala es la copia ya verificada en `<raíz>/upgrade/<etiqueta>`
 verificarlo no cuela nada. En Linux corre como root (`sudo`), y las extensiones
 de cada usuario se las deja a su `kling upgrade -cli`. No pasa
 nada por argv que no sea público (etiqueta, rutas, la unidad), y del entorno del
-daemon solo lee `KLING_LIB_DIR`. Solo reinicia el daemon si el proceso que
+daemon solo lee `KLING_LIB_DIR` (y, para un `-rollback` con el daemon caído,
+`KLING_ROOT` y `KLING_SOCKET` de la unidad y su `EnvironmentFile`, sin leer ni
+guardar otras claves). Solo reinicia el daemon si el proceso que
 escucha en el socket (`SO_PEERCRED`/`LOCAL_PEERPID`, lo dice el kernel) es el
 de la unidad o el agente de launchd: un `KLING_HOST` hacia otro daemon no hace
-cambiar y reiniciar el de producción. `SHA256SUMS` sigue sin firmar (ver abajo).
+cambiar y reiniciar el de producción; con el daemon caído, si el socket de la
+unidad es el que se espera. Dos `kling upgrade` sobre la misma raíz no corren a
+la vez (`flock` en `<raíz>/upgrade/.lock`). `SHA256SUMS` sigue sin firmar (ver abajo).
 
 ## Lo que NO está resuelto
 
