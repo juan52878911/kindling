@@ -142,11 +142,80 @@ func (p *progressBody) Close() error { return p.body.Close() }
 // —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
 // CABECERAS, que es lo que separa "está trabajando" de "no hay nadie"; una vez
 // que llegan, wrapGuestBody acota por su cuenta el progreso del CUERPO.
-var guestClient = &http.Client{Transport: &http.Transport{
-	ResponseHeaderTimeout: 5 * time.Minute,
-	MaxIdleConnsPerHost:   8,
-	IdleConnTimeout:       90 * time.Second,
-}}
+var guestClient = &http.Client{Transport: guestTransports}
+
+// guestTransports da un transporte por dirección de invitado, para poder
+// soltar las conexiones de UNO cuando su red se desmonta (forgetIP) sin tocar
+// las de los demás: con uno compartido, cada stop, rm o sandbox retirado
+// cerraba las ociosas hacia TODAS las máquinas, y en un host con muchas altas
+// y bajas cada exec volvía a abrir conexión.
+var guestTransports = &transportesInvitado{}
+
+// maxTransportesInvitado acota el mapa. En Linux cada transporte se olvida al
+// desmontar la red de su máquina; en macOS la dirección es un reenvío de
+// 127.0.0.1 con un puerto nuevo por VMM que nadie olvida (al morir kling-vz
+// el reenvío se cierra y sus conexiones con él). Pasado el tope se empieza de
+// cero: cuesta una conexión nueva por invitado, nada más.
+const maxTransportesInvitado = 1024
+
+type transportesInvitado struct {
+	mu    sync.Mutex
+	porID map[string]*http.Transport // host:puerto -> transporte
+}
+
+func (g *transportesInvitado) de(host string) *http.Transport {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if t := g.porID[host]; t != nil {
+		return t
+	}
+	if g.porID == nil || len(g.porID) >= maxTransportesInvitado {
+		for _, t := range g.porID {
+			t.CloseIdleConnections()
+		}
+		g.porID = map[string]*http.Transport{}
+	}
+	t := &http.Transport{
+		ResponseHeaderTimeout: 5 * time.Minute,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	g.porID[host] = t
+	return t
+}
+
+func (g *transportesInvitado) RoundTrip(req *http.Request) (*http.Response, error) {
+	return g.de(req.URL.Host).RoundTrip(req)
+}
+
+// CloseIdleConnections cierra las ociosas de todos (http.Client lo reenvía).
+func (g *transportesInvitado) CloseIdleConnections() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, t := range g.porID {
+		t.CloseIdleConnections()
+	}
+}
+
+// forgetIP cierra las ociosas hacia ip (en cualquier puerto) y olvida sus
+// transportes. Las peticiones en curso siguen en el suyo hasta acabar.
+func (g *transportesInvitado) forgetIP(ip string) {
+	if ip == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for host, t := range g.porID {
+		h, _, err := net.SplitHostPort(host)
+		if err != nil {
+			h = host
+		}
+		if h == ip {
+			t.CloseIdleConnections()
+			delete(g.porID, host)
+		}
+	}
+}
 
 type Server struct {
 	socket     string
@@ -219,8 +288,9 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	mgr.FijarOrigen(Version, fcVersion)
 	// Una máquina parada o borrada deja su IP a la siguiente (kling start
 	// conserva la suya): lo que guardara guestClient contra ella es un TCP
-	// muerto, y el primer exec del VMM nuevo se comía un RST.
-	mgr.OnGuestGone(guestClient.CloseIdleConnections)
+	// muerto, y el primer exec del VMM nuevo se comía un RST. Solo las de esa
+	// IP: las de las demás máquinas siguen valiendo.
+	mgr.OnGuestGone(guestTransports.forgetIP)
 	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
 		fcVersion: fcVersion}, nil
 }

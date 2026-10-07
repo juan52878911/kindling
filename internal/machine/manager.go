@@ -155,7 +155,7 @@ type Manager struct {
 
 	// redCaida es lo que se llama al desmontar la red de una máquina (ver
 	// OnGuestGone).
-	redCaida atomic.Pointer[func()]
+	redCaida atomic.Pointer[func(ip string)]
 
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones

@@ -92,10 +92,11 @@ func TestDesmontarRedAvisaDeQueElInvitadoSeFue(t *testing.T) {
 	desmontarRedHost = func(*knet.Net) {}
 	m := &Manager{}
 	m.desmontarRed(knet.Plan(3, "abcd000000000001"), "abcd000000000001") // sin aviso registrado
-	var avisos atomic.Int32
-	m.OnGuestGone(func() { avisos.Add(1) })
-	m.desmontarRed(knet.Plan(3, "abcd000000000001"), "abcd000000000001")
-	if avisos.Load() != 1 {
-		t.Fatalf("%d avisos al desmontar la red, quería 1", avisos.Load())
+	var avisos []string
+	m.OnGuestGone(func(ip string) { avisos = append(avisos, ip) })
+	n := knet.Plan(3, "abcd000000000001")
+	m.desmontarRed(n, "abcd000000000001")
+	if len(avisos) != 1 || avisos[0] != n.NSIP {
+		t.Fatalf("avisos al desmontar la red = %v, quería uno con su IP %s", avisos, n.NSIP)
 	}
 }
