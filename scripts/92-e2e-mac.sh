@@ -204,7 +204,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   t0=$(now_ms); k exec "$M" -- true >/dev/null 2>&1; t1=$(now_ms); lat+=($((t1-t0)))
 done
 EXEC_P50=$(pctl 50 "${lat[@]}")
-ok "exec latency (CLI round trip): p50 ${EXEC_P50} ms, max $(pctl 100 "${lat[@]}") ms"
+info "exec latency (CLI round trip): p50 ${EXEC_P50} ms, max $(pctl 100 "${lat[@]}") ms"
 
 f="$TMPBASE/e2e-cp.$$"; head -c 200000 /dev/urandom >"$f"
 if k cp "$f" "$M:/tmp/blob" >/dev/null 2>&1 && k cp "$M:/tmp/blob" "$f.back" >/dev/null 2>&1 && cmp -s "$f" "$f.back"; then
@@ -748,7 +748,7 @@ tf=$(total_fp); [ "${tf:-0}" -gt $peak ] && peak=$tf
 [ $bfail -eq 0 ] && ok "$BURST/$BURST started through the launch gate (KLING_MAX_PARALLEL_BOOT=$KLING_MAX_PARALLEL_BOOT) in $((t1-t0)) ms" \
   || bad "burst" "$BURST started" "$bfail failed"
 BURST_P50=$(pctl 50 "${blat[@]:-0}"); BURST_P95=$(pctl 95 "${blat[@]:-0}")
-ok "run -from latency: p50 $BURST_P50 ms, p95 $BURST_P95 ms"
+info "run -from latency: p50 $BURST_P50 ms, p95 $BURST_P95 ms"
 nok=0
 for i in $(seq 1 "$BURST"); do out=$(k exec "$P-b$i" -- cat /root/mark 2>&1); [ "$out" = golden ] && nok=$((nok+1)); done
 [ $nok -eq "$BURST" ] && ok "all $BURST answer exec" || bad "burst exec" "$BURST" "$nok"
@@ -769,7 +769,7 @@ for i in $(seq 1 "$BURST"); do
 done
 [ $tfail -eq 0 ] && ok "$BURST concurrent thaws: p50 $(pctl 50 "${tl[@]:-0}") ms, p95 $(pctl 95 "${tl[@]:-0}") ms" \
   || bad "thaws" "$BURST thawed" "$tfail failed"
-ok "peak footprint of the burst: $peak MiB for $BURST microVMs (a restore materializes all of its memory)"
+info "peak footprint of the burst: $peak MiB for $BURST microVMs (a restore materializes all of its memory)"
 pids=()
 for m in $(k ps -a -q 2>/dev/null); do k rm "$m" >/dev/null 2>&1 & pids+=($!); done
 [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"

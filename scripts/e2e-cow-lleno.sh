@@ -20,6 +20,7 @@ FILAS="${FILAS:-400000}"
 pass=0; fail=0
 ok()  { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
 bad() { printf "  \033[31mFALLO\033[0m %s\n     esperaba: %s\n     obtuvo:   %s\n" "$1" "$2" "$3"; fail=$((fail+1)); }
+info() { printf "        %s\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 json() { $KLING db ls -json | python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
 copias() { json 'print(" ".join(c["name"] for c in d if c["name"].startswith("cowfull-")))'; }
@@ -53,9 +54,12 @@ for _ in $(seq 1 120); do [ "$(retenidas)" -ge 1 ] && break; sleep 1; done
 sleep 3
 n=$(retenidas); [ "$n" -ge 1 ] && ok "el vigilante retuvo $n copias" || bad "retenidas" ">= 1" "$n"
 e=$(errores); [ "$e" = 0 ] && ok "ninguna copia vio errores de disco" || bad "errores de disco" 0 "$e"
-out=$($KLING thaw cowfull-rama 2>&1)
-contiene "$out" "store full" && ok "la rama congelada no se despierta sin sitio: store full" \
-  || ok "la rama se despertó (había sitio en ese momento): $out"
+out=$($KLING thaw cowfull-rama 2>&1); rc=$?
+# Si en ese momento quedaba sitio, despertar es correcto pero no prueba nada:
+# se anota, no cuenta como ok. Cualquier otro fallo es un fallo.
+if contiene "$out" "store full"; then ok "la rama congelada no se despierta sin sitio: store full"
+elif [ $rc -eq 0 ]; then info "la rama se despertó (había sitio en ese momento): $out"
+else bad "thaw con el almacén lleno" "store full" "$out"; fi
 
 if [ -n "${KLING_E2E_RESTART:-}" ]; then
   echo "2. reinicio del daemon con copias retenidas"
