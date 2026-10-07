@@ -36,6 +36,7 @@ func TestFirmaDeSnapshots(t *testing.T) {
 	// y sobre todo la política (encender exec o dar red).
 	for nombre, tocar := range map[string]func(*api.Snapshot){
 		"hash del overlay": func(s *api.Snapshot) { s.RootfsSHA256 = "cc" },
+		"hash en árbol":    func(s *api.Snapshot) { s.RootfsDigest = "sha256-tree-4m:cc" },
 		"encender exec":    func(s *api.Snapshot) { s.AllowExec = true },
 		"dar internet":     func(s *api.Snapshot) { s.Egress = "internet" },
 		"añadir volumen":   func(s *api.Snapshot) { s.Volumes = []api.VolumeAttachment{{Name: "x", Mount: "/x"}} },
@@ -79,6 +80,16 @@ func TestFirmaDeSnapshots(t *testing.T) {
 }
 
 // Los snapshots anteriores a las firmas siguen restaurándose, salvo que se exija.
+// Sin RootfsDigest (los dorados de antes de meta.json v2) se firma byte a
+// byte lo mismo que antes de existir el campo: sus firmas siguen valiendo.
+func TestContenidoFirmadoSinDigestEnArbol(t *testing.T) {
+	want := `{"Name":"svc","Image":"toolchain","Rootfs":"aa","Snap":"bb","Egress":"none",` +
+		`"Allow":"","Vols":"","AllowExec":false,"VCPUs":1,"MemMiB":256}`
+	if got := string(contenidoFirmado(snapDePrueba())); got != want {
+		t.Fatalf("signed content changed for old goldens:\n got %s\nwant %s", got, want)
+	}
+}
+
 func TestSnapshotSinFirma(t *testing.T) {
 	m := newTestManager(t)
 	s := snapDePrueba()

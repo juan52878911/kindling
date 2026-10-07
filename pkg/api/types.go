@@ -622,6 +622,10 @@ type Snapshot struct {
 	// Ver Manager.verifyIntegrity.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
+	// RootfsDigest sustituye a RootfsSHA256 desde meta.json v2: el overlay en
+	// árbol de sha256 (pkg/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
+	// sin leer los huecos. Un dorado lleva uno de los dos.
+	RootfsDigest string `json:"rootfs_digest,omitempty"`
 
 	// KernelSHA256 es el sha256 del vmlinux con el que se congeló el snapshot.
 	// Campo nuevo y opcional: los snapshots anteriores a K1 (kernel propio) no

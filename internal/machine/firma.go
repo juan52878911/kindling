@@ -94,8 +94,12 @@ func contenidoFirmado(s *api.Snapshot) []byte {
 		Allow, Vols                       string
 		AllowExec                         bool
 		VCPUs, MemMiB                     int
+		// omitempty: sin él (los dorados de antes de v2) firman lo mismo que
+		// antes de existir el campo.
+		RootfsDigest string `json:",omitempty"`
 	}{s.Name, s.Image, s.RootfsSHA256, s.SnapSHA256, s.Egress,
-		strings.Join(s.AllowDomains, ","), strings.Join(vols, ","), s.AllowExec, s.VCPUs, s.MemMiB})
+		strings.Join(s.AllowDomains, ","), strings.Join(vols, ","), s.AllowExec, s.VCPUs, s.MemMiB,
+		s.RootfsDigest})
 	return b
 }
 

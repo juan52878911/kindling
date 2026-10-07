@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestMetaV0SeMigraConCopia(t *testing.T) {
 // listado lo enseña a medias ni una anotación lo reescribe sin sus campos.
 func TestMetaMasNuevoNoSeToca(t *testing.T) {
 	m := annotTestManager(t)
-	original := ponerFijacion(t, m, "svc", "meta.v2.json")
+	original := ponerFijacion(t, m, "svc", "meta.v3.json")
 	ruta := filepath.Join(m.snapDir("svc"), "meta.json")
 
 	if _, err := m.loadSnapshot("svc"); !esquema.EsMasNuevo(err) {
@@ -110,7 +111,7 @@ func TestMetaMasNuevoNoSeToca(t *testing.T) {
 // nuevo está entero aunque este binario no lo entienda, y ninguno se aparta.
 func TestRecuperarReemplazosRespetaElMetaDelFuturo(t *testing.T) {
 	m := annotTestManager(t)
-	ponerFijacion(t, m, "svc", "meta.v2.json")
+	ponerFijacion(t, m, "svc", "meta.v3.json")
 	anterior := filepath.Join(m.root, "snapshots", ".svc"+sufijoAnterior)
 	if err := os.MkdirAll(anterior, 0o755); err != nil {
 		t.Fatal(err)
@@ -129,9 +130,9 @@ func TestRecuperarReemplazosRespetaElMetaDelFuturo(t *testing.T) {
 // quitó.
 func TestEditMetaConservaLoQueNoConoce(t *testing.T) {
 	m := annotTestManager(t)
-	writeSnapMeta(t, m, "svc", `{"schema": 1, "name": "svc", "image": "eco",
+	writeSnapMeta(t, m, "svc", fmt.Sprintf(`{"schema": %d, "name": "svc", "image": "eco",
 		"annotations": {"vieja": 1},
-		"campo_nuevo": {"a": [1, 2]}, "otro_nuevo": "x"}`)
+		"campo_nuevo": {"a": [1, 2]}, "otro_nuevo": "x"}`, metaSchema))
 
 	for _, paso := range []func() error{
 		func() error { _, err := m.SetAnnotation("svc", "otra", json.RawMessage(`{"b": true}`)); return err },
@@ -153,8 +154,8 @@ func TestEditMetaConservaLoQueNoConoce(t *testing.T) {
 	if _, hay := got["annotations"]; hay {
 		t.Fatalf("las anotaciones quitadas volvieron del meta anterior:\n%s", b)
 	}
-	if _, err := os.Stat(esquema.RutaRespaldo(filepath.Join(m.snapDir("svc"), "meta.json"), 1)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("de v1 a v1 no hay migración ni copia")
+	if _, err := os.Stat(esquema.RutaRespaldo(filepath.Join(m.snapDir("svc"), "meta.json"), metaSchema)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("de una versión a la misma no hay migración ni copia")
 	}
 }
 

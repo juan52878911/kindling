@@ -135,3 +135,35 @@ func TestElVeredictoDeIntegridadSeRecuerdaPeroSeInvalida(t *testing.T) {
 		t.Errorf("el error debería nombrar el fichero corrupto: %v", err)
 	}
 }
+
+// Un dorado v2 lleva el overlay en árbol (RootfsDigest): pasa íntegro, falla
+// corrupto y el error da el hex, no el prefijo del algoritmo.
+func TestVerifyIntegrityEnArbol(t *testing.T) {
+	dir := t.TempDir()
+	overlay := filepath.Join(dir, "overlay.ext4")
+	f, err := os.Create(overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Truncate(64 << 20) // disperso, como el de verdad
+	f.WriteAt([]byte("superbloque"), 1024)
+	f.Close()
+	os.WriteFile(filepath.Join(dir, "snap.file"), []byte("volcado"), 0o644)
+	arbol, _ := digest.Tree(overlay)
+	snapSHA, _ := digest.File(filepath.Join(dir, "snap.file"))
+
+	snap := &api.Snapshot{Name: "svc", RootfsDigest: arbol, SnapSHA256: snapSHA}
+	if err := (&Manager{}).verifyIntegrity(snap, dir); err != nil {
+		t.Fatalf("an intact v2 golden failed: %v", err)
+	}
+	f, _ = os.OpenFile(overlay, os.O_WRONLY, 0)
+	f.WriteAt([]byte("!"), 40<<20) // en lo que era hueco
+	f.Close()
+	err = (&Manager{}).verifyIntegrity(snap, dir)
+	if err == nil {
+		t.Fatal("a byte written into a hole of the overlay went unnoticed")
+	}
+	if strings.Contains(err.Error(), "sha256-tree") || !strings.Contains(err.Error(), strings.TrimPrefix(arbol, digest.TreePrefix)[:12]) {
+		t.Errorf("the error should show the hex of the digest: %v", err)
+	}
+}
