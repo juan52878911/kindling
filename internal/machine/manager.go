@@ -2871,7 +2871,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// directorio que ya no existe (como Freeze y Commit, se relee).
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StateRunning {
 		return cur, nil
@@ -2949,7 +2949,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			// justo lo que esta readopción evita. El que corre no es de nadie.
 			m.mu.Unlock()
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+			return nil, retiradaDurante(mc.Name, "thawed")
 		}
 		now := time.Now()
 		cur.State = api.StateRunning
