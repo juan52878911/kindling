@@ -100,6 +100,9 @@ CONFIG_SWAP=y
 CONFIG_COMPACTION=y
 CONFIG_MIGRATION=y
 CONFIG_BALLOON_COMPACTION=y
+# Informe de páginas libres del globo (free_page_reporting, Firecracker 1.14+):
+# VIRTIO_BALLOON ya lo selecciona; se pide explícito para que se vea.
+CONFIG_PAGE_REPORTING=y
 
 # ── endurecimiento ───────────────────────────────────────────────────────────
 CONFIG_SECCOMP=y

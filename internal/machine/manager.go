@@ -1760,7 +1760,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// del snapshot dorado, heredado por las copias. No es fatal: si el kernel
 	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
 	// microVM arranca igual y solo se pierde el squeeze.
-	if err := c.SetBalloon(ctx, globo, true, balloonStatsPollSec); err != nil {
+	if err := m.configurarGlobo(ctx, c, id, globo); err != nil {
 		if globo > 0 {
 			// Sin globo no hay forma de retener la diferencia: el invitado
 			// vería el techo entero, que no es lo que se pidió.
