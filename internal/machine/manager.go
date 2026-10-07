@@ -2733,13 +2733,18 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	crono.marca(&crono.p.WaitMS)
 
-	// Otra llamada pudo descongelarla mientras esperábamos el candado.
+	// Otra llamada pudo descongelarla mientras esperábamos el candado, o
+	// borrarla: seguir con la copia de antes lanzaba un VMM sobre un
+	// directorio que ya no existe (como Freeze y Commit, se relee).
 	cur, ok := m.Get(mc.ID)
-	if ok && cur.State == api.StateRunning {
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	if cur.State == api.StateRunning {
 		return cur, nil
 	}
 	// Pausada: solo reanudar (ver pausa.go).
-	if ok && cur.State == api.StatePaused {
+	if cur.State == api.StatePaused {
 		crono.p.Tier = "paused"
 		// Pausada por el almacén lleno (cow_vigilante.go): reanudarla sin
 		// sitio la devolvería a escribir en un almacén que da EIO.
@@ -2761,9 +2766,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			Message: "resumed" + notaFases(fases)})
 		return out, nil
 	}
-	if ok {
-		mc = cur
-	}
+	mc = cur
 	if mc.State != api.StateWarm {
 		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
@@ -2793,21 +2796,39 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			mc.Name, mc.ID[:8], pid)
 		// Con su socket real: si corre en jail, el del chroot (ver socketDe).
 		sock := m.socketDe(mc.ID, pid)
-		m.mu.Lock()
-		if cur := m.byID[mc.ID]; cur != nil {
-			now := time.Now()
-			cur.State = api.StateRunning
-			cur.PID = pid
-			cur.StartedAt = &now
-			cur.FrozenAt = nil
-			m.socket[mc.ID] = sock
-			m.persist()
-			out := *cur
-			m.mu.Unlock()
-			m.startShares(mc.ID)
-			return &out, nil
+		// El techo de CPU, el configurado (no el impulso de arranque: este
+		// invitado ya arrancó). Su cgroup pudo irse con un reinicio del daemon
+		// (sweepCgroups) o no haberse aplicado nunca si el thaw que lo lanzó
+		// murió antes de llegar a limitCPU: sin esto corría sin techo.
+		techo := mc.CPUPct
+		if techo <= 0 {
+			techo = techoDelDaemon(mc.VCPUs)
 		}
+		if warn := m.limitCPU(mc.ID, pid, techo); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
+		m.mu.Lock()
+		cur := m.byID[mc.ID]
+		if cur == nil {
+			// Con el cerrojo tomado nadie debería poder borrarla; si aun así
+			// no está, seguir lanzaría un SEGUNDO VMM sobre su overlay, que es
+			// justo lo que esta readopción evita. El que corre no es de nadie.
+			m.mu.Unlock()
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+		}
+		now := time.Now()
+		cur.State = api.StateRunning
+		cur.PID = pid
+		cur.StartedAt = &now
+		cur.FrozenAt = nil
+		cur.CPUPct = techo
+		m.socket[mc.ID] = sock
+		m.persist()
+		out := *cur
 		m.mu.Unlock()
+		m.startShares(mc.ID)
+		return &out, nil
 	}
 
 	// Jailer bloqueado: antes de enterLaunch, la red y el cgroup (ver Run). No
@@ -2835,6 +2856,22 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
+	// Admisión de memoria, como Run y runFrom: descongelar devuelve al host
+	// toda la RAM del invitado, y una tormenta de thaws (el gateway
+	// despertando a la vez lo que congeló) lo dejaba sin memoria sin que nada
+	// dijera que no. El techo entero (MemMaxMiB): es lo que el VMM mapea al
+	// cargar. Sin la del disco (checkDisk): despertar no crea disco —el
+	// overlay y el volcado ya existen—, y el diferencial sin reflink ya mide
+	// el suyo (prepararMemoriaDesdeDiff). Reanudar una pausada (arriba) y
+	// readoptar un VMM vivo no pasan por aquí: su memoria ya está ocupada.
+	if err := m.admitirMemoria(); err != nil {
+		return nil, err
+	}
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, max(mc.MemMiB, mc.MemMaxMiB), "", mc.ID)
+	if merr != nil {
+		return nil, merr
+	}
+	defer releaseMem()
 	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
 	base := leerSello(dir).DiffBase

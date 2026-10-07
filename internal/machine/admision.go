@@ -227,6 +227,12 @@ func (m *Manager) admitir() error {
 	if err := m.checkDisk(); err != nil {
 		return err
 	}
+	return m.admitirMemoria()
+}
+
+// admitirMemoria es la admisión sin la del disco: la de quien no crea disco
+// nuevo (Thaw).
+func (m *Manager) admitirMemoria() error {
 	if err := m.checkPresionPlataforma(); err != nil {
 		return err
 	}

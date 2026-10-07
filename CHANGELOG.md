@@ -43,6 +43,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `thaw` goes through memory admission like `run`: a storm of thaws is refused with 507 instead of exhausting the host
+- `thaw` of a machine removed while it waited fails instead of starting a VMM; re-adopting a live VMM restores its CPU ceiling (Linux)
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
