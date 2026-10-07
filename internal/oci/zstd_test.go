@@ -3,11 +3,15 @@ package oci_test
 import (
 	"archive/tar"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
@@ -110,5 +114,43 @@ func TestPullZstdBomb(t *testing.T) {
 	}
 	if es, _ := os.ReadDir(dir); len(es) != 0 {
 		t.Fatalf("left %d files in the unpack dir", len(es))
+	}
+}
+
+// Las capas zstd se descomprimen de dos en dos como mucho (cada una guarda
+// ~230 MiB con la ventana más grande); las gzip, tantas como núcleos.
+func TestPullZstdParallel(t *testing.T) {
+	if runtime.NumCPU() < 3 {
+		t.Skip("needs 3 CPUs")
+	}
+	r := ocitest.New()
+	defer r.Close()
+	var layers [][]byte
+	for i := 0; i < 6; i++ {
+		f := []ocitest.File{{Name: fmt.Sprintf("f%d", i), Body: strings.Repeat("z", 100*i)}}
+		layers = append(layers, ocitest.Zstd(ocitest.Tar(f)), ocitest.TarGz(f))
+	}
+	var mu sync.Mutex
+	var now, peak [2]int // [gzip, zstd]
+	oci.SetUnpackHook(func(zst bool) func() {
+		k := 0
+		if zst {
+			k = 1
+		}
+		mu.Lock()
+		now[k]++
+		peak[k] = max(peak[k], now[k])
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		return func() { mu.Lock(); now[k]--; mu.Unlock() }
+	})
+	defer oci.SetUnpackHook(nil)
+	man, _ := r.Image("amd64", nil, layers...)
+	c := &oci.Client{Cache: t.TempDir(), Unpack: filepath.Join(t.TempDir(), "layers"), MaxBytes: 1 << 20, Log: io.Discard}
+	if _, err := c.Pull(context.Background(), r.Host()+"/x/y", man, "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	if peak[1] > 2 || peak[0] < 3 {
+		t.Fatalf("%d zstd and %d gzip layers unpacked at once, want <= 2 and >= 3", peak[1], peak[0])
 	}
 }

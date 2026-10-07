@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -378,6 +379,68 @@ func TestHistoryBound(t *testing.T) {
 	}
 	if limit := 1024 + 1<<20 + maxBlock; cap(z.hist) > limit {
 		t.Fatalf("history of %d bytes, over %d", cap(z.hist), limit)
+	}
+}
+
+// rleFrame hace un marco sin tamaño, con ventana de 128 MiB, de n bloques
+// RLE de 128 KiB: unos pocos KiB que dan n*128 KiB.
+func rleFrame(n int) []byte {
+	out := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 17 << 3}
+	for i := 0; i < n; i++ {
+		h := maxBlock<<3 | 1<<1
+		if i == n-1 {
+			h |= 1
+		}
+		out = append(out, byte(h), byte(h>>8), byte(h>>16), byte(i))
+	}
+	return out
+}
+
+// Lo que pide un marco con la ventana más grande se acerca a la historia
+// final (192 MiB más un bloque), no al doble: al crecer, hist salta a su
+// tamaño final en vez de pasar por 128 MiB y copiarlos.
+func TestHistoryGrowth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short")
+	}
+	var a, b runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&a)
+	z := NewReader(bytes.NewReader(rleFrame(1600)))
+	n, err := io.Copy(io.Discard, z)
+	runtime.ReadMemStats(&b)
+	if err != nil || n != 1600*maxBlock {
+		t.Fatalf("rle frame: %d bytes, %v", n, err)
+	}
+	final := MaxWindow + MaxWindow/2 + maxBlock
+	if cap(z.hist) != final {
+		t.Fatalf("history of %d bytes, want %d", cap(z.hist), final)
+	}
+	if got := b.TotalAlloc - a.TotalAlloc; got > uint64(final+final/4) {
+		t.Fatalf("allocated %d MiB for a %d MiB history", got>>20, final>>20)
+	}
+}
+
+// Con el tamaño del marco declarado, la historia no pasa de él (más un
+// bloque) aunque la ventana sea mayor.
+func TestHistoryFrameSize(t *testing.T) {
+	in := words(5<<19, 41)
+	f := filepath.Join(t.TempDir(), "in")
+	if err := os.WriteFile(f, in, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// De un fichero (no de la entrada estándar) zstd escribe el tamaño.
+	comp, err := exec.Command("zstd", "-q", "-c", "-3", "--zstd=wlog=21", f).Output()
+	if err != nil {
+		t.Skip("no zstd tool")
+	}
+	z := NewReader(bytes.NewReader(comp))
+	got, err := io.ReadAll(z)
+	if err != nil || !bytes.Equal(got, in) {
+		t.Fatalf("decode: %v", err)
+	}
+	if z.window != 2<<20 || cap(z.hist) > len(in)+maxBlock {
+		t.Fatalf("window %d, history %d for %d bytes", z.window, cap(z.hist), len(in))
 	}
 }
 

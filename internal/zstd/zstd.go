@@ -6,7 +6,9 @@
 // varios marcos seguidos y salta los marcos saltables. La memoria está
 // acotada: la ventana que declara un marco no puede pasar de MaxWindow
 // (128 MiB, la de zstd --long), y lo que se guarda de historia nunca pasa
-// de la ventana, más media ventana (o 1 MiB) y un bloque. Una entrada mala da un error, no
+// de la ventana, más media ventana (o 1 MiB) y un bloque: unos 192 MiB con la
+// ventana más grande, y en el peor momento (cuando crece) unos 210 MiB vivos
+// a la vez. Quien abre muchos a la vez acota el total. Una entrada mala da un error, no
 // un pánico ni un bucle: cada longitud y cada desplazamiento se comprueban
 // antes de usarlos. Si el marco lleva su xxhash64, se comprueba al final;
 // de todos modos, quien llama ya verificó el sha256 de la capa entera.
@@ -180,7 +182,11 @@ func (z *Reader) frame() error {
 
 // room deja sitio para un bloque más en hist. La historia más allá de la
 // ventana no la puede usar nadie: cuando sobra más de media ventana (o de 1
-// MiB), se descarta moviendo la ventana al principio.
+// MiB), se descarta moviendo la ventana al principio. hist crece al doble
+// mientras es pequeña y luego salta de una vez a su tamaño final (la ventana,
+// el margen y un bloque, o lo que declara el marco si es menos): si fuera
+// doblando hasta el final, el array viejo y el nuevo, juntos, pasarían de la
+// vez y media de ese tamaño.
 func (z *Reader) room() {
 	if len(z.hist)+maxBlock <= cap(z.hist) {
 		return
@@ -191,7 +197,15 @@ func (z *Reader) room() {
 		z.hist = z.hist[:n]
 	}
 	if need := len(z.hist) + maxBlock; need > cap(z.hist) {
-		c := min(max(2*cap(z.hist), need), z.window+extra+maxBlock)
+		limit := z.window + extra + maxBlock
+		if z.hasSize && z.size < uint64(limit) {
+			limit = int(z.size) + maxBlock
+		}
+		c := max(2*cap(z.hist), need)
+		if c > limit/8 {
+			c = limit
+		}
+		z.out = nil // no retiene el array viejo
 		h := make([]byte, len(z.hist), max(c, need))
 		copy(h, z.hist)
 		z.hist = h

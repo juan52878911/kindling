@@ -183,6 +183,17 @@ const parallel = 4
 // respecto a MaxBytes: lo mismo que deja el constructor oci al aplanado.
 const maxUnpackRatio = 8
 
+// zstdParallel es cuántas capas zstd se descomprimen a la vez. Cada una
+// guarda su historia, ~230 MiB de RSS con la ventana más grande (una de gzip,
+// 32 KiB): con tantas como núcleos, una imagen de capas con ventanas de 128
+// MiB pediría varios GiB en un host grande.
+const zstdParallel = 2
+
+// unpackHook, si no es nil, se llama al empezar a descomprimir cada capa
+// (con los turnos ya cogidos) y lo que devuelve, al acabar. Es para las
+// pruebas.
+var unpackHook func(zstd bool) func()
+
 func (c *Client) client() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
@@ -351,7 +362,8 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 }
 
 // layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
-// descomprime según van llegando (tantas a la vez como núcleos). Cada una se
+// descomprime según van llegando (tantas a la vez como núcleos, y de las zstd,
+// zstdParallel). Cada una se
 // descomprime solo después de verificar su sha256. El primer error para las
 // demás.
 func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor) ([]Layer, error) {
@@ -380,6 +392,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 	}
 	out := make([]Layer, len(ds))
 	dl, cpu := make(chan struct{}, parallel), make(chan struct{}, runtime.NumCPU())
+	zs := make(chan struct{}, zstdParallel)
 	var wg sync.WaitGroup
 	var once sync.Once
 	var first error
@@ -406,14 +419,29 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 			}
 			l := Layer{Descriptor: d, Path: f.path}
 			if c.Unpack != "" && compressed(d.MediaType) {
-				select {
-				case cpu <- struct{}{}:
-				case <-ctx.Done():
+				// Las zstd cogen además uno de los pocos turnos de zstd, antes
+				// que el de CPU para no tenerlo parado mientras esperan.
+				zst := isZstd(f.path)
+				if zst && !acquire(ctx, zs) {
 					return
+				}
+				if !acquire(ctx, cpu) {
+					if zst {
+						<-zs
+					}
+					return
+				}
+				done := func() {}
+				if unpackHook != nil {
+					done = unpackHook(zst)
 				}
 				tar := filepath.Join(c.Unpack, fmt.Sprintf("layer-%d.tar", i))
 				err := unpack(ctx, l, tar, budget, c.MaxBytes*maxUnpackRatio)
+				done()
 				<-cpu
+				if zst {
+					<-zs
+				}
 				if err != nil {
 					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
 					return
@@ -431,6 +459,16 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 		return nil, first
 	}
 	return out, nil
+}
+
+// acquire coge un turno de sem, o devuelve false si se cancela ctx.
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // unpack deja la capa l (ya verificada) descomprimida en dst. El CRC32 del

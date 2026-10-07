@@ -222,14 +222,18 @@ zstd es de kindling (`internal/zstd`, Go sin dependencias, RFC 8878): lee
 varios marcos seguidos, comprueba el xxhash64 si el marco lo trae y no admite
 diccionarios. Su memoria está acotada por la ventana del marco, que no puede
 pasar de 128 MiB (la de `zstd --long`): guarda como mucho la ventana, media
-ventana más un bloque. Medido en el lab (CT 105, i7-8700T, 2026-10-07) con
+ventana más y un bloque (o el tamaño del marco, si es menor), y lo pide de una
+vez cuando pasa de un octavo de eso, no doblando. Una capa de 300 MB con
+`zstd -3 --long=27` se descomprime con 232 MiB de RSS máximo (medido en el
+M4; antes de pedirlo de una vez, 456 MiB). Para que eso no se multiplique por
+los núcleos, de las capas zstd se descomprimen dos a la vez como mucho (las
+gzip, tantas como núcleos; cada una pide 32 KiB). Medido en el lab (CT 105, i7-8700T, 2026-10-07) con
 `postgres:16-alpine` subida a un registro local con sus capas en zstd (la
 grande, 286 MiB, con `-19 --long=27`: ventana de 128 MiB) y otra vez en gzip
 `-6`: se importa en 2,8 s frente a 3,0 s, arranca lista en 2 s, y las dos
 imágenes tienen el mismo árbol (solo cambian la referencia y el digest de
 `/etc/kindling`). Esa capa se descomprime a 215 MB/s, frente a 116 MB/s de
-`compress/gzip` y 160 MB/s de `gzip -d`; pide ~200 MiB de historia por la
-ventana.
+`compress/gzip` y 160 MB/s de `gzip -d`.
 
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen

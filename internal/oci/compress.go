@@ -24,6 +24,20 @@ type layerFile struct {
 
 func (l *layerFile) Close() error { return l.f.Close() }
 
+const zstdMagic = "\x28\xb5\x2f\xfd"
+
+// isZstd dice si el fichero empieza como un marco zstd.
+func isZstd(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var m [4]byte
+	_, err = io.ReadFull(f, m[:])
+	return err == nil && string(m[:]) == zstdMagic
+}
+
 // decompress abre una capa comprimida con gzip o zstd. Lo deciden los
 // primeros bytes, no el media type: hay herramientas que suben capas zstd
 // etiquetadas como gzip.
@@ -35,7 +49,7 @@ func decompress(f *os.File) (io.ReadCloser, error) {
 	switch {
 	case len(m) == 4 && m[0] == 0x1f && m[1] == 0x8b:
 		r, err = gzip.NewReader(br)
-	case string(m) == "\x28\xb5\x2f\xfd":
+	case string(m) == zstdMagic:
 		r = zstd.NewReader(br)
 	default:
 		err = errors.New("compressed layer is neither gzip nor zstd")
