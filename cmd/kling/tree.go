@@ -246,6 +246,9 @@ var coreTree = []section{
                                                    the mark
   machine ready <ref> [-wait 1m] [-json]           ready by its image's probe
                                                    (/etc/kindling/ready) and hooks?
+                                                   An agent that does not answer is "waiting"; on
+                                                   a host without debugfs, only for the first 30 s
+                                                   after starting or restoring if it never answered
   machine hooks <ref> [-wait 1m] [-json]           runs its post-restore hooks again
                                                    (/etc/kindling/post-restore.d)
   machine credential <ref> -domain D -env VAR      hands an API key to the credential

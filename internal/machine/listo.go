@@ -253,6 +253,12 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 				// (una imagen sin agente): lo de siempre.
 				if decl, seguro := m.declaraListo(ctx, mc.ID); errors.Is(err, errListoConexion) && seguro && !decl {
 					return res, nil
+				} else if errors.Is(err, errListoConexion) && !seguro && m.sinAgenteTrasGracia(mc.ID) {
+					// Sin poder mirar la imagen (sin debugfs), la misma gracia
+					// que el commit (GraciaAgente): un agente que no ha
+					// contestado nunca en graciaAgenteMin desde que arrancó es
+					// una imagen sin agente, no un invitado arrancando.
+					return res, nil
 				}
 				res.Ready, res.Detail = api.ReadyWaiting, err.Error()
 				return res, nil
@@ -392,6 +398,16 @@ func graciaAgente(plazo time.Duration) time.Duration {
 		plazo = DefaultReadyWait
 	}
 	return max(graciaAgenteMin, plazo*3/4)
+}
+
+// sinAgenteTrasGracia dice si la máquina id lleva más de graciaAgenteMin en
+// marcha (desde su arranque o su última restauración) sin que su agente haya
+// contestado nunca (conocerAgente no le ha visto ninguno).
+func (m *Manager) sinAgenteTrasGracia(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	mc := m.byID[id]
+	return mc != nil && mc.Agent == nil && mc.StartedAt != nil && time.Since(*mc.StartedAt) > graciaAgenteMin
 }
 
 // declaraListo dice si la máquina ref tiene sonda o ganchos que esperar antes

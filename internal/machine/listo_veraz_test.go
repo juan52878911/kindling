@@ -385,3 +385,31 @@ func TestGanchosPendientesSobrevivenAlReinicio(t *testing.T) {
 		t.Errorf("HooksPending tras lanzarla = %q", mc.HooksPending)
 	}
 }
+
+// GET /machines/{ref}/ready sin poder mirar la imagen (sin debugfs): durante
+// la gracia, un agente que no contesta es "waiting"; pasada la gracia sin
+// que haya contestado nunca, es una imagen sin agente (como el commit con
+// GraciaAgente). Si alguna vez contestó, sigue siendo "waiting".
+func TestWaitReadyUnaVezSinDebugfsTrasLaGracia(t *testing.T) {
+	antes := graciaAgenteMin
+	graciaAgenteMin = 200 * time.Millisecond
+	t.Cleanup(func() { graciaAgenteMin = antes })
+	capturarLog(t)
+	m := &Manager{byID: map[string]*api.Machine{}}
+	id := "abcdef0123456789"
+	ahora := time.Now()
+	m.byID[id] = &api.Machine{ID: id, Name: "x", State: api.StateRunning, Image: "img", StartedAt: &ahora,
+		Forwards: map[string]string{"8080": "127.0.0.1:1"}}
+	if res, err := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); err != nil || res.OK() {
+		t.Fatalf("recién arrancada, sin agente aún: %+v, %v", res, err)
+	}
+	hace := time.Now().Add(-time.Second)
+	m.byID[id].StartedAt = &hace
+	if res, err := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); err != nil || !res.OK() {
+		t.Fatalf("pasada la gracia sin agente: %+v, %v", res, err)
+	}
+	m.byID[id].Agent = &api.GuestAgent{Agent: "kling-guest", Version: "v9.0.0"}
+	if res, _ := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); res.OK() {
+		t.Fatalf("un agente que contestó y ya no: %+v", res)
+	}
+}
