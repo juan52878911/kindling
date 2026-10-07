@@ -523,3 +523,37 @@ func TestSondearUnKlingAnterior(t *testing.T) {
 		t.Fatalf("%+v %v", ib, err)
 	}
 }
+
+// La vuelta atrás automática devuelve el state.json de la copia aunque el
+// daemon nuevo lo reescribiera sin migrarlo (misma versión, campos nuevos), y
+// no toca las copias de migración que ya estaban antes de actualizar.
+func TestVueltaAtrasDevuelveElEstadoYRespetaLasCopiasViejas(t *testing.T) {
+	m := nuevoMontaje(t)
+	v1 := `{"schema":1,"machines":[{"id":"aaaa","state":"frozen"}]}`
+	os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(v1), 0o600)
+	meta := filepath.Join(m.raiz, "snapshots", "pg", "meta.json")
+	os.MkdirAll(filepath.Dir(meta), 0o700)
+	os.WriteFile(meta, []byte(`{"schema":1,"name":"pg"}`), 0o600)
+	os.WriteFile(meta+".v0.bak", []byte(`{"name":"pg","viejo":true}`), 0o600)
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(`{"schema":1,"machines":[],"nuevo":1}`), 0o600)
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	_, err := Actualizar(context.Background(), m.opciones())
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got := leer(t, filepath.Join(m.raiz, "state.json")); got != v1 {
+		t.Errorf("state.json = %s, want the one from before", got)
+	}
+	if got := leer(t, meta); got != `{"schema":1,"name":"pg"}` {
+		t.Errorf("an old migration copy was restored over meta.json: %s", got)
+	}
+	if _, err := os.Stat(meta + ".v0.bak"); err != nil {
+		t.Error("an old migration copy was consumed")
+	}
+}

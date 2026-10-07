@@ -61,6 +61,7 @@ case "$NAME" in *[!A-Za-z0-9_-]*|"") die "invalid NAME";; esac
 [ -e "$BASE" ] && die "$BASE already exists: another run? remove it or pick NAME"
 command -v python3 >/dev/null || die "python3 missing"
 
+# (El daemon dice su versión sin la "v": se compara sin ella.)
 # El CLI viejo para crear estado y el nuevo para actualizar (el viejo no tiene
 # upgrade), los dos contra el socket del daemon privado y nunca contra el del
 # sistema.
@@ -117,7 +118,7 @@ systemctl daemon-reload
 systemctl start "$NAME" || die "systemctl start $NAME failed"
 for _ in $(seq 1 40); do k ps >/dev/null 2>&1 && break; sleep 0.5; done
 v=$(k version 2>&1 | sed -n 2p)
-contiene "$v" "$OLD_TAG" && ok "daemon $OLD_TAG answers" || bad "old daemon" "$OLD_TAG" "$v"
+contiene "$v" "${OLD_TAG#v}" && ok "daemon $OLD_TAG answers" || bad "old daemon" "$OLD_TAG" "$v"
 
 # ── 1. estado hecho por la versión anterior ──────────────────────────────────
 step "1. State made by $OLD_TAG"
@@ -165,7 +166,7 @@ out=$(kn upgrade -unit "$NAME" -from-dir "$ROTO" -timeout 15s 2>&1); rc=$?
 [ $rc != 0 ] && contiene "$out" "rolled back" && ok "upgrade refused and rolled back" \
   || bad "broken upgrade" "an error and a rollback" "rc=$rc: $out"
 v=$(k version 2>&1 | sed -n 2p)
-contiene "$v" "$OLD_TAG" && ok "$OLD_TAG answers again" || bad "after rollback" "$OLD_TAG" "$v"
+contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after rollback" "$OLD_TAG" "$v"
 cmp -s "$BIN/kling" "$OLDK" && ok "old binary back in place" || bad "binary" "the old one" "something else"
 st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" || bad "frozen after rollback" frozen "$st"
 
@@ -179,7 +180,7 @@ out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" 2>&1); rc=$?
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "kling upgrade in ${ms} ms" || bad "upgrade" "upgraded" "rc=$rc: $out"
 v=$(kn version 2>&1 | sed -n 2p)
-contiene "$v" "$NEWV" && ok "daemon answers as $NEWV" || bad "new daemon" "$NEWV" "$v"
+contiene "$v" "${NEWV#v}" && ok "daemon answers as $NEWV" || bad "new daemon" "$NEWV" "$v"
 cmp -s "$BIN/kling" "$NEWK" && ok "$BIN/kling replaced" || bad "binary" "the new one" "something else"
 [ -f "$LIB/kling-guest" ] && { cmp -s "$LIB/kling-guest" "$OLD_DIR/kling-guest" && bad "kling-guest" "replaced" "the old one" || ok "kling-guest replaced"; }
 schema=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('schema'))" "$ROOT/state.json" 2>&1)
@@ -212,7 +213,7 @@ step "5. kling upgrade -rollback"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "rolled back to $OLD_TAG" && ok "rollback" || bad "rollback" "rolled back to $OLD_TAG" "rc=$rc: $out"
 v=$(k version 2>&1 | sed -n 2p)
-contiene "$v" "$OLD_TAG" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
+contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
 schema=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('schema',0) if isinstance(d,dict) else 0)" "$ROOT/state.json")
 [ "$schema" = 0 ] && ok "state.json back to schema 0" || bad "state.json after -rollback" "schema 0" "$schema"
 [ ! -e "$ROOT/state.json.v0.bak" ] && ok "migration copy consumed" || bad "v0.bak" "gone" "still there"
