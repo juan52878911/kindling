@@ -46,6 +46,9 @@ type Registry struct {
 	// BlobRedirect, si no está vacío, es la URL base (un CDN) a la que se
 	// redirigen las peticiones de blobs, como Docker Hub o ghcr.io.
 	BlobRedirect string
+	// LayerType, si no está vacío, es el media type de todas las capas de
+	// Image; si no, tar+gzip o tar+zstd según sus primeros bytes.
+	LayerType string
 }
 
 // New arranca el registro.
@@ -177,7 +180,36 @@ type File struct {
 func TarGz(files []File) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
+	zw.Write(Tar(files))
+	zw.Close()
+	return buf.Bytes()
+}
+
+// Zstd envuelve b en un marco zstd de bloques sin comprimir (raw): basta
+// para probar el camino de las capas zstd; la descompresión de verdad la
+// prueba internal/zstd con la herramienta zstd.
+func Zstd(b []byte) []byte {
+	out := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00} // ventana de 1 KiB
+	for {
+		n := min(len(b), 1024)
+		last := 0
+		if n == len(b) {
+			last = 1
+		}
+		h := n<<3 | last // tipo 0: raw
+		out = append(out, byte(h), byte(h>>8), byte(h>>16))
+		out = append(out, b[:n]...)
+		b = b[n:]
+		if last == 1 {
+			return out
+		}
+	}
+}
+
+// Tar arma una capa .tar sin comprimir.
+func Tar(files []File) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
 	for _, f := range files {
 		h := &tar.Header{Name: f.Name, Mode: f.Mode, Uid: f.Uid, ModTime: f.ModTime, Format: tar.FormatPAX}
 		if h.ModTime.IsZero() {
@@ -204,7 +236,6 @@ func TarGz(files []File) []byte {
 		tw.Write([]byte(f.Body))
 	}
 	tw.Close()
-	zw.Close()
 	return buf.Bytes()
 }
 
@@ -222,8 +253,14 @@ func (r *Registry) ImageConfig(arch string, config map[string]any, layers ...[]b
 	cd := r.Put(cfg, "")
 	var ls []map[string]any
 	for _, l := range layers {
-		ls = append(ls, map[string]any{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-			"digest": r.Put(l, ""), "size": len(l)})
+		mt := "application/vnd.oci.image.layer.v1.tar+gzip"
+		if bytes.HasPrefix(l, []byte{0x28, 0xB5, 0x2F, 0xFD}) {
+			mt = "application/vnd.oci.image.layer.v1.tar+zstd"
+		}
+		if r.LayerType != "" {
+			mt = r.LayerType
+		}
+		ls = append(ls, map[string]any{"mediaType": mt, "digest": r.Put(l, ""), "size": len(l)})
 	}
 	m, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
 		"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cd, "size": len(cfg)},

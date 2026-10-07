@@ -1282,8 +1282,8 @@ en credenciales de máquina que se atan a cada instancia (`POST
 
 ### 24. El constructor `oci` no corre como root
 
-Importar una imagen de Docker baja de internet y parsea tars hostiles
-(`internal/oci`, `internal/ext4`). Los demás constructores del daemon corren como root;
+Importar una imagen de Docker baja de internet, descomprime y parsea tars hostiles
+(`internal/oci`, `internal/zstd`, `internal/ext4`). Los demás constructores del daemon corren como root;
 `oci` no lo necesita, así que en Linux corre con un usuario propio (`-build-as`,
 `KLING_BUILD_AS`, por defecto `kindling-build`). Medido en el lab importando
 `postgres:17-alpine`:
@@ -1310,6 +1310,13 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
 - **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
   antes de usarlo; un constructor comprometido no envenena los imports siguientes.
+- **El descompresor de zstd es propio y acotado** (Go sin dependencias): la ventana de un
+  marco no pasa de 128 MiB, la historia que guarda, de esa ventana más la mitad (o 1 MiB):
+  una capa de `--long=27` se descomprime con ~232 MiB de RSS, y de las zstd se descomprimen dos
+  a la vez como mucho, así que el total no crece con los núcleos del host. Una entrada mala
+  es un error, no un pánico ni un bucle (lo prueban un fuzz y un caso hecho a mano por cada
+  comprobación). Lo descomprimido
+  de todas las capas tiene el mismo tope que con gzip, 8 veces `max_mb`.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en

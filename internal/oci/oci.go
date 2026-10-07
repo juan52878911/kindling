@@ -155,11 +155,11 @@ type Client struct {
 	// tope, una capa sin tamaño declarado no se acepta.
 	MaxBytes int64
 	// Unpack, si no está vacío, es un directorio donde Pull deja además cada
-	// capa gzip descomprimida (Layer.Tar), una vez y en paralelo, para que
-	// quien la recorre dos veces (el árbol y luego los datos del ext4) no
-	// la descomprima dos. Es de quien llama: lo borra él. Con MaxBytes, lo
-	// descomprimido no puede pasar de maxUnpackRatio veces el tope (una
-	// bomba gzip llenaría el disco).
+	// capa comprimida (gzip o zstd) descomprimida (Layer.Tar), una vez y en
+	// paralelo, para que quien la recorre dos veces (el árbol y luego los
+	// datos del ext4) no la descomprima dos. Es de quien llama: lo borra él.
+	// Con MaxBytes, lo descomprimido no puede pasar de maxUnpackRatio veces
+	// el tope (una bomba gzip o zstd llenaría el disco).
 	Unpack string
 	// SiempreRehash: los blobs de la caché se rehashean siempre antes de
 	// usarlos. Para el constructor que corre sin privilegios (ver
@@ -187,6 +187,17 @@ const parallel = 4
 // maxUnpackRatio es cuánto puede crecer una imagen al descomprimirla,
 // respecto a MaxBytes: lo mismo que deja el constructor oci al aplanado.
 const maxUnpackRatio = 8
+
+// zstdParallel es cuántas capas zstd se descomprimen a la vez. Cada una
+// guarda su historia, ~230 MiB de RSS con la ventana más grande (una de gzip,
+// 32 KiB): con tantas como núcleos, una imagen de capas con ventanas de 128
+// MiB pediría varios GiB en un host grande.
+const zstdParallel = 2
+
+// unpackHook, si no es nil, se llama al empezar a descomprimir cada capa
+// (con los turnos ya cogidos) y lo que devuelve, al acabar. Es para las
+// pruebas.
+var unpackHook func(zstd bool) func()
 
 func (c *Client) client() *http.Client {
 	if c.HTTP != nil {
@@ -351,8 +362,8 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		return nil, fmt.Errorf("image %s is %s/%s, not linux/%s", digest, img.Config.OS, img.Config.Architecture, arch)
 	}
 	for _, l := range m.Layers {
-		if !strings.Contains(l.MediaType, "tar") || strings.Contains(l.MediaType, "zstd") {
-			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar and tar+gzip)", l.Digest, l.MediaType)
+		if !strings.Contains(l.MediaType, "tar") {
+			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar, tar+gzip and tar+zstd)", l.Digest, l.MediaType)
 		}
 	}
 	img.Layers, err = c.layers(ctx, registry, repo, m.Layers)
@@ -363,7 +374,8 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 }
 
 // layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
-// descomprime según van llegando (tantas a la vez como núcleos). Cada una se
+// descomprime según van llegando (tantas a la vez como núcleos, y de las zstd,
+// zstdParallel). Cada una se
 // descomprime solo después de verificar su sha256. El primer error para las
 // demás.
 func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor) ([]Layer, error) {
@@ -392,6 +404,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 	}
 	out := make([]Layer, len(ds))
 	dl, cpu := make(chan struct{}, parallel), make(chan struct{}, runtime.NumCPU())
+	zs := make(chan struct{}, zstdParallel)
 	var wg sync.WaitGroup
 	var once sync.Once
 	var first error
@@ -417,15 +430,30 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 				return
 			}
 			l := Layer{Descriptor: d, Path: f.path}
-			if c.Unpack != "" && strings.Contains(d.MediaType, "gzip") {
-				select {
-				case cpu <- struct{}{}:
-				case <-ctx.Done():
+			if c.Unpack != "" && compressed(d.MediaType) {
+				// Las zstd cogen además uno de los pocos turnos de zstd, antes
+				// que el de CPU para no tenerlo parado mientras esperan.
+				zst := isZstd(f.path)
+				if zst && !acquire(ctx, zs) {
 					return
+				}
+				if !acquire(ctx, cpu) {
+					if zst {
+						<-zs
+					}
+					return
+				}
+				done := func() {}
+				if unpackHook != nil {
+					done = unpackHook(zst)
 				}
 				tar := filepath.Join(c.Unpack, fmt.Sprintf("layer-%d.tar", i))
 				err := unpack(ctx, l, tar, budget, c.MaxBytes*maxUnpackRatio)
+				done()
 				<-cpu
+				if zst {
+					<-zs
+				}
 				if err != nil {
 					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
 					return
@@ -445,9 +473,20 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 	return out, nil
 }
 
+// acquire coge un turno de sem, o devuelve false si se cancela ctx.
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // unpack deja la capa l (ya verificada) descomprimida en dst. El CRC32 del
-// gzip, que se comprueba al llegar al final, es una segunda defensa contra
-// una capa dañada en la caché después de verificarla.
+// gzip (o el xxhash64 del zstd, si lo lleva), que se comprueba al llegar al
+// final, es una segunda defensa contra una capa dañada en la caché después
+// de verificarla.
 func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
 	rc, err := OpenLayer(l)
 	if err != nil {
@@ -873,8 +912,8 @@ func splitChallenge(s string) []string {
 	return out
 }
 
-// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip,
-// o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
+// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip o
+// zstd, o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
 // salta con Seek los datos que no se leen.
 func OpenLayer(l Layer) (io.ReadCloser, error) {
 	if l.Tar != "" {
@@ -884,8 +923,8 @@ func OpenLayer(l Layer) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(l.MediaType, "gzip") {
+	if !compressed(l.MediaType) {
 		return f, nil
 	}
-	return newGzip(f)
+	return decompress(f)
 }

@@ -202,7 +202,7 @@ descomprime una sola vez, en paralelo y después de comprobar su sha256, a un
 tar en el directorio de trabajo de la construcción: el árbol se arma leyendo
 solo las cabeceras y el ext4 lee los datos de ahí (cada tar se borra en cuanto
 se ha leído). Cuesta en disco, mientras dura, el tamaño descomprimido de las
-capas, con tope de 8 veces `max_mb` (una bomba gzip no llena el disco). Un blob
+capas, con tope de 8 veces `max_mb` (una bomba gzip o zstd no llena el disco). Un blob
 de la caché no se vuelve a hashear en cada import cuando el constructor corre
 como root: solo llega a su ruta con un `rename` después de verificarlo, así
 que estar ahí, con el tamaño del manifiesto, siendo un fichero regular sin
@@ -212,7 +212,28 @@ cambiar también las imágenes y los binarios. Con el usuario de construcción
 (abajo) la caché es suya, y lo cacheado se rehashea **siempre**: un
 constructor comprometido por una imagen no puede envenenar los imports
 siguientes cambiando o renombrando un blob. Una capa dañada después en disco la caza además el
-CRC32 del gzip al descomprimirla.
+CRC32 del gzip (o el xxhash64 del zstd, si lo lleva) al descomprimirla.
+
+**Capas gzip y zstd.** Las capas `tar+gzip` y `tar+zstd` (las de `docker
+buildx --output compression=zstd` y las de muchas imágenes nuevas) se leen
+igual; cuál es lo deciden sus primeros bytes, no el media type, porque hay
+herramientas que suben capas zstd etiquetadas como gzip. El descompresor de
+zstd es de kindling (`internal/zstd`, Go sin dependencias, RFC 8878): lee
+varios marcos seguidos, comprueba el xxhash64 si el marco lo trae y no admite
+diccionarios. Su memoria está acotada por la ventana del marco, que no puede
+pasar de 128 MiB (la de `zstd --long`): guarda como mucho la ventana, media
+ventana más y un bloque (o el tamaño del marco, si es menor), y lo pide de una
+vez cuando pasa de un octavo de eso, no doblando. Una capa de 300 MB con
+`zstd -3 --long=27` se descomprime con 232 MiB de RSS máximo (medido en el
+M4; antes de pedirlo de una vez, 456 MiB). Para que eso no se multiplique por
+los núcleos, de las capas zstd se descomprimen dos a la vez como mucho (las
+gzip, tantas como núcleos; cada una pide 32 KiB). Medido en el lab (CT 105, i7-8700T, 2026-10-07) con
+`postgres:16-alpine` subida a un registro local con sus capas en zstd (la
+grande, 286 MiB, con `-19 --long=27`: ventana de 128 MiB) y otra vez en gzip
+`-6`: se importa en 2,8 s frente a 3,0 s, arranca lista en 2 s, y las dos
+imágenes tienen el mismo árbol (solo cambian la referencia y el digest de
+`/etc/kindling`). Esa capa se descomprime a 215 MB/s, frente a 116 MB/s de
+`compress/gzip` y 160 MB/s de `gzip -d`.
 
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
@@ -445,7 +466,9 @@ prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
   en Docker; si ese usuario no existe en la imagen, la máquina no llega a lista.
 - **El constructor `oci` corre como root si no hay usuario de construcción**:
   ver abajo.
-- **Sin zstd**: solo capas `tar` y `tar+gzip`.
+- **zstd con ventana de hasta 128 MiB**: una capa de `zstd --long=28` o más
+  se rechaza con un error que lo dice; las de los niveles normales (hasta
+  `--ultra -22`) y `--long` caben. Sin diccionarios.
 - **No cambia la licencia**: convertir una imagen no la redistribuye, pero
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
   de datos gestionada). No publiques imágenes convertidas.
