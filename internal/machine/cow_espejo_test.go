@@ -176,7 +176,7 @@ func TestEspejarMemoriaDoradoEnSegundoPlano(t *testing.T) {
 
 func espejosHechos(t *testing.T, root, snap string) []string {
 	t.Helper()
-	m, _ := filepath.Glob(filepath.Join(root, "cow", "bases", snap, "[!.]*"+sufijoBaseMemoria))
+	m, _ := filepath.Glob(filepath.Join(root, "cow", "bases", snap, "[^.]*"+sufijoBaseMemoria))
 	return m
 }
 
