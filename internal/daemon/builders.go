@@ -258,9 +258,11 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 				return
 			}
 			if manifiesto != "" {
-				s.muCacheOCI.Lock()
+				// Como quien la usa (RLock): que no la barra nadie mientras
+				// tanto, sin esperar a otra construcción que también la lee.
+				s.muCacheOCI.RLock()
 				err := enlazarArchivo(s.root, verificada, deOrigen, manifiesto, u.GID, time.Now())
-				s.muCacheOCI.Unlock()
+				s.muCacheOCI.RUnlock()
 				if err != nil {
 					fail(w, http.StatusInternalServerError, fmt.Errorf("archive blobs: %w", err))
 					return
