@@ -160,6 +160,14 @@ func (a *almacenCoW) espejarMemoria(ctx context.Context, snap, src string) (hech
 	if !a.montado {
 		return false, nil
 	}
+	// Por adelantado solo si sobra sitio: un dorado del que nunca se congela
+	// ninguna copia en diferencial no necesita espejo, y con varios dorados
+	// los espejos le quitarían el almacén a las instancias. Si después del
+	// espejo quedaría menos de la mitad libre, se deja al primer thaw que lo
+	// necesite (el camino perezoso de memoriaInstancia).
+	if total, libre, err := a.libreDentro(); err == nil && total > 0 && libre-allocatedBytes(src) < total/2 {
+		return false, nil
+	}
 	if _, err := a.baseMemoria(ctx, snap, src, nil); err != nil {
 		return false, err
 	}

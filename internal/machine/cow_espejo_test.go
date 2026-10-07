@@ -273,3 +273,24 @@ func TestNotaFasesConEspejo(t *testing.T) {
 		}
 	}
 }
+
+// El espejo por adelantado no se hace si dejaría el almacén por debajo de la
+// mitad libre: lo hará, si hace falta, el primer thaw de una copia.
+func TestEspejoPorAdelantadoSoloConSitio(t *testing.T) {
+	root := t.TempDir()
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, root, f)
+	src := escribirMemoriaDorada(t, root, "justo", paginaDe('A'))
+	montarAlmacen(t, a)
+	a.libreAlmacen = func(string) (int64, int64, error) { return 1 << 30, 400 << 20, nil }
+	if hecho, err := a.espejarMemoria(context.Background(), "justo", src); err != nil || hecho {
+		t.Fatalf("con el almacén por debajo de la mitad libre: hecho=%v err=%v; quería que lo dejara para el thaw", hecho, err)
+	}
+	if n := f.copias.Load(); n != 0 {
+		t.Fatalf("copió %d veces sin sitio", n)
+	}
+	a.libreAlmacen = func(string) (int64, int64, error) { return 1 << 30, 900 << 20, nil }
+	if hecho, err := a.espejarMemoria(context.Background(), "justo", src); err != nil || !hecho {
+		t.Fatalf("con sitio de sobra: hecho=%v err=%v", hecho, err)
+	}
+}
