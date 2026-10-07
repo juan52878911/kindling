@@ -78,7 +78,7 @@ state.json api.WakePhases total_ms float64
 state.json api.WakePhases wait_ms float64
 meta.json api.Snapshot allow_domains []string
 meta.json api.Snapshot allow_exec bool
-meta.json api.Snapshot annotations map[string]jsontext.Value
+meta.json api.Snapshot annotations map[string]json.RawMessage
 meta.json api.Snapshot cpu_pct int
 meta.json api.Snapshot cpu_pct_fixed bool
 meta.json api.Snapshot created_at time.Time

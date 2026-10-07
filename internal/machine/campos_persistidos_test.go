@@ -95,7 +95,7 @@ func camposDe(fichero string, t reflect.Type, vistos map[reflect.Type]bool, out 
 			if nombre == "" {
 				nombre = f.Name
 			}
-			*out = append(*out, fmt.Sprintf("%s %s %s %s", fichero, t.String(), nombre, f.Type.String()))
+			*out = append(*out, fmt.Sprintf("%s %s %s %s", fichero, t.String(), nombre, tipoPersistido(f.Type)))
 			hijos = append(hijos, f.Type)
 		}
 	}
@@ -103,6 +103,32 @@ func camposDe(fichero string, t reflect.Type, vistos map[reflect.Type]bool, out 
 	for _, h := range hijos {
 		camposDe(fichero, h, vistos, out)
 	}
+}
+
+// tipoRaw es json.RawMessage, que desde Go 1.25 con jsonv2 es un alias de
+// jsontext.Value: su String() depende del toolchain y la lista no puede.
+var tipoRaw = reflect.TypeOf(json.RawMessage(nil))
+
+// tipoPersistido describe t igual en cualquier versión de Go: como
+// t.String(), pero con json.RawMessage siempre con ese nombre.
+func tipoPersistido(t reflect.Type) string {
+	if t == tipoRaw {
+		return "json.RawMessage"
+	}
+	if t.Name() != "" {
+		return t.String()
+	}
+	switch t.Kind() {
+	case reflect.Pointer:
+		return "*" + tipoPersistido(t.Elem())
+	case reflect.Slice:
+		return "[]" + tipoPersistido(t.Elem())
+	case reflect.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), tipoPersistido(t.Elem()))
+	case reflect.Map:
+		return "map[" + tipoPersistido(t.Key()) + "]" + tipoPersistido(t.Elem())
+	}
+	return t.String()
 }
 
 // structDe devuelve el struct del módulo que hay detrás de t, o nil. Los de
@@ -337,5 +363,26 @@ func TestCamposDeSigueAJSON(t *testing.T) {
 	if !reflect.DeepEqual(campos, quiero) {
 		got, _ := json.MarshalIndent(campos, "", "  ")
 		t.Fatalf("campos = %s", got)
+	}
+}
+
+// La lista tiene que salir igual con cualquier Go: con jsonv2 (Go 1.25+ por
+// defecto) json.RawMessage es jsontext.Value, y la CI usa otra versión.
+func TestTipoPersistidoIndependienteDelToolchain(t *testing.T) {
+	casos := map[reflect.Type]string{
+		reflect.TypeOf(json.RawMessage(nil)):         "json.RawMessage",
+		reflect.TypeOf(map[string]json.RawMessage{}): "map[string]json.RawMessage",
+		reflect.TypeOf([]*json.RawMessage{}):         "[]*json.RawMessage",
+		reflect.TypeOf([2]json.RawMessage{}):         "[2]json.RawMessage",
+		reflect.TypeOf(map[string][]string{}):        "map[string][]string",
+		reflect.TypeOf((*api.Snapshot)(nil)):         "*api.Snapshot",
+	}
+	for tipo, quiero := range casos {
+		if got := tipoPersistido(tipo); got != quiero {
+			t.Errorf("tipoPersistido(%v) = %q, want %q", tipo, got, quiero)
+		}
+	}
+	if bytes.Contains(listaCampos(), []byte("jsontext")) {
+		t.Errorf("the persisted field list depends on the Go toolchain (jsontext)")
 	}
 }
