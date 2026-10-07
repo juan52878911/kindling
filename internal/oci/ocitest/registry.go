@@ -141,7 +141,15 @@ type File struct {
 func TarGz(files []File) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
+	zw.Write(Tar(files))
+	zw.Close()
+	return buf.Bytes()
+}
+
+// Tar es TarGz sin comprimir: una capa como la de docker save.
+func Tar(files []File) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
 	for _, f := range files {
 		h := &tar.Header{Name: f.Name, Mode: f.Mode, Uid: f.Uid, ModTime: f.ModTime, Format: tar.FormatPAX}
 		if h.ModTime.IsZero() {
@@ -168,7 +176,6 @@ func TarGz(files []File) []byte {
 		tw.Write([]byte(f.Body))
 	}
 	tw.Close()
-	zw.Close()
 	return buf.Bytes()
 }
 

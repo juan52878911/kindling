@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -22,6 +23,10 @@ import (
 //	kling image import postgres:17-alpine
 //	kling image import docker.io/timescale/timescaledb:latest-pg16 -name tsdb -env-file pg.env
 //	kling image import redis:7 -json -- redis-server --save ""
+//	kling image import -archive postgres.tar       (docker save, o un layout OCI)
+//
+// Con -archive la imagen sale de un fichero de esta máquina y no de un
+// registro: ver images_import_archive.go.
 //
 // Las variables -e KEY=valor van en la línea de órdenes (cualquiera las ve
 // en /proc/<pid>/cmdline): para una contraseña, -e KEY (del entorno) o
@@ -43,16 +48,32 @@ func imagesImport(args []string) error {
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
+	archive := fs.String("archive", "", "import from a docker save tar or an OCI layout (tar or directory) on this machine, not from a registry")
+	pick := fs.String("image", "", "with -archive: which image of the archive (repo:tag or digest), if it has several")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) == 0 || rest[0] == "--" {
-		return fmt.Errorf("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]")
+	if *archive != "" {
+		// Sin referencia: la imagen sale del archivo. Lo de después de --
+		// sigue siendo el comando.
+		if len(rest) > 0 && rest[0] != "--" {
+			return fmt.Errorf("with -archive there is no <ref>; pick an image of the archive with -image %s", rest[0])
+		}
+		rest = append([]string{""}, rest...)
+	} else if *pick != "" {
+		return fmt.Errorf("-image only goes with -archive")
 	}
-	ref, err := oci.ParseImageRef(rest[0])
-	if err != nil {
-		return err
+	if len(rest) == 0 || rest[0] == "--" {
+		return fmt.Errorf("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]\n" +
+			"       kling image import -archive <file.tar|dir> [-image repo:tag] [...]")
+	}
+	var ref oci.ImageRef
+	var err error
+	if *archive == "" {
+		if ref, err = oci.ParseImageRef(rest[0]); err != nil {
+			return err
+		}
 	}
 	env, err := ef.resolve()
 	if err != nil {
@@ -87,15 +108,33 @@ func imagesImport(args []string) error {
 			return fmt.Errorf("invalid environment entry %q: use KEY=value, one line", k)
 		}
 	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	shown := ref.String()
+	var arc *archivoImport
+	if *archive != "" {
+		if arc, err = abrirArchivoImport(ctx, c, *archive, *pick, *arch, *maxSize); err != nil {
+			return err
+		}
+		defer arc.a.Close()
+		// La receta: "archive", el nombre que traía y el digest del
+		// manifiesto. La ruta del fichero no sale de esta máquina.
+		spec.Ref, spec.Digest, spec.Source, spec.Arch = arc.img.Ref, arc.img.ManifestDigest, ociSourceArchive, arc.arch
+		shown = "the archive"
+		if arc.img.Ref != "" {
+			shown += " (" + arc.img.Ref + ")"
+		}
+		if *name == "" {
+			*name = nombreArchivo(arc.img)
+		}
+	}
 	if *name == "" {
 		*name = imageNameFor(ref)
 	}
 	sb, _ := json.Marshal(spec)
 	req := api.BuildImageRequest{Name: *name, Builder: "oci", Spec: sb}
 
-	ctx, stop := ctxWithSignals()
-	defer stop()
-	c := api.NewClient(hostOf(*host))
 	// El nombre por defecto sale solo del repositorio y la etiqueta: redis:7
 	// y ghcr.io/x/redis:7 dan los dos redis-7. Sin -replace no se pisa una
 	// imagen que no sea esta misma importación.
@@ -107,7 +146,22 @@ func imagesImport(args []string) error {
 		}
 	}
 	if !already {
-		if !*asJSON {
+		if arc != nil {
+			var log io.Writer = os.Stdout
+			if *asJSON {
+				log = nil
+			}
+			if log != nil {
+				fmt.Printf("importing %s as %s: %s, %d MiB of layers\n", shown, *name, arc.img.Format, arc.img.LayerBytes>>20)
+			}
+			n, bytes, err := arc.subir(ctx, c, log)
+			if err != nil {
+				return err
+			}
+			if log != nil {
+				fmt.Printf("  %d blob(s) uploaded (%d MiB); building...\n", n, bytes>>20)
+			}
+		} else if !*asJSON {
 			fmt.Printf("importing %s as %s (the first time downloads it)...\n", ref, *name)
 		}
 		res, err := c.BuildImage(ctx, req)
@@ -144,7 +198,7 @@ func imagesImport(args []string) error {
 		if in, err := c.Info(ctx); err == nil {
 			dmn = in.Version
 		}
-		fmt.Println(alreadyImportedLine(*name, ref.String(), rec.KlingVer, dmn))
+		fmt.Println(alreadyImportedLine(*name, shown, rec.KlingVer, dmn))
 	}
 	fmt.Print(output)
 	fmt.Printf("image %s: %s\n", *name, built.Digest)
@@ -205,12 +259,18 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 		return false, fmt.Errorf("image %s already exists and wasn't imported from a Docker image; "+
 			"pick another -name, or pass -replace to overwrite it", name)
 	}
-	pr, perr := oci.ParseImageRef(prev.Ref)
-	nr, nerr := oci.ParseImageRef(spec.Ref)
-	if perr != nil || nerr != nil || pr.String() != nr.String() || prev.Digest != spec.Digest {
+	pr, perr := ociSpecRef(prev)
+	nr, nerr := ociSpecRef(spec)
+	if perr != nil || nerr != nil || pr.String() != nr.String() || prev.Digest != spec.Digest || prev.Source != spec.Source {
 		from := prev.Ref
 		if perr == nil {
 			from = pr.String()
+		}
+		if prev.Source == ociSourceArchive {
+			from = "an archive"
+			if prev.Ref != "" {
+				from += " (" + prev.Ref + ")"
+			}
 		}
 		return false, fmt.Errorf("image %s already exists, imported from %s; pick another -name, or pass -replace to overwrite it", name, from)
 	}

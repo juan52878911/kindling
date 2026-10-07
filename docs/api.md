@@ -42,6 +42,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `machine-env` | sin publicar | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
 | `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso; tiene que caber en el disco libre del host, `503` si no, y `KLING_MAX_DISK_MIB` baja el máximo); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
 | `start` | sin publicar | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
+| `oci-blobs` | sin publicar | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -120,6 +121,8 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `DELETE /images/{name}` | la borra si nada la usa |
 | `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
 | `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto, también si la está leyendo un arranque en vuelo (vuelve a intentarlo) |
+| `GET /oci/blobs/{digest}` | `{digest, size}` si el blob (`sha256:<64 hex>`) ya está en la caché de blobs OCI del daemon (`$KLING_ROOT/cache/oci`), `404` si no. No lo sirve: es para no volver a subirlo |
+| `PUT /oci/blobs/{digest}` | recibe un blob en flujo (con `Content-Length` obligatorio, `411` sin él; hasta 16 GiB) y lo deja en esa caché solo si su sha256 es el del digest (`400` si no, sin dejar nada): temporal, fsync y renombrado atómico. `201` si lo escribe, `200` con `unchanged` si ya estaba (sin leer el cuerpo). Lo usa `kling image import -archive`: después, `POST /images` con el constructor `oci` y `{"source": "archive", "digest": <manifiesto>}` construye desde la caché, sin red |
 
 **Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
 (`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
