@@ -13,16 +13,15 @@ import (
 // StateWarm es lo que distingue a kindling de un runtime de contenedores: la
 // máquina está congelada en un snapshot y despierta en decenas de milisegundos.
 // No consume CPU ni RAM mientras está así, solo disco. Desde 0.14 se llama
-// "frozen" —es lo que produce `kling freeze`—; hasta 0.13 era "warm", y ese
-// nombre se sigue leyendo (UnmarshalJSON) de daemons y ficheros anteriores.
+// "frozen" —es lo que produce `kling freeze`—; hasta 0.13 era "warm". Hasta
+// v0.17 ese nombre se seguía leyendo; ya no (docs/actualizar.md §5, PR 11): un
+// state.json que lo lleve se rechaza al arrancar (internal/machine).
 type State string
 
 const (
 	StateCreated State = "created"
 	StateRunning State = "running"
 	StateWarm    State = "frozen"
-	// StateWarmLegacy es cómo llamaban a StateWarm los daemons hasta 0.13.
-	StateWarmLegacy = "warm"
 	// StatePaused: el VMM sigue vivo con el invitado en pausa (sin volcar
 	// nada a disco). Despertarla es solo reanudar: ~1 ms, pero retiene su RAM.
 	// Es el nivel "pausada" del planificador (docs/despertar.md).
@@ -42,21 +41,6 @@ const (
 // al escribir, donde vive su disco, se quedó sin sitio: el daemon la reanuda
 // solo cuando vuelve a haberlo (kling cow grow).
 const HoldStoreFull = "copy-on-write store full"
-
-// UnmarshalJSON acepta el nombre antiguo del estado congelado: un CLI nuevo
-// contra un daemon 0.13, o un daemon nuevo leyendo el estado que guardó el
-// anterior, ven "warm" y lo entienden como "frozen".
-func (s *State) UnmarshalJSON(b []byte) error {
-	var v string
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	if v == StateWarmLegacy {
-		v = string(StateWarm)
-	}
-	*s = State(v)
-	return nil
-}
 
 // Machine es una microVM gestionada por el daemon.
 type Machine struct {

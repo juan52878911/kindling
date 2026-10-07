@@ -105,29 +105,25 @@ func TestAnotacionesPorHTTP(t *testing.T) {
 	}
 }
 
-// El links.json de v0.4 se migra al store al arrancar, sin perder nada, y una
-// segunda migración no pisa lo que ya hay.
-func TestMigracionDeLinks(t *testing.T) {
+// Un links.json de v0.4 ya no se migra: el daemon no arranca y dice cómo
+// pasarlo por v0.17. Si el store ya tiene los enlaces, es un resto y no cuenta.
+func TestLinksDeV04SeRechazan(t *testing.T) {
 	s, h := testServer(t)
 	old := `[{"name":"engram","url":"http://mac:9100/mcp","created_at":"2026-08-01T00:00:00Z"}]`
 	os.WriteFile(filepath.Join(s.root, "links.json"), []byte(old), 0o644)
-	migrateLinks(s.root, s.store)
+	err := comprobarLinksV04(s.root, s.store)
+	if err == nil || !strings.Contains(err.Error(), "kling v0.4") || !strings.Contains(err.Error(), "kling v0.17") {
+		t.Fatalf("err = %v, want the v0.4 refusal with the way out", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(s.root, "links.json")); string(b) != old {
+		t.Fatal("the refusal must leave links.json as it was")
+	}
+	if _, err := New(filepath.Join(t.TempDir(), "s.sock"), s.root, "", "", ""); err == nil || !strings.Contains(err.Error(), "v0.4") {
+		t.Fatalf("New on a v0.4 root: %v", err)
+	}
 
-	if _, err := os.Stat(filepath.Join(s.root, "links.json.migrated")); err != nil {
-		t.Fatal("el original debe quedar como links.json.migrated")
-	}
-	var m map[string]struct {
-		URL string `json:"url"`
-	}
-	json.Unmarshal(call(t, h, "GET", "/store/mcp/links", "").Body.Bytes(), &m)
-	if m["engram"].URL != "http://mac:9100/mcp" {
-		t.Fatalf("links tras migrar: %+v", m)
-	}
 	call(t, h, "PUT", "/store/mcp/links", `{"otro":{"name":"otro","url":"x"}}`)
-	os.WriteFile(filepath.Join(s.root, "links.json"), []byte(old), 0o644)
-	migrateLinks(s.root, s.store)
-	json.Unmarshal(call(t, h, "GET", "/store/mcp/links", "").Body.Bytes(), &m)
-	if _, ok := m["otro"]; !ok {
-		t.Fatalf("la migración repetida pisó el store: %+v", m)
+	if err := comprobarLinksV04(s.root, s.store); err != nil {
+		t.Fatalf("leftover links.json with the store already migrated: %v", err)
 	}
 }

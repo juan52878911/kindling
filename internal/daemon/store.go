@@ -179,49 +179,27 @@ func (s *Server) handleStoreDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---- MIGRACIÓN DE links.json (v0.4)
+// ---- links.json de v0.4
 //
 // Hasta v0.4 los servidores MCP externos enlazados vivían en
-// $KLING_ROOT/links.json, gestionados por el núcleo. Ahora son de kindling-mcp,
-// que los guarda en el store como el documento mcp/links (objeto nombre -> link).
-// La primera vez que arranca un daemon nuevo sobre datos de v0.4 se mueven ahí,
-// sin interpretarlos más allá del nombre, y el original se queda como
-// links.json.migrated. Se puede quitar cuando no queden hosts de v0.4.
+// $KLING_ROOT/links.json; desde v0.5 son de kindling-mcp, en el documento
+// mcp/links del store. Hasta v0.17 el daemon los movía al arrancar. Ya no
+// (docs/actualizar.md §5, PR 11): una raíz con un links.json sin migrar es de
+// v0.4, y el daemon se niega a arrancar diciendo cómo pasarla por v0.17, en
+// vez de seguir sin esos enlaces como si no existieran.
 
-func migrateLinks(root string, st *store) {
-	old := filepath.Join(root, "links.json")
-	b, err := os.ReadFile(old)
-	if err != nil {
-		return
+// comprobarLinksV04 da error si en root hay un links.json de v0.4 que nadie
+// migró al store. Si el store ya tiene mcp/links, el fichero es un resto (v0.17
+// lo dejaba si no podía renombrarlo) y no cuenta.
+func comprobarLinksV04(root string, st *store) error {
+	viejo := filepath.Join(root, "links.json")
+	if _, err := os.Stat(viejo); err != nil {
+		return nil
 	}
 	if _, err := st.get("mcp", "links"); err == nil {
-		return // ya migrado
+		log.Printf("%s: ignored, the links are already in store/mcp/links", viejo)
+		return nil
 	}
-	var list []json.RawMessage
-	if err := json.Unmarshal(b, &list); err != nil {
-		log.Printf("links.json: cannot read it (%v); leaving it where it is", err)
-		return
-	}
-	m := map[string]json.RawMessage{}
-	for _, raw := range list {
-		var named struct {
-			Name string `json:"name"`
-		}
-		if json.Unmarshal(raw, &named) == nil && named.Name != "" {
-			m[named.Name] = raw
-		}
-	}
-	out, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return
-	}
-	if err := st.put("mcp", "links", out); err != nil {
-		log.Printf("links.json: cannot migrate it to the store: %v", err)
-		return
-	}
-	if err := os.Rename(old, old+".migrated"); err != nil {
-		log.Printf("links.json migrated to store/mcp/links, but it could not be renamed: %v", err)
-		return
-	}
-	log.Printf("links.json migrated to store/mcp/links (%d link(s)); original kept as links.json.migrated", len(m))
+	return fmt.Errorf("%s holds MCP links from kling v0.4, which this kling no longer migrates: "+
+		"start kling v0.17 once on %s (it moves them to store/mcp/links), or remove the file if you do not need them", viejo, root)
 }

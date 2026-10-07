@@ -103,41 +103,31 @@ func TestAnotacionesConcurrentesNoSePierden(t *testing.T) {
 	}
 }
 
-// Los snapshots de v0.4 no se reescriben al actualizar: su catálogo y su salud
-// tienen que aparecer como anotaciones, que es donde los busca kindling-mcp, y
-// con la forma que kindling-mcp entiende.
-func TestLiftV04(t *testing.T) {
+// Un meta.json de v0.4 (catálogo y salud en campos propios) ya no se eleva a
+// anotaciones: se rechaza diciendo de dónde viene y qué hacer, sin tocarlo.
+// Uno v0 sin esos campos (v0.5 a v0.17) se sigue leyendo.
+func TestMetaV04SeRechaza(t *testing.T) {
 	m := annotTestManager(t)
 	writeSnapMeta(t, m, "eco", metaV04)
 
-	s, err := m.loadSnapshot("eco")
-	if err != nil {
-		t.Fatal(err)
+	_, err := m.loadSnapshot("eco")
+	if err == nil || !strings.Contains(err.Error(), "kling v0.4") || !strings.Contains(err.Error(), "kling save") {
+		t.Fatalf("err = %v, want the v0.4 refusal", err)
 	}
-	var tools struct {
-		Tools      []struct{ Name string } `json:"tools"`
-		CapturedAt string                  `json:"captured_at"`
+	if _, err := m.SetAnnotation("eco", "otra", json.RawMessage(`1`)); err == nil {
+		t.Fatal("annotating a v0.4 meta must fail")
 	}
-	if ok, err := s.Annotation("mcp.tools", &tools); !ok || err != nil || len(tools.Tools) != 1 ||
-		tools.Tools[0].Name != "echo" || tools.CapturedAt == "" {
-		t.Fatalf("mcp.tools mal elevado: ok=%v err=%v %+v", ok, err, tools)
+	if b, _ := os.ReadFile(filepath.Join(m.snapDir("eco"), "meta.json")); string(b) != metaV04 {
+		t.Fatalf("the refusal rewrote the meta: %s", b)
 	}
-	var h struct{ Status, At, Error string }
-	if ok, _ := s.Annotation("mcp.health", &h); !ok || h.Status != "unhealthy" || h.Error != "timeout" || h.At == "" {
-		t.Fatalf("mcp.health mal elevado: %+v", h)
+	for _, s := range m.Snapshots() {
+		if s.Name == "eco" {
+			t.Fatal("a v0.4 golden must not be listed as usable")
+		}
 	}
-	// Leer no escribe; la siguiente anotación deja el meta sin los campos viejos.
-	if _, err := m.SetAnnotation("eco", "otra", json.RawMessage(`1`)); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(m.snapDir("eco"), "meta.json"))
-	if strings.Contains(string(b), `"tools_at"`) || !strings.Contains(string(b), `"mcp.tools"`) {
-		t.Fatalf("tras escribir, el meta debe quedar solo con anotaciones: %s", b)
-	}
-	// Un snapshot de v0.4 que nunca se sondeó no se inventa una salud.
-	writeSnapMeta(t, m, "nuevo", `{"name":"nuevo","image":"x","tools":[]}`)
-	s, _ = m.loadSnapshot("nuevo")
-	if _, ok := s.Annotations["mcp.health"]; ok {
-		t.Fatal("sin salud en v0.4 no hay mcp.health")
+
+	writeSnapMeta(t, m, "v017", `{"name":"v017","image":"x","annotations":{"mcp.tools":{"tools":[]}}}`)
+	if _, err := m.loadSnapshot("v017"); err != nil {
+		t.Fatalf("a v0.17 meta (v0, no v0.4 fields): %v", err)
 	}
 }
