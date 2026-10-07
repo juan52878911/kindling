@@ -641,7 +641,9 @@ func cmdSave(args []string) error {
 	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
 	// de unas decenas de servicios la cuenta puede no salir.
 	warm := fs.Bool("warm", true, "ask the guest agent to start its runtime before freezing, if it supports it (bigger snapshot, much faster first wake)")
-	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve (and to be ready by its image's probe) before committing")
+	// El mismo plazo que el daemon da a commit sin ready_timeout_seconds: con
+	// menos, el CLI recortaba en silencio la espera a la sonda de la imagen.
+	espera := fs.Duration("wait", machine.DefaultReadyWait, "how long to wait for the guest to serve (and to be ready by its image's probe) before saving")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}

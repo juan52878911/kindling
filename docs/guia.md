@@ -402,7 +402,7 @@ $ kling events
 ```
 
 `kling save` **exige que el invitado esté sirviendo** antes de congelar un dorado
-(`-wait`, 60 s por defecto). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
+(`-wait`, 2 min por defecto, como la API). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
 no contesta — minutos u horas después, con un error que no menciona el commit. Si el
 invitado no sirve, commit se niega y explica la cadena entera; `-force` salta la
 comprobación y `-replace` sustituye un snapshot existente de forma atómica.

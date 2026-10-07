@@ -398,7 +398,7 @@ $ kling events
 ```
 
 `kling save` **requires the guest to be serving** before it freezes a golden snapshot
-(`-wait`, 60 s by default). A snapshot taken too early restores in 26 ms and then never
+(`-wait`, 2 min by default, like the API). A snapshot taken too early restores in 26 ms and then never
 answers — minutes or hours later, with an error that does not mention the commit. If the
 guest is not serving, commit refuses and explains the whole chain; `-force` skips the
 check, `-replace` swaps an existing snapshot atomically.
