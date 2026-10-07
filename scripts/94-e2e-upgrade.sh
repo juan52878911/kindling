@@ -71,6 +71,11 @@ NEWK="$NEW_DIR/kling-linux-$ARCH"; [ -x "$NEWK" ] || NEWK="$NEW_DIR/kling"
 OLDK="$BIN/kling.old-cli"   # copia aparte: upgrade cambia $BIN/kling
 k()  { "$OLDK" "$@"; }
 kn() { "$NEWK" "$@"; }
+# Las dos versiones tienen que ser las de verdad: con binarios sin
+# -ldflags "-X main.Version=..." (los dos "dev") upgrade contesta "nothing to
+# do" y todo lo demás falla en cascada.
+NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
+case "$NEWV" in ""|dev|"${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
 
 cleanup() {
   if [ "$KEEP" = 1 ]; then echo; echo "KEEP=1: $BASE and $NAME.service left as they are"; return; fi
@@ -118,7 +123,9 @@ systemctl daemon-reload
 systemctl start "$NAME" || die "systemctl start $NAME failed"
 for _ in $(seq 1 40); do k ps >/dev/null 2>&1 && break; sleep 0.5; done
 v=$(k version 2>&1 | sed -n 2p)
-contiene "$v" "${OLD_TAG#v}" && ok "daemon $OLD_TAG answers" || bad "old daemon" "$OLD_TAG" "$v"
+# Un OLD_DIR sin su versión (ver arriba): parar aquí, no fallar en cascada.
+contiene "$v" "${OLD_TAG#v}" || die "the old daemon says \"$v\", not $OLD_TAG: build OLD_DIR with -ldflags \"-X main.Version=$OLD_TAG\" (or leave OLD_DIR empty to download it)"
+ok "daemon $OLD_TAG answers"
 
 # ── 1. estado hecho por la versión anterior ──────────────────────────────────
 step "1. State made by $OLD_TAG"
@@ -144,7 +151,6 @@ cp "$ROOT/state.json" "$BASE/state.before"
 
 # ── 2. upgrade fallido: el nuevo no arranca y se vuelve solo ─────────────────
 step "2. A new daemon that does not start is rolled back"
-NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
 ROTO="$BASE/roto"; mkdir -p "$ROTO"
 # Dice ser la versión nueva y entender el estado, pero no arranca como daemon.
 cat > "$ROTO/kling" <<EOF

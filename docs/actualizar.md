@@ -450,8 +450,11 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   (tiene que volver sola), la de verdad con `-from-dir` (y su `-dry-run`), que
   la congelada despierte con su marca, que el dorado sirva para `run -from` y
   la parada para `start`, y `-rollback` a N-1 con el `state.json` de antes. La
-  credencial y el enlace de MCP quedan fuera (son de extensiones). En Mac,
-  pendiente.
+  credencial y el enlace de MCP quedan fuera (son de extensiones). Con
+  binarios sin su versión sellada (los dos `dev`) se para al principio y lo
+  dice. En Mac, pendiente: el camino de launchd tiene tests unitarios pero no
+  e2e, así que [`releases.md`](releases.md) lo pide a mano (paso 3b) antes de
+  cada etiqueta.
 
 ---
 
@@ -496,7 +499,7 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 7 | fijaciones de `testdata/` | `internal/machine/testdata/esquema/v0.17/`: `state.json`, `meta.json` y `recipe.json` con todos los campos de v0.17.0 (generados con su `pkg/api`); `fijaciones_v017_test.go` comprueba que se leen, que migran con su `.v0.bak` y que ningún campo se pierde ni cambia, tanto en el fichero reescrito como al leerlo al struct. `credentials.v0.enc` ya estaba (PR 3) | S — **hecho** |
 | 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L — **hecho** (las unidades no se tocan: §3.4) |
 | 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M — **hecho** |
-| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M — **hecho** en Linux (en Mac, pendiente) |
+| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M — **hecho** en Linux (en Mac, a mano: paso 3b de `releases.md`) |
 | 11 | limpieza de v0.4 | quitar `migrateLinks`, `liftV04` y el alias `warm` → `frozen` | S — **hecho** |
 
 Los PR 2–5 son los de "romper ahora": conviene que salgan **en la misma MINOR**
