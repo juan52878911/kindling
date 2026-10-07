@@ -43,15 +43,24 @@ func TestCgroupConTechoDeMemoriaYProcesos(t *testing.T) {
 		root := t.TempDir()
 		m := &Manager{cgroupRoot: root, cgroupMemoria: delegados, cgroupProcesos: delegados}
 		id := "abcdef0123456789"
+		// Como en cgroupfs, memory.swap.max existe si el kernel cuenta el
+		// swap: el daemon lo escribe, nunca lo crea.
+		if err := os.MkdirAll(m.dirCgroup(id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(m.dirCgroup(id), "memory.swap.max"), []byte("max"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		dir, warn := m.crearCgroup(id, 50, 1024)
 		if warn != "" {
 			t.Fatal(warn)
 		}
 		mem, errMem := os.ReadFile(filepath.Join(dir, "memory.max"))
 		pids, errPids := os.ReadFile(filepath.Join(dir, "pids.max"))
+		swap, _ := os.ReadFile(filepath.Join(dir, "memory.swap.max"))
 		if !delegados {
-			if errMem == nil || errPids == nil {
-				t.Errorf("sin controladores delegados no se escribe nada: memory.max=%q pids.max=%q", mem, pids)
+			if errMem == nil || errPids == nil || string(swap) != "max" {
+				t.Errorf("sin controladores delegados no se escribe nada: memory.max=%q pids.max=%q memory.swap.max=%q", mem, pids, swap)
 			}
 			continue
 		}
@@ -59,12 +68,28 @@ func TestCgroupConTechoDeMemoriaYProcesos(t *testing.T) {
 		if string(mem) != quiero {
 			t.Errorf("memory.max=%q, quería %s (RAM + margen del VMM)", mem, quiero)
 		}
+		if string(swap) != quiero {
+			t.Errorf("memory.swap.max=%q, quería %s: memory.max no acota el swap", swap, quiero)
+		}
 		if string(pids) != strconv.Itoa(pidsMaxVMM) {
 			t.Errorf("pids.max=%q", pids)
 		}
 		if cpu, _ := os.ReadFile(filepath.Join(dir, "cpu.max")); string(cpu) != "50000 100000" {
 			t.Errorf("cpu.max=%q", cpu)
 		}
+	}
+}
+
+// Sin contabilidad de swap (no hay memory.swap.max) no se crea el fichero ni
+// falla el cgroup.
+func TestCgroupSinSwapNoLoCrea(t *testing.T) {
+	m := &Manager{cgroupRoot: t.TempDir(), cgroupMemoria: true}
+	dir, warn := m.crearCgroup("abcdef0123456789", 50, 512)
+	if warn != "" {
+		t.Fatal(warn)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "memory.swap.max")); err == nil {
+		t.Error("se creó memory.swap.max")
 	}
 }
 

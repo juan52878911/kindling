@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,15 @@ func (m *Manager) escribirLimitesMemoria(dir string, memMiB int) error {
 			[]byte(strconv.FormatInt(lim, 10)), 0o644); err != nil {
 			return fmt.Errorf("could not set memory.max: %w", err)
 		}
+		// memory.max no cuenta el swap: en un host con swap, un VMM
+		// comprometido pasaría del techo mandando lo demás al swap. El
+		// mismo techo para el swap deja que el host le saque páginas como
+		// a cualquiera bajo presión, pero acotado. Sin contabilidad de
+		// swap en el kernel el fichero no existe y no hay nada que acotar.
+		if err := escribirSiExiste(filepath.Join(dir, "memory.swap.max"),
+			strconv.FormatInt(lim, 10)); err != nil {
+			return fmt.Errorf("could not set memory.swap.max: %w", err)
+		}
 	}
 	if m.cgroupProcesos {
 		if err := os.WriteFile(filepath.Join(dir, "pids.max"),
@@ -112,6 +122,23 @@ func (m *Manager) escribirLimitesMemoria(dir string, memMiB int) error {
 		}
 	}
 	return nil
+}
+
+// escribirSiExiste escribe v en el fichero p solo si ya existe (en cgroupfs,
+// si el controlador lo ofrece): no lo crea.
+func escribirSiExiste(p, v string) error {
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_TRUNC, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(v)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func readFile(p string) string {

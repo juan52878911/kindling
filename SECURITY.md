@@ -163,8 +163,11 @@ backend.
   el propio Firecracker y lo que KVM le cobra) y `pids.max` (128). Medido en el
   laboratorio con un Postgres de 512 MiB: recién arrancado, el cgroup ocupa 183 MiB; con
   el invitado llenando toda su RAM, ~500 MiB de un techo de 608, sin un solo evento
-  `max` ni `oom`, y freeze y thaw siguen igual. Si el host no delega los controladores
-  `memory` o `pids`, queda solo el techo de CPU y el daemon lo avisa al arrancar.
+  `max` ni `oom`, y freeze y thaw siguen igual. `memory.max` no cuenta el swap: en un
+  host con swap, `memory.swap.max` lleva el mismo techo, así que el VMM puede ir al swap
+  bajo presión pero no sin límite (sin contabilidad de swap en el kernel no hay ni swap
+  que acotar por cgroup). Si el host no delega los controladores `memory` o `pids`,
+  queda solo el techo de CPU y el daemon avisa al arrancar de cuál falta.
 - En el gateway, **cuotas por token/tenant**: varios clientes sobre un mismo token se
   reparten la capacidad en vez de matarse de hambre.
 - **Consola serie acotada**: `firecracker.log` rota en el sitio (sin recrear el fichero, el
