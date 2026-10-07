@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,6 +46,8 @@ type releaseFalsa struct {
 	sumas    map[string]string
 	pedidos  []string
 	mu       sync.Mutex
+	// alPedir corre en cada petición: lo que pasa en el host mientras baja.
+	alPedir func(path string)
 }
 
 func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
@@ -52,6 +55,9 @@ func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
 		r.mu.Lock()
 		r.pedidos = append(r.pedidos, req.URL.Path)
 		r.mu.Unlock()
+		if r.alPedir != nil {
+			r.alPedir(req.URL.Path)
+		}
 		pre := "/releases/download/" + r.etiqueta + "/"
 		switch {
 		case req.URL.Path == "/releases/latest":
@@ -93,12 +99,19 @@ type daemonFalso struct {
 	maquinas []*api.Machine
 	dorados  []*api.Snapshot
 	root     string
+	// mudo es una versión que arranca pero nunca contesta; alPreguntar corre
+	// en cada Info, con la versión que corre.
+	mudo        string
+	alPreguntar func(version string)
 }
 
 func (d *daemonFalso) Info(context.Context) (*api.Info, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.caido {
+	if d.alPreguntar != nil {
+		d.alPreguntar(d.version)
+	}
+	if d.caido || (d.mudo != "" && d.version == d.mudo) {
 		return nil, errors.New("connection refused")
 	}
 	return &api.Info{Version: d.version, Root: d.root}, nil
@@ -403,7 +416,7 @@ func TestFalloAlArrancarVuelveAtras(t *testing.T) {
 func TestPerderUnaMaquinaVuelveAtras(t *testing.T) {
 	for nombre, perder := range map[string]func(d *daemonFalso){
 		"congelada que despierta": func(d *daemonFalso) { d.maquinas[0] = &api.Machine{ID: "aaaa", State: api.StateFailed} },
-		"máquina que falta":       func(d *daemonFalso) { d.maquinas = d.maquinas[:1] },
+		"congelada que falta":     func(d *daemonFalso) { d.maquinas = d.maquinas[1:] },
 		"dorado que falta":        func(d *daemonFalso) { d.dorados = nil },
 	} {
 		t.Run(nombre, func(t *testing.T) {
@@ -581,5 +594,180 @@ func TestVueltaAtrasDevuelveElEstadoYRespetaLasCopiasViejas(t *testing.T) {
 	}
 	if _, err := os.Stat(meta + ".v0.bak"); err != nil {
 		t.Error("an old migration copy was consumed")
+	}
+}
+
+// Lo que hace el gateway mientras se actualiza no es una pérdida: una
+// congelada que un cliente despierta en cuanto el daemon nuevo contesta, una
+// máquina de sesión que se borra, y lo que cambie durante la descarga (la
+// foto se toma después).
+func TestLoQueHaceElGatewayNoEsUnaPerdida(t *testing.T) {
+	m := nuevoMontaje(t)
+	m.d.maquinas = append(m.d.maquinas, &api.Machine{ID: "cccc", State: api.StateWarm})
+	m.rel.alPedir = func(path string) {
+		if strings.HasSuffix(path, "SHA256SUMS") { // una sesión acaba y su congelada se borra
+			m.d.mu.Lock()
+			m.d.maquinas = m.d.maquinas[:2]
+			m.d.mu.Unlock()
+		}
+	}
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			m.d.mu.Lock()
+			m.d.maquinas = []*api.Machine{{ID: "aaaa", State: api.StateRunning}}
+			m.d.mu.Unlock()
+		}
+		return nil
+	}
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if leer(t, m.bin) != string(m.nuevo) {
+		t.Error("rolled back for nothing")
+	}
+}
+
+// servicioConCtx es systemd de verdad en lo que importa aquí: sus órdenes van
+// con exec.CommandContext y no corren con un contexto cancelado.
+type servicioConCtx struct{ *servicioFalso }
+
+func (s servicioConCtx) Parar(ctx context.Context) error {
+	if err := exec.CommandContext(ctx, "true").Run(); err != nil {
+		s.llamadas = append(s.llamadas, "stop failed")
+		return err
+	}
+	return s.servicioFalso.Parar(ctx)
+}
+
+func (s servicioConCtx) Arrancar(ctx context.Context) error {
+	if err := exec.CommandContext(ctx, "true").Run(); err != nil {
+		s.llamadas = append(s.llamadas, "start failed")
+		return err
+	}
+	return s.servicioFalso.Arrancar(ctx)
+}
+
+// Un Ctrl-C mientras se espera al daemon nuevo vuelve atrás entera: parar el
+// nuevo, devolver los binarios y arrancar el viejo, aunque el contexto de
+// quien llama ya esté cancelado.
+func TestSeñalDuranteLaVerificacionVuelveAtras(t *testing.T) {
+	m := nuevoMontaje(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.d.mudo = "v1.1.0"
+	m.d.alPreguntar = func(v string) {
+		if v == "v1.1.0" {
+			cancel()
+		}
+	}
+	o := m.opciones()
+	o.Servicio = servicioConCtx{m.svc}
+	_, err := Actualizar(ctx, o)
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo != nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("err = %v, want a clean rollback after the interruption\n%s", err, m.out.String())
+	}
+	if got := strings.Join(m.svc.llamadas, ","); got != "stop,start,stop,start" {
+		t.Errorf("service calls %s, want stop,start,stop,start", got)
+	}
+	if leer(t, m.bin) != string(m.viejo) || m.d.version != "v1.0.0" || m.d.caido {
+		t.Errorf("not back on v1.0.0: daemon %s down=%v", m.d.version, m.d.caido)
+	}
+}
+
+// Un dorado de v0.4 que el kling nuevo ya no lee se dice antes de parar nada,
+// con el mismo mensaje que daría el daemon, y no después como "template is
+// gone". Lo mismo un state.json de v0.13 y un links.json sin migrar.
+func TestEstadoObsoletoNoParaNada(t *testing.T) {
+	for nombre, prep := range map[string]func(m *montaje){
+		"meta.json de v0.4": func(m *montaje) {
+			meta := filepath.Join(m.raiz, "snapshots", "pg", "meta.json")
+			os.MkdirAll(filepath.Dir(meta), 0o700)
+			os.WriteFile(meta, []byte(`{"name":"pg","tools":[{"name":"q"}]}`), 0o600)
+		},
+		"state.json de v0.13": func(m *montaje) {
+			os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(`[{"id":"aaaa","state":"warm"}]`), 0o600)
+		},
+		"links.json de v0.4": func(m *montaje) {
+			os.WriteFile(filepath.Join(m.raiz, "links.json"), []byte(`[]`), 0o600)
+		},
+	} {
+		t.Run(nombre, func(t *testing.T) {
+			m := nuevoMontaje(t)
+			prep(m)
+			_, err := Actualizar(context.Background(), m.opciones())
+			if err == nil || !strings.Contains(err.Error(), "cannot use this daemon's data") || !strings.Contains(err.Error(), "v0.17") {
+				t.Fatalf("err = %v", err)
+			}
+			m.noTocado(t)
+		})
+	}
+	// Un destino anterior a `upgrade -schemas` (v0.17) aún los migra.
+	m := nuevoMontaje(t)
+	m.rel.assets["kling-linux-amd64"] = klingFalso("v1.1.0", "")
+	m.nuevo = m.rel.assets["kling-linux-amd64"]
+	os.WriteFile(filepath.Join(m.raiz, "links.json"), []byte(`[]`), 0o600)
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("to a v0.17-like kling: %v", err)
+	}
+}
+
+// Dos intentos fallidos seguidos no se llevan la copia del último bueno:
+// -rollback sigue volviendo a la versión de antes de él.
+func TestFallosNoBorranLaCopiaBuena(t *testing.T) {
+	m := nuevoMontaje(t)
+	o := m.opciones()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	m.svc.binario = m.bin
+	m.rel.etiqueta = "v1.2.0"
+	m.rel.assets["kling-linux-amd64"] = klingFalso("v1.2.0", esquemasHoy)
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.2.0" {
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	for i := 0; i < 2; i++ {
+		var va *ErrVueltaAtras
+		if _, err := Actualizar(context.Background(), o); !errors.As(err, &va) || va.Fallo != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	if m.d.version != "v1.1.0" {
+		t.Fatalf("daemon at %s after the failed attempts", m.d.version)
+	}
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if m.d.version != "v1.0.0" || leer(t, m.bin) != string(m.viejo) {
+		t.Errorf("-rollback went to %s, want v1.0.0", m.d.version)
+	}
+}
+
+// Una release por https que redirige un asset a http se rechaza: lo que
+// cualquiera en el camino puede cambiar no se baja, venga de donde venga.
+func TestRedireccionAHTTPSeRechaza(t *testing.T) {
+	plano := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("binario cambiado"))
+	}))
+	defer plano.Close()
+	cuerpo := []byte("binario")
+	tls := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
+			fmt.Fprintf(w, "%s  kling-linux-amd64\n", sha(cuerpo))
+		case strings.HasSuffix(r.URL.Path, "/kling-linux-amd64"):
+			http.Redirect(w, r, plano.URL+"/kling-linux-amd64", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer tls.Close()
+	f := &Fuente{Repo: tls.URL, Client: tls.Client()}
+	_, err := f.Bajar(context.Background(), "v1.1.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "only downloaded over https") {
+		t.Fatalf("err = %v, want the https refusal", err)
 	}
 }

@@ -281,8 +281,7 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 		return nil, err
 	}
 	// Antes de cargar nada: una raíz de v0.4 no se abre a medias.
-	st := &store{dir: filepath.Join(root, "store")}
-	if err := comprobarLinksV04(root, st); err != nil {
+	if err := comprobarLinksV04(root); err != nil {
 		lock.Close()
 		return nil, err
 	}
@@ -296,6 +295,7 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 		return nil, err
 	}
 
+	st := &store{dir: filepath.Join(root, "store")}
 	fcVersion := firecrackerVersion(fcBin)
 	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
 	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -181,25 +182,17 @@ func (s *Server) handleStoreDelete(w http.ResponseWriter, r *http.Request) {
 
 // ---- links.json de v0.4
 //
-// Hasta v0.4 los servidores MCP externos enlazados vivían en
-// $KLING_ROOT/links.json; desde v0.5 son de kindling-mcp, en el documento
-// mcp/links del store. Hasta v0.17 el daemon los movía al arrancar. Ya no
-// (docs/actualizar.md §5, PR 11): una raíz con un links.json sin migrar es de
-// v0.4, y el daemon se niega a arrancar diciendo cómo pasarla por v0.17, en
-// vez de seguir sin esos enlaces como si no existieran.
+// La comprobación es machine.LinksV04 (la misma que hace `kling upgrade` antes
+// de parar nada); aquí solo se avisa de un resto que ya no cuenta.
 
-// comprobarLinksV04 da error si en root hay un links.json de v0.4 que nadie
-// migró al store. Si el store ya tiene mcp/links, el fichero es un resto (v0.17
-// lo dejaba si no podía renombrarlo) y no cuenta.
-func comprobarLinksV04(root string, st *store) error {
+// comprobarLinksV04 da error si en root hay un links.json de v0.4 sin migrar.
+func comprobarLinksV04(root string) error {
+	if err := machine.LinksV04(root); err != nil {
+		return err
+	}
 	viejo := filepath.Join(root, "links.json")
-	if _, err := os.Stat(viejo); err != nil {
-		return nil
-	}
-	if _, err := st.get("mcp", "links"); err == nil {
+	if _, err := os.Stat(viejo); err == nil {
 		log.Printf("%s: ignored, the links are already in store/mcp/links", viejo)
-		return nil
 	}
-	return fmt.Errorf("%s holds MCP links from kling v0.4, which this kling no longer migrates: "+
-		"start kling v0.17 once on %s (it moves them to store/mcp/links), or remove the file if you do not need them", viejo, root)
+	return nil
 }

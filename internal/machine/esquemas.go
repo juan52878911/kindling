@@ -114,3 +114,52 @@ func (s Esquemas) Migraciones(disco Esquemas) []string {
 	}
 	return out
 }
+
+// ObsoletosEnDisco lista, con un mensaje por fichero, lo que hay en root de
+// una época cuyas migraciones ya no están (docs/actualizar.md §5, PR 11): un
+// state.json de v0.13 ("warm"), meta.json de v0.4 con los campos de MCP y un
+// links.json de v0.4 sin migrar. Son los mismos mensajes con los que el daemon
+// se niega a arrancar o a listar el dorado; `kling upgrade` los da antes de
+// parar nada. Como EsquemasEnDisco, un fichero que no se puede abrir es un
+// error y uno ilegible no cuenta.
+func ObsoletosEnDisco(root string) ([]string, error) {
+	var out []string
+	if err := comprobarVersionEstado(root); err != nil && !esquema.EsMasNuevo(err) {
+		out = append(out, err.Error())
+	}
+	metas, _ := filepath.Glob(filepath.Join(root, "snapshots", "*", "meta.json"))
+	for _, p := range metas {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		if v, err := esquema.Version(b); err == nil && v == 0 {
+			if err := comprobarMetaV04(p, b); err != nil {
+				out = append(out, err.Error())
+			}
+		}
+	}
+	if err := LinksV04(root); err != nil {
+		out = append(out, err.Error())
+	}
+	return out, nil
+}
+
+// LinksV04 da error si en root hay un links.json de v0.4 que nadie migró al
+// store (root/store/mcp/links.json). Hasta v0.4 los servidores MCP externos
+// enlazados vivían ahí; desde v0.5 son de kindling-mcp, en ese documento, y
+// hasta v0.17 el daemon los movía al arrancar. Ya no: el daemon se niega a
+// arrancar diciendo cómo pasarla por v0.17, en vez de seguir sin esos enlaces.
+// Si el store ya los tiene, el fichero es un resto (v0.17 lo dejaba si no podía
+// renombrarlo) y no cuenta.
+func LinksV04(root string) error {
+	viejo := filepath.Join(root, "links.json")
+	if _, err := os.Stat(viejo); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(root, "store", "mcp", "links.json")); err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s holds MCP links from kling v0.4, which this kling no longer migrates: "+
+		"start kling v0.17 once on %s (it moves them to store/mcp/links), or remove the file if you do not need them", viejo, root)
+}

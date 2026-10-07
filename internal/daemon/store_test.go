@@ -111,7 +111,7 @@ func TestLinksDeV04SeRechazan(t *testing.T) {
 	s, h := testServer(t)
 	old := `[{"name":"engram","url":"http://mac:9100/mcp","created_at":"2026-08-01T00:00:00Z"}]`
 	os.WriteFile(filepath.Join(s.root, "links.json"), []byte(old), 0o644)
-	err := comprobarLinksV04(s.root, s.store)
+	err := comprobarLinksV04(s.root)
 	if err == nil || !strings.Contains(err.Error(), "kling v0.4") || !strings.Contains(err.Error(), "kling v0.17") {
 		t.Fatalf("err = %v, want the v0.4 refusal with the way out", err)
 	}
@@ -123,7 +123,7 @@ func TestLinksDeV04SeRechazan(t *testing.T) {
 	}
 
 	call(t, h, "PUT", "/store/mcp/links", `{"otro":{"name":"otro","url":"x"}}`)
-	if err := comprobarLinksV04(s.root, s.store); err != nil {
+	if err := comprobarLinksV04(s.root); err != nil {
 		t.Fatalf("leftover links.json with the store already migrated: %v", err)
 	}
 }

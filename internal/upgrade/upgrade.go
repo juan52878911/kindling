@@ -136,7 +136,6 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 		o.Fuente = &Fuente{}
 	}
 	res := &Resultado{Desde: o.Actual}
-	var antes *foto
 	if o.Daemon != nil {
 		info, err := o.Daemon.Info(ctx)
 		if err != nil {
@@ -145,9 +144,6 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 		res.Desde = info.Version
 		if o.Raiz == "" {
 			o.Raiz = info.Root
-		}
-		if antes, err = fotografiar(ctx, o.Daemon); err != nil {
-			return nil, err
 		}
 	}
 
@@ -223,7 +219,19 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 		if nuevo.SinEsquemas {
 			soporta.Meta = disco.Meta
 		}
-		if mal := soporta.Incompatibles(disco); len(mal) > 0 {
+		mal := soporta.Incompatibles(disco)
+		// Un kling que sabe `upgrade -schemas` ya no trae las migraciones de
+		// v0.4 ni de v0.13 (salieron en la misma release, §5 PR 11): lo que
+		// solo ellas sabían leer se dice aquí, antes de parar nada, y no
+		// después como "template X is gone".
+		if !nuevo.SinEsquemas {
+			obs, err := machine.ObsoletosEnDisco(o.Raiz)
+			if err != nil {
+				return nil, fmt.Errorf("reading the state: %v (run it as the daemon's user)", err)
+			}
+			mal = append(mal, obs...)
+		}
+		if len(mal) > 0 {
 			return nil, fmt.Errorf("%s cannot use this daemon's data in %s:\n  %s\nnothing was changed", nuevo.Kling, o.Raiz, strings.Join(mal, "\n  "))
 		}
 		if !nuevo.SinEsquemas {
@@ -255,13 +263,29 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 	res.Copia = copia.dir
 	o.printf("\nbackup in %s\n", copia.dir)
 
-	// 6-8. Parar, cambiar, arrancar y verificar; si falla, volver.
+	// La foto de lo que no se puede perder se toma ahora y no al empezar: la
+	// descarga puede durar minutos, y en ese tiempo el gateway crea, borra y
+	// despierta máquinas sin que eso sea culpa de nadie.
+	var antes *foto
+	if o.Daemon != nil {
+		if antes, err = fotografiar(ctx, o.Daemon); err != nil {
+			os.RemoveAll(copia.dir)
+			return nil, fmt.Errorf("%v (nothing was changed)", err)
+		}
+	}
+
+	// 6-8. Parar, cambiar, arrancar y verificar; si falla, volver. Desde aquí
+	// una señal no corta nada a medias: las órdenes van con fijo (sin
+	// cancelar, con su plazo), y Ctrl-C solo acorta la espera de verificar,
+	// que entonces vuelve atrás entera.
+	fijo := context.WithoutCancel(ctx)
 	if o.Servicio != nil {
 		o.printf("stopping %s\n", o.Servicio)
-		if err := o.Servicio.Parar(ctx); err != nil {
+		if err := o.orden(fijo, o.Servicio.Parar); err != nil {
 			// Puede haberse parado a medias: se arranca lo que hay, que sigue
 			// siendo lo de antes.
-			_ = o.Servicio.Arrancar(ctx)
+			_ = o.orden(fijo, o.Servicio.Arrancar)
+			os.RemoveAll(copia.dir)
 			return nil, fmt.Errorf("stopping %s: %v (nothing was changed)", o.Servicio, err)
 		}
 	}
@@ -272,7 +296,7 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 			}
 		}
 		if o.Servicio == nil {
-			v, err := Sondear(ctx, o.Piezas[0].Destino)
+			v, err := Sondear(fijo, o.Piezas[0].Destino)
 			if err != nil {
 				return err
 			}
@@ -282,25 +306,44 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 			return nil
 		}
 		o.printf("starting %s\n", o.Servicio)
-		if err := o.Servicio.Arrancar(ctx); err != nil {
+		if err := o.orden(fijo, o.Servicio.Arrancar); err != nil {
 			return fmt.Errorf("starting %s: %v", o.Servicio, err)
 		}
-		return o.verificar(ctx, nuevo.Kling, antes)
+		return o.verificar(ctx, fijo, nuevo.Kling, antes)
 	}()
 	if causa == nil {
+		// Solo ahora: podar antes de saber que salió bien dejaría que dos
+		// intentos fallidos se llevaran la copia del último bueno.
+		podarCopias(filepath.Dir(copia.dir), copiasGuardadas)
 		o.printf("upgraded: %s -> %s\n", res.Desde, res.Hacia)
 		return res, nil
 	}
 	o.printf("upgrade failed: %v\nrolling back to %s\n", causa, res.Desde)
 	if o.Servicio != nil {
 		// Puede estar corriendo (verificar falló) o caído: parado, en todo caso.
-		_ = o.Servicio.Parar(ctx)
+		_ = o.orden(fijo, o.Servicio.Parar)
 	}
-	fallo := o.restaurar(ctx, copia, true)
+	fallo := o.restaurar(fijo, copia, true)
 	if fallo == nil && o.Servicio != nil {
-		fallo = o.esperarVersion(ctx, res.Desde)
+		fallo = o.esperarVersion(fijo, res.Desde)
+	}
+	if fallo == nil {
+		// Todo está otra vez como en la copia: guardarla haría que -rollback
+		// "volviera" a lo mismo que ya corre en vez de a la versión de antes.
+		os.RemoveAll(copia.dir)
 	}
 	return res, &ErrVueltaAtras{Causa: causa, Fallo: fallo, Copia: copia.dir}
+}
+
+// plazoOrden acota cada orden al gestor de servicios. systemd tiene su propio
+// TimeoutStopSec; esto es solo para que nada espere para siempre.
+const plazoOrden = 5 * time.Minute
+
+// orden ejecuta una orden del servicio con su propio plazo.
+func (o *Opciones) orden(ctx context.Context, f func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, plazoOrden)
+	defer cancel()
+	return f(ctx)
 }
 
 // VolverAtras deshace la última actualización con su copia: los binarios de
@@ -332,17 +375,19 @@ func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
 		o.printf("\n(dry run: nothing was changed)\n")
 		return res, nil
 	}
+	// Como en Actualizar: una vez parado, una señal no deja nada a medias.
+	fijo := context.WithoutCancel(ctx)
 	if o.Servicio != nil {
-		if err := o.Servicio.Parar(ctx); err != nil {
-			_ = o.Servicio.Arrancar(ctx)
+		if err := o.orden(fijo, o.Servicio.Parar); err != nil {
+			_ = o.orden(fijo, o.Servicio.Arrancar)
 			return nil, fmt.Errorf("stopping %s: %v (nothing was changed)", o.Servicio, err)
 		}
 	}
-	if err := o.restaurar(ctx, c, false); err != nil {
+	if err := o.restaurar(fijo, c, false); err != nil {
 		return nil, err
 	}
 	if o.Servicio != nil {
-		if err := o.esperarVersion(ctx, viejo.Kling); err != nil {
+		if err := o.esperarVersion(fijo, viejo.Kling); err != nil {
 			return nil, fmt.Errorf("%v; the state.json from before the upgrade is in %s", err, c.dir)
 		}
 	}
@@ -413,7 +458,6 @@ func guardarCopia(o Opciones, desde, hacia string) (*copia, error) {
 	if err := c.escribir(); err != nil {
 		return falla(err)
 	}
-	podarCopias(base, copiasGuardadas)
 	return c, nil
 }
 
@@ -518,7 +562,7 @@ func (o *Opciones) restaurar(ctx context.Context, c *copia, conEstado bool) erro
 		}
 	}
 	if o.Servicio != nil {
-		if err := o.Servicio.Arrancar(ctx); err != nil {
+		if err := o.orden(ctx, o.Servicio.Arrancar); err != nil {
 			errs = append(errs, fmt.Errorf("starting %s: %v", o.Servicio, err))
 		}
 	}
@@ -743,6 +787,9 @@ func (o *Opciones) esperarVersion(ctx context.Context, v string) error {
 		}
 		select {
 		case <-ctx.Done():
+			if errors.Is(context.Cause(ctx), context.Canceled) {
+				return fmt.Errorf("interrupted while waiting for the daemon to come back as %s (%s)", v, ultimo)
+			}
 			return fmt.Errorf("the daemon did not come back as %s within %s (%s)", v, o.plazo(), ultimo)
 		case <-time.After(250 * time.Millisecond):
 		}
@@ -750,23 +797,31 @@ func (o *Opciones) esperarVersion(ctx context.Context, v string) error {
 }
 
 // verificar comprueba que el daemon nuevo contesta con su versión y que no
-// perdió nada: las máquinas siguen, las congeladas siguen congeladas y los
-// dorados siguen listados.
-func (o *Opciones) verificar(ctx context.Context, v string, antes *foto) error {
-	if err := o.esperarVersion(ctx, v); err != nil {
+// perdió nada: las máquinas congeladas y paradas siguen (una congelada puede
+// haber despertado: un cliente la pidió en cuanto el daemon nuevo contestó) y
+// los dorados siguen listados. Las que corrían no se exigen: el gateway crea y
+// borra las de cada sesión cuando quiere. espera es el contexto de la espera
+// (una señal la corta y se vuelve atrás); fijo, el de las preguntas.
+func (o *Opciones) verificar(espera, fijo context.Context, v string, antes *foto) error {
+	if err := o.esperarVersion(espera, v); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(fijo, o.plazo())
+	defer cancel()
 	despues, err := fotografiar(ctx, o.Daemon)
 	if err != nil {
 		return err
 	}
 	var falta []string
 	for id, st := range antes.maquinas {
+		if st != api.StateWarm && st != api.StateStopped {
+			continue
+		}
 		ahora, ok := despues.maquinas[id]
 		switch {
 		case !ok:
 			falta = append(falta, "machine "+id+" is gone")
-		case st == api.StateWarm && ahora != api.StateWarm:
+		case st == api.StateWarm && ahora != api.StateWarm && ahora != api.StateRunning && ahora != api.StatePaused:
 			falta = append(falta, fmt.Sprintf("machine %s was frozen and is now %s", id, ahora))
 		}
 	}
