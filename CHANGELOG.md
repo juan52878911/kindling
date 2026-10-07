@@ -14,6 +14,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling image import` reads `tar+zstd` layers: a zstd decoder in pure Go, windows up to 128 MiB; gzip or zstd is decided by the layer's magic bytes; at most 2 zstd layers unpack at once (~232 MiB each with a 128 MiB window)
 - `kling image import -archive x.tar [-image repo:tag]`: imports a `docker save` tar or an OCI layout (tar or directory) from the CLI's machine; only missing blobs are streamed to the daemon (`PUT /oci/blobs/{digest}`, capability `oci-blobs`), each checked by sha256, and the build runs offline checking diff_ids; the recipe says `source: archive`, never the host path
+- Images without `sh` (distroless, scratch, `traefik/whoami`) import and boot: `kling-guest` is their init, and their ready probes run without a shell
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`

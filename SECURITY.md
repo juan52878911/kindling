@@ -1374,6 +1374,18 @@ fiar más que una imagen de un registro:
 Límite: la caché de blobs crece con lo que se sube y no se poda sola (como lo bajado de
 un registro); quien tiene el rol admin ya puede llenar el disco de otras maneras.
 
+### 27. El init en Go de las imágenes sin `sh`
+
+En una imagen de Docker sin `sh` (distroless, `scratch`) el init es `kling-guest`
+llamado como `/sbin/overlay-init` (`pkg/guest/init.go`). Hace lo mismo que
+`minimal-init.sh` y nada más: no ejecuta ningún programa de la imagen antes del agente
+(ni `/entrypoint`, que ni siquiera se escribe), y el servicio lo sigue arrancando el
+agente con su `USER`. Se niega a correr si no es PID 1: un `overlay-init` lanzado a mano
+en el anfitrión no monta ni hace `pivot_root`. Lee `/etc/kling/env` como datos (solo
+`export CLAVE='valor'`, sin interpretar sh) y de una línea que no entiende avisa con su
+número, nunca con su contenido. Las sondas de esas imágenes son `#!` al agente: lo que
+ejecutan es el argv del `HEALTHCHECK` de la imagen, sin shell, igual que en Docker.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

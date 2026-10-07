@@ -33,7 +33,7 @@ func TestImagesImportRestartFlag(t *testing.T) {
 // Una imagen que solo expone UDP se queda sin sonda: la salida lo dice.
 func TestReadyLine(t *testing.T) {
 	udp := oci.ImageConfig{ExposedPorts: map[string]struct{}{"53/udp": {}, "5353/udp": {}}}
-	script, what := ociReadyProbe(udp)
+	script, what := ociReadyProbe(udp, true)
 	if script != "" || what != "" {
 		t.Fatalf("UDP con sonda: %q %q", script, what)
 	}

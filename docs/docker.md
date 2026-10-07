@@ -111,7 +111,6 @@ espejo de la memoria en el almacén y `-disk`.
   (o un layout OCI en un directorio); el comprimido hay que descomprimirlo antes.
 - **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
   se entra por el gateway o con `kling exec`.
-- **Imágenes sin `sh`** (distroless): el init es un script y se rechazan.
 - **`docker start` sin volver a dar el entorno**: `kling start` lo exige,
   porque el daemon solo guarda los nombres de las variables. Docker guarda los
   valores con el contenedor.

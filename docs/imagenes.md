@@ -169,12 +169,12 @@ kindling y nada más:
 
 | Dónde | Qué |
 |---|---|
-| `/sbin/overlay-init` | `minimal-init.sh`, con el contrato de runtime de Docker (`/dev/fd`, `/dev/std*`, `/dev/shm`, `/etc/hosts`, nombre) |
-| `/usr/local/bin/kling-guest`, `/entrypoint` | el agente de invitado como PID 1 |
+| `/sbin/overlay-init` | `minimal-init.sh`, con el contrato de runtime de Docker (`/dev/fd`, `/dev/std*`, `/dev/shm`, `/etc/hosts`, nombre); en una imagen sin `sh` (abajo), un enlace a `kling-guest` |
+| `/usr/local/bin/kling-guest`, `/entrypoint` | el agente de invitado como PID 1 (sin `/entrypoint` en una imagen sin `sh`) |
 | `/etc/kling/env` (0600 de root) | el `Env` de la imagen con el del spec encima |
 | `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente. Se relanza si sale con error (`-restart always\|on-failure\|no`, `on-failure` por defecto); un `STOPSIGNAL` que no se entiende pasa a `SIGTERM` con un aviso; un `USER` numérico sin entrada en `/etc/passwd` corre con el grupo 0, como en Docker |
 | `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`). Su `Timeout` es el plazo de cada ejecución y su `StartPeriod` alarga el impulso de CPU del arranque (en `service.json`, hasta 120 s cada uno); `Interval` y `Retries` no se usan |
-| `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
+| `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera; `IMAGE.txt` dice qué init lleva (`init=sh` o `init=go`, también en `built.init` de la receta) |
 | `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
 
 `/tmp` y `/run` son los de la imagen, en el disco de la máquina, como en
@@ -501,10 +501,26 @@ prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
 
 ### Límites del constructor `oci`
 
-- **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
-  `pivot_root`, `mkdir` y `ln` (cualquier Alpine o Debian). Una
-  imagen *distroless* se rechaza al construir, igual que una que ya traiga
-  `/entrypoint`.
+- **Dos inits, el mismo contrato.** Si la imagen trae `sh`, `mount`,
+  `pivot_root`, `mkdir` y `ln` (cualquier Alpine o Debian), el init es
+  `minimal-init.sh`, como en las bases de kindling. Si le falta alguno (una
+  *distroless*, una `scratch` con un binario estático, `traefik/whoami`), o si
+  la imagen ya trae su propio `/entrypoint`, el init es el de Go de
+  `kling-guest` (`/sbin/overlay-init` es un enlace a él): hace lo mismo que el
+  script (overlay, `pivot_root`, `/proc`, `/sys`, `/dev`, `/dev/fd`,
+  `/dev/shm`, nombre, `/etc/hosts` sin pisar lo que haya), carga
+  `/etc/kling/env` y se vuelve a ejecutar como agente, sin `/entrypoint` y sin
+  ningún programa de la imagen. Solo arranca como PID 1. El script se queda
+  para las imágenes que lo pueden correr porque es el que llevan todas las
+  importadas hasta ahora; los dos se prueban con los mismos casos.
+- **Sondas sin shell.** En una imagen sin `/bin/sh` la sonda de listo no es un
+  script: es un `#!` que apunta al agente (`kling-guest -probe-tcp=...` para
+  el puerto de `EXPOSE`, `kling-guest -exec-json` con el argv de un
+  `HEALTHCHECK CMD` en la segunda línea), que el kernel ejecuta sin shell. Un
+  `HEALTHCHECK CMD-SHELL` necesita `sh` (en Docker tampoco pasaría nunca): se
+  ignora con un aviso y queda la sonda de `EXPOSE`.
+- **El agente escucha en el 8080 del invitado**: un servicio que quiera ese
+  puerto no arranca (`address already in use` en `kling logs`).
 - **Sin dm-verity**: la imagen es la raíz, no una capa.
 - **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
   máquina (512 MiB; `kling run -disk 4G` lo agranda, y es disperso: solo cuesta

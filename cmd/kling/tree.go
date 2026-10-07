@@ -176,7 +176,9 @@ var coreTree = []section{
       [-max-size 4G] [-arch A] [-- cmd args...]    zstd) is checked by sha256. -- replaces
                                                    its CMD; -e bakes values into the
                                                    image (per machine: kling run -image
-                                                   <ref> -e KEY)
+                                                   <ref> -e KEY). Images without sh
+                                                   (distroless, scratch) boot with the
+                                                   agent's init in Go
   image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
                                                    docker save (manifest.json) or an OCI
                                                    layout (tar or dir). Only the missing
