@@ -43,7 +43,8 @@ var coreTree = []section{
                                                    rolls back by itself if not (sudo
                                                    on Linux; -unit must run the daemon
                                                    on the socket; -cli: only this
-                                                   binary)
+                                                   binary; guest agents only in
+                                                   KLING_LIB_DIR)
   upgrade -rollback [-root DIR]                    back to the last backup, also with
                                                    the daemon down
 `},

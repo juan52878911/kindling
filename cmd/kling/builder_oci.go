@@ -20,6 +20,7 @@ import (
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/scripts"
 )
@@ -378,6 +379,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	case goInit:
 		logf("the image has its own /entrypoint: it boots with kindling's init in Go, which leaves it alone")
 	}
+	if goInit {
+		if err := agentIsInit(agent); err != nil {
+			return err
+		}
+	}
 	// Las sondas de listo son scripts con #!/bin/sh si la imagen lo tiene.
 	hasSh := treeExec(tree, "/bin/sh")
 	probeCfg := cfg
@@ -673,6 +679,27 @@ func ociReadyTimes(hc *oci.Healthcheck) (timeout, startPeriod int) {
 		return int(min((ns+int64(time.Second)-1)/int64(time.Second), api.MaxReadyTimeoutSeconds))
 	}
 	return secs(hc.Timeout), secs(hc.StartPeriod)
+}
+
+// agentIsInit comprueba que el agente que va a la imagen sabe hacer de init
+// (guest.InitMarker). Uno anterior, el de KLING_GUEST_AGENT o el de otra
+// arquitectura que kling upgrade no cambia, se metería sin queja y la imagen
+// no arrancaría: correría como PID 1 sin overlay ni /proc, y sin decir por qué.
+func agentIsInit(agent string) error {
+	f, err := os.Open(agent)
+	if err != nil {
+		return fmt.Errorf("guest agent: %w", err)
+	}
+	defer f.Close()
+	ok, err := guest.HasInitMarker(f)
+	if err != nil {
+		return fmt.Errorf("guest agent %s: %w", agent, err)
+	}
+	if !ok {
+		return fmt.Errorf("the guest agent at %s predates the Go init this image needs; update it "+
+			"(make deploy, or kling upgrade if it lives in KLING_LIB_DIR; KLING_GUEST_AGENT and KLING_GUEST_AGENT_<arch> pick another one)", agent)
+	}
+	return nil
 }
 
 // ociReadyProbe es la sonda de "listo" (api.GuestReadyProbe) para la

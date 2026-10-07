@@ -3,11 +3,14 @@ package guest
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/juan52878911/kindling/internal/imagen"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // fakeInit es un sistema falso para el init: apunta cada llamada y guarda los
@@ -310,5 +313,33 @@ func TestInitEnv(t *testing.T) {
 	vars2, bad := parseEnvFile("# it's\nexport A='x\ny'\nexport B=b\\'c\nmal\nexport C='z\n")
 	if strings.Join(vars2, "|") != "A=x\ny|B=b'c" || len(bad) != 2 || bad[0] != 5 || bad[1] != 6 {
 		t.Fatalf("multiline: %q, bad lines %v", vars2, bad)
+	}
+}
+
+// La marca del init se encuentra en cualquier sitio del binario, también
+// partida entre dos lecturas, y un binario sin ella (un agente anterior al
+// init en Go) no la tiene aunque lleve la cadena de kling.layer suelta.
+func TestHasInitMarker(t *testing.T) {
+	relleno := strings.Repeat("\x7fELF\x00", 20000) // más de un trozo de 64 KiB
+	for _, corte := range []int{0, 1, len(InitMarker) / 2, len(InitMarker) - 1} {
+		for _, pos := range []int{0, 64<<10 - corte, len(relleno)} {
+			bin := relleno[:pos] + InitMarker + relleno[pos:]
+			for nombre, r := range map[string]io.Reader{
+				"entero":       strings.NewReader(bin),
+				"byte a byte":  iotest.OneByteReader(strings.NewReader(bin)),
+				"medio trozos": iotest.HalfReader(strings.NewReader(bin)),
+			} {
+				if ok, err := HasInitMarker(r); !ok || err != nil {
+					t.Fatalf("pos %d, %s: %v %v", pos, nombre, ok, err)
+				}
+			}
+		}
+	}
+	viejo := relleno + api.LayerBootParam + "library" + InitMarker[:len(InitMarker)-1]
+	if ok, err := HasInitMarker(iotest.HalfReader(strings.NewReader(viejo))); ok || err != nil {
+		t.Fatalf("an agent without the marker: %v %v", ok, err)
+	}
+	if _, err := HasInitMarker(iotest.ErrReader(io.ErrUnexpectedEOF)); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("read error: %v", err)
 	}
 }

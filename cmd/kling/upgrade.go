@@ -291,6 +291,10 @@ func prepararSystemd(o *upgrade.Opciones, c *api.Client, unit, arch string) erro
 			o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe(g, "linux", arch), Destino: p})
 		}
 	}
+	environ, _ := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	for _, a := range agentesFueraDeLib(environ, lib) {
+		fmt.Printf("note: the daemon runs with %s, which kling upgrade does not replace; update it by hand (images without sh need a kling-guest with the Go init)\n", a)
+	}
 	if yo, err := ejecutableReal(); err == nil && yo != exe {
 		fmt.Printf("note: this kling (%s) is not the daemon's (%s); upgrade it afterwards with: kling upgrade -cli\n\n", yo, exe)
 	}
@@ -336,15 +340,36 @@ var reNombreUnidad = lazyre.New(`^[A-Za-z0-9@_.:-]+$`)
 // libDirDe es el KLING_LIB_DIR con el que corre el daemon pid, o el de
 // siempre. Del entorno del proceso solo se lee esa clave.
 func libDirDe(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
-	if err == nil {
-		for _, kv := range bytes.Split(b, []byte{0}) {
-			if v, ok := bytes.CutPrefix(kv, []byte("KLING_LIB_DIR=")); ok && len(v) > 0 {
-				return string(v)
-			}
-		}
+	b, _ := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if v := valorEntorno(b, "KLING_LIB_DIR"); v != "" {
+		return v
 	}
 	return "/usr/local/lib/kindling"
+}
+
+// valorEntorno es el valor de clave en un /proc/PID/environ ("" si no está).
+func valorEntorno(environ []byte, clave string) string {
+	for _, kv := range bytes.Split(environ, []byte{0}) {
+		if v, ok := bytes.CutPrefix(kv, []byte(clave+"=")); ok {
+			return string(v)
+		}
+	}
+	return ""
+}
+
+// agentesFueraDeLib son los agentes de invitado que el daemon da a los
+// constructores (KLING_GUEST_AGENT y los de cada arquitectura) y que no viven
+// en lib: upgrade no los cambia, y uno viejo no hace de init en Go (el
+// constructor oci se niega entonces a construir una imagen sin sh). Solo se
+// leen esas claves, que son rutas.
+func agentesFueraDeLib(environ []byte, lib string) []string {
+	var fuera []string
+	for _, k := range []string{"KLING_GUEST_AGENT", "KLING_GUEST_AGENT_amd64", "KLING_GUEST_AGENT_arm64"} {
+		if v := valorEntorno(environ, k); v != "" && filepath.Clean(v) != filepath.Join(lib, "kling-guest") {
+			fuera = append(fuera, k+"="+v)
+		}
+	}
+	return fuera
 }
 
 // ---- macOS: launchd

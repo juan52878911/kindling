@@ -13,6 +13,7 @@ import (
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // alpineLike es una raíz mínima al estilo de Alpine: /sbin de verdad (no
@@ -44,7 +45,8 @@ func newOCITest(t *testing.T) *ociTestEnv {
 	e := &ociTestEnv{reg: ocitest.New(), root: t.TempDir(), work: t.TempDir()}
 	t.Cleanup(e.reg.Close)
 	agent := filepath.Join(t.TempDir(), "kling-guest")
-	os.WriteFile(agent, []byte(testELF(0x3e)), 0o755)
+	// Un agente que sabe hacer de init: lleva la marca, como el de verdad.
+	os.WriteFile(agent, []byte(testELF(0x3e)+guest.InitMarker), 0o755)
 	t.Setenv("KLING_ROOT", e.root)
 	t.Setenv("KLING_GUEST_AGENT", agent)
 	t.Setenv("KLING_GUEST_AGENT_amd64", agent)
@@ -132,7 +134,7 @@ func TestBuildOCI(t *testing.T) {
 		}
 		return string(b)
 	}
-	if !strings.Contains(cat("/sbin/overlay-init"), "exec /entrypoint") || cat("/usr/local/bin/kling-guest") != testELF(0x3e) {
+	if !strings.Contains(cat("/sbin/overlay-init"), "exec /entrypoint") || cat("/usr/local/bin/kling-guest") != testELF(0x3e)+guest.InitMarker {
 		t.Fatal("init or agent")
 	}
 	if tree.Lookup("/sbin").IsLink() || tree.Lookup("/sbin/overlay-init") == nil {
@@ -391,6 +393,33 @@ func TestBuildOCIOwnEntrypoint(t *testing.T) {
 	// Con sh, la sonda sigue siendo la de siempre.
 	if p := cat(api.GuestReadyProbe); !strings.HasPrefix(p, "#!/bin/sh\n") || !strings.Contains(p, "-probe-tcp 127.0.0.1:6379") {
 		t.Fatalf("probe:\n%s", p)
+	}
+}
+
+// Un agente anterior al init en Go (sin guest.InitMarker) no hace de init:
+// una imagen que lo necesita se niega a construirse, diciendo cuál y qué
+// hacer, en vez de salir una imagen que no arranca. Las que van con el script
+// de sh no lo necesitan y se construyen igual.
+func TestBuildOCIAgenteSinInit(t *testing.T) {
+	e := newOCITest(t)
+	viejo := filepath.Join(t.TempDir(), "kling-guest-viejo")
+	os.WriteFile(viejo, []byte(testELF(0x3e)+api.LayerBootParam), 0o755)
+	t.Setenv("KLING_GUEST_AGENT_amd64", viejo)
+	t.Setenv("KLING_GUEST_AGENT", viejo)
+
+	distroless := ocitest.TarGz([]ocitest.File{{Name: "app", Body: testELF(0x3e), Mode: 0o755}})
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/app"}}, distroless)
+	_, log, err := e.build("d", OCISpec{Ref: e.reg.Host() + "/x/d@" + idx, Arch: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "the guest agent at "+viejo+" predates the Go init") {
+		t.Fatalf("an agent without the Go init was accepted: %v\n%s", err, log)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "images", "d.ext4")); !os.IsNotExist(err) {
+		t.Fatalf("an image was left behind: %v", err)
+	}
+
+	_, idx = e.reg.ImageConfig("amd64", map[string]any{"Cmd": []string{"sh"}}, ocitest.TarGz(alpineLike()))
+	if _, log, err := e.build("a", OCISpec{Ref: e.reg.Host() + "/x/a@" + idx, Arch: "amd64"}); err != nil {
+		t.Fatalf("an image with sh needs no Go init: %v\n%s", err, log)
 	}
 }
 

@@ -279,3 +279,22 @@ func TestVolcadoLegibleParaElKlingVZViejo(t *testing.T) {
 		t.Fatal("a missing snapshot must not pass")
 	}
 }
+
+// upgrade solo cambia el kling-guest de KLING_LIB_DIR: avisa de los agentes
+// que el daemon toma de otro sitio (con su clave, que es una ruta), y de
+// ninguno más.
+func TestAgentesFueraDeLib(t *testing.T) {
+	lib := "/usr/local/lib/kindling"
+	env := []byte("PATH=/usr/bin\x00KLING_GUEST_AGENT=/usr/local/lib/kindling/./kling-guest\x00" +
+		"KLING_GUEST_AGENT_arm64=/opt/arm/kling-guest\x00KLING_TOKEN=secreto\x00KLING_GUEST_AGENT_amd64=\x00")
+	got := agentesFueraDeLib(env, lib)
+	if len(got) != 1 || got[0] != "KLING_GUEST_AGENT_arm64=/opt/arm/kling-guest" {
+		t.Fatalf("%q", got)
+	}
+	if got := agentesFueraDeLib([]byte("KLING_GUEST_AGENT=/srv/kg\x00"), lib); len(got) != 1 || got[0] != "KLING_GUEST_AGENT=/srv/kg" {
+		t.Fatalf("%q", got)
+	}
+	if got := agentesFueraDeLib(nil, lib); got != nil {
+		t.Fatalf("%q", got)
+	}
+}

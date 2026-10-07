@@ -337,7 +337,9 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   `-dry-run` que se perdiera por el camino sería una actualización de verdad.
 - **Qué se cambia.** El binario que ejecuta el daemon (`/proc/<MainPID>/exe` de
   la unidad, o el `program` de launchd), y a su lado lo que ya esté instalado:
-  `kling-guest` y `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux),
+  `kling-guest` y `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux;
+  si el daemon toma el agente de otro sitio con `KLING_GUEST_AGENT*`, lo dice
+  con una nota y no lo toca),
   `kling-vz` junto a `kling` (Mac, comprobando antes de parar nada que lleva el
   permiso de virtualización). Las extensiones instaladas con `kling plugin
   install` se pasan a la misma versión después de verificar el núcleo (con sus

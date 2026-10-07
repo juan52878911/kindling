@@ -20,8 +20,10 @@ package guest
 // de ficheros falso en cualquier plataforma (init_test.go).
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -51,6 +53,44 @@ const (
 	ociMarker = "/etc/kindling/oci.json"
 )
 
+// InitMarker va dentro de todo kling-guest que sabe hacer de init (Init lo
+// escribe en la consola al arrancar, y así el enlazador no lo quita). Desde
+// fuera se busca en el binario, sin ejecutarlo y valga la arquitectura que
+// valga: un agente anterior al init en Go ignora que lo llamen overlay-init y
+// arranca como PID 1 sin overlay ni /proc. Lo miran el constructor oci antes
+// de poner el init en Go y el daemon antes de enganchar una capa a una base
+// cuyo overlay-init es el agente (internal/machine baseSupportsLayers).
+//
+// Cambiarlo deja de reconocer los agentes que ya hay: solo si el init deja de
+// ser compatible con lo que esperan los dos.
+const InitMarker = "kindling-guest-go-init/1 " + api.LayerBootParam
+
+// HasInitMarker dice si lo que se lee de r (un binario de kling-guest) lleva
+// InitMarker. Lee por trozos, sin cargarlo entero; el tope, si hace falta, lo
+// pone quien llama.
+func HasInitMarker(r io.Reader) (bool, error) {
+	marca := []byte(InitMarker)
+	buf := make([]byte, 64<<10)
+	guardado := 0 // la cola de la lectura anterior, por si la marca cae entre dos
+	for {
+		n, err := r.Read(buf[guardado:])
+		if n > 0 {
+			fin := guardado + n
+			if bytes.Contains(buf[:fin], marca) {
+				return true, nil
+			}
+			guardado = min(fin, len(marca)-1)
+			copy(buf, buf[fin-guardado:fin])
+		}
+		if err == io.EOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
 // initSys son las llamadas al sistema del init.
 type initSys interface {
 	Mount(src, target, fstype string, flags uintptr, data string) error
@@ -75,6 +115,7 @@ type initSys interface {
 func Init() {
 	log.SetFlags(0)
 	log.SetPrefix("kling-guest init: ")
+	log.Printf("starting (%s)", InitMarker)
 	if os.Getpid() != 1 {
 		// Montar y hacer pivot_root fuera de una microVM sería tocar el anfitrión.
 		log.Fatal("refusing to run: the init must be PID 1 inside a microVM")
