@@ -3,7 +3,7 @@ package daemon
 // Transferencia de imágenes entre daemons: GET y PUT /images/{name}/blob.
 //
 // Existe para macOS, donde no se construyen imágenes: se construyen en un host
-// Linux y `kling images copy` las mueve de un daemon a otro, en flujo, sin
+// Linux y `kling image copy` las mueve de un daemon a otro, en flujo, sin
 // pasar por el disco del CLI. Una imagen son hasta tres ficheros —el ext4 (o
 // la capa), la receta y, compartido, el kernel—, y cada uno viaja por separado
 // con su parte en ?part=.
@@ -82,7 +82,7 @@ func blobSidecarPath(path string) string { return path + ".sha256" }
 //
 // Sin esto, GET y HEAD de /images/{name}/blob hasheaban el fichero entero en
 // cada llamada — varios GiB para una imagen normal — antes de contestar
-// siquiera las cabeceras. `kling images copy` hace un HEAD y luego un GET, así
+// siquiera las cabeceras. `kling image copy` hace un HEAD y luego un GET, así
 // que cada copia pagaba dos lecturas completas solo para el sha256 que ya
 // tenía calculado un segundo antes.
 func cachedSHA256(path string) (string, error) {
@@ -231,7 +231,7 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	// ella. Se mira antes de recibir nada: son gigas.
 	if otra, ok := s.formaContraria(t); ok {
 		fail(w, http.StatusConflict, fmt.Errorf("image %q already exists as a %s on this daemon; "+
-			"remove it first (kling images rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
+			"remove it first (kling image rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
 		return
 	}
 	if r.ContentLength > api.MaxBlobBytes {

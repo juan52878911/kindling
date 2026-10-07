@@ -128,7 +128,7 @@ const VIEWS = {
             open: true}),
         ], open: true});
 
-      return n('l:gw', 'kling gateway', {cls: 'host', sub: 'a single HTTP endpoint', open: true,
+      return n('l:gw', 'kling mcp serve', {cls: 'host', sub: 'a single HTTP endpoint', open: true,
         detail: {rows: [['endpoint', M.host.endpoint],
                         ['services', String(M.services.length)]]},
         kids: [

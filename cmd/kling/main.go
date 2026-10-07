@@ -41,7 +41,11 @@ func main() {
 		printUsage(os.Stdout)
 		os.Exit(2)
 	}
-	// Los nombres de antes se traducen en silencio a los de ahora (tree.go).
+	// Los nombres de antes se traducen a los de ahora (tree.go), con un aviso
+	// en stderr salvo los que se quedan para siempre.
+	if w := aliasWarning(os.Args[1], os.Args[2:]); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	cmd, args := resolveAlias(os.Args[1], os.Args[2:])
 
 	// `kling run -h`, `kling mcp add -h`: la misma ayuda que `kling help ...`,

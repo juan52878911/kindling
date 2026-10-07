@@ -554,8 +554,9 @@ Since 0.14 an extension's commands live **under its name**: `kling mcp add`, `kl
 serve`, `kling sbx ls`. Only `connect` is promoted to the top level. The old loose verbs
 (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`, `kling
 snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) keep working as
-silent aliases; 0.15 will warn once per process and 0.16 removes the extension ones.
-`commit`, `snapshots` and `plugins` stay for good.
+aliases. They were silent until 0.17; now each one warns once on stderr (`warning: kling
+add is now kling mcp add`), and the extension ones will be removed in a release the
+CHANGELOG announces. `commit`, `snapshots` and `plugins` stay for good, silently.
 
 ## kling-mcp: MCP servers on demand
 

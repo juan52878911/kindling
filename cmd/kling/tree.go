@@ -309,13 +309,14 @@ const usageTail = `CONNECTION
   equivalent to root on its host, so the only remote access is SSH.
 `
 
-// aliases son los nombres de antes: se traducen en silencio a los de ahora
-// antes de enrutar. No salen en la ayuda ni en el completado.
+// aliases son los nombres de antes: se traducen a los de ahora antes de
+// enrutar. No salen en la ayuda ni en el completado.
 //
-// Plan: en 0.14 son silenciosos; en 0.15 avisan una vez por proceso en stderr
-// ("warning: kling add is now kling mcp add"), como hizo -cpu; en 0.16 se
-// retiran los de extensiones (add, search, gateway, export, memory, migrate,
-// models, chispa, info). commit, snapshots y plugins se quedan para siempre:
+// Fueron silenciosos de 0.14 a 0.17; ahora avisan una vez por proceso en
+// stderr ("warning: kling add is now kling mcp add", aliasWarning), y los de
+// extensiones (add, search, gateway, export, memory, migrate, models, chispa,
+// info) se retirarán en una versión que lo anuncie el CHANGELOG. commit,
+// snapshots y plugins se quedan para siempre y en silencio (permanentAliases):
 // cuestan cero y hay scripts ajenos que los usan.
 var aliases = map[string]string{
 	"commit":    "save",
@@ -343,6 +344,24 @@ var extAliases = map[string]string{
 	"export":  "mcp export",
 	"memory":  "mcp memory",
 	"migrate": "mcp migrate",
+}
+
+// permanentAliases no avisan nunca: ver aliases.
+var permanentAliases = map[string]bool{"commit": true, "snapshots": true, "plugins": true}
+
+// aliasWarning es el aviso para quien escribió un nombre de antes, o "" si cmd
+// no es un alias que se vaya a retirar (o una extensión instalada lo sirve
+// todavía). Va a stderr: la salida -json de stdout no cambia.
+func aliasWarning(cmd string, args []string) string {
+	if permanentAliases[cmd] {
+		return ""
+	}
+	to, rest := resolveAlias(cmd, args)
+	if to == cmd && len(rest) == len(args) {
+		return ""
+	}
+	now := strings.Join(append([]string{to}, rest[:len(rest)-len(args)]...), " ")
+	return fmt.Sprintf("warning: kling %s is now kling %s", cmd, now)
 }
 
 // resolveAlias traduce un comando viejo a (comando, args) de ahora. Devuelve

@@ -57,7 +57,7 @@ func RenderMap(info *api.Info, groups []Group, endpoint string, now time.Time, m
   <div id="p-body" hidden></div>
 </section>`)
 
-	b.WriteString(`<footer>Static snapshot. Regenerate with <code>kling export</code>.</footer>`)
+	b.WriteString(`<footer>Static snapshot. Regenerate with <code>kling mcp export</code>.</footer>`)
 	b.WriteString(`<script id="model" type="application/json">` + modelJSON(m) + `</script>`)
 	b.WriteString(`<script>` + jsViews + jsTree + `</script>`)
 	b.WriteString(`</body></html>`)

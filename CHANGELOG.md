@@ -39,6 +39,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The balloon asks for free page reporting, so pages the guest frees go back to the host without a squeeze (Firecracker 1.14+; falls back without it; `KLING_FREE_PAGE_REPORTING=0` turns it off)
 - `save` mirrors the golden memory into the copy-on-write store in the background when the store is mounted, so the first diff thaw of a copy no longer copies it (10 s with Postgres); thaw events show `store`, `mirror` and `memory` phases
 - Docker images get a full core per vCPU by default
+- Old command names (`kling add`, `kling rmi`, `kling info`…) warn once on stderr with the new name; `commit`, `snapshots` and `plugins` stay silent
 - Docker images restart their service only when it fails, like `docker run --restart on-failure`; `kling image import -restart` picks `always`, `on-failure` or `no`
 - Docker images: the `HEALTHCHECK` timeout bounds each ready probe and its start period extends the boot CPU boost (up to 120 s each)
 - Docker images only need `sh`, `mount`, `pivot_root`, `mkdir` and `ln` for the init (no longer `cat` and `grep`)

@@ -265,7 +265,7 @@ func TestBuildImageSegunPlataforma(t *testing.T) {
 		}
 		return
 	}
-	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "kling images copy") {
+	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "kling image copy") {
 		t.Fatalf("POST /images en macOS = %d %s", rr.Code, rr.Body)
 	}
 }

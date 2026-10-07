@@ -142,4 +142,4 @@ for mode in $MODES; do
 done
 echo
 echo "first_ms is the first instance of the round; disk_MiB is what the N instances added"
-echo "(data root + inside of the store). The daemon's own count: kling info (disk clones)."
+echo "(data root + inside of the store). The daemon's own count: kling status -v (disk clones)."

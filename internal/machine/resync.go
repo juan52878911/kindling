@@ -143,7 +143,7 @@ func (m *Manager) avisarResync(image, name string, err error) {
 	if errors.Is(err, errResyncNoSoportado) {
 		log.Printf("warning: %s (image %s): its guest agent predates %s, so instances restored "+
 			"from the same snapshot share clock and RNG state. Rebuild the image with a current "+
-			"kling-guest (kling images build), or refresh its MCP bridge (kling mcp refresh-bridge)",
+			"kling-guest (kling image build), or refresh its MCP bridge (kling mcp refresh-bridge)",
 			name, image, api.GuestResyncPath)
 		return
 	}
