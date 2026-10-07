@@ -46,6 +46,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - Docker images keep their own `/tmp` on disk, as in Docker, instead of a tmpfs that used guest RAM
+- `kling image import` says when an image has no ready probe (only UDP ports), and Docker schema 1 manifests fail with a clear error instead of "has no layers"
 - The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
 - `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)

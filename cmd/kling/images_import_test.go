@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/oci"
 )
 
 // Los argumentos que puso quien importa no se repiten en la salida.
@@ -16,6 +18,25 @@ func TestRunsLine(t *testing.T) {
 	got := runsLine(argv, true)
 	if strings.Contains(got, "secreto") || !strings.HasPrefix(got, "postgres") || !strings.Contains(got, "2 arguments") {
 		t.Fatalf("de la línea de órdenes: %q", got)
+	}
+}
+
+// Una imagen que solo expone UDP se queda sin sonda: la salida lo dice.
+func TestReadyLine(t *testing.T) {
+	udp := oci.ImageConfig{ExposedPorts: map[string]struct{}{"53/udp": {}, "5353/udp": {}}}
+	script, what := ociReadyProbe(udp)
+	if script != "" || what != "" {
+		t.Fatalf("UDP con sonda: %q %q", script, what)
+	}
+	got := readyLine(what, sortedKeys(udp.ExposedPorts))
+	if !strings.HasPrefix(got, "none") || !strings.Contains(got, "53/udp 5353/udp") || !strings.Contains(got, "-wait-ready") {
+		t.Fatalf("solo UDP: %q", got)
+	}
+	if got := readyLine("tcp 5432", []string{"5432/tcp"}); got != "tcp 5432" {
+		t.Fatalf("con sonda: %q", got)
+	}
+	if got := readyLine("", nil); got != "" {
+		t.Fatalf("sin puertos: %q", got)
 	}
 }
 

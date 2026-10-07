@@ -144,8 +144,8 @@ func imagesImport(args []string) error {
 	if len(built.Ports) > 0 {
 		fmt.Printf("  ports    %s\n", strings.Join(built.Ports, " "))
 	}
-	if built.Ready != "" {
-		fmt.Printf("  ready    %s\n", built.Ready)
+	if r := readyLine(built.Ready, built.Ports); r != "" {
+		fmt.Printf("  ready    %s\n", r)
 	}
 	if len(built.Volumes) > 0 {
 		// No se sugiere montar el volumen justo ahí: un volumen de kling
@@ -226,6 +226,16 @@ func imageNameFor(r oci.ImageRef) string {
 		n = "image"
 	}
 	return n
+}
+
+// readyLine es la línea "ready" de la salida. Sin sonda pero con puertos
+// (solo UDP: la sonda solo sabe de TCP) se dice, para que -wait-ready no se
+// lea como "el servicio contesta". Sin puertos ni sonda, nada.
+func readyLine(ready string, ports []string) string {
+	if ready != "" || len(ports) == 0 {
+		return ready
+	}
+	return "none: no HEALTHCHECK and no TCP port in EXPOSE (" + strings.Join(ports, " ") + "), so -wait-ready won't wait for the service"
 }
 
 // runsLine es la orden del servicio para la salida. Los argumentos que puso

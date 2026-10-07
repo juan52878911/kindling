@@ -172,6 +172,11 @@ Docker: lo que trae la imagen ahí (`/run/mysqld` del usuario `mysql` en
 `mariadb`) sigue ahí, y lo que se escribe en `/tmp` no gasta RAM del invitado
 (ni engorda un `freeze`). En las bases de kindling los dos son `tmpfs`.
 
+Sin `HEALTHCHECK` ni un puerto TCP en `EXPOSE` (una imagen que solo expone
+UDP, como un DNS) no hay sonda: `import` lo dice (`ready none: ...`) y
+`-wait-ready` espera al agente, no al servicio. Un manifiesto *schema 1* de
+Docker (obsoleto desde 2017) se rechaza con un error que lo dice.
+
 **Fijada por digest.** La etiqueta se resuelve una vez: el digest sale del
 sha256 del manifiesto bajado (si el registro dice otro en
 `Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al

@@ -40,6 +40,26 @@ const (
 
 var reDigest = lazyre.New(`^sha256:[0-9a-f]{64}$`)
 
+// schema1 dice si un manifiesto es del formato 1 de Docker (obsoleto desde
+// 2017: application/vnd.docker.distribution.manifest.v1+json o
+// v1+prettyjws). No se piden, pero un registro viejo puede mandarlos igual, y
+// sin "layers" acabarían en un "has no layers" que no dice la causa.
+func schema1(body []byte, mediaType string) bool {
+	if strings.HasPrefix(mediaType, "application/vnd.docker.distribution.manifest.v1+") {
+		return true
+	}
+	var v struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	return json.Unmarshal(body, &v) == nil && v.SchemaVersion == 1
+}
+
+// errSchema1 es el error de un manifiesto schema1.
+func errSchema1(what string) error {
+	return fmt.Errorf("%s is a Docker schema 1 manifest, which is not supported (deprecated since 2017); "+
+		"push the image again with a current docker or use a newer tag", what)
+}
+
 // manifestAccept son los tipos de manifiesto que se piden.
 var manifestAccept = strings.Join([]string{MediaOCIManifest, MediaDockerManifest, MediaOCIIndex, MediaDockerList}, ", ")
 
@@ -266,6 +286,9 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 				_ = os.Rename(tmp, c.BlobPath(digest))
 			}
 		}
+	}
+	if schema1(body, mt) {
+		return nil, errSchema1(ref + "@" + digest)
 	}
 	var m Manifest
 	if err := json.Unmarshal(body, &m); err != nil {
