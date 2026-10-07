@@ -452,6 +452,14 @@ son de root sin escritura para grupo ni otros, sin enlaces, y el fichero es
 regular con el tamaño del manifiesto; si no, como si no estuviera: se baja a su
 caché y se rehashea como antes. Lo suyo se sigue rehasheando siempre.
 
+Medido en el lab (amd64, caché caliente): el `Pull` de `postgres:17-alpine`
+(111 MiB comprimidos) pasa de 0,27 s rehasheando a menos de 1 ms desde la
+verificada, y el de `timescale/timescaledb:latest-pg16` (575 MiB) de 0,78 s a
+menos de 1 ms. En el import entero se nota menos, porque el rehash va en
+paralelo con la descompresión: `postgres:17-alpine` baja de 3,6 a 3,3 s (mediana
+de 6); en timescaledb (unos 10 s) queda dentro del ruido. La primera
+construcción que verifica paga una copia: 0,4 s y 2 s.
+
 **Las dos cachés tienen tope.** Después de cada construcción sin root el daemon
 las barre: fuera los `.part` y lo que no es un blob, lo que lleva más de
 `daemon.build_cache_max_days` días sin usarse (30 por defecto; cada uso pone la
