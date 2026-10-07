@@ -354,11 +354,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if goInit {
 		initKind = "go"
 	}
-	put := []struct {
+	type putFile struct {
 		p    string
 		data string
 		mode uint32
-	}{
+	}
+	put := []putFile{
 		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
 		{"/etc/kindling/oci.json", string(ociJSON) + "\n", 0o644},
 		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\nref=%s\ndigest=%s\nmanifest=%s\ninit=%s\nbuilt_at=%s\n",
@@ -371,30 +372,15 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			return err
 		}
 	} else {
-		put = append(put, struct {
-			p    string
-			data string
-			mode uint32
-		}{"/sbin/overlay-init", scripts.MinimalInit, 0o755}, struct {
-			p    string
-			data string
-			mode uint32
-		}{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755})
+		put = append(put, putFile{"/sbin/overlay-init", scripts.MinimalInit, 0o755},
+			putFile{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755})
 	}
 	if len(argv) > 0 {
-		put = append(put, struct {
-			p    string
-			data string
-			mode uint32
-		}{api.GuestServiceSpec, string(svcJSON) + "\n", 0o644})
+		put = append(put, putFile{api.GuestServiceSpec, string(svcJSON) + "\n", 0o644})
 	}
 	probe, probeWhat := ociReadyProbe(probeCfg, hasSh)
 	if probe != "" {
-		put = append(put, struct {
-			p    string
-			data string
-			mode uint32
-		}{api.GuestReadyProbe, probe, 0o755})
+		put = append(put, putFile{api.GuestReadyProbe, probe, 0o755})
 	}
 	for _, f := range put {
 		if err := imagen.Put(tree, f.p, []byte(f.data), f.mode, t); err != nil {
