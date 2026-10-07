@@ -370,3 +370,101 @@ func TestSeedFromImageOnExt4(t *testing.T) {
 		t.Errorf("grafana.db = %q: a volume with data was overwritten", b)
 	}
 }
+
+// Heredar es una vez: un volumen que heredó y sigue vacío no vuelve a tomar el
+// dueño y el modo de la imagen, que desharían un chmod del usuario. La marca va
+// en lost+found, no en la raíz que ve el servicio.
+func TestSeedVolumeOnlyOnce(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "vacio")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustChmod(t, src, 0o770)
+	img := statImageDir(src)
+	root := nuevoVolumen(t)
+	if seeded, err := seedVolume(root, "", img); err != nil || !seeded {
+		t.Fatalf("first seedVolume = %v, %v", seeded, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "lost+found", seedMark)); err != nil {
+		t.Errorf("no mark in lost+found: %v", err)
+	}
+	if names, _ := os.ReadDir(root); len(names) != 1 {
+		t.Errorf("volume root has %d entries, want only lost+found", len(names))
+	}
+	mustChmod(t, root, 0o700)
+	if seeded, err := seedVolume(root, "", img); err != nil || seeded {
+		t.Fatalf("second seedVolume = %v, %v; want untouched", seeded, err)
+	}
+	if st := statT(t, root); st.Mode&0o7777 != 0o700 {
+		t.Errorf("root mode = %04o: the user's chmod was undone", st.Mode&0o7777)
+	}
+}
+
+// Una copia que falla no marca el volumen: el siguiente arranque la reintenta.
+func TestSeedVolumeRetriesAFailedCopy(t *testing.T) {
+	src := imagenGrafana(t)
+	img := statImageDir(src)
+	root := nuevoVolumen(t)
+	t.Cleanup(func() { os.Chmod(filepath.Join(root, "plugins", "ro"), 0o755) })
+	if seeded, err := seedVolume(root, filepath.Join(src, "no-existe"), img); err != nil || !seeded {
+		t.Fatalf("seedVolume = %v, %v", seeded, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "lost+found", seedMark)); !os.IsNotExist(err) {
+		t.Errorf("failed copy marked as done: %v", err)
+	}
+	if seeded, err := seedVolume(root, img.path, img); err != nil || !seeded {
+		t.Fatalf("retry seedVolume = %v, %v", seeded, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "grafana.ini")); err != nil {
+		t.Errorf("retry did not copy: %v", err)
+	}
+}
+
+// El arranque de verdad: el volumen se monta en su sitio, sobre el directorio
+// de la imagen; si hace falta heredar se quita, se rellena aparte y vuelve. El
+// segundo arranque no desmonta nada.
+func TestInheritImageDirOnExt4(t *testing.T) {
+	dev := loopExt4(t)
+	src := imagenGrafana(t)
+	v := VolumeSpec{device: dev, mount: src}
+	img := statImageDir(src)
+	if err := mountVolume(v); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Unmount(src, syscall.MNT_DETACH) })
+	if err := inheritImageDir(v, img); err != nil {
+		t.Fatal(err)
+	}
+	// Lo que se ve en el punto de montaje es el volumen (tiene la marca) con
+	// lo de la imagen dentro.
+	if _, err := os.Lstat(filepath.Join(src, "lost+found", seedMark)); err != nil {
+		t.Fatalf("volume not mounted back in place: %v", err)
+	}
+	if st := statT(t, src); st.Mode&0o7777 != 0o2770 || st.Uid != 472 {
+		t.Errorf("volume root = %d %04o, want 472 2770", st.Uid, st.Mode&0o7777)
+	}
+	if b, err := os.ReadFile(filepath.Join(src, "grafana.ini")); err != nil || string(b) != "[server]\n" {
+		t.Errorf("grafana.ini = %q, %v", b, err)
+	}
+	if err := syscall.Unmount(src, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := mountVolume(v); err != nil {
+		t.Fatal(err)
+	}
+	if err := inheritImageDir(v, img); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(mountinfo(t), " "+src+" "); n != 1 {
+		t.Errorf("%s mounted %d times after a second boot, want 1", src, n)
+	}
+}
+
+func mountinfo(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

@@ -15,6 +15,12 @@ package guest
 // se negocian: solo un volumen virgen (nada más que lost+found) y nunca uno de
 // solo lectura. Un volumen con datos es del usuario, aunque lo que tenga sea
 // basura.
+//
+// Y solo una vez: al acabar se deja una marca dentro de lost+found (seedMark).
+// Sin ella, cada arranque de un servicio que aún no ha escrito nada volvería a
+// recorrer la imagen y a poner el dueño y el modo, deshaciendo un chmod que el
+// usuario hiciera en la raíz. Va en lost+found y no en la raíz porque ahí no la
+// ve nadie: un initdb que exige un directorio vacío no la encuentra.
 
 import (
 	"errors"
@@ -41,6 +47,8 @@ const (
 	// copia, el siguiente arranque lo borra y empieza de nuevo, en vez de dejar
 	// para siempre un volumen a medio rellenar.
 	seedTmp = ".kling-seed"
+	// seedMark, dentro de lost+found, dice que el volumen ya heredó lo suyo.
+	seedMark = ".kling-seeded"
 )
 
 // imageDir es lo que la imagen tiene en un punto de montaje, leído ANTES de
@@ -92,32 +100,64 @@ func volumeIsVirgin(root string) (bool, error) {
 	return true, nil
 }
 
+// volumeNeedsSeed dice si un volumen aún tiene que heredar el directorio de la
+// imagen: virgen y sin la marca de haberlo hecho ya.
+func volumeNeedsSeed(root string) (bool, error) {
+	virgin, err := volumeIsVirgin(root)
+	if err != nil || !virgin {
+		return false, err
+	}
+	_, err = os.Lstat(filepath.Join(root, "lost+found", seedMark))
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
+}
+
+// markSeeded deja la marca de volumeNeedsSeed. Sin lost+found (alguien lo
+// borró) no hay dónde ponerla, y el volumen se trata como antes: virgen hasta
+// que tenga algo.
+func markSeeded(root string) error {
+	f, err := os.OpenFile(filepath.Join(root, "lost+found", seedMark),
+		os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 // seedVolume hace que la raíz de un volumen virgen montado en root herede el
 // dueño y el modo de img y, si src no está vacío y pesa poco, una copia de su
-// contenido. Un volumen con datos no se toca.
+// contenido. Un volumen con datos, o que ya heredó, no se toca.
 //
 // Devuelve si lo tocó. Un fallo copiando el contenido no es un error: se avisa,
 // se deshace la copia y el volumen se queda con el dueño y el modo, que es lo
-// que el servicio necesita para escribir; el siguiente arranque lo reintenta.
+// que el servicio necesita para escribir; no se marca, y el siguiente arranque
+// lo reintenta.
 func seedVolume(root, src string, img *imageDir) (bool, error) {
-	virgin, err := volumeIsVirgin(root)
-	if err != nil || !virgin {
+	needs, err := volumeNeedsSeed(root)
+	if err != nil || !needs {
 		return false, err
 	}
 	tmp := filepath.Join(root, seedTmp)
 	if err := os.RemoveAll(tmp); err != nil {
 		return false, err
 	}
-	copied := false
+	copied, done := false, true
 	if src != "" {
 		if fits, err := seedFits(src, img.dev); err != nil {
 			log.Printf("volume %s: not copying the image's content: %v", root, err)
+			done = false
 		} else if !fits {
 			log.Printf("volume %s: the image's content is over %d MiB or %d entries; "+
 				"the volume gets only its owner and mode", root, seedMaxBytes>>20, seedMaxEntries)
 		} else if err := copyTree(src, tmp, img.dev); err != nil {
 			log.Printf("volume %s: copying the image's content: %v", root, err)
 			os.RemoveAll(tmp)
+			done = false
 		} else {
 			copied = true
 		}
@@ -132,19 +172,24 @@ func seedVolume(root, src string, img *imageDir) (bool, error) {
 	if err := syscall.Chmod(root, img.mode); err != nil {
 		return false, err
 	}
-	if !copied {
-		return true, nil
-	}
-	entries, err := os.ReadDir(tmp)
-	if err != nil {
-		return false, err
-	}
-	for _, e := range entries {
-		if err := os.Rename(filepath.Join(tmp, e.Name()), filepath.Join(root, e.Name())); err != nil {
+	if copied {
+		entries, err := os.ReadDir(tmp)
+		if err != nil {
+			return false, err
+		}
+		for _, e := range entries {
+			if err := os.Rename(filepath.Join(tmp, e.Name()), filepath.Join(root, e.Name())); err != nil {
+				return false, err
+			}
+		}
+		if err := os.Remove(tmp); err != nil {
 			return false, err
 		}
 	}
-	return true, os.Remove(tmp)
+	if done {
+		return true, markSeeded(root)
+	}
+	return true, nil
 }
 
 // seedSkip dice qué entradas de primer nivel de la imagen no se copian:

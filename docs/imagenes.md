@@ -354,6 +354,10 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
   el modo. Así un servicio sin root (`grafana`: `USER 472`, `VOLUME
   /var/lib/grafana`) puede escribir en él. Un volumen con algo más dentro no se
   toca nunca, ni uno de solo lectura; los atributos extendidos no se copian.
+  Se hace una sola vez: queda una marca en `lost+found/.kling-seeded`, así que
+  un `chmod` en la raíz de un volumen aún vacío no se deshace al reiniciar, y
+  los arranques siguientes no vuelven a montar ni a recorrer nada. Una copia
+  que falla no se marca y se reintenta en el siguiente arranque.
 - **El `lost+found` sigue ahí**: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un

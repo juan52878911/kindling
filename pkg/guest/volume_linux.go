@@ -36,47 +36,12 @@ func mountVolumes() ([]VolumeSpec, error) {
 		if err := os.MkdirAll(v.mount, 0o755); err != nil {
 			return nil, fmt.Errorf("creating %s: %w", v.mount, err)
 		}
-		if img != nil && img.content {
-			seedFromImage(v.device, img)
+		if err := mountVolume(v); err != nil {
+			return nil, err
 		}
-		// data=ordered es el defecto de ext4 y aquí importa que lo sea:
-		// garantiza que los datos llegan al disco ANTES que los metadatos que
-		// los referencian. Sin eso, un corte a destiempo deja ficheros del
-		// tamaño correcto llenos de basura, que es peor que no tenerlos.
-		flags, opts := uintptr(0), "data=ordered"
-		if v.readOnly {
-			// noload además de MS_RDONLY: sin él, ext4 intentaría REPRODUCIR el
-			// journal al montar, que es una escritura — y varias microVMs
-			// reproduciéndolo a la vez sobre el mismo fichero es exactamente la
-			// corrupción que el modo de solo lectura viene a evitar.
-			flags, opts = syscall.MS_RDONLY, "noload"
-		}
-		if err := syscall.Mount(v.device, v.mount, "ext4", flags, opts); err != nil {
-			// EACCES sobre un disco que el VMM marcó de solo lectura casi
-			// siempre significa que este puente no entendió el modo y pidió
-			// montarlo en escritura. Pasa cuando la imagen lleva un puente
-			// anterior a los volúmenes compartidos: interpreta el ":ro" como
-			// parte del nombre del directorio.
-			//
-			// Merece un mensaje propio porque el puente es PID 1: al morir, el
-			// kernel entra en pánico, y un pánico es un sitio pésimo para
-			// deducir que hay que reconstruir una imagen.
-			if errors.Is(err, syscall.EACCES) && !v.readOnly {
-				return nil, fmt.Errorf("mounting %s at %s: %w.\n"+
-					"The disk appears to be READ-ONLY and this bridge requested it writable.\n"+
-					"Usually means an image with an old bridge: rebuild it with `kling add`",
-					v.device, v.mount, err)
-			}
-			return nil, fmt.Errorf("mounting %s at %s: %w", v.device, v.mount, err)
-		}
-		if img != nil && !img.content {
-			// Sin contenido que copiar basta con el dueño y el modo, y eso se
-			// puede hacer ya montado: sin segundo montaje.
-			if seeded, err := seedVolume(v.mount, "", img); err != nil {
-				log.Printf("volume %s: could not take the image's owner and mode: %v", v.mount, err)
-			} else if seeded {
-				log.Printf("volume %s: new, took the image's owner %d:%d and mode %04o",
-					v.mount, img.uid, img.gid, img.mode)
+		if img != nil {
+			if err := inheritImageDir(v, img); err != nil {
+				return nil, err
 			}
 		}
 		if v.readOnly {
@@ -86,6 +51,77 @@ func mountVolumes() ([]VolumeSpec, error) {
 		}
 	}
 	return specs, nil
+}
+
+// mountVolume monta un volumen en su sitio.
+func mountVolume(v VolumeSpec) error {
+	// data=ordered es el defecto de ext4 y aquí importa que lo sea:
+	// garantiza que los datos llegan al disco ANTES que los metadatos que
+	// los referencian. Sin eso, un corte a destiempo deja ficheros del
+	// tamaño correcto llenos de basura, que es peor que no tenerlos.
+	flags, opts := uintptr(0), "data=ordered"
+	if v.readOnly {
+		// noload además de MS_RDONLY: sin él, ext4 intentaría REPRODUCIR el
+		// journal al montar, que es una escritura — y varias microVMs
+		// reproduciéndolo a la vez sobre el mismo fichero es exactamente la
+		// corrupción que el modo de solo lectura viene a evitar.
+		flags, opts = syscall.MS_RDONLY, "noload"
+	}
+	if err := syscall.Mount(v.device, v.mount, "ext4", flags, opts); err != nil {
+		// EACCES sobre un disco que el VMM marcó de solo lectura casi
+		// siempre significa que este puente no entendió el modo y pidió
+		// montarlo en escritura. Pasa cuando la imagen lleva un puente
+		// anterior a los volúmenes compartidos: interpreta el ":ro" como
+		// parte del nombre del directorio.
+		//
+		// Merece un mensaje propio porque el puente es PID 1: al morir, el
+		// kernel entra en pánico, y un pánico es un sitio pésimo para
+		// deducir que hay que reconstruir una imagen.
+		if errors.Is(err, syscall.EACCES) && !v.readOnly {
+			return fmt.Errorf("mounting %s at %s: %w.\n"+
+				"The disk appears to be READ-ONLY and this bridge requested it writable.\n"+
+				"Usually means an image with an old bridge: rebuild it with `kling add`",
+				v.device, v.mount, err)
+		}
+		return fmt.Errorf("mounting %s at %s: %w", v.device, v.mount, err)
+	}
+	return nil
+}
+
+// inheritImageDir hace que un volumen ya montado herede el directorio que la
+// imagen tiene debajo (ver volume_seed_linux.go).
+//
+// Lo normal es que no haga falta: el volumen tiene datos o ya heredó, y eso
+// cuesta un ReadDir. Solo uno que aún lo necesita se desmonta, se rellena
+// montado aparte y se vuelve a montar. Nada de esto es fatal salvo volver a
+// montarlo.
+func inheritImageDir(v VolumeSpec, img *imageDir) error {
+	needs, err := volumeNeedsSeed(v.mount)
+	if err != nil {
+		log.Printf("volume %s: not inheriting the image's directory: %v", v.mount, err)
+		return nil
+	}
+	if !needs {
+		return nil
+	}
+	if !img.content {
+		// Sin contenido que copiar basta con el dueño y el modo, y eso se
+		// puede hacer ya montado: sin segundo montaje.
+		if seeded, err := seedVolume(v.mount, "", img); err != nil {
+			log.Printf("volume %s: could not take the image's owner and mode: %v", v.mount, err)
+		} else if seeded {
+			log.Printf("volume %s: new, took the image's owner %d:%d and mode %04o",
+				v.mount, img.uid, img.gid, img.mode)
+		}
+		return nil
+	}
+	// Montado en su sitio tapa justo lo que hay que copiar.
+	if err := syscall.Unmount(v.mount, 0); err != nil {
+		log.Printf("volume %s: not seeding from the image: %v", v.mount, err)
+		return nil
+	}
+	seedFromImage(v.device, img)
+	return mountVolume(v)
 }
 
 // seedFromImage rellena un volumen virgen con lo que la imagen tiene en su
