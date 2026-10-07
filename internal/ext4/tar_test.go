@@ -101,6 +101,54 @@ func TestAddTarOpaqueWhiteout(t *testing.T) {
 	}
 }
 
+// Con /usr unificado (bin -> usr/bin), los ".wh." que llegan por bin/ actúan
+// sobre usr/bin, igual que los ficheros que llegan por ahí: antes se buscaba
+// el directorio sin seguir el enlace y se ignoraban en silencio. Lo que la
+// capa mete por cualquiera de los dos caminos sobrevive al opaco.
+func TestAddTarWhiteoutThroughDirSymlink(t *testing.T) {
+	r := aplica(t,
+		capa(t, dir("usr"), dir("usr/bin"), simb("bin", "usr/bin"),
+			fich("usr/bin/x", "x"), fich("usr/bin/y", "y"), dir("usr/lib"), simb("lib", "usr/lib"),
+			fich("usr/lib/viejo", "v")),
+		capa(t,
+			fich("bin/.wh.x", ""),
+			fich("usr/lib/nuevo-largo", "1"), fich("lib/nuevo-corto", "2"),
+			fich("lib/.wh..wh..opq", "")),
+	)
+	for _, p := range []string{"/usr/bin/x", "/usr/lib/viejo"} {
+		if existe(r, p) {
+			t.Errorf("%s sigue ahí", p)
+		}
+	}
+	for _, p := range []string{"/usr/bin/y", "/usr/lib/nuevo-largo", "/usr/lib/nuevo-corto"} {
+		if !existe(r, p) {
+			t.Errorf("%s ha desaparecido", p)
+		}
+	}
+	for _, p := range []string{"/bin", "/lib"} {
+		if n := r.Lookup(p); n == nil || !n.IsLink() {
+			t.Errorf("%s ya no es un enlace simbólico", p)
+		}
+	}
+}
+
+// Un ".wh." no sale de Prefix por un enlace: x -> / es la raíz de la capa.
+func TestAddTarWhiteoutNoSaleDelPrefijo(t *testing.T) {
+	root := NewDir(0o755, 0, 0, time.Unix(0, 0))
+	if err := root.Put("/etc/passwd", &Node{Mode: ModeReg}, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range []string{"/", "../../.."} {
+		c := capa(t, simb("x", x), fich("x/etc/.wh.passwd", ""), fich("../etc/.wh.passwd", ""))
+		if err := root.AddTar(c, TarOptions{Prefix: "/android", Whiteouts: true}); err != nil {
+			t.Fatalf("x -> %s: %v", x, err)
+		}
+		if !existe(root, "/etc/passwd") {
+			t.Fatalf("x -> %s: un whiteout borró /etc/passwd, fuera del prefijo", x)
+		}
+	}
+}
+
 // Con /usr unificado (bin -> usr/bin), un enlace duro a bin/busybox
 // encuentra usr/bin/busybox, y uno cuyo nombre pasa por el enlace también.
 func TestAddTarHardLinkThroughDirSymlink(t *testing.T) {
@@ -152,6 +200,34 @@ func TestAddTarHardLinkErrors(t *testing.T) {
 		root := NewDir(0o755, 0, 0, time.Unix(0, 0))
 		if err := root.AddTar(capa(t, c.capa...), TarOptions{Whiteouts: true}); err == nil {
 			t.Errorf("%s: sin error", c.nombre)
+		}
+	}
+}
+
+// Con Prefix, lo que hay en el árbol fuera del prefijo existe de verdad: un
+// enlace duro no puede llegar a él ni por un enlace que sube (x -> ../../..
+// o x -> /, que dentro de la capa son su raíz) ni con "..". Sin un fichero
+// fuera, el test de arriba pasaría aunque se resolviera desde la raíz.
+func TestAddTarHardLinkNoSaleDelPrefijo(t *testing.T) {
+	for _, c := range []struct {
+		nombre string
+		capa   []entrada
+	}{
+		{"x -> ../../..", []entrada{simb("x", "../../.."), duro("h", "x/etc/passwd")}},
+		{"x -> /", []entrada{simb("x", "/"), duro("h", "x/etc/passwd")}},
+		{"../etc/passwd", []entrada{duro("h", "../etc/passwd")}},
+		{"/etc/passwd", []entrada{duro("h", "/etc/passwd")}},
+	} {
+		root := NewDir(0o755, 0, 0, time.Unix(0, 0))
+		if err := root.Put("/etc/passwd", &Node{Mode: ModeReg}, time.Unix(0, 0)); err != nil {
+			t.Fatal(err)
+		}
+		err := root.AddTar(capa(t, c.capa...), TarOptions{Prefix: "/android", Whiteouts: true})
+		if err == nil {
+			t.Errorf("%s: enlazó /etc/passwd, fuera del prefijo", c.nombre)
+		}
+		if h := root.Lookup("/android/h"); h != nil {
+			t.Errorf("%s: dejó /android/h", c.nombre)
 		}
 	}
 }
