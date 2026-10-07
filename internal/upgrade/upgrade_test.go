@@ -103,6 +103,8 @@ type daemonFalso struct {
 	// en cada Info, con la versión que corre.
 	mudo        string
 	alPreguntar func(version string)
+	// alCongelar corre en cada Freeze; si devuelve error, el freeze falla.
+	alCongelar func(id string) error
 }
 
 func (d *daemonFalso) Info(context.Context) (*api.Info, error) {
@@ -120,7 +122,30 @@ func (d *daemonFalso) Info(context.Context) (*api.Info, error) {
 func (d *daemonFalso) List(context.Context) ([]*api.Machine, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.caido {
+		return nil, errors.New("connection refused")
+	}
 	return append([]*api.Machine(nil), d.maquinas...), nil
+}
+
+func (d *daemonFalso) Freeze(_ context.Context, id string) (*api.Machine, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.caido {
+		return nil, errors.New("connection refused")
+	}
+	if d.alCongelar != nil {
+		if err := d.alCongelar(id); err != nil {
+			return nil, err
+		}
+	}
+	for _, m := range d.maquinas {
+		if m.ID == id {
+			m.State = api.StateWarm
+			return m, nil
+		}
+	}
+	return nil, errors.New("no such machine")
 }
 
 func (d *daemonFalso) Snapshots(context.Context) ([]*api.Snapshot, error) {
@@ -137,12 +162,18 @@ type servicioFalso struct {
 	binario    string
 	llamadas   []string
 	alArrancar func(version string) error
+	// alParar corre al parar, con la versión que corría: lo que escribe el
+	// daemon al apagarse.
+	alParar func(version string)
 }
 
 func (s *servicioFalso) String() string { return "fake.service" }
 
 func (s *servicioFalso) Parar(context.Context) error {
 	s.llamadas = append(s.llamadas, "stop")
+	if s.alParar != nil {
+		s.alParar(s.d.version)
+	}
 	s.d.mu.Lock()
 	s.d.caido = true
 	s.d.mu.Unlock()
@@ -769,5 +800,195 @@ func TestRedireccionAHTTPSeRechaza(t *testing.T) {
 	_, err := f.Bajar(context.Background(), "v1.1.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "only downloaded over https") {
 		t.Fatalf("err = %v, want the https refusal", err)
+	}
+}
+
+// despertarYPerder es un daemon nuevo que despierta la congelada aaaa (un
+// cliente la pidió en cuanto contestó) y pierde el dorado pg: verificar falla
+// con la congelada ya corriendo y escribiendo en su disco.
+func (m *montaje) despertarYPerder() {
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			m.d.mu.Lock()
+			m.d.maquinas = []*api.Machine{{ID: "aaaa", State: api.StateRunning}, {ID: "bbbb", State: api.StateRunning}}
+			m.d.dorados = nil
+			m.d.mu.Unlock()
+		}
+		return nil
+	}
+	m.d.alCongelar = func(id string) error {
+		m.svc.llamadas = append(m.svc.llamadas, "freeze "+id)
+		return nil
+	}
+}
+
+// Volver atrás deja el state.json de antes, donde aaaa está congelada: antes
+// de parar se congela otra vez con el daemon nuevo, o el viejo la despertaría
+// con un mem.file más viejo que su disco.
+func TestVueltaAtrasRecongelaLasQueDesperto(t *testing.T) {
+	m := nuevoMontaje(t)
+	m.despertarYPerder()
+	_, err := Actualizar(context.Background(), m.opciones())
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo != nil {
+		t.Fatalf("err = %v\n%s", err, m.out.String())
+	}
+	if got := strings.Join(m.svc.llamadas, ","); got != "stop,start,freeze aaaa,stop,start" {
+		t.Errorf("calls %s, want aaaa frozen again before stopping the new daemon", got)
+	}
+	if m.d.version != "v1.0.0" {
+		t.Errorf("daemon at %s", m.d.version)
+	}
+}
+
+// Si no se puede congelar otra vez, no se vuelve atrás (salvo -force): el
+// nuevo sigue corriendo y se dice cuál, y la copia se queda para -rollback.
+func TestVueltaAtrasSinRecongelarSeNiega(t *testing.T) {
+	m := nuevoMontaje(t)
+	m.despertarYPerder()
+	m.d.alCongelar = func(string) error { return errors.New("it has secrets") }
+	_, err := Actualizar(context.Background(), m.opciones())
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo == nil || !strings.Contains(err.Error(), "not rolled back") || !strings.Contains(err.Error(), "aaaa") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(m.svc.llamadas, ","); got != "stop,start" || m.d.version != "v1.1.0" {
+		t.Errorf("calls %s, daemon %s: the new one must keep running", got, m.d.version)
+	}
+	if _, err := os.Stat(va.Copia); err != nil {
+		t.Error("the backup must stay for -rollback")
+	}
+
+	m = nuevoMontaje(t)
+	m.despertarYPerder()
+	m.d.alCongelar = func(string) error { return errors.New("it has secrets") }
+	o := m.opciones()
+	o.Forzar = true
+	if _, err := Actualizar(context.Background(), o); !errors.As(err, &va) || va.Fallo != nil {
+		t.Fatalf("-force: %v", err)
+	}
+	if m.d.version != "v1.0.0" {
+		t.Errorf("-force did not roll back: %s", m.d.version)
+	}
+}
+
+// -rollback hace lo mismo con la copia de la migración (state.json.v0.bak):
+// congela otra vez lo que el nuevo despertó, y si el daemon no contesta y su
+// state.json dice que corre, se niega sin tocar nada.
+func TestVolverAtrasRecongela(t *testing.T) {
+	prep := func(t *testing.T) (*montaje, Opciones) {
+		m := nuevoMontaje(t)
+		m.svc.alArrancar = func(v string) error {
+			if v == "v1.1.0" {
+				os.WriteFile(filepath.Join(m.raiz, "state.json.v0.bak"), []byte(estadoV0), 0o600)
+				os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(`{"schema":1,"machines":[{"id":"aaaa","state":"running"}]}`), 0o600)
+			}
+			return nil
+		}
+		o := m.opciones()
+		if _, err := Actualizar(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+		m.d.maquinas[0].State = api.StateRunning
+		m.d.alCongelar = func(id string) error {
+			m.svc.llamadas = append(m.svc.llamadas, "freeze "+id)
+			return nil
+		}
+		m.svc.llamadas = nil
+		return m, o
+	}
+	m, o := prep(t)
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(m.svc.llamadas, ","); got != "freeze aaaa,stop,start" {
+		t.Errorf("calls %s", got)
+	}
+
+	m, o = prep(t)
+	m.d.caido = true
+	_, err := VolverAtras(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "aaaa") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(m.svc.llamadas) != 0 || leer(t, m.bin) != string(m.nuevo) {
+		t.Errorf("something changed: %v", m.svc.llamadas)
+	}
+	o.Forzar = true
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("-force: %v", err)
+	}
+	if leer(t, m.bin) != string(m.viejo) {
+		t.Error("-force did not roll back")
+	}
+}
+
+// -rollback con el daemon caído (el nuevo no arranca tras un reinicio): se
+// para y arranca por su servicio y se espera al viejo, que contesta solo
+// después de arrancarlo.
+func TestVolverAtrasConElDaemonCaido(t *testing.T) {
+	m := nuevoMontaje(t)
+	o := m.opciones()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	m.d.caido = true
+	m.svc.llamadas = nil
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if m.d.version != "v1.0.0" || m.d.caido || leer(t, m.bin) != string(m.viejo) {
+		t.Errorf("daemon %s down=%v", m.d.version, m.d.caido)
+	}
+	if got := strings.Join(m.svc.llamadas, ","); got != "stop,start" {
+		t.Errorf("calls %s", got)
+	}
+}
+
+// La copia del state.json se toma ya parado el daemon: lo que el viejo
+// escribió al apagarse (o mientras se bajaba la release) vuelve con él.
+func TestLaCopiaDelEstadoEsDespuesDeParar(t *testing.T) {
+	m := nuevoMontaje(t)
+	ultimo := `[{"id":"aaaa","state":"frozen"},{"id":"cccc","state":"frozen"}]`
+	m.svc.alParar = func(v string) {
+		if v == "v1.0.0" {
+			os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(ultimo), 0o600)
+		}
+	}
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(`{"schema":1,"machines":[]}`), 0o600)
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	_, err := Actualizar(context.Background(), m.opciones())
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got := leer(t, filepath.Join(m.raiz, "state.json")); got != ultimo {
+		t.Errorf("state.json = %s, want what the old daemon wrote when it stopped", got)
+	}
+}
+
+// Dos upgrades a la vez sobre la misma raíz: el segundo no toca nada.
+func TestDosUpgradesALaVez(t *testing.T) {
+	m := nuevoMontaje(t)
+	o := m.opciones()
+	soltar, err := bloquear(o.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Actualizar(context.Background(), o); err == nil || !strings.Contains(err.Error(), "another kling upgrade") {
+		t.Fatalf("err = %v", err)
+	}
+	m.noTocado(t)
+	if _, err := VolverAtras(context.Background(), o); err == nil || !strings.Contains(err.Error(), "another kling upgrade") {
+		t.Fatalf("rollback: %v", err)
+	}
+	soltar()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("after the other one finished: %v", err)
 	}
 }

@@ -43,6 +43,9 @@ type Daemon interface {
 	Info(ctx context.Context) (*api.Info, error)
 	List(ctx context.Context) ([]*api.Machine, error)
 	Snapshots(ctx context.Context) ([]*api.Snapshot, error)
+	// Freeze vuelve a congelar, antes de volver atrás, lo que el daemon nuevo
+	// despertó (recongelar).
+	Freeze(ctx context.Context, ref string) (*api.Machine, error)
 }
 
 // Opciones de una actualización o de una vuelta atrás.
@@ -68,7 +71,9 @@ type Opciones struct {
 	// macOS, que kling-vz lleve el permiso de virtualización.
 	Validar func(bajados map[string]string) error
 
-	Forzar bool // la misma versión, o una anterior
+	// Forzar instala la misma versión o una anterior, y vuelve atrás aunque
+	// no se puedan volver a congelar las máquinas que el nuevo despertó.
+	Forzar bool
 	EnSeco bool // el plan y nada más
 	// Plazo para que el daemon nuevo conteste con su versión. 0 = 60 s.
 	Plazo time.Duration
@@ -135,6 +140,11 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 	if o.Fuente == nil {
 		o.Fuente = &Fuente{}
 	}
+	soltar, err := bloquear(o.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer soltar()
 	res := &Resultado{Desde: o.Actual}
 	if o.Daemon != nil {
 		info, err := o.Daemon.Info(ctx)
@@ -289,6 +299,16 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 			return nil, fmt.Errorf("stopping %s: %v (nothing was changed)", o.Servicio, err)
 		}
 	}
+	// El state.json se copia ya parado el daemon, y no con los binarios: lo
+	// que el viejo escribiera entre tanto (crear, despertar) se perdería al
+	// volver atrás.
+	if err := copia.guardarEstado(); err != nil {
+		if o.Servicio != nil {
+			_ = o.orden(fijo, o.Servicio.Arrancar)
+		}
+		os.RemoveAll(copia.dir)
+		return nil, fmt.Errorf("backing up %s: %v (nothing was changed)", filepath.Join(o.Raiz, "state.json"), err)
+	}
 	causa := func() error {
 		for _, p := range o.Piezas {
 			if err := colocar(bajados[p.Asset.Nombre], p.Destino); err != nil {
@@ -320,6 +340,14 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 	}
 	o.printf("upgrade failed: %v\nrolling back to %s\n", causa, res.Desde)
 	if o.Servicio != nil {
+		if err := o.recongelar(fijo, copia.estadoARestaurar(true)); err != nil {
+			if !o.Forzar {
+				o.printf("not rolling back: %v\n", err)
+				return res, &ErrVueltaAtras{Causa: causa, Copia: copia.dir,
+					Fallo: fmt.Errorf("not rolled back, %s is still running: %v (kling upgrade -rollback -force rolls back anyway)", o.Servicio, err)}
+			}
+			o.printf("rolling back anyway (-force): %v\n", err)
+		}
 		// Puede estar corriendo (verificar falló) o caído: parado, en todo caso.
 		_ = o.orden(fijo, o.Servicio.Parar)
 	}
@@ -351,6 +379,11 @@ func (o *Opciones) orden(ctx context.Context, f func(context.Context) error) err
 // nombre). Lo creado después en esos ficheros se pierde, como dice
 // docs/actualizar.md §6.
 func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
+	soltar, err := bloquear(o.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer soltar()
 	c, err := ultimaCopia(o.Dir)
 	if err != nil {
 		return nil, err
@@ -378,6 +411,12 @@ func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
 	// Como en Actualizar: una vez parado, una señal no deja nada a medias.
 	fijo := context.WithoutCancel(ctx)
 	if o.Servicio != nil {
+		if err := o.recongelar(fijo, c.estadoARestaurar(false)); err != nil {
+			if !o.Forzar {
+				return nil, fmt.Errorf("%v\nnothing was changed (-force rolls back anyway)", err)
+			}
+			o.printf("rolling back anyway (-force): %v\n", err)
+		}
 		if err := o.orden(fijo, o.Servicio.Parar); err != nil {
 			_ = o.orden(fijo, o.Servicio.Arrancar)
 			return nil, fmt.Errorf("stopping %s: %v (nothing was changed)", o.Servicio, err)
@@ -445,20 +484,45 @@ func guardarCopia(o Opciones, desde, hacia string) (*copia, error) {
 		}
 		c.Piezas = append(c.Piezas, piezaCopia{Destino: p.Destino, Copia: nombre})
 	}
-	if o.Raiz != "" {
-		est := filepath.Join(o.Raiz, "state.json")
-		if _, err := os.Stat(est); err == nil {
-			if err := colocar(est, filepath.Join(dir, "state.json")); err != nil {
-				return falla(err)
-			}
-			c.Estado = "state.json"
-		}
-		c.Baks = baks(o.Raiz)
-	}
 	if err := c.escribir(); err != nil {
 		return falla(err)
 	}
 	return c, nil
+}
+
+// guardarEstado añade a la copia el state.json y la lista de copias de
+// migración que hay: con el daemon ya parado, para que sea lo último que
+// escribió.
+func (c *copia) guardarEstado() error {
+	if c.Raiz == "" {
+		return nil
+	}
+	est := filepath.Join(c.Raiz, "state.json")
+	if _, err := os.Stat(est); err == nil {
+		if err := colocar(est, filepath.Join(c.dir, "state.json")); err != nil {
+			return err
+		}
+		c.Estado = "state.json"
+	}
+	c.Baks = baks(c.Raiz)
+	return c.escribir()
+}
+
+// estadoARestaurar es el state.json que volver atrás va a dejar en la raíz:
+// el de la copia (conEstado, la vuelta atrás automática) o, si no, el
+// state.json.v<N>.bak que dejó la migración del daemon nuevo. Vacío = el de
+// ahora se queda.
+func (c *copia) estadoARestaurar(conEstado bool) string {
+	if conEstado && c.Estado != "" && c.Raiz != "" {
+		return filepath.Join(c.dir, c.Estado)
+	}
+	est := filepath.Join(c.Raiz, "state.json")
+	for _, b := range bakNuevos(c) {
+		if sinBak(b) == est {
+			return b
+		}
+	}
+	return ""
 }
 
 func (c *copia) escribir() error {
@@ -835,4 +899,102 @@ func (o *Opciones) verificar(espera, fijo context.Context, v string, antes *foto
 		return fmt.Errorf("the new daemon lost things: %s", strings.Join(falta, "; "))
 	}
 	return nil
+}
+
+// ---- volver atrás sin romper las congeladas
+
+// recongelar vuelve a congelar, con el daemon que corre ahora, las máquinas
+// que están congeladas en ruta (el state.json que volver atrás va a dejar) y
+// que ahora corren o están en pausa: el daemon nuevo las despertó (un cliente
+// las pidió en cuanto contestó) y siguen escribiendo en su disco. Si el viejo
+// las leyera congeladas, el próximo despertar cargaría el mem.file de antes
+// sobre un disco cambiado después: memoria y disco ya no casan y el sistema
+// de ficheros del invitado puede romperse sin que nadie lo diga. El VMM no
+// cambia entre releases, así que el mem.file que escribe el nuevo lo lee el
+// viejo. Si no se puede (no contesta, o el freeze falla), se dice cuáles.
+func (o *Opciones) recongelar(ctx context.Context, ruta string) error {
+	if ruta == "" || o.Daemon == nil {
+		return nil
+	}
+	antes, err := estadosEn(ruta)
+	if err != nil {
+		return nil // ilegible: el daemon viejo lo apartará igual que ahora
+	}
+	congeladas := map[string]bool{}
+	for id, st := range antes {
+		if st == api.StateWarm || st == "warm" {
+			congeladas[id] = true
+		}
+	}
+	if len(congeladas) == 0 {
+		return nil
+	}
+	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ms, err := o.Daemon.List(lctx)
+	cancel()
+	if err != nil {
+		// No contesta: lo que diga el state.json que escribió.
+		ahora, _ := estadosEn(filepath.Join(o.Raiz, "state.json"))
+		var despiertas []string
+		for id := range congeladas {
+			if despierta(ahora[id]) {
+				despiertas = append(despiertas, id)
+			}
+		}
+		if len(despiertas) == 0 {
+			return nil
+		}
+		sort.Strings(despiertas)
+		return fmt.Errorf("machines %s were frozen before the upgrade and the new daemon woke them, but it does not answer to freeze them again (%v): "+
+			"rolling back would later wake them on a memory snapshot older than their disk", strings.Join(despiertas, ", "), err)
+	}
+	var mal []string
+	for _, m := range ms {
+		if !congeladas[m.ID] || !despierta(m.State) {
+			continue
+		}
+		o.printf("freezing %s again (the new daemon woke it; the old one has it frozen)\n", m.ID)
+		fctx, cancel := context.WithTimeout(ctx, plazoOrden)
+		_, err := o.Daemon.Freeze(fctx, m.ID)
+		cancel()
+		if err != nil {
+			mal = append(mal, fmt.Sprintf("%s (%v)", m.ID, err))
+		}
+	}
+	if len(mal) > 0 {
+		sort.Strings(mal)
+		return fmt.Errorf("machines frozen before the upgrade could not be frozen again: %s; "+
+			"rolling back would later wake them on a memory snapshot older than their disk", strings.Join(mal, "; "))
+	}
+	return nil
+}
+
+func despierta(st api.State) bool { return st == api.StateRunning || st == api.StatePaused }
+
+// estadosEn lee de un state.json, en cualquiera de sus versiones (v0 es una
+// lista; desde v1, un objeto con "machines"), el estado de cada máquina.
+func estadosEn(ruta string) (map[string]api.State, error) {
+	b, err := os.ReadFile(ruta)
+	if err != nil {
+		return nil, err
+	}
+	type maquina struct {
+		ID    string    `json:"id"`
+		State api.State `json:"state"`
+	}
+	var lista []maquina
+	if err := json.Unmarshal(b, &lista); err != nil {
+		var f struct {
+			Machines []maquina `json:"machines"`
+		}
+		if err := json.Unmarshal(b, &f); err != nil {
+			return nil, err
+		}
+		lista = f.Machines
+	}
+	out := make(map[string]api.State, len(lista))
+	for _, m := range lista {
+		out[m.ID] = m.State
+	}
+	return out, nil
 }
