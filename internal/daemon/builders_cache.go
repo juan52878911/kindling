@@ -38,6 +38,10 @@ import (
 // root desde que nace, sin ACL, sin otros enlaces duros que el constructor
 // guarde, sin descriptores ni mmap suyos abiertos; lo que se hashea es
 // exactamente lo que queda. El original se borra de la caché del constructor.
+// Su caché se toca solo a través de un os.Root (abrirPropia) y solo si el
+// barrido de sus procesos acabó limpio; un fichero disperso no se copia, ni
+// más bytes por pasada que el tope (el constructor no llena el disco del
+// host a través de root).
 //
 // El constructor la lee (KLING_VERIFIED_CACHE_DIR) y no puede escribir en ella
 // ni renombrar nada: los directorios no son suyos ni tienen escritura para
@@ -153,16 +157,42 @@ func leerUsados(p string) ([]string, error) {
 	return out, nil
 }
 
-// dirDelConstructor dice si d es un directorio de verdad (no un enlace) del
-// constructor o de root. Con sus procesos barridos no cambia mientras se
-// mira y se usa.
-func dirDelConstructor(d string, uid uint32) bool {
-	fi, err := os.Lstat(d)
-	if err != nil || !fi.IsDir() {
+// dirDelConstructor dice si fi es un directorio de verdad (no un enlace) del
+// constructor o de root.
+func dirDelConstructor(fi os.FileInfo, uid uint32) bool {
+	if !fi.IsDir() {
 		return false
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	return ok && (st.Uid == uid || st.Uid == 0)
+}
+
+// abrirPropia abre <cache>/oci/sha256, la caché de blobs del constructor,
+// como un os.Root, o nil si no está o no es un directorio suyo (o de root).
+// Todo lo que el daemon hace después ahí (listar, abrir, borrar) va relativo
+// a ese directorio ya abierto y no sale de él por un enlace: aunque un
+// proceso suyo que sobreviviera al barrido cambiara cache/oci por un enlace a
+// /etc después de mirarlo, no se borra ni se lee nada fuera. cache
+// (<root>/cache/builder) cuelga de un directorio de root: no lo puede
+// cambiar él.
+func abrirPropia(cache string, uid uint32) *os.Root {
+	if fi, err := os.Lstat(cache); err != nil || !dirDelConstructor(fi, uid) {
+		return nil
+	}
+	r, err := os.OpenRoot(cache)
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	sub, err := r.OpenRoot(filepath.Join("oci", "sha256"))
+	if err != nil {
+		return nil
+	}
+	if fi, err := sub.Stat("."); err != nil || !dirDelConstructor(fi, uid) {
+		sub.Close()
+		return nil
+	}
+	return sub
 }
 
 // promoverCache pasa a la caché verificada (verificada/oci) los blobs que
@@ -170,82 +200,101 @@ func dirDelConstructor(d string, uid uint32) bool {
 // del constructor (cache/oci); a los que ya estaban les pone la fecha de hoy
 // (para el barrido). Devuelve los digests usados (lo que el barrido no toca)
 // y cuántos pasó. Un blob que no cuadra se borra de la caché del constructor
-// y no entra.
-func promoverCache(work, cache, verificada string, uid uint32) (usados []string, n int, err error) {
+// y no entra. maxBytes es el tope de las cachés: en una pasada no se copian
+// más bytes que eso (el constructor no llena el disco del host a través de
+// root); lo que no cabe se queda en la suya, sin verificar.
+func promoverCache(work, cache, verificada string, uid uint32, maxBytes int64) (usados []string, n int, err error) {
 	usados, err = leerUsados(filepath.Join(work, ficheroUsados))
 	if err != nil || len(usados) == 0 {
 		return nil, 0, err
 	}
-	srcDir := filepath.Join(cache, "oci", "sha256")
 	dstDir := filepath.Join(verificada, "oci", "sha256")
-	propia := dirDelConstructor(cache, uid) && dirDelConstructor(filepath.Join(cache, "oci"), uid) && dirDelConstructor(srcDir, uid)
+	propia := abrirPropia(cache, uid)
+	if propia != nil {
+		defer propia.Close()
+	}
 	ahora := time.Now()
 	var errs []error
+	var copiados int64
 	for _, d := range usados {
 		h := strings.TrimPrefix(d, "sha256:")
 		dst := filepath.Join(dstDir, h)
 		if fi, lerr := os.Lstat(dst); lerr == nil && fi.Mode().IsRegular() {
 			_ = os.Chtimes(dst, ahora, ahora)
-			if propia {
-				_ = os.Remove(filepath.Join(srcDir, h)) // ya no hace falta allí
+			if propia != nil {
+				_ = propia.Remove(h) // ya no hace falta allí
 			}
 			continue
 		}
-		if !propia {
+		if propia == nil {
 			continue
 		}
-		src := filepath.Join(srcDir, h)
-		ok, cerr := copiarVerificado(src, dst, d, uid)
+		tam, cerr := copiarVerificado(propia, h, dst, d, uid, maxBytes-copiados)
 		if cerr != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", d, cerr))
 		}
-		if ok {
+		if tam >= 0 && cerr == nil {
 			n++
+			copiados += tam
 		}
-		if ok || cerr != nil {
+		if tam >= 0 && !errors.Is(cerr, errSinSitio) {
 			// Verificado ya está en la otra; dañado no sirve: fuera de la suya.
-			_ = os.Remove(src)
+			_ = propia.Remove(h)
 		}
 	}
 	return usados, n, errors.Join(errs...)
 }
 
-// copiarVerificado copia src (de la caché del constructor) a dst (en la
-// verificada) si sus bytes tienen el sha256 digest. false y nil si src no
-// está. El fichero nuevo es de root (de quien corre el daemon) y 0644, y
-// llega a dst con un rename después del fsync: dst o está entero y
+// errSinSitio: el blob no cabe en lo que queda del tope en esta pasada.
+var errSinSitio = errors.New("over the builder cache limit (daemon.build_cache_max_gib)")
+
+// copiarVerificado copia el blob nombre de src (la caché del constructor) a
+// dst (en la verificada) si sus bytes tienen el sha256 digest, y devuelve
+// cuántos bytes copió; -1 y nil si no está. No copia más de max bytes ni un
+// fichero disperso (el constructor podría pedir así a root TiB de ceros sin
+// gastar disco). El fichero nuevo es de root (de quien corre el daemon) y
+// 0644, y llega a dst con un rename después del fsync: dst o está entero y
 // verificado, o no está.
-func copiarVerificado(src, dst, digest string, uid uint32) (bool, error) {
-	// O_NONBLOCK: abrir una FIFO plantada no se queda esperando.
-	f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+func copiarVerificado(src *os.Root, nombre, dst, digest string, uid uint32, max int64) (int64, error) {
+	// O_NONBLOCK: abrir una FIFO plantada no se queda esperando. Un enlace
+	// solo se sigue si no sale de src (os.Root); lo que se abre se mira
+	// abajo con fstat igual.
+	f, err := src.OpenFile(nombre, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if os.IsNotExist(err) {
-		return false, nil
+		return -1, nil
 	}
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	switch {
 	case !fi.Mode().IsRegular():
-		return false, errors.New("not a regular file")
+		return 0, errors.New("not a regular file")
 	case !ok || (st.Uid != uid && st.Uid != 0):
-		return false, fmt.Errorf("not owned by the builder (uid %d)", uid)
+		return 0, fmt.Errorf("not owned by the builder (uid %d)", uid)
 	case st.Uid == 0 && fi.Mode().Perm()&0o004 == 0:
 		// Uno de root que el constructor no puede leer (un enlace duro a
 		// algo privado, donde no hay protected_hardlinks): copiarlo a la
 		// verificada, 0644, se lo enseñaría, y aceptarlo o no le diría si
 		// acertó su sha256. Los de root legítimos (los enlazados de
 		// cache/oci) son 0644.
-		return false, errors.New("owned by root and not world-readable")
+		return 0, errors.New("owned by root and not world-readable")
+	case st.Blocks*512+4096 < fi.Size():
+		// Disperso: lo que ocupa en disco no llega a lo que dice medir (con
+		// margen para lo que el sistema de ficheros guarda en línea). Un
+		// blob de verdad se escribe entero.
+		return 0, errors.New("sparse file")
+	case fi.Size() > max:
+		return 0, errSinSitio
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-")
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer os.Remove(tmp.Name()) // si llega a dst, ya no existe con este nombre
 	defer tmp.Close()
@@ -254,32 +303,37 @@ func copiarVerificado(src, dst, digest string, uid uint32) (bool, error) {
 	// debería: no queda nadie suyo vivo) no se copia lo que no se miró.
 	n, err := io.Copy(io.MultiWriter(tmp, hs), io.LimitReader(f, fi.Size()))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if n != fi.Size() {
-		return false, fmt.Errorf("short read (%d of %d bytes)", n, fi.Size())
+		return 0, fmt.Errorf("short read (%d of %d bytes)", n, fi.Size())
 	}
 	if got := "sha256:" + hex.EncodeToString(hs.Sum(nil)); got != digest {
-		return false, fmt.Errorf("sha256 mismatch (got %s)", got)
+		return 0, fmt.Errorf("sha256 mismatch (got %s)", got)
 	}
 	if err := tmp.Chmod(0o644); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := tmp.Sync(); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := tmp.Close(); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return false, err
+		return 0, err
 	}
-	return true, nil
+	return n, nil
 }
+
+// trasAbrirPropia es para los tests: el constructor cambiando su caché justo
+// después de que el daemon la mire.
+var trasAbrirPropia = func() {}
 
 // entradaCache es un fichero de una de las dos cachés, para el barrido.
 type entradaCache struct {
-	ruta       string
+	dir        *os.Root
+	nombre     string
 	tam        int64
 	mod        time.Time
 	verificada bool
@@ -287,11 +341,12 @@ type entradaCache struct {
 
 // barrerCachesConstruccion barre las dos cachés de blobs del constructor (ver
 // arriba): cache es la suya (<root>/cache/builder), verificada la de root
-// (<root>/cache/verified). conservar son los digests que acaba de usar una
-// construcción; maxBytes y maxEdad, los topes (LimitesCacheConstruccion).
-// Devuelve cuántos ficheros borró y cuántos bytes liberó. Corre con los
-// procesos del constructor barridos: su directorio no cambia mientras se
-// recorre.
+// (<root>/cache/verified); con cache vacío solo se barre la verificada.
+// conservar son los digests que acaba de usar una construcción; maxBytes y
+// maxEdad, los topes (LimitesCacheConstruccion). Devuelve cuántos ficheros
+// borró y cuántos bytes liberó. Corre con los procesos del constructor
+// barridos, y aun así lo suyo se recorre y se borra a través de abrirPropia:
+// nada fuera de su caché.
 func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int64, maxEdad time.Duration,
 	conservar []string, ahora time.Time) (borrados int, liberados int64) {
 	guardar := map[string]bool{}
@@ -300,21 +355,25 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 	}
 	var blobs []entradaCache
 	var total int64
-	recorrer := func(dir string, esVerificada bool) {
-		entradas, err := os.ReadDir(dir)
+	recorrer := func(dir *os.Root, esVerificada bool) {
+		d, err := dir.Open(".")
+		if err != nil {
+			return
+		}
+		entradas, err := d.ReadDir(-1)
+		d.Close()
 		if err != nil {
 			return
 		}
 		for _, e := range entradas {
-			p := filepath.Join(dir, e.Name())
-			fi, err := os.Lstat(p)
+			fi, err := dir.Lstat(e.Name())
 			if err != nil || fi.IsDir() {
 				continue
 			}
 			if !fi.Mode().IsRegular() || !reHexBlob.MatchString(e.Name()) {
 				// .part y .tmp- a medias (nadie escribe ahora) y lo que no es
 				// un blob. Un unlink no sigue enlaces.
-				if os.Remove(p) == nil {
+				if dir.Remove(e.Name()) == nil {
 					borrados++
 					if fi.Mode().IsRegular() {
 						liberados += fi.Size()
@@ -326,15 +385,21 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 				total += fi.Size()
 				continue
 			}
-			blobs = append(blobs, entradaCache{ruta: p, tam: fi.Size(), mod: fi.ModTime(), verificada: esVerificada})
+			blobs = append(blobs, entradaCache{dir: dir, nombre: e.Name(), tam: fi.Size(), mod: fi.ModTime(), verificada: esVerificada})
 			total += fi.Size()
 		}
 	}
-	if propia := filepath.Join(cache, "oci", "sha256"); dirDelConstructor(cache, uid) &&
-		dirDelConstructor(filepath.Join(cache, "oci"), uid) && dirDelConstructor(propia, uid) {
-		recorrer(propia, false)
+	if cache != "" {
+		if propia := abrirPropia(cache, uid); propia != nil {
+			defer propia.Close()
+			trasAbrirPropia()
+			recorrer(propia, false)
+		}
 	}
-	recorrer(filepath.Join(verificada, "oci", "sha256"), true)
+	if v, err := os.OpenRoot(filepath.Join(verificada, "oci", "sha256")); err == nil {
+		defer v.Close()
+		recorrer(v, true)
+	}
 
 	// Lo no verificado antes (su fecha la pone el constructor: no se le
 	// cree para quedarse delante), y dentro de cada una lo más viejo.
@@ -349,7 +414,7 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 		if !viejo && total <= maxBytes {
 			continue
 		}
-		if os.Remove(b.ruta) == nil {
+		if b.dir.Remove(b.nombre) == nil {
 			borrados++
 			liberados += b.tam
 			total -= b.tam
@@ -360,17 +425,25 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 
 // cacheConstruccion es lo que hace el daemon con las cachés al acabar una
 // construcción sin root: si fue bien, pasar a la verificada lo que usó; y
-// siempre, barrer. Nada de esto hace fallar la construcción: se avisa.
-func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioConstructor, bien bool) {
+// siempre, barrer. limpio dice si el barrido de sus procesos acabó sin
+// ninguno vivo (barrerProcesos): si no, su caché no se toca (ni se promueve
+// ni se barre), solo la verificada. Nada de esto hace fallar la
+// construcción: se avisa.
+func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioConstructor, bien, limpio bool) {
 	if cache == "" || verificada == "" {
 		return
+	}
+	maxBytes, maxEdad := s.limitesCacheConstruccion().efectivos()
+	if !limpio {
+		log.Printf("WARNING: builder cache: processes of uid %d still alive; not promoting or sweeping its cache", u.UID)
+		cache, bien = "", false
 	}
 	var usados []string
 	if bien {
 		t0 := time.Now()
 		var n int
 		var err error
-		usados, n, err = promoverCache(work, cache, verificada, u.UID)
+		usados, n, err = promoverCache(work, cache, verificada, u.UID, maxBytes)
 		if err != nil {
 			log.Printf("builder cache: %v", err)
 		}
@@ -378,7 +451,6 @@ func (s *Server) cacheConstruccion(work, cache, verificada string, u *usuarioCon
 			log.Printf("builder cache: %d blob(s) verified into %s in %s", n, verificada, time.Since(t0).Round(time.Millisecond))
 		}
 	}
-	maxBytes, maxEdad := s.limitesCacheConstruccion().efectivos()
 	if b, lib := barrerCachesConstruccion(cache, verificada, u.UID, maxBytes, maxEdad, usados, time.Now()); b > 0 {
 		log.Printf("builder cache: removed %d file(s), %d MiB", b, lib>>20)
 	}

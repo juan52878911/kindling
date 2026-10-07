@@ -213,8 +213,8 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		// al revés, sus hijos seguirían escribiendo mientras se borra. Las
 		// cachés, con él ya barrido y antes de borrar la lista de lo usado.
 		if u != nil {
-			barrerProcesos(u.UID)
-			s.cacheConstruccion(work, cache, verificada, u, bien)
+			limpio := barrerProcesos(u.UID)
+			s.cacheConstruccion(work, cache, verificada, u, bien, limpio)
 		}
 		os.RemoveAll(work)
 	}()
