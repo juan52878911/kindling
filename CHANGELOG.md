@@ -115,7 +115,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling up -check` fails when something is missing and finds tools in `/sbin` (#134)
 - `kling image build NAME -spec -` works with the name before the flags (#137)
 - Internal: `kling db doctor` grouping, `rm`/`class`/`audit` fixes, MCP health and pagination (#135, #149, #151)
-- `kling save`/`commit` and `kling graph snapshot` mark a machine failed when it cannot mount its volumes again, instead of leaving it running without them
+- `kling save`/`commit` and `kling graph snapshot` mark a machine failed when it cannot mount its volumes again, instead of leaving it running without them, and say so in their output (the saved golden is still good)
 - Post-restore hooks left pending by a failed resync survive a daemon restart, and are only pending when the guest agent should have answered
 - `kling machine ready` on a host without debugfs takes a machine whose agent never answered in 30 s as an image without an agent
 
