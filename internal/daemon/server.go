@@ -576,12 +576,23 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 // los constructores y con qué usuario corren los que lo admiten.
 func (s *Server) ajustes() map[string]string {
 	a := s.mgr.Ajustes()
-	a["KLING_BUILDERS_DIR"] = buildersDir()
+	a["KLING_BUILDERS_DIR"] = ajusteBuildersDir()
 	a["builder_user"] = "daemon"
 	if s.constructor != nil {
 		a["builder_user"] = s.constructor.Nombre
 	}
 	return a
+}
+
+// ajusteBuildersDir es lo que se dice de KLING_BUILDERS_DIR. Sin la variable,
+// los constructores sin root son el propio binario del daemon
+// (resolverConstructor), y decir solo el directorio por defecto hacía creer
+// que se usaban los instalados ahí.
+func ajusteBuildersDir() string {
+	if d := os.Getenv("KLING_BUILDERS_DIR"); d != "" {
+		return d
+	}
+	return "unset (oci, debian, android: the daemon's own binary; others: " + buildersDirPorDefecto + ")"
 }
 
 // contarMaquinas es cuántas máquinas ve quien pregunta.

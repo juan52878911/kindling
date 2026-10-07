@@ -101,3 +101,16 @@ func TestConstructorPropioFueraDeAlcance(t *testing.T) {
 		t.Fatalf("binario fuera de alcance: %d %s", rr.Code, rr.Body)
 	}
 }
+
+// GET /info no da por usado el directorio por defecto cuando los
+// constructores sin root son el propio daemon.
+func TestAjusteBuildersDir(t *testing.T) {
+	t.Setenv("KLING_BUILDERS_DIR", "")
+	if got := ajusteBuildersDir(); !strings.Contains(got, "unset") || !strings.Contains(got, "daemon's own binary") {
+		t.Errorf("sin la variable: %q", got)
+	}
+	t.Setenv("KLING_BUILDERS_DIR", "/srv/builders")
+	if got := ajusteBuildersDir(); got != "/srv/builders" {
+		t.Errorf("con la variable: %q", got)
+	}
+}

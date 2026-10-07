@@ -36,6 +36,16 @@ func (m *Manager) Ajustes() map[string]string {
 	if c := m.CoWInfo(); c != nil {
 		cow = c.Mode
 	}
+	// 0 es lo que se pide sin la variable: un cuarto del disco libre, hasta
+	// 16 GiB (tamAlmacen).
+	cowGiB := "auto"
+	if g := m.cow.gibs(); g > 0 {
+		cowGiB = strconv.Itoa(g)
+	}
+	retParada := "off"
+	if r := stoppedRetention(); r > 0 {
+		retParada = r.String()
+	}
 	return map[string]string{
 		"KLING_MIN_FREE_DISK_MIB":   strconv.FormatInt(minFreeDiskMiB(), 10),
 		"KLING_MAX_DISK_MIB":        strconv.Itoa(maxDiskMiB()),
@@ -53,6 +63,10 @@ func (m *Manager) Ajustes() map[string]string {
 		"KLING_DIFF_FREEZE":         onOff(congelarEnDiff()),
 		"KLING_SQUEEZE_BEFORE_DUMP": onOff(!globoSinEstadisticas && os.Getenv("KLING_SQUEEZE_BEFORE_DUMP") != "0"),
 		"KLING_READY_BOOST":         boost,
+		"KLING_SQUEEZE_ON_READY":    onOff(apretarAlEstarListaActivo()),
+		"KLING_FREE_PAGE_REPORTING": onOff(informePaginasLibres()),
+		"KLING_STOPPED_RETENTION":   retParada,
+		"KLING_COW_STORE_GIB":       cowGiB,
 		"cow":                       cow,
 	}
 }
