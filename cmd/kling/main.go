@@ -64,6 +64,8 @@ func main() {
 		err = cmdDaemon(args)
 	case "up":
 		err = cmdUp(args)
+	case "upgrade":
+		err = cmdUpgrade(args)
 	case "status":
 		err = cmdStatus(args)
 	case "doctor":

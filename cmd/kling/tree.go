@@ -36,6 +36,17 @@ var coreTree = []section{
                                                    nftables, user, images, daemon
                                                    and extension units
 `},
+		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]           downloads and verifies a release,
+      [-dry-run] [-force] [-unit NAME]             checks it reads the state, backs up,
+                                                   restarts the daemon with it, checks
+                                                   /info, machines and templates, and
+                                                   rolls back by itself if not (sudo
+                                                   on Linux; -unit must run the daemon
+                                                   on the socket; -cli: only this
+                                                   binary)
+  upgrade -rollback [-root DIR]                    back to the last backup, also with
+                                                   the daemon down
+`},
 		{Name: "status", Summary: "which piece is up and which is missing", Usage: `  status [-v] [-json]                              which piece is up and which is
                                                    missing (-v: daemon details)
 `},

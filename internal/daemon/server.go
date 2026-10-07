@@ -282,6 +282,11 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Antes de cargar nada: una raíz de v0.4 no se abre a medias.
+	if err := comprobarLinksV04(root); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	// Antes del manager: al cargar reconcilia las máquinas vivas y levanta
 	// sus proxies de credenciales, que toman ya el directorio de derrame.
 	prepararRaizPlataforma(root)
@@ -291,8 +296,8 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 		lock.Close()
 		return nil, err
 	}
+
 	st := &store{dir: filepath.Join(root, "store")}
-	migrateLinks(root, st)
 	fcVersion := firecrackerVersion(fcBin)
 	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
 	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.

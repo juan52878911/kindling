@@ -701,8 +701,33 @@ func comprobarVersionEstado(root string) error {
 	if err != nil {
 		return nil // que no exista es la primera arrancada; ilegible lo trata load
 	}
-	if _, err := esquema.Comprobar(ruta, b, versionEstadoMax); esquema.EsMasNuevo(err) {
+	v, err := esquema.Comprobar(ruta, b, versionEstadoMax)
+	if esquema.EsMasNuevo(err) {
 		return err
+	}
+	if err == nil && v == 0 {
+		return comprobarEstadoV013(ruta, b)
+	}
+	return nil
+}
+
+// comprobarEstadoV013 se niega a arrancar con un state.json de kling ≤ v0.13,
+// que llamaba "warm" al estado congelado. Hasta v0.17 se traducía al leerlo;
+// ya no (docs/actualizar.md §5, PR 11), y leerlo sin traducir dejaría esas
+// máquinas en un estado que nadie conoce: ni se despiertan ni se recogen.
+func comprobarEstadoV013(ruta string, b []byte) error {
+	var list []struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if json.Unmarshal(b, &list) != nil {
+		return nil // lo ilegible lo aparta load, como siempre
+	}
+	for _, mc := range list {
+		if mc.State == "warm" {
+			return fmt.Errorf("%s was written by kling v0.13 or older (machine %s is %q, now called %q), which this kling no longer reads: "+
+				"start kling v0.17 once on this root (it rewrites the state), then this one", ruta, mc.ID, mc.State, api.StateWarm)
+		}
 	}
 	return nil
 }

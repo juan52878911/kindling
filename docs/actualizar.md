@@ -46,7 +46,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `state.json` | `internal/machine/manager.go` (`load`, `writePending`) | **`schema: 1`** desde este cambio; antes, un array sin nada | lee el array (v0), copia a `state.json.v0.bak`, escribe v1 | un kling ≤ v0.17 no entiende el objeto: lo aparta a `.corrupt-*` y entra en modo protegido (no borra nada; hay que restaurar la copia). Uno futuro con `schema` > 1: **no arranca** |
 | Campos de `api.Machine` | `pkg/api/types.go` | por el de `state.json` | los que faltan quedan a cero | **los que no conoce se pierden** en su siguiente `persist` |
 | `store/<ns>/<key>.json` | `internal/daemon/store.go` | ninguna; el daemon lo trata como opaco | lo que decida cada dueño (`mcp/links`, `graph/*`, `phone/*`) | igual: sin campo, nadie lo sabe |
-| `links.json` → `store/mcp/links` | `internal/daemon/store.go` (`migrateLinks`) | — | migración de v0.4, la única que hay: copia al almacén y deja `links.json.migrated` | un v0.4 ya no ve enlaces |
+| `links.json` de v0.4 | `internal/daemon/store.go` (`comprobarLinksV04`) | — | ya no se migra (PR 11): con uno sin migrar el daemon no arranca y dice que se pase por v0.17 | un v0.4 ya no ve enlaces |
 | grafos | `store/graph/*`, `internal/machine/grafo.go` | ninguna | se ignoran los ilegibles y sus aristas cierran | ídem |
 | `net-claims` | `/run/kindling/net-claims` (tmpfs) | ninguna; `"<pid> <ns> <hex8>"` | se vacía al reiniciar el host: sin riesgo | un daemon sin reservas solo se protege comprobando las direcciones del host |
 
@@ -109,7 +109,8 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 
 | Camino | Verifica | Cambia atómicamente | Para/reinicia el daemon | Vuelta atrás |
 |---|---|---|---|---|
-| `scripts/install.sh` | sha256 contra `SHA256SUMS`, **antes** de escribir | sí (temporal + `mv -f`) | no | no; no guarda el binario anterior |
+| `kling upgrade` (PR 8-9) | sha256 contra `SHA256SUMS`, los esquemas que lee el nuevo, que arranca | sí (temporal + `rename`) | sí: `systemctl stop/start` o `launchctl bootout/bootstrap` | sí, sola si el nuevo no contesta o pierde algo, y `-rollback` |
+| `scripts/install.sh` | sha256 contra `SHA256SUMS`, **antes** de escribir | sí (temporal + `mv -f`) | no | no; sobre una instalación existente remite a `kling upgrade` (o `--force`) |
 | `kling plugin install` | sha256 contra `SHA256SUMS`, manifiesto, `min_kling` | sí, companions primero | no | no |
 | `make deploy` | — | `scp` | sí, `restart` | no |
 | `kling up` | no baja nada | — | `enable --now` (**no reinicia uno vivo**) | — |
@@ -134,6 +135,7 @@ del host solo se actualizan con `make deploy`.
    imagen, y el caso del puente viejo es un pánico, no un error.
 5. **Actualizar no para, no verifica y no vuelve**: `install.sh` cambia el
    binario con el daemon viejo corriendo, y nada comprueba que el nuevo arranca.
+   *Resuelto en los PR 8-9: `kling upgrade` (§3.4).*
 
 ---
 
@@ -302,7 +304,114 @@ orden de `ssh` en vez de ejecutarla. En Mac el daemon y el CLI son el mismo
 host y todo es local.
 
 `install.sh` sobre una instalación existente pasa a decir "ya hay un kling
-v0.17.0; usa `kling upgrade`" y solo sigue con `--force`.
+v0.17.0; usa `kling upgrade`" y solo sigue con `--force`. Con `--with` y sin
+`--tag` sí sigue: añade esas extensiones y deja kling como está.
+
+**Cómo quedó (PR 8-9).** `internal/upgrade` es el flujo, con lo que se puede
+probar sin host (un servidor de releases falso, un daemon y un servicio de
+mentira); `cmd/kling/upgrade.go`, lo de cada sistema.
+
+```sh
+sudo kling upgrade                     # Linux: el daemon de kling.service
+kling upgrade                          # Mac: el agente de launchd de docs/mac.md
+kling upgrade -tag v0.18.0             # -version es lo mismo
+kling upgrade -from-dir ./dist         # sin bajar nada (el e2e)
+kling upgrade -dry-run                 # -check es lo mismo
+kling upgrade -rollback
+kling upgrade -cli                     # solo este binario: un CLI sin daemon
+```
+
+Los pasos son los de arriba, con estas diferencias, y por qué:
+
+- **Dónde.** Lo bajado y las copias van en `<raíz del daemon>/upgrade/`
+  (`<etiqueta>/`, que se borra al acabar, y `backups/<fecha>-<versión>/` con un
+  `manifest.json`, las dos últimas), no en `~/.local/state`: en Linux corre con
+  `sudo` (y entonces `~` es el de root o el del usuario según la distribución),
+  y la copia es de ese daemon, no de quien teclea. Un CLI sin daemon (`-cli`, o
+  un contexto remoto) sí usa `~/.local/state/kling/upgrade/`. Dos `kling
+  upgrade` a la vez sobre la misma raíz no pueden correr: comparten la descarga
+  (que cada uno borra al acabar) y el servicio, así que el segundo se niega con
+  un `flock` sin espera sobre `upgrade/.lock` (también `-rollback` y
+  `-dry-run`). Con un contexto `ssh://` se imprime la orden para el host del
+  daemon con sus banderas (`-dry-run`, `-force`, `-unit`, `-root`): un
+  `-dry-run` que se perdiera por el camino sería una actualización de verdad.
+- **Qué se cambia.** El binario que ejecuta el daemon (`/proc/<MainPID>/exe` de
+  la unidad, o el `program` de launchd), y a su lado lo que ya esté instalado:
+  `kling-guest` y `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux),
+  `kling-vz` junto a `kling` (Mac, comprobando antes de parar nada que lleva el
+  permiso de virtualización). Las extensiones instaladas con `kling plugin
+  install` se pasan a la misma versión después de verificar el núcleo (con sus
+  compañeros, y guardadas en la misma copia para que `-rollback` las devuelva);
+  con `sudo` no se tocan las de root y se dice que cada usuario corra `kling
+  upgrade -cli`. Las unidades de las extensiones (`kling-gateway`…) siguen con
+  el binario que arrancaron hasta que se reinician.
+- **Plan.** En vez de `kling-nuevo upgrade --plan-from <versión>`, el nuevo
+  dice qué sabe leer (`kling upgrade -schemas`: su versión y los esquemas de
+  `state.json`, `meta.json` y credenciales, `machine.EsquemasSoportados`) y el
+  que actualiza lo compara con lo que hay en disco (`machine.EsquemasEnDisco`,
+  que solo lee cabeceras). Algo que el nuevo no sabría leer para **antes** de
+  tocar nada, diciendo qué fichero; lo que migrará sale en el plan. Un kling
+  anterior sin `-schemas` (≤ v0.17) se trata como lo que era: esquemas 0, y los
+  `meta.json` sin mirar. Uno con `-schemas` ya no trae las migraciones de PR 11:
+  un `state.json` de v0.13, un `meta.json` de v0.4 o un `links.json` sin
+  migrar también lo paran antes (`machine.ObsoletosEnDisco`), con el mensaje
+  con el que el daemon se negaría.
+- **Qué daemon.** El que contesta en el socket (`-host`, `KLING_HOST`) tiene que
+  ser el proceso de la unidad (`-unit`, por defecto `kling`) o del agente de
+  launchd: se compara su PID con el del otro lado del socket (`SO_PEERCRED`,
+  `LOCAL_PEERPID`). Con `KLING_HOST` en un daemon privado, sin esto se
+  reiniciaría el de producción y se verificaría el privado.
+- **Prueba en seco.** Es ese `-schemas` (o `version`) del binario bajado, sin
+  hablar con ningún daemon. No se corre `kling up -check`: diagnostica el host,
+  que no cambia, y sale en rojo por avisos que no tienen que ver.
+- **Versiones.** La misma o una anterior (por sus tres números; un build de
+  desarrollo de la misma no lo es) piden `-force`; una etiqueta que no dice lo
+  mismo que el binario bajado es un error.
+- **Drenar y recongelar.** No hace falta: Firecracker no viene en la release,
+  así que el VMM no cambia y ningún dorado ni congelada queda obsoleto; las
+  microVMs en marcha siguen (`KillMode=process`) y el daemon nuevo las readopta.
+  En el Mac `kling-vz` sí cambia, pero su versión no se compara (§3.2).
+- **Unidades y `/etc/default/kling`.** No se regeneran: la release no publica
+  `kling.service` (lo instala `make deploy`), y lo que no se cambia no hace
+  falta copiarlo.
+- **Verificar.** `/info` con la versión del binario nuevo dentro del plazo
+  (`-timeout`, 60 s), y que siguen las máquinas congeladas (congeladas, o
+  despiertas si un cliente las pidió) y las paradas, y todos los dorados. Las
+  que corrían no se exigen: el gateway crea y borra las de cada sesión. La foto
+  de antes se toma justo antes de parar, no al empezar: la descarga puede durar
+  minutos. Desde que se para, una señal no corta nada a medias: las órdenes
+  van sin cancelar (con su plazo) y Ctrl-C solo acorta la espera, que entonces
+  vuelve atrás entera. El `state.json` va a la copia ya parado el daemon, y no
+  con los binarios: lo que el viejo escribió entre tanto no se pierde al volver.
+  Si algo falla, vuelve sola: para, devuelve binarios,
+  el `state.json` de la copia y cada `.v<N>.bak` que no estaba antes (y lo
+  borra, para que la siguiente migración la vuelva a hacer), arranca y espera
+  a la versión de antes; esa copia ya no sirve y se borra (las copias se podan
+  solo tras una actualización buena, así que dos intentos fallidos no se
+  llevan la del último bueno). El gancho `status` de las extensiones no se
+  corre.
+- **Congeladas que el nuevo despertó.** Volver atrás deja un `state.json` (el
+  de la copia, o el `.bak` de la migración) donde siguen congeladas máquinas
+  que un cliente despertó en cuanto el daemon nuevo contestó, y que desde
+  entonces escriben en su disco. El viejo las despertaría cargando el
+  `mem.file` de antes sobre un disco cambiado después: memoria y disco ya no
+  casan y el sistema de ficheros del invitado puede romperse en silencio. Así
+  que, antes de parar para volver, se comparan con el `List` del daemon nuevo y
+  se congelan otra vez con él (el VMM no cambia, así que su `mem.file` lo lee
+  el viejo). Si no se puede (no contesta y su `state.json` dice que corren, o
+  el freeze falla), no se vuelve atrás y se dice cuáles: el nuevo sigue
+  corriendo, la copia se queda, y `-rollback -force` vuelve igualmente. Lo
+  creado después sí se pierde, como dice §6.
+- **`-rollback`.** Lo mismo con la última copia, menos el `state.json`
+  guardado (se usa el `.bak` de la migración, que es lo que dice §6); la copia
+  usada se borra, así que el siguiente `-rollback` va a la anterior. Funciona
+  también con el daemon caído, que es cuando más falta hace (el nuevo no
+  arranca tras un reinicio, o la vuelta atrás sola falló): la raíz y el socket
+  salen de cómo lo arranca su servicio (`-root`/`-socket` del `ExecStart`, si
+  no `KLING_ROOT`/`KLING_SOCKET` de `Environment=` o del `EnvironmentFile`, de
+  los que solo se leen esas dos claves; en el Mac, del plist), o de `-root DIR`;
+  lo que se restaura, del `manifest.json` de la copia. No hay PID que comparar:
+  en su lugar, el socket del servicio tiene que ser el que se espera.
 
 ### 3.5 Pruebas
 
@@ -332,6 +441,18 @@ v0.17.0; usa `kling upgrade`" y solo sigue con `--force`.
   de cada `release.sh`**. Sin VM, en CI sí puede correr la parte de ficheros:
   arrancar el `Manager` de N-1 y el de HEAD sobre el mismo directorio.
 
+  Cómo quedó (PR 10), en Linux: `sudo OLD_DIR=… NEW_DIR=… scripts/94-e2e-upgrade.sh`
+  monta un daemon privado de N-1 con su propia unidad de systemd de tiempo de
+  ejecución (`/run/systemd/system/<NAME>.service`, raíz en `/srv/<NAME>`), sin
+  tocar el del sistema; sin `OLD_DIR` baja `OLD_TAG` con `install.sh`. Con N-1
+  crea una máquina congelada (con una marca en su RAM), una parada, un dorado
+  y un volumen; luego prueba una actualización a un binario que no arranca
+  (tiene que volver sola), la de verdad con `-from-dir` (y su `-dry-run`), que
+  la congelada despierte con su marca, que el dorado sirva para `run -from` y
+  la parada para `start`, y `-rollback` a N-1 con el `state.json` de antes. La
+  credencial y el enlace de MCP quedan fuera (son de extensiones). En Mac,
+  pendiente.
+
 ---
 
 ## 4. Qué romper ahora
@@ -349,7 +470,7 @@ su prueba para siempre.
 | **P1** | `api` en `/info` y `max_api` en el manifiesto | **hecho** (PR 5): el manifiesto ya tenía versión; añadir el campo era gratis |
 | **P1** | subir `kling_vz` a 2 por `graphics` | **hecho** (PR 5): un kling-vz anterior restauraba en silencio con otros dispositivos |
 | **P1** | `schema` en el almacén (`store`) para `mcp/links`, `phone/*` y grafos | los dueños son nuestras extensiones; poner la convención antes de que haya extensiones de otros |
-| **P2** | quitar `migrateLinks` y `liftV04` | migraciones de v0.4 sin nadie en v0.4; son código que hay que mantener probado |
+| **P2** | quitar `migrateLinks` y `liftV04` | **hecho** (PR 11), con el alias `warm`: lo de esa época se rechaza diciendo que se pase por v0.17 |
 | **P2** | recetas de Android con `durable.Escribir` | lo único que escribe estado sin la escritura segura |
 | **P2** | `snapshot.key`: aviso en `doctor` si no hay copia y `kling secrets export` | no rompe formato, pero es el único fichero cuya pérdida no tiene arreglo |
 
@@ -373,10 +494,10 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 5 | `api` en `/info` y `max_api` en extensiones | `api` en `/info` y `X-Kling-API` en cada respuesta, que `pkg/api` compara (aviso si el daemon es más nuevo, error si es más viejo que el mínimo); `kling plugins` avisa de las que no casan; `kling_vz` a 2 | S — **hecho** |
 | 6 | guarda de structs persistidos | `TestCamposPersistidos` compara nombre JSON y tipo de los campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` y `api.CredentialSpec` (y de los structs del módulo que cuelgan de ellos) con `internal/machine/testdata/esquema/campos-persistidos.txt`, que también apunta la versión de cada fichero. Quitar o cambiar de tipo un campo sin subir la versión falla y `-update` se niega; añadir uno se registra con `-update` | S — **hecho** |
 | 7 | fijaciones de `testdata/` | `internal/machine/testdata/esquema/v0.17/`: `state.json`, `meta.json` y `recipe.json` con todos los campos de v0.17.0 (generados con su `pkg/api`); `fijaciones_v017_test.go` comprueba que se leen, que migran con su `.v0.bak` y que ningún campo se pierde ni cambia, tanto en el fichero reescrito como al leerlo al struct. `credentials.v0.enc` ya estaba (PR 3) | S — **hecho** |
-| 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L |
-| 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M |
-| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M |
-| 11 | limpieza de v0.4 | quitar `migrateLinks`, `liftV04` y el alias `warm` → `frozen` | S |
+| 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L — **hecho** (las unidades no se tocan: §3.4) |
+| 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M — **hecho** |
+| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M — **hecho** en Linux (en Mac, pendiente) |
+| 11 | limpieza de v0.4 | quitar `migrateLinks`, `liftV04` y el alias `warm` → `frozen` | S — **hecho** |
 
 Los PR 2–5 son los de "romper ahora": conviene que salgan **en la misma MINOR**
 (v0.18), para que haya una sola actualización incompatible y, desde ella, todo
@@ -385,6 +506,10 @@ lo siguiente migre.
 ---
 
 ## 6. Volver atrás desde este cambio
+
+Desde el PR 8, `kling upgrade -rollback` hace lo que sigue (binarios y
+`.v<N>.bak`) con la copia de la última actualización. A mano, para lo que se
+instaló sin `kling upgrade`:
 
 Con `state.json` ya en v1, un kling ≤ v0.17 lo lee como ilegible, lo aparta a
 `state.json.corrupt-*` y arranca en modo protegido (no borra ni mata nada). Para

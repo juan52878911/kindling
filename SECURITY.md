@@ -1386,6 +1386,29 @@ en el anfitrión no monta ni hace `pivot_root`. Lee `/etc/kling/env` como datos 
 número, nunca con su contenido. Las sondas de esas imágenes son `#!` al agente: lo que
 ejecutan es el argv del `HEALTHCHECK` de la imagen, sin shell, igual que en Docker.
 
+### 28. `kling upgrade` no instala nada sin verificar, y deja volver
+
+`kling upgrade` baja la release solo por https (también las redirecciones), con
+tamaño acotado, y no acepta un binario que no esté en el `SHA256SUMS` de esa misma
+release o cuyo hash no coincida; con `-from-dir`, si hay un `SHA256SUMS` al lado,
+lo mismo. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
+contra ningún daemon) **antes** de parar nada. Se cambia por `rename` desde un
+temporal del mismo directorio, nunca escribiendo encima, y lo de antes queda en
+`<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que se
+ejecuta y se instala es la copia ya verificada en `<raíz>/upgrade/<etiqueta>`
+(0700), no el fichero de origen: cambiar el de `-from-dir` después de
+verificarlo no cuela nada. En Linux corre como root (`sudo`), y las extensiones
+de cada usuario se las deja a su `kling upgrade -cli`. No pasa
+nada por argv que no sea público (etiqueta, rutas, la unidad), y del entorno del
+daemon solo lee `KLING_LIB_DIR` (y, para un `-rollback` con el daemon caído,
+`KLING_ROOT` y `KLING_SOCKET` de la unidad y su `EnvironmentFile`, sin leer ni
+guardar otras claves). Solo reinicia el daemon si el proceso que
+escucha en el socket (`SO_PEERCRED`/`LOCAL_PEERPID`, lo dice el kernel) es el
+de la unidad o el agente de launchd: un `KLING_HOST` hacia otro daemon no hace
+cambiar y reiniciar el de producción; con el daemon caído, si el socket de la
+unidad es el que se espera. Dos `kling upgrade` sobre la misma raíz no corren a
+la vez (`flock` en `<raíz>/upgrade/.lock`). `SHA256SUMS` sigue sin firmar (ver abajo).
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

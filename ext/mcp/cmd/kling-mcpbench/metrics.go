@@ -181,7 +181,7 @@ func reduce(ms []metric, targets map[string]bool) sample {
 		case "kling_available_mib":
 			s.AvailMiB = m.Value
 		case "kling_machines":
-			if st := m.Labels["state"]; st == "frozen" || st == "warm" { // "warm": daemons hasta 0.13
+			if m.Labels["state"] == "frozen" {
 				s.Frozen += m.Value
 			}
 		}

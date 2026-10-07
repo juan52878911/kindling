@@ -773,7 +773,10 @@ kindling-mcp sobre las rutas genéricas:
 | `POST /images` sin `builder` | `builder: "mcp"` |
 
 El snapshot ya no devuelve `tools`, `tools_at`, `health`, `health_at` ni
-`health_err`. Los datos no se pierden: al leer un `meta.json` de v0.4, el daemon
-los pasa a las anotaciones `mcp.tools` y `mcp.health`, y al arrancar migra un
-`links.json` que quede a `store/mcp/links` (dejando el original como
-`links.json.migrated`).
+`health_err`. Hasta v0.17 el daemon pasaba esos campos de un `meta.json` de v0.4
+a las anotaciones `mcp.tools` y `mcp.health`, y movía un `links.json` a
+`store/mcp/links`. Desde v0.18 ya no: un dorado con esos campos no se lista ni
+se restaura (el error dice que se rehaga con `kling save`), y una raíz con un
+`links.json` sin migrar no arranca; las dos cosas se arreglan arrancando una
+vez kling v0.17 sobre ella ([`actualizar.md`](actualizar.md) §5, PR 11). Lo
+mismo con el estado `warm` de los daemons ≤ v0.13: el API solo dice `frozen`.
