@@ -353,6 +353,19 @@ Desde el Mac por SSH, el layout OCI de Docker 29 de `redis:7-alpine` (con su
 atestación al lado) se sube y construye en 2,2 s, con el mismo digest de
 manifiesto que en Docker Hub.
 
+Con la caché de root cerrada y lo subido pasando a la verificada (lab, 2026-10-07,
+`docker save postgres:16-alpine`, 283 MiB): el primer import tarda 2,4 s y deja
+`cache/oci` vacía y los 13 blobs en la verificada (enlazados, `root:kindling-build`
+0640, en 0 s); reconstruirlo (`-replace`) no sube nada ni rehashea, 0,70-0,78 s. Una
+cuenta del host que no es root ni del grupo no puede listar `cache/oci` ni leer un
+blob de la verificada; `kindling-build` sí. Unas cachés de antes (0755/0644) quedan
+en 0750/0640 en el primer uso. Con `daemon.build_cache_max_gib = 1`, importar
+`timescale/timescaledb:latest-pg16` (1,8 GiB sin comprimir) se para en la capa que no
+cabe con un `507` que nombra el tope. Un layout OCI con dos imágenes de capas zstd
+(`-19`, `-3` y `-1`) se importa sin `-image` diciendo los nombres, y con él construye
+cada una en 0,1-0,2 s; la de `busybox` (init de `sh`) y otra sin `sh` (init en Go)
+arrancan, sirven HTTP y su servicio ve un `ENV` de varias líneas igual que Docker.
+
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
 | Qué | |
