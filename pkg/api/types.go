@@ -95,6 +95,11 @@ type Machine struct {
 	// fallidas se acumulaban para siempre, una por intento de instanciación roto.
 	FailedAt *time.Time `json:"failed_at,omitempty"`
 
+	// StoppedAt es cuándo se paró (o cuándo falló su último `kling start`). Lo
+	// mismo que FailedAt para las paradas: la recogida automática las mide
+	// con él (ver gcFailed).
+	StoppedAt *time.Time `json:"stopped_at,omitempty"`
+
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
 
@@ -263,6 +268,13 @@ type WakePhases struct {
 	// FinishMS es apuntar el estado y el resto hasta contestar.
 	FinishMS float64 `json:"finish_ms"`
 	TotalMS  float64 `json:"total_ms"`
+}
+
+// StartRequest es el cuerpo de POST /machines/{ref}/start. Env es el entorno
+// de la máquina (KEY=valor, como RunRequest.Env): kindling solo guarda sus
+// nombres (Machine.EnvKeys), así que arrancarla otra vez exige volver a darlos.
+type StartRequest struct {
+	Env []string `json:"env,omitempty"`
 }
 
 // RunRequest crea y arranca una microVM.

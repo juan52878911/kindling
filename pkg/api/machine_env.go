@@ -31,6 +31,10 @@ import (
 // arrancaría la máquina sin su entorno: el CLI la mira antes de mandarlo.
 const CapabilityMachineEnv = "machine-env"
 
+// CapabilityStart es la capacidad de GET /info que dice que el daemon tiene
+// POST /machines/{ref}/start (arrancar otra vez una máquina parada).
+const CapabilityStart = "start"
+
 // MachineEnvBootParam le dice al agente que hay entorno de la máquina en MMDS
 // y que no arranque el servicio sin él.
 const MachineEnvBootParam = "kling.env"
@@ -40,12 +44,20 @@ const MachineEnvBootParam = "kling.env"
 // se mezcla con lo que esos caminos ponen y quitan.
 const MachineEnvMMDSKey = "machine_env"
 
-// Límites del entorno de una máquina. El almacén MMDS de Firecracker es de 50
-// KiB por defecto, y el entorno no es sitio para ficheros.
+// Límites del entorno de una máquina. Caben de sobra en el almacén MMDS
+// (MaxMMDSBytes) aun escapados en JSON y junto a los secretos de sesión y
+// los marcadores de credenciales; el entorno no es sitio para ficheros.
 const (
 	MaxMachineEnvVars  = 256
 	MaxMachineEnvBytes = 32 << 10
 )
+
+// MaxMMDSBytes es el tamaño máximo del almacén MMDS de una máquina, en JSON:
+// el que acepta kling-vz y con el que el daemon lanza Firecracker
+// (--mmds-size-limit; su defecto, 50 KiB, no daba para un entorno de 32 KiB
+// más los secretos de sesión). Es también el tope del cuerpo de
+// POST /machines/{ref}/mmds.
+const MaxMMDSBytes = 1 << 20
 
 var reMachineEnvKey = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*$`)
 

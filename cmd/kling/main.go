@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -114,6 +115,8 @@ func main() {
 		err = cmdLogs(args)
 	case "freeze", "thaw", "pause", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
+	case "start":
+		err = cmdStart(args)
 	case "machine":
 		err = cmdMachine(args)
 	case "save":
@@ -928,6 +931,50 @@ func cmdLifecycle(op string, args []string) error {
 		default:
 			fmt.Printf("%s  %s\n", mc.ID[:12], mc.State)
 		}
+	}
+	return nil
+}
+
+// cmdStart es `kling start [-e K=V|K] [-env-file F] <ref>...`: arranca otra
+// vez una máquina parada, en frío sobre su propio disco. El entorno de -e no
+// se guarda (solo sus nombres), así que hay que volver a darlo; el daemon dice
+// qué claves faltan.
+func cmdStart(args []string) error {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	host := hostFlag(fs)
+	var ef envFlags
+	ef.register(fs)
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: kling start [-e K=V|K] [-env-file F] <ref>...")
+	}
+	env, err := ef.resolve()
+	if err != nil {
+		return err
+	}
+	if _, err := api.MachineEnvMap(env); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	for _, ref := range fs.Args() {
+		mc, err := c.Start(ctx, ref, env)
+		if err != nil {
+			// Un daemon anterior no tiene la ruta: el 404 del enrutador no
+			// dice nada útil.
+			var se *api.StatusError
+			if errors.As(err, &se) && se.Code == http.StatusNotFound {
+				if info, ierr := c.Info(ctx); ierr == nil && !slices.Contains(info.Capabilities, api.CapabilityStart) {
+					return fmt.Errorf("the daemon (%s) can't start a stopped machine: update it", info.Version)
+				}
+			}
+			return err
+		}
+		fmt.Printf("%s  %s  (cold boot from its disk, %d ms)\n", mc.ID[:12], mc.State, mc.BootMS)
 	}
 	return nil
 }

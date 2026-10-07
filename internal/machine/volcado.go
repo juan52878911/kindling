@@ -106,6 +106,20 @@ func (m *Manager) borrarVolcadoParcial(id string, jailed bool, dir string) {
 	_ = os.Remove(filepath.Join(dir, marcaEnCurso))
 }
 
+// borrarVolcado retira el volcado entero de la máquina id —estado, memoria,
+// diferencial, la memoria reconstruida de un thaw, sus marcas y su espejo en
+// el almacén— cuando ya no lo va a cargar nadie (Stop). Lo que no se pueda
+// borrar se avisa y no bloquea.
+func (m *Manager) borrarVolcado(id string) {
+	dir := m.dir(id)
+	for _, f := range []string{"snap.file", "mem.file", memDiff, memFull, marcaOK, marcaEnCurso} {
+		if err := os.Remove(filepath.Join(dir, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("warning: %s: could not remove its %s: %v", shortID(id), f, err)
+		}
+	}
+	m.borrarMemoriaAlmacen(id)
+}
+
 // errVolcadoIncompleto es que el volcado no se puede usar.
 var errVolcadoIncompleto = errors.New("the frozen state is incomplete")
 

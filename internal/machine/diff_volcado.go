@@ -252,10 +252,15 @@ func (m *Manager) prepararMemoriaDesdeDiff(ctx context.Context, mc *api.Machine,
 		return enlace, nil
 	}
 	if err := clonarFichero(base, full); err != nil {
-		if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB), "thaw"); err != nil {
+		soltarDisco, err := m.reservarDiscoParaVolcado(max(mc.MemMiB, mc.MemMaxMiB), "thaw")
+		if err != nil {
 			return "", err
 		}
-		if err := copiarFicheroDisperso(ctx, base, full); err != nil {
+		// Hasta que la copia termina: desde ahí lo que ocupa ya se ve libre
+		// de menos y no hace falta contarlo.
+		err = copiarFicheroDisperso(ctx, base, full)
+		soltarDisco()
+		if err != nil {
 			_ = os.Remove(full)
 			return "", fmt.Errorf("copying the golden memory: %w", err)
 		}

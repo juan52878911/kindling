@@ -42,12 +42,29 @@ func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains 
 	// La reserva del índice (asignarRed, redParaRehacer) se suelta al acabar:
 	// desde ahí la ocupa la dirección del veth (ver internal/net/subredes.go).
 	defer n.SoltarReserva()
-	if err := n.Setup(egress, domains, m.priv.UID); err != nil {
+	uid := 0
+	if m.priv != nil {
+		uid = m.priv.UID
+	}
+	if err := montarRedHost(n, egress, domains, uid); err != nil {
+		// Un Setup que falla a medias deja el namespace, el veth y sus
+		// reglas; quien llama no los desmontaba, y barrerNamespaces solo
+		// corre al arrancar el daemon: cada fallo era una red huérfana (y su
+		// subred ocupada en el host) hasta el siguiente reinicio.
+		m.desmontarRed(n, id)
 		return err
 	}
 	m.redMontada.Store(id, true)
 	return nil
 }
+
+// Sustituibles en tests: montar y desmontar la red de verdad pide root e `ip`.
+var (
+	montarRedHost = func(n *knet.Net, egress knet.Egress, domains []string, uid int) error {
+		return n.Setup(egress, domains, uid)
+	}
+	desmontarRedHost = func(n *knet.Net) { n.Teardown() }
+)
 
 // redParaRehacer da la red con la que rehacer la de una máquina que ya tenía
 // índice (thaw sin la red montada): la de su índice si sigue libre en el host,
@@ -83,7 +100,7 @@ func (m *Manager) redParaRehacer(mc *api.Machine) (*knet.Net, error) {
 // de una máquina: si se desmontara por otro camino, redLista la daría por buena.
 func (m *Manager) desmontarRed(n *knet.Net, id string) {
 	m.redMontada.Delete(id)
-	n.Teardown()
+	desmontarRedHost(n)
 	m.olvidarRedPropia(n.NS)
 }
 

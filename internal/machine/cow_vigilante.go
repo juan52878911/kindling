@@ -199,7 +199,10 @@ func (m *Manager) pausarPorAlmacen(ctx context.Context) []string {
 	m.mu.RLock()
 	var ids []string
 	for id, mc := range m.byID {
-		if mc.State == api.StateRunning && mc.Transition == "" {
+		// La transición en curso vive en m.transicion: Transition solo se
+		// rellena en las copias que se devuelven (Get, List), nunca en byID.
+		// Mirar mc.Transition aquí no saltaba nunca a la que se congela.
+		if mc.State == api.StateRunning && m.transicion[id] == "" {
 			ids = append(ids, id)
 		}
 	}

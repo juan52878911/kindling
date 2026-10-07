@@ -30,6 +30,17 @@ const putSinMontar = false
 // backendVMM es el VMM con el que arranca este binario.
 const backendVMM = BackendFirecracker
 
+// argsVMM son los argumentos de Firecracker que no dependen de la máquina,
+// tras --api-sock (con jailer, tras "--"). El almacén MMDS y el cuerpo de
+// una petición a su API van con el tope de api.MaxMMDSBytes: sus 50 KiB por
+// defecto no daban para el entorno de la máquina (hasta 32 KiB, más su
+// escape en JSON) junto a los secretos de sesión, y el PUT fallaba al
+// arrancar o al inyectar.
+func argsVMM() []string {
+	tope := strconv.Itoa(api.MaxMMDSBytes)
+	return []string{"--http-api-max-payload-size", tope, "--mmds-size-limit", tope}
+}
+
 // jailerPosible dice si esta plataforma tiene jailer. En Linux lo decide
 // decidirJailer según haya binario y usuario sin privilegios (ver jailer.go).
 const jailerPosible = true

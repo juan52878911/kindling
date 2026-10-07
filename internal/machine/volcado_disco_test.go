@@ -3,6 +3,9 @@ package machine
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -14,11 +17,13 @@ import (
 func TestVolcadoQueNoCabeSeRechazaAntes(t *testing.T) {
 	m := newTestManager(t)
 	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
-	if err := m.checkDiskParaVolcado(0, "freeze"); err != nil {
+	soltar, err := m.reservarDiscoParaVolcado(0, "freeze")
+	if err != nil {
 		t.Fatalf("sin RAM que volcar ni mínimo: %v", err)
 	}
+	soltar()
 	// Más RAM de la que puede haber libre en ningún disco.
-	err := m.checkDiskParaVolcado(1<<40, "freeze")
+	_, err = m.reservarDiscoParaVolcado(1<<40, "freeze")
 	if err == nil {
 		t.Fatal("un volcado de 1 PiB tenía que rechazarse")
 	}
@@ -30,9 +35,80 @@ func TestVolcadoQueNoCabeSeRechazaAntes(t *testing.T) {
 	}
 	// El mínimo del daemon cuenta aunque la RAM sea poca.
 	t.Setenv("KLING_MIN_FREE_DISK_MIB", "999999999")
-	if err := m.checkDiskParaVolcado(1, "save"); err == nil || !api.IsDiskFull(err) {
+	if _, err := m.reservarDiscoParaVolcado(1, "save"); err == nil || !api.IsDiskFull(err) {
 		t.Fatalf("el mínimo del daemon no se suma al volcado: %v", err)
 	}
+}
+
+// discoLibreFalso hace que statfsRaiz diga que quedan libreMiB.
+func discoLibreFalso(t *testing.T, libreMiB uint64) {
+	t.Helper()
+	old := statfsRaiz
+	statfsRaiz = func(_ string, st *syscall.Statfs_t) error {
+		st.Bsize = 1 << 20
+		st.Bavail = libreMiB
+		st.Blocks = libreMiB * 4
+		return nil
+	}
+	t.Cleanup(func() { statfsRaiz = old })
+}
+
+// Comprobar y actuar: N freezes a la vez miraban el mismo disco libre y
+// pasaban todos aunque juntos no cupieran. Lo que reservó uno y aún no ha
+// escrito cuenta para el siguiente, y se devuelve al soltarlo.
+func TestVolcadosSimultaneosNoPasanTodos(t *testing.T) {
+	m := newTestManager(t)
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "100")
+	// Caben dos de 400 (más el mínimo), no tres.
+	discoLibreFalso(t, 1000)
+
+	const n = 8
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		soltar  []func()
+		negados int
+	)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := m.reservarDiscoParaVolcado(400, "freeze")
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if !api.IsDiskFull(err) {
+					t.Errorf("error que no es disco lleno: %v", err)
+				}
+				negados++
+				return
+			}
+			soltar = append(soltar, s)
+		}()
+	}
+	wg.Wait()
+	if len(soltar) != 2 || negados != n-2 {
+		t.Fatalf("admitidos %d, negados %d; quería 2 y %d", len(soltar), negados, n-2)
+	}
+	_, err := m.reservarDiscoParaVolcado(400, "freeze")
+	if err == nil || !strings.Contains(err.Error(), "800 MiB of it reserved") {
+		t.Fatalf("el rechazo no cuenta lo reservado por los demás: %v", err)
+	}
+	for _, s := range soltar {
+		s()
+		s() // soltar dos veces no devuelve de más
+	}
+	m.mu.RLock()
+	quedan := m.volcandoMiB
+	m.mu.RUnlock()
+	if quedan != 0 {
+		t.Fatalf("volcandoMiB = %d tras soltarlo todo", quedan)
+	}
+	s, err := m.reservarDiscoParaVolcado(400, "freeze")
+	if err != nil {
+		t.Fatalf("con todo soltado no cabe uno: %v", err)
+	}
+	s()
 }
 
 // Lo que un volcado fallido dejó a medias se borra: el mem.file del tamaño de

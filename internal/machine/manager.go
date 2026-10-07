@@ -262,6 +262,12 @@ type Manager struct {
 	// para impedir. Se toca bajo mu.
 	pendingMiB int
 
+	// volcandoMiB es el disco que tienen reservado los volcados en curso
+	// (freeze, save, el thaw de un diferencial sin reflink) y que aún no han
+	// escrito: reservarDiscoParaVolcado lo suma a lo que pide cada uno, como
+	// pendingMiB con la memoria. Se toca bajo mu.
+	volcandoMiB int
+
 	// snapPending cuenta, por snapshot dorado, cuántas instancias están
 	// arrancando de él ahora mismo. Sirve a reserveMemory para saber si el
 	// mem.file ya está anclado y cobrar solo la fracción divergente a las copias.
@@ -1386,7 +1392,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	// abandonar deshace lo publicado: la máquina ya está en byID, y dejarla ahí
-	// tras un fallo crea un fantasma que no se puede arrancar (no hay `start`) y
+	// tras un fallo crea un fantasma created que nadie va a arrancar y
 	// que RETIENE su volumen en exclusiva, porque volumeUsers cuenta todo lo que
 	// no esté stopped o failed. Nadie podría montarlo hasta un `rm` a mano.
 	abandonar := func(err error) (*api.Machine, error) {
@@ -1814,7 +1820,7 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 	}
 	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
 	// Orden: primero el namespace (necesita privilegios), después soltarlos.
-	argv := m.priv.Wrap([]string{m.fcBin, "--api-sock", sock})
+	argv := m.priv.Wrap(append([]string{m.fcBin, "--api-sock", sock}, argsVMM()...))
 	if n != nil {
 		argv = n.Wrap(argv[0], argv[1:]...)
 	}
@@ -1967,7 +1973,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
-	// sigue corriendo como si nada (ver checkDiskParaVolcado).
+	// sigue corriendo como si nada (ver reservarDiscoParaVolcado).
 	// Diferencial (diff_volcado.go): una copia con seguimiento de páginas
 	// sucias vuelca solo lo escrito desde el dorado. Lo que ocupa no se sabe
 	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
@@ -1984,9 +1990,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		necesario /= 4
 	}
-	if err := m.checkDiskParaVolcado(necesario, "freeze"); err != nil {
+	soltarDisco, err := m.reservarDiscoParaVolcado(necesario, "freeze")
+	if err != nil {
 		return nil, err
 	}
+	defer soltarDisco()
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
@@ -2051,8 +2059,9 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// caminos. Un invitado pausado no atiende HTTP: la petición se comía su
 	// plazo entero en CADA congelación, y lo que quedara sin vaciar solo vivía
 	// en mem.file — si luego se elimina la máquina warm, esas escrituras
-	// desaparecen sin dejar rastro.
-	m.flushVolume(mc)
+	// desaparecen sin dejar rastro. Con el overlay también: un stop de la
+	// congelada tira mem.file, y kling start arranca sobre el overlay solo.
+	m.flushVolume(mc, true)
 
 	// Las carpetas vivas se desconectan ANTES de pausar: la conexión muere con
 	// el VMM, y si no se cortara aquí el daemon no se enteraría hasta que
@@ -2571,6 +2580,14 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
 		return nil, err
 	}
+	// Con los marcadores y el entorno pendiente puede pasarse del almacén
+	// del VMM: se dice aquí, con el tope, y no con el error crudo del VMM.
+	if b, err := json.Marshal(doc); err != nil {
+		return nil, err
+	} else if len(b) > api.MaxMMDSBytes {
+		return nil, fmt.Errorf("the MMDS store would be %d bytes with the machine's credential placeholders, "+
+			"over the limit of %d", len(b), api.MaxMMDSBytes)
+	}
 	c := fc.New(sock)
 	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
@@ -2771,13 +2788,18 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	crono.marca(&crono.p.WaitMS)
 
-	// Otra llamada pudo descongelarla mientras esperábamos el candado.
+	// Otra llamada pudo descongelarla mientras esperábamos el candado, o
+	// borrarla: seguir con la copia de antes lanzaba un VMM sobre un
+	// directorio que ya no existe (como Freeze y Commit, se relee).
 	cur, ok := m.Get(mc.ID)
-	if ok && cur.State == api.StateRunning {
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	if cur.State == api.StateRunning {
 		return cur, nil
 	}
 	// Pausada: solo reanudar (ver pausa.go).
-	if ok && cur.State == api.StatePaused {
+	if cur.State == api.StatePaused {
 		crono.p.Tier = "paused"
 		// Pausada por el almacén lleno (cow_vigilante.go): reanudarla sin
 		// sitio la devolvería a escribir en un almacén que da EIO.
@@ -2799,9 +2821,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			Message: "resumed" + notaFases(fases)})
 		return out, nil
 	}
-	if ok {
-		mc = cur
-	}
+	mc = cur
 	if mc.State != api.StateWarm {
 		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
@@ -2831,21 +2851,39 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			mc.Name, mc.ID[:8], pid)
 		// Con su socket real: si corre en jail, el del chroot (ver socketDe).
 		sock := m.socketDe(mc.ID, pid)
-		m.mu.Lock()
-		if cur := m.byID[mc.ID]; cur != nil {
-			now := time.Now()
-			cur.State = api.StateRunning
-			cur.PID = pid
-			cur.StartedAt = &now
-			cur.FrozenAt = nil
-			m.socket[mc.ID] = sock
-			m.persist()
-			out := *cur
-			m.mu.Unlock()
-			m.startShares(mc.ID)
-			return &out, nil
+		// El techo de CPU, el configurado (no el impulso de arranque: este
+		// invitado ya arrancó). Su cgroup pudo irse con un reinicio del daemon
+		// (sweepCgroups) o no haberse aplicado nunca si el thaw que lo lanzó
+		// murió antes de llegar a limitCPU: sin esto corría sin techo.
+		techo := mc.CPUPct
+		if techo <= 0 {
+			techo = techoDelDaemon(mc.VCPUs)
 		}
+		if warn := m.limitCPU(mc.ID, pid, techo); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
+		m.mu.Lock()
+		cur := m.byID[mc.ID]
+		if cur == nil {
+			// Con el cerrojo tomado nadie debería poder borrarla; si aun así
+			// no está, seguir lanzaría un SEGUNDO VMM sobre su overlay, que es
+			// justo lo que esta readopción evita. El que corre no es de nadie.
+			m.mu.Unlock()
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+		}
+		now := time.Now()
+		cur.State = api.StateRunning
+		cur.PID = pid
+		cur.StartedAt = &now
+		cur.FrozenAt = nil
+		cur.CPUPct = techo
+		m.socket[mc.ID] = sock
+		m.persist()
+		out := *cur
 		m.mu.Unlock()
+		m.startShares(mc.ID)
+		return &out, nil
 	}
 
 	// Jailer bloqueado: antes de enterLaunch, la red y el cgroup (ver Run). No
@@ -2873,6 +2911,30 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
+	// Admisión de memoria, como Run y runFrom: descongelar devuelve al host
+	// toda la RAM del invitado, y una tormenta de thaws (el gateway
+	// despertando a la vez lo que congeló) lo dejaba sin memoria sin que nada
+	// dijera que no. El techo entero (MemMaxMiB): es lo que el VMM mapea al
+	// cargar. Sin la del disco (checkDisk): despertar no crea disco —el
+	// overlay y el volcado ya existen—, y el diferencial sin reflink ya mide
+	// el suyo (prepararMemoriaDesdeDiff). Reanudar una pausada (arriba) y
+	// readoptar un VMM vivo no pasan por aquí: su memoria ya está ocupada.
+	//
+	// Se reserva con el cerrojo de la máquina tomado, a diferencia de Run
+	// (que aún no tiene máquina): si no cabe, esperarReservas puede esperar
+	// hasta esperaReservasMax, y mientras tanto un stop o un rm de ESTA
+	// máquina esperan con él. Es a propósito: reservar antes del cerrojo
+	// obligaría a releerla y a devolver la reserva si cambió entre medias,
+	// para ahorrar una espera acotada a una máquina que ya se está
+	// despertando. El ctx de la petición la corta antes si quien pidió se va.
+	if err := m.admitirMemoria(); err != nil {
+		return nil, err
+	}
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, max(mc.MemMiB, mc.MemMaxMiB), "", mc.ID)
+	if merr != nil {
+		return nil, merr
+	}
+	defer releaseMem()
 	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
 	base := leerSello(dir).DiffBase
@@ -3206,10 +3268,18 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc = cur
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
-	m.kill(mc.ID)
+	m.killConservandoDisco(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
+	// Ni su volcado: una parada arranca en frío (kling start), así que el
+	// mem.file de una congelada —del tamaño de su RAM— y el de un thaw
+	// anterior ya no los carga nadie y se quedaban en disco hasta el rm.
+	// Tampoco el jail, que guarda enlaces a ellos.
+	if err := m.borrarJail(mc.ID); err != nil {
+		log.Printf("warning: %v", err)
+	}
+	m.borrarVolcado(mc.ID)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3223,9 +3293,15 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc.State, mc.PID = api.StateStopped, 0
 		return mc, nil
 	}
+	now := time.Now()
 	live.State = api.StateStopped
 	live.PID = 0
 	live.Forwards = nil
+	live.StoppedAt = &now
+	live.FrozenAt = nil
+	live.DiffBase = ""
+	live.MemShared = false
+	live.SnapSize = 0
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live
@@ -3301,7 +3377,11 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) { m.killMachine(id, true) }
+func (m *Manager) kill(id string) { m.killMachine(id, true, false) }
+
+// killConservandoDisco es kill para Stop: el overlay sigue después (kling
+// start), así que el invitado vacía su caché aunque no tenga volúmenes.
+func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true) }
 
 // killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
 //
@@ -3309,9 +3389,9 @@ func (m *Manager) kill(id string) { m.killMachine(id, true) }
 // el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
 // morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
 // pausar, que es el único momento en que el invitado podía responder.
-func (m *Manager) killPaused(id string) { m.killMachine(id, false) }
+func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
 
-func (m *Manager) killMachine(id string, flush bool) {
+func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
@@ -3338,7 +3418,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	if flush && mc.State != api.StatePaused {
 		// El servicio primero: es quien escribe en los volúmenes.
 		m.stopService(mc)
-		m.flushVolume(mc)
+		m.flushVolume(mc, conservaDisco)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	defer func() {

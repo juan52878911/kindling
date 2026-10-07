@@ -28,6 +28,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
+// argsVMM: kling-vz ya acepta un almacén MMDS de api.MaxMMDSBytes y no
+// conoce los argumentos de Firecracker.
+func argsVMM() []string { return nil }
+
 // putSinMontar: macOS no monta ext4; intentarPut escribe con debugfs -w
 // (put_debugfs.go).
 const putSinMontar = true

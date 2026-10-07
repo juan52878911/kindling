@@ -129,11 +129,14 @@ func (v *Volumes) Acquire() error {
 	return nil
 }
 
-// sync vacía al disco lo que haya en la caché del invitado.
+// sync vacía al disco lo que haya en la caché del invitado: la de sus
+// volúmenes y también la de su raíz. El overlay sobrevive a un stop (kling
+// start arranca otra vez sobre él) y no lleva journal, así que lo que quedara
+// en caché al matar el VMM se perdía aunque la máquina no tuviera volúmenes.
 func (v *Volumes) Sync() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	syncVolumes(v.mounted)
+	syncDiscos()
 }
 
 // release desmonta. También idempotente: desmontar dos veces no es un error, y

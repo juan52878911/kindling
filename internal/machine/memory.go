@@ -79,8 +79,9 @@ func meminfoMiB(key string) int {
 // reclamables.
 //
 // Devuelve 0 si no se puede saber; quien llama debe tratarlo como "no comprobar"
-// en vez de como "no hay memoria".
-func availableMiB() int { return meminfoMiB("MemAvailable") }
+// en vez de como "no hay memoria". En variable para que los tests simulen un
+// host lleno.
+var availableMiB = func() int { return meminfoMiB("MemAvailable") }
 
 // freeMiB devuelve la memoria REALMENTE libre (MemFree), sin contar caché.
 //
