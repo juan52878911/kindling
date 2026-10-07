@@ -34,6 +34,11 @@
 # abierto) y dejaba a medias a quien actualizaba desde una shell con kling
 # corriendo.
 #
+# Sobre una instalación que ya existe (hay un kling en --prefix) no hace nada
+# sin --force: actualizar es `kling upgrade`, que además para y arranca el
+# daemon, verifica que el nuevo responde y vuelve atrás solo si no
+# (docs/actualizar.md). --force reinstala con este script, como antes.
+#
 # Al final deja `kling doctor` en verde: instala el completado de tu shell en
 # ~/.config/kling y añade a tu rc la línea que lo carga y el PATH de --prefix
 # si faltaba (una sola vez, bajo un comentario "# kling"). Con --no-rc no toca
@@ -61,6 +66,7 @@ PLUGIN_DIR=""
 SKIP_KLING=0
 NO_COMPANIONS=0
 NO_RC="${KLING_NO_RC:-0}"
+FORCE=0
 
 usage() {
     cat <<EOF
@@ -77,6 +83,8 @@ Uso: install.sh [opciones]
   --no-companions    no instala los compañeros de las extensiones (kling-bridge)
   --no-rc            no toca nada fuera de --prefix: ni tu rc ni el completado
                      en ~/.config/kling; imprime lo que harías tú
+  --force            reinstala aunque ya haya un kling en --prefix (para
+                     actualizar, mejor: kling upgrade)
   --dry-run          muestra lo que haría sin descargar ni instalar nada
   -h, --help         muestra esta ayuda
 
@@ -100,6 +108,7 @@ while [ $# -gt 0 ]; do
         --no-companions) NO_COMPANIONS=1; shift ;;
         --no-rc)     NO_RC=1; shift ;;
         --dry-run)   DRY_RUN=1; shift ;;
+        --force)     FORCE=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "opción desconocida: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -192,6 +201,18 @@ resolve_tag() {
         exit 1
     fi
 }
+
+# ── instalación existente: eso es kling upgrade ─────────────────────────────
+# Va antes de resolver la etiqueta: no hace falta red para decir que no.
+if [ "$SKIP_KLING" != "1" ] && [ "$FORCE" != "1" ] && [ -x "$PREFIX/kling" ]; then
+    HAVE_VER="$("$PREFIX/kling" version 2>/dev/null | awk 'NR==1{print $2}')"
+    echo "Ya hay un kling ${HAVE_VER:-} en $PREFIX/kling." >&2
+    echo "Para actualizarlo:  kling upgrade${TAG:+ -tag $TAG}   (con el daemon: sudo kling upgrade en Linux)" >&2
+    echo "  baja y verifica la release, para el daemon, cambia, arranca, comprueba y" >&2
+    echo "  vuelve atrás solo si algo falla. Un kling anterior a v0.18 no lo tiene:" >&2
+    echo "  vuelve a lanzar este script con --force." >&2
+    exit 1
+fi
 
 resolve_tag
 
