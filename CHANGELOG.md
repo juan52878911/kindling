@@ -24,7 +24,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling exec`/`kling shell` take `-e KEY` and `-env-file`, keeping secrets out of argv (#135)
 - `kling db role -login` lets a migrations role connect from the host (#149)
 - `kling db diff` also compares functions, views, triggers, grants, extensions and hypertables (#148)
-- `/metrics`: operations by result, admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
+- `/metrics`: operations by result (run, thaw, freeze, start), admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
 - `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
 
@@ -57,6 +57,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
 - The daemon builds `oci`, `debian` and `android` images with its own binary, not the `kling` installed on the host (unless `KLING_BUILDERS_DIR` is set)
