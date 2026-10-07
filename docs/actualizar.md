@@ -397,9 +397,15 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   `mem.file` de antes sobre un disco cambiado después: memoria y disco ya no
   casan y el sistema de ficheros del invitado puede romperse en silencio. Así
   que, antes de parar para volver, se comparan con el `List` del daemon nuevo y
-  se congelan otra vez con él (el VMM no cambia, así que su `mem.file` lo lee
-  el viejo). Si no se puede (no contesta y su `state.json` dice que corren, o
-  el freeze falla), no se vuelve atrás y se dice cuáles: el nuevo sigue
+  se congelan otra vez con él. En Linux el VMM no cambia, así que su
+  `mem.file` lo lee el viejo. En el Mac `kling-vz` sí cambia: escribe el
+  formato de snapshot más bajo que describe la máquina (`kling_vz` 1 sin
+  pantalla), y antes de volver se pregunta al `kling-vz` de la copia hasta qué
+  formato lee (`-snapshot-formats`; uno de v0.17, sin esa bandera, solo el 1)
+  y se mira el `snap.file` de cada una que se congeló otra vez. Si no se puede
+  (no contesta y su `state.json` dice que corren, el freeze falla o el viejo
+  no leería el volcado: una con pantalla al volver a v0.17), no se vuelve atrás
+  y se dice cuáles: el nuevo sigue
   corriendo, la copia se queda, y `-rollback -force` vuelve igualmente. Lo
   creado después sí se pierde, como dice §6.
 - **`-rollback`.** Lo mismo con la última copia, menos el `state.json`
@@ -452,9 +458,33 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   la parada para `start`, y `-rollback` a N-1 con el `state.json` de antes. La
   credencial y el enlace de MCP quedan fuera (son de extensiones). Con
   binarios sin su versión sellada (los dos `dev`) se para al principio y lo
-  dice. En Mac, pendiente: el camino de launchd tiene tests unitarios pero no
-  e2e, así que [`releases.md`](releases.md) lo pide a mano (paso 3b) antes de
-  cada etiqueta.
+  dice. El `state.json.v0.bak` se compara por su contenido con el de justo
+  antes de actualizar: v0.17 escribe las máquinas desde un mapa, en otro orden
+  cada vez, y reescribe el fichero al pararse y arrancar.
+
+  Comprobado el 2026-10-07 en el lab (CT 105, amd64, Firecracker 1.17, unidad
+  privada `kt-l3fix-upg.service` con raíz en `/srv/kt-l3fix-upg`): v0.17.0 →
+  `v0.17.0-485-g8e599d65` → `-rollback` (y `-rollback` con el daemon caído),
+  38 de 38, cinco veces seguidas, 25-27 s cada una. El cambio tarda 403-424 ms;
+  la congelada por v0.17.0 despierta en 2 ms con su marca en RAM, el dorado
+  sirve para `run -from`, la parada arranca con `start`, y tras `-rollback`
+  v0.17.0 la vuelve a despertar con la marca. Antes de comparar por contenido,
+  2 de 6 vueltas fallaban por el orden de las máquinas en el `.v0.bak`.
+
+  En el Mac, `scripts/95-e2e-upgrade-mac.sh` hace lo mismo con el agente de
+  launchd: instala uno suyo con la etiqueta de `kling upgrade`
+  (`dev.kindling.daemon`, en el dominio `gui/<uid>`) apuntando a un daemon
+  privado con sus binarios, su raíz y su socket, y lo quita al acabar; si el
+  usuario ya tiene ese agente (cargado o su plist), se niega. Comprueba además
+  que se cambian y se devuelven `kling` y `kling-vz`, que este sigue con el
+  permiso de virtualización y que launchd ejecuta el binario nuevo. Comprobado
+  el 2026-10-07 en el M4 (v0.17.0 → `v0.17.0-486-gd5b48f8c`, imágenes `min` y
+  `toolchain` del Lima `kling-arm`): 42 de 42, dos veces, 33 s; el cambio tarda
+  1,3 s y la congelada despierta en 266-275 ms con su marca. La primera vuelta
+  encontró un fallo de verdad: `-rollback` dejaba la congelada que el nuevo
+  había vuelto a congelar con `kling_vz` 2, que el `kling-vz` de v0.17 no lee
+  (`unsupported snapshot format kling_vz=2`); arreglado escribiendo el formato
+  más bajo que describe la máquina (§3.4).
 
 ---
 
@@ -498,8 +528,8 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 6 | guarda de structs persistidos | `TestCamposPersistidos` compara nombre JSON y tipo de los campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` y `api.CredentialSpec` (y de los structs del módulo que cuelgan de ellos) con `internal/machine/testdata/esquema/campos-persistidos.txt`, que también apunta la versión de cada fichero. Quitar o cambiar de tipo un campo sin subir la versión falla y `-update` se niega; añadir uno se registra con `-update` | S — **hecho** |
 | 7 | fijaciones de `testdata/` | `internal/machine/testdata/esquema/v0.17/`: `state.json`, `meta.json` y `recipe.json` con todos los campos de v0.17.0 (generados con su `pkg/api`); `fijaciones_v017_test.go` comprueba que se leen, que migran con su `.v0.bak` y que ningún campo se pierde ni cambia, tanto en el fichero reescrito como al leerlo al struct. `credentials.v0.enc` ya estaba (PR 3) | S — **hecho** |
 | 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L — **hecho** (las unidades no se tocan: §3.4) |
-| 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M — **hecho** |
-| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M — **hecho** en Linux (en Mac, a mano: paso 3b de `releases.md`) |
+| 9 | `kling upgrade` en Mac y extensiones | `kling-vz`, `launchctl`, companions; `install.sh` remite a `upgrade` sobre una instalación existente | M — **hecho** (e2e en el M4 con `95-e2e-upgrade-mac.sh`) |
+| 10 | e2e `94-e2e-upgrade.sh` | N-1 → HEAD → rollback en el laboratorio y en Mac; paso obligatorio en [`releases.md`](releases.md) antes de etiquetar | M — **hecho**: `94-e2e-upgrade.sh` en el lab y `95-e2e-upgrade-mac.sh` en el Mac, los dos comprobados el 2026-10-07 (§3.5) |
 | 11 | limpieza de v0.4 | quitar `migrateLinks`, `liftV04` y el alias `warm` → `frozen` | S — **hecho** |
 
 Los PR 2–5 son los de "romper ahora": conviene que salgan **en la misma MINOR**

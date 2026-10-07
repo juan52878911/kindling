@@ -151,7 +151,8 @@ release, verifica `kling` y `kling-vz` (y que este lleva el permiso de
 virtualización), los cambia en su sitio, lo reinicia con `launchctl bootout` y
 `bootstrap` y vuelve atrás solo si no contesta con la versión nueva
 ([`actualizar.md`](actualizar.md) §3.4). Sin el agente de launchd no sabe
-reiniciarlo: `kling upgrade -cli` cambia solo el binario.
+reiniciarlo: `kling upgrade -cli` cambia solo el binario. Lo prueba de punta a
+punta `scripts/95-e2e-upgrade-mac.sh`, con un agente suyo para un daemon privado.
 
 ## Cómo se llega a cada máquina
 

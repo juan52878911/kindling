@@ -38,6 +38,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling upgrade`: verified download, schema check, backup, daemon restart (systemd or launchd), check and automatic rollback; `-rollback`, `-dry-run`, `-from-dir`, `-cli`
 - `kling upgrade` rolls back without corrupting frozen machines the new daemon woke (it freezes them again first), `-rollback` works with the daemon down (`-root`), and only one upgrade runs per root
 - `scripts/94-e2e-upgrade.sh`: upgrade from the previous release and back on a private daemon
+- `scripts/95-e2e-upgrade-mac.sh`: the same on macOS, through a temporary launchd agent for a private daemon
+- `kling-vz -snapshot-formats` prints the snapshot formats (`kling_vz`) it reads
 - `kling upgrade` checks that the daemon on the socket is the one the unit (or launchd agent) runs, refuses state the target no longer reads before stopping anything, and finishes the restart or rollback on Ctrl-C
 - `kling upgrade` tolerates what the gateway does meanwhile: frozen machines woken by clients, session machines removed
 
@@ -75,6 +77,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling upgrade -rollback` on macOS no longer leaves frozen machines the previous kling-vz cannot wake: kling-vz writes the oldest snapshot format that describes the machine (`kling_vz` 1 without a screen), and the rollback is refused, naming the machine, if the old kling-vz still could not read it
 - Disk-full errors suggest removing frozen or stopped machines, not "warm" ones (a v0.13 state)
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
 - Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first, up to 3/4 of `-wait` (at least 30 s)

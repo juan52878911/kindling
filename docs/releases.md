@@ -126,19 +126,14 @@ git commit -am "changelog: vX.Y.Z"
 #    con los binarios sellados (-ldflags "-X main.Version=..."): si no, el script se para
 sudo OLD_DIR=<kling de la anterior> NEW_DIR=<binarios de HEAD> scripts/94-e2e-upgrade.sh
 
-# 3b. en el Mac, A MANO (94-e2e-upgrade.sh es solo de Linux): con el agente de
-#     launchd de docs/mac.md en la versión anterior, una máquina congelada y un
-#     dorado; `kling upgrade -from-dir <binarios de HEAD>` (kling y kling-vz),
-#     que la congelada despierte y el dorado sirva para `run -from`; luego
-#     `kling upgrade -rollback` y lo mismo con la anterior
+# 3b. lo mismo en el Mac, con el agente de launchd (instala uno suyo y lo
+#     quita; se niega si ya tienes dev.kindling.daemon): kling y kling-vz de
+#     la anterior y de HEAD, sellados, y las imágenes de un daemon Linux arm64
+OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmlinux, min.ext4…> scripts/95-e2e-upgrade-mac.sh
 
 # 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```
-
-El paso 3b no está automatizado: el camino de launchd de `kling upgrade` tiene
-tests unitarios pero no un e2e (ver [`actualizar.md`](actualizar.md), PR 10), así
-que hasta que lo tenga se hace a mano antes de cada etiqueta.
 
 `scripts/release.sh` se niega a etiquetar sin ese bloque, `--dry-run` enseña
 las notas que saldrán y `--wait` espera al workflow y abre la release. A mano:
