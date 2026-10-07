@@ -206,7 +206,7 @@ func Zstd(b []byte) []byte {
 	}
 }
 
-// Tar arma una capa .tar sin comprimir.
+// Tar es TarGz sin comprimir: una capa como la de docker save.
 func Tar(files []File) []byte {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)

@@ -96,6 +96,10 @@ type Config struct {
 	OS           string      `json:"os"`
 	Variant      string      `json:"variant,omitempty"`
 	Config       ImageConfig `json:"config"`
+	// RootFS.DiffIDs son los sha256 de las capas SIN comprimir, en orden.
+	RootFS struct {
+		DiffIDs []string `json:"diff_ids"`
+	} `json:"rootfs"`
 }
 
 // ImageConfig es la parte "config" de la configuración de una imagen: lo
@@ -172,6 +176,15 @@ type Client struct {
 	// Auth son las credenciales de los registros privados, por CredentialKey
 	// (auth.go). Sin ellas, tokens anónimos.
 	Auth map[string]Credential
+	// Offline: nada se pide a un registro. Lo que no esté en la caché (o en
+	// Seed) es un error. Para lo importado de un archivo (archive.go): el
+	// daemon dejó sus blobs en la caché, comprobados, y la referencia no es de
+	// ningún registro.
+	Offline bool
+	// Seed, si no está vacío, es otra caché de blobs (la de root, adonde sube
+	// el daemon lo importado), solo para leer: lo que se use de ahí se
+	// rehashea siempre y no se copia.
+	Seed string
 
 	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
 	authMu sync.Mutex // un solo token pedido a la vez
@@ -295,6 +308,8 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	var mt string
 	if b, err := os.ReadFile(c.BlobPath(digest)); err == nil && sha(b) == digest {
 		body = b
+	} else if b, err := c.readSeed(digest, maxManifest); err == nil && sha(b) == digest {
+		body = b
 	} else {
 		body, mt, err = c.get(ctx, registry, repo, "manifests/"+digest, manifestAccept, maxManifest)
 		if err != nil {
@@ -361,6 +376,9 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	if img.Config.Architecture != arch || (img.Config.OS != "" && img.Config.OS != "linux") {
 		return nil, fmt.Errorf("image %s is %s/%s, not linux/%s", digest, img.Config.OS, img.Config.Architecture, arch)
 	}
+	if err := checkDiffIDs(m.Layers, img.Config.RootFS.DiffIDs, c.Offline); err != nil {
+		return nil, fmt.Errorf("image %s: %w", digest, err)
+	}
 	for _, l := range m.Layers {
 		if !strings.Contains(l.MediaType, "tar") {
 			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar, tar+gzip and tar+zstd)", l.Digest, l.MediaType)
@@ -371,6 +389,25 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		return nil, err
 	}
 	return img, nil
+}
+
+// checkDiffIDs comprueba las capas sin comprimir con los diff_ids de la
+// configuración: de una capa así, el digest y el diff_id son el mismo sha256
+// (así se importa un docker save). Con strict (lo importado de un archivo),
+// además tiene que haber un diff_id por capa.
+func checkDiffIDs(layers []Descriptor, ids []string, strict bool) error {
+	if len(ids) != len(layers) {
+		if strict {
+			return fmt.Errorf("the config has %d diff_ids for %d layers", len(ids), len(layers))
+		}
+		return nil
+	}
+	for i, l := range layers {
+		if strings.HasSuffix(l.MediaType, ".tar") && l.Digest != ids[i] {
+			return fmt.Errorf("layer %d is %s but the config says its diff_id is %s", i+1, l.Digest, ids[i])
+		}
+	}
+	return nil
 }
 
 // layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
@@ -580,6 +617,16 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
 		return dst, nil
 	}
+	if c.Seed != "" {
+		if p := c.seedPath(d.Digest); p != "" {
+			if ok, _ := fileHas(p, d.Digest, d.Size); ok {
+				return p, nil
+			}
+		}
+	}
+	if c.Offline {
+		return "", errOffline(d.Digest)
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", err
 	}
@@ -602,6 +649,39 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 		}
 	}
 	return "", last
+}
+
+// errOffline es el error de un blob que falta sin poder bajarlo.
+func errOffline(digest string) error {
+	return fmt.Errorf("blob %s is not in the daemon's cache, and this image doesn't come from a registry: "+
+		"import the archive again (kling image import -archive)", digest)
+}
+
+// seedPath es dónde estaría digest en Seed ("" sin Seed). Solo un fichero
+// regular: un enlace no se sigue.
+func (c *Client) seedPath(digest string) string {
+	if c.Seed == "" || !reDigest.MatchString(digest) {
+		return ""
+	}
+	p := filepath.Join(c.Seed, "sha256", strings.TrimPrefix(digest, "sha256:"))
+	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	return p
+}
+
+// readSeed lee un blob pequeño de Seed.
+func (c *Client) readSeed(digest string, max int64) ([]byte, error) {
+	p := c.seedPath(digest)
+	if p == "" {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readMax(f, max)
 }
 
 // cached dice si el blob de la caché se puede usar sin volver a hashearlo.
@@ -732,6 +812,10 @@ func readMax(r io.Reader, max int64) ([]byte, error) {
 // do hace la petición y, si el registro pide un token (401 con Bearer),
 // lo consigue y repite.
 func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*http.Response, error) {
+	if c.Offline {
+		_, digest, _ := strings.Cut(path, "/")
+		return nil, errOffline(digest)
+	}
 	u := "https://" + registry + "/v2/" + repo + "/" + path
 	if isLocalHost(registryHost(registry)) {
 		u = "http://" + registry + "/v2/" + repo + "/" + path

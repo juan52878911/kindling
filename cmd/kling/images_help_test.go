@@ -35,7 +35,7 @@ func TestImageSubcommandsHaveHelp(t *testing.T) {
 	}
 	b := subBlock(img, "import")
 	for _, f := range []string{"-name", "-replace", "-json", "-e ", "-env-file", "-user", "-entrypoint",
-		"-restart", "-max-size", "-arch", "-- cmd"} {
+		"-restart", "-max-size", "-arch", "-- cmd", "-archive", "-image R"} {
 		if !strings.Contains(b, f) {
 			t.Errorf("image import help lacks %s:\n%s", f, b)
 		}

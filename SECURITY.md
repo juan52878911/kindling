@@ -1348,6 +1348,32 @@ congelarla: el entorno es configuración. Un secreto que no deba tocar nunca el 
 va por `machine secret` o por el proxy de credenciales. Una imagen cuyo agente no sabe
 leer el entorno hace fallar la máquina en vez de arrancar su servicio sin él.
 
+### 26. Importar un archivo (`image import -archive`): nada se usa sin su sha256
+
+`kling image import -archive` lee un `docker save` o un layout OCI en la máquina del CLI
+y sube sus blobs al daemon (`PUT /oci/blobs/{digest}`, solo admin). El archivo no es de
+fiar más que una imagen de un registro:
+
+- **El CLI valida la estructura antes de subir nada**: nombres sin `..` ni absolutos,
+  ningún enlace (simbólico o duro) que salga del archivo, sin entradas repetidas ni
+  ficheros dispersos, JSON acotados (4-8 MiB), un tope de entradas y el `-max-size`. Un
+  enlace interno se resuelve en el índice del tar, nunca en el disco; en un layout en
+  directorio no se sigue ninguno (`os.Root`, fichero regular, el mismo que se comprobó).
+- **El daemon no se fía del CLI**: la ruta de un blob sale solo de su digest (lista
+  blanca `sha256:<64 hex>`), el cuerpo tiene que traer `Content-Length` (hasta 16 GiB) y
+  el blob solo se renombra a la caché si su sha256 es el del digest. Lo que hay en la
+  caché con un nombre es siempre ese contenido, lo suba quien lo suba.
+- **El constructor comprueba la cadena entera**, sin red: el manifiesto por su digest
+  (el que fija la receta), la configuración y cada capa por los suyos, y en las capas sin
+  comprimir que su digest sea el `diff_id` de la configuración. Con el usuario de
+  construcción (24) lee lo subido de la caché de root, de solo lectura para él, y lo
+  rehashea siempre.
+- **La receta no filtra el host del CLI**: guarda `source: archive`, el nombre que traía
+  la imagen y el digest; la ruta del archivo no sale de la máquina del CLI.
+
+Límite: la caché de blobs crece con lo que se sube y no se poda sola (como lo bajado de
+un registro); quien tiene el rol admin ya puede llenar el disco de otras maneras.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

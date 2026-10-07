@@ -80,7 +80,16 @@ type OCISpec struct {
 	// cuyo CMD acaba con 0 (python:3.12-slim) no se tiene que relanzar para
 	// siempre; uno que se cae, sí.
 	Restart string `json:"restart,omitempty"`
+	// Source dice de dónde salen los blobs: "" es un registro; "archive",
+	// un docker save o un layout OCI que el CLI subió a la caché del daemon
+	// (kling image import -archive). Entonces Digest es obligatorio (el del
+	// manifiesto), Ref es opcional (el nombre que traía la imagen en el
+	// archivo) y no se usa la red. Ninguna ruta del host del CLI llega aquí.
+	Source string `json:"source,omitempty"`
 }
+
+// ociSourceArchive es OCISpec.Source de lo importado de un archivo.
+const ociSourceArchive = "archive"
 
 const (
 	ociDefaultMaxMB = 4096
@@ -102,7 +111,15 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	if req.Base != "" {
 		return oci.ImageRef{}, fmt.Errorf("the oci builder makes its own base; don't give one")
 	}
-	ref, err := oci.ParseImageRef(s.Ref)
+	switch s.Source {
+	case "", ociSourceArchive:
+	default:
+		return oci.ImageRef{}, fmt.Errorf("invalid source %q (want archive, or none for a registry)", s.Source)
+	}
+	if s.Source == ociSourceArchive && s.Digest == "" {
+		return oci.ImageRef{}, fmt.Errorf("an image from an archive needs its manifest digest")
+	}
+	ref, err := ociSpecRef(s)
 	if err != nil {
 		return ref, err
 	}
@@ -144,6 +161,27 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 		return ref, fmt.Errorf("invalid restart policy %q: use always, on-failure or no", s.Restart)
 	}
 	return ref, nil
+}
+
+// ociSpecRef es la referencia del spec. Una imagen de un archivo puede no
+// tener nombre: entonces es "archive/image" (solo para los mensajes; la imagen
+// la fija el digest).
+func ociSpecRef(s OCISpec) (oci.ImageRef, error) {
+	if s.Source == ociSourceArchive && s.Ref == "" {
+		return oci.ImageRef{Registry: "archive", Repo: "image"}, nil
+	}
+	return oci.ParseImageRef(s.Ref)
+}
+
+// ociShown es cómo se nombra la imagen en el registro de la construcción y en
+// la receta: la referencia normalizada; la de un archivo, tal como venía
+// ("postgres:17-alpine@sha256:...", no de ningún registro), o "archive@..."
+// si no traía nombre.
+func ociShown(s OCISpec, ref oci.ImageRef) string {
+	if s.Source == ociSourceArchive {
+		return cmp.Or(s.Ref, "archive") + "@" + ref.Digest
+	}
+	return ref.String()
 }
 
 func builderOCI(dir string) error { return buildOCI(context.Background(), dir, os.Stdout) }
@@ -223,10 +261,21 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// cacheado se rehashea siempre (oci.Client.SiempreRehash).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
 		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
+	archive := spec.Source == ociSourceArchive
+	if archive {
+		// Los blobs los subió el CLI a la caché de root (PUT /oci/blobs): sin
+		// red, y desde ahí si esta caché es otra (la del usuario de
+		// construcción), rehasheados.
+		c.Offline = true
+		if subidos := filepath.Join(root, "cache", "oci"); subidos != cache {
+			c.Seed = subidos
+		}
+	}
+	shown := ociShown(spec, ref)
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("resolving %s: %w", ref, err)
+		return fmt.Errorf("resolving %s: %w", shown, err)
 	}
 	img, err := c.Pull(ctx, ref.Name(), digest, spec.Arch)
 	if err != nil {
@@ -238,7 +287,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	for _, l := range img.Layers {
 		compressed += l.Size
 	}
-	logf("%s: %s, %d layer(s), %d MiB compressed", ref, img.ManifestDigest, len(img.Layers), compressed>>20)
+	how := "compressed"
+	if archive {
+		how = "of layers" // un docker save las trae sin comprimir
+	}
+	logf("%s: %s, %d layer(s), %d MiB %s", shown, img.ManifestDigest, len(img.Layers), compressed>>20, how)
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
 	tTree := time.Now()
@@ -328,8 +381,14 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	svc.ProbeTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(cfg.Healthcheck)
 	svcJSON, _ := json.MarshalIndent(svc, "", "  ")
-	ociJSON, _ := json.MarshalIndent(map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest,
-		"arch": spec.Arch, "config": cfg}, "", "  ")
+	ociInfo := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest,
+		"arch": spec.Arch, "config": cfg}
+	sourceLine := ""
+	if archive {
+		ociInfo["source"] = ociSourceArchive
+		sourceLine = "source=" + ociSourceArchive + "\n"
+	}
+	ociJSON, _ := json.MarshalIndent(ociInfo, "", "  ")
 	put := []struct {
 		p    string
 		data string
@@ -339,8 +398,8 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755},
 		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
 		{"/etc/kindling/oci.json", string(ociJSON) + "\n", 0o644},
-		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\nref=%s\ndigest=%s\nmanifest=%s\nbuilt_at=%s\n",
-			ref, digest, img.ManifestDigest, t.Format("2006-01-02T15:04:05Z")), 0o644},
+		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\n%sref=%s\ndigest=%s\nmanifest=%s\nbuilt_at=%s\n",
+			sourceLine, shown, digest, img.ManifestDigest, t.Format("2006-01-02T15:04:05Z")), 0o644},
 	}
 	if len(argv) > 0 {
 		put = append(put, struct {
@@ -406,11 +465,17 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	for _, l := range img.Layers {
 		layers = append(layers, map[string]any{"digest": l.Digest, "size": l.Size, "media_type": l.MediaType})
 	}
-	built := map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
+	built := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
 		"layers": layers, "service": svc, "ready": probeWhat, "ports": sortedKeys(cfg.ExposedPorts),
 		"volumes": sortedKeys(cfg.Volumes)}
 	if len(cfg.Labels) > 0 {
 		built["labels"] = cfg.Labels
+	}
+	if archive {
+		// De dónde vino: un archivo, y el id de la imagen (el digest de su
+		// configuración, el que enseña docker images). Sin rutas del host.
+		built["source"] = ociSourceArchive
+		built["config"] = img.Manifest.Config.Digest
 	}
 	bj, _ := json.Marshal(built)
 	// Un contenedor de Docker corre con los núcleos enteros salvo que se le
