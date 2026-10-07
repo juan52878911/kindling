@@ -91,7 +91,7 @@ func (m *Manager) makeRoom(ctx context.Context, skip string) int {
 		if !ok {
 			continue
 		}
-		res, err := m.squeezeLocked(ctx, c.id, c.id, false, balloonSqueezeMarginMiB)
+		res, err := m.squeezeLocked(ctx, c.id, c.id, false, balloonSqueezeMarginMiB, true)
 		soltar()
 		m.mu.Lock()
 		m.squeezedAt[c.id] = time.Now()

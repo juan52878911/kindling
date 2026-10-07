@@ -124,6 +124,8 @@ func TestApretonListoSinMargen(t *testing.T) {
 	}
 	m, id, falso := maquinaParaApretonListo(t, true)
 	m.bus = events.New()
+	eventos, baja := m.bus.Subscribe()
+	defer baja()
 	falso.mu.Lock()
 	falso.globo = &fc.BalloonStats{AvailableMemory: 400 << 20, FreeMemory: 300 << 20, TotalMemory: 512 << 20}
 	falso.mu.Unlock()
@@ -134,6 +136,20 @@ func TestApretonListoSinMargen(t *testing.T) {
 	}
 	if got := globosPedidos(t, falso); !slices.Equal(got, []int{400, 0}) {
 		t.Fatalf("globo pedido %v; quería [400 0]: inflar a todo lo disponible y volver a la base", got)
+	}
+	// No es congelar: nada de machine.frozen en el bus (el squeeze a mano sí
+	// lo publica, TestSqueezeMargenYSuelo).
+	time.Sleep(100 * time.Millisecond)
+	for {
+		select {
+		case ev := <-eventos:
+			if ev.Type == api.EvFrozen {
+				t.Fatalf("el apretón al estar lista publicó %s: %q", ev.Type, ev.Message)
+			}
+			continue
+		default:
+		}
+		break
 	}
 }
 
@@ -154,8 +170,18 @@ func TestSqueezeMargenYSuelo(t *testing.T) {
 			m, id, falso := maquinaParaApretonListo(t, true)
 			m.bus = events.New()
 			falso.globo = &fc.BalloonStats{ActualMiB: c.actual, AvailableMemory: int64(c.disp) << 20, TotalMemory: 512 << 20}
-			if _, err := m.squeezeLocked(context.Background(), id, id, false, c.margen); err != nil {
+			eventos, baja := m.bus.Subscribe()
+			defer baja()
+			if _, err := m.squeezeLocked(context.Background(), id, id, false, c.margen, true); err != nil {
 				t.Fatal(err)
+			}
+			select {
+			case ev := <-eventos:
+				if ev.Type != api.EvFrozen {
+					t.Errorf("squeeze publicó %s, quería %s", ev.Type, api.EvFrozen)
+				}
+			case <-time.After(time.Second):
+				t.Error("squeeze no publicó su evento")
 			}
 			if got := globosPedidos(t, falso); len(got) == 0 || got[0] != c.quiero {
 				t.Fatalf("globo pedido %v; quería inflar a %d", got, c.quiero)

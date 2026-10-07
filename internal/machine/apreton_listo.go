@@ -83,7 +83,8 @@ func (m *Manager) apretarAlEstarLista(id string) {
 			return
 		}
 		defer soltar()
-		res, err := m.squeezeLocked(ctx, id, id, false, margenApretonListo)
+		// Sin evento: solo el log (ver squeezeLocked).
+		res, err := m.squeezeLocked(ctx, id, id, false, margenApretonListo, false)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("%s: no squeeze after the ready probe: %v", shortID(id), err)

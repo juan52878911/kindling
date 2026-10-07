@@ -444,6 +444,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		if !m.cgroupMemoria {
 			log.Printf("warning: the memory cgroup controller is not available: no memory.max per microVM")
 		}
+		if !m.cgroupProcesos {
+			log.Printf("warning: the pids cgroup controller is not available: no pids.max per microVM")
+		}
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
@@ -2332,14 +2335,17 @@ func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
-	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB)
+	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB, true)
 }
 
 // squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
 // tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
 // las ocupadas). margen es lo que se le deja disponible al invitado mientras el
 // globo está inflado (balloonSqueezeMarginMiB, salvo el apretón al estar lista).
-func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool, margen int) (*api.SqueezeResult, error) {
+// publicar anuncia el apretón en el bus como EvFrozen, como siempre han hecho
+// squeeze y makeRoom; el apretón al estar lista no, que no es congelar nada y
+// quien lee los eventos vería un "freeze" justo después de arrancar.
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool, margen int, publicar bool) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
@@ -2456,8 +2462,10 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 		}
 	}
 
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
-		Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	if publicar {
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
+			Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	}
 
 	return &api.SqueezeResult{ID: id, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
 }
