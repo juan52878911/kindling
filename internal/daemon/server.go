@@ -338,7 +338,10 @@ func conVersionAPI(h http.Handler) http.Handler {
 // entera; los nombres se validan además donde se construye la ruta.
 func sinBarrasEscapadas(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if raw := r.URL.RawPath; raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
+		// La contrabarra se mira también ya desescapada: %5C es como Go la
+		// escapa por defecto, así que con %5C (mayúscula) RawPath queda vacío
+		// y mirar solo RawPath no la veía.
+		if raw := r.URL.RawPath; strings.ContainsRune(r.URL.Path, '\\') || raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
 			strings.Contains(raw, "%5C") || strings.Contains(raw, "%5c")) {
 			fail(w, http.StatusBadRequest, errors.New("escaped slashes are not allowed in the path: no name contains one"))
 			return
@@ -616,10 +619,24 @@ func runStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
+// cicloStatus traduce los errores de las operaciones sobre una máquina que ya
+// existe (freeze, pause, thaw, stop, rm...): 404 si no existe, 409 si su
+// estado no admite la operación. Lo demás sigue siendo 400, como siempre; un
+// api.StatusError del manager (507, 503...) manda sobre todo esto (ver fail).
+func cicloStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrNoMachine):
+		return http.StatusNotFound
+	case errors.Is(err, machine.ErrWrongState):
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Freeze(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -628,7 +645,7 @@ func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Pause(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -637,7 +654,7 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Thaw(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -668,7 +685,7 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
 	res, err := s.mgr.SqueezeWith(r.Context(), r.PathValue("ref"), force)
 	if err != nil {
-		code := http.StatusBadRequest
+		code := cicloStatus(err)
 		if errors.Is(err, machine.ErrSqueezeShared) {
 			code = http.StatusConflict
 		}
@@ -689,7 +706,7 @@ func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.PutMMDS(r.Context(), r.PathValue("ref"), data)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -703,7 +720,7 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -714,8 +731,8 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
 	if err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "has no credential") {
+		code := cicloStatus(err)
+		if strings.Contains(err.Error(), "has no credential") {
 			code = http.StatusNotFound
 		}
 		fail(w, code, err)
@@ -745,7 +762,7 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Stop(r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -753,7 +770,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Remove(r.PathValue("ref")); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

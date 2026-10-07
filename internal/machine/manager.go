@@ -1890,7 +1890,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
@@ -1900,7 +1900,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// rechazar una máquina recién arrancada por estar "created".
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
@@ -1919,7 +1919,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		mc = r
 	}
 	if mc.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be frozen (it is %s)", mc.State)
+		return nil, estadoInvalido("only a running machine can be frozen (it is %s)", mc.State)
 	}
 
 	// Negativa deliberada: una máquina con secretos inyectados por MMDS NO se
@@ -1931,7 +1931,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
 	// vuelca nada a disco) o `stop`/`rm`.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and "+
+		return nil, estadoInvalido("machine %s has session secrets injected via MMDS and "+
 			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+
 			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm; or, if its image "+
 			"has post-restore hooks that consume the secret, run them (kling machine hooks -wait) and "+
@@ -2247,7 +2247,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// se lleva el proceso, y con el TODAS las microVM quedan huerfanas.
 		delete(m.socket, mc.ID)
 		m.mu.Unlock()
-		return nil, fmt.Errorf("machine %q was removed while it was being frozen", mc.Name)
+		return nil, retiradaDurante(mc.Name, "frozen")
 	}
 	now := time.Now()
 	live.State = api.StateWarm
@@ -2318,7 +2318,7 @@ var ErrSqueezeShared = errors.New("squeezing a copy that shares memory with its 
 func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api.SqueezeResult, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	return m.squeezeLocked(ctx, mc.ID, ref, force)
@@ -2331,7 +2331,7 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
@@ -2501,13 +2501,13 @@ func procRSSMiB(pid int) int {
 func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("MMDS can only be injected into a running machine (it is %s)", cur.State)
@@ -2675,13 +2675,13 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("credentials can only be given to a running machine (it is %s)", cur.State)
@@ -2728,7 +2728,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono := nuevoCrono("frozen")
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	crono.marca(&crono.p.WaitMS)
@@ -2765,7 +2765,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		mc = cur
 	}
 	if mc.State != api.StateWarm {
-		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
+		return nil, estadoInvalido("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
 	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
 	// que el invitado lo descubra con un EIO al escribir.
@@ -3063,7 +3063,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		m.desmontarRed(netcfg, mc.ID)
-		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+		return nil, retiradaDurante(mc.Name, "thawed")
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
@@ -3120,7 +3120,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3152,7 +3152,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	// El cerrojo de ciclo de vida, que aqui faltaba y lo tienen Freeze, Thaw,
 	// Squeeze, PutMMDS y Remove. Sin el, un Stop concurrente a un Thaw desmonta
@@ -3211,7 +3211,7 @@ func (m *Manager) Remove(ref string) error {
 func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.

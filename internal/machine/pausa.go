@@ -30,23 +30,23 @@ import (
 func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StatePaused {
 		return cur, nil
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be paused (it is %s)", cur.State)
+		return nil, estadoInvalido("only a running machine can be paused (it is %s)", cur.State)
 	}
 	// Las carpetas vivas hablan con el invitado: pausado no contestaría y su
 	// sesión caería por keepalive. No merece la pena: se congela o se deja.
 	if hasLiveShares(cur) {
-		return nil, fmt.Errorf("machine %s has live shared folders; freeze it instead of pausing it", cur.Name)
+		return nil, estadoInvalido("machine %s has live shared folders; freeze it instead of pausing it", cur.Name)
 	}
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
@@ -63,7 +63,7 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	live := m.byID[mc.ID]
 	if live == nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("machine %q was removed while it was being paused", mc.Name)
+		return nil, retiradaDurante(mc.Name, "paused")
 	}
 	now := time.Now()
 	live.State = api.StatePaused
@@ -98,7 +98,7 @@ func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cr
 	live := m.byID[mc.ID]
 	if live == nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("machine %q was removed while it was being resumed", mc.Name)
+		return nil, retiradaDurante(mc.Name, "resumed")
 	}
 	now := time.Now()
 	live.State = api.StateRunning
