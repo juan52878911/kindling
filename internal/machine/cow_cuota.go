@@ -153,7 +153,7 @@ func ejecutar(bin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s %s: %v: %s", filepath.Base(bin), strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s %s: %s", filepath.Base(bin), strings.Join(args, " "), conSalida(err, out))
 	}
 	return nil
 }

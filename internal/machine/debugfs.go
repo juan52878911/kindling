@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 )
 
 // ErrNoDebugfs dice que no hay debugfs en este host. Va aparte porque debugfs
@@ -29,6 +30,16 @@ const maxSalidaDebugfs = 1 << 20
 
 // errSalidaGrande dice que la salida de debugfs pasó del tope pedido.
 var errSalidaGrande = errors.New("debugfs output exceeds the limit")
+
+// conSalida es el texto de err seguido de la salida de la orden que falló,
+// si dijo algo: sin salida no queda un ": " colgando ("debugfs on x: exit
+// status 1: ").
+func conSalida(err error, out []byte) string {
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return err.Error() + ": " + s
+	}
+	return err.Error()
+}
 
 // salidaAcotada es c.Output() leyendo como mucho max bytes: si hay más, mata
 // el proceso y devuelve errSalidaGrande, sin haber cargado el resto.

@@ -426,7 +426,7 @@ func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() erro
 	}
 	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
 		_ = os.Remove(dst)
-		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("copying %s: %s", filepath.Base(src), conSalida(err, out))
 	}
 	return modo, nil
 }

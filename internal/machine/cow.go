@@ -274,7 +274,7 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 		}
 	}
 	if out, err := copiarDisco(ctx, src, dst); err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%s", conSalida(err, out))
 	}
 	hecho := cowModoCopy
 	if modo == cowModoClone {

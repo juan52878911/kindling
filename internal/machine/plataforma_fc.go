@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -180,7 +179,7 @@ func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() erro
 		return "", err
 	}
 	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("copying %s: %s", filepath.Base(src), conSalida(err, out))
 	}
 	return "copy", nil
 }

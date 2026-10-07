@@ -303,3 +303,23 @@ func TestSondaConPlazosDelServicio(t *testing.T) {
 		t.Fatalf("StartPeriodSeconds = %d, quiero 40", st.StartPeriodSeconds)
 	}
 }
+
+// Una sonda o un gancho que fallan sin decir nada no dejan un ": " colgando
+// en el detalle ("/etc/kindling/ready: exit status 1: ").
+func TestDetalleSinSalidaNoAcabaEnDosPuntos(t *testing.T) {
+	r, _ := nuevoReadiness(t)
+	script(t, r.probePath, "exit 1")
+	st := r.check(context.Background())
+	if st.Ready || !strings.HasSuffix(st.Detail, "exit status 1") {
+		t.Fatalf("sonda callada = %q", st.Detail)
+	}
+	r, _ = nuevoReadiness(t)
+	script(t, filepath.Join(r.hooksDir, "10-id"), "exit 3")
+	hecho := make(chan struct{})
+	r.startHooks(api.ResyncInstance, func() { close(hecho) })
+	<-hecho
+	st = r.check(context.Background())
+	if st.Hooks != api.HooksFailed || !strings.HasSuffix(st.Detail, "exit status 3") {
+		t.Fatalf("gancho callado = %+v", st)
+	}
+}

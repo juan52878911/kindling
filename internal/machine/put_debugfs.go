@@ -235,7 +235,7 @@ func (im imagenDebugfs) escribir(ctx context.Context, dir string, ordenes []stri
 	}
 	out, err := im.cmd(ctx, "-w", "-f", f.Name()).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("debugfs -w on %s: %v: %s", filepath.Base(im.file), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("debugfs -w on %s: %s", filepath.Base(im.file), conSalida(err, out))
 	}
 	if quejas := quejasDebugfs(out); len(quejas) > 0 {
 		return fmt.Errorf("debugfs -w on %s: %s", filepath.Base(im.file), strings.Join(quejas, "; "))

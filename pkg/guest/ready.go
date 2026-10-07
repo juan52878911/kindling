@@ -144,7 +144,7 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 			if err == nil {
 				r.ok, r.detail = true, ""
 			} else {
-				r.detail = recortar(fmt.Sprintf("%s: %v: %s", r.probePath, err, strings.TrimSpace(out)))
+				r.detail = recortar(r.probePath + ": " + conSalida(err, out))
 			}
 			r.mu.Unlock()
 		}
@@ -239,7 +239,7 @@ func (r *readiness) startHooks(kind string, done func()) bool {
 			}
 			if err != nil {
 				estado = api.HooksFailed
-				fallo = recortar(fmt.Sprintf("post-restore hook %s: %v: %s", filepath.Base(h), err, strings.TrimSpace(out)))
+				fallo = recortar("post-restore hook " + filepath.Base(h) + ": " + conSalida(err, out))
 				log.Printf("post-restore %s failed after %s: %v", filepath.Base(h), time.Since(t0).Round(time.Millisecond), err)
 				break
 			}
@@ -317,6 +317,15 @@ func restoreKind(v, def string) string {
 
 // recortar deja s en readyDetailMax bytes, por el final (lo último que dijo un
 // programa suele ser el motivo).
+// conSalida es el texto de err seguido de la salida de la orden, si dijo
+// algo: una sonda que falla callada no deja un ": " colgando en el detalle.
+func conSalida(err error, out string) string {
+	if s := strings.TrimSpace(out); s != "" {
+		return err.Error() + ": " + s
+	}
+	return err.Error()
+}
+
 func recortar(s string) string {
 	if len(s) <= readyDetailMax {
 		return s

@@ -100,7 +100,7 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 		clonar: clonarFichero,
 		copiar: func(ctx context.Context, src, dst string) error {
 			if out, err := copiarDisco(ctx, src, dst); err != nil {
-				return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+				return fmt.Errorf("%s", conSalida(err, out))
 			}
 			return nil
 		},
@@ -291,7 +291,7 @@ func crearImagenAlmacen(ctx context.Context, fs, img string, bytes int64) error 
 	out, err := exec.CommandContext(ctx, mkfs, append(argsMkfs(fs), tmp)...).CombinedOutput()
 	if err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("%s: %v: %s", nombre, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s: %s", nombre, conSalida(err, out))
 	}
 	if err := durable.Renombrar(tmp, img); err != nil {
 		_ = os.Remove(tmp)
@@ -304,7 +304,7 @@ func crearImagenAlmacen(ctx context.Context, fs, img string, bytes int64) error 
 func montarLoopAlmacen(ctx context.Context, fs, img, dir string) error {
 	out, err := exec.CommandContext(ctx, "mount", "-t", fs, "-o", opcionesMontaje(fs), img, dir).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mounting %s: %v: %s", img, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("mounting %s: %s", img, conSalida(err, out))
 	}
 	return nil
 }
@@ -363,7 +363,7 @@ func agrandarAlmacen(ctx context.Context, fs, img, dir string, bytes int64) erro
 		return fmt.Errorf("refreshing the size of %s: %w", loop, e)
 	}
 	if out, err := exec.CommandContext(ctx, ruta, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %v: %s", bin, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s: %s", bin, conSalida(err, out))
 	}
 	return nil
 }
