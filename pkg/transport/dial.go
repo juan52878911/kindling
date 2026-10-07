@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -106,6 +107,7 @@ func shortLink(dir, destino string) (string, error) {
 	if actual, err := os.Readlink(link); err == nil && actual == destino {
 		return link, nil
 	}
+	barrerEnlacesMuertos(dir)
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	tmp := link + "." + hex.EncodeToString(rnd[:])
@@ -117,6 +119,31 @@ func shortLink(dir, destino string) (string, error) {
 		return "", err
 	}
 	return link, nil
+}
+
+// barrerEnlacesMuertos quita de dir los enlaces cortos (<16 hex>.sock) cuyo
+// socket ya no existe: los de daemons que se fueron o de directorios
+// temporales de pruebas. Solo al crear uno nuevo, que es cuando el directorio
+// crece; un enlace a un socket que aún no existe se vuelve a crear en el
+// siguiente dial.
+func barrerEnlacesMuertos(dir string) {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range es {
+		n := e.Name()
+		if e.Type()&os.ModeSymlink == 0 || len(n) != 16+len(".sock") || !strings.HasSuffix(n, ".sock") {
+			continue
+		}
+		if _, err := hex.DecodeString(strings.TrimSuffix(n, ".sock")); err != nil {
+			continue
+		}
+		p := filepath.Join(dir, n)
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // userCacheDir y tmpBase son os.UserCacheDir y /tmp en producción; las

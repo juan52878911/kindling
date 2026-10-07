@@ -283,3 +283,35 @@ func TestDialRutaLargaPorEnlaceCorto(t *testing.T) {
 		t.Fatalf("esperaba un error que explicara el tope, no %v", err)
 	}
 }
+
+// Al crear un enlace corto se quitan los que apuntan a un socket que ya no
+// existe (daemons idos, temporales de pruebas); los vivos y lo que no es un
+// enlace corto se quedan.
+func TestShortLinkBarreLosMuertos(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "kl")
+	if err := privateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	vivo := filepath.Join(t.TempDir(), "vivo.sock")
+	if err := os.WriteFile(vivo, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	muerto := filepath.Join(dir, "0123456789abcdef.sock")
+	conVida := filepath.Join(dir, "fedcba9876543210.sock")
+	ajeno := filepath.Join(dir, "otra-cosa")
+	_ = os.Symlink(filepath.Join(t.TempDir(), "ya-no-existe.sock"), muerto)
+	_ = os.Symlink(vivo, conVida)
+	_ = os.Symlink("/no/existe", ajeno)
+	if _, err := shortLink(dir, filepath.Join(t.TempDir(), "nuevo.sock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(muerto); !os.IsNotExist(err) {
+		t.Error("el enlace a un socket que ya no existe sigue ahí")
+	}
+	if _, err := os.Lstat(conVida); err != nil {
+		t.Error("se llevó un enlace vivo")
+	}
+	if _, err := os.Lstat(ajeno); err != nil {
+		t.Error("se llevó algo que no es un enlace corto")
+	}
+}
