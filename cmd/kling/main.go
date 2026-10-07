@@ -1404,7 +1404,13 @@ func wakeNote(p *api.WakePhases) string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f, other %.1f",
-		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS,
-		p.WaitMS+p.CheckMS+p.StoreMS+p.MirrorMS+p.MemoryMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
+	// La memoria de una copia en diferencial (almacén, espejo y montaje) va
+	// aparte: el primer thaw de una copia puede pasar ahí casi todo.
+	mem := ""
+	if m := p.StoreMS + p.MirrorMS + p.MemoryMS; m > 0 {
+		mem = fmt.Sprintf(", memory %.1f (store %.1f, mirror %.1f)", m, p.StoreMS, p.MirrorMS)
+	}
+	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f%s, other %.1f",
+		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS, mem,
+		p.WaitMS+p.CheckMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
 }

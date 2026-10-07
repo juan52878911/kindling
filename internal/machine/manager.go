@@ -2893,7 +2893,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, err
 		}
 		fases := crono.cerrar()
-		tel.exito(OpThaw, DurResume, int64(fases.TotalMS))
+		tel.despertar(DurResume, fases)
 		out.Wake = fases
 		m.mu.Lock()
 		if l := m.byID[mc.ID]; l != nil {
@@ -3270,7 +3270,6 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *cur
 	m.mu.Unlock()
-	tel.exito(OpThaw, DurThaw, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 
@@ -3285,6 +3284,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	impulso.entregarRestaurada(listo)
 
 	fases := crono.cerrar()
+	tel.despertar(DurThaw, fases)
 	out.Wake = fases
 	m.mu.Lock()
 	if cur := m.byID[mc.ID]; cur != nil {

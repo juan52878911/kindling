@@ -86,3 +86,13 @@ func TestTelemetriaDiscoYPendiente(t *testing.T) {
 		t.Errorf("DiscoLibreMiB = %d bajo un directorio temporal", d.DiscoLibreMiB)
 	}
 }
+
+// El histograma de thaw y resume mide el despertar entero, no solo el
+// LoadSnapshot: en el lab ThawMS era 4-6 ms de un despertar de 110-300.
+func TestDespertarMideElTotal(t *testing.T) {
+	antes := tel.dur[DurThaw].suma.Load()
+	tel.despertar(DurThaw, &api.WakePhases{LoadMS: 5, TotalMS: 180})
+	if d := tel.dur[DurThaw].suma.Load() - antes; d != 180 {
+		t.Fatalf("thaw anotó %d ms, quería el total (180)", d)
+	}
+}

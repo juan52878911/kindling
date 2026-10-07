@@ -99,6 +99,13 @@ func (t *telemetria) exito(op, dur string, ms int64) {
 	t.dur[dur].observar(ms)
 }
 
+// despertar anota un thaw o un resume con lo que esperó quien llamó: el
+// despertar entero (Wake.total_ms), y no solo LoadSnapshot (ThawMS, 4-6 ms de
+// 110-300 en el lab), que no era lo que el histograma dice medir.
+func (t *telemetria) despertar(dur string, f *api.WakePhases) {
+	t.exito(OpThaw, dur, int64(f.TotalMS))
+}
+
 // fin clasifica el error con el que acabó una operación. Sin error no hace
 // nada: el éxito lo anota exito() donde se mide. Una negativa de admisión es
 // un rechazo y no un fallo; un error de quien llama (no existe, estado que no
