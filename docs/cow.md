@@ -37,7 +37,7 @@ El modo en uso se ve en `kling info`:
 disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; store /var/lib/kindling/cow (XFS): 15870 of 16384 MiB free; since start: store 32
 ```
 
-Antes del primer `run -from` el almacén aún no existe, y no se da por hecho:
+Antes del primer save o `run -from` el almacén aún no existe, y no se da por hecho:
 
 ```
 disk clones:  store pending (created on first use)  [daemon.cow=auto]; no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first save or run -from)
@@ -47,8 +47,8 @@ Si el núcleo todavía no lista ese sistema de ficheros, el motivo lo añade (te
 cargar el módulo al montar). Lo que se sabe al arrancar sin crear nada —falta de sitio
 en la raíz para el almacén, ningún `mkfs`, no ser root— deja el modo en `copy` con el
 motivo en la misma línea; lo que solo se descubre montando (el núcleo no tiene el
-módulo, el contenedor no deja montar) lo dice el primer `run -from`, que pasa a `copy`
-con el error.
+módulo, el contenedor no deja montar) lo dice el primer save o `run -from`, que pasa a
+`copy` con el error.
 
 y en `GET /info` (campo `cow`: `setting`, `mode`, `reason`, `pending` —el almacén está
 por crear—, `store` —con `fs`, `xfs` o `btrfs`— y `clones`, que

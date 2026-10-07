@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,6 +209,32 @@ func TestCommitCreaElAlmacenYEspeja(t *testing.T) {
 	}
 	if n := f.creados.Load(); n != 1 {
 		t.Errorf("almacenes creados: %d", n)
+	}
+}
+
+// Si el commit no puede crear el almacén (sin módulo, sin mkfs, sin sitio),
+// el modo pasa ya a copy con el motivo: no se queda "pendiente" hasta el
+// primer run -from, que solo repetiría el mismo error.
+func TestCommitSinPoderCrearElAlmacenDegrada(t *testing.T) {
+	m, f := managerConAlmacen(t, "c0aa170000000025", "dorado")
+	m.alm.mu.Lock()
+	m.alm.montado, f.montado = false, false
+	_ = os.Remove(m.alm.img)
+	f.falloCrear = errors.New("mkfs.btrfs: not found")
+	m.alm.mu.Unlock()
+	if _, err := m.Commit(context.Background(), "c0aa170000000025", "dorado", false); err != nil {
+		t.Fatal(err)
+	}
+	plazo := time.Now().Add(5 * time.Second)
+	for m.cow.actual() != cowModoCopy {
+		if time.Now().After(plazo) {
+			t.Fatalf("el modo sigue en %q tras fallar la creación del almacén", m.cow.actual())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	info := m.CoWInfo()
+	if info.Pending || !strings.Contains(info.Reason, "mkfs.btrfs: not found") {
+		t.Errorf("CoWInfo: pending=%v reason=%q", info.Pending, info.Reason)
 	}
 }
 

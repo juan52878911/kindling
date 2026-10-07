@@ -148,6 +148,13 @@ func (e *estadoCoW) degradar(motivo string) {
 	}
 }
 
+// degradarSinAlmacen degrada (degradar) porque el almacén no se pudo
+// preparar (errAlmacenNoDisponible): lo mismo da quién lo descubrió, un run
+// -from o el espejo tras un save.
+func (e *estadoCoW) degradarSinAlmacen(err error) {
+	e.degradar(fmt.Sprintf("copy-on-write store unavailable (%v): copying overlays until the daemon restarts", err))
+}
+
 // SetCoW fija el modo de copias de disco. Se llama una vez, al arrancar el
 // daemon y antes de servir; la detección prueba FICLONE de verdad.
 func (m *Manager) SetCoW(cfg CoWConfig) {
@@ -184,8 +191,8 @@ func (m *Manager) CoWInfo() *api.CoWInfo {
 	m.cow.mu.Unlock()
 	if m.alm != nil {
 		info.Store = m.alm.info()
-		// En modo store, hasta el primer run -from el almacén no existe (o no
-		// se ha montado): se crea entonces. Decir "store" sin más daba por
+		// En modo store, hasta el primer save o run -from el almacén no
+		// existe (o no se ha montado): se crea entonces. Decir "store" sin más daba por
 		// hecho algo que aún no se ha probado.
 		info.Pending = info.Mode == cowModoStore && !m.alm.estaListo()
 	}
@@ -261,7 +268,7 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 			}
 			log.Printf("warning: %v; copying the overlay of %s to the data root instead", err, shortID(id))
 		} else if errors.Is(err, errAlmacenNoDisponible) {
-			m.cow.degradar(fmt.Sprintf("copy-on-write store unavailable (%v): copying overlays until the daemon restarts", err))
+			m.cow.degradarSinAlmacen(err)
 		} else {
 			log.Printf("warning: copy-on-write store: %v; copying the overlay of %s instead", err, shortID(id))
 		}

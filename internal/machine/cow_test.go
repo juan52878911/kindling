@@ -172,6 +172,7 @@ type almacenFalso struct {
 	desmontajes               atomic.Int32
 	libre                     int64
 	falloMontar               error
+	falloCrear                error
 	falloClonar               error
 	montado                   bool
 }
@@ -198,6 +199,9 @@ func nuevoAlmacenFalso(t *testing.T, root string, f *almacenFalso) *almacenCoW {
 		root: root, fs: "btrfs", img: filepath.Join(root, "cow.btrfs"), dir: filepath.Join(root, "cow"),
 		estaMontado: func(string) (bool, error) { return f.montado, nil },
 		crear: func(_ context.Context, img string, _ int64) error {
+			if f.falloCrear != nil {
+				return f.falloCrear
+			}
 			f.creados.Add(1)
 			return os.WriteFile(img, nil, 0o600)
 		},

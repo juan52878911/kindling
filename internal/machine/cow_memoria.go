@@ -316,7 +316,8 @@ func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff stri
 // esperando: 10 s medidos con un dorado de Postgres. Solo si las copias se
 // congelan en diferencial y el almacén está en uso; si algo falla, el thaw lo
 // sigue haciendo como antes. Si el almacén aún no existe, lo crea (ver
-// espejarMemoria). Se cancela al cerrar el Manager: lo que quede a
+// espejarMemoria); si no puede, degrada a copy como lo haría el primer run
+// -from. Se cancela al cerrar el Manager: lo que quede a
 // medias es un temporal que barrer recoge al arrancar.
 func (m *Manager) espejarMemoriaDorado(name string) {
 	if m.alm == nil || m.cow.actual() != cowModoStore || !congelarEnDiff() || isClosed(m.quit) {
@@ -336,7 +337,14 @@ func (m *Manager) espejarMemoriaDorado(name string) {
 		t0 := time.Now()
 		hecho, err := m.alm.espejarMemoria(ctx, name, src, m.cow.gibs())
 		if err != nil {
-			if ctx.Err() == nil {
+			switch {
+			case ctx.Err() != nil:
+			case errors.Is(err, errAlmacenNoDisponible):
+				// El almacén no se pudo crear o montar, y no se reintenta
+				// hasta reiniciar: se dice ya (kling info), no en el
+				// primer run -from.
+				m.cow.degradarSinAlmacen(err)
+			default:
 				log.Printf("warning: copy-on-write store: mirroring the memory of %s: %v; the first thaw of a copy will do it", name, err)
 			}
 			return
