@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -251,6 +251,8 @@ type Server struct {
 	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.
 	muConstruyendo sync.Mutex
 	construyendo   map[string]*cerrojoImagen
+	// muRegistros guarda registries.json (registries.go).
+	muRegistros sync.Mutex
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
@@ -350,6 +352,9 @@ func (s *Server) rutas() []ruta {
 		{"POST /volumes/{name}/snapshots", AccionAdmin, nil, s.handleSnapshotVolume},
 		{"POST /volumes/{name}/restore", AccionAdmin, nil, s.handleRestoreVolume},
 		{"DELETE /volumes/{name}/snapshots/{snap}", AccionAdmin, nil, s.handleRemoveVolumeSnapshot},
+		{"GET /registries", AccionAdmin, nil, s.handleRegistries},
+		{"POST /registries", AccionAdmin, nil, s.handleRegistryLogin},
+		{"DELETE /registries/{host}", AccionAdmin, nil, s.handleRegistryLogout},
 		{"GET /images/{name}/recipe", AccionAdmin, nil, s.handleImageRecipe},
 		{"GET /images/{name}/files", AccionAdmin, nil, s.handleGetImageFile},
 		{"PUT /images/{name}/files", AccionAdmin, nil, s.handlePutImageFile},

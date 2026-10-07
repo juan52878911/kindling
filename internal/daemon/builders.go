@@ -198,7 +198,12 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		barrerProcesos(u.UID)
 	}
 	b, _ := json.MarshalIndent(req, "", "  ")
-	work, err := prepararTrabajo(s.root, req.Name, b, u)
+	auth, err := s.credencialesConstructor(req)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("registry credentials: %w", err))
+		return
+	}
+	work, err := prepararTrabajo(s.root, req.Name, b, auth, u)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return

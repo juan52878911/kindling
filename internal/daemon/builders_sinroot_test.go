@@ -22,7 +22,7 @@ func yo() *usuarioConstructor {
 
 func TestPrepararTrabajo(t *testing.T) {
 	root := t.TempDir()
-	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), yo())
+	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), nil, yo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestPrepararTrabajo(t *testing.T) {
 
 	// Sin usuario, como siempre: build/ cerrado.
 	root2 := t.TempDir()
-	if _, err := prepararTrabajo(root2, "x", nil, nil); err != nil {
+	if _, err := prepararTrabajo(root2, "x", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fi, _ := os.Stat(filepath.Join(root2, "build")); fi.Mode().Perm() != 0o700 {

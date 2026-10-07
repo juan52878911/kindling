@@ -177,9 +177,10 @@ func entornoConstructor(work string) []string {
 }
 
 // prepararTrabajo crea el directorio de trabajo de una construcción con su
-// request.json. Con usuario de construcción, build/ queda de root 0711 (se
+// request.json y, si auth no es nil, las credenciales de su registro
+// (registries.go). Con usuario de construcción, build/ queda de root 0711 (se
 // atraviesa, no se lista ni se escribe) y el directorio de trabajo es suyo.
-func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (string, error) {
+func prepararTrabajo(root, name string, req, auth []byte, u *usuarioConstructor) (string, error) {
 	build := filepath.Join(root, "build")
 	if err := os.MkdirAll(build, 0o700); err != nil {
 		return "", err
@@ -211,6 +212,12 @@ func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (stri
 	if err := os.WriteFile(rq, req, 0o600); err != nil {
 		os.RemoveAll(work)
 		return "", err
+	}
+	if auth != nil {
+		if err := escribirCredencialesConstructor(work, auth, u); err != nil {
+			os.RemoveAll(work)
+			return "", err
+		}
 	}
 	if u != nil {
 		for _, p := range []string{rq, work} {
