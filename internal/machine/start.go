@@ -134,7 +134,14 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
 	}
 	// La imagen pudo borrarse mientras estaba parada (una parada no la
-	// retiene, ver blobs.go): se dice antes de reservar nada.
+	// retiene, ver blobs.go): se dice antes de reservar nada, y con cómo
+	// salir. El disco sigue ahí; basta con volver a traer la imagen con el
+	// mismo nombre.
+	if m.imagenBorrada(mc.Image) {
+		return nil, fmt.Errorf("machine %q can't be started: its image %q is gone (a stopped machine doesn't keep it). "+
+			"Its disk is kept: import or build the image again under that name (kling image import -name %s <ref>) and start it again",
+			mc.Name, mc.Image, mc.Image)
+	}
 	src, layer, err := m.imageLayer(mc.Image)
 	if err != nil {
 		return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
@@ -311,4 +318,18 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("started from its disk in %d ms%s", out.BootMS, keys)})
 	return &out, nil
+}
+
+// imagenBorrada dice si de la imagen no queda ni la monolítica ni la capa.
+// Un nombre inválido no se mira aquí: imageLayer lo rechaza con su error.
+func (m *Manager) imagenBorrada(image string) bool {
+	if !validName.MatchString(image) {
+		return false
+	}
+	for _, p := range []string{m.imagePath(image), m.layerPath(image)} {
+		if _, err := os.Stat(p); err == nil {
+			return false
+		}
+	}
+	return true
 }

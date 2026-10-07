@@ -198,3 +198,25 @@ func TestStopDeUnaCongeladaBorraSuVolcado(t *testing.T) {
 		t.Fatalf("parar se llevó el disco: %v", err)
 	}
 }
+
+// Una parada no retiene su imagen: si se borró, Start lo dice nombrándola y
+// con cómo volver (importarla otra vez con el mismo nombre), sin tocar la
+// máquina ni dejar memoria reservada.
+func TestStartSinImagenDiceComoVolver(t *testing.T) {
+	m := newTestManager(t)
+	mc, _ := paradaParaStart(t, m, "5a5a000000000009")
+	if err := os.Remove(m.imagePath(mc.Image)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Start(context.Background(), mc.ID, nil)
+	if err == nil || !strings.Contains(err.Error(), `image "`+mc.Image+`" is gone`) ||
+		!strings.Contains(err.Error(), "kling image import -name "+mc.Image) {
+		t.Fatalf("Start sin imagen = %v; quería que la nombrase y dijera cómo volver a traerla", err)
+	}
+	if got := vivaDe(t, m, mc.ID).State; got != api.StateStopped {
+		t.Fatalf("estado = %s; quería stopped", got)
+	}
+	if p := pendiente(m); p != 0 {
+		t.Fatalf("pendingMiB = %d", p)
+	}
+}

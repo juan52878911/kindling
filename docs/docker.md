@@ -114,6 +114,10 @@ espejo de la memoria en el almacén y `-disk`.
   porque el daemon solo guarda los nombres de las variables. Docker guarda los
   valores con el contenedor.
 - **`docker restart`**: es `kling stop` y `kling start`.
+- **Una parada no retiene su imagen**: Docker no deja borrar la imagen de un
+  contenedor parado; kindling sí. Si se borró, `kling start` lo dice y la
+  máquina conserva su disco: se vuelve a importar con el mismo nombre
+  (`kling image import -name N <ref>`) y arranca otra vez.
 - **Despertar aún más rápido con diffs grandes**: con cientos de MiB de
   diff, despertar cuesta ~40 µs por tramo de páginas (24 000 tramos en
   Hindsight, 1,1 s). Un servidor de páginas (UFFD) que sirviera base + diff
