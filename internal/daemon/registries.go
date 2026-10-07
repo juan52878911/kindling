@@ -184,9 +184,14 @@ func (s *Server) credencialesConstructor(req api.BuildImageRequest) ([]byte, err
 		return nil, nil
 	}
 	var spec struct {
-		Ref string `json:"ref"`
+		Ref    string `json:"ref"`
+		Source string `json:"source"`
 	}
-	if json.Unmarshal(req.Spec, &spec) != nil {
+	if json.Unmarshal(req.Spec, &spec) != nil || spec.Source != "" {
+		// Lo importado de un archivo (source "archive") no va a ningún
+		// registro, y su ref sale del propio archivo (sus RepoTags, que
+		// escribe quien lo hizo): con ella se pedirían las credenciales del
+		// registro que nombre a un proceso que va a parsear tars hostiles.
 		return nil, nil
 	}
 	ref, err := oci.ParseImageRef(spec.Ref)

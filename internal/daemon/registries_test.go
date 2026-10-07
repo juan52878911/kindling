@@ -118,4 +118,14 @@ echo img > "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
 	if _, err := os.Stat(copia); !os.IsNotExist(err) {
 		t.Fatal("una imagen de otro registro recibió credenciales")
 	}
+
+	// Un archivo importado cuya etiqueta (sacada del propio archivo) nombra
+	// el registro privado: es offline, no recibe ninguna.
+	if rr := call(t, h, "POST", "/images", `{"name":"arch","builder":"oci","spec":{"ref":"localhost:5000/priv/app:v1",`+
+		`"source":"archive","digest":"sha256:`+strings.Repeat("a", 64)+`"}}`); rr.Code != 200 {
+		t.Fatalf("build arch: %d %s", rr.Code, rr.Body)
+	}
+	if _, err := os.Stat(copia); !os.IsNotExist(err) {
+		t.Fatal("una construcción de un archivo recibió credenciales")
+	}
 }
