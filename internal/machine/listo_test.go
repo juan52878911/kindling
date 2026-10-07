@@ -147,10 +147,19 @@ func TestWaitReadyPlazoAgotado(t *testing.T) {
 func TestWaitReadyGanchoFallidoNoEspera(t *testing.T) {
 	a := &agenteListo{falla: true, ganchos: true}
 	m, id := conAgenteListo(t, a)
+	// Un plazo corto pero muy por encima de lo que tarda en contestar: si
+	// dejara de cortar al ver el gancho fallido, el test caería en 5 s y no en
+	// el minuto de un plazo de verdad.
+	const plazo = 5 * time.Second
 	t0 := time.Now()
-	res, err := m.WaitReady(context.Background(), id, OpcionesListo{Plazo: time.Minute})
-	if !errors.Is(err, ErrNotReady) || res.Ready != api.ReadyFailed || time.Since(t0) > 5*time.Second {
+	res, err := m.WaitReady(context.Background(), id, OpcionesListo{Plazo: plazo})
+	if !errors.Is(err, ErrNotReady) || res.Ready != api.ReadyFailed || time.Since(t0) > plazo/2 {
 		t.Fatalf("WaitReady = %+v, %v en %s", res, err, time.Since(t0))
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.llamadas != 1 {
+		t.Errorf("llamadas = %d: con el gancho fallido no hay nada que reintentar", a.llamadas)
 	}
 }
 

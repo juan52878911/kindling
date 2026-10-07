@@ -119,13 +119,16 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `PUT /images/{name}/files` | pone un fichero dentro (`path`, `mode`, `content_b64` hasta 8 MiB o `from_host` relativo a `/usr/local/lib/kindling`, `create`); se niega si la imagen está en uso. En Linux monta la imagen; en macOS escribe con `debugfs -w`, sin montarla (ver [mac.md](mac.md)) |
 | `DELETE /images/{name}` | la borra si nada la usa |
 | `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
-| `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto |
+| `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto, también si la está leyendo un arranque en vuelo (vuelve a intentarlo) |
 
 **Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
 (`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
 reservado para el kernel compartido (`part` vacía o `kernel`). "En uso" es lo mismo
 que impide borrarla: un dorado o una máquina que no esté parada que la usen, o
-capas encima; para el kernel, cualquier máquina que no esté parada. La receta de
+capas encima, o un arranque en frío en vuelo que ya la eligió; para el kernel,
+cualquier máquina que no esté parada o cualquier arranque en vuelo. La comparación
+con lo que hay, la comprobación de uso y el renombrado se hacen con los arranques
+en frío en espera, así que ninguno lee una imagen a medio sustituir. La receta de
 una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
 `kling image copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
 uno de macOS, donde `POST /images` contesta `501` salvo para los constructores

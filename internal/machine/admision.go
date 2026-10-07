@@ -42,10 +42,14 @@ func maxMemPressure() float64 {
 	return defaultMaxMemPressure
 }
 
+// psiMemoria es de dónde lee memPressure; variable solo para que los tests
+// puedan fingir un host bajo presión.
+var psiMemoria = "/proc/pressure/memory"
+
 // memPressure devuelve "some avg10" de /proc/pressure/memory, o -1 si el kernel
 // no lo expone (PSI desactivado, o no es Linux).
 func memPressure() float64 {
-	f, err := os.Open("/proc/pressure/memory")
+	f, err := os.Open(psiMemoria)
 	if err != nil {
 		return -1
 	}
