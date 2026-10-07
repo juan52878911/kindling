@@ -232,7 +232,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		maxMB = ociDefaultMaxMB
 	}
 	root := envOr("KLING_ROOT", "/var/lib/kindling")
-	lib := envOr("KLING_LIB_DIR", "/usr/local/lib/kindling")
+	lib := envOr("KLING_LIB_DIR", libPorDefecto(root))
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	if spec.Arch != runtime.GOARCH {
 		if a := os.Getenv("KLING_GUEST_AGENT_" + spec.Arch); a != "" {
@@ -241,7 +241,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	agentSum, err := imagen.SHA256File(agent)
 	if err != nil {
-		return fmt.Errorf("guest agent: %w (set KLING_GUEST_AGENT or install it with make deploy)", err)
+		return fmt.Errorf("guest agent: %w (%s)", err, pistaAgente())
 	}
 	t := time.Now().UTC().Truncate(time.Second)
 	if e := os.Getenv("SOURCE_DATE_EPOCH"); e != "" {
@@ -759,4 +759,26 @@ func sortedKeys(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// pistaAgente dice cómo conseguir el agente del invitado (un binario de
+// Linux) donde lo busca el constructor. En macOS no hay make deploy: lo pone
+// make install, o se compila y se señala con KLING_GUEST_AGENT.
+func pistaAgente() string {
+	if runtime.GOOS == "darwin" {
+		return "on macOS it is a Linux binary: make install puts it in lib/ of the data root, " +
+			"or build it with make guest GOARCH=arm64 and set KLING_GUEST_AGENT to it"
+	}
+	return "set KLING_GUEST_AGENT or install it with make deploy"
+}
+
+// libPorDefecto es dónde buscan los constructores el agente y los scripts:
+// /usr/local/lib/kindling en Linux (lo instala make deploy, de root) y, en
+// macOS, lib/ de la raíz de datos, porque allí el daemon es tu usuario y lo
+// pone make install sin sudo.
+func libPorDefecto(root string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(root, "lib")
+	}
+	return "/usr/local/lib/kindling"
 }

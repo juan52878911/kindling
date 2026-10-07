@@ -425,6 +425,13 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	}
 	o.Servicio = a
 	o.Piezas = []upgrade.Pieza{{Asset: assetDe("kling", "darwin", arch), Destino: exe}}
+	// El agente del invitado de Linux que make install deja en lib/ de la raíz
+	// de datos (libPorDefecto): el que meten en sus imágenes los constructores
+	// del daemon de macOS. Si está, se cambia con lo demás; uno viejo no hace
+	// de init en Go.
+	if g := filepath.Join(libPorDefecto(o.Raiz), "kling-guest"); o.Raiz != "" && fileExists(g) {
+		o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe("kling-guest", "linux", arch), Destino: g})
+	}
 	// Sin el permiso de virtualización, el daemon nuevo arrancaría y la
 	// primera microVM fallaría: se mira antes de parar nada.
 	o.Validar = func(bajados map[string]string) error {

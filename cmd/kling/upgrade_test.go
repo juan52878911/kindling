@@ -298,3 +298,19 @@ func TestAgentesFueraDeLib(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// El agente del invitado de Linux se busca en /usr/local/lib/kindling en
+// Linux y en lib/ de la raíz de datos en macOS (lo pone make install, sin
+// sudo); la pista del error dice lo que vale en cada uno.
+func TestLibPorDefecto(t *testing.T) {
+	got := libPorDefecto("/datos")
+	if runtime.GOOS == "darwin" {
+		if got != "/datos/lib" || !strings.Contains(pistaAgente(), "make install") {
+			t.Fatalf("macOS: lib %q, pista %q", got, pistaAgente())
+		}
+		return
+	}
+	if got != "/usr/local/lib/kindling" || !strings.Contains(pistaAgente(), "make deploy") {
+		t.Fatalf("lib %q, pista %q", got, pistaAgente())
+	}
+}

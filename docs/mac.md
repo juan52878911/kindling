@@ -74,9 +74,19 @@ arranque el daemon con la raíz que arranque.
 
 ## Conseguir imágenes
 
-En macOS **no se construyen imágenes**: construir necesita root, dispositivos
-loop y chroot de Linux. `POST /images` contesta 501 y dice qué hacer. Se
-construyen en un host Linux y se **copian**:
+**Imágenes de Docker**: `kling image import <ref>` (y `-archive`, y los
+registros privados de `kling registry login`) funciona en el Mac: su
+constructor es Go puro, sin root ni loop. Mete en la imagen el agente del
+invitado, que es un binario de **Linux**: `make install` lo compila y lo deja en
+`lib/` de la raíz de datos (`~/Library/Application Support/kindling/lib/kling-guest`),
+donde lo busca, y `kling upgrade` lo cambia con lo demás. Para usar otro,
+`KLING_GUEST_AGENT=/ruta` (o `make guest GOARCH=arm64` y apuntarlo ahí). Un
+puerto de `EXPOSE` no se publica solo en el host: el gateway o `-label
+kling.ports=N` (ver [`docker.md`](docker.md)).
+
+El resto de imágenes (`min`, MCP, chispa...) **no se construyen en macOS**:
+necesitan root, dispositivos loop y chroot de Linux. `POST /images` contesta 501
+y dice qué hacer. Se construyen en un host Linux y se **copian**:
 
 ```sh
 kling image copy min  -from ssh://juan@lab-arm64

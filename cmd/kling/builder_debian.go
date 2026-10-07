@@ -163,7 +163,7 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 		return fmt.Errorf("invalid base name %q", baseName)
 	}
 	root := envOr("KLING_ROOT", "/var/lib/kindling")
-	lib := envOr("KLING_LIB_DIR", "/usr/local/lib/kindling")
+	lib := envOr("KLING_LIB_DIR", libPorDefecto(root))
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	if spec.Arch != runtime.GOARCH {
 		// El agente instalado es el del host; para otra arquitectura hay que
@@ -174,7 +174,7 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 	}
 	agentSum, err := imagen.SHA256File(agent)
 	if err != nil {
-		return fmt.Errorf("guest agent: %w (set KLING_GUEST_AGENT or install it with make deploy)", err)
+		return fmt.Errorf("guest agent: %w (%s)", err, pistaAgente())
 	}
 	t := time.Now().UTC().Truncate(time.Second)
 	if e := os.Getenv("SOURCE_DATE_EPOCH"); e != "" {
