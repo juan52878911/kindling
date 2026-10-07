@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -23,8 +24,9 @@ func TestEspejoTrasCommitAhorraLaCopiaDelThaw(t *testing.T) {
 	escribirPaginas(t, diff, nil, paginaDe('D'))
 
 	src := escribirMemoriaDorada(t, root, "con", paginaDe('A'), paginaDe('B'))
-	if err := a.espejarMemoria(context.Background(), "con", src, 0); err != nil {
-		t.Fatal(err)
+	montarAlmacen(t, a)
+	if hecho, err := a.espejarMemoria(context.Background(), "con", src); err != nil || !hecho {
+		t.Fatalf("espejarMemoria: %v, %v", hecho, err)
 	}
 	antes := f.copias.Load()
 	if antes != 1 {
@@ -71,8 +73,12 @@ func TestEspejoEnCursoNoBloqueaElAlmacen(t *testing.T) {
 	}
 	src := escribirMemoriaDorada(t, root, "dorado", paginaDe('A'), paginaDe('B'))
 	ov := escribirDorado(t, root, "dorado", "disco")
+	montarAlmacen(t, a)
 	espejado := make(chan error, 1)
-	go func() { espejado <- a.espejarMemoria(context.Background(), "dorado", src, 0) }()
+	go func() {
+		_, err := a.espejarMemoria(context.Background(), "dorado", src)
+		espejado <- err
+	}()
 	<-empezo
 
 	hecho := make(chan error, 1)
@@ -127,26 +133,79 @@ func TestEspejoEnCursoNoBloqueaElAlmacen(t *testing.T) {
 	}
 }
 
-// El commit lanza el espejo en segundo plano (espejarMemoriaDorado) y el
-// primer thaw de una copia congelada en diferencial ya no copia.
-func TestEspejarMemoriaDoradoEnSegundoPlano(t *testing.T) {
+// montarAlmacen deja el almacén falso creado y montado, como tras el primer
+// run -from.
+func montarAlmacen(t *testing.T, a *almacenCoW) {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.preparar(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Sin almacén montado, el espejo no hace nada: un save no crea ni reserva un
+// almacén que quizá nadie use (lo hace el primer run -from o thaw).
+func TestEspejarMemoriaSinAlmacenNoLoCrea(t *testing.T) {
+	root := t.TempDir()
+	f := &almacenFalso{}
+	a := nuevoAlmacenFalso(t, root, f)
+	src := escribirMemoriaDorada(t, root, "dorado", paginaDe('A'))
+	hecho, err := a.espejarMemoria(context.Background(), "dorado", src)
+	if err != nil || hecho {
+		t.Fatalf("espejarMemoria sin almacén: %v, %v", hecho, err)
+	}
+	if f.creados.Load() != 0 || f.montajes.Load() != 0 || f.copias.Load() != 0 {
+		t.Errorf("creó %d, montó %d, copió %d sin almacén", f.creados.Load(), f.montajes.Load(), f.copias.Load())
+	}
+	if _, err := os.Lstat(a.img); err == nil {
+		t.Error("el save creó la imagen del almacén")
+	}
+}
+
+// managerConAlmacen es un Manager de prueba con el almacén falso montado y
+// en modo store, y una plantilla running con un VMM falso que, al volcar,
+// deja una memoria dorada con datos.
+func managerConAlmacen(t *testing.T, id, snap string) (*Manager, *almacenFalso) {
+	t.Helper()
 	if !congelarEnDiff() {
 		t.Skip("sin congelado diferencial en esta plataforma")
+	}
+	if _, err := exec.LookPath("fallocate"); err != nil {
+		t.Skip("sin fallocate no se puede perforar el volcado")
 	}
 	m := newTestManager(t)
 	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
 	f := &almacenFalso{}
 	m.alm = nuevoAlmacenFalso(t, m.root, f)
 	m.cow.modo = cowModoStore
-	base := escribirMemoriaDorada(t, m.root, "dorado", paginaDe('A'), paginaDe('B'))
-	if base != filepath.Join(m.snapDir("dorado"), "mem.file") {
-		t.Fatalf("el dorado de la prueba no está donde lo busca el Manager: %s", base)
+	montarAlmacen(t, m.alm)
+	falso := plantillaSinProceso(t, m, id)
+	if err := os.WriteFile(m.KernelPath(), []byte("vmlinux de prueba"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	m.espejarMemoriaDorado("dorado")
+	dir := m.snapDir(snap)
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
+			mem := append(paginaDe('A'), paginaDe('B')...)
+			_ = os.WriteFile(filepath.Join(dir, "mem.file"), mem, 0o644)
+		}
+	})
+	return m, f
+}
+
+// El commit (save) lanza el espejo en segundo plano y el primer thaw de una
+// copia congelada en diferencial ya no copia la memoria del dorado.
+func TestCommitEspejaLaMemoriaYElThawNoCopia(t *testing.T) {
+	m, f := managerConAlmacen(t, "c0aa170000000021", "dorado")
+	if _, err := m.Commit(context.Background(), "c0aa170000000021", "dorado", false); err != nil {
+		t.Fatal(err)
+	}
 	plazo := time.Now().Add(5 * time.Second)
-	for f.copias.Load() == 0 || len(espejosHechos(t, m.root, "dorado")) == 0 {
+	for len(espejosHechos(t, m.root, "dorado")) == 0 {
 		if time.Now().After(plazo) {
-			t.Fatal("el espejo no se hizo en segundo plano")
+			t.Fatal("el commit no espejó la memoria del dorado en segundo plano")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -162,6 +221,7 @@ func TestEspejarMemoriaDoradoEnSegundoPlano(t *testing.T) {
 	escribirPaginas(t, filepath.Join(dir, "mem.file"), nil, paginaDe('D'))
 	antes := f.copias.Load()
 	var tm tiemposMemoria
+	base := filepath.Join(m.snapDir("dorado"), "mem.file")
 	full, err := m.prepararMemoriaDesdeDiff(context.Background(), &api.Machine{ID: id, MemMiB: 1}, dir, base, &tm)
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +231,22 @@ func TestEspejarMemoriaDoradoEnSegundoPlano(t *testing.T) {
 	}
 	if fi, err := os.Lstat(full); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("la memoria no salió del almacén: %v", err)
+	}
+}
+
+// El dorado temporal de un fork no se espeja: se borra en cuanto no quedan
+// copias, y el espejo solo gastaría disco y E/S.
+func TestCommitDeForkNoEspeja(t *testing.T) {
+	m, f := managerConAlmacen(t, "c0aa170000000022", "fork-tmp")
+	if _, err := m.commit(context.Background(), "c0aa170000000022", "fork-tmp", false, nil, false, true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := f.copias.Load(); n != 0 {
+		t.Errorf("el commit de un fork copió %d veces", n)
+	}
+	if e := espejosHechos(t, m.root, "fork-tmp"); len(e) != 0 {
+		t.Errorf("el commit de un fork dejó espejos: %v", e)
 	}
 }
 
