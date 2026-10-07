@@ -158,7 +158,13 @@ backend.
 - **Techo de CPU por máquina** con su propio cgroup (`-cpu-pct`, 50% de un core por
   defecto): un invitado en bucle no se come el host.
 - **Tope de máquinas** (`MaxMachines = 256`) para que un cliente comprometido no agote el host.
-- **RAM fija** por microVM; el invitado no puede pedir más.
+- **RAM fija** por microVM; el invitado no puede pedir más. Y el VMM tampoco: su cgroup
+  lleva `memory.max` (la RAM del invitado, o su techo `-mem-max`, más 64 MiB y 1/16 para
+  el propio Firecracker y lo que KVM le cobra) y `pids.max` (128). Medido en el
+  laboratorio con un Postgres de 512 MiB: recién arrancado, el cgroup ocupa 183 MiB; con
+  el invitado llenando toda su RAM, ~500 MiB de un techo de 608, sin un solo evento
+  `max` ni `oom`, y freeze y thaw siguen igual. Si el host no delega los controladores
+  `memory` o `pids`, queda solo el techo de CPU y el daemon lo avisa al arrancar.
 - En el gateway, **cuotas por token/tenant**: varios clientes sobre un mismo token se
   reparten la capacidad en vez de matarse de hambre.
 - **Consola serie acotada**: `firecracker.log` rota en el sitio (sin recrear el fichero, el

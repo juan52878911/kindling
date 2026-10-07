@@ -75,8 +75,9 @@ func controladoresDelegados(root string) (memoria, procesos bool) {
 // búferes de red y disco), lo que el kernel le cobra por KVM (tablas de
 // páginas del invitado, estructuras de cada vCPU) y su caché de página. La
 // caché limpia se reclama sola al tocar el techo; lo demás no. Medido en el
-// laboratorio (docs/seguridad.md): con el invitado tocando toda su RAM, el
-// cgroup llega a la RAM más 20-40 MiB.
+// laboratorio (SECURITY.md, apartado 4): con un invitado de 512 MiB que llena
+// su RAM, el cgroup se queda en ~500 MiB; recién arrancado, la RAM que tocó
+// más ~15 MiB.
 func margenMemoriaVMM(memMiB int) int {
 	return 64 + memMiB/16
 }
