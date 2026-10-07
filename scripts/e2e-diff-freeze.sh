@@ -104,13 +104,11 @@ arrancar() { # $@ = entorno del montaje
     sudo cp "$SCRIPTS/$s" "$BASE/lib/"
   done
   sudo cp "$VMLINUX" "$R/images/vmlinux"
-  # El log es del usuario a propósito: lo lee la prueba sin sudo.
-  # KLING_BUILDERS_DIR a un directorio vacío: si no, el constructor oci
-  # instalado en el host (/usr/local/lib/kindling/builders/oci, que lanza el
-  # kling del sistema) haría las imágenes con OTRO binario que el probado.
+  # El log es del usuario a propósito: lo lee la prueba sin sudo. El
+  # constructor oci lo hace el propio $BASE/kling (docs/api.md), no el
+  # instalado en el host.
   # shellcheck disable=SC2024
   sudo env "$@" KLING_LIB_DIR="$BASE/lib" KLING_GUEST_AGENT="$BASE/lib/kling-guest" \
-    KLING_BUILDERS_DIR="$BASE/no-builders" \
     KLING_COW_STORE_GIB=3 KLING_MIN_FREE_DISK_MIB=4096 KLING_GC_DISK_HIGH=99 \
     KLING_SOCKET_USER="$(id -un)" \
     setsid "$BASE/kling" daemon -root "$R" -socket "$SOCK" >>"$TMPC/daemon.log" 2>&1 </dev/null &

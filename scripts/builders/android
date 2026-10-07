@@ -1,4 +1,6 @@
 #!/bin/sh
 # Constructor "android" del núcleo: Redroid 13 + base Debian + dm-verity, todo
 # en Go (internal/android). Ver prototypes/android/docs/constructor.md.
+# El daemon no lo usa salvo con KLING_BUILDERS_DIR: se ejecuta a sí mismo
+# (docs/api.md). Queda para daemons anteriores y para lanzarlo a mano.
 exec /usr/local/bin/kling builder android "$@"

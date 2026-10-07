@@ -1,4 +1,6 @@
 #!/bin/sh
 # Constructor "oci" del núcleo: una imagen de Docker/OCI como base propia,
 # todo en Go y sin root (cmd/kling/builder_oci.go). Ver docs/imagenes.md.
+# El daemon no lo usa salvo con KLING_BUILDERS_DIR: se ejecuta a sí mismo
+# (docs/api.md). Queda para daemons anteriores y para lanzarlo a mano.
 exec /usr/local/bin/kling builder oci "$@"

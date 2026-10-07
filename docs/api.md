@@ -139,8 +139,20 @@ permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
 lo que apuntó de lo construido) y el daemon lo lleva a la receta. Los del núcleo
-en Go (`android`, `debian`, `oci`) no hace falta instalarlos: si no están en el directorio de
-constructores, el daemon se ejecuta a sí mismo como `kling builder <nombre>`.
+en Go (`android`, `debian`, `oci`) no hace falta instalarlos: el daemon se
+ejecuta a sí mismo como `<su binario> builder <nombre>`, y así construye
+siempre el mismo binario que atiende la petición. El orden:
+
+1. Sin `KLING_BUILDERS_DIR`, el propio binario del daemon, aunque haya uno
+   instalado en `/usr/local/lib/kindling/builders/` (ese envoltorio lanza el
+   `kling` del sistema: un daemon privado o recién compilado construiría con
+   otro).
+2. Con `KLING_BUILDERS_DIR` puesto, el constructor de ese directorio si está
+   (para probar uno a mano), y si no, otra vez el propio binario.
+
+Con usuario de construcción (`-build-as`), ese usuario tiene que poder ejecutar
+el binario del daemon: uno bajo `/root` no le deja pasar y la construcción falla
+con un 412 que lo dice. El resto de constructores, siempre el instalado.
 
 ### Volúmenes
 

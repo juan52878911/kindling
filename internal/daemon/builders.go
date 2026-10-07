@@ -27,7 +27,8 @@ import (
 // entorno de sandbox, ni lo que venga después; sabe ejecutar, como root y con
 // plazo, un constructor que el administrador instaló a propósito (los del
 // núcleo que no necesitan root, como "oci", con un usuario sin privilegios:
-// ver builders_sinroot.go):
+// ver builders_sinroot.go; y esos los hace el propio daemon, ver
+// resolverConstructor):
 //
 //	/usr/local/lib/kindling/builders/<nombre>   (o $KLING_BUILDERS_DIR)
 //
@@ -53,18 +54,21 @@ var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // constructoresSinRoot son los constructores del núcleo escritos en Go de
 // punta a punta (sin loop, chroot ni root): corren también en el daemon de
-// macOS, y si no están instalados en el directorio de constructores el
-// daemon se ejecuta a sí mismo como `kling builder <nombre>`.
+// macOS, y el daemon se ejecuta a sí mismo como `kling builder <nombre>`
+// (resolverConstructor).
 var constructoresSinRoot = map[string]bool{"android": true, "debian": true, "oci": true}
 
 // maxRecipeHints es el tamaño máximo del recipe.json que deja un constructor.
 const maxRecipeHints = 256 << 10
 
+// buildersDirPorDefecto es variable para los tests.
+var buildersDirPorDefecto = "/usr/local/lib/kindling/builders"
+
 func buildersDir() string {
 	if d := os.Getenv("KLING_BUILDERS_DIR"); d != "" {
 		return d
 	}
-	return "/usr/local/lib/kindling/builders"
+	return buildersDirPorDefecto
 }
 
 // builderPath localiza el constructor y comprueba que se puede ejecutar como
@@ -102,6 +106,31 @@ func builderPath(name string) (string, error) {
 	return p, nil
 }
 
+// resolverConstructor dice qué ejecutar para el constructor name: un
+// ejecutable y los argumentos que van antes del directorio de trabajo.
+//
+// Los del núcleo sin root (constructoresSinRoot) los hace el PROPIO binario
+// del daemon (`<daemon> builder <name>`), aunque haya uno instalado en
+// /usr/local/lib/kindling/builders: el instalado lanza el kling del sistema,
+// y un daemon privado o recién compilado construiría con OTRO binario que el
+// suyo. Solo un KLING_BUILDERS_DIR puesto a propósito manda sobre eso (para
+// probar un constructor a mano); si no lo tiene, también el propio binario.
+// El resto, siempre el instalado (builderPath).
+func resolverConstructor(name string) (string, []string, error) {
+	if constructoresSinRoot[name] && os.Getenv("KLING_BUILDERS_DIR") == "" {
+		if self, err := os.Executable(); err == nil {
+			return self, []string{"builder", name}, nil
+		}
+	}
+	bin, err := builderPath(name)
+	if err != nil && constructoresSinRoot[name] {
+		if self, serr := os.Executable(); serr == nil {
+			return self, []string{"builder", name}, nil
+		}
+	}
+	return bin, nil, err
+}
+
 func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req api.BuildImageRequest) {
 	if !reName.MatchString(req.Name) {
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid image name %q", req.Name))
@@ -115,14 +144,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		fail(w, http.StatusBadRequest, fmt.Errorf("spec is not valid JSON"))
 		return
 	}
-	bin, err := builderPath(req.Builder)
-	var binArgs []string
-	if err != nil && constructoresSinRoot[req.Builder] {
-		// Del núcleo y en Go: el propio binario del daemon lo lleva.
-		if self, serr := os.Executable(); serr == nil {
-			bin, binArgs, err = self, []string{"builder", req.Builder}, nil
-		}
-	}
+	bin, binArgs, err := resolverConstructor(req.Builder)
 	if err != nil {
 		fail(w, http.StatusPreconditionFailed, err)
 		return
@@ -134,6 +156,12 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	var u *usuarioConstructor
 	if aislado {
 		u = s.constructor
+	}
+	if u != nil && binArgs != nil && !atravesable(bin, u) {
+		fail(w, http.StatusPreconditionFailed, fmt.Errorf("the builder user %q can't execute the daemon binary %s "+
+			"(it or a parent directory doesn't let it through, e.g. /root): put kling under /usr/local or /srv, "+
+			"or install the builder in KLING_BUILDERS_DIR", u.Nombre, bin))
+		return
 	}
 	dueño := uint32(os.Geteuid())
 	if u != nil {
