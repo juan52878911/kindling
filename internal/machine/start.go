@@ -162,7 +162,9 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		}
 		copies = append(copies, resolvedVolume{path: p, mount: s.Mount, readOnly: true})
 	}
-	// Admisión, como Run: un arranque en frío ocupa lo mismo aquí.
+	// Admisión, como Run: un arranque en frío ocupa lo mismo aquí. Con el
+	// cerrojo de la máquina tomado, como en Thaw (ver allí): un stop o un rm
+	// de esta máquina esperan, acotado, a que se decida su memoria.
 	if err := m.admitir(); err != nil {
 		return nil, err
 	}

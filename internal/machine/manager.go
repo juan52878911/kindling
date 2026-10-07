@@ -2880,6 +2880,14 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// overlay y el volcado ya existen—, y el diferencial sin reflink ya mide
 	// el suyo (prepararMemoriaDesdeDiff). Reanudar una pausada (arriba) y
 	// readoptar un VMM vivo no pasan por aquí: su memoria ya está ocupada.
+	//
+	// Se reserva con el cerrojo de la máquina tomado, a diferencia de Run
+	// (que aún no tiene máquina): si no cabe, esperarReservas puede esperar
+	// hasta esperaReservasMax, y mientras tanto un stop o un rm de ESTA
+	// máquina esperan con él. Es a propósito: reservar antes del cerrojo
+	// obligaría a releerla y a devolver la reserva si cambió entre medias,
+	// para ahorrar una espera acotada a una máquina que ya se está
+	// despertando. El ctx de la petición la corta antes si quien pidió se va.
 	if err := m.admitirMemoria(); err != nil {
 		return nil, err
 	}
