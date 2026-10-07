@@ -276,6 +276,42 @@ func TestImpulsoBajaAlAgotarElPlazoDeLaSonda(t *testing.T) {
 	esperarSecuencia(t, cg, id, []int{100, 50})
 }
 
+// Una imagen cuyo HEALTHCHECK trae StartPeriod (el agente lo dice en /ready)
+// tiene ese tiempo de más: al agotar el plazo sigue impulsada, y baja al
+// agotar plazo + StartPeriod.
+func TestImpulsoConStartPeriodAlargaElPlazo(t *testing.T) {
+	m, cg, contesta := managerConCgroupFalso(t)
+	t.Setenv("KLING_READY_BOOST", "200ms")
+	m.bus = events.New()
+	evs, baja := m.bus.Subscribe()
+	defer baja()
+	id := "a2c00013000000000"
+	addConIP(m, id)
+
+	t0 := time.Now()
+	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	listosFalsos.Store(id, api.GuestReady{Probe: true, Detail: "not yet", StartPeriodSeconds: 1})
+	close(contesta)
+	time.Sleep(600 * time.Millisecond)
+	if got := cg.de(id); !reflect.DeepEqual(got, []int{100}) {
+		t.Fatalf("dentro del start period cpu.max = %v, quería [100]", got)
+	}
+	esperarSecuencia(t, cg, id, []int{100, 50})
+	if d := time.Since(t0); d < 1100*time.Millisecond {
+		t.Fatalf("bajó a los %s, antes de plazo + start period", d)
+	}
+	select {
+	case ev := <-evs:
+		if !strings.Contains(ev.Message, "not ready after 1.2s") {
+			t.Fatalf("evento = %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no se publicó el fin del impulso")
+	}
+}
+
 // Un agente que nunca contesta (imagen sin agente) no deja la máquina con el
 // impulso para siempre: al agotar plazoImpulsoCPU, el techo baja igual.
 func TestImpulsoBajaAlAgotarElPlazoSinAgente(t *testing.T) {

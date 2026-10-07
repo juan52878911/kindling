@@ -13,7 +13,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 |---|---|
 | Correr una imagen tal cual | `kling run -image redis:7-alpine -mem 256M -wait-ready` (se importa la primera vez) |
 | Con entorno (`-e` de Docker) | `kling run -image postgres:17-alpine -e POSTGRES_PASSWORD` (el valor, del entorno; o `-e K=V`, `-env-file F`): el entorno es de la máquina, llega por MMDS y no entra en la imagen; una imagen por referencia ([imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
-| Importar con nombre, usuario, entrypoint o comando propios | `kling image import <ref> -name N [-user U] [-entrypoint E] [-- cmd...]` |
+| Importar con nombre, usuario, entrypoint o comando propios | `kling image import <ref> -name N [-user U] [-entrypoint E] [-restart always\|on-failure\|no] [-- cmd...]` |
 | Datos que sobrevivan a la máquina | `-volume nombre:/ruta` (un `VOLUME` de la imagen no crea nada solo) |
 | Más disco para la propia máquina | `-disk 4G` (disperso: cuesta lo que se escribe) |
 | Fijar la imagen | la etiqueta se resuelve una vez a digest y queda en la receta; `kling image recipe N` |

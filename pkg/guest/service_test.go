@@ -26,6 +26,9 @@ func TestLookupUser(t *testing.T) {
 		"70:0":         {uid: 70, gid: 0, groups: []uint32{0, 101}, home: "/var/lib/postgresql"},
 		"postgres:ssl": {uid: 70, gid: 101, groups: []uint32{101}, home: "/var/lib/postgresql"},
 		"1000:1000":    {uid: 1000, gid: 1000, groups: []uint32{1000}},
+		// Sin entrada en /etc/passwd, grupo 0, como Docker.
+		"1000":   {uid: 1000, gid: 0, groups: []uint32{0}},
+		"1000:5": {uid: 1000, gid: 5, groups: []uint32{5}},
 	} {
 		got, err := lookupUser(root, spec)
 		if err != nil || got.uid != want.uid || got.gid != want.gid || got.home != want.home || !sameGroups(got.groups, want.groups) {
@@ -55,14 +58,12 @@ func sameGroups(a, b []uint32) bool {
 	return true
 }
 
-func TestParseSignal(t *testing.T) {
-	for s, want := range map[string]syscall.Signal{"": syscall.SIGTERM, "SIGINT": syscall.SIGINT, "quit": syscall.SIGQUIT, "9": syscall.SIGKILL} {
-		if got, err := parseSignal(s); err != nil || got != want {
-			t.Errorf("parseSignal(%q) = %v, %v", s, got, err)
+func TestStopSignal(t *testing.T) {
+	for s, want := range map[string]syscall.Signal{"": syscall.SIGTERM, "SIGINT": syscall.SIGINT, "quit": syscall.SIGQUIT,
+		"9": syscall.SIGKILL, "SIGNOPE": syscall.SIGTERM, "SIGRTMIN+3": syscall.Signal(37), "SIGABRT": syscall.Signal(6)} {
+		if got := stopSignal(api.ServiceSpec{StopSignal: s}); got != want {
+			t.Errorf("stopSignal(%q) = %v, want %v", s, got, want)
 		}
-	}
-	if _, err := parseSignal("SIGNOPE"); err == nil {
-		t.Error("unknown signal accepted")
 	}
 }
 
@@ -136,6 +137,24 @@ func TestServiceRestartPolicy(t *testing.T) {
 	if st := s.Status(0); st.Starts != 1 || st.Running {
 		t.Fatalf("%+v", st)
 	}
+
+	// on-failure sí relanza una salida con error.
+	s = newTestService(t, api.ServiceSpec{Argv: []string{"false"}, Restart: api.RestartOnFailure})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	waitUntil(t, "a restart after a failure", func() bool { return s.Status(0).Starts >= 2 })
+	s.Stop()
+
+	// no: ni con error.
+	s = newTestService(t, api.ServiceSpec{Argv: []string{"false"}, Restart: api.RestartNo})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	select {
+	case <-s.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no restarted a failure")
+	}
+	if st := s.Status(0); st.Starts != 1 || st.LastExit != "exit status 1" {
+		t.Fatalf("%+v", st)
+	}
 }
 
 func TestServiceStopSignalAndKill(t *testing.T) {
@@ -176,7 +195,7 @@ func TestLoadServiceRejectsBadSpecs(t *testing.T) {
 	if s, err := LoadService(filepath.Join(dir, "none.json")); s != nil || err != nil {
 		t.Fatalf("missing file: %v %v", s, err)
 	}
-	for _, bad := range []string{`{}`, `{"argv":["x"],"stop_signal":"SIGNOPE"}`, `{"argv":["x"],"restart":"sometimes"}`, `nope`} {
+	for _, bad := range []string{`{}`, `{"argv":["x"],"restart":"sometimes"}`, `nope`} {
 		p := filepath.Join(dir, "s.json")
 		os.WriteFile(p, []byte(bad), 0o644)
 		if _, err := LoadService(p); err == nil {
@@ -229,5 +248,23 @@ func TestServiceStopHandlerAndCaps(t *testing.T) {
 	ServiceStopHandler()(rec, httptest.NewRequest(http.MethodGet, api.GuestServiceStopPath, nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /service/stop: %d", rec.Code)
+	}
+}
+
+// Un STOPSIGNAL que no se entiende no deja la imagen sin servicio: se carga
+// con SIGTERM. Antes LoadService fallaba y el servicio no arrancaba.
+func TestLoadServiceUnknownSignalUsesTerm(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	os.WriteFile(p, []byte(`{"argv":["x"],"stop_signal":"SIGNOPE"}`), 0o644)
+	s, err := LoadService(p)
+	if err != nil || s == nil {
+		t.Fatalf("LoadService: %v %v", s, err)
+	}
+	if s.spec.StopSignal != "" || stopSignal(s.spec) != syscall.SIGTERM {
+		t.Fatalf("stop signal %q", s.spec.StopSignal)
+	}
+	os.WriteFile(p, []byte(`{"argv":["x"],"stop_signal":"SIGRTMIN+3"}`), 0o644)
+	if s, err := LoadService(p); err != nil || s.spec.StopSignal != "SIGRTMIN+3" {
+		t.Fatalf("SIGRTMIN+3: %v %v", s, err)
 	}
 }

@@ -103,7 +103,7 @@ func (m *Manager) conocerAgente(id string) {
 			if addr == "" {
 				return
 			}
-			pctx, pcancel := context.WithTimeout(ctx, plazoPeticionListo)
+			pctx, pcancel := context.WithTimeout(ctx, plazoPeticionAgente)
 			ag, err := preguntarAgente(pctx, "http://"+addr)
 			pcancel()
 			if err == nil {

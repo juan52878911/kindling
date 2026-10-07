@@ -162,8 +162,8 @@ kindling y nada más:
 | `/sbin/overlay-init` | `minimal-init.sh`, con el contrato de runtime de Docker (`/dev/fd`, `/dev/std*`, `/dev/shm`, `/etc/hosts`, nombre) |
 | `/usr/local/bin/kling-guest`, `/entrypoint` | el agente de invitado como PID 1 |
 | `/etc/kling/env` (0600 de root) | el `Env` de la imagen con el del spec encima |
-| `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente |
-| `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`) |
+| `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente. Se relanza si sale con error (`-restart always\|on-failure\|no`, `on-failure` por defecto); un `STOPSIGNAL` que no se entiende pasa a `SIGTERM` con un aviso; un `USER` numérico sin entrada en `/etc/passwd` corre con el grupo 0, como en Docker |
+| `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`). Su `Timeout` es el plazo de cada ejecución y su `StartPeriod` alarga el impulso de CPU del arranque (en `service.json`, hasta 120 s cada uno); `Interval` y `Retries` no se usan |
 | `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
 | `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
 

@@ -64,6 +64,9 @@ type GuestReady struct {
 	// Detail explica por qué no está listo: la salida (recortada) de la sonda
 	// o del gancho que falló.
 	Detail string `json:"detail,omitempty"`
+	// StartPeriodSeconds es el ReadyStartPeriodSeconds del servicio de la
+	// imagen: el daemon alarga eso el impulso de CPU del arranque.
+	StartPeriodSeconds int `json:"start_period_seconds,omitempty"`
 }
 
 // Declares dice si la imagen declara algo (sonda o ganchos): sin nada, "listo"
