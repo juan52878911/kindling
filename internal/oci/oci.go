@@ -11,6 +11,8 @@ package oci
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -939,14 +941,15 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 			}
 			resp, err = c.client().Do(req)
 		}
-		if err != nil && ctx.Err() == nil {
+		if err != nil && ctx.Err() == nil && !errCertificado(err) {
 			// Un corte de red (el TLS de Docker Hub a veces no contesta):
-			// otra vez, una sola.
+			// otra vez, una sola. Un certificado que no vale no cambia por
+			// reintentar.
 			time.Sleep(2 * time.Second)
 			resp, err = c.client().Do(req.Clone(ctx))
 		}
 		if err != nil {
-			return nil, err
+			return nil, conPistaCertificado(err)
 		}
 		if resp.StatusCode == http.StatusOK {
 			return resp, nil
@@ -1049,12 +1052,12 @@ func (c *Client) token(ctx context.Context, challenge, registry, repo string) (s
 		req.Header.Set("Authorization", cr.basic())
 	}
 	resp, err := c.client().Do(req)
-	if err != nil && ctx.Err() == nil {
+	if err != nil && ctx.Err() == nil && !errCertificado(err) {
 		time.Sleep(2 * time.Second)
 		resp, err = c.client().Do(req.Clone(ctx))
 	}
 	if err != nil {
-		return "", err
+		return "", conPistaCertificado(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1117,4 +1120,24 @@ func OpenLayer(l Layer) (io.ReadCloser, error) {
 		return f, nil
 	}
 	return decompress(f)
+}
+
+// errCertificado dice si err es de un certificado que no se pudo verificar
+// (CA desconocida, caducado, de otro nombre).
+func errCertificado(err error) bool {
+	var ca x509.UnknownAuthorityError
+	var inv x509.CertificateInvalidError
+	var host x509.HostnameError
+	var ver *tls.CertificateVerificationError
+	return errors.As(err, &ca) || errors.As(err, &inv) || errors.As(err, &host) || errors.As(err, &ver)
+}
+
+// conPistaCertificado añade a un error de certificado cómo arreglarlo: un
+// registro con su propia CA se usa dándole al daemon un SSL_CERT_FILE que la
+// incluya (el constructor lo recibe de su entorno).
+func conPistaCertificado(err error) error {
+	if !errCertificado(err) {
+		return err
+	}
+	return fmt.Errorf("%w (if the registry uses its own CA, add it to a bundle and start the daemon with SSL_CERT_FILE pointing to it)", err)
 }
