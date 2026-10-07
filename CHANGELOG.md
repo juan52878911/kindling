@@ -49,6 +49,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
 - The daemon builds `oci`, `debian` and `android` images with its own binary, not the `kling` installed on the host (unless `KLING_BUILDERS_DIR` is set)
 - Replacing an image or the kernel (`PUT /images/{name}/blob`) can no longer race a machine that is booting from it
+- Image layers: a hard link whose target path goes through a directory symlink (`bin/busybox` with `bin -> usr/bin`) no longer fails as "hard link to missing"
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
 - Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker
