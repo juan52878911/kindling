@@ -6,9 +6,10 @@ import (
 	"testing"
 )
 
-// El puente no autentica: sin -listen tiene que quedarse en loopback.
+// El puente no autentica: sin -listen, fuera de la microVM, tiene que
+// quedarse en loopback.
 func TestDefaultListenIsLoopback(t *testing.T) {
-	host, port, err := net.SplitHostPort(defaultListen)
+	host, port, err := net.SplitHostPort(defaultListenFor(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,5 +48,18 @@ func TestExposedWarning(t *testing.T) {
 		if w != "" && !strings.Contains(w, "NO authentication") {
 			t.Errorf("warning for %q does not say why: %q", tc.listen, w)
 		}
+	}
+}
+
+// Como PID 1 (el /entrypoint de una microVM) sin -listen escucha en :8080:
+// el gateway llega por la tap, y una imagen propia sin -listen que recibe el
+// puente nuevo con refresh-bridge no puede quedarse en loopback. Y sin aviso.
+func TestDefaultListenInsideMicroVM(t *testing.T) {
+	got := defaultListenFor(true)
+	if got != ":8080" {
+		t.Fatalf("default listen as PID 1 = %q, want :8080", got)
+	}
+	if w := exposedWarning(got, true); w != "" {
+		t.Fatalf("the microVM default must not warn: %q", w)
 	}
 }

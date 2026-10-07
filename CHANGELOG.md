@@ -134,7 +134,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling add -env` values stay out of the host process list while building (#159)
 - Pinned Debian base picks up openssl and pcre2 security updates (deb13u3) (#160)
 - Internal: scheduler races, silent state losses and `make deploy` without fixed `/tmp` paths (#130, #132, #139)
-- `kling-bridge` listens on `127.0.0.1:8080` by default (was every interface) and warns in its log when it listens on another address outside a microVM
+- `kling-bridge` listens on `127.0.0.1:8080` by default outside a microVM (as PID 1 it keeps `:8080`) and warns in its log when it listens on another address outside a microVM
 
 ## [0.17.0] - 2026-09-29
 

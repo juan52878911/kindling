@@ -53,11 +53,15 @@ var Version = "dev"
 const SessionHeader = "Mcp-Session-Id"
 
 func main() {
-	// Loopback por defecto: el puente NO autentica. Dentro de la microVM el
-	// /entrypoint que genera 80-mcp-image.sh pide -listen :8080 explícito (el
-	// gateway llega por la tap); fuera, en tu máquina, exponerlo a la red tiene
-	// que ser una decisión, y avisa (exposedWarning).
-	listen := flag.String("listen", defaultListen, "where to listen (non-loopback exposes it without authentication)")
+	// Loopback por defecto: el puente NO autentica. Dentro de la microVM (PID
+	// 1) escucha en :8080, porque el gateway llega por la tap: el /entrypoint
+	// que genera 80-mcp-image.sh ya lo pide explícito, pero una imagen propia
+	// que siga el ejemplo sin -listen y reciba este binario con `kling mcp
+	// refresh-bridge` quedaría en loopback, inalcanzable y sin aviso. Fuera, en
+	// tu máquina, exponerlo a la red tiene que ser una decisión, y avisa
+	// (exposedWarning).
+	listen := flag.String("listen", defaultListenFor(os.Getpid() == 1),
+		"where to listen (non-loopback exposes it without authentication; :8080 as PID 1 in a microVM)")
 	idle := flag.Duration("session-idle", 10*time.Minute, "idle time before closing a session")
 	// 0 = derivarlo de la memoria del invitado. El flag sigue existiendo para
 	// forzarlo, porque la estimación por sesión es eso, una estimación.
@@ -223,8 +227,22 @@ Options:
 	agent.Close()
 }
 
-// defaultListen es loopback: ver el flag -listen.
-const defaultListen = "127.0.0.1:8080"
+// defaultListen es loopback; microVMListen, el de PID 1 dentro de la microVM:
+// ver el flag -listen.
+const (
+	defaultListen = "127.0.0.1:8080"
+	microVMListen = ":8080"
+)
+
+// defaultListenFor es el -listen por defecto: todas las interfaces como PID 1
+// (el /entrypoint de una microVM, donde exposedWarning tampoco avisa),
+// loopback en cualquier otro caso.
+func defaultListenFor(pid1 bool) string {
+	if pid1 {
+		return microVMListen
+	}
+	return defaultListen
+}
 
 // exposedWarning devuelve el aviso para una dirección que no es loopback, o ""
 // si no hace falta. Como PID 1 el puente es el /entrypoint de una microVM: ahí
