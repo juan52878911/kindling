@@ -1,6 +1,9 @@
 package machine
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -32,20 +35,55 @@ func TestDiscoLlenoNoSeConfundeConMemoria(t *testing.T) {
 // La presión de memoria se puede apagar, y sin PSI (macOS, kernels sin él) no
 // bloquea nada: una comprobación de cordura no puede volverse un requisito.
 func TestPresionDeMemoria(t *testing.T) {
+	// Un /proc/pressure/memory de mentira: con él se puede fingir un host bajo
+	// presión en cualquier sitio, también en macOS.
+	psi := filepath.Join(t.TempDir(), "memory")
+	viejo := psiMemoria
+	psiMemoria = psi
+	t.Cleanup(func() { psiMemoria = viejo })
+	escribir := func(avg10 string) {
+		t.Helper()
+		txt := "some avg10=" + avg10 + " avg60=1.00 avg300=0.50 total=12345\n" +
+			"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+		if err := os.WriteFile(psi, []byte(txt), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Sin PSI (el fichero no existe) no bloquea nada.
+	t.Setenv("KLING_MAX_MEM_PRESSURE", "")
+	if p := memPressure(); p != -1 {
+		t.Fatalf("sin PSI memPressure = %v, quería -1", p)
+	}
+	if err := checkPressure(); err != nil {
+		t.Fatalf("sin PSI no debe bloquear: %v", err)
+	}
+
+	// Bajo el tope por defecto se admite; por encima, 507.
+	escribir("19.50")
+	if p := memPressure(); p != 19.5 {
+		t.Fatalf("memPressure = %v, quería 19.5 (la línea some, no la full)", p)
+	}
+	if err := checkPressure(); err != nil {
+		t.Fatalf("19,5 %% con tope %v: %v", defaultMaxMemPressure, err)
+	}
+	escribir("42.00")
+	err := checkPressure()
+	if err == nil {
+		t.Fatal("con 42 % de presión y tope 20 tenía que rechazar")
+	}
+	if !api.IsInsufficientMemory(err) || !strings.Contains(err.Error(), "KLING_MAX_MEM_PRESSURE") {
+		t.Fatalf("el rechazo tiene que ser 507 y decir cómo subir el tope: %v", err)
+	}
+
+	// El tope se sube, y "0" lo apaga.
+	t.Setenv("KLING_MAX_MEM_PRESSURE", "50")
+	if err := checkPressure(); err != nil {
+		t.Fatalf("42 %% con tope 50: %v", err)
+	}
 	t.Setenv("KLING_MAX_MEM_PRESSURE", "0")
 	if err := checkPressure(); err != nil {
 		t.Fatalf("apagada: %v", err)
-	}
-	t.Setenv("KLING_MAX_MEM_PRESSURE", "")
-	if p := memPressure(); p < 0 {
-		if err := checkPressure(); err != nil {
-			t.Fatalf("sin PSI no debe bloquear: %v", err)
-		}
-	}
-	// Con PSI y un tope negativo imposible de cumplir... no hay forma de forzar
-	// presión en un test; lo que se comprueba es el camino de lectura.
-	if p := memPressure(); p > 100 {
-		t.Fatalf("PSI fuera de rango: %v", p)
 	}
 }
 
