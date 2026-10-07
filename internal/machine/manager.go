@@ -2298,6 +2298,10 @@ const balloonStatsPollSec = 1
 // del OOM justo después.
 const balloonSqueezeMarginMiB = 128
 
+// sueloSqueezeMiB es lo que el globo nunca le quita al invitado, sea cual sea
+// el margen: el kernel necesita memoria propia para atender al driver.
+const sueloSqueezeMiB = 32
+
 // squeezeMinRetenerMiB: por debajo de esto, en macOS, el apretón no ha devuelto
 // nada que valga la pena retener y el globo vuelve a la línea base.
 const squeezeMinRetenerMiB = 16
@@ -2328,13 +2332,14 @@ func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
-	return m.squeezeLocked(ctx, mc.ID, ref, force)
+	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB)
 }
 
 // squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
 // tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
-// las ocupadas).
-func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool) (*api.SqueezeResult, error) {
+// las ocupadas). margen es lo que se le deja disponible al invitado mientras el
+// globo está inflado (balloonSqueezeMarginMiB, salvo el apretón al estar lista).
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool, margen int) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
@@ -2386,7 +2391,13 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 		reclaimMiB = avail
 	}
 
-	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
+	target := stats.ActualMiB + reclaimMiB - margen
+	// Como en apretarAntesDeVolcar: con un ActualMiB obsoleto la suma puede
+	// pasar del total, y el VMM rechaza un globo mayor que la RAM. Nunca a
+	// menos de un suelo del total, por pequeño que sea el margen.
+	if tot := int(stats.TotalMemory >> 20); tot > 0 && target > tot-sueloSqueezeMiB {
+		target = tot - sueloSqueezeMiB
+	}
 	sinEstadisticas := globoSinEstadisticas && estadisticasDesconocidas(stats)
 	if sinEstadisticas {
 		// macOS: el framework no dice cuánta memoria tiene libre el invitado

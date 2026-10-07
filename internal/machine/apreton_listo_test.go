@@ -2,11 +2,15 @@ package machine
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -92,5 +96,70 @@ func TestApretonListoNoTrasRestaurar(t *testing.T) {
 			got = mc.Ready
 		}
 		t.Fatalf("la vigía no siguió la sonda: %q", got)
+	}
+}
+
+// globosPedidos devuelve los amount_mib de los PATCH /balloon que recibió f.
+func globosPedidos(t *testing.T, f *fcFalso) []int {
+	t.Helper()
+	var r []int
+	for _, l := range f.llamadasA(http.MethodPatch, "/balloon") {
+		var p struct {
+			AmountMiB int `json:"amount_mib"`
+		}
+		if err := json.Unmarshal(l.Cuerpo, &p); err != nil {
+			t.Fatal(err)
+		}
+		r = append(r, p.AmountMiB)
+	}
+	return r
+}
+
+// El apretón al estar lista infla el globo hasta todo lo disponible (sin el
+// margen de 128 MiB de squeeze, que solo se llevaba la memoria libre de un
+// arranque en frío) y lo desinfla a la línea base.
+func TestApretonListoSinMargen(t *testing.T) {
+	if !apretarAlEstarListaActivo() {
+		t.Skip("sin apretón al estar lista en esta plataforma")
+	}
+	m, id, falso := maquinaParaApretonListo(t, true)
+	m.bus = events.New()
+	falso.mu.Lock()
+	falso.globo = &fc.BalloonStats{AvailableMemory: 400 << 20, FreeMemory: 300 << 20, TotalMemory: 512 << 20}
+	falso.mu.Unlock()
+	m.vigilarListo(id, nil)
+	limite := time.Now().Add(3 * time.Second)
+	for len(globosPedidos(t, falso)) < 2 && time.Now().Before(limite) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := globosPedidos(t, falso); !slices.Equal(got, []int{400, 0}) {
+		t.Fatalf("globo pedido %v; quería [400 0]: inflar a todo lo disponible y volver a la base", got)
+	}
+}
+
+// squeeze deja su margen; y por pequeño que sea el margen, el globo nunca
+// pasa del total menos sueloSqueezeMiB.
+func TestSqueezeMargenYSuelo(t *testing.T) {
+	for _, c := range []struct {
+		nombre       string
+		margen       int
+		actual, disp int
+		quiero       int
+	}{
+		{"squeeze", balloonSqueezeMarginMiB, 0, 400, 400 - balloonSqueezeMarginMiB},
+		{"sin margen", 0, 0, 400, 400},
+		{"suelo", 0, 100, 450, 512 - sueloSqueezeMiB},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			m, id, falso := maquinaParaApretonListo(t, true)
+			m.bus = events.New()
+			falso.globo = &fc.BalloonStats{ActualMiB: c.actual, AvailableMemory: int64(c.disp) << 20, TotalMemory: 512 << 20}
+			if _, err := m.squeezeLocked(context.Background(), id, id, false, c.margen); err != nil {
+				t.Fatal(err)
+			}
+			if got := globosPedidos(t, falso); len(got) == 0 || got[0] != c.quiero {
+				t.Fatalf("globo pedido %v; quería inflar a %d", got, c.quiero)
+			}
+		})
 	}
 }

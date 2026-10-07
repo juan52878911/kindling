@@ -28,6 +28,16 @@ import (
 // macOS el framework vuelve a poblar las páginas al desinflar.
 // KLING_SQUEEZE_ON_READY=0 lo apaga.
 
+// margenApretonListo es el margen del apretón al estar lista: ninguno. Con el
+// de squeeze (128 MiB) el globo solo se llevaba memoria LIBRE, que en un
+// arranque en frío casi no se ha tocado y no está en el RSS: lo que ocupa es
+// la caché de página de la imagen. Medido con postgres:17-alpine (512 MiB): el
+// globo a lo disponible menos 128 MiB devolvía 13 MiB; a lo disponible menos
+// 16, 68; a todo lo disponible, 90 (RSS de 160 a 70 MiB). Es un momento: se
+// desinfla en cuanto el invitado entrega, y deflate_on_oom le devuelve
+// páginas si las necesita antes; sueloSqueezeMiB acota el globo igual.
+const margenApretonListo = 0
+
 // plazoApretonListo acota el apretón entero: el inflado espera al driver como
 // mucho 3 s (waitBalloon).
 const plazoApretonListo = 15 * time.Second
@@ -73,7 +83,7 @@ func (m *Manager) apretarAlEstarLista(id string) {
 			return
 		}
 		defer soltar()
-		res, err := m.squeezeLocked(ctx, id, id, false)
+		res, err := m.squeezeLocked(ctx, id, id, false, margenApretonListo)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("%s: no squeeze after the ready probe: %v", shortID(id), err)
