@@ -20,6 +20,7 @@ import (
 func TestGCRecogeSoloLasParadasQueSeRecrean(t *testing.T) {
 	m := newTestManager(t)
 	m.bus = events.New()
+	writeSnapMeta(t, m, "web", `{"name":"web","image":"web"}`)
 	vieja := time.Now().Add(-2 * defaultStoppedRetention)
 	reciente := time.Now().Add(-time.Minute)
 	svc := map[string]string{api.LabelService: "web"}
@@ -51,11 +52,36 @@ func TestGCRecogeSoloLasParadasQueSeRecrean(t *testing.T) {
 	}
 }
 
+// Sin su dorado, la instancia parada de un servicio no se recrea de ningún
+// sitio: su overlay es la única copia que queda (kling start la arranca en
+// frío). Un dorado se puede borrar con paradas que salieron de él, porque no
+// cuentan como usuarias; la recogida no puede tirarlas a las 24 h.
+func TestGCNoRecogeLaParadaSinDorado(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	vieja := time.Now().Add(-2 * defaultStoppedRetention)
+	id := "0b0b000000000006"
+	m.mu.Lock()
+	m.byID[id] = &api.Machine{ID: id, Name: "web-1", State: api.StateStopped, From: "web",
+		Labels: map[string]string{api.LabelService: "web"}, StoppedAt: &vieja}
+	m.mu.Unlock()
+
+	m.gcFailed()
+
+	m.mu.RLock()
+	_, sigue := m.byID[id]
+	m.mu.RUnlock()
+	if !sigue {
+		t.Fatal("recogió la instancia parada de un servicio cuyo dorado ya no existe: su overlay era la única copia")
+	}
+}
+
 // gcFailed decide con una foto y borra fuera del candado: si entre medias
 // alguien arranca la máquina (kling start, con su cerrojo), no se borra.
 func TestGCNoBorraLaParadaQueArrancaronEntreMedias(t *testing.T) {
 	m := newTestManager(t)
 	m.bus = events.New()
+	writeSnapMeta(t, m, "web", `{"name":"web","image":"web"}`)
 	t.Setenv("KLING_STOPPED_RETENTION", "1ms")
 	id := "0b0b000000000010"
 	vieja := time.Now().Add(-time.Hour)

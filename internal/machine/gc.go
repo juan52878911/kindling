@@ -357,14 +357,14 @@ func mismaHora(a, b *time.Time) bool {
 //     de una warm. Borrarla a la hora era perder la máquina entera.
 //   - Una arrancada en frío (sin From) cuyo VMM murió corriendo: su overlay es
 //     el único disco que tiene, con todo lo que escribió.
-//   - Una parada, salvo la instancia de un servicio que sale de su dorado (la
-//     misma regla que gcDisk): su overlay tiene lo que escribió desde que
-//     nació —una copia de kling db parada guarda su base de datos ahí—, y
-//     kling start la arranca otra vez sobre él. Las paradas por un reinicio
-//     del host (reconcile) son de estas.
+//   - Una parada, salvo la instancia de un servicio cuyo dorado sigue ahí
+//     para recrearla (la misma regla que gcDisk): su overlay tiene lo que
+//     escribió desde que nació —una copia de kling db parada guarda su base
+//     de datos ahí—, y kling start la arranca otra vez sobre él. Las paradas
+//     por un reinicio del host (reconcile) son de estas.
 //
-// Lee el disco (el sha256 del volcado de una failed): quien llama le pasa una
-// copia y no sostiene m.mu.
+// Lee el disco (el sha256 del volcado de una failed, el meta.json del dorado
+// de una parada): quien llama le pasa una copia y no sostiene m.mu.
 func (m *Manager) retieneDatos(mc *api.Machine) string {
 	if len(mc.Volumes) > 0 {
 		return "it has volumes attached"
@@ -380,6 +380,13 @@ func (m *Manager) retieneDatos(mc *api.Machine) string {
 	case api.StateStopped:
 		if mc.From == "" || mc.Service() == "" {
 			return "its overlay is the only copy of what it wrote (kling start boots it again)"
+		}
+		// Como en gcDisk: sin su dorado no hay de dónde recrearla. Un dorado
+		// se puede borrar con paradas que salieron de él (no cuentan como
+		// usuarias), y entonces su overlay es la única copia del servicio;
+		// kling start la arranca en frío, sin el dorado.
+		if _, _, err := m.loadSnapshotCached(mc.From); err != nil {
+			return "its template is gone: its overlay is the only copy (kling start boots it again)"
 		}
 	}
 	return ""
