@@ -93,7 +93,9 @@ func TestExistingImport(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("otro digest: %v", err)
 	}
-	if _, err := existingImport(ctx, c, "vieja", mismo); err == nil || !strings.Contains(err.Error(), "wasn't imported") {
+	// Sin receta no se sabe de dónde salió: no se dice que no fue de Docker.
+	if _, err := existingImport(ctx, c, "vieja", mismo); err == nil || !strings.Contains(err.Error(), "has no recipe") ||
+		strings.Contains(err.Error(), "wasn't imported") || !strings.Contains(err.Error(), "-replace") {
 		t.Fatalf("sin receta: %v", err)
 	}
 	// Una receta sin política es de antes de las políticas: su servicio se
@@ -105,5 +107,29 @@ func TestExistingImport(t *testing.T) {
 	c = fakeDaemon(t, fakeImagesMux("debian", `{"packages":["redis"]}`))
 	if _, err := existingImport(ctx, c, "redis-7", mismo); err == nil || !strings.Contains(err.Error(), "wasn't imported") {
 		t.Fatalf("de otro constructor: %v", err)
+	}
+}
+
+// Si la construyó otra versión del daemon, la salida lo dice y sugiere
+// -replace; con la misma, o con una de desarrollo, no.
+func TestAlreadyImportedLine(t *testing.T) {
+	for _, c := range []struct {
+		built, daemon string
+		hint          string
+	}{
+		{"0.17.0", "0.18.0", "built by kling 0.17.0; -replace rebuilds it with this version (0.18.0"},
+		{"", "v0.18.0", "built by an earlier kling; -replace rebuilds it with this version (v0.18.0"},
+		{"v0.18.0", "0.18.0", ""},
+		{"0.17.0", "dev", ""},
+		{"dev", "0.18.0", ""},
+		{"0.17.0", "", ""},
+	} {
+		got := alreadyImportedLine("redis-7", "docker.io/library/redis:7", c.built, c.daemon)
+		if !strings.HasPrefix(got, "image redis-7: already imported from docker.io/library/redis:7") {
+			t.Errorf("%q/%q: %q", c.built, c.daemon, got)
+		}
+		if c.hint == "" && strings.Contains(got, "built by") || c.hint != "" && !strings.Contains(got, c.hint) {
+			t.Errorf("%q/%q: %q, quería %q", c.built, c.daemon, got, c.hint)
+		}
 	}
 }
