@@ -5,8 +5,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/oci"
@@ -90,5 +93,53 @@ func TestAvisoImportAntiguo(t *testing.T) {
 	// Sin receta (404), el run sigue sin avisar.
 	if a := avisoImportAntiguo(ctx, fakeDaemon(t, http.NewServeMux()), "redis-7", "redis:7"); a != "" {
 		t.Errorf("sin receta: %q", a)
+	}
+}
+
+// asegurarImagenDocker, al reutilizar la imagen que ya tiene para la
+// referencia, avisa si es de antes de las políticas de reinicio, y no la
+// rehace por su cuenta (nada de POST /images/build).
+func TestAsegurarImagenDockerAvisaAlReutilizar(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("HOME", cfg)
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("AppData", cfg)
+	r, err := oci.ParseImageRef("redis:7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := nombreParaRef(r, claveRunImage())
+	m := http.NewServeMux()
+	m.HandleFunc("GET /images", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"name":"` + name + `","has_recipe":true}]`))
+	})
+	m.HandleFunc("GET /images/{name}/recipe", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"` + name + `","builder":"oci","spec":{"ref":"redis:7"}}`))
+	})
+	var construyo atomic.Bool
+	m.HandleFunc("POST /images/build", func(w http.ResponseWriter, _ *http.Request) {
+		construyo.Store(true)
+		http.Error(w, "no", http.StatusInternalServerError)
+	})
+	c := fakeDaemon(t, m)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := os.Stderr
+	os.Stderr = pw
+	got, err := asegurarImagenDocker(context.Background(), c, "redis:7")
+	os.Stderr = stderr
+	pw.Close()
+	salida, _ := io.ReadAll(pr)
+	if err != nil || got != name {
+		t.Fatalf("asegurarImagenDocker: %q, %v", got, err)
+	}
+	if construyo.Load() {
+		t.Error("rehízo la imagen por su cuenta")
+	}
+	if !strings.Contains(string(salida), "before restart policies") || !strings.Contains(string(salida), "-name "+name+" -replace") {
+		t.Errorf("no avisó de la imagen antigua: %q", salida)
 	}
 }
