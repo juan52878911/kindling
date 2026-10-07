@@ -25,7 +25,7 @@ func TestEspejoTrasCommitAhorraLaCopiaDelThaw(t *testing.T) {
 
 	src := escribirMemoriaDorada(t, root, "con", paginaDe('A'), paginaDe('B'))
 	montarAlmacen(t, a)
-	if hecho, err := a.espejarMemoria(context.Background(), "con", src); err != nil || !hecho {
+	if hecho, err := a.espejarMemoria(context.Background(), "con", src, 0); err != nil || !hecho {
 		t.Fatalf("espejarMemoria: %v, %v", hecho, err)
 	}
 	antes := f.copias.Load()
@@ -76,7 +76,7 @@ func TestEspejoEnCursoNoBloqueaElAlmacen(t *testing.T) {
 	montarAlmacen(t, a)
 	espejado := make(chan error, 1)
 	go func() {
-		_, err := a.espejarMemoria(context.Background(), "dorado", src)
+		_, err := a.espejarMemoria(context.Background(), "dorado", src, 0)
 		espejado <- err
 	}()
 	<-empezo
@@ -144,22 +144,70 @@ func montarAlmacen(t *testing.T, a *almacenCoW) {
 	}
 }
 
-// Sin almacén montado, el espejo no hace nada: un save no crea ni reserva un
-// almacén que quizá nadie use (lo hace el primer run -from o thaw).
-func TestEspejarMemoriaSinAlmacenNoLoCrea(t *testing.T) {
+// En un daemon recién instalado el almacén aún no existe al guardar el primer
+// dorado: el espejo lo crea y lo monta (lo habría hecho igual el primer run
+// -from) en vez de dejarle la copia entera al primer thaw.
+func TestEspejarMemoriaCreaElAlmacenQueAunNoExiste(t *testing.T) {
 	root := t.TempDir()
 	f := &almacenFalso{}
 	a := nuevoAlmacenFalso(t, root, f)
 	src := escribirMemoriaDorada(t, root, "dorado", paginaDe('A'))
-	hecho, err := a.espejarMemoria(context.Background(), "dorado", src)
-	if err != nil || hecho {
-		t.Fatalf("espejarMemoria sin almacén: %v, %v", hecho, err)
+	hecho, err := a.espejarMemoria(context.Background(), "dorado", src, 0)
+	if err != nil || !hecho {
+		t.Fatalf("espejarMemoria con el almacén aún sin crear: %v, %v", hecho, err)
 	}
+	if f.creados.Load() != 1 || f.montajes.Load() != 1 || f.copias.Load() != 1 {
+		t.Errorf("creó %d, montó %d, copió %d; quería 1, 1, 1", f.creados.Load(), f.montajes.Load(), f.copias.Load())
+	}
+	if e := espejosHechos(t, root, "dorado"); len(e) != 1 {
+		t.Errorf("espejos: %v", e)
+	}
+}
+
+// Sin el almacén en uso (otro modo de copia), el commit no lo crea ni espeja
+// nada: un daemon que no usa almacén no reserva uno.
+func TestCommitSinModoStoreNoCreaElAlmacen(t *testing.T) {
+	m, f := managerConAlmacen(t, "c0aa170000000023", "dorado")
+	f.creados.Store(0)
+	f.montajes.Store(0)
+	m.alm.mu.Lock()
+	m.alm.montado = false
+	m.alm.mu.Unlock()
+	m.cow.modo = cowModoCopy
+	if _, err := m.Commit(context.Background(), "c0aa170000000023", "dorado", false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
 	if f.creados.Load() != 0 || f.montajes.Load() != 0 || f.copias.Load() != 0 {
-		t.Errorf("creó %d, montó %d, copió %d sin almacén", f.creados.Load(), f.montajes.Load(), f.copias.Load())
+		t.Errorf("creó %d, montó %d, copió %d fuera del modo store", f.creados.Load(), f.montajes.Load(), f.copias.Load())
 	}
-	if _, err := os.Lstat(a.img); err == nil {
-		t.Error("el save creó la imagen del almacén")
+	if e := espejosHechos(t, m.root, "dorado"); len(e) != 0 {
+		t.Errorf("espejos fuera del modo store: %v", e)
+	}
+}
+
+// El commit del primer dorado de un daemon recién instalado, en modo store y
+// sin almacén todavía: lo crea en segundo plano y deja el espejo hecho.
+func TestCommitCreaElAlmacenYEspeja(t *testing.T) {
+	m, f := managerConAlmacen(t, "c0aa170000000024", "dorado")
+	// Como recién instalado: ni imagen ni montaje.
+	m.alm.mu.Lock()
+	m.alm.montado, f.montado = false, false
+	_ = os.Remove(m.alm.img)
+	m.alm.mu.Unlock()
+	f.creados.Store(0)
+	if _, err := m.Commit(context.Background(), "c0aa170000000024", "dorado", false); err != nil {
+		t.Fatal(err)
+	}
+	plazo := time.Now().Add(5 * time.Second)
+	for len(espejosHechos(t, m.root, "dorado")) == 0 {
+		if time.Now().After(plazo) {
+			t.Fatal("el commit no creó el almacén ni espejó la memoria")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := f.creados.Load(); n != 1 {
+		t.Errorf("almacenes creados: %d", n)
 	}
 }
 
@@ -283,14 +331,14 @@ func TestEspejoPorAdelantadoSoloConSitio(t *testing.T) {
 	src := escribirMemoriaDorada(t, root, "justo", paginaDe('A'))
 	montarAlmacen(t, a)
 	a.libreAlmacen = func(string) (int64, int64, error) { return 1 << 30, 400 << 20, nil }
-	if hecho, err := a.espejarMemoria(context.Background(), "justo", src); err != nil || hecho {
+	if hecho, err := a.espejarMemoria(context.Background(), "justo", src, 0); err != nil || hecho {
 		t.Fatalf("con el almacén por debajo de la mitad libre: hecho=%v err=%v; quería que lo dejara para el thaw", hecho, err)
 	}
 	if n := f.copias.Load(); n != 0 {
 		t.Fatalf("copió %d veces sin sitio", n)
 	}
 	a.libreAlmacen = func(string) (int64, int64, error) { return 1 << 30, 900 << 20, nil }
-	if hecho, err := a.espejarMemoria(context.Background(), "justo", src); err != nil || !hecho {
+	if hecho, err := a.espejarMemoria(context.Background(), "justo", src, 0); err != nil || !hecho {
 		t.Fatalf("con sitio de sobra: hecho=%v err=%v", hecho, err)
 	}
 }

@@ -40,7 +40,7 @@ disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; st
 Antes del primer `run -from` el almacén aún no existe, y no se da por hecho:
 
 ```
-disk clones:  store pending (created on first use)  [daemon.cow=auto]; no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first run -from)
+disk clones:  store pending (created on first use)  [daemon.cow=auto]; no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first save or run -from)
 ```
 
 Si el núcleo todavía no lista ese sistema de ficheros, el motivo lo añade (tendrá que
@@ -105,7 +105,10 @@ es del daemon y el VMM solo lo lee (0640): lo mapea MAP_PRIVATE y nunca escribe
 en él. Se retira al congelar otra vez o al borrar la máquina; el espejo, cuando
 el dorado desaparece o se reemplaza (`barrer`). Sin almacén, o si el overlay de
 la copia no vive en él, el diff se queda en `machines/<id>` y despertar copia
-la base en la raíz.
+la base en la raíz. El espejo se copia en segundo plano al guardar el dorado
+(si el almacén aún no existe, ese save lo crea, como lo haría el primer
+`run -from`) y solo si después queda libre al menos la mitad del almacén; si
+no, lo copia el primer thaw que lo necesite.
 
 `scripts/e2e-diff-freeze.sh` lo prueba de punta a punta en el host con KVM, con
 daemons privados que levanta él mismo (almacén con jailer, `KLING_COW=off` con

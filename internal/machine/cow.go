@@ -100,7 +100,7 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 // ficheros, que tendrá que cargar su módulo al montarlo (en un contenedor LXC
 // no puede, y el primer run -from lo descubrirá).
 func notaAlmacenPendiente(fs string, conoce bool) string {
-	n := fmt.Sprintf(" (%s store, created on the first run -from", fs)
+	n := fmt.Sprintf(" (%s store, created on the first save or run -from", fs)
 	if !conoce {
 		n += fmt.Sprintf("; the kernel does not list %s yet: it has to load its module to mount it", fs)
 	}
@@ -1220,7 +1220,7 @@ func (a *almacenCoW) crecer(ctx context.Context, nuevo, añadir int64) error {
 	defer a.mu.Unlock()
 	if !a.montado {
 		if !a.existe() {
-			return errors.New("there is no copy-on-write store yet: it is created on the first run -from")
+			return errors.New("there is no copy-on-write store yet: it is created on the first save or run -from")
 		}
 		return fmt.Errorf("the copy-on-write store %s is not mounted", a.dir)
 	}
