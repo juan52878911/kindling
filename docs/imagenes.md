@@ -513,10 +513,22 @@ prueba. Un token que caduca (ECR, 12 h; GCR, 1 h) hay que volver a guardarlo.
   `kling-guest` (`/sbin/overlay-init` es un enlace a él): hace lo mismo que el
   script (overlay, `pivot_root`, `/proc`, `/sys`, `/dev`, `/dev/fd`,
   `/dev/shm`, nombre, `/etc/hosts` sin pisar lo que haya), carga
-  `/etc/kling/env` y se vuelve a ejecutar como agente, sin `/entrypoint` y sin
-  ningún programa de la imagen. Solo arranca como PID 1. El script se queda
-  para las imágenes que lo pueden correr porque es el que llevan todas las
-  importadas hasta ahora; los dos se prueban con los mismos casos.
+  `/etc/kling/env` (como sh: un valor con saltos de línea sigue entre
+  comillas en las líneas siguientes) y se vuelve a ejecutar como agente, sin
+  `/entrypoint` y sin ningún programa de la imagen. Solo arranca como PID 1.
+  El script se queda para las imágenes que lo pueden correr porque es el que
+  llevan todas las importadas hasta ahora; los dos se prueban con los mismos
+  casos. Comprobado el 2026-10-07 en el lab (CT 105, amd64, daemon privado,
+  constructor con `kindling-build`): `gcr.io/distroless/static-debian12` con
+  un servidor HTTP en Go (subida a un `registry:2` local) y `traefik/whoami`
+  salen con el init de Go, quedan listas y responden por HTTP (`:9090` y
+  `:80`); `run -e FOO=bar` llega al servicio por MMDS. Por el camino del
+  script, `postgres:17-alpine`, `nginx:alpine` y `mariadb:11` se importan en
+  6,1, 2,3 y 5,9 s, quedan listas y responden (`psql`, la página de nginx,
+  `select version()` de MariaDB 11.8.9); el nombre del invitado es `kindling`
+  con los dos inits. En una imagen sin el comando `ip` (las dos de Go), el
+  agente avisa de que no puede poner la ruta a 169.254.169.254, sin
+  consecuencias: MMDS responde igual por la ruta por defecto.
 - **Sondas sin shell.** En una imagen sin `/bin/sh` la sonda de listo no es un
   script: es un `#!` que apunta al agente (`kling-guest -probe-tcp=...` para
   el puerto de `EXPOSE`, `kling-guest -exec-json` con el argv de un

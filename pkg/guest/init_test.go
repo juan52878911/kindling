@@ -286,11 +286,13 @@ func TestInitHostname(t *testing.T) {
 // /etc/kling/env tal como lo escribe imagen.EnvFile, comillas incluidas. Una
 // línea que no se entiende se salta sin que su valor llegue al registro.
 func TestInitEnv(t *testing.T) {
-	vars := []string{"PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b"}
+	vars := []string{"PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b",
+		"MULTI=a\nb'\n\nc # no\n", "AFTER=1"}
 	f := newFakeInit()
 	f.files[guestEnvPath] = imagen.EnvFile(vars) + "export BAD=$(rm -rf /)\nnot a line\nexport 1X='v'\n"
 	env := initEnv(f, []string{"TERM=linux", "HOME=/"})
-	want := []string{"TERM=linux", "HOME=/root", "PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b"}
+	want := []string{"TERM=linux", "HOME=/root", "PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b",
+		"MULTI=a\nb'\n\nc # no\n", "AFTER=1"}
 	if strings.Join(env, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("env:\n%q\nwant\n%q", env, want)
 	}
@@ -301,5 +303,12 @@ func TestInitEnv(t *testing.T) {
 	}
 	if _, bad := parseEnvFile("export A='x\nexport B='y'\n"); len(bad) != 1 || bad[0] != 1 {
 		t.Fatalf("bad lines %v", bad)
+	}
+	// Un valor multilínea (un ENV de la imagen con saltos), como lo carga sh:
+	// la variable entera y lo que sigue en su sitio; un comentario con una
+	// comilla no abre nada; el número de línea de lo malo es donde empieza.
+	vars2, bad := parseEnvFile("# it's\nexport A='x\ny'\nexport B=b\\'c\nmal\nexport C='z\n")
+	if strings.Join(vars2, "|") != "A=x\ny|B=b'c" || len(bad) != 2 || bad[0] != 5 || bad[1] != 6 {
+		t.Fatalf("multiline: %q, bad lines %v", vars2, bad)
 	}
 }

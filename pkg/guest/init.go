@@ -280,24 +280,68 @@ func initEnv(s initSys, environ []string) []string {
 
 // parseEnvFile lee lo que escribe imagen.EnvFile: líneas
 // `export KEY='valor'` con las comillas simples de sh (imagen.SQ: una comilla
-// dentro del valor cierra el tramo, va escapada con \ y abre otro).
-// Devuelve las variables (KEY=valor) y los números de las líneas que no
-// entiende. No es un intérprete de sh: solo lo que se puede escribir ahí.
+// dentro del valor cierra el tramo, va escapada con \ y abre otro). Un valor
+// con saltos de línea (un ENV de la imagen) sigue entre comillas en las
+// líneas siguientes, como lo lee sh. Devuelve las variables (KEY=valor) y los
+// números de las líneas (donde empieza cada una) que no entiende. No es un
+// intérprete de sh: solo lo que se puede escribir ahí.
 func parseEnvFile(s string) (vars []string, bad []int) {
-	for i, line := range strings.Split(s, "\n") {
-		t := strings.TrimSpace(line)
+	for _, r := range envRecords(s) {
+		t := strings.TrimSpace(r.text)
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
 		k, v, ok := strings.Cut(strings.TrimPrefix(t, "export "), "=")
 		val, okv := shUnquote(v)
 		if !ok || !okv || !validEnvKey(k) {
-			bad = append(bad, i+1)
+			bad = append(bad, r.line)
 			continue
 		}
 		vars = append(vars, k+"="+val)
 	}
 	return vars, bad
+}
+
+// envRecord es una orden del fichero de entorno y la línea donde empieza.
+type envRecord struct {
+	line int
+	text string
+}
+
+// envRecords parte s en órdenes como sh: por saltos de línea fuera de
+// comillas simples (y no escapados con \); un comentario llega hasta el
+// final de su línea. Una comilla sin cerrar se queda en la última, que
+// shUnquote rechaza.
+func envRecords(s string) []envRecord {
+	var out []envRecord
+	start, line, startLine := 0, 1, 1
+	inQuote, comment, empty := false, false, true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\n':
+			line++
+			if !inQuote {
+				out = append(out, envRecord{startLine, s[start:i]})
+				start, startLine, comment, empty = i+1, line, false, true
+			}
+		case comment || inQuote && c != '\'':
+		case c == '\'':
+			inQuote = !inQuote
+			empty = false
+		case c == '\\' && i+1 < len(s) && s[i+1] != '\n':
+			i++
+			empty = false
+		case c == '#' && empty:
+			comment = true
+		case c != ' ' && c != '\t':
+			empty = false
+		}
+	}
+	if start < len(s) {
+		out = append(out, envRecord{startLine, s[start:]})
+	}
+	return out
 }
 
 func validEnvKey(k string) bool {
