@@ -36,8 +36,15 @@ func (m *Manager) trasRestaurar(ctx context.Context, id, kind string, r resultad
 		}
 		return
 	}
-	// Esta restauración sí contestó: una tanda pendiente de otra anterior ya
-	// no hace falta, porque ahora se lanzan las de esta.
+	// Esta restauración sí contestó: la tanda pendiente de otra anterior se
+	// lanza con esta. Si la pendiente era la de una copia nueva (instance:
+	// identidad, claves) y esta es un thaw, se lanza como instance: la copia
+	// nunca corrió los suyos, y un thaw solo no los correría nunca.
+	if v, ok := m.ganchosPendientes.Load(id); ok {
+		if p, _ := v.(*ganchosPendientes); p != nil && p.kind == api.ResyncInstance && kind != api.ResyncInstance {
+			kind = api.ResyncInstance
+		}
+	}
 	m.olvidarGanchosPendientes(id, nil)
 	st := *inicial
 	if st.HasHooks {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -411,5 +412,32 @@ func TestWaitReadyUnaVezSinDebugfsTrasLaGracia(t *testing.T) {
 	m.byID[id].Agent = &api.GuestAgent{Agent: "kling-guest", Version: "v9.0.0"}
 	if res, _ := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); res.OK() {
 		t.Fatalf("un agente que contestó y ya no: %+v", res)
+	}
+}
+
+// Una copia cuyo /resync falló y que se congela antes de que nadie lance su
+// tanda (instance) la corre en el thaw siguiente, como instance: si el thaw
+// la olvidara, la copia no correría nunca sus ganchos de identidad.
+func TestThawLanzaLaTandaInstancePendiente(t *testing.T) {
+	a := &agenteListo{ganchos: true, listoEn: 1}
+	m, id := conAgenteListo(t, a)
+	var kinds []string
+	var mu sync.Mutex
+	m.pruebasGanchos = func(ctx context.Context, id, kind string) (api.GuestReady, error) {
+		mu.Lock()
+		kinds = append(kinds, kind)
+		mu.Unlock()
+		return api.GuestReady{Ready: true, HasHooks: true, Hooks: api.HooksDone}, nil
+	}
+	m.ganchosPendientes.Store(id, &ganchosPendientes{kind: api.ResyncInstance})
+	m.trasRestaurar(context.Background(), id, api.ResyncThaw,
+		resultadoResync{listo: &api.GuestReady{Ready: true, HasHooks: true, Hooks: api.HooksDone}})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(kinds) != 1 || kinds[0] != api.ResyncInstance {
+		t.Fatalf("ganchos lanzados = %v; quería uno, instance", kinds)
+	}
+	if _, ok := m.ganchosPendientes.Load(id); ok {
+		t.Error("lanzados, ya no están pendientes")
 	}
 }
