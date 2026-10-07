@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A network setup that fails halfway no longer leaves its namespace and veth behind until the daemon restarts (Linux)
 - `thaw` goes through memory admission like `run`: a storm of thaws is refused with 507 instead of exhausting the host
 - `thaw` of a machine removed while it waited fails instead of starting a VMM; re-adopting a live VMM restores its CPU ceiling (Linux)
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
