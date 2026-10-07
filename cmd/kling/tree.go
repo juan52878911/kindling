@@ -167,9 +167,15 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "recipe", "cat", "put", "rm", "copy", "toolchain"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
                                                    on the daemon (extensions ship them)
+  image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
+      [-e K=V] [-env-file F] [-user U]             Docker or root: the tag resolves to a
+      [-entrypoint ARG]... [-restart R]            digest, every layer is checked by
+      [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
+                                                   values into the image (per machine:
+                                                   kling run -image <ref> -e KEY)
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
