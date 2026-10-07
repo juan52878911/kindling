@@ -172,10 +172,11 @@ var coreTree = []section{
                                                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
       [-e K=V] [-env-file F] [-user U]             Docker or root: the tag resolves to a
-      [-entrypoint ARG]... [-restart R]            digest, every layer is checked by
-      [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
-                                                   values into the image (per machine:
-                                                   kling run -image <ref> -e KEY)
+      [-entrypoint ARG]... [-restart R]            digest, every layer (tar, gzip or
+      [-max-size 4G] [-arch A] [-- cmd args...]    zstd) is checked by sha256. -- replaces
+                                                   its CMD; -e bakes values into the
+                                                   image (per machine: kling run -image
+                                                   <ref> -e KEY)
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
