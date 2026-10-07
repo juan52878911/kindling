@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +175,59 @@ func TestFreezeFallidaPeroReanudadaSigueRunning(t *testing.T) {
 	}
 	if n := len(llamadas); n == len(want) && !strings.Contains(string(llamadas[n-1].Cuerpo), "Resumed") {
 		t.Errorf("la última llamada no reanuda: %s", llamadas[n-1].Cuerpo)
+	}
+}
+
+// Freeze no suelta los volúmenes (solo los vacía): si el volcado falla y la
+// máquina se reanuda, los sigue teniendo montados y no hay nada que pedirle a
+// su agente. Pedírselo era un viaje de hasta 50 s con el cerrojo tomado, y
+// con un puente sin /volume/acquire el error se tiraba sin más.
+func TestFreezeFallidaNoPideLosVolumenes(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000003"
+	falso, muerto := maquinaCorriendo(t, m, id)
+	falso.fallar(http.MethodPut, "/snapshot/create", http.StatusBadRequest, "disk full")
+
+	var mu sync.Mutex
+	var rutas []string
+	agente := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		rutas = append(rutas, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/volume/acquire" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(agente.Close)
+	m.mu.Lock()
+	mc := m.byID[id]
+	mc.Volumes = []api.VolumeAttachment{{Name: "datos", Mount: "/datos", DriveID: "volume0"}}
+	mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+	m.mu.Unlock()
+
+	if _, err := m.Freeze(context.Background(), id); err == nil {
+		t.Fatal("Freeze con el volcado roto no devolvió error")
+	}
+
+	viva := vivaDe(t, m, id)
+	if viva.State != api.StateRunning || viva.LastErr != "" {
+		t.Errorf("estado = %s / %q, quería running sin error: se reanudó bien", viva.State, viva.LastErr)
+	}
+	if !sigueVivo(muerto) {
+		t.Error("mató el VMM de una máquina que se reanudó bien")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range rutas {
+		if r == "/volume/acquire" {
+			t.Errorf("pidió /volume/acquire tras un freeze fallido (rutas: %v): los volúmenes nunca se soltaron", rutas)
+		}
+	}
+	if !slices.Contains(rutas, "/volume/sync") {
+		t.Errorf("rutas = %v: el agente falso no recibió el vaciado, la prueba no mira lo que debe", rutas)
 	}
 }
 
