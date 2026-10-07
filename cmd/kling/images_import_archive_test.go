@@ -196,6 +196,10 @@ func TestValidateOCISource(t *testing.T) {
 	if got := ociShown(OCISpec{Source: ociSourceArchive}, ref); got != "archive@"+d {
 		t.Fatalf("shown %q", got)
 	}
+	// Con nombre, tal como venía en el archivo: no es de Docker Hub.
+	if got := ociShown(OCISpec{Source: ociSourceArchive, Ref: "redis:7"}, ref); got != "redis:7@"+d {
+		t.Fatalf("shown %q", got)
+	}
 }
 
 // Una imagen del mismo archivo ya importada es la misma importación; de un

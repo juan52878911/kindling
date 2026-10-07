@@ -172,11 +172,13 @@ func ociSpecRef(s OCISpec) (oci.ImageRef, error) {
 	return oci.ParseImageRef(s.Ref)
 }
 
-// ociShown es cómo se nombra la imagen en el registro de la construcción:
-// la referencia, o "archive" si es de un archivo sin nombre.
+// ociShown es cómo se nombra la imagen en el registro de la construcción y en
+// la receta: la referencia normalizada; la de un archivo, tal como venía
+// ("postgres:17-alpine@sha256:...", no de ningún registro), o "archive@..."
+// si no traía nombre.
 func ociShown(s OCISpec, ref oci.ImageRef) string {
-	if s.Source == ociSourceArchive && s.Ref == "" {
-		return "archive@" + ref.Digest
+	if s.Source == ociSourceArchive {
+		return cmp.Or(s.Ref, "archive") + "@" + ref.Digest
 	}
 	return ref.String()
 }
@@ -278,7 +280,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	for _, l := range img.Layers {
 		compressed += l.Size
 	}
-	logf("%s: %s, %d layer(s), %d MiB compressed", shown, img.ManifestDigest, len(img.Layers), compressed>>20)
+	how := "compressed"
+	if archive {
+		how = "of layers" // un docker save las trae sin comprimir
+	}
+	logf("%s: %s, %d layer(s), %d MiB %s", shown, img.ManifestDigest, len(img.Layers), compressed>>20, how)
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
 	tTree := time.Now()
