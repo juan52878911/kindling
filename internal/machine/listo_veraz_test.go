@@ -54,6 +54,12 @@ func TestWaitReadyUnaVezSinAgente(t *testing.T) {
 	if res, err := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); err != nil || !res.OK() {
 		t.Fatalf("sin nada declarado: %+v, %v", res, err)
 	}
+	// Pero si su agente ya se identificó, la imagen lo lleva: sin respuesta
+	// ahora no está lista (como con ?wait), aunque no declare sonda.
+	m.byID[id].Agent = &api.GuestAgent{Agent: "kling-guest"}
+	if res, err := m.WaitReady(context.Background(), id, OpcionesListo{UnaVez: true}); err != nil || res.OK() || res.Ready != api.ReadyWaiting {
+		t.Fatalf("agente conocido que no contesta: %+v, %v; quería waiting", res, err)
+	}
 }
 
 // Sin poder mirar la imagen (sin debugfs), commit no da por listo a un

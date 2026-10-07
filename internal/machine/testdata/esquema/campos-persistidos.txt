@@ -115,6 +115,7 @@ meta.json api.Snapshot volume string
 meta.json api.Snapshot volume_mount string
 meta.json api.Snapshot volume_read_only bool
 meta.json api.Snapshot volumes []api.VolumeAttachment
+meta.json api.Snapshot warnings []string
 meta.json api.VolumeAttachment drive_id string
 meta.json api.VolumeAttachment mount string
 meta.json api.VolumeAttachment name string

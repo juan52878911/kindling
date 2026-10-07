@@ -315,8 +315,6 @@ func restoreKind(v, def string) string {
 	return def
 }
 
-// recortar deja s en readyDetailMax bytes, por el final (lo último que dijo un
-// programa suele ser el motivo).
 // conSalida es el texto de err seguido de la salida de la orden, si dijo
 // algo: una sonda que falla callada no deja un ": " colgando en el detalle.
 func conSalida(err error, out string) string {
@@ -326,6 +324,8 @@ func conSalida(err error, out string) string {
 	return err.Error()
 }
 
+// recortar deja s en readyDetailMax bytes, por el final (lo último que dijo un
+// programa suele ser el motivo).
 func recortar(s string) string {
 	if len(s) <= readyDetailMax {
 		return s

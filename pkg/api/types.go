@@ -554,6 +554,11 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"`            // total del snapshot en disco
 	Instances int       `json:"instances"`             // máquinas vivas restauradas de aquí
 
+	// Warnings solo va en la respuesta de un commit (kling save): lo que salió
+	// mal fuera del dorado, que sí vale (p.ej. la plantilla no pudo volver a
+	// montar sus volúmenes y quedó fallida). No se guarda en meta.json.
+	Warnings []string `json:"warnings,omitempty"`
+
 	// Volumes son los volúmenes que tenía la plantilla, en el orden de los
 	// discos. Se recuerdan para que despertar una instancia no exija repetirlos:
 	// el gateway despierta servicios por nombre y no sabe nada de volúmenes.

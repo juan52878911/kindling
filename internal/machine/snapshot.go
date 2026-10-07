@@ -250,6 +250,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// el volcado (para que la plantilla esté parada lo menos posible), y la
 	// limpieza. Si devuelve error, la plantilla no era recuperable y ya quedó
 	// marcada fallida.
+	var avisosCommit []string
 	restaurarPlantilla := func() error {
 		if reapuntado {
 			if err := lento.PatchDrive(limpio, "overlay", ownOverlay); err != nil {
@@ -291,6 +292,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			if err := m.acquireVolumes(mc); err != nil {
 				log.Printf("commit %s: the template could not mount its volumes again: %v", mc.Name, err)
 				m.fail(mc, fmt.Errorf("commit could not give the template its volumes back: %w", err))
+				avisosCommit = append(avisosCommit, fmt.Sprintf("the template %s could not mount its volumes again and was marked failed: %v", mc.Name, err))
 			}
 		}
 		return nil
@@ -570,6 +572,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
+	if len(avisosCommit) > 0 {
+		// En una copia: el snap puede ser el de la caché de metas, y los
+		// avisos son de esta respuesta, no del dorado.
+		out := *snap
+		out.Warnings = avisosCommit
+		return &out, nil
+	}
 	return snap, nil
 }
 

@@ -671,6 +671,9 @@ func cmdSave(args []string) error {
 		return err
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
+	for _, w := range snap.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 	next("kling run -from %s", snap.Name)
 	return nil
 }

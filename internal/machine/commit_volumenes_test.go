@@ -96,8 +96,13 @@ func TestCommitCompletoSinVolumenesDevueltosConservaElDorado(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
 		}
 	})
-	if _, err := m.Commit(context.Background(), id, "dorado", false); err != nil {
+	snap, err := m.Commit(context.Background(), id, "dorado", false)
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	// Quien guardó se entera: el dorado vale, pero su plantilla ya no.
+	if len(snap.Warnings) != 1 || !strings.Contains(snap.Warnings[0], "marked failed") {
+		t.Errorf("avisos del commit = %q, quería el de la plantilla fallida", snap.Warnings)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err != nil {
 		t.Errorf("el dorado no quedó: %v", err)

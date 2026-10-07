@@ -251,7 +251,10 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 				// Sin respuesta no se sabe si está listo, y decir que sí
 				// es mentir; salvo que la imagen seguro que no declara nada
 				// (una imagen sin agente): lo de siempre.
-				if decl, seguro := m.declaraListo(ctx, mc.ID); errors.Is(err, errListoConexion) && seguro && !decl {
+				// Un agente que ya se identificó (mc.Agent) dice que la imagen
+				// lo lleva: sin respuesta ahora está arrancando o se cayó, y se
+				// espera como con ?wait, aunque no declare sonda.
+				if decl, seguro := m.declaraListo(ctx, mc.ID); errors.Is(err, errListoConexion) && seguro && !decl && m.agenteDe(mc.ID) == nil {
 					return res, nil
 				} else if errors.Is(err, errListoConexion) && !seguro && m.sinAgenteTrasGracia(mc.ID) {
 					// Sin poder mirar la imagen (sin debugfs), la misma gracia

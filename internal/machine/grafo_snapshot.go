@@ -219,6 +219,15 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 			}
 		}
 	}
+	// conAvisos añade al error lo que deshacer() tuvo que hacer (un nodo
+	// marcado fallido, uno que no se pudo volver a congelar): sin esto, quien
+	// pidió el snapshot solo veía el error original.
+	conAvisos := func(err error) error {
+		if len(avisos) == 0 {
+			return err
+		}
+		return fmt.Errorf("%w; also: %s", err, strings.Join(avisos, "; "))
+	}
 	estado := map[string]api.State{}
 	// (0) despertar los congelados, en orden de arranque.
 	for _, n := range nodos {
@@ -228,7 +237,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := despertarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, nil, fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err))
 		}
 		despertadas[n.id] = true
 		estado[n.id] = api.StateRunning
@@ -245,7 +254,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 			// Un puente que no conoce la ruta no soltó nada (ver Commit).
 			soltadas[n.id] = !sinOperacionesDeVolumen(err)
 			deshacer()
-			return nil, nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err))
 		}
 	}
 	// (1) pausar todos los que corren, en orden de parada; se reanudan en el
@@ -256,7 +265,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := pausarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, nil, fmt.Errorf("pausing node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("pausing node %s: %w", n.nodo, err))
 		}
 		pausadas[n.id] = true
 	}
@@ -275,7 +284,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 				}
 			}
 			deshacer()
-			return nil, nil, fmt.Errorf("snapshot of node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("snapshot of node %s: %w", n.nodo, err))
 		}
 		hechas[n.nodo] = name
 	}
