@@ -23,11 +23,11 @@ func TestStartAPI(t *testing.T) {
 		t.Fatalf("sin la capacidad %s: %v", api.CapabilityStart, info.Capabilities)
 	}
 	rr := call(t, h, "POST", "/machines/nada/start", "")
-	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "doesn't exist") {
+	if rr.Code != 404 || !strings.Contains(rr.Body.String(), "doesn't exist") {
 		t.Fatalf("start de una que no existe = %d %s", rr.Code, rr.Body)
 	}
 	rr = call(t, h, "POST", "/machines/nada/start", `{"env":["no vale=secreto"]}`)
-	if rr.Code != 400 || strings.Contains(rr.Body.String(), "secreto") {
+	if rr.Code != 404 || strings.Contains(rr.Body.String(), "secreto") {
 		t.Fatalf("start con un entorno inválido = %d %s", rr.Code, rr.Body)
 	}
 	if rr := call(t, h, "POST", "/machines/nada/start", `{`); rr.Code != 400 {
