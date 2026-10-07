@@ -581,7 +581,7 @@ func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, e
 	}
 	codigo := ee.ExitCode()
 	if codigo&^3 == 0 {
-		return true, out, nil
+		return !soloResumenE2fsck(out), out, nil
 	}
 	var que []string
 	for _, b := range []struct {
@@ -594,6 +594,25 @@ func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, e
 	}
 	return false, out, fmt.Errorf("e2fsck %s exited with %d (%s): %s", filepath.Base(path), codigo,
 		strings.Join(que, ", "), strings.TrimSpace(string(out)))
+}
+
+// reResumenE2fsck es la línea con la que e2fsck -p acaba siempre.
+var reResumenE2fsck = lazyre.New(`^[^:]+: \d+/\d+ files \([^)]*\), \d+/\d+ blocks$`)
+
+// soloResumenE2fsck dice si e2fsck no dijo nada más que su resumen. Así sale
+// con 1 cuando solo corrigió, en silencio, los recuentos de bloques e inodos
+// libres de un ext4 sin journal que no se desmontó (el overlay tras un stop,
+// que mata el VMM): eso no es un daño, y avisar "repaired" en cada kling start
+// era ruido.
+func soloResumenE2fsck(out []byte) bool {
+	hay := false
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if !reResumenE2fsck.MatchString(strings.TrimSpace(l)) {
+			return false
+		}
+		hay = true
+	}
+	return hay
 }
 
 // flushVolume le pide al invitado que vacíe su caché al disco.
