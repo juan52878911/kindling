@@ -618,7 +618,11 @@ importa en 0,69 s y nginx responde, del mismo tamaño que con las capas gzip.
   ver abajo.
 - **zstd con ventana de hasta 128 MiB**: una capa de `zstd --long=28` o más
   se rechaza con un error que lo dice; las de los niveles normales (hasta
-  `--ultra -22`) y `--long` caben. Sin diccionarios.
+  `--ultra -22`) y `--long` caben. También una capa de **un solo segmento**
+  (la ventana es todo su contenido) de más de 128 MiB, como las de
+  `EncodeAll` o `WithSingleSegment` de klauspost con capas grandes; con los
+  valores por defecto de containerd y buildx no se dan (probado con capas de
+  120 y 200 MiB). Sin diccionarios.
 - **No cambia la licencia**: convertir una imagen no la redistribuye, pero
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
   de datos gestionada). No publiques imágenes convertidas.

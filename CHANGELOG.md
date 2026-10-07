@@ -77,6 +77,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A registry whose certificate can't be verified fails at once (no 2 s retry) and says how to trust its CA (`SSL_CERT_FILE` for the daemon)
+- macOS: `make install` also installs the Linux `kling-guest` that `kling image import` puts in images (in `lib/` of the data root, no sudo), `kling upgrade` updates it, and the error without it says what to do on a Mac
+- Short socket links in `/tmp/kling-<uid>` whose socket is gone are swept when a new one is made, instead of piling up
 - A layered image on a base without `sh` (whose `/sbin/overlay-init` links to `kling-guest`) boots; it was refused as a base from before layers
 - The oci builder refuses a `kling-guest` without the Go init for images without `sh`, naming it, instead of building one that does not boot; `kling upgrade` notes `KLING_GUEST_AGENT*` paths it does not replace
 - `kling upgrade -rollback` on macOS no longer leaves frozen machines the previous kling-vz cannot wake: kling-vz writes the oldest snapshot format that describes the machine (`kling_vz` 1 without a screen), and the rollback is refused, naming the machine, if the old kling-vz still could not read it
