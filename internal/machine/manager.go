@@ -325,8 +325,11 @@ type Manager struct {
 	impulsos   map[string]*impulsoCPU
 
 	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
-	// una nueva jubila a la anterior.
+	// una nueva jubila a la anterior. Remove poda la entrada.
 	vigiasListo sync.Map
+	// discoMedido es el estado en el que refreshDiskUsage midió por última vez
+	// el disco de cada máquina. Bajo mu.
+	discoMedido map[string]api.State
 	// pruebasListo y pruebasGanchos sustituyen GET /ready y POST /hooks del
 	// agente. Solo lo ponen las pruebas.
 	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
@@ -410,7 +413,24 @@ type Manager struct {
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
-func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
+func (m *Manager) lock(id string) func() { return m.trasCierre(m.lifecycle.tomar(id)) }
+
+// trasCierre envuelve la liberación de un cerrojo de ciclo de vida: si el
+// Manager ya se cerró (persistLoop parado), la operación que acaba escribe
+// ella misma su última foto del estado, que nadie más va a escribir. Solo
+// pasa en el apagado, con una operación que acabó después del plazo de Close;
+// ahí la latencia del disco ya no le quita nada a nadie, y perder la
+// transición sí. Se escribe DESPUÉS de soltar, fuera de m.mu (ver doc.go).
+func (m *Manager) trasCierre(soltar func()) func() {
+	return func() {
+		soltar()
+		select {
+		case <-m.quit:
+			m.writePending()
+		default:
+		}
+	}
+}
 
 // lockUnaVez es lock con una liberación idempotente: la función devuelta se
 // puede llamar varias veces y solo suelta la primera. La usan Run y runFrom,
@@ -424,7 +444,13 @@ func (m *Manager) lockUnaVez(id string) func() {
 }
 
 // tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
-func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
+func (m *Manager) tryLock(id string) (func(), bool) {
+	soltar, ok := m.lifecycle.intentar(id)
+	if !ok {
+		return nil, false
+	}
+	return m.trasCierre(soltar), true
+}
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
@@ -857,6 +883,11 @@ func (m *Manager) persistirYa() {
 	m.writePending()
 }
 
+// cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
+// vida en curso. Un freeze de varios GiB tarda segundos; systemd da 90 s
+// antes del SIGKILL.
+const cierreOperacionesMax = 30 * time.Second
+
 // Close para la escritura de estado tras volcar lo que quede pendiente.
 //
 // Lo llama el daemon en su camino de apagado, y tiene que esperarse: si el
@@ -864,6 +895,15 @@ func (m *Manager) persistirYa() {
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
+		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
+		// escritura del estado ya se cerró, esa transición se pierde y el
+		// arranque siguiente ve una máquina "running" que ya es un volcado.
+		// Con plazo: un apagado no puede quedarse colgado de un volcado que no
+		// termina. Lo que acabe después aún se escribe (ver trasCierre).
+		if !m.lifecycle.esperarLibres(cierreOperacionesMax) {
+			log.Printf("shutdown: lifecycle operations still running after %s; their last state may not be saved", cierreOperacionesMax)
+		}
 		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
 		// agente del invitado, no el estado.
 		m.drainShares(shareDrainWait)
@@ -927,29 +967,57 @@ func (m *Manager) touchDisk(id string) int64 {
 	return n
 }
 
-// refreshDiskUsage recalcula el disco de todas las máquinas.
+// refreshDiskUsage recalcula el disco de las máquinas que pueden estar
+// cambiándolo.
 //
 // Lo llama el vigilante, que ya pasa cada pocos segundos. El overlay es un
 // fichero disperso que CRECE mientras el invitado escribe, así que un valor
 // que solo se actualizara al arrancar o congelar sería justo el que no sirve:
 // el número con el que se detecta a un invitado llenando su disco.
+//
+// Pero solo escribe un invitado vivo. Recorrer cada 10 s el directorio de
+// todas las congeladas y paradas —en un host con cientos dormidas, la
+// mayoría— era E/S sin ningún dato nuevo. Las que no corren se miden una vez
+// por cambio de estado (discoMedido), que es cuando su disco cambia: al
+// congelarse aparece el mem.file, al pararse deja de crecer.
 func (m *Manager) refreshDiskUsage() {
+	type medir struct {
+		id     string
+		estado api.State
+	}
 	m.mu.RLock()
-	ids := make([]string, 0, len(m.byID))
-	for id := range m.byID {
-		ids = append(ids, id)
+	var cuales []medir
+	for id, mc := range m.byID {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused {
+			cuales = append(cuales, medir{id, mc.State})
+			continue
+		}
+		if est, ok := m.discoMedido[id]; !ok || est != mc.State {
+			cuales = append(cuales, medir{id, mc.State})
+		}
 	}
 	m.mu.RUnlock()
 
-	sizes := make(map[string]int64, len(ids))
-	for _, id := range ids {
-		sizes[id] = diskUsage(m.dir(id))
+	sizes := make([]int64, len(cuales))
+	for i, c := range cuales {
+		sizes[i] = diskUsage(m.dir(c.id))
 	}
 
 	m.mu.Lock()
-	for id, n := range sizes {
-		if mc := m.byID[id]; mc != nil {
-			mc.DiskBytes = n
+	if m.discoMedido == nil {
+		m.discoMedido = make(map[string]api.State)
+	}
+	for i, c := range cuales {
+		if mc := m.byID[c.id]; mc != nil {
+			mc.DiskBytes = sizes[i]
+			// El estado de ANTES de medir: si cambió mientras tanto, no casa
+			// y la próxima vuelta la mide otra vez.
+			m.discoMedido[c.id] = c.estado
+		}
+	}
+	for id := range m.discoMedido {
+		if m.byID[id] == nil {
+			delete(m.discoMedido, id)
 		}
 	}
 	m.mu.Unlock()
@@ -1122,6 +1190,7 @@ func newID() string {
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	mc, err := m.run(ctx, req)
+	tel.fin(OpRun, err)
 	if err != nil || !req.WaitReady {
 		return mc, err
 	}
@@ -1475,6 +1544,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.persist()
 	out := *mc
 	m.mu.Unlock()
+	tel.exito(OpRun, DurBoot, out.BootMS)
 
 	// El walk va DESPUÉS de soltar el lock, y su resultado entra en la
 	// respuesta: si se dejara solo al vigilante, esta llamada devolvería 0 y
@@ -1915,10 +1985,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 // Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
 // cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
 // que su dueño acababa de pedir conservar.
-func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (_ *api.Machine, err error) {
+	defer func() { tel.fin(OpFreeze, err) }()
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
@@ -1928,7 +1999,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// rechazar una máquina recién arrancada por estar "created".
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
@@ -1947,7 +2018,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		mc = r
 	}
 	if mc.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be frozen (it is %s)", mc.State)
+		return nil, estadoInvalido("only a running machine can be frozen (it is %s)", mc.State)
 	}
 
 	// Negativa deliberada: una máquina con secretos inyectados por MMDS NO se
@@ -1959,7 +2030,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
 	// vuelca nada a disco) o `stop`/`rm`.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and "+
+		return nil, estadoInvalido("machine %s has session secrets injected via MMDS and "+
 			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+
 			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm; or, if its image "+
 			"has post-restore hooks that consume the secret, run them (kling machine hooks -wait) and "+
@@ -2278,7 +2349,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// se lleva el proceso, y con el TODAS las microVM quedan huerfanas.
 		delete(m.socket, mc.ID)
 		m.mu.Unlock()
-		return nil, fmt.Errorf("machine %q was removed while it was being frozen", mc.Name)
+		return nil, retiradaDurante(mc.Name, "frozen")
 	}
 	now := time.Now()
 	live.State = api.StateWarm
@@ -2296,6 +2367,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Una copia de kling db congelada no atiende: se cortan las sesiones de
 	// los agentes que llegaban a ella por su proxy (copias_db.go).
 	m.invalidarSesiones(mc.ID, "frozen")
+	tel.exito(OpFreeze, DurFreeze, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 	if sinAgente {
@@ -2353,7 +2425,7 @@ var ErrSqueezeShared = errors.New("squeezing a copy that shares memory with its 
 func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api.SqueezeResult, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB, true)
@@ -2370,7 +2442,7 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
@@ -2548,13 +2620,13 @@ func procRSSMiB(pid int) int {
 func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("MMDS can only be injected into a running machine (it is %s)", cur.State)
@@ -2730,13 +2802,13 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("credentials can only be given to a running machine (it is %s)", cur.State)
@@ -2780,10 +2852,16 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	mc, err := m.thaw(ctx, ref)
+	tel.fin(OpThaw, err)
+	return mc, err
+}
+
+func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono := nuevoCrono("frozen")
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	crono.marca(&crono.p.WaitMS)
@@ -2811,6 +2889,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, err
 		}
 		fases := crono.cerrar()
+		tel.exito(OpThaw, DurResume, int64(fases.TotalMS))
 		out.Wake = fases
 		m.mu.Lock()
 		if l := m.byID[mc.ID]; l != nil {
@@ -2823,7 +2902,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	mc = cur
 	if mc.State != api.StateWarm {
-		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
+		return nil, estadoInvalido("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
 	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
 	// que el invitado lo descubra con un EIO al escribir.
@@ -3165,7 +3244,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		m.desmontarRed(netcfg, mc.ID)
-		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+		return nil, retiradaDurante(mc.Name, "thawed")
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
@@ -3187,6 +3266,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *cur
 	m.mu.Unlock()
+	tel.exito(OpThaw, DurThaw, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 
@@ -3222,7 +3302,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3254,7 +3334,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	// El cerrojo de ciclo de vida, que aqui faltaba y lo tienen Freeze, Thaw,
 	// Squeeze, PutMMDS y Remove. Sin el, un Stop concurrente a un Thaw desmonta
@@ -3327,7 +3407,7 @@ func (m *Manager) Remove(ref string) error {
 func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
@@ -3363,8 +3443,15 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
+	delete(m.discoMedido, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	// La numeración de sus vigías de "listo": sin podarla, cada máquina que
+	// pasó por aquí dejaba su entrada para siempre. Se adelanta antes de
+	// soltarla, para que una vigía aún viva se sepa jubilada.
+	if v, ok := m.vigiasListo.LoadAndDelete(mc.ID); ok {
+		v.(*atomic.Uint64).Add(1)
+	}
 	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil

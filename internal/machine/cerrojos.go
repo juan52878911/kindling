@@ -1,6 +1,9 @@
 package machine
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // cerrojos es un registro de mutex POR MAQUINA con contador de referencias.
 //
@@ -111,4 +114,25 @@ func (c *cerrojos) vivos() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.m)
+}
+
+// esperarLibres espera, como mucho plazo, a que nadie tenga ni espere ningún
+// cerrojo: a que acaben las operaciones de ciclo de vida en curso. Dice si lo
+// consiguió. Es para el apagado, que no debe cerrar la escritura del estado
+// por debajo de un Freeze a medias; sondear cada pocos milisegundos basta y no
+// le pone coste a tomar y soltar, que es el camino caliente.
+func (c *cerrojos) esperarLibres(plazo time.Duration) bool {
+	limite := time.Now().Add(plazo)
+	for {
+		c.mu.Lock()
+		n := len(c.m)
+		c.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if time.Now().After(limite) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

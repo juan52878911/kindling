@@ -24,6 +24,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling exec`/`kling shell` take `-e KEY` and `-env-file`, keeping secrets out of argv (#135)
 - `kling db role -login` lets a migrations role connect from the host (#149)
 - `kling db diff` also compares functions, views, triggers, grants, extensions and hypertables (#148)
+- `/metrics`: operations by result, admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
+- `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
+- `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
 
 ### Changed
 
@@ -49,6 +52,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Short README; the full guide moves to `docs/guide.md` (#152)
 - Guest kernel ships dm-verity: verity layers boot and verify on Linux and macOS (#161)
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
+- Lifecycle operations (`freeze`, `thaw`, `pause`, `stop`, `rm`) answer 404 for an unknown machine and 409 for a wrong state (was 400)
+- The watcher scans VMM processes once per round and re-measures disk only for running machines or after a state change
 
 ### Fixed
 
@@ -63,6 +68,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - A network setup that fails halfway no longer leaves its namespace and veth behind until the daemon restarts (Linux)
 - `thaw` goes through memory admission like `run`: a storm of thaws is refused with 507 instead of exhausting the host
 - `thaw` of a machine removed while it waited fails instead of starting a VMM; re-adopting a live VMM restores its CPU ceiling (Linux)
+- Daemon shutdown waits for in-flight lifecycle operations, so their last state is saved
+- Paths with a backslash are refused like escaped slashes
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
 - Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker

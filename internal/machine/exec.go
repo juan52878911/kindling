@@ -24,7 +24,39 @@ var (
 	ErrNoMachine = errors.New("that machine doesn't exist")
 	// ErrNotRunning: la máquina no puede atender (parada, fallida...).
 	ErrNotRunning = errors.New("the machine is not running")
+	// ErrWrongState: la máquina existe, pero su estado no admite la operación
+	// (congelar una parada, descongelar una que corre, pausar una con
+	// carpetas vivas...). El daemon lo contesta con 409; un ErrNoMachine, con
+	// 404. Antes los dos eran un 400 indistinguible de una petición mal hecha.
+	ErrWrongState = errors.New("the machine's state does not allow this operation")
 )
+
+// errMarcado es un error con su propio texto que además "es" una centinela
+// para errors.Is. El texto de siempre no cambia —hay clientes que lo leen— y
+// el daemon traduce a código HTTP sin comparar cadenas.
+type errMarcado struct {
+	msg   string
+	marca error
+}
+
+func (e *errMarcado) Error() string        { return e.msg }
+func (e *errMarcado) Is(target error) bool { return target == e.marca }
+
+// noExiste es el error de una referencia que no resuelve a ninguna máquina.
+func noExiste(ref string) error {
+	return &errMarcado{fmt.Sprintf("machine %q doesn't exist", ref), ErrNoMachine}
+}
+
+// retiradaDurante es el de una máquina que alguien borró mientras otra
+// operación la tenía entre manos: para quien llama, ya no existe.
+func retiradaDurante(nombre, que string) error {
+	return &errMarcado{fmt.Sprintf("machine %q was removed while it was being %s", nombre, que), ErrNoMachine}
+}
+
+// estadoInvalido es un ErrWrongState con el texto que se le pase.
+func estadoInvalido(format string, a ...any) error {
+	return &errMarcado{fmt.Sprintf(format, a...), ErrWrongState}
+}
 
 // ExecTarget devuelve la máquina lista para recibir exec o ficheros: existe,
 // tiene la ejecución encendida y está corriendo. Una congelada se descongela

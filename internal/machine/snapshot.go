@@ -1690,6 +1690,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.socket[id] = sock
 	m.persist()
 	m.mu.Unlock()
+	tel.exito(OpRun, DurRestore, elapsed)
 
 	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
 	// imagen (identidad por copia, etc.), en segundo plano.

@@ -344,7 +344,10 @@ func conVersionAPI(h http.Handler) http.Handler {
 // entera; los nombres se validan además donde se construye la ruta.
 func sinBarrasEscapadas(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if raw := r.URL.RawPath; raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
+		// La contrabarra se mira también ya desescapada: %5C es como Go la
+		// escapa por defecto, así que con %5C (mayúscula) RawPath queda vacío
+		// y mirar solo RawPath no la veía.
+		if raw := r.URL.RawPath; strings.ContainsRune(r.URL.Path, '\\') || raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
 			strings.Contains(raw, "%5C") || strings.Contains(raw, "%5c")) {
 			fail(w, http.StatusBadRequest, errors.New("escaped slashes are not allowed in the path: no name contains one"))
 			return
@@ -443,9 +446,13 @@ func (s *Server) Listen(ctx context.Context) error {
 	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
 	// que ninguna petición cambie el estado después de la limpieza.
 	<-shutdownDone
-	// Con las peticiones ya drenadas, esta es la última escritura del estado y
-	// nadie va a cambiarlo por detrás. Se espera de verdad: perder la última
-	// transición hace que el arranque siguiente reconstruya algo que no es.
+	// Con las peticiones ya drenadas, esta es la última escritura del estado.
+	// Shutdown se rinde a los 5 s, y una petición lenta (un freeze de varios
+	// GiB) o una operación del vigilante puede seguir en marcha: Close espera
+	// a las operaciones de ciclo de vida en curso antes de cerrar la escritura
+	// (con plazo), y la que acabe aún más tarde escribe su propia foto. Perder
+	// la última transición hace que el arranque siguiente reconstruya algo
+	// que no es.
 	s.mgr.Close()
 	_ = os.Remove(s.socket)
 	return nil
@@ -545,6 +552,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
+	// Los ajustes del host no son de ningún inquilino.
+	if _, filtra := inquilinoDe(r); !filtra {
+		info.Tuning = s.ajustes()
+	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
 	}
@@ -555,6 +566,18 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info = api.Info{Version: Version, API: api.APIVersion, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// ajustes son los del manager más los que viven en el daemon: de dónde salen
+// los constructores y con qué usuario corren los que lo admiten.
+func (s *Server) ajustes() map[string]string {
+	a := s.mgr.Ajustes()
+	a["KLING_BUILDERS_DIR"] = buildersDir()
+	a["builder_user"] = "daemon"
+	if s.constructor != nil {
+		a["builder_user"] = s.constructor.Nombre
+	}
+	return a
 }
 
 // contarMaquinas es cuántas máquinas ve quien pregunta.
@@ -622,10 +645,24 @@ func runStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
+// cicloStatus traduce los errores de las operaciones sobre una máquina que ya
+// existe (freeze, pause, thaw, stop, rm...): 404 si no existe, 409 si su
+// estado no admite la operación. Lo demás sigue siendo 400, como siempre; un
+// api.StatusError del manager (507, 503...) manda sobre todo esto (ver fail).
+func cicloStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrNoMachine):
+		return http.StatusNotFound
+	case errors.Is(err, machine.ErrWrongState):
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Freeze(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -634,7 +671,7 @@ func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Pause(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -643,7 +680,7 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Thaw(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -674,7 +711,7 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
 	res, err := s.mgr.SqueezeWith(r.Context(), r.PathValue("ref"), force)
 	if err != nil {
-		code := http.StatusBadRequest
+		code := cicloStatus(err)
 		if errors.Is(err, machine.ErrSqueezeShared) {
 			code = http.StatusConflict
 		}
@@ -695,7 +732,7 @@ func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.PutMMDS(r.Context(), r.PathValue("ref"), data)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -709,7 +746,7 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -720,8 +757,8 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
 	if err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "has no credential") {
+		code := cicloStatus(err)
+		if strings.Contains(err.Error(), "has no credential") {
 			code = http.StatusNotFound
 		}
 		fail(w, code, err)
@@ -751,7 +788,7 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Stop(r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -775,7 +812,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Remove(r.PathValue("ref")); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -942,7 +979,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !s.eventoVisible(r, ev) {
+			if ev.Type == api.EvDropped {
+				// El aviso de descartes no es de ninguna máquina. A un
+				// inquilino se le dice que perdió eventos, pero no cuántos: el
+				// recuento incluye los de las máquinas de los demás.
+				if _, filtra := inquilinoDe(r); filtra {
+					ev.Dropped, ev.Message = 0, "events dropped: this subscriber did not read them in time"
+				}
+			} else if !s.eventoVisible(r, ev) {
 				continue
 			}
 			if enc.Encode(ev) != nil {

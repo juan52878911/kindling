@@ -212,12 +212,12 @@ func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachin
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	creds, err := m.cargarCredenciales(cur.ID)
 	if err != nil {

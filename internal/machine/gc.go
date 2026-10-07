@@ -200,6 +200,7 @@ func (m *Manager) gcDisk(ctx context.Context) {
 			}
 			continue
 		}
+		tel.gcExpulsa.Add(1)
 		log.Printf("gc: disk at %d%%, removed dormant instance %s (recreates from %s)",
 			m.diskUsedPct(), c.name, c.from)
 	}

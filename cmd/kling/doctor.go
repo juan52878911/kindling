@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -121,17 +122,25 @@ func cmdDoctor(args []string) error {
 		}
 	}
 	if *asJSON {
+		var tuning map[string]string
+		if in.info != nil {
+			tuning = in.info.Tuning
+		}
 		out := struct {
-			OK      bool          `json:"ok"`
-			Checks  []doctorCheck `json:"checks"`
-			Runtime string        `json:"runtime_report,omitempty"`
-		}{failed == 0, checks, runtimeOut}
+			OK      bool              `json:"ok"`
+			Checks  []doctorCheck     `json:"checks"`
+			Runtime string            `json:"runtime_report,omitempty"`
+			Tuning  map[string]string `json:"tuning,omitempty"`
+		}{failed == 0, checks, runtimeOut, tuning}
 		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 			return err
 		}
 	} else {
 		// La línea del runtime ya la ha impreso up; aquí solo lo demás.
 		writeDoctor(os.Stdout, checks[1:])
+		if in.info != nil {
+			writeTuning(os.Stdout, in.info.Tuning)
+		}
 	}
 	if failed > 0 {
 		// El informe ya lo dice todo: solo el código de salida.
@@ -321,6 +330,28 @@ func writeDoctor(w io.Writer, checks []doctorCheck) {
 		fmt.Fprintf(w, "everything works; %d warning(s) above\n", warned)
 	default:
 		fmt.Fprintln(w, "everything looks good")
+	}
+}
+
+// writeTuning enseña los ajustes efectivos del daemon (GET /info, tuning):
+// con qué topes y políticas corre de verdad, que es lo primero que hay que
+// saber cuando rechaza máquinas o expulsa dormidas. Un daemon anterior no los
+// manda y no se imprime nada.
+func writeTuning(w io.Writer, tuning map[string]string) {
+	if len(tuning) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(tuning))
+	width := 0
+	for k := range tuning {
+		keys = append(keys, k)
+		width = max(width, len(k))
+	}
+	sort.Strings(keys)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "── daemon tuning (effective values; set on the daemon's environment) ──")
+	for _, k := range keys {
+		fmt.Fprintf(w, "  %-*s  %s\n", width, k, tuning[k])
 	}
 }
 
