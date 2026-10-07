@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -247,6 +247,7 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/credentials", AccionMaquina, revisarCredenciales, s.handleCredentials},
 		{"DELETE /machines/{ref}/credentials/{env}", AccionMaquina, nil, s.handleRemoveCredential},
 		{"POST /machines/{ref}/stop", AccionMaquina, nil, s.handleStop},
+		{"POST /machines/{ref}/start", AccionMaquina, nil, s.handleStart},
 		{"DELETE /machines/{ref}", AccionMaquina, nil, s.handleRemove},
 		{"PUT /machines/{ref}/labels", AccionMaquina, revisarEtiquetas, s.handleLabels},
 		{"POST /machines/{ref}/commit", AccionMaquina, revisarCommit, s.handleCommit},
@@ -744,6 +745,22 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Stop(r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+// handleStart arranca otra vez una máquina parada. El cuerpo (StartRequest)
+// es opcional: sin entorno no hace falta mandarlo.
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	var req api.StartRequest
+	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	mc, err := s.mgr.Start(r.Context(), r.PathValue("ref"), req.Env)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

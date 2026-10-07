@@ -131,12 +131,21 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		from  string
 		since int64
 	}
+	// La foto, bajo el candado; lo que mira el disco (retieneDatos, el meta
+	// del dorado), fuera: con el disco lleno cada stat cuesta, y el candado
+	// global no puede esperar a nadie.
 	m.mu.RLock()
-	var cands []cand
+	var fotos []*api.Machine
 	for _, mc := range m.byID {
 		if mc.State != api.StateWarm || mc.From == "" {
 			continue
 		}
+		fotos = append(fotos, mc.Clone())
+	}
+	m.mu.RUnlock()
+
+	var cands []cand
+	for _, mc := range fotos {
 		// Solo las de un servicio (la etiqueta service: el planificador las
 		// crea y las recrea igual desde el dorado del servicio). Cualquier
 		// otra que haya corrido desde su dorado tiene en su overlay y en su
@@ -154,8 +163,9 @@ func (m *Manager) gcDisk(ctx context.Context) {
 			continue
 		}
 		// Solo si su snapshot sigue ahí para recrearla. Sin él, esta warm es
-		// irrecuperable y no se toca.
-		if _, err := m.loadSnapshot(mc.From); err != nil {
+		// irrecuperable y no se toca. Con la caché: varias copias del mismo
+		// dorado no leen su meta.json una vez cada una.
+		if _, _, err := m.loadSnapshotCached(mc.From); err != nil {
 			continue
 		}
 		var since int64
@@ -164,7 +174,6 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		}
 		cands = append(cands, cand{mc.ID, mc.Name, mc.From, since})
 	}
-	m.mu.RUnlock()
 
 	// Más antigua (FrozenAt menor) primero.
 	sort.Slice(cands, func(i, j int) bool { return cands[i].since < cands[j].since })
@@ -218,52 +227,86 @@ func (m *Manager) gcDisk(ctx context.Context) {
 // observaron nueve en 21 horas, uno por instanciación rota, para siempre.
 const defaultFailedRetention = time.Hour
 
+// defaultStoppedRetention es lo mismo para las paradas que se pueden recoger
+// (ver retieneDatos). Más larga que la de las failed: una parada se puede
+// volver a arrancar (kling start), y quien la paró puede volver mañana.
+const defaultStoppedRetention = 24 * time.Hour
+
 // failedRetention devuelve la retención, ajustable con KLING_FAILED_RETENTION
 // (una duración de Go: "30m", "2h"; "0" desactiva la recogida).
 func failedRetention() time.Duration {
-	if v := os.Getenv("KLING_FAILED_RETENTION"); v != "" {
+	return retencion("KLING_FAILED_RETENTION", defaultFailedRetention)
+}
+
+// stoppedRetention es la de las paradas: KLING_STOPPED_RETENTION, "0" la
+// desactiva.
+func stoppedRetention() time.Duration {
+	return retencion("KLING_STOPPED_RETENTION", defaultStoppedRetention)
+}
+
+func retencion(variable string, defecto time.Duration) time.Duration {
+	if v := os.Getenv(variable); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
 			return d
 		}
 	}
-	return defaultFailedRetention
+	return defecto
 }
 
-// gcFailed recoge las máquinas failed que ya cumplieron su tiempo de gracia.
+// gcFailed recoge las máquinas failed y stopped que ya cumplieron su tiempo
+// de gracia.
 //
 // Automático y no un comando, por la misma razón que gcDisk: failed es un
-// estado TERMINAL (no hay `start` que lo saque de ahí), así que conservarlas no
-// da ninguna opción nueva — solo diagnóstico, y para eso basta la ventana de
-// gracia. Un daemon que exige limpieza manual de sus propios restos acumula
-// restos, que es exactamente lo observado.
+// estado TERMINAL, así que conservarlas no da ninguna opción nueva — solo
+// diagnóstico, y para eso basta la ventana de gracia. Una parada sí se puede
+// arrancar otra vez (kling start), así que solo se recogen las que no pierden
+// nada que no esté en otro sitio (retieneDatos: las instancias de un
+// servicio, que su dorado recrea) y con una gracia más larga.
+// Un daemon que exige limpieza manual de sus propios restos acumula restos,
+// que es exactamente lo observado.
 //
-// Una failed sin fecha (estado anterior al campo FailedAt) no se borra al
-// instante: se le arranca el reloj ahora y cae en la pasada que le toque. Es la
-// diferencia entre recoger basura y borrar algo que quizá falló hace un minuto.
+// Una failed o parada sin fecha (estado anterior al campo) no se borra al
+// instante: se le arranca el reloj ahora y cae en la pasada que le toque. Es
+// la diferencia entre recoger basura y borrar algo que quizá falló hace un
+// minuto.
+//
+// El candado global solo para la foto y el sello de fecha: retieneDatos lee
+// el disco (el sha256 del volcado de cada failed) y corre fuera, cada diez
+// segundos, sin parar a nadie. Lo elegido con la foto se borra solo si, con
+// el cerrojo de la máquina, sigue igual (removeSi): un start o un rm entre
+// medias se respetan.
 func (m *Manager) gcFailed() {
-	retention := failedRetention()
-	if retention <= 0 || m.barridoBloqueado() {
+	retFallida, retParada := failedRetention(), stoppedRetention()
+	if (retFallida <= 0 && retParada <= 0) || m.barridoBloqueado() {
 		return
 	}
 	now := time.Now()
 
-	type victim struct{ id, name, lastErr string }
-	var due []victim
+	var fotos []*api.Machine
 	stamped := false
-
 	m.mu.Lock()
 	for _, mc := range m.byID {
-		if mc.State != api.StateFailed {
+		var desde **time.Time
+		var ret time.Duration
+		switch mc.State {
+		case api.StateFailed:
+			desde, ret = &mc.FailedAt, retFallida
+		case api.StateStopped:
+			desde, ret = &mc.StoppedAt, retParada
+		default:
 			continue
 		}
-		if mc.FailedAt == nil {
+		if ret <= 0 {
+			continue
+		}
+		if *desde == nil {
 			t := now
-			mc.FailedAt = &t
+			*desde = &t
 			stamped = true
 			continue
 		}
-		if now.Sub(*mc.FailedAt) >= retention && m.retieneDatos(mc) == "" {
-			due = append(due, victim{mc.ID, mc.Name, mc.LastErr})
+		if now.Sub(**desde) >= ret {
+			fotos = append(fotos, mc.Clone())
 		}
 	}
 	if stamped {
@@ -271,14 +314,34 @@ func (m *Manager) gcFailed() {
 	}
 	m.mu.Unlock()
 
-	// Fuera del candado: Remove toma el suyo y además toca disco y red.
-	for _, v := range due {
-		if err := m.Remove(v.id); err != nil {
-			log.Printf("gc: couldn't collect failed machine %s: %v", v.name, err)
+	for _, f := range fotos {
+		if m.retieneDatos(f) != "" {
 			continue
 		}
-		log.Printf("gc: collected failed machine %s (failed with: %s)", v.name, v.lastErr)
+		f := f
+		sigue := func(cur *api.Machine) bool {
+			return cur.State == f.State && mismaHora(cur.FailedAt, f.FailedAt) && mismaHora(cur.StoppedAt, f.StoppedAt)
+		}
+		if err := m.removeSi(f.ID, sigue); err != nil {
+			if !errors.Is(err, errYaNoToca) {
+				log.Printf("gc: couldn't collect %s machine %s: %v", f.State, f.Name, err)
+			}
+			continue
+		}
+		if f.State == api.StateFailed {
+			log.Printf("gc: collected failed machine %s (failed with: %s)", f.Name, f.LastErr)
+		} else {
+			log.Printf("gc: collected stopped machine %s (stopped for over %s; KLING_STOPPED_RETENTION)", f.Name, retParada)
+		}
 	}
+}
+
+// mismaHora compara dos fechas opcionales.
+func mismaHora(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 // retieneDatos dice por qué borrar mc perdería algo que no existe en otro
@@ -294,18 +357,29 @@ func (m *Manager) gcFailed() {
 //     de una warm. Borrarla a la hora era perder la máquina entera.
 //   - Una arrancada en frío (sin From) cuyo VMM murió corriendo: su overlay es
 //     el único disco que tiene, con todo lo que escribió.
+//   - Una parada, salvo la instancia de un servicio que sale de su dorado (la
+//     misma regla que gcDisk): su overlay tiene lo que escribió desde que
+//     nació —una copia de kling db parada guarda su base de datos ahí—, y
+//     kling start la arranca otra vez sobre él. Las paradas por un reinicio
+//     del host (reconcile) son de estas.
 //
-// Se llama con m.mu tomado (lectura basta).
+// Lee el disco (el sha256 del volcado de una failed): quien llama le pasa una
+// copia y no sostiene m.mu.
 func (m *Manager) retieneDatos(mc *api.Machine) string {
 	if len(mc.Volumes) > 0 {
 		return "it has volumes attached"
 	}
-	if mc.State == api.StateFailed {
+	switch mc.State {
+	case api.StateFailed:
 		if volcadoValido(m.dir(mc.ID)) == nil {
 			return "it keeps a complete snapshot of its own"
 		}
 		if mc.From == "" && mc.LastErr == errProcesoDesaparecido {
 			return "it was cold-booted and ran: its overlay is the only copy of its disk"
+		}
+	case api.StateStopped:
+		if mc.From == "" || mc.Service() == "" {
+			return "its overlay is the only copy of what it wrote (kling start boots it again)"
 		}
 	}
 	return ""

@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
@@ -26,6 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling stop` drops a machine's memory dump and keeps its disk; stopped service instances from a template are collected after `KLING_STOPPED_RETENTION` (24 h)
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
 - Docker images get a full core per vCPU by default
@@ -43,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- The collectors of failed machines and of disk no longer hold the daemon's lock while they read the disk
 - Firecracker starts with a 1 MiB MMDS store (was its 50 KiB default), so a 32 KiB `-e` environment plus session secrets fits; a larger store is refused with the limit (Linux)
 - Simultaneous freezes and saves reserve their disk: they no longer all pass a free-space check that only one of them fits
 - A full copy-on-write store no longer pauses a machine that is in the middle of freezing

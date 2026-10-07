@@ -88,7 +88,12 @@ var coreTree = []section{
 		{Name: "pause", Summary: "pauses it without dumping memory", MachineArgs: []string{""}, Usage: `  pause <ref>...                                   pauses it keeping its RAM (thaw
                                                    resumes it in ~1 ms)
 `},
-		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop <ref>...                                    terminates the machine
+		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop <ref>...                                    terminates the machine; its disk
+                                                   stays (start), its memory goes
+`},
+		{Name: "start", Summary: "boots a stopped machine again from its disk", MachineArgs: []string{""}, Usage: `  start [-e K=V] [-env-file F] <ref>...            boots a stopped machine again, cold,
+                                                   on its own disk; -e/-env-file must
+                                                   give again the keys it ran with
 `},
 		{Name: "rm", Summary: "removes machine and snapshot", MachineArgs: []string{""}, Usage: `  rm [-f] <ref>...                                 removes machine and snapshot
                                                    (asks first for several; -f: no)
@@ -443,7 +448,7 @@ func printUsage(w io.Writer) {
 
 EVERY DAY
   run, ps, logs, exec, shell, cp        machines and what runs inside
-  freeze, thaw, pause, stop, rm         lifecycle (frozen = 0 RAM, thaw ~30 ms)
+  freeze, thaw, pause, stop, start, rm  lifecycle (frozen = 0 RAM, thaw ~30 ms)
   save <ref> <name>                     turn a machine into a template
 
 MANAGE     template, image, volume, sandbox, context, config, plugin

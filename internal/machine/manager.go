@@ -1370,7 +1370,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	// abandonar deshace lo publicado: la máquina ya está en byID, y dejarla ahí
-	// tras un fallo crea un fantasma que no se puede arrancar (no hay `start`) y
+	// tras un fallo crea un fantasma created que nadie va a arrancar y
 	// que RETIENE su volumen en exclusiva, porque volumeUsers cuenta todo lo que
 	// no esté stopped o failed. Nadie podría montarlo hasta un `rm` a mano.
 	abandonar := func(err error) (*api.Machine, error) {
@@ -3223,6 +3223,14 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
+	// Ni su volcado: una parada arranca en frío (kling start), así que el
+	// mem.file de una congelada —del tamaño de su RAM— y el de un thaw
+	// anterior ya no los carga nadie y se quedaban en disco hasta el rm.
+	// Tampoco el jail, que guarda enlaces a ellos.
+	if err := m.borrarJail(mc.ID); err != nil {
+		log.Printf("warning: %v", err)
+	}
+	m.borrarVolcado(mc.ID)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3236,9 +3244,15 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc.State, mc.PID = api.StateStopped, 0
 		return mc, nil
 	}
+	now := time.Now()
 	live.State = api.StateStopped
 	live.PID = 0
 	live.Forwards = nil
+	live.StoppedAt = &now
+	live.FrozenAt = nil
+	live.DiffBase = ""
+	live.MemShared = false
+	live.SnapSize = 0
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live

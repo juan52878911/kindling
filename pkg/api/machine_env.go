@@ -31,6 +31,10 @@ import (
 // arrancaría la máquina sin su entorno: el CLI la mira antes de mandarlo.
 const CapabilityMachineEnv = "machine-env"
 
+// CapabilityStart es la capacidad de GET /info que dice que el daemon tiene
+// POST /machines/{ref}/start (arrancar otra vez una máquina parada).
+const CapabilityStart = "start"
+
 // MachineEnvBootParam le dice al agente que hay entorno de la máquina en MMDS
 // y que no arranque el servicio sin él.
 const MachineEnvBootParam = "kling.env"

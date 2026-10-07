@@ -148,6 +148,12 @@ nuevo no le llegaría (un `POSTGRES_PASSWORD` solo cuenta en el `initdb`). Para
 otro entorno, otra máquina en frío con `-image`. La plantilla, como el
 `mem.file` de cualquier dorado, es 0600 del daemon.
 
+**Pararla y arrancarla otra vez.** `kling stop` conserva el disco de la
+máquina y suelta su memoria; `kling start` la arranca en frío sobre ese disco.
+Como el daemon no guardó los valores, `start` exige otra vez todas las claves
+de `env_keys` (`kling start -e POSTGRES_PASSWORD pg`, o `-env-file`) y, si falta
+alguna, dice cuáles en vez de arrancar el servicio sin ellas.
+
 `kling image import -e` sigue horneando valores en `/etc/kling/env` por
 compatibilidad, con un aviso en stderr: sirve para lo que es de la imagen
 (`PGDATA`), no para una contraseña.
