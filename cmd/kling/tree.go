@@ -176,6 +176,12 @@ var coreTree = []section{
       [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
                                                    values into the image (per machine:
                                                    kling run -image <ref> -e KEY)
+  image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
+                                                   docker save (manifest.json) or an OCI
+                                                   layout (tar or dir). Only the missing
+                                                   blobs go to the daemon, each checked by
+                                                   sha256; no registry. -image repo:tag
+                                                   picks one in an archive with several
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image

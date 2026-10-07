@@ -25,7 +25,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Dormir y despertar copias | `kling freeze`, `kling thaw` (o `-ttl 10m`): una copia dormida cuesta en disco solo lo que cambió |
 | Salir a internet, o no | `-egress none` (por defecto), `allowlist -allow dominio`, `internet`; nunca a redes privadas |
 | Secretos que no entren en la máquina | el proxy de credenciales (`kling machine credential`): el invitado ve un marcador |
-| Una imagen tuya sin registro | aún no: `image import` baja de un registro (ver "Lo que falta") |
+| Una imagen tuya sin registro (`docker save`, un layout OCI) | `kling image import -archive x.tar [-image repo:tag]`: el CLI sube al daemon, en flujo, solo los blobs que no tenga, y el daemon comprueba cada uno por sha256 ([imagenes.md](imagenes.md#desde-un-archivo-docker-save-o-un-layout-oci)) |
 
 Lo que la imagen no decide: la CPU (un núcleo por vCPU, como un contenedor;
 `-cpu-pct` manda), la memoria (`-mem`), la red (cerrada) y el disco propio.
@@ -105,8 +105,8 @@ espejo de la memoria en el almacén y `-disk`.
 
 ## Lo que falta
 
-- **Importar una imagen local** (`docker save`, un directorio OCI): hoy
-  `image import` solo baja de un registro.
+- **`docker save | gzip`**: `image import -archive` lee el tar sin comprimir
+  (o un layout OCI en un directorio); el comprimido hay que descomprimirlo antes.
 - **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
   se entra por el gateway o con `kling exec`.
 - **Imágenes sin `sh`** (distroless): el init es un script y se rechazan.

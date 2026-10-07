@@ -102,6 +102,11 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Legibles para el constructor sin privilegios, que los lee de aquí
+	// (builders_sinroot.go) aunque la máscara del daemon sea más estricta.
+	for _, d := range []string{dir, filepath.Dir(dir)} {
+		_ = os.Chmod(d, 0o755)
+	}
 	// Un temporal propio por subida (dos a la vez del mismo blob no se pisan),
 	// en el mismo directorio para que el renombrado sea atómico, y acabado en
 	// .part como los de las descargas: nadie lo toma por un blob.

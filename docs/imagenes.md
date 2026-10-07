@@ -243,6 +243,7 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 | `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`): para lo que es de cada máquina, `kling run -e` (arriba) |
 | `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
 | `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
+| `source` | `archive`: los blobs ya están en la caché del daemon (los subió `kling image import -archive`, abajo) y no se usa la red; `digest` (el del manifiesto) es obligatorio y `ref`, opcional |
 
 `kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
@@ -257,6 +258,59 @@ opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
 `-replace` la reconstruye (y vuelve a resolver la etiqueta), salvo que la use un
 dorado o una máquina que no esté parada: entonces 409, como al subirla con
 `kling image put`; hay que retirar antes lo que la usa.
+
+### Desde un archivo: `docker save` o un layout OCI
+
+```sh
+docker save postgres:17-alpine -o pg.tar
+kling image import -archive pg.tar                 # postgres-17-alpine, como desde el registro
+kling image import -archive todo.tar -image redis:7  # un archivo con varias imágenes
+kling image import -archive ./layout/              # un layout OCI en un directorio
+```
+
+Sirve para una imagen que no está en ningún registro (construida en local, en
+una red sin salida) y lee los dos formatos de `docker save`: el clásico, hasta
+Docker 24 (`manifest.json`, `repositories`, `<id>.json` y `<capa>/layer.tar`), y
+el layout OCI de Docker 25 en adelante y de skopeo (`index.json`, `oci-layout`,
+`blobs/sha256/`), en un tar o en un directorio. Un tar comprimido no: hay que
+descomprimirlo antes (`docker save` sin `| gzip`).
+
+El archivo está en la máquina del CLI y el daemon puede estar en otra (`-host`
+por SSH): el CLI lo abre, valida su estructura, elige la imagen (`-image
+repo:tag`, o su digest, o el id de `docker images`; sin `-image`, la única) para
+la arquitectura del daemon, y sube **solo los blobs que el daemon no tenga**, de
+uno en uno y en flujo, sin leerlos enteros a memoria (`PUT /oci/blobs/{digest}`,
+[api.md](api.md#imágenes)). El daemon comprueba cada uno con su sha256 antes de
+dejarlo en su caché de blobs (`$KLING_ROOT/cache/oci`); después el constructor
+`oci` construye desde ahí sin red, comprobando la cadena manifiesto →
+configuración → capas → `diff_ids` como con un registro (el usuario de
+construcción los lee de esa caché y los rehashea). Reimportar el mismo archivo
+no sube nada.
+
+`docker save` clásico no trae un manifiesto OCI: su `manifest.json` solo dice
+qué fichero es la configuración y cuáles las capas, que van **sin comprimir** y
+cuyo sha256 es el `diff_id` de la configuración. El CLI escribe con eso un
+manifiesto OCI equivalente (capas `application/vnd.oci.image.layer.v1.tar`, cada
+una con su `diff_id` como digest), que es el que se sube y el que fija la
+imagen. Por eso su digest no es el del registro, aunque la imagen sea la misma:
+para cruzarla con `docker images`, la receta guarda el id (`built.config`, el
+digest de la configuración).
+
+La receta dice de dónde vino —`source: archive`, el nombre que traía la imagen
+en el archivo y el digest del manifiesto— y **nunca la ruta del archivo** en la
+máquina del CLI. Reconstruirla (`-replace`) pide los blobs a la caché: si ya no
+están, el error dice que hay que volver a importar el archivo. `-max-size` se
+compara con lo que suman las capas tal como van en el archivo (sin comprimir en
+un `docker save` clásico).
+
+Lo que se rechaza del archivo antes de subir nada: entradas con nombre absoluto
+o con `..`, enlaces (simbólicos o duros) que salgan del archivo, entradas
+repetidas, ficheros dispersos, capas comprimidas en un `docker save` clásico
+(no serían su `diff_id`) o en zstd, una capa que falte (guardada para otra
+plataforma) y un manifiesto o un índice que no sea el de su digest. Un enlace
+dentro del archivo se resuelve por nombre en el propio índice del tar (docker
+enlaza un `layer.tar` repetido al primero), nunca en el disco; en un directorio
+no se sigue ninguno.
 
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
