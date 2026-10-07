@@ -288,12 +288,12 @@ func TestSondaConPlazosDelServicio(t *testing.T) {
 	if d := probeTimeout(); d != readyProbeTimeout {
 		t.Fatalf("sin servicio: %s", d)
 	}
-	poner(api.ServiceSpec{Argv: []string{"x"}, ReadyTimeoutSeconds: 1000, ReadyStartPeriodSeconds: -5})
+	poner(api.ServiceSpec{Argv: []string{"x"}, ProbeTimeoutSeconds: 1000, ReadyStartPeriodSeconds: -5})
 	if d, sp := probeTimeout(), serviceReadySpec().ReadyStartPeriodSeconds; d != api.MaxReadyTimeoutSeconds*time.Second || sp != 0 {
 		t.Fatalf("acotado: %s, %d", d, sp)
 	}
 
-	poner(api.ServiceSpec{Argv: []string{"x"}, ReadyTimeoutSeconds: 1, ReadyStartPeriodSeconds: 40})
+	poner(api.ServiceSpec{Argv: []string{"x"}, ProbeTimeoutSeconds: 1, ReadyStartPeriodSeconds: 40})
 	t0 := time.Now()
 	st := r.check(context.Background())
 	if d := time.Since(t0); st.Ready || d < 900*time.Millisecond || d > 5*time.Second || !strings.Contains(st.Detail, "timed out") {

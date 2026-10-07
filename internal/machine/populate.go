@@ -54,7 +54,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	image := req.Image
 	if image == "" {
 		return nil, fmt.Errorf("an image with the installer is required: " +
-			"build it with `kling images toolchain`")
+			"build it with `kling image toolchain`")
 	}
 	memMiB := req.MemMiB
 	if memMiB <= 0 {

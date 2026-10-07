@@ -41,7 +41,11 @@ func main() {
 		printUsage(os.Stdout)
 		os.Exit(2)
 	}
-	// Los nombres de antes se traducen en silencio a los de ahora (tree.go).
+	// Los nombres de antes se traducen a los de ahora (tree.go), con un aviso
+	// en stderr salvo los que se quedan para siempre.
+	if w := aliasWarning(os.Args[1], os.Args[2:]); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	cmd, args := resolveAlias(os.Args[1], os.Args[2:])
 
 	// `kling run -h`, `kling mcp add -h`: la misma ayuda que `kling help ...`,
@@ -501,15 +505,18 @@ func cmdRun(args []string) error {
 	if _, err := api.MachineEnvMap(env); err != nil {
 		return err
 	}
-	if len(env) > 0 {
+	if len(env) > 0 || (*disk > 0 && *from == "") {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
-		// su entorno, sin un solo error.
+		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
+		if len(env) > 0 && !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
 			return fmt.Errorf("the daemon (%s) does not take -e at run: update it", info.Version)
+		}
+		if *disk > 0 && *from == "" && !slices.Contains(info.Capabilities, api.CapabilityDisk) {
+			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {
@@ -634,7 +641,9 @@ func cmdSave(args []string) error {
 	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
 	// de unas decenas de servicios la cuenta puede no salir.
 	warm := fs.Bool("warm", true, "ask the guest agent to start its runtime before freezing, if it supports it (bigger snapshot, much faster first wake)")
-	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve (and to be ready by its image's probe) before committing")
+	// El mismo plazo que el daemon da a commit sin ready_timeout_seconds: con
+	// menos, el CLI recortaba en silencio la espera a la sonda de la imagen.
+	espera := fs.Duration("wait", machine.DefaultReadyWait, "how long to wait for the guest to serve (and to be ready by its image's probe) before saving")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}

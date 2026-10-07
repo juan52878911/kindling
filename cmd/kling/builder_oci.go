@@ -319,7 +319,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)
 		svc.StopSignal = ""
 	}
-	svc.ReadyTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(cfg.Healthcheck)
+	svc.ProbeTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(cfg.Healthcheck)
 	svcJSON, _ := json.MarshalIndent(svc, "", "  ")
 	ociJSON, _ := json.MarshalIndent(map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest,
 		"arch": spec.Arch, "config": cfg}, "", "  ")

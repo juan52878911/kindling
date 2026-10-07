@@ -29,7 +29,8 @@ func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) error {
 // ensureDevpts monta /dev/pts si falta.
 //
 // Hace falta de verdad: el init mínimo de las imágenes de kindling monta proc,
-// sysfs, devtmpfs, /tmp y /run, y NUNCA devpts (scripts/minimal-init.sh). Sin él
+// sysfs y devtmpfs (y /tmp y /run en tmpfs, salvo en las imágenes de Docker, que
+// conservan los suyos), y NUNCA devpts (scripts/minimal-init.sh). Sin él
 // /dev/ptmx existe —lo crea devtmpfs— pero no entrega esclavo, así que abrir un
 // PTY falla con un error que no señala a ninguna parte. Montarlo aquí evita
 // tener que reconstruir todas las imágenes ya existentes.

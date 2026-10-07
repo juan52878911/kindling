@@ -366,11 +366,11 @@ $ kling run -name mcp-demo
 efad9e5f7003  mcp-demo  booted cold in 54 ms
 
 $ kling freeze mcp-demo
-efad9e5f7003  warm  (754 ms, 256 MiB on disk)
+efad9e5f7003  frozen  (754 ms, 256 MiB on disk)
 
 $ kling ps
 ID             NAME       IMAGE     STATE   CPU/MEM    DISK   EGRESS   AGE   LAST OP
-efad9e5f7003   mcp-demo   default   warm    1/256MiB   81M    none     17s   freeze 754ms, 256MiB
+efad9e5f7003   mcp-demo   default   frozen  1/256MiB   81M    none     17s   freeze 754ms, 256MiB
 
 $ kling thaw mcp-demo
 efad9e5f7003  running  (22 ms)
@@ -402,7 +402,7 @@ $ kling events
 ```
 
 `kling save` **exige que el invitado esté sirviendo** antes de congelar un dorado
-(`-wait`, 60 s por defecto). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
+(`-wait`, 2 min por defecto, como la API). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
 no contesta — minutos u horas después, con un error que no menciona el commit. Si el
 invitado no sirve, commit se niega y explica la cadena entera; `-force` salta la
 comprobación y `-replace` sustituye un snapshot existente de forma atómica.
@@ -460,7 +460,7 @@ kindling  ssh://juan@192.168.2.60
    └─◆ (booted cold)
       └── plantilla      running  172.30.0.6      ⌀     8M  boot 46ms
 
-  4 running · 0 warm · 0 stopped   disk: 9M own + 83M shared
+  4 running · 0 frozen · 0 stopped   disk: 9M own + 83M shared
   egress:  ⌀ isolated   → internet (private networks are always blocked)
 ```
 
@@ -552,8 +552,10 @@ Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp a
 `kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
 de antes (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`,
 `kling snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) siguen
-funcionando como alias silenciosos; en 0.15 avisarán una vez por proceso y en 0.16 se
-retiran los de extensiones. `commit`, `snapshots` y `plugins` se quedan para siempre.
+funcionando como alias. Fueron silenciosos hasta 0.17; ahora cada uno avisa una vez en
+stderr (`warning: kling add is now kling mcp add`), y los de extensiones se retirarán en
+una versión que anunciará el CHANGELOG. `commit`, `snapshots` y `plugins` se quedan para
+siempre, en silencio.
 
 ## kling-mcp: servidores MCP bajo demanda
 
@@ -692,7 +694,7 @@ kling run -name apuntes -volume notas:/data
 **Coherente sin congelar el sistema de ficheros.** No hay `fsfreeze` en caliente dentro del
 invitado, así que la misma regla que decide quién monta decide cuándo una copia es segura: un
 snapshot solo se toma sin nadie que **escriba** (los lectores no cambian ningún bloque), y un
-restore solo sin nadie que lo use. Una máquina congelada o warm cuenta: sigue teniendo el
+restore solo sin nadie que lo use. Una máquina congelada cuenta: sigue teniendo el
 volumen montado, con la caché de ext4 dentro de la memoria congelada. Mientras dura la copia el
 volumen queda reservado igual que lo reserva una máquina que arranca, así que un `run` que
 llegue a medias se rechaza con "being snapshotted" o "being restored".
@@ -1357,7 +1359,8 @@ nunca en `state.json`, en eventos ni en un snapshot. Repetir `-env` con otra cla
 rota; el marcador se conserva y el proceso no tiene que reiniciarse.
 
 Cada petición que pasa por el proxy, y cada rechazo, queda anotada en un registro de la
-máquina (0600, rotado a 1 MiB; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
+máquina (0600, rotado a 4 MiB guardando 3 generaciones —`daemon.credaudit_max_mib`,
+`daemon.credaudit_generations` o `KLING_CREDAUDIT=MIB:GENS`—; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
 llega; en macOS en su directorio, `credaudit.jsonl`):
 
 ```sh
@@ -1539,8 +1542,9 @@ permite que N instancias compartan páginas.
   virtualización
 - Si corre anidado, virtualización anidada activada en el host padre
 - `firecracker` + `jailer`, `e2fsprogs`, `squashfs-tools`, `curl`, `jq`
-- En **macOS**: Apple Silicon M3+ con macOS 15+, vía una VM Linux con virtualización
-  anidada — ver [En un Mac](#en-un-mac-apple-silicon)
+- En **macOS**: Apple Silicon con macOS 14+, nativo con el backend `vz` (`kling-vz`, sin
+  root ni VM Linux); o M3+ con macOS 15+ corriendo Firecracker dentro de una VM Linux con
+  virtualización anidada — ver [En un Mac](#en-un-mac-apple-silicon)
 
 ## Scripts
 

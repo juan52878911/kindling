@@ -102,7 +102,7 @@ func TestBuildOCI(t *testing.T) {
 	}
 	if built.Digest != idx || built.Ready != "tcp 5432" || len(built.Layers) != 2 || hints.Base != "" ||
 		strings.Join(built.Service.Argv, " ") != "docker-entrypoint.sh postgres" || built.Service.StopSignal != "SIGINT" ||
-		built.Service.Restart != api.RestartOnFailure || built.Service.ReadyTimeoutSeconds != 0 {
+		built.Service.Restart != api.RestartOnFailure || built.Service.ProbeTimeoutSeconds != 0 {
 		t.Fatalf("built %s", hints.Built)
 	}
 
@@ -241,7 +241,7 @@ func TestBuildOCIServiceFromConfig(t *testing.T) {
 	if svc.StopSignal != "" || !strings.Contains(log, "STOPSIGNAL") || !strings.Contains(log, "SIGTERM") {
 		t.Fatalf("stop signal %q, log:\n%s", svc.StopSignal, log)
 	}
-	if svc.Restart != api.RestartOnFailure || svc.ReadyTimeoutSeconds != 3 || svc.ReadyStartPeriodSeconds != api.MaxReadyTimeoutSeconds {
+	if svc.Restart != api.RestartOnFailure || svc.ProbeTimeoutSeconds != 3 || svc.ReadyStartPeriodSeconds != api.MaxReadyTimeoutSeconds {
 		t.Fatalf("service %+v", svc)
 	}
 	if svc, _ = service(OCISpec{Ref: e.reg.Host() + "/x/py@" + idx, Arch: "amd64", Restart: api.RestartAlways}); svc.Restart != api.RestartAlways {

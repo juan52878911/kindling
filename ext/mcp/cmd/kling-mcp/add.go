@@ -53,7 +53,7 @@ func cmdSearch(args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tVERSION\tkling add\tDESCRIPTION")
+	fmt.Fprintln(w, "NAME\tVERSION\tkling mcp add\tDESCRIPTION")
 	for _, s := range servers {
 		ok := "no"
 		if _, can := s.Stdio(); can {

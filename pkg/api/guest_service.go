@@ -53,16 +53,17 @@ type ServiceSpec struct {
 	StopTimeoutSeconds int    `json:"stop_timeout_seconds,omitempty"`
 	// Restart es RestartAlways, RestartOnFailure o RestartNo.
 	Restart string `json:"restart,omitempty"`
-	// ReadyTimeoutSeconds es el plazo de cada ejecución de la sonda de listo
+	// ProbeTimeoutSeconds es el plazo de cada ejecución de la sonda de listo
 	// (GuestReadyProbe; 0 = 10 s, como mucho MaxReadyTimeoutSeconds), y
 	// ReadyStartPeriodSeconds lo que se le da de más al arranque antes de
 	// darlo por lento (el impulso de CPU dura eso de más). Son el Timeout y
-	// el StartPeriod del HEALTHCHECK de Docker.
-	ReadyTimeoutSeconds     int `json:"ready_timeout_seconds,omitempty"`
+	// el StartPeriod del HEALTHCHECK de Docker. No es el ready_timeout_seconds
+	// de commit, fork o run, que es la espera total a "listo".
+	ProbeTimeoutSeconds     int `json:"probe_timeout_seconds,omitempty"`
 	ReadyStartPeriodSeconds int `json:"ready_start_period_seconds,omitempty"`
 }
 
-// MaxReadyTimeoutSeconds acota ReadyTimeoutSeconds y ReadyStartPeriodSeconds:
+// MaxReadyTimeoutSeconds acota ProbeTimeoutSeconds y ReadyStartPeriodSeconds:
 // el HEALTHCHECK los admite de horas, pero "listo" es "terminó de arrancar" y
 // una sonda colgada no puede tener esperando a quien la pregunta más que esto.
 const MaxReadyTimeoutSeconds = 120

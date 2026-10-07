@@ -685,7 +685,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("this image's bridge does not know how to %s volumes: "+
-				"it predates unmounted snapshots. Update it with `kling images refresh`", op)
+				"it predates unmounted snapshots. Update it with `kling mcp refresh-bridge`", op)
 		}
 		return fmt.Errorf("guest could not %s its volumes: %s", op, strings.TrimSpace(string(b)))
 	}

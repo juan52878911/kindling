@@ -41,7 +41,7 @@ import (
 
 // Plazos. La sonda se pregunta a menudo y tiene que ser barata: 10 s es de
 // sobra para un `getprop`; una imagen que necesita más lo dice en su servicio
-// (api.ServiceSpec.ReadyTimeoutSeconds: el Timeout de su HEALTHCHECK). Un gancho puede hacer trabajo de verdad (aplicar una
+// (api.ServiceSpec.ProbeTimeoutSeconds: el Timeout de su HEALTHCHECK). Un gancho puede hacer trabajo de verdad (aplicar una
 // identidad, regenerar claves), pero no puede dejar la máquina "no lista"
 // indefinidamente.
 const (
@@ -165,13 +165,13 @@ func serviceReadySpec() api.ServiceSpec {
 		return api.ServiceSpec{}
 	}
 	clamp := func(n int) int { return min(max(n, 0), api.MaxReadyTimeoutSeconds) }
-	return api.ServiceSpec{ReadyTimeoutSeconds: clamp(svc.spec.ReadyTimeoutSeconds),
+	return api.ServiceSpec{ProbeTimeoutSeconds: clamp(svc.spec.ProbeTimeoutSeconds),
 		ReadyStartPeriodSeconds: clamp(svc.spec.ReadyStartPeriodSeconds)}
 }
 
 // probeTimeout es el plazo de una ejecución de la sonda.
 func probeTimeout() time.Duration {
-	if n := serviceReadySpec().ReadyTimeoutSeconds; n > 0 {
+	if n := serviceReadySpec().ProbeTimeoutSeconds; n > 0 {
 		return time.Duration(n) * time.Second
 	}
 	return readyProbeTimeout

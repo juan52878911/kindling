@@ -27,6 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `/metrics`: operations by result (run, thaw, freeze, start), admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
 - `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
+- `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
 
 ### Changed
 
@@ -38,6 +39,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The balloon asks for free page reporting, so pages the guest frees go back to the host without a squeeze (Firecracker 1.14+; falls back without it; `KLING_FREE_PAGE_REPORTING=0` turns it off)
 - `save` mirrors the golden memory into the copy-on-write store in the background when the store is mounted, so the first diff thaw of a copy no longer copies it (10 s with Postgres); thaw events show `store`, `mirror` and `memory` phases
 - Docker images get a full core per vCPU by default
+- `kling save -wait` defaults to 2 minutes, the API's default (was 60 s, which cut the wait for the image's ready probe short)
+- Old command names (`kling add`, `kling rmi`, `kling info`…) warn once on stderr with the new name; `commit`, `snapshots` and `plugins` stay silent
 - Docker images restart their service only when it fails, like `docker run --restart on-failure`; `kling image import -restart` picks `always`, `on-failure` or `no`
 - Docker images: the `HEALTHCHECK` timeout bounds each ready probe and its start period extends the boot CPU boost (up to 120 s each)
 - Docker images only need `sh`, `mount`, `pivot_root`, `mkdir` and `ln` for the init (no longer `cat` and `grep`)
@@ -83,7 +86,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
 - Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker
 - Docker images keep their own `/tmp` on disk, as in Docker, instead of a tmpfs that used guest RAM
-- `kling image import` says when an image has no ready probe (only UDP ports), and Docker schema 1 manifests fail with a clear error instead of "has no layers"
+- `kling image import` says when an image has no ready probe (only UDP ports)
+- Docker schema 1 manifests fail with a clear error instead of "has no layers"
 - The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
 - `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
 - A new volume takes the owner, mode and (up to 64 MiB) content of the image's directory, as in Docker: non-root services like `grafana` can write to it; volumes with data are never touched, and a volume is seeded only once
@@ -121,6 +125,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling add -env` values stay out of the host process list while building (#159)
 - Pinned Debian base picks up openssl and pcre2 security updates (deb13u3) (#160)
 - Internal: scheduler races, silent state losses and `make deploy` without fixed `/tmp` paths (#130, #132, #139)
+- `kling-bridge` listens on `127.0.0.1:8080` by default (was every interface) and warns in its log when it listens on another address outside a microVM
 
 ## [0.17.0] - 2026-09-29
 

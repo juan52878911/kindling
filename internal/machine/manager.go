@@ -1398,14 +1398,14 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			if len(vols) == 0 {
 				return nil, fmt.Errorf("%w: image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
 					"is what mounts shared folders inside the guest.\n"+
-					"Use an image with an agent (kling images toolchain, or kling images build -builder base)",
+					"Use an image with an agent (kling image toolchain, or kling image build -builder base)",
 					ErrShareRequest, req.Image)
 			}
 			return nil, fmt.Errorf("image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
 				"is what mounts the volumes inside the guest.\n"+
 				"With this image the disk would be attached but nobody would mount it, and everything written "+
 				"to %s would die with the machine, without a single error.\n"+
-				"Rebuild it with an agent (kling images build -builder base, or kindling-mcp in stdio mode), or remove the volume",
+				"Rebuild it with an agent (kling image build -builder base, or kindling-mcp in stdio mode), or remove the volume",
 				req.Image, vols[0].mount)
 		}
 	}
