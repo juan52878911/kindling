@@ -524,6 +524,32 @@ func TestSondearUnKlingAnterior(t *testing.T) {
 	}
 }
 
+// Solo el CLI (-cli, o un contexto remoto): sin daemon que parar; se cambia el
+// binario, se comprueba que dice la versión nueva, y -rollback lo devuelve.
+func TestSoloElCLI(t *testing.T) {
+	m := nuevoMontaje(t)
+	o := m.opciones()
+	o.Servicio, o.Daemon, o.Raiz, o.Actual = nil, nil, "", "v1.0.0"
+	o.Piezas = o.Piezas[:1]
+	res, err := Actualizar(context.Background(), o)
+	if err != nil || res.Hacia != "v1.1.0" {
+		t.Fatalf("%+v %v\n%s", res, err, m.out.String())
+	}
+	if leer(t, m.bin) != string(m.nuevo) {
+		t.Error("not replaced")
+	}
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if leer(t, m.bin) != string(m.viejo) {
+		t.Error("not rolled back")
+	}
+	o.Servicio = m.svc
+	if _, err := Actualizar(context.Background(), o); err == nil {
+		t.Error("a service without a daemon to check was accepted")
+	}
+}
+
 // La vuelta atrás automática devuelve el state.json de la copia aunque el
 // daemon nuevo lo reescribiera sin migrarlo (misma versión, campos nuevos), y
 // no toca las copias de migración que ya estaban antes de actualizar.
