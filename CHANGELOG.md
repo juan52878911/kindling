@@ -77,7 +77,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
 - Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker
 - Docker images keep their own `/tmp` on disk, as in Docker, instead of a tmpfs that used guest RAM
-- `kling image import` says when an image has no ready probe (only UDP ports), and Docker schema 1 manifests fail with a clear error instead of "has no layers"
+- `kling image import` says when an image has no ready probe (only UDP ports)
+- Docker schema 1 manifests fail with a clear error instead of "has no layers"
 - The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
 - `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
 - A new volume takes the owner, mode and (up to 64 MiB) content of the image's directory, as in Docker: non-root services like `grafana` can write to it; volumes with data are never touched, and a volume is seeded only once
@@ -115,6 +116,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling add -env` values stay out of the host process list while building (#159)
 - Pinned Debian base picks up openssl and pcre2 security updates (deb13u3) (#160)
 - Internal: scheduler races, silent state losses and `make deploy` without fixed `/tmp` paths (#130, #132, #139)
+- `kling-bridge` listens on `127.0.0.1:8080` by default (was every interface) and warns in its log when it listens on another address outside a microVM
 
 ## [0.17.0] - 2026-09-29
 

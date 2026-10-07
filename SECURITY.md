@@ -1429,9 +1429,12 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   por servicio, entregada a cada réplica al nacer); (2) proxy de credenciales para
   aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos por
   sesión reales.
-- **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
-  en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
-  (`-listen 0.0.0.0:9100`) y avisa.
+- **El puente local (`kling-bridge-local`) no autentica.** Por eso escucha en
+  `127.0.0.1:8080` por defecto (`kling mcp memory enable`/`install-service` le pasan
+  `127.0.0.1:9100`); exponerlo a la red es una decisión explícita
+  (`-listen 0.0.0.0:9100`) y avisa: `install-service` por la terminal y el propio puente
+  en su log. Dentro de la microVM el `/entrypoint` generado pide `-listen :8080`, donde
+  lo busca el gateway; ahí, como PID 1, no avisa.
 - **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
   silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
   este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del
