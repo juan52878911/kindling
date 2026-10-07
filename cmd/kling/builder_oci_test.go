@@ -311,7 +311,7 @@ func TestBuildOCIDistroless(t *testing.T) {
 	})
 	build := func(hc map[string]any) (string, *ext4.Node, func(string) string, string) {
 		t.Helper()
-		cfg := map[string]any{"Entrypoint": []string{"/app"}, "User": "65532", "Env": []string{"MSG=it's"},
+		cfg := map[string]any{"Entrypoint": []string{"/app"}, "User": "65532", "Env": []string{"MSG=it's", "MULTI=a\nb", "BAD=x\ry", "1X=v"},
 			"ExposedPorts": map[string]any{"80/tcp": map[string]any{}}}
 		if hc != nil {
 			cfg["Healthcheck"] = hc
@@ -337,8 +337,14 @@ func TestBuildOCIDistroless(t *testing.T) {
 	if tree.Lookup("/entrypoint") != nil {
 		t.Fatal("an /entrypoint (a sh script) in an image without sh")
 	}
-	if !strings.Contains(cat("/etc/kindling/IMAGE.txt"), "\ninit=go\n") || cat("/etc/kling/env") != "export MSG='it'\\''s'\n" {
+	// Un ENV de varias líneas se queda (sh y el init en Go lo leen entre
+	// comillas); uno con un CR o una clave que no lo es, fuera, con aviso del
+	// nombre y sin el valor.
+	if !strings.Contains(cat("/etc/kindling/IMAGE.txt"), "\ninit=go\n") || cat("/etc/kling/env") != "export MSG='it'\\''s'\nexport MULTI='a\nb'\n" {
 		t.Fatalf("IMAGE.txt or env:\n%s%s", cat("/etc/kindling/IMAGE.txt"), cat("/etc/kling/env"))
+	}
+	if !strings.Contains(log, "ENV BAD is not") || !strings.Contains(log, "ENV 1X is not") || strings.Contains(log, "x\ry") {
+		t.Fatalf("dropped ENV warning:\n%s", log)
 	}
 	// El CMD-SHELL no se puede correr: la sonda de EXPOSE, sin sus plazos.
 	if p := cat(api.GuestReadyProbe); p != "#!/usr/local/bin/kling-guest -probe-tcp=127.0.0.1:80\n" || ready != "tcp 80" ||

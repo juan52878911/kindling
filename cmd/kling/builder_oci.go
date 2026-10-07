@@ -397,7 +397,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if spec.User != "" {
 		user = spec.User
 	}
-	env := mergeEnv(cfg.Env, spec.Env)
+	env, fuera := mergeEnv(cfg.Env, spec.Env)
+	for _, k := range fuera {
+		// Solo el nombre: el valor puede ser un secreto.
+		logf("warning: the image's ENV %s is not KEY=value without NUL or CR; left out", k)
+	}
 	if len(argv) == 0 {
 		logf("the image has no ENTRYPOINT or CMD: only the agent runs (use kling exec)")
 	}
@@ -610,14 +614,19 @@ func (r removeOnClose) Close() error {
 var marcaOCI = imagen.Marca{Constructor: "oci", Dir: "/etc/kindling", DM: "kindling-layer"}
 
 // mergeEnv son las variables de la imagen con las del spec encima (una
-// clave repetida se queda en su sitio con el valor nuevo).
-func mergeEnv(image, extra []string) []string {
-	out := []string{}
+// clave repetida se queda en su sitio con el valor nuevo), y los nombres de
+// las de la imagen que se dejan fuera. Un valor de la imagen puede tener
+// saltos de línea (Docker los deja en el ENV): imagen.SQ los guarda entre
+// comillas, y tanto sh como el init en Go los leen así. Un NUL o un CR, no.
+// Las del spec ya llegan validadas, de una línea (validateOCI).
+func mergeEnv(image, extra []string) (out, fuera []string) {
+	out = []string{}
 	at := map[string]int{}
 	for _, kv := range append(append([]string{}, image...), extra...) {
-		k, _, _ := strings.Cut(kv, "=")
-		if !reBuildEnv.MatchString(kv) {
-			continue // una variable de la imagen que no cabe en una línea de sh
+		k, v, _ := strings.Cut(kv, "=")
+		if !reBuildEnv.MatchString(k+"=") || strings.ContainsAny(v, "\x00\r") {
+			fuera = append(fuera, k)
+			continue
 		}
 		if i, ok := at[k]; ok {
 			out[i] = kv
@@ -626,7 +635,7 @@ func mergeEnv(image, extra []string) []string {
 		at[k] = len(out)
 		out = append(out, kv)
 	}
-	return out
+	return out, fuera
 }
 
 // findTool busca un ejecutable en los directorios de siempre del árbol.

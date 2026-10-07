@@ -1407,8 +1407,9 @@ llamado como `/sbin/overlay-init` (`pkg/guest/init.go`). Hace lo mismo que
 (ni `/entrypoint`, que ni siquiera se escribe), y el servicio lo sigue arrancando el
 agente con su `USER`. Se niega a correr si no es PID 1: un `overlay-init` lanzado a mano
 en el anfitrión no monta ni hace `pivot_root`. Lee `/etc/kling/env` como datos (solo
-`export CLAVE='valor'`, sin interpretar sh) y de una línea que no entiende avisa con su
-número, nunca con su contenido. Las sondas de esas imágenes son `#!` al agente: lo que
+`export CLAVE='valor'`, con las comillas simples de sh, también de varias líneas, sin
+interpretar nada más) y de una orden que no entiende avisa con su número de línea, nunca
+con su contenido. Las sondas de esas imágenes son `#!` al agente: lo que
 ejecutan es el argv del `HEALTHCHECK` de la imagen, sin shell, igual que en Docker.
 
 ### 28. `kling upgrade` no instala nada sin verificar, y deja volver
