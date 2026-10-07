@@ -57,6 +57,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling image import` says when an image has no ready probe (only UDP ports), and Docker schema 1 manifests fail with a clear error instead of "has no layers"
 - The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
 - `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
+- A new volume takes the owner, mode and (up to 64 MiB) content of the image's directory, as in Docker: non-root services like `grafana` can write to it; volumes with data are never touched, and a volume is seeded only once
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
 - `ext4.Write` no longer panics on layers without data
