@@ -254,7 +254,9 @@ El nombre por defecto sale del repositorio y la etiqueta, así que `redis:7` y
 `ghcr.io/x/redis:7` dan los dos `redis-7`. Si ya hay una imagen con ese nombre,
 `import` no la pisa: si es la misma importación (misma referencia y mismas
 opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
-`-replace` la reconstruye (y vuelve a resolver la etiqueta).
+`-replace` la reconstruye (y vuelve a resolver la etiqueta), salvo que la use un
+dorado o una máquina que no esté parada: entonces 409, como al subirla con
+`kling image put`; hay que retirar antes lo que la usa.
 
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 

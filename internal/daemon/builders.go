@@ -237,8 +237,27 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		if u != nil {
 			barrerProcesos(u.UID) // nada del constructor sigue vivo mientras se valida
 		}
-		if _, err := adoptarSalida(out, filepath.Join(s.root, "images"), req.Name, dueño); err != nil {
-			fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w", req.Builder, err))
+		// Como PUT /images/{name}/blob (blobs.go): si la imagen ya existe (un
+		// import -replace), comprobar que se puede sustituir y renombrar con
+		// las imágenes quietas. Si no, un run en vuelo o un dorado que la usa
+		// se quedarían con otro contenido debajo.
+		status := http.StatusInternalServerError
+		err := s.mgr.ConImagenesQuietas(func() error {
+			images := filepath.Join(s.root, "images")
+			for _, f := range []string{req.Name + ".ext4", req.Name + ".layer.ext4"} {
+				if _, lerr := os.Lstat(filepath.Join(images, f)); lerr == nil {
+					if rerr := s.mgr.ImageReplaceable(req.Name); rerr != nil {
+						status = http.StatusConflict
+						return rerr
+					}
+					break
+				}
+			}
+			_, aerr := adoptarSalida(out, images, req.Name, dueño)
+			return aerr
+		})
+		if err != nil {
+			fail(w, status, fmt.Errorf("builder %s: %w", req.Builder, err))
 			return
 		}
 	}
