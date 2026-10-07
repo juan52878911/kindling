@@ -3013,7 +3013,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := m.admitirMemoria(); err != nil {
 		return nil, err
 	}
-	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, max(mc.MemMiB, mc.MemMaxMiB), "", mc.ID)
+	// Lo mismo que Run, Start y runFrom: la memoria de arranque (MemMiB), no
+	// el techo elástico (-mem-max), que el globo concede después. Reservar el
+	// techo aquí hacía que una máquina que cupo al arrancar no pudiera
+	// despertar nunca en el mismo host (507).
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, mc.MemMiB, "", mc.ID)
 	if merr != nil {
 		return nil, merr
 	}

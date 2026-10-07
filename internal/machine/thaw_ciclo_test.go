@@ -176,3 +176,40 @@ func TestThawQueReadoptaReaplicaElTechoDeCPU(t *testing.T) {
 		t.Fatalf("cpu.max = %q; quería el techo configurado (50 %%)", max)
 	}
 }
+
+// Con memoria elástica (-mem-max) el thaw reserva la de arranque, como Run,
+// Start y runFrom: reservar el techo hacía que una máquina que cupo al
+// arrancar no pudiera despertar nunca en el mismo host.
+func TestThawReservaLaMemoriaDeArranque(t *testing.T) {
+	t.Setenv("KLING_MAX_MEM_PRESSURE", "0")
+	t.Setenv("KLING_MAX_SWAP_PCT", "0")
+	t.Setenv("KLING_MIN_FREE_MIB", "0")
+	m := newTestManager(t)
+	mc := congeladaParaThaw(t, m, "a1a1000000000009", 512)
+	m.mu.Lock()
+	m.byID[mc.ID].MemMaxMiB = 8192
+	m.mu.Unlock()
+
+	// 1 GiB libre: cabe la de arranque (512), no el techo (8 GiB).
+	fingirMemoria(t, 1024)
+	m.launchGate = make(chan struct{}, 1)
+	m.launchGate <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	res := make(chan error, 1)
+	go func() {
+		_, err := m.Thaw(ctx, mc.ID)
+		res <- err
+	}()
+	limite := time.Now().Add(5 * time.Second)
+	for pendiente(m) != 512 {
+		if time.Now().After(limite) {
+			cancel()
+			t.Fatalf("pendingMiB = %d; quería 512 reservados (la memoria de arranque)", pendiente(m))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-res; api.IsInsufficientMemory(err) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Thaw = %v; quería pasar la admisión y esperar en la puerta", err)
+	}
+}
