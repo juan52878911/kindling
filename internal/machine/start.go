@@ -128,6 +128,11 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 		return nil, fmt.Errorf("machine %q can't be started: its disk is gone (%v). Remove it (kling rm %s)",
 			mc.Name, err, mc.Name)
 	}
+	// Su disco vive en el almacén y no queda sitio: como en Thaw, se dice
+	// ahora y no con un EIO dentro del invitado.
+	if err := m.comprobarAlmacenPara(mc.ID); err != nil {
+		return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
+	}
 	// La imagen pudo borrarse mientras estaba parada (una parada no la
 	// retiene, ver blobs.go): se dice antes de reservar nada.
 	src, layer, err := m.imageLayer(mc.Image)
