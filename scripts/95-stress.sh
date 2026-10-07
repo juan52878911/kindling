@@ -53,7 +53,7 @@ limpiar() {
   for m in $($KLING ps -a 2>/dev/null | awk -v p="$PREFIJO" '$0 ~ p {print $1}'); do
     $KLING rm "$m" >/dev/null 2>&1
   done
-  $KLING rmi "$TPL" >/dev/null 2>&1
+  $KLING template rm "$TPL" >/dev/null 2>&1
 }
 trap limpiar EXIT
 
@@ -170,7 +170,7 @@ if [ -n "$rechazo" ]; then
     *) bad "rechazo poco claro: $rechazo" ;;
   esac
   # El daemon tiene que seguir atendiendo después de decir que no.
-  $KLING info >/dev/null 2>&1 && ok "el daemon sigue respondiendo tras el rechazo" \
+  $KLING status -v >/dev/null 2>&1 && ok "el daemon sigue respondiendo tras el rechazo" \
     || bad "el daemon dejó de responder"
 else
   med "rechazo" "no llegó: cabían los 60"
