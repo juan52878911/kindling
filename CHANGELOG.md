@@ -57,6 +57,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
+- Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first
+- A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
