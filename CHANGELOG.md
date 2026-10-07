@@ -77,6 +77,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A layered image on a base without `sh` (whose `/sbin/overlay-init` links to `kling-guest`) boots; it was refused as a base from before layers
+- The oci builder refuses a `kling-guest` without the Go init for images without `sh`, naming it, instead of building one that does not boot; `kling upgrade` notes `KLING_GUEST_AGENT*` paths it does not replace
 - `kling upgrade -rollback` on macOS no longer leaves frozen machines the previous kling-vz cannot wake: kling-vz writes the oldest snapshot format that describes the machine (`kling_vz` 1 without a screen), and the rollback is refused, naming the machine, if the old kling-vz still could not read it
 - Disk-full errors suggest removing frozen or stopped machines, not "warm" ones (a v0.13 state)
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why

@@ -556,6 +556,14 @@ importa en 0,69 s y nginx responde, del mismo tamaño que con las capas gzip.
   `/etc/kling/env` (como sh: un valor con saltos de línea sigue entre
   comillas en las líneas siguientes) y se vuelve a ejecutar como agente, sin
   `/entrypoint` y sin ningún programa de la imagen. Solo arranca como PID 1.
+  Un `kling-guest` anterior al init en Go ignoraría que lo llamen
+  `overlay-init`: antes de ponerlo, el constructor busca en el binario la
+  marca del init (`guest.InitMarker`, vale para cualquier arquitectura) y, si
+  no está, se niega con `the guest agent at X predates the Go init` (`kling
+  upgrade` solo cambia el de `KLING_LIB_DIR`, y avisa de los
+  `KLING_GUEST_AGENT*` que apuntan a otro sitio). Una imagen por capas sobre
+  una base así funciona: el daemon sigue el enlace de `/sbin/overlay-init` y
+  busca la misma marca para saber que entiende `kling.layer`.
   El script se queda para las imágenes que lo pueden correr porque es el que
   llevan todas las importadas hasta ahora; los dos se prueban con los mismos
   casos. Comprobado el 2026-10-07 en el lab (CT 105, amd64, daemon privado,

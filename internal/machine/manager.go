@@ -1387,9 +1387,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			log.Printf("warning: could not check whether base %s understands layers: %v", src, cerr)
 		case !ok:
 			return nil, fmt.Errorf("image %q is layered, but its base (%s) has an overlay-init "+
-				"from before layers existed: it would ignore %s and boot the guest without the "+
-				"service inside.\nRebuild the base (scripts/70-build-minimal-image.sh) or "+
-				"repackage this service as a monolithic image",
+				"from before layers existed (or a guest agent without the Go init): it would ignore %s "+
+				"and boot the guest without the service inside.\nRebuild the base "+
+				"(scripts/70-build-minimal-image.sh, or re-import a Docker image with an up-to-date "+
+				"kling-guest) or repackage this service as a monolithic image",
 				req.Image, src, api.LayerBootParam)
 		}
 	}

@@ -17,15 +17,18 @@ package machine
 // $NAME.layer.ext4 marca la imagen como por capas. Nada que migrar.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // layerUpperDir es el directorio dentro de la capa donde está el delta.
@@ -193,6 +196,10 @@ const guestInitPath = "/sbin/overlay-init"
 // se queda sin /entrypoint y lo que se ve es un pánico del kernel. Deducir de ahí
 // que hay que reconstruir la base es pedir demasiado.
 //
+// El init es el script de sh (lleva la cadena kling.layer) o, en una imagen
+// de Docker sin sh, un enlace al agente (el init en Go, que lleva
+// guest.InitMarker). debugfs cat no sigue enlaces: se resuelven aquí.
+//
 // El error va aparte del booleano, como en imageHasBridge: sin debugfs no se
 // puede saber, y "no lo sé" no es "no lo lleva".
 func (m *Manager) baseSupportsLayers(ctx context.Context, base string) (bool, error) {
@@ -210,15 +217,85 @@ func (m *Manager) baseSupportsLayers(ctx context.Context, base string) (bool, er
 	if bin == "" {
 		return false, ErrNoDebugfs
 	}
-	// Con tope: overlay-init es un guion de unos KiB, y la base es un fichero
-	// que no controla este código.
-	out, err := salidaAcotada(exec.CommandContext(ctx, bin, "-R", "cat "+comillas(guestInitPath), base), maxSalidaDebugfs)
+	ok, err := initEntiendeCapas(ctx, imagenDebugfs{bin: bin, file: base})
 	if err != nil {
 		return false, fmt.Errorf("reading %s from %s: %w", guestInitPath, base, err)
 	}
-	ok := strings.Contains(string(out), api.LayerBootParam)
 	m.layerOK.Store(key, ok)
 	return ok, nil
+}
+
+// maxInitGo es lo que se lee como mucho del agente que hace de init (unos
+// 11 MiB hoy): la base es un fichero que no controla este código.
+const maxInitGo = 256 << 20
+
+// initEntiendeCapas sigue /sbin/overlay-init dentro de la imagen y mira si el
+// fichero al que lleva entiende kling.layer.
+func initEntiendeCapas(ctx context.Context, im imagenDebugfs) (bool, error) {
+	p := guestInitPath
+	for saltos := 0; ; saltos++ {
+		e, err := im.stat(ctx, p)
+		if err != nil {
+			return false, err
+		}
+		if !e.existe {
+			return false, nil
+		}
+		if e.tipo != "symlink" {
+			break
+		}
+		if saltos >= maxEnlacesRuta {
+			return false, fmt.Errorf("too many symlinks resolving %s", guestInitPath)
+		}
+		if strings.HasPrefix(e.enlace, "/") {
+			p = path.Clean(e.enlace) // desde la raíz de la IMAGEN
+		} else {
+			p = path.Join(path.Dir(p), e.enlace)
+		}
+	}
+	c := im.cmd(ctx, "-R", "cat "+comillas(p))
+	out, err := c.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	if err := c.Start(); err != nil {
+		return false, err
+	}
+	// Se deja de leer en cuanto hay respuesta: el resto no hace falta.
+	defer func() { _ = c.Process.Kill(); _ = c.Wait() }()
+	r := io.LimitReader(out, maxInitGo+1)
+	cab := make([]byte, 4)
+	n, _ := io.ReadFull(r, cab)
+	if string(cab[:n]) != "\x7fELF" {
+		// El guion de sh: pequeño, con tope como cualquier salida de debugfs.
+		b, err := io.ReadAll(io.LimitReader(r, maxSalidaDebugfs))
+		if err != nil {
+			return false, err
+		}
+		return bytes.Contains(append(cab[:n], b...), []byte(api.LayerBootParam)), nil
+	}
+	// Un binario: el agente, que hace de init si lleva la marca. La cadena
+	// kling.layer sola no vale, que un agente anterior también la tiene.
+	cuenta := &contador{r: r}
+	ok, err := guest.HasInitMarker(io.MultiReader(bytes.NewReader(cab), cuenta))
+	if err == nil && !ok && cuenta.n+int64(len(cab)) > maxInitGo {
+		err = fmt.Errorf("%s is over %d MiB", p, maxInitGo>>20)
+	}
+	return ok, err
+}
+
+// contador cuenta lo que se lee de r.
+type contador struct {
+	r io.Reader
+	n int64
+}
+
+func (c *contador) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // layerDriveID nombra el disco de la capa dentro del VMM. Como el de los
