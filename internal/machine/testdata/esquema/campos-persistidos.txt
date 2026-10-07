@@ -48,6 +48,7 @@ state.json api.Machine shares []api.ShareAttachment
 state.json api.Machine snapshot_bytes int64
 state.json api.Machine started_at *time.Time
 state.json api.Machine state api.State
+state.json api.Machine stopped_at *time.Time
 state.json api.Machine thaw_ms int64
 state.json api.Machine transition string
 state.json api.Machine ttl_at *time.Time
@@ -69,10 +70,13 @@ state.json api.WakePhases check_ms float64
 state.json api.WakePhases finish_ms float64
 state.json api.WakePhases forwards_ms float64
 state.json api.WakePhases load_ms float64
+state.json api.WakePhases memory_ms float64
+state.json api.WakePhases mirror_ms float64
 state.json api.WakePhases net_ms float64
 state.json api.WakePhases resync_ms float64
 state.json api.WakePhases socket_ms float64
 state.json api.WakePhases spawn_ms float64
+state.json api.WakePhases store_ms float64
 state.json api.WakePhases tier string
 state.json api.WakePhases total_ms float64
 state.json api.WakePhases wait_ms float64
