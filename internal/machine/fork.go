@@ -138,6 +138,16 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	if err := m.forkSinCredenciales(src); err != nil {
 		return "", nil, err
 	}
+	// La cuota del dueño de las copias, antes de pausar y volcar el original:
+	// solo un filtro (cada copia se decide al publicarla). El disco no se
+	// mira aquí: el de una copia es el del snapshot que aún no existe.
+	dueño, ok := opt.Labels[api.LabelOwner]
+	if !ok {
+		dueño = src.Labels[api.LabelOwner]
+	}
+	if err := m.comprobarCuota(dueño, UsoCuota{Maquinas: n, MemMiB: n * memCuota(src.MemMiB, src.MemMaxMiB)}); err != nil {
+		return "", nil, err
+	}
 
 	t := nuevosTiempos()
 	// Antes de reservar nada: la espera a "listo" puede durar minutos.

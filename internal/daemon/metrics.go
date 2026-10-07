@@ -78,9 +78,9 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 		fmt.Fprintf(w, "kling_operations_total{op=%q,result=\"error\"} %d\n", op, t.Fallos[op])
 	}
 
-	fmt.Fprintln(w, "# HELP kling_admission_rejections_total Requests refused for lack of room: 409 machine limit, 503 disk, 507 memory.")
+	fmt.Fprintln(w, "# HELP kling_admission_rejections_total Requests refused for lack of room: 409 machine limit, 429 tenant quota, 503 disk, 507 memory.")
 	fmt.Fprintln(w, "# TYPE kling_admission_rejections_total counter")
-	for _, c := range []int{api.StatusMachineLimit, api.StatusDiskFull, api.StatusInsufficientMemory} {
+	for _, c := range []int{api.StatusMachineLimit, api.StatusTenantQuota, api.StatusDiskFull, api.StatusInsufficientMemory} {
 		fmt.Fprintf(w, "kling_admission_rejections_total{code=\"%d\"} %d\n", c, t.Rechazos[c])
 	}
 

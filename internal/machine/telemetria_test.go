@@ -21,6 +21,7 @@ func TestTelemetriaClasificaLosErrores(t *testing.T) {
 	tel.fin(OpRun, &api.StatusError{Code: api.StatusDiskFull, Message: "lleno"})
 	tel.fin(OpRun, fmt.Errorf("admisión: %w", &api.StatusError{Code: api.StatusInsufficientMemory}))
 	tel.fin(OpRun, &api.StatusError{Code: 500})
+	tel.fin(OpStart, excedeCuota("a", Cuota{Maquinas: 0}, UsoCuota{}, UsoCuota{Maquinas: 1}))
 	tel.fin(OpThaw, errors.New("resuming: EOF"))
 	d := (&Manager{}).Telemetria()
 
@@ -38,6 +39,10 @@ func TestTelemetriaClasificaLosErrores(t *testing.T) {
 	}
 	if n := d.Rechazos[api.StatusInsufficientMemory] - antes.Rechazos[api.StatusInsufficientMemory]; n != 1 {
 		t.Errorf("rechazos 507 (envuelto) = %d", n)
+	}
+	// La cuota de un inquilino es una negativa, no un fallo del arranque.
+	if n := d.Rechazos[api.StatusTenantQuota] - antes.Rechazos[api.StatusTenantQuota]; n != 1 || d.Fallos[OpStart] != antes.Fallos[OpStart] {
+		t.Errorf("rechazos 429 = %d, fallos de start %d", n, d.Fallos[OpStart]-antes.Fallos[OpStart])
 	}
 }
 

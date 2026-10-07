@@ -157,6 +157,9 @@ type Manager struct {
 	// OnGuestGone).
 	redCaida atomic.Pointer[func(ip string)]
 
+	// cuotas da la cuota de un inquilino (cuota_inquilino.go); nil = ninguna.
+	cuotas atomic.Pointer[func(owner string) (Cuota, bool)]
+
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
 	// simultáneas —el gateway marcando salud y el CLI guardando el catálogo— se
@@ -1299,6 +1302,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err := m.checkMachineLimit(); err != nil {
 		return nil, err
 	}
+	// La cuota del dueño, antes de nada caro: solo un filtro, publicar decide.
+	if err := m.comprobarCuota(req.Labels[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(req.MemMiB, req.MemMaxMiB), DiscoMiB: discoCuota(req.DiskMiB)}); err != nil {
+		return nil, err
+	}
 
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
@@ -1458,10 +1466,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// esperar el cerrojo de OTRA máquina. Ver doc.go.
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
-	m.mu.Lock()
-	m.byID[id] = mc
-	m.persist()
-	m.mu.Unlock()
+	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
+	if err := m.publicar(mc); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	// abandonar deshace lo publicado: la máquina ya está en byID, y dejarla ahí

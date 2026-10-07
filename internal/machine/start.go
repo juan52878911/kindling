@@ -68,6 +68,13 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 	if !arrancable(live) {
 		return nil, estadoInvalido("only a stopped machine can be started (it is %s)", live.State)
 	}
+	// Vuelve a contar como máquina y como memoria de su dueño (su disco ya
+	// contaba): se decide aquí, en la misma sección crítica en que deja de
+	// estar parada, por lo mismo que en publicar.
+	if err := m.cuotaExcedidaLocked(live.Labels[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(live.MemMiB, live.MemMaxMiB)}, live.ID); err != nil {
+		return nil, err
+	}
 	var vols []resolvedVolume
 	if len(live.Volumes) > 0 {
 		var err error

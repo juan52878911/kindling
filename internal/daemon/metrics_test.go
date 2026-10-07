@@ -25,6 +25,7 @@ func TestMetricsExponeLaTelemetria(t *testing.T) {
 		`kling_admission_rejections_total{code="507"}`,
 		`kling_admission_rejections_total{code="503"}`,
 		`kling_admission_rejections_total{code="409"}`,
+		`kling_admission_rejections_total{code="429"}`,
 		`kling_operation_duration_ms_bucket{kind="thaw",le="+Inf"}`,
 		`kling_operation_duration_ms_count{kind="boot"}`,
 		`kling_gc_evictions_total`,
