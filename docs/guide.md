@@ -201,6 +201,21 @@ Binaries are published on
 disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Kill`,
 `Setsid`, `Stat_t`).
 
+**Upgrading — `kling upgrade`:**
+
+```sh
+sudo kling upgrade               # Linux: the daemon of kling.service, to the latest release
+kling upgrade -tag v0.18.0       # macOS (launchd agent), or a specific release
+kling upgrade -dry-run           # download, verify and print the plan
+kling upgrade -rollback          # back to the binaries saved by the last upgrade
+```
+
+It verifies every binary against the release's `SHA256SUMS`, checks that the new kling
+reads the state on disk, backs up the current binaries, restarts the daemon (running
+microVMs keep running), checks `/info`, the machines and the templates, and rolls back by
+itself if anything fails. On top of an existing install, `install.sh` points here and only
+reinstalls with `--force`. Details: [docs/actualizar.md](actualizar.md).
+
 **From source — `make`:**
 
 ```sh

@@ -1328,6 +1328,20 @@ congelarla: el entorno es configuración. Un secreto que no deba tocar nunca el 
 va por `machine secret` o por el proxy de credenciales. Una imagen cuyo agente no sabe
 leer el entorno hace fallar la máquina en vez de arrancar su servicio sin él.
 
+### 26. `kling upgrade` no instala nada sin verificar, y deja volver
+
+`kling upgrade` baja la release solo por https (también las redirecciones), con
+tamaño acotado, y no acepta un binario que no esté en el `SHA256SUMS` de esa misma
+release o cuyo hash no coincida; con `-from-dir`, si hay un `SHA256SUMS` al lado,
+lo mismo. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
+contra ningún daemon) **antes** de parar nada. Se cambia por `rename` desde un
+temporal del mismo directorio, nunca escribiendo encima, y lo de antes queda en
+`<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que bajó un
+usuario no lo ejecuta root: en Linux corre entero como root (`sudo`), y lo que
+toca de los usuarios (sus extensiones) se lo deja a `kling upgrade -cli`. No pasa
+nada por argv que no sea público (etiqueta, rutas, la unidad), y del entorno del
+daemon solo lee `KLING_LIB_DIR`. `SHA256SUMS` sigue sin firmar (ver abajo).
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
