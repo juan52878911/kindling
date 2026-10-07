@@ -53,7 +53,9 @@ import (
 // lo que lleva más de daemon.build_cache_max_days sin usarse (en la
 // verificada, cada uso le pone la fecha) y, si entre las dos pasan de
 // daemon.build_cache_max_gib, lo más viejo, primero lo no verificado. Lo que
-// acaba de usar la construcción no se toca.
+// acaba de usar la construcción no se toca, pero solo hasta el tope: la lista
+// la escribe el constructor, y uno comprometido no puede así mantener la
+// verificada por encima de daemon.build_cache_max_gib.
 
 // LimitesCacheConstruccion son los topes de las cachés de blobs del
 // constructor sin root (daemon.build_cache_max_gib y
@@ -69,6 +71,14 @@ const (
 	cacheMaxDiasPorDefecto = 30
 )
 
+// BuildCacheMaxGiBTope y BuildCacheMaxDaysTope son lo más que se acepta (1
+// PiB, 100 años). Pasado eso, GiB<<30 y días*24h desbordan: un tope a 0 o
+// negativo que, en vez de guardar más, lo borraría todo en cada barrido.
+const (
+	BuildCacheMaxGiBTope  = 1 << 20
+	BuildCacheMaxDaysTope = 36500
+)
+
 func (l LimitesCacheConstruccion) efectivos() (bytes int64, edad time.Duration) {
 	gib, dias := l.MaxGiB, l.MaxDays
 	if gib <= 0 {
@@ -77,6 +87,7 @@ func (l LimitesCacheConstruccion) efectivos() (bytes int64, edad time.Duration) 
 	if dias <= 0 {
 		dias = cacheMaxDiasPorDefecto
 	}
+	gib, dias = min(gib, BuildCacheMaxGiBTope), min(dias, BuildCacheMaxDaysTope)
 	return int64(gib) << 30, time.Duration(dias) * 24 * time.Hour
 }
 
@@ -353,7 +364,7 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 	for _, d := range conservar {
 		guardar[strings.TrimPrefix(d, "sha256:")] = true
 	}
-	var blobs []entradaCache
+	var blobs, usados []entradaCache
 	var total int64
 	recorrer := func(dir *os.Root, esVerificada bool) {
 		d, err := dir.Open(".")
@@ -381,11 +392,12 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 				}
 				continue
 			}
+			ent := entradaCache{dir: dir, nombre: e.Name(), tam: fi.Size(), mod: fi.ModTime(), verificada: esVerificada}
 			if guardar[e.Name()] {
-				total += fi.Size()
-				continue
+				usados = append(usados, ent)
+			} else {
+				blobs = append(blobs, ent)
 			}
-			blobs = append(blobs, entradaCache{dir: dir, nombre: e.Name(), tam: fi.Size(), mod: fi.ModTime(), verificada: esVerificada})
 			total += fi.Size()
 		}
 	}
@@ -399,6 +411,20 @@ func barrerCachesConstruccion(cache, verificada string, uid uint32, maxBytes int
 	if v, err := os.OpenRoot(filepath.Join(verificada, "oci", "sha256")); err == nil {
 		defer v.Close()
 		recorrer(v, true)
+	}
+
+	// Lo usado se guarda mientras quepa en el tope, primero lo verificado
+	// (lo que la próxima construcción lee sin rehashear); lo que no cabe se
+	// barre como lo demás. La lista la escribe el constructor: sin esto,
+	// nombrando blobs verificados mantendría la caché por encima del tope.
+	sort.SliceStable(usados, func(i, j int) bool { return usados[i].verificada && !usados[j].verificada })
+	var protegidos int64
+	for _, u := range usados {
+		if protegidos+u.tam <= maxBytes {
+			protegidos += u.tam
+			continue
+		}
+		blobs = append(blobs, u)
 	}
 
 	// Lo no verificado antes (su fecha la pone el constructor: no se le

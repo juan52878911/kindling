@@ -281,6 +281,39 @@ func TestLimitesCacheEfectivos(t *testing.T) {
 	if b != 2<<30 || e != 24*time.Hour {
 		t.Fatal(b, e)
 	}
+	// Un tope enorme quiere decir guardar más: sin el recorte, días*24h y
+	// GiB<<30 desbordan a negativo o 0 y el barrido lo borraría todo.
+	for _, l := range []LimitesCacheConstruccion{{MaxGiB: 1 << 40, MaxDays: 1 << 20}, {MaxGiB: 1 << 34, MaxDays: 200000}} {
+		b, e = l.efectivos()
+		if b < 20<<30 || e < 30*24*time.Hour {
+			t.Fatalf("%+v: %d bytes, %s", l, b, e)
+		}
+	}
+}
+
+// La lista de lo usado la escribe el constructor: nombrando blobs
+// verificados no mantiene la caché por encima del tope. Lo usado se guarda
+// solo mientras quepa.
+func TestBarrerUsadosNoPasanDelTope(t *testing.T) {
+	cache, verificada, _ := cachesDePrueba(t)
+	ahora := time.Now()
+	var usados []string
+	for i, c := range []byte("abcd") {
+		p := filepath.Join(verificada, "oci", "sha256", strings.Repeat(string(c), 64))
+		os.WriteFile(p, make([]byte, 1<<20), 0o644)
+		os.Chtimes(p, ahora.Add(-time.Duration(4-i)*time.Hour), ahora.Add(-time.Duration(4-i)*time.Hour))
+		usados = append(usados, "sha256:"+strings.Repeat(string(c), 64))
+	}
+	barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 2<<20, 30*24*time.Hour, usados, ahora)
+	var total int64
+	es, _ := os.ReadDir(filepath.Join(verificada, "oci", "sha256"))
+	for _, e := range es {
+		fi, _ := e.Info()
+		total += fi.Size()
+	}
+	if total > 2<<20 || len(es) != 2 {
+		t.Fatalf("quedan %d ficheros, %d bytes con un tope de 2 MiB", len(es), total)
+	}
 }
 
 // Como root en Linux: el usuario de construcción (aquí nobody) no puede

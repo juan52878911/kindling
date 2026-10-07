@@ -348,3 +348,19 @@ func TestMaskSpecEnv(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// Un tope de la caché por encima del máximo, por entorno, se avisa y se
+// queda en el de por defecto: no llega a desbordar en el daemon.
+func TestBuildCacheConfigTopes(t *testing.T) {
+	t.Setenv("KLING_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("KLING_BUILD_CACHE_MAX_GIB", "17179869184")
+	t.Setenv("KLING_BUILD_CACHE_MAX_DAYS", "200000")
+	if l := buildCacheConfig(); l.MaxGiB != 0 || l.MaxDays != 0 {
+		t.Fatalf("%+v", l)
+	}
+	t.Setenv("KLING_BUILD_CACHE_MAX_GIB", "50")
+	t.Setenv("KLING_BUILD_CACHE_MAX_DAYS", "7")
+	if l := buildCacheConfig(); l.MaxGiB != 50 || l.MaxDays != 7 {
+		t.Fatalf("%+v", l)
+	}
+}

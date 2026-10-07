@@ -486,8 +486,9 @@ func (c *Config) Set(key, value string) error {
 			if err != nil {
 				return err
 			}
-			if n < 0 || n > 1<<20 {
-				return fmt.Errorf("daemon.%s out of range (0 is the default)", field)
+			// Los mismos topes que daemon.BuildCacheMax*Tope: más desborda.
+			if n < 0 || (field == "build_cache_max_gib" && n > 1<<20) || (field == "build_cache_max_days" && n > 36500) {
+				return fmt.Errorf("daemon.%s out of range (0-1048576 GiB, 0-36500 days; 0 is the default)", field)
 			}
 			if field == "build_cache_max_gib" {
 				c.Daemon.BuildCacheMaxGiB = n
