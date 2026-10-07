@@ -65,6 +65,15 @@ kling doctor
 hash **antes** de tocar el disco y deja los binarios en `--prefix` (por defecto
 `~/.local/bin`).
 
+Para actualizar una instalación que ya existe, `kling upgrade` (con `sudo` en
+Linux, donde reinicia `kling.service`): baja la release de la plataforma, la
+verifica contra el mismo `SHA256SUMS`, comprueba que el binario nuevo lee el
+estado que hay, guarda los binarios de ahora, para el daemon, cambia, arranca,
+comprueba `/info`, las máquinas y los dorados y, si algo falla, vuelve solo;
+`kling upgrade -rollback` vuelve a mano. `install.sh` sobre un kling ya
+instalado remite a él y solo reinstala con `--force`. Detalles en
+[`actualizar.md`](actualizar.md) §3.4.
+
 `kling plugin install <n>` baja
 `https://github.com/juan52878911/kindling/releases/download/<tag>/kling-<n>-<os>-<arch>`
 (con `<tag>` la versión del propio `kling`, o la de `@vX`), lo verifica contra el
@@ -113,7 +122,16 @@ git checkout main && git pull --rebase && git status
 #    (y su enlace al final del fichero)
 git commit -am "changelog: vX.Y.Z"
 
-# 3. la etiqueta dispara el workflow
+# 3. actualizar desde la anterior, en el laboratorio (KVM y root; ver actualizar.md §3.5),
+#    con los binarios sellados (-ldflags "-X main.Version=..."): si no, el script se para
+sudo OLD_DIR=<kling de la anterior> NEW_DIR=<binarios de HEAD> scripts/94-e2e-upgrade.sh
+
+# 3b. lo mismo en el Mac, con el agente de launchd (instala uno suyo y lo
+#     quita; se niega si ya tienes dev.kindling.daemon): kling y kling-vz de
+#     la anterior y de HEAD, sellados, y las imágenes de un daemon Linux arm64
+OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmlinux, min.ext4…> scripts/95-e2e-upgrade-mac.sh
+
+# 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```
 
@@ -151,8 +169,8 @@ daemon, MINOR para funcionalidades compatibles, PATCH para arreglos. Seguimos en
 una extensión oficial lleva la del núcleo con el que salió.
 
 Qué se promete al pasar de una versión a otra (formatos en disco con `schema`,
-migraciones con copia, dorados obsoletos, qué pasa al mezclar versiones) y el
-plan de `kling upgrade`, en [`actualizar.md`](actualizar.md). Un cambio que
+migraciones con copia, dorados obsoletos, qué pasa al mezclar versiones) y cómo
+funciona `kling upgrade`, en [`actualizar.md`](actualizar.md). Un cambio que
 sube la versión de un formato persistido va en una MINOR, con su línea en
 `Changed` del CHANGELOG; cómo volver atrás va en `actualizar.md`.
 

@@ -42,6 +42,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `machine-env` | sin publicar | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
 | `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso; tiene que caber en el disco libre del host, `503` si no, y `KLING_MAX_DISK_MIB` baja el máximo); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
 | `start` | sin publicar | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
+| `registry-auth` | sin publicar | `GET/POST /registries`, `DELETE /registries/{host}`: credenciales de registros privados que usa el constructor `oci` (ver "Registros") |
+| `oci-blobs` | sin publicar | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -120,6 +122,21 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `DELETE /images/{name}` | la borra si nada la usa |
 | `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
 | `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto, también si la está leyendo un arranque en vuelo (vuelve a intentarlo) |
+| `GET /oci/blobs/{digest}` | `{digest, size}` si el blob (`sha256:<64 hex>`) ya está en la caché de blobs OCI del daemon (`$KLING_ROOT/cache/oci`, o en la verificada si los constructores corren sin root), `404` si no; le pone la fecha de hoy para el barrido. No lo sirve: es para no volver a subirlo |
+| `PUT /oci/blobs/{digest}` | recibe un blob en flujo (con `Content-Length` obligatorio, `411` sin él; hasta 16 GiB) y lo deja en esa caché solo si su sha256 es el del digest (`400` si no, sin dejar nada): temporal, fsync y renombrado atómico. `201` si lo escribe, `200` con `unchanged` si ya estaba (sin leer el cuerpo; también si ya pasó a la caché verificada del constructor sin root). `507` si no cabe en `daemon.build_cache_max_gib` ni barriendo lo que lleve más de 2 horas. Queda de root con el grupo del usuario de construcción, 0640. Lo usa `kling image import -archive`: después, `POST /images` con el constructor `oci` y `{"source": "archive", "digest": <manifiesto>}` construye desde la caché, sin red |
+
+### Registros
+
+Credenciales de registros privados, guardadas en el daemon
+(`$KLING_ROOT/registries.json`, root 0600) y no en el `spec` de la construcción,
+que va entero a la receta. Solo admin. El constructor `oci` recibe solo las del
+registro de su referencia (ver [imagenes.md](imagenes.md#registros-privados)).
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /registries` | `[{"host", "username"}]`, sin contraseñas |
+| `POST /registries` | guarda o sustituye (`{"host", "username", "password"}`; `host` es `registro[:puerto]`, sin esquema ni ruta, y los nombres de Docker Hub son `docker.io`; `password` hasta 16 KiB, una línea). Devuelve `{"host", "username"}`. No se comprueban contra el registro: se ve en el primer import |
+| `DELETE /registries/{host}` | las borra, y con ellas las capas que se bajaron con ellas (`cache/verified/registry-<sha256 del host>`); `404` si no había |
 
 **Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
 (`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
@@ -144,8 +161,10 @@ porque el daemon lo ejecuta como root. Excepción: `oci` (el del núcleo o uno
 instalado con ese nombre) corre con el usuario de construcción
 (`kindling-build`, ver `docs/imagenes.md`) cuando existe: recibe además
 `KLING_OUT_DIR` (deja ahí la imagen; el daemon la valida y la mueve a
-`images/`) y `KLING_CACHE_DIR` (su caché), y del entorno del daemon solo una
-lista blanca. La receta la escribe el daemon, con
+`images/`), `KLING_CACHE_DIR` (su caché) y `KLING_VERIFIED_CACHE_DIR` (la
+que verificó el daemon, de solo lectura; deja en `<dir>/cache-used` los blobs
+que usó y, si acaba bien, el daemon pasa ahí los nuevos), y del entorno del
+daemon solo una lista blanca. La receta la escribe el daemon, con
 permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
@@ -643,7 +662,7 @@ puente MCP) lo ejecuta él mismo, **sin `allow_exec`** y sin argumentos de nadie
 
 | Ruta del invitado | Qué es |
 |---|---|
-| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `probe_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s) |
+| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `probe_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s). No tiene por qué ser un script de sh: en una imagen sin `sh` es un `#!` al agente, `#!/usr/local/bin/kling-guest -probe-tcp=127.0.0.1:<puerto>` o `#!/usr/local/bin/kling-guest -exec-json` con el argv en JSON en la segunda línea |
 | `/etc/kindling/post-restore.d/*` | ejecutables que corren en orden (como `run-parts`: sin ocultos, `*~` ni `*.disabled`) al final de cada restauración, con el reloj y la entropía resincronizados, los volúmenes montados y las credenciales en MMDS. `KLING_RESTORE` dice de qué: `instance` (`run -from`, fork), `thaw` o `manual` (`POST .../hooks`). Plazo de 60 s cada uno; el primero que falla para la tanda y deja `failed`. Mientras corren, el invitado no está listo. Su salida va a la consola (`kling logs`) |
 
 Rutas del agente, de control (el gateway no las reenvía):
@@ -756,7 +775,10 @@ kindling-mcp sobre las rutas genéricas:
 | `POST /images` sin `builder` | `builder: "mcp"` |
 
 El snapshot ya no devuelve `tools`, `tools_at`, `health`, `health_at` ni
-`health_err`. Los datos no se pierden: al leer un `meta.json` de v0.4, el daemon
-los pasa a las anotaciones `mcp.tools` y `mcp.health`, y al arrancar migra un
-`links.json` que quede a `store/mcp/links` (dejando el original como
-`links.json.migrated`).
+`health_err`. Hasta v0.17 el daemon pasaba esos campos de un `meta.json` de v0.4
+a las anotaciones `mcp.tools` y `mcp.health`, y movía un `links.json` a
+`store/mcp/links`. Desde v0.18 ya no: un dorado con esos campos no se lista ni
+se restaura (el error dice que se rehaga con `kling save`), y una raíz con un
+`links.json` sin migrar no arranca; las dos cosas se arreglan arrancando una
+vez kling v0.17 sobre ella ([`actualizar.md`](actualizar.md) §5, PR 11). Lo
+mismo con el estado `warm` de los daemons ≤ v0.13: el API solo dice `frozen`.

@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
@@ -62,6 +65,24 @@ func TestPull(t *testing.T) {
 	}
 	if r.Hits != hits {
 		t.Fatalf("a cached pull hit the registry %d times", r.Hits-hits)
+	}
+}
+
+// Un registro de esta máquina con TLS (un registry:2 con certificado en
+// localhost:5000) se habla por https; uno sin TLS, por http (TestPull).
+func TestPullLocalTLS(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	r.User, r.Pass, r.Basic = "u", "p", true
+	srv := httptest.NewTLSServer(r.Config.Handler)
+	defer srv.Close()
+	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: "x"}})
+	man, _ := r.Image("amd64", nil, layer)
+	c := &oci.Client{Cache: t.TempDir(), HTTP: srv.Client(),
+		Auth: map[string]oci.Credential{strings.TrimPrefix(srv.URL, "https://"): {Username: "u", Password: "p"}}}
+	ref := strings.TrimPrefix(srv.URL, "https://") + "/x/y"
+	if _, err := c.Pull(context.Background(), ref, man, "amd64"); err != nil {
+		t.Fatalf("TLS registry on 127.0.0.1: %v", err)
 	}
 }
 
@@ -213,5 +234,26 @@ func TestSchema1(t *testing.T) {
 		if _, err := c.Pull(context.Background(), r.Host()+"/x/y", d, "amd64"); err == nil || !strings.Contains(err.Error(), "schema 1") {
 			t.Errorf("Pull (%q): %v", mt, err)
 		}
+	}
+}
+
+// Un registro con un certificado que no se puede verificar falla al momento
+// (sin el reintento de 2 s de un corte de red) y dice cómo confiar en su CA.
+func TestRegistroConCertificadoDesconocido(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "https://")
+	c := &oci.Client{Cache: t.TempDir(), Log: io.Discard}
+	t0 := time.Now()
+	ref, perr := oci.ParseImageRef(host + "/x/y:1")
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	_, err := c.Resolve(context.Background(), ref)
+	if err == nil || !strings.Contains(err.Error(), "SSL_CERT_FILE") {
+		t.Fatalf("certificado desconocido: %v; quería la pista de SSL_CERT_FILE", err)
+	}
+	if d := time.Since(t0); d > 1500*time.Millisecond {
+		t.Errorf("tardó %s: reintentó un error de certificado", d)
 	}
 }

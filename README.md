@@ -45,7 +45,9 @@ kling image copy min -from ssh://user@linux-arm64-host   # images are built on L
 
 The script verifies every binary against the release's `SHA256SUMS`, installs to
 `~/.local/bin` without sudo, and takes `--with mcp,sandbox`, `--tag vX.Y.Z` and
-`--prefix DIR`. From source: `make install` (plus `make vz` on a Mac). Details:
+`--prefix DIR`. To upgrade later: `kling upgrade` (`sudo` on Linux) swaps the binaries,
+restarts the daemon, checks it and rolls back by itself if it fails. From source:
+`make install` (plus `make vz` on a Mac). Details:
 [`docs/mac.md`](docs/mac.md), [`docs/releases.md`](docs/releases.md),
 [`docs/actualizar.md`](docs/actualizar.md) (upgrades).
 

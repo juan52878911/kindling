@@ -321,3 +321,18 @@ func TestSetCredAudit(t *testing.T) {
 		}
 	}
 }
+
+func TestSetBuildCache(t *testing.T) {
+	var c Config
+	if err := c.Set("daemon.build_cache_max_gib", "50"); err != nil || c.Daemon.BuildCacheMaxGiB != 50 {
+		t.Fatalf("%v %d", err, c.Daemon.BuildCacheMaxGiB)
+	}
+	if err := c.Set("daemon.build_cache_max_days", "7"); err != nil || c.Daemon.BuildCacheMaxDays != 7 {
+		t.Fatalf("%v %d", err, c.Daemon.BuildCacheMaxDays)
+	}
+	for _, kv := range [][2]string{{"daemon.build_cache_max_gib", "-1"}, {"daemon.build_cache_max_days", "x"}, {"daemon.build_cache_max_days", "36501"}, {"daemon.build_cache_max_gib", "1048577"}} {
+		if err := c.Set(kv[0], kv[1]); err == nil {
+			t.Errorf("%s=%s aceptado", kv[0], kv[1])
+		}
+	}
+}

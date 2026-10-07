@@ -119,7 +119,7 @@ func maxDiskMiB() int {
 // dejaría al host sin disco.
 func (m *Manager) checkDiskParaOverlay(diskMiB int) error {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(m.root, &st); err != nil {
+	if err := statfsRaiz(m.root, &st); err != nil {
 		return nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
@@ -181,7 +181,7 @@ func (m *Manager) checkDisk() error {
 		return nil
 	}
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(m.root, &st); err != nil {
+	if err := statfsRaiz(m.root, &st); err != nil {
 		return nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
@@ -190,9 +190,14 @@ func (m *Manager) checkDisk() error {
 	}
 	return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
 		"only %d MiB of disk left under %s (the minimum to start a machine is %d MiB).\n"+
-			"Remove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
-			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, tope)}
+			consejoDiscoLleno, libre, m.root, tope)}
 }
+
+// consejoDiscoLleno cierra los tres rechazos por disco. Nada de "warm": era un
+// estado de v0.13 que kling ps ya no muestra; lo que ocupa disco son las
+// congeladas y las paradas.
+const consejoDiscoLleno = "Remove frozen or stopped machines or unused snapshots (`kling ps -a`, `kling snapshots`), " +
+	"or lower the minimum with KLING_MIN_FREE_DISK_MIB"
 
 // statfsRaiz es syscall.Statfs, en variable para que los tests simulen un
 // disco casi lleno.
@@ -245,14 +250,12 @@ func (m *Manager) reservarDiscoParaVolcado(memMiB int, que string) (func(), erro
 		return nil, &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
 			"only %d MiB of disk left under %s%s: thawing this copy rebuilds its %d MiB of memory from the "+
 				"golden snapshot (this filesystem cannot share blocks) and needs %d MiB free (the RAM plus the "+
-				"%d MiB minimum).\nRemove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
-				"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, otros, memMiB, necesario, minFreeDiskMiB())}
+				"%d MiB minimum).\n"+consejoDiscoLleno, libre, m.root, otros, memMiB, necesario, minFreeDiskMiB())}
 	}
 	return nil, &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
 		"only %d MiB of disk left under %s%s: %s dumps the machine's %d MiB of RAM to disk first and "+
 			"needs %d MiB free (the RAM plus the %d MiB minimum).\n"+
-			"Remove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
-			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, otros, que, memMiB, necesario, minFreeDiskMiB())}
+			consejoDiscoLleno, libre, m.root, otros, que, memMiB, necesario, minFreeDiskMiB())}
 }
 
 // admitir es la admisión completa, antes de reservar memoria.

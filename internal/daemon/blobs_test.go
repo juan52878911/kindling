@@ -211,11 +211,29 @@ func TestImageBlobSha256Sidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	otro := strings.Repeat("X", len(body)) // misma longitud que body, a propósito
-	if err := os.WriteFile(filepath.Join(imgs, "foo.ext4"), []byte(otro), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(filepath.Join(imgs, "foo.ext4"), fi.ModTime(), fi.ModTime()); err != nil {
-		t.Fatal(err)
+	// El ctime es de grano grueso (un jiffy en Linux arm64, 1 s en sistemas de
+	// ficheros con segundos): una reescritura en el mismo tic que el PUT deja
+	// el mismo ctime y ninguna huella de stat la ve (ver huellaBlob). Lo que
+	// se prueba es la de después, la de touch -r o rsync -t: se repite hasta
+	// que el ctime avanza.
+	_, ctimePut := identidadFichero(fi)
+	for plazo := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if err := os.WriteFile(filepath.Join(imgs, "foo.ext4"), []byte(otro), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(imgs, "foo.ext4"), fi.ModTime(), fi.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		nuevo, err := os.Stat(filepath.Join(imgs, "foo.ext4"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, c := identidadFichero(nuevo); c != ctimePut {
+			break
+		}
+		if time.Now().After(plazo) {
+			t.Fatal("el ctime no avanzó en 3 s")
+		}
 	}
 	rr := httptest.NewRecorder()
 	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images/foo/blob", nil))

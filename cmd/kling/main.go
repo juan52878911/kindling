@@ -64,6 +64,8 @@ func main() {
 		err = cmdDaemon(args)
 	case "up":
 		err = cmdUp(args)
+	case "upgrade":
+		err = cmdUpgrade(args)
 	case "status":
 		err = cmdStatus(args)
 	case "doctor":
@@ -129,6 +131,8 @@ func main() {
 		err = cmdTemplate(args)
 	case "image":
 		err = cmdImages(args)
+	case "registry":
+		err = cmdRegistry(args)
 	case "topo":
 		err = cmdTopo(args)
 	case "top":
@@ -347,6 +351,7 @@ func cmdDaemon(args []string) error {
 	srv.SetCoW(cowConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
+	srv.SetBuildCache(buildCacheConfig)
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -373,6 +378,35 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// buildCacheConfig lee daemon.build_cache_max_gib y
+// daemon.build_cache_max_days; KLING_BUILD_CACHE_MAX_GIB y
+// KLING_BUILD_CACHE_MAX_DAYS mandan sobre el fichero. Se llama en cada
+// construcción: cambiarlos no pide reiniciar el daemon. 0, un valor que no
+// se entiende o uno por encima del tope (daemon.BuildCacheMax*Tope) = el de
+// por defecto.
+func buildCacheConfig() daemon.LimitesCacheConstruccion {
+	cfg := loadConfig()
+	l := daemon.LimitesCacheConstruccion{MaxGiB: cfg.Daemon.BuildCacheMaxGiB, MaxDays: cfg.Daemon.BuildCacheMaxDays}
+	for _, v := range []struct {
+		env string
+		dst *int
+		max int
+	}{{"KLING_BUILD_CACHE_MAX_GIB", &l.MaxGiB, daemon.BuildCacheMaxGiBTope}, {"KLING_BUILD_CACHE_MAX_DAYS", &l.MaxDays, daemon.BuildCacheMaxDaysTope}} {
+		if s := os.Getenv(v.env); s != "" {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 0 {
+				log.Printf("warning: %s=%q is not a whole number (using the default)", v.env, s)
+				n = 0
+			} else if n > v.max {
+				log.Printf("warning: %s=%q is over %d (using the default)", v.env, s, v.max)
+				n = 0
+			}
+			*v.dst = n
+		}
+	}
+	return l
 }
 
 // credAuditConfig lee daemon.credaudit_max_mib y daemon.credaudit_generations;

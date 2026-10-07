@@ -701,8 +701,33 @@ func comprobarVersionEstado(root string) error {
 	if err != nil {
 		return nil // que no exista es la primera arrancada; ilegible lo trata load
 	}
-	if _, err := esquema.Comprobar(ruta, b, versionEstadoMax); esquema.EsMasNuevo(err) {
+	v, err := esquema.Comprobar(ruta, b, versionEstadoMax)
+	if esquema.EsMasNuevo(err) {
 		return err
+	}
+	if err == nil && v == 0 {
+		return comprobarEstadoV013(ruta, b)
+	}
+	return nil
+}
+
+// comprobarEstadoV013 se niega a arrancar con un state.json de kling ≤ v0.13,
+// que llamaba "warm" al estado congelado. Hasta v0.17 se traducía al leerlo;
+// ya no (docs/actualizar.md §5, PR 11), y leerlo sin traducir dejaría esas
+// máquinas en un estado que nadie conoce: ni se despiertan ni se recogen.
+func comprobarEstadoV013(ruta string, b []byte) error {
+	var list []struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if json.Unmarshal(b, &list) != nil {
+		return nil // lo ilegible lo aparta load, como siempre
+	}
+	for _, mc := range list {
+		if mc.State == "warm" {
+			return fmt.Errorf("%s was written by kling v0.13 or older (machine %s is %q, now called %q), which this kling no longer reads: "+
+				"start kling v0.17 once on this root (it rewrites the state), then this one", ruta, mc.ID, mc.State, api.StateWarm)
+		}
 	}
 	return nil
 }
@@ -1362,9 +1387,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			log.Printf("warning: could not check whether base %s understands layers: %v", src, cerr)
 		case !ok:
 			return nil, fmt.Errorf("image %q is layered, but its base (%s) has an overlay-init "+
-				"from before layers existed: it would ignore %s and boot the guest without the "+
-				"service inside.\nRebuild the base (scripts/70-build-minimal-image.sh) or "+
-				"repackage this service as a monolithic image",
+				"from before layers existed (or a guest agent without the Go init): it would ignore %s "+
+				"and boot the guest without the service inside.\nRebuild the base "+
+				"(scripts/70-build-minimal-image.sh, or re-import a Docker image with an up-to-date "+
+				"kling-guest) or repackage this service as a monolithic image",
 				req.Image, src, api.LayerBootParam)
 		}
 	}

@@ -36,6 +36,18 @@ var coreTree = []section{
                                                    nftables, user, images, daemon
                                                    and extension units
 `},
+		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]           downloads and verifies a release,
+      [-dry-run] [-force] [-unit NAME]             checks it reads the state, backs up,
+                                                   restarts the daemon with it, checks
+                                                   /info, machines and templates, and
+                                                   rolls back by itself if not (sudo
+                                                   on Linux; -unit must run the daemon
+                                                   on the socket; -cli: only this
+                                                   binary; guest agents only in
+                                                   KLING_LIB_DIR)
+  upgrade -rollback [-root DIR]                    back to the last backup, also with
+                                                   the daemon down
+`},
 		{Name: "status", Summary: "which piece is up and which is missing", Usage: `  status [-v] [-json]                              which piece is up and which is
                                                    missing (-v: daemon details)
 `},
@@ -172,10 +184,22 @@ var coreTree = []section{
                                                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
       [-e K=V] [-env-file F] [-user U]             Docker or root: the tag resolves to a
-      [-entrypoint ARG]... [-restart R]            digest, every layer is checked by
-      [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
-                                                   values into the image (per machine:
-                                                   kling run -image <ref> -e KEY)
+      [-entrypoint ARG]... [-restart R]            digest, every layer (tar, gzip or
+      [-max-size 4G] [-arch A] [-- cmd args...]    zstd) is checked by sha256. -- replaces
+                                                   its CMD; -e bakes values into the
+                                                   image (per machine: kling run -image
+                                                   <ref> -e KEY). Images without sh
+                                                   (distroless, scratch) boot with the
+                                                   agent's init in Go. Blobs stay cached,
+                                                   bounded by daemon.build_cache_max_gib
+                                                   and _days
+  image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
+                                                   docker save (manifest.json) or an OCI
+                                                   layout (tar or dir). Only the missing
+                                                   blobs go to the daemon, each checked by
+                                                   sha256, within the same cache limit;
+                                                   no registry. -image repo:tag picks one
+                                                   in an archive with several
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
@@ -186,6 +210,17 @@ var coreTree = []section{
                                                    and base) between daemons
   image toolchain                                  builds the image with npm and pip
                                                    (try and volume populate use it)
+`},
+		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
+                                                   the daemon; the password or token is
+                                                   read from stdin (no echo on a tty)
+  registry logout <registry>...                    removes them and the layers pulled
+                                                   with them
+  registry ls [-json]                              registries with credentials (no
+                                                   secrets)
+  registry import [-config F] [registry...]        copies them from ~/.docker/config.json
+                                                   (only those stored in it, not in a
+                                                   credential helper)
 `},
 	}},
 	{title: "VOLUMES", cmds: []plugin.Command{

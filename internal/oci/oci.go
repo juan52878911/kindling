@@ -11,6 +11,8 @@ package oci
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,9 +24,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -96,6 +100,10 @@ type Config struct {
 	OS           string      `json:"os"`
 	Variant      string      `json:"variant,omitempty"`
 	Config       ImageConfig `json:"config"`
+	// RootFS.DiffIDs son los sha256 de las capas SIN comprimir, en orden.
+	RootFS struct {
+		DiffIDs []string `json:"diff_ids"`
+	} `json:"rootfs"`
 }
 
 // ImageConfig es la parte "config" de la configuración de una imagen: lo
@@ -155,11 +163,11 @@ type Client struct {
 	// tope, una capa sin tamaño declarado no se acepta.
 	MaxBytes int64
 	// Unpack, si no está vacío, es un directorio donde Pull deja además cada
-	// capa gzip descomprimida (Layer.Tar), una vez y en paralelo, para que
-	// quien la recorre dos veces (el árbol y luego los datos del ext4) no
-	// la descomprima dos. Es de quien llama: lo borra él. Con MaxBytes, lo
-	// descomprimido no puede pasar de maxUnpackRatio veces el tope (una
-	// bomba gzip llenaría el disco).
+	// capa comprimida (gzip o zstd) descomprimida (Layer.Tar), una vez y en
+	// paralelo, para que quien la recorre dos veces (el árbol y luego los
+	// datos del ext4) no la descomprima dos. Es de quien llama: lo borra él.
+	// Con MaxBytes, lo descomprimido no puede pasar de maxUnpackRatio veces
+	// el tope (una bomba gzip o zstd llenaría el disco).
 	Unpack string
 	// SiempreRehash: los blobs de la caché se rehashean siempre antes de
 	// usarlos. Para el constructor que corre sin privilegios (ver
@@ -168,12 +176,37 @@ type Client struct {
 	// root heredado al nombre de otro del mismo tamaño— para envenenar los
 	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
 	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
+	// No vale para Verificadas.
 	SiempreRehash bool
+	// Auth son las credenciales de los registros privados, por CredentialKey
+	// (auth.go). Sin ellas, tokens anónimos.
+	Auth map[string]Credential
+	// Offline: nada se pide a un registro. Lo que no esté en las cachés es un
+	// error. Para lo importado de un archivo (archive.go): el daemon dejó sus
+	// blobs en la caché (o en la verificada de ese archivo), comprobados, y la
+	// referencia no es de ningún registro.
+	Offline bool
+	// Verificadas son cachés de SOLO LECTURA (cada una, el directorio que
+	// tiene sha256/ dentro) que llena otro, el daemon como root, después de
+	// comprobar cada blob por sha256 (ver internal/daemon/builders_cache.go):
+	// la de lo público y, si la construcción tiene una, la de su origen (un
+	// registro con credenciales, un archivo). Se miran antes que Cache, en
+	// orden, y un blob de ahí se usa sin rehashear aunque SiempreRehash: solo
+	// si el fichero, sha256/, el directorio y su padre son de root sin
+	// escritura para grupo ni otros (quien construye no puede cambiarlo ni
+	// renombrarlo) y el fichero es regular con el tamaño del manifiesto. Si
+	// no, cuenta como si no estuviera. En ellas no se escribe nunca.
+	Verificadas []string
 
-	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
+	mu     sync.Mutex // tokens, plain, hc, Log y usados: las capas se bajan en paralelo
+	usados map[string]bool
 	authMu sync.Mutex // un solo token pedido a la vez
+	// tokens es la cabecera Authorization de cada registro/repo: "Bearer
+	// <token>" o, si el registro pide Basic, "Basic <credencial>".
 	tokens map[string]string
-	hc     *http.Client
+	// plain son los registros de esta máquina que hablan http (scheme).
+	plain map[string]bool
+	hc    *http.Client
 }
 
 // parallel es cuántas capas se bajan a la vez (docker pull baja 3).
@@ -182,6 +215,17 @@ const parallel = 4
 // maxUnpackRatio es cuánto puede crecer una imagen al descomprimirla,
 // respecto a MaxBytes: lo mismo que deja el constructor oci al aplanado.
 const maxUnpackRatio = 8
+
+// zstdParallel es cuántas capas zstd se descomprimen a la vez. Cada una
+// guarda su historia, ~230 MiB de RSS con la ventana más grande (una de gzip,
+// 32 KiB): con tantas como núcleos, una imagen de capas con ventanas de 128
+// MiB pediría varios GiB en un host grande.
+const zstdParallel = 2
+
+// unpackHook, si no es nil, se llama al empezar a descomprimir cada capa
+// (con los turnos ya cogidos) y lo que devuelve, al acabar. Es para las
+// pruebas.
+var unpackHook func(zstd bool) func()
 
 func (c *Client) client() *http.Client {
 	if c.HTTP != nil {
@@ -205,7 +249,11 @@ func (c *Client) client() *http.Client {
 
 // checkRedirect sigue las redirecciones de los registros (las capas suelen
 // estar en un CDN) pero nunca de https a http: el contenido se verifica por
-// sha256, pero el token de la petición no debe viajar en claro.
+// sha256, pero el token de la petición no debe viajar en claro. Y la cabecera
+// Authorization (el token, o la credencial de un registro con Basic) solo va
+// al host:puerto de la petición original: Go la mantiene hacia un subdominio
+// o hacia otro puerto del mismo host, y un CDN no la necesita (su URL ya va
+// firmada).
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
@@ -213,7 +261,22 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" && !(req.URL.Scheme == "http" && isLocalHost(req.URL.Hostname()) && isLocalHost(via[0].URL.Hostname())) {
 		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 	}
+	if !strings.EqualFold(req.URL.Host, via[0].URL.Host) || req.URL.Scheme != via[0].URL.Scheme {
+		req.Header.Del("Authorization")
+	}
 	return nil
+}
+
+// scheme es "https", salvo para un registro de esta máquina que ya contestó
+// en claro a https (un registry:2 de pruebas sin TLS): "http". Como docker,
+// uno de esta máquina se prueba primero con https, por si lleva TLS.
+func (c *Client) scheme(registry string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.plain[registry] {
+		return "http"
+	}
+	return "https"
 }
 
 // isLocalHost dice si host (sin puerto) es esta máquina: solo ahí se habla
@@ -270,9 +333,14 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	// (reconstruir sin red).
 	var body []byte
 	var mt string
-	if b, err := os.ReadFile(c.BlobPath(digest)); err == nil && sha(b) == digest {
-		body = b
-	} else {
+	for _, p := range append(c.rutasVerificadas(digest), c.BlobPath(digest)) {
+		if b, err := leerMax(p, maxManifest); err == nil && sha(b) == digest {
+			body = b
+			break
+		}
+	}
+	if body == nil {
+		var err error
 		body, mt, err = c.get(ctx, registry, repo, "manifests/"+digest, manifestAccept, maxManifest)
 		if err != nil {
 			return nil, err
@@ -287,6 +355,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 			}
 		}
 	}
+	c.usar(digest)
 	if schema1(body, mt) {
 		return nil, errSchema1(ref + "@" + digest)
 	}
@@ -338,9 +407,12 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	if img.Config.Architecture != arch || (img.Config.OS != "" && img.Config.OS != "linux") {
 		return nil, fmt.Errorf("image %s is %s/%s, not linux/%s", digest, img.Config.OS, img.Config.Architecture, arch)
 	}
+	if err := checkDiffIDs(m.Layers, img.Config.RootFS.DiffIDs, c.Offline); err != nil {
+		return nil, fmt.Errorf("image %s: %w", digest, err)
+	}
 	for _, l := range m.Layers {
-		if !strings.Contains(l.MediaType, "tar") || strings.Contains(l.MediaType, "zstd") {
-			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar and tar+gzip)", l.Digest, l.MediaType)
+		if !strings.Contains(l.MediaType, "tar") {
+			return nil, fmt.Errorf("layer %s: unsupported media type %q (only tar, tar+gzip and tar+zstd)", l.Digest, l.MediaType)
 		}
 	}
 	img.Layers, err = c.layers(ctx, registry, repo, m.Layers)
@@ -350,8 +422,28 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	return img, nil
 }
 
+// checkDiffIDs comprueba las capas sin comprimir con los diff_ids de la
+// configuración: de una capa así, el digest y el diff_id son el mismo sha256
+// (así se importa un docker save). Con strict (lo importado de un archivo),
+// además tiene que haber un diff_id por capa.
+func checkDiffIDs(layers []Descriptor, ids []string, strict bool) error {
+	if len(ids) != len(layers) {
+		if strict {
+			return fmt.Errorf("the config has %d diff_ids for %d layers", len(ids), len(layers))
+		}
+		return nil
+	}
+	for i, l := range layers {
+		if strings.HasSuffix(l.MediaType, ".tar") && l.Digest != ids[i] {
+			return fmt.Errorf("layer %d is %s but the config says its diff_id is %s", i+1, l.Digest, ids[i])
+		}
+	}
+	return nil
+}
+
 // layers baja las capas en paralelo (parallel a la vez) y, con Unpack, las
-// descomprime según van llegando (tantas a la vez como núcleos). Cada una se
+// descomprime según van llegando (tantas a la vez como núcleos, y de las zstd,
+// zstdParallel). Cada una se
 // descomprime solo después de verificar su sha256. El primer error para las
 // demás.
 func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descriptor) ([]Layer, error) {
@@ -380,6 +472,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 	}
 	out := make([]Layer, len(ds))
 	dl, cpu := make(chan struct{}, parallel), make(chan struct{}, runtime.NumCPU())
+	zs := make(chan struct{}, zstdParallel)
 	var wg sync.WaitGroup
 	var once sync.Once
 	var first error
@@ -405,15 +498,30 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 				return
 			}
 			l := Layer{Descriptor: d, Path: f.path}
-			if c.Unpack != "" && strings.Contains(d.MediaType, "gzip") {
-				select {
-				case cpu <- struct{}{}:
-				case <-ctx.Done():
+			if c.Unpack != "" && compressed(d.MediaType) {
+				// Las zstd cogen además uno de los pocos turnos de zstd, antes
+				// que el de CPU para no tenerlo parado mientras esperan.
+				zst := isZstd(f.path)
+				if zst && !acquire(ctx, zs) {
 					return
+				}
+				if !acquire(ctx, cpu) {
+					if zst {
+						<-zs
+					}
+					return
+				}
+				done := func() {}
+				if unpackHook != nil {
+					done = unpackHook(zst)
 				}
 				tar := filepath.Join(c.Unpack, fmt.Sprintf("layer-%d.tar", i))
 				err := unpack(ctx, l, tar, budget, c.MaxBytes*maxUnpackRatio)
+				done()
 				<-cpu
+				if zst {
+					<-zs
+				}
 				if err != nil {
 					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
 					return
@@ -433,9 +541,20 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 	return out, nil
 }
 
+// acquire coge un turno de sem, o devuelve false si se cancela ctx.
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // unpack deja la capa l (ya verificada) descomprimida en dst. El CRC32 del
-// gzip, que se comprueba al llegar al final, es una segunda defensa contra
-// una capa dañada en la caché después de verificarla.
+// gzip (o el xxhash64 del zstd, si lo lleva), que se comprueba al llegar al
+// final, es una segunda defensa contra una capa dañada en la caché después
+// de verificarla.
 func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
 	rc, err := OpenLayer(l)
 	if err != nil {
@@ -517,10 +636,55 @@ func (c *Client) BlobPath(digest string) string {
 	return filepath.Join(c.Cache, "sha256", strings.TrimPrefix(digest, "sha256:"))
 }
 
+// rutasVerificadas es dónde estaría el blob en cada caché verificada.
+func (c *Client) rutasVerificadas(digest string) []string {
+	out := make([]string, 0, len(c.Verificadas))
+	for _, v := range c.Verificadas {
+		out = append(out, filepath.Join(v, "sha256", strings.TrimPrefix(digest, "sha256:")))
+	}
+	return out
+}
+
+// Usados son los digests de los blobs que se han leído o dejado en las
+// cachés (manifiestos, configuración y capas), ordenados: lo que el daemon
+// verifica y pasa a la caché verificada al acabar bien una construcción.
+func (c *Client) Usados() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.usados))
+	for d := range c.usados {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (c *Client) usar(digest string) {
+	c.mu.Lock()
+	if c.usados == nil {
+		c.usados = map[string]bool{}
+	}
+	c.usados[digest] = true
+	c.mu.Unlock()
+}
+
 // blob deja el blob en la caché, verificado, y devuelve su ruta.
 func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) (string, error) {
 	if !reDigest.MatchString(d.Digest) {
 		return "", fmt.Errorf("invalid digest %q", d.Digest)
+	}
+	p, err := c.blobSinApuntar(ctx, registry, repo, d)
+	if err == nil {
+		c.usar(d.Digest)
+	}
+	return p, err
+}
+
+func (c *Client) blobSinApuntar(ctx context.Context, registry, repo string, d Descriptor) (string, error) {
+	for i, p := range c.rutasVerificadas(d.Digest) {
+		if verificado(c.Verificadas[i], p, d.Size) {
+			return p, nil
+		}
 	}
 	dst := c.BlobPath(d.Digest)
 	if !c.SiempreRehash && cached(dst, d.Size) {
@@ -528,6 +692,9 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 	}
 	if ok, _ := fileHas(dst, d.Digest, d.Size); ok {
 		return dst, nil
+	}
+	if c.Offline {
+		return "", errOffline(d.Digest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", err
@@ -553,6 +720,12 @@ func (c *Client) blob(ctx context.Context, registry, repo string, d Descriptor) 
 	return "", last
 }
 
+// errOffline es el error de un blob que falta sin poder bajarlo.
+func errOffline(digest string) error {
+	return fmt.Errorf("blob %s is not in the daemon's cache, and this image doesn't come from a registry: "+
+		"import the archive again (kling image import -archive)", digest)
+}
+
 // cached dice si el blob de la caché se puede usar sin volver a hashearlo.
 //
 // Un blob solo llega a su ruta definitiva con un rename después de comprobar
@@ -571,6 +744,53 @@ func cached(p string, size int64) bool {
 	}
 	st, err := os.Lstat(p)
 	return err == nil && st.Mode().IsRegular() && st.Size() == size && st.Mode().Perm()&0o022 == 0
+}
+
+// dueñoVerificada es el dueño que tiene que tener la caché verificada: root
+// (variable para los tests, que no corren como root).
+var dueñoVerificada uint32 = 0
+
+// verificado dice si el blob p de la caché verificada dir se puede usar sin
+// rehashear (Client.Verificadas): el fichero, regular, con el tamaño del
+// manifiesto; y él, dir/sha256, dir y el padre de dir, de dueñoVerificada y
+// sin escritura para grupo ni otros, sin seguir enlaces. Así quien lo usa no
+// puede haberlo escrito, ni cambiado, ni puesto otro con su nombre.
+func verificado(dir, p string, size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() != size || !deDueño(st) {
+		return false
+	}
+	for _, d := range []string{filepath.Join(dir, "sha256"), dir, filepath.Dir(dir)} {
+		st, err := os.Lstat(d)
+		if err != nil || !st.IsDir() || !deDueño(st) {
+			return false
+		}
+	}
+	return true
+}
+
+func deDueño(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == dueñoVerificada && fi.Mode().Perm()&0o022 == 0
+}
+
+// leerMax lee un fichero de hasta max bytes, sin seguir un enlace al final.
+func leerMax(p string, max int64) ([]byte, error) {
+	if p == "" {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	return readMax(f, max)
 }
 
 func fileHas(p, digest string, size int64) (bool, error) {
@@ -681,31 +901,55 @@ func readMax(r io.Reader, max int64) ([]byte, error) {
 // do hace la petición y, si el registro pide un token (401 con Bearer),
 // lo consigue y repite.
 func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*http.Response, error) {
-	u := "https://" + registry + "/v2/" + repo + "/" + path
-	if isLocalHost(registryHost(registry)) {
-		u = "http://" + registry + "/v2/" + repo + "/" + path
+	if c.Offline {
+		_, digest, _ := strings.Cut(path, "/")
+		return nil, errOffline(digest)
 	}
 	for try := 0; try < 2; try++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		u := c.scheme(registry) + "://" + registry + "/v2/" + repo + "/" + path
+		used := c.tokenFor(registry + "/" + repo)
+		newReq := func(u string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+			if err != nil {
+				return nil, err
+			}
+			if accept != "" {
+				req.Header.Set("Accept", accept)
+			}
+			if used != "" {
+				req.Header.Set("Authorization", used)
+			}
+			return req, nil
+		}
+		req, err := newReq(u)
 		if err != nil {
 			return nil, err
 		}
-		if accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		used := c.tokenFor(registry + "/" + repo)
-		if used != "" {
-			req.Header.Set("Authorization", "Bearer "+used)
-		}
 		resp, err := c.client().Do(req)
-		if err != nil && ctx.Err() == nil {
+		if errors.Is(err, http.ErrSchemeMismatch) && isLocalHost(registryHost(registry)) && req.URL.Scheme == "https" {
+			// Un registro de esta máquina que habla en claro: http desde
+			// ahora, como docker.
+			c.mu.Lock()
+			if c.plain == nil {
+				c.plain = map[string]bool{}
+			}
+			c.plain[registry] = true
+			c.mu.Unlock()
+			u = "http://" + strings.TrimPrefix(u, "https://")
+			if req, err = newReq(u); err != nil {
+				return nil, err
+			}
+			resp, err = c.client().Do(req)
+		}
+		if err != nil && ctx.Err() == nil && !errCertificado(err) {
 			// Un corte de red (el TLS de Docker Hub a veces no contesta):
-			// otra vez, una sola.
+			// otra vez, una sola. Un certificado que no vale no cambia por
+			// reintentar.
 			time.Sleep(2 * time.Second)
 			resp, err = c.client().Do(req.Clone(ctx))
 		}
 		if err != nil {
-			return nil, err
+			return nil, conPistaCertificado(err)
 		}
 		if resp.StatusCode == http.StatusOK {
 			return resp, nil
@@ -713,15 +957,35 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		auth := resp.Header.Get("WWW-Authenticate")
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized && try == 0 && strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			if err := c.refreshToken(ctx, auth, registry, repo, used); err != nil {
-				return nil, fmt.Errorf("registry token: %w", err)
+		if resp.StatusCode == http.StatusUnauthorized && try == 0 {
+			scheme := strings.ToLower(auth)
+			switch {
+			case strings.HasPrefix(scheme, "bearer "):
+				if err := c.refreshToken(ctx, auth, registry, repo, used); err != nil {
+					return nil, fmt.Errorf("registry token: %w", err)
+				}
+				continue
+			case strings.HasPrefix(scheme, "basic") && c.credFor(registry) != nil:
+				c.setToken(registry+"/"+repo, c.credFor(registry).basic())
+				continue
 			}
-			continue
 		}
-		return nil, fmt.Errorf("GET %s: %s: %s", u, resp.Status, strings.TrimSpace(string(b)))
+		msg := fmt.Sprintf("GET %s: %s: %s", u, resp.Status, strings.TrimSpace(string(b)))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			msg += c.pista(registry)
+		}
+		return nil, errors.New(msg)
 	}
-	return nil, errors.New("unauthorized")
+	return nil, errors.New("unauthorized" + c.pista(registry))
+}
+
+func (c *Client) setToken(key, auth string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tokens == nil {
+		c.tokens = map[string]string{}
+	}
+	c.tokens[key] = auth
 }
 
 func (c *Client) tokenFor(key string) string {
@@ -739,21 +1003,18 @@ func (c *Client) refreshToken(ctx context.Context, challenge, registry, repo, us
 	if c.tokenFor(key) != used {
 		return nil
 	}
-	tok, err := c.token(ctx, challenge, repo)
+	tok, err := c.token(ctx, challenge, registry, repo)
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	if c.tokens == nil {
-		c.tokens = map[string]string{}
-	}
-	c.tokens[key] = tok
-	c.mu.Unlock()
+	c.setToken(key, "Bearer "+tok)
 	return nil
 }
 
-// token pide un token anónimo de lectura al servicio que indica el 401.
-func (c *Client) token(ctx context.Context, challenge, repo string) (string, error) {
+// token pide un token de lectura al servicio que indica el 401: con las
+// credenciales del registro si las hay (y el servicio está en su dominio,
+// realmPermitido), anónimo si no.
+func (c *Client) token(ctx context.Context, challenge, registry, repo string) (string, error) {
 	params := map[string]string{}
 	for _, kv := range splitChallenge(challenge[len("bearer "):]) {
 		if k, v, ok := strings.Cut(kv, "="); ok {
@@ -784,16 +1045,25 @@ func (c *Client) token(ctx context.Context, challenge, repo string) (string, err
 	if err != nil {
 		return "", err
 	}
+	if cr := c.credFor(registry); cr != nil {
+		if !realmPermitido(registry, ru.Hostname()) {
+			return "", fmt.Errorf("the token service %s is not on %s's domain: not sending its credentials there", ru.Host, registryHost(registry))
+		}
+		req.Header.Set("Authorization", cr.basic())
+	}
 	resp, err := c.client().Do(req)
-	if err != nil && ctx.Err() == nil {
+	if err != nil && ctx.Err() == nil && !errCertificado(err) {
 		time.Sleep(2 * time.Second)
 		resp, err = c.client().Do(req.Clone(ctx))
 	}
 	if err != nil {
-		return "", err
+		return "", conPistaCertificado(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return "", fmt.Errorf("%s: %s%s", ru.Host, resp.Status, c.pista(registry))
+		}
 		return "", fmt.Errorf("%s: %s", ru.Host, resp.Status)
 	}
 	var t struct {
@@ -835,8 +1105,8 @@ func splitChallenge(s string) []string {
 	return out
 }
 
-// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip,
-// o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
+// OpenLayer abre una capa ya verificada como tar (descomprimida si es gzip o
+// zstd, o la que dejó Unpack). Un tar sin comprimir se da como *os.File: archive/tar
 // salta con Seek los datos que no se leen.
 func OpenLayer(l Layer) (io.ReadCloser, error) {
 	if l.Tar != "" {
@@ -846,8 +1116,28 @@ func OpenLayer(l Layer) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(l.MediaType, "gzip") {
+	if !compressed(l.MediaType) {
 		return f, nil
 	}
-	return newGzip(f)
+	return decompress(f)
+}
+
+// errCertificado dice si err es de un certificado que no se pudo verificar
+// (CA desconocida, caducado, de otro nombre).
+func errCertificado(err error) bool {
+	var ca x509.UnknownAuthorityError
+	var inv x509.CertificateInvalidError
+	var host x509.HostnameError
+	var ver *tls.CertificateVerificationError
+	return errors.As(err, &ca) || errors.As(err, &inv) || errors.As(err, &host) || errors.As(err, &ver)
+}
+
+// conPistaCertificado añade a un error de certificado cómo arreglarlo: un
+// registro con su propia CA se usa dándole al daemon un SSL_CERT_FILE que la
+// incluya (el constructor lo recibe de su entorno).
+func conPistaCertificado(err error) error {
+	if !errCertificado(err) {
+		return err
+	}
+	return fmt.Errorf("%w (if the registry uses its own CA, add it to a bundle and start the daemon with SSL_CERT_FILE pointing to it)", err)
 }

@@ -1282,8 +1282,8 @@ en credenciales de máquina que se atan a cada instancia (`POST
 
 ### 24. El constructor `oci` no corre como root
 
-Importar una imagen de Docker baja de internet y parsea tars hostiles
-(`internal/oci`, `internal/ext4`). Los demás constructores del daemon corren como root;
+Importar una imagen de Docker baja de internet, descomprime y parsea tars hostiles
+(`internal/oci`, `internal/zstd`, `internal/ext4`). Los demás constructores del daemon corren como root;
 `oci` no lo necesita, así que en Linux corre con un usuario propio (`-build-as`,
 `KLING_BUILD_AS`, por defecto `kindling-build`). Medido en el lab importando
 `postgres:17-alpine`:
@@ -1308,12 +1308,66 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   procesos que queden con ese uid. Por eso tiene que ser un usuario de sistema dedicado
   (uid ≤ `SYS_UID_MAX`; uno de persona o `nobody` se rechaza), y las construcciones van
   en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
-- **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
-  antes de usarlo; un constructor comprometido no envenena los imports siguientes.
+- **El descompresor de zstd es propio y acotado** (Go sin dependencias): la ventana de un
+  marco no pasa de 128 MiB, la historia que guarda, de esa ventana más la mitad (o 1 MiB):
+  una capa de `--long=27` se descomprime con ~232 MiB de RSS, y de las zstd se descomprimen dos
+  a la vez como mucho, así que el total no crece con los núcleos del host. Una entrada mala
+  es un error, no un pánico ni un bucle (lo prueban un fuzz y un caso hecho a mano por cada
+  comprobación). Lo descomprimido
+  de todas las capas tiene el mismo tope que con gzip, 8 veces `max_mb`.
+- **Su caché no se cree**: como la puede escribir, lo que saca de ella se rehashea
+  siempre antes de usarlo; un constructor comprometido no envenena los imports
+  siguientes.
+- **La caché verificada es de root**: tras una construcción correcta, con el constructor
+  ya barrido, el daemon copia a `cache/verified/oci` (root, del grupo del constructor,
+  0750/0640) los blobs que usó,
+  hasheando lo que copia y sin seguir enlaces (su caché, a través de un `os.Root`, y solo
+  si el barrido de sus procesos acabó limpio); uno cambiado no entra, ni uno disperso, ni
+  más bytes por pasada que el tope de la caché. El constructor la
+  lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
+  puede escribir, renombrar ni borrar nada en ella. Las cachés se barren con tope
+  (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado;
+  lo que la construcción dice haber usado se guarda solo mientras quepa en el tope.
+- **Las capas privadas no son de las demás construcciones**: solo lo bajado sin
+  credenciales (lo que cualquier construcción, que tiene red, podría bajar) va a la
+  verificada de todos, `cache/verified/oci`. Lo bajado con `kling registry login` va a
+  `cache/verified/registry-<sha256 del host>` y lo de un archivo a
+  `cache/verified/archive-<digest del manifiesto>`; cada una es de root 0700 y el daemon
+  solo la abre (0750, del grupo del constructor) mientras construye una imagen de ese
+  mismo origen, y la vuelve a cerrar con el constructor ya barrido. Esas construcciones
+  tampoco escriben en la caché compartida del constructor (`cache/builder`), sino en
+  una dentro de su directorio de trabajo, que se borra al acabar; y la caché de blobs de
+  root (`cache/oci`, donde espera lo subido) es solo de root: antes de construir un
+  archivo, el daemon enlaza en su verificada los blobs que nombra su manifiesto (que lee
+  como JSON acotado, comprobado por su sha256). Así un constructor comprometido por una
+  imagen pública no lee las capas de una privada ni de un archivo, ni uno de un registro
+  las de otro. Lo que sigue viendo: las de su propio origen (las de otras imágenes del
+  mismo registro privado, o de ese mismo archivo) y las públicas. El daemon tampoco pasa
+  a la verificada de todos nada que no estuviera en la caché del propio constructor
+  (la lista de lo usado la escribe él, y con un digest sacaría lo ajeno). `kling registry
+  logout` borra la verificada de su registro.
+- **Las capas no son de las demás cuentas del host**: la verificada (todas sus partes)
+  es de root con el grupo del usuario de construcción, directorios 0750 y blobs 0640
+  (sin usuario de construcción, 0700/0600), y `cache/oci`, 0700/0600 siempre. Una
+  imagen privada o de un archivo no se puede listar ni leer desde otra cuenta. Lo de
+  versiones anteriores (0755/0644) se cierra la primera vez que se usa cada caché.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en
 [docs/imagenes.md](docs/imagenes.md).
+
+**Credenciales de registros privados** (`kling registry login`): viven en el daemon,
+`$KLING_ROOT/registries.json` (root 0600, en claro como `~/.docker/config.json`), no en
+el `spec` de la construcción, que va a la receta. La contraseña llega al CLI por stdin
+(sin eco en una terminal), nunca por argv; `GET /registries` no la devuelve. Cada
+construcción `oci` recibe solo las del registro de su referencia, en un fichero 0600
+suyo en su directorio de trabajo que borra al leerlo, ni por argv ni por el entorno; no
+salen en el log de la construcción, la receta, `state.json` ni los eventos. El cliente
+OCI solo las manda a ese registro (por https salvo localhost) y a su servicio de tokens
+si está en su dominio, y quita `Authorization` en cualquier redirección a otro
+host:puerto (el CDN de las capas). Un constructor comprometido por una imagen de ese
+registro las ve: tienen que ser de solo lectura (un token con `read:packages`, no la
+contraseña de la cuenta).
 
 ### 25. El entorno de `run -e` va por MMDS, y se congela con la máquina
 
@@ -1327,6 +1381,75 @@ sesión (`kling machine secret`), que marcan la máquina (`has_secrets`) y no de
 congelarla: el entorno es configuración. Un secreto que no deba tocar nunca el disco
 va por `machine secret` o por el proxy de credenciales. Una imagen cuyo agente no sabe
 leer el entorno hace fallar la máquina en vez de arrancar su servicio sin él.
+
+### 26. Importar un archivo (`image import -archive`): nada se usa sin su sha256
+
+`kling image import -archive` lee un `docker save` o un layout OCI en la máquina del CLI
+y sube sus blobs al daemon (`PUT /oci/blobs/{digest}`, solo admin). El archivo no es de
+fiar más que una imagen de un registro:
+
+- **El CLI valida la estructura antes de subir nada**: nombres sin `..` ni absolutos,
+  ningún enlace (simbólico o duro) que salga del archivo, sin entradas repetidas ni
+  ficheros dispersos, JSON acotados (4-8 MiB), un tope de entradas y el `-max-size`. Un
+  enlace interno se resuelve en el índice del tar, nunca en el disco; en un layout en
+  directorio no se sigue ninguno (`os.Root`, fichero regular, el mismo que se comprobó).
+- **El daemon no se fía del CLI**: la ruta de un blob sale solo de su digest (lista
+  blanca `sha256:<64 hex>`), el cuerpo tiene que traer `Content-Length` (hasta 16 GiB) y
+  el blob solo se renombra a la caché si su sha256 es el del digest. Lo que hay en la
+  caché con un nombre es siempre ese contenido, lo suba quien lo suba.
+- **El constructor comprueba la cadena entera**, sin red: el manifiesto por su digest
+  (el que fija la receta), la configuración y cada capa por los suyos, y en las capas sin
+  comprimir que su digest sea el `diff_id` de la configuración. Con el usuario de
+  construcción (24) no lee la caché de root (solo de root): el daemon enlaza antes, en
+  la verificada de ese archivo, los blobs que nombra su manifiesto, y solo esa
+  construcción (y las siguientes del mismo archivo) la lee. Otra construcción, aunque
+  la comprometa una imagen hostil, no llega a las capas del archivo.
+- **El constructor de un archivo no recibe credenciales**: su `ref` sale del propio
+  archivo (las etiquetas que escribió quien lo hizo), así que un `source: archive` no
+  lleva las de ningún registro aunque la etiqueta nombre uno privado.
+- **La receta no filtra el host del CLI**: guarda `source: archive`, el nombre que traía
+  la imagen y el digest; la ruta del archivo no sale de la máquina del CLI.
+
+La caché de blobs de root tiene el tope de las del constructor
+(`daemon.build_cache_max_gib`): se barre después de cada construcción (lo más viejo
+primero, nada de menos de 2 horas: lo que espera a su construcción, y nunca mientras
+otra construcción o subida la usa) y una subida que no cabe ni barriendo es un `507`.
+
+### 27. El init en Go de las imágenes sin `sh`
+
+En una imagen de Docker sin `sh` (distroless, `scratch`) el init es `kling-guest`
+llamado como `/sbin/overlay-init` (`pkg/guest/init.go`). Hace lo mismo que
+`minimal-init.sh` y nada más: no ejecuta ningún programa de la imagen antes del agente
+(ni `/entrypoint`, que ni siquiera se escribe), y el servicio lo sigue arrancando el
+agente con su `USER`. Se niega a correr si no es PID 1: un `overlay-init` lanzado a mano
+en el anfitrión no monta ni hace `pivot_root`. Lee `/etc/kling/env` como datos (solo
+`export CLAVE='valor'`, con las comillas simples de sh, también de varias líneas, sin
+interpretar nada más) y de una orden que no entiende avisa con su número de línea, nunca
+con su contenido. Las sondas de esas imágenes son `#!` al agente: lo que
+ejecutan es el argv del `HEALTHCHECK` de la imagen, sin shell, igual que en Docker.
+
+### 28. `kling upgrade` no instala nada sin verificar, y deja volver
+
+`kling upgrade` baja la release solo por https (también las redirecciones), con
+tamaño acotado, y no acepta un binario que no esté en el `SHA256SUMS` de esa misma
+release o cuyo hash no coincida; con `-from-dir`, si hay un `SHA256SUMS` al lado,
+lo mismo. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
+contra ningún daemon) **antes** de parar nada. Se cambia por `rename` desde un
+temporal del mismo directorio, nunca escribiendo encima, y lo de antes queda en
+`<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que se
+ejecuta y se instala es la copia ya verificada en `<raíz>/upgrade/<etiqueta>`
+(0700), no el fichero de origen: cambiar el de `-from-dir` después de
+verificarlo no cuela nada. En Linux corre como root (`sudo`), y las extensiones
+de cada usuario se las deja a su `kling upgrade -cli`. No pasa
+nada por argv que no sea público (etiqueta, rutas, la unidad), y del entorno del
+daemon solo lee `KLING_LIB_DIR` (y, para un `-rollback` con el daemon caído,
+`KLING_ROOT` y `KLING_SOCKET` de la unidad y su `EnvironmentFile`, sin leer ni
+guardar otras claves). Solo reinicia el daemon si el proceso que
+escucha en el socket (`SO_PEERCRED`/`LOCAL_PEERPID`, lo dice el kernel) es el
+de la unidad o el agente de launchd: un `KLING_HOST` hacia otro daemon no hace
+cambiar y reiniciar el de producción; con el daemon caído, si el socket de la
+unidad es el que se espera. Dos `kling upgrade` sobre la misma raíz no corren a
+la vez (`flock` en `<raíz>/upgrade/.lock`). `SHA256SUMS` sigue sin firmar (ver abajo).
 
 ## Lo que NO está resuelto
 

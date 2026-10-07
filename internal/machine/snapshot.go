@@ -753,7 +753,6 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 			name, s.Name)
 		s.Name = name
 	}
-	liftV04(b, s)
 	return s, b, v, nil
 }
 

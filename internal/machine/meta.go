@@ -50,9 +50,12 @@ type metaEnDisco struct {
 	*api.Snapshot
 }
 
-// clavesV04 son los campos de v0.4 que liftV04 sube a anotaciones: no se
-// conservan al reescribir, que es lo que ya pasaba (ver legacy_v04.go).
-var clavesV04 = map[string]bool{"tools": true, "tools_at": true, "health": true, "health_at": true, "health_err": true}
+// clavesV04 son los campos con los que v0.4 guardaba en el meta el catálogo y
+// la salud de MCP. Desde v0.5 son las anotaciones mcp.tools y mcp.health, y
+// hasta v0.17 un meta con ellos se elevaba a anotaciones al leerlo. Ya no
+// (docs/actualizar.md §5, PR 11): un meta v0 con alguno es de v0.4 y se
+// rechaza diciéndolo, en vez de perder en silencio lo que llevaba.
+var clavesV04 = []string{"tools", "tools_at", "health", "health_at", "health_err"}
 
 // clavesConocidas son las claves JSON de api.Snapshot y la del esquema: lo que
 // este binario sabe escribir. Lo demás de un meta es de otro binario.
@@ -77,12 +80,32 @@ func decodificarMeta(ruta string, b []byte) (*api.Snapshot, int, error) {
 	}
 	// v0 y v1 tienen los mismos campos: la v1 solo añade la cabecera y los
 	// del origen, que en un v0 quedan vacíos ("no consta").
+	if v == 0 {
+		if err := comprobarMetaV04(ruta, b); err != nil {
+			return nil, v, err
+		}
+	}
 	var s api.Snapshot
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, v, err
 	}
 	s.Stale = "" // se calcula al leer, nunca viene del disco
 	return &s, v, nil
+}
+
+// comprobarMetaV04 da error si el meta lleva los campos de MCP de v0.4.
+func comprobarMetaV04(ruta string, b []byte) error {
+	var claves map[string]json.RawMessage
+	if json.Unmarshal(b, &claves) != nil {
+		return nil // lo ilegible lo dice el decodificado de después
+	}
+	for _, k := range clavesV04 {
+		if _, ok := claves[k]; ok {
+			return fmt.Errorf("%s was written by kling v0.4 (it has %q), which this kling no longer reads: "+
+				"save the template again (kling save), or annotate it once with kling v0.17 to move its MCP fields to annotations", ruta, k)
+		}
+	}
+	return nil
 }
 
 // codificarMeta escribe s como meta.json de la versión actual. previo es el
@@ -105,7 +128,7 @@ func codificarMeta(s *api.Snapshot, previo []byte) ([]byte, error) {
 	conocidas := clavesConocidas()
 	var extra []string
 	for k := range viejo {
-		if !conocidas[k] && !clavesV04[k] {
+		if !conocidas[k] {
 			extra = append(extra, k)
 		}
 	}

@@ -137,3 +137,22 @@ func TestVolcadoFallidoNoDejaRestos(t *testing.T) {
 	// Sin restos tampoco es un error.
 	m.borrarVolcadoParcial(id, false, dir)
 }
+
+// Los tres rechazos por disco lleno dicen qué borrar con los estados que kling
+// ps muestra hoy: "warm" era de v0.13 y ya no existe.
+func TestDiscoLlenoNoNombraEstadosViejos(t *testing.T) {
+	m := newTestManager(t)
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "100")
+	discoLibreFalso(t, 10)
+	errs := map[string]error{"admisión": m.checkDisk()}
+	_, errs["freeze"] = m.reservarDiscoParaVolcado(400, "freeze")
+	_, errs["thaw"] = m.reservarDiscoParaVolcado(400, "thaw")
+	for que, err := range errs {
+		if !api.IsDiskFull(err) {
+			t.Fatalf("%s: no es disco lleno: %v", que, err)
+		}
+		if msg := err.Error(); strings.Contains(msg, "warm") || !strings.Contains(msg, "frozen") {
+			t.Errorf("%s: el consejo no nombra los estados de hoy: %s", que, msg)
+		}
+	}
+}

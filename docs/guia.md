@@ -190,7 +190,8 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 # Con extensiones de la misma release (servidores MCP, sandboxes):
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
-# Versión concreta (por defecto instala la última release):
+# Versión concreta (por defecto instala la última release; encima de una
+# instalación que ya existe pide --force, o usa kling upgrade -tag):
 curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
 
 # Prefijo personalizado:
@@ -203,6 +204,27 @@ Los binarios se publican en
 `SHA256SUMS`, y el script de instalación verifica el checksum antes de mover nada al
 disco. **Windows no está soportado** — el código usa syscalls POSIX (`syscall.Kill`,
 `Setsid`, `Stat_t`).
+
+**Actualizar — `kling upgrade`:**
+
+```sh
+sudo kling upgrade               # Linux: el daemon de kling.service, a la última release
+kling upgrade -tag v0.18.0       # macOS (agente de launchd), o una release concreta
+kling upgrade -dry-run           # baja, verifica e imprime el plan
+kling upgrade -rollback          # vuelve a los binarios guardados por la última,
+                                 # también con el daemon caído (lee su unidad)
+```
+
+Verifica cada binario contra el `SHA256SUMS` de la release, comprueba que el kling nuevo
+lee el estado del disco, guarda una copia de los binarios de ahora, reinicia el daemon
+(las microVMs que corren siguen corriendo), comprueba `/info`, las máquinas y los
+dorados, y vuelve atrás solo si algo falla. Antes de volver atrás congela otra vez, con el
+daemon nuevo, las máquinas que estaban congeladas y que el nuevo despertó, para que el
+viejo nunca despierte una memoria más vieja que su disco. Solo corre una actualización a la
+vez sobre una raíz. Se ejecuta en el host del daemon: con un contexto `ssh://` imprime la
+orden para pegar allí, con sus banderas. Encima de una instalación que ya existe,
+`install.sh` remite aquí y solo reinstala con `--force`. Detalles:
+[docs/actualizar.md](actualizar.md).
 
 **Desde fuentes — `make`:**
 

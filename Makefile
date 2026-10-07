@@ -59,6 +59,16 @@ install: build
 	@install -m755 $(BIN) $(PREFIX)/bin/$(BIN) 2>/dev/null \
 		|| sudo install -m755 $(BIN) $(PREFIX)/bin/$(BIN)
 	@echo "instalado: $(PREFIX)/bin/$(BIN)  ($(VERSION))"
+	@# En macOS el daemon (que corre como tu usuario) construye las imágenes de
+	@# Docker y mete en ellas el agente del invitado, un binario de Linux: va a
+	@# lib/ de su raíz de datos, donde lo busca el constructor (KLING_LIB_DIR).
+	@if [ "$$(uname -s)" = Darwin ]; then \
+		d="$$HOME/Library/Application Support/kindling/lib"; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o "$$d/kling-guest.tmp" ./cmd/kling-guest 2>/dev/null \
+			|| { mkdir -p "$$d" && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o "$$d/kling-guest.tmp" ./cmd/kling-guest; } && \
+		chmod 755 "$$d/kling-guest.tmp" && mv "$$d/kling-guest.tmp" "$$d/kling-guest" && \
+		echo "instalado: $$d/kling-guest  (linux, para las imágenes de Docker)"; \
+	fi
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
 	  *) echo; echo "AVISO: $(PREFIX)/bin no está en tu PATH. Añádelo:"; \
 	     echo "  echo 'export PATH=\"$(PREFIX)/bin:$$PATH\"' >> ~/.zshrc";; esac

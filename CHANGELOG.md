@@ -8,9 +8,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling registry login|logout|ls|import`: private registries for `image import` and `run -image` (Basic and Bearer); credentials stay on the daemon (root 0600), read from stdin, never in recipes, logs or argv
+- The rootless oci builder reads a root-owned verified blob cache without rehashing: after a successful build the daemon copies the blobs it used there, checked by sha256 (never sparse files, never past the cache limit); an archive's uploaded blobs are hard-linked into its own verified cache before it builds, so rebuilding it does not rehash them
+- `daemon.build_cache_max_gib` and `daemon.build_cache_max_days` (`KLING_BUILD_CACHE_MAX_GIB`, `KLING_BUILD_CACHE_MAX_DAYS`) bound the builder's blob caches; unverified blobs go first; values are capped at 1048576 GiB and 36500 days, and blobs the builder lists as used are kept only up to the limit
 - Per-tenant quotas in the authz policy (`quotas`: `max_machines`, `max_mem_mib`, `max_disk_mib`, `"*"` for everyone); exceeding one is a `429` that names the limit and the usage, decided without races
 - `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
+- `kling image import` reads `tar+zstd` layers: a zstd decoder in pure Go, windows up to 128 MiB; gzip or zstd is decided by the layer's magic bytes; at most 2 zstd layers unpack at once (~232 MiB each with a 128 MiB window)
+- `kling image import -archive x.tar [-image repo:tag]`: imports a `docker save` tar or an OCI layout (tar or directory; gzip or zstd layers) from the CLI's machine; only missing blobs are streamed to the daemon (`PUT /oci/blobs/{digest}`, capability `oci-blobs`), each checked by sha256, and the build runs offline checking diff_ids; the recipe says `source: archive`, never the host path
+- Images without `sh` (distroless, scratch, `traefik/whoami`) import and boot: `kling-guest` is their init, and their ready probes run without a shell; image `ENV` values with newlines are kept and read the same by both inits
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
 - The guest supervises the image's service (`ENTRYPOINT`, `USER`, `WORKDIR`, `STOPSIGNAL`, `HEALTHCHECK`), restarts it and stops it cleanly on `stop`/`rm`
@@ -29,6 +35,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
 - `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
+- `kling upgrade`: verified download, schema check, backup, daemon restart (systemd or launchd), check and automatic rollback; `-rollback`, `-dry-run`, `-from-dir`, `-cli`
+- `kling upgrade` rolls back without corrupting frozen machines the new daemon woke (it freezes them again first), `-rollback` works with the daemon down (`-root`), and only one upgrade runs per root
+- `scripts/94-e2e-upgrade.sh`: upgrade from the previous release and back on a private daemon
+- `scripts/95-e2e-upgrade-mac.sh`: the same on macOS, through a temporary launchd agent for a private daemon
+- `kling-vz -snapshot-formats` prints the snapshot formats (`kling_vz`) it reads
+- `kling upgrade` checks that the daemon on the socket is the one the unit (or launchd agent) runs, refuses state the target no longer reads before stopping anything, and finishes the restart or rollback on Ctrl-C
+- `kling upgrade` tolerates what the gateway does meanwhile: frozen machines woken by clients, session machines removed
 
 ### Changed
 
@@ -59,9 +72,18 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
 - Lifecycle operations (`freeze`, `thaw`, `pause`, `stop`, `rm`) answer 404 for an unknown machine and 409 for a wrong state (was 400)
 - The watcher scans VMM processes once per round and re-measures disk only for running machines or after a state change
+- `install.sh` refuses to overwrite an existing kling without `--force` and points to `kling upgrade`; `--with` without `--tag` still adds extensions
+- v0.4 `links.json` and golden MCP fields and v0.13 `warm` state are no longer migrated: they are refused with how to pass through v0.17
 
 ### Fixed
 
+- A registry whose certificate can't be verified fails at once (no 2 s retry) and says how to trust its CA (`SSL_CERT_FILE` for the daemon)
+- macOS: `make install` also installs the Linux `kling-guest` that `kling image import` puts in images (in `lib/` of the data root, no sudo), `kling upgrade` updates it, and the error without it says what to do on a Mac
+- Short socket links in `/tmp/kling-<uid>` whose socket is gone are swept when a new one is made, instead of piling up
+- A layered image on a base without `sh` (whose `/sbin/overlay-init` links to `kling-guest`) boots; it was refused as a base from before layers
+- The oci builder refuses a `kling-guest` without the Go init for images without `sh`, naming it, instead of building one that does not boot; `kling upgrade` notes `KLING_GUEST_AGENT*` paths it does not replace
+- `kling upgrade -rollback` on macOS no longer leaves frozen machines the previous kling-vz cannot wake: kling-vz writes the oldest snapshot format that describes the machine (`kling_vz` 1 without a screen), and the rollback is refused, naming the machine, if the old kling-vz still could not read it
+- Disk-full errors suggest removing frozen or stopped machines, not "warm" ones (a v0.13 state)
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
 - Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first, up to 3/4 of `-wait` (at least 30 s)
 - A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
@@ -121,6 +143,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- The daemon's blob caches are closed to other host accounts: `cache/verified` is root with the builder's group, 0750/0640, and `cache/oci` root-only, 0700/0600; older 0755/0644 caches are closed on first use
+- Layers pulled with registry credentials or imported from an archive are cached per origin (`cache/verified/registry-*`, `cache/verified/archive-*`, root 0700) and opened to the rootless builder only while it builds an image of that origin; those builds use a cache in their work dir, so a builder compromised by another image cannot read them; `kling registry logout` drops that registry's layers
+- An archive build (`source: archive`) gets no registry credentials, even if the archive's tag names a private registry
+- `cache/oci` is swept with the builder cache limits after every build (nothing younger than 2 h, never while a build or upload uses it), and an upload that does not fit is a `507`
 - Diff freeze: the daemon never follows links in a machine's directory, checks the seal's base is the golden's memory, and only freezes as a diff where the filesystem tells holes from zero pages
 - `state.json` is written with schema 2 while a copy is frozen as a diff, so an older kling refuses to start instead of loading it as full memory
 - `run -disk` must fit in the free disk; `KLING_MAX_DISK_MIB` lowers the maximum

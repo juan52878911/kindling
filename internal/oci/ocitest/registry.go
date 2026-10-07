@@ -1,6 +1,7 @@
 // Package ocitest es un registro OCI mínimo en memoria para las pruebas: sirve
 // índices, manifiestos y blobs por digest y pide un token Bearer como Docker
-// Hub, para probar la descarga sin red.
+// Hub (o credenciales, Basic o Bearer, como un registro privado), para probar
+// la descarga sin red.
 package ocitest
 
 import (
@@ -37,6 +38,17 @@ type Registry struct {
 	BlobDelay   time.Duration
 	MaxInFlight int
 	inFlight    int
+	// User y Pass, si User no está vacío, son las credenciales que exige: el
+	// servicio de tokens no da uno sin ellas (Basic) o, con Basic, cada
+	// petición a /v2/ las lleva directamente.
+	User, Pass string
+	Basic      bool
+	// BlobRedirect, si no está vacío, es la URL base (un CDN) a la que se
+	// redirigen las peticiones de blobs, como Docker Hub o ghcr.io.
+	BlobRedirect string
+	// LayerType, si no está vacío, es el media type de todas las capas de
+	// Image; si no, tar+gzip o tar+zstd según sus primeros bytes.
+	LayerType string
 }
 
 // New arranca el registro.
@@ -71,15 +83,38 @@ func (r *Registry) Put(b []byte, mediaType string) string {
 	return d
 }
 
+// Blob es el contenido de un blob (para servirlo desde otro sitio).
+func (r *Registry) Blob(digest string) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blobs[digest]
+}
+
+// credOK dice si la petición lleva las credenciales que se exigen.
+func (r *Registry) credOK(req *http.Request) bool {
+	u, p, ok := req.BasicAuth()
+	return ok && u == r.User && p == r.Pass
+}
+
 func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path == "/token" {
+		if r.User != "" && !r.credOK(req) {
+			http.Error(w, `{"details":"incorrect username or password"}`, http.StatusUnauthorized)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"token": "t0k3n"})
 		return
 	}
 	r.mu.Lock()
 	r.Hits++
 	r.mu.Unlock()
-	if req.Header.Get("Authorization") != "Bearer t0k3n" {
+	if r.Basic && r.User != "" {
+		if !r.credOK(req) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Registry Realm"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else if req.Header.Get("Authorization") != "Bearer t0k3n" {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="test",scope="repository:x:pull"`, r.URL))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -105,6 +140,10 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	if d == r.Corrupt {
 		b = append([]byte{}, b...)
 		b[len(b)/2] ^= 1
+	}
+	if r.BlobRedirect != "" && strings.Contains(req.URL.Path, "/blobs/") {
+		http.Redirect(w, req, r.BlobRedirect+"/"+d, http.StatusTemporaryRedirect)
+		return
 	}
 	if strings.Contains(req.URL.Path, "/blobs/") {
 		r.mu.Lock()
@@ -141,7 +180,36 @@ type File struct {
 func TarGz(files []File) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
+	zw.Write(Tar(files))
+	zw.Close()
+	return buf.Bytes()
+}
+
+// Zstd envuelve b en un marco zstd de bloques sin comprimir (raw): basta
+// para probar el camino de las capas zstd; la descompresión de verdad la
+// prueba internal/zstd con la herramienta zstd.
+func Zstd(b []byte) []byte {
+	out := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00} // ventana de 1 KiB
+	for {
+		n := min(len(b), 1024)
+		last := 0
+		if n == len(b) {
+			last = 1
+		}
+		h := n<<3 | last // tipo 0: raw
+		out = append(out, byte(h), byte(h>>8), byte(h>>16))
+		out = append(out, b[:n]...)
+		b = b[n:]
+		if last == 1 {
+			return out
+		}
+	}
+}
+
+// Tar es TarGz sin comprimir: una capa como la de docker save.
+func Tar(files []File) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
 	for _, f := range files {
 		h := &tar.Header{Name: f.Name, Mode: f.Mode, Uid: f.Uid, ModTime: f.ModTime, Format: tar.FormatPAX}
 		if h.ModTime.IsZero() {
@@ -168,7 +236,6 @@ func TarGz(files []File) []byte {
 		tw.Write([]byte(f.Body))
 	}
 	tw.Close()
-	zw.Close()
 	return buf.Bytes()
 }
 
@@ -186,8 +253,14 @@ func (r *Registry) ImageConfig(arch string, config map[string]any, layers ...[]b
 	cd := r.Put(cfg, "")
 	var ls []map[string]any
 	for _, l := range layers {
-		ls = append(ls, map[string]any{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-			"digest": r.Put(l, ""), "size": len(l)})
+		mt := "application/vnd.oci.image.layer.v1.tar+gzip"
+		if bytes.HasPrefix(l, []byte{0x28, 0xB5, 0x2F, 0xFD}) {
+			mt = "application/vnd.oci.image.layer.v1.tar+zstd"
+		}
+		if r.LayerType != "" {
+			mt = r.LayerType
+		}
+		ls = append(ls, map[string]any{"mediaType": mt, "digest": r.Put(l, ""), "size": len(l)})
 	}
 	m, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
 		"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cd, "size": len(cfg)},

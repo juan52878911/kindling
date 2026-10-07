@@ -6,17 +6,26 @@
 // Es lo que llevan las imágenes de herramientas (`kling images toolchain`) y
 // lo que llevarán los sandboxes de código. El puente MCP, kling-bridge, embebe
 // el mismo agente (pkg/guest) y añade encima sus rutas.
+//
+// Llamado como overlay-init (un enlace en /sbin, en las imágenes de Docker
+// sin sh), es el init de la microVM: monta el overlay, hace pivot_root y se
+// vuelve a ejecutar como agente (pkg/guest/init.go).
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -27,11 +36,17 @@ import (
 var Version = "dev"
 
 func main() {
+	if filepath.Base(os.Args[0]) == "overlay-init" {
+		guest.Init() // no vuelve
+	}
 	listen := flag.String("listen", ":8080", "where to listen")
 	version := flag.Bool("version", false, "print the version and exit")
 	// La sonda de "listo" de las imágenes del constructor oci: que el puerto
 	// de EXPOSE acepte conexiones. Aquí y no con nc, que no todas traen.
 	probeTCP := flag.String("probe-tcp", "", "exit 0 if host:port accepts a TCP connection, 1 if not (a readiness probe)")
+	// Las sondas de las imágenes sin sh: un #! que apunta aquí con el argv en
+	// JSON en la segunda línea del fichero (el HEALTHCHECK CMD de la imagen).
+	execJSON := flag.Bool("exec-json", false, "run the JSON argv on the second line of the given file (a #! probe for images without sh)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "kling-guest — kindling's guest agent (PID 1 inside a microVM)\n\n  kling-guest [options]\n\nOptions:\n")
 		flag.PrintDefaults()
@@ -39,6 +54,13 @@ func main() {
 	flag.Parse()
 	if *version {
 		fmt.Println(Version)
+		return
+	}
+	if *execJSON {
+		if err := execArgvFile(flag.Arg(0)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *probeTCP != "" {
@@ -95,4 +117,38 @@ func main() {
 	}
 	<-done
 	agent.Close()
+}
+
+// execArgvFile ejecuta, en lugar de este proceso, el argv de p
+// (readArgvFile), buscando el programa en el PATH, como el HEALTHCHECK CMD de
+// Docker. Solo vuelve si no puede.
+func execArgvFile(p string) error {
+	argv, err := readArgvFile(p)
+	if err != nil {
+		return err
+	}
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(bin, argv, os.Environ())
+}
+
+// readArgvFile lee el argv en JSON de la segunda línea de p (la primera es el
+// #!).
+func readArgvFile(p string) ([]string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	r := bufio.NewReader(io.LimitReader(f, 64<<10))
+	if _, err := r.ReadString('\n'); err != nil {
+		return nil, fmt.Errorf("%s: no argv line", p)
+	}
+	var argv []string
+	if err := json.NewDecoder(r).Decode(&argv); err != nil || len(argv) == 0 || argv[0] == "" {
+		return nil, fmt.Errorf("%s: the second line must be a JSON array with the command", p)
+	}
+	return argv, nil
 }

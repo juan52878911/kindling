@@ -74,9 +74,19 @@ arranque el daemon con la raíz que arranque.
 
 ## Conseguir imágenes
 
-En macOS **no se construyen imágenes**: construir necesita root, dispositivos
-loop y chroot de Linux. `POST /images` contesta 501 y dice qué hacer. Se
-construyen en un host Linux y se **copian**:
+**Imágenes de Docker**: `kling image import <ref>` (y `-archive`, y los
+registros privados de `kling registry login`) funciona en el Mac: su
+constructor es Go puro, sin root ni loop. Mete en la imagen el agente del
+invitado, que es un binario de **Linux**: `make install` lo compila y lo deja en
+`lib/` de la raíz de datos (`~/Library/Application Support/kindling/lib/kling-guest`),
+donde lo busca, y `kling upgrade` lo cambia con lo demás. Para usar otro,
+`KLING_GUEST_AGENT=/ruta` (o `make guest GOARCH=arm64` y apuntarlo ahí). Un
+puerto de `EXPOSE` no se publica solo en el host: el gateway o `-label
+kling.ports=N` (ver [`docker.md`](docker.md)).
+
+El resto de imágenes (`min`, MCP, chispa...) **no se construyen en macOS**:
+necesitan root, dispositivos loop y chroot de Linux. `POST /images` contesta 501
+y dice qué hacer. Se construyen en un host Linux y se **copian**:
 
 ```sh
 kling image copy min  -from ssh://juan@lab-arm64
@@ -145,6 +155,14 @@ launchctl bootout gui/$(id -u)/dev.kindling.daemon           # pararlo
 ```
 
 Con el plist instalado, `kling up` lo arranca si no está corriendo.
+
+Con el plist instalado, `kling upgrade` también actualiza el daemon: baja la
+release, verifica `kling` y `kling-vz` (y que este lleva el permiso de
+virtualización), los cambia en su sitio, lo reinicia con `launchctl bootout` y
+`bootstrap` y vuelve atrás solo si no contesta con la versión nueva
+([`actualizar.md`](actualizar.md) §3.4). Sin el agente de launchd no sabe
+reiniciarlo: `kling upgrade -cli` cambia solo el binario. Lo prueba de punta a
+punta `scripts/95-e2e-upgrade-mac.sh`, con un agente suyo para un daemon privado.
 
 ## Cómo se llega a cada máquina
 

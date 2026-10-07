@@ -22,7 +22,7 @@ func yo() *usuarioConstructor {
 
 func TestPrepararTrabajo(t *testing.T) {
 	root := t.TempDir()
-	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), yo())
+	work, err := prepararTrabajo(root, "pg", []byte(`{"name":"pg"}`), []byte(`{"ghcr.io":{}}`), yo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestPrepararTrabajo(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(work), "pg.") {
 		t.Fatalf("directorio de trabajo %s", work)
 	}
-	for _, p := range []string{work, filepath.Join(work, "request.json")} {
+	for _, p := range []string{work, filepath.Join(work, "request.json"), filepath.Join(work, FicheroCredencialesConstructor)} {
 		fi, err := os.Lstat(p)
 		if err != nil {
 			t.Fatal(err)
@@ -45,9 +45,13 @@ func TestPrepararTrabajo(t *testing.T) {
 		t.Fatalf("request.json: %s", b)
 	}
 
+	if fi, _ := os.Lstat(filepath.Join(work, FicheroCredencialesConstructor)); fi == nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v, quiero 0600", FicheroCredencialesConstructor, fi)
+	}
+
 	// Sin usuario, como siempre: build/ cerrado.
 	root2 := t.TempDir()
-	if _, err := prepararTrabajo(root2, "x", nil, nil); err != nil {
+	if _, err := prepararTrabajo(root2, "x", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fi, _ := os.Stat(filepath.Join(root2, "build")); fi.Mode().Perm() != 0o700 {
@@ -55,13 +59,14 @@ func TestPrepararTrabajo(t *testing.T) {
 	}
 }
 
-func TestPrepararCacheMigra(t *testing.T) {
+// La caché del constructor es suya y 0700, y nace vacía: nada de la de blobs
+// de root pasa a ella (ahí hay capas de archivos y de registros privados, que
+// leerían todas sus construcciones).
+func TestPrepararCache(t *testing.T) {
 	root := t.TempDir()
 	vieja := filepath.Join(root, "cache", "oci", "sha256")
 	os.MkdirAll(vieja, 0o755)
-	os.WriteFile(filepath.Join(vieja, "aaaa"), []byte("blob"), 0o644)
-	os.WriteFile(filepath.Join(vieja, "bbbb.part"), []byte("a medias"), 0o644)
-	os.Symlink("/etc/passwd", filepath.Join(vieja, "cccc"))
+	os.WriteFile(filepath.Join(vieja, "aaaa"), []byte("capa de un archivo"), 0o600)
 
 	d, err := prepararCache(root, yo())
 	if err != nil {
@@ -73,23 +78,11 @@ func TestPrepararCacheMigra(t *testing.T) {
 	if fi, _ := os.Lstat(d); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("caché del constructor %o, quiero 0700", fi.Mode().Perm())
 	}
-	a, _ := os.Stat(filepath.Join(vieja, "aaaa"))
-	b, err := os.Lstat(filepath.Join(d, "oci", "sha256", "aaaa"))
-	if err != nil || !os.SameFile(a, b) {
-		t.Fatalf("el blob de la caché de root tiene que estar enlazado: %v", err)
+	if es, _ := os.ReadDir(d); len(es) != 0 {
+		t.Fatalf("la caché del constructor no nace vacía: %v", es)
 	}
-	for _, n := range []string{"bbbb.part", "cccc"} {
-		if _, err := os.Lstat(filepath.Join(d, "oci", "sha256", n)); err == nil {
-			t.Fatalf("%s no se migra", n)
-		}
-	}
-	// La segunda vez no migra ni falla.
-	os.WriteFile(filepath.Join(vieja, "dddd"), []byte("nuevo"), 0o644)
 	if _, err := prepararCache(root, yo()); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Lstat(filepath.Join(d, "oci", "sha256", "dddd")); err == nil {
-		t.Fatal("solo se migra al crear la caché")
 	}
 
 	// Un enlace en el sitio de la caché se rechaza.
@@ -193,7 +186,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	u := &usuarioConstructor{Nombre: "kindling-build", UID: 990, GID: 989}
 	req := api.BuildImageRequest{Name: "pg", Builder: "oci"}
 	cmd := comandoConstructor(context.Background(), "/bin/kling", []string{"builder", "oci"}, "/var/lib/kindling",
-		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder")
+		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder", "/var/lib/kindling/cache/verified", "")
 
 	c := cmd.SysProcAttr.Credential
 	if c == nil || c.Uid != 990 || c.Gid != 989 || c.Groups == nil || len(c.Groups) != 0 || c.NoSetGroups {
@@ -201,7 +194,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	}
 	env := strings.Join(cmd.Env, "\n") + "\n"
 	for _, quiero := range []string{"HOME=/var/lib/kindling/build/pg.1\n", "KLING_OUT_DIR=/var/lib/kindling/build/pg.1/out\n",
-		"KLING_CACHE_DIR=/var/lib/kindling/cache/builder\n", "KLING_BUILD_LIMITS=1\n", "HTTPS_PROXY=http://proxy:3128\n",
+		"KLING_CACHE_DIR=/var/lib/kindling/cache/builder\n", "KLING_VERIFIED_CACHE_DIR=/var/lib/kindling/cache/verified\n", "KLING_BUILD_LIMITS=1\n", "HTTPS_PROXY=http://proxy:3128\n",
 		"KLING_IMAGE_NAME=pg\n"} {
 		if !strings.Contains(env, quiero) {
 			t.Fatalf("falta %q en el entorno:\n%s", quiero, env)
@@ -210,12 +203,21 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	if strings.Contains(env, "secreto-del-daemon") {
 		t.Fatalf("el entorno del daemon llega al constructor:\n%s", env)
 	}
+	if strings.Contains(env, "KLING_VERIFIED_SCOPE_DIR") {
+		t.Fatalf("una imagen pública recibe la verificada de un origen:\n%s", env)
+	}
+	priv := comandoConstructor(context.Background(), "/bin/kling", []string{"builder", "oci"}, "/var/lib/kindling",
+		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/build/pg.1/cache", "/var/lib/kindling/cache/verified",
+		"/var/lib/kindling/cache/verified/registry-x")
+	if env := strings.Join(priv.Env, "\n") + "\n"; !strings.Contains(env, "KLING_VERIFIED_SCOPE_DIR=/var/lib/kindling/cache/verified/registry-x\n") {
+		t.Fatalf("falta la verificada del origen:\n%s", env)
+	}
 	if got := strings.Join(cmd.Args, " "); got != "/bin/kling builder oci /var/lib/kindling/build/pg.1" {
 		t.Fatalf("argv %s", got)
 	}
 
 	// Sin usuario: el entorno del daemon y su identidad, como siempre.
-	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "")
+	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "", "", "")
 	if cmd.SysProcAttr != nil || !strings.Contains(strings.Join(cmd.Env, "\n"), "secreto-del-daemon") ||
 		strings.Contains(strings.Join(cmd.Env, "\n"), "KLING_OUT_DIR") {
 		t.Fatalf("sin usuario: %+v %v", cmd.SysProcAttr, cmd.Env)
@@ -234,7 +236,7 @@ func TestConstructorCredencialDeVerdad(t *testing.T) {
 	os.Chmod(work, 0o755)
 	script := `grep -E "^(Uid|Gid|Groups|CapEff):" /proc/self/status; true`
 	cmd := comandoConstructor(context.Background(), "/bin/sh", []string{"-c", script},
-		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c")
+		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c", "/v", "")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -405,5 +407,51 @@ echo "$CONTENIDO" > "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
 	}
 	if b, _ := os.ReadFile(filepath.Join(s.root, "images", "pg.ext4")); string(b) != "v1\n" {
 		t.Fatalf("la imagen en uso cambió: %q", b)
+	}
+}
+
+// Como root, las credenciales del registro se ceden al usuario de construcción
+// (0600, suyas): solo él las lee.
+func TestPrepararTrabajoCedeCredenciales(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ceder un fichero a otro uid necesita root")
+	}
+	u := &usuarioConstructor{Nombre: "x", UID: 54321, GID: 54321}
+	work, err := prepararTrabajo(t.TempDir(), "pg", []byte(`{}`), []byte(`{"ghcr.io":{}}`), u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(work, FicheroCredencialesConstructor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != u.UID || st.Gid != u.GID || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: uid %d gid %d modo %o", FicheroCredencialesConstructor, st.Uid, st.Gid, fi.Mode().Perm())
+	}
+}
+
+// Sin usuario de construcción, una caché propia (la de un registro con
+// credenciales) también le llega al constructor: si no, usaría la de todos.
+func TestComandoConstructorCacheSinUsuario(t *testing.T) {
+	cmd := comandoConstructor(context.Background(), "/bin/true", nil, "/r", "/w",
+		api.BuildImageRequest{Name: "x"}, true, nil, "/w/cache", "", "")
+	var hay bool
+	for _, e := range cmd.Env {
+		if e == "KLING_CACHE_DIR=/w/cache" {
+			hay = true
+		}
+	}
+	if !hay {
+		t.Fatal("sin usuario de construcción, la caché propia no llega al constructor")
+	}
+	cmd = comandoConstructor(context.Background(), "/bin/true", nil, "/r", "/w",
+		api.BuildImageRequest{Name: "x"}, true, nil, "", "", "")
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "KLING_CACHE_DIR=") && e != "KLING_CACHE_DIR=" {
+			// Heredado del entorno del test: no lo pone el daemon.
+			if os.Getenv("KLING_CACHE_DIR") == "" {
+				t.Fatalf("sin caché propia no debe poner KLING_CACHE_DIR: %s", e)
+			}
+		}
 	}
 }

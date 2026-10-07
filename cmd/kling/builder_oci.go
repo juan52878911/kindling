@@ -13,12 +13,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/scripts"
 )
@@ -33,6 +35,10 @@ import (
 //     Docker da por hecho: /dev/fd, /dev/shm, /etc/hosts, hostname);
 //   - el agente de invitado, /usr/local/bin/kling-guest, y el /entrypoint
 //     que le cede el PID 1;
+//   - o, si a la imagen le faltan las herramientas del script (una
+//     distroless, una scratch), el init en Go: /sbin/overlay-init es un
+//     enlace a kling-guest, que hace lo mismo que el script y se ejecuta como
+//     agente, sin /entrypoint (pkg/guest/init.go);
 //   - en /etc/kling/env (0600) el Env de la imagen más el del spec;
 //   - en /etc/kindling/service.json el ENTRYPOINT+CMD con el USER, el
 //     WORKDIR y la STOPSIGNAL de la imagen: lo arranca y vigila el agente
@@ -47,10 +53,16 @@ import (
 // mismo. Cada capa se comprueba por sha256 y queda en la caché por hash:
 // reimportar el mismo digest no baja nada.
 //
-// Límites: el init es un script de sh que necesita sh, mount, pivot_root,
-// mkdir y ln en la imagen (cualquier Alpine o Debian los trae; una
-// "distroless" no, y se rechaza al construir). Sin verity: la imagen es la
-// raíz, no una capa.
+// Por qué el script sigue siendo el init de las imágenes que lo pueden correr,
+// y no el de Go para todas: es el que llevan las bases de kindling y todas las
+// imágenes de Docker importadas hasta ahora, probado en el laboratorio con
+// Postgres, MariaDB, nginx o Hindsight; cambiarlo para ellas no arreglaría
+// nada. Los dos hacen lo mismo, y init_test.go (pkg/guest) prueba el de Go
+// con los mismos casos que scripts/minimal_init_test.go.
+//
+// Límites: sin verity (la imagen es la raíz, no una capa); en una imagen sin
+// sh, un HEALTHCHECK CMD-SHELL no se puede correr y se sustituye por la sonda
+// de EXPOSE.
 
 // OCISpec es el spec del constructor "oci".
 type OCISpec struct {
@@ -79,7 +91,16 @@ type OCISpec struct {
 	// cuyo CMD acaba con 0 (python:3.12-slim) no se tiene que relanzar para
 	// siempre; uno que se cae, sí.
 	Restart string `json:"restart,omitempty"`
+	// Source dice de dónde salen los blobs: "" es un registro; "archive",
+	// un docker save o un layout OCI que el CLI subió a la caché del daemon
+	// (kling image import -archive). Entonces Digest es obligatorio (el del
+	// manifiesto), Ref es opcional (el nombre que traía la imagen en el
+	// archivo) y no se usa la red. Ninguna ruta del host del CLI llega aquí.
+	Source string `json:"source,omitempty"`
 }
+
+// ociSourceArchive es OCISpec.Source de lo importado de un archivo.
+const ociSourceArchive = "archive"
 
 const (
 	ociDefaultMaxMB = 4096
@@ -101,7 +122,15 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	if req.Base != "" {
 		return oci.ImageRef{}, fmt.Errorf("the oci builder makes its own base; don't give one")
 	}
-	ref, err := oci.ParseImageRef(s.Ref)
+	switch s.Source {
+	case "", ociSourceArchive:
+	default:
+		return oci.ImageRef{}, fmt.Errorf("invalid source %q (want archive, or none for a registry)", s.Source)
+	}
+	if s.Source == ociSourceArchive && s.Digest == "" {
+		return oci.ImageRef{}, fmt.Errorf("an image from an archive needs its manifest digest")
+	}
+	ref, err := ociSpecRef(s)
 	if err != nil {
 		return ref, err
 	}
@@ -145,11 +174,38 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	return ref, nil
 }
 
+// ociSpecRef es la referencia del spec. Una imagen de un archivo puede no
+// tener nombre: entonces es "archive/image" (solo para los mensajes; la imagen
+// la fija el digest).
+func ociSpecRef(s OCISpec) (oci.ImageRef, error) {
+	if s.Source == ociSourceArchive && s.Ref == "" {
+		return oci.ImageRef{Registry: "archive", Repo: "image"}, nil
+	}
+	return oci.ParseImageRef(s.Ref)
+}
+
+// ociShown es cómo se nombra la imagen en el registro de la construcción y en
+// la receta: la referencia normalizada; la de un archivo, tal como venía
+// ("postgres:17-alpine@sha256:...", no de ningún registro), o "archive@..."
+// si no traía nombre.
+func ociShown(s OCISpec, ref oci.ImageRef) string {
+	if s.Source == ociSourceArchive {
+		return cmp.Or(s.Ref, "archive") + "@" + ref.Digest
+	}
+	return ref.String()
+}
+
 func builderOCI(dir string) error { return buildOCI(context.Background(), dir, os.Stdout) }
 
 func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	t0 := time.Now()
 	logf := func(format string, a ...any) { fmt.Fprintf(log, format+"\n", a...) }
+	// Lo primero, y se borra al leerlo: lo que venga después (bajar y parsear
+	// tars hostiles) ya no lo tiene en disco.
+	auth, err := leerCredencialesRegistro(dir)
+	if err != nil {
+		return err
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "request.json"))
 	if err != nil {
 		return err
@@ -176,7 +232,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		maxMB = ociDefaultMaxMB
 	}
 	root := envOr("KLING_ROOT", "/var/lib/kindling")
-	lib := envOr("KLING_LIB_DIR", "/usr/local/lib/kindling")
+	lib := envOr("KLING_LIB_DIR", libPorDefecto(root))
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	if spec.Arch != runtime.GOARCH {
 		if a := os.Getenv("KLING_GUEST_AGENT_" + spec.Arch); a != "" {
@@ -185,7 +241,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	agentSum, err := imagen.SHA256File(agent)
 	if err != nil {
-		return fmt.Errorf("guest agent: %w (set KLING_GUEST_AGENT or install it with make deploy)", err)
+		return fmt.Errorf("guest agent: %w (%s)", err, pistaAgente())
 	}
 	t := time.Now().UTC().Truncate(time.Second)
 	if e := os.Getenv("SOURCE_DATE_EPOCH"); e != "" {
@@ -213,17 +269,45 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	unpacked := filepath.Join(dir, "layers")
 	defer os.RemoveAll(unpacked)
 	// Sin privilegios (el daemon nos bajó de root), la caché es nuestra: todo lo
-	// cacheado se rehashea siempre (oci.Client.SiempreRehash).
+	// cacheado se rehashea siempre (oci.Client.SiempreRehash). Lo que el daemon
+	// ya verificó está en KLING_VERIFIED_CACHE_DIR, suya y de solo lectura
+	// para nosotros: eso no se rehashea (internal/daemon/builders_cache.go).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
-		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0}
+		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
+	archive := spec.Source == ociSourceArchive
+	if archive {
+		// Los blobs los subió el CLI a la caché de root (PUT /oci/blobs): sin
+		// red. Sin root, el daemon los dejó en la verificada de este archivo
+		// (KLING_VERIFIED_SCOPE_DIR); la de root no la leemos.
+		c.Offline = true
+	}
+	shown := ociShown(spec, ref)
+	if os.Getenv("KLING_CACHE_DIR") != "" {
+		// La de lo público y, si la hay, la del origen de esta imagen (su
+		// registro con credenciales, o el archivo): las de otros orígenes
+		// están cerradas para nosotros (builders_cache.go).
+		for _, k := range []string{"KLING_VERIFIED_CACHE_DIR", "KLING_VERIFIED_SCOPE_DIR"} {
+			if d := os.Getenv(k); d != "" {
+				c.Verificadas = append(c.Verificadas, filepath.Join(d, "oci"))
+			}
+		}
+	}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("resolving %s: %w", ref, err)
+		return fmt.Errorf("resolving %s: %w", shown, err)
 	}
 	img, err := c.Pull(ctx, ref.Name(), digest, spec.Arch)
 	if err != nil {
 		return err
+	}
+	if os.Getenv("KLING_CACHE_DIR") != "" {
+		// Para el daemon: qué blobs de la caché usó esta construcción. Si
+		// acaba bien, los comprueba él y pasa a la verificada los nuevos.
+		usados := strings.Join(c.Usados(), "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "cache-used"), []byte(usados), 0o600); err != nil {
+			return err
+		}
 	}
 	cfg := img.Config.Config
 	dPull := time.Since(tPull)
@@ -231,7 +315,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	for _, l := range img.Layers {
 		compressed += l.Size
 	}
-	logf("%s: %s, %d layer(s), %d MiB compressed", ref, img.ManifestDigest, len(img.Layers), compressed>>20)
+	how := "compressed"
+	if archive {
+		how = "of layers" // un docker save las trae sin comprimir
+	}
+	logf("%s: %s, %d layer(s), %d MiB %s", shown, img.ManifestDigest, len(img.Layers), compressed>>20, how)
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
 	tTree := time.Now()
@@ -273,14 +361,31 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if files > ociMaxFiles || bytes > int64(maxMB)<<23 {
 		return fmt.Errorf("image unpacks to %d files and %d MiB, over the limits (%d files, %d MiB)", files, bytes>>20, ociMaxFiles, maxMB*8)
 	}
+	// El init: el script si la imagen trae lo que necesita; si no (una
+	// distroless, una scratch), el init en Go de kling-guest. También si la
+	// imagen trae su propio /entrypoint, que el script ejecutaría en vez del
+	// agente: el de Go no lo mira.
+	var missing []string
 	for _, tool := range ociInitTools {
 		if findTool(tree, tool) == "" {
-			return fmt.Errorf("the image has no %s; kindling's init needs a shell and %s (distroless images are not supported yet)",
-				tool, strings.Join(ociInitTools[1:], ", "))
+			missing = append(missing, tool)
 		}
 	}
-	if n, _ := tree.Resolve("/entrypoint"); n != nil {
-		return fmt.Errorf("the image already has /entrypoint, which kindling's init would run instead of its agent")
+	ownEntry, _ := tree.Resolve("/entrypoint")
+	goInit := len(missing) > 0 || ownEntry != nil
+	switch {
+	case len(missing) > 0:
+		logf("the image has no %s: it boots with kindling's init in Go", strings.Join(missing, ", "))
+	case goInit:
+		logf("the image has its own /entrypoint: it boots with kindling's init in Go, which leaves it alone")
+	}
+	// Las sondas de listo son scripts con #!/bin/sh si la imagen lo tiene.
+	hasSh := treeExec(tree, "/bin/sh")
+	probeCfg := cfg
+	if hc := cfg.Healthcheck; !hasSh && hc != nil && len(hc.Test) > 1 && hc.Test[0] == "CMD-SHELL" {
+		// Docker la correría con sh y nunca pasaría; aquí se queda la de EXPOSE.
+		logf("warning: the image's HEALTHCHECK needs a shell, which the image doesn't have; ignoring it")
+		probeCfg.Healthcheck = nil
 	}
 
 	// Lo que se ejecuta: como docker run.
@@ -297,7 +402,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if spec.User != "" {
 		user = spec.User
 	}
-	env := mergeEnv(cfg.Env, spec.Env)
+	env, fuera := mergeEnv(cfg.Env, spec.Env)
+	for _, k := range fuera {
+		// Solo el nombre: el valor puede ser un secreto.
+		logf("warning: the image's ENV %s is not KEY=value without NUL or CR; left out", k)
+	}
 	if len(argv) == 0 {
 		logf("the image has no ENTRYPOINT or CMD: only the agent runs (use kling exec)")
 	}
@@ -312,6 +421,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if err := imagen.PutAgent(tree, agent, spec.Arch, t); err != nil {
 		return err
 	}
+	if goInit {
+		// Después de PutAgent, que ya dijo si es de otra arquitectura.
+		if err := agentIsInit(agent); err != nil {
+			return err
+		}
+	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure)}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
@@ -319,36 +434,47 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)
 		svc.StopSignal = ""
 	}
-	svc.ProbeTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(cfg.Healthcheck)
+	svc.ProbeTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(probeCfg.Healthcheck)
 	svcJSON, _ := json.MarshalIndent(svc, "", "  ")
-	ociJSON, _ := json.MarshalIndent(map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest,
-		"arch": spec.Arch, "config": cfg}, "", "  ")
-	put := []struct {
+	ociInfo := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest,
+		"arch": spec.Arch, "config": cfg}
+	sourceLine := ""
+	if archive {
+		ociInfo["source"] = ociSourceArchive
+		sourceLine = "source=" + ociSourceArchive + "\n"
+	}
+	ociJSON, _ := json.MarshalIndent(ociInfo, "", "  ")
+	initKind := "sh"
+	if goInit {
+		initKind = "go"
+	}
+	type putFile struct {
 		p    string
 		data string
 		mode uint32
-	}{
-		{"/sbin/overlay-init", scripts.MinimalInit, 0o755},
-		{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755},
+	}
+	put := []putFile{
 		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
 		{"/etc/kindling/oci.json", string(ociJSON) + "\n", 0o644},
-		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\nref=%s\ndigest=%s\nmanifest=%s\nbuilt_at=%s\n",
-			ref, digest, img.ManifestDigest, t.Format("2006-01-02T15:04:05Z")), 0o644},
+		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\n%sref=%s\ndigest=%s\nmanifest=%s\ninit=%s\nbuilt_at=%s\n",
+			sourceLine, shown, digest, img.ManifestDigest, initKind, t.Format("2006-01-02T15:04:05Z")), 0o644},
+	}
+	if goInit {
+		// kling-guest hace de init al verse llamado overlay-init
+		// (pkg/guest/init.go): carga /etc/kling/env y se ejecuta como agente.
+		if err := imagen.Link(tree, "/sbin/overlay-init", "/usr/local/bin/kling-guest", t); err != nil {
+			return err
+		}
+	} else {
+		put = append(put, putFile{"/sbin/overlay-init", scripts.MinimalInit, 0o755},
+			putFile{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755})
 	}
 	if len(argv) > 0 {
-		put = append(put, struct {
-			p    string
-			data string
-			mode uint32
-		}{api.GuestServiceSpec, string(svcJSON) + "\n", 0o644})
+		put = append(put, putFile{api.GuestServiceSpec, string(svcJSON) + "\n", 0o644})
 	}
-	probe, probeWhat := ociReadyProbe(cfg)
+	probe, probeWhat := ociReadyProbe(probeCfg, hasSh)
 	if probe != "" {
-		put = append(put, struct {
-			p    string
-			data string
-			mode uint32
-		}{api.GuestReadyProbe, probe, 0o755})
+		put = append(put, putFile{api.GuestReadyProbe, probe, 0o755})
 	}
 	for _, f := range put {
 		if err := imagen.Put(tree, f.p, []byte(f.data), f.mode, t); err != nil {
@@ -399,11 +525,17 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	for _, l := range img.Layers {
 		layers = append(layers, map[string]any{"digest": l.Digest, "size": l.Size, "media_type": l.MediaType})
 	}
-	built := map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
-		"layers": layers, "service": svc, "ready": probeWhat, "ports": sortedKeys(cfg.ExposedPorts),
+	built := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
+		"layers": layers, "service": svc, "ready": probeWhat, "init": initKind, "ports": sortedKeys(cfg.ExposedPorts),
 		"volumes": sortedKeys(cfg.Volumes)}
 	if len(cfg.Labels) > 0 {
 		built["labels"] = cfg.Labels
+	}
+	if archive {
+		// De dónde vino: un archivo, y el id de la imagen (el digest de su
+		// configuración, el que enseña docker images). Sin rutas del host.
+		built["source"] = ociSourceArchive
+		built["config"] = img.Manifest.Config.Digest
 	}
 	bj, _ := json.Marshal(built)
 	// Un contenedor de Docker corre con los núcleos enteros salvo que se le
@@ -431,6 +563,52 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	return nil
 }
 
+// ficheroCredencialesRegistro es el fichero con las credenciales del registro
+// que deja el daemon en el directorio de trabajo
+// (internal/daemon/registries.go): {"<registro>": {"username", "password"}}.
+const ficheroCredencialesRegistro = "registry-auth.json"
+
+// leerCredencialesRegistro lee y borra el fichero de credenciales, si lo hay.
+// Sin seguir enlaces y solo un fichero regular. Ningún error cita su
+// contenido.
+func leerCredencialesRegistro(dir string) (map[string]oci.Credential, error) {
+	p := filepath.Join(dir, ficheroCredencialesRegistro)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ficheroCredencialesRegistro, err)
+	}
+	defer f.Close()
+	os.Remove(p)
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", ficheroCredencialesRegistro)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ficheroCredencialesRegistro, err)
+	}
+	var m map[string]oci.Credential
+	if json.Unmarshal(b, &m) != nil {
+		return nil, fmt.Errorf("%s is not valid JSON", ficheroCredencialesRegistro)
+	}
+	return m, nil
+}
+
+// soloDe deja de auth solo las credenciales de registry: el daemon ya manda
+// solo esas, y el cliente OCI solo las usa con él, pero no cuesta nada.
+func soloDe(auth map[string]oci.Credential, registry string) map[string]oci.Credential {
+	k, err := oci.CredentialKey(registry)
+	if err != nil {
+		return nil
+	}
+	if c, ok := auth[k]; ok {
+		return map[string]oci.Credential{k: c}
+	}
+	return nil
+}
+
 // removeOnClose borra el tar descomprimido de una capa al cerrarlo: el ext4
 // ya no lo vuelve a leer.
 type removeOnClose struct {
@@ -447,14 +625,19 @@ func (r removeOnClose) Close() error {
 var marcaOCI = imagen.Marca{Constructor: "oci", Dir: "/etc/kindling", DM: "kindling-layer"}
 
 // mergeEnv son las variables de la imagen con las del spec encima (una
-// clave repetida se queda en su sitio con el valor nuevo).
-func mergeEnv(image, extra []string) []string {
-	out := []string{}
+// clave repetida se queda en su sitio con el valor nuevo), y los nombres de
+// las de la imagen que se dejan fuera. Un valor de la imagen puede tener
+// saltos de línea (Docker los deja en el ENV): imagen.SQ los guarda entre
+// comillas, y tanto sh como el init en Go los leen así. Un NUL o un CR, no.
+// Las del spec ya llegan validadas, de una línea (validateOCI).
+func mergeEnv(image, extra []string) (out, fuera []string) {
+	out = []string{}
 	at := map[string]int{}
 	for _, kv := range append(append([]string{}, image...), extra...) {
-		k, _, _ := strings.Cut(kv, "=")
-		if !reBuildEnv.MatchString(kv) {
-			continue // una variable de la imagen que no cabe en una línea de sh
+		k, v, _ := strings.Cut(kv, "=")
+		if !reBuildEnv.MatchString(k+"=") || strings.ContainsAny(v, "\x00\r") {
+			fuera = append(fuera, k)
+			continue
 		}
 		if i, ok := at[k]; ok {
 			out[i] = kv
@@ -463,17 +646,23 @@ func mergeEnv(image, extra []string) []string {
 		at[k] = len(out)
 		out = append(out, kv)
 	}
-	return out
+	return out, fuera
 }
 
 // findTool busca un ejecutable en los directorios de siempre del árbol.
 func findTool(tree *ext4.Node, name string) string {
 	for _, d := range []string{"/bin", "/sbin", "/usr/bin", "/usr/sbin"} {
-		if n, _ := tree.Resolve(d + "/" + name); n != nil && n.IsReg() && n.Mode&0o111 != 0 {
+		if treeExec(tree, d+"/"+name) {
 			return d + "/" + name
 		}
 	}
 	return ""
+}
+
+// treeExec dice si p es un ejecutable del árbol (siguiendo enlaces).
+func treeExec(tree *ext4.Node, p string) bool {
+	n, _ := tree.Resolve(p)
+	return n != nil && n.IsReg() && n.Mode&0o111 != 0
 }
 
 // ociReadyTimes son el Timeout y el StartPeriod del HEALTHCHECK (en
@@ -493,16 +682,46 @@ func ociReadyTimes(hc *oci.Healthcheck) (timeout, startPeriod int) {
 	return secs(hc.Timeout), secs(hc.StartPeriod)
 }
 
+// agentIsInit comprueba que el agente que va a la imagen sabe hacer de init
+// (guest.InitMarker). Uno anterior, el de KLING_GUEST_AGENT o el de otra
+// arquitectura que kling upgrade no cambia, se metería sin queja y la imagen
+// no arrancaría: correría como PID 1 sin overlay ni /proc, y sin decir por qué.
+func agentIsInit(agent string) error {
+	f, err := os.Open(agent)
+	if err != nil {
+		return fmt.Errorf("guest agent: %w", err)
+	}
+	defer f.Close()
+	ok, err := guest.HasInitMarker(f)
+	if err != nil {
+		return fmt.Errorf("guest agent %s: %w", agent, err)
+	}
+	if !ok {
+		return fmt.Errorf("the guest agent at %s predates the Go init this image needs; update it "+
+			"(make deploy, or kling upgrade if it lives in KLING_LIB_DIR; KLING_GUEST_AGENT and KLING_GUEST_AGENT_<arch> pick another one)", agent)
+	}
+	return nil
+}
+
 // ociReadyProbe es la sonda de "listo" (api.GuestReadyProbe) para la
 // configuración: el HEALTHCHECK si lo hay; si no, que acepte conexiones el
 // primer puerto TCP de EXPOSE (lo comprueba el agente: no todas las imágenes
 // traen nc). Devuelve también qué se comprueba, para la receta.
-func ociReadyProbe(cfg oci.ImageConfig) (script, what string) {
+//
+// Sin sh en la imagen (sh = false), la sonda no es un script: es un #! que
+// apunta al agente, que el kernel ejecuta sin shell; el HEALTHCHECK CMD va en
+// JSON en la segunda línea (kling-guest -exec-json) y un CMD-SHELL no se puede
+// correr (lo descarta quien llama).
+func ociReadyProbe(cfg oci.ImageConfig, sh bool) (script, what string) {
 	if hc := cfg.Healthcheck; hc != nil && len(hc.Test) > 1 {
-		switch hc.Test[0] {
-		case "CMD-SHELL":
+		switch {
+		case !sh && hc.Test[0] == "CMD":
+			argv, _ := json.Marshal(hc.Test[1:])
+			return "#!/usr/local/bin/kling-guest -exec-json\n" + string(argv) + "\n", "healthcheck: " + strings.Join(hc.Test[1:], " ")
+		case !sh:
+		case hc.Test[0] == "CMD-SHELL":
 			return "#!/bin/sh\n# HEALTHCHECK de la imagen (constructor oci de kindling).\n" + hc.Test[1] + "\n", "healthcheck: " + hc.Test[1]
-		case "CMD":
+		case hc.Test[0] == "CMD":
 			var q []string
 			for _, a := range hc.Test[1:] {
 				q = append(q, imagen.SQ(a))
@@ -525,6 +744,10 @@ func ociReadyProbe(cfg oci.ImageConfig) (script, what string) {
 	if port == 0 {
 		return "", ""
 	}
+	if !sh {
+		// El #! pasa un único argumento: -probe-tcp=..., con el "=".
+		return fmt.Sprintf("#!/usr/local/bin/kling-guest -probe-tcp=127.0.0.1:%d\n", port), fmt.Sprintf("tcp %d", port)
+	}
 	return fmt.Sprintf("#!/bin/sh\n# EXPOSE %d de la imagen (constructor oci de kindling).\nexec /usr/local/bin/kling-guest -probe-tcp 127.0.0.1:%d\n", port, port),
 		fmt.Sprintf("tcp %d", port)
 }
@@ -536,4 +759,26 @@ func sortedKeys(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// pistaAgente dice cómo conseguir el agente del invitado (un binario de
+// Linux) donde lo busca el constructor. En macOS no hay make deploy: lo pone
+// make install, o se compila y se señala con KLING_GUEST_AGENT.
+func pistaAgente() string {
+	if runtime.GOOS == "darwin" {
+		return "on macOS it is a Linux binary: make install puts it in lib/ of the data root, " +
+			"or build it with make guest GOARCH=arm64 and set KLING_GUEST_AGENT to it"
+	}
+	return "set KLING_GUEST_AGENT or install it with make deploy"
+}
+
+// libPorDefecto es dónde buscan los constructores el agente y los scripts:
+// /usr/local/lib/kindling en Linux (lo instala make deploy, de root) y, en
+// macOS, lib/ de la raíz de datos, porque allí el daemon es tu usuario y lo
+// pone make install sin sudo.
+func libPorDefecto(root string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(root, "lib")
+	}
+	return "/usr/local/lib/kindling"
 }

@@ -101,6 +101,7 @@ func run() int {
 	fs := flag.NewFlagSet("kling-vz", flag.ContinueOnError)
 	sock := fs.String("api-sock", "", "unix socket for the Firecracker-compatible API")
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	formats := fs.Bool("snapshot-formats", false, "print the oldest and newest snapshot formats (kling_vz) this build reads, and exit")
 	// --id lo pasa Firecracker (y el jailer); se acepta para no romper a quien
 	// lance el ayudante con los mismos argumentos.
 	_ = fs.String("id", "", "instance id (ignored)")
@@ -109,6 +110,11 @@ func run() int {
 	}
 	if *showVersion {
 		fmt.Println("kling-vz", version)
+		return 0
+	}
+	if *formats {
+		min, max := spec.Formatos()
+		fmt.Println(min, max)
 		return 0
 	}
 	if *sock == "" {

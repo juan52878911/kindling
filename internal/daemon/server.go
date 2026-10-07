@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -246,11 +246,20 @@ type Server struct {
 	// muConstructor los pone en fila: ver barrerProcesos.
 	constructor   *usuarioConstructor
 	muConstructor sync.Mutex
+	// limitesCache da los topes de sus cachés (builders_cache.go); nil = los
+	// de por defecto.
+	limitesCache func() LimitesCacheConstruccion
+	// muCacheOCI: los constructores (mientras corren) y GET/PUT /oci/blobs
+	// la toman en lectura; el barrido de <root>/cache/oci, en escritura y
+	// solo si no hay nadie (TryLock). Así no borra lo que alguien usa.
+	muCacheOCI sync.RWMutex
 
 	// construyendo es un cerrojo por nombre de imagen: dos construcciones
 	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.
 	muConstruyendo sync.Mutex
 	construyendo   map[string]*cerrojoImagen
+	// muRegistros guarda registries.json (registries.go).
+	muRegistros sync.Mutex
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
@@ -280,6 +289,11 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Antes de cargar nada: una raíz de v0.4 no se abre a medias.
+	if err := comprobarLinksV04(root); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	// Antes del manager: al cargar reconcilia las máquinas vivas y levanta
 	// sus proxies de credenciales, que toman ya el directorio de derrame.
 	prepararRaizPlataforma(root)
@@ -289,8 +303,8 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 		lock.Close()
 		return nil, err
 	}
+
 	st := &store{dir: filepath.Join(root, "store")}
-	migrateLinks(root, st)
 	fcVersion := firecrackerVersion(fcBin)
 	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
 	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.
@@ -350,11 +364,16 @@ func (s *Server) rutas() []ruta {
 		{"POST /volumes/{name}/snapshots", AccionAdmin, nil, s.handleSnapshotVolume},
 		{"POST /volumes/{name}/restore", AccionAdmin, nil, s.handleRestoreVolume},
 		{"DELETE /volumes/{name}/snapshots/{snap}", AccionAdmin, nil, s.handleRemoveVolumeSnapshot},
+		{"GET /registries", AccionAdmin, nil, s.handleRegistries},
+		{"POST /registries", AccionAdmin, nil, s.handleRegistryLogin},
+		{"DELETE /registries/{host}", AccionAdmin, nil, s.handleRegistryLogout},
 		{"GET /images/{name}/recipe", AccionAdmin, nil, s.handleImageRecipe},
 		{"GET /images/{name}/files", AccionAdmin, nil, s.handleGetImageFile},
 		{"PUT /images/{name}/files", AccionAdmin, nil, s.handlePutImageFile},
 		{"GET /images/{name}/blob", AccionAdmin, nil, s.handleGetImageBlob},
 		{"PUT /images/{name}/blob", AccionAdmin, nil, s.handlePutImageBlob},
+		{"GET /oci/blobs/{digest}", AccionAdmin, nil, s.handleGetOCIBlob},
+		{"PUT /oci/blobs/{digest}", AccionAdmin, nil, s.handlePutOCIBlob},
 		{"GET /snapshots", AccionListar, nil, s.handleSnapshots},
 		{"GET /snapshots/{name}", AccionSnapLeer, nil, s.handleSnapshot},
 		{"PUT /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleSetAnnotation},
@@ -660,6 +679,7 @@ func (s *Server) ajustes() map[string]string {
 	if s.constructor != nil {
 		a["builder_user"] = s.constructor.Nombre
 	}
+	s.ajustesCache(a)
 	return a
 }
 

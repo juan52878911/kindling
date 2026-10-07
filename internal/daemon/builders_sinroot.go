@@ -177,9 +177,10 @@ func entornoConstructor(work string) []string {
 }
 
 // prepararTrabajo crea el directorio de trabajo de una construcción con su
-// request.json. Con usuario de construcción, build/ queda de root 0711 (se
+// request.json y, si auth no es nil, las credenciales de su registro
+// (registries.go). Con usuario de construcción, build/ queda de root 0711 (se
 // atraviesa, no se lista ni se escribe) y el directorio de trabajo es suyo.
-func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (string, error) {
+func prepararTrabajo(root, name string, req, auth []byte, u *usuarioConstructor) (string, error) {
 	build := filepath.Join(root, "build")
 	if err := os.MkdirAll(build, 0o700); err != nil {
 		return "", err
@@ -212,6 +213,12 @@ func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (stri
 		os.RemoveAll(work)
 		return "", err
 	}
+	if auth != nil {
+		if err := escribirCredencialesConstructor(work, auth, u); err != nil {
+			os.RemoveAll(work)
+			return "", err
+		}
+	}
 	if u != nil {
 		for _, p := range []string{rq, work} {
 			if err := os.Lchown(p, int(u.UID), int(u.GID)); err != nil {
@@ -227,10 +234,8 @@ func prepararTrabajo(root, name string, req []byte, u *usuarioConstructor) (stri
 // construcción: suya y 0700. Aparte de <root>/cache/oci, que siguen usando
 // los constructores que corren como root (debian, android): root no debe
 // escribir en un directorio de un usuario sin privilegios (le plantaría
-// enlaces), ni fiarse de lo que haya dejado. La primera vez enlaza (hard
-// link) los blobs de la caché de root: siguen siendo de root y de solo lectura
-// para él, el cliente OCI los rehashea cada vez (SiempreRehash), y reimportar
-// lo que ya se bajó como root no vuelve a bajar nada.
+// enlaces), ni fiarse de lo que haya dejado. Nada de la de root pasa a ésta:
+// ahí hay capas de archivos y de registros privados (builders_cache.go).
 func prepararCache(root string, u *usuarioConstructor) (string, error) {
 	cache := filepath.Join(root, "cache")
 	if err := os.MkdirAll(cache, 0o755); err != nil {
@@ -253,7 +258,6 @@ func prepararCache(root string, u *usuarioConstructor) (string, error) {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			return "", err
 		}
-		migrarCacheOCI(filepath.Join(cache, "oci"), filepath.Join(d, "oci"), u)
 	case err != nil:
 		return "", err
 	case !fi.IsDir():
@@ -263,35 +267,6 @@ func prepararCache(root string, u *usuarioConstructor) (string, error) {
 		return "", err
 	}
 	return d, os.Chmod(d, 0o700)
-}
-
-// migrarCacheOCI enlaza los blobs de la caché OCI de root en la nueva. Corre
-// con el directorio nuevo aún de root (nadie más puede tocarlo); lo que falle
-// se baja otra vez, sin más.
-func migrarCacheOCI(vieja, nueva string, u *usuarioConstructor) {
-	entradas, err := os.ReadDir(filepath.Join(vieja, "sha256"))
-	if err != nil {
-		return
-	}
-	dst := filepath.Join(nueva, "sha256")
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return
-	}
-	n := 0
-	for _, e := range entradas {
-		if !e.Type().IsRegular() || strings.HasSuffix(e.Name(), ".part") {
-			continue
-		}
-		if os.Link(filepath.Join(vieja, "sha256", e.Name()), filepath.Join(dst, e.Name())) == nil {
-			n++
-		}
-	}
-	for _, p := range []string{nueva, dst} {
-		_ = os.Lchown(p, int(u.UID), int(u.GID))
-	}
-	if n > 0 {
-		log.Printf("builder cache: linked %d blob(s) from %s", n, vieja)
-	}
 }
 
 // adoptarSalida mueve a images/ la imagen que dejó un constructor en out/:
@@ -369,11 +344,13 @@ func adoptarFichero(src, dst string, uid uint32) (bool, error) {
 // barrerProcesos mata los procesos que queden con el uid del constructor. Va
 // por /proc y repite hasta una pasada limpia: un proceso que se bifurca sin
 // parar no se escapa entre dos lecturas. Sin /proc (macOS) no hace nada.
-func barrerProcesos(uid uint32) {
+// Devuelve si la última pasada fue limpia (sin ninguno vivo); sin /proc, solo
+// fuera de Linux (allí no hay constructor sin root).
+func barrerProcesos(uid uint32) bool {
 	for pasada := 0; pasada < 50; pasada++ {
 		entradas, err := os.ReadDir("/proc")
 		if err != nil {
-			return
+			return runtime.GOOS != "linux"
 		}
 		vivos := 0
 		for _, e := range entradas {
@@ -387,11 +364,12 @@ func barrerProcesos(uid uint32) {
 			}
 		}
 		if vivos == 0 {
-			return
+			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	log.Printf("WARNING: processes of builder uid %d keep coming back", uid)
+	return false
 }
 
 // procesoDeUID dice si alguno de los uid (real, efectivo, guardado, de

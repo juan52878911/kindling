@@ -73,13 +73,13 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := s.Clone()
-	want.KlingVZ = FormatVersion
+	want.KlingVZ = 1 // sin pantalla: lo lee también un kling-vz anterior
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, want)
 	}
 	// El JSON lleva los nombres del contrato.
 	b, _ := os.ReadFile(path)
-	for _, k := range []string{`"kling_vz": 2`, `"boot_source"`, `"machine_config"`, `"drives"`, `"network"`,
+	for _, k := range []string{`"kling_vz": 1`, `"boot_source"`, `"machine_config"`, `"drives"`, `"network"`,
 		`"mmds_config"`, `"balloon"`, `"entropy"`, `"machine_identifier"`} {
 		if !strings.Contains(string(b), k) {
 			t.Errorf("snapshot JSON lacks %s", k)
@@ -143,5 +143,32 @@ func TestSnapshotVersion(t *testing.T) {
 	_, err := Decode(strings.NewReader(futuro))
 	if err == nil || !strings.Contains(err.Error(), "newer kling-vz") || !strings.Contains(err.Error(), "update kling-vz") {
 		t.Fatalf("snapshot del futuro: %v", err)
+	}
+}
+
+// Un snapshot sin nada de la versión 2 (sin pantalla) se escribe como 1: el
+// kling-vz anterior lo restaura igual, y es lo que hace falta para volver atrás
+// (kling upgrade -rollback) con máquinas que el nuevo congeló. Con pantalla, 2.
+func TestSnapshotEscribeLaVersionMasBaja(t *testing.T) {
+	for _, c := range []struct {
+		g    *Graphics
+		want string
+	}{{nil, `"kling_vz": 1`}, {&Graphics{Width: 720, Height: 1280}, `"kling_vz": 2`}} {
+		s := sample()
+		s.Graphics = c.g
+		path := filepath.Join(t.TempDir(), "snap.json")
+		if err := s.WriteFile(path); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(path); !strings.Contains(string(b), c.want) {
+			t.Errorf("graphics %v: want %s in\n%s", c.g, c.want, b)
+		}
+	}
+}
+
+// Lo que dice -snapshot-formats: lee de la 1 a la actual.
+func TestFormatos(t *testing.T) {
+	if min, max := Formatos(); min != 1 || max != FormatVersion {
+		t.Fatalf("Formatos() = %d %d", min, max)
 	}
 }

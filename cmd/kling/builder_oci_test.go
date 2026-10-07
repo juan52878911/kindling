@@ -13,6 +13,7 @@ import (
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // alpineLike es una raíz mínima al estilo de Alpine: /sbin de verdad (no
@@ -44,7 +45,8 @@ func newOCITest(t *testing.T) *ociTestEnv {
 	e := &ociTestEnv{reg: ocitest.New(), root: t.TempDir(), work: t.TempDir()}
 	t.Cleanup(e.reg.Close)
 	agent := filepath.Join(t.TempDir(), "kling-guest")
-	os.WriteFile(agent, []byte(testELF(0x3e)), 0o755)
+	// Un agente que sabe hacer de init: lleva la marca, como el de verdad.
+	os.WriteFile(agent, []byte(testELF(0x3e)+guest.InitMarker), 0o755)
 	t.Setenv("KLING_ROOT", e.root)
 	t.Setenv("KLING_GUEST_AGENT", agent)
 	t.Setenv("KLING_GUEST_AGENT_amd64", agent)
@@ -92,15 +94,15 @@ func TestBuildOCI(t *testing.T) {
 		t.Fatalf("the build log shows an env value:\n%s", log)
 	}
 	var built struct {
-		Ref, Digest, Manifest, Ready string
-		Ports, Volumes               []string
-		Service                      api.ServiceSpec
-		Layers                       []struct{ Digest string }
+		Ref, Digest, Manifest, Ready, Init string
+		Ports, Volumes                     []string
+		Service                            api.ServiceSpec
+		Layers                             []struct{ Digest string }
 	}
 	if err := json.Unmarshal(hints.Built, &built); err != nil {
 		t.Fatal(err)
 	}
-	if built.Digest != idx || built.Ready != "tcp 5432" || len(built.Layers) != 2 || hints.Base != "" ||
+	if built.Digest != idx || built.Ready != "tcp 5432" || built.Init != "sh" || len(built.Layers) != 2 || hints.Base != "" ||
 		strings.Join(built.Service.Argv, " ") != "docker-entrypoint.sh postgres" || built.Service.StopSignal != "SIGINT" ||
 		built.Service.Restart != api.RestartOnFailure || built.Service.ProbeTimeoutSeconds != 0 {
 		t.Fatalf("built %s", hints.Built)
@@ -132,7 +134,7 @@ func TestBuildOCI(t *testing.T) {
 		}
 		return string(b)
 	}
-	if !strings.Contains(cat("/sbin/overlay-init"), "exec /entrypoint") || cat("/usr/local/bin/kling-guest") != testELF(0x3e) {
+	if !strings.Contains(cat("/sbin/overlay-init"), "exec /entrypoint") || cat("/usr/local/bin/kling-guest") != testELF(0x3e)+guest.InitMarker {
 		t.Fatal("init or agent")
 	}
 	if tree.Lookup("/sbin").IsLink() || tree.Lookup("/sbin/overlay-init") == nil {
@@ -158,7 +160,7 @@ func TestBuildOCI(t *testing.T) {
 	if err := json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc); err != nil || svc.WorkingDir != "/var/lib/postgresql" || svc.Argv[0] != "docker-entrypoint.sh" {
 		t.Fatalf("service %+v %v", svc, err)
 	}
-	if p := cat(api.GuestReadyProbe); !strings.Contains(p, "-probe-tcp 127.0.0.1:5432") {
+	if p := cat(api.GuestReadyProbe); !strings.HasPrefix(p, "#!/bin/sh\n") || !strings.Contains(p, "-probe-tcp 127.0.0.1:5432") {
 		t.Fatalf("ready probe:\n%s", p)
 	}
 	if n := tree.Lookup("/tmp"); n == nil || n.Mode&0o1777 != 0o1777 {
@@ -213,6 +215,12 @@ func TestBuildOCI(t *testing.T) {
 	if blobs, _ := os.ReadDir(filepath.Join(cache, "oci", "sha256")); len(blobs) == 0 {
 		t.Fatal("KLING_CACHE_DIR: no blobs in <cache>/oci")
 	}
+	// Y deja al daemon la lista de blobs que usó, para pasarlos a la caché
+	// verificada (internal/daemon/builders_cache.go).
+	usados, err := os.ReadFile(filepath.Join(e.work, "cache-used"))
+	if err != nil || !strings.Contains(string(usados), idx+"\n") || strings.Count(string(usados), "sha256:") != 5 {
+		t.Fatalf("cache-used (índice, manifiesto, config y 2 capas): %q %v", usados, err)
+	}
 }
 
 // El servicio que sale de la configuración de la imagen: un STOPSIGNAL que no
@@ -266,24 +274,215 @@ func TestOCIReadyTimes(t *testing.T) {
 	}
 }
 
-func TestBuildOCIRejects(t *testing.T) {
+// readImage lee la imagen construida como árbol, con cat de un fichero.
+func readImage(t *testing.T, img string) (*ext4.Node, func(string) string) {
+	t.Helper()
+	fsckImage(t, img)
+	f, err := os.Open(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	tree, err := ext4.Read(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree, func(p string) string {
+		t.Helper()
+		n, _ := tree.Resolve(p)
+		if n == nil {
+			t.Fatalf("%s missing", p)
+		}
+		b, err := n.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+
+// Una imagen sin sh (distroless, scratch): arranca con el init en Go. Sin
+// script de init ni /entrypoint; /sbin/overlay-init es el agente, y las
+// sondas son #! al agente que el kernel ejecuta sin shell.
+func TestBuildOCIDistroless(t *testing.T) {
 	e := newOCITest(t)
+	distroless := ocitest.TarGz([]ocitest.File{
+		{Name: "app", Body: testELF(0x3e), Mode: 0o755},
+		{Name: "etc/", Dir: true, Mode: 0o755},
+		{Name: "etc/passwd", Body: "root:x:0:0:root:/root:/sbin/nologin\nnonroot:x:65532:65532::/home/nonroot:/sbin/nologin\n"},
+	})
+	build := func(hc map[string]any) (string, *ext4.Node, func(string) string, string) {
+		t.Helper()
+		cfg := map[string]any{"Entrypoint": []string{"/app"}, "User": "65532", "Env": []string{"MSG=it's", "MULTI=a\nb", "BAD=x\ry", "1X=v"},
+			"ExposedPorts": map[string]any{"80/tcp": map[string]any{}}}
+		if hc != nil {
+			cfg["Healthcheck"] = hc
+		}
+		_, idx := e.reg.ImageConfig("amd64", cfg, distroless)
+		hints, log, err := e.build("whoami", OCISpec{Ref: e.reg.Host() + "/x/whoami@" + idx, Arch: "amd64"})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, log)
+		}
+		var built struct{ Init, Ready string }
+		json.Unmarshal(hints.Built, &built)
+		if built.Init != "go" || !strings.Contains(log, "no sh, mount, pivot_root, mkdir, ln") {
+			t.Fatalf("init %q, log:\n%s", built.Init, log)
+		}
+		tree, cat := readImage(t, filepath.Join(e.root, "images", "whoami.ext4"))
+		return built.Ready, tree, cat, log
+	}
+
+	ready, tree, cat, log := build(map[string]any{"Test": []string{"CMD-SHELL", "wget -q localhost"}, "Timeout": 30e9})
+	if n := tree.Lookup("/sbin/overlay-init"); n == nil || !n.IsLink() || n.Target != "/usr/local/bin/kling-guest" {
+		t.Fatalf("/sbin/overlay-init: %+v", n)
+	}
+	if tree.Lookup("/entrypoint") != nil {
+		t.Fatal("an /entrypoint (a sh script) in an image without sh")
+	}
+	// Un ENV de varias líneas se queda (sh y el init en Go lo leen entre
+	// comillas); uno con un CR o una clave que no lo es, fuera, con aviso del
+	// nombre y sin el valor.
+	if !strings.Contains(cat("/etc/kindling/IMAGE.txt"), "\ninit=go\n") || cat("/etc/kling/env") != "export MSG='it'\\''s'\nexport MULTI='a\nb'\n" {
+		t.Fatalf("IMAGE.txt or env:\n%s%s", cat("/etc/kindling/IMAGE.txt"), cat("/etc/kling/env"))
+	}
+	if !strings.Contains(log, "ENV BAD is not") || !strings.Contains(log, "ENV 1X is not") || strings.Contains(log, "x\ry") {
+		t.Fatalf("dropped ENV warning:\n%s", log)
+	}
+	// El CMD-SHELL no se puede correr: la sonda de EXPOSE, sin sus plazos.
+	if p := cat(api.GuestReadyProbe); p != "#!/usr/local/bin/kling-guest -probe-tcp=127.0.0.1:80\n" || ready != "tcp 80" ||
+		!strings.Contains(log, "HEALTHCHECK needs a shell") {
+		t.Fatalf("ready %q, probe:\n%s", ready, p)
+	}
+	var svc api.ServiceSpec
+	if err := json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc); err != nil || svc.User != "65532" || svc.ProbeTimeoutSeconds != 0 {
+		t.Fatalf("service %+v %v", svc, err)
+	}
+	if !strings.Contains(cat("/etc/kindling/oci.json"), "wget -q localhost") {
+		t.Fatal("oci.json lost the image's HEALTHCHECK")
+	}
+
+	// HEALTHCHECK CMD: el argv en JSON, con su plazo.
+	ready, _, cat, _ = build(map[string]any{"Test": []string{"CMD", "/app", "-health", "it's"}, "Timeout": 30e9})
+	if p := cat(api.GuestReadyProbe); p != "#!/usr/local/bin/kling-guest -exec-json\n[\"/app\",\"-health\",\"it's\"]\n" ||
+		ready != "healthcheck: /app -health it's" {
+		t.Fatalf("ready %q, probe:\n%s", ready, p)
+	}
+	var svc2 api.ServiceSpec
+	if json.Unmarshal([]byte(cat(api.GuestServiceSpec)), &svc2); svc2.ProbeTimeoutSeconds != 30 {
+		t.Fatalf("service %+v", svc2)
+	}
+}
+
+// Una imagen con sh y su propio /entrypoint arranca con el init en Go, que no
+// lo ejecuta: se queda tal cual, para su ENTRYPOINT.
+func TestBuildOCIOwnEntrypoint(t *testing.T) {
+	e := newOCITest(t)
+	own := ocitest.TarGz(append(alpineLike(), ocitest.File{Name: "entrypoint", Body: "#!/bin/sh\nexec \"$@\"\n", Mode: 0o755}))
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/entrypoint"}, "Cmd": []string{"redis-server"},
+		"ExposedPorts": map[string]any{"6379/tcp": map[string]any{}}}, own)
+	hints, log, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	var built struct{ Init string }
+	json.Unmarshal(hints.Built, &built)
+	tree, cat := readImage(t, filepath.Join(e.root, "images", "x.ext4"))
+	if built.Init != "go" || !tree.Lookup("/sbin/overlay-init").IsLink() || cat("/entrypoint") != "#!/bin/sh\nexec \"$@\"\n" {
+		t.Fatalf("init %q, /entrypoint %q", built.Init, cat("/entrypoint"))
+	}
+	// Con sh, la sonda sigue siendo la de siempre.
+	if p := cat(api.GuestReadyProbe); !strings.HasPrefix(p, "#!/bin/sh\n") || !strings.Contains(p, "-probe-tcp 127.0.0.1:6379") {
+		t.Fatalf("probe:\n%s", p)
+	}
+}
+
+// Un agente anterior al init en Go (sin guest.InitMarker) no hace de init:
+// una imagen que lo necesita se niega a construirse, diciendo cuál y qué
+// hacer, en vez de salir una imagen que no arranca. Las que van con el script
+// de sh no lo necesitan y se construyen igual.
+func TestBuildOCIAgenteSinInit(t *testing.T) {
+	e := newOCITest(t)
+	viejo := filepath.Join(t.TempDir(), "kling-guest-viejo")
+	os.WriteFile(viejo, []byte(testELF(0x3e)+api.LayerBootParam), 0o755)
+	t.Setenv("KLING_GUEST_AGENT_amd64", viejo)
+	t.Setenv("KLING_GUEST_AGENT", viejo)
+
 	distroless := ocitest.TarGz([]ocitest.File{{Name: "app", Body: testELF(0x3e), Mode: 0o755}})
 	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/app"}}, distroless)
-	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "distroless") {
-		t.Fatalf("distroless: %v", err)
+	_, log, err := e.build("d", OCISpec{Ref: e.reg.Host() + "/x/d@" + idx, Arch: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "the guest agent at "+viejo+" predates the Go init") {
+		t.Fatalf("an agent without the Go init was accepted: %v\n%s", err, log)
 	}
-	own := ocitest.TarGz(append(alpineLike(), ocitest.File{Name: "entrypoint", Body: "#!/bin/sh\n", Mode: 0o755}))
-	_, idx = e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/entrypoint"}}, own)
-	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "/entrypoint") {
-		t.Fatalf("own /entrypoint: %v", err)
+	if _, err := os.Stat(filepath.Join(e.root, "images", "d.ext4")); !os.IsNotExist(err) {
+		t.Fatalf("an image was left behind: %v", err)
 	}
-	_, idx = e.reg.ImageConfig("arm64", nil, ocitest.TarGz(alpineLike()))
+	// Uno de otra arquitectura dice eso primero, que es lo que hay que arreglar.
+	otra := filepath.Join(t.TempDir(), "kling-guest-arm64")
+	os.WriteFile(otra, []byte(testELF(0xb7)), 0o755)
+	t.Setenv("KLING_GUEST_AGENT_amd64", otra) // en un host arm64
+	t.Setenv("KLING_GUEST_AGENT", otra)       // en uno amd64
+	if _, _, err := e.build("d", OCISpec{Ref: e.reg.Host() + "/x/d@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "not amd64") {
+		t.Fatalf("an arm64 agent for an amd64 image: %v", err)
+	}
+	t.Setenv("KLING_GUEST_AGENT_amd64", viejo)
+	t.Setenv("KLING_GUEST_AGENT", viejo)
+
+	_, idx = e.reg.ImageConfig("amd64", map[string]any{"Cmd": []string{"sh"}}, ocitest.TarGz(alpineLike()))
+	if _, log, err := e.build("a", OCISpec{Ref: e.reg.Host() + "/x/a@" + idx, Arch: "amd64"}); err != nil {
+		t.Fatalf("an image with sh needs no Go init: %v\n%s", err, log)
+	}
+}
+
+func TestBuildOCIRejects(t *testing.T) {
+	e := newOCITest(t)
+	_, idx := e.reg.ImageConfig("arm64", nil, ocitest.TarGz(alpineLike()))
 	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "no linux/amd64") {
 		t.Fatalf("wrong arch: %v", err)
 	}
 	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64", MaxMB: 1, Env: []string{"A=1\nB=2"}}); err == nil {
 		t.Fatal("multi-line env accepted")
+	}
+}
+
+// Una imagen de un registro privado: con las credenciales que deja el daemon
+// en registry-auth.json se construye, el fichero se borra al leerlo, y la
+// contraseña no sale ni en el log ni en recipe.json; sin ellas, el error dice
+// cómo darlas (y tampoco la lleva).
+func TestBuildOCIRegistroPrivado(t *testing.T) {
+	const pass = "s3cr3t-registry-pass"
+	e := newOCITest(t)
+	e.reg.User, e.reg.Pass = "juan", pass
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/bin/sh"}}, ocitest.TarGz(alpineLike()))
+	e.reg.Tag("v1", idx)
+	ref := e.reg.Host() + "/priv/app:v1"
+	key, _ := oci.CredentialKey(e.reg.Host())
+	authFile := filepath.Join(e.work, ficheroCredencialesRegistro)
+
+	if _, log, err := e.build("priv", OCISpec{Ref: ref, Arch: "amd64"}); err == nil ||
+		!strings.Contains(err.Error(), "kling registry login "+key) {
+		t.Fatalf("sin credenciales: %v\n%s", err, log)
+	}
+
+	auth, _ := json.Marshal(map[string]oci.Credential{key: {Username: "juan", Password: pass}, "ghcr.io": {Username: "x", Password: "otra"}})
+	os.WriteFile(authFile, auth, 0o600)
+	_, log, err := e.build("priv", OCISpec{Ref: ref, Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	if _, err := os.Lstat(authFile); !os.IsNotExist(err) {
+		t.Fatalf("el constructor no borró %s: %v", ficheroCredencialesRegistro, err)
+	}
+	rec, _ := os.ReadFile(filepath.Join(e.work, "recipe.json"))
+	if strings.Contains(log, pass) || strings.Contains(string(rec), pass) {
+		t.Fatalf("la contraseña salió en el log o en recipe.json:\n%s\n%s", log, rec)
+	}
+
+	// Credenciales malas: el error tampoco las cita.
+	auth, _ = json.Marshal(map[string]oci.Credential{key: {Username: "juan", Password: "mala-" + pass}})
+	os.WriteFile(authFile, auth, 0o600)
+	if _, _, err := e.build("priv2", OCISpec{Ref: ref, Arch: "amd64"}); err == nil ||
+		!strings.Contains(err.Error(), "were refused") || strings.Contains(err.Error(), pass) {
+		t.Fatalf("credenciales malas: %v", err)
 	}
 }
 
@@ -340,5 +539,21 @@ func TestMaskSpecEnv(t *testing.T) {
 	}
 	if got := string(maskSpecEnv(json.RawMessage(`[1]`))); got != "[1]" {
 		t.Fatal(got)
+	}
+}
+
+// Un tope de la caché por encima del máximo, por entorno, se avisa y se
+// queda en el de por defecto: no llega a desbordar en el daemon.
+func TestBuildCacheConfigTopes(t *testing.T) {
+	t.Setenv("KLING_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("KLING_BUILD_CACHE_MAX_GIB", "17179869184")
+	t.Setenv("KLING_BUILD_CACHE_MAX_DAYS", "200000")
+	if l := buildCacheConfig(); l.MaxGiB != 0 || l.MaxDays != 0 {
+		t.Fatalf("%+v", l)
+	}
+	t.Setenv("KLING_BUILD_CACHE_MAX_GIB", "50")
+	t.Setenv("KLING_BUILD_CACHE_MAX_DAYS", "7")
+	if l := buildCacheConfig(); l.MaxGiB != 50 || l.MaxDays != 7 {
+		t.Fatalf("%+v", l)
 	}
 }
