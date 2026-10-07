@@ -1,6 +1,7 @@
 // Package ocitest es un registro OCI mínimo en memoria para las pruebas: sirve
 // índices, manifiestos y blobs por digest y pide un token Bearer como Docker
-// Hub, para probar la descarga sin red.
+// Hub (o credenciales, Basic o Bearer, como un registro privado), para probar
+// la descarga sin red.
 package ocitest
 
 import (
@@ -37,6 +38,14 @@ type Registry struct {
 	BlobDelay   time.Duration
 	MaxInFlight int
 	inFlight    int
+	// User y Pass, si User no está vacío, son las credenciales que exige: el
+	// servicio de tokens no da uno sin ellas (Basic) o, con Basic, cada
+	// petición a /v2/ las lleva directamente.
+	User, Pass string
+	Basic      bool
+	// BlobRedirect, si no está vacío, es la URL base (un CDN) a la que se
+	// redirigen las peticiones de blobs, como Docker Hub o ghcr.io.
+	BlobRedirect string
 }
 
 // New arranca el registro.
@@ -71,15 +80,38 @@ func (r *Registry) Put(b []byte, mediaType string) string {
 	return d
 }
 
+// Blob es el contenido de un blob (para servirlo desde otro sitio).
+func (r *Registry) Blob(digest string) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blobs[digest]
+}
+
+// credOK dice si la petición lleva las credenciales que se exigen.
+func (r *Registry) credOK(req *http.Request) bool {
+	u, p, ok := req.BasicAuth()
+	return ok && u == r.User && p == r.Pass
+}
+
 func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path == "/token" {
+		if r.User != "" && !r.credOK(req) {
+			http.Error(w, `{"details":"incorrect username or password"}`, http.StatusUnauthorized)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"token": "t0k3n"})
 		return
 	}
 	r.mu.Lock()
 	r.Hits++
 	r.mu.Unlock()
-	if req.Header.Get("Authorization") != "Bearer t0k3n" {
+	if r.Basic && r.User != "" {
+		if !r.credOK(req) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Registry Realm"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else if req.Header.Get("Authorization") != "Bearer t0k3n" {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="test",scope="repository:x:pull"`, r.URL))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -105,6 +137,10 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 	if d == r.Corrupt {
 		b = append([]byte{}, b...)
 		b[len(b)/2] ^= 1
+	}
+	if r.BlobRedirect != "" && strings.Contains(req.URL.Path, "/blobs/") {
+		http.Redirect(w, req, r.BlobRedirect+"/"+d, http.StatusTemporaryRedirect)
+		return
 	}
 	if strings.Contains(req.URL.Path, "/blobs/") {
 		r.mu.Lock()

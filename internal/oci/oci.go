@@ -169,9 +169,14 @@ type Client struct {
 	// imports siguientes de otras imágenes. Cuesta rehashear lo cacheado (1-3
 	// s en una imagen de GiB); sin él, no se le cree a quien pudo escribirla.
 	SiempreRehash bool
+	// Auth son las credenciales de los registros privados, por CredentialKey
+	// (auth.go). Sin ellas, tokens anónimos.
+	Auth map[string]Credential
 
 	mu     sync.Mutex // tokens, hc y Log: las capas se bajan en paralelo
 	authMu sync.Mutex // un solo token pedido a la vez
+	// tokens es la cabecera Authorization de cada registro/repo: "Bearer
+	// <token>" o, si el registro pide Basic, "Basic <credencial>".
 	tokens map[string]string
 	hc     *http.Client
 }
@@ -205,13 +210,20 @@ func (c *Client) client() *http.Client {
 
 // checkRedirect sigue las redirecciones de los registros (las capas suelen
 // estar en un CDN) pero nunca de https a http: el contenido se verifica por
-// sha256, pero el token de la petición no debe viajar en claro.
+// sha256, pero el token de la petición no debe viajar en claro. Y la cabecera
+// Authorization (el token, o la credencial de un registro con Basic) solo va
+// al host:puerto de la petición original: Go la mantiene hacia un subdominio
+// o hacia otro puerto del mismo host, y un CDN no la necesita (su URL ya va
+// firmada).
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
 	}
 	if req.URL.Scheme != "https" && !(req.URL.Scheme == "http" && isLocalHost(req.URL.Hostname()) && isLocalHost(via[0].URL.Hostname())) {
 		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	if !strings.EqualFold(req.URL.Host, via[0].URL.Host) || req.URL.Scheme != via[0].URL.Scheme {
+		req.Header.Del("Authorization")
 	}
 	return nil
 }
@@ -695,7 +707,7 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		}
 		used := c.tokenFor(registry + "/" + repo)
 		if used != "" {
-			req.Header.Set("Authorization", "Bearer "+used)
+			req.Header.Set("Authorization", used)
 		}
 		resp, err := c.client().Do(req)
 		if err != nil && ctx.Err() == nil {
@@ -713,15 +725,35 @@ func (c *Client) do(ctx context.Context, registry, repo, path, accept string) (*
 		auth := resp.Header.Get("WWW-Authenticate")
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized && try == 0 && strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			if err := c.refreshToken(ctx, auth, registry, repo, used); err != nil {
-				return nil, fmt.Errorf("registry token: %w", err)
+		if resp.StatusCode == http.StatusUnauthorized && try == 0 {
+			scheme := strings.ToLower(auth)
+			switch {
+			case strings.HasPrefix(scheme, "bearer "):
+				if err := c.refreshToken(ctx, auth, registry, repo, used); err != nil {
+					return nil, fmt.Errorf("registry token: %w", err)
+				}
+				continue
+			case strings.HasPrefix(scheme, "basic") && c.credFor(registry) != nil:
+				c.setToken(registry+"/"+repo, c.credFor(registry).basic())
+				continue
 			}
-			continue
 		}
-		return nil, fmt.Errorf("GET %s: %s: %s", u, resp.Status, strings.TrimSpace(string(b)))
+		msg := fmt.Sprintf("GET %s: %s: %s", u, resp.Status, strings.TrimSpace(string(b)))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			msg += c.pista(registry)
+		}
+		return nil, errors.New(msg)
 	}
-	return nil, errors.New("unauthorized")
+	return nil, errors.New("unauthorized" + c.pista(registry))
+}
+
+func (c *Client) setToken(key, auth string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tokens == nil {
+		c.tokens = map[string]string{}
+	}
+	c.tokens[key] = auth
 }
 
 func (c *Client) tokenFor(key string) string {
@@ -739,21 +771,18 @@ func (c *Client) refreshToken(ctx context.Context, challenge, registry, repo, us
 	if c.tokenFor(key) != used {
 		return nil
 	}
-	tok, err := c.token(ctx, challenge, repo)
+	tok, err := c.token(ctx, challenge, registry, repo)
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	if c.tokens == nil {
-		c.tokens = map[string]string{}
-	}
-	c.tokens[key] = tok
-	c.mu.Unlock()
+	c.setToken(key, "Bearer "+tok)
 	return nil
 }
 
-// token pide un token anónimo de lectura al servicio que indica el 401.
-func (c *Client) token(ctx context.Context, challenge, repo string) (string, error) {
+// token pide un token de lectura al servicio que indica el 401: con las
+// credenciales del registro si las hay (y el servicio está en su dominio,
+// realmPermitido), anónimo si no.
+func (c *Client) token(ctx context.Context, challenge, registry, repo string) (string, error) {
 	params := map[string]string{}
 	for _, kv := range splitChallenge(challenge[len("bearer "):]) {
 		if k, v, ok := strings.Cut(kv, "="); ok {
@@ -784,6 +813,12 @@ func (c *Client) token(ctx context.Context, challenge, repo string) (string, err
 	if err != nil {
 		return "", err
 	}
+	if cr := c.credFor(registry); cr != nil {
+		if !realmPermitido(registry, ru.Hostname()) {
+			return "", fmt.Errorf("the token service %s is not on %s's domain: not sending its credentials there", ru.Host, registryHost(registry))
+		}
+		req.Header.Set("Authorization", cr.basic())
+	}
 	resp, err := c.client().Do(req)
 	if err != nil && ctx.Err() == nil {
 		time.Sleep(2 * time.Second)
@@ -794,6 +829,9 @@ func (c *Client) token(ctx context.Context, challenge, repo string) (string, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return "", fmt.Errorf("%s: %s%s", ru.Host, resp.Status, c.pista(registry))
+		}
 		return "", fmt.Errorf("%s: %s", ru.Host, resp.Status)
 	}
 	var t struct {

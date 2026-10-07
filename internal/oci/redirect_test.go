@@ -45,3 +45,44 @@ func TestCheckRedirect(t *testing.T) {
 		t.Fatal("sin tope de redirecciones")
 	}
 }
+
+// La cabecera Authorization solo sigue a una redirección al mismo host:puerto.
+func TestCheckRedirectQuitaAuthorization(t *testing.T) {
+	req := func(u string) *http.Request {
+		p, _ := url.Parse(u)
+		return &http.Request{URL: p, Header: http.Header{"Authorization": {"Basic x"}}}
+	}
+	desde := []*http.Request{req("https://registry.example.com/v2/x/blobs/sha256:a")}
+	for _, u := range []string{"https://cdn.example.com/b", "https://registry.example.com:8443/b", "https://sub.registry.example.com/b"} {
+		r := req(u)
+		if err := checkRedirect(r, desde); err != nil || r.Header.Get("Authorization") != "" {
+			t.Errorf("%s: Authorization %q, %v", u, r.Header.Get("Authorization"), err)
+		}
+	}
+	r := req("https://registry.example.com/otra")
+	if err := checkRedirect(r, desde); err != nil || r.Header.Get("Authorization") == "" {
+		t.Errorf("mismo host: se quitó la cabecera (%v)", err)
+	}
+}
+
+func TestRealmPermitido(t *testing.T) {
+	for _, c := range []struct {
+		reg, realm string
+		ok         bool
+	}{
+		{"registry-1.docker.io", "auth.docker.io", true},
+		{"ghcr.io", "ghcr.io", true},
+		{"registry.gitlab.com", "gitlab.com", true},
+		{"registry.example.com:5000", "gitlab.example.com", true},
+		{"localhost:5000", "127.0.0.1", true},
+		{"ghcr.io", "evil.io", false},
+		{"registry-1.docker.io", "docker.io.evil.com", false},
+		{"registry.example.com", "example.org", false},
+		{"10.0.0.5:5000", "10.0.0.6", false},
+		{"localhost:5000", "example.com", false},
+	} {
+		if got := realmPermitido(c.reg, c.realm); got != c.ok {
+			t.Errorf("realmPermitido(%q, %q) = %v", c.reg, c.realm, got)
+		}
+	}
+}
