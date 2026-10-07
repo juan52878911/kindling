@@ -95,7 +95,7 @@ func TestTrasRestaurarResyncFallidoLanzaGanchos(t *testing.T) {
 	m, id := conAgenteListo(t, a)
 	m.quit = make(chan struct{})
 	defer close(m.quit)
-	m.trasRestaurar(context.Background(), id, api.ResyncInstance, nil)
+	m.trasRestaurar(context.Background(), id, api.ResyncInstance, resultadoResync{fallo: true})
 	if _, err := m.WaitReady(context.Background(), id, OpcionesListo{Plazo: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,5 +278,110 @@ func TestListoParaCongelarAgenteTardio(t *testing.T) {
 	graciaAgenteMin = vigiaAgenteMax
 	if g := graciaAgente(5 * time.Second); g != vigiaAgenteMax {
 		t.Errorf("gracia con un plazo corto = %s; nunca menos de %s", g, vigiaAgenteMax)
+	}
+}
+
+// Solo un /resync que falla con un agente que debía contestar deja ganchos
+// pendientes. Sin dirección, un agente que no sabe hacerlo (Lacks o 404),
+// nadie escuchando o una imagen que se sabe sin agente no tienen ganchos que
+// lanzar: antes cada una de esas restauraciones apuntaba una tanda y lanzaba
+// una vigía de hasta 4 consultas de 5 s.
+func TestResyncFalloSoloConAgenteQueDebiaContestar(t *testing.T) {
+	capturarLog(t)
+	con := func(code int) (*Manager, string) {
+		return managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "x", code)
+		}))
+	}
+	m, id := con(http.StatusInternalServerError)
+	if r := m.resyncGuest(context.Background(), id, "", api.ResyncInstance); r.ok || !r.fallo {
+		t.Errorf("un 500: %+v, quería fallo", r)
+	}
+	m, id = con(http.StatusNotFound)
+	if r := m.resyncGuest(context.Background(), id, "", api.ResyncInstance); r.fallo {
+		t.Errorf("un agente sin /resync (404): %+v, no es un fallo", r)
+	}
+	m, id = con(http.StatusInternalServerError)
+	m.byID[id].Agent = &api.GuestAgent{Agent: "kling-guest", Version: "v9.0.0", Caps: []string{api.GuestCapMCP}}
+	if r := m.resyncGuest(context.Background(), id, "", api.ResyncInstance); r.fallo {
+		t.Errorf("un agente que no anuncia resync: %+v, no es un fallo", r)
+	}
+	// Nadie escucha: RST.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cerrado := l.Addr().String()
+	l.Close()
+	m.byID[id].Agent, m.byID[id].Forwards = nil, map[string]string{"8080": cerrado}
+	clave := claveSnapshot(&api.Snapshot{Name: "dorado", CreatedAt: time.Now()})
+	if r := m.resyncGuest(context.Background(), id, clave, api.ResyncInstance); r.fallo {
+		t.Errorf("nadie escucha: %+v, no es un fallo", r)
+	}
+	// La siguiente copia del mismo dorado ni lo intenta.
+	if r := m.resyncGuest(context.Background(), id, clave, api.ResyncInstance); r.fallo || r.took != 0 {
+		t.Errorf("dorado que se sabe sin agente: %+v", r)
+	}
+	m.byID[id].Forwards = nil
+	if r := m.resyncGuest(context.Background(), id, "", api.ResyncInstance); r.fallo {
+		t.Errorf("sin dirección: %+v, no es un fallo", r)
+	}
+}
+
+// Y sin fallo, trasRestaurar no apunta nada ni lanza la vigía.
+func TestTrasRestaurarSinFalloNoDejaPendientes(t *testing.T) {
+	var consultas atomic.Int32
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == api.GuestReadyPath || r.URL.Path == api.GuestHooksPath {
+			consultas.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	m.byID[id].State = api.StateRunning
+	m.quit = make(chan struct{})
+	defer close(m.quit)
+	m.trasRestaurar(context.Background(), id, api.ResyncInstance, resultadoResync{})
+	if _, ok := m.ganchosPendientes.Load(id); ok {
+		t.Fatal("una restauración sin agente al día dejó ganchos pendientes")
+	}
+	if mc, _ := m.Get(id); mc.HooksPending != "" {
+		t.Errorf("HooksPending = %q", mc.HooksPending)
+	}
+	time.Sleep(3 * pasoListo)
+	if n := consultas.Load(); n != 0 {
+		t.Errorf("la vigía consultó %d veces a un invitado sin nada pendiente", n)
+	}
+}
+
+// La tanda pendiente sobrevive a un reinicio del daemon: va en state.json
+// (HooksPending) y load la vuelve a apuntar; al lanzarse se borra de ambos.
+func TestGanchosPendientesSobrevivenAlReinicio(t *testing.T) {
+	m := newTestManager(t)
+	id := "abcdef0123456789"
+	m.addForTest(id)
+	m.apuntarGanchosPendientes(id, &ganchosPendientes{kind: api.ResyncInstance})
+	m.Close()
+	var enDisco string
+	for _, f := range readState(t, m) {
+		if f.ID == id {
+			enDisco = f.HooksPending
+		}
+	}
+	if enDisco != api.ResyncInstance {
+		t.Fatalf("HooksPending en state.json = %q, quería %q", enDisco, api.ResyncInstance)
+	}
+
+	m2 := newTestManager(t)
+	m2.root = m.root
+	m2.load()
+	v, ok := m2.ganchosPendientes.Load(id)
+	if !ok || v.(*ganchosPendientes).kind != api.ResyncInstance {
+		t.Fatalf("tras reiniciar, la tanda pendiente se perdió (%v, %v)", v, ok)
+	}
+	if !m2.olvidarGanchosPendientes(id, nil) {
+		t.Fatal("no había nada que olvidar")
+	}
+	if mc, _ := m2.Get(id); mc.HooksPending != "" {
+		t.Errorf("HooksPending tras lanzarla = %q", mc.HooksPending)
 	}
 }

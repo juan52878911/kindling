@@ -92,6 +92,7 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 	// murió sola, sin pasar por Stop): este arranque es en frío, y lanzarla
 	// mandaría un /hooks de copia a un invitado recién arrancado.
 	m.ganchosPendientes.Delete(id)
+	live.HooksPending = ""
 	m.persist()
 	return vols, nil
 }

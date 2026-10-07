@@ -221,7 +221,7 @@ func TestTrasRestaurarLanzaGanchos(t *testing.T) {
 	m, id := conAgenteListo(t, a)
 	m.quit = make(chan struct{})
 	defer close(m.quit)
-	m.trasRestaurar(context.Background(), id, api.ResyncInstance, &api.GuestReady{Ready: true, HasHooks: true})
+	m.trasRestaurar(context.Background(), id, api.ResyncInstance, resultadoResync{ok: true, listo: &api.GuestReady{Ready: true, HasHooks: true}})
 	a.mu.Lock()
 	lanzados := append([]string(nil), a.lanzados...)
 	a.mu.Unlock()
@@ -247,8 +247,8 @@ func TestTrasRestaurarSinGanchosNoPide(t *testing.T) {
 		n.Add(1)
 		return api.GuestReady{}, nil
 	}
-	m.trasRestaurar(context.Background(), id, api.ResyncThaw, &api.GuestReady{Ready: true})
-	m.trasRestaurar(context.Background(), id, api.ResyncThaw, nil)
+	m.trasRestaurar(context.Background(), id, api.ResyncThaw, resultadoResync{ok: true, listo: &api.GuestReady{Ready: true}})
+	m.trasRestaurar(context.Background(), id, api.ResyncThaw, resultadoResync{})
 	if n.Load() != 0 {
 		t.Fatal("sin ganchos declarados no se pide POST /hooks")
 	}

@@ -20,21 +20,25 @@ import (
 
 // trasRestaurar es el último paso de una restauración (thaw, run -from, fork),
 // con volúmenes montados y credenciales entregadas: lanza los ganchos de la
-// imagen si los declara y deja a la vigía siguiendo el "listo". inicial es lo
-// que contestó el /resync; nil es un agente anterior, una imagen sin agente o
-// un /resync que falló: ver ganchosTrasResyncFallido.
+// imagen si los declara y deja a la vigía siguiendo el "listo". r es lo que
+// dio el /resync: r.listo nil es un agente anterior, una imagen sin agente o
+// un /resync que falló, y solo lo último (r.fallo) deja ganchos pendientes:
+// ver ganchosTrasResyncFallido.
 // No espera a los ganchos: quien lo necesite llama a WaitReady.
-func (m *Manager) trasRestaurar(ctx context.Context, id, kind string, inicial *api.GuestReady) {
+func (m *Manager) trasRestaurar(ctx context.Context, id, kind string, r resultadoResync) {
 	// Una descongelada ya sabe qué agente lleva; una copia de un dorado, no.
 	m.conocerAgente(id)
+	inicial := r.listo
 	if inicial == nil {
 		m.anotarListo(id, api.ReadyUnknown)
-		m.ganchosTrasResyncFallido(id, kind)
+		if r.fallo {
+			m.ganchosTrasResyncFallido(id, kind)
+		}
 		return
 	}
 	// Esta restauración sí contestó: una tanda pendiente de otra anterior ya
 	// no hace falta, porque ahora se lanzan las de esta.
-	m.ganchosPendientes.Delete(id)
+	m.olvidarGanchosPendientes(id, nil)
 	st := *inicial
 	if st.HasHooks {
 		lanzado, err := m.lanzarGanchos(ctx, id, kind)
@@ -60,6 +64,52 @@ type ganchosPendientes struct {
 	ok   bool // st vale: los ganchos se lanzaron (o fallaron al lanzarse)
 }
 
+// apuntarGanchosPendientes registra la tanda p de la máquina id, también en
+// su HooksPending, que se persiste: un reinicio del daemon entre el /resync
+// fallido y el primer WaitReady no la pierde (ver recuperarGanchosPendientes).
+func (m *Manager) apuntarGanchosPendientes(id string, p *ganchosPendientes) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ganchosPendientes.Store(id, p)
+	if mc := m.byID[id]; mc != nil && mc.HooksPending != p.kind {
+		mc.HooksPending = p.kind
+		m.persist()
+	}
+}
+
+// olvidarGanchosPendientes quita la tanda de id (solo si sigue siendo p; con
+// p nil, la que haya) y su HooksPending. Devuelve si quitó algo.
+func (m *Manager) olvidarGanchosPendientes(id string, p *ganchosPendientes) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var quitada bool
+	if p == nil {
+		_, quitada = m.ganchosPendientes.LoadAndDelete(id)
+	} else {
+		quitada = m.ganchosPendientes.CompareAndDelete(id, p)
+	}
+	if !quitada {
+		return false
+	}
+	if mc := m.byID[id]; mc != nil && mc.HooksPending != "" {
+		mc.HooksPending = ""
+		m.persist()
+	}
+	return true
+}
+
+// recuperarGanchosPendientes vuelve a apuntar, al arrancar el daemon, las
+// tandas que quedaron pendientes en state.json. No hay vigía de fondo: las
+// lanza el primer WaitReady (o kling machine hooks), como a cualquier otra.
+// Con m.mu tomado o antes de que nadie más vea el Manager.
+func (m *Manager) recuperarGanchosPendientes() {
+	for id, mc := range m.byID {
+		if mc.HooksPending != "" {
+			m.ganchosPendientes.Store(id, &ganchosPendientes{kind: mc.HooksPending})
+		}
+	}
+}
+
 // Cuántas veces y cada cuánto pregunta la vigía de un /resync fallido: tras
 // restaurar, el agente que había al congelar ya escucha, así que pocas.
 const (
@@ -67,16 +117,16 @@ const (
 	plazoGanchosPendientes    = 5 * time.Second
 )
 
-// ganchosTrasResyncFallido cubre una restauración sin respuesta del /resync.
-// Si fue un agente anterior o una imagen sin agente, no hay nada que hacer;
-// pero si el /resync falló con un agente al día, GET /ready contesta lo que
+// ganchosTrasResyncFallido cubre una restauración cuyo /resync falló con un
+// agente que debía contestar (no uno anterior ni una imagen sin agente, que
+// no tienen ganchos que lanzar): GET /ready contesta lo que
 // quedó en la memoria del dorado (ganchos "done") y la copia se daría por
 // lista sin haber corrido los suyos (identidad por copia). Se apunta la tanda
 // como pendiente y se intenta lanzar en segundo plano; WaitReady la lanza
 // también antes de creerse un "listo".
 func (m *Manager) ganchosTrasResyncFallido(id, kind string) {
 	p := &ganchosPendientes{kind: kind}
-	m.ganchosPendientes.Store(id, p)
+	m.apuntarGanchosPendientes(id, p)
 	go func() {
 		for i := 0; i < intentosGanchosPendientes; i++ {
 			if i > 0 {
@@ -94,7 +144,7 @@ func (m *Manager) ganchosTrasResyncFallido(id, kind string) {
 			cancel()
 			switch {
 			case errors.Is(err, errListoViejo):
-				m.ganchosPendientes.CompareAndDelete(id, p)
+				m.olvidarGanchosPendientes(id, p)
 				return
 			case err == nil:
 				st = m.ganchosPendientesAhora(context.Background(), id, st)
@@ -127,10 +177,10 @@ func (m *Manager) ganchosPendientesAhora(ctx context.Context, id string, st api.
 		}
 		switch {
 		case !st.HasHooks, errors.Is(err, errListoViejo):
-			m.ganchosPendientes.CompareAndDelete(id, p)
+			m.olvidarGanchosPendientes(id, p)
 			return
 		case err == nil:
-			m.ganchosPendientes.CompareAndDelete(id, p)
+			m.olvidarGanchosPendientes(id, p)
 		default:
 			log.Printf("warning: %s: resync failed and its post-restore hooks could not start: %v", shortID(id), err)
 			lanzado = api.GuestReady{Probe: st.Probe, HasHooks: true, Hooks: api.HooksFailed,
@@ -265,7 +315,7 @@ func (m *Manager) RunHooks(ctx context.Context, ref string, espera time.Duration
 		return res, fmt.Errorf("%w: %v", ErrNotReady, err)
 	}
 	// Lanzadas a mano: una tanda pendiente de un /resync fallido ya no lo está.
-	m.ganchosPendientes.Delete(mc.ID)
+	m.olvidarGanchosPendientes(mc.ID, nil)
 	res.Guest, res.Ready = &st, estadoListo(st)
 	m.anotarListo(mc.ID, res.Ready)
 	if espera <= 0 {

@@ -173,6 +173,12 @@ type Machine struct {
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
 	Ready string `json:"ready,omitempty"`
 
+	// HooksPending es el tipo de restauración (api.ResyncInstance, ...) cuyos
+	// ganchos el daemon aún debe lanzar porque el /resync falló con un agente
+	// que sí los conoce; vacío si no hay ninguna. Se guarda para que un
+	// reinicio del daemon no la pierda (ver internal/machine/listo_ganchos.go).
+	HooksPending string `json:"hooks_pending,omitempty"`
+
 	// Hold dice por qué el daemon la tiene parada y la despertará él mismo en
 	// cuanto se pueda (HoldStoreFull). Vacío en el caso normal.
 	Hold string `json:"hold,omitempty"`

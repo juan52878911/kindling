@@ -636,6 +636,7 @@ func (m *Manager) load() {
 		}
 		m.byID[mc.ID] = mc
 	}
+	m.recuperarGanchosPendientes()
 }
 
 // versionEstado es la versión del formato de state.json que escribe este
@@ -3230,11 +3231,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
-	var resyncT time.Duration
-	var resyncOK bool
-	var listo *api.GuestReady
+	var resync resultadoResync
 	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
-		resyncT, resyncOK, listo = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
+		resync = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
 
@@ -3295,10 +3294,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// pida mientras tanto espera a la sesión.
 	m.startShares(mc.ID)
 	// Los ganchos de la imagen, con credenciales y red ya en su sitio.
-	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
+	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, resync)
 	// Fin del impulso de arranque: ya, si su memoria trae el "listo" (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada(listo)
+	impulso.entregarRestaurada(resync.listo)
 
 	fases := crono.cerrar()
 	tel.despertar(DurThaw, fases)
@@ -3310,7 +3309,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resyncT, resyncOK), notaFases(fases))})
+		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases))})
 	return &out, nil
 }
 
@@ -3406,13 +3405,14 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	live.DiffBase = ""
 	live.MemShared = false
 	live.SnapSize = 0
+	// Una tanda de ganchos pendiente era de la restauración que acaba de
+	// parar: el siguiente arranque es en frío y no la hereda.
+	live.HooksPending = ""
+	m.ganchosPendientes.Delete(mc.ID)
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live
 	m.mu.Unlock()
-	// Una tanda de ganchos pendiente era de la restauración que acaba de
-	// parar: el siguiente arranque es en frío y no la hereda.
-	m.ganchosPendientes.Delete(mc.ID)
 	m.invalidarSesiones(mc.ID, "stopped")
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name})

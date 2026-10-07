@@ -31,6 +31,7 @@ state.json api.Machine from string
 state.json api.Machine frozen_at *time.Time
 state.json api.Machine has_secrets bool
 state.json api.Machine hold string
+state.json api.Machine hooks_pending string
 state.json api.Machine id string
 state.json api.Machine image string
 state.json api.Machine ip string

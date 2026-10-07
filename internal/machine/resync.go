@@ -64,13 +64,25 @@ func claveSnapshot(s *api.Snapshot) string {
 // descriptor hasta que el invitado muera.
 var resyncClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
+// resultadoResync es lo que dio resyncGuest: cuánto tardó, si el agente lo
+// aplicó, lo que contestó de su "listo" (nil si nada), y si falló con un
+// agente que debía contestar. fallo es falso cuando no se intentó (sin
+// dirección, un agente que no sabe hacerlo, una imagen que se sabe sin
+// agente) o cuando contestó que no sabe (404) o nadie escuchaba: ahí no hay
+// ganchos que lanzar después (ver ganchosTrasResyncFallido).
+type resultadoResync struct {
+	took  time.Duration
+	ok    bool
+	listo *api.GuestReady
+	fallo bool
+}
+
 // resyncGuest resincroniza el invitado id. No devuelve error: un agente viejo
 // (404), una máquina sin agente o uno que falla dejan la máquina como antes de
 // esto —utilizable, con el reloj parado— y se avisa una vez por imagen.
 // clave es la del snapshot del que se restauró (claveSnapshot) para recordar
-// que no tiene agente, o "" para no recordar nada. Devuelve cuánto tardó y si
-// el agente lo aplicó.
-func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) (time.Duration, bool, *api.GuestReady) {
+// que no tiene agente, o "" para no recordar nada.
+func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resultadoResync {
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
@@ -80,17 +92,17 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) (time
 	}
 	m.mu.RUnlock()
 	if addr == "" {
-		return 0, false, nil
+		return resultadoResync{}
 	}
 	// El agente dijo en su /healthz lo que sabe hacer y resync no está: el
 	// mismo aviso que daría el 404, sin la petición (agente.go).
 	if ag.Lacks(api.GuestCapResync) {
 		m.avisarResync(image, name, errResyncNoSoportado)
-		return 0, false, nil
+		return resultadoResync{}
 	}
 	if clave != "" {
 		if hasta, ok := m.resyncSinAgente.Load(clave); ok && time.Now().Before(hasta.(time.Time)) {
-			return 0, false, nil
+			return resultadoResync{}
 		}
 	}
 
@@ -114,13 +126,17 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) (time
 			m.resyncSinAgente.Store(clave, time.Now().Add(resyncSinAgenteTTL))
 		}
 		m.avisarResync(image, name, err)
-		return took, false, nil
+		// Un agente anterior o nadie escuchando no tienen ganchos que lanzar;
+		// cualquier otro fallo (un plazo agotado, un 5xx) es de un agente que
+		// sí debía contestar.
+		fallo := !errors.Is(err, errResyncNoSoportado) && !errors.Is(err, errResyncNadie)
+		return resultadoResync{took: took, fallo: fallo}
 	}
 	if res.SkewMS > 1000 || res.SkewMS < -1000 {
 		log.Printf("%s: guest clock was %s off; resynced in %s", name,
 			(time.Duration(res.SkewMS) * time.Millisecond).Round(time.Millisecond), took.Round(time.Millisecond))
 	}
-	return took, true, res.Ready
+	return resultadoResync{took: took, ok: true, listo: res.Ready}
 }
 
 // avisarResync registra por qué no se resincronizó, una vez por imagen y

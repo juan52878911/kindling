@@ -68,7 +68,7 @@ func TestSinCapacidadNoSeSondea(t *testing.T) {
 	m.byID[id].Agent = &api.GuestAgent{Agent: "kling-guest", Version: "v9.0.0", Caps: []string{api.GuestCapMCP}}
 	buf := capturarLog(t)
 
-	if _, ok, _ := m.resyncGuest(context.Background(), id, "", api.ResyncThaw); ok {
+	if r := m.resyncGuest(context.Background(), id, "", api.ResyncThaw); r.ok {
 		t.Fatal("resync dado por aplicado")
 	}
 	if !strings.Contains(buf.String(), "predates") {
