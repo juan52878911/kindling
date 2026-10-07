@@ -345,8 +345,16 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
 - **Sin dm-verity**: la imagen es la raíz, no una capa.
 - **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
   máquina (512 MiB; `kling run -disk 4G` lo agranda, y es disperso: solo cuesta
-  lo que se escribe). La ruta va en la receta (`built.volumes`). Un volumen de
-  kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
+  lo que se escribe). La ruta va en la receta (`built.volumes`).
+- **Un volumen nuevo hereda el directorio de la imagen**, como en Docker: la
+  primera vez que se monta, si no tiene más que el `lost+found` de `mke2fs`,
+  su raíz toma el dueño y el modo del directorio que la imagen tiene en ese
+  punto, y se copia lo que haya dentro (sin seguir enlaces, con dueños, modos y
+  fechas) si no pasa de 64 MiB ni de 65 536 entradas; si pasa, solo el dueño y
+  el modo. Así un servicio sin root (`grafana`: `USER 472`, `VOLUME
+  /var/lib/grafana`) puede escribir en él. Un volumen con algo más dentro no se
+  toca nunca, ni uno de solo lectura; los atributos extendidos no se copian.
+- **El `lost+found` sigue ahí**: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
   subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata`).

@@ -26,8 +26,18 @@ func mountVolumes() ([]VolumeSpec, error) {
 			return nil, fmt.Errorf("the kernel asked to mount %s at %s but it doesn't exist: %w",
 				v.device, v.mount, err)
 		}
+		// Lo que la imagen tiene en ese punto se lee ANTES de montar encima:
+		// después queda tapado. Uno de solo lectura es de varias máquinas y no
+		// hereda nada de ninguna.
+		var img *imageDir
+		if !v.readOnly {
+			img = statImageDir(v.mount)
+		}
 		if err := os.MkdirAll(v.mount, 0o755); err != nil {
 			return nil, fmt.Errorf("creating %s: %w", v.mount, err)
+		}
+		if img != nil && img.content {
+			seedFromImage(v.device, img)
 		}
 		// data=ordered es el defecto de ext4 y aquí importa que lo sea:
 		// garantiza que los datos llegan al disco ANTES que los metadatos que
@@ -59,6 +69,16 @@ func mountVolumes() ([]VolumeSpec, error) {
 			}
 			return nil, fmt.Errorf("mounting %s at %s: %w", v.device, v.mount, err)
 		}
+		if img != nil && !img.content {
+			// Sin contenido que copiar basta con el dueño y el modo, y eso se
+			// puede hacer ya montado: sin segundo montaje.
+			if seeded, err := seedVolume(v.mount, "", img); err != nil {
+				log.Printf("volume %s: could not take the image's owner and mode: %v", v.mount, err)
+			} else if seeded {
+				log.Printf("volume %s: new, took the image's owner %d:%d and mode %04o",
+					v.mount, img.uid, img.gid, img.mode)
+			}
+		}
 		if v.readOnly {
 			log.Printf("shared library mounted at %s (read-only)", v.mount)
 		} else {
@@ -66,6 +86,47 @@ func mountVolumes() ([]VolumeSpec, error) {
 		}
 	}
 	return specs, nil
+}
+
+// seedFromImage rellena un volumen virgen con lo que la imagen tiene en su
+// punto de montaje (ver volume_seed_linux.go).
+//
+// El volumen se monta un momento en un directorio aparte, porque montado en su
+// sitio taparía justo lo que hay que copiar. Un bind del directorio de la imagen
+// tampoco serviría: si el árbol se montó compartido, el montaje del volumen se
+// propagaría también al bind y se copiaría a sí mismo.
+//
+// Nada de aquí es fatal. Si falla, el volumen se monta como antes, sin heredar
+// nada, y el servicio lo verá igual que antes de existir esto.
+func seedFromImage(device string, img *imageDir) {
+	// /dev como respaldo: es devtmpfs y existe siempre, aunque la imagen no
+	// traiga /tmp.
+	staging, err := os.MkdirTemp("", "kling-volume-")
+	if err != nil {
+		staging, err = os.MkdirTemp("/dev", "kling-volume-")
+	}
+	if err != nil {
+		log.Printf("volume %s: not seeding from the image: %v", img.path, err)
+		return
+	}
+	defer os.Remove(staging)
+	if err := syscall.Mount(device, staging, "ext4", 0, "data=ordered"); err != nil {
+		log.Printf("volume %s: not seeding from the image: %v", img.path, err)
+		return
+	}
+	seeded, err := seedVolume(staging, img.path, img)
+	if err != nil {
+		log.Printf("volume %s: seeding from the image: %v", img.path, err)
+	} else if seeded {
+		log.Printf("volume %s: new, seeded from the image (owner %d:%d, mode %04o)",
+			img.path, img.uid, img.gid, img.mode)
+	}
+	if err := syscall.Unmount(staging, 0); err != nil {
+		// Ocupado no debería estarlo: nadie más sabe que existe. Si lo está, se
+		// desengancha; el montaje de verdad comparte con él el superbloque.
+		log.Printf("volume %s: unmounting the staging mount: %v", img.path, err)
+		syscall.Unmount(staging, syscall.MNT_DETACH)
+	}
 }
 
 // syncVolumes vacía al disco lo que el invitado tenga en caché.
