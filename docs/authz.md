@@ -40,7 +40,11 @@ Se lee de `/etc/kling/authz.json` al arrancar el daemon, o del fichero que diga
   "shared_templates": ["python", "node"],
   "tokens": [
     {"sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "role": "tenant:ci"}
-  ]
+  ],
+  "quotas": {
+    "*":   {"max_machines": 10, "max_mem_mib": 8192, "max_disk_mib": 51200},
+    "ci":  {"max_machines": 40}
+  }
 }
 ```
 
@@ -61,6 +65,8 @@ Se lee de `/etc/kling/authz.json` al arrancar el daemon, o del fichero que diga
   por un secreto. Un token que no está es un `401`. Se comparan todos, en tiempo
   constante, como los del frontal de `ext/sandbox`. `printf %s "$TOKEN" |
   sha256sum` da el hash.
+- **`quotas`**: opcionales. Los topes de cada inquilino, por nombre, y `"*"` para
+  los que no tienen el suyo. Ver [Cuotas](#cuotas).
 
 Todo lo que no se entiende es un error y el daemon no arranca: un campo mal
 escrito que se ignorara dejaría a alguien sin el límite que se le quería poner.
@@ -173,6 +179,54 @@ cuota propia, `-allow-request`). Lo que es de un inquilino, en una plantilla suy
 credenciales de máquina (`kling machine credential`) de cada instancia. `kling template
 inspect <plantilla>` enseña los dominios con credencial y si lleva volúmenes o `exec`.
 
+## Cuotas
+
+Sin `quotas`, un inquilino puede ocupar el host hasta los topes del daemon
+(`KLING_MAX_MACHINES`, memoria, disco), como los demás. Con ellas, cada inquilino
+tiene un techo para lo que lleva **su** `kling.owner`:
+
+| Campo | Qué cuenta |
+|---|---|
+| `max_machines` | sus máquinas que no están paradas ni fallidas: `created`, `running`, `paused` y `frozen`. Una congelada cuenta: vuelve con un `thaw` que no pide nada |
+| `max_mem_mib` | la memoria de esas mismas máquinas: `mem_mib`, o su techo `mem_max_mib` si lo tiene (un `resize` la sube hasta ahí sin preguntar) |
+| `max_disk_mib` | el tamaño **lógico** de los discos escribibles de **todas** sus máquinas, también paradas y fallidas (el disco existe hasta el `rm`): `disk_mib`, o 512 MiB si no se dijo; las que salen de un snapshot, el del overlay del snapshot |
+
+- Un campo que falta no pone tope; en un inquilino con su propia entrada, hereda el
+  de `"*"`. `0` es "nada" (el inquilino no puede crear). Un número negativo, una
+  clave que no es un nombre de inquilino ni `"*"` o un campo desconocido son un
+  error y el daemon no arranca.
+- Se comprueba al **crear** (`run`, `run -from`, `sandbox`, `fork` de un sandbox o de
+  un grafo, `graph up` y los nodos `lazy` cuando despiertan) y al **arrancar** una
+  parada (`start`). `thaw`, `resume` y `resize` no cambian lo que cuenta.
+- Cuenta lo que lleva la etiqueta, lo haya creado quien lo haya creado: un admin
+  que crea a nombre de un inquilino (`-label kling.owner=ana`) también gasta su
+  cuota. Lo que no lleva dueño no tiene cuota.
+- Pasarse es un **`429`** que dice qué tope y cuánto lleva:
+
+  ```
+  error: tenant "ana" quota exceeded: max_machines is 10 and it has 10 machine(s) that aren't stopped or failed; this needs 1 more.
+  Stop what it doesn't need (`kling stop`; only `kling rm` frees disk), or ask an admin to raise its quota in the authz policy (docs/authz.md)
+  ```
+
+  `429` y no `403`: no es un permiso que falte, es lo suyo lo que está lleno, y se
+  arregla liberando. Tampoco `507` ni `409`: quien escala (el planificador)
+  contesta a esos congelando o retirando máquinas del host, y lo que sobra aquí
+  es del inquilino. `kling_admission_rejections_total{code="429"}` los cuenta.
+- **Sin carreras.** La decisión la toma el manager en el mismo cerrojo en que da de
+  alta la máquina (o la saca de `stopped`), contando lo que ya está dado de alta:
+  de dos `run` a la vez del mismo inquilino con un hueco, solo pasa uno, y el que
+  pasa no se cuenta dos veces. Antes del trabajo caro (copiar el overlay, montar
+  la red, pausar el original de un `fork`, arrancar el primer nodo de un grafo) se
+  mira la misma cuenta como filtro, para no hacerlo en balde.
+- Lo que **no** cuenta: los snapshots del inquilino (`commit`) y el volcado de
+  memoria de sus congeladas ocupan disco del host y no entran en `max_disk_mib`;
+  lo acotan la admisión de disco del daemon (`KLING_MIN_FREE_DISK_MIB`) y borrarlos.
+  Los volúmenes no cuentan porque un inquilino no puede usarlos (abajo). Una
+  máquina de antes de esta versión creada desde un snapshot cuenta 512 MiB de
+  disco, sea cual sea el de su snapshot.
+- Bajar una cuota con el daemon reiniciado no para nada: quien está por encima
+  sigue con lo que tiene y no puede crear ni arrancar más hasta bajar de ella.
+
 ## Lo que un inquilino no puede usar (todavía)
 
 - **Volúmenes** (`-volume`, `volumes`): no tienen dueño, y un volumen compartido
@@ -225,9 +279,10 @@ error: uid 1003 has no role in the daemon's authz policy (/etc/kling/authz.json)
   quiera la máquina de un prefijo que coincide con el nombre de otra usa el ID
   completo.
 - **La política se lee al arrancar.** Cambiarla pide reiniciar el daemon.
-- **Sin cuotas.** Un inquilino puede llenar el host de máquinas hasta los topes del
-  daemon (`KLING_MAX_MACHINES`, memoria, disco). El reparto por inquilino con cuotas
-  lo hace el frontal de `ext/sandbox`.
+- **Las cuotas son opcionales y por tamaño declarado.** Sin `quotas` un inquilino
+  llega hasta los topes del daemon. Con ellas, el disco que cuenta es el lógico de
+  sus discos escribibles, no lo escrito, ni sus snapshots ([Cuotas](#cuotas)); y no
+  hay cuota de CPU (cada máquina tiene su techo, `cpu_pct`).
 - **La frontera es el daemon, no el invitado.** Dos inquilinos siguen compartiendo
   host, kernel y KVM; lo que separa sus microVMs es lo de siempre (`SECURITY.md`).
 - **`GET /events`** filtra por las máquinas vivas del inquilino: el evento de una
