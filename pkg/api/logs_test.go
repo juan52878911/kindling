@@ -9,6 +9,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,10 +17,17 @@ import (
 )
 
 func TestLogsAcotaLaRespuestaConLimitReader(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "kling.sock")
+	// En un temporal corto y no en t.TempDir(): en macOS la ruta con el nombre
+	// del test pasa de los 104 bytes de sun_path, y el test se saltaba siempre.
+	dir, err := os.MkdirTemp("", "kl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "k.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Skipf("no se puede abrir un socket unix aquí: %v", err)
+		t.Fatalf("socket unix: %v", err)
 	}
 
 	mux := http.NewServeMux()
