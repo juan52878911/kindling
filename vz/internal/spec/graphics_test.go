@@ -45,6 +45,9 @@ func TestGraphicsViajaEnElSnapshot(t *testing.T) {
 	if got.Graphics == nil || *got.Graphics != *s.Graphics {
 		t.Fatalf("graphics after the round trip: %+v", got.Graphics)
 	}
+	if got.KlingVZ != 2 {
+		t.Fatalf("a snapshot with a screen is kling_vz %d, want 2: a kling-vz without graphics must refuse it", got.KlingVZ)
+	}
 	s.Graphics = &Graphics{Width: 1, Height: 1280}
 	if err := s.Validate(); err == nil {
 		t.Fatal("a 1-pixel-wide screen must not validate")

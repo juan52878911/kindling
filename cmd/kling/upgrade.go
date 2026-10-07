@@ -17,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -409,6 +410,50 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	}
 	if vz := filepath.Join(filepath.Dir(exe), "kling-vz"); fileExists(vz) && arch == "arm64" {
 		o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe("kling-vz", "darwin", "arm64"), Destino: vz})
+		o.CongeladaLegible = func(raiz, id string, viejos map[string]string) error {
+			viejo, ok := viejos[vz]
+			if !ok {
+				return nil // kling-vz no se cambió
+			}
+			return volcadoLegible(filepath.Join(raiz, "machines", id, "snap.file"), formatoMaxVZ(viejo))
+		}
+	}
+	return nil
+}
+
+// formatoMaxVZ es el formato de snapshot (kling_vz) más nuevo que lee el
+// kling-vz bin: lo dice con -snapshot-formats; uno anterior a ese flag
+// (v0.17 y antes) lee solo el 1.
+func formatoMaxVZ(bin string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "-snapshot-formats").Output()
+	if err != nil {
+		return 1
+	}
+	var min, max int
+	if n, _ := fmt.Sscanf(string(out), "%d %d", &min, &max); n != 2 || max < 1 {
+		return 1
+	}
+	return max
+}
+
+// volcadoLegible dice si el snapshot de kling-vz en p (su snap.file) es de un
+// formato que lee un kling-vz que lee hasta max.
+func volcadoLegible(p string, max int) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var s struct {
+		KlingVZ int `json:"kling_vz"`
+	}
+	if err := json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&s); err != nil {
+		return fmt.Errorf("%s: %v", p, err)
+	}
+	if s.KlingVZ > max {
+		return fmt.Errorf("its snapshot is kling_vz %d and the previous kling-vz reads up to %d", s.KlingVZ, max)
 	}
 	return nil
 }

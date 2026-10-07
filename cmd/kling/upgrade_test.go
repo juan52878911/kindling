@@ -242,3 +242,40 @@ func TestRaizDeLaUnidad(t *testing.T) {
 		t.Error("the same socket compares different")
 	}
 }
+
+// Antes de volver atrás en el Mac: un snapshot que el kling-vz de la copia no
+// lee se dice; lo que lee pasa. Un kling-vz sin -snapshot-formats (v0.17) lee
+// solo el 1.
+func TestVolcadoLegibleParaElKlingVZViejo(t *testing.T) {
+	dir := t.TempDir()
+	snap := func(v int) string {
+		p := filepath.Join(t.TempDir(), "snap.file")
+		os.WriteFile(p, []byte(fmt.Sprintf(`{"kling_vz": %d, "machine_identifier": "x"}`, v)), 0o644)
+		return p
+	}
+	viejo := filepath.Join(dir, "kling-vz-v017")
+	os.WriteFile(viejo, []byte("#!/bin/sh\necho 'flag provided but not defined' >&2; exit 2\n"), 0o755)
+	nuevo := filepath.Join(dir, "kling-vz-v018")
+	os.WriteFile(nuevo, []byte("#!/bin/sh\n[ \"$1\" = -snapshot-formats ] && echo '1 2'\n"), 0o755)
+	if m := formatoMaxVZ(viejo); m != 1 {
+		t.Fatalf("v0.17 reads up to %d, want 1", m)
+	}
+	if m := formatoMaxVZ(nuevo); m != 2 {
+		t.Fatalf("v0.18 reads up to %d, want 2", m)
+	}
+	if m := formatoMaxVZ(filepath.Join(dir, "no-existe")); m != 1 {
+		t.Fatalf("a missing binary reads up to %d, want 1", m)
+	}
+	if err := volcadoLegible(snap(1), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := volcadoLegible(snap(2), 1); err == nil || !strings.Contains(err.Error(), "kling_vz 2") {
+		t.Fatalf("kling_vz 2 for a kling-vz that reads 1: %v", err)
+	}
+	if err := volcadoLegible(snap(2), 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := volcadoLegible(filepath.Join(dir, "no-existe"), 2); err == nil {
+		t.Fatal("a missing snapshot must not pass")
+	}
+}

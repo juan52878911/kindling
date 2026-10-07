@@ -71,6 +71,14 @@ type Opciones struct {
 	// macOS, que kling-vz lleve el permiso de virtualización.
 	Validar func(bajados map[string]string) error
 
+	// CongeladaLegible, si no es nil, dice si el daemon viejo despertará lo
+	// que el nuevo acaba de congelar otra vez antes de volver atrás
+	// (recongelar): en macOS kling-vz cambia con la release, y un volcado con
+	// algo que el viejo no conoce no despierta. viejos son los binarios de la
+	// copia (su destino -> dónde está la copia). En Linux, nil: Firecracker no
+	// viene en la release.
+	CongeladaLegible func(raiz, id string, viejos map[string]string) error
+
 	// Forzar instala la misma versión o una anterior, y vuelve atrás aunque
 	// no se puedan volver a congelar las máquinas que el nuevo despertó.
 	Forzar bool
@@ -340,7 +348,7 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 	}
 	o.printf("upgrade failed: %v\nrolling back to %s\n", causa, res.Desde)
 	if o.Servicio != nil {
-		if err := o.recongelar(fijo, copia.estadoARestaurar(true)); err != nil {
+		if err := o.recongelar(fijo, copia, copia.estadoARestaurar(true)); err != nil {
 			if !o.Forzar {
 				o.printf("not rolling back: %v\n", err)
 				return res, &ErrVueltaAtras{Causa: causa, Copia: copia.dir,
@@ -411,7 +419,7 @@ func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
 	// Como en Actualizar: una vez parado, una señal no deja nada a medias.
 	fijo := context.WithoutCancel(ctx)
 	if o.Servicio != nil {
-		if err := o.recongelar(fijo, c.estadoARestaurar(false)); err != nil {
+		if err := o.recongelar(fijo, c, c.estadoARestaurar(false)); err != nil {
 			if !o.Forzar {
 				return nil, fmt.Errorf("%v\nnothing was changed (-force rolls back anyway)", err)
 			}
@@ -452,6 +460,15 @@ type copia struct {
 	Estado string       `json:"state,omitempty"` // copia de state.json, si había
 	Baks   []string     `json:"baks_before,omitempty"`
 	Extras []piezaCopia `json:"extra,omitempty"` // extensiones (AñadirACopia)
+}
+
+// viejos son los binarios guardados en la copia: su destino -> la copia.
+func (c *copia) viejos() map[string]string {
+	out := map[string]string{}
+	for _, p := range c.Piezas {
+		out[p.Destino] = filepath.Join(c.dir, p.Copia)
+	}
+	return out
 }
 
 type piezaCopia struct {
@@ -909,10 +926,12 @@ func (o *Opciones) verificar(espera, fijo context.Context, v string, antes *foto
 // las pidió en cuanto contestó) y siguen escribiendo en su disco. Si el viejo
 // las leyera congeladas, el próximo despertar cargaría el mem.file de antes
 // sobre un disco cambiado después: memoria y disco ya no casan y el sistema
-// de ficheros del invitado puede romperse sin que nadie lo diga. El VMM no
-// cambia entre releases, así que el mem.file que escribe el nuevo lo lee el
-// viejo. Si no se puede (no contesta, o el freeze falla), se dice cuáles.
-func (o *Opciones) recongelar(ctx context.Context, ruta string) error {
+// de ficheros del invitado puede romperse sin que nadie lo diga. En Linux el
+// VMM no cambia entre releases, así que el mem.file que escribe el nuevo lo
+// lee el viejo; en macOS kling-vz sí, y CongeladaLegible comprueba que el
+// viejo lo leerá. Si no se puede (no contesta, el freeze falla o el viejo no
+// lo leería), se dice cuáles.
+func (o *Opciones) recongelar(ctx context.Context, c *copia, ruta string) error {
 	if ruta == "" || o.Daemon == nil {
 		return nil
 	}
@@ -957,6 +976,9 @@ func (o *Opciones) recongelar(ctx context.Context, ruta string) error {
 		fctx, cancel := context.WithTimeout(ctx, plazoOrden)
 		_, err := o.Daemon.Freeze(fctx, m.ID)
 		cancel()
+		if err == nil && o.CongeladaLegible != nil {
+			err = o.CongeladaLegible(o.Raiz, m.ID, c.viejos())
+		}
 		if err != nil {
 			mal = append(mal, fmt.Sprintf("%s (%v)", m.ID, err))
 		}

@@ -21,7 +21,10 @@ import (
 // FormatVersion es el valor de "kling_vz" en el JSON del snapshot. Sube cada
 // vez que el snapshot gana algo que cambia la máquina restaurada: un kling-vz
 // que no lo conoce lo ignoraría y restauraría OTRA máquina, así que lo que
-// tiene que hacer es negarse. Se escribe siempre la actual.
+// tiene que hacer es negarse. Se escribe la más baja que describe el snapshot
+// (formato): uno que no usa nada nuevo lo sigue leyendo un kling-vz anterior,
+// que es lo que necesita `kling upgrade -rollback` para despertar lo que se
+// congeló con el nuevo.
 //
 //   - 1: el formato inicial.
 //   - 2: graphics (la pantalla virtio-gpu). Entró sin subir la versión, y un
@@ -31,6 +34,11 @@ const FormatVersion = 2
 // minFormatVersion es la más vieja que se sigue leyendo. Un snapshot de la 1
 // no tiene graphics, que es justo lo que significa leerla con este código.
 const minFormatVersion = 1
+
+// Formatos son la versión más vieja y la más nueva que lee este kling-vz
+// (`kling-vz -snapshot-formats`): `kling upgrade` la pregunta al de la copia
+// antes de volver atrás con lo que el nuevo congeló.
+func Formatos() (min, max int) { return minFormatVersion, FormatVersion }
 
 // maxSnapshotJSON acota lo que se lee del fichero de snapshot. El fichero viene
 // de disco y lo escribe este mismo programa, pero un fichero corrupto o ajeno no
@@ -210,7 +218,7 @@ func ParseGraphics(v string) (*Graphics, error) {
 // configuración o no restauraría, y el núcleo no tendría forma de saberlo.
 func (s *Spec) WriteFile(path string) error {
 	out := s.Clone()
-	out.KlingVZ = FormatVersion
+	out.KlingVZ = out.formato()
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
@@ -237,6 +245,14 @@ func (s *Spec) WriteFile(path string) error {
 		return err
 	}
 	return nil
+}
+
+// formato es la versión más baja que describe s: 2 solo si tiene pantalla.
+func (s *Spec) formato() int {
+	if s.Graphics != nil {
+		return 2
+	}
+	return 1
 }
 
 // ReadFile lee y valida el JSON de un snapshot.

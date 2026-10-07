@@ -992,3 +992,38 @@ func TestDosUpgradesALaVez(t *testing.T) {
 		t.Fatalf("after the other one finished: %v", err)
 	}
 }
+
+// En macOS kling-vz cambia con la release: lo que el nuevo congela otra vez
+// tiene que poder despertarlo el viejo (CongeladaLegible, con los binarios de
+// la copia). Si no, no se vuelve atrás (salvo -force) y se dice por qué.
+func TestVueltaAtrasConUnVolcadoQueElViejoNoLee(t *testing.T) {
+	var vistos map[string]string
+	var raiz string
+	ilegible := func(r, id string, viejos map[string]string) error {
+		vistos, raiz = viejos, r
+		return errors.New("its snapshot is kling_vz 2 and the old kling-vz reads up to 1")
+	}
+	m := nuevoMontaje(t)
+	m.despertarYPerder()
+	o := m.opciones()
+	o.CongeladaLegible = ilegible
+	_, err := Actualizar(context.Background(), o)
+	var va *ErrVueltaAtras
+	if !errors.As(err, &va) || va.Fallo == nil || !strings.Contains(err.Error(), "aaaa") || !strings.Contains(err.Error(), "kling_vz 2") {
+		t.Fatalf("err = %v", err)
+	}
+	if m.d.version != "v1.1.0" {
+		t.Errorf("rolled back to %s with a snapshot the old one can't read", m.d.version)
+	}
+	if v := vistos[m.bin]; v == "" || leer(t, v) != string(m.viejo) || raiz != m.raiz {
+		t.Errorf("the check got viejos %v and root %q: want the backed-up binary and the daemon's root", vistos, raiz)
+	}
+
+	m = nuevoMontaje(t)
+	m.despertarYPerder()
+	o = m.opciones()
+	o.CongeladaLegible = func(string, string, map[string]string) error { return nil }
+	if _, err := Actualizar(context.Background(), o); !errors.As(err, &va) || va.Fallo != nil || m.d.version != "v1.0.0" {
+		t.Fatalf("a readable snapshot must roll back: %v (daemon %s)", err, m.d.version)
+	}
+}
