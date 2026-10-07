@@ -135,7 +135,7 @@ pone en `kling.layer`.
 - **Bonus hecho — el puente, horneado en la base.** `70-build-minimal-image.sh` lo
   instala en la base, y `80-mcp-image.sh` (`install_bridge`) NO lo copia a la capa
   si el binario que ya se ve es idéntico. Así actualizarlo son ~8 MiB menos por
-  servicio y **un** fichero (`kling image refresh min`) en vez de N. Una capa sin
+  servicio y **un** fichero (`kling mcp refresh-bridge min`) en vez de N. Una capa sin
   puente propio no se reporta como "no es una imagen de servicio" sino como *"its
   bridge comes from base X"*. Si la base no lo trae, la capa se lleva el suyo y
   todo sigue igual: lo que está en la capa gana por ir de lower delante.

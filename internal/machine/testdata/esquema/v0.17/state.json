@@ -1,0 +1,80 @@
+[
+  {
+    "id": "aa11bb22cc33dd44",
+    "name": "vieja",
+    "image": "eco",
+    "state": "stopped",
+    "vcpus": 5,
+    "mem_mib": 6,
+    "pid": 7,
+    "last_error": "v017-8",
+    "mem_max_mib": 9,
+    "snapshot_bytes": 10,
+    "disk_bytes": 11,
+    "created_at": "2026-09-01T10:12:00Z",
+    "started_at": "2026-09-01T10:13:00Z",
+    "frozen_at": "2026-09-01T10:14:00Z",
+    "failed_at": "2026-09-01T10:15:00Z",
+    "from": "svc",
+    "ip": "172.16.0.6",
+    "net_index": 18,
+    "egress": "allowlist",
+    "forwards": {
+      "v017-20": "v017-21"
+    },
+    "allow_domains": [
+      "v017-22"
+    ],
+    "ttl_seconds": 23,
+    "cpu_pct": 24,
+    "allow_exec": true,
+    "on_ttl": "v017-25",
+    "ttl_at": "2026-09-01T10:26:00Z",
+    "volumes": [
+      {
+        "name": "v017-27",
+        "mount": "v017-28",
+        "read_only": true,
+        "drive_id": "v017-29"
+      }
+    ],
+    "shares": [
+      {
+        "mode": "v017-30",
+        "mount": "v017-31",
+        "source": "v017-32",
+        "image_bytes": 33,
+        "status": "v017-34"
+      }
+    ],
+    "labels": {
+      "v017-35": "v017-36"
+    },
+    "has_secrets": true,
+    "ready": "v017-37",
+    "mem_shared": true,
+    "credential_domains": [
+      "v017-38"
+    ],
+    "credential_any_database": [
+      "v017-39"
+    ],
+    "boot_ms": 40,
+    "freeze_ms": 41,
+    "thaw_ms": 42,
+    "wake": {
+      "tier": "v017-43",
+      "wait_ms": 1.5,
+      "check_ms": 1.5,
+      "net_ms": 1.5,
+      "spawn_ms": 1.5,
+      "socket_ms": 1.5,
+      "load_ms": 1.5,
+      "forwards_ms": 1.5,
+      "resync_ms": 1.5,
+      "cgroup_ms": 1.5,
+      "finish_ms": 1.5,
+      "total_ms": 1.5
+    }
+  }
+]

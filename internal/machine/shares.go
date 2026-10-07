@@ -860,7 +860,7 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 		// escuche, y se reintenta.
 		if resp.Header.Get(share.HeaderAgent) == "" && resp.StatusCode < 500 {
 			return errPermanente{fmt.Errorf("the guest agent in image %q is too old for live shares (kindling v0.10); "+
-				"rebuild the image with a current agent (kling images toolchain, kling images build -builder base, "+
+				"rebuild the image with a current agent (kling image toolchain, kling image build -builder base, "+
 				"or kindling-mcp for MCP images), or use mode copy", mc.Image)}
 		}
 		switch resp.StatusCode {

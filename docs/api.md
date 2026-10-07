@@ -32,14 +32,21 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `shares-live` | v0.10 | `shares` con `mode: ro\|rw` (directorio del host del daemon, bajo `share_roots`); `share_roots` en `GET /info` |
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
-| `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
-| `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
-| `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
-| `authz` | sin publicar | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
-| `ready` | sin publicar | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
+| `fork` | v0.15 | `POST /sandboxes/{ref}/fork` |
+| `credaudit` | v0.17 | `GET /machines/{ref}/credaudit` |
+| `db-attach` | v0.17 | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
+| `graphs` | v0.17 | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
+| `authz` | v0.17 | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
+| `cow-grow` | v0.17 | `POST /cow/store/grow` (ver [cow.md](cow.md#hacer-crecer-el-almacén)) |
+| `ready` | v0.17 | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
 | `machine-env` | sin publicar | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
-| `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
-| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
+| `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso; tiene que caber en el disco libre del host, `503` si no, y `KLING_MAX_DISK_MIB` baja el máximo); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
+| `start` | sin publicar | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
+
+Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
+`ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
+y `PUT /snapshots/{name}/credentials` llegaron en v0.17 **sin capacidad propia**: un daemon
+que anuncia `db-attach` las entiende.
 
 ## Rutas
 
@@ -47,9 +54,9 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
-| `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
-| `GET /metrics` | métricas Prometheus en texto |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)), `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)) y `tuning` (los ajustes efectivos del daemon que se cambian por entorno, `KLING_MAX_MACHINES`, `KLING_MIN_FREE_DISK_MIB`…, con el valor que aplica de verdad; solo a un admin o sin política; `kling doctor` los enseña). Contesta también a quien no tiene rol, sin contarle máquinas |
+| `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s. Un suscriptor que no lee a tiempo pierde eventos; cuando vuelve a haber sitio recibe antes del siguiente un `events.dropped` con `dropped` (cuántos; a un inquilino solo se le dice que hubo pérdida) |
+| `GET /metrics` | métricas Prometheus en texto: máquinas por estado, memoria del host y PSS por microVM; `kling_operations_total{op,result}` (run, thaw, freeze, start; un rechazo o un error de quien llama no es `error`), `kling_admission_rejections_total{code}` (409 tope, 429 cuota de inquilino, 503 disco, 507 memoria), el histograma `kling_operation_duration_ms{kind}` (boot —el arranque en frío de un run o de un start—, restore, thaw, resume, freeze; `thaw` y `resume` son el despertar entero, `wake.total_ms`, no solo `thaw_ms`), `kling_gc_evictions_total`, `kling_orphan_vmms_killed_total`, `kling_events_dropped_total`, `kling_disk_free_mib` y `kling_pending_mib` (memoria de los arranques en curso). Los contadores empiezan en 0 con cada daemon |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
 | `POST /cow/store/grow` | amplía en caliente el almacén de copias de disco (`size_mib`, el tamaño nuevo, o `add_mib`, cuánto añadir); devuelve el `store` como en `GET /info`. Solo admin; capacidad `cow-grow`. Ver [cow.md](cow.md#hacer-crecer-el-almacén) |
 
@@ -60,12 +67,13 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `GET /machines` | lista |
 | `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, carpetas compartidas, etiquetas) |
 | `GET /machines/{ref}` | una máquina |
-| `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida |
+| `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida. Parar conserva el disco de la máquina (su overlay) y borra su volcado. Una parada se recoge sola solo si no pierde nada: la instancia de un servicio (etiqueta `service`) salida de su dorado, pasadas `KLING_STOPPED_RETENTION` (24 h; `0` lo apaga). `404` si la máquina no existe, `409` si su estado no lo admite (congelar, descongelar o pausar una parada; pausar una congelada); igual `pause` y `DELETE /machines/{ref}`. Pedir el estado en el que ya está (descongelar o arrancar una que corre, congelar una congelada, pausar una pausada) no es un error: `200` con la máquina, sin tocarla |
+| `POST /machines/{ref}/start` | arranca otra vez una máquina parada, en frío sobre su disco, con su imagen, memoria, volúmenes, salida de red y carpetas (`StartRequest`: `env`, `KEY=valor`; opcional). Exige todas las claves de `env_keys`: el daemon no guarda los valores (`400` con las que faltan). Si falla, la máquina sigue parada con el motivo en `last_error`. `404` y `409` como `freeze`. Capacidad `start` |
 | `POST /machines/{ref}/pause` | pausa una máquina en marcha sin volcarla (ver abajo) |
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze?force=1` | el globo devuelve al host la memoria libre del invitado. `409` en una copia que comparte memoria con su dorado (`mem_shared`, Firecracker) salvo `force` (ver "Listo y ganchos tras restaurar") |
 | `POST /machines/{ref}/mmds` | secretos por MMDS, comunes a todas las sesiones de la máquina (`{"env":{...}}`, ≤1 MiB; el campo `sessions` ya no se usa); la máquina deja de poder congelarse. Un almacén vacío (`{}` o `null`) levanta la marca solo si tras la última inyección corrieron con éxito los ganchos de la imagen (`POST .../hooks?wait=`); vaciar una máquina sin secretos no la marca |
-| `GET /machines/{ref}/ready?wait=60s` | ¿está lista según su imagen? (`ReadyResult`: `ready` = `ready`, `waiting`, `failed` o `""` si no hay nada que esperar; `guest` con lo que dijo el agente). Sin `wait`, pregunta una vez; un "no listo" es un `200` |
+| `GET /machines/{ref}/ready?wait=60s` | ¿está lista según su imagen? (`ReadyResult`: `ready` = `ready`, `waiting`, `failed` o `""` si no hay nada que esperar; `guest` con lo que dijo el agente; `detail` si el agente no contestó o contestó un error, que es `waiting` y no "nada que esperar"; si el daemon no puede mirar la imagen —un host sin `debugfs`— y el agente nunca ha contestado, es `waiting` durante los primeros 30 s desde que arrancó o se restauró, y después `""`, como una imagen sin agente). Sin `wait`, pregunta una vez; un "no listo" es un `200` |
 | `POST /machines/{ref}/hooks?wait=60s` | vuelve a lanzar los ganchos tras restaurar de la imagen y, con `wait`, espera a que acaben (`ReadyResult`). `409` si el agente es anterior |
 | `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. `headers` (hasta 8), `query` y `body` dicen dónde se cambia el marcador: por defecto solo en `Authorization` (también dentro de un `Basic`) y `X-Api-Key`; `headers` añade cabeceras, `query` la query (`?key=`) y `body` el cuerpo, inseguro frente a un proveedor que refleje lo que recibe (ver SECURITY.md). Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios, y `Machine.credential_any_database` las variables de las credenciales postgres que entran en cualquier base (sin `database`, o de un almacén anterior a que fuese obligatoria: el daemon lo avisa en su log al cargarlas). Con `"type":"postgres"` es una contraseña de base de datos (ver abajo) |
 | `DELETE /machines/{ref}/credentials/{env}?upstream_machine=ID` | retira de la máquina la credencial de esa variable (404 si no la tiene). Con `upstream_machine`, solo si va a esa máquina (`kling db detach`). En una máquina viva el proxy deja de conocer el marcador y corta las sesiones de Postgres que lo usaban, y el marcador sale de MMDS; en una congelada o parada solo cambia el almacén. Devuelve la máquina |
@@ -111,13 +119,16 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `PUT /images/{name}/files` | pone un fichero dentro (`path`, `mode`, `content_b64` hasta 8 MiB o `from_host` relativo a `/usr/local/lib/kindling`, `create`); se niega si la imagen está en uso. En Linux monta la imagen; en macOS escribe con `debugfs -w`, sin montarla (ver [mac.md](mac.md)) |
 | `DELETE /images/{name}` | la borra si nada la usa |
 | `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
-| `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto |
+| `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto, también si la está leyendo un arranque en vuelo (vuelve a intentarlo) |
 
 **Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
 (`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
 reservado para el kernel compartido (`part` vacía o `kernel`). "En uso" es lo mismo
 que impide borrarla: un dorado o una máquina que no esté parada que la usen, o
-capas encima; para el kernel, cualquier máquina que no esté parada. La receta de
+capas encima, o un arranque en frío en vuelo que ya la eligió; para el kernel,
+cualquier máquina que no esté parada o cualquier arranque en vuelo. La comparación
+con lo que hay, la comprobación de uso y el renombrado se hacen con los arranques
+en frío en espera, así que ninguno lee una imagen a medio sustituir. La receta de
 una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
 `kling image copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
 uno de macOS, donde `POST /images` contesta `501` salvo para los constructores
@@ -139,8 +150,20 @@ permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
 al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
 eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
 lo que apuntó de lo construido) y el daemon lo lleva a la receta. Los del núcleo
-en Go (`android`, `debian`, `oci`) no hace falta instalarlos: si no están en el directorio de
-constructores, el daemon se ejecuta a sí mismo como `kling builder <nombre>`.
+en Go (`android`, `debian`, `oci`) no hace falta instalarlos: el daemon se
+ejecuta a sí mismo como `<su binario> builder <nombre>`, y así construye
+siempre el mismo binario que atiende la petición. El orden:
+
+1. Sin `KLING_BUILDERS_DIR`, el propio binario del daemon, aunque haya uno
+   instalado en `/usr/local/lib/kindling/builders/` (ese envoltorio lanza el
+   `kling` del sistema: un daemon privado o recién compilado construiría con
+   otro).
+2. Con `KLING_BUILDERS_DIR` puesto, el constructor de ese directorio si está
+   (para probar uno a mano), y si no, otra vez el propio binario.
+
+Con usuario de construcción (`-build-as`), ese usuario tiene que poder ejecutar
+el binario del daemon: uno bajo `/root` no le deja pasar y la construcción falla
+con un 412 que lo dice. El resto de constructores, siempre el instalado.
 
 ### Volúmenes
 
@@ -308,6 +331,7 @@ y `auth` `mysql_native_password`, `caching_sha2_password-fast`, `caching_sha2_pa
 | `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto; en macOS, `kern.memorystatus_level` por debajo de `KLING_MIN_MEM_LEVEL`, 15 % por defecto, o el swap usado por encima de `KLING_MAX_SWAP_PCT`, 85 % por defecto, de lo que puede llegar a ocupar: el swap actual más el disco libre del volumen `VM` por encima del mínimo de disco. Ver [estabilidad.md](estabilidad.md) §9) |
 | `503` | queda menos disco que `KLING_MIN_FREE_DISK_MIB` bajo `$KLING_ROOT` (2 GiB en Linux; 16 GiB en macOS, donde el swap crece en el mismo disco). No es un 507 a propósito: quien recibe un 507 congela para hacer sitio, y congelar escribe en disco |
 | `409` | tope de máquinas del daemon (`KLING_MAX_MACHINES`, 256) |
+| `429` | cuota del inquilino dueño (`kling.owner`) en la política de autorización: `max_machines`, `max_mem_mib` o `max_disk_mib`. El mensaje dice qué tope, cuánto lleva y cuánto pide, y lleva `quota exceeded` (`api.IsTenantQuota`). También en `run -from`, `fork`, `graph up` y `start`. Ver [authz.md](authz.md#cuotas) |
 
 ### El proxy y los puertos
 
@@ -328,7 +352,7 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 
 | Ruta | Qué hace |
 |---|---|
-| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`. En macOS las aristas `link` y `credential` van por el broker de enlaces y una `depends` con `port` espera preguntando al `kling-vz` del destino |
+| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `429` si no caben en la cuota de su inquilino, `507` si no cabe la memoria de los `eager`. En macOS las aristas `link` y `credential` van por el broker de enlaces y una `depends` con `port` espera preguntando al `kling-vz` del destino |
 | `GET /graphs` | lista, por nombre |
 | `GET /graphs/{ref}` | uno, con el estado de cada nodo |
 | `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
@@ -619,13 +643,13 @@ puente MCP) lo ejecuta él mismo, **sin `allow_exec`** y sin argumentos de nadie
 
 | Ruta del invitado | Qué es |
 |---|---|
-| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución |
+| `/etc/kindling/ready` | ejecutable que sale con 0 cuando el invitado está listo. Se pregunta hasta que contesta 0 y a partir de ahí se recuerda: es "terminó de arrancar", no un chequeo de vida (un dorado guardado listo trae el recuerdo a cada copia). Plazo de 10 s por ejecución, o el `probe_timeout_seconds` del servicio de la imagen (`service.json`, el `Timeout` del `HEALTHCHECK`; hasta 120 s) |
 | `/etc/kindling/post-restore.d/*` | ejecutables que corren en orden (como `run-parts`: sin ocultos, `*~` ni `*.disabled`) al final de cada restauración, con el reloj y la entropía resincronizados, los volúmenes montados y las credenciales en MMDS. `KLING_RESTORE` dice de qué: `instance` (`run -from`, fork), `thaw` o `manual` (`POST .../hooks`). Plazo de 60 s cada uno; el primero que falla para la tanda y deja `failed`. Mientras corren, el invitado no está listo. Su salida va a la consola (`kling logs`) |
 
 Rutas del agente, de control (el gateway no las reenvía):
 
 ```
-GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"..."}
+GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"...","start_period_seconds":N}
 POST /hooks?restore=instance|thaw|manual → 202 (409 si ya corren)
 GET  /meminfo → {"total_mib":N,"available_mib":N}
 ```
@@ -649,7 +673,16 @@ Qué hace el daemon con ello:
 
 Compatibilidad: un agente anterior (`404`, o el `400` del puente viejo) o una
 imagen sin nada de esto cuentan como "nada que esperar", y una imagen sin agente
-no retrasa un commit (se sondea el puerto antes): lo de siempre.
+no retrasa un commit (se sondea el puerto antes): lo de siempre. Si el daemon no
+puede mirar la imagen (sin `debugfs`) y su agente aún no ha contestado nunca,
+commit y fork esperan a que conteste tres cuartos de su plazo (`-wait`; 90 s con
+los 2 min por defecto, nunca menos de 30 s) antes de darla por imagen sin agente.
+Si el plazo no da para eso, fallan en vez de congelar a ciegas.
+
+Si el `/resync` de una restauración falla, la copia aún dice lo que se guardó en
+el dorado (ganchos `done`): el daemon lanza igualmente sus ganchos en cuanto el
+agente contesta a `/ready`, y si no puede, la máquina queda `failed` hasta
+`kling machine hooks`.
 
 **Identidad por copia.** Lo que un gancho necesita y llega después de restaurar
 (un secreto por MMDS) se entrega y se aplica así:
@@ -678,7 +711,9 @@ con el 50 % iba a ¼.
 **Impulso de arranque (Linux).** Mientras arranca (en frío, `run -from` o
 `thaw`), la máquina corre con todas sus vCPU enteras (sin pasar de los núcleos
 del host) y vuelve a su `cpu_pct` cuando pasa la sonda de listo de su imagen,
-o cuando contesta su agente si no declara sonda; como mucho 60 s. Mientras dura,
+o cuando contesta su agente si no declara sonda; como mucho 60 s, más el
+`start_period_seconds` que diga el agente (el `StartPeriod` del `HEALTHCHECK`,
+hasta 120 s). Mientras dura,
 `GET /machines/{ref}` trae `cpu_boost_pct` (el techo de ese momento; `kling ps`
 lo enseña en READY) y al acabar se publica `machine.boost_ended` con el motivo.
 Un `cpu_pct` pedido explícitamente (`cpu_pct_fixed` en la máquina y en el

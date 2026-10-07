@@ -64,7 +64,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotImplemented, errors.New("this daemon can't build images: building needs root, loop "+
 			"devices and chroot on Linux (only the builders written in Go, like \"android\", run here). "+
 			"Build the image on a Linux host and copy it here:\n"+
-			"  kling images copy <name> -from ssh://user@linux-host"))
+			"  kling image copy <name> -from ssh://user@linux-host"))
 		return
 	}
 	if req.Builder == "" {

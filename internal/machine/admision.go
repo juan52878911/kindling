@@ -20,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -41,10 +42,14 @@ func maxMemPressure() float64 {
 	return defaultMaxMemPressure
 }
 
+// psiMemoria es de dónde lee memPressure; variable solo para que los tests
+// puedan fingir un host bajo presión.
+var psiMemoria = "/proc/pressure/memory"
+
 // memPressure devuelve "some avg10" de /proc/pressure/memory, o -1 si el kernel
 // no lo expone (PSI desactivado, o no es Linux).
 func memPressure() float64 {
-	f, err := os.Open("/proc/pressure/memory")
+	f, err := os.Open(psiMemoria)
 	if err != nil {
 		return -1
 	}
@@ -189,37 +194,65 @@ func (m *Manager) checkDisk() error {
 			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, tope)}
 }
 
-// checkDiskParaVolcado rechaza un volcado (freeze, save) que no cabe: Firecracker
-// escribe un mem.file del tamaño de la RAM de la máquina ANTES de que
-// perforarHuecos lo adelgace, y si el disco se acaba a medias deja el fichero
-// parcial, la máquina pausada y el resto del host sin disco. Medido en el
-// laboratorio con una microVM de 2 GiB y 1,9 GiB libres: el disco llegó al 100 %
-// y el daemon de al lado dejó de admitir máquinas. Hace falta la RAM entera más
-// el mínimo de siempre, para que el host siga admitiendo máquinas después.
-func (m *Manager) checkDiskParaVolcado(memMiB int, que string) error {
+// statfsRaiz es syscall.Statfs, en variable para que los tests simulen un
+// disco casi lleno.
+var statfsRaiz = syscall.Statfs
+
+// reservarDiscoParaVolcado comprueba Y reserva el disco de un volcado
+// (freeze, save): Firecracker escribe un mem.file del tamaño de la RAM de la
+// máquina ANTES de que perforarHuecos lo adelgace, y si el disco se acaba a
+// medias deja el fichero parcial, la máquina pausada y el resto del host sin
+// disco. Medido en el laboratorio con una microVM de 2 GiB y 1,9 GiB libres:
+// el disco llegó al 100 % y el daemon de al lado dejó de admitir máquinas.
+// Hace falta la RAM entera más el mínimo de siempre, para que el host siga
+// admitiendo máquinas después.
+//
+// Reserva y no solo comprueba, por lo mismo que reserveMemory: N freezes a la
+// vez (el planificador congelando para hacer sitio) miraban el mismo disco
+// libre y pasaban todos, y juntos no cabían. Lo reservado por los que aún no
+// han escrito (volcandoMiB) se suma a lo que pide este. Devuelve la función
+// que suelta la reserva, que hay que llamar siempre al terminar de escribir
+// (o de fallar).
+func (m *Manager) reservarDiscoParaVolcado(memMiB int, que string) (func(), error) {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(m.root, &st); err != nil {
-		return nil // sin poder medirlo no se bloquea nada
+	if err := statfsRaiz(m.root, &st); err != nil {
+		return func() {}, nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	enVuelo := int64(m.volcandoMiB)
 	necesario := int64(memMiB) + minFreeDiskMiB()
-	if libre >= necesario {
-		return nil
+	if libre >= necesario+enVuelo {
+		m.volcandoMiB += memMiB
+		var una sync.Once
+		return func() {
+			una.Do(func() {
+				m.mu.Lock()
+				m.volcandoMiB = max(0, m.volcandoMiB-memMiB)
+				m.mu.Unlock()
+			})
+		}, nil
+	}
+	otros := ""
+	if enVuelo > 0 {
+		otros = fmt.Sprintf(", and other dumps in progress have %d MiB of it reserved", enVuelo)
 	}
 	if que == "thaw" {
 		// Descongelar un diferencial sin reflink: la base se copia entera
 		// (diff_volcado.go), y el fichero vive mientras la copia corra.
-		return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
-			"only %d MiB of disk left under %s: thawing this copy rebuilds its %d MiB of memory from the "+
+		return nil, &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
+			"only %d MiB of disk left under %s%s: thawing this copy rebuilds its %d MiB of memory from the "+
 				"golden snapshot (this filesystem cannot share blocks) and needs %d MiB free (the RAM plus the "+
 				"%d MiB minimum).\nRemove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
-				"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, memMiB, necesario, minFreeDiskMiB())}
+				"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, otros, memMiB, necesario, minFreeDiskMiB())}
 	}
-	return &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
-		"only %d MiB of disk left under %s: %s dumps the machine's %d MiB of RAM to disk first and "+
+	return nil, &api.StatusError{Code: api.StatusDiskFull, Message: fmt.Sprintf(
+		"only %d MiB of disk left under %s%s: %s dumps the machine's %d MiB of RAM to disk first and "+
 			"needs %d MiB free (the RAM plus the %d MiB minimum).\n"+
 			"Remove warm machines or unused snapshots (`kling ps -a`, `kling snapshots`), "+
-			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, que, memMiB, necesario, minFreeDiskMiB())}
+			"or lower the minimum with KLING_MIN_FREE_DISK_MIB", libre, m.root, otros, que, memMiB, necesario, minFreeDiskMiB())}
 }
 
 // admitir es la admisión completa, antes de reservar memoria.
@@ -227,6 +260,12 @@ func (m *Manager) admitir() error {
 	if err := m.checkDisk(); err != nil {
 		return err
 	}
+	return m.admitirMemoria()
+}
+
+// admitirMemoria es la admisión sin la del disco: la de quien no crea disco
+// nuevo (Thaw).
+func (m *Manager) admitirMemoria() error {
 	if err := m.checkPresionPlataforma(); err != nil {
 		return err
 	}

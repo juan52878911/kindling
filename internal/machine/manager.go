@@ -103,6 +103,9 @@ type Manager struct {
 	// cgroupRoot vacío = sin límite de CPU; el motivo queda en CgroupWarning.
 	cgroupRoot    string
 	CgroupWarning string
+	// cgroupMemoria y cgroupProcesos: los cgroups de las microVMs tienen los
+	// controladores de memoria y de procesos (memory.max, pids.max).
+	cgroupMemoria, cgroupProcesos bool
 
 	// jailerJailed dice si las microVMs de este proceso arrancan dentro de
 	// jailer (ver decidirJailer). Se decide UNA vez al construir el Manager y
@@ -141,6 +144,21 @@ type Manager struct {
 	// nombresNaciendo son los nombres de las máquinas que run está creando y
 	// aún no están en byID (reservarNombre). Bajo mu.
 	nombresNaciendo map[string]bool
+	// arrancando cuenta, por imagen, los arranques en frío de run que ya la
+	// eligieron y aún no están en byID (reservarImagen); arrancandoTotal, todos,
+	// que leen además el kernel. Bajo mu, y se apuntan con imgMu: ver
+	// ConImagenesQuietas.
+	arrancando      map[string]int
+	arrancandoTotal int
+	// imgMu es el cerrojo de sustituir una imagen o el kernel (blobs.go).
+	imgMu sync.Mutex
+
+	// redCaida es lo que se llama al desmontar la red de una máquina (ver
+	// OnGuestGone).
+	redCaida atomic.Pointer[func(ip string)]
+
+	// cuotas da la cuota de un inquilino (cuota_inquilino.go); nil = ninguna.
+	cuotas atomic.Pointer[func(owner string) (Cuota, bool)]
 
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
@@ -219,6 +237,12 @@ type Manager struct {
 	// listoDeclarado memoriza, igual, qué imágenes declaran sonda o ganchos
 	// de "listo" (ver imagenDeclaraListo).
 	listoDeclarado sync.Map
+	// listoDudaAvisado: imágenes de las que ya se avisó de que no se sabe si
+	// declaran "listo" (declaraListo): un aviso por imagen.
+	listoDudaAvisado sync.Map
+	// ganchosPendientes: restauraciones cuyo /resync falló y cuyos ganchos
+	// aún no se han lanzado (ver ganchosTrasResyncFallido). Remove la poda.
+	ganchosPendientes sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -250,6 +274,12 @@ type Manager struct {
 	// pasan los dos, y juntos no caben — el OOM del anfitrión que el check existe
 	// para impedir. Se toca bajo mu.
 	pendingMiB int
+
+	// volcandoMiB es el disco que tienen reservado los volcados en curso
+	// (freeze, save, el thaw de un diferencial sin reflink) y que aún no han
+	// escrito: reservarDiscoParaVolcado lo suma a lo que pide cada uno, como
+	// pendingMiB con la memoria. Se toca bajo mu.
+	volcandoMiB int
 
 	// snapPending cuenta, por snapshot dorado, cuántas instancias están
 	// arrancando de él ahora mismo. Sirve a reserveMemory para saber si el
@@ -308,8 +338,11 @@ type Manager struct {
 	impulsos   map[string]*impulsoCPU
 
 	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
-	// una nueva jubila a la anterior.
+	// una nueva jubila a la anterior. Remove poda la entrada.
 	vigiasListo sync.Map
+	// discoMedido es el estado en el que refreshDiskUsage midió por última vez
+	// el disco de cada máquina. Bajo mu.
+	discoMedido map[string]api.State
 	// pruebasListo y pruebasGanchos sustituyen GET /ready y POST /hooks del
 	// agente. Solo lo ponen las pruebas.
 	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
@@ -393,7 +426,24 @@ type Manager struct {
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
-func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
+func (m *Manager) lock(id string) func() { return m.trasCierre(m.lifecycle.tomar(id)) }
+
+// trasCierre envuelve la liberación de un cerrojo de ciclo de vida: si el
+// Manager ya se cerró (persistLoop parado), la operación que acaba escribe
+// ella misma su última foto del estado, que nadie más va a escribir. Solo
+// pasa en el apagado, con una operación que acabó después del plazo de Close;
+// ahí la latencia del disco ya no le quita nada a nadie, y perder la
+// transición sí. Se escribe DESPUÉS de soltar, fuera de m.mu (ver doc.go).
+func (m *Manager) trasCierre(soltar func()) func() {
+	return func() {
+		soltar()
+		select {
+		case <-m.quit:
+			m.writePending()
+		default:
+		}
+	}
+}
 
 // lockUnaVez es lock con una liberación idempotente: la función devuelta se
 // puede llamar varias veces y solo suelta la primera. La usan Run y runFrom,
@@ -407,7 +457,13 @@ func (m *Manager) lockUnaVez(id string) func() {
 }
 
 // tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
-func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
+func (m *Manager) tryLock(id string) (func(), bool) {
+	soltar, ok := m.lifecycle.intentar(id)
+	if !ok {
+		return nil, false
+	}
+	return m.trasCierre(soltar), true
+}
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
@@ -437,6 +493,13 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		m.CgroupWarning = err.Error()
 	} else {
 		m.cgroupRoot = cg
+		m.cgroupMemoria, m.cgroupProcesos = controladoresDelegados(cg)
+		if !m.cgroupMemoria {
+			log.Printf("warning: the memory cgroup controller is not available: no memory.max per microVM")
+		}
+		if !m.cgroupProcesos {
+			log.Printf("warning: the pids cgroup controller is not available: no pids.max per microVM")
+		}
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
@@ -573,6 +636,7 @@ func (m *Manager) load() {
 		}
 		m.byID[mc.ID] = mc
 	}
+	m.recuperarGanchosPendientes()
 }
 
 // versionEstado es la versión del formato de state.json que escribe este
@@ -833,6 +897,11 @@ func (m *Manager) persistirYa() {
 	m.writePending()
 }
 
+// cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
+// vida en curso. Un freeze de varios GiB tarda segundos; systemd da 90 s
+// antes del SIGKILL.
+const cierreOperacionesMax = 30 * time.Second
+
 // Close para la escritura de estado tras volcar lo que quede pendiente.
 //
 // Lo llama el daemon en su camino de apagado, y tiene que esperarse: si el
@@ -840,6 +909,15 @@ func (m *Manager) persistirYa() {
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
+		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
+		// escritura del estado ya se cerró, esa transición se pierde y el
+		// arranque siguiente ve una máquina "running" que ya es un volcado.
+		// Con plazo: un apagado no puede quedarse colgado de un volcado que no
+		// termina. Lo que acabe después aún se escribe (ver trasCierre).
+		if !m.lifecycle.esperarLibres(cierreOperacionesMax) {
+			log.Printf("shutdown: lifecycle operations still running after %s; their last state may not be saved", cierreOperacionesMax)
+		}
 		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
 		// agente del invitado, no el estado.
 		m.drainShares(shareDrainWait)
@@ -903,29 +981,57 @@ func (m *Manager) touchDisk(id string) int64 {
 	return n
 }
 
-// refreshDiskUsage recalcula el disco de todas las máquinas.
+// refreshDiskUsage recalcula el disco de las máquinas que pueden estar
+// cambiándolo.
 //
 // Lo llama el vigilante, que ya pasa cada pocos segundos. El overlay es un
 // fichero disperso que CRECE mientras el invitado escribe, así que un valor
 // que solo se actualizara al arrancar o congelar sería justo el que no sirve:
 // el número con el que se detecta a un invitado llenando su disco.
+//
+// Pero solo escribe un invitado vivo. Recorrer cada 10 s el directorio de
+// todas las congeladas y paradas —en un host con cientos dormidas, la
+// mayoría— era E/S sin ningún dato nuevo. Las que no corren se miden una vez
+// por cambio de estado (discoMedido), que es cuando su disco cambia: al
+// congelarse aparece el mem.file, al pararse deja de crecer.
 func (m *Manager) refreshDiskUsage() {
+	type medir struct {
+		id     string
+		estado api.State
+	}
 	m.mu.RLock()
-	ids := make([]string, 0, len(m.byID))
-	for id := range m.byID {
-		ids = append(ids, id)
+	var cuales []medir
+	for id, mc := range m.byID {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused {
+			cuales = append(cuales, medir{id, mc.State})
+			continue
+		}
+		if est, ok := m.discoMedido[id]; !ok || est != mc.State {
+			cuales = append(cuales, medir{id, mc.State})
+		}
 	}
 	m.mu.RUnlock()
 
-	sizes := make(map[string]int64, len(ids))
-	for _, id := range ids {
-		sizes[id] = diskUsage(m.dir(id))
+	sizes := make([]int64, len(cuales))
+	for i, c := range cuales {
+		sizes[i] = diskUsage(m.dir(c.id))
 	}
 
 	m.mu.Lock()
-	for id, n := range sizes {
-		if mc := m.byID[id]; mc != nil {
-			mc.DiskBytes = n
+	if m.discoMedido == nil {
+		m.discoMedido = make(map[string]api.State)
+	}
+	for i, c := range cuales {
+		if mc := m.byID[c.id]; mc != nil {
+			mc.DiskBytes = sizes[i]
+			// El estado de ANTES de medir: si cambió mientras tanto, no casa
+			// y la próxima vuelta la mide otra vez.
+			m.discoMedido[c.id] = c.estado
+		}
+	}
+	for id := range m.discoMedido {
+		if m.byID[id] == nil {
+			delete(m.discoMedido, id)
 		}
 	}
 	m.mu.Unlock()
@@ -1098,6 +1204,7 @@ func newID() string {
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	mc, err := m.run(ctx, req)
+	tel.fin(OpRun, err)
 	if err != nil || !req.WaitReady {
 		return mc, err
 	}
@@ -1162,6 +1269,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.Image == "" {
 		req.Image = "default"
 	}
+	// Antes de mirar la imagen: desde aquí hasta byID nadie puede sustituirla
+	// (ni el kernel) por debajo de este arranque.
+	soltarImagen := m.reservarImagen(req.Image)
+	defer soltarImagen()
 	if req.VCPUs <= 0 {
 		req.VCPUs = 1
 	}
@@ -1196,6 +1307,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	if err := m.checkMachineLimit(); err != nil {
+		return nil, err
+	}
+	// La cuota del dueño, antes de nada caro: solo un filtro, publicar decide.
+	if err := m.comprobarCuota(req.Labels[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(req.MemMiB, req.MemMaxMiB), DiscoMiB: discoCuota(req.DiskMiB)}); err != nil {
 		return nil, err
 	}
 
@@ -1291,14 +1407,14 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			if len(vols) == 0 {
 				return nil, fmt.Errorf("%w: image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
 					"is what mounts shared folders inside the guest.\n"+
-					"Use an image with an agent (kling images toolchain, or kling images build -builder base)",
+					"Use an image with an agent (kling image toolchain, or kling image build -builder base)",
 					ErrShareRequest, req.Image)
 			}
 			return nil, fmt.Errorf("image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
 				"is what mounts the volumes inside the guest.\n"+
 				"With this image the disk would be attached but nobody would mount it, and everything written "+
 				"to %s would die with the machine, without a single error.\n"+
-				"Rebuild it with an agent (kling images build -builder base, or kindling-mcp in stdio mode), or remove the volume",
+				"Rebuild it with an agent (kling image build -builder base, or kindling-mcp in stdio mode), or remove the volume",
 				req.Image, vols[0].mount)
 		}
 	}
@@ -1357,14 +1473,15 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// esperar el cerrojo de OTRA máquina. Ver doc.go.
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
-	m.mu.Lock()
-	m.byID[id] = mc
-	m.persist()
-	m.mu.Unlock()
+	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
+	if err := m.publicar(mc); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	// abandonar deshace lo publicado: la máquina ya está en byID, y dejarla ahí
-	// tras un fallo crea un fantasma que no se puede arrancar (no hay `start`) y
+	// tras un fallo crea un fantasma created que nadie va a arrancar y
 	// que RETIENE su volumen en exclusiva, porque volumeUsers cuenta todo lo que
 	// no esté stopped o failed. Nadie podría montarlo hasta un `rm` a mano.
 	abandonar := func(err error) (*api.Machine, error) {
@@ -1434,7 +1551,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// lo entrega a quien espera el fin del arranque. Ver arranque_cpu.go.
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -1447,6 +1564,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.persist()
 	out := *mc
 	m.mu.Unlock()
+	tel.exito(OpRun, DurBoot, out.BootMS)
 
 	// El walk va DESPUÉS de soltar el lock, y su resultado entra en la
 	// respuesta: si se dejara solo al vigilante, esta llamada devolvería 0 y
@@ -1753,7 +1871,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// del snapshot dorado, heredado por las copias. No es fatal: si el kernel
 	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
 	// microVM arranca igual y solo se pierde el squeeze.
-	if err := c.SetBalloon(ctx, globo, true, balloonStatsPollSec); err != nil {
+	if err := m.configurarGlobo(ctx, c, id, globo); err != nil {
 		if globo > 0 {
 			// Sin globo no hay forma de retener la diferencia: el invitado
 			// vería el techo entero, que no es lo que se pidió.
@@ -1792,7 +1910,7 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 	}
 	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
 	// Orden: primero el namespace (necesita privilegios), después soltarlos.
-	argv := m.priv.Wrap([]string{m.fcBin, "--api-sock", sock})
+	argv := m.priv.Wrap(append([]string{m.fcBin, "--api-sock", sock}, argsVMM()...))
 	if n != nil {
 		argv = n.Wrap(argv[0], argv[1:]...)
 	}
@@ -1887,10 +2005,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 // Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
 // cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
 // que su dueño acababa de pedir conservar.
-func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (_ *api.Machine, err error) {
+	defer func() { tel.fin(OpFreeze, err) }()
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
@@ -1900,7 +2019,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// rechazar una máquina recién arrancada por estar "created".
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
@@ -1919,7 +2038,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		mc = r
 	}
 	if mc.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be frozen (it is %s)", mc.State)
+		return nil, estadoInvalido("only a running machine can be frozen (it is %s)", mc.State)
 	}
 
 	// Negativa deliberada: una máquina con secretos inyectados por MMDS NO se
@@ -1931,7 +2050,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
 	// vuelca nada a disco) o `stop`/`rm`.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and "+
+		return nil, estadoInvalido("machine %s has session secrets injected via MMDS and "+
 			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+
 			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm; or, if its image "+
 			"has post-restore hooks that consume the secret, run them (kling machine hooks -wait) and "+
@@ -1945,7 +2064,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
-	// sigue corriendo como si nada (ver checkDiskParaVolcado).
+	// sigue corriendo como si nada (ver reservarDiscoParaVolcado).
 	// Diferencial (diff_volcado.go): una copia con seguimiento de páginas
 	// sucias vuelca solo lo escrito desde el dorado. Lo que ocupa no se sabe
 	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
@@ -1962,9 +2081,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		necesario /= 4
 	}
-	if err := m.checkDiskParaVolcado(necesario, "freeze"); err != nil {
+	soltarDisco, err := m.reservarDiscoParaVolcado(necesario, "freeze")
+	if err != nil {
 		return nil, err
 	}
+	defer soltarDisco()
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
@@ -2029,8 +2150,9 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// caminos. Un invitado pausado no atiende HTTP: la petición se comía su
 	// plazo entero en CADA congelación, y lo que quedara sin vaciar solo vivía
 	// en mem.file — si luego se elimina la máquina warm, esas escrituras
-	// desaparecen sin dejar rastro.
-	m.flushVolume(mc)
+	// desaparecen sin dejar rastro. Con el overlay también: un stop de la
+	// congelada tira mem.file, y kling start arranca sobre el overlay solo.
+	m.flushVolume(mc, true)
 
 	// Las carpetas vivas se desconectan ANTES de pausar: la conexión muere con
 	// el VMM, y si no se cortara aquí el daemon no se enteraría hasta que
@@ -2094,15 +2216,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
 		// ninguna responde jamás.
 		//
-		// Y hay que devolverle sus volúmenes, que se soltaron arriba para poder
-		// congelar: si no, seguiría corriendo escribiendo en su overlay.
+		// Sus volúmenes siguen montados: Freeze solo los vacía (flushVolume),
+		// no los suelta, así que no hay nada que devolverle. Pedírselo era un
+		// viaje al agente de hasta 50 s con el cerrojo tomado y el error tirado.
 		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			// Si tampoco se puede reanudar, la máquina no es recuperable y
 			// dejarla como running sería mentir. Se marca fallida.
 			m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 			return nil, err
 		}
-		_ = m.acquireVolumes(mc)
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
@@ -2131,7 +2253,6 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
-			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
 		snapPath = filepath.Join(dir, "snap.file")
@@ -2158,7 +2279,6 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
-			_ = m.acquireVolumes(mc)
 			return nil, err
 		}
 		memPath = filepath.Join(dir, "mem.file")
@@ -2247,7 +2367,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// se lleva el proceso, y con el TODAS las microVM quedan huerfanas.
 		delete(m.socket, mc.ID)
 		m.mu.Unlock()
-		return nil, fmt.Errorf("machine %q was removed while it was being frozen", mc.Name)
+		return nil, retiradaDurante(mc.Name, "frozen")
 	}
 	now := time.Now()
 	live.State = api.StateWarm
@@ -2265,6 +2385,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Una copia de kling db congelada no atiende: se cortan las sesiones de
 	// los agentes que llegaban a ella por su proxy (copias_db.go).
 	m.invalidarSesiones(mc.ID, "frozen")
+	tel.exito(OpFreeze, DurFreeze, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 	if sinAgente {
@@ -2290,6 +2411,10 @@ const balloonStatsPollSec = 1
 // se reclama su memoria libre MENOS este margen, para no dejarlo pegado al borde
 // del OOM justo después.
 const balloonSqueezeMarginMiB = 128
+
+// sueloSqueezeMiB es lo que el globo nunca le quita al invitado, sea cual sea
+// el margen: el kernel necesita memoria propia para atender al driver.
+const sueloSqueezeMiB = 32
 
 // squeezeMinRetenerMiB: por debajo de esto, en macOS, el apretón no ha devuelto
 // nada que valga la pena retener y el globo vuelve a la línea base.
@@ -2318,23 +2443,27 @@ var ErrSqueezeShared = errors.New("squeezing a copy that shares memory with its 
 func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api.SqueezeResult, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
-	return m.squeezeLocked(ctx, mc.ID, ref, force)
+	return m.squeezeLocked(ctx, mc.ID, ref, force, balloonSqueezeMarginMiB, true)
 }
 
 // squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
 // tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
-// las ocupadas).
-func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool) (*api.SqueezeResult, error) {
+// las ocupadas). margen es lo que se le deja disponible al invitado mientras el
+// globo está inflado (balloonSqueezeMarginMiB, salvo el apretón al estar lista).
+// publicar anuncia el apretón en el bus como EvFrozen, como siempre han hecho
+// squeeze y makeRoom; el apretón al estar lista no, que no es congelar nada y
+// quien lee los eventos vería un "freeze" justo después de arrancar.
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool, margen int, publicar bool) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
+		return nil, estadoInvalido("only a running machine can be squeezed (it is %s)", cur.State)
 	}
 	// Una copia de un dorado en Firecracker mapea su mem.file MAP_PRIVATE: la
 	// caché de páginas del invitado son páginas LIMPIAS y COMPARTIDAS con las
@@ -2379,7 +2508,13 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 		reclaimMiB = avail
 	}
 
-	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
+	target := stats.ActualMiB + reclaimMiB - margen
+	// Como en apretarAntesDeVolcar: con un ActualMiB obsoleto la suma puede
+	// pasar del total, y el VMM rechaza un globo mayor que la RAM. Nunca a
+	// menos de un suelo del total, por pequeño que sea el margen.
+	if tot := int(stats.TotalMemory >> 20); tot > 0 && target > tot-sueloSqueezeMiB {
+		target = tot - sueloSqueezeMiB
+	}
 	sinEstadisticas := globoSinEstadisticas && estadisticasDesconocidas(stats)
 	if sinEstadisticas {
 		// macOS: el framework no dice cuánta memoria tiene libre el invitado
@@ -2438,8 +2573,10 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool)
 		}
 	}
 
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
-		Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	if publicar {
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
+			Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+	}
 
 	return &api.SqueezeResult{ID: id, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
 }
@@ -2501,16 +2638,16 @@ func procRSSMiB(pid int) int {
 func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("MMDS can only be injected into a running machine (it is %s)", cur.State)
+		return nil, estadoInvalido("MMDS can only be injected into a running machine (it is %s)", cur.State)
 	}
 
 	m.mu.RLock()
@@ -2532,6 +2669,14 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	}
 	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
 		return nil, err
+	}
+	// Con los marcadores y el entorno pendiente puede pasarse del almacén
+	// del VMM: se dice aquí, con el tope, y no con el error crudo del VMM.
+	if b, err := json.Marshal(doc); err != nil {
+		return nil, err
+	} else if len(b) > api.MaxMMDSBytes {
+		return nil, fmt.Errorf("the MMDS store would be %d bytes with the machine's credential placeholders, "+
+			"over the limit of %d", len(b), api.MaxMMDSBytes)
 	}
 	c := fc.New(sock)
 	if err := c.PutMMDSData(ctx, doc); err != nil {
@@ -2675,16 +2820,16 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("credentials can only be given to a running machine (it is %s)", cur.State)
+		return nil, estadoInvalido("credentials can only be given to a running machine (it is %s)", cur.State)
 	}
 	if cur.Egress != string(knet.EgressAllowlist) {
 		return nil, fmt.Errorf("credentials need -egress allowlist (the machine has %q)", cur.Egress)
@@ -2725,21 +2870,32 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	mc, err := m.thaw(ctx, ref)
+	tel.fin(OpThaw, err)
+	return mc, err
+}
+
+func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono := nuevoCrono("frozen")
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
 	crono.marca(&crono.p.WaitMS)
 
-	// Otra llamada pudo descongelarla mientras esperábamos el candado.
+	// Otra llamada pudo descongelarla mientras esperábamos el candado, o
+	// borrarla: seguir con la copia de antes lanzaba un VMM sobre un
+	// directorio que ya no existe (como Freeze y Commit, se relee).
 	cur, ok := m.Get(mc.ID)
-	if ok && cur.State == api.StateRunning {
+	if !ok {
+		return nil, noExiste(ref)
+	}
+	if cur.State == api.StateRunning {
 		return cur, nil
 	}
 	// Pausada: solo reanudar (ver pausa.go).
-	if ok && cur.State == api.StatePaused {
+	if cur.State == api.StatePaused {
 		crono.p.Tier = "paused"
 		// Pausada por el almacén lleno (cow_vigilante.go): reanudarla sin
 		// sitio la devolvería a escribir en un almacén que da EIO.
@@ -2751,6 +2907,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, err
 		}
 		fases := crono.cerrar()
+		tel.despertar(DurResume, fases)
 		out.Wake = fases
 		m.mu.Lock()
 		if l := m.byID[mc.ID]; l != nil {
@@ -2761,11 +2918,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			Message: "resumed" + notaFases(fases)})
 		return out, nil
 	}
-	if ok {
-		mc = cur
-	}
+	mc = cur
 	if mc.State != api.StateWarm {
-		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
+		return nil, estadoInvalido("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
 	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
 	// que el invitado lo descubra con un EIO al escribir.
@@ -2793,21 +2948,39 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			mc.Name, mc.ID[:8], pid)
 		// Con su socket real: si corre en jail, el del chroot (ver socketDe).
 		sock := m.socketDe(mc.ID, pid)
-		m.mu.Lock()
-		if cur := m.byID[mc.ID]; cur != nil {
-			now := time.Now()
-			cur.State = api.StateRunning
-			cur.PID = pid
-			cur.StartedAt = &now
-			cur.FrozenAt = nil
-			m.socket[mc.ID] = sock
-			m.persist()
-			out := *cur
-			m.mu.Unlock()
-			m.startShares(mc.ID)
-			return &out, nil
+		// El techo de CPU, el configurado (no el impulso de arranque: este
+		// invitado ya arrancó). Su cgroup pudo irse con un reinicio del daemon
+		// (sweepCgroups) o no haberse aplicado nunca si el thaw que lo lanzó
+		// murió antes de llegar a limitCPU: sin esto corría sin techo.
+		techo := mc.CPUPct
+		if techo <= 0 {
+			techo = techoDelDaemon(mc.VCPUs)
 		}
+		if warn := m.limitCPU(mc.ID, pid, techo, memoriaCgroup(mc)); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
+		m.mu.Lock()
+		cur := m.byID[mc.ID]
+		if cur == nil {
+			// Con el cerrojo tomado nadie debería poder borrarla; si aun así
+			// no está, seguir lanzaría un SEGUNDO VMM sobre su overlay, que es
+			// justo lo que esta readopción evita. El que corre no es de nadie.
+			m.mu.Unlock()
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			return nil, retiradaDurante(mc.Name, "thawed")
+		}
+		now := time.Now()
+		cur.State = api.StateRunning
+		cur.PID = pid
+		cur.StartedAt = &now
+		cur.FrozenAt = nil
+		cur.CPUPct = techo
+		m.socket[mc.ID] = sock
+		m.persist()
+		out := *cur
 		m.mu.Unlock()
+		m.startShares(mc.ID)
+		return &out, nil
 	}
 
 	// Jailer bloqueado: antes de enterLaunch, la red y el cgroup (ver Run). No
@@ -2835,6 +3008,34 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
+	// Admisión de memoria, como Run y runFrom: descongelar devuelve al host
+	// toda la RAM del invitado, y una tormenta de thaws (el gateway
+	// despertando a la vez lo que congeló) lo dejaba sin memoria sin que nada
+	// dijera que no. El techo entero (MemMaxMiB): es lo que el VMM mapea al
+	// cargar. Sin la del disco (checkDisk): despertar no crea disco —el
+	// overlay y el volcado ya existen—, y el diferencial sin reflink ya mide
+	// el suyo (prepararMemoriaDesdeDiff). Reanudar una pausada (arriba) y
+	// readoptar un VMM vivo no pasan por aquí: su memoria ya está ocupada.
+	//
+	// Se reserva con el cerrojo de la máquina tomado, a diferencia de Run
+	// (que aún no tiene máquina): si no cabe, esperarReservas puede esperar
+	// hasta esperaReservasMax, y mientras tanto un stop o un rm de ESTA
+	// máquina esperan con él. Es a propósito: reservar antes del cerrojo
+	// obligaría a releerla y a devolver la reserva si cambió entre medias,
+	// para ahorrar una espera acotada a una máquina que ya se está
+	// despertando. El ctx de la petición la corta antes si quien pidió se va.
+	if err := m.admitirMemoria(); err != nil {
+		return nil, err
+	}
+	// Lo mismo que Run, Start y runFrom: la memoria de arranque (MemMiB), no
+	// el techo elástico (-mem-max), que el globo concede después. Reservar el
+	// techo aquí hacía que una máquina que cupo al arrancar no pudiera
+	// despertar nunca en el mismo host (507).
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, mc.MemMiB, "", mc.ID)
+	if merr != nil {
+		return nil, merr
+	}
+	defer releaseMem()
 	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
 	base := leerSello(dir).DiffBase
@@ -2842,11 +3043,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.baseDiffValida(mc, base); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
-		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
+		var tm tiemposMemoria
+		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base, &tm)
 		if err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
 		memPath = full
+		crono.marcaMemoria(tm)
 	}
 	// El mem.full de este despertar, si algo falla antes de abortar (que lo
 	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
@@ -2920,7 +3123,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(mc.ID, impulso.tope)
+	cg := m.cgroupParaLanzar(mc.ID, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -3028,11 +3231,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
-	var resyncT time.Duration
-	var resyncOK bool
-	var listo *api.GuestReady
+	var resync resultadoResync
 	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
-		resyncT, resyncOK, listo = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
+		resync = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
 
@@ -3044,7 +3245,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
 	// que mover.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
@@ -3063,7 +3264,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		m.desmontarRed(netcfg, mc.ID)
-		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+		return nil, retiradaDurante(mc.Name, "thawed")
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
@@ -3093,12 +3294,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// pida mientras tanto espera a la sesión.
 	m.startShares(mc.ID)
 	// Los ganchos de la imagen, con credenciales y red ya en su sitio.
-	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
+	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, resync)
 	// Fin del impulso de arranque: ya, si su memoria trae el "listo" (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada(listo)
+	impulso.entregarRestaurada(resync.listo)
 
 	fases := crono.cerrar()
+	tel.despertar(DurThaw, fases)
 	out.Wake = fases
 	m.mu.Lock()
 	if cur := m.byID[mc.ID]; cur != nil {
@@ -3107,7 +3309,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resyncT, resyncOK), notaFases(fases))})
+		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resync.took, resync.ok), notaFases(fases))})
 	return &out, nil
 }
 
@@ -3120,7 +3322,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3152,7 +3354,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+		return nil, noExiste(ref)
 	}
 	// El cerrojo de ciclo de vida, que aqui faltaba y lo tienen Freeze, Thaw,
 	// Squeeze, PutMMDS y Remove. Sin el, un Stop concurrente a un Thaw desmonta
@@ -3166,10 +3368,18 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc = cur
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
-	m.kill(mc.ID)
+	m.killConservandoDisco(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
+	// Ni su volcado: una parada arranca en frío (kling start), así que el
+	// mem.file de una congelada —del tamaño de su RAM— y el de un thaw
+	// anterior ya no los carga nadie y se quedaban en disco hasta el rm.
+	// Tampoco el jail, que guarda enlaces a ellos.
+	if err := m.borrarJail(mc.ID); err != nil {
+		log.Printf("warning: %v", err)
+	}
+	m.borrarVolcado(mc.ID)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3183,9 +3393,22 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		mc.State, mc.PID = api.StateStopped, 0
 		return mc, nil
 	}
+	now := time.Now()
 	live.State = api.StateStopped
 	live.PID = 0
 	live.Forwards = nil
+	live.StoppedAt = &now
+	// Una parada no está lista de nada: "stopped ready" se leía como que lo
+	// estaría al arrancarla.
+	live.Ready = api.ReadyUnknown
+	live.FrozenAt = nil
+	live.DiffBase = ""
+	live.MemShared = false
+	live.SnapSize = 0
+	// Una tanda de ganchos pendiente era de la restauración que acaba de
+	// parar: el siguiente arranque es en frío y no la hereda.
+	live.HooksPending = ""
+	m.ganchosPendientes.Delete(mc.ID)
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live
@@ -3211,7 +3434,7 @@ func (m *Manager) Remove(ref string) error {
 func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("machine %q doesn't exist", ref)
+		return noExiste(ref)
 	}
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
@@ -3247,8 +3470,16 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
+	delete(m.discoMedido, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	// La numeración de sus vigías de "listo": sin podarla, cada máquina que
+	// pasó por aquí dejaba su entrada para siempre. Se adelanta antes de
+	// soltarla, para que una vigía aún viva se sepa jubilada.
+	if v, ok := m.vigiasListo.LoadAndDelete(mc.ID); ok {
+		v.(*atomic.Uint64).Add(1)
+	}
+	m.ganchosPendientes.Delete(mc.ID)
 	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil
@@ -3261,7 +3492,11 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) { m.killMachine(id, true) }
+func (m *Manager) kill(id string) { m.killMachine(id, true, false) }
+
+// killConservandoDisco es kill para Stop: el overlay sigue después (kling
+// start), así que el invitado vacía su caché aunque no tenga volúmenes.
+func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true) }
 
 // killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
 //
@@ -3269,9 +3504,9 @@ func (m *Manager) kill(id string) { m.killMachine(id, true) }
 // el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
 // morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
 // pausar, que es el único momento en que el invitado podía responder.
-func (m *Manager) killPaused(id string) { m.killMachine(id, false) }
+func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
 
-func (m *Manager) killMachine(id string, flush bool) {
+func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
@@ -3298,7 +3533,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	if flush && mc.State != api.StatePaused {
 		// El servicio primero: es quien escribe en los volúmenes.
 		m.stopService(mc)
-		m.flushVolume(mc)
+		m.flushVolume(mc, conservaDisco)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	defer func() {

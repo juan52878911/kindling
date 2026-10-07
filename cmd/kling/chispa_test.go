@@ -82,7 +82,7 @@ func TestChispaCLI(t *testing.T) {
 		return out
 	}
 
-	trainArgs := []string{"chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"),
+	trainArgs := []string{"ai", "chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"),
 		"-buckets", "12", "-min-support", "5"}
 	out := mustRun("", append(trainArgs, "-test", p("test.jsonl"), "-o", p("a.chispa"))...)
 	for _, want := range []string{"trained", "3 labels", "int16 vs float agreement (test)", "confusion"} {
@@ -98,7 +98,7 @@ func TestChispaCLI(t *testing.T) {
 		t.Error("two trainings with the same seed produced different files")
 	}
 
-	out = mustRun("", "chispa", "eval", "-model", p("a.chispa"), "-data", p("test.jsonl"))
+	out = mustRun("", "ai", "chispa", "eval", "-model", p("a.chispa"), "-data", p("test.jsonl"))
 	for _, want := range []string{"accuracy:", "macro-F1:", "ECE:", "confident:", "precision on confident", "confusion"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("eval output lacks %q:\n%s", want, out)
@@ -109,7 +109,7 @@ func TestChispaCLI(t *testing.T) {
 		Accuracy float64 `json:"accuracy"`
 		Coverage float64 `json:"coverage"`
 	}
-	if err := json.Unmarshal([]byte(mustRun("", "chispa", "eval", "-json", "-model", p("a.chispa"), "-data", p("test.jsonl"))), &rep); err != nil {
+	if err := json.Unmarshal([]byte(mustRun("", "ai", "chispa", "eval", "-json", "-model", p("a.chispa"), "-data", p("test.jsonl"))), &rep); err != nil {
 		t.Fatal(err)
 	}
 	if rep.N != 150 || rep.Accuracy < 0.9 {
@@ -125,7 +125,7 @@ func TestChispaCLI(t *testing.T) {
 		Probs     []any   `json:"probs"`
 		Confident *bool   `json:"confident"`
 	}
-	out = mustRun("", "chispa", "predict", "-model", p("a.chispa"), "-text", "segfault crash in the parser", "-json", "-top", "3")
+	out = mustRun("", "ai", "chispa", "predict", "-model", p("a.chispa"), "-text", "segfault crash in the parser", "-json", "-top", "3")
 	if err := json.Unmarshal([]byte(out), &pred); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -133,30 +133,30 @@ func TestChispaCLI(t *testing.T) {
 		(pred.Decision != "confident" && pred.Decision != "escalate") || pred.Threshold <= 0 {
 		t.Errorf("predict -json: %s", out)
 	}
-	out = mustRun("", "chispa", "predict", "-model", p("a.chispa"), "-text", "readme typo", "-fields", `{"ext":".md"}`)
+	out = mustRun("", "ai", "chispa", "predict", "-model", p("a.chispa"), "-text", "readme typo", "-fields", `{"ext":".md"}`)
 	if !strings.HasPrefix(out, "docs") || !strings.Contains(out, "evidence:") {
 		t.Errorf("predict text output:\n%s", out)
 	}
 	out = mustRun("{\"text\":\"add support for option\"}\n\n{\"text\":\"panic\",\"fields\":{\"ext\":\".go\"}}\n",
-		"chispa", "predict", "-model", p("a.chispa"))
+		"ai", "chispa", "predict", "-model", p("a.chispa"))
 	if lines := strings.Split(strings.TrimSpace(out), "\n"); len(lines) != 2 || !strings.Contains(lines[0], `"label":"feat"`) {
 		t.Errorf("predict from stdin:\n%s", out)
 	}
 
-	out = mustRun("", "chispa", "inspect", p("a.chispa"))
+	out = mustRun("", "ai", "chispa", "inspect", p("a.chispa"))
 	for _, want := range []string{"spec hash:", "2^12 buckets", "multinomial", "adagrad", "LABEL"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("inspect output lacks %q:\n%s", want, out)
 		}
 	}
-	out = mustRun("", "chispa", "inspect", "-json", p("a.chispa"))
+	out = mustRun("", "ai", "chispa", "inspect", "-json", p("a.chispa"))
 	var info map[string]any
 	if err := json.Unmarshal([]byte(out), &info); err != nil || info["spec_hash"] == nil {
 		t.Errorf("inspect -json: %v\n%s", err, out)
 	}
 
 	// Binario uno-contra-resto a partir de los mismos datos multiclase.
-	out = mustRun("", "chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"), "-buckets", "12",
+	out = mustRun("", "ai", "chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"), "-buckets", "12",
 		"-one-vs-rest", "bug", "-o", p("bug.chispa"), "-test", p("test.jsonl"))
 	if !strings.Contains(out, "2 labels") || !strings.Contains(out, "not-bug") {
 		t.Errorf("one-vs-rest:\n%s", out)
@@ -167,14 +167,14 @@ func TestChispaCLI(t *testing.T) {
 	bad := append([]byte(nil), a...)
 	bad[len(bad)/2] ^= 0xff
 	os.WriteFile(p("bad.chispa"), bad, 0o644)
-	if out, err := run("", "chispa", "eval", "-model", p("bad.chispa"), "-data", p("test.jsonl")); err == nil || !strings.Contains(out, "checksum") {
+	if out, err := run("", "ai", "chispa", "eval", "-model", p("bad.chispa"), "-data", p("test.jsonl")); err == nil || !strings.Contains(out, "checksum") {
 		t.Errorf("corrupt model: err=%v\n%s", err, out)
 	}
 	os.WriteFile(p("broken.jsonl"), []byte("{\"text\":\"a\",\"label\":\"x\"}\n{nope\n"), 0o644)
-	if out, err := run("", "chispa", "eval", "-model", p("a.chispa"), "-data", p("broken.jsonl")); err == nil || !strings.Contains(out, "line 2") {
+	if out, err := run("", "ai", "chispa", "eval", "-model", p("a.chispa"), "-data", p("broken.jsonl")); err == nil || !strings.Contains(out, "line 2") {
 		t.Errorf("broken JSONL: err=%v\n%s", err, out)
 	}
-	if out, err := run("", "chispa", "bogus"); err == nil || !strings.Contains(out, "unknown chispa command") {
+	if out, err := run("", "ai", "chispa", "bogus"); err == nil || !strings.Contains(out, "unknown chispa command") {
 		t.Errorf("unknown subcommand: %v\n%s", err, out)
 	}
 }

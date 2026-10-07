@@ -205,7 +205,7 @@ func crecerImagen(ctx context.Context, image string, extra int64) error {
 	// resize2fs se niega a tocar un ext4 que no venga de un fsck reciente.
 	repairVolume(ctx, image)
 	if out, err := e2fsCmd(ctx, "resize2fs", image).CombinedOutput(); err != nil {
-		return fmt.Errorf("resize2fs %s: %v: %s", filepath.Base(image), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("resize2fs %s: %s", filepath.Base(image), conSalida(err, out))
 	}
 	return nil
 }
@@ -280,7 +280,7 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	defer os.Remove(mnt)
 
 	if out, err := exec.CommandContext(ctx, "mount", argsMontajePut(image, mnt)...).CombinedOutput(); err != nil {
-		return false, fmt.Errorf("mounting: %v: %s", err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("mounting: %s", conSalida(err, out))
 	}
 	// El desmontaje va en defer y NO al final del cuerpo: cualquier retorno
 	// intermedio dejaría la imagen montada, y una imagen montada en escritura es
@@ -401,7 +401,7 @@ func hasFile(ctx context.Context, image, path string) (bool, error) {
 	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	out, err := salidaAcotada(c, maxSalidaDebugfs)
 	if err != nil {
-		return false, fmt.Errorf("debugfs on %s: %v: %s", image, err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("debugfs on %s: %s", image, conSalida(err, out))
 	}
 	// debugfs sale con 0 aunque el fichero no exista: la respuesta está en la
 	// salida. Un stat con éxito imprime la línea "Inode: NNN Type: ...".

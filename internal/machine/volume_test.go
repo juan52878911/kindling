@@ -703,3 +703,36 @@ func TestRevisarExt4PlazoYCodigos(t *testing.T) {
 		t.Fatalf("repairVolume tardó %s con un plazo de %s", d, plazoE2fsck)
 	}
 }
+
+// e2fsck -p sale con 1 al corregir en silencio los recuentos de libres de un
+// ext4 sin journal que no se desmontó (el overlay tras un stop): solo dice su
+// resumen, y eso no es una reparación que avisar en cada kling start. Lo que
+// diga algo más sí lo es.
+func TestE2fsckSoloRecuentosNoEsReparar(t *testing.T) {
+	orden := ordenE2fsck
+	t.Cleanup(func() { ordenE2fsck = orden })
+	for _, c := range []struct {
+		salida   string
+		codigo   int
+		reparado bool
+	}{
+		// Lo que dijo e2fsck 1.47 sobre un overlay copiado sin desmontar.
+		{"overlay.ext4: 12/16384 files (0.0% non-contiguous), 2321/16384 blocks", 1, false},
+		{"/srv/m/overlay.ext4: 12/16384 files (8.3% non-contiguous), 2321/16384 blocks", 1, false},
+		{"overlay.ext4: Deleted inode 13 has zero dtime.  FIXED.\noverlay.ext4: 12/16384 files (0.0% non-contiguous), 2321/16384 blocks", 1, true},
+		{"", 1, true},
+		{"overlay.ext4: 12/16384 files (0.0% non-contiguous), 2321/16384 blocks", 0, false},
+	} {
+		f := filepath.Join(t.TempDir(), "salida")
+		if err := os.WriteFile(f, []byte(c.salida+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ordenE2fsck = func(ctx context.Context, _ string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("cat %s; exit %d", f, c.codigo))
+		}
+		reparado, _, err := revisarExt4(context.Background(), "overlay.ext4")
+		if err != nil || reparado != c.reparado {
+			t.Errorf("%q (sale %d): reparado=%v err=%v, quería %v", c.salida, c.codigo, reparado, err, c.reparado)
+		}
+	}
+}

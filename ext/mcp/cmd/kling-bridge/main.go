@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -52,7 +53,15 @@ var Version = "dev"
 const SessionHeader = "Mcp-Session-Id"
 
 func main() {
-	listen := flag.String("listen", ":8080", "where to listen")
+	// Loopback por defecto: el puente NO autentica. Dentro de la microVM (PID
+	// 1) escucha en :8080, porque el gateway llega por la tap: el /entrypoint
+	// que genera 80-mcp-image.sh ya lo pide explícito, pero una imagen propia
+	// que siga el ejemplo sin -listen y reciba este binario con `kling mcp
+	// refresh-bridge` quedaría en loopback, inalcanzable y sin aviso. Fuera, en
+	// tu máquina, exponerlo a la red tiene que ser una decisión, y avisa
+	// (exposedWarning).
+	listen := flag.String("listen", defaultListenFor(os.Getpid() == 1),
+		"where to listen (non-loopback exposes it without authentication; :8080 as PID 1 in a microVM)")
 	idle := flag.Duration("session-idle", 10*time.Minute, "idle time before closing a session")
 	// 0 = derivarlo de la memoria del invitado. El flag sigue existiendo para
 	// forzarlo, porque la estimación por sesión es eso, una estimación.
@@ -76,7 +85,7 @@ func main() {
 
 Examples:
   kling-bridge -- npx -y @modelcontextprotocol/server-filesystem /data
-  kling-bridge -- python3 -m my_mcp_server
+  kling-bridge -listen :8080 -- python3 -m my_mcp_server   # inside a microVM
 
 Options:
 `)
@@ -201,6 +210,9 @@ Options:
 	}()
 
 	log.Printf("kling-bridge listening on %s -> %s", *listen, strings.Join(argv, " "))
+	if w := exposedWarning(*listen, os.Getpid() == 1); w != "" {
+		log.Print(w)
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -213,6 +225,50 @@ Options:
 	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
 	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
 	agent.Close()
+}
+
+// defaultListen es loopback; microVMListen, el de PID 1 dentro de la microVM:
+// ver el flag -listen.
+const (
+	defaultListen = "127.0.0.1:8080"
+	microVMListen = ":8080"
+)
+
+// defaultListenFor es el -listen por defecto: todas las interfaces como PID 1
+// (el /entrypoint de una microVM, donde exposedWarning tampoco avisa),
+// loopback en cualquier otro caso.
+func defaultListenFor(pid1 bool) string {
+	if pid1 {
+		return microVMListen
+	}
+	return defaultListen
+}
+
+// exposedWarning devuelve el aviso para una dirección que no es loopback, o ""
+// si no hace falta. Como PID 1 el puente es el /entrypoint de una microVM: ahí
+// escuchar en todas las interfaces es el diseño (solo el host alcanza la tap, y
+// el gateway llega por ella), y avisar en cada arranque sería ruido.
+func exposedWarning(listen string, pid1 bool) string {
+	if pid1 {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return ""
+	}
+	if host == "localhost" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	where := host
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		where = "every interface"
+	}
+	return fmt.Sprintf("WARNING: listening on %s (%s) with NO authentication: anyone who "+
+		"can reach the port can call the MCP server and /reset. "+
+		"Use -listen 127.0.0.1:PORT if the gateway runs on this machine.", listen, where)
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo, incluido el

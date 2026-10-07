@@ -38,7 +38,7 @@ train() { # nombre, split (vacío = temporal, xrepo- = entre repos), opciones...
 	local name=$1 split=$2
 	shift 2
 	section "chispa $name (${split:-temporal})"
-	"$k" chispa train -data "$out/${split}train.jsonl" -valid "$out/${split}valid.jsonl" \
+	"$k" ai chispa train -data "$out/${split}train.jsonl" -valid "$out/${split}valid.jsonl" \
 		-test "$out/${split}test.jsonl" -o "$out/$name.chispa" "$@"
 }
 
@@ -52,4 +52,4 @@ train xrepo-words-only xrepo- -fields=false
 train fix-vs-rest "" -one-vs-rest fix
 
 section "inspect"
-"$k" chispa inspect "$out/words-fields.chispa"
+"$k" ai chispa inspect "$out/words-fields.chispa"

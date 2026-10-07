@@ -58,7 +58,7 @@ func (s *Server) waitAgent(ctx context.Context, mc *api.Machine) error {
 // la imagen se construyó antes de v0.7.
 func tooOldAgent(mc *api.Machine) error {
 	return fmt.Errorf("the guest agent in image %q predates exec streaming and files (kindling v0.7); "+
-		"rebuild the image (kling images build -builder base, or kling images toolchain)", mc.Image)
+		"rebuild the image (kling image build -builder base, or kling image toolchain)", mc.Image)
 }
 
 // handleExec sirve POST /machines/{ref}/exec: NDJSON de api.ExecEvent, o con
@@ -357,7 +357,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Image == "" && req.From == "" {
 		fail(w, http.StatusBadRequest, errors.New("missing image (or from, a snapshot made with allow_exec). "+
-			"Any image with the guest agent works: kling images toolchain builds one with node and python"))
+			"Any image with the guest agent works: kling image toolchain builds one with node and python"))
 		return
 	}
 	onTTL := req.OnTTL
@@ -391,7 +391,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 		if !has {
 			fail(w, http.StatusBadRequest, fmt.Errorf("image %q has no guest agent, so nobody inside would run commands; "+
-				"build one with kling images build -builder base (or kling images toolchain)", req.Image))
+				"build one with kling image build -builder base (or kling image toolchain)", req.Image))
 			return
 		}
 	}

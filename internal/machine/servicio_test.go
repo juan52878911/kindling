@@ -1,13 +1,16 @@
 package machine
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -44,5 +47,56 @@ func TestStopService(t *testing.T) {
 		if hits.Load() != c.want {
 			t.Errorf("state %s agent %+v: %d stops, want %d", c.mc.State, c.mc.Agent, hits.Load(), c.want)
 		}
+	}
+}
+
+// Ninguna conexión al agente se guarda para la siguiente: tras un stop, kling
+// start arranca otro VMM con la MISMA IP, y la conexión guardada del stop
+// anterior (o del vaciado) llegaba al invitado nuevo, que contestaba con un
+// RST. En el lab: el segundo stop no paraba Postgres, que arrancaba después
+// recuperándose como tras un corte.
+func TestPeticionesAlAgenteSinConexionesGuardadas(t *testing.T) {
+	var nuevas atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			nuevas.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	m := &Manager{}
+	mc := &api.Machine{Name: "pg", State: api.StateRunning,
+		Agent:    &api.GuestAgent{Caps: []string{api.GuestCapReady, api.GuestCapService}},
+		Volumes:  []api.VolumeAttachment{{Name: "datos", Mount: "/datos"}},
+		Forwards: map[string]string{strconv.Itoa(api.GuestPort): strings.TrimPrefix(srv.URL, "http://")}}
+	m.stopService(mc)
+	m.flushVolume(mc, true)
+	m.stopService(mc)
+	if err := m.guestVolumeOp(mc, "release", 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := nuevas.Load(); got != 4 {
+		t.Fatalf("%d conexiones para 4 peticiones: alguna reusó una guardada", got)
+	}
+}
+
+// Al desmontar la red de una máquina se avisa (OnGuestGone): el daemon suelta
+// ahí las conexiones que guarda hacia los invitados, que con la misma IP
+// llegarían al VMM siguiente.
+func TestDesmontarRedAvisaDeQueElInvitadoSeFue(t *testing.T) {
+	old := desmontarRedHost
+	t.Cleanup(func() { desmontarRedHost = old })
+	desmontarRedHost = func(*knet.Net) {}
+	m := &Manager{}
+	m.desmontarRed(knet.Plan(3, "abcd000000000001"), "abcd000000000001") // sin aviso registrado
+	var avisos []string
+	m.OnGuestGone(func(ip string) { avisos = append(avisos, ip) })
+	n := knet.Plan(3, "abcd000000000001")
+	m.desmontarRed(n, "abcd000000000001")
+	if len(avisos) != 1 || avisos[0] != n.NSIP {
+		t.Fatalf("avisos al desmontar la red = %v, quería uno con su IP %s", avisos, n.NSIP)
 	}
 }

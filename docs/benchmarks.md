@@ -15,7 +15,7 @@ next to each one.
 | Node | Change | Where |
 |---|---|---|
 | A1 | Kernel command line gains `quiet`; on amd64 also disables i8042 (PS/2) emulation | `internal/machine/manager.go`, `bootArgs`/`archBootArg` |
-| A2 | A booting or restoring machine runs with every vCPU at a full core (capped at the host's cores) until its image's ready probe passes (or the guest agent answers, if the image declares no probe), capped at 60 s (`KLING_READY_BOOST`), then drops to its configured `cpu_pct`; an explicit `-cpu-pct` gets no boost. `KLING_READY_BOOST=0` restores the earlier boost: `max(cpu_pct, 100)` until the agent answers, capped at 10 s | `internal/machine/arranque_cpu.go` |
+| A2 | A booting or restoring machine runs with every vCPU at a full core (capped at the host's cores) until its image's ready probe passes (or the guest agent answers, if the image declares no probe), capped at 60 s (`KLING_READY_BOOST`) plus the `HEALTHCHECK`'s start period when the image declares one (up to 120 s more), then drops to its configured `cpu_pct`; an explicit `-cpu-pct` gets no boost. `KLING_READY_BOOST=0` restores the earlier boost: `max(cpu_pct, 100)` until the agent answers, capped at 10 s | `internal/machine/arranque_cpu.go` |
 | A3 | SSH remote dialing reuses a `ControlMaster` socket (60 s persist) instead of opening a fresh connection per call | `pkg/transport/dial.go` |
 | A4 | The daemon polls the guest agent every 5–10 ms during boot (was a coarser interval) and records a per-phase latency breakdown | part of the N8 node, `internal/machine` |
 

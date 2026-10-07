@@ -1,6 +1,8 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,14 +39,16 @@ func imagesImport(args []string) error {
 	user := fs.String("user", "", "run the entrypoint as uid[:gid] or name[:group] instead of the image's USER")
 	var entrypoint stringsFlag
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
+	restart := fs.String("restart", "", "restart the service when it exits: always, on-failure or no (default on-failure)")
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
+	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) == 0 || rest[0] == "--" {
-		return fmt.Errorf("usage: kling image import <ref> [-name N] [-e K=V] [-env-file F] [-json] [-- cmd args...]")
+		return fmt.Errorf("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]")
 	}
 	ref, err := oci.ParseImageRef(rest[0])
 	if err != nil {
@@ -58,7 +62,15 @@ func imagesImport(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: -e and -env-file bake the values into the image (/etc/kling/env) and every copy of it; "+
 			"for a password or anything per machine, use kling run -image <image> -e KEY instead")
 	}
-	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env}
+	switch *restart {
+	case "", api.RestartAlways, api.RestartOnFailure, api.RestartNo:
+	default:
+		return fmt.Errorf("-restart must be always, on-failure or no, not %q", *restart)
+	}
+	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env,
+		// Explícita en la receta: una sin ella es de antes de las políticas
+		// (ver existingImport).
+		Restart: cmp.Or(*restart, api.RestartOnFailure)}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}
@@ -84,17 +96,30 @@ func imagesImport(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
-	if !*asJSON {
-		fmt.Printf("importing %s as %s (the first time downloads it)...\n", ref, *name)
-	}
-	res, err := c.BuildImage(ctx, req)
-	if err != nil {
-		if res != nil && res.Output != "" && !*asJSON {
-			fmt.Print(res.Output)
+	// El nombre por defecto sale solo del repositorio y la etiqueta: redis:7
+	// y ghcr.io/x/redis:7 dan los dos redis-7. Sin -replace no se pisa una
+	// imagen que no sea esta misma importación.
+	output := ""
+	already := false
+	if !*replace {
+		if already, err = existingImport(ctx, c, *name, spec); err != nil {
+			return err
 		}
-		return err
 	}
-	rec, err := c.ImageRecipe(ctx, res.Name)
+	if !already {
+		if !*asJSON {
+			fmt.Printf("importing %s as %s (the first time downloads it)...\n", ref, *name)
+		}
+		res, err := c.BuildImage(ctx, req)
+		if err != nil {
+			if res != nil && res.Output != "" && !*asJSON {
+				fmt.Print(res.Output)
+			}
+			return err
+		}
+		*name, output = res.Name, res.Output
+	}
+	rec, err := c.ImageRecipe(ctx, *name)
 	if err != nil {
 		return err
 	}
@@ -110,12 +135,19 @@ func imagesImport(args []string) error {
 	}
 	_ = json.Unmarshal(rec.Built, &built)
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"name": res.Name, "ref": built.Ref, "digest": built.Digest,
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"name": *name, "already_imported": already, "ref": built.Ref, "digest": built.Digest,
 			"manifest": built.Manifest, "arch": built.Arch, "ports": built.Ports, "volumes": built.Volumes,
 			"ready": built.Ready, "service": built.Service})
 	}
-	fmt.Print(res.Output)
-	fmt.Printf("image %s: %s\n", res.Name, built.Digest)
+	if already {
+		dmn := ""
+		if in, err := c.Info(ctx); err == nil {
+			dmn = in.Version
+		}
+		fmt.Println(alreadyImportedLine(*name, ref.String(), rec.KlingVer, dmn))
+	}
+	fmt.Print(output)
+	fmt.Printf("image %s: %s\n", *name, built.Digest)
 	if len(built.Service.Argv) > 0 {
 		fmt.Printf("  runs     %s", runsLine(built.Service.Argv, len(spec.Cmd)+len(spec.Entrypoint) > 0))
 		if built.Service.User != "" {
@@ -126,8 +158,8 @@ func imagesImport(args []string) error {
 	if len(built.Ports) > 0 {
 		fmt.Printf("  ports    %s\n", strings.Join(built.Ports, " "))
 	}
-	if built.Ready != "" {
-		fmt.Printf("  ready    %s\n", built.Ready)
+	if r := readyLine(built.Ready, built.Ports); r != "" {
+		fmt.Printf("  ready    %s\n", r)
 	}
 	if len(built.Volumes) > 0 {
 		// No se sugiere montar el volumen justo ahí: un volumen de kling
@@ -135,8 +167,87 @@ func imagesImport(args []string) error {
 		// no esté vacío. En el padre, o con un subdirectorio (PGDATA).
 		fmt.Printf("  volumes  %s  (keep data with -volume NAME:<a parent dir>)\n", strings.Join(built.Volumes, " "))
 	}
-	next("kling run -image %s -mem 512M -wait-ready", res.Name)
+	next("kling run -image %s -mem 512M -wait-ready", *name)
 	return nil
+}
+
+// existingImport mira si ya hay una imagen con ese nombre. Sin ella, false.
+// Si es esta misma importación (constructor oci y el mismo spec, con la
+// referencia normalizada), true: no hace falta rehacerla. Cualquier otra
+// cosa es un error: pisarla en silencio cambiaría lo que arrancan las
+// máquinas y plantillas que la usan. Los valores del spec (puede llevar una
+// contraseña en env) no salen en ningún mensaje.
+func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpec) (bool, error) {
+	imgs, err := c.Images(ctx)
+	if err != nil {
+		return false, err
+	}
+	var img *api.Image
+	for i := range imgs {
+		if imgs[i].Name == name {
+			img = &imgs[i]
+		}
+	}
+	if img == nil {
+		return false, nil
+	}
+	// Sin receta no se sabe de dónde salió (puede que sí de una imagen de
+	// Docker, con un kling que no las guardaba): no se dice que no.
+	if !img.HasRecipe {
+		return false, fmt.Errorf("image %s already exists and has no recipe; pick another -name, or pass -replace to overwrite it", name)
+	}
+	rec, err := c.ImageRecipe(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	var prev OCISpec
+	if rec.Builder != "oci" || json.Unmarshal(rec.Spec, &prev) != nil {
+		return false, fmt.Errorf("image %s already exists and wasn't imported from a Docker image; "+
+			"pick another -name, or pass -replace to overwrite it", name)
+	}
+	pr, perr := oci.ParseImageRef(prev.Ref)
+	nr, nerr := oci.ParseImageRef(spec.Ref)
+	if perr != nil || nerr != nil || pr.String() != nr.String() || prev.Digest != spec.Digest {
+		from := prev.Ref
+		if perr == nil {
+			from = pr.String()
+		}
+		return false, fmt.Errorf("image %s already exists, imported from %s; pick another -name, or pass -replace to overwrite it", name, from)
+	}
+	prev.Ref, spec.Ref = "", ""
+	// Sin -restart la política es on-failure. Una receta sin política es de
+	// antes de que existieran, y su servicio se relanza siempre: darla por
+	// la misma dejaba relanzando un CMD que acaba con 0 (python:3.12-slim).
+	if prev.Restart == "" {
+		return false, fmt.Errorf("image %s was imported before restart policies (its service always restarts); "+
+			"pass -replace to rebuild it", name)
+	}
+	spec.Restart = cmp.Or(spec.Restart, api.RestartOnFailure)
+	a, _ := json.Marshal(prev)
+	b, _ := json.Marshal(spec)
+	if string(a) != string(b) {
+		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit or restart policy); "+
+			"pass -replace to rebuild it with these", name, nr)
+	}
+	return true, nil
+}
+
+// alreadyImportedLine es lo que se dice cuando la importación ya estaba. Si la
+// construyó otra versión del daemon (otro init, otro agente), se dice cuál y
+// que -replace la rehace con esta: si no, una imagen importada hace varias
+// versiones se queda así para siempre sin que nadie lo note. Con una versión
+// de desarrollo, o sin saber la del daemon, no se compara (como doctor).
+func alreadyImportedLine(name, ref, builtBy, daemon string) string {
+	b, d := strings.TrimPrefix(builtBy, "v"), strings.TrimPrefix(daemon, "v")
+	if d == "" || d == "dev" || b == "dev" || b == d {
+		return fmt.Sprintf("image %s: already imported from %s (-replace re-resolves the tag and rebuilds it)", name, ref)
+	}
+	by := "an earlier kling"
+	if b != "" {
+		by = "kling " + builtBy
+	}
+	return fmt.Sprintf("image %s: already imported from %s, built by %s; -replace rebuilds it with this version (%s, and re-resolves the tag)",
+		name, ref, by, daemon)
 }
 
 var reNameJunk = lazyre.New(`[^a-z0-9_-]+`)
@@ -156,6 +267,16 @@ func imageNameFor(r oci.ImageRef) string {
 		n = "image"
 	}
 	return n
+}
+
+// readyLine es la línea "ready" de la salida. Sin sonda pero con puertos
+// (solo UDP: la sonda solo sabe de TCP) se dice, para que -wait-ready no se
+// lea como "el servicio contesta". Sin puertos ni sonda, nada.
+func readyLine(ready string, ports []string) string {
+	if ready != "" || len(ports) == 0 {
+		return ready
+	}
+	return "none: no HEALTHCHECK and no TCP port in EXPOSE (" + strings.Join(ports, " ") + "), so -wait-ready won't wait for the service"
 }
 
 // runsLine es la orden del servicio para la salida. Los argumentos que puso

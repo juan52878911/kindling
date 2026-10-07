@@ -40,14 +40,20 @@ mkdir -p /overlay/upper /overlay/work /overlay/merged
 # La línea de comandos se parte por palabras y se compara entera, sin regex: el
 # sed de busybox va contra el regex de musl, que no trae las extensiones de GNU,
 # y un patrón que no case dejaría la capa sin montar — un invitado sin
-# /entrypoint, que no se parece en nada a la causa.
+# /entrypoint, que no se parece en nada a la causa. Con read y no con cat: en
+# una imagen de Docker el init solo puede contar con sh, mount, pivot_root,
+# mkdir y ln (ociInitTools en cmd/kling/builder_oci.go).
 LOWER="/"
 LAYER_DEV=""
-for tok in $(cat /proc/cmdline); do
+CMDLINE=""
+read -r CMDLINE < /proc/cmdline || true
+set -f
+for tok in $CMDLINE; do
   case "$tok" in
     kling.layer=*) LAYER_DEV="${tok#kling.layer=}" ;;
   esac
 done
+set +f
 if [ -n "$LAYER_DEV" ]; then
   mkdir -p /overlay/svc
   mount -t ext4 -o ro "$LAYER_DEV" /overlay/svc
@@ -68,8 +74,15 @@ mkdir -p /proc /sys /dev /tmp /run 2>/dev/null || true
 mount -t proc     proc     /proc     2>/dev/null || true
 mount -t sysfs    sysfs    /sys      2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev      2>/dev/null || true
-mount -t tmpfs    tmpfs    /tmp      2>/dev/null || true
-mount -t tmpfs    tmpfs    /run      2>/dev/null || true
+# /tmp y /run: en una imagen de Docker (constructor oci, /etc/kindling/oci.json)
+# se dejan los de la imagen, en el disco de la máquina, como hace Docker: hay
+# imágenes que traen ahí directorios con su dueño (mariadb, /run/mysqld del
+# usuario mysql) y su entrypoint falla si un tmpfs vacío los tapa; y lo que
+# escriben en /tmp no ocupa RAM del invitado. En las bases de kindling, tmpfs.
+if [ ! -e /etc/kindling/oci.json ]; then
+  mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+  mount -t tmpfs tmpfs /run 2>/dev/null || true
+fi
 
 umount /rom/proc /rom/sys /rom/dev 2>/dev/null || true
 
@@ -106,9 +119,27 @@ fi
 # disable_ipv6=1, ver internal/net), así que ::1 no existe y un "::1 localhost"
 # haría que un cliente probara primero una dirección inalcanzable. El nombre va
 # a 127.0.1.1, como en Debian: siempre alcanzable, también con -egress none.
+# Con read y case, sin grep (ver arriba). set -f: un "*" del fichero no se
+# expande contra la raíz. Si la última línea no acaba en \n, se le pone antes
+# de añadir: si no, lo añadido se pegaría a ella.
 {
-  grep -qsE '^127\.0\.0\.1[[:space:]]+([^#]*[[:space:]])?localhost([[:space:]]|$)' /etc/hosts || echo "127.0.0.1	localhost" >> /etc/hosts
-  grep -qswF "$HN" /etc/hosts || echo "127.0.1.1	$HN" >> /etc/hosts
+  HAS_LH=""
+  HAS_HN=""
+  SIN_NL=""
+  set -f
+  if [ -f /etc/hosts ]; then
+    while read -r ip names || { [ -n "$ip$names" ] && SIN_NL=1; }; do
+      case "$ip" in ""|"#"*) continue ;; esac
+      for n in ${names%%#*}; do
+        if [ "$n" = localhost ] && [ "$ip" = 127.0.0.1 ]; then HAS_LH=1; fi
+        if [ "$n" = "$HN" ]; then HAS_HN=1; fi
+      done
+    done < /etc/hosts
+  fi
+  set +f
+  if [ -n "$SIN_NL" ] && { [ -z "$HAS_LH" ] || [ -z "$HAS_HN" ]; }; then echo >> /etc/hosts; fi
+  [ -n "$HAS_LH" ] || echo "127.0.0.1	localhost" >> /etc/hosts
+  [ -n "$HAS_HN" ] || echo "127.0.1.1	$HN" >> /etc/hosts
 } 2>/dev/null || true
 
 # /entrypoint es lo que convierte esta microVM en "una herramienta". Se

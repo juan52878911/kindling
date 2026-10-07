@@ -38,7 +38,7 @@ func TestRunEnviaElEntornoEnLaPeticion(t *testing.T) {
 	var viejo atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
-		caps := []string{api.CapabilityMachineEnv}
+		caps := []string{api.CapabilityMachineEnv, api.CapabilityDisk}
 		if viejo.Load() {
 			caps = nil
 		}
@@ -74,6 +74,18 @@ func TestRunEnviaElEntornoEnLaPeticion(t *testing.T) {
 	err = cmdRun([]string{"-H", sock, "-image", "mi-imagen", "-e", "MODE=dev"})
 	if err == nil || !strings.Contains(err.Error(), "update") || llamadas.Load() != 1 {
 		t.Fatalf("daemon antiguo: err %v, llamadas %d", err, llamadas.Load())
+	}
+	// Igual con -disk: un daemon antiguo daría 512 MiB en silencio.
+	err = cmdRun([]string{"-H", sock, "-image", "mi-imagen", "-disk", "2G"})
+	if err == nil || !strings.Contains(err.Error(), "-disk") || llamadas.Load() != 1 {
+		t.Fatalf("daemon antiguo con -disk: err %v, llamadas %d", err, llamadas.Load())
+	}
+	viejo.Store(false)
+	if err := cmdRun([]string{"-H", sock, "-image", "mi-imagen", "-disk", "2G", "-json"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.DiskMiB != 2048 || llamadas.Load() != 2 {
+		t.Fatalf("-disk 2G: disk_mib %d, llamadas %d", got.DiskMiB, llamadas.Load())
 	}
 }
 

@@ -159,7 +159,8 @@ func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
 // en orden de parada. Lo mismo si algo falla: el grafo queda como estaba.
 //
 // avisos son los nodos que no se pudieron volver a congelar tras un volcado
-// bueno: siguen en marcha, y quien pidió el snapshot tiene que saberlo.
+// bueno (siguen en marcha) o a los que no se pudo devolver sus volúmenes
+// (quedan fallidos), y quien pidió el snapshot tiene que saberlo.
 func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre func(nodo string) string) (hechas map[string]string, avisos []string, err error) {
 	nodos, err := m.nodosParaVolcar(gid)
 	if err != nil {
@@ -180,7 +181,8 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 	pausadas, soltadas, despertadas := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	// deshacer devuelve cada nodo a como estaba: reanudar antes de devolver
 	// los volúmenes (un invitado pausado no contesta) y devolverlos antes de
-	// congelar (Freeze los vuelve a soltar, como con cualquier máquina).
+	// congelar: Freeze no los suelta, y la copia congelada los tiene que
+	// llevar montados, como cualquier otra.
 	deshacer := func() {
 		for _, n := range nodos {
 			if !pausadas[n.id] {
@@ -195,7 +197,13 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 				continue
 			}
 			if err := devolverVolumenesNodo(limpio, m, n.id); err != nil {
-				log.Printf("warning: graph %s: node %s ended up without its volumes after the snapshot: %v", shortID(gid), n.nodo, err)
+				// Como en Commit: un nodo sin sus volúmenes no sigue en marcha
+				// escribiendo en su overlay. Las plantillas valen; el nodo no.
+				log.Printf("graph %s: node %s could not mount its volumes again after the snapshot: %v", shortID(gid), n.nodo, err)
+				if mc, ok := m.Get(n.id); ok {
+					m.fail(mc, fmt.Errorf("graph snapshot could not give the node its volumes back: %w", err))
+				}
+				avisos = append(avisos, fmt.Sprintf("node %s could not mount its volumes again after the snapshot and was marked failed: %v", n.nodo, err))
 			}
 		}
 		for _, n := range porParada {
@@ -211,6 +219,15 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 			}
 		}
 	}
+	// conAvisos añade al error lo que deshacer() tuvo que hacer (un nodo
+	// marcado fallido, uno que no se pudo volver a congelar): sin esto, quien
+	// pidió el snapshot solo veía el error original.
+	conAvisos := func(err error) error {
+		if len(avisos) == 0 {
+			return err
+		}
+		return fmt.Errorf("%w; also: %s", err, strings.Join(avisos, "; "))
+	}
 	estado := map[string]api.State{}
 	// (0) despertar los congelados, en orden de arranque.
 	for _, n := range nodos {
@@ -220,7 +237,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := despertarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, nil, fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err))
 		}
 		despertadas[n.id] = true
 		estado[n.id] = api.StateRunning
@@ -234,8 +251,10 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		soltadas[n.id] = true
 		if err := soltarVolumenesNodo(ctx, m, n.id); err != nil {
+			// Un puente que no conoce la ruta no soltó nada (ver Commit).
+			soltadas[n.id] = !sinOperacionesDeVolumen(err)
 			deshacer()
-			return nil, nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err))
 		}
 	}
 	// (1) pausar todos los que corren, en orden de parada; se reanudan en el
@@ -246,7 +265,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := pausarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, nil, fmt.Errorf("pausing node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("pausing node %s: %w", n.nodo, err))
 		}
 		pausadas[n.id] = true
 	}
@@ -265,7 +284,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 				}
 			}
 			deshacer()
-			return nil, nil, fmt.Errorf("snapshot of node %s: %w", n.nodo, err)
+			return nil, nil, conAvisos(fmt.Errorf("snapshot of node %s: %w", n.nodo, err))
 		}
 		hechas[n.nodo] = name
 	}

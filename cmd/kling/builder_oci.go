@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -47,7 +48,7 @@ import (
 // reimportar el mismo digest no baja nada.
 //
 // Límites: el init es un script de sh que necesita sh, mount, pivot_root,
-// mkdir, ln, cat y grep en la imagen (cualquier Alpine o Debian los trae; una
+// mkdir y ln en la imagen (cualquier Alpine o Debian los trae; una
 // "distroless" no, y se rechaza al construir). Sin verity: la imagen es la
 // raíz, no una capa.
 
@@ -73,6 +74,11 @@ type OCISpec struct {
 	// MaxMB es el tope de lo que se baja (las capas comprimidas). Por
 	// defecto 4096; el aplanado no puede pasar de 8 veces eso.
 	MaxMB int `json:"max_mb,omitempty"`
+	// Restart es la política de reinicio del servicio (api.Restart*). Por
+	// defecto on-failure: Docker no relanza nada sin --restart, y una imagen
+	// cuyo CMD acaba con 0 (python:3.12-slim) no se tiene que relanzar para
+	// siempre; uno que se cae, sí.
+	Restart string `json:"restart,omitempty"`
 }
 
 const (
@@ -80,8 +86,10 @@ const (
 	ociMaxFiles     = 2_000_000
 )
 
-// ociInitTools son lo que minimal-init.sh necesita de la imagen.
-var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln", "cat", "grep"}
+// ociInitTools son lo que minimal-init.sh necesita de la imagen. El resto lo
+// hace con builtins de sh (read, case, echo, [): umount puede faltar.
+// scripts/minimal_init_test.go corre sus trozos sin PATH.
+var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln"}
 
 // reOCIUser es un USER de Docker: uid o nombre, con grupo opcional.
 var reOCIUser = lazyre.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$`)
@@ -128,6 +136,11 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	}
 	if s.MaxMB < 0 || s.MaxMB > 65536 {
 		return ref, fmt.Errorf("max_mb out of range (0..65536)")
+	}
+	switch s.Restart {
+	case "", api.RestartAlways, api.RestartOnFailure, api.RestartNo:
+	default:
+		return ref, fmt.Errorf("invalid restart policy %q: use always, on-failure or no", s.Restart)
 	}
 	return ref, nil
 }
@@ -299,7 +312,14 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if err := imagen.PutAgent(tree, agent, spec.Arch, t); err != nil {
 		return err
 	}
-	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal}
+	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
+		Restart: cmp.Or(spec.Restart, api.RestartOnFailure)}
+	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
+		// El agente la cambiaría igual por SIGTERM; aquí se ve al importar.
+		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)
+		svc.StopSignal = ""
+	}
+	svc.ProbeTimeoutSeconds, svc.ReadyStartPeriodSeconds = ociReadyTimes(cfg.Healthcheck)
 	svcJSON, _ := json.MarshalIndent(svc, "", "  ")
 	ociJSON, _ := json.MarshalIndent(map[string]any{"ref": ref.String(), "digest": digest, "manifest": img.ManifestDigest,
 		"arch": spec.Arch, "config": cfg}, "", "  ")
@@ -454,6 +474,23 @@ func findTool(tree *ext4.Node, name string) string {
 		}
 	}
 	return ""
+}
+
+// ociReadyTimes son el Timeout y el StartPeriod del HEALTHCHECK (en
+// nanosegundos) en segundos, redondeados hacia arriba y con tope
+// api.MaxReadyTimeoutSeconds. El Interval y los Retries no se usan: "listo" es
+// la primera vez que la sonda pasa, y quien espera la pregunta a su ritmo.
+func ociReadyTimes(hc *oci.Healthcheck) (timeout, startPeriod int) {
+	if hc == nil || len(hc.Test) < 2 || (hc.Test[0] != "CMD" && hc.Test[0] != "CMD-SHELL") {
+		return 0, 0
+	}
+	secs := func(ns int64) int {
+		if ns <= 0 {
+			return 0
+		}
+		return int(min((ns+int64(time.Second)-1)/int64(time.Second), api.MaxReadyTimeoutSeconds))
+	}
+	return secs(hc.Timeout), secs(hc.StartPeriod)
 }
 
 // ociReadyProbe es la sonda de "listo" (api.GuestReadyProbe) para la

@@ -285,6 +285,7 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 	// Todo lo que va tras `--` son los argumentos de Firecracker. El socket es
 	// relativo al chroot: jailer lo crea en /run dentro del jail.
 	argv = append(argv, "--", "--api-sock", "/run/firecracker.socket")
+	argv = append(argv, argsVMM()...)
 	return argv, nil
 }
 
@@ -297,6 +298,14 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 //
 // cg es como en spawn: el cgroup en el que nace el proceso, si se puede.
 func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string, bool, error) {
+	// jailer canonicaliza --chroot-base-dir antes de nada, así que tiene que
+	// existir. Si no se crea aquí, el primero en crearlo era el propio jailer
+	// (al hacer firecracker/<id>), y el segundo de dos arranques a la vez en
+	// una raíz nueva fallaba con "Failed to canonicalize path .../jails".
+	// 0700, como lo deja restringirRaiz.
+	if err := os.MkdirAll(m.jailBase(), 0o700); err != nil {
+		return 0, "", false, fmt.Errorf("creating the jail directory: %w", err)
+	}
 	// jailer se queja si su directorio ya existe de una ejecución anterior que
 	// no se limpió. Se borra: el estado que importa (snapshot, overlay) vive en
 	// machines/, no aquí.

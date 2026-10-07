@@ -45,7 +45,14 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		return err
 	}
 	baseDir := path.Clean("/" + o.Prefix)
-	added := map[string]bool{} // lo que trae esta capa, para los ".wh..wh..opq"
+	// Lo que trae esta capa, para los ".wh..wh..opq": por directorio de
+	// verdad (el nodo) y no por la ruta del tar, que puede pasar por un
+	// enlace (bin/x cae en usr/bin con bin -> usr/bin).
+	type hijo struct {
+		dir  *Node
+		name string
+	}
+	added := map[hijo]bool{}
 	tr := tar.NewReader(r)
 	for idx := 0; ; idx++ {
 		h, err := tr.Next()
@@ -76,13 +83,16 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		full := path.Join(baseDir, name)
 		dir, file := path.Split(name)
 		if o.Whiteouts && strings.HasPrefix(file, ".wh.") {
-			d := base.Lookup(dir)
+			// El directorio se resuelve siguiendo enlaces, como al meter
+			// ficheros (MkdirAll): bin/.wh.x con bin -> usr/bin borra
+			// usr/bin/x. Dentro de base: un enlace no lleva fuera.
+			d, _ := base.Resolve(dir)
 			if d == nil || !d.IsDir() {
 				continue
 			}
 			if file == ".wh..wh..opq" {
 				for _, c := range d.Children() {
-					if !added[path.Join(dir, c)] {
+					if !added[hijo{d, c}] {
 						d.RemoveChild(c)
 					}
 				}
@@ -95,7 +105,7 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", full, err)
 		}
-		added[name] = true
+		added[hijo{parent, file}] = true
 		if o.OnEntry != nil {
 			o.OnEntry(name, h)
 		}
@@ -127,7 +137,15 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 		case tar.TypeSymlink:
 			n = &Node{Mode: ModeLink, Target: h.Linkname}
 		case tar.TypeLink:
-			t := base.Lookup(path.Clean("/" + h.Linkname))
+			// El directorio del destino se resuelve siguiendo enlaces
+			// (dentro de base, como MkdirAll): con /usr unificado,
+			// bin/busybox vive en usr/bin. El último componente no se
+			// sigue: un enlace duro a un enlace simbólico enlaza a este.
+			var t *Node
+			ld, lf := path.Split(path.Clean("/" + h.Linkname))
+			if d, _ := base.Resolve(ld); d != nil && d.IsDir() && lf != "" {
+				t = d.Child(lf)
+			}
 			if t == nil || t.IsDir() {
 				return fmt.Errorf("%s: hard link to missing %q", full, h.Linkname)
 			}

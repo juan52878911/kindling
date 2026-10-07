@@ -38,7 +38,10 @@ filtran por dueño. Volúmenes, carpetas del host, el store, construir imágenes
 del host son de admin. El fichero tiene que ser regular, de root o del usuario del daemon y no
 escribible por otros; uno pedido que falta, o mal escrito, impide arrancar. root y el usuario
 del daemon son siempre admin (pueden reescribir la política). Tokens de inquilino opcionales
-(`KLING_AUTHZ_TOKEN`, guardados como sha256) que solo dan roles de inquilino.
+(`KLING_AUTHZ_TOKEN`, guardados como sha256) que solo dan roles de inquilino. Cuotas por
+inquilino opcionales (`quotas`: máquinas, memoria y disco lógico de lo que lleva su
+`kling.owner`), que decide el manager en el mismo cerrojo en que da de alta la máquina:
+dos creaciones a la vez no pasan las dos el tope; pasarse es un `429`.
 
 Ese socket incluye `POST /machines/{ref}/guest`, que reenvía una petición HTTP al servidor
 que corre dentro de una microVM. Es lo que permite importar un servicio desde un CLI remoto,
@@ -158,7 +161,16 @@ backend.
 - **Techo de CPU por máquina** con su propio cgroup (`-cpu-pct`, 50% de un core por
   defecto): un invitado en bucle no se come el host.
 - **Tope de máquinas** (`MaxMachines = 256`) para que un cliente comprometido no agote el host.
-- **RAM fija** por microVM; el invitado no puede pedir más.
+- **RAM fija** por microVM; el invitado no puede pedir más. Y el VMM tampoco: su cgroup
+  lleva `memory.max` (la RAM del invitado, o su techo `-mem-max`, más 64 MiB y 1/16 para
+  el propio Firecracker y lo que KVM le cobra) y `pids.max` (128). Medido en el
+  laboratorio con un Postgres de 512 MiB: recién arrancado, el cgroup ocupa 183 MiB; con
+  el invitado llenando toda su RAM, ~500 MiB de un techo de 608, sin un solo evento
+  `max` ni `oom`, y freeze y thaw siguen igual. `memory.max` no cuenta el swap: en un
+  host con swap, `memory.swap.max` lleva el mismo techo, así que el VMM puede ir al swap
+  bajo presión pero no sin límite (sin contabilidad de swap en el kernel no hay ni swap
+  que acotar por cgroup). Si el host no delega los controladores `memory` o `pids`,
+  queda solo el techo de CPU y el daemon avisa al arrancar de cuál falta.
 - En el gateway, **cuotas por token/tenant**: varios clientes sobre un mismo token se
   reparten la capacidad en vez de matarse de hambre.
 - **Consola serie acotada**: `firecracker.log` rota en el sitio (sin recrear el fichero, el
@@ -823,7 +835,7 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   memoria de la plantilla.
 - **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
   RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
-  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
+  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling template rm`. El `mem.file`
   de un nodo con aristas `credential` contiene los marcadores que el invitado tenía en
   memoria (en su entorno, en la memoria de su aplicación). **No son las claves**: la
   clave nunca entra al invitado ni al volcado, y la plantilla no se lleva ni el almacén
@@ -1324,9 +1336,12 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   (ver 11): arrancar sin él exige `KLING_JAILER=0` a propósito, y eso deja un aviso en el
   log. Quien lo pone y no lo lee sigue corriendo el VMM con el sistema de ficheros del
   host y los permisos de su usuario.
-- **Cuota de disco por overlay, no por host.** Cada overlay son 512 MiB lógicos; la
-  admisión por disco (ver 12) impide crear máquinas nuevas con el disco casi lleno, pero
-  las que ya corren pueden seguir llenando los suyos.
+- **Cuota de disco por overlay, no por host.** Cada overlay es disperso y de tamaño
+  lógico fijo al nacer: 512 MiB por defecto, de 64 MiB a 256 GiB con `run -disk`
+  (`KLING_MAX_DISK_MIB` baja el máximo). La admisión por disco (ver 12) rechaza una
+  máquina cuyo `-disk` no quepa en el disco libre y crear máquinas nuevas con el disco
+  casi lleno, pero no reserva: las que ya corren pueden seguir llenando los suyos hasta
+  su tamaño, y entre todas pasar de lo libre.
 - **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
   `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
   microVMs. Receta en `docs/cifrado.md`.
@@ -1335,8 +1350,9 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   puedes con todo. Con política ([docs/authz.md](docs/authz.md)) quien no tiene regla no
   puede nada y un inquilino solo lo suyo, pero es un MVP: los nombres de máquinas,
   snapshots y grafos son globales (un `409` dice que un nombre ajeno existe, no de quién
-  es), no hay cuotas por inquilino (topes del host y nada más), los inquilinos no usan
-  volúmenes ni carpetas del host, y la política se lee al arrancar. Dos inquilinos siguen
+  es), las cuotas por inquilino son opcionales y miden lo declarado (máquinas, memoria
+  y tamaño lógico de los discos escribibles; no lo escrito, ni snapshots, ni CPU), los
+  inquilinos no usan volúmenes ni carpetas del host, y la política se lee al arrancar. Dos inquilinos siguen
   compartiendo host y kernel: lo que separa sus microVMs es lo de las barreras de arriba.
 - **El proxy al invitado no filtra la ruta.** Solo llega a los puertos permitidos (ver
   10), pero dentro de ellos a cualquier ruta. No es una escalada: sin política quien
@@ -1390,7 +1406,8 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   o un rol de solo lectura por agente con `-role`). Las consultas viajan en claro por el
   veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
   o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
-  repetirlos. Solo Linux por ahora (ver 7).
+  repetirlos. En Linux y en macOS; en macOS el `kling-vz` del agente pide cada conexión
+  al broker de enlaces del daemon (ver 7).
 - **El registro de auditoría es observabilidad, no prueba.** En Linux vive en
   `<root>/audit`, fuera del alcance del VMM (ver 7), pero lo migrado desde versiones
   anteriores estuvo en un directorio que el VMM podía tocar. En macOS lo escribe
@@ -1420,9 +1437,12 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   por servicio, entregada a cada réplica al nacer); (2) proxy de credenciales para
   aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos por
   sesión reales.
-- **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
-  en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
-  (`-listen 0.0.0.0:9100`) y avisa.
+- **El puente local (`kling-bridge-local`) no autentica.** Por eso escucha en
+  `127.0.0.1:8080` por defecto (`kling mcp memory enable`/`install-service` le pasan
+  `127.0.0.1:9100`); exponerlo a la red es una decisión explícita
+  (`-listen 0.0.0.0:9100`) y avisa: `install-service` por la terminal y el propio puente
+  en su log. Dentro de la microVM el `/entrypoint` generado pide `-listen :8080`, donde
+  lo busca el gateway; ahí, como PID 1, no avisa.
 - **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
   silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
   este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del

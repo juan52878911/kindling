@@ -32,6 +32,17 @@ func (c *cronoFases) marca(campo *float64) {
 	c.ultima = now
 }
 
+// marcaMemoria apunta lo transcurrido desde la marca anterior como
+// construir la memoria de una copia congelada en diferencial, separando lo
+// que fue montar el almacén y copiar el espejo del dorado (tm).
+func (c *cronoFases) marcaMemoria(tm tiemposMemoria) {
+	c.marca(&c.p.MemoryMS)
+	alm, esp := msDesde(tm.almacen), msDesde(tm.espejo)
+	c.p.StoreMS += alm
+	c.p.MirrorMS += esp
+	c.p.MemoryMS = max(c.p.MemoryMS-alm-esp, 0)
+}
+
 // cerrar apunta lo que queda en FinishMS y el total, y devuelve una copia.
 func (c *cronoFases) cerrar() *api.WakePhases {
 	c.marca(&c.p.FinishMS)
@@ -58,6 +69,9 @@ func notaFases(p *api.WakePhases) string {
 	}
 	add("wait", p.WaitMS)
 	add("check", p.CheckMS)
+	add("store", p.StoreMS)
+	add("mirror", p.MirrorMS)
+	add("memory", p.MemoryMS)
 	add("net", p.NetMS)
 	add("spawn", p.SpawnMS)
 	add("socket", p.SocketMS)

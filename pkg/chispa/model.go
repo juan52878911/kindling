@@ -54,7 +54,7 @@ type Model struct {
 }
 
 // Meta es lo que se sabe del entrenamiento. No afecta a la inferencia; se
-// guarda para que `kling chispa inspect` pueda contar de dónde sale un modelo.
+// guarda para que `kling ai chispa inspect` pueda contar de dónde sale un modelo.
 type Meta struct {
 	CreatedAt       string             `json:"created_at,omitempty"`
 	DatasetSHA256   string             `json:"dataset_sha256,omitempty"`

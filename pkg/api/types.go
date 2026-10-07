@@ -95,6 +95,11 @@ type Machine struct {
 	// fallidas se acumulaban para siempre, una por intento de instanciación roto.
 	FailedAt *time.Time `json:"failed_at,omitempty"`
 
+	// StoppedAt es cuándo se paró (o cuándo falló su último `kling start`). Lo
+	// mismo que FailedAt para las paradas: la recogida automática las mide
+	// con él (ver gcFailed).
+	StoppedAt *time.Time `json:"stopped_at,omitempty"`
+
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
 
@@ -168,6 +173,12 @@ type Machine struct {
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
 	Ready string `json:"ready,omitempty"`
 
+	// HooksPending es el tipo de restauración (api.ResyncInstance, ...) cuyos
+	// ganchos el daemon aún debe lanzar porque el /resync falló con un agente
+	// que sí los conoce; vacío si no hay ninguna. Se guarda para que un
+	// reinicio del daemon no la pierda (ver internal/machine/listo_ganchos.go).
+	HooksPending string `json:"hooks_pending,omitempty"`
+
 	// Hold dice por qué el daemon la tiene parada y la despertará él mismo en
 	// cuanto se pueda (HoldStoreFull). Vacío en el caso normal.
 	Hold string `json:"hold,omitempty"`
@@ -235,6 +246,16 @@ type WakePhases struct {
 	WaitMS float64 `json:"wait_ms"`
 	// CheckMS es comprobar que no quede ya un VMM vivo de esta máquina.
 	CheckMS float64 `json:"check_ms"`
+	// StoreMS es montar el almacén de copia al escribir para construir la
+	// memoria de una copia congelada en diferencial (casi siempre ya lo está).
+	StoreMS float64 `json:"store_ms,omitempty"`
+	// MirrorMS es copiar al almacén el espejo de la memoria del dorado, o
+	// esperar al que se copia tras el commit: solo el primer thaw de las
+	// copias de un dorado, y solo si ese espejo aún no estaba hecho.
+	MirrorMS float64 `json:"mirror_ms,omitempty"`
+	// MemoryMS es el resto de construir esa memoria: clonar el espejo (o
+	// copiar la base, sin almacén) y escribirle encima el diferencial.
+	MemoryMS float64 `json:"memory_ms,omitempty"`
 	// NetMS es montar (o comprobar) el namespace, el veth, el tap y las reglas.
 	NetMS float64 `json:"net_ms"`
 	// SpawnMS es lanzar el VMM (firecracker o jailer) y preparar su jaula.
@@ -253,6 +274,13 @@ type WakePhases struct {
 	// FinishMS es apuntar el estado y el resto hasta contestar.
 	FinishMS float64 `json:"finish_ms"`
 	TotalMS  float64 `json:"total_ms"`
+}
+
+// StartRequest es el cuerpo de POST /machines/{ref}/start. Env es el entorno
+// de la máquina (KEY=valor, como RunRequest.Env): kindling solo guarda sus
+// nombres (Machine.EnvKeys), así que arrancarla otra vez exige volver a darlos.
+type StartRequest struct {
+	Env []string `json:"env,omitempty"`
 }
 
 // RunRequest crea y arranca una microVM.
@@ -526,6 +554,11 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"`            // total del snapshot en disco
 	Instances int       `json:"instances"`             // máquinas vivas restauradas de aquí
 
+	// Warnings solo va en la respuesta de un commit (kling save): lo que salió
+	// mal fuera del dorado, que sí vale (p.ej. la plantilla no pudo volver a
+	// montar sus volúmenes y quedó fallida). No se guarda en meta.json.
+	Warnings []string `json:"warnings,omitempty"`
+
 	// Volumes son los volúmenes que tenía la plantilla, en el orden de los
 	// discos. Se recuerdan para que despertar una instancia no exija repetirlos:
 	// el gateway despierta servicios por nombre y no sabe nada de volúmenes.
@@ -701,6 +734,9 @@ type Event struct {
 	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Dropped, solo en EvDropped: cuántos eventos perdió este suscriptor por
+	// no leerlos a tiempo.
+	Dropped int64 `json:"dropped,omitempty"`
 }
 
 // Tipos de evento.
@@ -723,6 +759,10 @@ const (
 	// módulo IPv6 de su kernel, aunque el namespace del host lo tenga
 	// bloqueado igual (applyIPv6Barrier). Ver Manager.avisoIPv6Invitado.
 	EvGuestIPv6 = "snapshot.guest_ipv6"
+	// EvDropped avisa a un suscriptor de que se perdió eventos (Dropped dice
+	// cuántos): el bus no espera a nadie, y uno que no lee a tiempo pierde lo
+	// que no cabe. Llega en cuanto vuelve a haber sitio, antes del siguiente.
+	EvDropped = "events.dropped"
 )
 
 // ProcStat es la foto de recursos de UNA microVM.
@@ -786,6 +826,12 @@ type Info struct {
 	// Authz dice si el daemon aplica una política de autorización y con qué
 	// rol ve a quien pregunta (docs/authz.md). nil = daemon anterior.
 	Authz *AuthzInfo `json:"authz,omitempty"`
+	// Tuning son los ajustes EFECTIVOS del daemon que se cambian por entorno
+	// (KLING_MAX_MACHINES, KLING_MIN_FREE_DISK_MIB...), con el nombre de su
+	// variable como clave: lo que aplica, no lo que se escribió (un valor
+	// fuera de rango deja el defecto). Solo a un admin o sin política; nil =
+	// daemon anterior.
+	Tuning map[string]string `json:"tuning,omitempty"`
 }
 
 // AuthzInfo es el estado de la autorización del daemon visto por quien llama.
@@ -813,7 +859,7 @@ type CoWInfo struct {
 	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
 	Reason string `json:"reason,omitempty"`
 	// Pending: el modo es "store" pero el almacén aún no se ha creado ni
-	// montado; se crea en el primer run -from, y si entonces falla el modo
+	// montado; se crea en el primer save o run -from, y si entonces falla el modo
 	// pasa a "copy" con el motivo en Reason.
 	Pending bool `json:"pending,omitempty"`
 	// Store describe el almacén propio, si existe (aunque el modo sea otro:
@@ -1137,6 +1183,24 @@ func IsMachineLimit(err error) bool {
 // machineLimitMark marca los errores de tope de máquinas para poder
 // reconocerlos: 409 lo usan más cosas.
 const machineLimitMark = "machine limit"
+
+// StatusTenantQuota es la negativa por la cuota de un inquilino (la de la
+// política de autorización, docs/authz.md). 429 y no 403: no es que no pueda
+// hacerlo, es que ya ocupa lo que se le dio, y se resuelve liberando (parar o
+// borrar lo suyo) sin tocar permisos. Tampoco 507 ni 409: quien escala
+// respondería congelando o retirando máquinas de otros, y lo que sobra aquí
+// es suyo.
+const StatusTenantQuota = 429
+
+// IsTenantQuota dice si un error es la negativa por la cuota de un inquilino.
+func IsTenantQuota(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusTenantQuota && strings.Contains(se.Message, TenantQuotaMark)
+}
+
+// TenantQuotaMark marca los errores de cuota de inquilino: 429 lo usan más
+// cosas (el gateway, el frontal).
+const TenantQuotaMark = "quota exceeded"
 
 // StatusDiskFull es la negativa por quedar poco disco en el anfitrión. 503 y no
 // 507: quien recibe un 507 congela instancias para hacer sitio, y congelar

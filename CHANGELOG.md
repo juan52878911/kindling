@@ -8,6 +8,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- Per-tenant quotas in the authz policy (`quotas`: `max_machines`, `max_mem_mib`, `max_disk_mib`, `"*"` for everyone); exceeding one is a `429` that names the limit and the usage, decided without races
+- `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
 - `kling image import <ref>`: Docker/OCI images become kindling images without Docker or root; tags resolve to a digest and every layer is checked by sha256, downloaded 4 at a time and unpacked once
 - `kling run -image <docker ref>` imports on first use; `-disk` sizes the writable disk (was a fixed 512 MiB)
 - `kling run -e/-env-file` gives the machine its environment at boot via MMDS, not baked into the image: one image per reference; the daemon keeps only the names, but guest RAM (and so a freeze, save or fork) holds the values
@@ -23,12 +25,27 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling exec`/`kling shell` take `-e KEY` and `-env-file`, keeping secrets out of argv (#135)
 - `kling db role -login` lets a migrations role connect from the host (#149)
 - `kling db diff` also compares functions, views, triggers, grants, extensions and hypertables (#148)
+- `/metrics`: operations by result (run, thaw, freeze, start), admission rejections (409/503/507), boot/restore/thaw/resume/freeze duration histograms, GC evictions, orphan VMMs killed, dropped events, free disk and pending memory
+- `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
+- `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
+- `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
 
 ### Changed
 
+- A machine made from a snapshot reports the snapshot's writable disk size in `disk_mib` (it was left out)
+- `kling stop` drops a machine's memory dump and keeps its disk; stopped service instances from a template are collected after `KLING_STOPPED_RETENTION` (24 h)
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
+- A cold-booted machine whose image declares a ready probe squeezes its balloon once when the probe passes, returning boot-time page cache to the host: Postgres at rest 167 → 89–99 MiB, nginx 65 → 60 MiB (Firecracker; `KLING_SQUEEZE_ON_READY=0` turns it off)
+- Each VMM cgroup also gets `memory.max` (guest RAM + 64 MiB + 1/16), the same `memory.swap.max`, and `pids.max` (128) when those controllers can be delegated (Linux)
+- The balloon asks for free page reporting, so pages the guest frees go back to the host without a squeeze (Firecracker 1.14+; falls back without it; `KLING_FREE_PAGE_REPORTING=0` turns it off)
+- `save` mirrors the golden memory into the copy-on-write store in the background when the store is mounted, so the first diff thaw of a copy no longer copies it (10 s with Postgres); thaw events show `store`, `mirror` and `memory` phases
 - Docker images get a full core per vCPU by default
+- `kling save -wait` defaults to 2 minutes, the API's default (was 60 s, which cut the wait for the image's ready probe short)
+- Old command names (`kling add`, `kling rmi`, `kling info`…) warn once on stderr with the new name; `commit`, `snapshots` and `plugins` stay silent
+- Docker images restart their service only when it fails, like `docker run --restart on-failure`; `kling image import -restart` picks `always`, `on-failure` or `no`
+- Docker images: the `HEALTHCHECK` timeout bounds each ready probe and its start period extends the boot CPU boost (up to 120 s each)
+- Docker images only need `sh`, `mount`, `pivot_root`, `mkdir` and `ln` for the init (no longer `cat` and `grep`)
 - A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
 - `kling db branch`: `git checkout` switches databases in tens of milliseconds (#125)
 - Concurrent `kling db up` calls wait for admission instead of being rejected (#150)
@@ -40,9 +57,52 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Short README; the full guide moves to `docs/guide.md` (#152)
 - Guest kernel ships dm-verity: verity layers boot and verify on Linux and macOS (#161)
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
+- Lifecycle operations (`freeze`, `thaw`, `pause`, `stop`, `rm`) answer 404 for an unknown machine and 409 for a wrong state (was 400)
+- The watcher scans VMM processes once per round and re-measures disk only for running machines or after a state change
 
 ### Fixed
 
+- `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
+- Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first, up to 3/4 of `-wait` (at least 30 s)
+- A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
+- A ready probe, hook or host tool that fails without output no longer leaves a trailing `: ` in the error
+- `kling save` of a machine that doesn't exist says so, instead of "not serving on port 8080 after 2m0s"
+- Error hints name the current commands (`kling ai chispa deploy`, `kling ai model add`, `kling mcp add`), so following them no longer prints the old-name warning
+- `kling start` over a tenant's quota is refused before memory admission, instead of squeezing other machines or waiting up to 60 s first
+- A failed post-restore hooks batch no longer outlives the restore: after `kling stop` + `kling start` the machine is not reported as failed
+- With `-e`, a lost first health check of the guest agent is retried after 15 s instead of holding the environment in MMDS for up to 2 minutes
+- A VMM cgroup whose `memory.max` cannot be written still gets its swap and pids limits (Linux)
+- A failed freeze no longer asks the resumed guest to remount volumes it never released (up to 50 s holding the machine's lock)
+- OCI layer whiteouts under a directory symlink (`bin/.wh.x` with `bin -> usr/bin`) now delete the file instead of being ignored
+- `PUT /images/{name}/blob` decides "identical, 200 unchanged" with cold boots held, so a concurrent upload can no longer make it answer for content that is gone
+- The first golden saved on a fresh daemon gets its memory mirrored too: the save creates the copy-on-write store if it doesn't exist yet; if it can't, `kling status -v` shows copy mode and why right away
+- `kling run -image` warns when it reuses an image imported before restart policies (its service restarts even after exiting 0) and says how to rebuild it
+- `kling image import` says which kling built an existing import and that `-replace` rebuilds it; an existing image without a recipe is no longer called "not from Docker"
+- Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
+- The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
+- Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
+- The daemon builds `oci`, `debian` and `android` images with its own binary, not the `kling` installed on the host (unless `KLING_BUILDERS_DIR` is set)
+- Replacing an image or the kernel (`PUT /images/{name}/blob`) can no longer race a machine that is booting from it
+- Image layers: a hard link whose target path goes through a directory symlink (`bin/busybox` with `bin -> usr/bin`) no longer fails as "hard link to missing"
+- The collectors of failed machines and of disk no longer hold the daemon's lock while they read the disk
+- Firecracker starts with a 1 MiB MMDS store (was its 50 KiB default), so a 32 KiB `-e` environment plus session secrets fits; a larger store is refused with the limit (Linux)
+- Simultaneous freezes and saves reserve their disk: they no longer all pass a free-space check that only one of them fits
+- A full copy-on-write store no longer pauses a machine that is in the middle of freezing
+- A network setup that fails halfway no longer leaves its namespace and veth behind until the daemon restarts (Linux)
+- `thaw` goes through memory admission like `run`: a storm of thaws is refused with 507 instead of exhausting the host
+- `thaw` of a machine removed while it waited fails instead of starting a VMM; re-adopting a live VMM restores its CPU ceiling (Linux)
+- Daemon shutdown waits for in-flight lifecycle operations, so their last state is saved
+- Paths with a backslash are refused like escaped slashes
+- Gateway: freezing an idle paused instance no longer races a request resuming it, which froze the freshly adopted instance (502 on its first call)
+- Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
+- Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
+- Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker
+- Docker images keep their own `/tmp` on disk, as in Docker, instead of a tmpfs that used guest RAM
+- `kling image import` says when an image has no ready probe (only UDP ports)
+- Docker schema 1 manifests fail with a clear error instead of "has no layers"
+- The guest's `/etc/hosts` entries are no longer glued to a last line without a newline
+- `kling image import` no longer silently overwrites an image of the same name from another reference (`redis:7` and `ghcr.io/x/redis:7`); `-replace` does, and the same import is not redone
+- A new volume takes the owner, mode and (up to 64 MiB) content of the image's directory, as in Docker: non-root services like `grafana` can write to it; volumes with data are never touched, and a volume is seeded only once
 - XFS store: memory files and overlays no longer share project ids (a new copy's disk could start over quota)
 - A dump that does not fit is refused before pausing, and a failed dump removes what it wrote
 - `ext4.Write` no longer panics on layers without data
@@ -55,6 +115,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling up -check` fails when something is missing and finds tools in `/sbin` (#134)
 - `kling image build NAME -spec -` works with the name before the flags (#137)
 - Internal: `kling db doctor` grouping, `rm`/`class`/`audit` fixes, MCP health and pagination (#135, #149, #151)
+- `kling save`/`commit` and `kling graph snapshot` mark a machine failed when it cannot mount its volumes again, instead of leaving it running without them, and say so in their output (the saved golden is still good)
+- Post-restore hooks left pending by a failed resync survive a daemon restart, and are only pending when the guest agent should have answered
+- `kling machine ready` on a host without debugfs takes a machine whose agent never answered in 30 s as an image without an agent
 
 ### Security
 
@@ -77,6 +140,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling add -env` values stay out of the host process list while building (#159)
 - Pinned Debian base picks up openssl and pcre2 security updates (deb13u3) (#160)
 - Internal: scheduler races, silent state losses and `make deploy` without fixed `/tmp` paths (#130, #132, #139)
+- `kling-bridge` listens on `127.0.0.1:8080` by default outside a microVM (as PID 1 it keeps `:8080`) and warns in its log when it listens on another address outside a microVM
 
 ## [0.17.0] - 2026-09-29
 

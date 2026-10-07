@@ -53,6 +53,12 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 	o := machine.OpcionesListo{Plazo: espera, UnaVez: espera == 0}
 	res, err := s.mgr.WaitReady(r.Context(), r.PathValue("ref"), o)
+	escribirListo(w, res, err)
+}
+
+// escribirListo contesta GET /machines/{ref}/ready: no estar listo es un 200
+// con el estado (Ready, Detail), no un error HTTP.
+func escribirListo(w http.ResponseWriter, res api.ReadyResult, err error) {
 	if err != nil && !errors.Is(err, machine.ErrNotReady) {
 		fail(w, estadoDeListo(err), err)
 		return

@@ -212,7 +212,7 @@ func TestAlmacenCrecer(t *testing.T) {
 		return os.Truncate(img, bytes)
 	}
 	ctx := context.Background()
-	if err := a.crecer(ctx, 8<<30, 0); err == nil || !strings.Contains(err.Error(), "created on the first run -from") {
+	if err := a.crecer(ctx, 8<<30, 0); err == nil || !strings.Contains(err.Error(), "created on the first save or run -from") {
 		t.Errorf("sin almacén: %v", err)
 	}
 	if err := os.WriteFile(a.img, nil, 0o600); err != nil {

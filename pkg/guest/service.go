@@ -73,6 +73,12 @@ func LoadService(p string) (*Service, error) {
 	if err := json.Unmarshal(b, &spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
+	if _, err := api.ParseSignal(spec.StopSignal); err != nil {
+		// Por la señal de parada no se queda la imagen sin servicio: SIGTERM,
+		// que es lo que manda Docker por defecto, y un aviso en la consola.
+		log.Printf("service: %s: stop signal: %v; using SIGTERM", p, err)
+		spec.StopSignal = ""
+	}
 	if err := checkServiceSpec(spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
@@ -83,7 +89,7 @@ func checkServiceSpec(s api.ServiceSpec) error {
 	if len(s.Argv) == 0 || s.Argv[0] == "" {
 		return errors.New("argv is empty")
 	}
-	if _, err := parseSignal(s.StopSignal); err != nil {
+	if _, err := api.ParseSignal(s.StopSignal); err != nil {
 		return err
 	}
 	switch s.Restart {
@@ -322,7 +328,9 @@ func lookupUser(root, spec string) (userInfo, error) {
 	found := false
 	passwd, _ := readColon(filepath.Join(root, "etc/passwd"), 7)
 	if n, err := strconv.ParseUint(name, 10, 32); err == nil {
-		u.uid, u.gid = uint32(n), uint32(n)
+		// Un uid que no está en /etc/passwd corre con el grupo 0, como en
+		// Docker (runc): no con un gid igual al uid que nadie le dio.
+		u.uid, u.gid = uint32(n), 0
 		for _, f := range passwd {
 			if f[2] == name {
 				name = f[0]
@@ -406,23 +414,14 @@ func readColon(p string, n int) ([][]string, error) {
 	return out, sc.Err()
 }
 
-var signals = map[string]syscall.Signal{
-	"HUP": syscall.SIGHUP, "INT": syscall.SIGINT, "QUIT": syscall.SIGQUIT, "KILL": syscall.SIGKILL,
-	"USR1": syscall.SIGUSR1, "USR2": syscall.SIGUSR2, "TERM": syscall.SIGTERM, "WINCH": syscall.SIGWINCH,
-}
-
-// parseSignal entiende "SIGINT", "INT" y "2" ("" = SIGTERM).
-func parseSignal(s string) (syscall.Signal, error) {
-	if s == "" {
-		return syscall.SIGTERM, nil
+// stopSignal es la señal de parada de spec; LoadService ya cambió por SIGTERM
+// una que no se entiende.
+func stopSignal(spec api.ServiceSpec) syscall.Signal {
+	n, err := api.ParseSignal(spec.StopSignal)
+	if err != nil {
+		return syscall.SIGTERM
 	}
-	if n, err := strconv.Atoi(s); err == nil && n > 0 && n < 65 {
-		return syscall.Signal(n), nil
-	}
-	if sig, ok := signals[strings.TrimPrefix(strings.ToUpper(s), "SIG")]; ok {
-		return sig, nil
-	}
-	return 0, fmt.Errorf("unknown stop signal %q", s)
+	return syscall.Signal(n)
 }
 
 // ServiceDeclared dice si la imagen declaró un servicio (y se lanzó).
@@ -483,7 +482,7 @@ func (s *Service) Stop() {
 	cmd := s.cmd
 	s.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
-		sig, _ := parseSignal(s.spec.StopSignal)
+		sig := stopSignal(s.spec)
 		// Al proceso y no al grupo, como Docker: el que reparte la señal a
 		// sus hijos (o no) es él.
 		_ = cmd.Process.Signal(sig)

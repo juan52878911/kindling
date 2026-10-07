@@ -54,7 +54,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	image := req.Image
 	if image == "" {
 		return nil, fmt.Errorf("an image with the installer is required: " +
-			"build it with `kling images toolchain`")
+			"build it with `kling image toolchain`")
 	}
 	memMiB := req.MemMiB
 	if memMiB <= 0 {
@@ -97,7 +97,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	// El vaciado a disco se lo pide Remove() al matar, pero aquí se pide antes
 	// de mirar el tamaño: si no, el "en disco" que se informa sería el de antes
 	// de que la caché del invitado llegara al fichero.
-	m.flushVolume(mc)
+	m.flushVolume(mc, false)
 
 	res := &api.PopulateResult{ExitCode: out.ExitCode, Output: out.Output, Machine: mc.ID}
 	if v, err := m.statVolume(req.Volume); err == nil {
@@ -109,7 +109,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 // waitGuest espera a que el puente conteste dentro de la microVM.
 func waitGuest(ctx context.Context, base string, limit time.Duration) error {
 	deadline := time.Now().Add(limit)
-	cli := &http.Client{Timeout: 2 * time.Second}
+	cli := &http.Client{Timeout: 2 * time.Second, Transport: listoClient.Transport}
 	var last error
 	for time.Now().Before(deadline) {
 		select {
@@ -148,7 +148,7 @@ func ejecutarEnInvitado(ctx context.Context, base string, cmd []string) (poblado
 	hreq.Header.Set("Content-Type", "application/json")
 	// Sin plazo de cabeceras: el agente contesta al empezar, pero una
 	// instalación larga no es un invitado colgado. El límite es el contexto.
-	resp, err := (&http.Client{}).Do(hreq)
+	resp, err := listoClient.Do(hreq)
 	if err != nil {
 		return poblado{}, fmt.Errorf("executing inside the microVM: %w", err)
 	}
@@ -196,7 +196,7 @@ func ejecutarLegado(ctx context.Context, base string, cmd []string) (poblado, er
 		return poblado{}, err
 	}
 	hreq.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{}).Do(hreq)
+	resp, err := listoClient.Do(hreq)
 	if err != nil {
 		return poblado{}, fmt.Errorf("executing inside the microVM: %w", err)
 	}

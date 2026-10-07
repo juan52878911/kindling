@@ -402,6 +402,9 @@ func TestAuthzInquilinoNoVeAjenos(t *testing.T) {
 	if info.Root == "" {
 		t.Errorf("info de a sin root")
 	}
+	if info.Tuning != nil {
+		t.Errorf("info de a cuenta los ajustes del host: %v", info.Tuning)
+	}
 	// Sin rol (o sin peercred): la versión, las capacidades y su authz, nada
 	// del host (ni la raíz, ni las carpetas compartibles, ni el almacén).
 	for _, uid := range []int{uidNadie, -1} {
@@ -411,7 +414,7 @@ func TestAuthzInquilinoNoVeAjenos(t *testing.T) {
 		if rr.Code != 200 || info.Machines != 0 || info.Authz == nil || info.Authz.Role != "none" || info.Version == "" {
 			t.Errorf("info sin rol (uid %d): %d %+v", uid, rr.Code, info.Authz)
 		}
-		if info.Root != "" || info.ShareRoots != nil || info.CoW != nil || info.EncryptedAtRest != nil ||
+		if info.Root != "" || info.ShareRoots != nil || info.CoW != nil || info.EncryptedAtRest != nil || info.Tuning != nil ||
 			strings.Contains(rr.Body.String(), s.root) {
 			t.Errorf("info sin rol (uid %d) cuenta el host: %s", uid, rr.Body)
 		}
@@ -420,6 +423,9 @@ func TestAuthzInquilinoNoVeAjenos(t *testing.T) {
 	json.Unmarshal(como(t, h, uidAdmin, "GET", "/info", "").Body.Bytes(), &info)
 	if info.Machines != 4 || info.Authz.Role != "admin" {
 		t.Errorf("info de admin: %d máquinas, %+v", info.Machines, info.Authz)
+	}
+	if info.Tuning["KLING_MAX_MACHINES"] == "" || info.Tuning["builder_user"] == "" {
+		t.Errorf("info de admin sin ajustes efectivos: %v", info.Tuning)
 	}
 
 	// Los eventos: solo los de sus máquinas.

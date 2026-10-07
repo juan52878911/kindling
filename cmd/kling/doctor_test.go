@@ -159,3 +159,20 @@ func TestDoctorAuthz(t *testing.T) {
 		}
 	}
 }
+
+// Los ajustes efectivos del daemon se enseñan ordenados y alineados; sin
+// ellos (daemon anterior) no se imprime la sección.
+func TestWriteTuning(t *testing.T) {
+	var b bytes.Buffer
+	writeTuning(&b, map[string]string{"KLING_MAX_MACHINES": "512", "KLING_DIFF_FREEZE": "on"})
+	out := b.String()
+	i, j := strings.Index(out, "KLING_DIFF_FREEZE"), strings.Index(out, "KLING_MAX_MACHINES")
+	if i < 0 || j < 0 || i > j || !strings.Contains(out, "512") || !strings.Contains(out, "daemon tuning") {
+		t.Fatalf("salida:\n%s", out)
+	}
+	b.Reset()
+	writeTuning(&b, nil)
+	if b.Len() != 0 {
+		t.Fatalf("sin ajustes no debería imprimir nada: %q", b.String())
+	}
+}

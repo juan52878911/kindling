@@ -104,7 +104,9 @@ arrancar() { # $@ = entorno del montaje
     sudo cp "$SCRIPTS/$s" "$BASE/lib/"
   done
   sudo cp "$VMLINUX" "$R/images/vmlinux"
-  # El log es del usuario a propósito: lo lee la prueba sin sudo.
+  # El log es del usuario a propósito: lo lee la prueba sin sudo. El
+  # constructor oci lo hace el propio $BASE/kling (docs/api.md), no el
+  # instalado en el host.
   # shellcheck disable=SC2024
   sudo env "$@" KLING_LIB_DIR="$BASE/lib" KLING_GUEST_AGENT="$BASE/lib/kling-guest" \
     KLING_COW_STORE_GIB=3 KLING_MIN_FREE_DISK_MIB=4096 KLING_GC_DISK_HIGH=99 \

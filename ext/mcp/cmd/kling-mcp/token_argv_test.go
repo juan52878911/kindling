@@ -77,7 +77,9 @@ func TestGatewayNoImprimeElToken(t *testing.T) {
 	if strings.Contains(out, tok) {
 		t.Errorf("the token was printed in full:\n%s", out)
 	}
-	if strings.Contains(out, "config set gateway.token "+tok[:1]) {
+	// La pista buena acaba en "gateway.token -" (leer de stdin): se quita antes
+	// de buscar, o un token que empiece por '-' daría un falso positivo.
+	if strings.Contains(strings.ReplaceAll(out, tokenPipeHint, ""), "config set gateway.token ") {
 		t.Errorf("it suggests the token as an argument:\n%s", out)
 	}
 	saved, err := config.Load()

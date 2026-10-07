@@ -1,4 +1,6 @@
 #!/bin/sh
 # Constructor "debian" del núcleo: Debian trixie fijada con los paquetes de la
 # receta, todo en Go y sin root (internal/imagen). Ver docs/imagenes.md.
+# El daemon no lo usa salvo con KLING_BUILDERS_DIR: se ejecuta a sí mismo
+# (docs/api.md). Queda para daemons anteriores y para lanzarlo a mano.
 exec /usr/local/bin/kling builder debian "$@"

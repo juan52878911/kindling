@@ -1,0 +1,49 @@
+{
+  "name": "svc",
+  "image": "eco",
+  "created_at": "2026-09-01T10:46:00Z",
+  "vcpus": 47,
+  "mem_mib": 48,
+  "mem_max_mib": 49,
+  "mem_bytes": 50,
+  "disk_bytes": 51,
+  "instances": 52,
+  "volumes": [
+    {
+      "name": "v017-53",
+      "mount": "v017-54",
+      "read_only": true,
+      "drive_id": "v017-55"
+    }
+  ],
+  "volume": "v017-56",
+  "has_volume": true,
+  "volume_mount": "v017-57",
+  "volume_read_only": true,
+  "egress": "allowlist",
+  "cpu_pct": 59,
+  "allow_domains": [
+    "v017-60"
+  ],
+  "allow_exec": true,
+  "labels": {
+    "v017-61": "v017-62"
+  },
+  "credential_domains": [
+    "v017-63"
+  ],
+  "credential_any_database": [
+    "v017-64"
+  ],
+  "rootfs_sha256": "v017-65",
+  "snap_sha256": "v017-66",
+  "kernel_sha256": "v017-67",
+  "guest_ipv6_off": true,
+  "guest_ipv6_stack": true,
+  "signature": "v017-68",
+  "annotations": {
+    "v017-69": {
+      "v017": 70
+    }
+  }
+}

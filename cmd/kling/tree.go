@@ -88,7 +88,12 @@ var coreTree = []section{
 		{Name: "pause", Summary: "pauses it without dumping memory", MachineArgs: []string{""}, Usage: `  pause <ref>...                                   pauses it keeping its RAM (thaw
                                                    resumes it in ~1 ms)
 `},
-		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop <ref>...                                    terminates the machine
+		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop <ref>...                                    terminates the machine; its disk
+                                                   stays (start), its memory goes
+`},
+		{Name: "start", Summary: "boots a stopped machine again from its disk", MachineArgs: []string{""}, Usage: `  start [-e K=V] [-env-file F] <ref>...            boots a stopped machine again, cold,
+                                                   on its own disk; -e/-env-file must
+                                                   give again the keys it ran with
 `},
 		{Name: "rm", Summary: "removes machine and snapshot", MachineArgs: []string{""}, Usage: `  rm [-f] <ref>...                                 removes machine and snapshot
                                                    (asks first for several; -f: no)
@@ -162,9 +167,15 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "recipe", "cat", "put", "rm", "copy", "toolchain"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
                                                    on the daemon (extensions ship them)
+  image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
+      [-e K=V] [-env-file F] [-user U]             Docker or root: the tag resolves to a
+      [-entrypoint ARG]... [-restart R]            digest, every layer is checked by
+      [-max-size 4G] [-arch A] [-- cmd args...]    sha256. -- replaces its CMD; -e bakes
+                                                   values into the image (per machine:
+                                                   kling run -image <ref> -e KEY)
   image recipe <image>                             how it was built
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
@@ -235,6 +246,9 @@ var coreTree = []section{
                                                    the mark
   machine ready <ref> [-wait 1m] [-json]           ready by its image's probe
                                                    (/etc/kindling/ready) and hooks?
+                                                   An agent that does not answer is "waiting"; on
+                                                   a host without debugfs, only for the first 30 s
+                                                   after starting or restoring if it never answered
   machine hooks <ref> [-wait 1m] [-json]           runs its post-restore hooks again
                                                    (/etc/kindling/post-restore.d)
   machine credential <ref> -domain D -env VAR      hands an API key to the credential
@@ -304,13 +318,14 @@ const usageTail = `CONNECTION
   equivalent to root on its host, so the only remote access is SSH.
 `
 
-// aliases son los nombres de antes: se traducen en silencio a los de ahora
-// antes de enrutar. No salen en la ayuda ni en el completado.
+// aliases son los nombres de antes: se traducen a los de ahora antes de
+// enrutar. No salen en la ayuda ni en el completado.
 //
-// Plan: en 0.14 son silenciosos; en 0.15 avisan una vez por proceso en stderr
-// ("warning: kling add is now kling mcp add"), como hizo -cpu; en 0.16 se
-// retiran los de extensiones (add, search, gateway, export, memory, migrate,
-// models, chispa, info). commit, snapshots y plugins se quedan para siempre:
+// Fueron silenciosos de 0.14 a 0.17; ahora avisan una vez por proceso en
+// stderr ("warning: kling add is now kling mcp add", aliasWarning), y los de
+// extensiones (add, search, gateway, export, memory, migrate, models, chispa,
+// info) se retirarán en una versión que lo anuncie el CHANGELOG. commit,
+// snapshots y plugins se quedan para siempre y en silencio (permanentAliases):
 // cuestan cero y hay scripts ajenos que los usan.
 var aliases = map[string]string{
 	"commit":    "save",
@@ -338,6 +353,24 @@ var extAliases = map[string]string{
 	"export":  "mcp export",
 	"memory":  "mcp memory",
 	"migrate": "mcp migrate",
+}
+
+// permanentAliases no avisan nunca: ver aliases.
+var permanentAliases = map[string]bool{"commit": true, "snapshots": true, "plugins": true}
+
+// aliasWarning es el aviso para quien escribió un nombre de antes, o "" si cmd
+// no es un alias que se vaya a retirar (o una extensión instalada lo sirve
+// todavía). Va a stderr: la salida -json de stdout no cambia.
+func aliasWarning(cmd string, args []string) string {
+	if permanentAliases[cmd] {
+		return ""
+	}
+	to, rest := resolveAlias(cmd, args)
+	if to == cmd && len(rest) == len(args) {
+		return ""
+	}
+	now := strings.Join(append([]string{to}, rest[:len(rest)-len(args)]...), " ")
+	return fmt.Sprintf("warning: kling %s is now kling %s", cmd, now)
 }
 
 // resolveAlias traduce un comando viejo a (comando, args) de ahora. Devuelve
@@ -443,7 +476,7 @@ func printUsage(w io.Writer) {
 
 EVERY DAY
   run, ps, logs, exec, shell, cp        machines and what runs inside
-  freeze, thaw, pause, stop, rm         lifecycle (frozen = 0 RAM, thaw ~30 ms)
+  freeze, thaw, pause, stop, start, rm  lifecycle (frozen = 0 RAM, thaw ~30 ms)
   save <ref> <name>                     turn a machine into a template
 
 MANAGE     template, image, volume, sandbox, context, config, plugin

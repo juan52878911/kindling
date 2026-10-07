@@ -3,7 +3,7 @@ package daemon
 // Transferencia de imágenes entre daemons: GET y PUT /images/{name}/blob.
 //
 // Existe para macOS, donde no se construyen imágenes: se construyen en un host
-// Linux y `kling images copy` las mueve de un daemon a otro, en flujo, sin
+// Linux y `kling image copy` las mueve de un daemon a otro, en flujo, sin
 // pasar por el disco del CLI. Una imagen son hasta tres ficheros —el ext4 (o
 // la capa), la receta y, compartido, el kernel—, y cada uno viaja por separado
 // con su parte en ?part=.
@@ -82,7 +82,7 @@ func blobSidecarPath(path string) string { return path + ".sha256" }
 //
 // Sin esto, GET y HEAD de /images/{name}/blob hasheaban el fichero entero en
 // cada llamada — varios GiB para una imagen normal — antes de contestar
-// siquiera las cabeceras. `kling images copy` hace un HEAD y luego un GET, así
+// siquiera las cabeceras. `kling image copy` hace un HEAD y luego un GET, así
 // que cada copia pagaba dos lecturas completas solo para el sha256 que ya
 // tenía calculado un segundo antes.
 func cachedSHA256(path string) (string, error) {
@@ -231,7 +231,7 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	// ella. Se mira antes de recibir nada: son gigas.
 	if otra, ok := s.formaContraria(t); ok {
 		fail(w, http.StatusConflict, fmt.Errorf("image %q already exists as a %s on this daemon; "+
-			"remove it first (kling images rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
+			"remove it first (kling image rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
 		return
 	}
 	if r.ContentLength > api.MaxBlobBytes {
@@ -303,41 +303,58 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := api.BlobPutResult{Name: t.name, Part: t.part, Size: n, Sha256: got}
-	if prev, err := cachedSHA256(t.path); err == nil {
-		if prev == got {
-			// Idéntico: no se toca, y así no importa que esté en uso.
-			_ = os.Remove(tmp)
-			res.Unchanged = true
-			writeJSON(w, http.StatusOK, res)
-			return
-		}
-		if err := s.blobReplaceable(t); err != nil {
-			_ = os.Remove(tmp)
-			fail(w, http.StatusConflict, err)
-			return
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	// El sha256 de lo que hay se calcula aquí, fuera del cerrojo: con una
+	// imagen sin sidecar son gigas que leer, y dentro bloquearían todos los
+	// arranques. Dentro se vuelve a pedir y sale de la caché.
+	if _, err := cachedSHA256(t.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(tmp)
 		fail(w, http.StatusInternalServerError, err)
 		return
-	} else if t.part == api.BlobRecipe && s.esCapa(t.name) {
+	}
+	// La comparación, la comprobación y el rename con las imágenes quietas:
+	// un run que llegara entre medias arrancaría con el contenido nuevo de una
+	// imagen que se acaba de ver que no se podía cambiar. Y lo que había se
+	// mira dentro: otra subida pudo cambiarlo mientras tanto, y contestar
+	// "idéntico" por lo que había antes sería mentir.
+	status := http.StatusInternalServerError
+	err = s.mgr.ConImagenesQuietas(func() error {
+		prev, perr := cachedSHA256(t.path)
+		switch {
+		case perr == nil && prev == got:
+			// Idéntico: no se toca, y así no importa que esté en uso.
+			res.Unchanged = true
+			return nil
+		case perr != nil && !errors.Is(perr, os.ErrNotExist):
+			return perr
+		}
+		_, lerr := os.Lstat(t.path)
 		// Una capa sin receta va sobre la base por defecto: ponérsela ahora
 		// puede cambiarle la base, así que cuenta como sustituir.
-		if err := s.blobReplaceable(t); err != nil {
-			_ = os.Remove(tmp)
-			fail(w, http.StatusConflict, err)
-			return
+		if lerr == nil || (t.part == api.BlobRecipe && s.esCapa(t.name)) {
+			if err := s.blobReplaceable(t); err != nil {
+				status = http.StatusConflict
+				return err
+			}
 		}
-	}
-	if err := os.Rename(tmp, t.path); err != nil {
+		if err := os.Rename(tmp, t.path); err != nil {
+			return err
+		}
+		// El sidecar ya con el hash que se acaba de verificar (`got`): evita
+		// que el primer GET tras subir tenga que releer el fichero entero para
+		// el mismo dato que este PUT ya comprobó byte a byte.
+		cacheSHA256(t.path, got)
+		return nil
+	})
+	if err != nil {
 		_ = os.Remove(tmp)
-		fail(w, http.StatusInternalServerError, err)
+		fail(w, status, err)
 		return
 	}
-	// El sidecar ya con el hash que se acaba de verificar (`got`): evita que
-	// el primer GET tras subir tenga que releer el fichero entero para el
-	// mismo dato que este PUT ya comprobó byte a byte.
-	cacheSHA256(t.path, got)
+	if res.Unchanged {
+		_ = os.Remove(tmp)
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
 	// En Linux el VMM corre sin privilegios y tiene que poder leer la imagen.
 	if t.part != api.BlobRecipe && t.part != api.BlobKernel {
 		s.mgr.EnsureImageReadable(t.name)

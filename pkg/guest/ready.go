@@ -40,7 +40,8 @@ import (
 )
 
 // Plazos. La sonda se pregunta a menudo y tiene que ser barata: 10 s es de
-// sobra para un `getprop`. Un gancho puede hacer trabajo de verdad (aplicar una
+// sobra para un `getprop`; una imagen que necesita más lo dice en su servicio
+// (api.ServiceSpec.ProbeTimeoutSeconds: el Timeout de su HEALTHCHECK). Un gancho puede hacer trabajo de verdad (aplicar una
 // identidad, regenerar claves), pero no puede dejar la máquina "no lista"
 // indefinidamente.
 const (
@@ -102,6 +103,9 @@ func (r *readiness) snapshot() api.GuestReady {
 
 func (r *readiness) stateLocked(probe, hooks bool) api.GuestReady {
 	st := api.GuestReady{Probe: probe, HasHooks: hooks, Hooks: r.hooks}
+	if probe {
+		st.StartPeriodSeconds = serviceReadySpec().ReadyStartPeriodSeconds
+	}
 	switch {
 	case r.hooks == api.HooksRunning:
 		st.Detail = "post-restore hooks are running"
@@ -129,7 +133,7 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 		need = !r.ok
 		r.mu.Unlock()
 		if need {
-			pctx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
+			pctx, cancel := context.WithTimeout(ctx, probeTimeout())
 			run := r.probe
 			if run == nil {
 				run = r.run
@@ -140,7 +144,7 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 			if err == nil {
 				r.ok, r.detail = true, ""
 			} else {
-				r.detail = recortar(fmt.Sprintf("%s: %v: %s", r.probePath, err, strings.TrimSpace(out)))
+				r.detail = recortar(r.probePath + ": " + conSalida(err, out))
 			}
 			r.mu.Unlock()
 		}
@@ -149,6 +153,28 @@ func (r *readiness) check(ctx context.Context) api.GuestReady {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stateLocked(probe, hooks)
+}
+
+// serviceReadySpec son los plazos de la sonda que declara el servicio de la
+// imagen, ya acotados; sin servicio, ceros.
+func serviceReadySpec() api.ServiceSpec {
+	serviceState.mu.Lock()
+	svc := serviceState.svc
+	serviceState.mu.Unlock()
+	if svc == nil {
+		return api.ServiceSpec{}
+	}
+	clamp := func(n int) int { return min(max(n, 0), api.MaxReadyTimeoutSeconds) }
+	return api.ServiceSpec{ProbeTimeoutSeconds: clamp(svc.spec.ProbeTimeoutSeconds),
+		ReadyStartPeriodSeconds: clamp(svc.spec.ReadyStartPeriodSeconds)}
+}
+
+// probeTimeout es el plazo de una ejecución de la sonda.
+func probeTimeout() time.Duration {
+	if n := serviceReadySpec().ProbeTimeoutSeconds; n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return readyProbeTimeout
 }
 
 // listHooks devuelve los ganchos en orden: ficheros regulares ejecutables del
@@ -213,7 +239,7 @@ func (r *readiness) startHooks(kind string, done func()) bool {
 			}
 			if err != nil {
 				estado = api.HooksFailed
-				fallo = recortar(fmt.Sprintf("post-restore hook %s: %v: %s", filepath.Base(h), err, strings.TrimSpace(out)))
+				fallo = recortar("post-restore hook " + filepath.Base(h) + ": " + conSalida(err, out))
 				log.Printf("post-restore %s failed after %s: %v", filepath.Base(h), time.Since(t0).Round(time.Millisecond), err)
 				break
 			}
@@ -287,6 +313,15 @@ func restoreKind(v, def string) string {
 		return v
 	}
 	return def
+}
+
+// conSalida es el texto de err seguido de la salida de la orden, si dijo
+// algo: una sonda que falla callada no deja un ": " colgando en el detalle.
+func conSalida(err error, out string) string {
+	if s := strings.TrimSpace(out); s != "" {
+		return err.Error() + ": " + s
+	}
+	return err.Error()
 }
 
 // recortar deja s en readyDetailMax bytes, por el final (lo último que dijo un

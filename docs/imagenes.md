@@ -148,6 +148,16 @@ nuevo no le llegaría (un `POSTGRES_PASSWORD` solo cuenta en el `initdb`). Para
 otro entorno, otra máquina en frío con `-image`. La plantilla, como el
 `mem.file` de cualquier dorado, es 0600 del daemon.
 
+**Pararla y arrancarla otra vez.** `kling stop` conserva el disco de la
+máquina y suelta su memoria; `kling start` la arranca en frío sobre ese disco.
+Como el daemon no guardó los valores, `start` exige otra vez todas las claves
+de `env_keys` (`kling start -e POSTGRES_PASSWORD pg`, o `-env-file`) y, si falta
+alguna, dice cuáles en vez de arrancar el servicio sin ellas. Al pararla, el
+invitado vacía su caché al disco; al arrancarla, el daemon pasa `e2fsck -p`
+por ese disco (no lleva journal) por si se paró a la brava —pausada, o con el
+anfitrión caído—, y si queda algo que no sabe arreglar solo no arranca y lo
+dice.
+
 `kling image import -e` sigue horneando valores en `/etc/kling/env` por
 compatibilidad, con un aviso en stderr: sirve para lo que es de la imagen
 (`PGDATA`), no para una contraseña.
@@ -162,10 +172,20 @@ kindling y nada más:
 | `/sbin/overlay-init` | `minimal-init.sh`, con el contrato de runtime de Docker (`/dev/fd`, `/dev/std*`, `/dev/shm`, `/etc/hosts`, nombre) |
 | `/usr/local/bin/kling-guest`, `/entrypoint` | el agente de invitado como PID 1 |
 | `/etc/kling/env` (0600 de root) | el `Env` de la imagen con el del spec encima |
-| `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente |
-| `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`) |
+| `/etc/kindling/service.json` | `ENTRYPOINT`+`CMD` con `USER`, `WORKDIR` y `STOPSIGNAL`: lo arranca y vigila el agente. Se relanza si sale con error (`-restart always\|on-failure\|no`, `on-failure` por defecto); un `STOPSIGNAL` que no se entiende pasa a `SIGTERM` con un aviso; un `USER` numérico sin entrada en `/etc/passwd` corre con el grupo 0, como en Docker |
+| `/etc/kindling/ready` | la sonda de "listo": el `HEALTHCHECK` de la imagen o, sin él, que acepte conexiones el primer puerto TCP de `EXPOSE` (`kling-guest -probe-tcp`). Su `Timeout` es el plazo de cada ejecución y su `StartPeriod` alarga el impulso de CPU del arranque (en `service.json`, hasta 120 s cada uno); `Interval` y `Retries` no se usan |
 | `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
 | `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
+
+`/tmp` y `/run` son los de la imagen, en el disco de la máquina, como en
+Docker: lo que trae la imagen ahí (`/run/mysqld` del usuario `mysql` en
+`mariadb`) sigue ahí, y lo que se escribe en `/tmp` no gasta RAM del invitado
+(ni engorda un `freeze`). En las bases de kindling los dos son `tmpfs`.
+
+Sin `HEALTHCHECK` ni un puerto TCP en `EXPOSE` (una imagen que solo expone
+UDP, como un DNS) no hay sonda: `import` lo dice (`ready none: ...`) y
+`-wait-ready` espera al agente, no al servicio. Un manifiesto *schema 1* de
+Docker (obsoleto desde 2017) se rechaza con un error que lo dice.
 
 **Fijada por digest.** La etiqueta se resuelve una vez: el digest sale del
 sha256 del manifiesto bajado (si el registro dice otro en
@@ -228,7 +248,15 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
 `-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
-ready, service}`).
+ready, service, already_imported}`).
+
+El nombre por defecto sale del repositorio y la etiqueta, así que `redis:7` y
+`ghcr.io/x/redis:7` dan los dos `redis-7`. Si ya hay una imagen con ese nombre,
+`import` no la pisa: si es la misma importación (misma referencia y mismas
+opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
+`-replace` la reconstruye (y vuelve a resolver la etiqueta), salvo que la use un
+dorado o una máquina que no esté parada: entonces 409, como al subirla con
+`kling image put`; hay que retirar antes lo que la usa.
 
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
@@ -339,14 +367,26 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
 ### Límites del constructor `oci`
 
 - **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
-  `pivot_root`, `mkdir`, `ln`, `cat` y `grep` (cualquier Alpine o Debian). Una
+  `pivot_root`, `mkdir` y `ln` (cualquier Alpine o Debian). Una
   imagen *distroless* se rechaza al construir, igual que una que ya traiga
   `/entrypoint`.
 - **Sin dm-verity**: la imagen es la raíz, no una capa.
 - **`VOLUME` no crea nada**: sin `-volume`, los datos viven en el disco de la
   máquina (512 MiB; `kling run -disk 4G` lo agranda, y es disperso: solo cuesta
-  lo que se escribe). La ruta va en la receta (`built.volumes`). Un volumen de
-  kling es un ext4 con `lost+found`: montado justo en el `PGDATA`, `initdb` se
+  lo que se escribe). La ruta va en la receta (`built.volumes`).
+- **Un volumen nuevo hereda el directorio de la imagen**, como en Docker: la
+  primera vez que se monta, si no tiene más que el `lost+found` de `mke2fs`,
+  su raíz toma el dueño y el modo del directorio que la imagen tiene en ese
+  punto, y se copia lo que haya dentro (sin seguir enlaces, con dueños, modos y
+  fechas) si no pasa de 64 MiB ni de 65 536 entradas; si pasa, solo el dueño y
+  el modo. Así un servicio sin root (`grafana`: `USER 472`, `VOLUME
+  /var/lib/grafana`) puede escribir en él. Un volumen con algo más dentro no se
+  toca nunca, ni uno de solo lectura; los atributos extendidos no se copian.
+  Se hace una sola vez: queda una marca en `lost+found/.kling-seeded`, así que
+  un `chmod` en la raíz de un volumen aún vacío no se deshace al reiniciar, y
+  los arranques siguientes no vuelven a montar ni a recorrer nada. Una copia
+  que falla no se marca y se reintenta en el siguiente arranque.
+- **El `lost+found` sigue ahí**: montado justo en el `PGDATA`, `initdb` se
   niega ("directory not empty"), igual que en Docker con un punto de montaje.
   Se monta en el padre (`-volume pgdata:/var/lib/postgresql`) o se fija un
   subdirectorio (`-e PGDATA=/var/lib/postgresql/data/pgdata`).

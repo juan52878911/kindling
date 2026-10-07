@@ -372,3 +372,38 @@ ln -s /etc/passwd "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
 		t.Fatal("el enlace llegó a images/")
 	}
 }
+
+// Reconstruir una imagen que ya existe (import -replace) pasa por la misma
+// comprobación que PUT /images/{name}/blob: si un dorado la usa, 409 y la
+// imagen no cambia.
+func TestConstructorAisladoNoPisaUnaImagenEnUso(t *testing.T) {
+	s, h := testServer(t)
+	bdir := t.TempDir()
+	t.Setenv("KLING_BUILDERS_DIR", bdir)
+	t.Setenv("KLING_BUILDERS_INSECURE", "1")
+	os.MkdirAll(filepath.Join(s.root, "images"), 0o755)
+	instalarConstructor(t, bdir, "oci", `
+set -e
+mkdir -p "$KLING_OUT_DIR"
+echo "$CONTENIDO" > "$KLING_OUT_DIR/$KLING_IMAGE_NAME.ext4"
+`)
+	t.Setenv("CONTENIDO", "v1")
+	if rr := call(t, h, "POST", "/images", `{"name":"pg","builder":"oci","spec":{"ref":"a"}}`); rr.Code != 200 {
+		t.Fatalf("primera construcción: %d %s", rr.Code, rr.Body)
+	}
+	dir := filepath.Join(s.root, "snapshots", "svc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"name":"svc","image":"pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONTENIDO", "v2")
+	rr := call(t, h, "POST", "/images", `{"name":"pg","builder":"oci","spec":{"ref":"b"}}`)
+	if rr.Code != 409 || !strings.Contains(rr.Body.String(), "svc") {
+		t.Fatalf("reconstruir una imagen que usa un dorado = %d %s; quería 409", rr.Code, rr.Body)
+	}
+	if b, _ := os.ReadFile(filepath.Join(s.root, "images", "pg.ext4")); string(b) != "v1\n" {
+		t.Fatalf("la imagen en uso cambió: %q", b)
+	}
+}

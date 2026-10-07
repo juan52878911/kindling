@@ -127,10 +127,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	// El dorado es un volcado de la RAM entera más una copia del overlay: si
 	// no cabe, mejor saberlo antes de soltar volúmenes y pausar (ver
-	// checkDiskParaVolcado).
-	if err := m.checkDiskParaVolcado(max(mc.MemMiB, mc.MemMaxMiB)+int(allocatedBytes(filepath.Join(m.dir(mc.ID), "overlay.ext4"))>>20), "save"); err != nil {
+	// reservarDiscoParaVolcado).
+	soltarDisco, err := m.reservarDiscoParaVolcado(max(mc.MemMiB, mc.MemMaxMiB)+int(allocatedBytes(filepath.Join(m.dir(mc.ID), "overlay.ext4"))>>20), "save")
+	if err != nil {
 		return nil, err
 	}
+	defer soltarDisco()
 	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
 	// o un disco que no viaja con el snapshot (las copias): cada instancia
 	// restaurada despertaría con un montaje que no le corresponde.
@@ -248,6 +250,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// el volcado (para que la plantilla esté parada lo menos posible), y la
 	// limpieza. Si devuelve error, la plantilla no era recuperable y ya quedó
 	// marcada fallida.
+	var avisosCommit []string
 	restaurarPlantilla := func() error {
 		if reapuntado {
 			if err := lento.PatchDrive(limpio, "overlay", ownOverlay); err != nil {
@@ -281,8 +284,15 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			soltados = false
 			// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay
 			// que devolvérselos, o seguirá corriendo escribiendo en su overlay.
+			// Si no se le pueden devolver, la plantilla no sigue en marcha: sin
+			// volumen, lo que escriba acaba en su overlay y muere con ella sin
+			// que nadie lo note. El dorado sí vale (se volcó con los volúmenes
+			// soltados), así que el commit sigue: lo que se pierde es la
+			// plantilla, y queda dicho por qué.
 			if err := m.acquireVolumes(mc); err != nil {
-				log.Printf("warning: template %s ended up without its volumes after commit: %v", mc.Name, err)
+				log.Printf("commit %s: the template could not mount its volumes again: %v", mc.Name, err)
+				m.fail(mc, fmt.Errorf("commit could not give the template its volumes back: %w", err))
+				avisosCommit = append(avisosCommit, fmt.Sprintf("the template %s could not mount its volumes again and was marked failed: %v", mc.Name, err))
 			}
 		}
 		return nil
@@ -346,6 +356,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if !yaPausada {
 		soltados = true
 		if err := m.releaseVolumes(mc); err != nil {
+			// Un puente que no conoce la ruta no soltó nada: no hay que
+			// devolverle nada, ni darla por perdida al no poder hacerlo.
+			soltados = !sinOperacionesDeVolumen(err)
 			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 		}
 
@@ -550,9 +563,22 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	m.anotarIntegridad(name, dir)
 	t.marca("meta")
 	log.Printf("commit %s -> %s: %s", mc.Name, name, t)
+	// El espejo de su memoria en el almacén, ya, en segundo plano: si no, lo
+	// copia entero el primer thaw de una copia congelada en diferencial
+	// (cow_memoria.go). No el de un fork: su dorado es temporal.
+	if !deFork {
+		m.espejarMemoriaDorado(name)
+	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
+	if len(avisosCommit) > 0 {
+		// En una copia: el snap puede ser el de la caché de metas, y los
+		// avisos son de esta respuesta, no del dorado.
+		out := *snap
+		out.Warnings = avisosCommit
+		return &out, nil
+	}
 	return snap, nil
 }
 
@@ -1278,6 +1304,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La clave de compartición es el snapshot de origen: todas sus instancias
 	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
 	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
+	// Las etiquetas del snapshot se heredan; las de la petición mandan. Se
+	// calculan aquí porque el dueño que sale de ellas es el de la cuota.
+	etiquetas := api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels)
+	// Su disco es una copia del overlay del dorado: su tamaño lógico.
+	discoMiB := tamañoLogicoMiB(filepath.Join(m.snapDir(req.From), "overlay.ext4"))
+	if err := m.comprobarCuota(etiquetas[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(snap.MemMiB, snap.MemMaxMiB), DiscoMiB: discoCuota(discoMiB)}); err != nil {
+		return nil, err
+	}
 	if err := m.admitir(); err != nil {
 		return nil, err
 	}
@@ -1409,15 +1444,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB, MemMaxMiB: snap.MemMaxMiB,
-		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
+		DiskMiB: discoMiB,
+		IP:      netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo,
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// El entorno es el del dorado: está en su memoria (entorno.go).
-		EnvKeys: snap.EnvKeys,
-		// Las etiquetas del snapshot se heredan; las de la petición mandan.
-		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
+		EnvKeys:   snap.EnvKeys,
+		Labels:    etiquetas,
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
@@ -1428,10 +1463,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// nombrarla (ver doc.go).
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
-	m.mu.Lock()
-	m.byID[id] = mc
-	m.persist()
-	m.mu.Unlock()
+	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
+	if err := m.publicar(mc); err != nil {
+		m.desmontarRed(netcfg, id)
+		os.RemoveAll(dir)
+		return nil, err
+	}
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
@@ -1467,7 +1504,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	impulso := m.nuevoImpulso(id, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	cg := m.cgroupParaLanzar(id, impulso.tope)
+	cg := m.cgroupParaLanzar(id, impulso.tope, memoriaCgroup(mc))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1631,7 +1668,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	resyncT, resyncOK, listo := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+	resync := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -1661,7 +1698,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, con el techo
 	// de arranque: lo baja entregarRestaurada, abajo.
 	if !enCg {
-		if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 	}
@@ -1682,19 +1719,20 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.socket[id] = sock
 	m.persist()
 	m.mu.Unlock()
+	tel.exito(OpRun, DurRestore, elapsed)
 
 	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
 	// imagen (identidad por copia, etc.), en segundo plano.
-	m.trasRestaurar(ctx, id, api.ResyncInstance, listo)
+	m.trasRestaurar(ctx, id, api.ResyncInstance, resync)
 	// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
 	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada(listo)
+	impulso.entregarRestaurada(resync.listo)
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resyncT, resyncOK))})
+		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))})
 	return &out, nil
 }
 

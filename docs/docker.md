@@ -13,13 +13,14 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 |---|---|
 | Correr una imagen tal cual | `kling run -image redis:7-alpine -mem 256M -wait-ready` (se importa la primera vez) |
 | Con entorno (`-e` de Docker) | `kling run -image postgres:17-alpine -e POSTGRES_PASSWORD` (el valor, del entorno; o `-e K=V`, `-env-file F`): el entorno es de la máquina, llega por MMDS y no entra en la imagen; una imagen por referencia ([imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
-| Importar con nombre, usuario, entrypoint o comando propios | `kling image import <ref> -name N [-user U] [-entrypoint E] [-- cmd...]` |
+| Importar con nombre, usuario, entrypoint o comando propios | `kling image import <ref> -name N [-user U] [-entrypoint E] [-restart always\|on-failure\|no] [-- cmd...]` |
 | Datos que sobrevivan a la máquina | `-volume nombre:/ruta` (un `VOLUME` de la imagen no crea nada solo) |
 | Más disco para la propia máquina | `-disk 4G` (disperso: cuesta lo que se escribe) |
 | Fijar la imagen | la etiqueta se resuelve una vez a digest y queda en la receta; `kling image recipe N` |
 | Saber que está lista | el `HEALTHCHECK` de la imagen, o el primer puerto de `EXPOSE`; `-wait-ready`, `kling machine ready N` |
 | Ver qué dice el servicio | `kling logs -service N` |
-| Pararla como Docker | `kling stop` manda la `STOPSIGNAL` de la imagen antes de apagar |
+| Pararla como Docker | `kling stop` manda la `STOPSIGNAL` de la imagen antes de apagar; el disco de la máquina se queda |
+| Arrancarla otra vez (`docker start`) | `kling start N`: en frío, sobre su disco, con la misma imagen, memoria, volúmenes y red. El entorno de `-e` no se guarda: hay que volver a darlo (`kling start -e POSTGRES_PASSWORD N`), y si falta una clave lo dice |
 | Una plantilla caliente y copias | `kling save N plantilla` y `kling run -from plantilla`: copias listas en decenas de milisegundos con el estado de la plantilla |
 | Dormir y despertar copias | `kling freeze`, `kling thaw` (o `-ttl 10m`): una copia dormida cuesta en disco solo lo que cambió |
 | Salir a internet, o no | `-egress none` (por defecto), `allowlist -allow dominio`, `internet`; nunca a redes privadas |
@@ -109,6 +110,14 @@ espejo de la memoria en el almacén y `-disk`.
 - **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
   se entra por el gateway o con `kling exec`.
 - **Imágenes sin `sh`** (distroless): el init es un script y se rechazan.
+- **`docker start` sin volver a dar el entorno**: `kling start` lo exige,
+  porque el daemon solo guarda los nombres de las variables. Docker guarda los
+  valores con el contenedor.
+- **`docker restart`**: es `kling stop` y `kling start`.
+- **Una parada no retiene su imagen**: Docker no deja borrar la imagen de un
+  contenedor parado; kindling sí. Si se borró, `kling start` lo dice y la
+  máquina conserva su disco: se vuelve a importar con el mismo nombre
+  (`kling image import -name N <ref>`) y arranca otra vez.
 - **Despertar aún más rápido con diffs grandes**: con cientos de MiB de
   diff, despertar cuesta ~40 µs por tramo de páginas (24 000 tramos en
   Hindsight, 1,1 s). Un servidor de páginas (UFFD) que sirviera base + diff

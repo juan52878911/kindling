@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -142,11 +142,80 @@ func (p *progressBody) Close() error { return p.body.Close() }
 // —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
 // CABECERAS, que es lo que separa "está trabajando" de "no hay nadie"; una vez
 // que llegan, wrapGuestBody acota por su cuenta el progreso del CUERPO.
-var guestClient = &http.Client{Transport: &http.Transport{
-	ResponseHeaderTimeout: 5 * time.Minute,
-	MaxIdleConnsPerHost:   8,
-	IdleConnTimeout:       90 * time.Second,
-}}
+var guestClient = &http.Client{Transport: guestTransports}
+
+// guestTransports da un transporte por dirección de invitado, para poder
+// soltar las conexiones de UNO cuando su red se desmonta (forgetIP) sin tocar
+// las de los demás: con uno compartido, cada stop, rm o sandbox retirado
+// cerraba las ociosas hacia TODAS las máquinas, y en un host con muchas altas
+// y bajas cada exec volvía a abrir conexión.
+var guestTransports = &transportesInvitado{}
+
+// maxTransportesInvitado acota el mapa. En Linux cada transporte se olvida al
+// desmontar la red de su máquina; en macOS la dirección es un reenvío de
+// 127.0.0.1 con un puerto nuevo por VMM que nadie olvida (al morir kling-vz
+// el reenvío se cierra y sus conexiones con él). Pasado el tope se empieza de
+// cero: cuesta una conexión nueva por invitado, nada más.
+const maxTransportesInvitado = 1024
+
+type transportesInvitado struct {
+	mu    sync.Mutex
+	porID map[string]*http.Transport // host:puerto -> transporte
+}
+
+func (g *transportesInvitado) de(host string) *http.Transport {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if t := g.porID[host]; t != nil {
+		return t
+	}
+	if g.porID == nil || len(g.porID) >= maxTransportesInvitado {
+		for _, t := range g.porID {
+			t.CloseIdleConnections()
+		}
+		g.porID = map[string]*http.Transport{}
+	}
+	t := &http.Transport{
+		ResponseHeaderTimeout: 5 * time.Minute,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	g.porID[host] = t
+	return t
+}
+
+func (g *transportesInvitado) RoundTrip(req *http.Request) (*http.Response, error) {
+	return g.de(req.URL.Host).RoundTrip(req)
+}
+
+// CloseIdleConnections cierra las ociosas de todos (http.Client lo reenvía).
+func (g *transportesInvitado) CloseIdleConnections() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, t := range g.porID {
+		t.CloseIdleConnections()
+	}
+}
+
+// forgetIP cierra las ociosas hacia ip (en cualquier puerto) y olvida sus
+// transportes. Las peticiones en curso siguen en el suyo hasta acabar.
+func (g *transportesInvitado) forgetIP(ip string) {
+	if ip == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for host, t := range g.porID {
+		h, _, err := net.SplitHostPort(host)
+		if err != nil {
+			h = host
+		}
+		if h == ip {
+			t.CloseIdleConnections()
+			delete(g.porID, host)
+		}
+	}
+}
 
 type Server struct {
 	socket     string
@@ -177,11 +246,25 @@ type Server struct {
 	// muConstructor los pone en fila: ver barrerProcesos.
 	constructor   *usuarioConstructor
 	muConstructor sync.Mutex
+
+	// construyendo es un cerrojo por nombre de imagen: dos construcciones
+	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.
+	muConstruyendo sync.Mutex
+	construyendo   map[string]*cerrojoImagen
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
-// Listen: la política no cambia con el daemon en marcha.
-func (s *Server) SetAuthz(p *Politica) { s.authz = p }
+// Listen: la política no cambia con el daemon en marcha. Sus cuotas las
+// aplica el manager, que es quien puede contarlas sin carreras
+// (internal/machine/cuota_inquilino.go).
+func (s *Server) SetAuthz(p *Politica) {
+	s.authz = p
+	if p != nil && p.tieneCuotas() {
+		s.mgr.SetCuotas(p.cuotaDe)
+	} else {
+		s.mgr.SetCuotas(nil)
+	}
+}
 
 // SetShareConfig fija de dónde lee el daemon su configuración de carpetas
 // compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en
@@ -212,6 +295,11 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
 	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.
 	mgr.FijarOrigen(Version, fcVersion)
+	// Una máquina parada o borrada deja su IP a la siguiente (kling start
+	// conserva la suya): lo que guardara guestClient contra ella es un TCP
+	// muerto, y el primer exec del VMM nuevo se comía un RST. Solo las de esa
+	// IP: las de las demás máquinas siguen valiendo.
+	mgr.OnGuestGone(guestTransports.forgetIP)
 	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
 		fcVersion: fcVersion}, nil
 }
@@ -247,6 +335,7 @@ func (s *Server) rutas() []ruta {
 		{"POST /machines/{ref}/credentials", AccionMaquina, revisarCredenciales, s.handleCredentials},
 		{"DELETE /machines/{ref}/credentials/{env}", AccionMaquina, nil, s.handleRemoveCredential},
 		{"POST /machines/{ref}/stop", AccionMaquina, nil, s.handleStop},
+		{"POST /machines/{ref}/start", AccionMaquina, nil, s.handleStart},
 		{"DELETE /machines/{ref}", AccionMaquina, nil, s.handleRemove},
 		{"PUT /machines/{ref}/labels", AccionMaquina, revisarEtiquetas, s.handleLabels},
 		{"POST /machines/{ref}/commit", AccionMaquina, revisarCommit, s.handleCommit},
@@ -338,7 +427,10 @@ func conVersionAPI(h http.Handler) http.Handler {
 // entera; los nombres se validan además donde se construye la ruta.
 func sinBarrasEscapadas(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if raw := r.URL.RawPath; raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
+		// La contrabarra se mira también ya desescapada: %5C es como Go la
+		// escapa por defecto, así que con %5C (mayúscula) RawPath queda vacío
+		// y mirar solo RawPath no la veía.
+		if raw := r.URL.RawPath; strings.ContainsRune(r.URL.Path, '\\') || raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
 			strings.Contains(raw, "%5C") || strings.Contains(raw, "%5c")) {
 			fail(w, http.StatusBadRequest, errors.New("escaped slashes are not allowed in the path: no name contains one"))
 			return
@@ -437,9 +529,13 @@ func (s *Server) Listen(ctx context.Context) error {
 	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
 	// que ninguna petición cambie el estado después de la limpieza.
 	<-shutdownDone
-	// Con las peticiones ya drenadas, esta es la última escritura del estado y
-	// nadie va a cambiarlo por detrás. Se espera de verdad: perder la última
-	// transición hace que el arranque siguiente reconstruya algo que no es.
+	// Con las peticiones ya drenadas, esta es la última escritura del estado.
+	// Shutdown se rinde a los 5 s, y una petición lenta (un freeze de varios
+	// GiB) o una operación del vigilante puede seguir en marcha: Close espera
+	// a las operaciones de ciclo de vida en curso antes de cerrar la escritura
+	// (con plazo), y la que acabe aún más tarde escribe su propia foto. Perder
+	// la última transición hace que el arranque siguiente reconstruya algo
+	// que no es.
 	s.mgr.Close()
 	_ = os.Remove(s.socket)
 	return nil
@@ -539,6 +635,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
+	// Los ajustes del host no son de ningún inquilino.
+	if _, filtra := inquilinoDe(r); !filtra {
+		info.Tuning = s.ajustes()
+	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
 	}
@@ -549,6 +649,29 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info = api.Info{Version: Version, API: api.APIVersion, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// ajustes son los del manager más los que viven en el daemon: de dónde salen
+// los constructores y con qué usuario corren los que lo admiten.
+func (s *Server) ajustes() map[string]string {
+	a := s.mgr.Ajustes()
+	a["KLING_BUILDERS_DIR"] = ajusteBuildersDir()
+	a["builder_user"] = "daemon"
+	if s.constructor != nil {
+		a["builder_user"] = s.constructor.Nombre
+	}
+	return a
+}
+
+// ajusteBuildersDir es lo que se dice de KLING_BUILDERS_DIR. Sin la variable,
+// los constructores sin root son el propio binario del daemon
+// (resolverConstructor), y decir solo el directorio por defecto hacía creer
+// que se usaban los instalados ahí.
+func ajusteBuildersDir() string {
+	if d := os.Getenv("KLING_BUILDERS_DIR"); d != "" {
+		return d
+	}
+	return "unset (oci, debian, android: the daemon's own binary; others: " + buildersDirPorDefecto + ")"
 }
 
 // contarMaquinas es cuántas máquinas ve quien pregunta.
@@ -616,10 +739,24 @@ func runStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
+// cicloStatus traduce los errores de las operaciones sobre una máquina que ya
+// existe (freeze, pause, thaw, stop, rm...): 404 si no existe, 409 si su
+// estado no admite la operación. Lo demás sigue siendo 400, como siempre; un
+// api.StatusError del manager (507, 503...) manda sobre todo esto (ver fail).
+func cicloStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrNoMachine):
+		return http.StatusNotFound
+	case errors.Is(err, machine.ErrWrongState):
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Freeze(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -628,7 +765,7 @@ func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Pause(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -637,7 +774,7 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Thaw(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -668,7 +805,7 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
 	res, err := s.mgr.SqueezeWith(r.Context(), r.PathValue("ref"), force)
 	if err != nil {
-		code := http.StatusBadRequest
+		code := cicloStatus(err)
 		if errors.Is(err, machine.ErrSqueezeShared) {
 			code = http.StatusConflict
 		}
@@ -683,13 +820,13 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 // entrega a Firecracker. No se interpreta aquí: el esquema lo entiende el bridge.
 func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 	var data json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, api.MaxMMDSBytes)).Decode(&data); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	mc, err := s.mgr.PutMMDS(r.Context(), r.PathValue("ref"), data)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -703,7 +840,7 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -714,8 +851,8 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
 	if err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "has no credential") {
+		code := cicloStatus(err)
+		if strings.Contains(err.Error(), "has no credential") {
 			code = http.StatusNotFound
 		}
 		fail(w, code, err)
@@ -745,7 +882,23 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Stop(r.PathValue("ref"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+// handleStart arranca otra vez una máquina parada. El cuerpo (StartRequest)
+// es opcional: sin entorno no hace falta mandarlo.
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	var req api.StartRequest
+	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	mc, err := s.mgr.Start(r.Context(), r.PathValue("ref"), req.Env)
+	if err != nil {
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -753,7 +906,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Remove(r.PathValue("ref")); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -920,7 +1073,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !s.eventoVisible(r, ev) {
+			if ev.Type == api.EvDropped {
+				// El aviso de descartes no es de ninguna máquina. A un
+				// inquilino se le dice que perdió eventos, pero no cuántos: el
+				// recuento incluye los de las máquinas de los demás.
+				if _, filtra := inquilinoDe(r); filtra {
+					ev.Dropped, ev.Message = 0, "events dropped: this subscriber did not read them in time"
+				}
+			} else if !s.eventoVisible(r, ev) {
 				continue
 			}
 			if enc.Encode(ev) != nil {

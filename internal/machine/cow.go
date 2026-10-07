@@ -100,7 +100,7 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 // ficheros, que tendrá que cargar su módulo al montarlo (en un contenedor LXC
 // no puede, y el primer run -from lo descubrirá).
 func notaAlmacenPendiente(fs string, conoce bool) string {
-	n := fmt.Sprintf(" (%s store, created on the first run -from", fs)
+	n := fmt.Sprintf(" (%s store, created on the first save or run -from", fs)
 	if !conoce {
 		n += fmt.Sprintf("; the kernel does not list %s yet: it has to load its module to mount it", fs)
 	}
@@ -148,6 +148,13 @@ func (e *estadoCoW) degradar(motivo string) {
 	}
 }
 
+// degradarSinAlmacen degrada (degradar) porque el almacén no se pudo
+// preparar (errAlmacenNoDisponible): lo mismo da quién lo descubrió, un run
+// -from o el espejo tras un save.
+func (e *estadoCoW) degradarSinAlmacen(err error) {
+	e.degradar(fmt.Sprintf("copy-on-write store unavailable (%v): copying overlays until the daemon restarts", err))
+}
+
 // SetCoW fija el modo de copias de disco. Se llama una vez, al arrancar el
 // daemon y antes de servir; la detección prueba FICLONE de verdad.
 func (m *Manager) SetCoW(cfg CoWConfig) {
@@ -184,8 +191,8 @@ func (m *Manager) CoWInfo() *api.CoWInfo {
 	m.cow.mu.Unlock()
 	if m.alm != nil {
 		info.Store = m.alm.info()
-		// En modo store, hasta el primer run -from el almacén no existe (o no
-		// se ha montado): se crea entonces. Decir "store" sin más daba por
+		// En modo store, hasta el primer save o run -from el almacén no
+		// existe (o no se ha montado): se crea entonces. Decir "store" sin más daba por
 		// hecho algo que aún no se ha probado.
 		info.Pending = info.Mode == cowModoStore && !m.alm.estaListo()
 	}
@@ -261,13 +268,13 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 			}
 			log.Printf("warning: %v; copying the overlay of %s to the data root instead", err, shortID(id))
 		} else if errors.Is(err, errAlmacenNoDisponible) {
-			m.cow.degradar(fmt.Sprintf("copy-on-write store unavailable (%v): copying overlays until the daemon restarts", err))
+			m.cow.degradarSinAlmacen(err)
 		} else {
 			log.Printf("warning: copy-on-write store: %v; copying the overlay of %s instead", err, shortID(id))
 		}
 	}
 	if out, err := copiarDisco(ctx, src, dst); err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%s", conSalida(err, out))
 	}
 	hecho := cowModoCopy
 	if modo == cowModoClone {
@@ -544,6 +551,11 @@ type almacenCoW struct {
 	limitar       func(d, overlay string, bytes int64) error
 	quitarDir     func(d string) error
 	cuota         string // lo que detectó detectarCuota al montar
+
+	// espejando son los espejos de memoria que alguien copia ahora mismo sin
+	// a.mu (baseMemoria): la ruta definitiva y un canal que se cierra al
+	// acabar, bien o mal.
+	espejando map[string]chan struct{}
 }
 
 // holguraCuota es lo que se deja por encima del tamaño lógico del overlay: el
@@ -1176,7 +1188,7 @@ func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado, memoriaDor
 		}
 		hijos, _ := os.ReadDir(dir)
 		for _, h := range hijos {
-			if h.Name() != vigente && h.Name() != vigenteMem {
+			if h.Name() != vigente && h.Name() != vigenteMem && !a.espejoEnCurso(dir, h.Name()) {
 				_ = os.Remove(filepath.Join(dir, h.Name()))
 			}
 		}
@@ -1215,7 +1227,7 @@ func (a *almacenCoW) crecer(ctx context.Context, nuevo, añadir int64) error {
 	defer a.mu.Unlock()
 	if !a.montado {
 		if !a.existe() {
-			return errors.New("there is no copy-on-write store yet: it is created on the first run -from")
+			return errors.New("there is no copy-on-write store yet: it is created on the first save or run -from")
 		}
 		return fmt.Errorf("the copy-on-write store %s is not mounted", a.dir)
 	}

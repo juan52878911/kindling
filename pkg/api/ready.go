@@ -64,6 +64,9 @@ type GuestReady struct {
 	// Detail explica por qué no está listo: la salida (recortada) de la sonda
 	// o del gancho que falló.
 	Detail string `json:"detail,omitempty"`
+	// StartPeriodSeconds es el ReadyStartPeriodSeconds del servicio de la
+	// imagen: el daemon alarga eso el impulso de CPU del arranque.
+	StartPeriodSeconds int `json:"start_period_seconds,omitempty"`
 }
 
 // Declares dice si la imagen declara algo (sonda o ganchos): sin nada, "listo"
@@ -86,6 +89,9 @@ type ReadyResult struct {
 	// Guest es lo que contestó el agente; nil si no hay agente o es anterior
 	// a /ready.
 	Guest *GuestReady `json:"guest,omitempty"`
+	// Detail explica un "no listo" que el agente no pudo explicar: no
+	// contestó, o contestó un error (con Guest, el motivo va en Guest.Detail).
+	Detail string `json:"detail,omitempty"`
 	// WaitedMS es cuánto se esperó en esta llamada.
 	WaitedMS int64 `json:"waited_ms"`
 }

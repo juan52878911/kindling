@@ -17,7 +17,7 @@
 // Uso:
 //
 //	go run ./tools/mejora-continua prepare -data <dir con train/valid/test.jsonl> -out <dir>
-//	kling chispa train -data <out>/gold.jsonl -valid <out>/valid.jsonl -o <out>/intent.chispa
+//	kling ai chispa train -data <out>/gold.jsonl -valid <out>/valid.jsonl -o <out>/intent.chispa
 //	go run ./tools/mejora-continua run -out <dir>
 package main
 
@@ -241,7 +241,7 @@ func run(args []string) error {
 	}
 	v1, err := os.ReadFile(filepath.Join(abs, "intent.chispa"))
 	if err != nil {
-		return fmt.Errorf("train v1 first (kling chispa train ... -o %s/intent.chispa): %w", abs, err)
+		return fmt.Errorf("train v1 first (kling ai chispa train ... -o %s/intent.chispa): %w", abs, err)
 	}
 	if err := os.WriteFile(filepath.Join(abs, "live.chispa"), v1, 0o644); err != nil {
 		return err

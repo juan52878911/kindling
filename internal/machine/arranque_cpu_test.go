@@ -142,7 +142,7 @@ func impulsoQueSeVe(t *testing.T, m *Manager, id string) int {
 func arranqueComoRun(m *Manager, id string, pct, vcpus int, fijo bool, err error) error {
 	impulso := m.nuevoImpulso(id, pct, vcpus, fijo)
 	defer impulso.fin()
-	if warn := m.limitCPU(id, os.Getpid(), impulso.tope); warn != "" {
+	if warn := m.limitCPU(id, os.Getpid(), impulso.tope, 0); warn != "" {
 		return errors.New(warn)
 	}
 	if err != nil {
@@ -276,6 +276,42 @@ func TestImpulsoBajaAlAgotarElPlazoDeLaSonda(t *testing.T) {
 	esperarSecuencia(t, cg, id, []int{100, 50})
 }
 
+// Una imagen cuyo HEALTHCHECK trae StartPeriod (el agente lo dice en /ready)
+// tiene ese tiempo de más: al agotar el plazo sigue impulsada, y baja al
+// agotar plazo + StartPeriod.
+func TestImpulsoConStartPeriodAlargaElPlazo(t *testing.T) {
+	m, cg, contesta := managerConCgroupFalso(t)
+	t.Setenv("KLING_READY_BOOST", "200ms")
+	m.bus = events.New()
+	evs, baja := m.bus.Subscribe()
+	defer baja()
+	id := "a2c00013000000000"
+	addConIP(m, id)
+
+	t0 := time.Now()
+	if err := arranqueComoRun(m, id, 50, 1, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	listosFalsos.Store(id, api.GuestReady{Probe: true, Detail: "not yet", StartPeriodSeconds: 1})
+	close(contesta)
+	time.Sleep(600 * time.Millisecond)
+	if got := cg.de(id); !reflect.DeepEqual(got, []int{100}) {
+		t.Fatalf("dentro del start period cpu.max = %v, quería [100]", got)
+	}
+	esperarSecuencia(t, cg, id, []int{100, 50})
+	if d := time.Since(t0); d < 1100*time.Millisecond {
+		t.Fatalf("bajó a los %s, antes de plazo + start period", d)
+	}
+	select {
+	case ev := <-evs:
+		if !strings.Contains(ev.Message, "not ready after 1.2s") {
+			t.Fatalf("evento = %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no se publicó el fin del impulso")
+	}
+}
+
 // Un agente que nunca contesta (imagen sin agente) no deja la máquina con el
 // impulso para siempre: al agotar plazoImpulsoCPU, el techo baja igual.
 func TestImpulsoBajaAlAgotarElPlazoSinAgente(t *testing.T) {
@@ -354,7 +390,7 @@ func TestImpulsoPanicoBajaElTope(t *testing.T) {
 		defer func() { _ = recover() }()
 		impulso := m.nuevoImpulso(id, 50, 1, false)
 		defer impulso.fin()
-		m.limitCPU(id, os.Getpid(), impulso.tope)
+		m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 		panic("boom")
 	}()
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{100, 50}) {
@@ -485,7 +521,7 @@ func TestImpulsoComoThawYaListo(t *testing.T) {
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 2, false)
 		defer impulso.fin()
-		f := m.cgroupParaLanzar(id, impulso.tope)
+		f := m.cgroupParaLanzar(id, impulso.tope, 0)
 		if f == nil {
 			t.Fatal("cgroupParaLanzar no preparó el cgroup")
 		}
@@ -511,7 +547,7 @@ func TestImpulsoComoThawEsperandoLosGanchos(t *testing.T) {
 	func() {
 		impulso := m.nuevoImpulso(id, 50, 1, false)
 		defer impulso.fin()
-		m.limitCPU(id, os.Getpid(), impulso.tope)
+		m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 		fijarListo(m, id, api.ReadyWaiting)
 		impulso.entregarRestaurada(&api.GuestReady{Probe: true, Ready: true, HasHooks: true})
 	}()
@@ -565,7 +601,7 @@ func TestImpulsoRestauradaSinAgenteBajaYa(t *testing.T) {
 	addConIP(m, id)
 
 	impulso := m.nuevoImpulso(id, 50, 2, false)
-	m.limitCPU(id, os.Getpid(), impulso.tope)
+	m.limitCPU(id, os.Getpid(), impulso.tope, 0)
 	impulso.entregarRestaurada(nil)
 	impulso.fin()
 	if got := cg.de(id); !reflect.DeepEqual(got, []int{200, 50}) {
@@ -585,7 +621,7 @@ func TestImpulsoComoThawFallido(t *testing.T) {
 	thaw := func() error {
 		impulso := m.nuevoImpulso(id, 20, 1, false)
 		defer impulso.fin()
-		if f := m.cgroupParaLanzar(id, impulso.tope); f != nil {
+		if f := m.cgroupParaLanzar(id, impulso.tope, 0); f != nil {
 			defer f.Close()
 		}
 		return errors.New("loading snapshot: TSC")

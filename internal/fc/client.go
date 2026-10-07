@@ -259,12 +259,21 @@ func (c *Client) LoadSnapshotTracking(ctx context.Context, snapPath, memPath str
 // vez de morir por el OOM killer del propio invitado. statsPollingSec>0 activa
 // las estadísticas del globo —imprescindibles para saber cuánta memoria libre
 // tiene el invitado antes de apretarlo—.
-func (c *Client) SetBalloon(ctx context.Context, amountMiB int, deflateOnOOM bool, statsPollingSec int) error {
-	return c.do(ctx, http.MethodPut, "/balloon", map[string]any{
+//
+// freePageReporting activa el informe de páginas libres (virtio-balloon
+// VIRTIO_BALLOON_F_REPORTING, Firecracker 1.14+): el invitado avisa de los
+// bloques que libera y Firecracker los suelta, sin inflar nada. Solo se manda
+// si es true: un Firecracker anterior rechaza el campo con un 400.
+func (c *Client) SetBalloon(ctx context.Context, amountMiB int, deflateOnOOM bool, statsPollingSec int, freePageReporting bool) error {
+	cuerpo := map[string]any{
 		"amount_mib":               amountMiB,
 		"deflate_on_oom":           deflateOnOOM,
 		"stats_polling_interval_s": statsPollingSec,
-	})
+	}
+	if freePageReporting {
+		cuerpo["free_page_reporting"] = true
+	}
+	return c.do(ctx, http.MethodPut, "/balloon", cuerpo)
 }
 
 // PatchBalloon cambia el tamaño del globo en caliente.

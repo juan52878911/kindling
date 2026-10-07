@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,5 +297,57 @@ func TestInfoYCabecerasLlevanElAPI(t *testing.T) {
 	}
 	if rr.Header().Get(api.HeaderVersion) != Version {
 		t.Fatalf("%s = %q", api.HeaderVersion, rr.Header().Get(api.HeaderVersion))
+	}
+}
+
+// Al desmontar la red de una máquina el daemon suelta las conexiones que
+// guarda hacia SU IP, y solo esas: antes cerraba las ociosas hacia todos los
+// invitados, y cada stop o rm hacía que el siguiente exec a cada máquina viva
+// volviera a abrir conexión.
+func TestGuestTransportsOlvidaSoloEsaIP(t *testing.T) {
+	var nuevas atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			nuevas.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	g := &transportesInvitado{}
+	c := &http.Client{Transport: g}
+	pedir := func() {
+		t.Helper()
+		resp, err := c.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	pedir()
+	g.forgetIP("10.200.0.2") // otra máquina
+	pedir()
+	if n := nuevas.Load(); n != 1 {
+		t.Fatalf("%d conexiones: olvidar otra IP cerró la de esta", n)
+	}
+	g.forgetIP("127.0.0.1")
+	pedir()
+	if n := nuevas.Load(); n != 2 {
+		t.Fatalf("%d conexiones: olvidar su IP no soltó la guardada", n)
+	}
+	if _, ok := g.porID[strings.TrimPrefix(srv.URL, "http://")]; !ok {
+		t.Fatal("el transporte no volvió a crearse")
+	}
+}
+
+// El mapa de transportes está acotado: pasado el tope se empieza de cero.
+func TestGuestTransportsAcotado(t *testing.T) {
+	g := &transportesInvitado{}
+	for i := 0; i <= maxTransportesInvitado; i++ {
+		g.de("127.0.0.1:" + strconv.Itoa(20000+i))
+	}
+	if n := len(g.porID); n > maxTransportesInvitado || n == 0 {
+		t.Fatalf("%d transportes, tope %d", n, maxTransportesInvitado)
 	}
 }

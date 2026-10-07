@@ -37,7 +37,7 @@ const (
 	KindChispa = "chispa"
 	KindVON    = "von"
 	// KindEmbed es un codificador de frases servido como un VON (dorado de
-	// `kling models add` con kind embed): la capa 3 de las tareas de
+	// `kling ai model add` con kind embed): la capa 3 de las tareas de
 	// intención (intent.go).
 	KindEmbed = "embed"
 )
@@ -62,8 +62,8 @@ type ModelConfig struct {
 	// Path es el .chispa (kind chispa, backend inprocess). Relativo = relativo al
 	// fichero de config.
 	Path string `json:"path,omitempty"`
-	// Snapshot es el dorado de `kling models add` (kind von o embed) o de
-	// `kling chispa deploy` (kind chispa, backend microvm).
+	// Snapshot es el dorado de `kling ai model add` (kind von o embed) o de
+	// `kling ai chispa deploy` (kind chispa, backend microvm).
 	Snapshot string `json:"snapshot,omitempty"`
 	// Backend dice DÓNDE vive un modelo chispa: "" o "inprocess" (por defecto,
 	// dentro de este proceso, µs, sin daemon) o "microvm" (una réplica de
@@ -278,7 +278,7 @@ func (c *Config) Validate() error {
 				}
 			case BackendMicroVM:
 				if m.Snapshot == "" || m.Path != "" {
-					errs = append(errs, fmt.Errorf("model %q: a chispa model with backend microvm needs snapshot (and no path), from kling chispa deploy", n))
+					errs = append(errs, fmt.Errorf("model %q: a chispa model with backend microvm needs snapshot (and no path), from kling ai chispa deploy", n))
 				}
 			default:
 				errs = append(errs, fmt.Errorf("model %q: backend must be inprocess or microvm, not %q", n, m.Backend))

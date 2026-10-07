@@ -97,6 +97,9 @@ func printReady(out io.Writer, res *api.ReadyResult, asJSON bool) error {
 			fmt.Fprintf(out, "  why    %s\n", g.Detail)
 		}
 	}
+	if res.Detail != "" && (res.Guest == nil || res.Guest.Detail == "") {
+		fmt.Fprintf(out, "  why    %s\n", res.Detail)
+	}
 	if !res.OK() {
 		return &errConCodigo{code: 1, err: fmt.Errorf("%s is not ready", res.Name)}
 	}

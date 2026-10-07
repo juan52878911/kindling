@@ -97,6 +97,11 @@ func (c *Client) Resolve(ctx context.Context, ref ImageRef) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", ref, err)
 	}
+	// Antes que el digest: el de un schema1 firmado no es el sha256 de lo
+	// que llega, y el error sería otro.
+	if schema1(body, resp.Header.Get("Content-Type")) {
+		return "", errSchema1(ref.String())
+	}
 	digest := sha(body)
 	if h := resp.Header.Get("Docker-Content-Digest"); h != "" && h != digest {
 		return "", fmt.Errorf("%s: registry says %s but the manifest it sent is %s", ref, h, digest)

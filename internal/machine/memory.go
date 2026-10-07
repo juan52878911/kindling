@@ -79,8 +79,9 @@ func meminfoMiB(key string) int {
 // reclamables.
 //
 // Devuelve 0 si no se puede saber; quien llama debe tratarlo como "no comprobar"
-// en vez de como "no hay memoria".
-func availableMiB() int { return meminfoMiB("MemAvailable") }
+// en vez de como "no hay memoria". En variable para que los tests simulen un
+// host lleno.
+var availableMiB = func() int { return meminfoMiB("MemAvailable") }
 
 // freeMiB devuelve la memoria REALMENTE libre (MemFree), sin contar caché.
 //
@@ -169,11 +170,21 @@ func (m *Manager) shareAnchoredLocked(shareKey string) bool {
 		return true
 	}
 	for _, mc := range m.byID {
-		if mc.From == shareKey && mc.State == api.StateRunning {
+		if mc.From == shareKey && mc.State == api.StateRunning && mapeaSuDorado(mc) {
 			return true
 		}
 	}
 	return false
+}
+
+// mapeaSuDorado: la máquina salió de un dorado (From) y no ha vuelto a
+// arrancar en frío. kling start arranca una parada desde su disco, sin el
+// mem.file del dorado, pero conserva From; BootMS > 0 es lo que lo dice (un
+// run -from no lo pone, y Start siempre lo deja en 1 ms o más). Contarla
+// inflaba la caché caliente y daba el dorado por anclado: un run -from
+// reservaba solo 1/shareReserveDiv sin que nadie mapeara el fichero.
+func mapeaSuDorado(mc *api.Machine) bool {
+	return mc.From != "" && mc.BootMS == 0
 }
 
 // hotMemFilesMiBLocked estima cuánta caché de página es atribuible a los
@@ -206,7 +217,9 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		if mc.State != api.StateRunning && mc.State != api.StatePaused {
 			continue
 		}
-		count(mc.From)
+		if mapeaSuDorado(mc) {
+			count(mc.From)
+		}
 		// Una máquina descongelada mapea su propio volcado, no el dorado: éste SÍ
 		// cambia con lo que el invitado va escribiendo, así que no se cachea.
 		total += allocatedBytes(filepath.Join(m.dir(mc.ID), "mem.file"))

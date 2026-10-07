@@ -28,6 +28,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
+// argsVMM: kling-vz ya acepta un almacén MMDS de api.MaxMMDSBytes y no
+// conoce los argumentos de Firecracker.
+func argsVMM() []string { return nil }
+
 // putSinMontar: macOS no monta ext4; intentarPut escribe con debugfs -w
 // (put_debugfs.go).
 const putSinMontar = true
@@ -422,7 +426,7 @@ func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() erro
 	}
 	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
 		_ = os.Remove(dst)
-		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("copying %s: %s", filepath.Base(src), conSalida(err, out))
 	}
 	return modo, nil
 }

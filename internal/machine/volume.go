@@ -581,7 +581,7 @@ func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, e
 	}
 	codigo := ee.ExitCode()
 	if codigo&^3 == 0 {
-		return true, out, nil
+		return !soloResumenE2fsck(out), out, nil
 	}
 	var que []string
 	for _, b := range []struct {
@@ -594,6 +594,25 @@ func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, e
 	}
 	return false, out, fmt.Errorf("e2fsck %s exited with %d (%s): %s", filepath.Base(path), codigo,
 		strings.Join(que, ", "), strings.TrimSpace(string(out)))
+}
+
+// reResumenE2fsck es la línea con la que e2fsck -p acaba siempre.
+var reResumenE2fsck = lazyre.New(`^[^:]+: \d+/\d+ files \([^)]*\), \d+/\d+ blocks$`)
+
+// soloResumenE2fsck dice si e2fsck no dijo nada más que su resumen. Así sale
+// con 1 cuando solo corrigió, en silencio, los recuentos de bloques e inodos
+// libres de un ext4 sin journal que no se desmontó (el overlay tras un stop,
+// que mata el VMM): eso no es un daño, y avisar "repaired" en cada kling start
+// era ruido.
+func soloResumenE2fsck(out []byte) bool {
+	hay := false
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if !reResumenE2fsck.MatchString(strings.TrimSpace(l)) {
+			return false
+		}
+		hay = true
+	}
+	return hay
 }
 
 // flushVolume le pide al invitado que vacíe su caché al disco.
@@ -643,6 +662,22 @@ func (m *Manager) acquireVolumes(mc *api.Machine) error {
 	return m.guestVolumeOp(mc, "acquire", 30*time.Second)
 }
 
+// errPuenteSinVolumenes es el 404 de un puente que no conoce /volume/<op>:
+// la petición NO se aplicó. Quien soltó volúmenes lo mira para saber que no
+// hay nada que devolver (y que una máquina viva no se quedó sin ellos).
+type errPuenteSinVolumenes struct{ op string }
+
+func (e errPuenteSinVolumenes) Error() string {
+	return fmt.Sprintf("this image's bridge does not know how to %s volumes: "+
+		"it predates unmounted snapshots. Update it with `kling mcp refresh-bridge`", e.op)
+}
+
+// sinOperacionesDeVolumen dice si err es ese 404.
+func sinOperacionesDeVolumen(err error) bool {
+	var e errPuenteSinVolumenes
+	return errors.As(err, &e)
+}
+
 func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration) error {
 	if mc == nil || !mc.Reachable() || len(mc.Volumes) == 0 {
 		return nil
@@ -654,7 +689,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("asking guest to %s its volumes: %w", op, err)
 	}
@@ -665,8 +700,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("this image's bridge does not know how to %s volumes: "+
-				"it predates unmounted snapshots. Update it with `kling images refresh`", op)
+			return errPuenteSinVolumenes{op}
 		}
 		return fmt.Errorf("guest could not %s its volumes: %s", op, strings.TrimSpace(string(b)))
 	}
@@ -689,7 +723,7 @@ func (m *Manager) stopService(mc *api.Machine) {
 		return
 	}
 	t0 := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		log.Printf("%s: guest did not stop its service before dying: %v", mc.Name, err)
 		return
@@ -701,21 +735,15 @@ func (m *Manager) stopService(mc *api.Machine) {
 // serviceStopTimeout es cuánto se espera a que el invitado pare su servicio.
 var serviceStopTimeout = 15 * time.Second
 
-func (m *Manager) flushVolume(mc *api.Machine) {
+// conservaDisco dice que el overlay sobrevive al VMM (Stop: kling start
+// arranca otra vez sobre él). Entonces se pide aunque no haya volúmenes: el
+// overlay no lleva journal, y lo que quedase en la caché del invitado se
+// perdía con el SIGKILL.
+func (m *Manager) flushVolume(mc *api.Machine, conservaDisco bool) {
 	if mc == nil || !mc.Reachable() || mc.State != api.StateRunning {
 		return
 	}
-	// Solo si hay algo que pueda haberse escrito. Un invitado con únicamente
-	// volúmenes de solo lectura no tiene nada en caché que perder, y pedirle un
-	// vaciado retrasaría su apagado a cambio de nada.
-	escribible := false
-	for _, v := range mc.Volumes {
-		if !v.ReadOnly {
-			escribible = true
-			break
-		}
-	}
-	if !escribible {
+	if !hayQueVaciar(mc, conservaDisco) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -725,12 +753,30 @@ func (m *Manager) flushVolume(mc *api.Machine) {
 	if err != nil {
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := listoClient.Do(req)
 	if err != nil {
 		log.Printf("%s: guest did not flush its volumes before dying: %v", mc.Name, err)
 		return
 	}
 	resp.Body.Close()
+}
+
+// hayQueVaciar dice si pedirle al invitado que vacíe su caché antes de
+// matarlo. Solo si hay algo que pueda haberse escrito y vaya a seguir ahí:
+// un volumen escribible, o el overlay de una máquina que se para (no de una
+// que se borra). Un invitado con únicamente volúmenes de solo lectura que se
+// borra no tiene nada que perder, y pedirle un vaciado retrasaría su apagado
+// a cambio de nada.
+func hayQueVaciar(mc *api.Machine, conservaDisco bool) bool {
+	if conservaDisco {
+		return true
+	}
+	for _, v := range mc.Volumes {
+		if !v.ReadOnly {
+			return true
+		}
+	}
+	return false
 }
 
 // volumeDriveID nombra el disco i-ésimo de volumen.

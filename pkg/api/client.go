@@ -281,6 +281,13 @@ func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/thaw", nil, &m)
 }
 
+// Start arranca otra vez una máquina parada, en frío sobre su propio disco.
+// env es su entorno (KEY=valor): el daemon solo guardó los nombres.
+func (c *Client) Start(ctx context.Context, ref string, env []string) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/start", StartRequest{Env: env}, &m)
+}
+
 func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/stop", nil, &m)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -40,7 +41,11 @@ func main() {
 		printUsage(os.Stdout)
 		os.Exit(2)
 	}
-	// Los nombres de antes se traducen en silencio a los de ahora (tree.go).
+	// Los nombres de antes se traducen a los de ahora (tree.go), con un aviso
+	// en stderr salvo los que se quedan para siempre.
+	if w := aliasWarning(os.Args[1], os.Args[2:]); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	cmd, args := resolveAlias(os.Args[1], os.Args[2:])
 
 	// `kling run -h`, `kling mcp add -h`: la misma ayuda que `kling help ...`,
@@ -114,6 +119,8 @@ func main() {
 		err = cmdLogs(args)
 	case "freeze", "thaw", "pause", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
+	case "start":
+		err = cmdStart(args)
 	case "machine":
 		err = cmdMachine(args)
 	case "save":
@@ -498,15 +505,18 @@ func cmdRun(args []string) error {
 	if _, err := api.MachineEnvMap(env); err != nil {
 		return err
 	}
-	if len(env) > 0 {
+	if len(env) > 0 || (*disk > 0 && *from == "") {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
-		// su entorno, sin un solo error.
+		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
+		if len(env) > 0 && !slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
 			return fmt.Errorf("the daemon (%s) does not take -e at run: update it", info.Version)
+		}
+		if *disk > 0 && *from == "" && !slices.Contains(info.Capabilities, api.CapabilityDisk) {
+			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {
@@ -631,7 +641,9 @@ func cmdSave(args []string) error {
 	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
 	// de unas decenas de servicios la cuenta puede no salir.
 	warm := fs.Bool("warm", true, "ask the guest agent to start its runtime before freezing, if it supports it (bigger snapshot, much faster first wake)")
-	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve (and to be ready by its image's probe) before committing")
+	// El mismo plazo que el daemon da a commit sin ready_timeout_seconds: con
+	// menos, el CLI recortaba en silencio la espera a la sonda de la imagen.
+	espera := fs.Duration("wait", machine.DefaultReadyWait, "how long to wait for the guest to serve (and to be ready by its image's probe) before saving")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -659,6 +671,9 @@ func cmdSave(args []string) error {
 		return err
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
+	for _, w := range snap.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 	next("kling run -from %s", snap.Name)
 	return nil
 }
@@ -679,6 +694,11 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	fmt.Printf("checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
 		fmt.Println("✗")
+		if api.IsNotFound(err) {
+			// No hay máquina: ni puerto ni plazo que explicar (fallaba en
+			// milisegundos diciendo "not serving ... after 2m0s").
+			return fmt.Errorf("%s: %w", ref, err)
+		}
 		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
 	}
 	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que
@@ -928,6 +948,50 @@ func cmdLifecycle(op string, args []string) error {
 		default:
 			fmt.Printf("%s  %s\n", mc.ID[:12], mc.State)
 		}
+	}
+	return nil
+}
+
+// cmdStart es `kling start [-e K=V|K] [-env-file F] <ref>...`: arranca otra
+// vez una máquina parada, en frío sobre su propio disco. El entorno de -e no
+// se guarda (solo sus nombres), así que hay que volver a darlo; el daemon dice
+// qué claves faltan.
+func cmdStart(args []string) error {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	host := hostFlag(fs)
+	var ef envFlags
+	ef.register(fs)
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: kling start [-e K=V|K] [-env-file F] <ref>...")
+	}
+	env, err := ef.resolve()
+	if err != nil {
+		return err
+	}
+	if _, err := api.MachineEnvMap(env); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	for _, ref := range fs.Args() {
+		mc, err := c.Start(ctx, ref, env)
+		if err != nil {
+			// Un daemon anterior no tiene la ruta: el 404 del enrutador no
+			// dice nada útil.
+			var se *api.StatusError
+			if errors.As(err, &se) && se.Code == http.StatusNotFound {
+				if info, ierr := c.Info(ctx); ierr == nil && !slices.Contains(info.Capabilities, api.CapabilityStart) {
+					return fmt.Errorf("the daemon (%s) can't start a stopped machine: update it", info.Version)
+				}
+			}
+			return err
+		}
+		fmt.Printf("%s  %s  (cold boot from its disk, %d ms)\n", mc.ID[:12], mc.State, mc.BootMS)
 	}
 	return nil
 }
@@ -1357,7 +1421,13 @@ func wakeNote(p *api.WakePhases) string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f, other %.1f",
-		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS,
+	// La memoria de una copia en diferencial (almacén, espejo y montaje) va
+	// aparte: el primer thaw de una copia puede pasar ahí casi todo.
+	mem := ""
+	if m := p.StoreMS + p.MirrorMS + p.MemoryMS; m > 0 {
+		mem = fmt.Sprintf(", memory %.1f (store %.1f, mirror %.1f)", m, p.StoreMS, p.MirrorMS)
+	}
+	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f%s, other %.1f",
+		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS, mem,
 		p.WaitMS+p.CheckMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
 }

@@ -56,6 +56,10 @@ type fcFalso struct {
 	llamadas []llamadaFC
 	fallos   map[string]fallosFC
 	hook     func(metodo, ruta string)
+	// globo, si no es nil, es lo que contesta GET /balloon/statistics; un
+	// PATCH /balloon le pone ActualMiB a lo pedido, como si el invitado lo
+	// entregara al instante.
+	globo *fc.BalloonStats
 
 	srv *http.Server
 }
@@ -95,6 +99,18 @@ func (f *fcFalso) atender(w http.ResponseWriter, r *http.Request) {
 	f.llamadas = append(f.llamadas, llamadaFC{Metodo: r.Method, Ruta: r.URL.Path, Cuerpo: cuerpo})
 	fallo, hayFallo := f.fallos[r.Method+" "+r.URL.Path]
 	hook := f.hook
+	var globo fc.BalloonStats
+	if f.globo != nil {
+		if r.Method == http.MethodPatch && r.URL.Path == "/balloon" {
+			var p struct {
+				AmountMiB int `json:"amount_mib"`
+			}
+			if json.Unmarshal(cuerpo, &p) == nil {
+				f.globo.ActualMiB, f.globo.TargetMiB = p.AmountMiB, p.AmountMiB
+			}
+		}
+		globo = *f.globo
+	}
 	f.mu.Unlock()
 
 	// Fuera del lock: el hook puede tardar (por ejemplo, esperar a que el test
@@ -116,7 +132,7 @@ func (f *fcFalso) atender(w http.ResponseWriter, r *http.Request) {
 		// Sin un cuerpo, BalloonStats no tiene JSON que decodificar. Todo a
 		// cero vale como "el invitado aún no ha reportado" (ver
 		// estadisticasDesconocidas en plataforma_fc.go).
-		_ = json.NewEncoder(w).Encode(fc.BalloonStats{})
+		_ = json.NewEncoder(w).Encode(globo)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

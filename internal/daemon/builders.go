@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,7 +29,8 @@ import (
 // entorno de sandbox, ni lo que venga después; sabe ejecutar, como root y con
 // plazo, un constructor que el administrador instaló a propósito (los del
 // núcleo que no necesitan root, como "oci", con un usuario sin privilegios:
-// ver builders_sinroot.go):
+// ver builders_sinroot.go; y esos los hace el propio daemon, ver
+// resolverConstructor):
 //
 //	/usr/local/lib/kindling/builders/<nombre>   (o $KLING_BUILDERS_DIR)
 //
@@ -53,18 +56,21 @@ var reBuilder = lazyre.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // constructoresSinRoot son los constructores del núcleo escritos en Go de
 // punta a punta (sin loop, chroot ni root): corren también en el daemon de
-// macOS, y si no están instalados en el directorio de constructores el
-// daemon se ejecuta a sí mismo como `kling builder <nombre>`.
+// macOS, y el daemon se ejecuta a sí mismo como `kling builder <nombre>`
+// (resolverConstructor).
 var constructoresSinRoot = map[string]bool{"android": true, "debian": true, "oci": true}
 
 // maxRecipeHints es el tamaño máximo del recipe.json que deja un constructor.
 const maxRecipeHints = 256 << 10
 
+// buildersDirPorDefecto es variable para los tests.
+var buildersDirPorDefecto = "/usr/local/lib/kindling/builders"
+
 func buildersDir() string {
 	if d := os.Getenv("KLING_BUILDERS_DIR"); d != "" {
 		return d
 	}
-	return "/usr/local/lib/kindling/builders"
+	return buildersDirPorDefecto
 }
 
 // builderPath localiza el constructor y comprueba que se puede ejecutar como
@@ -102,6 +108,31 @@ func builderPath(name string) (string, error) {
 	return p, nil
 }
 
+// resolverConstructor dice qué ejecutar para el constructor name: un
+// ejecutable y los argumentos que van antes del directorio de trabajo.
+//
+// Los del núcleo sin root (constructoresSinRoot) los hace el PROPIO binario
+// del daemon (`<daemon> builder <name>`), aunque haya uno instalado en
+// /usr/local/lib/kindling/builders: el instalado lanza el kling del sistema,
+// y un daemon privado o recién compilado construiría con OTRO binario que el
+// suyo. Solo un KLING_BUILDERS_DIR puesto a propósito manda sobre eso (para
+// probar un constructor a mano); si no lo tiene, también el propio binario.
+// El resto, siempre el instalado (builderPath).
+func resolverConstructor(name string) (string, []string, error) {
+	if constructoresSinRoot[name] && os.Getenv("KLING_BUILDERS_DIR") == "" {
+		if self, err := os.Executable(); err == nil {
+			return self, []string{"builder", name}, nil
+		}
+	}
+	bin, err := builderPath(name)
+	if err != nil && constructoresSinRoot[name] {
+		if self, serr := os.Executable(); serr == nil {
+			return self, []string{"builder", name}, nil
+		}
+	}
+	return bin, nil, err
+}
+
 func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req api.BuildImageRequest) {
 	if !reName.MatchString(req.Name) {
 		fail(w, http.StatusBadRequest, fmt.Errorf("invalid image name %q", req.Name))
@@ -115,16 +146,25 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		fail(w, http.StatusBadRequest, fmt.Errorf("spec is not valid JSON"))
 		return
 	}
-	bin, err := builderPath(req.Builder)
-	var binArgs []string
-	if err != nil && constructoresSinRoot[req.Builder] {
-		// Del núcleo y en Go: el propio binario del daemon lo lleva.
-		if self, serr := os.Executable(); serr == nil {
-			bin, binArgs, err = self, []string{"builder", req.Builder}, nil
-		}
-	}
+	bin, binArgs, err := resolverConstructor(req.Builder)
 	if err != nil {
 		fail(w, http.StatusPreconditionFailed, err)
+		return
+	}
+
+	// En fila con las demás construcciones de este nombre: dos a la vez
+	// escribirían el mismo images/<name> y la segunda lo renombraría bajo
+	// las máquinas que ya arrancó la primera. Si mientras se esperaba otra
+	// petición igual ya la hizo (dos `kling run -image` de la misma
+	// referencia), se devuelve esa. Solo la hecha DURANTE la espera: pedir
+	// otra vez lo mismo más tarde sigue siendo reconstruir (`-rebuild`, una
+	// etiqueta que se movió).
+	llegada := time.Now()
+	soltarNombre := s.bloquearNombreImagen(req.Name)
+	defer soltarNombre()
+	if s.construidaDesde(req, llegada) {
+		writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: s.mgr.ImageFile(req.Name),
+			Output: fmt.Sprintf("image %s was built by a concurrent request with the same spec: reused\n", req.Name)})
 		return
 	}
 
@@ -134,6 +174,12 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	var u *usuarioConstructor
 	if aislado {
 		u = s.constructor
+	}
+	if u != nil && binArgs != nil && !atravesable(bin, u) {
+		fail(w, http.StatusPreconditionFailed, fmt.Errorf("the builder user %q can't execute the daemon binary %s "+
+			"(it or a parent directory doesn't let it through, e.g. /root): put kling under /usr/local or /srv, "+
+			"or install the builder in KLING_BUILDERS_DIR", u.Nombre, bin))
+		return
 	}
 	dueño := uint32(os.Geteuid())
 	if u != nil {
@@ -191,8 +237,27 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		if u != nil {
 			barrerProcesos(u.UID) // nada del constructor sigue vivo mientras se valida
 		}
-		if _, err := adoptarSalida(out, filepath.Join(s.root, "images"), req.Name, dueño); err != nil {
-			fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w", req.Builder, err))
+		// Como PUT /images/{name}/blob (blobs.go): si la imagen ya existe (un
+		// import -replace), comprobar que se puede sustituir y renombrar con
+		// las imágenes quietas. Si no, un run en vuelo o un dorado que la usa
+		// se quedarían con otro contenido debajo.
+		status := http.StatusInternalServerError
+		err := s.mgr.ConImagenesQuietas(func() error {
+			images := filepath.Join(s.root, "images")
+			for _, f := range []string{req.Name + ".ext4", req.Name + ".layer.ext4"} {
+				if _, lerr := os.Lstat(filepath.Join(images, f)); lerr == nil {
+					if rerr := s.mgr.ImageReplaceable(req.Name); rerr != nil {
+						status = http.StatusConflict
+						return rerr
+					}
+					break
+				}
+			}
+			_, aerr := adoptarSalida(out, images, req.Name, dueño)
+			return aerr
+		})
+		if err != nil {
+			fail(w, status, fmt.Errorf("builder %s: %w", req.Builder, err))
 			return
 		}
 	}
@@ -234,6 +299,70 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
 	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: salida.String()})
+}
+
+// cerrojoImagen es el cerrojo de construir un nombre de imagen; n, cuántos
+// lo esperan o lo tienen (para soltar la entrada del mapa).
+type cerrojoImagen struct {
+	mu sync.Mutex
+	n  int
+}
+
+// bloquearNombreImagen toma el cerrojo de construir name y devuelve con qué
+// soltarlo.
+func (s *Server) bloquearNombreImagen(name string) func() {
+	s.muConstruyendo.Lock()
+	if s.construyendo == nil {
+		s.construyendo = map[string]*cerrojoImagen{}
+	}
+	c := s.construyendo[name]
+	if c == nil {
+		c = &cerrojoImagen{}
+		s.construyendo[name] = c
+	}
+	c.n++
+	s.muConstruyendo.Unlock()
+	c.mu.Lock()
+	return func() {
+		c.mu.Unlock()
+		s.muConstruyendo.Lock()
+		if c.n--; c.n == 0 {
+			delete(s.construyendo, name)
+		}
+		s.muConstruyendo.Unlock()
+	}
+}
+
+// construidaDesde dice si la imagen de req ya está, construida desde desde
+// con el mismo constructor, spec, base y tamaño: lo que hizo otra petición
+// igual mientras ésta esperaba su turno.
+func (s *Server) construidaDesde(req api.BuildImageRequest, desde time.Time) bool {
+	b, err := os.ReadFile(s.recipePath(req.Name))
+	if err != nil {
+		return false
+	}
+	var rec api.ImageRecipe
+	if json.Unmarshal(b, &rec) != nil || rec.BuiltAt.Before(desde) || rec.Builder != req.Builder ||
+		rec.GrowMB != req.GrowMB || (req.Base != "" && rec.Base != req.Base) || !mismoJSON(rec.Spec, req.Spec) {
+		return false
+	}
+	if _, err := os.Stat(s.mgr.ImageFile(req.Name)); err != nil {
+		return false
+	}
+	return true
+}
+
+// mismoJSON compara dos JSON por su valor, no por sus bytes: la receta guarda
+// el spec reindentado. Vacío cuenta como null.
+func mismoJSON(a, b json.RawMessage) bool {
+	var va, vb any
+	if len(a) > 0 && json.Unmarshal(a, &va) != nil {
+		return false
+	}
+	if len(b) > 0 && json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
 }
 
 // comandoConstructor prepara el proceso del constructor: su entorno y, con

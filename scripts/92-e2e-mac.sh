@@ -113,7 +113,7 @@ start_daemon() {
   DPID=$!
   local i
   for i in $(seq 1 50); do
-    k info >/dev/null 2>&1 && return 0
+    k status -v >/dev/null 2>&1 && return 0
     kill -0 "$DPID" 2>/dev/null || break
     sleep 0.2
   done
@@ -132,7 +132,7 @@ cleanup() {
   if [ -n "$DPID" ]; then
     for m in $(k ps -a -q 2>/dev/null); do k rm "$m" >/dev/null 2>&1; done
     for g in $(k graph ls -q 2>/dev/null); do k graph rm -f "$g" >/dev/null 2>&1; done
-    for s in $(k snapshots 2>/dev/null | awk -v p="$P" 'index($1,p)==1 {print $1}'); do k rmi "$s" >/dev/null 2>&1; done
+    for s in $(k snapshots 2>/dev/null | awk -v p="$P" 'index($1,p)==1 {print $1}'); do k template rm "$s" >/dev/null 2>&1; done
   fi
   stop_daemon
   pkill -KILL -f "kling-vz --api-sock $ROOT/" 2>/dev/null
@@ -158,10 +158,10 @@ fi
 if start_daemon; then ok "daemon started (pid $DPID, log $LOG)"; else echo "daemon did not start; see $LOG" >&2; tail -5 "$LOG" >&2; exit 1; fi
 if [ -n "$FROM" ]; then
   for i in "$IMG" "$BRIDGE_IMG"; do
-    out=$(k images copy "$i" -from "$FROM" 2>&1) && ok "images copy $i from $FROM" || bad "images copy $i" "copied" "$out"
+    out=$(k image copy "$i" -from "$FROM" 2>&1) && ok "images copy $i from $FROM" || bad "images copy $i" "copied" "$out"
   done
 fi
-imgs=$(k images ls 2>&1)
+imgs=$(k image ls 2>&1)
 contiene "$imgs" "$IMG " || { echo "image $IMG is not in $ROOT/images; set FROM or IMAGES_DIR" >&2; exit 1; }
 HAVE_BRIDGE=0; contiene "$imgs" "$BRIDGE_IMG " && HAVE_BRIDGE=1
 
@@ -178,7 +178,7 @@ out=$(KLING_ROOT="$ROOT" k up -check 2>&1); rc=$?
 contiene "$out" "local runtime on macOS (vz)" && ok "up -check diagnoses the Mac (rc=$rc)" || bad "up -check" "macOS (vz) diagnosis" "$out"
 contiene "$out" "✓ kling-vz" && contiene "$out" "✓ vz entitlement" && ok "up -check finds kling-vz, signed" \
   || bad "up -check kling-vz" "✓ kling-vz and ✓ vz entitlement" "$out"
-out=$(k info 2>&1)
+out=$(k status -v 2>&1)
 be=$(printf '%s' "$out" | tr -s ' ' | grep '^backend:' || true)
 contiene "$be" "vz" && ok "info: $be" || bad "info backend" "backend: vz" "$out"
 
@@ -204,7 +204,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   t0=$(now_ms); k exec "$M" -- true >/dev/null 2>&1; t1=$(now_ms); lat+=($((t1-t0)))
 done
 EXEC_P50=$(pctl 50 "${lat[@]}")
-ok "exec latency (CLI round trip): p50 ${EXEC_P50} ms, max $(pctl 100 "${lat[@]}") ms"
+info "exec latency (CLI round trip): p50 ${EXEC_P50} ms, max $(pctl 100 "${lat[@]}") ms"
 
 f="$TMPBASE/e2e-cp.$$"; head -c 200000 /dev/urandom >"$f"
 if k cp "$f" "$M:/tmp/blob" >/dev/null 2>&1 && k cp "$M:/tmp/blob" "$f.back" >/dev/null 2>&1 && cmp -s "$f" "$f.back"; then
@@ -309,7 +309,7 @@ step "5. squeeze, resize"
 # En macOS el globo solo devuelve memoria en una máquina restaurada: se aprieta
 # una réplica.
 before=$(footprint "$P-r1")
-out=$(k squeeze "$P-r1" 2>&1)
+out=$(k machine squeeze "$P-r1" 2>&1)
 sleep 4   # al desinflar, el framework repoblaba las páginas en ~3 s
 FP_SQUEEZED=$(footprint "$P-r1")
 [ "$FP_SQUEEZED" -gt 0 ] && [ "$FP_SQUEEZED" -lt $((before * 3 / 4)) ] \
@@ -322,7 +322,7 @@ if k run -name "$R" -image "$IMG" -mem 256 -mem-max 512 -allow-exec >/dev/null 2
   sleep 3   # el globo inicial se fija cuando el driver del invitado aparece
   tot() { k exec "$R" -- sh -c 'free -m | awk "/^Mem:/ {print \$2-\$3+\$6}"' 2>/dev/null; } # total - usado + caché ≈ lo que le queda
   avail0=$(tot)
-  out=$(k resize "$R" -mem 448 2>&1); sleep 2; avail1=$(tot)
+  out=$(k machine resize "$R" -mem 448 2>&1); sleep 2; avail1=$(tot)
   [ -n "$avail0" ] && [ -n "$avail1" ] && [ "$avail0" -lt 300 ] && [ "$avail1" -gt $((avail0 + 120)) ] \
     && ok "mem-max ceiling applied at boot (~$avail0 MiB usable of 512); resize 256 -> 448: ~$avail1 MiB" \
     || bad "resize" "~256 usable at boot, ~448 after" "$avail0 -> $avail1 ($out)"
@@ -348,7 +348,7 @@ for e in none internet; do
   fi
 done
 mm="$P-eg-none"
-out=$(printf '{"secret":"s3cr3t-%s"}' "$$" | k mmds "$mm" 2>&1)
+out=$(printf '{"secret":"s3cr3t-%s"}' "$$" | k machine secret "$mm" 2>&1)
 py='import urllib.request as u
 t=u.urlopen(u.Request("http://169.254.169.254/latest/api/token",method="PUT",headers={"X-metadata-token-ttl-seconds":"60"}),timeout=5).read().decode()
 print(u.urlopen(u.Request("http://169.254.169.254/",headers={"X-metadata-token":t,"Accept":"application/json"}),timeout=5).read().decode())'
@@ -748,7 +748,7 @@ tf=$(total_fp); [ "${tf:-0}" -gt $peak ] && peak=$tf
 [ $bfail -eq 0 ] && ok "$BURST/$BURST started through the launch gate (KLING_MAX_PARALLEL_BOOT=$KLING_MAX_PARALLEL_BOOT) in $((t1-t0)) ms" \
   || bad "burst" "$BURST started" "$bfail failed"
 BURST_P50=$(pctl 50 "${blat[@]:-0}"); BURST_P95=$(pctl 95 "${blat[@]:-0}")
-ok "run -from latency: p50 $BURST_P50 ms, p95 $BURST_P95 ms"
+info "run -from latency: p50 $BURST_P50 ms, p95 $BURST_P95 ms"
 nok=0
 for i in $(seq 1 "$BURST"); do out=$(k exec "$P-b$i" -- cat /root/mark 2>&1); [ "$out" = golden ] && nok=$((nok+1)); done
 [ $nok -eq "$BURST" ] && ok "all $BURST answer exec" || bad "burst exec" "$BURST" "$nok"
@@ -769,7 +769,7 @@ for i in $(seq 1 "$BURST"); do
 done
 [ $tfail -eq 0 ] && ok "$BURST concurrent thaws: p50 $(pctl 50 "${tl[@]:-0}") ms, p95 $(pctl 95 "${tl[@]:-0}") ms" \
   || bad "thaws" "$BURST thawed" "$tfail failed"
-ok "peak footprint of the burst: $peak MiB for $BURST microVMs (a restore materializes all of its memory)"
+info "peak footprint of the burst: $peak MiB for $BURST microVMs (a restore materializes all of its memory)"
 pids=()
 for m in $(k ps -a -q 2>/dev/null); do k rm "$m" >/dev/null 2>&1 & pids+=($!); done
 [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
@@ -1274,7 +1274,7 @@ EOF
     k graph rm "$G" >/dev/null 2>&1
     quedan=$(k ps -a 2>/dev/null | grep -c -- "$G" || true)
     { [ "$quedan" = 0 ] && ! k graph inspect "$G" >/dev/null 2>&1; } && ok "graph rm: no machines, no graph" || bad "graph rm" "0 machines" "machines=$quedan"
-    for t in $GSNAPS; do k rmi "$t" >/dev/null 2>&1; done
+    for t in $GSNAPS; do k template rm "$t" >/dev/null 2>&1; done
   fi
   k graph rm -f "$G" >/dev/null 2>&1
   rm -rf "$GTMP"
@@ -1411,16 +1411,16 @@ EOF
       && ok "graph rm: no machines, no graph" || bad "graph rm" "0 machines" "machines=$left"
   fi
   k graph rm -f "$G" >/dev/null 2>&1
-  k rmi "$GDBT" >/dev/null 2>&1
+  k template rm "$GDBT" >/dev/null 2>&1
   rm -rf "$GTMP"
 fi
 
 # El golden de 6f, si lo construyó este script, ya no hace falta.
-if [ "$DBBUILT" = 1 ]; then k rmi "$DBG" >/dev/null 2>&1; k rmi "$GBASE" >/dev/null 2>&1; fi
+if [ "$DBBUILT" = 1 ]; then k template rm "$DBG" >/dev/null 2>&1; k template rm "$GBASE" >/dev/null 2>&1; fi
 
 # ── 9. nada suelto ───────────────────────────────────────────────────────────
 step "9. leftovers"
-k rmi "$SNAP" >/dev/null 2>&1
+k template rm "$SNAP" >/dev/null 2>&1
 stop_daemon
 sleep 1
 n=$(our_vmms); [ "$n" = 0 ] && ok "no kling-vz of this test left" || bad "kling-vz leftovers" 0 "$n"

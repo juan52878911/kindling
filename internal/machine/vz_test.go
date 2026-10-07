@@ -1027,3 +1027,47 @@ func TestTechoDelDaemonEnMacEsSinTecho(t *testing.T) {
 		}
 	}
 }
+
+// kling start en macOS: boot abre los reenvíos del VMM nuevo y Start los
+// conserva (antes los borraba después, y la máquina quedaba con IP:puerto,
+// que el Mac no alcanza). Y la marca de secretos de MMDS era del VMM
+// anterior: la arrancada se puede congelar.
+func TestVZStartConservaLosReenviosYOlvidaLosSecretos(t *testing.T) {
+	m, _ := managerVZ(t)
+	mc, _ := paradaParaStart(t, m, "5a5a00000000000a")
+	m.mu.Lock()
+	m.byID[mc.ID].HasSecrets = true
+	m.secretos = map[string]*estadoSecreto{mc.ID: {gen: 1}}
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := m.Start(ctx, mc.ID, nil)
+	if out != nil {
+		defer matarVMM(out.PID)
+	}
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if got := out.Addr(api.GuestPort); got != puertoFalso(api.GuestPort) {
+		t.Fatalf("Addr(%d) = %q tras start; quería el reenvío %q", api.GuestPort, got, puertoFalso(api.GuestPort))
+	}
+	if got, _ := m.Get(mc.ID); got.Addr(api.GuestPort) != puertoFalso(api.GuestPort) {
+		t.Fatalf("la viva perdió sus reenvíos: %v", got.Forwards)
+	}
+	if out.HasSecrets {
+		t.Fatal("la arrancada sigue marcada con secretos de MMDS")
+	}
+	m.mu.RLock()
+	_, queda := m.secretos[mc.ID]
+	m.mu.RUnlock()
+	if queda {
+		t.Fatal("el registro de secretos de la máquina se quedó")
+	}
+	if out.BootMS <= 0 {
+		t.Fatalf("BootMS = %d; tiene que decir que arrancó en frío", out.BootMS)
+	}
+	if _, err := m.Freeze(ctx, mc.ID); err != nil && strings.Contains(err.Error(), "secrets") {
+		t.Fatalf("freeze de la arrancada: %v", err)
+	}
+}

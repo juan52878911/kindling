@@ -1595,13 +1595,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	// recorre g.extra.
 	for svc, e := range g.services {
 		if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-			victims = append(victims, victim{svc, e.machineID, e.memMiB})
+			victims = append(victims, victim{service: svc, id: e.machineID, memMiB: e.memMiB, aislada: e.aislada})
 		}
 	}
 	for svc, es := range g.extra {
 		for _, e := range es {
 			if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-				victims = append(victims, victim{svc, e.machineID, e.memMiB})
+				victims = append(victims, victim{service: svc, id: e.machineID, memMiB: e.memMiB, aislada: e.aislada})
 			}
 		}
 	}
@@ -1708,14 +1708,16 @@ const evictedPool = "(warm pool)"
 func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// Antes que nada despierto, lo pausado: retiene RAM sin atender a nadie, y
 	// congelarlo solo cuesta que su próximo despertar sea un thaw.
-	if id, p := g.pausadaMasVieja(); id != "" {
-		if g.congelarPausada(ctx, id) {
+	// Se aparta con el candado de quien la despertaría (ver tomarPausada).
+	if id, p, soltar := g.tomarPausadaMasVieja(); soltar != nil {
+		congelada := g.congelarPausada(ctx, id)
+		// Si el freeze falló, soltar la repone en vez de perderla del
+		// registro reteniendo RAM sin dueño (G-04); se sigue con el camino
+		// normal de desalojo por si hay algo despierto que sacrificar.
+		soltar(congelada)
+		if congelada {
 			return p.service
 		}
-		// El freeze falló: se repone en vez de perderla del registro
-		// reteniendo RAM sin dueño (G-04); se sigue con el camino normal de
-		// desalojo por si hay algo despierto que sacrificar en su lugar.
-		g.reponerPausada(id, p)
 	}
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de

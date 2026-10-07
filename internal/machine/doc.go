@@ -22,8 +22,8 @@
 //   - shareSup.mu protege el registro de conexiones de carpetas vivas. Hoy no
 //     se anida con m.mu en ningún sitio (startSharesIf lee la máquina con
 //     m.get ANTES de tomarlo); si alguna vez hiciera falta, m.mu va dentro.
-//   - m.mu (RWMutex) protege byID, socket, reserved, volReservas, pendingMiB y
-//     demás mapas del Manager, y TODOS los campos de las *api.Machine vivas.
+//   - m.mu (RWMutex) protege byID, socket, reserved, volReservas, pendingMiB,
+//     volcandoMiB y demás mapas del Manager, y TODOS los campos de las *api.Machine vivas.
 //     Nunca se sostiene durante E/S lenta ni llamadas al VMM; un rename a la
 //     papelera sí (sweepMachineDirs, removeSnapshot), porque es instantáneo y
 //     es lo que hace atómico "nadie lo usa, fuera". Las reservas de

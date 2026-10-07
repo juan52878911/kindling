@@ -1,6 +1,6 @@
 // Package chispa es un clasificador lineal diminuto para decisiones pequeñas:
 // clasificar eventos, enrutar peticiones de agentes, filtrar entradas. Se
-// entrena fuera (pkg/chispa/train, `kling chispa train`) y se sirve aquí con
+// entrena fuera (pkg/chispa/train, `kling ai chispa train`) y se sirve aquí con
 // inferencia entera en microsegundos. Ver docs/chispa.md.
 //
 // Lo que este paquete garantiza y por qué importa:

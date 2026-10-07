@@ -527,14 +527,16 @@ The same bridge used inside the microVMs works on your machine:
 
 ```sh
 make bridge-local
-./kling-bridge-local -- engram mcp --tools=agent
+./kling-bridge-local -listen 127.0.0.1:9100 -- engram mcp --tools=agent
 kling mcp link engram http://127.0.0.1:9100/mcp
 ```
 
-Since v0.4.0 the local bridge listens on `127.0.0.1:9100` **by default**: what it wraps
-is usually your personal memory, it does not authenticate, and `/reset` would be reachable
-by anyone who can reach the port. If the gateway runs on another machine, exposing it is
-still one explicit flag: `-listen 0.0.0.0:9100`.
+The bridge listens on loopback **by default** (`127.0.0.1:8080`; `kling mcp memory
+enable` and `install-service` use `127.0.0.1:9100`): what it wraps is usually your
+personal memory, it does not authenticate, and `/reset` would be reachable by anyone who
+can reach the port. If the gateway runs on another machine, exposing it is still one
+explicit flag, `-listen 0.0.0.0:9100`, and the bridge warns about it in its log. Inside a
+microVM the image's `/entrypoint` asks for `-listen :8080`, where the gateway looks.
 
 ## Usage memory (optional)
 

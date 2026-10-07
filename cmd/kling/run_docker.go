@@ -107,10 +107,13 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (strin
 	}
 	for _, im := range imgs {
 		if im.Name == name {
+			if aviso := avisoImportAntiguo(ctx, c, name, r.String()); aviso != "" {
+				fmt.Fprintln(os.Stderr, aviso)
+			}
 			return name, nil
 		}
 	}
-	sb, _ := json.Marshal(OCISpec{Ref: ref})
+	sb, _ := json.Marshal(OCISpec{Ref: ref, Restart: api.RestartOnFailure})
 	fmt.Fprintf(os.Stderr, "importing %s as %s (the first time downloads it)...\n", r, name)
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Builder: "oci", Spec: sb})
 	if err != nil {
@@ -120,4 +123,27 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (strin
 		return "", fmt.Errorf("importing %s: %w", ref, err)
 	}
 	return res.Name, nil
+}
+
+// avisoImportAntiguo dice, si hace falta, que la imagen name que run -image ya
+// tenía para ref es de antes de las políticas de reinicio: su receta no lleva
+// restart, y el agente relanza su servicio SIEMPRE, también cuando acaba con 0
+// (un CMD de python:3.12-slim que imprime y sale, para siempre). No se
+// rehace sola: eso volvería a resolver la etiqueta (otra versión de la imagen
+// bajo las máquinas y dorados que ya la usan), y run -image, como docker run,
+// no lo hace nunca por su cuenta. Se dice cómo. Una imagen de otra versión de
+// kling pero con política no se avisa: se comporta bien, y el aviso saldría
+// en cada run tras cada actualización. Si la receta no se puede leer, nada:
+// el run sigue.
+func avisoImportAntiguo(ctx context.Context, c *api.Client, name, ref string) string {
+	rec, err := c.ImageRecipe(ctx, name)
+	if err != nil || rec.Builder != "oci" {
+		return ""
+	}
+	var prev OCISpec
+	if json.Unmarshal(rec.Spec, &prev) != nil || prev.Restart != "" {
+		return ""
+	}
+	return fmt.Sprintf("warning: image %s (%s) was imported before restart policies, so its service restarts even when it exits 0; "+
+		"kling image import %s -name %s -replace rebuilds it (and re-resolves the tag)", name, ref, ref, name)
 }

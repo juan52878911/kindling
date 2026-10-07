@@ -42,12 +42,29 @@ func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains 
 	// La reserva del índice (asignarRed, redParaRehacer) se suelta al acabar:
 	// desde ahí la ocupa la dirección del veth (ver internal/net/subredes.go).
 	defer n.SoltarReserva()
-	if err := n.Setup(egress, domains, m.priv.UID); err != nil {
+	uid := 0
+	if m.priv != nil {
+		uid = m.priv.UID
+	}
+	if err := montarRedHost(n, egress, domains, uid); err != nil {
+		// Un Setup que falla a medias deja el namespace, el veth y sus
+		// reglas; quien llama no los desmontaba, y barrerNamespaces solo
+		// corre al arrancar el daemon: cada fallo era una red huérfana (y su
+		// subred ocupada en el host) hasta el siguiente reinicio.
+		m.desmontarRed(n, id)
 		return err
 	}
 	m.redMontada.Store(id, true)
 	return nil
 }
+
+// Sustituibles en tests: montar y desmontar la red de verdad pide root e `ip`.
+var (
+	montarRedHost = func(n *knet.Net, egress knet.Egress, domains []string, uid int) error {
+		return n.Setup(egress, domains, uid)
+	}
+	desmontarRedHost = func(n *knet.Net) { n.Teardown() }
+)
 
 // redParaRehacer da la red con la que rehacer la de una máquina que ya tenía
 // índice (thaw sin la red montada): la de su índice si sigue libre en el host,
@@ -83,9 +100,21 @@ func (m *Manager) redParaRehacer(mc *api.Machine) (*knet.Net, error) {
 // de una máquina: si se desmontara por otro camino, redLista la daría por buena.
 func (m *Manager) desmontarRed(n *knet.Net, id string) {
 	m.redMontada.Delete(id)
-	n.Teardown()
+	desmontarRedHost(n)
 	m.olvidarRedPropia(n.NS)
+	if f := m.redCaida.Load(); f != nil {
+		(*f)(n.NSIP)
+	}
 }
+
+// OnGuestGone registra f para cuando la red de una máquina se desmonta, con la
+// IP por la que se la alcanzaba: su invitado ya no va a contestar en ella, y
+// la siguiente máquina que la reciba (kling start la conserva) es otro TCP. El
+// daemon suelta ahí las conexiones que guarda hacia ESA IP —no las de las
+// demás—: una guardada contra la IP de una parada se la comía el primer exec
+// tras el start, con un RST. La red sobrevive al freeze, así que un thaw
+// conserva las suyas.
+func (m *Manager) OnGuestGone(f func(ip string)) { m.redCaida.Store(&f) }
 
 // DE QUIÉN ES CADA NAMESPACE.
 //

@@ -142,7 +142,7 @@ func TestGCThresholdsFromEnv(t *testing.T) {
 }
 
 // Las failed se recogen solas pasado su tiempo de gracia. Failed es terminal
-// —no hay `start` que las saque de ahí—, así que acumularlas no da opciones,
+// —`start` solo arranca paradas—, así que acumularlas no da opciones,
 // solo basura: se observaron nueve en 21 horas, una por intento roto.
 func TestLasFailedViejasSeRecogenSolas(t *testing.T) {
 	m := newTestManager(t)

@@ -16,7 +16,8 @@ import (
 )
 
 // alpineLike es una raíz mínima al estilo de Alpine: /sbin de verdad (no
-// enlace) y las herramientas del init como enlaces a busybox.
+// enlace) y las herramientas del init como enlaces a busybox: solo las que
+// usa (ociInitTools), sin cat ni grep.
 func alpineLike() []ocitest.File {
 	fs := []ocitest.File{
 		{Name: "bin/", Dir: true, Mode: 0o755}, {Name: "sbin/", Dir: true, Mode: 0o755}, {Name: "usr/", Dir: true, Mode: 0o755},
@@ -27,7 +28,7 @@ func alpineLike() []ocitest.File {
 		{Name: "usr/local/bin/docker-entrypoint.sh", Body: "#!/bin/sh\nexec \"$@\"\n", Mode: 0o755},
 		{Name: "var/", Dir: true, Mode: 0o755}, {Name: "var/old", Body: "borrado por la capa 2"},
 	}
-	for _, t := range []string{"sh", "mount", "mkdir", "ln", "cat", "grep"} {
+	for _, t := range []string{"sh", "mount", "mkdir", "ln"} {
 		fs = append(fs, ocitest.File{Name: "bin/" + t, Link: "busybox"})
 	}
 	return append(fs, ocitest.File{Name: "sbin/pivot_root", Link: "/bin/busybox"})
@@ -100,7 +101,8 @@ func TestBuildOCI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if built.Digest != idx || built.Ready != "tcp 5432" || len(built.Layers) != 2 || hints.Base != "" ||
-		strings.Join(built.Service.Argv, " ") != "docker-entrypoint.sh postgres" || built.Service.StopSignal != "SIGINT" {
+		strings.Join(built.Service.Argv, " ") != "docker-entrypoint.sh postgres" || built.Service.StopSignal != "SIGINT" ||
+		built.Service.Restart != api.RestartOnFailure || built.Service.ProbeTimeoutSeconds != 0 {
 		t.Fatalf("built %s", hints.Built)
 	}
 
@@ -213,6 +215,57 @@ func TestBuildOCI(t *testing.T) {
 	}
 }
 
+// El servicio que sale de la configuración de la imagen: un STOPSIGNAL que no
+// se entiende pasa a SIGTERM con aviso (no deja la imagen sin servicio), los
+// plazos del HEALTHCHECK llegan a la sonda con tope, y -restart manda.
+func TestBuildOCIServiceFromConfig(t *testing.T) {
+	e := newOCITest(t)
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{
+		"Cmd": []string{"python3"}, "StopSignal": "SIGNOPE",
+		"Healthcheck": map[string]any{"Test": []string{"CMD", "true"}, "Timeout": 2500e6, "StartPeriod": 3600e9,
+			"Interval": 5e9, "Retries": 3},
+	}, ocitest.TarGz(alpineLike()))
+	service := func(spec OCISpec) (api.ServiceSpec, string) {
+		t.Helper()
+		hints, log, err := e.build("py", spec)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, log)
+		}
+		var built struct{ Service api.ServiceSpec }
+		if err := json.Unmarshal(hints.Built, &built); err != nil {
+			t.Fatal(err)
+		}
+		return built.Service, log
+	}
+	svc, log := service(OCISpec{Ref: e.reg.Host() + "/x/py@" + idx, Arch: "amd64"})
+	if svc.StopSignal != "" || !strings.Contains(log, "STOPSIGNAL") || !strings.Contains(log, "SIGTERM") {
+		t.Fatalf("stop signal %q, log:\n%s", svc.StopSignal, log)
+	}
+	if svc.Restart != api.RestartOnFailure || svc.ProbeTimeoutSeconds != 3 || svc.ReadyStartPeriodSeconds != api.MaxReadyTimeoutSeconds {
+		t.Fatalf("service %+v", svc)
+	}
+	if svc, _ = service(OCISpec{Ref: e.reg.Host() + "/x/py@" + idx, Arch: "amd64", Restart: api.RestartAlways}); svc.Restart != api.RestartAlways {
+		t.Fatalf("restart %q", svc.Restart)
+	}
+}
+
+func TestOCIReadyTimes(t *testing.T) {
+	for _, c := range []struct {
+		hc     *oci.Healthcheck
+		to, sp int
+	}{
+		{nil, 0, 0},
+		{&oci.Healthcheck{Test: []string{"NONE"}, Timeout: 5e9}, 0, 0},
+		{&oci.Healthcheck{Test: []string{"CMD-SHELL", "true"}}, 0, 0},
+		{&oci.Healthcheck{Test: []string{"CMD-SHELL", "true"}, Timeout: 30e9, StartPeriod: 1}, 30, 1},
+		{&oci.Healthcheck{Test: []string{"CMD", "x"}, Timeout: -1, StartPeriod: 121e9}, 0, 120},
+	} {
+		if to, sp := ociReadyTimes(c.hc); to != c.to || sp != c.sp {
+			t.Errorf("ociReadyTimes(%+v) = %d, %d; want %d, %d", c.hc, to, sp, c.to, c.sp)
+		}
+	}
+}
+
 func TestBuildOCIRejects(t *testing.T) {
 	e := newOCITest(t)
 	distroless := ocitest.TarGz([]ocitest.File{{Name: "app", Body: testELF(0x3e), Mode: 0o755}})
@@ -248,6 +301,7 @@ func TestValidateOCI(t *testing.T) {
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", User: "root; rm"}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", MaxMB: -1}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Cmd: []string{"a\x00b"}}},
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Restart: "sometimes"}},
 	} {
 		if _, err := validateOCI(c.req, c.spec); err == nil {
 			t.Errorf("case %d accepted", i)

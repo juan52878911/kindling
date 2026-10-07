@@ -41,3 +41,15 @@ func TestHasFileRutaConEspacio(t *testing.T) {
 		t.Fatal("una comilla en la ruta debería ser un error, no un stat")
 	}
 }
+
+// Una orden que falla sin decir nada no deja un ": " colgando ("debugfs on x:
+// exit status 1: ").
+func TestConSalida(t *testing.T) {
+	err := errors.New("exit status 1")
+	if got := conSalida(err, []byte(" \n")); got != "exit status 1" {
+		t.Errorf("sin salida = %q", got)
+	}
+	if got := conSalida(err, []byte("not here\n")); got != "exit status 1: not here" {
+		t.Errorf("con salida = %q", got)
+	}
+}

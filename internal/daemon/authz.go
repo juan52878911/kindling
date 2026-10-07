@@ -18,6 +18,10 @@ package daemon
 // Se aplica en UN sitio: cada ruta declara su acción (ver rutas() en
 // server.go) y autorizar decide antes de llamar al handler. Los handlers solo
 // filtran sus listados con lo que autorizar dejó en el contexto.
+//
+// Las cuotas de la política (quotas) no se aplican aquí sino en el manager
+// (internal/machine/cuota_inquilino.go), que es quien puede contar y dar de
+// alta en el mismo cerrojo: SetAuthz se las pasa.
 
 import (
 	"bytes"
@@ -37,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -111,7 +116,22 @@ type ficheroAuthz struct {
 		SHA256 string `json:"sha256"`
 		Role   string `json:"role"`
 	} `json:"tokens,omitempty"`
+	// Quotas son los topes de cada inquilino, por nombre; "*" es el de los
+	// que no tienen el suyo, y lo que el suyo no dice (campo a campo).
+	Quotas map[string]cuotaFichero `json:"quotas,omitempty"`
 }
+
+// cuotaFichero es la cuota de un inquilino en el fichero. Un campo que falta
+// no pone tope (o hereda el de "*"); 0 es "nada".
+type cuotaFichero struct {
+	MaxMachines *int `json:"max_machines,omitempty"`
+	MaxMemMiB   *int `json:"max_mem_mib,omitempty"`
+	MaxDiskMiB  *int `json:"max_disk_mib,omitempty"`
+}
+
+// cuotaTodos es la clave de la cuota por defecto: no es un nombre de
+// inquilino válido, así que no se confunde con ninguno.
+const cuotaTodos = "*"
 
 type reglaAuthz struct {
 	porUID bool
@@ -131,6 +151,10 @@ type Politica struct {
 	reglas      []reglaAuthz
 	compartidas map[string]bool
 	tokens      []tokenAuthz
+	// cuotas son las de cada inquilino ya resueltas (con "*" aplicado), y
+	// cuotaPorDefecto la de los demás; nil = sin cuota. Ver cuotaDe.
+	cuotas          map[string]machine.Cuota
+	cuotaPorDefecto *machine.Cuota
 	// admins son los uid que siempre son admin: root y el usuario del daemon.
 	// Cualquiera de los dos puede reescribir la política o el daemon mismo, así
 	// que negarles algo no protegería nada.
@@ -260,7 +284,77 @@ func parsePolitica(b []byte, res resolutor) (*Politica, error) {
 		tk.rol = rol
 		p.tokens = append(p.tokens, tk)
 	}
+	if err := p.resolverCuotas(f.Quotas); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// resolverCuotas valida las cuotas del fichero y resuelve, para cada
+// inquilino, lo que hereda de "*".
+func (p *Politica) resolverCuotas(qs map[string]cuotaFichero) error {
+	campo := func(quien, nombre string, v, defecto *int) (int, error) {
+		switch {
+		case v != nil && *v < 0:
+			return 0, fmt.Errorf("quota %q: %s can't be negative (leave it out for no limit)", quien, nombre)
+		case v != nil:
+			return *v, nil
+		case defecto != nil:
+			return *defecto, nil
+		}
+		return machine.SinTope, nil
+	}
+	resolver := func(quien string, q, defecto cuotaFichero) (machine.Cuota, error) {
+		var c machine.Cuota
+		var err error
+		if c.Maquinas, err = campo(quien, "max_machines", q.MaxMachines, defecto.MaxMachines); err != nil {
+			return c, err
+		}
+		if c.MemMiB, err = campo(quien, "max_mem_mib", q.MaxMemMiB, defecto.MaxMemMiB); err != nil {
+			return c, err
+		}
+		c.DiscoMiB, err = campo(quien, "max_disk_mib", q.MaxDiskMiB, defecto.MaxDiskMiB)
+		return c, err
+	}
+	todos, hayTodos := qs[cuotaTodos]
+	if hayTodos {
+		c, err := resolver(cuotaTodos, todos, cuotaFichero{})
+		if err != nil {
+			return err
+		}
+		p.cuotaPorDefecto = &c
+	}
+	for t, q := range qs {
+		if t == cuotaTodos {
+			continue
+		}
+		if !api.KeyPattern.MatchString(t) {
+			return fmt.Errorf("quota %q: not a tenant name (lowercase letters, digits, '.', '_', '-') nor %q", t, cuotaTodos)
+		}
+		c, err := resolver(t, q, todos)
+		if err != nil {
+			return err
+		}
+		if p.cuotas == nil {
+			p.cuotas = map[string]machine.Cuota{}
+		}
+		p.cuotas[t] = c
+	}
+	return nil
+}
+
+// tieneCuotas dice si la política pone alguna cuota.
+func (p *Politica) tieneCuotas() bool { return len(p.cuotas) > 0 || p.cuotaPorDefecto != nil }
+
+// cuotaDe es la cuota del inquilino t: la suya, la de "*", o ninguna.
+func (p *Politica) cuotaDe(t string) (machine.Cuota, bool) {
+	if c, ok := p.cuotas[t]; ok {
+		return c, true
+	}
+	if p.cuotaPorDefecto != nil {
+		return *p.cuotaPorDefecto, true
+	}
+	return machine.Cuota{}, false
 }
 
 // CargarPolitica lee la política de ruta. Si no existe y no es obligatoria

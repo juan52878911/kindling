@@ -34,7 +34,7 @@ addr() { # dirección del puerto 8000 de una máquina: IP en Linux, reenvío en 
   if [ -n "$f" ]; then echo "$f"; else echo "$(jq -r .ip <<<"$j"):8000"; fi
 }
 embed1() { # embed1 <máquina> <texto>: una petición por el proxy del daemon
-  "$KLING" models embed -json "$1" "$2"
+  "$KLING" ai model embed -json "$1" "$2"
 }
 
 info="$("$KLING" snapshots -json | jq --arg s "$SNAP" '.[]|select(.name==$s)')"
