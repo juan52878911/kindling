@@ -33,10 +33,10 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 	}
 	g.pop.observe("fria")
 	g.dormir(context.Background(), []dormida{
-		{"von", "m-von", 1536},  // más popular, pero no cabe
-		{"chispa", "m-ch", 128}, // 10/128
-		{"fria", "m-fria", 128}, // 1/128: puntúa menos, pero aún cabe
-		{"nadie", "m-nadie", 64},
+		{"von", "m-von", 1536, ""},  // más popular, pero no cabe
+		{"chispa", "m-ch", 128, ""}, // 10/128
+		{"fria", "m-fria", 128, ""}, // 1/128: puntúa menos, pero aún cabe
+		{"nadie", "m-nadie", 64, ""},
 	})
 	if !pausadas["m-ch"] || !pausadas["m-fria"] {
 		t.Errorf("pausadas = %v; esperaba chispa y fria (caben 256)", pausadas)
@@ -49,7 +49,7 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 	}
 	// El presupuesto se cuenta con lo ya pausado.
 	g.pop.observe("otra")
-	g.dormir(context.Background(), []dormida{{"otra", "m-otra", 64}})
+	g.dormir(context.Background(), []dormida{{"otra", "m-otra", 64, ""}})
 	if pausadas["m-otra"] || !congeladas["m-otra"] {
 		t.Errorf("sin presupuesto libre, otra debía congelarse")
 	}
@@ -59,7 +59,7 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 func TestDormirSinPresupuestoCongela(t *testing.T) {
 	g, pausadas, congeladas := gwPausas(0)
 	g.pop.observe("chispa")
-	g.dormir(context.Background(), []dormida{{"chispa", "m-ch", 64}})
+	g.dormir(context.Background(), []dormida{{"chispa", "m-ch", 64, ""}})
 	if len(pausadas) != 0 || !congeladas["m-ch"] {
 		t.Errorf("pausadas=%v congeladas=%v", pausadas, congeladas)
 	}

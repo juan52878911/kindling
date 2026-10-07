@@ -70,6 +70,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `thaw` of a machine removed while it waited fails instead of starting a VMM; re-adopting a live VMM restores its CPU ceiling (Linux)
 - Daemon shutdown waits for in-flight lifecycle operations, so their last state is saved
 - Paths with a backslash are refused like escaped slashes
+- Gateway: freezing an idle paused instance no longer races a request resuming it, which froze the freshly adopted instance (502 on its first call)
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts
 - Docker images: an unknown `STOPSIGNAL` falls back to SIGTERM with a warning instead of leaving the image without its service; `SIGRTMIN+n` and every Linux signal are understood
 - Docker images: a numeric `USER` missing from `/etc/passwd` runs with group 0, as in Docker

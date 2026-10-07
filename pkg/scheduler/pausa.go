@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type pausada struct {
 	service string
 	memMiB  int
 	at      time.Time
+	// aislada es la clave de la sesión aislada dueña de la máquina, si lo es
+	// (ver candadoPausada).
+	aislada string
 }
 
 // pausedFor es cuánto dura una pausada antes de congelarse de verdad.
@@ -63,6 +67,7 @@ func (g *Scheduler) sabePausar(ctx context.Context) bool {
 type dormida struct {
 	service, id string
 	memMiB      int
+	aislada     string // clave de la sesión, si es la máquina de una aislada
 }
 
 // dormir pone a dormir las víctimas del segador: pausa las que mejor
@@ -111,7 +116,7 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 		if g.pausadas == nil {
 			g.pausadas = map[string]pausada{}
 		}
-		g.pausadas[v.id] = pausada{service: v.service, memMiB: v.memMiB, at: time.Now()}
+		g.pausadas[v.id] = pausada{service: v.service, memMiB: v.memMiB, at: time.Now(), aislada: v.aislada}
 		g.mu.Unlock()
 		log.Printf("%s: paused due to inactivity", v.service)
 	}
@@ -130,61 +135,109 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 // enfriarPausadas congela de verdad las pausadas que llevan más de pausedFor
 // sin usarse.
 func (g *Scheduler) enfriarPausadas(ctx context.Context) {
-	type vieja struct {
+	vieja := func(p pausada) bool { return time.Since(p.at) > g.pausedFor() }
+	type candidata struct {
 		id string
 		p  pausada
 	}
-	var viejas []vieja
+	var viejas []candidata
 	g.mu.Lock()
 	for id, p := range g.pausadas {
-		if time.Since(p.at) > g.pausedFor() && !g.adquiriendo[id] {
-			viejas = append(viejas, vieja{id, p})
-			delete(g.pausadas, id)
+		if vieja(p) && !g.adquiriendo[id] {
+			viejas = append(viejas, candidata{id, p})
 		}
 	}
 	g.mu.Unlock()
 	for _, v := range viejas {
-		if !g.congelarPausada(ctx, v.id) {
-			// El freeze falló: se repone, o se pierde del registro para
-			// siempre reteniendo su RAM sin ningún dueño en el planificador
-			// (G-04) — solo el TTL del daemon (2×idle) acabaría congelándola,
-			// y renovarTTL puede seguir aplazándolo si algo la adopta.
-			g.reponerPausada(v.id, v.p)
+		soltar := g.tomarPausada(v.id, v.p, vieja)
+		if soltar == nil {
+			continue // alguien la está despertando: ya no es vieja
 		}
+		// Si el freeze falla, soltar la repone: perderla del registro la
+		// dejaría reteniendo su RAM sin ningún dueño en el planificador (G-04)
+		// — solo el TTL del daemon (2×idle) acabaría congelándola, y
+		// renovarTTL puede seguir aplazándolo si algo la adopta.
+		soltar(g.congelarPausada(ctx, v.id))
 	}
 }
 
-// pausadaMasVieja saca del registro la pausada más antigua (para evictLRU),
-// junto con su valor completo: si el freeze acaba fallando, el llamador debe
-// reponerla con reponerPausada en vez de perderla (G-04).
-func (g *Scheduler) pausadaMasVieja() (string, pausada) {
+// tomarPausadaMasVieja aparta para congelarla (ver tomarPausada) la pausada
+// más antigua que nadie esté despertando, para evictLRU. Devuelve su valor y
+// con qué soltarla; soltar es nil si no hay ninguna.
+func (g *Scheduler) tomarPausadaMasVieja() (string, pausada, func(congelada bool)) {
+	type candidata struct {
+		id string
+		p  pausada
+	}
+	var cands []candidata
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	var id string
-	var elegida pausada
-	for k, p := range g.pausadas {
-		if g.adquiriendo[k] {
-			continue
-		}
-		if id == "" || p.at.Before(elegida.at) {
-			id, elegida = k, p
+	for id, p := range g.pausadas {
+		if !g.adquiriendo[id] {
+			cands = append(cands, candidata{id, p})
 		}
 	}
-	if id != "" {
-		delete(g.pausadas, id)
-	}
-	return id, elegida
-}
-
-// reponerPausada repone en el registro una pausada que se sacó para intentar
-// congelarla y no se pudo (ver enfriarPausadas y evictLRU).
-func (g *Scheduler) reponerPausada(id string, p pausada) {
-	g.mu.Lock()
-	if g.pausadas == nil {
-		g.pausadas = map[string]pausada{}
-	}
-	g.pausadas[id] = p
 	g.mu.Unlock()
+	sort.Slice(cands, func(i, j int) bool { return cands[i].p.at.Before(cands[j].p.at) })
+	for _, c := range cands {
+		if soltar := g.tomarPausada(c.id, c.p, nil); soltar != nil {
+			return c.id, c.p, soltar
+		}
+	}
+	return "", pausada{}, nil
+}
+
+// candadoPausada es el candado bajo el que se despierta esa máquina: el del
+// servicio (ensure → acquire) o, si es de una sesión aislada, el de la sesión
+// (isolatedSession → despertarAislada).
+func (g *Scheduler) candadoPausada(p pausada) *sync.Mutex {
+	if p.aislada != "" {
+		return g.aisladaLock(p.aislada)
+	}
+	return g.ensureLock(p.service)
+}
+
+// tomarPausada saca del registro la pausada id para congelarla, con el mismo
+// TryLock que evictLRU toma sobre sus víctimas despiertas, y la marca en
+// g.adquiriendo mientras dura el freeze. Sin las dos cosas, un acquire
+// concurrente la veía "paused" en su List(), la reanudaba y el freeze, que
+// llegaba después, congelaba una instancia recién adoptada: 502 en su primera
+// petición. El candado detiene a ensure y a isolatedSession hasta que acabe el
+// freeze (y entonces la descongelan); la marca, al scale-out, que no lo toma.
+//
+// Devuelve nil si el candado está ocupado (alguien la está despertando), si ya
+// no figura en el registro, si alguien la eligió o si deja de cumplir vale
+// (nil: cualquiera). Si no, devuelve con qué soltarla al acabar: con
+// congelada=false la repone en el registro (G-04).
+func (g *Scheduler) tomarPausada(id string, p pausada, vale func(pausada) bool) func(congelada bool) {
+	l := g.candadoPausada(p)
+	if !l.TryLock() {
+		return nil
+	}
+	g.mu.Lock()
+	actual, sigue := g.pausadas[id]
+	if !sigue || g.adquiriendo[id] || (vale != nil && !vale(actual)) {
+		g.mu.Unlock()
+		l.Unlock()
+		return nil
+	}
+	delete(g.pausadas, id)
+	if g.adquiriendo == nil {
+		g.adquiriendo = map[string]bool{}
+	}
+	g.adquiriendo[id] = true
+	g.mu.Unlock()
+	return func(congelada bool) {
+		g.mu.Lock()
+		if !congelada {
+			if g.pausadas == nil {
+				g.pausadas = map[string]pausada{}
+			}
+			g.pausadas[id] = actual
+		}
+		delete(g.adquiriendo, id)
+		g.mu.Unlock()
+		l.Unlock()
+	}
 }
 
 func (g *Scheduler) congelarPausada(ctx context.Context, id string) bool {
