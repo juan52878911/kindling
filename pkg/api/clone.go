@@ -16,7 +16,7 @@ import (
 // withDriveIDs (ver manager.go, M-03) muta ese slice compartido, así que una
 // foto tomada mientras persist() serializa fuera del lock puede ver un array a
 // medio escribir — una carrera de datos real, no solo teórica. Lo mismo vale
-// para los punteros a time.Time (StartedAt, FrozenAt, FailedAt, TTLAt, DiskErrorAt) y para
+// para los punteros a time.Time (StartedAt, FrozenAt, FailedAt, StoppedAt, TTLAt, DiskErrorAt) y para
 // Wake: sin copiar lo que señalan, dos *api.Machine acaban señalando la misma
 // fecha o el mismo WakePhases, y mutar uno a través de su puntero muta al
 // otro por debajo.
@@ -49,6 +49,7 @@ func (mc *Machine) Clone() *Machine {
 	out.StartedAt = clonarFecha(mc.StartedAt)
 	out.FrozenAt = clonarFecha(mc.FrozenAt)
 	out.FailedAt = clonarFecha(mc.FailedAt)
+	out.StoppedAt = clonarFecha(mc.StoppedAt)
 	out.DiskErrorAt = clonarFecha(mc.DiskErrorAt)
 	out.TTLAt = clonarFecha(mc.TTLAt)
 
