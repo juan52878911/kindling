@@ -249,6 +249,10 @@ type Server struct {
 	// limitesCache da los topes de sus cachés (builders_cache.go); nil = los
 	// de por defecto.
 	limitesCache func() LimitesCacheConstruccion
+	// muCacheOCI: los constructores (mientras corren) y GET/PUT /oci/blobs
+	// la toman en lectura; el barrido de <root>/cache/oci, en escritura y
+	// solo si no hay nadie (TryLock). Así no borra lo que alguien usa.
+	muCacheOCI sync.RWMutex
 
 	// construyendo es un cerrojo por nombre de imagen: dos construcciones
 	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.

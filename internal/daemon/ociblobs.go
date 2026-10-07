@@ -16,6 +16,14 @@ package daemon
 // escribe en un temporal que solo se renombra cuando su sha256 es el del
 // digest: lo que hay en la caché con ese nombre es siempre ese contenido, lo
 // suba quien lo suba. Nada se ejecuta ni se interpreta aquí.
+//
+// PERMISOS Y TOPE: la caché es de root con el grupo del usuario de
+// construcción (directorios 0750, blobs 0640; ver builders_cache.go), no de
+// todo el host: un archivo puede traer una imagen privada. Lo subido cuenta
+// para daemon.build_cache_max_gib: si la caché de root ya pasa del tope, se
+// barre (lo que lleve más de graciaCacheOCI) y, si sigue sin caber, la subida
+// es un 507. Se barre también después de cada construcción, y lo que usa una
+// construcción sin root pasa a la caché verificada (y sale de ésta).
 
 import (
 	"crypto/rand"
@@ -23,6 +31,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,6 +63,61 @@ func ociBlobPresente(p string) (int64, bool) {
 	return fi.Size(), true
 }
 
+// ociBlobTenido dice si el daemon ya tiene el blob para una construcción
+// desde un archivo: en la caché de root o, si los constructores corren sin
+// root (que la leen), en la verificada, adonde pasa lo que usan. Le pone la
+// fecha de hoy: quien pregunta va a construir con él, y el barrido empieza
+// por lo más viejo.
+func (s *Server) ociBlobTenido(p string) (int64, bool) {
+	cands := []string{p}
+	if s.constructor != nil {
+		cands = append(cands, filepath.Join(s.root, "cache", "verified", "oci", "sha256", filepath.Base(p)))
+	}
+	for _, c := range cands {
+		if n, ok := ociBlobPresente(c); ok {
+			ahora := time.Now()
+			_ = os.Chtimes(c, ahora, ahora)
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// tamCacheOCI es lo que ocupan los ficheros de la caché de blobs de root.
+func tamCacheOCI(dir string) int64 {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range es {
+		if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+			total += fi.Size()
+		}
+	}
+	return total
+}
+
+// hayHueco dice si caben size bytes más en la caché de root sin pasar del
+// tope; si no, la barre primero (si nadie la usa) y vuelve a mirar.
+func (s *Server) hayHueco(size int64) bool {
+	maxBytes, maxEdad := s.limitesCacheConstruccion().efectivos()
+	dir := dirCacheOCI(s.root)
+	if tamCacheOCI(dir)+size <= maxBytes {
+		return true
+	}
+	if size > maxBytes {
+		return false // no cabría ni con la caché vacía: no se barre por nada
+	}
+	if s.muCacheOCI.TryLock() {
+		if b, lib := barrerCachesConstruccion("", "", dir, uint32(os.Geteuid()), maxBytes-size, maxEdad, nil, time.Now()); b > 0 {
+			log.Printf("blob cache: removed %d file(s), %d MiB", b, lib>>20)
+		}
+		s.muCacheOCI.Unlock()
+	}
+	return tamCacheOCI(dir)+size <= maxBytes
+}
+
 // handleGetOCIBlob dice si el daemon ya tiene un blob (no lo sirve: es para
 // no volver a subirlo). 404 si no.
 func (s *Server) handleGetOCIBlob(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +127,9 @@ func (s *Server) handleGetOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	n, ok := ociBlobPresente(p)
+	s.muCacheOCI.RLock()
+	defer s.muCacheOCI.RUnlock()
+	n, ok := s.ociBlobTenido(p)
 	if !ok {
 		fail(w, http.StatusNotFound, fmt.Errorf("blob %s is not in the cache", digest))
 		return
@@ -89,31 +155,35 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the blob is %d bytes and the limit is %d", size, api.MaxBlobBytes))
 		return
 	}
-	if n, ok := ociBlobPresente(p); ok && n == size {
+	if err := cerrarCacheOCI(s.root, s.constructor); err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n, ok := s.ociBlobTenido(p); ok && n == size {
 		// Ya está (otra subida, o una descarga de un registro): no se lee nada.
 		writeJSON(w, http.StatusOK, api.OCIBlob{Digest: digest, Size: n, Unchanged: true})
 		return
 	}
+	if !s.hayHueco(size) {
+		max, _ := s.limitesCacheConstruccion().efectivos()
+		fail(w, http.StatusInsufficientStorage, fmt.Errorf("the daemon's blob cache is over its limit "+
+			"(daemon.build_cache_max_gib = %d GiB) with this %d MiB blob: build what was uploaded, or raise the limit",
+			max>>30, size>>20))
+		return
+	}
+	s.muCacheOCI.RLock()
+	defer s.muCacheOCI.RUnlock()
 	// Sin el plazo de lectura de 30 s del servidor: gigas por SSH no caben, y
 	// el tamaño ya está acotado.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	// Legibles para el constructor sin privilegios, que los lee de aquí
-	// (builders_sinroot.go) aunque la máscara del daemon sea más estricta.
-	for _, d := range []string{dir, filepath.Dir(dir)} {
-		_ = os.Chmod(d, 0o755)
-	}
+	gid, modoDir := grupoCaches(s.constructor)
 	// Un temporal propio por subida (dos a la vez del mismo blob no se pisan),
 	// en el mismo directorio para que el renombrado sea atómico, y acabado en
 	// .part como los de las descargas: nadie lo toma por un blob.
 	var rnd [6]byte
 	_, _ = rand.Read(rnd[:])
 	tmp := p + "." + hex.EncodeToString(rnd[:]) + ".part"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
@@ -147,8 +217,15 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Sin la máscara del daemon de por medio: 0644, como los que se bajan.
-	if err := os.Chmod(tmp, 0o644); err != nil {
+	// Del grupo del constructor, que lo lee (como Seed), y de nadie más.
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(tmp, 0, int(gid)); err != nil {
+			_ = os.Remove(tmp)
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := os.Chmod(tmp, modoBlob(modoDir)); err != nil {
 		_ = os.Remove(tmp)
 		fail(w, http.StatusInternalServerError, err)
 		return

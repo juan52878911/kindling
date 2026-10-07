@@ -217,10 +217,11 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		// Primero lo que el constructor dejara vivo, después su directorio:
 		// al revés, sus hijos seguirían escribiendo mientras se borra. Las
 		// cachés, con él ya barrido y antes de borrar la lista de lo usado.
+		limpio := true
 		if u != nil {
-			limpio := barrerProcesos(u.UID)
-			s.cacheConstruccion(work, cache, verificada, u, bien, limpio)
+			limpio = barrerProcesos(u.UID)
 		}
+		s.cacheConstruccion(work, cache, verificada, u, bien, limpio)
 		os.RemoveAll(work)
 	}()
 
@@ -229,7 +230,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 			fail(w, http.StatusInternalServerError, fmt.Errorf("builder cache: %w", err))
 			return
 		}
-		if verificada, err = prepararVerificada(s.root); err != nil {
+		if verificada, err = prepararVerificada(s.root, u); err != nil {
 			fail(w, http.StatusInternalServerError, fmt.Errorf("verified builder cache: %w", err))
 			return
 		}
@@ -243,7 +244,17 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	out := filepath.Join(work, "out")
 	var salida bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &salida, &salida
-	if err := cmd.Run(); err != nil {
+	// La caché de blobs de root, cerrada a las demás cuentas antes de que un
+	// constructor como root (debian, android, oci sin usuario) la cree con su
+	// umask, y sin barrer mientras alguno la usa (builders_cache.go).
+	if err := cerrarCacheOCI(s.root, s.constructor); err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("blob cache: %w", err))
+		return
+	}
+	s.muCacheOCI.RLock()
+	err = cmd.Run()
+	s.muCacheOCI.RUnlock()
+	if err != nil {
 		fail(w, http.StatusInternalServerError,
 			fmt.Errorf("builder %s failed: %w\n%s", req.Builder, err, strings.TrimSpace(salida.String())))
 		return

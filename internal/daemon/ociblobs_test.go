@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -59,9 +60,15 @@ func TestPutOCIBlob(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
 	}
+	// Sin usuario de construcción, solo para root (para el daemon).
 	fi, err := os.Lstat(p)
-	if err != nil || fi.Mode().Perm() != 0o644 {
+	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("blob %v %v", fi, err)
+	}
+	for _, d := range []string{dir, filepath.Dir(dir)} {
+		if fi, err := os.Lstat(d); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v %v", d, fi, err)
+		}
 	}
 	if b, _ := os.ReadFile(p); string(b) != body {
 		t.Fatalf("content %q", b)
@@ -121,5 +128,110 @@ func TestOCIBlobNotALink(t *testing.T) {
 	}
 	if fi, err := os.Lstat(filepath.Join(dir, h)); err != nil || !fi.Mode().IsRegular() {
 		t.Fatalf("the link stayed: %v", err)
+	}
+}
+
+// Lo subido no es legible para las demás cuentas del host (una imagen
+// privada): con usuario de construcción, directorios 0750 y blobs 0640 de su
+// grupo; lo de una versión anterior (0755 y 0644) se cierra al subir.
+func TestPutOCIBlobSinLecturaParaOtros(t *testing.T) {
+	s, root := servidorBlobs(t)
+	s.constructor = yo()
+	dir := filepath.Join(root, "cache", "oci", "sha256")
+	os.MkdirAll(dir, 0o755)
+	os.Chmod(filepath.Dir(dir), 0o755)
+	viejo := filepath.Join(dir, strings.Repeat("b", 64))
+	os.WriteFile(viejo, []byte("de antes"), 0o644)
+	body := "capa privada"
+	d := "sha256:" + shaHex([]byte(body))
+	if rr := putOCIBlob(s, d, strings.NewReader(body), int64(len(body))); rr.Code != http.StatusCreated {
+		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
+	}
+	sinLecturaParaOtros(t, filepath.Join(root, "cache", "oci"))
+	if fi, _ := os.Lstat(filepath.Join(dir, shaHex([]byte(body)))); fi.Mode().Perm() != 0o640 {
+		t.Fatalf("blob %o, want 0640", fi.Mode().Perm())
+	}
+}
+
+// sinLecturaParaOtros falla si algo bajo dir (incluido él) deja leer,
+// escribir o atravesar a otros, o no es del grupo esperado (como root).
+func sinLecturaParaOtros(t *testing.T, dir string) {
+	t.Helper()
+	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o007 != 0 {
+			t.Errorf("%s is %o: other accounts can reach it", p, fi.Mode().Perm())
+		}
+		return nil
+	})
+}
+
+// Pasado el tope, una subida barre lo viejo de la caché de root; si aun así
+// no cabe, 507. Lo de menos de graciaCacheOCI no se barre.
+func TestPutOCIBlobTope(t *testing.T) {
+	s, root := servidorBlobs(t)
+	s.SetBuildCache(func() LimitesCacheConstruccion { return LimitesCacheConstruccion{MaxGiB: 1} })
+	dir := filepath.Join(root, "cache", "oci", "sha256")
+	os.MkdirAll(dir, 0o700)
+	hace := time.Now().Add(-3 * graciaCacheOCI)
+	grande := func(c byte, mod time.Time) string {
+		p := filepath.Join(dir, strings.Repeat(string(c), 64))
+		f, _ := os.Create(p)
+		f.Truncate(600 << 20) // disperso: cuenta lo que dice medir
+		f.Close()
+		os.Chtimes(p, mod, mod)
+		return p
+	}
+	viejo := grande('a', hace)
+	body := "capa"
+	d := "sha256:" + shaHex([]byte(body))
+	if rr := putOCIBlob(s, d, strings.NewReader(body), 500<<20); rr.Code != http.StatusInsufficientStorage &&
+		rr.Code != http.StatusBadRequest {
+		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
+	}
+	if _, err := os.Lstat(viejo); !os.IsNotExist(err) {
+		t.Fatal("over the limit, the old blob was not swept")
+	}
+	reciente := grande('c', time.Now())
+	grande('d', time.Now())
+	rr := putOCIBlob(s, d, strings.NewReader(body), int64(len(body)))
+	if rr.Code != http.StatusInsufficientStorage || !strings.Contains(rr.Body.String(), "build_cache_max_gib") {
+		t.Fatalf("PUT over the limit = %d %s", rr.Code, rr.Body)
+	}
+	if _, err := os.Lstat(reciente); err != nil {
+		t.Fatal("a recent upload was swept")
+	}
+}
+
+// Con constructores sin root, lo que pasó a la caché verificada cuenta como
+// "ya está": reimportar el archivo no vuelve a subirlo.
+func TestOCIBlobEnLaVerificada(t *testing.T) {
+	s, root := servidorBlobs(t)
+	body := "capa ya verificada"
+	h := shaHex([]byte(body))
+	os.MkdirAll(filepath.Join(root, "cache"), 0o755)
+	v, err := prepararVerificada(root, yo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(v, "oci", "sha256", h)
+	os.WriteFile(p, []byte(body), 0o640)
+	viejo := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(p, viejo, viejo)
+	if rr := getOCIBlob(s, "sha256:"+h); rr.Code != http.StatusNotFound {
+		t.Fatalf("without a builder user, GET = %d", rr.Code)
+	}
+	s.constructor = yo()
+	if rr := getOCIBlob(s, "sha256:"+h); rr.Code != http.StatusOK {
+		t.Fatalf("GET = %d %s", rr.Code, rr.Body)
+	}
+	if fi, _ := os.Lstat(p); time.Since(fi.ModTime()) > time.Hour {
+		t.Fatal("GET did not touch the blob it is about to use")
+	}
+	if rr := putOCIBlob(s, "sha256:"+h, strings.NewReader(body), int64(len(body))); rr.Code != http.StatusOK ||
+		!strings.Contains(rr.Body.String(), `"unchanged":true`) {
+		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
 	}
 }

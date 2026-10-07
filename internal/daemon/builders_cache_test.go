@@ -31,7 +31,7 @@ func cachesDePrueba(t *testing.T) (cache, verificada, work string) {
 	if err := os.MkdirAll(filepath.Join(cache, "oci", "sha256"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if verificada, err = prepararVerificada(root); err != nil {
+	if verificada, err = prepararVerificada(root, yo()); err != nil {
 		t.Fatal(err)
 	}
 	return cache, verificada, t.TempDir()
@@ -50,7 +50,7 @@ func verificadoEn(verificada, digest string) string {
 	return filepath.Join(verificada, "oci", "sha256", strings.TrimPrefix(digest, "sha256:"))
 }
 
-// Un blob que cuadra pasa a la verificada (copia nueva, 0644) y sale de la
+// Un blob que cuadra pasa a la verificada (copia nueva, 0640) y sale de la
 // caché del constructor. El ATAQUE: el constructor cambia un blob de su caché
 // (contenido de otro con el nombre del bueno) y ese no entra: se borra.
 func TestPromoverCache(t *testing.T) {
@@ -64,7 +64,7 @@ func TestPromoverCache(t *testing.T) {
 	os.WriteFile(filepath.Join(work, ficheroUsados),
 		[]byte(dBueno+"\n"+dEnvenenado+"\n"+dFalta+"\nbasura\n../../etc/passwd\n"), 0o600)
 
-	usados, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<30)
+	usados, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<30)
 	if n != 1 || err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("promovidos %d, err %v", n, err)
 	}
@@ -76,7 +76,7 @@ func TestPromoverCache(t *testing.T) {
 		t.Fatalf("el bueno en la verificada: %q %v", b, err)
 	}
 	fi, _ := os.Lstat(verificadoEn(verificada, dBueno))
-	if fi.Mode().Perm() != 0o644 {
+	if fi.Mode().Perm() != 0o640 {
 		t.Fatalf("modo %o", fi.Mode().Perm())
 	}
 	if _, err := os.Lstat(srcBueno); !os.IsNotExist(err) {
@@ -98,7 +98,7 @@ func TestPromoverCache(t *testing.T) {
 	os.Chtimes(verificadoEn(verificada, dBueno), viejo, viejo)
 	otra := blobDelConstructor(t, cache, dBueno, bueno)
 	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(dBueno+"\n"), 0o600)
-	if _, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<30); n != 0 || err != nil {
+	if _, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<30); n != 0 || err != nil {
 		t.Fatalf("promovidos %d, err %v", n, err)
 	}
 	if fi, _ := os.Lstat(verificadoEn(verificada, dBueno)); time.Since(fi.ModTime()) > time.Hour {
@@ -118,7 +118,7 @@ func TestPromoverCacheRechaza(t *testing.T) {
 	d := digestDe([]byte("privado"))
 	os.Symlink(secreto, filepath.Join(cache, "oci", "sha256", strings.TrimPrefix(d, "sha256:")))
 	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(d+"\n"), 0o600)
-	if _, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<30); n != 0 || err == nil {
+	if _, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<30); n != 0 || err == nil {
 		t.Fatalf("un enlace promovido: %d %v", n, err)
 	}
 	if _, err := os.Lstat(verificadoEn(verificada, d)); !os.IsNotExist(err) {
@@ -131,7 +131,7 @@ func TestPromoverCacheRechaza(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(vacio+"\n"), 0o600)
-	if _, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<30); n != 0 || err == nil {
+	if _, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<30); n != 0 || err == nil {
 		t.Fatalf("una FIFO promovida: %d %v", n, err)
 	}
 
@@ -144,7 +144,7 @@ func TestPromoverCacheRechaza(t *testing.T) {
 	blobDelConstructor(t, c2, d2, cuerpo)
 	os.WriteFile(filepath.Join(w2, ficheroUsados), []byte(d2+"\n"), 0o600)
 	if os.Geteuid() != 0 {
-		if _, n, _ := promoverCache(w2, c2, v2, uint32(os.Getuid())+1, 1<<30); n != 0 {
+		if _, n, _ := promoverCache(w2, c2, v2, "", &usuarioConstructor{UID: uint32(os.Getuid()) + 1, GID: uint32(os.Getgid())}, 1<<30); n != 0 {
 			t.Fatalf("de otro dueño promovido: %d", n)
 		}
 		if _, err := os.Lstat(verificadoEn(v2, d2)); !os.IsNotExist(err) {
@@ -157,7 +157,7 @@ func TestPromoverCacheRechaza(t *testing.T) {
 	lista := filepath.Join(t.TempDir(), "lista")
 	os.WriteFile(lista, []byte(d2+"\n"), 0o600)
 	os.Symlink(lista, filepath.Join(w3, ficheroUsados))
-	if _, _, err := promoverCache(w3, c3, v3, uint32(os.Getuid()), 1<<30); err == nil {
+	if _, _, err := promoverCache(w3, c3, v3, "", yo(), 1<<30); err == nil {
 		t.Fatal("una lista que es un enlace se siguió")
 	}
 
@@ -170,7 +170,7 @@ func TestPromoverCacheRechaza(t *testing.T) {
 	os.RemoveAll(filepath.Join(c4, "oci"))
 	os.Symlink(fuera, filepath.Join(c4, "oci"))
 	os.WriteFile(filepath.Join(w4, ficheroUsados), []byte(d2+"\n"), 0o600)
-	if _, n, _ := promoverCache(w4, c4, v4, uint32(os.Getuid()), 1<<30); n != 0 {
+	if _, n, _ := promoverCache(w4, c4, v4, "", yo(), 1<<30); n != 0 {
 		t.Fatal("se promovió a través de un enlace")
 	}
 	if _, err := os.Stat(filepath.Join(fuera, "sha256", strings.TrimPrefix(d2, "sha256:"))); err != nil {
@@ -181,19 +181,19 @@ func TestPromoverCacheRechaza(t *testing.T) {
 func TestPrepararVerificada(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "cache"), 0o755)
-	v, err := prepararVerificada(root)
+	v, err := prepararVerificada(root, yo())
 	if err != nil || v != filepath.Join(root, "cache", "verified") {
 		t.Fatal(v, err)
 	}
 	for _, d := range []string{v, filepath.Join(v, "oci"), filepath.Join(v, "oci", "sha256")} {
-		if fi, err := os.Lstat(d); err != nil || fi.Mode().Perm() != 0o755 || !fi.IsDir() {
+		if fi, err := os.Lstat(d); err != nil || fi.Mode().Perm() != 0o750 || !fi.IsDir() {
 			t.Fatalf("%s: %v %v", d, fi, err)
 		}
 	}
 	root2 := t.TempDir()
 	os.MkdirAll(filepath.Join(root2, "cache"), 0o755)
 	os.Symlink(t.TempDir(), filepath.Join(root2, "cache", "verified"))
-	if _, err := prepararVerificada(root2); err == nil {
+	if _, err := prepararVerificada(root2, yo()); err == nil {
 		t.Fatal("cache/verified como enlace aceptado")
 	}
 }
@@ -223,7 +223,7 @@ func TestBarrerCachesConstruccion(t *testing.T) {
 
 	// Tope de 0 = 20 GiB: solo lo a medias y lo viejo.
 	const mes = 30 * 24 * time.Hour
-	b, _ := barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 20<<30, mes,
+	b, _ := barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), 20<<30, mes,
 		[]string{"sha256:" + hex('c')}, ahora)
 	for _, p := range []string{parte, tmp, viejoV} {
 		if _, err := os.Lstat(p); !os.IsNotExist(err) {
@@ -240,7 +240,7 @@ func TestBarrerCachesConstruccion(t *testing.T) {
 	}
 
 	// Con tope: hay 4 MiB y algo; bajo el tope no se toca nada más.
-	if b, _ := barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 5<<20, mes,
+	if b, _ := barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), 5<<20, mes,
 		[]string{"sha256:" + hex('c')}, ahora); b != 0 {
 		t.Fatalf("bajo el tope se borraron %d", b)
 	}
@@ -260,7 +260,7 @@ func TestBarrerCachesConstruccion(t *testing.T) {
 // devuelve los nombres que quedan en las dos cachés, ordenados.
 func barrerHasta(t *testing.T, cache, verificada string, tope int64, conservar string, ahora time.Time) []string {
 	t.Helper()
-	barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), tope, 30*24*time.Hour, []string{"sha256:" + conservar}, ahora)
+	barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), tope, 30*24*time.Hour, []string{"sha256:" + conservar}, ahora)
 	var out []string
 	for _, d := range []string{filepath.Join(cache, "oci", "sha256"), filepath.Join(verificada, "oci", "sha256")} {
 		es, _ := os.ReadDir(d)
@@ -304,7 +304,7 @@ func TestBarrerUsadosNoPasanDelTope(t *testing.T) {
 		os.Chtimes(p, ahora.Add(-time.Duration(4-i)*time.Hour), ahora.Add(-time.Duration(4-i)*time.Hour))
 		usados = append(usados, "sha256:"+strings.Repeat(string(c), 64))
 	}
-	barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 2<<20, 30*24*time.Hour, usados, ahora)
+	barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), 2<<20, 30*24*time.Hour, usados, ahora)
 	var total int64
 	es, _ := os.ReadDir(filepath.Join(verificada, "oci", "sha256"))
 	for _, e := range es {
@@ -330,7 +330,7 @@ func TestVerificadaIntocableParaElConstructor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verificada, err := prepararVerificada(root)
+	verificada, err := prepararVerificada(root, u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestVerificadaIntocableParaElConstructor(t *testing.T) {
 	os.Lchown(src, 65534, 65534)
 	work := t.TempDir()
 	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(dg+"\n"), 0o600)
-	if _, n, err := promoverCache(work, cache, verificada, 65534, 1<<30); n != 1 || err != nil {
+	if _, n, err := promoverCache(work, cache, verificada, "", u, 1<<30); n != 1 || err != nil {
 		t.Fatalf("promovidos %d: %v", n, err)
 	}
 	dst := verificadoEn(verificada, dg)
@@ -387,9 +387,37 @@ func TestVerificadaIntocableParaElConstructor(t *testing.T) {
 		os.Lchown(p, c.uid, c.uid)
 		os.Chmod(p, c.modo)
 		os.WriteFile(filepath.Join(work, ficheroUsados), []byte(dg+"\n"), 0o600)
-		if _, n, err := promoverCache(work, cache, verificada, 65534, 1<<30); n != 0 || err == nil {
+		if _, n, err := promoverCache(work, cache, verificada, "", u, 1<<30); n != 0 || err == nil {
 			t.Errorf("uid %d modo %v promovido: %d %v", c.uid, c.modo, n, err)
 		}
+	}
+	// Uno de root de su grupo y 0640 (lo enlazado de cache/oci desde que es
+	// del grupo del constructor) sí: lo puede leer.
+	deGrupo := []byte("de root, 0640, de su grupo")
+	dg = digestDe(deGrupo)
+	p := blobDelConstructor(t, cache, dg, deGrupo)
+	os.Lchown(p, 0, int(u.GID))
+	os.Chmod(p, 0o640)
+	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(dg+"\n"), 0o600)
+	if _, n, err := promoverCache(work, cache, verificada, "", u, 1<<30); n != 1 || err != nil {
+		t.Errorf("uno de root de su grupo no se promovió: %d %v", n, err)
+	}
+
+	// Nadie que no sea root o del grupo llega a la verificada ni a la caché
+	// de root: ni listar ni leer.
+	if err := cerrarCacheOCI(root, u); err != nil {
+		t.Fatal(err)
+	}
+	ajeno := &usuarioConstructor{Nombre: "otro", UID: 12345, GID: 12345}
+	for _, script := range []string{"ls " + dir, "cat " + dst, "ls " + dirCacheOCI(root)} {
+		cmd := exec.Command("/bin/sh", "-c", script)
+		cmd.SysProcAttr = ajeno.credencial()
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Errorf("otra cuenta pudo: %s (%s)", script, out)
+		}
+	}
+	for _, d := range []string{verificada, filepath.Join(root, "cache", "oci")} {
+		sinLecturaParaOtros(t, d)
 	}
 }
 
@@ -425,7 +453,7 @@ func TestPromoverCacheTope(t *testing.T) {
 	os.WriteFile(filepath.Join(work, ficheroUsados),
 		[]byte(dDisperso+"\n"+dGrande+"\n"+dUno+"\n"+dOtro+"\n"), 0o600)
 
-	_, n, err := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<20)
+	_, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<20)
 	if n != 1 || err == nil || !strings.Contains(err.Error(), "sparse") {
 		t.Fatalf("promovidos %d, err %v", n, err)
 	}
@@ -471,7 +499,7 @@ func TestCachePropiaNoSalePorEnlace(t *testing.T) {
 	parte := blobDelConstructor(t, cache, "sha256:x.part", []byte("a medias"))
 	trasAbrirPropia = func() { cambiar(cache, fuera) }
 	t.Cleanup(func() { trasAbrirPropia = func() {} })
-	barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 20<<30, time.Hour, nil, time.Now())
+	barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), 20<<30, time.Hour, nil, time.Now())
 	if _, err := os.Lstat(victima); err != nil {
 		t.Fatal("el barrido borró fuera de la caché del constructor:", err)
 	}
@@ -488,10 +516,10 @@ func TestCachePropiaNoSalePorEnlace(t *testing.T) {
 	os.WriteFile(filepath.Join(fuera, "sha256", strings.TrimPrefix(d, "sha256:")), cuerpo, 0o644)
 	cambiar(cache, fuera)
 	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(d+"\n"), 0o600)
-	if _, n, _ := promoverCache(work, cache, verificada, uint32(os.Getuid()), 1<<30); n != 0 {
+	if _, n, _ := promoverCache(work, cache, verificada, "", yo(), 1<<30); n != 0 {
 		t.Fatal("se promovió a través de un enlace")
 	}
-	barrerCachesConstruccion(cache, verificada, uint32(os.Getuid()), 0, 0, nil, time.Now())
+	barrerCachesConstruccion(cache, verificada, "", uint32(os.Getuid()), 0, 0, nil, time.Now())
 	if _, err := os.Lstat(victima); err != nil {
 		t.Fatal("se borró fuera de la caché del constructor:", err)
 	}
@@ -520,5 +548,133 @@ func TestCacheConstruccionSinBarridoLimpio(t *testing.T) {
 	s.cacheConstruccion(work, cache, verificada, u, true, true)
 	if _, err := os.Lstat(verificadoEn(verificada, d)); err != nil {
 		t.Fatal("con el barrido limpio no se promovió")
+	}
+}
+
+// Las capas de la caché verificada (de una imagen privada, de un archivo) no
+// las lee ninguna otra cuenta del host: directorios 0750 y blobs 0640 del
+// grupo del constructor. Lo de una versión anterior (0755 y 0644) se cierra
+// al prepararla.
+func TestVerificadaSinLecturaParaOtros(t *testing.T) {
+	cache, verificada, work := cachesDePrueba(t)
+	cuerpo := []byte("capa privada")
+	d := digestDe(cuerpo)
+	blobDelConstructor(t, cache, d, cuerpo)
+	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(d+"\n"), 0o600)
+	if _, n, err := promoverCache(work, cache, verificada, "", yo(), 1<<30); n != 1 || err != nil {
+		t.Fatalf("promovidos %d: %v", n, err)
+	}
+	sinLecturaParaOtros(t, verificada)
+
+	// De antes: todo abierto. Se cierra, ficheros incluidos.
+	root := filepath.Dir(filepath.Dir(verificada))
+	viejo := filepath.Join(verificada, "oci", "sha256", strings.Repeat("e", 64))
+	os.WriteFile(viejo, []byte("de antes"), 0o644)
+	for _, p := range []string{verificada, filepath.Join(verificada, "oci"), filepath.Join(verificada, "oci", "sha256")} {
+		os.Chmod(p, 0o755)
+	}
+	if _, err := prepararVerificada(root, yo()); err != nil {
+		t.Fatal(err)
+	}
+	sinLecturaParaOtros(t, verificada)
+	if os.Geteuid() == 0 {
+		var st syscall.Stat_t
+		syscall.Lstat(viejo, &st)
+		if st.Uid != 0 || st.Gid != yo().GID {
+			t.Fatalf("dueño %d:%d", st.Uid, st.Gid)
+		}
+	}
+}
+
+// Lo que una construcción usó de la caché de root (lo subido de un archivo,
+// que lee como Seed) pasa a la verificada con un enlace, sin copiar, y sale
+// de allí: reconstruir no lo rehashea. Lo que no es un blob del daemon, no.
+func TestPromoverDesdeCacheDeRoot(t *testing.T) {
+	cache, verificada, work := cachesDePrueba(t)
+	subidos := t.TempDir()
+	cuerpo := []byte("capa de un docker save")
+	d := digestDe(cuerpo)
+	src := filepath.Join(subidos, strings.TrimPrefix(d, "sha256:"))
+	os.WriteFile(src, cuerpo, 0o640)
+	antes, _ := os.Stat(src)
+	abierto := []byte("con escritura para el grupo")
+	dAbierto := digestDe(abierto)
+	srcAbierto := filepath.Join(subidos, strings.TrimPrefix(dAbierto, "sha256:"))
+	os.WriteFile(srcAbierto, abierto, 0o644)
+	os.Chmod(srcAbierto, 0o664)
+	os.WriteFile(filepath.Join(work, ficheroUsados), []byte(d+"\n"+dAbierto+"\n"), 0o600)
+
+	_, n, err := promoverCache(work, cache, verificada, subidos, yo(), 1<<30)
+	if n != 1 || err == nil {
+		t.Fatalf("promovidos %d: %v", n, err)
+	}
+	despues, err := os.Stat(verificadoEn(verificada, d))
+	if err != nil || !os.SameFile(antes, despues) || despues.Mode().Perm() != 0o640 {
+		t.Fatalf("en la verificada: %v %v", despues, err)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Fatal("sigue en la caché de root")
+	}
+	if _, err := os.Lstat(verificadoEn(verificada, dAbierto)); !os.IsNotExist(err) {
+		t.Fatal("uno con escritura para el grupo entró en la verificada")
+	}
+}
+
+// En la caché de root no se barre lo reciente (una subida que espera a su
+// construcción, una descarga a medias); lo viejo sí, y antes que lo
+// verificado.
+func TestBarrerCacheDeRoot(t *testing.T) {
+	cache, verificada, _ := cachesDePrueba(t)
+	subidos := t.TempDir()
+	ahora := time.Now()
+	poner := func(dir, nombre string, edad time.Duration) string {
+		p := filepath.Join(dir, nombre)
+		os.WriteFile(p, make([]byte, 1<<20), 0o640)
+		os.Chtimes(p, ahora.Add(-edad), ahora.Add(-edad))
+		return p
+	}
+	hex := func(c byte) string { return strings.Repeat(string(c), 64) }
+	vSub := filepath.Join(verificada, "oci", "sha256")
+	parteNueva := poner(subidos, hex('a')+".123.part", time.Minute)
+	parteVieja := poner(subidos, hex('b')+".456.part", 3*graciaCacheOCI)
+	nuevo := poner(subidos, hex('c'), time.Minute)
+	viejo := poner(subidos, hex('d'), 3*graciaCacheOCI)
+	verif := poner(vSub, hex('e'), 10*graciaCacheOCI)
+	// 4 MiB y un tope de 3: se va lo viejo de root (el .part por estar a
+	// medias), no lo verificado aunque sea más viejo, ni lo reciente.
+	barrerCachesConstruccion(cache, verificada, subidos, uint32(os.Getuid()), 3<<20, 30*24*time.Hour, nil, ahora)
+	for _, p := range []string{parteVieja, viejo} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s sigue", filepath.Base(p))
+		}
+	}
+	for _, p := range []string{parteNueva, nuevo, verif} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s se barrió", filepath.Base(p))
+		}
+	}
+}
+
+// Con el constructor corriendo como el daemon (sin usuario) la caché de root
+// también se barre al acabar; pero no mientras alguien la usa (otra
+// construcción, una subida).
+func TestCacheConstruccionBarreLaDeRoot(t *testing.T) {
+	root := t.TempDir()
+	dir := dirCacheOCI(root)
+	os.MkdirAll(dir, 0o700)
+	p := filepath.Join(dir, strings.Repeat("a", 64))
+	os.WriteFile(p, []byte("viejo"), 0o600)
+	hace := time.Now().Add(-40 * 24 * time.Hour)
+	os.Chtimes(p, hace, hace)
+	s := &Server{root: root}
+	s.muCacheOCI.RLock()
+	s.cacheConstruccion(t.TempDir(), "", "", nil, true, true)
+	s.muCacheOCI.RUnlock()
+	if _, err := os.Lstat(p); err != nil {
+		t.Fatal("se barrió mientras alguien la usaba")
+	}
+	s.cacheConstruccion(t.TempDir(), "", "", nil, true, true)
+	if _, err := os.Lstat(p); !os.IsNotExist(err) {
+		t.Fatal("la caché de root no se barrió")
 	}
 }

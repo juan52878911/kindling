@@ -9,7 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - `kling registry login|logout|ls|import`: private registries for `image import` and `run -image` (Basic and Bearer); credentials stay on the daemon (root 0600), read from stdin, never in recipes, logs or argv
-- The rootless oci builder reads a root-owned verified blob cache without rehashing: after a successful build the daemon copies the blobs it used there, checked by sha256 (never sparse files, never past the cache limit)
+- The rootless oci builder reads a root-owned verified blob cache without rehashing: after a successful build the daemon copies the blobs it used there, checked by sha256 (never sparse files, never past the cache limit); blobs it read from uploads are hard-linked there, so rebuilding an imported archive does not rehash it
 - `daemon.build_cache_max_gib` and `daemon.build_cache_max_days` (`KLING_BUILD_CACHE_MAX_GIB`, `KLING_BUILD_CACHE_MAX_DAYS`) bound the builder's blob caches; unverified blobs go first; values are capped at 1048576 GiB and 36500 days, and blobs the builder lists as used are kept only up to the limit
 - Per-tenant quotas in the authz policy (`quotas`: `max_machines`, `max_mem_mib`, `max_disk_mib`, `"*"` for everyone); exceeding one is a `429` that names the limit and the usage, decided without races
 - `kling start` (`POST /machines/{ref}/start`) boots a stopped machine again, cold, on its own disk; `-e`/`-env-file` must give its environment again, and a missing key is named; stop flushes the guest's disk and start checks it with `e2fsck` first
@@ -134,6 +134,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- The daemon's blob caches (`cache/oci`, `cache/verified`) are root with the builder's group, 0750/0640 (0700/0600 without a builder user): other host accounts can no longer read private or imported image layers; older 0755/0644 caches are closed on first use
+- An archive build (`source: archive`) gets no registry credentials, even if the archive's tag names a private registry
+- `cache/oci` is swept with the builder cache limits after every build (nothing younger than 2 h, never while a build or upload uses it), and an upload that does not fit is a `507`
 - Diff freeze: the daemon never follows links in a machine's directory, checks the seal's base is the golden's memory, and only freezes as a diff where the filesystem tells holes from zero pages
 - `state.json` is written with schema 2 while a copy is frozen as a diff, so an older kling refuses to start instead of loading it as full memory
 - `run -disk` must fit in the free disk; `KLING_MAX_DISK_MIB` lowers the maximum

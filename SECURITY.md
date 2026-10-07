@@ -1319,14 +1319,23 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   siempre antes de usarlo; un constructor comprometido no envenena los imports
   siguientes.
 - **La caché verificada es de root**: tras una construcción correcta, con el constructor
-  ya barrido, el daemon copia a `cache/verified/oci` (root, 0755/0644) los blobs que usó,
+  ya barrido, el daemon copia a `cache/verified/oci` (root, del grupo del constructor,
+  0750/0640) los blobs que usó,
   hasheando lo que copia y sin seguir enlaces (su caché, a través de un `os.Root`, y solo
   si el barrido de sus procesos acabó limpio); uno cambiado no entra, ni uno disperso, ni
   más bytes por pasada que el tope de la caché. El constructor la
   lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
-  puede escribir, renombrar ni borrar nada en ella. Las dos cachés se barren con tope
+  puede escribir, renombrar ni borrar nada en ella. Lo que usó de la caché de blobs de
+  root (lo subido por `image import -archive`) pasa con un enlace duro: solo root la
+  escribe y cada blob entró comprobado. Las cachés se barren con tope
   (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado;
   lo que la construcción dice haber usado se guarda solo mientras quepa en el tope.
+- **Las capas no son de las demás cuentas del host**: la verificada y la caché de
+  blobs de root (`cache/oci`, la de lo subido y de los constructores que corren como
+  root) son de root con el grupo del usuario de construcción, directorios 0750 y blobs
+  0640 (sin usuario de construcción, 0700/0600). Una imagen privada (`kling registry
+  login`) o de un archivo no se puede listar ni leer desde otra cuenta. Lo de versiones
+  anteriores (0755/0644) se cierra la primera vez que se usa cada caché.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en
@@ -1376,13 +1385,19 @@ fiar más que una imagen de un registro:
 - **El constructor comprueba la cadena entera**, sin red: el manifiesto por su digest
   (el que fija la receta), la configuración y cada capa por los suyos, y en las capas sin
   comprimir que su digest sea el `diff_id` de la configuración. Con el usuario de
-  construcción (24) lee lo subido de la caché de root, de solo lectura para él, y lo
-  rehashea siempre.
+  construcción (24) lee lo subido de la caché de root (de su grupo, 0640, de solo
+  lectura para él) y lo rehashea; si la construcción acaba bien, el daemon lo pasa a la
+  caché verificada y las siguientes no lo rehashean.
+- **El constructor de un archivo no recibe credenciales**: su `ref` sale del propio
+  archivo (las etiquetas que escribió quien lo hizo), así que un `source: archive` no
+  lleva las de ningún registro aunque la etiqueta nombre uno privado.
 - **La receta no filtra el host del CLI**: guarda `source: archive`, el nombre que traía
   la imagen y el digest; la ruta del archivo no sale de la máquina del CLI.
 
-Límite: la caché de blobs crece con lo que se sube y no se poda sola (como lo bajado de
-un registro); quien tiene el rol admin ya puede llenar el disco de otras maneras.
+La caché de blobs de root tiene el tope de las del constructor
+(`daemon.build_cache_max_gib`): se barre después de cada construcción (lo más viejo
+primero, nada de menos de 2 horas: lo que espera a su construcción, y nunca mientras
+otra construcción o subida la usa) y una subida que no cabe ni barriendo es un `507`.
 
 ### 27. El init en Go de las imágenes sin `sh`
 
