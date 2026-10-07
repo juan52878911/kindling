@@ -75,6 +75,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Disk-full errors suggest removing frozen or stopped machines, not "warm" ones (a v0.13 state)
 - `kling machine ready` no longer reports ready (exit 0) when the guest agent errors or does not answer; `ReadyResult.detail` says why
 - Commit and fork no longer freeze a half-booted guest when the image cannot be inspected (no `debugfs`): they wait for its agent first, up to 3/4 of `-wait` (at least 30 s)
 - A copy whose resync failed runs its post-restore hooks anyway, instead of inheriting the golden's `done`
