@@ -1166,6 +1166,7 @@ func newID() string {
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	mc, err := m.run(ctx, req)
+	tel.fin(OpRun, err)
 	if err != nil || !req.WaitReady {
 		return mc, err
 	}
@@ -1515,6 +1516,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.persist()
 	out := *mc
 	m.mu.Unlock()
+	tel.exito(OpRun, DurBoot, out.BootMS)
 
 	// El walk va DESPUÉS de soltar el lock, y su resultado entra en la
 	// respuesta: si se dejara solo al vigilante, esta llamada devolvería 0 y
@@ -1955,7 +1957,8 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 // Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
 // cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
 // que su dueño acababa de pedir conservar.
-func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (_ *api.Machine, err error) {
+	defer func() { tel.fin(OpFreeze, err) }()
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, noExiste(ref)
@@ -2333,6 +2336,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// Una copia de kling db congelada no atiende: se cortan las sesiones de
 	// los agentes que llegaban a ella por su proxy (copias_db.go).
 	m.invalidarSesiones(mc.ID, "frozen")
+	tel.exito(OpFreeze, DurFreeze, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 	if sinAgente {
@@ -2793,6 +2797,12 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	mc, err := m.thaw(ctx, ref)
+	tel.fin(OpThaw, err)
+	return mc, err
+}
+
+func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono := nuevoCrono("frozen")
 	mc, ok := m.Get(ref)
 	if !ok {
@@ -2819,6 +2829,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, err
 		}
 		fases := crono.cerrar()
+		tel.exito(OpThaw, DurResume, int64(fases.TotalMS))
 		out.Wake = fases
 		m.mu.Lock()
 		if l := m.byID[mc.ID]; l != nil {
@@ -3153,6 +3164,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *cur
 	m.mu.Unlock()
+	tel.exito(OpThaw, DurThaw, elapsed)
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 

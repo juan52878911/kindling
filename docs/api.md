@@ -48,8 +48,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | Ruta | Qué hace |
 |---|---|
 | `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
-| `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
-| `GET /metrics` | métricas Prometheus en texto |
+| `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s. Un suscriptor que no lee a tiempo pierde eventos; cuando vuelve a haber sitio recibe antes del siguiente un `events.dropped` con `dropped` (cuántos; a un inquilino solo se le dice que hubo pérdida) |
+| `GET /metrics` | métricas Prometheus en texto: máquinas por estado, memoria del host y PSS por microVM; `kling_operations_total{op,result}` (run, thaw, freeze; un rechazo o un error de quien llama no es `error`), `kling_admission_rejections_total{code}` (409 tope, 503 disco, 507 memoria), el histograma `kling_operation_duration_ms{kind}` (boot, restore, thaw, resume, freeze), `kling_gc_evictions_total`, `kling_orphan_vmms_killed_total`, `kling_events_dropped_total`, `kling_disk_free_mib` y `kling_pending_mib` (memoria de los arranques en curso). Los contadores empiezan en 0 con cada daemon |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
 | `POST /cow/store/grow` | amplía en caliente el almacén de copias de disco (`size_mib`, el tamaño nuevo, o `add_mib`, cuánto añadir); devuelve el `store` como en `GET /info`. Solo admin; capacidad `cow-grow`. Ver [cow.md](cow.md#hacer-crecer-el-almacén) |
 
@@ -60,7 +60,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `GET /machines` | lista |
 | `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, carpetas compartidas, etiquetas) |
 | `GET /machines/{ref}` | una máquina |
-| `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida |
+| `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida. `404` si la máquina no existe, `409` si su estado no lo admite (congelar una parada, descongelar una que corre); igual `pause` y `DELETE /machines/{ref}` |
 | `POST /machines/{ref}/pause` | pausa una máquina en marcha sin volcarla (ver abajo) |
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze?force=1` | el globo devuelve al host la memoria libre del invitado. `409` en una copia que comparte memoria con su dorado (`mem_shared`, Firecracker) salvo `force` (ver "Listo y ganchos tras restaurar") |

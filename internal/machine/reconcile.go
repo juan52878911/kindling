@@ -160,6 +160,7 @@ func (m *Manager) killOrphanVMMs() {
 		log.Printf("reconcile: killing orphan VMM of %s (pid %d, state %s)",
 			shortID(id), pid, estadoDe(mc))
 		_ = syscall.Kill(pid, syscall.SIGKILL)
+		tel.huerfanos.Add(1)
 	}
 }
 
@@ -218,6 +219,7 @@ func (m *Manager) barrerHuerfanos(live map[string]int) {
 		}
 		log.Printf("watch: killing orphan VMM of %s (pid %d, state %s)", shortID(id), pid, estadoDe(mc))
 		_ = syscall.Kill(pid, syscall.SIGKILL)
+		tel.huerfanos.Add(1)
 		delete(m.orphanSeen, id)
 	}
 }

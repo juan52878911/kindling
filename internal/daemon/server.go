@@ -941,7 +941,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !s.eventoVisible(r, ev) {
+			if ev.Type == api.EvDropped {
+				// El aviso de descartes no es de ninguna máquina. A un
+				// inquilino se le dice que perdió eventos, pero no cuántos: el
+				// recuento incluye los de las máquinas de los demás.
+				if _, filtra := inquilinoDe(r); filtra {
+					ev.Dropped, ev.Message = 0, "events dropped: this subscriber did not read them in time"
+				}
+			} else if !s.eventoVisible(r, ev) {
 				continue
 			}
 			if enc.Encode(ev) != nil {

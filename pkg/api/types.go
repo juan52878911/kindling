@@ -701,6 +701,9 @@ type Event struct {
 	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Dropped, solo en EvDropped: cuántos eventos perdió este suscriptor por
+	// no leerlos a tiempo.
+	Dropped int64 `json:"dropped,omitempty"`
 }
 
 // Tipos de evento.
@@ -723,6 +726,10 @@ const (
 	// módulo IPv6 de su kernel, aunque el namespace del host lo tenga
 	// bloqueado igual (applyIPv6Barrier). Ver Manager.avisoIPv6Invitado.
 	EvGuestIPv6 = "snapshot.guest_ipv6"
+	// EvDropped avisa a un suscriptor de que se perdió eventos (Dropped dice
+	// cuántos): el bus no espera a nadie, y uno que no lee a tiempo pierde lo
+	// que no cabe. Llega en cuanto vuelve a haber sitio, antes del siguiente.
+	EvDropped = "events.dropped"
 )
 
 // ProcStat es la foto de recursos de UNA microVM.
