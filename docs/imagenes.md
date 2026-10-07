@@ -445,6 +445,13 @@ de root, sin ACL, sin otros enlaces duros ni descriptores del constructor, y lo
 hasheado es exactamente lo que queda. No se sigue ningún enlace (ni en la lista
 ni en los blobs ni en los directorios de su caché); un blob tiene que ser
 regular y suyo, o de root y legible para todos (los enlazados de `cache/oci`).
+Su caché se abre una vez como `os.Root` y todo (listar, abrir, borrar) va
+relativo a ese directorio: aunque cambiara `cache/oci` por un enlace a `/etc`
+después de mirarlo, no se sale de ella. Si el barrido de sus procesos no acaba
+limpio (alguno sigue volviendo), su caché no se toca: ni se promueve ni se barre.
+Tampoco llena el disco del host a través de root: un fichero disperso no se
+copia, y en una pasada no se copian más bytes que `daemon.build_cache_max_gib`;
+lo que no cabe se queda en la suya, sin verificar.
 
 El cliente OCI del constructor (`KLING_VERIFIED_CACHE_DIR`) mira primero ahí y
 usa un blob sin rehashear solo si el fichero, `sha256/`, `oci/` y `verified/`

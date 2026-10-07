@@ -1313,7 +1313,9 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   siguientes.
 - **La caché verificada es de root**: tras una construcción correcta, con el constructor
   ya barrido, el daemon copia a `cache/verified/oci` (root, 0755/0644) los blobs que usó,
-  hasheando lo que copia y sin seguir enlaces; uno cambiado no entra. El constructor la
+  hasheando lo que copia y sin seguir enlaces (su caché, a través de un `os.Root`, y solo
+  si el barrido de sus procesos acabó limpio); uno cambiado no entra, ni uno disperso, ni
+  más bytes por pasada que el tope de la caché. El constructor la
   lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
   puede escribir, renombrar ni borrar nada en ella. Las dos cachés se barren con tope
   (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado.
