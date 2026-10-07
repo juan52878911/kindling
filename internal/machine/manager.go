@@ -308,8 +308,11 @@ type Manager struct {
 	impulsos   map[string]*impulsoCPU
 
 	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
-	// una nueva jubila a la anterior.
+	// una nueva jubila a la anterior. Remove poda la entrada.
 	vigiasListo sync.Map
+	// discoMedido es el estado en el que refreshDiskUsage midió por última vez
+	// el disco de cada máquina. Bajo mu.
+	discoMedido map[string]api.State
 	// pruebasListo y pruebasGanchos sustituyen GET /ready y POST /hooks del
 	// agente. Solo lo ponen las pruebas.
 	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
@@ -903,29 +906,57 @@ func (m *Manager) touchDisk(id string) int64 {
 	return n
 }
 
-// refreshDiskUsage recalcula el disco de todas las máquinas.
+// refreshDiskUsage recalcula el disco de las máquinas que pueden estar
+// cambiándolo.
 //
 // Lo llama el vigilante, que ya pasa cada pocos segundos. El overlay es un
 // fichero disperso que CRECE mientras el invitado escribe, así que un valor
 // que solo se actualizara al arrancar o congelar sería justo el que no sirve:
 // el número con el que se detecta a un invitado llenando su disco.
+//
+// Pero solo escribe un invitado vivo. Recorrer cada 10 s el directorio de
+// todas las congeladas y paradas —en un host con cientos dormidas, la
+// mayoría— era E/S sin ningún dato nuevo. Las que no corren se miden una vez
+// por cambio de estado (discoMedido), que es cuando su disco cambia: al
+// congelarse aparece el mem.file, al pararse deja de crecer.
 func (m *Manager) refreshDiskUsage() {
+	type medir struct {
+		id     string
+		estado api.State
+	}
 	m.mu.RLock()
-	ids := make([]string, 0, len(m.byID))
-	for id := range m.byID {
-		ids = append(ids, id)
+	var cuales []medir
+	for id, mc := range m.byID {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused {
+			cuales = append(cuales, medir{id, mc.State})
+			continue
+		}
+		if est, ok := m.discoMedido[id]; !ok || est != mc.State {
+			cuales = append(cuales, medir{id, mc.State})
+		}
 	}
 	m.mu.RUnlock()
 
-	sizes := make(map[string]int64, len(ids))
-	for _, id := range ids {
-		sizes[id] = diskUsage(m.dir(id))
+	sizes := make([]int64, len(cuales))
+	for i, c := range cuales {
+		sizes[i] = diskUsage(m.dir(c.id))
 	}
 
 	m.mu.Lock()
-	for id, n := range sizes {
-		if mc := m.byID[id]; mc != nil {
-			mc.DiskBytes = n
+	if m.discoMedido == nil {
+		m.discoMedido = make(map[string]api.State)
+	}
+	for i, c := range cuales {
+		if mc := m.byID[c.id]; mc != nil {
+			mc.DiskBytes = sizes[i]
+			// El estado de ANTES de medir: si cambió mientras tanto, no casa
+			// y la próxima vuelta la mide otra vez.
+			m.discoMedido[c.id] = c.estado
+		}
+	}
+	for id := range m.discoMedido {
+		if m.byID[id] == nil {
+			delete(m.discoMedido, id)
 		}
 	}
 	m.mu.Unlock()
@@ -3247,8 +3278,15 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
+	delete(m.discoMedido, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	// La numeración de sus vigías de "listo": sin podarla, cada máquina que
+	// pasó por aquí dejaba su entrada para siempre. Se adelanta antes de
+	// soltarla, para que una vigía aún viva se sepa jubilada.
+	if v, ok := m.vigiasListo.LoadAndDelete(mc.ID); ok {
+		v.(*atomic.Uint64).Add(1)
+	}
 	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil

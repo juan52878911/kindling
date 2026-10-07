@@ -182,8 +182,16 @@ func (m *Manager) sweepOrphanVMMs() {
 	if m.barridoBloqueado() {
 		return
 	}
-	live := m.liveVMs()
+	m.barrerHuerfanos(m.liveVMs())
+}
 
+// barrerHuerfanos es sweepOrphanVMMs sobre un escaneo ya hecho (liveVMs). El
+// vigilante le pasa el de sweep, recién tomado: un solo recorrido de /proc
+// (un solo ps en macOS) por vuelta, y no uno por cada tarea que lo necesita.
+func (m *Manager) barrerHuerfanos(live map[string]int) {
+	if m.barridoBloqueado() {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.orphanSeen == nil {
@@ -408,7 +416,16 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
 			// y eso es peor que caerse.
 			panico.Contener("machine.watch", func() {
-				m.sweep()
+				vmms := m.sweep()
+				// Procesos de firecracker que ya no son de nadie, con el mismo
+				// escaneo que acaba de usar sweep. Hasta ahora esto solo corría
+				// al arrancar el daemon, así que un VMM huérfano —cada
+				// restauración fallida dejaba uno— retenía su RAM hasta el
+				// siguiente reinicio, invisible para `kling ps` y para la
+				// contabilidad de memoria que decide si cabe la siguiente
+				// microVM. Justo detrás de sweep y no al final de la vuelta: el
+				// PID que mata tiene que ser de un escaneo reciente.
+				m.barrerHuerfanos(vmms)
 				// Las carpetas vivas de las máquinas que corren y no tienen
 				// conexión (tras reiniciar el daemon, sobre todo).
 				m.ensureShares()
@@ -421,12 +438,6 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// La red que Freeze dejó montada, en las que llevan mucho
 				// tiempo congeladas (ver red.go).
 				m.soltarRedesDormidas()
-				// Procesos de firecracker que ya no son de nadie. Hasta ahora esto
-				// solo corría al arrancar el daemon, así que un VMM huérfano
-				// —cada restauración fallida dejaba uno— retenía su RAM hasta el
-				// siguiente reinicio, invisible para `kling ps` y para la
-				// contabilidad de memoria que decide si cabe la siguiente microVM.
-				m.sweepOrphanVMMs()
 				// Errores de disco que el invitado vio (errores_disco.go),
 				// antes de rotar: si no, se perderían.
 				m.revisarErroresDisco()
@@ -465,7 +476,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 // murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
 const errProcesoDesaparecido = "the microVM process disappeared"
 
-func (m *Manager) sweep() {
+// Devuelve el escaneo de VMMs vivos (liveVMs) que hizo, para que el resto de
+// la vuelta lo reutilice en vez de recorrer /proc otra vez.
+func (m *Manager) sweep() map[string]int {
 	var died []*api.Machine
 	live := make(map[string]bool)
 
@@ -486,10 +499,12 @@ func (m *Manager) sweep() {
 		}
 	}
 	m.mu.RUnlock()
+	// El escaneo DESPUÉS de copiar: una máquina que pasó a running justo antes
+	// de la copia ya tiene su VMM en la tabla. Al revés, se daría por muerta.
+	vmms := m.liveVMs()
 	var muertas []vista
 	for _, v := range vistas {
-		c := api.Machine{ID: v.mc.ID, PID: v.pid}
-		if _, ok := m.adopt(&c); ok {
+		if m.vmmSigue(vmms, v.mc.ID, v.pid) {
 			live["kl-"+v.mc.ID[:8]] = true
 			continue
 		}
@@ -551,6 +566,20 @@ func (m *Manager) sweep() {
 			Message: errProcesoDesaparecido,
 		})
 	}
+	return vmms
+}
+
+// vmmSigue dice si el VMM pid sigue siendo el de la máquina id, mirando
+// primero el escaneo de la vuelta (vmms). Casa en el caso normal, y entonces
+// solo falta lo que adopt comprueba además de la línea de órdenes: que el
+// socket exista. Si no casa —la máquina murió, o hay dos VMM con su id— se
+// pregunta como siempre, con adopt: es lo raro, y ahí manda la exactitud.
+func (m *Manager) vmmSigue(vmms map[string]int, id string, pid int) bool {
+	if pid > 0 && vmms[id] == pid && (existe(m.dir(id)+"/fc.sock") || existe(m.jailSock(id))) {
+		return true
+	}
+	_, ok := m.adopt(&api.Machine{ID: id, PID: pid})
+	return ok
 }
 
 // Watch lanza el vigilante en segundo plano.
