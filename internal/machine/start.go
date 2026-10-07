@@ -96,7 +96,16 @@ func arrancable(mc *api.Machine) bool {
 // Start arranca en frío una máquina parada sobre su propio disco. env es el
 // entorno (KEY=valor) con el que se arranca: tiene que traer todas las claves
 // de su EnvKeys.
+//
+// Cuenta en la telemetría como "start" (/metrics): pasa por la misma admisión
+// que Run, y sus rechazos y fallos tienen que verse igual.
 func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.Machine, error) {
+	mc, err := m.start(ctx, ref, envKV)
+	tel.fin(OpStart, err)
+	return mc, err
+}
+
+func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, noExiste(ref)
@@ -311,13 +320,23 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 	live.FailedAt = nil
 	live.LastErr = ""
 	live.Hold = ""
-	live.BootMS = time.Since(start).Milliseconds()
+	// Nunca 0: BootMS > 0 es lo que dice que arrancó en frío y ya no mapea
+	// el mem.file de su dorado aunque conserve From (ver mapeaSuDorado).
+	live.BootMS = max(time.Since(start).Milliseconds(), 1)
 	live.TTLAt = &now
 	live.CPUPct = mc.CPUPct
 	live.IP, live.NetIndex = netcfg.NSIP, netcfg.Index
 	live.MemShared = false
 	live.DiffBase = ""
-	live.Forwards = nil
+	// Forwards NO se toca: Stop ya los borró, y boot acaba de abrir los del
+	// VMM nuevo (abrirReenvios, en macOS). Borrarlos aquí dejaba la máquina
+	// con IP:puerto, que el Mac no alcanza: ni listo, ni exec, ni servicios.
+	//
+	// Los secretos de MMDS eran del VMM anterior: este arrancó con la RAM y
+	// el almacén vacíos. Con la marca puesta, Freeze y Commit la rechazaban
+	// para siempre y el vigilante le quitaba el TTL.
+	live.HasSecrets = false
+	delete(m.secretos, mc.ID)
 	live.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	// Las claves que se dieron ahora (al menos las de antes; puede traer más).
 	live.EnvKeys = api.MachineEnvKeys(env)
@@ -341,6 +360,7 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("started from its disk in %d ms%s", out.BootMS, keys)})
+	tel.exito(OpStart, DurBoot, out.BootMS)
 	return &out, nil
 }
 

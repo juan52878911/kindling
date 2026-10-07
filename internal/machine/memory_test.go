@@ -390,3 +390,36 @@ func TestCacheTibiaCubreUnaCopiaDePostgres(t *testing.T) {
 		t.Fatal("lo que se deja en caché al congelar no puede pasar de lo que el thaw precargaría")
 	}
 }
+
+// Una máquina que salió de un dorado y después se paró y se arrancó con
+// kling start (BootMS > 0) arranca en frío desde su disco: ya no mapea el
+// mem.file del dorado aunque conserve From. Ni ancla el dorado —el siguiente
+// run -from tiene que reservar entero— ni cuenta como caché caliente.
+func TestUnaArrancadaConStartNoMapeaSuDorado(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.snapDir("dorado"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.snapDir("dorado"), "mem.file"), make([]byte, 8<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.byID["arrancada"] = &api.Machine{ID: "arrancada", From: "dorado", State: api.StateRunning, BootMS: 24}
+	anclado, caliente := m.shareAnchoredLocked("dorado"), m.hotMemFilesMiBLocked()
+	m.mu.Unlock()
+	if anclado {
+		t.Error("una arrancada en frío da su dorado por anclado")
+	}
+	if caliente != 0 {
+		t.Errorf("una arrancada en frío cuenta %d MiB de su dorado como caché caliente", caliente)
+	}
+
+	// La copia de verdad (run -from, sin BootMS) sí.
+	m.mu.Lock()
+	m.byID["copia"] = &api.Machine{ID: "copia", From: "dorado", State: api.StateRunning}
+	anclado, caliente = m.shareAnchoredLocked("dorado"), m.hotMemFilesMiBLocked()
+	m.mu.Unlock()
+	if !anclado || caliente < 7 {
+		t.Errorf("con una copia viva: anclado %v, caliente %d MiB; quería true y ~8", anclado, caliente)
+	}
+}

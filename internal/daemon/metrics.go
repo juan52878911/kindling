@@ -70,7 +70,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // vigilante hace por su cuenta. Las series se emiten siempre, aunque estén a
 // 0, por lo mismo que kling_machines.
 func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
-	ops := []string{machine.OpRun, machine.OpThaw, machine.OpFreeze}
+	ops := []string{machine.OpRun, machine.OpThaw, machine.OpFreeze, machine.OpStart}
 	fmt.Fprintln(w, "# HELP kling_operations_total Lifecycle operations by result (rejections and caller errors are not failures).")
 	fmt.Fprintln(w, "# TYPE kling_operations_total counter")
 	for _, op := range ops {
@@ -86,7 +86,7 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 
 	// Histograma con los cubos ACUMULADOS, como manda el formato: cada "le"
 	// cuenta todo lo que tardó eso o menos.
-	fmt.Fprintln(w, "# HELP kling_operation_duration_ms Duration of successful lifecycle operations, in ms (boot: cold start; restore: run from a snapshot; thaw; resume: from paused; freeze).")
+	fmt.Fprintln(w, "# HELP kling_operation_duration_ms Duration of successful lifecycle operations, in ms (boot: cold start, run or start; restore: run from a snapshot; thaw; resume: from paused; freeze).")
 	fmt.Fprintln(w, "# TYPE kling_operation_duration_ms histogram")
 	for _, k := range []string{machine.DurBoot, machine.DurRestore, machine.DurThaw, machine.DurResume, machine.DurFreeze} {
 		h := t.Duraciones[k]

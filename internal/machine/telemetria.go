@@ -30,6 +30,9 @@ const (
 	OpRun    = "run"
 	OpThaw   = "thaw"
 	OpFreeze = "freeze"
+	// OpStart es kling start: un arranque en frío de una parada, con su
+	// admisión. Su duración va a DurBoot, como la de un run en frío.
+	OpStart = "start"
 
 	DurBoot    = "boot"
 	DurRestore = "restore"
@@ -39,7 +42,7 @@ const (
 )
 
 var (
-	opsTelemetria = []string{OpRun, OpThaw, OpFreeze}
+	opsTelemetria = []string{OpRun, OpThaw, OpFreeze, OpStart}
 	durTelemetria = []string{DurBoot, DurRestore, DurThaw, DurResume, DurFreeze}
 	// codigosRechazo son las negativas de admisión: tope de máquinas (409),
 	// disco (503) y memoria (507). Ver admision.go.
@@ -109,12 +112,13 @@ func (t *telemetria) despertar(dur string, f *api.WakePhases) {
 // fin clasifica el error con el que acabó una operación. Sin error no hace
 // nada: el éxito lo anota exito() donde se mide. Una negativa de admisión es
 // un rechazo y no un fallo; un error de quien llama (no existe, estado que no
-// lo admite) no es ninguna de las dos cosas, y errYaNoToca es el vigilante
+// lo admite, un entorno que no vale o al que le faltan claves) no es ninguna de las dos cosas, y errYaNoToca es el vigilante
 // cambiando de idea.
 func (t *telemetria) fin(op string, err error) {
 	var se *api.StatusError
 	switch {
-	case err == nil, errors.Is(err, errYaNoToca), errors.Is(err, ErrNoMachine), errors.Is(err, ErrWrongState):
+	case err == nil, errors.Is(err, errYaNoToca), errors.Is(err, ErrNoMachine), errors.Is(err, ErrWrongState),
+		errors.Is(err, ErrEnvRequest):
 		return
 	case errors.As(err, &se) && t.rechazos[se.Code] != nil:
 		t.rechazos[se.Code].Add(1)
@@ -134,7 +138,7 @@ type Histograma struct {
 
 // Telemetria es la foto que lee /metrics.
 type Telemetria struct {
-	OK, Fallos       map[string]int64 // por operación (OpRun, OpThaw, OpFreeze)
+	OK, Fallos       map[string]int64 // por operación (OpRun, OpThaw, OpFreeze, OpStart)
 	Rechazos         map[int]int64    // por código HTTP de la negativa
 	Duraciones       map[string]Histograma
 	ExpulsionesGC    int64 // dormidas que gcDisk eliminó para liberar disco

@@ -357,3 +357,39 @@ func TestStopYStartOlvidanLoListo(t *testing.T) {
 		t.Fatalf("tras arrancar: ready %q", got)
 	}
 }
+
+// Start pasa por la admisión de Run y cuenta igual en /metrics: sus rechazos
+// como rechazos, sus fallos como fallos de "start", y un entorno incompleto
+// (error de quien llama) como ninguna de las dos cosas.
+func TestStartCuentaEnLaTelemetria(t *testing.T) {
+	m := newTestManager(t)
+	m.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
+	mc, _ := paradaParaStart(t, m, "5a5a000000000009")
+	antes := m.Telemetria()
+
+	m.mu.Lock()
+	m.byID[mc.ID].EnvKeys = []string{"TOKEN"}
+	m.mu.Unlock()
+	if _, err := m.Start(context.Background(), mc.ID, nil); !errors.Is(err, ErrEnvRequest) {
+		t.Fatalf("sin entorno: %v", err)
+	}
+	if d := m.Telemetria(); d.Fallos[OpStart] != antes.Fallos[OpStart] {
+		t.Fatal("un entorno incompleto contó como fallo")
+	}
+
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "999999999")
+	if _, err := m.Start(context.Background(), mc.ID, []string{"TOKEN=x"}); !api.IsDiskFull(err) {
+		t.Fatalf("con el disco 'lleno': %v", err)
+	}
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	if _, err := m.Start(context.Background(), mc.ID, []string{"TOKEN=x"}); err == nil {
+		t.Fatal("Start sin VMM no falló")
+	}
+	d := m.Telemetria()
+	if n := d.Rechazos[api.StatusDiskFull] - antes.Rechazos[api.StatusDiskFull]; n != 1 {
+		t.Errorf("rechazos 503 = %d, quería 1", n)
+	}
+	if n := d.Fallos[OpStart] - antes.Fallos[OpStart]; n != 1 {
+		t.Errorf("fallos de start = %d, quería 1 (el VMM que no está)", n)
+	}
+}
