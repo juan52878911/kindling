@@ -269,7 +269,7 @@ func (m *Manager) Start(ctx context.Context, ref string, envKV []string) (*api.M
 	}
 	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct, mc.VCPUs, mc.CPUPctFixed)
 	defer impulso.fin()
-	if warn := m.limitCPU(mc.ID, pid, impulso.tope); warn != "" {
+	if warn := m.limitCPU(mc.ID, pid, impulso.tope, memoriaCgroup(mc)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 	// Sus credenciales: el proxy y el resolver se fueron con la red al

@@ -2938,7 +2938,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if techo <= 0 {
 			techo = techoDelDaemon(mc.VCPUs)
 		}
-		if warn := m.limitCPU(mc.ID, pid, techo); warn != "" {
+		if warn := m.limitCPU(mc.ID, pid, techo, memoriaCgroup(mc)); warn != "" {
 			log.Printf("warning: %s: %s", mc.Name, warn)
 		}
 		m.mu.Lock()
