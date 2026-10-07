@@ -34,10 +34,12 @@
 # abierto) y dejaba a medias a quien actualizaba desde una shell con kling
 # corriendo.
 #
-# Sobre una instalación que ya existe (hay un kling en --prefix) no hace nada
-# sin --force: actualizar es `kling upgrade`, que además para y arranca el
+# Sobre una instalación que ya existe (hay un kling en --prefix) no reinstala
+# kling sin --force: actualizar es `kling upgrade`, que además para y arranca el
 # daemon, verifica que el nuevo responde y vuelve atrás solo si no
-# (docs/actualizar.md). --force reinstala con este script, como antes.
+# (docs/actualizar.md). --force reinstala con este script, como antes. Con
+# --with y sin --tag sí sigue: añade esas extensiones y deja kling como está
+# (lo mismo que --skip-kling).
 #
 # Al final deja `kling doctor` en verde: instala el completado de tu shell en
 # ~/.config/kling y añade a tu rc la línea que lo carga y el PATH de --prefix
@@ -204,8 +206,15 @@ resolve_tag() {
 
 # ── instalación existente: eso es kling upgrade ─────────────────────────────
 # Va antes de resolver la etiqueta: no hace falta red para decir que no.
+# La versión se pregunta sin daemon: KLING_HOST a ninguna parte, para que
+# `kling version` no hable con uno ni abra un ssh del contexto activo.
+if [ "$SKIP_KLING" != "1" ] && [ "$FORCE" != "1" ] && [ -x "$PREFIX/kling" ] \
+   && [ -n "$EXTS" ] && [ -z "$TAG" ]; then
+    echo "Ya hay un kling en $PREFIX/kling: lo dejo como está y solo instalo $EXTS (actualizarlo es kling upgrade)."
+    SKIP_KLING=1
+fi
 if [ "$SKIP_KLING" != "1" ] && [ "$FORCE" != "1" ] && [ -x "$PREFIX/kling" ]; then
-    HAVE_VER="$("$PREFIX/kling" version 2>/dev/null | awk 'NR==1{print $2}')"
+    HAVE_VER="$(KLING_HOST=unix:///nonexistent/kling-install.sock "$PREFIX/kling" version 2>/dev/null | awk 'NR==1{print $2}')"
     echo "Ya hay un kling ${HAVE_VER:-} en $PREFIX/kling." >&2
     echo "Para actualizarlo:  kling upgrade${TAG:+ -tag $TAG}   (con el daemon: sudo kling upgrade en Linux)" >&2
     echo "  baja y verifica la release, para el daemon, cambia, arranca, comprueba y" >&2
@@ -345,7 +354,7 @@ check_min_kling() {
         return 0
     fi
     [ -n "$MIN" ] || return 0
-    HAVE="$(kling version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//; s/[-+].*//')"
+    HAVE="$(KLING_HOST=unix:///nonexistent/kling-install.sock kling version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//; s/[-+].*//')"
     case "$HAVE" in
         [0-9]*.[0-9]*)
             version_ge "$HAVE" "$MIN" || fail "tu kling es $HAVE y $(basename "$1") necesita >= $MIN. Quita --skip-kling para actualizarlo." ;;
