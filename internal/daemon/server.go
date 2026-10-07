@@ -177,6 +177,11 @@ type Server struct {
 	// muConstructor los pone en fila: ver barrerProcesos.
 	constructor   *usuarioConstructor
 	muConstructor sync.Mutex
+
+	// construyendo es un cerrojo por nombre de imagen: dos construcciones
+	// del mismo nombre van en fila (bloquearNombreImagen). Bajo muConstruyendo.
+	muConstruyendo sync.Mutex
+	construyendo   map[string]*cerrojoImagen
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de

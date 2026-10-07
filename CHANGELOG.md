@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
 - The daemon builds `oci`, `debian` and `android` images with its own binary, not the `kling` installed on the host (unless `KLING_BUILDERS_DIR` is set)
 - Replacing an image or the kernel (`PUT /images/{name}/blob`) can no longer race a machine that is booting from it
 - Docker images keep their own `/run`, as in Docker: `mariadb` (whose entrypoint needs `/run/mysqld`) now starts

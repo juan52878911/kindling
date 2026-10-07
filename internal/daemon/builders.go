@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -150,6 +152,22 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 
+	// En fila con las demás construcciones de este nombre: dos a la vez
+	// escribirían el mismo images/<name> y la segunda lo renombraría bajo
+	// las máquinas que ya arrancó la primera. Si mientras se esperaba otra
+	// petición igual ya la hizo (dos `kling run -image` de la misma
+	// referencia), se devuelve esa. Solo la hecha DURANTE la espera: pedir
+	// otra vez lo mismo más tarde sigue siendo reconstruir (`-rebuild`, una
+	// etiqueta que se movió).
+	llegada := time.Now()
+	soltarNombre := s.bloquearNombreImagen(req.Name)
+	defer soltarNombre()
+	if s.construidaDesde(req, llegada) {
+		writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: s.mgr.ImageFile(req.Name),
+			Output: fmt.Sprintf("image %s was built by a concurrent request with the same spec: reused\n", req.Name)})
+		return
+	}
+
 	// Los aislados dejan la imagen en out/ y, con usuario de construcción,
 	// corren con él (builders_sinroot.go).
 	aislado := constructoresAislados[req.Builder]
@@ -262,6 +280,70 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
 	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: salida.String()})
+}
+
+// cerrojoImagen es el cerrojo de construir un nombre de imagen; n, cuántos
+// lo esperan o lo tienen (para soltar la entrada del mapa).
+type cerrojoImagen struct {
+	mu sync.Mutex
+	n  int
+}
+
+// bloquearNombreImagen toma el cerrojo de construir name y devuelve con qué
+// soltarlo.
+func (s *Server) bloquearNombreImagen(name string) func() {
+	s.muConstruyendo.Lock()
+	if s.construyendo == nil {
+		s.construyendo = map[string]*cerrojoImagen{}
+	}
+	c := s.construyendo[name]
+	if c == nil {
+		c = &cerrojoImagen{}
+		s.construyendo[name] = c
+	}
+	c.n++
+	s.muConstruyendo.Unlock()
+	c.mu.Lock()
+	return func() {
+		c.mu.Unlock()
+		s.muConstruyendo.Lock()
+		if c.n--; c.n == 0 {
+			delete(s.construyendo, name)
+		}
+		s.muConstruyendo.Unlock()
+	}
+}
+
+// construidaDesde dice si la imagen de req ya está, construida desde desde
+// con el mismo constructor, spec, base y tamaño: lo que hizo otra petición
+// igual mientras ésta esperaba su turno.
+func (s *Server) construidaDesde(req api.BuildImageRequest, desde time.Time) bool {
+	b, err := os.ReadFile(s.recipePath(req.Name))
+	if err != nil {
+		return false
+	}
+	var rec api.ImageRecipe
+	if json.Unmarshal(b, &rec) != nil || rec.BuiltAt.Before(desde) || rec.Builder != req.Builder ||
+		rec.GrowMB != req.GrowMB || (req.Base != "" && rec.Base != req.Base) || !mismoJSON(rec.Spec, req.Spec) {
+		return false
+	}
+	if _, err := os.Stat(s.mgr.ImageFile(req.Name)); err != nil {
+		return false
+	}
+	return true
+}
+
+// mismoJSON compara dos JSON por su valor, no por sus bytes: la receta guarda
+// el spec reindentado. Vacío cuenta como null.
+func mismoJSON(a, b json.RawMessage) bool {
+	var va, vb any
+	if len(a) > 0 && json.Unmarshal(a, &va) != nil {
+		return false
+	}
+	if len(b) > 0 && json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
 }
 
 // comandoConstructor prepara el proceso del constructor: su entorno y, con
