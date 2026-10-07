@@ -29,6 +29,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET /events` tells a slow subscriber how many events it lost (`events.dropped`)
 - `GET /info` reports the daemon's effective `KLING_*` tuning, and `kling doctor` prints it
 - `GET /info` announces the `disk` capability, and `kling run -disk` refuses a daemon that would ignore it
+- `kling upgrade`: verified download, schema check, backup, daemon restart (systemd or launchd), check and automatic rollback; `-rollback`, `-dry-run`, `-from-dir`, `-cli`
+- `scripts/94-e2e-upgrade.sh`: upgrade from the previous release and back on a private daemon
 
 ### Changed
 
@@ -59,6 +61,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Internal: Android x86_64 ARM translation, phone GPU docs, ANDROID_ID checks (#121, #122, #123, #126)
 - Lifecycle operations (`freeze`, `thaw`, `pause`, `stop`, `rm`) answer 404 for an unknown machine and 409 for a wrong state (was 400)
 - The watcher scans VMM processes once per round and re-measures disk only for running machines or after a state change
+- `install.sh` refuses to overwrite an existing kling without `--force` and points to `kling upgrade`
+- v0.4 `links.json` and golden MCP fields and v0.13 `warm` state are no longer migrated: they are refused with how to pass through v0.17
 
 ### Fixed
 

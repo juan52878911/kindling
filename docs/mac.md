@@ -146,6 +146,13 @@ launchctl bootout gui/$(id -u)/dev.kindling.daemon           # pararlo
 
 Con el plist instalado, `kling up` lo arranca si no está corriendo.
 
+Con el plist instalado, `kling upgrade` también actualiza el daemon: baja la
+release, verifica `kling` y `kling-vz` (y que este lleva el permiso de
+virtualización), los cambia en su sitio, lo reinicia con `launchctl bootout` y
+`bootstrap` y vuelve atrás solo si no contesta con la versión nueva
+([`actualizar.md`](actualizar.md) §3.4). Sin el agente de launchd no sabe
+reiniciarlo: `kling upgrade -cli` cambia solo el binario.
+
 ## Cómo se llega a cada máquina
 
 En Linux cada invitado es `172.16.0.2` dentro de su namespace y el host lo
