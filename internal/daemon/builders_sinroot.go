@@ -158,12 +158,13 @@ func (u *usuarioConstructor) credencial() *syscall.SysProcAttr {
 
 // entornoPermitido es lo único del entorno del daemon que llega a un
 // constructor sin root: lo que necesita para bajar (proxy, certificados), dónde
-// está el agente y la fecha reproducible.
+// está el agente (y kling-unpack) y la fecha reproducible.
 var entornoPermitido = []string{
 	"PATH", "TZ", "LANG", "LC_ALL", "SOURCE_DATE_EPOCH",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 	"SSL_CERT_FILE", "SSL_CERT_DIR",
 	"KLING_LIB_DIR", "KLING_GUEST_AGENT", "KLING_GUEST_AGENT_amd64", "KLING_GUEST_AGENT_arm64",
+	"KLING_UNPACK",
 }
 
 func entornoConstructor(work string) []string {

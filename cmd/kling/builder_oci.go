@@ -233,6 +233,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	root := envOr("KLING_ROOT", "/var/lib/kindling")
 	lib := envOr("KLING_LIB_DIR", libPorDefecto(root))
+	// kling-unpack descomprime las capas más rápido (internal/oci); es un
+	// binario del anfitrión, no del invitado, así que no depende de spec.Arch.
+	oci.SetUnpackHelper(filepath.Join(lib, "kling-unpack"))
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	if spec.Arch != runtime.GOARCH {
 		if a := os.Getenv("KLING_GUEST_AGENT_" + spec.Arch); a != "" {
@@ -320,6 +323,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		how = "of layers" // un docker save las trae sin comprimir
 	}
 	logf("%s: %s, %d layer(s), %d MiB %s", shown, img.ManifestDigest, len(img.Layers), compressed>>20, how)
+	if h := oci.UnpackHelper(); h != "" {
+		logf("compressed layers are decompressed with %s", h)
+	}
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
 	tTree := time.Now()

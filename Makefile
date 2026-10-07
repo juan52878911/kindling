@@ -46,7 +46,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets guest chispa-guest domotica deploy deploy-mac vz test cross test-all cross-all clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets guest chispa-guest unpack domotica deploy deploy-mac vz test cross test-all cross-all clean fmt
 
 all: build
 
@@ -68,6 +68,11 @@ install: build
 			|| { mkdir -p "$$d" && CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o "$$d/kling-guest.tmp" ./cmd/kling-guest; } && \
 		chmod 755 "$$d/kling-guest.tmp" && mv "$$d/kling-guest.tmp" "$$d/kling-guest" && \
 		echo "instalado: $$d/kling-guest  (linux, para las imágenes de Docker)"; \
+		if command -v cargo >/dev/null 2>&1; then \
+			cargo build --release --locked --quiet --manifest-path rust/kling-unpack/Cargo.toml && \
+			install -m755 rust/kling-unpack/target/release/kling-unpack "$$d/kling-unpack" && \
+			echo "instalado: $$d/kling-unpack  (descomprime las capas de las imágenes de Docker)"; \
+		else echo "sin cargo: las capas se descomprimen en Go (más lento; ver rust/kling-unpack)"; fi; \
 	fi
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
 	  *) echo; echo "AVISO: $(PREFIX)/bin no está en tu PATH. Añádelo:"; \
@@ -141,6 +146,19 @@ daemon-full: assets
 		-ldflags "$(LDFLAGS)" -o $(BIN)-linux-$(GOARCH) $(PKG)
 	@echo "$(BIN)-linux-$(GOARCH)  ($(VERSION))  con artefactos embebidos"
 
+## unpack — kling-unpack (rust/kling-unpack), el descompresor de capas OCI:
+## 2,2× más rápido que Go en gzip y 3× en zstd. Opcional: sin él, Go. Es Rust y
+## el núcleo no lleva cgo, así que es un binario aparte que se compila en
+## Docker (estático, musl) con la imagen fijada por digest; make deploy lo
+## instala si está.
+RUST_IMAGE ?= rust:1-alpine@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627
+unpack:
+	docker run --rm --platform linux/$(GOARCH) -v "$(CURDIR)/rust/kling-unpack":/src -w /src \
+		-e CARGO_TARGET_DIR=/src/target-linux-$(GOARCH) $(RUST_IMAGE) \
+		sh -c 'apk add -q musl-dev && cargo build --release --locked'
+	cp rust/kling-unpack/target-linux-$(GOARCH)/release/kling-unpack kling-unpack
+	@echo "kling-unpack  (linux/$(GOARCH), estático)"
+
 ## deploy — instala el daemon por SSH y lo reinicia
 ## Van también el agente de invitado (kling-guest) y el constructor "base", que
 ## construye imágenes con él (la de herramientas de `volume populate`, por ejemplo):
@@ -177,10 +195,12 @@ deploy: daemon guest chispa-guest
 	scp -q scripts/builders/debian $(TARGET):$$D/builder-debian; \
 	scp -q scripts/builders/oci $(TARGET):$$D/builder-oci; \
 	scp -q packaging/$(BIN).service $(TARGET):$$D/; \
+	if [ -f kling-unpack ]; then scp -q kling-unpack $(TARGET):$$D/; else echo "sin kling-unpack (make unpack): el lab descomprimirá las capas en Go"; fi; \
 	ssh $(TARGET) "D=$$D; "'sudo install -m755 "$$D/$(BIN)" /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
 		sudo install -m755 "$$D/kling-guest" /usr/local/lib/kindling/kling-guest && \
 		sudo install -m755 "$$D/kling-chispa" /usr/local/lib/kindling/kling-chispa && \
+		{ [ ! -f "$$D/kling-unpack" ] || sudo install -m755 "$$D/kling-unpack" /usr/local/lib/kindling/kling-unpack; } && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
 		sudo install -m755 "$$D/81-base-image.sh" /usr/local/lib/kindling/81-base-image.sh && \
 		sudo install -m755 "$$D/71-build-glibc-base.sh" /usr/local/lib/kindling/71-build-glibc-base.sh && \
@@ -275,4 +295,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa kindling-domotica
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa kling-unpack kindling-domotica

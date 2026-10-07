@@ -40,8 +40,17 @@ func isZstd(path string) bool {
 
 // decompress abre una capa comprimida con gzip o zstd. Lo deciden los
 // primeros bytes, no el media type: hay herramientas que suben capas zstd
-// etiquetadas como gzip.
+// etiquetadas como gzip. Con kling-unpack instalado lo hace él (ver
+// unpack_helper.go); si no, Go.
 func decompress(f *os.File) (io.ReadCloser, error) {
+	if h := unpackHelper(); h != "" {
+		rc, err := decompressHelper(h, f)
+		if err == nil {
+			return rc, nil
+		}
+		// No arrancó: f sigue sin leer, Go lo abre desde el principio.
+		warnHelper(h, err)
+	}
 	br := bufio.NewReaderSize(f, 1<<20)
 	m, _ := br.Peek(4)
 	var r io.Reader

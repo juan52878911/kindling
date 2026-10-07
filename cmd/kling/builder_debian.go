@@ -164,6 +164,9 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 	}
 	root := envOr("KLING_ROOT", "/var/lib/kindling")
 	lib := envOr("KLING_LIB_DIR", libPorDefecto(root))
+	// kling-unpack descomprime las capas más rápido (internal/oci); es un
+	// binario del anfitrión, no del invitado, así que no depende de spec.Arch.
+	oci.SetUnpackHelper(filepath.Join(lib, "kling-unpack"))
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
 	if spec.Arch != runtime.GOARCH {
 		// El agente instalado es el del host; para otra arquitectura hay que

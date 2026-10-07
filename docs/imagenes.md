@@ -384,6 +384,44 @@ arrancan, sirven HTTP y su servicio ve un `ENV` de varias líneas igual que Dock
 Sin una línea de código por imagen: ni enlaces a mano en `/dev` (lo que hizo
 falta en la evaluación del 2026-09-30) ni `chroot`.
 
+### Descomprimir más rápido: `kling-unpack`
+
+Descomprimir las capas es lo que más tarda de un import con la caché de blobs
+caliente: `compress/gzip` de Go va a ~200 MB/s y el decodificador zstd propio a
+~300 en el lab (AVX2, sin SHA-NI). `kling-unpack` (`rust/kling-unpack`) hace lo
+mismo con zlib-rs y libzstd. Es Rust y el núcleo es Go sin cgo ni
+dependencias: por eso es un binario aparte, estático, como Firecracker. Si no
+está, Go descomprime igual que siempre.
+
+- **Dónde lo busca.** `KLING_UNPACK` (una ruta; `0` lo apaga); si no, el
+  `KLING_LIB_DIR` del constructor (`/usr/local/lib/kindling/kling-unpack`, o
+  `lib/` de la raíz de datos en macOS). Si está pero no arranca (otra
+  arquitectura), un aviso y Go.
+- **El contrato.** Lee la capa por stdin (el descriptor tal cual) y escribe el
+  tar por stdout, sin argumentos ni entorno. Solo cuenta si sale con 0, que es
+  cuando comprobó el CRC32 de cada miembro gzip y el xxhash64 de cada marco zstd
+  que lo lleve. Si muere a mitad, la lectura falla: lo que dio antes no pasa por
+  la capa entera. La capa ya llega verificada por sha256.
+- **Mismos límites que Go.** Ventana de zstd de 128 MiB como mucho, gzip
+  multimiembro, y falla donde falla Go: `TestUnpackHelperIgualQueGo` compara
+  los dos con capas buenas, truncadas, con el CRC roto, basura y ventanas
+  hostiles, también en el CI.
+- **Compilarlo.** `make unpack` lo compila en Docker (`rust:1-alpine` fijada
+  por digest, musl, estático) y `make deploy` lo instala si está. En macOS,
+  `make install` lo compila con `cargo` si lo hay.
+
+Medido el 2026-10-07 en el lab (CT 105, daemon privado, caché caliente, tres
+vueltas de cada uno):
+
+| | Go | `kling-unpack` |
+|---|---|---|
+| capa gzip de 202 MiB → 570 MiB (`node:22`), solo descomprimir | 3,0 s | 1,35 s (2,2×) |
+| la misma en zstd -3 / -19 | 2,0 / 1,7 s | 0,67 / 0,73 s (3× / 2,3×) |
+| `kling image import node:22-bookworm -replace` | 8,3 s (descarga y descompresión 4,1 s) | 7,1 s (2,7 s) |
+| `kling image import postgres:17-alpine -replace` | 3,4 s (2,6 s) | 2,4 s (1,7 s) |
+
+Ahora, en `node:22`, lo que más pesa es escribir el ext4 (4 s).
+
 ### Imágenes grandes: RAM, CPU y disco
 
 Lo que salió de correr Hindsight (memoria de agentes: API en Python, Postgres

@@ -97,6 +97,28 @@ jobs:
             }
           done
 
+  # kling-unpack (rust/kling-unpack) descomprime las capas fuera del núcleo:
+  # aquí se compila con su Cargo.lock y se comprueba contra el camino de Go
+  # (mismos bytes, mismos fallos) con capas buenas, dañadas y hostiles.
+  kling-unpack:
+    name: kling-unpack (Rust)
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - run: cargo fmt --check --manifest-path rust/kling-unpack/Cargo.toml
+      - run: cargo clippy --locked --manifest-path rust/kling-unpack/Cargo.toml -- -D warnings
+      - run: cargo build --release --locked --manifest-path rust/kling-unpack/Cargo.toml
+      - run: go test -race -count=1 -run UnpackHelper -v ./internal/oci
+        env:
+          KLING_UNPACK_TEST: ${{ github.workspace }}/rust/kling-unpack/target/release/kling-unpack
+
   # El go.work comiteado es la comodidad de local: un cambio en pkg/api rompe
   # ext/mcp en el mismo `go build`. Si go.work o go.work.sum se quedan atrás (un
   # módulo nuevo sin `use`, una suma que falta), aquí se ve.
