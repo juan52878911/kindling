@@ -48,7 +48,7 @@ import (
 // reimportar el mismo digest no baja nada.
 //
 // Límites: el init es un script de sh que necesita sh, mount, pivot_root,
-// mkdir, ln, cat y grep en la imagen (cualquier Alpine o Debian los trae; una
+// mkdir y ln en la imagen (cualquier Alpine o Debian los trae; una
 // "distroless" no, y se rechaza al construir). Sin verity: la imagen es la
 // raíz, no una capa.
 
@@ -86,8 +86,10 @@ const (
 	ociMaxFiles     = 2_000_000
 )
 
-// ociInitTools son lo que minimal-init.sh necesita de la imagen.
-var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln", "cat", "grep"}
+// ociInitTools son lo que minimal-init.sh necesita de la imagen. El resto lo
+// hace con builtins de sh (read, case, echo, [): umount puede faltar.
+// scripts/minimal_init_test.go corre sus trozos sin PATH.
+var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln"}
 
 // reOCIUser es un USER de Docker: uid o nombre, con grupo opcional.
 var reOCIUser = lazyre.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$`)

@@ -167,6 +167,16 @@ kindling y nada más:
 | `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
 | `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
 
+`/tmp` y `/run` son los de la imagen, en el disco de la máquina, como en
+Docker: lo que trae la imagen ahí (`/run/mysqld` del usuario `mysql` en
+`mariadb`) sigue ahí, y lo que se escribe en `/tmp` no gasta RAM del invitado
+(ni engorda un `freeze`). En las bases de kindling los dos son `tmpfs`.
+
+Sin `HEALTHCHECK` ni un puerto TCP en `EXPOSE` (una imagen que solo expone
+UDP, como un DNS) no hay sonda: `import` lo dice (`ready none: ...`) y
+`-wait-ready` espera al agente, no al servicio. Un manifiesto *schema 1* de
+Docker (obsoleto desde 2017) se rechaza con un error que lo dice.
+
 **Fijada por digest.** La etiqueta se resuelve una vez: el digest sale del
 sha256 del manifiesto bajado (si el registro dice otro en
 `Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al
@@ -228,7 +238,13 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
 `-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
-ready, service}`).
+ready, service, already_imported}`).
+
+El nombre por defecto sale del repositorio y la etiqueta, así que `redis:7` y
+`ghcr.io/x/redis:7` dan los dos `redis-7`. Si ya hay una imagen con ese nombre,
+`import` no la pisa: si es la misma importación (misma referencia y mismas
+opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
+`-replace` la reconstruye (y vuelve a resolver la etiqueta).
 
 ### Medido (2026-10-01, lab CT 105, amd64, daemon privado)
 
@@ -339,7 +355,7 @@ al arrancar se cuelga sin salida a internet hasta que se le pone
 ### Límites del constructor `oci`
 
 - **El init es un script de sh**: la imagen tiene que traer `sh`, `mount`,
-  `pivot_root`, `mkdir`, `ln`, `cat` y `grep` (cualquier Alpine o Debian). Una
+  `pivot_root`, `mkdir` y `ln` (cualquier Alpine o Debian). Una
   imagen *distroless* se rechaza al construir, igual que una que ya traiga
   `/entrypoint`.
 - **Sin dm-verity**: la imagen es la raíz, no una capa.

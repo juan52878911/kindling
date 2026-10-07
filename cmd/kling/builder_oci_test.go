@@ -16,7 +16,8 @@ import (
 )
 
 // alpineLike es una raíz mínima al estilo de Alpine: /sbin de verdad (no
-// enlace) y las herramientas del init como enlaces a busybox.
+// enlace) y las herramientas del init como enlaces a busybox: solo las que
+// usa (ociInitTools), sin cat ni grep.
 func alpineLike() []ocitest.File {
 	fs := []ocitest.File{
 		{Name: "bin/", Dir: true, Mode: 0o755}, {Name: "sbin/", Dir: true, Mode: 0o755}, {Name: "usr/", Dir: true, Mode: 0o755},
@@ -27,7 +28,7 @@ func alpineLike() []ocitest.File {
 		{Name: "usr/local/bin/docker-entrypoint.sh", Body: "#!/bin/sh\nexec \"$@\"\n", Mode: 0o755},
 		{Name: "var/", Dir: true, Mode: 0o755}, {Name: "var/old", Body: "borrado por la capa 2"},
 	}
-	for _, t := range []string{"sh", "mount", "mkdir", "ln", "cat", "grep"} {
+	for _, t := range []string{"sh", "mount", "mkdir", "ln"} {
 		fs = append(fs, ocitest.File{Name: "bin/" + t, Link: "busybox"})
 	}
 	return append(fs, ocitest.File{Name: "sbin/pivot_root", Link: "/bin/busybox"})

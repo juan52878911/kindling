@@ -192,3 +192,26 @@ func TestPullRejectsConfigSize(t *testing.T) {
 		}
 	}
 }
+
+// Un manifiesto schema1 de Docker no tiene "layers": el error dice que es
+// schema1, no "has no layers". Por etiqueta (Resolve) y por digest (Pull),
+// con su media type o sin él.
+func TestSchema1(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	body := []byte(`{"schemaVersion":1,"name":"x/y","tag":"old","architecture":"amd64",` +
+		`"fsLayers":[{"blobSum":"sha256:` + strings.Repeat("a", 64) + `"}],"history":[{"v1Compatibility":"{}"}]}`)
+	for _, mt := range []string{"application/vnd.docker.distribution.manifest.v1+prettyjws", ""} {
+		d := r.Put(body, mt)
+		r.Tag("old", d)
+		ref, _ := oci.ParseImageRef(r.Host() + "/x/y:old")
+		c := &oci.Client{Cache: t.TempDir(), Log: io.Discard}
+		if _, err := c.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "schema 1") {
+			t.Errorf("Resolve (%q): %v", mt, err)
+		}
+		c = &oci.Client{Cache: t.TempDir(), Log: io.Discard}
+		if _, err := c.Pull(context.Background(), r.Host()+"/x/y", d, "amd64"); err == nil || !strings.Contains(err.Error(), "schema 1") {
+			t.Errorf("Pull (%q): %v", mt, err)
+		}
+	}
+}
