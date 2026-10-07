@@ -107,3 +107,47 @@ func hostsCasos(t *testing.T, sh []string, s, hosts string) {
 		}
 	}
 }
+
+// En una imagen de Docker (/etc/kindling/oci.json) /tmp y /run son los de la
+// imagen, en disco, como en Docker; en las bases, tmpfs. Se corre el trozo con
+// un mount falso que apunta lo que le piden.
+func TestMinimalInitTmpYRun(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "mounts")
+	os.WriteFile(filepath.Join(dir, "mount"), []byte("#!/bin/sh\necho \"$*\" >> "+log+"\n"), 0o755)
+	oci := filepath.Join(dir, "oci.json")
+	bloque := trozo(t, "if [ ! -e /etc/kindling/oci.json ]", "fi")
+	s := strings.ReplaceAll(bloque, "/etc/kindling/oci.json", oci)
+	for _, sh := range shells(t) {
+		if len(sh) > 1 {
+			continue // el sh de busybox usa su applet mount antes que el del PATH
+		}
+		for _, docker := range []bool{false, true} {
+			os.Remove(log)
+			os.Remove(oci)
+			if docker {
+				os.WriteFile(oci, []byte("{}"), 0o644)
+			}
+			cmd := exec.Command(sh[0], append(sh[1:], "-c", "set -e\n"+s)...)
+			cmd.Env = []string{"PATH=" + dir}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %v\n%s", sh, err, out)
+			}
+			b, _ := os.ReadFile(log)
+			want := "-t tmpfs tmpfs /tmp\n-t tmpfs tmpfs /run\n"
+			if docker {
+				want = ""
+			}
+			if string(b) != want {
+				t.Errorf("%v, docker=%v: %q", sh, docker, b)
+			}
+		}
+	}
+	// Y no hay otro tmpfs sobre /tmp o /run fuera de ese if.
+	for _, l := range strings.Split(strings.Replace(MinimalInit, bloque, "", 1), "\n") {
+		if f := strings.Fields(l); len(f) > 0 && f[0] == "mount" && strings.Contains(l, "tmpfs") &&
+			(strings.Contains(l, " /tmp") || strings.Contains(l, " /run")) {
+			t.Errorf("tmpfs fuera del if de oci.json: %q", l)
+		}
+	}
+}

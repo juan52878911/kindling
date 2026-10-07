@@ -167,6 +167,11 @@ kindling y nada más:
 | `/etc/kindling/oci.json`, `IMAGE.txt` | la referencia, el digest y la configuración entera |
 | `/overlay /rom /proc /sys /dev /run /tmp` | los puntos de montaje que la imagen no traiga (la raíz es de solo lectura) |
 
+`/tmp` y `/run` son los de la imagen, en el disco de la máquina, como en
+Docker: lo que trae la imagen ahí (`/run/mysqld` del usuario `mysql` en
+`mariadb`) sigue ahí, y lo que se escribe en `/tmp` no gasta RAM del invitado
+(ni engorda un `freeze`). En las bases de kindling los dos son `tmpfs`.
+
 **Fijada por digest.** La etiqueta se resuelve una vez: el digest sale del
 sha256 del manifiesto bajado (si el registro dice otro en
 `Docker-Content-Digest`, error) y queda en la receta (`built.digest`, junto al
