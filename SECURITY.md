@@ -1336,9 +1336,11 @@ release o cuyo hash no coincida; con `-from-dir`, si hay un `SHA256SUMS` al lado
 lo mismo. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
 contra ningún daemon) **antes** de parar nada. Se cambia por `rename` desde un
 temporal del mismo directorio, nunca escribiendo encima, y lo de antes queda en
-`<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que bajó un
-usuario no lo ejecuta root: en Linux corre entero como root (`sudo`), y lo que
-toca de los usuarios (sus extensiones) se lo deja a `kling upgrade -cli`. No pasa
+`<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que se
+ejecuta y se instala es la copia ya verificada en `<raíz>/upgrade/<etiqueta>`
+(0700), no el fichero de origen: cambiar el de `-from-dir` después de
+verificarlo no cuela nada. En Linux corre como root (`sudo`), y las extensiones
+de cada usuario se las deja a su `kling upgrade -cli`. No pasa
 nada por argv que no sea público (etiqueta, rutas, la unidad), y del entorno del
 daemon solo lee `KLING_LIB_DIR`. `SHA256SUMS` sigue sin firmar (ver abajo).
 
