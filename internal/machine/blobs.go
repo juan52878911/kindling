@@ -29,6 +29,9 @@ func (m *Manager) ImageReplaceable(name string) error {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.arrancando[name] > 0 {
+		return fmt.Errorf("image %q is being booted by a machine right now and the new content is different", name)
+	}
 	for _, mc := range m.byID {
 		if mc.Image == name && mc.State != api.StateStopped && mc.State != api.StateFailed {
 			return fmt.Errorf("image %q is in use by machine %q and the new content is different", name, mc.Name)
@@ -43,6 +46,9 @@ func (m *Manager) ImageReplaceable(name string) error {
 func (m *Manager) KernelReplaceable() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.arrancandoTotal > 0 {
+		return fmt.Errorf("the kernel is being read by a machine that is booting and the new one is different: try again")
+	}
 	for _, mc := range m.byID {
 		if mc.State != api.StateStopped && mc.State != api.StateFailed {
 			return fmt.Errorf("the kernel is in use by machine %q and the new one is different: "+
@@ -50,4 +56,38 @@ func (m *Manager) KernelReplaceable() error {
 		}
 	}
 	return nil
+}
+
+// ConImagenesQuietas ejecuta fn sin ningún arranque en frío que empiece a
+// leer una imagen mientras tanto. Es para sustituir una imagen o el kernel:
+// ImageReplaceable (o KernelReplaceable) y el rename DENTRO de fn, o un run
+// que llegue entre las dos arrancaría con el contenido que se comprobó que
+// no se podía cambiar. fn no puede arrancar máquinas.
+func (m *Manager) ConImagenesQuietas(fn func() error) error {
+	m.imgMu.Lock()
+	defer m.imgMu.Unlock()
+	return fn()
+}
+
+// reservarImagen apunta que run va a arrancar en frío con image, hasta que la
+// máquina esté en byID (donde ya la ve ImageReplaceable). Espera a que acabe
+// una sustitución en curso. Devuelve con qué soltarla.
+func (m *Manager) reservarImagen(image string) func() {
+	m.imgMu.Lock()
+	m.mu.Lock()
+	if m.arrancando == nil {
+		m.arrancando = map[string]int{}
+	}
+	m.arrancando[image]++
+	m.arrancandoTotal++
+	m.mu.Unlock()
+	m.imgMu.Unlock()
+	return func() {
+		m.mu.Lock()
+		if m.arrancando[image]--; m.arrancando[image] <= 0 {
+			delete(m.arrancando, image)
+		}
+		m.arrancandoTotal--
+		m.mu.Unlock()
+	}
 }

@@ -311,33 +311,40 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, res)
 			return
 		}
-		if err := s.blobReplaceable(t); err != nil {
-			_ = os.Remove(tmp)
-			fail(w, http.StatusConflict, err)
-			return
-		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(tmp)
 		fail(w, http.StatusInternalServerError, err)
 		return
-	} else if t.part == api.BlobRecipe && s.esCapa(t.name) {
+	}
+	// La comprobación y el rename con las imágenes quietas: un run que
+	// llegara entre las dos arrancaría con el contenido nuevo de una imagen
+	// que se acaba de ver que no se podía cambiar. Lo que había se vuelve a
+	// mirar dentro: otra subida pudo dejarlo mientras tanto.
+	status := http.StatusInternalServerError
+	err = s.mgr.ConImagenesQuietas(func() error {
+		_, lerr := os.Lstat(t.path)
 		// Una capa sin receta va sobre la base por defecto: ponérsela ahora
 		// puede cambiarle la base, así que cuenta como sustituir.
-		if err := s.blobReplaceable(t); err != nil {
-			_ = os.Remove(tmp)
-			fail(w, http.StatusConflict, err)
-			return
+		if lerr == nil || (t.part == api.BlobRecipe && s.esCapa(t.name)) {
+			if err := s.blobReplaceable(t); err != nil {
+				status = http.StatusConflict
+				return err
+			}
 		}
-	}
-	if err := os.Rename(tmp, t.path); err != nil {
+		if err := os.Rename(tmp, t.path); err != nil {
+			return err
+		}
+		// El sidecar ya con el hash que se acaba de verificar (`got`): evita
+		// que el primer GET tras subir tenga que releer el fichero entero para
+		// el mismo dato que este PUT ya comprobó byte a byte.
+		cacheSHA256(t.path, got)
+		return nil
+	})
+	if err != nil {
 		_ = os.Remove(tmp)
-		fail(w, http.StatusInternalServerError, err)
+		fail(w, status, err)
 		return
 	}
-	// El sidecar ya con el hash que se acaba de verificar (`got`): evita que
-	// el primer GET tras subir tenga que releer el fichero entero para el
-	// mismo dato que este PUT ya comprobó byte a byte.
-	cacheSHA256(t.path, got)
 	// En Linux el VMM corre sin privilegios y tiene que poder leer la imagen.
 	if t.part != api.BlobRecipe && t.part != api.BlobKernel {
 		s.mgr.EnsureImageReadable(t.name)

@@ -141,6 +141,14 @@ type Manager struct {
 	// nombresNaciendo son los nombres de las máquinas que run está creando y
 	// aún no están en byID (reservarNombre). Bajo mu.
 	nombresNaciendo map[string]bool
+	// arrancando cuenta, por imagen, los arranques en frío de run que ya la
+	// eligieron y aún no están en byID (reservarImagen); arrancandoTotal, todos,
+	// que leen además el kernel. Bajo mu, y se apuntan con imgMu: ver
+	// ConImagenesQuietas.
+	arrancando      map[string]int
+	arrancandoTotal int
+	// imgMu es el cerrojo de sustituir una imagen o el kernel (blobs.go).
+	imgMu sync.Mutex
 
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
@@ -1162,6 +1170,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.Image == "" {
 		req.Image = "default"
 	}
+	// Antes de mirar la imagen: desde aquí hasta byID nadie puede sustituirla
+	// (ni el kernel) por debajo de este arranque.
+	soltarImagen := m.reservarImagen(req.Image)
+	defer soltarImagen()
 	if req.VCPUs <= 0 {
 		req.VCPUs = 1
 	}
