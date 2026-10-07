@@ -1004,7 +1004,7 @@ instance still has an independent disk.
 ```sh
 kling config set daemon.cow auto            # auto (default) | reflink-store | off
 sudo systemctl restart kling                # read when the daemon starts
-kling info                                  # the mode in use, on the "disk clones" line
+kling status -v                             # the mode in use, on the "disk clones" line
 ```
 
 `auto` uses native reflink when the data root is XFS or Btrfs, falls back to a store of

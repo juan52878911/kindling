@@ -1009,7 +1009,7 @@ tamaño del disco y cada instancia sigue teniendo un disco independiente.
 ```sh
 kling config set daemon.cow auto            # auto (defecto) | reflink-store | off
 sudo systemctl restart kling                # se lee al arrancar el daemon
-kling info                                  # el modo en uso, en la línea «disk clones»
+kling status -v                             # el modo en uso, en la línea «disk clones»
 ```
 
 `auto` usa reflink nativo si la raíz de datos es XFS o Btrfs, cae a un almacén propio

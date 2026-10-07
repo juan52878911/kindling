@@ -241,7 +241,7 @@ tiene un techo para lo que lleva **su** `kling.owner`:
 ## Comprobarlo
 
 ```
-$ kling info
+$ kling status -v
 ...
 authz:        policy on; you are tenant:ana
 $ kling doctor

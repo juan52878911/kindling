@@ -184,7 +184,7 @@ Mientras sigamos en 0.x:
 - **Dorados y congeladas:** no se migran nunca. Son caché cara, no datos.
 - **Imágenes:** sobreviven a cualquier actualización. Un agente de invitado
   viejo dentro sigue funcionando con lo que tuviera (degradación, no fallo),
-  durante al menos una MINOR; después, `kling doctor` avisa y `kling images`
+  durante al menos una MINOR; después, `kling doctor` avisa y `kling image ls`
   lo marca.
 
 **Dorados obsoletos.** El meta guarda lo que los ata al host: la versión de

@@ -31,7 +31,7 @@ sudo systemctl restart kling                # se lee al arrancar el daemon
 | `reflink-store` | El almacén propio aunque la raíz clone. Si no se puede, copia completa (con aviso). |
 | `off` | La copia completa de siempre. |
 
-El modo en uso se ve en `kling info`:
+El modo en uso se ve en `kling status -v`:
 
 ```
 disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; store /var/lib/kindling/cow (XFS): 15870 of 16384 MiB free; since start: store 32
@@ -134,7 +134,7 @@ sobre 512.
   instancias que tienen su overlay dentro lo necesitan para descongelarse. Poner
   `daemon.cow=off` después no las deja tiradas.
 - **Lleno**: si quedan menos de 256 MiB libres dentro del almacén, la instancia nueva
-  recibe una copia completa en la raíz, como antes. Pasado el 85 % de uso, `kling info`
+  recibe una copia completa en la raíz, como antes. Pasado el 85 % de uso, `kling status -v`
   y `kling doctor` avisan con el comando para agrandarlo
   ([Hacer crecer el almacén](#hacer-crecer-el-almacén)).
 - **Si no se puede crear o montar** (el núcleo no tiene el módulo, el contenedor no deja
@@ -142,7 +142,7 @@ sobre 512.
   desmonta y se borra** y se prueba con el otro tipo (Btrfs si era XFS, y al revés),
   si su `mkfs` está instalado. Si ninguno sirve, no queda ninguna imagen, el daemon
   vuelve a copiar hasta que se reinicie, y el motivo de cada tipo sale una vez en el log
-  y en `kling info`.
+  y en `kling status -v`.
 - **Al arrancar**, un `cow.xfs`/`cow.btrfs` que ya existe y no monta se borra si
   **ninguna** máquina tiene su overlay en él (ningún `machines/<id>/overlay.ext4`
   apunta dentro de `cow/`): no guarda nada que no se pueda rehacer (las bases se
@@ -168,7 +168,7 @@ ficheros así:
    instalado, XFS antes que Btrfs.
 3. Si el núcleo no lista ninguno de los dos (módulo sin cargar; se cargaría al montar),
    el primero cuyo `mkfs` esté instalado.
-4. Si nada de eso, no hay almacén, y el motivo (qué instalar) sale en `kling info` y
+4. Si nada de eso, no hay almacén, y el motivo (qué instalar) sale en `kling status -v` y
    `kling doctor`.
 
 Btrfs se formatea con `mkfs.btrfs -K -m single -d single -L kling-cow` y se monta con
@@ -301,7 +301,7 @@ Firecracker abriría como dispositivo de bloques.
   que un bind.
 - **Formato**: `commit` tendría que volcar el volumen a un fichero (el snapshot sigue
   siendo un `overlay.ext4`), y los discos dejarían de ser ficheros que se pueden copiar,
-  inspeccionar con `debugfs` o mover con `kling images copy`.
+  inspeccionar con `debugfs` o mover con `kling image copy`.
 - Ventaja real: granularidad de bloque sin sistema de ficheros intermedio. No compensa
   la complejidad ni el modo de fallo.
 
@@ -333,7 +333,7 @@ seguridad de los otros dos modos.
   clonar (`ENOTSUP` fuera de APFS, `EXDEV` entre volúmenes) se copia dispersa como en
   Linux.
 - `DiskBytes` de `kling ps` no cuenta el overlay del almacén (sus bloques son
-  compartidos: sumarlos por instancia mentiría). El uso real está en `kling info`.
+  compartidos: sumarlos por instancia mentiría). El uso real está en `kling status -v`.
 
 ## Hacer crecer el almacén
 
@@ -379,7 +379,7 @@ de E/S: ext4 aborta su journal y Postgres hace PANIC. Visto en el laboratorio co
   falla igual si los metadatos se llenaron y no queda nada sin asignar. El daemon lo
   calcula con `BTRFS_IOC_SPACE_INFO` (`internal/machine/cow_asignable.go`): datos libres
   más lo sin asignar, 0 si los metadatos no tienen ni 16 MiB, y nunca más que `statfs`.
-  En XFS, `statfs` es exacto. Es la cifra que enseñan `kling cow` y `kling info`.
+  En XFS, `statfs` es exacto. Es la cifra que enseñan `kling cow` y `kling status -v`.
 - **Admisión.** Con menos de 256 MiB asignables no se clona en el almacén: la instancia
   nueva va a una copia completa en la raíz **solo si cabe entera** con los 2 GiB de margen
   de la raíz; si no, `run -from` (y `fork`, `kling db up`...) falla con
