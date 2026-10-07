@@ -376,11 +376,13 @@ func adoptarFichero(src, dst string, uid uint32) (bool, error) {
 // barrerProcesos mata los procesos que queden con el uid del constructor. Va
 // por /proc y repite hasta una pasada limpia: un proceso que se bifurca sin
 // parar no se escapa entre dos lecturas. Sin /proc (macOS) no hace nada.
-func barrerProcesos(uid uint32) {
+// Devuelve si la última pasada fue limpia (sin ninguno vivo); sin /proc, solo
+// fuera de Linux (allí no hay constructor sin root).
+func barrerProcesos(uid uint32) bool {
 	for pasada := 0; pasada < 50; pasada++ {
 		entradas, err := os.ReadDir("/proc")
 		if err != nil {
-			return
+			return runtime.GOOS != "linux"
 		}
 		vivos := 0
 		for _, e := range entradas {
@@ -394,11 +396,12 @@ func barrerProcesos(uid uint32) {
 			}
 		}
 		if vivos == 0 {
-			return
+			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	log.Printf("WARNING: processes of builder uid %d keep coming back", uid)
+	return false
 }
 
 // procesoDeUID dice si alguno de los uid (real, efectivo, guardado, de

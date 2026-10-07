@@ -142,6 +142,15 @@ type Daemon struct {
 	// ("MIB:GENERACIONES") lo sustituye. Se lee al arrancar el daemon.
 	CredAuditMiB         int `json:"credaudit_max_mib,omitempty"`
 	CredAuditGenerations int `json:"credaudit_generations,omitempty"`
+
+	// BuildCacheMaxGiB y BuildCacheMaxDays acotan las cachés de blobs del
+	// constructor oci sin root (la suya y la verificada por el daemon): lo
+	// que lleva más días sin usarse se borra, y si entre las dos pasan del
+	// tope, lo más viejo. 0 = 20 GiB y 30 días. KLING_BUILD_CACHE_MAX_GIB y
+	// KLING_BUILD_CACHE_MAX_DAYS los sustituyen. Se leen en cada
+	// construcción. Ver docs/imagenes.md.
+	BuildCacheMaxGiB  int `json:"build_cache_max_gib,omitempty"`
+	BuildCacheMaxDays int `json:"build_cache_max_days,omitempty"`
 }
 
 // Modos de daemon.cow.
@@ -472,6 +481,20 @@ func (c *Config) Set(key, value string) error {
 				return fmt.Errorf("daemon.cow_store_gib can't be negative")
 			}
 			c.Daemon.CoWStoreGiB = n
+		case "build_cache_max_gib", "build_cache_max_days":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			// Los mismos topes que daemon.BuildCacheMax*Tope: más desborda.
+			if n < 0 || (field == "build_cache_max_gib" && n > 1<<20) || (field == "build_cache_max_days" && n > 36500) {
+				return fmt.Errorf("daemon.%s out of range (0-1048576 GiB, 0-36500 days; 0 is the default)", field)
+			}
+			if field == "build_cache_max_gib" {
+				c.Daemon.BuildCacheMaxGiB = n
+			} else {
+				c.Daemon.BuildCacheMaxDays = n
+			}
 		case "credaudit_max_mib", "credaudit_generations":
 			n, err := atoi()
 			if err != nil {
@@ -580,6 +603,8 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.cow_store_gib", itoa(c.Daemon.CoWStoreGiB)},
 		{"daemon.credaudit_max_mib", itoa(c.Daemon.CredAuditMiB)},
 		{"daemon.credaudit_generations", itoa(c.Daemon.CredAuditGenerations)},
+		{"daemon.build_cache_max_gib", itoa(c.Daemon.BuildCacheMaxGiB)},
+		{"daemon.build_cache_max_days", itoa(c.Daemon.BuildCacheMaxDays)},
 	}
 }
 

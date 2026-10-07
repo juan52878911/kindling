@@ -1308,8 +1308,6 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   procesos que queden con ese uid. Por eso tiene que ser un usuario de sistema dedicado
   (uid ≤ `SYS_UID_MAX`; uno de persona o `nobody` se rechaza), y las construcciones van
   en fila en todo el host (`/run/kindling-build-<uid>.lock`), no solo en un daemon.
-- **Su caché no se cree**: como la puede escribir, lo cacheado se rehashea siempre
-  antes de usarlo; un constructor comprometido no envenena los imports siguientes.
 - **El descompresor de zstd es propio y acotado** (Go sin dependencias): la ventana de un
   marco no pasa de 128 MiB, la historia que guarda, de esa ventana más la mitad (o 1 MiB):
   una capa de `--long=27` se descomprime con ~232 MiB de RSS, y de las zstd se descomprimen dos
@@ -1317,6 +1315,18 @@ Max open files 4096 · Max data size 8 GiB · Max processes 512 · Max core file
   es un error, no un pánico ni un bucle (lo prueban un fuzz y un caso hecho a mano por cada
   comprobación). Lo descomprimido
   de todas las capas tiene el mismo tope que con gzip, 8 veces `max_mb`.
+- **Su caché no se cree**: como la puede escribir, lo que saca de ella se rehashea
+  siempre antes de usarlo; un constructor comprometido no envenena los imports
+  siguientes.
+- **La caché verificada es de root**: tras una construcción correcta, con el constructor
+  ya barrido, el daemon copia a `cache/verified/oci` (root, 0755/0644) los blobs que usó,
+  hasheando lo que copia y sin seguir enlaces (su caché, a través de un `os.Root`, y solo
+  si el barrido de sus procesos acabó limpio); uno cambiado no entra, ni uno disperso, ni
+  más bytes por pasada que el tope de la caché. El constructor la
+  lee sin rehashear solo si todo el camino es de root sin escritura para otros, y no
+  puede escribir, renombrar ni borrar nada en ella. Las dos cachés se barren con tope
+  (`daemon.build_cache_max_gib`, `daemon.build_cache_max_days`), primero lo no verificado;
+  lo que la construcción dice haber usado se guarda solo mientras quepa en el tope.
 
 Sin ese usuario (o en macOS, o con el daemon sin root) corre como el daemon y se avisa
 al arrancar. `debian` y `android` siguen como root. Detalle en

@@ -189,7 +189,9 @@ var coreTree = []section{
                                                    image (per machine: kling run -image
                                                    <ref> -e KEY). Images without sh
                                                    (distroless, scratch) boot with the
-                                                   agent's init in Go
+                                                   agent's init in Go. Blobs stay cached,
+                                                   bounded by daemon.build_cache_max_gib
+                                                   and _days
   image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
                                                    docker save (manifest.json) or an OCI
                                                    layout (tar or dir). Only the missing

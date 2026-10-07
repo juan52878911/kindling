@@ -209,9 +209,12 @@ que estar ahí, con el tamaño del manifiesto, siendo un fichero regular sin
 escritura para grupo ni otros, es estar verificado; si algo de eso falla, se
 rehashea entero. Esa caché es del daemon: quien pueda escribir en ella puede
 cambiar también las imágenes y los binarios. Con el usuario de construcción
-(abajo) la caché es suya, y lo cacheado se rehashea **siempre**: un
+(abajo) la caché es suya, y lo que saca de ella se rehashea **siempre**: un
 constructor comprometido por una imagen no puede envenenar los imports
-siguientes cambiando o renombrando un blob. Una capa dañada después en disco la caza además el
+siguientes cambiando o renombrando un blob. Para no pagarlo en cada import, el
+daemon (root) pasa a una **caché verificada** de solo lectura para el
+constructor lo que usó una construcción correcta, comprobado por sha256 una vez;
+de ahí se lee sin rehashear (abajo). Una capa dañada después en disco la caza además el
 CRC32 del gzip (o el xxhash64 del zstd, si lo lleva) al descomprimirla.
 
 **Capas gzip y zstd.** Las capas `tar+gzip` y `tar+zstd` (las de `docker
@@ -575,11 +578,66 @@ VMM vivos y escribir en los volúmenes.
 | `<root>/build/` | root, 0711 | se atraviesa; no se lista ni se escribe |
 | `<root>/build/<name>.XXXX/` | `kindling-build`, 0700 | el directorio de trabajo, con `request.json` y, para un registro privado, `registry-auth.json` (0600, lo borra al leerlo); la imagen sale en `out/` |
 | `<root>/cache/builder/oci/` | `kindling-build`, 0700 | su caché de blobs, aparte de `cache/oci` (la de los constructores que corren como root, `debian` y `android`: root no escribe en un directorio de un usuario sin privilegios ni se fía de lo que deje) |
+| `<root>/cache/verified/oci/sha256/` | root; directorios 0755, ficheros 0644 | la caché verificada: la lee sin rehashear, no puede escribir, renombrar ni borrar nada |
 
 La primera vez, `cache/builder/oci` enlaza (enlaces duros) los blobs que ya
 hubiera en `cache/oci`: siguen siendo de root y de solo lectura para él, se
-comprueban por sha256 cada vez que se usan y reimportar lo bajado antes no
-baja nada.
+comprueban por sha256 hasta que pasan a la verificada y reimportar lo bajado
+antes no baja nada.
+
+**La caché verificada.** Lo que el constructor saca de su caché se rehashea
+cada vez (1-3 s por GiB). Por eso, al acabar **bien** una construcción, con sus
+procesos ya barridos y el cerrojo de host aún tomado, el daemon lee la lista de
+blobs que usó (`<trabajo>/cache-used`, que deja el constructor; solo cuentan las
+líneas `sha256:<64 hex>`) y cada uno que aún no esté en la verificada lo **copia**
+desde `cache/builder/oci` a un fichero nuevo de root, hasheando lo que copia:
+entra solo si el sha256 es el de su nombre, con un `rename` después del
+`fsync`. El original sale de la caché del constructor; uno que no cuadra se
+borra y no entra. Copiar, y no mover ni enlazar, es a propósito: el inodo nace
+de root, sin ACL, sin otros enlaces duros ni descriptores del constructor, y lo
+hasheado es exactamente lo que queda. No se sigue ningún enlace (ni en la lista
+ni en los blobs ni en los directorios de su caché); un blob tiene que ser
+regular y suyo, o de root y legible para todos (los enlazados de `cache/oci`).
+Su caché se abre una vez como `os.Root` y todo (listar, abrir, borrar) va
+relativo a ese directorio: aunque cambiara `cache/oci` por un enlace a `/etc`
+después de mirarlo, no se sale de ella. Si el barrido de sus procesos no acaba
+limpio (alguno sigue volviendo), su caché no se toca: ni se promueve ni se barre.
+Tampoco llena el disco del host a través de root: un fichero disperso no se
+copia, y en una pasada no se copian más bytes que `daemon.build_cache_max_gib`;
+lo que no cabe se queda en la suya, sin verificar.
+
+El cliente OCI del constructor (`KLING_VERIFIED_CACHE_DIR`) mira primero ahí y
+usa un blob sin rehashear solo si el fichero, `sha256/`, `oci/` y `verified/`
+son de root sin escritura para grupo ni otros, sin enlaces, y el fichero es
+regular con el tamaño del manifiesto; si no, como si no estuviera: se baja a su
+caché y se rehashea como antes. Lo suyo se sigue rehasheando siempre.
+
+Medido en el lab (amd64, caché caliente): el `Pull` de `postgres:17-alpine`
+(111 MiB comprimidos) pasa de 0,27 s rehasheando a menos de 1 ms desde la
+verificada, y el de `timescale/timescaledb:latest-pg16` (575 MiB) de 0,78 s a
+menos de 1 ms. En el import entero se nota menos, porque el rehash va en
+paralelo con la descompresión: `postgres:17-alpine` baja de 3,6 a 3,3 s (mediana
+de 6); en timescaledb (unos 10 s) queda dentro del ruido. La primera
+construcción que verifica paga una copia: 0,4 s y 2 s.
+
+**Las dos cachés tienen tope.** Después de cada construcción sin root el daemon
+las barre: fuera los `.part` y lo que no es un blob, lo que lleva más de
+`daemon.build_cache_max_days` días sin usarse (30 por defecto; cada uso pone la
+fecha a un blob verificado) y, si entre las dos pasan de
+`daemon.build_cache_max_gib` (20 por defecto), lo más viejo, **primero lo no
+verificado** (su fecha la pone el constructor). Lo que acaba de usar la
+construcción no se toca mientras quepa en el tope: la lista la escribe el
+constructor, y uno comprometido no mantiene así la verificada por encima de él.
+Como mucho 1048576 GiB y 36500 días (más desbordaría); por entorno, un valor
+mayor se avisa y queda el de por defecto. `KLING_BUILD_CACHE_MAX_GIB` y
+`KLING_BUILD_CACHE_MAX_DAYS` mandan sobre el fichero; se leen en cada
+construcción y `GET /info` (y `kling doctor`) dice los efectivos. `cache/oci`, la
+de los constructores que corren como root, no se barre todavía.
+
+```sh
+kling config set daemon.build_cache_max_gib 50
+kling config set daemon.build_cache_max_days 7
+```
 
 El usuario tiene que ser **de sistema y dedicado** (uid ≤ `SYS_UID_MAX`): al
 acabar cada construcción el daemon mata todos sus procesos, y con varios

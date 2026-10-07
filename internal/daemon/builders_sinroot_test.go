@@ -197,7 +197,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	u := &usuarioConstructor{Nombre: "kindling-build", UID: 990, GID: 989}
 	req := api.BuildImageRequest{Name: "pg", Builder: "oci"}
 	cmd := comandoConstructor(context.Background(), "/bin/kling", []string{"builder", "oci"}, "/var/lib/kindling",
-		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder")
+		"/var/lib/kindling/build/pg.1", req, true, u, "/var/lib/kindling/cache/builder", "/var/lib/kindling/cache/verified")
 
 	c := cmd.SysProcAttr.Credential
 	if c == nil || c.Uid != 990 || c.Gid != 989 || c.Groups == nil || len(c.Groups) != 0 || c.NoSetGroups {
@@ -205,7 +205,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	}
 	env := strings.Join(cmd.Env, "\n") + "\n"
 	for _, quiero := range []string{"HOME=/var/lib/kindling/build/pg.1\n", "KLING_OUT_DIR=/var/lib/kindling/build/pg.1/out\n",
-		"KLING_CACHE_DIR=/var/lib/kindling/cache/builder\n", "KLING_BUILD_LIMITS=1\n", "HTTPS_PROXY=http://proxy:3128\n",
+		"KLING_CACHE_DIR=/var/lib/kindling/cache/builder\n", "KLING_VERIFIED_CACHE_DIR=/var/lib/kindling/cache/verified\n", "KLING_BUILD_LIMITS=1\n", "HTTPS_PROXY=http://proxy:3128\n",
 		"KLING_IMAGE_NAME=pg\n"} {
 		if !strings.Contains(env, quiero) {
 			t.Fatalf("falta %q en el entorno:\n%s", quiero, env)
@@ -219,7 +219,7 @@ func TestComandoConstructorSinRoot(t *testing.T) {
 	}
 
 	// Sin usuario: el entorno del daemon y su identidad, como siempre.
-	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "")
+	cmd = comandoConstructor(context.Background(), "/bin/kling", nil, "/r", "/r/build/pg.1", req, false, nil, "", "")
 	if cmd.SysProcAttr != nil || !strings.Contains(strings.Join(cmd.Env, "\n"), "secreto-del-daemon") ||
 		strings.Contains(strings.Join(cmd.Env, "\n"), "KLING_OUT_DIR") {
 		t.Fatalf("sin usuario: %+v %v", cmd.SysProcAttr, cmd.Env)
@@ -238,7 +238,7 @@ func TestConstructorCredencialDeVerdad(t *testing.T) {
 	os.Chmod(work, 0o755)
 	script := `grep -E "^(Uid|Gid|Groups|CapEff):" /proc/self/status; true`
 	cmd := comandoConstructor(context.Background(), "/bin/sh", []string{"-c", script},
-		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c")
+		"/r", work, api.BuildImageRequest{Name: "x"}, true, u, "/c", "/v")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
