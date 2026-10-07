@@ -476,6 +476,7 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 // murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
 const errProcesoDesaparecido = "the microVM process disappeared"
 
+// sweep da por failed las máquinas running o pausadas cuyo VMM ya no existe.
 // Devuelve el escaneo de VMMs vivos (liveVMs) que hizo, para que el resto de
 // la vuelta lo reutilice en vez de recorrer /proc otra vez.
 func (m *Manager) sweep() map[string]int {

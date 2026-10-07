@@ -440,9 +440,13 @@ func (s *Server) Listen(ctx context.Context) error {
 	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
 	// que ninguna petición cambie el estado después de la limpieza.
 	<-shutdownDone
-	// Con las peticiones ya drenadas, esta es la última escritura del estado y
-	// nadie va a cambiarlo por detrás. Se espera de verdad: perder la última
-	// transición hace que el arranque siguiente reconstruya algo que no es.
+	// Con las peticiones ya drenadas, esta es la última escritura del estado.
+	// Shutdown se rinde a los 5 s, y una petición lenta (un freeze de varios
+	// GiB) o una operación del vigilante puede seguir en marcha: Close espera
+	// a las operaciones de ciclo de vida en curso antes de cerrar la escritura
+	// (con plazo), y la que acabe aún más tarde escribe su propia foto. Perder
+	// la última transición hace que el arranque siguiente reconstruya algo
+	// que no es.
 	s.mgr.Close()
 	_ = os.Remove(s.socket)
 	return nil

@@ -396,7 +396,24 @@ type Manager struct {
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
-func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
+func (m *Manager) lock(id string) func() { return m.trasCierre(m.lifecycle.tomar(id)) }
+
+// trasCierre envuelve la liberación de un cerrojo de ciclo de vida: si el
+// Manager ya se cerró (persistLoop parado), la operación que acaba escribe
+// ella misma su última foto del estado, que nadie más va a escribir. Solo
+// pasa en el apagado, con una operación que acabó después del plazo de Close;
+// ahí la latencia del disco ya no le quita nada a nadie, y perder la
+// transición sí. Se escribe DESPUÉS de soltar, fuera de m.mu (ver doc.go).
+func (m *Manager) trasCierre(soltar func()) func() {
+	return func() {
+		soltar()
+		select {
+		case <-m.quit:
+			m.writePending()
+		default:
+		}
+	}
+}
 
 // lockUnaVez es lock con una liberación idempotente: la función devuelta se
 // puede llamar varias veces y solo suelta la primera. La usan Run y runFrom,
@@ -410,7 +427,13 @@ func (m *Manager) lockUnaVez(id string) func() {
 }
 
 // tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
-func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
+func (m *Manager) tryLock(id string) (func(), bool) {
+	soltar, ok := m.lifecycle.intentar(id)
+	if !ok {
+		return nil, false
+	}
+	return m.trasCierre(soltar), true
+}
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
@@ -836,6 +859,11 @@ func (m *Manager) persistirYa() {
 	m.writePending()
 }
 
+// cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
+// vida en curso. Un freeze de varios GiB tarda segundos; systemd da 90 s
+// antes del SIGKILL.
+const cierreOperacionesMax = 30 * time.Second
+
 // Close para la escritura de estado tras volcar lo que quede pendiente.
 //
 // Lo llama el daemon en su camino de apagado, y tiene que esperarse: si el
@@ -843,6 +871,15 @@ func (m *Manager) persistirYa() {
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
+		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
+		// escritura del estado ya se cerró, esa transición se pierde y el
+		// arranque siguiente ve una máquina "running" que ya es un volcado.
+		// Con plazo: un apagado no puede quedarse colgado de un volcado que no
+		// termina. Lo que acabe después aún se escribe (ver trasCierre).
+		if !m.lifecycle.esperarLibres(cierreOperacionesMax) {
+			log.Printf("shutdown: lifecycle operations still running after %s; their last state may not be saved", cierreOperacionesMax)
+		}
 		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
 		// agente del invitado, no el estado.
 		m.drainShares(shareDrainWait)
