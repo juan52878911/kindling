@@ -28,6 +28,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Copies of a golden freeze as diff snapshots mirrored in the copy-on-write store: thaw in 0.1–0.2 s, a sleeping copy costs what it changed (Firecracker)
 - `save` and `freeze` squeeze the balloon before dumping, so free memory is not stored
+- A cold-booted machine whose image declares a ready probe squeezes its balloon once when the probe passes, returning boot-time page cache to the host (Firecracker; `KLING_SQUEEZE_ON_READY=0` turns it off)
 - `save` mirrors the golden memory into the copy-on-write store in the background, so the first diff thaw of a copy no longer copies it (10 s with Postgres); thaw events show `store`, `mirror` and `memory` phases
 - Docker images get a full core per vCPU by default
 - A booting machine keeps every vCPU at a full core until its ready probe passes (was: one core until the guest agent answered); `KLING_READY_BOOST=0` restores the old boost, and an explicit `-cpu-pct` gets none (Linux)
