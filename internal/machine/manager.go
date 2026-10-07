@@ -251,6 +251,12 @@ type Manager struct {
 	// para impedir. Se toca bajo mu.
 	pendingMiB int
 
+	// volcandoMiB es el disco que tienen reservado los volcados en curso
+	// (freeze, save, el thaw de un diferencial sin reflink) y que aún no han
+	// escrito: reservarDiscoParaVolcado lo suma a lo que pide cada uno, como
+	// pendingMiB con la memoria. Se toca bajo mu.
+	volcandoMiB int
+
 	// snapPending cuenta, por snapshot dorado, cuántas instancias están
 	// arrancando de él ahora mismo. Sirve a reserveMemory para saber si el
 	// mem.file ya está anclado y cobrar solo la fracción divergente a las copias.
@@ -1945,7 +1951,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 	// Antes de pausar nada: si el volcado no cabe, se dice ahora y la máquina
-	// sigue corriendo como si nada (ver checkDiskParaVolcado).
+	// sigue corriendo como si nada (ver reservarDiscoParaVolcado).
 	// Diferencial (diff_volcado.go): una copia con seguimiento de páginas
 	// sucias vuelca solo lo escrito desde el dorado. Lo que ocupa no se sabe
 	// hasta volcarlo; un cuarto de la RAM es más de lo medido (~100 MiB de 3
@@ -1962,9 +1968,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		necesario /= 4
 	}
-	if err := m.checkDiskParaVolcado(necesario, "freeze"); err != nil {
+	soltarDisco, err := m.reservarDiscoParaVolcado(necesario, "freeze")
+	if err != nil {
 		return nil, err
 	}
+	defer soltarDisco()
 	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)

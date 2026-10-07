@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Simultaneous freezes and saves reserve their disk: they no longer all pass a free-space check that only one of them fits
 - A full copy-on-write store no longer pauses a machine that is in the middle of freezing
 - A network setup that fails halfway no longer leaves its namespace and veth behind until the daemon restarts (Linux)
 - `thaw` goes through memory admission like `run`: a storm of thaws is refused with 507 instead of exhausting the host
