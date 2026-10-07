@@ -254,3 +254,21 @@ func TestCuotaInquilinoComprobar(t *testing.T) {
 		t.Fatalf("mensaje: %v", err)
 	}
 }
+
+// El filtro previo de Start no cuenta a la máquina que se arranca: una created
+// a medias (ya cuenta) se puede reintentar en el tope, como en reclamarParada.
+func TestCuotaInquilinoFiltroPrevioExcluye(t *testing.T) {
+	m := newTestManager(t)
+	m.SetCuotas(cuotasDePrueba(Cuota{Maquinas: 1, MemMiB: SinTope, DiscoMiB: SinTope}))
+	creada := maquinaDe("a", api.StateCreated, 256)
+	if err := m.publicar(creada); err != nil {
+		t.Fatal(err)
+	}
+	pide := UsoCuota{Maquinas: 1, MemMiB: 256}
+	if err := m.comprobarCuota("a", pide); !api.IsTenantQuota(err) {
+		t.Fatalf("contándola: %v", err)
+	}
+	if err := m.comprobarCuotaSin("a", pide, creada.ID); err != nil {
+		t.Fatalf("sin contarla: %v", err)
+	}
+}

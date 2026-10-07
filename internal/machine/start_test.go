@@ -393,3 +393,33 @@ func TestStartCuentaEnLaTelemetria(t *testing.T) {
 		t.Errorf("fallos de start = %d, quería 1 (el VMM que no está)", n)
 	}
 }
+
+// Un start que no cabe en la cuota de su dueño se rechaza antes de reservar
+// memoria: antes pasaba por admitir y reserveMemoryMakingRoom (que aprieta
+// globos ajenos y espera hasta 60 s) para acabar en el 429 de reclamarParada.
+func TestStartSobreCuotaNoReservaMemoria(t *testing.T) {
+	m := newTestManager(t)
+	mc, _ := paradaParaStart(t, m, "5a5a00000000000c")
+	m.mu.Lock()
+	m.byID[mc.ID].Labels = map[string]string{api.LabelOwner: "a"}
+	m.byID[mc.ID].MemMiB = 256
+	m.mu.Unlock()
+	m.SetCuotas(cuotasDePrueba(Cuota{Maquinas: 1, MemMiB: SinTope, DiscoMiB: SinTope}))
+	if err := m.publicar(maquinaDe("a", api.StateRunning, 256)); err != nil {
+		t.Fatal(err)
+	}
+	// El host no tiene sitio: quien llegue a reservar memoria falla con 507,
+	// no con la cuota.
+	t.Setenv("KLING_MIN_FREE_MIB", "0")
+	fingirMemoria(t, 100)
+	_, err := m.Start(context.Background(), mc.ID, nil)
+	if !api.IsTenantQuota(err) {
+		t.Fatalf("Start sobre la cuota = %v; quería el 429 de la cuota antes de reservar memoria", err)
+	}
+	if p := pendiente(m); p != 0 {
+		t.Fatalf("pendingMiB = %d", p)
+	}
+	if got := vivaDe(t, m, mc.ID).State; got != api.StateStopped {
+		t.Fatalf("estado = %s; quería stopped", got)
+	}
+}

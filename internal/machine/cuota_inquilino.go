@@ -149,12 +149,18 @@ func excedeCuota(owner string, c Cuota, lleva, pide UsoCuota) error {
 // comprobarCuota es el filtro previo: ¿le cabe a owner pide con lo que ya
 // tiene? No reserva nada; publicar decide.
 func (m *Manager) comprobarCuota(owner string, pide UsoCuota) error {
+	return m.comprobarCuotaSin(owner, pide, "")
+}
+
+// comprobarCuotaSin es comprobarCuota sin contar la máquina excluir: la que
+// se va a arrancar (Start), que puede contar ya si es una created a medias.
+func (m *Manager) comprobarCuotaSin(owner string, pide UsoCuota, excluir string) error {
 	if _, ok := m.cuotaDe(owner); !ok {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.cuotaExcedidaLocked(owner, pide, "")
+	return m.cuotaExcedidaLocked(owner, pide, excluir)
 }
 
 // publicar mete una máquina recién creada en byID si le cabe a su dueño, en

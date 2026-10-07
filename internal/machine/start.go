@@ -191,6 +191,14 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 		}
 		copies = append(copies, resolvedVolume{path: p, mount: s.Mount, readOnly: true})
 	}
+	// La cuota de su dueño, antes de lo caro: admitir y hacer sitio pueden
+	// apretar los globos de otros inquilinos y esperar hasta 60 s para
+	// acabar en un 429. Es el filtro previo, como en Run; quien decide sigue
+	// siendo reclamarParada. Su propio disco ya contaba y no pide más.
+	if err := m.comprobarCuotaSin(mc.Labels[api.LabelOwner], UsoCuota{
+		Maquinas: 1, MemMiB: memCuota(mc.MemMiB, mc.MemMaxMiB)}, mc.ID); err != nil {
+		return nil, err
+	}
 	// Admisión, como Run: un arranque en frío ocupa lo mismo aquí. Con el
 	// cerrojo de la máquina tomado, como en Thaw (ver allí): un stop o un rm
 	// de esta máquina esperan, acotado, a que se decida su memoria.
