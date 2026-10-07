@@ -287,6 +287,48 @@ func TestBuildOCIRejects(t *testing.T) {
 	}
 }
 
+// Una imagen de un registro privado: con las credenciales que deja el daemon
+// en registry-auth.json se construye, el fichero se borra al leerlo, y la
+// contraseña no sale ni en el log ni en recipe.json; sin ellas, el error dice
+// cómo darlas (y tampoco la lleva).
+func TestBuildOCIRegistroPrivado(t *testing.T) {
+	const pass = "s3cr3t-registry-pass"
+	e := newOCITest(t)
+	e.reg.User, e.reg.Pass = "juan", pass
+	_, idx := e.reg.ImageConfig("amd64", map[string]any{"Entrypoint": []string{"/bin/sh"}}, ocitest.TarGz(alpineLike()))
+	e.reg.Tag("v1", idx)
+	ref := e.reg.Host() + "/priv/app:v1"
+	key, _ := oci.CredentialKey(e.reg.Host())
+	authFile := filepath.Join(e.work, ficheroCredencialesRegistro)
+
+	if _, log, err := e.build("priv", OCISpec{Ref: ref, Arch: "amd64"}); err == nil ||
+		!strings.Contains(err.Error(), "kling registry login "+key) {
+		t.Fatalf("sin credenciales: %v\n%s", err, log)
+	}
+
+	auth, _ := json.Marshal(map[string]oci.Credential{key: {Username: "juan", Password: pass}, "ghcr.io": {Username: "x", Password: "otra"}})
+	os.WriteFile(authFile, auth, 0o600)
+	_, log, err := e.build("priv", OCISpec{Ref: ref, Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	if _, err := os.Lstat(authFile); !os.IsNotExist(err) {
+		t.Fatalf("el constructor no borró %s: %v", ficheroCredencialesRegistro, err)
+	}
+	rec, _ := os.ReadFile(filepath.Join(e.work, "recipe.json"))
+	if strings.Contains(log, pass) || strings.Contains(string(rec), pass) {
+		t.Fatalf("la contraseña salió en el log o en recipe.json:\n%s\n%s", log, rec)
+	}
+
+	// Credenciales malas: el error tampoco las cita.
+	auth, _ = json.Marshal(map[string]oci.Credential{key: {Username: "juan", Password: "mala-" + pass}})
+	os.WriteFile(authFile, auth, 0o600)
+	if _, _, err := e.build("priv2", OCISpec{Ref: ref, Arch: "amd64"}); err == nil ||
+		!strings.Contains(err.Error(), "were refused") || strings.Contains(err.Error(), pass) {
+		t.Fatalf("credenciales malas: %v", err)
+	}
+}
+
 func TestValidateOCI(t *testing.T) {
 	d := "sha256:" + strings.Repeat("a", 64)
 	ok := OCISpec{Ref: "postgres:17-alpine", Arch: "amd64"}

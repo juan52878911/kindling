@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
@@ -150,6 +151,12 @@ func builderOCI(dir string) error { return buildOCI(context.Background(), dir, o
 func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	t0 := time.Now()
 	logf := func(format string, a ...any) { fmt.Fprintf(log, format+"\n", a...) }
+	// Lo primero, y se borra al leerlo: lo que venga después (bajar y parsear
+	// tars hostiles) ya no lo tiene en disco.
+	auth, err := leerCredencialesRegistro(dir)
+	if err != nil {
+		return err
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "request.json"))
 	if err != nil {
 		return err
@@ -215,7 +222,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// Sin privilegios (el daemon nos bajó de root), la caché es nuestra: todo lo
 	// cacheado se rehashea siempre (oci.Client.SiempreRehash).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
-		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0}
+		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
 	tPull := time.Now()
 	digest, err := c.Resolve(ctx, ref)
 	if err != nil {
@@ -428,6 +435,52 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("the image declares volumes %s: without -volume they live in the machine's disk", strings.Join(v, " "))
 	}
 	logf("image %s ready (%s) in %.1f s", req.Name, digest, time.Since(t0).Seconds())
+	return nil
+}
+
+// ficheroCredencialesRegistro es el fichero con las credenciales del registro
+// que deja el daemon en el directorio de trabajo
+// (internal/daemon/registries.go): {"<registro>": {"username", "password"}}.
+const ficheroCredencialesRegistro = "registry-auth.json"
+
+// leerCredencialesRegistro lee y borra el fichero de credenciales, si lo hay.
+// Sin seguir enlaces y solo un fichero regular. Ningún error cita su
+// contenido.
+func leerCredencialesRegistro(dir string) (map[string]oci.Credential, error) {
+	p := filepath.Join(dir, ficheroCredencialesRegistro)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ficheroCredencialesRegistro, err)
+	}
+	defer f.Close()
+	os.Remove(p)
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", ficheroCredencialesRegistro)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ficheroCredencialesRegistro, err)
+	}
+	var m map[string]oci.Credential
+	if json.Unmarshal(b, &m) != nil {
+		return nil, fmt.Errorf("%s is not valid JSON", ficheroCredencialesRegistro)
+	}
+	return m, nil
+}
+
+// soloDe deja de auth solo las credenciales de registry: el daemon ya manda
+// solo esas, y el cliente OCI solo las usa con él, pero no cuesta nada.
+func soloDe(auth map[string]oci.Credential, registry string) map[string]oci.Credential {
+	k, err := oci.CredentialKey(registry)
+	if err != nil {
+		return nil
+	}
+	if c, ok := auth[k]; ok {
+		return map[string]oci.Credential{k: c}
+	}
 	return nil
 }
 

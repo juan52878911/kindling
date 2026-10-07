@@ -129,6 +129,8 @@ func main() {
 		err = cmdTemplate(args)
 	case "image":
 		err = cmdImages(args)
+	case "registry":
+		err = cmdRegistry(args)
 	case "topo":
 		err = cmdTopo(args)
 	case "top":

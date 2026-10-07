@@ -38,6 +38,23 @@ func termiosSet(fd uintptr, t *syscall.Termios) error {
 	return nil
 }
 
+// sinEco apaga el eco de la terminal (para pedir una contraseña) y devuelve
+// cómo dejarla como estaba. Sigue en modo línea: Enter termina.
+func sinEco(fd uintptr) (restore func(), err error) {
+	old, err := termiosGet(fd)
+	if err != nil {
+		return nil, err
+	}
+	t := old
+	t.Lflag &^= syscall.ECHO
+	t.Lflag |= syscall.ICANON | syscall.ECHONL
+	if err := termiosSet(fd, &t); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { _ = termiosSet(fd, &old) }) }, nil
+}
+
 // isTerminal dice si fd es una terminal: la prueba es que acepte TIOCGETA.
 func isTerminal(fd uintptr) bool {
 	_, err := termiosGet(fd)
