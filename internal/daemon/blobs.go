@@ -303,25 +303,30 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := api.BlobPutResult{Name: t.name, Part: t.part, Size: n, Sha256: got}
-	if prev, err := cachedSHA256(t.path); err == nil {
-		if prev == got {
-			// Idéntico: no se toca, y así no importa que esté en uso.
-			_ = os.Remove(tmp)
-			res.Unchanged = true
-			writeJSON(w, http.StatusOK, res)
-			return
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	// El sha256 de lo que hay se calcula aquí, fuera del cerrojo: con una
+	// imagen sin sidecar son gigas que leer, y dentro bloquearían todos los
+	// arranques. Dentro se vuelve a pedir y sale de la caché.
+	if _, err := cachedSHA256(t.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(tmp)
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	// La comprobación y el rename con las imágenes quietas: un run que
-	// llegara entre las dos arrancaría con el contenido nuevo de una imagen
-	// que se acaba de ver que no se podía cambiar. Lo que había se vuelve a
-	// mirar dentro: otra subida pudo dejarlo mientras tanto.
+	// La comparación, la comprobación y el rename con las imágenes quietas:
+	// un run que llegara entre medias arrancaría con el contenido nuevo de una
+	// imagen que se acaba de ver que no se podía cambiar. Y lo que había se
+	// mira dentro: otra subida pudo cambiarlo mientras tanto, y contestar
+	// "idéntico" por lo que había antes sería mentir.
 	status := http.StatusInternalServerError
 	err = s.mgr.ConImagenesQuietas(func() error {
+		prev, perr := cachedSHA256(t.path)
+		switch {
+		case perr == nil && prev == got:
+			// Idéntico: no se toca, y así no importa que esté en uso.
+			res.Unchanged = true
+			return nil
+		case perr != nil && !errors.Is(perr, os.ErrNotExist):
+			return perr
+		}
 		_, lerr := os.Lstat(t.path)
 		// Una capa sin receta va sobre la base por defecto: ponérsela ahora
 		// puede cambiarle la base, así que cuenta como sustituir.
@@ -343,6 +348,11 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = os.Remove(tmp)
 		fail(w, status, err)
+		return
+	}
+	if res.Unchanged {
+		_ = os.Remove(tmp)
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
 	// En Linux el VMM corre sin privilegios y tiene que poder leer la imagen.

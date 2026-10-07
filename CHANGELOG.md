@@ -57,6 +57,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `PUT /images/{name}/blob` decides "identical, 200 unchanged" with cold boots held, so a concurrent upload can no longer make it answer for content that is gone
 - Two jailed machines booting at once on a fresh root no longer fail with "Failed to canonicalize path .../jails"
 - The daemon no longer reuses a kept connection to a stopped or removed machine's address: the next machine on that IP (`kling start` keeps it) answered the first exec or the next stop with a connection reset
 - Two identical image builds at once (two `kling run -image` of the same reference) build once instead of replacing the image under the first one's machine
