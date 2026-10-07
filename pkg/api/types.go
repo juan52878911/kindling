@@ -235,6 +235,16 @@ type WakePhases struct {
 	WaitMS float64 `json:"wait_ms"`
 	// CheckMS es comprobar que no quede ya un VMM vivo de esta máquina.
 	CheckMS float64 `json:"check_ms"`
+	// StoreMS es montar el almacén de copia al escribir para construir la
+	// memoria de una copia congelada en diferencial (casi siempre ya lo está).
+	StoreMS float64 `json:"store_ms,omitempty"`
+	// MirrorMS es copiar al almacén el espejo de la memoria del dorado, o
+	// esperar al que se copia tras el commit: solo el primer thaw de las
+	// copias de un dorado, y solo si ese espejo aún no estaba hecho.
+	MirrorMS float64 `json:"mirror_ms,omitempty"`
+	// MemoryMS es el resto de construir esa memoria: clonar el espejo (o
+	// copiar la base, sin almacén) y escribirle encima el diferencial.
+	MemoryMS float64 `json:"memory_ms,omitempty"`
 	// NetMS es montar (o comprobar) el namespace, el veth, el tap y las reglas.
 	NetMS float64 `json:"net_ms"`
 	// SpawnMS es lanzar el VMM (firecracker o jailer) y preparar su jaula.

@@ -2842,11 +2842,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.baseDiffValida(mc, base); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
-		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base)
+		var tm tiemposMemoria
+		full, err := m.prepararMemoriaDesdeDiff(ctx, mc, dir, base, &tm)
 		if err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 		}
 		memPath = full
+		crono.marcaMemoria(tm)
 	}
 	// El mem.full de este despertar, si algo falla antes de abortar (que lo
 	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.

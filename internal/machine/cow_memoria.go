@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -45,11 +46,28 @@ import (
 // overlay (.ext4): base() y barrer solo tocan los de su sufijo.
 const sufijoBaseMemoria = ".mem"
 
+// tiemposMemoria es lo que costó preparar la memoria de un despertar en el
+// almacén, para el desglose del evento de thaw (notaFases): montar el almacén
+// y, si aún no estaba, copiar el espejo del dorado (o esperar al que se copia
+// tras el commit, espejarMemoria).
+type tiemposMemoria struct {
+	almacen, espejo time.Duration
+}
+
 // baseMemoria devuelve el espejo del mem.file src del dorado snap dentro del
-// almacén, creándolo la primera vez. Con a.mu tomado. Mismo contrato que
-// base(): a un temporal y renombrado, para que un espejo a medias no pueda
-// quedar con su nombre definitivo.
-func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string) (string, error) {
+// almacén, creándolo si aún no está. Con a.mu tomado, que SUELTA mientras
+// copia: son segundos con un dorado de GiB (10 s medidos con Postgres), y con
+// el candado tomado todo lo demás del almacén —un run -from, otro thaw— se
+// quedaba esperando. Si otro ya lo está copiando (el espejo de después del
+// commit, o un thaw a la vez), se espera a ese en vez de copiar dos veces.
+// Mismo contrato que base(): a un temporal y renombrado, para que un espejo a
+// medias no pueda quedar con su nombre definitivo. t, si no es nil, suma lo
+// que se tardó.
+func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string, t *tiemposMemoria) (string, error) {
+	if t != nil {
+		t0 := time.Now()
+		defer func() { t.espejo += time.Since(t0) }()
+	}
 	if err := nombreSeguro(snap); err != nil {
 		return "", err
 	}
@@ -59,8 +77,24 @@ func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string) (string,
 	}
 	dir := a.dirBases(snap)
 	ruta := filepath.Join(dir, claveBase(fi)+sufijoBaseMemoria)
-	if _, err := os.Lstat(ruta); err == nil {
-		return ruta, nil
+	for {
+		if _, err := os.Lstat(ruta); err == nil {
+			return ruta, nil
+		}
+		hecho := a.espejando[ruta]
+		if hecho == nil {
+			break
+		}
+		a.mu.Unlock()
+		select {
+		case <-hecho:
+			a.mu.Lock()
+		case <-ctx.Done():
+			a.mu.Lock()
+			return "", ctx.Err()
+		}
+		// Si aquel falló, la vuelta siguiente no ve ni espejo ni copia en
+		// curso, y copia este.
 	}
 	// La base entera, más lo que debe quedar para las instancias.
 	if _, libre, err := a.libreDentro(); err == nil && libre < allocatedBytes(src)+libreMinimaAlmacen {
@@ -71,7 +105,17 @@ func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string) (string,
 	}
 	tmp := filepath.Join(dir, ".tmp-"+filepath.Base(ruta))
 	_ = os.Remove(tmp)
-	if err := a.copiar(ctx, src, tmp); err != nil {
+	hecho := make(chan struct{})
+	if a.espejando == nil {
+		a.espejando = map[string]chan struct{}{}
+	}
+	a.espejando[ruta] = hecho
+	a.mu.Unlock()
+	err = a.copiar(ctx, src, tmp)
+	a.mu.Lock()
+	delete(a.espejando, ruta)
+	close(hecho)
+	if err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("mirroring the memory of %s into the store: %w", snap, err)
 	}
@@ -81,10 +125,11 @@ func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string) (string,
 		return "", err
 	}
 	// Los espejos de versiones anteriores de este dorado sobran; los .ext4
-	// son del overlay y no se tocan.
+	// son del overlay y no se tocan, ni el temporal de otro que aún copia.
 	if entradas, err := os.ReadDir(dir); err == nil {
 		for _, e := range entradas {
-			if e.Name() != filepath.Base(ruta) && strings.HasSuffix(e.Name(), sufijoBaseMemoria) {
+			if e.Name() != filepath.Base(ruta) && strings.HasSuffix(e.Name(), sufijoBaseMemoria) &&
+				!a.espejoEnCurso(dir, e.Name()) {
 				_ = os.Remove(filepath.Join(dir, e.Name()))
 			}
 		}
@@ -92,16 +137,46 @@ func (a *almacenCoW) baseMemoria(ctx context.Context, snap, src string) (string,
 	return ruta, nil
 }
 
+// espejoEnCurso dice si nombre, dentro de dir (bases/<snap>), es el temporal
+// de un espejo que alguien está copiando ahora mismo sin a.mu: ni barrer ni
+// la limpieza de versiones viejas deben borrárselo. Con a.mu tomado.
+func (a *almacenCoW) espejoEnCurso(dir, nombre string) bool {
+	if !strings.HasPrefix(nombre, ".tmp-") {
+		return false
+	}
+	return a.espejando[filepath.Join(dir, strings.TrimPrefix(nombre, ".tmp-"))] != nil
+}
+
+// espejarMemoria deja hecho el espejo del mem.file src del dorado snap, sin
+// que nadie lo pida todavía: lo llama el commit en segundo plano
+// (Manager.espejarMemoriaDorado), para que el primer thaw de una copia
+// congelada en diferencial no pague la copia entera. Si el almacén aún no
+// existe, lo crea y lo monta, como haría el primer run -from.
+func (a *almacenCoW) espejarMemoria(ctx context.Context, snap, src string, gib int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.preparar(ctx, gib); err != nil {
+		return err
+	}
+	_, err := a.baseMemoria(ctx, snap, src, nil)
+	return err
+}
+
 // memoriaInstancia deja en el almacén la memoria completa de la copia id:
 // el espejo del mem.file src del dorado snap clonado y con el diferencial
 // diff escrito encima. Devuelve su ruta, ya legible por el VMM.
-func (a *almacenCoW) memoriaInstancia(ctx context.Context, snap, src, diff, id string, gib int) (string, error) {
+func (a *almacenCoW) memoriaInstancia(ctx context.Context, snap, src, diff, id string, gib int, t *tiemposMemoria) (string, error) {
 	if err := nombreSeguro(id); err != nil {
 		return "", err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.preparar(ctx, gib); err != nil {
+	t0 := time.Now()
+	err := a.preparar(ctx, gib)
+	if t != nil {
+		t.almacen += time.Since(t0)
+	}
+	if err != nil {
 		return "", err
 	}
 	// El diff se escribe entero sobre el clon: son los únicos bloques que el
@@ -109,7 +184,7 @@ func (a *almacenCoW) memoriaInstancia(ctx context.Context, snap, src, diff, id s
 	if _, libre, err := a.libreDentro(); err == nil && libre < allocatedBytes(diff)+libreMinimaAlmacen {
 		return "", &errAlmacenLleno{libre: libre}
 	}
-	base, err := a.baseMemoria(ctx, snap, src)
+	base, err := a.baseMemoria(ctx, snap, src, t)
 	if err != nil {
 		return "", err
 	}
@@ -200,13 +275,14 @@ func (a *almacenCoW) borrarMemoriaInstancia(id string) {
 // memoria completa (base + diff) de la copia construida en el almacén, y
 // devuelve esa ruta; nil error y "" si el almacén no está en uso. Cualquier
 // fallo del almacén se dice y devuelve "", para que quien llama siga por el
-// camino de siempre.
-func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff string) string {
+// camino de siempre. t, si no es nil, suma lo que costaron el almacén y el
+// espejo.
+func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff string, t *tiemposMemoria) string {
 	if m.alm == nil || m.cow.actual() != cowModoStore {
 		return ""
 	}
 	snap := filepath.Base(filepath.Dir(base))
-	ruta, err := m.alm.memoriaInstancia(ctx, snap, base, diff, id, m.cow.gibs())
+	ruta, err := m.alm.memoriaInstancia(ctx, snap, base, diff, id, m.cow.gibs(), t)
 	if err == nil {
 		enlace := filepath.Join(dir, memFull)
 		_ = os.Remove(enlace)
@@ -217,6 +293,39 @@ func (m *Manager) memoriaEnAlmacen(ctx context.Context, id, dir, base, diff stri
 	}
 	log.Printf("warning: copy-on-write store: %v; building the memory of %s in the data root instead", err, shortID(id))
 	return ""
+}
+
+// espejarMemoriaDorado copia en segundo plano, tras el commit del dorado name,
+// el espejo de su memoria en el almacén (espejarMemoria). Sin esto lo copiaba
+// el PRIMER thaw de una copia congelada en diferencial, con quien la despierta
+// esperando: 10 s medidos con un dorado de Postgres. Solo si las copias se
+// congelan en diferencial y el almacén está en uso; si algo falla, el thaw lo
+// sigue haciendo como antes. Se cancela al cerrar el Manager: lo que quede a
+// medias es un temporal que barrer recoge al arrancar.
+func (m *Manager) espejarMemoriaDorado(name string) {
+	if m.alm == nil || m.cow.actual() != cowModoStore || !congelarEnDiff() || isClosed(m.quit) {
+		return
+	}
+	src := filepath.Join(m.snapDir(name), "mem.file")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-m.quit:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+	go func() {
+		defer cancel()
+		t0 := time.Now()
+		if err := m.alm.espejarMemoria(ctx, name, src, m.cow.gibs()); err != nil {
+			if ctx.Err() == nil {
+				log.Printf("warning: copy-on-write store: mirroring the memory of %s: %v; the first thaw of a copy will do it", name, err)
+			}
+			return
+		}
+		log.Printf("copy-on-write store: memory of %s mirrored in %d ms", name, time.Since(t0).Milliseconds())
+	}()
 }
 
 // borrarMemoriaAlmacen es borrarMemoriaInstancia desde el Manager (nil sin

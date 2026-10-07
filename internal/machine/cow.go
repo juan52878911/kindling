@@ -544,6 +544,11 @@ type almacenCoW struct {
 	limitar       func(d, overlay string, bytes int64) error
 	quitarDir     func(d string) error
 	cuota         string // lo que detectó detectarCuota al montar
+
+	// espejando son los espejos de memoria que alguien copia ahora mismo sin
+	// a.mu (baseMemoria): la ruta definitiva y un canal que se cierra al
+	// acabar, bien o mal.
+	espejando map[string]chan struct{}
 }
 
 // holguraCuota es lo que se deja por encima del tamaño lógico del overlay: el
@@ -1176,7 +1181,7 @@ func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado, memoriaDor
 		}
 		hijos, _ := os.ReadDir(dir)
 		for _, h := range hijos {
-			if h.Name() != vigente && h.Name() != vigenteMem {
+			if h.Name() != vigente && h.Name() != vigenteMem && !a.espejoEnCurso(dir, h.Name()) {
 				_ = os.Remove(filepath.Join(dir, h.Name()))
 			}
 		}
