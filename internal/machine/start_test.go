@@ -326,3 +326,34 @@ func TestStartEsperaAUnaSustitucionDeSuImagen(t *testing.T) {
 		t.Fatalf("la reserva de la imagen quedó colgada: %v %d", m.arrancando, m.arrancandoTotal)
 	}
 }
+
+// Parar y arrancar olvidan lo listo del arranque anterior: GET /machines
+// decía "stopped ready" y, recién arrancada, "running ready" mientras el
+// invitado aún arrancaba (y un exec en ese rato fallaba).
+func TestStopYStartOlvidanLoListo(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	m.priv = &Privileges{}
+	mc := congeladaParaThaw(t, m, "5a5a00000000000b", 64)
+	m.anotarListo(mc.ID, api.ReadyYes)
+	out, err := m.Stop(mc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Ready != api.ReadyUnknown || vivaDe(t, m, mc.ID).Ready != api.ReadyUnknown {
+		t.Fatalf("tras parar: ready %q", out.Ready)
+	}
+
+	m2 := newTestManager(t)
+	m2.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
+	p, _ := paradaParaStart(t, m2, "5a5a00000000000c")
+	m2.mu.Lock()
+	m2.byID[p.ID].Ready = api.ReadyYes // de un daemon anterior a esto
+	m2.mu.Unlock()
+	if _, err := m2.Start(context.Background(), p.ID, nil); err == nil {
+		t.Fatal("Start sin VMM no falló")
+	}
+	if got := vivaDe(t, m2, p.ID).Ready; got != api.ReadyUnknown {
+		t.Fatalf("tras arrancar: ready %q", got)
+	}
+}

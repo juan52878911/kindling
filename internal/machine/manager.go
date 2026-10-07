@@ -3382,6 +3382,9 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	live.PID = 0
 	live.Forwards = nil
 	live.StoppedAt = &now
+	// Una parada no está lista de nada: "stopped ready" se leía como que lo
+	// estaría al arrancarla.
+	live.Ready = api.ReadyUnknown
 	live.FrozenAt = nil
 	live.DiffBase = ""
 	live.MemShared = false

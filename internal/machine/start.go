@@ -77,6 +77,10 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		}
 	}
 	live.State = api.StateCreated
+	// Lo listo era del arranque anterior: hasta que el agente nuevo conteste,
+	// no se sabe (como en Run). Si no, GET /machines decía "ready" mientras
+	// el invitado aún arrancaba, y un exec en ese rato fallaba.
+	live.Ready = api.ReadyUnknown
 	m.persist()
 	return vols, nil
 }
