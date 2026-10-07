@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -152,5 +154,65 @@ func TestInterpretarGanchosCuerpoRaro(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "not JSON") {
 		t.Errorf("sin aviso: %q", buf)
+	}
+}
+
+// Una tanda pendiente que no se pudo lanzar era de esa restauración: tras
+// stop + start (en frío) WaitReady no la arrastra ni lanza un /hooks de copia
+// a un invitado recién arrancado. Antes solo la quitaban rm, kling machine
+// hooks u otra restauración.
+func TestGanchosPendientesNoSobrevivenAParar(t *testing.T) {
+	a := &agenteListo{ganchos: true, listoEn: 1}
+	srv := httptest.NewServer(a)
+	t.Cleanup(srv.Close)
+	m := newTestManager(t)
+	m.bus = events.New()
+	m.priv = &Privileges{}
+	id := "abcdef0123456789"
+	m.addForTest(id)
+	enMarcha := func() {
+		m.mu.Lock()
+		m.byID[id].State = api.StateRunning
+		m.byID[id].Forwards = map[string]string{"8080": strings.TrimPrefix(srv.URL, "http://")}
+		m.mu.Unlock()
+	}
+	enMarcha()
+	var lanzadas atomic.Int32
+	m.pruebasGanchos = func(ctx context.Context, id, kind string) (api.GuestReady, error) {
+		lanzadas.Add(1)
+		return api.GuestReady{}, errors.New("guest answered 500 to /hooks")
+	}
+	m.ganchosPendientes.Store(id, &ganchosPendientes{kind: api.ResyncInstance})
+	if _, err := m.WaitReady(context.Background(), id, OpcionesListo{Plazo: 5 * time.Second}); err == nil ||
+		!strings.Contains(err.Error(), "resync failed") {
+		t.Fatalf("antes de parar: %v", err)
+	}
+	if _, err := m.Stop(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.reclamarParada(id); err != nil {
+		t.Fatal(err)
+	}
+	enMarcha()
+	antes := lanzadas.Load()
+	res, err := m.WaitReady(context.Background(), id, OpcionesListo{Plazo: 5 * time.Second})
+	if err != nil || res.Ready != api.ReadyYes || (res.Guest != nil && res.Guest.Hooks == api.HooksFailed) {
+		t.Fatalf("tras stop + start: %+v, %v", res, err)
+	}
+	if n := lanzadas.Load() - antes; n != 0 {
+		t.Fatalf("tras stop + start se lanzaron %d tandas de ganchos de copia", n)
+	}
+
+	// Una que se paró sola (sin Stop, p. ej. el VMM murió): la quita el
+	// arranque.
+	m.ganchosPendientes.Store(id, &ganchosPendientes{kind: api.ResyncInstance})
+	m.mu.Lock()
+	m.byID[id].State, m.byID[id].PID = api.StateStopped, 0
+	m.mu.Unlock()
+	if _, err := m.reclamarParada(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.ganchosPendientes.Load(id); ok {
+		t.Fatal("el arranque en frío heredó la tanda pendiente")
 	}
 }

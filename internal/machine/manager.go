@@ -3410,6 +3410,9 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	// Una tanda de ganchos pendiente era de la restauración que acaba de
+	// parar: el siguiente arranque es en frío y no la hereda.
+	m.ganchosPendientes.Delete(mc.ID)
 	m.invalidarSesiones(mc.ID, "stopped")
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name})

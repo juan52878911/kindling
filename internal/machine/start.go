@@ -88,6 +88,10 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 	// no se sabe (como en Run). Si no, GET /machines decía "ready" mientras
 	// el invitado aún arrancaba, y un exec en ese rato fallaba.
 	live.Ready = api.ReadyUnknown
+	// Ni una tanda de ganchos pendiente de una restauración anterior (una que
+	// murió sola, sin pasar por Stop): este arranque es en frío, y lanzarla
+	// mandaría un /hooks de copia a un invitado recién arrancado.
+	m.ganchosPendientes.Delete(id)
 	m.persist()
 	return vols, nil
 }
