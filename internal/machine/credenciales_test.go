@@ -748,3 +748,31 @@ func (e escritorSeguro) Write(p []byte) (int, error) {
 	defer e.mu.Unlock()
 	return e.b.Write(p)
 }
+
+// Un servicio de imagen lee su entorno al arrancar: el marcador de cada
+// credencial tiene que ir en él, sin tocar el entorno que dio quien arranca
+// (de ahí salen las claves que se le pedirán en el siguiente start).
+func TestEntornoConMarcadores(t *testing.T) {
+	env := map[string]string{"A": "1", "LLM_KEY": "lo-que-dio-alguien"}
+	creds := []credproxy.Credential{
+		{Env: "LLM_KEY", Placeholder: "kling-cred-uno"},
+		{Env: "OTRA", Placeholder: "kling-cred-dos"},
+		{Env: "", Placeholder: "kling-cred-sin-variable"},
+	}
+	got := entornoConMarcadores(env, creds)
+	want := map[string]string{"A": "1", "LLM_KEY": "kling-cred-uno", "OTRA": "kling-cred-dos"}
+	if len(got) != len(want) {
+		t.Fatalf("entorno = %v, quería %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, quería %q", k, got[k], v)
+		}
+	}
+	if env["LLM_KEY"] != "lo-que-dio-alguien" || len(env) != 2 {
+		t.Errorf("entornoConMarcadores cambió el entorno de entrada: %v", env)
+	}
+	if got := entornoConMarcadores(env, nil); len(got) != 2 {
+		t.Errorf("sin credenciales el entorno no cambia: %v", got)
+	}
+}

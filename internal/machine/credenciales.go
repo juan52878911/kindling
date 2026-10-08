@@ -547,6 +547,29 @@ func (m *Manager) EnvCredenciales(id string) []string {
 	return env
 }
 
+// entornoConMarcadores es el entorno con el que arranca una máquina: el que
+// dio quien la arranca más VAR=marcador por cada credencial suya. El marcador
+// no es un secreto (la capacidad es estar en la red de la máquina), así que
+// puede ir en el entorno de la máquina como cualquier otra variable. Pisa a
+// una variable del mismo nombre, como en conMarcadores: esa variable es de la
+// credencial. env no se toca: sus claves son las que se guardan (EnvKeys) y
+// las de las credenciales no se le piden a nadie en el siguiente start.
+func entornoConMarcadores(env map[string]string, creds []credproxy.Credential) map[string]string {
+	if len(creds) == 0 {
+		return env
+	}
+	out := make(map[string]string, len(env)+len(creds))
+	for k, v := range env {
+		out[k] = v
+	}
+	for _, cr := range creds {
+		if cr.Env != "" && cr.Placeholder != "" {
+			out[cr.Env] = cr.Placeholder
+		}
+	}
+	return out
+}
+
 // ponerMarcadoresMMDS deja en MMDS (clave "env") el marcador de cada
 // credencial. PATCH fusiona con lo que otro inyectara antes; Firecracker lo
 // rechaza si el almacén aún no existe, y entonces se crea con PUT.
