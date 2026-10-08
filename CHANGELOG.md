@@ -45,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Writing an image's ext4 is 2.3–3.7× faster: one copy buffer for the whole image instead of 1 MiB per file (27 GB of garbage for `node:22`), data blocks written in the background while the next ones are read, and buffered tar reads; byte-identical output. `kling image import -replace` of `node:22-bookworm` goes from 7.0 to 4.2 s, `golang:1.23-bookworm` from 5.9 to 3.2 s, `postgres:17` from 3.3 to 2.5 s
 - Layers are decompressed by `kling-unpack` when it is installed (`rust/kling-unpack`, a static Rust binary outside the Go core: zlib-rs for gzip, libzstd for zstd, same 128 MiB zstd window): 2.2× faster gzip and 3× faster zstd than Go; `node:22-bookworm` imports in 7.1 s instead of 8.3 s and `postgres:17-alpine` in 2.4 s instead of 3.4 s with a warm blob cache. Without it, or with `KLING_UNPACK=0`, Go decompresses as before. `make unpack` builds it, `make deploy` installs it if built
 - `save`/`commit` hash the golden overlay as a sha256 tree of 4 MiB chunks, in parallel and without reading holes: the digest step went from 1.4 s to 25 ms for a Redis golden. It is stored in `rootfs_digest`, so `meta.json` is now schema 2; older goldens keep their plain `rootfs_sha256` and still verify, and an older kling refuses schema-2 goldens by name instead of calling them corrupt
 - A machine made from a snapshot reports the snapshot's writable disk size in `disk_mib` (it was left out)

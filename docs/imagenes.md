@@ -420,7 +420,27 @@ vueltas de cada uno):
 | `kling image import node:22-bookworm -replace` | 8,3 s (descarga y descompresión 4,1 s) | 7,1 s (2,7 s) |
 | `kling image import postgres:17-alpine -replace` | 3,4 s (2,6 s) | 2,4 s (1,7 s) |
 
-Ahora, en `node:22`, lo que más pesa es escribir el ext4 (4 s).
+Escribir el ext4, que después de esto era lo que más pesaba (4 s en
+`node:22`), bajó a ~1 s el mismo día: el escritor (`internal/ext4`) creaba
+un búfer de 1 MiB por fichero (27 GB de basura en los 27 000 ficheros de
+`node:22`, y el recolector se llevaba la mitad del tiempo); ahora usa uno
+para toda la imagen, escribe los bloques de fondo mientras lee los
+siguientes y lee el tar con búfer. La imagen sale idéntica byte a byte.
+Medido en el lab (`import -replace`, caché caliente, mediana de 3, el
+binario de `main` frente al nuevo, los dos con `kling-unpack`):
+
+| | antes | ahora | ext4 antes → ahora |
+|---|---|---|---|
+| `node:22-bookworm` | 7,0 s | 4,2 s | 3,9 → 1,1 s |
+| `golang:1.23-bookworm` | 5,9 s | 3,2 s | 3,7 → 1,0 s |
+| `timescale/timescaledb:latest-pg16` | 6,8 s | 6,0 s | 3,1 → 1,6 s |
+| `postgres:17` | 3,3 s | 2,5 s | 1,4 → 0,5 s |
+| `eclipse-temurin:21-jdk` | 3,4 s | 2,5 s | 1,4 → 0,6 s |
+| `grafana/grafana:11.3.0` | 3,0 s | 2,3 s | 1,4 → 0,6 s |
+| `mariadb:11` | 2,6 s | 1,9 s | 1,0 → 0,4 s |
+| `nginx:1.27` | 2,0 s | 1,5 s | 0,7 → 0,2 s |
+| `python:3.12-slim` | 1,8 s | 1,4 s | 0,6 → 0,2 s |
+| `alpine:3.20` | 1,0 s | 0,9 s | — |
 
 ### Imágenes grandes: RAM, CPU y disco
 

@@ -2,6 +2,7 @@ package ext4
 
 import (
 	"archive/tar"
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -191,7 +192,10 @@ func TarStream(open func() (io.ReadCloser, error)) Stream {
 			return err
 		}
 		defer rc.Close()
-		tr := tar.NewReader(rc)
+		// Con búfer: sin él, cada cabecera (512 bytes) y cada fichero
+		// pequeño era una lectura al sistema. Aquí se leen los datos
+		// enteros, así que no se pierde el Seek con el que AddTar salta.
+		tr := tar.NewReader(bufio.NewReaderSize(rc, 1<<20))
 		for idx := 0; ; idx++ {
 			h, err := tr.Next()
 			if errors.Is(err, io.EOF) {
