@@ -80,6 +80,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A Docker image's supervised service now sees the placeholder of a `machine credential`: `kling start` puts each credential's `VAR=placeholder` in the machine environment the service reads at boot (it only reached MCP sessions before), and the credential's variable is not asked for on the next start
 - A registry whose certificate can't be verified fails at once (no 2 s retry) and says how to trust its CA (`SSL_CERT_FILE` for the daemon)
 - macOS: `make install` also installs the Linux `kling-guest` that `kling image import` puts in images (in `lib/` of the data root, no sudo), `kling upgrade` updates it, and the error without it says what to do on a Mac
 - Short socket links in `/tmp/kling-<uid>` whose socket is gone are swept when a new one is made, instead of piling up

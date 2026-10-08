@@ -144,6 +144,15 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	if err != nil {
 		return nil, err
 	}
+	// El servicio de una imagen lee su entorno UNA vez, al arrancar (ver
+	// pkg/guest/machine_env.go), y los marcadores de las credenciales se
+	// reentregan después, por otra clave de MMDS que solo usa el puente MCP:
+	// sin esto, un servicio con `machine credential` nunca veía su variable.
+	creds, err := m.cargarCredenciales(mc.ID)
+	if err != nil {
+		return nil, fmt.Errorf("machine %q can't be started: reading its credentials: %w", mc.Name, err)
+	}
+	bootEnv := entornoConMarcadores(env, creds)
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
 	}
@@ -298,7 +307,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	start := time.Now()
 	m.persistirYa()
 	pid, err = m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg,
-		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), env)
+		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv)
 	if err != nil {
 		return devolver(err)
 	}
@@ -371,8 +380,8 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	m.vigilarListo(mc.ID, nil)
 	m.olvidarAgente(mc.ID)
 	m.conocerAgente(mc.ID)
-	if len(env) > 0 {
-		m.retirarEntornoMMDS(mc.ID, mc.Name, env)
+	if len(bootEnv) > 0 {
+		m.retirarEntornoMMDS(mc.ID, mc.Name, bootEnv)
 	}
 	keys := ""
 	if len(env) > 0 {

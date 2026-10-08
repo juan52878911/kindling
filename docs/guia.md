@@ -1373,6 +1373,19 @@ sentido lo renueva) y un techo de 15 min por petición. Un LLM que emite SSE dur
 minutos pasa. Uno que se atasca, o un invitado que gotea bytes para ocupar una plaza, se
 corta, y quien estaba al otro lado ve un error, no una respuesta que parece completa.
 
+Una imagen de Docker con un servicio supervisado (Hindsight, una API) lee su entorno una
+sola vez, al arrancar. El marcador entra en el entorno de la máquina en cada `kling start`,
+así que con el servicio ya en marcha basta con parar y arrancar la máquina después de
+añadir la credencial (`kling stop` y `kling start`, con las `-e` de siempre: la variable
+de la credencial no se pide).
+
+```sh
+kling run -image hindsight -name memoria -egress allowlist -allow api.minimax.io -e ...
+kling machine credential memoria -domain api.minimax.io -env HINDSIGHT_API_LLM_API_KEY -f clave.txt \
+  -allow-request 'POST /v1/chat/completions'
+kling stop memoria && kling start memoria -e ...     # el servicio arranca con el marcador
+```
+
 El marcador no es un secreto: la capacidad es estar dentro de la red de esa máquina, no
 conocer la cadena. Por eso una máquina con credenciales **sí se congela**, despierta con
 ellas, y sobreviven a un reinicio del daemon: viven cifradas en el directorio de la
