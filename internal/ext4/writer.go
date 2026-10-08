@@ -111,6 +111,11 @@ type writer struct {
 	cursor uint64
 	dw     dataWriter
 	zero   [blockSize]byte
+	// buf es el búfer de copia de writeData, uno para toda la imagen: uno
+	// nuevo por fichero eran 27 GB de basura en node:22 (27 000 ficheros) y
+	// el recolector se llevaba la mitad del tiempo de escribir.
+	buf []byte
+	pad [blockSize]byte
 }
 
 type geometry struct {
@@ -158,6 +163,9 @@ func Write(f *os.File, root *Node, streams []Stream, opt Options) (Stats, error)
 		return Stats{}, err
 	}
 	w.dw = dataWriter{f: f}
+	// Si se sale con un error a medias, que no quede una escritura de fondo
+	// sobre un fichero que quien llama va a cerrar y borrar.
+	defer w.dw.wait()
 
 	// Directorios y enlaces largos primero (cerca de las tablas de inodos),
 	// luego los ficheros en el orden del árbol y al final los flujos.
@@ -232,6 +240,9 @@ func Write(f *os.File, root *Node, streams []Stream, opt Options) (Stats, error)
 		}
 	}
 	if err := w.dw.flush(); err != nil {
+		return Stats{}, err
+	}
+	if err := w.dw.wait(); err != nil {
 		return Stats{}, err
 	}
 	return w.writeMetadata()
@@ -538,7 +549,10 @@ func (w *writer) writeData(n *Node, r io.Reader, size int64, holes bool) error {
 		return nil
 	}
 	ni.written = true
-	buf := make([]byte, 1<<20)
+	if w.buf == nil {
+		w.buf = make([]byte, 1<<20)
+	}
+	buf := w.buf
 	var logical uint64
 	left := size
 	for left > 0 {
@@ -563,9 +577,11 @@ func (w *writer) writeData(n *Node, r io.Reader, size int64, holes bool) error {
 				continue
 			}
 			if len(b) < blockSize {
-				pad := make([]byte, blockSize)
-				copy(pad, b)
-				b = pad
+				// El último bloque, relleno de ceros: dw.write lo copia, así
+				// que vale el mismo para todos.
+				w.pad = [blockSize]byte{}
+				copy(w.pad[:], b)
+				b = w.pad[:]
 			}
 			phys := w.alloc()
 			if err := w.dw.write(phys, b); err != nil {
@@ -704,11 +720,18 @@ func (w *writer) dirBlocks(n *Node) []byte {
 	return out
 }
 
-// dataWriter junta escrituras de bloques seguidos en una sola.
+// dataWriter junta escrituras de bloques seguidos en una sola, y la hace en
+// segundo plano mientras se lee lo siguiente: leer el tar y escribir la
+// imagen eran dos esperas en fila.
+// Hay como mucho una escritura en vuelo y dos búferes que se turnan; un
+// error de la de fondo sale en la siguiente flush o en wait.
 type dataWriter struct {
-	f     *os.File
-	start uint64
-	buf   []byte
+	f        *os.File
+	start    uint64
+	buf      []byte
+	spare    []byte
+	done     chan error // la escritura en vuelo, si inflight
+	inflight bool
 }
 
 func (d *dataWriter) write(block uint64, b []byte) error {
@@ -724,13 +747,35 @@ func (d *dataWriter) write(block uint64, b []byte) error {
 	return nil
 }
 
+// flush manda lo juntado a escribir de fondo, tras esperar a la anterior.
 func (d *dataWriter) flush() error {
 	if len(d.buf) == 0 {
 		return nil
 	}
-	_, err := d.f.WriteAt(d.buf, int64(d.start)*blockSize)
-	d.buf = d.buf[:0]
-	return err
+	if err := d.wait(); err != nil {
+		return err
+	}
+	if d.done == nil {
+		d.done = make(chan error, 1)
+	}
+	b, off := d.buf, int64(d.start)*blockSize
+	d.inflight = true
+	go func() {
+		_, err := d.f.WriteAt(b, off)
+		d.done <- err
+	}()
+	d.buf, d.spare = d.spare[:0], b
+	return nil
+}
+
+// wait espera a la escritura en vuelo. Antes de leer o escribir el fichero
+// por otro camino (los metadatos), flush y wait.
+func (d *dataWriter) wait() error {
+	if !d.inflight {
+		return nil
+	}
+	d.inflight = false
+	return <-d.done
 }
 
 func encTime(t time.Time) (uint32, uint32) {
