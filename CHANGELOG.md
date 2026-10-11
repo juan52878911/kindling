@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `kling db` templates that speak the MongoDB protocol through FerretDB (`-engine ferretdb`); copies get a `mongodb://` DSN and a rotated password like Postgres (#117)
+
 ## [0.18.0] - 2026-10-11
 
 On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and rolls back on failure.

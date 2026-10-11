@@ -195,6 +195,10 @@ func (a *app) printReady(mc *api.Machine) {
 		fmt.Fprintf(a.stdout, "  inside the copy:  REDISCLI_AUTH=$(cat %s) redis-cli -s %s   (as the admin)\n", redisAdminFile, redisSock)
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-redis | -dsn]\n", mc.Name)
 		return
+	case engineFerret:
+		fmt.Fprintf(a.stdout, "  MongoDB protocol (FerretDB) on port %d; the same user and password as its Postgres role\n", ferretPort)
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -dsn | <mongosh or your driver>\n", mc.Name)
+		return
 	case engineSQLite:
 		fmt.Fprintf(a.stdout, "  inside the copy:  sqlite3 %s\n", sqlitePath(db))
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -sqlite   (no network server, no password)\n", mc.Name)
@@ -488,6 +492,10 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 	flagRole := ""
 	if extraRole != "" {
 		flagRole = " -role " + extraRole
+	}
+	if client == "dsn" {
+		fmt.Fprintf(a.stdout, "  kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole)
+		return nil
 	}
 	fmt.Fprintf(a.stdout, "  kling db connect %s%s -%s   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, client, mc.Name, flagRole)
 	return nil

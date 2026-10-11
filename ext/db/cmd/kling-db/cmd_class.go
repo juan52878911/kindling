@@ -550,6 +550,9 @@ func engineDSN(engine, role, pw, h string, port int, db string) string {
 		u.Scheme, u.RawQuery = "mysql", ""
 	case engineRedis:
 		u.Scheme, u.RawQuery, u.Path = "redis", "", "/0"
+	case engineFerret:
+		// FerretDB comprueba la clave contra el rol de Postgres, por SCRAM.
+		u.Scheme, u.RawQuery = "mongodb", "authMechanism=SCRAM-SHA-256"
 	}
 	return u.String()
 }

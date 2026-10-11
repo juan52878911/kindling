@@ -239,6 +239,11 @@ func copyChecks(ctx context.Context, k klingc.Kling, qr querier, mc *api.Machine
 		}
 		n := 0
 		for _, c := range cl {
+			// FerretDB abre su pool como el superusuario, por el loopback del
+			// propio invitado: es parte del servidor, no un cliente.
+			if mc.Labels[LabelEngine] == "ferretdb" && c.User == "postgres" {
+				continue
+			}
 			if c.Start < cut {
 				n++
 			}
