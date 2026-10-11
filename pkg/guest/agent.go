@@ -116,6 +116,7 @@ func New() (*Agent, error) {
 	// El entorno de la máquina, encima del de la imagen: antes de escuchar,
 	// que es cuando el daemon lo borra de MMDS.
 	a.applyMachineEnv(MachineEnvRequired(), FetchMMDS)
+	a.Env = cpuQuirkEnv(a.Env)
 	readyState.setEnv(a.Env)
 	for _, kv := range a.Env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
