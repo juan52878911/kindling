@@ -52,4 +52,17 @@ type GuestResyncResult struct {
 	// en marcha. nil = agente anterior a /ready. Ahorra al daemon una
 	// petición en cada restauración.
 	Ready *GuestReady `json:"ready,omitempty"`
+	// Generation es el contador de restauraciones del invitado tras esta:
+	// lo que el agente escribe en GuestGenerationFile. 0 = agente anterior.
+	Generation uint64 `json:"generation,omitempty"`
 }
+
+// GuestGenerationFile es donde el agente deja, tras cada /resync, cuántas
+// restauraciones lleva el invitado: un número en decimal y un salto de línea,
+// escrito con un rename (quien lo vigile con inotify ve un IN_MOVED_TO). Es lo
+// que en Firecracker hace VMGenID por el kernel, pero para los procesos: una app
+// o un acompañante que lo vigila sabe que ahora es una copia y tiene que
+// volver a sembrar lo que guarde en memoria (issue #175). Todas las copias de
+// un dorado ven el mismo número: avisa de que hubo restauración, no es una
+// identidad.
+const GuestGenerationFile = "/run/kindling/generation"

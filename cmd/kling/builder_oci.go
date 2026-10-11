@@ -91,6 +91,11 @@ type OCISpec struct {
 	// cuyo CMD acaba con 0 (python:3.12-slim) no se tiene que relanzar para
 	// siempre; uno que se cae, sí.
 	Restart string `json:"restart,omitempty"`
+	// OnRestore es qué hacer con el servicio en cada copia de un dorado:
+	// api.OnRestoreRestart o "signal:<SIG>" (api.ServiceSpec.OnRestore).
+	// Vacío, nada: el proceso de la copia sigue con los aleatorios en memoria
+	// del dorado (#175).
+	OnRestore string `json:"on_restore,omitempty"`
 	// Source dice de dónde salen los blobs: "" es un registro; "archive",
 	// un docker save o un layout OCI que el CLI subió a la caché del daemon
 	// (kling image import -archive). Entonces Digest es obligatorio (el del
@@ -170,6 +175,9 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	case "", api.RestartAlways, api.RestartOnFailure, api.RestartNo:
 	default:
 		return ref, fmt.Errorf("invalid restart policy %q: use always, on-failure or no", s.Restart)
+	}
+	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
+		return ref, err
 	}
 	return ref, nil
 }
@@ -434,7 +442,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
-		Restart: cmp.Or(spec.Restart, api.RestartOnFailure)}
+		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
 		// El agente la cambiaría igual por SIGTERM; aquí se ve al importar.
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)

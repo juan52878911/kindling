@@ -267,11 +267,12 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 | `env` | `KEY=valor` que se suman al `Env` de la imagen. Van dentro de la imagen y en la receta (0600; `kling image recipe` los enseña como `KEY=***`): para lo que es de cada máquina, `kling run -e` (arriba) |
 | `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
 | `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
+| `on_restore` | qué hacer con el servicio en cada copia de un dorado: `restart` o `signal:<SEÑAL>` (abajo); vacío o `none`, nada |
 | `source` | `archive`: los blobs ya están en la caché del daemon (los subió `kling image import -archive`, abajo) y no se usa la red; `digest` (el del manifiesto) es obligatorio y `ref`, opcional |
 
 `kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
-`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, el comando tras `--` y `-json`
+`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, `-on-restore`, el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
 ready, service, already_imported}`).
 
@@ -282,6 +283,57 @@ opciones) dice `already imported` sin rehacerla; si es otra cosa, falla. Con
 `-replace` la reconstruye (y vuelve a resolver la etiqueta), salvo que la use un
 dorado o una máquina que no esté parada: entonces 409, como al subirla con
 `kling image put`; hay que retirar antes lo que la usa.
+
+### Copias de un dorado: los aleatorios del servicio (`-on-restore`)
+
+Un dorado guardado con el servicio en marcha lo despierta igual en todas sus
+copias. `/resync` vuelve a sembrar el kernel (`getrandom`, `/dev/urandom`,
+`/proc/sys/kernel/random/uuid` salen distintos en cada copia), pero no lo que el
+proceso guardó en su memoria a partir de una semilla tomada antes del volcado
+(issue #175). Medido con 10 copias (Mac con vz y lab con Firecracker):
+
+| Lenguaje | Se repite en todas las copias | Sale distinto |
+|---|---|---|
+| Node 22 | `Math.random`, `crypto.randomUUID`, `crypto.randomBytes` | — |
+| Python 3.12 | `random.random`, `ssl.RAND_bytes` | `uuid4`, `secrets`, `os.urandom` |
+| Go 1.23 | `math/rand` y `math/rand/v2` globales | `crypto/rand` |
+| Java 21 | `Math.random`, un `java.util.Random` compartido | `UUID.randomUUID`, `SecureRandom`, `new Random()` por petición |
+
+La regla: lo que pide al kernel en cada llamada sale bien; lo que el proceso
+genera de una semilla propia, no. En pruebas oculta fallos (el mismo UUID en
+todas las réplicas); en servicios con réplicas de un dorado es un problema de
+seguridad (tokens, nonces, ids de sesión).
+
+`kling image import -on-restore` le dice al agente qué hacer en cada copia
+(`run -from`, `sandbox fork`; no al descongelar la misma máquina, que no se
+duplica), después de los ganchos de `post-restore.d`, con los volúmenes y las
+credenciales ya puestos:
+
+| `-on-restore` | Qué hace | Coste por copia (lab, Firecracker) |
+|---|---|---|
+| `restart` | para el servicio con su `STOPSIGNAL` y lo vuelve a lanzar, sea cual sea `-restart`. Espera a que el proceso nuevo escuche otra vez en los puertos TCP en que escuchaba el viejo y vuelve a pasar la sonda de "listo", así que `run -from -wait-ready` devuelve la copia ya sirviendo, aunque la imagen no tenga `HEALTHCHECK` ni `EXPOSE` | ~170 ms con un servidor de Node (`run -from -wait-ready` de ~100 a ~270 ms): el arranque en frío de la app |
+| `signal:SIGUSR1` (cualquier señal) | se la manda al proceso del servicio, sin reiniciarlo. Sirve si la app vuelve a sembrar al recibirla (Python: `random.seed()` y `ssl.RAND_add(os.urandom(32), 32.0)`; Go y Java, igual). **No sirve para Node**: no puede volver a sembrar `Math.random` ni su OpenSSL | nada medible |
+
+Mientras corre, la copia no está lista (`/ready` da 503); si falla (el
+servicio no vuelve, o no vuelve a escuchar en 60 s), la tanda de ganchos queda
+`failed` con el motivo. Cuenta como un gancho más, así que también funciona con
+un daemon anterior que ya lance los ganchos.
+
+Para apps que no son el servicio de la imagen, o que prefieren enterarse sin
+señal: tras cada restauración el agente sube un contador en
+`/run/kindling/generation` (un número y un salto de línea, escrito con un
+`rename`: `inotify` ve un `IN_MOVED_TO`). Es el equivalente de VMGenID para los
+procesos; todas las copias de un dorado ven el mismo número, porque avisa de que
+hubo una restauración, no es una identidad.
+
+`kling save` avisa cuando el dorado se lleva procesos de usuario vivos que nada
+de esto cubre (`warning: 1 process is alive in this snapshot (node): ...`). El
+agente los cuenta con `GET /procs` (sin argumentos ni entorno, que pueden llevar
+secretos); el servicio con `-on-restore` no cuenta. Las imágenes MCP no avisan:
+su servidor siempre está vivo en el dorado y todavía no tienen `-on-restore`.
+
+La prueba es `scripts/91-e2e-determinismo.sh` (Node con y sin `restart`, Python
+con señal; corre contra cualquier daemon, Linux o macOS).
 
 ### Desde un archivo: `docker save` o un layout OCI
 

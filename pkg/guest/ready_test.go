@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -321,5 +322,68 @@ func TestDetalleSinSalidaNoAcabaEnDosPuntos(t *testing.T) {
 	st = r.check(context.Background())
 	if st.Hooks != api.HooksFailed || !strings.HasSuffix(st.Detail, "exit status 3") {
 		t.Fatalf("gancho callado = %+v", st)
+	}
+}
+
+// En una copia de un dorado, la acción OnRestore del servicio corre tras los
+// ganchos y la sonda tiene que volver a decir "listo"; al descongelar la misma
+// máquina, no corre.
+func TestHooksAccionOnRestore(t *testing.T) {
+	r, dir := nuevoReadiness(t)
+	orden := filepath.Join(dir, "orden")
+	script(t, filepath.Join(r.hooksDir, "10-gancho"), `echo gancho >> `+orden)
+	var corridas atomic.Int32
+	r.restore = func() func() error {
+		return func() error {
+			corridas.Add(1)
+			f, _ := os.OpenFile(orden, os.O_APPEND|os.O_WRONLY, 0)
+			f.WriteString("accion\n")
+			f.Close()
+			return nil
+		}
+	}
+	cuenta := filepath.Join(dir, "sondas")
+	script(t, r.probePath, `echo x >> `+cuenta)
+	if st := r.check(context.Background()); !st.Ready {
+		t.Fatalf("antes: %+v", st)
+	}
+
+	hecho := make(chan struct{})
+	r.startHooks(api.ResyncThaw, func() { close(hecho) })
+	<-hecho
+	if corridas.Load() != 0 {
+		t.Fatal("la acción OnRestore corrió al descongelar")
+	}
+
+	hecho = make(chan struct{})
+	r.startHooks(api.ResyncInstance, func() { close(hecho) })
+	<-hecho
+	if b, _ := os.ReadFile(orden); string(b) != "gancho\ngancho\naccion\n" {
+		t.Fatalf("orden = %q, quiero los ganchos y luego la acción", b)
+	}
+	if st := r.check(context.Background()); !st.Ready || st.Hooks != api.HooksDone {
+		t.Fatalf("tras la acción: %+v", st)
+	}
+	if b, _ := os.ReadFile(cuenta); strings.Count(string(b), "x") != 2 {
+		t.Fatalf("la sonda corrió %d veces, quiero 2 (otra vez tras reiniciar)", strings.Count(string(b), "x"))
+	}
+}
+
+// Sin ganchos, una acción OnRestore basta para "declarar ganchos" (el daemon
+// llama a /hooks), y si falla la tanda queda failed.
+func TestHooksSoloAccionYFallo(t *testing.T) {
+	r, _ := nuevoReadiness(t)
+	r.restore = func() func() error { return func() error { return errors.New("no vuelve") } }
+	if !r.snapshot().HasHooks {
+		t.Fatal("una acción OnRestore sin ganchos tiene que contar como ganchos")
+	}
+	hecho := make(chan struct{})
+	if !r.startHooks(api.ResyncInstance, func() { close(hecho) }) {
+		t.Fatal("startHooks no arrancó")
+	}
+	<-hecho
+	st := r.check(context.Background())
+	if st.Ready || st.Hooks != api.HooksFailed || !strings.Contains(st.Detail, "no vuelve") {
+		t.Fatalf("%+v", st)
 	}
 }

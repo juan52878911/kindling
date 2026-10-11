@@ -72,7 +72,7 @@ type Agent struct {
 // en este proceso y las que añade quien lo embebe.
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
-		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv}
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -144,6 +144,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// solo lee su estado y su salida.
 	mux.HandleFunc(api.GuestServicePath, ServiceHandler())
 	mux.HandleFunc(api.GuestServiceStopPath, ServiceStopHandler())
+	// /procs: los procesos vivos, para que `kling save` avise de los que el
+	// dorado copiaría con sus aleatorios en memoria (procs.go).
+	mux.HandleFunc(api.GuestProcsPath, ProcsHandler())
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere

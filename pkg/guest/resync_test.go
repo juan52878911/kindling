@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,10 +22,13 @@ func falsos(t *testing.T, errReloj, errEntropia error) (*time.Time, *[]byte) {
 	t.Helper()
 	var reloj time.Time
 	var ent []byte
-	viejoReloj, viejaEnt := setClock, mixEntropy
+	viejoReloj, viejaEnt, viejoFichero, viejaGen := setClock, mixEntropy, generationFile, generation
 	setClock = func(tm time.Time) error { reloj = tm; return errReloj }
 	mixEntropy = func(b []byte) error { ent = append([]byte(nil), b...); return errEntropia }
-	t.Cleanup(func() { setClock, mixEntropy = viejoReloj, viejaEnt })
+	generationFile = filepath.Join(t.TempDir(), "run/kindling/generation")
+	t.Cleanup(func() {
+		setClock, mixEntropy, generationFile, generation = viejoReloj, viejaEnt, viejoFichero, viejaGen
+	})
 	return &reloj, &ent
 }
 
@@ -132,6 +138,27 @@ func TestIsControlPath(t *testing.T) {
 	for _, p := range []string{"/", "/mcp", "/mcp/resync", "/resyncx", "/executor", "/healthz", "/sse", "/services"} {
 		if IsControlPath(p) {
 			t.Errorf("%s no debería ser de control", p)
+		}
+	}
+}
+
+// Cada /resync sube la generación y la deja en el fichero que vigilan los
+// procesos (#175).
+func TestResyncSubeLaGeneracion(t *testing.T) {
+	falsos(t, nil, nil)
+	ent := bytes.Repeat([]byte{7}, api.GuestResyncEntropy)
+	for want := uint64(1); want <= 2; want++ {
+		rr := postResync(t, cuerpo(t, time.Now().UnixNano(), ent))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("resync %d: %d %s", want, rr.Code, rr.Body)
+		}
+		var res api.GuestResyncResult
+		if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil || res.Generation != want {
+			t.Fatalf("resync %d: generation %d (%v), quiero %d", want, res.Generation, err, want)
+		}
+		b, err := os.ReadFile(generationFile)
+		if err != nil || string(b) != fmt.Sprintf("%d\n", want) {
+			t.Fatalf("fichero de generación = %q (%v), quiero %d", b, err, want)
 		}
 	}
 }

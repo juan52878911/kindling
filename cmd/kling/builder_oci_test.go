@@ -255,6 +255,9 @@ func TestBuildOCIServiceFromConfig(t *testing.T) {
 	if svc, _ = service(OCISpec{Ref: e.reg.Host() + "/x/py@" + idx, Arch: "amd64", Restart: api.RestartAlways}); svc.Restart != api.RestartAlways {
 		t.Fatalf("restart %q", svc.Restart)
 	}
+	if svc, _ = service(OCISpec{Ref: e.reg.Host() + "/x/py@" + idx, Arch: "amd64", OnRestore: "signal:SIGUSR1"}); svc.OnRestore != "signal:SIGUSR1" {
+		t.Fatalf("on_restore %q", svc.OnRestore)
+	}
 }
 
 func TestOCIReadyTimes(t *testing.T) {
@@ -501,6 +504,7 @@ func TestValidateOCI(t *testing.T) {
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", MaxMB: -1}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Cmd: []string{"a\x00b"}}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Restart: "sometimes"}},
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", OnRestore: "reload"}},
 	} {
 		if _, err := validateOCI(c.req, c.spec); err == nil {
 			t.Errorf("case %d accepted", i)

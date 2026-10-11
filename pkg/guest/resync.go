@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,14 +92,45 @@ func ResyncHandler() http.HandlerFunc {
 			http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		gen := bumpGeneration()
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
 		// pide él cuando ya montó volúmenes y entregó credenciales) o una
 		// sonda que esperar (ver ready.go).
 		st := readyState.snapshot()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st})
+		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen})
 	}
+}
+
+// generation cuenta las restauraciones de este invitado; generationFile es
+// donde se publica (variable para los tests).
+var (
+	generation     uint64
+	generationFile = api.GuestGenerationFile
+)
+
+// bumpGeneration sube el contador y lo escribe en generationFile con un
+// rename, para que quien lo vigile no lea nunca un fichero a medias. Un fallo
+// al escribirlo se apunta y no tumba el /resync: el kernel ya está resembrado.
+// Se llama con resyncMu tomado.
+func bumpGeneration() uint64 {
+	generation++
+	if err := writeGeneration(generationFile, generation); err != nil {
+		log.Printf("resync: writing %s: %v", generationFile, err)
+	}
+	return generation
+}
+
+func writeGeneration(p string, n uint64) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(n, 10)+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 func validarResync(req api.GuestResync) error {
@@ -115,7 +150,7 @@ func validarResync(req api.GuestResync) error {
 // /volume/release desmonta los volúmenes por debajo del servidor, /exec ejecuta,
 // /share conecta una carpeta del host.
 var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share",
-	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath, api.GuestServicePath}
+	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath, api.GuestServicePath, api.GuestProcsPath}
 
 // IsControlPath dice si p (una ruta ya limpia, con path.Clean) es una ruta de
 // control del agente y no algo que un cliente del servicio deba alcanzar.

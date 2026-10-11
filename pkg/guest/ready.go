@@ -20,6 +20,13 @@ package guest
 //     SEGUNDO PLANO: quien necesite esperarlos pregunta /ready.
 //   - Uno que falla (o agota su plazo) para la tanda y deja "failed": no se
 //     reintenta solo. POST /hooks los vuelve a lanzar.
+//   - En una copia de un dorado (KLING_RESTORE=instance), al final de la
+//     tanda va lo que el servicio de la imagen pida en OnRestore: reiniciarlo
+//     o mandarle una señal, para que no herede los aleatorios que tenía en
+//     memoria el del dorado (#175). Cuenta como un gancho más: con él, la
+//     imagen "declara ganchos" (el daemon llama a /hooks), mientras corre no
+//     está lista, y si falla la tanda queda "failed". Tras él la sonda se
+//     vuelve a ejecutar: el proceso nuevo tiene que volver a estar listo.
 
 import (
 	"context"
@@ -62,6 +69,9 @@ type readiness struct {
 	// probe ejecuta la sonda; nil = run. Por defecto, con el usuario del
 	// servicio de la imagen (como el HEALTHCHECK de Docker); los ganchos, root.
 	probe func(ctx context.Context, path string, env []string) (string, error)
+	// restore devuelve la acción OnRestore del servicio (nil = ninguna).
+	// Sustituible en tests.
+	restore func() func() error
 
 	probeMu sync.Mutex // una sonda a la vez: dos /ready seguidos esperan a la misma
 	mu      sync.Mutex // protege lo de abajo
@@ -78,6 +88,7 @@ var readyState = &readiness{
 	hooksDir:  api.GuestPostRestoreDir,
 	run:       runWithTimeout,
 	probe:     runProbeAsService,
+	restore:   onRestore,
 }
 
 // setEnv fija el entorno de la sonda y los ganchos (el de los servicios).
@@ -93,9 +104,15 @@ func (r *readiness) hasProbe() bool {
 	return err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0
 }
 
+// hasHooks dice si hay algo que hacer tras restaurar: ganchos de la imagen o
+// la acción OnRestore de su servicio.
+func (r *readiness) hasHooks() bool {
+	return len(r.listHooks()) > 0 || (r.restore != nil && r.restore() != nil)
+}
+
 // snapshot es el estado sin ejecutar nada: lo que se sabe ahora mismo.
 func (r *readiness) snapshot() api.GuestReady {
-	probe, hooks := r.hasProbe(), len(r.listHooks()) > 0
+	probe, hooks := r.hasProbe(), r.hasHooks()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stateLocked(probe, hooks)
@@ -121,7 +138,7 @@ func (r *readiness) stateLocked(probe, hooks bool) api.GuestReady {
 
 // check es GET /ready: ejecuta la sonda si hace falta y devuelve el estado.
 func (r *readiness) check(ctx context.Context) api.GuestReady {
-	probe, hooks := r.hasProbe(), len(r.listHooks()) > 0
+	probe, hooks := r.hasProbe(), r.hasHooks()
 	r.mu.Lock()
 	need := probe && !r.ok && r.hooks != api.HooksRunning && r.hooks != api.HooksFailed
 	env := r.env
@@ -203,16 +220,20 @@ func (r *readiness) listHooks() []string {
 
 // startHooks lanza la tanda de ganchos en segundo plano. Devuelve false si ya
 // había una corriendo (no se solapan: la segunda vería a medias lo de la
-// primera). Sin ganchos no cambia nada y devuelve true. done, si no es nil, se
-// llama al acabar (tests).
+// primera). Sin ganchos ni acción OnRestore no cambia nada y devuelve true.
+// done, si no es nil, se llama al acabar (tests).
 func (r *readiness) startHooks(kind string, done func()) bool {
 	hooks := r.listHooks()
+	var action func() error
+	if kind == api.ResyncInstance && r.restore != nil {
+		action = r.restore()
+	}
 	r.mu.Lock()
 	if r.hooks == api.HooksRunning {
 		r.mu.Unlock()
 		return false
 	}
-	if len(hooks) == 0 {
+	if len(hooks) == 0 && action == nil {
 		r.mu.Unlock()
 		if done != nil {
 			done()
@@ -245,8 +266,23 @@ func (r *readiness) startHooks(kind string, done func()) bool {
 			}
 			log.Printf("post-restore %s ok in %s", filepath.Base(h), time.Since(t0).Round(time.Millisecond))
 		}
+		acted := false
+		if estado == api.HooksDone && action != nil {
+			t0 := time.Now()
+			if err := action(); err != nil {
+				estado, fallo = api.HooksFailed, recortar("service on-restore: "+err.Error())
+				log.Printf("post-restore: service on-restore failed after %s: %v", time.Since(t0).Round(time.Millisecond), err)
+			} else {
+				acted = true
+				log.Printf("post-restore: service on-restore done in %s", time.Since(t0).Round(time.Millisecond))
+			}
+		}
 		r.mu.Lock()
 		r.hooks, r.hookErr = estado, fallo
+		if acted {
+			// El proceso es otro: "listo" lo tiene que volver a decir la sonda.
+			r.ok, r.detail = false, ""
+		}
 		r.mu.Unlock()
 		if estado == api.HooksDone {
 			log.Printf("post-restore: %d hook(s) done in %s", len(hooks), time.Since(start).Round(time.Millisecond))

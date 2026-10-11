@@ -1,5 +1,10 @@
 package api
 
+import (
+	"fmt"
+	"strings"
+)
+
 // El servicio supervisado de una imagen.
 //
 // Una imagen puede declarar en su rootfs, en GuestServiceSpec, un proceso que
@@ -61,6 +66,40 @@ type ServiceSpec struct {
 	// de commit, fork o run, que es la espera total a "listo".
 	ProbeTimeoutSeconds     int `json:"probe_timeout_seconds,omitempty"`
 	ReadyStartPeriodSeconds int `json:"ready_start_period_seconds,omitempty"`
+	// OnRestore es qué hacer con el servicio en cada copia de un dorado
+	// (run -from, fork), cuando ya corrieron los ganchos tras restaurar:
+	// OnRestoreRestart lo reinicia, "signal:SIGUSR1" (OnRestoreSignal más el
+	// nombre: ParseSignal) le manda esa señal. Vacío o OnRestoreNone, nada.
+	// Existe porque /resync vuelve a sembrar el kernel pero no la memoria de
+	// un proceso vivo en el dorado: sin esto, todas las copias sacan los
+	// mismos Math.random, randomUUID o random.random (issue #175).
+	OnRestore string `json:"on_restore,omitempty"`
+}
+
+// Valores de ServiceSpec.OnRestore.
+const (
+	OnRestoreNone    = "none"
+	OnRestoreRestart = "restart"
+	OnRestoreSignal  = "signal:"
+)
+
+// ParseOnRestore valida un ServiceSpec.OnRestore. Devuelve la acción
+// (OnRestoreNone, OnRestoreRestart u OnRestoreSignal) y, para una señal, su
+// número.
+func ParseOnRestore(v string) (action string, sig int, err error) {
+	switch {
+	case v == "" || v == OnRestoreNone:
+		return OnRestoreNone, 0, nil
+	case v == OnRestoreRestart:
+		return OnRestoreRestart, 0, nil
+	case strings.HasPrefix(v, OnRestoreSignal) && len(v) > len(OnRestoreSignal):
+		n, err := ParseSignal(strings.TrimPrefix(v, OnRestoreSignal))
+		if err != nil {
+			return "", 0, fmt.Errorf("on-restore %q: %w", v, err)
+		}
+		return OnRestoreSignal, n, nil
+	}
+	return "", 0, fmt.Errorf("on-restore must be none, restart or signal:<SIG> (signal:SIGUSR1), not %q", v)
 }
 
 // MaxReadyTimeoutSeconds acota ProbeTimeoutSeconds y ReadyStartPeriodSeconds:
