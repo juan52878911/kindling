@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
+
 ## [0.18.0] - 2026-10-11
 
 On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and rolls back on failure.
