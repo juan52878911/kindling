@@ -41,15 +41,24 @@ func TestLiveVMsEncuentraLaMaquinaPorSuSocket(t *testing.T) {
 	// y buscaba un proceso que ya no existía. Como sólo corre en Linux y el
 	// desarrollo es en macOS, donde se salta, nadie lo vio fallar.
 	//
-	// La forma que sí funciona: `sh -c 'sleep 30' <ruta>` deja la ruta en $0 del
-	// SHELL, que sigue vivo esperando a su hijo, así que su cmdline la conserva.
+	// La forma que sí funciona: `sh -c '...' <ruta>` deja la ruta en $0 del
+	// SHELL, que sigue vivo, así que su cmdline la conserva.
 	// Con `exec sleep 30` no valdría: exec sustituye la imagen del proceso y el
 	// cmdline pasa a ser "sleep 30", perdiendo la ruta que liveVMs busca.
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30", sock)
+	//
+	// Y tampoco `sleep 30` sin exec: el shell hace fork para lanzarlo, y entre
+	// el fork y el exec el hijo tiene el MISMO cmdline que el padre, ruta
+	// incluida; liveVMs a veces se quedaba con ese pid (CI de #180). `read` es
+	// del propio shell: espera sin hijos mientras la tubería siga abierta.
+	cmd := exec.Command("/bin/sh", "-c", "read x", sock)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() { stdin.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
 	// Esperar a que el cmdline del hijo sea visible: Start() vuelve al fork, no
 	// al exec, y liveVMs lee /proc.

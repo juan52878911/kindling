@@ -55,12 +55,11 @@ func ParseEgress(s string) (Egress, error) {
 // también el resolver con el que el host siembra el ipset, para que las IP que
 // ve el invitado y las que permitimos coincidan.
 //
-// TODO(allowlist): esto es un resolver recursivo público, no uno propio. Un
-// invitado decidido todavía puede filtrar datos codificándolos en subdominios
-// que este resolver reenvía a un NS autoritativo del atacante (DNS tunneling).
-// Cerrar ese hueco pide un resolver del host que SOLO responda por los dominios
-// permitidos —y que de paso siembre el ipset con lo que resuelva—; ese es el
-// resolver dinámico que aún falta (ver applyAllowlist).
+// El invitado no habla con él directamente: su 53 va al resolver dinámico de
+// cada microVM (dnsresolver.go), que responde REFUSED a los dominios no
+// permitidos y reenvía aquí el resto. Lo que sigue abierto es el tunneling por
+// subdominios de un dominio permitido cuyo NS autoritativo controle el
+// atacante: cerrarlo pide un resolver autoritativo propio (ver dnsresolver.go).
 const DNSResolver = "1.1.1.1"
 
 // blocked son los destinos que una microVM no debe alcanzar jamás, ni siquiera

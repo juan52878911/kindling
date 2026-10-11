@@ -58,6 +58,12 @@ Dos cosas que hay que resolver en la fase 2, y que conviene no descubrir en prod
 2. **El estado de red no sobrevive.** El TAP se recrea y el invitado despierta con tablas ARP
    y conexiones TCP obsoletas. Es la parte tediosa de la fase 2.
 
+> **Estado (octubre de 2026).** Las dos están resueltas en lo que toca al kernel y a la red:
+> `/resync` vuelve a sembrar el RNG del kernel y corrige el reloj tras cada restauración
+> (v0.9.1), y la red se rehace al despertar. Lo que queda abierto es la memoria de los
+> **procesos** vivos en el dorado (Node, Python `random`, OpenSSL…), que el kernel no puede
+> volver a sembrar: ver el issue #175.
+
 ## Medir arranques: cuidado con el propio medidor
 
 `timeout N firecracker ... | grep -m1 -q PATRON` **no mide lo que parece**. `grep -q` sale al
