@@ -83,6 +83,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling run -ttl 0` means never again when the configuration sets `defaults.ttl`: an explicit 0 was read as "not given" and the machine froze after the configured TTL
+- `kling run -from` says that `-cpus`, `-mem`, `-mem-max` and `-disk` are ignored (a copy has the template's vCPUs, memory and disk) instead of dropping them silently
+- Copies of a template whose machine had a credential keep that placeholder for the same variable when the template carries a credential for it: a process alive in the template still held the old placeholder and every copy's proxy refused it (`bad_placeholder`)
+- `kling doctor` lists stale templates (made with another Firecracker or kling-vz version), which `run -from` refuses
 - A Docker image's supervised service now sees the placeholder of a `machine credential`: `kling start` puts each credential's `VAR=placeholder` in the machine environment the service reads at boot (it only reached MCP sessions before), and the credential's variable is not asked for on the next start
 - A registry whose certificate can't be verified fails at once (no 2 s retry) and says how to trust its CA (`SSL_CERT_FILE` for the daemon)
 - macOS: `make install` also installs the Linux `kling-guest` that `kling image import` puts in images (in `lib/` of the data root, no sudo), `kling upgrade` updates it, and the error without it says what to do on a Mac

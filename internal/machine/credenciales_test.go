@@ -368,7 +368,7 @@ func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
 		t.Fatal(err)
 	}
 	specs := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: credSecreto}}
-	creds, nuevas, err := m.entregarCredenciales(context.Background(), "i1", knet.Plan(1, "i1"), falso.cliente(), specs)
+	creds, nuevas, err := m.entregarCredenciales(context.Background(), "i1", knet.Plan(1, "i1"), falso.cliente(), specs, nil)
 	if err != nil || nuevas != 1 || len(creds) != 1 {
 		t.Fatalf("%+v %d %v", creds, nuevas, err)
 	}
@@ -383,9 +383,61 @@ func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
 	if err := os.MkdirAll(m.dir("i2"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	creds2, _, err := m.entregarCredenciales(context.Background(), "i2", knet.Plan(2, "i2"), falso.cliente(), specs)
+	creds2, _, err := m.entregarCredenciales(context.Background(), "i2", knet.Plan(2, "i2"), falso.cliente(), specs, nil)
 	if err != nil || creds2[0].Placeholder == creds[0].Placeholder {
 		t.Fatalf("segunda instancia: %+v, %v", creds2, err)
+	}
+}
+
+// Las copias de un dorado cuya máquina tenía credenciales reutilizan el
+// marcador del dorado para la misma variable: un proceso vivo en el volcado lo
+// tiene en memoria (Hindsight daba bad_placeholder). Las variables que el
+// dorado no tenía siguen llevando uno nuevo.
+func TestCopiasReutilizanLosMarcadoresDelDorado(t *testing.T) {
+	m := newTestManager(t)
+	capturarRegistro(t)
+	falso := nuevoFcFalso(t)
+	for _, id := range []string{"src", "c1", "c2"} {
+		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pg := api.CredentialSpec{Domain: "api.example.com", Env: "PGPASSWORD", Secret: credSecreto}
+	orig, _, err := m.entregarCredenciales(context.Background(), "src", knet.Plan(1, "src"), falso.cliente(), []api.CredentialSpec{pg}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.guardarMarcadoresDorado("gold", "src"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(m.marcadoresDoradoPath("gold")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("fichero de marcadores: %v %v", fi, err)
+	}
+	ph := m.marcadoresDorado("gold")
+	if ph["PGPASSWORD"] != orig[0].Placeholder {
+		t.Fatalf("marcadores del dorado = %v", ph)
+	}
+	otra := api.CredentialSpec{Domain: "api.example.com", Env: "OTRA", Secret: credSecreto}
+	for i, id := range []string{"c1", "c2"} {
+		creds, _, err := m.entregarCredenciales(context.Background(), id, knet.Plan(2+i, id), falso.cliente(), []api.CredentialSpec{pg, otra}, ph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if creds[0].Placeholder != orig[0].Placeholder || creds[1].Placeholder == orig[0].Placeholder || creds[1].Placeholder == "" {
+			t.Fatalf("copia %s: %+v", id, creds)
+		}
+	}
+	// Un dorado de una máquina sin credenciales borra los de antes.
+	if err := m.guardarMarcadoresDorado("gold", "c9"); err != nil {
+		t.Fatal(err)
+	}
+	if m.marcadoresDorado("gold") != nil {
+		t.Fatal("quedaron marcadores de un dorado anterior")
+	}
+	// Uno que no tiene forma de marcador no se usa.
+	os.WriteFile(m.marcadoresDoradoPath("raro"), []byte(`{"K":"secreto-de-verdad"}`), 0o600)
+	if len(m.marcadoresDorado("raro")) != 0 {
+		t.Fatal("aceptó algo que no es un marcador")
 	}
 }
 
@@ -508,7 +560,7 @@ func TestCredencialesDePlantillaConAllow(t *testing.T) {
 	if err := os.MkdirAll(m.dir("i1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.entregarCredenciales(context.Background(), "i1", knet.Plan(1, "i1"), falso.cliente(), specs); err != nil {
+	if _, _, err := m.entregarCredenciales(context.Background(), "i1", knet.Plan(1, "i1"), falso.cliente(), specs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual((*got)[0][0].Allow, []string{"GET /v1/*"}) {

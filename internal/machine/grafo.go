@@ -925,7 +925,7 @@ func (m *Manager) entregarCredencialesNodo(ctx context.Context, id string, specs
 	if sock == "" {
 		return fmt.Errorf("no socket for %s", id)
 	}
-	creds, _, err := m.entregarCredenciales(ctx, id, knet.Plan(cur.NetIndex, cur.ID), fc.New(sock), specs)
+	creds, _, err := m.entregarCredenciales(ctx, id, knet.Plan(cur.NetIndex, cur.ID), fc.New(sock), specs, nil)
 	if err != nil {
 		return err
 	}

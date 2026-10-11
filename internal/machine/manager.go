@@ -2867,7 +2867,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
-	creds, nuevas, err := m.entregarCredenciales(ctx, mc.ID, knet.Plan(cur.NetIndex, cur.ID), fc.New(sock), specs)
+	creds, nuevas, err := m.entregarCredenciales(ctx, mc.ID, knet.Plan(cur.NetIndex, cur.ID), fc.New(sock), specs, nil)
 	if err != nil {
 		return nil, err
 	}

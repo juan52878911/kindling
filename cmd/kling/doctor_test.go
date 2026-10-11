@@ -176,3 +176,23 @@ func TestWriteTuning(t *testing.T) {
 		t.Fatalf("sin ajustes no debería imprimir nada: %q", b.String())
 	}
 }
+
+func TestDoctorStale(t *testing.T) {
+	in := doctorInput{cliVersion: "v1", info: &api.Info{Version: "1"}, completion: true,
+		snaps: []*api.Snapshot{{Name: "ok"}, {Name: "viejo", Stale: "firecracker 1.12 → 1.17"}}}
+	var got *doctorCheck
+	for _, c := range doctorChecks(in) {
+		if c.Name == "templates" {
+			got = &c
+		}
+	}
+	if got == nil || got.State != doctorWarn || !strings.Contains(got.Detail, "1 stale") || !strings.Contains(got.Detail, "viejo") {
+		t.Fatalf("templates = %+v", got)
+	}
+	in.snaps = in.snaps[:1]
+	for _, c := range doctorChecks(in) {
+		if c.Name == "templates" {
+			t.Fatalf("sin stale no hay línea: %+v", c)
+		}
+	}
+}
