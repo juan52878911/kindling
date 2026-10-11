@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `kling db` templates of ClickHouse (`-engine clickhouse`), with the password stored as a SHA-256 computed on the host (#118)
+
 ## [0.18.0] - 2026-10-11
 
 On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and rolls back on failure.

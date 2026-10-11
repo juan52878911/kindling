@@ -120,6 +120,8 @@ func (a *app) setPassword(ctx context.Context, mc *api.Machine, role, pw string)
 		// Solo el usuario de la aplicación: la del administrador no sale del
 		// invitado y ya se estrenó al preparar la copia.
 		return a.setRedisHash(ctx, mc.ID, role, redisHash(pw), false)
+	case engineClickHouse:
+		return a.setClickHouseHash(ctx, mc.ID, role, redisHash(pw))
 	case engineSQLite:
 		return fmt.Errorf("%s is a sqlite copy: it has no password", mc.Name)
 	}

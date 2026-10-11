@@ -53,6 +53,9 @@ const (
 	engineMySQL    = "mysql"
 	engineRedis    = "redis"
 	engineSQLite   = "sqlite"
+	// engineClickHouse: la clave del usuario de la aplicación, como SHA-256
+	// (clickhouse.go).
+	engineClickHouse = "clickhouse"
 
 	redisPort = 6379
 )
@@ -61,7 +64,7 @@ const (
 // Postgres, como antes de #64 (goldenInfo sí lo rechaza al crear copias).
 func engineOf(labels map[string]string) string {
 	switch e := labels[labelEngine]; e {
-	case engineMySQL, engineRedis, engineSQLite:
+	case engineMySQL, engineRedis, engineSQLite, engineClickHouse:
 		return e
 	}
 	return enginePostgres
@@ -70,7 +73,7 @@ func engineOf(labels map[string]string) string {
 // knownEngine dice si e es un motor que kling db sabe manejar.
 func knownEngine(e string) bool {
 	switch e {
-	case enginePostgres, engineMySQL, engineRedis, engineSQLite:
+	case enginePostgres, engineMySQL, engineRedis, engineSQLite, engineClickHouse:
 		return true
 	}
 	return false
@@ -85,6 +88,8 @@ func enginePort(engine string) int {
 		return redisPort
 	case engineSQLite:
 		return 0
+	case engineClickHouse:
+		return chPort
 	}
 	return pgPort
 }
@@ -94,7 +99,7 @@ func engineDoc(engine string) string {
 	switch engine {
 	case engineMySQL:
 		return "docs/mysql.md"
-	case engineRedis, engineSQLite:
+	case engineRedis, engineSQLite, engineClickHouse:
 		return "docs/db-engines.md"
 	}
 	return "docs/db.md"
@@ -146,6 +151,10 @@ func clientMode(engine string) string {
 		return "redis"
 	case engineSQLite:
 		return "sqlite"
+	case engineClickHouse:
+		// clickhouse-client pide la clave en argv o por teclado: el DSN va a
+		// la herramienta de cada uno.
+		return "dsn"
 	}
 	return "psql"
 }

@@ -8,6 +8,7 @@
 #   scripts/db-golden.sh build [opciones] <nombre> arranca, carga y congela
 #   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
 #   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
+#   ... image|build -engine clickhouse ...        ClickHouse (db-golden-clickhouse.sh)
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
 # cluster en el overlay de la máquina, arranca Postgres escuchando en la IP del
@@ -573,7 +574,8 @@ case "$engine" in
   mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;
   redis) exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
   sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
-  *) die "motor desconocido: $engine (postgres, mysql, redis o sqlite)" ;;
+  clickhouse) exec bash "$HERE/db-golden-clickhouse.sh" ${args[@]+"${args[@]}"} ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis, sqlite o clickhouse)" ;;
 esac
 set -- ${args[@]+"${args[@]}"}
 

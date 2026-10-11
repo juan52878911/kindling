@@ -550,6 +550,9 @@ func engineDSN(engine, role, pw, h string, port int, db string) string {
 		u.Scheme, u.RawQuery = "mysql", ""
 	case engineRedis:
 		u.Scheme, u.RawQuery, u.Path = "redis", "", "/0"
+	case engineClickHouse:
+		// El protocolo nativo (9000), el de clickhouse-go y clickhouse-client.
+		u.Scheme, u.RawQuery = "clickhouse", ""
 	}
 	return u.String()
 }
