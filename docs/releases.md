@@ -4,7 +4,7 @@ Cómo se distribuyen los binarios de kindling y cómo se crea una release.
 
 Desde v0.13.0 hay **un repositorio, una etiqueta y una release**: el núcleo
 (`kling`, el daemon, el agente de invitado, Chispa y `kling-vz`) y las
-extensiones oficiales (`mcp`, `sandbox`, el operador de Kubernetes)
+extensiones oficiales (`mcp`, `sandbox`, `db`, `phone`, el operador de Kubernetes)
 salen juntos con la misma versión. Los ejemplos de `examples/` (como la demo de
 domótica, `kindling-domotica`) no se publican: se compilan desde el repo. Todos los binarios de una release son
 compatibles entre sí; no hay tabla de compatibilidades que consultar. Las
@@ -33,6 +33,8 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `kling-mcp-<os>-<arch>` | extensión MCP: `mcp`, `add`, `connect`, `gateway`… | las cuatro |
 | `kling-bridge-<os>-<arch>` | puente stdio↔HTTP; *companion* de `mcp` | las cuatro |
 | `kling-sandbox-<os>-<arch>` | extensión de sandboxes multiinquilino (gateway, plantillas, fondo precalentado) | las cuatro |
+| `kling-db-<os>-<arch>` | extensión de bases de datos desechables (`kling db`) | las cuatro |
+| `kling-phone-<os>-<arch>` | extensión de teléfonos Android (`kling phone`) | las cuatro |
 | `kindling-operator-linux-<arch>` | operador de Kubernetes | linux |
 | `kindling-mcp-host.tar.gz` | lo que va en el host del daemon para MCP: unidades de systemd (`kling-gateway`, `kling-heal`), constructores y puente de invitado | — |
 | `kindling-sandbox-host.tar.gz` | unidad `kling-sandbox.service` y lo que necesita en el host | — |
@@ -147,7 +149,7 @@ git push origin vX.Y.Z
 `.github/workflows/release.yml`:
 
 1. **build** (matriz os/arch): `kling`, `kling-guest`, `kling-chispa`,
-   `kling-mcp`, `kling-bridge`, `kling-sandbox` y, en Linux,
+   `kling-mcp`, `kling-bridge`, `kling-sandbox`, `kling-db`, `kling-phone` y, en Linux,
    `kindling-operator`; empaqueta los tres `.tar.gz`.
 2. **vz** (macos-14): compila y firma `kling-vz-darwin-arm64`.
 3. **release**: junta todo, genera **un** `SHA256SUMS`, publica como notas el
