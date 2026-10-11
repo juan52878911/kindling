@@ -44,7 +44,9 @@ package machine
 // aleatorios que ya estaban sembrados. El reloj y el CSPRNG del invitado se
 // resiembran al restaurar (resyncGuest, VMGENID), pero un proceso que ya tenía
 // su semilla en memoria la conserva: es lo mismo que pasa con cualquier
-// instancia de un snapshot dorado.
+// instancia de un snapshot dorado. Lo que sí se puede hacer es reiniciar el
+// servicio de la imagen o mandarle una señal en cada copia (on_restore en
+// service.json, `kling image import -on-restore`; ver docs/imagenes.md).
 
 import (
 	"context"

@@ -45,6 +45,7 @@ func imagesImport(args []string) error {
 	var entrypoint stringsFlag
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
 	restart := fs.String("restart", "", "restart the service when it exits: always, on-failure or no (default on-failure)")
+	onRestore := fs.String("on-restore", "", "in every copy of a snapshot of it: restart the service, or send it signal:SIGUSR1, so it doesn't keep the snapshot's random state (default none)")
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
@@ -88,7 +89,13 @@ func imagesImport(args []string) error {
 	default:
 		return fmt.Errorf("-restart must be always, on-failure or no, not %q", *restart)
 	}
-	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env,
+	if _, _, err := api.ParseOnRestore(*onRestore); err != nil {
+		return err
+	}
+	if *onRestore == api.OnRestoreNone {
+		*onRestore = ""
+	}
+	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
 		Restart: cmp.Or(*restart, api.RestartOnFailure)}

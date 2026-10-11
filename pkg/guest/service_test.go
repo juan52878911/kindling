@@ -268,3 +268,104 @@ func TestLoadServiceUnknownSignalUsesTerm(t *testing.T) {
 		t.Fatalf("SIGRTMIN+3: %v %v", s, err)
 	}
 }
+
+// Restart lo relanza aunque su política sea "no", y el proceso es otro.
+func TestServiceRestartAunqueNoRelance(t *testing.T) {
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "echo up; while :; do sleep 0.05; done"}, Restart: api.RestartNo})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	defer s.Stop()
+	waitUntil(t, "the service", func() bool { return s.Status(0).Running })
+	antes := s.Status(0).PID
+	if err := s.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	st := s.Status(0)
+	if !st.Running || st.Starts != 2 || st.PID == antes {
+		t.Fatalf("tras Restart = %+v (pid antes %d)", st, antes)
+	}
+}
+
+// Uno que ignora su señal de parada se lleva SIGKILL y vuelve igual.
+func TestServiceRestartMataAlQueNoSale(t *testing.T) {
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "trap '' TERM; while :; do sleep 0.05; done"}, StopTimeoutSeconds: 1})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	defer s.Stop()
+	waitUntil(t, "the service", func() bool { return s.Status(0).Running })
+	t0 := time.Now()
+	if err := s.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(t0); d < time.Second || d > 8*time.Second {
+		t.Fatalf("Restart tardó %s, quiero el plazo de parada y poco más", d)
+	}
+	if st := s.Status(0); !st.Running || st.Starts != 2 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// Esperando entre dos reinicios, Restart lo lanza ya, sin agotar la espera.
+func TestServiceRestartCortaLaEspera(t *testing.T) {
+	marca := filepath.Join(t.TempDir(), "vivo")
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "test -f " + marca + " || exit 1; while :; do sleep 0.05; done"}})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	defer s.Stop()
+	// Falla dos veces: la segunda espera ya es de 2 s.
+	waitUntil(t, "two failures", func() bool { return s.Status(0).Starts >= 2 })
+	os.WriteFile(marca, nil, 0o644)
+	t0 := time.Now()
+	if err := s.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(t0); d > 1500*time.Millisecond {
+		t.Fatalf("Restart esperó %s: no cortó la espera entre reinicios", d)
+	}
+	if !s.Status(0).Running {
+		t.Fatalf("%+v", s.Status(0))
+	}
+}
+
+func TestServiceRestartParadoOAcabado(t *testing.T) {
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"true"}, Restart: api.RestartNo})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	<-s.done
+	if err := s.Restart(); err == nil {
+		t.Fatal("Restart de un servicio que ya acabó con política no")
+	}
+	s = newTestService(t, api.ServiceSpec{Argv: []string{"sleep", "30"}})
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	s.Stop()
+	if err := s.Restart(); err == nil {
+		t.Fatal("Restart de un servicio parado")
+	}
+}
+
+func TestServiceSignalYOnRestore(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "trap 'touch " + dir + "/hup' HUP; while :; do sleep 0.05; done"},
+		OnRestore: "signal:SIGHUP"}) // HUP es 1 en Linux y en macOS
+	s.Start([]string{"PATH=/usr/bin:/bin"})
+	defer s.Stop()
+	waitUntil(t, "the service", func() bool { return s.Status(0).Running })
+	time.Sleep(100 * time.Millisecond) // que el trap esté puesto
+	act := onRestore()
+	if act == nil {
+		t.Fatal("onRestore = nil con on_restore signal:SIGHUP")
+	}
+	if err := act(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the signal", func() bool { _, err := os.Stat(filepath.Join(dir, "hup")); return err == nil })
+	if st := s.Status(0); st.Starts != 1 {
+		t.Fatalf("una señal no lo reinicia: %+v", st)
+	}
+}
+
+func TestCheckServiceSpecOnRestore(t *testing.T) {
+	for v, ok := range map[string]bool{"": true, "none": true, "restart": true, "signal:SIGUSR1": true, "signal:HUP": true,
+		"signal:": false, "signal:NOPE": false, "reload": false} {
+		err := checkServiceSpec(api.ServiceSpec{Argv: []string{"x"}, OnRestore: v})
+		if (err == nil) != ok {
+			t.Errorf("on_restore %q: err = %v", v, err)
+		}
+	}
+}

@@ -61,7 +61,13 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 			return nil, err
 		}
 	}
-	return m.commit(ctx, ref, name, o.Replace, nil, false, false)
+	// Con la máquina aún en marcha: pausada, el agente no contesta.
+	aviso := m.avisoProcesosVivos(ctx, ref)
+	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false)
+	if err == nil && aviso != "" {
+		snap.Warnings = append(snap.Warnings, aviso)
+	}
+	return snap, err
 }
 
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se

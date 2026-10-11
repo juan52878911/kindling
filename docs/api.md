@@ -647,6 +647,12 @@ primer cliente al thaw, y la petición siguiente tarda lo de siempre. En macOS
 Reconstruir la imagen con un `kling-guest` actual (`kling image build`) o
 refrescar su puente MCP (`kling mcp refresh-bridge`) lo arregla.
 
+La respuesta lleva además `generation`: cuántas restauraciones lleva el
+invitado, el número que el agente acaba de escribir en
+`/run/kindling/generation` para los procesos (un agente anterior no lo manda).
+El kernel queda resembrado, pero no lo que un proceso vivo en el dorado guardó
+en su memoria: para eso, `-on-restore` en `docs/imagenes.md` (issue #175).
+
 Solo el host debe llamar a `/resync` (o a `/volume/*`, `/exec`, `/files`): quien
 reenvíe peticiones de terceros al puerto del agente tiene que cortar esas rutas
 (`guest.IsControlPath`). Ver SECURITY.md.
@@ -671,7 +677,15 @@ Rutas del agente, de control (el gateway no las reenvía):
 GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"...","start_period_seconds":N}
 POST /hooks?restore=instance|thaw|manual → 202 (409 si ya corren)
 GET  /meminfo → {"total_mib":N,"available_mib":N}
+GET  /procs   → {"count":N,"names":["node"],"covered":N}   (capacidad procs)
 ```
+
+Si el servicio de la imagen declara `on_restore` (`service.json`; `kling image
+import -on-restore`), en una restauración `instance` el agente lo reinicia o le
+manda su señal al final de la tanda de ganchos, y la imagen cuenta como "con
+ganchos" (`has_hooks`) aunque no traiga ninguno. `/procs` es lo que pregunta
+`kling save` para avisar de los procesos que el dorado copiaría con sus
+aleatorios en memoria; `covered` son los del servicio con `on_restore`.
 
 El `/resync` devuelve además ese estado (`ready`), así que una imagen que no
 declara nada no cuesta ni una petición más por restauración; con ganchos, el

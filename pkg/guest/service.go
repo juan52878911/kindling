@@ -50,8 +50,12 @@ type Service struct {
 	lastExit string
 	err      string
 	stopping bool
-	done     chan struct{} // se cierra cuando el bucle termina
-	wake     chan struct{} // corta la espera entre reinicios al parar
+	// restartReq: Restart pidió relanzarlo. El bucle lo relanza en cuanto
+	// sale, sin mirar la política de reinicio ni esperar.
+	restartReq bool
+	done       chan struct{} // se cierra cuando el bucle termina
+	wake       chan struct{} // corta la espera entre reinicios al parar
+	kick       chan struct{} // corta la espera entre reinicios para relanzar ya
 }
 
 var serviceState struct {
@@ -100,6 +104,9 @@ func checkServiceSpec(s api.ServiceSpec) error {
 	if s.StopTimeoutSeconds < 0 || s.StopTimeoutSeconds > 3600 {
 		return errors.New("stop_timeout_seconds out of range")
 	}
+	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -134,7 +141,7 @@ func (a *Agent) startService(svc *Service) {
 // Start lanza el bucle que arranca y relanza el servicio.
 func (s *Service) Start(env []string) {
 	s.mu.Lock()
-	s.done, s.wake = make(chan struct{}), make(chan struct{})
+	s.done, s.wake, s.kick = make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
 	s.mu.Unlock()
 	serviceState.mu.Lock()
 	serviceState.svc = s
@@ -155,10 +162,20 @@ func (s *Service) loop(env []string) {
 		t0 := time.Now()
 		err := s.runOnce(env, w)
 		s.mu.Lock()
-		stopping := s.stopping
+		stopping, again := s.stopping, s.restartReq
+		s.restartReq = false
 		s.mu.Unlock()
 		if stopping {
 			return
+		}
+		if again {
+			select { // el aviso de Restart ya no hace falta
+			case <-s.kick:
+			default:
+			}
+			fmt.Fprintf(w, "kling-guest: service restarted after a restore (%v)\n", errOrOK(err))
+			backoff = time.Second
+			continue
 		}
 		switch s.spec.Restart {
 		case api.RestartNo:
@@ -176,6 +193,10 @@ func (s *Service) loop(env []string) {
 		fmt.Fprintf(w, "kling-guest: service exited (%v), restarting in %s\n", errOrOK(err), backoff)
 		select {
 		case <-time.After(backoff):
+		case <-s.kick:
+			s.mu.Lock()
+			s.restartReq = false
+			s.mu.Unlock()
 		case <-s.wake:
 			return
 		}
@@ -502,6 +523,157 @@ func (s *Service) Stop() {
 	log.Printf("service: still running %s after the stop signal; killing it", timeout)
 	KillGroup(cmd)
 	<-s.done
+}
+
+// Restart para el proceso del servicio con su señal de parada (SIGKILL a su
+// grupo pasado StopTimeoutSeconds) y espera a que el bucle lo vuelva a lanzar,
+// sea cual sea su política de reinicio. Si estaba esperando entre dos
+// reinicios, lo lanza ya. Es lo que hace OnRestoreRestart en cada copia de un
+// dorado: un proceso nuevo siembra sus aleatorios del kernel ya resembrado.
+func (s *Service) Restart() error {
+	s.mu.Lock()
+	if s.done == nil || s.stopping {
+		s.mu.Unlock()
+		return errors.New("the service is stopped")
+	}
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return errors.New("the service exited and its restart policy keeps it down")
+	default:
+	}
+	s.restartReq = true
+	cmd, starts := s.cmd, s.starts
+	s.mu.Unlock()
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(stopSignal(s.spec))
+	}
+	timeout := time.Duration(s.spec.StopTimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	deadline, killed := time.Now().Add(timeout), false
+	for {
+		s.mu.Lock()
+		n, cur, pending, launchErr := s.starts, s.cmd, s.restartReq, s.err
+		s.mu.Unlock()
+		switch {
+		case n > starts && cur != nil:
+			// Si Restart llegó con el bucle lanzando el proceso (s.cmd aún
+			// sin poner), ese proceso ya es posterior a la restauración y
+			// nadie consumió la petición: se retira, o la próxima salida
+			// normal se relanzaría sin esperar.
+			s.mu.Lock()
+			s.restartReq = false
+			s.mu.Unlock()
+			select {
+			case <-s.kick:
+			default:
+			}
+			return nil
+		case !pending && cur == nil && launchErr != "":
+			return fmt.Errorf("restarting the service: %s", launchErr)
+		}
+		select {
+		case <-s.done:
+			return errors.New("the service loop ended while restarting it")
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			if killed || cur == nil {
+				return errors.New("the service did not come back after the restart")
+			}
+			log.Printf("service: still running %s after the stop signal; killing it to restart it", timeout)
+			KillGroup(cur)
+			deadline, killed = time.Now().Add(5*time.Second), true
+		}
+	}
+}
+
+// restartListenTimeout es cuánto se espera, tras reiniciar el servicio, a que
+// vuelva a escuchar en sus puertos.
+var restartListenTimeout = 60 * time.Second
+
+// restartAndListen es Restart esperando, además, a que el proceso nuevo vuelva
+// a escuchar en los puertos TCP en que escuchaba el viejo. Sin eso, una imagen
+// sin sonda de "listo" (sin HEALTHCHECK ni EXPOSE) se daba por lista con el
+// servicio aún arrancando, y la primera conexión a la copia se rechazaba.
+func (s *Service) restartAndListen(root string, timeout time.Duration) error {
+	antes := map[int]bool{}
+	if st := s.Status(0); st.Running {
+		antes = listeningPorts(root, st.PID)
+	}
+	if err := s.Restart(); err != nil {
+		return err
+	}
+	if len(antes) == 0 {
+		return nil
+	}
+	for end := time.Now().Add(timeout); ; time.Sleep(20 * time.Millisecond) {
+		st := s.Status(0)
+		if !st.Running {
+			return fmt.Errorf("the service exited after the restart (%s)", st.LastExit)
+		}
+		ahora := listeningPorts(root, st.PID)
+		falta := 0
+		for p := range antes {
+			if !ahora[p] {
+				falta = p
+				break
+			}
+		}
+		if falta == 0 {
+			return nil
+		}
+		if time.Now().After(end) {
+			return fmt.Errorf("the service is not listening on port %d %s after the restart", falta, timeout)
+		}
+	}
+}
+
+// Signal manda sig al proceso del servicio (no a su grupo, como la señal de
+// parada).
+func (s *Service) Signal(sig syscall.Signal) error {
+	s.mu.Lock()
+	cmd := s.cmd
+	s.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("the service is not running")
+	}
+	return cmd.Process.Signal(sig)
+}
+
+// onRestore es lo que hay que hacerle al servicio en una copia de un dorado
+// (api.ServiceSpec.OnRestore), o nil si nada: sin servicio, sin OnRestore, o
+// arrancado sin el entorno de la máquina.
+func onRestore() func() error {
+	serviceState.mu.Lock()
+	s := serviceState.svc
+	serviceState.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	started := s.done != nil
+	s.mu.Unlock()
+	if !started {
+		return nil
+	}
+	action, sig, err := api.ParseOnRestore(s.spec.OnRestore)
+	if err != nil {
+		return nil // LoadService ya lo validó
+	}
+	switch action {
+	case api.OnRestoreRestart:
+		return func() error { return s.restartAndListen(procRoot, restartListenTimeout) }
+	case api.OnRestoreSignal:
+		return func() error { return s.Signal(syscall.Signal(sig)) }
+	}
+	return nil
 }
 
 // Status es lo que devuelve GET /service, con los últimos tail bytes del log.
