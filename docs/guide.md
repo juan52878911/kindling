@@ -1387,7 +1387,10 @@ identifier `:tok`. It works on running, frozen and stopped machines.
 
 For an MCP service nobody is there to hand a key to each replica the gateway wakes.
 Tie it to the template instead: every instance born from it gets its own placeholder
-at start, before the first session (the bridge reads MMDS when it spawns a session):
+at start, before the first session (the bridge reads MMDS when it spawns a session).
+If the machine you saved already had a credential for that variable, its copies keep
+that placeholder instead: a process alive in the template read it at boot and still
+holds it (each copy's proxy has its own key, so sharing a placeholder shares nothing):
 
 ```sh
 kling mcp import stripe -egress allowlist -allow api.stripe.com

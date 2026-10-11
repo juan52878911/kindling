@@ -561,6 +561,16 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// de un fork). Tras reiniciar el daemon se verifican otra vez, como
 	// cualquier dorado (integridadYaVista).
 	m.anotarIntegridad(name, dir)
+	// Los marcadores de sus credenciales: los procesos vivos en el volcado los
+	// tienen en memoria, y cada copia tiene que reconocerlos (ver
+	// marcadoresDorado). Un fallo deja copias con marcadores nuevos, como
+	// antes: se avisa y el dorado vale.
+	if !deFork {
+		if err := m.guardarMarcadoresDorado(name, mc.ID); err != nil {
+			avisosCommit = append(avisosCommit, fmt.Sprintf("recording the credential placeholders of %s: %v; "+
+				"processes alive in this template may not reach their credentials in its copies", name, err))
+		}
+	}
 	t.marca("meta")
 	log.Printf("commit %s -> %s: %s", mc.Name, name, t)
 	// El espejo de su memoria en el almacén, ya, en segundo plano: si no, lo
@@ -1699,7 +1709,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// aborta la restauración por lo dicho arriba.
 	var dominiosCred, anyDBCred []string
 	if len(credsPlantilla) > 0 {
-		creds, _, err := m.entregarCredenciales(ctx, id, netcfg, c, credsPlantilla)
+		creds, _, err := m.entregarCredenciales(ctx, id, netcfg, c, credsPlantilla, m.marcadoresDorado(req.From))
 		if err != nil {
 			return abortar(fmt.Errorf("handing %s the credentials of template %s: %w", mc.Name, req.From, err))
 		}

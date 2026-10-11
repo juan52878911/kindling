@@ -50,6 +50,9 @@ type doctorInput struct {
 	cliVersion string
 	info       *api.Info
 	infoErr    error
+	// snaps son los dorados del daemon (nil si no se pudieron listar): los
+	// stale no se pueden restaurar con el VMM de ahora.
+	snaps      []*api.Snapshot
 	plugins    []*plugin.Plugin
 	completion bool // $_KLING_COMPLETION: lo exportan los scripts de completado
 	// completionRC es que el rc de la shell carga el fichero que escribió
@@ -106,6 +109,9 @@ func cmdDoctor(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	in.info, in.infoErr = api.NewClient(endpoint).Info(ctx)
+	if in.infoErr == nil {
+		in.snaps, _ = api.NewClient(endpoint).Snapshots(ctx)
+	}
 	cancel()
 
 	checks := doctorChecks(in)
@@ -191,6 +197,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		if c, ok := checkAuthz(in.info.Authz); ok {
 			out = append(out, c)
 		}
+		if c, ok := checkStale(in.snaps); ok {
+			out = append(out, c)
+		}
 	}
 
 	for _, p := range in.plugins {
@@ -256,6 +265,29 @@ func doctorChecks(in doctorInput) []doctorCheck {
 	}
 	out = append(out, dir)
 	return out
+}
+
+// checkStale avisa de los dorados que no se pueden restaurar con el VMM de
+// ahora (otra versión de Firecracker o de kling-vz, docs/actualizar.md): run
+// -from da 409 con ellos. Sin ninguno no hay línea: no es algo que haya que
+// tener presente cuando todo está bien.
+func checkStale(snaps []*api.Snapshot) (doctorCheck, bool) {
+	var names []string
+	for _, s := range snaps {
+		if s != nil && s.Stale != "" {
+			names = append(names, s.Name)
+		}
+	}
+	if len(names) == 0 {
+		return doctorCheck{}, false
+	}
+	shown := names
+	if len(shown) > 5 {
+		shown = append(shown[:5:5], fmt.Sprintf("and %d more", len(names)-5))
+	}
+	return doctorCheck{Name: "templates", State: doctorWarn,
+		Detail: fmt.Sprintf("%d stale (made with another VMM version, can't be restored): %s", len(names), strings.Join(shown, ", ")),
+		Fix:    "kling template inspect <name> says why; re-save it with kling save -replace <machine> <name>"}, true
 }
 
 // completionInRC dice si el rc de la shell ya carga el completado instalado

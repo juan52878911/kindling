@@ -468,8 +468,12 @@ func fusionarSpecs(previas, specs []api.CredentialSpec) []api.CredentialSpec {
 // el almacén tiene una credencial que el invitado aún no ve y la siguiente
 // entrega (o un thaw) la repone; y un marcador sin proxy detrás no vale nada
 // fuera de esta máquina. Devuelve el juego completo y cuántas eran nuevas.
+//
+// marcadores, si no es nil, son los que tenía el dorado por variable
+// (marcadoresDorado): una credencial nueva para una de ellas lleva ese
+// marcador y no uno recién hecho.
 func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *knet.Net, c *fc.Client,
-	specs []api.CredentialSpec) (creds []credproxy.Credential, nuevas int, err error) {
+	specs []api.CredentialSpec, marcadores map[string]string) (creds []credproxy.Credential, nuevas int, err error) {
 	if err := validarSpecs(specs); err != nil {
 		return nil, 0, err
 	}
@@ -493,9 +497,11 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 			creds[i].Placeholder = ph
 			continue
 		}
-		ph, err := credproxy.NuevoMarcador()
-		if err != nil {
-			return nil, 0, err
+		ph := marcadores[s.Env]
+		if ph == "" {
+			if ph, err = credproxy.NuevoMarcador(); err != nil {
+				return nil, 0, err
+			}
 		}
 		c := credencialDeSpec(s)
 		c.Placeholder = ph
@@ -678,6 +684,73 @@ func dominiosDe(creds []credproxy.Credential) []string {
 }
 
 // ── credenciales de plantilla ────────────────────────────────────────────────
+
+// MARCADORES DEL DORADO. Un proceso vivo en el dorado leyó al arrancar el
+// marcador de su credencial (PGPASSWORD=kling-ph-...) y lo guarda en su
+// entorno o en su pool de conexiones. Si cada copia recibía un marcador
+// nuevo, ese proceso seguía mandando el del dorado y el proxy de la copia lo
+// rechazaba (bad_placeholder; visto con Hindsight). Así que al guardar se
+// apunta, por variable, el marcador que tenía la máquina, y las credenciales de
+// plantilla que se entregan a una copia lo reutilizan. Un marcador no es la
+// clave: solo vale a través del proxy de cada máquina, que tiene la suya.
+
+// marcadoresDoradoPath es donde se apuntan, junto al almacén de la plantilla.
+func (m *Manager) marcadoresDoradoPath(name string) string {
+	return filepath.Join(m.root, "secrets", "credentials", name+".placeholders.json")
+}
+
+// guardarMarcadoresDorado apunta los marcadores de la máquina id para el
+// dorado name, o borra los de un dorado anterior con ese nombre si la máquina
+// no tiene credenciales.
+func (m *Manager) guardarMarcadoresDorado(name, id string) error {
+	creds, err := m.cargarCredenciales(id)
+	if err != nil {
+		return err
+	}
+	p := m.marcadoresDoradoPath(name)
+	if len(creds) == 0 {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	porEnv := make(map[string]string, len(creds))
+	for _, c := range creds {
+		porEnv[c.Env] = c.Placeholder
+	}
+	b, err := json.Marshal(porEnv)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// marcadoresDorado son los que apuntó guardarMarcadoresDorado; nil si no hay
+// o no se pueden leer (entonces cada copia lleva marcadores nuevos, como antes).
+func (m *Manager) marcadoresDorado(name string) map[string]string {
+	b, err := os.ReadFile(m.marcadoresDoradoPath(name))
+	if err != nil {
+		return nil
+	}
+	var porEnv map[string]string
+	if json.Unmarshal(b, &porEnv) != nil {
+		return nil
+	}
+	for env, ph := range porEnv {
+		// Lo que NuevoMarcador produce: el prefijo y 36 dígitos hex.
+		if h, ok := strings.CutPrefix(ph, credproxy.PlaceholderPrefix); !ok || len(h) != 36 || strings.Trim(h, "0123456789abcdef") != "" {
+			delete(porEnv, env)
+		}
+	}
+	return porEnv
+}
 
 // cargarCredencialesPlantilla lee las credenciales atadas a la plantilla name.
 // Sin fichero, nil, nil.

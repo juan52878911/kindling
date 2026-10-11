@@ -154,3 +154,39 @@ func TestEgressForRun(t *testing.T) {
 		}
 	})
 }
+
+// -ttl 0 explícito gana al defaults.ttl de la configuración: la ayuda dice
+// "0 = never" y antes la máquina se congelaba igual a los 600 s.
+func TestTTLForRun(t *testing.T) {
+	mk := func(args ...string) *flag.FlagSet {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.Int("ttl", 0, "")
+		_ = fs.Parse(args)
+		return fs
+	}
+	for _, c := range []struct {
+		args       []string
+		flag, conf int
+		want       int
+	}{
+		{nil, 0, 600, 600},                 // sin flag: la configuración
+		{[]string{"-ttl", "0"}, 0, 600, 0}, // 0 explícito: nunca
+		{[]string{"-ttl", "60"}, 60, 600, 60},
+		{nil, 0, 0, 0},
+	} {
+		if got := ttlForRun(mk(c.args...), c.flag, c.conf); got != c.want {
+			t.Errorf("ttlForRun(%v, config %d) = %d, want %d", c.args, c.conf, got, c.want)
+		}
+	}
+}
+
+func TestFlagsGiven(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	for _, n := range []string{"cpus", "mem", "mem-max", "disk", "from"} {
+		fs.String(n, "", "")
+	}
+	_ = fs.Parse([]string{"-from", "tpl", "-disk", "2G", "-cpus", "4"})
+	if got := flagsGiven(fs, "cpus", "mem", "mem-max", "disk"); len(got) != 2 || got[0] != "cpus" || got[1] != "disk" {
+		t.Fatalf("flagsGiven = %v, want [cpus disk]", got)
+	}
+}

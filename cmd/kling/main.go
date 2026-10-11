@@ -284,6 +284,31 @@ func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
 	return pct
 }
 
+// flagsGiven son los de names que se dieron en la línea de comandos, en ese
+// orden.
+func flagsGiven(fs *flag.FlagSet, names ...string) []string {
+	dados := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { dados[f.Name] = true })
+	var out []string
+	for _, n := range names {
+		if dados[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// ttlForRun es el TTL de kling run: el del flag si se dio, aunque sea 0 ("0 =
+// never" en la ayuda); si no, el de la configuración. Con config.Or un -ttl 0
+// explícito se leía como "no dado" y la máquina se congelaba con el
+// defaults.ttl de la configuración.
+func ttlForRun(fs *flag.FlagSet, flagTTL, cfgTTL int) int {
+	if len(flagsGiven(fs, "ttl")) > 0 {
+		return flagTTL
+	}
+	return cfgTTL
+}
+
 // egressForRun decide qué egress y qué dominios mandar en la petición de
 // arranque. Con -from y sin -egress explícito en la línea de comandos, se
 // mandan vacíos para que runFrom() (internal/machine/snapshot.go) herede la
@@ -539,6 +564,15 @@ func cmdRun(args []string) error {
 	if _, err := api.MachineEnvMap(env); err != nil {
 		return err
 	}
+	if *from != "" {
+		// La copia tiene las vCPU, la memoria y el disco del dorado: van en el
+		// volcado. Antes se ignoraban sin decir nada y parecía que -cpus 4
+		// había funcionado.
+		if dados := flagsGiven(fs, "cpus", "mem", "mem-max", "disk"); len(dados) > 0 {
+			fmt.Fprintf(os.Stderr, "warning: %s ignored with -from: a copy has the vCPUs, memory and disk of the template %s\n",
+				"-"+strings.Join(dados, ", -"), *from)
+		}
+	}
 	if len(env) > 0 || (*disk > 0 && *from == "") {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
 		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
@@ -570,7 +604,7 @@ func cmdRun(args []string) error {
 		DiskMiB:      *disk,
 		Egress:       egressReq,
 		AllowDomains: allowReq,
-		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
+		TTLSeconds:   ttlForRun(fs, *ttl, cfg.Defaults.TTL),
 		// El flag va en CPUPct; el valor por defecto de la configuración, aparte:
 		// el del dorado y el de la receta de la imagen le ganan (ver RunRequest).
 		CPUPct:              resolveCPUPct(fs, *cpuPct, *cpu),
