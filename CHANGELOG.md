@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
+
 ## [0.18.0] - 2026-10-11
 
 On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and rolls back on failure.

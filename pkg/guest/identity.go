@@ -13,17 +13,20 @@ package guest
 // lo usa. Un enlace simbólico (/var/lib/dbus/machine-id → /etc/machine-id) no
 // se toca: ya sigue al otro.
 //
-// Las claves de host SSH no se regeneran aquí: sshd las carga al arrancar y
-// regenerarlas pide ssh-keygen dentro de la imagen y reiniciar sshd. kling save
-// avisa de ellas (hostKeys) para que la imagen lo haga en un gancho.
+// Las claves de host SSH se regeneran en la tanda de ganchos (sshRenewal),
+// porque tarda; si la imagen no trae ssh-keygen, kling save avisa de ellas.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 // machineIDFiles son los machine-id que se renuevan (variable para los tests).
@@ -80,4 +83,78 @@ func esMachineID(s string) bool {
 func hostKeys() []string {
 	m, _ := filepath.Glob(sshHostKeyGlob)
 	return m
+}
+
+// sshKeygenPaths son los sitios donde se busca ssh-keygen en el invitado
+// (variable para los tests).
+var sshKeygenPaths = []string{"/usr/bin/ssh-keygen", "/usr/local/bin/ssh-keygen", "/bin/ssh-keygen"}
+
+// sshKeygen es el ssh-keygen de la imagen, o "" si no trae.
+func sshKeygen() string {
+	for _, p := range sshKeygenPaths {
+		if isExec(p) == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// sshRenewal es lo que hay que hacer con las claves de host SSH en una copia,
+// o nil si nada: la imagen no tiene claves o no tiene con qué regenerarlas
+// (entonces `kling save` avisa, ver ProcsHandler).
+//
+// Cada clave se regenera con su tipo (sale del nombre: ssh_host_<tipo>_key),
+// sin añadir tipos que la imagen no tenía. Después, SIGHUP al sshd que escucha:
+// desde OpenSSH 9.8 el proceso que escucha carga las claves al arrancar y no
+// las vuelve a leer hasta un HUP (medido: OpenSSH 10.0 seguía anunciando la
+// clave vieja; 9.7, que vuelve a ejecutarse en cada conexión, cogía la nueva).
+// Corre en la tanda de ganchos, no en /resync: una RSA de 3072 bits tarda.
+func sshRenewal() func() error {
+	keys, gen := hostKeys(), sshKeygen()
+	if len(keys) == 0 || gen == "" {
+		return nil
+	}
+	return func() error {
+		for _, k := range keys {
+			tipo := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(k), "ssh_host_"), "_key")
+			if tipo == "" || strings.ContainsAny(tipo, "/ ") {
+				continue
+			}
+			os.Remove(k)
+			os.Remove(k + ".pub")
+			ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+			out, err := runArgs(ctx, gen, "-q", "-t", tipo, "-N", "", "-C", "", "-f", k)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("regenerating %s: %s", k, conSalida(err, out))
+			}
+		}
+		for _, pid := range sshdListeners(procRoot) {
+			_ = syscall.Kill(pid, syscall.SIGHUP)
+		}
+		log.Printf("post-restore: %d SSH host key(s) regenerated", len(keys))
+		return nil
+	}
+}
+
+// sshdListeners son los sshd que escuchan: los que se llaman sshd y cuyo padre
+// no es otro sshd (las sesiones son hijas suyas, y un HUP las cortaría).
+func sshdListeners(root string) []int {
+	ents, _ := os.ReadDir(root)
+	var out []int
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		st, ok := readProcStat(root, pid)
+		if !ok || st.comm != "sshd" {
+			continue
+		}
+		if padre, ok := readProcStat(root, st.ppid); ok && strings.HasPrefix(padre.comm, "sshd") {
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out
 }
