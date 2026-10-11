@@ -20,7 +20,7 @@ package net
 //
 // MODELO DE AMENAZA (el invitado es HOSTIL):
 //   - Dominio no listado: el resolver ni lo reenvía; responde REFUSED. Esto
-//     cierra el DNS-tunneling por nombres arbitrarios que menciona el TODO de
+//     cierra el DNS-tunneling por nombres arbitrarios que mencionaba el TODO de
 //     DNSResolver: el invitado ya no puede hacer que el host reenvíe
 //     datos-en-subdominios a un NS autoritativo cualquiera.
 //   - Resolver ajeno: imposible, el 53 está DNATeado a este resolver (firewall).
