@@ -54,6 +54,9 @@ ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
 bad()  { printf "  \033[31mFAIL\033[0m  %s\n     want: %s\n     got:  %s\n" "$1" "$2" "$3"; fail=$((fail+1)); }
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
+# vuelta_atras: upgrade dice "rolled back to <versión>" con la que da el binario
+# viejo: "0.17.0" el de la release (install.sh), "v0.17.0" uno sellado a mano.
+vuelta_atras() { contiene "$1" "rolled back to $OLD_TAG" || contiene "$1" "rolled back to ${OLD_TAG#v}"; }
 # mismo_estado compara dos state.json por su contenido: v0.17 los escribe
 # desde un mapa, en otro orden cada vez.
 mismo_estado() {
@@ -241,7 +244,7 @@ kn stop up-stopped >/dev/null 2>&1
 # ── 5. -rollback a mano ───────────────────────────────────────────────────────
 step "5. kling upgrade -rollback"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
-[ $rc = 0 ] && contiene "$out" "rolled back to $OLD_TAG" && ok "rollback" || bad "rollback" "rolled back to $OLD_TAG" "rc=$rc: $out"
+[ $rc = 0 ] && vuelta_atras "$out" && ok "rollback" || bad "rollback" "rolled back to $OLD_TAG" "rc=$rc: $out"
 contiene "$out" "freezing $FROZEN again" && ok "the machine the new daemon woke was frozen again first" \
   || bad "refreeze before rollback" "freezing $FROZEN again" "$out"
 v=$(k version 2>&1 | sed -n 2p)
@@ -264,7 +267,7 @@ out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again" || bad "second upgrade" "upgraded" "rc=$rc: $out"
 systemctl stop "$NAME"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
-[ $rc = 0 ] && contiene "$out" "no daemon answers" && contiene "$out" "rolled back to $OLD_TAG" \
+[ $rc = 0 ] && contiene "$out" "no daemon answers" && vuelta_atras "$out" \
   && ok "rollback found the backup through the unit" || bad "rollback without a daemon" "rolled back to $OLD_TAG" "rc=$rc: $out"
 v=$(k version 2>&1 | sed -n 2p)
 contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"

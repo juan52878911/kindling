@@ -149,8 +149,6 @@ proceso se cayera a la vista. En Linux, limpio siempre.
 
 ## Pendiente
 
-- La release no publica `kling-phone` todavía (como `kling-db`): se compila con
-  `make -C ext/phone install`.
 - El rol de inquilino con authz está probado con el daemon falso, no con un daemon con
   política.
 - Una arista del grafo que reparta el token a los dos extremos (el núcleo no sabe de
