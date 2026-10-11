@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
+
 ## [0.18.0] - 2026-10-11
 
 On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and rolls back on failure.

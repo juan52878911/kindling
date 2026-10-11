@@ -218,9 +218,9 @@ Por orden:
 1. **Rápido.** pgvector y PostGIS en la receta de Postgres (hay que comprobar que Alpine
    los empaqueta), un golden de Valkey de verdad (el guion ya acepta
    `valkey-server`/`valkey-cli`) y esta tabla por motor en la documentación de producto.
-2. **MySQL 8.4 y 9 de Oracle.** El hash de `caching_sha2_password` (SHA-256-crypt, 5000
-   rondas) calculado en el host: MySQL 9 ya no trae `mysql_native_password`. Abre también
-   Percona y los orígenes de `clone` en MySQL.
+2. **Hecho.** MySQL 8.4 y 9 de Oracle, con el hash de `caching_sha2_password` calculado en
+   el host (#114, docs/mysql.md). Percona y los orígenes de `clone` en MySQL siguen
+   pendientes.
 3. **Almacenamiento de objetos (S3).**
    - Un golden de almacén de objetos con clave por copia: Garage o SeaweedFS mejor que
      MinIO, que dejó de publicar binarios de su edición comunitaria y es AGPL. SigV4 es
