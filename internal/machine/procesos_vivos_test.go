@@ -22,23 +22,28 @@ func TestAvisoProcesosVivos(t *testing.T) {
 	mc.State = api.StateRunning
 
 	// Un agente que no anuncia /procs no se pregunta.
-	if a := m.avisoProcesosVivos(t.Context(), id); a != "" {
+	if a := m.avisoProcesosVivos(t.Context(), id); len(a) != 0 {
 		t.Fatalf("sin la capacidad: %q", a)
 	}
 	mc.Agent = &api.GuestAgent{Caps: []string{api.GuestCapProcs}}
-	a := m.avisoProcesosVivos(t.Context(), id)
+	a := strings.Join(m.avisoProcesosVivos(t.Context(), id), "|")
 	if !strings.HasPrefix(a, "2 processes are alive") || !strings.Contains(a, "(node, python3)") || !strings.Contains(a, "-on-restore") {
 		t.Fatalf("aviso = %q", a)
 	}
+	// Claves de host SSH: un aviso aparte.
+	procs = api.GuestProcs{HostKeys: []string{"/etc/ssh/ssh_host_ed25519_key"}}
+	if a := m.avisoProcesosVivos(t.Context(), id); len(a) != 1 || !strings.Contains(a[0], "SSH host keys (/etc/ssh/ssh_host_ed25519_key)") {
+		t.Fatalf("claves SSH: %q", a)
+	}
 	// Todos del servicio con OnRestore: nada que decir.
 	procs = api.GuestProcs{Count: 2, Covered: 2, Names: []string{"node"}}
-	if a := m.avisoProcesosVivos(t.Context(), id); a != "" {
+	if a := m.avisoProcesosVivos(t.Context(), id); len(a) != 0 {
 		t.Fatalf("todos cubiertos: %q", a)
 	}
 	// El puente MCP no avisa.
 	procs = api.GuestProcs{Count: 1, Names: []string{"node"}}
 	mc.Agent.Caps = append(mc.Agent.Caps, api.GuestCapMCP)
-	if a := m.avisoProcesosVivos(t.Context(), id); a != "" {
+	if a := m.avisoProcesosVivos(t.Context(), id); len(a) != 0 {
 		t.Fatalf("puente MCP: %q", a)
 	}
 }

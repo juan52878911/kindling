@@ -332,8 +332,20 @@ agente los cuenta con `GET /procs` (sin argumentos ni entorno, que pueden llevar
 secretos); el servicio con `-on-restore` no cuenta. Las imágenes MCP no avisan:
 su servidor siempre está vivo en el dorado y todavía no tienen `-on-restore`.
 
+**Identidad de cada copia** (issue #176). En cada copia el agente escribe un
+`/etc/machine-id` nuevo (y el de `/var/lib/dbus/machine-id` si es un fichero
+aparte), con el kernel ya resembrado: systemd, journald o dbus ya no ven la
+misma máquina N veces. Solo si el dorado tenía uno con valor: uno vacío
+significa "genéralo al arrancar" y se deja. Al descongelar la misma máquina no
+se toca. Las claves de host SSH (`/etc/ssh/ssh_host_*_key`) no se renuevan
+solas, porque sshd las carga al arrancar: `kling save` avisa de ellas, y la
+imagen las regenera en un gancho de `post-restore.d` (`rm` de las claves,
+`ssh-keygen -A` y reiniciar sshd). Las claves de cancelación de las conexiones
+de Postgres que el dorado tenía abiertas las vigila `kling db doctor` (DB051).
+
 La prueba es `scripts/91-e2e-determinismo.sh` (Node con y sin `restart`, Python
-con señal; corre contra cualquier daemon, Linux o macOS).
+con señal, machine-id y claves SSH; corre contra cualquier daemon, Linux o
+macOS).
 
 ### Desde un archivo: `docker save` o un layout OCI
 

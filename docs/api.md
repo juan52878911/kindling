@@ -649,7 +649,9 @@ refrescar su puente MCP (`kling mcp refresh-bridge`) lo arregla.
 
 La respuesta lleva además `generation`: cuántas restauraciones lleva el
 invitado, el número que el agente acaba de escribir en
-`/run/kindling/generation` para los procesos (un agente anterior no lo manda).
+`/run/kindling/generation` para los procesos (un agente anterior no lo manda),
+y, en una restauración `instance`, `renewed`: los ficheros de identidad que
+renovó (los `machine-id` con valor, issue #176).
 El kernel queda resembrado, pero no lo que un proceso vivo en el dorado guardó
 en su memoria: para eso, `-on-restore` en `docs/imagenes.md` (issue #175).
 
@@ -677,7 +679,7 @@ Rutas del agente, de control (el gateway no las reenvía):
 GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"...","start_period_seconds":N}
 POST /hooks?restore=instance|thaw|manual → 202 (409 si ya corren)
 GET  /meminfo → {"total_mib":N,"available_mib":N}
-GET  /procs   → {"count":N,"names":["node"],"covered":N}   (capacidad procs)
+GET  /procs   → {"count":N,"names":["node"],"covered":N,"host_keys":["/etc/ssh/ssh_host_ed25519_key"]}   (capacidad procs)
 ```
 
 Si el servicio de la imagen declara `on_restore` (`service.json`; `kling image

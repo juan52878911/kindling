@@ -55,6 +55,10 @@ type GuestResyncResult struct {
 	// Generation es el contador de restauraciones del invitado tras esta:
 	// lo que el agente escribe en GuestGenerationFile. 0 = agente anterior.
 	Generation uint64 `json:"generation,omitempty"`
+	// Renewed son los ficheros de identidad que el agente renovó por ser una
+	// copia (Restore = ResyncInstance): hoy, los machine-id con valor
+	// (/etc/machine-id, /var/lib/dbus/machine-id). Issue #176.
+	Renewed []string `json:"renewed,omitempty"`
 }
 
 // GuestGenerationFile es donde el agente deja, tras cada /resync, cuántas

@@ -14,6 +14,8 @@
 #   3. Python con `-on-restore signal:SIGUSR1`: la app vuelve a sembrar al
 #      recibirla, sin reiniciarse.
 #   4. /run/kindling/generation existe en la copia y vale 1.
+#   5. Identidad (#176): un /etc/machine-id del dorado sale distinto en cada
+#      copia, y unas claves de host SSH hacen que `save` avise.
 #
 # Corre contra el daemon de KLING_HOST (Linux con Firecracker o macOS con vz) y
 # necesita red para bajar node:22-alpine y python:3.12-alpine.
@@ -72,16 +74,18 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(s,*a): pass
 http.server.HTTPServer(("0.0.0.0",9000),H).serve_forever()'
 
-# dorado VAR IMAGEN: arranca la plantilla, espera a que sirva y la guarda.
-# Deja en SAVE_OUT lo que dijo save (los avisos van por stderr).
+# dorado VAR IMAGEN [ORDEN]: arranca la plantilla, espera a que sirva, ejecuta
+# ORDEN dentro (si la hay) y la guarda. Deja en SAVE_OUT lo que dijo save (los
+# avisos van por stderr).
 dorado() {
-  local v="$1" img="$2"
+  local v="$1" img="$2" pre="${3:-}"
   k run -name "$P-src-$v" -image "$img" -allow-exec -wait-ready >/dev/null || return 1
   # Que el servidor ya escuche (sin HEALTHCHECK ni EXPOSE no hay sonda).
   for _ in $(seq 1 100); do
     k exec "$P-src-$v" -- wget -qO- 127.0.0.1:9000 >/dev/null 2>&1 && break
     sleep 0.2
   done
+  [ -z "$pre" ] || k exec "$P-src-$v" -- sh -c "$pre" >/dev/null
   SAVE_OUT="$(k save "$P-src-$v" "$P-tpl-$v" 2>&1)"
 }
 
@@ -110,14 +114,23 @@ distintas() { printf '%s' "$1" | grep -v '^$' | sort -u | wc -l | tr -d ' '; }
 
 step "1. node without on-restore: save warns, copies repeat"
 k image import node:22-alpine -name "$P-node" -- node -e "$NODE_SRV" >/dev/null || bad "import node" "ok" "failed"
-if dorado a "$P-node"; then
+# Una identidad como la de una imagen con systemd y sshd.
+IDENT='echo 0123456789abcdef0123456789abcdef > /etc/machine-id; mkdir -p /etc/ssh; : > /etc/ssh/ssh_host_ed25519_key'
+if dorado a "$P-node" "$IDENT"; then
   if contiene "$SAVE_OUT" "alive in this snapshot"; then ok "save warns about live processes"
   else bad "save warns about live processes" "a warning" "$SAVE_OUT"; fi
+  if contiene "$SAVE_OUT" "SSH host keys"; then ok "save warns about the SSH host keys"
+  else bad "save warns about the SSH host keys" "a warning" "$SAVE_OUT"; fi
   copias a
   echo "     run -from -wait-ready (ms): $RUNMS"
   n="$(distintas "$RESP")"
   if [ "$n" = 1 ]; then ok "the $COPIES copies repeat the same values (the bug this test catches)"
   else bad "copies without on-restore repeat" "1 distinct answer" "$n: $RESP"; fi
+  ids=""
+  for i in $(seq 1 "$COPIES"); do ids+="$(k exec "$P-a$i" -- cat /etc/machine-id 2>&1)"$'\n'; done
+  n="$(distintas "$ids")"
+  if [ "$n" = "$COPIES" ] && ! contiene "$ids" 0123456789abcdef; then ok "each copy has its own /etc/machine-id"
+  else bad "a machine-id per copy" "$COPIES distinct, none the template's" "$ids"; fi
 else bad "template a" "running and saved" "failed"; fi
 
 step "2. node with -on-restore restart: no warning, distinct copies"

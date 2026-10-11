@@ -62,10 +62,10 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 		}
 	}
 	// Con la máquina aún en marcha: pausada, el agente no contesta.
-	aviso := m.avisoProcesosVivos(ctx, ref)
+	avisos := m.avisoProcesosVivos(ctx, ref)
 	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false)
-	if err == nil && aviso != "" {
-		snap.Warnings = append(snap.Warnings, aviso)
+	if err == nil {
+		snap.Warnings = append(snap.Warnings, avisos...)
 	}
 	return snap, err
 }
