@@ -93,13 +93,19 @@ func ResyncHandler() http.HandlerFunc {
 			return
 		}
 		gen := bumpGeneration()
+		// Una copia de un dorado no es la misma máquina: machine-id propio.
+		// Al descongelar la misma máquina no se toca.
+		var renewed []string
+		if req.Restore == api.ResyncInstance {
+			renewed = renewMachineID(machineIDFiles)
+		}
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
 		// pide él cuando ya montó volúmenes y entregó credenciales) o una
 		// sonda que esperar (ver ready.go).
 		st := readyState.snapshot()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen})
+		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen, Renewed: renewed})
 	}
 }
 

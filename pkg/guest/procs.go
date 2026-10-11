@@ -138,7 +138,9 @@ func ProcsHandler() http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(listProcs(procRoot, os.Getpid(), servicePgrp()))
+		p := listProcs(procRoot, os.Getpid(), servicePgrp())
+		p.HostKeys = hostKeys()
+		_ = json.NewEncoder(w).Encode(p)
 	}
 }
 

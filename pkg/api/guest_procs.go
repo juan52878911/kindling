@@ -1,7 +1,8 @@
 package api
 
 // GuestProcsPath (GET) son los procesos de usuario vivos en el invitado, sin el
-// agente: lo que pregunta `kling save` antes de volcar un dorado. Cada uno que
+// agente, y lo que todas las copias compartirían (las claves de host SSH): lo
+// que pregunta `kling save` antes de volcar un dorado. Cada uno que
 // esté vivo en el volcado despierta igual en todas las copias, con los mismos
 // aleatorios en memoria (issue #175). Ruta de control: solo lee /proc.
 const GuestProcsPath = "/procs"
@@ -20,4 +21,8 @@ type GuestProcs struct {
 	// Covered son los de Count que pertenecen al servicio de la imagen cuando
 	// este declara OnRestore: cada copia los reinicia o les manda su señal.
 	Covered int `json:"covered,omitempty"`
+	// HostKeys son las claves privadas de host SSH del invitado
+	// (/etc/ssh/ssh_host_*_key): todas las copias del dorado las comparten, y
+	// el agente no las renueva (issue #176).
+	HostKeys []string `json:"host_keys,omitempty"`
 }
