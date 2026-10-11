@@ -563,6 +563,17 @@ func (s *Service) Restart() error {
 		s.mu.Unlock()
 		switch {
 		case n > starts && cur != nil:
+			// Si Restart llegó con el bucle lanzando el proceso (s.cmd aún
+			// sin poner), ese proceso ya es posterior a la restauración y
+			// nadie consumió la petición: se retira, o la próxima salida
+			// normal se relanzaría sin esperar.
+			s.mu.Lock()
+			s.restartReq = false
+			s.mu.Unlock()
+			select {
+			case <-s.kick:
+			default:
+			}
 			return nil
 		case !pending && cur == nil && launchErr != "":
 			return fmt.Errorf("restarting the service: %s", launchErr)
