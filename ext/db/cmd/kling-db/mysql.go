@@ -24,7 +24,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -84,19 +86,45 @@ func (a *app) rotateMySQL(ctx context.Context, id, user string) error {
 	if err := dbstate.WritePassword(id, pw); err != nil {
 		return fmt.Errorf("storing the password of %s: %w", shortID(id), err)
 	}
-	return a.setMySQLHash(ctx, id, user, mysqlpw.NativeHash(pw))
+	return a.setMySQLPassword(ctx, id, user, pw)
 }
 
-// setMySQLHash pone el hash h al usuario user@'%' de la copia id y comprueba
-// en la misma sesión que mysql.user lo guarda con ese plugin.
-func (a *app) setMySQLHash(ctx context.Context, id, user, h string) error {
-	// user pasó identPattern y h es "*" y 40 hexadecimales: nada que escapar.
-	if !identPattern.MatchString(user) || !mysqlpw.ValidHash(h) {
+// setMySQLPassword pone a user@'%' de la copia id el hash de pw con el método
+// que ya tiene (mysql_native_password en MariaDB, caching_sha2_password en
+// MySQL 8.4 y 9 de Oracle) y comprueba en la misma sesión que mysql.user lo
+// guarda. La clave no entra en el invitado: solo el hash, por stdin.
+func (a *app) setMySQLPassword(ctx context.Context, id, user, pw string) error {
+	if !identPattern.MatchString(user) {
+		return fmt.Errorf("rotating the password of %s: invalid user", shortID(id))
+	}
+	out, err := a.k.Run(ctx, strings.NewReader(fmt.Sprintf("SELECT plugin FROM mysql.user WHERE User = '%s' AND Host = '%%';\n", user)),
+		"exec", "-i", "-timeout", "60s", id, "--", "sh", "-c", myClient)
+	if err != nil {
+		// Sin el detalle, como abajo: la salida del cliente puede citar SQL.
+		return fmt.Errorf("rotating the password of %s: could not read the method of %q", shortID(id), user)
+	}
+	plugin := strings.TrimSpace(string(out))
+	if plugin == "" {
+		return fmt.Errorf("rotating the password of %s: user %q@'%%' does not exist", shortID(id), user)
+	}
+	h, err := mysqlpw.Hash(plugin, pw)
+	if err != nil {
+		return fmt.Errorf("rotating the password of %s: %w", shortID(id), err)
+	}
+	return a.setMySQLHash(ctx, id, user, plugin, h)
+}
+
+// setMySQLHash pone el hash h del método plugin al usuario user@'%' de la
+// copia id y comprueba en la misma sesión que mysql.user lo guarda.
+func (a *app) setMySQLHash(ctx context.Context, id, user, plugin, h string) error {
+	// user pasó identPattern y h tiene la forma de su método (hexadecimal, o
+	// el alfabeto de crypt y '$'): nada que escapar.
+	if !identPattern.MatchString(user) || !mysqlpw.ValidHashFor(plugin, h) {
 		return fmt.Errorf("rotating the password of %s: invalid user or hash", shortID(id))
 	}
 	sql := fmt.Sprintf("ALTER USER '%[1]s'@'%%' IDENTIFIED WITH %[3]s AS '%[2]s';\n"+
 		"SELECT COUNT(*) FROM mysql.user WHERE User = '%[1]s' AND Host = '%%' AND plugin = '%[3]s' AND authentication_string = '%[2]s';\n",
-		user, h, mysqlpw.NativePlugin)
+		user, h, plugin)
 	out, err := a.k.Run(ctx, strings.NewReader(sql), "exec", "-i", "-timeout", "60s", id, "--", "sh", "-c", myClient)
 	if err != nil {
 		// Sin el detalle: el error del cliente puede citar la sentencia.
@@ -109,13 +137,13 @@ func (a *app) setMySQLHash(ctx context.Context, id, user, h string) error {
 }
 
 // setPassword pone en la copia la contraseña pw (ya en el host) con el
-// mecanismo de su motor: verificador SCRAM, hash de mysql_native_password o
+// mecanismo de su motor: verificador SCRAM, hash del método de MySQL o
 // SHA-256 del usuario ACL de Redis.
 // Lo usa kling db rotate, en los dos sentidos (la nueva y, si falla, la vieja).
 func (a *app) setPassword(ctx context.Context, mc *api.Machine, role, pw string) error {
 	switch engineOf(mc.Labels) {
 	case engineMySQL:
-		return a.setMySQLHash(ctx, mc.ID, role, mysqlpw.NativeHash(pw))
+		return a.setMySQLPassword(ctx, mc.ID, role, pw)
 	case engineRedis:
 		// Solo el usuario de la aplicación: la del administrador no sale del
 		// invitado y ya se estrenó al preparar la copia.
@@ -207,4 +235,31 @@ func mysqlClientTLSFlag(ctx context.Context, p string, probe func(ctx context.Co
 		why = errors.New("neither --version nor --help names it")
 	}
 	return "", fmt.Errorf("can't tell whether %s is the MySQL or the MariaDB client (%v): use kling db connect -dsn with your client", p, why)
+}
+
+// cmdMySQLHash es `kling db mysql-hash`: escribe el authentication_string de
+// la contraseña que llega por stdin. Lo usa db-golden-mysql.sh para crear el
+// usuario de la aplicación con el hash calculado en el host (la clave no
+// entra en el invitado), también el de caching_sha2_password de MySQL 8.4 y
+// 9, que bash no sabe calcular.
+func cmdMySQLHash(args []string) error {
+	fs := flag.NewFlagSet("mysql-hash", flag.ContinueOnError)
+	plugin := fs.String("plugin", mysqlpw.CachingSHA2Plugin, "caching_sha2_password or mysql_native_password")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+	if err != nil {
+		return err
+	}
+	pw := strings.TrimRight(string(b), "\r\n")
+	if pw == "" {
+		return errors.New("no password on stdin")
+	}
+	h, err := mysqlpw.Hash(*plugin, pw)
+	if err != nil {
+		return err
+	}
+	fmt.Println(h)
+	return nil
 }

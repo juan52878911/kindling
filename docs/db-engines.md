@@ -1,4 +1,4 @@
-# kling db con Redis y SQLite (y por qué no MongoDB)
+# kling db con Redis, SQLite y FerretDB (y por qué no MongoDB)
 
 `kling db` nació para Postgres ([db.md](db.md)) y ya habla MySQL/MariaDB
 ([mysql.md](mysql.md)). Esta página cubre los otros dos motores (#65): **Redis**, con el
@@ -47,10 +47,15 @@ copias.
 
 ### La plantilla (`scripts/db-golden-redis.sh`)
 
-- **Receta** `scripts/recipes/redis.recipe.json`: Alpine + `redis` y `tzdata`. El script
-  vale igual con `valkey-server`/`valkey-cli` (busca los dos nombres), por si la versión
-  de Alpine solo empaqueta Valkey. Hace falta Redis 7 o más (ACL con selectores,
-  `ACL DRYRUN`, `enable-*-command`).
+- **Receta** `scripts/recipes/redis.recipe.json`: Alpine + `redis` y `tzdata`. Hace falta
+  Redis 7 o más (ACL con selectores, `ACL DRYRUN`, `enable-*-command`).
+- **Valkey** (el fork libre de Redis): `kling db golden image -engine valkey` construye la
+  imagen `valkey` con `scripts/recipes/valkey.recipe.json` (Alpine + `valkey` y
+  `valkey-cli`, 9.0.4 en Alpine 3.24) y `golden build -engine valkey <nombre>` la usa por
+  defecto. El script busca `valkey-server`/`valkey-cli` y el usuario `valkey` si no hay
+  `redis`; lo demás es igual, y `kling db` la trata como `redis` (mismo protocolo, mismas
+  ACL). Probado en el lab el 2026-10-11: dorado con 1.000 claves, copia con `kling db up`,
+  `AUTH` del usuario de la aplicación, `CONFIG` denegado y `kling db doctor` sin hallazgos.
 - **El servidor** escucha en la IP del invitado y en `/run/redis/redis.sock`
   (`unixsocketperm 700`, del usuario `redis`), como el usuario `redis`, con la
   configuración en `/etc/kling-db/redis.conf`: `protected-mode yes`, sin `DEBUG` ni
@@ -213,10 +218,46 @@ Se estudió y se deja fuera a propósito:
    una interfaz soportada. Hacerlo así sería frágil, y hacerlo con la clave en claro
    rompería la regla que sostienen los otros cuatro motores.
 
-Si MongoDB hace falta, la receta es: una imagen glibc con `mongod` (fuera de kindling),
-una plantilla hecha a mano con `-from`, y la clave rotada con `updateUser` aceptando que
-cruza al invitado por stdin (nunca en argv), documentando esa diferencia. No se incluye
-aquí.
+Si hace falta el **protocolo** de MongoDB, la vía es FerretDB (abajo). MongoDB en sí,
+con `mongod`, sigue fuera.
+
+## Compatible con MongoDB: FerretDB
+
+[FerretDB](https://www.ferretdb.com) (Apache-2.0) habla el protocolo de MongoDB sobre un
+Postgres con la extensión DocumentDB. Una copia es por dentro un Postgres, y la regla del
+verificador se cumple igual. Comprobado en el lab: FerretDB 2 valida el login de Mongo
+(SCRAM-SHA-256) contra la contraseña del **rol de Postgres**. Así que `kling db up` y
+`rotate` le ponen un verificador SCRAM calculado en el host, como a cualquier copia de
+Postgres, y el cliente de Mongo entra con ese usuario y esa clave.
+
+```sh
+scripts/db-golden.sh image -engine ferretdb              # kling image import ghcr.io/ferretdb/ferretdb-eval:2 → ferretdb
+scripts/db-golden.sh build -engine ferretdb -seed-docs 1000 docs
+kling db up docs -name d1
+kling db connect d1 -dsn   # mongodb://app:…@<ip>:27017/appdb?authMechanism=SCRAM-SHA-256
+```
+
+- **La imagen** es la oficial de evaluación (Postgres 17 + DocumentDB + FerretDB 2.7),
+  importada sin Docker. Alpine no empaqueta DocumentDB.
+- **El superusuario** `postgres` lleva una clave generada dentro del invitado, que solo
+  usa FerretDB por el loopback. Por red, `pg_hba.conf` solo deja entrar al rol de la
+  aplicación, con SCRAM.
+- **El rol de la aplicación** lleva `documentdb_admin_role`: FerretDB 2 aún no tiene
+  permisos por base, así que ve todas las bases de Mongo de su copia (todas son suyas).
+- **`-seed-docs N`** carga N documentos sintéticos por SQL
+  (`documentdb_api.insert_one`): no hace falta cliente de Mongo en el host. Para datos
+  reales, cárgalos con tu driver en una copia y guárdala como plantilla.
+- **`kling db connect`** da el DSN (`-dsn`); no abre `mongosh` porque pediría la clave en
+  argv o por teclado. `doctor` no cuenta como cliente heredado el pool de FerretDB (el
+  superusuario por el loopback).
+- Probado en el lab el 2026-10-11 con un cliente del driver oficial de Go:
+  - un dorado con 1.000 documentos, la copia con `kling db up` y el login con la clave
+    rotada;
+  - la clave del dorado se rechaza;
+  - `kling db rotate` cambia la clave y la vieja ya no entra;
+  - `kling db doctor` sin avisos.
+- No van con FerretDB: `attach`, `role`, `branch`, `snapshot`/`undo`, `ask` y `clone`, que
+  dependen de las tablas de la aplicación en SQL; se rechazan con un error claro.
 
 ## Probado y pendiente
 
@@ -246,12 +287,11 @@ Análisis de compatibilidad del 2026-09-29. Hay tres niveles de soporte:
 
 Por orden:
 
-1. **Rápido.** pgvector y PostGIS en la receta de Postgres (hay que comprobar que Alpine
-   los empaqueta), un golden de Valkey de verdad (el guion ya acepta
-   `valkey-server`/`valkey-cli`) y esta tabla por motor en la documentación de producto.
-2. **MySQL 8.4 y 9 de Oracle.** El hash de `caching_sha2_password` (SHA-256-crypt, 5000
-   rondas) calculado en el host: MySQL 9 ya no trae `mysql_native_password`. Abre también
-   Percona y los orígenes de `clone` en MySQL.
+1. **Hecho.** pgvector y PostGIS (`kling db golden image -ext`, #144) y un golden de
+   Valkey (`-engine valkey`, #113).
+2. **Hecho.** MySQL 8.4 y 9 de Oracle, con el hash de `caching_sha2_password` calculado en
+   el host (#114, docs/mysql.md). Percona y los orígenes de `clone` en MySQL siguen
+   pendientes.
 3. **Almacenamiento de objetos (S3).**
    - Un golden de almacén de objetos con clave por copia: Garage o SeaweedFS mejor que
      MinIO, que dejó de publicar binarios de su edición comunitaria y es AGPL. SigV4 es
@@ -263,9 +303,7 @@ Por orden:
      trozo, y las URL prefirmadas. Con él, un agente usa S3, R2, GCS en modo S3, MinIO o
      Garage sin ver la clave.
    - Opcional: `clone` de un bucket por prefijo hacia el golden.
-4. **Compatible con MongoDB mediante FerretDB** (Apache-2.0, protocolo de MongoDB sobre
-   Postgres). El golden es un Postgres con FerretDB y reutiliza lo que ya funciona.
-   MongoDB en sí sigue fuera, por su licencia y por `createUser` con la clave en claro.
+4. **Hecho.** Compatible con MongoDB mediante FerretDB (#117, arriba).
 5. **Hecho.** ClickHouse desde su imagen de Docker (#118, arriba).
 
 Descartados por ahora: Cassandra y Scylla (pesados), y Elasticsearch y OpenSearch (JVM

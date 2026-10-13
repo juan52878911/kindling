@@ -8,6 +8,8 @@
 #   scripts/db-golden.sh build [opciones] <nombre> arranca, carga y congela
 #   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
 #   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
+#   ... image|build -engine valkey ...             Valkey: el guion de Redis con la imagen valkey
+#   ... image|build -engine ferretdb ...          MongoDB por FerretDB (db-golden-ferretdb.sh)
 #   ... image|build -engine clickhouse ...        ClickHouse (db-golden-clickhouse.sh)
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
@@ -573,9 +575,11 @@ case "$engine" in
   postgres) ;;
   mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;
   redis) exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
+  valkey) KLING_DB_REDIS_FLAVOR=valkey exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
   sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
+  ferretdb|mongo|mongodb) exec bash "$HERE/db-golden-ferretdb.sh" ${args[@]+"${args[@]}"} ;;
   clickhouse) exec bash "$HERE/db-golden-clickhouse.sh" ${args[@]+"${args[@]}"} ;;
-  *) die "motor desconocido: $engine (postgres, mysql, redis, sqlite o clickhouse)" ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey, sqlite, ferretdb o clickhouse)" ;;
 esac
 set -- ${args[@]+"${args[@]}"}
 

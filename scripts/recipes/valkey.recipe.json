@@ -1,0 +1,3 @@
+{
+  "packages": ["valkey", "valkey-cli", "tzdata"]
+}

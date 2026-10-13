@@ -402,7 +402,13 @@ func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 	if err := a.waitPostgres(ctx, mc.ID); err != nil {
 		return err
 	}
-	if err := a.purgeInheritedRoles(ctx, mc.ID, db); err != nil {
+	pgdb := db
+	if engineOf(mc.Labels) == engineFerret {
+		// La base de FerretDB es de Mongo: en Postgres todo vive en la base
+		// postgres (las tablas de DocumentDB).
+		pgdb = "postgres"
+	}
+	if err := a.purgeInheritedRoles(ctx, mc.ID, pgdb); err != nil {
 		return err
 	}
 	return a.rotate(ctx, mc.ID, role)

@@ -6,6 +6,14 @@
 #
 # (o db-golden.sh image|build -engine mysql ..., que llega aquí.)
 #
+# MySQL DE ORACLE (8.4, 9): `image -oracle [-tag 8.4]` importa la imagen de
+# Docker mysql:<tag> (sin Docker: kling image import) como mysql-<tag>, y
+# `build -image mysql-8-4 ...` la usa. Se nota sola, por el binario: con
+# mysqld y sin mariadbd, el usuario de la aplicación va con
+# caching_sha2_password (el hash lo calcula `kling db mysql-hash` en el host;
+# MySQL 9 ya no trae mysql_native_password), root entra por auth_socket y el
+# servidor arranca con --daemonize. Sin server_audit (es de MariaDB).
+#
 # `build` arranca una microVM desde la imagen mariadb (Alpine; sin red, con
 # exec), crea el datadir en el overlay de la máquina, arranca MariaDB
 # escuchando en la IP del invitado, crea el usuario y la base de la
@@ -85,6 +93,14 @@ native_hash() {
 MYC='"$(command -v mariadb || command -v mysql)" --protocol=socket -uroot'
 
 cmd_image() {
+  if [ "${1:-}" = -oracle ]; then
+    local tag=8.4
+    [ "${2:-}" != -tag ] || tag="${3:?falta valor}"
+    [[ "$tag" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || die "-tag no válido: $tag (8.4, 9.4...)"
+    say "importando mysql:$tag de Docker Hub como mysql-${tag//./-} (el servidor lo arranca build, no la imagen)"
+    "${K[@]}" image import "mysql:$tag" -name "mysql-${tag//./-}" -replace -entrypoint sleep -- infinity
+    return
+  fi
   [ -f "$HERE/recipes/mariadb.recipe.json" ] || die "falta scripts/recipes/mariadb.recipe.json"
   say "construyendo la imagen mariadb (Alpine + mariadb); tarda unos minutos"
   "${K[@]}" image build mariadb -builder base -base min -grow 512 -spec "$HERE/recipes/mariadb.recipe.json"
@@ -151,7 +167,6 @@ cmd_build() {
   od -An -tx1 -N24 /dev/urandom | tr -d ' \n' > "$BUILD_TMP/password"
   [ "$(wc -c < "$BUILD_TMP/password" | tr -d ' ')" -eq 48 ] || die "no se pudo generar la contraseña"
   local hash
-  hash="$(native_hash "$BUILD_TMP/password")"
 
   # La etiqueta del motor viaja con la plantilla (kling save copia las
   # etiquetas) y la heredan las copias: así kling db sabe que es MySQL.
@@ -177,22 +192,40 @@ cmd_build() {
   ip="$(printf '%s' "$cmdline" | tr ' ' '\n' | sed -n 's/^ip=\([0-9.]*\)::.*/\1/p' | head -n1)"
   [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "no encuentro la IP del invitado en /proc/cmdline"
 
-  say "datadir en el overlay y arranque de MariaDB en $ip"
+  # MariaDB o MySQL de Oracle: lo dice el binario que trae la imagen.
+  local flavor=mariadb plugin=mysql_native_password
+  if ! "${K[@]}" exec "$m" -- sh -c 'command -v mariadbd' >/dev/null 2>&1; then
+    flavor=oracle plugin=caching_sha2_password
+  fi
+  if [ "$flavor" = oracle ]; then
+    hash="$("${K[@]}" db mysql-hash -plugin "$plugin" < "$BUILD_TMP/password")" ||
+      die "no se pudo calcular el hash de caching_sha2_password (hace falta la extensión db: kling plugin install db)"
+    [[ "$hash" =~ ^\$A\$005\$[./0-9A-Za-z]{63}$ ]] || die "hash de caching_sha2_password con forma rara"
+  else
+    hash="$(native_hash "$BUILD_TMP/password")"
+  fi
+
+  say "datadir en el overlay y arranque de $flavor en $ip"
   # El datadir va en la raíz de la máquina (overlay), NO en un volumen: Freeze
   # desmonta los volúmenes y Fork rechaza los de escritura.
   "${K[@]}" exec -i -timeout 5m "$m" -- sh -s <<SETUP
 set -eu
 D=/var/lib/mysql
-BIN=\$(command -v mariadbd || command -v mysqld) || { echo "no hay mariadbd en la imagen"; exit 1; }
-INIT=\$(command -v mariadb-install-db || command -v mysql_install_db) || { echo "no hay mariadb-install-db en la imagen"; exit 1; }
-mkdir -p /run/mysqld /var/log/mysql /var/lib/mysql-files /etc/my.cnf.d
+F=$flavor
+BIN=\$(command -v mariadbd || command -v mysqld) || { echo "no hay mariadbd ni mysqld en la imagen"; exit 1; }
+mkdir -p /run/mysqld /var/log/mysql /var/lib/mysql-files
 chown mysql:mysql /run/mysqld /var/log/mysql /var/lib/mysql-files
 chmod 750 /var/lib/mysql-files
 install -d -o mysql -g mysql -m 0700 "\$D"
 # zz-: después de la configuración del paquete (la de Alpine trae
-# skip-networking), y gana.
-cat > /etc/my.cnf.d/zz-kling-db.cnf <<'CONF'
+# skip-networking), y gana. La de Oracle lee /etc/mysql/conf.d.
+if [ "\$F" = oracle ]; then CNF=/etc/mysql/conf.d/zz-kling-db.cnf; else CNF=/etc/my.cnf.d/zz-kling-db.cnf; fi
+mkdir -p "\$(dirname "\$CNF")"
+cat > "\$CNF" <<'CONF'
 [client-server]
+socket = /run/mysqld/mysqld.sock
+
+[client]
 socket = /run/mysqld/mysqld.sock
 
 [mysqld]
@@ -208,19 +241,28 @@ secure-file-priv = /var/lib/mysql-files
 symbolic-links = 0
 max_connections = 50
 innodb_buffer_pool_size = 128M
-innodb_log_file_size = 64M
 default_time_zone = '+00:00'
 character-set-server = utf8mb4
 collation-server = utf8mb4_general_ci
 # Sin log general ni de consultas lentas: ni SQL ni datos en disco.
 general_log = 0
 slow_query_log = 0
-log_warnings = 2
 CONF
+# Lo que solo entiende uno de los dos (MySQL 8.4 rechaza al arrancar las
+# opciones que ya no tiene).
+if [ "\$F" = oracle ]; then
+  # También en el loopback (gana al bind-address de arriba): la sonda de
+  # "listo" de la imagen de Docker (su EXPOSE 3306) pregunta a 127.0.0.1, y
+  # sin ella save no congela.
+  printf 'bind-address = $ip,127.0.0.1\n' >> "\$CNF"
+  printf 'innodb_redo_log_capacity = 128M\nlog_error_verbosity = 2\npid-file = /run/mysqld/mysqld.pid\nlog-error = /var/log/mysql/mysqld.err\n' >> "\$CNF"
+else
+  printf 'innodb_log_file_size = 64M\nlog_warnings = 2\n' >> "\$CNF"
+fi
 # kling db audit: server_audit, SOLO conexiones (quién, desde dónde, a qué
 # base), sin consultas. FORCE_PLUS_PERMANENT: nadie lo desinstala en marcha.
 if P=\$(find /usr/lib -name server_audit.so 2>/dev/null | head -n1) && [ -n "\$P" ]; then
-  cat >> /etc/my.cnf.d/zz-kling-db.cnf <<'CONF'
+  cat >> "\$CNF" <<'CONF'
 plugin_load_add = server_audit
 server_audit = FORCE_PLUS_PERMANENT
 server_audit_events = CONNECT
@@ -231,17 +273,34 @@ server_audit_file_rotate_size = 1000000
 server_audit_file_rotations = 3
 CONF
 fi
-"\$INIT" --user=mysql --datadir="\$D" --auth-root-authentication-method=socket --skip-test-db >/var/log/mysql/install.out 2>&1 || { cat /var/log/mysql/install.out; exit 1; }
-# El servidor hereda las tuberías del exec: a fichero, sin stdin y en su
-# propia sesión, o el exec no termina nunca.
-setsid "\$BIN" --user=mysql </dev/null >/var/log/mysql/mariadbd.out 2>&1 &
+if [ "\$F" = oracle ]; then
+  # root@localhost sin clave hasta el ALTER de abajo: el servidor aún no
+  # escucha en la red (el arranque es después).
+  "\$BIN" --initialize-insecure --user=mysql --datadir="\$D" >/var/log/mysql/install.out 2>&1 || { cat /var/log/mysql/install.out; exit 1; }
+  # Sin setsid en la imagen de Oracle: el propio mysqld se separa.
+  "\$BIN" --daemonize --user=mysql </dev/null >/var/log/mysql/mariadbd.out 2>&1 || { tail -n 30 /var/log/mysql/mysqld.err; exit 1; }
+else
+  INIT=\$(command -v mariadb-install-db || command -v mysql_install_db) || { echo "no hay mariadb-install-db en la imagen"; exit 1; }
+  "\$INIT" --user=mysql --datadir="\$D" --auth-root-authentication-method=socket --skip-test-db >/var/log/mysql/install.out 2>&1 || { cat /var/log/mysql/install.out; exit 1; }
+  # El servidor hereda las tuberías del exec: a fichero, sin stdin y en su
+  # propia sesión, o el exec no termina nunca.
+  setsid "\$BIN" --user=mysql </dev/null >/var/log/mysql/mariadbd.out 2>&1 &
+fi
 ADMIN=\$(command -v mariadb-admin || command -v mysqladmin)
 i=0
 until "\$ADMIN" --protocol=socket -uroot ping --silent >/dev/null 2>&1; do
   i=\$((i + 1))
-  [ "\$i" -lt 90 ] || { tail -n 30 /var/log/mysql/mariadbd.out; exit 1; }
+  [ "\$i" -lt 90 ] || { tail -n 30 /var/log/mysql/mariadbd.out /var/log/mysql/mysqld.err 2>/dev/null; exit 1; }
   sleep 1
 done
+# Oracle: root solo como el root del sistema, por el socket (auth_socket),
+# como el unix_socket de MariaDB.
+if [ "\$F" = oracle ]; then
+  "\$(command -v mysql)" --protocol=socket -uroot <<'SQL'
+INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
+SQL
+fi
 SETUP
 
   say "cuentas: fuera las anónimas, root solo local; usuario $role y base $db (al invitado va el hash)"
@@ -253,7 +312,7 @@ SELECT CONCAT('DROP USER ''', REPLACE(User, '''', ''''''), '''@''', REPLACE(Host
 SQL
   if ! {
     printf "DROP DATABASE IF EXISTS test;\n"
-    printf "CREATE USER '%s'@'%%' IDENTIFIED WITH mysql_native_password AS '%s';\n" "$role" "$hash"
+    printf "CREATE USER '%s'@'%%' IDENTIFIED WITH %s AS '%s';\n" "$role" "$plugin" "$hash"
     printf "CREATE DATABASE %s CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;\n" "$db"
     printf "GRANT ALL PRIVILEGES ON %s.* TO '%s'@'%%';\n" "$db" "$role"
   } | "${K[@]}" exec -i "$m" -- sh -c "$MYC" >/dev/null 2>&1; then
@@ -275,10 +334,22 @@ CREATE TABLE seed_events (
   created_at DATETIME NOT NULL,
   KEY seed_events_account_idx (account)
 ) ENGINE=InnoDB;
+SQL
+    if [ "$flavor" = oracle ]; then
+      # Sin el motor SEQUENCE de MariaDB: una CTE recursiva.
+      cat >> "$BUILD_TMP/seed-synth.sql" <<SQL
+SET SESSION cte_max_recursion_depth = $((rows + 1));
+INSERT INTO seed_events
+  WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM s WHERE seq < $rows)
+  SELECT seq, seq % 1000, REPEAT(MD5(seq), 6), TIMESTAMP '2026-01-01 00:00:00' - INTERVAL (seq % 86400) SECOND FROM s;
+SQL
+    else
+      cat >> "$BUILD_TMP/seed-synth.sql" <<SQL
 INSERT INTO seed_events
   SELECT seq, seq % 1000, REPEAT(MD5(seq), 6), TIMESTAMP '2026-01-01 00:00:00' - INTERVAL (seq % 86400) SECOND
   FROM seq_1_to_$rows;
 SQL
+    fi
     files+=("$BUILD_TMP/seed-synth.sql")
   fi
 
@@ -307,7 +378,8 @@ SQL
 
   local audit
   audit="$("${K[@]}" exec -i "$m" -- sh -c "$MYC -N -B" <<<"SELECT COALESCE((SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'SERVER_AUDIT'), 'NONE');")"
-  if [ "$audit" != ACTIVE ]; then
+  # MySQL Community de Oracle no tiene server_audit: no hay nada que avisar.
+  if [ "$audit" != ACTIVE ] && [ "$flavor" = mariadb ]; then
     say "AVISO: server_audit no está activo ($audit): kling db audit solo verá los eventos del daemon (docs/mysql.md)"
   fi
 

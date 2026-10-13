@@ -199,6 +199,10 @@ func (a *app) printReady(mc *api.Machine) {
 		fmt.Fprintf(a.stdout, "  inside the copy:  clickhouse-client --host 127.0.0.1   (as default, the admin)\n")
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -dsn | <your client>   (native %d; HTTP on 8123)\n", mc.Name, chPort)
 		return
+	case engineFerret:
+		fmt.Fprintf(a.stdout, "  MongoDB protocol (FerretDB) on port %d; the same user and password as its Postgres role\n", ferretPort)
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -dsn | <mongosh or your driver>\n", mc.Name)
+		return
 	case engineSQLite:
 		fmt.Fprintf(a.stdout, "  inside the copy:  sqlite3 %s\n", sqlitePath(db))
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -sqlite   (no network server, no password)\n", mc.Name)
