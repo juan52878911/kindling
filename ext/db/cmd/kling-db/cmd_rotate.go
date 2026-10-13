@@ -66,7 +66,7 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
-	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis); err != nil {
+	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis, engineFerret); err != nil {
 		return nil, err
 	}
 	if err := checkReady(mc, owner); err != nil {
@@ -84,7 +84,7 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
-	if engineOf(mc.Labels) == enginePostgres {
+	if pgBacked(engineOf(mc.Labels)) {
 		// Postgres: el verificador antes de tocar nada (si falla, nada cambió).
 		if _, err := newVerifier(pw); err != nil {
 			return nil, err

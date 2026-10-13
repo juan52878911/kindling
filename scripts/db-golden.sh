@@ -9,6 +9,7 @@
 #   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
 #   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
 #   ... image|build -engine valkey ...             Valkey: el guion de Redis con la imagen valkey
+#   ... image|build -engine ferretdb ...          MongoDB por FerretDB (db-golden-ferretdb.sh)
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
 # cluster en el overlay de la máquina, arranca Postgres escuchando en la IP del
@@ -575,7 +576,8 @@ case "$engine" in
   redis) exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
   valkey) KLING_DB_REDIS_FLAVOR=valkey exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
   sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
-  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey o sqlite)" ;;
+  ferretdb|mongo|mongodb) exec bash "$HERE/db-golden-ferretdb.sh" ${args[@]+"${args[@]}"} ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey, sqlite o ferretdb)" ;;
 esac
 set -- ${args[@]+"${args[@]}"}
 

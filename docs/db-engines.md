@@ -1,4 +1,4 @@
-# kling db con Redis y SQLite (y por qué no MongoDB)
+# kling db con Redis, SQLite y FerretDB (y por qué no MongoDB)
 
 `kling db` nació para Postgres ([db.md](db.md)) y ya habla MySQL/MariaDB
 ([mysql.md](mysql.md)). Esta página cubre los otros dos motores (#65): **Redis**, con el
@@ -187,10 +187,46 @@ Se estudió y se deja fuera a propósito:
    una interfaz soportada. Hacerlo así sería frágil, y hacerlo con la clave en claro
    rompería la regla que sostienen los otros cuatro motores.
 
-Si MongoDB hace falta, la receta es: una imagen glibc con `mongod` (fuera de kindling),
-una plantilla hecha a mano con `-from`, y la clave rotada con `updateUser` aceptando que
-cruza al invitado por stdin (nunca en argv), documentando esa diferencia. No se incluye
-aquí.
+Si hace falta el **protocolo** de MongoDB, la vía es FerretDB (abajo). MongoDB en sí,
+con `mongod`, sigue fuera.
+
+## Compatible con MongoDB: FerretDB
+
+[FerretDB](https://www.ferretdb.com) (Apache-2.0) habla el protocolo de MongoDB sobre un
+Postgres con la extensión DocumentDB. Una copia es por dentro un Postgres, y la regla del
+verificador se cumple igual. Comprobado en el lab: FerretDB 2 valida el login de Mongo
+(SCRAM-SHA-256) contra la contraseña del **rol de Postgres**. Así que `kling db up` y
+`rotate` le ponen un verificador SCRAM calculado en el host, como a cualquier copia de
+Postgres, y el cliente de Mongo entra con ese usuario y esa clave.
+
+```sh
+scripts/db-golden.sh image -engine ferretdb              # kling image import ghcr.io/ferretdb/ferretdb-eval:2 → ferretdb
+scripts/db-golden.sh build -engine ferretdb -seed-docs 1000 docs
+kling db up docs -name d1
+kling db connect d1 -dsn   # mongodb://app:…@<ip>:27017/appdb?authMechanism=SCRAM-SHA-256
+```
+
+- **La imagen** es la oficial de evaluación (Postgres 17 + DocumentDB + FerretDB 2.7),
+  importada sin Docker. Alpine no empaqueta DocumentDB.
+- **El superusuario** `postgres` lleva una clave generada dentro del invitado, que solo
+  usa FerretDB por el loopback. Por red, `pg_hba.conf` solo deja entrar al rol de la
+  aplicación, con SCRAM.
+- **El rol de la aplicación** lleva `documentdb_admin_role`: FerretDB 2 aún no tiene
+  permisos por base, así que ve todas las bases de Mongo de su copia (todas son suyas).
+- **`-seed-docs N`** carga N documentos sintéticos por SQL
+  (`documentdb_api.insert_one`): no hace falta cliente de Mongo en el host. Para datos
+  reales, cárgalos con tu driver en una copia y guárdala como plantilla.
+- **`kling db connect`** da el DSN (`-dsn`); no abre `mongosh` porque pediría la clave en
+  argv o por teclado. `doctor` no cuenta como cliente heredado el pool de FerretDB (el
+  superusuario por el loopback).
+- Probado en el lab el 2026-10-11 con un cliente del driver oficial de Go:
+  - un dorado con 1.000 documentos, la copia con `kling db up` y el login con la clave
+    rotada;
+  - la clave del dorado se rechaza;
+  - `kling db rotate` cambia la clave y la vieja ya no entra;
+  - `kling db doctor` sin avisos.
+- No van con FerretDB: `attach`, `role`, `branch`, `snapshot`/`undo`, `ask` y `clone`, que
+  dependen de las tablas de la aplicación en SQL; se rechazan con un error claro.
 
 ## Probado y pendiente
 
@@ -236,9 +272,7 @@ Por orden:
      trozo, y las URL prefirmadas. Con él, un agente usa S3, R2, GCS en modo S3, MinIO o
      Garage sin ver la clave.
    - Opcional: `clone` de un bucket por prefijo hacia el golden.
-4. **Compatible con MongoDB mediante FerretDB** (Apache-2.0, protocolo de MongoDB sobre
-   Postgres). El golden es un Postgres con FerretDB y reutiliza lo que ya funciona.
-   MongoDB en sí sigue fuera, por su licencia y por `createUser` con la clave en claro.
+4. **Hecho.** Compatible con MongoDB mediante FerretDB (#117, arriba).
 5. **ClickHouse** con `-from`, si alguien lo pide: acepta `password_sha256_hex`, así que
    cumple la regla del hash.
 
