@@ -8,7 +8,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
-- `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
+### Fixed
+
+- MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 
 ## [0.18.0] - 2026-10-11
 

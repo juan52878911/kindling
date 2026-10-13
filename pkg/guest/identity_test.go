@@ -84,3 +84,73 @@ func TestHostKeys(t *testing.T) {
 		t.Fatalf("%v", k)
 	}
 }
+
+// sshFalso deja claves de host en un temporal y un ssh-keygen de mentira que
+// escribe "nueva <tipo>" en el fichero que le pidan y apunta sus argumentos.
+func sshFalso(t *testing.T, tipos ...string) (dir, registro string) {
+	t.Helper()
+	dir = t.TempDir()
+	registro = filepath.Join(dir, "args")
+	gen := filepath.Join(dir, "ssh-keygen")
+	os.WriteFile(gen, []byte(`#!/bin/sh
+echo "$@" >> `+registro+`
+while [ $# -gt 0 ]; do case "$1" in -t) t=$2; shift;; -f) f=$2; shift;; esac; shift; done
+echo "nueva $t" > "$f"; echo pub > "$f.pub"
+`), 0o755)
+	for _, ty := range tipos {
+		os.WriteFile(filepath.Join(dir, "ssh_host_"+ty+"_key"), []byte("vieja"), 0o600)
+		os.WriteFile(filepath.Join(dir, "ssh_host_"+ty+"_key.pub"), []byte("vieja"), 0o644)
+	}
+	viejoGlob, viejoGen := sshHostKeyGlob, sshKeygenPaths
+	sshHostKeyGlob, sshKeygenPaths = filepath.Join(dir, "ssh_host_*_key"), []string{gen}
+	t.Cleanup(func() { sshHostKeyGlob, sshKeygenPaths = viejoGlob, viejoGen })
+	return dir, registro
+}
+
+func TestSSHRenewalRegeneraCadaTipo(t *testing.T) {
+	dir, registro := sshFalso(t, "ed25519", "rsa")
+	viejo := procRoot
+	procRoot = t.TempDir() // sin sshd: nadie a quien mandar el HUP
+	t.Cleanup(func() { procRoot = viejo })
+	r := sshRenewal()
+	if r == nil {
+		t.Fatal("sshRenewal = nil con claves y ssh-keygen")
+	}
+	if err := r(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ty := range []string{"ed25519", "rsa"} {
+		if b, _ := os.ReadFile(filepath.Join(dir, "ssh_host_"+ty+"_key")); string(b) != "nueva "+ty+"\n" {
+			t.Errorf("%s: %q", ty, b)
+		}
+	}
+	args, _ := os.ReadFile(registro)
+	if strings.Count(string(args), "-t ") != 2 || strings.Contains(string(args), "ecdsa") || !strings.Contains(string(args), "-N  -C ") {
+		t.Errorf("ssh-keygen recibió %q: un tipo por clave existente, sin frase", args)
+	}
+}
+
+func TestSSHRenewalSinKeygenOSinClaves(t *testing.T) {
+	sshFalso(t, "ed25519")
+	sshKeygenPaths = []string{"/no/existe"}
+	if sshRenewal() != nil {
+		t.Fatal("sin ssh-keygen no hay renovación (la avisa save)")
+	}
+	sshFalso(t)
+	if sshRenewal() != nil {
+		t.Fatal("sin claves no hay renovación")
+	}
+}
+
+func TestSSHDListeners(t *testing.T) {
+	root := t.TempDir()
+	proc(t, root, 1, "1 (kling-guest) S 0 1 1 0", "x\x00")
+	proc(t, root, 40, "40 (sshd) S 1 40 40 0", "sshd: /usr/sbin/sshd [listener]\x00")
+	proc(t, root, 41, "41 (sshd-session) S 40 41 41 0", "sshd-session\x00")
+	proc(t, root, 42, "42 (sshd) S 41 41 41 0", "sshd: root@pts/0\x00")  // sesión: hija de sshd-session
+	proc(t, root, 50, "50 (sshd) S 40 50 50 0", "sshd: root [priv]\x00") // sesión vieja: hija de sshd
+	got := sshdListeners(root)
+	if len(got) != 1 || got[0] != 40 {
+		t.Fatalf("sshdListeners = %v, quiero [40]", got)
+	}
+}

@@ -20,6 +20,8 @@ package guest
 //     SEGUNDO PLANO: quien necesite esperarlos pregunta /ready.
 //   - Uno que falla (o agota su plazo) para la tanda y deja "failed": no se
 //     reintenta solo. POST /hooks los vuelve a lanzar.
+//   - En una copia de un dorado, antes de los ganchos, el agente regenera las
+//     claves de host SSH si la imagen las tiene y trae ssh-keygen (#176).
 //   - En una copia de un dorado (KLING_RESTORE=instance), al final de la
 //     tanda va lo que el servicio de la imagen pida en OnRestore: reiniciarlo
 //     o mandarle una señal, para que no herede los aleatorios que tenía en
@@ -72,6 +74,9 @@ type readiness struct {
 	// restore devuelve la acción OnRestore del servicio (nil = ninguna).
 	// Sustituible en tests.
 	restore func() func() error
+	// ssh devuelve la renovación de las claves de host SSH (nil = nada que
+	// hacer). Sustituible en tests.
+	ssh func() func() error
 
 	probeMu sync.Mutex // una sonda a la vez: dos /ready seguidos esperan a la misma
 	mu      sync.Mutex // protege lo de abajo
@@ -89,6 +94,7 @@ var readyState = &readiness{
 	run:       runWithTimeout,
 	probe:     runProbeAsService,
 	restore:   onRestore,
+	ssh:       sshRenewal,
 }
 
 // setEnv fija el entorno de la sonda y los ganchos (el de los servicios).
@@ -107,7 +113,7 @@ func (r *readiness) hasProbe() bool {
 // hasHooks dice si hay algo que hacer tras restaurar: ganchos de la imagen o
 // la acción OnRestore de su servicio.
 func (r *readiness) hasHooks() bool {
-	return len(r.listHooks()) > 0 || (r.restore != nil && r.restore() != nil)
+	return len(r.listHooks()) > 0 || (r.restore != nil && r.restore() != nil) || (r.ssh != nil && r.ssh() != nil)
 }
 
 // snapshot es el estado sin ejecutar nada: lo que se sabe ahora mismo.
@@ -224,16 +230,19 @@ func (r *readiness) listHooks() []string {
 // done, si no es nil, se llama al acabar (tests).
 func (r *readiness) startHooks(kind string, done func()) bool {
 	hooks := r.listHooks()
-	var action func() error
+	var action, ssh func() error
 	if kind == api.ResyncInstance && r.restore != nil {
 		action = r.restore()
+	}
+	if kind == api.ResyncInstance && r.ssh != nil {
+		ssh = r.ssh()
 	}
 	r.mu.Lock()
 	if r.hooks == api.HooksRunning {
 		r.mu.Unlock()
 		return false
 	}
-	if len(hooks) == 0 && action == nil {
+	if len(hooks) == 0 && action == nil && ssh == nil {
 		r.mu.Unlock()
 		if done != nil {
 			done()
@@ -250,6 +259,15 @@ func (r *readiness) startHooks(kind string, done func()) bool {
 		}
 		start := time.Now()
 		estado, fallo := api.HooksDone, ""
+		// Las claves de host SSH, antes que los ganchos de la imagen: un gancho
+		// que arranque o configure sshd ya las ve nuevas (#176).
+		if ssh != nil {
+			if err := ssh(); err != nil {
+				estado, fallo = api.HooksFailed, recortar("SSH host keys: "+err.Error())
+				log.Printf("post-restore: %v", err)
+				hooks = nil
+			}
+		}
 		for _, h := range hooks {
 			t0 := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
@@ -319,7 +337,16 @@ func runProbeAsService(ctx context.Context, path string, env []string) (string, 
 }
 
 func runAs(ctx context.Context, path string, env []string, cred *syscall.Credential) (string, error) {
-	cmd := exec.CommandContext(ctx, path)
+	return runCmd(ctx, path, nil, env, cred)
+}
+
+// runArgs ejecuta path con argumentos, como root y con el entorno mínimo.
+func runArgs(ctx context.Context, path string, args ...string) (string, error) {
+	return runCmd(ctx, path, args, []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}, nil)
+}
+
+func runCmd(ctx context.Context, path string, args, env []string, cred *syscall.Credential) (string, error) {
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = "/"
 	cmd.Env = env
 	if cred != nil {

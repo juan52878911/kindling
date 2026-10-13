@@ -139,7 +139,11 @@ func ProcsHandler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		p := listProcs(procRoot, os.Getpid(), servicePgrp())
-		p.HostKeys = hostKeys()
+		// Solo las que nadie va a renovar: con ssh-keygen en la imagen, cada
+		// copia regenera las suyas (sshRenewal).
+		if sshRenewal() == nil {
+			p.HostKeys = hostKeys()
+		}
 		_ = json.NewEncoder(w).Encode(p)
 	}
 }
