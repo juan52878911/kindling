@@ -14,6 +14,7 @@ func TestEngineDSN(t *testing.T) {
 		{engineMySQL, "mysql://app:pw@127.0.0.1:5432/appdb"},
 		{engineRedis, "redis://app:pw@127.0.0.1:5432/0"},
 		{engineFerret, "mongodb://app:pw@127.0.0.1:5432/appdb?authMechanism=SCRAM-SHA-256"},
+		{engineClickHouse, "clickhouse://app:pw@127.0.0.1:5432/appdb"},
 	} {
 		if got := engineDSN(c.engine, "app", "pw", "127.0.0.1", 5432, "appdb"); got != c.want {
 			t.Errorf("%s: %s, quería %s", c.engine, got, c.want)
@@ -46,6 +47,9 @@ func TestEngineFerret(t *testing.T) {
 	}
 	if enginePort(engineFerret) != 27017 || clientMode(engineFerret) != "dsn" || engineDoc(engineFerret) != "docs/db-engines.md" {
 		t.Fatalf("puerto %d, cliente %q, doc %q", enginePort(engineFerret), clientMode(engineFerret), engineDoc(engineFerret))
+	}
+	if clientMode(engineClickHouse) != "dsn" || enginePort(engineClickHouse) != 9000 || pgBacked(engineClickHouse) {
+		t.Fatal("clickhouse: cliente, puerto o pgBacked mal")
 	}
 	if pgBacked(engineMySQL) || pgBacked(engineRedis) {
 		t.Fatal("pgBacked de un motor que no es Postgres")

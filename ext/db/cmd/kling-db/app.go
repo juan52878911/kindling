@@ -211,7 +211,7 @@ func roleDB(labels map[string]string) (role, db string, err error) {
 	role = orDefault(labels[labelRole], defaultRole)
 	db = orDefault(labels[labelDatabase], defaultDatabase)
 	e := engineOf(labels)
-	if !identPattern.MatchString(role) || role == "postgres" || (e == engineMySQL && myReservedUsers[role]) || (e == engineRedis && redisReservedUsers[role]) {
+	if !identPattern.MatchString(role) || role == "postgres" || (e == engineMySQL && myReservedUsers[role]) || (e == engineRedis && redisReservedUsers[role]) || (e == engineClickHouse && chReservedUsers[role]) {
 		return "", "", fmt.Errorf("invalid role %q", role)
 	}
 	if !identPattern.MatchString(db) {
@@ -393,6 +393,11 @@ func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 	case engineSQLite:
 		// Sin clave que rotar: basta con que la base esté y se abra.
 		return a.waitSQLite(ctx, mc.ID, db)
+	case engineClickHouse:
+		if err := a.waitClickHouse(ctx, mc.ID); err != nil {
+			return err
+		}
+		return a.rotateClickHouse(ctx, mc.ID, role)
 	}
 	if err := a.waitPostgres(ctx, mc.ID); err != nil {
 		return err

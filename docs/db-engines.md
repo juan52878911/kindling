@@ -171,6 +171,37 @@ hay** proxy en esta versión, y por eso `attach`/`detach` se rechazan:
   Redis. Un agente en la misma microVM usa la copia como siempre.
 - **SQLite**: no hay protocolo que proxificar. Compartir la base es compartir la máquina.
 
+## ClickHouse
+
+`kling db golden image -engine clickhouse` importa la imagen oficial de Docker
+(`clickhouse/clickhouse-server:25.8`, glibc) sin Docker, y `golden build -engine clickhouse
+<nombre>` deja una plantilla con el servidor caliente:
+
+```sh
+scripts/db-golden.sh image -engine clickhouse
+scripts/db-golden.sh build -engine clickhouse -seed-rows 100000 eventos
+kling db up eventos -name e1
+kling db connect e1 -dsn   # clickhouse://app:…@<ip>:9000/appdb  (HTTP en el 8123)
+```
+
+- **La clave cumple la regla del hash.** El usuario de la aplicación se crea y se rota
+  con `IDENTIFIED WITH sha256_hash BY '<hex>'`, y el hash se calcula en el host. La
+  rotación comprueba con `SHOW CREATE USER` que se guardó: la plantilla enciende
+  `display_secrets_in_show_and_select` para eso.
+- **El administrador** es `default`, sin clave y solo desde el loopback del invitado
+  (`HOST LOCAL`). Por red solo entra el usuario de la aplicación, con `GRANT ALL` en su base.
+- **El servidor** escucha en la IP del invitado y en 127.0.0.1 (la sonda de "listo" de la
+  imagen pregunta ahí), y no en todas las direcciones como trae la imagen.
+- **`kling db doctor`** mira que `default` sea solo local (CH001), que no haya más usuarios
+  (CH003) y que la clave de la aplicación no sea la del dorado y cuadre con el fichero del
+  host (CH052, CH054).
+- Probado en el lab el 2026-10-11 con 100.000 filas:
+  - la copia entra con su clave por HTTP y la del dorado se rechaza;
+  - `rotate` cambia la clave y la vieja deja de valer;
+  - `default` no entra por red;
+  - `doctor` no encuentra nada.
+- No van con ClickHouse: `attach`, `role`, `branch`, `snapshot`/`undo`, `ask` y `clone`.
+
 ## Por qué no MongoDB
 
 Se estudió y se deja fuera a propósito:
@@ -273,8 +304,7 @@ Por orden:
      Garage sin ver la clave.
    - Opcional: `clone` de un bucket por prefijo hacia el golden.
 4. **Hecho.** Compatible con MongoDB mediante FerretDB (#117, arriba).
-5. **ClickHouse** con `-from`, si alguien lo pide: acepta `password_sha256_hex`, así que
-   cumple la regla del hash.
+5. **Hecho.** ClickHouse desde su imagen de Docker (#118, arriba).
 
 Descartados por ahora: Cassandra y Scylla (pesados), y Elasticsearch y OpenSearch (JVM
 con 1 GiB o más por copia; posibles con un hash bcrypt calculado en el host si hay

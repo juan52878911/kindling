@@ -153,24 +153,31 @@ func redisCopy(ctx context.Context, k klingc.Kling, mc *api.Machine, state strin
 }
 
 func redisPasswordChecks(app *redisUser, id, state, golden, appUser string, ready bool, r *report) {
+	hashPasswordChecks("RD", "scripts/db-golden-redis.sh", app, id, state, golden, appUser, ready, r)
+}
+
+// hashPasswordChecks son las comprobaciones de la clave de un motor que guarda
+// el SHA-256 de la clave (Redis, ClickHouse): pre es el prefijo de sus reglas
+// (RD, CH) y script el guion que hace sus plantillas.
+func hashPasswordChecks(pre, script string, app *redisUser, id, state, golden, appUser string, ready bool, r *report) {
 	if app == nil || !app.on {
-		r.add("RD052", High, "recreate the copy from a golden built by scripts/db-golden-redis.sh",
+		r.add(pre+"052", High, "recreate the copy from a golden built by "+script,
 			"application user %s does not exist or is off", q(appUser))
 		return
 	}
 	if len(app.hashes) != 1 || !reHex64.MatchString(app.hashes[0]) {
-		r.add("RD052", High, "rotate the password with kling db rotate (it leaves exactly one)",
+		r.add(pre+"052", High, "rotate the password with kling db rotate (it leaves exactly one)",
 			"user %s has %d password(s); kling db gives it exactly one", q(appUser), len(app.hashes))
 		return
 	}
 	gdir := filepath.Join(state, golden)
 	if gp, err := readSmall(filepath.Join(gdir, "password")); err == nil {
 		if sha256Hex(strings.TrimRight(string(gp), "\r\n")) == app.hashes[0] {
-			r.add("RD052", Critical, "destroy this copy; kling db must rotate the password before marking a copy ready",
+			r.add(pre+"052", Critical, "destroy this copy; kling db must rotate the password before marking a copy ready",
 				"the password of %s is still the golden's: whoever knows %s's password can log in to this copy", q(appUser), q(golden))
 		}
 	} else {
-		r.add("RD052", Warn, fmt.Sprintf("keep the golden's password in %s so the rotation can be checked", filepath.Join(gdir, "password")),
+		r.add(pre+"052", Warn, fmt.Sprintf("keep the golden's password in %s so the rotation can be checked", filepath.Join(gdir, "password")),
 			"cannot verify that the password of %s was rotated away from the golden's", q(appUser))
 	}
 
@@ -182,26 +189,26 @@ func redisPasswordChecks(app *redisUser, id, state, golden, appUser string, read
 		if ready {
 			sev = High
 		}
-		r.add("RD054", sev, "destroy the copy and create it again: the rotated password is only known to the host that rotated it",
+		r.add(pre+"054", sev, "destroy the copy and create it again: the rotated password is only known to the host that rotated it",
 			"no host password file for this copy (%s): kling db connect refuses it", p)
 		return
 	case err != nil:
-		checkFailed(r, "RD054", "the host password file", err)
+		checkFailed(r, pre+"054", "the host password file", err)
 		return
 	case !fi.Mode().IsRegular():
-		r.add("RD054", High, "replace it with a regular file (0600)", "host password file %s is not a regular file", p)
+		r.add(pre+"054", High, "replace it with a regular file (0600)", "host password file %s is not a regular file", p)
 		return
 	case fi.Mode().Perm()&0o077 != 0:
-		r.add("RD054", High, fmt.Sprintf("chmod 600 %s", p),
+		r.add(pre+"054", High, fmt.Sprintf("chmod 600 %s", p),
 			"host password file %s is readable by other users (mode %04o)", p, fi.Mode().Perm())
 	}
 	cp, err := readSmall(p)
 	if err != nil {
-		checkFailed(r, "RD054", "the host password file", err)
+		checkFailed(r, pre+"054", "the host password file", err)
 		return
 	}
 	if sha256Hex(strings.TrimRight(string(cp), "\r\n")) != app.hashes[0] {
-		r.add("RD054", High, "rotate the password again (kling db rotate) or recreate the copy",
+		r.add(pre+"054", High, "rotate the password again (kling db rotate) or recreate the copy",
 			"host password file %s does not match the user's hash: kling db connect will fail", p)
 	}
 }

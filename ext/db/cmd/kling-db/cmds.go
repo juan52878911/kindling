@@ -195,6 +195,10 @@ func (a *app) printReady(mc *api.Machine) {
 		fmt.Fprintf(a.stdout, "  inside the copy:  REDISCLI_AUTH=$(cat %s) redis-cli -s %s   (as the admin)\n", redisAdminFile, redisSock)
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-redis | -dsn]\n", mc.Name)
 		return
+	case engineClickHouse:
+		fmt.Fprintf(a.stdout, "  inside the copy:  clickhouse-client --host 127.0.0.1   (as default, the admin)\n")
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -dsn | <your client>   (native %d; HTTP on 8123)\n", mc.Name, chPort)
+		return
 	case engineFerret:
 		fmt.Fprintf(a.stdout, "  MongoDB protocol (FerretDB) on port %d; the same user and password as its Postgres role\n", ferretPort)
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -dsn | <mongosh or your driver>\n", mc.Name)

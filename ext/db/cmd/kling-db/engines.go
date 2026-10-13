@@ -57,6 +57,9 @@ const (
 	// DocumentDB. Por debajo es una copia de Postgres (la contraseña es la del
 	// rol, SCRAM), y por fuera se habla Mongo en el 27017.
 	engineFerret = "ferretdb"
+	// engineClickHouse: la clave del usuario de la aplicación, como SHA-256
+	// (clickhouse.go).
+	engineClickHouse = "clickhouse"
 
 	redisPort  = 6379
 	ferretPort = 27017
@@ -66,7 +69,7 @@ const (
 // Postgres, como antes de #64 (goldenInfo sí lo rechaza al crear copias).
 func engineOf(labels map[string]string) string {
 	switch e := labels[labelEngine]; e {
-	case engineMySQL, engineRedis, engineSQLite, engineFerret:
+	case engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse:
 		return e
 	}
 	return enginePostgres
@@ -79,7 +82,7 @@ func pgBacked(engine string) bool { return engine == enginePostgres || engine ==
 // knownEngine dice si e es un motor que kling db sabe manejar.
 func knownEngine(e string) bool {
 	switch e {
-	case enginePostgres, engineMySQL, engineRedis, engineSQLite, engineFerret:
+	case enginePostgres, engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse:
 		return true
 	}
 	return false
@@ -96,6 +99,8 @@ func enginePort(engine string) int {
 		return 0
 	case engineFerret:
 		return ferretPort
+	case engineClickHouse:
+		return chPort
 	}
 	return pgPort
 }
@@ -105,7 +110,7 @@ func engineDoc(engine string) string {
 	switch engine {
 	case engineMySQL:
 		return "docs/mysql.md"
-	case engineRedis, engineSQLite, engineFerret:
+	case engineRedis, engineSQLite, engineFerret, engineClickHouse:
 		return "docs/db-engines.md"
 	}
 	return "docs/db.md"
@@ -157,9 +162,9 @@ func clientMode(engine string) string {
 		return "redis"
 	case engineSQLite:
 		return "sqlite"
-	case engineFerret:
-		// Sin cliente propio: mongosh pide la clave en argv o por teclado;
-		// el DSN va a la herramienta de cada uno.
+	case engineFerret, engineClickHouse:
+		// Sin cliente propio: mongosh y clickhouse-client piden la clave en
+		// argv o por teclado; el DSN va a la herramienta de cada uno.
 		return "dsn"
 	}
 	return "psql"
