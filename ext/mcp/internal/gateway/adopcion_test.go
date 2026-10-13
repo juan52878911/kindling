@@ -132,7 +132,7 @@ func TestAdoptarUnaInstanciaLimpiaSusSesiones(t *testing.T) {
 	if fault != nil {
 		t.Fatalf("forward: %+v", fault)
 	}
-	if !strings.Contains(fmt.Sprint(res), `"soy":"vieja"`) {
+	if !strings.Contains(texto(res), `"soy":"vieja"`) {
 		t.Fatalf("respuesta %v: quería la instancia adoptada", res)
 	}
 	vieja.mu.Lock()
@@ -171,7 +171,22 @@ func TestAgregadorConPrimariaLlenaVaAUnaReplica(t *testing.T) {
 	if fault != nil {
 		t.Fatalf("forward con la primaria llena: %+v", fault)
 	}
-	if r := fmt.Sprint(res); strings.Contains(r, `"soy":"A"`) || !strings.Contains(r, `"soy":`) {
+	if r := texto(res); strings.Contains(r, `"soy":"A"`) || !strings.Contains(r, `"soy":`) {
 		t.Fatalf("respuesta %v: quería una réplica, no la primaria llena", res)
 	}
+}
+
+// texto es la respuesta de forward como texto, sea json.RawMessage, []byte o
+// lo que sea (fmt.Sprint de un RawMessage imprime sus bytes como números).
+func texto(v any) string {
+	switch x := v.(type) {
+	case json.RawMessage:
+		return string(x)
+	case []byte:
+		return string(x)
+	case string:
+		return x
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }

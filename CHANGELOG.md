@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
+
 ### Fixed
 
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
