@@ -387,3 +387,26 @@ func TestHooksSoloAccionYFallo(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+// La renovación SSH va antes que los ganchos y solo en copias.
+func TestHooksRenovacionSSHAntesQueLosGanchos(t *testing.T) {
+	r, dir := nuevoReadiness(t)
+	orden := filepath.Join(dir, "orden")
+	script(t, filepath.Join(r.hooksDir, "10-gancho"), `echo gancho >> `+orden)
+	r.ssh = func() func() error {
+		return func() error {
+			f, _ := os.OpenFile(orden, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			f.WriteString("ssh\n")
+			f.Close()
+			return nil
+		}
+	}
+	for _, kind := range []string{api.ResyncThaw, api.ResyncInstance} {
+		hecho := make(chan struct{})
+		r.startHooks(kind, func() { close(hecho) })
+		<-hecho
+	}
+	if b, _ := os.ReadFile(orden); string(b) != "gancho\nssh\ngancho\n" {
+		t.Fatalf("orden = %q", b)
+	}
+}

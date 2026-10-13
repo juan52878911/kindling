@@ -589,7 +589,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	// instancia en plena llamada, y un scan de dos minutos moría con un timeout
 	// que parecía un fallo de la herramienta.
 	a.gw.Begin(e)
-	defer a.gw.End(e)
+	defer func() { a.gw.End(e) }() // e puede cambiar: ver el scale-out de abajo
 	dEnsure := time.Since(tEnsure)
 	// e.Addr resuelve el reenvío de macOS; en Linux es e.IP()+puerto de siempre.
 	base := "http://" + e.Addr(GuestPort)
@@ -617,6 +617,27 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	a.mu.Unlock()
 	if sid == "" {
 		newSid, ierr := mcpInit(ctx, base)
+		if errors.Is(ierr, errSessionLimit) && !aislado {
+			// La primaria está llena (sesiones directas, u otras conversaciones
+			// del agregador): como en el initialize directo, una réplica nueva.
+			e2, serr := a.gw.ScaleOut(ctx, t.Service, scheduler.TenantFrom(ctx))
+			if serr != nil {
+				log.Printf("%s: primary full and no replica for the aggregator: %v", t.Service, serr)
+			}
+			if serr == nil {
+				a.gw.Begin(e2)
+				a.gw.End(e)
+				e, base = e2, "http://"+e2.Addr(GuestPort)
+				bkey = t.Service + "\x00" + e.MachineID()
+				a.mu.Lock()
+				sid = s.backing[bkey]
+				a.mu.Unlock()
+				newSid, ierr = sid, nil
+				if sid == "" {
+					newSid, ierr = mcpInit(ctx, base)
+				}
+			}
+		}
 		if ierr != nil {
 			initLock.Unlock()
 			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}

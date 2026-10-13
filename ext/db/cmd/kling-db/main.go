@@ -123,6 +123,8 @@ func manifest() plugin.Manifest {
 				Usage: usage("observe <copy> | -off <copy>", "log every statement of new connections, with its duration") +
 					usage("observe -report <copy> [-table T] [-json]", "the statements that touch the table, grouped"),
 				MachineArgs: []string{""}},
+			{Name: "mysql-hash", Hidden: true, Summary: "the stored hash of a password read from stdin (for db-golden-mysql.sh)",
+				Usage: usage("mysql-hash", "[-plugin caching_sha2_password|mysql_native_password] < password")},
 			{Name: "templates", Group: "TEMPLATES", Summary: "lists the bundled database templates",
 				Usage: usage("templates", "empty, crm-demo...")},
 		},
@@ -164,5 +166,6 @@ func main() {
 		"observe":      cmdObserve,
 		"role":         cmdRole,
 		"templates":    cmdTemplates,
+		"mysql-hash":   cmdMySQLHash,
 	}, map[string]func([]string, io.Writer) error{})
 }

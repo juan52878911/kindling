@@ -179,6 +179,12 @@ type Scheduler struct {
 	// OnWake, si está, se llama junto a OnAcquire con el desglose por fases
 	// de ese despertar (ver WakeTrace).
 	OnWake func(service string, t *WakeTrace)
+	// OnAdopt, si está, se llama al adoptar una máquina que ya corría y que
+	// este planificador no tenía como instancia (la dejó el proceso anterior
+	// del gateway, al reiniciarlo), antes de enrutarle nada. El gateway MCP
+	// limpia ahí las sesiones que el puente aún guarda de ese proceso: nadie
+	// las va a usar, y ocupaban el tope de sesiones de la instancia (#187).
+	OnAdopt func(ctx context.Context, service string, m *api.Machine)
 	// PausedMiB es el presupuesto del nivel "pausada" (ver pausa.go), en MiB de
 	// mem_mib configurada: 0 = nunca se pausa, todo se congela.
 	PausedMiB int
@@ -1043,6 +1049,9 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 			t := time.Now()
 			g.renovarTTL(ctx, m.ID)
 			tr.Renew += time.Since(t)
+			if g.OnAdopt != nil {
+				g.OnAdopt(ctx, service, m)
+			}
 			return m, "adopt", nil
 		}
 	}
