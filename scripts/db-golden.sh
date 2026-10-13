@@ -8,6 +8,7 @@
 #   scripts/db-golden.sh build [opciones] <nombre> arranca, carga y congela
 #   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
 #   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
+#   ... image|build -engine valkey ...             Valkey: el guion de Redis con la imagen valkey
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
 # cluster en el overlay de la máquina, arranca Postgres escuchando en la IP del
@@ -572,8 +573,9 @@ case "$engine" in
   postgres) ;;
   mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;
   redis) exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
+  valkey) KLING_DB_REDIS_FLAVOR=valkey exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
   sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
-  *) die "motor desconocido: $engine (postgres, mysql, redis o sqlite)" ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey o sqlite)" ;;
 esac
 set -- ${args[@]+"${args[@]}"}
 
