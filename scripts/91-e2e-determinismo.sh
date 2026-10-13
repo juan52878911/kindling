@@ -15,7 +15,13 @@
 #      recibirla, sin reiniciarse.
 #   4. /run/kindling/generation existe en la copia y vale 1.
 #   5. Identidad (#176): un /etc/machine-id del dorado sale distinto en cada
-#      copia, y unas claves de host SSH hacen que `save` avise.
+#      copia, y unas claves de host SSH que nadie puede renovar hacen que
+#      `save` avise.
+#   6. SSH (#176): con openssh en la imagen, cada copia regenera sus claves de
+#      host y sshd anuncia la nueva (sin reiniciarlo a mano).
+#   0. Kernel (#177, D5): uuid de /proc, /dev/urandom y reloj de cada copia;
+#      con LONG_FREEZE=segundos (p. ej. 660), además el reloj de una copia que
+#      pasa ese tiempo congelada (D4).
 #
 # Corre contra el daemon de KLING_HOST (Linux con Firecracker o macOS con vz) y
 # necesita red para bajar node:22-alpine y python:3.12-alpine.
@@ -24,6 +30,8 @@
 #
 #   KLING   el CLI (por defecto kling del PATH)
 #   COPIES  copias por dorado (3)
+#   LONG_FREEZE  segundos que se deja congelada una copia para medir el reloj
+#           al despertar (0, por defecto: no se mide)
 #   KEEP=1  no borra máquinas, dorados ni imágenes al acabar
 #
 # Cada comprobación dice qué esperaba y qué obtuvo; un fallo no aborta el
@@ -33,6 +41,7 @@ set -uo pipefail
 KLING="${KLING:-kling}"
 COPIES="${COPIES:-3}"
 KEEP="${KEEP:-0}"
+LONG_FREEZE="${LONG_FREEZE:-0}"
 P="det$$"
 
 pass=0; fail=0
@@ -52,7 +61,9 @@ limpiar() {
     k rm "$P-src-$v" >/dev/null 2>&1
     k template rm "$P-tpl-$v" >/dev/null 2>&1
   done
-  for img in "$P-node" "$P-node-r" "$P-py"; do k image rm "$img" >/dev/null 2>&1; done
+  k rm "$P-src-d" >/dev/null 2>&1; k template rm "$P-tpl-d" >/dev/null 2>&1
+  for i in $(seq 1 "$COPIES"); do k rm "$P-d$i" >/dev/null 2>&1; done
+  for img in "$P-node" "$P-node-r" "$P-py" "$P-ssh"; do k image rm "$img" >/dev/null 2>&1; done
 }
 trap limpiar EXIT
 
@@ -112,6 +123,10 @@ copias() {
 
 distintas() { printf '%s' "$1" | grep -v '^$' | sort -u | wc -l | tr -d ' '; }
 
+# skew NOMBRE: segundos que va el reloj del invitado respecto al del host.
+skew() { echo $(( $(k exec "$1" -- date +%s) - $(date +%s) )); }
+abs() { local v=$1; [ "$v" -ge 0 ] || v=$((-v)); echo "$v"; }
+
 step "1. node without on-restore: save warns, copies repeat"
 k image import node:22-alpine -name "$P-node" -- node -e "$NODE_SRV" >/dev/null || bad "import node" "ok" "failed"
 # Una identidad como la de una imagen con systemd y sshd.
@@ -126,6 +141,26 @@ if dorado a "$P-node" "$IDENT"; then
   n="$(distintas "$RESP")"
   if [ "$n" = 1 ]; then ok "the $COPIES copies repeat the same values (the bug this test catches)"
   else bad "copies without on-restore repeat" "1 distinct answer" "$n: $RESP"; fi
+  # El kernel de cada copia (D5): uuid, urandom y reloj.
+  kern="" maxskew=0
+  for i in $(seq 1 "$COPIES"); do
+    kern+="$(k exec "$P-a$i" -- sh -c 'cat /proc/sys/kernel/random/uuid; head -c16 /dev/urandom | od -An -tx1 | tr -d " \n"')"$'\n'
+    s="$(abs "$(skew "$P-a$i")")"; [ "$s" -gt "$maxskew" ] && maxskew=$s
+  done
+  n="$(printf '%s' "$kern" | grep -v '^$' | sort | uniq -d | wc -l | tr -d ' ')"
+  if [ "$n" = 0 ]; then ok "kernel uuid and /dev/urandom differ in every copy"
+  else bad "kernel randomness per copy" "no repeated value" "$kern"; fi
+  if [ "$maxskew" -le 2 ]; then ok "guest clocks within ${maxskew}s of the host"
+  else bad "guest clock after run -from" "≤ 2 s off" "${maxskew} s"; fi
+  if [ "$LONG_FREEZE" -gt 0 ]; then
+    k freeze "$P-a1" >/dev/null
+    echo "     frozen for ${LONG_FREEZE}s..."
+    sleep "$LONG_FREEZE"
+    k thaw "$P-a1" >/dev/null
+    s="$(skew "$P-a1")"
+    if [ "$(abs "$s")" -le 2 ]; then ok "clock after ${LONG_FREEZE}s frozen: ${s}s off"
+    else bad "clock after a long freeze" "≤ 2 s off" "${s} s"; fi
+  fi
   ids=""
   for i in $(seq 1 "$COPIES"); do ids+="$(k exec "$P-a$i" -- cat /etc/machine-id 2>&1)"$'\n'; done
   n="$(distintas "$ids")"
@@ -163,6 +198,27 @@ if dorado c "$P-py"; then
   if [ "$n" = "$COPIES" ]; then ok "$COPIES copies, $COPIES distinct answers"
   else bad "distinct answers after the signal" "$COPIES" "$n: $RESP"; fi
 else bad "template c" "running and saved" "failed"; fi
+
+step "6. SSH host keys: every copy regenerates its own, and sshd serves it"
+k image import alpine:3.22 -name "$P-ssh" >/dev/null || bad "import alpine" "ok" "failed"
+if k run -name "$P-src-d" -image "$P-ssh" -egress internet -allow-exec >/dev/null &&
+   k exec "$P-src-d" -- sh -c 'apk add -q openssh >/dev/null && ssh-keygen -A >/dev/null && /usr/sbin/sshd' &&
+   SAVE_OUT="$(k save "$P-src-d" "$P-tpl-d" 2>&1)"; then
+  if contiene "$SAVE_OUT" "SSH host keys"; then bad "save stays quiet when the image can renew its keys" "no SSH warning" "$SAVE_OUT"
+  else ok "save does not warn: the image has ssh-keygen"; fi
+  orig="$(k exec "$P-src-d" -- ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>&1 | awk '{print $2}')"
+  fps="" served=""
+  for i in $(seq 1 "$COPIES"); do
+    k run -name "$P-d$i" -from "$P-tpl-d" -wait-ready >/dev/null
+    fps+="$(k exec "$P-d$i" -- ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>&1 | awk '{print $2}')"$'\n'
+    served+="$(k exec "$P-d$i" -- sh -c 'ssh-keyscan -t ed25519 127.0.0.1 2>/dev/null | ssh-keygen -lf - | awk "{print \$2}"')"$'\n'
+  done
+  n="$(distintas "$fps")"
+  if [ "$n" = "$COPIES" ] && ! contiene "$fps" "$orig"; then ok "each copy has its own SSH host key"
+  else bad "an SSH host key per copy" "$COPIES distinct, none the template's ($orig)" "$fps"; fi
+  if [ "$fps" = "$served" ]; then ok "sshd serves the new key in every copy"
+  else bad "sshd serves the regenerated key" "$fps" "$served"; fi
+else bad "template d (sshd)" "running and saved" "failed"; fi
 
 printf "\n%d ok, %d failed\n" "$pass" "$fail"
 [ "$fail" = 0 ]

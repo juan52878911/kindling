@@ -90,6 +90,11 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	g.PrepareAddr = func(ctx context.Context, addr string) (string, error) {
 		return mcpInit(ctx, "http://"+addr)
 	}
+	// Una instancia que ya corría cuando arrancó este gateway trae las sesiones
+	// del proceso anterior en su puente: se limpian antes de usarla (#187).
+	g.OnAdopt = func(ctx context.Context, service string, m *api.Machine) {
+		resetBridge(ctx, service, "http://"+m.Addr(GuestPort))
+	}
 	// Los servicios con estado no se precalientan: su instancia es persistente.
 	g.Skip = mcp.Stateful
 	// Una instancia que no contesta marca la salud del servicio.

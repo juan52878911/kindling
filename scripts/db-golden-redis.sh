@@ -6,6 +6,11 @@
 #
 # (o db-golden.sh image|build -engine redis ..., que llega aquí.)
 #
+# VALKEY: con -engine valkey (KLING_DB_REDIS_FLAVOR=valkey) la imagen es
+# `valkey` (Alpine + valkey y valkey-cli, el fork libre de Redis) y build la usa
+# por defecto. El resto es igual: mismo protocolo, mismas ACL, y kling db la
+# trata como redis (la etiqueta kling.db.engine es redis).
+#
 # `build` arranca una microVM desde la imagen redis (Alpine; sin red, con
 # exec), arranca redis-server escuchando en la IP del invitado y en un socket
 # local, crea el usuario ACL de la aplicación, carga el seed, lo guarda en
@@ -47,6 +52,9 @@ say() { echo "db-golden-redis: $*"; }
 
 SEED_KEYS_MAX=5000000
 
+FLAVOR="${KLING_DB_REDIS_FLAVOR:-redis}"
+case "$FLAVOR" in redis|valkey) ;; *) die "KLING_DB_REDIS_FLAVOR: redis o valkey, no $FLAVOR" ;; esac
+
 BUILD_M=""
 BUILD_TMP=""
 BUILD_OK=0
@@ -86,14 +94,14 @@ sha256_file() {
 RC='c=$(command -v redis-cli || command -v valkey-cli) && REDISCLI_AUTH=$(cat /etc/kling-db/redis-admin) && export REDISCLI_AUTH && exec "$c" -s /run/redis/redis.sock'
 
 cmd_image() {
-  [ -f "$HERE/recipes/redis.recipe.json" ] || die "falta scripts/recipes/redis.recipe.json"
-  say "construyendo la imagen redis (Alpine + redis); tarda unos minutos"
-  "${K[@]}" image build redis -builder base -base min -grow 256 -spec "$HERE/recipes/redis.recipe.json"
-  "${K[@]}" image recipe redis
+  [ -f "$HERE/recipes/$FLAVOR.recipe.json" ] || die "falta scripts/recipes/$FLAVOR.recipe.json"
+  say "construyendo la imagen $FLAVOR (Alpine + $FLAVOR); tarda unos minutos"
+  "${K[@]}" image build "$FLAVOR" -builder base -base min -grow 256 -spec "$HERE/recipes/$FLAVOR.recipe.json"
+  "${K[@]}" image recipe "$FLAVOR"
 }
 
 cmd_build() {
-  local seed="" seed_keys=0 role=app image=redis from=""
+  local seed="" seed_keys=0 role=app image="$FLAVOR" from=""
   local mem=512M cpus=1 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -176,10 +184,12 @@ set -eu
 umask 077
 BIN=\$(command -v redis-server || command -v valkey-server) || { echo "no hay redis-server en la imagen"; exit 1; }
 CLI=\$(command -v redis-cli || command -v valkey-cli) || { echo "no hay redis-cli en la imagen"; exit 1; }
-id redis >/dev/null 2>&1 || { echo "no hay usuario redis en la imagen"; exit 1; }
+# El usuario del servidor: redis, o valkey en la imagen de Valkey.
+if id redis >/dev/null 2>&1; then SU=redis; elif id valkey >/dev/null 2>&1; then SU=valkey
+else echo "no hay usuario redis ni valkey en la imagen"; exit 1; fi
 mkdir -p /etc/kling-db /run/redis /var/lib/redis /var/log/redis
 chmod 755 /etc/kling-db
-chown redis:redis /run/redis /var/lib/redis /var/log/redis
+chown "\$SU:\$SU" /run/redis /var/lib/redis /var/log/redis
 chmod 700 /run/redis /var/lib/redis /var/log/redis
 # La clave del administrador: generada aquí dentro, solo la lee root.
 N=\$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
@@ -188,9 +198,9 @@ printf %s "\$N" > /etc/kling-db/redis-admin
 chmod 600 /etc/kling-db/redis-admin
 H=\$(printf %s "\$N" | sha256sum | cut -d' ' -f1)
 # El aclfile lo reescribe ACL SAVE (fichero temporal + rename en su
-# directorio): va en el de datos, que es de redis.
+# directorio): va en el de datos, que es del usuario del servidor.
 printf 'user default on #%s ~* &* +@all\nuser %s on #%s ~* &* +@all -@admin\n' "\$H" "$role" "$hash" > /var/lib/redis/users.acl
-chown redis:redis /var/lib/redis/users.acl
+chown "\$SU:\$SU" /var/lib/redis/users.acl
 cat > /etc/kling-db/redis.conf <<'CONF'
 bind $ip
 port 6379
@@ -214,7 +224,7 @@ CONF
 chmod 644 /etc/kling-db/redis.conf
 # El servidor hereda las tuberías del exec: a fichero, sin stdin y en su
 # propia sesión, o el exec no termina nunca.
-setsid su -s /bin/sh redis -c "exec \$BIN /etc/kling-db/redis.conf" </dev/null >/var/log/redis/server.out 2>&1 &
+setsid su -s /bin/sh "\$SU" -c "exec \$BIN /etc/kling-db/redis.conf" </dev/null >/var/log/redis/server.out 2>&1 &
 export REDISCLI_AUTH="\$N"
 i=0
 until [ "\$("\$CLI" -s /run/redis/redis.sock PING 2>/dev/null)" = PONG ]; do

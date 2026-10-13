@@ -337,11 +337,14 @@ su servidor siempre está vivo en el dorado y todavía no tienen `-on-restore`.
 aparte), con el kernel ya resembrado: systemd, journald o dbus ya no ven la
 misma máquina N veces. Solo si el dorado tenía uno con valor: uno vacío
 significa "genéralo al arrancar" y se deja. Al descongelar la misma máquina no
-se toca. Las claves de host SSH (`/etc/ssh/ssh_host_*_key`) no se renuevan
-solas, porque sshd las carga al arrancar: `kling save` avisa de ellas, y la
-imagen las regenera en un gancho de `post-restore.d` (`rm` de las claves,
-`ssh-keygen -A` y reiniciar sshd). Las claves de cancelación de las conexiones
-de Postgres que el dorado tenía abiertas las vigila `kling db doctor` (DB051).
+se toca. Las claves de host SSH (`/etc/ssh/ssh_host_*_key`) también: si la
+imagen trae `ssh-keygen`, cada copia regenera las suyas (del mismo tipo, antes
+de los ganchos) y manda SIGHUP al sshd que escucha, porque desde OpenSSH 9.8 no
+las vuelve a leer sin él. Sin `ssh-keygen`, `kling save` avisa de ellas. En
+Postgres, las conexiones nuevas de cada copia ya llevan claves de cancelación
+distintas (medido en el lab con tres copias); lo que se compartiría son las de
+conexiones abiertas en el dorado, y `kling db golden build` no guarda con
+ninguna abierta (`kling db doctor` lo vigila en las demás, DB051).
 
 La prueba es `scripts/91-e2e-determinismo.sh` (Node con y sin `restart`, Python
 con señal, machine-id y claves SSH; corre contra cualquier daemon, Linux o

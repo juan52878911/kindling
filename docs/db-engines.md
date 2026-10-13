@@ -47,10 +47,15 @@ copias.
 
 ### La plantilla (`scripts/db-golden-redis.sh`)
 
-- **Receta** `scripts/recipes/redis.recipe.json`: Alpine + `redis` y `tzdata`. El script
-  vale igual con `valkey-server`/`valkey-cli` (busca los dos nombres), por si la versión
-  de Alpine solo empaqueta Valkey. Hace falta Redis 7 o más (ACL con selectores,
-  `ACL DRYRUN`, `enable-*-command`).
+- **Receta** `scripts/recipes/redis.recipe.json`: Alpine + `redis` y `tzdata`. Hace falta
+  Redis 7 o más (ACL con selectores, `ACL DRYRUN`, `enable-*-command`).
+- **Valkey** (el fork libre de Redis): `kling db golden image -engine valkey` construye la
+  imagen `valkey` con `scripts/recipes/valkey.recipe.json` (Alpine + `valkey` y
+  `valkey-cli`, 9.0.4 en Alpine 3.24) y `golden build -engine valkey <nombre>` la usa por
+  defecto. El script busca `valkey-server`/`valkey-cli` y el usuario `valkey` si no hay
+  `redis`; lo demás es igual, y `kling db` la trata como `redis` (mismo protocolo, mismas
+  ACL). Probado en el lab el 2026-10-11: dorado con 1.000 claves, copia con `kling db up`,
+  `AUTH` del usuario de la aplicación, `CONFIG` denegado y `kling db doctor` sin hallazgos.
 - **El servidor** escucha en la IP del invitado y en `/run/redis/redis.sock`
   (`unixsocketperm 700`, del usuario `redis`), como el usuario `redis`, con la
   configuración en `/etc/kling-db/redis.conf`: `protected-mode yes`, sin `DEBUG` ni
@@ -215,9 +220,8 @@ Análisis de compatibilidad del 2026-09-29. Hay tres niveles de soporte:
 
 Por orden:
 
-1. **Rápido.** pgvector y PostGIS en la receta de Postgres (hay que comprobar que Alpine
-   los empaqueta), un golden de Valkey de verdad (el guion ya acepta
-   `valkey-server`/`valkey-cli`) y esta tabla por motor en la documentación de producto.
+1. **Hecho.** pgvector y PostGIS (`kling db golden image -ext`, #144) y un golden de
+   Valkey (`-engine valkey`, #113).
 2. **Hecho.** MySQL 8.4 y 9 de Oracle, con el hash de `caching_sha2_password` calculado en
    el host (#114, docs/mysql.md). Percona y los orígenes de `clone` en MySQL siguen
    pendientes.
