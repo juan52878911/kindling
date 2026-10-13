@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -247,9 +249,23 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	base := "http://" + e.Addr(GuestPort)
 
 	sid, err := mcpInit(ctx, base)
+	if errors.Is(err, errSessionLimit) && !aislado {
+		// La primaria está llena: cualquier réplica sabe listar lo mismo.
+		if e2, serr := c.gw.ScaleOut(ctx, service, scheduler.TenantFrom(ctx)); serr == nil {
+			c.gw.Begin(e2)
+			defer c.gw.End(e2)
+			base = "http://" + e2.Addr(GuestPort)
+			sid, err = mcpInit(ctx, base)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
+	// La sesión del catálogo solo sirve para listar: se cierra al acabar. Sin
+	// esto ocupaba un hueco del puente para siempre, y en uno con tope de una
+	// sesión (los de 256 MiB) el call_tool siguiente chocaba con "session
+	// limit" (#187).
+	defer mcpClose(context.WithoutCancel(ctx), base, sid)
 	listed, err := listTools(ctx, base, sid)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
@@ -386,6 +402,30 @@ var httpc = &http.Client{
 // esto: reintentarlo re-ejecuta la llamada.
 var errStaleSession = errors.New("the bridge does not recognize the session")
 
+// errSessionLimit es el 400 del puente cuando ya tiene todas las sesiones que
+// admite: esa instancia está llena y hay que ir a otra.
+var errSessionLimit = errors.New("the bridge is at its session limit")
+
+// resetBridge pide al puente de base que suelte sus sesiones (POST /reset).
+// Lo usa el gateway al adoptar una instancia que dejó el proceso anterior: sus
+// sesiones no son de nadie ya. Un fallo solo se apunta: la instancia sigue
+// valiendo, y el camino de initialize sabe ir a otra si está llena.
+func resetBridge(ctx context.Context, service, base string) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/reset", nil)
+	if err != nil {
+		return
+	}
+	resp, err := httpc.Do(req)
+	if err != nil {
+		log.Printf("%s: resetting the sessions of an adopted instance: %v", service, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("%s: adopted a running instance, its old sessions reset (HTTP %d)", service, resp.StatusCode)
+}
+
 // rpcSeq da identificadores JSON-RPC únicos. El protocolo exige que un id no se
 // repita dentro de una sesión mientras haya peticiones en vuelo.
 var rpcSeq atomic.Int64
@@ -411,6 +451,24 @@ func mcpPostAt(ctx context.Context, url, sid, body string) (*http.Response, erro
 	return httpc.Do(req)
 }
 
+// mcpClose termina la sesión sid en el puente de base (DELETE /mcp). Con
+// plazo corto y sin error: si no se cierra, el puente la recoge al reiniciarse.
+func mcpClose(ctx context.Context, base, sid string) {
+	if sid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/mcp", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set(SessionHeader, sid)
+	if resp, err := httpc.Do(req); err == nil {
+		resp.Body.Close()
+	}
+}
+
 func mcpInit(ctx context.Context, base string) (string, error) {
 	return mcpInitAt(ctx, base+"/mcp")
 }
@@ -423,6 +481,13 @@ func mcpInitAt(ctx context.Context, url string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(b), "session limit") {
+			return "", fmt.Errorf("initialize: %w", errSessionLimit)
+		}
+		if msg := strings.TrimSpace(string(b)); msg != "" {
+			return "", fmt.Errorf("initialize: HTTP %s: %s", resp.Status, msg)
+		}
 		return "", fmt.Errorf("initialize: HTTP %s", resp.Status)
 	}
 	return resp.Header.Get(SessionHeader), nil
