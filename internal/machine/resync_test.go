@@ -109,12 +109,7 @@ func TestResyncGuestAgenteViejoNoFalla(t *testing.T) {
 // Sin nadie escuchando (una máquina sin agente) se insiste un instante y se
 // sigue: no puede costar el plazo entero en cada restauración.
 func TestResyncGuestSinAgente(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
+	addr := dirSinNadie
 	m := &Manager{byID: map[string]*api.Machine{
 		"x": {ID: "x", Name: "x", Image: "sin-agente", Forwards: map[string]string{"8080": addr}},
 		"y": {ID: "y", Name: "y"}, // sin IP ni reenvíos: ni se intenta
@@ -176,12 +171,7 @@ func TestAgenteEscucha(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	cerrado, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	libre := cerrado.Addr().String()
-	cerrado.Close()
+	libre := dirSinNadie
 	m := &Manager{byID: map[string]*api.Machine{
 		"si": {ID: "si", Forwards: map[string]string{"8080": ln.Addr().String()}},
 		"no": {ID: "no", Forwards: map[string]string{"8080": libre}},

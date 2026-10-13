@@ -3,7 +3,6 @@ package machine
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -229,21 +228,12 @@ func TestGanchosPendientesNoSobrevivenAParar(t *testing.T) {
 // invitado cuyo agente tarda en contestar la primera vez.
 func agenteTardio(t *testing.T, h http.Handler, tarde time.Duration) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
+	ln := nuevoListenerTardio(t)
 	srv := &http.Server{Handler: h}
 	t.Cleanup(func() { srv.Close() })
-	go func() {
-		time.Sleep(tarde)
-		if ln, err := net.Listen("tcp", addr); err == nil {
-			_ = srv.Serve(ln)
-		}
-	}()
-	return addr
+	go func() { _ = srv.Serve(ln) }()
+	time.AfterFunc(tarde, ln.abrir)
+	return ln.Addr().String()
 }
 
 // Sin poder mirar la imagen, la gracia para la primera respuesta del agente
@@ -314,12 +304,7 @@ func TestResyncFalloSoloConAgenteQueDebiaContestar(t *testing.T) {
 		t.Errorf("un agente que no anuncia resync: %+v, no es un fallo", r)
 	}
 	// Nadie escucha: RST.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cerrado := l.Addr().String()
-	l.Close()
+	cerrado := dirSinNadie
 	m.byID[id].Agent, m.byID[id].Forwards = nil, map[string]string{"8080": cerrado}
 	clave := claveSnapshot(&api.Snapshot{Name: "dorado", CreatedAt: time.Now()})
 	if r := m.resyncGuest(context.Background(), id, clave, api.ResyncInstance); r.fallo {

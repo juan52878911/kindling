@@ -297,10 +297,9 @@ func TestFirstCountTimeout(t *testing.T) {
 	cfg.Timeout = 300 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
-	// Puerto cerrado: se reintenta hasta agotar el plazo y se clasifica.
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	ln.Close()
+	// Puerto cerrado: se reintenta hasta agotar el plazo y se clasifica. El 1,
+	// y no uno de :0 recién cerrado: ese lo puede coger otro test en paralelo.
+	addr := "127.0.0.1:1"
 	phase, err := firstCount(ctx, target{Addr: addr, User: "u", Database: "d"}, cfg)
 	if err == nil || phase != "connect" {
 		t.Fatalf("phase=%q err=%v", phase, err)
