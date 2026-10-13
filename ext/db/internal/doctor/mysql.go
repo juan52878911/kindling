@@ -188,7 +188,14 @@ func mysqlCopy(ctx context.Context, k klingc.Kling, mc *api.Machine, state strin
 			r.add("MY011", Warn, "set secure_file_priv to an empty dedicated directory (or NULL)",
 				"secure_file_priv is empty: an account with FILE can read and write any file the server can")
 		}
-		if golden != "" && !strings.EqualFold(st.Audit, "ACTIVE") {
+		switch {
+		case golden == "" || strings.EqualFold(st.Audit, "ACTIVE"):
+		case !mariadb:
+			// MySQL Community de Oracle no tiene plugin de auditoría (es de la
+			// edición Enterprise): no hay nada que reconstruir.
+			r.add("MY012", Info, "",
+				"MySQL Community has no connection log (server_audit is MariaDB's): kling db audit shows only daemon events")
+		default:
 			r.add("MY012", Warn, "rebuild the golden with scripts/db-golden-mysql.sh (server_audit with server_audit_events=CONNECT)",
 				"the connection log (server_audit) is not active: kling db audit shows only daemon events")
 		}
@@ -359,14 +366,14 @@ func myPasswordChecks(app *myUserRow, id, state, golden, appUser string, ready, 
 			"application user %s@'%%' does not exist in the copy", q(appUser))
 		return
 	}
-	if app.Plugin != mysqlpw.NativePlugin || !mysqlpw.ValidHash(app.Auth) {
-		r.add("MY052", High, "rotate the password with kling db rotate (it stores a mysql_native_password hash)",
-			"the password of %s is not a mysql_native_password hash kling db can check (plugin %s)", q(appUser), q(app.Plugin))
+	if !mysqlpw.ValidHashFor(app.Plugin, app.Auth) {
+		r.add("MY052", High, "rotate the password with kling db rotate (it stores a mysql_native_password or caching_sha2_password hash)",
+			"the password of %s is not a hash kling db can check (plugin %s)", q(appUser), q(app.Plugin))
 		return
 	}
 	gdir := filepath.Join(state, golden)
 	if gp, err := readSmall(filepath.Join(gdir, "password")); err == nil {
-		if mysqlpw.NativeHash(strings.TrimRight(string(gp), "\r\n")) == app.Auth {
+		if mysqlpw.Check(app.Plugin, strings.TrimRight(string(gp), "\r\n"), app.Auth) {
 			r.add("MY052", Critical, "destroy this copy; kling db must rotate the password before marking a copy ready",
 				"the password of %s is still the golden's: whoever knows %s's password can log in to this copy", q(appUser), q(golden))
 		}
@@ -401,7 +408,7 @@ func myPasswordChecks(app *myUserRow, id, state, golden, appUser string, ready, 
 		checkFailed(r, "MY054", "the host password file", err)
 		return
 	}
-	if mysqlpw.NativeHash(strings.TrimRight(string(cp), "\r\n")) != app.Auth {
+	if !mysqlpw.Check(app.Plugin, strings.TrimRight(string(cp), "\r\n"), app.Auth) {
 		r.add("MY054", High, "rotate the password again (kling db rotate) or recreate the copy",
 			"host password file %s does not match the user's hash: kling db connect will fail", p)
 	}

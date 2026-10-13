@@ -189,6 +189,28 @@ func TestRotateMySQL(t *testing.T) {
 	}
 }
 
+// MySQL 8.4 y 9 de Oracle: el usuario tiene caching_sha2_password y la
+// rotación le pone un hash de ese método, no uno de mysql_native_password
+// (que MySQL 9 ya no trae).
+func TestRotateMySQLCachingSHA2(t *testing.T) {
+	ta := testAppMy(t)
+	ta.f.myPlugin = mysqlpw.CachingSHA2Plugin
+	mc, err := ta.up(ctx, "my", "m1", 0, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ta.f.verifier[mc.ID]
+	if !mysqlpw.ValidCachingSHA2Hash(h) || !mysqlpw.CheckCachingSHA2(password(t, mc.ID), h) {
+		t.Fatalf("la copia recibió %q, quiero el caching_sha2_password de su clave", h)
+	}
+	if _, err := ta.rotateCopy(ctx, "m1", "local"); err != nil {
+		t.Fatal(err)
+	}
+	if h2 := ta.f.verifier[mc.ID]; h2 == h || !mysqlpw.CheckCachingSHA2(password(t, mc.ID), h2) {
+		t.Fatal("la rotación no dejó el hash de la clave nueva")
+	}
+}
+
 // Lo que esta versión no hace con MySQL se rechaza antes de tocar nada.
 func TestMySQLSoloPostgres(t *testing.T) {
 	ta := testAppMy(t)

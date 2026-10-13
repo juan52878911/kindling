@@ -194,3 +194,24 @@ func TestMyMariaDBReal(t *testing.T) {
 		t.Error("qMySettings: local_infile tiene que ir como número")
 	}
 }
+
+// Una copia de MySQL 8.4/9 de Oracle: el usuario de la aplicación con
+// caching_sha2_password. doctor comprueba su hash igual que el de MariaDB.
+func TestMyCopiaCachingSHA2(t *testing.T) {
+	k := copiaMy(t)
+	h, err := mysqlpw.NewCachingSHA2Hash(copyPW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.sql["version"] = `"8.4.11"`
+	k.sql["users"] = `[{"user":"app","host":"%","plugin":"caching_sha2_password","auth":"` + h + `","locked":false,"role":false}]`
+	_, out := correrMy(t, k)
+	for _, r := range []string{"MY052", "MY054"} {
+		noTiene(t, out, r)
+	}
+	// La del dorado sigue: crítico, como con mysql_native_password.
+	hg, _ := mysqlpw.NewCachingSHA2Hash(goldenPW)
+	k.sql["users"] = `[{"user":"app","host":"%","plugin":"caching_sha2_password","auth":"` + hg + `","locked":false,"role":false}]`
+	_, out = correrMy(t, k)
+	tiene(t, out, "CRITICAL", "MY052")
+}

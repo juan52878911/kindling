@@ -16,8 +16,37 @@ Alcance de esta versión (#64), decidido por seguridad antes que por cobertura:
 | hecho | pendiente |
 |---|---|
 | proxy `-type mysql`: saludo propio, marcador por `mysql_native_password` o la ruta rápida de `caching_sha2_password`, TLS verify-full al servidor, clave real por `caching_sha2_password` (completa, dentro del TLS) o `mysql_native_password` | `KILL QUERY` mapeado (exige reescribir SQL); RSA para `caching_sha2_password` sin TLS |
-| goldens MariaDB (Alpine) con `db-golden-mysql.sh` / `db-golden.sh -engine mysql` | goldens MySQL 8 de Oracle (Alpine no lo empaqueta) y hash `caching_sha2_password` en el host |
+| goldens MariaDB (Alpine) y MySQL 8.4/9 de Oracle (la imagen de Docker) con `db-golden-mysql.sh` / `db-golden.sh -engine mysql`; hash `caching_sha2_password` calculado en el host (#114) | |
 | `kling db up/fork/connect/rotate/reset/rm/doctor/audit/branch` sobre copias MySQL | `attach/detach`, `role`, `rehearse`, `snapshot/undo`, `tenant-check`, `ask`, `clone` y `doctor -url` para MySQL: se rechazan con un error claro |
+
+## MySQL 8.4 y 9 de Oracle
+
+Alpine no empaqueta MySQL de Oracle; la imagen sale de Docker Hub sin Docker:
+
+```sh
+scripts/db-golden.sh image -engine mysql -oracle -tag 8.4     # kling image import mysql:8.4 → mysql-8-4
+scripts/db-golden.sh build -engine mysql -image mysql-8-4 -seed-mb 5 my84
+kling db up my84 -name c1
+```
+
+El guion lo nota por el binario (`mysqld` sin `mariadbd`) y cambia lo que no es
+igual: `mysqld --initialize-insecure` y `--daemonize` (la imagen no trae
+`setsid`), su configuración en `/etc/mysql/conf.d` sin las opciones que MySQL 8.4
+ya no acepta, root por `auth_socket` (solo el root del sistema, por el socket),
+escucha también en 127.0.0.1 (la sonda de "listo" de la imagen pregunta ahí) y
+los datos sintéticos con una CTE recursiva en vez del motor `SEQUENCE`.
+
+**La contraseña** sigue sin entrar en el invitado. MySQL 8.4 trae
+`mysql_native_password` apagado y MySQL 9 no lo trae, así que el usuario de la
+aplicación va con `caching_sha2_password`. Su `authentication_string`
+(`$A$005$` + 20 bytes de sal + el SHA-256-crypt de 5000 rondas, sin cortar la sal
+a 16 como el `$5$` estándar) lo calcula el host: `kling db mysql-hash` en el
+dorado, y `kling db up`/`rotate` en cada copia, que mantienen el método que el
+usuario ya tiene. Validado contra MySQL 8.4.11: un usuario creado con un hash de
+kling db entra con su clave y no con otra, y `kling db doctor` lo comprueba igual
+que el de MariaDB. MySQL Community no tiene `server_audit` (es de MariaDB):
+`kling db audit` ve solo los eventos del daemon, y `doctor` lo dice como
+informativo (MY012).
 
 ## El proxy de credenciales
 

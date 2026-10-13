@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
 - Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
 
