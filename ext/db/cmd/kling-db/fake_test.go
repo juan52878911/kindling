@@ -40,6 +40,9 @@ type fakeKling struct {
 	failRotation int
 	// wrongVerifier: la rotación "funciona" pero pg_authid no lo refleja.
 	wrongVerifier bool
+	// myPlugin es el método del usuario de las copias MySQL (vacío =
+	// mysql_native_password, el de MariaDB).
+	myPlugin string
 	// pgDown: pg_isready no contesta nunca.
 	pgDown bool
 	// macOS: las máquinas se alcanzan por reenvíos en loopback.
@@ -261,6 +264,12 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 				return fail("exit status 1")
 			}
 			return nil, nil
+		case strings.Contains(cmd, "command -v mariadb ||") && strings.Contains(string(in), "SELECT plugin FROM mysql.user"):
+			// myClient: el método del usuario, antes de rotar.
+			if f.myPlugin != "" {
+				return []byte(f.myPlugin + "\n"), nil
+			}
+			return []byte("mysql_native_password\n"), nil
 		case strings.Contains(cmd, "command -v mariadb ||"):
 			// myClient: la rotación de una copia MySQL (ALTER USER ... AS
 			// '<hash>') y su comprobación.
@@ -472,9 +481,14 @@ func lineValue(s, prefix string) string {
 	return ""
 }
 
-// hashIn saca el hash del ALTER USER de MySQL que llegó por stdin.
+// hashIn saca el hash del ALTER USER de MySQL que llegó por stdin, sea cual
+// sea su método.
 func hashIn(sql string) string {
-	_, rest, ok := strings.Cut(sql, "mysql_native_password AS '")
+	_, rest, ok := strings.Cut(sql, "IDENTIFIED WITH ")
+	if !ok {
+		return ""
+	}
+	_, rest, ok = strings.Cut(rest, " AS '")
 	if !ok {
 		return ""
 	}
