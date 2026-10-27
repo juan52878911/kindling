@@ -37,7 +37,7 @@ func congeladaParaThaw(t *testing.T, m *Manager, id string, memMiB int) *api.Mac
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir, "", "", ""); err != nil {
+	if err := sellarVolcado(dir, "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	return mc
