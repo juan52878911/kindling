@@ -160,7 +160,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
-		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential"}, Usage: `  template ls [-q] [-json]                         lists the templates
+		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential", "pool"}, Usage: `  template ls [-q] [-json]                         lists the templates
   template inspect <name> [-json]                  one template, with its annotations
   template rm [-f] <name>...                       removes templates
   template credential <name> -domain D -env VAR    ties an API key to the template:
@@ -177,6 +177,9 @@ var coreTree = []section{
       [-ca-file ca.pem] [-upstream H:P]
       [-upstream-tls verify-full|disable]
       [-tls-server-name N] -env PGPASSWORD [-f file]
+  template pool <name> [-n N]                      keeps N awake copies: run -from claims
+                                                   one in ms (-n 0 turns it off; off by
+                                                   default; the copies count as machines)
   save <ref> <name>                                makes one from a running machine
 `},
 	}},

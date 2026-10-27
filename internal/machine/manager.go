@@ -95,6 +95,15 @@ const (
 
 // Manager gestiona todas las microVMs del daemon.
 type Manager struct {
+	// fondos son las copias precalentadas por plantilla (fondo.go); fondoMu
+	// los protege y nunca se toma con m.mu cogido.
+	fondoMu sync.Mutex
+	fondos  map[string]*fondoPlantilla
+	// altaFondo crea una copia para el fondo; nil = crearParaFondo. Punto de
+	// inyección de las pruebas: el fondo es concurrencia, y eso no se ejercita
+	// si cada copia exige KVM.
+	altaFondo func(ctx context.Context, name string) (string, error)
+
 	root        string // /var/lib/kindling
 	fcBin       string
 	priv        *Privileges
@@ -559,6 +568,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// esto todas las máquinas cargadas del estado saldrían a 0 en `kling ps`
 	// hasta el primer tic del vigilante.
 	m.refreshDiskUsage()
+	m.reanudarFondos()
 	return m, nil
 }
 
@@ -934,6 +944,7 @@ const cierreOperacionesMax = 30 * time.Second
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		m.pararFondos()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
 		// escritura del estado ya se cerró, esa transición se pierde y el
@@ -1288,6 +1299,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		// y a una máquina restaurada no se le añaden discos.
 		if len(req.Shares) > 0 {
 			return nil, fmt.Errorf("%w: shared folders need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+		}
+		// Una copia ya despierta del fondo de la plantilla, si la hay y la
+		// petición no pide nada que se decida al restaurar (fondo.go).
+		if mc, ok := m.reclamarFondo(ctx, req); ok {
+			return mc, nil
 		}
 		return m.runFrom(ctx, req)
 	}
