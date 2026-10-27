@@ -96,6 +96,12 @@ type OCISpec struct {
 	// Vacío, nada: el proceso de la copia sigue con los aleatorios en memoria
 	// del dorado (#175).
 	OnRestore string `json:"on_restore,omitempty"`
+	// Ulimits ("nofile=65536", "memlock=unlimited") y Sysctls
+	// ("vm.max_map_count": "262144") se aplican antes de lanzar el servicio
+	// (api.ServiceSpec.Ulimits y Sysctls): sin ellos, OpenSearch y ClickHouse
+	// no arrancan.
+	Ulimits []string          `json:"ulimits,omitempty"`
+	Sysctls map[string]string `json:"sysctls,omitempty"`
 	// Source dice de dónde salen los blobs: "" es un registro; "archive",
 	// un docker save o un layout OCI que el CLI subió a la caché del daemon
 	// (kling image import -archive). Entonces Digest es obligatorio (el del
@@ -182,6 +188,12 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 		return ref, fmt.Errorf("invalid restart policy %q: use always, on-failure or no", s.Restart)
 	}
 	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
+		return ref, err
+	}
+	if _, err := api.ParseUlimits(s.Ulimits); err != nil {
+		return ref, err
+	}
+	if err := api.CheckSysctls(s.Sysctls); err != nil {
 		return ref, err
 	}
 	return ref, nil
@@ -468,7 +480,8 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
-		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore}
+		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
+		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
 		// El agente la cambiaría igual por SIGTERM; aquí se ve al importar.
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)

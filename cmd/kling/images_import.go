@@ -46,6 +46,9 @@ func imagesImport(args []string) error {
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
 	restart := fs.String("restart", "", "restart the service when it exits: always, on-failure or no (default on-failure)")
 	onRestore := fs.String("on-restore", "", "in every copy of a snapshot of it: restart the service, or send it signal:SIGUSR1, so it doesn't keep the snapshot's random state (default none)")
+	var ulimits, sysctls stringsFlag
+	fs.Var(&ulimits, "ulimit", "apply a resource limit before the service starts, as in docker: nofile=65536, memlock=unlimited, nproc=1024:4096 (repeatable)")
+	fs.Var(&sysctls, "sysctl", "set a kernel parameter before the service starts: vm.max_map_count=262144 (repeatable; only a list of safe ones)")
 	maxSize := units.MiBVar(fs, "max-size", 0, "refuse images bigger than this, compressed: 2G, 800M (default 4G)")
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
@@ -96,12 +99,29 @@ func imagesImport(args []string) error {
 	if *onRestore == api.OnRestoreNone {
 		*onRestore = ""
 	}
+	if _, err := api.ParseUlimits(ulimits); err != nil {
+		return err
+	}
+	sysctlMap := map[string]string{}
+	for _, kv := range sysctls {
+		k, v, err := api.ParseSysctlFlag(kv)
+		if err != nil {
+			return err
+		}
+		sysctlMap[k] = v
+	}
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
 		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
+	}
+	if len(ulimits) > 0 {
+		spec.Ulimits = ulimits
+	}
+	if len(sysctlMap) > 0 {
+		spec.Sysctls = sysctlMap
 	}
 	switch {
 	case len(rest) > 2 && rest[1] == "--":

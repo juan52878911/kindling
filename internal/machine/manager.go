@@ -2380,7 +2380,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		base = mc.DiffBase
 	}
-	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base); err != nil {
+	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -3258,7 +3258,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
 	var resync resultadoResync
-	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
+	_, sinAgenteMem := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID))
+	if !sinAgenteMem && !leerSello(m.dir(mc.ID)).SinAgente {
 		resync = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
