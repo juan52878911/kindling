@@ -247,13 +247,19 @@ func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
 // espera a que esté lista, ganchos de identidad incluidos. Devuelve su id.
 func (m *Manager) crearParaFondo(ctx context.Context, name string) (string, error) {
 	ctx = context.WithValue(ctx, ctxFondo{}, true)
+	nombre := "pool-" + newID()[:8]
 	mc, err := m.Run(ctx, api.RunRequest{
+		Name:                nombre,
 		From:                name,
 		Labels:              map[string]string{api.LabelPool: name},
 		WaitReady:           true,
 		ReadyTimeoutSeconds: 60,
 	})
 	if err != nil {
+		// Un alta cancelada (se apagó o se vació el fondo) puede dejar su
+		// entrada fallida en el estado: sin retirarla, impediría borrar la
+		// plantilla ("has live instances").
+		m.retirarDelFondo(nombre)
 		return "", err
 	}
 	if mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed {
