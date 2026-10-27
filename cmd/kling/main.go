@@ -712,11 +712,23 @@ func cmdSave(args []string) error {
 	// El mismo plazo que el daemon da a commit sin ready_timeout_seconds: con
 	// menos, el CLI recortaba en silencio la espera a la sonda de la imagen.
 	espera := fs.Duration("wait", machine.DefaultReadyWait, "how long to wait for the guest to serve (and to be ready by its image's probe) before saving")
+	// Informa de lo que no se usó mientras la máquina estaba cargada; no
+	// guarda ni quita nada (ver save_audit.go).
+	audit := fs.Bool("audit", false, "report the files never seen open or mapped on this machine (for what to trim); saves nothing")
+	auditFor := fs.Duration("audit-for", 5*time.Second, "with -audit: how long to sample what is in use")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
+	if *audit {
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: kling save -audit [-audit-for 5s] <ref>")
+		}
+		ctx, stop := ctxWithSignals()
+		defer stop()
+		return cmdSaveAudit(ctx, api.NewClient(hostOf(*host)), fs.Arg(0), *auditFor)
+	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling save [-replace] [-force] [-warm=false] <ref> <template-name>")
+		return fmt.Errorf("usage: kling save [-replace] [-force] [-warm=false] <ref> <template-name>\n       kling save -audit <ref>")
 	}
 
 	ctx, stop := ctxWithSignals()

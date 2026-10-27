@@ -32,6 +32,7 @@ func cmdGolden(args []string) error {
 	fs := flag.NewFlagSet("db golden", flag.ContinueOnError)
 	host := fs.String("H", "", "daemon endpoint (socket or ssh://user@host)")
 	script := fs.String("script", "", "path of scripts/db-golden.sh (default: $"+goldenScriptEnv+", or installed next to kling-db)")
+	fromOCI := fs.String("from-oci", "", "build the golden from this Docker/OCI image (postgres:16, pgvector/pgvector:pg16...) instead of pg16; build only")
 	// Los flags de este comando van ANTES del subcomando; lo de después es del
 	// script tal cual (db-golden.sh build -seed-mb 20 nombre).
 	if err := fs.Parse(args); err != nil {
@@ -39,7 +40,7 @@ func cmdGolden(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 || (rest[0] != "image" && rest[0] != "build") {
-		return usageErr("usage: kling db golden [-script P] [-H host] image [-ext [-pg 17] [-only A,B]] | build [options] <name>\n" +
+		return usageErr("usage: kling db golden [-script P] [-H host] [-from-oci REF] image [-ext [-pg 17] [-only A,B]] | build [options] <name>\n" +
 			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -role R  -database B\n" +
 			"                 -extension A,B  -preload A,B  -conf K=V  -as-super  -env-file F\n" +
 			"                 -step CMD -agent T [-workdir DIR] [-step-timeout 30m] | -super-step CMD | -sql FILE   (in order, after the SQL)\n" +
@@ -53,6 +54,22 @@ func cmdGolden(args []string) error {
 		return err
 	}
 	defer cleanup()
+	if *fromOCI != "" {
+		cli, err := klingc.New(*host)
+		if err != nil {
+			return err
+		}
+		ctx, stop := signalCtx()
+		defer stop()
+		fmt.Fprintf(os.Stderr, "db-golden: importing %s (the first time downloads it)\n", *fromOCI)
+		img, err := importarOCI(ctx, cli, *fromOCI)
+		if err != nil {
+			return err
+		}
+		if rest, err = ociArgs(rest, img); err != nil {
+			return err
+		}
+	}
 	rest, steps, conPasos, err := parseSteps(rest)
 	if err != nil {
 		return err

@@ -261,6 +261,7 @@ A few more everyday commands:
 kling help run                    # just the help for one command
 kling logs -f <machine>           # follow the console until it stops running (-raw: escapes as is)
 kling template ls | inspect <name> | rm <name>
+kling template pool <name> -n 2   # keep 2 awake copies: run -from claims one instead of restoring (off by default; -n 0 turns it off)
 kling version                     # CLI and daemon versions (-json)
 kling completion install          # writes the completion script and shows the line for your rc
 ```

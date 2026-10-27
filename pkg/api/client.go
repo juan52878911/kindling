@@ -356,6 +356,19 @@ func (c *Client) SetSnapshotCredentials(ctx context.Context, name string, req Cr
 	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/credentials", req, &s)
 }
 
+// SetSnapshotPool fija cuántas copias despiertas mantiene el daemon de una
+// plantilla (0 la apaga y vacía el fondo). Devuelve el estado del fondo.
+func (c *Client) SetSnapshotPool(ctx context.Context, name string, size int) (*PoolInfo, error) {
+	var p PoolInfo
+	return &p, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/pool", PoolRequest{Size: size}, &p)
+}
+
+// SnapshotPool devuelve el estado del fondo de una plantilla.
+func (c *Client) SnapshotPool(ctx context.Context, name string) (*PoolInfo, error) {
+	var p PoolInfo
+	return &p, c.do(ctx, http.MethodGet, "/snapshots/"+name+"/pool", nil, &p)
+}
+
 func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }

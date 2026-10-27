@@ -45,6 +45,9 @@ func ValidateNoGraphLabels(labels map[string]string) error {
 		if IsGraphLabel(k) {
 			return fmt.Errorf("label %q is reserved: the daemon sets it on the machines of a graph", k)
 		}
+		if k == LabelPool || k == LabelPoolReady {
+			return fmt.Errorf("label %q is reserved: the daemon sets it on the pre-warmed copies of a template", k)
+		}
 	}
 	return nil
 }
