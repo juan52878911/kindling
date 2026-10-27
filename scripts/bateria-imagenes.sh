@@ -103,7 +103,7 @@ definir() {
       imgflags="-ulimit nofile=65536 -sysctl vm.max_map_count=262144"
       # kling no admite claves con punto en -e: los ajustes con punto van como -E tras --
       cmd="opensearch -Ediscovery.type=single-node"
-      runflags="-e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e OPENSEARCH_JAVA_OPTS=-Xmx512m"
+      runflags="-e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true -e OPENSEARCH_JAVA_OPTS=-Xmx1g"
       check="curl -fsS 'http://127.0.0.1:9200/_cluster/health'"; espera='"status":"(green|yellow)"' ;;
     nginx)
       ref=nginx:alpine; mem=256M
