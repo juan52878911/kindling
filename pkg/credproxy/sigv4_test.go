@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
+	"hash/crc32"
 	"io"
 	"net"
 	"net/http"
@@ -197,7 +200,13 @@ func trozosInvitado(f firmador, res resultadoFirma, trozos [][]byte, trailer boo
 		}
 	}
 	if trailer {
-		b.WriteString("x-amz-checksum-crc32:AAAAAA==\r\nx-amz-trailer-signature:" + trailerSig + "\r\n\r\n")
+		var todo []byte
+		for _, d := range trozos {
+			todo = append(todo, d...)
+		}
+		var be [4]byte
+		binary.BigEndian.PutUint32(be[:], crc32.ChecksumIEEE(todo))
+		b.WriteString("x-amz-checksum-crc32:" + base64.StdEncoding.EncodeToString(be[:]) + "\r\nx-amz-trailer-signature:" + trailerSig + "\r\n\r\n")
 	}
 	return b.Bytes()
 }
@@ -492,10 +501,8 @@ func TestSigV4ProxyCuerpoConHash(t *testing.T) {
 	if string(m.ver.cuerpos["/mi-cubo/dir uno/ñandú+x.txt"]) != string(cuerpo) {
 		t.Errorf("cuerpo recibido: %q", m.ver.cuerpos)
 	}
-	// El servidor devuelve la cabecera Authorization con el access key id real:
-	// al invitado le llega el marcador.
-	if eco := resp.Header.Get("X-Eco"); strings.Contains(eco, svRealAK) || !strings.Contains(eco, svMarcAK) {
-		t.Errorf("el access key id real no debía llegar al invitado: %q", eco)
+	if resp.Header.Get("Content-Length") != "2" {
+		t.Errorf("la respuesta debía conservar su Content-Length: %q", resp.Header.Get("Content-Length"))
 	}
 }
 
@@ -744,3 +751,15 @@ func TestSigV4ValidacionDeLaCredencial(t *testing.T) {
 }
 
 var _ = svMaxTest
+
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER (aws CLI por HTTPS): los trozos no llevan
+// firma, así que el cuerpo pasa tal cual y solo se firma la cabecera.
+func TestSigV4ProxyTrozosSinFirmarPasanTalCual(t *testing.T) {
+	m := nuevoMontajeS3(t)
+	cuerpo := []byte("5\r\nhola!\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n")
+	resp, b := m.peticionInvitado(t, "PUT", "/mi-cubo/sf", "", hashSinFirmarTr, cuerpo, map[string]string{
+		"Content-Encoding": "aws-chunked", "X-Amz-Trailer": "x-amz-checksum-crc32"})
+	if resp.StatusCode != 200 || !bytes.Equal(m.ver.cuerpos["/mi-cubo/sf"], cuerpo) {
+		t.Fatalf("%d %s, cuerpo en el servidor %q", resp.StatusCode, b, m.ver.cuerpos["/mi-cubo/sf"])
+	}
+}

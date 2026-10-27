@@ -302,6 +302,7 @@ Por orden:
      hash del cuerpo (`UNSIGNED-PAYLOAD`), las subidas `aws-chunked`, con una firma por
      trozo, y las URL prefirmadas. Con él, un agente usa S3, R2, GCS en modo S3, MinIO o
      Garage sin ver la clave.
+     **Hecho en el proxy** (#116, `docs/s3-sigv4.md`): falta enchufarlo a la API y al CLI.
    - Opcional: `clone` de un bucket por prefijo hacia el golden.
 4. **Hecho.** Compatible con MongoDB mediante FerretDB (#117, arriba).
 5. **Hecho.** ClickHouse desde su imagen de Docker (#118, arriba).

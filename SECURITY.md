@@ -237,6 +237,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   proceso root de dentro, y el servidor MCP corre como root: MMDS evita que el secreto
   acabe en un snapshot, no que el código hostil lo lea y lo saque por un dominio
   permitido.
+- **Firma SigV4** (S3 y compatibles, `docs/s3-sigv4.md`): una credencial `sigv4` no cambia un
+  marcador, descarta la firma del invitado y firma de nuevo; la clave real solo entra en el HMAC.
 - **Proxy de credenciales** (`kling machine credential`, `pkg/credproxy`, servido por `internal/net/credproxy.go`):
   la clave se queda en la memoria del daemon y el invitado recibe un marcador. Con
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con

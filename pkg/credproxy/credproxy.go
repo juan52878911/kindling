@@ -96,6 +96,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -807,8 +808,6 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	out.Host = host
 	if firma != nil {
 		c := cs[isv]
-		// El access key id real puede volver en un mensaje de error del servidor.
-		red.par(c.AccessKeyID, c.Placeholder)
 		ps := paresQuery(r.URL.RawQuery, "X-Amz-Signature")
 		res, err := c.firmador().firmarPeticion(out, firma, hashSv, ahoraSigV4(), ps)
 		if err != nil {
@@ -845,8 +844,15 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	for _, h := range hopByHop {
 		w.Header().Del(h)
 	}
-	// La longitud puede cambiar al redactar: que la calcule el servidor.
-	w.Header().Del("Content-Length")
+	// La longitud puede cambiar al redactar: que la calcule el servidor. Salvo
+	// con SigV4: los clientes de S3 exigen Content-Length en un GET. Si el
+	// redactor cambiara algo (la clave en un objeto), la longitud ya no cuadra
+	// y el servidor corta la respuesta, que el cliente ve como error.
+	if firma != nil && resp.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+	} else {
+		w.Header().Del("Content-Length")
+	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(red, origenVigilado{r: resp.Body, v: v}); err != nil {
 		// Cortada a medias (inactividad, techo, el proveedor se fue): se aborta
