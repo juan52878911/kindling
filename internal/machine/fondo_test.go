@@ -43,6 +43,21 @@ func fondoDePrueba(t *testing.T, size int) (*Manager, *atomic.Int32) {
 	escribirSnapshot(t, m, "dorado", api.Snapshot{})
 	var n atomic.Int32
 	m.altaFondo = altaFalsa(m, &n)
+	// Antes de que TempDir se limpie, ninguna reposición puede seguir escribiendo.
+	t.Cleanup(func() {
+		m.pararFondos()
+		m.fondoMu.Lock()
+		var hechos []chan struct{}
+		for _, f := range m.fondos {
+			if f.hecho != nil {
+				hechos = append(hechos, f.hecho)
+			}
+		}
+		m.fondoMu.Unlock()
+		for _, h := range hechos {
+			<-h
+		}
+	})
 	if _, err := m.SetFondo("dorado", size); err != nil {
 		t.Fatal(err)
 	}
