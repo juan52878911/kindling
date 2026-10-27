@@ -66,6 +66,8 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 	pReg, pInvC, pInvE, pEnv := registrarCredenciales, invalidarCopia, invalidarEnlaces, enviarGrafo
 	pSolt, pDev := soltarVolumenesNodo, devolverVolumenesNodo
 	t.Cleanup(func() {
+		// Las limpiezas de rm en segundo plano usan estos ganchos.
+		m.EsperarBorrados(5 * time.Second)
 		enviarGrafo = pEnv
 		soltarVolumenesNodo, devolverVolumenesNodo = pSolt, pDev
 		arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo = pArr, pDesp, pCong, pRed
@@ -1038,6 +1040,7 @@ func TestGrafoUpPersistenciaYRm(t *testing.T) {
 	if err := e.m.GraphRemove(context.Background(), "tienda"); err != nil {
 		t.Fatal(err)
 	}
+	e.m.EsperarBorrados(5 * time.Second)
 	if _, ok := e.m.Get(web); ok {
 		t.Fatal("rm dejó la máquina de web")
 	}
@@ -1061,6 +1064,7 @@ func TestGrafoUpTodoONada(t *testing.T) {
 	if _, err := e.m.GraphUp(context.Background(), grafoTienda(true), nil); err == nil || !strings.Contains(err.Error(), "imagen rota") {
 		t.Fatalf("esperaba el fallo de web, llegó %v", err)
 	}
+	e.m.EsperarBorrados(5 * time.Second)
 	if n := len(e.m.List()); n != 0 {
 		t.Fatalf("quedaron %d máquinas", n)
 	}
