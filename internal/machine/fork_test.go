@@ -243,6 +243,7 @@ func TestForkFallidoDeshaceCopiasYSnapshot(t *testing.T) {
 	if dirs := snapshotsFork(t, m); len(dirs) != 0 {
 		t.Errorf("quedaron snapshots de fork: %v", dirs)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	m.mu.RLock()
 	quedan := len(m.byID)
 	m.mu.RUnlock()
@@ -266,6 +267,7 @@ func TestForkListaRechazaYSeDeshace(t *testing.T) {
 	if dirs := snapshotsFork(t, m); len(dirs) != 0 {
 		t.Errorf("quedaron snapshots de fork: %v", dirs)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	m.mu.RLock()
 	quedan := len(m.byID)
 	m.mu.RUnlock()
