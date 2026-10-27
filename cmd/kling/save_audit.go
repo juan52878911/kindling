@@ -201,7 +201,7 @@ func cmdSaveAudit(ctx context.Context, c *api.Client, ref string, dur time.Durat
 	res, err := c.Exec(ctx, ref, api.ExecRequest{
 		Cmd:            []string{"sh", "-c", auditScript, "audit", strconv.Itoa(secs)},
 		TimeoutSeconds: secs + 120,
-		MaxOutputBytes: 256 << 20,
+		MaxOutputBytes: 64 << 20,
 	}, func(stream string, data []byte) error {
 		if stream == "stdout" {
 			out.Write(data)
@@ -209,7 +209,10 @@ func cmdSaveAudit(ctx context.Context, c *api.Client, ref string, dur time.Durat
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("%s: %w\n(-audit needs a machine with exec: kling run -allow-exec, or a sandbox)", ref, err)
+		if strings.Contains(err.Error(), "exec is not enabled") {
+			err = fmt.Errorf("%w\n(-audit needs a machine created with kling run -allow-exec, or a sandbox)", err)
+		}
+		return fmt.Errorf("%s: %w", ref, err)
 	}
 	if res.ExitCode != 0 || res.Truncated {
 		return fmt.Errorf("%s: the audit script failed (exit %d, truncated=%v): %s", ref, res.ExitCode, res.Truncated, strings.TrimSpace(string(res.Stderr)))
