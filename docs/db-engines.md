@@ -202,6 +202,48 @@ kling db connect e1 -dsn   # clickhouse://app:…@<ip>:9000/appdb  (HTTP en el 8
   - `doctor` no encuentra nada.
 - No van con ClickHouse: `attach`, `role`, `branch`, `snapshot`/`undo`, `ask` y `clone`.
 
+## Almacén de objetos S3: Garage
+
+`kling db golden image -engine garage` importa la imagen oficial `dxflrs/garage` (AGPL,
+pero se usa como servidor, sin tocarla; no MinIO) sin Docker, y `golden build -engine
+garage <nombre>` deja una plantilla con el servidor caliente y un bucket de semilla:
+
+```sh
+scripts/db-golden.sh image -engine garage
+scripts/db-golden.sh build -engine garage -seed-objects 50 almacen   # bucket appdb, 50 objetos de 4 KiB
+kling db up almacen -name s1
+kling db connect s1 -dsn   # s3://GK…:<secreto>@<ip>:3900/appdb   (path-style, sin TLS, región garage)
+```
+
+- **La clave es de la copia.** SigV4 es un HMAC: Garage necesita el secreto, no un hash. Cada
+  copia estrena su propio par acceso/secreto aleatorio, calculado en el host (el secreto es el
+  fichero de contraseña de la copia; el identificador, `GK` + 24 hexadecimales, sale de él con
+  SHA-256), importa ese par (`garage key import`), le da lectura, escritura y dueño sobre el
+  bucket y **borra el par del dorado y cualquier otro**. `rotate` hace lo mismo. Límite: el
+  secreto sí entra en el invitado (argv de `garage key import`, visible solo dentro de la
+  copia), porque no hay forma de dar a Garage un verificador; y la clave rotada solo da acceso
+  al bucket de la plantilla, no a otros que se creen después.
+- **La imagen no tiene shell** (`scratch`): el servicio es `/garage -c /etc/garage.toml server`,
+  que reintenta hasta que `build` copia la configuración con `kling cp`; toda orden de
+  administración va por argv directo. El RPC escucha solo en 127.0.0.1 y el administrador no
+  es accesible por red (solo el S3 en el 3900).
+- **Cliente:** cualquiera con SigV4 (`aws`, `rclone`, SDK) con endpoint `http://<ip>:3900`,
+  región `garage` y path-style. La carga de la semilla usa `curl --aws-sigv4` desde el host
+  (Linux: llega a la IP del invitado); Garage exige la cabecera `x-amz-content-sha256`.
+- **`doctor`** mira que haya exactamente una clave (GA052), que no sea la del dorado (GA052,
+  crítico) y que cuadre con el secreto del host (GA054).
+- Probado en el lab (kling-ascci, daemon privado, 2026-10-27, Garage 1.1.0, 50 objetos):
+  - dos copias listan los 50 objetos; un PUT en una no aparece en la otra;
+  - la clave de una copia da 403 en la otra, y la del dorado da 403 en las dos;
+  - `rotate` cambia el par y el viejo da 403; `reset` devuelve el bucket al estado del
+    dorado (el PUT desaparece); `fork` de una copia da copias con sus datos y claves nuevas;
+  - `doctor` no encuentra nada;
+  - `up` desde la plantilla: 1,26, 1,12 y 1,29 s; `reset`: 1,64, 1,84 y 1,66 s (Redis, mismo
+    host: 0,51 / 0,42 / 0,51 s y 0,61 / 0,58 / 0,54 s). Cada paso de administración es un
+    `exec` a un binario Rust que abre su RPC, de ahí la diferencia.
+- No van con Garage: `attach`, `role`, `branch`, `snapshot`/`undo`, `ask` y `clone`. Volver
+  al estado del dorado es `reset`.
+
 ## Por qué no MongoDB
 
 Se estudió y se deja fuera a propósito:
@@ -293,10 +335,9 @@ Por orden:
    el host (#114, docs/mysql.md). Percona y los orígenes de `clone` en MySQL siguen
    pendientes.
 3. **Almacenamiento de objetos (S3).**
-   - Un golden de almacén de objetos con clave por copia: Garage o SeaweedFS mejor que
-     MinIO, que dejó de publicar binarios de su edición comunitaria y es AGPL. SigV4 es
-     HMAC, así que el servidor necesita el secreto: el invitado conoce el de su copia
-     (aleatorio y suyo), nunca el del host.
+   - **Hecho** (#115, Garage, arriba): golden con clave por copia. SigV4 es HMAC, así que el
+     servidor necesita el secreto: el invitado conoce el de su copia (aleatorio y suyo),
+     nunca el del dorado.
    - Un modo de **re-firma SigV4** en el proxy HTTP. El invitado firma con una credencial
      marcador y el proxy descarta esa firma y firma de nuevo con la real. Lo delicado: el
      hash del cuerpo (`UNSIGNED-PAYLOAD`), las subidas `aws-chunked`, con una firma por

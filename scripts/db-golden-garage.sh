@@ -208,17 +208,21 @@ TOML
     say "cargando $seed_objects objetos de ${object_kb} KiB en $bucket"
     printf 'user = "%s:%s"\n' "$ak" "$secret" > "$BUILD_TMP/curl.cfg"
     head -c "$((object_kb * 1024))" /dev/zero | tr '\0' 'x' > "$BUILD_TMP/obj"
+    local empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 body h n
     for i in $(seq 1 "$seed_objects"); do
       # El contenido de cada objeto lleva su número: no hay dos iguales.
       { printf 'seed object %05d\n' "$i"; cat "$BUILD_TMP/obj"; } > "$BUILD_TMP/obj.$i"
-      curl -sS --fail --max-time 30 -K "$BUILD_TMP/curl.cfg" --aws-sigv4 "aws:amz:garage:s3" \
-        -X PUT --data-binary "@$BUILD_TMP/obj.$i" "http://$ip:3900/$bucket/seed/obj-$(printf '%05d' "$i").txt" >/dev/null ||
-        die "falló la carga del objeto $i"
+      h="$(sha256_hex < "$BUILD_TMP/obj.$i")"
+      # Garage exige x-amz-content-sha256; curl lo firma si va como cabecera.
+      curl -sS --max-time 30 -K "$BUILD_TMP/curl.cfg" --aws-sigv4 "aws:amz:garage:s3" -H "x-amz-content-sha256: $h" \
+        -o "$BUILD_TMP/resp" -w '%{http_code}' -X PUT --data-binary "@$BUILD_TMP/obj.$i" \
+        "http://$ip:3900/$bucket/seed/obj-$(printf '%05d' "$i").txt" > "$BUILD_TMP/code" || true
+      [ "$(cat "$BUILD_TMP/code")" = 200 ] || { head -c 400 "$BUILD_TMP/resp" >&2; echo >&2; die "falló la carga del objeto $i (HTTP $(cat "$BUILD_TMP/code"))"; }
       rm -f "$BUILD_TMP/obj.$i"
     done
-    local n
-    n="$(curl -sS --fail --max-time 30 -K "$BUILD_TMP/curl.cfg" --aws-sigv4 "aws:amz:garage:s3" \
-      "http://$ip:3900/$bucket?list-type=2&max-keys=1000" | grep -o '<Key>' | wc -l | tr -d ' ')"
+    body="$(curl -sS --fail --max-time 30 -K "$BUILD_TMP/curl.cfg" --aws-sigv4 "aws:amz:garage:s3" -H "x-amz-content-sha256: $empty" \
+      "http://$ip:3900/$bucket?list-type=2&max-keys=1000")" || die "falló el listado del bucket"
+    n="$(printf '%s' "$body" | grep -o '<Key>' | wc -l | tr -d ' ')"
     [ "$n" -eq "$seed_objects" ] || die "el bucket tiene $n objetos, no $seed_objects"
   fi
 
