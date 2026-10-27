@@ -33,7 +33,7 @@
         "usr/local/share/postgresql/extension/timescaledb--*--*.sql"
       ],
       "ultimaVersion": [
-        {"dir": "usr/local/lib/postgresql", "patron": "^(timescaledb(?:-tsl)?)-([0-9]+(?:\\.[0-9]+)*)\\.so$"},
+        {"dir": "usr/local/lib/postgresql", "patron": "^(timescaledb(?:-[a-z]+)?)-([0-9]+(?:\\.[0-9]+)*)\\.so$"},
         {"dir": "usr/local/share/postgresql/extension", "patron": "^(timescaledb)--([0-9]+(?:\\.[0-9]+)*)\\.sql$"}
       ]
     }
