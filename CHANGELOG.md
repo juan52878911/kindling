@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling image import -slim` trims Postgres and Timescale images by family rules (LLVM/JIT, bitcode, headers, old extension versions, `jit=off`): postgres:17-alpine 297→91 MiB, postgres:17 457→167 MiB, Timescale 1.6 GiB→187 MiB; `kling save -audit` reports files the running service never opened, without trimming
 - `kling db` templates of ClickHouse (`-engine clickhouse`), with the password stored as a SHA-256 computed on the host (#118)
 - `kling db` templates that speak the MongoDB protocol through FerretDB (`-engine ferretdb`); copies get a `mongodb://` DSN and a rotated password like Postgres (#117)
 - `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
