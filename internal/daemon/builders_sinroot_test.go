@@ -119,6 +119,18 @@ func TestAdoptarSalida(t *testing.T) {
 		t.Fatal("solo se mueve <name>.ext4 / <name>.layer.ext4")
 	}
 
+	// Una capa que sustituye a una imagen entera (import -replace): la entera
+	// de antes no se queda.
+	out, images = nuevo(t)
+	os.WriteFile(filepath.Join(images, "pg.ext4"), []byte("vieja"), 0o644)
+	os.WriteFile(filepath.Join(out, "pg.layer.ext4"), []byte("capa"), 0o600)
+	if n, err := adoptarSalida(out, images, "pg", uid); err != nil || n != 1 {
+		t.Fatalf("adoptar capa: %d %v", n, err)
+	}
+	if _, err := os.Lstat(filepath.Join(images, "pg.ext4")); err == nil {
+		t.Fatal("la imagen entera de antes sigue junto a la capa")
+	}
+
 	// Sin salida no es error: el daemon dirá luego que no hay imagen.
 	if n, err := adoptarSalida(filepath.Join(t.TempDir(), "out"), images, "pg", uid); n != 0 || err != nil {
 		t.Fatalf("sin out/: %d %v", n, err)
