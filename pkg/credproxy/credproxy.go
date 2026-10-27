@@ -193,6 +193,13 @@ type Credential struct {
 	// tanto SCRAM-SHA-256) y Database. Ver maquina.go.
 	UpstreamMachine string `json:",omitempty"`
 	UpstreamOwner   string `json:",omitempty"`
+	// AccessKeyID, Region y Service (solo Kind "sigv4", ver sigv4.go): el
+	// access key id real (Secret es su secret key), y la región y el servicio
+	// ("s3" por defecto) con los que se firma. Placeholder es el access key id
+	// que usa el invitado.
+	AccessKeyID string `json:",omitempty"`
+	Region      string `json:",omitempty"`
+	Service     string `json:",omitempty"`
 }
 
 var reDominio = lazyre.New(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -260,7 +267,10 @@ func ValidarCredenciales(creds []Credential) error {
 // venir ya normalizado.
 func ValidarTipo(c *Credential) error {
 	d := c.Domain
-	if c.Kind != "" && c.Kind != KindHTTP && (len(c.Headers) > 0 || c.Query || c.Body) {
+	if c.Kind != KindSigV4 && (c.AccessKeyID != "" || c.Region != "" || c.Service != "") {
+		return fmt.Errorf("credential for %s: access key id, region and service are only for -type sigv4", d)
+	}
+	if c.Kind != "" && c.Kind != KindHTTP && c.Kind != KindSigV4 && (len(c.Headers) > 0 || c.Query || c.Body) {
 		return fmt.Errorf("credential for %s: -header, -query and -body are only for HTTP credentials", d)
 	}
 	switch c.Kind {
@@ -275,12 +285,14 @@ func ValidarTipo(c *Credential) error {
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
 		}
+	case KindSigV4:
+		return validarSigV4(c)
 	case KindPostgres:
 		return validarPostgres(c)
 	case KindMySQL:
 		return validarMySQL(c)
 	default:
-		return fmt.Errorf("credential for %s: unknown type %q (http, postgres or mysql)", d, c.Kind)
+		return fmt.Errorf("credential for %s: unknown type %q (http, sigv4, postgres or mysql)", d, c.Kind)
 	}
 	return nil
 }
@@ -670,6 +682,12 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usadas = make(marcas, len(cs))
+	firma, isv, errSv := buscarSigV4(r, cs)
+	if errSv != nil {
+		rec.Reason = ReasonBadRequest
+		rechazar(w, "kindling credential proxy: "+errSv.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Un Content-Length por encima del tope se rechaza ya: con MaxBytesReader la
 	// subida se cortaría a medias y la petición saliente se quedaría esperando
@@ -695,7 +713,27 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	// las que no se usaron: defensa en profundidad, no cuesta nada.
 	red := nuevoRedactor(escritorVigilado{w: w, v: v, p: pl}, credencialesDe(todas))
 
-	body, length, cerrar, err := cuerpoSaliente(r, sw, cs, usadas, v, pl, p.tempDir)
+	var (
+		body   io.Reader
+		length int64
+		cerrar cerrarCuerpo
+		err    error
+		hashSv string
+		resig  *resignador
+	)
+	if firma != nil {
+		usadas.marcar(isv)
+		src := lectorVigilado{r: http.MaxBytesReader(sw, r.Body, MaxBody), v: v, p: pl}
+		body, length, hashSv, resig, err = cuerpoSigV4(r, src, firma, cs[isv].Service)
+		var e400 errPeticionSigV4
+		if errors.As(err, &e400) {
+			rec.Reason = ReasonBadRequest
+			http.Error(w, "kindling credential proxy: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		body, length, cerrar, err = cuerpoSaliente(r, sw, cs, usadas, v, pl, p.tempDir)
+	}
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -740,6 +778,9 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	out.URL = salida
 	out.ContentLength = length
 	for k, vs := range r.Header {
+		if firma != nil && descartaSigV4(k) {
+			continue
+		}
 		for _, v := range vs {
 			nv, pares := sustituirMarcando(k, v, cs, usadas)
 			// El valor tal y como sale, para redactarlo si el proveedor lo
@@ -764,6 +805,21 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	// descomprime antes de que el cuerpo pase por el redactor.
 	out.Header.Del("Accept-Encoding")
 	out.Host = host
+	if firma != nil {
+		c := cs[isv]
+		// El access key id real puede volver en un mensaje de error del servidor.
+		red.par(c.AccessKeyID, c.Placeholder)
+		ps := paresQuery(r.URL.RawQuery, "X-Amz-Signature")
+		res, err := c.firmador().firmarPeticion(out, firma, hashSv, ahoraSigV4(), ps)
+		if err != nil {
+			rec.Reason = ReasonBadRequest
+			http.Error(w, "kindling credential proxy: could not sign the request", http.StatusBadRequest)
+			return
+		}
+		if resig != nil {
+			resig.f, resig.fecha, resig.prev = c.firmador(), res.fecha, res.semilla
+		}
+	}
 
 	resp, err := p.client.Do(out)
 	if err != nil {
@@ -885,6 +941,10 @@ func validarCabeceras(hs []string) error {
 
 // enCabecera dice si el marcador de c se cambia en la cabecera k.
 func (c Credential) enCabecera(k string) bool {
+	// Una credencial sigv4 no cambia marcadores: firma (ver sigv4.go).
+	if c.Kind == KindSigV4 {
+		return false
+	}
 	k = http.CanonicalHeaderKey(k)
 	return slices.Contains(CabecerasPorDefecto, k) || slices.Contains(c.Headers, k)
 }
