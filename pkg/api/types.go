@@ -538,6 +538,11 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"`            // total del snapshot en disco
 	Instances int       `json:"instances"`             // máquinas vivas restauradas de aquí
 
+	// SinAgente: al guardarlo no había agente escuchando en la plantilla, y
+	// run -from se salta el resync (nadie lo atendería). Falso/ausente: se
+	// intenta, como en los dorados anteriores a este campo.
+	SinAgente bool `json:"sin_agente,omitempty"`
+
 	// Warnings solo va en la respuesta de un commit (kling save): lo que salió
 	// mal fuera del dorado, que sí vale (p.ej. la plantilla no pudo volver a
 	// montar sus volúmenes y quedó fallida). No se guarda en meta.json.
