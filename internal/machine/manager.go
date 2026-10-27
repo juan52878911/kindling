@@ -560,6 +560,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// él sus aristas en cuanto el invitado conecta.
 	m.iniciarBroker()
 	m.reconcile()
+	m.recuperarTumbas()
 	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
 	// se quedó con el techo de arranque (ver arranque_cpu.go).
@@ -3481,7 +3482,13 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	}
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
-	defer m.lock(mc.ID)()
+	soltar := m.lock(mc.ID)
+	traspasado := false
+	defer func() {
+		if !traspasado {
+			soltar()
+		}
+	}()
 	// Releer con el cerrojo: si estaba arrancando, Run lo tenía y la copia de
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {
@@ -3492,40 +3499,17 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	if sigue != nil && !sigue(mc) {
 		return errYaNoToca
 	}
+	// Sin condición (kling rm): se contesta al morir el VMM y el resto se
+	// limpia en segundo plano (ver borrado.go). Con condición, quien llama es
+	// el TTL o la recogida de disco, que quieren el sitio liberado al volver.
+	if sigue == nil {
+		m.borrarEnSegundoPlano(mc, soltar)
+		traspasado = true // el cerrojo pasó a la limpieza
+		return nil
+	}
 	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
 	m.kill(mc.ID)
-	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-	m.releaseCPU(mc.ID)
-	// El chroot del jail vive aparte del directorio de la máquina: se limpia
-	// también, o cada restauración jailed deja un árbol huérfano.
-	if err := m.borrarJail(mc.ID); err != nil {
-		log.Printf("warning: %v", err)
-	}
-	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
-		return err
-	}
-	m.borrarAuditoria(mc.ID)
-	// Su overlay en el almacén de discos, si lo tenía (ver cow.go).
-	m.borrarOverlayAlmacen(mc.ID)
-	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el
-	// vigilante lo barrería en la siguiente vuelta, pero así no queda ni ese rato.
-	fc.BarrerEnlaces(m.root)
-	m.mu.Lock()
-	delete(m.byID, mc.ID)
-	delete(m.socket, mc.ID)
-	delete(m.discoMedido, mc.ID)
-	m.persist()
-	m.mu.Unlock()
-	// La numeración de sus vigías de "listo": sin podarla, cada máquina que
-	// pasó por aquí dejaba su entrada para siempre. Se adelanta antes de
-	// soltarla, para que una vigía aún viva se sepa jubilada.
-	if v, ok := m.vigiasListo.LoadAndDelete(mc.ID); ok {
-		v.(*atomic.Uint64).Add(1)
-	}
-	m.ganchosPendientes.Delete(mc.ID)
-	m.invalidarSesiones(mc.ID, "removed")
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
-	return nil
+	return m.limpiarMaquina(mc)
 }
 
 // kill para el VMM. SIGKILL y no SIGTERM: un invitado hostil puede ignorar una
@@ -3614,7 +3598,9 @@ func waitGone(pid int, timeout time.Duration) {
 		if syscall.Kill(pid, 0) == syscall.ESRCH {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		// 1 ms y no 20: el VMM suele morir en uno o dos, y con 20 el sondeo
+		// era la mayor parte de lo que tardaba kling rm.
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -22,6 +22,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Changed
 
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
+- `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
 
 ### Fixed
 

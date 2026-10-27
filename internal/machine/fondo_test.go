@@ -135,6 +135,10 @@ func TestFondoVaciarYApagar(t *testing.T) {
 	if got := m.InfoFondo("dorado"); got.Size != 0 || got.Ready != 0 {
 		t.Fatalf("tras apagarlo: %+v", got)
 	}
+	// rm es asíncrono: las copias quedan como tumbas hasta que acaba la limpieza.
+	if !m.EsperarBorrados(5 * time.Second) {
+		t.Fatal("la limpieza de las copias no acabó")
+	}
 	for _, mc := range m.List() {
 		if mc.Labels[api.LabelPool] != "" {
 			t.Fatalf("queda una copia del fondo: %s", mc.Name)
@@ -149,6 +153,9 @@ func TestFondoBorrarPlantillaLoVacia(t *testing.T) {
 	m, _ := fondoDePrueba(t, 2)
 	if err := m.RemoveSnapshot("dorado"); err != nil {
 		t.Fatalf("borrar la plantilla con fondo: %v", err)
+	}
+	if !m.EsperarBorrados(5 * time.Second) {
+		t.Fatal("la limpieza de las copias no acabó")
 	}
 	if len(m.List()) != 0 {
 		t.Fatalf("quedan máquinas: %d", len(m.List()))

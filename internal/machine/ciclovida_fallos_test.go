@@ -417,6 +417,7 @@ func TestRemoveEsperaAlArranque(t *testing.T) {
 		t.Fatal("Remove no terminó tras el arranque")
 	}
 
+	m.EsperarBorrados(5 * time.Second)
 	m.mu.RLock()
 	_, sigue := m.byID[id]
 	m.mu.RUnlock()

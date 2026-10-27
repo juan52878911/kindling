@@ -79,6 +79,7 @@ func TestRemoveNoSueltaSuCerrojoAntesDeTerminar(t *testing.T) {
 		t.Fatal("Remove no terminó")
 	}
 
+	m.EsperarBorrados(5 * time.Second)
 	if _, sigue := m.byID[id]; sigue {
 		t.Error("la máquina sigue en byID tras Remove")
 	}
@@ -129,6 +130,7 @@ func TestRemoveDeUnaRunningNoNecesitaPararlaAntes(t *testing.T) {
 	if err := m.Remove(mc.ID); err != nil {
 		t.Fatalf("Remove de una running: %v", err)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	if _, sigue := m.byID[mc.ID]; sigue {
 		t.Error("la máquina sigue en byID tras Remove")
 	}
