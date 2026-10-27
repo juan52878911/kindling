@@ -107,7 +107,10 @@ func checkServiceSpec(s api.ServiceSpec) error {
 	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
 		return err
 	}
-	return nil
+	if _, err := api.ParseUlimits(s.Ulimits); err != nil {
+		return err
+	}
+	return api.CheckSysctls(s.Sysctls)
 }
 
 // StartService arranca el servicio que declare la imagen, si declara uno.
@@ -156,6 +159,10 @@ func (s *Service) loop(env []string) {
 	w := io.Writer(out)
 	if s.console != nil {
 		w = io.MultiWriter(out, s.console)
+	}
+	// Los ulimits y sysctls, una vez y antes del primer arranque.
+	for _, w2 := range applyLimits(s.spec) {
+		fmt.Fprintf(w, "kling-guest: %s\n", w2)
 	}
 	backoff := time.Second
 	for {
