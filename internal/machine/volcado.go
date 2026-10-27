@@ -55,6 +55,10 @@ type sello struct {
 	// desde el dorado) y este es el mem.file del dorado sobre el que va
 	// (diff_volcado.go). Vacío: la RAM entera, como siempre.
 	DiffBase string `json:"diff_base,omitempty"`
+	// SinAgente: nadie escuchaba en el puerto del agente al congelar; el thaw
+	// no resincroniza (mismo criterio que Snapshot.SinAgente) y sobrevive a un
+	// reinicio del daemon.
+	SinAgente bool `json:"sin_agente,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -69,7 +73,7 @@ func volcadoEnCurso(dir string) error {
 // sha256 del vmlinux instalado y vmm el VMM que volcó; vacíos, el sello no
 // los lleva. diffBase, si el mem.file es un diferencial, es su base
 // (diff_volcado.go).
-func sellarVolcado(dir, kernelSHA, vmm, diffBase string) error {
+func sellarVolcado(dir, kernelSHA, vmm, diffBase string, sinAgente bool) error {
 	snapSHA, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
@@ -78,7 +82,7 @@ func sellarVolcado(dir, kernelSHA, vmm, diffBase string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase})
+	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase, SinAgente: sinAgente})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}

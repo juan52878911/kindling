@@ -369,3 +369,42 @@ func TestCheckServiceSpecOnRestore(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadServiceRejectsBadLimits(t *testing.T) {
+	dir := t.TempDir()
+	for _, bad := range []string{
+		`{"argv":["x"],"ulimits":["nofile"]}`,
+		`{"argv":["x"],"ulimits":["files=1"]}`,
+		`{"argv":["x"],"sysctls":{"kernel.core_pattern":"|/x"}}`,
+		`{"argv":["x"],"sysctls":{"vm.max_map_count":"1\n2"}}`,
+	} {
+		p := filepath.Join(dir, "s.json")
+		os.WriteFile(p, []byte(bad), 0o644)
+		if _, err := LoadService(p); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	p := filepath.Join(dir, "ok.json")
+	os.WriteFile(p, []byte(`{"argv":["x"],"ulimits":["nofile=65536"],"sysctls":{"vm.max_map_count":"262144"}}`), 0o644)
+	if _, err := LoadService(p); err != nil {
+		t.Errorf("rejected a good spec: %v", err)
+	}
+}
+
+func TestApplySysctlsWritesProcSys(t *testing.T) {
+	root := t.TempDir()
+	old := procSysRoot
+	procSysRoot = root
+	defer func() { procSysRoot = old }()
+	os.MkdirAll(filepath.Join(root, "vm"), 0o755)
+	os.WriteFile(filepath.Join(root, "vm/max_map_count"), []byte("65530\n"), 0o644)
+	// net/core/somaxconn no existe: un aviso, y los demás se aplican.
+	warn := applySysctls(map[string]string{"vm.max_map_count": "262144", "net.core.somaxconn": "4096"})
+	b, _ := os.ReadFile(filepath.Join(root, "vm/max_map_count"))
+	if string(b) != "262144\n" {
+		t.Errorf("max_map_count = %q", b)
+	}
+	if len(warn) != 1 || !strings.Contains(warn[0], "net.core.somaxconn") {
+		t.Errorf("warnings = %q", warn)
+	}
+}
