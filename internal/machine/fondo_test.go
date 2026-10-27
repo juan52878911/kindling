@@ -161,8 +161,8 @@ func TestFondoBorrarPlantillaLoVacia(t *testing.T) {
 func TestFondoNoReclamaLoQueSeDecideAlRestaurar(t *testing.T) {
 	m, _ := fondoDePrueba(t, 1)
 	for nombre, req := range map[string]api.RunRequest{
-		"vcpus":  {From: "dorado", VCPUs: 2},
-		"mem":    {From: "dorado", MemMiB: 512},
+		"cpupct": {From: "dorado", CPUPct: 50},
+		"vol":    {From: "dorado", Volume: "v"},
 		"egress": {From: "dorado", Egress: "internet"},
 		"owner":  {From: "dorado", Labels: map[string]string{api.LabelOwner: "x"}},
 		"exec":   {From: "dorado", AllowExec: true}, // el dorado no la tiene
@@ -173,6 +173,16 @@ func TestFondoNoReclamaLoQueSeDecideAlRestaurar(t *testing.T) {
 	}
 	if m.InfoFondo("dorado").Ready != 1 {
 		t.Fatal("una petición no elegible gastó una copia")
+	}
+}
+
+// El CLI manda siempre VCPUs y MemMiB, y con -from no significan nada: no
+// deben bastar para saltarse el fondo.
+func TestFondoReclamaConLosDefaultsDelCLI(t *testing.T) {
+	m, _ := fondoDePrueba(t, 1)
+	req := api.RunRequest{From: "dorado", Name: "x", VCPUs: 1, MemMiB: 256, Egress: "none", TTLSeconds: 0}
+	if _, ok := m.reclamarFondo(context.Background(), req); !ok {
+		t.Fatal("la petición típica de kling run -from no reclamó")
 	}
 }
 

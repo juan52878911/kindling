@@ -266,6 +266,7 @@ Otros de uso diario:
 kling help run                    # solo la ayuda de un comando
 kling logs -f <máquina>           # sigue la consola hasta que deja de correr
 kling template ls | inspect <nombre> | rm <nombre>
+kling template pool <nombre> -n 2 # mantiene 2 copias despiertas: run -from reclama una en vez de restaurar (apagado por defecto; -n 0 lo apaga)
 kling version                     # versión del CLI y del daemon (-json)
 kling completion install          # escribe el script de completado y dice qué línea añadir al rc
 ```

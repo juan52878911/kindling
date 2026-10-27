@@ -270,16 +270,16 @@ func (m *Manager) crearParaFondo(ctx context.Context, name string) (string, erro
 }
 
 // peticionLlana dice si la petición se conforma con lo que una copia del
-// fondo ya es. Red, vCPUs, memoria, disco, volúmenes y límite de CPU se fijan
-// al restaurar; lo único que se puede ajustar después es el nombre, las
+// fondo ya es. Red, volúmenes y límite de CPU se fijan al restaurar; lo único que se puede ajustar después es el nombre, las
 // etiquetas, el TTL y qué hacer al vencer.
 //
 // Con un dueño explícito (cuota de inquilino, docs/authz.md) tampoco se
 // reclama: la copia nació con las etiquetas del dorado y la cuota del dueño
 // se decide al crearla.
 func peticionLlana(req api.RunRequest, snap *api.Snapshot) bool {
-	if req.Image != "" || req.VCPUs != 0 || req.MemMiB != 0 || req.MemMaxMiB != 0 || req.DiskMiB != 0 ||
-		req.CPUPct != 0 || len(req.AllowDomains) != 0 || len(req.VolumeSet()) != 0 || len(req.Shares) != 0 ||
+	// VCPUs, MemMiB, MemMaxMiB, DiskMiB e Image no cuentan: con From runFrom los
+	// ignora y hereda los del dorado (el CLI manda siempre VCPUs y MemMiB).
+	if req.CPUPct != 0 || len(req.AllowDomains) != 0 || len(req.VolumeSet()) != 0 || len(req.Shares) != 0 ||
 		len(req.Env) != 0 {
 		return false
 	}
