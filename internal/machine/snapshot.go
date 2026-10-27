@@ -162,6 +162,14 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	defer soltar()
 
 	dir := m.snapDir(name)
+	// Declarado antes que el defer de abajo, para que la reposición del fondo
+	// corra DESPUÉS de que el dorado esté en su sitio (o restaurado).
+	var tamFondo int
+	defer func() {
+		if tamFondo > 0 {
+			m.restablecerFondo(name, tamFondo)
+		}
+	}()
 	var anterior string // el dorado viejo apartado por -replace
 	defer func() {
 		if anterior == "" {
@@ -197,6 +205,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// y un volcado que fallaba por disco lleno dejaba sin ninguno de los dos.
 		// El nuevo se escribe en el nombre definitivo, no en un temporal: el
 		// volcado graba la ruta de su overlay, y restaurar la abre tal cual.
+		//
+		// Las copias del fondo son instancias vivas del viejo: se retiran antes
+		// y se reponen del nuevo al acabar, salga como salga (fondo.go).
+		if tamFondo = m.InfoFondo(name).Size; tamFondo > 0 {
+			m.vaciarFondo(name, false)
+		}
 		var err error
 		if anterior, err = m.apartarParaReemplazo(name); err != nil {
 			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
@@ -1027,6 +1041,11 @@ func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(na
 // "nadie lo usa" y "ya no está" no cabe una reserva nueva. El borrado de verdad,
 // que con un mem.file de GiB tarda, va después y sin cerrojo.
 func (m *Manager) removeSnapshot(name string, propio bool) error {
+	// Las copias precalentadas son instancias vivas del snapshot: sin
+	// retirarlas, borrarlo se negaría (fondo.go).
+	if !propio {
+		m.vaciarFondo(name, true)
+	}
 	destino, restos, rerr, err := m.retirarSnapshot(name, propio, m.apartarSnapshot)
 	if err != nil {
 		return err

@@ -378,6 +378,8 @@ func (s *Server) rutas() []ruta {
 		{"GET /snapshots/{name}", AccionSnapLeer, nil, s.handleSnapshot},
 		{"PUT /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleSetAnnotation},
 		{"PUT /snapshots/{name}/credentials", AccionSnapEscribir, revisarCredenciales, s.handleSnapshotCredentials},
+		{"GET /snapshots/{name}/pool", AccionSnapLeer, nil, s.handleGetPool},
+		{"PUT /snapshots/{name}/pool", AccionSnapEscribir, nil, s.handleSetPool},
 		{"DELETE /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleRemoveAnnotation},
 		{"GET /store/{ns}", AccionAdmin, nil, s.handleStoreKeys},
 		{"GET /store/{ns}/{key}", AccionAdmin, nil, s.handleStoreGet},
@@ -897,6 +899,39 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleGetPool devuelve el estado del fondo precalentado de una plantilla.
+func (s *Server) handleGetPool(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, err := s.mgr.Snapshot(name); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "does not exist") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.mgr.InfoFondo(name))
+}
+
+// handleSetPool fija el tamaño del fondo precalentado de una plantilla.
+func (s *Server) handleSetPool(w http.ResponseWriter, r *http.Request) {
+	var req api.PoolRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	info, err := s.mgr.SetFondo(r.PathValue("name"), req.Size)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "does not exist") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
