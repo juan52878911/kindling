@@ -63,7 +63,14 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 	}
 	// Con la máquina aún en marcha: pausada, el agente no contesta.
 	avisos := m.avisoProcesosVivos(ctx, ref)
-	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false)
+	// ¿Escucha el agente ahora? Si no, el dorado nace sin agente (o con el
+	// invitado a medio arrancar) y cada run -from pagaría el reintento entero
+	// del resync (~320 ms con "no route to host"): se recuerda como en Freeze.
+	sinAgente := false
+	if mc, ok := m.Get(ref); ok && mc.Reachable() && mc.State == api.StateRunning {
+		sinAgente = !m.agenteEscucha(ctx, mc.ID)
+	}
+	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, sinAgente)
 	if err == nil {
 		snap.Warnings = append(snap.Warnings, avisos...)
 	}
@@ -77,7 +84,7 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 // pausarla (soltarlos pide hablar con el agente, y un invitado pausado no
 // contesta), y es también quien se los devuelve: aquí no se tocan.
 func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
-	return m.commit(ctx, ref, name, false, nil, true, false)
+	return m.commit(ctx, ref, name, false, nil, true, false, false)
 }
 
 // commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
@@ -87,7 +94,7 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
 // Con deFork es el snapshot temporal de un fork: no se hashea su overlay (ver
 // la DECISIÓN junto a los digests).
-func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork bool) (snapOut *api.Snapshot, errOut error) {
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork, sinAgente bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -553,6 +560,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		Volumes:   mc.Volumes,
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
+		SinAgente: sinAgente,
 	}
 	// Con qué VMM, kling y macOS se hizo: lo que permite marcarlo obsoleto
 	// cuando cambien en vez de fallar al despertar (meta.go).
@@ -1715,7 +1723,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	resync := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+	resync := m.resyncInstancia(ctx, id, snap)
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.

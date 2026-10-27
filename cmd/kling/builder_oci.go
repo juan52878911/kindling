@@ -96,12 +96,23 @@ type OCISpec struct {
 	// Vacío, nada: el proceso de la copia sigue con los aleatorios en memoria
 	// del dorado (#175).
 	OnRestore string `json:"on_restore,omitempty"`
+	// Ulimits ("nofile=65536", "memlock=unlimited") y Sysctls
+	// ("vm.max_map_count": "262144") se aplican antes de lanzar el servicio
+	// (api.ServiceSpec.Ulimits y Sysctls): sin ellos, OpenSearch y ClickHouse
+	// no arrancan.
+	Ulimits []string          `json:"ulimits,omitempty"`
+	Sysctls map[string]string `json:"sysctls,omitempty"`
 	// Source dice de dónde salen los blobs: "" es un registro; "archive",
 	// un docker save o un layout OCI que el CLI subió a la caché del daemon
 	// (kling image import -archive). Entonces Digest es obligatorio (el del
 	// manifiesto), Ref es opcional (el nombre que traía la imagen en el
 	// archivo) y no se usa la red. Ninguna ruta del host del CLI llega aquí.
 	Source string `json:"source,omitempty"`
+	// Slim quita de la raíz lo que el servicio no usa, según las reglas por
+	// familia de internal/imagen/slim.json (LLVM y bitcode de Postgres,
+	// cabeceras, versiones viejas de extensiones) y añade `-c jit=off` a su
+	// comando. Opt-in: cambia lo que hay en la imagen.
+	Slim bool `json:"slim,omitempty"`
 }
 
 // ociSourceArchive es OCISpec.Source de lo importado de un archivo.
@@ -177,6 +188,12 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 		return ref, fmt.Errorf("invalid restart policy %q: use always, on-failure or no", s.Restart)
 	}
 	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
+		return ref, err
+	}
+	if _, err := api.ParseUlimits(s.Ulimits); err != nil {
+		return ref, err
+	}
+	if err := api.CheckSysctls(s.Sysctls); err != nil {
 		return ref, err
 	}
 	return ref, nil
@@ -375,6 +392,23 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if files > ociMaxFiles || bytes > int64(maxMB)<<23 {
 		return fmt.Errorf("image unpacks to %d files and %d MiB, over the limits (%d files, %d MiB)", files, bytes>>20, ociMaxFiles, maxMB*8)
 	}
+	var slimArgs []imagen.ArgsSlim
+	if spec.Slim {
+		reglas, err := imagen.CargarReglasSlim()
+		if err != nil {
+			return err
+		}
+		inf, err := reglas.Aplica(tree, cfg.Env, false)
+		if err != nil {
+			return err
+		}
+		if len(inf.Familias) == 0 {
+			logf("slim: no rule matches this image; nothing removed")
+		} else {
+			logf("slim (%s): removed %d files, %d MiB", strings.Join(inf.Familias, ", "), inf.Ficheros, inf.Bytes>>20)
+		}
+		slimArgs = inf.Args
+	}
 	// El init: el script si la imagen trae lo que necesita; si no (una
 	// distroless, una scratch), el init en Go de kling-guest. También si la
 	// imagen trae su propio /entrypoint, que el script ejecutaría en vez del
@@ -412,6 +446,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		cmd = spec.Cmd
 	}
 	argv := append(append([]string{}, entry...), cmd...)
+	if len(slimArgs) > 0 {
+		// Sin llvmjit.so, jit=off: si no, cada consulta cara intentaría cargarlo.
+		argv = imagen.ArgsSlimSobre(argv, slimArgs)
+	}
 	user := cfg.User
 	if spec.User != "" {
 		user = spec.User
@@ -442,7 +480,8 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
-		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore}
+		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
+		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
 		// El agente la cambiaría igual por SIGTERM; aquí se ve al importar.
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)

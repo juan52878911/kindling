@@ -268,11 +268,12 @@ El spec (`kling image build <n> -builder oci -spec s.json`, o `kling image impor
 | `entrypoint`, `cmd`, `user` | sustituyen a los de la imagen, como en `docker run` (`entrypoint` descarta el `CMD`) |
 | `max_mb` | tope de lo que se baja, comprimido (4096 por defecto); aplanada no puede pasar de 8 veces eso ni de 2 millones de ficheros |
 | `on_restore` | qué hacer con el servicio en cada copia de un dorado: `restart` o `signal:<SEÑAL>` (abajo); vacío o `none`, nada |
+| `ulimits`, `sysctls` | `["nofile=65536", "memlock=unlimited", "nproc=1024:4096"]` y `{"vm.max_map_count": "262144"}`: el agente los aplica antes de lanzar el servicio (los sysctls, primero; los ulimits quedan en el agente y los hereda lo que lance). Solo sysctls de una lista (`vm.max_map_count`, `vm.overcommit_memory`, `net.core.somaxconn`, `net.ipv4.tcp_*`, `fs.*` de ficheros...): nada que ejecute código como `kernel.core_pattern`. OpenSearch pide `nofile=65536` y `vm.max_map_count=262144`; ClickHouse, `nofile=262144` |
 | `source` | `archive`: los blobs ya están en la caché del daemon (los subió `kling image import -archive`, abajo) y no se usa la red; `digest` (el del manifiesto) es obligatorio y `ref`, opcional |
 
 `kling image import <ref>` es eso con nombre por defecto (`postgres-17-alpine`),
 `-e KEY=valor`, `-e KEY` (el valor sale del entorno: no queda en `ps`),
-`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, `-on-restore`, el comando tras `--` y `-json`
+`-env-file` (hornean el valor; avisa y recomienda `run -e`), `-user`, `-entrypoint`, `-max-size`, `-on-restore`, `-ulimit nofile=65536` y `-sysctl vm.max_map_count=262144` (repetibles), el comando tras `--` y `-json`
 para agentes y scripts (`{name, ref, digest, manifest, arch, ports, volumes,
 ready, service, already_imported}`).
 

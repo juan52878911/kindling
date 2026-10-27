@@ -30,6 +30,20 @@ func TestImagesImportRestartFlag(t *testing.T) {
 	}
 }
 
+func TestImagesImportLimitFlags(t *testing.T) {
+	for _, c := range []struct{ flag, val, want string }{
+		{"-ulimit", "nofile", "name=soft"},
+		{"-ulimit", "files=1", "unknown resource"},
+		{"-sysctl", "kernel.core_pattern=|/x", "not allowed"},
+		{"-sysctl", "vm.max_map_count", "name=value"},
+	} {
+		err := imagesImport([]string{"-H", "/nonexistent/kling.sock", c.flag, c.val, "redis:7"})
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s %s: err = %v, want %q", c.flag, c.val, err, c.want)
+		}
+	}
+}
+
 // Una imagen que solo expone UDP se queda sin sonda: la salida lo dice.
 func TestReadyLine(t *testing.T) {
 	udp := oci.ImageConfig{ExposedPorts: map[string]struct{}{"53/udp": {}, "5353/udp": {}}}
