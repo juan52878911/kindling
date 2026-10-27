@@ -911,6 +911,85 @@ hasta ahora, con el uid del daemon, y el daemon lo avisa al arrancar. `debian`
 y `android` también son Go puro, pero leen y escriben bases y recetas de
 `images/`: siguen corriendo como root.
 
+## Batería de compatibilidad (`scripts/bateria-imagenes.sh`, 2026-10-27)
+
+`scripts/bateria-imagenes.sh` importa cada imagen con `kling image import`, la
+arranca (`run -wait-ready`), hace una comprobación real **dentro** de la máquina
+(`kling exec`: SQL, `ping`, HTTP) y la borra. Imprime una tabla con el
+resultado, el tiempo de import y el de «primer arranque listo» (de `run` a que
+responde la comprobación). Es bash 3.2 (corre en macOS). Todo lo que crea
+lleva el prefijo `bat-` y es lo único que borra. `-n` salta clickhouse y
+opensearch (un daemon sin `-ulimit`/`-sysctl`, como el 0.18); `-o "postgres
+redis"` elige casos; `-l` los lista. Una positiva que falla se reintenta una
+vez y, si sigue fallando, sale `ROJO` con la causa.
+
+| Caso | Imagen | Comprobación |
+|---|---|---|
+| postgres | `postgres:17-alpine` | `psql -c 'select 40+2'` |
+| mysql | `mysql:8.4` | `mysql -e 'select 40+2'` |
+| mariadb | `mariadb:11` | `mariadb -e 'select 40+2'` |
+| mongo | `mongo:7` | `mongosh` `ping` |
+| redis | `redis:7-alpine -- redis-server --requirepass …` | `PONG` con la clave y `NOAUTH` sin ella |
+| clickhouse | `clickhouse/clickhouse-server:24.8`, `-ulimit nofile=262144` | `clickhouse-client -q 'select 40+2'` |
+| opensearch | `opensearchproject/opensearch:2.17.1`, `-ulimit nofile=65536 -sysctl vm.max_map_count=262144` | `_cluster/health` verde o amarillo |
+| nginx | `nginx:alpine` | `GET /` |
+| python | `python:3.13-alpine -- python -m http.server 8000` | `GET /` |
+| zstd | alpine con capas zstd (layout OCI de `docker buildx`, `-archive`) | `cat /hola` |
+
+Resultados con la rama `claude/bateria-imagenes` (daemon con ulimits y sysctls):
+**10/10 positivas verdes** en Linux (CT 109, funcionalidad) y en kt-pend
+(kling-ascci, disco local, tiempos), y las 3 negativas fallan con un mensaje
+que dice qué falta. Las imágenes con capas zstd **sí se soportan** (el
+encargo las daba por negativas; se comprueban cada capa por sha256 y se
+descomprimen), así que `zstd` es un caso positivo.
+
+### Negativas
+
+| Imagen | Antes | Ahora |
+|---|---|---|
+| `gcr.io/distroless/static-debian12:nonroot` (sin `ENTRYPOINT`/`CMD` ni shell) | importaba y la máquina arrancaba «lista» y vacía | `the image has no ENTRYPOINT or CMD and no shell, so there is nothing to run: give the command after --, or -entrypoint` |
+| `nginx:alpine` con `-arch arm64` en un daemon amd64 | `guest agent …/kling-guest: ELF machine 0x3e is not arm64` | `ELF machine 0x3e is amd64, not arm64: the image is arm64 but the host's guest agent is amd64; kling runs images of the host's architecture, so import the amd64 variant (-arch amd64)` |
+| `ghcr.io/linuxserver/nginx` (s6-overlay, `/init`) | importaba; la máquina quedaba «not ready» y el servicio se reiniciaba sin fin (`s6-overlay-suexec: fatal: can only run as pid 1`, solo en los logs) | `the image uses s6-overlay as its init (/init), which must be PID 1 and can't run under kindling's agent: import it with its own command after -- or -entrypoint (the service itself, not /init)` |
+
+### Tiempos en kt-pend (kling-ascci, amd64, ext4 local; mín/mediana/máx de 3 corridas, segundos)
+
+Las siete positivas que no necesitan ulimits, rama frente a main (v0.18.0-26) en
+el mismo host y el mismo script. Las 3 corridas de la rama van primero, y la
+primera trae las capas del registro: la caché de blobs ya estaba caliente en las
+de main, así que el **import** de main sale más corto por eso; el **listo** es
+comparable.
+
+| Caso | import rama | listo rama | import main | listo main |
+|---|---|---|---|---|
+| postgres | 5,9 / 6,4 / 15,7 | 2,9 / 3,6 / 5,0 | 7,5 / 8,5 / 9,5 | 4,2 / 5,7 / 5,9 |
+| mysql | 18,3 / 21,5 / 22,9 | 17,8 / 21,8 / 23,3 | 24,0 / 26,6 / 28,0 | 21,9 / 29,0 / 35,1 |
+| mariadb | 4,9 / 5,5 / 10,1 | 8,5 / 10,0 / 17,1 | 6,9 / 6,9 / 6,9 | 15,6 / 16,3 / 17,4 |
+| mongo | 17,5 / 21,6 / 24,1 | 3,9 / 5,6 / 6,4 | 19,4 / 20,3 / 22,4 | 5,4 / 9,5 / 9,9 |
+| redis | 3,9 / 4,4 / 6,3 | 0,4 / 1,0 / 1,2 | 1,9 / 2,3 / 5,3 | 0,9 / 1,1 / 1,3 |
+| nginx | 1,8 / 2,7 / 4,6 | 0,5 / 0,7 / 0,8 | 2,3 / 2,3 / 5,3 | 0,7 / 0,8 / 1,0 |
+| python | 1,5 / 2,1 / 4,9 | 1,4 / 1,6 / 2,8 | 1,8 / 1,9 / 2,1 | 2,8 / 2,8 / 2,9 |
+
+Con ulimits (solo la rama, una corrida): clickhouse importa en 17,4 s y está
+lista en 4,2 s; opensearch (2 GiB, heap de 1 GiB), 39,3 s y 90,6 s. En CT 109
+(rootfs en NFS, solo funcionalidad: los tiempos varían ×8) salieron 16,8 s y
+4,0 s en postgres, 145,7 s y 42,1 s en opensearch.
+
+### Mac (vz), kling 0.18.0 instalado, una corrida
+
+Las siete positivas sin ulimits, 7/7 verdes: postgres 3,9 s + 5,2 s, mysql
+8,0 s + 9,1 s, mariadb 3,6 s + 5,5 s, mongo 8,1 s + 1,5 s, redis 1,6 s + 1,2 s,
+nginx 1,7 s + 1,2 s y python 1,7 s + 1,1 s (import + listo). Sin nada que
+apuntar: clickhouse y opensearch no se probaron en vz porque piden ulimits y
+sysctls, que el 0.18 no tiene.
+
+### Cómo se corre
+
+```sh
+KLING_HOST=unix:///run/kt-pend/kling.sock scripts/bateria-imagenes.sh        # todo
+scripts/bateria-imagenes.sh -n -s positivas                                  # daemon sin ulimits
+BAT_ZSTD_ARCHIVE=/ruta/zstd-oci.tar scripts/bateria-imagenes.sh -o zstd      # sin docker buildx
+```
+
 ## Límites
 
 - **Verity necesita device-mapper en el núcleo del invitado.** El núcleo de
