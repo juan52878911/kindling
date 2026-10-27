@@ -62,6 +62,12 @@ func CheckELF(b []byte, arch string) error {
 		return fmt.Errorf("not an ELF binary")
 	}
 	if m := binary.LittleEndian.Uint16(b[18:]); m != ElfMachine[arch] {
+		for a, em := range ElfMachine {
+			if em == m {
+				// El caso típico: una imagen arm64 en un anfitrión amd64 (o al revés).
+				return fmt.Errorf("ELF machine %#x is %s, not %s: an %s image needs a %s agent and host (this one is %s); import the %s variant of the image or run on a %s host", m, a, arch, arch, arch, a, a, a)
+			}
+		}
 		return fmt.Errorf("ELF machine %#x is not %s", m, arch)
 	}
 	return nil

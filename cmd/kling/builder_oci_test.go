@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/ext4"
+	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -566,5 +568,31 @@ func TestBuildCacheConfigTopes(t *testing.T) {
 	t.Setenv("KLING_BUILD_CACHE_MAX_DAYS", "7")
 	if l := buildCacheConfig(); l.MaxGiB != 50 || l.MaxDays != 7 {
 		t.Fatalf("%+v", l)
+	}
+}
+
+func TestCheckNoS6(t *testing.T) {
+	now := time.Unix(1, 0)
+	s6 := ext4.NewDir(0o755, 0, 0, now)
+	if err := imagen.Put(s6, "/etc/s6-overlay/config", []byte("x"), 0o644, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNoS6(s6, []string{"/init"}); err == nil || !strings.Contains(err.Error(), "s6-overlay") {
+		t.Fatalf("s6 with /init accepted: %v", err)
+	}
+	if err := checkNoS6(s6, []string{"nginx"}); err != nil {
+		t.Fatalf("s6 files but another command: %v", err)
+	}
+	if err := checkNoS6(ext4.NewDir(0o755, 0, 0, now), []string{"/init"}); err != nil {
+		t.Fatalf("/init without s6: %v", err)
+	}
+}
+
+func TestCheckRunnable(t *testing.T) {
+	if err := checkRunnable(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRunnable(false); err == nil || !strings.Contains(err.Error(), "nothing to run") {
+		t.Fatalf("no command and no shell accepted: %v", err)
 	}
 }

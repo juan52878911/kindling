@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -424,6 +425,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		cmd = spec.Cmd
 	}
 	argv := append(append([]string{}, entry...), cmd...)
+	if err := checkNoS6(tree, argv); err != nil {
+		return err
+	}
 	user := cfg.User
 	if spec.User != "" {
 		user = spec.User
@@ -434,6 +438,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("warning: the image's ENV %s is not KEY=value without NUL or CR; left out", k)
 	}
 	if len(argv) == 0 {
+		if err := checkRunnable(hasSh); err != nil {
+			return err
+		}
 		logf("the image has no ENTRYPOINT or CMD: only the agent runs (use kling exec)")
 	}
 
@@ -808,4 +815,30 @@ func libPorDefecto(root string) string {
 		return filepath.Join(root, "lib")
 	}
 	return "/usr/local/lib/kindling"
+}
+
+// checkNoS6 rechaza las imágenes cuyo init es s6-overlay (linuxserver/*, etc.):
+// su /init exige ser el PID 1 ("can only run as pid 1"), y aquí el PID 1 es el
+// agente, que lanza el servicio como hijo. Sin esto la máquina arranca, el
+// servicio muere y se reinicia sin parar y el error solo sale en los logs.
+func checkNoS6(tree *ext4.Node, argv []string) error {
+	if len(argv) == 0 || argv[0] != "/init" {
+		return nil
+	}
+	for _, p := range []string{"/package/admin/s6-overlay", "/etc/s6-overlay", "/command/with-contenv"} {
+		if n, _ := tree.Resolve(p); n != nil {
+			return fmt.Errorf("the image uses s6-overlay as its init (%s), which must be PID 1 and can't run under kindling's agent: import it with its own command after -- or -entrypoint (the service itself, not /init)", argv[0])
+		}
+	}
+	return nil
+}
+
+// checkRunnable es para una imagen sin ENTRYPOINT ni CMD: con shell queda el
+// agente y kling exec; sin ella (distroless, scratch), ni el servicio ni exec
+// harían nada y la máquina arrancaría vacía y "lista".
+func checkRunnable(hasSh bool) error {
+	if hasSh {
+		return nil
+	}
+	return errors.New("the image has no ENTRYPOINT or CMD and no shell, so there is nothing to run: give the command after --, or -entrypoint")
 }

@@ -86,3 +86,13 @@ func TestCheckELF(t *testing.T) {
 		t.Fatal("CheckELF")
 	}
 }
+
+func TestCheckELFOtraArquitectura(t *testing.T) {
+	b := make([]byte, 64)
+	copy(b, "\x7fELF\x02\x01\x01")
+	b[18] = 0x3e
+	err := CheckELF(b, "arm64")
+	if err == nil || !strings.Contains(err.Error(), "amd64") || !strings.Contains(err.Error(), "arm64") {
+		t.Fatalf("the error should name both architectures: %v", err)
+	}
+}
