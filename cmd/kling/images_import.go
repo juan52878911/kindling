@@ -10,7 +10,9 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -53,9 +55,26 @@ func imagesImport(args []string) error {
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
 	archive := fs.String("archive", "", "import from a docker save tar or an OCI layout (tar or directory) on this machine, not from a registry")
+	slim := fs.Bool("slim", false, "drop what the service doesn't use, by family (Postgres: LLVM/JIT, bitcode, headers, old extension versions; sets jit=off)")
 	pick := fs.String("image", "", "with -archive: which image of the archive (repo:tag or digest), if it has several")
+	warm := fs.Bool("warm", false, "after importing: boot it at full CPU, run the -step commands inside, wait until it is ready and save it as a template")
+	var steps stringsFlag
+	fs.Var(&steps, "step", "with -warm: shell command to run inside before saving (repeatable, in order)")
+	tmplName := fs.String("template", "", "with -warm: template name (default: the image's)")
+	warmMem := units.MiBVar(fs, "mem", 0, "with -warm: memory of the template: 512M, 2G (default 1G)")
+	warmCPUs := fs.Int("cpus", 0, "with -warm: vCPUs of the template (default 2)")
+	warmEgress := fs.String("egress", "", "with -warm: egress of the preparation machine: none | internet (default: the daemon's)")
+	warmWait := fs.Duration("wait", machine.DefaultReadyWait, "with -warm: how long to wait for the service to be ready, at boot and at save")
+	stepTimeout := fs.Duration("step-timeout", 10*time.Minute, "with -warm: kill a -step after this long")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
+	}
+	if !*warm {
+		if dados := flagsGiven(fs, "step", "template", "mem", "cpus", "egress", "wait", "step-timeout"); len(dados) > 0 {
+			return fmt.Errorf("-%s only goes with -warm", strings.Join(dados, ", -"))
+		}
+	} else if *tmplName != "" && !reTemplateWarm.MatchString(*tmplName) {
+		return fmt.Errorf("invalid -template %q: lowercase letters, digits, - and _ (up to 41)", *tmplName)
 	}
 	rest := fs.Args()
 	if *archive != "" {
@@ -112,7 +131,7 @@ func imagesImport(args []string) error {
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
-		Restart: cmp.Or(*restart, api.RestartOnFailure)}
+		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}
@@ -216,9 +235,19 @@ func imagesImport(args []string) error {
 	}
 	_ = json.Unmarshal(rec.Built, &built)
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"name": *name, "already_imported": already, "ref": built.Ref, "digest": built.Digest,
+		res := map[string]any{"name": *name, "already_imported": already, "ref": built.Ref, "digest": built.Digest,
 			"manifest": built.Manifest, "arch": built.Arch, "ports": built.Ports, "volumes": built.Volumes,
-			"ready": built.Ready, "service": built.Service})
+			"ready": built.Ready, "service": built.Service}
+		if *warm {
+			// El progreso y la salida de los pasos, a stderr: stdout es el JSON.
+			snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmEgress, *warmWait, *stepTimeout, *replace),
+				os.Stderr, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
+			if err != nil {
+				return err
+			}
+			res["template"], res["template_mem_bytes"] = snap.Name, snap.MemBytes
+		}
+		return json.NewEncoder(os.Stdout).Encode(res)
 	}
 	if already {
 		dmn := ""
@@ -254,8 +283,28 @@ func imagesImport(args []string) error {
 		// no esté vacío. En el padre, o con un subdirectorio (PGDATA).
 		fmt.Printf("  volumes  %s  (keep data with -volume NAME:<a parent dir>)\n", strings.Join(built.Volumes, " "))
 	}
+	if *warm {
+		snap, err := warmUp(ctx, c, warmFrom(*name, *tmplName, steps, *warmCPUs, *warmMem, *warmEgress, *warmWait, *stepTimeout, *replace),
+			os.Stdout, func(f string, a ...any) { fmt.Printf(f+"\n", a...) })
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
+		for _, w := range snap.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		next("kling run -from %s", snap.Name)
+		return nil
+	}
 	next("kling run -image %s -mem 512M -wait-ready", *name)
 	return nil
+}
+
+// warmFrom junta las opciones de -warm con sus valores por defecto.
+func warmFrom(image, template string, steps []string, cpus, memMiB int, egress string, wait, stepTimeout time.Duration, replace bool) warmSpec {
+	return warmSpec{Image: image, Template: cmp.Or(template, image), Steps: steps,
+		CPUs: cmp.Or(cpus, 2), MemMiB: cmp.Or(memMiB, 1024), Egress: egress,
+		Replace: replace, Wait: wait, StepTimeout: stepTimeout}
 }
 
 // existingImport mira si ya hay una imagen con ese nombre. Sin ella, false.
@@ -319,7 +368,7 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 	a, _ := json.Marshal(prev)
 	b, _ := json.Marshal(spec)
 	if string(a) != string(b) {
-		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit or restart policy); "+
+		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit, restart policy or -slim); "+
 			"pass -replace to rebuild it with these", name, nr)
 	}
 	return true, nil

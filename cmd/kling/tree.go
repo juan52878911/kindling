@@ -114,6 +114,8 @@ var coreTree = []section{
                                                    template: run -from <name>; waits
                                                    until the guest serves and is ready
                                                    by its image's probe (-force: no)
+  save -audit [-audit-for 5s] <ref>                lists what was never open or mapped
+                                                   on the machine; saves nothing
 `},
 	}},
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{
@@ -158,7 +160,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
-		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential"}, Usage: `  template ls [-q] [-json]                         lists the templates
+		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential", "pool"}, Usage: `  template ls [-q] [-json]                         lists the templates
   template inspect <name> [-json]                  one template, with its annotations
   template rm [-f] <name>...                       removes templates
   template credential <name> -domain D -env VAR    ties an API key to the template:
@@ -175,6 +177,9 @@ var coreTree = []section{
       [-ca-file ca.pem] [-upstream H:P]
       [-upstream-tls verify-full|disable]
       [-tls-server-name N] -env PGPASSWORD [-f file]
+  template pool <name> [-n N]                      keeps N awake copies: run -from claims
+                                                   one in ms (-n 0 turns it off; off by
+                                                   default; the copies count as machines)
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -193,6 +198,11 @@ var coreTree = []section{
                                                    agent's init in Go. Blobs stay cached,
                                                    bounded by daemon.build_cache_max_gib
                                                    and _days
+  image import <ref> -warm [-step 'cmd']...        then boots it at full CPU, runs each
+      [-template T] [-cpus N] [-mem M]             -step inside (sh -c), waits until the
+      [-egress E] [-wait D] [-step-timeout D]      service is ready and saves a template:
+                                                   from the ref to kling run -from, in one
+                                                   command
   image import -archive <x.tar|dir> [-image R]     the same from a file on this machine:
                                                    docker save (manifest.json) or an OCI
                                                    layout (tar or dir). Only the missing

@@ -8,6 +8,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling image import` stores an image whose layers extend an already imported one (same diff_id prefix, agent and arch) as a small layer over it instead of a second full ext4; a base with layers on top cannot be removed
+- `kling template pool <name> -n N` keeps N awake copies of a template; `run -from` claims one in ~10-20 ms instead of restoring (off by default)
+- `kling image import -warm [-step CMD]...` goes from a registry ref to a ready template in one command; `kling db golden -from-oci REF build` builds a database golden from a Docker/OCI image (e.g. pgvector/pgvector:pg16) without compiling extensions
+- `kling image import -slim` trims Postgres and Timescale images by family rules (LLVM/JIT, bitcode, headers, old extension versions, `jit=off`): postgres:17-alpine 297→91 MiB, postgres:17 457→167 MiB, Timescale 1.6 GiB→187 MiB; `kling save -audit` reports files the running service never opened, without trimming
 - `kling image import -ulimit` and `-sysctl`: the guest agent applies them before the service starts (OpenSearch and ClickHouse need nofile and vm.max_map_count)
 - `kling db` templates of ClickHouse (`-engine clickhouse`), with the password stored as a SHA-256 computed on the host (#118)
 - `kling db` templates that speak the MongoDB protocol through FerretDB (`-engine ferretdb`); copies get a `mongodb://` DSN and a rotated password like Postgres (#117)
@@ -21,6 +25,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 

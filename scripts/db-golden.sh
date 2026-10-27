@@ -35,6 +35,7 @@
 #   -image I          imagen (pg16)                  -mem M        RAM de la VM (1G)
 #   -from T           plantilla con Postgres instalado en vez de -image (macOS: ver docs/db-golden.md)
 #   -cpus N           vCPUs (2)                      -state DIR    dónde va la contraseña
+#   -loopback         escuchar también en 127.0.0.1 (lo pone -from-oci: la sonda de la imagen)
 #   -keep             no borrar la máquina de preparación tras guardar
 #
 # Entorno: KLING = comando kling (con sus banderas, p.ej. "kling -H ssh://lab").
@@ -163,7 +164,7 @@ POST
 cmd_build() {
   local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16 from=""
   local mem=1G cpus=2 mem_cpus_set=0 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
-  local exts="" preload="" confs=() init="" env_file=""
+  local exts="" preload="" confs=() init="" env_file="" loopback=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -migrations) migrations="${2:?falta valor}"; shift 2 ;;
@@ -183,6 +184,7 @@ cmd_build() {
       -cpus)       cpus="${2:?falta valor}"; mem_cpus_set=1; shift 2 ;;
       -state)      state="${2:?falta valor}"; shift 2 ;;
       -keep)       BUILD_KEEP=1; shift ;;
+      -loopback)   loopback=1; shift ;;
       -*)          die "opción desconocida: $1" ;;
       *)           [ -z "$name" ] || die "sobra un argumento: $1"; name="$1"; shift ;;
     esac
@@ -312,7 +314,11 @@ cmd_build() {
     quiet "${K[@]}" cp "$BUILD_TMP/preload" "$m:/tmp/kdb-preload"
   fi
 
-  say "initdb en el overlay y arranque de Postgres en $ip"
+  # Una imagen OCI (kling db golden -from-oci) trae su sonda de listo contra
+  # 127.0.0.1:5432: sin escuchar también ahí, el guardado espera en balde.
+  local listen="$ip"
+  [ "$loopback" -eq 0 ] || listen="$ip,127.0.0.1"
+  say "initdb en el overlay y arranque de Postgres en $listen"
   # PGDATA va en la raíz de la máquina (overlay), NO en un volumen: Freeze
   # desmonta los volúmenes y Fork rechaza los de escritura (puedeRamificarse).
   "${K[@]}" exec -i -timeout 5m "$m" -- sh -s <<SETUP
@@ -330,7 +336,7 @@ local all postgres peer
 host  all $role 0.0.0.0/0 scram-sha-256
 HBA
 cat >> "\$D/postgresql.conf" <<'CONF'
-listen_addresses = '$ip'
+listen_addresses = '$listen'
 unix_socket_directories = '/run/postgresql'
 password_encryption = 'scram-sha-256'
 max_connections = 50

@@ -59,6 +59,17 @@ func claveSnapshot(s *api.Snapshot) string {
 	return "s:" + s.Name + "@" + s.CreatedAt.UTC().Format(time.RFC3339Nano)
 }
 
+// resyncInstancia es el resync de una instancia nacida de snap. Si la
+// plantilla se guardó sin agente (snap.SinAgente, en su meta.json firmado), no
+// se intenta: sobrevive a reinicios del daemon. Las anteriores al campo siguen
+// por resyncGuest, que recuerda en memoria lo que descubra.
+func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snapshot) resultadoResync {
+	if snap.SinAgente {
+		return resultadoResync{}
+	}
+	return m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+}
+
 // resyncClient no reutiliza conexiones: cada llamada va a una microVM recién
 // restaurada, y una conexión ociosa guardada hacia ella solo retendría un
 // descriptor hasta que el invitado muera.

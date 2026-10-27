@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +62,14 @@ import (
 // nada. Los dos hacen lo mismo, y init_test.go (pkg/guest) prueba el de Go
 // con los mismos casos que scripts/minimal_init_test.go.
 //
+// Si ya hay una imagen oci importada (entera, con su .ext4) cuya cadena de
+// diff_ids es prefijo de la de ésta, no se escribe otro ext4 completo: se
+// escribe <nombre>.layer.ext4 con solo la diferencia (el /upper de un overlay
+// sobre esa imagen, con sus whiteouts como dispositivos 0/0) y la receta
+// apunta a ella como base (imagen.IndexBases / BestBase). La base tiene que
+// llevar el mismo agente y el mismo tipo de init. KLING_OCI_NO_REUSE=1 lo
+// desactiva.
+//
 // Límites: sin verity (la imagen es la raíz, no una capa); en una imagen sin
 // sh, un HEALTHCHECK CMD-SHELL no se puede correr y se sustituye por la sonda
 // de EXPOSE.
@@ -109,6 +118,11 @@ type OCISpec struct {
 	// manifiesto), Ref es opcional (el nombre que traía la imagen en el
 	// archivo) y no se usa la red. Ninguna ruta del host del CLI llega aquí.
 	Source string `json:"source,omitempty"`
+	// Slim quita de la raíz lo que el servicio no usa, según las reglas por
+	// familia de internal/imagen/slim.json (LLVM y bitcode de Postgres,
+	// cabeceras, versiones viejas de extensiones) y añade `-c jit=off` a su
+	// comando. Opt-in: cambia lo que hay en la imagen.
+	Slim bool `json:"slim,omitempty"`
 }
 
 // ociSourceArchive es OCISpec.Source de lo importado de un archivo.
@@ -348,33 +362,100 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("compressed layers are decompressed with %s", h)
 	}
 
-	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera.
+	// Una base ya importada cuya cadena de diff_ids es prefijo de la de esta
+	// imagen: entonces solo se escribe la diferencia, como capa de kindling
+	// (capas.go de internal/imagen). Sin ella, o si algo no cuadra, la imagen
+	// entera, como siempre.
+	chain := img.Config.RootFS.DiffIDs
+	if len(chain) != len(img.Layers) {
+		// Sin diff_ids por capa (no pasa con un registro de verdad): los digests
+		// de los blobs, que valen igual mientras no se recompriman.
+		chain = chain[:0:0]
+		for _, l := range img.Layers {
+			chain = append(chain, l.Digest)
+		}
+	}
+	var reuse *imagen.BaseOCI
+	if os.Getenv("KLING_OCI_NO_REUSE") == "" {
+		// El índice lo deja el daemon en el directorio de trabajo (un
+		// constructor sin privilegios no lee images/); sin daemon, de images/.
+		bases, ok := imagen.LeerBases(dir)
+		if !ok {
+			bases = imagen.IndexBases(filepath.Join(root, "images"))
+		}
+		// Nunca ella misma (un import -replace): sería su propia base.
+		bases = slices.DeleteFunc(slices.Clone(bases), func(b imagen.BaseOCI) bool { return b.Name == req.Name })
+		reuse = imagen.BestBase(bases, chain, agentSum, spec.Arch)
+	}
+
+	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera. Con
+	// base, tras las k primeras se mete lo común que ya lleva la base (agente,
+	// init, puntos de montaje) y se fotografía el árbol.
 	tTree := time.Now()
-	tree := ext4.NewDir(0o755, 0, 0, t)
-	var streams []ext4.Stream
-	// Tope de entradas mientras se leen: las capas se pisan unas a otras, así
-	// que el de ficheros de la raíz final (abajo) es el que cuenta; este solo
-	// impide que una capa con millones de entradas agote la memoria antes.
 	var entries int64
-	for i, l := range img.Layers {
-		rc, err := oci.OpenLayer(l)
-		if err != nil {
-			return err
-		}
-		err = tree.AddTar(rc, ext4.TarOptions{Stream: len(streams), Whiteouts: true, Time: t,
-			Entries: &entries, MaxEntries: 2 * ociMaxFiles})
-		rc.Close()
-		if err != nil {
-			return fmt.Errorf("layer %d (%s): %w", i, l.Digest, err)
-		}
-		l := l
-		streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) {
-			rc, err := oci.OpenLayer(l)
-			if err != nil || l.Tar == "" {
-				return rc, err
+	flatten := func(k int) (tree *ext4.Node, streams []ext4.Stream, foto *imagen.Foto, err error) {
+		tree = ext4.NewDir(0o755, 0, 0, t)
+		// Tope de entradas mientras se leen: las capas se pisan unas a otras, así
+		// que el de ficheros de la raíz final (abajo) es el que cuenta; este solo
+		// impide que una capa con millones de entradas agote la memoria antes.
+		entries = 0
+		for i, l := range img.Layers {
+			if i == k && k > 0 {
+				if err = ociComun(tree, agent, spec.Arch, reuse.Init == "go", t); err != nil {
+					return
+				}
+				foto = imagen.Fotografiar(tree)
 			}
-			return removeOnClose{rc, l.Tar}, nil
-		}))
+			var rc io.ReadCloser
+			if rc, err = oci.OpenLayer(l); err != nil {
+				return
+			}
+			err = tree.AddTar(rc, ext4.TarOptions{Stream: len(streams), Whiteouts: true, Time: t,
+				Entries: &entries, MaxEntries: 2 * ociMaxFiles})
+			rc.Close()
+			if err != nil {
+				err = fmt.Errorf("layer %d (%s): %w", i, l.Digest, err)
+				return
+			}
+			l := l
+			streams = append(streams, ext4.TarStream(func() (io.ReadCloser, error) {
+				rc, err := oci.OpenLayer(l)
+				if err != nil || l.Tar == "" {
+					return rc, err
+				}
+				return removeOnClose{rc, l.Tar}, nil
+			}))
+		}
+		return
+	}
+	k := 0
+	if reuse != nil {
+		k = len(reuse.DiffIDs)
+	}
+	tree, streams, foto, err := flatten(k)
+	if err != nil {
+		return err
+	}
+	if reuse != nil {
+		// Lo que no cuadra con la base manda a la imagen entera: otro init
+		// del que lleva (se lee de la base, no se puede cambiar desde la
+		// capa), o un enlace duro a un fichero de la base.
+		g, _, _ := ociInit(tree)
+		_, uerr := foto.Upper(tree, k)
+		why := ""
+		switch {
+		case g != (reuse.Init == "go"):
+			why = "the image needs another init than the base's"
+		case uerr != nil:
+			why = uerr.Error()
+		}
+		if why != "" {
+			logf("not reusing base %s: %s", reuse.Name, why)
+			reuse, k, foto = nil, 0, nil
+			if tree, streams, foto, err = flatten(0); err != nil {
+				return err
+			}
+		}
 	}
 	dTree := time.Since(tTree)
 	var files, bytes int64
@@ -388,22 +469,32 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if files > ociMaxFiles || bytes > int64(maxMB)<<23 {
 		return fmt.Errorf("image unpacks to %d files and %d MiB, over the limits (%d files, %d MiB)", files, bytes>>20, ociMaxFiles, maxMB*8)
 	}
+	var slimArgs []imagen.ArgsSlim
+	if spec.Slim {
+		reglas, err := imagen.CargarReglasSlim()
+		if err != nil {
+			return err
+		}
+		inf, err := reglas.Aplica(tree, cfg.Env, false)
+		if err != nil {
+			return err
+		}
+		if len(inf.Familias) == 0 {
+			logf("slim: no rule matches this image; nothing removed")
+		} else {
+			logf("slim (%s): removed %d files, %d MiB", strings.Join(inf.Familias, ", "), inf.Ficheros, inf.Bytes>>20)
+		}
+		slimArgs = inf.Args
+	}
 	// El init: el script si la imagen trae lo que necesita; si no (una
 	// distroless, una scratch), el init en Go de kling-guest. También si la
 	// imagen trae su propio /entrypoint, que el script ejecutaría en vez del
 	// agente: el de Go no lo mira.
-	var missing []string
-	for _, tool := range ociInitTools {
-		if findTool(tree, tool) == "" {
-			missing = append(missing, tool)
-		}
-	}
-	ownEntry, _ := tree.Resolve("/entrypoint")
-	goInit := len(missing) > 0 || ownEntry != nil
+	goInit, missing, ownEntry := ociInit(tree)
 	switch {
 	case len(missing) > 0:
 		logf("the image has no %s: it boots with kindling's init in Go", strings.Join(missing, ", "))
-	case goInit:
+	case goInit && ownEntry:
 		logf("the image has its own /entrypoint: it boots with kindling's init in Go, which leaves it alone")
 	}
 	// Las sondas de listo son scripts con #!/bin/sh si la imagen lo tiene.
@@ -428,6 +519,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if err := checkNoS6(tree, argv); err != nil {
 		return err
 	}
+	if len(slimArgs) > 0 {
+		// Sin llvmjit.so, jit=off: si no, cada consulta cara intentaría cargarlo.
+		argv = imagen.ArgsSlimSobre(argv, slimArgs)
+	}
 	user := cfg.User
 	if spec.User != "" {
 		user = spec.User
@@ -451,12 +546,8 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	var id [32]byte
 	copy(id[:], h.Sum(nil))
 
-	if err := imagen.PutAgent(tree, agent, spec.Arch, t); err != nil {
-		return err
-	}
-	if goInit {
-		// Después de PutAgent, que ya dijo si es de otra arquitectura.
-		if err := agentIsInit(agent); err != nil {
+	if reuse == nil {
+		if err := ociComun(tree, agent, spec.Arch, goInit, t); err != nil {
 			return err
 		}
 	}
@@ -493,15 +584,8 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\n%sref=%s\ndigest=%s\nmanifest=%s\ninit=%s\nbuilt_at=%s\n",
 			sourceLine, shown, digest, img.ManifestDigest, initKind, t.Format("2006-01-02T15:04:05Z")), 0o644},
 	}
-	if goInit {
-		// kling-guest hace de init al verse llamado overlay-init
-		// (pkg/guest/init.go): carga /etc/kling/env y se ejecuta como agente.
-		if err := imagen.Link(tree, "/sbin/overlay-init", "/usr/local/bin/kling-guest", t); err != nil {
-			return err
-		}
-	} else {
-		put = append(put, putFile{"/sbin/overlay-init", scripts.MinimalInit, 0o755},
-			putFile{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755})
+	if !goInit {
+		put = append(put, putFile{"/entrypoint", imagen.Entrypoint(marcaOCI, env, ""), 0o755})
 	}
 	if len(argv) > 0 {
 		put = append(put, putFile{api.GuestServiceSpec, string(svcJSON) + "\n", 0o644})
@@ -521,38 +605,65 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			return err
 		}
 	}
-	// Los puntos de montaje: la raíz es de solo lectura, el init no puede
-	// crearlos si la imagen no los trae.
-	for _, d := range []struct {
-		p    string
-		perm uint32
-	}{{"/overlay", 0o755}, {"/rom", 0o755}, {"/run", 0o755}, {"/proc", 0o555}, {"/sys", 0o555}, {"/dev", 0o755}, {"/tmp", 0o1777}} {
-		if n, _ := tree.Resolve(d.p); n == nil {
-			nd, err := tree.MkdirAll(d.p, d.perm&0o777, 0, 0, t)
-			if err != nil {
-				return err
+	if reuse != nil {
+		// Los ficheros de kindling que esta imagen no trae y la base sí (el
+		// servicio, la sonda, las variables): se tapan.
+		for _, p := range []string{api.GuestServiceSpec, api.GuestReadyProbe, imagen.EnvPath} {
+			if n, _ := tree.Resolve(p); n == nil {
+				tree.Put(p, imagen.Whiteout(), t)
 			}
-			nd.Mode |= d.perm & 0o7000
 		}
 	}
 
-	tmp := filepath.Join(images, "."+req.Name+".ext4.tmp")
-	defer os.Remove(tmp)
 	tWrite := time.Now()
-	stats, err := writeExt4(tmp, tree, streams, ext4.Options{
-		Time: t, UUID: imagen.UUID("kindling-oci", "root", id), LostFound: true, ZeroHoles: true,
-		SlackBlocks: 32 << 20 / ext4.BlockSize, SlackInodes: 1024,
-	})
-	if err != nil {
-		return fmt.Errorf("writing the image: %w", err)
+	if reuse == nil {
+		tmp := filepath.Join(images, "."+req.Name+".ext4.tmp")
+		defer os.Remove(tmp)
+		stats, err := writeExt4(tmp, tree, streams, ext4.Options{
+			Time: t, UUID: imagen.UUID("kindling-oci", "root", id), LostFound: true, ZeroHoles: true,
+			SlackBlocks: 32 << 20 / ext4.BlockSize, SlackInodes: 1024,
+		})
+		if err != nil {
+			return fmt.Errorf("writing the image: %w", err)
+		}
+		if err := os.Chmod(tmp, 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(images, req.Name+".ext4")); err != nil {
+			return err
+		}
+		logf("image: %d MiB, %d files", stats.Bytes()>>20, stats.Files)
+	} else {
+		// Solo la diferencia con la base, como /upper de una capa de kindling
+		// (lo que habría quedado en el upperdir de un overlay sobre ella).
+		upper, err := foto.Upper(tree, k)
+		if err != nil {
+			return err
+		}
+		layer := ext4.NewDir(0o755, 0, 0, t)
+		layer.SetChild("upper", upper)
+		// Los flujos de la base no se leen: nada de la capa sale de ellos.
+		ls := append([]ext4.Stream(nil), streams...)
+		for i := 0; i < k; i++ {
+			ls[i] = func(func(int, io.Reader) error) error { return nil }
+		}
+		tmp := filepath.Join(images, "."+req.Name+".layer.ext4.tmp")
+		defer os.Remove(tmp)
+		stats, err := writeExt4(tmp, layer, ls, ext4.Options{
+			Time: t, UUID: imagen.UUID("kindling-oci", "layer", id), LostFound: true, ZeroHoles: true,
+			SlackBlocks: 16 << 20 / ext4.BlockSize, SlackInodes: 256,
+		})
+		if err != nil {
+			return fmt.Errorf("writing the layer: %w", err)
+		}
+		if err := os.Chmod(tmp, 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(images, req.Name+".layer.ext4")); err != nil {
+			return err
+		}
+		logf("layer over %s (%d of %d layers shared): %d MiB, %d files", reuse.Name, k, len(img.Layers), stats.Bytes()>>20, stats.Files)
 	}
-	if err := os.Chmod(tmp, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, filepath.Join(images, req.Name+".ext4")); err != nil {
-		return err
-	}
-	logf("image: %d MiB, %d files", stats.Bytes()>>20, stats.Files)
 	logf("times: pull and unpack %.1f s, layers %.1f s, ext4 %.1f s", dPull.Seconds(), dTree.Seconds(), time.Since(tWrite).Seconds())
 
 	var layers []map[string]any
@@ -561,7 +672,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	built := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
 		"layers": layers, "service": svc, "ready": probeWhat, "init": initKind, "ports": sortedKeys(cfg.ExposedPorts),
-		"volumes": sortedKeys(cfg.Volumes)}
+		"volumes": sortedKeys(cfg.Volumes), "diff_ids": chain, "agent_sha256": agentSum}
 	if len(cfg.Labels) > 0 {
 		built["labels"] = cfg.Labels
 	}
@@ -586,7 +697,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// tarda el doble (medido en el lab: recall de Hindsight 0,09 s frente a
 	// 0,05 s; una consulta de Postgres que suma 3 M filas, 0,93 s frente a
 	// 0,49 s).
-	hb, _ := json.MarshalIndent(api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj}, "", "  ")
+	hints := api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj}
+	if reuse != nil {
+		hints.Base = reuse.Name
+	}
+	hb, _ := json.MarshalIndent(hints, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "recipe.json"), append(hb, '\n'), 0o644); err != nil {
 		return err
 	}
@@ -594,6 +709,58 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		logf("the image declares volumes %s: without -volume they live in the machine's disk", strings.Join(v, " "))
 	}
 	logf("image %s ready (%s) in %.1f s", req.Name, digest, time.Since(t0).Seconds())
+	return nil
+}
+
+// ociInit dice si la imagen arranca con el init en Go de kling-guest en vez
+// del script, y por qué: las herramientas que le faltan al script, o que
+// trae su propio /entrypoint (que el script ejecutaría en vez del agente; el
+// de Go no lo mira).
+func ociInit(tree *ext4.Node) (goInit bool, missing []string, ownEntry bool) {
+	for _, tool := range ociInitTools {
+		if findTool(tree, tool) == "" {
+			missing = append(missing, tool)
+		}
+	}
+	e, _ := tree.Resolve("/entrypoint")
+	ownEntry = e != nil
+	return len(missing) > 0 || ownEntry, missing, ownEntry
+}
+
+// ociComun mete en la raíz lo de kindling que es igual para todas las
+// imágenes de una misma base: el agente, el init y los puntos de montaje. Con
+// base reutilizada va antes de las capas nuevas, y la base ya lo lleva.
+func ociComun(tree *ext4.Node, agent, arch string, goInit bool, t time.Time) error {
+	if err := imagen.PutAgent(tree, agent, arch, t); err != nil {
+		return err
+	}
+	if goInit {
+		// Después de PutAgent, que ya dijo si es de otra arquitectura.
+		if err := agentIsInit(agent); err != nil {
+			return err
+		}
+		// kling-guest hace de init al verse llamado overlay-init
+		// (pkg/guest/init.go): carga /etc/kling/env y se ejecuta como agente.
+		if err := imagen.Link(tree, "/sbin/overlay-init", "/usr/local/bin/kling-guest", t); err != nil {
+			return err
+		}
+	} else if err := imagen.Put(tree, "/sbin/overlay-init", []byte(scripts.MinimalInit), 0o755, t); err != nil {
+		return err
+	}
+	// Los puntos de montaje: la raíz es de solo lectura, el init no puede
+	// crearlos si la imagen no los trae.
+	for _, d := range []struct {
+		p    string
+		perm uint32
+	}{{"/overlay", 0o755}, {"/rom", 0o755}, {"/run", 0o755}, {"/proc", 0o555}, {"/sys", 0o555}, {"/dev", 0o755}, {"/tmp", 0o1777}} {
+		if n, _ := tree.Resolve(d.p); n == nil {
+			nd, err := tree.MkdirAll(d.p, d.perm&0o777, 0, 0, t)
+			if err != nil {
+				return err
+			}
+			nd.Mode |= d.perm & 0o7000
+		}
+	}
 	return nil
 }
 

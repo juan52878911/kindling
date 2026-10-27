@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -211,6 +212,18 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
+	}
+	if req.Builder == "oci" {
+		// Las imágenes oci ya importadas que pueden hacer de base de ésta
+		// (internal/imagen/capas.go): el constructor sin privilegios no lee
+		// images/. Sin el índice, la imagen sale entera.
+		if p, err := imagen.EscribirBases(filepath.Join(s.root, "images"), work); err != nil {
+			os.Remove(p)
+		} else if u != nil {
+			if err := os.Lchown(p, int(u.UID), int(u.GID)); err != nil {
+				os.Remove(p)
+			}
+		}
 	}
 	// cache es la caché del constructor, verificada la de root que lee sin
 	// rehashear y deOrigen la de su origen, si no es público
