@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -358,7 +359,15 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	var reuse *imagen.BaseOCI
 	if os.Getenv("KLING_OCI_NO_REUSE") == "" {
-		reuse = imagen.BestBase(imagen.IndexBases(filepath.Join(root, "images"), spec.Arch), chain, agentSum)
+		// El índice lo deja el daemon en el directorio de trabajo (un
+		// constructor sin privilegios no lee images/); sin daemon, de images/.
+		bases, ok := imagen.LeerBases(dir)
+		if !ok {
+			bases = imagen.IndexBases(filepath.Join(root, "images"))
+		}
+		// Nunca ella misma (un import -replace): sería su propia base.
+		bases = slices.DeleteFunc(slices.Clone(bases), func(b imagen.BaseOCI) bool { return b.Name == req.Name })
+		reuse = imagen.BestBase(bases, chain, agentSum, spec.Arch)
 	}
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera. Con

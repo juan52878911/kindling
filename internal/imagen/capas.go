@@ -23,13 +23,38 @@ import (
 // BaseOCI es una imagen OCI ya importada, entera en su .ext4, que puede hacer
 // de base.
 type BaseOCI struct {
-	Name    string
-	DiffIDs []string
+	Name    string   `json:"name"`
+	Arch    string   `json:"arch"`
+	DiffIDs []string `json:"diff_ids"`
 	// Init es "sh" o "go": el /sbin/overlay-init que lleva. Una capa nueva no
 	// lo puede cambiar (se lee de la base antes de montarla).
-	Init string
+	Init string `json:"init"`
 	// Agent es el sha256 del kling-guest que lleva dentro.
-	Agent string
+	Agent string `json:"agent"`
+}
+
+// BasesFile es el fichero del directorio de trabajo de una construcción donde
+// el daemon deja el índice de bases (el constructor sin privilegios no puede
+// leer images/).
+const BasesFile = "oci-bases.json"
+
+// LeerBases lee el índice que dejó el daemon; ok es false si no hay.
+func LeerBases(dir string) (bases []BaseOCI, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, BasesFile))
+	if err != nil || json.Unmarshal(b, &bases) != nil {
+		return nil, false
+	}
+	return bases, true
+}
+
+// EscribirBases deja el índice de images en dir, para LeerBases.
+func EscribirBases(images, dir string) (string, error) {
+	b, err := json.Marshal(IndexBases(images))
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, BasesFile)
+	return p, os.WriteFile(p, b, 0o600)
 }
 
 // BuiltOCI es lo que el constructor oci apunta en Built de la receta para
@@ -42,10 +67,10 @@ type BuiltOCI struct {
 }
 
 // IndexBases lee las recetas de images y devuelve las bases posibles: las
-// imágenes del constructor oci y de esa arquitectura, monolíticas (ni son
+// imágenes del constructor oci, monolíticas (ni son
 // una capa ni tienen base) y cuyo .ext4 sigue ahí. Una base borrada no
 // aparece, aunque su receta se haya quedado.
-func IndexBases(images, arch string) []BaseOCI {
+func IndexBases(images string) []BaseOCI {
 	recs, _ := filepath.Glob(filepath.Join(images, "*.recipe.json"))
 	var out []BaseOCI
 	for _, p := range recs {
@@ -59,7 +84,7 @@ func IndexBases(images, arch string) []BaseOCI {
 			continue
 		}
 		var built BuiltOCI
-		if json.Unmarshal(rec.Built, &built) != nil || built.Arch != arch || len(built.DiffIDs) == 0 || built.Init == "" {
+		if json.Unmarshal(rec.Built, &built) != nil || len(built.DiffIDs) == 0 || built.Init == "" {
 			continue
 		}
 		if fi, err := os.Stat(filepath.Join(images, name+".ext4")); err != nil || !fi.Mode().IsRegular() {
@@ -68,7 +93,7 @@ func IndexBases(images, arch string) []BaseOCI {
 		if _, err := os.Stat(filepath.Join(images, name+".layer.ext4")); err == nil {
 			continue
 		}
-		out = append(out, BaseOCI{Name: name, DiffIDs: built.DiffIDs, Init: built.Init, Agent: built.Agent})
+		out = append(out, BaseOCI{Name: name, Arch: built.Arch, DiffIDs: built.DiffIDs, Init: built.Init, Agent: built.Agent})
 	}
 	return out
 }
@@ -77,11 +102,11 @@ func IndexBases(images, arch string) []BaseOCI {
 // aportar al menos una capa más) de chain, la más larga; y con el mismo
 // agente. Sin ninguna, nil. A igual largo gana el nombre menor, para que sea
 // determinista.
-func BestBase(bases []BaseOCI, chain []string, agent string) *BaseOCI {
+func BestBase(bases []BaseOCI, chain []string, agent, arch string) *BaseOCI {
 	var best *BaseOCI
 	for i := range bases {
 		b := &bases[i]
-		if len(b.DiffIDs) >= len(chain) || b.Agent != agent || !prefijo(b.DiffIDs, chain) {
+		if len(b.DiffIDs) >= len(chain) || b.Agent != agent || b.Arch != arch || !prefijo(b.DiffIDs, chain) {
 			continue
 		}
 		if best == nil || len(b.DiffIDs) > len(best.DiffIDs) || (len(b.DiffIDs) == len(best.DiffIDs) && b.Name < best.Name) {

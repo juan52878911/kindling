@@ -30,29 +30,29 @@ func TestBestBasePrefijo(t *testing.T) {
 	escribirImagen(t, images, "corta", []string{"a", "b"}, "sh")
 	escribirImagen(t, images, "larga", []string{"a", "b", "c"}, "sh")
 	escribirImagen(t, images, "otra", []string{"a", "x", "c"}, "sh")
-	bases := IndexBases(images, "amd64")
+	bases := IndexBases(images)
 	if len(bases) != 3 {
 		t.Fatalf("bases = %d, quiero 3", len(bases))
 	}
 	// El prefijo más largo gana.
-	if b := BestBase(bases, []string{"a", "b", "c", "d"}, "ag"); b == nil || b.Name != "larga" {
+	if b := BestBase(bases, []string{"a", "b", "c", "d"}, "ag", "amd64"); b == nil || b.Name != "larga" {
 		t.Fatalf("base = %+v, quiero larga", b)
 	}
 	// Prefijo distinto: ninguna.
-	if b := BestBase(bases, []string{"z", "b", "c", "d"}, "ag"); b != nil {
+	if b := BestBase(bases, []string{"z", "b", "c", "d"}, "ag", "amd64"); b != nil {
 		t.Fatalf("base = %+v, quiero ninguna", b)
 	}
 	// La misma imagen entera no es una capa nueva: no se reutiliza.
-	if b := BestBase(bases, []string{"a", "b", "c"}, "ag"); b == nil || b.Name != "corta" {
+	if b := BestBase(bases, []string{"a", "b", "c"}, "ag", "amd64"); b == nil || b.Name != "corta" {
 		t.Fatalf("misma cadena: base = %+v, quiero corta (la larga no deja nada)", b)
 	}
 	// Otro agente: la base lleva otro kling-guest.
-	if b := BestBase(bases, []string{"a", "b", "c", "d"}, "otro"); b != nil {
+	if b := BestBase(bases, []string{"a", "b", "c", "d"}, "otro", "amd64"); b != nil {
 		t.Fatalf("otro agente: base = %+v", b)
 	}
 	// Otra arquitectura.
-	if len(IndexBases(images, "arm64")) != 0 {
-		t.Fatal("otra arquitectura indexada")
+	if b := BestBase(bases, []string{"a", "b", "c", "d"}, "ag", "arm64"); b != nil {
+		t.Fatalf("otra arquitectura: base = %+v", b)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestIndexBasesBaseBorrada(t *testing.T) {
 	if err := os.Remove(filepath.Join(images, "pg.ext4")); err != nil {
 		t.Fatal(err)
 	}
-	if b := BestBase(IndexBases(images, "amd64"), []string{"a", "b", "c"}, "ag"); b != nil {
+	if b := BestBase(IndexBases(images), []string{"a", "b", "c"}, "ag", "amd64"); b != nil {
 		t.Fatalf("base borrada reutilizada: %+v", b)
 	}
 }
@@ -73,7 +73,7 @@ func TestIndexBasesNoCuentaCapas(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(images, "hija.layer.ext4"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if len(IndexBases(images, "amd64")) != 0 {
+	if len(IndexBases(images)) != 0 {
 		t.Fatal("una imagen por capas no es base")
 	}
 }
@@ -122,5 +122,20 @@ func TestUpperPrefijoCompartido(t *testing.T) {
 	root.SetChild("g", root.Child("f"))
 	if _, err := foto.Upper(root, 1); !errors.Is(err, ErrPrefijoCompartido) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBasesIdaYVuelta(t *testing.T) {
+	images, work := t.TempDir(), t.TempDir()
+	escribirImagen(t, images, "pg", []string{"a", "b"}, "go")
+	if _, err := EscribirBases(images, work); err != nil {
+		t.Fatal(err)
+	}
+	bases, ok := LeerBases(work)
+	if !ok || len(bases) != 1 || bases[0].Name != "pg" || bases[0].Init != "go" || bases[0].Arch != "amd64" {
+		t.Fatalf("bases = %+v, %v", bases, ok)
+	}
+	if _, ok := LeerBases(t.TempDir()); ok {
+		t.Fatal("sin índice, ok")
 	}
 }
