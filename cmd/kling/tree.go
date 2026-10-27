@@ -114,6 +114,8 @@ var coreTree = []section{
                                                    template: run -from <name>; waits
                                                    until the guest serves and is ready
                                                    by its image's probe (-force: no)
+  save -audit [-audit-for 5s] <ref>                lists what was never open or mapped
+                                                   on the machine; saves nothing
 `},
 	}},
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{

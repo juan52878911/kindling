@@ -108,6 +108,11 @@ type OCISpec struct {
 	// manifiesto), Ref es opcional (el nombre que traía la imagen en el
 	// archivo) y no se usa la red. Ninguna ruta del host del CLI llega aquí.
 	Source string `json:"source,omitempty"`
+	// Slim quita de la raíz lo que el servicio no usa, según las reglas por
+	// familia de internal/imagen/slim.json (LLVM y bitcode de Postgres,
+	// cabeceras, versiones viejas de extensiones) y añade `-c jit=off` a su
+	// comando. Opt-in: cambia lo que hay en la imagen.
+	Slim bool `json:"slim,omitempty"`
 }
 
 // ociSourceArchive es OCISpec.Source de lo importado de un archivo.
@@ -387,6 +392,23 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if files > ociMaxFiles || bytes > int64(maxMB)<<23 {
 		return fmt.Errorf("image unpacks to %d files and %d MiB, over the limits (%d files, %d MiB)", files, bytes>>20, ociMaxFiles, maxMB*8)
 	}
+	var slimArgs []imagen.ArgsSlim
+	if spec.Slim {
+		reglas, err := imagen.CargarReglasSlim()
+		if err != nil {
+			return err
+		}
+		inf, err := reglas.Aplica(tree, cfg.Env, false)
+		if err != nil {
+			return err
+		}
+		if len(inf.Familias) == 0 {
+			logf("slim: no rule matches this image; nothing removed")
+		} else {
+			logf("slim (%s): removed %d files, %d MiB", strings.Join(inf.Familias, ", "), inf.Ficheros, inf.Bytes>>20)
+		}
+		slimArgs = inf.Args
+	}
 	// El init: el script si la imagen trae lo que necesita; si no (una
 	// distroless, una scratch), el init en Go de kling-guest. También si la
 	// imagen trae su propio /entrypoint, que el script ejecutaría en vez del
@@ -424,6 +446,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		cmd = spec.Cmd
 	}
 	argv := append(append([]string{}, entry...), cmd...)
+	if len(slimArgs) > 0 {
+		// Sin llvmjit.so, jit=off: si no, cada consulta cara intentaría cargarlo.
+		argv = imagen.ArgsSlimSobre(argv, slimArgs)
+	}
 	user := cfg.User
 	if spec.User != "" {
 		user = spec.User

@@ -53,6 +53,7 @@ func imagesImport(args []string) error {
 	asJSON := fs.Bool("json", false, "print the result as JSON (for scripts and agents)")
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
 	archive := fs.String("archive", "", "import from a docker save tar or an OCI layout (tar or directory) on this machine, not from a registry")
+	slim := fs.Bool("slim", false, "drop what the service doesn't use, by family (Postgres: LLVM/JIT, bitcode, headers, old extension versions; sets jit=off)")
 	pick := fs.String("image", "", "with -archive: which image of the archive (repo:tag or digest), if it has several")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -112,7 +113,7 @@ func imagesImport(args []string) error {
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
-		Restart: cmp.Or(*restart, api.RestartOnFailure)}
+		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}
@@ -319,7 +320,7 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 	a, _ := json.Marshal(prev)
 	b, _ := json.Marshal(spec)
 	if string(a) != string(b) {
-		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit or restart policy); "+
+		return false, fmt.Errorf("image %s was imported from %s with other options (env, user, entrypoint, command, arch, size limit, restart policy or -slim); "+
 			"pass -replace to rebuild it with these", name, nr)
 	}
 	return true, nil
