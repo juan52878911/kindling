@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -250,6 +251,7 @@ func TestInvalidacionAlCambiarLaCopia(t *testing.T) {
 	if err := m.Remove(idCopia); err != nil {
 		t.Fatal(err)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	if n := len(inv.copias); n != 4 || inv.copias[2] != idCopia || inv.copias[3] != idCopia {
 		t.Fatalf("Stop y Remove: %v", inv.copias)
 	}

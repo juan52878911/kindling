@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -202,6 +203,7 @@ func TestRemoveBorraElRegistroDeAuditoria(t *testing.T) {
 	if err := m.Remove(mc.ID); err != nil {
 		t.Fatal(err)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	for _, f := range []string{p, p + ".1"} {
 		if _, err := os.Lstat(f); !os.IsNotExist(err) {
 			t.Errorf("%s sigue tras rm: %v", f, err)

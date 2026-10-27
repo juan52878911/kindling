@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -80,6 +81,7 @@ func TestRemovePodaLasVigiasDeListo(t *testing.T) {
 	if err := m.Remove(mc.ID); err != nil {
 		t.Fatal(err)
 	}
+	m.EsperarBorrados(5 * time.Second)
 	if _, ok := m.vigiasListo.Load(mc.ID); ok {
 		t.Error("Remove dejó la entrada de vigiasListo")
 	}

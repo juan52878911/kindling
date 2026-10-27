@@ -19,6 +19,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
 
+### Changed
+
+- `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
+
 ### Fixed
 
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
