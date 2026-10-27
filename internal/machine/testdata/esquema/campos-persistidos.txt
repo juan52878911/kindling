@@ -140,6 +140,7 @@ credentials.enc api.CredentialSpec upstream_machine string
 credentials.enc api.CredentialSpec upstream_owner string
 credentials.enc api.CredentialSpec upstream_tls string
 credentials.enc api.CredentialSpec user string
+credentials.enc credproxy.Credential AccessKeyID string
 credentials.enc credproxy.Credential Allow []string
 credentials.enc credproxy.Credential AnyDatabase bool
 credentials.enc credproxy.Credential Body bool
@@ -152,7 +153,9 @@ credentials.enc credproxy.Credential Kind string
 credentials.enc credproxy.Credential Placeholder string
 credentials.enc credproxy.Credential Port int
 credentials.enc credproxy.Credential Query bool
+credentials.enc credproxy.Credential Region string
 credentials.enc credproxy.Credential Secret string
+credentials.enc credproxy.Credential Service string
 credentials.enc credproxy.Credential TLSServerName string
 credentials.enc credproxy.Credential Upstream string
 credentials.enc credproxy.Credential UpstreamMachine string
