@@ -63,9 +63,19 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 	}
 	// Con la máquina aún en marcha: pausada, el agente no contesta.
 	avisos := m.avisoProcesosVivos(ctx, ref)
+	// ¿Escucha el agente ahora? Si no, el dorado nace sin agente (o con el
+	// invitado a medio arrancar) y cada run -from pagaría el reintento entero
+	// del resync (~320 ms con "no route to host"): se recuerda como en Freeze.
+	sinAgente := false
+	if mc, ok := m.Get(ref); ok && mc.Reachable() && mc.State == api.StateRunning {
+		sinAgente = !m.agenteEscucha(ctx, mc.ID)
+	}
 	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false)
 	if err == nil {
 		snap.Warnings = append(snap.Warnings, avisos...)
+		if sinAgente {
+			m.resyncSinAgente.Store(claveSnapshot(snap), time.Now().Add(resyncSinAgenteTTL))
+		}
 	}
 	return snap, err
 }
