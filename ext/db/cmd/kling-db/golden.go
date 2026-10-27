@@ -47,7 +47,7 @@ func cmdGolden(args []string) error {
 			"                 -image I | -from T  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
 			"  image -ext: the pg16-ext template, with TimescaleDB, pgvector, PostGIS, pg_cron and pg_partman\n" +
 			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)\n" +
-			"  -engine redis | -engine valkey | -engine sqlite | -engine ferretdb | -engine clickhouse: Redis, Valkey, SQLite, MongoDB via FerretDB or ClickHouse (see docs/db-engines.md)")
+			"  -engine redis | -engine valkey | -engine sqlite | -engine ferretdb | -engine clickhouse | -engine garage: Redis, Valkey, SQLite, MongoDB via FerretDB, ClickHouse or S3 via Garage (see docs/db-engines.md)")
 	}
 	rest, cleanup, err := expandTemplate(rest)
 	if err != nil {

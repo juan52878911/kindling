@@ -553,6 +553,10 @@ func engineDSN(engine, role, pw, h string, port int, db string) string {
 	case engineClickHouse:
 		// El protocolo nativo (9000), el de clickhouse-go y clickhouse-client.
 		u.Scheme, u.RawQuery = "clickhouse", ""
+	case engineGarage:
+		// Acceso y secreto de S3 (path-style, sin TLS, región garage).
+		u.Scheme, u.RawQuery = "s3", ""
+		u.User = url.UserPassword(dbstate.S3AccessKey(pw), pw)
 	case engineFerret:
 		// FerretDB comprueba la clave contra el rol de Postgres, por SCRAM.
 		u.Scheme, u.RawQuery = "mongodb", "authMechanism=SCRAM-SHA-256"

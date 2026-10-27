@@ -128,6 +128,8 @@ func runCopy(ctx context.Context, k klingc.Kling, ref string, r *report) error {
 		return sqliteCopy(ctx, k, &mc, state, r)
 	case "clickhouse":
 		return clickhouseCopy(ctx, k, &mc, state, r)
+	case "garage":
+		return garageCopy(ctx, k, &mc, state, r)
 	}
 	appRole, err := appRoleOf(state, golden, mc.Labels)
 	if err != nil {
