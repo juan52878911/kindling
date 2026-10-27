@@ -288,13 +288,26 @@ func adoptarSalida(out, images, name string, uid uint32) (int, error) {
 		return 0, fmt.Errorf("the builder's output %s is not a directory", out)
 	}
 	n := 0
-	for _, f := range []string{name + ".ext4", name + ".layer.ext4"} {
+	fs := []string{name + ".ext4", name + ".layer.ext4"}
+	adoptado := make([]bool, len(fs))
+	for i, f := range fs {
 		ok, err := adoptarFichero(filepath.Join(out, f), filepath.Join(images, f), uid)
 		if err != nil {
 			return n, err
 		}
 		if ok {
 			n++
+			adoptado[i] = true
+		}
+	}
+	if n == 1 {
+		// Sustituir una imagen entera por una capa (o al revés) no deja la
+		// otra forma de antes: el daemon prefiere <name>.ext4 y arrancaría
+		// la vieja.
+		for i, f := range fs {
+			if !adoptado[i] {
+				os.Remove(filepath.Join(images, f))
+			}
 		}
 	}
 	return n, nil

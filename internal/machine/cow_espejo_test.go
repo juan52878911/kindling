@@ -313,7 +313,7 @@ func TestCommitEspejaLaMemoriaYElThawNoCopia(t *testing.T) {
 // copias, y el espejo solo gastaría disco y E/S.
 func TestCommitDeForkNoEspeja(t *testing.T) {
 	m, f := managerConAlmacen(t, "c0aa170000000022", "fork-tmp")
-	if _, err := m.commit(context.Background(), "c0aa170000000022", "fork-tmp", false, nil, false, true); err != nil {
+	if _, err := m.commit(context.Background(), "c0aa170000000022", "fork-tmp", false, nil, false, true, false); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(200 * time.Millisecond)

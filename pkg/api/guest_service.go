@@ -74,6 +74,11 @@ type ServiceSpec struct {
 	// un proceso vivo en el dorado: sin esto, todas las copias sacan los
 	// mismos Math.random, randomUUID o random.random (issue #175).
 	OnRestore string `json:"on_restore,omitempty"`
+	// Ulimits ("nofile=65536", "memlock=unlimited", "nproc=1024:4096") y
+	// Sysctls ("vm.max_map_count": "262144") los aplica el agente antes de
+	// lanzar el servicio (ParseUlimit, CheckSysctl; guest_limits.go).
+	Ulimits []string          `json:"ulimits,omitempty"`
+	Sysctls map[string]string `json:"sysctls,omitempty"`
 }
 
 // Valores de ServiceSpec.OnRestore.

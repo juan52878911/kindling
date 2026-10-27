@@ -35,8 +35,43 @@ func cmdTemplate(args []string) error {
 		return snapshotsInspect(args)
 	case "credential":
 		return snapshotsCredential(args)
+	case "pool":
+		return snapshotsPool(args)
 	}
-	return fmt.Errorf("unknown subcommand %q: use ls, rm, inspect or credential", sub)
+	return fmt.Errorf("unknown subcommand %q: use ls, rm, inspect, credential or pool", sub)
+}
+
+// snapshotsPool es `kling template pool`: mantiene N copias de la plantilla ya
+// despiertas, para que `run -from` reclame una en vez de restaurarla.
+func snapshotsPool(args []string) error {
+	fs := flag.NewFlagSet("template pool", flag.ExitOnError)
+	host := hostFlag(fs)
+	n := fs.Int("n", -1, "copies to keep awake (0 turns the pool off and empties it)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: kling template pool <template> [-n N]   (without -n, shows the pool)")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	var p *api.PoolInfo
+	var err error
+	if *n < 0 {
+		p, err = c.SnapshotPool(ctx, fs.Arg(0))
+	} else {
+		p, err = c.SetSnapshotPool(ctx, fs.Arg(0), *n)
+	}
+	if err != nil {
+		return err
+	}
+	if p.Size == 0 {
+		fmt.Printf("%s  no pool: run -from restores a new copy each time\n", p.Template)
+		return nil
+	}
+	fmt.Printf("%s  pool of %d: %d awake (filled in the background; run -from claims one)\n", p.Template, p.Size, p.Ready)
+	return nil
 }
 
 // snapshotsCredential es `kling template credential`: ata una clave a una
