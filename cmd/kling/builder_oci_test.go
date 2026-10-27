@@ -505,6 +505,9 @@ func TestValidateOCI(t *testing.T) {
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Cmd: []string{"a\x00b"}}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Restart: "sometimes"}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", OnRestore: "reload"}},
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Ulimits: []string{"nofile"}}},
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Ulimits: []string{"nofile=1", "nofile=2"}}},
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Sysctls: map[string]string{"kernel.core_pattern": "|/x"}}},
 	} {
 		if _, err := validateOCI(c.req, c.spec); err == nil {
 			t.Errorf("case %d accepted", i)
@@ -513,6 +516,10 @@ func TestValidateOCI(t *testing.T) {
 	r, err := validateOCI(api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x:1", Digest: d, Arch: "arm64", User: "70:70"})
 	if err != nil || r.Digest != d || r.Tag != "1" {
 		t.Fatalf("%+v %v", r, err)
+	}
+	if _, err := validateOCI(api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x:1", Arch: "amd64",
+		Ulimits: []string{"nofile=65536"}, Sysctls: map[string]string{"vm.max_map_count": "262144"}}); err != nil {
+		t.Fatalf("limits rejected: %v", err)
 	}
 }
 
