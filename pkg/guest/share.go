@@ -17,6 +17,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -180,6 +181,12 @@ func requestFromGuest(r *http.Request) bool {
 	rh, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return true
+	}
+	// Por vsock (kling-vz, kling-hv) la dirección es un CID: solo el host
+	// (2) cuenta como de fuera. Antes se miraba como IP, no lo era, y toda
+	// carpeta viva conectada por vsock se rechazaba.
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la.Network() == "vsock" {
+		return rh != strconv.Itoa(vmaddrCIDHost)
 	}
 	rip := net.ParseIP(rh)
 	if rip == nil || rip.IsLoopback() {

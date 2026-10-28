@@ -79,10 +79,17 @@ var _ net.Addr = vsockAddr{}
 type vsockConn struct {
 	f     *os.File
 	local vsockAddr
+	// remote es el otro extremo, de getpeername: el host es el CID 2
+	// (VMADDR_CID_HOST); un proceso del propio invitado por el loopback de
+	// vsock sería el 1.
+	remote vsockAddr
 }
 
+// vmaddrCIDHost es el CID del host (VMADDR_CID_HOST).
+const vmaddrCIDHost = 2
+
 func newVsockConn(f *os.File, local vsockAddr) *vsockConn {
-	return &vsockConn{f: f, local: local}
+	return &vsockConn{f: f, local: local, remote: vsockAddr{cid: vmaddrCIDHost}}
 }
 
 // opErr traduce un error de *os.File al que daría el paquete net.
@@ -113,8 +120,9 @@ func (c *vsockConn) Write(b []byte) (int, error) {
 func (c *vsockConn) Close() error        { return c.opErr("close", c.f.Close()) }
 func (c *vsockConn) LocalAddr() net.Addr { return c.local }
 
-// RemoteAddr: el otro extremo es siempre el host (CID 2).
-func (c *vsockConn) RemoteAddr() net.Addr { return vsockAddr{cid: 2} }
+// RemoteAddr: el otro extremo (el host, CID 2, salvo que getpeername diga
+// otra cosa).
+func (c *vsockConn) RemoteAddr() net.Addr { return c.remote }
 
 func (c *vsockConn) SetDeadline(t time.Time) error     { return c.opErr("set", c.f.SetDeadline(t)) }
 func (c *vsockConn) SetReadDeadline(t time.Time) error { return c.opErr("set", c.f.SetReadDeadline(t)) }

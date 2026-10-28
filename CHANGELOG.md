@@ -71,6 +71,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Guest agent: live shares attached over vsock (`kling-vz`, `kling-hv`) were refused as "from inside the guest" (the CID was read as an IP); the agent now reads the peer CID with getpeername and accepts only the host (CID 2)
 - `compose up`/`graph from-compose`: a bare value equal to a service name is rewritten to `<node>.graph` only in host variables (`*_HOST`, `*_SERVER`, `*_ADDR`…): `POSTGRES_USER: app` next to a service `app` stays `app`
 - `kling-hv`: a thaw of a machine that had already been thawed spent 60-90 ms in page faults before the agent answered (the snapshot now carries the resident pages); a guest could hang a device thread, and with it pauses and snapshots, by placing the used ring over the avail ring; a failed create no longer leaves a `kling-hv` that cannot host another VM
 - macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
