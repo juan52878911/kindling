@@ -151,6 +151,34 @@ type Daemon struct {
 	// construcción. Ver docs/imagenes.md.
 	BuildCacheMaxGiB  int `json:"build_cache_max_gib,omitempty"`
 	BuildCacheMaxDays int `json:"build_cache_max_days,omitempty"`
+
+	// BatteryMode decide el modo batería (macOS): "auto" (vacío: cuando el
+	// Mac va con batería), "on" (siempre) u "off" (nunca). En batería el
+	// daemon pausa las máquinas ociosas, les baja la QoS y espacia sus
+	// vigilantes. KLING_BATTERY_MODE lo sustituye. Ver docs/mac.md.
+	BatteryMode string `json:"battery_mode,omitempty"`
+
+	// BatteryPauseAfter son los segundos de inactividad tras los que el modo
+	// batería pausa una máquina. 0 = 60; -1 = no pausar nunca (solo QoS y
+	// vigilantes). KLING_BATTERY_PAUSE_AFTER lo sustituye.
+	BatteryPauseAfter int `json:"battery_pause_after_seconds,omitempty"`
+}
+
+// Modos de daemon.battery_mode.
+const (
+	BatteryAuto = "auto"
+	BatteryOn   = "on"
+	BatteryOff  = "off"
+)
+
+// ValidateBatteryMode dice si v es un valor válido de daemon.battery_mode
+// (vacío = auto).
+func ValidateBatteryMode(v string) error {
+	switch v {
+	case "", BatteryAuto, BatteryOn, BatteryOff:
+		return nil
+	}
+	return fmt.Errorf("daemon.battery_mode must be %q, %q or %q, not %q", BatteryAuto, BatteryOn, BatteryOff, v)
 }
 
 // Modos de daemon.cow.
@@ -472,6 +500,20 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.CoW = value
+		case "battery_mode":
+			if err := ValidateBatteryMode(value); err != nil {
+				return err
+			}
+			c.Daemon.BatteryMode = value
+		case "battery_pause_after_seconds":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < -1 || n > 86400 {
+				return fmt.Errorf("daemon.battery_pause_after_seconds must be between -1 (never) and 86400 (0 is the default, 60)")
+			}
+			c.Daemon.BatteryPauseAfter = n
 		case "cow_store_gib":
 			n, err := atoi()
 			if err != nil {
@@ -605,6 +647,8 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.credaudit_generations", itoa(c.Daemon.CredAuditGenerations)},
 		{"daemon.build_cache_max_gib", itoa(c.Daemon.BuildCacheMaxGiB)},
 		{"daemon.build_cache_max_days", itoa(c.Daemon.BuildCacheMaxDays)},
+		{"daemon.battery_mode", c.Daemon.BatteryMode},
+		{"daemon.battery_pause_after_seconds", itoa(c.Daemon.BatteryPauseAfter)},
 	}
 }
 

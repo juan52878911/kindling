@@ -182,6 +182,23 @@ func (c *Client) KlingCPU(ctx context.Context, pct int) error {
 	return c.do(ctx, http.MethodPut, "/kling/cpu", map[string]int{"pct": pct})
 }
 
+// KlingCPUEstado es lo que da GET /kling/cpu: el techo, la CPU que lleva
+// gastada la VM (CPUMS, -1 si kling-vz no lo sabe) y el pid del auxiliar de
+// Apple donde corren sus vCPU (0 si no lo da).
+type KlingCPUEstado struct {
+	Pct       int   `json:"pct"`
+	CPUMS     int64 `json:"cpu_ms"`
+	HelperPID int   `json:"helper_pid"`
+}
+
+// KlingCPUState pregunta a kling-vz por su CPU (ver KlingCPUEstado). Un
+// kling-vz anterior no da cpu_ms: sale -1, que es "no se sabe".
+func (c *Client) KlingCPUState(ctx context.Context) (KlingCPUEstado, error) {
+	e := KlingCPUEstado{CPUMS: -1}
+	err := c.doOut(ctx, http.MethodGet, "/kling/cpu", nil, &e)
+	return e, err
+}
+
 // KlingFootprintMiB es la memoria que ocupa la máquina en el host: el
 // equivalente en macOS del RSS de firecracker.
 func (c *Client) KlingFootprintMiB(ctx context.Context) (int64, error) {

@@ -186,6 +186,84 @@ Solo los procesos de tu usuario pasan por esos puertos: otra cuenta del Mac que
 conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (ver
 [`backend-vz.md`](backend-vz.md#por-qué-puertos-en-loopback-y-no-la-ip-del-invitado)).
 
+## Energía y batería
+
+En un portátil cada despertar de la CPU cuesta batería, también con las
+máquinas quietas. Lo que gasta kindling con todo ocioso, medido en un M4 con
+`top -stats pid,command,cpu,idlew,csw,power` (cambios de contexto por segundo,
+la medida más estable con el Mac ocupado; redis 7 sin clientes, 1 vCPU):
+
+| proceso | estado | antes | ahora |
+|---|---|---|---|
+| `kling-vz` | running o pausada | ~65 csw/s, POWER 0,1-0,2 | 0,1-2,6 csw/s, POWER 0,0 |
+| auxiliar de Apple | running | ~75-100 csw/s, POWER 0,5 | igual (es el invitado: ver abajo) |
+| auxiliar de Apple | pausada o congelada | 0 | 0 |
+| daemon | con máquinas, enchufado | `ps` cada 10 s (fork+exec, ~40 ms) | sysctl, ~3 ms cada 10 s |
+| daemon | en batería | — | ~0 csw/s (vuelta cada 30 s) |
+
+Qué despertaba y qué se hace:
+
+- **El regulador de CPU de `kling-vz`** medía cada 100 ms aunque no hubiera
+  techo (en vz no lo hay por defecto) y también con la VM en pausa: ahora
+  espera a que algo cambie (techo, estado de la VM) sin despertar. Con techo y
+  la VM ociosa el sueño entre medidas crece hasta 500 ms (antes 50-100 ms); lo
+  que una VM que despierta gaste de más se cobra como deuda, así que la media
+  se cumple. Tampoco se pregunta al agente cada 20 ms en el arranque si no hay
+  techo.
+- **El registro de auditoría del proxy de credenciales** tenía un ticker de 1 s
+  en cada `kling-vz`, con o sin credenciales: ahora solo se arma con algo
+  pendiente.
+- **El vigilante del daemon** (cada 10 s) lanzaba `ps -axww` para saber qué
+  `kling-vz` siguen vivos: ahora lee la tabla de procesos con `proc_listpids` y
+  `kern.procargs2`, solo los de tu usuario.
+- **El invitado**: con `HZ=100` y `NO_HZ_IDLE` (lo que ya tenía el núcleo) un
+  invitado sin carga despierta su vCPU ~7 veces por segundo; dos sysctl en la
+  línea de órdenes del núcleo (`vm.compaction_proactiveness=0`,
+  `vm.stat_interval=10`) lo bajan a ~3,7. Lo demás es de la imagen: redis
+  despierta 10 veces por segundo por su cuenta (`hz 10`) y, con ello, RCU otras
+  ~20; eso no lo arregla el núcleo, lo arregla pausarla.
+
+### Modo batería
+
+```
+kling config set daemon.battery_mode auto              # auto (defecto), on, off
+kling config set daemon.battery_pause_after_seconds 60 # 0 = 60; -1 = no pausar
+```
+
+`KLING_BATTERY_MODE` y `KLING_BATTERY_PAUSE_AFTER` mandan sobre el fichero; se
+leen al arrancar el daemon. En `auto` el daemon pregunta a `pmset -g ps` si el
+Mac va con batería, como mucho una vez por minuto (sin cgo no hay
+`IOPSCopyPowerSourcesInfo`). Con batería:
+
+1. **Baja la QoS** (`PRIO_DARWIN_BG`, lo de `taskpolicy -b`: núcleos de
+   eficiencia, E/S en segundo plano) del `kling-vz` y del auxiliar de Apple de
+   cada máquina ociosa, y se la devuelve en cuanto llega una petición.
+2. **Pausa** (no congela) la que lleva `battery_pause_after_seconds` ociosa. En
+   pausa el auxiliar no gasta nada; despertarla es reanudar (~50 ms medido el
+   primer `exec`). Exec, shell, ficheros y las llamadas al invitado
+   (`POST /machines/{ref}/guest`) la despiertan solos. Al volver al enchufe se
+   reanudan las que pausó este modo (no las que pausaste tú).
+3. **Espacia el vigilante**: una vuelta cada 30 s en vez de cada 10.
+
+Ociosa es: ninguna petición en curso contra ella (un `kling shell` abierto, un
+`exec` largo, `kling logs -f`) ni terminada hace menos de ese plazo, y su
+invitado gastando menos del 2 % de un núcleo entre dos vueltas (`cpu_ms` de
+`GET /kling/cpu`). Nunca se pausan las que alguien puede usar sin pasar por el
+daemon: las que publican puertos (`kling.ports`), las del planificador y los
+fondos (`kling ai serve`, `template pool`), las de un grafo, las de `kling db`
+y las que tienen carpetas vivas. El planificador ya duerme las suyas con su
+propio plazo.
+
+### Al dormir el Mac
+
+Con el Mac dormido no corre nada, tampoco los invitados, y su reloj (el
+contador de ARM no avanza dormido) se quedaba atrás todo lo que durmió. El
+daemon lo detecta sin notificaciones del sistema: el reloj monotónico no cuenta
+el sueño y el de pared sí. Al despertar, en la siguiente vuelta del vigilante o
+en la primera petición contra una máquina (lo que llegue antes), pone en hora
+las que corren (`POST /resync` del agente, lo mismo que tras un thaw). Las
+pausadas y congeladas se ponen en hora al despertarlas, como siempre.
+
 ## Límites frente a Linux
 
 | | Linux (firecracker) | macOS (vz) |

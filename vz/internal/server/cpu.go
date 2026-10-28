@@ -80,6 +80,9 @@ const (
 	cpuPausaMax = time.Second
 	// cpuPasoAgente es cada cuánto se pregunta si el agente escucha.
 	cpuPasoAgente = 20 * time.Millisecond
+	// cpuReposoMax acota cuánto se duerme entre medidas con la VM ociosa (ver
+	// regularCPU): lo más que una VM que despierta corre sin medir.
+	cpuReposoMax = 500 * time.Millisecond
 	// agentPort es el puerto del agente del invitado (api.GuestPort del núcleo).
 	agentPort = 8080
 )
@@ -147,18 +150,40 @@ func (s *Server) putKlingCPU(w http.ResponseWriter, r *http.Request) {
 	if arrancar {
 		s.cpuEnMarcha = true
 	}
+	// El agente solo importa para el impulso de arranque, que solo cuenta con
+	// techo: sin él (lo normal en vz) no se le pregunta cada 20 ms.
+	esperar := c.Pct > 0 && !s.cpuEsperando && !s.cpuListo && s.d.CPUTime != nil
+	if esperar {
+		s.cpuEsperando = true
+	}
 	s.mu.Unlock()
-	if arrancar {
+	if esperar {
 		go s.esperarAgente()
+	}
+	if arrancar {
 		go s.regularCPU()
 	}
+	s.avisarCPU()
 	noContent(w)
 }
 
+// getKlingCPU da el techo, lo que lleva frenada la VM y, para el modo batería
+// del daemon (internal/machine/bateria.go), la CPU que lleva gastada
+// (cpu_ms, la de Deps.CPUTime; -1 si no se sabe) y el pid del auxiliar.
 func (s *Server) getKlingCPU(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	out := map[string]any{"pct": s.cpuPct, "throttled_ms": s.cpuPausado.Milliseconds()}
 	s.mu.Unlock()
+	usado := time.Duration(-time.Millisecond)
+	if s.d.CPUTime != nil {
+		if u, err := s.d.CPUTime(); err == nil {
+			usado = u
+		}
+	}
+	out["cpu_ms"] = usado.Milliseconds()
+	if s.d.HelperPID != nil {
+		out["helper_pid"] = s.d.HelperPID()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -186,9 +211,42 @@ func (s *Server) esperarAgente() {
 			}
 		}
 	}
+	s.marcarListo()
+}
+
+// marcarListo da por terminado el impulso de arranque.
+func (s *Server) marcarListo() {
 	s.mu.Lock()
 	s.cpuListo = true
 	s.mu.Unlock()
+	s.avisarCPU()
+}
+
+// avisarCPU despierta al regulador si duerme sin techo que aplicar: cambió el
+// techo, el estado de la VM o el impulso de arranque. No bloquea; con s.mu
+// tomado o sin él.
+func (s *Server) avisarCPU() {
+	select {
+	case s.cpuAviso <- struct{}{}:
+	default:
+	}
+}
+
+// esperarCambioCPU es lo que hace el regulador cuando no hay techo que
+// aplicar (sin techo, que es lo normal en vz, o con la VM parada o en pausa):
+// esperar a que algo cambie, sin despertar al proceso cada 100 ms como antes
+// (diez despertares por segundo y VM, también en pausa). Solo se duerme a
+// plazo si el auxiliar quedó parado por un SIGCONT fallido: hay que
+// reintentarlo (soltarFreno, al principio de cada vuelta).
+func (s *Server) esperarCambioCPU(rj reloj) {
+	s.frenoMu.Lock()
+	parado := s.congelado
+	s.frenoMu.Unlock()
+	if parado || s.cpuAviso == nil {
+		rj.dormir(cpuRafaga)
+		return
+	}
+	<-s.cpuAviso
 }
 
 // regularCPU es la goroutine del regulador. Termina cuando se para la VM.
@@ -203,6 +261,7 @@ func (s *Server) regularCPU() {
 	var (
 		c      cubo
 		vmBase VM
+		reposo time.Duration // sueño de la VM ociosa, que crece (ver abajo)
 	)
 	for {
 		// Si el último SIGCONT falló, el auxiliar sigue parado (congelado) y
@@ -227,8 +286,8 @@ func (s *Server) regularCPU() {
 		activo := s.st == stRunning && vm != nil && pct > 0 && pct < vcpus*100
 		s.mu.Unlock()
 		if !activo {
-			vmBase = nil
-			rj.dormir(cpuRafaga)
+			vmBase, reposo = nil, 0
+			s.esperarCambioCPU(rj)
 			continue
 		}
 		// La medida va sin s.mu: proc_pid_rusage y la búsqueda del auxiliar
@@ -240,19 +299,34 @@ func (s *Server) regularCPU() {
 			rj.dormir(cpuRafaga)
 			continue
 		}
+		ociosa := false
 		if vmBase != vm || usado < c.base {
 			// VM nueva (restaurada), techo recién puesto o contador reiniciado:
 			// empezar con el cubo lleno, como un cgroup nuevo.
 			vmBase = vm
 			c = cubo{fichas: cpuRafaga * time.Duration(pct) / 100, base: usado, t: ahora}
 		} else {
+			ociosa = usado-c.base < cpuMedidaMin
 			c.cuenta(ahora, usado, pct)
 		}
 		parar, dormir := c.decide(pct, vcpus, periodo)
 		if parar == 0 {
+			// Con la VM ociosa (no gastó ni un milisegundo desde la última
+			// medida) el sueño se dobla en cada vuelta hasta cpuReposoMax: de
+			// 10-20 medidas por segundo a 2. Lo que una VM que despierta gaste
+			// de más mientras tanto se cobra como deuda en la siguiente medida
+			// (acotada por cpuPausaMax, como siempre), así que la media se
+			// cumple; solo tarda hasta medio segundo más en empezar a frenar.
+			if ociosa {
+				reposo = min(max(2*reposo, dormir), cpuReposoMax)
+				dormir = reposo
+			} else {
+				reposo = 0
+			}
 			rj.dormir(dormir)
 			continue
 		}
+		reposo = 0
 		s.mu.Lock()
 		// Mientras se medía, el núcleo pudo pausarla, pararla o cambiarla:
 		// solo se frena la VM medida y si sigue corriendo.

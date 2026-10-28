@@ -281,6 +281,7 @@ func run() int {
 		CPUTime:       meter.CPUTime,
 		Freeze:        freeze,
 		HelperStopped: meter.HelperStopped,
+		HelperPID:     meter.HelperPID,
 		Graph:         grafoMaq,
 	})
 
