@@ -193,7 +193,7 @@ jobs:
   # solo compila de verdad en macOS. Sus tests no arrancan ninguna VM (la VM es
   # una interfaz con un doble), así que valen en un runner sin virtualización.
   vz:
-    name: kling-vz (macOS)
+    name: kling-vz and kling-hv (macOS)
     # macos-15: kling-hv (vz/internal/hvvm) usa la API GIC de
     # Hypervisor.framework, que solo trae el SDK de macOS 15.
     runs-on: macos-15
@@ -215,6 +215,9 @@ jobs:
       # lleve es parte del contrato del binario.
       - run: codesign -d --entitlements - bin/kling-vz 2>&1 | grep -q com.apple.security.virtualization
       - run: bin/kling-vz --version
+      - run: ./build-hv.sh
+      - run: codesign -d --entitlements - bin/kling-hv 2>&1 | grep -q com.apple.security.hypervisor
+      - run: bin/kling-hv --version
 
   # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que
   # aquí el clon es de verdad.

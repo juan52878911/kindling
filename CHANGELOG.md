@@ -37,6 +37,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
 - `docs/linux-arm64.md`: which arm64 hosts can run kindling (Graviton .metal, Ampere, OCI BM A1, Pi 5 with the 4K kernel), setup, tuning, and why goldens don't move between arm64 CPU models
 - macOS: new machines get a virtio-vsock device and `kling-vz` reaches the guest agent over it (the agent also listens on `AF_VSOCK` when booted with `kling.vsock=1`); older agents and snapshots keep using TCP, `KLING_VZ_VSOCK=0` turns it off
+- Releases ship `kling-hv-darwin-arm64` (built and entitlement-checked on macos-15, in SHA256SUMS); CI builds and checks it too
 
 ### Changed
 
