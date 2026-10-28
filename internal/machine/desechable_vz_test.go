@@ -33,7 +33,7 @@ func bootVZFalso(t *testing.T, onTTL string) []string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil)
+	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil, 0)
 	defer matarVMM(pid)
 	if err != nil {
 		t.Fatalf("boot: %v", err)
