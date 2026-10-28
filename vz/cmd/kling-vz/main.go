@@ -22,6 +22,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/energia"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
@@ -86,6 +87,9 @@ const argFreno = "--cpu-brake"
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == argFreno {
 		os.Exit(servirFreno())
+	}
+	if len(os.Args) == 2 && os.Args[1] == energia.Arg {
+		os.Exit(energia.Main(sandbox.Aplicar))
 	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el

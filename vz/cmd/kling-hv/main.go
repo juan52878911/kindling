@@ -28,6 +28,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/energia"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/hvvm"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
@@ -87,6 +88,9 @@ func main() {
 	// misma latencia. GOMAXPROCS en el entorno sigue mandando.
 	if os.Getenv("GOMAXPROCS") == "" {
 		runtime.GOMAXPROCS(2)
+	}
+	if len(os.Args) == 2 && os.Args[1] == energia.Arg {
+		os.Exit(energia.Main(sandbox.Aplicar))
 	}
 	os.Exit(run())
 }

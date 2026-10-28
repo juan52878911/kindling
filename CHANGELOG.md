@@ -10,6 +10,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them
 - After the host sleeps, the daemon resyncs the clock of running guests (detected from wall vs monotonic clock, no extra wakeups)
+- macOS: running machines are paused before the Mac sleeps and resumed when it wakes: `kling-vz`/`kling-hv --power-events`, a small sandboxed helper the daemon starts, relays IOKit's sleep notice (the core stays without cgo; sleep is never delayed more than 10 s)
 - Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
 - Live `rw` shares accept relative symlinks that stay inside the folder: `npm install` works in a shared project
 - `kling compose up` keeps a warm template per service, keyed by its recipe: a repeated up restores app + postgres + redis in under a second instead of booting cold and re-importing; `environment:` goes on the machine instead of the image and `healthcheck:` runs inside before saving (`-fresh` rebuilds them)

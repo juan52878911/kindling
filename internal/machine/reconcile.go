@@ -616,6 +616,8 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	go m.ensureShares()
 	go m.watch(ctx, every)
 	go m.vigilarAlmacen(ctx)
+	// macOS: pausar las máquinas antes de que el Mac duerma (energia.go).
+	go m.vigilarEnergia(ctx)
 }
 
 // ttlDesde es cuándo empezó a contar el TTL de mc.
