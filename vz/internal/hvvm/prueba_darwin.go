@@ -30,3 +30,12 @@ func cadena(descs [][4]uint64, head, num uint16, max int) int {
 	out := make([]C.struct_vdesc, max+1)
 	return int(C.vq_cadena(&q, &tabla[0], C.uint16_t(head), &out[0], C.int(max)))
 }
+
+// vsockReuso cruza dos dials de vsock en un mismo slot sin invitado
+// (khv_vsock_prueba_reuso): devuelve lo que vio el primero y si el segundo
+// recibió el mismo número de fd.
+func vsockReuso() (ret int, mismoFD bool) {
+	var c C.int
+	ret = int(C.khv_vsock_prueba_reuso(&c))
+	return ret, c != 0
+}
