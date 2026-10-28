@@ -17,6 +17,7 @@ package main
 // entorno, vacío: así las imágenes ya importadas sin -e conservan su nombre.
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/oci"
@@ -96,11 +98,43 @@ func claveRunImage() []byte {
 // referencia ref, importándola si el daemon no la tiene. Lo que dice
 // mientras importa va a stderr: la salida normal del run puede ser JSON.
 func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (string, error) {
+	return asegurarImagenDockerPlataforma(ctx, c, ref, "")
+}
+
+// asegurarImagenDockerPlataforma es asegurarImagenDocker con -platform
+// (linux/amd64): de otra arquitectura que el daemon, la imagen se importa
+// emulada (emulacionImport) y con otro nombre que la nativa.
+func asegurarImagenDockerPlataforma(ctx context.Context, c *api.Client, ref, platform string) (string, error) {
 	r, err := oci.ParseImageRef(ref)
 	if err != nil {
 		return "", err
 	}
+	spec := OCISpec{Ref: ref, Restart: api.RestartOnFailure}
 	name := nombreParaRef(r, claveRunImage())
+	if platform != "" {
+		arch, ok := strings.CutPrefix(platform, "linux/")
+		if !ok || (arch != "amd64" && arch != "arm64") {
+			return "", fmt.Errorf("-platform %q: use linux/amd64 or linux/arm64", platform)
+		}
+		in, err := c.Info(ctx)
+		if err != nil {
+			return "", err
+		}
+		a, emu, aviso, err := emulacionImport(in.Arch, arch, false, false)
+		if err != nil {
+			return "", err
+		}
+		if a != cmp.Or(in.Arch, runtime.GOARCH) && !emu {
+			return "", fmt.Errorf("-platform %s can't run on this %s daemon", platform, in.Arch)
+		}
+		if emu {
+			spec.Arch, spec.Emulate = a, true
+			name = nombreEmulada(nombreParaRef(r, claveRunImage()), a)
+			if aviso != "" {
+				fmt.Fprintln(os.Stderr, aviso)
+			}
+		}
+	}
 	imgs, err := c.Images(ctx)
 	if err != nil {
 		return "", err
@@ -113,7 +147,7 @@ func asegurarImagenDocker(ctx context.Context, c *api.Client, ref string) (strin
 			return name, nil
 		}
 	}
-	sb, _ := json.Marshal(OCISpec{Ref: ref, Restart: api.RestartOnFailure})
+	sb, _ := json.Marshal(spec)
 	fmt.Fprintf(os.Stderr, "importing %s as %s (the first time downloads it)...\n", r, name)
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Builder: "oci", Spec: sb})
 	if err != nil {

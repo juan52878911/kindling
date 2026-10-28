@@ -65,7 +65,12 @@ func CheckELF(b []byte, arch string) error {
 		for a, em := range ElfMachine {
 			if em == m {
 				// El caso típico: una imagen arm64 en un anfitrión amd64 (o al revés).
-				return fmt.Errorf("ELF machine %#x is %s, not %s: the image is %s but the host's guest agent is %s; kling runs images of the host's architecture, so import the %s variant (-arch %s)", m, a, arch, arch, a, a, a)
+				// Una amd64 en arm64 se puede emular (emulador.go): se dice.
+				emular := ""
+				if _, ok := Emulable(a, arch); ok {
+					emular = fmt.Sprintf(", or run the %s image emulated with qemu-user (kling image import -arch %s -emulate)", arch, arch)
+				}
+				return fmt.Errorf("ELF machine %#x is %s, not %s: the image is %s but the host's guest agent is %s; kling runs images of the host's architecture, so import the %s variant (-arch %s)%s", m, a, arch, arch, a, a, a, emular)
 			}
 		}
 		return fmt.Errorf("ELF machine %#x is not %s", m, arch)

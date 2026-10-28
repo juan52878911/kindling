@@ -124,6 +124,10 @@ arranque el daemon con la raíz que arranque.
 
 ## Conseguir imágenes
 
+Una imagen que solo existe para amd64 se importa **emulada** con qemu-user
+(`kling image import -arch amd64 <ref>` o `kling run -platform linux/amd64`):
+ver [`imagenes-amd64.md`](imagenes-amd64.md).
+
 **Imágenes de Docker**: `kling image import <ref>` (y `-archive`, y los
 registros privados de `kling registry login`) funciona en el Mac: su
 constructor es Go puro, sin root ni loop. Mete en la imagen el agente del
