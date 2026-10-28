@@ -1641,6 +1641,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc.PID = pid
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
+	mc.VMM = m.origenActual().vmm
 	mc.BootMS = time.Since(start).Milliseconds()
 	m.persist()
 	out := *mc
@@ -2459,7 +2460,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
 	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
 		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
-	} else if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
+	} else if err := sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -3376,6 +3377,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.State = api.StateRunning
 	cur.StartedAt = &now
 	cur.FrozenAt = nil
+	cur.VMM = m.origenActual().vmm
 	cur.Hold = ""
 	cur.ThawMS = elapsed
 	cur.PID = pid

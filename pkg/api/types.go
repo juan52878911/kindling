@@ -198,6 +198,12 @@ type Machine struct {
 	// como GuestAgent vacío: contestó, pero no dice nada de sí mismo.
 	Agent *GuestAgent `json:"agent,omitempty"`
 
+	// VMM es el VMM (y su versión) que la lanzó por última vez ("kling-vz
+	// 0.19.0", "firecracker 1.12.0"): con él se sella su volcado y se graba el
+	// dorado que se haga de ella, aunque el daemon haya cambiado de backend
+	// desde entonces. Vacío = lanzada por un daemon anterior.
+	VMM string `json:"vmm,omitempty"`
+
 	// Transition dice que una operación de ciclo de vida que va a sacarla de
 	// su estado está en curso ahora mismo (TransitionFreezing, ...). La
 	// máquina sigue figurando con su State de antes hasta que termina: un
