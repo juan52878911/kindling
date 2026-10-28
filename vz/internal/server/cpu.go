@@ -146,6 +146,14 @@ func (s *Server) putKlingCPU(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.cpuPct = c.Pct
+	vcpus := 1
+	if s.spec != nil && s.spec.MachineConfig != nil && s.spec.MachineConfig.VCPUCount > 0 {
+		vcpus = s.spec.MachineConfig.VCPUCount
+	}
+	if f := s.d.CPUCeiling; f != nil {
+		// Sin s.mu: quien lo recibe puede tardar (cerrar un proceso).
+		defer f(c.Pct > 0 && c.Pct < vcpus*100)
+	}
 	arrancar := !s.cpuEnMarcha && s.d.CPUTime != nil
 	if arrancar {
 		s.cpuEnMarcha = true

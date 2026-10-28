@@ -452,3 +452,18 @@ func TestGetKlingCPUDaCPUyAuxiliar(t *testing.T) {
 		t.Fatalf("GET /kling/cpu = %+v", out)
 	}
 }
+
+// Deps.CPUCeiling dice en cada PUT /kling/cpu si el techo regula: con él
+// kling-vz suelta el proceso freno de una VM sin techo.
+func TestCPUCeilingDiceSiHayTecho(t *testing.T) {
+	m := nuevoSimulado(0)
+	r := rigSimulado(t, 2, m, true, nil)
+	var visto []bool
+	r.srv.d.CPUCeiling = func(active bool) { visto = append(visto, active) }
+	for _, pct := range []string{`{"pct":0}`, `{"pct":200}`, `{"pct":50}`, `{"pct":150}`} {
+		r.must("PUT", "/kling/cpu", pct)
+	}
+	if want := []bool{false, false, true, true}; fmt.Sprint(visto) != fmt.Sprint(want) {
+		t.Fatalf("CPUCeiling = %v, quería %v", visto, want)
+	}
+}

@@ -129,6 +129,18 @@ func (f *Freno) Track(fd uintptr) error {
 	return f.orden(frenoVM, syscall.UnixRights(int(fd)))
 }
 
+// Close suelta el proceso freno: ve cerrarse el socket, reanuda el auxiliar
+// si lo tenía parado y termina. Después, Track y Freeze dan ErrFrenoCaido.
+func (f *Freno) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.muerto {
+		return nil
+	}
+	f.muerto = true
+	return f.c.Close()
+}
+
 // Freeze para (true) o reanuda (false) el auxiliar de la VM.
 func (f *Freno) Freeze(stop bool) error {
 	if stop {

@@ -40,6 +40,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling-vz` releases its CPU brake process (`--cpu-brake`) when the first `PUT /kling/cpu` has no effective ceiling (the macOS default): one process less per machine
 - `kling-hv`: per-thread QoS: vCPUs rest at utility and get user-initiated while the host sends work or they are busy; disk, network and vsock threads at utility (`KLING_HV_QOS=0` turns it off)
 - `kling-hv`: the CPU ceiling charges vCPU time on efficiency cores at its performance-core worth, like `kling-vz` (per-thread P/E counters): a 25 % ceiling on E cores went from ~12× to ~4× slower
 - `kling-hv`: the CPU ceiling charges vCPU time on efficiency cores at its performance-core worth, like `kling-vz` (per-thread P/E counters): a 25 % ceiling on E cores went from ~12× to ~4× slower
