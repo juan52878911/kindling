@@ -70,10 +70,15 @@ func (m *Manager) reconcile() {
 			// Lo mismo con las aristas de un nodo de grafo (grafo_red.go):
 			// sus proxies de enlace y, en egress none o internet, su resolver.
 			spec, esNodo := m.especRedGrafoLocked(mc)
-			if mc.Egress == string(knet.EgressAllowlist) || esNodo {
+			// En egress none el resolver registra los nombres cortados
+			// (internal/net/bloqueos.go): también hay que reanudarlo.
+			esNone := mc.Egress == string(knet.EgressNone) || mc.Egress == ""
+			if mc.Egress == string(knet.EgressAllowlist) || esNone || esNodo {
 				var err error
 				if mc.Egress == string(knet.EgressAllowlist) {
 					err = knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains)
+				} else if esNone {
+					err = knet.Plan(mc.NetIndex, mc.ID).ReanudarResolver(knet.EgressNone)
 				}
 				if err == nil && esNodo {
 					if gerr := montarRedGrafo(knet.Plan(mc.NetIndex, mc.ID), spec); gerr != nil {

@@ -389,6 +389,7 @@ func (s *Server) rutas() []ruta {
 		{"DELETE /snapshots/{name}", AccionSnapEscribir, nil, s.handleRemoveSnapshot},
 		{"GET /machines/{ref}/logs", AccionMaquina, nil, s.handleLogs},
 		{"GET /machines/{ref}/credaudit", AccionMaquina, nil, s.handleCredAudit},
+		{"GET /machines/{ref}/egress", AccionMaquina, nil, s.handleEgress},
 		{"POST /machines/{ref}/guest", AccionMaquina, nil, s.handleGuest},
 		{"POST /machines/{ref}/renew", AccionMaquina, nil, s.handleRenew},
 		{"GET /machines/{ref}/ready", AccionMaquina, nil, s.handleReady},

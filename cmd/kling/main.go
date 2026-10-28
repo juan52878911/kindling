@@ -643,8 +643,11 @@ func cmdRun(args []string) error {
 		case api.ReadyYes:
 			fmt.Printf("  ready (its image's probe passed)\n")
 		case api.ReadyWaiting, api.ReadyFailed:
-			return &errWithHint{err: fmt.Errorf("%s is running but not ready (%s)", mc.Name, mc.Ready),
-				hint: "kling machine ready " + mc.Name + "   (says why)"}
+			hint := "kling machine ready " + mc.Name + "   (says why)"
+			if a := avisoEgress(ctx, client, mc.ID); a != "" {
+				hint = a + "\n" + hint
+			}
+			return &errWithHint{err: fmt.Errorf("%s is running but not ready (%s)", mc.Name, mc.Ready), hint: hint}
 		}
 	}
 	for _, s := range mc.Shares {

@@ -125,13 +125,45 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// ms cada uno). allowlist sigue su camino (ipset, resolver).
 	if egress != EgressAllowlist {
 		if _, err := exec.LookPath("iptables-restore"); err == nil {
-			return n.restoreRules(append([][]string{dnat}, n.egressRules(egress)...))
+			reglas := append([][]string{dnat}, n.egressRules(egress)...)
+			if egress == EgressNone {
+				// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
+				// todo): así sabemos QUÉ nombre quiso y el aviso de red
+				// cortada puede decirlo (bloqueos.go).
+				reglas = append(reglas, n.reglasGrafo(EgressNone, false)...)
+			}
+			if err := n.restoreRules(reglas); err != nil {
+				return err
+			}
+			return n.arrancarRegistroNone(egress)
 		}
 	}
 	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {
 		return err
 	}
-	return n.applyEgress(egress, domains)
+	if err := n.applyEgress(egress, domains); err != nil {
+		return err
+	}
+	if egress == EgressNone {
+		if err := n.asegurarReglas(n.reglasGrafo(EgressNone, false)); err != nil {
+			return err
+		}
+	}
+	return n.arrancarRegistroNone(egress)
+}
+
+// arrancarRegistroNone monta, en egress none, lo que ve los destinos cortados:
+// el resolver que contesta NXDOMAIN y el set de nft de IP:puerto. No-op en los
+// demás modos.
+func (n *Net) arrancarRegistroNone(egress Egress) error {
+	if egress != EgressNone {
+		return nil
+	}
+	if err := startDNSResolverModo(n, nil, modoSoloGrafo); err != nil {
+		return err
+	}
+	n.instalarRegistroIP()
+	return nil
 }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,
