@@ -113,3 +113,23 @@ func TestEnlaces(t *testing.T) {
 		t.Error("a link TO a link is fine: the other one is checked on its own")
 	}
 }
+
+func TestPush(t *testing.T) {
+	b := Push(EventCreate, "a/b.txt")
+	d := NewDec(b)
+	if id, errno := d.U64(), d.U32(); id != PushID || errno != 0 {
+		t.Fatalf("header %d %d", id, errno)
+	}
+	ev, p, err := ParsePush(d)
+	if err != nil || ev != EventCreate || p != "a/b.txt" {
+		t.Fatalf("%d %q %v", ev, p, err)
+	}
+	for _, bad := range [][]byte{Push(0, "x"), Push(EventModify, "../x"), Push(EventModify, "/x"), append(Push(EventModify, "x"), 0)} {
+		d := NewDec(bad)
+		d.U64()
+		d.U32()
+		if _, _, err := ParsePush(d); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+}

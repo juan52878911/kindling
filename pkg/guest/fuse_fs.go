@@ -85,6 +85,14 @@ type fuseFS struct {
 	// él no se pide nunca FOPEN_KEEP_CACHE (ver keepCache).
 	autoInval atomic.Bool
 	kcMu      sync.Mutex // guarda node.openKey/openSeen
+
+	// Avisos de cambios del host (fuse_notify.go).
+	evq       chan pushEvent
+	evOnce    sync.Once
+	synthTID  atomic.Uint32 // hilo del notificador: sus peticiones se contestan aquí
+	synMu     sync.Mutex
+	syn       synthOp
+	touchHost func(op synthOp, full string) // provoca el evento de inotify (Linux)
 }
 
 // cacheKey es la versión de un fichero a efectos de la caché de páginas.
@@ -137,8 +145,10 @@ func newFuseFS(dev fuseDev, mount string, readOnly bool) *fuseFS {
 		ready: make(chan struct{}),
 		nodes: newNodeTable(),
 		files: map[uint64]*fileHandle{}, dirs: map[uint64]*dirHandle{},
-		inflight: make(chan struct{}, maxCalls),
-		grace:    detachedGrace,
+		inflight:  make(chan struct{}, maxCalls),
+		grace:     detachedGrace,
+		evq:       make(chan pushEvent, maxPendingEvents),
+		touchHost: touchInGuest,
 	}
 }
 
@@ -160,6 +170,16 @@ func (fs *fuseFS) attach(s *shareSession) {
 	go func() {
 		<-s.done
 		fs.dropSession(s)
+	}()
+	go func() {
+		for {
+			select {
+			case ev := <-s.events:
+				fs.enqueue(ev)
+			case <-s.done:
+				return
+			}
+		}
 	}()
 }
 
@@ -363,6 +383,12 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 	}
 	a := req.arg
 
+	if req.pid != 0 && req.pid == fs.synthTID.Load() {
+		if out, ok := fs.synthReply(req, n); ok {
+			return out
+		}
+	}
+
 	switch req.opcode {
 	case opLookup:
 		name, _, err := cstring(a)
@@ -382,6 +408,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EIO)
 		}
 		c := fs.nodes.lookup(n, name)
+		c.typ.Store(at.Mode & share.SIFMT)
 		return reply(u, 0, entryOut(c.id, toFattr(at, c.id)))
 
 	case opGetattr:
@@ -419,9 +446,13 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		}
 		return reply(u, 0, []byte(t))
 
-	case opSymlink, opLink, opMknod:
-		// Un enlace creado por el invitado en el host es un arma contra lo que
-		// el host haga luego con esa carpeta. Ver docs/compartir.md.
+	case opSymlink:
+		return fs.symlink(u, n, a)
+
+	case opLink, opMknod:
+		// Un enlace duro o un nodo de dispositivo creados por el invitado en
+		// el host son un arma contra lo que el host haga luego con esa
+		// carpeta. Ver docs/compartir.md.
 		return fail(share.EPERM)
 
 	case opMkdir:
@@ -449,6 +480,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EIO)
 		}
 		c := fs.nodes.lookup(n, name)
+		c.typ.Store(at.Mode & share.SIFMT)
 		return reply(u, 0, entryOut(c.id, toFattr(at, c.id)))
 
 	case opUnlink, opRmdir:
@@ -587,6 +619,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EIO)
 		}
 		c := fs.nodes.lookup(n, name)
+		c.typ.Store(at.Mode & share.SIFMT)
 		fh, e := fs.addFile(&fileHandle{node: c, flags: flags &^ (share.FlagTrunc | share.FlagExcl), dh: dh, sess: s})
 		if e != 0 {
 			s.call(share.OpRelease, func(e *share.Enc) { e.U64(dh) })

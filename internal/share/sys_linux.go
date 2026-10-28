@@ -44,3 +44,20 @@ func fstatfs(f *os.File) (proto.Statfs, error) {
 	return proto.Statfs{Blocks: st.Blocks, Bfree: st.Bfree, Bavail: st.Bavail,
 		Files: st.Files, Ffree: st.Ffree, Bsize: uint32(st.Bsize), Namelen: uint32(st.Namelen)}, nil
 }
+
+// symlinkat crea name -> target dentro de dir (abierto por os.Root).
+func symlinkat(target string, dir *os.File, name string) error {
+	t, err := syscall.BytePtrFromString(target)
+	if err != nil {
+		return err
+	}
+	n, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return err
+	}
+	_, _, e := syscall.Syscall(syscall.SYS_SYMLINKAT, uintptr(unsafe.Pointer(t)), dir.Fd(), uintptr(unsafe.Pointer(n)))
+	if e != 0 {
+		return e
+	}
+	return nil
+}

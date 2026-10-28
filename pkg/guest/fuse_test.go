@@ -24,10 +24,12 @@ type devFalso struct {
 	mu     sync.Mutex
 	outs   map[uint64]chan []byte
 	unique uint64
+	// notas son los avisos (unique 0) que el agente manda al "kernel".
+	notas chan []byte
 }
 
 func newDevFalso() *devFalso {
-	return &devFalso{in: make(chan []byte, 16), outs: map[uint64]chan []byte{}}
+	return &devFalso{in: make(chan []byte, 16), outs: map[uint64]chan []byte{}, notas: make(chan []byte, 64)}
 }
 
 func (d *devFalso) Read(buf []byte) (int, error) {
@@ -40,6 +42,13 @@ func (d *devFalso) Read(buf []byte) (int, error) {
 
 func (d *devFalso) Write(b []byte) (int, error) {
 	u := binary.LittleEndian.Uint64(b[8:])
+	if u == 0 {
+		select {
+		case d.notas <- append([]byte(nil), b...):
+		default:
+		}
+		return len(b), nil
+	}
 	d.mu.Lock()
 	ch := d.outs[u]
 	delete(d.outs, u)
