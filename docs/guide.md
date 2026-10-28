@@ -737,6 +737,28 @@ Snapshots live in `volumes/snapshots/<vol>/`, owned by root with `0700` director
 `0600` files: the VMM never reads them, so a compromised one cannot rewrite the past you
 roll back to. There is no `run -volume notes@snap` yet: restore, then mount.
 
+## Cloning a volume
+
+```sh
+kling volume clone notes notes-test              # a new volume that starts as a copy of notes
+kling volume clone notes notes-test -copy        # on a filesystem that cannot clone: allow a full copy
+```
+
+A clone shares blocks with its source until one of them writes (`FICLONE` on Linux,
+`clonefile` on macOS), so on XFS (`reflink=1`), Btrfs, APFS or ZFS 2.2+ with block cloning it
+takes milliseconds whatever the size. On ext4 there is nothing to share: the daemon answers
+**409** and says why; it never copies unless you pass `-copy` (a full, sparse copy, 1 GiB of
+data in 5.7-8.6 s on the ext4 lab disk, the same as a snapshot there). `kling status -v` shows
+which directories can clone (`clone:` line), found by really cloning a probe file in each of
+`volumes/`, `machines/`, `snapshots/` and `jails/`, not by guessing from the filesystem name.
+
+The rules are those of a snapshot: the source must have no **writer** (a frozen machine
+counts), readers are fine, and while the clone runs the source cannot be mounted for writing,
+restored or removed, and the destination name is taken. The new volume is published with
+`link(2)`, never `rename`, so a volume created under that name meanwhile is not overwritten.
+`volume ls` counts shared blocks in both volumes. API: `POST /volumes/{name}/clone`
+([api.md](api.md)).
+
 ## A shared package library
 
 That is what makes it possible not to duplicate the same dependencies in every image:
