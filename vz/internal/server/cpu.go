@@ -167,10 +167,23 @@ func (s *Server) putKlingCPU(w http.ResponseWriter, r *http.Request) {
 	noContent(w)
 }
 
+// getKlingCPU da el techo, lo que lleva frenada la VM y, para el modo batería
+// del daemon (internal/machine/bateria.go), la CPU que lleva gastada
+// (cpu_ms, la de Deps.CPUTime; -1 si no se sabe) y el pid del auxiliar.
 func (s *Server) getKlingCPU(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	out := map[string]any{"pct": s.cpuPct, "throttled_ms": s.cpuPausado.Milliseconds()}
 	s.mu.Unlock()
+	usado := time.Duration(-time.Millisecond)
+	if s.d.CPUTime != nil {
+		if u, err := s.d.CPUTime(); err == nil {
+			usado = u
+		}
+	}
+	out["cpu_ms"] = usado.Milliseconds()
+	if s.d.HelperPID != nil {
+		out["helper_pid"] = s.d.HelperPID()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

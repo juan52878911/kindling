@@ -121,6 +121,9 @@ type Deps struct {
 	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone
 	// que sí.
 	HelperStopped func() (bool, error)
+	// HelperPID es el pid del auxiliar (0 si no hay). Sale en GET /kling/cpu
+	// para que el daemon le baje la QoS en batería. Nil = 0.
+	HelperPID func() int
 	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
 	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
 	// no: el framework exige los mismos dispositivos que al guardar.

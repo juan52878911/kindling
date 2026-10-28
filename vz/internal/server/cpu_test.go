@@ -433,3 +433,22 @@ func TestFrenoQueFallaPausaLaVM(t *testing.T) {
 		t.Fatalf("%d avisos del freno, quería 1: %q", n, avisos)
 	}
 }
+
+// GET /kling/cpu da la CPU gastada y el pid del auxiliar: el modo batería del
+// daemon mira con eso si la VM está ociosa y a quién bajarle la QoS.
+func TestGetKlingCPUDaCPUyAuxiliar(t *testing.T) {
+	m := nuevoSimulado(1)
+	r := rigSimulado(t, 1, m, true, nil)
+	r.srv.d.HelperPID = func() int { return 4242 }
+	m.dormir(1500 * time.Millisecond)
+	var out struct {
+		CPUMS     int64 `json:"cpu_ms"`
+		HelperPID int   `json:"helper_pid"`
+	}
+	if err := json.Unmarshal([]byte(r.must("GET", "/kling/cpu", "")), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.CPUMS != 1500 || out.HelperPID != 4242 {
+		t.Fatalf("GET /kling/cpu = %+v", out)
+	}
+}
