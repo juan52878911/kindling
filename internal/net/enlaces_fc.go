@@ -300,13 +300,13 @@ func (n *Net) reglasGrafo(e Egress, creds bool) [][]string {
 	}
 	dnsPortStr := strconv.Itoa(dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
-		reglas = append(reglas, []string{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf,
-			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"})
+		reglas = append(reglas, sinInvalid([]string{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf,
+			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"}))
 	}
 	if creds {
 		for _, r := range n.credForwardRules() {
 			// {"iptables", "-A", "FORWARD", ...} -> {"-I", "FORWARD", "1", ...}
-			reglas = append(reglas, append([]string{"-I", "FORWARD", "1"}, r[3:]...))
+			reglas = append(reglas, sinInvalid(append([]string{"-I", "FORWARD", "1"}, r[3:]...)))
 		}
 	}
 	if e == EgressNone {
@@ -335,9 +335,24 @@ func (n *Net) reglasEnlace(port, slot int) [][]string {
 	return [][]string{
 		{"-t", "nat", "-I", "PREROUTING", "1", "-i", TapName, "-p", "tcp", "-d", n.HostIP,
 			"--dport", strconv.Itoa(port), "-j", "DNAT", "--to-destination", destino},
-		{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf, "-p", "tcp", "-d", n.HostIP,
-			"--dport", strconv.Itoa(linkBasePort + slot), "-j", "ACCEPT"},
+		sinInvalid([]string{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf, "-p", "tcp", "-d", n.HostIP,
+			"--dport", strconv.Itoa(linkBasePort + slot), "-j", "ACCEPT"}),
 	}
+}
+
+// sinInvalid añade "! --ctstate INVALID" a un ACCEPT que se inserta con -I 1:
+// queda por delante del DROP de INVALID del egreso (firewall.go) y, sin esto,
+// un RST o FIN con datos hacia n.HostIP pasaría el FORWARD aunque la conexión
+// no exista.
+func sinInvalid(r []string) []string {
+	for i, a := range r {
+		if a == "-j" {
+			out := append([]string{}, r[:i]...)
+			out = append(out, "-m", "conntrack", "!", "--ctstate", "INVALID")
+			return append(out, r[i:]...)
+		}
+	}
+	return r
 }
 
 // asegurarRegla pone r (argumentos de iptables, con -A o -I) dentro del netns

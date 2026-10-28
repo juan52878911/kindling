@@ -43,6 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
+- The FORWARD accepts inserted ahead of everything for graph links, the DNS resolver and credential proxies no longer let INVALID packets through to the host side
 - `kling rm|stop|freeze|thaw|pause a b c` keeps going after a failure, prints each error and exits 1 at the end, like docker
 - Daemon status codes: removing an image or snapshot answers 400 for a bad name, 404 if it does not exist and 409 if it is in use; snapshot lookups decide 404 by error type, not by message
 - Request bodies over the limit answer 413 instead of 400 "unexpected EOF" (exec, shell, resize, mmds, credentials); store and annotations answer 413 only for size
