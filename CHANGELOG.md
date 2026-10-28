@@ -37,6 +37,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - A freeze whose pause fails resumes the machine and clears the in-progress mark, instead of leaving it possibly paused while shown as running
 - Linux: writing a file into an image flushes only that image (`syncfs`) instead of running a host-wide `sync` on every put
 - Tenants see the removal events of their own machines: events carry an `owner` field, and `kling rm` publishes the event with the machine's name and owner as soon as the name is free
+- Smaller leaks: a failed `run -from` drops its overlay from the copy-on-write store at once, `kling rm` forgets the machine's per-ID freeze and resync marks, and the pre-dump balloon wait honours cancellation
 
 ## [0.18.0] - 2026-10-11
 

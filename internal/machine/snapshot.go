@@ -1412,6 +1412,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
+	// En el almacén, el overlay no vive en dir: los fallos de antes de
+	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
+	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
+	publicada := false
+	if modoCoW == cowModoStore {
+		defer func() {
+			if !publicada {
+				m.borrarOverlayAlmacen(id)
+			}
+		}()
+	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
@@ -1538,6 +1549,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	publicada = true
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
