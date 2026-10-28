@@ -45,6 +45,7 @@ package guest
 // no lo usa: si encuentra sessions no vacío, avisa UNA VEZ al iniciar la máquina.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -90,7 +91,8 @@ type MMDSStore struct {
 // imagen traiga `iproute2` y de que la ruta on-link baste para que Firecracker
 // intercepte. Hay que confirmarlo en hardware; ver el reporte de la tarea.
 func SetupMMDSRoute() {
-	if _, err := exec.LookPath("ip"); err != nil {
+	ipBin, err := exec.LookPath("ip")
+	if err != nil {
 		// La imagen mínima puede no traer iproute2. No hay un /sys equivalente para
 		// añadir rutas (no viven ahí), así que aquí no hay plan B limpio: se deja
 		// constancia para que se resuelva en el build de la imagen o se valide que
@@ -100,11 +102,20 @@ func SetupMMDSRoute() {
 		return
 	}
 	// ip route add 169.254.169.254/32 dev eth0
-	out, err := exec.Command("ip", "route", "add", "169.254.169.254/32", "dev", "eth0").CombinedOutput()
+	//
+	// Por el cosechador (runArgs → StartTracked + WaitFor), no con
+	// exec.Command(...).CombinedOutput(): New() arranca el cosechador antes de
+	// llamar aquí, y siendo PID 1 su wait4(-1) se adelantaba al Wait de
+	// CombinedOutput, que devolvía "no child processes". Una ruta que se había
+	// puesto bien se registraba como fallo. El plazo es solo una red: `ip` contesta
+	// en milisegundos.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := runArgs(ctx, ipBin, "route", "add", "169.254.169.254/32", "dev", "eth0")
 	if err != nil {
 		// "File exists" si ya estaba: no es un fallo real. Cualquier otra cosa se
 		// registra para diagnóstico en el lab.
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(out)
 		if strings.Contains(msg, "File exists") {
 			return
 		}
