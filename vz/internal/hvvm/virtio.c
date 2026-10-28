@@ -271,6 +271,7 @@ static bool b_procesar(struct vblk *b, struct vq q) {
 
 static void *vblk_hilo(void *a) {
   struct vblk *b = a;
+  khv_qos_dispositivo();
   pthread_mutex_lock(&b->mu);
   for (;;) {
     while (!(b->pend && !g_pausa)) pthread_cond_wait(&b->cv, &b->mu);

@@ -143,6 +143,22 @@ en segundo plano (`taskpolicy -b`, todo en E) tras una pasada en P: el mismo
 bucle pasa de 9,3 a 2,9 s (n=5). Sin más muestra en P que el arranque, la
 proporción sale ~0,9 y apenas corrige (como en vz).
 
+### QoS de los hilos
+
+En macOS la QoS es la única palanca sobre el tipo de núcleo. Los vCPU van de
+base en `QOS_CLASS_UTILITY` y suben a `USER_INITIATED` con un override mientras
+tienen trabajo: en el acto cuando el host le manda algo al invitado (datos o una
+conexión por vsock, tramas de red) y, si gastan más de medio núcleo por su
+cuenta, en la vuelta lenta de un hilo vigilante (cada 2 s en reposo, 200 ms
+arriba); bajan tras 400 ms por debajo de una décima de núcleo. Los hilos de
+disco, red y vsock van en `UTILITY`. Nunca `BACKGROUND`: eso lo pone el modo
+batería del daemon a todo el proceso, solo con la máquina ociosa.
+`KLING_HV_QOS=0` lo apaga. Medido (M4 con carga ~10 de otros procesos, n=15):
+`exec true` tras 1 s de reposo 25 → 27 ms y el bucle de CPU 622 → 629 ms
+(ruido); 10 máquinas ociosas, energía de sus hilos (`PROC_PIDTHREADCOUNTS`)
+2,4/3,1/1,7 mW con QoS frente a 2,9/3,0/0,6 sin ella (tres rondas): con el Mac
+cargado no se ve ahorro, y el vigilante añade ~0,5 despertares/s por máquina.
+
 ## Lo que cambia en el núcleo con `hv`
 
 - `kling up -check` mira `kling-hv`, su entitlement y macOS 15 cuando

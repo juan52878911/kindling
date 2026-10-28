@@ -85,6 +85,7 @@ static bool rx_entregar(const uint8_t *trama, size_t n, bool *sin_buf) {
 // RX: lee tramas del socket y las mete en los búferes del invitado.
 static void *rx_hilo(void *a) {
   (void)a;
+  khv_qos_dispositivo();
   static uint8_t trama[65536];
   for (;;) {
     ssize_t n = recv(fd, trama, sizeof trama, 0);
@@ -92,6 +93,7 @@ static void *rx_hilo(void *a) {
       if (errno == EINTR) continue;
       return NULL;
     }
+    khv_qos_impulso();  // el host le manda trabajo al invitado (vm.c, QoS)
     pthread_mutex_lock(&mu);
     for (int intentos = 0;; intentos++) {
       // Con la VM en pausa (restaurando o haciendo snapshot) no se toca la

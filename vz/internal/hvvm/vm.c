@@ -420,6 +420,128 @@ static bool psci(struct cpu *c) {
   return true;
 }
 
+// ===================== QoS =====================
+//
+// En macOS la QoS del hilo es la única palanca sobre el tipo de núcleo: no se
+// puede fijar un hilo a un núcleo P o E. Los vCPU van de base en
+// QOS_CLASS_UTILITY, para que sus despertares de reposo (el tick del invitado,
+// un paquete suelto) puedan ir a los núcleos E, que gastan menos, y suben a
+// QOS_CLASS_USER_INITIATED (núcleos P, como una app en primer plano) con un
+// override (pthread_override_qos_class_start_np) mientras tienen trabajo.
+// Nunca BACKGROUND: en E un vCPU frenaba ×12-15 bajo launchd
+// (footprint/coste.go); eso solo lo pone el modo batería del daemon, a todo el
+// proceso, con la máquina ociosa y sin peticiones en vuelo
+// (internal/machine/bateria.go).
+//
+// Trabajo es: (1) lo que el host le manda al invitado (datos por vsock, tramas
+// de red: un exec, ficheros, una petición a un puerto reenviado), que sube los
+// vCPU en el acto, antes de que el invitado lo vea (khv_qos_impulso, desde los
+// hilos de vsock y de red); (2) un vCPU que gasta más de la mitad de un núcleo
+// por su cuenta (un cron, un proceso que ya corría), que el vigilante ve en su
+// vuelta lenta. Un vCPU que corre en el invitado no sale a espacio de usuario
+// en cientos de ms (el timer y el WFI los resuelve el framework), así que no
+// puede medirse a sí mismo: lo mide el hilo vigilante con thread_info, cada
+// QOS_RAPIDA mientras están arriba y cada QOS_LENTA en reposo (la única
+// vuelta que hace una VM ociosa: medio despertar por segundo). Baja tras dos
+// medidas seguidas por debajo de una décima de núcleo. Arranca arriba: el
+// arranque y una restauración quieren los núcleos P. KLING_HV_QOS=0 lo apaga
+// todo (los hilos quedan con la QoS de siempre).
+#define QOS_RAPIDA_MS 200
+#define QOS_LENTA_MS 2000
+static bool qos_activa;
+static volatile bool qos_alta;  // con overrides puestos; se lee sin qos_mu en el impulso
+static pthread_override_t qos_ov[MAX_CPUS];
+static pthread_mutex_t qos_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t qos_cv = PTHREAD_COND_INITIALIZER;
+static int qos_n;  // vCPU que vigila
+
+void khv_qos_dispositivo(void) {
+  if (qos_activa) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+
+// Con qos_mu.
+static void qos_subir(void) {
+  if (qos_alta) return;
+  for (int i = 0; i < qos_n; i++)
+    qos_ov[i] = pthread_override_qos_class_start_np(cpus[i].hilo, QOS_CLASS_USER_INITIATED, 0);
+  qos_alta = true;
+  pthread_cond_broadcast(&qos_cv);  // el vigilante pasa a la vuelta rápida
+}
+
+static void qos_bajar(void) {
+  if (!qos_alta) return;
+  for (int i = 0; i < qos_n; i++) {
+    if (qos_ov[i]) pthread_override_qos_class_end_np(qos_ov[i]);
+    qos_ov[i] = NULL;
+  }
+  qos_alta = false;
+}
+
+void khv_qos_impulso(void) {
+  // Ya arriba (lo normal mientras dura una petición): ni un cerrojo.
+  if (!qos_activa || qos_alta) return;
+  pthread_mutex_lock(&qos_mu);
+  if (qos_n > 0) qos_subir();
+  pthread_mutex_unlock(&qos_mu);
+}
+
+static uint64_t hilo_cpu_ns(pthread_t h) {
+  thread_basic_info_data_t bi;
+  mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+  if (thread_info(pthread_mach_thread_np(h), THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) return 0;
+  return (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
+         (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
+}
+
+static void *qos_vigilante(void *a) {
+  (void)a;
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+  uint64_t antes[MAX_CPUS] = {0}, t_antes = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  for (int i = 0; i < qos_n; i++) antes[i] = hilo_cpu_ns(cpus[i].hilo);
+  int bajas = 0;
+  pthread_mutex_lock(&qos_mu);
+  for (;;) {
+    bool estaba = qos_alta;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
+                   (uint64_t)(estaba ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
+    ts.tv_sec = (time_t)(fin / 1000000000ULL);
+    ts.tv_nsec = (long)(fin % 1000000000ULL);
+    // Un impulso en reposo despierta antes: la ventana empieza ahí.
+    int r = pthread_cond_timedwait(&qos_cv, &qos_mu, &ts);
+    if (parar) break;
+    uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dw = ahora - t_antes, max = 0;
+    t_antes = ahora;
+    for (int i = 0; i < qos_n; i++) {
+      uint64_t c = hilo_cpu_ns(cpus[i].hilo);
+      if (c - antes[i] > max) max = c - antes[i];
+      antes[i] = c;
+    }
+    if (r != ETIMEDOUT && !estaba) continue;  // despertado por un impulso: medir desde aquí
+    if (qos_alta) {
+      bajas = max * 10 < dw ? bajas + 1 : 0;
+      if (bajas >= 2) qos_bajar(), bajas = 0;
+    } else if (max * 2 > dw) {
+      qos_subir();
+    }
+  }
+  qos_bajar();
+  pthread_mutex_unlock(&qos_mu);
+  return NULL;
+}
+
+// qos_empezar pone los vCPU (ya creados) arriba y lanza el vigilante.
+static void qos_empezar(void) {
+  if (!qos_activa) return;
+  pthread_mutex_lock(&qos_mu);
+  qos_n = ncpus;
+  qos_subir();
+  pthread_mutex_unlock(&qos_mu);
+  pthread_t t;
+  if (pthread_create(&t, NULL, qos_vigilante, NULL) == 0) pthread_detach(t);
+}
+
 // WFI de respaldo: con el GIC de HVF el framework resuelve el WFI dentro y
 // esto no se usa (medido en el prototipo). Si llega, dormir hasta el
 // vencimiento del timer virtual o hasta que un dispositivo avise; con varios
@@ -460,6 +582,7 @@ static void volcar(struct cpu *c, const char *por) {
 
 static void *vcpu_hilo(void *arg) {
   struct cpu *c = arg;
+  khv_qos_dispositivo();  // base UTILITY; los overrides la suben con trabajo (qos_subir)
   hv_return_t r = hv_vcpu_create(&c->id, &c->exit, NULL);
   if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
   pthread_mutex_lock(&mu);
@@ -594,6 +717,7 @@ static int crear_vcpus(void) {
     fallo("%s", errbuf[0] ? errbuf : "creating the vCPUs failed");
     return -1;
   }
+  qos_empezar();
   return 0;
 }
 
@@ -647,6 +771,8 @@ int khv_create(const struct khv_config *c) {
     return -1;
   }
   ncpus = c->ncpus;
+  const char *q = getenv("KLING_HV_QOS");
+  qos_activa = !(q && strcmp(q, "0") == 0);
   g_ram_size = c->mem_size;
   ndisks = c->ndisks;
   hay_red = c->net_fd >= 0;

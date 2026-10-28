@@ -248,4 +248,12 @@ int khv_balloon(uint32_t marcos);
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);
 
+// ---- QoS de los hilos (vm.c) ----
+// khv_qos_dispositivo pone el hilo que llama (disco, red, vsock) en
+// QOS_CLASS_UTILITY. khv_qos_impulso avisa de que el host le manda trabajo al
+// invitado (datos por vsock): los vCPU suben a USER_INITIATED en su siguiente
+// salida, sin esperar a medir que están ocupados.
+void khv_qos_dispositivo(void);
+void khv_qos_impulso(void);
+
 #endif
