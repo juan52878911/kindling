@@ -163,7 +163,16 @@ type Daemon struct {
 	// batería pausa una máquina. 0 = 60; -1 = no pausar nunca (solo QoS y
 	// vigilantes). KLING_BATTERY_PAUSE_AFTER lo sustituye.
 	BatteryPauseAfter int `json:"battery_pause_after_seconds,omitempty"`
+
+	// NetMiBps es el caudal de red por microVM (MiB/s en cada sentido) cuando
+	// la petición no pide otro. 0 = 16. KLING_NET_MIBPS lo sustituye. Se lee
+	// en cada arranque en frío; en macOS no se aplica.
+	NetMiBps int `json:"net_mibps,omitempty"`
 }
+
+// MaxNetMiBps es el tope de daemon.net_mibps y de RunRequest.NetMiBps: por
+// encima, el limitador ya no protege a las vecinas de nada.
+const MaxNetMiBps = 10240
 
 // Modos de daemon.battery_mode.
 const (
@@ -503,6 +512,15 @@ func (c *Config) Set(key, value string) error {
 				return fmt.Errorf("daemon.share_copy_max_mib can't be negative")
 			}
 			c.Daemon.ShareCopyMaxMiB = n
+		case "net_mibps":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < 0 || n > MaxNetMiBps {
+				return fmt.Errorf("daemon.net_mibps goes from 0 (the default, 16) to %d", MaxNetMiBps)
+			}
+			c.Daemon.NetMiBps = n
 		case "cow":
 			if err := ValidateCoW(value); err != nil {
 				return err
@@ -657,6 +675,7 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.build_cache_max_days", itoa(c.Daemon.BuildCacheMaxDays)},
 		{"daemon.battery_mode", c.Daemon.BatteryMode},
 		{"daemon.battery_pause_after_seconds", itoa(c.Daemon.BatteryPauseAfter)},
+		{"daemon.net_mibps", itoa(c.Daemon.NetMiBps)},
 	}
 }
 

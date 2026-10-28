@@ -304,6 +304,19 @@ func flagsGiven(fs *flag.FlagSet, names ...string) []string {
 // never" en la ayuda); si no, el de la configuración. Con config.Or un -ttl 0
 // explícito se leía como "no dado" y la máquina se congelaba con el
 // defaults.ttl de la configuración.
+// netMiBpsCarpetas es el caudal de red que piden run -share y compose: las
+// carpetas compartidas viajan por la red de la máquina, y con los 16 MiB/s de
+// siempre un `cp` de la carpeta iba a 16 MiB/s.
+const netMiBpsCarpetas = 256
+
+// netMiBpsDeCarpetas: con carpetas, netMiBpsCarpetas; sin ellas, el del daemon.
+func netMiBpsDeCarpetas(n int) int {
+	if n > 0 {
+		return netMiBpsCarpetas
+	}
+	return 0
+}
+
 func ttlForRun(fs *flag.FlagSet, flagTTL, cfgTTL int) int {
 	if len(flagsGiven(fs, "ttl")) > 0 {
 		return flagTTL
@@ -384,6 +397,7 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 	srv.SetShareConfig(shareConfig)
+	srv.SetNetMiBps(netMiBpsConfig)
 	srv.SetCoW(cowConfig())
 	srv.SetBattery(batteryConfig())
 	srv.SetAuthz(pol)
@@ -415,6 +429,17 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// netMiBpsConfig lee daemon.net_mibps; KLING_NET_MIBPS manda sobre el fichero.
+// Se llama en cada arranque en frío. 0 = el de siempre (16 MiB/s).
+func netMiBpsConfig() int {
+	if v := os.Getenv("KLING_NET_MIBPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return loadConfig().Daemon.NetMiBps
 }
 
 // buildCacheConfig lee daemon.build_cache_max_gib y
@@ -686,6 +711,7 @@ func cmdRun(args []string) error {
 		OnTTL:     *onTTL,
 		Env:       env,
 		ShareWait: *shareWait,
+		NetMiBps:  netMiBpsDeCarpetas(len(shareSpecs)),
 	})
 	if err != nil {
 		return err

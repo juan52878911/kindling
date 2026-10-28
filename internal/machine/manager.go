@@ -94,7 +94,9 @@ const (
 	// Caudal máximo por dispositivo. Sin esto una microVM satura el disco o la
 	// red del host y tumba a todas las demás.
 	diskBytesPerSec = 128 << 20 // 128 MiB/s
-	netBytesPerSec  = 16 << 20  // 16 MiB/s
+	// defaultNetMiBps: el de la red si ni la petición ni daemon.net_mibps
+	// piden otro (red_caudal.go).
+	defaultNetMiBps = 16
 
 	// defaultCPUPct: media vCPU por microVM. Una herramienta MCP responde a
 	// peticiones puntuales; darle un core entero solo sirve para que un bucle
@@ -417,6 +419,8 @@ type Manager struct {
 	shares     *shareSup
 	sharesOnce sync.Once
 	shareCfg   func() ShareConfig
+	// netMiBps da daemon.net_mibps (red_caudal.go).
+	netMiBps func() int
 
 	// uploadMu serializa el check-and-reserve del tope de subidas pendientes
 	// (M-19): sin él, N subidas a la vez pasan todas la comprobación antes de
@@ -1357,6 +1361,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
 			req.DiskMiB, minOverlayMiB, tope, defaultOverlayMiB)
 	}
+	if err := validarNetMiBps(req.NetMiBps); err != nil {
+		return nil, err
+	}
 	// Disperso, pero el invitado puede llenarlo: uno más grande que el de
 	// siempre tiene que caber en lo que queda libre.
 	if req.DiskMiB > defaultOverlayMiB {
@@ -1537,6 +1544,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		TTLAt:     &creada,
 		EnvKeys:   api.MachineEnvKeys(env),
 		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
+		NetMiBps:  req.NetMiBps,
 	}
 	if comando != nil {
 		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd
@@ -1912,10 +1920,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if n != nil {
 		// tap0 se llama igual en todos los namespaces: por eso el snapshot vale
 		// para cualquier instancia.
-		if err := c.SetNetwork(ctx, fc.NetworkInterface{
-			IfaceID: "eth0", HostDevName: knet.TapName, GuestMAC: knet.GuestMAC,
-			RxLimiter: fc.Limit(netBytesPerSec), TxLimiter: fc.Limit(netBytesPerSec),
-		}); err != nil {
+		if err := c.SetNetwork(ctx, m.interfazRed(id)); err != nil {
 			return pid, err
 		}
 		// MMDS por eth0: habilita el metadata service para poder INYECTAR secretos

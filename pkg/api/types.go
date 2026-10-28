@@ -111,6 +111,9 @@ type Machine struct {
 	// la receta ni del daemon. Entonces no hay impulso de arranque: manda
 	// también mientras arranca. Viaja con la máquina para que un thaw lo sepa.
 	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
+	// NetMiBps es el caudal de red que pidió quien la arrancó (0 = el del
+	// daemon). Viaja con la máquina para que un arranque en frío lo repita.
+	NetMiBps int `json:"net_mibps,omitempty"`
 	// CPUBoostPct es el techo con el que corre AHORA mientras termina de
 	// arrancar (impulso hasta la sonda de listo; ver
 	// internal/machine/arranque_cpu.go); 0 = su techo de siempre. Como
@@ -326,6 +329,13 @@ type RunRequest struct {
 	// nada. Existe para que un valor por defecto del cliente no pise el de la
 	// imagen como si fuera un flag.
 	CPUPctDefault int `json:"cpu_pct_default,omitempty"`
+
+	// NetMiBps es el caudal de red de la máquina en MiB/s, en cada sentido
+	// (el limitador de Firecracker). 0 = el del daemon (daemon.net_mibps, 16
+	// por defecto). Las carpetas compartidas viajan por la red: run -share y
+	// compose piden más. Con From no se aplica: la copia hereda el del
+	// dorado. En macOS no hay limitador y se ignora.
+	NetMiBps int `json:"net_mibps,omitempty"`
 
 	// WaitReady: no contestar hasta que el invitado esté listo según su imagen
 	// (ver ready.go), o hasta ReadyTimeoutSeconds (por defecto 120). La
