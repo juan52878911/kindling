@@ -348,6 +348,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// para nosotros: eso no se rehashea (internal/daemon/builders_cache.go).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
 		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
+	if phase == ociPhasePull {
+		// Ni siquiera se descomprime: en el anfitrión solo se baja y se comprueba
+		// el sha256 del blob comprimido; descomprimir es cosa de la VM.
+		c.Unpack = ""
+	}
 	archive := spec.Source == ociSourceArchive
 	pinned := os.Getenv(ociPinnedEnv)
 	if phase == ociPhaseFlat {

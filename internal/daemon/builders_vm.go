@@ -241,12 +241,19 @@ type cargaVM struct {
 	Plan     planAislado
 	Caches   []string // cachés OCI donde buscar los blobs
 	Epoch    int64
-	MaxImage int64 // tope del ext4 que vuelve
+	MaxImage int64                         // tope del ext4 que vuelve
+	Log      func(format string, a ...any) // tiempos de cada paso (puede ser nil)
 }
 
 // aplanarEnInvitado corre el protocolo entero contra g y deja el ext4 en
 // w y el recipe.json en recipe (nil = se descarta).
 func aplanarEnInvitado(ctx context.Context, g invitadoVM, c cargaVM, ext4 io.Writer, recipe io.Writer) (string, error) {
+	t0 := time.Now()
+	logf := func(format string, a ...any) {
+		if c.Log != nil {
+			c.Log(format, a...)
+		}
+	}
 	cache := vmWork + "/cache/oci/sha256/"
 	for _, d := range c.Plan.Blobs {
 		f, size, err := blobVerificado(c.Caches, d)
@@ -281,6 +288,8 @@ func aplanarEnInvitado(ctx context.Context, g invitadoVM, c cargaVM, ext4 io.Wri
 		"KLING_OCI_PHASE=flatten", "KLING_OCI_PINNED=" + c.Plan.Digest,
 		"SOURCE_DATE_EPOCH=" + strconv.FormatInt(c.Plan.Epoch, 10),
 		vmBin, "builder", "oci", vmWork}
+	logf("blobs and request sent in %.1f s", time.Since(t0).Seconds())
+	t0 = time.Now()
 	exit, out, err := g.Exec(ctx, env)
 	if err != nil {
 		return out, fmt.Errorf("running the builder inside the microVM: %w", err)
@@ -288,6 +297,8 @@ func aplanarEnInvitado(ctx context.Context, g invitadoVM, c cargaVM, ext4 io.Wri
 	if exit != 0 {
 		return out, fmt.Errorf("the builder failed inside the microVM (exit %d):\n%s", exit, strings.TrimSpace(out))
 	}
+	logf("builder ran %.1f s inside", time.Since(t0).Seconds())
+	t0 = time.Now()
 	if _, err := bajarFichero(ctx, g, vmWork+"/out/"+c.Name+".ext4", ext4, c.MaxImage); err != nil {
 		return out, fmt.Errorf("taking the image out of the microVM: %w", err)
 	}
@@ -296,6 +307,7 @@ func aplanarEnInvitado(ctx context.Context, g invitadoVM, c cargaVM, ext4 io.Wri
 			return out, fmt.Errorf("taking recipe.json out of the microVM: %w", err)
 		}
 	}
+	logf("image out of the microVM in %.1f s", time.Since(t0).Seconds())
 	return out, nil
 }
 
@@ -450,11 +462,12 @@ func (s *Server) aplanarEnVM(ctx context.Context, req api.BuildImageRequest, wor
 			blobsMiB += size >> 20
 		}
 	}
-	diskMiB := int(min(1536+10*blobsMiB, int64(maxMB)*8+1536))
+	diskMiB := int(min(768+5*blobsMiB, int64(maxMB)*8+1536))
 
 	if _, err := os.Stat(s.mgr.ImageFile(ToolsImage)); err != nil {
 		return fmt.Errorf("-isolate needs the %q image: run `kling image build-tools`", ToolsImage)
 	}
+	tVM := time.Now()
 	mc, err := s.mgr.Run(ctx, api.RunRequest{Name: "build-" + req.Name, Image: ToolsImage, VCPUs: 2, MemMiB: 2048,
 		DiskMiB: diskMiB, Egress: "none", AllowExec: true})
 	if err != nil {
@@ -466,6 +479,7 @@ func (s *Server) aplanarEnVM(ctx context.Context, req api.BuildImageRequest, wor
 		return fmt.Errorf("the tools microVM did not start listening: %w", err)
 	}
 
+	fmt.Fprintf(salida, "isolate: tools microVM up in %.1f s\n", time.Since(tVM).Seconds())
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
@@ -477,7 +491,7 @@ func (s *Server) aplanarEnVM(ctx context.Context, req api.BuildImageRequest, wor
 	var rec bytes.Buffer
 	g := invitadoHTTP{base: base, cli: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}}
 	log, err := aplanarEnInvitado(ctx, g, cargaVM{Name: req.Name, Request: rb, Agent: agent, Plan: plan, Caches: caches,
-		MaxImage: int64(maxMB) << 23}, f, &rec)
+		MaxImage: int64(maxMB) << 23, Log: func(format string, a ...any) { fmt.Fprintf(salida, "isolate: "+format+"\n", a...) }}, f, &rec)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
