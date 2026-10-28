@@ -10,6 +10,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
 - Live `rw` shares accept relative symlinks that stay inside the folder: `npm install` works in a shared project
+- `kling compose up` keeps a warm template per service, keyed by its recipe: a repeated up restores app + postgres + redis in under a second instead of booting cold and re-importing; `environment:` goes on the machine instead of the image and `healthcheck:` runs inside before saving (`-fresh` rebuilds them)
+- The image's service waits for its live shares before starting (`kling.shares=N`); `run -share-wait N` saves templates whose copies take N live shares on `run -from`
+- `kling run -p HOST:GUEST`: a stable port on 127.0.0.1 in the foreground, waking the machine if frozen
 - `kling compose up [-f compose.yaml]`: a dev stack in the foreground, with bind mounts as live shares, `ports:` published on 127.0.0.1 and the services' output joined; Ctrl-C removes it. `graph from-compose` keeps warning that it does not publish
 - `kling db` templates of Garage, an S3-compatible object store (`-engine garage`): every copy gets its own access/secret key, generated on the host and rotated by `rotate` (#115)
 - Credential proxy: SigV4 re-signing (`kind: sigv4`) for S3-compatible servers: the guest signs with a placeholder key and the proxy signs again with the real one, incl. `UNSIGNED-PAYLOAD`, `aws-chunked` and presigned URLs (#116)
