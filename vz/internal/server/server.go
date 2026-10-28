@@ -452,6 +452,10 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 	var d struct {
 		DriveID    string `json:"drive_id"`
 		PathOnHost string `json:"path_on_host"`
+		// Disposable: ver spec.Drive. Solo antes de crear la VM (antes de
+		// InstanceStart o con un snapshot cargado pendiente de reanudar),
+		// que es cuando se eligen los modos del disco.
+		Disposable *bool `json:"kling_disposable"`
 	}
 	if err := decode(r, maxConfigBody, &d); err != nil {
 		fault(w, err)
@@ -467,7 +471,11 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("the microVM has stopped"))
 		return
 	}
-	if err := s.spec.PatchDrivePath(r.PathValue("id"), d.PathOnHost); err != nil {
+	if d.Disposable != nil && s.st != stConfiguring && s.st != stPendingLoad {
+		fault(w, errors.New("kling_disposable can only change before the VM is created"))
+		return
+	}
+	if err := s.spec.PatchDrive(r.PathValue("id"), d.PathOnHost, d.Disposable); err != nil {
 		fault(w, err)
 		return
 	}

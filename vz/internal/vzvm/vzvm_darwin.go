@@ -112,7 +112,7 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	// Un virtio-blk por drive en el orden del Spec: vda, vdb... como Firecracker.
 	var disks []vz.StorageDeviceConfiguration
 	for _, d := range s.Drives {
-		att, err := adjuntoDisco(d.PathOnHost, d.IsReadOnly)
+		att, err := adjuntoDisco(d)
 		if err != nil {
 			return nil, fmt.Errorf("drive %s (%s): %w", d.DriveID, d.PathOnHost, err)
 		}
@@ -323,34 +323,65 @@ func (m *machine) SetBalloonTargetMiB(mib int) error {
 	return nil
 }
 
-// adjuntoDisco crea el adjunto de un disco. Por defecto, el del framework
-// (caché automática). KLING_VZ_DISK_CACHING=cached|uncached|automatic y
-// KLING_VZ_DISK_SYNC=full|fsync|none lo cambian: sirven para comparar modos
-// cuando se investiga una lectura corrupta (prototypes/android/docs/sigill.md).
-func adjuntoDisco(path string, ro bool) (*vz.DiskImageStorageDeviceAttachment, error) {
-	c, s := os.Getenv("KLING_VZ_DISK_CACHING"), os.Getenv("KLING_VZ_DISK_SYNC")
-	if c == "" && s == "" {
-		return vz.NewDiskImageStorageDeviceAttachment(path, ro)
+// adjuntoDisco crea el adjunto de un disco con sus modos (modosDisco).
+func adjuntoDisco(d spec.Drive) (*vz.DiskImageStorageDeviceAttachment, error) {
+	cm, sm, def, err := modosDisco(d, os.Getenv("KLING_VZ_DISK_CACHING"), os.Getenv("KLING_VZ_DISK_SYNC"))
+	if err != nil {
+		return nil, err
 	}
+	if def {
+		return vz.NewDiskImageStorageDeviceAttachment(d.PathOnHost, d.IsReadOnly)
+	}
+	return vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(d.PathOnHost, d.IsReadOnly, cm, sm)
+}
+
+// modosDisco elige la caché y la sincronización de un disco:
+//
+//   - De solo lectura (la base, las capas, el dorado): caché "cached". Nadie
+//     escribe en ellos y los comparten las máquinas que arrancan de la misma
+//     imagen: que el host los guarde en su caché ahorra lecturas a todas.
+//   - De escritura: la caché por defecto del framework (automatic).
+//   - Sincronización: la del framework (full: cada flush del invitado llega
+//     al disco físico) salvo en el overlay desechable de una máquina no
+//     persistente (spec.Drive.SyncNone), que va con none. Volúmenes y discos
+//     de db nunca vienen marcados.
+//
+// KLING_VZ_DISK_CACHING=cached|uncached|automatic y
+// KLING_VZ_DISK_SYNC=full|fsync|none mandan sobre lo anterior, para todos los
+// discos: sirven para comparar modos cuando se investiga una lectura
+// corrupta (prototypes/android/docs/sigill.md). def: son los modos por
+// defecto del framework (el adjunto de siempre).
+func modosDisco(d spec.Drive, envCaching, envSync string) (vz.DiskImageCachingMode, vz.DiskImageSynchronizationMode, bool, error) {
 	cm := vz.DiskImageCachingModeAutomatic
-	switch c {
-	case "", "automatic":
+	if d.IsReadOnly {
+		cm = vz.DiskImageCachingModeCached
+	}
+	switch envCaching {
+	case "":
+	case "automatic":
+		cm = vz.DiskImageCachingModeAutomatic
 	case "cached":
 		cm = vz.DiskImageCachingModeCached
 	case "uncached":
 		cm = vz.DiskImageCachingModeUncached
 	default:
-		return nil, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", c)
+		return 0, 0, false, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", envCaching)
 	}
 	sm := vz.DiskImageSynchronizationModeFull
-	switch s {
-	case "", "full":
+	if d.SyncNone() {
+		sm = vz.DiskImageSynchronizationModeNone
+	}
+	switch envSync {
+	case "":
+	case "full":
+		sm = vz.DiskImageSynchronizationModeFull
 	case "fsync":
 		sm = vz.DiskImageSynchronizationModeFsync
 	case "none":
 		sm = vz.DiskImageSynchronizationModeNone
 	default:
-		return nil, fmt.Errorf("KLING_VZ_DISK_SYNC=%q: use full, fsync or none", s)
+		return 0, 0, false, fmt.Errorf("KLING_VZ_DISK_SYNC=%q: use full, fsync or none", envSync)
 	}
-	return vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(path, ro, cm, sm)
+	def := cm == vz.DiskImageCachingModeAutomatic && sm == vz.DiskImageSynchronizationModeFull
+	return cm, sm, def, nil
 }

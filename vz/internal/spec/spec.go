@@ -60,6 +60,20 @@ type Drive struct {
 	PathOnHost   string `json:"path_on_host"`
 	IsRootDevice bool   `json:"is_root_device"`
 	IsReadOnly   bool   `json:"is_read_only"`
+	// Disposable (extensión de kling-vz, opcional): el disco es el overlay
+	// desechable de una máquina no persistente, que se tira con ella. Solo
+	// entonces kling-vz no pide al host que lleve al disco físico los flush
+	// del invitado (synchronizationMode none): si el Mac se cae, se pierde
+	// un disco que se iba a borrar igual. Nunca para volúmenes ni discos de
+	// db; lo decide el núcleo, que es quien sabe qué es cada drive. No va
+	// al snapshot (WriteFile lo quita): quien restaure lo vuelve a decir.
+	Disposable bool `json:"kling_disposable,omitempty"`
+}
+
+// SyncNone dice si el disco puede ir sin sincronizar: marcado desechable,
+// de escritura y que no sea la raíz.
+func (d Drive) SyncNone() bool {
+	return d.Disposable && !d.IsReadOnly && !d.IsRootDevice
 }
 
 type NetworkInterface struct {
@@ -130,9 +144,18 @@ func (s *Spec) PutDrive(d Drive) {
 
 // PatchDrivePath cambia la ruta registrada de un drive existente.
 func (s *Spec) PatchDrivePath(id, path string) error {
+	return s.PatchDrive(id, path, nil)
+}
+
+// PatchDrive cambia la ruta registrada de un drive existente y, si
+// disposable no es nil, si es desechable.
+func (s *Spec) PatchDrive(id, path string, disposable *bool) error {
 	for i := range s.Drives {
 		if s.Drives[i].DriveID == id {
 			s.Drives[i].PathOnHost = path
+			if disposable != nil {
+				s.Drives[i].Disposable = *disposable
+			}
 			return nil
 		}
 	}
@@ -219,6 +242,11 @@ func ParseGraphics(v string) (*Graphics, error) {
 func (s *Spec) WriteFile(path string) error {
 	out := s.Clone()
 	out.KlingVZ = out.formato()
+	// Desechable es de esta máquina, no del snapshot: un dorado sacado de
+	// una máquina efímera puede despertar en una persistente.
+	for i := range out.Drives {
+		out.Drives[i].Disposable = false
+	}
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
