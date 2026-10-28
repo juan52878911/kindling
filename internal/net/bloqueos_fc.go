@@ -33,13 +33,22 @@ func (n *Net) reglasRegistroIP() string {
 // instalarRegistroIP monta el registro de IP:puerto en el netns. Es de mejor
 // esfuerzo: sin nft (o sin nf_tables en el kernel) el aviso se queda con los
 // nombres y el contador, y la máquina arranca igual.
+//
+// Va en segundo plano: nft tarda ~17 ms en el lab (medido) y el invitado no
+// emite tráfico hasta bastante después de que Setup devuelva; esperarlo
+// añadiría esos ms a cada arranque. Si el netns se desmonta antes de que
+// acabe, nft falla y no pasa nada.
 func (n *Net) instalarRegistroIP() {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return
 	}
-	cmd := exec.Command("ip", "netns", "exec", n.NS, "nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(n.reglasRegistroIP())
-	_ = cmd.Run()
+	script := n.reglasRegistroIP()
+	ns := n.NS
+	go func() {
+		cmd := exec.Command("ip", "netns", "exec", ns, "nft", "-f", "-")
+		cmd.Stdin = strings.NewReader(script)
+		_ = cmd.Run()
+	}()
 }
 
 // destinosIP lee el set de nft del netns de n.
