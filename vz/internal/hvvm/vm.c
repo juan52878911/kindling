@@ -773,6 +773,8 @@ int khv_create(const struct khv_config *c) {
   ncpus = c->ncpus;
   const char *q = getenv("KLING_HV_QOS");
   qos_activa = !(q && strcmp(q, "0") == 0);
+  const char *e = getenv("KLING_HV_EVENT_IDX");
+  if (e && strcmp(e, "0") == 0) khv_event_idx = 0;  // para comparar: sin VIRTIO_RING_F_EVENT_IDX
   g_ram_size = c->mem_size;
   ndisks = c->ndisks;
   hay_red = c->net_fd >= 0;

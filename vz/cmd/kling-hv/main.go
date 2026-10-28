@@ -182,6 +182,17 @@ func run() int {
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
 		ArgCustodio: argCustodio, Sock: *sock, Broker: broker, Logf: logf})
 
+	// KLING_HV_AVISOS=1: los contadores de notify e interrupciones de la red y
+	// los discos en el registro cada 5 s (para medir la supresión de avisos).
+	if os.Getenv("KLING_HV_AVISOS") == "1" {
+		go func() {
+			for range time.Tick(5 * time.Second) {
+				a := hvvm.Avisos()
+				logf("notifications: net tx %d rx %d irq %d, blk %d irq %d", a[0], a[1], a[2], a[3], a[4])
+			}
+		}()
+	}
+
 	peers := peercred.New()
 	srv := server.New(server.Deps{
 		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},

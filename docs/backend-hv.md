@@ -55,7 +55,16 @@ atiende como mucho una vuelta de la cola: un invitado que pusiera el anillo
 `used` encima del `avail` dejaba un hilo de dispositivo girando para siempre, y
 con él cualquier pausa o snapshot. Una petición de disco sin byte de estado o
 fuera del disco se rechaza (antes rompía el proceso o hacía crecer el overlay).
-`go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
+La red y los discos ofrecen `VIRTIO_RING_F_EVENT_IDX` (y sin él se respeta
+`VRING_AVAIL_F_NO_INTERRUPT`): el driver solo avisa y recibe interrupciones
+cuando le hacen falta (`vq_interrumpir`, `vq_pedir_aviso` en `virtio.c`);
+`KLING_HV_EVENT_IDX=0` no lo ofrece y `KLING_HV_AVISOS=1` escribe los contadores
+en el registro cada 5 s. Medido (M4, n=10, dos rondas, 10×256 MiB por el
+reenvío más 7 × [20.000 ficheros de 4 KiB + sync, 256 MiB + fsync]): los avisos
+de rx de red pasan de ~30.000 a ~100, las interrupciones de red de ~198.000 a
+~112.000 (−45 %) y los avisos de disco de ~6.300 a ~3.200 (−48 %); el caudal
+(~2.300-2.600 / ~1.700-1.900 MiB/s) y los tiempos de disco quedan dentro del
+ruido. `go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
 datos al azar sobre una RAM de mentira (`prueba.c`); el fuzz de Go no ve la
 cobertura del C, así que es aleatorio puro (8 M de ejecuciones en 90 s sin
 fallos).

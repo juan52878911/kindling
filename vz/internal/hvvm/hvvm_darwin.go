@@ -316,6 +316,19 @@ func Footprint() (uint64, error) {
 	return b, nil
 }
 
+// Avisos son los contadores de avisos del invitado (notify) e interrupciones
+// hacia él de la red y los discos, acumulados desde que arrancó el proceso:
+// tx, rx, irq de red, notify de disco, irq de disco.
+func Avisos() [5]uint64 {
+	var v [C.KHV_N_MAX]C.uint64_t
+	C.khv_contadores(&v[0])
+	var out [5]uint64
+	for i := range out {
+		out[i] = uint64(v[i])
+	}
+	return out
+}
+
 // cpuMu serializa las lecturas (el C decide su fuente en la primera) y
 // cpuEquiv lleva la cuenta en tiempo de núcleo P.
 var (

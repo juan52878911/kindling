@@ -169,6 +169,28 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
                  bool escribir, uint64_t *val, uint32_t *cola);
 void vmmio_irq(struct vmmio *m, uint32_t intid);  // pasa al GIC el nivel de isr si cambió
 
+// Supresión de avisos (virtio 1.x, 2.7.7 y 2.7.10): VIRTIO_RING_F_EVENT_IDX,
+// que ofrecen la red y los discos. vq_interrumpir dice si hay que interrumpir
+// al driver tras pasar el used de viejo a nuevo (con EVENT_IDX, según su
+// used_event; sin él, según VRING_AVAIL_F_NO_INTERRUPT). vq_pedir_aviso, con
+// EVENT_IDX, le pide al driver que avise (notify) en cuanto añada algo más
+// allá de lo consumido, y devuelve si ya lo había (hay que volver a mirar
+// antes de esperar el aviso). Sin EVENT_IDX no hace nada y devuelve false.
+#define VIRTIO_RING_F_EVENT_IDX 29
+// khv_event_idx: el bit que ofrecen red y discos (0 con KLING_HV_EVENT_IDX=0).
+extern uint64_t khv_event_idx;
+bool vq_interrumpir(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint16_t viejo, uint16_t nuevo);
+bool vq_pedir_aviso(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used);
+// vq_pedir_aviso_ya: con EVENT_IDX, que el siguiente añadido avise aunque
+// queden entradas sin atender (se cortó una tanda por el tope de vueltas).
+void vq_pedir_aviso_ya(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used);
+
+// Contadores de avisos (pruebas y medidas): notify del invitado e
+// interrupciones al invitado, por dispositivo.
+enum { KHV_N_NET_TX, KHV_N_NET_RX, KHV_N_NET_IRQ, KHV_N_BLK, KHV_N_BLK_IRQ, KHV_N_MAX };
+extern uint64_t khv_avisos[KHV_N_MAX];
+void khv_contadores(uint64_t out[KHV_N_MAX]);
+
 // block: una cola, atendida por un hilo propio (fuera del hilo del vCPU)
 struct vblk_state {
   struct vmmio m;
