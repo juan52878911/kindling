@@ -23,12 +23,20 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
 - `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
+- Release binaries are built with Go 1.27.3 (12 reachable stdlib CVEs fixed); the minimum Go in `go.mod` stays 1.24
+- The release workflow runs the full test suite before building, uses a read-only token except to publish, and pins actions by SHA
+- `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
+- Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
 
 ### Fixed
 
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
+- Extension manifest, hook and `-h` output is capped at 1 MiB; the old cap was bypassed by `io.Copy`
+- Concurrent writes of the same state file no longer share a temp file
+- A panic while keeping a service warm no longer kills the gateway
+- `scripts/release.sh` refuses a tag that already exists on origin and fetches before comparing main
 
 ## [0.18.0] - 2026-10-11
 
