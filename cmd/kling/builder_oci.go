@@ -131,6 +131,33 @@ type OCISpec struct {
 	// cabeceras, versiones viejas de extensiones) y añade `-c jit=off` a su
 	// comando. Opt-in: cambia lo que hay en la imagen.
 	Slim bool `json:"slim,omitempty"`
+	// Isolate aplana las capas dentro de una microVM de herramientas en vez
+	// de en el anfitrión: el daemon baja y verifica los blobs (fase "pull"),
+	// se los pasa a la VM, que corre este mismo constructor sin red (fase
+	// "flatten") y devuelve el ext4. El tar nunca se interpreta en el host.
+	// No cambia la imagen (no entra en su identidad): solo dónde se hace.
+	Isolate bool `json:"isolate,omitempty"`
+}
+
+// Fases del constructor con Isolate (KLING_OCI_PHASE): "pull" solo baja y
+// verifica los blobs y deja isolate.json; "flatten" corre dentro de la VM, con
+// los blobs ya en su caché y el digest fijado por KLING_OCI_PINNED.
+const (
+	ociPhaseEnv    = "KLING_OCI_PHASE"
+	ociPinnedEnv   = "KLING_OCI_PINNED"
+	ociPhasePull   = "pull"
+	ociPhaseFlat   = "flatten"
+	isolateFile    = "isolate.json"
+	isolateMaxBlob = 4096
+)
+
+// IsolatePlan es lo que la fase pull le dice al daemon: el digest fijado, la
+// hora de la construcción y los blobs (manifiestos, configuración y capas)
+// que la VM necesita en su caché.
+type IsolatePlan struct {
+	Digest string   `json:"digest"`
+	Epoch  int64    `json:"epoch"`
+	Blobs  []string `json:"blobs"`
 }
 
 // ociSourceArchive es OCISpec.Source de lo importado de un archivo.
@@ -147,6 +174,8 @@ const (
 var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln"}
 
 // reOCIUser es un USER de Docker: uid o nombre, con grupo opcional.
+var rePinned = lazyre.New(`^sha256:[0-9a-f]{64}$`)
+
 var reOCIUser = lazyre.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$`)
 
 func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
@@ -275,6 +304,13 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if spec.Arch == "" {
 		spec.Arch = runtime.GOARCH
 	}
+	phase := os.Getenv(ociPhaseEnv)
+	if phase != "" && phase != ociPhasePull && phase != ociPhaseFlat {
+		return fmt.Errorf("%s=%q: unknown phase", ociPhaseEnv, phase)
+	}
+	// Dentro de la VM el spec es el de siempre: la identidad de la imagen no
+	// depende de dónde se aplanó.
+	spec.Isolate = false
 	ref, err := validateOCI(req, spec)
 	if err != nil {
 		return err
@@ -329,7 +365,20 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// para nosotros: eso no se rehashea (internal/daemon/builders_cache.go).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
 		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
+	if phase == ociPhasePull {
+		// Ni siquiera se descomprime: en el anfitrión solo se baja y se comprueba
+		// el sha256 del blob comprimido; descomprimir es cosa de la VM.
+		c.Unpack = ""
+	}
 	archive := spec.Source == ociSourceArchive
+	pinned := os.Getenv(ociPinnedEnv)
+	if phase == ociPhaseFlat {
+		if !rePinned.MatchString(pinned) {
+			return fmt.Errorf("%s: want sha256:<64 hex>", ociPinnedEnv)
+		}
+		// Sin c.Offline: es la comprobación estricta de un archivo (un diff_id
+		// por capa), que la fase pull ya hizo si tocaba; la VM no tiene red.
+	}
 	if archive {
 		// Los blobs los subió el CLI a la caché de root (PUT /oci/blobs): sin
 		// red. Sin root, el daemon los dejó en la verificada de este archivo
@@ -348,9 +397,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	tPull := time.Now()
-	digest, err := c.Resolve(ctx, ref)
-	if err != nil {
-		return fmt.Errorf("resolving %s: %w", shown, err)
+	digest := pinned
+	if phase != ociPhaseFlat {
+		if digest, err = c.Resolve(ctx, ref); err != nil {
+			return fmt.Errorf("resolving %s: %w", shown, err)
+		}
 	}
 	img, err := c.Pull(ctx, ref.Name(), digest, spec.Arch)
 	if err != nil {
@@ -363,6 +414,16 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		if err := os.WriteFile(filepath.Join(dir, "cache-used"), []byte(usados), 0o600); err != nil {
 			return err
 		}
+	}
+	if phase == ociPhasePull {
+		// Solo JSON parseado y blobs comprobados por digest: ningún tar.
+		blobs := c.Usados()
+		if len(blobs) > isolateMaxBlob {
+			return fmt.Errorf("image has %d blobs, over the limit of %d", len(blobs), isolateMaxBlob)
+		}
+		pj, _ := json.Marshal(IsolatePlan{Digest: digest, Epoch: t.Unix(), Blobs: blobs})
+		logf("%s: %s, %d blob(s) pulled; flattening in a microVM", shown, img.ManifestDigest, len(blobs))
+		return os.WriteFile(filepath.Join(dir, isolateFile), pj, 0o600)
 	}
 	cfg := img.Config.Config
 	dPull := time.Since(tPull)

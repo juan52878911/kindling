@@ -186,7 +186,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
                                                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
@@ -222,6 +222,8 @@ var coreTree = []section{
                                                    and base) between daemons
   image toolchain                                  builds the image with npm and pip
                                                    (try and volume populate use it)
+  image build-tools                                builds the image where "image import
+                                                   -isolate" flattens layers
 `},
 		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
                                                    the daemon; the password or token is
