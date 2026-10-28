@@ -1,10 +1,11 @@
 warning: service app: container_name: ignored (the machine is called <graph>-<node>)
 warning: service app: env_file: not read; put the variables in environment: or bake them with kling image import -env-file
+warning: service app: ports: 3000: graph up does not publish it on the host (kling compose up does, on a free 127.0.0.1 port)
 warning: service builder: build: not supported and no image: to use; service skipped (build the image and import it with kling image import)
 warning: service proxy: cap_add: not supported (a node is a microVM with its own kernel; there is no host privilege to grant)
 warning: service proxy: network_mode: host: not supported (a service reaches the others of its networks only by edges, as <node>.graph)
 warning: service proxy: ports: 8080:80: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:8080)
-warning: service proxy: ports: 9100:9100/udp: UDP is not supported
+warning: service proxy: ports: 9100:9100: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:9100/udp; Linux only)
 warning: service proxy: volumes: ./nginx.conf:/etc/nginx/nginx.conf:ro: bind mounts are not supported here (kling compose up makes them live shares; or use a named volume)
 warning: service proxy: volumes: /var/log/nginx: an anonymous volume has no equivalent; declare a named one
 warning: service proxy: depends_on app: they share no network; only an ordering edge
