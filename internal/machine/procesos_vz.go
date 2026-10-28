@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	// procInfoCallListPIDs y procAllPIDs son PROC_INFO_CALL_LISTPIDS y
-	// PROC_ALL_PIDS de <sys/proc_info.h> (lo que hace proc_listpids).
+	// procInfoCallListPIDs, procAllPIDs y procUIDOnly son
+	// PROC_INFO_CALL_LISTPIDS, PROC_ALL_PIDS y PROC_UID_ONLY de
+	// <sys/proc_info.h> (lo que hace proc_listpids).
 	procInfoCallListPIDs = 1
 	procAllPIDs          = 1
+	procUIDOnly          = 4
 	// ctlKern y kernProcArgs2 son CTL_KERN y KERN_PROCARGS2 de <sys/sysctl.h>.
 	ctlKern       = 1
 	kernProcArgs2 = 49
@@ -35,12 +37,19 @@ const (
 	procArgsMax = 256 << 10
 )
 
-// pidsVivos son todos los PID del sistema (proc_listpids(PROC_ALL_PIDS)).
+// pidsVivos son los PID en los que puede haber un VMM nuestro: los de nuestro
+// usuario efectivo, o todos si somos root (proc_listpids). Sin root no se
+// puede leer la línea de órdenes de otro usuario, así que mirarlos solo
+// costaba (la mitad de las llamadas en un Mac normal).
 func pidsVivos() ([]int32, error) {
+	tipo, uid := uintptr(procAllPIDs), uintptr(0)
+	if e := os.Geteuid(); e != 0 {
+		tipo, uid = procUIDOnly, uintptr(e)
+	}
 	n := 4096
 	for range 4 {
 		buf := make([]int32, n)
-		r, _, e := syscall.Syscall6(syscall.SYS_PROC_INFO, procInfoCallListPIDs, procAllPIDs, 0, 0,
+		r, _, e := syscall.Syscall6(syscall.SYS_PROC_INFO, procInfoCallListPIDs, tipo, uid, 0,
 			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)*4))
 		if e != 0 {
 			return nil, e
