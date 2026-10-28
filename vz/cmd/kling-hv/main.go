@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/hvvm"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
+	"github.com/juan52878911/kindling/vz/internal/sandbox"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
@@ -71,7 +73,21 @@ func logf(format string, args ...any) {
 	stdout.line("kling-hv: " + fmt.Sprintf(format, args...))
 }
 
-func main() { os.Exit(run()) }
+// argCustodio lanza este binario como custodio de snapshots (ver
+// internal/custodio), con la carpeta de snapshots y la de la máquina.
+const argCustodio = "--snapshot-keeper"
+
+// perfil es el sandbox de kling-hv (ver internal/sandbox).
+//
+//go:embed kling-hv.sb
+var perfil string
+
+func main() {
+	if len(os.Args) == 4 && os.Args[1] == argCustodio {
+		os.Exit(sandbox.ServirCustodio("kling-hv", os.Args[2], os.Args[3]))
+	}
+	os.Exit(run())
+}
 
 func run() int {
 	fs := flag.NewFlagSet("kling-hv", flag.ContinueOnError)
@@ -144,12 +160,11 @@ func run() int {
 	}
 	syscall.Umask(0o077)
 
-	// Sin sandbox todavía: kling-vz se encierra en kling-vz.sb al crear la VM;
-	// el perfil de kling-hv (que necesita Hypervisor.framework en su propio
-	// proceso) está por hacer. Ver docs/backend-hv.md.
-	if os.Getenv("KLING_VZ_CONFINE_ROOT") != "" {
-		logf("WARNING: not confined: kling-hv has no sandbox profile yet")
-	}
+	// Como kling-vz: al crear o restaurar la VM se encierra en kling-hv.sb y
+	// solo escribe en el directorio de su máquina; los dorados los coloca el
+	// custodio (internal/sandbox).
+	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
+		ArgCustodio: argCustodio, Sock: *sock, Broker: broker, Logf: logf})
 
 	peers := peercred.New()
 	srv := server.New(server.Deps{
@@ -184,6 +199,8 @@ func run() int {
 		CPUTime:     hvvm.CPUTime,
 		Freeze:      hvvm.Freeze,
 		Graph:       grafoMaq,
+		Confine:     confine,
+		Destino:     destino,
 	})
 
 	if fi, err := os.Lstat(*sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
