@@ -44,6 +44,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `start` | sin publicar | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
 | `registry-auth` | sin publicar | `GET/POST /registries`, `DELETE /registries/{host}`: credenciales de registros privados que usa el constructor `oci` (ver "Registros") |
 | `oci-blobs` | sin publicar | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
+| `volume-clone` | sin publicar | `POST /volumes/{name}/clone` y `clone` en `GET /info` (la sonda de clonado; ver "Volúmenes") |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -191,6 +192,7 @@ con un 412 que lo dice. El resto de constructores, siempre el instalado.
 | `GET /volumes` | lista |
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
+| `POST /volumes/{name}/clone` | lo clona en uno nuevo (`to`, `copy`); capacidad `volume-clone` |
 | `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no); con snapshots, 409 salvo `?snapshots=1`, que se los lleva también |
 | `GET /volumes/{name}/snapshots` | lista sus snapshots, del más antiguo al último (404 si no existe el volumen) |
 | `POST /volumes/{name}/snapshots` | toma uno (`name`, opcional: hora UTC `20260928-153012`) |
@@ -216,6 +218,46 @@ suelo de disco libre (`KLING_MIN_FREE_DISK_MIB`) o el hueco hasta la marca alta 
 gc. Los snapshots viven en `volumes/snapshots/<vol>/<snap>.ext4`, de root y `0600`.
 A propósito, ni restore ni el borrado de snapshots se exponen como herramienta MCP:
 son operaciones destructivas del operador, no del agente.
+
+#### `POST /volumes/{name}/clone`
+
+```json
+{"to": "notas-prueba", "copy": false}
+```
+
+Crea `to` como **clon** de `{name}`: reflink (`FICLONE`) en Linux, `clonefile`
+en macOS. No copia datos: los dos comparten bloques hasta que uno escribe, y
+cuesta milisegundos sea cual sea el tamaño. Contesta `CloneVolumeResult`:
+
+```json
+{"volume": {"name": "notas-prueba", "size_bytes": 2147483648, "used_bytes": 4194304},
+ "method": "reflink", "filesystem": "xfs", "elapsed_ms": 2}
+```
+
+- **Sin reflink** (ext4, XFS formateado sin `reflink=1`, ZFS sin block cloning,
+  `volumes/` en otro disco): **409** que lo explica. Con `"copy": true` hace una
+  copia completa dispersa (`method: "copy"`), que tarda lo que tarde. Nunca
+  copia sin que se pida.
+- **Origen con un escritor vivo: 409.** Un ext4 montado en escritura se clonaría
+  a medio escribir. Los lectores no molestan. Mientras dura el clon, el origen no
+  se puede montar en escritura ni borrar.
+- **Destino que ya existe: 409.** Nombre inválido u origen inexistente: 400.
+- `used_bytes` cuenta los bloques compartidos como propios: un clon recién hecho
+  parece ocupar lo mismo que su origen aunque no haya costado nada.
+
+`GET /info` trae en `clone` una **sonda real**: el daemon clona un fichero de
+prueba desde `volumes/` a cada uno de `volumes/`, `machines/`, `snapshots/` y
+`jails/` (los que existan) y dice, para cada uno, el sistema de ficheros y si
+el clon salió (`reflink`) o por qué no (`error`). No se deduce del tipo de
+sistema de ficheros: se prueba, porque un mount lo cambia sin reiniciar nada.
+Vale un minuto.
+
+```json
+"clone": {"method": "reflink", "dirs": [
+  {"dir": "volumes",  "filesystem": "xfs", "reflink": true},
+  {"dir": "machines", "filesystem": "xfs", "reflink": true},
+  {"dir": "snapshots","filesystem": "ext4","reflink": false, "error": "invalid cross-device link"}]}
+```
 
 ### `POST /machines/{ref}/pause`
 
