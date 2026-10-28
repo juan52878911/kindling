@@ -54,7 +54,7 @@ func TestPull(t *testing.T) {
 	if err != nil || h.Name != "init" {
 		t.Fatalf("layer: %v %v", h, err)
 	}
-	if _, err := c.Pull(context.Background(), ref, idx, "amd64"); err == nil || !strings.Contains(err.Error(), "no linux/amd64") {
+	if _, err := c.Pull(context.Background(), ref, idx, "amd64"); err == nil || !strings.Contains(err.Error(), "not linux/amd64") {
 		t.Fatalf("amd64 from an arm64-only index: %v", err)
 	}
 
