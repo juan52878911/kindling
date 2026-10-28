@@ -264,9 +264,12 @@ func (c *Client) Get(ctx context.Context, ref string) (*Machine, error) {
 	return &m, c.do(ctx, http.MethodGet, "/machines/"+ref, nil, &m)
 }
 
+// Freeze congela una máquina running. Va por c.long, como Commit: volcar la
+// memoria de una microVM grande puede pasar del minuto de ResponseHeaderTimeout.
+// Acota ctx.
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)
 }
 
 // Pause pausa una máquina running sin volcarla (nivel "pausada"; capacidad
@@ -276,16 +279,19 @@ func (c *Client) Pause(ctx context.Context, ref string) (*Machine, error) {
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/pause", nil, &m)
 }
 
+// Thaw despierta una máquina congelada o pausada. Por c.long: restaurar desde
+// disco frío y esperar al invitado puede tardar más del minuto. Acota ctx.
 func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/thaw", nil, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/thaw", nil, &m)
 }
 
 // Start arranca otra vez una máquina parada, en frío sobre su propio disco.
-// env es su entorno (KEY=valor): el daemon solo guardó los nombres.
+// env es su entorno (KEY=valor): el daemon solo guardó los nombres. Por
+// c.long: un arranque en frío con su sonda de listo puede pasar del minuto.
 func (c *Client) Start(ctx context.Context, ref string, env []string) (*Machine, error) {
 	var m Machine
-	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/start", StartRequest{Env: env}, &m)
+	return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/start", StartRequest{Env: env}, &m)
 }
 
 func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
@@ -530,6 +536,10 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	defer resp.Body.Close()
 
 	sc := bufio.NewScanner(resp.Body)
+	// Una línea de evento puede pasar de los 64 KiB del Scanner por defecto
+	// (una máquina con muchas anotaciones): sin esto el stream se corta con
+	// "token too long".
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
