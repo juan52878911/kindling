@@ -2232,6 +2232,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
+		// Nada se volcó, pero la marca de volcado en curso ya está y la pausa
+		// pudo llegar al VMM aunque la respuesta no (un ctx cortado): sin
+		// reanudar, se quedaba pausada figurando como running, como tras un
+		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
+		// así que ese fallo solo se apunta.
+		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
+		}
 		return nil, err
 	}
 	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios

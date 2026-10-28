@@ -178,6 +178,33 @@ func TestFreezeFallidaPeroReanudadaSigueRunning(t *testing.T) {
 	}
 }
 
+// Una pausa que falla también reanuda (pudo llegar al VMM sin que llegara la
+// respuesta) y retira la marca de volcado en curso; la máquina sigue running.
+func TestFreezeConPausaFallidaReanudaYLimpia(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000004"
+	falso, muerto := maquinaCorriendo(t, m, id)
+	falso.fallar(http.MethodPatch, "/vm", http.StatusBadRequest, "pause timed out")
+
+	if _, err := m.Freeze(context.Background(), id); err == nil {
+		t.Fatal("Freeze con la pausa rota no devolvió error")
+	}
+	pausas := falso.llamadasA(http.MethodPatch, "/vm")
+	if len(pausas) != 2 || !strings.Contains(string(pausas[1].Cuerpo), "Resumed") {
+		t.Fatalf("PATCH /vm = %d llamadas, quería la pausa y el intento de reanudar", len(pausas))
+	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
+		t.Errorf("estado = %s, quería running", viva.State)
+	}
+	if !sigueVivo(muerto) {
+		t.Error("mató el VMM de una máquina que no llegó a volcarse")
+	}
+	if _, err := os.Stat(filepath.Join(m.dir(id), marcaEnCurso)); err == nil {
+		t.Error("quedó la marca de volcado en curso")
+	}
+}
+
 // Freeze no suelta los volúmenes (solo los vacía): si el volcado falla y la
 // máquina se reanuda, los sigue teniendo montados y no hay nada que pedirle a
 // su agente. Pedírselo era un viaje de hasta 50 s con el cerrojo tomado, y
