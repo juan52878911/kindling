@@ -13,7 +13,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
 - Live `rw` shares accept relative symlinks that stay inside the folder: `npm install` works in a shared project
 - `kling compose up [-f compose.yaml]`: a dev stack in the foreground, with bind mounts as live shares, `ports:` published on 127.0.0.1 and the services' output joined; Ctrl-C removes it. `graph from-compose` keeps warning that it does not publish
-- `kling-hv`, a third backend for macOS on Hypervisor.framework (`daemon.vmm: hv` or `KLING_VMM=hv`): same API as `kling-vz`, but guest RAM is a mapped file, so a restore takes ~10 ms and ~13 MiB instead of ~200 ms and ~320 MiB (experimental: no sandbox profile, balloon or display yet)
+- `kling-hv`, a third backend for macOS on Hypervisor.framework (`daemon.vmm: hv` or `KLING_VMM=hv`): same API as `kling-vz`, but guest RAM is a mapped file, so a restore takes ~10 ms and ~13 MiB instead of ~200 ms and ~320 MiB (experimental: no display)
+- `kling-hv`: virtio-vsock channel to the agent (same contract as `kling-vz`), virtio-balloon (`squeeze`, `-mem-max`), its own sandbox profile, and `kling up -check` checks it when `daemon.vmm` is `hv`
 - `kling db` templates of Garage, an S3-compatible object store (`-engine garage`): every copy gets its own access/secret key, generated on the host and rotated by `rotate` (#115)
 - Credential proxy: SigV4 re-signing (`kind: sigv4`) for S3-compatible servers: the guest signs with a placeholder key and the proxy signs again with the real one, incl. `UNSIGNED-PAYLOAD`, `aws-chunked` and presigned URLs (#116)
 - `kling volume clone <src> <dst> [-copy]`: instant copy-on-write volume clones (reflink/clonefile), with a real clone probe in `kling status -v`; refuses on filesystems that cannot clone unless `-copy`
@@ -62,6 +63,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling-hv`: a thaw of a machine that had already been thawed spent 60-90 ms in page faults before the agent answered (the snapshot now carries the resident pages); a guest could hang a device thread, and with it pauses and snapshots, by placing the used ring over the avail ring; a failed create no longer leaves a `kling-hv` that cannot host another VM
 - macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
 - The FORWARD accepts inserted ahead of everything for graph links, the DNS resolver and credential proxies no longer let INVALID packets through to the host side

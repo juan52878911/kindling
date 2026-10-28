@@ -44,7 +44,57 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S) |
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
-| sin | globo, pantalla, vsock |
+| vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
+| globo | virtio-balloon sin cola de estadísticas: `squeeze`, `-mem-max` y `resize` (abajo) |
+| sin | pantalla |
+
+Todas las colas pasan por un único recorrido de cadenas con topes
+(`vq_cadena`: índices fuera de la tabla, ciclos, descriptores indirectos —no
+se ofrecen— y cadenas más largas que la cola son inválidas) y cada aviso
+atiende como mucho una vuelta de la cola: un invitado que pusiera el anillo
+`used` encima del `avail` dejaba un hilo de dispositivo girando para siempre, y
+con él cualquier pausa o snapshot. Una petición de disco sin byte de estado o
+fuera del disco se rechaza (antes rompía el proceso o hacía crecer el overlay).
+`go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
+datos al azar sobre una RAM de mentira (`prueba.c`); el fuzz de Go no ve la
+cobertura del C, así que es aleatorio puro (8 M de ejecuciones en 90 s sin
+fallos).
+
+### vsock
+
+Como en `kling-vz` (ver [backend-vz.md](backend-vz.md)): las máquinas que
+arrancan llevan el dispositivo y `kling.vsock=1` (salvo `KLING_VZ_VSOCK=0`), el
+reenvío del 8080 y `/kling/probe` prueban vsock primero y el snapshot dice si lo
+lleva. Cada `DialVsock` es un `socketpair`: un extremo es el `net.Conn` de Go y
+el otro lo bombea un hilo de C hacia la cola de rx del invitado, con el control
+de flujo por crédito de virtio-vsock (256 KiB por conexión) y el medio cierre
+(`CloseWrite`) como `SHUTDOWN`. Las conexiones no van en el snapshot: al
+restaurar se manda `VIRTIO_VSOCK_EVENT_TRANSPORT_RESET`. Comprobado: 20 MB de
+`kling cp` íntegros y `kling exec` con `eth0` caído en el invitado.
+
+### Globo
+
+El invitado entrega marcos de 4 KiB y la página del host es de 16 KiB: una
+página se suelta cuando sus cuatro marcos están en el globo. Soltar es volver a
+mapear ese tramo del fichero de RAM (`mmap MAP_FIXED` + `hv_vm_unmap/map`):
+`madvise` (`FREE`, `FREE_REUSABLE`, `DONTNEED`) **no** baja `phys_footprint`
+de las páginas privadas de un mapeo `MAP_PRIVATE` de fichero (medido en macOS
+26.5). Medido: 405 → 115 MiB al encoger con `resize` una máquina que había
+escrito 300 MB, y `squeeze` devuelve ~242 MiB de otra; lo que se vuelve a
+escribir tras desinflar es correcto. Las copias de un dorado comparten sus
+páginas y el núcleo no las aprieta sin `-force`, como con Firecracker.
+
+### Sandbox
+
+`kling-hv` se encierra en `vz/cmd/kling-hv/kling-hv.sb` al crear o restaurar
+la VM, con el mismo reparto que `kling-vz` (`vz/internal/sandbox`, que
+comparten): escribe solo en el directorio de su máquina, lee los ficheros de su
+VM y los dorados los coloca el custodio. Sin `mach-lookup`, IOKit ni memoria
+compartida: Hypervisor.framework no los necesita. Los reenvíos escuchan en
+cualquier puerto de 127.0.0.1 en vez de una regla por puerto del rango
+reservado: las 1000 reglas costaban ~38 ms de compilar el perfil en cada
+restauración. Aun así `sandbox_init` cuesta ~10 ms y ~3 MiB de huella por
+proceso (medido con un perfil vacío), y el custodio es otro proceso de ~8 MiB.
 
 ## El fichero de memoria del snapshot
 
@@ -71,6 +121,14 @@ el reloj de pared lo arregla `/resync` del agente, como con vz.
 Nadie escribe un fichero de memoria después de crearlo: lo exige el mapeo
 `MAP_PRIVATE` (sus páginas limpias son las del fichero).
 
+El snapshot escribe también las páginas residentes que el invitado solo leyó
+(`MINCORE_INCORE`): el clon es otro vnode y no comparte la caché unificada con
+su base, así que una página que no se escribe la tendría que leer del SSD el
+invitado restaurado. Sin ello, el thaw de una máquina ya descongelada antes
+tardaba 60-90 ms en el primer `/resync` (cada interrupción del invitado
+esperaba a un fallo de página); con ello, 2-4 ms. Lo escrito queda en la
+caché.
+
 ## Pausa y techo de CPU
 
 La VM corre con todos los bits de pausa a cero: el del núcleo (`PATCH /vm`) y
@@ -82,6 +140,13 @@ de vCPU.
 
 ## Lo que cambia en el núcleo con `hv`
 
+- `kling up -check` mira `kling-hv`, su entitlement y macOS 15 cuando
+  `daemon.vmm` es `hv`; `make vz` compila los dos VMM.
+- Si una creación, un arranque o una restauración fallan después de crear la
+  VM de Hypervisor.framework (una por proceso, sin vuelta atrás), `kling-hv`
+  sale con código 1 tras contestar, para que el núcleo lance uno nuevo; el
+  servidor compartido con `kling-vz` habría intentado otra VM en el mismo
+  proceso.
 - `restaurarComparteMemoria` es verdad: las copias de un dorado son
   `MemShared` y la reserva de la segunda en adelante es la fracción divergente
   (`shareReserveDiv`), como en Firecracker.
@@ -93,26 +158,33 @@ de vCPU.
 
 ## Medidas (MacBook Pro M4, 16 GiB, macOS 26.5, daemon privado, n=10)
 
-Ver el informe de la rama: cada operación vista desde el API del daemon
-(incluye el `ps` de ~27 ms con que el núcleo comprueba que no quede un VMM
-vivo y el `/resync` del agente).
+Cada operación vista desde el API del daemon, p50 (el Mac con carga de otros
+procesos: media de carga ~10-15). Los dos VMM confinados, con vsock.
 
 | | hv | vz |
 |---|---|---|
-| run (frío) + primer exec | 202 ms | 591 ms |
-| freeze | 58–86 ms | 156 ms |
-| thaw + primer exec | 113–142 ms | 237 ms |
-| run -from + primer exec | 75 ms | 255 ms |
-| sandbox fork -n 10 | 429 ms | 2,8 s |
-| memoria por copia de un dorado | 13,3 MiB | 319 MiB |
-| restore a pelo (proceso nuevo → 200 de /healthz) | ~10 ms | — |
+| run (frío) + primer exec | 225 ms | 527 ms |
+| freeze | 102 ms | 149 ms |
+| thaw + primer exec | 35 ms (30–55) | 201 ms |
+| run -from + primer exec | 42 ms | 238 ms |
+| sandbox fork -n 10 + exec en todas | 558 ms | no acabó (memoria) |
+| exec en caliente (API) | 0,6 ms | 0,6 ms |
+| memoria por copia de un dorado (10 / 50 copias) | 17,4 / 17,5 MiB | ~365 MiB |
+| 50 copias | 875 MiB | — |
+
+El thaw se reparte (fases del daemon) en ~3 ms de comprobar el VMM anterior,
+~6 ms de lanzar el proceso, ~13 ms de cargar (de ellos ~10 de `sandbox_init`),
+2–4 ms de `/resync` y el resto del CLI/API. El freeze es más caro que antes
+(58–86 ms) porque escribe también las páginas residentes. La copia pesa más
+que los 13,3 MiB de antes por el sandbox (~3 MiB por proceso); el custodio de
+cada máquina es otro proceso de ~8 MiB que `kling top` no suma.
 
 ## Pendiente
 
-- Perfil de sandbox (`kling-hv` corre hoy sin confinar: avisa si el daemon
-  pide `KLING_VZ_CONFINE_ROOT`) y peercred ya está (es el de vnet).
-- Globo (`squeeze` falla) y pantalla.
-- Endurecer las colas virtio (longitudes, descriptores indirectos), fuzz de
-  MMIO, e2e de Mac (`92-e2e-mac.sh`) contra hv.
-- Bajar los ~9 MiB del proceso Go (runtime, gVisor, servidor) que se suman a
-  los ~4 MiB del invitado en cada copia.
+- Pantalla.
+- Que el daemon publique los dorados (una petición por el socket del broker)
+  en vez del custodio: ~8 MiB menos por máquina, en vz también.
+- `sandbox_init` cuesta ~10 ms y ~3 MiB por proceso: un perfil precompilado
+  lo bajaría.
+- Empaquetar `kling-hv` en `release.sh`, `install.sh`, `release.yml` y `kling
+  upgrade` (hoy solo llevan `kling-vz`).
