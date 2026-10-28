@@ -70,6 +70,7 @@ type servicioCompose struct {
 	nombre  string // el del compose
 	nodo    string // el del grafo
 	imagen  string
+	arch    string // de platform: (amd64|arm64); vacía = la del daemon
 	puertos []int
 	publ    [][2]int // {host, invitado} publicados en el host
 	shares  []api.ShareSpec
@@ -351,6 +352,15 @@ func (t *traduccionCompose) servicio(s *servicioCompose, def map[string]any, pro
 			t.puertosDe(s, k, v, pre, avisa)
 		case "environment":
 			t.entorno(s, v, pre, avisa)
+		case "platform":
+			switch p, _ := v.(string); p {
+			case "linux/amd64", "linux/x86_64":
+				s.arch = "amd64"
+			case "linux/arm64", "linux/arm64/v8", "linux/aarch64":
+				s.arch = "arm64"
+			default:
+				avisa("%splatform: %v: only linux/amd64 and linux/arm64", pre, v)
+			}
 		case "command":
 			s.cmd = argvCompose(v)
 		case "entrypoint":
@@ -402,7 +412,7 @@ func (t *traduccionCompose) servicio(s *servicioCompose, def map[string]any, pro
 			"security_opt", "sysctls", "ulimits", "tmpfs", "extra_hosts", "dns", "init",
 			"working_dir", "hostname", "container_name", "env_file", "labels",
 			"profiles", "links", "stdin_open", "tty", "stop_grace_period", "stop_signal",
-			"logging", "shm_size", "platform", "pull_policy", "secrets", "configs", "domainname",
+			"logging", "shm_size", "pull_policy", "secrets", "configs", "domainname",
 			"read_only", "group_add", "extends", "scale":
 			avisa("%s%s: %s", pre, k, motivoNoSoportado(k))
 		default:
@@ -777,6 +787,10 @@ func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, conComando,
 	a := []string{"kling", "image", "import", comillaSh(s.imagen), "-name", proyecto + "-" + s.nodo}
 	if replace {
 		a = append(a, "-replace")
+	}
+	// En un daemon arm64, -arch amd64 emula con qemu-user (docs/imagenes-amd64.md).
+	if s.arch != "" {
+		a = append(a, "-arch", s.arch)
 	}
 	if s.user != "" {
 		a = append(a, "-user", comillaSh(s.user))
