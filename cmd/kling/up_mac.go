@@ -135,7 +135,7 @@ func checksMac(p probeMac) []check {
 	if backend == machine.BackendHV {
 		whyMacOS = "kling-hv needs the in-kernel GIC of Hypervisor.framework and is built for macOS " + macOSMinHV + " or later"
 	}
-	cs := []check{
+	return []check{
 		{
 			label: "Apple Silicon", ok: p.arch == "arm64", fatal: true,
 			found: p.arch,
@@ -190,20 +190,6 @@ func checksMac(p probeMac) []check {
 			fix:   []string{copyHint},
 		},
 	}
-	// Con auto, quedarse en vz no es un fallo (vz funciona), pero se dice por
-	// qué no es hv y cómo llegar a él.
-	if motivo, ok := strings.CutPrefix(p.motivo, "auto: "); ok && backend == machine.BackendVZ {
-		cs = append(cs, check{
-			label: "kling-hv (daemon.vmm auto)", ok: false,
-			found: "using vz: " + motivo,
-			why:   "kling-hv restores in milliseconds and shares the memory of a golden's copies (docs/backend-hv.md)",
-			fix: []string{
-				"needs macOS " + macOSMinHV + "+ and kling-hv signed next to kling: the release installer ships it, or  make vz && make install",
-				"kling config set daemon.vmm vz      # to stay on vz without this notice",
-			},
-		})
-	}
-	return cs
 }
 
 // upMac diagnostica este Mac y, si se puede, arranca el daemon.
@@ -212,6 +198,12 @@ func upMac(root string, checkOnly bool) error {
 	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n", p.backend, root)
 	if p.motivo != "" {
 		fmt.Printf("vmm:         %s (%s)\n", p.backend, p.motivo)
+		// Con auto, quedarse en vz no es un fallo (vz funciona, y -check no
+		// debe salir con 1 en un Sonoma): una nota con cómo llegar a hv.
+		if strings.HasPrefix(p.motivo, "auto: ") && p.backend == machine.BackendVZ {
+			fmt.Println("             hv restores in ms and shares a golden's memory: it needs macOS " + macOSMinHV + "+ and kling-hv")
+			fmt.Println("             signed next to kling (the release installer ships it, or: make vz && make install)")
+		}
 	}
 	fmt.Println()
 	cs := checksMac(p)
