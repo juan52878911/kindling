@@ -33,6 +33,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
 - Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
 - Live shares move up to 1 MiB per operation when agent and daemon are both new (negotiated, 128 KiB otherwise), ro shares keep the guest page cache for files unchanged since the last open, and listing a large directory no longer reopens it for every page
+- macOS: the CPU ceiling charges time on efficiency cores at what it is worth on a performance core; under launchd a 25 % ceiling slowed a CPU-bound guest ×12–15 instead of ×4 (now ×4–5)
+- macOS: while the guest boots, the CPU ceiling lets all its vCPUs run (up to the host's cores), as on Linux
+- macOS: read-only drives use the host cache, and a drive marked `kling_disposable` (the overlay of a non-persistent machine) skips host flushes: 300 guest `sync` 1.8 → 0.7 s
+- macOS: bigger TCP buffers in the user-space network (8 MiB receive, 6 MiB send) and at most 512 live TCP connections per machine
 
 ### Fixed
 
@@ -53,6 +57,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: only a 400 that says the session is unknown triggers a new handshake and retry (a bad request returns its real error); the `/mcp/_all` endpoints cap the request body at 8 MiB
 - MCP gateway: re-adopting one of its own running instances after a failed liveness probe no longer resets its bridge and wipes live sessions
 - `kling-sandbox`: a prewarmed sandbox whose renew fails after it was labelled for a tenant is removed instead of left counting against that tenant; with a quota set, creating fails closed (503) while a host does not answer
+- macOS: in allowlist mode an IP resolved with TTL 0 stayed allowed forever; it now expires after 60 s like any other
+- macOS: if the CPU brake process dies with the VM's helper stopped, `kling-vz` exits instead of keeping a machine that never runs again; a SIGTERM to it resumes the helper first
+- macOS: a failed VM start no longer leaks the VM and its console pipe
+- macOS: a slow CPU reading no longer blocks the `kling-vz` API
 
 ## [0.18.0] - 2026-10-11
 

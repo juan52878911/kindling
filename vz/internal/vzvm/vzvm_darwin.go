@@ -75,11 +75,16 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	}
 	cfg.SetPlatformVirtualMachineConfiguration(platform)
 
-	m := &machine{stopped: make(chan error, 1), logf: f.Logf}
+	m := &machine{stopped: make(chan error, 1), fin: make(chan struct{}), logf: f.Logf}
 	ok := false
 	defer func() {
 		if !ok {
+			// La copia de la consola no llegó a arrancar: el extremo de
+			// lectura también es nuestro.
 			m.closeConsole()
+			if m.outR != nil {
+				m.outR.Close()
+			}
 		}
 	}()
 
@@ -107,7 +112,7 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	// Un virtio-blk por drive en el orden del Spec: vda, vdb... como Firecracker.
 	var disks []vz.StorageDeviceConfiguration
 	for _, d := range s.Drives {
-		att, err := adjuntoDisco(d.PathOnHost, d.IsReadOnly)
+		att, err := adjuntoDisco(d)
 		if err != nil {
 			return nil, fmt.Errorf("drive %s (%s): %w", d.DriveID, d.PathOnHost, err)
 		}
@@ -202,6 +207,10 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	}
 
 	go func() {
+		// Lee hasta el fin de fichero (el auxiliar y signal cierran sus
+		// extremos de escritura) y suelta el descriptor: antes se quedaba
+		// abierto para siempre, uno por VM creada.
+		defer m.outR.Close()
 		if f.Console != nil {
 			_, _ = io.Copy(f.Console, m.outR)
 		} else {
@@ -216,14 +225,20 @@ type machine struct {
 	vm                   *vz.VirtualMachine
 	inR, inW, outR, outW *os.File
 	stopped              chan error
-	once                 sync.Once
-	logf                 func(string, ...any)
-	view                 unsafe.Pointer // VZVirtualMachineView si hay ventana
+	// fin se cierra en signal: watch deja de esperar cambios de estado de
+	// una VM que ya no los va a tener (p. ej. la de un Start fallido).
+	fin  chan struct{}
+	once sync.Once
+	logf func(string, ...any)
+	view unsafe.Pointer // VZVirtualMachineView si hay ventana
 }
 
 // Screenshot devuelve la ventana de la VM como PNG (ver capture).
 func (m *machine) Screenshot() ([]byte, error) { return capture(m.view) }
 
+// closeConsole cierra nuestros extremos de las tuberías de consola menos el
+// de lectura de la salida, que es de la copia (la gorrutina de Create): ella
+// lo cierra al ver el fin de fichero, para no perder la cola de la consola.
 func (m *machine) closeConsole() {
 	for _, f := range []*os.File{m.inR, m.inW, m.outW} {
 		if f != nil {
@@ -233,14 +248,26 @@ func (m *machine) closeConsole() {
 }
 
 func (m *machine) watch() {
-	for st := range m.vm.StateChangedNotify() {
-		switch st {
-		case vz.VirtualMachineStateStopped:
-			m.signal(nil)
+	cambios := m.vm.StateChangedNotify()
+	for {
+		select {
+		case <-m.fin:
+			// Ya se avisó por otro camino (Stop de una VM que nunca
+			// arrancó, Start fallido): esta gorrutina era lo único que
+			// retenía la VM.
 			return
-		case vz.VirtualMachineStateError:
-			m.signal(errors.New("Virtualization.framework reported the VM in error state"))
-			return
+		case st, ok := <-cambios:
+			if !ok {
+				return
+			}
+			switch st {
+			case vz.VirtualMachineStateStopped:
+				m.signal(nil)
+				return
+			case vz.VirtualMachineStateError:
+				m.signal(errors.New("Virtualization.framework reported the VM in error state"))
+				return
+			}
 		}
 	}
 }
@@ -248,6 +275,7 @@ func (m *machine) watch() {
 func (m *machine) signal(err error) {
 	m.once.Do(func() {
 		m.stopped <- err
+		close(m.fin)
 		// Cerrar la escritura deja que la copia de la consola termine.
 		m.closeConsole()
 	})
@@ -255,7 +283,16 @@ func (m *machine) signal(err error) {
 
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
-func (m *machine) Start() error  { return m.vm.Start() }
+// Start arranca la VM. Si falla, la VM no llega a cambiar de estado y watch
+// no se enteraría nunca: se avisa aquí (Stopped con el error), lo que suelta
+// la gorrutina y la consola. Quien llama la abandona igualmente.
+func (m *machine) Start() error {
+	err := m.vm.Start()
+	if err != nil && !m.vm.CanStop() {
+		m.signal(fmt.Errorf("start: %w", err))
+	}
+	return err
+}
 func (m *machine) Pause() error  { return m.vm.Pause() }
 func (m *machine) Resume() error { return m.vm.Resume() }
 
@@ -286,34 +323,65 @@ func (m *machine) SetBalloonTargetMiB(mib int) error {
 	return nil
 }
 
-// adjuntoDisco crea el adjunto de un disco. Por defecto, el del framework
-// (caché automática). KLING_VZ_DISK_CACHING=cached|uncached|automatic y
-// KLING_VZ_DISK_SYNC=full|fsync|none lo cambian: sirven para comparar modos
-// cuando se investiga una lectura corrupta (prototypes/android/docs/sigill.md).
-func adjuntoDisco(path string, ro bool) (*vz.DiskImageStorageDeviceAttachment, error) {
-	c, s := os.Getenv("KLING_VZ_DISK_CACHING"), os.Getenv("KLING_VZ_DISK_SYNC")
-	if c == "" && s == "" {
-		return vz.NewDiskImageStorageDeviceAttachment(path, ro)
+// adjuntoDisco crea el adjunto de un disco con sus modos (modosDisco).
+func adjuntoDisco(d spec.Drive) (*vz.DiskImageStorageDeviceAttachment, error) {
+	cm, sm, def, err := modosDisco(d, os.Getenv("KLING_VZ_DISK_CACHING"), os.Getenv("KLING_VZ_DISK_SYNC"))
+	if err != nil {
+		return nil, err
 	}
+	if def {
+		return vz.NewDiskImageStorageDeviceAttachment(d.PathOnHost, d.IsReadOnly)
+	}
+	return vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(d.PathOnHost, d.IsReadOnly, cm, sm)
+}
+
+// modosDisco elige la caché y la sincronización de un disco:
+//
+//   - De solo lectura (la base, las capas, el dorado): caché "cached". Nadie
+//     escribe en ellos y los comparten las máquinas que arrancan de la misma
+//     imagen: que el host los guarde en su caché ahorra lecturas a todas.
+//   - De escritura: la caché por defecto del framework (automatic).
+//   - Sincronización: la del framework (full: cada flush del invitado llega
+//     al disco físico) salvo en el overlay desechable de una máquina no
+//     persistente (spec.Drive.SyncNone), que va con none. Volúmenes y discos
+//     de db nunca vienen marcados.
+//
+// KLING_VZ_DISK_CACHING=cached|uncached|automatic y
+// KLING_VZ_DISK_SYNC=full|fsync|none mandan sobre lo anterior, para todos los
+// discos: sirven para comparar modos cuando se investiga una lectura
+// corrupta (prototypes/android/docs/sigill.md). def: son los modos por
+// defecto del framework (el adjunto de siempre).
+func modosDisco(d spec.Drive, envCaching, envSync string) (vz.DiskImageCachingMode, vz.DiskImageSynchronizationMode, bool, error) {
 	cm := vz.DiskImageCachingModeAutomatic
-	switch c {
-	case "", "automatic":
+	if d.IsReadOnly {
+		cm = vz.DiskImageCachingModeCached
+	}
+	switch envCaching {
+	case "":
+	case "automatic":
+		cm = vz.DiskImageCachingModeAutomatic
 	case "cached":
 		cm = vz.DiskImageCachingModeCached
 	case "uncached":
 		cm = vz.DiskImageCachingModeUncached
 	default:
-		return nil, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", c)
+		return 0, 0, false, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", envCaching)
 	}
 	sm := vz.DiskImageSynchronizationModeFull
-	switch s {
-	case "", "full":
+	if d.SyncNone() {
+		sm = vz.DiskImageSynchronizationModeNone
+	}
+	switch envSync {
+	case "":
+	case "full":
+		sm = vz.DiskImageSynchronizationModeFull
 	case "fsync":
 		sm = vz.DiskImageSynchronizationModeFsync
 	case "none":
 		sm = vz.DiskImageSynchronizationModeNone
 	default:
-		return nil, fmt.Errorf("KLING_VZ_DISK_SYNC=%q: use full, fsync or none", s)
+		return 0, 0, false, fmt.Errorf("KLING_VZ_DISK_SYNC=%q: use full, fsync or none", envSync)
 	}
-	return vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(path, ro, cm, sm)
+	def := cm == vz.DiskImageCachingModeAutomatic && sm == vz.DiskImageSynchronizationModeFull
+	return cm, sm, def, nil
 }

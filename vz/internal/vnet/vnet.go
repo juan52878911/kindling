@@ -83,6 +83,20 @@ const (
 	MaxDNSUDPFlows = 64
 	MaxDNSTCPConns = 64
 	MaxUDPFlows    = 256
+	// MaxTCPFlows acota las conexiones TCP vivas que no son DNS (salida,
+	// aristas de grafo, proxy de bases de datos): cada una retiene dos
+	// goroutines, un socket del Mac y los buffers de la pila, que con
+	// tcpRXBufMax/tcpTXBufMax pueden crecer a varios MiB. El forwarder solo
+	// acotaba los SYN en vuelo (512); una vez aceptadas no había tope. Por
+	// encima, la conexión nueva recibe un RST.
+	MaxTCPFlows = 512
+
+	// Buffers TCP de la pila (por conexión), como los de Tailscale en su
+	// netstack: el máximo por defecto de gVisor (4 MiB) limita el caudal de
+	// una descarga larga con RTT alto, y la autoescala (moderate receive
+	// buffer) solo los agranda cuando el flujo lo pide.
+	tcpRXBufMax = 8 << 20
+	tcpTXBufMax = 6 << 20
 )
 
 // Config es lo que la red necesita saber de la máquina.
@@ -157,7 +171,7 @@ type Net struct {
 	wg       sync.WaitGroup
 
 	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
-	dnsUDP, dnsTCP, udpFlows chan struct{}
+	dnsUDP, dnsTCP, udpFlows, tcpFlows chan struct{}
 }
 
 // tomar ocupa una plaza de sem sin esperar; false si no queda ninguna.
@@ -231,6 +245,10 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 	})
+	if err := opcionesTCP(s); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	ep := channel.New(1024, mtu+header.EthernetMinimumSize, gwMAC)
 	// El framework entrega las tramas por memoria, sin cable: no hay nada que
 	// pueda corromperlas por el camino, y un invitado con offload de checksum
@@ -240,7 +258,7 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Net{cfg: cfg, stack: s, ep: ep, conn: conn, ctx: ctx, cancel: cancel, forwards: map[int]net.Listener{},
 		dnsUDP: make(chan struct{}, MaxDNSUDPFlows), dnsTCP: make(chan struct{}, MaxDNSTCPConns),
-		udpFlows: make(chan struct{}, MaxUDPFlows)}
+		udpFlows: make(chan struct{}, MaxUDPFlows), tcpFlows: make(chan struct{}, MaxTCPFlows)}
 	fail := func(what string, e tcpip.Error) (*Net, error) {
 		n.Close()
 		return nil, fmt.Errorf("netstack %s: %s", what, e)
@@ -336,6 +354,11 @@ func (n *Net) VMFile() *os.File { return n.vmFile }
 
 func (n *Net) rxLoop() {
 	defer n.wg.Done()
+	// Un único buffer de lectura: la trama se copia una vez, a un trozo del
+	// pool de gVisor del tamaño justo (buffer.MakeWithData), que la pila
+	// devuelve al pool al soltar el paquete. Antes se copiaba dos veces y la
+	// primera a memoria nueva por trama (append), que el recolector tenía que
+	// barrer a ritmo de red.
 	buf := make([]byte, 65536)
 	for {
 		k, err := n.conn.Read(buf)
@@ -351,7 +374,7 @@ func (n *Net) rxLoop() {
 			continue
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(append([]byte(nil), buf[:k]...)),
+			Payload: buffer.MakeWithData(buf[:k]),
 		})
 		n.ep.InjectInbound(0, pkt)
 		pkt.DecRef()
@@ -360,19 +383,40 @@ func (n *Net) rxLoop() {
 
 func (n *Net) txLoop() {
 	defer n.wg.Done()
+	// La trama se junta en un buffer propio que se reutiliza, en vez de
+	// pedir uno nuevo por trama (pkt.ToView).
+	buf := make([]byte, 0, mtu+header.EthernetMinimumSize+64)
 	for {
 		pkt := n.ep.ReadContext(n.ctx)
 		if pkt == nil {
 			return
 		}
-		v := pkt.ToView()
+		buf = buf[:0]
+		for _, v := range pkt.AsSlices() {
+			buf = append(buf, v...)
+		}
+		pkt.DecRef()
 		// Con la VM en pausa el otro lado no lee y el envío falla con ENOBUFS:
 		// se descarta la trama y TCP la retransmite, que es lo que haría un
 		// cable desconectado un momento.
-		_, _ = n.conn.Write(v.AsSlice())
-		v.Release()
-		pkt.DecRef()
+		_, _ = n.conn.Write(buf)
 	}
+}
+
+// opcionesTCP ajusta la pila TCP: buffers más grandes (tcpRXBufMax,
+// tcpTXBufMax), SACK y autoescala del buffer de recepción. Los dos últimos ya
+// vienen encendidos en gVisor; se fijan aquí para no depender de ello.
+func opcionesTCP(s *stack.Stack) error {
+	sack := tcpip.TCPSACKEnabled(true)
+	moderar := tcpip.TCPModerateReceiveBufferOption(true)
+	rx := tcpip.TCPReceiveBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: tcp.DefaultReceiveBufferSize, Max: tcpRXBufMax}
+	tx := tcpip.TCPSendBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: tcp.DefaultSendBufferSize, Max: tcpTXBufMax}
+	for _, o := range []tcpip.SettableTransportProtocolOption{&sack, &moderar, &rx, &tx} {
+		if e := s.SetTransportProtocolOption(tcp.ProtocolNumber, o); e != nil {
+			return fmt.Errorf("netstack tcp option %T: %s", o, e)
+		}
+	}
+	return nil
 }
 
 func addrOf(a tcpip.Address) netip.Addr {
@@ -403,6 +447,11 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
 		return
 	}
+	if !tomar(n.tcpFlows) {
+		r.Complete(true) // por encima de MaxTCPFlows: RST
+		return
+	}
+	defer func() { <-n.tcpFlows }()
 	if dst == GatewayIP && n.cfg.Graph != nil && n.cfg.Graph.Link(id.LocalPort) {
 		n.cfg.Graph.Serve(n.ctx, id.LocalPort, func() (net.Conn, error) {
 			var wq waiter.Queue
