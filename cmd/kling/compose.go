@@ -239,6 +239,7 @@ func composeUp(args []string) error {
 
 	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
 	_ = selfCmd(ctx, *host, "graph", "rm", "-f", t.Proyect).Run()
+	quitarHuerfanas(ctx, c, t)
 	if err := prepararCompose(ctx, c, *host, t, *fresh); err != nil {
 		return err
 	}
@@ -301,6 +302,28 @@ func composeUp(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "\nremoving %s...\n", t.Proyect)
 	return selfCmd(context.Background(), *host, "graph", "rm", "-f", t.Proyect).Run()
+}
+
+// quitarHuerfanas borra las máquinas <proyecto>-<nodo> de un grafo que ya
+// no existe: un up que falló a medias puede dejar una fallida que el grafo no
+// se llevó, y con ella el siguiente up falla por el nombre ("machine name is
+// taken") hasta un kling rm a mano. Solo las que llevan la etiqueta de grafo:
+// una máquina del usuario con ese nombre no se toca.
+func quitarHuerfanas(ctx context.Context, c *api.Client, t *traduccionCompose) {
+	ms, err := c.List(ctx)
+	if err != nil {
+		return
+	}
+	nombres := map[string]bool{}
+	for _, s := range t.vivos {
+		nombres[t.Proyect+"-"+s.nodo] = true
+	}
+	for _, m := range ms {
+		if nombres[m.Name] && m.Labels[api.LabelGraph] != "" {
+			fmt.Fprintf(os.Stderr, "removing %s, left %s by an earlier up\n", m.Name, m.State)
+			_ = c.Remove(ctx, m.ID)
+		}
+	}
 }
 
 func composeDown(args []string) error {
