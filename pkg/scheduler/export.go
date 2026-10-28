@@ -140,6 +140,16 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	return st
 }
 
+// SessionsOn cuenta las sesiones fijadas (Bind/BindGuest) a la máquina
+// machineID, aunque esa máquina ya no figure como instancia. Sirve a OnAdopt
+// para distinguir una máquina heredada de otro proceso de una propia que solo
+// se dejó de tener como instancia un momento.
+func (g *Scheduler) SessionsOn(machineID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sessionCountLocked(machineID)
+}
+
 // ---- sesiones aisladas: una microVM por sesión (ver aislada.go)
 
 // IsolatedSession devuelve, despierta, la microVM propia de la sesión key del

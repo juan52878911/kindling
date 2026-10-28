@@ -30,6 +30,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 - `kling-bridge`: client replies to server requests (sampling, elicitation, roots) are accepted at once instead of hanging until `-request-timeout`; sessions with an open SSE stream or a call in flight are never reaped or recycled; starting a session no longer holds the bridge lock
+- MCP gateway: only a 400 that says the session is unknown triggers a new handshake and retry (a bad request returns its real error); the `/mcp/_all` endpoints cap the request body at 8 MiB
+- MCP gateway: re-adopting one of its own running instances after a failed liveness probe no longer resets its bridge and wipes live sessions
 
 ## [0.18.0] - 2026-10-11
 
