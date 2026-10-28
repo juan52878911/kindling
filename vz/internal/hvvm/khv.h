@@ -51,6 +51,7 @@ struct khv_config {
   uint8_t mac[6];
   int rng;         // virtio-rng
   int vsock;       // virtio-vsock (el agente por AF_VSOCK)
+  int balloon;     // virtio-balloon: 0 sin globo, 1 con él, 2 con deflate_on_oom
   int console_fd;  // salida de la UART
 };
 
@@ -82,6 +83,7 @@ void fin_vm(int codigo, const char *motivo);  // la VM termina (desde cualquier 
 extern uint8_t *g_ram;
 extern uint64_t g_ram_size;
 void *gpa_ptr(uint64_t gpa, uint64_t len);  // NULL si se sale de la RAM
+int ram_soltar(uint64_t off, uint64_t len);  // devuelve esas páginas al fichero (globo)
 
 // Pausa de los dispositivos: con g_pausa los hilos de disco y red no tocan la
 // RAM (restaurando o haciendo snapshot). La cambia vm.c con mu_dev.
@@ -217,6 +219,24 @@ void vsock_despertar(void);
 // khv_vsock_dial abre una conexión al puerto port del invitado y devuelve el
 // descriptor de un socket de dominio Unix que la lleva, o -errno.
 int khv_vsock_dial(uint32_t port, int plazo_ms);
+
+// balloon (virtio-balloon; ver balloon.c)
+struct vballoon_state {
+  struct vmmio m;
+  struct vq q[2];
+  uint32_t num_pages, actual;  // en marcos de 4 KiB
+};
+int vballoon_init(uint32_t intid, bool deflate_on_oom);
+bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
+void vballoon_objetivo(uint32_t marcos);
+uint32_t vballoon_actual(void);
+uint64_t vballoon_sueltas(void);
+bool vballoon_inflada(uint64_t pagina);
+void vballoon_get(struct vballoon_state *s);
+void vballoon_reafirmar(void);
+void vballoon_set(const struct vballoon_state *s);
+// khv_balloon fija el globo en marcos de 4 KiB; -1 si la VM no tiene globo.
+int khv_balloon(uint32_t marcos);
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);

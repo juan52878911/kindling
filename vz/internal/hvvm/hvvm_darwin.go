@@ -145,13 +145,20 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	if s.Vsock {
 		cfg.vsock = 1
 	}
+	if s.Balloon != nil {
+		cfg.balloon = 1
+		if s.Balloon.DeflateOnOOM {
+			cfg.balloon = 2
+		}
+	}
 	cfg.console_fd = C.int(pw.Fd())
 
 	if C.khv_create(&cfg) != 0 {
 		return nil, errC("creating the VM")
 	}
 	f.creada = true
-	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock}
+	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock,
+		memMiB: s.MachineConfig.MemSizeMiB}
 	go m.esperar()
 	return m, nil
 }
@@ -162,6 +169,7 @@ type machine struct {
 	consola *os.File // extremo de escritura de la tubería de consola
 	net     *os.File // se guarda para que no lo cierre el recolector
 	vsock   bool
+	memMiB  int
 }
 
 func (m *machine) esperar() {
@@ -252,8 +260,16 @@ func (m *machine) DialVsock(ctx context.Context, port uint32) (net.Conn, error) 
 	return net.FileConn(f)
 }
 
-func (m *machine) SetBalloonTargetMiB(int) error {
-	return errors.New("kling-hv has no balloon device")
+// SetBalloonTargetMiB deja al invitado con mib MiB: el globo (balloon.c) se
+// infla hasta la diferencia con su RAM, como en kling-vz.
+func (m *machine) SetBalloonTargetMiB(mib int) error {
+	if mib < 0 || mib > m.memMiB {
+		mib = m.memMiB
+	}
+	if C.khv_balloon(C.uint32_t((m.memMiB-mib)*256)) != 0 {
+		return errors.New("the VM has no balloon device")
+	}
+	return nil
 }
 
 func (m *machine) Stopped() <-chan error { return m.stopped }

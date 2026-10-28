@@ -163,6 +163,8 @@ struct snap_hdr {
   // versión 2
   uint8_t hay_vsock;
   struct vvsock_state vsock;
+  uint8_t hay_globo;
+  struct vballoon_state globo;
 };
 #define SNAP_HDR_V1 offsetof(struct snap_hdr, hay_vsock)
 
@@ -176,12 +178,12 @@ static int ncpus = 1;
 static int ndisks;
 static char *disk_path[KHV_MAX_DISKS];
 static bool disk_ro[KHV_MAX_DISKS];
-static bool hay_red, hay_rng, hay_vsock;
+static bool hay_red, hay_rng, hay_vsock, hay_globo;
 static int net_fd = -1;
 static uint8_t net_mac[6];
 static char *kernel_path, *cmdline, *ram_dir;
 static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
-static int slot_net = -1, slot_rng = -1, slot_vsock = -1, nvirtio;
+static int slot_net = -1, slot_rng = -1, slot_vsock = -1, slot_globo = -1, nvirtio;
 
 // ===================== vCPU =====================
 
@@ -340,6 +342,7 @@ static void mmio(struct cpu *c, uint64_t ipa, bool w, unsigned srt, int size, bo
     else if (slot == slot_net) vnet_mmio(off, w, &v, size);
     else if (slot == slot_rng) vrng_mmio(off, w, &v, size);
     else if (slot == slot_vsock) vsock_mmio(off, w, &v, size);
+    else if (slot == slot_globo) vballoon_mmio(off, w, &v, size);
     else v = 0;
   } else {
     static int avisos;
@@ -644,6 +647,7 @@ int khv_create(const struct khv_config *c) {
   hay_red = c->net_fd >= 0;
   hay_rng = c->rng != 0;
   hay_vsock = c->vsock != 0;
+  hay_globo = c->balloon != 0;
   net_fd = c->net_fd;
   memcpy(net_mac, c->mac, 6);
   kernel_path = strdup(c->kernel ? c->kernel : "");
@@ -653,6 +657,7 @@ int khv_create(const struct khv_config *c) {
   if (hay_red) slot_net = nvirtio++;
   if (hay_rng) slot_rng = nvirtio++;
   if (hay_vsock) slot_vsock = nvirtio++;
+  if (hay_globo) slot_globo = nvirtio++;
   if (nvirtio > VIRTIO_MAX) {
     fallo("too many virtio devices (%d, at most %d)", nvirtio, VIRTIO_MAX);
     return -1;
@@ -681,6 +686,7 @@ int khv_create(const struct khv_config *c) {
   if (hay_red) vnet_init(net_fd, net_mac, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);
   if (hay_vsock) vsock_init(virtio_intid[slot_vsock]);
+  if (hay_globo && vballoon_init(virtio_intid[slot_globo], c->balloon == 2) != 0) return -1;
   return 0;
 }
 
@@ -693,6 +699,25 @@ static int mapear_ram(int fd) {
   }
   base_fd = fd;
   TRY(hv_vm_map(g_ram, RAM_BASE, g_ram_size, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+  return 0;
+}
+
+// ram_soltar devuelve al fichero las páginas [off, off+len) de la RAM: tira
+// la copia privada (sucia) y deja la del fichero, limpia y fuera de
+// phys_footprint. Es lo único que lo consigue con un mapeo MAP_PRIVATE de
+// fichero: madvise (FREE, FREE_REUSABLE, DONTNEED) no baja la huella de esas
+// páginas (medido en macOS 26.5). HVF lleva su propio mapeo de la región, así
+// que también se rehace. Si eso falla, la RAM del invitado queda rota: la VM
+// termina.
+int ram_soltar(uint64_t off, uint64_t len) {
+  if (!g_ram || off > g_ram_size || len > g_ram_size - off || (off | len) % PAGINA) return -1;
+  if (mmap(g_ram + off, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, base_fd, (off_t)off) == MAP_FAILED)
+    return -1;
+  if (hv_vm_unmap(RAM_BASE + off, len) != HV_SUCCESS ||
+      hv_vm_map(g_ram + off, RAM_BASE + off, len, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) != HV_SUCCESS) {
+    fin_vm(1, "remapping guest RAM for the balloon failed");
+    return -1;
+  }
   return 0;
 }
 
@@ -811,13 +836,19 @@ int khv_restore(const char *mem_path) {
     fallo("%s: snapshot state version %u, this kling-hv reads %u", mem_path, h.version, SNAP_VERSION);
     return -1;
   }
+  if (h.version == 1) {
+    // Una cabecera anterior no tiene vsock ni globo: el invitado nunca vio
+    // esos dispositivos (van detrás de los demás), así que no existen.
+    hay_vsock = hay_globo = false;
+  }
   if (h.ram_size != g_ram_size || (int)h.ncpus != ncpus || (int)h.ndisks != ndisks || (bool)h.hay_red != hay_red ||
-      (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || h.uart_intid != uart_intid) {
+      (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || (bool)h.hay_globo != hay_globo ||
+      h.uart_intid != uart_intid) {
     close(fd);
     fallo("the snapshot does not match the configured machine (ram %llu/%llu, cpus %u/%d, disks %u/%d, net %u/%d, "
-          "rng %u/%d, vsock %u/%d)",
+          "rng %u/%d, vsock %u/%d, balloon %u/%d)",
           h.ram_size, g_ram_size, h.ncpus, ncpus, h.ndisks, ndisks, h.hay_red, hay_red, h.hay_rng, hay_rng,
-          h.hay_vsock, hay_vsock);
+          h.hay_vsock, hay_vsock, h.hay_globo, hay_globo);
     return -1;
   }
   void *gdata = h.gic_size <= (uint64_t)st.st_size ? malloc(h.gic_size) : NULL;
@@ -841,6 +872,7 @@ int khv_restore(const char *mem_path) {
   }
   if (hay_rng) vrng_set(&h.vrng);
   if (hay_vsock) vsock_set(&h.vsock);
+  if (hay_globo) vballoon_set(&h.globo);
   restaurando = true;
   if (crear_vcpus() != 0) {
     free(gdata);
@@ -860,6 +892,7 @@ int khv_restore(const char *mem_path) {
   if (hay_red) vnet_reafirmar();
   if (hay_rng) vrng_reafirmar();
   if (hay_vsock) vsock_reafirmar();
+  if (hay_globo) vballoon_reafirmar();
   for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
   snap_t_pausa = h.t_pausa;
   // Queda en pausa hasta khv_resume: los PATCH de discos del núcleo ya
@@ -951,6 +984,8 @@ int khv_snapshot(const char *mem_out) {
   if (hay_rng) vrng_get(&h.vrng);
   h.hay_vsock = hay_vsock;
   if (hay_vsock) vsock_get(&h.vsock);
+  h.hay_globo = hay_globo;
+  if (hay_globo) vballoon_get(&h.globo);
   for (int i = 0; i < ncpus; i++) h.cpu[i] = cpus[i].st;
   hv_gic_state_t gs = hv_gic_state_create();
   if (!gs) {
@@ -1002,6 +1037,9 @@ int khv_snapshot(const char *mem_out) {
   // tras el thaw (2-4 ms escribiéndolas). Lo escrito queda en la caché.
   const unsigned char mascara =
       MINCORE_INCORE | MINCORE_MODIFIED | MINCORE_COPIED | MINCORE_ANONYMOUS | MINCORE_PAGED_OUT;
+  // Lo inflado en el globo no se escribe: al invitado no le importa qué tenga.
+  for (size_t i = 0; i < np; i++)
+    if (hay_globo && vballoon_inflada(i)) v[i] = 0;
   for (size_t i = 0; i < np;) {
     if (!(v[i] & mascara)) {
       i++;
@@ -1030,6 +1068,12 @@ fin:
   free(v);
   pthread_mutex_unlock(&op_mu);
   return ret;
+}
+
+int khv_balloon(uint32_t marcos) {
+  if (!hay_globo) return -1;
+  vballoon_objetivo(marcos);
+  return 0;
 }
 
 uint64_t khv_footprint(void) {
