@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -192,8 +191,9 @@ func checksMac(p probeMac) []check {
 	}
 }
 
-// upMac diagnostica este Mac y, si se puede, arranca el daemon.
-func upMac(root string, checkOnly bool) error {
+// upMac diagnostica este Mac y, si se puede, arranca el daemon (en endpoint).
+// Con install escribe antes el agente de launchd (launchd_mac.go).
+func upMac(root, endpoint string, checkOnly, install bool) error {
 	p := localProbeMac(root)
 	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n", p.backend, root)
 	if p.motivo != "" {
@@ -217,12 +217,25 @@ func upMac(root string, checkOnly bool) error {
 	}
 	fmt.Println()
 
+	a, err := agenteDaemonMac()
+	if err != nil {
+		return err
+	}
+	if install {
+		if err := instalarAgente(a, root); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	info := waitDaemon(ctx)
+	info := waitDaemonEn(ctx, endpoint)
 	cancel()
 	if info != nil {
 		fmt.Printf("daemon:      already running (%s, backend %s)\n", info.Version, info.Backend)
-	} else if err := startMacDaemon(); err != nil {
+		if install && !agenteCargado(a) {
+			fmt.Println("             not from the launchd agent: it starts the daemon at the next login, or stop")
+			fmt.Println("             this one and run `kling up` to start it from the agent now")
+		}
+	} else if err := startMacDaemon(a, endpoint); err != nil {
 		return err
 	}
 	if warn > 0 {
@@ -237,24 +250,27 @@ func upMac(root string, checkOnly bool) error {
 	return nil
 }
 
+// agenteCargado dice si launchd ya tiene el agente a.
+func agenteCargado(a agenteDaemon) bool {
+	return exec.Command("launchctl", "print", a.dominio()+"/"+a.label).Run() == nil
+}
+
 // startMacDaemon arranca el agente de launchd si está instalado; si no, dice
 // cómo instalarlo. Es lo único que up ejecuta por su cuenta, igual que en
 // Linux arranca los servicios de systemd, y también se imprime antes.
-func startMacDaemon() error {
-	home, _ := os.UserHomeDir()
-	plist := filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
+func startMacDaemon(a agenteDaemon, endpoint string) error {
+	plist := a.plist
 	if !fileExists(plist) {
 		fmt.Println("daemon:      not running, and there's no launchd agent to start it.")
 		fmt.Println("  Run it in a terminal:        kling daemon")
-		fmt.Println("  Or at every login: install " + plist)
-		fmt.Println("  (the plist is in docs/mac.md) and run `kling up` again.")
+		fmt.Println("  Or at every login:           kling up -install")
 		return nil
 	}
-	argv := []string{"launchctl", "bootstrap", "gui/" + strconv.Itoa(os.Getuid()), plist}
+	argv := []string{"launchctl", "bootstrap", a.dominio(), plist}
 	fmt.Printf("daemon:      $ %s\n", strings.Join(argv, " "))
 	if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
 		// Ya cargado: bootstrap falla, pero kickstart lo arranca.
-		argv = []string{"launchctl", "kickstart", "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchAgentLabel}
+		argv = []string{"launchctl", "kickstart", a.dominio() + "/" + a.label}
 		fmt.Printf("             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
 		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
@@ -262,11 +278,11 @@ func startMacDaemon() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if info := waitDaemon(ctx); info != nil {
+	if info := waitDaemonEn(ctx, endpoint); info != nil {
 		fmt.Printf("daemon:      ✓ responding (%s, backend %s)\n", info.Version, info.Backend)
 		return nil
 	}
 	fmt.Println("daemon:      started, but not yet responding on the socket.")
-	fmt.Println("  See why:  tail -n 50 \"$HOME/Library/Logs/kindling.log\"")
+	fmt.Printf("  See why:  tail -n 50 %q\n", a.log)
 	return nil
 }

@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -54,8 +55,12 @@ func cmdUp(args []string) error {
 	host := hostFlag(fs)
 	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
+	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
+	}
+	if *install && (runtime.GOOS != "darwin" || *checkOnly) {
+		return errors.New("-install is for macOS (on Linux, kling up installs the systemd units) and doesn't go with -check")
 	}
 
 	endpoint := loadConfig().Host(*host)
@@ -70,7 +75,7 @@ func cmdUp(args []string) error {
 		return upRemote(endpoint, config.Or(*root, "/var/lib/kindling"), *checkOnly)
 	case runtime.GOOS == "darwin":
 		// En macOS el runtime es kling-vz, sin KVM.
-		return upMac(config.Or(*root, transport.DefaultRoot()), *checkOnly)
+		return upMac(config.Or(*root, transport.DefaultRoot()), endpoint, *checkOnly, *install)
 	case hasKVM():
 		return upHere(config.Or(*root, transport.DefaultRoot()), *checkOnly)
 	default:
@@ -664,8 +669,11 @@ func startServices(p probe) error {
 }
 
 // waitDaemon espera a que el socket local conteste. Devuelve nil si se agota.
-func waitDaemon(ctx context.Context) *api.Info {
-	c := api.NewClient("")
+func waitDaemon(ctx context.Context) *api.Info { return waitDaemonEn(ctx, "") }
+
+// waitDaemonEn es waitDaemon contra endpoint ("" = el socket por defecto).
+func waitDaemonEn(ctx context.Context, endpoint string) *api.Info {
+	c := api.NewClient(endpoint)
 	for {
 		if info, err := c.Info(ctx); err == nil {
 			return info

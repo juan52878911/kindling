@@ -167,9 +167,22 @@ cualquier Linux arm64 con KVM.
 
 ## Arrancar el daemon al iniciar sesión (launchd)
 
-A mano basta con `kling daemon` en una terminal. Para que arranque solo, un
-agente de launchd en `~/Library/LaunchAgents/dev.kindling.daemon.plist`
-(launchd no expande `~` ni `$HOME`: rutas absolutas):
+A mano basta con `kling daemon` en una terminal. Para que arranque solo:
+
+```sh
+kling up -install
+```
+
+comprueba lo de `kling up -check`, escribe el agente de launchd
+`~/Library/LaunchAgents/dev.kindling.daemon.plist` (el `kling` que lo ejecuta,
+con rutas absolutas; `KLING_ROOT`, `KLING_SOCKET` y `KLING_VMM` si están
+puestos, porque launchd no hereda la shell) y lo arranca con `launchctl
+bootstrap`. Si el plist ya existe igual, no lo toca; si es distinto, no lo pisa
+y dice cómo quitarlo. `KLING_LAUNCH_AGENT_LABEL` y `KLING_LAUNCH_AGENT_PLIST`
+cambian la etiqueta y la ruta (el log va entonces junto al plist): sirven para
+probarlo con un daemon privado sin tocar el agente de verdad.
+
+Lo que escribe es esto (launchd no expande `~` ni `$HOME`: rutas absolutas):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
