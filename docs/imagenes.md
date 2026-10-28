@@ -949,7 +949,23 @@ descomprimen), así que `zstd` es un caso positivo.
 |---|---|---|
 | `gcr.io/distroless/static-debian12:nonroot` (sin `ENTRYPOINT`/`CMD` ni shell) | importaba y la máquina arrancaba «lista» y vacía | `the image has no ENTRYPOINT or CMD and no shell, so there is nothing to run: give the command after --, or -entrypoint` |
 | `nginx:alpine` con `-arch arm64` en un daemon amd64 | `guest agent …/kling-guest: ELF machine 0x3e is not arm64` | `ELF machine 0x3e is amd64, not arm64: the image is arm64 but the host's guest agent is amd64; kling runs images of the host's architecture, so import the amd64 variant (-arch amd64)` |
-| `ghcr.io/linuxserver/nginx` (s6-overlay, `/init`) | importaba; la máquina quedaba «not ready» y el servicio se reiniciaba sin fin (`s6-overlay-suexec: fatal: can only run as pid 1`, solo en los logs) | `the image uses s6-overlay as its init (/init), which must be PID 1 and can't run under kindling's agent: import it with its own command after -- or -entrypoint (the service itself, not /init)` |
+| `ghcr.io/linuxserver/nginx` (s6-overlay, `/init`) | importaba; la máquina quedaba «not ready» y el servicio se reiniciaba sin fin (`s6-overlay-suexec: fatal: can only run as pid 1`, solo en los logs) | `the image uses s6-overlay as its init (/init), which must be PID 1 and can't run under kindling's agent: import it with -init image (the image's init becomes PID 1; slower to boot), or with its own command after -- or -entrypoint (the service itself, not /init)` |
+
+### Init de la imagen como PID 1 (`-init image`)
+
+Opt-in para las imágenes con su propio init (s6-overlay, supervisord): `kling
+image import -init image lscr.io/linuxserver/syncthing`. El init en Go de
+kling-guest monta todo, lanza el agente como **hijo** y hace `exec` del
+ENTRYPOINT/CMD de la imagen, que pasa a ser el PID 1 (reparte las señales y
+cosecha a los huérfanos). `exec`, `logs` (la consola), la sonda de listo y el
+`resync` los sigue sirviendo el agente. `kling rm`/stop manda al PID 1 la señal
+de parada de la imagen (SIGTERM por defecto) y espera a que se vayan los demás
+procesos. Es más caro: la imagen no comparte base con otras (siempre un ext4
+entero) y arranca todo su init antes de estar lista (syncthing con s6: ~1,8–3 s
+frente a ~1,1 s de redis sin init). Límites: no admite `-ulimit` ni
+`-on-restore` (nadie reinicia el init), ignora `-user`/`-restart` (lo decide la
+imagen), y si el init sale la máquina muere (pánico del kernel). **systemd** no
+está probado: queda como limitación conocida.
 
 ### Tiempos en kt-pend (kling-ascci, amd64, ext4 local; mín/mediana/máx de 3 corridas, segundos)
 

@@ -44,7 +44,11 @@ func (s *Service) initLoop() {
 		timeout = 10 * time.Second
 	}
 	for end := time.Now().Add(timeout); time.Now().Before(end) && otherProcs(procRoot, os.Getpid()) > 0; {
-		time.Sleep(50 * time.Millisecond)
+		// Con sync en cada vuelta: si el init de la imagen sale en cuanto
+		// acaba su último hijo (supervisord), el kernel entra en pánico y
+		// lo que quedara en la caché se pierde.
+		syncFS()
+		time.Sleep(20 * time.Millisecond)
 	}
 	syncFS()
 }
