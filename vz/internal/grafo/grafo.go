@@ -225,6 +225,17 @@ func (g *Grafo) DialMachine(ctx context.Context, id, owner string, port int) (ne
 	return c, nil
 }
 
+// DialLoopback es el credproxy Options.DialLoopback del proxy de la máquina:
+// la conexión con el upstream de una credencial en el loopback del Mac, que
+// marca y entrega el daemon (el perfil de sandbox no abre el loopback).
+func (g *Grafo) DialLoopback(ctx context.Context, port int) (net.Conn, error) {
+	c, _, err := g.pedir(ctx, linkbroker.Request{V: linkbroker.Version, Kind: linkbroker.KindLoopback, Port: port})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // pedir pide una conexión al daemon y la envuelve con su arrendamiento.
 func (g *Grafo) pedir(ctx context.Context, req linkbroker.Request) (*Conexion, linkbroker.Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, PlazoResolver)

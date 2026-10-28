@@ -380,3 +380,40 @@ func esperarSesionesBroker(t *testing.T, origen string, n int) {
 		}
 	}
 }
+
+// El upstream del loopback de una credencial: el VMM solo dice el puerto y el
+// daemon marca la dirección de SU credencial; nunca un puerto sin credencial,
+// el rango de los reenvíos ni el de otra máquina.
+func TestBrokerLoopback(t *testing.T) {
+	m := escenaModeloA(t)
+	eco := nuevoEcoBroker(t, m)
+	req := linkbroker.Request{Kind: linkbroker.KindLoopback, Port: 5432}
+	if _, _, _, err := pedirBroker(t, m, idAgente, req); err == nil || !strings.Contains(err.Error(), "no credential") {
+		t.Fatalf("sin la credencial en el almacén: %v", err)
+	}
+	cred := credproxy.Credential{Env: "PGPASSWORD", Domain: "db.local", Placeholder: "kling-cred-l", Secret: "s-clave-de-prueba",
+		Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb", Upstream: "127.0.0.1:5432",
+		UpstreamTLS: credproxy.UpstreamTLSDisable}
+	if err := m.guardarCredenciales(idAgente, []credproxy.Credential{cred}); err != nil {
+		t.Fatal(err)
+	}
+	for _, mal := range []linkbroker.Request{
+		{Kind: linkbroker.KindLoopback, Port: 5433},
+		{Kind: linkbroker.KindLoopback, Port: credproxy.ForwardPortMin},
+	} {
+		if _, _, _, err := pedirBroker(t, m, idAgente, mal); err == nil {
+			t.Fatalf("aceptada: %+v", mal)
+		}
+	}
+	if _, _, _, err := pedirBroker(t, m, idOtra, req); err == nil {
+		t.Fatal("otra máquina usó la credencial del agente")
+	}
+	tc, _, _, err := pedirBroker(t, m, idAgente, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := eco.lista(); l[len(l)-1] != "127.0.0.1:5432" {
+		t.Fatalf("marcó a %v", l)
+	}
+	ecoPor(t, tc)
+}

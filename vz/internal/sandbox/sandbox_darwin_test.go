@@ -32,7 +32,7 @@ func TestParametros(t *testing.T) {
 	// Todos los parámetros presentes (el perfil los lee sin comprobar), las
 	// rutas reales (el TempDir de macOS cuelga de /var, que es /private/var)
 	// y un broker que no abre nada.
-	if m["NET"] != "1" || m["LOOP"] != "0" || m["L0"] != filepath.Join(real, "k") || m["E0"] != filepath.Join(real, "o") ||
+	if m["NET"] != "1" || m["L0"] != filepath.Join(real, "k") || m["E0"] != filepath.Join(real, "o") ||
 		m["L15"] != "" || !strings.HasPrefix(m["BROKER"], "/dev/null/") {
 		t.Fatalf("parámetros: %v", m)
 	}

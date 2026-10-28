@@ -395,7 +395,8 @@ func ResolverUpstream(ctx context.Context, lookup func(ctx context.Context, host
 
 // dialFijado marca un upstream fijado por el operador: resuelve el nombre (si
 // lo es), se niega si alguna IP está prohibida y prueba las demás en orden.
-func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, addr string) (net.Conn, error) {
+// Una IP del loopback va por loop si no es nil (Options.DialLoopback).
+func dialFijado(lookup lookupUpstream, d *net.Dialer, loop func(context.Context, int) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
 	return func(ctx context.Context, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -411,6 +412,11 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, 
 		}
 		var last error
 		for _, ip := range ips {
+			if loop != nil && ip.Unmap().IsLoopback() {
+				// Todas las IP del loopback son la misma petición: el daemon
+				// marca la dirección de la credencial.
+				return loop(ctx, pn)
+			}
 			c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), port))
 			if err == nil {
 				return c, nil

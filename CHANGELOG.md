@@ -40,6 +40,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: the `kling-vz`/`kling-hv` sandbox profiles have no per-port rules: `sandbox_init` takes ~9 ms instead of 53-68 ms (vz) and 10-29 ms (hv); the host loopback is always closed to the VMM and a credential's `-upstream 127.0.0.1:PORT` is dialed by the daemon over the link broker; `kling-vz` listens on any 127.0.0.1 port like `kling-hv`
 - macOS: the daemon publishes committed snapshots itself (clonefile from the machine directory, no symlinks or hardlinks); `kling-vz` and `kling-hv` no longer start a snapshot keeper process per machine (~6 MiB less per machine: 22.1 → 15.5 MiB per `kling-hv` copy). A new VMM needs the new daemon to commit
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 

@@ -218,6 +218,11 @@ func run() int {
 		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
 			return grafoMaq.DialMachine(ctx, id, owner, port)
 		}
+		// El loopback del Mac (-upstream 127.0.0.1:5432) también lo marca el
+		// daemon: el perfil no abre el loopback a este proceso.
+		opts.DialLoopback = func(ctx context.Context, port int) (net.Conn, error) {
+			return grafoMaq.DialLoopback(ctx, port)
+		}
 	}
 	creds = credproxy.New(opts)
 	if broker != "" {

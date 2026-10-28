@@ -1206,10 +1206,16 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     existe, y lo que se escriba después en el origen no llega al dorado. Hasta la
     v0.18 lo hacía un proceso custodio por máquina, confinado en su propio perfil;
     `kling-vz` y `kling-hv` siguen sin poder escribir en `snapshots/`.
-  - **Red**: escucha solo en `127.0.0.1:29000-29999` (sus reenvíos); sale al exterior
-    solo con egress distinto de none; al loopback del Mac (que para el sandbox incluye
-    `0.0.0.0`) solo en allowlist (el `-upstream 127.0.0.1:5432` de una credencial), y
-    nunca al rango de los reenvíos.
+  - **Red**: escucha en `127.0.0.1` (sus reenvíos, del rango 29000-29999; ahora el
+    perfil no lo acota por puerto, como el de `kling-hv`: una regla por puerto
+    eran ~40 ms de `sandbox_init` en cada arranque y restauración, y escuchar no da
+    acceso a otra máquina); sale al exterior solo con egress distinto de none; y nunca
+    al loopback del Mac (que para el sandbox incluye `0.0.0.0`). El `-upstream
+    127.0.0.1:5432` de una credencial lo marca el daemon, que solo acepta el puerto de
+    una credencial de esa máquina, fuera del rango de los reenvíos y que no sea el de
+    ninguna máquina, y le entrega el socket por el broker (`linkbroker.KindLoopback`).
+    Antes el perfil abría todo el loopback en allowlist salvo el rango, con 1000
+    reglas.
   - Probado con `sandbox-exec` y el perfil real (`vz/scripts/sandbox-perfil.sh`): con el
     perfil anterior, 15 de 23 comprobaciones abrían lo que no debían (leer
     `snapshot.key`, otras máquinas y dorados ajenos; escribir dorados y volúmenes ajenos;

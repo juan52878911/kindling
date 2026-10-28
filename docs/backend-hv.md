@@ -90,11 +90,13 @@ páginas y el núcleo no las aprieta sin `-force`, como con Firecracker.
 la VM, con el mismo reparto que `kling-vz` (`vz/internal/sandbox`, que
 comparten): escribe solo en el directorio de su máquina, lee los ficheros de su
 VM y los dorados los publica el daemon. Sin `mach-lookup`, IOKit ni memoria
-compartida: Hypervisor.framework no los necesita. Los reenvíos escuchan en
-cualquier puerto de 127.0.0.1 en vez de una regla por puerto del rango
-reservado: las 1000 reglas costaban ~38 ms de compilar el perfil en cada
-restauración. Aun así `sandbox_init` cuesta ~10 ms y ~3 MiB de huella por
-proceso (medido con un perfil vacío), y el custodio es otro proceso de ~8 MiB.
+compartida: Hypervisor.framework no los necesita. Ningún perfil lleva reglas
+por puerto: los reenvíos escuchan en cualquier puerto de 127.0.0.1, y el
+loopback del Mac está cerrado siempre (el `-upstream 127.0.0.1:5432` de una
+credencial lo marca el daemon por el broker), así que una máquina en allowlist
+ya no compila 1000 reglas para cerrar el rango de los reenvíos. Lo que queda
+de `sandbox_init` (~9 ms, `go test -bench SandboxInit ./internal/sandbox` en
+vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
 
 ## El fichero de memoria del snapshot
 

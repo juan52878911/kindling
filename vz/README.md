@@ -258,14 +258,16 @@ VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
   directorio y lo publica el daemon, que lo clona desde un descriptor abierto
   sin seguir enlaces a `snapshots/<nombre>/{snap,mem}.file`, sin pisar ningún
   fichero (`internal/machine/publicar_volcado.go` del núcleo);
-- escucha en su socket y en `127.0.0.1` solo en el rango de los reenvíos
-  (29000-29999); sale a la red solo si la máquina tiene egress distinto de
-  `none`, y al loopback del Mac solo en allowlist (el `-upstream` de una
-  credencial) y nunca al rango de los reenvíos, donde está el agente de las
-  demás máquinas;
+- escucha en su socket y en `127.0.0.1` (sus reenvíos, que salen del rango
+  29000-29999; el perfil no lo acota por puerto); sale a la red solo si la
+  máquina tiene egress distinto de `none`, y nunca al loopback del Mac, donde
+  están los reenvíos y el agente de las demás máquinas: el `-upstream
+  127.0.0.1:5432` de una credencial lo marca el daemon y se lo entrega por el
+  broker;
 - de los sockets Unix de fuera, solo puede abrir el del broker de enlaces del
   daemon (`KLING_VZ_BROKER`), por el que pide las conexiones de las aristas de un
-  grafo y de `kling db attach` (`internal/grafo`, `pkg/linkbroker`).
+  grafo, de `kling db attach` y del upstream en el loopback de una credencial
+  (`internal/grafo`, `pkg/linkbroker`).
 
 La raíz la pasa el daemon en `KLING_VZ_CONFINE_ROOT`, y el broker en
 `KLING_VZ_BROKER`; sin la raíz (lanzado a mano) no se confina y lo dice en el log. `KLING_VZ_NO_SANDBOX=1` lo apaga para

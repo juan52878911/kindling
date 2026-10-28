@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"unsafe"
 
-	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/server"
 )
 
@@ -33,7 +32,7 @@ import (
 const sinBroker = "/dev/null/kling-vz-no-broker"
 
 // MaxFicheros es cuántos ficheros de lectura (L0..) y de escritura (E0..)
-// admite el perfil: el kernel y unos pocos discos, de sobra.
+// se le pasan al perfil como mucho: el kernel y unos pocos discos, de sobra.
 const MaxFicheros = 16
 
 // Real resuelve p a su ruta real y absoluta: el sandbox compara rutas reales,
@@ -65,18 +64,15 @@ func Parametros(root, mdir, broker string, c server.Confinamiento) ([]string, er
 		return nil, fmt.Errorf("the VM has %d read-only and %d read-write files; the sandbox profile admits %d of each",
 			len(c.Lectura), len(c.Escritura), MaxFicheros)
 	}
-	pares := []string{"ROOT", root, "MDIR", mdir, "NET", uno(c.ConRed), "LOOP", uno(c.ConRed && c.Loopback),
-		"BROKER", broker, "GFX", uno(c.Graphics),
-		"FMIN", strconv.Itoa(credproxy.ForwardPortMin), "FMAX", strconv.Itoa(credproxy.ForwardPortMax)}
-	for i := 0; i < MaxFicheros; i++ {
-		l, e := "", ""
-		if i < len(c.Lectura) {
-			l = Real(c.Lectura[i])
-		}
-		if i < len(c.Escritura) {
-			e = Real(c.Escritura[i])
-		}
-		pares = append(pares, "L"+strconv.Itoa(i), l, "E"+strconv.Itoa(i), e)
+	pares := []string{"ROOT", root, "MDIR", mdir, "NET", uno(c.ConRed), "BROKER", broker, "GFX", uno(c.Graphics),
+		"NL", strconv.Itoa(len(c.Lectura)), "NE", strconv.Itoa(len(c.Escritura))}
+	// Solo los que hay: el perfil recorre NL y NE, no los 16 (~1 ms menos de
+	// sandbox_init con los 4-5 ficheros de una VM normal).
+	for i, f := range c.Lectura {
+		pares = append(pares, "L"+strconv.Itoa(i), Real(f))
+	}
+	for i, f := range c.Escritura {
+		pares = append(pares, "E"+strconv.Itoa(i), Real(f))
 	}
 	return pares, nil
 }
@@ -157,8 +153,8 @@ func Preparar(o Opciones) (func(server.Confinamiento) error, func(string) (strin
 			return err
 		}
 		confinado = true
-		o.Logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v, loopback: %v",
-			len(c.Lectura), len(c.Escritura), mdir, c.ConRed, c.ConRed && c.Loopback)
+		o.Logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v",
+			len(c.Lectura), len(c.Escritura), mdir, c.ConRed)
 		return nil
 	}
 	return confine, destino
