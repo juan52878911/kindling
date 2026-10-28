@@ -83,16 +83,9 @@ func (e frenoCaido) Unwrap() error        { return e.error }
 // footprint/freno_darwin.go).
 const argFreno = "--cpu-brake"
 
-// argCustodio lanza este binario como custodio de snapshots (ver
-// internal/custodio), con la carpeta de snapshots y la de la máquina.
-const argCustodio = "--snapshot-keeper"
-
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == argFreno {
 		os.Exit(servirFreno())
-	}
-	if len(os.Args) == 4 && os.Args[1] == argCustodio {
-		os.Exit(sandbox.ServirCustodio("kling-vz", os.Args[2], os.Args[3]))
 	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
@@ -239,7 +232,7 @@ func run() int {
 	// Encerrado, este proceso solo escribe en el directorio de su máquina; ver
 	// internal/sandbox y kling-vz.sb.
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-vz", Perfil: perfil,
-		ArgCustodio: argCustodio, Sock: *sock, Broker: rutaBroker(), Logf: logf})
+		Sock: *sock, Broker: rutaBroker(), Logf: logf})
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},

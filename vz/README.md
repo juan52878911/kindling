@@ -255,10 +255,9 @@ VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
   de lectura y escritura (su overlay, sus volúmenes). Nada más de la raíz: ni
   `secrets/`, ni los dorados que no restaura, ni otras máquinas;
 - no escribe en `snapshots/`: el dorado de `kling commit` lo vuelca en su
-  directorio y lo coloca el **custodio** (`internal/custodio`), un proceso que
-  lanza antes de encerrarse, confinado en su propio perfil, que solo clona a
-  `snapshots/<nombre>/{snap,mem}.file` en un directorio que ya existe, sin
-  `meta.json` y sin pisar ningún fichero;
+  directorio y lo publica el daemon, que lo clona desde un descriptor abierto
+  sin seguir enlaces a `snapshots/<nombre>/{snap,mem}.file`, sin pisar ningún
+  fichero (`internal/machine/publicar_volcado.go` del núcleo);
 - escucha en su socket y en `127.0.0.1` solo en el rango de los reenvíos
   (29000-29999); sale a la red solo si la máquina tiene egress distinto de
   `none`, y al loopback del Mac solo en allowlist (el `-upstream` de una

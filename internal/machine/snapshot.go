@@ -444,8 +444,28 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// no solo si el commit sale bien: falle lo que falle a partir de aquí, la
 	// plantilla se reanuda con el mapa ya reiniciado.
 	m.olvidarDiffBase(mc.ID)
-	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
+	// En macOS el VMM, confinado, no escribe en snapshots/: vuelca en el
+	// directorio de su máquina y el daemon lo clona a su sitio
+	// (publicar_volcado.go).
+	volSnap, volMem := snapPath, memPath
+	if volcadoEnLaMaquina && !jailed {
+		mdir := m.dir(mc.ID)
+		volSnap, volMem = filepath.Join(mdir, volcadoTmpSnap), filepath.Join(mdir, volcadoTmpMem)
+		quitarVolcadoTemporal(mdir)
+		defer quitarVolcadoTemporal(mdir)
+	}
+	if err := lento.Snapshot(ctx, volSnap, volMem); err != nil {
 		return nil, err
+	}
+	if volSnap != snapPath {
+		mdir := m.dir(mc.ID)
+		if err := m.publicarVolcado(limpio, mdir, volcadoTmpMem, memPath); err != nil {
+			return nil, err
+		}
+		if err := m.publicarVolcado(limpio, mdir, volcadoTmpSnap, snapPath); err != nil {
+			return nil, err
+		}
+		quitarVolcadoTemporal(mdir)
 	}
 	t.marca("dump")
 	if jailed {

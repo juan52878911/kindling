@@ -124,11 +124,11 @@ type Deps struct {
 	// VM: preferimos no arrancar a arrancar sin la barrera.
 	Confine func(Confinamiento) error
 	// Destino, si no es nil, dice dónde escribir de verdad un fichero de
-	// snapshot pedido en path: confinado, este proceso solo escribe en el
-	// directorio de su máquina, así que un destino de fuera (el dorado de
-	// kling commit en snapshots/<nombre>/) se escribe en un temporal suyo y
-	// publicar lo deja en path (vz/internal/custodio). publicar nil: se
-	// escribe en path directamente. Nil = siempre directamente.
+	// snapshot pedido en path, o un error si este proceso no puede escribirlo
+	// (confinado, solo escribe en el directorio de su máquina; el dorado de
+	// kling commit lo publica el daemon). publicar, si no es nil, se llama al
+	// acabar para dejar lo escrito en path. publicar nil: se escribe en path
+	// directamente. Nil = siempre directamente.
 	Destino func(path string) (escribir string, publicar func() error, err error)
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).

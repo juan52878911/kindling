@@ -74,10 +74,6 @@ func logf(format string, args ...any) {
 	stdout.line("kling-hv: " + fmt.Sprintf(format, args...))
 }
 
-// argCustodio lanza este binario como custodio de snapshots (ver
-// internal/custodio), con la carpeta de snapshots y la de la máquina.
-const argCustodio = "--snapshot-keeper"
-
 // perfil es el sandbox de kling-hv (ver internal/sandbox).
 //
 //go:embed kling-hv.sb
@@ -91,9 +87,6 @@ func main() {
 	// misma latencia. GOMAXPROCS en el entorno sigue mandando.
 	if os.Getenv("GOMAXPROCS") == "" {
 		runtime.GOMAXPROCS(2)
-	}
-	if len(os.Args) == 4 && os.Args[1] == argCustodio {
-		os.Exit(sandbox.ServirCustodio("kling-hv", os.Args[2], os.Args[3]))
 	}
 	os.Exit(run())
 }
@@ -170,10 +163,10 @@ func run() int {
 	syscall.Umask(0o077)
 
 	// Como kling-vz: al crear o restaurar la VM se encierra en kling-hv.sb y
-	// solo escribe en el directorio de su máquina; los dorados los coloca el
-	// custodio (internal/sandbox).
+	// solo escribe en el directorio de su máquina; los dorados los publica el
+	// daemon (internal/sandbox).
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
-		ArgCustodio: argCustodio, Sock: *sock, Broker: broker, Logf: logf})
+		Sock: *sock, Broker: broker, Logf: logf})
 
 	peers := peercred.New()
 	srv := server.New(server.Deps{

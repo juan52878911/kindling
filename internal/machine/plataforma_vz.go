@@ -710,8 +710,7 @@ func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) in
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
 // de Apple que aloja la VM (con vz es donde vive de verdad la memoria). Y
 // suma la de sus hijos, que el ayudante no cuenta: el freno del tope de CPU
-// de kling-vz y el custodio de snapshots, unos MiB de runtime de Go cada uno
-// (huella_vz.go). Sin eso
+// de kling-vz, unos MiB de runtime de Go (huella_vz.go). Sin eso
 // la memoria por máquina que dan kling top y las métricas se quedaba corta.
 func memoriaVMM(pid int, sock string) int64 {
 	if sock == "" {
@@ -763,7 +762,7 @@ func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
 // (vz/cmd/kling-vz/kling-vz.sb): lee y escribe su directorio de máquina y,
 // fuera de él, solo los ficheros exactos que su VM necesita; nunca secrets/, y
-// en snapshots/ no escribe (los dorados los coloca el custodio).
+// en snapshots/ no escribe (los dorados los publica el daemon, publicar_volcado.go).
 //
 // Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.

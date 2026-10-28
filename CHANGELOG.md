@@ -40,6 +40,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: the daemon publishes committed snapshots itself (clonefile from the machine directory, no symlinks or hardlinks); `kling-vz` and `kling-hv` no longer start a snapshot keeper process per machine (~6 MiB less per machine: 22.1 → 15.5 MiB per `kling-hv` copy). A new VMM needs the new daemon to commit
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
 - `kling-vz` no longer wakes up 10 times a second per VM: the CPU regulator waits for a change when there is no ceiling (the vz default) and backs off to 500 ms with an idle VM; the credential audit log arms its flush timer only with something pending (~65 to ~1 context switches/s per VM, also paused)

@@ -54,7 +54,7 @@
 ;; Ficheros: su directorio entero (socket, log de auditoría, overlay y
 ;; congelación) y los ficheros exactos de su VM. Un snapshot dorado de
 ;; kling commit (snapshots/<nombre>/) no lo escribe este proceso: lo vuelca en
-;; su directorio y lo coloca el custodio (vz/internal/custodio).
+;; su directorio y lo publica el daemon (internal/machine/publicar_volcado.go).
 (allow file-read* file-write* file-ioctl (subpath (param "MDIR")))
 (cada-uno "L" 16 (lambda (f) (allow file-read* (literal f))))
 (cada-uno "E" 16 (lambda (f) (allow file-read* file-write* file-ioctl (literal f))))
