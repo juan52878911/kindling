@@ -11,6 +11,7 @@ package hvvm
 import "C"
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -102,7 +104,13 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		}
 	}()
 	cfg.kernel = cstr(s.BootSource.KernelImagePath)
-	cfg.cmdline = cstr(s.BootSource.BootArgs)
+	args := s.BootSource.BootArgs
+	if s.Vsock {
+		// El mismo parámetro que añade el servidor a la línea traducida de vz:
+		// el agente escucha entonces también por AF_VSOCK.
+		args += " " + server.VsockBootParam
+	}
+	cfg.cmdline = cstr(args)
 	cfg.ram_dir = cstr(f.RAMDir)
 	cfg.ndisks = C.int(len(s.Drives))
 	for i, d := range s.Drives {
@@ -134,13 +142,16 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	if s.Entropy {
 		cfg.rng = 1
 	}
+	if s.Vsock {
+		cfg.vsock = 1
+	}
 	cfg.console_fd = C.int(pw.Fd())
 
 	if C.khv_create(&cfg) != 0 {
 		return nil, errC("creating the VM")
 	}
 	f.creada = true
-	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile}
+	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock}
 	go m.esperar()
 	return m, nil
 }
@@ -150,6 +161,7 @@ type machine struct {
 	stopped chan error
 	consola *os.File // extremo de escritura de la tubería de consola
 	net     *os.File // se guarda para que no lo cierre el recolector
+	vsock   bool
 }
 
 func (m *machine) esperar() {
@@ -206,6 +218,38 @@ func (m *machine) RestoreState(path string) error {
 		return errC("restoring")
 	}
 	return nil
+}
+
+// DialVsock abre una conexión virtio-vsock al puerto port del invitado (ver
+// vsock.c): el canal con el agente, como en kling-vz. Cada llamada es una
+// conexión nueva; tras restaurar, el dispositivo manda TRANSPORT_RESET y las
+// que el invitado creía vivas mueren, pero su listener sigue.
+func (m *machine) DialVsock(ctx context.Context, port uint32) (net.Conn, error) {
+	if !m.vsock {
+		return nil, errors.New("the VM has no vsock device")
+	}
+	plazo := 2 * time.Second
+	if d, ok := ctx.Deadline(); ok {
+		plazo = time.Until(d)
+	}
+	if plazo <= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	ms := plazo.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	fd := int(C.khv_vsock_dial(C.uint32_t(port), C.int(ms)))
+	if fd < 0 {
+		err := syscall.Errno(-fd)
+		if err == syscall.ETIMEDOUT && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("vsock connect to port %d: %w", port, err)
+	}
+	f := os.NewFile(uintptr(fd), "vsock")
+	defer f.Close()
+	return net.FileConn(f)
 }
 
 func (m *machine) SetBalloonTargetMiB(int) error {

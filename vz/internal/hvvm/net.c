@@ -39,16 +39,7 @@ static void tx(void) {
     if (q->last_avail == *(volatile uint16_t *)&avail[1]) break;
     uint16_t head = avail[2 + q->last_avail % q->num];
     q->last_avail++;
-    size_t n = 0;
-    for (uint16_t i = head, k = 0; k < q->num; i = desc[i].next, k++) {
-      if (i >= q->num) break;
-      void *d = gpa_ptr(desc[i].addr, desc[i].len);
-      if (d && n + desc[i].len <= sizeof buf) {
-        memcpy(buf + n, d, desc[i].len);
-        n += desc[i].len;
-      }
-      if (!(desc[i].flags & VIRTQ_DESC_F_NEXT)) break;
-    }
+    size_t n = vq_leer(q, desc, head, buf, sizeof buf);  // 0 si la cadena no vale o no cabe
     if (fd >= 0 && n > HDR) send(fd, buf + HDR, n - HDR, 0);  // ENOBUFS: se pierde, TCP reintenta
     vq_push(q, used, head, 0);
     hecho = true;
@@ -75,21 +66,14 @@ static bool rx_entregar(const uint8_t *trama, size_t n, bool *sin_buf) {
   }
   uint16_t head = avail[2 + q->last_avail % q->num];
   q->last_avail++;
-  uint8_t hdr[HDR] = {0};
-  hdr[10] = 1;  // num_buffers
-  size_t off = 0, total = HDR + n;
-  for (uint16_t i = head, k = 0; k < q->num && off < total; i = desc[i].next, k++) {
-    if (i >= q->num) break;
-    uint8_t *d = gpa_ptr(desc[i].addr, desc[i].len);
-    if (!d) break;
-    size_t l = desc[i].len < total - off ? desc[i].len : total - off;
-    size_t de_hdr = off < HDR ? (HDR - off < l ? HDR - off : l) : 0;
-    if (de_hdr) memcpy(d, hdr + off, de_hdr);
-    if (l > de_hdr) memcpy(d + de_hdr, trama + (off + de_hdr - HDR), l - de_hdr);
-    off += l;
-    if (!(desc[i].flags & VIRTQ_DESC_F_NEXT)) break;
-  }
-  vq_push(q, used, head, (uint32_t)off);
+  static uint8_t pkt[HDR + 65536];
+  if (n > sizeof pkt - HDR) n = sizeof pkt - HDR;
+  memset(pkt, 0, HDR);
+  pkt[10] = 1;  // num_buffers
+  memcpy(pkt + HDR, trama, n);
+  // Lo que no quepa en la cadena se pierde (trama truncada), como antes.
+  uint32_t off = vq_escribir(q, desc, head, pkt, (uint32_t)(HDR + n));
+  vq_push(q, used, head, off);
   s.m.isr |= 1;
   irq();
   return true;

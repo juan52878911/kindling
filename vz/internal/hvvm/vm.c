@@ -29,6 +29,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/clonefile.h>
 #include <sys/mman.h>
@@ -140,7 +141,9 @@ struct cpu_state {
 };
 
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
-#define SNAP_VERSION 1
+// 2 añade vsock al final de la cabecera; una de la versión 1 (sin él) se lee
+// como un prefijo.
+#define SNAP_VERSION 2
 struct snap_hdr {
   uint64_t magic;
   uint32_t version, ncpus, ndisks;
@@ -157,7 +160,11 @@ struct snap_hdr {
   struct vrng_state vrng;
   struct cpu_state cpu[MAX_CPUS];
   uint64_t gic_size;
+  // versión 2
+  uint8_t hay_vsock;
+  struct vvsock_state vsock;
 };
+#define SNAP_HDR_V1 offsetof(struct snap_hdr, hay_vsock)
 
 struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
@@ -169,12 +176,12 @@ static int ncpus = 1;
 static int ndisks;
 static char *disk_path[KHV_MAX_DISKS];
 static bool disk_ro[KHV_MAX_DISKS];
-static bool hay_red, hay_rng;
+static bool hay_red, hay_rng, hay_vsock;
 static int net_fd = -1;
 static uint8_t net_mac[6];
 static char *kernel_path, *cmdline, *ram_dir;
 static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
-static int slot_net = -1, slot_rng = -1, nvirtio;
+static int slot_net = -1, slot_rng = -1, slot_vsock = -1, nvirtio;
 
 // ===================== vCPU =====================
 
@@ -332,6 +339,7 @@ static void mmio(struct cpu *c, uint64_t ipa, bool w, unsigned srt, int size, bo
     if (slot < ndisks) vblk_mmio(slot, off, w, &v, size);
     else if (slot == slot_net) vnet_mmio(off, w, &v, size);
     else if (slot == slot_rng) vrng_mmio(off, w, &v, size);
+    else if (slot == slot_vsock) vsock_mmio(off, w, &v, size);
     else v = 0;
   } else {
     static int avisos;
@@ -587,11 +595,13 @@ static int crear_vcpus(void) {
 static void dispositivos_quietos(void) {
   for (int i = 0; i < ndisks; i++) vblk_quieto(i);
   if (hay_red) vnet_quieto();
+  if (hay_vsock) vsock_quieto();
 }
 
 static void dispositivos_despertar(void) {
   for (int i = 0; i < ndisks; i++) vblk_despertar(i);
   if (hay_red) vnet_despertar();
+  if (hay_vsock) vsock_despertar();
 }
 
 // soltar deja correr la VM por primera vez. Con mu.
@@ -633,6 +643,7 @@ int khv_create(const struct khv_config *c) {
   ndisks = c->ndisks;
   hay_red = c->net_fd >= 0;
   hay_rng = c->rng != 0;
+  hay_vsock = c->vsock != 0;
   net_fd = c->net_fd;
   memcpy(net_mac, c->mac, 6);
   kernel_path = strdup(c->kernel ? c->kernel : "");
@@ -641,6 +652,7 @@ int khv_create(const struct khv_config *c) {
   nvirtio = ndisks;
   if (hay_red) slot_net = nvirtio++;
   if (hay_rng) slot_rng = nvirtio++;
+  if (hay_vsock) slot_vsock = nvirtio++;
   if (nvirtio > VIRTIO_MAX) {
     fallo("too many virtio devices (%d, at most %d)", nvirtio, VIRTIO_MAX);
     return -1;
@@ -668,6 +680,7 @@ int khv_create(const struct khv_config *c) {
   }
   if (hay_red) vnet_init(net_fd, net_mac, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);
+  if (hay_vsock) vsock_init(virtio_intid[slot_vsock]);
   return 0;
 }
 
@@ -786,26 +799,28 @@ int khv_restore(const char *mem_path) {
   static struct snap_hdr h;
   if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof pie ||
       leer_todo(fd, &pie, sizeof pie, st.st_size - (off_t)sizeof pie) != 0 || pie.magic != SNAP_MAGIC ||
-      pie.hdr_len != sizeof h || pie.hdr_off + pie.hdr_len > (uint64_t)st.st_size ||
-      leer_todo(fd, &h, sizeof h, (off_t)pie.hdr_off) != 0 || h.magic != SNAP_MAGIC) {
+      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1) || pie.hdr_off > (uint64_t)st.st_size ||
+      pie.hdr_len > (uint64_t)st.st_size - pie.hdr_off ||
+      (memset(&h, 0, sizeof h), leer_todo(fd, &h, pie.hdr_len, (off_t)pie.hdr_off)) != 0 || h.magic != SNAP_MAGIC) {
     close(fd);
     fallo("%s is not a kling-hv memory file (or was written by another version)", mem_path);
     return -1;
   }
-  if (h.version != SNAP_VERSION) {
+  if (h.version != SNAP_VERSION && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1)) {
     close(fd);
     fallo("%s: snapshot state version %u, this kling-hv reads %u", mem_path, h.version, SNAP_VERSION);
     return -1;
   }
   if (h.ram_size != g_ram_size || (int)h.ncpus != ncpus || (int)h.ndisks != ndisks || (bool)h.hay_red != hay_red ||
-      (bool)h.hay_rng != hay_rng || h.uart_intid != uart_intid) {
+      (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || h.uart_intid != uart_intid) {
     close(fd);
     fallo("the snapshot does not match the configured machine (ram %llu/%llu, cpus %u/%d, disks %u/%d, net %u/%d, "
-          "rng %u/%d)",
-          h.ram_size, g_ram_size, h.ncpus, ncpus, h.ndisks, ndisks, h.hay_red, hay_red, h.hay_rng, hay_rng);
+          "rng %u/%d, vsock %u/%d)",
+          h.ram_size, g_ram_size, h.ncpus, ncpus, h.ndisks, ndisks, h.hay_red, hay_red, h.hay_rng, hay_rng,
+          h.hay_vsock, hay_vsock);
     return -1;
   }
-  void *gdata = malloc(h.gic_size);
+  void *gdata = h.gic_size <= (uint64_t)st.st_size ? malloc(h.gic_size) : NULL;
   if (!gdata || leer_todo(fd, gdata, h.gic_size, (off_t)(pie.hdr_off + pie.hdr_len)) != 0) {
     free(gdata);
     close(fd);
@@ -825,6 +840,7 @@ int khv_restore(const char *mem_path) {
     vnet_set(&h.vnet);
   }
   if (hay_rng) vrng_set(&h.vrng);
+  if (hay_vsock) vsock_set(&h.vsock);
   restaurando = true;
   if (crear_vcpus() != 0) {
     free(gdata);
@@ -843,6 +859,7 @@ int khv_restore(const char *mem_path) {
   for (int i = 0; i < ndisks; i++) vblk_reafirmar(i);
   if (hay_red) vnet_reafirmar();
   if (hay_rng) vrng_reafirmar();
+  if (hay_vsock) vsock_reafirmar();
   for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
   snap_t_pausa = h.t_pausa;
   // Queda en pausa hasta khv_resume: los PATCH de discos del núcleo ya
@@ -932,6 +949,8 @@ int khv_snapshot(const char *mem_out) {
   if (hay_red) vnet_get(&h.vnet);
   h.hay_rng = hay_rng;
   if (hay_rng) vrng_get(&h.vrng);
+  h.hay_vsock = hay_vsock;
+  if (hay_vsock) vsock_get(&h.vsock);
   for (int i = 0; i < ncpus; i++) h.cpu[i] = cpus[i].st;
   hv_gic_state_t gs = hv_gic_state_create();
   if (!gs) {

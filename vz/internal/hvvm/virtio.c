@@ -21,6 +21,66 @@ bool vq_ptrs(struct vq *q, uint16_t **avail, uint8_t **used, struct vdesc **desc
   return *avail && *used && *desc;
 }
 
+int vq_cadena(const struct vq *q, const struct vdesc *desc, uint16_t head, struct vdesc *out, int max) {
+  int n = 0;
+  uint16_t i = head;
+  for (;;) {
+    // Fuera de la tabla, más larga que la cola (un ciclo) o más larga de lo
+    // que cabe: inválida. Los indirectos no se ofrecen (sin
+    // VIRTIO_F_INDIRECT_DESC), así que uno es un invitado que miente.
+    if (i >= q->num || n >= max || n >= (int)q->num) return -1;
+    struct vdesc d;
+    memcpy(&d, (const void *)&desc[i], sizeof d);  // una sola lectura: el invitado puede cambiarlo
+    if (d.flags & VIRTQ_DESC_F_INDIRECT) return -1;
+    out[n++] = d;
+    if (!(d.flags & VIRTQ_DESC_F_NEXT)) return n;
+    i = d.next;
+  }
+}
+
+uint32_t vq_leer(const struct vq *q, const struct vdesc *desc, uint16_t head, void *buf, uint32_t cap) {
+  struct vdesc ch[QMAX];
+  int n = vq_cadena(q, desc, head, ch, QMAX);
+  uint32_t total = 0;
+  for (int k = 0; k < n; k++) {
+    if (ch[k].flags & VIRTQ_DESC_F_WRITE) continue;
+    uint32_t l = ch[k].len;
+    if (l > cap - total) return 0;  // no cabe: el paquete se descarta entero
+    const void *d = gpa_ptr(ch[k].addr, l);
+    if (!d) return 0;
+    memcpy((uint8_t *)buf + total, d, l);
+    total += l;
+  }
+  return n < 0 ? 0 : total;
+}
+
+uint32_t vq_capacidad(const struct vq *q, const struct vdesc *desc, uint16_t head) {
+  struct vdesc ch[QMAX];
+  int n = vq_cadena(q, desc, head, ch, QMAX);
+  uint64_t total = 0;
+  for (int k = 0; k < n; k++) {
+    if (!(ch[k].flags & VIRTQ_DESC_F_WRITE)) continue;
+    if (!gpa_ptr(ch[k].addr, ch[k].len)) return 0;
+    total += ch[k].len;
+  }
+  return n < 0 ? 0 : total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
+}
+
+uint32_t vq_escribir(const struct vq *q, const struct vdesc *desc, uint16_t head, const void *src, uint32_t len) {
+  struct vdesc ch[QMAX];
+  int n = vq_cadena(q, desc, head, ch, QMAX);
+  uint32_t off = 0;
+  for (int k = 0; k < n && off < len; k++) {
+    if (!(ch[k].flags & VIRTQ_DESC_F_WRITE)) continue;
+    uint32_t l = ch[k].len < len - off ? ch[k].len : len - off;
+    void *d = gpa_ptr(ch[k].addr, l);
+    if (!d) break;
+    memcpy(d, (const uint8_t *)src + off, l);
+    off += l;
+  }
+  return off;
+}
+
 void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len) {
   uint16_t uidx = *(volatile uint16_t *)(used + 2);
   uint32_t *e = (uint32_t *)(used + 4 + 8 * (uidx % q->num));
@@ -138,13 +198,9 @@ static bool b_procesar(struct vblk *b, struct vq q) {
     b->s.q.last_avail++;
 
     // Recorre la cadena: cabecera, datos, estado (1 byte, el último).
-    struct vdesc ch[QMAX + 2];
-    int n = 0;
-    for (uint16_t i = head;; i = desc[i].next) {
-      if (i >= q.num || n >= QMAX) break;
-      ch[n++] = desc[i];
-      if (!(desc[i].flags & VIRTQ_DESC_F_NEXT)) break;
-    }
+    struct vdesc ch[QMAX];
+    int n = vq_cadena(&q, desc, head, ch, QMAX);
+    if (n < 0) n = 0;
     uint32_t escrito = 0;
     uint8_t estado = 0;
     struct {
@@ -152,7 +208,7 @@ static bool b_procesar(struct vblk *b, struct vq q) {
       uint64_t sector;
     } hdr;
     void *hp = n >= 2 ? gpa_ptr(ch[0].addr, sizeof hdr) : NULL;
-    uint8_t *sp = n >= 2 ? gpa_ptr(ch[n - 1].addr, 1) : NULL;
+    uint8_t *sp = n >= 2 && (ch[n - 1].flags & VIRTQ_DESC_F_WRITE) ? gpa_ptr(ch[n - 1].addr, 1) : NULL;
     if (!hp || !sp || ch[0].len < sizeof hdr) {
       estado = 1;
     } else {
@@ -160,7 +216,11 @@ static bool b_procesar(struct vblk *b, struct vq q) {
       uint64_t off = hdr.sector * 512;
       for (int k = 1; k < n - 1 && estado == 0; k++) {
         void *d = gpa_ptr(ch[k].addr, ch[k].len);
-        if (!d) {
+        // Ni fuera de la RAM ni fuera del disco: un pwrite más allá del final
+        // haría crecer el overlay a voluntad del invitado.
+        bool rw = hdr.type == 0 || hdr.type == 1;
+        if (!d || (rw && (hdr.sector > b->sectores || ch[k].len > (b->sectores * 512 - off) ||
+                          off > b->sectores * 512))) {
           estado = 1;
           break;
         }
@@ -195,8 +255,8 @@ static bool b_procesar(struct vblk *b, struct vq q) {
         if (fsync(b->fd) != 0) estado = 1;
       }
     }
-    *sp = estado;
-    vq_push(&q, used, head, escrito + 1);
+    if (sp) *sp = estado;  // sin byte de estado (cadena inválida) no hay dónde decirlo
+    vq_push(&q, used, head, sp ? escrito + 1 : 0);
     hecho = true;
   }
   return hecho;
@@ -344,17 +404,16 @@ static void r_procesar(void) {
     uint16_t head = avail[2 + rs.q.last_avail % rs.q.num];
     rs.q.last_avail++;
     uint32_t total = 0;
-    for (uint16_t i = head, k = 0; k < rs.q.num; i = desc[i].next, k++) {
-      if (i >= rs.q.num) break;
-      if (desc[i].flags & VIRTQ_DESC_F_WRITE) {
-        uint32_t l = desc[i].len > 65536 ? 65536 : desc[i].len;
-        void *d = gpa_ptr(desc[i].addr, l);
-        if (d) {
-          arc4random_buf(d, l);
-          total += l;
-        }
+    struct vdesc ch[QMAX];
+    int n = vq_cadena(&rs.q, desc, head, ch, QMAX);
+    for (int k = 0; k < n && total < 65536; k++) {
+      if (!(ch[k].flags & VIRTQ_DESC_F_WRITE)) continue;
+      uint32_t l = ch[k].len > 65536 - total ? 65536 - total : ch[k].len;
+      void *d = gpa_ptr(ch[k].addr, l);
+      if (d) {
+        arc4random_buf(d, l);
+        total += l;
       }
-      if (!(desc[i].flags & VIRTQ_DESC_F_NEXT)) break;
     }
     vq_push(&rs.q, used, head, total);
     hecho = true;

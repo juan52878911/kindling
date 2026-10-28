@@ -96,6 +96,15 @@ func run() int {
 		return 2
 	}
 
+	// El canal con el agente por virtio-vsock (vsock.c), como en kling-vz y
+	// con la misma variable: las máquinas que arrancan aquí lo llevan salvo
+	// KLING_VZ_VSOCK=0; una restauración usa lo que diga su snapshot.
+	vsock, err := spec.ParseVsock(os.Getenv("KLING_VZ_VSOCK"))
+	if err != nil {
+		logf("KLING_VZ_VSOCK: %v", err)
+		return 2
+	}
+
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
 	// El proxy de credenciales y las aristas de grafo, como en kling-vz (ver
@@ -145,6 +154,7 @@ func run() int {
 	peers := peercred.New()
 	srv := server.New(server.Deps{
 		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock)},
+		Vsock:   vsock,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			var pg vnet.PGProxy
 			if c.CredentialsPG != nil {
