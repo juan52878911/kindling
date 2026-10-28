@@ -27,9 +27,13 @@ No hace falta root: el daemon corre como tu usuario.
 
 ## Instalación
 
+Con el instalador de la release (la línea de `curl` del [README](../README.md)),
+`kling`, `kling-vz` y `kling-hv` quedan en el mismo directorio y sin la
+cuarentena de la descarga (van firmados ad-hoc, sin notarizar). Desde el repo:
+
 ```sh
-make install            # el CLI (y el daemon: es el mismo binario)
-make vz                 # compila y firma kling-vz (módulo aparte en vz/)
+make vz                 # compila y firma kling-vz y kling-hv (módulo aparte en vz/)
+make install            # el CLI (y el daemon: es el mismo binario) y los VMM de vz/bin
 brew install e2fsprogs
 kling up -check
 ```
@@ -157,8 +161,9 @@ launchctl bootout gui/$(id -u)/dev.kindling.daemon           # pararlo
 Con el plist instalado, `kling up` lo arranca si no está corriendo.
 
 Con el plist instalado, `kling upgrade` también actualiza el daemon: baja la
-release, verifica `kling` y `kling-vz` (y que este lleva el permiso de
-virtualización), los cambia en su sitio, lo reinicia con `launchctl bootout` y
+release, verifica `kling`, `kling-vz` y `kling-hv` (y que cada VMM lleva el
+permiso de su framework), los cambia en su sitio (si junto a `kling` está
+`kling-vz` pero no `kling-hv`, lo instala; volver atrás lo quita), lo reinicia con `launchctl bootout` y
 `bootstrap` y vuelve atrás solo si no contesta con la versión nueva
 ([`actualizar.md`](actualizar.md) §3.4). Sin el agente de launchd no sabe
 reiniciarlo: `kling upgrade -cli` cambia solo el binario. Lo prueba de punta a

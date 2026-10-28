@@ -23,6 +23,11 @@ import (
 
 // Pieza es un binario instalado que se cambia por un asset de la release.
 // La primera de Opciones.Piezas es siempre kling.
+//
+// Destino puede no existir todavía (kling-hv en un Mac instalado antes de que
+// la release lo trajera): entonces se instala, y volver atrás lo quita. Con
+// Asset.Opcional, una release que no lo trae no es un error: la pieza se
+// omite.
 type Pieza struct {
 	Asset   Asset
 	Destino string
@@ -202,6 +207,7 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 	if err != nil {
 		return nil, err
 	}
+	o.Piezas = conAsset(o.Piezas, bajados)
 
 	// 3. Prueba en seco del nuevo: que arranca y qué sabe leer.
 	nuevo, err := Sondear(ctx, bajados[o.Piezas[0].Asset.Nombre])
@@ -259,6 +265,10 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 
 	o.printf("\nplan: %s -> %s\n", res.Desde, nuevo.Kling)
 	for _, p := range o.Piezas {
+		if _, err := os.Lstat(p.Destino); os.IsNotExist(err) {
+			o.printf("  install %s\n", p.Destino)
+			continue
+		}
 		o.printf("  replace %s\n", p.Destino)
 	}
 	for _, m := range migraciones {
@@ -406,6 +416,10 @@ func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
 	}
 	o.printf("rolling back: %s -> %s (from %s)\n", c.Hacia, viejo.Kling, c.dir)
 	for _, p := range c.Piezas {
+		if p.Copia == "" {
+			o.printf("  remove %s (it wasn't there before)\n", p.Destino)
+			continue
+		}
 		o.printf("  restore %s\n", p.Destino)
 	}
 	for _, b := range bakNuevos(c) {
@@ -466,14 +480,30 @@ type copia struct {
 func (c *copia) viejos() map[string]string {
 	out := map[string]string{}
 	for _, p := range c.Piezas {
-		out[p.Destino] = filepath.Join(c.dir, p.Copia)
+		if p.Copia != "" {
+			out[p.Destino] = filepath.Join(c.dir, p.Copia)
+		}
 	}
 	return out
 }
 
 type piezaCopia struct {
 	Destino string `json:"path"`
-	Copia   string `json:"copy"` // nombre dentro del directorio de la copia
+	// Copia es el nombre dentro del directorio de la copia; vacío = Destino
+	// no existía antes de actualizar, y volver atrás lo quita.
+	Copia string `json:"copy"`
+}
+
+// conAsset quita de piezas las opcionales que la release no trae (Bajar no
+// las devolvió). kling, la primera, nunca es opcional.
+func conAsset(piezas []Pieza, bajados map[string]string) []Pieza {
+	out := piezas[:0:0]
+	for _, p := range piezas {
+		if _, ok := bajados[p.Asset.Nombre]; ok || !p.Asset.Opcional {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // copiasGuardadas es cuántas copias se conservan: la de esta actualización y
@@ -495,6 +525,10 @@ func guardarCopia(o Opciones, desde, hacia string) (*copia, error) {
 		return nil, err
 	}
 	for i, p := range o.Piezas {
+		if _, err := os.Lstat(p.Destino); os.IsNotExist(err) {
+			c.Piezas = append(c.Piezas, piezaCopia{Destino: p.Destino})
+			continue
+		}
 		nombre := fmt.Sprintf("%d-%s", i, filepath.Base(p.Destino))
 		if err := colocar(p.Destino, filepath.Join(dir, nombre)); err != nil {
 			return falla(err)
@@ -624,6 +658,13 @@ func podarCopias(base string, guardar int) {
 func (o *Opciones) restaurar(ctx context.Context, c *copia, conEstado bool) error {
 	var errs []error
 	for _, p := range append(append([]piezaCopia(nil), c.Piezas...), c.Extras...) {
+		if p.Copia == "" {
+			// No estaba antes de actualizar: se quita.
+			if err := os.Remove(p.Destino); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %v", p.Destino, err))
+			}
+			continue
+		}
 		if err := colocar(filepath.Join(c.dir, p.Copia), p.Destino); err != nil {
 			errs = append(errs, fmt.Errorf("restoring %s: %v", p.Destino, err))
 		}

@@ -59,6 +59,14 @@ install: build
 	@install -m755 $(BIN) $(PREFIX)/bin/$(BIN) 2>/dev/null \
 		|| sudo install -m755 $(BIN) $(PREFIX)/bin/$(BIN)
 	@echo "instalado: $(PREFIX)/bin/$(BIN)  ($(VERSION))"
+	@# Los VMM de macOS que haya dejado `make vz`, junto a kling (donde los busca
+	@# el daemon). install copia el Mach-O con su firma ad-hoc y su entitlement.
+	@for v in kling-vz kling-hv; do \
+		if [ "$$(uname -s)" = Darwin ] && [ -x vz/bin/$$v ]; then \
+			install -m755 vz/bin/$$v $(PREFIX)/bin/$$v 2>/dev/null || sudo install -m755 vz/bin/$$v $(PREFIX)/bin/$$v; \
+			echo "instalado: $(PREFIX)/bin/$$v"; \
+		fi; \
+	done
 	@# En macOS el daemon (que corre como tu usuario) construye las imágenes de
 	@# Docker y mete en ellas el agente del invitado, un binario de Linux: va a
 	@# lib/ de su raíz de datos, donde lo busca el constructor (KLING_LIB_DIR).
@@ -243,8 +251,9 @@ deploy-mac:
 ## Vive en vz/ como módulo Go APARTE (github.com/juan52878911/kindling/vz):
 ## necesita cgo y dependencias (Code-Hex/vz, gVisor) que el núcleo no tiene ni
 ## quiere tener. Por ser otro módulo, `go test ./...` y `go vet ./...` desde la
-## raíz no entran en vz/; su build.sh compila, firma con el entitlement de
-## virtualización y deja el binario. Solo en macOS.
+## raíz no entran en vz/; build.sh y build-hv.sh compilan, firman con el
+## entitlement de su framework y dejan los binarios en vz/bin, de donde los
+## copia `make install`. Solo en macOS.
 vz:
 	@test "$$(uname -s)" = Darwin || { echo "kling-vz only builds on macOS" >&2; exit 1; }
 	@test -x vz/build.sh || { echo "vz/build.sh not found: kling-vz is not in this checkout yet" >&2; exit 1; }
