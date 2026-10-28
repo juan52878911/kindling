@@ -531,7 +531,16 @@ func cmdRun(args []string) error {
 	fs.Var(&shares, "share", shareUsage)
 	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
+	var publica publishFlag
+	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST or PORT; repeatable): kling stays in the foreground following the service, and wakes the machine if frozen")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if len(publica) > 0 && *asJSON {
+		return errors.New("-p keeps kling in the foreground; it doesn't go with -json")
+	}
+	lns, err := escucharPuertos(publica)
+	if err != nil {
 		return err
 	}
 
@@ -614,7 +623,7 @@ func cmdRun(args []string) error {
 		CPUPctDefault:       cfg.Defaults.CPUPct,
 		WaitReady:           *waitReady,
 		ReadyTimeoutSeconds: int(readyTimeout.Seconds()),
-		Labels:              labels.merge(*service),
+		Labels:              conPuertos(labels.merge(*service), publica),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
@@ -656,6 +665,10 @@ func cmdRun(args []string) error {
 	}
 	for _, s := range mc.Shares {
 		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
+	}
+	if len(publica) > 0 {
+		publicarEnPrimerPlano(ctx, client, endpoint, mc, publica, lns)
+		return nil
 	}
 	if *allowExec {
 		next("kling exec %s -- <cmd>   ·   kling save %s <name>", mc.ID[:12], mc.ID[:12])
