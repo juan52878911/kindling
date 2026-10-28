@@ -1,10 +1,8 @@
 //go:build darwin
 
 // Package sandbox encierra a kling-vz y kling-hv en su perfil de sandbox
-// (sandbox_init_with_parameters) y lanza el custodio de snapshots que coloca
-// lo que el proceso encerrado no puede escribir (internal/custodio). Los dos
-// VMM comparten los parámetros del perfil y el reparto de ficheros; cada uno
-// trae su perfil.
+// (sandbox_init_with_parameters). Los dos VMM comparten los parámetros del
+// perfil y el reparto de ficheros; cada uno trae su perfil.
 package sandbox
 
 /*
@@ -22,14 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"unsafe"
 
-	"github.com/juan52878911/kindling/pkg/credproxy"
-	"github.com/juan52878911/kindling/vz/internal/custodio"
 	"github.com/juan52878911/kindling/vz/internal/server"
 )
 
@@ -38,7 +32,7 @@ import (
 const sinBroker = "/dev/null/kling-vz-no-broker"
 
 // MaxFicheros es cuántos ficheros de lectura (L0..) y de escritura (E0..)
-// admite el perfil: el kernel y unos pocos discos, de sobra.
+// se le pasan al perfil como mucho: el kernel y unos pocos discos, de sobra.
 const MaxFicheros = 16
 
 // Real resuelve p a su ruta real y absoluta: el sandbox compara rutas reales,
@@ -70,18 +64,15 @@ func Parametros(root, mdir, broker string, c server.Confinamiento) ([]string, er
 		return nil, fmt.Errorf("the VM has %d read-only and %d read-write files; the sandbox profile admits %d of each",
 			len(c.Lectura), len(c.Escritura), MaxFicheros)
 	}
-	pares := []string{"ROOT", root, "MDIR", mdir, "NET", uno(c.ConRed), "LOOP", uno(c.ConRed && c.Loopback),
-		"BROKER", broker, "GFX", uno(c.Graphics),
-		"FMIN", strconv.Itoa(credproxy.ForwardPortMin), "FMAX", strconv.Itoa(credproxy.ForwardPortMax)}
-	for i := 0; i < MaxFicheros; i++ {
-		l, e := "", ""
-		if i < len(c.Lectura) {
-			l = Real(c.Lectura[i])
-		}
-		if i < len(c.Escritura) {
-			e = Real(c.Escritura[i])
-		}
-		pares = append(pares, "L"+strconv.Itoa(i), l, "E"+strconv.Itoa(i), e)
+	pares := []string{"ROOT", root, "MDIR", mdir, "NET", uno(c.ConRed), "BROKER", broker, "GFX", uno(c.Graphics),
+		"NL", strconv.Itoa(len(c.Lectura)), "NE", strconv.Itoa(len(c.Escritura))}
+	// Solo los que hay: el perfil recorre NL y NE, no los 16 (~1 ms menos de
+	// sandbox_init con los 4-5 ficheros de una VM normal).
+	for i, f := range c.Lectura {
+		pares = append(pares, "L"+strconv.Itoa(i), Real(f))
+	}
+	for i, f := range c.Escritura {
+		pares = append(pares, "E"+strconv.Itoa(i), Real(f))
 	}
 	return pares, nil
 }
@@ -111,37 +102,13 @@ func Aplicar(profile string, pares []string) error {
 	return nil
 }
 
-// perfilCustodio es el sandbox del custodio de snapshots (internal/custodio):
-// leer el directorio de su máquina y escribir bajo snapshots/, nada más; ni
-// red, ni lanzar procesos. Las comprobaciones de qué escribe ahí son del
-// propio custodio; esto acota lo que haría uno con un fallo.
-const perfilCustodio = `(version 1)
-(deny default)
-(import "system.sb")
-(allow file-read-metadata)
-(allow file-read* (subpath (param "MDIR")))
-(allow file-read* file-write* (subpath (param "SNAPS")))
-`
-
-// ServirCustodio es el proceso custodio de snapshots: se encierra y atiende a
-// su VMM por el fd 3 hasta que este muere. nombre va en los errores.
-func ServirCustodio(nombre, snaps, mdir string) int {
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	if err := Aplicar(perfilCustodio, []string{"SNAPS", snaps, "MDIR", mdir}); err != nil {
-		fmt.Fprintf(os.Stderr, "%s: snapshot keeper: %v\n", nombre, err)
-		return 1
-	}
-	return custodio.Servir(3, snaps, mdir)
-}
-
 // Opciones dice cómo se encierra un VMM.
 type Opciones struct {
-	Nombre      string // "kling-vz", "kling-hv": prefijo de los temporales
-	Perfil      string // el texto del perfil
-	ArgCustodio string // el argumento con el que este binario hace de custodio
-	Sock        string // el socket de la API (su directorio es el de la máquina)
-	Broker      string // el socket del broker del daemon, o ""
-	Logf        func(string, ...any)
+	Nombre string // "kling-vz", "kling-hv"
+	Perfil string // el texto del perfil
+	Sock   string // el socket de la API (su directorio es el de la máquina)
+	Broker string // el socket del broker del daemon, o ""
+	Logf   func(string, ...any)
 }
 
 // Preparar devuelve cómo encerrar este proceso en su sandbox (o nil si no
@@ -152,11 +119,10 @@ type Opciones struct {
 // diagnosticar un perfil que una versión nueva de macOS rompa.
 //
 // Encerrado, el proceso solo escribe en el directorio de su máquina (y en sus
-// discos). Un snapshot que el daemon pide fuera de él (el dorado de kling
-// commit, en snapshots/<nombre>/) se vuelca a un temporal del directorio y el
-// custodio lo deja en su sitio. El custodio se lanza aquí, antes de
-// encerrarse; si no arranca, esos snapshots fallan (nunca se abre snapshots/
-// a este proceso).
+// discos). Un snapshot pedido fuera de él falla con un error claro: el dorado
+// de kling commit lo pide el daemon en el directorio de la máquina y lo
+// publica él en snapshots/<nombre>/ (internal/machine/publicar_volcado.go);
+// nunca se abre snapshots/ a este proceso.
 //
 // Las rutas se resuelven antes: el sandbox compara rutas reales.
 func Preparar(o Opciones) (func(server.Confinamiento) error, func(string) (string, func() error, error)) {
@@ -170,23 +136,13 @@ func Preparar(o Opciones) (func(server.Confinamiento) error, func(string) (strin
 		return nil, nil
 	}
 	root, mdir := Real(root), Real(filepath.Dir(o.Sock))
-	snaps := filepath.Join(root, "snapshots")
-	k, err := custodio.Iniciar(o.ArgCustodio, snaps, mdir)
-	if err != nil {
-		o.Logf("warning: no snapshot keeper process, snapshots outside %s will fail: %v", mdir, err)
-	}
 	var confinado bool
 	destino := func(p string) (string, func() error, error) {
-		d := Real(filepath.Dir(p))
-		if !confinado || d == mdir {
+		if !confinado || Real(filepath.Dir(p)) == mdir {
 			return p, nil, nil
 		}
-		if k == nil {
-			return "", nil, fmt.Errorf("%s is outside this machine's directory and there is no snapshot keeper", p)
-		}
-		dst := filepath.Join(d, filepath.Base(p))
-		tmp := filepath.Join(mdir, "."+o.Nombre+"-publish-"+filepath.Base(p))
-		return tmp, func() error { return k.Publicar(tmp, dst) }, nil
+		return "", nil, fmt.Errorf("%s is outside this machine's directory (%s): a confined %s only writes there; "+
+			"the daemon publishes committed snapshots", p, mdir, o.Nombre)
 	}
 	confine := func(c server.Confinamiento) error {
 		pares, err := Parametros(root, mdir, o.Broker, c)
@@ -197,8 +153,8 @@ func Preparar(o Opciones) (func(server.Confinamiento) error, func(string) (strin
 			return err
 		}
 		confinado = true
-		o.Logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v, loopback: %v",
-			len(c.Lectura), len(c.Escritura), mdir, c.ConRed, c.ConRed && c.Loopback)
+		o.Logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v",
+			len(c.Lectura), len(c.Escritura), mdir, c.ConRed)
 		return nil
 	}
 	return confine, destino

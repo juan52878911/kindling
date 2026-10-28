@@ -24,6 +24,11 @@ import (
 // miradas es lo que durmió el host. Se mira en cada vuelta del vigilante y en
 // cada petición contra una máquina (Usar), que es cuando importa: un exec
 // justo al despertar ve ya la hora buena. Nada de eso añade despertares.
+//
+// En macOS, además, el vigía de energía (energia.go: el binario del VMM, que
+// sí es cgo, en un proceso aparte) avisa ANTES de dormir y las máquinas se
+// pausan; esto queda para Linux, para un VMM sin vigía y para las que no se
+// pudieron pausar.
 
 // suenoMin es lo menos que tiene que haber dormido el host para resincronizar:
 // por debajo, lo que se desvían los dos relojes sin dormir.

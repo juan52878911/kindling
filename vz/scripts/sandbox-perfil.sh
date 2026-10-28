@@ -4,6 +4,10 @@
 #
 #   vz/scripts/sandbox-perfil.sh                 # el perfil del árbol
 #   vz/scripts/sandbox-perfil.sh viejo.sb        # otro (p. ej. el de main)
+#   vz/scripts/sandbox-perfil.sh vz/cmd/kling-hv/kling-hv.sb   # el de kling-hv
+#
+# (vz/internal/sandbox/perfil_darwin_test.go prueba lo mismo con
+# sandbox_init_with_parameters, como lo aplica el VMM, y mide su coste.)
 #
 # Monta una raíz de kindling falsa con dos máquinas, secrets/, dorados y
 # volúmenes, abre un "reenvío" de otra máquina en 127.0.0.1 dentro del rango
@@ -67,20 +71,20 @@ awk '{ print } /^\(import "system.sb"\)/ {
 }' "$PERFIL" >"$T/perfil.sb"
 
 fallos=0
-# dentro NET LOOP -- orden...: ejecuta orden en el perfil con los parámetros de m1.
+# dentro NET ALLOWLIST -- orden...: ejecuta orden en el perfil con los
+# parámetros de m1. ALLOWLIST ya no cambia el perfil (el loopback del Mac lo
+# marca el daemon por el broker); se deja para que las pruebas lo digan.
 dentro() {
-	net=$1 loop=$2
+	net=$1
 	shift 2
 	sandbox-exec -f "$T/perfil.sb" \
-		-D ROOT="$R" -D MDIR="$M" -D NET="$net" -D LOOP="$loop" -D GFX=0 \
-		-D BROKER=/dev/null/kling-vz-no-broker -D FMIN=$FMIN -D FMAX=$FMAX \
+		-D ROOT="$R" -D MDIR="$M" -D NET="$net" -D GFX=0 \
+		-D BROKER=/dev/null/kling-vz-no-broker -D NL=3 -D NE=2 \
 		-D L0="$R/images/vmlinux" -D L1="$R/images/base.ext4" -D L2="$R/snapshots/suyo/mem.file" \
-		-D L3= -D L4= -D L5= -D L6= -D L7= -D L8= -D L9= -D L10= -D L11= -D L12= -D L13= -D L14= -D L15= \
 		-D E0="$M/overlay.ext4" -D E1="$R/volumes/suyo.ext4" \
-		-D E2= -D E3= -D E4= -D E5= -D E6= -D E7= -D E8= -D E9= -D E10= -D E11= -D E12= -D E13= -D E14= -D E15= \
 		"$@" >/dev/null 2>&1
 }
-# prueba DEBE descripción NET LOOP -- orden...
+# prueba DEBE descripción NET ALLOWLIST -- orden...
 prueba() {
 	debe=$1 que=$2
 	shift 2
@@ -118,9 +122,9 @@ prueba DENEGADO "egress internet: 127.0.0.1:$REENVIO" 1 0 perl -e "$conecta" 127
 prueba DENEGADO "egress internet: 127.0.0.1:$OTRO" 1 0 perl -e "$conecta" 127.0.0.1 "$OTRO"
 prueba DENEGADO "allowlist: 127.0.0.1:$REENVIO" 1 1 perl -e "$conecta" 127.0.0.1 "$REENVIO"
 prueba DENEGADO "allowlist: 0.0.0.0:$REENVIO" 1 1 perl -e "$conecta" 0.0.0.0 "$REENVIO"
-prueba PERMITIDO "allowlist: 127.0.0.1:$OTRO (upstream -upstream del loopback)" 1 1 perl -e "$conecta" 127.0.0.1 "$OTRO"
+prueba DENEGADO "allowlist: 127.0.0.1:$OTRO (el -upstream del loopback lo marca el daemon)" 1 1 perl -e "$conecta" 127.0.0.1 "$OTRO"
 prueba PERMITIDO "escuchar en 127.0.0.1:$BIND (su reenvío, en el rango)" 0 0 perl -e "$escucha" "$BIND"
-prueba DENEGADO "escuchar en 127.0.0.1:$OTRO (fuera del rango)" 0 0 perl -e "$escucha" "$((OTRO + 1))"
+prueba PERMITIDO "escuchar en 127.0.0.1:$((OTRO + 1)) (cualquier puerto del loopback, como kling-hv)" 0 0 perl -e "$escucha" "$((OTRO + 1))"
 
 echo
 if [ $fallos -eq 0 ]; then

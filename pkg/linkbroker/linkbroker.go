@@ -2,7 +2,8 @@
 
 // Package linkbroker es el canal por el que kling-vz (macOS) pide al daemon
 // una conexión YA ABIERTA hacia otra máquina: una arista link o credential de
-// un grafo, o la copia de `kling db attach` (docs/grafos.md, SECURITY.md).
+// un grafo, o la copia de `kling db attach` (docs/grafos.md, SECURITY.md); o
+// hacia el upstream de una credencial en el loopback del Mac.
 //
 // POR QUÉ ASÍ: en Linux el proxy de cada arista es del daemon, y resuelve y
 // marca bajo el candado del manager en cada conexión. En macOS la red del
@@ -61,6 +62,12 @@ const (
 	// credential o kling db attach). Machine es el ID que lleva la
 	// credencial (el de un nodo o el de una copia), Owner su dueño.
 	KindMachine = "machine"
+	// KindLoopback: el upstream fijado en el loopback del Mac de una
+	// credencial suya (-upstream 127.0.0.1:5432). Solo Port: el daemon marca
+	// la dirección de la credencial que tenga ese puerto, nunca una que diga
+	// kling-vz. Así el perfil de sandbox del VMM no abre el loopback (ni
+	// tiene que cerrar con una regla por puerto el rango de los reenvíos).
+	KindLoopback = "loopback"
 
 	// MaxRequest y MaxResponse acotan una línea de cada lado.
 	MaxRequest  = 4 << 10
@@ -120,6 +127,10 @@ func (r Request) Validate() error {
 		}
 		if _, err := NodoDeHost(r.Host); err != nil {
 			return err
+		}
+	case KindLoopback:
+		if r.Host != "" || r.Machine != "" || r.Owner != "" {
+			return errors.New("a loopback request names only a port")
 		}
 	case KindMachine:
 		if r.Host != "" {

@@ -243,7 +243,7 @@ func TestDialFijado(t *testing.T) {
 		}
 		return nil, errors.New("no existe")
 	}
-	dial := dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second})
+	dial := dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second}, nil)
 	ctx := context.Background()
 	for _, addr := range []string{"169.254.169.254:" + puerto, "172.30.5.1:" + puerto, "[fe80::1]:" + puerto, "mixto.lan:" + puerto} {
 		if c, err := dial(ctx, addr); err == nil || !errors.Is(err, errUpstreamProhibido) {
@@ -268,6 +268,29 @@ func TestDialFijado(t *testing.T) {
 			continue
 		}
 		c.Close()
+	}
+
+	// Con DialLoopback (kling-vz confinado) el loopback se pide por él, con
+	// el puerto y nada más; lo demás sigue igual y lo prohibido, prohibido.
+	var pedidos []int
+	loop := func(_ context.Context, p int) (net.Conn, error) {
+		pedidos = append(pedidos, p)
+		return nil, errors.New("del daemon")
+	}
+	dial = dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second}, loop)
+	for _, addr := range []string{"127.0.0.1:" + puerto, "localhost:" + puerto, "[::1]:" + puerto} {
+		if _, err := dial(ctx, addr); err == nil || err.Error() != "del daemon" {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+	if _, err := dial(ctx, "169.254.169.254:"+puerto); !errors.Is(err, errUpstreamProhibido) {
+		t.Errorf("prohibida con DialLoopback: %v", err)
+	}
+	if _, err := dial(ctx, fmt.Sprintf("127.0.0.1:%d", ForwardPortMin)); !errors.Is(err, errUpstreamProhibido) {
+		t.Errorf("rango reservado con DialLoopback: %v", err)
+	}
+	if len(pedidos) != 3 || fmt.Sprint(pedidos[0]) != puerto {
+		t.Errorf("pedidos al daemon: %v", pedidos)
 	}
 }
 
@@ -322,7 +345,7 @@ func TestUpstreamRangoReenvios(t *testing.T) {
 	lookup := func(_ context.Context, host string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	}
-	dial := dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second})
+	dial := dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second}, nil)
 	for _, addr := range []string{"db.lan:" + puerto, "127.0.0.1:" + puerto, "localhost:" + puerto} {
 		if c, err := dial(context.Background(), addr); err == nil || !errors.Is(err, errUpstreamProhibido) {
 			if c != nil {

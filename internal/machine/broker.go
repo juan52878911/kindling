@@ -292,6 +292,8 @@ func (m *Manager) abrirDestinoBroker(ctx context.Context, origen string, req lin
 	var addr, id string
 	var err error
 	switch req.Kind {
+	case linkbroker.KindLoopback:
+		return m.abrirLoopbackBroker(ctx, origen, req.Port)
 	case linkbroker.KindLink:
 		hacia, _ := linkbroker.NodoDeHost(req.Host)
 		m.mu.RLock()
@@ -360,6 +362,47 @@ func (m *Manager) abrirDestinoBroker(ctx context.Context, origen string, req lin
 		return nil, "", fmt.Errorf("machine %s changed while connecting to it", shortID(id))
 	}
 	return tc, id, nil
+}
+
+// abrirLoopbackBroker marca el upstream del loopback del Mac de una
+// credencial de la máquina origen (-upstream 127.0.0.1:5432) con ese puerto.
+// kling-vz solo dice el puerto: la dirección es la de la credencial que el
+// daemon le dio. Las mismas barreras que al registrarla (reenvios.go): nunca
+// el rango de los reenvíos ni un puerto donde esté expuesta una máquina.
+func (m *Manager) abrirLoopbackBroker(ctx context.Context, origen string, port int) (*net.TCPConn, string, error) {
+	if credproxy.PuertoReservado(port) {
+		return nil, "", fmt.Errorf("port %d is in kindling's reserved forward range", port)
+	}
+	creds, err := m.cargarCredenciales(origen)
+	if err != nil {
+		return nil, "", err
+	}
+	var up string
+	for _, c := range creds {
+		if p, ok := credproxy.UpstreamPuertoLoopback(c.Upstream); ok && p == port {
+			up = c.Upstream
+			break
+		}
+	}
+	if up == "" {
+		return nil, "", fmt.Errorf("machine %s has no credential with a loopback upstream on port %d", shortID(origen), port)
+	}
+	m.mu.RLock()
+	maq, hit := m.puertosReenviadosLocked()[port]
+	m.mu.RUnlock()
+	if hit {
+		return nil, "", fmt.Errorf("loopback port %d is where machine %s's guest is forwarded", port, maq)
+	}
+	nc, err := m.marcarBroker(ctx, up)
+	if err != nil {
+		return nil, "", &errBroker{motivo: linkbroker.ReasonUpstreamError, err: fmt.Errorf("connecting to %s: %w", up, err)}
+	}
+	tc, ok := nc.(*net.TCPConn)
+	if !ok {
+		nc.Close()
+		return nil, "", fmt.Errorf("connection to %s is not TCP", up)
+	}
+	return tc, "", nil
 }
 
 // tieneCredencialAMaquina comprueba que la máquina origen tiene en su almacén

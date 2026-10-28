@@ -10,6 +10,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them
 - After the host sleeps, the daemon resyncs the clock of running guests (detected from wall vs monotonic clock, no extra wakeups)
+- macOS: running machines are paused before the Mac sleeps and resumed when it wakes: `kling-vz`/`kling-hv --power-events`, a small sandboxed helper the daemon starts, relays IOKit's sleep notice (the core stays without cgo; sleep is never delayed more than 10 s)
 - Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
 - Live `rw` shares accept relative symlinks that stay inside the folder: `npm install` works in a shared project
 - `kling compose up` keeps a warm template per service, keyed by its recipe: a repeated up restores app + postgres + redis in under a second instead of booting cold and re-importing; `environment:` goes on the machine instead of the image and `healthcheck:` runs inside before saving (`-fresh` rebuilds them)
@@ -46,6 +47,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: the `kling-vz`/`kling-hv` sandbox profiles have no per-port rules: `sandbox_init` takes ~9 ms instead of 53-68 ms (vz) and 10-29 ms (hv); the host loopback is always closed to the VMM and a credential's `-upstream 127.0.0.1:PORT` is dialed by the daemon over the link broker; `kling-vz` listens on any 127.0.0.1 port like `kling-hv`
+- macOS: the daemon publishes committed snapshots itself (clonefile from the machine directory, no symlinks or hardlinks); `kling-vz` and `kling-hv` no longer start a snapshot keeper process per machine (~6 MiB less per machine: 22.1 → 15.5 MiB per `kling-hv` copy). A new VMM needs the new daemon to commit
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
 - `kling-vz` no longer wakes up 10 times a second per VM: the CPU regulator waits for a change when there is no ceiling (the vz default) and backs off to 500 ms with an idle VM; the credential audit log arms its flush timer only with something pending (~65 to ~1 context switches/s per VM, also paused)
@@ -72,6 +75,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: `kling top` and procstats count the VMM's child processes (CPU brake, snapshot keeper) in each machine's memory
 - `kling-hv`: a thaw of a machine that had already been thawed spent 60-90 ms in page faults before the agent answered (the snapshot now carries the resident pages); a guest could hang a device thread, and with it pauses and snapshots, by placing the used ring over the avail ring; a failed create no longer leaves a `kling-hv` that cannot host another VM
 - macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16

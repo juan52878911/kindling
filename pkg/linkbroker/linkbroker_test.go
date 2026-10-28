@@ -58,6 +58,7 @@ func TestValidate(t *testing.T) {
 	buenas := []Request{
 		{V: 1, Kind: KindLink, Host: "api.graph", Port: 8081},
 		{V: 1, Kind: KindMachine, Machine: "0123456789abcdef", Owner: "local", Port: 5432},
+		{V: 1, Kind: KindLoopback, Port: 5432},
 	}
 	for _, r := range buenas {
 		if err := r.Validate(); err != nil {
@@ -76,6 +77,9 @@ func TestValidate(t *testing.T) {
 		{V: 1, Kind: KindMachine, Machine: "127.0.0.1:5432", Owner: "local", Port: 5432},
 		{V: 1, Kind: KindMachine, Machine: "0123456789abcdef", Owner: "", Port: 5432},
 		{V: 1, Kind: KindMachine, Machine: "0123456789abcdef", Owner: "local", Port: 5432, Host: "db.graph"},
+		{V: 1, Kind: KindLoopback, Port: 5432, Host: "127.0.0.1"},
+		{V: 1, Kind: KindLoopback, Port: 5432, Machine: "0123456789abcdef"},
+		{V: 1, Kind: KindLoopback},
 		{V: 1, Kind: "raw", Port: 5432},
 	}
 	for _, r := range malas {

@@ -53,6 +53,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/energia"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/hvvm"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
@@ -127,10 +128,6 @@ func logf(format string, args ...any) {
 	stdout.line("kling-hv: " + fmt.Sprintf(format, args...))
 }
 
-// argCustodio lanza este binario como custodio de snapshots (ver
-// internal/custodio), con la carpeta de snapshots y la de la máquina.
-const argCustodio = "--snapshot-keeper"
-
 // perfil es el sandbox de kling-hv (ver internal/sandbox).
 //
 //go:embed kling-hv.sb
@@ -145,8 +142,8 @@ func main() {
 	if os.Getenv("GOMAXPROCS") == "" {
 		runtime.GOMAXPROCS(2)
 	}
-	if len(os.Args) == 4 && os.Args[1] == argCustodio {
-		os.Exit(sandbox.ServirCustodio("kling-hv", os.Args[2], os.Args[3]))
+	if len(os.Args) == 2 && os.Args[1] == energia.Arg {
+		os.Exit(energia.Main(sandbox.Aplicar))
 	}
 	os.Exit(run())
 }
@@ -219,6 +216,11 @@ func run() int {
 		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
 			return grafoMaq.DialMachine(ctx, id, owner, port)
 		}
+		// El loopback del Mac (-upstream 127.0.0.1:5432) también lo marca el
+		// daemon: el perfil no abre el loopback a este proceso.
+		opts.DialLoopback = func(ctx context.Context, port int) (net.Conn, error) {
+			return grafoMaq.DialLoopback(ctx, port)
+		}
 	}
 	creds = credproxy.New(opts)
 	if broker != "" {
@@ -227,10 +229,10 @@ func run() int {
 	syscall.Umask(0o077)
 
 	// Como kling-vz: al crear o restaurar la VM se encierra en kling-hv.sb y
-	// solo escribe en el directorio de su máquina; los dorados los coloca el
-	// custodio (internal/sandbox).
+	// solo escribe en el directorio de su máquina; los dorados los publica el
+	// daemon (internal/sandbox).
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
-		ArgCustodio: argCustodio, Sock: *sock, Broker: broker, Logf: logf})
+		Sock: *sock, Broker: broker, Logf: logf})
 
 	peers := peercred.New()
 	srv := server.New(server.Deps{

@@ -97,12 +97,14 @@ páginas y el núcleo no las aprieta sin `-force`, como con Firecracker.
 `kling-hv` se encierra en `vz/cmd/kling-hv/kling-hv.sb` al crear o restaurar
 la VM, con el mismo reparto que `kling-vz` (`vz/internal/sandbox`, que
 comparten): escribe solo en el directorio de su máquina, lee los ficheros de su
-VM y los dorados los coloca el custodio. Sin `mach-lookup`, IOKit ni memoria
-compartida: Hypervisor.framework no los necesita. Los reenvíos escuchan en
-cualquier puerto de 127.0.0.1 en vez de una regla por puerto del rango
-reservado: las 1000 reglas costaban ~38 ms de compilar el perfil en cada
-restauración. Aun así `sandbox_init` cuesta ~10 ms y ~3 MiB de huella por
-proceso (medido con un perfil vacío), y el custodio es otro proceso de ~8 MiB.
+VM y los dorados los publica el daemon. Sin `mach-lookup`, IOKit ni memoria
+compartida: Hypervisor.framework no los necesita. Ningún perfil lleva reglas
+por puerto: los reenvíos escuchan en cualquier puerto de 127.0.0.1, y el
+loopback del Mac está cerrado siempre (el `-upstream 127.0.0.1:5432` de una
+credencial lo marca el daemon por el broker), así que una máquina en allowlist
+ya no compila 1000 reglas para cerrar el rango de los reenvíos. Lo que queda
+de `sandbox_init` (~9 ms, `go test -bench SandboxInit ./internal/sandbox` en
+vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
 
 ## El fichero de memoria del snapshot
 
@@ -172,25 +174,59 @@ procesos: media de carga ~10-15). Los dos VMM confinados, con vsock.
 | | hv | vz |
 |---|---|---|
 | run (frío) + primer exec | 225 ms | 527 ms |
-| freeze | 102 ms | 149 ms |
-| thaw + primer exec | 35 ms (30–55) | 201 ms |
+| freeze | 73 ms | 122 ms |
+| thaw + primer exec | 37 ms (30–55) | 171 ms |
 | run -from + primer exec | 42 ms | 238 ms |
 | sandbox fork -n 10 + exec en todas | 558 ms | no acabó (memoria) |
 | exec en caliente (API) | 0,6 ms | 0,6 ms |
-| memoria por copia de un dorado (10 / 50 copias) | 17,4 / 17,5 MiB | ~365 MiB |
-| 50 copias | 875 MiB | — |
+| memoria por copia de un dorado (10 / 50 copias) | 13,1 / 13,0 MiB | ~349 MiB |
+| 50 copias | 651 MiB | — |
 
-El thaw se reparte (fases del daemon) en ~3 ms de comprobar el VMM anterior,
-~6 ms de lanzar el proceso, ~13 ms de cargar (de ellos ~10 de `sandbox_init`),
-2–4 ms de `/resync` y el resto del CLI/API. El freeze es más caro que antes
-(58–86 ms) porque escribe también las páginas residentes. La copia pesa más
-que los 13,3 MiB de antes por el sandbox (~3 MiB por proceso); el custodio de
-cada máquina es otro proceso de ~8 MiB que `kling top` no suma.
+Freeze, thaw y memoria medidos de nuevo el 2026-10-28 (`kling top`, que
+desde entonces suma los hijos de cada VMM), antes y después de quitar el
+custodio y las reglas por puerto del perfil, en las mismas condiciones (carga
+~10, máquinas con egress none, p50):
+
+| | antes | después |
+|---|---|---|
+| hv: memoria por copia (10 copias, con su custodio) | 22,1 MiB | 13,1 MiB |
+| hv: thaw + primer exec (n=12 / n=20) | 48,7 ms | 37,3 ms |
+| vz: memoria por copia (3 copias, custodio y freno) | 356 MiB | 349 MiB |
+| vz: thaw + primer exec (n=10) | 276 ms | 171 ms |
+| `sandbox_init` kling-vz, none / allowlist (n=15-20) | 53 / 69 ms | 9 / 9 ms |
+| `sandbox_init` kling-hv, none / allowlist | 10 / 29 ms | 9 / 9 ms |
+
+La cifra de 17,4 MiB de la tabla de antes no contaba el custodio (~6 MiB por
+máquina). El thaw de hv sigue repartido en el VMM anterior (~3 ms), lanzar el
+proceso (~5 ms), cargar (de ellos ~9 de `sandbox_init`), `/resync` (2–4 ms) y
+el API. El freeze escribe también las páginas residentes.
+
+## Fondo de procesos pre-lanzados (propuesta, sin hacer)
+
+La idea: tener unos `kling-hv` ya arrancados esperando un `snapshot/load`
+para que el thaw no pague el proceso. Medido (n=15, p50): del exec a tener el
+API escuchando son 5,2 ms. Es lo único que se ahorraría sin abrir el perfil:
+un proceso no se puede encerrar hasta saber de qué máquina es (su directorio,
+su dorado, su overlay), y un sandbox no se puede apilar ni ampliar después
+(`sandbox_apply` sobre un proceso ya encerrado da EPERM, medido con
+`sandbox-exec` anidado). Así que el fondo esperaría SIN confinar y se
+encerraría al recibir la máquina: los ~9 ms de `sandbox_init` se quedan, y
+también la carga y el `/resync`. De ~35-40 ms se bajaría a ~30, no a 15-20.
+
+Lo que pediría además: que el daemon dé a un proceso del fondo su socket del
+API y su entorno (hoy van en la línea de órdenes y en el entorno del exec, y
+el vigilante reconoce a cada VMM por su `--api-sock`: procesos_vz.go), y que
+un proceso del fondo sin confinar no sea alcanzable por nadie más que el
+daemon. Para bajar de verdad haría falta compilar el perfil fuera del camino
+del thaw (`sandbox_compile_string` + `sandbox_apply` son privados y piden cgo
+en quien compila; el núcleo no lo tiene) o un perfil sin `system.sb` (~5 de
+los ~9 ms), que es otra auditoría.
 
 ## Pendiente
 
 - Pantalla.
-- Que el daemon publique los dorados (una petición por el socket del broker)
-  en vez del custodio: ~8 MiB menos por máquina, en vz también.
-- `sandbox_init` cuesta ~10 ms y ~3 MiB por proceso: un perfil precompilado
-  lo bajaría.
+- `sandbox_init` cuesta ~9 ms (4 de base y 5 de `system.sb`) y ~3 MiB por
+  proceso; ver el fondo de procesos, arriba.
+- El vigía de energía (`--power-events`) se registra y se prueba con
+  sandbox, pero un sueño de verdad del Mac no lo prueba ningún test: mirarlo
+  en `pmset -g log` y en el log del daemon tras cerrar la tapa.

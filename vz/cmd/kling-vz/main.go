@@ -22,6 +22,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/energia"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
@@ -83,16 +84,12 @@ func (e frenoCaido) Unwrap() error        { return e.error }
 // footprint/freno_darwin.go).
 const argFreno = "--cpu-brake"
 
-// argCustodio lanza este binario como custodio de snapshots (ver
-// internal/custodio), con la carpeta de snapshots y la de la máquina.
-const argCustodio = "--snapshot-keeper"
-
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == argFreno {
 		os.Exit(servirFreno())
 	}
-	if len(os.Args) == 4 && os.Args[1] == argCustodio {
-		os.Exit(sandbox.ServirCustodio("kling-vz", os.Args[2], os.Args[3]))
+	if len(os.Args) == 2 && os.Args[1] == energia.Arg {
+		os.Exit(energia.Main(sandbox.Aplicar))
 	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
@@ -225,6 +222,11 @@ func run() int {
 		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
 			return grafoMaq.DialMachine(ctx, id, owner, port)
 		}
+		// El loopback del Mac (-upstream 127.0.0.1:5432) también lo marca el
+		// daemon: el perfil no abre el loopback a este proceso.
+		opts.DialLoopback = func(ctx context.Context, port int) (net.Conn, error) {
+			return grafoMaq.DialLoopback(ctx, port)
+		}
 	}
 	creds = credproxy.New(opts)
 	if broker != "" {
@@ -239,7 +241,7 @@ func run() int {
 	// Encerrado, este proceso solo escribe en el directorio de su máquina; ver
 	// internal/sandbox y kling-vz.sb.
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-vz", Perfil: perfil,
-		ArgCustodio: argCustodio, Sock: *sock, Broker: rutaBroker(), Logf: logf})
+		Sock: *sock, Broker: rutaBroker(), Logf: logf})
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
