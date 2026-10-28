@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -47,6 +48,10 @@ type traduccionCompose struct {
 	// desde: nodo → plantilla de la que arranca en vez de su imagen
 	// (compose up, ver compose_plantillas.go). Vacío en from-compose.
 	desde map[string]string
+	// saludTCP: el daemon no ejecuta healthchecks en las aristas depends
+	// (sin api.CapabilityGraphHealth); service_healthy se aproxima con una
+	// sonda TCP, como antes.
+	saludTCP bool
 }
 
 // puertosDeImagen: los puertos de las imágenes de siempre, para un destino de
@@ -78,7 +83,10 @@ type servicioCompose struct {
 	vols    []api.VolumeAttachment
 	deps    []depCompose
 	salud   []string // test del healthcheck, vacío si no hay
-	skip    bool
+	// tiempos del healthcheck (interval, timeout, retries, start_period,
+	// start_interval), como en una arista depends con health.
+	saludT api.GraphHealth
+	skip   bool
 	// redes son las del compose (networks:); vacío es la "default". Dos
 	// servicios se alcanzan si comparten una. sinRed: network_mode: none.
 	redes  []string
@@ -691,8 +699,29 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 			if b, _ := m[k].(bool); b {
 				s.salud = nil
 			}
-		case "interval", "timeout", "retries", "start_period", "start_interval":
-			avisa("%shealthcheck %s: ignored (the probe is a TCP connect, retried until the 2 minute limit)", pre, k)
+		case "interval", "timeout", "start_period", "start_interval":
+			d, err := time.ParseDuration(fmt.Sprint(m[k]))
+			if err != nil || d < 0 {
+				avisa("%shealthcheck %s: %v: not a duration (like 5s or 1m30s)", pre, k, m[k])
+				continue
+			}
+			switch k {
+			case "interval":
+				s.saludT.IntervalMS = int(d.Milliseconds())
+			case "timeout":
+				s.saludT.TimeoutSeconds = max(int(math.Ceil(d.Seconds())), 1)
+			case "start_period":
+				s.saludT.StartPeriodSeconds = int(math.Ceil(d.Seconds()))
+			case "start_interval":
+				s.saludT.StartIntervalMS = int(d.Milliseconds())
+			}
+		case "retries":
+			n, err := strconv.Atoi(fmt.Sprint(m[k]))
+			if err != nil || n < 0 {
+				avisa("%shealthcheck retries: %v: not a count", pre, m[k])
+				continue
+			}
+			s.saludT.Retries = n
 		default:
 			avisa("%shealthcheck %s: not supported", pre, k)
 		}
@@ -797,6 +826,10 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 			if s.memMiB > 0 {
 				campos = append(campos, "mem_mib: "+strconv.Itoa(s.memMiB))
 			}
+			if exigeExec(s, vivos) && !t.saludTCP {
+				// Su healthcheck se ejecuta dentro (arista depends con health).
+				campos = append(campos, "allow_exec: true")
+			}
 		}
 		if len(s.puertos) > 0 {
 			ps := make([]string, len(s.puertos))
@@ -849,14 +882,20 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 						break
 					}
 				}
-				if len(o.salud) == 0 {
+				switch {
+				case len(o.salud) == 0:
 					avisa("service %s: depends_on %s: service_healthy but %s has no healthcheck; waiting for it to be running only", s.nombre, d.a, d.a)
-				} else if puerto == 0 {
+				case len(saludArgv(o.salud)) > 0 && !t.saludTCP:
+					// El test de verdad, dentro del destino (api.GraphEdge.Health).
+					h := o.saludT
+					h.Test = saludArgv(o.salud)
+					dep += ", health: " + saludYAML(h)
+				case puerto == 0:
 					avisa("service %s: depends_on %s: service_healthy with no port to probe; waiting for it to be running only", s.nombre, d.a)
-				} else {
+				default:
 					p := puertoDeSalud(o.salud, o.puertos, puerto)
 					dep += fmt.Sprintf(", port: %d", p)
-					avisa("service %s: depends_on %s: healthcheck %q approximated by a TCP probe on port %d (the test itself is not run)", s.nombre, d.a, strings.Join(o.salud, " "), p)
+					avisa("service %s: depends_on %s: healthcheck %q approximated by a TCP probe on port %d", s.nombre, d.a, strings.Join(o.salud, " "), p)
 				}
 			}
 			deps = append(deps, dep+"}")
@@ -889,6 +928,41 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 		b.WriteString("edges:\n" + strings.Join(aristas, "\n") + "\n")
 	}
 	return b.String()
+}
+
+// saludYAML es h como mapa de flujo del fichero del grafo.
+func saludYAML(h api.GraphHealth) string {
+	ts := make([]string, len(h.Test))
+	for i, a := range h.Test {
+		ts[i] = yq(a)
+	}
+	campos := []string{"test: [" + strings.Join(ts, ", ") + "]"}
+	for _, c := range []struct {
+		k string
+		v int
+	}{{"interval_ms", h.IntervalMS}, {"timeout_seconds", h.TimeoutSeconds}, {"retries", h.Retries},
+		{"start_period_seconds", h.StartPeriodSeconds}, {"start_interval_ms", h.StartIntervalMS}} {
+		if c.v > 0 {
+			campos = append(campos, c.k+": "+strconv.Itoa(c.v))
+		}
+	}
+	return "{" + strings.Join(campos, ", ") + "}"
+}
+
+// exigeExec dice si algún depends_on service_healthy ejecuta el test dentro
+// de s: entonces su nodo necesita allow_exec.
+func exigeExec(s *servicioCompose, vivos []*servicioCompose) bool {
+	if len(saludArgv(s.salud)) == 0 {
+		return false
+	}
+	for _, x := range vivos {
+		for _, d := range x.deps {
+			if d.a == s.nombre && d.cond == "service_healthy" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // puertoReservado: los puertos que no valen en una arista link (el DNS y el

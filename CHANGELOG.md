@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `depends` edges take a `health` check run inside the target (capability `graph-health`): `compose up` translates `condition: service_healthy` to the real `test` with `interval`, `timeout`, `retries`, `start_period` and `start_interval`, instead of a TCP probe
 - `compose up`: the template key includes the daemon's VMM, so switching between `kling-vz`, `kling-hv` and Firecracker rebuilds the templates instead of failing until `-fresh`
 - `RunRequest.Entrypoint`/`Cmd` (capability `machine-cmd`): a machine runs another command without baking another image, via MMDS like the environment (cold boots only; an agent without the `cmd` capability fails the machine); `compose up` puts `command:`/`entrypoint:` there, so changing them rebuilds the template but no longer reimports the image
 - `compose up`/`graph from-compose`: a project network like Docker Compose: every service reaches every other one (link edges to all their ports, hosts in `environment:` rewritten), restricted by `networks:` and `network_mode: none`; only the used links if over 64 edges

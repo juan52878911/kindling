@@ -318,6 +318,11 @@ func (m *Manager) ponerEnMarchaLocked(ctx context.Context, gid, nodo string, con
 		if err := m.esperarListo(ctx, gid, d.To, d.Port); err != nil {
 			return fmt.Errorf("it depends on node %s: %w", d.To, err)
 		}
+		if d.Health != nil {
+			if err := m.esperarSalud(ctx, gid, d.To, d.Health); err != nil {
+				return fmt.Errorf("it depends on node %s being healthy: %w", d.To, err)
+			}
+		}
 	}
 	if id == "" {
 		if err := m.instanciarNodo(ctx, gid, nodo, ""); err != nil {

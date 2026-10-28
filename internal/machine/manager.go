@@ -187,6 +187,9 @@ type Manager struct {
 	// entornoPendiente es el entorno de las máquinas cuyo agente aún no lo
 	// ha leído de MMDS (entorno.go): un PutMMDS en ese rato lo conserva.
 	entornoPendiente map[string]map[string]string
+	// sondaExec ejecuta los healthchecks de las aristas depends
+	// (grafo_salud.go); la pone el daemon.
+	sondaExec SondaExec
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
 	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está

@@ -217,12 +217,15 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 	// Con carpetas, el servicio no arranca hasta tenerlas: basta con que el
 	// agente conteste. Sin ellas, el healthcheck del compose, dentro.
 	argv := saludArgv(s.salud)
-	espera, que := plantillaListo, "healthcheck"
+	// El plazo del healthcheck (start_period + retries × interval), y nunca
+	// menos que el de siempre: la primera vez hay initdb y se espera a ella.
+	intervalo, plazo, reintentos, arranque, _ := s.saludT.Tiempos()
+	espera, que := max(plantillaListo, arranque+time.Duration(reintentos)*intervalo), "healthcheck"
 	if p.vivas > 0 {
-		argv, espera, que = []string{"true"}, plantillaAgente, "guest agent"
+		argv, espera, que, plazo = []string{"true"}, plantillaAgente, "guest agent", 30*time.Second
 	}
 	if len(argv) > 0 {
-		if err := esperarOrden(ctx, ops, prep, argv, espera); err != nil {
+		if err := esperarOrden(ctx, ops, prep, argv, espera, plazo); err != nil {
 			return fmt.Errorf("%s: %s: %w", s.nombre, que, err)
 		}
 	}
@@ -242,11 +245,11 @@ func comandoMaquina(p *plantillaCompose, l []string) []string {
 
 // esperarOrden repite argv dentro de la máquina hasta que acaba con 0, como
 // mucho d.
-func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []string, d time.Duration) error {
+func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []string, d, plazo time.Duration) error {
 	limite := time.Now().Add(d)
 	var ultimo error
 	for {
-		res, err := ops.Exec(ctx, ref, api.ExecRequest{Cmd: argv, TimeoutSeconds: 30},
+		res, err := ops.Exec(ctx, ref, api.ExecRequest{Cmd: argv, TimeoutSeconds: max(int(plazo.Seconds()), 1)},
 			func(string, []byte) error { return nil })
 		switch {
 		case err == nil && res.ExitCode == 0 && !res.TimedOut:
@@ -305,6 +308,7 @@ func prepararCompose(ctx context.Context, c *api.Client, host string, t *traducc
 		return err
 	}
 	var ps []*plantillaCompose
+	t.saludTCP = !slices.Contains(info.Capabilities, api.CapabilityGraphHealth)
 	if slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
 		ps = planPlantillas(t, snaps, daemonDeInfo(info), fresh)
 	} else {
