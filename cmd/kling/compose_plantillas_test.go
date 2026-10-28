@@ -216,6 +216,45 @@ func TestPlantillaComandoEnMaquina(t *testing.T) {
 	}
 }
 
+// Con un daemon que sabe esperar volúmenes, el servicio con volumen también
+// sale de plantilla: se prepara con el volumen puesto y sin montar.
+func TestPlantillaConVolumen(t *testing.T) {
+	tr := traducirParaPlantillas(t, composePlantillas)
+	d := daemonCompose{version: "v1", volWait: true}
+	var data *plantillaCompose
+	for _, p := range planPlantillas(tr, nil, d, false) {
+		if p.s.nodo == "data" {
+			data = p
+		}
+	}
+	if data.nombre == "" || !data.volEspera {
+		t.Fatalf("data: %+v", data)
+	}
+	otro := *data.s
+	otro.vols = []api.VolumeAttachment{{Name: "dev-otro", Mount: "/data"}}
+	if clavePlantilla(data.s, "dev", d) == clavePlantilla(&otro, "dev", d) {
+		t.Error("another volume keeps the key")
+	}
+	ops := &opsFalsas{}
+	if err := prepararPlantilla(context.Background(), ops, "dev", data, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.run.VolumeWait || len(ops.run.Volumes) != 1 || ops.run.Volumes[0].Name != "dev-cache" || ops.run.WaitReady {
+		t.Errorf("prep run: %+v", ops.run)
+	}
+	if !ops.commit.SkipReady || !reflect.DeepEqual(ops.execs, [][]string{{"true"}}) {
+		t.Errorf("commit %+v execs %q", ops.commit, ops.execs)
+	}
+	tr.desde = map[string]string{"data": data.nombre}
+	g := grafoDeCompose(tr, "dev", tr.vivos, tr.por, func(string, ...any) {})
+	if !strings.Contains(g, "data: {from: "+data.nombre+", ports: [6379], volumes: [{name: dev-cache") {
+		t.Errorf("graph:\n%s", g)
+	}
+	if _, err := leerGrafo("dev.yaml", []byte(g), nil); err != nil {
+		t.Errorf("graph not valid: %v", err)
+	}
+}
+
 func TestPrepararPlantilla(t *testing.T) {
 	old := plantillaPaso
 	plantillaPaso = time.Millisecond

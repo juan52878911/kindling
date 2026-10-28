@@ -76,7 +76,8 @@ type Agent struct {
 // en este proceso y las que añade quien lo embebe.
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
-		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd}
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
+		api.GuestCapVolumeWait}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -111,7 +112,11 @@ func New() (*Agent, error) {
 	// esta ruta la que los hace legibles.
 	SetupMMDSRoute()
 
-	if err := a.Volumes.Acquire(); err != nil {
+	// Con kling.volwait=1 los monta el host (POST /volume/acquire) cuando
+	// toque: volume_wait.go.
+	if volumeWaitWanted() {
+		log.Printf("volumes: left unmounted until the host asks (%s=1)", api.VolumeWaitBootParam)
+	} else if err := a.Volumes.Acquire(); err != nil {
 		return nil, err
 	}
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para

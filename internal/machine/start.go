@@ -84,6 +84,9 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		}
 	}
 	live.State = api.StateCreated
+	// VolumeWait es del primer arranque: un Start monta como siempre (nadie
+	// le mandaría el acquire).
+	live.VolumeWait = false
 	// Lo listo era del arranque anterior: hasta que el agente nuevo conteste,
 	// no se sabe (como en Run). Si no, GET /machines decía "ready" mientras
 	// el invitado aún arrancaba, y un exec en ese rato fallaba.

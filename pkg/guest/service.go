@@ -157,12 +157,17 @@ func (a *Agent) startService(svc *Service) {
 		serviceState.mu.Unlock()
 		return
 	}
+	env := a.Env
+	start := func() { svc.Start(env) }
 	if n := shareWaitWanted(); n > 0 {
-		env := a.Env
-		startAfterShares(shareState, n, func() { svc.Start(env) })
+		start = func() { startAfterShares(shareState, n, func() { svc.Start(env) }) }
+	}
+	if volumeWaitWanted() {
+		// Primero los volúmenes y, montados, las carpetas si las espera.
+		startAfterVolumes(a.Volumes, start)
 		return
 	}
-	svc.Start(a.Env)
+	start()
 }
 
 // Start lanza el bucle que arranca y relanza el servicio.

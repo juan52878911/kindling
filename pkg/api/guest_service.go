@@ -128,6 +128,11 @@ const MaxReadyTimeoutSeconds = 120
 // el daemon da la máquina por fallida.
 const GuestCapCmd = "cmd"
 
+// GuestCapVolumeWait: el agente entiende kling.volwait=1 (no monta ni lanza
+// el servicio hasta POST /volume/acquire). Uno sin ella montaría y
+// arrancaría en seguida: el daemon da la máquina por fallida.
+const GuestCapVolumeWait = "volume-wait"
+
 // GuestService es la respuesta de GET /service.
 type GuestService struct {
 	// Declared: la imagen declara un servicio. Sin él, el resto va vacío.

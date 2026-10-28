@@ -162,6 +162,11 @@ type Machine struct {
 	Entrypoint []string `json:"entrypoint,omitempty"`
 	Cmd        []string `json:"cmd,omitempty"`
 
+	// VolumeWait: arrancó con sus volúmenes sin montar, esperando al host
+	// (RunRequest.VolumeWait). Mientras siga así, un commit no los suelta ni
+	// se los devuelve (devolvérselos lanzaría el servicio en ella).
+	VolumeWait bool `json:"volume_wait,omitempty"`
+
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
@@ -387,6 +392,14 @@ type RunRequest struct {
 	// CapabilityMachineCmd los ignoraría: el CLI la mira antes de mandarlos.
 	Entrypoint []string `json:"entrypoint,omitempty"`
 	Cmd        []string `json:"cmd,omitempty"`
+	// VolumeWait: la máquina arranca con sus Volumes puestos pero SIN
+	// montar, y el servicio de la imagen sin lanzar, hasta que el host se los
+	// monta. Es para guardar una plantilla de un servicio con volúmenes sin
+	// congelar en su memoria la caché de un disco que después cambia: el
+	// commit no los toca (no están montados) y cada copia, al restaurarse, los
+	// monta y lanza el servicio con los datos de ahora. Necesita Volumes y no
+	// vale con From. Solo el primer arranque: un Start los monta como siempre.
+	VolumeWait bool `json:"volume_wait,omitempty"`
 }
 
 // CapabilityMachineCmd es la capacidad de GET /info que dice que el daemon
@@ -513,6 +526,15 @@ const ExecBootParam = "kling.exec"
 // esperar antes de lanzar el servicio (RunRequest.ShareWait). Un agente
 // anterior no lo conoce: avisa y lo ignora.
 const ShareWaitBootParam = "kling.shares"
+
+// VolumeWaitBootParam (kling.volwait=1) le dice al agente que no monte sus
+// volúmenes ni lance el servicio hasta que el host se los monte
+// (RunRequest.VolumeWait).
+const VolumeWaitBootParam = "kling.volwait"
+
+// CapabilityVolumeWait es la capacidad de GET /info que dice que el daemon
+// entiende RunRequest.VolumeWait.
+const CapabilityVolumeWait = "volume-wait"
 
 // Image es una imagen de rootfs ya construida ($ROOT/images/$NAME.ext4): la base
 // de la que se arrancan las microVMs. Hasta que existió GET /images no se podían

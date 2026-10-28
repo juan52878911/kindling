@@ -1305,6 +1305,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return nil, err
 	}
+	if err := validarVolumeWait(req); err != nil {
+		return nil, err
+	}
 	req.Env = nil
 	if err := validarShareWait(req.ShareWait); err != nil {
 		return nil, err
@@ -1538,6 +1541,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if comando != nil {
 		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd
 	}
+	mc.VolumeWait = req.VolumeWait
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
 	// gcFailed) veía la máquina en created con PID 0, no mataba nada, borraba
@@ -1676,6 +1680,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.conocerAgente(id)
 	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
+	}
+	if mc.VolumeWait {
+		m.vigilarEsperaVolumen(id)
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
@@ -1849,7 +1856,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
 	}
 	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
-		cmdBootArg(comando) + shareWaitBootArg(shareWait)
+		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait)
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}
