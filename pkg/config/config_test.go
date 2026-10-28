@@ -208,6 +208,9 @@ func TestValidateVMM(t *testing.T) {
 		{"vz", "darwin", "arm64", true},
 		{"vz", "darwin", "amd64", false},
 		{"vz", "linux", "arm64", false},
+		{"hv", "darwin", "arm64", true},
+		{"hv", "darwin", "amd64", false},
+		{"hv", "linux", "arm64", false},
 		{"qemu", "linux", "amd64", false},
 	}
 	for _, c := range casos {

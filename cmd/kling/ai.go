@@ -922,7 +922,7 @@ func aiPrime(args []string) error {
 const pausedMiBDefault = 256
 
 // pausedMiBPorBackend elige el presupuesto del nivel pausada cuando no se pasa
-// -paused-mib. Con el backend vz (macOS) es el automático (-1, ver
+// -paused-mib. Con los backends de macOS (vz, hv) es el automático (-1, ver
 // pkg/scheduler/pausa.go): 256 MiB fijos eran poco para un Mac de 16–64 GiB,
 // donde una réplica pausada retiene su memoria y reanudarla cuesta 6–7 ms
 // frente a los ~210 de un thaw, y demasiado si el Mac se queda sin memoria.
@@ -931,7 +931,7 @@ func pausedMiBPorBackend(ctx context.Context, c *api.Client) int {
 	ictx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	info, err := c.Info(ictx)
-	if err != nil || info.Backend != "vz" {
+	if err != nil || (info.Backend != "vz" && info.Backend != "hv") {
 		return pausedMiBDefault
 	}
 	return -1

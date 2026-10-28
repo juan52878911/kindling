@@ -38,6 +38,9 @@ func TestResolverVMM(t *testing.T) {
 		{"KLING_VMM=vz es un nombre de backend", BackendVZ, "vz", "firecracker", hayJunto, look, junto},
 		{"KLING_VMM ruta con vz", BackendVZ, "/tmp/fake-vz", "firecracker", hayJunto, look, "/tmp/fake-vz"},
 		{"KLING_VMM de otro backend no cambia el binario", BackendFirecracker, "vz", "fc", nada, look, "fc"},
+		{"hv busca kling-hv", BackendHV, "", "firecracker", nada, noLook, "kling-hv"},
+		{"KLING_VMM=hv es un nombre de backend", BackendHV, "hv", "firecracker", nada, noLook, "kling-hv"},
+		{"KLING_VMM=vz con hv configurado no cambia el binario", BackendHV, "vz", "firecracker", nada, noLook, "kling-hv"},
 	}
 	for _, c := range casos {
 		if got := resolverVMM(c.backend, c.env, c.fcBin, exeDir, c.look, c.existe); got != c.quiero {

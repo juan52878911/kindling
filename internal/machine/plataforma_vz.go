@@ -37,7 +37,9 @@ func argsVMM() []string { return nil }
 // (put_debugfs.go).
 const putSinMontar = true
 
-const backendVMM = BackendVZ
+// backendVMM es vz o hv: lo fija ElegirBackend (backend_darwin.go) antes de
+// crear el Manager.
+var backendVMM = BackendVZ
 
 // auditoriaEnElDaemon: en macOS el registro lo escribe el kling-vz de la
 // máquina junto a su socket, el único sitio en que su sandbox le deja
@@ -208,8 +210,9 @@ func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
 const jailerPosible = false
 
 // restaurarComparteMemoria: Virtualization.framework copia la memoria al
-// restaurar (RestoreMachineState); las copias no comparten nada.
-const restaurarComparteMemoria = false
+// restaurar (RestoreMachineState); las copias no comparten nada. kling-hv sí
+// la comparte: mapea el fichero (ElegirBackend).
+var restaurarComparteMemoria = false
 
 // globoSinEstadisticas: Virtualization.framework no da las estadísticas de
 // memoria del invitado; squeeze aprieta a ciegas (ver objetivoSinEstadisticas).
@@ -574,7 +577,12 @@ const (
 
 // lanzamientoPlataforma: el tamaño de launchGate, que en macOS es la compuerta
 // de RESTAURACIONES.
-func lanzamientoPlataforma() int { return restoresSimultaneosVZ }
+func lanzamientoPlataforma() int {
+	if backendVMM == BackendHV {
+		return restoresSimultaneosHV
+	}
+	return restoresSimultaneosVZ
+}
 
 var (
 	esperaNivelRestoreVZ   = 2 * time.Second // variable para las pruebas

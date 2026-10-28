@@ -31,7 +31,8 @@ package machine
 //     sucias del VMM: desde ahí un diff ya no sería "desde el dorado". Quien
 //     lo hace olvida DiffBase y el siguiente freeze vuelca entero.
 //
-// Solo en Firecracker (en vz la copia no comparte memoria con el dorado).
+// Solo en Firecracker (en vz la copia no comparte memoria con el dorado; en
+// hv sí, pero su fichero de memoria ya es un clon de la base más lo sucio).
 // KLING_DIFF_FREEZE=0 lo apaga: las copias se cargan sin seguimiento y se
 // congelan como siempre.
 
@@ -60,7 +61,7 @@ const (
 // congelarEnDiff dice si las copias se cargan con seguimiento y se congelan
 // en diferencial.
 func congelarEnDiff() bool {
-	return restaurarComparteMemoria && os.Getenv("KLING_DIFF_FREEZE") != "0"
+	return backendVMM == BackendFirecracker && restaurarComparteMemoria && os.Getenv("KLING_DIFF_FREEZE") != "0"
 }
 
 // existe dice si hay algo en path.

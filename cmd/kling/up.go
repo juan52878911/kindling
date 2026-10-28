@@ -750,16 +750,21 @@ func cmdStatus(args []string) error {
 		if *verbose {
 			writeInfo(c, info)
 		}
-		if info.Backend == "vz" {
-			// macOS: sin KVM ni firecracker; el VMM es kling-vz.
+		if info.Backend == "vz" || info.Backend == "hv" {
+			// macOS: sin KVM ni firecracker; el VMM es kling-vz (o kling-hv).
 			vz := strings.TrimSpace(info.Firecrack)
 			if vz == "" {
 				vz = "✗ not found or not running — see `kling up`"
 			} else {
 				vz = "✓ " + vz
 			}
-			fmt.Printf("backend:      vz (Virtualization.framework)\n")
-			fmt.Printf("kling-vz:     %s\n", vz)
+			if info.Backend == "hv" {
+				fmt.Printf("backend:      hv (Hypervisor.framework)\n")
+				fmt.Printf("kling-hv:     %s\n", vz)
+			} else {
+				fmt.Printf("backend:      vz (Virtualization.framework)\n")
+				fmt.Printf("kling-vz:     %s\n", vz)
+			}
 		} else {
 			fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
 			fc := strings.TrimSpace(info.Firecrack)

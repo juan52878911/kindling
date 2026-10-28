@@ -36,3 +36,22 @@ func TestDaemonBackend(t *testing.T) {
 		t.Fatalf("backend desconocido: %v", err)
 	}
 }
+
+// hv (kling-hv) es la otra opción de macOS: por la clave o por KLING_VMM.
+func TestDaemonBackendHV(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		if _, err := daemonBackend("hv", "", runtime.GOOS, runtime.GOARCH); err == nil {
+			t.Fatal("hv solo en Apple Silicon")
+		}
+		return
+	}
+	if b, err := daemonBackend("hv", "", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("daemon.vmm hv = %q, %v", b, err)
+	}
+	if b, err := daemonBackend("vz", "hv", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("KLING_VMM=hv = %q, %v", b, err)
+	}
+	if b, err := daemonBackend("hv", "/tmp/kling-hv", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("KLING_VMM ruta con hv = %q, %v", b, err)
+	}
+}
