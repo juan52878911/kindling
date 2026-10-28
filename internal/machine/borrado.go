@@ -163,8 +163,12 @@ func (m *Manager) limpiarMaquina(mc *api.Machine) error {
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
 	delete(m.discoMedido, mc.ID)
+	delete(m.freezeFails, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	// La marca de "sin agente" de su último freeze: sin esto se quedaba hasta
+	// el siguiente thaw de un ID que ya no volverá.
+	m.resyncSinAgente.Delete(claveThaw(mc.ID))
 	// La numeración de sus vigías de "listo": sin podarla, cada máquina que
 	// pasó por aquí dejaba su entrada para siempre. Se adelanta antes de
 	// soltarla, para que una vigía aún viva se sepa jubilada.
