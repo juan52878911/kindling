@@ -164,6 +164,9 @@ type session struct {
 	// maxIO es el tamaño de E/S negociado con OpHello; BaseIO hasta entonces
 	// (y para siempre con un agente que no la conoce).
 	maxIO atomic.Int64
+
+	// cursors son los listados a medias (ver list.go). Con mu.
+	cursors []*listCursor
 }
 
 type handle struct {
@@ -355,6 +358,10 @@ func (ss *session) closeAll() {
 		<-globalFDs
 		delete(ss.files, id)
 	}
+	for _, c := range ss.cursors {
+		ss.dropCursorLocked(c)
+	}
+	ss.cursors = nil
 }
 
 // errReply es una respuesta de error.
@@ -412,7 +419,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if max == 0 || max > maxListBytes {
 			max = maxListBytes
 		}
-		return s.list(id, p, cookie, int(max))
+		return ss.list(id, p, cookie, int(max))
 
 	case proto.OpOpen, proto.OpCreate:
 		p, flags := d.Str(), d.U32()
@@ -705,64 +712,6 @@ func (s *Server) stat(p string) (proto.Attr, uint32) {
 		return proto.Attr{}, proto.ENOENT
 	}
 	return attrOf(fi), 0
-}
-
-func (s *Server) list(id uint64, p string, cookie uint64, max int) []byte {
-	f, err := s.root.Open(rel(p))
-	if err != nil {
-		return errReply(id, Errno(err))
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil {
-		return errReply(id, Errno(err))
-	} else if !fi.IsDir() {
-		return errReply(id, proto.ENOTDIR)
-	}
-
-	var ent proto.Enc
-	n, idx, eof := uint32(0), uint64(0), false
-	for {
-		batch, err := f.ReadDir(256)
-		for _, de := range batch {
-			if idx < cookie {
-				idx++
-				continue
-			}
-			if !servible(de.Type()) || proto.ValidName(de.Name()) != nil {
-				idx++
-				continue
-			}
-			if len(ent.B)+len(de.Name())+6 > max {
-				goto done
-			}
-			ent.Str(de.Name())
-			ent.U32(typeBits(de.Type()))
-			n++
-			idx++
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				return errReply(id, Errno(err))
-			}
-			eof = true
-			break
-		}
-		if len(batch) == 0 {
-			eof = true
-			break
-		}
-	}
-done:
-	r := proto.Response(id, 0)
-	if eof {
-		r.U8(1)
-	} else {
-		r.U8(0)
-	}
-	r.U32(n)
-	r.B = append(r.B, ent.B...)
-	r.U64(idx)
-	return r.B
 }
 
 func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.File, bool, uint32) {
