@@ -69,7 +69,7 @@ const (
 // Postgres, como antes de #64 (goldenInfo sí lo rechaza al crear copias).
 func engineOf(labels map[string]string) string {
 	switch e := labels[labelEngine]; e {
-	case engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse:
+	case engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse, engineGarage:
 		return e
 	}
 	return enginePostgres
@@ -82,7 +82,7 @@ func pgBacked(engine string) bool { return engine == enginePostgres || engine ==
 // knownEngine dice si e es un motor que kling db sabe manejar.
 func knownEngine(e string) bool {
 	switch e {
-	case enginePostgres, engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse:
+	case enginePostgres, engineMySQL, engineRedis, engineSQLite, engineFerret, engineClickHouse, engineGarage:
 		return true
 	}
 	return false
@@ -101,6 +101,8 @@ func enginePort(engine string) int {
 		return ferretPort
 	case engineClickHouse:
 		return chPort
+	case engineGarage:
+		return garagePort
 	}
 	return pgPort
 }
@@ -110,7 +112,7 @@ func engineDoc(engine string) string {
 	switch engine {
 	case engineMySQL:
 		return "docs/mysql.md"
-	case engineRedis, engineSQLite, engineFerret, engineClickHouse:
+	case engineRedis, engineSQLite, engineFerret, engineClickHouse, engineGarage:
 		return "docs/db-engines.md"
 	}
 	return "docs/db.md"
@@ -162,8 +164,8 @@ func clientMode(engine string) string {
 		return "redis"
 	case engineSQLite:
 		return "sqlite"
-	case engineFerret, engineClickHouse:
-		// Sin cliente propio: mongosh y clickhouse-client piden la clave en
+	case engineFerret, engineClickHouse, engineGarage:
+		// Sin cliente propio: mongosh, clickhouse-client y aws piden la clave en
 		// argv o por teclado; el DSN va a la herramienta de cada uno.
 		return "dsn"
 	}

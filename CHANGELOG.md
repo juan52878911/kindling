@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling db` templates of Garage, an S3-compatible object store (`-engine garage`): every copy gets its own access/secret key, generated on the host and rotated by `rotate` (#115)
 - Credential proxy: SigV4 re-signing (`kind: sigv4`) for S3-compatible servers: the guest signs with a placeholder key and the proxy signs again with the real one, incl. `UNSIGNED-PAYLOAD`, `aws-chunked` and presigned URLs (#116)
 - `kling volume clone <src> <dst> [-copy]`: instant copy-on-write volume clones (reflink/clonefile), with a real clone probe in `kling status -v`; refuses on filesystems that cannot clone unless `-copy`
 - `kling image import` stores an image whose layers extend an already imported one (same diff_id prefix, agent and arch) as a small layer over it instead of a second full ext4; a base with layers on top cannot be removed

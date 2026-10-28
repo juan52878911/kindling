@@ -393,6 +393,11 @@ func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 	case engineSQLite:
 		// Sin clave que rotar: basta con que la base esté y se abra.
 		return a.waitSQLite(ctx, mc.ID, db)
+	case engineGarage:
+		if err := a.waitGarage(ctx, mc.ID); err != nil {
+			return err
+		}
+		return a.rotateGarage(ctx, mc.ID, role, db)
 	case engineClickHouse:
 		if err := a.waitClickHouse(ctx, mc.ID); err != nil {
 			return err

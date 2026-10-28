@@ -150,6 +150,12 @@ func (a *app) setPassword(ctx context.Context, mc *api.Machine, role, pw string)
 		return a.setRedisHash(ctx, mc.ID, role, redisHash(pw), false)
 	case engineClickHouse:
 		return a.setClickHouseHash(ctx, mc.ID, role, redisHash(pw))
+	case engineGarage:
+		_, db, err := roleDB(mc.Labels)
+		if err != nil {
+			return err
+		}
+		return a.setGarageKey(ctx, mc.ID, role, db, pw)
 	case engineSQLite:
 		return fmt.Errorf("%s is a sqlite copy: it has no password", mc.Name)
 	}
