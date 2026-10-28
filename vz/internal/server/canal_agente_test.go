@@ -173,3 +173,169 @@ func TestDialAgenteEnmudece(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// agenteDeQuita es un agente por net.Pipe que contesta a cada petición de una
+// conexión (keep-alive) mientras calla sea false; después lee y no contesta.
+type agenteDeQuita struct {
+	calla atomic.Bool
+	mu    sync.Mutex
+	lados []net.Conn
+}
+
+func (a *agenteDeQuita) dial(ctx context.Context) (net.Conn, error) {
+	c, s := net.Pipe()
+	a.mu.Lock()
+	a.lados = append(a.lados, s)
+	a.mu.Unlock()
+	go func() {
+		r := bufio.NewReader(s)
+		for {
+			l, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if l == "\r\n" && !a.calla.Load() {
+				if _, err := s.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return c, nil
+}
+
+func (a *agenteDeQuita) cerrar() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, c := range a.lados {
+		c.Close()
+	}
+}
+
+// Al confirmar la mudez se cierran TODAS las conexiones que esperaban, no
+// solo la que lanzó la prueba; y una conexión que ya leyó (un keep-alive
+// reutilizado) vuelve a vigilarse con su siguiente escritura.
+func TestDialAgenteEnmudeceCierraTodas(t *testing.T) {
+	viejo := plazoMudez
+	plazoMudez = 50 * time.Millisecond
+	t.Cleanup(func() { plazoMudez = viejo })
+	ag := &agenteDeQuita{}
+	defer ag.cerrar()
+	d := dialAgenteComprobado(ag.dial)
+
+	pedir := "POST /resync HTTP/1.1\r\n\r\n"
+	vieja, err := d(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vieja.Close()
+	if _, err := vieja.Write([]byte(pedir)); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(vieja)
+	for {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("primera respuesta: %v", err)
+		}
+		if l == "\r\n" {
+			break
+		}
+	}
+
+	ag.calla.Store(true)
+	conns := []net.Conn{vieja}
+	for i := 0; i < 3; i++ {
+		c, err := d(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		conns = append(conns, c)
+	}
+	t0 := time.Now()
+	var wg sync.WaitGroup
+	errs := make([]error, len(conns))
+	for i, c := range conns {
+		wg.Add(1)
+		go func(i int, c net.Conn) {
+			defer wg.Done()
+			if _, err := c.Write([]byte(pedir)); err != nil {
+				errs[i] = err
+				return
+			}
+			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var b [1]byte
+			var err error
+			if i == 0 {
+				_, err = r.Read(b[:])
+			} else {
+				_, err = c.Read(b[:])
+			}
+			if err == nil {
+				errs[i] = errors.New("contestó")
+				return
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				errs[i] = err
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("las conexiones colgadas tardaron %s en cerrarse", d)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("conexión %d: %v (quiero que se cierre)", i, err)
+		}
+	}
+	if _, err := d(context.Background()); !errors.Is(err, vnet.ErrCaminoMudo) {
+		t.Fatalf("tras enmudecer el dial da %v", err)
+	}
+}
+
+// El plazo de quien llama no es mudez: un /healthz que tarda 300 ms (un
+// invitado recién reanudado) contra un dial de 150 ms da DeadlineExceeded, y
+// el dial siguiente sigue por vsock.
+func TestDialAgentePlazoCortoNoEsMudez(t *testing.T) {
+	var n atomic.Int32
+	var mu sync.Mutex
+	var lados []net.Conn
+	dial := func(ctx context.Context) (net.Conn, error) {
+		c, s := net.Pipe()
+		mu.Lock()
+		lados = append(lados, s)
+		mu.Unlock()
+		lenta := n.Add(1) == 1
+		go func() {
+			if l, _ := bufio.NewReader(s).ReadString('\n'); l == "" {
+				return
+			}
+			if lenta {
+				time.Sleep(300 * time.Millisecond)
+			}
+			_, _ = s.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+		}()
+		return c, nil
+	}
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range lados {
+			c.Close()
+		}
+	}()
+	d := dialAgenteComprobado(dial)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := d(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, quiero DeadlineExceeded", err)
+	}
+	c, err := d(context.Background())
+	if err != nil {
+		t.Fatalf("el dial siguiente: %v (quiero que siga por vsock)", err)
+	}
+	c.Close()
+}

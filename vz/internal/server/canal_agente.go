@@ -36,8 +36,8 @@ import (
 //   - Después, una conexión que escribió y lleva plazoMudez sin leer nada
 //     lanza la prueba; si no contesta, el camino queda mudo (cada dial
 //     siguiente da vnet.ErrCaminoMudo y el reenvío sigue por TCP hasta que
-//     muera este proceso) y la conexión colgada se cierra, para que quien
-//     esperaba reintente ya en vez de agotar su plazo.
+//     muera este proceso) y todas las conexiones abiertas se cierran, para
+//     que quien esperaba reintente ya en vez de agotar su plazo.
 //
 // Cuesta un viaje por vsock (~1 ms) en la primera conexión de cada proceso, y
 // nada en las demás salvo un temporizador por conexión.
@@ -52,6 +52,10 @@ type vigia struct {
 	mudo  atomic.Bool // y después dejó de hacerlo: todo por TCP
 	// probando: una prueba de mudez en marcha (no se lanzan dos a la vez).
 	probando atomic.Bool
+	// vivas: las conexiones abiertas, para cerrarlas todas al enmudecer. mu
+	// las guarda y ordena su alta con el paso a mudo.
+	mu    sync.Mutex
+	vivas map[*connVigilada]struct{}
 }
 
 // plazoMudez es cuánto puede estar una conexión con algo escrito y nada leído
@@ -62,6 +66,7 @@ var plazoMudez = time.Second
 
 // intentoPrueba acota cada GET /healthz de prueba. El agente contesta en ~1
 // ms; dos intentos caben en el plazo del dial (vnet.intentoGuestDial).
+// Es el único plazo de la prueba (ver probar).
 const intentoPrueba = 200 * time.Millisecond
 
 func (v *vigia) dialar(ctx context.Context) (net.Conn, error) {
@@ -73,27 +78,49 @@ func (v *vigia) dialar(ctx context.Context) (net.Conn, error) {
 			return nil, err
 		}
 		v.visto.Store(true)
+		// La prueba lleva su propio plazo: el agente contestó, pero quizá
+		// cuando quien llamaba ya no esperaba.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 	c, err := v.dial(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &connVigilada{Conn: c, v: v}, nil
+	cv := &connVigilada{Conn: c, v: v}
+	v.mu.Lock()
+	if v.mudo.Load() {
+		v.mu.Unlock()
+		c.Close()
+		return nil, vnet.ErrCaminoMudo
+	}
+	if v.vivas == nil {
+		v.vivas = map[*connVigilada]struct{}{}
+	}
+	v.vivas[cv] = struct{}{}
+	v.mu.Unlock()
+	return cv, nil
 }
 
-// probar hace la prueba con dos intentos. Devuelve vnet.ErrCaminoMudo si el
-// vsock conecta y no contesta, ctx.Err() si venció el plazo de quien llama, o
-// el error del dial (un agente anterior, que ni conecta por vsock).
+// probar hace la prueba con dos intentos, con su propio plazo (intentoPrueba
+// cada uno) y no con el de quien llama: un plazo corto de fuera (los 150 ms de
+// un sondeo de puerto) contra un invitado vivo pero lento (recién reanudado,
+// o parado por el freno de CPU) no es mudez, y dejaría la máquina por TCP de
+// por vida. Devuelve vnet.ErrCaminoMudo si el vsock conecta y no contesta en
+// ese plazo propio, ctx.Err() si venció el de quien llama sin veredicto de
+// mudez, o el error del dial (un agente anterior, que ni conecta por vsock).
 func (v *vigia) probar(ctx context.Context) error {
+	pbase := context.WithoutCancel(ctx)
 	var err error
 	for i := 0; i < 2; i++ {
-		pctx, cancel := context.WithTimeout(ctx, intentoPrueba)
+		pctx, cancel := context.WithTimeout(pbase, intentoPrueba)
 		err = agenteContesta(pctx, v.dial)
 		cancel()
 		if err == nil {
 			return nil
 		}
-		if !esSinRespuesta(err) || ctx.Err() != nil {
+		if !esSinRespuesta(err) {
 			break
 		}
 	}
@@ -107,62 +134,109 @@ func (v *vigia) probar(ctx context.Context) error {
 }
 
 // sospechar comprueba, en segundo plano, si el camino sigue vivo; si no, lo
-// marca mudo y cierra c.
+// marca mudo y cierra todas las conexiones vivas (no solo c: las que
+// esperaban a la vez su /resync o su attach colgarían hasta su plazo). Si ya
+// estaba mudo, cierra c en el acto; si hay otra prueba en marcha, su
+// veredicto cierra también c, que está entre las vivas.
 func (v *vigia) sospechar(c *connVigilada) {
-	if v.mudo.Load() || !v.probando.CompareAndSwap(false, true) {
+	if v.mudo.Load() {
+		c.Close()
+		return
+	}
+	if !v.probando.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
 		defer v.probando.Store(false)
 		// El aviso lo da vnet al ver el primer ErrCaminoMudo.
 		if err := v.probar(context.Background()); errors.Is(err, vnet.ErrCaminoMudo) {
-			v.mudo.Store(true)
-			c.Close()
+			v.enmudecer()
 		}
 	}()
 }
 
+// enmudecer marca el camino mudo y cierra las conexiones vivas.
+func (v *vigia) enmudecer() {
+	v.mu.Lock()
+	v.mudo.Store(true)
+	vivas := v.vivas
+	v.vivas = nil
+	v.mu.Unlock()
+	for c := range vivas {
+		c.Close()
+	}
+}
+
+func (v *vigia) olvidar(c *connVigilada) {
+	v.mu.Lock()
+	delete(v.vivas, c)
+	v.mu.Unlock()
+}
+
 // connVigilada es una conexión con el agente que avisa a su vigía si escribe
-// y no lee nada en plazoMudez.
+// y no lee nada en plazoMudez. La vigilancia se rearma con cada escritura que
+// llega tras una lectura: un keep-alive reutilizado sobre un vsock que
+// enmudece después también se detecta.
 type connVigilada struct {
 	net.Conn
-	v      *vigia
-	leido  atomic.Bool
-	armado sync.Once
-	mu     sync.Mutex
-	t      *time.Timer
+	v *vigia
+	// Con mu: armado, hay una escritura sin lectura detrás y t corre;
+	// cerrada, ya pasó Close.
+	mu      sync.Mutex
+	armado  bool
+	cerrada bool
+	t       *time.Timer
 }
 
 func (c *connVigilada) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
-	if n > 0 && !c.leido.Load() {
-		c.armado.Do(func() {
-			c.mu.Lock()
-			c.t = time.AfterFunc(plazoMudez, func() {
-				if !c.leido.Load() {
-					c.v.sospechar(c)
-				}
-			})
-			c.mu.Unlock()
-		})
+	if n > 0 {
+		c.mu.Lock()
+		if !c.armado && !c.cerrada {
+			c.armado = true
+			if c.t == nil {
+				c.t = time.AfterFunc(plazoMudez, c.vence)
+			} else {
+				c.t.Reset(plazoMudez)
+			}
+		}
+		c.mu.Unlock()
 	}
 	return n, err
+}
+
+// vence: plazoMudez desde la primera escritura sin lectura detrás.
+func (c *connVigilada) vence() {
+	c.mu.Lock()
+	sospecha := c.armado && !c.cerrada
+	c.armado = false
+	c.mu.Unlock()
+	if sospecha {
+		c.v.sospechar(c)
+	}
 }
 
 func (c *connVigilada) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
-		c.leido.Store(true)
+		c.mu.Lock()
+		if c.armado {
+			c.armado = false
+			c.t.Stop()
+		}
+		c.mu.Unlock()
 	}
 	return n, err
 }
 
 func (c *connVigilada) Close() error {
 	c.mu.Lock()
+	c.cerrada = true
 	if c.t != nil {
 		c.t.Stop()
 	}
 	c.mu.Unlock()
+	c.v.olvidar(c)
 	return c.Conn.Close()
 }
 
@@ -201,7 +275,9 @@ func agenteContesta(ctx context.Context, dial func(ctx context.Context) (net.Con
 	}
 	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: agent\r\nConnection: close\r\n\r\n", api.GuestHealthPath); err != nil {
 		// Conectó pero ni acepta la petición antes del plazo: tan mudo como
-		// el que no contesta.
+		// el que no contesta. El plazo es siempre el propio de la prueba
+		// (probar no le pasa el de quien llama), así que vencer aquí sí es
+		// mudez.
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
 			return errSinRespuesta{err}
