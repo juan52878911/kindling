@@ -1,0 +1,12 @@
+warning: top-level networks: not supported (nodes of a graph share one network; reach each other only by edges)
+warning: service app: container_name: ignored (the machine is called <graph>-<node>)
+warning: service app: env_file: not read; put the variables in environment: or bake them with kling image import -env-file
+warning: service app: networks: not supported (nodes share no network; they reach each other only by edges, as <node>.graph)
+warning: service builder: build: not supported and no image: to use; service skipped (build the image and import it with kling image import)
+warning: service proxy: cap_add: not supported (a node is a microVM with its own kernel; there is no host privilege to grant)
+warning: service proxy: network_mode: not supported (nodes share no network; they reach each other only by edges, as <node>.graph)
+warning: service proxy: ports: 8080:80: publishing to the host is not supported; port 80 is exposed to the graph's edges only
+warning: service proxy: ports: 9100:9100/udp: UDP is not supported
+warning: service proxy: volumes: ./nginx.conf:/etc/nginx/nginx.conf:ro: bind mounts are not supported (use a named volume, or a share on a cold-booted image)
+warning: service proxy: volumes: /var/log/nginx: an anonymous volume has no equivalent; declare a named one
+warning: service app: healthcheck: nobody depends on it with service_healthy; not carried

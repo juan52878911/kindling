@@ -1,0 +1,27 @@
+services:
+  api:
+    image: example/api:2
+    ports: ["8081:8081"]
+    environment:
+      - DB_HOST=db
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16
+    ports:
+      - 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -p 5432"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1g
+volumes:
+  data: {}

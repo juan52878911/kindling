@@ -143,7 +143,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "GRAPHS (several machines as one)", cmds: []plugin.Command{
-		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "audit", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
+		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "audit", "freeze", "thaw", "snapshot", "fork", "rm", "from-compose"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
                                                    eager nodes; lazy ones start on
                                                    their first connection
   graph ls [-q] [-json]                            lists the graphs
@@ -157,6 +157,8 @@ var coreTree = []section{
   graph fork <graph> [-n N] [-q] [-json]           N new graphs from this instant; their
                                                    edges reach their own nodes only
   graph rm [-f] <graph>...                         removes the graph and its machines
+  graph from-compose <compose.yaml> [-o F]         translates a compose file into a graph file
+      [-name N] [-script S]                        (+ the setup script); warns per unsupported key
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{

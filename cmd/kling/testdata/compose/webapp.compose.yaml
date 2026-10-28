@@ -1,0 +1,26 @@
+name: shop
+services:
+  web:
+    image: ghcr.io/example/shop-web:1.4
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://shop:s3cret@db:5432/shop
+      REDIS_HOST: cache
+    depends_on:
+      - db
+      - cache
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: s3cret
+      POSTGRES_DB: shop
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  cache:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 64mb
+    mem_limit: 128m
+volumes:
+  pgdata:
