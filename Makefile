@@ -257,7 +257,10 @@ deploy-mac:
 vz:
 	@test "$$(uname -s)" = Darwin || { echo "kling-vz only builds on macOS" >&2; exit 1; }
 	@test -x vz/build.sh || { echo "vz/build.sh not found: kling-vz is not in this checkout yet" >&2; exit 1; }
-	cd vz && ./build.sh && ./build-hv.sh
+	@# El mínimo de macOS de cada uno (docs/mac.md): sin fijarlo, el binario
+	@# pediría la versión del SDK de este Mac y no cargaría en uno anterior.
+	cd vz && MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" ./build.sh \
+		&& MACOSX_DEPLOYMENT_TARGET=15.2 CGO_CFLAGS="-O2 -g -mmacosx-version-min=15.2" CGO_LDFLAGS="-mmacosx-version-min=15.2" ./build-hv.sh
 
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##

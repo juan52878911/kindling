@@ -170,10 +170,19 @@ jobs:
           set -euo pipefail
           VERSION="$INPUT_TAG"
           [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME}"
-          cd vz && OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
+          # Sin fijarlo, el enlazador marca el binario con la versión del SDK
+          # del runner (15.x) y dyld se niega a cargarlo en un macOS anterior:
+          # kling-vz vale desde 14.0 y kling-hv desde 15.2 (docs/mac.md).
+          minos() { otool -l "$1" | grep -A4 LC_BUILD_VERSION | grep -q "minos $2\$" || { echo "$1 is not built for macOS $2" >&2; exit 1; }; }
+          cd vz
+          MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+            OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
           codesign -d --entitlements - dist/kling-vz-darwin-arm64 2>&1 | grep -q com.apple.security.virtualization
-          OUT=dist/kling-hv-darwin-arm64 VERSION="$VERSION" ./build-hv.sh
+          minos dist/kling-vz-darwin-arm64 14.0
+          MACOSX_DEPLOYMENT_TARGET=15.2 CGO_CFLAGS="-O2 -g -mmacosx-version-min=15.2" CGO_LDFLAGS="-mmacosx-version-min=15.2" \
+            OUT=dist/kling-hv-darwin-arm64 VERSION="$VERSION" ./build-hv.sh
           codesign -d --entitlements - dist/kling-hv-darwin-arm64 2>&1 | grep -q com.apple.security.hypervisor
+          minos dist/kling-hv-darwin-arm64 15.2
           dist/kling-hv-darwin-arm64 --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

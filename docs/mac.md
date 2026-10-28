@@ -17,13 +17,40 @@ opción: el runtime en el propio Mac.
 | Qué | Por qué |
 |---|---|
 | Apple Silicon (arm64) | los invitados son aarch64; en un Mac Intel no hay backend `vz` |
-| macOS 14 (Sonoma) o superior | congelar y descongelar usa el guardado y restauración de estado de la VM, que llega en 14 |
+| macOS 14 (Sonoma) o superior; 15.2 para `kling-hv` | congelar y descongelar usa el guardado y restauración de estado de la VM, que llega en 14; `kling-hv` usa el GIC de Hypervisor.framework (ver la tabla de abajo) |
 | `kling-vz` firmado con `com.apple.security.virtualization` | sin ese permiso macOS no deja crear la VM; una firma ad-hoc basta |
 | e2fsprogs (`brew install e2fsprogs`) | cada microVM lleva un overlay ext4 y las imágenes se inspeccionan con `debugfs` |
 
 No hace falta root: el daemon corre como tu usuario.
 
 `kling up -check` comprueba todo lo anterior y dice qué teclear para cada fallo.
+
+### Qué VMM según la versión de macOS
+
+Hay dos VMM: `kling-vz` (Virtualization.framework) y `kling-hv`
+(Hypervisor.framework, [`backend-hv.md`](backend-hv.md)). La versión se compara
+entera (15.1 no llega a 15.2):
+
+| macOS | VMM |
+|---|---|
+| 13 o anterior | ninguno |
+| 14.x (Sonoma) | `vz` |
+| 15.0 – 15.1 | `vz` |
+| 15.2 o posterior | `hv` (con `daemon.vmm auto`, si `kling-hv` pasa su sonda) |
+
+`kling-vz` se enlaza para macOS 14.0 y `kling-hv` para 15.2
+(`MACOSX_DEPLOYMENT_TARGET` en `make vz` y en la release: sin fijarlo el binario
+pide la versión del SDK con que se compiló y dyld no lo carga en un macOS
+anterior).
+
+Por qué 15.2 y no 15.0: la API del GIC de Hypervisor.framework (`hv_gic_create`,
+`hv_gic_state_*`) es de macOS 15.0 según el SDK, y `kling-hv` no usa nada más
+nuevo (lo de 15.2 es SME, que no toca). Pero `vz/internal/hvvm` se compila con
+`-mmacosx-version-min=15.2` y nadie lo ha probado en 15.0 ni 15.1; bajar el
+mínimo no gana casi a nadie (15.2 salió en diciembre de 2024) y arriesga un GIC
+sin probar. Bajarlo es cambiar ese flag, `macOSMinHV` en
+`cmd/kling/version_macos.go` y el objetivo de `make vz`/release, tras probarlo
+en un Mac con 15.0.
 
 ## Instalación
 

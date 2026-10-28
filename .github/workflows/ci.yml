@@ -210,13 +210,25 @@ jobs:
       - run: go vet ./...
       - run: GOOS=linux go vet ./...
       - run: go test -race -count=1 ./...
+      # El mínimo de macOS de cada VMM se fija como en release.yml: sin él
+      # el binario pediría la versión del SDK del runner.
       - run: ./build.sh
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+          CGO_CFLAGS: -O2 -g -mmacosx-version-min=14.0
+          CGO_LDFLAGS: -mmacosx-version-min=14.0
       # Sin el entitlement el framework se niega a crear la VM: que la firma lo
       # lleve es parte del contrato del binario.
       - run: codesign -d --entitlements - bin/kling-vz 2>&1 | grep -q com.apple.security.virtualization
+      - run: otool -l bin/kling-vz | grep -A4 LC_BUILD_VERSION | grep -q 'minos 14.0$'
       - run: bin/kling-vz --version
       - run: ./build-hv.sh
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '15.2'
+          CGO_CFLAGS: -O2 -g -mmacosx-version-min=15.2
+          CGO_LDFLAGS: -mmacosx-version-min=15.2
       - run: codesign -d --entitlements - bin/kling-hv 2>&1 | grep -q com.apple.security.hypervisor
+      - run: otool -l bin/kling-hv | grep -A4 LC_BUILD_VERSION | grep -q 'minos 15.2$'
       - run: bin/kling-hv --version
 
   # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que

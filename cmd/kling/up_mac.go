@@ -103,17 +103,6 @@ func tieneEntitlement(path, ent string) bool {
 	return strings.Contains(string(out), ent)
 }
 
-// versionMayor devuelve el número mayor de una versión "15.5.1"; 0 si no se
-// puede leer.
-func versionMayor(v string) int {
-	mayor, _, _ := strings.Cut(v, ".")
-	n, err := strconv.Atoi(mayor)
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
 func checksMac(p probeMac) []check {
 	vmmFound := "not next to kling nor in PATH"
 	switch {
@@ -137,10 +126,12 @@ func checksMac(p probeMac) []check {
 		framework, build = "Hypervisor.framework", "make vz            # in the kindling repo; builds and signs kling-vz and kling-hv"
 	}
 	// vz necesita el save/restore de macOS 14; hv, el GIC de
-	// Hypervisor.framework (hv_gic_create), que llegó en macOS 15.
-	minMacOS, whyMacOS := 14, "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later"
+	// Hypervisor.framework y un binario compilado para 15.2 (version_macos.go).
+	// Se compara la versión entera: 15.1 no es 15.2.
+	minMacOS := macOSMinDe(backend)
+	whyMacOS := "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later"
 	if backend == machine.BackendHV {
-		minMacOS, whyMacOS = 15, "kling-hv needs the in-kernel GIC of Hypervisor.framework (macOS 15 Sequoia or later)"
+		whyMacOS = "kling-hv needs the in-kernel GIC of Hypervisor.framework and is built for macOS " + macOSMinHV + " or later"
 	}
 	return []check{
 		{
@@ -150,7 +141,7 @@ func checksMac(p probeMac) []check {
 			fix:   []string{"use a Linux host with KVM instead:  kling context add lab ssh://user@host"},
 		},
 		{
-			label: fmt.Sprintf("macOS %d+", minMacOS), ok: versionMayor(p.macOS) >= minMacOS, fatal: true,
+			label: "macOS " + minMacOS + "+", ok: versionAlMenos(p.macOS, minMacOS), fatal: true,
 			found: macOS,
 			why:   whyMacOS,
 			fix:   []string{"update macOS (System Settings > General > Software Update)"},

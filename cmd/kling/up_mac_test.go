@@ -21,7 +21,7 @@ func TestChecksMac(t *testing.T) {
 	}
 	viejo := sano
 	viejo.macOS = "13.6"
-	if !fatales(viejo)["macOS 14+"] {
+	if !fatales(viejo)["macOS 14.0+"] {
 		t.Fatal("macOS 13 no vale")
 	}
 	intel := sano
@@ -56,8 +56,15 @@ func TestChecksMac(t *testing.T) {
 	if f := fatales(sinImg); len(f) != 0 {
 		t.Fatalf("sin imágenes no es fatal: %v", f)
 	}
-	if versionMayor("14.0") != 14 || versionMayor("") != 0 || versionMayor("x") != 0 {
-		t.Fatal("versionMayor")
+	for v, want := range map[string]bool{"14.0": true, "14": true, "13.6.1": false, "26.5": true, "": false, "x": false, "14.x": false} {
+		if versionAlMenos(v, "14.0") != want {
+			t.Fatalf("versionAlMenos(%q, 14.0) != %v", v, want)
+		}
+	}
+	for v, want := range map[string]bool{"15.1": false, "15.1.1": false, "15.2": true, "15.2.0": true, "15.10": true, "16.0": true, "15": false} {
+		if versionAlMenos(v, "15.2") != want {
+			t.Fatalf("versionAlMenos(%q, 15.2) != %v", v, want)
+		}
 	}
 }
 
@@ -69,13 +76,22 @@ func TestChecksMacHV(t *testing.T) {
 	vistos := map[string]bool{}
 	for _, c := range checksMac(p) {
 		vistos[c.label] = true
-		if c.label == "macOS 15+" && c.ok {
+		if c.label == "macOS 15.2+" && c.ok {
 			t.Fatal("kling-hv no vale en macOS 14")
 		}
 	}
-	for _, l := range []string{"kling-hv", "hv entitlement", "macOS 15+"} {
+	for _, l := range []string{"kling-hv", "hv entitlement", "macOS 15.2+"} {
 		if !vistos[l] {
 			t.Fatalf("falta el check %q: %v", l, vistos)
+		}
+	}
+	// 15.1 tiene el mismo mayor pero no el mínimo de kling-hv.
+	for v, ok := range map[string]bool{"15.1": false, "15.2": true, "26.5": true} {
+		p.macOS = v
+		for _, c := range checksMac(p) {
+			if c.label == "macOS 15.2+" && c.ok != ok {
+				t.Fatalf("macOS %s con hv: ok=%v, want %v", v, c.ok, ok)
+			}
 		}
 	}
 }
