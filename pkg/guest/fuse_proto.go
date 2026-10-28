@@ -72,6 +72,7 @@ const (
 	initAutoInvalData = 1 << 12
 	initParallelDirop = 1 << 18
 	initMaxPages      = 1 << 22
+	initCacheSymlinks = 1 << 23
 )
 
 // Bits de fuse_setattr_in.valid.

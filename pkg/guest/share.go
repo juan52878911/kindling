@@ -148,6 +148,7 @@ func (s *Shares) mountFor(a share.Attach) (*shareMount, int, error) {
 		return nil, http.StatusInternalServerError, fmt.Errorf("mounting %s: %w", a.Mount, err)
 	}
 	fs := newFuseFS(dev, a.Mount, a.Mode == share.ModeRO)
+	fs.afterInit = setReadahead
 	go fs.serve()
 	m := &shareMount{a: a, fs: fs, unmount: unmount}
 	s.mounts[a.Tag] = m

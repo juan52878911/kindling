@@ -44,6 +44,16 @@ type node struct {
 	// este nodo al kernel. Los usa el borrado sintético de fuse_notify.go,
 	// cuando el host ya no puede decirlos.
 	typ atomic.Uint32
+
+	// wb son las escrituras diferidas pendientes (fuse_wb.go); nil si nunca
+	// hubo.
+	wb atomic.Pointer[wbState]
+
+	// linkKey es la versión del enlace simbólico (mtime y ctime) que vio el
+	// último LOOKUP, para tirar su destino de la caché del kernel
+	// (CACHE_SYMLINKS) si el host lo cambió. Con fuseFS.kcMu.
+	linkKey  cacheKey
+	linkSeen bool
 }
 
 type nodeTable struct {

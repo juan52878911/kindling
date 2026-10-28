@@ -196,8 +196,9 @@ Daemon (`internal/share`):
   dispositivos, FIFOs y sockets del host no aparecen en los listados, `stat` los
   da por inexistentes y `open` los rechaza.
 - Lecturas y escrituras de 128 KiB como máximo, o de 1 MiB si agente y daemon lo
-  negocian al conectar (`OpHello`; uno viejo se queda en 128 KiB), con como mucho 4
-  operaciones grandes en vuelo por sesión; offsets no negativos y sin
+  negocian al conectar (`OpHello`; uno viejo se queda en 128 KiB), con como mucho 8
+  operaciones grandes en vuelo por sesión (antes 4: la lectura adelantada y las
+  escrituras diferidas se esperaban entre sí); offsets no negativos y sin
   desbordamiento.
 - Un enlace del host con destino absoluto dentro de la carpeta se lee como relativo;
   con destino fuera de ella, `readlink` da EACCES.
@@ -250,8 +251,26 @@ Agente (`pkg/guest`):
   host llega en milisegundos y dispara inotify en el invitado (ver abajo); con
   uno anterior, se ve en ≤ 1 s y ningún vigilante se entera. La caché de
   páginas se invalida en cada `open`.
-- Escritura directa (sin write-back): cada `write()` llega al host antes de
-  volver. Dos máquinas escribiendo el mismo fichero: gana la última escritura de
+- Escritura diferida en el agente (`pkg/guest/fuse_wb.go`), con un daemon que
+  la anuncia en `OpHello` (`CapWriteBehind`, v0.20): `write()` vuelve en cuanto
+  el agente tiene los datos; los contiguos se juntan en trozos de hasta 1 MiB y
+  salen en cuanto no hay otro en vuelo (como mucho 4 MiB pendientes por
+  fichero; más allá, `write()` espera). Leer, pedir atributos, truncar, abrir,
+  `fsync` y `close` esperan antes a que lo pendiente llegue al host, y un error
+  del host en algo ya contestado lo devuelve el siguiente `write`, `fsync` o
+  `close` de ese fichero, como en NFS. Si la máquina muere de golpe se pierde
+  lo que no hubiera llegado (como con la caché de páginas de cualquier disco).
+  Con un agente o un daemon anteriores, cada `write()` llega al host antes de
+  volver, como antes. No se usa `FUSE_WRITEBACK_CACHE` del kernel: con él Linux
+  (6.1) se queda con su tamaño y su mtime de cada fichero y deja de creer los
+  del host, así que un cambio del host sin aviso (fuera del tope de vigilancia,
+  o en el segundo de eco) no se vería nunca; y medido, la escritura secuencial
+  bajaba a ~80 MB/s por el límite de páginas sucias que el kernel pone a FUSE.
+- Lectura adelantada de 4 MiB (`/sys/class/bdi/<dev>/read_ahead_kb`, que el
+  agente sube tras INIT: el kernel le daba 128 KiB), hasta 64 peticiones en
+  segundo plano, y los destinos de los enlaces simbólicos en la caché del kernel
+  (`FUSE_CACHE_SYMLINKS`): un aviso de WATCH los invalida, y si el host cambia
+  un enlace sin aviso se ve al caducar su entrada (1 s). Dos máquinas escribiendo el mismo fichero: gana la última escritura de
   cada rango; no hay bloqueos entre máquinas (los `flock`/`fcntl` son locales a
   cada invitado).
 - `rename` con `RENAME_NOREPLACE` comprueba y luego renombra: no es atómico
@@ -259,9 +278,9 @@ Agente (`pkg/guest`):
 - Enlaces simbólicos nuevos solo dentro de la carpeta (ver arriba): `npm
   install` funciona en una carpeta `rw`; `python -m venv` necesita `--copies`
   (sus enlaces apuntan a `/usr/bin/python3`, fuera).
-- Caudal: la conexión pasa por la interfaz de red del invitado, que en
+- Caudal: en Linux la conexión pasa por la interfaz de red del invitado, que en
   Firecracker tiene un limitador de 16 MiB/s por sentido. Es el techo de lectura
-  y escritura secuencial de una carpeta viva.
+  y escritura secuencial de una carpeta viva allí.
 
 ### Cambios hechos en el host
 

@@ -44,10 +44,13 @@ const (
 	// TCP en vez de acumularse aquí.
 	maxInflight = 16
 	// maxBigInflight por sesión: de esas, cuántas pueden pasar de BaseIO (una
-	// lectura o escritura negociada con OpHello, hasta 1 MiB). Acota la memoria
-	// que una sesión obliga a reservar: 16 de 1 MiB por carpeta y 8 carpetas por
-	// máquina serían 128 MiB del host por cada invitado hostil.
-	maxBigInflight = 4
+	// lectura o escritura negociada con OpHello, hasta 1 MiB). Acota lo que se
+	// reserva para respuestas de lectura (las tramas de escritura ya están
+	// leídas: esas las acota maxInflight). Con 4, la lectura adelantada del
+	// agente (4 MiB) y sus escrituras diferidas (otros 4) se esperaban entre sí;
+	// 8 de 1 MiB por carpeta y 8 carpetas por máquina son 64 MiB del host por
+	// cada invitado hostil.
+	maxBigInflight = 8
 	// maxListBytes es lo más que ocupa una página de listado.
 	maxListBytes = 64 << 10
 )
@@ -656,6 +659,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		ss.maxIO.Store(n)
 		r := ok()
 		r.U32(uint32(n))
+		r.U32(proto.CapWriteBehind)
 		return r.B
 
 	case proto.OpSymlink:

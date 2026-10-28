@@ -57,6 +57,11 @@ func TestFUSEIOGrandeTroceado(t *testing.T) {
 		if e, out := m.dev.pedir(t, opWrite, node, w, datos); e != 0 || le.Uint32(out) != uint32(len(datos)) {
 			t.Fatalf("hello=%v write: %d", conHello, e)
 		}
+		// Con hello el daemon anuncia CapWriteBehind: el write vuelve antes de
+		// llegar al host, y es flush (close) quien espera.
+		if e, _ := m.dev.pedir(t, opFlush, node, u64s(fh, 0, 0)); e != 0 {
+			t.Fatalf("hello=%v flush: %d", conHello, e)
+		}
 		if b, _ := os.ReadFile(filepath.Join(dir, "big.bin")); !bytes.Equal(b, datos) {
 			t.Fatalf("hello=%v: the host sees %d bytes, not what was written", conHello, len(b))
 		}
