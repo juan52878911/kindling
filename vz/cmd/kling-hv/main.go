@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -83,6 +84,14 @@ const argCustodio = "--snapshot-keeper"
 var perfil string
 
 func main() {
+	// El Go de kling-hv es el servidor y la red de usuario: los vCPU son hilos
+	// de C, fuera de los P del planificador. Con los 10 P por defecto de un M4
+	// cada copia de un dorado carga con sus cachés y su recolección sin
+	// ganar nada; con 2, ~0,3 MiB menos por copia (medido, 10 copias) y la
+	// misma latencia. GOMAXPROCS en el entorno sigue mandando.
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(2)
+	}
 	if len(os.Args) == 4 && os.Args[1] == argCustodio {
 		os.Exit(sandbox.ServirCustodio("kling-hv", os.Args[2], os.Args[3]))
 	}
