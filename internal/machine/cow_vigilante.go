@@ -239,8 +239,10 @@ func (m *Manager) pausarUnaPorAlmacen(ctx context.Context, id string) (string, b
 	mc, err := m.Pause(cctx, id)
 	if err != nil {
 		// Con carpetas vivas no se pausa (pausa.go): se congela. La memoria
-		// va a la raíz, no al almacén.
-		mc, err = m.Freeze(cctx, id)
+		// va a la raíz, no al almacén. Sin los 5 s: volcar varios GiB tarda
+		// más, y cortarlo a medias deja la máquina a medio congelar; el plazo
+		// del volcado lo pone Freeze (plazoVolcado).
+		mc, err = m.Freeze(context.WithoutCancel(ctx), id)
 	}
 	if err != nil {
 		log.Printf("warning: copy-on-write store full: couldn't pause %s: %v", shortID(id), err)
@@ -278,9 +280,9 @@ func (m *Manager) reanudarPorAlmacen(ctx context.Context) {
 			m.quitarHold(id)
 			continue
 		}
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err := m.Thaw(cctx, id)
-		cancel()
+		// Sin plazo propio, como Freeze arriba: un thaw cortado a mitad deja
+		// la máquina a medio despertar.
+		_, err := m.Thaw(context.WithoutCancel(ctx), id)
 		var lleno *errAlmacenLleno
 		switch {
 		case errors.As(err, &lleno):

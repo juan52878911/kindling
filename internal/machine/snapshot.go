@@ -473,10 +473,24 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	t.marca("resume")
 
-	if out, err := perforarHuecos(ctx, memPath); err != nil {
+	// Con limpio: el volcado ya está completo y la plantilla reanudada, y un
+	// cliente que se desconecte aquí tiraba un dorado entero por un perforado
+	// cortado.
+	if out, err := perforarHuecos(limpio, memPath); err != nil {
 		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
 	t.marca("holes")
+
+	// A disco antes del meta, con la plantilla ya reanudada: el meta es
+	// durable y sin esto, tras un corte, daba por bueno un volcado que seguía
+	// en la caché. El temporal de un fork no: se restaura en esta llamada y
+	// barrerForks lo recoge si el daemon muere (como su digest, más abajo).
+	if !deFork {
+		if err := sincronizarVolcado(snapPath, memPath, goldOverlay); err != nil {
+			return nil, err
+		}
+		t.marca("sync")
+	}
 
 	// Digests de integridad del rootfs dorado y del volcado de estado.
 	//
@@ -1398,6 +1412,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
+	// En el almacén, el overlay no vive en dir: los fallos de antes de
+	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
+	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
+	publicada := false
+	if modoCoW == cowModoStore {
+		defer func() {
+			if !publicada {
+				m.borrarOverlayAlmacen(id)
+			}
+		}()
+	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
@@ -1524,6 +1549,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	publicada = true
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios

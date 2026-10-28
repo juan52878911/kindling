@@ -342,6 +342,15 @@ func (m *Manager) RemoveImage(name string) error {
 	if !validName.MatchString(name) {
 		return marcado(ErrInvalidName, "invalid image name %q", name)
 	}
+	// Bajo ConImagenesQuietas, por lo mismo que la sustitución: un arranque
+	// en frío entre la comprobación y el borrado se quedaría sin rootfs.
+	return m.ConImagenesQuietas(func() error { return m.removeImageQuieta(name) })
+}
+
+func (m *Manager) removeImageQuieta(name string) error {
+	if n := m.arrancandoCon(name); n > 0 {
+		return fmt.Errorf("image %q is being booted by %d machine(s) right now: try again", name, n)
+	}
 	if _, ok := m.ImageBase(name); !ok {
 		// Monolitica: puede ser la BASE de otras capas.
 		for _, otra := range m.Images() {

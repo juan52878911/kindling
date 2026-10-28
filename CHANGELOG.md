@@ -69,6 +69,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: if the CPU brake process dies with the VM's helper stopped, `kling-vz` exits instead of keeping a machine that never runs again; a SIGTERM to it resumes the helper first
 - macOS: a failed VM start no longer leaks the VM and its console pipe
 - macOS: a slow CPU reading no longer blocks the `kling-vz` API
+- Writing a file into an image or removing it is refused while a cold boot of that image is in flight
+- Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
+- Freeze and save fsync the memory, state and overlay files before sealing, after the VM is resumed or gone, so a power cut cannot leave a seal over a dump still in cache
+- A full copy-on-write store no longer cuts the freeze or thaw of a machine at 5 s, which could leave it half frozen
+- `kling save` no longer throws away a finished dump when the client disconnects while holes are punched in it
+- A freeze whose pause fails resumes the machine and clears the in-progress mark, instead of leaving it possibly paused while shown as running
+- Linux: writing a file into an image flushes only that image (`syncfs`) instead of running a host-wide `sync` on every put
+- Tenants see the removal events of their own machines: events carry an `owner` field, and `kling rm` publishes the event with the machine's name and owner as soon as the name is free
+- Smaller leaks: a failed `run -from` drops its overlay from the copy-on-write store at once, `kling rm` forgets the machine's per-ID freeze and resync marks, and the pre-dump balloon wait honours cancellation
 
 ## [0.18.0] - 2026-10-11
 

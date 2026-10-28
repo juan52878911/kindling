@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -154,5 +155,43 @@ func TestDiscoLlenoNoNombraEstadosViejos(t *testing.T) {
 		if msg := err.Error(); strings.Contains(msg, "warm") || !strings.Contains(msg, "frozen") {
 			t.Errorf("%s: el consejo no nombra los estados de hoy: %s", que, msg)
 		}
+	}
+}
+
+// Sincronizar antes del sello: snap y mem se siguen (mem.file puede ser un
+// enlace del daemon al almacén), el overlay no; lo que falta o no es un
+// fichero regular se salta, y un FIFO no lo deja colgado.
+func TestSincronizarVolcado(t *testing.T) {
+	dir := t.TempDir()
+	ruta := func(n string) string { return filepath.Join(dir, n) }
+	for _, n := range []string{"snap.file", "acumulado"} {
+		if err := os.WriteFile(ruta(n), []byte("datos"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(ruta("acumulado"), ruta("mem.file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(ruta("snap.file"), ruta("overlay.ext4")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sincronizarVolcado(ruta("snap.file"), ruta("mem.file"), ruta("overlay.ext4")); err != nil {
+		t.Fatalf("con enlaces: %v", err)
+	}
+	if err := sincronizarVolcado(ruta("snap.file"), ruta("no-esta"), ""); err != nil {
+		t.Fatalf("con uno que falta: %v", err)
+	}
+	if err := syscall.Mkfifo(ruta("fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hecho := make(chan error, 1)
+	go func() { hecho <- sincronizarVolcado(ruta("snap.file"), ruta("mem.file"), ruta("fifo")) }()
+	select {
+	case err := <-hecho:
+		if err != nil {
+			t.Fatalf("con un FIFO: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("un FIFO dejó colgada la sincronización")
 	}
 }
