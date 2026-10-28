@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `compose up`: the template key includes the daemon's VMM, so switching between `kling-vz`, `kling-hv` and Firecracker rebuilds the templates instead of failing until `-fresh`
 - `RunRequest.Entrypoint`/`Cmd` (capability `machine-cmd`): a machine runs another command without baking another image, via MMDS like the environment (cold boots only; an agent without the `cmd` capability fails the machine); `compose up` puts `command:`/`entrypoint:` there, so changing them rebuilds the template but no longer reimports the image
 - `compose up`/`graph from-compose`: a project network like Docker Compose: every service reaches every other one (link edges to all their ports, hosts in `environment:` rewritten), restricted by `networks:` and `network_mode: none`; only the used links if over 64 edges
 - macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them

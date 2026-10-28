@@ -67,15 +67,17 @@ type plantillaCompose struct {
 }
 
 // daemonCompose es lo que la receta de una plantilla toma del daemon: su
-// versión y si entiende el comando por máquina.
+// versión, su VMM (una plantilla de kling-vz no se restaura en kling-hv) y si
+// entiende el comando por máquina.
 type daemonCompose struct {
-	version string
-	cmd     bool
+	version, backend string
+	cmd              bool
 }
 
 // daemonDeInfo saca daemonCompose de GET /info.
 func daemonDeInfo(info *api.Info) daemonCompose {
-	return daemonCompose{version: info.Version, cmd: slices.Contains(info.Capabilities, api.CapabilityMachineCmd)}
+	return daemonCompose{version: info.Version, backend: info.Backend,
+		cmd: slices.Contains(info.Capabilities, api.CapabilityMachineCmd)}
 }
 
 // usaPlantilla dice si el servicio sale de una plantilla: todos menos los que
@@ -98,9 +100,10 @@ func clavePlantilla(s *servicioCompose, proyecto string, d daemonCompose) string
 		Shares  []api.ShareSpec
 		Salud   []string
 		Daemon  string
+		Backend string
 		Version int
 	}{ordenImportCon(s, proyecto, false, !d.cmd, false), s.env, s.cmd, s.entry, s.vcpus, s.memMiB, s.shares, s.salud,
-		d.version, 2}
+		d.version, d.backend, 2}
 	b, _ := json.Marshal(receta)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:4])

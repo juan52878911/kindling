@@ -68,6 +68,10 @@ func TestClavePlantilla(t *testing.T) {
 	if clavePlantilla(db, "dev", daemonCompose{version: "v2"}) == k {
 		t.Error("another daemon version keeps the key")
 	}
+	// Cambiar de VMM (kling-vz a kling-hv) es otra plantilla, sin -fresh.
+	if clavePlantilla(db, "dev", daemonCompose{version: "v1", backend: "hv"}) == clavePlantilla(db, "dev", daemonCompose{version: "v1", backend: "vz"}) {
+		t.Error("another backend keeps the key")
+	}
 	// Con el comando en la máquina, sigue en la clave (solo vale en frío).
 	cm := daemonCompose{version: "v1", cmd: true}
 	if clavePlantilla(db, "dev", cm) == clavePlantilla(&otraCmd, "dev", cm) {
