@@ -125,18 +125,20 @@ func TestHostEgressRulesNieganLaRedPrivadaMenosElRangoPropio(t *testing.T) {
 	}
 
 	// La excepcion deliberada: 172.16/12 contiene el propio rango de enlaces
-	// entre host y microVMs. Descartarlo aqui cortaria el trafico legitimo, y por
-	// eso ese rango lo cubren SOLO las reglas del namespace.
-	if strings.Contains(junto, "-d 172.16.0.0/12") {
-		t.Errorf("el host descarta 172.16/12 y eso corta host<->microVM:\n%s", junto)
+	// entre host y microVMs. Descartarlo entero aqui cortaria el trafico
+	// legitimo, y por eso va partido sin HostSubnet (ver
+	// TestHostEgressRulesCierranVethAVethYOrigenFalso).
+	if strings.Contains(junto, "-d 172.16.0.0/12") || strings.Contains(junto, "-d "+HostSubnet+" -j DROP") {
+		t.Errorf("el host descarta HostSubnet y eso corta host<->microVM:\n%s", junto)
 	}
 
 	if !strings.Contains(junto, "MASQUERADE") {
 		t.Errorf("falta el MASQUERADE: sin el, ninguna microVM sale a internet:\n%s", junto)
 	}
-	// Todas las reglas salen del rango de kindling, no de cualquier origen.
+	// Todas las reglas salen del rango de kindling o entran por sus veth, no
+	// de cualquier origen.
 	for _, r := range reglas {
-		if !strings.Contains(linea(r), "-s "+HostSubnet) {
+		if !strings.Contains(linea(r), "-s "+HostSubnet) && !strings.Contains(linea(r), "-i vh-+") {
 			t.Errorf("regla sin acotar al rango de kindling: %s", linea(r))
 		}
 	}
