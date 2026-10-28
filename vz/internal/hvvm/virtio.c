@@ -171,6 +171,7 @@ static uint64_t cfg_leer(const void *cfg, size_t n, uint64_t o, int size) {
 struct vblk {
   int fd;
   bool ro;
+  bool sin_flush;  // desechable: los FLUSH del invitado no hacen fsync
   uint64_t sectores;
   uint32_t intid;
   struct vblk_state s;
@@ -252,9 +253,12 @@ static bool b_procesar(struct vblk *b, struct vq q) {
         if (r < 0) estado = 1;
         off += ch[k].len;
       }
-      if (hdr.type == 4 && estado == 0) {
+      if (hdr.type == 4 && estado == 0 && !b->sin_flush) {
         // fsync de macOS no llega al disco físico (F_FULLFSYNC sí), igual que
-        // el modo por defecto de Virtualization.framework.
+        // el modo por defecto de Virtualization.framework. El overlay
+        // desechable (kling_disposable) ni eso, como el synchronizationMode
+        // none de vz: lo escrito queda en la caché del host, y el núcleo lo
+        // asienta antes de conservar el disco (internal/machine/desechable.go).
         if (fsync(b->fd) != 0) estado = 1;
       }
     }
@@ -302,7 +306,7 @@ void vblk_prueba(int idx) {
   pthread_mutex_unlock(&b->mu);
 }
 
-int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
+int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid) {
   struct vblk *b = &blks[idx];
   b->fd = open(ruta, ro ? O_RDONLY : O_RDWR);
   if (b->fd < 0) {
@@ -313,6 +317,7 @@ int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
   fstat(b->fd, &st);
   b->sectores = (uint64_t)st.st_size / 512;
   b->ro = ro;
+  b->sin_flush = sin_flush && !ro;
   b->intid = intid;
   memset(&b->s, 0, sizeof b->s);
   pthread_mutex_init(&b->mu, NULL);

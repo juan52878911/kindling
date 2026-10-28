@@ -35,7 +35,7 @@ int khv_prueba(const uint8_t *d, size_t n) {
     if (fd < 0) return -1;
     if (ftruncate(fd, 1 << 20) != 0) return -1;
     close(fd);
-    int r = vblk_init(0, ruta, false, 48);
+    int r = vblk_init(0, ruta, false, false, 48);
     unlink(ruta);
     if (r != 0) return -1;
     static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};

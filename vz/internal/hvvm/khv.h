@@ -37,6 +37,7 @@
 struct khv_disk {
   const char *path;
   int ro;
+  int sin_flush;  // overlay desechable (spec.Drive.SyncNone): FLUSH no llega al host
 };
 
 struct khv_config {
@@ -173,7 +174,7 @@ struct vblk_state {
   struct vmmio m;
   struct vq q;
 };
-int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid);
+int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid);
 bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size);
 void vblk_get(int idx, struct vblk_state *s);
 void vblk_reafirmar(int idx);

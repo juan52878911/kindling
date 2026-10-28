@@ -30,8 +30,9 @@ package machine
 // snapshot no guarda la marca, y la VM nace al cargar): tras despertar va
 // sincronizado, que es lo seguro.
 //
-// Solo en kling-vz: Firecracker rechaza los campos que no conoce, así que con
-// él el campo no viaja nunca (fc.Drive lo omite si es false).
+// Solo en kling-vz y kling-hv (que no hace fsync en los FLUSH de ese disco):
+// Firecracker rechaza los campos que no conoce, así que con él el campo no
+// viaja nunca (fc.Drive lo omite si es false).
 
 import (
 	"errors"
@@ -47,8 +48,8 @@ func overlayDesechable(mc *api.Machine) bool {
 	return vmmAdmiteDesechable(backendVMM) && mc != nil && mc.OnTTL == api.OnTTLRemove
 }
 
-// vmmAdmiteDesechable: solo kling-vz conoce kling_disposable.
-func vmmAdmiteDesechable(backend string) bool { return backend == BackendVZ }
+// vmmAdmiteDesechable: solo kling-vz y kling-hv conocen kling_disposable.
+func vmmAdmiteDesechable(backend string) bool { return backend == BackendVZ || backend == BackendHV }
 
 // overlayDesechableDe es overlayDesechable de la máquina registrada con id.
 // boot la consulta así porque Run y Start la publican en byID antes de

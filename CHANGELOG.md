@@ -40,6 +40,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling-hv` honours `kling_disposable`: the overlay of `on_ttl=remove` machines skips the host fsync on guest flushes, like `kling-vz` (300 guest `sync` in `kling try` 58 → 26 ms)
 - `kling-hv`: new machines boot with the 16384-byte link MTU of `kling-vz` (`KLING_VZ_MTU`, announced with `VIRTIO_NET_F_MTU`): guest↔host throughput through a forward ~200-370/380-570 → ~850-1050/1270-1480 MiB/s
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 

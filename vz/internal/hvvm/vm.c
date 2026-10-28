@@ -689,7 +689,7 @@ int khv_create(const struct khv_config *c) {
   for (int i = 0; i < ndisks; i++) {
     disk_path[i] = strdup(c->disks[i].path);
     disk_ro[i] = c->disks[i].ro != 0;
-    if (vblk_init(i, disk_path[i], disk_ro[i], virtio_intid[i]) != 0) return -1;
+    if (vblk_init(i, disk_path[i], disk_ro[i], c->disks[i].sin_flush != 0, virtio_intid[i]) != 0) return -1;
   }
   if (hay_red) vnet_init(net_fd, net_mac, net_mtu, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);

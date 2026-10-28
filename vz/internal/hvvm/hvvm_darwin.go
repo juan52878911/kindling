@@ -126,6 +126,11 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		if d.IsReadOnly {
 			cfg.disks[i].ro = 1
 		}
+		// El overlay desechable (kling_disposable): sus FLUSH no hacen fsync,
+		// como el synchronizationMode none de vz.
+		if d.SyncNone() {
+			cfg.disks[i].sin_flush = 1
+		}
 	}
 	cfg.net_fd = -1
 	mac := guestMAC
