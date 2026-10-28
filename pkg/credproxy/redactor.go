@@ -181,6 +181,12 @@ func nuevoRedactor(w io.Writer, cs []Credential) *redactor {
 		for _, v := range variantes(c.Secret) {
 			r.par(v, c.Placeholder)
 		}
+		// En una sigv4 el access key id real tampoco vuelve al invitado: S3 lo
+		// repite en InvalidAccessKeyId y en ecos de Authorization. El
+		// marcador es el access key id que usa el invitado.
+		if c.Kind == KindSigV4 {
+			r.par(c.AccessKeyID, c.Placeholder)
+		}
 	}
 	return r
 }
