@@ -22,7 +22,23 @@ var (
 	// ErrSnapshotInUse: el snapshot tiene instancias vivas, o un commit o una
 	// restauración lo tiene reservado.
 	ErrSnapshotInUse = errors.New("snapshot is in use")
+	// ErrRunRequest: lo que está mal es la petición (un on_ttl que no existe,
+	// un disk_mib fuera de rango, mem_max_mib por debajo de mem_mib...), no el
+	// host. El daemon la contesta con 400; lo que no lleva marca es del host
+	// y sale como 500 (M13).
+	ErrRunRequest = errors.New("invalid machine request")
 )
+
+// peticionInvalida es un error de la petición con el texto de format.
+func peticionInvalida(format string, a ...any) error { return marcado(ErrRunRequest, format, a...) }
+
+// comoPeticion marca err como error de la petición sin cambiar su texto.
+func comoPeticion(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &errMarcado{err.Error(), ErrRunRequest}
+}
 
 // marcado devuelve un error con el texto de format que además "es" marca.
 func marcado(marca error, format string, a ...any) error {

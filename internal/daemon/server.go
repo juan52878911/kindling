@@ -790,31 +790,56 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mc)
 }
 
-// runStatus traduce los errores de arrancar una máquina a códigos HTTP.
+// runStatus traduce los errores de arrancar una máquina a códigos HTTP: 4xx
+// lo que está mal en la petición (M13: un -image que no existe, un on_ttl
+// inválido, disk_mib fuera de rango, mem_max por debajo de mem salían como
+// 500), 500 lo que falla en el host.
 func runStatus(err error) int {
+	if c, ok := statusPeticion(err); ok {
+		return c
+	}
 	switch {
-	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
+	case errors.Is(err, machine.ErrExecNotInSnapshot):
 		return http.StatusConflict
-	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
-		return http.StatusBadRequest
 	case errors.Is(err, machine.ErrNameTaken):
 		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }
 
+// statusPeticion es el código de los errores con centinela comunes a crear
+// una máquina y a operar sobre una que existe.
+func statusPeticion(err error) (int, bool) {
+	switch {
+	case errors.Is(err, machine.ErrRunRequest), errors.Is(err, machine.ErrInvalidName),
+		errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
+		return http.StatusBadRequest, true
+	case errors.Is(err, machine.ErrNoImage), errors.Is(err, machine.ErrNoSnapshot):
+		return http.StatusNotFound, true
+	case errors.Is(err, machine.ErrDoradoObsoleto):
+		return http.StatusConflict, true
+	}
+	return 0, false
+}
+
 // cicloStatus traduce los errores de las operaciones sobre una máquina que ya
 // existe (freeze, pause, thaw, stop, rm...): 404 si no existe, 409 si su
-// estado no admite la operación. Lo demás sigue siendo 400, como siempre; un
-// api.StatusError del manager (507, 503...) manda sobre todo esto (ver fail).
+// estado no admite la operación, 400 si la petición trae algo mal (centinelas,
+// ver statusPeticion). Lo demás es del host y sale como 500 (M13: un EIO o un
+// kernel que falta se contestaban 400, como si los hubiera pedido mal el
+// cliente). Un api.StatusError del manager (507, 503...) manda sobre todo esto
+// (ver fail).
 func cicloStatus(err error) int {
+	if c, ok := statusPeticion(err); ok {
+		return c
+	}
 	switch {
 	case errors.Is(err, machine.ErrNoMachine):
 		return http.StatusNotFound
 	case errors.Is(err, machine.ErrWrongState):
 		return http.StatusConflict
 	}
-	return http.StatusBadRequest
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {

@@ -208,7 +208,7 @@ func cambianEtiquetasDB(antes, nuevas map[string]string) bool {
 // haya en él.
 func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachine string) (*api.Machine, error) {
 	if !reEnvCredencial.MatchString(env) {
-		return nil, fmt.Errorf("env %q must match [A-Z_][A-Z0-9_]*", env)
+		return nil, peticionInvalida("env %q must match [A-Z_][A-Z0-9_]*", env)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
@@ -234,7 +234,7 @@ func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachin
 		return nil, fmt.Errorf("machine %s has no credential in %s", cur.Name, env)
 	}
 	if upstreamMachine != "" && creds[i].UpstreamMachine != upstreamMachine {
-		return nil, fmt.Errorf("the credential in %s of %s does not go to machine %s", env, cur.Name, shortID(upstreamMachine))
+		return nil, peticionInvalida("the credential in %s of %s does not go to machine %s", env, cur.Name, shortID(upstreamMachine))
 	}
 	quitada := creds[i]
 	// Una máquina corriendo sin socket del VMM no podría enterarse (en macOS,

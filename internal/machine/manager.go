@@ -1301,7 +1301,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.OnTTL = ""
 	case api.OnTTLRemove:
 	default:
-		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
+		return nil, peticionInvalida("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
 	// El entorno de la máquina (entorno.go): validado antes de reservar
 	// nada. Desde aquí solo viaja en env, nunca en la máquina.
@@ -1362,7 +1362,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
 	// hasta que se escribe, pero uno diminuto no monta ni el agente.
 	if tope := maxDiskMiB(); req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > tope {
-		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
+		return nil, peticionInvalida("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
 			req.DiskMiB, minOverlayMiB, tope, defaultOverlayMiB)
 	}
 	// Disperso, pero el invitado puede llenarlo: uno más grande que el de
@@ -1376,7 +1376,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.MemMiB = 256
 	}
 	if req.MemMaxMiB != 0 && req.MemMaxMiB < req.MemMiB {
-		return nil, fmt.Errorf("mem_max_mib (%d) can't be below mem_mib (%d)", req.MemMaxMiB, req.MemMiB)
+		return nil, peticionInvalida("mem_max_mib (%d) can't be below mem_mib (%d)", req.MemMaxMiB, req.MemMiB)
 	}
 	if req.MemMaxMiB == req.MemMiB {
 		req.MemMaxMiB = 0 // un techo igual a la memoria es memoria fija
@@ -2804,7 +2804,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if b, err := json.Marshal(doc); err != nil {
 		return nil, err
 	} else if len(b) > api.MaxMMDSBytes {
-		return nil, fmt.Errorf("the MMDS store would be %d bytes with the machine's credential placeholders, "+
+		return nil, peticionInvalida("the MMDS store would be %d bytes with the machine's credential placeholders, "+
 			"over the limit of %d", len(b), api.MaxMMDSBytes)
 	}
 	c := fc.New(sock)
@@ -2945,7 +2945,12 @@ func (m *Manager) confirmarSecreto(id string, gen uint64) {
 // a entregar las credenciales desde su almacén.
 func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.CredentialSpec) (*api.Machine, error) {
 	if len(specs) == 0 {
-		return nil, errors.New("no credentials given")
+		return nil, peticionInvalida("no credentials given")
+	}
+	// Lo mismo que valida entregarCredenciales, aquí para que un juego mal
+	// formado se conteste como error de la petición (400) y no del host.
+	if err := validarSpecs(specs); err != nil {
+		return nil, comoPeticion(err)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
@@ -2961,7 +2966,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, estadoInvalido("credentials can only be given to a running machine (it is %s)", cur.State)
 	}
 	if cur.Egress != string(knet.EgressAllowlist) {
-		return nil, fmt.Errorf("credentials need -egress allowlist (the machine has %q)", cur.Egress)
+		return nil, peticionInvalida("credentials need -egress allowlist (the machine has %q)", cur.Egress)
 	}
 	m.mu.RLock()
 	sock := m.socket[mc.ID]

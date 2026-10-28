@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
@@ -143,5 +146,67 @@ func TestExecMaxOutputPasaDeOchoMiB(t *testing.T) {
 	}
 	if len(res.Stdout) != quiero || res.Truncated {
 		t.Fatalf("stdout = %d bytes (truncated=%v), quería %d", len(res.Stdout), res.Truncated, quiero)
+	}
+}
+
+// M13: POST /machines contesta 4xx a lo que está mal en la petición, no 500
+// como si el host fallara.
+func TestCodigosDeCrearMaquina(t *testing.T) {
+	s, h := testServer(t)
+	if err := os.MkdirAll(filepath.Join(s.root, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.root, "images", "hay.ext4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"image":"nope"}`, http.StatusNotFound},
+		{`{"image":"hay","on_ttl":"explode"}`, http.StatusBadRequest},
+		{`{"image":"hay","disk_mib":1}`, http.StatusBadRequest},
+		{`{"image":"hay","mem_mib":512,"mem_max_mib":256}`, http.StatusBadRequest},
+		{`{"image":"../x"}`, http.StatusBadRequest},
+		// El kernel que falta es del host.
+		{`{"image":"hay"}`, http.StatusInternalServerError},
+		{`{"image":"hay","from":"nada"}`, http.StatusNotFound},
+	} {
+		rr := call(t, h, "POST", "/machines", c.body)
+		if rr.Code != c.want {
+			t.Errorf("POST /machines %s = %d (%s), quería %d", c.body, rr.Code, strings.TrimSpace(rr.Body.String()), c.want)
+		}
+	}
+}
+
+// M13: en las operaciones sobre una máquina que existe, lo que falla en el host
+// (aquí, arrancar sin kernel) es 500 y no 400; lo que está mal en la petición
+// sigue siendo 400.
+func TestCodigosCicloHostYPeticion(t *testing.T) {
+	root := t.TempDir()
+	b, _ := json.Marshal([]*api.Machine{{ID: "cccc000000000003", Name: "parada", State: api.StateStopped, Image: "hay"}})
+	if err := os.WriteFile(filepath.Join(root, "state.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bus := events.New()
+	mgr, err := machine.NewManager(root, "", "", bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mgr.Close)
+	s := &Server{mgr: mgr, root: root, bus: bus, store: &store{dir: filepath.Join(root, "store")}}
+	h := s.routes()
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"POST", "/machines/parada/start", "", http.StatusInternalServerError},
+		{"POST", "/machines/parada/credentials", `{"credentials":[]}`, http.StatusBadRequest},
+		{"DELETE", "/machines/parada/credentials/mal-env", "", http.StatusBadRequest},
+	} {
+		rr := call(t, h, c.method, c.path, c.body)
+		if rr.Code != c.want {
+			t.Errorf("%s %s = %d (%s), quería %d", c.method, c.path, rr.Code, strings.TrimSpace(rr.Body.String()), c.want)
+		}
 	}
 }
