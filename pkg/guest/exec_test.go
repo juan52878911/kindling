@@ -1,11 +1,16 @@
 package guest
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Un código de salida distinto de cero NO es un error HTTP.
@@ -150,4 +155,87 @@ func TestLaEjecucionSoloLaEnciendeElKernel(t *testing.T) {
 	if execBootParam != "kling.exec" {
 		t.Errorf("el parámetro cambió de nombre: %q", execBootParam)
 	}
+}
+
+// Un nieto en segundo plano que hereda la tubería NO retiene la respuesta.
+//
+// Antes `sh -c "sleep 600 & echo ok"` tardaba 600 s en contestar: Wait esperaba
+// a que se cerrara la tubería, y la sostenía el sleep. Ahora, pasado WaitDelay
+// desde que sale sh, se responde con lo leído y el código de sh.
+func TestExecNoEsperaANietosEnSegundoPlano(t *testing.T) {
+	antes := execWaitDelay
+	execWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { execWaitDelay = antes })
+
+	body := `{"cmd":["sh","-c","sleep 600 & echo $!; echo ok"]}`
+	w := httptest.NewRecorder()
+	inicio := time.Now()
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body)))
+	if d := time.Since(inicio); d > 10*time.Second {
+		t.Fatalf("tardó %v: esperó al nieto", d)
+	}
+	var res execResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	pid := pidDeSalida(t, res.Output)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// sh salió con 0: agotar WaitDelay no convierte eso en "no pude ejecutarlo".
+	if res.ExitCode != 0 || !strings.Contains(res.Output, "ok") {
+		t.Errorf("exit_code=%d output=%q, want 0 y \"ok\"", res.ExitCode, res.Output)
+	}
+}
+
+// Al cortarse la petición muere el GRUPO entero, no solo sh.
+func TestExecCanceladoMataALosNietos(t *testing.T) {
+	body := `{"cmd":["sh","-c","sleep 600 & echo $!; wait"]}`
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	w := httptest.NewRecorder()
+	inicio := time.Now()
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body)).WithContext(ctx))
+	if d := time.Since(inicio); d > 10*time.Second {
+		t.Fatalf("tardó %v tras cancelar", d)
+	}
+	var res execResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	pid := pidDeSalida(t, res.Output)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if res.ExitCode != 137 {
+		t.Errorf("exit_code = %d, want 137 (SIGKILL al grupo)", res.ExitCode)
+	}
+	// El nieto puede quedar un instante como zombi hasta que lo cosecha init:
+	// se mira su estado y no solo si existe.
+	plazo := time.Now().Add(5 * time.Second)
+	for time.Now().Before(plazo) {
+		if !procesoVivo(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("el nieto %d sigue vivo tras cancelar la petición", pid)
+}
+
+func pidDeSalida(t *testing.T, out string) int {
+	t.Helper()
+	linea, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(linea))
+	if err != nil || pid <= 0 {
+		t.Fatalf("no encuentro el pid del nieto en %q", out)
+	}
+	return pid
+}
+
+// procesoVivo dice si pid existe y no es un zombi.
+func procesoVivo(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }

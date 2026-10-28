@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -28,6 +29,12 @@ import (
 // execBootParam enciende la ruta /exec. Va en la línea de comandos del kernel,
 // que solo escribe el anfitrión: el invitado no puede concedérsela a sí mismo.
 const execBootParam = "kling.exec"
+
+// execWaitDelay es lo que se espera, una vez muerto el comando (o cortada la
+// petición), a que se cierren sus tuberías. Mismo valor y mismo motivo que en
+// runStreaming: es una red contra nietos que sostienen la salida abierta, no un
+// límite de rendimiento. Variable solo para que los tests no esperen 30 s.
+var execWaitDelay = 30 * time.Second
 
 // execMaxBody acota el cuerpo de una petición /exec legacy: solo lleva un
 // comando y un directorio, nunca necesita más que esto. Sin tope, un cuerpo
@@ -98,6 +105,17 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 	// PYTHONPATH ya apuntando a los volúmenes: instalar en un volumen y luego
 	// no encontrarlo desde el mismo sitio sería desconcertante.
 	cmd.Env = env
+	// Igual que runStreaming: al cortarse la petición se mata el GRUPO entero
+	// (StartTracked lo hace líder de su grupo), no solo al hijo. Un `sh -c` que
+	// lanzó nietos los dejaba vivos tras cancelar, y con la tubería abierta.
+	cmd.Cancel = func() error {
+		KillGroup(cmd)
+		return nil
+	}
+	// Y un nieto en segundo plano (`sleep 600 & echo ok`) que hereda la tubería
+	// ya no retiene la respuesta hasta que acabe: pasado este plazo desde que
+	// sale el comando, se cierran las tuberías y se responde con lo leído.
+	cmd.WaitDelay = execWaitDelay
 
 	// Por el cosechador, igual que los servidores MCP: si se adelanta a nuestro
 	// Wait, CombinedOutput devolvería un error que no es *ExitError y un
@@ -124,7 +142,14 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 
 	resp := execResponse{Output: out.String(), Truncated: out.truncated}
 	if err != nil {
-		if code, ok := ExitCodeOf(err); ok {
+		code, ok := ExitCodeOf(err)
+		// El proceso pudo terminar y fallar solo el ESPERARLO (WaitDelay agotado
+		// por un nieto que sostenía la tubería): si hay estado de salida, ese es
+		// el resultado, no "no pude ejecutarlo".
+		if !ok && cmd.ProcessState != nil {
+			code, ok = ExitCodeOf(&exec.ExitError{ProcessState: cmd.ProcessState})
+		}
+		if ok {
 			resp.ExitCode = code
 		} else {
 			// Ni siquiera se pudo lanzar: no existe el binario, o no hay
