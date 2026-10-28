@@ -119,6 +119,11 @@ type Server struct {
 	// uid/gid del dueño de la carpeta, a quien se entrega lo que crea el
 	// invitado si el daemon corre como root. -1 = no se toca.
 	uid, gid int
+
+	// ns ordena las operaciones que cambian el árbol de nombres frente a las
+	// comprobaciones de enlaces (ver symlink.go): rename y rmdir en exclusiva,
+	// symlink, mkdir, create y unlink compartido.
+	ns sync.RWMutex
 }
 
 // Open abre la carpeta dir para servirla. machineID identifica a la máquina
@@ -820,6 +825,8 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 	var f *os.File
 	var err error
 	if create {
+		s.ns.RLock()
+		defer s.ns.RUnlock()
 		// Antes de abrir, igual que en la ruta sin create: mirar qué hay ahí
 		// (Lstat). Si ya existe y no es un fichero regular (FIFO, dispositivo,
 		// socket), se rechaza sin tocarlo: abrir un FIFO existente bloquearía,
@@ -988,6 +995,8 @@ func (s *Server) mkdir(p string, mode uint32) (proto.Attr, uint32) {
 	if p == "" {
 		return proto.Attr{}, proto.EEXIST
 	}
+	s.ns.RLock()
+	defer s.ns.RUnlock()
 	if err := s.root.Mkdir(p, fs.FileMode(mode&0o777)); err != nil {
 		return proto.Attr{}, Errno(err)
 	}
@@ -1011,6 +1020,13 @@ func (s *Server) remove(p string, dir bool) uint32 {
 	}
 	if p == "" {
 		return proto.EBUSY
+	}
+	if dir {
+		s.ns.Lock()
+		defer s.ns.Unlock()
+	} else {
+		s.ns.RLock()
+		defer s.ns.RUnlock()
 	}
 	fi, err := s.root.Lstat(p)
 	if err != nil {
@@ -1066,6 +1082,8 @@ func (s *Server) rename(oldp, newp string, flags uint32) uint32 {
 	if flags&^proto.RenameNoReplace != 0 {
 		return proto.EINVAL
 	}
+	s.ns.Lock()
+	defer s.ns.Unlock()
 	of, ob, e := s.parent(oldp)
 	if e != 0 {
 		return e

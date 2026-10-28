@@ -94,12 +94,12 @@ func TestRutasYMontajes(t *testing.T) {
 }
 
 func TestEnlaces(t *testing.T) {
-	for _, c := range [][2]string{{"l", "a"}, {"d/l", "../a"}, {"d/e/l", "../../x/y"}, {"l", "./a/../b"}} {
+	for _, c := range [][2]string{{"l", "a"}, {"d/l", "../a"}, {"d/e/l", "../../x/y"}, {"l", "./a/./b/"}, {"d/l", ".."}} {
 		if err := CheckLink(c[0], c[1]); err != nil {
 			t.Errorf("CheckLink(%q, %q): %v", c[0], c[1], err)
 		}
 	}
-	for _, c := range [][2]string{{"l", "/etc"}, {"l", ".."}, {"d/l", "../../x"}, {"l", ""}, {"l", "a/../../b"}} {
+	for _, c := range [][2]string{{"l", "/etc"}, {"l", ".."}, {"d/l", "../../x"}, {"l", ""}, {"l", "a/../../b"}, {"l", "./a/../b"}, {"x", "a/up/../.."}, {"d/e/l", "../x/../y"}} {
 		if CheckLink(c[0], c[1]) == nil {
 			t.Errorf("CheckLink(%q, %q) accepted", c[0], c[1])
 		}

@@ -224,7 +224,7 @@ const (
 	// un agente anterior no la manda y el daemon nunca le empuja nada.
 	OpWatch byte = 18
 	// OpSymlink crea un enlace simbólico (solo rw). El destino tiene que ser
-	// relativo y quedarse dentro de la carpeta (CheckLink, LinkTraverses): un
+	// relativo, canónico y quedarse dentro de la carpeta (CheckLink, LinkTraverses): un
 	// proceso del host que lo siga no sale de ella. Un daemon anterior contesta
 	// ENOSYS y el agente da EPERM, como antes.
 	OpSymlink byte = 19 // path, target -> Attr

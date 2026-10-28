@@ -48,9 +48,10 @@ tampoco tiene virtio-fs. Las opciones reales eran tres:
    versión.
 
 Lo que el CLI mete en el tar: directorios, ficheros regulares (los enlaces duros
-van como copias) y enlaces simbólicos relativos que no salen del directorio. Se
-salta, avisando, lo demás: sockets, dispositivos, FIFOs y enlaces que apuntan
-fuera. Los bits setuid/setgid/sticky se quitan.
+van como copias) y enlaces simbólicos relativos que no salen del directorio y
+están en forma canónica (primero los `..`, luego lo que baja: `../../a/b`, nunca
+`a/../b`). Se salta, avisando, lo demás: sockets, dispositivos, FIFOs, enlaces
+que apuntan fuera y enlaces no canónicos. Los bits setuid/setgid/sticky se quitan.
 
 Lo que el daemon ACEPTA, porque el cliente no es de fiar por serlo: solo
 entradas de tipo directorio, fichero regular y enlace simbólico; ni rutas
@@ -211,13 +212,19 @@ Daemon (`internal/share`):
   modos se recortan a `0777`: ni setuid, ni setgid, ni sticky. Si el daemon
   corre como root, lo que crea el invitado se entrega al dueño de SRC.
 - SYMLINK solo en `rw` y solo si el enlace no puede sacar a nadie de la
-  carpeta: destino relativo, que resuelto desde donde está el enlace se queda
-  dentro (la regla de las copias, `share.CheckLink`) y sin atravesar otro
-  enlace (`share.LinkTraverses`). Si no, `EPERM`. El agente traduce a relativo
+  carpeta: destino relativo y canónico (ningún `..` tras un componente que
+  baja: `x -> a/up/../..` y luego `a/up -> ..`, válidos por separado, sacaban
+  a x dos niveles), que resuelto desde donde está el enlace se queda dentro (la
+  regla de las copias, `share.CheckLink`), sin atravesar otro enlace
+  (`share.LinkTraverses`) y en un directorio nombrado sin pasar por enlaces. Si
+  no, `EPERM`. Comprobar y crear no compite con un `rename` o `rmdir`
+  concurrente: esos dos toman el árbol en exclusiva y las operaciones que crean,
+  compartido. El agente traduce a relativo
   un destino absoluto que cae dentro del propio montaje (`/app/x`); uno fuera
   (`/usr/bin/python3`) es `EPERM`. Un enlace válido podría dejar de serlo si se
   mueve más arriba (`a/b/l -> ../../x` movido a `l`): `rename` revalida el
-  enlace movido y, si un directorio sube de nivel, recorre sus enlaces (hasta
+  enlace movido (y da `EXDEV` si origen o destino se nombran a través de un
+  enlace) y, si un directorio sube de nivel, recorre sus enlaces (hasta
   20 000 entradas); si alguno saldría, `EXDEV`, y `mv` cae a copiar y borrar,
   que vuelve a pasar cada enlace por SYMLINK.
 - LINK se rechaza (`EPERM`): un enlace duro al fichero que sea es un arma
