@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +31,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/hvvm"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
+	"github.com/juan52878911/kindling/vz/internal/sandbox"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
@@ -71,7 +74,29 @@ func logf(format string, args ...any) {
 	stdout.line("kling-hv: " + fmt.Sprintf(format, args...))
 }
 
-func main() { os.Exit(run()) }
+// argCustodio lanza este binario como custodio de snapshots (ver
+// internal/custodio), con la carpeta de snapshots y la de la máquina.
+const argCustodio = "--snapshot-keeper"
+
+// perfil es el sandbox de kling-hv (ver internal/sandbox).
+//
+//go:embed kling-hv.sb
+var perfil string
+
+func main() {
+	// El Go de kling-hv es el servidor y la red de usuario: los vCPU son hilos
+	// de C, fuera de los P del planificador. Con los 10 P por defecto de un M4
+	// cada copia de un dorado carga con sus cachés y su recolección sin
+	// ganar nada; con 2, ~0,3 MiB menos por copia (medido, 10 copias) y la
+	// misma latencia. GOMAXPROCS en el entorno sigue mandando.
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(2)
+	}
+	if len(os.Args) == 4 && os.Args[1] == argCustodio {
+		os.Exit(sandbox.ServirCustodio("kling-hv", os.Args[2], os.Args[3]))
+	}
+	os.Exit(run())
+}
 
 func run() int {
 	fs := flag.NewFlagSet("kling-hv", flag.ContinueOnError)
@@ -93,6 +118,15 @@ func run() int {
 	}
 	if *sock == "" {
 		fmt.Fprintln(os.Stderr, "kling-hv: --api-sock is required")
+		return 2
+	}
+
+	// El canal con el agente por virtio-vsock (vsock.c), como en kling-vz y
+	// con la misma variable: las máquinas que arrancan aquí lo llevan salvo
+	// KLING_VZ_VSOCK=0; una restauración usa lo que diga su snapshot.
+	vsock, err := spec.ParseVsock(os.Getenv("KLING_VZ_VSOCK"))
+	if err != nil {
+		logf("KLING_VZ_VSOCK: %v", err)
 		return 2
 	}
 
@@ -135,16 +169,16 @@ func run() int {
 	}
 	syscall.Umask(0o077)
 
-	// Sin sandbox todavía: kling-vz se encierra en kling-vz.sb al crear la VM;
-	// el perfil de kling-hv (que necesita Hypervisor.framework en su propio
-	// proceso) está por hacer. Ver docs/backend-hv.md.
-	if os.Getenv("KLING_VZ_CONFINE_ROOT") != "" {
-		logf("WARNING: not confined: kling-hv has no sandbox profile yet")
-	}
+	// Como kling-vz: al crear o restaurar la VM se encierra en kling-hv.sb y
+	// solo escribe en el directorio de su máquina; los dorados los coloca el
+	// custodio (internal/sandbox).
+	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
+		ArgCustodio: argCustodio, Sock: *sock, Broker: broker, Logf: logf})
 
 	peers := peercred.New()
 	srv := server.New(server.Deps{
-		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock)},
+		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},
+		Vsock:   vsock,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			var pg vnet.PGProxy
 			if c.CredentialsPG != nil {
@@ -174,6 +208,8 @@ func run() int {
 		CPUTime:     hvvm.CPUTime,
 		Freeze:      hvvm.Freeze,
 		Graph:       grafoMaq,
+		Confine:     confine,
+		Destino:     destino,
 	})
 
 	if fi, err := os.Lstat(*sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
@@ -223,6 +259,17 @@ func run() int {
 	_ = hs.Close()
 	_ = creds.Close()
 	return code
+}
+
+// salirInservible termina el proceso cuando ya no puede alojar una VM (ver
+// hvvm.Factory.Inservible): con un margen para que la respuesta con el error
+// llegue al núcleo, que verá morir al VMM y lanzará uno nuevo.
+func salirInservible(err error) {
+	logf("this process cannot host another VM (%v): exiting so the daemon starts a new kling-hv", err)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		os.Exit(1)
+	}()
 }
 
 // dirMaquina es el directorio de la máquina (el del socket), absoluto y real.

@@ -11,6 +11,7 @@ package hvvm
 import "C"
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -38,6 +40,12 @@ type Factory struct {
 	// RAMDir es dónde se crea (y se borra en seguida) el fichero disperso que
 	// respalda la RAM de un arranque en frío: el directorio de la máquina.
 	RAMDir string
+	// Inservible se llama cuando este proceso ya no puede alojar una VM: un
+	// Create, un arranque o una restauración que fallaron después de crear la
+	// VM de Hypervisor.framework, que es una por proceso y no se puede
+	// rehacer. El servidor, como con kling-vz, intentaría otra en el mismo
+	// proceso; kling-hv tiene que salir para que el núcleo lance uno nuevo.
+	Inservible func(error)
 
 	mu     sync.Mutex
 	creada bool
@@ -65,7 +73,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.creada {
-		return nil, errors.New("kling-hv creates a single VM per process")
+		err := errors.New("kling-hv creates a single VM per process")
+		f.inservible(err)
+		return nil, err
 	}
 	if s.BootSource == nil || s.MachineConfig == nil {
 		return nil, errors.New("boot source and machine config are required")
@@ -102,7 +112,13 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		}
 	}()
 	cfg.kernel = cstr(s.BootSource.KernelImagePath)
-	cfg.cmdline = cstr(s.BootSource.BootArgs)
+	args := s.BootSource.BootArgs
+	if s.Vsock {
+		// El mismo parámetro que añade el servidor a la línea traducida de vz:
+		// el agente escucha entonces también por AF_VSOCK.
+		args += " " + server.VsockBootParam
+	}
+	cfg.cmdline = cstr(args)
 	cfg.ram_dir = cstr(f.RAMDir)
 	cfg.ndisks = C.int(len(s.Drives))
 	for i, d := range s.Drives {
@@ -134,15 +150,36 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	if s.Entropy {
 		cfg.rng = 1
 	}
+	if s.Vsock {
+		cfg.vsock = 1
+	}
+	if s.Balloon != nil {
+		cfg.balloon = 1
+		if s.Balloon.DeflateOnOOM {
+			cfg.balloon = 2
+		}
+	}
 	cfg.console_fd = C.int(pw.Fd())
 
 	if C.khv_create(&cfg) != 0 {
-		return nil, errC("creating the VM")
+		err := errC("creating the VM")
+		if C.khv_vm_tocada() {
+			f.creada = true
+			f.inservible(err)
+		}
+		return nil, err
 	}
 	f.creada = true
-	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile}
+	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock,
+		memMiB: s.MachineConfig.MemSizeMiB}
 	go m.esperar()
 	return m, nil
+}
+
+func (f *Factory) inservible(err error) {
+	if f.Inservible != nil {
+		f.Inservible(err)
+	}
 }
 
 type machine struct {
@@ -150,6 +187,8 @@ type machine struct {
 	stopped chan error
 	consola *os.File // extremo de escritura de la tubería de consola
 	net     *os.File // se guarda para que no lo cierre el recolector
+	vsock   bool
+	memMiB  int
 }
 
 func (m *machine) esperar() {
@@ -163,7 +202,9 @@ func (m *machine) esperar() {
 
 func (m *machine) Start() error {
 	if C.khv_boot() != 0 {
-		return errC("booting")
+		err := errC("booting")
+		m.f.inservible(err)
+		return err
 	}
 	return nil
 }
@@ -203,13 +244,55 @@ func (m *machine) RestoreState(path string) error {
 	p := C.CString(path)
 	defer C.free(unsafe.Pointer(p))
 	if C.khv_restore(p) != 0 {
-		return errC("restoring")
+		err := errC("restoring")
+		m.f.inservible(err)
+		return err
 	}
 	return nil
 }
 
-func (m *machine) SetBalloonTargetMiB(int) error {
-	return errors.New("kling-hv has no balloon device")
+// DialVsock abre una conexión virtio-vsock al puerto port del invitado (ver
+// vsock.c): el canal con el agente, como en kling-vz. Cada llamada es una
+// conexión nueva; tras restaurar, el dispositivo manda TRANSPORT_RESET y las
+// que el invitado creía vivas mueren, pero su listener sigue.
+func (m *machine) DialVsock(ctx context.Context, port uint32) (net.Conn, error) {
+	if !m.vsock {
+		return nil, errors.New("the VM has no vsock device")
+	}
+	plazo := 2 * time.Second
+	if d, ok := ctx.Deadline(); ok {
+		plazo = time.Until(d)
+	}
+	if plazo <= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	ms := plazo.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	fd := int(C.khv_vsock_dial(C.uint32_t(port), C.int(ms)))
+	if fd < 0 {
+		err := syscall.Errno(-fd)
+		if err == syscall.ETIMEDOUT && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("vsock connect to port %d: %w", port, err)
+	}
+	f := os.NewFile(uintptr(fd), "vsock")
+	defer f.Close()
+	return net.FileConn(f)
+}
+
+// SetBalloonTargetMiB deja al invitado con mib MiB: el globo (balloon.c) se
+// infla hasta la diferencia con su RAM, como en kling-vz.
+func (m *machine) SetBalloonTargetMiB(mib int) error {
+	if mib < 0 || mib > m.memMiB {
+		mib = m.memMiB
+	}
+	if C.khv_balloon(C.uint32_t((m.memMiB-mib)*256)) != 0 {
+		return errors.New("the VM has no balloon device")
+	}
+	return nil
 }
 
 func (m *machine) Stopped() <-chan error { return m.stopped }

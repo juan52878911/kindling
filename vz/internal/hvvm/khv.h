@@ -50,6 +50,8 @@ struct khv_config {
   int net_fd;  // -1 sin red: socket SOCK_DGRAM, una trama por datagrama
   uint8_t mac[6];
   int rng;         // virtio-rng
+  int vsock;       // virtio-vsock (el agente por AF_VSOCK)
+  int balloon;     // virtio-balloon: 0 sin globo, 1 con él, 2 con deflate_on_oom
   int console_fd;  // salida de la UART
 };
 
@@ -60,6 +62,7 @@ struct khv_config {
 
 const char *khv_error(void);
 int khv_create(const struct khv_config *c);
+bool khv_vm_tocada(void);  // si khv_create llegó a crear la VM (el proceso ya no sirve para otra)
 int khv_boot(void);
 int khv_restore(const char *mem_path);
 int khv_pause(unsigned bit);
@@ -81,6 +84,7 @@ void fin_vm(int codigo, const char *motivo);  // la VM termina (desde cualquier 
 extern uint8_t *g_ram;
 extern uint64_t g_ram_size;
 void *gpa_ptr(uint64_t gpa, uint64_t len);  // NULL si se sale de la RAM
+int ram_soltar(uint64_t off, uint64_t len);  // devuelve esas páginas al fichero (globo)
 
 // Pausa de los dispositivos: con g_pausa los hilos de disco y red no tocan la
 // RAM (restaurando o haciendo snapshot). La cambia vm.c con mu_dev.
@@ -137,8 +141,18 @@ struct vdesc {
 #define VIRTQ_DESC_F_NEXT 1
 #define VIRTQ_DESC_F_WRITE 2
 #define QMAX 256
+#define VIRTQ_DESC_F_INDIRECT 4
 bool vq_ptrs(struct vq *q, uint16_t **avail, uint8_t **used, struct vdesc **desc);
 void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len);
+// Cadenas de descriptores, con todos los topes: vq_cadena copia la cadena de
+// head en out (como mucho max) y devuelve cuántos tiene, o -1 si es inválida
+// (índice fuera de la tabla, más larga que la cola, indirecta). vq_leer junta
+// los descriptores de lectura en buf (0 si no caben en cap o alguno se sale de
+// la RAM); vq_capacidad suma los de escritura; vq_escribir los llena en orden.
+int vq_cadena(const struct vq *q, const struct vdesc *desc, uint16_t head, struct vdesc *out, int max);
+uint32_t vq_leer(const struct vq *q, const struct vdesc *desc, uint16_t head, void *buf, uint32_t cap);
+uint32_t vq_capacidad(const struct vq *q, const struct vdesc *desc, uint16_t head);
+uint32_t vq_escribir(const struct vq *q, const struct vdesc *desc, uint16_t head, const void *src, uint32_t len);
 
 // Registros comunes de virtio-mmio (versión 2), compartidos por los tres
 // dispositivos. vmmio_acceso atiende un acceso por debajo de 0x100 y dice qué
@@ -165,6 +179,10 @@ void vblk_reafirmar(int idx);
 void vblk_set(int idx, const struct vblk_state *s);
 void vblk_quieto(int idx);     // espera a que el hilo del disco no toque la RAM
 void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaurar)
+void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
+
+// Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
+int khv_prueba(const uint8_t *datos, size_t n);
 
 // net (tramas por un socket unix SOCK_DGRAM)
 struct vnet_state {
@@ -189,6 +207,41 @@ bool vrng_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
 void vrng_get(struct vrng_state *s);
 void vrng_reafirmar(void);
 void vrng_set(const struct vrng_state *s);
+
+// vsock (virtio-vsock; ver vsock.c)
+#define VS_HDR 44
+struct vvsock_state {
+  struct vmmio m;
+  struct vq q[3];
+};
+void vsock_init(uint32_t intid);
+bool vsock_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
+void vsock_get(struct vvsock_state *s);
+void vsock_reafirmar(void);
+void vsock_set(const struct vvsock_state *s);
+void vsock_quieto(void);
+void vsock_despertar(void);
+// khv_vsock_dial abre una conexión al puerto port del invitado y devuelve el
+// descriptor de un socket de dominio Unix que la lleva, o -errno.
+int khv_vsock_dial(uint32_t port, int plazo_ms);
+
+// balloon (virtio-balloon; ver balloon.c)
+struct vballoon_state {
+  struct vmmio m;
+  struct vq q[2];
+  uint32_t num_pages, actual;  // en marcos de 4 KiB
+};
+int vballoon_init(uint32_t intid, bool deflate_on_oom);
+bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
+void vballoon_objetivo(uint32_t marcos);
+uint32_t vballoon_actual(void);
+uint64_t vballoon_sueltas(void);
+bool vballoon_inflada(uint64_t pagina);
+void vballoon_get(struct vballoon_state *s);
+void vballoon_reafirmar(void);
+void vballoon_set(const struct vballoon_state *s);
+// khv_balloon fija el globo en marcos de 4 KiB; -1 si la VM no tiene globo.
+int khv_balloon(uint32_t marcos);
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);

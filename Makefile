@@ -238,7 +238,7 @@ deploy: daemon guest chispa-guest
 deploy-mac:
 	@$(MAKE) deploy GOARCH=arm64 HOST="$(HOST)"
 
-## vz — el VMM de macOS (kling-vz), junto al CLI.
+## vz — los VMM de macOS (kling-vz y kling-hv), junto al CLI.
 ##
 ## Vive en vz/ como módulo Go APARTE (github.com/juan52878911/kindling/vz):
 ## necesita cgo y dependencias (Code-Hex/vz, gVisor) que el núcleo no tiene ni
@@ -248,7 +248,7 @@ deploy-mac:
 vz:
 	@test "$$(uname -s)" = Darwin || { echo "kling-vz only builds on macOS" >&2; exit 1; }
 	@test -x vz/build.sh || { echo "vz/build.sh not found: kling-vz is not in this checkout yet" >&2; exit 1; }
-	cd vz && ./build.sh
+	cd vz && ./build.sh && ./build-hv.sh
 
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##

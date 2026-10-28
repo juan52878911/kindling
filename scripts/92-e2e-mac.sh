@@ -16,8 +16,10 @@
 #   FROM=ssh://juan@lab-arm64 ./92-e2e-mac.sh           las copia de un daemon Linux arm64
 #   IMAGES_DIR=/ruta ./92-e2e-mac.sh                    las clona (cp -c) de un directorio
 #   KEEP=1 ./92-e2e-mac.sh                              no limpia (para inspeccionar)
+#   VMM=hv ./92-e2e-mac.sh                              contra kling-hv (Hypervisor.framework)
 #
-# Variables: KLING (binario; kling-vz junto a él o KLING_VMM), ROOT (por defecto
+# Variables: VMM (vz o hv, el backend; su kling-vz o kling-hv va junto a KLING),
+# KLING (binario; el VMM junto a él o KLING_VMM), ROOT (por defecto
 # una ruta a propósito más larga que sun_path), SOCK, IMG (imagen con agente de
 # invitado, por defecto toolchain), BRIDGE_IMG (imagen con puente MCP en 8080,
 # por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10),
@@ -44,7 +46,12 @@ KEEP="${KEEP:-0}"
 FROM="${FROM:-}"
 IMAGES_DIR="${IMAGES_DIR:-}"
 LOG="${LOG:-$TMPBASE/kling-e2e-mac/daemon.log}"
-P="e2e-$$"   # prefijo de todo lo que crea la prueba
+P="${E2E_PREFIX:-e2e-$$}"   # prefijo de todo lo que crea la prueba
+VMM="${VMM:-vz}"
+case "$VMM" in vz|hv) ;; *) echo "VMM must be vz or hv" >&2; exit 2;; esac
+VMMB="kling-$VMM"
+# El backend lo elige el entorno del daemon (la configuración está vacía).
+export KLING_VMM="$VMM"
 
 export KLING_HOST="unix://$SOCK"
 # Que la configuración del usuario (defaults.mem_mib, defaults.ttl_seconds, el
@@ -135,7 +142,7 @@ cleanup() {
     for s in $(k snapshots 2>/dev/null | awk -v p="$P" 'index($1,p)==1 {print $1}'); do k template rm "$s" >/dev/null 2>&1; done
   fi
   stop_daemon
-  pkill -KILL -f "kling-vz --api-sock $ROOT/" 2>/dev/null
+  pkill -KILL -f "$VMMB --api-sock $ROOT/" 2>/dev/null
   rm -f "$KLING_CONFIG"
   rm -rf "$SHARES" "${DBSTAGE:-}" "${GTMP:-}"
 }
@@ -175,12 +182,12 @@ rm -f "$SOCK.2"
 # ── 1. diagnóstico ────────────────────────────────────────────────────────────
 step "1. kling up / info"
 out=$(KLING_ROOT="$ROOT" k up -check 2>&1); rc=$?
-contiene "$out" "local runtime on macOS (vz)" && ok "up -check diagnoses the Mac (rc=$rc)" || bad "up -check" "macOS (vz) diagnosis" "$out"
-contiene "$out" "✓ kling-vz" && contiene "$out" "✓ vz entitlement" && ok "up -check finds kling-vz, signed" \
-  || bad "up -check kling-vz" "✓ kling-vz and ✓ vz entitlement" "$out"
+contiene "$out" "local runtime on macOS ($VMM)" && ok "up -check diagnoses the Mac (rc=$rc)" || bad "up -check" "macOS ($VMM) diagnosis" "$out"
+contiene "$out" "✓ $VMMB" && contiene "$out" "✓ $VMM entitlement" && ok "up -check finds $VMMB, signed" \
+  || bad "up -check $VMMB" "✓ $VMMB and ✓ $VMM entitlement" "$out"
 out=$(k status -v 2>&1)
 be=$(printf '%s' "$out" | tr -s ' ' | grep '^backend:' || true)
-contiene "$be" "vz" && ok "info: $be" || bad "info backend" "backend: vz" "$out"
+contiene "$be" "$VMM" && ok "info: $be" || bad "info backend" "backend: $VMM" "$out"
 
 # ── 2. ciclo de vida ──────────────────────────────────────────────────────────
 step "2. run, exec, cp, shell, logs, freeze, thaw"
@@ -306,16 +313,28 @@ fi
 
 # ── 5. squeeze y resize ──────────────────────────────────────────────────────
 step "5. squeeze, resize"
-# En macOS el globo solo devuelve memoria en una máquina restaurada: se aprieta
-# una réplica.
-before=$(footprint "$P-r1")
-out=$(k machine squeeze "$P-r1" 2>&1)
+# En vz el globo solo devuelve memoria en una máquina restaurada: se aprieta
+# una réplica. En hv las réplicas comparten las páginas del dorado (el núcleo
+# no las aprieta sin -force) y cuestan pocos MiB: se aprieta una máquina en
+# frío que ha ensuciado 150 MiB y los ha soltado.
+SQ="$P-r1"
+if [ "$VMM" = hv ]; then
+  SQ="$P-sq"
+  k run -name "$SQ" -image "$IMG" -mem 512 -allow-exec >/dev/null 2>&1
+  # 150 MiB escritos página a página y soltados al salir: memoria sucia en el
+  # host que el invitado ya tiene libre (la imagen puede no tener /dev/shm).
+  k exec "$SQ" -- python3 -c 'b = bytearray(150 << 20)
+for i in range(0, len(b), 4096): b[i] = 1' >/dev/null 2>&1
+fi
+before=$(footprint "$SQ")
+out=$(k machine squeeze "$SQ" 2>&1)
 sleep 4   # al desinflar, el framework repoblaba las páginas en ~3 s
-FP_SQUEEZED=$(footprint "$P-r1")
+FP_SQUEEZED=$(footprint "$SQ")
 [ "$FP_SQUEEZED" -gt 0 ] && [ "$FP_SQUEEZED" -lt $((before * 3 / 4)) ] \
-  && ok "squeeze a replica: footprint $before -> $FP_SQUEEZED MiB, still there 4 s later" \
+  && ok "squeeze $SQ: footprint $before -> $FP_SQUEEZED MiB, still there 4 s later" \
   || bad "squeeze" "footprint well below $before MiB and holding" "$FP_SQUEEZED MiB ($out)"
-out=$(k exec "$P-r1" -- echo alive 2>&1); [ "$out" = alive ] && ok "squeezed replica still answers" || bad "after squeeze" "alive" "$out"
+out=$(k exec "$SQ" -- echo alive 2>&1); [ "$out" = alive ] && ok "squeezed machine still answers" || bad "after squeeze" "alive" "$out"
+[ "$VMM" = hv ] && k rm -f "$SQ" >/dev/null 2>&1
 
 R="$P-rs"
 if k run -name "$R" -image "$IMG" -mem 256 -mem-max 512 -allow-exec >/dev/null 2>&1; then
@@ -489,7 +508,7 @@ if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -al
   # Y todo lo anterior con kling-vz dentro de su perfil de sandbox (TLS al
   # proveedor incluido): si no, el resultado no vale para producción.
   vzl=$(cat "$vlog" 2>/dev/null)
-  contiene "$vzl" "confined: " && contiene "$vzl" "network out: true" && ok "with kling-vz confined in its sandbox profile" \
+  contiene "$vzl" "confined: " && contiene "$vzl" "network out: true" && ok "with $VMMB confined in its sandbox profile" \
     || bad "sandbox" "confined: ... network out: true" "$(printf '%s' "$vzl" | grep -i confin)"
 
   # El kling-vz de una máquina descongelada es nuevo: el daemon le devuelve la
@@ -685,11 +704,11 @@ else
 fi
 
 # ── 7. reinicio del daemon y kill -9─────────────────────────────────────────
-step "7. daemon restart, SIGKILL of a kling-vz"
+step "7. daemon restart, SIGKILL of a $VMMB"
 pid_before=$(machine_field "$P-r3" pid)
 stop_daemon
 alive=$(our_vmms)
-[ "$alive" -gt 0 ] && ok "machines outlive the daemon ($alive kling-vz running)" || bad "daemon stop" "kling-vz still running" "$alive"
+[ "$alive" -gt 0 ] && ok "machines outlive the daemon ($alive $VMMB running)" || bad "daemon stop" "$VMMB still running" "$alive"
 start_daemon && ok "daemon restarted" || bad "daemon restart" "up" "see $LOG"
 st=$(machine_field "$P-r3" state); pid_after=$(machine_field "$P-r3" pid)
 out=$(k exec "$P-r3" -- cat /root/mark 2>&1)
@@ -718,11 +737,13 @@ victim=$(machine_field "$P-r2" pid)
 kill -9 "$victim" 2>/dev/null
 st=""
 for i in $(seq 1 30); do st=$(machine_field "$P-r2" state); [ "$st" = failed ] && break; sleep 1; done
-[ "$st" = failed ] && ok "kill -9 of its kling-vz: marked failed after ~${i} s" || bad "kill -9" "failed" "$st"
+[ "$st" = failed ] && ok "kill -9 of its $VMMB: marked failed after ~${i} s" || bad "kill -9" "failed" "$st"
 sleep 1
 vm_after=$(apple_vms)
-[ "$vm_after" -eq $((vm_before - 1)) ] && ok "its Apple VM process went with it ($vm_before -> $vm_after)" \
-  || bad "Apple VM helper" "$((vm_before - 1))" "$vm_after"
+if [ "$VMM" = vz ]; then
+  [ "$vm_after" -eq $((vm_before - 1)) ] && ok "its Apple VM process went with it ($vm_before -> $vm_after)" \
+    || bad "Apple VM helper" "$((vm_before - 1))" "$vm_after"
+fi
 
 # ── 8. ráfaga ────────────────────────────────────────────────────────────────
 step "8. stress: burst of $BURST runs from the snapshot"
@@ -1423,7 +1444,7 @@ step "9. leftovers"
 k template rm "$SNAP" >/dev/null 2>&1
 stop_daemon
 sleep 1
-n=$(our_vmms); [ "$n" = 0 ] && ok "no kling-vz of this test left" || bad "kling-vz leftovers" 0 "$n"
+n=$(our_vmms); [ "$n" = 0 ] && ok "no $VMMB of this test left" || bad "$VMMB leftovers" 0 "$n"
 n=$(apple_vms); [ "$n" -le "$APPLE_BEFORE" ] && ok "no Apple VM process left ($n, $APPLE_BEFORE before the test)" || bad "Apple VM leftovers" "$APPLE_BEFORE" "$n"
 n=$(our_links); [ "$n" = 0 ] && ok "no /tmp/kling-$(id -u) link into the test root left" || bad "short links" 0 "$n"
 

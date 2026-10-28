@@ -27,12 +27,13 @@ const launchAgentLabel = "dev.kindling.daemon"
 
 // probeMac es la foto de un Mac como host de microVMs.
 type probeMac struct {
+	backend     string // machine.BackendVZ o machine.BackendHV
 	arch        string
 	macOS       string // "15.5"; vacío si no se pudo leer
-	vmm         string // ruta de kling-vz; vacío si no está
+	vmm         string // ruta de kling-vz (o kling-hv); vacío si no está
 	vmmVersion  string // salida de --version; vacío si no arranca
 	vmmErr      string
-	entitlement bool // firmado con com.apple.security.virtualization
+	entitlement bool // firmado con el entitlement de su framework
 	mkfs        bool
 	debugfs     bool
 	kernel      bool
@@ -41,8 +42,14 @@ type probeMac struct {
 }
 
 func localProbeMac(root string) probeMac {
-	p := probeMac{arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
-	vmm := machine.ResolverVMM(machine.BackendVZ, os.Getenv("KLING_VMM"), "")
+	// El backend que usaría el daemon (KLING_VMM, daemon.vmm o el de la
+	// plataforma): con daemon.vmm hv lo que hay que tener es kling-hv.
+	backend, err := daemonBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH)
+	if err != nil || (backend != machine.BackendVZ && backend != machine.BackendHV) {
+		backend = machine.BackendVZ
+	}
+	p := probeMac{backend: backend, arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
+	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), "")
 	if path, err := exec.LookPath(vmm); err == nil {
 		p.vmm = path
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -56,7 +63,7 @@ func localProbeMac(root string) probeMac {
 				p.vmmErr = err.Error()
 			}
 		}
-		p.entitlement = tieneEntitlementVZ(path)
+		p.entitlement = tieneEntitlement(path, entitlementDe(backend))
 	}
 	p.mkfs = machine.E2fsDisponible("mkfs.ext4")
 	p.debugfs = machine.E2fsDisponible("debugfs")
@@ -70,10 +77,19 @@ func firstLine(s string) string {
 	return l
 }
 
-// tieneEntitlementVZ mira si el binario está firmado con el permiso de
-// virtualización. Sin él, Virtualization.framework se niega a crear la VM y
-// el error llega tarde y críptico, en el primer arranque.
-func tieneEntitlementVZ(path string) bool {
+// entitlementDe es el permiso con el que tiene que ir firmado el VMM del
+// backend: Virtualization.framework o Hypervisor.framework.
+func entitlementDe(backend string) string {
+	if backend == machine.BackendHV {
+		return "com.apple.security.hypervisor"
+	}
+	return "com.apple.security.virtualization"
+}
+
+// tieneEntitlement mira si el binario está firmado con ese permiso. Sin él, el
+// framework se niega a crear la VM y el error llega tarde y críptico, en el
+// primer arranque.
+func tieneEntitlement(path, ent string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "codesign", "-d", "--entitlements", "-", "--xml", path).CombinedOutput()
@@ -84,7 +100,7 @@ func tieneEntitlementVZ(path string) bool {
 			return false
 		}
 	}
-	return strings.Contains(string(out), "com.apple.security.virtualization")
+	return strings.Contains(string(out), ent)
 }
 
 // versionMayor devuelve el número mayor de una versión "15.5.1"; 0 si no se
@@ -111,32 +127,47 @@ func checksMac(p probeMac) []check {
 		macOS = "unknown version"
 	}
 	copyHint := "kling image copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
+	backend := p.backend
+	if backend == "" {
+		backend = machine.BackendVZ
+	}
+	nombre := machine.NombreVMM(backend)
+	framework, build := "Virtualization.framework", "make vz            # in the kindling repo; builds and signs vz/cmd/kling-vz"
+	if backend == machine.BackendHV {
+		framework, build = "Hypervisor.framework", "make vz            # in the kindling repo; builds and signs kling-vz and kling-hv"
+	}
+	// vz necesita el save/restore de macOS 14; hv, el GIC de
+	// Hypervisor.framework (hv_gic_create), que llegó en macOS 15.
+	minMacOS, whyMacOS := 14, "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later"
+	if backend == machine.BackendHV {
+		minMacOS, whyMacOS = 15, "kling-hv needs the in-kernel GIC of Hypervisor.framework (macOS 15 Sequoia or later)"
+	}
 	return []check{
 		{
 			label: "Apple Silicon", ok: p.arch == "arm64", fatal: true,
 			found: p.arch,
-			why:   "kling-vz runs aarch64 guests on Virtualization.framework; Intel Macs are not supported",
+			why:   nombre + " runs aarch64 guests on " + framework + "; Intel Macs are not supported",
 			fix:   []string{"use a Linux host with KVM instead:  kling context add lab ssh://user@host"},
 		},
 		{
-			label: "macOS 14+", ok: versionMayor(p.macOS) >= 14, fatal: true,
+			label: fmt.Sprintf("macOS %d+", minMacOS), ok: versionMayor(p.macOS) >= minMacOS, fatal: true,
 			found: macOS,
-			why:   "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later",
+			why:   whyMacOS,
 			fix:   []string{"update macOS (System Settings > General > Software Update)"},
 		},
 		{
-			label: "kling-vz", ok: p.vmm != "" && p.vmmVersion != "", fatal: true,
+			label: nombre, ok: p.vmm != "" && p.vmmVersion != "", fatal: true,
 			found: vmmFound,
-			why:   "it's the VMM on macOS: without it there's nothing to start",
+			why:   "it's the VMM on macOS (daemon.vmm " + backend + "): without it there's nothing to start",
 			fix: []string{
-				"make vz            # in the kindling repo; builds and signs vz/cmd/kling-vz",
-				"# then put kling-vz next to kling, or set KLING_VMM=/path/to/kling-vz",
+				build,
+				"# then put " + nombre + " next to kling, or set KLING_VMM=/path/to/" + nombre,
 			},
 		},
 		{
-			label: "vz entitlement", ok: p.vmm != "" && p.entitlement, fatal: true,
-			found: presence(p.entitlement, "signed with com.apple.security.virtualization", "missing"),
-			why:   "macOS refuses to create a VM from a binary without the virtualization entitlement",
+			label: backend + " entitlement", ok: p.vmm != "" && p.entitlement, fatal: true,
+			found: presence(p.entitlement, "signed with "+entitlementDe(backend), "missing"),
+			why:   "macOS refuses to create a VM from a binary without the " + framework + " entitlement",
 			fix:   []string{"make vz            # signs it (ad-hoc is enough)"},
 		},
 		{
@@ -170,8 +201,9 @@ func checksMac(p probeMac) []check {
 
 // upMac diagnostica este Mac y, si se puede, arranca el daemon.
 func upMac(root string, checkOnly bool) error {
-	fmt.Printf("kindling — local runtime on macOS (vz)  (data root: %s)\n\n", root)
-	cs := checksMac(localProbeMac(root))
+	p := localProbeMac(root)
+	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n\n", p.backend, root)
+	cs := checksMac(p)
 	fatal, warn := printChecks(cs, "")
 	if fatal > 0 {
 		fmt.Println()
