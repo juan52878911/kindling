@@ -3115,7 +3115,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// además, la mayoría del ciclo, así que es aquí donde una tormenta simultánea
 	// hace más daño. Va tras la readopción de arriba: readoptar no enciende nada,
 	// no tiene por qué esperar turno.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterRestore(ctx)
 	if glErr != nil {
 		soltarFull()
 		return nil, glErr

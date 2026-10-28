@@ -210,6 +210,10 @@ func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) 
 	return fc.New(sock).KlingProbe(ctx, port)
 }
 
+// enterRestore: en Linux restaurar y arrancar en frío comparten la puerta de
+// arranque (launch.go); la tormenta que cuelga un host anidado es la misma.
+func (m *Manager) enterRestore(ctx context.Context) (func(), error) { return m.enterLaunch(ctx) }
+
 // lanzamientoPlataforma es el tope de encendidos simultáneos propio de la
 // plataforma; 0 = el cálculo general de maxParallelLaunch.
 func lanzamientoPlataforma() int { return 0 }

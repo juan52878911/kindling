@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -547,10 +548,97 @@ func discoLibreMiB(path, alternativa string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize) >> 20
 }
 
-// lanzamientoPlataforma: 4 encendidos a la vez. El prototipo vio fallos con
-// ~20 restauraciones simultáneas (docs/vz-mac-prototipo.md): cada una copia el
-// estado a memoria y el sistema empieza a matar procesos auxiliares.
+// lanzamientoPlataforma: 4 ARRANQUES EN FRÍO a la vez. Las restauraciones
+// (thaw, run -from) van por su propia compuerta, enterRestore: un arranque en
+// frío no carga memoria de golpe (el invitado la va tocando) y no tiene por
+// qué esperar detrás de cuatro restauraciones, ni al revés.
 func lanzamientoPlataforma() int { return 4 }
+
+// Compuerta de restauraciones en macOS. El prototipo vio fallos con ~20
+// restauraciones simultáneas (docs/vz-mac-prototipo.md): cada una copia su
+// estado a memoria (~324 MiB por instancia medidos en el M4) y, con el Mac
+// justo, el sistema empieza a matar procesos auxiliares (jetsam). Reanudar una
+// pausada no pasa por aquí: no carga nada.
+const (
+	// restoresSimultaneosVZ es cuántas restauraciones cargan a la vez.
+	restoresSimultaneosVZ = 3
+	// nivelRestoreVZ es el kern.memorystatus_level (%) por encima del cual
+	// rige restoresSimultaneosVZ. Con el nivel en esto o por debajo se espera
+	// un poco a que suba (esperaNivelRestoreVZ) y luego se restaura de una en
+	// una: la admisión dura (507, minMemLevel) ya decidió que cabe.
+	nivelRestoreVZ = 25
+)
+
+var (
+	esperaNivelRestoreVZ   = 2 * time.Second // variable para las pruebas
+	compuertaRestoreVZ     = make(chan struct{}, restoresSimultaneosVZ)
+	compuertaRestoreBajaVZ = make(chan struct{}, 1)
+	// nivelMemoriaVZ lee kern.memorystatus_level; -1 si no se puede.
+	// Variable para las pruebas.
+	nivelMemoriaVZ = func() int {
+		n, err := syscall.SysctlUint32("kern.memorystatus_level")
+		if err != nil {
+			return -1
+		}
+		return int(n)
+	}
+)
+
+// enterRestore toma un hueco en la compuerta de restauraciones y devuelve con
+// qué soltarlo (siempre, en un defer, como enterLaunch). Un Manager hecho a
+// mano en un test (sin launchGate) no tiene compuertas.
+func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
+	if m.launchGate == nil {
+		return func() {}, nil
+	}
+	tomar := func(c chan struct{}) error {
+		select {
+		case c <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := tomar(compuertaRestoreVZ); err != nil {
+		return nil, err
+	}
+	soltar := []chan struct{}{compuertaRestoreVZ}
+	if nivelBajoParaRestaurar(ctx) {
+		if err := tomar(compuertaRestoreBajaVZ); err != nil {
+			<-compuertaRestoreVZ
+			return nil, err
+		}
+		soltar = append(soltar, compuertaRestoreBajaVZ)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for _, c := range soltar {
+				<-c
+			}
+		})
+	}, nil
+}
+
+// nivelBajoParaRestaurar espera hasta esperaNivelRestoreVZ a que el nivel de
+// memoria pase de nivelRestoreVZ, y dice si sigue sin pasar.
+func nivelBajoParaRestaurar(ctx context.Context) bool {
+	limite := time.Now().Add(esperaNivelRestoreVZ)
+	for {
+		n := nivelMemoriaVZ()
+		if n < 0 || n > nivelRestoreVZ {
+			return false
+		}
+		if !time.Now().Before(limite) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
 
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
 // de Apple que aloja la VM, que es donde vive de verdad la memoria.
