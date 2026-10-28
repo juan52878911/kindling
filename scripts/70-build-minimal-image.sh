@@ -43,10 +43,21 @@ for c in curl mkfs.ext4; do
 done
 
 case "$(uname -m)" in
-  x86_64)  ALPINE_ARCH=x86_64 ;;
-  aarch64) ALPINE_ARCH=aarch64 ;;
-  *) echo "arquitectura no soportada: $(uname -m)" >&2; exit 1 ;;
+  x86_64)  HOST_ALPINE_ARCH=x86_64 ;;
+  aarch64) HOST_ALPINE_ARCH=aarch64 ;;
+  *) HOST_ALPINE_ARCH="" ;;
 esac
+# ALPINE_ARCH=aarch64 construye para otra arquitectura (la release hace las
+# dos en un runner x86_64). Solo sin PKGS: instalar paquetes es un chroot, y
+# eso necesita ejecutar binarios de la arquitectura del invitado.
+ALPINE_ARCH="${ALPINE_ARCH:-$HOST_ALPINE_ARCH}"
+case "$ALPINE_ARCH" in
+  x86_64|aarch64) ;;
+  *) echo "arquitectura no soportada: ${ALPINE_ARCH:-$(uname -m)}" >&2; exit 1 ;;
+esac
+if [ -n "$PKGS" ] && [ "$ALPINE_ARCH" != "$HOST_ALPINE_ARCH" ]; then
+  echo "PKGS necesita construir en la arquitectura del invitado ($ALPINE_ARCH)" >&2; exit 1
+fi
 
 # El minirootfs, fijado con su sha256 y no "el más reciente de latest-stable":
 # lo que se descarga acaba siendo el sistema de cada microVM, y antes no se

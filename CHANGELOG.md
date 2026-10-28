@@ -6,6 +6,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- Releases ship the guest kernel and the `min` image for amd64 and arm64 (`vmlinux-<arch>.zst`, `min-<arch>.ext4.zst`), and `kling up` on a Mac downloads them when missing, checked against the release's `SHA256SUMS`: no Linux host needed for a first `kling run -image min`.
+- Homebrew: each release attaches a `kling.rb` formula (darwin-arm64 and linux, depends on e2fsprogs, with a service that runs the daemon); `kling upgrade` refuses binaries in Homebrew's Cellar and points to `brew upgrade kling`.
+
 ### Changed
 
 - The per-microVM network limit is no longer a fixed 16 MiB/s: `daemon.net_mibps` (or `KLING_NET_MIBPS`) sets the default and `RunRequest.net_mibps` asks for another; `kling run -share` and compose ask for 256. Reading a shared folder in the lab went from 21 to ~167 MiB/s (p50, n=5); writes stay at ~12 MiB/s (not the limiter).

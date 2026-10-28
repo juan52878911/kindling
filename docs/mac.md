@@ -65,6 +65,26 @@ brew install e2fsprogs
 kling up -check
 ```
 
+Con **Homebrew**: cada release adjunta su fórmula (`kling.rb`, con la versión y
+el sha256 de cada binario). Instala los mismos binarios firmados (no compila
+nada), depende de e2fsprogs y trae un servicio que corre `kling daemon` como el
+agente de `kling up -install` (no instales los dos):
+
+```sh
+curl -fsSLO https://github.com/juan52878911/kindling/releases/latest/download/kling.rb
+brew install --formula ./kling.rb
+brew services start kling     # o: kling up -install, sin brew services
+```
+
+Así instalado, se actualiza con `brew upgrade kling`; `kling upgrade` lo detecta
+(binarios en el `Cellar`) y lo dice en vez de pisarlos.
+
+**El kernel y `min` vienen con la release** (desde v0.20): `kling up` los baja
+si faltan en `images/` (`vmlinux-arm64.zst` y `min-arm64.ext4.zst`),
+verificados contra el `SHA256SUMS` de la release de ese `kling`, igual que
+`install.sh`. Ya no hace falta un host Linux para el primer `kling run -image
+min`; para el resto de imágenes, ver [Conseguir imágenes](#conseguir-imágenes).
+
 `kling-vz` vive en este repositorio, en `vz/`, como **módulo Go aparte**
 (`github.com/juan52878911/kindling/vz`): necesita cgo y dependencias que el
 núcleo no tiene. Por ser otro módulo, `go test ./...` desde la raíz no entra ahí.

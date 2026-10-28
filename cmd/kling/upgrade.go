@@ -110,6 +110,9 @@ func cmdUpgrade(args []string) error {
 	} else if err := prepararDaemon(&o, endpoint, *unit, *root, *rollback); err != nil {
 		return err
 	}
+	if err := noEsDeBrew(o.Piezas); err != nil {
+		return err
+	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -173,6 +176,31 @@ func prepararCLI(o *upgrade.Opciones) error {
 	o.Piezas = []upgrade.Pieza{{Asset: assetDe("kling", runtime.GOOS, runtime.GOARCH), Destino: exe}}
 	o.Dir, err = dirEstadoUsuario()
 	return err
+}
+
+// noEsDeBrew se niega a cambiar binarios que instaló Homebrew (los de su
+// Cellar): brew no se enteraría, el siguiente `brew upgrade` los pisaría y
+// `brew uninstall` dejaría lo que no es suyo. Se actualizan con brew.
+func noEsDeBrew(piezas []upgrade.Pieza) error {
+	for _, p := range piezas {
+		if real, err := filepath.EvalSymlinks(p.Destino); err == nil && enCellar(real) {
+			return fmt.Errorf("%s was installed with Homebrew: upgrade it with  brew upgrade kling", real)
+		}
+	}
+	return nil
+}
+
+// enCellar dice si la ruta está bajo el Cellar de Homebrew de la fórmula
+// kling: /opt/homebrew/Cellar/kling/0.20.0/bin/kling, /usr/local/Cellar/...,
+// /home/linuxbrew/.linuxbrew/Cellar/... (o el HOMEBREW_CELLAR que sea).
+func enCellar(ruta string) bool {
+	partes := strings.Split(filepath.ToSlash(ruta), "/")
+	for i := 0; i+1 < len(partes); i++ {
+		if partes[i] == "Cellar" && partes[i+1] == "kling" {
+			return true
+		}
+	}
+	return false
 }
 
 func ejecutableReal() (string, error) {
