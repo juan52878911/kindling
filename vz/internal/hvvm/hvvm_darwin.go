@@ -40,6 +40,12 @@ type Factory struct {
 	// RAMDir es dónde se crea (y se borra en seguida) el fichero disperso que
 	// respalda la RAM de un arranque en frío: el directorio de la máquina.
 	RAMDir string
+	// Inservible se llama cuando este proceso ya no puede alojar una VM: un
+	// Create, un arranque o una restauración que fallaron después de crear la
+	// VM de Hypervisor.framework, que es una por proceso y no se puede
+	// rehacer. El servidor, como con kling-vz, intentaría otra en el mismo
+	// proceso; kling-hv tiene que salir para que el núcleo lance uno nuevo.
+	Inservible func(error)
 
 	mu     sync.Mutex
 	creada bool
@@ -67,7 +73,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.creada {
-		return nil, errors.New("kling-hv creates a single VM per process")
+		err := errors.New("kling-hv creates a single VM per process")
+		f.inservible(err)
+		return nil, err
 	}
 	if s.BootSource == nil || s.MachineConfig == nil {
 		return nil, errors.New("boot source and machine config are required")
@@ -154,13 +162,24 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	cfg.console_fd = C.int(pw.Fd())
 
 	if C.khv_create(&cfg) != 0 {
-		return nil, errC("creating the VM")
+		err := errC("creating the VM")
+		if C.khv_vm_tocada() {
+			f.creada = true
+			f.inservible(err)
+		}
+		return nil, err
 	}
 	f.creada = true
 	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock,
 		memMiB: s.MachineConfig.MemSizeMiB}
 	go m.esperar()
 	return m, nil
+}
+
+func (f *Factory) inservible(err error) {
+	if f.Inservible != nil {
+		f.Inservible(err)
+	}
 }
 
 type machine struct {
@@ -183,7 +202,9 @@ func (m *machine) esperar() {
 
 func (m *machine) Start() error {
 	if C.khv_boot() != 0 {
-		return errC("booting")
+		err := errC("booting")
+		m.f.inservible(err)
+		return err
 	}
 	return nil
 }
@@ -223,7 +244,9 @@ func (m *machine) RestoreState(path string) error {
 	p := C.CString(path)
 	defer C.free(unsafe.Pointer(p))
 	if C.khv_restore(p) != 0 {
-		return errC("restoring")
+		err := errC("restoring")
+		m.f.inservible(err)
+		return err
 	}
 	return nil
 }

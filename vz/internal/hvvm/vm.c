@@ -626,6 +626,9 @@ static void soltar_locked(void) {
 
 // ===================== VM =====================
 
+static bool vm_tocada;
+bool khv_vm_tocada(void) { return vm_tocada; }
+
 int khv_create(const struct khv_config *c) {
   t_inicio = mach_absolute_time();
   mach_timebase_info(&tb);
@@ -663,6 +666,9 @@ int khv_create(const struct khv_config *c) {
     return -1;
   }
 
+  // Desde aquí un fallo deja el proceso inservible para otra VM
+  // (Hypervisor.framework admite una por proceso y no hay vuelta atrás).
+  vm_tocada = true;
   TRY(hv_vm_create(NULL));
   hv_gic_config_t g = hv_gic_config_create();
   TRY(hv_gic_config_set_distributor_base(g, GIC_DIST_BASE));

@@ -62,6 +62,7 @@ struct khv_config {
 
 const char *khv_error(void);
 int khv_create(const struct khv_config *c);
+bool khv_vm_tocada(void);  // si khv_create llegó a crear la VM (el proceso ya no sirve para otra)
 int khv_boot(void);
 int khv_restore(const char *mem_path);
 int khv_pause(unsigned bit);

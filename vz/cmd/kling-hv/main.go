@@ -177,7 +177,7 @@ func run() int {
 
 	peers := peercred.New()
 	srv := server.New(server.Deps{
-		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock)},
+		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},
 		Vsock:   vsock,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			var pg vnet.PGProxy
@@ -259,6 +259,17 @@ func run() int {
 	_ = hs.Close()
 	_ = creds.Close()
 	return code
+}
+
+// salirInservible termina el proceso cuando ya no puede alojar una VM (ver
+// hvvm.Factory.Inservible): con un margen para que la respuesta con el error
+// llegue al núcleo, que verá morir al VMM y lanzará uno nuevo.
+func salirInservible(err error) {
+	logf("this process cannot host another VM (%v): exiting so the daemon starts a new kling-hv", err)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		os.Exit(1)
+	}()
 }
 
 // dirMaquina es el directorio de la máquina (el del socket), absoluto y real.
