@@ -152,6 +152,10 @@ type Machine struct {
 	// Una copia de un dorado hereda los del dorado: lleva su memoria.
 	EnvKeys []string `json:"env_keys,omitempty"`
 
+	// ShareWait es cuántas carpetas vivas espera su agente antes de lanzar el
+	// servicio (RunRequest.ShareWait; kling.shares en la línea del kernel).
+	ShareWait int `json:"share_wait,omitempty"`
+
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
@@ -360,6 +364,13 @@ type RunRequest struct {
 	// nombres). Solo en frío: con From se rechaza, porque la copia es la
 	// memoria del dorado y su servicio ya arrancó con el entorno de aquel.
 	Env []string `json:"env,omitempty"`
+	// ShareWait: el agente espera a tantas carpetas vivas (con plazo) antes
+	// de lanzar el servicio de la imagen, para que no arranque sin su código.
+	// 0 = las carpetas vivas de Shares. Sirve para preparar una plantilla sin
+	// carpetas cuyo servicio arranque cuando se le den: sus copias (From con
+	// el mismo número de carpetas vivas) las reciben tras restaurar. Un agente
+	// anterior lo ignora y arranca el servicio en seguida.
+	ShareWait int `json:"share_wait,omitempty"`
 }
 
 // GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en
@@ -431,6 +442,11 @@ const LayerBootParam = "kling.layer"
 // concederse a sí mismo esa capacidad porque la línea de comandos del kernel la
 // escribe quien arranca la máquina.
 const ExecBootParam = "kling.exec"
+
+// ShareWaitBootParam (kling.shares=N) le dice al agente cuántas carpetas vivas
+// esperar antes de lanzar el servicio (RunRequest.ShareWait). Un agente
+// anterior no lo conoce: avisa y lo ignora.
+const ShareWaitBootParam = "kling.shares"
 
 // Image es una imagen de rootfs ya construida ($ROOT/images/$NAME.ext4): la base
 // de la que se arrancan las microVMs. Hasta que existió GET /images no se podían
@@ -661,6 +677,12 @@ type Snapshot struct {
 	// se hizo commit (Machine.EnvKeys): sus valores están en la memoria
 	// congelada y las instancias los heredan.
 	EnvKeys []string `json:"env_keys,omitempty"`
+
+	// ShareWait: la máquina de la que se hizo commit arrancó con su agente
+	// esperando a tantas carpetas vivas (Machine.ShareWait). Solo una
+	// plantilla así acepta carpetas vivas al instanciarla, y tantas como
+	// éstas: su servicio aún no arrancó y arranca con ellas.
+	ShareWait int `json:"share_wait,omitempty"`
 
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.

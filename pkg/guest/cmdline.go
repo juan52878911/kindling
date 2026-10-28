@@ -30,6 +30,7 @@ var knownBootParams = map[string]bool{
 	volumeBootParam:         true,
 	execBootParam:           true,
 	api.MachineEnvBootParam: true,
+	api.ShareWaitBootParam:  true,
 	"kling.layer":           true,
 }
 

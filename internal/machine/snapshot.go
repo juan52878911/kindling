@@ -561,6 +561,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
 		AllowExec:      mc.AllowExec,
 		EnvKeys:        mc.EnvKeys,
+		ShareWait:      mc.ShareWait,
 		RootfsDigest:   rootfsDigest,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
@@ -1266,6 +1267,16 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err != nil {
 		return nil, err
 	}
+	// Carpetas vivas (run() ya rechazó las copias): solo en una plantilla cuyo
+	// agente espera ese mismo número antes de lanzar el servicio. En otra, el
+	// servicio ya corre en la memoria del dorado sin ellas.
+	if len(req.Shares) > 0 && len(req.Shares) != snap.ShareWait {
+		if snap.ShareWait == 0 {
+			return nil, fmt.Errorf("%w: template %s was not saved waiting for shared folders, and its service is already running without them; "+
+				"save one from a machine started with share_wait (kling run -share-wait N), or boot cold with -image", ErrShareRequest, req.From)
+		}
+		return nil, fmt.Errorf("%w: template %s waits for %d shared folder(s) and is being given %d", ErrShareRequest, req.From, snap.ShareWait, len(req.Shares))
+	}
 	// OBSOLETO: hecho con un VMM que el de ahora no sabe cargar. Se falla
 	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
 	// al cargar no dice que la causa es la actualización (meta.go).
@@ -1448,6 +1459,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, verr
 	}
+	shares, serr := m.resolveShares(ctx, req, vols)
+	if serr != nil {
+		os.RemoveAll(dir)
+		return nil, serr
+	}
+	var shareAtts []api.ShareAttachment
+	for _, sh := range shares {
+		shareAtts = append(shareAtts, sh.att)
+	}
 	for _, v := range vols {
 		if !v.readOnly {
 			repairVolume(ctx, v.path)
@@ -1532,6 +1552,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// El entorno es el del dorado: está en su memoria (entorno.go).
 		EnvKeys:   snap.EnvKeys,
+		ShareWait: snap.ShareWait,
+		Shares:    shareAtts,
 		Labels:    etiquetas,
 		CreatedAt: creada,
 		TTLAt:     &creada,
@@ -1811,6 +1833,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
+	// Las carpetas vivas, como en el arranque en frío: el agente de la copia
+	// las espera para lanzar el servicio.
+	if hasLiveShares(&out) {
+		m.startShares(id)
+		if err := m.waitShares(ctx, id, shareAttachWait); err != nil {
+			soltarCiclo()
+			_ = m.Remove(id)
+			return nil, err
+		}
+		m.decorarShares(&out)
+	}
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))})

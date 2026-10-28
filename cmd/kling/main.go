@@ -529,6 +529,7 @@ func cmdRun(args []string) error {
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
+	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -622,6 +623,7 @@ func cmdRun(args []string) error {
 		AllowExec: *allowExec,
 		OnTTL:     *onTTL,
 		Env:       env,
+		ShareWait: *shareWait,
 	})
 	if err != nil {
 		return err
