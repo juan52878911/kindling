@@ -75,11 +75,16 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	}
 	cfg.SetPlatformVirtualMachineConfiguration(platform)
 
-	m := &machine{stopped: make(chan error, 1), logf: f.Logf}
+	m := &machine{stopped: make(chan error, 1), fin: make(chan struct{}), logf: f.Logf}
 	ok := false
 	defer func() {
 		if !ok {
+			// La copia de la consola no llegó a arrancar: el extremo de
+			// lectura también es nuestro.
 			m.closeConsole()
+			if m.outR != nil {
+				m.outR.Close()
+			}
 		}
 	}()
 
@@ -202,6 +207,10 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	}
 
 	go func() {
+		// Lee hasta el fin de fichero (el auxiliar y signal cierran sus
+		// extremos de escritura) y suelta el descriptor: antes se quedaba
+		// abierto para siempre, uno por VM creada.
+		defer m.outR.Close()
 		if f.Console != nil {
 			_, _ = io.Copy(f.Console, m.outR)
 		} else {
@@ -216,14 +225,20 @@ type machine struct {
 	vm                   *vz.VirtualMachine
 	inR, inW, outR, outW *os.File
 	stopped              chan error
-	once                 sync.Once
-	logf                 func(string, ...any)
-	view                 unsafe.Pointer // VZVirtualMachineView si hay ventana
+	// fin se cierra en signal: watch deja de esperar cambios de estado de
+	// una VM que ya no los va a tener (p. ej. la de un Start fallido).
+	fin  chan struct{}
+	once sync.Once
+	logf func(string, ...any)
+	view unsafe.Pointer // VZVirtualMachineView si hay ventana
 }
 
 // Screenshot devuelve la ventana de la VM como PNG (ver capture).
 func (m *machine) Screenshot() ([]byte, error) { return capture(m.view) }
 
+// closeConsole cierra nuestros extremos de las tuberías de consola menos el
+// de lectura de la salida, que es de la copia (la gorrutina de Create): ella
+// lo cierra al ver el fin de fichero, para no perder la cola de la consola.
 func (m *machine) closeConsole() {
 	for _, f := range []*os.File{m.inR, m.inW, m.outW} {
 		if f != nil {
@@ -233,14 +248,26 @@ func (m *machine) closeConsole() {
 }
 
 func (m *machine) watch() {
-	for st := range m.vm.StateChangedNotify() {
-		switch st {
-		case vz.VirtualMachineStateStopped:
-			m.signal(nil)
+	cambios := m.vm.StateChangedNotify()
+	for {
+		select {
+		case <-m.fin:
+			// Ya se avisó por otro camino (Stop de una VM que nunca
+			// arrancó, Start fallido): esta gorrutina era lo único que
+			// retenía la VM.
 			return
-		case vz.VirtualMachineStateError:
-			m.signal(errors.New("Virtualization.framework reported the VM in error state"))
-			return
+		case st, ok := <-cambios:
+			if !ok {
+				return
+			}
+			switch st {
+			case vz.VirtualMachineStateStopped:
+				m.signal(nil)
+				return
+			case vz.VirtualMachineStateError:
+				m.signal(errors.New("Virtualization.framework reported the VM in error state"))
+				return
+			}
 		}
 	}
 }
@@ -248,6 +275,7 @@ func (m *machine) watch() {
 func (m *machine) signal(err error) {
 	m.once.Do(func() {
 		m.stopped <- err
+		close(m.fin)
 		// Cerrar la escritura deja que la copia de la consola termine.
 		m.closeConsole()
 	})
@@ -255,7 +283,16 @@ func (m *machine) signal(err error) {
 
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
-func (m *machine) Start() error  { return m.vm.Start() }
+// Start arranca la VM. Si falla, la VM no llega a cambiar de estado y watch
+// no se enteraría nunca: se avisa aquí (Stopped con el error), lo que suelta
+// la gorrutina y la consola. Quien llama la abandona igualmente.
+func (m *machine) Start() error {
+	err := m.vm.Start()
+	if err != nil && !m.vm.CanStop() {
+		m.signal(fmt.Errorf("start: %w", err))
+	}
+	return err
+}
 func (m *machine) Pause() error  { return m.vm.Pause() }
 func (m *machine) Resume() error { return m.vm.Resume() }
 
