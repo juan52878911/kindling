@@ -71,12 +71,14 @@ func cmdLogs(args []string) error {
 	}
 	fmt.Fprint(w, out)
 	if !*follow {
+		avisarEgress(ctx, c, ref)
 		return nil
 	}
 	if out != "" && !strings.HasSuffix(out, "\n") {
 		fmt.Fprintln(w)
 	}
 	err = followLogs(ctx, w, src, splitLines(out), followEvery)
+	avisarEgress(ctx, c, ref)
 	if ctx.Err() != nil {
 		return nil // Ctrl-C es la forma normal de terminar
 	}

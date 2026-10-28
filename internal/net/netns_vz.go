@@ -41,3 +41,9 @@ func TeardownNamespace(ns string) {}
 
 // Available siempre vale: la red no depende de herramientas del host.
 func Available() error { return nil }
+
+// En macOS el aviso de bloqueos lo calcula kling-vz, no el host.
+func destinosIP(n *Net) []Destino { return nil }
+
+// ReanudarResolver no hace falta: no hay resolver en el host.
+func (n *Net) ReanudarResolver(e Egress) error { return nil }

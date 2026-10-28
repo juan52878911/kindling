@@ -54,6 +54,9 @@ func warmUp(ctx context.Context, ops warmOps, w warmSpec, out io.Writer, logf fu
 	// Se retira siempre, por éxito o por fallo, y aunque se cancele el contexto.
 	defer func() { _ = ops.Remove(context.WithoutCancel(ctx), m) }()
 	if mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed {
+		if a := avisoEgress(ctx, ops, m); a != "" {
+			logf("%s", a)
+		}
 		return nil, fmt.Errorf("%s is running but not ready (%s): see kling logs %s", m, mc.Ready, m)
 	}
 	for i, step := range w.Steps {
@@ -66,6 +69,11 @@ func warmUp(ctx context.Context, ops warmOps, w warmSpec, out io.Writer, logf fu
 		})
 		if err != nil {
 			return nil, fmt.Errorf("step %d: %w", i+1, err)
+		}
+		if res.TimedOut || res.ExitCode != 0 {
+			if a := avisoEgress(ctx, ops, m); a != "" {
+				logf("%s", a)
+			}
 		}
 		switch {
 		case res.TimedOut:
