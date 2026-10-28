@@ -693,9 +693,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
-	// Los ajustes del host no son de ningún inquilino.
+	// Los ajustes del host no son de ningún inquilino, ni sus fondos.
 	if _, filtra := inquilinoDe(r); !filtra {
 		info.Tuning = s.ajustes()
+		info.PoolProblems = s.mgr.ProblemasFondos()
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion

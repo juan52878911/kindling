@@ -196,3 +196,40 @@ func TestDoctorStale(t *testing.T) {
 		}
 	}
 }
+
+// Tras pasar de vz a hv, los dorados de kling-vz salen en su propia línea con
+// cómo rehacerlos (o volver a vz), no mezclados con los stale de siempre; y
+// los fondos que no se reponen, con la orden.
+func TestDoctorDoradosDeOtroVMM(t *testing.T) {
+	in := doctorInput{cliVersion: "v1", completion: true,
+		info: &api.Info{Version: "1", Backend: "hv", PoolProblems: []api.PoolInfo{
+			{Template: "node", Size: 2, Stale: "made with kling-vz 0.18.0; this host runs kling-hv 0.19.0", Fix: "  kling save -replace <machine> node    (a template)\n  kling mcp import node -force"}}},
+		snaps: []*api.Snapshot{
+			{Name: "hecho-hv", VMM: "kling-hv 0.19.0"},
+			{Name: "node", VMM: "kling-vz 0.18.0", Stale: "made with kling-vz 0.18.0; this host runs kling-hv 0.19.0"},
+			{Name: "pg", VMM: "kling-vz 0.17.0", Stale: "made with kling-vz 0.17.0; this host runs kling-hv 0.19.0"},
+		}}
+	got := map[string]doctorCheck{}
+	for _, c := range doctorChecks(in) {
+		got[c.Name] = c
+	}
+	c, ok := got["templates (vmm)"]
+	if !ok || c.State != doctorWarn || !strings.Contains(c.Detail, "2 made with kling-vz: node, pg") ||
+		!strings.Contains(c.Detail, "runs kling-hv") || !strings.Contains(c.Fix, "daemon.vmm vz") {
+		t.Fatalf("templates (vmm) = %+v", c)
+	}
+	if c, ok := got["templates"]; ok {
+		t.Fatalf("los de otro VMM no se cuentan dos veces: %+v", c)
+	}
+	p, ok := got["pool node"]
+	if !ok || !strings.Contains(p.Detail, "stale") || !strings.Contains(p.Fix, "kling save -replace <machine> node") {
+		t.Fatalf("pool node = %+v", p)
+	}
+	// Todo del VMM de ahora: ninguna línea.
+	in.snaps, in.info.PoolProblems = in.snaps[:1], nil
+	for _, c := range doctorChecks(in) {
+		if strings.HasPrefix(c.Name, "templates") || strings.HasPrefix(c.Name, "pool") {
+			t.Fatalf("sobra %+v", c)
+		}
+	}
+}

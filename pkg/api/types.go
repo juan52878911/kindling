@@ -900,6 +900,10 @@ type Info struct {
 	// daemon.vmm auto (macOS), "daemon.vmm hv", "KLING_VMM=vz". Vacío en Linux
 	// y en daemons anteriores.
 	BackendReason string `json:"backend_reason,omitempty"`
+	// PoolProblems son los fondos precalentados (kling template pool) que no
+	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
+	// Vacío = todos bien o ninguno.
+	PoolProblems []PoolInfo `json:"pool_problems,omitempty"`
 	// Arch es la arquitectura del host del daemon (GOARCH: "amd64", "arm64").
 	// Las imágenes y el kernel son de una arquitectura: `kling images copy`
 	// la compara antes de mover gigas que luego no arrancarían.

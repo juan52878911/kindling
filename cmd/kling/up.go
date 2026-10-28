@@ -775,6 +775,7 @@ func cmdStatus(args []string) error {
 			}
 			fmt.Printf("firecracker:  %s\n", fc)
 		}
+		printPoolProblems(info.PoolProblems)
 	}
 
 	// Lo demás lo cuenta cada extensión. Un gancho que falla es una línea de
