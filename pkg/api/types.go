@@ -727,6 +727,11 @@ type Event struct {
 	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Owner es el kling.owner (LabelOwner) de la máquina del evento, si lo
+	// tiene. Lo pone el daemon en los eventos que se publican cuando la
+	// máquina ya no está para preguntarle (el borrado): con él, el filtro por
+	// inquilino del bus no depende de que siga registrada.
+	Owner string `json:"owner,omitempty"`
 	// Dropped, solo en EvDropped: cuántos eventos perdió este suscriptor por
 	// no leerlos a tiempo.
 	Dropped int64 `json:"dropped,omitempty"`

@@ -49,7 +49,9 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 	m.kill(id)
 
 	m.mu.Lock()
+	name, dueño := mc.Name, mc.Labels[api.LabelOwner]
 	if live := m.byID[id]; live != nil {
+		name, dueño = live.Name, live.Labels[api.LabelOwner]
 		live.Name = nombreTumba(id)
 		live.State = api.StateStopped
 		live.PID = 0
@@ -62,6 +64,10 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 	// escribir dejaría, si el daemon muere en esos 250 ms, una máquina viva con
 	// su nombre de siempre.
 	m.persistirYa()
+	// El evento del borrado sale aquí, cuando el nombre ya está libre, y con
+	// el nombre y el dueño de antes: la tumba ya no los tiene, y sin el dueño
+	// el inquilino no lo vería (daemon/authz.go, eventoVisible).
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: id, Name: name, Message: "removed", Owner: dueño})
 
 	go func() {
 		defer soltar()
@@ -167,7 +173,13 @@ func (m *Manager) limpiarMaquina(mc *api.Machine) error {
 	}
 	m.ganchosPendientes.Delete(mc.ID)
 	m.invalidarSesiones(mc.ID, "removed")
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
+	// Con el dueño: ya no está en byID, y el filtro por inquilino del bus no
+	// tendría a quién preguntar (daemon/authz.go, eventoVisible). Una tumba
+	// ya lo publicó al hacerse (borrarEnSegundoPlano).
+	if !esTumba(mc) {
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed",
+			Owner: mc.Labels[api.LabelOwner]})
+	}
 	return nil
 }
 

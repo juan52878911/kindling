@@ -3655,9 +3655,10 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
 	// se quedaba en la lista para siempre (ver gcFailed).
 	destino.FailedAt = &now
-	name := destino.Name
+	name, dueño := destino.Name, destino.Labels[api.LabelOwner]
 	m.persist()
 	m.mu.Unlock()
 	m.invalidarSesiones(id, "failed")
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
+	// Con el dueño: destino puede ser una que ya no está registrada.
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error(), Owner: dueño})
 }
