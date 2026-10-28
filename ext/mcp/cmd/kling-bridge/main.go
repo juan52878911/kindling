@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -212,6 +213,13 @@ Options:
 	log.Printf("kling-bridge listening on %s -> %s", *listen, strings.Join(argv, " "))
 	if w := exposedWarning(*listen, os.Getpid() == 1); w != "" {
 		log.Print(w)
+	}
+	// En macOS (kling.vsock=1) el núcleo llega al puente por vsock, en el mismo
+	// puerto que el TCP, como al kling-guest.
+	if _, p, err := net.SplitHostPort(*listen); err == nil {
+		if port, err := strconv.ParseUint(p, 10, 32); err == nil {
+			guest.ServeVsock(srv, uint32(port))
+		}
 	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
