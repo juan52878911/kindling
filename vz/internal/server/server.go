@@ -1295,9 +1295,9 @@ func (s *Server) canalAgente(vm VM) {
 	if !s.spec.Vsock || !ok || !ok2 {
 		return
 	}
-	g.SetGuestDialer(api.GuestPort, func(ctx context.Context) (net.Conn, error) {
+	g.SetGuestDialer(api.GuestPort, dialAgenteComprobado(func(ctx context.Context) (net.Conn, error) {
 		return d.DialVsock(ctx, uint32(api.GuestPort))
-	}, s.spec.AgentTCPOnly)
+	}), s.spec.AgentTCPOnly)
 }
 
 // confinar aplica Deps.Confine la primera vez, con la red que pide la política

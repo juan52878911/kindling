@@ -746,8 +746,21 @@ type camino struct {
 	dial func(ctx context.Context) (net.Conn, error)
 	// ok: contestó alguna vez. soloTCP: no contestó y TCP sí, así que el
 	// invitado no lo tiene (un agente anterior) y no se vuelve a probar.
-	ok, soloTCP bool
+	// mudo: conecta pero nadie contesta por él (ErrCaminoMudo); hasta que
+	// muera este proceso se va por TCP, sin apuntarlo en el snapshot.
+	ok, soloTCP, mudo bool
 }
+
+// ErrCaminoMudo lo devuelve un dial de SetGuestDialer que conectó pero vio que
+// por ahí nadie contesta. No es un agente anterior (que ni conecta): el
+// invitado sí tiene el camino, y por eso no se apunta como soloTCP.
+//
+// Pasa con kling-vz tras algunas restauraciones: el vsock del framework acepta
+// la conexión y el invitado no recibe nada nunca (sus interrupciones de vsock
+// no se mueven y su ISR está a 0), mientras la red sigue bien. Sin esto, cada
+// petición del núcleo al agente se quedaba colgada hasta su plazo y la copia
+// no contestaba a nada.
+var ErrCaminoMudo = errors.New("the guest accepts the connection but nothing answers on it")
 
 // SetGuestDialer hace que el reenvío y la sonda del puerto port del invitado
 // prueben primero dial (el vsock del agente) y solo si falla la pila de
@@ -789,7 +802,7 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 	n.mu.Lock()
 	cam := n.guestDial[int(port)]
 	var dial func(ctx context.Context) (net.Conn, error)
-	if cam != nil && !cam.soloTCP {
+	if cam != nil && !cam.soloTCP && !cam.mudo {
 		dial = cam.dial
 	}
 	n.mu.Unlock()
@@ -808,10 +821,19 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 			}
 			return c, nil
 		}
-		if ctx.Err() != nil {
+		if errors.Is(err, ErrCaminoMudo) {
+			n.mu.Lock()
+			primera := !cam.mudo
+			cam.mudo = true
+			n.mu.Unlock()
+			if primera {
+				n.cfg.Logf("guest port %d connects over vsock but does not answer there: using TCP until this process ends", port)
+			}
+		} else if ctx.Err() != nil {
 			return nil, ctx.Err()
+		} else {
+			probado = true
 		}
-		probado = true
 	}
 	gc, err := gonet.DialTCPWithBind(ctx, n.stack,
 		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},

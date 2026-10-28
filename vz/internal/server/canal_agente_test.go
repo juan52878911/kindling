@@ -1,0 +1,175 @@
+package server
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/juan52878911/kindling/vz/internal/vnet"
+)
+
+// Un agente que contesta: la primera conexión se comprueba con /healthz y las
+// siguientes ya no. Uno que acepta y calla (el vsock de una restauración que
+// no entrega nada) da vnet.ErrCaminoMudo dentro del plazo.
+func TestDialAgenteComprobado(t *testing.T) {
+	var dials atomic.Int32
+	contesta := func(ctx context.Context) (net.Conn, error) {
+		dials.Add(1)
+		a, b := net.Pipe()
+		go func() {
+			defer b.Close()
+			l, _ := bufio.NewReader(b).ReadString('\n')
+			if l != "" {
+				_, _ = b.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+			}
+		}()
+		return a, nil
+	}
+	d := dialAgenteComprobado(contesta)
+	for i := 0; i < 3; i++ {
+		c, err := d(context.Background())
+		if err != nil {
+			t.Fatalf("vuelta %d: %v", i, err)
+		}
+		c.Close()
+	}
+	if n := dials.Load(); n != 4 {
+		t.Fatalf("%d dials, quiero 4 (la prueba solo en la primera)", n)
+	}
+
+	var abiertas []net.Conn
+	calla := func(ctx context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		abiertas = append(abiertas, b)
+		go func() { _, _ = bufio.NewReader(b).ReadString('\n') }()
+		return a, nil
+	}
+	defer func() {
+		for _, c := range abiertas {
+			c.Close()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	t0 := time.Now()
+	if _, err := dialAgenteComprobado(calla)(ctx); !errors.Is(err, vnet.ErrCaminoMudo) {
+		t.Fatalf("err = %v, quiero ErrCaminoMudo", err)
+	}
+	if d := time.Since(t0); d > time.Second {
+		t.Fatalf("tardó %s", d)
+	}
+}
+
+// Justo tras restaurar, la primera conexión puede morir en silencio (el
+// invitado aún no había atendido el TRANSPORT_RESET): con la segunda que
+// contesta, el vsock vale y no se cae a TCP.
+func TestDialAgenteComprobadoPrimeraMuda(t *testing.T) {
+	var n atomic.Int32
+	var mudas []net.Conn
+	dial := func(ctx context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		if n.Add(1) == 1 {
+			mudas = append(mudas, b)
+			go func() { _, _ = bufio.NewReader(b).ReadString('\n') }()
+			return a, nil
+		}
+		go func() {
+			defer b.Close()
+			if l, _ := bufio.NewReader(b).ReadString('\n'); l != "" {
+				_, _ = b.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+			}
+		}()
+		return a, nil
+	}
+	defer func() {
+		for _, c := range mudas {
+			c.Close()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := dialAgenteComprobado(dial)(ctx)
+	if err != nil {
+		t.Fatalf("con la segunda prueba buena: %v", err)
+	}
+	c.Close()
+	if n.Load() != 3 {
+		t.Fatalf("%d dials, quiero 3 (dos pruebas y la conexión)", n.Load())
+	}
+}
+
+// El vsock que enmudece después de contestar: una conexión que escribió y no
+// lee nada lanza la prueba; como no contesta, se cierra y los dials
+// siguientes dan ErrCaminoMudo (el reenvío sigue por TCP).
+func TestDialAgenteEnmudece(t *testing.T) {
+	viejo := plazoMudez
+	plazoMudez = 50 * time.Millisecond
+	t.Cleanup(func() { plazoMudez = viejo })
+	var calla atomic.Bool
+	var colgadas []net.Conn
+	var mu sync.Mutex
+	dial := func(ctx context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		if calla.Load() {
+			mu.Lock()
+			colgadas = append(colgadas, b)
+			mu.Unlock()
+			go func() { _, _ = io.Copy(io.Discard, b) }()
+			return a, nil
+		}
+		go func() {
+			defer b.Close()
+			if l, _ := bufio.NewReader(b).ReadString('\n'); l != "" {
+				_, _ = b.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+			}
+		}()
+		return a, nil
+	}
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range colgadas {
+			c.Close()
+		}
+	}()
+	d := dialAgenteComprobado(dial)
+	c, err := d(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+
+	calla.Store(true)
+	c, err = d(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("POST /resync HTTP/1.1\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var b [1]byte
+	t0 := time.Now()
+	if _, err := c.Read(b[:]); err == nil {
+		t.Fatal("la conexión colgada contestó")
+	}
+	if time.Since(t0) > 2*time.Second {
+		t.Fatalf("la conexión colgada no se cerró a tiempo (%s)", time.Since(t0))
+	}
+	for i := 0; ; i++ {
+		_, err := d(context.Background())
+		if errors.Is(err, vnet.ErrCaminoMudo) {
+			break
+		}
+		if i > 100 {
+			t.Fatalf("tras enmudecer el dial sigue dando %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

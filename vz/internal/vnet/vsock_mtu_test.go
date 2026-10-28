@@ -174,6 +174,31 @@ func TestGuestDialerQueNoContesta(t *testing.T) {
 	}
 }
 
+// Un camino que conecta y calla (ErrCaminoMudo) no es un agente anterior: el
+// reenvío sigue por TCP, no se vuelve a probar en este proceso y no se apunta
+// como soloTCP (no viajaría al snapshot).
+func TestGuestDialerMudo(t *testing.T) {
+	r := newRig(t, "")
+	escucharEnInvitado(t, r.g, 8080, "tcp")
+	var llamadas atomic.Int32
+	r.n.SetGuestDialer(8080, func(ctx context.Context) (net.Conn, error) {
+		llamadas.Add(1)
+		return nil, ErrCaminoMudo
+	}, false)
+	addr, _ := r.n.Forward(8080)
+	for i := 0; i < 3; i++ {
+		if got := pedir(t, addr, "m"); got != "tcp m\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+	if llamadas.Load() != 1 {
+		t.Fatalf("el camino mudo se probó %d veces, quiero 1", llamadas.Load())
+	}
+	if r.n.GuestOnlyTCP(8080) {
+		t.Fatal("un camino mudo no es un agente anterior: no debe ir al snapshot")
+	}
+}
+
 // contarTramas recuerda la mayor trama que el host manda al invitado.
 type contarTramas struct {
 	net.Conn

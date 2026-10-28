@@ -157,6 +157,18 @@ pila de usuario como siempre. Los demás puertos (`kling.ports`) van por TCP.
   formato `kling_vz` 3): uno guardado sin él se restaura sin él, y un
   `kling-vz` anterior se niega a restaurar uno con él (`kling upgrade
   -rollback` lo comprueba antes).
+- **Vsock mudo tras restaurar**: en ~1 de cada 25-50 `compose up` de una
+  plantilla con carpetas vivas (M4, macOS 26.5) el vsock de una copia deja de
+  entregar al invitado: el `connect` del host sale bien, a veces la primera
+  petición contesta, y después nada; dentro, las interrupciones del vsock no
+  se mueven y su ISR está a 0, mientras el agente contesta por TCP. Es del
+  dispositivo del framework (con `kling-hv`, cuyo vsock es nuestro, no se vio
+  en 240 `up`). `kling-vz` lo vigila (`internal/server/canal_agente.go`): la
+  primera conexión de cada proceso va precedida de un `GET /healthz` por
+  vsock, y una conexión que escribió y lleva 1 s sin leer nada lanza la misma
+  prueba; si no contesta, ese proceso sigue por TCP (`guest port 8080
+  connects over vsock but does not answer there` en su log) y la conexión
+  colgada se cierra para que el núcleo reintente.
 - `KLING_VZ_VSOCK=0` en el entorno del daemon arranca las máquinas sin vsock.
 
 El reenvío de loopback del 8080 **sigue haciendo falta**: lo usan, además del
