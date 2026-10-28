@@ -24,6 +24,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/publicar"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -260,6 +261,12 @@ type Server struct {
 	construyendo   map[string]*cerrojoImagen
 	// muRegistros guarda registries.json (registries.go).
 	muRegistros sync.Mutex
+
+	// pub publica los puertos de las máquinas (publicar.go); idleFreeze es
+	// daemon.idle_freeze (nil o 0 = nunca).
+	pub        *publicar.Publicador
+	pubUna     sync.Once
+	idleFreeze func() time.Duration
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
@@ -344,7 +351,7 @@ func (s *Server) rutas() []ruta {
 	return []ruta{
 		{"GET /info", AccionInfo, nil, s.handleInfo},
 		{"GET /machines", AccionListar, nil, s.handleList},
-		{"POST /machines", AccionCrear, revisarRun, s.handleRun},
+		{"POST /machines", AccionCrear, revisarRun, s.conPublicacion(s.handleRun)},
 		{"GET /machines/{ref}", AccionMaquina, nil, s.handleGet},
 		{"POST /machines/{ref}/freeze", AccionMaquina, nil, s.handleFreeze},
 		{"POST /machines/{ref}/thaw", AccionMaquina, nil, s.handleThaw},
@@ -424,6 +431,9 @@ func (s *Server) rutas() []ruta {
 		{"GET /metrics", AccionAdmin, nil, s.handleMetrics},
 		{"GET /procstats", AccionAdmin, nil, s.handleProcStats},
 		{"POST /cow/store/grow", AccionAdmin, nil, s.handleGrowCoWStore},
+		{"POST /machines/{ref}/publish", AccionMaquina, nil, s.handlePublish},
+		{"DELETE /machines/{ref}/publish", AccionMaquina, nil, s.handleUnpublish},
+		{"GET /publish", AccionListar, nil, s.handlePublications},
 	}
 }
 
@@ -526,6 +536,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	// del host). Decir "running" sobre algo muerto haría que el gateway enrutara
 	// peticiones a la nada.
 	s.mgr.Watch(ctx, 10*time.Second)
+	s.arrancarPublicador(ctx)
 
 	srv := &http.Server{
 		Handler:     s.routes(),

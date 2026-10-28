@@ -101,6 +101,11 @@ type Machine struct {
 	// Linux va vacío e IP basta. No leerlo a mano: usar Addr.
 	Forwards map[string]string `json:"forwards,omitempty"`
 
+	// Published son los puertos que el daemon publica en 127.0.0.1 para esta
+	// máquina (api.PortPublish). No se guarda con la máquina: lo pone el
+	// daemon al responder a POST /machines con Publish.
+	Published []PortPublish `json:"published,omitempty"`
+
 	// AllowDomains son los dominios permitidos con egress "allowlist". Viajan con
 	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
 	AllowDomains []string `json:"allow_domains,omitempty"`
@@ -382,6 +387,11 @@ type RunRequest struct {
 	// el mismo número de carpetas vivas) las reciben tras restaurar. Un agente
 	// anterior lo ignora y arranca el servicio en seguida.
 	ShareWait int `json:"share_wait,omitempty"`
+	// Publish son puertos que el daemon publica en 127.0.0.1 en cuanto la
+	// máquina existe (como POST /machines/{ref}/publish). Todos o ninguno:
+	// uno ocupado falla la creación antes de arrancar nada. Un daemon sin
+	// api.CapabilityPublish lo ignora.
+	Publish []PortPublish `json:"publish,omitempty"`
 	// Entrypoint y Cmd sustituyen a los de la imagen para el servicio de esta
 	// máquina, sin hornear otra imagen: el ENTRYPOINT y el CMD de Docker
 	// (`docker run --entrypoint x img args...`). Cmd solo cambia los

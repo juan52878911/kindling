@@ -48,6 +48,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `registry-auth` | sin publicar | `GET/POST /registries`, `DELETE /registries/{host}`: credenciales de registros privados que usa el constructor `oci` (ver "Registros") |
 | `oci-blobs` | sin publicar | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
 | `volume-clone` | sin publicar | `POST /volumes/{name}/clone` y `clone` en `GET /info` (la sonda de clonado; ver "Volúmenes") |
+| `publish` | sin publicar | `POST/DELETE /machines/{ref}/publish`, `GET /publish` y `publish` en `POST /machines`: el daemon publica `127.0.0.1:host` hacia un puerto de la máquina (tcp, y udp en Linux), lo guarda en su raíz y lo quita con la máquina (ver "Puertos publicados") |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -77,6 +78,8 @@ que anuncia `db-attach` las entiende.
 | `POST /machines/{ref}/start` | arranca otra vez una máquina parada, en frío sobre su disco, con su imagen, memoria, volúmenes, salida de red y carpetas (`StartRequest`: `env`, `KEY=valor`; opcional). Exige todas las claves de `env_keys`: el daemon no guarda los valores (`400` con las que faltan). Si falla, la máquina sigue parada con el motivo en `last_error`. `404` y `409` como `freeze`. Capacidad `start` |
 | `POST /machines/{ref}/pause` | pausa una máquina en marcha sin volcarla (ver abajo) |
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
+| `POST /machines/{ref}/publish` | publica `{"ports":[{"host":H,"guest":G,"proto":"tcp"}]}` en `127.0.0.1` (ver "Puertos publicados"); `200` con la `Publication`. `409` si un puerto del host está ocupado (por otra máquina o por otro proceso; no se publica ninguno), `501` para udp en el Mac |
+| `DELETE /machines/{ref}/publish?host=H,…` | deja de publicar esos puertos del host (sin `host`, todos); `204` |
 | `POST /machines/{ref}/squeeze?force=1` | el globo devuelve al host la memoria libre del invitado. `409` en una copia que comparte memoria con su dorado (`mem_shared`, Firecracker) salvo `force` (ver "Listo y ganchos tras restaurar") |
 | `POST /machines/{ref}/mmds` | secretos por MMDS, comunes a todas las sesiones de la máquina (`{"env":{...}}`, ≤1 MiB; el campo `sessions` ya no se usa); la máquina deja de poder congelarse. Un almacén vacío (`{}` o `null`) levanta la marca solo si tras la última inyección corrieron con éxito los ganchos de la imagen (`POST .../hooks?wait=`); vaciar una máquina sin secretos no la marca |
 | `GET /machines/{ref}/ready?wait=60s` | ¿está lista según su imagen? (`ReadyResult`: `ready` = `ready`, `waiting`, `failed` o `""` si no hay nada que esperar; `guest` con lo que dijo el agente; `detail` si el agente no contestó o contestó un error, que es `waiting` y no "nada que esperar"; si el daemon no puede mirar la imagen —un host sin `debugfs`— y el agente nunca ha contestado, es `waiting` durante los primeros 30 s desde que arrancó o se restauró, y después `""`, como una imagen sin agente). Sin `wait`, pregunta una vez; un "no listo" es un `200` |
@@ -438,6 +441,36 @@ daemon: `POST /machines`, `POST /sandboxes`, el fork de un sandbox y
 `$KLING_ROOT/store/graph/<id>.json`, que `GET /store/graph` lee pero que solo el daemon
 escribe.
 
+## Puertos publicados
+
+`kling run -p` y los `ports:` de `kling compose up` los publica el **daemon**:
+`127.0.0.1:host` lleva al puerto `guest` de la máquina (`RunRequest.publish`,
+o `POST /machines/{ref}/publish` sobre una que ya existe). Cada conexión
+resuelve la dirección de la máquina en ese momento (en el Mac,
+`Machine.forwards` cambia con cada arranque o descongelación) y la primera
+**despierta** a una congelada o en pausa; si el servicio aún no escucha, se
+reintenta 15 s y después se corta con un RST. Solo `127.0.0.1`: nunca otra
+interfaz. `host: 0` pide uno libre al azar (el `ports: "80"` de Docker); la
+respuesta dice cuál.
+
+- **Todos o ninguno**: con `publish` en `POST /machines`, los puertos se
+  comprueban antes de crear nada (`409` si uno está ocupado) y, si al final no
+  se pudieran tomar, la máquina se borra. La respuesta lleva `published`.
+- **Persisten**: se guardan en `<raíz>/publish.json` y el daemon los vuelve a
+  abrir al arrancar. Se quitan solos cuando la máquina desaparece.
+- `GET /publish` lista todas (`[{machine, name, ports}]`); `kling ps` las
+  enseña en la columna `PORTS`.
+- Con una política de autorización, un inquilino no publica puertos del host
+  por debajo de 1024 (`403`).
+- **UDP**: en Linux (`proto: "udp"`, un flujo por cliente que calla a los
+  60 s); en el Mac, `501` (el VMM aún no reenvía UDP).
+- **`daemon.idle_freeze`** (por defecto `10m` en el Mac, `0` = nunca; en
+  Linux `0`): una máquina con puertos publicados que lleva ese plazo sin
+  conexiones por ellos, sin peticiones al daemon contra ella (exec, shell,
+  logs seguidos…) y sin sesiones por las aristas de su grafo (Mac) se
+  **congela**, con todo su grafo; la siguiente conexión la despierta. La
+  etiqueta `kling.idle=keep` la excluye (y a su grafo).
+
 ## Exec y ficheros
 
 Solo en máquinas creadas con `allow_exec` (`403` si no). Una máquina congelada se
@@ -459,6 +492,20 @@ Guía de uso: [`exec-sandbox.md`](exec-sandbox.md).
 
 `cmd` es argv, sin shell. `stdin` va en base64, hasta 1 MiB. Plazo por defecto
 300 s (máximo 3600); salida por defecto 8 MiB **por flujo** (máximo 64 MiB).
+
+**Un proceso que se queda en segundo plano retrasa el final 30 s.** El exec
+acaba cuando el comando sale *y* se cierran su stdout y su stderr. Con
+`sh -c 'servidor &'` el nieto hereda las dos tuberías: el `sh` sale en
+seguida, pero el agente sigue leyendo hasta que el nieto las suelta o pasan
+30 s (el `WaitDelay` del agente), y entonces cierra y da el código del `sh`.
+Para dejar algo corriendo, que no herede la salida:
+`sh -c 'servidor >/tmp/servidor.log 2>&1 </dev/null &'` (o `setsid … &` con la
+misma redirección), y el exec vuelve al momento.
+
+`user` (opcional) corre el comando con ese usuario de la imagen (`nombre`,
+`uid` o `uid:gid`, como el `user:` de un compose): es lo que usan los
+healthchecks de `kling compose`. Un agente anterior lo ignora y corre como
+root.
 
 La respuesta es `application/x-ndjson`, una línea por evento según ocurren:
 
