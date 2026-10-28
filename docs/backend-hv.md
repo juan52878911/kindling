@@ -136,7 +136,12 @@ el del regulador de CPU (`Deps.Freeze`, que en vz es SIGSTOP al auxiliar de
 Apple). Pausar saca a los vCPU a un punto seguro (`hv_vcpus_exit`) y espera a
 que los hilos de disco y red no toquen la RAM. Bajo el regulador el reloj del
 invitado sigue corriendo, como bajo `cpu.max`. `CPUTime` es la CPU de los hilos
-de vCPU.
+de vCPU, con el tiempo en núcleos E cobrado a lo que vale en P
+(`footprint.Contador`, la misma cuenta que `kling-vz`), leída por hilo y por
+tipo de núcleo con `PROC_PIDTHREADCOUNTS`. Medido con techo 25 % y el proceso
+en segundo plano (`taskpolicy -b`, todo en E) tras una pasada en P: el mismo
+bucle pasa de 9,3 a 2,9 s (n=5). Sin más muestra en P que el arranque, la
+proporción sale ~0,9 y apenas corrige (como en vz).
 
 ## Lo que cambia en el núcleo con `hv`
 

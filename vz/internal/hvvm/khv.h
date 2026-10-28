@@ -73,7 +73,7 @@ int khv_snapshot(const char *mem_out);
 int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó
 void khv_stop(void);
 uint64_t khv_footprint(void);
-uint64_t khv_cpu_ns(void);
+void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), instrucciones y en P
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 
 // ---- interno ----

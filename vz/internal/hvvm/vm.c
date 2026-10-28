@@ -26,6 +26,7 @@
 #include <copyfile.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
@@ -1091,22 +1092,72 @@ uint64_t khv_footprint(void) {
   return vi.phys_footprint;
 }
 
-// khv_cpu_ns es la CPU que han gastado los hilos de vCPU (dentro y fuera del
-// invitado): lo que el regulador de CPU cobra a la VM.
-uint64_t khv_cpu_ns(void) {
-  uint64_t total = 0;
+// Contadores por hilo y por tipo de núcleo: PROC_PIDTHREADCOUNTS de
+// <sys/proc_info_private.h> (macOS 13+), que el SDK no publica. Una entrada
+// por nivel de rendimiento: la 0 son los núcleos P y la 1 los E. Los tiempos
+// van en unidades de mach_absolute_time.
+#define KHV_PROC_PIDTHREADCOUNTS 34
+struct khv_ptc_datos {
+  uint64_t instr, ciclos, user_mach, system_mach, energia_nj;
+};
+struct khv_ptc {
+  uint16_t niveles, reservado0;
+  uint32_t reservado1;
+  struct khv_ptc_datos c[];
+};
+
+static uint64_t mach_a_ns(uint64_t t) { return (uint64_t)((__uint128_t)t * tb.numer / tb.denom); }
+
+// khv_cpu_lectura da la CPU que han gastado los hilos de vCPU (dentro y fuera
+// del invitado), lo que el regulador de CPU cobra a la VM: out[0] el total en
+// ns, out[1] lo que corrió en núcleos P, out[2] las instrucciones y out[3] las
+// de P. Con eso footprint.Contador cobra el tiempo en E a lo que vale en P
+// (vz/internal/footprint/coste.go), como hace kling-vz con su auxiliar. Sin
+// los contadores por núcleo (un macOS que no los dé), out[1..3] van a 0 y se
+// cobra el tiempo tal cual; la elección se hace en la primera lectura y no
+// cambia, para que el total no salte entre una fuente y otra.
+void khv_cpu_lectura(uint64_t out[4]) {
+  static int por_nucleo = -1;  // -1: sin decidir
+  out[0] = out[1] = out[2] = out[3] = 0;
   pthread_mutex_lock(&mu);
   int n = n_creados;
   pthread_mutex_unlock(&mu);
   for (int i = 0; i < n; i++) {
+    if (por_nucleo != 0) {
+      uint64_t tid = 0;
+      union {
+        struct khv_ptc p;
+        uint8_t b[sizeof(struct khv_ptc) + 4 * sizeof(struct khv_ptc_datos)];
+      } u;
+      int r = pthread_threadid_np(cpus[i].hilo, &tid) == 0
+                  ? proc_pidinfo(getpid(), KHV_PROC_PIDTHREADCOUNTS, tid, &u, sizeof u)
+                  : -1;
+      if (r >= (int)(sizeof(struct khv_ptc) + 2 * sizeof(struct khv_ptc_datos)) && u.p.niveles >= 2) {
+        por_nucleo = 1;
+        for (int k = 0; k < u.p.niveles && k < 4; k++) {
+          uint64_t t = mach_a_ns(u.p.c[k].user_mach + u.p.c[k].system_mach);
+          out[0] += t;
+          out[2] += u.p.c[k].instr;
+          if (k == 0) out[1] += t, out[3] += u.p.c[k].instr;
+        }
+        continue;
+      }
+      if (por_nucleo == -1) {
+        // La primera lectura decide: sin contadores por núcleo, a la cuenta
+        // de siempre para todos los hilos.
+        por_nucleo = 0;
+        khv_cpu_lectura(out);
+        return;
+      }
+      continue;  // un hilo que no se pudo leer esta vez (no debería pasar)
+    }
     thread_basic_info_data_t bi;
     mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
     mach_port_t t = pthread_mach_thread_np(cpus[i].hilo);
     if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) continue;
-    total += (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
-             (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
+    out[0] += (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
+              (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
   }
-  return total;
 }
 
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms) {

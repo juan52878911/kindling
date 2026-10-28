@@ -24,6 +24,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 )
@@ -315,9 +316,23 @@ func Footprint() (uint64, error) {
 	return b, nil
 }
 
-// CPUTime es la CPU que llevan gastada los hilos de vCPU.
+// cpuMu serializa las lecturas (el C decide su fuente en la primera) y
+// cpuEquiv lleva la cuenta en tiempo de núcleo P.
+var (
+	cpuMu    sync.Mutex
+	cpuEquiv footprint.Contador
+)
+
+// CPUTime es la CPU que llevan gastada los hilos de vCPU, con el tiempo en
+// núcleos de eficiencia cobrado a lo que vale en P, como el de kling-vz
+// (footprint/coste.go): sin eso, un vCPU que el planificador manda a los E
+// gasta el techo de CPU varias veces más deprisa por el mismo trabajo.
 func CPUTime() (time.Duration, error) {
-	return time.Duration(C.khv_cpu_ns()), nil
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+	var v [4]C.uint64_t
+	C.khv_cpu_lectura(&v[0])
+	return cpuEquiv.Suma(time.Duration(v[0]), time.Duration(v[1]), uint64(v[2]), uint64(v[3])), nil
 }
 
 // Freeze para (o reanuda) los vCPU para el regulador de CPU: lo que en vz es
