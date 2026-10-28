@@ -114,3 +114,53 @@ func TestChecksOfSinUsuarioDeConstruccion(t *testing.T) {
 		t.Fatalf("failed checks = %+v, want the build user, not fatal, with its useradd", fallan)
 	}
 }
+
+// En arm64 KVM va compilado dentro: la pista de modprobe kvm_intel no sirve y
+// sale la de arm64. Una página de 16 KiB (Pi 5 por defecto) es un aviso, no un
+// fallo fatal; en x86, o si el host remoto no supo decirla, no aparece.
+func TestChecksOfArm64(t *testing.T) {
+	base := probe{kvm: true, firecracker: "/usr/local/bin/firecracker", ip: true, iptables: true, nft: true,
+		runAs: "kindling", runAsExists: true, buildAs: "kindling-build", buildAsExists: true,
+		kernel: true, baseImage: true, root: "/var/lib/kindling", remote: true}
+	find := func(cs []check, label string) (check, bool) {
+		for _, c := range cs {
+			if c.label == label {
+				return c, true
+			}
+		}
+		return check{}, false
+	}
+
+	for _, tc := range []struct {
+		system   string
+		page     int
+		pageLine bool // sale la comprobación de la página
+		failed   int
+		modprobe bool // la pista de /dev/kvm habla de modprobe
+	}{
+		{"Linux/x86_64", 4096, false, 0, true},
+		{"linux/amd64", 0, false, 0, true},
+		{"Linux/aarch64", 4096, true, 0, false},
+		{"linux/arm64", 16384, true, 1, false},
+		{"Linux/aarch64", 0, false, 0, false},
+	} {
+		p := base
+		p.system, p.pageSize = tc.system, tc.page
+		cs := checksOf(p)
+		pc, ok := find(cs, "host page size")
+		if ok != tc.pageLine {
+			t.Errorf("%s/%d: page check present=%v, want %v", tc.system, tc.page, ok, tc.pageLine)
+		}
+		if ok && (pc.fatal || cs[1].label != "host page size") {
+			t.Errorf("%s/%d: page check fatal=%v at %q; want a warning right after /dev/kvm",
+				tc.system, tc.page, pc.fatal, cs[1].label)
+		}
+		if f := onlyFailed(cs); len(f) != tc.failed {
+			t.Errorf("%s/%d: %d failed checks, want %d", tc.system, tc.page, len(f), tc.failed)
+		}
+		kv, _ := find(cs, "/dev/kvm")
+		if got := strings.Contains(strings.Join(kv.fix, "\n"), "modprobe"); got != tc.modprobe {
+			t.Errorf("%s: /dev/kvm fix mentions modprobe=%v, want %v", tc.system, got, tc.modprobe)
+		}
+	}
+}

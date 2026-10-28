@@ -27,6 +27,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,10 +197,10 @@ func explainNoRuntime() error {
 		fmt.Println("  and restart with:  wsl --shutdown")
 		fmt.Println()
 	} else {
-		fmt.Println("  There's no /dev/kvm on this machine. If it's physical, check that")
-		fmt.Println("  virtualization is enabled in the BIOS and that the module is loaded:")
-		fmt.Println("      sudo modprobe kvm_intel   # or kvm_amd")
-		fmt.Println("  If it's a VM, its hypervisor has to expose nested virtualization.")
+		fmt.Println("  There's no /dev/kvm on this machine.")
+		for _, l := range kvmFix(isArm64(runtime.GOARCH)) {
+			fmt.Println("      " + l)
+		}
 	}
 
 	fmt.Println()
@@ -239,6 +241,9 @@ type probe struct {
 	kernel        bool     // $root/images/vmlinux
 	baseImage     bool     // $root/images/min.ext4
 	root          string
+	// pageSize es la página del host en bytes; 0 si no se supo (un host
+	// remoto sin getconf).
+	pageSize int
 }
 
 // check es una comprobación con su porqué y su remedio.
@@ -263,6 +268,8 @@ func localProbe(root string) probe {
 		runAs:   envOr("KLING_RUN_AS", runAsDefault),
 		buildAs: envOr("KLING_BUILD_AS", buildAsDefault),
 		root:    root,
+		// La página del proceso es la del kernel del host.
+		pageSize: os.Getpagesize(),
 	}
 	p.firecracker = lookFirecracker()
 	p.ip = inPathOrSbin("ip")
@@ -314,6 +321,7 @@ echo "units=$(for u in $UNITS; do [ -f "/etc/systemd/system/$u" ] && printf '%s 
 echo "active=$(systemctl is-active kling 2>/dev/null || true)"
 echo "kernel=$(si "$([ -f "$ROOT/images/vmlinux" ] && echo 1)")"
 echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
+echo "pagesize=$(getconf PAGESIZE 2>/dev/null || true)"
 `
 
 // remoteProbeScript es remoteScript con sus variables delante, entrecomilladas
@@ -360,7 +368,60 @@ func remoteProbe(target, root string) (probe, error) {
 	p.extUnits = strings.Fields(vals["units"])
 	p.active = vals["active"]
 	p.kernel, p.baseImage = yes("kernel"), yes("image")
+	p.pageSize, _ = strconv.Atoi(vals["pagesize"])
 	return p, nil
+}
+
+// isArm64 dice si un sistema es arm64. Acepta el GOARCH local ("arm64",
+// "linux/arm64") y lo que imprime `uname -m` en un host remoto
+// ("Linux/aarch64").
+func isArm64(system string) bool {
+	s := strings.ToLower(system)
+	return strings.HasSuffix(s, "arm64") || strings.HasSuffix(s, "aarch64")
+}
+
+// kvmFix es el remedio cuando falta /dev/kvm. En x86 KVM suele ir en módulo
+// (kvm_intel/kvm_amd). En arm64 los kernels de distribución lo llevan
+// compilado dentro y no hay módulo que cargar: si no está, el kernel no
+// arrancó en EL2 (una VM sin virtualización anidada, o un firmware que no la
+// da).
+func kvmFix(arm64 bool) []string {
+	if arm64 {
+		return []string{
+			"# on arm64 KVM is built into the kernel: there's no module to load",
+			"dmesg | grep -i kvm    # 'Hyp mode initialized' means the kernel got EL2",
+			"# it needs bare metal (Graviton *.metal, Ampere, Raspberry Pi 5) or a VM",
+			"# whose host exposes nested virtualization; Graviton non-metal and",
+			"# OCI A1 VMs don't. See docs/linux-arm64.md",
+		}
+	}
+	return []string{
+		"sudo modprobe kvm_intel      # or kvm_amd, depending on the processor",
+		"# if it's physical, enable virtualization (VT-x/AMD-V) in the BIOS",
+		"# if it's a VM, its host has to allow nested virtualization",
+	}
+}
+
+// pageCheck avisa de una página de host distinta de 4 KiB en arm64. Firecracker
+// solo se valida en hosts de 4 KiB, y la Raspberry Pi 5 arranca por defecto un
+// kernel de 16 KiB (kernel_2712.img). No es fatal: nadie lo ha probado, pero
+// tampoco se sabe que falle. En x86 la página es siempre 4 KiB y no se mira;
+// tampoco si el host remoto no supo decirla.
+func pageCheck(p probe) (check, bool) {
+	if !isArm64(p.system) || p.pageSize == 0 {
+		return check{}, false
+	}
+	return check{
+		label: "host page size", ok: p.pageSize == 4096,
+		found: fmt.Sprintf("%d bytes", p.pageSize),
+		why:   "Firecracker is only validated on hosts with 4 KiB pages",
+		fix: []string{
+			"# Raspberry Pi 5: boot the 4K kernel. In /boot/firmware/config.txt:",
+			"kernel=kernel8.img",
+			"# reboot, then: getconf PAGESIZE   # 4096",
+			"# elsewhere: a kernel built with CONFIG_ARM64_4K_PAGES=y",
+		},
+	}, true
 }
 
 // checksOf traduce la foto del host a la lista de comprobaciones con su remedio.
@@ -384,15 +445,12 @@ func checksOf(p probe) []check {
 		return fix
 	}
 
-	return []check{
+	cs := []check{
 		{
 			label: "/dev/kvm", ok: p.kvm, fatal: true,
 			found: presence(p.kvm, "present", "doesn't exist"),
 			why:   "Firecracker talks to KVM and only KVM; there's no software mode",
-			fix: []string{
-				"sudo modprobe kvm_intel      # or kvm_amd, depending on the processor",
-				"# if it's a VM, its host has to allow nested virtualization",
-			},
+			fix:   kvmFix(isArm64(p.system)),
 		},
 		{
 			label: "firecracker", ok: p.firecracker != "", fatal: true,
@@ -467,6 +525,12 @@ func checksOf(p probe) []check {
 			fix:   artifactFix("70-build-minimal-image.sh", "min.ext4"),
 		},
 	}
+	// La página va justo detrás de /dev/kvm: es del mismo tipo (el host), y en
+	// x86 no sale.
+	if c, ok := pageCheck(p); ok {
+		cs = slices.Insert(cs, 1, c)
+	}
+	return cs
 }
 
 // printChecks imprime el informe y devuelve cuántos fallos son fatales y
