@@ -129,7 +129,24 @@ func (n *Node) Child(name string) *Node {
 	return n.children[name]
 }
 
-// SetChild pone (o sustituye) la entrada name de un directorio.
+// CheckName dice si name vale como nombre de una entrada de directorio de
+// ext4: no vacío, ni "." ni "..", sin '/' ni NUL y de 255 bytes como mucho
+// (name_len del dirent es un byte: uno más largo se truncaría y dejaría la
+// entrada corrupta).
+func CheckName(name string) error {
+	switch {
+	case name == "" || name == "." || name == "..":
+		return fmt.Errorf("invalid file name %q", name)
+	case len(name) > 255:
+		return fmt.Errorf("file name too long (%d bytes, max 255): %.40q", len(name), name)
+	case strings.ContainsAny(name, "/\x00"):
+		return fmt.Errorf("invalid character in file name %q", name)
+	}
+	return nil
+}
+
+// SetChild pone (o sustituye) la entrada name de un directorio. No valida
+// name: un nombre que no pase CheckName hace fallar Write.
 func (n *Node) SetChild(name string, c *Node) {
 	if n.children == nil {
 		n.children = map[string]*Node{}
@@ -151,7 +168,7 @@ func splitPath(p string) ([]string, error) {
 	}
 	parts := strings.Split(p[1:], "/")
 	for _, c := range parts {
-		if c == "" || c == "." || c == ".." || len(c) > 255 {
+		if CheckName(c) != nil {
 			return nil, fmt.Errorf("invalid path component %q", c)
 		}
 	}
@@ -248,6 +265,9 @@ func (n *Node) Put(p string, c *Node, t time.Time) error {
 	dir, base := path.Split(path.Clean("/" + p))
 	if base == "" {
 		return fmt.Errorf("invalid path %q", p)
+	}
+	if err := CheckName(base); err != nil {
+		return err
 	}
 	d, err := n.MkdirAll(dir, 0o755, 0, 0, t)
 	if err != nil {

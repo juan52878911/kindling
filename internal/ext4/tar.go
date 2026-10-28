@@ -102,6 +102,11 @@ func (root *Node) AddTar(r io.Reader, o TarOptions) error {
 			}
 			continue
 		}
+		// El último componente se valida aquí, después de los whiteouts
+		// (".wh." + un nombre de 255 bytes es un whiteout válido).
+		if err := CheckName(file); err != nil {
+			return fmt.Errorf("tar entry %q: %w", h.Name, err)
+		}
 		parent, err := base.MkdirAll(dir, 0o755, 0, 0, o.Time)
 		if err != nil {
 			return fmt.Errorf("%s: %w", full, err)
