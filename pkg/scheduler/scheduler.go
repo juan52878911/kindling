@@ -1530,12 +1530,19 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 		// adopta como dueña (ver ensure).
 		warmed++
 		go func(svc string) {
+			// Como en el pool: la liberación va fuera de Contener, o un pánico
+			// dejaría el servicio reservado para siempre y nadie volvería a
+			// mantenerlo caliente. Y sin Contener, un pánico en ensure mataría
+			// el gateway entero: esta goroutine ya no está dentro del Contener
+			// del segador que la lanzó.
 			defer g.keepwarmListo(svc)
-			if _, err := g.ensure(ctx, svc); err != nil {
-				log.Printf("keepwarm %s: %v", svc, err)
-				return
-			}
-			log.Printf("%s: primary kept warm", svc)
+			panico.Contener("gateway.keepwarm", func() {
+				if _, err := g.ensure(ctx, svc); err != nil {
+					log.Printf("keepwarm %s: %v", svc, err)
+					return
+				}
+				log.Printf("%s: primary kept warm", svc)
+			})
 		}(c.svc)
 	}
 }

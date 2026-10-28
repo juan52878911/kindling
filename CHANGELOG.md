@@ -28,6 +28,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling up` on arm64: the missing-`/dev/kvm` hint no longer says `modprobe kvm_intel` (KVM is built in there), and a host page size other than 4 KiB is a warning (Raspberry Pi 5 boots a 16K kernel by default)
 - Guest kernel: the 6.1.140 tarball sha256 is pinned, so `scripts/builders/kernel/build.sh` runs; arm64 adds errata 1319367, 1530923 and 2067961 and drops 2645198, which 6.1 doesn't have
 - `scripts/30-fetch-artifacts.sh` recommends `KERNEL_SOURCE=build` on aarch64 when it isn't set
+- Release binaries are built with Go 1.27.3 (12 reachable stdlib CVEs fixed); the minimum Go in `go.mod` stays 1.24
+- The release workflow runs the full test suite before building, uses a read-only token except to publish, and pins actions by SHA
+- `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
+- Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
 
 ### Fixed
 
@@ -37,6 +41,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 - Image import: a file name over 255 bytes or with a NUL is rejected instead of writing a corrupt directory entry; a file alternating data and zero blocks no longer fails with "file too fragmented"; xattrs in unknown namespaces or too large in `user.*` are dropped with a warning instead of failing the image
 - Reading an ext4 with a corrupt superblock (0 inodes or blocks per group) returns an error instead of panicking
+- Extension manifest, hook and `-h` output is capped at 1 MiB; the old cap was bypassed by `io.Copy`
+- Concurrent writes of the same state file no longer share a temp file
+- A panic while keeping a service warm no longer kills the gateway
+- `scripts/release.sh` refuses a tag that already exists on origin and fetches before comparing main
 
 ## [0.18.0] - 2026-10-11
 

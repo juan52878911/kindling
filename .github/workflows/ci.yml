@@ -17,6 +17,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   modulo:
     name: make test cross (${{ matrix.dir }})
@@ -31,21 +34,25 @@ jobs:
       # y con el go.work puesto un replace roto pasaría desapercibido. El camino
       # con workspace lo comprueba el job `workspace`.
       GOWORK: 'off'
-      # Que Go no se baje otra toolchain por su cuenta: la 1.24 es la que
-      # declaran los go.mod y es el mínimo que prometemos.
+      # Que Go no se baje otra toolchain por su cuenta. Se prueba con la misma
+      # toolchain con la que publica release.yml (1.27.x, con los CVE de la
+      # stdlib corregidos); el mínimo que declaran los go.mod (go 1.24) lo
+      # sigue comprobando el job raiz-sin-deps.
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: '1.27.3'
           cache: true
           cache-dependency-path: ${{ matrix.dir }}/go.mod
 
       - name: make test cross
-        run: make -C "${{ matrix.dir }}" test cross
+        env:
+          DIR: ${{ matrix.dir }}
+        run: make -C "$DIR" test cross
 
   # El go.mod del núcleo no tiene dependencias ni cgo, y es una promesa: el
   # binario se instala copiándolo, y cualquier require nuevo lo tiene que decidir
@@ -58,9 +65,11 @@ jobs:
       GOWORK: 'off'
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
+          # A propósito la 1.24 y no la de release: este job comprueba que el
+          # mínimo que declaran los go.mod sigue compilando el núcleo.
           go-version: '1.24'
           cache: false
 
@@ -84,7 +93,7 @@ jobs:
           done
 
       # La directiva go de cada ext/* es la del núcleo: es el mínimo que se
-      # promete y con el que compila el job de arriba (GOTOOLCHAIN=local). El
+      # promete y con el que compila este job (go 1.24, GOTOOLCHAIN=local). El
       # go.work declara otra (la de vz/go.mod), y eso no cuenta aquí.
       - name: ext/* declaran la misma versión de Go que el núcleo
         run: |
@@ -107,10 +116,10 @@ jobs:
       GOWORK: 'off'
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: '1.27.3'
           cache: false
       - run: cargo fmt --check --manifest-path rust/kling-unpack/Cargo.toml
       - run: cargo clippy --locked --manifest-path rust/kling-unpack/Cargo.toml -- -D warnings
@@ -126,11 +135,11 @@ jobs:
     name: go.work
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          # go.work declara la versión que exige vz/go.mod.
-          go-version-file: go.work
+          # La de release; go.work declara la mínima que exige vz/go.mod.
+          go-version: '1.27.3'
           cache: false
       # vz queda fuera del build: es cgo y solo de macOS (lo compila el job vz).
       # Su go.mod sí entra en el grafo del workspace, así que de paso se
@@ -190,15 +199,15 @@ jobs:
       run:
         working-directory: vz
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: vz/go.mod
+          go-version: '1.27.3'
           cache-dependency-path: vz/go.sum
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: GOOS=linux go vet ./...
-      - run: go test -race ./...
+      - run: go test -race -count=1 ./...
       - run: ./build.sh
       # Sin el entitlement el framework se niega a crear la VM: que la firma lo
       # lleve es parte del contrato del binario.

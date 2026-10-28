@@ -27,7 +27,12 @@
 #   5. Push del tag → activa .github/workflows/release.yml
 #   6. (Opcional) espera a que el workflow termine y abre la release en el browser
 
-set -u
+# -e y -u siempre; pipefail donde el sh lo tenga (bash, zsh, dash reciente).
+# Ningún paso depende de que un error se ignore: los que pueden fallar sin que
+# sea fatal van con `|| ...` explícito o dentro de un if.
+set -eu
+# shellcheck disable=SC3040 # se comprueba antes en una subshell
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 VERSION="${VERSION:-}"
 DRY_RUN=0
@@ -66,7 +71,8 @@ if [ "$DRY_RUN" = "0" ]; then
 fi
 
 if [ -z "$VERSION" ]; then
-    LAST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+    # Sin tubería: con pipefail, `git tag | head -1` puede morir de SIGPIPE.
+    LAST=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:short)' 'refs/tags/v*' 2>/dev/null || true)
     if [ -z "$LAST" ]; then
         echo "no previous tags and no VERSION given: starting at v0.1.0" >&2
         VERSION="v0.1.0"
@@ -83,10 +89,22 @@ case "$VERSION" in
     *)   VERSION="v$VERSION" ;;
 esac
 
-if git tag --list "$VERSION" | grep -q "^${VERSION}\$"; then
+if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null 2>&1; then
     echo "tag $VERSION already exists locally" >&2
     exit 1
 fi
+
+# El tag puede existir ya en origin sin estar en local (lo empujó otra máquina):
+# el push fallaría después de haber creado el tag local.
+# ls-remote --exit-code: 0 = existe, 2 = no existe, otro = no se pudo preguntar.
+RC=0
+git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1 || RC=$?
+case "$RC" in
+    0) echo "tag $VERSION already exists on origin" >&2; exit 1 ;;
+    2) ;;
+    *) echo "cannot query tags on origin (git ls-remote exit $RC)" >&2
+       [ "$DRY_RUN" = "1" ] || exit 1 ;;
+esac
 
 # Working tree limpio (--dry-run lo permite)
 if [ "$DRY_RUN" = "0" ]; then
@@ -110,8 +128,13 @@ for m in ext/*/go.mod; do
     fi
 done
 
-# main al día
-LOCAL=$(git rev-parse --verify main 2>/dev/null || git rev-parse --verify HEAD)
+# main al día. Sin fetch, origin/main es el de la última vez que se trajo y la
+# comparación no dice nada.
+if ! git fetch --quiet origin main; then
+    echo "git fetch origin main failed: cannot check that main is up to date" >&2
+    [ "$DRY_RUN" = "1" ] || exit 1
+fi
+LOCAL=$(git rev-parse --verify main 2>/dev/null || git rev-parse --verify HEAD 2>/dev/null || true)
 REMOTE=$(git rev-parse --verify origin/main 2>/dev/null || echo "")
 if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
     echo "local main ($LOCAL) != origin/main ($REMOTE): fetch/merge first" >&2
