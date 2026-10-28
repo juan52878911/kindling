@@ -200,6 +200,12 @@ func agenteContesta(ctx context.Context, dial func(ctx context.Context) (net.Con
 		_ = c.SetDeadline(time.Now().Add(time.Second))
 	}
 	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: agent\r\nConnection: close\r\n\r\n", api.GuestHealthPath); err != nil {
+		// Conectó pero ni acepta la petición antes del plazo: tan mudo como
+		// el que no contesta.
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return errSinRespuesta{err}
+		}
 		return err
 	}
 	var b [1]byte

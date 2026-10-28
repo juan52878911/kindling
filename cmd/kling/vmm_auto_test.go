@@ -38,7 +38,7 @@ func TestElegirAuto(t *testing.T) {
 		"sonda sin salida": {func(e *entornoAuto) {
 			e.sonda = func(string) (string, error) { return "", errors.New("signal: killed") }
 		}, "killed"},
-		"KLING_VMM a otro": {func(e *entornoAuto) { e.env = "/opt/kling-vz" }, "not a kling-hv"},
+		"KLING_VMM a otro":  {func(e *entornoAuto) { e.env = "/opt/kling-vz" }, "not a kling-hv"},
 		"congeladas con vz": {func(e *entornoAuto) { e.volcadosVZ = 2 }, "2 frozen machines or goldens"},
 	}
 	for nombre, c := range casos {
