@@ -181,7 +181,7 @@ func TestFreezeReanudacionPendienteLaRecuperaElVigilante(t *testing.T) {
 	if got, _ := m.Get(id); got == nil || got.Transition != "" {
 		t.Fatalf("Transition = %+v, quería vacía tras reanudar", got)
 	}
-	if len(m.ReanudacionesPendientes()) != 0 {
+	if len(m.Atascadas()) != 0 {
 		t.Fatal("sigue pendiente tras reanudar")
 	}
 	if !sigueVivo(muerto) {

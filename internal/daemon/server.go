@@ -700,6 +700,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if _, filtra := inquilinoDe(r); !filtra {
 		info.Tuning = s.ajustes()
 		info.PoolProblems = s.mgr.ProblemasFondos()
+		info.Stuck = s.mgr.Atascadas()
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion

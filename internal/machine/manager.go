@@ -3609,7 +3609,14 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 		return nil
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
-	m.kill(mc.ID)
+	if !m.kill(mc.ID) {
+		// Con el VMM vivo no se suelta nada (M4): su red, su disco y su
+		// índice de red los sigue usando él, y dárselos a otra máquina la
+		// pondría a hablar por su interfaz. La máquina se queda como estaba,
+		// con su PID: el vigilante la ve viva y el siguiente intento la mata.
+		return fmt.Errorf("%s: its VMM (pid %d) did not exit after SIGKILL; leaving its network and disk in place",
+			mc.Name, mc.PID)
+	}
 	return m.limpiarMaquina(mc)
 }
 
@@ -3620,7 +3627,11 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) { m.killMachine(id, true, false) }
+//
+// Devuelve si el VMM ya no existe (o no lo había): uno que sobrevive a
+// waitGone conserva su PID en la máquina, y quien libera lo que usaba (Remove)
+// no debe hacerlo todavía.
+func (m *Manager) kill(id string) bool { return m.killMachine(id, true, false) }
 
 // killConservandoDisco es kill para Stop: el overlay sigue después (kling
 // start), así que el invitado vacía su caché aunque no tenga volúmenes.
@@ -3634,7 +3645,7 @@ func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true
 // pausar, que es el único momento en que el invitado podía responder.
 func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
 
-func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
+func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
@@ -3654,7 +3665,7 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
-		return
+		return true
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
@@ -3663,8 +3674,14 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 		m.stopService(mc)
 		m.flushVolume(mc, conservaDisco)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	senalMatar(pid)
 	defer func() {
+		if !murio {
+			// Sigue vivo: el PID se queda, para que se sepa y se pueda
+			// volver a matar (M4).
+			log.Printf("warning: %s: VMM pid %d still alive %s after SIGKILL", shortID(id), pid, plazoMuerte)
+			return
+		}
 		m.mu.Lock()
 		if live := m.byID[id]; live != nil && live.PID == pid {
 			live.PID = 0
@@ -3684,25 +3701,35 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
 	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
 	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
-	waitGone(pid, 5*time.Second)
+	return waitGone(pid, plazoMuerte)
 }
 
-// waitGone espera a que un pid desaparezca de la tabla de procesos.
+// senalMatar manda el SIGKILL a un VMM. Variable para los tests: un VMM que
+// no muere no se puede fabricar de otra forma.
+var senalMatar = func(pid int) { _ = syscall.Kill(pid, syscall.SIGKILL) }
+
+// plazoMuerte es cuánto se espera a que un VMM muera tras el SIGKILL. Variable
+// para los tests.
+var plazoMuerte = 5 * time.Second
+
+// waitGone espera a que un pid desaparezca de la tabla de procesos y dice si
+// desapareció antes del plazo.
 //
 // Kill(pid, 0) no manda señal: solo pregunta si el proceso existe. Devuelve
 // ESRCH cuando ya no —ni vivo ni zombi—, que es justo cuando su memoria está
 // reclamada. Sondea con pausas cortas porque morir tras un SIGKILL es cuestión
 // de milisegundos en el caso normal.
-func waitGone(pid int, timeout time.Duration) {
+func waitGone(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if syscall.Kill(pid, 0) == syscall.ESRCH {
-			return
+			return true
 		}
 		// 1 ms y no 20: el VMM suele morir en uno o dos, y con 20 el sondeo
 		// era la mayor parte de lo que tardaba kling rm.
 		time.Sleep(time.Millisecond)
 	}
+	return false
 }
 
 // fail da una máquina por perdida: mata su VMM, desmonta su red y su cgroup y

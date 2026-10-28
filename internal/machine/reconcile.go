@@ -451,6 +451,8 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// Las que un volcado fallido dejó en pausa sin poder
 				// reanudarlas (reanudar_pendiente.go).
 				m.reanudarPendientes()
+				// Y las borradas cuyo VMM no murió al primer SIGKILL (M4).
+				m.reintentarTumbas()
 				// Las carpetas vivas de las máquinas que corren y no tienen
 				// conexión (tras reiniciar el daemon, sobre todo).
 				m.ensureShares()

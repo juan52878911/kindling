@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -122,16 +123,25 @@ func (m *Manager) reanudarPendiente(id string) {
 	m.fail(&copia, fmt.Errorf("%s (gave up after %s: %v)", r.causa, plazoReanudacion, err))
 }
 
-// ReanudacionesPendientes devuelve los nombres de las máquinas que un freeze
-// fallido dejó en pausa y el vigilante aún intenta reanudar (kling doctor).
-func (m *Manager) ReanudacionesPendientes() []string {
+// Atascadas son las máquinas que el daemon no ha podido llevar al estado que
+// se le pidió y sigue reintentando: un freeze que no pudo reanudarla (A5) y
+// un rm cuyo VMM sobrevivió al SIGKILL (M4). Lo enseña `kling doctor`.
+func (m *Manager) Atascadas() []api.StuckMachine {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var out []string
-	for id := range m.reanudaciones {
+	var out []api.StuckMachine
+	for id, r := range m.reanudaciones {
 		if mc := m.byID[id]; mc != nil {
-			out = append(out, mc.Name)
+			out = append(out, api.StuckMachine{ID: id, Name: mc.Name, PID: mc.PID, Transition: api.TransitionFreezing,
+				Since: r.desde, Problem: r.causa + "; the daemon keeps trying to resume it"})
 		}
 	}
+	for id, mc := range m.byID {
+		if esTumba(mc) && mc.PID != 0 {
+			out = append(out, api.StuckMachine{ID: id, Name: mc.Name, PID: mc.PID, Transition: api.TransitionRemoving,
+				Problem: fmt.Sprintf("removed, but its VMM (pid %d) survived SIGKILL; its network and disk stay until it exits", mc.PID)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }

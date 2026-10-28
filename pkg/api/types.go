@@ -240,6 +240,16 @@ type Machine struct {
 	Wake *WakePhases `json:"wake,omitempty"`
 }
 
+// StuckMachine es una máquina atascada a mitad de una operación (Info.Stuck).
+type StuckMachine struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	PID        int       `json:"pid,omitempty"`
+	Transition string    `json:"transition"`
+	Since      time.Time `json:"since,omitempty"`
+	Problem    string    `json:"problem"`
+}
+
 // WakePhases es el desglose de un despertar en el daemon, en milisegundos.
 // Cada campo es el tiempo de pared de esa fase; TotalMS los suma todos más lo
 // que quede entre ellos.
@@ -994,6 +1004,10 @@ type Info struct {
 	// daemon.vmm auto (macOS), "daemon.vmm hv", "KLING_VMM=vz". Vacío en Linux
 	// y en daemons anteriores.
 	BackendReason string `json:"backend_reason,omitempty"`
+	// Stuck son las máquinas que el daemon no logró llevar al estado pedido y
+	// sigue reintentando (un freeze que no pudo reanudarla, un rm cuyo VMM
+	// sobrevivió al SIGKILL). Vacío = ninguna. Lo enseña `kling doctor`.
+	Stuck []StuckMachine `json:"stuck,omitempty"`
 	// PoolProblems son los fondos precalentados (kling template pool) que no
 	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
 	// Vacío = todos bien o ninguno.
