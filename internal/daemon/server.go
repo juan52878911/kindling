@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -360,6 +360,7 @@ func (s *Server) rutas() []ruta {
 		{"POST /volumes", AccionAdmin, nil, s.handleCreateVolume},
 		{"DELETE /volumes/{name}", AccionAdmin, nil, s.handleRemoveVolume},
 		{"POST /volumes/{name}/populate", AccionAdmin, nil, s.handlePopulateVolume},
+		{"POST /volumes/{name}/clone", AccionAdmin, nil, s.handleCloneVolume},
 		{"GET /volumes/{name}/snapshots", AccionAdmin, nil, s.handleVolumeSnapshots},
 		{"POST /volumes/{name}/snapshots", AccionAdmin, nil, s.handleSnapshotVolume},
 		{"POST /volumes/{name}/restore", AccionAdmin, nil, s.handleRestoreVolume},
@@ -652,6 +653,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		ShareRoots:   s.mgr.ShareRoots(),
 		CoW:          s.mgr.CoWInfo(),
 		Authz:        s.infoAuthz(r),
+		Clone:        s.mgr.CloneInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado

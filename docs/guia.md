@@ -743,6 +743,29 @@ Los snapshots viven en `volumes/snapshots/<vol>/`, de root, con directorios `070
 `0600`: el VMM no los lee nunca, así que uno comprometido no puede reescribir el pasado al que
 se vuelve. Todavía no hay `run -volume notas@snap`: se restaura y luego se monta.
 
+## Clonar un volumen
+
+```sh
+kling volume clone notas notas-prueba            # un volumen nuevo que empieza como copia de notas
+kling volume clone notas notas-prueba -copy      # en un sistema de ficheros que no clona: permite la copia completa
+```
+
+Un clon comparte bloques con el origen hasta que uno de los dos escribe (`FICLONE` en Linux,
+`clonefile` en macOS), así que en XFS (`reflink=1`), Btrfs, APFS o ZFS 2.2+ con block cloning
+tarda milisegundos sea cual sea el tamaño. En ext4 no hay nada que compartir: el daemon
+contesta **409** y explica por qué; nunca copia si no pasas `-copy` (copia completa dispersa:
+1 GiB de datos en 5,7-8,6 s en el disco ext4 del lab, lo mismo que un snapshot allí).
+`kling status -v` enseña en la línea `clone:` qué directorios pueden clonar, averiguado
+clonando de verdad un fichero de prueba en `volumes/`, `machines/`, `snapshots/` y `jails/`,
+no deduciéndolo del nombre del sistema de ficheros.
+
+Las reglas son las de un snapshot: el origen no puede tener **escritor** (una máquina
+congelada cuenta), los lectores valen, y mientras dura el clon el origen no se puede montar
+en escritura, restaurar ni borrar, y el nombre del destino queda ocupado. El volumen nuevo se
+publica con `link(2)`, nunca con `rename`, así que uno creado con ese nombre entretanto no se
+pisa. `volume ls` cuenta los bloques compartidos en los dos volúmenes. API:
+`POST /volumes/{name}/clone` ([api.md](api.md)).
+
 ## Una biblioteca de paquetes compartida
 
 Es lo que permite no duplicar las mismas dependencias en cada imagen:

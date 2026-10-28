@@ -51,6 +51,8 @@ const (
 	opSnapshot  tipoOperacion = iota // lee: fuera los escritores
 	opRestore                        // reescribe: fuera todos
 	opBorrarSnp                      // solo toca snapshots: fuera las demás operaciones
+	opCloneSrc                       // clon, origen: lee, fuera los escritores
+	opCloneDst                       // clon, destino: aún no existe, escribe
 )
 
 func (t tipoOperacion) desc() string {
@@ -59,6 +61,10 @@ func (t tipoOperacion) desc() string {
 		return "being snapshotted"
 	case opRestore:
 		return "being restored"
+	case opCloneSrc:
+		return "being cloned"
+	case opCloneDst:
+		return "being created by a clone"
 	default:
 		return "having a snapshot removed"
 	}
@@ -109,11 +115,11 @@ func (m *Manager) reservarOperacion(vol string, t tipoOperacion) (func(), error)
 	}
 	u := m.volumeUsersLocked()[vol]
 	switch t {
-	case opSnapshot:
+	case opSnapshot, opCloneSrc:
 		if len(u.writers) > 0 {
 			return nil, errEstado(http.StatusConflict,
 				"volume %q is mounted in WRITE mode by %s.\n"+
-					"A snapshot needs no writers, so it is consistent: stop it first "+
+					"A snapshot or clone needs no writers, so it is consistent: stop it first "+
 					"(a frozen machine still has it mounted)", vol, strings.Join(u.writers, ", "))
 		}
 	case opRestore:
@@ -130,7 +136,7 @@ func (m *Manager) reservarOperacion(vol string, t tipoOperacion) (func(), error)
 	d := t.desc()
 	m.volReservas[vol] = append(m.volReservas[vol], reservaVolumen{
 		maquina: opPrefijo + vol, nombre: d, desc: "(" + d + ")",
-		soloLect: t != opRestore, sinUso: t == opBorrarSnp,
+		soloLect: t != opRestore && t != opCloneDst, sinUso: t == opBorrarSnp,
 	})
 	return func() { m.soltarReservas(opPrefijo + vol) }, nil
 }
