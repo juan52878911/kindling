@@ -81,7 +81,7 @@ a la hora; como mucho hay 8 pendientes a la vez.
   un sistema de ficheros FUSE en DST y habla él mismo el protocolo del kernel:
   INIT, LOOKUP, FORGET/BATCH_FORGET, GETATTR, SETATTR, OPENDIR/READDIR/
   RELEASEDIR, OPEN/READ/WRITE/RELEASE/FLUSH/FSYNC, CREATE/MKDIR/UNLINK/RMDIR/
-  RENAME(2), READLINK, STATFS y ACCESS. SYMLINK, LINK y MKNOD devuelven `EPERM`
+  RENAME(2), SYMLINK, READLINK, STATFS y ACCESS. LINK y MKNOD devuelven `EPERM`
   (ver más abajo); el resto, `ENOSYS`. No hay libfuse ni cgo.
 - **El agente traduce** cada operación FUSE a una operación por RUTA
   (`stat a/b`, `open a/b`, `read handle off size`…) y la manda al daemon. La
@@ -120,8 +120,12 @@ daemon de macOS traduce sus errores a los de Linux antes de contestar. Las rutas
 son relativas a SRC, ya limpias, sin componentes vacíos, `.` ni `..`, y el
 daemon las revalida. Operaciones: STAT, FSTAT, LIST (paginado por índice), OPEN,
 CREATE, READ, WRITE, RELEASE, FSYNC, SETATTR, MKDIR, UNLINK, RMDIR, RENAME,
-READLINK, STATFS. Los flags de apertura viajan en bits propios del protocolo
-(los `O_*` de Linux y de macOS no coinciden).
+READLINK, STATFS, HELLO, WATCH y SYMLINK. Los flags de apertura viajan en bits
+propios del protocolo (los `O_*` de Linux y de macOS no coinciden).
+
+Tras WATCH, el daemon es el único que manda tramas sin que se las pidan:
+avisos con id 0 (`u64 0 | u32 0 | u8 evento | ruta`), con evento modify,
+create o delete. Ver [Cambios hechos en el host](#cambios-hechos-en-el-host).
 
 ### Congelar, descongelar, reiniciar el daemon
 
@@ -191,12 +195,20 @@ Daemon (`internal/share`):
 - Propietarios: el invitado ve todo como uid/gid 0. `chown` no hace nada. Los
   modos se recortan a `0777`: ni setuid, ni setgid, ni sticky. Si el daemon
   corre como root, lo que crea el invitado se entrega al dueño de SRC.
-- SYMLINK y LINK se rechazan (`EPERM`): un enlace creado por el invitado en el
-  host es un arma contra lo que el host haga luego con ese directorio (un
-  proceso del host que siga el enlace escribiría donde el invitado quiso).
-  MKNOD, igual. Los enlaces que ya hubiera se leen (`readlink`) pero el host no
-  los sigue nunca: los resuelve el kernel del invitado, dentro de su propio
-  árbol.
+- SYMLINK solo en `rw` y solo si el enlace no puede sacar a nadie de la
+  carpeta: destino relativo, que resuelto desde donde está el enlace se queda
+  dentro (la regla de las copias, `share.CheckLink`) y sin atravesar otro
+  enlace (`share.LinkTraverses`). Si no, `EPERM`. El agente traduce a relativo
+  un destino absoluto que cae dentro del propio montaje (`/app/x`); uno fuera
+  (`/usr/bin/python3`) es `EPERM`. Un enlace válido podría dejar de serlo si se
+  mueve más arriba (`a/b/l -> ../../x` movido a `l`): `rename` revalida el
+  enlace movido y, si un directorio sube de nivel, recorre sus enlaces (hasta
+  20 000 entradas); si alguno saldría, `EXDEV`, y `mv` cae a copiar y borrar,
+  que vuelve a pasar cada enlace por SYMLINK.
+- LINK se rechaza (`EPERM`): un enlace duro al fichero que sea es un arma
+  contra lo que el host haga luego con ese directorio. MKNOD, igual. Los
+  enlaces que ya hubiera se leen (`readlink`) pero el daemon no los sigue
+  nunca: los resuelve el kernel del invitado, dentro de su propio árbol.
 
 Agente (`pkg/guest`):
 - Cada mensaje de `/dev/fuse` se comprueba contra su cabecera y el tamaño de su
@@ -212,7 +224,9 @@ Agente (`pkg/guest`):
 ### Coherencia y límites
 
 - Cachés del kernel del invitado de 1 s (atributos y entradas) y con
-  `auto_inval_data`: un cambio hecho en el host se ve en ≤ 1 s. La caché de
+  `auto_inval_data`. Con un daemon que vigila (WATCH), un cambio hecho en el
+  host llega en milisegundos y dispara inotify en el invitado (ver abajo); con
+  uno anterior, se ve en ≤ 1 s y ningún vigilante se entera. La caché de
   páginas se invalida en cada `open`.
 - Escritura directa (sin write-back): cada `write()` llega al host antes de
   volver. Dos máquinas escribiendo el mismo fichero: gana la última escritura de
@@ -220,12 +234,45 @@ Agente (`pkg/guest`):
   cada invitado).
 - `rename` con `RENAME_NOREPLACE` comprueba y luego renombra: no es atómico
   frente a otro escritor del host.
-- Sin enlaces simbólicos nuevos: `npm install` (que crea `node_modules/.bin`)
-  falla en una carpeta `rw`; `npm install --no-bin-links` funciona, o se
-  instala en el disco de la máquina.
+- Enlaces simbólicos nuevos solo dentro de la carpeta (ver arriba): `npm
+  install` funciona en una carpeta `rw`; `python -m venv` necesita `--copies`
+  (sus enlaces apuntan a `/usr/bin/python3`, fuera).
 - Caudal: la conexión pasa por la interfaz de red del invitado, que en
   Firecracker tiene un limitador de 16 MiB/s por sentido. Es el techo de lectura
   y escritura secuencial de una carpeta viva.
+
+### Cambios hechos en el host
+
+Un `node --watch`, nodemon, vite o webpack del invitado vigilan con inotify, y
+inotify solo ve lo que pasa por el VFS del propio invitado: lo que se edita en
+el host no lo despierta. Con WATCH:
+
+1. **El daemon vigila lo que el invitado ha mirado** (`internal/share/watch.go`):
+   cada ruta de un stat, list, open, create o mkdir, con kqueue en macOS (un
+   descriptor `O_EVTONLY` por ruta) e inotify en Linux (por `/proc/self/fd`
+   de un `O_PATH` abierto con `os.Root`, sin descriptores). Tope de 4096 rutas
+   por sesión, expulsando la menos usada; en macOS, 8192 descriptores en todo
+   el daemon. Lo que el invitado nunca miró no puede estar en su caché ni
+   tener un vigilante: un `node_modules` sin abrir no cuesta nada.
+2. Los cambios se agrupan 15 ms y se comparan: un directorio vigilado se vuelve
+   a listar para saber qué nombre apareció o desapareció; un fichero sustituido
+   por rename (el guardado atómico de un editor) es un cambio del mismo nombre.
+   Lo que el propio invitado tocó en el último segundo es eco y no se avisa.
+3. **El agente lo lleva al kernel** (`pkg/guest/fuse_notify.go`):
+   `FUSE_NOTIFY_INVAL_INODE`, `INVAL_ENTRY` o `DELETE`, y luego hace él la
+   operación que dispara inotify, desde un hilo suyo: truncar al tamaño que
+   ya tiene (IN_MODIFY), crear con `O_EXCL` o `mkdir` (IN_CREATE), `unlink` o
+   `rmdir` (IN_DELETE). Las peticiones FUSE que eso provoca llevan el id de
+   ese hilo en la cabecera y las contesta el agente sin ir al host: el host no
+   cambia y no hay eco. Un aviso de FUSE solo no genera eventos de inotify.
+
+En una carpeta `ro` se invalida pero inotify no dispara (el VFS no deja
+truncar ni crear). Se descartó sondear desde el invitado (CPU y latencia aun
+sin cambios, y tampoco dispara inotify) y emular inotify fuera del kernel.
+
+Medido en un M4 (kling-vz), con un servidor de Node en la carpeta: editar en
+el host y que `curl` devuelva lo nuevo tarda 254 ms con `node --watch` (Docker
+Desktop: 257 ms); sin WATCH no recargaba nunca.
 
 ### Medidas
 

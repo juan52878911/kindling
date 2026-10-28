@@ -124,8 +124,10 @@ imagen entera).
 
 - **`docker save | gzip`**: `image import -archive` lee el tar sin comprimir
   (o un layout OCI en un directorio); el comprimido hay que descomprimirlo antes.
-- **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
-  se entra por el gateway o con `kling exec`.
+- **`-p` de Docker**: `kling run` no publica puertos en el host a propósito;
+  se entra por el gateway o con `kling exec`. Para desarrollo local,
+  `kling compose up` publica los `ports:` del compose en `127.0.0.1` mientras
+  corre ([desarrollo-local.md](desarrollo-local.md)).
 - **`docker start` sin volver a dar el entorno**: `kling start` lo exige,
   porque el daemon solo guarda los nombres de las variables. Docker guarda los
   valores con el contenedor.
