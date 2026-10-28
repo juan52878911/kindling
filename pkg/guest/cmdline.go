@@ -31,6 +31,7 @@ var knownBootParams = map[string]bool{
 	execBootParam:           true,
 	api.MachineEnvBootParam: true,
 	"kling.layer":           true,
+	vsockBootParam:          true,
 }
 
 // bootParams es lo que se leyó de /proc/cmdline: los kling.* conocidos con su
