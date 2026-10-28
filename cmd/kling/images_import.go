@@ -56,6 +56,7 @@ func imagesImport(args []string) error {
 	replace := fs.Bool("replace", false, "overwrite an image with that name, and re-import one already imported (re-resolves the tag)")
 	archive := fs.String("archive", "", "import from a docker save tar or an OCI layout (tar or directory) on this machine, not from a registry")
 	slim := fs.Bool("slim", false, "drop what the service doesn't use, by family (Postgres: LLVM/JIT, bitcode, headers, old extension versions; sets jit=off)")
+	isolate := fs.Bool("isolate", false, "flatten the layers inside a tools microVM, not on the host: the daemon hands it the digest-verified blobs and gets an ext4 back; the tar is never parsed on the host (needs the "+BuildToolsImage+" image: kling image build-tools)")
 	pick := fs.String("image", "", "with -archive: which image of the archive (repo:tag or digest), if it has several")
 	warm := fs.Bool("warm", false, "after importing: boot it at full CPU, run the -step commands inside, wait until it is ready and save it as a template")
 	var steps stringsFlag
@@ -131,7 +132,7 @@ func imagesImport(args []string) error {
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
-		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim}
+		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim, Isolate: *isolate}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}

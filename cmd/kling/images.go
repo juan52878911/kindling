@@ -25,6 +25,8 @@ func cmdImages(args []string) error {
 		return fmt.Errorf("the bridge belongs to kindling-mcp now: kling mcp refresh-bridge [image...]")
 	case "toolchain":
 		return imagesToolchain(args[1:])
+	case "build-tools":
+		return imagesBuildTools(args[1:])
 	case "rm", "remove":
 		return imagesRm(args[1:])
 	case "recipe":

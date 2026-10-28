@@ -299,6 +299,11 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
 	cmd := comandoConstructor(ctx, bin, binArgs, s.root, work, req, aislado, u, cache, verificada, deOrigen)
+	enVM := aislarSpec(req)
+	if enVM {
+		// Solo baja y verifica; el aplanado lo hace la microVM (builders_vm.go).
+		cmd.Env = append(cmd.Env, "KLING_OCI_PHASE=pull")
+	}
 	out := filepath.Join(work, "out")
 	var salida bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &salida, &salida
@@ -320,6 +325,21 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	if aislado {
 		if u != nil {
 			barrerProcesos(u.UID) // nada del constructor sigue vivo mientras se valida
+		}
+		if enVM {
+			caches := []string{filepath.Join(s.root, "cache", "oci")}
+			if cache != "" {
+				caches = []string{filepath.Join(cache, "oci")}
+			}
+			for _, d := range []string{verificada, deOrigen} {
+				if d != "" {
+					caches = append(caches, filepath.Join(d, "oci"))
+				}
+			}
+			if err := s.aplanarEnVM(ctx, req, work, out, u, caches, &salida); err != nil {
+				fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s (isolated): %w\n%s", req.Builder, err, strings.TrimSpace(salida.String())))
+				return
+			}
 		}
 		// Como PUT /images/{name}/blob (blobs.go): si la imagen ya existe (un
 		// import -replace), comprobar que se puede sustituir y renombrar con
