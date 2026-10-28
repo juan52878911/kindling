@@ -23,6 +23,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: `kling ai serve` without `-paused-mib` derives the paused budget from host memory and freezes paused replicas when the memory level drops; the core inflates the balloon before pausing and keeps it
+- macOS: restores (3 at once, one by one at memory level 25 % or below) and cold boots (4) have separate launch gates; resuming a paused machine takes neither
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
 - `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
 - `kling up` on arm64: the missing-`/dev/kvm` hint no longer says `modprobe kvm_intel` (KVM is built in there), and a host page size other than 4 KiB is a warning (Raspberry Pi 5 boots a 16K kernel by default)
@@ -46,6 +48,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Request bodies over the limit answer 413 instead of 400 "unexpected EOF" (exec, shell, resize, mmds, credentials); store and annotations answer 413 only for size
 - `kling events` no longer stops on an event line over 64 KiB
 - `kling freeze`, `thaw` and `start` no longer fail after 60 s waiting for the daemon's answer
+- macOS: the first `exec` after a cold boot no longer waits ~1.2 s for a lost SYN (agent probes in 150 ms attempts): `run` + `exec` 1.4 → 0.55 s, `run -wait-ready` 1.2 → 0.54 s on an M4
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - Guest `/exec`: a background grandchild (`sh -c "sleep 600 & echo ok"`) no longer holds the reply until it exits, and cancelling the request kills the whole process group

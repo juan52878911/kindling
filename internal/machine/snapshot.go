@@ -1530,7 +1530,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// servicios de golpe. Sin acotarlo, esa ráfaga simultánea cuelga el host bajo
 	// anidamiento. El defer suelta el hueco al volver; si el contexto se cancela en
 	// la cola, se deshace lo ya montado igual que un fallo de spawn.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterRestore(ctx)
 	if glErr != nil {
 		m.desmontarRed(netcfg, id)
 		m.fail(mc, glErr)

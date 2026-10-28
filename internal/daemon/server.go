@@ -1292,6 +1292,9 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 // contestaba 200 y wait_ms no esperaba nada—.
 func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	// Entre preguntas, de 10 ms a 50 ms: con 200 ms fijos cada exec tras un
+	// arranque en frío llegaba hasta 200 ms tarde al agente que ya escuchaba.
+	paso := 10 * time.Millisecond
 	for {
 		open, ok := s.mgr.ProbeGuestPort(ctx, mc.ID, port)
 		if !ok {
@@ -1306,8 +1309,9 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(paso):
 		}
+		paso = min(2*paso, 50*time.Millisecond)
 	}
 }
 

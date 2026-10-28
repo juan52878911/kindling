@@ -43,7 +43,7 @@ func (m *Manager) ProcStats() api.ProcStats {
 	avail, free := memoriaHost()
 	return api.ProcStats{
 		Machines: stats, ByState: byState, TotalPSSMiB: total,
-		AvailableMiB: avail, FreeMiB: free,
+		AvailableMiB: avail, FreeMiB: free, TotalMiB: memoriaTotalPlataforma(),
 	}
 }
 

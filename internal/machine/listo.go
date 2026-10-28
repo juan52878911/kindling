@@ -50,6 +50,11 @@ const (
 	// esperar el paso entero sumaba 250 ms a cada `run -from -wait-ready`.
 	// Se dobla hasta pasoListo.
 	pasoListoPrimero = 25 * time.Millisecond
+	// pasoListoConexion es el tope del paso mientras el agente ni siquiera
+	// acepta conexiones: ahí no corre ninguna sonda (preguntar no le cuesta
+	// nada al invitado) y doblar hasta 250 ms hacía llegar tarde a un agente
+	// que empezaba a escuchar a mitad de un paso.
+	pasoListoConexion = 50 * time.Millisecond
 	// plazoPeticionListo acota UNA pregunta a /ready: la sonda corre dentro
 	// con su plazo (10 s, o el de la imagen hasta api.MaxReadyTimeoutSeconds).
 	plazoPeticionListo = api.MaxReadyTimeoutSeconds*time.Second + 5*time.Second
@@ -95,6 +100,13 @@ func (m *Manager) consultarListo(ctx context.Context, id string) (api.GuestReady
 	}
 	if ag.Lacks(api.GuestCapReady) {
 		return api.GuestReady{}, errListoViejo
+	}
+	// En macOS, antes de la petición, kling-vz dice si el agente escucha: el
+	// reenvío acepta siempre y, si la red del invitado aún no ha subido, su
+	// SYN se pierde y la pila de usuario no lo repite hasta pasado 1 s (ver
+	// intentoSondeoVZ). En Linux ok es false y se pregunta como siempre.
+	if open, ok := m.ProbeGuestPort(ctx, id, api.GuestPort); ok && !open {
+		return api.GuestReady{}, errListoConexion
 	}
 	ctx, cancel := context.WithTimeout(ctx, plazoPeticionListo)
 	defer cancel()
@@ -288,7 +300,11 @@ func (m *Manager) WaitReady(ctx context.Context, ref string, o OpcionesListo) (a
 			return res, fmt.Errorf("%w: %s after %s: %s", ErrNotReady, mc.Name, plazo, motivo)
 		case <-time.After(paso):
 		}
-		paso = min(2*paso, pasoListo)
+		if errors.Is(err, errListoConexion) {
+			paso = min(2*paso, pasoListoConexion)
+		} else {
+			paso = min(2*paso, pasoListo)
+		}
 	}
 }
 
