@@ -194,7 +194,9 @@ jobs:
   # una interfaz con un doble), así que valen en un runner sin virtualización.
   vz:
     name: kling-vz (macOS)
-    runs-on: macos-14
+    # macos-15: kling-hv (vz/internal/hvvm) usa la API GIC de
+    # Hypervisor.framework, que solo trae el SDK de macOS 15.
+    runs-on: macos-15
     defaults:
       run:
         working-directory: vz

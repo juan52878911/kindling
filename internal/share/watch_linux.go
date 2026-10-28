@@ -16,7 +16,10 @@ import (
 )
 
 const (
-	inDirMask  = syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM | syscall.IN_MOVED_TO | syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR
+	inDirMask = syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM | syscall.IN_MOVED_TO | syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR
+	// oPath es O_PATH (0x200000 en todas las arquitecturas Linux de Go): el
+	// paquete syscall no lo define en todas ni en las versiones viejas de Go.
+	oPath      = 0x200000
 	inFileMask = syscall.IN_MODIFY | syscall.IN_ATTRIB | syscall.IN_CLOSE_WRITE | syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF
 )
 
@@ -60,7 +63,7 @@ func (b *inBackend) add(rel string, dir bool) error {
 	if _, ok := b.byRel[rel]; ok {
 		return nil
 	}
-	h, err := b.root.OpenFile(relPath(rel), syscall.O_PATH, 0)
+	h, err := b.root.OpenFile(relPath(rel), oPath, 0)
 	if err != nil {
 		return err
 	}
