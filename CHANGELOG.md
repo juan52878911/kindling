@@ -6,6 +6,25 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `/metrics`: `kling_machine_footprint_mib` (macOS), `kling_machine_cpu_seconds_total{core="p|e"}` (Apple Silicon; `all` on Linux), `kling_machine_energy_joules_total` (macOS), `kling_machine_state_seconds` and `kling_host_mem_available_mib`.
+- `kling top` on macOS shows each machine's memory and %CPU (and the share on P-cores) instead of "no /proc".
+- `kling doctor` warns about machines stuck mid-operation: a freeze that could not resume, or a removed machine whose VMM survived SIGKILL.
+- `scripts/94-energia-mac.sh`: a reproducible energy bench on the Mac (no sudo), JSON in `docs/bench-data/`.
+
+### Fixed
+
+- A dump or a golden is stamped with the VMM that launched the machine, not the daemon's: a `kling-vz` machine readopted by a daemon set to `hv` no longer looks restorable by `kling-hv`.
+- Ctrl-C on `kling freeze` no longer kills the machine: the dump finishes, and a resume that fails is retried by the daemon instead of a SIGKILL.
+- A thaw whose client left after the memory was loaded still resyncs the guest's clock and RNG.
+- `kling rm` keeps the network and disk of a machine whose VMM survives SIGKILL until it exits.
+- Leftover commit dumps (`.commit-mem.file`, the size of the RAM) are removed on daemon start and on stop.
+- `POST /machines` answers 4xx to request errors (unknown image or snapshot, bad `on_ttl`, `disk_mib`, `mem_max_mib`) and lifecycle calls answer 500, not 400, to host errors.
+- Battery mode resumes a machine when a request came in while it was being paused.
+- A paused machine resumed after the Mac slept gets its clock resynced.
+- On battery the daemon's watcher wakes less when no machine runs, on a fixed grid; dot-names in the root no longer count as `kling-vz` dumps for `daemon.vmm: auto`.
+
 ## [0.19.0] - 2026-10-28
 
 macOS gets a second VMM, `kling-hv`, picked by the new default `daemon.vmm: auto`. A Mac that already has machines or goldens frozen with `kling-vz` stays on `kling-vz` until you switch with `daemon.vmm: hv`. Guest kernel changed: old goldens still restore, with a warning. Upgrade with `kling upgrade`.
