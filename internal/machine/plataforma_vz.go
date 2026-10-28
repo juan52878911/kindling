@@ -708,7 +708,11 @@ func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) in
 }
 
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
-// de Apple que aloja la VM, que es donde vive de verdad la memoria.
+// de Apple que aloja la VM (con vz es donde vive de verdad la memoria). Y
+// suma la de sus hijos, que el ayudante no cuenta: el freno del tope de CPU
+// de kling-vz y el custodio de snapshots, unos MiB de runtime de Go cada uno
+// (huella_vz.go). Sin eso
+// la memoria por máquina que dan kling top y las métricas se quedaba corta.
 func memoriaVMM(pid int, sock string) int64 {
 	if sock == "" {
 		return 0
@@ -719,7 +723,7 @@ func memoriaVMM(pid int, sock string) int64 {
 	if err != nil {
 		return 0
 	}
-	return n
+	return n + (huellaHijosBytes(pid)+(1<<19))>>20
 }
 
 func rssVMM(pid int, sock string) int { return int(memoriaVMM(pid, sock)) }
