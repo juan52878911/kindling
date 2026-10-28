@@ -7,6 +7,7 @@ package guest
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/share"
 )
@@ -33,12 +34,40 @@ type shareSession struct {
 	pending map[uint64]chan callResult
 	done    chan struct{}
 	closed  bool
+
+	// maxIO es lo más que se lee o escribe por operación en esta sesión:
+	// share.BaseIO salvo que hello negocie más. Se fija antes de publicar la
+	// sesión (fuseFS.attach) y no cambia después.
+	maxIO uint32
 }
 
 func newShareSession(rw io.ReadWriteCloser) *shareSession {
-	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, done: make(chan struct{})}
+	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, done: make(chan struct{}), maxIO: share.BaseIO}
 	go s.readLoop()
 	return s
+}
+
+// helloTimeout acota la espera de la respuesta a OpHello. Un daemon que no
+// contesta a la primera operación no contestará a ninguna: se corta la sesión
+// y el daemon abre otra.
+const helloTimeout = 10 * time.Second
+
+// hello negocia el tamaño de E/S con el daemon. Hay que llamarla antes de
+// publicar la sesión y sin nada más en vuelo: el daemon solo acepta tramas
+// mayores después de contestar. Un daemon anterior contesta ENOSYS y la sesión
+// se queda en share.BaseIO, que es lo que hablaba.
+func (s *shareSession) hello() {
+	t := time.AfterFunc(helloTimeout, s.close)
+	defer t.Stop()
+	errno, d := s.call(share.OpHello, func(e *share.Enc) { e.U32(share.MaxIO) })
+	if errno != 0 {
+		return
+	}
+	n := d.U32()
+	if d.Err() != nil || n < share.BaseIO || n > share.MaxIO {
+		return
+	}
+	s.maxIO = n
 }
 
 func (s *shareSession) readLoop() {

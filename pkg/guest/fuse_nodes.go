@@ -32,6 +32,12 @@ type node struct {
 	nlookup  uint64
 	children map[string]*node
 	lastUse  uint64
+
+	// openKey es la versión del fichero (tamaño y tiempos) que vio el último
+	// OPEN, y openSeen si hubo alguno. Ver fuseFS.keepCache. Los guarda
+	// fuseFS.kcMu, no la tabla.
+	openKey  cacheKey
+	openSeen bool
 }
 
 type nodeTable struct {

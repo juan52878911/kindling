@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,6 +43,11 @@ const (
 	// lee hasta que hay hueco, así que la contrapresión llega al invitado por
 	// TCP en vez de acumularse aquí.
 	maxInflight = 16
+	// maxBigInflight por sesión: de esas, cuántas pueden pasar de BaseIO (una
+	// lectura o escritura negociada con OpHello, hasta 1 MiB). Acota la memoria
+	// que una sesión obliga a reservar: 16 de 1 MiB por carpeta y 8 carpetas por
+	// máquina serían 128 MiB del host por cada invitado hostil.
+	maxBigInflight = 4
 	// maxListBytes es lo más que ocupa una página de listado.
 	maxListBytes = 64 << 10
 )
@@ -154,6 +160,10 @@ type session struct {
 	mu    sync.Mutex
 	next  uint64
 	files map[uint64]*handle
+
+	// maxIO es el tamaño de E/S negociado con OpHello; BaseIO hasta entonces
+	// (y para siempre con un agente que no la conoce).
+	maxIO atomic.Int64
 }
 
 type handle struct {
@@ -191,6 +201,7 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	sess := &session{srv: s, epoch: uint64(binary.BigEndian.Uint32(b[:])|1) << 32, files: map[uint64]*handle{}}
+	sess.maxIO.Store(proto.BaseIO)
 	defer sess.closeAll()
 
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -206,6 +217,7 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 		}
 	}
 	slots := make(chan struct{}, maxInflight)
+	big := make(chan struct{}, maxBigInflight)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -217,7 +229,10 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 	defer close(salir)
 	go func() {
 		for {
-			body, err := proto.ReadFrame(conn)
+			// El tope se mira tras la cabecera: OpHello lo sube mientras esta
+			// lectura ya espera la trama siguiente (el agente no la manda hasta
+			// tener la respuesta).
+			body, err := proto.ReadFrameLimit(conn, func() int { return proto.FrameFor(int(sess.maxIO.Load())) })
 			select {
 			case tramas <- trama{body, err}:
 			case <-salir:
@@ -250,12 +265,36 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 			return errors.New("the guest sent a message without a header")
 		}
 		slots <- struct{}{}
+		grande := bigOp(op, t.body)
+		if grande {
+			big <- struct{}{}
+		}
 		wg.Add(1)
 		go func() {
-			defer func() { <-slots; wg.Done() }()
+			defer func() {
+				if grande {
+					<-big
+				}
+				<-slots
+				wg.Done()
+			}()
 			reply(sess.dispatch(id, op, d))
 		}()
 	}
+}
+
+// bigOp dice si una petición mueve más de BaseIO: una escritura con más datos,
+// o una lectura que pide más (la respuesta se reserva entera).
+func bigOp(op byte, body []byte) bool {
+	switch op {
+	case proto.OpWrite:
+		return len(body) > proto.BaseIO
+	case proto.OpRead:
+		// id u64, op u8, handle u64, off u64, size u32.
+		const at = 8 + 1 + 8 + 8
+		return len(body) >= at+4 && binary.BigEndian.Uint32(body[at:]) > proto.BaseIO
+	}
+	return false
 }
 
 // drainSession es la segunda mitad del cierre ordenado. Primero espera a que
@@ -407,7 +446,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 
 	case proto.OpRead:
 		h, off, size := d.U64(), d.U64(), d.U32()
-		if d.Done() != nil || size > proto.MaxIO || int64(off) < 0 || int64(off)+int64(size) < 0 {
+		if d.Done() != nil || int64(size) > ss.maxIO.Load() || int64(off) < 0 || int64(off)+int64(size) < 0 {
 			return errReply(id, proto.EINVAL)
 		}
 		hd := ss.get(h)
@@ -424,7 +463,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		return r.B
 
 	case proto.OpWrite:
-		h, off, data := d.U64(), d.U64(), d.Bytes(proto.MaxIO)
+		h, off, data := d.U64(), d.U64(), d.Bytes(int(ss.maxIO.Load()))
 		if d.Done() != nil || int64(off) < 0 || int64(off)+int64(len(data)) < 0 {
 			return errReply(id, proto.EINVAL)
 		}
@@ -539,6 +578,21 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		}
 		r := ok()
 		r.Str(t)
+		return r.B
+
+	case proto.OpHello:
+		want := d.U32()
+		if d.Done() != nil {
+			return errReply(id, proto.EINVAL)
+		}
+		n := int64(min(want, proto.MaxIO))
+		if n < proto.BaseIO {
+			// BaseIO lo acepta cualquiera sin negociar: no se baja de ahí.
+			n = proto.BaseIO
+		}
+		ss.maxIO.Store(n)
+		r := ok()
+		r.U32(uint32(n))
 		return r.B
 
 	case proto.OpStatfs:
