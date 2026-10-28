@@ -339,8 +339,15 @@ func validarNodo(name string, n *GraphNode) error {
 		vistos[p] = true
 	}
 	sort.Ints(n.Ports)
-	if len(n.Shares) > 0 && n.From != "" {
-		return fmt.Errorf("node %s: shared folders need a cold boot (image), not a template", name)
+	// Con plantilla, solo carpetas vivas: se conectan tras restaurar a una
+	// plantilla que las espera (RunRequest.ShareWait; lo comprueba el daemon).
+	// Una copia es un disco, y a una máquina restaurada no se le añaden.
+	if n.From != "" {
+		for _, sh := range n.Shares {
+			if !(ShareAttachment{Mode: sh.Mode}).Live() {
+				return fmt.Errorf("node %s: a copy share needs a cold boot (image), not a template; use ro or rw", name)
+			}
+		}
 	}
 	for k := range n.Labels {
 		if !KeyPattern.MatchString(k) {
