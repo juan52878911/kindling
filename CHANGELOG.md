@@ -18,11 +18,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
 - Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
+- `docs/linux-arm64.md`: which arm64 hosts can run kindling (Graviton .metal, Ampere, OCI BM A1, Pi 5 with the 4K kernel), setup, tuning, and why goldens don't move between arm64 CPU models
 
 ### Changed
 
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
 - `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
+- `kling up` on arm64: the missing-`/dev/kvm` hint no longer says `modprobe kvm_intel` (KVM is built in there), and a host page size other than 4 KiB is a warning (Raspberry Pi 5 boots a 16K kernel by default)
+- Guest kernel: the 6.1.140 tarball sha256 is pinned, so `scripts/builders/kernel/build.sh` runs; arm64 adds errata 1319367, 1530923 and 2067961 and drops 2645198, which 6.1 doesn't have
+- `scripts/30-fetch-artifacts.sh` recommends `KERNEL_SOURCE=build` on aarch64 when it isn't set
 
 ### Fixed
 
