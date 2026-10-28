@@ -178,6 +178,10 @@ void vblk_reafirmar(int idx);
 void vblk_set(int idx, const struct vblk_state *s);
 void vblk_quieto(int idx);     // espera a que el hilo del disco no toque la RAM
 void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaurar)
+void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
+
+// Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
+int khv_prueba(const uint8_t *datos, size_t n);
 
 // net (tramas por un socket unix SOCK_DGRAM)
 struct vnet_state {

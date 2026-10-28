@@ -34,7 +34,7 @@ static void tx(void) {
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   bool hecho = false;
   static uint8_t buf[65536 + HDR];
-  for (;;) {
+  for (uint32_t vueltas = 0; vueltas < q->num; vueltas++) {  // ver b_procesar en virtio.c
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1]) break;
     uint16_t head = avail[2 + q->last_avail % q->num];

@@ -190,7 +190,10 @@ static bool b_procesar(struct vblk *b, struct vq q) {
   struct vdesc *desc;
   if (!vq_ptrs(&q, &avail, &used, &desc)) return false;
   bool hecho = false;
-  for (;;) {
+  // Como mucho una vuelta a la cola por aviso: un invitado que ponga el used
+  // encima del avail haría que cada respuesta añadiera una petición, y el
+  // hilo no saldría nunca (ni dejaría pausar la VM).
+  for (uint32_t vueltas = 0; vueltas < q.num; vueltas++) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     uint16_t aidx = *(volatile uint16_t *)&avail[1];
     if (b->s.q.last_avail == aidx) break;
@@ -281,6 +284,22 @@ static void *vblk_hilo(void *a) {
     pthread_cond_broadcast(&b->cv);
   }
   return NULL;
+}
+
+// vblk_prueba atiende la cola del disco idx en el hilo que llama (solo para
+// las pruebas de prueba.c: sin esperar al hilo del disco).
+void vblk_prueba(int idx) {
+  struct vblk *b = &blks[idx];
+  pthread_mutex_lock(&b->mu);
+  while (b->ocupado) pthread_cond_wait(&b->cv, &b->mu);
+  b->ocupado = true;
+  struct vq q = b->s.q;
+  pthread_mutex_unlock(&b->mu);
+  b_procesar(b, q);
+  pthread_mutex_lock(&b->mu);
+  b->ocupado = false;
+  pthread_cond_broadcast(&b->cv);
+  pthread_mutex_unlock(&b->mu);
 }
 
 int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
@@ -398,7 +417,7 @@ static void r_procesar(void) {
   struct vdesc *desc;
   if (!vq_ptrs(&rs.q, &avail, &used, &desc)) return;
   bool hecho = false;
-  for (;;) {
+  for (uint32_t vueltas = 0; vueltas < rs.q.num; vueltas++) {  // ver b_procesar
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (rs.q.last_avail == *(volatile uint16_t *)&avail[1]) break;
     uint16_t head = avail[2 + rs.q.last_avail % rs.q.num];
