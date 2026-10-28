@@ -32,6 +32,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Writing a file into an image or removing it is refused while a cold boot of that image is in flight
 - Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
 - Freeze and save fsync the memory, state and overlay files before sealing, after the VM is resumed or gone, so a power cut cannot leave a seal over a dump still in cache
+- A full copy-on-write store no longer cuts the freeze or thaw of a machine at 5 s, which could leave it half frozen
 
 ## [0.18.0] - 2026-10-11
 
