@@ -1,9 +1,13 @@
 # Atajos de desarrollo. build.sh es quien sabe firmar; el resto es lo que corre
 # el CI del núcleo sobre este módulo.
-.PHONY: build test vet fmt check smoke clean
+.PHONY: build build-hv test vet fmt check smoke clean
 
 build:
 	./build.sh
+
+# kling-hv: el VMM sobre Hypervisor.framework (docs/backend-hv.md del núcleo).
+build-hv:
+	./build-hv.sh
 
 test:
 	go test -race ./...
