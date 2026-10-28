@@ -149,6 +149,10 @@ func (s *Service) Start(env []string) {
 	serviceState.mu.Lock()
 	serviceState.svc = s
 	serviceState.mu.Unlock()
+	if s.spec.Init {
+		go s.initLoop()
+		return
+	}
 	go s.loop(env)
 }
 
@@ -538,6 +542,9 @@ func (s *Service) Stop() {
 // reinicios, lo lanza ya. Es lo que hace OnRestoreRestart en cada copia de un
 // dorado: un proceso nuevo siembra sus aleatorios del kernel ya resembrado.
 func (s *Service) Restart() error {
+	if s.spec.Init {
+		return errors.New("the image's init is PID 1; it can't be restarted without rebooting the machine")
+	}
 	s.mu.Lock()
 	if s.done == nil || s.stopping {
 		s.mu.Unlock()

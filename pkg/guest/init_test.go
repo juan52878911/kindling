@@ -83,6 +83,10 @@ func (f *fakeInit) Exec(p string, argv, env []string) error {
 	return f.call("exec " + p)
 }
 
+func (f *fakeInit) Spawn(p string, argv, env []string) error {
+	return f.call("spawn " + p + " " + strings.Join(argv[1:], " "))
+}
+
 // El plan entero, en orden: lo mismo que hace minimal-init.sh para una imagen
 // de Docker (sin tmpfs en /tmp y /run), y con la capa de servicio.
 func TestInitPlan(t *testing.T) {

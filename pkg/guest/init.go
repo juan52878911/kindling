@@ -21,6 +21,7 @@ package guest
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -107,6 +108,8 @@ type initSys interface {
 	Lstat(p string) error
 	Symlink(target, p string) error
 	Exec(path string, argv, env []string) error
+	// Spawn lanza un proceso hijo con la consola de este y no lo espera.
+	Spawn(path string, argv, env []string) error
 }
 
 // Init hace de PID 1 y no vuelve: acaba en el agente o, si algo que el
@@ -220,8 +223,47 @@ func runInit(s initSys, environ []string) error {
 	initHosts(s, hn)
 
 	env := initEnv(s, environ)
+	if svc, ok := initImageService(s); ok {
+		return execImageInit(s, svc, env)
+	}
 	argv := []string{guestAgentPath, "-listen", ":8080"}
 	return must(s.Exec(guestAgentPath, argv, env), "starting "+guestAgentPath)
+}
+
+// initImageService es el servicio de la imagen si pide su propio init como
+// PID 1 (api.ServiceSpec.Init, importada con -init image).
+func initImageService(s initSys) (api.ServiceSpec, bool) {
+	b, err := s.ReadFile(api.GuestServiceSpec)
+	if err != nil {
+		return api.ServiceSpec{}, false
+	}
+	var svc api.ServiceSpec
+	if json.Unmarshal(b, &svc) != nil || !svc.Init || len(svc.Argv) == 0 {
+		return api.ServiceSpec{}, false
+	}
+	return svc, true
+}
+
+// execImageInit cede el PID 1 al init de la imagen (s6-overlay, supervisord):
+// antes lanza el agente como hijo suyo, que sigue sirviendo al anfitrión
+// (exec, logs, resync, parada). Va antes del exec y no después porque tras él
+// este proceso ya no existe; el init de la imagen cosecha a los huérfanos y
+// la consola (stdout) es la misma para los dos.
+func execImageInit(s initSys, svc api.ServiceSpec, env []string) error {
+	bin := svc.Argv[0]
+	if !strings.Contains(bin, "/") {
+		var err error
+		if bin, err = lookPathEnv(bin, env, ""); err != nil {
+			return fmt.Errorf("the image's init: %w", err)
+		}
+	}
+	if err := s.Spawn(guestAgentPath, []string{guestAgentPath, "-listen", ":8080"}, env); err != nil {
+		return fmt.Errorf("starting %s: %w", guestAgentPath, err)
+	}
+	if err := s.Exec(bin, svc.Argv, env); err != nil {
+		return fmt.Errorf("starting the image's init %s: %w", bin, err)
+	}
+	return nil
 }
 
 // initLayerDev es el valor de kling.layer en la línea de comandos del kernel

@@ -79,6 +79,11 @@ type ServiceSpec struct {
 	// lanzar el servicio (ParseUlimit, CheckSysctl; guest_limits.go).
 	Ulimits []string          `json:"ulimits,omitempty"`
 	Sysctls map[string]string `json:"sysctls,omitempty"`
+	// Init dice que Argv es el init de la imagen (s6-overlay, supervisord...)
+	// y que es el PID 1: el init de kindling lo ejecuta en su lugar y el
+	// agente corre como hijo suyo. El agente no lo lanza ni lo reinicia; solo
+	// le manda la señal de parada y espera a que el resto de procesos acabe.
+	Init bool `json:"init,omitempty"`
 }
 
 // Valores de ServiceSpec.OnRestore.
