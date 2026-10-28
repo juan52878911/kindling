@@ -30,6 +30,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 - Writing a file into an image or removing it is refused while a cold boot of that image is in flight
+- Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
 
 ## [0.18.0] - 2026-10-11
 

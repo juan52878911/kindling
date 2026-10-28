@@ -2,7 +2,9 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,8 +211,37 @@ func TestCrearVolumenNoPisaElExistente(t *testing.T) {
 		t.Error("pisó el contenido de un volumen existente")
 	}
 	// Y no debe dejar un .tmp por ahí.
-	if _, err := os.Stat(m.volumePath("notas") + ".tmp"); err == nil {
-		t.Error("quedó un .tmp suelto")
+	if tmps, _ := filepath.Glob(filepath.Join(m.volumesDir(), "*.tmp")); len(tmps) > 0 {
+		t.Errorf("quedó un .tmp suelto: %v", tmps)
+	}
+}
+
+// Un create en curso reserva el nombre: un segundo create del mismo volumen
+// se niega en vez de pasar el Stat y renombrar encima del primero.
+func TestCrearVolumenConCreateEnCurso(t *testing.T) {
+	m := newTestManager(t)
+	soltar, err := m.reservarOperacion("notas", opCrear)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.CreateVolume(t.Context(), "notas", 64)
+	var se *api.StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusConflict {
+		t.Fatalf("con otro create en curso: quería 409, dio %v", err)
+	}
+	if _, err := os.Stat(m.volumePath("notas")); err == nil {
+		t.Error("creó el volumen pese a la reserva")
+	}
+	if tmps, _ := filepath.Glob(filepath.Join(m.volumesDir(), "*.tmp")); len(tmps) > 0 {
+		t.Errorf("quedó un .tmp suelto: %v", tmps)
+	}
+	soltar()
+	// Soltada, no queda ninguna operación sobre el nombre.
+	m.mu.Lock()
+	op := m.operacionEnCursoLocked("notas")
+	m.mu.Unlock()
+	if op != "" {
+		t.Fatalf("la reserva no se soltó: %q", op)
 	}
 }
 

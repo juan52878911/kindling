@@ -48,17 +48,31 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		return nil, err
 	}
 	path := m.volumePath(name)
+	// Reservado ANTES de mirar si existe: dos creates a la vez pasaban los dos
+	// el Stat y el segundo rename tapaba el volumen del primero, o renombraba
+	// el .tmp que el otro aún formateaba.
+	soltar, err := m.reservarOperacion(name, opCrear)
+	if err != nil {
+		return nil, err
+	}
+	defer soltar()
 	if _, err := os.Stat(path); err == nil {
 		return nil, fmt.Errorf("volume %q already exists", name)
 	}
 
-	// Se construye en .tmp y se renombra con durable.Renombrar (fsync del
-	// fichero + rename + fsync del directorio): existir tiene que implicar
-	// estar formateado Y en disco. Un fichero a medias se montaría mal dentro
-	// del invitado y el fallo aparecería allí, no aquí; y un rename sin fsync
-	// puede no sobrevivir a un corte de luz aunque parezca que ya ocurrió.
-	tmp := path + ".tmp"
-	_ = os.Remove(tmp)
+	// Se construye en un temporal propio y se renombra con durable.Renombrar
+	// (fsync del fichero + rename + fsync del directorio): existir tiene que
+	// implicar estar formateado Y en disco. Un fichero a medias se montaría
+	// mal dentro del invitado y el fallo aparecería allí, no aquí; y un rename
+	// sin fsync puede no sobrevivir a un corte de luz aunque parezca que ya
+	// ocurrió. Acaba en .tmp para que barrerTmpVolumenes lo recoja si el
+	// daemon muere a medias.
+	f, err := os.CreateTemp(m.volumesDir(), name+".ext4.*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	tmp := f.Name()
+	f.Close()
 	if err := createVolumeImage(ctx, tmp, sizeMiB); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("formatting volume: %w", err)
