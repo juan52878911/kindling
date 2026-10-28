@@ -7,10 +7,17 @@ package units
 import (
 	"flag"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// MaxMiB es el mayor tamaño que acepta ParseMiB: 1 PiB. Sobra para memoria y
+// disco, cabe en un int32 y, pasado a bytes (<<20), en un int64. Sin tope,
+// "1e30G" acababa en MaxInt64 (o en lo que diera la conversión de un float
+// fuera de rango, que en Go depende de la arquitectura) sin ningún error.
+const MaxMiB = 1 << 30
 
 // ParseMiB lee "512", "512M", "2G", "1024MiB", "0.5G" y devuelve MiB.
 func ParseMiB(s string) (int, error) {
@@ -22,11 +29,14 @@ func ParseMiB(s string) (int, error) {
 		if n < 0 {
 			return 0, fmt.Errorf("negative size %q", s)
 		}
+		if n > MaxMiB {
+			return 0, fmt.Errorf("size %q is too big (max %d MiB)", s, MaxMiB)
+		}
 		return n, nil
 	}
 	num, unit := splitUnit(s)
 	f, err := strconv.ParseFloat(num, 64)
-	if err != nil || f < 0 {
+	if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, fmt.Errorf("invalid size %q: use 512, 512M or 2G", s)
 	}
 	var mib float64
@@ -42,7 +52,11 @@ func ParseMiB(s string) (int, error) {
 	default:
 		return 0, fmt.Errorf("invalid size %q: use 512, 512M or 2G", s)
 	}
-	return int(mib + 0.5), nil
+	r := math.Floor(mib + 0.5)
+	if r > MaxMiB {
+		return 0, fmt.Errorf("size %q is too big (max %d MiB)", s, MaxMiB)
+	}
+	return int(r), nil
 }
 
 // ParseDuration lee "600" (segundos), "10m", "1h30m".
