@@ -19,7 +19,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Fijar la imagen | la etiqueta se resuelve una vez a digest y queda en la receta; `kling image recipe N` |
 | Capas `tar+zstd` | igual que las gzip: se leen con un descompresor propio, sin dependencias ([imagenes.md](imagenes.md#imágenes-de-docker-el-constructor-oci)) |
 | Saber que está lista | el `HEALTHCHECK` de la imagen, o el primer puerto de `EXPOSE`; `-wait-ready`, `kling machine ready N` |
-| Ver qué dice el servicio | `kling logs -service N` |
+| Ver qué dice el servicio | `kling logs -service N` (`-t`: la hora de cada línea, como `docker logs -t`; `-f` la sigue) |
 | Pararla como Docker | `kling stop` manda la `STOPSIGNAL` de la imagen antes de apagar; el disco de la máquina se queda |
 | Arrancarla otra vez (`docker start`) | `kling start N`: en frío, sobre su disco, con la misma imagen, memoria, volúmenes y red. El entorno de `-e` no se guarda: hay que volver a darlo (`kling start -e POSTGRES_PASSWORD N`), y si falta una clave lo dice |
 | Una plantilla caliente y copias | `kling save N plantilla` y `kling run -from plantilla`: copias listas en decenas de milisegundos con el estado de la plantilla |

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,11 +39,17 @@ func cmdLogs(args []string) error {
 	follow := fs.Bool("f", false, "keep printing new lines until Ctrl-C or until the machine stops running")
 	service := fs.Bool("service", false, "the output of the image's service (the ENTRYPOINT of a Docker image) instead of the serial console")
 	raw := fs.Bool("raw", false, "print the console as is, escape sequences included (by default, on a terminal, control characters are shown escaped)")
+	stamps := fs.Bool("t", false, "with -service, show the time each line arrived (RFC 3339, UTC), as docker logs -t")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling logs [-f] [-service] <ref> [-tail N]")
+		return fmt.Errorf("usage: kling logs [-f] [-service [-t]] <ref> [-tail N]")
+	}
+	if *stamps && !*service {
+		// La consola serie no guarda horas; las del kernel ([   1.234]) son
+		// segundos desde el arranque.
+		return errors.New("-t needs -service: only the service's output keeps the time of each line (the serial console has none)")
 	}
 	ref := fs.Arg(0)
 
@@ -54,7 +61,7 @@ func cmdLogs(args []string) error {
 	var out string
 	var err error
 	if *service {
-		src = serviceLogSource{c: c, ref: ref}
+		src = serviceLogSource{c: c, ref: ref, tiempos: stamps, avisado: new(bool)}
 		out, err = src.fetch(ctx)
 		out = lastLines(out, *tail)
 	} else {
@@ -116,14 +123,20 @@ func (s logSource) running(ctx context.Context) (bool, string, error) {
 type serviceLogSource struct {
 	c   *api.Client
 	ref string
+	// tiempos pide las horas de cada línea (-t); avisado, que el agente no
+	// las tiene (ya se dijo una vez).
+	tiempos, avisado *bool
 }
 
 // serviceLogWindow es cuánto de la cola del log se pide cada vez.
 const serviceLogWindow = 256 << 10
 
 func (s serviceLogSource) fetch(ctx context.Context) (string, error) {
-	resp, err := s.c.Guest(ctx, s.ref, api.GuestRequest{Method: "GET",
-		Path: fmt.Sprintf("%s?tail=%d", api.GuestServicePath, serviceLogWindow), MaxBodyBytes: 4 * serviceLogWindow})
+	path := fmt.Sprintf("%s?tail=%d", api.GuestServicePath, serviceLogWindow)
+	if s.tiempos != nil && *s.tiempos {
+		path += "&timestamps=1"
+	}
+	resp, err := s.c.Guest(ctx, s.ref, api.GuestRequest{Method: "GET", Path: path, MaxBodyBytes: 4 * serviceLogWindow})
 	if err != nil {
 		return "", err
 	}
@@ -137,6 +150,10 @@ func (s serviceLogSource) fetch(ctx context.Context) (string, error) {
 	if !st.Declared {
 		return "", fmt.Errorf("%s: its image declares no service; try kling logs without -service", s.ref)
 	}
+	if s.tiempos != nil && *s.tiempos && !st.Timestamps && st.Log != "" && s.avisado != nil && !*s.avisado {
+		*s.avisado = true
+		fmt.Fprintf(os.Stderr, "warning: %s: its guest agent keeps no times per line (an image from before kling logs -t): reimport it\n", s.ref)
+	}
 	log := st.Log
 	if len(log) >= serviceLogWindow {
 		// La primera línea viene cortada por la ventana.
@@ -148,7 +165,7 @@ func (s serviceLogSource) fetch(ctx context.Context) (string, error) {
 }
 
 func (s serviceLogSource) running(ctx context.Context) (bool, string, error) {
-	return logSource(s).running(ctx)
+	return logSource{c: s.c, ref: s.ref}.running(ctx)
 }
 
 // lastLines deja las n últimas líneas de s (0 = todas).

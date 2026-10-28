@@ -18,6 +18,7 @@ package guest
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,7 +87,12 @@ func LoadService(p string) (*Service, error) {
 	if err := checkServiceSpec(spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
-	return &Service{spec: spec, root: "/", logPath: api.GuestServiceLog, console: os.Stdout}, nil
+	return newService(spec), nil
+}
+
+// newService es el servicio de spec con la consola y el log de siempre.
+func newService(spec api.ServiceSpec) *Service {
+	return &Service{spec: spec, root: "/", logPath: api.GuestServiceLog, console: os.Stdout}
 }
 
 func checkServiceSpec(s api.ServiceSpec) error {
@@ -121,6 +127,20 @@ func (a *Agent) StartService() {
 		log.Printf("service: %v", err)
 		return
 	}
+	// El comando de la máquina (machine_cmd.go), encima del de la imagen.
+	svc, err = a.conMachineCmd(svc)
+	if err != nil {
+		log.Printf("service: %v; not starting it", err)
+		if svc == nil {
+			svc = newService(api.ServiceSpec{})
+		}
+		// Declarado pero sin arrancar: GET /service enseña por qué.
+		svc.err = err.Error()
+		serviceState.mu.Lock()
+		serviceState.svc = svc
+		serviceState.mu.Unlock()
+		return
+	}
 	if svc == nil {
 		return
 	}
@@ -138,12 +158,17 @@ func (a *Agent) startService(svc *Service) {
 		serviceState.mu.Unlock()
 		return
 	}
+	env := a.Env
+	start := func() { svc.Start(env) }
 	if n := shareWaitWanted(); n > 0 {
-		env := a.Env
-		startAfterShares(shareState, n, func() { svc.Start(env) })
+		start = func() { startAfterShares(shareState, n, func() { svc.Start(env) }) }
+	}
+	if volumeWaitWanted() {
+		// Primero los volúmenes y, montados, las carpetas si las espera.
+		startAfterVolumes(a.Volumes, start)
 		return
 	}
-	svc.Start(a.Env)
+	start()
 }
 
 // Start lanza el bucle que arranca y relanza el servicio.
@@ -695,8 +720,13 @@ func onRestore() func() error {
 	return nil
 }
 
-// Status es lo que devuelve GET /service, con los últimos tail bytes del log.
-func (s *Service) Status(tail int64) api.GuestService {
+// Status es lo que devuelve GET /service, con los últimos tail bytes del log
+// sin las marcas de tiempo.
+func (s *Service) Status(tail int64) api.GuestService { return s.StatusCon(tail, false) }
+
+// StatusCon es Status con las marcas de tiempo al principio de cada línea si
+// tiempos (GET /service?timestamps=1).
+func (s *Service) StatusCon(tail int64, tiempos bool) api.GuestService {
 	s.mu.Lock()
 	st := api.GuestService{Declared: true, Argv: s.spec.Argv, Starts: s.starts, LastExit: s.lastExit, Error: s.err}
 	if s.cmd != nil && s.cmd.Process != nil {
@@ -705,6 +735,11 @@ func (s *Service) Status(tail int64) api.GuestService {
 	s.mu.Unlock()
 	if tail > 0 {
 		st.Log = tailFile(s.logPath, tail)
+		if tiempos {
+			st.Timestamps = true
+		} else {
+			st.Log = quitarTiempos(st.Log)
+		}
 	}
 	return st
 }
@@ -722,7 +757,7 @@ func tailFile(p string, n int64) string {
 	return string(b)
 }
 
-// ServiceHandler sirve GET /service[?tail=N].
+// ServiceHandler sirve GET /service[?tail=N][&timestamps=1].
 func ServiceHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -743,22 +778,78 @@ func ServiceHandler() http.HandlerFunc {
 		serviceState.mu.Unlock()
 		st := api.GuestService{}
 		if s != nil {
-			st = s.Status(tail)
+			st = s.StatusCon(tail, r.URL.Query().Get("timestamps") == "1")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
 	}
 }
 
-// rotatingLog escribe en path y, al pasar de max, lo rota a path.1.
+// rotatingLog escribe en path y, al pasar de max, lo rota a path.1. Cada
+// línea va con la hora a la que llegó delante (RFC 3339 en UTC y un espacio):
+// GET /service la quita salvo con ?timestamps=1 (`kling logs -t`).
 type rotatingLog struct {
 	path string
 	max  int64
 	f    *os.File
 	n    int64
+	// enMedio: lo último escrito no acabó en salto de línea.
+	enMedio bool
+	// ahora es el reloj (pruebas).
+	ahora func() time.Time
+}
+
+// formatoTiempoLog es el de las marcas: ancho fijo, para quitarlas sin dudas.
+const formatoTiempoLog = "2006-01-02T15:04:05.000000Z"
+
+// conTiempos pone la marca al principio de cada línea que empieza en p.
+func (l *rotatingLog) conTiempos(p []byte) []byte {
+	ahora := time.Now
+	if l.ahora != nil {
+		ahora = l.ahora
+	}
+	marca := ahora().UTC().Format(formatoTiempoLog) + " "
+	out := make([]byte, 0, len(p)+len(marca))
+	for len(p) > 0 {
+		if !l.enMedio {
+			out = append(out, marca...)
+		}
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			out = append(out, p...)
+			l.enMedio = true
+			break
+		}
+		out = append(out, p[:i+1]...)
+		p = p[i+1:]
+		l.enMedio = false
+	}
+	return out
+}
+
+// quitarTiempos quita la marca de cada línea que la lleve (la primera de una
+// cola por bytes puede venir cortada, sin ella).
+func quitarTiempos(s string) string {
+	if s == "" {
+		return s
+	}
+	lineas := strings.SplitAfter(s, "\n")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, l := range lineas {
+		if len(l) > len(formatoTiempoLog) && l[len(formatoTiempoLog)] == ' ' {
+			if _, err := time.Parse(formatoTiempoLog, l[:len(formatoTiempoLog)]); err == nil {
+				l = l[len(formatoTiempoLog)+1:]
+			}
+		}
+		b.WriteString(l)
+	}
+	return b.String()
 }
 
 func (l *rotatingLog) Write(p []byte) (int, error) {
+	escrito := len(p)
+	p = l.conTiempos(p)
 	if l.f == nil || l.n+int64(len(p)) > l.max {
 		if l.f != nil {
 			l.f.Close()
@@ -768,7 +859,7 @@ func (l *rotatingLog) Write(p []byte) (int, error) {
 		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 		if err != nil {
 			// Sin fichero se sigue: la consola recibe la salida igual.
-			return len(p), nil
+			return escrito, nil
 		}
 		st, _ := f.Stat()
 		l.f, l.n = f, 0
@@ -780,7 +871,7 @@ func (l *rotatingLog) Write(p []byte) (int, error) {
 	l.n += int64(n)
 	// Siempre "todo escrito": un error aquí cortaría la copia a la consola
 	// (io.MultiWriter para en el primero que falla).
-	return len(p), nil
+	return escrito, nil
 }
 
 func (l *rotatingLog) Close() {

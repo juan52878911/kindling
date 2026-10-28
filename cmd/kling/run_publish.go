@@ -116,6 +116,6 @@ func publicarEnPrimerPlano(ctx context.Context, c *api.Client, host string, mc *
 	}
 	fmt.Fprintf(os.Stderr, "Ctrl-C stops publishing; the machine stays (kling rm %s removes it)\n", mc.Name)
 	var mu sync.Mutex
-	go followServiceLogs(ctx, host, mc.ID, "", &mu)
+	go followServiceLogs(ctx, host, mc.ID, "", false, &mu)
 	<-ctx.Done()
 }

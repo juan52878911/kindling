@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -317,8 +317,11 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	// muerto, y el primer exec del VMM nuevo se comía un RST. Solo las de esa
 	// IP: las de las demás máquinas siguen valiendo.
 	mgr.OnGuestGone(guestTransports.forgetIP)
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
-		fcVersion: fcVersion}, nil
+	srv := &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
+		fcVersion: fcVersion}
+	// Los healthchecks de las aristas depends se ejecutan con el exec de aquí.
+	mgr.FijarSondaExec(srv.sondaSalud)
+	return srv, nil
 }
 
 // firecrackerVersion ejecuta `firecracker --version` una vez. Si el binario
@@ -791,7 +794,7 @@ func runStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
 		return http.StatusConflict
-	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest):
+	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
 		return http.StatusBadRequest
 	case errors.Is(err, machine.ErrNameTaken):
 		return http.StatusConflict

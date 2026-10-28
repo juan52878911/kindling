@@ -381,12 +381,16 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
 	if !yaPausada {
-		soltados = true
-		if err := m.releaseVolumes(mc); err != nil {
-			// Un puente que no conoce la ruta no soltó nada: no hay que
-			// devolverle nada, ni darla por perdida al no poder hacerlo.
-			soltados = !sinOperacionesDeVolumen(err)
-			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+		// Con VolumeWait no hay nada montado que soltar, y devolvérselos
+		// después lanzaría el servicio en ella (volumen_espera.go).
+		soltados = !mc.VolumeWait
+		if soltados {
+			if err := m.releaseVolumes(mc); err != nil {
+				// Un puente que no conoce la ruta no soltó nada: no hay que
+				// devolverle nada, ni darla por perdida al no poder hacerlo.
+				soltados = !sinOperacionesDeVolumen(err)
+				return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+			}
 		}
 
 		// Con la plantilla aún en marcha: que suelte lo que no usa, y el

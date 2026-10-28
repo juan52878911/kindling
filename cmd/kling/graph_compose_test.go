@@ -54,7 +54,7 @@ func TestComposeGrafoSeLee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Graph.Name != "shop" || len(req.Graph.Nodes) != 3 || len(req.Graph.Edges) != 4 {
+	if req.Graph.Name != "shop" || len(req.Graph.Nodes) != 3 || len(req.Graph.Edges) != 8 {
 		t.Errorf("graph = %+v", req.Graph)
 	}
 }

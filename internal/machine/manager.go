@@ -187,6 +187,9 @@ type Manager struct {
 	// entornoPendiente es el entorno de las máquinas cuyo agente aún no lo
 	// ha leído de MMDS (entorno.go): un PutMMDS en ese rato lo conserva.
 	entornoPendiente map[string]map[string]string
+	// sondaExec ejecuta los healthchecks de las aristas depends
+	// (grafo_salud.go); la pone el daemon.
+	sondaExec SondaExec
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
 	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
@@ -1298,6 +1301,13 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return nil, err
 	}
+	comando, err := comandoDePeticion(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := validarVolumeWait(req); err != nil {
+		return nil, err
+	}
 	req.Env = nil
 	if err := validarShareWait(req.ShareWait); err != nil {
 		return nil, err
@@ -1528,6 +1538,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		EnvKeys:   api.MachineEnvKeys(env),
 		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
 	}
+	if comando != nil {
+		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd
+	}
+	mc.VolumeWait = req.VolumeWait
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
 	// gcFailed) veía la máquina en created con PID 0, no mataba nada, borraba
@@ -1664,8 +1678,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
 	m.conocerAgente(id)
-	if len(env) > 0 {
+	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
+	}
+	if mc.VolumeWait {
+		m.vigilarEsperaVolumen(id)
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
@@ -1830,11 +1847,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	// El entorno de la máquina va por MMDS, que cuelga de la red.
+	// El entorno y el comando de la máquina van por MMDS, que cuelga de la red.
+	comando := m.comandoDeID(id)
 	if len(env) > 0 && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrEnvRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) + shareWaitBootArg(shareWait)
+	if comando != nil && n == nil {
+		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
+	}
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
+		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait)
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}
@@ -1908,12 +1930,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
 			// Sin MMDS el entorno de la máquina no llega: el agente no
 			// arrancaría el servicio. Mejor no arrancar.
-			if len(env) > 0 {
-				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment: %w", err)
+			if len(env) > 0 || comando != nil {
+				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment and command: %w", err)
 			}
 			log.Printf("warning: could not configure MMDS on %s: %v (no session secrets available)", id, err)
-		} else if len(env) > 0 {
-			if err := ponerEntornoMMDS(ctx, c, env); err != nil {
+		} else if len(env) > 0 || comando != nil {
+			if err := ponerEntornoMMDS(ctx, c, datosArranqueMMDS(env, comando)); err != nil {
 				return pid, err
 			}
 		}

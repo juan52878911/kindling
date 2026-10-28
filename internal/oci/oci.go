@@ -369,7 +369,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 	if len(m.Manifests) > 0 {
 		pick := pickPlatform(m.Manifests, arch)
 		if pick == nil {
-			return nil, fmt.Errorf("%s@%s has no linux/%s image", ref, digest, arch)
+			return nil, errSinPlataforma(ref, digest, arch, m.Manifests)
 		}
 		c.logf("index %s: linux/%s is %s", short(digest), arch, pick.Digest)
 		return c.Pull(ctx, ref, pick.Digest, arch)
@@ -616,6 +616,50 @@ func pickPlatform(ds []Descriptor, arch string) *Descriptor {
 		}
 	}
 	return pick
+}
+
+// plataformasDe son las plataformas de un índice ("linux/amd64",
+// "linux/arm/v7"), sin las atestaciones, en su orden y sin repetir.
+func plataformasDe(ds []Descriptor) []string {
+	var out []string
+	visto := map[string]bool{}
+	for _, d := range ds {
+		p := d.Platform
+		if p == nil || p.OS == "unknown" || p.Architecture == "unknown" {
+			continue
+		}
+		s := p.OS + "/" + p.Architecture
+		if p.Variant != "" {
+			s += "/" + p.Variant
+		}
+		if !visto[s] {
+			visto[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// errSinPlataforma es el error de un índice sin linux/arch: dice qué hay y
+// qué se puede hacer, en vez de solo lo que falta.
+func errSinPlataforma(ref, digest, arch string, ds []Descriptor) error {
+	hay := plataformasDe(ds)
+	if len(hay) == 0 {
+		return fmt.Errorf("%s@%s has no linux/%s image (and lists no platforms)", ref, digest, arch)
+	}
+	otra := ""
+	for _, p := range hay {
+		if strings.HasPrefix(p, "linux/") {
+			otra = strings.SplitN(strings.TrimPrefix(p, "linux/"), "/", 2)[0]
+			break
+		}
+	}
+	consejo := "look for a tag published for linux/" + arch + ", or build one (docker buildx build --platform linux/" + arch + ")"
+	if otra != "" {
+		consejo += "; -arch " + otra + " imports it for " + otra + " hosts (it does not boot on this one)"
+	}
+	return fmt.Errorf("%s is published only for %s, not linux/%s (the daemon's architecture): %s",
+		ref, strings.Join(hay, ", "), arch, consejo)
 }
 
 func sha(b []byte) string {

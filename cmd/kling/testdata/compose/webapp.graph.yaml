@@ -9,6 +9,10 @@ nodes:
   db: {image: shop-db, ports: [5432], volumes: [{name: shop-pgdata, mount: /var/lib/postgresql/data}]}
   web: {image: shop-web, ports: [8000]}
 edges:
+  - {from: cache, to: db, kind: link, port: 5432}
+  - {from: cache, to: web, kind: link, port: 8000}
+  - {from: db, to: cache, kind: link, port: 6379}
+  - {from: db, to: web, kind: link, port: 8000}
   - {from: web, to: cache, kind: link, port: 6379}
   - {from: web, to: cache, kind: depends}
   - {from: web, to: db, kind: link, port: 5432}

@@ -441,7 +441,7 @@ func TestBuildOCIAgenteSinInit(t *testing.T) {
 func TestBuildOCIRejects(t *testing.T) {
 	e := newOCITest(t)
 	_, idx := e.reg.ImageConfig("arm64", nil, ocitest.TarGz(alpineLike()))
-	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "no linux/amd64") {
+	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "not linux/amd64") {
 		t.Fatalf("wrong arch: %v", err)
 	}
 	if _, _, err := e.build("x", OCISpec{Ref: e.reg.Host() + "/x/y@" + idx, Arch: "amd64", MaxMB: 1, Env: []string{"A=1\nB=2"}}); err == nil {

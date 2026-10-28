@@ -644,7 +644,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			return err
 		}
 	}
-	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
+	// Las dos mitades, para que el agente pueda cambiar solo el CMD de una
+	// máquina (RunRequest.Cmd) sin perder el ENTRYPOINT.
+	svc := api.ServiceSpec{Argv: argv, Entrypoint: entry, Cmd: argv[len(entry):], User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
 		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls, Init: initImage}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
@@ -672,7 +674,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		mode uint32
 	}
 	put := []putFile{
-		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
+		// search graph: en un grafo (compose up), "api" a secas es api.graph,
+		// como el nombre de un servicio en la red de Docker Compose: un
+		// proxy_pass http://api:8081 de un nginx.conf no se puede reescribir.
+		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch " + api.GraphDomain + "\n", 0o644},
 		{"/etc/kindling/oci.json", string(ociJSON) + "\n", 0o644},
 		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\n%sref=%s\ndigest=%s\nmanifest=%s\ninit=%s\nbuilt_at=%s\n",
 			sourceLine, shown, digest, img.ManifestDigest, initKind, t.Format("2006-01-02T15:04:05Z")), 0o644},

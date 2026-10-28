@@ -8,6 +8,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling logs -service -t` and `compose up -t`: the time each line of the service's output arrived, kept by the guest agent (`GET /service?timestamps=1`)
+- `RunRequest.VolumeWait` (capability `volume-wait`, agent `kling.volwait=1`): boot with the volumes attached but unmounted and the service waiting; each copy of its template mounts them on restore and then starts the service. `compose up` now keeps warm templates for services with named volumes (postgres with `pgdata:`) too
+- `depends` edges take a `health` check run inside the target (capability `graph-health`): `compose up` translates `condition: service_healthy` to the real `test` with `interval`, `timeout`, `retries`, `start_period` and `start_interval`, instead of a TCP probe
+- `compose up`: the template key includes the daemon's VMM, so switching between `kling-vz`, `kling-hv` and Firecracker rebuilds the templates instead of failing until `-fresh`
+- `RunRequest.Entrypoint`/`Cmd` (capability `machine-cmd`): a machine runs another command without baking another image, via MMDS like the environment (cold boots only; an agent without the `cmd` capability fails the machine); `compose up` puts `command:`/`entrypoint:` there, so changing them rebuilds the template but no longer reimports the image
+- `compose up`/`graph from-compose`: a project network like Docker Compose: every service reaches every other one (link edges to all their ports, hosts in `environment:` rewritten), restricted by `networks:` and `network_mode: none`; only the used links if over 64 edges
 - macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them
 - After the host sleeps, the daemon resyncs the clock of running guests (detected from wall vs monotonic clock, no extra wakeups)
 - macOS: running machines are paused before the Mac sleeps and resumed when it wakes: `kling-vz`/`kling-hv --power-events`, a small sandboxed helper the daemon starts, relays IOKit's sleep notice (the core stays without cgo; sleep is never delayed more than 10 s)
@@ -49,6 +55,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - macOS: the `kling-vz`/`kling-hv` sandbox profiles have no per-port rules: `sandbox_init` takes ~9 ms instead of 53-68 ms (vz) and 10-29 ms (hv); the host loopback is always closed to the VMM and a credential's `-upstream 127.0.0.1:PORT` is dialed by the daemon over the link broker; `kling-vz` listens on any 127.0.0.1 port like `kling-hv`
 - macOS: the daemon publishes committed snapshots itself (clonefile from the machine directory, no symlinks or hardlinks); `kling-vz` and `kling-hv` no longer start a snapshot keeper process per machine (~6 MiB less per machine: 22.1 → 15.5 MiB per `kling-hv` copy). A new VMM needs the new daemon to commit
+- Live and copy shares can be mounted on a configuration directory under `/etc` (`./nginx:/etc/nginx/conf.d:ro`), except `/etc` itself and kindling's own `/etc/kindling` and `/etc/kling`
+- Imported Docker images resolve bare names in their graph (`search graph` in `/etc/resolv.conf`): an `nginx.conf` with `proxy_pass http://api:8081` works under `compose up` as in Docker Compose
+- Importing an image that has no build for the daemon's architecture lists the platforms it has and what to do (another tag, `docker buildx --platform`, or `-arch` for another host); `scripts/bateria-imagenes.sh` tests `otra-plataforma` with the architecture opposite to the daemon's
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
 - `kling-vz` no longer wakes up 10 times a second per VM: the CPU regulator waits for a change when there is no ceiling (the vz default) and backs off to 500 ms with an idle VM; the credential audit log arms its flush timer only with something pending (~65 to ~1 context switches/s per VM, also paused)
@@ -76,6 +85,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - macOS: `kling top` and procstats count the VMM's child processes (CPU brake, snapshot keeper) in each machine's memory
+- `compose up -fresh` reimports the images with `-replace` (it reused them when the recipe was the same, so a new guest agent never reached them)
+- `compose up` removes a failed `<project>-<node>` machine left by an earlier up (labelled with a graph that no longer exists) instead of failing on "machine name is taken"
+- Guest agent: live shares attached over vsock (`kling-vz`, `kling-hv`) were refused as "from inside the guest" (the CID was read as an IP); the agent now reads the peer CID with getpeername and accepts only the host (CID 2)
+- `compose up`/`graph from-compose`: a bare value equal to a service name is rewritten to `<node>.graph` only in host variables (`*_HOST`, `*_SERVER`, `*_ADDR`…): `POSTGRES_USER: app` next to a service `app` stays `app`
 - `kling-hv`: a thaw of a machine that had already been thawed spent 60-90 ms in page faults before the agent answered (the snapshot now carries the resident pages); a guest could hang a device thread, and with it pauses and snapshots, by placing the used ring over the avail ring; a failed create no longer leaves a `kling-hv` that cannot host another VM
 - macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16

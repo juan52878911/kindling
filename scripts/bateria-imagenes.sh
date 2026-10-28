@@ -43,6 +43,15 @@ POS="postgres mysql mariadb mongo redis clickhouse opensearch nginx python zstd"
 NEG="distroless otra-plataforma s6-overlay"
 if [ "${LIST:-0}" = 1 ]; then echo "positivas: $POS"; echo "negativas: $NEG"; exit 0; fi
 
+# arch_contraria: amd64 si el daemon es arm64 y al revés (de `kling status -v`;
+# sin él, de uname -m, que es la del daemon cuando es local).
+arch_contraria() {
+  local a
+  a=$("$KLING" status -v 2>/dev/null | awk '$1 == "arch:" {print $2; exit}')
+  [ -z "$a" ] && case $(uname -m) in arm64|aarch64) a=arm64 ;; *) a=amd64 ;; esac
+  case $a in arm64) echo amd64 ;; *) echo arm64 ;; esac
+}
+
 # Milisegundos: GNU date, si no perl (macOS), si no segundos.
 now_ms() {
   local n
@@ -121,8 +130,10 @@ definir() {
       ref=alpine-zstd:bateria; mem=128M; archive=1
       check="cat /hola"; espera=hola ;;
     otra-plataforma)
-      ref=nginx:alpine; arch=arm64; mem=128M
-      espera='arm64|platform|architecture|arch' ;;
+      # La arquitectura contraria a la del daemon: importa, pero no arranca
+      # (con la del daemon, en un Mac arm64, arrancaba y el caso salía rojo).
+      ref=nginx:alpine; arch=$(arch_contraria); mem=128M
+      espera='amd64|arm64|platform|architecture|arch' ;;
     s6-overlay)
       ref=ghcr.io/linuxserver/nginx:latest; mem=256M
       espera='s6-overlay' ;;

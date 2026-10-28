@@ -2,7 +2,7 @@ warning: service db: environment: a node has no environment of its own; the 3 va
 warning: service db: volumes: pgdata:/var/lib/postgresql/data: a new volume has a lost+found that initdb refuses; PGDATA=/var/lib/postgresql/data/pgdata is set (baked into the image)
 warning: service web: environment: a node has no environment of its own; the 2 variable(s) are baked into the image with kling image import -e (every copy of it sees them)
 warning: service web: ports: 8000:8000: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:8000)
-warning: service cache: no ports; assuming 6379 from image redis:7-alpine so web can reach it
-warning: service db: no ports; assuming 5432 from image postgres:16-alpine so web can reach it
+warning: service cache: no ports; assuming 6379 from image redis:7-alpine so the other services can reach it
+warning: service db: no ports; assuming 5432 from image postgres:16-alpine so the other services can reach it
 warning: service web: environment DATABASE_URL: host "db" rewritten to "db.graph" (a node is reached as <node>.graph)
 warning: service web: environment REDIS_HOST: host "cache" rewritten to "cache.graph" (a node is reached as <node>.graph)

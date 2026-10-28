@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -47,6 +48,10 @@ type traduccionCompose struct {
 	// desde: nodo → plantilla de la que arranca en vez de su imagen
 	// (compose up, ver compose_plantillas.go). Vacío en from-compose.
 	desde map[string]string
+	// saludTCP: el daemon no ejecuta healthchecks en las aristas depends
+	// (sin api.CapabilityGraphHealth); service_healthy se aproxima con una
+	// sonda TCP, como antes.
+	saludTCP bool
 }
 
 // puertosDeImagen: los puertos de las imágenes de siempre, para un destino de
@@ -78,7 +83,16 @@ type servicioCompose struct {
 	vols    []api.VolumeAttachment
 	deps    []depCompose
 	salud   []string // test del healthcheck, vacío si no hay
-	skip    bool
+	// tiempos del healthcheck (interval, timeout, retries, start_period,
+	// start_interval), como en una arista depends con health.
+	saludT api.GraphHealth
+	skip   bool
+	// redes son las del compose (networks:); vacío es la "default". Dos
+	// servicios se alcanzan si comparten una. sinRed: network_mode: none.
+	redes  []string
+	sinRed bool
+	// refs son los servicios que su entorno nombra como host (db, @db:5432).
+	refs map[string]bool
 }
 
 type depCompose struct {
@@ -159,13 +173,9 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 	for _, k := range clavesOrd(top) {
 		switch k {
 		case "services", "name", "version":
-		case "volumes", "networks", "secrets", "configs":
-			if k != "volumes" {
-				avisa("top-level %s: not supported (nodes of a graph share one network; reach each other only by edges)", k)
-				if k != "networks" {
-					avisa("top-level %s: its values are not carried to the nodes", k)
-				}
-			}
+		case "volumes", "networks":
+		case "secrets", "configs":
+			avisa("top-level %s: not supported; its values are not carried to the nodes", k)
 		default:
 			if !strings.HasPrefix(k, "x-") {
 				avisa("top-level %s: not supported", k)
@@ -193,6 +203,19 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 		}
 	}
 
+	// Redes declaradas: solo dicen quién alcanza a quién (ver alcanza).
+	redes := map[string]bool{"default": true}
+	if nm, ok := top["networks"].(map[string]any); ok {
+		for _, n := range clavesOrd(nm) {
+			redes[n] = true
+			if cfg, ok := nm[n].(map[string]any); ok {
+				for _, ck := range clavesOrd(cfg) {
+					avisa("network %s: %s: not supported (a network here only says which services reach each other)", n, ck)
+				}
+			}
+		}
+	}
+
 	porNombre := map[string]*servicioCompose{}
 	var orden []string
 	usados := map[string]string{}
@@ -212,6 +235,11 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 		}
 		usados[s.nodo] = n
 		t.servicio(s, def, proyecto, declarados, avisa)
+		for _, r := range s.redes {
+			if !redes[r] {
+				avisa("service %s: networks: %s is not declared at the top level; used as is", n, r)
+			}
+		}
 		porNombre[n] = s
 		orden = append(orden, n)
 	}
@@ -230,25 +258,36 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 		s.deps = ok
 	}
 
-	// Puertos inferidos para destinos sin ninguno.
+	// Puertos inferidos para los servicios sin ninguno: como en la red de un
+	// proyecto de Docker, cualquiera de los demás puede querer llegar a él.
 	for _, n := range orden {
-		for _, d := range porNombre[n].deps {
-			o := porNombre[d.a]
-			if len(o.puertos) == 0 {
-				if p, ok := puertosDeImagen[imagenBase(o.imagen)]; ok {
-					o.puertos = []int{p}
-					avisa("service %s: no ports; assuming %d from image %s so %s can reach it", o.nombre, p, o.imagen, n)
-				}
-			}
+		o := porNombre[n]
+		if o.skip || len(o.puertos) > 0 {
+			continue
+		}
+		if p, ok := puertosDeImagen[imagenBase(o.imagen)]; ok {
+			o.puertos = []int{p}
+			avisa("service %s: no ports; assuming %d from image %s so the other services can reach it", o.nombre, p, o.imagen)
 		}
 	}
 
-	// Referencias por nombre en el entorno: db → db.graph.
+	// Referencias por nombre en el entorno: db → db.graph, para todo servicio
+	// que se alcanza (comparte red), no solo los de depends_on.
 	for _, n := range orden {
 		s := porNombre[n]
+		alcanzables := map[string]*servicioCompose{}
+		for m, o := range porNombre {
+			if m != n && alcanza(s, o) {
+				alcanzables[m] = o
+			}
+		}
 		for i, kv := range s.env {
-			nv, cambios := reescribirHosts(kv[1], porNombre)
+			nv, cambios := reescribirHosts(kv[0], kv[1], alcanzables)
 			for _, c := range cambios {
+				if s.refs == nil {
+					s.refs = map[string]bool{}
+				}
+				s.refs[c] = true
 				avisa("service %s: environment %s: host %q rewritten to %q (a node is reached as <node>.%s)", n, kv[0], c, c+"."+api.GraphDomain, api.GraphDomain)
 			}
 			s.env[i][1] = nv
@@ -349,9 +388,19 @@ func (t *traduccionCompose) servicio(s *servicioCompose, def map[string]any, pro
 			}
 		case "deploy":
 			t.deploy(s, v, pre, avisa)
-		case "privileged", "network_mode", "cap_add", "cap_drop", "devices", "pid", "ipc",
+		case "networks":
+			t.redesDe(s, v, pre, avisa)
+		case "network_mode":
+			switch m := fmt.Sprint(v); m {
+			case "bridge", "default":
+			case "none":
+				s.sinRed = true
+			default:
+				avisa("%snetwork_mode: %s: %s", pre, m, motivoNoSoportado(k))
+			}
+		case "privileged", "cap_add", "cap_drop", "devices", "pid", "ipc",
 			"security_opt", "sysctls", "ulimits", "tmpfs", "extra_hosts", "dns", "init",
-			"working_dir", "hostname", "container_name", "env_file", "labels", "networks",
+			"working_dir", "hostname", "container_name", "env_file", "labels",
 			"profiles", "links", "stdin_open", "tty", "stop_grace_period", "stop_signal",
 			"logging", "shm_size", "platform", "pull_policy", "secrets", "configs", "domainname",
 			"read_only", "group_add", "extends", "scale":
@@ -368,8 +417,8 @@ func motivoNoSoportado(k string) string {
 	switch k {
 	case "privileged", "cap_add", "cap_drop", "devices", "security_opt", "pid", "ipc":
 		return "not supported (a node is a microVM with its own kernel; there is no host privilege to grant)"
-	case "network_mode", "networks", "links", "extra_hosts", "dns", "hostname", "domainname":
-		return "not supported (nodes share no network; they reach each other only by edges, as <node>.graph)"
+	case "network_mode", "links", "extra_hosts", "dns", "hostname", "domainname":
+		return "not supported (a service reaches the others of its networks only by edges, as <node>.graph)"
 	case "env_file":
 		return "not read; put the variables in environment: or bake them with kling image import -env-file"
 	case "labels":
@@ -467,6 +516,50 @@ func (t *traduccionCompose) entorno(s *servicioCompose, v any, pre string, avisa
 	if len(s.env) > 0 {
 		avisa("%senvironment: a node has no environment of its own; the %d variable(s) are baked into the image with kling image import -e (every copy of it sees them)", pre, len(s.env))
 	}
+}
+
+// redesDe lee el networks: de un servicio: una lista o un mapa (sus opciones,
+// aliases o ipv4_address, no se llevan).
+func (t *traduccionCompose) redesDe(s *servicioCompose, v any, pre string, avisa func(string, ...any)) {
+	switch x := v.(type) {
+	case []any:
+		for _, e := range x {
+			s.redes = append(s.redes, fmt.Sprint(e))
+		}
+	case map[string]any:
+		for _, n := range clavesOrd(x) {
+			s.redes = append(s.redes, n)
+			if m, ok := x[n].(map[string]any); ok {
+				for _, mk := range clavesOrd(m) {
+					avisa("%snetworks %s: %s: not supported", pre, n, mk)
+				}
+			}
+		}
+	default:
+		avisa("%snetworks: expected a list or a map", pre)
+	}
+	sort.Strings(s.redes)
+}
+
+// alcanza dice si s llega a o por la red del proyecto: los dos tienen red y
+// comparten una (sin networks:, la "default" de Docker Compose).
+func alcanza(s, o *servicioCompose) bool {
+	if s == o || s.sinRed || o.sinRed {
+		return false
+	}
+	rs, ro := s.redes, o.redes
+	if len(rs) == 0 {
+		rs = []string{"default"}
+	}
+	if len(ro) == 0 {
+		ro = []string{"default"}
+	}
+	for _, r := range rs {
+		if slices.Contains(ro, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *traduccionCompose) dependencias(s *servicioCompose, v any, pre string, avisa func(string, ...any)) {
@@ -606,8 +699,29 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 			if b, _ := m[k].(bool); b {
 				s.salud = nil
 			}
-		case "interval", "timeout", "retries", "start_period", "start_interval":
-			avisa("%shealthcheck %s: ignored (the probe is a TCP connect, retried until the 2 minute limit)", pre, k)
+		case "interval", "timeout", "start_period", "start_interval":
+			d, err := time.ParseDuration(fmt.Sprint(m[k]))
+			if err != nil || d < 0 {
+				avisa("%shealthcheck %s: %v: not a duration (like 5s or 1m30s)", pre, k, m[k])
+				continue
+			}
+			switch k {
+			case "interval":
+				s.saludT.IntervalMS = int(d.Milliseconds())
+			case "timeout":
+				s.saludT.TimeoutSeconds = max(int(math.Ceil(d.Seconds())), 1)
+			case "start_period":
+				s.saludT.StartPeriodSeconds = int(math.Ceil(d.Seconds()))
+			case "start_interval":
+				s.saludT.StartIntervalMS = int(d.Milliseconds())
+			}
+		case "retries":
+			n, err := strconv.Atoi(fmt.Sprint(m[k]))
+			if err != nil || n < 0 {
+				avisa("%shealthcheck retries: %v: not a count", pre, m[k])
+				continue
+			}
+			s.saludT.Retries = n
 		default:
 			avisa("%shealthcheck %s: not supported", pre, k)
 		}
@@ -653,13 +767,13 @@ func (t *traduccionCompose) deploy(s *servicioCompose, v any, pre string, avisa 
 // ordenImport es el `kling image import` del servicio: lleva su entorno,
 // usuario, entrypoint, comando y política de reinicio.
 func ordenImport(s *servicioCompose, proyecto string) string {
-	return ordenImportCon(s, proyecto, true, true)
+	return ordenImportCon(s, proyecto, true, true, true)
 }
 
-// ordenImportCon es la orden de import del servicio; sin entorno cuando lo
-// lleva la máquina (compose up con plantillas), y sin -replace cuando se
-// confía en que import reconozca la misma receta.
-func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace bool) string {
+// ordenImportCon es la orden de import del servicio; sin entorno ni comando
+// cuando los lleva la máquina (compose up con plantillas), y sin -replace
+// cuando se confía en que import reconozca la misma receta.
+func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, conComando, replace bool) string {
 	a := []string{"kling", "image", "import", comillaSh(s.imagen), "-name", proyecto + "-" + s.nodo}
 	if replace {
 		a = append(a, "-replace")
@@ -671,6 +785,9 @@ func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace boo
 		a = append(a, "-restart", s.restart)
 	}
 	for _, e := range s.entry {
+		if !conComando {
+			break
+		}
 		a = append(a, "-entrypoint", comillaSh(e))
 	}
 	for _, kv := range s.env {
@@ -679,7 +796,7 @@ func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace boo
 		}
 		a = append(a, "-e", comillaSh(kv[0]+"="+kv[1]))
 	}
-	if len(s.cmd) > 0 {
+	if len(s.cmd) > 0 && conComando {
 		a = append(a, "--")
 		for _, c := range s.cmd {
 			a = append(a, comillaSh(c))
@@ -708,6 +825,10 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 			}
 			if s.memMiB > 0 {
 				campos = append(campos, "mem_mib: "+strconv.Itoa(s.memMiB))
+			}
+			if exigeExec(s, vivos) && !t.saludTCP {
+				// Su healthcheck se ejecuta dentro (arista depends con health).
+				campos = append(campos, "allow_exec: true")
 			}
 		}
 		if len(s.puertos) > 0 {
@@ -738,39 +859,55 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 		fmt.Fprintf(&b, "  %s: {%s}\n", s.nodo, strings.Join(campos, ", "))
 	}
 
-	var aristas []string
+	// Enlaces: como en la red de un proyecto de Docker Compose, cada servicio
+	// alcanza a todos los de sus redes, no solo a los de depends_on. Si no
+	// caben en el tope de aristas, solo los que se usan: depends_on y los
+	// hosts que nombra el entorno.
+	enlaces := enlacesCompose(vivos, por, false, avisa)
+	var deps []string
 	for _, s := range vivos {
 		for _, d := range s.deps {
 			o := por[d.a]
-			puerto := 0
-			for _, p := range o.puertos {
-				if p == 53 || p == 80 || p == 443 {
-					avisa("service %s: depends_on %s: port %d is reserved on the graph address; no link edge to it (expose the service on another port)", s.nombre, d.a, p)
-					continue
-				}
-				if puerto == 0 {
-					puerto = p
-				}
-				aristas = append(aristas, fmt.Sprintf("  - {from: %s, to: %s, kind: link, port: %d}", s.nodo, o.nodo, p))
-			}
 			if len(o.puertos) == 0 {
 				avisa("service %s: depends_on %s: %s exposes no ports, so there is only an ordering edge (no link); add ports: to it", s.nombre, d.a, d.a)
+			} else if !alcanza(s, o) {
+				avisa("service %s: depends_on %s: they share no network; only an ordering edge", s.nombre, d.a)
 			}
 			dep := fmt.Sprintf("  - {from: %s, to: %s, kind: depends", s.nodo, o.nodo)
 			if d.cond == "service_healthy" {
-				if len(o.salud) == 0 {
+				puerto := 0
+				for _, p := range o.puertos {
+					if !puertoReservado(p) {
+						puerto = p
+						break
+					}
+				}
+				switch {
+				case len(o.salud) == 0:
 					avisa("service %s: depends_on %s: service_healthy but %s has no healthcheck; waiting for it to be running only", s.nombre, d.a, d.a)
-				} else if puerto == 0 {
+				case len(saludArgv(o.salud)) > 0 && !t.saludTCP:
+					// El test de verdad, dentro del destino (api.GraphEdge.Health).
+					h := o.saludT
+					h.Test = saludArgv(o.salud)
+					dep += ", health: " + saludYAML(h)
+				case puerto == 0:
 					avisa("service %s: depends_on %s: service_healthy with no port to probe; waiting for it to be running only", s.nombre, d.a)
-				} else {
+				default:
 					p := puertoDeSalud(o.salud, o.puertos, puerto)
 					dep += fmt.Sprintf(", port: %d", p)
-					avisa("service %s: depends_on %s: healthcheck %q approximated by a TCP probe on port %d (the test itself is not run)", s.nombre, d.a, strings.Join(o.salud, " "), p)
+					avisa("service %s: depends_on %s: healthcheck %q approximated by a TCP probe on port %d", s.nombre, d.a, strings.Join(o.salud, " "), p)
 				}
 			}
-			aristas = append(aristas, dep+"}")
+			deps = append(deps, dep+"}")
 		}
 	}
+	if len(enlaces)+len(deps) > api.GraphMaxEdges {
+		avisa("the project network needs %d edges, over the limit of %d: only the links to depends_on and to the hosts named in environment are kept",
+			len(enlaces)+len(deps), api.GraphMaxEdges)
+		enlaces = enlacesCompose(vivos, por, true, func(string, ...any) {})
+	}
+	aristas := append(enlaces, deps...)
+	sort.SliceStable(aristas, func(i, j int) bool { return claveArista(aristas[i]) < claveArista(aristas[j]) })
 	for _, s := range vivos {
 		if len(s.salud) == 0 {
 			continue
@@ -793,6 +930,110 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 	return b.String()
 }
 
+// saludYAML es h como mapa de flujo del fichero del grafo.
+func saludYAML(h api.GraphHealth) string {
+	ts := make([]string, len(h.Test))
+	for i, a := range h.Test {
+		ts[i] = yq(a)
+	}
+	campos := []string{"test: [" + strings.Join(ts, ", ") + "]"}
+	for _, c := range []struct {
+		k string
+		v int
+	}{{"interval_ms", h.IntervalMS}, {"timeout_seconds", h.TimeoutSeconds}, {"retries", h.Retries},
+		{"start_period_seconds", h.StartPeriodSeconds}, {"start_interval_ms", h.StartIntervalMS}} {
+		if c.v > 0 {
+			campos = append(campos, c.k+": "+strconv.Itoa(c.v))
+		}
+	}
+	return "{" + strings.Join(campos, ", ") + "}"
+}
+
+// exigeExec dice si algún depends_on service_healthy ejecuta el test dentro
+// de s: entonces su nodo necesita allow_exec.
+func exigeExec(s *servicioCompose, vivos []*servicioCompose) bool {
+	if len(saludArgv(s.salud)) == 0 {
+		return false
+	}
+	for _, x := range vivos {
+		for _, d := range x.deps {
+			if d.a == s.nombre && d.cond == "service_healthy" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// puertoReservado: los puertos que no valen en una arista link (el DNS y el
+// proxy de credenciales de la dirección del grafo).
+func puertoReservado(p int) bool { return p == 53 || p == 80 || p == 443 }
+
+// enlacesCompose son las aristas link de la red del proyecto: de cada
+// servicio a cada puerto de cada servicio que comparte red con él. Un nodo
+// alcanza un solo nodo por puerto: si dos destinos exponen el mismo, gana el
+// de depends_on o el que nombra el entorno, y luego el primero por nombre.
+// soloUsados deja solo esos (depends_on y entorno).
+func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, soloUsados bool, avisa func(string, ...any)) []string {
+	var out []string
+	for _, s := range vivos {
+		usado := func(o *servicioCompose) bool {
+			if s.refs[o.nombre] {
+				return true
+			}
+			for _, d := range s.deps {
+				if d.a == o.nombre {
+					return true
+				}
+			}
+			return false
+		}
+		var destinos []*servicioCompose
+		for _, o := range vivos {
+			if alcanza(s, o) && (!soloUsados || usado(o)) {
+				destinos = append(destinos, o)
+			}
+		}
+		sort.SliceStable(destinos, func(i, j int) bool { return usado(destinos[i]) && !usado(destinos[j]) })
+		quien := map[int]*servicioCompose{}
+		for _, o := range destinos {
+			for _, p := range o.puertos {
+				if puertoReservado(p) {
+					if usado(o) {
+						avisa("service %s: reaching %s: port %d is reserved on the graph address; no link edge to it (expose the service on another port)", s.nombre, o.nombre, p)
+					}
+					continue
+				}
+				if prev := quien[p]; prev != nil {
+					if usado(o) {
+						avisa("service %s: reaching %s: port %d already reaches %s (a node reaches one node per port); no link edge to it", s.nombre, o.nombre, p, prev.nombre)
+					}
+					continue
+				}
+				quien[p] = o
+				out = append(out, fmt.Sprintf("  - {from: %s, to: %s, kind: link, port: %d}", s.nodo, o.nodo, p))
+			}
+		}
+	}
+	return out
+}
+
+// claveArista ordena las aristas por origen y destino, y dentro de cada par
+// los link antes que la depends: el orden de siempre.
+func claveArista(l string) string {
+	f := strings.Fields(strings.NewReplacer("{", " ", "}", " ", ",", " ").Replace(l))
+	// - from: X to: Y kind: K ...
+	k := ""
+	if len(f) > 6 {
+		orden := "1"
+		if f[6] == "link" {
+			orden = "0"
+		}
+		k = f[2] + "\x00" + f[4] + "\x00" + orden
+	}
+	return k
+}
+
 // puertoDeSalud: el puerto del destino que nombra el test del healthcheck, o
 // el primero.
 func puertoDeSalud(test []string, puertos []int, def int) int {
@@ -805,16 +1046,23 @@ func puertoDeSalud(test []string, puertos []int, def int) int {
 	return def
 }
 
-// reescribirHosts cambia el nombre de un servicio usado como host en un valor
-// ("db", "postgres://u:p@db:5432/x", "http://api:8081") por <nodo>.graph.
-func reescribirHosts(v string, por map[string]*servicioCompose) (string, []string) {
+// reHostVar: una variable cuyo valor entero puede ser un host (DB_HOST,
+// REDIS_HOSTNAME, SMTP_SERVER, API_ADDR). Un valor suelto igual al nombre de
+// un servicio solo se reescribe en ellas: POSTGRES_USER=app con un servicio
+// app es un usuario, no un host.
+var reHostVar = regexp.MustCompile(`(?i)(HOST|HOSTNAME|HOSTS|SERVER|SERVERS|ADDR|ADDRESS)$`)
+
+// reescribirHosts cambia el nombre de un servicio usado como host en el valor
+// de la variable k ("postgres://u:p@db:5432/x", "http://api:8081" en
+// cualquiera; "db" suelto solo en una variable de host) por <nodo>.graph.
+func reescribirHosts(k, v string, por map[string]*servicioCompose) (string, []string) {
 	var cambios []string
 	for _, n := range clavesOrd(por) {
 		s := por[n]
 		if s.skip {
 			continue
 		}
-		if v == n {
+		if v == n && reHostVar.MatchString(k) {
 			v = s.nodo + "." + api.GraphDomain
 			cambios = append(cambios, n)
 			continue

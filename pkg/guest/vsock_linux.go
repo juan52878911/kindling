@@ -85,7 +85,16 @@ func (l *vsockListener) Accept() (net.Conn, error) {
 	if aerr != nil {
 		return nil, aerr
 	}
-	return newVsockConn(os.NewFile(uintptr(nfd), "vsock"), l.addr), nil
+	c := newVsockConn(os.NewFile(uintptr(nfd), "vsock"), l.addr)
+	// Quién llama: requestFromGuest solo deja conectar carpetas al host.
+	var sa sockaddrVM
+	n := uint32(unsafe.Sizeof(sa))
+	if _, _, e := syscall.Syscall(syscall.SYS_GETPEERNAME, uintptr(nfd), uintptr(unsafe.Pointer(&sa)), uintptr(unsafe.Pointer(&n))); e == 0 {
+		c.remote = vsockAddr{cid: sa.cid, port: sa.port}
+	} else {
+		c.remote = vsockAddr{}
+	}
+	return c, nil
 }
 
 func (l *vsockListener) Close() error   { return l.f.Close() }

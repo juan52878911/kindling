@@ -101,6 +101,9 @@ func TestServiceLogSource(t *testing.T) {
 			json.NewEncoder(w).Encode(api.GuestResponse{Status: 200, Body: `{"declared":false}`})
 		case req.Path == fmt.Sprintf("/service?tail=%d", serviceLogWindow) && req.Method == "GET":
 			json.NewEncoder(w).Encode(api.GuestResponse{Status: 200, Body: body})
+		case req.Path == fmt.Sprintf("/service?tail=%d&timestamps=1", serviceLogWindow):
+			json.NewEncoder(w).Encode(api.GuestResponse{Status: 200,
+				Body: `{"declared":true,"timestamps":true,"log":"2026-10-28T11:00:00.000001Z uno\n"}`})
 		default:
 			http.Error(w, "unexpected "+req.Path, 400)
 		}
@@ -112,6 +115,11 @@ func TestServiceLogSource(t *testing.T) {
 	}
 	if got := lastLines(out, 2); got != "uno\ndos\n" {
 		t.Fatalf("lastLines %q", got)
+	}
+	si := true
+	out, err = serviceLogSource{c: c, ref: "pg", tiempos: &si, avisado: new(bool)}.fetch(context.Background())
+	if err != nil || out != "2026-10-28T11:00:00.000001Z uno\n" {
+		t.Fatalf("-t: %q %v", out, err)
 	}
 	for ref, want := range map[string]string{"old": "no /service", "none": "declares no service"} {
 		if _, err := (serviceLogSource{c: c, ref: ref}).fetch(context.Background()); err == nil || !strings.Contains(err.Error(), want) {

@@ -81,12 +81,12 @@ func TestRutasYMontajes(t *testing.T) {
 			t.Errorf("ValidPath(%q) accepted", p)
 		}
 	}
-	for _, m := range []string{"/work", "/home/u/src", "/data2"} {
+	for _, m := range []string{"/work", "/home/u/src", "/data2", "/etc/nginx/conf.d", "/etc/nginx"} {
 		if err := ValidMount(m); err != nil {
 			t.Errorf("ValidMount(%q): %v", m, err)
 		}
 	}
-	for _, m := range []string{"", "work", "/", "/etc", "/usr/local/x", "/proc/1", "/a b", "/a,b", "/a:b", "/w/../etc", "/w/", "//w"} {
+	for _, m := range []string{"", "work", "/", "/etc", "/usr/local/x", "/proc/1", "/etc/kindling", "/etc/kling/x", "/a b", "/a,b", "/a:b", "/w/../etc", "/w/", "//w"} {
 		if ValidMount(m) == nil {
 			t.Errorf("ValidMount(%q) accepted", m)
 		}

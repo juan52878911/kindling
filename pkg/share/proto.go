@@ -89,6 +89,26 @@ func (a Attach) Validate() error {
 // invitado necesita para funcionar.
 var reservedMounts = []string{"/proc", "/sys", "/dev", "/run", "/bin", "/sbin", "/lib", "/usr", "/etc"}
 
+// etcDeKindling son los directorios de /etc que son de kindling (el servicio,
+// el entorno de la imagen): una carpeta encima decidiría qué lanza el agente.
+var etcDeKindling = []string{"/etc/kindling", "/etc/kling"}
+
+// configEnEtc dice si mp es un directorio de configuración bajo /etc
+// (/etc/nginx/conf.d, /etc/mysql/conf.d): es lo que un compose monta casi
+// siempre, y tapa solo esa configuración, no /etc. /etc mismo y los de
+// kindling, no.
+func configEnEtc(mp string) bool {
+	if !strings.HasPrefix(mp, "/etc/") {
+		return false
+	}
+	for _, k := range etcDeKindling {
+		if mp == k || strings.HasPrefix(mp, k+"/") {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidMount comprueba un punto de montaje dentro del invitado.
 //
 // Las mismas reglas que un volumen (viaja por la línea de comandos del kernel en
@@ -106,7 +126,7 @@ func ValidMount(mp string) error {
 		return errors.New("a share cannot be mounted at /")
 	}
 	for _, r := range reservedMounts {
-		if mp == r || strings.HasPrefix(mp, r+"/") {
+		if (mp == r || strings.HasPrefix(mp, r+"/")) && !configEnEtc(mp) {
 			return fmt.Errorf("a share cannot be mounted at %s: it would hide %s from the guest", mp, r)
 		}
 	}

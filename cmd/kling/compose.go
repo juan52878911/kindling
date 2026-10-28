@@ -35,7 +35,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs] [-fresh]
+const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs] [-t] [-fresh]
        kling compose down [-f compose.yaml] [-p name]`
 
 func cmdCompose(args []string) error {
@@ -129,6 +129,8 @@ func selfCmd(ctx context.Context, host string, args ...string) *exec.Cmd {
 type importCompose struct {
 	linea, conReplace string
 	antesDeReplace    func()
+	// yaReplace: directamente con -replace (compose up -fresh).
+	yaReplace bool
 }
 
 // runSetup crea los volúmenes y después importa en paralelo.
@@ -159,6 +161,13 @@ func runSetup(ctx context.Context, host string, vols []string, imports []importC
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if im.yaReplace {
+				if im.antesDeReplace != nil {
+					im.antesDeReplace()
+				}
+				_, errs[i] = run(im.conReplace)
+				return
+			}
 			out, err := run(im.linea)
 			if err != nil && strings.Contains(out, "-replace") {
 				if im.antesDeReplace != nil {
@@ -220,6 +229,7 @@ func composeUp(args []string) error {
 	name := fs.String("p", "", "project (graph) name (default: name: of the file, or the directory's)")
 	keep := fs.Bool("keep", false, "leave the machines running when this exits (kling compose down removes them)")
 	noLogs := fs.Bool("no-logs", false, "do not follow the services' output")
+	stamps := fs.Bool("t", false, "show the time of each line of the services' output (RFC 3339, UTC)")
 	fresh := fs.Bool("fresh", false, "rebuild the services' warm templates (after re-pulling an image tag, say)")
 	_ = fs.Parse(reorderFor(fs, args))
 	if fs.NArg() != 0 {
@@ -238,6 +248,7 @@ func composeUp(args []string) error {
 
 	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
 	_ = selfCmd(ctx, *host, "graph", "rm", "-f", t.Proyect).Run()
+	quitarHuerfanas(ctx, c, t)
 	if err := prepararCompose(ctx, c, *host, t, *fresh); err != nil {
 		return err
 	}
@@ -286,7 +297,7 @@ func composeUp(args []string) error {
 		}
 		var mu sync.Mutex
 		for _, n := range nodos {
-			go followServiceLogs(ctx, *host, t.Proyect+"-"+n, fmt.Sprintf("%-*s | ", w, n), &mu)
+			go followServiceLogs(ctx, *host, t.Proyect+"-"+n, fmt.Sprintf("%-*s | ", w, n), *stamps, &mu)
 		}
 	}
 	if *keep {
@@ -300,6 +311,28 @@ func composeUp(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "\nremoving %s...\n", t.Proyect)
 	return selfCmd(context.Background(), *host, "graph", "rm", "-f", t.Proyect).Run()
+}
+
+// quitarHuerfanas borra las máquinas <proyecto>-<nodo> de un grafo que ya
+// no existe: un up que falló a medias puede dejar una fallida que el grafo no
+// se llevó, y con ella el siguiente up falla por el nombre ("machine name is
+// taken") hasta un kling rm a mano. Solo las que llevan la etiqueta de grafo:
+// una máquina del usuario con ese nombre no se toca.
+func quitarHuerfanas(ctx context.Context, c *api.Client, t *traduccionCompose) {
+	ms, err := c.List(ctx)
+	if err != nil {
+		return
+	}
+	nombres := map[string]bool{}
+	for _, s := range t.vivos {
+		nombres[t.Proyect+"-"+s.nodo] = true
+	}
+	for _, m := range ms {
+		if nombres[m.Name] && m.Labels[api.LabelGraph] != "" {
+			fmt.Fprintf(os.Stderr, "removing %s, left %s by an earlier up\n", m.Name, m.State)
+			_ = c.Remove(ctx, m.ID)
+		}
+	}
 }
 
 func composeDown(args []string) error {
@@ -393,10 +426,14 @@ func dialMachine(ctx context.Context, c *api.Client, machine string, port int) (
 
 // followServiceLogs sigue la salida del servicio de una máquina con un prefijo por
 // línea, y vuelve a engancharse si se corta (una descongelación, un reinicio).
-func followServiceLogs(ctx context.Context, host, machine, prefix string, mu *sync.Mutex) {
+func followServiceLogs(ctx context.Context, host, machine, prefix string, stamps bool, mu *sync.Mutex) {
 	tail := "20"
 	for ctx.Err() == nil {
-		cmd := selfCmd(ctx, host, "logs", "-service", "-f", "-tail", tail, machine)
+		args := []string{"logs", "-service", "-f", "-tail", tail}
+		if stamps {
+			args = append(args, "-t")
+		}
+		cmd := selfCmd(ctx, host, append(args, machine)...)
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			return
