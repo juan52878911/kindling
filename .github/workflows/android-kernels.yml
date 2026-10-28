@@ -18,15 +18,18 @@ on:
         description: 'release a la que subir los kernels (ej. v0.17.0); tiene que existir'
         required: true
 
+# Lectura por defecto; la escritura, solo en el job que la necesita.
 permissions:
-  contents: write     # subir a la release
-  id-token: write     # firmar la atestación (Sigstore, sin claves)
-  attestations: write
+  contents: read
 
 jobs:
   kernel:
     name: kernel android ${{ matrix.arch }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write     # subir a la release
+      id-token: write     # firmar la atestación (Sigstore, sin claves)
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +37,7 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.event.release.tag_name }}
 
@@ -50,7 +53,8 @@ jobs:
           set -euo pipefail
           . scripts/builders/kernel/kernel.pin
           curl -fsSLo sha256sums.asc "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/sha256sums.asc"
-          export GNUPGHOME="$(mktemp -d)"
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
           gpg --batch --quiet --auto-key-locate clear,wkd --locate-keys \
             torvalds@kernel.org gregkh@kernel.org autosigner@kernel.org
           gpg --batch --verify sha256sums.asc
@@ -70,7 +74,7 @@ jobs:
         run: prototypes/android/kernel/build.sh
 
       - name: attest
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/vmlinux-*-android
 
