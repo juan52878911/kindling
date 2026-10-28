@@ -53,6 +53,12 @@ func (m *Manager) reconcile() {
 
 	for _, mc := range m.byID {
 		seen[knet.Plan(mc.NetIndex, mc.ID).NS] = true
+		// El volcado temporal de un commit que el reinicio cortó (macOS,
+		// publicar_volcado.go): ningún commit de este daemon está en curso
+		// todavía, así que nadie lo va a publicar. Sin esto, la RAM entera de
+		// la máquina se quedaba en su directorio hasta el rm (M15). Aunque el
+		// VMM siga vivo y escribiéndolo: se borra el nombre, no su descriptor.
+		quitarVolcadoTemporal(m.dir(mc.ID))
 
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.

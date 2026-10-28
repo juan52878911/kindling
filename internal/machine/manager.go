@@ -3525,6 +3525,10 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		log.Printf("warning: %v", err)
 	}
 	m.borrarVolcado(mc.ID)
+	// Y el volcado temporal de un commit que se cortó (macOS: el VMM vuelca
+	// en el directorio de su máquina, publicar_volcado.go): del tamaño de su
+	// RAM, y nadie lo va a publicar ya (M15).
+	quitarVolcadoTemporal(m.dir(mc.ID))
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
