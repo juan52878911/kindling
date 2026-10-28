@@ -374,6 +374,9 @@ type Manager struct {
 	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
 	pruebasGanchos func(ctx context.Context, id, kind string) (api.GuestReady, error)
 	pruebasMeminfo func(ctx context.Context, id string) (api.GuestMemInfo, error)
+	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
+	// resync del invitado (tests de B12).
+	pruebasAntesDeResync func()
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
@@ -384,6 +387,11 @@ type Manager struct {
 	// copia a lo que devuelven List y Get: las entradas de byID no la llevan,
 	// así que tampoco llega al estado persistido. Ver marcarTransicion.
 	transicion map[string]string
+
+	// reanudaciones son las máquinas que un volcado fallido dejó en pausa sin
+	// poder reanudarlas: el vigilante lo reintenta (reanudar_pendiente.go).
+	// Con m.mu.
+	reanudaciones map[string]reanudacion
 
 	// muertes serializa killMachine por máquina (ver killMachine). Aparte del
 	// cerrojo de ciclo de vida, que quien mata ya suele tener tomado.
@@ -2178,7 +2186,16 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, err
 	}
 	defer soltarDisco()
-	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
+	// Si la reanudación de un volcado fallido tampoco sale, la transición se
+	// queda puesta hasta que el vigilante la reanude (reanudarPendientes): el
+	// planificador no debe enrutar a una máquina en pausa.
+	quitarTransicion := m.marcarTransicion(mc.ID, api.TransitionFreezing)
+	pendiente := false
+	defer func() {
+		if !pendiente {
+			quitarTransicion()
+		}
+	}()
 
 	dir := m.dir(mc.ID)
 	// El diferencial se vuelca aparte (mem.diff) y se funde después sobre el
@@ -2279,6 +2296,24 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, fmt.Errorf("marking the freeze as in progress: %w", err)
 	}
 
+	// Desde la pausa, el volcado no se corta con la petición (A5): un Ctrl-C en
+	// `kling freeze` cancelaba ctx con Firecracker o kling-vz aún escribiendo;
+	// el daemon borraba lo escrito, pedía Resume con el plazo de 30 s a un VMM
+	// que seguía ocupado volcando, y al no contestar la daba por fallida y la
+	// mataba. Lo único que lo limita ya es plazoVolcado.
+	ctx = context.WithoutCancel(ctx)
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// reanudar es la salida de todo volcado fallido: con el plazo largo (el
+	// VMM atiende la reanudación cuando acabe lo que tenga en curso) y, si ni
+	// así, la deja running en transición para que el vigilante lo reintente
+	// en vez de matarla.
+	reanudar := func(causa error) {
+		if rerr := lento.Resume(ctx); rerr != nil {
+			pendiente = true
+			m.apuntarReanudacion(mc, causa, rerr)
+		}
+	}
+
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
 		// Nada se volcó, pero la marca de volcado en curso ya está y la pausa
@@ -2287,14 +2322,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
 		// así que ese fallo solo se apunta.
 		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
-		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+		if rerr := c.Resume(ctx); rerr != nil {
 			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
 		}
 		return nil, err
 	}
-	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
-	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
-	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// Con plazo propio (lento): el de 30 s del cliente no alcanza para volcar
+	// varios GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
 	var verr error
 	if enDiff {
 		verr = lento.SnapshotDiff(ctx, snapPath, memPath)
@@ -2320,12 +2354,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// Sus volúmenes siguen montados: Freeze solo los vacía (flushVolume),
 		// no los suelta, así que no hay nada que devolverle. Pedírselo era un
 		// viaje al agente de hasta 50 s con el cerrojo tomado y el error tirado.
-		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-			// Si tampoco se puede reanudar, la máquina no es recuperable y
-			// dejarla como running sería mentir. Se marca fallida.
-			m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-			return nil, err
-		}
+		reanudar(err)
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
@@ -2350,10 +2379,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			m.borrarDiffParcialAlmacen(mc.ID)
 			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
-			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-				return nil, err
-			}
+			reanudar(err)
 			return nil, err
 		}
 		snapPath = filepath.Join(dir, "snap.file")
@@ -2376,10 +2402,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			m.borrarDiffParcialAlmacen(mc.ID)
 			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
-			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-				return nil, err
-			}
+			reanudar(err)
 			return nil, err
 		}
 		memPath = filepath.Join(dir, "mem.file")
@@ -3338,9 +3361,17 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
 	var resync resultadoResync
+	if m.pruebasAntesDeResync != nil {
+		m.pruebasAntesDeResync()
+	}
 	_, sinAgenteMem := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID))
 	if !sinAgenteMem && !leerSello(m.dir(mc.ID)).SinAgente {
-		resync = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
+		// Sin el ctx de la petición (B12): con la memoria ya cargada, el
+		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
+		// cancelado hacía que resyncGuest volviera al instante: la máquina
+		// quedaba running con el reloj y el CSPRNG de cuando se congeló. El
+		// propio resync lleva su plazo (resyncPlazo).
+		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
 

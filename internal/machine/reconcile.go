@@ -448,6 +448,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// microVM. Justo detrás de sweep y no al final de la vuelta: el
 				// PID que mata tiene que ser de un escaneo reciente.
 				m.barrerHuerfanos(vmms)
+				// Las que un volcado fallido dejó en pausa sin poder
+				// reanudarlas (reanudar_pendiente.go).
+				m.reanudarPendientes()
 				// Las carpetas vivas de las máquinas que corren y no tienen
 				// conexión (tras reiniciar el daemon, sobre todo).
 				m.ensureShares()
