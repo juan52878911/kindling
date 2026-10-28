@@ -32,12 +32,16 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The release workflow runs the full test suite before building, uses a read-only token except to publish, and pins actions by SHA
 - `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
 - Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
+- Live shares move up to 1 MiB per operation when agent and daemon are both new (negotiated, 128 KiB otherwise), ro shares keep the guest page cache for files unchanged since the last open, and listing a large directory no longer reopens it for every page
 
 ### Fixed
 
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
+- Guest `/exec`: a background grandchild (`sh -c "sleep 600 & echo ok"`) no longer holds the reply until it exits, and cancelling the request kills the whole process group
+- Guest agent: setting the MMDS route no longer logs a spurious "no child processes"
+- Live shares no longer hand absolute host symlink targets to the guest: targets inside the share become relative, the rest get EACCES
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 - Image import: a file name over 255 bytes or with a NUL is rejected instead of writing a corrupt directory entry; a file alternating data and zero blocks no longer fails with "file too fragmented"; xattrs in unknown namespaces or too large in `user.*` are dropped with a warning instead of failing the image
 - Reading an ext4 with a corrupt superblock (0 inodes or blocks per group) returns an error instead of panicking

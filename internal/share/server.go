@@ -17,8 +17,11 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +43,11 @@ const (
 	// lee hasta que hay hueco, así que la contrapresión llega al invitado por
 	// TCP en vez de acumularse aquí.
 	maxInflight = 16
+	// maxBigInflight por sesión: de esas, cuántas pueden pasar de BaseIO (una
+	// lectura o escritura negociada con OpHello, hasta 1 MiB). Acota la memoria
+	// que una sesión obliga a reservar: 16 de 1 MiB por carpeta y 8 carpetas por
+	// máquina serían 128 MiB del host por cada invitado hostil.
+	maxBigInflight = 4
 	// maxListBytes es lo más que ocupa una página de listado.
 	maxListBytes = 64 << 10
 )
@@ -103,6 +111,11 @@ type Server struct {
 	machineID string
 	budget    *machineBudget
 
+	// hostRoots son las rutas absolutas con las que el host puede nombrar la
+	// raíz de la carpeta (tal cual y con los enlaces resueltos: en macOS /tmp es
+	// /private/tmp). Sirven para traducir enlaces absolutos que apuntan dentro.
+	hostRoots []string
+
 	// uid/gid del dueño de la carpeta, a quien se entrega lo que crea el
 	// invitado si el daemon corre como root. -1 = no se toca.
 	uid, gid int
@@ -119,6 +132,7 @@ func Open(dir string, readOnly bool, machineID string) (*Server, error) {
 	s := &Server{
 		dir: dir, root: root, readOnly: readOnly, uid: -1, gid: -1,
 		machineID: machineID, budget: acquireMachineBudget(machineID),
+		hostRoots: hostRoots(dir),
 	}
 	if os.Geteuid() == 0 {
 		// Si el daemon es root, lo que cree el invitado sería de root en el
@@ -146,6 +160,13 @@ type session struct {
 	mu    sync.Mutex
 	next  uint64
 	files map[uint64]*handle
+
+	// maxIO es el tamaño de E/S negociado con OpHello; BaseIO hasta entonces
+	// (y para siempre con un agente que no la conoce).
+	maxIO atomic.Int64
+
+	// cursors son los listados a medias (ver list.go). Con mu.
+	cursors []*listCursor
 }
 
 type handle struct {
@@ -183,6 +204,7 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	sess := &session{srv: s, epoch: uint64(binary.BigEndian.Uint32(b[:])|1) << 32, files: map[uint64]*handle{}}
+	sess.maxIO.Store(proto.BaseIO)
 	defer sess.closeAll()
 
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -198,6 +220,7 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 		}
 	}
 	slots := make(chan struct{}, maxInflight)
+	big := make(chan struct{}, maxBigInflight)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -209,7 +232,10 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 	defer close(salir)
 	go func() {
 		for {
-			body, err := proto.ReadFrame(conn)
+			// El tope se mira tras la cabecera: OpHello lo sube mientras esta
+			// lectura ya espera la trama siguiente (el agente no la manda hasta
+			// tener la respuesta).
+			body, err := proto.ReadFrameLimit(conn, func() int { return proto.FrameFor(int(sess.maxIO.Load())) })
 			select {
 			case tramas <- trama{body, err}:
 			case <-salir:
@@ -242,12 +268,36 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 			return errors.New("the guest sent a message without a header")
 		}
 		slots <- struct{}{}
+		grande := bigOp(op, t.body)
+		if grande {
+			big <- struct{}{}
+		}
 		wg.Add(1)
 		go func() {
-			defer func() { <-slots; wg.Done() }()
+			defer func() {
+				if grande {
+					<-big
+				}
+				<-slots
+				wg.Done()
+			}()
 			reply(sess.dispatch(id, op, d))
 		}()
 	}
+}
+
+// bigOp dice si una petición mueve más de BaseIO: una escritura con más datos,
+// o una lectura que pide más (la respuesta se reserva entera).
+func bigOp(op byte, body []byte) bool {
+	switch op {
+	case proto.OpWrite:
+		return len(body) > proto.BaseIO
+	case proto.OpRead:
+		// id u64, op u8, handle u64, off u64, size u32.
+		const at = 8 + 1 + 8 + 8
+		return len(body) >= at+4 && binary.BigEndian.Uint32(body[at:]) > proto.BaseIO
+	}
+	return false
 }
 
 // drainSession es la segunda mitad del cierre ordenado. Primero espera a que
@@ -308,6 +358,10 @@ func (ss *session) closeAll() {
 		<-globalFDs
 		delete(ss.files, id)
 	}
+	for _, c := range ss.cursors {
+		ss.dropCursorLocked(c)
+	}
+	ss.cursors = nil
 }
 
 // errReply es una respuesta de error.
@@ -365,7 +419,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if max == 0 || max > maxListBytes {
 			max = maxListBytes
 		}
-		return s.list(id, p, cookie, int(max))
+		return ss.list(id, p, cookie, int(max))
 
 	case proto.OpOpen, proto.OpCreate:
 		p, flags := d.Str(), d.U32()
@@ -399,7 +453,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 
 	case proto.OpRead:
 		h, off, size := d.U64(), d.U64(), d.U32()
-		if d.Done() != nil || size > proto.MaxIO || int64(off) < 0 || int64(off)+int64(size) < 0 {
+		if d.Done() != nil || int64(size) > ss.maxIO.Load() || int64(off) < 0 || int64(off)+int64(size) < 0 {
 			return errReply(id, proto.EINVAL)
 		}
 		hd := ss.get(h)
@@ -416,7 +470,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		return r.B
 
 	case proto.OpWrite:
-		h, off, data := d.U64(), d.U64(), d.Bytes(proto.MaxIO)
+		h, off, data := d.U64(), d.U64(), d.Bytes(int(ss.maxIO.Load()))
 		if d.Done() != nil || int64(off) < 0 || int64(off)+int64(len(data)) < 0 {
 			return errReply(id, proto.EINVAL)
 		}
@@ -533,6 +587,21 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		r.Str(t)
 		return r.B
 
+	case proto.OpHello:
+		want := d.U32()
+		if d.Done() != nil {
+			return errReply(id, proto.EINVAL)
+		}
+		n := int64(min(want, proto.MaxIO))
+		if n < proto.BaseIO {
+			// BaseIO lo acepta cualquiera sin negociar: no se baja de ahí.
+			n = proto.BaseIO
+		}
+		ss.maxIO.Store(n)
+		r := ok()
+		r.U32(uint32(n))
+		return r.B
+
 	case proto.OpStatfs:
 		if d.Done() != nil {
 			return errReply(id, proto.EINVAL)
@@ -643,64 +712,6 @@ func (s *Server) stat(p string) (proto.Attr, uint32) {
 		return proto.Attr{}, proto.ENOENT
 	}
 	return attrOf(fi), 0
-}
-
-func (s *Server) list(id uint64, p string, cookie uint64, max int) []byte {
-	f, err := s.root.Open(rel(p))
-	if err != nil {
-		return errReply(id, Errno(err))
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil {
-		return errReply(id, Errno(err))
-	} else if !fi.IsDir() {
-		return errReply(id, proto.ENOTDIR)
-	}
-
-	var ent proto.Enc
-	n, idx, eof := uint32(0), uint64(0), false
-	for {
-		batch, err := f.ReadDir(256)
-		for _, de := range batch {
-			if idx < cookie {
-				idx++
-				continue
-			}
-			if !servible(de.Type()) || proto.ValidName(de.Name()) != nil {
-				idx++
-				continue
-			}
-			if len(ent.B)+len(de.Name())+6 > max {
-				goto done
-			}
-			ent.Str(de.Name())
-			ent.U32(typeBits(de.Type()))
-			n++
-			idx++
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				return errReply(id, Errno(err))
-			}
-			eof = true
-			break
-		}
-		if len(batch) == 0 {
-			eof = true
-			break
-		}
-	}
-done:
-	r := proto.Response(id, 0)
-	if eof {
-		r.U8(1)
-	} else {
-		r.U8(0)
-	}
-	r.U32(n)
-	r.B = append(r.B, ent.B...)
-	r.U64(idx)
-	return r.B
 }
 
 func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.File, bool, uint32) {
@@ -1014,7 +1025,65 @@ func (s *Server) readlink(p string) (string, uint32) {
 	if err != nil {
 		return "", Errno(err)
 	}
+	if strings.HasPrefix(t, "/") {
+		return s.linkInterno(p, t)
+	}
 	return t, 0
+}
+
+// linkInterno traduce el destino absoluto t del enlace p.
+//
+// Un destino absoluto es una ruta DEL HOST: devolverla tal cual le enseñaba al
+// invitado el árbol del anfitrión (/Users/<quien>/..., dónde vive la carpeta), y
+// además el invitado la resolvería contra SU sistema de ficheros, que no tiene
+// nada que ver. Si apunta dentro de la carpeta se devuelve el equivalente
+// relativo desde el directorio del enlace, que el invitado resuelve dentro de su
+// montaje y llega al mismo sitio. Si apunta fuera, EACCES: ni se enseña ni se
+// sigue. Es léxico, y basta: lo devuelto es relativo y el invitado lo resuelve
+// otra vez a través de este servidor, que nunca sale de la raíz.
+func (s *Server) linkInterno(p, t string) (string, uint32) {
+	t = path.Clean(t)
+	for _, root := range s.hostRoots {
+		var dentro string
+		switch {
+		case t == root:
+			dentro = "/"
+		case root == "/":
+			dentro = t
+		case strings.HasPrefix(t, root+"/"):
+			dentro = t[len(root):]
+		default:
+			continue
+		}
+		r, err := filepath.Rel(path.Join("/", path.Dir(p)), dentro)
+		if err != nil || len(r) >= proto.MaxPath {
+			return "", proto.EACCES
+		}
+		return r, 0
+	}
+	return "", proto.EACCES
+}
+
+// hostRoots devuelve las formas absolutas y limpias de dir: tal cual y con los
+// enlaces resueltos, sin repetir.
+func hostRoots(dir string) []string {
+	var out []string
+	add := func(d string) {
+		d = filepath.Clean(d)
+		for _, o := range out {
+			if o == d {
+				return
+			}
+		}
+		out = append(out, d)
+	}
+	if a, err := filepath.Abs(dir); err == nil {
+		add(a)
+		if r, err := filepath.EvalSymlinks(a); err == nil {
+			add(r)
+		}
+	}
+	return out
 }
 
 func (s *Server) statfs() (proto.Statfs, uint32) {
