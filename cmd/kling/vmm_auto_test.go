@@ -40,6 +40,7 @@ func TestElegirAuto(t *testing.T) {
 		}, "killed"},
 		"KLING_VMM a otro":  {func(e *entornoAuto) { e.env = "/opt/kling-vz" }, "not a kling-hv"},
 		"congeladas con vz": {func(e *entornoAuto) { e.volcadosVZ = 2 }, "2 frozen machines or goldens"},
+		"vivas con vz":      {func(e *entornoAuto) { e.vivosVZ = 1 }, "1 running machines were started with kling-vz"},
 	}
 	for nombre, c := range casos {
 		e := bien()

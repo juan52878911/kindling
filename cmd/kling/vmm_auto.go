@@ -30,6 +30,9 @@ type entornoAuto struct {
 	// volcadosVZ son las máquinas congeladas y los dorados de la raíz hechos
 	// con kling-vz: kling-hv no carga su memoria.
 	volcadosVZ int
+	// vivosVZ son las máquinas de la raíz que corren ahora con kling-vz: un
+	// daemon con hv las readoptaría y sellaría sus volcados como de hv.
+	vivosVZ int
 }
 
 // elegirAuto decide entre hv y vz y dice por qué, en una línea.
@@ -55,6 +58,9 @@ func elegirAuto(e entornoAuto) (backend, motivo string) {
 	}
 	// Lo ya congelado con kling-vz solo lo descongela kling-vz: pasar solo a
 	// hv dejaría esas máquinas y dorados sin poder usarse tras un upgrade.
+	if e.vivosVZ > 0 {
+		return vz, fmt.Sprintf("%d running machines were started with kling-vz; stop them, or set daemon.vmm: hv once they are gone", e.vivosVZ)
+	}
 	if e.volcadosVZ > 0 {
 		return vz, fmt.Sprintf("%d frozen machines or goldens were made with kling-vz; set daemon.vmm: hv to switch (they must be thawed and removed, or rebuilt)", e.volcadosVZ)
 	}
@@ -72,6 +78,7 @@ func entornoAutoReal(env, root string) entornoAuto {
 	return entornoAuto{
 		macOS:      versionMacOS(),
 		volcadosVZ: machine.VolcadosDeVMM(root, "kling-vz"),
+		vivosVZ:    machine.VMMsVivosDe(root, "kling-vz"),
 		env:        env,
 		hv:         machine.ResolverVMM(machine.BackendHV, "", ""),
 		existe: func(p string) bool {

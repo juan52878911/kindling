@@ -34,3 +34,23 @@ func vmmsDeTabla(tabla map[int]string, prefix string) map[string]int {
 	}
 	return out
 }
+
+// vivosDeVMMEnTabla cuenta los VMM de las máquinas bajo prefix cuyo ejecutable
+// se llama nombre ("kling-vz"): siguen corriendo con él y su volcado solo lo
+// carga ese VMM.
+func vivosDeVMMEnTabla(tabla map[int]string, prefix, nombre string) int {
+	n := 0
+	for _, linea := range tabla {
+		i := strings.Index(linea, prefix)
+		if i < 0 || vmmDeLinea(linea, prefix) == "" {
+			continue
+		}
+		// El ejecutable va delante de la ruta del socket; su directorio puede
+		// llevar espacios ("Application Support").
+		antes := linea[:i]
+		if strings.HasPrefix(antes, nombre+" ") || strings.Contains(antes, "/"+nombre+" ") {
+			n++
+		}
+	}
+	return n
+}

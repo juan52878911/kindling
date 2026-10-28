@@ -163,3 +163,13 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 // la máquina. No se llama a adopt, que lee la tabla de procesos: reconcile lo
 // usa bajo m.mu.
 func (m *Manager) socketDe(id string, pid int) string { return m.dir(id) + "/fc.sock" }
+
+// VMMsVivosDe cuenta las máquinas de root que corren ahora con el VMM nombre
+// ("kling-vz"): las adoptaría un daemon que arrancara con otro VMM.
+func VMMsVivosDe(root, nombre string) int {
+	tabla, err := tablaProcesos()
+	if err != nil {
+		return 0
+	}
+	return vivosDeVMMEnTabla(tabla, filepath.Join(root, "machines")+"/", nombre)
+}
