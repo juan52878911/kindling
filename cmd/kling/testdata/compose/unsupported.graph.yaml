@@ -6,5 +6,4 @@ nodes:
   app: {image: lab-app, ports: [3000]}
   proxy: {image: lab-proxy, ports: [80]}
 edges:
-  - {from: proxy, to: app, kind: link, port: 3000}
   - {from: proxy, to: app, kind: depends}

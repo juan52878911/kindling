@@ -9,3 +9,4 @@ nodes:
 edges:
   - {from: api, to: db, kind: link, port: 5432}
   - {from: api, to: db, kind: depends, port: 5432}
+  - {from: db, to: api, kind: link, port: 8081}
