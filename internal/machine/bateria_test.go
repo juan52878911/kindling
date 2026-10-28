@@ -280,3 +280,27 @@ func (b *bancoBateria) usoPausada(m *Manager, id string) bool {
 	u := m.bat.uso[id]
 	return u != nil && u.pausada
 }
+
+// 2.2: en batería sin ninguna máquina corriendo (pausadas o congeladas) el
+// vigilante se espacia más; y sus vueltas caen en la rejilla de su intervalo.
+func TestIntervaloVigilanteQuietoYAlineado(t *testing.T) {
+	m := newTestManager(t)
+	nuevoBancoBateria(t, m, BatteryConfig{Mode: config.BatteryOn})
+	mc := maquinaBateria(m, "a", nil)
+	if got := m.intervaloVigilante(10 * time.Second); got != 30*time.Second {
+		t.Fatalf("con una corriendo = %v", got)
+	}
+	m.mu.Lock()
+	mc.State = api.StatePaused
+	m.mu.Unlock()
+	if got := m.intervaloVigilante(10 * time.Second); got != 60*time.Second {
+		t.Fatalf("todas pausadas = %v", got)
+	}
+	base := time.Unix(1_000_040, 0) // 20 s pasado un múltiplo de 30 s
+	if got := esperaAlineada(base, 30*time.Second); got != 10*time.Second+30*time.Second {
+		t.Fatalf("a 10 s de la marca = %v, quería saltar a la siguiente", got)
+	}
+	if got := esperaAlineada(base.Add(-10*time.Second), 30*time.Second); got != 20*time.Second {
+		t.Fatalf("a 20 s de la marca = %v", got)
+	}
+}

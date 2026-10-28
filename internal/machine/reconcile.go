@@ -431,14 +431,17 @@ func (m *Manager) hasSnapshot(id string) bool {
 // valga desde la vuelta siguiente.
 func (m *Manager) watch(ctx context.Context, every time.Duration) {
 	m.reloj.durmio() // la base del reloj del host
-	t := time.NewTimer(m.intervaloVigilante(every))
+	// Un solo temporizador, rearmado en cada vuelta sobre la rejilla de su
+	// intervalo (esperaAlineada): la batería y la QoS van dentro de la vuelta
+	// (vueltaBateria), no en un reloj aparte.
+	t := time.NewTimer(esperaAlineada(time.Now(), m.intervaloVigilante(every)))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			t.Reset(m.intervaloVigilante(every))
+			t.Reset(esperaAlineada(time.Now(), m.intervaloVigilante(every)))
 			// Una vuelta entera por iteracion: si cualquiera de estas tareas
 			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
 			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
