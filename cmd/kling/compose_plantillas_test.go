@@ -162,12 +162,19 @@ type opsFalsas struct {
 	fallos  int // execs que acaban con 1 antes de pasar
 	commit  api.CommitRequest
 	borrada string
+	// orden: "run:<nombre>" y "rm:<ref>" según llegan; runErr hace fallar Run.
+	orden  []string
+	runErr error
 }
 
 func (o *opsFalsas) Run(_ context.Context, r api.RunRequest) (*api.Machine, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.run = r
+	o.orden = append(o.orden, "run:"+r.Name)
+	if o.runErr != nil {
+		return nil, o.runErr
+	}
 	return &api.Machine{Name: r.Name, Ready: api.ReadyYes}, nil
 }
 
@@ -187,8 +194,39 @@ func (o *opsFalsas) CommitWith(_ context.Context, _ string, r api.CommitRequest)
 }
 
 func (o *opsFalsas) Remove(_ context.Context, ref string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.borrada = ref
+	o.orden = append(o.orden, "rm:"+ref)
 	return nil
+}
+
+// A6: una -prep que dejó un up interrumpido (Ctrl-C dentro de su Run) se
+// borra ANTES de crear la nueva, y si Run falla o se corta también se borra
+// (el daemon pudo crearla igual).
+func TestPlantillaPrepHuerfanaNoBloquea(t *testing.T) {
+	tr := traducirParaPlantillas(t, composePlantillas)
+	var app *plantillaCompose
+	for _, p := range planPlantillas(tr, nil, daemonCompose{version: "v1", cmd: true}, false) {
+		if p.s.nodo == "app" {
+			app = p
+		}
+	}
+	prep := app.nombre + "-prep"
+	ops := &opsFalsas{}
+	if err := prepararPlantilla(context.Background(), ops, "dev", app, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.orden) < 3 || ops.orden[0] != "rm:"+prep || ops.orden[1] != "run:"+prep || ops.orden[len(ops.orden)-1] != "rm:"+prep {
+		t.Fatalf("orden = %v", ops.orden)
+	}
+	ops = &opsFalsas{runErr: context.Canceled}
+	if err := prepararPlantilla(context.Background(), ops, "dev", app, func(string, ...any) {}); err == nil {
+		t.Fatal("Run falló y prepararPlantilla no")
+	}
+	if !reflect.DeepEqual(ops.orden, []string{"rm:" + prep, "run:" + prep, "rm:" + prep}) {
+		t.Fatalf("Run cortado: orden = %v", ops.orden)
+	}
 }
 
 // Con un daemon que entiende el comando por máquina, el comando no se hornea:
