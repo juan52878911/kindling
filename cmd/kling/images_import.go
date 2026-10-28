@@ -48,6 +48,7 @@ func imagesImport(args []string) error {
 	fs.Var(&entrypoint, "entrypoint", "replace the image's ENTRYPOINT (repeatable, one argument each; drops its CMD)")
 	restart := fs.String("restart", "", "restart the service when it exits: always, on-failure or no (default on-failure)")
 	onRestore := fs.String("on-restore", "", "in every copy of a snapshot of it: restart the service, or send it signal:SIGUSR1, so it doesn't keep the snapshot's random state (default none)")
+	initMode := fs.String("init", "", "image: run the image's own init (s6-overlay, supervisord) as PID 1 with the agent beside it; slower to boot and no shared base (default: the agent is PID 1)")
 	var ulimits, sysctls stringsFlag
 	fs.Var(&ulimits, "ulimit", "apply a resource limit before the service starts, as in docker: nofile=65536, memlock=unlimited, nproc=1024:4096 (repeatable)")
 	fs.Var(&sysctls, "sysctl", "set a kernel parameter before the service starts: vm.max_map_count=262144 (repeatable; only a list of safe ones)")
@@ -131,7 +132,7 @@ func imagesImport(args []string) error {
 	spec := OCISpec{Ref: rest[0], Arch: *arch, User: *user, MaxMB: *maxSize, Env: env, OnRestore: *onRestore,
 		// Explícita en la receta: una sin ella es de antes de las políticas
 		// (ver existingImport).
-		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim}
+		Restart: cmp.Or(*restart, api.RestartOnFailure), Slim: *slim, Init: *initMode}
 	if len(entrypoint) > 0 {
 		spec.Entrypoint = entrypoint
 	}

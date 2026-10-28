@@ -101,6 +101,11 @@ func KillGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
+	if cmd.Process.Pid <= 1 {
+		// El init de la imagen (Init): kill(-1) mataría a todos, y matarlo a él
+		// es un pánico del kernel. De eso se ocupa el daemon.
+		return
+	}
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 		_ = cmd.Process.Kill()
 	}

@@ -48,3 +48,11 @@ func (linuxInit) AppendFile(p string, b []byte) error {
 }
 
 func (linuxInit) Exec(path string, argv, env []string) error { return syscall.Exec(path, argv, env) }
+
+func (linuxInit) Spawn(path string, argv, env []string) error {
+	p, err := os.StartProcess(path, argv, &os.ProcAttr{Env: env, Files: []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+	if err != nil {
+		return err
+	}
+	return p.Release()
+}
