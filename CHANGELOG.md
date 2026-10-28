@@ -29,6 +29,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
+- Image import: a file name over 255 bytes or with a NUL is rejected instead of writing a corrupt directory entry; a file alternating data and zero blocks no longer fails with "file too fragmented"; xattrs in unknown namespaces or too large in `user.*` are dropped with a warning instead of failing the image
+- Reading an ext4 with a corrupt superblock (0 inodes or blocks per group) returns an error instead of panicking
 
 ## [0.18.0] - 2026-10-11
 
