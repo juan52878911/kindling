@@ -92,14 +92,11 @@ CONFIG_CRYPTO_SHA2_ARM64_CE=y
 # registra al arrancar solo si la imagen va emulada; sin eso no cuesta nada.
 CONFIG_BINFMT_MISC=y
 
-# Tics: con NO_HZ_IDLE un vCPU en reposo no recibe el tic periódico, pero
-# cada vez que despierta (un temporizador, el agente) el tic vuelve a correr
-# hasta que se duerme otra vez; a 100 Hz son la mitad de interrupciones que a
-# 250 y los temporizadores en jiffies se agrupan más. En el Mac cada
-# despertar de un vCPU es un despertar del portátil. El planificador CFS no lo
-# nota en una microVM de 1-2 vCPUs. Solo arm64: el kernel x86 no cambia.
-CONFIG_HZ_100=y
-# CONFIG_HZ_250 is not set
+# Tics: se queda en HZ_250 (el de siempre). Probado HZ_100 en el Mac (vz y
+# hv, n=10, docs/imagenes-amd64.md): en reposo da lo mismo (con NO_HZ_IDLE un
+# vCPU dormido ya no recibe el tic; quedan temporizadores e IPIs, ~0,7/s por
+# vCPU) y con él el e2e de Mac falla 2 de 2 en "freeze/thaw with a live share"
+# (EIO de una escritura en vuelo al volver la sesión FUSE), que con 250 pasa.
 # Ni detector de bloqueos (ni soft ni hard: el hard pide perf/NMI, que no
 # hay) ni tareas colgadas: hilos que se despiertan solos para vigilar.
 # allnoconfig ya los deja fuera; se dicen para que build.sh avise si vuelven.
