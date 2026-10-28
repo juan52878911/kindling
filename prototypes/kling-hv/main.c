@@ -127,6 +127,8 @@ struct snap_hdr {
   uint64_t t_pausa;  // mach_absolute_time() al pausar
   struct uart_state uart;
   struct vblk_state vblk[VIRTIO_MAX];
+  uint8_t hay_red, mac[6];
+  struct vnet_state vnet;
   struct cpu_state cpu[MAX_CPUS];
   uint64_t gic_size;
 };
@@ -151,6 +153,7 @@ static int ncpus = 1;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static volatile bool pausa_pedida;
+volatile bool g_pausa;
 static int n_pausados, n_creados;
 static bool arrancar;          // la VM puede empezar a correr
 static bool restaurando;       // los hilos cargan cpu_state antes de correr
@@ -214,6 +217,11 @@ static void punto_pausa(struct cpu *c) {
   pthread_mutex_unlock(&mu);
 }
 
+static int ndisks;
+static bool hay_red;
+static int net_fd = -1;
+static uint8_t net_mac[6] = {0x06, 0x00, 0xac, 0x10, 0x00, 0x02};  // knet.GuestMAC
+
 static void set_x(struct cpu *c, unsigned r, uint64_t v) {
   if (r < 31) OK(hv_vcpu_set_reg(c->id, HV_REG_X0 + r, v));
 }
@@ -235,7 +243,9 @@ static void mmio(struct cpu *c, uint64_t ipa, bool w, unsigned srt, int size, bo
   if (ipa >= UART_BASE && ipa < UART_BASE + UART_SIZE) {
     uart_mmio(ipa - UART_BASE, w, &v);
   } else if (ipa >= VIRTIO_BASE && ipa < VIRTIO_BASE + VIRTIO_MAX * VIRTIO_STRIDE) {
-    vblk_mmio((int)((ipa - VIRTIO_BASE) / VIRTIO_STRIDE), (ipa - VIRTIO_BASE) % VIRTIO_STRIDE, w, &v, size);
+    int slot = (int)((ipa - VIRTIO_BASE) / VIRTIO_STRIDE);
+    if (slot < ndisks) vblk_mmio(slot, (ipa - VIRTIO_BASE) % VIRTIO_STRIDE, w, &v, size);
+    else if (slot == ndisks && hay_red) vnet_mmio((ipa - VIRTIO_BASE) % VIRTIO_STRIDE, w, &v, size);
   } else {
     static int avisos;
     if (avisos++ < 10) LOG("cpu%d: MMIO sin dispositivo %s %#llx", c->idx, w ? "escritura" : "lectura", ipa);
@@ -474,7 +484,6 @@ static void soltar_vcpus(void) {
 // ===================== VM =====================
 
 static uint32_t uart_intid, disk_intid[VIRTIO_MAX];
-static int ndisks;
 static char disk_path[VIRTIO_MAX][512];
 static bool disk_ro[VIRTIO_MAX];
 static bool disk_tmp[VIRTIO_MAX];  // clon propio de este restore: se borra al salir
@@ -529,13 +538,13 @@ static void cargar_kernel(const char *ruta, const char *cmdline) {
   close(fd);
 
   struct fdt_params p = {.ram_size = g_ram_size, .ncpus = ncpus, .bootargs = cmdline, .uart_spi = uart_intid,
-                         .nvirtio = ndisks};
+                         .nvirtio = ndisks + (hay_red ? 1 : 0)};
   size_t sz;
   hv_gic_get_distributor_size(&sz);
   p.dist_size = sz;
   hv_gic_get_redistributor_size(&sz);
   p.redist_size = sz;
-  for (int i = 0; i < ndisks; i++) p.virtio_spi[i] = disk_intid[i];
+  for (int i = 0; i < p.nvirtio; i++) p.virtio_spi[i] = disk_intid[i];
   // El DTB va al final de la RAM, alineado a 2 MiB y fuera de la imagen.
   fdt_gpa = RAM_BASE + g_ram_size - (2 << 20);
   size_t n = fdt_build(gpa_ptr(fdt_gpa, 1 << 20), 1 << 20, &p);
@@ -576,6 +585,7 @@ static void marca_cb(int a) {
 static void pausar(void) {
   pthread_mutex_lock(&mu);
   pausa_pedida = true;
+  g_pausa = true;
   pthread_cond_broadcast(&cv);
   pthread_mutex_unlock(&mu);
   hv_vcpu_t ids[MAX_CPUS];
@@ -589,6 +599,7 @@ static void pausar(void) {
 __attribute__((unused)) static void reanudar(void) {
   pthread_mutex_lock(&mu);
   pausa_pedida = false;
+  g_pausa = false;
   pthread_cond_broadcast(&cv);
   pthread_mutex_unlock(&mu);
 }
@@ -637,6 +648,9 @@ static void hacer_snapshot(void) {
     vblk_get(i, &h.vblk[i]);
   }
   uart_get(&h.uart);
+  h.hay_red = hay_red;
+  memcpy(h.mac, net_mac, 6);
+  if (hay_red) vnet_get(&h.vnet);
   for (int i = 0; i < ncpus; i++) h.cpu[i] = cpus[i].st;
   hv_gic_state_t gs = hv_gic_state_create();
   if (!gs) morir("hv_gic_state_create devolvió NULL");
@@ -704,6 +718,7 @@ static void restaurar(const char *dir) {
   fclose(f);
 
   ncpus = (int)h.ncpus;
+  g_pausa = true;  // los dispositivos esperan a que la VM corra
   crear_vm();
   snprintf(ruta, sizeof ruta, "%s/mem", dir);
   mapear_ram(ruta, h.ram_size, false);
@@ -727,10 +742,26 @@ static void restaurar(const char *dir) {
     vblk_init(i, disk_path[i], disk_ro[i], disk_intid[i]);
     vblk_set(i, &h.vblk[i]);
   }
+  hay_red = h.hay_red;
+  if (hay_red) {
+    // La red es de la instancia (como el netns en Linux): el fd lo da quien
+    // lanza este restore; las colas siguen donde las dejó el invitado.
+    memcpy(net_mac, h.mac, 6);
+    vnet_init(net_fd, net_mac, disk_intid[ndisks]);
+    vnet_set(&h.vnet);
+  }
   restaurando = true;
   crear_vcpus();
   OK(hv_gic_set_state(gdata, h.gic_size));
   free(gdata);
+  // El nivel de la línea de cada SPI es del dispositivo y hv_gic_set_state no
+  // lo deja como estaba: sin volver a subirlo, una interrupción pendiente en
+  // el snapshot no llega nunca y el dispositivo cree que la línea ya está alta.
+  if (!getenv("KHV_NO_REAFIRMAR")) {  // para medir qué pasa sin ello
+    uart_reafirmar();
+    for (int i = 0; i < ndisks; i++) vblk_reafirmar(i);
+    if (hay_red) vnet_reafirmar();
+  }
   for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
   // El contador virtual sigue donde se quedó: CNTVCT = mach_absolute_time - offset.
   uint64_t cnt = h.t_pausa - h.cpu[0].vtimer_offset;
@@ -738,6 +769,7 @@ static void restaurar(const char *dir) {
   t_restaurado = ms_desde_inicio();
   LOG("estado restaurado (gic %llu bytes, %d vCPU)", h.gic_size, ncpus);
   soltar_vcpus();
+  g_pausa = false;
 }
 
 static void fin_vm(int codigo) {
@@ -785,7 +817,7 @@ static void uso(void) {
           "uso: kling-hv boot -k KERNEL -d DISCO[:ro] [-m MiB] [-c CPUS] [-a CMDLINE] [--mem FICHERO] [comunes]\n"
           "     kling-hv restore DIR [comunes]\n"
           "comunes: -T -i TEXTO [--send-on CADENA] --mark CADENA --on-mark exit|snap|stats --snap-dir DIR\n"
-          "         --snap-after MS"
+          "         --snap-after MS --net-fd FD (socket SOCK_DGRAM de tramas Ethernet)"
           "         --stats-after MS --exit-after MS --snap-full\n");
   exit(2);
 }
@@ -801,11 +833,17 @@ int main(int argc, char **argv) {
   const char *kernel = NULL, *cmdline = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/bin/sh";
   const char *mem = "kling-hv.mem", *entrada = NULL, *marca = NULL, *send_on = NULL;
   uint64_t mib = 512;
-  double snap_after = -1, stats_after = -1, exit_after = -1;
+  double snap_after = -1, exit_after = -1;
   static struct option largas[] = {{"mem", 1, 0, 'M'},        {"mark", 1, 0, 'K'},       {"on-mark", 1, 0, 'O'},
                                    {"snap-dir", 1, 0, 'D'},   {"snap-after", 1, 0, 'S'}, {"stats-after", 1, 0, 'P'},
                                    {"exit-after", 1, 0, 'E'}, {"snap-full", 0, 0, 'F'},  {"send-on", 1, 0, 'I'},
+                                   {"net-fd", 1, 0, 'N'},
                                    {0, 0, 0, 0}};
+  char semnom[64];
+  snprintf(semnom, sizeof semnom, "/klinghv.%d", getpid());
+  sem_accion = sem_open(semnom, O_CREAT | O_EXCL, 0600, 0);
+  if (sem_accion == SEM_FAILED) morir("sem_open");
+  sem_unlink(semnom);
   optind = 2;
   int o;
   while ((o = getopt_long(argc, argv, "k:d:m:c:a:Ti:", largas, NULL)) != -1) {
@@ -830,24 +868,22 @@ int main(int argc, char **argv) {
       case 'M': mem = optarg; break;
       case 'K': marca = optarg; break;
       case 'I': send_on = optarg; break;
+      case 'N':
+        net_fd = atoi(optarg);
+        hay_red = true;
+        break;
       case 'O':
         accion_marca = strcmp(optarg, "snap") == 0 ? ACC_SNAP : strcmp(optarg, "stats") == 0 ? ACC_STATS : ACC_EXIT;
         break;
       case 'D': snap_dir = optarg; break;
       case 'S': snap_after = atof(optarg); break;
-      case 'P': stats_after = atof(optarg); break;
+      case 'P': programar(atof(optarg), ACC_STATS); break;  // se puede repetir
       case 'E': exit_after = atof(optarg); break;
       case 'F': snap_full = true; break;
       default: uso();
     }
   }
-  if (ncpus < 1 || ncpus > MAX_CPUS) uso();
-  sem_unlink("/kling-hv");
-  char semnom[64];
-  snprintf(semnom, sizeof semnom, "/klinghv.%d", getpid());
-  sem_accion = sem_open(semnom, O_CREAT | O_EXCL, 0600, 0);
-  if (sem_accion == SEM_FAILED) morir("sem_open");
-  sem_unlink(semnom);
+  if (ncpus < 1 || ncpus > MAX_CPUS || ndisks + (hay_red ? 1 : 0) > VIRTIO_MAX) uso();
 
   if (boot) {
     if (!kernel || ndisks == 0) uso();
@@ -855,6 +891,7 @@ int main(int argc, char **argv) {
     mapear_ram(mem, mib << 20, true);
     uart_init(uart_intid);
     for (int i = 0; i < ndisks; i++) vblk_init(i, disk_path[i], disk_ro[i], disk_intid[i]);
+    if (hay_red) vnet_init(net_fd, net_mac, disk_intid[ndisks]);
     cargar_kernel(kernel, cmdline);
     LOG("cmdline: %s", cmdline);
     crear_vcpus();
@@ -868,7 +905,6 @@ int main(int argc, char **argv) {
   else if (entrada) uart_rx_push(entrada, strlen(entrada));
   if (isatty(0)) uart_start_stdin();
   if (snap_after >= 0) programar(snap_after, ACC_SNAP);
-  if (stats_after >= 0) programar(stats_after, ACC_STATS);
   if (exit_after >= 0) programar(exit_after, ACC_EXIT);
 
   bool enviada = false;

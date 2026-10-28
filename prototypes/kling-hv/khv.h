@@ -65,6 +65,7 @@ bool uart_mmio(uint64_t off, bool escribir, uint64_t *val);
 void uart_rx_push(const char *s, size_t n);
 void uart_start_stdin(void);
 void uart_get(struct uart_state *s);
+void uart_reafirmar(void);  // vuelve a poner en el GIC el nivel guardado
 void uart_set(const struct uart_state *s);
 // Marcas de consola: cuando la salida termina en la cadena se llama a cb(arg)
 // (desde el hilo del vCPU con la UART bloqueada: cb no debe tocar la UART).
@@ -87,7 +88,23 @@ void vblk_init(int idx, const char *ruta, bool ro, uint32_t intid);
 bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size);
 int vblk_count(void);
 void vblk_get(int idx, struct vblk_state *s);
+void vblk_reafirmar(int idx);
 void vblk_set(int idx, const struct vblk_state *s);
+
+// ---- virtio-mmio net (tramas por un socket unix SOCK_DGRAM) ----
+struct vnet_state {
+  uint32_t status, drv_feat_sel, dev_feat_sel, queue_sel, isr;
+  uint64_t drv_features;
+  struct vblk_queue q[2];
+  uint8_t nivel;
+};
+void vnet_init(int fd, const uint8_t mac[6], uint32_t intid);
+bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
+void vnet_get(struct vnet_state *s);
+void vnet_reafirmar(void);
+void vnet_set(const struct vnet_state *s);
+
+extern volatile bool g_pausa;  // VM en pausa: los dispositivos no tocan la RAM
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);

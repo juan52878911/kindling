@@ -159,6 +159,12 @@ void uart_get(struct uart_state *s) {
   pthread_mutex_unlock(&u_mu);
 }
 
+void uart_reafirmar(void) {
+  pthread_mutex_lock(&u_mu);
+  hv_gic_set_spi(u_intid, u.nivel);
+  pthread_mutex_unlock(&u_mu);
+}
+
 void uart_set(const struct uart_state *s) {
   pthread_mutex_lock(&u_mu);
   u = *s;
@@ -386,6 +392,12 @@ bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size) {
 void vblk_get(int idx, struct vblk_state *s) {
   pthread_mutex_lock(&blks[idx].mu);
   *s = blks[idx].s;
+  pthread_mutex_unlock(&blks[idx].mu);
+}
+
+void vblk_reafirmar(int idx) {
+  pthread_mutex_lock(&blks[idx].mu);
+  hv_gic_set_spi(blks[idx].intid, blks[idx].s.nivel);
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
