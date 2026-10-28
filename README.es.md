@@ -30,6 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 kling up            # comprueba KVM, nftables, el usuario kindling y las imágenes; imprime lo que pide sudo
 ```
 
+En arm64 (Graviton .metal, Ampere, Raspberry Pi 5 con el kernel de 4K), qué hosts sirven
+y cómo afinarlos: [`docs/linux-arm64.md`](docs/linux-arm64.md).
+
 El daemon también puede correr como servicio de systemd en un host remoto, desplegado
 desde una copia del repo: `make deploy HOST=ssh://usuario@host`. El CLI llega a él por
 SSH (`kling context add lab ssh://usuario@host`): el daemon nunca escucha en un puerto de

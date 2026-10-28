@@ -40,7 +40,7 @@ func TestPolicyModes(t *testing.T) {
 	if p.AllowConn(pub) {
 		t.Fatal("allowlist: an IP not seeded must be refused")
 	}
-	p.IPSet().Add(pub, 0)
+	p.IPSet().AddPermanent(pub)
 	if !p.AllowConn(pub) {
 		t.Fatal("allowlist: a seeded IP must pass")
 	}
@@ -72,8 +72,8 @@ func TestIPSetTTL(t *testing.T) {
 	a := netip.MustParseAddr("1.2.3.4")
 	b := netip.MustParseAddr("5.6.7.8")
 	s.Add(a, 5*time.Second) // se sube al suelo de MinTTL
-	s.Add(b, 0)             // permanente
-	s.Add(netip.MustParseAddr("10.0.0.1"), 0)
+	s.AddPermanent(b)
+	s.AddPermanent(netip.MustParseAddr("10.0.0.1"))
 	if s.Len() != 2 {
 		t.Fatalf("blocked IPs must never enter the set (len %d)", s.Len())
 	}
@@ -89,6 +89,26 @@ func TestIPSetTTL(t *testing.T) {
 	}
 	if !s.Contains(b) {
 		t.Fatal("a permanent entry expired")
+	}
+}
+
+// Un TTL de 0 en una respuesta DNS es el suelo, MinTTL, y no una entrada
+// permanente: antes, un upstream que contestara TTL 0 dejaba esa IP abierta
+// para siempre.
+func TestIPSetTTLCeroNoEsPermanente(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s := NewIPSet()
+	s.now = func() time.Time { return now }
+	a := netip.MustParseAddr("1.2.3.4")
+	s.Add(a, 0)
+	s.Add(netip.MustParseAddr("1.2.3.5"), -time.Second)
+	now = now.Add(MinTTL - time.Second)
+	if !s.Contains(a) {
+		t.Fatal("TTL 0 must still get the MinTTL floor")
+	}
+	now = now.Add(2 * time.Second)
+	if s.Contains(a) || s.Contains(netip.MustParseAddr("1.2.3.5")) {
+		t.Fatal("an IP resolved with TTL 0 must expire after MinTTL")
 	}
 }
 
@@ -156,6 +176,32 @@ func TestSeedStatic(t *testing.T) {
 	r.SeedStatic(context.Background())
 	if !p.AllowConn(netip.MustParseAddr("93.184.215.14")) {
 		t.Fatal("static seeding did not open the domain's IP")
+	}
+}
+
+// Por el camino del DNS: una respuesta con TTL 0 abre la IP durante MinTTL y
+// luego se cierra; el sembrado estático sigue siendo permanente.
+func TestDNSConTTLCeroCaduca(t *testing.T) {
+	p := NewPolicy()
+	p.Set(Allowlist, []string{"example.com"})
+	now := time.Unix(1000, 0)
+	p.IPSet().now = func() time.Time { return now }
+	r := &Resolver{Policy: p, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
+		return answer(q, 0, "93.184.215.14"), nil
+	}}
+	r.Process(context.Background(), BuildQuery("www.example.com", 1), false)
+	ip := netip.MustParseAddr("93.184.215.14")
+	if !p.AllowConn(ip) {
+		t.Fatal("the resolved IP was not seeded")
+	}
+	now = now.Add(MinTTL + time.Second)
+	if p.AllowConn(ip) {
+		t.Fatal("an IP answered with TTL 0 stayed open past MinTTL")
+	}
+	r.SeedStatic(context.Background())
+	now = now.Add(24 * time.Hour)
+	if !p.AllowConn(ip) {
+		t.Fatal("static seeding must stay permanent")
 	}
 }
 

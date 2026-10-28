@@ -1000,7 +1000,15 @@ func cmdLifecycle(op string, args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 
-	for _, ref := range fs.Args() {
+	return runLifecycle(ctx, c, op, fs.Args(), os.Stdout, os.Stderr)
+}
+
+// runLifecycle aplica op a cada ref. Como docker, un fallo no detiene el
+// resto: el error de cada uno va a stderr y al final se sale con 1. Con una
+// sola ref se devuelve su error tal cual, para que conserve pista y código.
+func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, out, errw io.Writer) error {
+	fallos := 0
+	for _, ref := range refs {
 		var mc *api.Machine
 		var err error
 		switch op {
@@ -1016,18 +1024,30 @@ func cmdLifecycle(op string, args []string) error {
 			err = c.Remove(ctx, ref)
 		}
 		if err != nil {
-			return err
+			if len(refs) == 1 {
+				return err
+			}
+			fallos++
+			printError(errw, fmt.Errorf("%s: %w", ref, err))
+			if ctx.Err() != nil {
+				break // Ctrl-C: no tiene sentido seguir con el resto
+			}
+			continue
 		}
 		switch {
 		case op == "rm":
-			fmt.Println(ref)
+			fmt.Fprintln(out, ref)
 		case op == "freeze":
-			fmt.Printf("%s  frozen  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
+			fmt.Fprintf(out, "%s  frozen  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
 		case op == "thaw":
-			fmt.Printf("%s  running  (%d ms)%s\n", mc.ID[:12], mc.ThawMS, wakeNote(mc.Wake))
+			fmt.Fprintf(out, "%s  running  (%d ms)%s\n", mc.ID[:12], mc.ThawMS, wakeNote(mc.Wake))
 		default:
-			fmt.Printf("%s  %s\n", mc.ID[:12], mc.State)
+			fmt.Fprintf(out, "%s  %s\n", mc.ID[:12], mc.State)
 		}
+	}
+	if fallos > 0 {
+		// Mensaje vacío: cada error ya salió por stderr; solo queda el código.
+		return &errConCodigo{code: 1, err: errors.New("")}
 	}
 	return nil
 }

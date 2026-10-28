@@ -172,3 +172,39 @@ func TestFormatos(t *testing.T) {
 		t.Fatalf("Formatos() = %d %d", min, max)
 	}
 }
+
+// Desechable es de la máquina, no del snapshot: no se escribe, y un PATCH lo
+// cambia sin tocar los demás campos.
+func TestDesechableNoVaAlSnapshot(t *testing.T) {
+	s := sample()
+	s.PutDrive(Drive{DriveID: "overlay", PathOnHost: "/m/overlay.ext4", Disposable: true})
+	if c := s.Clone(); !c.Drives[1].Disposable {
+		t.Fatal("Clone pierde kling_disposable (Create recibe un Clone)")
+	}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := s.WriteFile(path); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "kling_disposable") {
+		t.Fatalf("el snapshot lleva kling_disposable:\n%s", b)
+	}
+	if !s.Drives[1].Disposable {
+		t.Fatal("WriteFile tocó la spec en memoria")
+	}
+	got, err := ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	si := true
+	if err := got.PatchDrive("overlay", "/m2/overlay.ext4", &si); err != nil {
+		t.Fatal(err)
+	}
+	d := got.Drives[1]
+	if d.PathOnHost != "/m2/overlay.ext4" || !d.SyncNone() {
+		t.Fatalf("tras PATCH: %+v", d)
+	}
+	if (Drive{Disposable: true, IsReadOnly: true}).SyncNone() || (Drive{Disposable: true, IsRootDevice: true}).SyncNone() {
+		t.Fatal("SyncNone en un disco de solo lectura o en la raíz")
+	}
+}

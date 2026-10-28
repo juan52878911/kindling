@@ -90,6 +90,33 @@ func TestRemoveContestaAntesDeLimpiarYLiberaElNombre(t *testing.T) {
 	}
 }
 
+// Borrada, no quedan ni su cuenta de freezes fallidos ni su marca de "sin
+// agente": eran entradas por ID que ya no volverá.
+func TestRemovePurgaLoQueQuedabaPorID(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "aa00000000000003"
+	maquinaConDir(t, m, id, "web")
+	m.noteFreezeFailure(id)
+	m.resyncSinAgente.Store(claveThaw(id), time.Time{})
+
+	if err := m.Remove("web"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.EsperarBorrados(5 * time.Second) {
+		t.Fatal("la limpieza no terminó")
+	}
+	m.mu.RLock()
+	_, cuenta := m.freezeFails[id]
+	m.mu.RUnlock()
+	if cuenta {
+		t.Error("quedó su cuenta de freezes fallidos")
+	}
+	if _, ok := m.resyncSinAgente.Load(claveThaw(id)); ok {
+		t.Error("quedó su marca de sin agente")
+	}
+}
+
 // rm y un run con el mismo nombre en carrera: ninguno choca con ErrNameTaken.
 func TestRemoveYReservaDelMismoNombreEnCarrera(t *testing.T) {
 	m := newTestManager(t)

@@ -7,13 +7,14 @@ import (
 )
 
 func TestParseMiB(t *testing.T) {
-	for in, want := range map[string]int{"512": 512, "512M": 512, "2G": 2048, "1024MiB": 1024, "0.5G": 512, "2g": 2048, "1T": 1 << 20, "2048K": 2} {
+	for in, want := range map[string]int{"512": 512, "512M": 512, "2G": 2048, "1024MiB": 1024, "0.5G": 512, "2g": 2048, "1T": 1 << 20, "2048K": 2, "1024T": MaxMiB, "1073741824": MaxMiB} {
 		got, err := ParseMiB(in)
 		if err != nil || got != want {
 			t.Errorf("%q: got %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "-1", "abc", "2X", "1.5.5G"} {
+	// Lo que no cabe ya no se recorta en silencio a MaxInt64.
+	for _, bad := range []string{"", "-1", "abc", "2X", "1.5.5G", "1e30G", "1e999G", "1025T", "1073741825", "99999999999999999999"} {
 		if _, err := ParseMiB(bad); err == nil {
 			t.Errorf("%q: expected an error", bad)
 		}

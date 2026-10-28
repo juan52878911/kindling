@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -94,7 +95,7 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		sock := m.socket[id]
 		m.mu.RUnlock()
 		if sock != "" {
-			if ok, err := fc.New(sock).KlingProbe(ctx, port); err == nil && ok {
+			if ok, err := sondearPuertoVMM(ctx, sock, port); err == nil && ok {
 				return nil
 			}
 		}
@@ -104,6 +105,31 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// intentoSondeoVZ acota UNA pregunta a /kling/probe. kling-vz espera hasta
+// 1 s (su probeTimeout) a que el invitado conteste al SYN, y la pila de
+// usuario (gVisor) no lo reenvía hasta su RTO inicial, que es justo 1 s: un
+// sondeo lanzado antes de que suba la red del invitado se perdía entero y
+// contestaba "cerrado" a los 1001 ms aunque el agente escuchara desde los
+// ~500. Medido en el M4: exec tras un arranque en frío a 1,4 s con el sondeo
+// de 1 s y a 0,53 s con intentos de 100 ms. Cortando el intento, el siguiente
+// manda un SYN nuevo. Un invitado vivo contesta en <1 ms; el margen es para
+// un Mac cargado.
+const intentoSondeoVZ = 150 * time.Millisecond
+
+// sondearPuertoVMM pregunta a kling-vz (sock) si algo escucha en port dentro
+// del invitado, en un intento corto (intentoSondeoVZ). Un intento agotado con
+// ctx aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
+// quien llama vuelve a preguntar.
+func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
+	ictx, cancel := context.WithTimeout(ctx, intentoSondeoVZ)
+	defer cancel()
+	open, err := fc.New(sock).KlingProbe(ictx, port)
+	if err != nil && ctx.Err() == nil && errors.Is(ictx.Err(), context.DeadlineExceeded) {
+		return false, nil
+	}
+	return open, err
 }
 
 // capacidadGrafo comprueba que el kling-vz de c sabe pedir conexiones al
@@ -522,10 +548,156 @@ func discoLibreMiB(path, alternativa string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize) >> 20
 }
 
-// lanzamientoPlataforma: 4 encendidos a la vez. El prototipo vio fallos con
-// ~20 restauraciones simultáneas (docs/vz-mac-prototipo.md): cada una copia el
-// estado a memoria y el sistema empieza a matar procesos auxiliares.
-func lanzamientoPlataforma() int { return 4 }
+// Compuertas de encendido en macOS: restauraciones y arranques en frío por
+// separado. El prototipo vio fallos con ~20 restauraciones simultáneas
+// (docs/vz-mac-prototipo.md): cada una copia su estado a memoria (~324 MiB por
+// instancia medidos en el M4) y, con el Mac justo, el sistema empieza a matar
+// procesos auxiliares (jetsam). Un arranque en frío no carga memoria de golpe
+// (el invitado la va tocando) y no tiene por qué esperar detrás de las
+// restauraciones, ni al revés. Reanudar una pausada no pasa por ninguna: no
+// carga nada.
+//
+// La de restauraciones es la puerta general (launchGate, launch.go), con
+// lanzamientoPlataforma huecos; la de arranques en frío, compuertaFrioVZ.
+// KLING_MAX_PARALLEL_BOOT, si se da, fija las dos.
+const (
+	// restoresSimultaneosVZ es cuántas restauraciones cargan a la vez.
+	restoresSimultaneosVZ = 3
+	// arranquesFrioVZ es cuántos arranques en frío encienden a la vez.
+	arranquesFrioVZ = 4
+	// nivelRestoreVZ es el kern.memorystatus_level (%) por encima del cual
+	// rige restoresSimultaneosVZ. Con el nivel en esto o por debajo se espera
+	// un poco a que suba (esperaNivelRestoreVZ) y luego se restaura de una en
+	// una: la admisión dura (507, minMemLevel) ya decidió que cabe.
+	nivelRestoreVZ = 25
+)
+
+// lanzamientoPlataforma: el tamaño de launchGate, que en macOS es la compuerta
+// de RESTAURACIONES.
+func lanzamientoPlataforma() int { return restoresSimultaneosVZ }
+
+var (
+	esperaNivelRestoreVZ   = 2 * time.Second // variable para las pruebas
+	compuertaFrioVZ        = make(chan struct{}, arranqueFrioVZ())
+	compuertaRestoreBajaVZ = make(chan struct{}, 1)
+	// nivelMemoriaVZ lee kern.memorystatus_level; -1 si no se puede.
+	// Variable para las pruebas.
+	nivelMemoriaVZ = func() int {
+		n, err := syscall.SysctlUint32("kern.memorystatus_level")
+		if err != nil {
+			return -1
+		}
+		return int(n)
+	}
+)
+
+// arranqueFrioVZ es el tamaño de compuertaFrioVZ: arranquesFrioVZ, o
+// KLING_MAX_PARALLEL_BOOT si se da.
+func arranqueFrioVZ() int {
+	if v := os.Getenv("KLING_MAX_PARALLEL_BOOT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return arranquesFrioVZ
+}
+
+// tomarHueco espera un hueco en c o a que venza ctx (que gana si ya venció).
+func tomarHueco(ctx context.Context, c chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// enterBoot toma un hueco en la compuerta de arranques en frío y devuelve con
+// qué soltarlo (siempre, en un defer, como enterLaunch). Un Manager hecho a
+// mano en un test (sin launchGate) no tiene compuertas.
+func (m *Manager) enterBoot(ctx context.Context) (func(), error) {
+	if m.launchGate == nil {
+		return func() {}, nil
+	}
+	if err := tomarHueco(ctx, compuertaFrioVZ); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-compuertaFrioVZ }) }, nil
+}
+
+// enterRestore toma un hueco en la compuerta de restauraciones (launchGate)
+// y, con el nivel de memoria bajo, también el de "de una en una".
+func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
+	release, err := m.enterLaunch(ctx)
+	if err != nil || m.launchGate == nil {
+		return release, err
+	}
+	if !nivelBajoParaRestaurar(ctx) {
+		return release, nil
+	}
+	if err := tomarHueco(ctx, compuertaRestoreBajaVZ); err != nil {
+		release()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-compuertaRestoreBajaVZ
+			release()
+		})
+	}, nil
+}
+
+// nivelBajoParaRestaurar espera hasta esperaNivelRestoreVZ a que el nivel de
+// memoria pase de nivelRestoreVZ, y dice si sigue sin pasar.
+func nivelBajoParaRestaurar(ctx context.Context) bool {
+	limite := time.Now().Add(esperaNivelRestoreVZ)
+	for {
+		n := nivelMemoriaVZ()
+		if n < 0 || n > nivelRestoreVZ {
+			return false
+		}
+		if !time.Now().Before(limite) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// plazoApretonPausa acota el apretón antes de pausar: el invitado tiene que
+// entregar las páginas con los vCPU aún en marcha, y el planificador pausa en
+// segundo plano, pero con el candado de la máquina tomado (un despertar que
+// llegue mientras tanto espera).
+const plazoApretonPausa = 2 * time.Second
+
+// apretarAntesDePausar infla el globo al objetivo conservador de squeeze
+// (objetivoConMeminfo: deja al invitado max(128 MiB, mem/4) disponibles)
+// antes de pausar, y lo deja inflado: una pausada retiene su RAM mientras
+// dura, y en macOS desinflar vuelve a poblar las páginas (ver squeezeLocked),
+// así que se mantiene también al reanudar; deflate_on_oom se la devuelve al
+// invitado si la necesita. Devuelve los MiB que bajó la huella; 0 si no había
+// globo o nada que reclamar. Nunca falla: una pausa sin apretón es la de
+// siempre. KLING_SQUEEZE_BEFORE_PAUSE=0 lo apaga. Con el candado tomado.
+func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) int {
+	if os.Getenv("KLING_SQUEEZE_BEFORE_PAUSE") == "0" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, plazoApretonPausa)
+	defer cancel()
+	res, err := m.squeezeLocked(ctx, cur.ID, cur.ID, false, balloonSqueezeMarginMiB, false)
+	if err != nil || res == nil {
+		return 0
+	}
+	return res.ReclaimedMiB
+}
 
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
 // de Apple que aloja la VM, que es donde vive de verdad la memoria.
@@ -556,6 +728,9 @@ func memoriaHost() (available, free int64) {
 	a := total * int64(nivel) / 100
 	return a, a
 }
+
+// memoriaTotalPlataforma es la RAM física para ProcStats.TotalMiB.
+func memoriaTotalPlataforma() int64 { return memoriaFisicaMiB() }
 
 // memoriaFisicaMiB lee hw.memsize. syscall.Sysctl devuelve el entero crudo
 // como cadena y le quita el último byte si es cero, así que se rellena hasta

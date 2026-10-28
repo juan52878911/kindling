@@ -265,7 +265,7 @@ func (s *Servidor) handleCrearGrafo(w http.ResponseWriter, r *http.Request) {
 	// plantilla en MaxPorPlantilla.
 	clave := claveGrafo(pet.Template)
 	if err := s.reservar(r.Context(), t, clave); err != nil {
-		fail(w, http.StatusTooManyRequests, err)
+		fail(w, codigoReservar(err), err)
 		return
 	}
 	defer s.liberar(t, clave)

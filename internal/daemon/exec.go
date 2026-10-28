@@ -66,8 +66,8 @@ func tooOldAgent(mc *api.Machine) error {
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req api.ExecRequest
 	// El stdin viaja en base64 (4/3 del tamaño) y con su sobre JSON.
-	if err := json.NewDecoder(io.LimitReader(r.Body, 2*api.ExecMaxStdin+64<<10)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+	if err := decodeJSONCon(w, r, &req, 2*api.ExecMaxStdin+64<<10); err != nil {
+		fail(w, jsonBodyStatus(err), fmt.Errorf("invalid body: %w", err))
 		return
 	}
 	_, maxOut, err := req.Limits()

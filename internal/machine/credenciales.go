@@ -69,6 +69,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
@@ -725,11 +726,25 @@ func (m *Manager) guardarMarcadoresDorado(name, id string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// Temporal propio y durable, como escribirSellado: con p+".tmp" dos
+	// guardados a la vez se pisaban, y sin fsync un corte dejaba el nombre
+	// bueno con el contenido a medias.
+	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	tmp := f.Name()
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = durable.Renombrar(tmp, p)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // marcadoresDorado son los que apuntó guardarMarcadoresDorado; nil si no hay

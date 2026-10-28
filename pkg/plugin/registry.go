@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -127,7 +126,16 @@ func SearchPath() []string {
 		dirs = append(dirs, filepath.Join(h, ".local", "share", "kling", "plugins"))
 	}
 	dirs = append(dirs, filepath.SplitList(os.Getenv("PATH"))...)
-	return dirs
+	// Una entrada vacía o relativa ("", ".", "bin") es el directorio de trabajo
+	// de quien lanza kling: con ella, cualquier `kling …` dentro de un repo
+	// clonado ejecutaría el kling-* que trajera el repo. Fuera.
+	abs := dirs[:0]
+	for _, d := range dirs {
+		if filepath.IsAbs(d) {
+			abs = append(abs, d)
+		}
+	}
+	return abs
 }
 
 // Discover encuentra las extensiones y resuelve qué comando sirve cada una.
@@ -183,6 +191,9 @@ func Discover(ctx context.Context, o Options) *Registry {
 		path = SearchPath()
 	}
 	for _, dir := range path {
+		if !filepath.IsAbs(dir) {
+			continue // ver SearchPath
+		}
 		names, err := klingNames(dir)
 		if err != nil {
 			continue
@@ -201,6 +212,15 @@ func Discover(ctx context.Context, o Options) *Registry {
 			p := &Plugin{Name: name, Path: full}
 			if off[name] {
 				p.Err, p.Disabled = &DisabledError{name}, true
+				r.Plugins = append(r.Plugins, p)
+				continue
+			}
+			// Discover ejecuta --kling-manifest de cada kling-* en cada `kling …`:
+			// solo se ejecuta lo que nadie más que el usuario (o root) pudo poner
+			// o cambiar. Queda en la lista con su motivo, sin ejecutarse, y no
+			// cede el nombre a otro kling-* posterior en el PATH.
+			if err := trustedExecutable(dir, full); err != nil {
+				p.Err = fmt.Errorf("not run: %v", err)
 				r.Plugins = append(r.Plugins, p)
 				continue
 			}
@@ -235,7 +255,9 @@ func loadManifest(ctx context.Context, path string) (*Manifest, error) {
 func runManifest(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ManifestTimeout)
 	defer cancel()
-	var out bytes.Buffer
+	// Con tope: una extensión que vuelca sin fin no puede llenar la memoria de
+	// cada `kling …`.
+	out := limitedBuffer{max: maxManifestBytes}
 	cmd := exec.CommandContext(ctx, path, "--kling-manifest")
 	cmd.Stdout = &out
 	cmd.Env = Env("")
@@ -249,8 +271,15 @@ func runManifest(ctx context.Context, path string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("--kling-manifest failed: %v", err)
 	}
+	if out.over {
+		return nil, fmt.Errorf("--kling-manifest printed more than %d bytes", maxManifestBytes)
+	}
 	return out.Bytes(), nil
 }
+
+// maxManifestBytes es el tope de lo que se lee de --kling-manifest. Un
+// manifiesto real ocupa unos pocos KiB.
+const maxManifestBytes = 1 << 20
 
 // parseManifest lee y valida lo que imprimió --kling-manifest. Lo que sale de
 // la caché pasa por aquí igual que lo recién ejecutado.

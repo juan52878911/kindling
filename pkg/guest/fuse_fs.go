@@ -13,6 +13,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -79,6 +80,55 @@ type fuseFS struct {
 	wmu      sync.Mutex // serializa las respuestas en dispositivos que no lo hacen solos
 	inflight chan struct{}
 	grace    time.Duration
+
+	// autoInval dice si el kernel aceptó FUSE_AUTO_INVAL_DATA en INIT. Sin
+	// él no se pide nunca FOPEN_KEEP_CACHE (ver keepCache).
+	autoInval atomic.Bool
+	kcMu      sync.Mutex // guarda node.openKey/openSeen
+}
+
+// cacheKey es la versión de un fichero a efectos de la caché de páginas.
+type cacheKey struct {
+	size           uint64
+	mtime, ctime   int64
+	mtimen, ctimen uint32
+}
+
+// keepCache decide si un OPEN de n puede conservar la caché de páginas del
+// kernel (FOPEN_KEEP_CACHE), con at la versión del fichero que el daemon
+// acaba de abrir.
+//
+// Sin la bandera el kernel tira la caché en cada open: un `node` que arranca y
+// lee los mismos mil ficheros de node_modules los vuelve a pedir enteros al
+// host cada vez. Con ella, el riesgo es enseñar datos viejos si el host cambió
+// el fichero. Por eso solo se pide si:
+//
+//   - el montaje es ro: en rw el invitado también escribe y no se ha estudiado
+//     la coherencia con lo que escribe el host a la vez;
+//   - el kernel aceptó AUTO_INVAL_DATA, que tira las páginas cuando ve cambiar
+//     mtime o tamaño al refrescar atributos;
+//   - el fichero no ha cambiado desde el OPEN anterior (mismo tamaño, mtime y
+//     ctime al nanosegundo): las páginas cacheadas son de esta versión. Si
+//     cambió, este open va sin la bandera y el kernel tira la caché, como
+//     siempre;
+//   - el sistema de ficheros del host da tiempos con nanosegundos: con tiempos
+//     de segundo, dos cambios del mismo tamaño en el mismo segundo serían
+//     indistinguibles.
+//
+// Así se conserva la consistencia de cerrar-y-abrir que había sin la bandera.
+func (fs *fuseFS) keepCache(n *node, at share.Attr) bool {
+	if !fs.readOnly || !fs.autoInval.Load() || at.Mode&share.SIFMT != share.SIFREG {
+		return false
+	}
+	k := cacheKey{size: at.Size, mtime: at.Mtime, ctime: at.Ctime, mtimen: at.Mtimen, ctimen: at.Ctimen}
+	fs.kcMu.Lock()
+	prev, seen := n.openKey, n.openSeen
+	n.openKey, n.openSeen = k, true
+	fs.kcMu.Unlock()
+	if at.Mtimen == 0 && at.Ctimen == 0 {
+		return false
+	}
+	return seen && prev == k
 }
 
 func newFuseFS(dev fuseDev, mount string, readOnly bool) *fuseFS {
@@ -276,6 +326,7 @@ func (fs *fuseFS) init(req fuseReq) []byte {
 	le.PutUint32(out[4:], minor)
 	le.PutUint32(out[8:], readahead)
 	le.PutUint32(out[12:], flags&want)
+	fs.autoInval.Store(flags&initAutoInvalData != 0)
 	le.PutUint16(out[16:], 16)               // max_background
 	le.PutUint16(out[18:], 12)               // congestion_threshold
 	le.PutUint32(out[20:], share.MaxIO)      // max_write
@@ -492,12 +543,16 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if d.Err() != nil {
 			return fail(share.EIO)
 		}
+		var open uint32
+		if at := share.GetAttr(d); d.Err() == nil && fs.keepCache(n, at) {
+			open |= fopenKeepCache
+		}
 		fh, e := fs.addFile(&fileHandle{node: n, flags: flags &^ share.FlagTrunc, dh: dh, sess: s})
 		if e != 0 {
 			s.call(share.OpRelease, func(e *share.Enc) { e.U64(dh) })
 			return fail(e)
 		}
-		return reply(u, 0, openOut(fh))
+		return reply(u, 0, openOutFlags(fh, open))
 
 	case opCreate:
 		if len(a) < 16 {
@@ -552,15 +607,34 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if h == nil {
 			return fail(share.EBADF)
 		}
-		errno, d := fs.handleCall(h, share.OpRead, func(e *share.Enc) { e.U64(off); e.U32(size) })
-		if errno != 0 {
-			return fail(errno)
+		// El kernel pide hasta share.MaxIO; la sesión puede haber negociado
+		// menos (un daemon anterior se queda en BaseIO), así que se trocea. Si
+		// un trozo falla tras otros buenos, lectura corta: lo leído es válido.
+		var chunks [][]byte
+		for done := uint32(0); done < size; {
+			pos, left := off+uint64(done), size-done
+			var asked uint32
+			errno, d := fs.handleCallRaw(h, func(s *shareSession, dh uint64) (uint32, *share.Dec) {
+				asked = min(left, s.maxIO)
+				return s.call(share.OpRead, func(e *share.Enc) { e.U64(dh); e.U64(pos); e.U32(asked) })
+			})
+			if errno != 0 {
+				if done > 0 {
+					break
+				}
+				return fail(errno)
+			}
+			data := d.Bytes(int(asked))
+			if d.Err() != nil {
+				return fail(share.EIO)
+			}
+			chunks = append(chunks, data)
+			done += uint32(len(data))
+			if uint32(len(data)) < asked {
+				break // fin del fichero
+			}
 		}
-		data := d.Bytes(int(size))
-		if d.Err() != nil {
-			return fail(share.EIO)
-		}
-		return reply(u, 0, data)
+		return reply(u, 0, chunks...)
 
 	case opWrite:
 		if len(a) < 40 {
@@ -578,16 +652,34 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if h == nil {
 			return fail(share.EBADF)
 		}
-		errno, d := fs.handleCall(h, share.OpWrite, func(e *share.Enc) { e.U64(off); e.Bytes(data) })
-		if errno != 0 {
-			return fail(errno)
-		}
-		w := d.U32()
-		if d.Err() != nil || w > size {
-			return fail(share.EIO)
+		// Troceado igual que la lectura. Con trozos ya escritos, un fallo da
+		// una escritura corta y no un error: el kernel (y write(2)) saben
+		// qué hacer con ella, y lo escrito, escrito está.
+		var done uint32
+		for done < size {
+			pos, rest := off+uint64(done), data[done:]
+			var asked uint32
+			errno, d := fs.handleCallRaw(h, func(s *shareSession, dh uint64) (uint32, *share.Dec) {
+				asked = min(uint32(len(rest)), s.maxIO)
+				return s.call(share.OpWrite, func(e *share.Enc) { e.U64(dh); e.U64(pos); e.Bytes(rest[:asked]) })
+			})
+			if errno != 0 {
+				if done > 0 {
+					break
+				}
+				return fail(errno)
+			}
+			w := d.U32()
+			if d.Err() != nil || w > asked {
+				return fail(share.EIO)
+			}
+			done += w
+			if w < asked {
+				break
+			}
 		}
 		out := make([]byte, writeOutSize)
-		le.PutUint32(out, w)
+		le.PutUint32(out, done)
 		return reply(u, 0, out)
 
 	case opStatfs:

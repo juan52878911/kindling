@@ -116,6 +116,11 @@ type Deps struct {
 	// regulador pausa la VM por el framework, que para también el reloj del
 	// invitado (ver cpu.go).
 	Freeze func(stop bool) error
+	// HelperStopped dice si el auxiliar está parado. Con él, si el proceso
+	// freno muere a mitad de una parada se mira si de verdad dejó el
+	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone
+	// que sí.
+	HelperStopped func() (bool, error)
 	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
 	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
 	// no: el framework exige los mismos dispositivos que al guardar.
@@ -214,7 +219,11 @@ type Server struct {
 	// sueltaAviso: ya se avisó de que reanudar el auxiliar falla (con
 	// frenoMu); se rearma al conseguirlo.
 	sueltaAviso bool
-	frenoAviso  bool // ya se avisó de que Freeze falla (con mu)
+	// frenoPerdido: el proceso freno ya no está (Freeze devolvió
+	// ErrFreezeLost); desde entonces el regulador pausa por el framework.
+	// Con frenoMu.
+	frenoPerdido bool
+	frenoAviso   bool // ya se avisó de que Freeze falla (con mu)
 }
 
 func New(d Deps) *Server {
@@ -452,6 +461,10 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 	var d struct {
 		DriveID    string `json:"drive_id"`
 		PathOnHost string `json:"path_on_host"`
+		// Disposable: ver spec.Drive. Solo antes de crear la VM (antes de
+		// InstanceStart o con un snapshot cargado pendiente de reanudar),
+		// que es cuando se eligen los modos del disco.
+		Disposable *bool `json:"kling_disposable"`
 	}
 	if err := decode(r, maxConfigBody, &d); err != nil {
 		fault(w, err)
@@ -467,7 +480,11 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("the microVM has stopped"))
 		return
 	}
-	if err := s.spec.PatchDrivePath(r.PathValue("id"), d.PathOnHost); err != nil {
+	if d.Disposable != nil && s.st != stConfiguring && s.st != stPendingLoad {
+		fault(w, errors.New("kling_disposable can only change before the VM is created"))
+		return
+	}
+	if err := s.spec.PatchDrive(r.PathValue("id"), d.PathOnHost, d.Disposable); err != nil {
 		fault(w, err)
 		return
 	}

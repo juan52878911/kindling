@@ -184,9 +184,13 @@ type Scheduler struct {
 	// del gateway, al reiniciarlo), antes de enrutarle nada. El gateway MCP
 	// limpia ahí las sesiones que el puente aún guarda de ese proceso: nadie
 	// las va a usar, y ocupaban el tope de sesiones de la instancia (#187).
+	// También se llama al READOPTAR una máquina propia que se dejó de tener
+	// como instancia (DropInstance tras un fallo de vida pasajero): ver
+	// SessionsOn para distinguir un caso del otro.
 	OnAdopt func(ctx context.Context, service string, m *api.Machine)
 	// PausedMiB es el presupuesto del nivel "pausada" (ver pausa.go), en MiB de
-	// mem_mib configurada: 0 = nunca se pausa, todo se congela.
+	// mem_mib configurada: 0 = nunca se pausa, todo se congela; < 0 = derivado
+	// de la memoria del host en cada vuelta (presupuestoPausadas).
 	PausedMiB int
 	// PausedFor es cuánto dura una pausada sin uso antes de congelarse de
 	// verdad. 0 = 10 × idle.
@@ -1530,12 +1534,19 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 		// adopta como dueña (ver ensure).
 		warmed++
 		go func(svc string) {
+			// Como en el pool: la liberación va fuera de Contener, o un pánico
+			// dejaría el servicio reservado para siempre y nadie volvería a
+			// mantenerlo caliente. Y sin Contener, un pánico en ensure mataría
+			// el gateway entero: esta goroutine ya no está dentro del Contener
+			// del segador que la lanzó.
 			defer g.keepwarmListo(svc)
-			if _, err := g.ensure(ctx, svc); err != nil {
-				log.Printf("keepwarm %s: %v", svc, err)
-				return
-			}
-			log.Printf("%s: primary kept warm", svc)
+			panico.Contener("gateway.keepwarm", func() {
+				if _, err := g.ensure(ctx, svc); err != nil {
+					log.Printf("keepwarm %s: %v", svc, err)
+					return
+				}
+				log.Printf("%s: primary kept warm", svc)
+			})
 		}(c.svc)
 	}
 }

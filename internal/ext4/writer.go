@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sort"
 	"strings"
@@ -68,6 +69,9 @@ type Options struct {
 	// ZeroHoles deja como hueco cada bloque de 4 KiB que sea todo ceros: se
 	// lee igual y no ocupa.
 	ZeroHoles bool
+	// Logf recibe los avisos (xattrs que se descartan). Sin él van al log
+	// estándar.
+	Logf func(format string, a ...any)
 }
 
 // Stream recorre una fuente de datos de principio a fin y llama a emit con
@@ -248,6 +252,15 @@ func Write(f *os.File, root *Node, streams []Stream, opt Options) (Stats, error)
 	return w.writeMetadata()
 }
 
+// logf manda un aviso a Options.Logf o, si no hay, al log estándar.
+func (w *writer) logf(format string, a ...any) {
+	if w.opt.Logf != nil {
+		w.opt.Logf(format, a...)
+		return
+	}
+	log.Printf("ext4: "+format, a...)
+}
+
 func (w *writer) pathOf(n *Node) string {
 	var parts []string
 	for n != w.root {
@@ -318,13 +331,18 @@ func (w *writer) assign() ([]map[int]*Node, error) {
 		default:
 			return fmt.Errorf("unknown file type %o", n.Mode&ModeType)
 		}
-		xs, err := encodeXattrs(n.Xattrs)
+		xs, err := encodeXattrs(n.Xattrs, func(format string, a ...any) {
+			w.logf("%s: "+format, append([]any{w.pathOf(n)}, a...)...)
+		})
 		if err != nil {
 			return err
 		}
 		ni.xattrs = xs
 		if n.IsDir() {
 			for _, name := range n.Children() {
+				if err := CheckName(name); err != nil {
+					return err
+				}
 				c := n.children[name]
 				if err := visit(c, n, depth+1); err != nil {
 					return fmt.Errorf("%s: %w", name, err)
@@ -555,6 +573,21 @@ func (w *writer) writeData(n *Node, r io.Reader, size int64, holes bool) error {
 	buf := w.buf
 	var logical uint64
 	left := size
+	total := uint64((size + blockSize - 1) / blockSize)
+	// El árbol de extents tiene profundidad 1 como mucho: 4 hojas de
+	// extentsPerLeaf. Cada hueco corta un extent, así que con ZeroHoles un
+	// fichero que alterna bloques de datos y de ceros se pasaría. Antes de
+	// abrir un hueco se mira si, aun cortando ahí, caben los extents que
+	// faltan en el peor caso (los cortes por límite de grupo y por
+	// maxExtentLen del resto); si no, los ceros se escriben como datos. Así
+	// nunca falla por huecos, y los ficheros normales (pocos huecos grandes)
+	// siguen igual.
+	inHole := false
+	canHole := func() bool {
+		rest := total - logical
+		need := uint64(len(ni.extents)) + 1 + rest/maxExtentLen + rest/blocksPerGroup + 2
+		return need <= 4*extentsPerLeaf
+	}
 	for left > 0 {
 		want := int64(len(buf))
 		if want > left {
@@ -572,10 +605,12 @@ func (w *writer) writeData(n *Node, r io.Reader, size int64, holes bool) error {
 				end = want
 			}
 			b := buf[off:end]
-			if holes && bytes.Equal(b, w.zero[:len(b)]) {
+			if holes && bytes.Equal(b, w.zero[:len(b)]) && (inHole || canHole()) {
+				inHole = true
 				logical++
 				continue
 			}
+			inHole = false
 			if len(b) < blockSize {
 				// El último bloque, relleno de ceros: dw.write lo copia, así
 				// que vale el mismo para todos.

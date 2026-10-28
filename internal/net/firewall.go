@@ -79,8 +79,9 @@ var blocked = []string{
 // applyEgress instala las reglas de salida dentro del namespace. domains solo se
 // usa en modo allowlist; en el resto se ignora.
 func (n *Net) applyEgress(e Egress, domains []string) error {
+	// ejecutar y no run: es lo que deja a los tests ver las reglas sin netns.
 	ns := func(args ...string) error {
-		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
+		return ejecutar(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
 
 	// La barrera IPv6 (applyIPv6Barrier, más abajo en este fichero) NO va aquí:
@@ -88,42 +89,59 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 	// evita esta función para none/internet. Si viviera solo aquí se saltaría en
 	// ese camino, que es el habitual cuando iptables-restore está instalado.
 
-	// PRIMERO: dejar pasar las respuestas a conexiones ya establecidas.
-	//
-	// Sin esto se rompe el acceso host->microVM, porque nuestra propia red de
-	// enlace (172.30.0.0/16) cae DENTRO de 172.16.0.0/12, que está en la lista de
-	// bloqueo. La regla descartaría las respuestas del invitado al host.
-	//
-	// No abre ningún agujero: una conexión que el invitado INICIE hacia una red
-	// privada es ctstate NEW y sigue cayendo en los DROP de abajo.
-	if err := ns("iptables", "-A", "FORWARD", "-i", TapName,
-		"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
-		return err
-	}
-
-	if e == EgressNone {
-		// Se descarta todo lo que intente salir por el veth. El invitado sigue
-		// pudiendo responder a lo que le llega, porque eso no cruza FORWARD como
-		// tráfico nuevo iniciado por él.
-		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-			"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"); err != nil {
-			return err
-		}
-		return nil
-	}
-
 	if e == EgressAllowlist {
+		for _, r := range n.forwardBase() {
+			if err := ns(append([]string{"iptables"}, r...)...); err != nil {
+				return err
+			}
+		}
 		return n.applyAllowlist(ns, domains)
 	}
 
-	// EgressInternet: primero se cierran las redes privadas, luego se permite el resto.
-	// El orden importa: la primera regla que casa, gana.
-	for _, cidr := range blocked {
-		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"); err != nil {
+	// none e internet: las mismas reglas que pone de un golpe restoreRules (ver
+	// egressRules), aquí una a una para cuando no hay iptables-restore.
+	for _, r := range n.egressRules(e) {
+		if err := ns(append([]string{"iptables"}, r...)...); err != nil {
 			return err
 		}
 	}
-	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
+	return nil
+}
+
+// forwardBase son las dos primeras reglas del FORWARD del netns en los tres
+// modos, como argumentos de iptables:
+//
+//  1. DROP de lo que conntrack marca INVALID (un TCP con solo RST o FIN y
+//     carga, por ejemplo). Ni el ACCEPT de ESTABLISHED ni un DROP de NEW lo
+//     casan, así que sin esta regla caía en la política ACCEPT del FORWARD:
+//     en none era un canal de salida y, falsificando el origen hacia el NSIP
+//     de otra microVM, un canal entre microVMs.
+//  2. ACCEPT de las respuestas a conexiones ya establecidas. Sin esto se rompe
+//     el acceso host->microVM, porque nuestra propia red de enlace
+//     (172.30.0.0/16) cae DENTRO de 172.16.0.0/12, que está en la lista de
+//     bloqueo. No abre ningún agujero: una conexión que el invitado INICIE
+//     hacia una red privada es ctstate NEW y sigue cayendo en los DROP de
+//     después.
+//
+// Las que reglasGrafo y reglasEnlace insertan con -I FORWARD 1 quedan delante
+// de estas: van todas a n.HostIP, el lado host del propio veth.
+func (n *Net) forwardBase() [][]string {
+	return [][]string{
+		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
+		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+	}
+}
+
+// forwardCierre es la última regla del FORWARD del netns en none y allowlist:
+// DROP de todo lo que entre por tap0 y no haya casado antes, sin mirar el
+// ctstate. Antes el cierre era un DROP de --ctstate NEW, y lo que no fuera NEW
+// ni ESTABLISHED (INVALID, UNTRACKED) caía en la política ACCEPT. Va como
+// regla y no como -P FORWARD DROP para no tocar lo que entra por el veth hacia
+// la microVM (host->invitado), que no lleva -i tap0. Sin -o: en el netns solo
+// hay tap0, el veth y lo, y nada que salga por tap0 tiene por qué volver a
+// salir por otro sitio que no sea el veth.
+func forwardCierre() []string {
+	return []string{"-A", "FORWARD", "-i", TapName, "-j", "DROP"}
 }
 
 // applyIPv6Barrier cierra el paso a IPv6 dentro del namespace, en allowlist,
@@ -167,15 +185,20 @@ func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
 	return ns("ip6tables", "-A", "FORWARD", "-i", TapName, "-j", "DROP")
 }
 
-// egressRules son las reglas de salida de none e internet, en el mismo orden
-// que las pone applyEgress, como argumentos de iptables (con -t si no es
-// filter). Ver applyEgress para el porqué de cada una.
+// egressRules son las reglas de salida de none e internet como argumentos de
+// iptables (con -t si no es filter), en orden: las usan tanto restoreRules
+// (de un golpe) como applyEgress (una a una). Las dos primeras, forwardBase.
+//
+// none cierra con forwardCierre: se descarta todo lo que intente salir por el
+// veth. El invitado sigue pudiendo responder a lo que le llega (ESTABLISHED).
+//
+// internet: primero se cierran las redes privadas, sin mirar el ctstate (así
+// que también lo INVALID), luego se permite el resto. El orden importa: la
+// primera regla que casa, gana.
 func (n *Net) egressRules(e Egress) [][]string {
-	rules := [][]string{{"-A", "FORWARD", "-i", TapName,
-		"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
+	rules := n.forwardBase()
 	if e == EgressNone {
-		return append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-			"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"})
+		return append(rules, forwardCierre())
 	}
 	for _, cidr := range blocked {
 		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
@@ -186,6 +209,17 @@ func (n *Net) egressRules(e Egress) [][]string {
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
 // --noflush: todas o ninguna, y un proceso en vez de uno por regla.
 func (n *Net) restoreRules(rules [][]string) error {
+	cmd := exec.Command("ip", "netns", "exec", n.NS, "iptables-restore", "--noflush")
+	cmd.Stdin = strings.NewReader(restoreInput(rules))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// restoreInput es la entrada de iptables-restore para rules, agrupadas por
+// tabla en el orden en que aparece cada una.
+func restoreInput(rules [][]string) string {
 	tablas := map[string][]string{}
 	var orden []string
 	for _, r := range rules {
@@ -202,12 +236,7 @@ func (n *Net) restoreRules(rules [][]string) error {
 	for _, t := range orden {
 		fmt.Fprintf(&b, "*%s\n%s\nCOMMIT\n", t, strings.Join(tablas[t], "\n"))
 	}
-	cmd := exec.Command("ip", "netns", "exec", n.NS, "iptables-restore", "--noflush")
-	cmd.Stdin = strings.NewReader(b.String())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return b.String()
 }
 
 // setName es el nombre del ipset de dominios permitidos de este namespace. El
@@ -329,10 +358,10 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"); err != nil {
 		return err
 	}
-	//   3. Todo lo demás que el invitado inicie: DROP. Esto bloquea IP directa,
-	//      dominios no listados y cualquier otro puerto/destino.
-	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-		"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"); err != nil {
+	//   3. Todo lo demás que entre por tap0: DROP (forwardCierre), sea NEW o no.
+	//      Esto bloquea IP directa, dominios no listados y cualquier otro
+	//      puerto/destino.
+	if err := ns(append([]string{"iptables"}, forwardCierre()...)...); err != nil {
 		return err
 	}
 
@@ -437,22 +466,50 @@ func InalcanzableDesdeUnInvitado(dir string) bool {
 	return isBlockedIP(ip)
 }
 
+// privada172SinHostSubnet es 172.16.0.0/12 menos HostSubnet (172.30.0.0/16):
+// 172.16-23, 172.24-27, 172.28-29 y 172.31. iptables no admite dos -d en una
+// regla, y un ACCEPT o RETURN para HostSubnet delante adelantaría la política
+// del host a lo que tenga detrás. Si cambia hostPrefix, el test lo recalcula.
+var privada172SinHostSubnet = []string{
+	"172.16.0.0/13",
+	"172.24.0.0/14",
+	"172.28.0.0/15",
+	"172.31.0.0/16",
+}
+
 // HostEgressRules son las reglas que el host necesita para dar salida a los
 // namespaces. Se instalan una sola vez, no por máquina.
 //
 // Se aplican como segunda barrera: aunque alguien manipulara las reglas de un
-// namespace, el host sigue negando el acceso a la red privada.
+// namespace, el host sigue negando el acceso a la red privada. Todas las de
+// FORWARD son DROP, así que su orden no importa y añadir una nueva con -A en
+// un host que ya tenía las viejas no deja ninguna detrás de un ACCEPT nuestro.
+//
+//   - Nada de un veth de kindling a otro: el host no reenvía entre namespaces
+//     (los enlaces de los grafos van por proxies en INPUT, ver enlaces_fc.go).
+//   - Lo que entre por un veth con origen fuera de HostSubnet es falsificado
+//     (todo lo legítimo sale del netns con el NSIP o enmascarado al veth), y
+//     lo INVALID no lo crea ninguna conexión legítima. Las dos cubren también
+//     a un netns con las reglas de antes de forwardBase/forwardCierre.
+//   - Las redes privadas de blocked, salvo HostSubnet: 172.16.0.0/12 va
+//     partida en los trozos que la componen sin 172.30.0.0/16, para que una
+//     LAN en 172.16-172.29 o 172.31 tenga también esta segunda barrera.
 func HostEgressRules(bridge string) [][]string {
-	var rules [][]string
+	rules := [][]string{
+		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-o", "vh-+", "-j", "DROP"},
+		{"iptables", "-A", "FORWARD", "-i", "vh-+", "!", "-s", HostSubnet, "-j", "DROP"},
+		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
+	}
 	for _, cidr := range blocked {
+		destinos := []string{cidr}
 		if cidr == "172.16.0.0/12" {
-			// En el host hay que dejar pasar el propio rango de kindling, o se
-			// cortaría el tráfico legítimo entre host y microVMs.
-			continue
+			destinos = privada172SinHostSubnet
 		}
-		rules = append(rules, []string{
-			"iptables", "-A", "FORWARD", "-s", HostSubnet, "-d", cidr, "-j", "DROP",
-		})
+		for _, d := range destinos {
+			rules = append(rules, []string{
+				"iptables", "-A", "FORWARD", "-s", HostSubnet, "-d", d, "-j", "DROP",
+			})
+		}
 	}
 	rules = append(rules,
 		[]string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", HostSubnet, "!", "-d", HostSubnet, "-j", "MASQUERADE"},

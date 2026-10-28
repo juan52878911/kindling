@@ -30,7 +30,20 @@ var xattrPrefixes = []struct {
 	{"system.", 7, false},
 }
 
-func encodeXattrs(m map[string][]byte) ([]xattrEntry, error) {
+// Los atributos de security.* (capability, selinux, ima...), system.* (ACL) y
+// trusted.* (trusted.overlay.* marca los directorios opacos de overlayfs) los
+// usa el sistema: sin ellos la imagen se comporta distinto, así que uno que
+// no se pueda guardar es error. Los de user.* y los de namespaces que ext4 no
+// tiene (los com.apple.* de un tar hecho en un Mac, por ejemplo) se descartan
+// con un aviso: un xattr raro de una capa no debe tumbar la importación.
+func essentialXattr(index byte) bool { return index != 1 }
+
+// encodeXattrs pasa los atributos al formato de disco. warn recibe los que se
+// descartan (puede ser nil).
+func encodeXattrs(m map[string][]byte, warn func(format string, a ...any)) ([]xattrEntry, error) {
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
 	var out []xattrEntry
 	for full, v := range m {
 		var e *xattrEntry
@@ -45,10 +58,15 @@ func encodeXattrs(m map[string][]byte) ([]xattrEntry, error) {
 			}
 		}
 		if e == nil {
-			return nil, fmt.Errorf("unsupported xattr namespace %q", full)
+			warn("dropping xattr %q: namespace not supported by ext4", full)
+			continue
 		}
 		if len(e.name) > 255 {
-			return nil, fmt.Errorf("xattr name too long: %q", full)
+			if essentialXattr(e.index) {
+				return nil, fmt.Errorf("xattr name too long: %q", full)
+			}
+			warn("dropping xattr %q: name too long", full)
+			continue
 		}
 		if e.index == 2 || e.index == 3 {
 			acl, err := aclToDisk(v)
@@ -57,7 +75,31 @@ func encodeXattrs(m map[string][]byte) ([]xattrEntry, error) {
 			}
 			e.value = acl
 		}
+		if xattrBlockSize([]xattrEntry{*e}) > blockSize {
+			if essentialXattr(e.index) {
+				return nil, fmt.Errorf("xattr %q: value of %d bytes does not fit in one block", full, len(v))
+			}
+			warn("dropping xattr %q: value of %d bytes does not fit in one block", full, len(v))
+			continue
+		}
 		out = append(out, *e)
+	}
+	// Todos juntos tienen que caber en el inodo o en un bloque: si no, fuera
+	// los prescindibles, del más grande al más pequeño. Si aun así no caben,
+	// estimate da el error.
+	for !fitsInInode(out) && xattrBlockSize(out) > blockSize {
+		big := -1
+		for i, x := range out {
+			if !essentialXattr(x.index) && (big < 0 || len(x.value)+len(x.name) > len(out[big].value)+len(out[big].name)) {
+				big = i
+			}
+		}
+		if big < 0 {
+			break
+		}
+		x := out[big]
+		warn("dropping xattr %s%s: the extended attributes do not fit in one block", prefixOf(x.index), x.name)
+		out = append(out[:big], out[big+1:]...)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -70,6 +112,15 @@ func encodeXattrs(m map[string][]byte) ([]xattrEntry, error) {
 		return a.name < b.name
 	})
 	return out, nil
+}
+
+func prefixOf(index byte) string {
+	for _, p := range xattrPrefixes {
+		if p.index == index {
+			return p.prefix
+		}
+	}
+	return ""
 }
 
 func pad4(n int) int { return (n + 3) &^ 3 }

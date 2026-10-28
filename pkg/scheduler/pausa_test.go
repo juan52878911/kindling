@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func gwPausas(budget int) (*Scheduler, map[string]bool, map[string]bool) {
@@ -155,5 +157,67 @@ func TestReapAvisaOnSleep(t *testing.T) {
 	}
 	if !congeladas["m-vieja"] || congeladas["m-ocupada"] {
 		t.Fatalf("congeladas = %v", congeladas)
+	}
+}
+
+// El presupuesto automático sale de la foto de memoria del daemon.
+func TestPresupuestoDeHost(t *testing.T) {
+	despierta := func(pss int64) []api.ProcStat {
+		return []api.ProcStat{{State: api.StateRunning, PSSMiB: pss}, {State: api.StatePaused, PSSMiB: 9999}}
+	}
+	for _, c := range []struct {
+		nombre string
+		ps     api.ProcStats
+		want   int
+	}{
+		{"sin medir: el de siempre", api.ProcStats{}, presupuestoPausadasDef},
+		{"daemon sin TotalMiB: media de lo disponible", api.ProcStats{AvailableMiB: 4000}, 2000},
+		// 24 GiB al 60 %: la mitad de la física menos lo despierto (11288)
+		// frente a la mitad de lo disponible (7372): manda lo disponible.
+		{"Mac holgado", api.ProcStats{TotalMiB: 24576, AvailableMiB: 14745, Machines: despierta(1000)}, 7372},
+		// Mucho despierto: manda la mitad de la física menos eso.
+		{"mucho despierto", api.ProcStats{TotalMiB: 16384, AvailableMiB: 12000, Machines: despierta(7000)}, 1192},
+		{"nivel en el freno", api.ProcStats{TotalMiB: 16384, AvailableMiB: 16384 * 25 / 100}, 0},
+		{"despierto de sobra", api.ProcStats{TotalMiB: 16384, AvailableMiB: 8000, Machines: despierta(9000)}, 0},
+	} {
+		if got := presupuestoDeHost(&c.ps); got != c.want {
+			t.Errorf("%s: presupuesto = %d, quería %d", c.nombre, got, c.want)
+		}
+	}
+}
+
+// Con el presupuesto automático, si el nivel de memoria baja se congelan las
+// pausadas que ya no caben, de la más vieja a la más nueva; en el freno, todas.
+func TestPausadasSeCongelanAlBajarLaMemoria(t *testing.T) {
+	g, pausadas, congeladas := gwPausas(-1)
+	ps := &api.ProcStats{TotalMiB: 16384, AvailableMiB: 12000}
+	viejo := procStatsDe
+	procStatsDe = func(context.Context, *Scheduler) (*api.ProcStats, error) { return ps, nil }
+	t.Cleanup(func() { procStatsDe = viejo })
+
+	g.pop.observe("a")
+	g.pop.observe("b")
+	g.dormir(context.Background(), []dormida{{"a", "m-a", 1536, ""}})
+	time.Sleep(time.Millisecond) // que b sea la más nueva
+	g.dormir(context.Background(), []dormida{{"b", "m-b", 1536, ""}})
+	if !pausadas["m-a"] || !pausadas["m-b"] {
+		t.Fatalf("con memoria de sobra debían pausarse las dos: %v", pausadas)
+	}
+	// Baja el nivel al 27 %: caben 2250 MiB, una sola.
+	ps.AvailableMiB = 4500
+	g.enfriarPausadas(context.Background())
+	if !congeladas["m-a"] || congeladas["m-b"] {
+		t.Fatalf("congeladas = %v; solo la más vieja (a)", congeladas)
+	}
+	// En el freno, lo pausado se congela y nada nuevo se pausa.
+	ps.AvailableMiB = 3000
+	g.enfriarPausadas(context.Background())
+	if !congeladas["m-b"] {
+		t.Fatalf("en el freno debía congelarse b: %v", congeladas)
+	}
+	g.pop.observe("c")
+	g.dormir(context.Background(), []dormida{{"c", "m-c", 64, ""}})
+	if pausadas["m-c"] || !congeladas["m-c"] {
+		t.Errorf("en el freno no se pausa: pausadas=%v", pausadas)
 	}
 }

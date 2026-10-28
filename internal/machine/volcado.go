@@ -29,6 +29,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/digest"
@@ -87,6 +88,54 @@ func sellarVolcado(dir, kernelSHA, vmm, diffBase string, sinAgente bool) error {
 		return err
 	}
 	return os.Remove(filepath.Join(dir, marcaEnCurso))
+}
+
+// sincronizarVolcado lleva a disco snap.file, mem.file y el overlay antes del
+// sello o del meta. Éstos son durables (durable.Escribir), pero los ficheros
+// del volcado los escribió el VMM y seguían en la caché de página: tras un
+// corte de luz quedaba un sello que daba por bueno un mem.file con huecos o
+// un overlay a medias. Va con la máquina ya muerta o reanudada, nunca en la
+// pausa. Los que no existen se saltan.
+//
+// snap y mem son del daemon (recuperados de la jaula con comprobación), y
+// mem.file puede ser un enlace suyo al almacén (diff_volcado.go): se siguen.
+// El overlay puede estar en un directorio del VMM: sin seguir enlaces (un
+// enlace se salta, el overlay de verdad lo da overlayParaLeer) y solo un
+// fichero regular.
+func sincronizarVolcado(snap, mem, overlay string) error {
+	if err := sincronizarFichero(snap, 0); err != nil {
+		return err
+	}
+	if err := sincronizarFichero(mem, 0); err != nil {
+		return err
+	}
+	err := sincronizarFichero(overlay, syscall.O_NOFOLLOW)
+	if errors.Is(err, syscall.ELOOP) {
+		return nil
+	}
+	return err
+}
+
+func sincronizarFichero(ruta string, flag int) error {
+	if ruta == "" {
+		return nil
+	}
+	f, err := os.OpenFile(ruta, os.O_RDONLY|syscall.O_NONBLOCK|flag, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync %s: %w", filepath.Base(ruta), err)
+	}
+	return nil
 }
 
 // borrarVolcadoParcial retira lo que dejó un volcado que falló a medias: el

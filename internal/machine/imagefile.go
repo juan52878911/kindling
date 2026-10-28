@@ -182,11 +182,23 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 	if _, err := os.Stat(file); err != nil {
 		return res, fmt.Errorf("image %q does not exist", image)
 	}
-	if users := m.imageUsers()[image]; len(users) > 0 {
-		res.Busy = true
-		return res, fmt.Errorf("image %q is in use by %d machine(s): %s", image, len(users), strings.Join(users, ", "))
-	}
-	updated, err := m.putOne(ctx, file, dentro, src, quiero, mode, create)
+	// Bajo ConImagenesQuietas: un arranque en frío que ya eligió la imagen y
+	// aún no está en byID no figura en imageUsers, y tocar el ext4 debajo de
+	// él es lo mismo que debajo de una máquina viva.
+	var updated bool
+	err = m.ConImagenesQuietas(func() error {
+		if n := m.arrancandoCon(image); n > 0 {
+			res.Busy = true
+			return fmt.Errorf("image %q is being booted by %d machine(s) right now: try again", image, n)
+		}
+		if users := m.imageUsers()[image]; len(users) > 0 {
+			res.Busy = true
+			return fmt.Errorf("image %q is in use by %d machine(s): %s", image, len(users), strings.Join(users, ", "))
+		}
+		var err error
+		updated, err = m.putOne(ctx, file, dentro, src, quiero, mode, create)
+		return err
+	})
 	if errors.Is(err, errNoBridge) {
 		res.Skipped = true
 		return res, ErrNotInImage

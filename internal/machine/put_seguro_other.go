@@ -12,3 +12,6 @@ import (
 func ponerEnImagen(mnt, dentroPath, src, quiero string, mode os.FileMode, create bool) (bool, error) {
 	return false, errors.New("writing into a mounted image is only supported on Linux")
 }
+
+// sincronizarMontaje no hace falta fuera de Linux: no se monta (ver arriba).
+func sincronizarMontaje(mnt string) {}

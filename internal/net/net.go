@@ -93,9 +93,10 @@ func run(args ...string) error {
 	return nil
 }
 
-// ejecutar es run detrás de una variable: dnsresolver.go la llama en vez de
-// run directamente para que sus tests puedan sustituirla por un fake y probar
-// el sembrado del ipset sin invocar `ip`/`ipset` de verdad (sin root, sin netns).
+// ejecutar es run detrás de una variable: dnsresolver.go y applyEgress la
+// llaman en vez de run directamente para que sus tests puedan sustituirla por
+// un fake y probar el sembrado del ipset o las reglas de salida sin invocar
+// `ip`/`ipset`/`iptables` de verdad (sin root, sin netns).
 var ejecutar = run
 
 // quiet ejecuta ignorando el error; para limpiezas donde "no existe" es válido.

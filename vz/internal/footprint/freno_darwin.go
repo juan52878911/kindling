@@ -5,9 +5,11 @@ package footprint
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"syscall"
 )
@@ -32,6 +34,10 @@ import (
 // por SCM_RIGHTS. kling-vz solo puede pasarle tuberías que tiene, así que no
 // puede apuntarlo a otra VM. Si kling-vz muere, el freno ve cerrarse el
 // socket, reanuda el auxiliar y termina: nunca queda una VM parada sin dueño.
+// Al revés, si muere el freno (un SIGKILL; a las demás señales suelta antes de
+// salir), kling-vz lo ve en el socket (ErrFrenoCaido): si el auxiliar estaba
+// parado, nadie puede soltarlo, y kling-vz termina para que el sistema se
+// lleve la VM; si no, sigue con el tope por pausas del framework.
 
 // Órdenes del protocolo: un byte, y la respuesta es otro (0 = hecho).
 const (
@@ -40,10 +46,17 @@ const (
 	frenoSoltar = 'C'
 )
 
+// ErrFrenoCaido: el proceso freno ya no contesta (murió o cerró el socket).
+// Si tenía el auxiliar parado, se queda parado: kling-vz no puede mandar
+// señales (ver arriba), así que quien reciba este error decide qué hacer con
+// la VM (server.soltarFreno termina el proceso).
+var ErrFrenoCaido = errors.New("the CPU brake process is gone")
+
 // Freno es el lado de kling-vz.
 type Freno struct {
-	mu sync.Mutex
-	c  *net.UnixConn
+	mu     sync.Mutex
+	c      *net.UnixConn
+	muerto bool // con mu: el socket dio EOF/EPIPE; no se vuelve a intentar
 }
 
 // StartFreno lanza el proceso freno: este mismo ejecutable con args (el
@@ -63,6 +76,10 @@ func StartFreno(args ...string) (*Freno, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.ExtraFiles = []*os.File{suyo} // fd 3 en el hijo
 	cmd.Stderr = os.Stderr
+	// Su propio grupo de procesos: un Ctrl-C en la terminal (o una señal al
+	// grupo) llega a kling-vz y no mata al freno a mitad de una parada; el
+	// freno termina cuando kling-vz cierra el socket, soltando antes.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		mio.Close()
 		return nil, err
@@ -80,17 +97,31 @@ func StartFreno(args ...string) (*Freno, error) {
 func (f *Freno) orden(op byte, rights []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.muerto {
+		return ErrFrenoCaido
+	}
 	if _, _, err := f.c.WriteMsgUnix([]byte{op}, rights, nil); err != nil {
-		return fmt.Errorf("CPU brake process: %w", err)
+		return f.fallo(err)
 	}
 	var r [1]byte
 	if _, err := f.c.Read(r[:]); err != nil {
-		return fmt.Errorf("CPU brake process: %w", err)
+		return f.fallo(err)
 	}
 	if r[0] != 0 {
 		return errors.New("the CPU brake process could not signal the VM's helper")
 	}
 	return nil
+}
+
+// fallo traduce un error del socket. Uno de proceso muerto (EOF, EPIPE,
+// ECONNRESET) es para siempre: se marca y se devuelve ErrFrenoCaido. Con
+// f.mu tomado.
+func (f *Freno) fallo(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
+		f.muerto = true
+		return fmt.Errorf("%w: %v", ErrFrenoCaido, err)
+	}
+	return fmt.Errorf("CPU brake process: %w", err)
 }
 
 // Track le pasa al freno la tubería de consola de la VM recién creada.
@@ -122,6 +153,8 @@ func ServeFreno(fd int) int {
 		auxiliar, parado int
 		b                = make([]byte, 1)
 		oob              = make([]byte, syscall.CmsgSpace(4*4))
+		// mu protege parado frente a la goroutine de las señales.
+		mu sync.Mutex
 	)
 	soltar := func() bool {
 		if parado == 0 {
@@ -134,10 +167,24 @@ func ServeFreno(fd int) int {
 		}
 		return false
 	}
+	// Una señal que lo terminaría (SIGTERM de quien limpia procesos, SIGHUP
+	// al cerrar la terminal) no debe dejar el auxiliar parado: se suelta y se
+	// sale. SIGKILL no se puede atender; para eso, kling-vz (ErrFrenoCaido).
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(sigs)
+	go func() {
+		<-sigs
+		mu.Lock()
+		soltar()
+		os.Exit(0)
+	}()
 	for {
 		n, oobn, _, _, err := uc.ReadMsgUnix(b, oob)
+		mu.Lock()
 		if err != nil || n == 0 {
 			soltar()
+			mu.Unlock()
 			return 0
 		}
 		ok := false
@@ -177,7 +224,9 @@ func ServeFreno(fd int) int {
 		}
 		if _, err := uc.Write([]byte{r}); err != nil {
 			soltar()
+			mu.Unlock()
 			return 0
 		}
+		mu.Unlock()
 	}
 }

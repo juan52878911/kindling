@@ -786,6 +786,11 @@ type Event struct {
 	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Owner es el kling.owner (LabelOwner) de la máquina del evento, si lo
+	// tiene. Lo pone el daemon en los eventos que se publican cuando la
+	// máquina ya no está para preguntarle (el borrado): con él, el filtro por
+	// inquilino del bus no depende de que siga registrada.
+	Owner string `json:"owner,omitempty"`
 	// Dropped, solo en EvDropped: cuántos eventos perdió este suscriptor por
 	// no leerlos a tiempo.
 	Dropped int64 `json:"dropped,omitempty"`
@@ -842,6 +847,10 @@ type ProcStats struct {
 	// Memoria del host, leída de /proc/meminfo. 0 en dev sobre macOS (sin /proc).
 	AvailableMiB int64 `json:"available_mib"` // MemAvailable
 	FreeMiB      int64 `json:"free_mib"`      // MemFree
+	// TotalMiB es la RAM física del host (hw.memsize en macOS); 0 si el
+	// daemon no la da (Linux, o un daemon anterior). Con AvailableMiB da el
+	// nivel de memoria con el que el gateway reparte el nivel pausada.
+	TotalMiB int64 `json:"total_mib,omitempty"`
 }
 
 // Info describe el daemon.

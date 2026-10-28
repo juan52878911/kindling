@@ -42,16 +42,28 @@ const MaxShares = 8
 
 // Límites del protocolo. Son contrato: los dos lados los comprueban.
 const (
-	// MaxIO es lo más que se lee o escribe en una operación. Coincide con el
-	// max_write que el agente negocia con el kernel.
-	MaxIO = 128 << 10
+	// BaseIO es lo más que se lee o escribe en una operación sin haber
+	// negociado nada: lo que acepta cualquier versión de los dos lados (era el
+	// único tamaño hasta que llegó OpHello).
+	BaseIO = 128 << 10
+	// MaxIO es lo más que se puede negociar con OpHello. El agente lo usa como
+	// max_write/max_read con el kernel y trocea en BaseIO si el daemon no sabe
+	// de OpHello.
+	MaxIO = 1 << 20
 	// MaxFrame es la trama más grande: una escritura máxima con su ruta y su
-	// cabecera, con margen.
-	MaxFrame = MaxIO + 16<<10
+	// cabecera, con margen. Quien no haya negociado espera FrameFor(BaseIO).
+	MaxFrame = MaxIO + frameSlack
 	// MaxPath y MaxName son los de Linux (PATH_MAX, NAME_MAX).
 	MaxPath = 4096
 	MaxName = 255
 )
+
+// frameSlack es el margen de una trama sobre sus datos: cabecera, handle,
+// offset y una ruta.
+const frameSlack = 16 << 10
+
+// FrameFor es la trama más grande para un tamaño de E/S dado.
+func FrameFor(maxIO int) int { return maxIO + frameSlack }
 
 // Attach es el cuerpo de POST /share/attach: qué carpeta se sirve por esta
 // conexión y dónde debe estar montada dentro del invitado.
@@ -180,6 +192,12 @@ const (
 	OpRename   byte = 14 // old, new, flags u32
 	OpReadlink byte = 15 // path -> target
 	OpStatfs   byte = 16 // -> Statfs
+	// OpHello negocia el tamaño de E/S: el agente manda el suyo y el daemon
+	// contesta el menor de los dos. Es la primera operación de una sesión y
+	// el agente no manda nada más hasta tener la respuesta. Un daemon anterior
+	// contesta ENOSYS, y entonces se queda en BaseIO; un agente anterior no la
+	// manda, y el daemon se queda en BaseIO.
+	OpHello byte = 17 // max_io u32 -> max_io u32
 )
 
 // Flags de apertura del protocolo. Propios, y no los O_* del sistema: los de
@@ -311,13 +329,20 @@ func WriteFrame(w io.Writer, body []byte) error {
 // ReadFrame lee una trama. El tope no es una cortesía: sin él, el otro extremo
 // decide cuánta memoria reservamos.
 func ReadFrame(r io.Reader) ([]byte, error) {
+	return ReadFrameLimit(r, func() int { return MaxFrame })
+}
+
+// ReadFrameLimit es ReadFrame con un tope que se consulta DESPUÉS de leer la
+// cabecera. Así el lado que negocia puede subirlo entre una trama y la
+// siguiente aunque la lectura de esta ya estuviera esperando.
+func ReadFrameLimit(r io.Reader, limit func() int) ([]byte, error) {
 	var head [4]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
 		return nil, err
 	}
 	n := binary.BigEndian.Uint32(head[:])
-	if n > MaxFrame {
-		return nil, fmt.Errorf("frame of %d bytes; the limit is %d", n, MaxFrame)
+	if max := limit(); int64(n) > int64(max) {
+		return nil, fmt.Errorf("frame of %d bytes; the limit is %d", n, max)
 	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {

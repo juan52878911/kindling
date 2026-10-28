@@ -455,8 +455,13 @@ func TestVZSinJailerNiCgroupsNiPrivilegios(t *testing.T) {
 	if p, warn := privilegiosPlataforma("kindling"); p.Enabled || warn != "" {
 		t.Fatal("en macOS no se bajan privilegios")
 	}
-	if n := maxParallelLaunch(); n != 4 {
-		t.Fatalf("maxParallelLaunch = %d, quiero 4", n)
+	// launchGate es la compuerta de restauraciones; la de arranques en frío
+	// va aparte (arranqueFrioVZ).
+	if n := maxParallelLaunch(); n != restoresSimultaneosVZ {
+		t.Fatalf("maxParallelLaunch = %d, quiero %d", n, restoresSimultaneosVZ)
+	}
+	if n := arranqueFrioVZ(); n != arranquesFrioVZ {
+		t.Fatalf("arranqueFrioVZ = %d, quiero %d", n, arranquesFrioVZ)
 	}
 	t.Setenv("KLING_MAX_PARALLEL_BOOT", "7")
 	if n := maxParallelLaunch(); n != 7 {
