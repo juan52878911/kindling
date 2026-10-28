@@ -6,6 +6,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+- kling-hv: a guest FLUSH on a persistent disk is now F_FULLFSYNC, like kling-vz's full sync mode (a plain fsync on macOS stays in the SSD cache).
 - kling-hv: the disk thread works on its own copy of the queue, and queue size and addresses are ignored while the queue is ready (a hostile guest could write past guest RAM).
 
 ## [0.19.0] - 2026-10-28

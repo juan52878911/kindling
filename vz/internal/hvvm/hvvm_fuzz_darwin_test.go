@@ -126,3 +126,11 @@ func TestColaCambiaDeTamanoAMitad(t *testing.T) {
 		t.Fatal("no request was answered")
 	}
 }
+
+// El FLUSH de un disco que no es desechable es un F_FULLFSYNC (el fsync de
+// macOS no vacía la caché del SSD) y sobre un fichero de APFS tiene que ir bien.
+func TestFlushDelDisco(t *testing.T) {
+	if e := flushDisco(); e != 0 {
+		t.Fatalf("FLUSH status = %d, want 0", e)
+	}
+}

@@ -316,12 +316,14 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         off += ch[k].len;
       }
       if (hdr.type == 4 && estado == 0 && !b->sin_flush) {
-        // fsync de macOS no llega al disco físico (F_FULLFSYNC sí), igual que
-        // el modo por defecto de Virtualization.framework. El overlay
+        // F_FULLFSYNC: el fsync de macOS deja los datos en la caché del SSD, y
+        // un corte se los lleva aunque el invitado ya oyó que estaban. Es lo
+        // que hace kling-vz (VZDiskImageSynchronizationModeFull). Donde no se
+        // admite (un volumen de red), fsync, como hace Go. El overlay
         // desechable (kling_disposable) ni eso, como el synchronizationMode
         // none de vz: lo escrito queda en la caché del host, y el núcleo lo
         // asienta antes de conservar el disco (internal/machine/desechable.go).
-        if (fsync(b->fd) != 0) estado = 1;
+        if (fcntl(b->fd, F_FULLFSYNC) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) estado = 1;
       }
     }
     if (sp) *sp = estado;  // sin byte de estado (cadena inválida) no hay dónde decirlo

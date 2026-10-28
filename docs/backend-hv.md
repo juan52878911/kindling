@@ -49,7 +49,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | GIC | GICv3 del framework (`hv_gic_create`, macOS 15+): el timer virtual y el WFI no salen a espacio de usuario |
 | consola | UART 16550 en MMIO: `console=ttyS0` como en Firecracker, la línea de comandos pasa **intacta** (a diferencia de vz, que la traduce) |
 | reloj | PL031 (`rtc-pl031`, el mismo que da Firecracker en arm64): un arranque en frío nace con la hora del host |
-| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `fsync` del fichero, salvo en el overlay `kling_disposable` (como el `synchronizationMode none` de vz), que no lo hace |
+| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `F_FULLFSYNC` del fichero (el `fsync` de macOS deja los datos en la caché del SSD), como el `synchronizationMode full` de vz; salvo en el overlay `kling_disposable` (como el `none` de vz), que no lo hace. Cuesta: 300 `write`+`fsync` de 4 KiB en el invitado, p50 0,11 → 5,2 ms por `fsync` (38 ms → 2,8 s en total) |
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |

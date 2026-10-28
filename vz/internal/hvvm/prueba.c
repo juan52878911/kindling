@@ -124,10 +124,11 @@ static void *carrera_vcpu(void *a) {
 // vq_ptrs (4) cae 2 KiB más allá, en la página de guarda. Devuelve cuántas
 // peticiones se respondieron, o -1 si no se pudo preparar; también comprueba
 // que con la cola lista el QueueNum no cambia (-2 si cambió).
-int khv_prueba_carrera(int iters) {
-  if (preparar() != 0) return -1;
+// armar_blk deja el disco 0 con una cola de 4 entradas lista: la tabla en el
+// principio de la RAM, el avail en +0x1000 y el used al final.
+static const uint64_t desc = RAM_BASE, avail = RAM_BASE + 0x1000, used = RAM_BASE + PRUEBA_RAM - 40;
+static void armar_blk(void) {
   memset(g_ram, 0, g_ram_size);
-  uint64_t desc = RAM_BASE, avail = RAM_BASE + 0x1000, used = RAM_BASE + PRUEBA_RAM - 40;
   w(blk_mmio, 0x070, 0);
   w(blk_mmio, 0x024, 0);
   w(blk_mmio, 0x020, 1u << 29);  // VIRTIO_RING_F_EVENT_IDX
@@ -141,6 +142,11 @@ int khv_prueba_carrera(int iters) {
   w(blk_mmio, 0x0a4, 0);
   w(blk_mmio, 0x044, 1);
   w(blk_mmio, 0x070, 0xf);
+}
+
+int khv_prueba_carrera(int iters) {
+  if (preparar() != 0) return -1;
+  armar_blk();
   // Con la cola lista, ni el tamaño ni las direcciones se mueven.
   w(blk_mmio, 0x038, QMAX);
   w(blk_mmio, 0x0a0, (uint32_t)(used - 0x1000));
@@ -168,4 +174,23 @@ int khv_prueba_carrera(int iters) {
   pthread_join(h, NULL);
   w(blk_mmio, 0x070, 0);
   return hechas;
+}
+
+// khv_prueba_flush manda un FLUSH al disco 0 (un fichero normal, no
+// desechable) y devuelve el byte de estado: 0 si el F_FULLFSYNC fue bien.
+int khv_prueba_flush(void) {
+  if (preparar() != 0) return -1;
+  armar_blk();
+  struct vdesc *d = gpa_ptr(desc, 2 * sizeof *d);
+  d[0] = (struct vdesc){RAM_BASE + 0x2000, 16, VIRTQ_DESC_F_NEXT, 1};
+  d[1] = (struct vdesc){RAM_BASE + 0x4000, 1, VIRTQ_DESC_F_WRITE, 0};
+  *(uint32_t *)gpa_ptr(RAM_BASE + 0x2000, 4) = 4;  // VIRTIO_BLK_T_FLUSH
+  *(uint8_t *)gpa_ptr(RAM_BASE + 0x4000, 1) = 0xff;
+  uint16_t *av = gpa_ptr(avail, 6 + 2 * 4);
+  av[2] = 0;
+  __atomic_store_n(&av[1], 1, __ATOMIC_RELEASE);
+  vblk_prueba(0);
+  int estado = *(volatile uint8_t *)gpa_ptr(RAM_BASE + 0x4000, 1);
+  w(blk_mmio, 0x070, 0);
+  return estado;
 }
