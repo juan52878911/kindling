@@ -207,7 +207,7 @@ esac
 EOF
 chmod +x "$ROTO/kling"
 cp "$NEWVZ" "$ROTO/kling-vz"   # solo falla el daemon
-out=$(kn upgrade -from-dir "$ROTO" -timeout 15s 2>&1); rc=$?
+out=$(kn upgrade -from-dir "$ROTO" -insecure -timeout 15s 2>&1); rc=$?
 [ $rc != 0 ] && contiene "$out" "rolled back" && ok "upgrade refused and rolled back" \
   || bad "broken upgrade" "an error and a rollback" "rc=$rc: $out"
 for _ in $(seq 1 20); do k ps >/dev/null 2>&1 && break; sleep 0.5; done
@@ -219,13 +219,13 @@ st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" |
 
 # ── 3. upgrade de verdad ─────────────────────────────────────────────────────
 step "3. Upgrade $OLD_TAG -> $NEWV"
-out=$(kn upgrade -from-dir "$NEW_DIR" -dry-run 2>&1)
+out=$(kn upgrade -from-dir "$NEW_DIR" -insecure -dry-run 2>&1)
 contiene "$out" "state.json: schema 0 -> 1" && cmp -s "$BIN/kling" "$OLDK" \
   && ok "dry run lists the migration and changes nothing" || bad "dry run" "the plan, nothing changed" "$out"
 # Lo de justo antes: el viejo reescribe su state.json al pararse y arrancar.
 cp "$ROOT/state.json" "$BASE/state.before"
 t0=$(now_ms)
-out=$(kn upgrade -from-dir "$NEW_DIR" 2>&1); rc=$?
+out=$(kn upgrade -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
 ms=$(( $(now_ms) - t0 ))
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "kling upgrade in ${ms} ms" || bad "upgrade" "upgraded" "rc=$rc: $out"
 v=$(kn version 2>&1 | sed -n 2p)
@@ -285,7 +285,7 @@ k freeze up-frozen >/dev/null 2>&1
 
 # ── 6. -rollback con el daemon caído ─────────────────────────────────────────
 step "6. kling upgrade -rollback with the daemon down"
-out=$(kn upgrade -from-dir "$NEW_DIR" 2>&1); rc=$?
+out=$(kn upgrade -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again" || bad "second upgrade" "upgraded" "rc=$rc: $out"
 launchctl bootout "$DOMINIO/$LABEL"
 for _ in $(seq 1 20); do kn ps >/dev/null 2>&1 || break; sleep 0.5; done

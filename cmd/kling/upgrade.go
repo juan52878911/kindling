@@ -40,7 +40,8 @@ func cmdUpgrade(args []string) error {
 	host := hostFlag(fs)
 	tag := fs.String("tag", "", "release to upgrade to, vX.Y.Z (default: the latest)")
 	fs.StringVar(tag, "version", "", "same as -tag")
-	fromDir := fs.String("from-dir", "", "take the binaries from this directory (release names or plain ones, checked against its SHA256SUMS if there is one) instead of downloading them")
+	fromDir := fs.String("from-dir", "", "take the binaries from this directory (release names or plain ones, checked against its SHA256SUMS) instead of downloading them")
+	inseguro := fs.Bool("insecure", false, "with -from-dir: install the binaries even if the directory has no SHA256SUMS to check them against")
 	dry := fs.Bool("dry-run", false, "download, verify and print the plan; change nothing")
 	check := fs.Bool("check", false, "same as -dry-run")
 	rollback := fs.Bool("rollback", false, "go back to the binaries (and migrated files) saved by the last upgrade")
@@ -51,7 +52,7 @@ func cmdUpgrade(args []string) error {
 	timeout := fs.Duration("timeout", 60*time.Second, "how long the new daemon has to answer with its version")
 	schemas := fs.Bool("schemas", false, "print this binary's version and the state formats it reads, as JSON (for another kling's upgrade)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: kling upgrade [-tag vX.Y.Z | -from-dir DIR] [-dry-run] [-force] [-cli] [-unit NAME]\n       kling upgrade -rollback [-dry-run] [-force] [-unit NAME] [-root DIR]")
+		fmt.Fprintln(fs.Output(), "usage: kling upgrade [-tag vX.Y.Z | -from-dir DIR [-insecure]] [-dry-run] [-force] [-cli] [-unit NAME]\n       kling upgrade -rollback [-dry-run] [-force] [-unit NAME] [-root DIR]")
 		fs.VisitAll(func(f *flag.Flag) {
 			if f.Name != "schemas" {
 				fmt.Fprintf(fs.Output(), "  -%s\t%s\n", f.Name, f.Usage)
@@ -75,6 +76,9 @@ func cmdUpgrade(args []string) error {
 	if *rollback && (*tag != "" || *fromDir != "") {
 		return errors.New("-rollback goes back to the saved binaries: it takes no -tag or -from-dir")
 	}
+	if *inseguro && *fromDir == "" {
+		return errors.New("-insecure only applies to -from-dir: downloads are always checked against the release's SHA256SUMS")
+	}
 	if *fromDir != "" {
 		abs, err := filepath.Abs(*fromDir)
 		if err != nil {
@@ -85,7 +89,7 @@ func cmdUpgrade(args []string) error {
 
 	o := upgrade.Opciones{
 		Etiqueta: *tag,
-		Fuente:   &upgrade.Fuente{Dir: *fromDir},
+		Fuente:   &upgrade.Fuente{Dir: *fromDir, SinVerificar: *inseguro},
 		Forzar:   *force,
 		EnSeco:   *dry || *check,
 		Plazo:    *timeout,

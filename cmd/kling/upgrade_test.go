@@ -164,7 +164,7 @@ func TestActualizarExtensiones(t *testing.T) {
 	}
 	os.WriteFile(bin, klingSh("1.0.0"), 0o755)
 	os.WriteFile(filepath.Join(nuevos, "kling"), klingSh("1.1.0"), 0o755)
-	o := upgrade.Opciones{Dir: filepath.Join(base, "upgrade"), Fuente: &upgrade.Fuente{Dir: nuevos}, Actual: "1.0.0",
+	o := upgrade.Opciones{Dir: filepath.Join(base, "upgrade"), Fuente: &upgrade.Fuente{Dir: nuevos, SinVerificar: true}, Actual: "1.0.0",
 		Piezas: []upgrade.Pieza{{Asset: assetDe("kling", runtime.GOOS, runtime.GOARCH), Destino: bin}}}
 	res, err := upgrade.Actualizar(context.Background(), o)
 	if err != nil || res.Hacia != "1.1.0" {
