@@ -62,13 +62,14 @@ func agenteDaemonMac() (agenteDaemon, error) {
 
 // entornoDelAgente son las variables del daemon que el plist tiene que fijar
 // (launchd no hereda las de la shell): solo las que cambian dónde vive o con
-// qué VMM arranca, y solo si quien instala las tiene puestas.
+// qué VMM arranca (y de qué fichero lee su configuración), y solo si quien
+// instala las tiene puestas.
 func entornoDelAgente(root string) map[string]string {
 	env := map[string]string{}
 	if root != "" && root != transport.DefaultRoot() {
 		env["KLING_ROOT"] = root
 	}
-	for _, k := range []string{"KLING_SOCKET", "KLING_VMM"} {
+	for _, k := range []string{"KLING_CONFIG", "KLING_SOCKET", "KLING_VMM"} {
 		if v := os.Getenv(k); v != "" {
 			env[k] = v
 		}

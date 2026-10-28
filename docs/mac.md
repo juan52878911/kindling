@@ -175,7 +175,7 @@ kling up -install
 
 comprueba lo de `kling up -check`, escribe el agente de launchd
 `~/Library/LaunchAgents/dev.kindling.daemon.plist` (el `kling` que lo ejecuta,
-con rutas absolutas; `KLING_ROOT`, `KLING_SOCKET` y `KLING_VMM` si están
+con rutas absolutas; `KLING_ROOT`, `KLING_SOCKET`, `KLING_VMM` y `KLING_CONFIG` si están
 puestos, porque launchd no hereda la shell) y lo arranca con `launchctl
 bootstrap`. Si el plist ya existe igual, no lo toca; si es distinto, no lo pisa
 y dice cómo quitarlo. `KLING_LAUNCH_AGENT_LABEL` y `KLING_LAUNCH_AGENT_PLIST`
