@@ -69,6 +69,26 @@ func (m *Manager) ConImagenesQuietas(fn func() error) error {
 	return fn()
 }
 
+// arrancandoCon cuenta los arranques en frío reservados que leen image: los de
+// ella y los de las capas que se apoyan en ella. Se llama bajo imgMu
+// (ConImagenesQuietas): ahí no entran reservas nuevas y la cuenta no envejece.
+// ImageBase toca disco, así que va fuera de mu.
+func (m *Manager) arrancandoCon(image string) int {
+	m.mu.RLock()
+	enVuelo := make(map[string]int, len(m.arrancando))
+	for k, v := range m.arrancando {
+		enVuelo[k] = v
+	}
+	m.mu.RUnlock()
+	n := enVuelo[image]
+	for k, v := range enVuelo {
+		if b, ok := m.ImageBase(k); ok && k != image && b == image {
+			n += v
+		}
+	}
+	return n
+}
+
 // reservarImagen apunta que run va a arrancar en frío con image, hasta que la
 // máquina esté en byID (donde ya la ve ImageReplaceable). Espera a que acabe
 // una sustitución en curso. Devuelve con qué soltarla.
