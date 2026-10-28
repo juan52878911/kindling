@@ -307,7 +307,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	start := time.Now()
 	m.persistirYa()
 	pid, err = m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg,
-		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv)
+		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv, shareWaitDe(mc.ShareWait, mc.Shares))
 	if err != nil {
 		return devolver(err)
 	}

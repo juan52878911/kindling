@@ -148,8 +148,23 @@ La conexión muere al congelar: el VMM desaparece. Por eso:
 **commit** de una máquina con carpetas compartidas —de cualquier modo— se
 rechaza con 409: la memoria volcada llevaría un montaje que apunta a un
 directorio de un host concreto, y un disco de copia que no viaja con el
-snapshot. Por lo mismo, `run -from` no acepta `shares` (400): las carpetas se
-piden al arrancar en frío. freeze/thaw de la misma máquina sí está soportado.
+snapshot. freeze/thaw de la misma máquina sí está soportado.
+
+**El servicio espera a sus carpetas.** Con carpetas vivas, la línea del kernel
+lleva `kling.shares=N` y el agente no lanza el servicio de la imagen hasta que
+N carpetas tienen sesión (plazo: 30 s en marcha; al vencer, arranca igual y lo
+dice en `kling logs`). Antes, `node /app/server.js` fallaba una vez porque
+arrancaba antes de que el daemon conectara la carpeta. Un agente anterior
+ignora el parámetro.
+
+**Plantillas que esperan carpetas.** `run -share-wait N` arranca una máquina
+cuyo agente espera N carpetas sin dárselas: su servicio no arranca, y
+`kling save -force` la guarda así. `run -from` de esa plantilla acepta
+exactamente N carpetas vivas (`-share ...:ro|rw`): se conectan tras restaurar y
+el servicio arranca con ellas, con el código de ahora. Es lo que usa
+`kling compose up` para los servicios con bind mounts. Una plantilla sin
+`share_wait` rechaza carpetas (400): su servicio ya corre sin ellas. Las
+copias (`mode copy`) siguen pidiendo arranque en frío.
 
 ### Por qué la tabla de nodos vive en el invitado
 

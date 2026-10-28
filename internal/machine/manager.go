@@ -1299,6 +1299,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 	req.Env = nil
+	if err := validarShareWait(req.ShareWait); err != nil {
+		return nil, err
+	}
 	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
 	// llevar siempre a la misma máquina (docs/authz.md).
 	soltarNombre, err := m.reservarNombre(req.Name)
@@ -1310,10 +1313,16 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
 	if req.From != "" {
-		// Las carpetas se deciden al arrancar en frío: una copia es un disco,
-		// y a una máquina restaurada no se le añaden discos.
-		if len(req.Shares) > 0 {
-			return nil, fmt.Errorf("%w: shared folders need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+		// Las copias son un disco, y a una máquina restaurada no se le añaden
+		// discos. Las vivas sí se conectan tras restaurar, pero solo a una
+		// plantilla cuyo agente las espera (ShareWait): runFrom lo comprueba.
+		for _, sh := range req.Shares {
+			if !(api.ShareAttachment{Mode: sh.Mode}).Live() {
+				return nil, fmt.Errorf("%w: copy shares need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+			}
+		}
+		if req.ShareWait > 0 {
+			return nil, fmt.Errorf("%w: share_wait is decided at a cold boot; a copy waits for what its template waited for", ErrShareRequest)
 		}
 		// Una copia ya despierta del fondo de la plantilla, si la hay y la
 		// petición no pide nada que se decida al restaurar (fondo.go).
@@ -1515,8 +1524,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
-		TTLAt:   &creada,
-		EnvKeys: api.MachineEnvKeys(env),
+		TTLAt:     &creada,
+		EnvKeys:   api.MachineEnvKeys(env),
+		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
 	}
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
@@ -1583,7 +1593,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env, mc.ShareWait)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -1763,7 +1773,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string, shareWait int) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1824,7 +1834,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if len(env) > 0 && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrEnvRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0)
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) + shareWaitBootArg(shareWait)
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}

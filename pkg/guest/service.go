@@ -138,6 +138,11 @@ func (a *Agent) startService(svc *Service) {
 		serviceState.mu.Unlock()
 		return
 	}
+	if n := shareWaitWanted(); n > 0 {
+		env := a.Env
+		startAfterShares(shareState, n, func() { svc.Start(env) })
+		return
+	}
 	svc.Start(a.Env)
 }
 

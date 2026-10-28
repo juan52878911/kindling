@@ -39,6 +39,14 @@ type traduccionCompose struct {
 	// base es el directorio del compose: con él, un bind mount (./src:/app) es
 	// una carpeta compartida rw del nodo. Vacío, se avisa y se salta.
 	base string
+
+	// vivos son los servicios traducidos, en orden, y por, todos por nombre
+	// del compose: compose up los necesita para sus plantillas.
+	vivos []*servicioCompose
+	por   map[string]*servicioCompose
+	// desde: nodo → plantilla de la que arranca en vez de su imagen
+	// (compose up, ver compose_plantillas.go). Vacío en from-compose.
+	desde map[string]string
 }
 
 // puertosDeImagen: los puertos de las imágenes de siempre, para un destino de
@@ -268,6 +276,7 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 		return strings.HasPrefix(t.Antes[i], "kling volume") && !strings.HasPrefix(t.Antes[j], "kling volume")
 	})
 
+	t.vivos, t.por = vivos, porNombre
 	t.Grafo = grafoDeCompose(t, proyecto, vivos, porNombre, avisa)
 	// Se valida con el mismo camino que `graph up`: lo que sale se levanta.
 	if _, err := leerGrafo(proyecto+".yaml", []byte(t.Grafo), nil); err != nil {
@@ -644,7 +653,17 @@ func (t *traduccionCompose) deploy(s *servicioCompose, v any, pre string, avisa 
 // ordenImport es el `kling image import` del servicio: lleva su entorno,
 // usuario, entrypoint, comando y política de reinicio.
 func ordenImport(s *servicioCompose, proyecto string) string {
-	a := []string{"kling", "image", "import", comillaSh(s.imagen), "-name", proyecto + "-" + s.nodo, "-replace"}
+	return ordenImportCon(s, proyecto, true, true)
+}
+
+// ordenImportCon es la orden de import del servicio; sin entorno cuando lo
+// lleva la máquina (compose up con plantillas), y sin -replace cuando se
+// confía en que import reconozca la misma receta.
+func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace bool) string {
+	a := []string{"kling", "image", "import", comillaSh(s.imagen), "-name", proyecto + "-" + s.nodo}
+	if replace {
+		a = append(a, "-replace")
+	}
 	if s.user != "" {
 		a = append(a, "-user", comillaSh(s.user))
 	}
@@ -655,6 +674,9 @@ func ordenImport(s *servicioCompose, proyecto string) string {
 		a = append(a, "-entrypoint", comillaSh(e))
 	}
 	for _, kv := range s.env {
+		if !conEntorno {
+			break
+		}
 		a = append(a, "-e", comillaSh(kv[0]+"="+kv[1]))
 	}
 	if len(s.cmd) > 0 {
@@ -677,11 +699,16 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 	b.WriteString("name: " + yq(proyecto) + "\nnodes:\n")
 	for _, s := range vivos {
 		campos := []string{"image: " + yq(proyecto+"-"+s.nodo)}
-		if s.vcpus > 0 {
-			campos = append(campos, "vcpus: "+strconv.Itoa(s.vcpus))
-		}
-		if s.memMiB > 0 {
-			campos = append(campos, "mem_mib: "+strconv.Itoa(s.memMiB))
+		if p := t.desde[s.nodo]; p != "" {
+			// Las vCPU y la memoria son las de la plantilla.
+			campos = []string{"from: " + yq(p)}
+		} else {
+			if s.vcpus > 0 {
+				campos = append(campos, "vcpus: "+strconv.Itoa(s.vcpus))
+			}
+			if s.memMiB > 0 {
+				campos = append(campos, "mem_mib: "+strconv.Itoa(s.memMiB))
+			}
 		}
 		if len(s.puertos) > 0 {
 			ps := make([]string, len(s.puertos))

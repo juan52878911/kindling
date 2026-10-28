@@ -35,6 +35,11 @@ type Shares struct {
 	// fromGuest dice si una petición viene del propio invitado. Variable por lo
 	// mismo: en los tests todo llega por loopback.
 	fromGuest func(r *http.Request) bool
+
+	// withSession son las carpetas que ya tuvieron sesión, y changed se
+	// cierra con cada una nueva (share_wait.go).
+	withSession map[int]bool
+	changed     chan struct{}
 }
 
 type shareMount struct {
@@ -114,6 +119,7 @@ func (s *Shares) AttachHandler() http.HandlerFunc {
 		sess.hello()
 		watching := sess.watch()
 		m.fs.attach(sess)
+		s.noteAttached(a.Tag)
 		log.Printf("share %d attached at %s (%s, %d KiB I/O, host changes: %v)", a.Tag, a.Mount, a.Mode, sess.maxIO>>10, watching)
 	}
 }

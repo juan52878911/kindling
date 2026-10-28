@@ -35,7 +35,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs]
+const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs] [-fresh]
        kling compose down [-f compose.yaml] [-p name]`
 
 func cmdCompose(args []string) error {
@@ -95,10 +95,13 @@ func leerCompose(file, name string) (*traduccionCompose, string, error) {
 }
 
 // printAvisos enseña los avisos de la traducción menos los que compose up
-// resuelve (publicar puertos).
+// resuelve: publicar puertos, el entorno (va en la máquina de la plantilla)
+// y el healthcheck (se ejecuta dentro antes de guardarla).
 func printAvisos(avisos []string) {
 	for _, a := range avisos {
-		if strings.Contains(a, "kling compose up does") {
+		if strings.Contains(a, "kling compose up does") || strings.Contains(a, "baked into the image") ||
+			strings.Contains(a, "(the test itself is not run)") || strings.Contains(a, "healthcheck: nobody depends on it") ||
+			strings.Contains(a, "ignored (the probe is a TCP connect") {
 			continue
 		}
 		fmt.Fprintln(os.Stderr, a)
@@ -119,43 +122,52 @@ func selfCmd(ctx context.Context, host string, args ...string) *exec.Cmd {
 	return c
 }
 
-// runSetup corre las órdenes previas (volume create antes, imports en
-// paralelo): cada import con -replace, para que un cambio en el compose
-// (entorno, comando) llegue a la imagen.
-func runSetup(ctx context.Context, host string, antes []string) error {
-	var vols, imports []string
-	for _, l := range antes {
-		if strings.HasPrefix(l, "kling volume create ") {
-			vols = append(vols, l)
-		} else {
-			imports = append(imports, l)
-		}
-	}
-	run := func(l string) error {
+// importCompose es la orden de import de un servicio. Sin -replace: import
+// reconoce la misma receta y no hace nada (milisegundos); si la receta
+// cambió, antesDeReplace (borrar las plantillas que salieron de la imagen
+// vieja) y otra vez con -replace.
+type importCompose struct {
+	linea, conReplace string
+	antesDeReplace    func()
+}
+
+// runSetup crea los volúmenes y después importa en paralelo.
+func runSetup(ctx context.Context, host string, vols []string, imports []importCompose) error {
+	run := func(l string) (string, error) {
 		argv, err := shellWords(strings.TrimPrefix(l, "kling "))
 		if err != nil {
-			return err
+			return "", err
 		}
 		out, err := selfCmd(ctx, host, argv...).CombinedOutput()
+		s := strings.TrimSpace(string(out))
 		if err != nil {
-			s := strings.TrimSpace(string(out))
 			if len(argv) >= 3 && argv[0] == "volume" && strings.Contains(s, "exists") {
-				return nil // ya estaba: se reutiliza, como un volumen de Docker
+				return s, nil // ya estaba: se reutiliza, como un volumen de Docker
 			}
-			return fmt.Errorf("%s: %s", l, s)
+			return s, fmt.Errorf("%s: %s", l, s)
 		}
-		return nil
+		return s, nil
 	}
 	for _, l := range vols {
-		if err := run(l); err != nil {
+		if _, err := run(l); err != nil {
 			return err
 		}
 	}
 	errs := make([]error, len(imports))
 	var wg sync.WaitGroup
-	for i, l := range imports {
+	for i, im := range imports {
 		wg.Add(1)
-		go func() { defer wg.Done(); errs[i] = run(l) }()
+		go func() {
+			defer wg.Done()
+			out, err := run(im.linea)
+			if err != nil && strings.Contains(out, "-replace") {
+				if im.antesDeReplace != nil {
+					im.antesDeReplace()
+				}
+				_, err = run(im.conReplace)
+			}
+			errs[i] = err
+		}()
 	}
 	wg.Wait()
 	return errors.Join(errs...)
@@ -208,6 +220,7 @@ func composeUp(args []string) error {
 	name := fs.String("p", "", "project (graph) name (default: name: of the file, or the directory's)")
 	keep := fs.Bool("keep", false, "leave the machines running when this exits (kling compose down removes them)")
 	noLogs := fs.Bool("no-logs", false, "do not follow the services' output")
+	fresh := fs.Bool("fresh", false, "rebuild the services' warm templates (after re-pulling an image tag, say)")
 	_ = fs.Parse(reorderFor(fs, args))
 	if fs.NArg() != 0 {
 		return errors.New(composeUsage)
@@ -225,7 +238,7 @@ func composeUp(args []string) error {
 
 	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
 	_ = selfCmd(ctx, *host, "graph", "rm", "-f", t.Proyect).Run()
-	if err := runSetup(ctx, *host, t.Antes); err != nil {
+	if err := prepararCompose(ctx, c, *host, t, *fresh); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp("", "kling-compose-*.yaml")
