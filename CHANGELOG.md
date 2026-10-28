@@ -61,7 +61,8 @@ macOS gets a second VMM, `kling-hv`, picked by the new default `daemon.vmm: auto
 - Egress `none`/`allowlist` let conntrack-INVALID packets through the netns FORWARD and the graph/DNS/credential accepts.
 - macOS:
   - `kling-vz` died with SIGSEGV after balloon use;
-  - a restored copy whose vsock went silent hung every agent request (it now falls back to TCP);
+  - a restored copy whose vsock went silent hung every agent request; it now closes every connection and falls back to TCP, and a short caller deadline is no longer taken for a silent channel;
+  - two concurrent `kling-hv` vsock dials could swap connections;
   - the first `exec` after a cold boot waited ~1.2 s for a lost SYN;
   - OpenSSL died with `Illegal instruction` on M4 guests.
 - Live shares:
