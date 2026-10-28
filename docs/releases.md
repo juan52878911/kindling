@@ -3,7 +3,7 @@
 Cómo se distribuyen los binarios de kindling y cómo se crea una release.
 
 Desde v0.13.0 hay **un repositorio, una etiqueta y una release**: el núcleo
-(`kling`, el daemon, el agente de invitado, Chispa y `kling-vz`) y las
+(`kling`, el daemon, el agente de invitado, Chispa, `kling-vz` y `kling-hv`) y las
 extensiones oficiales (`mcp`, `sandbox`, `db`, `phone`, el operador de Kubernetes)
 salen juntos con la misma versión. Los ejemplos de `examples/` (como la demo de
 domótica, `kindling-domotica`) no se publican: se compilan desde el repo. Todos los binarios de una release son
@@ -26,10 +26,11 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 
 | Asset | Qué es | Plataformas |
 |---|---|---|
-| `kling-<os>-<arch>` | CLI y daemon (el daemon solo corre en Linux con KVM, o en macOS con `kling-vz`) | las cuatro |
+| `kling-<os>-<arch>` | CLI y daemon (el daemon solo corre en Linux con KVM, o en macOS con `kling-vz` o `kling-hv`) | las cuatro |
 | `kling-guest-linux-<arch>` | agente de invitado, estático, va dentro de las imágenes | linux |
 | `kling-chispa-linux-<arch>` | invitado de Chispa serverless | linux |
 | `kling-vz-darwin-arm64` | backend nativo de macOS (Virtualization.framework), firmado con su entitlement | darwin/arm64 |
+| `kling-hv-darwin-arm64` | backend de macOS 15.2+ sobre Hypervisor.framework (`daemon.vmm: auto` lo elige), firmado con su entitlement | darwin/arm64 |
 | `kling-mcp-<os>-<arch>` | extensión MCP: `mcp`, `add`, `connect`, `gateway`… | las cuatro |
 | `kling-bridge-<os>-<arch>` | puente stdio↔HTTP; *companion* de `mcp` | las cuatro |
 | `kling-sandbox-<os>-<arch>` | extensión de sandboxes multiinquilino (gateway, plantillas, fondo precalentado) | las cuatro |
@@ -151,7 +152,7 @@ git push origin vX.Y.Z
 1. **build** (matriz os/arch): `kling`, `kling-guest`, `kling-chispa`,
    `kling-mcp`, `kling-bridge`, `kling-sandbox`, `kling-db`, `kling-phone` y, en Linux,
    `kindling-operator`; empaqueta los tres `.tar.gz`.
-2. **vz** (macos-14): compila y firma `kling-vz-darwin-arm64`.
+2. **vz** (macos-15): compila y firma `kling-vz-darwin-arm64` (para macOS 14.0) y `kling-hv-darwin-arm64` (para 15.2), y comprueba su `minos`.
 3. **release**: junta todo, genera **un** `SHA256SUMS`, publica como notas el
    bloque de la versión en `CHANGELOG.md` más una línea de instalación
    (`scripts/release-notes.sh`) y nada más.
