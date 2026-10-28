@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -69,5 +70,38 @@ func TestEscribirTelemetriaCubosAcumulados(t *testing.T) {
 	}
 	if strings.Contains(out, "kling_disk_free_mib") {
 		t.Error("sin poder medir el disco no se inventa un 0")
+	}
+}
+
+// 5.1: huella, CPU por núcleo, energía, tiempo en el estado y memoria del host.
+func TestMetricsPorMaquina(t *testing.T) {
+	desde := time.Unix(1000, 0)
+	ps := api.ProcStats{MemoryKind: "footprint", AvailableMiB: 4096, Machines: []api.ProcStat{
+		{ID: "aa", Name: "web", State: api.StateRunning, PID: 7, FootprintMiB: 120, CPUSeconds: 3, CPUPSeconds: 1,
+			CoreSplit: true, EnergyJoules: 2.5, StateSince: &desde},
+		{ID: "bb", Name: "pg", State: api.StateWarm, StateSince: &desde},
+	}}
+	var b bytes.Buffer
+	escribirPorMaquina(&b, ps, desde.Add(90*time.Second))
+	out := b.String()
+	for _, l := range []string{
+		"kling_host_mem_available_mib 4096",
+		`kling_machine_footprint_mib{id="aa",name="web",state="running"} 120`,
+		`kling_machine_cpu_seconds_total{id="aa",name="web",core="p"} 1.000`,
+		`kling_machine_cpu_seconds_total{id="aa",name="web",core="e"} 2.000`,
+		`kling_machine_energy_joules_total{id="aa",name="web"} 2.500`,
+		`kling_machine_state_seconds{id="bb",name="pg",state="frozen"} 90`,
+	} {
+		if !strings.Contains(out, l+"\n") {
+			t.Errorf("falta %q en:\n%s", l, out)
+		}
+	}
+	// Sin reparto (Linux): core="all", y sin huella.
+	ps.MemoryKind = "pss"
+	ps.Machines[0].CoreSplit = false
+	b.Reset()
+	escribirPorMaquina(&b, ps, desde)
+	if out := b.String(); !strings.Contains(out, `core="all"} 3.000`) || strings.Contains(out, "kling_machine_footprint_mib{") {
+		t.Errorf("Linux:\n%s", out)
 	}
 }

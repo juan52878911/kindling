@@ -963,6 +963,24 @@ type ProcStat struct {
 	State   State  `json:"state"`
 	PID     int    `json:"pid,omitempty"`
 	PSSMiB  int64  `json:"pss_mib"`
+	// FootprintMiB es su memoria en macOS (phys_footprint del VMM, del
+	// auxiliar de Apple y de sus hijos: lo que Monitor de Actividad llama
+	// memoria). Allí PSSMiB lleva la misma cifra, para clientes anteriores.
+	// 0 en Linux, donde la cifra buena es el PSS.
+	FootprintMiB int64 `json:"footprint_mib,omitempty"`
+	// CPUSeconds es la CPU que ha gastado su VMM (con el auxiliar y los hijos
+	// en macOS) desde que se lanzó; 0 = no se sabe. En Apple Silicon,
+	// CPUPSeconds es la parte que corrió en núcleos de rendimiento y el resto
+	// en los de eficiencia (CoreSplit dice que el reparto se conoce).
+	CPUSeconds  float64 `json:"cpu_seconds,omitempty"`
+	CPUPSeconds float64 `json:"cpu_p_seconds,omitempty"`
+	CoreSplit   bool    `json:"core_split,omitempty"`
+	// EnergyJoules es la energía que el sistema le atribuye (macOS, en
+	// julios, desde que se lanzó); 0 = no se sabe.
+	EnergyJoules float64 `json:"energy_joules,omitempty"`
+	// StateSince es desde cuándo está en su estado (arranque, congelación,
+	// pausa, parada o fallo); nil si no consta.
+	StateSince *time.Time `json:"state_since,omitempty"`
 }
 
 // ProcStats es la respuesta de GET /procstats: el consumo del conjunto.
@@ -977,6 +995,9 @@ type ProcStats struct {
 	// daemon no la da (Linux, o un daemon anterior). Con AvailableMiB da el
 	// nivel de memoria con el que el gateway reparte el nivel pausada.
 	TotalMiB int64 `json:"total_mib,omitempty"`
+	// MemoryKind es qué mide la memoria por máquina: "pss" (Linux) o
+	// "footprint" (macOS). Vacío = daemon anterior ("pss").
+	MemoryKind string `json:"memory_kind,omitempty"`
 }
 
 // Info describe el daemon.
