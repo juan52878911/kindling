@@ -31,6 +31,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
 - Writing a file into an image or removing it is refused while a cold boot of that image is in flight
 - Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
+- Freeze and save fsync the memory, state and overlay files before sealing, after the VM is resumed or gone, so a power cut cannot leave a seal over a dump still in cache
 
 ## [0.18.0] - 2026-10-11
 

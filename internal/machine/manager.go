@@ -2397,7 +2397,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		base = mc.DiffBase
 	}
-	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
+	// A disco antes del sello, con el VMM ya muerto: no alarga la pausa
+	// (elapsed se midió arriba). Sin poder sincronizar no se sella: el volcado
+	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
+	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
+		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
+	} else if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 

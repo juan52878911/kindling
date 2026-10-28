@@ -478,6 +478,17 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	t.marca("holes")
 
+	// A disco antes del meta, con la plantilla ya reanudada: el meta es
+	// durable y sin esto, tras un corte, daba por bueno un volcado que seguía
+	// en la caché. El temporal de un fork no: se restaura en esta llamada y
+	// barrerForks lo recoge si el daemon muere (como su digest, más abajo).
+	if !deFork {
+		if err := sincronizarVolcado(snapPath, memPath, goldOverlay); err != nil {
+			return nil, err
+		}
+		t.marca("sync")
+	}
+
 	// Digests de integridad del rootfs dorado y del volcado de estado.
 	//
 	// Se calculan aquí, con los ficheros ya en su forma final (el overlay copiado,
