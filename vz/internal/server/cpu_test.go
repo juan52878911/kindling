@@ -278,6 +278,11 @@ func TestReguladorImpulsoDeArranque(t *testing.T) {
 	r.srv.mu.Lock()
 	r.srv.cpuListo = true
 	r.srv.mu.Unlock()
+	// Se deja pasar un segundo: la ráfaga que el cubo acumuló durante el
+	// impulso se gasta ahí y no infla la medida del régimen (con el host
+	// cargado salía 53 %).
+	t0, _, _, _ = m.foto()
+	m.hasta(t, t0.Add(time.Second))
 	t0, c0, _, _ = m.foto()
 	m.hasta(t, t0.Add(5*time.Second))
 	t1, c1, _, _ = m.foto()
