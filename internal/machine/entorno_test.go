@@ -54,7 +54,7 @@ func TestRunFromConEntornoSeRechaza(t *testing.T) {
 func TestEntornoEnMMDS(t *testing.T) {
 	f := nuevoFcFalso(t)
 	ctx := context.Background()
-	if err := ponerEntornoMMDS(ctx, f.cliente(), map[string]string{"PW": "s3"}); err != nil {
+	if err := ponerEntornoMMDS(ctx, f.cliente(), datosArranqueMMDS(map[string]string{"PW": "s3"}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if err := borrarEntornoMMDS(ctx, f.cliente()); err != nil {
@@ -69,7 +69,7 @@ func TestEntornoEnMMDS(t *testing.T) {
 	if err := json.Unmarshal(put[0].Cuerpo, &doc); err != nil || doc[api.MachineEnvMMDSKey]["PW"] != "s3" || len(doc) != 1 {
 		t.Fatalf("PUT /mmds: %s", put[0].Cuerpo)
 	}
-	if got := strings.TrimSpace(string(patch[0].Cuerpo)); got != `{"`+api.MachineEnvMMDSKey+`":null}` {
+	if got := strings.TrimSpace(string(patch[0].Cuerpo)); got != `{"`+api.MachineCmdMMDSKey+`":null,"`+api.MachineEnvMMDSKey+`":null}` {
 		t.Fatalf("PATCH /mmds: %s", got)
 	}
 	if envBootArg(false) != "" || envBootArg(true) != " kling.env=1" {

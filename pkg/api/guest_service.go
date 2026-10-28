@@ -45,6 +45,12 @@ const (
 type ServiceSpec struct {
 	// Argv es el ejecutable y sus argumentos; sin "/" se busca en el PATH.
 	Argv []string `json:"argv"`
+	// Entrypoint y Cmd son las dos mitades de Argv tal como las dio la imagen
+	// (ENTRYPOINT y CMD de Docker, ya con lo que cambió el import): con ellas
+	// el agente aplica el comando de una máquina (RunRequest.Cmd) sin perder
+	// el ENTRYPOINT. Una imagen anterior no las trae.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
 	// User es "uid[:gid]" o "nombre[:grupo]" (de /etc/passwd y /etc/group de
 	// la imagen); vacío = root. Como el USER de Docker.
 	User string `json:"user,omitempty"`
@@ -116,6 +122,11 @@ func ParseOnRestore(v string) (action string, sig int, err error) {
 // el HEALTHCHECK los admite de horas, pero "listo" es "terminó de arrancar" y
 // una sonda colgada no puede tener esperando a quien la pregunta más que esto.
 const MaxReadyTimeoutSeconds = 120
+
+// GuestCapCmd: el agente lee el comando de la máquina de MMDS con kling.cmd=1
+// (RunRequest.Cmd/Entrypoint). Un agente sin ella arrancaría el de la imagen:
+// el daemon da la máquina por fallida.
+const GuestCapCmd = "cmd"
 
 // GuestService es la respuesta de GET /service.
 type GuestService struct {

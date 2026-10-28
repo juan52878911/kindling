@@ -60,17 +60,18 @@ func envBootArg(hay bool) string {
 
 // ponerEntornoMMDS deja env en el almacén MMDS de c. Va antes de Start: el
 // almacén está vacío y el PUT no pisa nada.
-func ponerEntornoMMDS(ctx context.Context, c *fc.Client, env map[string]string) error {
-	if err := c.PutMMDSData(ctx, map[string]any{api.MachineEnvMMDSKey: env}); err != nil {
+func ponerEntornoMMDS(ctx context.Context, c *fc.Client, doc map[string]any) error {
+	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return fmt.Errorf("giving the machine its environment via MMDS: %w", err)
 	}
 	return nil
 }
 
-// borrarEntornoMMDS quita el entorno del almacén (un null en un merge patch)
-// sin tocar lo demás: marcadores de credenciales, secretos de sesión.
+// borrarEntornoMMDS quita el entorno y el comando del almacén (un null en un
+// merge patch) sin tocar lo demás: marcadores de credenciales, secretos de
+// sesión.
 func borrarEntornoMMDS(ctx context.Context, c *fc.Client) error {
-	return c.PatchMMDSData(ctx, map[string]any{api.MachineEnvMMDSKey: nil})
+	return c.PatchMMDSData(ctx, map[string]any{api.MachineEnvMMDSKey: nil, api.MachineCmdMMDSKey: nil})
 }
 
 // retirarEntornoMMDS espera en segundo plano a que el agente de la máquina id
@@ -111,7 +112,21 @@ func (m *Manager) retirarEntornoMMDS(id, nombre string, env map[string]string) {
 			}
 			bcancel()
 		}
-		if ag != nil && !ag.Has(api.GuestCapEnv) {
+		m.mu.RLock()
+		comando := comandoDe(m.byID[id])
+		m.mu.RUnlock()
+		if ag != nil && comando != nil && !ag.Has(api.GuestCapCmd) {
+			// Como con el entorno: el servicio de la imagen corriendo en vez
+			// del pedido parecería sano y no lo es.
+			m.mu.RLock()
+			mc := m.byID[id]
+			m.mu.RUnlock()
+			if mc != nil {
+				m.fail(mc, errors.New("its guest agent does not read the machine command (an image from "+
+					"before RunRequest.Cmd), so the image's own command would run: reimport the image"))
+			}
+		}
+		if ag != nil && len(env) > 0 && !ag.Has(api.GuestCapEnv) {
 			// Un servicio que esperaba su contraseña o su clave corriendo sin
 			// ella es peor que no arrancar: la máquina falla (y -wait-ready con
 			// ella) en vez de quedarse "lista" con el entorno equivocado.
@@ -165,6 +180,7 @@ func (m *Manager) esperarAgente(ctx context.Context, id string) *api.GuestAgent 
 func (m *Manager) conEntornoPendiente(id string, doc any) (any, error) {
 	m.mu.RLock()
 	env, pendiente := m.entornoPendiente[id]
+	comando := comandoDe(m.byID[id])
 	m.mu.RUnlock()
 	if !pendiente {
 		return doc, nil
@@ -185,6 +201,8 @@ func (m *Manager) conEntornoPendiente(id string, doc any) (any, error) {
 	for k, v := range obj {
 		out[k] = v
 	}
-	out[api.MachineEnvMMDSKey] = env
+	for k, v := range datosArranqueMMDS(env, comando) {
+		out[k] = v
+	}
 	return out, nil
 }

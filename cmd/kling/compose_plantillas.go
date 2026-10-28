@@ -61,24 +61,46 @@ type plantillaCompose struct {
 	nombre string // la plantilla; vacío = arranque en frío (volúmenes)
 	existe bool
 	vivas  int // carpetas vivas que espera
+	// cmdMaquina: command: y entrypoint: van en la máquina de preparación
+	// (RunRequest.Cmd/Entrypoint), no horneados en la imagen.
+	cmdMaquina bool
+}
+
+// daemonCompose es lo que la receta de una plantilla toma del daemon: su
+// versión y si entiende el comando por máquina.
+type daemonCompose struct {
+	version string
+	cmd     bool
+}
+
+// daemonDeInfo saca daemonCompose de GET /info.
+func daemonDeInfo(info *api.Info) daemonCompose {
+	return daemonCompose{version: info.Version, cmd: slices.Contains(info.Capabilities, api.CapabilityMachineCmd)}
 }
 
 // usaPlantilla dice si el servicio sale de una plantilla: todos menos los que
 // llevan volúmenes con nombre.
 func usaPlantilla(s *servicioCompose) bool { return len(s.vols) == 0 }
 
-// clavePlantilla es el hash de todo lo que decide la plantilla de s.
-func clavePlantilla(s *servicioCompose, proyecto, daemon string) string {
+// clavePlantilla es el hash de todo lo que decide la plantilla de s. El
+// comando está siempre: aun yendo en la máquina, solo se aplica en frío (la
+// plantilla guarda la memoria con el servicio lanzado, o a punto de lanzarse
+// con lo que su agente leyó al arrancar), así que otro comando es otra
+// plantilla; lo que se ahorra es reimportar la imagen.
+func clavePlantilla(s *servicioCompose, proyecto string, d daemonCompose) string {
 	receta := struct {
 		Import  string
 		Env     [][2]string
+		Cmd     []string
+		Entry   []string
 		VCPUs   int
 		MemMiB  int
 		Shares  []api.ShareSpec
 		Salud   []string
 		Daemon  string
 		Version int
-	}{ordenImportCon(s, proyecto, false, false), s.env, s.vcpus, s.memMiB, s.shares, s.salud, daemon, 1}
+	}{ordenImportCon(s, proyecto, false, !d.cmd, false), s.env, s.cmd, s.entry, s.vcpus, s.memMiB, s.shares, s.salud,
+		d.version, 2}
 	b, _ := json.Marshal(receta)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:4])
@@ -96,7 +118,7 @@ func nombrePlantilla(proyecto, nodo, clave string) string {
 
 // planPlantillas decide, para cada servicio, de qué plantilla sale y si ya
 // existe. fresh hace como que ninguna existe.
-func planPlantillas(t *traduccionCompose, snaps []*api.Snapshot, daemon string, fresh bool) []*plantillaCompose {
+func planPlantillas(t *traduccionCompose, snaps []*api.Snapshot, d daemonCompose, fresh bool) []*plantillaCompose {
 	hay := map[string]bool{}
 	for _, sn := range snaps {
 		hay[sn.Name] = true
@@ -105,9 +127,10 @@ func planPlantillas(t *traduccionCompose, snaps []*api.Snapshot, daemon string, 
 	for _, s := range t.vivos {
 		p := &plantillaCompose{s: s}
 		if usaPlantilla(s) {
-			p.nombre = nombrePlantilla(t.Proyect, s.nodo, clavePlantilla(s, t.Proyect, daemon))
+			p.nombre = nombrePlantilla(t.Proyect, s.nodo, clavePlantilla(s, t.Proyect, d))
 			p.existe = hay[p.nombre] && !fresh
 			p.vivas = len(s.shares)
+			p.cmdMaquina = d.cmd
 		}
 		out = append(out, p)
 	}
@@ -173,6 +196,7 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 		// CPU entera: la plantilla la conserva y sus copias arrancan sin el
 		// techo de media vCPU (en desarrollo no hay vecinos que proteger).
 		CPUPct: vcpus * 100, AllowExec: true, Env: env, ShareWait: p.vivas,
+		Cmd: comandoMaquina(p, s.cmd), Entrypoint: comandoMaquina(p, s.entry),
 		WaitReady: p.vivas == 0, ReadyTimeoutSeconds: int(plantillaListo.Seconds()),
 		Labels: map[string]string{labelComposeProject: proyecto, labelComposeNode: s.nodo},
 	}
@@ -203,6 +227,14 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 	_, err = ops.CommitWith(ctx, prep, api.CommitRequest{Name: p.nombre, Replace: true,
 		SkipReady: p.vivas > 0, ReadyTimeoutSeconds: int(plantillaListo.Seconds())})
 	return err
+}
+
+// comandoMaquina es l si va en la máquina, o nil.
+func comandoMaquina(p *plantillaCompose, l []string) []string {
+	if !p.cmdMaquina || len(l) == 0 {
+		return nil
+	}
+	return l
 }
 
 // esperarOrden repite argv dentro de la máquina hasta que acaba con 0, como
@@ -271,7 +303,7 @@ func prepararCompose(ctx context.Context, c *api.Client, host string, t *traducc
 	}
 	var ps []*plantillaCompose
 	if slices.Contains(info.Capabilities, api.CapabilityMachineEnv) {
-		ps = planPlantillas(t, snaps, info.Version, fresh)
+		ps = planPlantillas(t, snaps, daemonDeInfo(info), fresh)
 	} else {
 		// Sin entorno en la máquina, el de siempre: horneado y en frío.
 		fmt.Fprintf(os.Stderr, "warning: the daemon (%s) does not take a machine environment: no warm templates; update it\n", info.Version)
@@ -296,10 +328,11 @@ func prepararCompose(ctx context.Context, c *api.Client, host string, t *traducc
 			continue
 		}
 		frio := p.nombre == ""
+		hornear := frio || !p.cmdMaquina
 		nodo := p.s.nodo
 		imports = append(imports, importCompose{
-			linea:      ordenImportCon(p.s, t.Proyect, frio, false),
-			conReplace: ordenImportCon(p.s, t.Proyect, frio, true),
+			linea:      ordenImportCon(p.s, t.Proyect, frio, hornear, false),
+			conReplace: ordenImportCon(p.s, t.Proyect, frio, hornear, true),
 			// La imagen cambia: las plantillas que salieron de ella, fuera.
 			antesDeReplace: func() { borrar(viejasDe(snaps, t.Proyect, nodo, "")) },
 		})

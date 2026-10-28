@@ -86,7 +86,12 @@ func LoadService(p string) (*Service, error) {
 	if err := checkServiceSpec(spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
-	return &Service{spec: spec, root: "/", logPath: api.GuestServiceLog, console: os.Stdout}, nil
+	return newService(spec), nil
+}
+
+// newService es el servicio de spec con la consola y el log de siempre.
+func newService(spec api.ServiceSpec) *Service {
+	return &Service{spec: spec, root: "/", logPath: api.GuestServiceLog, console: os.Stdout}
 }
 
 func checkServiceSpec(s api.ServiceSpec) error {
@@ -119,6 +124,20 @@ func (a *Agent) StartService() {
 	svc, err := LoadService(api.GuestServiceSpec)
 	if err != nil {
 		log.Printf("service: %v", err)
+		return
+	}
+	// El comando de la máquina (machine_cmd.go), encima del de la imagen.
+	svc, err = a.conMachineCmd(svc)
+	if err != nil {
+		log.Printf("service: %v; not starting it", err)
+		if svc == nil {
+			svc = newService(api.ServiceSpec{})
+		}
+		// Declarado pero sin arrancar: GET /service enseña por qué.
+		svc.err = err.Error()
+		serviceState.mu.Lock()
+		serviceState.svc = svc
+		serviceState.mu.Unlock()
 		return
 	}
 	if svc == nil {

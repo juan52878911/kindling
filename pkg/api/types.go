@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -155,6 +156,11 @@ type Machine struct {
 	// ShareWait es cuántas carpetas vivas espera su agente antes de lanzar el
 	// servicio (RunRequest.ShareWait; kling.shares en la línea del kernel).
 	ShareWait int `json:"share_wait,omitempty"`
+
+	// Entrypoint y Cmd son los de la máquina (RunRequest.Entrypoint/Cmd), si
+	// se dieron: el daemon los guarda para volver a dárselos en un Start.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
 
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
@@ -371,6 +377,66 @@ type RunRequest struct {
 	// el mismo número de carpetas vivas) las reciben tras restaurar. Un agente
 	// anterior lo ignora y arranca el servicio en seguida.
 	ShareWait int `json:"share_wait,omitempty"`
+	// Entrypoint y Cmd sustituyen a los de la imagen para el servicio de esta
+	// máquina, sin hornear otra imagen: el ENTRYPOINT y el CMD de Docker
+	// (`docker run --entrypoint x img args...`). Cmd solo cambia los
+	// argumentos y conserva el ENTRYPOINT; Entrypoint cambia el ejecutable y,
+	// sin Cmd, deja los argumentos vacíos, como Docker. Llegan por MMDS como el
+	// entorno (MachineCmdMMDSKey) y solo en frío: con From se rechazan (el
+	// servicio del dorado ya arrancó con el suyo). Un daemon sin
+	// CapabilityMachineCmd los ignoraría: el CLI la mira antes de mandarlos.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+}
+
+// CapabilityMachineCmd es la capacidad de GET /info que dice que el daemon
+// entiende RunRequest.Entrypoint y RunRequest.Cmd.
+const CapabilityMachineCmd = "machine-cmd"
+
+// MachineCmdBootParam (kling.cmd=1) le dice al agente que hay un comando de
+// la máquina en MMDS y que no arranque el servicio de la imagen sin él.
+const MachineCmdBootParam = "kling.cmd"
+
+// MachineCmdMMDSKey es la clave del almacén MMDS que lleva el comando de la
+// máquina (MachineCmd). Como el entorno, el daemon la borra cuando el agente
+// contesta.
+const MachineCmdMMDSKey = "machine_cmd"
+
+// MachineCmd es el comando de una máquina tal como viaja por MMDS. nil en
+// un campo es "el de la imagen".
+type MachineCmd struct {
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+}
+
+// Límites del comando de una máquina: caben con el entorno en el almacén.
+const (
+	MaxMachineCmdArgs  = 1024
+	MaxMachineCmdBytes = 32 << 10
+)
+
+// CheckMachineCmd valida un comando de máquina.
+func CheckMachineCmd(c MachineCmd) error {
+	n, total := 0, 0
+	for _, l := range [][]string{c.Entrypoint, c.Cmd} {
+		for _, a := range l {
+			if strings.ContainsRune(a, 0) {
+				return fmt.Errorf("invalid command: an argument has a NUL byte")
+			}
+			n++
+			total += len(a) + 1
+		}
+	}
+	if n > MaxMachineCmdArgs {
+		return fmt.Errorf("the command has %d arguments, over the limit of %d", n, MaxMachineCmdArgs)
+	}
+	if total > MaxMachineCmdBytes {
+		return fmt.Errorf("the command is %d bytes, over the limit of %d", total, MaxMachineCmdBytes)
+	}
+	if c.Entrypoint != nil && len(c.Entrypoint) > 0 && c.Entrypoint[0] == "" {
+		return fmt.Errorf("invalid command: the entrypoint's executable is empty")
+	}
+	return nil
 }
 
 // GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en

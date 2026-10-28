@@ -644,7 +644,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			return err
 		}
 	}
-	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
+	// Las dos mitades, para que el agente pueda cambiar solo el CMD de una
+	// máquina (RunRequest.Cmd) sin perder el ENTRYPOINT.
+	svc := api.ServiceSpec{Argv: argv, Entrypoint: entry, Cmd: argv[len(entry):], User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
 		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls, Init: initImage}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {

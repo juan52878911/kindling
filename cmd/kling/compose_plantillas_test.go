@@ -50,8 +50,8 @@ func traducirParaPlantillas(t *testing.T, c string) *traduccionCompose {
 func TestClavePlantilla(t *testing.T) {
 	tr := traducirParaPlantillas(t, composePlantillas)
 	db := tr.por["db"]
-	k := clavePlantilla(db, "dev", "v1")
-	if k != clavePlantilla(db, "dev", "v1") {
+	k := clavePlantilla(db, "dev", daemonCompose{version: "v1"})
+	if k != clavePlantilla(db, "dev", daemonCompose{version: "v1"}) {
 		t.Fatal("the key is not stable")
 	}
 	otra := *db
@@ -61,12 +61,17 @@ func TestClavePlantilla(t *testing.T) {
 	otraSalud := *db
 	otraSalud.salud = nil
 	for nombre, s := range map[string]*servicioCompose{"env": &otra, "command": &otraCmd, "healthcheck": &otraSalud} {
-		if clavePlantilla(s, "dev", "v1") == k {
+		if clavePlantilla(s, "dev", daemonCompose{version: "v1"}) == k {
 			t.Errorf("changing %s keeps the key", nombre)
 		}
 	}
-	if clavePlantilla(db, "dev", "v2") == k {
+	if clavePlantilla(db, "dev", daemonCompose{version: "v2"}) == k {
 		t.Error("another daemon version keeps the key")
+	}
+	// Con el comando en la máquina, sigue en la clave (solo vale en frío).
+	cm := daemonCompose{version: "v1", cmd: true}
+	if clavePlantilla(db, "dev", cm) == clavePlantilla(&otraCmd, "dev", cm) {
+		t.Error("changing command keeps the key with the command on the machine")
 	}
 	if n := nombrePlantilla(strings.Repeat("p", 60), "nodo", k); len(n) > 64 {
 		t.Errorf("template name too long: %q", n)
@@ -77,8 +82,8 @@ func TestClavePlantilla(t *testing.T) {
 // que espera a sus carpetas vivas. El grafo nombra la plantilla.
 func TestPlanPlantillas(t *testing.T) {
 	tr := traducirParaPlantillas(t, composePlantillas)
-	ya := nombrePlantilla("dev", "db", clavePlantilla(tr.por["db"], "dev", "v1"))
-	ps := planPlantillas(tr, []*api.Snapshot{{Name: ya}}, "v1", false)
+	ya := nombrePlantilla("dev", "db", clavePlantilla(tr.por["db"], "dev", daemonCompose{version: "v1"}))
+	ps := planPlantillas(tr, []*api.Snapshot{{Name: ya}}, daemonCompose{version: "v1"}, false)
 	got := map[string]*plantillaCompose{}
 	for _, p := range ps {
 		got[p.s.nodo] = p
@@ -92,7 +97,7 @@ func TestPlanPlantillas(t *testing.T) {
 	if got["app"].existe || got["app"].vivas != 1 {
 		t.Errorf("app: %+v", got["app"])
 	}
-	if ps := planPlantillas(tr, []*api.Snapshot{{Name: ya}}, "v1", true); ps[2].existe {
+	if ps := planPlantillas(tr, []*api.Snapshot{{Name: ya}}, daemonCompose{version: "v1"}, true); ps[2].existe {
 		t.Error("-fresh reused a template")
 	}
 	tr.desde = map[string]string{"app": "dev-app-x", "db": ya}
@@ -107,10 +112,10 @@ func TestPlanPlantillas(t *testing.T) {
 	}
 	// La orden de import de una plantilla no lleva el entorno; la de un
 	// servicio en frío, sí.
-	if l := ordenImportCon(tr.por["db"], "dev", false, false); strings.Contains(l, "POSTGRES_PASSWORD") || strings.Contains(l, "-replace") {
+	if l := ordenImportCon(tr.por["db"], "dev", false, true, false); strings.Contains(l, "POSTGRES_PASSWORD") || strings.Contains(l, "-replace") {
 		t.Errorf("template import line: %s", l)
 	}
-	if l := ordenImportCon(tr.por["db"], "dev", true, true); !strings.Contains(l, "-e POSTGRES_PASSWORD=dev") || !strings.Contains(l, "-replace") {
+	if l := ordenImportCon(tr.por["db"], "dev", true, true, true); !strings.Contains(l, "-e POSTGRES_PASSWORD=dev") || !strings.Contains(l, "-replace") {
 		t.Errorf("cold import line: %s", l)
 	}
 }
@@ -182,13 +187,38 @@ func (o *opsFalsas) Remove(_ context.Context, ref string) error {
 	return nil
 }
 
+// Con un daemon que entiende el comando por máquina, el comando no se hornea:
+// va en la máquina de preparación.
+func TestPlantillaComandoEnMaquina(t *testing.T) {
+	tr := traducirParaPlantillas(t, composePlantillas)
+	var app *plantillaCompose
+	for _, p := range planPlantillas(tr, nil, daemonCompose{version: "v1", cmd: true}, false) {
+		if p.s.nodo == "app" {
+			app = p
+		}
+	}
+	if !app.cmdMaquina {
+		t.Fatal("cmdMaquina not set")
+	}
+	if l := ordenImportCon(app.s, "dev", false, false, false); strings.Contains(l, "server.js") {
+		t.Errorf("import line bakes the command: %s", l)
+	}
+	ops := &opsFalsas{}
+	if err := prepararPlantilla(context.Background(), ops, "dev", app, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ops.run.Cmd, []string{"node", "/app/server.js"}) || ops.run.Entrypoint != nil {
+		t.Errorf("prep run: cmd %q entrypoint %q", ops.run.Cmd, ops.run.Entrypoint)
+	}
+}
+
 func TestPrepararPlantilla(t *testing.T) {
 	old := plantillaPaso
 	plantillaPaso = time.Millisecond
 	defer func() { plantillaPaso = old }()
 	tr := traducirParaPlantillas(t, composePlantillas)
 	ps := map[string]*plantillaCompose{}
-	for _, p := range planPlantillas(tr, nil, "v1", false) {
+	for _, p := range planPlantillas(tr, nil, daemonCompose{version: "v1"}, false) {
 		ps[p.s.nodo] = p
 	}
 	logf := func(string, ...any) {}

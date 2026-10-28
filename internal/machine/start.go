@@ -380,7 +380,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	m.vigilarListo(mc.ID, nil)
 	m.olvidarAgente(mc.ID)
 	m.conocerAgente(mc.ID)
-	if len(bootEnv) > 0 {
+	if len(bootEnv) > 0 || comandoDe(mc) != nil {
 		m.retirarEntornoMMDS(mc.ID, mc.Name, bootEnv)
 	}
 	keys := ""

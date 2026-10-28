@@ -738,13 +738,13 @@ func (t *traduccionCompose) deploy(s *servicioCompose, v any, pre string, avisa 
 // ordenImport es el `kling image import` del servicio: lleva su entorno,
 // usuario, entrypoint, comando y política de reinicio.
 func ordenImport(s *servicioCompose, proyecto string) string {
-	return ordenImportCon(s, proyecto, true, true)
+	return ordenImportCon(s, proyecto, true, true, true)
 }
 
-// ordenImportCon es la orden de import del servicio; sin entorno cuando lo
-// lleva la máquina (compose up con plantillas), y sin -replace cuando se
-// confía en que import reconozca la misma receta.
-func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace bool) string {
+// ordenImportCon es la orden de import del servicio; sin entorno ni comando
+// cuando los lleva la máquina (compose up con plantillas), y sin -replace
+// cuando se confía en que import reconozca la misma receta.
+func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, conComando, replace bool) string {
 	a := []string{"kling", "image", "import", comillaSh(s.imagen), "-name", proyecto + "-" + s.nodo}
 	if replace {
 		a = append(a, "-replace")
@@ -756,6 +756,9 @@ func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace boo
 		a = append(a, "-restart", s.restart)
 	}
 	for _, e := range s.entry {
+		if !conComando {
+			break
+		}
 		a = append(a, "-entrypoint", comillaSh(e))
 	}
 	for _, kv := range s.env {
@@ -764,7 +767,7 @@ func ordenImportCon(s *servicioCompose, proyecto string, conEntorno, replace boo
 		}
 		a = append(a, "-e", comillaSh(kv[0]+"="+kv[1]))
 	}
-	if len(s.cmd) > 0 {
+	if len(s.cmd) > 0 && conComando {
 		a = append(a, "--")
 		for _, c := range s.cmd {
 			a = append(a, comillaSh(c))

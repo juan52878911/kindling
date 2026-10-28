@@ -54,6 +54,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 const (
@@ -72,6 +74,9 @@ type MMDSStore struct {
 	// MachineEnv es el entorno de la máquina (api.MachineEnvMMDSKey): solo
 	// está hasta que el agente contesta por primera vez (machine_env.go).
 	MachineEnv map[string]string `json:"machine_env,omitempty"`
+	// MachineCmd es el comando de la máquina (api.MachineCmdMMDSKey), con la
+	// misma vida (machine_cmd.go).
+	MachineCmd *api.MachineCmd `json:"machine_cmd,omitempty"`
 }
 
 // setupMMDSRoute añade la ruta a 169.254.169.254 por eth0. El bridge es PID 1 y
