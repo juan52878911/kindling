@@ -158,14 +158,18 @@ func (a *Agent) startService(svc *Service) {
 		serviceState.mu.Unlock()
 		return
 	}
-	env := a.Env
-	start := func() { svc.Start(env) }
+	// El entorno se lee al lanzarlo, no antes: con VolumeWait cambia al
+	// montarse los volúmenes (NODE_PATH, PYTHONPATH).
+	start := func() { svc.Start(a.Entorno()) }
 	if n := shareWaitWanted(); n > 0 {
-		start = func() { startAfterShares(shareState, n, func() { svc.Start(env) }) }
+		start = func() { startAfterShares(shareState, n, func() { svc.Start(a.Entorno()) }) }
 	}
 	if volumeWaitWanted() {
 		// Primero los volúmenes y, montados, las carpetas si las espera.
-		startAfterVolumes(a.Volumes, start)
+		startAfterVolumes(a.Volumes, func() {
+			a.recalcularBiblioteca()
+			start()
+		})
 		return
 	}
 	start()
@@ -379,6 +383,31 @@ type userInfo struct {
 	uid, gid uint32
 	groups   []uint32
 	home     string
+}
+
+// credencialExec es el usuario con el que corre un exec que pide spec
+// (api.ExecRequest.User): api.ExecUserService es el del servicio de la imagen
+// (nil, root, si no tiene servicio o no declara usuario). Devuelve también su
+// HOME, que va en el entorno como en el servicio.
+func credencialExec(spec string) (*syscall.Credential, string, error) {
+	root := "/"
+	if spec == api.ExecUserService {
+		serviceState.mu.Lock()
+		svc := serviceState.svc
+		serviceState.mu.Unlock()
+		if svc == nil || svc.spec.User == "" {
+			return nil, "", nil
+		}
+		spec, root = svc.spec.User, svc.root
+	}
+	if spec == "" {
+		return nil, "", nil
+	}
+	u, err := lookupUser(root, spec)
+	if err != nil {
+		return nil, "", err
+	}
+	return &syscall.Credential{Uid: u.uid, Gid: u.gid, Groups: u.groups}, u.home, nil
 }
 
 // lookupUser resuelve "uid[:gid]" o "nombre[:grupo]" con el /etc/passwd y el

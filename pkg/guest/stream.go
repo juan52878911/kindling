@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -68,6 +69,19 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	cmd := exec.CommandContext(ctx, req.Cmd[0], req.Cmd[1:]...)
 	cmd.Dir = req.Dir
 	cmd.Env = append(append([]string(nil), env...), req.Env...)
+	if req.User != "" {
+		cred, home, err := credencialExec(req.User)
+		if err != nil {
+			return api.ExecEvent{Error: fmt.Sprintf("user %q: %v", req.User, err)}
+		}
+		if cred != nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+			if home != "" {
+				// La HOME del usuario, salvo que la pida el propio exec.
+				cmd.Env = append(setEnv(append([]string(nil), env...), "HOME", home), req.Env...)
+			}
+		}
+	}
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
