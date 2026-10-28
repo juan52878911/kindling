@@ -60,3 +60,22 @@ func TestChecksMac(t *testing.T) {
 		t.Fatal("versionMayor")
 	}
 }
+
+// Con daemon.vmm hv se mira kling-hv, su entitlement y macOS 15 (el GIC de
+// Hypervisor.framework).
+func TestChecksMacHV(t *testing.T) {
+	p := probeMac{backend: "hv", arch: "arm64", macOS: "14.6", vmm: "/usr/local/bin/kling-hv", vmmVersion: "kling-hv 0.1.0",
+		entitlement: true, mkfs: true, debugfs: true, kernel: true, baseImage: true, root: "/r"}
+	vistos := map[string]bool{}
+	for _, c := range checksMac(p) {
+		vistos[c.label] = true
+		if c.label == "macOS 15+" && c.ok {
+			t.Fatal("kling-hv no vale en macOS 14")
+		}
+	}
+	for _, l := range []string{"kling-hv", "hv entitlement", "macOS 15+"} {
+		if !vistos[l] {
+			t.Fatalf("falta el check %q: %v", l, vistos)
+		}
+	}
+}

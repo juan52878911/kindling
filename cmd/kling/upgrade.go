@@ -435,7 +435,7 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	// Sin el permiso de virtualización, el daemon nuevo arrancaría y la
 	// primera microVM fallaría: se mira antes de parar nada.
 	o.Validar = func(bajados map[string]string) error {
-		if p, ok := bajados["kling-vz-darwin-arm64"]; ok && !tieneEntitlementVZ(p) {
+		if p, ok := bajados["kling-vz-darwin-arm64"]; ok && !tieneEntitlement(p, entitlementDe(machine.BackendVZ)) {
 			return fmt.Errorf("the downloaded kling-vz is not signed with com.apple.security.virtualization: nothing was changed")
 		}
 		return nil
