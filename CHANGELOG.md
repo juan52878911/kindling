@@ -46,6 +46,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Imported Docker images resolve bare names in their graph (`search graph` in `/etc/resolv.conf`): an `nginx.conf` with `proxy_pass http://api:8081` works under `compose up` as in Docker Compose
 - Importing an image that has no build for the daemon's architecture lists the platforms it has and what to do (another tag, `docker buildx --platform`, or `-arch` for another host); `scripts/bateria-imagenes.sh` tests `otra-plataforma` with the architecture opposite to the daemon's
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
