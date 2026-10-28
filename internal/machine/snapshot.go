@@ -473,7 +473,10 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	t.marca("resume")
 
-	if out, err := perforarHuecos(ctx, memPath); err != nil {
+	// Con limpio: el volcado ya está completo y la plantilla reanudada, y un
+	// cliente que se desconecte aquí tiraba un dorado entero por un perforado
+	// cortado.
+	if out, err := perforarHuecos(limpio, memPath); err != nil {
 		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
 	t.marca("holes")
