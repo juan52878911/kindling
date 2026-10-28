@@ -11,8 +11,9 @@ import (
 	proto "github.com/juan52878911/kindling/pkg/share"
 )
 
+// statTimes convierte a int64: en linux/arm y 386 Timespec es de int32.
 func statTimes(st *syscall.Stat_t) (atime, ctime time.Time) {
-	return time.Unix(st.Atim.Sec, st.Atim.Nsec), time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
+	return time.Unix(int64(st.Atim.Sec), int64(st.Atim.Nsec)), time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec))
 }
 
 // renameat renombra entre dos directorios abiertos por os.Root. Sobre

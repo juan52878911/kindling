@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"net"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -237,15 +240,25 @@ type verificadorS3 struct {
 	mu      sync.Mutex
 	vistas  []string // «MÉTODO ruta?query -> resultado»
 	cuerpos map[string][]byte
+	firmas  []string // las firmas que recibió (las que emitió el proxy)
 }
 
 func (v *verificadorS3) manejar(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	status, msg := v.comprobar(r)
 	v.mu.Lock()
 	v.vistas = append(v.vistas, r.Method+" "+r.URL.RequestURI()+" -> "+strconv.Itoa(status))
+	if a := r.Header.Get("Authorization"); a != "" {
+		_, sig, _ := strings.Cut(a, "Signature=")
+		v.firmas = append(v.firmas, sig)
+	} else if sig := r.URL.Query().Get("X-Amz-Signature"); sig != "" {
+		v.firmas = append(v.firmas, sig)
+	}
 	v.mu.Unlock()
 	if status != 200 {
-		http.Error(w, msg, status)
+		// Como S3: el error repite el access key id y la firma recibidos
+		// (InvalidAccessKeyId, SignatureDoesNotMatch).
+		http.Error(w, msg+" AWSAccessKeyId="+svRealAK+" Authorization="+r.Header.Get("Authorization")+
+			" Query="+r.URL.RawQuery, status)
 		return
 	}
 	// Eco del access key id real y del secreto: el redactor tiene que
@@ -413,6 +426,7 @@ func verificarTrozos(f firmador, fecha time.Time, semilla string, cuerpo []byte,
 // el proxy escribió con Logf.
 type montajeS3 struct {
 	srv  *httptest.Server
+	p    *Proxy
 	ver  *verificadorS3
 	aud  string
 	logs *syncBuf
@@ -437,12 +451,13 @@ func nuevoMontajeS3(t *testing.T, extra ...Credential) *montajeS3 {
 		return d.DialContext(ctx, network, up.Listener.Addr().String())
 	}
 	m.aud = filepath.Join(t.TempDir(), "credaudit.jsonl")
-	p := New(Options{Transport: tr, AuditPath: m.aud, Logf: func(f string, a ...any) { m.logs.Write([]byte(f)) }})
+	p := New(Options{Transport: tr, AuditPath: m.aud, Logf: func(f string, a ...any) { fmt.Fprintf(m.logs, f, a...) }})
 	creds := append([]Credential{{Env: "AWS_ACCESS_KEY_ID", Domain: svHost, Placeholder: svMarcAK, Secret: svRealSK,
 		Kind: KindSigV4, AccessKeyID: svRealAK, Region: svRegion}}, extra...)
 	if _, err := p.SetCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
+	m.p = p
 	m.srv = httptest.NewServer(p)
 	t.Cleanup(func() { m.srv.Close(); p.Close() })
 	return m
@@ -637,12 +652,18 @@ func TestSigV4LaClaveRealNuncaSale(t *testing.T) {
 	if resp.StatusCode == 200 {
 		t.Fatal("un hash que no es el del cuerpo debía fallar")
 	}
-	for _, s := range []string{svRealSK, hexSHA256([]byte(svRealSK))} {
+	for _, s := range append([]string{svRealSK, svRealAK, hexSHA256([]byte(svRealSK))}, m.ver.firmasEmitidas()...) {
 		if strings.Contains(string(b), s) {
-			t.Errorf("la respuesta lleva la clave: %s", b)
+			t.Errorf("la respuesta lleva %q: %s", s, b)
 		}
 	}
-	m.srv.Close() // el registro se escribe al terminar cada petición; se lee entero
+	if !strings.Contains(string(b), svMarcAK) {
+		t.Errorf("el error debía llevar el marcador en lugar del access key id real: %s", b)
+	}
+	// Record solo encola: cerrar el servidor espera a las peticiones, pero
+	// el registro lo escribe una goroutine. Close del proxy la drena.
+	m.srv.Close()
+	m.p.Close()
 	aud, err := os.ReadFile(m.aud)
 	if err != nil {
 		t.Fatal(err)
@@ -651,7 +672,7 @@ func TestSigV4LaClaveRealNuncaSale(t *testing.T) {
 		t.Fatal("registro de auditoría vacío")
 	}
 	for _, donde := range []struct{ n, v string }{{"auditoría", string(aud)}, {"logs", m.logs.String()}} {
-		for _, s := range []string{svRealSK, svRealAK, hex.EncodeToString(m.firmaDeLaClave()), url.QueryEscape(svRealSK)} {
+		for _, s := range append([]string{svRealSK, svRealAK, url.QueryEscape(svRealSK)}, m.firmasDeLaClave()...) {
 			if strings.Contains(donde.v, s) {
 				t.Errorf("%s lleva %q", donde.n, s)
 			}
@@ -667,10 +688,17 @@ func TestSigV4LaClaveRealNuncaSale(t *testing.T) {
 	}
 }
 
-// firmaDeLaClave es la clave de firma del día: la otra cosa derivada de la
-// clave real que tampoco debe verse.
-func (m *montajeS3) firmaDeLaClave() []byte {
-	return firmador{secret: svRealSK, region: svRegion, service: "s3"}.clave(time.Now().UTC())
+// firmasDeLaClave son las claves de firma (en hex) de ayer, hoy y mañana: la
+// otra cosa derivada de la clave real que tampoco debe verse. Las tres para
+// que una prueba que cruza la medianoche UTC no mire el día equivocado.
+func (m *montajeS3) firmasDeLaClave() []string {
+	f := firmador{secret: svRealSK, region: svRegion, service: "s3"}
+	ahora := time.Now().UTC()
+	var out []string
+	for _, d := range []time.Duration{-24 * time.Hour, 0, 24 * time.Hour} {
+		out = append(out, hex.EncodeToString(f.clave(ahora.Add(d))))
+	}
+	return out
 }
 
 // Sin hash declarado (otros servicios): lo calcula el proxy.
@@ -761,5 +789,73 @@ func TestSigV4ProxyTrozosSinFirmarPasanTalCual(t *testing.T) {
 		"Content-Encoding": "aws-chunked", "X-Amz-Trailer": "x-amz-checksum-crc32"})
 	if resp.StatusCode != 200 || !bytes.Equal(m.ver.cuerpos["/mi-cubo/sf"], cuerpo) {
 		t.Fatalf("%d %s, cuerpo en el servidor %q", resp.StatusCode, b, m.ver.cuerpos["/mi-cubo/sf"])
+	}
+}
+
+func (v *verificadorS3) firmasEmitidas() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return slices.Clone(v.firmas)
+}
+
+// Un eco de Authorization en una respuesta buena (X-Eco) sale con el marcador
+// y la firma del invitado, no con el access key id real ni la firma emitida.
+func TestSigV4EcoDeAuthorizationRedactado(t *testing.T) {
+	m := nuevoMontajeS3(t)
+	resp, b := m.peticionInvitado(t, "GET", "/mi-cubo/a", "", hashSinFirmar, nil, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	eco := resp.Header.Get("X-Eco")
+	if !strings.Contains(eco, "Credential="+svMarcAK+"/") {
+		t.Errorf("el eco debía llevar el marcador: %q", eco)
+	}
+	for _, s := range append([]string{svRealAK}, m.ver.firmasEmitidas()...) {
+		if strings.Contains(eco, s) {
+			t.Errorf("el eco lleva %q: %q", s, eco)
+		}
+	}
+}
+
+// Un fallo de red con una URL prefirmada no devuelve la URL saliente (que
+// lleva el access key id real y la firma real) en el 502.
+func TestSigV4PrefirmadaErrorDeRedNoReflejaLaURL(t *testing.T) {
+	tr := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("conexión rechazada")
+	}}
+	p := New(Options{Transport: tr})
+	t.Cleanup(func() { p.Close() })
+	if _, err := p.SetCredentials([]Credential{{Env: "AWS_ACCESS_KEY_ID", Domain: svHost, Placeholder: svMarcAK,
+		Secret: svRealSK, Kind: KindSigV4, AccessKeyID: svRealAK, Region: svRegion}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	ahora := time.Now().UTC()
+	q := url.Values{
+		"X-Amz-Algorithm":     {algoSigV4},
+		"X-Amz-Credential":    {svMarcAK + "/" + firmaInv.ambito(ahora)},
+		"X-Amz-Date":          {ahora.Format(formatoFecha)},
+		"X-Amz-Expires":       {"300"},
+		"X-Amz-SignedHeaders": {"host"},
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/mi-cubo/a?"+q.Encode()+"&X-Amz-Signature="+strings.Repeat("ab", 32), nil)
+	req.Host = svHost
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("%d %s, quería 502", resp.StatusCode, b)
+	}
+	for _, s := range []string{svRealAK, "X-Amz-Signature", "X-Amz-Credential", "mi-cubo"} {
+		if strings.Contains(string(b), s) {
+			t.Errorf("el 502 lleva %q: %s", s, b)
+		}
+	}
+	if !strings.Contains(string(b), "conexión rechazada") {
+		t.Errorf("el 502 debía conservar la causa: %s", b)
 	}
 }

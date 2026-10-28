@@ -44,6 +44,7 @@ state.json api.Machine mem_mib int
 state.json api.Machine mem_shared bool
 state.json api.Machine name string
 state.json api.Machine net_index int
+state.json api.Machine net_mibps int
 state.json api.Machine on_ttl string
 state.json api.Machine pid int
 state.json api.Machine ready string

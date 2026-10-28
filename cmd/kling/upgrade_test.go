@@ -164,7 +164,7 @@ func TestActualizarExtensiones(t *testing.T) {
 	}
 	os.WriteFile(bin, klingSh("1.0.0"), 0o755)
 	os.WriteFile(filepath.Join(nuevos, "kling"), klingSh("1.1.0"), 0o755)
-	o := upgrade.Opciones{Dir: filepath.Join(base, "upgrade"), Fuente: &upgrade.Fuente{Dir: nuevos}, Actual: "1.0.0",
+	o := upgrade.Opciones{Dir: filepath.Join(base, "upgrade"), Fuente: &upgrade.Fuente{Dir: nuevos, SinVerificar: true}, Actual: "1.0.0",
 		Piezas: []upgrade.Pieza{{Asset: assetDe("kling", runtime.GOOS, runtime.GOARCH), Destino: bin}}}
 	res, err := upgrade.Actualizar(context.Background(), o)
 	if err != nil || res.Hacia != "1.1.0" {
@@ -331,5 +331,41 @@ func TestPiezasVMMMac(t *testing.T) {
 	}
 	if p := piezasVMMMac(dir, "amd64"); len(p) != 0 {
 		t.Fatalf("Intel: %+v", p)
+	}
+}
+
+func TestEnCellar(t *testing.T) {
+	for ruta, want := range map[string]bool{
+		"/opt/homebrew/Cellar/kling/0.20.0/bin/kling":           true,
+		"/usr/local/Cellar/kling/0.20.0/bin/kling-vz":           true,
+		"/home/linuxbrew/.linuxbrew/Cellar/kling/0.20.0/bin/kl": true,
+		"/opt/homebrew/Cellar/otra/1.0/bin/kling":               false,
+		"/Users/juan/.local/bin/kling":                          false,
+		"/usr/local/bin/kling":                                  false,
+	} {
+		if enCellar(ruta) != want {
+			t.Errorf("enCellar(%q) = %v", ruta, !want)
+		}
+	}
+}
+
+// Por el enlace de /opt/homebrew/bin: lo que cuenta es adónde apunta.
+func TestUpgradeSeNiegaConBrew(t *testing.T) {
+	base := t.TempDir()
+	cellar := filepath.Join(base, "Cellar", "kling", "0.20.0", "bin")
+	os.MkdirAll(cellar, 0o755)
+	os.WriteFile(filepath.Join(cellar, "kling"), []byte("x"), 0o755)
+	enlace := filepath.Join(base, "kling")
+	if err := os.Symlink(filepath.Join(cellar, "kling"), enlace); err != nil {
+		t.Fatal(err)
+	}
+	err := noEsDeBrew([]upgrade.Pieza{{Destino: enlace}})
+	if err == nil || !strings.Contains(err.Error(), "brew upgrade kling") {
+		t.Fatalf("err = %v", err)
+	}
+	suelto := filepath.Join(base, "suelto")
+	os.WriteFile(suelto, []byte("x"), 0o755)
+	if err := noEsDeBrew([]upgrade.Pieza{{Destino: suelto}, {Destino: filepath.Join(base, "no-existe")}}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -192,9 +192,61 @@ jobs:
             vz/dist/kling-hv-darwin-arm64
           if-no-files-found: error
 
+  # El kernel de invitado y la imagen min de las dos arquitecturas: un Mac sin
+  # host Linux los baja con `kling up` (docs/mac.md) en vez de copiarlos de otro
+  # daemon. El kernel es reproducible (scripts/builders/kernel, cruzado para
+  # arm64) y min no instala paquetes (no hay chroot), así que los dos salen de
+  # un runner x86_64. min lleva horneado el kling-bridge de la misma release.
+  imagenes:
+    name: guest kernel and min image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bin-linux-*
+          path: bins
+          merge-multiple: true
+      - name: herramientas
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            build-essential flex bison bc libelf-dev xz-utils curl gcc-aarch64-linux-gnu e2fsprogs zstd
+      - name: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            TARGET_ARCH="$arch" OUT="$PWD/kout" scripts/builders/kernel/build.sh
+            n="$(TARGET_ARCH="$arch" scripts/builders/kernel/build.sh --print-name)"
+            zstd -19 -T0 -q -o "dist/vmlinux-$arch.zst" "kout/$n"
+          done
+      - name: min
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            case "$arch" in amd64) a=x86_64 ;; arm64) a=aarch64 ;; esac
+            chmod 755 "bins/kling-bridge-linux-$arch"
+            sudo env KLING_ROOT="$PWD/img-$arch" ALPINE_ARCH="$a" BRIDGE="$PWD/bins/kling-bridge-linux-$arch" \
+              scripts/70-build-minimal-image.sh min
+            # Root la dejó: se lee con sudo y el .zst es del runner.
+            sudo cat "img-$arch/images/min.ext4" | zstd -19 -T0 -q -o "dist/min-$arch.ext4.zst"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: imagenes
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: release
-    needs: [build, vz]
+    needs: [build, vz, imagenes]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
     permissions:
@@ -253,6 +305,9 @@ jobs:
           for arch in amd64 arm64; do
             want+=("kling-guest-linux-$arch" "kling-chispa-linux-$arch" "kindling-operator-linux-$arch")
           done
+          for arch in amd64 arm64; do
+            want+=("vmlinux-$arch.zst" "min-$arch.ext4.zst")
+          done
           want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
           (cd release && ls -1) | sort > have.txt
@@ -270,6 +325,18 @@ jobs:
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS SHA256SUMS
           cat SHA256SUMS
+
+      # La fórmula de Homebrew con la versión y los sha256 de esta release,
+      # como un asset más (no se publica en ningún tap). Va después de
+      # SHA256SUMS porque sale de él, y su propia suma se añade al final.
+      - name: fórmula de Homebrew
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          packaging/homebrew/formula.sh "$VERSION" release/SHA256SUMS > release/kling.rb
+          (cd release && sha256sum kling.rb >> SHA256SUMS)
+          cat release/kling.rb
 
       - name: generate release notes
         shell: bash

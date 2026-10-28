@@ -533,8 +533,8 @@ func TestSoloSeGuardanDosCopias(t *testing.T) {
 	}
 }
 
-// Desde un directorio: con SHA256SUMS se verifica igual; sin él, se acepta
-// (los ficheros ya están en esta máquina) y vale el nombre corto.
+// Desde un directorio: con SHA256SUMS se verifica igual; sin él, se rechaza
+// salvo con SinVerificar (-insecure), y vale el nombre corto.
 func TestDesdeDirectorio(t *testing.T) {
 	m := nuevoMontaje(t)
 	dir := t.TempDir()
@@ -542,8 +542,29 @@ func TestDesdeDirectorio(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "kling-guest"), []byte("guest nuevo"), 0o755)
 	o := m.opciones()
 	o.Fuente = &Fuente{Dir: dir}
+	if _, err := Actualizar(context.Background(), o); err == nil || !strings.Contains(err.Error(), "-insecure") {
+		t.Fatalf("sin SHA256SUMS: err = %v", err)
+	}
+	m.noTocado(t)
+
+	m = nuevoMontaje(t)
+	os.WriteFile(filepath.Join(dir, "kling"), m.nuevo, 0o755)
+	o = m.opciones()
+	o.Fuente = &Fuente{Dir: dir, SinVerificar: true}
 	if _, err := Actualizar(context.Background(), o); err != nil {
 		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if leer(t, m.bin) != string(m.nuevo) {
+		t.Error("not replaced")
+	}
+
+	m = nuevoMontaje(t)
+	os.WriteFile(filepath.Join(dir, "kling"), m.nuevo, 0o755)
+	os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sha(m.nuevo)+"  kling\n"+sha([]byte("guest nuevo"))+"  kling-guest\n"), 0o644)
+	o = m.opciones()
+	o.Fuente = &Fuente{Dir: dir}
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("con SHA256SUMS: %v\n%s", err, m.out.String())
 	}
 	if leer(t, m.bin) != string(m.nuevo) {
 		t.Error("not replaced")

@@ -280,6 +280,10 @@ func (s *Server) SetAuthz(p *Politica) {
 // cada petición: cambiarla no pide reiniciar.
 func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
 
+// SetNetMiBps fija de dónde sale daemon.net_mibps, el caudal de red por
+// defecto de cada microVM. Se lee en cada arranque en frío.
+func (s *Server) SetNetMiBps(f func() int) { s.mgr.SetNetMiBps(f) }
+
 // SetCoW fija el modo de copia de discos (daemon.cow). Se lee una vez, al
 // arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
 func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }

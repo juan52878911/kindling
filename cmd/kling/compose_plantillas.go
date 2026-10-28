@@ -214,6 +214,9 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 		Cmd: comandoMaquina(p, s.cmd), Entrypoint: comandoMaquina(p, s.entry),
 		WaitReady: !espera, ReadyTimeoutSeconds: int(plantillaListo.Seconds()),
 		Labels: map[string]string{labelComposeProject: proyecto, labelComposeNode: s.nodo},
+		// Red de desarrollo: las carpetas viajan por ella y las copias
+		// heredan este caudal (el de 16 MiB/s las ahogaba).
+		NetMiBps: netMiBpsCarpetas,
 	}
 	if p.volEspera {
 		// Los mismos volúmenes que el nodo: el disco del dorado tiene que

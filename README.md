@@ -42,13 +42,21 @@ The daemon can also run as a systemd service on a remote host, deployed from a c
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 brew install e2fsprogs
-kling up -check
-kling image copy min -from ssh://user@linux-arm64-host   # images are built on Linux
+kling up            # downloads the guest kernel and the `min` image from the release, verified
+```
+
+Or with Homebrew, from the formula each release attaches (`kling.rb`; it pulls in e2fsprogs
+and `brew services start kling` runs the daemon):
+
+```sh
+curl -fsSLO https://github.com/juan52878911/kindling/releases/latest/download/kling.rb
+brew install --formula ./kling.rb
 ```
 
 The script verifies every binary against the release's `SHA256SUMS`, installs to
 `~/.local/bin` without sudo, and takes `--with mcp,sandbox`, `--tag vX.Y.Z` and
-`--prefix DIR`. To upgrade later: `kling upgrade` (`sudo` on Linux) swaps the binaries,
+`--prefix DIR`. To upgrade later: `kling upgrade` (`sudo` on Linux; `brew upgrade kling` if
+Homebrew installed it) swaps the binaries,
 restarts the daemon, checks it and rolls back by itself if it fails. From source:
 `make install` (plus `make vz` on a Mac). Details:
 [`docs/mac.md`](docs/mac.md), [`docs/releases.md`](docs/releases.md),

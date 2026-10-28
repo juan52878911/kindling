@@ -1437,8 +1437,8 @@ ejecutan es el argv del `HEALTHCHECK` de la imagen, sin shell, igual que en Dock
 
 `kling upgrade` baja la release solo por https (también las redirecciones), con
 tamaño acotado, y no acepta un binario que no esté en el `SHA256SUMS` de esa misma
-release o cuyo hash no coincida; con `-from-dir`, si hay un `SHA256SUMS` al lado,
-lo mismo. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
+release o cuyo hash no coincida; con `-from-dir`, lo mismo con el `SHA256SUMS` del
+directorio, y sin él se niega salvo con `-insecure` explícito. Todo se verifica y el binario nuevo se ejecuta en seco (`upgrade -schemas`,
 contra ningún daemon) **antes** de parar nada. Se cambia por `rename` desde un
 temporal del mismo directorio, nunca escribiendo encima, y lo de antes queda en
 `<raíz>/upgrade/backups` (0700 del daemon) para la vuelta atrás. Lo que se

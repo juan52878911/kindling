@@ -54,6 +54,10 @@ type Fuente struct {
 	Repo   string // vacío = Repo
 	Dir    string
 	Client *http.Client
+	// SinVerificar acepta un Dir sin SHA256SUMS (el -insecure de `kling
+	// upgrade`). Sin él, un Dir sin sumas es un error: el binario acaba
+	// ejecutándose como root y "ya está en esta máquina" no dice quién lo dejó.
+	SinVerificar bool
 
 	// permitirHTTP deja bajar por http:// en los tests. No se puede activar
 	// desde fuera: fuera de un test, http es un binario que cualquiera en el
@@ -128,9 +132,9 @@ func (f *Fuente) UltimaEtiqueta(ctx context.Context) (string, error) {
 
 // Bajar deja en dest cada asset de la release etiqueta (o de Dir), verificado:
 // devuelve la ruta de cada uno. Un asset remoto que no está en SHA256SUMS, o
-// cuyo hash no coincide, es un error y no queda nada suyo en dest. En Dir, el
-// SHA256SUMS es opcional (los ficheros ya están en esta máquina), pero si
-// existe cada asset tiene que estar en él y coincidir. Se acepta el nombre
+// cuyo hash no coincide, es un error y no queda nada suyo en dest. En Dir
+// también hace falta su SHA256SUMS (salvo con SinVerificar), y cada asset
+// tiene que estar en él y coincidir. Se acepta el nombre
 // del asset (kling-linux-amd64) o el del binario a secas (kling).
 func (f *Fuente) Bajar(ctx context.Context, etiqueta string, assets []Asset, dest string) (map[string]string, error) {
 	if err := os.MkdirAll(dest, 0o700); err != nil {
@@ -182,12 +186,17 @@ func (f *Fuente) trae(a Asset, sumas map[string]string) bool {
 	return false
 }
 
-// sumas lee el SHA256SUMS de la release o de Dir. nil sin error = Dir sin él.
+// sumas lee el SHA256SUMS de la release o de Dir. nil sin error = Dir sin él
+// y SinVerificar.
 func (f *Fuente) sumas(ctx context.Context, etiqueta string) (map[string]string, error) {
 	if f.Dir != "" {
-		b, err := leerLimitado(filepath.Join(f.Dir, "SHA256SUMS"), maxSums)
+		ruta := filepath.Join(f.Dir, "SHA256SUMS")
+		b, err := leerLimitado(ruta, maxSums)
 		if os.IsNotExist(err) {
-			return nil, nil
+			if f.SinVerificar {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("%s not found: refusing to install unverified binaries (put the release's SHA256SUMS next to them, or pass -insecure)", ruta)
 		}
 		if err != nil {
 			return nil, err
