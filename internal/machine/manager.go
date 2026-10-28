@@ -1821,10 +1821,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	}); err != nil {
 		return pid, err
 	}
-	// vdb: capa escribible propia de esta microVM. Muere con ella.
+	// vdb: capa escribible propia de esta microVM. Muere con ella. Con
+	// kling-vz y on_ttl=remove va sin sincronizar (desechable.go).
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
-		RateLimiter: fc.Limit(diskBytesPerSec),
+		RateLimiter:     fc.Limit(diskBytesPerSec),
+		KlingDisposable: m.overlayDesechableDe(id),
 	}); err != nil {
 		return pid, err
 	}
@@ -3427,6 +3429,12 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.killConservandoDisco(mc.ID)
+	// El overlay se conserva para kling start: si iba sin sincronizar, se
+	// asienta antes de decir stopped (desechable.go).
+	if err := m.asentarOverlay(mc); err != nil {
+		m.fail(mc, fmt.Errorf("stop: %w", err))
+		return nil, err
+	}
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -3631,6 +3639,11 @@ func waitGone(pid int, timeout time.Duration) {
 func (m *Manager) fail(mc *api.Machine, err error) {
 	id := mc.ID
 	m.kill(id)
+	// Una fallida conserva su disco (se puede inspeccionar o arrancar):
+	// el overlay desechable se asienta como en Stop (desechable.go).
+	if aerr := m.asentarOverlay(mc); aerr != nil {
+		log.Printf("warning: %s: %v", shortID(id), aerr)
+	}
 
 	// El índice de red, de la viva: el de una copia tomada antes de esperar el
 	// cerrojo puede ser anterior a montar la red.

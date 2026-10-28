@@ -119,6 +119,15 @@ func servirVZFalso(sock, logPath string) {
 			return
 		}
 		linea := r.Method + " " + r.URL.Path
+		if strings.HasPrefix(r.URL.Path, "/drives/") {
+			// kling_disposable, si viaja (desechable.go).
+			var d struct {
+				Disposable *bool `json:"kling_disposable"`
+			}
+			if json.Unmarshal(body, &d) == nil && d.Disposable != nil {
+				linea += " disposable=" + strconv.FormatBool(*d.Disposable)
+			}
+		}
 		switch r.URL.Path {
 		case "/kling/info":
 			apuntar(linea)

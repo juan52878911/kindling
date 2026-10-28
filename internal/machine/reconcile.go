@@ -34,6 +34,8 @@ func (m *Manager) reconcile() {
 	// techo de CPU a máquinas que están funcionando, y en el peor caso arrancar
 	// un segundo firecracker sobre el mismo overlay.
 	live := m.liveVMs()
+	// Para las que corrían con el overlay sin sincronizar (fallidaTrasCorte).
+	arranque, conArranque := arranqueHost()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -110,6 +112,13 @@ func (m *Manager) reconcile() {
 				log.Printf("reconcile: %s (%s) is no longer running but keeps its snapshot: warm",
 					mc.Name, mc.ID[:8])
 				mc.State = api.StateWarm
+			} else if fallidaTrasCorte(mc, arranque, conArranque) {
+				// Overlay sin sincronizar y el host se reinició: puede estar a
+				// medias, y arrancarla sería montar un ext4 roto (desechable.go).
+				log.Printf("reconcile: %s (%s) was running with a disposable overlay when the host went down: failed",
+					mc.Name, mc.ID[:8])
+				ahora := time.Now()
+				mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errOverlaySinAsentar, &ahora
 			} else {
 				log.Printf("reconcile: %s (%s) is no longer running, marked as stopped", mc.Name, mc.ID[:8])
 				mc.State = api.StateStopped
