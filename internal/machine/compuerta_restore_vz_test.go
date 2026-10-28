@@ -17,11 +17,11 @@ func conNivelMemoriaVZ(t *testing.T, nivel int) {
 	t.Cleanup(func() { nivelMemoriaVZ, esperaNivelRestoreVZ = viejo, espera })
 }
 
-// Con memoria de sobra entran restoresSimultaneosVZ restauraciones a la vez y
-// la siguiente espera; la puerta de arranques en frío ni se toca.
+// Con memoria de sobra entran lanzamientoPlataforma restauraciones a la vez y
+// la siguiente espera; un arranque en frío no espera detrás de ellas.
 func TestCompuertaRestoreVZ(t *testing.T) {
 	conNivelMemoriaVZ(t, 80)
-	m := &Manager{launchGate: make(chan struct{}, 1)}
+	m := &Manager{launchGate: make(chan struct{}, lanzamientoPlataforma())}
 	var sueltas []func()
 	for i := 0; i < restoresSimultaneosVZ; i++ {
 		r, err := m.enterRestore(context.Background())
@@ -35,24 +35,25 @@ func TestCompuertaRestoreVZ(t *testing.T) {
 	if _, err := m.enterRestore(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("la restauración %d debía esperar: %v", restoresSimultaneosVZ+1, err)
 	}
-	frio, err := m.enterLaunch(context.Background())
+	frio, err := m.enterBoot(context.Background())
 	if err != nil {
 		t.Fatalf("un arranque en frío no espera a las restauraciones: %v", err)
 	}
 	frio()
+	frio() // soltar dos veces no suelta un hueco ajeno
 	for _, r := range sueltas {
 		r()
-		r() // soltar dos veces no suelta un hueco ajeno
+		r()
 	}
-	if len(compuertaRestoreVZ) != 0 {
-		t.Fatalf("quedan %d huecos tomados", len(compuertaRestoreVZ))
+	if len(m.launchGate) != 0 || len(compuertaFrioVZ) != 0 {
+		t.Fatalf("quedan huecos tomados: %d/%d", len(m.launchGate), len(compuertaFrioVZ))
 	}
 }
 
 // Con el nivel de memoria en el freno se restaura de una en una.
 func TestCompuertaRestoreVZNivelBajo(t *testing.T) {
 	conNivelMemoriaVZ(t, nivelRestoreVZ)
-	m := &Manager{launchGate: make(chan struct{}, 1)}
+	m := &Manager{launchGate: make(chan struct{}, lanzamientoPlataforma())}
 	r, err := m.enterRestore(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +64,7 @@ func TestCompuertaRestoreVZNivelBajo(t *testing.T) {
 		t.Fatalf("con el nivel bajo la segunda debía esperar: %v", err)
 	}
 	r()
-	if len(compuertaRestoreVZ) != 0 || len(compuertaRestoreBajaVZ) != 0 {
-		t.Fatalf("quedan huecos tomados: %d/%d", len(compuertaRestoreVZ), len(compuertaRestoreBajaVZ))
+	if len(m.launchGate) != 0 || len(compuertaRestoreBajaVZ) != 0 {
+		t.Fatalf("quedan huecos tomados: %d/%d", len(m.launchGate), len(compuertaRestoreBajaVZ))
 	}
 }

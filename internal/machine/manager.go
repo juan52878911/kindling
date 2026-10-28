@@ -1754,7 +1754,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
 	// defer suelta el hueco en cuanto la microVM está encendida y el siguiente pasa.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterBoot(ctx)
 	if glErr != nil {
 		return 0, glErr
 	}

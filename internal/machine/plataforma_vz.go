@@ -548,20 +548,23 @@ func discoLibreMiB(path, alternativa string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize) >> 20
 }
 
-// lanzamientoPlataforma: 4 ARRANQUES EN FRÍO a la vez. Las restauraciones
-// (thaw, run -from) van por su propia compuerta, enterRestore: un arranque en
-// frío no carga memoria de golpe (el invitado la va tocando) y no tiene por
-// qué esperar detrás de cuatro restauraciones, ni al revés.
-func lanzamientoPlataforma() int { return 4 }
-
-// Compuerta de restauraciones en macOS. El prototipo vio fallos con ~20
-// restauraciones simultáneas (docs/vz-mac-prototipo.md): cada una copia su
-// estado a memoria (~324 MiB por instancia medidos en el M4) y, con el Mac
-// justo, el sistema empieza a matar procesos auxiliares (jetsam). Reanudar una
-// pausada no pasa por aquí: no carga nada.
+// Compuertas de encendido en macOS: restauraciones y arranques en frío por
+// separado. El prototipo vio fallos con ~20 restauraciones simultáneas
+// (docs/vz-mac-prototipo.md): cada una copia su estado a memoria (~324 MiB por
+// instancia medidos en el M4) y, con el Mac justo, el sistema empieza a matar
+// procesos auxiliares (jetsam). Un arranque en frío no carga memoria de golpe
+// (el invitado la va tocando) y no tiene por qué esperar detrás de las
+// restauraciones, ni al revés. Reanudar una pausada no pasa por ninguna: no
+// carga nada.
+//
+// La de restauraciones es la puerta general (launchGate, launch.go), con
+// lanzamientoPlataforma huecos; la de arranques en frío, compuertaFrioVZ.
+// KLING_MAX_PARALLEL_BOOT, si se da, fija las dos.
 const (
 	// restoresSimultaneosVZ es cuántas restauraciones cargan a la vez.
 	restoresSimultaneosVZ = 3
+	// arranquesFrioVZ es cuántos arranques en frío encienden a la vez.
+	arranquesFrioVZ = 4
 	// nivelRestoreVZ es el kern.memorystatus_level (%) por encima del cual
 	// rige restoresSimultaneosVZ. Con el nivel en esto o por debajo se espera
 	// un poco a que suba (esperaNivelRestoreVZ) y luego se restaura de una en
@@ -569,9 +572,13 @@ const (
 	nivelRestoreVZ = 25
 )
 
+// lanzamientoPlataforma: el tamaño de launchGate, que en macOS es la compuerta
+// de RESTAURACIONES.
+func lanzamientoPlataforma() int { return restoresSimultaneosVZ }
+
 var (
 	esperaNivelRestoreVZ   = 2 * time.Second // variable para las pruebas
-	compuertaRestoreVZ     = make(chan struct{}, restoresSimultaneosVZ)
+	compuertaFrioVZ        = make(chan struct{}, arranqueFrioVZ())
 	compuertaRestoreBajaVZ = make(chan struct{}, 1)
 	// nivelMemoriaVZ lee kern.memorystatus_level; -1 si no se puede.
 	// Variable para las pruebas.
@@ -584,38 +591,63 @@ var (
 	}
 )
 
-// enterRestore toma un hueco en la compuerta de restauraciones y devuelve con
+// arranqueFrioVZ es el tamaño de compuertaFrioVZ: arranquesFrioVZ, o
+// KLING_MAX_PARALLEL_BOOT si se da.
+func arranqueFrioVZ() int {
+	if v := os.Getenv("KLING_MAX_PARALLEL_BOOT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return arranquesFrioVZ
+}
+
+// tomarHueco espera un hueco en c o a que venza ctx (que gana si ya venció).
+func tomarHueco(ctx context.Context, c chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// enterBoot toma un hueco en la compuerta de arranques en frío y devuelve con
 // qué soltarlo (siempre, en un defer, como enterLaunch). Un Manager hecho a
 // mano en un test (sin launchGate) no tiene compuertas.
-func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
+func (m *Manager) enterBoot(ctx context.Context) (func(), error) {
 	if m.launchGate == nil {
 		return func() {}, nil
 	}
-	tomar := func(c chan struct{}) error {
-		select {
-		case c <- struct{}{}:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	if err := tomar(compuertaRestoreVZ); err != nil {
+	if err := tomarHueco(ctx, compuertaFrioVZ); err != nil {
 		return nil, err
 	}
-	soltar := []chan struct{}{compuertaRestoreVZ}
-	if nivelBajoParaRestaurar(ctx) {
-		if err := tomar(compuertaRestoreBajaVZ); err != nil {
-			<-compuertaRestoreVZ
-			return nil, err
-		}
-		soltar = append(soltar, compuertaRestoreBajaVZ)
+	var once sync.Once
+	return func() { once.Do(func() { <-compuertaFrioVZ }) }, nil
+}
+
+// enterRestore toma un hueco en la compuerta de restauraciones (launchGate)
+// y, con el nivel de memoria bajo, también el de "de una en una".
+func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
+	release, err := m.enterLaunch(ctx)
+	if err != nil || m.launchGate == nil {
+		return release, err
+	}
+	if !nivelBajoParaRestaurar(ctx) {
+		return release, nil
+	}
+	if err := tomarHueco(ctx, compuertaRestoreBajaVZ); err != nil {
+		release()
+		return nil, err
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			for _, c := range soltar {
-				<-c
-			}
+			<-compuertaRestoreBajaVZ
+			release()
 		})
 	}, nil
 }
