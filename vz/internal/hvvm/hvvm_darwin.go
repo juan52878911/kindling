@@ -24,6 +24,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 )
@@ -126,6 +127,11 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		if d.IsReadOnly {
 			cfg.disks[i].ro = 1
 		}
+		// El overlay desechable (kling_disposable): sus FLUSH no hacen fsync,
+		// como el synchronizationMode none de vz.
+		if d.SyncNone() {
+			cfg.disks[i].sin_flush = 1
+		}
 	}
 	cfg.net_fd = -1
 	mac := guestMAC
@@ -143,6 +149,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 			}
 			mac = m
 		}
+		// La MTU del enlace (la del Spec, que es la del snapshot al
+		// restaurar): se anuncia al invitado, como hace vz con el adjunto.
+		cfg.mtu = C.int(s.MTU)
 	}
 	for i := 0; i < 6; i++ {
 		cfg.mac[i] = C.uint8_t(mac[i])
@@ -307,9 +316,36 @@ func Footprint() (uint64, error) {
 	return b, nil
 }
 
-// CPUTime es la CPU que llevan gastada los hilos de vCPU.
+// Avisos son los contadores de avisos del invitado (notify) e interrupciones
+// hacia él de la red y los discos, acumulados desde que arrancó el proceso:
+// tx, rx, irq de red, notify de disco, irq de disco.
+func Avisos() [5]uint64 {
+	var v [C.KHV_N_MAX]C.uint64_t
+	C.khv_contadores(&v[0])
+	var out [5]uint64
+	for i := range out {
+		out[i] = uint64(v[i])
+	}
+	return out
+}
+
+// cpuMu serializa las lecturas (el C decide su fuente en la primera) y
+// cpuEquiv lleva la cuenta en tiempo de núcleo P.
+var (
+	cpuMu    sync.Mutex
+	cpuEquiv footprint.Contador
+)
+
+// CPUTime es la CPU que llevan gastada los hilos de vCPU, con el tiempo en
+// núcleos de eficiencia cobrado a lo que vale en P, como el de kling-vz
+// (footprint/coste.go): sin eso, un vCPU que el planificador manda a los E
+// gasta el techo de CPU varias veces más deprisa por el mismo trabajo.
 func CPUTime() (time.Duration, error) {
-	return time.Duration(C.khv_cpu_ns()), nil
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+	var v [4]C.uint64_t
+	C.khv_cpu_lectura(&v[0])
+	return cpuEquiv.Suma(time.Duration(v[0]), time.Duration(v[1]), uint64(v[2]), uint64(v[3])), nil
 }
 
 // Freeze para (o reanuda) los vCPU para el regulador de CPU: lo que en vz es

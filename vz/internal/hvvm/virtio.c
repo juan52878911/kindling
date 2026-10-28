@@ -100,6 +100,40 @@ void vmmio_irq(struct vmmio *m, uint32_t intid) {
   }
 }
 
+uint64_t khv_avisos[KHV_N_MAX];
+uint64_t khv_event_idx = 1ULL << VIRTIO_RING_F_EVENT_IDX;
+
+void khv_contadores(uint64_t out[KHV_N_MAX]) {
+  for (int i = 0; i < KHV_N_MAX; i++) out[i] = __atomic_load_n(&khv_avisos[i], __ATOMIC_RELAXED);
+}
+
+static bool con_event_idx(const struct vmmio *m) { return (m->drv_features >> VIRTIO_RING_F_EVENT_IDX) & 1; }
+
+bool vq_interrumpir(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint16_t viejo, uint16_t nuevo) {
+  if (viejo == nuevo) return false;
+  // El used idx escrito antes de leer used_event (o los flags): si no, el
+  // driver podría volver a pedir interrupción entre medias y no recibirla.
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (con_event_idx(m)) {
+    uint16_t ev = *(volatile uint16_t *)&avail[2 + q->num];  // used_event
+    return (uint16_t)(nuevo - ev - 1) < (uint16_t)(nuevo - viejo);  // vring_need_event
+  }
+  return !(*(volatile uint16_t *)&avail[0] & 1);  // VRING_AVAIL_F_NO_INTERRUPT
+}
+
+bool vq_pedir_aviso(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used) {
+  if (!con_event_idx(m)) return false;
+  *(volatile uint16_t *)(used + 4 + 8 * (uint64_t)q->num) = q->last_avail;  // avail_event
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  return *(volatile uint16_t *)&avail[1] != q->last_avail;
+}
+
+void vq_pedir_aviso_ya(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used) {
+  if (!con_event_idx(m)) return;
+  *(volatile uint16_t *)(used + 4 + 8 * (uint64_t)q->num) = *(volatile uint16_t *)&avail[1];
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
 static void dir_lo(uint64_t *d, uint32_t v) { *d = (*d & ~0xffffffffULL) | v; }
 static void dir_hi(uint64_t *d, uint32_t v) { *d = (*d & 0xffffffffULL) | ((uint64_t)v << 32); }
 
@@ -171,6 +205,7 @@ static uint64_t cfg_leer(const void *cfg, size_t n, uint64_t o, int size) {
 struct vblk {
   int fd;
   bool ro;
+  bool sin_flush;  // desechable: los FLUSH del invitado no hacen fsync
   uint64_t sectores;
   uint32_t intid;
   struct vblk_state s;
@@ -182,21 +217,36 @@ struct vblk {
 
 static struct vblk blks[KHV_MAX_DISKS];
 
-// Atiende todas las peticiones pendientes de la cola. Solo desde el hilo del
-// disco, con ocupado puesto.
-static bool b_procesar(struct vblk *b, struct vq q) {
+// Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
+// con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
+// el driver las quiere, ver vq_interrumpir); *quedan: la tanda se cortó con
+// peticiones pendientes y hay que volver a mirar sin esperar un aviso.
+static bool b_procesar(struct vblk *b, struct vq q, bool *irq, bool *quedan) {
   uint16_t *avail;
   uint8_t *used;
   struct vdesc *desc;
+  *irq = *quedan = false;
   if (!vq_ptrs(&q, &avail, &used, &desc)) return false;
   bool hecho = false;
-  // Como mucho una vuelta a la cola por aviso: un invitado que ponga el used
-  // encima del avail haría que cada respuesta añadiera una petición, y el
-  // hilo no saldría nunca (ni dejaría pausar la VM).
-  for (uint32_t vueltas = 0; vueltas < q.num; vueltas++) {
+  uint16_t viejo = *(volatile uint16_t *)(used + 2);
+  // Como mucho una vuelta a la cola por aviso (dos pasadas de vueltas
+  // cuentan también las de volver a mirar tras pedir aviso): un invitado que
+  // ponga el used encima del avail haría que cada respuesta añadiera una
+  // petición, y el hilo no saldría nunca (ni dejaría pausar la VM).
+  for (uint32_t vueltas = 0;; vueltas++) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     uint16_t aidx = *(volatile uint16_t *)&avail[1];
-    if (b->s.q.last_avail == aidx) break;
+    if (b->s.q.last_avail == aidx) {
+      // Vacía: con EVENT_IDX, pedir el aviso del siguiente y volver a mirar
+      // (el driver pudo añadir justo antes de ver la petición).
+      if (vueltas < 2 * q.num && vq_pedir_aviso(&b->s.m, &b->s.q, avail, used)) continue;
+      break;
+    }
+    if (vueltas >= 2 * q.num) {
+      vq_pedir_aviso_ya(&b->s.m, &b->s.q, avail, used);
+      *quedan = true;
+      break;
+    }
     uint16_t head = avail[2 + b->s.q.last_avail % q.num];
     b->s.q.last_avail++;
 
@@ -252,9 +302,12 @@ static bool b_procesar(struct vblk *b, struct vq q) {
         if (r < 0) estado = 1;
         off += ch[k].len;
       }
-      if (hdr.type == 4 && estado == 0) {
+      if (hdr.type == 4 && estado == 0 && !b->sin_flush) {
         // fsync de macOS no llega al disco físico (F_FULLFSYNC sí), igual que
-        // el modo por defecto de Virtualization.framework.
+        // el modo por defecto de Virtualization.framework. El overlay
+        // desechable (kling_disposable) ni eso, como el synchronizationMode
+        // none de vz: lo escrito queda en la caché del host, y el núcleo lo
+        // asienta antes de conservar el disco (internal/machine/desechable.go).
         if (fsync(b->fd) != 0) estado = 1;
       }
     }
@@ -262,11 +315,13 @@ static bool b_procesar(struct vblk *b, struct vq q) {
     vq_push(&q, used, head, sp ? escrito + 1 : 0);
     hecho = true;
   }
+  *irq = hecho && vq_interrumpir(&b->s.m, &q, avail, viejo, *(volatile uint16_t *)(used + 2));
   return hecho;
 }
 
 static void *vblk_hilo(void *a) {
   struct vblk *b = a;
+  khv_qos_dispositivo();
   pthread_mutex_lock(&b->mu);
   for (;;) {
     while (!(b->pend && !g_pausa)) pthread_cond_wait(&b->cv, &b->mu);
@@ -274,13 +329,16 @@ static void *vblk_hilo(void *a) {
     b->ocupado = true;
     struct vq q = b->s.q;
     pthread_mutex_unlock(&b->mu);
-    bool hecho = b_procesar(b, q);
+    bool irq, quedan;
+    b_procesar(b, q, &irq, &quedan);
     pthread_mutex_lock(&b->mu);
     b->ocupado = false;
-    if (hecho) {
+    if (irq) {
+      __atomic_fetch_add(&khv_avisos[KHV_N_BLK_IRQ], 1, __ATOMIC_RELAXED);
       b->s.m.isr |= 1;
       vmmio_irq(&b->s.m, b->intid);
     }
+    if (quedan) b->pend = true;
     pthread_cond_broadcast(&b->cv);
   }
   return NULL;
@@ -295,14 +353,15 @@ void vblk_prueba(int idx) {
   b->ocupado = true;
   struct vq q = b->s.q;
   pthread_mutex_unlock(&b->mu);
-  b_procesar(b, q);
+  bool irq, quedan;
+  b_procesar(b, q, &irq, &quedan);
   pthread_mutex_lock(&b->mu);
   b->ocupado = false;
   pthread_cond_broadcast(&b->cv);
   pthread_mutex_unlock(&b->mu);
 }
 
-int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
+int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid) {
   struct vblk *b = &blks[idx];
   b->fd = open(ruta, ro ? O_RDONLY : O_RDWR);
   if (b->fd < 0) {
@@ -313,6 +372,7 @@ int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
   fstat(b->fd, &st);
   b->sectores = (uint64_t)st.st_size / 512;
   b->ro = ro;
+  b->sin_flush = sin_flush && !ro;
   b->intid = intid;
   memset(&b->s, 0, sizeof b->s);
   pthread_mutex_init(&b->mu, NULL);
@@ -324,8 +384,10 @@ int vblk_init(int idx, const char *ruta, bool ro, uint32_t intid) {
 }
 
 static uint64_t b_features(struct vblk *b) {
-  // VIRTIO_BLK_F_SEG_MAX (2), VIRTIO_BLK_F_RO (5), VIRTIO_BLK_F_FLUSH (9).
-  return (1u << 2) | (1u << 9) | (b->ro ? (1u << 5) : 0);
+  // VIRTIO_BLK_F_SEG_MAX (2), VIRTIO_BLK_F_RO (5), VIRTIO_BLK_F_FLUSH (9) y
+  // VIRTIO_RING_F_EVENT_IDX (29): el driver avisa y recibe interrupciones solo
+  // cuando hace falta, no por cada petición.
+  return (1u << 2) | (1u << 9) | khv_event_idx | (b->ro ? (1u << 5) : 0);
 }
 
 bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size) {
@@ -346,6 +408,7 @@ bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size) {
   switch (vmmio_acceso(&b->s.m, &b->s.q, 1, 2, b_features(b), off, escribir, val, &cola)) {
     case VM_NOTIFY:
       if (cola == 0) {
+        __atomic_fetch_add(&khv_avisos[KHV_N_BLK], 1, __ATOMIC_RELAXED);
         b->pend = true;
         pthread_cond_broadcast(&b->cv);
       }

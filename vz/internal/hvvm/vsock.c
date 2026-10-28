@@ -340,6 +340,7 @@ static bool bombear(const bool *listo) {
       continue;
     }
     if (c->p_request) {
+      khv_qos_impulso();  // una conexión nueva del host: trabajo (vm.c, QoS)
       cabecera(&h, c, OP_REQUEST, 0, 0);
       if (!rx_poner(&h, NULL)) return puesto;
       puesto = true;
@@ -364,6 +365,7 @@ static bool bombear(const bool *listo) {
         c->p_shut |= SHUT_SEND_F;
         break;
       }
+      khv_qos_impulso();
       cabecera(&h, c, OP_RW, (uint32_t)r, 0);
       if (!rx_poner(&h, datos)) {  // no pasa: la capacidad ya se miró con mu
         c->p_rst = true;
@@ -396,6 +398,7 @@ static bool bombear(const bool *listo) {
 
 static void *vs_hilo(void *a) {
   (void)a;
+  khv_qos_dispositivo();
   struct pollfd pf[1 + VS_MAXCONN];
   int idx[VS_MAXCONN];
   bool listo[VS_MAXCONN];

@@ -149,27 +149,62 @@ func run() int {
 
 	meter := footprint.NewMeter()
 	// El freno del tope de CPU va en su propio proceso, lanzado antes de que
-	// este se encierre. Sin él, el tope pausa la VM por el framework, con la
-	// que se para también el reloj del invitado.
+	// este se encierre (encerrado ya no puede lanzar procesos). Sin él, el
+	// tope pausa la VM por el framework, con la que se para también el reloj
+	// del invitado. El techo llega después de arrancar (PUT /kling/cpu, que el
+	// núcleo manda una vez tras el arranque, el thaw o la restauración), así
+	// que se lanza siempre y se suelta en cuanto ese PUT dice que no hay techo
+	// (lo normal en macOS: techoDelDaemon da todas las vCPU): un proceso de
+	// menos por máquina. Un techo que llegara más tarde, ya sin freno, regula
+	// con pausas del framework.
 	freno, err := footprint.StartFreno(argFreno)
 	if err != nil {
 		logf("warning: no CPU brake process, the CPU ceiling will pause the VM instead: %v", err)
 	}
 	onCreate, freeze := meter.Track, func(bool) error { return errors.New("no CPU brake process") }
+	var cpuCeiling func(bool)
 	if freno != nil {
+		var frenoMu sync.Mutex
+		soltado, tuvoTecho := false, false
 		onCreate = func(fd uintptr) {
 			meter.Track(fd)
+			frenoMu.Lock()
+			defer frenoMu.Unlock()
+			if soltado {
+				return
+			}
 			if err := freno.Track(fd); err != nil {
 				logf("warning: %v", err)
 			}
 		}
 		freeze = func(stop bool) error {
+			frenoMu.Lock()
+			sin := soltado
+			frenoMu.Unlock()
+			if sin {
+				return errors.New("no CPU brake process (released: the VM had no CPU ceiling)")
+			}
 			err := freno.Freeze(stop)
 			if errors.Is(err, footprint.ErrFrenoCaido) {
 				// El servidor reconoce su centinela, no el de footprint.
 				return frenoCaido{err}
 			}
 			return err
+		}
+		cpuCeiling = func(active bool) {
+			frenoMu.Lock()
+			defer frenoMu.Unlock()
+			tuvoTecho = tuvoTecho || active
+			// Solo si nunca hubo techo: entonces el regulador no llamó nunca
+			// a Freeze y el auxiliar no está parado, así que cerrar el socket
+			// basta (y aun así el freno lo reanudaría al ver el cierre).
+			if tuvoTecho || soltado {
+				return
+			}
+			soltado = true
+			if err := freno.Close(); err != nil {
+				logf("warning: releasing the CPU brake process: %v", err)
+			}
 		}
 	}
 	policy := egress.NewPolicy()
@@ -245,9 +280,10 @@ func run() int {
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
-		Graphics: graphics,
-		Vsock:    vsock,
-		MTU:      mtu,
+		Graphics:   graphics,
+		Vsock:      vsock,
+		MTU:        mtu,
+		CPUCeiling: cpuCeiling,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
 			// dentro de ella, que vnet tomaría por un proxy).

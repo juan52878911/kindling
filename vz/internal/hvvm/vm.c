@@ -26,6 +26,7 @@
 #include <copyfile.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
@@ -181,6 +182,7 @@ static bool disk_ro[KHV_MAX_DISKS];
 static bool hay_red, hay_rng, hay_vsock, hay_globo;
 static int net_fd = -1;
 static uint8_t net_mac[6];
+static int net_mtu;
 static char *kernel_path, *cmdline, *ram_dir;
 static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
 static int slot_net = -1, slot_rng = -1, slot_vsock = -1, slot_globo = -1, nvirtio;
@@ -418,6 +420,128 @@ static bool psci(struct cpu *c) {
   return true;
 }
 
+// ===================== QoS =====================
+//
+// En macOS la QoS del hilo es la única palanca sobre el tipo de núcleo: no se
+// puede fijar un hilo a un núcleo P o E. Los vCPU van de base en
+// QOS_CLASS_UTILITY, para que sus despertares de reposo (el tick del invitado,
+// un paquete suelto) puedan ir a los núcleos E, que gastan menos, y suben a
+// QOS_CLASS_USER_INITIATED (núcleos P, como una app en primer plano) con un
+// override (pthread_override_qos_class_start_np) mientras tienen trabajo.
+// Nunca BACKGROUND: en E un vCPU frenaba ×12-15 bajo launchd
+// (footprint/coste.go); eso solo lo pone el modo batería del daemon, a todo el
+// proceso, con la máquina ociosa y sin peticiones en vuelo
+// (internal/machine/bateria.go).
+//
+// Trabajo es: (1) lo que el host le manda al invitado (datos por vsock, tramas
+// de red: un exec, ficheros, una petición a un puerto reenviado), que sube los
+// vCPU en el acto, antes de que el invitado lo vea (khv_qos_impulso, desde los
+// hilos de vsock y de red); (2) un vCPU que gasta más de la mitad de un núcleo
+// por su cuenta (un cron, un proceso que ya corría), que el vigilante ve en su
+// vuelta lenta. Un vCPU que corre en el invitado no sale a espacio de usuario
+// en cientos de ms (el timer y el WFI los resuelve el framework), así que no
+// puede medirse a sí mismo: lo mide el hilo vigilante con thread_info, cada
+// QOS_RAPIDA mientras están arriba y cada QOS_LENTA en reposo (la única
+// vuelta que hace una VM ociosa: medio despertar por segundo). Baja tras dos
+// medidas seguidas por debajo de una décima de núcleo. Arranca arriba: el
+// arranque y una restauración quieren los núcleos P. KLING_HV_QOS=0 lo apaga
+// todo (los hilos quedan con la QoS de siempre).
+#define QOS_RAPIDA_MS 200
+#define QOS_LENTA_MS 2000
+static bool qos_activa;
+static volatile bool qos_alta;  // con overrides puestos; se lee sin qos_mu en el impulso
+static pthread_override_t qos_ov[MAX_CPUS];
+static pthread_mutex_t qos_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t qos_cv = PTHREAD_COND_INITIALIZER;
+static int qos_n;  // vCPU que vigila
+
+void khv_qos_dispositivo(void) {
+  if (qos_activa) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+
+// Con qos_mu.
+static void qos_subir(void) {
+  if (qos_alta) return;
+  for (int i = 0; i < qos_n; i++)
+    qos_ov[i] = pthread_override_qos_class_start_np(cpus[i].hilo, QOS_CLASS_USER_INITIATED, 0);
+  qos_alta = true;
+  pthread_cond_broadcast(&qos_cv);  // el vigilante pasa a la vuelta rápida
+}
+
+static void qos_bajar(void) {
+  if (!qos_alta) return;
+  for (int i = 0; i < qos_n; i++) {
+    if (qos_ov[i]) pthread_override_qos_class_end_np(qos_ov[i]);
+    qos_ov[i] = NULL;
+  }
+  qos_alta = false;
+}
+
+void khv_qos_impulso(void) {
+  // Ya arriba (lo normal mientras dura una petición): ni un cerrojo.
+  if (!qos_activa || qos_alta) return;
+  pthread_mutex_lock(&qos_mu);
+  if (qos_n > 0) qos_subir();
+  pthread_mutex_unlock(&qos_mu);
+}
+
+static uint64_t hilo_cpu_ns(pthread_t h) {
+  thread_basic_info_data_t bi;
+  mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+  if (thread_info(pthread_mach_thread_np(h), THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) return 0;
+  return (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
+         (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
+}
+
+static void *qos_vigilante(void *a) {
+  (void)a;
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+  uint64_t antes[MAX_CPUS] = {0}, t_antes = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  for (int i = 0; i < qos_n; i++) antes[i] = hilo_cpu_ns(cpus[i].hilo);
+  int bajas = 0;
+  pthread_mutex_lock(&qos_mu);
+  for (;;) {
+    bool estaba = qos_alta;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
+                   (uint64_t)(estaba ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
+    ts.tv_sec = (time_t)(fin / 1000000000ULL);
+    ts.tv_nsec = (long)(fin % 1000000000ULL);
+    // Un impulso en reposo despierta antes: la ventana empieza ahí.
+    int r = pthread_cond_timedwait(&qos_cv, &qos_mu, &ts);
+    if (parar) break;
+    uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dw = ahora - t_antes, max = 0;
+    t_antes = ahora;
+    for (int i = 0; i < qos_n; i++) {
+      uint64_t c = hilo_cpu_ns(cpus[i].hilo);
+      if (c - antes[i] > max) max = c - antes[i];
+      antes[i] = c;
+    }
+    if (r != ETIMEDOUT && !estaba) continue;  // despertado por un impulso: medir desde aquí
+    if (qos_alta) {
+      bajas = max * 10 < dw ? bajas + 1 : 0;
+      if (bajas >= 2) qos_bajar(), bajas = 0;
+    } else if (max * 2 > dw) {
+      qos_subir();
+    }
+  }
+  qos_bajar();
+  pthread_mutex_unlock(&qos_mu);
+  return NULL;
+}
+
+// qos_empezar pone los vCPU (ya creados) arriba y lanza el vigilante.
+static void qos_empezar(void) {
+  if (!qos_activa) return;
+  pthread_mutex_lock(&qos_mu);
+  qos_n = ncpus;
+  qos_subir();
+  pthread_mutex_unlock(&qos_mu);
+  pthread_t t;
+  if (pthread_create(&t, NULL, qos_vigilante, NULL) == 0) pthread_detach(t);
+}
+
 // WFI de respaldo: con el GIC de HVF el framework resuelve el WFI dentro y
 // esto no se usa (medido en el prototipo). Si llega, dormir hasta el
 // vencimiento del timer virtual o hasta que un dispositivo avise; con varios
@@ -458,6 +582,7 @@ static void volcar(struct cpu *c, const char *por) {
 
 static void *vcpu_hilo(void *arg) {
   struct cpu *c = arg;
+  khv_qos_dispositivo();  // base UTILITY; los overrides la suben con trabajo (qos_subir)
   hv_return_t r = hv_vcpu_create(&c->id, &c->exit, NULL);
   if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
   pthread_mutex_lock(&mu);
@@ -592,6 +717,7 @@ static int crear_vcpus(void) {
     fallo("%s", errbuf[0] ? errbuf : "creating the vCPUs failed");
     return -1;
   }
+  qos_empezar();
   return 0;
 }
 
@@ -645,6 +771,10 @@ int khv_create(const struct khv_config *c) {
     return -1;
   }
   ncpus = c->ncpus;
+  const char *q = getenv("KLING_HV_QOS");
+  qos_activa = !(q && strcmp(q, "0") == 0);
+  const char *e = getenv("KLING_HV_EVENT_IDX");
+  if (e && strcmp(e, "0") == 0) khv_event_idx = 0;  // para comparar: sin VIRTIO_RING_F_EVENT_IDX
   g_ram_size = c->mem_size;
   ndisks = c->ndisks;
   hay_red = c->net_fd >= 0;
@@ -653,6 +783,7 @@ int khv_create(const struct khv_config *c) {
   hay_globo = c->balloon != 0;
   net_fd = c->net_fd;
   memcpy(net_mac, c->mac, 6);
+  net_mtu = c->mtu;
   kernel_path = strdup(c->kernel ? c->kernel : "");
   cmdline = strdup(c->cmdline ? c->cmdline : "");
   ram_dir = strdup(c->ram_dir ? c->ram_dir : ".");
@@ -687,9 +818,9 @@ int khv_create(const struct khv_config *c) {
   for (int i = 0; i < ndisks; i++) {
     disk_path[i] = strdup(c->disks[i].path);
     disk_ro[i] = c->disks[i].ro != 0;
-    if (vblk_init(i, disk_path[i], disk_ro[i], virtio_intid[i]) != 0) return -1;
+    if (vblk_init(i, disk_path[i], disk_ro[i], c->disks[i].sin_flush != 0, virtio_intid[i]) != 0) return -1;
   }
-  if (hay_red) vnet_init(net_fd, net_mac, virtio_intid[slot_net]);
+  if (hay_red) vnet_init(net_fd, net_mac, net_mtu, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);
   if (hay_vsock) vsock_init(virtio_intid[slot_vsock]);
   if (hay_globo && vballoon_init(virtio_intid[slot_globo], c->balloon == 2) != 0) return -1;
@@ -1089,22 +1220,72 @@ uint64_t khv_footprint(void) {
   return vi.phys_footprint;
 }
 
-// khv_cpu_ns es la CPU que han gastado los hilos de vCPU (dentro y fuera del
-// invitado): lo que el regulador de CPU cobra a la VM.
-uint64_t khv_cpu_ns(void) {
-  uint64_t total = 0;
+// Contadores por hilo y por tipo de núcleo: PROC_PIDTHREADCOUNTS de
+// <sys/proc_info_private.h> (macOS 13+), que el SDK no publica. Una entrada
+// por nivel de rendimiento: la 0 son los núcleos P y la 1 los E. Los tiempos
+// van en unidades de mach_absolute_time.
+#define KHV_PROC_PIDTHREADCOUNTS 34
+struct khv_ptc_datos {
+  uint64_t instr, ciclos, user_mach, system_mach, energia_nj;
+};
+struct khv_ptc {
+  uint16_t niveles, reservado0;
+  uint32_t reservado1;
+  struct khv_ptc_datos c[];
+};
+
+static uint64_t mach_a_ns(uint64_t t) { return (uint64_t)((__uint128_t)t * tb.numer / tb.denom); }
+
+// khv_cpu_lectura da la CPU que han gastado los hilos de vCPU (dentro y fuera
+// del invitado), lo que el regulador de CPU cobra a la VM: out[0] el total en
+// ns, out[1] lo que corrió en núcleos P, out[2] las instrucciones y out[3] las
+// de P. Con eso footprint.Contador cobra el tiempo en E a lo que vale en P
+// (vz/internal/footprint/coste.go), como hace kling-vz con su auxiliar. Sin
+// los contadores por núcleo (un macOS que no los dé), out[1..3] van a 0 y se
+// cobra el tiempo tal cual; la elección se hace en la primera lectura y no
+// cambia, para que el total no salte entre una fuente y otra.
+void khv_cpu_lectura(uint64_t out[4]) {
+  static int por_nucleo = -1;  // -1: sin decidir
+  out[0] = out[1] = out[2] = out[3] = 0;
   pthread_mutex_lock(&mu);
   int n = n_creados;
   pthread_mutex_unlock(&mu);
   for (int i = 0; i < n; i++) {
+    if (por_nucleo != 0) {
+      uint64_t tid = 0;
+      union {
+        struct khv_ptc p;
+        uint8_t b[sizeof(struct khv_ptc) + 4 * sizeof(struct khv_ptc_datos)];
+      } u;
+      int r = pthread_threadid_np(cpus[i].hilo, &tid) == 0
+                  ? proc_pidinfo(getpid(), KHV_PROC_PIDTHREADCOUNTS, tid, &u, sizeof u)
+                  : -1;
+      if (r >= (int)(sizeof(struct khv_ptc) + 2 * sizeof(struct khv_ptc_datos)) && u.p.niveles >= 2) {
+        por_nucleo = 1;
+        for (int k = 0; k < u.p.niveles && k < 4; k++) {
+          uint64_t t = mach_a_ns(u.p.c[k].user_mach + u.p.c[k].system_mach);
+          out[0] += t;
+          out[2] += u.p.c[k].instr;
+          if (k == 0) out[1] += t, out[3] += u.p.c[k].instr;
+        }
+        continue;
+      }
+      if (por_nucleo == -1) {
+        // La primera lectura decide: sin contadores por núcleo, a la cuenta
+        // de siempre para todos los hilos.
+        por_nucleo = 0;
+        khv_cpu_lectura(out);
+        return;
+      }
+      continue;  // un hilo que no se pudo leer esta vez (no debería pasar)
+    }
     thread_basic_info_data_t bi;
     mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
     mach_port_t t = pthread_mach_thread_np(cpus[i].hilo);
     if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) continue;
-    total += (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
-             (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
+    out[0] += (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
+              (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
   }
-  return total;
 }
 
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms) {

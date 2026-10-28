@@ -1,6 +1,9 @@
 package footprint
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // La CPU que cobra el tope de CPU, en tiempo de núcleo de rendimiento (P).
 //
@@ -76,4 +79,21 @@ func (c *contador) suma(l lectura) time.Duration {
 	c.equiv += dP + time.Duration(float64(dE)*relativaE(l))
 	c.ult = l
 	return c.equiv
+}
+
+// Contador es el contador de CPU equivalente para quien lee la CPU por su
+// cuenta (kling-hv suma la de sus hilos de vCPU, sin auxiliar): la misma
+// cuenta que la de kling-vz, para que el regulador cobre igual con los dos.
+// Seguro para usarlo desde varias gorrutinas.
+type Contador struct {
+	mu sync.Mutex
+	c  contador
+}
+
+// Suma incorpora una lectura acumulada (CPU total y en núcleos P,
+// instrucciones totales y en P) y devuelve la CPU equivalente en P.
+func (c *Contador) Suma(total, p time.Duration, instr, instrP uint64) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.c.suma(lectura{total: total, p: p, instr: instr, instrP: instrP})
 }

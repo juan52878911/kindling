@@ -14,16 +14,16 @@ import (
 )
 
 // Firecracker rechaza los campos que no conoce: kling_disposable solo puede
-// salir hacia kling-vz.
+// salir hacia kling-vz y kling-hv.
 func TestDesechableSoloConKlingVZ(t *testing.T) {
 	if vmmAdmiteDesechable(BackendFirecracker) {
 		t.Fatal("Firecracker no conoce kling_disposable")
 	}
-	if !vmmAdmiteDesechable(BackendVZ) {
-		t.Fatal("kling-vz sí lo conoce")
+	if !vmmAdmiteDesechable(BackendVZ) || !vmmAdmiteDesechable(BackendHV) {
+		t.Fatal("kling-vz y kling-hv sí lo conocen")
 	}
 	sandbox := &api.Machine{ID: "a", OnTTL: api.OnTTLRemove}
-	if got, want := overlayDesechable(sandbox), backendVMM == BackendVZ; got != want {
+	if got, want := overlayDesechable(sandbox), vmmAdmiteDesechable(backendVMM); got != want {
 		t.Fatalf("overlayDesechable(on_ttl=remove) con %s = %v, quiero %v", backendVMM, got, want)
 	}
 	for _, onTTL := range []string{"", api.OnTTLFreeze} {
@@ -88,7 +88,7 @@ func TestFallidaTrasCorte(t *testing.T) {
 	sandbox := func(arrancada *time.Time) *api.Machine {
 		return &api.Machine{ID: "a", OnTTL: api.OnTTLRemove, StartedAt: arrancada}
 	}
-	vz := backendVMM == BackendVZ
+	vz := vmmAdmiteDesechable(backendVMM)
 	casos := []struct {
 		nombre      string
 		mc          *api.Machine

@@ -138,6 +138,10 @@ type Deps struct {
 	// regulador pausa la VM por el framework, que para también el reloj del
 	// invitado (ver cpu.go).
 	Freeze func(stop bool) error
+	// CPUCeiling, si no es nil, se llama tras cada PUT /kling/cpu con si el
+	// techo regula de verdad (pct entre 1 y menos que todas las vCPU). kling-vz
+	// suelta con él su proceso freno cuando la VM no tiene techo.
+	CPUCeiling func(active bool)
 	// HelperStopped dice si el auxiliar está parado. Con él, si el proceso
 	// freno muere a mitad de una parada se mira si de verdad dejó el
 	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone

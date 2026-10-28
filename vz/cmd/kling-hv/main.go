@@ -183,6 +183,13 @@ func run() int {
 		logf("KLING_VZ_VSOCK: %v", err)
 		return 2
 	}
+	// La MTU del enlace, también con la variable de kling-vz: 16384 por
+	// defecto en las máquinas que arrancan (spec.DefaultMTU).
+	mtu, err := spec.ParseMTU(os.Getenv("KLING_VZ_MTU"))
+	if err != nil {
+		logf("KLING_VZ_MTU: %v", err)
+		return 2
+	}
 
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
@@ -234,10 +241,22 @@ func run() int {
 	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-hv", Perfil: perfil,
 		Sock: *sock, Broker: broker, Logf: logf})
 
+	// KLING_HV_AVISOS=1: los contadores de notify e interrupciones de la red y
+	// los discos en el registro cada 5 s (para medir la supresión de avisos).
+	if os.Getenv("KLING_HV_AVISOS") == "1" {
+		go func() {
+			for range time.Tick(5 * time.Second) {
+				a := hvvm.Avisos()
+				logf("notifications: net tx %d rx %d irq %d, blk %d irq %d", a[0], a[1], a[2], a[3], a[4])
+			}
+		}()
+	}
+
 	peers := peercred.New()
 	srv := server.New(server.Deps{
 		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},
 		Vsock:   vsock,
+		MTU:     mtu,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			var pg vnet.PGProxy
 			if c.CredentialsPG != nil {
@@ -245,6 +264,7 @@ func run() int {
 			}
 			return vnet.New(vnet.Config{
 				GuestMAC:      c.GuestMAC,
+				MTU:           c.MTU,
 				MMDS:          c.MMDS,
 				MMDSAddr:      c.MMDSAddr,
 				Policy:        c.Policy,

@@ -49,8 +49,8 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | GIC | GICv3 del framework (`hv_gic_create`, macOS 15+): el timer virtual y el WFI no salen a espacio de usuario |
 | consola | UART 16550 en MMIO: `console=ttyS0` como en Firecracker, la línea de comandos pasa **intacta** (a diferencia de vz, que la traduce) |
 | reloj | PL031 (`rtc-pl031`, el mismo que da Firecracker en arm64): un arranque en frío nace con la hora del host |
-| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S) |
-| red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual |
+| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `fsync` del fichero, salvo en el overlay `kling_disposable` (como el `synchronizationMode none` de vz), que no lo hace |
+| red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
 | globo | virtio-balloon sin cola de estadísticas: `squeeze`, `-mem-max` y `resize` (abajo) |
@@ -63,7 +63,16 @@ atiende como mucho una vuelta de la cola: un invitado que pusiera el anillo
 `used` encima del `avail` dejaba un hilo de dispositivo girando para siempre, y
 con él cualquier pausa o snapshot. Una petición de disco sin byte de estado o
 fuera del disco se rechaza (antes rompía el proceso o hacía crecer el overlay).
-`go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
+La red y los discos ofrecen `VIRTIO_RING_F_EVENT_IDX` (y sin él se respeta
+`VRING_AVAIL_F_NO_INTERRUPT`): el driver solo avisa y recibe interrupciones
+cuando le hacen falta (`vq_interrumpir`, `vq_pedir_aviso` en `virtio.c`);
+`KLING_HV_EVENT_IDX=0` no lo ofrece y `KLING_HV_AVISOS=1` escribe los contadores
+en el registro cada 5 s. Medido (M4, n=10, dos rondas, 10×256 MiB por el
+reenvío más 7 × [20.000 ficheros de 4 KiB + sync, 256 MiB + fsync]): los avisos
+de rx de red pasan de ~30.000 a ~100, las interrupciones de red de ~198.000 a
+~112.000 (−45 %) y los avisos de disco de ~6.300 a ~3.200 (−48 %); el caudal
+(~2.300-2.600 / ~1.700-1.900 MiB/s) y los tiempos de disco quedan dentro del
+ruido. `go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
 datos al azar sobre una RAM de mentira (`prueba.c`); el fuzz de Go no ve la
 cobertura del C, así que es aleatorio puro (8 M de ejecuciones en 90 s sin
 fallos).
@@ -146,7 +155,28 @@ el del regulador de CPU (`Deps.Freeze`, que en vz es SIGSTOP al auxiliar de
 Apple). Pausar saca a los vCPU a un punto seguro (`hv_vcpus_exit`) y espera a
 que los hilos de disco y red no toquen la RAM. Bajo el regulador el reloj del
 invitado sigue corriendo, como bajo `cpu.max`. `CPUTime` es la CPU de los hilos
-de vCPU.
+de vCPU, con el tiempo en núcleos E cobrado a lo que vale en P
+(`footprint.Contador`, la misma cuenta que `kling-vz`), leída por hilo y por
+tipo de núcleo con `PROC_PIDTHREADCOUNTS`. Medido con techo 25 % y el proceso
+en segundo plano (`taskpolicy -b`, todo en E) tras una pasada en P: el mismo
+bucle pasa de 9,3 a 2,9 s (n=5). Sin más muestra en P que el arranque, la
+proporción sale ~0,9 y apenas corrige (como en vz).
+
+### QoS de los hilos
+
+En macOS la QoS es la única palanca sobre el tipo de núcleo. Los vCPU van de
+base en `QOS_CLASS_UTILITY` y suben a `USER_INITIATED` con un override mientras
+tienen trabajo: en el acto cuando el host le manda algo al invitado (datos o una
+conexión por vsock, tramas de red) y, si gastan más de medio núcleo por su
+cuenta, en la vuelta lenta de un hilo vigilante (cada 2 s en reposo, 200 ms
+arriba); bajan tras 400 ms por debajo de una décima de núcleo. Los hilos de
+disco, red y vsock van en `UTILITY`. Nunca `BACKGROUND`: eso lo pone el modo
+batería del daemon a todo el proceso, solo con la máquina ociosa.
+`KLING_HV_QOS=0` lo apaga. Medido (M4 con carga ~10 de otros procesos, n=15):
+`exec true` tras 1 s de reposo 25 → 27 ms y el bucle de CPU 622 → 629 ms
+(ruido); 10 máquinas ociosas, energía de sus hilos (`PROC_PIDTHREADCOUNTS`)
+2,4/3,1/1,7 mW con QoS frente a 2,9/3,0/0,6 sin ella (tres rondas): con el Mac
+cargado no se ve ahorro, y el vigilante añade ~0,5 despertares/s por máquina.
 
 ## Lo que cambia en el núcleo con `hv`
 
