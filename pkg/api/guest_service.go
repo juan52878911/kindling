@@ -148,4 +148,8 @@ type GuestService struct {
 	Error    string `json:"error,omitempty"`
 	// Log son los últimos bytes de su salida (con ?tail=N, hasta 1 MiB).
 	Log string `json:"log,omitempty"`
+	// Timestamps: Log lleva la hora de cada línea delante (RFC 3339 en UTC,
+	// con microsegundos, y un espacio), porque se pidió con ?timestamps=1 y
+	// el agente las guarda. Un agente anterior no las tiene y no lo pone.
+	Timestamps bool `json:"timestamps,omitempty"`
 }

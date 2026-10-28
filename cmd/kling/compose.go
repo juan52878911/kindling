@@ -35,7 +35,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs] [-fresh]
+const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs] [-t] [-fresh]
        kling compose down [-f compose.yaml] [-p name]`
 
 func cmdCompose(args []string) error {
@@ -220,6 +220,7 @@ func composeUp(args []string) error {
 	name := fs.String("p", "", "project (graph) name (default: name: of the file, or the directory's)")
 	keep := fs.Bool("keep", false, "leave the machines running when this exits (kling compose down removes them)")
 	noLogs := fs.Bool("no-logs", false, "do not follow the services' output")
+	stamps := fs.Bool("t", false, "show the time of each line of the services' output (RFC 3339, UTC)")
 	fresh := fs.Bool("fresh", false, "rebuild the services' warm templates (after re-pulling an image tag, say)")
 	_ = fs.Parse(reorderFor(fs, args))
 	if fs.NArg() != 0 {
@@ -286,7 +287,7 @@ func composeUp(args []string) error {
 		}
 		var mu sync.Mutex
 		for _, n := range nodos {
-			go followServiceLogs(ctx, *host, t.Proyect+"-"+n, fmt.Sprintf("%-*s | ", w, n), &mu)
+			go followServiceLogs(ctx, *host, t.Proyect+"-"+n, fmt.Sprintf("%-*s | ", w, n), *stamps, &mu)
 		}
 	}
 	if *keep {
@@ -393,10 +394,14 @@ func dialMachine(ctx context.Context, c *api.Client, machine string, port int) (
 
 // followServiceLogs sigue la salida del servicio de una máquina con un prefijo por
 // línea, y vuelve a engancharse si se corta (una descongelación, un reinicio).
-func followServiceLogs(ctx context.Context, host, machine, prefix string, mu *sync.Mutex) {
+func followServiceLogs(ctx context.Context, host, machine, prefix string, stamps bool, mu *sync.Mutex) {
 	tail := "20"
 	for ctx.Err() == nil {
-		cmd := selfCmd(ctx, host, "logs", "-service", "-f", "-tail", tail, machine)
+		args := []string{"logs", "-service", "-f", "-tail", tail}
+		if stamps {
+			args = append(args, "-t")
+		}
+		cmd := selfCmd(ctx, host, append(args, machine)...)
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			return

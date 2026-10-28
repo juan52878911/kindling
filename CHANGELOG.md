@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling logs -service -t` and `compose up -t`: the time each line of the service's output arrived, kept by the guest agent (`GET /service?timestamps=1`)
 - `RunRequest.VolumeWait` (capability `volume-wait`, agent `kling.volwait=1`): boot with the volumes attached but unmounted and the service waiting; each copy of its template mounts them on restore and then starts the service. `compose up` now keeps warm templates for services with named volumes (postgres with `pgdata:`) too
 - `depends` edges take a `health` check run inside the target (capability `graph-health`): `compose up` translates `condition: service_healthy` to the real `test` with `interval`, `timeout`, `retries`, `start_period` and `start_interval`, instead of a TCP probe
 - `compose up`: the template key includes the daemon's VMM, so switching between `kling-vz`, `kling-hv` and Firecracker rebuilds the templates instead of failing until `-fresh`
