@@ -112,8 +112,9 @@ func (s *Shares) AttachHandler() http.HandlerFunc {
 		// El lector con búfer puede traer bytes que ya leyó el servidor HTTP.
 		sess := newShareSession(&hijacked{r: brw.Reader, Conn: conn})
 		sess.hello()
+		watching := sess.watch()
 		m.fs.attach(sess)
-		log.Printf("share %d attached at %s (%s, %d KiB I/O)", a.Tag, a.Mount, a.Mode, sess.maxIO>>10)
+		log.Printf("share %d attached at %s (%s, %d KiB I/O, host changes: %v)", a.Tag, a.Mount, a.Mode, sess.maxIO>>10, watching)
 	}
 }
 
