@@ -477,6 +477,7 @@ static uint32_t uart_intid, disk_intid[VIRTIO_MAX];
 static int ndisks;
 static char disk_path[VIRTIO_MAX][512];
 static bool disk_ro[VIRTIO_MAX];
+static bool disk_tmp[VIRTIO_MAX];  // clon propio de este restore: se borra al salir
 
 static void crear_vm(void) {
   uint64_t t0 = mach_absolute_time();
@@ -621,9 +622,17 @@ static void hacer_snapshot(void) {
   h.ram_size = g_ram_size;
   h.uart_intid = uart_intid;
   h.t_pausa = t_pausa;
+  mkdir(snap_dir, 0755);
   for (int i = 0; i < ndisks; i++) {
     h.disk_intid[i] = disk_intid[i];
     strncpy(h.disk[i], disk_path[i], sizeof h.disk[i] - 1);
+    if (!disk_ro[i]) {
+      // Un disco escribible es parte del estado: se clona (APFS, sin copiar
+      // datos) junto al snapshot y cada restore trabaja sobre su propio clon.
+      snprintf(h.disk[i], sizeof h.disk[i], "%s/disk%d.ext4", snap_dir, i);
+      unlink(h.disk[i]);
+      if (clonefile(disk_path[i], h.disk[i], 0) != 0) morir("clonefile %s", disk_path[i]);
+    }
     h.disk_ro[i] = disk_ro[i];
     vblk_get(i, &h.vblk[i]);
   }
@@ -639,7 +648,6 @@ static void hacer_snapshot(void) {
   h.gic_size = gsz;
   double ms_estado = abs_a_ms(mach_absolute_time() - t_pausa);
 
-  mkdir(snap_dir, 0755);
   char ruta[1024];
   snprintf(ruta, sizeof ruta, "%s/state", snap_dir);
   FILE *f = fopen(ruta, "wb");
@@ -706,8 +714,15 @@ static void restaurar(const char *dir) {
   int n_cli = ndisks;
   ndisks = (int)h.ndisks;
   for (int i = 0; i < ndisks; i++) {
-    if (i >= n_cli) strncpy(disk_path[i], h.disk[i], sizeof disk_path[i] - 1);
     disk_ro[i] = h.disk_ro[i];
+    if (i >= n_cli) {
+      if (disk_ro[i]) strncpy(disk_path[i], h.disk[i], sizeof disk_path[i] - 1);
+      else {
+        snprintf(disk_path[i], sizeof disk_path[i], "%s.%d", h.disk[i], getpid());
+        if (clonefile(h.disk[i], disk_path[i], 0) != 0) morir("clonefile %s", h.disk[i]);
+        disk_tmp[i] = true;
+      }
+    }
     disk_intid[i] = h.disk_intid[i];
     vblk_init(i, disk_path[i], disk_ro[i], disk_intid[i]);
     vblk_set(i, &h.vblk[i]);
@@ -729,6 +744,8 @@ static void fin_vm(int codigo) {
   LOG("fin (código %d): primer hv_vcpu_run a %.3f ms; salidas cpu0=%llu mmio=%llu wfi=%llu vtimer=%llu", codigo,
       t_primer_run, cpus[0].n_exits, cpus[0].n_mmio, cpus[0].n_wfi, cpus[0].n_vtimer);
   fflush(stdout);
+  for (int i = 0; i < ndisks; i++)
+    if (disk_tmp[i]) unlink(disk_path[i]);
   _exit(codigo);
 }
 
