@@ -364,7 +364,7 @@ func cmdDaemon(args []string) error {
 
 	// Con daemon.vmm auto (el de macOS) se elige aquí, una vez: hasta el
 	// próximo arranque el daemon habla con ese VMM.
-	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, func(env string) entornoAuto { return entornoAutoReal(env, *root) })
 	if err != nil {
 		return err
 	}
