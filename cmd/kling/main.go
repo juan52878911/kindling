@@ -535,6 +535,7 @@ func cmdRun(args []string) error {
 	host := hostFlag(fs)
 	name := fs.String("name", "", "machine name")
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
+	platform := fs.String("platform", "", "with a Docker -image: linux/amd64 or linux/arm64, as in docker run; amd64 on an arm64 daemon runs emulated with qemu-user (docs/imagenes-amd64.md)")
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
@@ -632,9 +633,11 @@ func cmdRun(args []string) error {
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {
-		if imagen, err = asegurarImagenDocker(ctx, client, imagen); err != nil {
+		if imagen, err = asegurarImagenDockerPlataforma(ctx, client, imagen, *platform); err != nil {
 			return err
 		}
+	} else if *platform != "" {
+		return fmt.Errorf("-platform only goes with a Docker reference in -image")
 	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -510,6 +511,8 @@ func TestValidateOCI(t *testing.T) {
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Ulimits: []string{"nofile"}}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Ulimits: []string{"nofile=1", "nofile=2"}}},
 		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: "amd64", Sysctls: map[string]string{"kernel.core_pattern": "|/x"}}},
+		// Emular la arquitectura del propio anfitrión no tiene sentido.
+		{api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x", Arch: runtime.GOARCH, Emulate: true}},
 	} {
 		if _, err := validateOCI(c.req, c.spec); err == nil {
 			t.Errorf("case %d accepted", i)
@@ -522,6 +525,11 @@ func TestValidateOCI(t *testing.T) {
 	if _, err := validateOCI(api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x:1", Arch: "amd64",
 		Ulimits: []string{"nofile=65536"}, Sysctls: map[string]string{"vm.max_map_count": "262144"}}); err != nil {
 		t.Fatalf("limits rejected: %v", err)
+	}
+	// amd64 emulada: solo en un anfitrión arm64.
+	_, err = validateOCI(api.BuildImageRequest{Name: "x"}, OCISpec{Ref: "x:1", Arch: "amd64", Emulate: true})
+	if (runtime.GOARCH == "arm64") != (err == nil) {
+		t.Fatalf("emulated amd64 on %s: %v", runtime.GOARCH, err)
 	}
 }
 
