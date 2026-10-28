@@ -669,6 +669,11 @@ func TestServeDrainTerminaLoEnVueloYDevuelveLoNuevo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "despues")); !os.IsNotExist(err) {
 		t.Fatalf("la operación devuelta con ERetry se ejecutó (stat: %v)", err)
 	}
+	// La despedida: después de ella el daemon no ejecuta nada, y el agente
+	// repite lo que le quede pendiente en vez de darlo por perdido.
+	if id, e := leer(); id != proto.PushID || e != proto.ERetry {
+		t.Fatalf("despedida: id %d errno %d, want PushID y ERetry", id, e)
+	}
 	select {
 	case err := <-done:
 		if err != nil {

@@ -34,6 +34,9 @@ type shareSession struct {
 	pending map[uint64]chan callResult
 	done    chan struct{}
 	closed  bool
+	// retired: llegó share.Bye. Lo que quede pendiente al cerrar recibe
+	// errnoRetry y no EIO: el daemon dijo que no lo ejecutó.
+	retired bool
 
 	// maxIO es lo más que se lee o escribe por operación en esta sesión:
 	// share.BaseIO salvo que hello negocie más. Se fija antes de publicar la
@@ -106,6 +109,14 @@ func (s *shareSession) readLoop() {
 		if d.Err() != nil {
 			return
 		}
+		if id == share.PushID && errno == share.ERetry {
+			// share.Bye: el daemon cierra en orden y ya no ejecuta nada. Lo
+			// que siga en vuelo no se hizo: se repite con la sesión siguiente.
+			s.mu.Lock()
+			s.retired = true
+			s.mu.Unlock()
+			return
+		}
 		if id == share.PushID {
 			ev, p, err := share.ParsePush(d)
 			if err != nil || errno != 0 {
@@ -127,7 +138,8 @@ func (s *shareSession) readLoop() {
 	}
 }
 
-// close corta la sesión y despierta con EIO a quien estuviera esperando.
+// close corta la sesión y despierta con EIO a quien estuviera esperando (con
+// errnoRetry si el daemon se despidió con share.Bye).
 func (s *shareSession) close() {
 	s.mu.Lock()
 	if s.closed {
@@ -138,10 +150,14 @@ func (s *shareSession) close() {
 	pend := s.pending
 	s.pending = map[uint64]chan callResult{}
 	close(s.done)
+	errno := share.EIO
+	if s.retired {
+		errno = errnoRetry
+	}
 	s.mu.Unlock()
 	_ = s.rw.Close()
 	for _, ch := range pend {
-		ch <- callResult{errno: share.EIO}
+		ch <- callResult{errno: errno}
 	}
 }
 

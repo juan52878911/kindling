@@ -93,6 +93,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Live shares: freezing a machine no longer gives EIO to a write that reached the daemon as it stopped reading; the daemon now ends an orderly close with a goodbye frame and the agent retries what is still pending on the next session
 - macOS: `kling top` and procstats count the VMM's child processes (CPU brake, snapshot keeper) in each machine's memory
 - `compose up -fresh` reimports the images with `-replace` (it reused them when the recipe was the same, so a new guest agent never reached them)
 - `compose up` removes a failed `<project>-<node>` machine left by an earlier up (labelled with a graph that no longer exists) instead of failing on "machine name is taken"

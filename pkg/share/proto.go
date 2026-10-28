@@ -248,6 +248,16 @@ const (
 	EventDelete byte = 3
 )
 
+// Bye es la última trama de un cierre ordenado (ServeDrain): `PushID | ERetry`,
+// sin más. Antes de mandarla el daemon ya contestó todo lo que leyó, y
+// después no ejecuta nada: lo que el agente tenga aún sin respuesta NO se hizo
+// y se puede repetir con la sesión siguiente, en vez de darlo por perdido con
+// EIO. Sin ella, una escritura que salía justo cuando el daemon dejaba de leer
+// (congelar con una carpeta viva) recibía EIO al volver. Un agente anterior la
+// toma por una trama fuera de protocolo y corta la sesión: lo mismo que el
+// cierre que viene detrás.
+func Bye() []byte { return Response(PushID, ERetry).B }
+
 // Push construye un aviso del daemon.
 func Push(ev byte, path string) []byte {
 	e := Response(PushID, 0)

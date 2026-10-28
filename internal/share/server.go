@@ -193,6 +193,8 @@ func (ss *session) watcher() *watcher {
 var (
 	drainQuiet = 50 * time.Millisecond
 	drainMax   = 3 * time.Second
+	// byeWait acota la escritura de proto.Bye al final del cierre.
+	byeWait = 200 * time.Millisecond
 )
 
 // trama es lo que lee de la conexión la goroutine lectora de ServeDrain.
@@ -333,6 +335,19 @@ func (s *Server) drainSession(ctx context.Context, conn io.Closer, tramas <-chan
 	case <-ctx.Done():
 		return nil
 	}
+	// Desde aquí todo lo leído está contestado, y lo que llegue se contesta
+	// ERetry sin ejecutarlo: al salir, Bye le dice al agente que lo que siga
+	// esperando no se hizo (lo que el lector tuviera a medias, o lo que mandó
+	// después del último). La escritura se acota: un agente que no lee no
+	// retiene el cierre, y el conn.Close de arriba la desbloquea.
+	defer func() {
+		hecho := make(chan struct{})
+		go func() { reply(proto.Bye()); close(hecho) }()
+		select {
+		case <-hecho:
+		case <-time.After(byeWait):
+		}
+	}()
 	quieto := time.NewTimer(drainQuiet)
 	defer quieto.Stop()
 	for {
