@@ -48,6 +48,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
 - Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
 - The FORWARD accepts inserted ahead of everything for graph links, the DNS resolver and credential proxies no longer let INVALID packets through to the host side
 - `kling rm|stop|freeze|thaw|pause a b c` keeps going after a failure, prints each error and exits 1 at the end, like docker
