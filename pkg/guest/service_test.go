@@ -212,7 +212,7 @@ func TestRotatingLog(t *testing.T) {
 	l.Close()
 	a, _ := os.ReadFile(p + ".1")
 	b, _ := os.ReadFile(p)
-	if string(a) != "12345678" || string(b) != "abcdef" {
+	if quitarTiempos(string(a)) != "12345678" || string(b) != "abcdef" {
 		t.Fatalf("%q %q", a, b)
 	}
 }
