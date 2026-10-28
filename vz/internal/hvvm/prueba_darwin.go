@@ -30,3 +30,8 @@ func cadena(descs [][4]uint64, head, num uint16, max int) int {
 	out := make([]C.struct_vdesc, max+1)
 	return int(C.vq_cadena(&q, &tabla[0], C.uint16_t(head), &out[0], C.int(max)))
 }
+
+// carreraCola atiende iters lecturas del disco mientras otro hilo cambia el
+// QueueNum (prueba.c): devuelve las respondidas, -1 si no se pudo preparar y
+// -2 si el QueueNum cambió con la cola lista.
+func carreraCola(iters int) int { return int(C.khv_prueba_carrera(C.int(iters))) }

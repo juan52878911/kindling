@@ -141,6 +141,12 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
                  bool escribir, uint64_t *val, uint32_t *cola) {
   struct vq *q = m->queue_sel < (uint32_t)nq ? &qs[m->queue_sel] : NULL;
   uint32_t v = (uint32_t)*val;
+  // Con la cola lista, su tamaño y sus direcciones no se tocan (virtio 1.x:
+  // el driver solo los escribe con QueueReady a 0). Un invitado que los
+  // cambiara con un hilo de dispositivo a mitad de tanda le movería el anillo
+  // por debajo; se ignoran hasta que ponga QueueReady a 0.
+  bool fija = q && q->ready && (off == 0x038 || (off >= 0x080 && off <= 0x0a4));
+  if (escribir && fija) return VM_NADA;
   if (escribir) {
     switch (off) {
       case 0x014: m->dev_feat_sel = v; break;
@@ -221,12 +227,19 @@ static struct vblk blks[KHV_MAX_DISKS];
 // con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
 // el driver las quiere, ver vq_interrumpir); *quedan: la tanda se cortó con
 // peticiones pendientes y hay que volver a mirar sin esperar un aviso.
-static bool b_procesar(struct vblk *b, struct vq q, bool *irq, bool *quedan) {
+//
+// q y m son COPIAS tomadas bajo b->mu, y aquí solo se usan ellas: el vCPU
+// puede escribir los registros de la cola mientras tanto (sin mu de este
+// hilo), y un QueueNum que creciera a mitad de tanda haría que
+// vq_pedir_aviso escribiera el avail_event más allá de lo que vq_ptrs
+// comprobó, hasta 2 KiB fuera de la RAM. Quien llama vuelca q->last_avail en
+// b->s.q bajo b->mu al acabar.
+static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool *irq, bool *quedan) {
   uint16_t *avail;
   uint8_t *used;
   struct vdesc *desc;
   *irq = *quedan = false;
-  if (!vq_ptrs(&q, &avail, &used, &desc)) return false;
+  if (!vq_ptrs(q, &avail, &used, &desc)) return false;
   bool hecho = false;
   uint16_t viejo = *(volatile uint16_t *)(used + 2);
   // Como mucho una vuelta a la cola por aviso (dos pasadas de vueltas
@@ -236,23 +249,23 @@ static bool b_procesar(struct vblk *b, struct vq q, bool *irq, bool *quedan) {
   for (uint32_t vueltas = 0;; vueltas++) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     uint16_t aidx = *(volatile uint16_t *)&avail[1];
-    if (b->s.q.last_avail == aidx) {
+    if (q->last_avail == aidx) {
       // Vacía: con EVENT_IDX, pedir el aviso del siguiente y volver a mirar
       // (el driver pudo añadir justo antes de ver la petición).
-      if (vueltas < 2 * q.num && vq_pedir_aviso(&b->s.m, &b->s.q, avail, used)) continue;
+      if (vueltas < 2 * q->num && vq_pedir_aviso(m, q, avail, used)) continue;
       break;
     }
-    if (vueltas >= 2 * q.num) {
-      vq_pedir_aviso_ya(&b->s.m, &b->s.q, avail, used);
+    if (vueltas >= 2 * q->num) {
+      vq_pedir_aviso_ya(m, q, avail, used);
       *quedan = true;
       break;
     }
-    uint16_t head = avail[2 + b->s.q.last_avail % q.num];
-    b->s.q.last_avail++;
+    uint16_t head = avail[2 + q->last_avail % q->num];
+    q->last_avail++;
 
     // Recorre la cadena: cabecera, datos, estado (1 byte, el último).
     struct vdesc ch[QMAX];
-    int n = vq_cadena(&q, desc, head, ch, QMAX);
+    int n = vq_cadena(q, desc, head, ch, QMAX);
     if (n < 0) n = 0;
     uint32_t escrito = 0;
     uint8_t estado = 0;
@@ -312,10 +325,10 @@ static bool b_procesar(struct vblk *b, struct vq q, bool *irq, bool *quedan) {
       }
     }
     if (sp) *sp = estado;  // sin byte de estado (cadena inválida) no hay dónde decirlo
-    vq_push(&q, used, head, sp ? escrito + 1 : 0);
+    vq_push(q, used, head, sp ? escrito + 1 : 0);
     hecho = true;
   }
-  *irq = hecho && vq_interrumpir(&b->s.m, &q, avail, viejo, *(volatile uint16_t *)(used + 2));
+  *irq = hecho && vq_interrumpir(m, q, avail, viejo, *(volatile uint16_t *)(used + 2));
   return hecho;
 }
 
@@ -328,10 +341,12 @@ static void *vblk_hilo(void *a) {
     b->pend = false;
     b->ocupado = true;
     struct vq q = b->s.q;
+    struct vmmio m = b->s.m;
     pthread_mutex_unlock(&b->mu);
     bool irq, quedan;
-    b_procesar(b, q, &irq, &quedan);
+    b_procesar(b, &q, &m, &irq, &quedan);
     pthread_mutex_lock(&b->mu);
+    b->s.q.last_avail = q.last_avail;
     b->ocupado = false;
     if (irq) {
       __atomic_fetch_add(&khv_avisos[KHV_N_BLK_IRQ], 1, __ATOMIC_RELAXED);
@@ -352,10 +367,12 @@ void vblk_prueba(int idx) {
   while (b->ocupado) pthread_cond_wait(&b->cv, &b->mu);
   b->ocupado = true;
   struct vq q = b->s.q;
+  struct vmmio m = b->s.m;
   pthread_mutex_unlock(&b->mu);
   bool irq, quedan;
-  b_procesar(b, q, &irq, &quedan);
+  b_procesar(b, &q, &m, &irq, &quedan);
   pthread_mutex_lock(&b->mu);
+  b->s.q.last_avail = q.last_avail;
   b->ocupado = false;
   pthread_cond_broadcast(&b->cv);
   pthread_mutex_unlock(&b->mu);
