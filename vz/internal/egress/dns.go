@@ -243,7 +243,7 @@ func (r *Resolver) SeedStatic(ctx context.Context) {
 			continue // falla CERRADO: sin IP, el dominio no se abre
 		}
 		for _, rec := range ExtractA(resp) {
-			set.Add(rec.IP, 0)
+			set.AddPermanent(rec.IP)
 		}
 	}
 }
