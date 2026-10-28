@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +30,10 @@ import (
 //   - 1: el formato inicial.
 //   - 2: graphics (la pantalla virtio-gpu). Entró sin subir la versión, y un
 //     kling-vz anterior restauraba sin pantalla un snapshot que la tenía.
-const FormatVersion = 2
+//   - 3: vsock (el dispositivo virtio-vsock del canal con el agente) y mtu
+//     (la MTU del enlace). Uno anterior restauraría sin vsock o con MTU 1500
+//     un invitado que los espera.
+const FormatVersion = 3
 
 // minFormatVersion es la más vieja que se sigue leyendo. Un snapshot de la 1
 // no tiene graphics, que es justo lo que significa leerla con este código.
@@ -117,7 +121,24 @@ type Spec struct {
 	Entropy           bool              `json:"entropy"`
 	MachineIdentifier string            `json:"machine_identifier,omitempty"`
 	Graphics          *Graphics         `json:"graphics,omitempty"`
+	// Vsock: la VM lleva un virtio-vsock por el que kling-vz habla con el
+	// agente del invitado (docs/backend-vz.md). MTU: la del enlace de red y
+	// la de la pila de usuario; 0 = 1500. Como Graphics, no son del API de
+	// Firecracker: los pone kling-vz al arrancar (Deps.Vsock, Deps.MTU) y
+	// viajan en el snapshot, que se restaura con los mismos dispositivos.
+	Vsock bool `json:"vsock,omitempty"`
+	MTU   int  `json:"mtu,omitempty"`
+	// AgentTCPOnly: con Vsock, el kling-vz que guardó el snapshot vio que el
+	// agente del invitado contesta por TCP y no por vsock (uno anterior). No
+	// cambia la máquina, solo por dónde se prueba primero al restaurarla.
+	AgentTCPOnly bool `json:"agent_tcp_only,omitempty"`
 }
+
+// Límites de la MTU que acepta VZFileHandleNetworkDeviceAttachment.
+const (
+	MinMTU = 1500
+	MaxMTU = 65535
+)
 
 // Clone devuelve una copia profunda: el servidor guarda el Spec vivo y lo
 // muta con los PATCH, y lo que se escribe en un snapshot no debe compartir
@@ -175,6 +196,9 @@ func (s *Spec) Validate() error {
 	}
 	if g := s.Graphics; g != nil && (g.Width < 64 || g.Height < 64 || g.Width > 8192 || g.Height > 8192) {
 		return fmt.Errorf("graphics %dx%d: each side must be between 64 and 8192 pixels", g.Width, g.Height)
+	}
+	if s.MTU != 0 && (s.MTU < MinMTU || s.MTU > MaxMTU) {
+		return fmt.Errorf("mtu %d: must be between %d and %d", s.MTU, MinMTU, MaxMTU)
 	}
 	if s.Balloon != nil && s.Balloon.AmountMiB >= s.MachineConfig.MemSizeMiB {
 		return fmt.Errorf("balloon amount_mib (%d) must be below mem_size_mib (%d)",
@@ -275,9 +299,13 @@ func (s *Spec) WriteFile(path string) error {
 	return nil
 }
 
-// formato es la versión más baja que describe s: 2 solo si tiene pantalla.
+// formato es la versión más baja que describe s: 3 con vsock o una MTU
+// distinta de 1500, 2 con pantalla, 1 si no.
 func (s *Spec) formato() int {
-	if s.Graphics != nil {
+	switch {
+	case s.Vsock || (s.MTU != 0 && s.MTU != MinMTU):
+		return 3
+	case s.Graphics != nil:
 		return 2
 	}
 	return 1
@@ -324,4 +352,45 @@ func Decode(r io.Reader) (*Spec, error) {
 		return nil, fmt.Errorf("snapshot is incomplete: %w", err)
 	}
 	return &s, nil
+}
+
+// DefaultMTU es la MTU del enlace de las máquinas que arrancan si
+// KLING_VZ_MTU no dice otra. Entre el invitado y la pila de usuario no hay
+// cable, y cada trama es una llamada al sistema por lado: con tramas más
+// grandes el caudal invitado<->host sube ~3 veces (medido en el M4: ~600 ->
+// ~1900 MiB/s de bajada, ~950 -> ~2650 de subida). No es la máxima (65535)
+// porque el framework no ofrece VIRTIO_NET_F_MRG_RXBUF y el virtio_net del
+// invitado reserva cada búfer de recepción del tamaño de la MTU: 256 búferes
+// de 64 KiB son ~17 MiB de RAM del invitado por máquina, y de 16 KiB ~4,5,
+// con el mismo caudal (9000, 16384, 32768 y 65535 dieron lo mismo dentro del
+// ruido).
+const DefaultMTU = 16384
+
+// ParseMTU lee KLING_VZ_MTU: vacío = DefaultMTU; "0" o "1500" = la de
+// siempre (sin anunciar nada al invitado); si no, un número entre MinMTU y
+// MaxMTU.
+func ParseMTU(v string) (int, error) {
+	switch v {
+	case "":
+		return DefaultMTU, nil
+	case "0", "1500":
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < MinMTU || n > MaxMTU {
+		return 0, fmt.Errorf("mtu %q: want a number between %d and %d (or 0 for the default 1500)", v, MinMTU, MaxMTU)
+	}
+	return n, nil
+}
+
+// ParseVsock lee KLING_VZ_VSOCK: vacío o "1" = con vsock; "0" = sin él (el
+// agente solo por la pila de usuario, como antes).
+func ParseVsock(v string) (bool, error) {
+	switch v {
+	case "", "1":
+		return true, nil
+	case "0":
+		return false, nil
+	}
+	return false, fmt.Errorf("vsock %q: want 1 or 0", v)
 }

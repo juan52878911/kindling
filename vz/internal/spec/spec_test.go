@@ -139,7 +139,7 @@ func TestSnapshotVersion(t *testing.T) {
 		t.Fatalf("un snapshot de la versión 1 se tiene que seguir leyendo: %v", err)
 	}
 
-	futuro := strings.Replace(string(b), `"kling_vz": 2`, `"kling_vz": 3`, 1)
+	futuro := strings.Replace(string(b), `"kling_vz": 2`, `"kling_vz": 99`, 1)
 	_, err := Decode(strings.NewReader(futuro))
 	if err == nil || !strings.Contains(err.Error(), "newer kling-vz") || !strings.Contains(err.Error(), "update kling-vz") {
 		t.Fatalf("snapshot del futuro: %v", err)
@@ -206,5 +206,62 @@ func TestDesechableNoVaAlSnapshot(t *testing.T) {
 	}
 	if (Drive{Disposable: true, IsReadOnly: true}).SyncNone() || (Drive{Disposable: true, IsRootDevice: true}).SyncNone() {
 		t.Fatal("SyncNone en un disco de solo lectura o en la raíz")
+	}
+}
+
+// vsock y una MTU distinta de 1500 cambian la máquina restaurada: se escriben
+// como 3, que un kling-vz anterior rechaza en vez de restaurar sin ellos. Una
+// MTU de 1500 explícita es la de siempre y no sube nada.
+func TestSnapshotVersion3(t *testing.T) {
+	for _, c := range []struct {
+		vsock bool
+		mtu   int
+		want  string
+	}{{true, 0, `"kling_vz": 3`}, {false, 16384, `"kling_vz": 3`}, {false, 1500, `"kling_vz": 1`}, {false, 0, `"kling_vz": 1`}} {
+		s := sample()
+		s.Vsock, s.MTU = c.vsock, c.mtu
+		path := filepath.Join(t.TempDir(), "snap.json")
+		if err := s.WriteFile(path); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(path)
+		if !strings.Contains(string(b), c.want) {
+			t.Errorf("vsock=%v mtu=%d: want %s in\n%s", c.vsock, c.mtu, c.want, b)
+		}
+		got, err := Decode(strings.NewReader(string(b)))
+		if err != nil || got.Vsock != c.vsock || got.MTU != c.mtu {
+			t.Errorf("vsock=%v mtu=%d: releído %+v, %v", c.vsock, c.mtu, got, err)
+		}
+	}
+}
+
+func TestValidateMTU(t *testing.T) {
+	for mtu, ok := range map[int]bool{0: true, 1500: true, 16384: true, 65535: true, 1499: false, 65536: false} {
+		s := sample()
+		s.MTU = mtu
+		if err := s.Validate(); (err == nil) != ok {
+			t.Errorf("mtu %d: %v", mtu, err)
+		}
+	}
+}
+
+func TestParseMTUYVsock(t *testing.T) {
+	for v, want := range map[string]int{"": DefaultMTU, "0": 0, "1500": 0, "9000": 9000, "65535": 65535} {
+		if got, err := ParseMTU(v); err != nil || got != want {
+			t.Errorf("ParseMTU(%q) = %d, %v; want %d", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"1499", "65536", "x", "-1"} {
+		if _, err := ParseMTU(v); err == nil {
+			t.Errorf("ParseMTU(%q) debía fallar", v)
+		}
+	}
+	for v, want := range map[string]bool{"": true, "1": true, "0": false} {
+		if got, err := ParseVsock(v); err != nil || got != want {
+			t.Errorf("ParseVsock(%q) = %v, %v", v, got, err)
+		}
+	}
+	if _, err := ParseVsock("si"); err == nil {
+		t.Error("ParseVsock(si) debía fallar")
 	}
 }

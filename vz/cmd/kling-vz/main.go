@@ -137,6 +137,19 @@ func run() int {
 		return 2
 	}
 
+	// El canal con el agente por virtio-vsock y la MTU del enlace, para las
+	// máquinas que arranquen aquí (una restauración usa los del snapshot).
+	vsock, err := spec.ParseVsock(os.Getenv("KLING_VZ_VSOCK"))
+	if err != nil {
+		logf("KLING_VZ_VSOCK: %v", err)
+		return 2
+	}
+	mtu, err := spec.ParseMTU(os.Getenv("KLING_VZ_MTU"))
+	if err != nil {
+		logf("KLING_VZ_MTU: %v", err)
+		return 2
+	}
+
 	meter := footprint.NewMeter()
 	// El freno del tope de CPU va en su propio proceso, lanzado antes de que
 	// este se encierre. Sin él, el tope pausa la VM por el framework, con la
@@ -228,6 +241,8 @@ func run() int {
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
 		Graphics: graphics,
+		Vsock:    vsock,
+		MTU:      mtu,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
 			// dentro de ella, que vnet tomaría por un proxy).
@@ -237,6 +252,7 @@ func run() int {
 			}
 			return vnet.New(vnet.Config{
 				GuestMAC: c.GuestMAC,
+				MTU:      c.MTU,
 				MMDS:     c.MMDS,
 				MMDSAddr: c.MMDSAddr,
 				Policy:   c.Policy,

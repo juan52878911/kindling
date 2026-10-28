@@ -132,6 +132,15 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 		if err != nil {
 			return nil, fmt.Errorf("network attachment: %w", err)
 		}
+		// MTU del enlace (macOS 13+): el framework la anuncia al invitado
+		// (VIRTIO_NET_F_MTU) y el virtio_net de Linux la adopta solo. La pila
+		// de usuario se montó con la misma (vnet.Config.MTU): las dos salen
+		// del Spec, que viaja en el snapshot.
+		if s.MTU > 0 {
+			if err := att.SetMaximumTransmissionUnit(s.MTU); err != nil {
+				return nil, fmt.Errorf("network MTU %d: %w", s.MTU, err)
+			}
+		}
 		nic, err := vz.NewVirtioNetworkDeviceConfiguration(att)
 		if err != nil {
 			return nil, err
@@ -181,6 +190,17 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 		}
 		gpu.SetScanouts(scan)
 		cfg.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gpu})
+	}
+
+	// virtio-vsock: el canal con el agente del invitado (ver DialVsock). Solo
+	// si el Spec lo lleva: un snapshot guardado sin él debe restaurarse sin
+	// él, el framework exige los mismos dispositivos.
+	if s.Vsock {
+		vs, err := vz.NewVirtioSocketDeviceConfiguration()
+		if err != nil {
+			return nil, fmt.Errorf("vsock device: %w", err)
+		}
+		cfg.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{vs})
 	}
 
 	if valid, err := cfg.Validate(); !valid || err != nil {
