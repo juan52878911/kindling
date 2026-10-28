@@ -1,0 +1,28 @@
+name: lab
+services:
+  builder:
+    build: ./app
+    privileged: true
+  proxy:
+    image: nginx:1.27
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    ports:
+      - "8080:80"
+      - "9100:9100/udp"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /var/log/nginx
+    depends_on:
+      - app
+  app:
+    image: example/app:3
+    container_name: lab-app
+    env_file: .env
+    networks: [back]
+    ports: ["3000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+networks:
+  back: {}

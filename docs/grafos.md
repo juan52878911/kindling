@@ -78,6 +78,40 @@ pasarela de su red en macOS), así que un nodo alcanza **un nodo por puerto**, y
 puertos 53, 80 y 443 no valen en un `link` (son el DNS y el proxy de credenciales de
 esa dirección).
 
+## Desde un compose.yaml
+
+```sh
+kling graph from-compose compose.yaml -o tienda.yaml -script tienda-setup.sh
+sh tienda-setup.sh                 # kling volume create + kling image import
+kling graph up tienda.yaml
+```
+
+Traduce un `compose.yaml` a un fichero de grafo. Un nodo no lleva entorno ni comando
+(viven en la imagen), así que la traducción tiene dos salidas: el grafo (`-o`, o stdout)
+y las órdenes previas (`-script`, y también como comentario en la cabecera del grafo).
+`-name` fija el nombre del grafo (si no, `name:` del compose o el del directorio).
+
+| Compose | Grafo |
+|---|---|
+| `services.X` | nodo `X` (etiqueta DNS: `mi_web` pasa a `mi-web`, con aviso) con la imagen `<grafo>-X` |
+| `image`, `environment`, `command`, `entrypoint`, `user`, `restart` | un `kling image import <image> -name <grafo>-X -e K=V … -- cmd` (los valores quedan **horneados** en la imagen, como con `image import -e`) |
+| `ports`, `expose` | `ports` del nodo (el puerto del contenedor; publicar en el host no existe y se avisa) |
+| `depends_on` | una arista `link` a cada puerto del destino y una `depends`; `condition: service_healthy` con `healthcheck` pone el puerto en la `depends` |
+| `healthcheck` | la sonda es un connect TCP al puerto del destino (el `test` no se ejecuta; se avisa) |
+| volúmenes con nombre | `kling volume create <grafo>-V` y `volumes` del nodo (`:ro` incluido) |
+| `mem_limit`, `cpus`, `deploy.resources.limits` | `mem_mib`, `vcpus` |
+
+Además, un valor de `environment` que usa el nombre de un servicio como host
+(`db`, `@db:5432`, `//api:8081`) se reescribe a `db.graph`, con aviso. Un destino de
+`depends_on` sin puertos recibe el de su imagen (postgres, redis, mysql, mongo…) y se
+avisa. `${VAR}`, `${VAR:-x}` y `$$` se resuelven con el entorno del CLI.
+
+Lo que no tiene equivalente (`build:`, `privileged`, `network_mode`, `cap_add`, bind
+mounts, `env_file`, `networks`, UDP, rangos de puertos…) sale por **stderr, una línea
+`warning: service X: clave: motivo` por cosa**; un servicio con `build:` y sin `image:`
+se salta. El YAML sigue las reglas del [fichero](#el-fichero): anclas y bloques `|`/`>`
+dan un error con su línea. El grafo resultante se valida como lo hace `graph up`.
+
 ## Operaciones
 
 | Comando | Qué hace |

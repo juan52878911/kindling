@@ -1,0 +1,6 @@
+warning: service api: environment: a node has no environment of its own; the 2 variable(s) are baked into the image with kling image import -e (every copy of it sees them)
+warning: service api: ports: 8081:8081: publishing to the host is not supported; port 8081 is exposed to the graph's edges only
+warning: service db: healthcheck interval: ignored (the probe is a TCP connect, retried until the 2 minute limit)
+warning: service db: healthcheck retries: ignored (the probe is a TCP connect, retried until the 2 minute limit)
+warning: service api: environment DB_HOST: host "db" rewritten to "db.graph" (a node is reached as <node>.graph)
+warning: service api: depends_on db: healthcheck "CMD-SHELL pg_isready -U app -p 5432" approximated by a TCP probe on port 5432 (the test itself is not run)
