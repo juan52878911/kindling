@@ -9,7 +9,9 @@
 # con el API de Kubernetes y con el frontal. distroless/static trae los
 # certificados de CA (para un frontal detrás de HTTPS) y un usuario sin
 # privilegios, y nada más que se pueda explotar.
-FROM golang:1.24 AS build
+# La misma Go que CI y release (1.27.3): con 1.24 el binario llevaba una
+# biblioteca estándar con CVEs. go.mod sigue en 1.24, que es el mínimo.
+FROM golang:1.27.3 AS build
 WORKDIR /src
 # Sin workspace: go.work cita ./vz y ./ext/mcp, que no se copian. El replace
 # ../.. basta. Y sin bajarse otra toolchain por su cuenta.

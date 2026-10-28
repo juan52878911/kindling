@@ -45,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: while the guest boots, the CPU ceiling lets all its vCPUs run (up to the host's cores), as on Linux
 - macOS: read-only drives use the host cache, and a drive marked `kling_disposable` (the overlay of a non-persistent machine) skips host flushes: 300 guest `sync` 1.8 → 0.7 s
 - macOS: the core marks the overlay of `on_ttl=remove` machines (sandboxes, `kling try`) as `kling_disposable` on boot and on restore from a template; stop and fail sync it to disk first, and after a host reboot such a machine that was running is failed, not stopped
+- The Kubernetes operator image builds with Go 1.27.3, like the release binaries
 - macOS: bigger TCP buffers in the user-space network (8 MiB receive, 6 MiB send) and at most 512 live TCP connections per machine
 
 ### Fixed
