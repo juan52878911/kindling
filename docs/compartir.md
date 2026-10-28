@@ -280,6 +280,12 @@ el host no lo despierta. Con WATCH:
    a listar para saber qué nombre apareció o desapareció; un fichero sustituido
    por rename (el guardado atómico de un editor) es un cambio del mismo nombre.
    Lo que el propio invitado tocó en el último segundo es eco y no se avisa.
+   Si el host pierde eventos (la cola de inotify se desborda, `IN_Q_OVERFLOW`)
+   se repasa todo lo vigilado: cada directorio contra su foto y cada fichero
+   contra su huella (tamaño, mtime, inodo), y se avisa de lo que difiera. Si no
+   cabe una vigilancia más (los 4096 descriptores de macOS o
+   `max_user_watches` en Linux) se dice una vez en el log: esa ruta se ve al
+   caducar la caché de 1 s y sus vigilantes del invitado no se enteran.
 3. **El agente lo lleva al kernel** (`pkg/guest/fuse_notify.go`):
    `FUSE_NOTIFY_INVAL_INODE`, `INVAL_ENTRY` o `DELETE`, y luego hace él la
    operación que dispara inotify, desde un hilo suyo: truncar al tamaño que
