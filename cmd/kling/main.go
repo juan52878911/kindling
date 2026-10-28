@@ -374,6 +374,7 @@ func cmdDaemon(args []string) error {
 	}
 	srv.SetShareConfig(shareConfig)
 	srv.SetCoW(cowConfig())
+	srv.SetBattery(batteryConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
@@ -447,6 +448,34 @@ func credAuditConfig() credproxy.AuditConfig {
 			return credproxy.AuditConfig{}
 		}
 		c = p
+	}
+	return c
+}
+
+// batteryConfig lee daemon.battery_mode y daemon.battery_pause_after_seconds;
+// KLING_BATTERY_MODE y KLING_BATTERY_PAUSE_AFTER (segundos) mandan sobre el
+// fichero. Un valor que no se entiende se avisa y se queda en el de por
+// defecto.
+func batteryConfig() machine.BatteryConfig {
+	cfg := loadConfig()
+	mode, after := cfg.Daemon.BatteryMode, cfg.Daemon.BatteryPauseAfter
+	if v, ok := os.LookupEnv("KLING_BATTERY_MODE"); ok {
+		mode = v
+	}
+	if err := config.ValidateBatteryMode(mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.BatteryAuto)
+		mode = config.BatteryAuto
+	}
+	if v := os.Getenv("KLING_BATTERY_PAUSE_AFTER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= -1 {
+			after = n
+		} else {
+			log.Printf("warning: KLING_BATTERY_PAUSE_AFTER=%q is not a number of seconds or -1 (using the default)", v)
+		}
+	}
+	c := machine.BatteryConfig{Mode: mode, PauseAfter: time.Duration(after) * time.Second}
+	if after < 0 {
+		c.PauseAfter = -1
 	}
 	return c
 }

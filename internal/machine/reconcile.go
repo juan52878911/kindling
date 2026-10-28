@@ -410,14 +410,20 @@ func (m *Manager) hasSnapshot(id string) bool {
 // Una microVM puede morir por su cuenta: pánico del kernel invitado, OOM del
 // host, o alguien matando el proceso. Reportar "running" sobre algo muerto es
 // peor que no reportar nada, porque el gateway enrutaría peticiones a la nada.
+//
+// El intervalo se recalcula en cada vuelta: en batería es más largo
+// (intervaloVigilante), con un temporizador y no un ticker para que el cambio
+// valga desde la vuelta siguiente.
 func (m *Manager) watch(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
+	m.reloj.durmio() // la base del reloj del host
+	t := time.NewTimer(m.intervaloVigilante(every))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			t.Reset(m.intervaloVigilante(every))
 			// Una vuelta entera por iteracion: si cualquiera de estas tareas
 			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
 			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
@@ -474,6 +480,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// un recorrido por máquina, y el dato sigue fresco para las que
 				// están escribiendo.
 				m.refreshDiskUsage()
+				// Si el host durmió, la hora de los invitados que corren; y
+				// el modo batería (bateria.go).
+				m.revisarSueno(ctx)
+				m.vueltaBateria(ctx)
 			})
 		}
 	}

@@ -260,6 +260,11 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// bat es el modo batería (bateria.go); reloj, la vigilancia del sueño del
+	// host (despertar_host.go).
+	bat   bateria
+	reloj relojHost
+
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
 	// carga (ver avisarAnyDatabase).

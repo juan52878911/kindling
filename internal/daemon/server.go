@@ -284,6 +284,9 @@ func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareCo
 // arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
 func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
 
+// SetBattery fija el modo batería (ver internal/machine/bateria.go).
+func (s *Server) SetBattery(c machine.BatteryConfig) { s.mgr.SetBattery(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {
@@ -424,9 +427,39 @@ func (s *Server) rutas() []ruta {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.rutas() {
+		// Dentro de autorizar: despertar una máquina es cosa de quien puede.
+		if despertar, ok := usoDeMaquina[rt.patron]; ok {
+			rt.h = s.conUso(rt.h, despertar)
+		}
 		mux.HandleFunc(rt.patron, s.autorizar(rt))
 	}
 	return conVersionAPI(sinBarrasEscapadas(mux))
+}
+
+// usoDeMaquina son las rutas que cuentan como usar la máquina para el modo
+// batería (machine.Usar): mientras haya una en curso, o hasta un rato después,
+// no se pausa ni se le baja la QoS. El valor dice si además la despiertan si
+// el modo batería la pausó: las que hablan con el invitado. Exec, shell y
+// ficheros ya la despiertan solos (ExecTarget), pero no la llamada al
+// invitado. Las de consulta (GET /machines/{ref}, ready) no cuentan: un panel
+// que pregunta cada pocos segundos no debe mantenerla despierta.
+var usoDeMaquina = map[string]bool{
+	"POST /machines/{ref}/exec":    true,
+	"POST /machines/{ref}/shell":   true,
+	"GET /machines/{ref}/files":    true,
+	"PUT /machines/{ref}/files":    true,
+	"DELETE /machines/{ref}/files": true,
+	"POST /machines/{ref}/guest":   true,
+	"POST /machines/{ref}/hooks":   true,
+	"GET /machines/{ref}/logs":     false,
+}
+
+// conUso envuelve h con machine.Usar (ver usoDeMaquina).
+func (s *Server) conUso(h http.HandlerFunc, despertar bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer s.mgr.Usar(r.Context(), r.PathValue("ref"), despertar)()
+		h(w, r)
+	}
 }
 
 // conVersionAPI pone en cada respuesta el API y la versión del daemon: el
