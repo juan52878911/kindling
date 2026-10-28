@@ -86,3 +86,23 @@ CONFIG_PCI_MSI=y
 CONFIG_KERNEL_MODE_NEON=y
 CONFIG_CRYPTO_SHA256_ARM64=y
 CONFIG_CRYPTO_SHA2_ARM64_CE=y
+
+# binfmt_misc: imágenes OCI solo-amd64 en un anfitrión arm64 (Mac, Graviton)
+# con qemu-user dentro del invitado (docs/imagenes-amd64.md). El agente lo
+# registra al arrancar solo si la imagen va emulada; sin eso no cuesta nada.
+CONFIG_BINFMT_MISC=y
+
+# Tics: con NO_HZ_IDLE un vCPU en reposo no recibe el tic periódico, pero
+# cada vez que despierta (un temporizador, el agente) el tic vuelve a correr
+# hasta que se duerme otra vez; a 100 Hz son la mitad de interrupciones que a
+# 250 y los temporizadores en jiffies se agrupan más. En el Mac cada
+# despertar de un vCPU es un despertar del portátil. El planificador CFS no lo
+# nota en una microVM de 1-2 vCPUs. Solo arm64: el kernel x86 no cambia.
+CONFIG_HZ_100=y
+# CONFIG_HZ_250 is not set
+# Ni detector de bloqueos (ni soft ni hard: el hard pide perf/NMI, que no
+# hay) ni tareas colgadas: hilos que se despiertan solos para vigilar.
+# allnoconfig ya los deja fuera; se dicen para que build.sh avise si vuelven.
+# CONFIG_SOFTLOCKUP_DETECTOR is not set
+# CONFIG_DETECT_HUNG_TASK is not set
+# CONFIG_WQ_WATCHDOG is not set
