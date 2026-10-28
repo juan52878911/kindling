@@ -94,7 +94,7 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		sock := m.socket[id]
 		m.mu.RUnlock()
 		if sock != "" {
-			if ok, err := fc.New(sock).KlingProbe(ctx, port); err == nil && ok {
+			if ok, err := sondearPuertoVMM(ctx, sock, port); err == nil && ok {
 				return nil
 			}
 		}
@@ -104,6 +104,31 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// intentoSondeoVZ acota UNA pregunta a /kling/probe. kling-vz espera hasta
+// 1 s (su probeTimeout) a que el invitado conteste al SYN, y la pila de
+// usuario (gVisor) no lo reenvía hasta su RTO inicial, que es justo 1 s: un
+// sondeo lanzado antes de que suba la red del invitado se perdía entero y
+// contestaba "cerrado" a los 1001 ms aunque el agente escuchara desde los
+// ~500. Medido en el M4: exec tras un arranque en frío a 1,4 s con el sondeo
+// de 1 s y a 0,53 s con intentos de 100 ms. Cortando el intento, el siguiente
+// manda un SYN nuevo. Un invitado vivo contesta en <1 ms; el margen es para
+// un Mac cargado.
+const intentoSondeoVZ = 150 * time.Millisecond
+
+// sondearPuertoVMM pregunta a kling-vz (sock) si algo escucha en port dentro
+// del invitado, en un intento corto (intentoSondeoVZ). Un intento agotado con
+// ctx aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
+// quien llama vuelve a preguntar.
+func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
+	ictx, cancel := context.WithTimeout(ctx, intentoSondeoVZ)
+	defer cancel()
+	open, err := fc.New(sock).KlingProbe(ictx, port)
+	if err != nil && ctx.Err() == nil && errors.Is(ictx.Err(), context.DeadlineExceeded) {
+		return false, nil
+	}
+	return open, err
 }
 
 // capacidadGrafo comprueba que el kling-vz de c sabe pedir conexiones al

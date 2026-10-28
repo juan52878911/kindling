@@ -204,6 +204,12 @@ func (m *Manager) checkPresionPlataforma() error { return nil }
 // crece a costa del disco de datos.
 const minDiscoLibrePlataforma = 2048
 
+// sondearPuertoVMM: en Linux no hay /kling/probe al que preguntar
+// (ProbeGuestPort no llega aquí sin reenvíos); se deja la pregunta tal cual.
+func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
+	return fc.New(sock).KlingProbe(ctx, port)
+}
+
 // lanzamientoPlataforma es el tope de encendidos simultáneos propio de la
 // plataforma; 0 = el cálculo general de maxParallelLaunch.
 func lanzamientoPlataforma() int { return 0 }

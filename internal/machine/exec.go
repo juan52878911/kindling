@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -180,7 +179,7 @@ func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open
 	if !fwd || sock == "" {
 		return false, false
 	}
-	open, err := fc.New(sock).KlingProbe(ctx, port)
+	open, err := sondearPuertoVMM(ctx, sock, port)
 	if err != nil {
 		// Un kling-vz anterior a /kling/probe: se sondea el reenvío.
 		return false, false
