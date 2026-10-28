@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/linkbroker"
 	"github.com/juan52878911/kindling/vz/internal/egress"
@@ -46,6 +48,21 @@ type VM interface {
 	Stopped() <-chan error
 }
 
+// VsockDialer es lo que una VM con virtio-vsock (Spec.Vsock) ofrece: una
+// conexión nueva al puerto port del invitado.
+type VsockDialer interface {
+	DialVsock(ctx context.Context, port uint32) (net.Conn, error)
+}
+
+// GuestDialerSetter es la red que sabe llevar un puerto del invitado por otro
+// camino que su pila (vnet.Net.SetGuestDialer): el reenvío y la sonda de ese
+// puerto prueban primero dial y, si falla, siguen por TCP como siempre.
+// GuestOnlyTCP dice si vio que el invitado solo contesta por TCP.
+type GuestDialerSetter interface {
+	SetGuestDialer(port int, dial func(ctx context.Context) (net.Conn, error), soloTCP bool)
+	GuestOnlyTCP(port int) bool
+}
+
 // Network es la red de espacio de usuario de la máquina.
 type Network interface {
 	VMFile() *os.File
@@ -66,6 +83,8 @@ type Factory interface {
 // NetConfig es lo que la red necesita del servidor para montarse.
 type NetConfig struct {
 	GuestMAC string
+	// MTU del enlace (Spec.MTU); 0 = 1500.
+	MTU      int
 	MMDS     http.Handler // nil si MMDS no está configurado
 	MMDSAddr netip.Addr
 	Policy   *egress.Policy
@@ -121,6 +140,12 @@ type Deps struct {
 	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone
 	// que sí.
 	HelperStopped func() (bool, error)
+	// Vsock: las máquinas que ARRANCAN en este proceso llevan virtio-vsock y
+	// el agente del invitado se alcanza por él (kling.vsock=1 en su línea de
+	// comandos); MTU, si no es 0, es la de su enlace de red. Como Graphics,
+	// una restauración usa lo que diga el snapshot.
+	Vsock bool
+	MTU   int
 	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
 	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
 	// no: el framework exige los mismos dispositivos que al guardar.
@@ -801,6 +826,12 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("saving the machine state: %w", err))
 		return
 	}
+	// Lo que se sabe del agente viaja con el snapshot: si solo contesta por
+	// TCP, quien lo restaure no paga en cada despertar un connect de vsock
+	// fallido (vnet.Net.dialGuest).
+	if g, ok := s.net.(GuestDialerSetter); ok && s.spec.Vsock && g.GuestOnlyTCP(api.GuestPort) {
+		s.spec.AgentTCPOnly = true
+	}
 	if err := s.spec.WriteFile(snapW); err != nil {
 		fault(w, fmt.Errorf("writing the snapshot file: %w", err))
 		return
@@ -1175,6 +1206,7 @@ func (s *Server) ensureNet() error {
 	}
 	cfg := NetConfig{
 		GuestMAC: s.spec.Network.GuestMAC,
+		MTU:      s.spec.MTU,
 		Policy:   s.d.Policy,
 		Resolver: s.d.Resolver,
 	}
@@ -1207,13 +1239,40 @@ func (s *Server) create() error {
 	if err := s.confinar(); err != nil {
 		return err
 	}
-	vm, err := s.d.Factory.Create(s.spec.Clone(), spec.TranslateBootArgs(s.spec.BootSource.BootArgs), s.net)
+	args := spec.TranslateBootArgs(s.spec.BootSource.BootArgs)
+	if s.spec.Vsock {
+		args += " " + VsockBootParam
+	}
+	vm, err := s.d.Factory.Create(s.spec.Clone(), args, s.net)
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
 	s.vm = vm
+	s.canalAgente(vm)
 	go s.watch(vm)
 	return nil
+}
+
+// VsockBootParam es lo que se añade a la línea de comandos de una VM con
+// vsock: el agente (pkg/guest) escucha entonces también por AF_VSOCK en su
+// puerto. Uno anterior lo ignora con un aviso y se le sigue hablando por TCP.
+const VsockBootParam = "kling.vsock=1"
+
+// canalAgente lleva el puerto del agente (api.GuestPort) por vsock si la VM
+// lo tiene: el reenvío del núcleo y /kling/probe siguen igual por fuera, y por
+// dentro prueban primero vsock y, si nadie contesta (un agente anterior, que
+// solo escucha TCP), la pila de usuario como siempre. Se llama con s.mu
+// tomado, tras crear la VM: también en una restauración, cuyo vsock nace
+// reiniciado y donde cada conexión es nueva.
+func (s *Server) canalAgente(vm VM) {
+	d, ok := vm.(VsockDialer)
+	g, ok2 := s.net.(GuestDialerSetter)
+	if !s.spec.Vsock || !ok || !ok2 {
+		return
+	}
+	g.SetGuestDialer(api.GuestPort, func(ctx context.Context) (net.Conn, error) {
+		return d.DialVsock(ctx, uint32(api.GuestPort))
+	}, s.spec.AgentTCPOnly)
 }
 
 // confinar aplica Deps.Confine la primera vez, con la red que pide la política
@@ -1267,6 +1326,13 @@ func (s *Server) abandon() {
 }
 
 func (s *Server) start() error {
+	// Antes de create, que monta la red con la MTU del Spec.
+	if s.d.Vsock {
+		s.spec.Vsock = true
+	}
+	if s.d.MTU > 0 && s.spec.Network != nil {
+		s.spec.MTU = s.d.MTU
+	}
 	if s.spec.MachineIdentifier == "" {
 		id, err := s.d.Factory.NewMachineID()
 		if err != nil {

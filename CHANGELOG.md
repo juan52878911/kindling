@@ -26,8 +26,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
 - `docs/linux-arm64.md`: which arm64 hosts can run kindling (Graviton .metal, Ampere, OCI BM A1, Pi 5 with the 4K kernel), setup, tuning, and why goldens don't move between arm64 CPU models
+- macOS: new machines get a virtio-vsock device and `kling-vz` reaches the guest agent over it (the agent also listens on `AF_VSOCK` when booted with `kling.vsock=1`); older agents and snapshots keep using TCP, `KLING_VZ_VSOCK=0` turns it off
 
 ### Changed
+
+- macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
 - macOS: `kling ai serve` without `-paused-mib` derives the paused budget from host memory and freezes paused replicas when the memory level drops; the core inflates the balloon before pausing and keeps it
 - macOS: restores (3 at once, one by one at memory level 25 % or below) and cold boots (4) have separate launch gates; resuming a paused machine takes neither

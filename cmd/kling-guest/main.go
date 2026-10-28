@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
 
@@ -112,6 +113,9 @@ func main() {
 	}()
 
 	log.Printf("kling-guest %s listening on %s", Version, *listen)
+	// En macOS (kling-vz, kling.vsock=1) también por vsock: el canal del
+	// núcleo con el agente, sin pasar por la red de usuario.
+	guest.ServeVsock(srv, api.GuestPort)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
