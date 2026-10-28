@@ -672,6 +672,33 @@ func nivelBajoParaRestaurar(ctx context.Context) bool {
 	}
 }
 
+// plazoApretonPausa acota el apretón antes de pausar: el invitado tiene que
+// entregar las páginas con los vCPU aún en marcha, y el planificador pausa en
+// segundo plano, pero con el candado de la máquina tomado (un despertar que
+// llegue mientras tanto espera).
+const plazoApretonPausa = 2 * time.Second
+
+// apretarAntesDePausar infla el globo al objetivo conservador de squeeze
+// (objetivoConMeminfo: deja al invitado max(128 MiB, mem/4) disponibles)
+// antes de pausar, y lo deja inflado: una pausada retiene su RAM mientras
+// dura, y en macOS desinflar vuelve a poblar las páginas (ver squeezeLocked),
+// así que se mantiene también al reanudar; deflate_on_oom se la devuelve al
+// invitado si la necesita. Devuelve los MiB que bajó la huella; 0 si no había
+// globo o nada que reclamar. Nunca falla: una pausa sin apretón es la de
+// siempre. KLING_SQUEEZE_BEFORE_PAUSE=0 lo apaga. Con el candado tomado.
+func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) int {
+	if os.Getenv("KLING_SQUEEZE_BEFORE_PAUSE") == "0" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, plazoApretonPausa)
+	defer cancel()
+	res, err := m.squeezeLocked(ctx, cur.ID, cur.ID, false, balloonSqueezeMarginMiB, false)
+	if err != nil || res == nil {
+		return 0
+	}
+	return res.ReclaimedMiB
+}
+
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
 // de Apple que aloja la VM, que es donde vive de verdad la memoria.
 func memoriaVMM(pid int, sock string) int64 {

@@ -217,6 +217,11 @@ func (m *Manager) enterRestore(ctx context.Context) (func(), error) { return m.e
 
 func (m *Manager) enterBoot(ctx context.Context) (func(), error) { return m.enterLaunch(ctx) }
 
+// apretarAntesDePausar: en Linux no. Una pausada retiene lo que el invitado
+// tocó, casi todo caché del mem.file COMPARTIDA con las demás copias, y el
+// globo la convertiría en memoria privada al volver (ver squeezeLocked).
+func (m *Manager) apretarAntesDePausar(context.Context, *api.Machine) int { return 0 }
+
 // lanzamientoPlataforma es el tope de encendidos simultáneos propio de la
 // plataforma; 0 = el cálculo general de maxParallelLaunch.
 func lanzamientoPlataforma() int { return 0 }
