@@ -17,6 +17,7 @@ ARCH="$(uname -m)"
 DEST="${DEST:-/opt/fc}"
 KERNEL_PREF="${KERNEL_PREF:-6.1}"      # serie de kernel preferida
 ROOTFS_SIZE="${ROOTFS_SIZE:-800M}"
+KERNEL_SOURCE_SET="${KERNEL_SOURCE:+1}" # el usuario lo eligió: no se opina
 KERNEL_SOURCE="${KERNEL_SOURCE:-ci}"   # ci | build
 KBUILD="$(cd "$(dirname "$0")" && pwd)/builders/kernel/build.sh"
 
@@ -24,6 +25,17 @@ case "$KERNEL_SOURCE" in
   ci|build) ;;
   *) echo "KERNEL_SOURCE debe ser ci o build (es '$KERNEL_SOURCE')" >&2; exit 1 ;;
 esac
+
+# En aarch64 el kernel propio es el recomendado: trae CONFIG_DM_VERITY (el del
+# CI no, y las capas con verity no montan), las erratas de Neoverse/Ampere/A76
+# y páginas de 4 KiB fijadas. El defecto sigue siendo ci porque compilar pide
+# toolchain y, en una Pi, sus buenos minutos; no medimos que arranque más
+# rápido, así que no se cambia a escondidas: se recomienda.
+if [ "$ARCH" = aarch64 ] && [ -z "$KERNEL_SOURCE_SET" ]; then
+  echo "aarch64: se recomienda el kernel propio (verity, erratas arm64, 4K):" >&2
+  echo "  KERNEL_SOURCE=build $0     # ver docs/linux-arm64.md" >&2
+  echo "  sigo con el del CI de Firecracker (KERNEL_SOURCE=ci lo calla)" >&2
+fi
 
 for c in curl unsquashfs mkfs.ext4; do
   command -v "$c" >/dev/null || { echo "falta $c (apt install squashfs-tools e2fsprogs curl)" >&2; exit 1; }
