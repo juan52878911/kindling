@@ -29,3 +29,22 @@ func TestVMMDeLineaRechazaRutasRaras(t *testing.T) {
 		}
 	}
 }
+
+// Solo cuenta los VMM de esta raíz con ese ejecutable, aunque su ruta lleve
+// espacios.
+func TestVivosDeVMMEnTabla(t *testing.T) {
+	pre := "/Users/j/Library/Application Support/kindling/machines/"
+	tabla := map[int]string{
+		1: "/Users/j/.local/bin/kling-vz --socket " + pre + "a/fc.sock",
+		2: "/Users/j/Library/Application Support/x/kling-vz --socket " + pre + "b/fc.sock",
+		3: "/Users/j/.local/bin/kling-hv --socket " + pre + "c/fc.sock",
+		4: "kling-vz --socket /otra/machines/d/fc.sock",
+		5: "/usr/bin/kling-vz-viejo --socket " + pre + "e/fc.sock",
+	}
+	if n := vivosDeVMMEnTabla(tabla, pre, "kling-vz"); n != 2 {
+		t.Fatalf("kling-vz = %d, want 2", n)
+	}
+	if n := vivosDeVMMEnTabla(tabla, pre, "kling-hv"); n != 1 {
+		t.Fatalf("kling-hv = %d, want 1", n)
+	}
+}

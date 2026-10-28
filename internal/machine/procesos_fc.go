@@ -109,3 +109,6 @@ func (m *Manager) socketDe(id string, pid int) string {
 	}
 	return m.dir(id) + "/fc.sock"
 }
+
+// VMMsVivosDe solo tiene sentido en macOS, donde hay dos VMM entre los que elegir.
+func VMMsVivosDe(root, nombre string) int { return 0 }

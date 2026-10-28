@@ -27,6 +27,12 @@ type entornoAuto struct {
 	existe  func(string) bool            // el binario está y es ejecutable
 	firmado func(string) bool            // lleva com.apple.security.hypervisor
 	sonda   func(string) (string, error) // kling-hv --probe
+	// volcadosVZ son las máquinas congeladas y los dorados de la raíz hechos
+	// con kling-vz: kling-hv no carga su memoria.
+	volcadosVZ int
+	// vivosVZ son las máquinas de la raíz que corren ahora con kling-vz: un
+	// daemon con hv las readoptaría y sellaría sus volcados como de hv.
+	vivosVZ int
 }
 
 // elegirAuto decide entre hv y vz y dice por qué, en una línea.
@@ -50,6 +56,14 @@ func elegirAuto(e entornoAuto) (backend, motivo string) {
 	case !e.firmado(hv):
 		return vz, hv + " is not signed with " + entitlementDe(machine.BackendHV)
 	}
+	// Lo ya congelado con kling-vz solo lo descongela kling-vz: pasar solo a
+	// hv dejaría esas máquinas y dorados sin poder usarse tras un upgrade.
+	if e.vivosVZ > 0 {
+		return vz, fmt.Sprintf("%d running machines were started with kling-vz; stop them, or set daemon.vmm: hv once they are gone", e.vivosVZ)
+	}
+	if e.volcadosVZ > 0 {
+		return vz, fmt.Sprintf("%d frozen machines or goldens were made with kling-vz; set daemon.vmm: hv to switch (they must be thawed and removed, or rebuilt)", e.volcadosVZ)
+	}
 	if out, err := e.sonda(hv); err != nil {
 		if out = strings.TrimSpace(firstLine(out)); out != "" {
 			return vz, fmt.Sprintf("%s --probe failed: %s", hv, out)
@@ -59,12 +73,14 @@ func elegirAuto(e entornoAuto) (backend, motivo string) {
 	return machine.BackendHV, fmt.Sprintf("macOS %s, %s signed and probed", e.macOS, hv)
 }
 
-// entornoAutoReal es el de este Mac.
-func entornoAutoReal(env string) entornoAuto {
+// entornoAutoReal es el de este Mac, con los datos en root.
+func entornoAutoReal(env, root string) entornoAuto {
 	return entornoAuto{
-		macOS: versionMacOS(),
-		env:   env,
-		hv:    machine.ResolverVMM(machine.BackendHV, "", ""),
+		macOS:      versionMacOS(),
+		volcadosVZ: machine.VolcadosDeVMM(root, "kling-vz"),
+		vivosVZ:    machine.VMMsVivosDe(root, "kling-vz"),
+		env:        env,
+		hv:         machine.ResolverVMM(machine.BackendHV, "", ""),
 		existe: func(p string) bool {
 			_, err := exec.LookPath(p)
 			return err == nil

@@ -248,6 +248,8 @@ void vsock_despertar(void);
 // khv_vsock_dial abre una conexión al puerto port del invitado y devuelve el
 // descriptor de un socket de dominio Unix que la lleva, o -errno.
 int khv_vsock_dial(uint32_t port, int plazo_ms);
+// khv_vsock_prueba_reuso: solo para las pruebas (ver vsock.c).
+int khv_vsock_prueba_reuso(int *coincide_fd);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {

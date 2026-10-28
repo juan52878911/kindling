@@ -66,6 +66,10 @@ struct vconn {
   bool cerrar;        // cierre completo del invitado: RST en cuanto se vacíe pend
   int resultado;      // para quien marca: 0 esperando, 1 abierta, -1 rechazada
   uint64_t t_cierre;  // mach_absolute_time() del SHUTDOWN completo que se mandó
+  // gen sube al liberar el slot y al tomarlo: quien marca reconoce así su
+  // conexión. El fd no basta: liberar lo cierra y el dial siguiente que tome
+  // el slot puede recibir el mismo número.
+  uint32_t gen;
 };
 
 static struct vvsock_state s;
@@ -103,7 +107,9 @@ static void liberar(struct vconn *c) {
   if (c->fd >= 0) close(c->fd);
   free(c->pend);
   int estado = c->estado;
+  uint32_t gen = c->gen + 1;
   memset(c, 0, sizeof *c);
+  c->gen = gen;
   c->fd = -1;
   c->estado = C_LIBRE;
   c->resultado = -1;
@@ -513,24 +519,20 @@ bool vsock_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   return true;
 }
 
-int khv_vsock_dial(uint32_t port, int plazo_ms) {
-  pthread_mutex_lock(&mu);
-  if (!activo) {
-    pthread_mutex_unlock(&mu);
-    return -ENODEV;
-  }
+// reservar toma un slot libre para un dial a port, le abre su socketpair (sv[0]
+// para el slot, sv[1] para quien marca) y devuelve el slot, con su generación
+// en *gen; NULL y -errno en *err si no puede. Con mu.
+static struct vconn *reservar(uint32_t port, int sv[2], uint32_t *gen, int *err) {
   struct vconn *c = NULL;
   for (int i = 0; i < VS_MAXCONN && !c; i++)
     if (conns[i].estado == C_LIBRE) c = &conns[i];
   if (!c) {
-    pthread_mutex_unlock(&mu);
-    return -EMFILE;
+    *err = -EMFILE;
+    return NULL;
   }
-  int sv[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-    int e = errno;
-    pthread_mutex_unlock(&mu);
-    return -e;
+    *err = -errno;
+    return NULL;
   }
   int uno = 1, tam = (int)VS_BUF;
   for (int i = 0; i < 2; i++) {
@@ -543,36 +545,53 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
   do {
     if (++sig_puerto < 49152) sig_puerto = 49152;
   } while (buscar(sig_puerto, port));
+  uint32_t g = c->gen + 1;
   memset(c, 0, sizeof *c);
+  c->gen = g;
   c->estado = C_CONECTANDO;
   c->lport = sig_puerto;
   c->gport = port;
   c->fd = sv[0];
   c->p_request = true;
+  *gen = g;
+  return c;
+}
+
+int khv_vsock_dial(uint32_t port, int plazo_ms) {
+  pthread_mutex_lock(&mu);
+  if (!activo) {
+    pthread_mutex_unlock(&mu);
+    return -ENODEV;
+  }
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(port, sv, &gen, &err);
+  if (!c) {
+    pthread_mutex_unlock(&mu);
+    return err;
+  }
   despertar_hilo();
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + (uint64_t)plazo_ms * 1000000ULL;
   ts.tv_sec = (time_t)(fin / 1000000000ULL);
   ts.tv_nsec = (long)(fin % 1000000000ULL);
+  // El slot es nuestro mientras su generación sea gen: si cambia, se liberó
+  // (rechazo, RST, reinicio) y quizá ya es de otro dial.
   int ret = -ETIMEDOUT;
   for (;;) {
-    if (c->estado == C_ABIERTA && c->fd == sv[0]) {
-      ret = sv[1];
-      break;
-    }
-    if (c->estado != C_CONECTANDO || c->fd != sv[0]) {
-      ret = -ECONNREFUSED;
+    if (c->gen != gen || c->estado != C_CONECTANDO) {
+      ret = c->gen == gen && c->estado == C_ABIERTA ? sv[1] : -ECONNREFUSED;
       break;
     }
     if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) {
-      if (c->estado == C_CONECTANDO && c->fd == sv[0]) {
+      if (c->gen == gen && c->estado == C_CONECTANDO) {
         c->p_request = false;
         c->p_rst = true;  // que el invitado olvide la petición
         despertar_hilo();
       }
       ret = -ETIMEDOUT;
-      if (c->estado == C_ABIERTA && c->fd == sv[0]) ret = sv[1];
+      if (c->gen == gen && c->estado == C_ABIERTA) ret = sv[1];
       break;
     }
   }
@@ -613,4 +632,74 @@ void vsock_set(const struct vvsock_state *i) {
   s = *i;
   reset_pend = (s.m.status & 4) != 0;  // DRIVER_OK: hay un driver que lo espera
   pthread_mutex_unlock(&mu);
+}
+
+// ---------- solo para las pruebas (hvvm_darwin_test.go) ----------
+
+#define PRUEBA_PUERTO 4242
+
+struct prueba_dial {
+  int ret;
+};
+
+static void *prueba_marcar(void *arg) {
+  ((struct prueba_dial *)arg)->ret = khv_vsock_dial(PRUEBA_PUERTO, 2000);
+  return NULL;
+}
+
+// khv_vsock_prueba_reuso reproduce dos dials que se cruzan en un slot, sin
+// invitado: el primero (A) espera respuesta; su slot se libera (el RST del
+// invitado) y, antes de que A despierte, otro dial (B) toma el mismo slot y el
+// invitado le contesta. A tiene que ver que el slot ya no es suyo
+// (-ECONNREFUSED) y no tocar la conexión de B. Devuelve el error que dio A; 1
+// si A se quedó con un fd (creyó suya la de B), -EPROTO si tocó la conexión
+// de B, -EBUSY si A no llegó a esperar. En *coincide_fd, si B recibió el mismo número
+// de fd que A tenía (el caso en que el fd solo no los distinguía). No puede
+// convivir con una VM de verdad en el mismo proceso.
+int khv_vsock_prueba_reuso(int *coincide_fd) {
+  if (!activo) vsock_init(53);
+  struct prueba_dial a = {.ret = 1};
+  pthread_t t;
+  if (pthread_create(&t, NULL, prueba_marcar, &a) != 0) return -EAGAIN;
+  struct vconn *c = NULL;
+  for (int i = 0; i < 2000 && !c; i++) {
+    pthread_mutex_lock(&mu);
+    for (int j = 0; j < VS_MAXCONN && !c; j++)
+      if (conns[j].estado == C_CONECTANDO && conns[j].gport == PRUEBA_PUERTO) c = &conns[j];
+    if (!c) {
+      pthread_mutex_unlock(&mu);
+      usleep(1000);
+    }
+  }
+  if (!c) {
+    pthread_join(t, NULL);
+    return -EBUSY;
+  }
+  // Con mu desde el hallazgo: A no puede despertar hasta soltarlo.
+  int fd_a = c->fd;
+  liberar(c);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *b = reservar(PRUEBA_PUERTO, sv, &gen, &err);
+  if (!b) {
+    pthread_mutex_unlock(&mu);
+    pthread_join(t, NULL);
+    return err;
+  }
+  *coincide_fd = b == c && sv[0] == fd_a;
+  b->estado = C_ABIERTA;  // el OP_RESPONSE del invitado para B
+  b->p_request = false;
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  pthread_join(t, NULL);
+  pthread_mutex_lock(&mu);
+  bool tocada = b->gen != gen || b->estado != C_ABIERTA || b->p_rst;
+  liberar(b);
+  pthread_mutex_unlock(&mu);
+  close(sv[1]);
+  if (a.ret >= 0) {
+    close(a.ret);
+    return 1;
+  }
+  return tocada ? -EPROTO : a.ret;
 }

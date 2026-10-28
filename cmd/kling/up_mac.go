@@ -45,7 +45,7 @@ func localProbeMac(root string) probeMac {
 	// El backend que usaría el daemon (KLING_VMM, daemon.vmm o el de la
 	// plataforma, auto resuelto como lo hará él al arrancar): con hv lo que
 	// hay que tener es kling-hv.
-	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, func(env string) entornoAuto { return entornoAutoReal(env, root) })
 	if err != nil || (backend != machine.BackendVZ && backend != machine.BackendHV) {
 		backend, motivo = machine.BackendVZ, ""
 	}

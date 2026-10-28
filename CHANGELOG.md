@@ -6,139 +6,83 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-28
+
+macOS gets a second VMM, `kling-hv`, picked by the new default `daemon.vmm: auto`. A Mac that already has machines or goldens frozen with `kling-vz` stays on `kling-vz` until you switch with `daemon.vmm: hv`. Guest kernel changed: old goldens still restore, with a warning. Upgrade with `kling upgrade`.
+
 ### Added
 
-- `kling logs -service -t` and `compose up -t`: the time each line of the service's output arrived, kept by the guest agent (`GET /service?timestamps=1`)
-- `RunRequest.VolumeWait` (capability `volume-wait`, agent `kling.volwait=1`): boot with the volumes attached but unmounted and the service waiting; each copy of its template mounts them on restore and then starts the service. `compose up` now keeps warm templates for services with named volumes (postgres with `pgdata:`) too
-- `depends` edges take a `health` check run inside the target (capability `graph-health`): `compose up` translates `condition: service_healthy` to the real `test` with `interval`, `timeout`, `retries`, `start_period` and `start_interval`, instead of a TCP probe
-- `compose up`: the template key includes the daemon's VMM, so switching between `kling-vz`, `kling-hv` and Firecracker rebuilds the templates instead of failing until `-fresh`
-- `RunRequest.Entrypoint`/`Cmd` (capability `machine-cmd`): a machine runs another command without baking another image, via MMDS like the environment (cold boots only; an agent without the `cmd` capability fails the machine); `compose up` puts `command:`/`entrypoint:` there, so changing them rebuilds the template but no longer reimports the image
-- `compose up`/`graph from-compose`: a project network like Docker Compose: every service reaches every other one (link edges to all their ports, hosts in `environment:` rewritten), restricted by `networks:` and `network_mode: none`; only the used links if over 64 edges
-- amd64-only Docker images on arm64 hosts (Mac, Linux arm64): `kling image import -arch amd64` and `kling run -platform linux/amd64` and compose `platform: linux/amd64` run them with a pinned static qemu-user inside the guest, registered in binfmt_misc by the arm64 agent (opt-in, ~16x slower on CPU; see docs/imagenes-amd64.md)
-- macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them
-- After the host sleeps, the daemon resyncs the clock of running guests (detected from wall vs monotonic clock, no extra wakeups)
-- macOS: running machines are paused before the Mac sleeps and resumed when it wakes: `kling-vz`/`kling-hv --power-events`, a small sandboxed helper the daemon starts, relays IOKit's sleep notice (the core stays without cgo; sleep is never delayed more than 10 s)
-- Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
-- Live `rw` shares accept relative symlinks that stay inside the folder: `npm install` works in a shared project
-- `kling compose up` keeps a warm template per service, keyed by its recipe: a repeated up restores app + postgres + redis in under a second instead of booting cold and re-importing; `environment:` goes on the machine instead of the image and `healthcheck:` runs inside before saving (`-fresh` rebuilds them)
-- The image's service waits for its live shares before starting (`kling.shares=N`); `run -share-wait N` saves templates whose copies take N live shares on `run -from`
-- `kling run -p HOST:GUEST`: a stable port on 127.0.0.1 in the foreground, waking the machine if frozen
-- `kling compose up [-f compose.yaml]`: a dev stack in the foreground, with bind mounts as live shares, `ports:` published on 127.0.0.1 and the services' output joined; Ctrl-C removes it. `graph from-compose` keeps warning that it does not publish
-- `kling-hv`, a third backend for macOS on Hypervisor.framework (`daemon.vmm: hv` or `KLING_VMM=hv`): same API as `kling-vz`, but guest RAM is a mapped file, so a restore takes ~10 ms and ~13 MiB instead of ~200 ms and ~320 MiB (experimental: no display)
-- `kling-hv`: virtio-vsock channel to the agent (same contract as `kling-vz`), virtio-balloon (`squeeze`, `-mem-max`), its own sandbox profile, and `kling up -check` checks it when `daemon.vmm` is `hv`
-- `kling db` templates of Garage, an S3-compatible object store (`-engine garage`): every copy gets its own access/secret key, generated on the host and rotated by `rotate` (#115)
-- Credential proxy: SigV4 re-signing (`kind: sigv4`) for S3-compatible servers: the guest signs with a placeholder key and the proxy signs again with the real one, incl. `UNSIGNED-PAYLOAD`, `aws-chunked` and presigned URLs (#116)
-- `kling volume clone <src> <dst> [-copy]`: instant copy-on-write volume clones (reflink/clonefile), with a real clone probe in `kling status -v`; refuses on filesystems that cannot clone unless `-copy`
-- `kling graph from-compose <compose.yaml>` translates a Compose file into a graph file, warning per unsupported key; environment and command are baked into the imported images (a warning says so)
-- Machines with egress blocked report the destinations they tried to reach (`kling logs`/`inspect`, `run -wait-ready`, `image import -warm`) with an `-egress allowlist -allow` suggestion
-- `kling image import -init image` runs the image's own init (s6-overlay, supervisord) as PID 1 with the agent as its child (opt-in, slower to boot); images with s6 as init are no longer refused when this is used
-- `kling image import -isolate` flattens the layers inside a tools microVM without network (`kling image build-tools`): the tar is never parsed on the host (opt-in; ~6-9x slower to import for now)
-- `kling image import` stores an image whose layers extend an already imported one (same diff_id prefix, agent and arch) as a small layer over it instead of a second full ext4; a base with layers on top cannot be removed
-- `kling template pool <name> -n N` keeps N awake copies of a template; `run -from` claims one in ~10-20 ms instead of restoring (off by default)
-- `kling image import -warm [-step CMD]...` goes from a registry ref to a ready template in one command; `kling db golden -from-oci REF build` builds a database golden from a Docker/OCI image (e.g. pgvector/pgvector:pg16) without compiling extensions
-- `kling image import -slim` trims Postgres and Timescale images by family rules (LLVM/JIT, bitcode, headers, old extension versions, `jit=off`): postgres:17-alpine 297→91 MiB, postgres:17 457→167 MiB, Timescale 1.6 GiB→187 MiB; `kling save -audit` reports files the running service never opened, without trimming
-- `kling image import -ulimit` and `-sysctl`: the guest agent applies them before the service starts (OpenSearch and ClickHouse need nofile and vm.max_map_count)
-- `kling db` templates of ClickHouse (`-engine clickhouse`), with the password stored as a SHA-256 computed on the host (#118)
-- `kling db` templates that speak the MongoDB protocol through FerretDB (`-engine ferretdb`); copies get a `mongodb://` DSN and a rotated password like Postgres (#117)
-- `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
-- Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
-- `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
-- `docs/linux-arm64.md`: which arm64 hosts can run kindling (Graviton .metal, Ampere, OCI BM A1, Pi 5 with the 4K kernel), setup, tuning, and why goldens don't move between arm64 CPU models
-- macOS: new machines get a virtio-vsock device and `kling-vz` reaches the guest agent over it (the agent also listens on `AF_VSOCK` when booted with `kling.vsock=1`); older agents and snapshots keep using TCP, `KLING_VZ_VSOCK=0` turns it off
-- Releases ship `kling-hv-darwin-arm64` (built and entitlement-checked on macos-15, in SHA256SUMS); CI builds and checks it too
-- `kling up -install` (macOS) writes the `dev.kindling.daemon` launchd agent (RunAtLoad, KeepAlive, ExitTimeOut 30, logs; `KLING_ROOT`/`KLING_SOCKET`/`KLING_VMM`/`KLING_CONFIG` carried over) and bootstraps it; an existing plist that differs is left alone. `kling up` on macOS now checks the daemon of `-host`/`KLING_HOST`
-- A pre-warmed pool whose golden is stale (e.g. made with kling-vz and the daemon now runs kling-hv) shows up in `kling status`, `kling doctor` and `/info` (`pool_problems`) with the command to re-save it, instead of only "could not pre-warm" in the log; `kling doctor` lists goldens sealed by another VMM apart, with how to re-save them or go back
-- `daemon.vmm: auto` is the macOS default: at startup the daemon picks hv when macOS is 15.2+ and `kling-hv` is signed and passes `kling-hv --probe` (a VM with its GIC created and destroyed, <10 ms), else vz; the choice and its reason are logged and shown in `/info` (`backend_reason`), `kling status -v` and `kling up -check`. Explicit `vz`/`hv` keep working; Linux is unchanged
-- `kling up -check` compares the whole macOS version (kling-hv needs 15.2, not just 15); `make vz`, CI and releases link kling-vz for macOS 14.0 and kling-hv for 15.2 instead of the build machine's SDK version, and check it
-- `install.sh` installs `kling-hv` next to `kling` (quarantine removed); `kling upgrade` replaces it, installs it when only `kling-vz` was there (rollback removes it), and checks its entitlement; `make install` copies the VMMs left by `make vz`
+- `kling-hv`: a macOS 15.2+ backend on Hypervisor.framework with its own VMM. Guest RAM is a mapped file, so copies share pages.
+  - On an M4 (p50): thaw + exec 36 ms, `run -from` 40 ms, ~16 MiB per copy, 50 copies in 784 MiB. With `kling-vz` the same takes 176 ms and 218 ms and ~350 MiB per copy.
+  - Devices: vsock, balloon, MTU 16K and EVENT_IDX.
+  - CPU and energy: per-thread QoS, P/E-core CPU accounting and its own sandbox profile.
+- `daemon.vmm: auto` (macOS default): the daemon picks hv when macOS is 15.2+ and `kling-hv` is signed and passes `--probe`; otherwise vz. `kling status -v` and `/info` say which and why.
+- Releases ship `kling-hv-darwin-arm64`; `install.sh` and `kling upgrade` install it; `kling up -install` writes the launchd agent.
+- `kling compose up [-f compose.yaml]`: a dev stack in the foreground.
+  - Bind mounts become live shares, `ports:` are published on 127.0.0.1 and the services' output is joined.
+  - Each service keeps a warm template, named volumes included: a repeated up of postgres with `pgdata` takes 0.36 s on hv.
+  - Every service reaches every service on its networks; `service_healthy` runs the real healthcheck.
+  - `command:`/`entrypoint:` apply per machine without re-importing; `platform:` and `logs -t` are supported.
+- `kling run -p HOST:GUEST`, `run -platform`, and `RunRequest.Cmd`/`Entrypoint`/`VolumeWait`.
+- amd64-only images on arm64 hosts: `image import -arch amd64` uses a pinned static qemu-user registered in binfmt_misc (opt-in, ~16x slower on CPU).
+- Live shares see host edits at once (kqueue/inotify), accept relative symlinks inside the folder (`npm install` works), and move up to 1 MiB per operation.
+- macOS energy:
+  - battery mode (`daemon.battery_mode`): background QoS and pausing of idle machines;
+  - pause before the Mac sleeps, and a clock resync after it wakes;
+  - `kling-vz` idles at ~1 wakeup/s instead of ~65.
+- Images and templates:
+  - `image import -warm`, `-slim`, `-isolate`, `-init image`, `-ulimit`/`-sysctl`, and layered imports over an existing base;
+  - `template pool -n N`;
+  - `volume clone`.
+- `kling db` engines: Valkey, MySQL 8.4/9, FerretDB (MongoDB), ClickHouse and Garage (S3); the credential proxy re-signs SigV4.
+- Egress-blocked machines report what they tried to reach; `docs/linux-arm64.md`.
 
 ### Changed
 
-- macOS: the `kling-vz`/`kling-hv` sandbox profiles have no per-port rules: `sandbox_init` takes ~9 ms instead of 53-68 ms (vz) and 10-29 ms (hv); the host loopback is always closed to the VMM and a credential's `-upstream 127.0.0.1:PORT` is dialed by the daemon over the link broker; `kling-vz` listens on any 127.0.0.1 port like `kling-hv`
-- macOS: the daemon publishes committed snapshots itself (clonefile from the machine directory, no symlinks or hardlinks); `kling-vz` and `kling-hv` no longer start a snapshot keeper process per machine (~6 MiB less per machine: 22.1 → 15.5 MiB per `kling-hv` copy). A new VMM needs the new daemon to commit
-- Live and copy shares can be mounted on a configuration directory under `/etc` (`./nginx:/etc/nginx/conf.d:ro`), except `/etc` itself and kindling's own `/etc/kindling` and `/etc/kling`
-- Imported Docker images resolve bare names in their graph (`search graph` in `/etc/resolv.conf`): an `nginx.conf` with `proxy_pass http://api:8081` works under `compose up` as in Docker Compose
-- Importing an image that has no build for the daemon's architecture lists the platforms it has and what to do (another tag, `docker buildx --platform`, or `-arch` for another host); `scripts/bateria-imagenes.sh` tests `otra-plataforma` with the architecture opposite to the daemon's
-- arm64 guest kernel: `CONFIG_BINFMT_MISC=y` (HZ stays 250: HZ 100 made no idle difference and broke freeze/thaw with a live share). New kernel sha256, so goldens get a new seal: old ones still restore (with the existing "different kernel" warning) but keep the old kernel; rebuild them to get binfmt_misc. x86 kernel unchanged
-- `kling-hv`: virtio-net and virtio-blk offer `VIRTIO_RING_F_EVENT_IDX` (and honour `VRING_AVAIL_F_NO_INTERRUPT` without it): ~45 % fewer network interrupts, ~99 % fewer rx kicks and ~48 % fewer disk kicks under load
-- `kling-vz` releases its CPU brake process (`--cpu-brake`) when the first `PUT /kling/cpu` has no effective ceiling (the macOS default): one process less per machine
-- `kling-hv`: per-thread QoS: vCPUs rest at utility and get user-initiated while the host sends work or they are busy; disk, network and vsock threads at utility (`KLING_HV_QOS=0` turns it off)
-- `kling-hv`: the CPU ceiling charges vCPU time on efficiency cores at its performance-core worth, like `kling-vz` (per-thread P/E counters): a 25 % ceiling on E cores went from ~12× to ~4× slower
-- `kling-hv`: the CPU ceiling charges vCPU time on efficiency cores at its performance-core worth, like `kling-vz` (per-thread P/E counters): a 25 % ceiling on E cores went from ~12× to ~4× slower
-- `kling-hv` honours `kling_disposable`: the overlay of `on_ttl=remove` machines skips the host fsync on guest flushes, like `kling-vz` (300 guest `sync` in `kling try` 58 → 26 ms)
-- `kling-hv`: new machines boot with the 16384-byte link MTU of `kling-vz` (`KLING_VZ_MTU`, announced with `VIRTIO_NET_F_MTU`): guest↔host throughput through a forward ~200-370/380-570 → ~850-1050/1270-1480 MiB/s
-- macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
-
-- `kling-vz` no longer wakes up 10 times a second per VM: the CPU regulator waits for a change when there is no ceiling (the vz default) and backs off to 500 ms with an idle VM; the credential audit log arms its flush timer only with something pending (~65 to ~1 context switches/s per VM, also paused)
-- The macOS daemon reads the process table with sysctl instead of forking `ps` every 10 s
-- Guests boot with `vm.compaction_proactiveness=0` and `vm.stat_interval=10` (idle guest timer interrupts 7.4 to 3.7/s)
-- macOS: `kling ai serve` without `-paused-mib` derives the paused budget from host memory and freezes paused replicas when the memory level drops; the core inflates the balloon before pausing and keeps it
-- macOS: restores (3 at once, one by one at memory level 25 % or below) and cold boots (4) have separate launch gates; resuming a paused machine takes neither
-- `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
-- `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
-- `kling up` on arm64: the missing-`/dev/kvm` hint no longer says `modprobe kvm_intel` (KVM is built in there), and a host page size other than 4 KiB is a warning (Raspberry Pi 5 boots a 16K kernel by default)
-- Guest kernel: the 6.1.140 tarball sha256 is pinned, so `scripts/builders/kernel/build.sh` runs; arm64 adds errata 1319367, 1530923 and 2067961 and drops 2645198, which 6.1 doesn't have
-- `scripts/30-fetch-artifacts.sh` recommends `KERNEL_SOURCE=build` on aarch64 when it isn't set
-- Release binaries are built with Go 1.27.3 (12 reachable stdlib CVEs fixed); the minimum Go in `go.mod` stays 1.24
-- The release workflow runs the full test suite before building, uses a read-only token except to publish, and pins actions by SHA
-- `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
-- Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
-- Live shares move up to 1 MiB per operation when agent and daemon are both new (negotiated, 128 KiB otherwise), ro shares keep the guest page cache for files unchanged since the last open, and listing a large directory no longer reopens it for every page
-- macOS: the CPU ceiling charges time on efficiency cores at what it is worth on a performance core; under launchd a 25 % ceiling slowed a CPU-bound guest ×12–15 instead of ×4 (now ×4–5)
-- macOS: while the guest boots, the CPU ceiling lets all its vCPUs run (up to the host's cores), as on Linux
-- macOS: read-only drives use the host cache, and a drive marked `kling_disposable` (the overlay of a non-persistent machine) skips host flushes: 300 guest `sync` 1.8 → 0.7 s
-- macOS: the core marks the overlay of `on_ttl=remove` machines (sandboxes, `kling try`) as `kling_disposable` on boot and on restore from a template; stop and fail sync it to disk first, and after a host reboot such a machine that was running is failed, not stopped
-- The Kubernetes operator image builds with Go 1.27.3, like the release binaries
-- macOS: bigger TCP buffers in the user-space network (8 MiB receive, 6 MiB send) and at most 512 live TCP connections per machine
+- macOS:
+  - the VMM sandbox profiles have no per-port rules (`sandbox_init` 53-69 → 9 ms in vz), and the host loopback is closed to the VMM;
+  - the daemon publishes snapshots itself (no keeper process);
+  - the vz CPU brake only runs with a ceiling.
+- macOS networking:
+  - MTU 16384 (×3 throughput) and a vsock agent channel;
+  - bigger user-space TCP buffers.
+- macOS CPU:
+  - the CPU ceiling charges efficiency-core time at its performance-core worth (×12 → ×4-5 slowdown at 25 %);
+  - boot runs uncapped.
+- Shares may be mounted under `/etc/*` (except `/etc`, `/etc/kindling`, `/etc/kling`); imported images resolve bare graph names (`search graph`).
+- Guest kernel: `BINFMT_MISC`, pinned 6.1.140 tarball, arm64 errata; guests boot with lower timer churn.
+- A wrong-architecture image lists the platforms it has.
+- `kling rm` answers once the VM is dead.
+- Release binaries are built with Go 1.27.3; the minimum Go stays 1.24. The release workflow runs the full test suite and pins actions.
+- `kling-vz` targets macOS 14.0 and `kling-hv` 15.2 (both were stamped with the SDK version, 26.0).
 
 ### Fixed
 
-- `kling-vz`: a restored copy whose vsock stops delivering to the guest (seen in ~1 of 30 `compose up` of templates with live shares) no longer hangs every agent request until its timeout: the agent channel is checked with `GET /healthz` on first use and whenever a connection writes and reads nothing for 1 s, and falls back to TCP for the rest of that process
-- Live shares: freezing a machine no longer gives EIO to a write that reached the daemon as it stopped reading; the daemon now ends an orderly close with a goodbye frame and the agent retries what is still pending on the next session
-- macOS: `kling top` and procstats count the VMM's child processes (CPU brake, snapshot keeper) in each machine's memory
-- `compose up -fresh` reimports the images with `-replace` (it reused them when the recipe was the same, so a new guest agent never reached them)
-- `compose up` removes a failed `<project>-<node>` machine left by an earlier up (labelled with a graph that no longer exists) instead of failing on "machine name is taken"
-- Guest agent: live shares attached over vsock (`kling-vz`, `kling-hv`) were refused as "from inside the guest" (the CID was read as an IP); the agent now reads the peer CID with getpeername and accepts only the host (CID 2)
-- `compose up`/`graph from-compose`: a bare value equal to a service name is rewritten to `<node>.graph` only in host variables (`*_HOST`, `*_SERVER`, `*_ADDR`…): `POSTGRES_USER: app` next to a service `app` stays `app`
-- `kling-hv`: a thaw of a machine that had already been thawed spent 60-90 ms in page faults before the agent answered (the snapshot now carries the resident pages); a guest could hang a device thread, and with it pauses and snapshots, by placing the used ring over the avail ring; a failed create no longer leaves a `kling-hv` that cannot host another VM
-- macOS: `kling-vz` no longer dies with SIGSEGV a few minutes after the balloon is used (Code-Hex/vz over-released the balloon device in a finalizer)
-- Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
-- The FORWARD accepts inserted ahead of everything for graph links, the DNS resolver and credential proxies no longer let INVALID packets through to the host side
-- `kling rm|stop|freeze|thaw|pause a b c` keeps going after a failure, prints each error and exits 1 at the end, like docker
-- Daemon status codes: removing an image or snapshot answers 400 for a bad name, 404 if it does not exist and 409 if it is in use; snapshot lookups decide 404 by error type, not by message
-- Request bodies over the limit answer 413 instead of 400 "unexpected EOF" (exec, shell, resize, mmds, credentials); store and annotations answer 413 only for size
-- `kling events` no longer stops on an event line over 64 KiB
-- `kling freeze`, `thaw` and `start` no longer fail after 60 s waiting for the daemon's answer
-- macOS: the first `exec` after a cold boot no longer waits ~1.2 s for a lost SYN (agent probes in 150 ms attempts): `run` + `exec` 1.4 → 0.55 s, `run -wait-ready` 1.2 → 0.54 s on an M4
-- `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
-- macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
-- Guest `/exec`: a background grandchild (`sh -c "sleep 600 & echo ok"`) no longer holds the reply until it exits, and cancelling the request kills the whole process group
-- Guest agent: setting the MMDS route no longer logs a spurious "no child processes"
-- Live shares no longer hand absolute host symlink targets to the guest: targets inside the share become relative, the rest get EACCES
-- MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
-- Image import: a file name over 255 bytes or with a NUL is rejected instead of writing a corrupt directory entry; a file alternating data and zero blocks no longer fails with "file too fragmented"; xattrs in unknown namespaces or too large in `user.*` are dropped with a warning instead of failing the image
-- Reading an ext4 with a corrupt superblock (0 inodes or blocks per group) returns an error instead of panicking
-- Extension manifest, hook and `-h` output is capped at 1 MiB; the old cap was bypassed by `io.Copy`
-- Concurrent writes of the same state file no longer share a temp file
-- A panic while keeping a service warm no longer kills the gateway
-- `scripts/release.sh` refuses a tag that already exists on origin and fetches before comparing main
-- `kling-bridge`: client replies to server requests (sampling, elicitation, roots) are accepted at once instead of hanging until `-request-timeout`; sessions with an open SSE stream or a call in flight are never reaped or recycled; starting a session no longer holds the bridge lock
-- MCP gateway: only a 400 that says the session is unknown triggers a new handshake and retry (a bad request returns its real error); the `/mcp/_all` endpoints cap the request body at 8 MiB
-- MCP gateway: re-adopting one of its own running instances after a failed liveness probe no longer resets its bridge and wipes live sessions
-- `kling-sandbox`: a prewarmed sandbox whose renew fails after it was labelled for a tenant is removed instead of left counting against that tenant; with a quota set, creating fails closed (503) while a host does not answer
-- macOS: in allowlist mode an IP resolved with TTL 0 stayed allowed forever; it now expires after 60 s like any other
-- macOS: if the CPU brake process dies with the VM's helper stopped, `kling-vz` exits instead of keeping a machine that never runs again; a SIGTERM to it resumes the helper first
-- macOS: a failed VM start no longer leaks the VM and its console pipe
-- macOS: a slow CPU reading no longer blocks the `kling-vz` API
-- Writing a file into an image or removing it is refused while a cold boot of that image is in flight
-- Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
-- Freeze and save fsync the memory, state and overlay files before sealing, after the VM is resumed or gone, so a power cut cannot leave a seal over a dump still in cache
-- A full copy-on-write store no longer cuts the freeze or thaw of a machine at 5 s, which could leave it half frozen
-- `kling save` no longer throws away a finished dump when the client disconnects while holes are punched in it
-- A freeze whose pause fails resumes the machine and clears the in-progress mark, instead of leaving it possibly paused while shown as running
-- Linux: writing a file into an image flushes only that image (`syncfs`) instead of running a host-wide `sync` on every put
-- Tenants see the removal events of their own machines: events carry an `owner` field, and `kling rm` publishes the event with the machine's name and owner as soon as the name is free
-- Smaller leaks: a failed `run -from` drops its overlay from the copy-on-write store at once, `kling rm` forgets the machine's per-ID freeze and resync marks, and the pre-dump balloon wait honours cancellation
+- Egress `none`/`allowlist` let conntrack-INVALID packets through the netns FORWARD and the graph/DNS/credential accepts.
+- macOS:
+  - `kling-vz` died with SIGSEGV after balloon use;
+  - a restored copy whose vsock went silent hung every agent request; it now closes every connection and falls back to TCP, and a short caller deadline is no longer taken for a silent channel;
+  - two concurrent `kling-hv` vsock dials could swap connections;
+  - the first `exec` after a cold boot waited ~1.2 s for a lost SYN;
+  - OpenSSL died with `Illegal instruction` on M4 guests.
+- Live shares:
+  - freezing no longer gives EIO to an in-flight write;
+  - vsock-attached shares were refused;
+  - absolute host symlink targets no longer reach the guest.
+- `compose`/`from-compose`: `POSTGRES_USER: app` no longer becomes `app.graph`; `-fresh` really reimports; a failed earlier up no longer blocks the name.
+- Durability:
+  - freeze and save fsync before sealing;
+  - a full CoW store no longer cuts freeze/thaw at 5 s;
+  - concurrent volume creates and state writes no longer clash.
+- Guest `/exec` no longer waits for background grandchildren.
+- MCP gateway and `kling-bridge`: session and retry fixes (#187).
+- `kling-sandbox`: tenant quota fixes.
+- Daemon: status codes (400/404/409/413), `events` lines over 64 KiB, and 60 s timeouts on freeze, thaw and start.
+- Image import:
+  - long or NUL file names are rejected;
+  - fragmented files no longer fail;
+  - a corrupt ext4 superblock no longer panics.
+- `kling rm|stop|freeze|thaw|pause a b c` keeps going after a failure.
 
 ## [0.18.0] - 2026-10-11
 

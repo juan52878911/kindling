@@ -5,6 +5,7 @@ package hvvm
 import (
 	"io"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/juan52878911/kindling/vz/internal/spec"
@@ -55,5 +56,21 @@ func TestNewMachineID(t *testing.T) {
 	}
 	if b, _ := f.NewMachineID(); a == b {
 		t.Fatal("two equal machine ids")
+	}
+}
+
+// Un dial cuyo slot se libera mientras espera (el RST del invitado) y que otro
+// dial toma antes de que despierte: el primero no puede quedarse con la
+// conexión del segundo (que reconocía solo por el número de fd) ni mandarle
+// un RST.
+func TestVsockDialSlotReusado(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		ret, mismo := vsockReuso()
+		if ret != -int(syscall.ECONNREFUSED) {
+			t.Fatalf("vuelta %d: el primer dial dio %d (mismo fd: %v), quiero -ECONNREFUSED", i, ret, mismo)
+		}
+		if i == 0 {
+			t.Logf("mismo número de fd en el slot reusado: %v", mismo)
+		}
 	}
 }
