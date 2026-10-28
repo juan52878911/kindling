@@ -48,6 +48,7 @@ func main() {
 	path := flag.String("path", "/healthz", "ruta del agente a pedir")
 	hold := flag.Duration("hold", 0, "mantener la VM viva este tiempo tras la respuesta")
 	repeat := flag.Int("n", 1, "peticiones a medir tras la primera")
+	probeTO := flag.Duration("probe-timeout", time.Second, "plazo de cada intento (en frío el invitado tira el SYN hasta tener red)")
 	flag.Parse()
 
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -98,7 +99,7 @@ func main() {
 		default:
 		}
 		intentos++
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), *probeTO)
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := client.Do(req)
 		if err == nil {
