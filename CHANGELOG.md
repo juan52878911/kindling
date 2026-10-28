@@ -21,11 +21,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: `kling ai serve` without `-paused-mib` derives the paused budget from host memory and freezes paused replicas when the memory level drops; the core inflates the balloon before pausing and keeps it
+- macOS: restores (3 at once, one by one at memory level 25 % or below) and cold boots (4) have separate launch gates; resuming a paused machine takes neither
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
 - `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
 
 ### Fixed
 
+- macOS: the first `exec` after a cold boot no longer waits ~1.2 s for a lost SYN (agent probes in 150 ms attempts): `run` + `exec` 1.4 → 0.55 s, `run -wait-ready` 1.2 → 0.54 s on an M4
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
