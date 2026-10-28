@@ -36,19 +36,28 @@ CONFIG_UNMAP_KERNEL_AT_EL0=y
 CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y
 CONFIG_ARM64_SW_TTBR0_PAN=y
 
-# Erratas de los núcleos donde corre Firecracker (Graviton2 = Neoverse N1,
-# Graviton3 = V1, Graviton4 = V2) y de los que emulan. También tienen pregunta
-# con "y" por defecto. Las que no existan en la versión fijada solo avisan.
+# Erratas de los núcleos donde corre Firecracker: Graviton1 (a1.metal) =
+# Cortex-A72, Graviton2 y Ampere Altra (OCI A1) = Neoverse N1, Graviton3 = V1,
+# Graviton4 = V2, Cobalt 100 = N2, Raspberry Pi 5 = Cortex-A76. El invitado ve
+# el MIDR del host, así que el parche se activa solo donde toca. También tienen
+# pregunta con "y" por defecto. Todas existen en 6.1.140 (comprobado en
+# arch/arm64/Kconfig); las que dependen de COMPAT (1418040) se caen solas y
+# build.sh lo avisa.
+# Fuera a propósito: las de TRBE/CoreSight (2119858, 2139208, 2253138...) porque
+# el invitado no tiene CORESIGHT_TRBE, y 2457168 (A510) porque pide
+# ARM64_AMU_EXTN. 2645198 no existe en 6.1 (llegó en 6.2).
 CONFIG_ARM64_ERRATUM_1165522=y
 CONFIG_ARM64_ERRATUM_1286807=y
+CONFIG_ARM64_ERRATUM_1319367=y
 CONFIG_ARM64_ERRATUM_1418040=y
 CONFIG_ARM64_ERRATUM_1463225=y
 CONFIG_ARM64_ERRATUM_1508412=y
+CONFIG_ARM64_ERRATUM_1530923=y
 CONFIG_ARM64_ERRATUM_1542419=y
+CONFIG_ARM64_ERRATUM_2067961=y
 CONFIG_ARM64_ERRATUM_2441007=y
 CONFIG_ARM64_ERRATUM_2441009=y
 CONFIG_ARM64_ERRATUM_2658417=y
-CONFIG_ARM64_ERRATUM_2645198=y
 CONFIG_ARM64_ERRATUM_2966298=y
 CONFIG_ARM64_ERRATUM_3194386=y
 
