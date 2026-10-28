@@ -105,7 +105,10 @@ type Deps struct {
 	// Footprint devuelve la memoria que ocupa la máquina en el host, en bytes.
 	Footprint func() (uint64, error)
 	Version   string
-	Logf      func(format string, args ...any)
+	// Backend es el nombre que dan GET / y GET /kling/info: "vz" (vacío) o
+	// "hv" (kling-hv, el VMM sobre Hypervisor.framework, vz/internal/hvvm).
+	Backend string
+	Logf    func(format string, args ...any)
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
@@ -414,8 +417,17 @@ func (s *Server) getRoot(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Unlock()
 	writeJSON(w, map[string]string{
 		"id": "anonymous-instance", "state": st.String(),
-		"vmm_version": s.d.Version, "app_name": "kling-vz",
+		"vmm_version": s.d.Version, "app_name": "kling-" + s.backend(),
 	})
+}
+
+// backend es el nombre del VMM que hay detrás del servidor: Deps.Backend, o
+// "vz" si no se dio.
+func (s *Server) backend() string {
+	if s.d.Backend == "" {
+		return "vz"
+	}
+	return s.d.Backend
 }
 
 func (s *Server) putBootSource(w http.ResponseWriter, r *http.Request) {
@@ -933,7 +945,7 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
-	info := map[string]any{"backend": "vz", "version": s.d.Version}
+	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
 	if s.d.Credentials != nil {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.

@@ -366,6 +366,9 @@ func cmdDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := machine.ElegirBackend(backend); err != nil {
+		return err
+	}
 	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
@@ -512,7 +515,7 @@ func cowConfig() machine.CoWConfig {
 // VMM (red, cgroups, /proc) va compilado para un sistema concreto.
 func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	backend := ajuste
-	if env == config.VMMFirecracker || env == config.VMMVZ {
+	if env == config.VMMFirecracker || env == config.VMMVZ || env == config.VMMHV {
 		backend = env
 	}
 	if backend == "" {
@@ -521,8 +524,8 @@ func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	if err := config.ValidateVMM(backend, goos, goarch); err != nil {
 		return "", fmt.Errorf("daemon.vmm: %w", err)
 	}
-	if c := machine.BackendCompilado(); backend != c {
-		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, c)
+	if !machine.BackendSoportado(backend) {
+		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, machine.BackendCompilado())
 	}
 	return backend, nil
 }
