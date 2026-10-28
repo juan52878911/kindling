@@ -152,6 +152,9 @@ func TestExecMaxOutputPasaDeOchoMiB(t *testing.T) {
 // M13: POST /machines contesta 4xx a lo que está mal en la petición, no 500
 // como si el host fallara.
 func TestCodigosDeCrearMaquina(t *testing.T) {
+	// En Linux, sin jailer ni usuario sin privilegios, Run se niega antes de
+	// mirar la petición: aquí se mide lo que viene después.
+	t.Setenv("KLING_JAILER", "0")
 	s, h := testServer(t)
 	if err := os.MkdirAll(filepath.Join(s.root, "images"), 0o755); err != nil {
 		t.Fatal(err)
