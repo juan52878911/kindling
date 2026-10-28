@@ -360,7 +360,18 @@ func (m *Manager) revisarOciosa(ctx context.Context, mc *api.Machine, cfg Batter
 	}
 	b.mu.Lock()
 	u = b.usoDe(mc.ID)
-	// Si entre medias llegó una petición, la reanudará ExecTarget o Usar.
+	// Una petición que llegó mientras se pausaba (M7): Usar la vio running y
+	// sin pausada, así que no la reanudó, y entró en una VM que se paraba.
+	// Se mira ahora, con la pausa hecha: si hay alguna en curso, o acabó una
+	// desde que se decidió pausar, se reanuda ya. Las que lleguen desde aquí
+	// ven pausada y la reanudan ellas (Usar, ExecTarget).
+	if u.enCurso > 0 || u.ultimo.After(ahora) {
+		b.mu.Unlock()
+		if err := m.reanudarBat(ctx, mc.ID); err != nil {
+			log.Printf("battery: resuming %s after a request came in while pausing it: %v", mc.Name, err)
+		}
+		return
+	}
 	u.pausada = true
 	// En pausa no gasta y la QoS da igual: se devuelve ya, para que al
 	// despertarla (por donde sea) corra como siempre.

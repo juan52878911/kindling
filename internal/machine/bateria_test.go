@@ -236,3 +236,47 @@ func TestFuenteEsBateria(t *testing.T) {
 		t.Fatal("vio batería enchufado")
 	}
 }
+
+// M7: una petición que entra mientras el modo batería pausa la máquina (Usar
+// la ve running y no la reanuda) no se queda colgada de una VM en pausa: al
+// acabar la pausa se relee enCurso y se reanuda.
+func TestBateriaReanudaSiEntraUnaPeticionMientrasPausa(t *testing.T) {
+	m := newTestManager(t)
+	b := nuevoBancoBateria(t, m, BatteryConfig{Mode: config.BatteryAuto, PauseAfter: 60 * time.Second})
+	maquinaBateria(m, "ociosa", nil)
+	ctx := context.Background()
+	pausarDeVerdad := m.bat.pausar
+	var fin func()
+	m.bat.pausar = func(ctx context.Context, id string) error {
+		// Llega una petición antes de que la pausa termine.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); fin = m.Usar(ctx, id, true) }()
+		wg.Wait()
+		return pausarDeVerdad(ctx, id)
+	}
+	for range 4 {
+		m.vueltaBateria(ctx)
+		b.pasar(30 * time.Second)
+	}
+	if fin == nil {
+		t.Fatal("no se llegó a pausar")
+	}
+	defer fin()
+	if len(b.reanud) != 1 {
+		t.Fatalf("reanudadas = %v: la petición quedó en una VM en pausa", b.reanud)
+	}
+	if mc, _ := m.Get("ociosa"); mc.State != api.StateRunning {
+		t.Fatalf("estado = %s", mc.State)
+	}
+	if b.usoPausada(m, "ociosa") {
+		t.Fatal("quedó apuntada como pausada por el modo batería")
+	}
+}
+
+func (b *bancoBateria) usoPausada(m *Manager, id string) bool {
+	m.bat.mu.Lock()
+	defer m.bat.mu.Unlock()
+	u := m.bat.uso[id]
+	return u != nil && u.pausada
+}
