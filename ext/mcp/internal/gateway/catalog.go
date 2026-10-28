@@ -402,6 +402,17 @@ var httpc = &http.Client{
 // esto: reintentarlo re-ejecuta la llamada.
 var errStaleSession = errors.New("the bridge does not recognize the session")
 
+// staleSessionBody reconoce el cuerpo de un 400 que significa "no conozco esa
+// sesión": el de kling-bridge ("session ... unknown or expired", o el que pide
+// initialize por falta de cabecera) y el del SDK de TypeScript que un servidor
+// HTTP nativo devuelve en modo proxy ("No valid session ID provided").
+func staleSessionBody(b string) bool {
+	b = strings.ToLower(b)
+	return strings.Contains(b, "unknown or expired") ||
+		strings.Contains(b, "send initialize first") ||
+		strings.Contains(b, "no valid session id")
+}
+
 // errSessionLimit es el 400 del puente cuando ya tiene todas las sesiones que
 // admite: esa instancia está llena y hay que ir a otra.
 var errSessionLimit = errors.New("the bridge is at its session limit")
@@ -503,8 +514,22 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 400 || resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return nil, errStaleSession
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		// Un 400 solo es sesión caducada si el puente LO DICE. El puente
+		// contesta 400 también a un JSON inválido o a un cuerpo demasiado
+		// grande, y tomarlos por caducidad rehacía el handshake y reenviaba
+		// una petición que iba a fallar igual, perdiendo el error real.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if staleSessionBody(string(b)) {
+			return nil, errStaleSession
+		}
+		if msg := strings.TrimSpace(string(b)); msg != "" {
+			return nil, fmt.Errorf("HTTP %s: %s", resp.Status, msg)
+		}
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)

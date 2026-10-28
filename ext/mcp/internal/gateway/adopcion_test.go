@@ -142,6 +142,64 @@ func TestAdoptarUnaInstanciaLimpiaSusSesiones(t *testing.T) {
 	}
 }
 
+// Readoptar una máquina PROPIA —soltada por un fallo de vida pasajero y vuelta
+// a coger por Ensure— no resetea su puente si este gateway tiene sesiones en
+// ella: el reset las borraba justo antes de reapuntarlas. Sin sesiones, sí.
+func TestReadoptarConSesionesVivasNoReseteaElPuente(t *testing.T) {
+	vieja := &puenteLleno{nombre: "vieja"}
+	sv := httptest.NewServer(vieja)
+	defer sv.Close()
+	sock := daemonConUnaEnMarcha(t, "eco", strings.TrimPrefix(sv.URL, "http://"))
+	gw := New(api.NewClient(sock), 5*time.Minute, false, 0, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resets := func() int { vieja.mu.Lock(); defer vieja.mu.Unlock(); return vieja.resets }
+
+	e, err := gw.Ensure(ctx, "eco")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if resets() != 1 {
+		t.Fatalf("la primera adopción hizo %d resets, quería 1", resets())
+	}
+
+	// Una sesión directa fijada a la máquina: readoptar no resetea.
+	gw.Bind("cliente-1", "eco", e)
+	gw.DropInstance("eco", e.MachineID())
+	if _, err := gw.Ensure(ctx, "eco"); err != nil {
+		t.Fatalf("Ensure tras soltarla: %v", err)
+	}
+	if resets() != 1 {
+		t.Fatalf("readoptar con una sesión directa viva reseteó el puente (%d resets)", resets())
+	}
+
+	// Una conversación del agregador con sesión en esa máquina: tampoco.
+	gw.Forget("cliente-1")
+	gw.agg.mu.Lock()
+	gw.agg.sessions["agg-1"] = &aggSession{id: "agg-1", backing: map[string]string{
+		"eco\x00" + e.MachineID(): "sid-vieja"}}
+	gw.agg.mu.Unlock()
+	gw.DropInstance("eco", e.MachineID())
+	if _, err := gw.Ensure(ctx, "eco"); err != nil {
+		t.Fatalf("Ensure tras soltarla: %v", err)
+	}
+	if resets() != 1 {
+		t.Fatalf("readoptar con una sesión del agregador viva reseteó el puente (%d resets)", resets())
+	}
+
+	// Sin sesiones de este gateway, la máquina se trata como heredada.
+	gw.agg.mu.Lock()
+	delete(gw.agg.sessions, "agg-1")
+	gw.agg.mu.Unlock()
+	gw.DropInstance("eco", e.MachineID())
+	if _, err := gw.Ensure(ctx, "eco"); err != nil {
+		t.Fatalf("Ensure tras soltarla: %v", err)
+	}
+	if resets() != 2 {
+		t.Fatalf("readoptar sin sesiones no reseteó el puente (%d resets, quería 2)", resets())
+	}
+}
+
 // El agregador, ante una primaria llena, va a una réplica nueva como el
 // initialize directo, en vez de devolver el 400 al cliente.
 func TestAgregadorConPrimariaLlenaVaAUnaReplica(t *testing.T) {

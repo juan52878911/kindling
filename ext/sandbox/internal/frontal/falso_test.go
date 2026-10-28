@@ -56,6 +56,8 @@ type falso struct {
 	shellIlegal bool
 	// creadas cuenta los POST /sandboxes aceptados.
 	creadas int
+	// renewFalla hace fallar POST /sandboxes/{ref}/renew con un 500.
+	renewFalla bool
 
 	// grafos por id, y el store (espacio -> clave -> valor).
 	grafos map[string]*api.Graph
@@ -218,6 +220,10 @@ func (f *falso) rutas() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.renewFalla {
+			fail(w, 500, fmt.Errorf("renew failed"))
+			return
+		}
 		mc, ok := f.maquinas[r.PathValue("ref")]
 		if !ok {
 			fail(w, 404, fmt.Errorf("no sandbox"))

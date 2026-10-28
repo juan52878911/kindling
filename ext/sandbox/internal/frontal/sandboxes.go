@@ -390,8 +390,13 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
 	// vez no lo compartan.
 	if err := s.reservar(r.Context(), t, pet.Template); err != nil {
-		s.metricas.registrar(resultadoCuota, 0)
-		fail(w, http.StatusTooManyRequests, err)
+		codigo := codigoReservar(err)
+		if codigo == http.StatusTooManyRequests {
+			s.metricas.registrar(resultadoCuota, 0)
+		} else {
+			s.metricas.registrar(resultadoError, 0)
+		}
+		fail(w, codigo, err)
 		return
 	}
 	defer s.liberar(t, pet.Template)
@@ -499,8 +504,14 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 		s.mu.Unlock()
 		return nil
 	}
-	vivos, _ := s.sandboxesDe(ctx, t)
-	grafos, _ := s.grafosDe(ctx, t)
+	// Falla CERRADO si algún host no contesta. Contar solo los que sí
+	// responden dejaba crear de más: con un host caído sus sandboxes no
+	// contaban, y al volver el tenant tenía más de los que su cuota permite.
+	vivos, errs := s.sandboxesDe(ctx, t)
+	grafos, errsG := s.grafosDe(ctx, t)
+	if errs = append(errs, errsG...); len(errs) > 0 {
+		return &errCuotaSinContar{errors.Join(errs...)}
+	}
 	total, dePlantilla := len(vivos)+len(grafos), 0
 	for _, sb := range vivos {
 		if plantilla != "" && sb.Template == plantilla {
@@ -525,6 +536,25 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	s.enVuelo[t.Nombre]++
 	s.enVuelo[clavePlantilla(t, plantilla)]++
 	return nil
+}
+
+// errCuotaSinContar es que reservar no pudo contar lo que el tenant ya tiene
+// porque algún host no contestó. No es "cuota superada" (429): es que no se
+// sabe, y se niega hasta saberlo (503).
+type errCuotaSinContar struct{ err error }
+
+func (e *errCuotaSinContar) Error() string {
+	return "can't check the tenant's quota, a host did not answer: " + e.err.Error()
+}
+func (e *errCuotaSinContar) Unwrap() error { return e.err }
+
+// codigoReservar es el estado HTTP de un fallo de reservar.
+func codigoReservar(err error) int {
+	var sc *errCuotaSinContar
+	if errors.As(err, &sc) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusTooManyRequests
 }
 
 func (s *Servidor) liberar(t *Tenant, plantilla string) {
@@ -696,7 +726,21 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 				continue
 			}
 			out, err := h.Cliente.RenewSandbox(ctx, mc.ID, p.TTLSeconds)
-			if err != nil || !esSandboxDe(out, t) {
+			if err != nil {
+				// Ya lleva la etiqueta del tenant pero no se le va a entregar:
+				// dejarla así la sacaba del pool y le contaba al tenant en su
+				// cuota (y en su lista) un sandbox que nunca pidió, hasta que la
+				// limpieza por abandono se la llevara. Se destruye; el pool la
+				// repone. No se le quitan las etiquetas: llevaría las del cliente
+				// a la siguiente que la reclamara.
+				s.log.Printf("frontal: claiming %s/%s: renew: %v; removing it", h.Nombre, mc.ID, err)
+				if rerr := h.Cliente.RemoveSandbox(ctx, mc.ID); rerr != nil {
+					s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, mc.ID, rerr)
+				}
+				continue
+			}
+			if !esSandboxDe(out, t) {
+				// Otro frontal la etiquetó después (el último gana): es suya.
 				continue
 			}
 			return h, out

@@ -30,3 +30,22 @@ func TestMcpCallAtConTope(t *testing.T) {
 		t.Errorf("err = %v, quería el error del tope", err)
 	}
 }
+
+// Los endpoints agregados (/mcp/_all del gateway y del router) leen la petición
+// con tope: un JSON válido pero mayor que maxProxyBody se rechaza con 400 en vez
+// de cargarse entero en memoria.
+func TestAgregadosLeenLaPeticionConTope(t *testing.T) {
+	grande := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":"` +
+		strings.Repeat("a", maxProxyBody+1024) + `"}`
+	manejadores := map[string]http.HandlerFunc{
+		"gateway": (&Gateway{}).handleAggregate,
+		"router":  newRouterAgg(NewRouter(nil)).handle,
+	}
+	for nombre, h := range manejadores {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest("POST", "/mcp/_all", strings.NewReader(grande)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: un cuerpo de %d bytes devolvió %d, quería 400", nombre, len(grande), rec.Code)
+		}
+	}
+}

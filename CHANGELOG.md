@@ -45,6 +45,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Concurrent writes of the same state file no longer share a temp file
 - A panic while keeping a service warm no longer kills the gateway
 - `scripts/release.sh` refuses a tag that already exists on origin and fetches before comparing main
+- `kling-bridge`: client replies to server requests (sampling, elicitation, roots) are accepted at once instead of hanging until `-request-timeout`; sessions with an open SSE stream or a call in flight are never reaped or recycled; starting a session no longer holds the bridge lock
+- MCP gateway: only a 400 that says the session is unknown triggers a new handshake and retry (a bad request returns its real error); the `/mcp/_all` endpoints cap the request body at 8 MiB
+- MCP gateway: re-adopting one of its own running instances after a failed liveness probe no longer resets its bridge and wipes live sessions
+- `kling-sandbox`: a prewarmed sandbox whose renew fails after it was labelled for a tenant is removed instead of left counting against that tenant; with a quota set, creating fails closed (503) while a host does not answer
 
 ## [0.18.0] - 2026-10-11
 
