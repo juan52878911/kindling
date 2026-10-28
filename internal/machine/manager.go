@@ -34,7 +34,16 @@ import (
 // disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
 // (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
 // copiarla N veces.
-const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet"
+//
+// Los dos sysctl quitan despertares de un invitado ocioso (medido en un M4,
+// 6.1, 1 vCPU sin carga: de 7,4 a 3,7 interrupciones de reloj por segundo):
+// la compactación proactiva despierta a kcompactd cada 500 ms aunque no haya
+// nada que compactar (una microVM no vive de páginas enormes), y vmstat
+// repasa los contadores de cada CPU cada segundo; cada 10 basta para lo que
+// los lee (balloon, /proc/meminfo, que la deriva está acotada por CPU). En el
+// portátil cada despertar de un vCPU es un despertar del Mac.
+const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet" +
+	" sysctl.vm.compaction_proactiveness=0 sysctl.vm.stat_interval=10"
 
 // archBootArg añade parámetros de kernel específicos de la arquitectura para
 // acortar el arranque. En amd64 apaga la emulación de i8042 (teclado/ratón
