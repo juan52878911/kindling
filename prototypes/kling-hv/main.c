@@ -701,9 +701,12 @@ static void restaurar(const char *dir) {
   mapear_ram(ruta, h.ram_size, false);
   uart_init(h.uart_intid);
   uart_set(&h.uart);
+  // -d en restore sustituye los discos del snapshot en orden (cada clon
+  // necesita su propio overlay escribible).
+  int n_cli = ndisks;
   ndisks = (int)h.ndisks;
   for (int i = 0; i < ndisks; i++) {
-    strncpy(disk_path[i], h.disk[i], sizeof disk_path[i] - 1);
+    if (i >= n_cli) strncpy(disk_path[i], h.disk[i], sizeof disk_path[i] - 1);
     disk_ro[i] = h.disk_ro[i];
     disk_intid[i] = h.disk_intid[i];
     vblk_init(i, disk_path[i], disk_ro[i], disk_intid[i]);
