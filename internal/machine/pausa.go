@@ -82,10 +82,15 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	return &out, nil
 }
 
-// reanudarLocked despierta una pausada: Resume y nada más. Sin resync: es la
-// misma máquina sin clones, y el reloj del invitado (kvmclock) sigue al del
-// host durante la pausa. Se llama con el candado de la máquina tomado.
+// reanudarLocked despierta una pausada: Resume y, en el caso normal, nada más.
+// Sin resync: es la misma máquina sin clones, y el reloj del invitado sigue al
+// del host durante la pausa. Salvo si el host durmió desde que se pausó (M8):
+// dormido, el reloj del invitado no avanza, y se resincroniza tras reanudar.
+// Se llama con el candado de la máquina tomado.
 func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cronoFases) (*api.Machine, error) {
+	// Antes de nada, si el host durmió y nadie lo ha visto aún: es lo que
+	// apunta cuándo (y resincroniza las que corren).
+	m.revisarSueno(ctx)
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
 	m.mu.RUnlock()
@@ -112,5 +117,10 @@ func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cr
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	if m.reloj.pausaAntesDelSueno(mc.FrozenAt) {
+		// Sin el ctx de quien despierta: reanudada, el reloj tiene que quedar
+		// bien aunque se vaya (resyncGuest lleva su plazo).
+		m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
+	}
 	return &out, nil
 }
