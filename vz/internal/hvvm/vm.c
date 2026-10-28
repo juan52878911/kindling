@@ -975,7 +975,14 @@ int khv_snapshot(const char *mem_out) {
     fallo("mincore: %s", strerror(errno));
     goto fin;
   }
-  const unsigned char mascara = MINCORE_MODIFIED | MINCORE_COPIED | MINCORE_ANONYMOUS | MINCORE_PAGED_OUT;
+  // También las páginas residentes que el invitado solo leyó (MINCORE_INCORE):
+  // el clon es otro vnode y no comparte la caché unificada con su base, así
+  // que una página que no se escribe aquí la tendría que leer del SSD el
+  // invitado restaurado al tocarla. Con la congelación de una máquina ya
+  // restaurada eso eran 60-90 ms de fallos de página en el primer /resync
+  // tras el thaw (2-4 ms escribiéndolas). Lo escrito queda en la caché.
+  const unsigned char mascara =
+      MINCORE_INCORE | MINCORE_MODIFIED | MINCORE_COPIED | MINCORE_ANONYMOUS | MINCORE_PAGED_OUT;
   for (size_t i = 0; i < np;) {
     if (!(v[i] & mascara)) {
       i++;
