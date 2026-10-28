@@ -212,6 +212,30 @@ procesos: media de carga ~10-15). Los dos VMM confinados, con vsock.
 | memoria por copia de un dorado (10 / 50 copias) | 13,1 / 13,0 MiB | ~349 MiB |
 | 50 copias | 651 MiB | — |
 
+Banco consolidado del 2026-10-28, tras fusionar `hv-paridad`,
+`hv-distribucion`, `compose-paridad`, `mac-huella` y `amd64-en-arm` (d65c33d2):
+el mismo M4, daemon privado y solo, imagen `redis:7-alpine` importada, 256
+MiB, egress none; desde el API del daemon, p50 / p90.
+
+| | hv | vz |
+|---|---|---|
+| run (frío) + primer exec (n=12 / 10) | 210 / 223 ms | 502 / 539 ms |
+| freeze | 115 / 130 ms | 168 / 205 ms |
+| thaw + primer exec | 36 / 81 ms | 176 / 183 ms |
+| run -from + primer exec | 40 / 46 ms | 218 / 226 ms |
+| sandbox fork -n 10 + exec en todas | 521 / 601 ms | 2 587 / 5 282 ms (n=10; en otras 2 tandas, una copia no contestó: el vsock mudo de [backend-vz.md](backend-vz.md#el-canal-con-el-agente-vsock)) |
+| exec en caliente (API, n=200) | 0,7 / 1,1 ms | 0,5 / 0,7 ms |
+| memoria por copia de un dorado (`kling top`) | 16,1 MiB (10) · 15,7 MiB (50) | 365 MiB (3) · 318 MiB (10) |
+| 50 copias | 784 MiB, arriba en 4,5 s | — |
+
+Frente a la tabla de arriba, la memoria por copia de hv sube de 13 a 16 MiB:
+es la MTU de 16 KiB (92a4d658). Con `KLING_VZ_MTU=1500` en el daemon, la
+misma prueba da 14,0 MiB por copia (n=10): ~2 MiB por copia es el precio de
+la red rápida. El freeze de hv (115 frente a 73 ms) también sube; no se
+investigó. La comprobación del canal vsock de c46f0f8b no se nota: en dos
+vueltas alternas (n=12 cada una), thaw + primer exec 35-36 ms con ella y 46-113
+ms sin ella (el ruido del Mac), run -from + primer exec 40-41 frente a 40-43 ms.
+
 Freeze, thaw y memoria medidos de nuevo el 2026-10-28 (`kling top`, que
 desde entonces suma los hijos de cada VMM), antes y después de quitar el
 custodio y las reglas por puerto del perfil, en las mismas condiciones (carga

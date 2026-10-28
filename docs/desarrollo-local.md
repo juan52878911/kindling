@@ -138,14 +138,44 @@ cerrojo del banco.
 | `up` tras cambiar el `command:` de la app | reimportaba la imagen y rehacía la plantilla | 2,0–2,3 s (n=2): solo la plantilla de la app, sin reimportar |
 | primera vez (imágenes ya bajadas a la caché de capas) | 8,6 s | 7,3 s (n=1) |
 
+De nuevo el 2026-10-28 tras fusionar `hv-paridad`, `hv-distribucion`,
+`compose-paridad`, `mac-huella` y `amd64-en-arm` (M4, daemon privado, sin
+otros agentes midiendo, `up` repetido con la plantilla hecha; p50 / p90).
+Cada servicio, desde lanzar `compose up` hasta que contesta por su puerto
+publicado; las sondas van en paralelo. La app de prueba habla con `db` y
+`cache` al recibir la petición, así que paga el SYN que el invitado reintenta
+a 1 s si postgres aún no escuchaba (ver abajo): su cifra es ~1 s más que la de
+`db`.
+
+| | kling-hv | kling-vz |
+|---|---|---|
+| `cache` (redis) contesta `PONG` (n=60) | **0,29 s** / 0,64 | 0,94 s / 1,08 |
+| `db` (postgres con `pgdata:`) responde al `SSLRequest` (n=60) | **0,36 s** / 0,76 | 1,01 s / 1,16 |
+| `app` sirve una petición que habla con los dos (n=60) | 1,31 s / 1,61 | 1,96 s / 2,11 |
+| nginx + api, `/api` por nginx (hv n=12, vz n=100) | **0,16 s** / 0,38 | 0,59 s / 0,87 |
+| `up` colgados por una copia que no contesta | 0 de 135 | 4 de 275 antes del arreglo, 1 de 359 después (abajo) |
+
 La red del proyecto no cuesta: el mismo compose con cada servicio en su red
 (0 aristas `link` frente a 6) deja postgres en 0,99 s frente a 0,94 s (n=10):
 por debajo del ruido, < 10 ms por arista.
 
-Un fallo intermitente sigue abierto: en 3 de unos 45 `up` la copia de postgres
-no contestó a su agente tras restaurar (`guest agent not reachable`), el `up`
-se deshizo y el siguiente fue bien. No se reprodujo en 35 restauraciones de la
-misma plantilla fuera del grafo (solas o con otras dos a la vez).
+El fallo intermitente de antes (en 3 de unos 45 `up` la copia de postgres no
+contestaba a su agente tras restaurar y el `up` se deshacía) no es de
+VolumeWait: es el vsock de `kling-vz`, que en algunas copias deja de entregar
+al invitado (el agente sigue vivo por TCP; ver
+[backend-vz.md](backend-vz.md#el-canal-con-el-agente-vsock)). VolumeWait solo
+lo hacía fatal, porque `/volume/acquire` es obligatorio; en una copia sin
+volúmenes se colgaban el `/resync`, el attach de la carpeta y la sonda de
+listo. Medido el 2026-10-28 con kling-vz: 4 `up` colgados de 115 del compose
+nginx + api (las dos con carpetas vivas) y 0 de 160 del de postgres; con
+kling-hv, 0 de 135. Con la comprobación del canal (c46f0f8b) 0 de 150 del
+de nginx + api y 0 de 60 del de postgres; en otra tanda de 149 con la misma
+versión hubo 1 `up` colgado en el que el `/resync` sí contestó y lo que no
+llegó fue la carpeta, sin que la comprobación viera el vsock mudo: queda
+abierto. Fuera del grafo no se reproduce (60 restauraciones de la plantilla,
+solas o de dos en dos). Una versión intermedia que solo comprobaba el canal
+al conectar dejó 2 colgados en 349: el vsock enmudece también después de
+contestar la primera petición, y por eso se vigila cada conexión.
 
 Los tiempos de kindling incluyen el CLI (`kling run`/`compose up` es un proceso
 nuevo cada vez) y la sonda. En el arranque en frío, ~0,7 s de los 1,4 s de la
