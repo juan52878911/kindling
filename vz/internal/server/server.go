@@ -207,6 +207,8 @@ type Server struct {
 	// escucha (o pasó la gracia) y rige el techo configurado.
 	cpuPct                           int
 	cpuEnMarcha, regulando, cpuListo bool
+	cpuEsperando                     bool          // ya hay un esperarAgente
+	cpuAviso                         chan struct{} // despierta al regulador (avisarCPU)
 	cpuPausado                       time.Duration
 	cpuPeriodo, cpuGracia            time.Duration // para las pruebas; 0 = por defecto
 	cpuReloj                         reloj         // para las pruebas; nil = el de verdad
@@ -239,6 +241,8 @@ func New(d Deps) *Server {
 		spec:  &spec.Spec{},
 		done:  make(chan error, 1),
 
+		cpuAviso: make(chan struct{}, 1),
+
 		globoEn: []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second,
 			4 * time.Second, 8 * time.Second, 15 * time.Second},
 	}
@@ -259,6 +263,7 @@ func (s *Server) Shutdown() {
 	s.vm, s.net = nil, nil
 	s.st = stStopped
 	s.mu.Unlock()
+	s.avisarCPU()
 	if vm != nil {
 		_ = vm.Stop()
 	}
@@ -725,6 +730,7 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 		case stPaused:
 			if err = s.vm.Resume(); err == nil {
 				s.st = stRunning
+				s.avisarCPU()
 			}
 		case stPendingLoad:
 			err = s.restore()
@@ -1287,6 +1293,7 @@ func (s *Server) start() error {
 		return fmt.Errorf("starting the VM: %w", err)
 	}
 	s.st = stRunning
+	s.avisarCPU()
 	s.applyBalloon()
 	if s.spec.Balloon != nil && s.spec.Balloon.AmountMiB > 0 {
 		go s.reaplicarGlobo(s.vm, s.globoEn)
@@ -1310,6 +1317,7 @@ func (s *Server) restore() error {
 		return fmt.Errorf("resuming the restored VM: %w", err)
 	}
 	s.st = stRunning
+	s.avisarCPU()
 	s.applyBalloon()
 	s.d.Logf("snapshot restored in %d ms (resumed after %d ms)", tRestore.Milliseconds(), time.Since(t0).Milliseconds())
 	return nil
@@ -1367,6 +1375,7 @@ func (s *Server) watch(vm VM) {
 		s.st = stStopped
 	}
 	s.mu.Unlock()
+	s.avisarCPU()
 	if !current {
 		return // una VM abandonada tras un fallo: no es el fin del proceso
 	}
