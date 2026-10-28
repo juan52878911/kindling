@@ -33,7 +33,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -164,6 +166,32 @@ func sha256EnDir(d dirEnImagen, name string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// sincronizarMontaje vuelca a la imagen lo escrito en el ext4 montado en mnt,
+// y solo eso: un `sync` global hacía esperar a cada put toda la E/S sucia del
+// host (los volcados de otras máquinas incluidos). syncfs sobre un fd del
+// propio montaje. El umount de después lo volvería a hacer; esto es lo que
+// cubre el umount -l, que suelta el montaje sin esperar al vaciado. El flush
+// que syncfs pide al dispositivo llega al loop como un fsync del fichero de
+// la imagen, así que también queda en el disco del host.
+//
+// El paquete syscall no trae SYS_SYNCFS (está congelado): su número por
+// arquitectura. En otra, el sync global de siempre.
+func sincronizarMontaje(mnt string) {
+	nr := map[string]uintptr{"amd64": 306, "arm64": 267}[runtime.GOARCH]
+	fd, err := syscall.Open(mnt, oDir, 0)
+	if nr == 0 || err != nil {
+		_ = exec.Command("sync").Run()
+		if err == nil {
+			_ = syscall.Close(fd)
+		}
+		return
+	}
+	if _, _, e := syscall.Syscall(nr, uintptr(fd), 0, 0); e != 0 {
+		_ = exec.Command("sync").Run()
+	}
+	_ = syscall.Close(fd)
 }
 
 // ponerEnImagen es la parte de intentarPut que toca la imagen montada: mismo

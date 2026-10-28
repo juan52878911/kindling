@@ -35,6 +35,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - A full copy-on-write store no longer cuts the freeze or thaw of a machine at 5 s, which could leave it half frozen
 - `kling save` no longer throws away a finished dump when the client disconnects while holes are punched in it
 - A freeze whose pause fails resumes the machine and clears the in-progress mark, instead of leaving it possibly paused while shown as running
+- Linux: writing a file into an image flushes only that image (`syncfs`) instead of running a host-wide `sync` on every put
 
 ## [0.18.0] - 2026-10-11
 

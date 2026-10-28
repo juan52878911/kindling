@@ -292,7 +292,7 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 			return
 		}
 		montada = false
-		_ = exec.Command("sync").Run()
+		sincronizarMontaje(mnt)
 		if out, err := exec.Command("umount", mnt).CombinedOutput(); err != nil {
 			// Con -l al menos se desengancha; el sistema de ficheros se cierra
 			// cuando se suelte la última referencia.
