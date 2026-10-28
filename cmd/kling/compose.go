@@ -129,6 +129,8 @@ func selfCmd(ctx context.Context, host string, args ...string) *exec.Cmd {
 type importCompose struct {
 	linea, conReplace string
 	antesDeReplace    func()
+	// yaReplace: directamente con -replace (compose up -fresh).
+	yaReplace bool
 }
 
 // runSetup crea los volúmenes y después importa en paralelo.
@@ -159,6 +161,13 @@ func runSetup(ctx context.Context, host string, vols []string, imports []importC
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if im.yaReplace {
+				if im.antesDeReplace != nil {
+					im.antesDeReplace()
+				}
+				_, errs[i] = run(im.conReplace)
+				return
+			}
 			out, err := run(im.linea)
 			if err != nil && strings.Contains(out, "-replace") {
 				if im.antesDeReplace != nil {

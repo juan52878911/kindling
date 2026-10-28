@@ -357,6 +357,9 @@ func prepararCompose(ctx context.Context, c *api.Client, host string, t *traducc
 		imports = append(imports, importCompose{
 			linea:      ordenImportCon(p.s, t.Proyect, frio, hornear, false),
 			conReplace: ordenImportCon(p.s, t.Proyect, frio, hornear, true),
+			// Con -fresh, -replace siempre: la receta igual no ve un agente
+			// nuevo (el de un kling actualizado), y -fresh es para eso.
+			yaReplace: fresh,
 			// La imagen cambia: las plantillas que salieron de ella, fuera.
 			antesDeReplace: func() { borrar(viejasDe(snaps, t.Proyect, nodo, "")) },
 		})

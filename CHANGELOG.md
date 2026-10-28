@@ -75,6 +75,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `compose up -fresh` reimports the images with `-replace` (it reused them when the recipe was the same, so a new guest agent never reached them)
 - `compose up` removes a failed `<project>-<node>` machine left by an earlier up (labelled with a graph that no longer exists) instead of failing on "machine name is taken"
 - Guest agent: live shares attached over vsock (`kling-vz`, `kling-hv`) were refused as "from inside the guest" (the CID was read as an IP); the agent now reads the peer CID with getpeername and accepts only the host (CID 2)
 - `compose up`/`graph from-compose`: a bare value equal to a service name is rewritten to `<node>.graph` only in host variables (`*_HOST`, `*_SERVER`, `*_ADDR`…): `POSTGRES_USER: app` next to a service `app` stays `app`
