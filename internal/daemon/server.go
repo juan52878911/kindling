@@ -627,12 +627,12 @@ func decodeJSONCon(w http.ResponseWriter, r *http.Request, v any, max int64) err
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-// jsonBodyStatus traduce un error de decodeJSON a su código HTTP: 413 si fue
-// el tope de tamaño el que lo cortó, 400 para cualquier otro (JSON inválido,
+// jsonBodyStatus traduce un error de decodeJSON (o de api.LeerCuerpo) a su
+// código HTTP: 413 si fue el tope de tamaño el que lo cortó, 400 para cualquier otro (JSON inválido,
 // campo con el tipo que no toca, etc).
 func jsonBodyStatus(err error) int {
 	var mbe *http.MaxBytesError
-	if errors.As(err, &mbe) {
+	if errors.As(err, &mbe) || errors.Is(err, api.ErrBodyTooLarge) {
 		return http.StatusRequestEntityTooLarge
 	}
 	return http.StatusBadRequest
@@ -804,8 +804,8 @@ func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 	var req api.ResizeRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSONCon(w, r, &req, 4<<10); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	mc, err := s.mgr.Resize(r.Context(), r.PathValue("ref"), req.MemMiB)
@@ -842,8 +842,8 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 // entrega a Firecracker. No se interpreta aquí: el esquema lo entiende el bridge.
 func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 	var data json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(r.Body, api.MaxMMDSBytes)).Decode(&data); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSONCon(w, r, &data, api.MaxMMDSBytes); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	mc, err := s.mgr.PutMMDS(r.Context(), r.PathValue("ref"), data)
@@ -856,8 +856,8 @@ func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	var req api.CredentialsRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSONCon(w, r, &req, 256<<10); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
@@ -885,17 +885,13 @@ func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Request) {
 	var req api.CredentialsRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSONCon(w, r, &req, 256<<10); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	snap, err := s.mgr.SetSnapshotCredentials(r.PathValue("name"), req.Credentials, req.Clear)
 	if err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "does not exist") {
-			code = http.StatusNotFound
-		}
-		fail(w, code, err)
+		fail(w, snapshotStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
@@ -905,11 +901,7 @@ func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleGetPool(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if _, err := s.mgr.Snapshot(name); err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "does not exist") {
-			code = http.StatusNotFound
-		}
-		fail(w, code, err)
+		fail(w, snapshotStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.mgr.InfoFondo(name))
@@ -924,11 +916,7 @@ func (s *Server) handleSetPool(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := s.mgr.SetFondo(r.PathValue("name"), req.Size)
 	if err != nil {
-		code := http.StatusBadRequest
-		if strings.Contains(err.Error(), "does not exist") {
-			code = http.StatusNotFound
-		}
-		fail(w, code, err)
+		fail(w, snapshotStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
@@ -1083,9 +1071,23 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.filtrarSnapshots(r, s.mgr.Snapshots()))
 }
 
+// removeImageStatus: 400 si el nombre no vale, 404 si no existe, 409 si algo
+// depende de ella y 500 si falló el propio borrado en disco.
+func removeImageStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrInvalidName):
+		return http.StatusBadRequest
+	case errors.Is(err, machine.ErrNoImage):
+		return http.StatusNotFound
+	case errors.Is(err, machine.ErrImageInUse):
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
 func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.RemoveImage(r.PathValue("name")); err != nil {
-		fail(w, http.StatusConflict, err)
+		fail(w, removeImageStatus(err), err)
 		return
 	}
 	// De paso, los temporales de sidecar que dejó un daemon muerto a medias.
@@ -1095,7 +1097,7 @@ func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.RemoveSnapshot(r.PathValue("name")); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, snapshotStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -37,8 +37,8 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req api.ShellRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		fail(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+	if err := decodeJSONCon(w, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
+		fail(w, jsonBodyStatus(err), fmt.Errorf("invalid body: %w", err))
 		return
 	}
 	mc, err := s.mgr.ExecTarget(r.Context(), r.PathValue("ref"))

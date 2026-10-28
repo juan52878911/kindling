@@ -686,11 +686,11 @@ func (m *Manager) loadSnapshotCached(name string) (*api.Snapshot, int64, error) 
 	dir := m.snapDir(name)
 	metaFi, err := os.Stat(filepath.Join(dir, "meta.json"))
 	if err != nil {
-		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	dirFi, err := os.Stat(dir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	metaMod, dirMod := metaFi.ModTime().UnixNano(), dirFi.ModTime().UnixNano()
 
@@ -765,12 +765,12 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 	// El nombre llega de la URL. Sin validarlo, un "../../etc" saldría del
 	// directorio de datos: recorrido de rutas de manual.
 	if !validName.MatchString(name) {
-		return nil, nil, 0, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, nil, 0, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
 	ruta := filepath.Join(m.snapDir(name), "meta.json")
 	b, err := os.ReadFile(ruta)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	// Uno de un kling más nuevo (schema mayor) es un error y no se toca: ni
 	// se restaura ni se anota ni se aparta (esquema.ErrMasNuevo).
@@ -1093,9 +1093,9 @@ func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string)
 	if enUso > 0 {
 		m.mu.Unlock()
 		if restos {
-			return "", restos, nil, fmt.Errorf("snapshot %q is being committed right now", name)
+			return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q is being committed right now", name)
 		}
-		return "", restos, nil, fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
+		return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q is in use right now (an instance is being restored from it, "+
 			"or it is being committed); retry in a moment", name)
 	}
 	if !restos {
@@ -1107,7 +1107,7 @@ func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string)
 		}
 		if len(users) > 0 {
 			m.mu.Unlock()
-			return "", restos, nil, fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
+			return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 		}
 	}
 	destino, rerr = apartar(name)

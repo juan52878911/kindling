@@ -1,9 +1,15 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrBodyTooLarge es el error de LeerCuerpo cuando el cuerpo pasa del tope.
+// Sirve igual para respuestas y para peticiones: quien sirve HTTP lo distingue
+// con errors.Is y contesta 413 solo entonces; un fallo de lectura es otra cosa.
+var ErrBodyTooLarge = errors.New("body too large")
 
 // LeerCuerpo lee como mucho `max` bytes y FALLA si habia mas.
 //
@@ -25,8 +31,9 @@ func LeerCuerpo(r io.Reader, max int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > max {
-		return nil, fmt.Errorf("the response exceeds the %d-byte limit; "+
-			"it was not truncated on purpose because a cut JSON is unreadable", max)
+		// Mensaje neutro: LeerCuerpo lee respuestas y también peticiones.
+		return nil, fmt.Errorf("%w: it exceeds the %d-byte limit; "+
+			"it was not truncated on purpose because a cut JSON is unreadable", ErrBodyTooLarge, max)
 	}
 	return b, nil
 }

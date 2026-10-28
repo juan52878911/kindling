@@ -340,7 +340,7 @@ func layerGuestPath(path string) string {
 // y el sintoma no es un error al borrar sino un invitado que no arranca.
 func (m *Manager) RemoveImage(name string) error {
 	if !validName.MatchString(name) {
-		return fmt.Errorf("invalid image name %q", name)
+		return marcado(ErrInvalidName, "invalid image name %q", name)
 	}
 	if _, ok := m.ImageBase(name); !ok {
 		// Monolitica: puede ser la BASE de otras capas.
@@ -349,7 +349,7 @@ func (m *Manager) RemoveImage(name string) error {
 				continue
 			}
 			if b, ok := m.ImageBase(otra); ok && b == name {
-				return fmt.Errorf("image %q is the base of %q: removing it would leave that layer without a rootfs",
+				return marcado(ErrImageInUse, "image %q is the base of %q: removing it would leave that layer without a rootfs",
 					name, otra)
 			}
 		}
@@ -357,7 +357,7 @@ func (m *Manager) RemoveImage(name string) error {
 	// Y ningun dorado puede depender de ella.
 	for _, s := range m.Snapshots() {
 		if s.Image == name {
-			return fmt.Errorf("image %q is used by the golden snapshot %q: re-import or remove that service first",
+			return marcado(ErrImageInUse, "image %q is used by the golden snapshot %q: re-import or remove that service first",
 				name, s.Name)
 		}
 	}
@@ -366,7 +366,7 @@ func (m *Manager) RemoveImage(name string) error {
 	for _, mc := range m.byID {
 		if mc.Image == name && mc.State != api.StateStopped && mc.State != api.StateFailed {
 			m.mu.RUnlock()
-			return fmt.Errorf("image %q is in use by machine %q", name, mc.Name)
+			return marcado(ErrImageInUse, "image %q is in use by machine %q", name, mc.Name)
 		}
 	}
 	m.mu.RUnlock()
@@ -386,7 +386,7 @@ func (m *Manager) RemoveImage(name string) error {
 		_ = os.Remove(ruta + ".sha256")
 	}
 	if !borrado {
-		return fmt.Errorf("image %q does not exist", name)
+		return marcado(ErrNoImage, "image %q does not exist", name)
 	}
 	return nil
 }

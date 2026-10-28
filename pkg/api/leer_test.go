@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestLeerCuerpoFallaEnVezDeCortar(t *testing.T) {
@@ -37,5 +40,21 @@ func TestElErrorDeTamanoDiceQueEsDeTamano(t *testing.T) {
 		if !strings.Contains(err.Error(), quiero) {
 			t.Errorf("el error no menciona %q: %v", quiero, err)
 		}
+	}
+}
+
+// El daemon decide 413 con errors.Is: el tope tiene que viajar como sentinela,
+// y un fallo de lectura cualquiera no puede parecerlo.
+func TestLeerCuerpoTopeEsSentinela(t *testing.T) {
+	_, err := LeerCuerpo(strings.NewReader("123456"), 5)
+	if !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("err = %v; quiero ErrBodyTooLarge", err)
+	}
+	if strings.Contains(err.Error(), "response") {
+		t.Errorf("el mensaje habla de respuesta y también lee peticiones: %v", err)
+	}
+	_, err = LeerCuerpo(iotest.ErrReader(io.ErrUnexpectedEOF), 5)
+	if err == nil || errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("un fallo de lectura no es de tamaño: %v", err)
 	}
 }
