@@ -17,6 +17,8 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -103,6 +105,11 @@ type Server struct {
 	machineID string
 	budget    *machineBudget
 
+	// hostRoots son las rutas absolutas con las que el host puede nombrar la
+	// raíz de la carpeta (tal cual y con los enlaces resueltos: en macOS /tmp es
+	// /private/tmp). Sirven para traducir enlaces absolutos que apuntan dentro.
+	hostRoots []string
+
 	// uid/gid del dueño de la carpeta, a quien se entrega lo que crea el
 	// invitado si el daemon corre como root. -1 = no se toca.
 	uid, gid int
@@ -119,6 +126,7 @@ func Open(dir string, readOnly bool, machineID string) (*Server, error) {
 	s := &Server{
 		dir: dir, root: root, readOnly: readOnly, uid: -1, gid: -1,
 		machineID: machineID, budget: acquireMachineBudget(machineID),
+		hostRoots: hostRoots(dir),
 	}
 	if os.Geteuid() == 0 {
 		// Si el daemon es root, lo que cree el invitado sería de root en el
@@ -1014,7 +1022,65 @@ func (s *Server) readlink(p string) (string, uint32) {
 	if err != nil {
 		return "", Errno(err)
 	}
+	if strings.HasPrefix(t, "/") {
+		return s.linkInterno(p, t)
+	}
 	return t, 0
+}
+
+// linkInterno traduce el destino absoluto t del enlace p.
+//
+// Un destino absoluto es una ruta DEL HOST: devolverla tal cual le enseñaba al
+// invitado el árbol del anfitrión (/Users/<quien>/..., dónde vive la carpeta), y
+// además el invitado la resolvería contra SU sistema de ficheros, que no tiene
+// nada que ver. Si apunta dentro de la carpeta se devuelve el equivalente
+// relativo desde el directorio del enlace, que el invitado resuelve dentro de su
+// montaje y llega al mismo sitio. Si apunta fuera, EACCES: ni se enseña ni se
+// sigue. Es léxico, y basta: lo devuelto es relativo y el invitado lo resuelve
+// otra vez a través de este servidor, que nunca sale de la raíz.
+func (s *Server) linkInterno(p, t string) (string, uint32) {
+	t = path.Clean(t)
+	for _, root := range s.hostRoots {
+		var dentro string
+		switch {
+		case t == root:
+			dentro = "/"
+		case root == "/":
+			dentro = t
+		case strings.HasPrefix(t, root+"/"):
+			dentro = t[len(root):]
+		default:
+			continue
+		}
+		r, err := filepath.Rel(path.Join("/", path.Dir(p)), dentro)
+		if err != nil || len(r) >= proto.MaxPath {
+			return "", proto.EACCES
+		}
+		return r, 0
+	}
+	return "", proto.EACCES
+}
+
+// hostRoots devuelve las formas absolutas y limpias de dir: tal cual y con los
+// enlaces resueltos, sin repetir.
+func hostRoots(dir string) []string {
+	var out []string
+	add := func(d string) {
+		d = filepath.Clean(d)
+		for _, o := range out {
+			if o == d {
+				return
+			}
+		}
+		out = append(out, d)
+	}
+	if a, err := filepath.Abs(dir); err == nil {
+		add(a)
+		if r, err := filepath.EvalSymlinks(a); err == nil {
+			add(r)
+		}
+	}
+	return out
 }
 
 func (s *Server) statfs() (proto.Statfs, uint32) {

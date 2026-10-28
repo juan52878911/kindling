@@ -364,8 +364,9 @@ func TestFUSEEscapes(t *testing.T) {
 	if e != 0 || a.mode&share.SIFMT != share.SIFLNK {
 		t.Fatalf("lookup etc: %d %+v", e, a)
 	}
-	if e, out := m.dev.pedir(t, opReadlink, etc); e != 0 || string(out) != "/etc" {
-		t.Fatalf("readlink: %d %q", e, out)
+	// Su destino es una ruta absoluta del host fuera de la carpeta: no se enseña.
+	if e, out := m.dev.pedir(t, opReadlink, etc); e != share.EACCES {
+		t.Fatalf("readlink: %d %q, want EACCES", e, out)
 	}
 	if e, _, _ := m.lookup(t, etc, "passwd"); e == 0 {
 		t.Fatal("looked up /etc/passwd through the share")
