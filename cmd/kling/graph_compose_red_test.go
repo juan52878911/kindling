@@ -41,6 +41,18 @@ networks:
 			t.Errorf("unexpected %s in\n%s", no, tr.Grafo)
 		}
 	}
+	// Un valor suelto igual a un servicio solo es un host en una variable de
+	// host: POSTGRES_USER=app es un usuario.
+	src2 := "services:\n  app: {image: x/a, ports: [\"3000\"]}\n  db:\n    image: postgres:16\n    environment: {POSTGRES_USER: app, PEER_HOST: app}\n"
+	tr2, err := traducirCompose([]byte(src2), "p", false, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range tr2.por["db"].env {
+		if kv[0] == "POSTGRES_USER" && kv[1] != "app" || kv[0] == "PEER_HOST" && kv[1] != "app.graph" {
+			t.Errorf("%s = %s", kv[0], kv[1])
+		}
+	}
 	// El host de un servicio de otra red no se reescribe.
 	for _, kv := range tr.por["app"].env {
 		if kv[0] == "OTRO" && kv[1] != "http://aislado:9000" {

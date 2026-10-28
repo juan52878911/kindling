@@ -282,7 +282,7 @@ func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(s
 			}
 		}
 		for i, kv := range s.env {
-			nv, cambios := reescribirHosts(kv[1], alcanzables)
+			nv, cambios := reescribirHosts(kv[0], kv[1], alcanzables)
 			for _, c := range cambios {
 				if s.refs == nil {
 					s.refs = map[string]bool{}
@@ -1046,16 +1046,23 @@ func puertoDeSalud(test []string, puertos []int, def int) int {
 	return def
 }
 
-// reescribirHosts cambia el nombre de un servicio usado como host en un valor
-// ("db", "postgres://u:p@db:5432/x", "http://api:8081") por <nodo>.graph.
-func reescribirHosts(v string, por map[string]*servicioCompose) (string, []string) {
+// reHostVar: una variable cuyo valor entero puede ser un host (DB_HOST,
+// REDIS_HOSTNAME, SMTP_SERVER, API_ADDR). Un valor suelto igual al nombre de
+// un servicio solo se reescribe en ellas: POSTGRES_USER=app con un servicio
+// app es un usuario, no un host.
+var reHostVar = regexp.MustCompile(`(?i)(HOST|HOSTNAME|HOSTS|SERVER|SERVERS|ADDR|ADDRESS)$`)
+
+// reescribirHosts cambia el nombre de un servicio usado como host en el valor
+// de la variable k ("postgres://u:p@db:5432/x", "http://api:8081" en
+// cualquiera; "db" suelto solo en una variable de host) por <nodo>.graph.
+func reescribirHosts(k, v string, por map[string]*servicioCompose) (string, []string) {
 	var cambios []string
 	for _, n := range clavesOrd(por) {
 		s := por[n]
 		if s.skip {
 			continue
 		}
-		if v == n {
+		if v == n && reHostVar.MatchString(k) {
 			v = s.nodo + "." + api.GraphDomain
 			cambios = append(cambios, n)
 			continue
