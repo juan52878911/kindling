@@ -39,7 +39,7 @@ int khv_prueba(const uint8_t *d, size_t n) {
     unlink(ruta);
     if (r != 0) return -1;
     static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
-    vnet_init(-1, mac, 49);
+    vnet_init(-1, mac, 16384, 49);
     vrng_init(50);
     vsock_init(51);
     if (vballoon_init(52, true) != 0) return -1;

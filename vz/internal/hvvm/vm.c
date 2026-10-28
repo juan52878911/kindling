@@ -181,6 +181,7 @@ static bool disk_ro[KHV_MAX_DISKS];
 static bool hay_red, hay_rng, hay_vsock, hay_globo;
 static int net_fd = -1;
 static uint8_t net_mac[6];
+static int net_mtu;
 static char *kernel_path, *cmdline, *ram_dir;
 static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
 static int slot_net = -1, slot_rng = -1, slot_vsock = -1, slot_globo = -1, nvirtio;
@@ -653,6 +654,7 @@ int khv_create(const struct khv_config *c) {
   hay_globo = c->balloon != 0;
   net_fd = c->net_fd;
   memcpy(net_mac, c->mac, 6);
+  net_mtu = c->mtu;
   kernel_path = strdup(c->kernel ? c->kernel : "");
   cmdline = strdup(c->cmdline ? c->cmdline : "");
   ram_dir = strdup(c->ram_dir ? c->ram_dir : ".");
@@ -689,7 +691,7 @@ int khv_create(const struct khv_config *c) {
     disk_ro[i] = c->disks[i].ro != 0;
     if (vblk_init(i, disk_path[i], disk_ro[i], virtio_intid[i]) != 0) return -1;
   }
-  if (hay_red) vnet_init(net_fd, net_mac, virtio_intid[slot_net]);
+  if (hay_red) vnet_init(net_fd, net_mac, net_mtu, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);
   if (hay_vsock) vsock_init(virtio_intid[slot_vsock]);
   if (hay_globo && vballoon_init(virtio_intid[slot_globo], c->balloon == 2) != 0) return -1;

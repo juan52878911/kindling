@@ -129,6 +129,13 @@ func run() int {
 		logf("KLING_VZ_VSOCK: %v", err)
 		return 2
 	}
+	// La MTU del enlace, también con la variable de kling-vz: 16384 por
+	// defecto en las máquinas que arrancan (spec.DefaultMTU).
+	mtu, err := spec.ParseMTU(os.Getenv("KLING_VZ_MTU"))
+	if err != nil {
+		logf("KLING_VZ_MTU: %v", err)
+		return 2
+	}
 
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
@@ -179,6 +186,7 @@ func run() int {
 	srv := server.New(server.Deps{
 		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},
 		Vsock:   vsock,
+		MTU:     mtu,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			var pg vnet.PGProxy
 			if c.CredentialsPG != nil {
@@ -186,6 +194,7 @@ func run() int {
 			}
 			return vnet.New(vnet.Config{
 				GuestMAC:      c.GuestMAC,
+				MTU:           c.MTU,
 				MMDS:          c.MMDS,
 				MMDSAddr:      c.MMDSAddr,
 				Policy:        c.Policy,

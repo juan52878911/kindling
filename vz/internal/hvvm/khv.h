@@ -49,6 +49,7 @@ struct khv_config {
   struct khv_disk disks[KHV_MAX_DISKS];
   int net_fd;  // -1 sin red: socket SOCK_DGRAM, una trama por datagrama
   uint8_t mac[6];
+  int mtu;         // MTU del enlace (VIRTIO_NET_F_MTU); 0 = sin anunciar (1500)
   int rng;         // virtio-rng
   int vsock;       // virtio-vsock (el agente por AF_VSOCK)
   int balloon;     // virtio-balloon: 0 sin globo, 1 con él, 2 con deflate_on_oom
@@ -189,7 +190,7 @@ struct vnet_state {
   struct vmmio m;
   struct vq q[2];
 };
-void vnet_init(int fd, const uint8_t mac[6], uint32_t intid);
+void vnet_init(int fd, const uint8_t mac[6], int mtu, uint32_t intid);
 bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
 void vnet_get(struct vnet_state *s);
 void vnet_reafirmar(void);

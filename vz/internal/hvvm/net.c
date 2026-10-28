@@ -17,6 +17,9 @@ static struct vnet_state s;
 static int fd = -1;
 static uint32_t intid;
 static uint8_t mac[6];
+// MTU que se anuncia al invitado (VIRTIO_NET_F_MTU), la misma con la que se
+// montó la pila de usuario (vnet.Config.MTU); 0 = no se anuncia (1500).
+static uint16_t mtu;
 // mu protege el estado y la RAM que toca el hilo de recepción: con g_pausa
 // puesto (bajo mu, en vnet_quieto) el hilo no escribe en el invitado.
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -108,9 +111,12 @@ static void *rx_hilo(void *a) {
   }
 }
 
-void vnet_init(int net_fd, const uint8_t m[6], uint32_t id) {
+void vnet_init(int net_fd, const uint8_t m[6], int mtu_enlace, uint32_t id) {
   fd = net_fd;
   memcpy(mac, m, 6);
+  // Las tramas caben en los búferes de tx y rx (64 KiB) con cualquier MTU que
+  // admite el spec (hasta 65535).
+  mtu = mtu_enlace > 1500 && mtu_enlace <= 65535 ? (uint16_t)mtu_enlace : 0;
   intid = id;
   if (fd >= 0) {
     pthread_t t;
@@ -121,11 +127,13 @@ void vnet_init(int net_fd, const uint8_t m[6], uint32_t id) {
 
 bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   pthread_mutex_lock(&mu);
-  if (off >= 0x100) {  // configuración: mac[6], status u16
+  if (off >= 0x100) {  // configuración: mac[6], status u16, max_virtqueue_pairs u16, mtu u16
     if (!escribir) {
       uint8_t cfg[16] = {0};
       memcpy(cfg, mac, 6);
       cfg[6] = 1;  // VIRTIO_NET_S_LINK_UP
+      cfg[8] = 1;  // un par de colas
+      memcpy(cfg + 10, &mtu, 2);
       uint64_t o = off - 0x100, r = 0;
       if (o + (uint64_t)size <= sizeof cfg) memcpy(&r, cfg + o, (size_t)size);
       *val = r;
@@ -134,8 +142,12 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
     return true;
   }
   uint32_t cola = 0;
-  // VIRTIO_NET_F_MAC (5), VIRTIO_NET_F_STATUS (16).
-  switch (vmmio_acceso(&s.m, s.q, 2, 1, (1u << 5) | (1u << 16), off, escribir, val, &cola)) {
+  // VIRTIO_NET_F_MAC (5), VIRTIO_NET_F_STATUS (16) y, con una MTU mayor que
+  // 1500, VIRTIO_NET_F_MTU (3): el virtio_net de Linux la adopta solo, como con
+  // el adjunto de vz. Sin VIRTIO_NET_F_MRG_RXBUF el invitado reserva búferes
+  // del tamaño de la MTU (ver spec.DefaultMTU).
+  uint64_t feat = (1u << 5) | (1u << 16) | (mtu ? (1u << 3) : 0);
+  switch (vmmio_acceso(&s.m, s.q, 2, 1, feat, off, escribir, val, &cola)) {
     case VM_NOTIFY:
       if (cola == 1) tx();
       else if (cola == 0) pthread_cond_broadcast(&cv);

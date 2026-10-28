@@ -143,6 +143,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 			}
 			mac = m
 		}
+		// La MTU del enlace (la del Spec, que es la del snapshot al
+		// restaurar): se anuncia al invitado, como hace vz con el adjunto.
+		cfg.mtu = C.int(s.MTU)
 	}
 	for i := 0; i < 6; i++ {
 		cfg.mac[i] = C.uint8_t(mac[i])
