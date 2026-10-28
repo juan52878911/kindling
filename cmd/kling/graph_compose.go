@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -521,6 +522,14 @@ func (t *traduccionCompose) volumes(s *servicioCompose, v any, decl map[string]s
 			continue
 		}
 		s.vols = append(s.vols, api.VolumeAttachment{Name: kn, Mount: dst, ReadOnly: ro})
+		// Un volumen de kling es un ext4 recién hecho, con lost+found: initdb
+		// no inicializa en la raíz de un punto de montaje.
+		if imagenBase(s.imagen) == "postgres" && dst == "/var/lib/postgresql/data" && !ro {
+			if !slices.ContainsFunc(s.env, func(kv [2]string) bool { return kv[0] == "PGDATA" }) {
+				s.env = append(s.env, [2]string{"PGDATA", dst + "/pgdata"})
+				avisa("%svolumes: %s: a new volume has a lost+found that initdb refuses; PGDATA=%s/pgdata is set (baked into the image)", pre, desc, dst)
+			}
+		}
 	}
 }
 
