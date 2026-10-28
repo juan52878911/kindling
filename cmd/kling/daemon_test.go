@@ -9,7 +9,7 @@ import (
 func TestDaemonBackend(t *testing.T) {
 	nativo := "firecracker"
 	if runtime.GOOS == "darwin" {
-		nativo = "vz"
+		nativo = "auto" // lo resuelve resolverBackend a hv o vz
 	}
 	if runtime.GOOS == "darwin" && runtime.GOARCH != "arm64" {
 		t.Skip("vz solo en Apple Silicon")
@@ -22,7 +22,7 @@ func TestDaemonBackend(t *testing.T) {
 		t.Fatalf("KLING_VMM ruta = %q, %v", b, err)
 	}
 	otro := "vz"
-	if nativo == "vz" {
+	if runtime.GOOS == "darwin" {
 		otro = "firecracker"
 	}
 	if _, err := daemonBackend(otro, "", runtime.GOOS, runtime.GOARCH); err == nil {

@@ -676,18 +676,19 @@ func jsonBodyStatus(err error) int {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
-		Version:      Version,
-		API:          api.APIVersion,
-		Root:         s.root,
-		KVM:          kvmErr == nil,
-		Machines:     s.contarMaquinas(r),
-		Capabilities: Capabilities,
-		Backend:      s.mgr.Backend(),
-		Arch:         runtime.GOARCH,
-		ShareRoots:   s.mgr.ShareRoots(),
-		CoW:          s.mgr.CoWInfo(),
-		Authz:        s.infoAuthz(r),
-		Clone:        s.mgr.CloneInfo(),
+		Version:       Version,
+		API:           api.APIVersion,
+		Root:          s.root,
+		KVM:           kvmErr == nil,
+		Machines:      s.contarMaquinas(r),
+		Capabilities:  Capabilities,
+		Backend:       s.mgr.Backend(),
+		BackendReason: s.mgr.BackendMotivo(),
+		Arch:          runtime.GOARCH,
+		ShareRoots:    s.mgr.ShareRoots(),
+		CoW:           s.mgr.CoWInfo(),
+		Authz:         s.infoAuthz(r),
+		Clone:         s.mgr.CloneInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado

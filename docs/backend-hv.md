@@ -21,14 +21,22 @@ Firecracker.
 
 ## Elegirlo
 
+Es el de por defecto en macOS 15.2 o posterior: `daemon.vmm` vale `auto` si
+no se fija, y el daemon elige `hv` al arrancar si `kling-hv` está, va firmado y
+pasa su sonda (`kling-hv --probe`); si no, `vz`, y dice por qué
+([`mac.md`](mac.md), «El backend es una opción de configuración»). Para fijarlo:
+
 ```
 kling config set daemon.vmm hv        # o KLING_VMM=hv para el daemon
 ```
 
 `hv` se valida como `vz`: solo macOS en Apple Silicon. El daemon busca
 `kling-hv` junto a `kling` y luego en el `PATH` (`KLING_VMM=/ruta` lo fuerza).
-Se compila con `vz/build-hv.sh` (cgo + firma ad-hoc con
-`com.apple.security.hypervisor`; sin ella `hv_vm_create` da `HV_DENIED`).
+La release lo trae (`kling-hv-darwin-arm64`, en `SHA256SUMS`) y `install.sh` y
+`kling upgrade` lo dejan junto a `kling`. Desde el repo se compila con
+`make vz` (o `vz/build-hv.sh`: cgo + firma ad-hoc con
+`com.apple.security.hypervisor`; sin ella `hv_vm_create` da `HV_DENIED`) y
+`make install` lo copia.
 
 Los dorados no se comparten entre backends: el sello del snapshot lleva
 `kling-hv x.y.z`, y uno de `kling-vz` sale como obsoleto (hay que rehacerlo).
@@ -140,8 +148,8 @@ de vCPU.
 
 ## Lo que cambia en el núcleo con `hv`
 
-- `kling up -check` mira `kling-hv`, su entitlement y macOS 15 cuando
-  `daemon.vmm` es `hv`; `make vz` compila los dos VMM.
+- `kling up -check` mira `kling-hv`, su entitlement y macOS 15.2 cuando el
+  backend es `hv` (fijado o elegido por `auto`); `make vz` compila los dos VMM.
 - Si una creación, un arranque o una restauración fallan después de crear la
   VM de Hypervisor.framework (una por proceso, sin vuelta atrás), `kling-hv`
   sale con código 1 tras contestar, para que el núcleo lance uno nuevo; el
@@ -186,5 +194,3 @@ cada máquina es otro proceso de ~8 MiB que `kling top` no suma.
   en vez del custodio: ~8 MiB menos por máquina, en vz también.
 - `sandbox_init` cuesta ~10 ms y ~3 MiB por proceso: un perfil precompilado
   lo bajaría.
-- Empaquetar `kling-hv` en `release.sh`, `install.sh`, `release.yml` y `kling
-  upgrade` (hoy solo llevan `kling-vz`).

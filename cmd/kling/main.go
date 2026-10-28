@@ -362,14 +362,20 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 
-	backend, err := daemonBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH)
+	// Con daemon.vmm auto (el de macOS) se elige aquí, una vez: hasta el
+	// próximo arranque el daemon habla con ese VMM.
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
 	if err != nil {
 		return err
 	}
 	if err := machine.ElegirBackend(backend); err != nil {
 		return err
 	}
-	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
+	if motivo != "" {
+		machine.FijarMotivoBackend(motivo)
+		log.Printf("vmm: %s (%s)", backend, motivo)
+	}
+	vmm := machine.ResolverVMM(backend, envVMM(), *fcBin)
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
 	machine.SetCredAuditConfig(credAuditConfig())
@@ -509,13 +515,23 @@ func cowConfig() machine.CoWConfig {
 	return c
 }
 
+// envVMM es KLING_VMM para buscar el binario: "auto" no es un binario, es
+// la elección que ya hizo resolverBackend.
+func envVMM() string {
+	if v := os.Getenv("KLING_VMM"); v != config.VMMAuto {
+		return v
+	}
+	return ""
+}
+
 // daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
-// nombre de backend, si no la clave daemon.vmm, si no el de la plataforma. Y
+// nombre de backend, si no la clave daemon.vmm, si no el de la plataforma
+// (en macOS, auto: lo resuelve resolverBackend). Y
 // comprueba que ESTE binario sepa hablarlo: lo que hace el host alrededor del
 // VMM (red, cgroups, /proc) va compilado para un sistema concreto.
 func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	backend := ajuste
-	if env == config.VMMFirecracker || env == config.VMMVZ || env == config.VMMHV {
+	if env == config.VMMFirecracker || env == config.VMMVZ || env == config.VMMHV || env == config.VMMAuto {
 		backend = env
 	}
 	if backend == "" {
@@ -524,7 +540,9 @@ func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	if err := config.ValidateVMM(backend, goos, goarch); err != nil {
 		return "", fmt.Errorf("daemon.vmm: %w", err)
 	}
-	if !machine.BackendSoportado(backend) {
+	// auto se resuelve después (resolverBackend), a vz o hv: los dos los
+	// habla el binario de macOS, y ValidateVMM ya exigió darwin/arm64.
+	if backend != config.VMMAuto && !machine.BackendSoportado(backend) {
 		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, machine.BackendCompilado())
 	}
 	return backend, nil
@@ -1502,7 +1520,11 @@ func writeInfo(c *api.Client, i *api.Info) {
 	if backend == "" {
 		backend = "firecracker" // daemon anterior a v0.9: siempre lo era
 	}
-	fmt.Printf("backend:      %s\n", backend)
+	if i.BackendReason != "" {
+		fmt.Printf("backend:      %s (%s)\n", backend, i.BackendReason)
+	} else {
+		fmt.Printf("backend:      %s\n", backend)
+	}
 	if i.Arch != "" {
 		fmt.Printf("arch:         %s\n", i.Arch)
 	}

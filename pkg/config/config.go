@@ -111,8 +111,9 @@ type Defaults struct {
 type Daemon struct {
 	// VMM es el backend con el que el daemon arranca las microVMs:
 	// "firecracker" (Linux con KVM), "vz" (macOS en Apple Silicon, con
-	// kling-vz) o "hv" (lo mismo con kling-hv). Vacío = el de la plataforma (ver DefaultVMM). KLING_VMM lo
-	// sustituye sin tocar el fichero.
+	// kling-vz), "hv" (lo mismo con kling-hv) o "auto" (macOS: hv si este Mac
+	// lo admite, si no vz; se decide al arrancar el daemon). Vacío = el de la
+	// plataforma (ver DefaultVMM). KLING_VMM lo sustituye sin tocar el fichero.
 	VMM string `json:"vmm,omitempty"`
 
 	// ShareRoots son los directorios del host bajo los que se pueden compartir
@@ -204,13 +205,16 @@ const (
 	// VMMHV es kling-hv: Hypervisor.framework con la RAM en un fichero
 	// mapeado (restaurar no copia la memoria). Mismo contrato que vz.
 	VMMHV = "hv"
+	// VMMAuto es la elección del daemon de macOS al arrancar: hv si el macOS,
+	// kling-hv y su sonda lo permiten; si no, vz (docs/mac.md).
+	VMMAuto = "auto"
 )
 
-// DefaultVMM es el backend de la plataforma: vz en macOS, firecracker en el
-// resto.
+// DefaultVMM es el backend de la plataforma: auto en macOS (hv o vz, lo
+// decide el daemon), firecracker en el resto.
 func DefaultVMM(goos string) string {
 	if goos == "darwin" {
-		return VMMVZ
+		return VMMAuto
 	}
 	return VMMFirecracker
 }
@@ -226,12 +230,12 @@ func ValidateVMM(name, goos, goarch string) error {
 			return fmt.Errorf("vmm %q needs Linux with KVM, and this is %s/%s: use %q here (or point the CLI at a Linux host with `kling context add`)",
 				name, goos, goarch, DefaultVMM(goos))
 		}
-	case VMMVZ, VMMHV:
+	case VMMVZ, VMMHV, VMMAuto:
 		if goos != "darwin" || goarch != "arm64" {
 			return fmt.Errorf("vmm %q needs macOS on Apple Silicon (darwin/arm64), and this is %s/%s", name, goos, goarch)
 		}
 	default:
-		return fmt.Errorf("unknown vmm %q: use %q, %q or %q", name, VMMFirecracker, VMMVZ, VMMHV)
+		return fmt.Errorf("unknown vmm %q: use %q, %q, %q or %q", name, VMMFirecracker, VMMVZ, VMMHV, VMMAuto)
 	}
 	return nil
 }

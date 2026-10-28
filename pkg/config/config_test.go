@@ -211,6 +211,8 @@ func TestValidateVMM(t *testing.T) {
 		{"hv", "darwin", "arm64", true},
 		{"hv", "darwin", "amd64", false},
 		{"hv", "linux", "arm64", false},
+		{"auto", "darwin", "arm64", true},
+		{"auto", "linux", "amd64", false},
 		{"qemu", "linux", "amd64", false},
 	}
 	for _, c := range casos {
@@ -219,7 +221,7 @@ func TestValidateVMM(t *testing.T) {
 			t.Errorf("ValidateVMM(%s, %s/%s) = %v", c.name, c.goos, c.goarch, err)
 		}
 	}
-	if DefaultVMM("darwin") != VMMVZ || DefaultVMM("linux") != VMMFirecracker {
+	if DefaultVMM("darwin") != VMMAuto || DefaultVMM("linux") != VMMFirecracker {
 		t.Fatal("DefaultVMM")
 	}
 }

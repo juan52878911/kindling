@@ -79,17 +79,36 @@ busca `mkfs.ext4`, `debugfs`, `e2fsck` y `resize2fs` también en
 ### El backend es una opción de configuración
 
 ```sh
-kling config set daemon.vmm vz     # "vz" o "firecracker"
+kling config set daemon.vmm auto   # "auto", "hv", "vz" o "firecracker"
 kling config show                  # sin valor muestra el de la plataforma
 ```
 
-Sin valor, el daemon usa el de su plataforma: `vz` en macOS, `firecracker` en
-Linux. Se valida al escribirla y al arrancar el daemon: `vz` exige macOS en Apple
-Silicon y `firecracker` exige Linux con KVM, y el error dice cuál vale aquí.
-`KLING_VMM` la sustituye sin tocar el fichero: con un nombre (`vz`,
-`firecracker`) elige el backend; con una ruta, el binario.
+Sin valor, el daemon usa el de su plataforma: `auto` en macOS, `firecracker` en
+Linux. Se valida al escribirla y al arrancar el daemon: `auto`, `hv` y `vz`
+exigen macOS en Apple Silicon y `firecracker` exige Linux con KVM, y el error
+dice cuál vale aquí. `KLING_VMM` la sustituye sin tocar el fichero: con un
+nombre (`auto`, `hv`, `vz`, `firecracker`) elige el backend; con una ruta, el
+binario.
 
-`kling status -v` dice qué backend usa un daemon (`backend: vz`) y su arquitectura.
+Con `auto` el daemon elige **al arrancar**, una vez, y no cambia hasta que se
+reinicia:
+
+1. `hv` si macOS es 15.2 o posterior (la tabla de arriba), `kling-hv` está
+   junto a `kling` o en el `PATH`, va firmado con
+   `com.apple.security.hypervisor` y su sonda (`kling-hv --probe`: crea y
+   destruye una VM vacía con su GIC, menos de 10 ms) contesta `ok`;
+2. si no, `vz`.
+
+La elección y su motivo salen en el log (`vmm: hv (auto: macOS 26.5,
+/Users/…/kling-hv signed and probed)`), en `GET /info` (`backend_reason`) y en
+`kling status -v` (`backend: hv (auto: …)`); `kling up -check` hace la misma
+elección y, si se queda en `vz`, avisa de por qué. `daemon.vmm hv` o `vz`
+explícitos no sondean nada: `hv` falla al arrancar la primera microVM si
+`kling-hv` no vale aquí. Para probar la caída a `vz` en un Mac donde `hv`
+funciona, `KLING_HV_PROBE_FAIL=1` da la sonda por fallida.
+
+Los dorados son de un VMM: al pasar de `vz` a `hv` (o al revés) los que había
+salen obsoletos y hay que rehacerlos (`kling status` lo dice con la orden).
 
 ## Dónde vive
 

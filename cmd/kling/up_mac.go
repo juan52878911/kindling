@@ -28,6 +28,7 @@ const launchAgentLabel = "dev.kindling.daemon"
 // probeMac es la foto de un Mac como host de microVMs.
 type probeMac struct {
 	backend     string // machine.BackendVZ o machine.BackendHV
+	motivo      string // por qué ese backend ("auto: …", "daemon.vmm hv")
 	arch        string
 	macOS       string // "15.5"; vacío si no se pudo leer
 	vmm         string // ruta de kling-vz (o kling-hv); vacío si no está
@@ -43,13 +44,14 @@ type probeMac struct {
 
 func localProbeMac(root string) probeMac {
 	// El backend que usaría el daemon (KLING_VMM, daemon.vmm o el de la
-	// plataforma): con daemon.vmm hv lo que hay que tener es kling-hv.
-	backend, err := daemonBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH)
+	// plataforma, auto resuelto como lo hará él al arrancar): con hv lo que
+	// hay que tener es kling-hv.
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
 	if err != nil || (backend != machine.BackendVZ && backend != machine.BackendHV) {
-		backend = machine.BackendVZ
+		backend, motivo = machine.BackendVZ, ""
 	}
-	p := probeMac{backend: backend, arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
-	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), "")
+	p := probeMac{backend: backend, motivo: motivo, arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
+	vmm := machine.ResolverVMM(backend, envVMM(), "")
 	if path, err := exec.LookPath(vmm); err == nil {
 		p.vmm = path
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -133,7 +135,7 @@ func checksMac(p probeMac) []check {
 	if backend == machine.BackendHV {
 		whyMacOS = "kling-hv needs the in-kernel GIC of Hypervisor.framework and is built for macOS " + macOSMinHV + " or later"
 	}
-	return []check{
+	cs := []check{
 		{
 			label: "Apple Silicon", ok: p.arch == "arm64", fatal: true,
 			found: p.arch,
@@ -188,12 +190,30 @@ func checksMac(p probeMac) []check {
 			fix:   []string{copyHint},
 		},
 	}
+	// Con auto, quedarse en vz no es un fallo (vz funciona), pero se dice por
+	// qué no es hv y cómo llegar a él.
+	if motivo, ok := strings.CutPrefix(p.motivo, "auto: "); ok && backend == machine.BackendVZ {
+		cs = append(cs, check{
+			label: "kling-hv (daemon.vmm auto)", ok: false,
+			found: "using vz: " + motivo,
+			why:   "kling-hv restores in milliseconds and shares the memory of a golden's copies (docs/backend-hv.md)",
+			fix: []string{
+				"needs macOS " + macOSMinHV + "+ and kling-hv signed next to kling: the release installer ships it, or  make vz && make install",
+				"kling config set daemon.vmm vz      # to stay on vz without this notice",
+			},
+		})
+	}
+	return cs
 }
 
 // upMac diagnostica este Mac y, si se puede, arranca el daemon.
 func upMac(root string, checkOnly bool) error {
 	p := localProbeMac(root)
-	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n\n", p.backend, root)
+	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n", p.backend, root)
+	if p.motivo != "" {
+		fmt.Printf("vmm:         %s (%s)\n", p.backend, p.motivo)
+	}
+	fmt.Println()
 	cs := checksMac(p)
 	fatal, warn := printChecks(cs, "")
 	if fatal > 0 {

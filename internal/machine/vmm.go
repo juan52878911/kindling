@@ -33,6 +33,17 @@ const (
 // Backend es el VMM con el que arranca este daemon.
 func (m *Manager) Backend() string { return backendVMM }
 
+// motivoBackend es por qué el daemon usa backendVMM ("auto: macOS 26.5,
+// kling-hv signed and probed"); vacío en Linux. Lo fija el daemon al
+// arrancar, antes de servir.
+var motivoBackend string
+
+// FijarMotivoBackend guarda por qué se eligió el backend (GET /info).
+func FijarMotivoBackend(m string) { motivoBackend = m }
+
+// BackendMotivo es por qué este daemon usa su backend.
+func (m *Manager) BackendMotivo() string { return motivoBackend }
+
 // BackendCompilado es el VMM para el que se compiló este binario: el gestor
 // solo sabe hablar con ese, porque lo que hace el host alrededor del VMM
 // (red, cgroups, /proc) va por etiquetas de compilación.

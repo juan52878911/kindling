@@ -9,6 +9,31 @@
 // snapshot cuesta milisegundos y casi nada de memoria. Ver docs/backend-hv.md.
 package main
 
+/*
+#cgo CFLAGS: -mmacosx-version-min=15.2
+#cgo LDFLAGS: -framework Hypervisor
+#include <Hypervisor/Hypervisor.h>
+
+// khv_sondear crea y destruye una VM con el GIC del framework, sin vCPU ni
+// RAM: lo mínimo que dice si este proceso puede ser un kling-hv aquí (el
+// entitlement, un hipervisor disponible, el GIC de macOS 15). *paso es lo que
+// llegó a hacer: 0 = hv_vm_create, 1 = el GIC.
+static hv_return_t khv_sondear(int *paso) {
+	*paso = 0;
+	hv_return_t r = hv_vm_create(NULL);
+	if (r != HV_SUCCESS) return r;
+	*paso = 1;
+	hv_gic_config_t g = hv_gic_config_create();
+	r = hv_gic_config_set_distributor_base(g, 0x08000000ULL);
+	if (r == HV_SUCCESS) r = hv_gic_config_set_redistributor_base(g, 0x0A000000ULL);
+	if (r == HV_SUCCESS) r = hv_gic_create(g);
+	os_release(g);
+	hv_vm_destroy();
+	return r;
+}
+*/
+import "C"
+
 import (
 	"context"
 	_ "embed"
@@ -36,6 +61,34 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
 )
+
+// sondear es --probe: lo que mira el daemon con daemon.vmm auto antes de
+// elegir hv. Cuesta unos ms y no deja nada (la VM es del proceso, que sale).
+func sondear() int {
+	var paso C.int
+	r := C.khv_sondear(&paso)
+	if r == C.HV_SUCCESS {
+		fmt.Println("ok")
+		return 0
+	}
+	que := "hv_vm_create"
+	if paso == 1 {
+		que = "hv_gic_create"
+	}
+	por := ""
+	switch r {
+	case C.HV_DENIED:
+		por = " (denied: not signed with com.apple.security.hypervisor?)"
+	case C.HV_UNSUPPORTED:
+		por = " (unsupported: no hypervisor here, e.g. a VM without nested virtualization)"
+	case C.HV_BUSY:
+		por = " (busy)"
+	case C.HV_NO_RESOURCES:
+		por = " (no resources)"
+	}
+	fmt.Fprintf(os.Stderr, "kling-hv: %s failed: 0x%x%s\n", que, uint32(r), por)
+	return 1
+}
 
 // version la fija el build con -ldflags "-X main.version=...".
 var version = "0.1.0-dev"
@@ -103,6 +156,7 @@ func run() int {
 	sock := fs.String("api-sock", "", "unix socket for the Firecracker-compatible API")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	formats := fs.Bool("snapshot-formats", false, "print the oldest and newest snapshot formats (kling_vz) this build reads, and exit")
+	probe := fs.Bool("probe", false, "create and destroy an empty VM with its GIC to check Hypervisor.framework works here, and exit (0 = ok)")
 	_ = fs.String("id", "", "instance id (ignored)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
@@ -115,6 +169,9 @@ func run() int {
 		min, max := spec.Formatos()
 		fmt.Println(min, max)
 		return 0
+	}
+	if *probe {
+		return sondear()
 	}
 	if *sock == "" {
 		fmt.Fprintln(os.Stderr, "kling-hv: --api-sock is required")
