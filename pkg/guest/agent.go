@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/share"
@@ -44,8 +45,13 @@ import (
 type Agent struct {
 	// Env es el entorno para los procesos que lance el invitado: el del
 	// proceso más NODE_PATH/PYTHONPATH apuntando a los volúmenes que traen
-	// paquetes. Se calcula una vez, después de montar.
-	Env []string
+	// paquetes. Se calcula después de montar: en New, o con VolumeWait cuando
+	// el host monta los volúmenes (recalcularBiblioteca). Leerlo con Entorno.
+	Env   []string
+	envMu sync.RWMutex
+	// bibUna: con VolumeWait, NODE_PATH/PYTHONPATH se recalculan una vez,
+	// al montarse los volúmenes.
+	bibUna sync.Once
 
 	// Reaper es el cosechador de huérfanos del proceso. Cualquier hijo que se
 	// quiera esperar tiene que arrancarse con Reaper.StartTracked, o el
@@ -114,7 +120,8 @@ func New() (*Agent, error) {
 
 	// Con kling.volwait=1 los monta el host (POST /volume/acquire) cuando
 	// toque: volume_wait.go.
-	if volumeWaitWanted() {
+	espera := volumeWaitWanted()
+	if espera {
 		log.Printf("volumes: left unmounted until the host asks (%s=1)", api.VolumeWaitBootParam)
 	} else if err := a.Volumes.Acquire(); err != nil {
 		return nil, err
@@ -128,12 +135,46 @@ func New() (*Agent, error) {
 	a.applyMachineCmd(MachineCmdRequired(), FetchMMDS)
 	a.Env = cpuQuirkEnv(a.Env)
 	readyState.setEnv(a.Env)
-	for _, kv := range a.Env {
+	logBiblioteca(a.Env)
+	if espera {
+		// Sin los volúmenes montados, LibraryEnv no ve sus paquetes: cuando el
+		// host los monte, otra vez (los exec también, no solo el servicio).
+		go func() {
+			<-a.Volumes.acquiredCh()
+			a.recalcularBiblioteca()
+		}()
+	}
+	return a, nil
+}
+
+func logBiblioteca(env []string) {
+	for _, kv := range env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
 			log.Printf("library: %s", kv)
 		}
 	}
-	return a, nil
+}
+
+// Entorno es el entorno de los procesos del invitado (ver Env), en este
+// momento.
+func (a *Agent) Entorno() []string {
+	a.envMu.RLock()
+	defer a.envMu.RUnlock()
+	return append([]string(nil), a.Env...)
+}
+
+// recalcularBiblioteca añade a Env los NODE_PATH/PYTHONPATH de los volúmenes
+// ya montados. Una vez: la llaman el aviso del montaje y el arranque del
+// servicio, el primero que llegue.
+func (a *Agent) recalcularBiblioteca() {
+	a.bibUna.Do(func() {
+		a.envMu.Lock()
+		a.Env = LibraryEnv(a.Env, a.Volumes.Specs())
+		env := append([]string(nil), a.Env...)
+		a.envMu.Unlock()
+		readyState.setEnv(env)
+		logBiblioteca(env)
+	})
 }
 
 // Register añade las rutas del agente a mux. /exec solo existe si el kernel la
@@ -189,9 +230,11 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	mux.HandleFunc(share.AttachPath, shareState.AttachHandler())
 
 	if ExecEnabled() {
-		mux.HandleFunc("/exec", ExecHandler(a.Env))
-		mux.HandleFunc("/exec/stream", StreamExecHandler(a.Env))
-		mux.HandleFunc("/exec/pty", ShellHandler(a.Env))
+		// El entorno de cada exec se lee al llegar: con VolumeWait cambia al
+		// montarse los volúmenes.
+		mux.HandleFunc("/exec", ExecHandlerFunc(a.Entorno))
+		mux.HandleFunc("/exec/stream", StreamExecHandlerFunc(a.Entorno))
+		mux.HandleFunc("/exec/pty", ShellHandlerFunc(a.Entorno))
 		mux.HandleFunc("/files", FilesHandler())
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
 	}
