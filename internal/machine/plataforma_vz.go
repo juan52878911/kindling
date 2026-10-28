@@ -582,6 +582,9 @@ func memoriaHost() (available, free int64) {
 	return a, a
 }
 
+// memoriaTotalPlataforma es la RAM física para ProcStats.TotalMiB.
+func memoriaTotalPlataforma() int64 { return memoriaFisicaMiB() }
+
 // memoriaFisicaMiB lee hw.memsize. syscall.Sysctl devuelve el entero crudo
 // como cadena y le quita el último byte si es cero, así que se rellena hasta
 // los ocho antes de leerlo (little-endian).

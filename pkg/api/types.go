@@ -783,6 +783,10 @@ type ProcStats struct {
 	// Memoria del host, leída de /proc/meminfo. 0 en dev sobre macOS (sin /proc).
 	AvailableMiB int64 `json:"available_mib"` // MemAvailable
 	FreeMiB      int64 `json:"free_mib"`      // MemFree
+	// TotalMiB es la RAM física del host (hw.memsize en macOS); 0 si el
+	// daemon no la da (Linux, o un daemon anterior). Con AvailableMiB da el
+	// nivel de memoria con el que el gateway reparte el nivel pausada.
+	TotalMiB int64 `json:"total_mib,omitempty"`
 }
 
 // Info describe el daemon.

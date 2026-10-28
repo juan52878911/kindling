@@ -2,10 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // EL NIVEL "PAUSADA" (docs/despertar.md).
@@ -22,6 +25,12 @@ import (
 //   - una pausada que no se vuelve a usar en PausedFor se congela de verdad;
 //   - con el host sin memoria, evictLRU congela antes las pausadas que nada
 //     que esté despierto.
+//
+// PausedMiB < 0 es el presupuesto AUTOMÁTICO (el de `kling ai serve` sobre el
+// backend vz, docs/mac.md): en cada vuelta se deriva de la memoria del host
+// que da el daemon (presupuestoPausadas), y si baja (el nivel de memoria de
+// macOS cae) enfriarPausadas congela las pausadas que ya no caben, de la más
+// vieja a la más nueva.
 
 // pausada es una instancia que el segador pausó en vez de congelar.
 type pausada struct {
@@ -83,11 +92,15 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 		congelar = func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
 	}
 	var paused []dormida
-	if g.PausedMiB > 0 && (g.pauseFn != nil || g.sabePausar(ctx)) {
+	presupuesto := 0
+	if len(victims) > 0 && g.PausedMiB != 0 && (g.pauseFn != nil || g.sabePausar(ctx)) {
+		presupuesto = g.presupuestoPausadas(ctx)
+	}
+	if presupuesto > 0 {
 		score := func(v dormida) float64 { return g.pop.score(v.service) / float64(v.memMiB) }
 		cands := make([]dormida, 0, len(victims))
 		for _, v := range victims {
-			if v.memMiB > 0 && v.memMiB <= g.PausedMiB && g.pop.score(v.service) > 0 {
+			if v.memMiB > 0 && v.memMiB <= presupuesto && g.pop.score(v.service) > 0 {
 				cands = append(cands, v)
 			}
 		}
@@ -98,7 +111,7 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 			usado += p.memMiB
 		}
 		for _, v := range cands {
-			if usado+v.memMiB <= g.PausedMiB {
+			if usado+v.memMiB <= presupuesto {
 				usado += v.memMiB
 				paused = append(paused, v)
 			}
@@ -132,9 +145,107 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 	}
 }
 
+// Presupuesto automático (PausedMiB < 0).
+const (
+	// fraccionPausadasHost: lo pausado puede retener hasta esta fracción de la
+	// RAM física menos lo que ya ocupan las máquinas despiertas...
+	fraccionPausadasHost = 50
+	// ...y nunca más de esta fracción de lo que el host da por disponible.
+	fraccionPausadasLibre = 50
+	// nivelFrenoPausadas es el nivel de memoria (disponible / física, en %)
+	// por debajo del cual no se pausa nada y se congela lo pausado. Es el
+	// umbral con el que la compuerta de restores del daemon deja de admitir.
+	nivelFrenoPausadas = 25
+	// presupuestoPausadasDef es el de siempre, para cuando el daemon no da su
+	// memoria (no se puede derivar).
+	presupuestoPausadasDef = 256
+)
+
+// procStatsDe trae la foto de memoria del daemon; variable para las pruebas.
+var procStatsDe = func(ctx context.Context, g *Scheduler) (*api.ProcStats, error) {
+	if g.client == nil {
+		return nil, errors.New("no daemon client")
+	}
+	return g.client.ProcStats(ctx)
+}
+
+// presupuestoPausadas es cuántos MiB (de mem_mib configurada) puede retener
+// ahora el nivel pausada: PausedMiB si es fijo, o el derivado del host.
+func (g *Scheduler) presupuestoPausadas(ctx context.Context) int {
+	if g.PausedMiB >= 0 {
+		return g.PausedMiB
+	}
+	ps, err := procStatsDe(ctx, g)
+	if err != nil {
+		return presupuestoPausadasDef
+	}
+	return presupuestoDeHost(ps)
+}
+
+// presupuestoDeHost deriva el presupuesto de la foto del daemon: la mitad de
+// la RAM física menos lo despierto (su huella de verdad), sin pasar de la
+// mitad de lo disponible, y 0 con el nivel de memoria en el freno.
+func presupuestoDeHost(ps *api.ProcStats) int {
+	if ps.AvailableMiB <= 0 {
+		return presupuestoPausadasDef
+	}
+	libre := ps.AvailableMiB * fraccionPausadasLibre / 100
+	if ps.TotalMiB <= 0 {
+		return int(libre) // daemon sin TotalMiB: solo lo disponible
+	}
+	if ps.AvailableMiB*100/ps.TotalMiB <= nivelFrenoPausadas {
+		return 0
+	}
+	var despiertas int64
+	for _, m := range ps.Machines {
+		if m.State == api.StateRunning {
+			despiertas += m.PSSMiB
+		}
+	}
+	return int(max(0, min(ps.TotalMiB*fraccionPausadasHost/100-despiertas, libre)))
+}
+
+// ajustarPausadas congela, de la más vieja a la más nueva, las pausadas que
+// no caben en el presupuesto automático de ahora: es lo que suelta su RAM
+// cuando el nivel de memoria del host baja.
+func (g *Scheduler) ajustarPausadas(ctx context.Context) {
+	if g.PausedMiB >= 0 {
+		return
+	}
+	g.mu.Lock()
+	hay := len(g.pausadas) > 0
+	g.mu.Unlock()
+	if !hay {
+		return
+	}
+	presupuesto := g.presupuestoPausadas(ctx)
+	for {
+		g.mu.Lock()
+		usado := 0
+		for _, p := range g.pausadas {
+			usado += p.memMiB
+		}
+		g.mu.Unlock()
+		if usado <= presupuesto {
+			return
+		}
+		id, p, soltar := g.tomarPausadaMasVieja()
+		if soltar == nil {
+			return // las que quedan las está despertando alguien
+		}
+		ok := g.congelarPausada(ctx, id)
+		soltar(ok)
+		if !ok {
+			return
+		}
+		log.Printf("%s: paused instance frozen, host memory is low (paused budget %d MiB)", p.service, presupuesto)
+	}
+}
+
 // enfriarPausadas congela de verdad las pausadas que llevan más de pausedFor
-// sin usarse.
+// sin usarse, y las que ya no caben en el presupuesto automático.
 func (g *Scheduler) enfriarPausadas(ctx context.Context) {
+	defer g.ajustarPausadas(ctx)
 	vieja := func(p pausada) bool { return time.Since(p.at) > g.pausedFor() }
 	type candidata struct {
 		id string

@@ -186,7 +186,8 @@ type Scheduler struct {
 	// las va a usar, y ocupaban el tope de sesiones de la instancia (#187).
 	OnAdopt func(ctx context.Context, service string, m *api.Machine)
 	// PausedMiB es el presupuesto del nivel "pausada" (ver pausa.go), en MiB de
-	// mem_mib configurada: 0 = nunca se pausa, todo se congela.
+	// mem_mib configurada: 0 = nunca se pausa, todo se congela; < 0 = derivado
+	// de la memoria del host en cada vuelta (presupuestoPausadas).
 	PausedMiB int
 	// PausedFor es cuánto dura una pausada sin uso antes de congelarse de
 	// verdad. 0 = 10 × idle.

@@ -96,7 +96,7 @@ func aiServe(args []string) error {
 	maxReplicas := fs.Int("max-replicas", 2, "replicas per model (max_replicas in the registry wins)")
 	maxInflight := fs.Int("max-inflight", 1, "requests per replica before asking for another")
 	keepwarm := fs.Int("keepwarm", 0, "N most used models kept awake (0 = pure scale to zero)")
-	pausedMiB := fs.Int("paused-mib", 256, "MiB of idle replicas kept paused instead of frozen, small and popular first (0 = always freeze; docs/despertar.md)")
+	pausedMiB := fs.Int("paused-mib", pausedMiBDefault, "MiB of idle replicas kept paused instead of frozen, small and popular first (0 = always freeze; default: 256, or derived from host memory on macOS; docs/despertar.md)")
 	pausedFor := fs.Duration("paused-for", 0, "how long a paused replica waits before it is frozen (0 = 10 × -idle)")
 	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
@@ -142,6 +142,9 @@ func aiServe(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	client := api.NewClient(hostOf(*host))
+	if len(flagsGiven(fs, "paused-mib")) == 0 {
+		*pausedMiB = pausedMiBPorBackend(ctx, client)
+	}
 	g, err := aigw.New(aigw.Options{
 		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id, NamePrefix: *namePrefix,
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
@@ -912,4 +915,24 @@ func aiPrime(args []string) error {
 			human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
 	}
 	return errors.Join(errs...)
+}
+
+// pausedMiBDefault es el presupuesto del nivel pausada sin -paused-mib, salvo
+// sobre el backend vz (pausedMiBPorBackend).
+const pausedMiBDefault = 256
+
+// pausedMiBPorBackend elige el presupuesto del nivel pausada cuando no se pasa
+// -paused-mib. Con el backend vz (macOS) es el automático (-1, ver
+// pkg/scheduler/pausa.go): 256 MiB fijos eran poco para un Mac de 16–64 GiB,
+// donde una réplica pausada retiene su memoria y reanudarla cuesta 6–7 ms
+// frente a los ~210 de un thaw, y demasiado si el Mac se queda sin memoria.
+// En el resto, o sin poder preguntar, el de siempre.
+func pausedMiBPorBackend(ctx context.Context, c *api.Client) int {
+	ictx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	info, err := c.Info(ictx)
+	if err != nil || info.Backend != "vz" {
+		return pausedMiBDefault
+	}
+	return -1
 }
