@@ -1,5 +1,5 @@
 warning: service api: environment: a node has no environment of its own; the 2 variable(s) are baked into the image with kling image import -e (every copy of it sees them)
-warning: service api: ports: 8081:8081: publishing to the host is not supported; port 8081 is exposed to the graph's edges only
+warning: service api: ports: 8081:8081: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:8081)
 warning: service db: healthcheck interval: ignored (the probe is a TCP connect, retried until the 2 minute limit)
 warning: service db: healthcheck retries: ignored (the probe is a TCP connect, retried until the 2 minute limit)
 warning: service db: volumes: data:/var/lib/postgresql/data: a new volume has a lost+found that initdb refuses; PGDATA=/var/lib/postgresql/data/pgdata is set (baked into the image)

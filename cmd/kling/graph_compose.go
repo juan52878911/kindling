@@ -32,6 +32,13 @@ type traduccionCompose struct {
 	Antes   []string // órdenes a correr antes de `graph up`
 	Avisos  []string // una línea por cosa sin equivalente
 	Proyect string
+	// Publica son los puertos publicados en el host por nodo: {host, invitado}.
+	// `graph up` no los publica; `kling compose up` sí, en 127.0.0.1.
+	Publica map[string][][2]int
+
+	// base es el directorio del compose: con él, un bind mount (./src:/app) es
+	// una carpeta compartida rw del nodo. Vacío, se avisa y se salta.
+	base string
 }
 
 // puertosDeImagen: los puertos de las imágenes de siempre, para un destino de
@@ -47,22 +54,23 @@ var (
 )
 
 type servicioCompose struct {
-	nombre   string // el del compose
-	nodo     string // el del grafo
-	imagen   string
-	puertos  []int
-	hostPubl []string // "8080:80" publicados en el host
-	env      [][2]string
-	cmd      []string
-	entry    []string
-	user     string
-	restart  string
-	vcpus    int
-	memMiB   int
-	vols     []api.VolumeAttachment
-	deps     []depCompose
-	salud    []string // test del healthcheck, vacío si no hay
-	skip     bool
+	nombre  string // el del compose
+	nodo    string // el del grafo
+	imagen  string
+	puertos []int
+	publ    [][2]int // {host, invitado} publicados en el host
+	shares  []api.ShareSpec
+	env     [][2]string
+	cmd     []string
+	entry   []string
+	user    string
+	restart string
+	vcpus   int
+	memMiB  int
+	vols    []api.VolumeAttachment
+	deps    []depCompose
+	salud   []string // test del healthcheck, vacío si no hay
+	skip    bool
 }
 
 type depCompose struct {
@@ -109,7 +117,13 @@ func interpolarCompose(src string, lookup func(string) (string, bool), aviso fun
 // traducirCompose convierte el contenido de un compose.yaml. proyecto es el
 // nombre del grafo si el fichero no lleva name: (o siempre, con forzar).
 func traducirCompose(datos []byte, proyecto string, forzar bool, lookup func(string) (string, bool)) (*traduccionCompose, error) {
-	t := &traduccionCompose{}
+	return traducirComposeEn(datos, proyecto, forzar, lookup, "")
+}
+
+// traducirComposeEn es traducirCompose con el directorio del compose, del que
+// cuelgan los bind mounts relativos (ver traduccionCompose.base).
+func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(string) (string, bool), base string) (*traduccionCompose, error) {
+	t := &traduccionCompose{base: base, Publica: map[string][][2]int{}}
 	avisa := func(f string, a ...any) { t.Avisos = append(t.Avisos, "warning: "+fmt.Sprintf(f, a...)) }
 
 	texto := interpolarCompose(string(datos), lookup, func(s string) { avisa("%s", s) })
@@ -246,6 +260,9 @@ func traducirCompose(datos []byte, proyecto string, forzar bool, lookup func(str
 	// Órdenes de import.
 	for _, s := range vivos {
 		t.Antes = append(t.Antes, ordenImport(s, proyecto))
+		if len(s.publ) > 0 {
+			t.Publica[s.nodo] = s.publ
+		}
 	}
 	sort.SliceStable(t.Antes, func(i, j int) bool {
 		return strings.HasPrefix(t.Antes[i], "kling volume") && !strings.HasPrefix(t.Antes[j], "kling volume")
@@ -398,7 +415,13 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 			continue
 		}
 		if k == "ports" && len(parts) > 1 {
-			avisa("%sports: %s: publishing to the host is not supported; port %d is exposed to the graph's edges only", pre, spec, p)
+			h, err := strconv.Atoi(parts[len(parts)-2])
+			if err != nil || h < 1 || h > 65535 {
+				avisa("%sports: %s: host port not understood", pre, spec)
+			} else {
+				s.publ = append(s.publ, [2]int{h, p})
+				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:%d)", pre, spec, h)
+			}
 		}
 		if !slicesHas(s.puertos, p) {
 			s.puertos = append(s.puertos, p)
@@ -513,7 +536,24 @@ func (t *traduccionCompose) volumes(s *servicioCompose, v any, decl map[string]s
 			}
 		}
 		if strings.ContainsAny(src[:min(1, len(src))], "./~") {
-			avisa("%svolumes: %s: bind mounts are not supported (use a named volume, or a share on a cold-booted image)", pre, desc)
+			if t.base == "" || strings.HasPrefix(src, "~") {
+				avisa("%svolumes: %s: bind mounts are not supported here (kling compose up makes them live shares; or use a named volume)", pre, desc)
+				continue
+			}
+			abs := src
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(t.base, src)
+			}
+			if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+				avisa("%svolumes: %s: only directories can be shared (a single file, or missing); skipped", pre, desc)
+				continue
+			}
+			mode := "rw"
+			if ro {
+				mode = "ro"
+			}
+			s.shares = append(s.shares, api.ShareSpec{Source: filepath.Clean(abs), Mount: dst, Mode: mode})
+			avisa("%svolumes: %s: live %s share of %s (it must be under daemon.share_roots)", pre, desc, mode, filepath.Clean(abs))
 			continue
 		}
 		kn, ok := decl[src]
@@ -660,6 +700,13 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 				vs[i] += "}"
 			}
 			campos = append(campos, "volumes: ["+strings.Join(vs, ", ")+"]")
+		}
+		if len(s.shares) > 0 {
+			ss := make([]string, len(s.shares))
+			for i, sh := range s.shares {
+				ss[i] = "{source: " + yq(sh.Source) + ", mount: " + yq(sh.Mount) + ", mode: " + sh.Mode + "}"
+			}
+			campos = append(campos, "shares: ["+strings.Join(ss, ", ")+"]")
 		}
 		fmt.Fprintf(&b, "  %s: {%s}\n", s.nodo, strings.Join(campos, ", "))
 	}

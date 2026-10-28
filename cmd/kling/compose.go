@@ -1,0 +1,409 @@
+package main
+
+// `kling compose up`: un compose.yaml de desarrollo, como `docker compose up`
+// en primer plano. Traduce con from-compose (los bind mounts pasan a carpetas
+// vivas rw), importa las imágenes en paralelo, levanta el grafo, publica los
+// `ports:` en 127.0.0.1 y junta la salida de los servicios. Ctrl-C quita el
+// grafo (-keep lo deja).
+//
+// Los puertos los publica este proceso, no el daemon: en el Mac cada máquina
+// se alcanza por un puerto de loopback que cambia con cada arranque o
+// descongelación (Machine.Forwards), así que se resuelve en cada conexión, y
+// una máquina congelada se despierta con la primera. Solo 127.0.0.1: Docker
+// publica en todas las interfaces por defecto, aquí no se abre nada hacia la
+// red.
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
+)
+
+const composeUsage = `usage: kling compose up [-f compose.yaml] [-p name] [-keep] [-no-logs]
+       kling compose down [-f compose.yaml] [-p name]`
+
+func cmdCompose(args []string) error {
+	if len(args) == 0 {
+		return &errWithHint{err: errors.New(composeUsage), hint: "kling help compose"}
+	}
+	switch args[0] {
+	case "up":
+		return composeUp(args[1:])
+	case "down":
+		return composeDown(args[1:])
+	}
+	return fmt.Errorf("unknown subcommand %q: use up or down", args[0])
+}
+
+// composeFiles son los nombres que busca `docker compose`, en su orden.
+var composeFiles = []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"}
+
+func findCompose(f string) (string, error) {
+	if f != "" {
+		return f, nil
+	}
+	for _, n := range composeFiles {
+		if _, err := os.Stat(n); err == nil {
+			return n, nil
+		}
+	}
+	return "", fmt.Errorf("no compose file here (%s); use -f", strings.Join(composeFiles, ", "))
+}
+
+// leerCompose lee y traduce el compose de -f/-p.
+func leerCompose(file, name string) (*traduccionCompose, string, error) {
+	path, err := findCompose(file)
+	if err != nil {
+		return nil, "", err
+	}
+	datos, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", err
+	}
+	proyecto := name
+	if proyecto == "" {
+		proyecto = filepath.Base(filepath.Dir(abs))
+	}
+	t, err := traducirComposeEn(datos, proyecto, name != "", os.LookupEnv, filepath.Dir(abs))
+	if err != nil {
+		if t != nil {
+			printAvisos(t.Avisos)
+		}
+		return nil, "", fmt.Errorf("%s: %w", path, err)
+	}
+	return t, path, nil
+}
+
+// printAvisos enseña los avisos de la traducción menos los que compose up
+// resuelve (publicar puertos).
+func printAvisos(avisos []string) {
+	for _, a := range avisos {
+		if strings.Contains(a, "kling compose up does") {
+			continue
+		}
+		fmt.Fprintln(os.Stderr, a)
+	}
+}
+
+// selfCmd es este mismo binario con el endpoint de -H en el entorno.
+func selfCmd(ctx context.Context, host string, args ...string) *exec.Cmd {
+	self, err := os.Executable()
+	if err != nil {
+		self = os.Args[0]
+	}
+	c := exec.CommandContext(ctx, self, args...)
+	c.Env = os.Environ()
+	if host != "" {
+		c.Env = append(c.Env, "KLING_HOST="+host)
+	}
+	return c
+}
+
+// runSetup corre las órdenes previas (volume create antes, imports en
+// paralelo): cada import con -replace, para que un cambio en el compose
+// (entorno, comando) llegue a la imagen.
+func runSetup(ctx context.Context, host string, antes []string) error {
+	var vols, imports []string
+	for _, l := range antes {
+		if strings.HasPrefix(l, "kling volume create ") {
+			vols = append(vols, l)
+		} else {
+			imports = append(imports, l)
+		}
+	}
+	run := func(l string) error {
+		argv, err := shellWords(strings.TrimPrefix(l, "kling "))
+		if err != nil {
+			return err
+		}
+		out, err := selfCmd(ctx, host, argv...).CombinedOutput()
+		if err != nil {
+			s := strings.TrimSpace(string(out))
+			if len(argv) >= 3 && argv[0] == "volume" && strings.Contains(s, "exists") {
+				return nil // ya estaba: se reutiliza, como un volumen de Docker
+			}
+			return fmt.Errorf("%s: %s", l, s)
+		}
+		return nil
+	}
+	for _, l := range vols {
+		if err := run(l); err != nil {
+			return err
+		}
+	}
+	errs := make([]error, len(imports))
+	var wg sync.WaitGroup
+	for i, l := range imports {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs[i] = run(l) }()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// shellWords parte una línea de t.Antes (que sale de comillaSh) en palabras.
+func shellWords(s string) ([]string, error) {
+	var out []string
+	var cur strings.Builder
+	in, q := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case q:
+			if c == '\'' {
+				q = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'':
+			q, in = true, true
+		case c == '\\' && i+1 < len(s):
+			i++
+			cur.WriteByte(s[i])
+			in = true
+		case c == ' ' || c == '\t':
+			if in {
+				out = append(out, cur.String())
+				cur.Reset()
+				in = false
+			}
+		default:
+			cur.WriteByte(c)
+			in = true
+		}
+	}
+	if q {
+		return nil, fmt.Errorf("unbalanced quote in %q", s)
+	}
+	if in {
+		out = append(out, cur.String())
+	}
+	return out, nil
+}
+
+func composeUp(args []string) error {
+	fs := flag.NewFlagSet("compose up", flag.ExitOnError)
+	host := hostFlag(fs)
+	file := fs.String("f", "", "compose file (default: compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml)")
+	name := fs.String("p", "", "project (graph) name (default: name: of the file, or the directory's)")
+	keep := fs.Bool("keep", false, "leave the machines running when this exits (kling compose down removes them)")
+	noLogs := fs.Bool("no-logs", false, "do not follow the services' output")
+	_ = fs.Parse(reorderFor(fs, args))
+	if fs.NArg() != 0 {
+		return errors.New(composeUsage)
+	}
+	t, _, err := leerCompose(*file, *name)
+	if err != nil {
+		return err
+	}
+	printAvisos(t.Avisos)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	c := api.NewClient(hostOf(*host))
+	t0 := time.Now()
+
+	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
+	_ = selfCmd(ctx, *host, "graph", "rm", "-f", t.Proyect).Run()
+	if err := runSetup(ctx, *host, t.Antes); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "kling-compose-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(t.Grafo); err != nil {
+		return err
+	}
+	tmp.Close()
+	up := selfCmd(ctx, *host, "graph", "up", "-q", tmp.Name())
+	up.Stdin, up.Stderr = os.Stdin, os.Stderr
+	if out, err := up.Output(); err != nil {
+		return fmt.Errorf("graph up: %w", err)
+	} else {
+		_ = out
+	}
+	fmt.Fprintf(os.Stderr, "%s is up in %.1fs\n", t.Proyect, time.Since(t0).Seconds())
+
+	var lns []net.Listener
+	defer func() {
+		for _, l := range lns {
+			l.Close()
+		}
+	}()
+	for _, nodo := range clavesOrd(t.Publica) {
+		for _, p := range t.Publica[nodo] {
+			ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p[0])))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: cannot publish 127.0.0.1:%d (%v)\n", nodo, p[0], err)
+				continue
+			}
+			lns = append(lns, ln)
+			fmt.Fprintf(os.Stderr, "  %-12s 127.0.0.1:%d -> %d\n", nodo, p[0], p[1])
+			go publish(ctx, c, ln, t.Proyect+"-"+nodo, p[1])
+		}
+	}
+
+	if !*noLogs {
+		nodos := nodosDe(t)
+		w := 0
+		for _, n := range nodos {
+			w = max(w, len(n))
+		}
+		var mu sync.Mutex
+		for _, n := range nodos {
+			go followServiceLogs(ctx, *host, t.Proyect+"-"+n, fmt.Sprintf("%-*s | ", w, n), &mu)
+		}
+	}
+	if *keep {
+		fmt.Fprintln(os.Stderr, "Ctrl-C stops publishing and following; the machines stay (kling compose down removes them)")
+	} else {
+		fmt.Fprintln(os.Stderr, "Ctrl-C removes the machines (named volumes stay)")
+	}
+	<-ctx.Done()
+	if *keep {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "\nremoving %s...\n", t.Proyect)
+	return selfCmd(context.Background(), *host, "graph", "rm", "-f", t.Proyect).Run()
+}
+
+func composeDown(args []string) error {
+	fs := flag.NewFlagSet("compose down", flag.ExitOnError)
+	host := hostFlag(fs)
+	file := fs.String("f", "", "compose file")
+	name := fs.String("p", "", "project (graph) name")
+	_ = fs.Parse(reorderFor(fs, args))
+	proyecto := *name
+	if proyecto == "" {
+		t, _, err := leerCompose(*file, "")
+		if err != nil {
+			return err
+		}
+		proyecto = t.Proyect
+	}
+	cmd := selfCmd(context.Background(), *host, "graph", "rm", "-f", proyecto)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+// nodosDe son los nodos del grafo traducido, en orden.
+func nodosDe(t *traduccionCompose) []string {
+	var out []string
+	for _, l := range strings.Split(t.Grafo, "\n") {
+		if strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ": {") {
+			out = append(out, strings.TrimSpace(l[:strings.Index(l, ":")]))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// publish atiende 127.0.0.1:H y lleva cada conexión al puerto del invitado de
+// la máquina, resolviendo su dirección en cada conexión.
+func publish(ctx context.Context, c *api.Client, ln net.Listener, machine string, port int) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer conn.Close()
+			up, err := dialMachine(ctx, c, machine, port)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s:%d: %v\n", machine, port, err)
+				return
+			}
+			defer up.Close()
+			done := make(chan struct{}, 2)
+			cp := func(dst, src net.Conn) {
+				_, _ = io.Copy(dst, src)
+				if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+					_ = cw.CloseWrite()
+				}
+				done <- struct{}{}
+			}
+			go cp(up, conn)
+			go cp(conn, up)
+			<-done
+			<-done
+		}()
+	}
+}
+
+// dialMachine conecta con el puerto del invitado: despierta la máquina si
+// está congelada o en pausa, y reintenta unos segundos si el servicio aún no
+// escucha (acaba de arrancar).
+func dialMachine(ctx context.Context, c *api.Client, machine string, port int) (net.Conn, error) {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		m, err := c.Get(ctx, machine)
+		if err != nil {
+			return nil, err
+		}
+		if m.State == api.StateWarm || m.State == api.StatePaused {
+			if m, err = c.Thaw(ctx, machine); err != nil {
+				return nil, err
+			}
+		}
+		conn, err := net.DialTimeout("tcp", m.Addr(port), 2*time.Second)
+		if err == nil {
+			return conn, nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return nil, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// followServiceLogs sigue la salida del servicio de una máquina con un prefijo por
+// línea, y vuelve a engancharse si se corta (una descongelación, un reinicio).
+func followServiceLogs(ctx context.Context, host, machine, prefix string, mu *sync.Mutex) {
+	tail := "20"
+	for ctx.Err() == nil {
+		cmd := selfCmd(ctx, host, "logs", "-service", "-f", "-tail", tail, machine)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			return
+		}
+		cmd.Stderr = cmd.Stdout
+		if err := cmd.Start(); err != nil {
+			return
+		}
+		sc := bufio.NewScanner(out)
+		sc.Buffer(make([]byte, 64<<10), 1<<20)
+		for sc.Scan() {
+			mu.Lock()
+			fmt.Fprintln(os.Stdout, prefix+sc.Text())
+			mu.Unlock()
+		}
+		_ = cmd.Wait()
+		tail = "0"
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
+}
