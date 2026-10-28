@@ -287,10 +287,12 @@ func TestServiceRestartAunqueNoRelance(t *testing.T) {
 
 // Uno que ignora su señal de parada se lleva SIGKILL y vuelve igual.
 func TestServiceRestartMataAlQueNoSale(t *testing.T) {
-	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "trap '' TERM; while :; do sleep 0.05; done"}, StopTimeoutSeconds: 1})
+	s := newTestService(t, api.ServiceSpec{Argv: []string{"sh", "-c", "trap '' TERM; echo up; while :; do sleep 0.05; done"}, StopTimeoutSeconds: 1})
 	s.Start([]string{"PATH=/usr/bin:/bin"})
 	defer s.Stop()
-	waitUntil(t, "the service", func() bool { return s.Status(0).Running })
+	// "up" sale después del trap: con solo Running, el Restart podía llegar
+	// antes de que sh ignorase TERM y morir al instante.
+	waitUntil(t, "the service", func() bool { return strings.Contains(s.Status(1<<10).Log, "up") })
 	t0 := time.Now()
 	if err := s.Restart(); err != nil {
 		t.Fatal(err)
