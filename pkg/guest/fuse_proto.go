@@ -230,9 +230,16 @@ func attrOut(a fattr) []byte {
 	return b
 }
 
-func openOut(fh uint64) []byte {
+func openOut(fh uint64) []byte { return openOutFlags(fh, 0) }
+
+// fopenKeepCache (FOPEN_KEEP_CACHE) le dice al kernel que no tire la caché de
+// páginas del fichero al abrirlo.
+const fopenKeepCache = 1 << 1
+
+func openOutFlags(fh uint64, flags uint32) []byte {
 	b := make([]byte, openOutSize)
 	le.PutUint64(b[0:], fh)
+	le.PutUint32(b[8:], flags)
 	return b
 }
 

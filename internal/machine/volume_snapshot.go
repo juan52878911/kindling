@@ -53,6 +53,7 @@ const (
 	opBorrarSnp                      // solo toca snapshots: fuera las demás operaciones
 	opCloneSrc                       // clon, origen: lee, fuera los escritores
 	opCloneDst                       // clon, destino: aún no existe, escribe
+	opCrear                          // aún no existe: fuera todos
 )
 
 func (t tipoOperacion) desc() string {
@@ -65,6 +66,8 @@ func (t tipoOperacion) desc() string {
 		return "being cloned"
 	case opCloneDst:
 		return "being created by a clone"
+	case opCrear:
+		return "being created"
 	default:
 		return "having a snapshot removed"
 	}
@@ -136,7 +139,7 @@ func (m *Manager) reservarOperacion(vol string, t tipoOperacion) (func(), error)
 	d := t.desc()
 	m.volReservas[vol] = append(m.volReservas[vol], reservaVolumen{
 		maquina: opPrefijo + vol, nombre: d, desc: "(" + d + ")",
-		soloLect: t != opRestore && t != opCloneDst, sinUso: t == opBorrarSnp,
+		soloLect: t != opRestore && t != opCloneDst && t != opCrear, sinUso: t == opBorrarSnp,
 	})
 	return func() { m.soltarReservas(opPrefijo + vol) }, nil
 }

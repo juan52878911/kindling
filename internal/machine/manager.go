@@ -1754,7 +1754,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
 	// defer suelta el hueco en cuanto la microVM está encendida y el siguiente pasa.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterBoot(ctx)
 	if glErr != nil {
 		return 0, glErr
 	}
@@ -2232,6 +2232,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
+		// Nada se volcó, pero la marca de volcado en curso ya está y la pausa
+		// pudo llegar al VMM aunque la respuesta no (un ctx cortado): sin
+		// reanudar, se quedaba pausada figurando como running, como tras un
+		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
+		// así que ese fallo solo se apunta.
+		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
+		}
 		return nil, err
 	}
 	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
@@ -2397,7 +2406,12 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if enDiff {
 		base = mc.DiffBase
 	}
-	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
+	// A disco antes del sello, con el VMM ya muerto: no alarga la pausa
+	// (elapsed se midió arriba). Sin poder sincronizar no se sella: el volcado
+	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
+	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
+		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
+	} else if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -3115,7 +3129,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// además, la mayoría del ciclo, así que es aquí donde una tormenta simultánea
 	// hace más daño. Va tras la readopción de arriba: readoptar no enciende nada,
 	// no tiene por qué esperar turno.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterRestore(ctx)
 	if glErr != nil {
 		soltarFull()
 		return nil, glErr
@@ -3641,9 +3655,10 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
 	// se quedaba en la lista para siempre (ver gcFailed).
 	destino.FailedAt = &now
-	name := destino.Name
+	name, dueño := destino.Name, destino.Labels[api.LabelOwner]
 	m.persist()
 	m.mu.Unlock()
 	m.invalidarSesiones(id, "failed")
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
+	// Con el dueño: destino puede ser una que ya no está registrada.
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error(), Owner: dueño})
 }

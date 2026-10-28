@@ -124,6 +124,42 @@ func arbol(t *testing.T) (dir, fuera string) {
 	return dir, fuera
 }
 
+// Un enlace absoluto que apunta DENTRO de la carpeta se traduce a relativo
+// desde su directorio: el invitado llega al mismo fichero sin ver la ruta del
+// host. Vale con la ruta tal cual y con la resuelta (en macOS /var es
+// /private/var), y con lo que no pueda traducirse, EACCES.
+func TestReadlinkAbsolutoInterno(t *testing.T) {
+	dir, _ := arbol(t)
+	real, err := filepath.EvalSymlinks(dir)
+	must(t, err)
+	must(t, os.Symlink(filepath.Join(dir, "hello.txt"), filepath.Join(dir, "sub", "a-hello")))
+	must(t, os.Symlink(filepath.Join(real, "sub"), filepath.Join(dir, "a-sub")))
+	must(t, os.Symlink(dir, filepath.Join(dir, "sub", "a-raiz")))
+	must(t, os.Symlink(dir+"/sub/../hello.txt", filepath.Join(dir, "a-sucio")))
+	must(t, os.Symlink(dir+"-otra/x", filepath.Join(dir, "a-prefijo")))
+	c := servir(t, dir, true)
+
+	for p, want := range map[string]string{
+		"sub/a-hello": "../hello.txt",
+		"a-sub":       "sub",
+		"sub/a-raiz":  "..",
+		"a-sucio":     "hello.txt",
+	} {
+		e, d := c.call(proto.OpReadlink, func(e *proto.Enc) { e.Str(p) })
+		if e != 0 {
+			t.Errorf("readlink %q: %d", p, e)
+			continue
+		}
+		if got := d.Str(); got != want {
+			t.Errorf("readlink %q = %q, want %q", p, got, want)
+		}
+	}
+	// Mismo prefijo de texto pero otro directorio: fuera.
+	if e, _ := c.call(proto.OpReadlink, func(e *proto.Enc) { e.Str("a-prefijo") }); e != proto.EACCES {
+		t.Errorf("readlink a-prefijo = %d, want EACCES", e)
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -202,9 +238,16 @@ func TestNoSeEscapa(t *testing.T) {
 	if e, a := c.stat("etc"); e != 0 || a.Mode&proto.SIFMT != proto.SIFLNK {
 		t.Fatalf("stat etc: %d %+v", e, a)
 	}
-	e, d := c.call(proto.OpReadlink, func(e *proto.Enc) { e.Str("etc") })
-	if e != 0 || d.Str() != "/etc" {
-		t.Fatalf("readlink etc: %d", e)
+	// Los relativos se leen tal cual; los absolutos que salen de la carpeta
+	// (rutas del host) no se enseñan.
+	e, d := c.call(proto.OpReadlink, func(e *proto.Enc) { e.Str("inside") })
+	if e != 0 || d.Str() != "hello.txt" {
+		t.Fatalf("readlink inside: %d", e)
+	}
+	for _, p := range []string{"etc", "abs"} {
+		if e, _ := c.call(proto.OpReadlink, func(e *proto.Enc) { e.Str(p) }); e != proto.EACCES {
+			t.Errorf("readlink %q = %d, want EACCES: hands a host path to the guest", p, e)
+		}
 	}
 
 	// Pero nada los atraviesa hacia fuera.

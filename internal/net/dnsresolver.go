@@ -134,6 +134,9 @@ type dnsResolver struct {
 	tcpSem  chan struct{} // conexiones TCP abiertas, capacidad dnsMaxTCPConns
 	limiter *tokenBucket  // cubo de tokens, tasa dnsRate / ráfaga dnsBurst
 
+	// Nombres cortados por la política (bloqueos.go).
+	bloq registroBloqueos
+
 	seedMu sync.Mutex
 	seeded map[string]time.Time // ip -> caducidad; evita re-sembrar (fork+exec) dentro del TTL
 
@@ -405,6 +408,7 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 	switch r.modo {
 	case modoSoloGrafo:
 		// egress none: fuera de los nombres del grafo no hay nada.
+		r.bloq.anotar(name, qtype)
 		return respondError(query, 3) // NXDOMAIN
 	case modoLibre:
 		// egress internet: se reenvía sin lista y sin sembrar (no hay ipset;
@@ -415,6 +419,7 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		// Dominio no listado: ni lo reenviamos. Cierra el DNS-tunneling por
 		// nombres arbitrarios (el invitado no puede filtrar datos codificados en
 		// subdominios de un dominio suyo hacia un NS del atacante).
+		r.bloq.anotar(name, qtype)
 		return respondError(query, 5) // REFUSED
 	}
 	if !r.limiter.allow() {

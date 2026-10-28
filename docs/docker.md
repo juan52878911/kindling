@@ -105,6 +105,21 @@ espejo de la memoria en el almacén y `-disk`.
   llamada cada diez minutos no necesita estar corriendo: duerme entre
   llamadas y despierta con la primera ([mcp](../ext/mcp)).
 
+## Aplanar dentro de una microVM (`-isolate`)
+
+El tar de una capa es lo más hostil que entra al host. Con
+`kling image import -isolate` el daemon solo baja y verifica por sha256 los
+blobs (sin descomprimirlos ni abrir ningún tar); los vuelve a comprobar, se los
+pasa a una microVM sin red de la imagen `kling-build-tools` (la crea
+`kling image build-tools`; lleva este mismo binario) y esa VM corre allí el
+constructor oci y devuelve el ext4, con tope de tamaño (el disco de la VM y
+`-max-size`×8). Una ruta, un enlace o una bomba hostiles fallan dentro de la VM.
+La imagen es la misma que sin `-isolate` (mismo árbol); cuesta tiempo: el viaje
+de blobs e imagen por el agente (sobre todo el ext4 de vuelta) más el arranque
+de la VM. Necesita `kling` en el directorio de librerías del daemon
+(`/usr/local/lib/kindling/kling`). No reutiliza bases ya importadas (siempre la
+imagen entera).
+
 ## Lo que falta
 
 - **`docker save | gzip`**: `image import -archive` lee el tar sin comprimir

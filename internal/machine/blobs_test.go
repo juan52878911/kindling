@@ -2,6 +2,8 @@ package machine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -69,5 +71,37 @@ func TestRunEsperaALaSustitucion(t *testing.T) {
 	defer m.mu.RUnlock()
 	if len(m.arrancando) != 0 || m.arrancandoTotal != 0 {
 		t.Fatalf("run dejó su reserva: %v %d", m.arrancando, m.arrancandoTotal)
+	}
+}
+
+// Escribir dentro de una imagen o borrarla con un arranque en frío reservado
+// (aún fuera de byID) lo dejaría arrancando sobre un ext4 a medio cambiar o
+// sin rootfs: se niega como con una máquina viva.
+func TestPutYRemoveImageConArranqueEnVuelo(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(filepath.Dir(m.imagePath("img")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.imagePath("img"), []byte("ext4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	soltar := m.reservarImagen("img")
+	res, err := m.PutImageFile(context.Background(), "img", "/etc/f", src, 0o644, true)
+	if err == nil || !res.Busy {
+		t.Fatalf("put con un arranque en vuelo: res=%+v err=%v", res, err)
+	}
+	if err := m.RemoveImage("img"); err == nil {
+		t.Fatal("remove con un arranque en vuelo debería negarse")
+	}
+	if _, err := os.Stat(m.imagePath("img")); err != nil {
+		t.Fatalf("la imagen desapareció: %v", err)
+	}
+	soltar()
+	if err := m.RemoveImage("img"); err != nil {
+		t.Fatalf("soltada, el borrado: %v", err)
 	}
 }

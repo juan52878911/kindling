@@ -100,7 +100,10 @@ func RunHook(ctx context.Context, p *Plugin, h string, args []string, configPath
 	}
 	ctx, cancel := context.WithTimeout(ctx, HookTimeout)
 	defer cancel()
-	var out, errb bytes.Buffer
+	// Con tope, como --kling-manifest: lo que un gancho escribe se guarda en
+	// memoria. De stderr solo se muestran 200 bytes.
+	out := limitedBuffer{max: maxHookBytes}
+	errb := limitedBuffer{max: 4 << 10}
 	c := exec.CommandContext(ctx, p.Path, append([]string{"--kling-hook", h}, args...)...)
 	c.Stdout, c.Stderr = &out, &errb
 	c.Env = Env(configPath)
@@ -115,5 +118,11 @@ func RunHook(ctx context.Context, p *Plugin, h string, args []string, configPath
 		}
 		return out.Bytes(), fmt.Errorf("hook %s failed: %v %s", h, err, msg)
 	}
+	if out.over {
+		return out.Bytes(), fmt.Errorf("hook %s printed more than %d bytes", h, maxHookBytes)
+	}
 	return out.Bytes(), nil
 }
+
+// maxHookBytes es el tope de la salida de un gancho.
+const maxHookBytes = 1 << 20

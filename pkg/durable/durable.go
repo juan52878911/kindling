@@ -23,14 +23,25 @@ import (
 // Saltarse el 4 es el error clasico, y el peor: al arrancar se lee el fichero
 // VIEJO y se da por bueno. No hay error, no hay hueco, no hay nada que avise —
 // simplemente el sistema recuerda algo que ya no es verdad.
+//
+// El temporal tiene nombre unico (CreateTemp): con uno fijo (ruta+".tmp"), dos
+// escrituras concurrentes de la misma ruta se pisaban el temporal y el rename
+// de una podia publicar los bytes de la otra a medias, o fallar porque la otra
+// ya lo habia renombrado. CreateTemp lo crea 0600; los permisos se ponen con
+// Chmod, asi que perm se aplica tal cual, sin pasar por la umask.
 func Escribir(ruta string, datos []byte, perm os.FileMode) error {
-	tmp := ruta + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	f, err := os.CreateTemp(filepath.Dir(ruta), filepath.Base(ruta)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	// Cualquier fallo a partir de aqui borra el temporal: dejarlo tirado
 	// convertiria un fallo de escritura en basura permanente al lado del bueno.
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("chmod %s: %w", tmp, err)
+	}
 	if _, err := f.Write(datos); err != nil {
 		f.Close()
 		os.Remove(tmp)

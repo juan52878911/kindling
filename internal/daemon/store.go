@@ -150,7 +150,7 @@ func (s *Server) handleStoreGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStorePut(w http.ResponseWriter, r *http.Request) {
 	b, err := api.LeerCuerpo(r.Body, api.MaxValueBytes)
 	if err != nil {
-		fail(w, http.StatusRequestEntityTooLarge, err)
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	ns, key := r.PathValue("ns"), r.PathValue("key")

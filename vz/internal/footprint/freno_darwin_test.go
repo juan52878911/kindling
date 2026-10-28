@@ -3,12 +3,39 @@
 package footprint
 
 import (
+	"errors"
 	"net"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// Un proceso freno muerto (su extremo del socket cerrado) da ErrFrenoCaido,
+// y desde entonces se devuelve sin volver a escribir en el socket.
+func TestFrenoCaido(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.Close(fds[1]) // el freno "muere"
+	mio := os.NewFile(uintptr(fds[0]), "freno")
+	c, err := net.FileConn(mio)
+	mio.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &Freno{c: c.(*net.UnixConn)}
+	defer f.c.Close()
+	for i, stop := range []bool{false, true, false} {
+		if err := f.Freeze(stop); !errors.Is(err, ErrFrenoCaido) {
+			t.Fatalf("orden %d: %v, quería ErrFrenoCaido", i, err)
+		}
+	}
+	if !f.muerto {
+		t.Fatal("no quedó marcado como muerto")
+	}
+}
 
 // El protocolo del freno sin VM: acepta la tubería, no para nada si ningún
 // auxiliar de Apple la tiene (nunca señaliza a otro proceso) y termina al

@@ -16,22 +16,28 @@ import (
 // tocar la herramienta. Cualquier otro error —y un timeout el primero— puede
 // haberse ejecutado ya: reenviarlo escribiria dos veces en un servicio con
 // estado, sin que nada lo dijera.
-func TestSoloUn400O404SonSesionCaducada(t *testing.T) {
+func TestSoloUn400DeSesionO404SonSesionCaducada(t *testing.T) {
 	casos := []struct {
 		nombre    string
 		status    int
+		cuerpo    string
 		caducada  bool
 		reintenta string
 	}{
-		{"400: el puente no reconoce la sesion", 400, true, "si"},
-		{"404: la sesion ya no existe", 404, true, "si"},
-		{"500: el servidor fallo DESPUES de recibirla", 500, false, "no"},
-		{"502: puede haber llegado", 502, false, "no"},
-		{"503: puede haber llegado", 503, false, "no"},
+		{"400: el puente no reconoce la sesion", 400, `session "abc" unknown or expired`, true, "si"},
+		{"400: falta la cabecera de sesion", 400, "missing header Mcp-Session-Id (send initialize first)", true, "si"},
+		{"400: SDK de TypeScript sin sesion valida", 400, "Bad Request: No valid session ID provided", true, "si"},
+		{"400: JSON invalido NO es caducidad", 400, "invalid JSON: unexpected end", false, "no"},
+		{"400 sin cuerpo NO es caducidad", 400, "", false, "no"},
+		{"404: la sesion ya no existe", 404, "", true, "si"},
+		{"500: el servidor fallo DESPUES de recibirla", 500, "", false, "no"},
+		{"502: puede haber llegado", 502, "", false, "no"},
+		{"503: puede haber llegado", 503, "", false, "no"},
 	}
 	for _, c := range casos {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(c.cuerpo))
 		}))
 		_, err := mcpCallAt(context.Background(), srv.URL, "sid", `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`)
 		srv.Close()

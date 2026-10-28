@@ -92,7 +92,19 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	}
 	// Una instancia que ya corría cuando arrancó este gateway trae las sesiones
 	// del proceso anterior en su puente: se limpian antes de usarla (#187).
+	//
+	// Pero OnAdopt salta en CADA adopción, no solo al arrancar: si un sondeo de
+	// vida falla un momento, handleProxy suelta la instancia (DropInstance) y
+	// Ensure readopta la misma máquina, que sigue corriendo. Resetear ahí
+	// borraba las sesiones vivas de este mismo gateway justo antes de
+	// reapuntarlas a ella. Si este proceso tiene sesiones fijadas a esa
+	// máquina, no es una heredada: se deja como está.
 	g.OnAdopt = func(ctx context.Context, service string, m *api.Machine) {
+		if n := g.sesionesEn(m.ID); n > 0 {
+			log.Printf("%s: re-adopted machine %s with %d live session(s) of this gateway; its bridge is not reset",
+				service, m.ID, n)
+			return
+		}
 		resetBridge(ctx, service, "http://"+m.Addr(GuestPort))
 	}
 	// Los servicios con estado no se precalientan: su instancia es persistente.
@@ -102,6 +114,17 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	// Las sesiones del agregador viven más que las instancias: son baratas.
 	g.OnTick = func(ctx context.Context) { g.agg.reap(ctx, g.Idle()*4) }
 	return g
+}
+
+// sesionesEn cuenta las sesiones de ESTE gateway que viven en el puente de la
+// máquina machineID: las directas fijadas en el planificador y las del
+// agregador. Más que cero significa que la máquina es nuestra, no heredada.
+func (g *Gateway) sesionesEn(machineID string) int {
+	n := g.SessionsOn(machineID)
+	if g.agg != nil {
+		n += g.agg.backedOn(machineID)
+	}
+	return n
 }
 
 // Handler expone las rutas del gateway.

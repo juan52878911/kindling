@@ -1,10 +1,63 @@
 package durable
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
+
+// Con un temporal de nombre fijo, dos Escribir a la vez sobre la misma ruta se
+// truncaban el temporal el uno al otro: el rename publicaba una mezcla, o
+// fallaba porque el otro ya lo habia movido.
+func TestEscribirConcurrenteNoMezcla(t *testing.T) {
+	dir := t.TempDir()
+	ruta := filepath.Join(dir, "estado.json")
+	const n = 16
+	contenidos := make(map[string]bool, n)
+	var datos [n][]byte
+	for i := range datos {
+		datos[i] = bytes.Repeat([]byte{byte('a' + i)}, 1024*(i+1))
+		contenidos[string(datos[i])] = true
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, n*20)
+	for i := range datos {
+		wg.Add(1)
+		go func(b []byte) {
+			defer wg.Done()
+			for range 20 {
+				if err := Escribir(ruta, b, 0o640); err != nil {
+					errs <- err
+				}
+			}
+		}(datos[i])
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Escribir concurrente: %v", err)
+	}
+	b, err := os.ReadFile(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contenidos[string(b)] {
+		t.Errorf("quedaron %d bytes que no son ninguna de las escrituras completas", len(b))
+	}
+	if fi, err := os.Stat(ruta); err == nil && fi.Mode().Perm() != 0o640 {
+		t.Errorf("permisos = %v, esperaba 0640", fi.Mode().Perm())
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 1 {
+		var nombres []string
+		for _, e := range ents {
+			nombres = append(nombres, e.Name())
+		}
+		t.Errorf("quedaron temporales junto al fichero: %v", nombres)
+	}
+}
 
 func TestEscribirDejaElContenidoYNingunTemporal(t *testing.T) {
 	dir := t.TempDir()

@@ -11,6 +11,7 @@
 #   ... image|build -engine valkey ...             Valkey: el guion de Redis con la imagen valkey
 #   ... image|build -engine ferretdb ...          MongoDB por FerretDB (db-golden-ferretdb.sh)
 #   ... image|build -engine clickhouse ...        ClickHouse (db-golden-clickhouse.sh)
+#   ... image|build -engine garage ...            almacén S3 con Garage (db-golden-garage.sh)
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
 # cluster en el overlay de la máquina, arranca Postgres escuchando en la IP del
@@ -585,7 +586,8 @@ case "$engine" in
   sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
   ferretdb|mongo|mongodb) exec bash "$HERE/db-golden-ferretdb.sh" ${args[@]+"${args[@]}"} ;;
   clickhouse) exec bash "$HERE/db-golden-clickhouse.sh" ${args[@]+"${args[@]}"} ;;
-  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey, sqlite, ferretdb o clickhouse)" ;;
+  garage|s3) exec bash "$HERE/db-golden-garage.sh" ${args[@]+"${args[@]}"} ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis, valkey, sqlite, ferretdb, clickhouse o garage)" ;;
 esac
 set -- ${args[@]+"${args[@]}"}
 

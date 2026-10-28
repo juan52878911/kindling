@@ -49,7 +49,24 @@ func Read(r io.ReaderAt) (*Node, error) {
 		ds = uint32(le.Uint16(sb[254:]))
 	}
 	bpg := uint64(le.Uint32(sb[32:]))
+	// Un superbloque corrupto no debe tumbar el proceso (división por cero) ni
+	// pedir memoria sin tope para los descriptores: lo que no cuadre, error.
+	switch {
+	case rd.ipg == 0:
+		return nil, errors.New("corrupt superblock: 0 inodes per group")
+	case bpg == 0 || bpg > 8*blockSize:
+		return nil, fmt.Errorf("corrupt superblock: %d blocks per group", bpg)
+	case blocks <= rd.firstData:
+		return nil, fmt.Errorf("corrupt superblock: %d blocks", blocks)
+	case rd.isz < 128 || rd.isz > blockSize || rd.isz&(rd.isz-1) != 0:
+		return nil, fmt.Errorf("corrupt superblock: inode size %d", rd.isz)
+	case ds < 32 || ds > blockSize || ds&(ds-1) != 0:
+		return nil, fmt.Errorf("corrupt superblock: group descriptor size %d", ds)
+	}
 	rd.groups = int((blocks - rd.firstData + bpg - 1) / bpg)
+	if inodes := uint64(le.Uint32(sb[0:])); uint64(rd.groups)*uint64(rd.ipg) != inodes {
+		return nil, fmt.Errorf("corrupt superblock: %d inodes for %d groups of %d", inodes, rd.groups, rd.ipg)
+	}
 	gdt := make([]byte, uint64(rd.groups)*uint64(ds))
 	if _, err := r.ReadAt(gdt, int64((rd.firstData+1)*blockSize)); err != nil {
 		return nil, fmt.Errorf("reading group descriptors: %w", err)

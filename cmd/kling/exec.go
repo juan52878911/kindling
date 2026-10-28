@@ -97,7 +97,7 @@ func cmdExec(args []string) (int, error) {
 	timeout := fs.Duration("timeout", 0, "kill the command after this long (default 5m, max 1h)")
 	maxOut := fs.Int("max-output", 0, "bytes of stdout and of stderr to keep (default 8 MiB, max 64 MiB)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] <machine|sandbox> [--] <cmd> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

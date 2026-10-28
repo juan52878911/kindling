@@ -275,6 +275,7 @@ func exposedWarning(listen string, pid1 bool) string {
 // caliente sin ligar: somos PID 1 y nada debe quedar suelto al apagar.
 func (b *bridge) closeAll() {
 	b.mu.Lock()
+	b.gen++
 	all := b.sessions
 	b.sessions = map[string]*session{}
 	warm := b.warm
@@ -345,6 +346,13 @@ type bridge struct {
 	// (ver warm.go). Protegido por mu. A propósito NO vive en sessions: no
 	// cuenta para maxSessions ni puede cosecharlo el reaper de ociosas.
 	warm *warmChild
+	// spawning cuenta las sesiones con plaza reservada que se están lanzando
+	// FUERA del candado (ver resolve). Cuentan para maxSessions: sin esto, N
+	// initialize simultáneos verían el mismo hueco y lo superarían entre todos.
+	// gen se incrementa en cada /reset y en closeAll: una sesión que terminó de
+	// lanzarse después de uno de ellos no se registra, se cierra. Ambos bajo mu.
+	spawning int
+	gen      uint64
 
 	// warnedSessions registra si ya se ha avisado sobre el campo "sessions" retirado
 	// en MMDS. Se avisa solo UNA VEZ, cuando se encuentra sessions no vacío.
@@ -357,6 +365,14 @@ type session struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	lastUse time.Time
+	// inflight cuenta las peticiones POST que están dentro del puente ahora
+	// mismo, y streams los GET SSE abiertos. Mientras alguno sea >0 la sesión
+	// está EN USO aunque lastUse sea viejo —una tools/call de minutos, un
+	// cliente esperando notificaciones— y ni el reciclado por tope ni la
+	// cosecha de ociosas pueden llevársela. Los tres campos van bajo b.mu, no
+	// bajo s.mu: quien los consulta (resolve, reapOnce) ya tiene el del puente.
+	inflight int
+	streams  int
 	// reqTimeout se copia del puente al nacer la sesión en vez de consultarlo
 	// allí: call() lo lee sin tomar el mutex del puente, y esa dependencia entre
 	// candados es justo la que sale cara de descubrir.
@@ -457,8 +473,19 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(SessionHeader, s.id)
 	}
 
+	// La sesión quedó contada como en uso por esta petición: se suelta al
+	// salir, sea cual sea el camino, y deja lastUse en el momento de terminar.
+	defer b.release(s)
+
 	// Una notificación no lleva id y no espera respuesta: se entrega y se acepta.
-	if len(msg.ID) == 0 || string(msg.ID) == "null" {
+	//
+	// Un mensaje CON id y SIN method tampoco espera nada: es la RESPUESTA del
+	// cliente a algo que inició el servidor (sampling/createMessage,
+	// elicitation/create, roots/list). Tratarla como petición la dejaba
+	// esperando una contestación con ese id que el servidor nunca manda, y el
+	// cliente se colgaba hasta -request-timeout. Se entrega igual que una
+	// notificación: el servidor la casa con su propia petición.
+	if len(msg.ID) == 0 || string(msg.ID) == "null" || msg.Method == "" {
 		if err := s.send(body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -494,9 +521,21 @@ func (b *bridge) handleGet(w http.ResponseWriter, r *http.Request) {
 	// Tener el stream SSE abierto ES actividad. Sin esto, reapIdle mira solo el
 	// lastUse de las peticiones POST y cosecha a un cliente que está conectado y
 	// a la espera de notificaciones: su stream muere y su proceso con él.
+	//
+	// No basta con refrescar lastUse al abrir: un GET que dura más que b.idle
+	// (lo normal: el cliente lo deja abierto toda la conversación) acababa
+	// cosechado igual. Se cuenta el stream mientras vive, y al cerrarse se deja
+	// lastUse en ese momento para que la cuenta de ociosidad empiece ahí.
 	b.mu.Lock()
 	s.lastUse = time.Now()
+	s.streams++
 	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		s.streams--
+		s.lastUse = time.Now()
+		b.mu.Unlock()
+	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -574,6 +613,7 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.mu.Lock()
+	b.gen++
 	dead := make([]*session, 0, len(b.sessions))
 	for _, s := range b.sessions {
 		dead = append(dead, s)
@@ -607,32 +647,43 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolve devuelve la sesión pedida, creándola si el mensaje es un initialize.
+// La devuelve ya contada como en uso (inflight): quien la recibe llama a
+// b.release cuando acaba con ella.
+//
+// El lanzamiento del proceso va FUERA de b.mu. spawn lee MMDS por HTTP y hace
+// fork+exec de node o python; con el candado tomado, un initialize lento
+// paraba todas las peticiones de todas las sesiones, el GET SSE y la cosecha.
+// Se reserva la plaza bajo candado (spawning), se lanza sin él, y se registra
+// al volver, igual que hace replenishWarm con el hijo caliente.
 func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if sid != "" {
 		if s, ok := b.sessions[sid]; ok {
 			s.lastUse = time.Now()
+			s.inflight++
+			b.mu.Unlock()
 			return s, false, nil
 		}
 		if !isInit {
+			b.mu.Unlock()
 			return nil, false, fmt.Errorf("session %q unknown or expired", sid)
 		}
 	}
 	if !isInit {
+		b.mu.Unlock()
 		return nil, false, fmt.Errorf("missing header %s (send initialize first)", SessionHeader)
 	}
-	if len(b.sessions) >= b.maxSessions {
+	if len(b.sessions)+b.spawning >= b.maxSessions {
 		// Al tope. Antes de rechazar, intenta hacer sitio reciclando la sesión más
 		// OCIOSA si lleva parada más que una gracia corta. Es lo que permite que un
 		// cliente que se RECONECTA (p. ej. opencode reiniciado) entre aunque su
 		// sesión anterior siga contada: el reaper de inactividad espera b.idle
 		// —minutos—, y sin esto un servicio con tope 1 rechaza toda reconexión
 		// durante todo ese rato. Solo se reciclan ociosas: una sesión con su stream
-		// SSE abierto se marca activa y nunca es candidata.
+		// SSE abierto o una petición en curso nunca es candidata.
 		v := b.oldestReclaimableLocked()
 		if v == nil {
+			b.mu.Unlock()
 			return nil, false, fmt.Errorf("session limit of %d reached", b.maxSessions)
 		}
 		delete(b.sessions, v.id)
@@ -640,13 +691,48 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 		log.Printf("session %s reclaimed (idle %s) to make room for a new one",
 			v.id, time.Since(v.lastUse).Round(time.Second))
 	}
+	b.spawning++
+	gen := b.gen
+	b.mu.Unlock()
 
 	s, err := b.spawn()
+
+	b.mu.Lock()
+	b.spawning--
 	if err != nil {
+		b.mu.Unlock()
 		return nil, false, err
 	}
+	if b.gen != gen {
+		// Un /reset o el apagado vaciaron el puente mientras se lanzaba: no
+		// verían esta sesión, así que registrarla dejaría un proceso que nadie
+		// cierra (o congelado dentro del dorado).
+		b.mu.Unlock()
+		go s.close()
+		return nil, false, fmt.Errorf("the bridge was reset while the session was starting")
+	}
+	s.lastUse = time.Now()
+	s.inflight++
 	b.sessions[s.id] = s
+	b.mu.Unlock()
 	return s, true, nil
+}
+
+// release suelta la cuenta de uso que resolve le dio a una petición, y deja
+// lastUse en el momento en que TERMINA: la ociosidad se mide desde la última
+// respuesta, no desde la última llegada, o una tools/call de varios minutos
+// saldría ya "ociosa" y reciclable.
+func (b *bridge) release(s *session) {
+	b.mu.Lock()
+	s.inflight--
+	s.lastUse = time.Now()
+	b.mu.Unlock()
+}
+
+// busyLocked dice si la sesión tiene trabajo en curso: una petición dentro del
+// puente o un stream SSE abierto. Se llama con b.mu tomado.
+func (s *session) busyLocked() bool {
+	return s.inflight > 0 || s.streams > 0
 }
 
 // sessionReclaimGrace: cuánto debe llevar OCIOSA una sesión para poder
@@ -661,7 +747,7 @@ const sessionReclaimGrace = 45 * time.Second
 func (b *bridge) oldestReclaimableLocked() *session {
 	var oldest *session
 	for _, s := range b.sessions {
-		if time.Since(s.lastUse) < sessionReclaimGrace {
+		if s.busyLocked() || time.Since(s.lastUse) < sessionReclaimGrace {
 			continue
 		}
 		if oldest == nil || s.lastUse.Before(oldest.lastUse) {
@@ -671,7 +757,8 @@ func (b *bridge) oldestReclaimableLocked() *session {
 	return oldest
 }
 
-// spawn lanza un proceso del servidor MCP para una sesión nueva.
+// spawn lanza un proceso del servidor MCP para una sesión nueva. Se llama SIN
+// b.mu: lee MMDS y hace fork+exec, y eso no debe parar al resto del puente.
 func (b *bridge) spawn() (*session, error) {
 	// argv del servidor + los sessionArgs del modo navegador (vacío en el resto
 	// de servicios): apuntan esta sesión al Chromium compartido por CDP.
@@ -684,9 +771,13 @@ func (b *bridge) spawn() (*session, error) {
 
 	// Si /reset dejó un hijo caliente y esta sesión puede adoptarlo —vivo y sin
 	// secretos que él no tenga—, se ahorra el arranque del runtime, que es lo
-	// que anulaba la ventaja del snapshot dorado. Ver warm.go.
-	if s := b.adoptWarmLocked(id, secrets); s != nil {
-		return s, nil
+	// que anulaba la ventaja del snapshot dorado. Ver warm.go. spawn corre sin
+	// b.mu (ver resolve): se toma solo para mirar el caliente.
+	b.mu.Lock()
+	adopted := b.adoptWarmLocked(id, secrets)
+	b.mu.Unlock()
+	if adopted != nil {
+		return adopted, nil
 	}
 
 	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
@@ -950,33 +1041,38 @@ func (b *bridge) reapIdle(ctx context.Context) {
 			// El puente es el PID 1 del invitado: si muere, la microVM entra en
 			// panico del kernel. Contener aqui es lo que separa "una cosecha
 			// salio mal" de "el invitado se cayo".
-			panico.Contener("bridge.reapIdle", func() {
-				var dead []*session
-				b.mu.Lock()
-				for id, s := range b.sessions {
-					if time.Since(s.lastUse) > b.idle {
-						dead = append(dead, s)
-						delete(b.sessions, id)
-					}
-				}
-				b.mu.Unlock()
-				// En paralelo: cerrarlas en serie hacía que una sesión lenta
-				// retuviera la cosecha de todas las demás. close() es idempotente.
-				for _, s := range dead {
-					go s.close()
-				}
-				// Si el segador se llevó la última sesión, apaga el navegador
-				// compartido: una microVM viva pero ociosa no debe retenerlo.
-				if len(dead) > 0 {
-					b.stopBrowserIfIdle()
-				}
-				// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
-				// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
-				// compartido. Ver reapIdleProxy.
-				if b.proxy != nil {
-					b.reapIdleProxy()
-				}
-			})
+			panico.Contener("bridge.reapIdle", b.reapOnce)
 		}
+	}
+}
+
+// reapOnce es una vuelta del cosechador de ociosas. Una sesión en uso
+// (busyLocked) nunca se cosecha por viejo que sea su lastUse: una tools/call
+// larga o un stream SSE abierto pueden durar más que b.idle.
+func (b *bridge) reapOnce() {
+	var dead []*session
+	b.mu.Lock()
+	for id, s := range b.sessions {
+		if !s.busyLocked() && time.Since(s.lastUse) > b.idle {
+			dead = append(dead, s)
+			delete(b.sessions, id)
+		}
+	}
+	b.mu.Unlock()
+	// En paralelo: cerrarlas en serie hacía que una sesión lenta
+	// retuviera la cosecha de todas las demás. close() es idempotente.
+	for _, s := range dead {
+		go s.close()
+	}
+	// Si el segador se llevó la última sesión, apaga el navegador
+	// compartido: una microVM viva pero ociosa no debe retenerlo.
+	if len(dead) > 0 {
+		b.stopBrowserIfIdle()
+	}
+	// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
+	// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
+	// compartido. Ver reapIdleProxy.
+	if b.proxy != nil {
+		b.reapIdleProxy()
 	}
 }

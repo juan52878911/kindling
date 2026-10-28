@@ -230,6 +230,43 @@ func TestCrearReclamaPrecalentada(t *testing.T) {
 	}
 }
 
+// Si se etiqueta una precalentada y la renovación falla, no se queda con la
+// etiqueta del tenant (fuera del pool y contando en su cuota): se destruye y el
+// sandbox se crea de nuevo.
+func TestReclamarConRenovacionFallidaNoDejaLaMaquinaEtiquetada(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	f.renewFalla = true
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+
+	sb := crea(t, srv, tokenAlice, CrearPeticion{Template: "node"})
+	if sb.ID == "a/"+pre.ID {
+		t.Fatalf("got the prewarmed machine whose renew failed")
+	}
+	if f.existe(pre.ID) {
+		t.Fatalf("the half-claimed machine is still there with labels %v", f.maquina(pre.ID).Labels)
+	}
+	if f.creadas != 1 {
+		t.Fatalf("expected a fresh sandbox, created %d", f.creadas)
+	}
+}
+
+// Con cuota, un host que no contesta no deja crear: sus sandboxes no se pueden
+// contar y la cuota se podría superar. Sin cuota no hay nada que contar.
+func TestCuotaConUnHostCaidoFallaCerrado(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f, "muerto": {endpoint: "/nonexistent/kling.sock"}},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxSandboxes: 3},
+		Tenant{Nombre: "bob", Token: tokenBob})
+
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base"}), 503)
+	if f.creadas != 0 {
+		t.Fatalf("created %d sandboxes without being able to count the quota", f.creadas)
+	}
+	crea(t, srv, tokenBob, CrearPeticion{Image: "base"})
+}
+
 func TestReintentaEnOtroHostCuandoNoCabe(t *testing.T) {
 	a, b := nuevoFalso(t), nuevoFalso(t)
 	a.libreMiB, b.libreMiB = 8192, 1024          // a es el preferido...

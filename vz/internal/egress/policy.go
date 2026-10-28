@@ -290,7 +290,8 @@ const MinTTL = 60 * time.Second
 const maxIPSet = 4096
 
 // IPSet es el equivalente del ipset con timeout del núcleo: IPs permanentes
-// (sembrado estático) o con caducidad (sembrado dinámico por DNS).
+// (sembrado estático, AddPermanent) o con caducidad (sembrado dinámico por
+// DNS, Add).
 type IPSet struct {
 	mu  sync.Mutex
 	ips map[netip.Addr]time.Time // cero = permanente
@@ -301,9 +302,22 @@ func NewIPSet() *IPSet {
 	return &IPSet{ips: map[netip.Addr]time.Time{}, now: time.Now}
 }
 
-// Add mete una IP. ttl<=0 la deja permanente. Las bloqueadas se descartan aquí
-// también, para que un resolver envenenado no cuele 169.254 ni 192.168.
+// Add mete una IP resuelta por DNS durante max(ttl, MinTTL). Un TTL de 0 (o
+// negativo) no la deja permanente: antes sí, y un upstream que contestara TTL
+// 0 abría esa IP para siempre, saltándose el suelo y la caducidad. Lo
+// permanente es solo el sembrado estático (AddPermanent). Las bloqueadas se
+// descartan aquí también, para que un resolver envenenado no cuele 169.254
+// ni 192.168.
 func (s *IPSet) Add(ip netip.Addr, ttl time.Duration) {
+	s.add(ip, max(ttl, MinTTL), false)
+}
+
+// AddPermanent mete una IP sin caducidad: el sembrado estático (SeedStatic).
+func (s *IPSet) AddPermanent(ip netip.Addr) {
+	s.add(ip, 0, true)
+}
+
+func (s *IPSet) add(ip netip.Addr, ttl time.Duration, permanente bool) {
 	ip = ip.Unmap()
 	if IsBlockedIP(ip) {
 		return
@@ -311,10 +325,7 @@ func (s *IPSet) Add(ip netip.Addr, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var exp time.Time
-	if ttl > 0 {
-		if ttl < MinTTL {
-			ttl = MinTTL
-		}
+	if !permanente {
 		exp = s.now().Add(ttl)
 	}
 	if old, ok := s.ips[ip]; ok {

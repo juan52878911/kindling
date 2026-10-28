@@ -175,8 +175,12 @@ Daemon (`internal/share`):
 - Solo se sirven directorios, ficheros regulares y enlaces simbólicos. Los
   dispositivos, FIFOs y sockets del host no aparecen en los listados, `stat` los
   da por inexistentes y `open` los rechaza.
-- Lecturas y escrituras de 128 KiB como máximo; offsets no negativos y sin
+- Lecturas y escrituras de 128 KiB como máximo, o de 1 MiB si agente y daemon lo
+  negocian al conectar (`OpHello`; uno viejo se queda en 128 KiB), con como mucho 4
+  operaciones grandes en vuelo por sesión; offsets no negativos y sin
   desbordamiento.
+- Un enlace del host con destino absoluto dentro de la carpeta se lee como relativo;
+  con destino fuera de ella, `readlink` da EACCES.
 - Handles por sesión: 1024 como máximo, y 16384 en todo el daemon; más allá,
   `EMFILE`. Los ids de handle llevan la época de la sesión: uno de una sesión
   anterior nunca apunta a un fichero de la actual.

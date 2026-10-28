@@ -473,10 +473,24 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	t.marca("resume")
 
-	if out, err := perforarHuecos(ctx, memPath); err != nil {
+	// Con limpio: el volcado ya está completo y la plantilla reanudada, y un
+	// cliente que se desconecte aquí tiraba un dorado entero por un perforado
+	// cortado.
+	if out, err := perforarHuecos(limpio, memPath); err != nil {
 		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
 	t.marca("holes")
+
+	// A disco antes del meta, con la plantilla ya reanudada: el meta es
+	// durable y sin esto, tras un corte, daba por bueno un volcado que seguía
+	// en la caché. El temporal de un fork no: se restaura en esta llamada y
+	// barrerForks lo recoge si el daemon muere (como su digest, más abajo).
+	if !deFork {
+		if err := sincronizarVolcado(snapPath, memPath, goldOverlay); err != nil {
+			return nil, err
+		}
+		t.marca("sync")
+	}
 
 	// Digests de integridad del rootfs dorado y del volcado de estado.
 	//
@@ -686,11 +700,11 @@ func (m *Manager) loadSnapshotCached(name string) (*api.Snapshot, int64, error) 
 	dir := m.snapDir(name)
 	metaFi, err := os.Stat(filepath.Join(dir, "meta.json"))
 	if err != nil {
-		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	dirFi, err := os.Stat(dir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	metaMod, dirMod := metaFi.ModTime().UnixNano(), dirFi.ModTime().UnixNano()
 
@@ -765,12 +779,12 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 	// El nombre llega de la URL. Sin validarlo, un "../../etc" saldría del
 	// directorio de datos: recorrido de rutas de manual.
 	if !validName.MatchString(name) {
-		return nil, nil, 0, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, nil, 0, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
 	ruta := filepath.Join(m.snapDir(name), "meta.json")
 	b, err := os.ReadFile(ruta)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, nil, 0, marcado(ErrNoSnapshot, "snapshot %q does not exist", name)
 	}
 	// Uno de un kling más nuevo (schema mayor) es un error y no se toca: ni
 	// se restaura ni se anota ni se aparta (esquema.ErrMasNuevo).
@@ -1093,9 +1107,9 @@ func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string)
 	if enUso > 0 {
 		m.mu.Unlock()
 		if restos {
-			return "", restos, nil, fmt.Errorf("snapshot %q is being committed right now", name)
+			return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q is being committed right now", name)
 		}
-		return "", restos, nil, fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
+		return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q is in use right now (an instance is being restored from it, "+
 			"or it is being committed); retry in a moment", name)
 	}
 	if !restos {
@@ -1107,7 +1121,7 @@ func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string)
 		}
 		if len(users) > 0 {
 			m.mu.Unlock()
-			return "", restos, nil, fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
+			return "", restos, nil, marcado(ErrSnapshotInUse, "snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 		}
 	}
 	destino, rerr = apartar(name)
@@ -1398,6 +1412,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
+	// En el almacén, el overlay no vive en dir: los fallos de antes de
+	// publicarla, que solo borran dir, lo dejaban ahí hasta el barrido.
+	// Publicada, lo recoge su borrado (limpiarMaquina) como el de cualquiera.
+	publicada := false
+	if modoCoW == cowModoStore {
+		defer func() {
+			if !publicada {
+				m.borrarOverlayAlmacen(id)
+			}
+		}()
+	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
@@ -1524,13 +1549,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	publicada = true
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
 	// servicios de golpe. Sin acotarlo, esa ráfaga simultánea cuelga el host bajo
 	// anidamiento. El defer suelta el hueco al volver; si el contexto se cancela en
 	// la cola, se deshace lo ya montado igual que un fallo de spawn.
-	release, glErr := m.enterLaunch(ctx)
+	release, glErr := m.enterRestore(ctx)
 	if glErr != nil {
 		m.desmontarRed(netcfg, id)
 		m.fail(mc, glErr)

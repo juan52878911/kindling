@@ -66,7 +66,7 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
-	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis, engineFerret, engineClickHouse); err != nil {
+	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis, engineFerret, engineClickHouse, engineGarage); err != nil {
 		return nil, err
 	}
 	if err := checkReady(mc, owner); err != nil {

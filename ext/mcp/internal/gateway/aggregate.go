@@ -108,6 +108,9 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
+	// Con tope, como el resto de cuerpos del gateway: sin él un cliente podía
+	// mandar un JSON sin fin y tumbar al gateway compartido por memoria.
+	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
@@ -769,6 +772,25 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 	a.sessions[s.id] = s
 	a.mu.Unlock()
 	return s, true, nil
+}
+
+// backedOn cuenta las conversaciones del agregador con una sesión abierta en el
+// puente de la máquina machineID (la clave de backing es servicio + máquina,
+// ver forward).
+func (a *aggregator) backedOn(machineID string) int {
+	suf := "\x00" + machineID
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, s := range a.sessions {
+		for k := range s.backing {
+			if strings.HasSuffix(k, suf) {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 func (a *aggregator) drop(ctx context.Context, sid string) {

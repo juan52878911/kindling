@@ -447,6 +447,46 @@ func TestAuthzInquilinoNoVeAjenos(t *testing.T) {
 	}
 }
 
+// El borrado se publica con la máquina ya fuera de byID: el inquilino dueño
+// tiene que verlo igual (lo atribuye el Owner del evento), y otro no.
+func TestAuthzEventoDeMaquinaBorrada(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	ch, baja := s.bus.Subscribe()
+	defer baja()
+	if err := s.mgr.Remove("caja-a"); err != nil {
+		t.Fatal(err)
+	}
+	var ev api.Event
+	plazo := time.After(10 * time.Second)
+	for ev.Message != "removed" {
+		select {
+		case ev = <-ch:
+		case <-plazo:
+			t.Fatal("no llegó el evento del borrado")
+		}
+	}
+	// Se mira con la limpieza ya hecha: la tumba tampoco lleva etiquetas.
+	if !s.mgr.EsperarBorrados(10 * time.Second) {
+		t.Fatal("la limpieza del borrado no acabó")
+	}
+	if _, ok := s.mgr.Get(ev.ID); ok {
+		t.Fatal("la máquina sigue registrada: el test no prueba nada")
+	}
+	if ev.Owner != "a" {
+		t.Errorf("Owner del evento = %q, quería a", ev.Owner)
+	}
+	for _, c := range []struct {
+		tenant string
+		want   bool
+	}{{"a", true}, {"b", false}} {
+		r := httptest.NewRequest("GET", "/events", nil)
+		r = r.WithContext(context.WithValue(r.Context(), claveRol{}, Rol{Tenant: c.tenant}))
+		if got := s.eventoVisible(r, ev); got != c.want {
+			t.Errorf("inquilino %s ve el borrado = %v, quería %v", c.tenant, got, c.want)
+		}
+	}
+}
+
 // Sin política, todo como siempre: sin rol, sin filtros, sin revisar cuerpos.
 func TestAuthzSinPoliticaTodoIgual(t *testing.T) {
 	s := servidorAuthz(t, nil)

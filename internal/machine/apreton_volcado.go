@@ -97,6 +97,10 @@ func esperarGlobo(ctx context.Context, c *fc.Client, targetMiB int, plazo time.D
 		if !time.Now().Before(deadline) {
 			return actual
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return actual
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }

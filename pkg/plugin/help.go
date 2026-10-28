@@ -230,22 +230,33 @@ func FlagLines(s string) string {
 }
 
 // limitedBuffer guarda hasta max bytes y descarta el resto sin fallar: un
-// escritor que falla haría que el hijo recibiera SIGPIPE.
+// escritor que falla haría que el hijo recibiera SIGPIPE. over dice si se
+// descartó algo.
+//
+// El bytes.Buffer va en un campo y no embebido: embebido, su ReadFrom quedaría
+// promovido y io.Copy (el que usa exec para Stdout) lo llamaría en vez de
+// Write, sin tope ninguno.
 type limitedBuffer struct {
-	bytes.Buffer
-	max int
+	buf  bytes.Buffer
+	max  int
+	over bool
 }
 
 func (l *limitedBuffer) Write(p []byte) (int, error) {
-	if room := l.max - l.Len(); room > 0 {
-		if len(p) > room {
-			l.Buffer.Write(p[:room])
-		} else {
-			l.Buffer.Write(p)
+	room := l.max - l.buf.Len()
+	if len(p) > room {
+		l.over = true
+		if room > 0 {
+			l.buf.Write(p[:room])
 		}
+	} else {
+		l.buf.Write(p)
 	}
 	return len(p), nil
 }
+
+func (l *limitedBuffer) Bytes() []byte  { return l.buf.Bytes() }
+func (l *limitedBuffer) String() string { return l.buf.String() }
 
 // IsHelpArg dice si a pide ayuda.
 func IsHelpArg(a string) bool { return a == "-h" || a == "--help" || a == "help" }

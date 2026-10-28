@@ -117,3 +117,29 @@ func TestReglasGrafoCredencialesSoloConArista(t *testing.T) {
 		}
 	}
 }
+
+// Las reglas del grafo (DNS al resolver, proxies de credenciales, enlaces) se
+// insertan con -I 1, por delante del DROP de INVALID del egreso: tienen que
+// rechazar lo INVALID por su cuenta. Con none las pone ya Setup.
+func TestGrafoNoAbreLoInvalidoHaciaElHost(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	for _, e := range []Egress{EgressNone, EgressAllowlist, EgressInternet} {
+		var delante [][]string
+		for _, r := range append(n.reglasGrafo(e, true), n.reglasEnlace(8080, 0)...) {
+			if len(r) > 2 && r[0] == "-I" && r[1] == "FORWARD" {
+				delante = append([][]string{r}, delante...) // cada -I 1 queda el primero
+			}
+		}
+		cadena := append(delante, n.egressRules(e)...)
+		for _, puerto := range []int{dnsPort, linkBasePort} {
+			p := paquete{in: TapName, out: n.NSIf, src: GuestIP, dst: n.HostIP, proto: "tcp", dport: puerto, estado: "INVALID"}
+			if got := veredicto(t, cadena, p); got != "DROP" {
+				t.Errorf("%s: INVALID a %s:%d = %s, quería DROP", e, n.HostIP, puerto, got)
+			}
+			p.estado = "NEW"
+			if got := veredicto(t, cadena, p); got != "ACCEPT" {
+				t.Errorf("%s: NEW a %s:%d = %s, quería ACCEPT", e, n.HostIP, puerto, got)
+			}
+		}
+	}
+}

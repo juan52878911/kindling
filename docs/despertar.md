@@ -104,6 +104,22 @@ sin memoria `evictLRU` congela las pausadas antes que nada despierto. `kling ai
 serve -paused-mib 256` por defecto: caben dos tareas Chispa de 128 MiB y ningún
 VON (1,5 GiB); `-paused-mib 0` vuelve a congelarlo todo.
 
+**En macOS (backend `vz`)** el presupuesto por defecto no es fijo: sin
+`-paused-mib`, `kling ai serve` ve en `/info` que el daemon es `vz` y lo deriva
+en cada vuelta del segador de `/procstats` (`total_mib`, `available_mib` y la
+huella de lo despierto): la mitad de la RAM física menos lo que ocupan las
+máquinas despiertas, sin pasar de la mitad de lo que macOS da por disponible
+(`kern.memorystatus_level` × RAM). Con el nivel en el 25 % o por debajo el
+presupuesto es 0: no se pausa nada y las pausadas se congelan, de la más vieja a
+la más nueva; si el nivel baja sin llegar ahí, se congelan las que ya no caben.
+En un Mac de 16 GiB con el nivel al 71 % salen ~5,7 GiB (medido en el M4). Allí compensa: reanudar
+una pausada cuesta 6–7 ms frente a ~210 ms de un thaw (M4), y antes de pausar el
+núcleo infla el globo al objetivo de `squeeze` y lo deja inflado (una copia
+restaurada de redis medida: 837 → 381 MiB de huella al pausar). Un
+`-paused-mib N` explícito manda en cualquier backend, y `-paused-mib -1` pide el
+automático también fuera del Mac. El segador corre cada idle/3: entre vuelta y
+vuelta lo que protege es `evictLRU` y la admisión del daemon (507).
+
 **Sin jailer** (`KLING_JAILER=0`) el thaw congelado baja de ~20 a ~13 ms en el
 daemon: spawn pasa de 7,6 a 0,5 ms (jailer copia el binario de Firecracker al
 chroot y prepara `/dev` en cada lanzamiento). Se mantiene el jailer por

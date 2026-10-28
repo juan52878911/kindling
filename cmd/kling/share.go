@@ -200,13 +200,19 @@ func cmdInspect(args []string) error {
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	mc, err := api.NewClient(hostOf(*host)).Get(ctx, fs.Arg(0))
+	c := api.NewClient(hostOf(*host))
+	mc, err := c.Get(ctx, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(mc)
+	if err := enc.Encode(mc); err != nil {
+		return err
+	}
+	// Por stderr: stdout es JSON y tiene que seguir siéndolo.
+	avisarEgress(ctx, c, mc.ID)
+	return nil
 }
 
 // sharesColumn resume las carpetas de una máquina para `kling ps`.

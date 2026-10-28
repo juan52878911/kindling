@@ -74,6 +74,9 @@ import (
 // sh, un HEALTHCHECK CMD-SHELL no se puede correr y se sustituye por la sonda
 // de EXPOSE.
 
+// ociInitImage es OCISpec.Init cuando el init de la imagen es el PID 1.
+const ociInitImage = "image"
+
 // OCISpec es el spec del constructor "oci".
 type OCISpec struct {
 	// Ref es la imagen: "postgres:17-alpine", "ghcr.io/o/r:tag",
@@ -112,6 +115,11 @@ type OCISpec struct {
 	// no arrancan.
 	Ulimits []string          `json:"ulimits,omitempty"`
 	Sysctls map[string]string `json:"sysctls,omitempty"`
+	// Init es "image" para que el init de la imagen (s6-overlay, supervisord)
+	// sea el PID 1 y el agente corra como hijo suyo; vacío, el agente es el
+	// PID 1 y lanza el servicio. Más caro: la imagen no comparte base con otras
+	// y arranca todo su init antes de estar lista.
+	Init string `json:"init,omitempty"`
 	// Source dice de dónde salen los blobs: "" es un registro; "archive",
 	// un docker save o un layout OCI que el CLI subió a la caché del daemon
 	// (kling image import -archive). Entonces Digest es obligatorio (el del
@@ -123,6 +131,33 @@ type OCISpec struct {
 	// cabeceras, versiones viejas de extensiones) y añade `-c jit=off` a su
 	// comando. Opt-in: cambia lo que hay en la imagen.
 	Slim bool `json:"slim,omitempty"`
+	// Isolate aplana las capas dentro de una microVM de herramientas en vez
+	// de en el anfitrión: el daemon baja y verifica los blobs (fase "pull"),
+	// se los pasa a la VM, que corre este mismo constructor sin red (fase
+	// "flatten") y devuelve el ext4. El tar nunca se interpreta en el host.
+	// No cambia la imagen (no entra en su identidad): solo dónde se hace.
+	Isolate bool `json:"isolate,omitempty"`
+}
+
+// Fases del constructor con Isolate (KLING_OCI_PHASE): "pull" solo baja y
+// verifica los blobs y deja isolate.json; "flatten" corre dentro de la VM, con
+// los blobs ya en su caché y el digest fijado por KLING_OCI_PINNED.
+const (
+	ociPhaseEnv    = "KLING_OCI_PHASE"
+	ociPinnedEnv   = "KLING_OCI_PINNED"
+	ociPhasePull   = "pull"
+	ociPhaseFlat   = "flatten"
+	isolateFile    = "isolate.json"
+	isolateMaxBlob = 4096
+)
+
+// IsolatePlan es lo que la fase pull le dice al daemon: el digest fijado, la
+// hora de la construcción y los blobs (manifiestos, configuración y capas)
+// que la VM necesita en su caché.
+type IsolatePlan struct {
+	Digest string   `json:"digest"`
+	Epoch  int64    `json:"epoch"`
+	Blobs  []string `json:"blobs"`
 }
 
 // ociSourceArchive es OCISpec.Source de lo importado de un archivo.
@@ -139,6 +174,8 @@ const (
 var ociInitTools = []string{"sh", "mount", "pivot_root", "mkdir", "ln"}
 
 // reOCIUser es un USER de Docker: uid o nombre, con grupo opcional.
+var rePinned = lazyre.New(`^sha256:[0-9a-f]{64}$`)
+
 var reOCIUser = lazyre.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$`)
 
 func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
@@ -200,6 +237,15 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	if _, _, err := api.ParseOnRestore(s.OnRestore); err != nil {
 		return ref, err
 	}
+	switch s.Init {
+	case "":
+	case ociInitImage:
+		if len(s.Ulimits) > 0 || s.OnRestore != "" {
+			return ref, fmt.Errorf("init %q can't apply ulimits or on-restore: the image's init is not restarted by kindling", s.Init)
+		}
+	default:
+		return ref, fmt.Errorf("invalid init %q: use image, or leave it empty", s.Init)
+	}
 	if _, err := api.ParseUlimits(s.Ulimits); err != nil {
 		return ref, err
 	}
@@ -258,6 +304,13 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	if spec.Arch == "" {
 		spec.Arch = runtime.GOARCH
 	}
+	phase := os.Getenv(ociPhaseEnv)
+	if phase != "" && phase != ociPhasePull && phase != ociPhaseFlat {
+		return fmt.Errorf("%s=%q: unknown phase", ociPhaseEnv, phase)
+	}
+	// Dentro de la VM el spec es el de siempre: la identidad de la imagen no
+	// depende de dónde se aplanó.
+	spec.Isolate = false
 	ref, err := validateOCI(req, spec)
 	if err != nil {
 		return err
@@ -312,7 +365,20 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// para nosotros: eso no se rehashea (internal/daemon/builders_cache.go).
 	c := &oci.Client{Cache: cache, Log: log, MaxBytes: int64(maxMB) << 20, Unpack: unpacked,
 		SiempreRehash: os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0, Auth: soloDe(auth, ref.Registry)}
+	if phase == ociPhasePull {
+		// Ni siquiera se descomprime: en el anfitrión solo se baja y se comprueba
+		// el sha256 del blob comprimido; descomprimir es cosa de la VM.
+		c.Unpack = ""
+	}
 	archive := spec.Source == ociSourceArchive
+	pinned := os.Getenv(ociPinnedEnv)
+	if phase == ociPhaseFlat {
+		if !rePinned.MatchString(pinned) {
+			return fmt.Errorf("%s: want sha256:<64 hex>", ociPinnedEnv)
+		}
+		// Sin c.Offline: es la comprobación estricta de un archivo (un diff_id
+		// por capa), que la fase pull ya hizo si tocaba; la VM no tiene red.
+	}
 	if archive {
 		// Los blobs los subió el CLI a la caché de root (PUT /oci/blobs): sin
 		// red. Sin root, el daemon los dejó en la verificada de este archivo
@@ -331,9 +397,11 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 	}
 	tPull := time.Now()
-	digest, err := c.Resolve(ctx, ref)
-	if err != nil {
-		return fmt.Errorf("resolving %s: %w", shown, err)
+	digest := pinned
+	if phase != ociPhaseFlat {
+		if digest, err = c.Resolve(ctx, ref); err != nil {
+			return fmt.Errorf("resolving %s: %w", shown, err)
+		}
 	}
 	img, err := c.Pull(ctx, ref.Name(), digest, spec.Arch)
 	if err != nil {
@@ -346,6 +414,16 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		if err := os.WriteFile(filepath.Join(dir, "cache-used"), []byte(usados), 0o600); err != nil {
 			return err
 		}
+	}
+	if phase == ociPhasePull {
+		// Solo JSON parseado y blobs comprobados por digest: ningún tar.
+		blobs := c.Usados()
+		if len(blobs) > isolateMaxBlob {
+			return fmt.Errorf("image has %d blobs, over the limit of %d", len(blobs), isolateMaxBlob)
+		}
+		pj, _ := json.Marshal(IsolatePlan{Digest: digest, Epoch: t.Unix(), Blobs: blobs})
+		logf("%s: %s, %d blob(s) pulled; flattening in a microVM", shown, img.ManifestDigest, len(blobs))
+		return os.WriteFile(filepath.Join(dir, isolateFile), pj, 0o600)
 	}
 	cfg := img.Config.Config
 	dPull := time.Since(tPull)
@@ -386,6 +464,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		// Nunca ella misma (un import -replace): sería su propia base.
 		bases = slices.DeleteFunc(slices.Clone(bases), func(b imagen.BaseOCI) bool { return b.Name == req.Name })
 		reuse = imagen.BestBase(bases, chain, agentSum, spec.Arch)
+	}
+	initImage := spec.Init == ociInitImage
+	if initImage {
+		// Siempre con el init en Go (que cede el PID 1 a la imagen): una base
+		// con el script no sirve.
+		reuse = nil
 	}
 
 	// Aplanar las capas, con sus whiteouts, en un árbol: la raíz entera. Con
@@ -491,6 +575,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// imagen trae su propio /entrypoint, que el script ejecutaría en vez del
 	// agente: el de Go no lo mira.
 	goInit, missing, ownEntry := ociInit(tree)
+	goInit = goInit || initImage
 	switch {
 	case len(missing) > 0:
 		logf("the image has no %s: it boots with kindling's init in Go", strings.Join(missing, ", "))
@@ -516,7 +601,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		cmd = spec.Cmd
 	}
 	argv := append(append([]string{}, entry...), cmd...)
-	if err := checkNoS6(tree, argv); err != nil {
+	if initImage {
+		if len(argv) == 0 {
+			return errors.New("-init image needs the image's init as its ENTRYPOINT or CMD (s6-overlay: /init), and this one has neither")
+		}
+		logf("init=image: %s is PID 1 and the agent runs beside it (slower to boot, no shared base)", argv[0])
+	} else if err := checkNoS6(tree, argv); err != nil {
 		return err
 	}
 	if len(slimArgs) > 0 {
@@ -526,6 +616,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	user := cfg.User
 	if spec.User != "" {
 		user = spec.User
+	}
+	if initImage && user != "" {
+		logf("warning: init=image runs the image's init as root; USER %s is left to the image's own supervisor", user)
 	}
 	env, fuera := mergeEnv(cfg.Env, spec.Env)
 	for _, k := range fuera {
@@ -553,7 +646,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
-		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls}
+		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls, Init: initImage}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
 		// El agente la cambiaría igual por SIGTERM; aquí se ve al importar.
 		logf("warning: STOPSIGNAL: %v; the service will be stopped with SIGTERM", err)
@@ -994,7 +1087,7 @@ func checkNoS6(tree *ext4.Node, argv []string) error {
 	}
 	for _, p := range []string{"/package/admin/s6-overlay", "/etc/s6-overlay", "/command/with-contenv"} {
 		if n, _ := tree.Resolve(p); n != nil {
-			return fmt.Errorf("the image uses s6-overlay as its init (%s), which must be PID 1 and can't run under kindling's agent: import it with its own command after -- or -entrypoint (the service itself, not /init)", argv[0])
+			return fmt.Errorf("the image uses s6-overlay as its init (%s), which must be PID 1 and can't run under kindling's agent: import it with -init image (the image's init becomes PID 1; slower to boot), or with its own command after -- or -entrypoint (the service itself, not /init)", argv[0])
 		}
 	}
 	return nil

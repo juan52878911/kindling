@@ -55,6 +55,7 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 	start := time.Now()
+	apretado := m.apretarAntesDePausar(ctx, cur)
 	if err := fc.New(sock).Pause(ctx); err != nil {
 		return nil, fmt.Errorf("pausing: %w", err)
 	}
@@ -73,8 +74,11 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 	m.invalidarSesiones(mc.ID, "paused")
 
-	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("paused in %.1f ms (VMM kept, RAM retained)", msDesde(time.Since(start)))})
+	msg := fmt.Sprintf("paused in %.1f ms (VMM kept, RAM retained)", msDesde(time.Since(start)))
+	if apretado > 0 {
+		msg = fmt.Sprintf("paused in %.1f ms (VMM kept; the guest handed back ~%d MiB first)", msDesde(time.Since(start)), apretado)
+	}
+	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name, Message: msg})
 	return &out, nil
 }
 

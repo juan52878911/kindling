@@ -908,7 +908,9 @@ func filtrarGrafos(r *http.Request, l []*api.Graph) []*api.Graph {
 }
 
 // eventoVisible dice si r puede ver ev: un inquilino, solo los de sus
-// máquinas vivas (el de una ya borrada no se puede atribuir y no se envía).
+// máquinas. El evento que trae su dueño (el borrado, que se publica con la
+// máquina ya fuera de byID) se atribuye por él; los demás, por la máquina
+// viva, y el de una que ya no está y no lo trae no se envía.
 func (s *Server) eventoVisible(r *http.Request, ev api.Event) bool {
 	t, filtra := inquilinoDe(r)
 	if !filtra {
@@ -916,6 +918,9 @@ func (s *Server) eventoVisible(r *http.Request, ev api.Event) bool {
 	}
 	if ev.ID == "" {
 		return false
+	}
+	if ev.Owner != "" {
+		return t != "" && ev.Owner == t
 	}
 	mc, ok := s.mgr.Get(ev.ID)
 	return ok && mc.ID == ev.ID && esDe(mc.Labels, t)

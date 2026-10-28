@@ -385,6 +385,9 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
+	// Con tope, como el resto de cuerpos del gateway: sin él un cliente podía
+	// mandar un JSON sin fin y tumbar al gateway compartido por memoria.
+	req.Body = http.MaxBytesReader(w, req.Body, maxProxyBody)
 	if err := json.NewDecoder(req.Body).Decode(&rpc); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return

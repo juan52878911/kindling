@@ -8,8 +8,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling db` templates of Garage, an S3-compatible object store (`-engine garage`): every copy gets its own access/secret key, generated on the host and rotated by `rotate` (#115)
 - Credential proxy: SigV4 re-signing (`kind: sigv4`) for S3-compatible servers: the guest signs with a placeholder key and the proxy signs again with the real one, incl. `UNSIGNED-PAYLOAD`, `aws-chunked` and presigned URLs (#116)
 - `kling volume clone <src> <dst> [-copy]`: instant copy-on-write volume clones (reflink/clonefile), with a real clone probe in `kling status -v`; refuses on filesystems that cannot clone unless `-copy`
+- `kling graph from-compose <compose.yaml>` translates a Compose file into a graph file, warning per unsupported key; environment and command are baked into the imported images (a warning says so)
+- Machines with egress blocked report the destinations they tried to reach (`kling logs`/`inspect`, `run -wait-ready`, `image import -warm`) with an `-egress allowlist -allow` suggestion
+- `kling image import -init image` runs the image's own init (s6-overlay, supervisord) as PID 1 with the agent as its child (opt-in, slower to boot); images with s6 as init are no longer refused when this is used
+- `kling image import -isolate` flattens the layers inside a tools microVM without network (`kling image build-tools`): the tar is never parsed on the host (opt-in; ~6-9x slower to import for now)
 - `kling image import` stores an image whose layers extend an already imported one (same diff_id prefix, agent and arch) as a small layer over it instead of a second full ext4; a base with layers on top cannot be removed
 - `kling template pool <name> -n N` keeps N awake copies of a template; `run -from` claims one in ~10-20 ms instead of restoring (off by default)
 - `kling image import -warm [-step CMD]...` goes from a registry ref to a ready template in one command; `kling db golden -from-oci REF build` builds a database golden from a Docker/OCI image (e.g. pgvector/pgvector:pg16) without compiling extensions
@@ -20,17 +25,66 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db` templates of Oracle MySQL 8.4 and 9 from the Docker image, with `caching_sha2_password` hashes computed on the host (#114)
 - Every copy of a template regenerates its SSH host keys when the image has `ssh-keygen`, and sshd serves the new ones (#176)
 - `kling db golden image|build -engine valkey`: Valkey templates, served like Redis (#113)
+- `docs/linux-arm64.md`: which arm64 hosts can run kindling (Graviton .metal, Ampere, OCI BM A1, Pi 5 with the 4K kernel), setup, tuning, and why goldens don't move between arm64 CPU models
 
 ### Changed
 
+- macOS: `kling ai serve` without `-paused-mib` derives the paused budget from host memory and freezes paused replicas when the memory level drops; the core inflates the balloon before pausing and keeps it
+- macOS: restores (3 at once, one by one at memory level 25 % or below) and cold boots (4) have separate launch gates; resuming a paused machine takes neither
 - `kling image import` refuses images with no command and no shell, or with s6-overlay as init, with a clear error; a wrong-architecture image says which side is which; `scripts/bateria-imagenes.sh` checks 10 popular images end to end
 - `kling rm` answers once the VM is dead and cleans up in the background; the name is free at once and an interrupted cleanup finishes on daemon start (p50 ~65 → ~37 ms)
+- `kling up` on arm64: the missing-`/dev/kvm` hint no longer says `modprobe kvm_intel` (KVM is built in there), and a host page size other than 4 KiB is a warning (Raspberry Pi 5 boots a 16K kernel by default)
+- Guest kernel: the 6.1.140 tarball sha256 is pinned, so `scripts/builders/kernel/build.sh` runs; arm64 adds errata 1319367, 1530923 and 2067961 and drops 2645198, which 6.1 doesn't have
+- `scripts/30-fetch-artifacts.sh` recommends `KERNEL_SOURCE=build` on aarch64 when it isn't set
+- Release binaries are built with Go 1.27.3 (12 reachable stdlib CVEs fixed); the minimum Go in `go.mod` stays 1.24
+- The release workflow runs the full test suite before building, uses a read-only token except to publish, and pins actions by SHA
+- `kling` only runs `kling-*` extensions owned by you or root with no group/other write on the file or its directory, and ignores relative `PATH` entries
+- Sizes above 1 PiB (`-mem 1e30G`) are rejected instead of saturating
+- Live shares move up to 1 MiB per operation when agent and daemon are both new (negotiated, 128 KiB otherwise), ro shares keep the guest page cache for files unchanged since the last open, and listing a large directory no longer reopens it for every page
+- macOS: the CPU ceiling charges time on efficiency cores at what it is worth on a performance core; under launchd a 25 % ceiling slowed a CPU-bound guest ×12–15 instead of ×4 (now ×4–5)
+- macOS: while the guest boots, the CPU ceiling lets all its vCPUs run (up to the host's cores), as on Linux
+- macOS: read-only drives use the host cache, and a drive marked `kling_disposable` (the overlay of a non-persistent machine) skips host flushes: 300 guest `sync` 1.8 → 0.7 s
+- macOS: bigger TCP buffers in the user-space network (8 MiB receive, 6 MiB send) and at most 512 live TCP connections per machine
 
 ### Fixed
 
+- Egress `none` and `allowlist` no longer let conntrack-INVALID packets (e.g. RST/FIN with payload) through the netns FORWARD; the host also drops veth-to-veth forwarding, spoofed sources and 172.16/12 outside 172.30/16
+- The FORWARD accepts inserted ahead of everything for graph links, the DNS resolver and credential proxies no longer let INVALID packets through to the host side
+- `kling rm|stop|freeze|thaw|pause a b c` keeps going after a failure, prints each error and exits 1 at the end, like docker
+- Daemon status codes: removing an image or snapshot answers 400 for a bad name, 404 if it does not exist and 409 if it is in use; snapshot lookups decide 404 by error type, not by message
+- Request bodies over the limit answer 413 instead of 400 "unexpected EOF" (exec, shell, resize, mmds, credentials); store and annotations answer 413 only for size
+- `kling events` no longer stops on an event line over 64 KiB
+- `kling freeze`, `thaw` and `start` no longer fail after 60 s waiting for the daemon's answer
+- macOS: the first `exec` after a cold boot no longer waits ~1.2 s for a lost SYN (agent probes in 150 ms attempts): `run` + `exec` 1.4 → 0.55 s, `run -wait-ready` 1.2 → 0.54 s on an M4
 - `run -from` no longer pays a ~320 ms resync retry (up to 2 s) on templates saved while the guest agent was not listening: the mark is kept in the signed snapshot meta and the freeze seal
 - macOS on M4: OpenSSL no longer dies with `Illegal instruction` in the guest; the agent sets `OPENSSL_armcap` when the guest kernel reports SVE2 without SVE (#183)
+- Guest `/exec`: a background grandchild (`sh -c "sleep 600 & echo ok"`) no longer holds the reply until it exits, and cancelling the request kills the whole process group
+- Guest agent: setting the MMDS route no longer logs a spurious "no child processes"
+- Live shares no longer hand absolute host symlink targets to the guest: targets inside the share become relative, the rest get EACCES
 - MCP gateway: after a restart, tools of a service whose instance was still running work again; the gateway clears its old sessions and no longer leaks one per catalog fetch (#187)
+- Image import: a file name over 255 bytes or with a NUL is rejected instead of writing a corrupt directory entry; a file alternating data and zero blocks no longer fails with "file too fragmented"; xattrs in unknown namespaces or too large in `user.*` are dropped with a warning instead of failing the image
+- Reading an ext4 with a corrupt superblock (0 inodes or blocks per group) returns an error instead of panicking
+- Extension manifest, hook and `-h` output is capped at 1 MiB; the old cap was bypassed by `io.Copy`
+- Concurrent writes of the same state file no longer share a temp file
+- A panic while keeping a service warm no longer kills the gateway
+- `scripts/release.sh` refuses a tag that already exists on origin and fetches before comparing main
+- `kling-bridge`: client replies to server requests (sampling, elicitation, roots) are accepted at once instead of hanging until `-request-timeout`; sessions with an open SSE stream or a call in flight are never reaped or recycled; starting a session no longer holds the bridge lock
+- MCP gateway: only a 400 that says the session is unknown triggers a new handshake and retry (a bad request returns its real error); the `/mcp/_all` endpoints cap the request body at 8 MiB
+- MCP gateway: re-adopting one of its own running instances after a failed liveness probe no longer resets its bridge and wipes live sessions
+- `kling-sandbox`: a prewarmed sandbox whose renew fails after it was labelled for a tenant is removed instead of left counting against that tenant; with a quota set, creating fails closed (503) while a host does not answer
+- macOS: in allowlist mode an IP resolved with TTL 0 stayed allowed forever; it now expires after 60 s like any other
+- macOS: if the CPU brake process dies with the VM's helper stopped, `kling-vz` exits instead of keeping a machine that never runs again; a SIGTERM to it resumes the helper first
+- macOS: a failed VM start no longer leaks the VM and its console pipe
+- macOS: a slow CPU reading no longer blocks the `kling-vz` API
+- Writing a file into an image or removing it is refused while a cold boot of that image is in flight
+- Two concurrent `kling volume create` of the same name no longer replace each other's half-formatted file; template placeholder marks are written durably
+- Freeze and save fsync the memory, state and overlay files before sealing, after the VM is resumed or gone, so a power cut cannot leave a seal over a dump still in cache
+- A full copy-on-write store no longer cuts the freeze or thaw of a machine at 5 s, which could leave it half frozen
+- `kling save` no longer throws away a finished dump when the client disconnects while holes are punched in it
+- A freeze whose pause fails resumes the machine and clears the in-progress mark, instead of leaving it possibly paused while shown as running
+- Linux: writing a file into an image flushes only that image (`syncfs`) instead of running a host-wide `sync` on every put
+- Tenants see the removal events of their own machines: events carry an `owner` field, and `kling rm` publishes the event with the machine's name and owner as soon as the name is free
+- Smaller leaks: a failed `run -from` drops its overlay from the copy-on-write store at once, `kling rm` forgets the machine's per-ID freeze and resync marks, and the pre-dump balloon wait honours cancellation
 
 ## [0.18.0] - 2026-10-11
 
