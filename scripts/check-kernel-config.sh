@@ -113,6 +113,8 @@ REQUIRED_arm64=(
   SERIAL_OF_PLATFORM
   # vz: virtio por PCI y consola hvc0
   PCI VIRTIO_PCI VIRTIO_CONSOLE
+  # imágenes amd64 con qemu-user (docs/imagenes-amd64.md)
+  BINFMT_MISC
 )
 
 FORBIDDEN_COMMON=(

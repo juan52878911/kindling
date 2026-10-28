@@ -273,7 +273,7 @@ if [ "$DRY_RUN" = "1" ]; then
     info "$BASE/SHA256SUMS"
     if [ "$SKIP_KLING" != "1" ]; then
         info "$BASE/$BIN_NAME"
-        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64"
+        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (si la release lo trae)"
     fi
     for e in $EXTS; do
         info "$BASE/kling-${e}-${PLAT}  ->  $PLUGIN_DIR/kling-$e"
@@ -326,7 +326,15 @@ ok "SHA256SUMS"
 # un kling nuevo con extensiones viejas.
 if [ "$SKIP_KLING" != "1" ]; then
     get "$BIN_NAME"
-    [ "$PLAT" = "darwin-arm64" ] && get "kling-vz-darwin-arm64"
+    if [ "$PLAT" = "darwin-arm64" ]; then
+        get "kling-vz-darwin-arm64"
+        # kling-hv llega en las releases posteriores a v0.18: una anterior no
+        # lo trae y se instala igual (el daemon usará kling-vz).
+        if grep -Eq '[ *]kling-hv-darwin-arm64$' "$WORK/SHA256SUMS"; then
+            get "kling-hv-darwin-arm64"
+            HV_NAME="kling-hv-darwin-arm64"
+        fi
+    fi
 fi
 for e in $EXTS; do
     get "kling-${e}-${PLAT}"
@@ -389,6 +397,14 @@ if [ "$SKIP_KLING" != "1" ]; then
         xattr -d com.apple.quarantine "$WORK/$VZ_NAME" 2>/dev/null || true
         place "$WORK/$VZ_NAME" "$PREFIX/kling-vz" || fail "no puedo escribir en $PREFIX"
         ok "instalado en $PREFIX/kling-vz (backend nativo de macOS)"
+        # kling-hv (Hypervisor.framework), igual: junto a kling y sin
+        # cuarentena. Con daemon.vmm auto el daemon lo elige si este macOS lo
+        # admite (docs/mac.md).
+        if [ -n "${HV_NAME:-}" ]; then
+            xattr -d com.apple.quarantine "$WORK/$HV_NAME" 2>/dev/null || true
+            place "$WORK/$HV_NAME" "$PREFIX/kling-hv" || fail "no puedo escribir en $PREFIX"
+            ok "instalado en $PREFIX/kling-hv (backend hv de macOS)"
+        fi
     fi
 fi
 

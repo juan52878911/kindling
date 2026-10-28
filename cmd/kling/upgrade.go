@@ -432,25 +432,67 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 	if g := filepath.Join(libPorDefecto(o.Raiz), "kling-guest"); o.Raiz != "" && fileExists(g) {
 		o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe("kling-guest", "linux", arch), Destino: g})
 	}
-	// Sin el permiso de virtualización, el daemon nuevo arrancaría y la
+	// Sin el permiso de su framework, el daemon nuevo arrancaría y la
 	// primera microVM fallaría: se mira antes de parar nada.
 	o.Validar = func(bajados map[string]string) error {
-		if p, ok := bajados["kling-vz-darwin-arm64"]; ok && !tieneEntitlementVZ(p) {
-			return fmt.Errorf("the downloaded kling-vz is not signed with com.apple.security.virtualization: nothing was changed")
+		for _, b := range []string{machine.BackendVZ, machine.BackendHV} {
+			n := machine.NombreVMM(b)
+			if p, ok := bajados[n+"-darwin-arm64"]; ok && !tieneEntitlement(p, entitlementDe(b)) {
+				return fmt.Errorf("the downloaded %s is not signed with %s: nothing was changed", n, entitlementDe(b))
+			}
 		}
 		return nil
 	}
-	if vz := filepath.Join(filepath.Dir(exe), "kling-vz"); fileExists(vz) && arch == "arm64" {
-		o.Piezas = append(o.Piezas, upgrade.Pieza{Asset: assetDe("kling-vz", "darwin", "arm64"), Destino: vz})
+	vmms := piezasVMMMac(filepath.Dir(exe), arch)
+	o.Piezas = append(o.Piezas, vmms...)
+	if len(vmms) > 0 {
+		destinos := make([]string, len(vmms))
+		for i, p := range vmms {
+			destinos[i] = p.Destino
+		}
 		o.CongeladaLegible = func(raiz, id string, viejos map[string]string) error {
-			viejo, ok := viejos[vz]
-			if !ok {
-				return nil // kling-vz no se cambió
+			// kling-vz y kling-hv escriben el mismo snap.file (kling_vz): lo
+			// que congeló el daemon nuevo lo tiene que leer el VMM viejo que
+			// lo vaya a despertar, sea cual sea el que elija daemon.vmm.
+			max := 0
+			for _, d := range destinos {
+				if viejo, ok := viejos[d]; ok {
+					if m := formatoMaxVZ(viejo); max == 0 || m < max {
+						max = m
+					}
+				}
 			}
-			return volcadoLegible(filepath.Join(raiz, "machines", id, "snap.file"), formatoMaxVZ(viejo))
+			if max == 0 {
+				return nil // ningún VMM viejo que lo despierte cambió
+			}
+			return volcadoLegible(filepath.Join(raiz, "machines", id, "snap.file"), max)
 		}
 	}
 	return nil
+}
+
+// piezasVMMMac son los VMM de macOS que se actualizan junto a kling (en dir):
+// kling-vz si está, y kling-hv si está o si está kling-vz (una instalación de
+// install.sh anterior a kling-hv lo gana al actualizar; una release sin él, la
+// de una vuelta a una versión anterior, no es un error y lo deja como está:
+// Opcional). Un kling sin kling-vz al lado (compilado a mano, el
+// VMM en otro sitio) no toca ninguno.
+func piezasVMMMac(dir, arch string) []upgrade.Pieza {
+	if arch != "arm64" {
+		return nil
+	}
+	vz := filepath.Join(dir, machine.NombreVMM(machine.BackendVZ))
+	hv := filepath.Join(dir, machine.NombreVMM(machine.BackendHV))
+	var out []upgrade.Pieza
+	if fileExists(vz) {
+		out = append(out, upgrade.Pieza{Asset: assetDe("kling-vz", "darwin", "arm64"), Destino: vz})
+	}
+	if fileExists(hv) || fileExists(vz) {
+		a := assetDe("kling-hv", "darwin", "arm64")
+		a.Opcional = true
+		out = append(out, upgrade.Pieza{Asset: a, Destino: hv})
+	}
+	return out
 }
 
 // formatoMaxVZ es el formato de snapshot (kling_vz) más nuevo que lee el

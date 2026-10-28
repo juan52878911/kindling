@@ -10,9 +10,9 @@ package credproxy
 // EL CAMINO CALIENTE no espera al disco: la petición deja su registro en un
 // canal con un envío que no bloquea, y una sola goroutine lo codifica y lo
 // escribe con buffer (se vacía en cuanto la cola queda vacía, o cada auditLote
-// registros si no para de llegar, y cada segundo por si acaso; sin fsync: es
-// observabilidad, no un diario transaccional, y lo que ya se escribió sobrevive
-// a que maten el proceso). Si el canal está
+// registros si no para de llegar, y al segundo si quedó algo pendiente; sin
+// fsync: es observabilidad, no un diario transaccional, y lo que ya se
+// escribió sobrevive a que maten el proceso). Si el canal está
 // lleno —el disco no da abasto o un invitado dispara a saco— el registro se
 // descarta y se cuenta; la cuenta viaja en el campo dropped del siguiente
 // registro que sí se escriba (o en uno de tipo "dropped" si no llega ninguno),
@@ -262,8 +262,16 @@ func (a *Auditor) Close() error {
 
 func (a *Auditor) bucle() {
 	defer close(a.done)
-	t := time.NewTicker(auditCada)
-	defer t.Stop()
+	// La vuelta de cada auditCada solo hace falta con algo pendiente (buffer
+	// sin vaciar o descartados sin anotar): el temporizador se arma entonces y
+	// no siempre. Un ticker fijo despertaba a cada kling-vz una vez por
+	// segundo aunque su máquina no tuviera credenciales ni tráfico.
+	var vuelta <-chan time.Time
+	armar := func() {
+		if vuelta == nil && (a.enBuffer > 0 || a.dropped.Load() > 0) {
+			vuelta = time.After(auditCada)
+		}
+	}
 	for {
 		select {
 		case r := <-a.ch:
@@ -274,9 +282,12 @@ func (a *Auditor) bucle() {
 			if a.enBuffer >= auditLote || len(a.ch) == 0 {
 				a.vaciar()
 			}
-		case <-t.C:
+			armar()
+		case <-vuelta:
+			vuelta = nil
 			a.anotarPerdidas()
 			a.vaciar()
+			armar()
 		case <-a.quit:
 		resto:
 			for {

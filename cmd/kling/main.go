@@ -113,6 +113,8 @@ func main() {
 		err = cmdSandbox(args)
 	case "graph":
 		err = cmdGraph(args)
+	case "compose":
+		err = cmdCompose(args)
 	case "inspect":
 		err = cmdInspect(args)
 	case "ps":
@@ -360,11 +362,20 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 
-	backend, err := daemonBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH)
+	// Con daemon.vmm auto (el de macOS) se elige aquí, una vez: hasta el
+	// próximo arranque el daemon habla con ese VMM.
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
 	if err != nil {
 		return err
 	}
-	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
+	if err := machine.ElegirBackend(backend); err != nil {
+		return err
+	}
+	if motivo != "" {
+		machine.FijarMotivoBackend(motivo)
+		log.Printf("vmm: %s (%s)", backend, motivo)
+	}
+	vmm := machine.ResolverVMM(backend, envVMM(), *fcBin)
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
 	machine.SetCredAuditConfig(credAuditConfig())
@@ -374,6 +385,7 @@ func cmdDaemon(args []string) error {
 	}
 	srv.SetShareConfig(shareConfig)
 	srv.SetCoW(cowConfig())
+	srv.SetBattery(batteryConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
@@ -451,6 +463,34 @@ func credAuditConfig() credproxy.AuditConfig {
 	return c
 }
 
+// batteryConfig lee daemon.battery_mode y daemon.battery_pause_after_seconds;
+// KLING_BATTERY_MODE y KLING_BATTERY_PAUSE_AFTER (segundos) mandan sobre el
+// fichero. Un valor que no se entiende se avisa y se queda en el de por
+// defecto.
+func batteryConfig() machine.BatteryConfig {
+	cfg := loadConfig()
+	mode, after := cfg.Daemon.BatteryMode, cfg.Daemon.BatteryPauseAfter
+	if v, ok := os.LookupEnv("KLING_BATTERY_MODE"); ok {
+		mode = v
+	}
+	if err := config.ValidateBatteryMode(mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.BatteryAuto)
+		mode = config.BatteryAuto
+	}
+	if v := os.Getenv("KLING_BATTERY_PAUSE_AFTER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= -1 {
+			after = n
+		} else {
+			log.Printf("warning: KLING_BATTERY_PAUSE_AFTER=%q is not a number of seconds or -1 (using the default)", v)
+		}
+	}
+	c := machine.BatteryConfig{Mode: mode, PauseAfter: time.Duration(after) * time.Second}
+	if after < 0 {
+		c.PauseAfter = -1
+	}
+	return c
+}
+
 // cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
 // KLING_COW_STORE_GIB mandan sobre el fichero. Un valor que no se entiende se
 // avisa y se queda en auto.
@@ -475,13 +515,23 @@ func cowConfig() machine.CoWConfig {
 	return c
 }
 
+// envVMM es KLING_VMM para buscar el binario: "auto" no es un binario, es
+// la elección que ya hizo resolverBackend.
+func envVMM() string {
+	if v := os.Getenv("KLING_VMM"); v != config.VMMAuto {
+		return v
+	}
+	return ""
+}
+
 // daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
-// nombre de backend, si no la clave daemon.vmm, si no el de la plataforma. Y
+// nombre de backend, si no la clave daemon.vmm, si no el de la plataforma
+// (en macOS, auto: lo resuelve resolverBackend). Y
 // comprueba que ESTE binario sepa hablarlo: lo que hace el host alrededor del
 // VMM (red, cgroups, /proc) va compilado para un sistema concreto.
 func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	backend := ajuste
-	if env == config.VMMFirecracker || env == config.VMMVZ {
+	if env == config.VMMFirecracker || env == config.VMMVZ || env == config.VMMHV || env == config.VMMAuto {
 		backend = env
 	}
 	if backend == "" {
@@ -490,8 +540,10 @@ func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 	if err := config.ValidateVMM(backend, goos, goarch); err != nil {
 		return "", fmt.Errorf("daemon.vmm: %w", err)
 	}
-	if c := machine.BackendCompilado(); backend != c {
-		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, c)
+	// auto se resuelve después (resolverBackend), a vz o hv: los dos los
+	// habla el binario de macOS, y ValidateVMM ya exigió darwin/arm64.
+	if backend != config.VMMAuto && !machine.BackendSoportado(backend) {
+		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, machine.BackendCompilado())
 	}
 	return backend, nil
 }
@@ -501,6 +553,7 @@ func cmdRun(args []string) error {
 	host := hostFlag(fs)
 	name := fs.String("name", "", "machine name")
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
+	platform := fs.String("platform", "", "with a Docker -image: linux/amd64 or linux/arm64, as in docker run; amd64 on an arm64 daemon runs emulated with qemu-user (docs/imagenes-amd64.md)")
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
@@ -527,8 +580,18 @@ func cmdRun(args []string) error {
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
+	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
+	var publica publishFlag
+	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST or PORT; repeatable): kling stays in the foreground following the service, and wakes the machine if frozen")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if len(publica) > 0 && *asJSON {
+		return errors.New("-p keeps kling in the foreground; it doesn't go with -json")
+	}
+	lns, err := escucharPuertos(publica)
+	if err != nil {
 		return err
 	}
 
@@ -588,9 +651,11 @@ func cmdRun(args []string) error {
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {
-		if imagen, err = asegurarImagenDocker(ctx, client, imagen); err != nil {
+		if imagen, err = asegurarImagenDockerPlataforma(ctx, client, imagen, *platform); err != nil {
 			return err
 		}
+	} else if *platform != "" {
+		return fmt.Errorf("-platform only goes with a Docker reference in -image")
 	}
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
@@ -611,7 +676,7 @@ func cmdRun(args []string) error {
 		CPUPctDefault:       cfg.Defaults.CPUPct,
 		WaitReady:           *waitReady,
 		ReadyTimeoutSeconds: int(readyTimeout.Seconds()),
-		Labels:              labels.merge(*service),
+		Labels:              conPuertos(labels.merge(*service), publica),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
@@ -620,6 +685,7 @@ func cmdRun(args []string) error {
 		AllowExec: *allowExec,
 		OnTTL:     *onTTL,
 		Env:       env,
+		ShareWait: *shareWait,
 	})
 	if err != nil {
 		return err
@@ -652,6 +718,10 @@ func cmdRun(args []string) error {
 	}
 	for _, s := range mc.Shares {
 		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
+	}
+	if len(publica) > 0 {
+		publicarEnPrimerPlano(ctx, client, endpoint, mc, publica, lns)
+		return nil
 	}
 	if *allowExec {
 		next("kling exec %s -- <cmd>   ·   kling save %s <name>", mc.ID[:12], mc.ID[:12])
@@ -1453,7 +1523,11 @@ func writeInfo(c *api.Client, i *api.Info) {
 	if backend == "" {
 		backend = "firecracker" // daemon anterior a v0.9: siempre lo era
 	}
-	fmt.Printf("backend:      %s\n", backend)
+	if i.BackendReason != "" {
+		fmt.Printf("backend:      %s (%s)\n", backend, i.BackendReason)
+	} else {
+		fmt.Printf("backend:      %s\n", backend)
+	}
 	if i.Arch != "" {
 		fmt.Printf("arch:         %s\n", i.Arch)
 	}

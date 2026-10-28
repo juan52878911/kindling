@@ -40,7 +40,8 @@ func imagesImport(args []string) error {
 	fs := flag.NewFlagSet("image import", flag.ExitOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "image name (default: from the reference, e.g. postgres-17-alpine)")
-	arch := fs.String("arch", "", "amd64 or arm64 (default: the daemon's)")
+	arch := fs.String("arch", "", "amd64 or arm64 (default: the daemon's); amd64 on an arm64 daemon runs emulated (see -emulate)")
+	emulate := fs.Bool("emulate", false, "run an image of another -arch on this daemon with qemu-user inside the guest (only amd64 on arm64; slower, see docs/imagenes-amd64.md). On by default when -arch amd64 meets an arm64 daemon; -emulate=false builds it for an amd64 host instead")
 	var ef envFlags
 	ef.register(fs)
 	user := fs.String("user", "", "run the entrypoint as uid[:gid] or name[:group] instead of the image's USER")
@@ -159,6 +160,20 @@ func imagesImport(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
+	if *arch != "" || *emulate {
+		in, err := c.Info(ctx)
+		if err != nil {
+			return err
+		}
+		a, emu, aviso, err := emulacionImport(in.Arch, *arch, *emulate, flagsGiven(fs, "emulate") != nil)
+		if err != nil {
+			return err
+		}
+		*arch, spec.Arch, spec.Emulate = a, a, emu
+		if aviso != "" {
+			fmt.Fprintln(os.Stderr, aviso)
+		}
+	}
 	shown := ref.String()
 	var arc *archivoImport
 	if *archive != "" {
@@ -179,6 +194,10 @@ func imagesImport(args []string) error {
 	}
 	if *name == "" {
 		*name = imageNameFor(ref)
+		if spec.Emulate {
+			// Que no choque con la nativa de la misma referencia.
+			*name = nombreEmulada(*name, spec.Arch)
+		}
 	}
 	sb, _ := json.Marshal(spec)
 	req := api.BuildImageRequest{Name: *name, Builder: "oci", Spec: sb}
@@ -431,4 +450,45 @@ func runsLine(argv []string, fromCommandLine bool) string {
 		return strings.Join(argv, " ")
 	}
 	return fmt.Sprintf("%s … (%d arguments from the command line)", argv[0], len(argv)-1)
+}
+
+// emulacionImport decide -arch y -emulate frente a la arquitectura del daemon:
+// amd64 en un daemon arm64 va emulada salvo -emulate=false (construir para un
+// anfitrión amd64, como antes); -emulate sin -arch es amd64. dado dice si
+// -emulate vino en la línea de órdenes.
+func emulacionImport(daemon, arch string, emulate, dado bool) (string, bool, string, error) {
+	if emulate && arch == "" {
+		arch = "amd64"
+	}
+	if daemon == "" || arch == "" || arch == daemon {
+		if emulate {
+			return "", false, "", fmt.Errorf("-emulate needs an -arch other than the daemon's (%s)", cmp.Or(daemon, "unknown"))
+		}
+		return arch, false, "", nil
+	}
+	if dado && !emulate {
+		return arch, false, "", nil
+	}
+	if arch != "amd64" || daemon != "arm64" {
+		if emulate {
+			return "", false, "", fmt.Errorf("-emulate only runs amd64 images on an arm64 daemon, not %s on %s", arch, daemon)
+		}
+		return arch, false, "", nil
+	}
+	aviso := ""
+	if !dado {
+		aviso = "note: the daemon is arm64, so this amd64 image runs emulated with qemu-user (several times slower on CPU); " +
+			"-emulate=false builds it for an amd64 host instead"
+	}
+	return arch, true, aviso, nil
+}
+
+// nombreEmulada es el nombre por defecto de una importación emulada: el de
+// siempre con -amd64 detrás, dentro del largo de un nombre de imagen.
+func nombreEmulada(name, arch string) string {
+	suf := "-" + arch
+	if len(name)+len(suf) > 64 {
+		name = strings.TrimRight(name[:64-len(suf)], "-_")
+	}
+	return name + suf
 }

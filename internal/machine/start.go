@@ -84,6 +84,9 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		}
 	}
 	live.State = api.StateCreated
+	// VolumeWait es del primer arranque: un Start monta como siempre (nadie
+	// le mandaría el acquire).
+	live.VolumeWait = false
 	// Lo listo era del arranque anterior: hasta que el agente nuevo conteste,
 	// no se sabe (como en Run). Si no, GET /machines decía "ready" mientras
 	// el invitado aún arrancaba, y un exec en ese rato fallaba.
@@ -307,7 +310,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	start := time.Now()
 	m.persistirYa()
 	pid, err = m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg,
-		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv)
+		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv, shareWaitDe(mc.ShareWait, mc.Shares))
 	if err != nil {
 		return devolver(err)
 	}
@@ -380,7 +383,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	m.vigilarListo(mc.ID, nil)
 	m.olvidarAgente(mc.ID)
 	m.conocerAgente(mc.ID)
-	if len(bootEnv) > 0 {
+	if len(bootEnv) > 0 || comandoDe(mc) != nil {
 		m.retirarEntornoMMDS(mc.ID, mc.Name, bootEnv)
 	}
 	keys := ""

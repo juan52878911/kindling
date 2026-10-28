@@ -268,38 +268,78 @@ func TestReguladorImpulsoDeArranque(t *testing.T) {
 	m := nuevoSimulado(2)
 	r := rigSimulado(t, 2, m, false, nil)
 	r.must("PUT", "/kling/cpu", `{"pct":50}`)
-	t0, c0, _, _ := m.foto()
-	m.hasta(t, t0.Add(5*time.Second))
-	t1, c1, _, _ := m.foto()
-	want := float64(impulsoArranque(2))
-	if frac := 100 * float64(c1-c0) / float64(t1.Sub(t0)); frac < want*0.97 || frac > want*1.03 {
-		t.Fatalf("arrancando gasta %.1f %%, quería %.0f", frac, want)
+	// Con el impulso (200 con 2 vCPU) no hay techo efectivo: ni para ni mide.
+	_, _, _, n0 := m.foto()
+	time.Sleep(200 * time.Millisecond)
+	if _, _, paradas, n1 := m.foto(); len(paradas) != 0 || n1 != n0 {
+		t.Fatalf("arrancando: %d paradas y %d medidas, quería ninguna", len(paradas), n1-n0)
 	}
-	r.srv.mu.Lock()
-	r.srv.cpuListo = true
-	r.srv.mu.Unlock()
+	r.srv.marcarListo()
 	// Se deja pasar un segundo: la ráfaga que el cubo acumuló durante el
 	// impulso se gasta ahí y no infla la medida del régimen (con el host
 	// cargado salía 53 %).
-	t0, _, _, _ = m.foto()
+	t0, _, _, _ := m.foto()
 	m.hasta(t, t0.Add(time.Second))
-	t0, c0, _, _ = m.foto()
+	t0, c0, _, _ := m.foto()
 	m.hasta(t, t0.Add(5*time.Second))
-	t1, c1, _, _ = m.foto()
+	t1, c1, _, _ := m.foto()
 	if frac := 100 * float64(c1-c0) / float64(t1.Sub(t0)); frac < 47 || frac > 53 {
 		t.Fatalf("listo gasta %.1f %%, quería 50", frac)
 	}
 }
 
-// Sin techo efectivo (pct >= 100 × vCPU) no se para nunca.
+// Sin techo efectivo (pct >= 100 × vCPU, o 0) no se para nunca, y tampoco se
+// mide ni se duerme a plazo: el regulador espera a que algo cambie, sin
+// despertar al proceso (ni el reloj falso avanza). Al poner un techo de
+// verdad, empieza a regular sin esperar a nada más.
 func TestReguladorSinTechoEfectivo(t *testing.T) {
 	m := nuevoSimulado(2)
 	r := rigSimulado(t, 2, m, true, nil)
-	r.must("PUT", "/kling/cpu", `{"pct":200}`)
+	for _, pct := range []string{`{"pct":200}`, `{"pct":0}`} {
+		r.must("PUT", "/kling/cpu", pct)
+		t0, _, _, n0 := m.foto()
+		time.Sleep(200 * time.Millisecond)
+		t1, _, paradas, n1 := m.foto()
+		if len(paradas) != 0 || n1 != n0 || !t1.Equal(t0) {
+			t.Fatalf("%s: %d paradas, %d medidas y %v de reloj sin techo efectivo", pct, len(paradas), n1-n0, t1.Sub(t0))
+		}
+	}
+	r.must("PUT", "/kling/cpu", `{"pct":50}`)
 	t0, _, _, _ := m.foto()
 	m.hasta(t, t0.Add(2*time.Second))
-	if _, _, paradas, _ := m.foto(); len(paradas) != 0 {
-		t.Fatalf("%d paradas con pct 200 y 2 vCPU", len(paradas))
+	if _, _, paradas, _ := m.foto(); len(paradas) == 0 {
+		t.Fatal("con techo 50 no regula")
+	}
+}
+
+// Sin techo no se pregunta al agente: el impulso de arranque solo sirve con
+// techo.
+func TestSinTechoNoSeEsperaAlAgente(t *testing.T) {
+	m := nuevoSimulado(1)
+	r := rigSimulado(t, 1, m, false, nil)
+	r.must("PUT", "/kling/cpu", `{"pct":0}`)
+	r.srv.mu.Lock()
+	esperando := r.srv.cpuEsperando
+	r.srv.mu.Unlock()
+	if esperando {
+		t.Fatal("sin techo se lanzó esperarAgente")
+	}
+}
+
+// Con techo y la VM ociosa, el sueño entre medidas crece hasta cpuReposoMax:
+// pocas medidas por segundo, no las 10-20 de un cubo lleno.
+func TestReguladorOciosoDuermeLargo(t *testing.T) {
+	m := nuevoSimulado(0)
+	r := rigSimulado(t, 1, m, true, nil)
+	r.must("PUT", "/kling/cpu", `{"pct":50}`)
+	t0, _, _, n0 := m.foto()
+	m.hasta(t, t0.Add(10*time.Second))
+	t1, _, paradas, n1 := m.foto()
+	if len(paradas) != 0 {
+		t.Fatalf("paró %d veces una VM ociosa", len(paradas))
+	}
+	if por := float64(n1-n0) / t1.Sub(t0).Seconds(); por > 3 {
+		t.Fatalf("%.1f medidas por segundo con la VM ociosa, quería <= 3", por)
 	}
 }
 
@@ -331,8 +371,9 @@ func TestPausaDelNucleoConElAuxiliarParado(t *testing.T) {
 	if parado {
 		t.Fatal("se pausó la VM con el auxiliar aún parado")
 	}
-	t0, _, _, _ := m.foto()
-	m.hasta(t, t0.Add(time.Second))
+	// En pausa el regulador no tiene nada que hacer: espera sin medir (ni
+	// avanza el reloj falso), así que se deja pasar tiempo de verdad.
+	time.Sleep(200 * time.Millisecond)
 	if out := r.must("GET", "/", ""); !strings.Contains(out, `"Paused"`) {
 		t.Fatalf("estado tras pausar = %s", out)
 	}
@@ -390,5 +431,39 @@ func TestFrenoQueFallaPausaLaVM(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d avisos del freno, quería 1: %q", n, avisos)
+	}
+}
+
+// GET /kling/cpu da la CPU gastada y el pid del auxiliar: el modo batería del
+// daemon mira con eso si la VM está ociosa y a quién bajarle la QoS.
+func TestGetKlingCPUDaCPUyAuxiliar(t *testing.T) {
+	m := nuevoSimulado(1)
+	r := rigSimulado(t, 1, m, true, nil)
+	r.srv.d.HelperPID = func() int { return 4242 }
+	m.dormir(1500 * time.Millisecond)
+	var out struct {
+		CPUMS     int64 `json:"cpu_ms"`
+		HelperPID int   `json:"helper_pid"`
+	}
+	if err := json.Unmarshal([]byte(r.must("GET", "/kling/cpu", "")), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.CPUMS != 1500 || out.HelperPID != 4242 {
+		t.Fatalf("GET /kling/cpu = %+v", out)
+	}
+}
+
+// Deps.CPUCeiling dice en cada PUT /kling/cpu si el techo regula: con él
+// kling-vz suelta el proceso freno de una VM sin techo.
+func TestCPUCeilingDiceSiHayTecho(t *testing.T) {
+	m := nuevoSimulado(0)
+	r := rigSimulado(t, 2, m, true, nil)
+	var visto []bool
+	r.srv.d.CPUCeiling = func(active bool) { visto = append(visto, active) }
+	for _, pct := range []string{`{"pct":0}`, `{"pct":200}`, `{"pct":50}`, `{"pct":150}`} {
+		r.must("PUT", "/kling/cpu", pct)
+	}
+	if want := []bool{false, false, true, true}; fmt.Sprint(visto) != fmt.Sprint(want) {
+		t.Fatalf("CPUCeiling = %v, quería %v", visto, want)
 	}
 }

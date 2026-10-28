@@ -208,6 +208,11 @@ func TestValidateVMM(t *testing.T) {
 		{"vz", "darwin", "arm64", true},
 		{"vz", "darwin", "amd64", false},
 		{"vz", "linux", "arm64", false},
+		{"hv", "darwin", "arm64", true},
+		{"hv", "darwin", "amd64", false},
+		{"hv", "linux", "arm64", false},
+		{"auto", "darwin", "arm64", true},
+		{"auto", "linux", "amd64", false},
 		{"qemu", "linux", "amd64", false},
 	}
 	for _, c := range casos {
@@ -216,7 +221,7 @@ func TestValidateVMM(t *testing.T) {
 			t.Errorf("ValidateVMM(%s, %s/%s) = %v", c.name, c.goos, c.goarch, err)
 		}
 	}
-	if DefaultVMM("darwin") != VMMVZ || DefaultVMM("linux") != VMMFirecracker {
+	if DefaultVMM("darwin") != VMMAuto || DefaultVMM("linux") != VMMFirecracker {
 		t.Fatal("DefaultVMM")
 	}
 }
@@ -334,5 +339,34 @@ func TestSetBuildCache(t *testing.T) {
 		if err := c.Set(kv[0], kv[1]); err == nil {
 			t.Errorf("%s=%s aceptado", kv[0], kv[1])
 		}
+	}
+}
+
+func TestSetBattery(t *testing.T) {
+	var c Config
+	for _, v := range []string{"auto", "on", "off", ""} {
+		if err := c.Set("daemon.battery_mode", v); err != nil || c.Daemon.BatteryMode != v {
+			t.Fatalf("battery_mode %q: %v (%q)", v, err, c.Daemon.BatteryMode)
+		}
+	}
+	if err := c.Set("daemon.battery_mode", "siempre"); err == nil {
+		t.Fatal("aceptó un modo que no existe")
+	}
+	if err := c.Set("daemon.battery_pause_after_seconds", "-1"); err != nil || c.Daemon.BatteryPauseAfter != -1 {
+		t.Fatalf("-1: %v", err)
+	}
+	for _, v := range []string{"-2", "86401", "x"} {
+		if err := c.Set("daemon.battery_pause_after_seconds", v); err == nil {
+			t.Fatalf("aceptó battery_pause_after_seconds %q", v)
+		}
+	}
+	visto := 0
+	for _, kv := range c.Keys() {
+		if kv[0] == "daemon.battery_mode" || kv[0] == "daemon.battery_pause_after_seconds" {
+			visto++
+		}
+	}
+	if visto != 2 {
+		t.Fatal("las claves del modo batería no salen en Keys")
 	}
 }

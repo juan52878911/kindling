@@ -45,6 +45,12 @@ const (
 type ServiceSpec struct {
 	// Argv es el ejecutable y sus argumentos; sin "/" se busca en el PATH.
 	Argv []string `json:"argv"`
+	// Entrypoint y Cmd son las dos mitades de Argv tal como las dio la imagen
+	// (ENTRYPOINT y CMD de Docker, ya con lo que cambió el import): con ellas
+	// el agente aplica el comando de una máquina (RunRequest.Cmd) sin perder
+	// el ENTRYPOINT. Una imagen anterior no las trae.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
 	// User es "uid[:gid]" o "nombre[:grupo]" (de /etc/passwd y /etc/group de
 	// la imagen); vacío = root. Como el USER de Docker.
 	User string `json:"user,omitempty"`
@@ -117,6 +123,16 @@ func ParseOnRestore(v string) (action string, sig int, err error) {
 // una sonda colgada no puede tener esperando a quien la pregunta más que esto.
 const MaxReadyTimeoutSeconds = 120
 
+// GuestCapCmd: el agente lee el comando de la máquina de MMDS con kling.cmd=1
+// (RunRequest.Cmd/Entrypoint). Un agente sin ella arrancaría el de la imagen:
+// el daemon da la máquina por fallida.
+const GuestCapCmd = "cmd"
+
+// GuestCapVolumeWait: el agente entiende kling.volwait=1 (no monta ni lanza
+// el servicio hasta POST /volume/acquire). Uno sin ella montaría y
+// arrancaría en seguida: el daemon da la máquina por fallida.
+const GuestCapVolumeWait = "volume-wait"
+
 // GuestService es la respuesta de GET /service.
 type GuestService struct {
 	// Declared: la imagen declara un servicio. Sin él, el resto va vacío.
@@ -132,4 +148,8 @@ type GuestService struct {
 	Error    string `json:"error,omitempty"`
 	// Log son los últimos bytes de su salida (con ?tail=N, hasta 1 MiB).
 	Log string `json:"log,omitempty"`
+	// Timestamps: Log lleva la hora de cada línea delante (RFC 3339 en UTC,
+	// con microsegundos, y un espacio), porque se pidió con ?timestamps=1 y
+	// el agente las guarda. Un agente anterior no las tiene y no lo pone.
+	Timestamps bool `json:"timestamps,omitempty"`
 }

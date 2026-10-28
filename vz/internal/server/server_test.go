@@ -36,6 +36,8 @@ type fakeVM struct {
 	enMarcha bool
 	desde    time.Time
 	corrido  time.Duration
+
+	vsock []uint32 // puertos pedidos a DialVsock (vsock_test.go)
 }
 
 func (v *fakeVM) marcha(on bool) {
@@ -151,6 +153,10 @@ type fakeNet struct {
 	mu     sync.Mutex
 	fwd    map[int]string
 	closed bool
+	dial   map[int]func(ctx context.Context) (net.Conn, error) // SetGuestDialer
+	// soloTCP: lo último que dijo SetGuestDialer, y lo que contesta
+	// GuestOnlyTCP.
+	soloTCP bool
 }
 
 func (n *fakeNet) VMFile() *os.File { return nil }

@@ -21,3 +21,5 @@ func statTimes(st *syscall.Stat_t) (time.Time, time.Time) { return time.Time{}, 
 func renameat(*os.File, string, *os.File, string) error { return errUnsupported }
 func readlinkat(*os.File, string) (string, error)       { return "", errUnsupported }
 func fstatfs(*os.File) (proto.Statfs, error)            { return proto.Statfs{}, errUnsupported }
+
+func symlinkat(string, *os.File, string) error { return errUnsupported }

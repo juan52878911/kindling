@@ -160,6 +160,12 @@ var coreTree = []section{
   graph from-compose <compose.yaml> [-o F]         translates a compose file into a graph file
       [-name N] [-script S]                        (+ the setup script); warns per unsupported key
 `},
+		{Name: "compose", Summary: "a compose.yaml for local development, in the foreground", Subcommands: []string{"up", "down"}, Usage: `  compose up [-f compose.yaml] [-p name]          imports the images in parallel, starts the graph,
+      [-keep] [-no-logs]                           shares bind mounts live (rw), publishes ports: on
+                                                   127.0.0.1 and follows every service's output;
+                                                   Ctrl-C removes the machines (-keep: leaves them)
+  compose down [-f compose.yaml] [-p name]         removes the project's graph and machines
+`},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
 		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential", "pool"}, Usage: `  template ls [-q] [-json]                         lists the templates

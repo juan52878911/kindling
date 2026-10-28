@@ -2,18 +2,14 @@ package machine
 
 import "testing"
 
-func TestParsearPSyVMMs(t *testing.T) {
+func TestVMMsDeTabla(t *testing.T) {
 	root := "/Users/juan/Library/Application Support/kindling"
 	prefix := root + "/machines/"
-	out := `    1 /sbin/launchd
-  812 /usr/local/bin/kling-vz --api-sock /Users/juan/Library/Application Support/kindling/machines/aa11bb22cc33dd44/fc.sock
-  813 /usr/local/bin/kling-vz --api-sock /otra/raiz/machines/ee55ff66aa77bb88/fc.sock
-  900 vim /Users/juan/Library/Application Support/kindling/machines/notas.txt
-  abc basura
-`
-	tabla := parsearPS(out)
-	if len(tabla) != 4 {
-		t.Fatalf("tabla = %v", tabla)
+	tabla := map[int]string{
+		1:   "/sbin/launchd",
+		812: "/usr/local/bin/kling-vz --api-sock /Users/juan/Library/Application Support/kindling/machines/aa11bb22cc33dd44/fc.sock",
+		813: "/usr/local/bin/kling-vz --api-sock /otra/raiz/machines/ee55ff66aa77bb88/fc.sock",
+		900: "vim /Users/juan/Library/Application Support/kindling/machines/notas.txt",
 	}
 	got := vmmsDeTabla(tabla, prefix)
 	if len(got) != 1 || got["aa11bb22cc33dd44"] != 812 {

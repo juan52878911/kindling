@@ -369,6 +369,12 @@ type Options struct {
 	// resuelve y marca él mismo en cada conexión y le entrega el socket (ver
 	// pkg/linkbroker). Quien la usa nunca ve una dirección.
 	DialMachine DialMachineFunc
+	// DialLoopback, si no es nil, abre la conexión a un upstream fijado que
+	// cae en el loopback del host (127.0.0.1:5432): da el puerto y recibe la
+	// conexión ya abierta. Es lo que usa kling-vz (macOS), confinado sin
+	// acceso al loopback: el daemon marca la dirección de la credencial con
+	// ese puerto (pkg/linkbroker, KindLoopback).
+	DialLoopback func(ctx context.Context, port int) (net.Conn, error)
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -503,7 +509,7 @@ func New(o Options) *Proxy {
 	}
 	p.dialUp = dialFijado(func(ctx context.Context, host string) ([]netip.Addr, error) {
 		return p.lookupUp(ctx, host)
-	}, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive})
+	}, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}, o.DialLoopback)
 	return p
 }
 

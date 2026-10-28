@@ -23,10 +23,26 @@ import (
 const (
 	BackendFirecracker = "firecracker"
 	BackendVZ          = "vz"
+	// BackendHV es kling-hv: el mismo contrato que kling-vz (docs/backend-vz.md)
+	// sobre un VMM propio en Hypervisor.framework cuya RAM es un fichero
+	// mapeado (docs/backend-hv.md). En el núcleo es la plataforma de macOS
+	// con otra admisión de memoria (ElegirBackend).
+	BackendHV = "hv"
 )
 
 // Backend es el VMM con el que arranca este daemon.
 func (m *Manager) Backend() string { return backendVMM }
+
+// motivoBackend es por qué el daemon usa backendVMM ("auto: macOS 26.5,
+// kling-hv signed and probed"); vacío en Linux. Lo fija el daemon al
+// arrancar, antes de servir.
+var motivoBackend string
+
+// FijarMotivoBackend guarda por qué se eligió el backend (GET /info).
+func FijarMotivoBackend(m string) { motivoBackend = m }
+
+// BackendMotivo es por qué este daemon usa su backend.
+func (m *Manager) BackendMotivo() string { return motivoBackend }
 
 // BackendCompilado es el VMM para el que se compiló este binario: el gestor
 // solo sabe hablar con ese, porque lo que hace el host alrededor del VMM
@@ -35,19 +51,22 @@ func BackendCompilado() string { return backendVMM }
 
 // NombreVMM es el ejecutable por defecto de cada backend.
 func NombreVMM(backend string) string {
-	if backend == BackendVZ {
+	switch backend {
+	case BackendVZ:
 		return "kling-vz"
+	case BackendHV:
+		return "kling-hv"
 	}
 	return "firecracker"
 }
 
 // ResolverVMM decide el binario del VMM.
 //
-//   - KLING_VMM (env) manda si está: un nombre de backend ("vz",
+//   - KLING_VMM (env) manda si está: un nombre de backend ("vz", "hv",
 //     "firecracker") elige el ejecutable por defecto de ese backend; cualquier
 //     otra cosa es la ruta o el nombre del binario.
 //   - Si no, firecracker usa fcBin (el flag -firecracker o KLING_FIRECRACKER,
-//     como siempre) y kling-vz se busca junto al ejecutable de kling y luego en
+//     como siempre) y kling-vz o kling-hv se busca junto al ejecutable de kling y luego en
 //     el PATH.
 //
 // Si no se encuentra, devuelve el nombre a secas: el daemon arranca igual (vale
@@ -60,7 +79,7 @@ func ResolverVMM(backend, env, fcBin string) string {
 func resolverVMM(backend, env, fcBin, exeDir string, look func(string) (string, error), existe func(string) bool) string {
 	switch env {
 	case "":
-	case BackendVZ, BackendFirecracker:
+	case BackendVZ, BackendHV, BackendFirecracker:
 		if env != backend {
 			// Pedir por nombre el OTRO backend no cambia el protocolo, que ya
 			// eligió la configuración: se ignora y lo dirá la validación.
@@ -145,8 +164,7 @@ func evaluarNivelMemoria(nivel, minimo int) error {
 	}
 	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
 		"macOS reports only %d%% of memory available (the minimum to start a machine is %d%%).\n"+
-			"Every vz microVM restores its whole memory, so another one would push the system "+
-			"into killing processes.\n"+
+			"Another microVM would push the system into killing processes.\n"+
 			"Freeze or remove idle instances (`kling ps`), or lower the minimum with KLING_MIN_MEM_LEVEL",
 		nivel, minimo)}
 }

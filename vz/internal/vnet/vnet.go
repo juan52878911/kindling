@@ -60,9 +60,12 @@ var (
 )
 
 const (
-	nicID   = 1
-	mtu     = 1500
-	subnetL = 30
+	nicID = 1
+	// DefaultMTU es la de siempre; Config.MTU la sube (hasta MaxMTU) cuando
+	// el enlace del framework la anuncia igual al invitado.
+	DefaultMTU = 1500
+	MaxMTU     = 65535
+	subnetL    = 30
 	// Tamaños de buffer del socketpair. Apple recomienda que el de recepción
 	// sea al menos el doble del de envío para no perder tramas en ráfagas.
 	sndBuf = 1 << 20
@@ -102,6 +105,11 @@ const (
 // Config es lo que la red necesita saber de la máquina.
 type Config struct {
 	GuestMAC string
+	// MTU del enlace: la misma que kling-vz da al adjunto de red del
+	// framework, que el invitado adopta. 0 = DefaultMTU. Hacia internet no
+	// importa: la pila termina el TCP del invitado y el socket del Mac
+	// vuelve a segmentar con la MTU de su red.
+	MTU int
 	// MMDS, si no es nil, se sirve en MMDSAddr:80.
 	MMDS     http.Handler
 	MMDSAddr netip.Addr
@@ -165,10 +173,15 @@ type Net struct {
 	mmds   *http.Server
 	cred   *http.Server
 
+	mtu int
+
 	mu       sync.Mutex
 	forwards map[int]net.Listener
-	closed   bool
-	wg       sync.WaitGroup
+	// guestDial: puertos del invitado que se alcanzan por otro camino
+	// (SetGuestDialer), el vsock del agente.
+	guestDial map[int]*camino
+	closed    bool
+	wg        sync.WaitGroup
 
 	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
 	dnsUDP, dnsTCP, udpFlows, tcpFlows chan struct{}
@@ -234,6 +247,14 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	if !cfg.MMDSAddr.IsValid() {
 		cfg.MMDSAddr = DefaultMMDSIP
 	}
+	mtu := cfg.MTU
+	if mtu == 0 {
+		mtu = DefaultMTU
+	}
+	if mtu < DefaultMTU || mtu > MaxMTU {
+		conn.Close()
+		return nil, fmt.Errorf("mtu %d: must be between %d and %d", mtu, DefaultMTU, MaxMTU)
+	}
 	guestMAC, err := tcpip.ParseMACAddress(cfg.GuestMAC)
 	if err != nil {
 		conn.Close()
@@ -249,14 +270,14 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 		conn.Close()
 		return nil, err
 	}
-	ep := channel.New(1024, mtu+header.EthernetMinimumSize, gwMAC)
+	ep := channel.New(1024, uint32(mtu+header.EthernetMinimumSize), gwMAC)
 	// El framework entrega las tramas por memoria, sin cable: no hay nada que
 	// pueda corromperlas por el camino, y un invitado con offload de checksum
 	// las mandaría con sumas parciales que la pila descartaría.
 	ep.LinkEPCapabilities |= stack.CapabilityRXChecksumOffload
 
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &Net{cfg: cfg, stack: s, ep: ep, conn: conn, ctx: ctx, cancel: cancel, forwards: map[int]net.Listener{},
+	n := &Net{cfg: cfg, stack: s, ep: ep, conn: conn, ctx: ctx, cancel: cancel, mtu: mtu, forwards: map[int]net.Listener{},
 		dnsUDP: make(chan struct{}, MaxDNSUDPFlows), dnsTCP: make(chan struct{}, MaxDNSTCPConns),
 		udpFlows: make(chan struct{}, MaxUDPFlows), tcpFlows: make(chan struct{}, MaxTCPFlows)}
 	fail := func(what string, e tcpip.Error) (*Net, error) {
@@ -359,7 +380,7 @@ func (n *Net) rxLoop() {
 	// devuelve al pool al soltar el paquete. Antes se copiaba dos veces y la
 	// primera a memoria nueva por trama (append), que el recolector tenía que
 	// barrer a ritmo de red.
-	buf := make([]byte, 65536)
+	buf := make([]byte, max(65536, n.mtu+header.EthernetMinimumSize+64))
 	for {
 		k, err := n.conn.Read(buf)
 		if err != nil {
@@ -385,7 +406,7 @@ func (n *Net) txLoop() {
 	defer n.wg.Done()
 	// La trama se junta en un buffer propio que se reutiliza, en vez de
 	// pedir uno nuevo por trama (pkt.ToView).
-	buf := make([]byte, 0, mtu+header.EthernetMinimumSize+64)
+	buf := make([]byte, 0, n.mtu+header.EthernetMinimumSize+64)
 	for {
 		pkt := n.ep.ReadContext(n.ctx)
 		if pkt == nil {
@@ -704,10 +725,7 @@ func (n *Net) acceptForward(l net.Listener, port uint16) {
 				return
 			}
 			ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
-			gc, err := gonet.DialTCPWithBind(ctx, n.stack,
-				tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},
-				tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: port},
-				ipv4.ProtocolNumber)
+			gc, err := n.dialGuest(ctx, port)
 			cancel()
 			if err != nil {
 				c.Close()
@@ -718,17 +736,131 @@ func (n *Net) acceptForward(l net.Listener, port uint16) {
 	}
 }
 
-// Probe dice si algo acepta conexiones en ese puerto del invitado: conecta por
-// la pila de usuario, como haría un reenvío, y cierra. false si el invitado
+// intentoGuestDial acota el intento por el camino de SetGuestDialer antes de
+// caer a TCP. Un invitado vivo contesta (o rechaza) en microsegundos; si se
+// agota, es que el agente aún no escucha, y TCP tampoco tendría a nadie.
+const intentoGuestDial = 500 * time.Millisecond
+
+// camino es un puerto del invitado con SetGuestDialer. Sus campos, con n.mu.
+type camino struct {
+	dial func(ctx context.Context) (net.Conn, error)
+	// ok: contestó alguna vez. soloTCP: no contestó y TCP sí, así que el
+	// invitado no lo tiene (un agente anterior) y no se vuelve a probar.
+	// mudo: conecta pero nadie contesta por él (ErrCaminoMudo); hasta que
+	// muera este proceso se va por TCP, sin apuntarlo en el snapshot.
+	ok, soloTCP, mudo bool
+}
+
+// ErrCaminoMudo lo devuelve un dial de SetGuestDialer que conectó pero vio que
+// por ahí nadie contesta. No es un agente anterior (que ni conecta): el
+// invitado sí tiene el camino, y por eso no se apunta como soloTCP.
+//
+// Pasa con kling-vz tras algunas restauraciones: el vsock del framework acepta
+// la conexión y el invitado no recibe nada nunca (sus interrupciones de vsock
+// no se mueven y su ISR está a 0), mientras la red sigue bien. Sin esto, cada
+// petición del núcleo al agente se quedaba colgada hasta su plazo y la copia
+// no contestaba a nada.
+var ErrCaminoMudo = errors.New("the guest accepts the connection but nothing answers on it")
+
+// SetGuestDialer hace que el reenvío y la sonda del puerto port del invitado
+// prueben primero dial (el vsock del agente) y solo si falla la pila de
+// usuario. nil lo quita. soloTCP: ya se sabe que el invitado no lo tiene (lo
+// vio el proceso que guardó el snapshot, ver GuestOnlyTCP) y se va directo
+// por TCP.
+func (n *Net) SetGuestDialer(port int, dial func(ctx context.Context) (net.Conn, error), soloTCP bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if dial == nil {
+		delete(n.guestDial, port)
+		return
+	}
+	if n.guestDial == nil {
+		n.guestDial = map[int]*camino{}
+	}
+	n.guestDial[port] = &camino{dial: dial, soloTCP: soloTCP}
+}
+
+// GuestOnlyTCP dice si se vio que el puerto port del invitado contesta por
+// TCP y no por el camino de SetGuestDialer (un agente anterior).
+func (n *Net) GuestOnlyTCP(port int) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	c := n.guestDial[port]
+	return c != nil && c.soloTCP
+}
+
+// dialGuest conecta con el puerto port del invitado: por SetGuestDialer si
+// lo hay y contesta, y si no por la pila de usuario.
+//
+// Si el camino propio falla y TCP sí conecta, el invitado no lo tiene: es un
+// agente anterior, que solo escucha TCP (el nuevo abre su vsock ANTES que su
+// TCP, ver pkg/guest.ServeVsock). Desde entonces se va directo por TCP; si
+// no, cada conexión pagaría un connect de vsock fallido, que en el M4 suma
+// varios ms (un /resync de 1,6 ms pasaba a 9). Un fallo mientras el
+// invitado arranca (ni vsock ni TCP) no decide nada.
+func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
+	n.mu.Lock()
+	cam := n.guestDial[int(port)]
+	var dial func(ctx context.Context) (net.Conn, error)
+	if cam != nil && !cam.soloTCP && !cam.mudo {
+		dial = cam.dial
+	}
+	n.mu.Unlock()
+	probado := false
+	if dial != nil {
+		ictx, cancel := context.WithTimeout(ctx, intentoGuestDial)
+		c, err := dial(ictx)
+		cancel()
+		if err == nil {
+			n.mu.Lock()
+			primera := !cam.ok
+			cam.ok = true
+			n.mu.Unlock()
+			if primera {
+				n.cfg.Logf("guest port %d reached over vsock", port)
+			}
+			return c, nil
+		}
+		if errors.Is(err, ErrCaminoMudo) {
+			n.mu.Lock()
+			primera := !cam.mudo
+			cam.mudo = true
+			n.mu.Unlock()
+			if primera {
+				n.cfg.Logf("guest port %d connects over vsock but does not answer there: using TCP until this process ends", port)
+			}
+		} else if ctx.Err() != nil {
+			return nil, ctx.Err()
+		} else {
+			probado = true
+		}
+	}
+	gc, err := gonet.DialTCPWithBind(ctx, n.stack,
+		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},
+		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: port},
+		ipv4.ProtocolNumber)
+	if err == nil && probado {
+		n.mu.Lock()
+		descartar := !cam.ok && !cam.soloTCP
+		if descartar {
+			cam.soloTCP = true
+		}
+		n.mu.Unlock()
+		if descartar {
+			n.cfg.Logf("guest port %d answers over TCP but not over vsock (an older guest agent): using TCP from now on", port)
+		}
+	}
+	return gc, err
+}
+
+// Probe dice si algo acepta conexiones en ese puerto del invitado: conecta como
+// haría un reenvío (dialGuest), y cierra. false si el invitado
 // rechaza o no contesta antes de que venza ctx.
 func (n *Net) Probe(ctx context.Context, port int) bool {
 	if port < 1 || port > 65535 {
 		return false
 	}
-	gc, err := gonet.DialTCPWithBind(ctx, n.stack,
-		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},
-		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: uint16(port)},
-		ipv4.ProtocolNumber)
+	gc, err := n.dialGuest(ctx, uint16(port))
 	if err != nil {
 		return false
 	}

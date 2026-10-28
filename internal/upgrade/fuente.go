@@ -142,6 +142,9 @@ func (f *Fuente) Bajar(ctx context.Context, etiqueta string, assets []Asset, des
 	}
 	out := map[string]string{}
 	for _, a := range assets {
+		if a.Opcional && !f.trae(a, sumas) {
+			continue
+		}
 		p, err := f.bajarUno(ctx, etiqueta, a, sumas, dest)
 		if err != nil {
 			return nil, err
@@ -157,6 +160,26 @@ func (f *Fuente) Bajar(ctx context.Context, etiqueta string, assets []Asset, des
 type Asset struct {
 	Nombre string
 	Corto  string
+	// Opcional: si la release (o Dir) no lo trae, se omite en vez de fallar.
+	// Es kling-hv frente a una release anterior a él.
+	Opcional bool
+}
+
+// trae dice si la release (su SHA256SUMS) o Dir tienen el asset a.
+func (f *Fuente) trae(a Asset, sumas map[string]string) bool {
+	if f.Dir == "" {
+		_, ok := sumas[a.Nombre]
+		return ok
+	}
+	for _, n := range []string{a.Nombre, a.Corto} {
+		if n == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(f.Dir, n)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // sumas lee el SHA256SUMS de la release o de Dir. nil sin error = Dir sin él.

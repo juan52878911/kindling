@@ -90,7 +90,7 @@ func TestResolverCarpetas(t *testing.T) {
 		"relative":         {Mode: share.ModeRW, Mount: "/work", Source: "code/repo"},
 		"data root":        {Mode: share.ModeRW, Mount: "/work", Source: filepath.Dir(m.root)},
 		"not a dir":        {Mode: share.ModeRW, Mount: "/work", Source: m.uploadPath(up)},
-		"bad mount":        {Mode: share.ModeRW, Mount: "/etc/x", Source: permitido},
+		"bad mount":        {Mode: share.ModeRW, Mount: "/usr/x", Source: permitido},
 		"root mount":       {Mode: share.ModeCopy, Mount: "/", Upload: up},
 		"bad mode":         {Mode: "rwx", Mount: "/work", Source: permitido},
 		"copy no upload":   {Mode: share.ModeCopy, Mount: "/work"},

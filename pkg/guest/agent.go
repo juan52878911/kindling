@@ -66,13 +66,18 @@ type Agent struct {
 	// envErr: el host arrancó la máquina con entorno propio (kling.env=1) y
 	// no se pudo leer. El servicio no arranca sin él (machine_env.go).
 	envErr error
+	// machineCmd y cmdErr: el comando de la máquina (kling.cmd=1) o por qué
+	// no se pudo leer (machine_cmd.go).
+	machineCmd *api.MachineCmd
+	cmdErr     error
 }
 
 // Caps son las capacidades que anuncia /healthz: las rutas que Register sirve
 // en este proceso y las que añade quien lo embebe.
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
-		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs}
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
+		api.GuestCapVolumeWait}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -107,7 +112,11 @@ func New() (*Agent, error) {
 	// esta ruta la que los hace legibles.
 	SetupMMDSRoute()
 
-	if err := a.Volumes.Acquire(); err != nil {
+	// Con kling.volwait=1 los monta el host (POST /volume/acquire) cuando
+	// toque: volume_wait.go.
+	if volumeWaitWanted() {
+		log.Printf("volumes: left unmounted until the host asks (%s=1)", api.VolumeWaitBootParam)
+	} else if err := a.Volumes.Acquire(); err != nil {
 		return nil, err
 	}
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
@@ -116,6 +125,7 @@ func New() (*Agent, error) {
 	// El entorno de la máquina, encima del de la imagen: antes de escuchar,
 	// que es cuando el daemon lo borra de MMDS.
 	a.applyMachineEnv(MachineEnvRequired(), FetchMMDS)
+	a.applyMachineCmd(MachineCmdRequired(), FetchMMDS)
 	a.Env = cpuQuirkEnv(a.Env)
 	readyState.setEnv(a.Env)
 	for _, kv := range a.Env {

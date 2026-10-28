@@ -1,7 +1,7 @@
 # Publica una release a partir de una etiqueta vX.Y.Z.
 #
 # Desde v0.13.0 una sola etiqueta publica TODO lo del repo: el núcleo (kling,
-# kling-guest, kling-chispa, kling-vz), las extensiones (kling-mcp y su puente,
+# kling-guest, kling-chispa, kling-vz, kling-hv), las extensiones (kling-mcp y su puente,
 # kling-sandbox), el operador de Kubernetes y los tar de lo que
 # se instala en el host del daemon, con UN único SHA256SUMS. Antes cada repo
 # tenía su release y su SHA256SUMS y había que cruzar tablas de compatibilidad;
@@ -144,14 +144,15 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # kling-vz (backend nativo de macOS) necesita cgo y la firma con el
-  # entitlement de virtualización: solo se puede compilar en un runner macOS.
-  # No se vuelve a tocar el binario tras build.sh (strip, re-firma): se perdería
-  # el entitlement.
+  # kling-vz y kling-hv (los VMM nativos de macOS) necesitan cgo y la firma
+  # con el entitlement de su framework: solo se pueden compilar en un runner
+  # macOS. macos-15 porque kling-hv usa la API GIC de Hypervisor.framework,
+  # que no trae el SDK de 14. No se vuelve a tocar el binario tras build.sh o
+  # build-hv.sh (strip, re-firma): se perdería el entitlement.
   vz:
-    name: build kling-vz darwin/arm64
+    name: build kling-vz and kling-hv darwin/arm64
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -169,12 +170,26 @@ jobs:
           set -euo pipefail
           VERSION="$INPUT_TAG"
           [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME}"
-          cd vz && OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
+          # Sin fijarlo, el enlazador marca el binario con la versión del SDK
+          # del runner (15.x) y dyld se niega a cargarlo en un macOS anterior:
+          # kling-vz vale desde 14.0 y kling-hv desde 15.2 (docs/mac.md).
+          minos() { otool -l "$1" | grep -A4 LC_BUILD_VERSION | grep -q "minos $2\$" || { echo "$1 is not built for macOS $2" >&2; exit 1; }; }
+          cd vz
+          MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+            OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
           codesign -d --entitlements - dist/kling-vz-darwin-arm64 2>&1 | grep -q com.apple.security.virtualization
+          minos dist/kling-vz-darwin-arm64 14.0
+          MACOSX_DEPLOYMENT_TARGET=15.2 CGO_CFLAGS="-O2 -g -mmacosx-version-min=15.2" CGO_LDFLAGS="-mmacosx-version-min=15.2" \
+            OUT=dist/kling-hv-darwin-arm64 VERSION="$VERSION" ./build-hv.sh
+          codesign -d --entitlements - dist/kling-hv-darwin-arm64 2>&1 | grep -q com.apple.security.hypervisor
+          minos dist/kling-hv-darwin-arm64 15.2
+          dist/kling-hv-darwin-arm64 --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: kling-vz-darwin-arm64
-          path: vz/dist/kling-vz-darwin-arm64
+          name: vmm-darwin-arm64
+          path: |
+            vz/dist/kling-vz-darwin-arm64
+            vz/dist/kling-hv-darwin-arm64
           if-no-files-found: error
 
   release:
@@ -238,7 +253,7 @@ jobs:
           for arch in amd64 arm64; do
             want+=("kling-guest-linux-$arch" "kling-chispa-linux-$arch" "kindling-operator-linux-$arch")
           done
-          want+=(kling-vz-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
+          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
           (cd release && ls -1) | sort > have.txt
           if ! diff -u want.txt have.txt; then

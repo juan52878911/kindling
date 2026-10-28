@@ -34,7 +34,16 @@ import (
 // disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
 // (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
 // copiarla N veces.
-const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet"
+//
+// Los dos sysctl quitan despertares de un invitado ocioso (medido en un M4,
+// 6.1, 1 vCPU sin carga: de 7,4 a 3,7 interrupciones de reloj por segundo):
+// la compactación proactiva despierta a kcompactd cada 500 ms aunque no haya
+// nada que compactar (una microVM no vive de páginas enormes), y vmstat
+// repasa los contadores de cada CPU cada segundo; cada 10 basta para lo que
+// los lee (balloon, /proc/meminfo, que la deriva está acotada por CPU). En el
+// portátil cada despertar de un vCPU es un despertar del Mac.
+const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet" +
+	" sysctl.vm.compaction_proactiveness=0 sysctl.vm.stat_interval=10"
 
 // archBootArg añade parámetros de kernel específicos de la arquitectura para
 // acortar el arranque. En amd64 apaga la emulación de i8042 (teclado/ratón
@@ -178,6 +187,9 @@ type Manager struct {
 	// entornoPendiente es el entorno de las máquinas cuyo agente aún no lo
 	// ha leído de MMDS (entorno.go): un PutMMDS en ese rato lo conserva.
 	entornoPendiente map[string]map[string]string
+	// sondaExec ejecuta los healthchecks de las aristas depends
+	// (grafo_salud.go); la pone el daemon.
+	sondaExec SondaExec
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
 	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
@@ -259,6 +271,11 @@ type Manager struct {
 	// resyncSinAgente: qué restauraciones no tienen agente al que resincronizar
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
+
+	// bat es el modo batería (bateria.go); reloj, la vigilancia del sueño del
+	// host (despertar_host.go).
+	bat   bateria
+	reloj relojHost
 
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
@@ -1284,7 +1301,17 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return nil, err
 	}
+	comando, err := comandoDePeticion(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := validarVolumeWait(req); err != nil {
+		return nil, err
+	}
 	req.Env = nil
+	if err := validarShareWait(req.ShareWait); err != nil {
+		return nil, err
+	}
 	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
 	// llevar siempre a la misma máquina (docs/authz.md).
 	soltarNombre, err := m.reservarNombre(req.Name)
@@ -1296,10 +1323,16 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
 	if req.From != "" {
-		// Las carpetas se deciden al arrancar en frío: una copia es un disco,
-		// y a una máquina restaurada no se le añaden discos.
-		if len(req.Shares) > 0 {
-			return nil, fmt.Errorf("%w: shared folders need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+		// Las copias son un disco, y a una máquina restaurada no se le añaden
+		// discos. Las vivas sí se conectan tras restaurar, pero solo a una
+		// plantilla cuyo agente las espera (ShareWait): runFrom lo comprueba.
+		for _, sh := range req.Shares {
+			if !(api.ShareAttachment{Mode: sh.Mode}).Live() {
+				return nil, fmt.Errorf("%w: copy shares need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+			}
+		}
+		if req.ShareWait > 0 {
+			return nil, fmt.Errorf("%w: share_wait is decided at a cold boot; a copy waits for what its template waited for", ErrShareRequest)
 		}
 		// Una copia ya despierta del fondo de la plantilla, si la hay y la
 		// petición no pide nada que se decida al restaurar (fondo.go).
@@ -1501,9 +1534,14 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
-		TTLAt:   &creada,
-		EnvKeys: api.MachineEnvKeys(env),
+		TTLAt:     &creada,
+		EnvKeys:   api.MachineEnvKeys(env),
+		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
 	}
+	if comando != nil {
+		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd
+	}
+	mc.VolumeWait = req.VolumeWait
 	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
 	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
 	// gcFailed) veía la máquina en created con PID 0, no mataba nada, borraba
@@ -1569,7 +1607,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env, mc.ShareWait)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -1640,8 +1678,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
 	m.conocerAgente(id)
-	if len(env) > 0 {
+	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
+	}
+	if mc.VolumeWait {
+		m.vigilarEsperaVolumen(id)
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
@@ -1749,7 +1790,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool, env map[string]string, shareWait int) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1806,11 +1847,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	// El entorno de la máquina va por MMDS, que cuelga de la red.
+	// El entorno y el comando de la máquina van por MMDS, que cuelga de la red.
+	comando := m.comandoDeID(id)
 	if len(env) > 0 && n == nil {
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrEnvRequest)
 	}
-	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0)
+	if comando != nil && n == nil {
+		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
+	}
+	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
+		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait)
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}
@@ -1821,10 +1867,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	}); err != nil {
 		return pid, err
 	}
-	// vdb: capa escribible propia de esta microVM. Muere con ella.
+	// vdb: capa escribible propia de esta microVM. Muere con ella. Con
+	// kling-vz y on_ttl=remove va sin sincronizar (desechable.go).
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
-		RateLimiter: fc.Limit(diskBytesPerSec),
+		RateLimiter:     fc.Limit(diskBytesPerSec),
+		KlingDisposable: m.overlayDesechableDe(id),
 	}); err != nil {
 		return pid, err
 	}
@@ -1882,12 +1930,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
 			// Sin MMDS el entorno de la máquina no llega: el agente no
 			// arrancaría el servicio. Mejor no arrancar.
-			if len(env) > 0 {
-				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment: %w", err)
+			if len(env) > 0 || comando != nil {
+				return pid, fmt.Errorf("configuring MMDS, which carries the machine environment and command: %w", err)
 			}
 			log.Printf("warning: could not configure MMDS on %s: %v (no session secrets available)", id, err)
-		} else if len(env) > 0 {
-			if err := ponerEntornoMMDS(ctx, c, env); err != nil {
+		} else if len(env) > 0 || comando != nil {
+			if err := ponerEntornoMMDS(ctx, c, datosArranqueMMDS(env, comando)); err != nil {
 				return pid, err
 			}
 		}
@@ -3427,6 +3475,12 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.killConservandoDisco(mc.ID)
+	// El overlay se conserva para kling start: si iba sin sincronizar, se
+	// asienta antes de decir stopped (desechable.go).
+	if err := m.asentarOverlay(mc); err != nil {
+		m.fail(mc, fmt.Errorf("stop: %w", err))
+		return nil, err
+	}
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -3631,6 +3685,11 @@ func waitGone(pid int, timeout time.Duration) {
 func (m *Manager) fail(mc *api.Machine, err error) {
 	id := mc.ID
 	m.kill(id)
+	// Una fallida conserva su disco (se puede inspeccionar o arrancar):
+	// el overlay desechable se asienta como en Stop (desechable.go).
+	if aerr := m.asentarOverlay(mc); aerr != nil {
+		log.Printf("warning: %s: %v", shortID(id), aerr)
+	}
 
 	// El índice de red, de la viva: el de una copia tomada antes de esperar el
 	// cerrojo puede ser anterior a montar la red.

@@ -1027,3 +1027,56 @@ func TestVueltaAtrasConUnVolcadoQueElViejoNoLee(t *testing.T) {
 		t.Fatalf("a readable snapshot must roll back: %v (daemon %s)", err, m.d.version)
 	}
 }
+
+// Una pieza cuyo destino no existía (kling-hv en un Mac de antes de que la
+// release lo trajera) se instala, y volver atrás la quita.
+func TestPiezaNuevaSeInstalaYVolverAtrasLaQuita(t *testing.T) {
+	m := nuevoMontaje(t)
+	hv := filepath.Join(m.dir, "bin", "kling-hv")
+	m.rel.assets["kling-hv-darwin-arm64"] = []byte("hv nuevo")
+	o := m.opciones()
+	o.Piezas = append(o.Piezas, Pieza{Asset: Asset{Nombre: "kling-hv-darwin-arm64", Corto: "kling-hv", Opcional: true}, Destino: hv})
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if leer(t, hv) != "hv nuevo" {
+		t.Fatal("kling-hv was not installed")
+	}
+	if !strings.Contains(m.out.String(), "install "+hv) {
+		t.Errorf("the plan does not say it installs kling-hv:\n%s", m.out.String())
+	}
+	m.out.Reset()
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if _, err := os.Stat(hv); !os.IsNotExist(err) {
+		t.Error("rolling back left kling-hv, which wasn't there before")
+	}
+	if leer(t, m.bin) != string(m.viejo) {
+		t.Error("the previous kling is not back")
+	}
+}
+
+// Una pieza opcional que la release no trae se omite: ni error ni se toca.
+func TestPiezaOpcionalAusenteSeOmite(t *testing.T) {
+	m := nuevoMontaje(t)
+	hv := filepath.Join(m.dir, "bin", "kling-hv")
+	os.WriteFile(hv, []byte("hv viejo"), 0o755)
+	o := m.opciones()
+	o.Piezas = append(o.Piezas, Pieza{Asset: Asset{Nombre: "kling-hv-darwin-arm64", Opcional: true}, Destino: hv})
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if leer(t, hv) != "hv viejo" || leer(t, m.bin) != string(m.nuevo) {
+		t.Error("kling-hv changed, or kling did not")
+	}
+	// Sin Opcional, la misma release es un error antes de tocar nada.
+	m2 := nuevoMontaje(t)
+	hv2 := filepath.Join(m2.dir, "bin", "kling-hv")
+	o2 := m2.opciones()
+	o2.Piezas = append(o2.Piezas, Pieza{Asset: Asset{Nombre: "kling-hv-darwin-arm64"}, Destino: hv2})
+	if _, err := Actualizar(context.Background(), o2); err == nil {
+		t.Fatal("a required asset missing from the release must fail")
+	}
+	m2.noTocado(t)
+}

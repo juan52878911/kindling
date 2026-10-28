@@ -9,7 +9,7 @@ import (
 func TestDaemonBackend(t *testing.T) {
 	nativo := "firecracker"
 	if runtime.GOOS == "darwin" {
-		nativo = "vz"
+		nativo = "auto" // lo resuelve resolverBackend a hv o vz
 	}
 	if runtime.GOOS == "darwin" && runtime.GOARCH != "arm64" {
 		t.Skip("vz solo en Apple Silicon")
@@ -22,7 +22,7 @@ func TestDaemonBackend(t *testing.T) {
 		t.Fatalf("KLING_VMM ruta = %q, %v", b, err)
 	}
 	otro := "vz"
-	if nativo == "vz" {
+	if runtime.GOOS == "darwin" {
 		otro = "firecracker"
 	}
 	if _, err := daemonBackend(otro, "", runtime.GOOS, runtime.GOARCH); err == nil {
@@ -34,5 +34,24 @@ func TestDaemonBackend(t *testing.T) {
 	}
 	if _, err := daemonBackend("qemu", "", runtime.GOOS, runtime.GOARCH); err == nil || !strings.Contains(err.Error(), "daemon.vmm") {
 		t.Fatalf("backend desconocido: %v", err)
+	}
+}
+
+// hv (kling-hv) es la otra opción de macOS: por la clave o por KLING_VMM.
+func TestDaemonBackendHV(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		if _, err := daemonBackend("hv", "", runtime.GOOS, runtime.GOARCH); err == nil {
+			t.Fatal("hv solo en Apple Silicon")
+		}
+		return
+	}
+	if b, err := daemonBackend("hv", "", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("daemon.vmm hv = %q, %v", b, err)
+	}
+	if b, err := daemonBackend("vz", "hv", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("KLING_VMM=hv = %q, %v", b, err)
+	}
+	if b, err := daemonBackend("hv", "/tmp/kling-hv", runtime.GOOS, runtime.GOARCH); err != nil || b != "hv" {
+		t.Fatalf("KLING_VMM ruta con hv = %q, %v", b, err)
 	}
 }

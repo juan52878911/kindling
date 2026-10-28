@@ -21,11 +21,12 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
-	"github.com/juan52878911/kindling/vz/internal/custodio"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/energia"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
+	"github.com/juan52878911/kindling/vz/internal/sandbox"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
@@ -83,16 +84,12 @@ func (e frenoCaido) Unwrap() error        { return e.error }
 // footprint/freno_darwin.go).
 const argFreno = "--cpu-brake"
 
-// argCustodio lanza este binario como custodio de snapshots (ver
-// internal/custodio), con la carpeta de snapshots y la de la máquina.
-const argCustodio = "--snapshot-keeper"
-
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == argFreno {
 		os.Exit(servirFreno())
 	}
-	if len(os.Args) == 4 && os.Args[1] == argCustodio {
-		os.Exit(servirCustodio(os.Args[2], os.Args[3]))
+	if len(os.Args) == 2 && os.Args[1] == energia.Arg {
+		os.Exit(energia.Main(sandbox.Aplicar))
 	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
@@ -137,29 +134,77 @@ func run() int {
 		return 2
 	}
 
+	// El canal con el agente por virtio-vsock y la MTU del enlace, para las
+	// máquinas que arranquen aquí (una restauración usa los del snapshot).
+	vsock, err := spec.ParseVsock(os.Getenv("KLING_VZ_VSOCK"))
+	if err != nil {
+		logf("KLING_VZ_VSOCK: %v", err)
+		return 2
+	}
+	mtu, err := spec.ParseMTU(os.Getenv("KLING_VZ_MTU"))
+	if err != nil {
+		logf("KLING_VZ_MTU: %v", err)
+		return 2
+	}
+
 	meter := footprint.NewMeter()
 	// El freno del tope de CPU va en su propio proceso, lanzado antes de que
-	// este se encierre. Sin él, el tope pausa la VM por el framework, con la
-	// que se para también el reloj del invitado.
+	// este se encierre (encerrado ya no puede lanzar procesos). Sin él, el
+	// tope pausa la VM por el framework, con la que se para también el reloj
+	// del invitado. El techo llega después de arrancar (PUT /kling/cpu, que el
+	// núcleo manda una vez tras el arranque, el thaw o la restauración), así
+	// que se lanza siempre y se suelta en cuanto ese PUT dice que no hay techo
+	// (lo normal en macOS: techoDelDaemon da todas las vCPU): un proceso de
+	// menos por máquina. Un techo que llegara más tarde, ya sin freno, regula
+	// con pausas del framework.
 	freno, err := footprint.StartFreno(argFreno)
 	if err != nil {
 		logf("warning: no CPU brake process, the CPU ceiling will pause the VM instead: %v", err)
 	}
 	onCreate, freeze := meter.Track, func(bool) error { return errors.New("no CPU brake process") }
+	var cpuCeiling func(bool)
 	if freno != nil {
+		var frenoMu sync.Mutex
+		soltado, tuvoTecho := false, false
 		onCreate = func(fd uintptr) {
 			meter.Track(fd)
+			frenoMu.Lock()
+			defer frenoMu.Unlock()
+			if soltado {
+				return
+			}
 			if err := freno.Track(fd); err != nil {
 				logf("warning: %v", err)
 			}
 		}
 		freeze = func(stop bool) error {
+			frenoMu.Lock()
+			sin := soltado
+			frenoMu.Unlock()
+			if sin {
+				return errors.New("no CPU brake process (released: the VM had no CPU ceiling)")
+			}
 			err := freno.Freeze(stop)
 			if errors.Is(err, footprint.ErrFrenoCaido) {
 				// El servidor reconoce su centinela, no el de footprint.
 				return frenoCaido{err}
 			}
 			return err
+		}
+		cpuCeiling = func(active bool) {
+			frenoMu.Lock()
+			defer frenoMu.Unlock()
+			tuvoTecho = tuvoTecho || active
+			// Solo si nunca hubo techo: entonces el regulador no llamó nunca
+			// a Freeze y el auxiliar no está parado, así que cerrar el socket
+			// basta (y aun así el freno lo reanudaría al ver el cierre).
+			if tuvoTecho || soltado {
+				return
+			}
+			soltado = true
+			if err := freno.Close(); err != nil {
+				logf("warning: releasing the CPU brake process: %v", err)
+			}
 		}
 	}
 	policy := egress.NewPolicy()
@@ -212,6 +257,11 @@ func run() int {
 		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
 			return grafoMaq.DialMachine(ctx, id, owner, port)
 		}
+		// El loopback del Mac (-upstream 127.0.0.1:5432) también lo marca el
+		// daemon: el perfil no abre el loopback a este proceso.
+		opts.DialLoopback = func(ctx context.Context, port int) (net.Conn, error) {
+			return grafoMaq.DialLoopback(ctx, port)
+		}
 	}
 	creds = credproxy.New(opts)
 	if broker != "" {
@@ -223,11 +273,17 @@ func run() int {
 	syscall.Umask(0o077)
 
 	peers := peercred.New()
-	confine, destino := confinamiento(*sock, logf)
+	// Encerrado, este proceso solo escribe en el directorio de su máquina; ver
+	// internal/sandbox y kling-vz.sb.
+	confine, destino := sandbox.Preparar(sandbox.Opciones{Nombre: "kling-vz", Perfil: perfil,
+		Sock: *sock, Broker: rutaBroker(), Logf: logf})
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
-		Graphics: graphics,
+		Graphics:   graphics,
+		Vsock:      vsock,
+		MTU:        mtu,
+		CPUCeiling: cpuCeiling,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
 			// dentro de ella, que vnet tomaría por un proxy).
@@ -237,6 +293,7 @@ func run() int {
 			}
 			return vnet.New(vnet.Config{
 				GuestMAC: c.GuestMAC,
+				MTU:      c.MTU,
 				MMDS:     c.MMDS,
 				MMDSAddr: c.MMDSAddr,
 				Policy:   c.Policy,
@@ -265,6 +322,7 @@ func run() int {
 		CPUTime:       meter.CPUTime,
 		Freeze:        freeze,
 		HelperStopped: meter.HelperStopped,
+		HelperPID:     meter.HelperPID,
 		Graph:         grafoMaq,
 	})
 
@@ -369,75 +427,6 @@ func rutaBroker() string {
 		dir = r
 	}
 	return filepath.Join(dir, filepath.Base(p))
-}
-
-// confinamiento devuelve cómo encerrar este proceso en su sandbox, o nil si no
-// hay que hacerlo, y dónde escribir los ficheros de un snapshot una vez
-// encerrado. El daemon pasa su raíz de datos en KLING_VZ_CONFINE_ROOT (una
-// variable y no un argumento: un kling-vz anterior la ignora, mientras que un
-// argumento desconocido lo haría salir). KLING_VZ_NO_SANDBOX=1 lo apaga, para
-// diagnosticar un perfil que una versión nueva de macOS rompa.
-//
-// Encerrado, este proceso solo escribe en el directorio de su máquina (y en
-// sus discos). Un snapshot que el daemon pide fuera de él (el dorado de kling
-// commit, en snapshots/<nombre>/) se vuelca a un temporal del directorio y el
-// custodio lo deja en su sitio (internal/custodio). El custodio se lanza aquí,
-// antes de encerrarse; si no arranca, esos snapshots fallan (nunca se abre
-// snapshots/ a este proceso).
-//
-// Las rutas se resuelven antes: el sandbox compara rutas reales, y en macOS
-// /tmp es /private/tmp.
-func confinamiento(sock string, logf func(string, ...any)) (func(server.Confinamiento) error, func(string) (string, func() error, error)) {
-	root := os.Getenv("KLING_VZ_CONFINE_ROOT")
-	if root == "" {
-		logf("not confined: KLING_VZ_CONFINE_ROOT is not set (the daemon sets it)")
-		return nil, nil
-	}
-	if os.Getenv("KLING_VZ_NO_SANDBOX") == "1" {
-		logf("WARNING: not confined, KLING_VZ_NO_SANDBOX=1")
-		return nil, nil
-	}
-	root, mdir := real(root), real(filepath.Dir(sock))
-	snaps := filepath.Join(root, "snapshots")
-	broker := rutaBroker()
-	k, err := custodio.Iniciar(argCustodio, snaps, mdir)
-	if err != nil {
-		logf("warning: no snapshot keeper process, snapshots outside %s will fail: %v", mdir, err)
-	}
-	var confinado bool
-	destino := func(p string) (string, func() error, error) {
-		d := real(filepath.Dir(p))
-		if !confinado || d == mdir {
-			return p, nil, nil
-		}
-		if k == nil {
-			return "", nil, fmt.Errorf("%s is outside this machine's directory and there is no snapshot keeper", p)
-		}
-		dst := filepath.Join(d, filepath.Base(p))
-		tmp := filepath.Join(mdir, ".kling-vz-publish-"+filepath.Base(p))
-		return tmp, func() error { return k.Publicar(tmp, dst) }, nil
-	}
-	confine := func(c server.Confinamiento) error {
-		if err := confinar(root, mdir, broker, c); err != nil {
-			return err
-		}
-		confinado = true
-		logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v, loopback: %v",
-			len(c.Lectura), len(c.Escritura), mdir, c.ConRed, c.ConRed && c.Loopback)
-		return nil
-	}
-	return confine, destino
-}
-
-// servirCustodio es el custodio de snapshots: se encierra y atiende a su
-// kling-vz por el fd 3 hasta que este muere.
-func servirCustodio(snaps, mdir string) int {
-	signal.Ignore(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	if err := confinarCustodio(snaps, mdir); err != nil {
-		fmt.Fprintf(os.Stderr, "kling-vz: snapshot keeper: %v\n", err)
-		return 1
-	}
-	return custodio.Servir(3, snaps, mdir)
 }
 
 // servirFreno es el proceso freno: se encierra y atiende a su kling-vz por el

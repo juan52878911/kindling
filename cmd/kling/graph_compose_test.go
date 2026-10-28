@@ -54,7 +54,7 @@ func TestComposeGrafoSeLee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Graph.Name != "shop" || len(req.Graph.Nodes) != 3 || len(req.Graph.Edges) != 4 {
+	if req.Graph.Name != "shop" || len(req.Graph.Nodes) != 3 || len(req.Graph.Edges) != 8 {
 		t.Errorf("graph = %+v", req.Graph)
 	}
 }
@@ -105,6 +105,26 @@ func TestComposeNombres(t *testing.T) {
 		t.Errorf("grafo:\n%s", tr.Grafo)
 	}
 	if !strings.Contains(strings.Join(tr.Avisos, "\n"), `renamed to node "mi-web"`) {
+		t.Errorf("avisos = %v", tr.Avisos)
+	}
+}
+
+// platform: linux/amd64 llega al import como -arch amd64 (en un daemon arm64,
+// emulado con qemu-user); una plataforma que no es linux se avisa.
+func TestComposePlatform(t *testing.T) {
+	src := "services:\n  a:\n    image: x/a\n    platform: linux/amd64\n  b:\n    image: x/b\n    platform: windows/amd64\n"
+	tr, err := traducirCompose([]byte(src), "p", true, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	antes := strings.Join(tr.Antes, "\n")
+	if !strings.Contains(antes, "-name p-a -replace -arch amd64") {
+		t.Errorf("antes:\n%s", antes)
+	}
+	if strings.Contains(antes, "-name p-b -replace -arch") {
+		t.Errorf("b no debe llevar -arch:\n%s", antes)
+	}
+	if !strings.Contains(strings.Join(tr.Avisos, "\n"), "platform: windows/amd64") {
 		t.Errorf("avisos = %v", tr.Avisos)
 	}
 }

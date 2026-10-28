@@ -96,8 +96,9 @@ y las órdenes previas (`-script`, y también como comentario en la cabecera del
 | `services.X` | nodo `X` (etiqueta DNS: `mi_web` pasa a `mi-web`, con aviso) con la imagen `<grafo>-X` |
 | `image`, `environment`, `command`, `entrypoint`, `user`, `restart` | un `kling image import <image> -name <grafo>-X -e K=V … -- cmd` (los valores quedan **horneados** en la imagen, como con `image import -e`) |
 | `ports`, `expose` | `ports` del nodo (el puerto del contenedor; publicar en el host no existe y se avisa) |
-| `depends_on` | una arista `link` a cada puerto del destino y una `depends`; `condition: service_healthy` con `healthcheck` pone el puerto en la `depends` |
-| `healthcheck` | la sonda es un connect TCP al puerto del destino (el `test` no se ejecuta; se avisa) |
+| red del proyecto | como en Docker Compose, cada servicio alcanza a todos los demás: una arista `link` de cada nodo a cada puerto de cada otro (un nodo alcanza un nodo por puerto: si dos exponen el mismo, gana el de `depends_on` o el que nombra el entorno). `networks:` lo restringe a los que comparten red; `network_mode: none`, a ninguno. Si no caben en las 64 aristas, solo las de `depends_on` y las del entorno, con aviso |
+| `depends_on` | una arista `depends`; `condition: service_healthy` con `healthcheck` le pone `health` (el `test` de verdad, dentro del destino, que lleva `allow_exec`) |
+| `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period` y `start_interval` van a la `health` de la arista (con un daemon sin `graph-health`, `compose up` vuelve a la sonda TCP del puerto, con aviso) |
 | volúmenes con nombre | `kling volume create <grafo>-V` y `volumes` del nodo (`:ro` incluido) |
 | `mem_limit`, `cpus`, `deploy.resources.limits` | `mem_mib`, `vcpus` |
 
@@ -106,8 +107,8 @@ Además, un valor de `environment` que usa el nombre de un servicio como host
 `depends_on` sin puertos recibe el de su imagen (postgres, redis, mysql, mongo…) y se
 avisa. `${VAR}`, `${VAR:-x}` y `$$` se resuelven con el entorno del CLI.
 
-Lo que no tiene equivalente (`build:`, `privileged`, `network_mode`, `cap_add`, bind
-mounts, `env_file`, `networks`, UDP, rangos de puertos…) sale por **stderr, una línea
+Lo que no tiene equivalente (`build:`, `privileged`, `network_mode` salvo `none`, `cap_add`, bind
+mounts, `env_file`, las opciones de una red, UDP, rangos de puertos…) sale por **stderr, una línea
 `warning: service X: clave: motivo` por cosa**; un servicio con `build:` y sin `image:`
 se salta. El YAML sigue las reglas del [fichero](#el-fichero): anclas y bloques `|`/`>`
 dan un error con su línea. El grafo resultante se valida como lo hace `graph up`.
@@ -229,6 +230,14 @@ el orden de todo el grafo:
 - `freeze`, y la pausa de un `snapshot`, van al revés: primero quien depende.
 - Un ciclo (`a → b → a`) se rechaza al validar el fichero. Si una dependencia no
   arranca, el nodo que depende de ella tampoco (y `up` deshace todo).
+
+Con **`health`** (`{test: [pg_isready, -U, app], interval_ms: 5000, retries: 10}`),
+además, el `test` se ejecuta **dentro** del destino (que necesita `allow_exec: true`)
+hasta que acaba con 0: el `condition: service_healthy` de Docker Compose. Se intenta
+cada `start_interval_ms` (200 ms por defecto), no cada `interval_ms`: lo que se espera
+es el primer pase. Cada intento dura como mucho `timeout_seconds` (30), y el destino
+está enfermo —y `up` falla— si no pasó en `start_period_seconds + retries × interval`
+(por defecto 3 × 30 s, cuando Docker lo declararía `unhealthy`).
 
 Una `depends` vale en todas las plataformas. Con puerto, en Linux el daemon marca a la IP
 del netns del destino; en macOS pregunta al `kling-vz` del destino si algo escucha en

@@ -2,7 +2,9 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -203,5 +205,43 @@ func TestFondoTamanoFueraDeRango(t *testing.T) {
 	}
 	if _, err := m.SetFondo("nada", 1); err == nil {
 		t.Error("fondo de una plantilla que no existe")
+	}
+}
+
+// Un dorado de otro VMM (vz → hv) deja el fondo vacío: InfoFondo y
+// ProblemasFondos lo dicen con la orden para rehacerlo, en vez de solo el log.
+// Un fallo de otra clase sale como Error; reponer bien lo limpia.
+func TestFondoDoradoObsoletoSeInforma(t *testing.T) {
+	m, _ := fondoDePrueba(t, 1)
+	escribirSnapshot(t, m, "viejo", api.Snapshot{VMM: "kling-vz 0.18.0"})
+	m.FijarOrigen("0.19.0", "kling-hv 0.19.0")
+	m.altaFondo = func(ctx context.Context, name string) (string, error) {
+		if name == "viejo" {
+			return "", errObsoleto(name, causaObsoleto("kling-vz 0.18.0", "kling-hv 0.19.0"))
+		}
+		return "", errors.New("no space left")
+	}
+	if _, err := m.SetFondo("viejo", 2); err != nil {
+		t.Fatal(err)
+	}
+	esperar(t, "fondo obsoleto", func() bool { return m.InfoFondo("viejo").Stale != "" })
+	p := m.InfoFondo("viejo")
+	if !strings.Contains(p.Stale, "kling-vz 0.18.0") || !strings.Contains(p.Fix, "kling save -replace <machine> viejo") || p.Error != "" {
+		t.Fatalf("pool obsoleto = %+v", p)
+	}
+	if _, err := m.SetFondo("dorado", 2); err != nil {
+		t.Fatal(err)
+	}
+	esperar(t, "fallo del otro", func() bool { return m.InfoFondo("dorado").Error != "" })
+	ps := m.ProblemasFondos()
+	if len(ps) != 2 || ps[0].Template != "dorado" || ps[0].Error != "no space left" || ps[0].Stale != "" || ps[1].Template != "viejo" {
+		t.Fatalf("ProblemasFondos = %+v", ps)
+	}
+	// Apagado (tamaño 0) no es un problema.
+	if _, err := m.SetFondo("viejo", 0); err != nil {
+		t.Fatal(err)
+	}
+	if ps := m.ProblemasFondos(); len(ps) != 1 || ps[0].Template != "dorado" {
+		t.Fatalf("con viejo apagado: %+v", ps)
 	}
 }

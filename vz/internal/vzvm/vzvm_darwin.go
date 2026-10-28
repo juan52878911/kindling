@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -132,6 +133,15 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 		if err != nil {
 			return nil, fmt.Errorf("network attachment: %w", err)
 		}
+		// MTU del enlace (macOS 13+): el framework la anuncia al invitado
+		// (VIRTIO_NET_F_MTU) y el virtio_net de Linux la adopta solo. La pila
+		// de usuario se montó con la misma (vnet.Config.MTU): las dos salen
+		// del Spec, que viaja en el snapshot.
+		if s.MTU > 0 {
+			if err := att.SetMaximumTransmissionUnit(s.MTU); err != nil {
+				return nil, fmt.Errorf("network MTU %d: %w", s.MTU, err)
+			}
+		}
 		nic, err := vz.NewVirtioNetworkDeviceConfiguration(att)
 		if err != nil {
 			return nil, err
@@ -181,6 +191,17 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 		}
 		gpu.SetScanouts(scan)
 		cfg.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gpu})
+	}
+
+	// virtio-vsock: el canal con el agente del invitado (ver DialVsock). Solo
+	// si el Spec lo lleva: un snapshot guardado sin él debe restaurarse sin
+	// él, el framework exige los mismos dispositivos.
+	if s.Vsock {
+		vs, err := vz.NewVirtioSocketDeviceConfiguration()
+		if err != nil {
+			return nil, fmt.Errorf("vsock device: %w", err)
+		}
+		cfg.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{vs})
 	}
 
 	if valid, err := cfg.Validate(); !valid || err != nil {
@@ -312,6 +333,15 @@ func (m *machine) RestoreState(path string) error { return m.vm.RestoreMachineSt
 
 func (m *machine) SetBalloonTargetMiB(mib int) error {
 	devs := m.vm.MemoryBalloonDevices()
+	// Code-Hex/vz 3.7.1 envuelve los dispositivos que da el getter (sin retain)
+	// con un finalizador que hace release: al pasar el GC, la VM se queda con un
+	// objeto liberado de más y kling-vz muere con SIGSEGV unos minutos después.
+	// Sin finalizador el envoltorio no suelta nada que no sea suyo.
+	for _, d := range devs {
+		if t := vz.AsVirtioTraditionalMemoryBalloonDevice(d); t != nil {
+			runtime.SetFinalizer(t, nil)
+		}
+	}
 	if len(devs) == 0 {
 		return errors.New("the VM has no balloon device")
 	}

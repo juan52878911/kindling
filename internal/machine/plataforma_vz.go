@@ -37,7 +37,9 @@ func argsVMM() []string { return nil }
 // (put_debugfs.go).
 const putSinMontar = true
 
-const backendVMM = BackendVZ
+// backendVMM es vz o hv: lo fija ElegirBackend (backend_darwin.go) antes de
+// crear el Manager.
+var backendVMM = BackendVZ
 
 // auditoriaEnElDaemon: en macOS el registro lo escribe el kling-vz de la
 // máquina junto a su socket, el único sitio en que su sandbox le deja
@@ -208,8 +210,9 @@ func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
 const jailerPosible = false
 
 // restaurarComparteMemoria: Virtualization.framework copia la memoria al
-// restaurar (RestoreMachineState); las copias no comparten nada.
-const restaurarComparteMemoria = false
+// restaurar (RestoreMachineState); las copias no comparten nada. kling-hv sí
+// la comparte: mapea el fichero (ElegirBackend).
+var restaurarComparteMemoria = false
 
 // globoSinEstadisticas: Virtualization.framework no da las estadísticas de
 // memoria del invitado; squeeze aprieta a ciegas (ver objetivoSinEstadisticas).
@@ -574,7 +577,12 @@ const (
 
 // lanzamientoPlataforma: el tamaño de launchGate, que en macOS es la compuerta
 // de RESTAURACIONES.
-func lanzamientoPlataforma() int { return restoresSimultaneosVZ }
+func lanzamientoPlataforma() int {
+	if backendVMM == BackendHV {
+		return restoresSimultaneosHV
+	}
+	return restoresSimultaneosVZ
+}
 
 var (
 	esperaNivelRestoreVZ   = 2 * time.Second // variable para las pruebas
@@ -700,7 +708,10 @@ func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) in
 }
 
 // memoriaVMM pregunta al ayudante: suma su huella y la del proceso auxiliar
-// de Apple que aloja la VM, que es donde vive de verdad la memoria.
+// de Apple que aloja la VM (con vz es donde vive de verdad la memoria). Y
+// suma la de sus hijos, que el ayudante no cuenta: el freno del tope de CPU
+// de kling-vz, unos MiB de runtime de Go (huella_vz.go). Sin eso
+// la memoria por máquina que dan kling top y las métricas se quedaba corta.
 func memoriaVMM(pid int, sock string) int64 {
 	if sock == "" {
 		return 0
@@ -711,7 +722,7 @@ func memoriaVMM(pid int, sock string) int64 {
 	if err != nil {
 		return 0
 	}
-	return n
+	return n + (huellaHijosBytes(pid)+(1<<19))>>20
 }
 
 func rssVMM(pid int, sock string) int { return int(memoriaVMM(pid, sock)) }
@@ -751,7 +762,7 @@ func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
 // (vz/cmd/kling-vz/kling-vz.sb): lee y escribe su directorio de máquina y,
 // fuera de él, solo los ficheros exactos que su VM necesita; nunca secrets/, y
-// en snapshots/ no escribe (los dorados los coloca el custodio).
+// en snapshots/ no escribe (los dorados los publica el daemon, publicar_volcado.go).
 //
 // Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.

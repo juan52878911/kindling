@@ -86,3 +86,20 @@ CONFIG_PCI_MSI=y
 CONFIG_KERNEL_MODE_NEON=y
 CONFIG_CRYPTO_SHA256_ARM64=y
 CONFIG_CRYPTO_SHA2_ARM64_CE=y
+
+# binfmt_misc: imágenes OCI solo-amd64 en un anfitrión arm64 (Mac, Graviton)
+# con qemu-user dentro del invitado (docs/imagenes-amd64.md). El agente lo
+# registra al arrancar solo si la imagen va emulada; sin eso no cuesta nada.
+CONFIG_BINFMT_MISC=y
+
+# Tics: se queda en HZ_250 (el de siempre). Probado HZ_100 en el Mac (vz y
+# hv, n=10, docs/imagenes-amd64.md): en reposo da lo mismo (con NO_HZ_IDLE un
+# vCPU dormido ya no recibe el tic; quedan temporizadores e IPIs, ~0,7/s por
+# vCPU) y con él el e2e de Mac falla 2 de 2 en "freeze/thaw with a live share"
+# (EIO de una escritura en vuelo al volver la sesión FUSE), que con 250 pasa.
+# Ni detector de bloqueos (ni soft ni hard: el hard pide perf/NMI, que no
+# hay) ni tareas colgadas: hilos que se despiertan solos para vigilar.
+# allnoconfig ya los deja fuera; se dicen para que build.sh avise si vuelven.
+# CONFIG_SOFTLOCKUP_DETECTOR is not set
+# CONFIG_DETECT_HUNG_TASK is not set
+# CONFIG_WQ_WATCHDOG is not set

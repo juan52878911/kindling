@@ -167,11 +167,25 @@ type session struct {
 
 	// cursors son los listados a medias (ver list.go). Con mu.
 	cursors []*listCursor
+
+	// push manda una trama sin que la pidan (los avisos de watch.go), por la
+	// misma escritura serializada que las respuestas.
+	push func([]byte)
+	// watch vigila en el host lo que el invitado mira, desde OpWatch. Con mu.
+	watch *watcher
 }
 
 type handle struct {
 	f     *os.File
 	write bool
+	path  string
+}
+
+// watcher devuelve la vigilancia de la sesión, o nil si el agente no la pidió.
+func (ss *session) watcher() *watcher {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.watch
 }
 
 // Plazos del cierre ordenado (ServeDrain): cuánto se espera sin tramas nuevas
@@ -179,6 +193,8 @@ type handle struct {
 var (
 	drainQuiet = 50 * time.Millisecond
 	drainMax   = 3 * time.Second
+	// byeWait acota la escritura de proto.Bye al final del cierre.
+	byeWait = 200 * time.Millisecond
 )
 
 // trama es lo que lee de la conexión la goroutine lectora de ServeDrain.
@@ -219,6 +235,7 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 			_ = conn.Close()
 		}
 	}
+	sess.push = reply
 	slots := make(chan struct{}, maxInflight)
 	big := make(chan struct{}, maxBigInflight)
 	var wg sync.WaitGroup
@@ -318,6 +335,19 @@ func (s *Server) drainSession(ctx context.Context, conn io.Closer, tramas <-chan
 	case <-ctx.Done():
 		return nil
 	}
+	// Desde aquí todo lo leído está contestado, y lo que llegue se contesta
+	// ERetry sin ejecutarlo: al salir, Bye le dice al agente que lo que siga
+	// esperando no se hizo (lo que el lector tuviera a medias, o lo que mandó
+	// después del último). La escritura se acota: un agente que no lee no
+	// retiene el cierre, y el conn.Close de arriba la desbloquea.
+	defer func() {
+		hecho := make(chan struct{})
+		go func() { reply(proto.Bye()); close(hecho) }()
+		select {
+		case <-hecho:
+		case <-time.After(byeWait):
+		}
+	}()
 	quieto := time.NewTimer(drainQuiet)
 	defer quieto.Stop()
 	for {
@@ -352,6 +382,10 @@ func (s *Server) drainSession(ctx context.Context, conn io.Closer, tramas <-chan
 func (ss *session) closeAll() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if ss.watch != nil {
+		ss.watch.close()
+		ss.watch = nil
+	}
 	for id, h := range ss.files {
 		_ = h.f.Close()
 		<-ss.srv.budget.slots
@@ -390,6 +424,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if e != 0 {
 			return errReply(id, e)
 		}
+		ss.watcher().note(p, a.Mode&proto.SIFMT == proto.SIFDIR)
 		r := ok()
 		a.Put(r)
 		return r.B
@@ -419,6 +454,9 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if max == 0 || max > maxListBytes {
 			max = maxListBytes
 		}
+		if cookie == 0 {
+			ss.watcher().note(p, true)
+		}
 		return ss.list(id, p, cookie, int(max))
 
 	case proto.OpOpen, proto.OpCreate:
@@ -442,9 +480,15 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 			_ = f.Close()
 			return errReply(id, Errno(err))
 		}
-		h, e := ss.put(f, write)
+		h, e := ss.put(f, write, p)
 		if e != 0 {
 			return errReply(id, e)
+		}
+		if w := ss.watcher(); w != nil {
+			if op == proto.OpCreate || flags&proto.FlagTrunc != 0 {
+				w.touched(p)
+			}
+			w.note(p, false)
 		}
 		r := ok()
 		r.U64(h)
@@ -485,6 +529,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 			return errReply(id, proto.EBADF)
 		}
 		n, err := hd.f.WriteAt(data, int64(off))
+		ss.watcher().touched(hd.path)
 		if err != nil && n == 0 {
 			return errReply(id, Errno(err))
 		}
@@ -525,11 +570,13 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 			return errReply(id, proto.EINVAL)
 		}
 		var hf *os.File
+		tp := p
 		if h != 0 {
 			if hd := ss.get(h); hd != nil {
-				hf = hd.f
+				hf, tp = hd.f, hd.path
 			}
 		}
+		ss.watcher().touched(tp)
 		a, e := s.setattr(p, hf, valid, mode, int64(size), at, mt)
 		if e != 0 {
 			return errReply(id, e)
@@ -543,10 +590,12 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if e := checked(d, p); e != 0 {
 			return errReply(id, e)
 		}
+		ss.watcher().touched(p)
 		a, e := s.mkdir(p, mode)
 		if e != 0 {
 			return errReply(id, e)
 		}
+		ss.watcher().note(p, true)
 		r := ok()
 		a.Put(r)
 		return r.B
@@ -556,6 +605,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if e := checked(d, p); e != 0 {
 			return errReply(id, e)
 		}
+		ss.watcher().touched(p)
 		if e := s.remove(p, op == proto.OpRmdir); e != 0 {
 			return errReply(id, e)
 		}
@@ -569,6 +619,7 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if proto.ValidPath(oldp) != nil || proto.ValidPath(newp) != nil {
 			return errReply(id, proto.EINVAL)
 		}
+		ss.watcher().touched(oldp, newp)
 		if e := s.rename(oldp, newp, flags); e != 0 {
 			return errReply(id, e)
 		}
@@ -601,6 +652,35 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		r := ok()
 		r.U32(uint32(n))
 		return r.B
+
+	case proto.OpSymlink:
+		p, t := d.Str(), d.Str()
+		if e := checked(d, p); e != 0 {
+			return errReply(id, e)
+		}
+		ss.watcher().touched(p)
+		a, e := s.symlink(p, t)
+		if e != 0 {
+			return errReply(id, e)
+		}
+		r := ok()
+		a.Put(r)
+		return r.B
+
+	case proto.OpWatch:
+		if d.Done() != nil {
+			return errReply(id, proto.EINVAL)
+		}
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+		if ss.watch == nil {
+			w, err := newWatcher(s, ss.push)
+			if err != nil {
+				return errReply(id, proto.ENOSYS)
+			}
+			ss.watch = w
+		}
+		return ok().B
 
 	case proto.OpStatfs:
 		if d.Done() != nil {
@@ -644,7 +724,7 @@ func (ss *session) get(h uint64) *handle {
 	return ss.files[h]
 }
 
-func (ss *session) put(f *os.File, write bool) (uint64, uint32) {
+func (ss *session) put(f *os.File, write bool, path string) (uint64, uint32) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	if len(ss.files) >= maxHandles {
@@ -670,7 +750,7 @@ func (ss *session) put(f *os.File, write bool) (uint64, uint32) {
 	// La época en la mitad alta: un handle de una sesión anterior (de antes de
 	// congelar, o de otro proceso del daemon) no puede coincidir con uno de esta.
 	h := ss.epoch | (ss.next & 0xffffffff)
-	ss.files[h] = &handle{f: f, write: write}
+	ss.files[h] = &handle{f: f, write: write, path: path}
 	return h, 0
 }
 
@@ -1005,6 +1085,9 @@ func (s *Server) rename(oldp, newp string, flags uint32) uint32 {
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return Errno(err)
 		}
+	}
+	if !s.renameKeepsLinks(oldp, newp) {
+		return proto.EXDEV
 	}
 	if err := renameat(of, ob, nf, nb); err != nil {
 		return Errno(err)

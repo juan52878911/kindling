@@ -381,12 +381,16 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
 	if !yaPausada {
-		soltados = true
-		if err := m.releaseVolumes(mc); err != nil {
-			// Un puente que no conoce la ruta no soltó nada: no hay que
-			// devolverle nada, ni darla por perdida al no poder hacerlo.
-			soltados = !sinOperacionesDeVolumen(err)
-			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+		// Con VolumeWait no hay nada montado que soltar, y devolvérselos
+		// después lanzaría el servicio en ella (volumen_espera.go).
+		soltados = !mc.VolumeWait
+		if soltados {
+			if err := m.releaseVolumes(mc); err != nil {
+				// Un puente que no conoce la ruta no soltó nada: no hay que
+				// devolverle nada, ni darla por perdida al no poder hacerlo.
+				soltados = !sinOperacionesDeVolumen(err)
+				return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+			}
 		}
 
 		// Con la plantilla aún en marcha: que suelte lo que no usa, y el
@@ -444,8 +448,28 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// no solo si el commit sale bien: falle lo que falle a partir de aquí, la
 	// plantilla se reanuda con el mapa ya reiniciado.
 	m.olvidarDiffBase(mc.ID)
-	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
+	// En macOS el VMM, confinado, no escribe en snapshots/: vuelca en el
+	// directorio de su máquina y el daemon lo clona a su sitio
+	// (publicar_volcado.go).
+	volSnap, volMem := snapPath, memPath
+	if volcadoEnLaMaquina && !jailed {
+		mdir := m.dir(mc.ID)
+		volSnap, volMem = filepath.Join(mdir, volcadoTmpSnap), filepath.Join(mdir, volcadoTmpMem)
+		quitarVolcadoTemporal(mdir)
+		defer quitarVolcadoTemporal(mdir)
+	}
+	if err := lento.Snapshot(ctx, volSnap, volMem); err != nil {
 		return nil, err
+	}
+	if volSnap != snapPath {
+		mdir := m.dir(mc.ID)
+		if err := m.publicarVolcado(limpio, mdir, volcadoTmpMem, memPath); err != nil {
+			return nil, err
+		}
+		if err := m.publicarVolcado(limpio, mdir, volcadoTmpSnap, snapPath); err != nil {
+			return nil, err
+		}
+		quitarVolcadoTemporal(mdir)
 	}
 	t.marca("dump")
 	if jailed {
@@ -561,6 +585,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
 		AllowExec:      mc.AllowExec,
 		EnvKeys:        mc.EnvKeys,
+		ShareWait:      mc.ShareWait,
 		RootfsDigest:   rootfsDigest,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
@@ -1266,6 +1291,16 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err != nil {
 		return nil, err
 	}
+	// Carpetas vivas (run() ya rechazó las copias): solo en una plantilla cuyo
+	// agente espera ese mismo número antes de lanzar el servicio. En otra, el
+	// servicio ya corre en la memoria del dorado sin ellas.
+	if len(req.Shares) > 0 && len(req.Shares) != snap.ShareWait {
+		if snap.ShareWait == 0 {
+			return nil, fmt.Errorf("%w: template %s was not saved waiting for shared folders, and its service is already running without them; "+
+				"save one from a machine started with share_wait (kling run -share-wait N), or boot cold with -image", ErrShareRequest, req.From)
+		}
+		return nil, fmt.Errorf("%w: template %s waits for %d shared folder(s) and is being given %d", ErrShareRequest, req.From, snap.ShareWait, len(req.Shares))
+	}
 	// OBSOLETO: hecho con un VMM que el de ahora no sabe cargar. Se falla
 	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
 	// al cargar no dice que la causa es la actualización (meta.go).
@@ -1448,6 +1483,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, verr
 	}
+	shares, serr := m.resolveShares(ctx, req, vols)
+	if serr != nil {
+		os.RemoveAll(dir)
+		return nil, serr
+	}
+	var shareAtts []api.ShareAttachment
+	for _, sh := range shares {
+		shareAtts = append(shareAtts, sh.att)
+	}
 	for _, v := range vols {
 		if !v.readOnly {
 			repairVolume(ctx, v.path)
@@ -1532,6 +1576,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// El entorno es el del dorado: está en su memoria (entorno.go).
 		EnvKeys:   snap.EnvKeys,
+		ShareWait: snap.ShareWait,
+		Shares:    shareAtts,
 		Labels:    etiquetas,
 		CreatedAt: creada,
 		TTLAt:     &creada,
@@ -1706,7 +1752,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al
 	// detectar que ha sido restaurado.
-	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
+	// Con kling-vz y on_ttl=remove, el overlay de esta copia va sin
+	// sincronizar (desechable.go): se marca aquí, con la VM aún sin crear.
+	patch := c.PatchDrive
+	if overlayDesechable(mc) {
+		patch = c.PatchDriveDisposable
+	}
+	if err := patch(ctx, "overlay", overlay); err != nil {
 		return abortar(fmt.Errorf("repointing overlay: %w", err))
 	}
 	// Cada volumen se reapunta igual que el overlay: el dispositivo ya existe
@@ -1811,6 +1863,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
+	// Las carpetas vivas, como en el arranque en frío: el agente de la copia
+	// las espera para lanzar el servicio.
+	if hasLiveShares(&out) {
+		m.startShares(id)
+		if err := m.waitShares(ctx, id, shareAttachWait); err != nil {
+			soltarCiclo()
+			_ = m.Remove(id)
+			return nil, err
+		}
+		m.decorarShares(&out)
+	}
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))})

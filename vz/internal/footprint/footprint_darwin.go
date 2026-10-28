@@ -173,6 +173,14 @@ func buscarAuxiliar(anchor uint64, cache int) int {
 	return 0
 }
 
+// HelperPID es el pid del auxiliar de Apple de la VM, o 0 si aún no hay. Lo
+// pide el daemon para bajarle la QoS en batería (internal/machine/bateria.go).
+func (m *Meter) HelperPID() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return max(m.findHelper(), 0)
+}
+
 // CPUTime es el tiempo de CPU que lleva consumido el auxiliar de Apple que
 // aloja la VM: ahí corren sus vCPU. Es lo que mide el tope de CPU (cpu.go del
 // servidor), el equivalente a la contabilidad de un cgroup en Linux, con el

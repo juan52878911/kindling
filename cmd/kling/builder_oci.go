@@ -87,6 +87,14 @@ type OCISpec struct {
 	Digest string `json:"digest,omitempty"`
 	// Arch es amd64 o arm64 (por defecto, la del host).
 	Arch string `json:"arch,omitempty"`
+	// Emulate: la imagen es de Arch pero corre en este anfitrión, de otra
+	// arquitectura, con qemu-user dentro del invitado. El agente y el kernel
+	// siguen siendo los del anfitrión; el constructor mete el qemu fijado
+	// (internal/imagen/emulador.go) y el init del agente lo registra en
+	// binfmt_misc (pkg/guest/binfmt.go). Solo amd64 en arm64. Sin Emulate, un
+	// Arch de otra arquitectura es construir para otro anfitrión (con
+	// KLING_GUEST_AGENT_<arch>), como siempre.
+	Emulate bool `json:"emulate,omitempty"`
 	// Env son variables KEY=VALUE que se suman a las de la imagen (ganan
 	// éstas). Van en /etc/kling/env (0600), dentro de la imagen: no son sitio
 	// para secretos de verdad.
@@ -210,6 +218,14 @@ func validateOCI(req api.BuildImageRequest, s OCISpec) (oci.ImageRef, error) {
 	if _, ok := imagen.ElfMachine[s.Arch]; !ok {
 		return ref, fmt.Errorf("arch must be amd64 or arm64, not %q", s.Arch)
 	}
+	if s.Emulate {
+		if s.Arch == runtime.GOARCH {
+			return ref, fmt.Errorf("emulate needs an arch other than the host's (%s)", runtime.GOARCH)
+		}
+		if _, ok := imagen.Emulable(runtime.GOARCH, s.Arch); !ok {
+			return ref, fmt.Errorf("%s images can't be emulated on a %s host (only amd64 on arm64)", s.Arch, runtime.GOARCH)
+		}
+	}
 	if len(s.Env) > 256 {
 		return ref, fmt.Errorf("too many env entries (%d, max 256)", len(s.Env))
 	}
@@ -324,9 +340,19 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// kling-unpack descomprime las capas más rápido (internal/oci); es un
 	// binario del anfitrión, no del invitado, así que no depende de spec.Arch.
 	oci.SetUnpackHelper(filepath.Join(lib, "kling-unpack"))
+	// Emulada, el agente es el del anfitrión: corre nativo y lanza los
+	// binarios de la imagen por qemu.
+	agentArch := spec.Arch
+	if spec.Emulate {
+		agentArch = runtime.GOARCH
+		if phase != "" {
+			// El qemu se baja en la construcción y la VM de -isolate no tiene red.
+			return errors.New("an emulated image can't be flattened with -isolate yet")
+		}
+	}
 	agent := envOr("KLING_GUEST_AGENT", filepath.Join(lib, "kling-guest"))
-	if spec.Arch != runtime.GOARCH {
-		if a := os.Getenv("KLING_GUEST_AGENT_" + spec.Arch); a != "" {
+	if agentArch != runtime.GOARCH {
+		if a := os.Getenv("KLING_GUEST_AGENT_" + agentArch); a != "" {
 			agent = a
 		}
 	}
@@ -349,6 +375,20 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	cache := filepath.Join(root, "cache", "oci")
 	if d := os.Getenv("KLING_CACHE_DIR"); d != "" {
 		cache = filepath.Join(d, "oci")
+	}
+	// El qemu de una emulada, antes que las capas: si no se puede bajar, nada
+	// más que hacer. Va en la base con el agente, así que cuenta para
+	// reutilizarla (agentKey): una base nativa o con otro qemu no sirve.
+	var emu *imagen.Emulador
+	agentKey := agentSum
+	if spec.Emulate {
+		pin, _ := imagen.Emulable(runtime.GOARCH, spec.Arch)
+		d := imagen.Debs{Cache: filepath.Dir(cache), Logf: logf}
+		if emu, err = d.Qemu(ctx, pin, runtime.GOARCH, spec.Arch); err != nil {
+			return fmt.Errorf("emulator for %s: %w", spec.Arch, err)
+		}
+		agentKey = agentSum + "+qemu:" + emu.SHA256
+		logf("%s on %s: emulated with qemu-user %s (%d MiB)", spec.Arch, runtime.GOARCH, pin.Deb.Version, len(emu.Bin)>>20)
 	}
 
 	// Cada capa se descomprime una sola vez, a un tar en el directorio de
@@ -463,7 +503,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		}
 		// Nunca ella misma (un import -replace): sería su propia base.
 		bases = slices.DeleteFunc(slices.Clone(bases), func(b imagen.BaseOCI) bool { return b.Name == req.Name })
-		reuse = imagen.BestBase(bases, chain, agentSum, spec.Arch)
+		reuse = imagen.BestBase(bases, chain, agentKey, spec.Arch)
 	}
 	initImage := spec.Init == ociInitImage
 	if initImage {
@@ -485,7 +525,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		entries = 0
 		for i, l := range img.Layers {
 			if i == k && k > 0 {
-				if err = ociComun(tree, agent, spec.Arch, reuse.Init == "go", t); err != nil {
+				if err = ociComun(tree, agent, agentArch, emu, reuse.Init == "go", t); err != nil {
 					return
 				}
 				foto = imagen.Fotografiar(tree)
@@ -525,6 +565,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		// del que lleva (se lee de la base, no se puede cambiar desde la
 		// capa), o un enlace duro a un fichero de la base.
 		g, _, _ := ociInit(tree)
+		g = g || initImage || emu != nil // como abajo
 		_, uerr := foto.Upper(tree, k)
 		why := ""
 		switch {
@@ -576,6 +617,13 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// agente: el de Go no lo mira.
 	goInit, missing, ownEntry := ociInit(tree)
 	goInit = goInit || initImage
+	if emu != nil && !goInit {
+		// El script es #!/bin/sh de la imagen, de otra arquitectura: el kernel
+		// no lo puede ejecutar antes de que alguien registre qemu. El init en
+		// Go es el agente, nativo, y registra binfmt antes que nada.
+		logf("emulated image: it boots with kindling's init in Go")
+		goInit = true
+	}
 	switch {
 	case len(missing) > 0:
 		logf("the image has no %s: it boots with kindling's init in Go", strings.Join(missing, ", "))
@@ -635,16 +683,18 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// La identidad de la construcción: mismas entradas, misma imagen.
 	h := sha256.New()
 	sb, _ := json.Marshal(spec)
-	fmt.Fprintf(h, "kindling-oci-v1\x00%s\x00%s\x00%s\x00%s\x00%d\x00", req.Name, img.ManifestDigest, sb, agentSum, t.Unix())
+	fmt.Fprintf(h, "kindling-oci-v1\x00%s\x00%s\x00%s\x00%s\x00%d\x00", req.Name, img.ManifestDigest, sb, agentKey, t.Unix())
 	var id [32]byte
 	copy(id[:], h.Sum(nil))
 
 	if reuse == nil {
-		if err := ociComun(tree, agent, spec.Arch, goInit, t); err != nil {
+		if err := ociComun(tree, agent, agentArch, emu, goInit, t); err != nil {
 			return err
 		}
 	}
-	svc := api.ServiceSpec{Argv: argv, User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
+	// Las dos mitades, para que el agente pueda cambiar solo el CMD de una
+	// máquina (RunRequest.Cmd) sin perder el ENTRYPOINT.
+	svc := api.ServiceSpec{Argv: argv, Entrypoint: entry, Cmd: argv[len(entry):], User: user, WorkingDir: cfg.WorkingDir, StopSignal: cfg.StopSignal,
 		Restart: cmp.Or(spec.Restart, api.RestartOnFailure), OnRestore: spec.OnRestore,
 		Ulimits: spec.Ulimits, Sysctls: spec.Sysctls, Init: initImage}
 	if _, err := api.ParseSignal(svc.StopSignal); err != nil {
@@ -672,7 +722,10 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		mode uint32
 	}
 	put := []putFile{
-		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
+		// search graph: en un grafo (compose up), "api" a secas es api.graph,
+		// como el nombre de un servicio en la red de Docker Compose: un
+		// proxy_pass http://api:8081 de un nginx.conf no se puede reescribir.
+		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch " + api.GraphDomain + "\n", 0o644},
 		{"/etc/kindling/oci.json", string(ociJSON) + "\n", 0o644},
 		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=oci\n%sref=%s\ndigest=%s\nmanifest=%s\ninit=%s\nbuilt_at=%s\n",
 			sourceLine, shown, digest, img.ManifestDigest, initKind, t.Format("2006-01-02T15:04:05Z")), 0o644},
@@ -765,7 +818,12 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	}
 	built := map[string]any{"ref": shown, "digest": digest, "manifest": img.ManifestDigest, "arch": spec.Arch,
 		"layers": layers, "service": svc, "ready": probeWhat, "init": initKind, "ports": sortedKeys(cfg.ExposedPorts),
-		"volumes": sortedKeys(cfg.Volumes), "diff_ids": chain, "agent_sha256": agentSum}
+		"volumes": sortedKeys(cfg.Volumes), "diff_ids": chain, "agent_sha256": agentKey}
+	if emu != nil {
+		built["emulated"] = true
+		built["agent_arch"] = agentArch
+		built["qemu_sha256"] = emu.SHA256
+	}
 	if len(cfg.Labels) > 0 {
 		built["labels"] = cfg.Labels
 	}
@@ -823,9 +881,14 @@ func ociInit(tree *ext4.Node) (goInit bool, missing []string, ownEntry bool) {
 // ociComun mete en la raíz lo de kindling que es igual para todas las
 // imágenes de una misma base: el agente, el init y los puntos de montaje. Con
 // base reutilizada va antes de las capas nuevas, y la base ya lo lleva.
-func ociComun(tree *ext4.Node, agent, arch string, goInit bool, t time.Time) error {
+func ociComun(tree *ext4.Node, agent, arch string, emu *imagen.Emulador, goInit bool, t time.Time) error {
 	if err := imagen.PutAgent(tree, agent, arch, t); err != nil {
 		return err
+	}
+	if emu != nil {
+		if err := imagen.PutEmulador(tree, emu, t); err != nil {
+			return err
+		}
 	}
 	if goInit {
 		// Después de PutAgent, que ya dijo si es de otra arquitectura.

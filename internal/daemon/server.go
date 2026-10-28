@@ -36,7 +36,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -284,6 +284,9 @@ func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareCo
 // arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
 func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
 
+// SetBattery fija el modo batería (ver internal/machine/bateria.go).
+func (s *Server) SetBattery(c machine.BatteryConfig) { s.mgr.SetBattery(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {
@@ -314,8 +317,11 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	// muerto, y el primer exec del VMM nuevo se comía un RST. Solo las de esa
 	// IP: las de las demás máquinas siguen valiendo.
 	mgr.OnGuestGone(guestTransports.forgetIP)
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
-		fcVersion: fcVersion}, nil
+	srv := &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
+		fcVersion: fcVersion}
+	// Los healthchecks de las aristas depends se ejecutan con el exec de aquí.
+	mgr.FijarSondaExec(srv.sondaSalud)
+	return srv, nil
 }
 
 // firecrackerVersion ejecuta `firecracker --version` una vez. Si el binario
@@ -424,9 +430,39 @@ func (s *Server) rutas() []ruta {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.rutas() {
+		// Dentro de autorizar: despertar una máquina es cosa de quien puede.
+		if despertar, ok := usoDeMaquina[rt.patron]; ok {
+			rt.h = s.conUso(rt.h, despertar)
+		}
 		mux.HandleFunc(rt.patron, s.autorizar(rt))
 	}
 	return conVersionAPI(sinBarrasEscapadas(mux))
+}
+
+// usoDeMaquina son las rutas que cuentan como usar la máquina para el modo
+// batería (machine.Usar): mientras haya una en curso, o hasta un rato después,
+// no se pausa ni se le baja la QoS. El valor dice si además la despiertan si
+// el modo batería la pausó: las que hablan con el invitado. Exec, shell y
+// ficheros ya la despiertan solos (ExecTarget), pero no la llamada al
+// invitado. Las de consulta (GET /machines/{ref}, ready) no cuentan: un panel
+// que pregunta cada pocos segundos no debe mantenerla despierta.
+var usoDeMaquina = map[string]bool{
+	"POST /machines/{ref}/exec":    true,
+	"POST /machines/{ref}/shell":   true,
+	"GET /machines/{ref}/files":    true,
+	"PUT /machines/{ref}/files":    true,
+	"DELETE /machines/{ref}/files": true,
+	"POST /machines/{ref}/guest":   true,
+	"POST /machines/{ref}/hooks":   true,
+	"GET /machines/{ref}/logs":     false,
+}
+
+// conUso envuelve h con machine.Usar (ver usoDeMaquina).
+func (s *Server) conUso(h http.HandlerFunc, despertar bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer s.mgr.Usar(r.Context(), r.PathValue("ref"), despertar)()
+		h(w, r)
+	}
 }
 
 // conVersionAPI pone en cada respuesta el API y la versión del daemon: el
@@ -643,25 +679,27 @@ func jsonBodyStatus(err error) int {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
-		Version:      Version,
-		API:          api.APIVersion,
-		Root:         s.root,
-		KVM:          kvmErr == nil,
-		Machines:     s.contarMaquinas(r),
-		Capabilities: Capabilities,
-		Backend:      s.mgr.Backend(),
-		Arch:         runtime.GOARCH,
-		ShareRoots:   s.mgr.ShareRoots(),
-		CoW:          s.mgr.CoWInfo(),
-		Authz:        s.infoAuthz(r),
-		Clone:        s.mgr.CloneInfo(),
+		Version:       Version,
+		API:           api.APIVersion,
+		Root:          s.root,
+		KVM:           kvmErr == nil,
+		Machines:      s.contarMaquinas(r),
+		Capabilities:  Capabilities,
+		Backend:       s.mgr.Backend(),
+		BackendReason: s.mgr.BackendMotivo(),
+		Arch:          runtime.GOARCH,
+		ShareRoots:    s.mgr.ShareRoots(),
+		CoW:           s.mgr.CoWInfo(),
+		Authz:         s.infoAuthz(r),
+		Clone:         s.mgr.CloneInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
-	// Los ajustes del host no son de ningún inquilino.
+	// Los ajustes del host no son de ningún inquilino, ni sus fondos.
 	if _, filtra := inquilinoDe(r); !filtra {
 		info.Tuning = s.ajustes()
+		info.PoolProblems = s.mgr.ProblemasFondos()
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
@@ -756,7 +794,7 @@ func runStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
 		return http.StatusConflict
-	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest):
+	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
 		return http.StatusBadRequest
 	case errors.Is(err, machine.ErrNameTaken):
 		return http.StatusConflict

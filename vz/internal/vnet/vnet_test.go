@@ -48,12 +48,18 @@ type guest struct {
 
 func newGuest(t *testing.T, conn net.Conn) *guest {
 	t.Helper()
+	return newGuestMTU(t, conn, DefaultMTU)
+}
+
+// newGuestMTU es newGuest con la MTU de su enlace.
+func newGuestMTU(t *testing.T, conn net.Conn, mtu int) *guest {
+	t.Helper()
 	mac, _ := tcpip.ParseMACAddress(DefaultGuestMAC)
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
-	ep := channel.New(256, mtu+header.EthernetMinimumSize, mac)
+	ep := channel.New(256, uint32(mtu+header.EthernetMinimumSize), mac)
 	if e := s.CreateNIC(1, ethernet.New(ep)); e != nil {
 		t.Fatal(e)
 	}

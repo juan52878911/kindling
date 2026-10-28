@@ -34,15 +34,33 @@ type shareSession struct {
 	pending map[uint64]chan callResult
 	done    chan struct{}
 	closed  bool
+	// retired: llegó share.Bye. Lo que quede pendiente al cerrar recibe
+	// errnoRetry y no EIO: el daemon dijo que no lo ejecutó.
+	retired bool
 
 	// maxIO es lo más que se lee o escribe por operación en esta sesión:
 	// share.BaseIO salvo que hello negocie más. Se fija antes de publicar la
 	// sesión (fuseFS.attach) y no cambia después.
 	maxIO uint32
+
+	// events son los avisos de cambios del host (OpWatch). El lector nunca
+	// espera por ellos: si el consumidor se atasca, se pierden (son pistas; las
+	// cachés de 1 s siguen ahí).
+	events chan pushEvent
 }
 
+// pushEvent es un aviso del daemon: algo cambió en path, en el host.
+type pushEvent struct {
+	ev   byte
+	path string
+}
+
+// maxPendingEvents acota los avisos encolados por sesión.
+const maxPendingEvents = 1024
+
 func newShareSession(rw io.ReadWriteCloser) *shareSession {
-	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, done: make(chan struct{}), maxIO: share.BaseIO}
+	s := &shareSession{rw: rw, pending: map[uint64]chan callResult{}, done: make(chan struct{}), maxIO: share.BaseIO,
+		events: make(chan pushEvent, maxPendingEvents)}
 	go s.readLoop()
 	return s
 }
@@ -70,6 +88,15 @@ func (s *shareSession) hello() {
 	s.maxIO = n
 }
 
+// watch pide los avisos de cambios del host. Igual que hello, antes de
+// publicar la sesión. Un daemon anterior contesta ENOSYS: false.
+func (s *shareSession) watch() bool {
+	t := time.AfterFunc(helloTimeout, s.close)
+	defer t.Stop()
+	errno, _ := s.call(share.OpWatch, nil)
+	return errno == 0
+}
+
 func (s *shareSession) readLoop() {
 	defer s.close()
 	for {
@@ -82,6 +109,25 @@ func (s *shareSession) readLoop() {
 		if d.Err() != nil {
 			return
 		}
+		if id == share.PushID && errno == share.ERetry {
+			// share.Bye: el daemon cierra en orden y ya no ejecuta nada. Lo
+			// que siga en vuelo no se hizo: se repite con la sesión siguiente.
+			s.mu.Lock()
+			s.retired = true
+			s.mu.Unlock()
+			return
+		}
+		if id == share.PushID {
+			ev, p, err := share.ParsePush(d)
+			if err != nil || errno != 0 {
+				return // un daemon que no sigue el protocolo: fuera
+			}
+			select {
+			case s.events <- pushEvent{ev, p}:
+			default:
+			}
+			continue
+		}
 		s.mu.Lock()
 		ch := s.pending[id]
 		delete(s.pending, id)
@@ -92,7 +138,8 @@ func (s *shareSession) readLoop() {
 	}
 }
 
-// close corta la sesión y despierta con EIO a quien estuviera esperando.
+// close corta la sesión y despierta con EIO a quien estuviera esperando (con
+// errnoRetry si el daemon se despidió con share.Bye).
 func (s *shareSession) close() {
 	s.mu.Lock()
 	if s.closed {
@@ -103,10 +150,14 @@ func (s *shareSession) close() {
 	pend := s.pending
 	s.pending = map[uint64]chan callResult{}
 	close(s.done)
+	errno := share.EIO
+	if s.retired {
+		errno = errnoRetry
+	}
 	s.mu.Unlock()
 	_ = s.rw.Close()
 	for _, ch := range pend {
-		ch <- callResult{errno: share.EIO}
+		ch <- callResult{errno: errno}
 	}
 }
 

@@ -34,6 +34,8 @@ func (m *Manager) reconcile() {
 	// techo de CPU a máquinas que están funcionando, y en el peor caso arrancar
 	// un segundo firecracker sobre el mismo overlay.
 	live := m.liveVMs()
+	// Para las que corrían con el overlay sin sincronizar (fallidaTrasCorte).
+	arranque, conArranque := arranqueHost()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -110,6 +112,13 @@ func (m *Manager) reconcile() {
 				log.Printf("reconcile: %s (%s) is no longer running but keeps its snapshot: warm",
 					mc.Name, mc.ID[:8])
 				mc.State = api.StateWarm
+			} else if fallidaTrasCorte(mc, arranque, conArranque) {
+				// Overlay sin sincronizar y el host se reinició: puede estar a
+				// medias, y arrancarla sería montar un ext4 roto (desechable.go).
+				log.Printf("reconcile: %s (%s) was running with a disposable overlay when the host went down: failed",
+					mc.Name, mc.ID[:8])
+				ahora := time.Now()
+				mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errOverlaySinAsentar, &ahora
 			} else {
 				log.Printf("reconcile: %s (%s) is no longer running, marked as stopped", mc.Name, mc.ID[:8])
 				mc.State = api.StateStopped
@@ -410,14 +419,20 @@ func (m *Manager) hasSnapshot(id string) bool {
 // Una microVM puede morir por su cuenta: pánico del kernel invitado, OOM del
 // host, o alguien matando el proceso. Reportar "running" sobre algo muerto es
 // peor que no reportar nada, porque el gateway enrutaría peticiones a la nada.
+//
+// El intervalo se recalcula en cada vuelta: en batería es más largo
+// (intervaloVigilante), con un temporizador y no un ticker para que el cambio
+// valga desde la vuelta siguiente.
 func (m *Manager) watch(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
+	m.reloj.durmio() // la base del reloj del host
+	t := time.NewTimer(m.intervaloVigilante(every))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			t.Reset(m.intervaloVigilante(every))
 			// Una vuelta entera por iteracion: si cualquiera de estas tareas
 			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
 			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
@@ -474,6 +489,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// un recorrido por máquina, y el dato sigue fresco para las que
 				// están escribiendo.
 				m.refreshDiskUsage()
+				// Si el host durmió, la hora de los invitados que corren; y
+				// el modo batería (bateria.go).
+				m.revisarSueno(ctx)
+				m.vueltaBateria(ctx)
 			})
 		}
 	}
@@ -597,6 +616,8 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	go m.ensureShares()
 	go m.watch(ctx, every)
 	go m.vigilarAlmacen(ctx)
+	// macOS: pausar las máquinas antes de que el Mac duerma (energia.go).
+	go m.vigilarEnergia(ctx)
 }
 
 // ttlDesde es cuándo empezó a contar el TTL de mc.

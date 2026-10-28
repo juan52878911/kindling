@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,12 +26,14 @@ const launchAgentLabel = "dev.kindling.daemon"
 
 // probeMac es la foto de un Mac como host de microVMs.
 type probeMac struct {
+	backend     string // machine.BackendVZ o machine.BackendHV
+	motivo      string // por qué ese backend ("auto: …", "daemon.vmm hv")
 	arch        string
 	macOS       string // "15.5"; vacío si no se pudo leer
-	vmm         string // ruta de kling-vz; vacío si no está
+	vmm         string // ruta de kling-vz (o kling-hv); vacío si no está
 	vmmVersion  string // salida de --version; vacío si no arranca
 	vmmErr      string
-	entitlement bool // firmado con com.apple.security.virtualization
+	entitlement bool // firmado con el entitlement de su framework
 	mkfs        bool
 	debugfs     bool
 	kernel      bool
@@ -41,8 +42,15 @@ type probeMac struct {
 }
 
 func localProbeMac(root string) probeMac {
-	p := probeMac{arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
-	vmm := machine.ResolverVMM(machine.BackendVZ, os.Getenv("KLING_VMM"), "")
+	// El backend que usaría el daemon (KLING_VMM, daemon.vmm o el de la
+	// plataforma, auto resuelto como lo hará él al arrancar): con hv lo que
+	// hay que tener es kling-hv.
+	backend, motivo, err := resolverBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH, entornoAutoReal)
+	if err != nil || (backend != machine.BackendVZ && backend != machine.BackendHV) {
+		backend, motivo = machine.BackendVZ, ""
+	}
+	p := probeMac{backend: backend, motivo: motivo, arch: runtime.GOARCH, macOS: versionMacOS(), root: root}
+	vmm := machine.ResolverVMM(backend, envVMM(), "")
 	if path, err := exec.LookPath(vmm); err == nil {
 		p.vmm = path
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -56,7 +64,7 @@ func localProbeMac(root string) probeMac {
 				p.vmmErr = err.Error()
 			}
 		}
-		p.entitlement = tieneEntitlementVZ(path)
+		p.entitlement = tieneEntitlement(path, entitlementDe(backend))
 	}
 	p.mkfs = machine.E2fsDisponible("mkfs.ext4")
 	p.debugfs = machine.E2fsDisponible("debugfs")
@@ -70,10 +78,19 @@ func firstLine(s string) string {
 	return l
 }
 
-// tieneEntitlementVZ mira si el binario está firmado con el permiso de
-// virtualización. Sin él, Virtualization.framework se niega a crear la VM y
-// el error llega tarde y críptico, en el primer arranque.
-func tieneEntitlementVZ(path string) bool {
+// entitlementDe es el permiso con el que tiene que ir firmado el VMM del
+// backend: Virtualization.framework o Hypervisor.framework.
+func entitlementDe(backend string) string {
+	if backend == machine.BackendHV {
+		return "com.apple.security.hypervisor"
+	}
+	return "com.apple.security.virtualization"
+}
+
+// tieneEntitlement mira si el binario está firmado con ese permiso. Sin él, el
+// framework se niega a crear la VM y el error llega tarde y críptico, en el
+// primer arranque.
+func tieneEntitlement(path, ent string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "codesign", "-d", "--entitlements", "-", "--xml", path).CombinedOutput()
@@ -84,18 +101,7 @@ func tieneEntitlementVZ(path string) bool {
 			return false
 		}
 	}
-	return strings.Contains(string(out), "com.apple.security.virtualization")
-}
-
-// versionMayor devuelve el número mayor de una versión "15.5.1"; 0 si no se
-// puede leer.
-func versionMayor(v string) int {
-	mayor, _, _ := strings.Cut(v, ".")
-	n, err := strconv.Atoi(mayor)
-	if err != nil {
-		return 0
-	}
-	return n
+	return strings.Contains(string(out), ent)
 }
 
 func checksMac(p probeMac) []check {
@@ -111,32 +117,49 @@ func checksMac(p probeMac) []check {
 		macOS = "unknown version"
 	}
 	copyHint := "kling image copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
+	backend := p.backend
+	if backend == "" {
+		backend = machine.BackendVZ
+	}
+	nombre := machine.NombreVMM(backend)
+	framework, build := "Virtualization.framework", "make vz            # in the kindling repo; builds and signs vz/cmd/kling-vz"
+	if backend == machine.BackendHV {
+		framework, build = "Hypervisor.framework", "make vz            # in the kindling repo; builds and signs kling-vz and kling-hv"
+	}
+	// vz necesita el save/restore de macOS 14; hv, el GIC de
+	// Hypervisor.framework y un binario compilado para 15.2 (version_macos.go).
+	// Se compara la versión entera: 15.1 no es 15.2.
+	minMacOS := macOSMinDe(backend)
+	whyMacOS := "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later"
+	if backend == machine.BackendHV {
+		whyMacOS = "kling-hv needs the in-kernel GIC of Hypervisor.framework and is built for macOS " + macOSMinHV + " or later"
+	}
 	return []check{
 		{
 			label: "Apple Silicon", ok: p.arch == "arm64", fatal: true,
 			found: p.arch,
-			why:   "kling-vz runs aarch64 guests on Virtualization.framework; Intel Macs are not supported",
+			why:   nombre + " runs aarch64 guests on " + framework + "; Intel Macs are not supported",
 			fix:   []string{"use a Linux host with KVM instead:  kling context add lab ssh://user@host"},
 		},
 		{
-			label: "macOS 14+", ok: versionMayor(p.macOS) >= 14, fatal: true,
+			label: "macOS " + minMacOS + "+", ok: versionAlMenos(p.macOS, minMacOS), fatal: true,
 			found: macOS,
-			why:   "freezing and thawing microVMs needs the save/restore of macOS 14 (Sonoma) or later",
+			why:   whyMacOS,
 			fix:   []string{"update macOS (System Settings > General > Software Update)"},
 		},
 		{
-			label: "kling-vz", ok: p.vmm != "" && p.vmmVersion != "", fatal: true,
+			label: nombre, ok: p.vmm != "" && p.vmmVersion != "", fatal: true,
 			found: vmmFound,
-			why:   "it's the VMM on macOS: without it there's nothing to start",
+			why:   "it's the VMM on macOS (daemon.vmm " + backend + "): without it there's nothing to start",
 			fix: []string{
-				"make vz            # in the kindling repo; builds and signs vz/cmd/kling-vz",
-				"# then put kling-vz next to kling, or set KLING_VMM=/path/to/kling-vz",
+				build,
+				"# then put " + nombre + " next to kling, or set KLING_VMM=/path/to/" + nombre,
 			},
 		},
 		{
-			label: "vz entitlement", ok: p.vmm != "" && p.entitlement, fatal: true,
-			found: presence(p.entitlement, "signed with com.apple.security.virtualization", "missing"),
-			why:   "macOS refuses to create a VM from a binary without the virtualization entitlement",
+			label: backend + " entitlement", ok: p.vmm != "" && p.entitlement, fatal: true,
+			found: presence(p.entitlement, "signed with "+entitlementDe(backend), "missing"),
+			why:   "macOS refuses to create a VM from a binary without the " + framework + " entitlement",
 			fix:   []string{"make vz            # signs it (ad-hoc is enough)"},
 		},
 		{
@@ -168,10 +191,22 @@ func checksMac(p probeMac) []check {
 	}
 }
 
-// upMac diagnostica este Mac y, si se puede, arranca el daemon.
-func upMac(root string, checkOnly bool) error {
-	fmt.Printf("kindling — local runtime on macOS (vz)  (data root: %s)\n\n", root)
-	cs := checksMac(localProbeMac(root))
+// upMac diagnostica este Mac y, si se puede, arranca el daemon (en endpoint).
+// Con install escribe antes el agente de launchd (launchd_mac.go).
+func upMac(root, endpoint string, checkOnly, install bool) error {
+	p := localProbeMac(root)
+	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n", p.backend, root)
+	if p.motivo != "" {
+		fmt.Printf("vmm:         %s (%s)\n", p.backend, p.motivo)
+		// Con auto, quedarse en vz no es un fallo (vz funciona, y -check no
+		// debe salir con 1 en un Sonoma): una nota con cómo llegar a hv.
+		if strings.HasPrefix(p.motivo, "auto: ") && p.backend == machine.BackendVZ {
+			fmt.Println("             hv restores in ms and shares a golden's memory: it needs macOS " + macOSMinHV + "+ and kling-hv")
+			fmt.Println("             signed next to kling (the release installer ships it, or: make vz && make install)")
+		}
+	}
+	fmt.Println()
+	cs := checksMac(p)
 	fatal, warn := printChecks(cs, "")
 	if fatal > 0 {
 		fmt.Println()
@@ -182,12 +217,25 @@ func upMac(root string, checkOnly bool) error {
 	}
 	fmt.Println()
 
+	a, err := agenteDaemonMac()
+	if err != nil {
+		return err
+	}
+	if install {
+		if err := instalarAgente(a, root); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	info := waitDaemon(ctx)
+	info := waitDaemonEn(ctx, endpoint)
 	cancel()
 	if info != nil {
 		fmt.Printf("daemon:      already running (%s, backend %s)\n", info.Version, info.Backend)
-	} else if err := startMacDaemon(); err != nil {
+		if install && !agenteCargado(a) {
+			fmt.Println("             not from the launchd agent: it starts the daemon at the next login, or stop")
+			fmt.Println("             this one and run `kling up` to start it from the agent now")
+		}
+	} else if err := startMacDaemon(a, endpoint); err != nil {
 		return err
 	}
 	if warn > 0 {
@@ -202,24 +250,27 @@ func upMac(root string, checkOnly bool) error {
 	return nil
 }
 
+// agenteCargado dice si launchd ya tiene el agente a.
+func agenteCargado(a agenteDaemon) bool {
+	return exec.Command("launchctl", "print", a.dominio()+"/"+a.label).Run() == nil
+}
+
 // startMacDaemon arranca el agente de launchd si está instalado; si no, dice
 // cómo instalarlo. Es lo único que up ejecuta por su cuenta, igual que en
 // Linux arranca los servicios de systemd, y también se imprime antes.
-func startMacDaemon() error {
-	home, _ := os.UserHomeDir()
-	plist := filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
+func startMacDaemon(a agenteDaemon, endpoint string) error {
+	plist := a.plist
 	if !fileExists(plist) {
 		fmt.Println("daemon:      not running, and there's no launchd agent to start it.")
 		fmt.Println("  Run it in a terminal:        kling daemon")
-		fmt.Println("  Or at every login: install " + plist)
-		fmt.Println("  (the plist is in docs/mac.md) and run `kling up` again.")
+		fmt.Println("  Or at every login:           kling up -install")
 		return nil
 	}
-	argv := []string{"launchctl", "bootstrap", "gui/" + strconv.Itoa(os.Getuid()), plist}
+	argv := []string{"launchctl", "bootstrap", a.dominio(), plist}
 	fmt.Printf("daemon:      $ %s\n", strings.Join(argv, " "))
 	if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
 		// Ya cargado: bootstrap falla, pero kickstart lo arranca.
-		argv = []string{"launchctl", "kickstart", "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchAgentLabel}
+		argv = []string{"launchctl", "kickstart", a.dominio() + "/" + a.label}
 		fmt.Printf("             (%s) $ %s\n", strings.TrimSpace(string(out)), strings.Join(argv, " "))
 		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
@@ -227,11 +278,11 @@ func startMacDaemon() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if info := waitDaemon(ctx); info != nil {
+	if info := waitDaemonEn(ctx, endpoint); info != nil {
 		fmt.Printf("daemon:      ✓ responding (%s, backend %s)\n", info.Version, info.Backend)
 		return nil
 	}
 	fmt.Println("daemon:      started, but not yet responding on the socket.")
-	fmt.Println("  See why:  tail -n 50 \"$HOME/Library/Logs/kindling.log\"")
+	fmt.Printf("  See why:  tail -n 50 %q\n", a.log)
 	return nil
 }

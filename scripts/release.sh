@@ -2,7 +2,7 @@
 # release.sh — crea un tag anotado y lo pushea. El workflow de GitHub Actions
 # detecta el tag, compila los binarios y publica la release.
 #
-# Una etiqueta publica todo el repo: el núcleo, kling-vz, las extensiones de
+# Una etiqueta publica todo el repo: el núcleo, kling-vz y kling-hv, las extensiones de
 # ext/ (kling-mcp, kling-bridge, kling-sandbox, kling-db, kling-phone), el operador
 # (binarios e imagen GHCR) y los tar del host, con un único SHA256SUMS.
 #

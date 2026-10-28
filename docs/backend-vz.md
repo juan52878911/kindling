@@ -104,9 +104,9 @@ El núcleo las llama únicamente en macOS.
 | `PUT /kling/credentials` `{"credentials": [{"env", "domain", "placeholder", "secret", "allow"}, ...]}` | Juego COMPLETO de credenciales del proxy de credenciales (`pkg/credproxy`); la lista vacía las quita. Exige que la política ya sea `allowlist`, salvo si TODAS van a otra máquina (`upstream_machine`, las aristas `credential` de un grafo): esas se piden al broker del daemon en cada conexión y no salen a ningún otro sitio. El ayudante sirve el proxy en la pasarela:80 y su DNS contesta esos dominios con la pasarela. La clave queda en la memoria del ayudante (SECURITY.md §7). `allow` (opcional) es el mismo formato que en Linux (`"MÉTODO /ruta"`, `*` y `**`) y lo aplica el mismo `pkg/credproxy`. El núcleo la manda tras `PUT /kling/network` y antes de arrancar o cargar, y otra vez con los marcadores en MMDS. Contesta `{"domains": [...]}`. |
 | `PUT /kling/graph` `{"links": [{"host": "api.graph", "port": 8081}], "hosts": ["api.graph", "db.graph"]}` | Aristas salientes del nodo (sustituye las anteriores). Su DNS contesta los `hosts` con la pasarela en todos los modos (y NXDOMAIN a cualquier otro `*.graph`), y una conexión a la pasarela en el puerto de un `link` se pide al broker de enlaces del daemon (`pkg/linkbroker`), que entrega el socket ya conectado. Sin direcciones. El núcleo la manda antes de arrancar o cargar un nodo, y al montar el grafo. Ni el 8080 ni 53/80/443. |
 | `PUT /kling/forwards` `{"ports": [8080, ...]}` | Abre un puerto en `127.0.0.1` (elegido por el sistema) por cada puerto del invitado y contesta `{"forwards": {"8080": "127.0.0.1:61234", ...}}`. Se puede llamar en cualquier momento tras crear la red; repetir un puerto devuelve la misma dirección. |
-| `GET /kling/probe?port=N` | `{"open": bool}`: si algo acepta conexiones en ese puerto DENTRO del invitado (conecta por la pila de usuario, espera ≤1 s al SYN). El reenvío no sirve para saberlo: el puerto de loopback lo abre el ayudante y acepta siempre. El núcleo lo usa para esperar al agente, `wait_ms` y `probe_only`. |
+| `GET /kling/probe?port=N` | `{"open": bool}`: si algo acepta conexiones en ese puerto DENTRO del invitado (conecta como un reenvío: el 8080 por vsock si la máquina lo lleva, y si no por la pila de usuario, que espera ≤1 s al SYN). El reenvío no sirve para saberlo: el puerto de loopback lo abre el ayudante y acepta siempre. El núcleo lo usa para esperar al agente, `wait_ms` y `probe_only`. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: memoria que ocupa esta máquina en el host, sumando el `phys_footprint` del ayudante y del proceso auxiliar `com.apple.Virtualization.VirtualMachine` que la aloja. Es lo que en Linux es el RSS de firecracker. |
-| `PUT /kling/cpu` `{"pct": N}` | Techo de CPU de la máquina en porcentaje de un núcleo (0 lo quita): lo que en Linux es el cgroup. El núcleo lo manda tras abrir los reenvíos, con `cpu_pct` o el valor por defecto. Mismo significado que `cpu.max`: % de un núcleo para toda la VM, sumen lo que sumen sus vCPU. `kling-vz` lleva un cubo de fichas con la CPU del auxiliar de Apple y, cuando se vacía, para el auxiliar con SIGSTOP 20 ms (lo manda el proceso freno, `kling-vz --cpu-brake`, lanzado antes del sandbox y encerrado en uno que solo deja señalizar; solo toca al auxiliar que tiene la tubería de consola que se le pasa). Si el freno falla, pausa la VM por el framework, que para también el reloj del invitado. Hasta que el agente escucha, el techo es `max(pct, 100)`. Ver `vz/internal/server/cpu.go`. `GET /kling/cpu` da `{"pct", "throttled_ms"}`. |
+| `PUT /kling/cpu` `{"pct": N}` | Techo de CPU de la máquina en porcentaje de un núcleo (0 lo quita): lo que en Linux es el cgroup. El núcleo lo manda tras abrir los reenvíos, con `cpu_pct` o el valor por defecto. Mismo significado que `cpu.max`: % de un núcleo para toda la VM, sumen lo que sumen sus vCPU. `kling-vz` lleva un cubo de fichas con la CPU del auxiliar de Apple y, cuando se vacía, para el auxiliar con SIGSTOP 20 ms (lo manda el proceso freno, `kling-vz --cpu-brake`, lanzado antes del sandbox y encerrado en uno que solo deja señalizar; solo toca al auxiliar que tiene la tubería de consola que se le pasa). El primer `PUT /kling/cpu` sin techo efectivo (0 o todas las vCPU, lo normal en macOS) suelta el freno: un proceso menos por máquina; un techo que llegara después regula con pausas del framework. Si el freno falla, pausa la VM por el framework, que para también el reloj del invitado. Hasta que el agente escucha, el techo es `max(pct, 100)`. Ver `vz/internal/server/cpu.go`. `GET /kling/cpu` da `{"pct", "throttled_ms"}`. |
 
 ### Por qué puertos en loopback y no la IP del invitado
 
@@ -132,6 +132,60 @@ Los puertos que se reenvían son `api.GuestPort` más los de la etiqueta
 `kling.ports`. Se piden tras cada arranque o descongelación, porque un proceso
 nuevo abre puertos nuevos.
 
+### El canal con el agente: vsock
+
+Las máquinas que ARRANCAN con un `kling-vz` nuevo llevan un
+`VZVirtioSocketDevice` y `kling.vsock=1` en la línea de comandos; el agente
+(`pkg/guest.ServeVsock`) escucha entonces también por `AF_VSOCK` en el 8080,
+antes de abrir su TCP. Por fuera nada cambia: el núcleo sigue usando el reenvío
+de loopback y `/kling/probe`. Por dentro, cada conexión al reenvío del 8080 (y la
+sonda del 8080) prueba primero `connect` por vsock (≤500 ms) y, si falla, la
+pila de usuario como siempre. Los demás puertos (`kling.ports`) van por TCP.
+
+- **Agente anterior** (imágenes construidas antes): ignora `kling.vsock`
+  (aviso en la consola) y solo escucha TCP. Cuando vsock falla y TCP contesta,
+  `kling-vz` deja de probar vsock en esa máquina, y lo apunta en el snapshot
+  (`agent_tcp_only`) para no pagar en cada descongelación el connect fallido
+  (~6 ms medidos en el `/resync`).
+- **`kling-vz` anterior con un agente nuevo**: sin `kling.vsock`, el agente no
+  abre vsock; todo por TCP como antes.
+- **Snapshots**: `ValidateSaveRestoreSupport` acepta la configuración con
+  vsock en el M4 (macOS 26) y guardar/restaurar funciona. El framework reinicia
+  el dispositivo al restaurar (las conexiones vivas mueren; el listener del
+  invitado sigue), y como cada conexión al reenvío abre una nueva, no hay nada
+  que reconectar. El snapshot dice si la máquina lleva vsock (`"vsock": true`,
+  formato `kling_vz` 3): uno guardado sin él se restaura sin él, y un
+  `kling-vz` anterior se niega a restaurar uno con él (`kling upgrade
+  -rollback` lo comprueba antes).
+- **Vsock mudo tras restaurar**: en ~1 de cada 25-50 `compose up` de una
+  plantilla con carpetas vivas (M4, macOS 26.5) el vsock de una copia deja de
+  entregar al invitado: el `connect` del host sale bien, a veces la primera
+  petición contesta, y después nada; dentro, las interrupciones del vsock no
+  se mueven y su ISR está a 0, mientras el agente contesta por TCP. Es del
+  dispositivo del framework (con `kling-hv`, cuyo vsock es nuestro, no se vio
+  en 240 `up`). `kling-vz` lo vigila (`internal/server/canal_agente.go`): la
+  primera conexión de cada proceso va precedida de un `GET /healthz` por
+  vsock, y una conexión que escribió y lleva 1 s sin leer nada lanza la misma
+  prueba; si no contesta, ese proceso sigue por TCP (`guest port 8080
+  connects over vsock but does not answer there` en su log) y la conexión
+  colgada se cierra para que el núcleo reintente.
+- `KLING_VZ_VSOCK=0` en el entorno del daemon arranca las máquinas sin vsock.
+
+El reenvío de loopback del 8080 **sigue haciendo falta**: lo usan, además del
+daemon, el CLI (`kling` con `Machine.Addr`), el scheduler del gateway y
+kindling-mcp, que no hablan con `kling-vz`. Por eso sigue el filtro por usuario
+(`peercred`). Lo que cambia es el tramo de dentro: el agente ya no depende de la
+red del invitado ni de la pila de usuario (comprobado: tras `ip link set eth0 down`
+en el invitado, `kling exec` sigue funcionando; con TCP se queda sin respuesta).
+
+Cifras (M4, `kling-vz` aislado con `KLING_VZ_MTU=0`, n=300 por medida): una
+conexión nueva al agente cuesta ~0,4 ms por vsock frente a ~0,22 ms por la pila
+de usuario (el `connect` de vsock es una ida y vuelta por XPC al auxiliar de
+Apple); por una conexión ya abierta (keep-alive, lo que hace el daemon) y en un
+`/exec/stream` de `true`, lo mismo (~0,1 y ~0,22 ms). En `kling exec`, `kling
+run`, thaw y `/resync` la diferencia queda dentro del ruido del CLI y del
+arranque.
+
 ## 4. La red de cada máquina
 
 Cada `kling-vz` monta una red de espacio de usuario propia
@@ -140,6 +194,19 @@ del namespace de Linux, para que un snapshot sirva igual en los dos sistemas:
 
 - invitado `172.16.0.2/30`, pasarela `172.16.0.1`, MAC `06:00:AC:10:00:02` (la
   que manda el núcleo), sin DHCP (el `ip=` de la línea de comandos la fija);
+- MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, de 1500 a 65535; `0`
+  = 1500): `kling-vz` la pone en el adjunto del framework
+  (`setMaximumTransmissionUnit`), que la anuncia al invitado por
+  `VIRTIO_NET_F_MTU` y el `virtio_net` de Linux la adopta solo; la pila de
+  usuario usa la misma, y las dos viajan en el snapshot (`"mtu"`), así que uno
+  guardado con 1500 se restaura con 1500. Hacia internet no cambia nada: la pila
+  termina el TCP del invitado y el socket del Mac segmenta con la MTU de su red.
+  Caudal invitado↔host por un reenvío (256 MiB, M4): ~600→~1900 MiB/s de bajada
+  y ~950→~2650 de subida. No es 65535 porque el framework no ofrece
+  `VIRTIO_NET_F_MRG_RXBUF` y el invitado reserva cada búfer de recepción del
+  tamaño de la MTU: con 65535 son ~17 MiB de RAM del invitado por máquina, con
+  16384 ~4,5, y el caudal es el mismo (9000, 16384, 32768 y 65535 dentro del
+  ruido);
 - MMDS v2 en `169.254.169.254:80`, con la semántica de Firecracker que usa
   `pkg/guest/mmds.go` (`PUT /latest/api/token` con
   `X-metadata-token-ttl-seconds`, lecturas con `X-metadata-token`, JSON con

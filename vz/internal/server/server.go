@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/linkbroker"
 	"github.com/juan52878911/kindling/vz/internal/egress"
@@ -46,6 +48,21 @@ type VM interface {
 	Stopped() <-chan error
 }
 
+// VsockDialer es lo que una VM con virtio-vsock (Spec.Vsock) ofrece: una
+// conexión nueva al puerto port del invitado.
+type VsockDialer interface {
+	DialVsock(ctx context.Context, port uint32) (net.Conn, error)
+}
+
+// GuestDialerSetter es la red que sabe llevar un puerto del invitado por otro
+// camino que su pila (vnet.Net.SetGuestDialer): el reenvío y la sonda de ese
+// puerto prueban primero dial y, si falla, siguen por TCP como siempre.
+// GuestOnlyTCP dice si vio que el invitado solo contesta por TCP.
+type GuestDialerSetter interface {
+	SetGuestDialer(port int, dial func(ctx context.Context) (net.Conn, error), soloTCP bool)
+	GuestOnlyTCP(port int) bool
+}
+
 // Network es la red de espacio de usuario de la máquina.
 type Network interface {
 	VMFile() *os.File
@@ -66,6 +83,8 @@ type Factory interface {
 // NetConfig es lo que la red necesita del servidor para montarse.
 type NetConfig struct {
 	GuestMAC string
+	// MTU del enlace (Spec.MTU); 0 = 1500.
+	MTU      int
 	MMDS     http.Handler // nil si MMDS no está configurado
 	MMDSAddr netip.Addr
 	Policy   *egress.Policy
@@ -86,7 +105,10 @@ type Deps struct {
 	// Footprint devuelve la memoria que ocupa la máquina en el host, en bytes.
 	Footprint func() (uint64, error)
 	Version   string
-	Logf      func(format string, args ...any)
+	// Backend es el nombre que dan GET / y GET /kling/info: "vz" (vacío) o
+	// "hv" (kling-hv, el VMM sobre Hypervisor.framework, vz/internal/hvvm).
+	Backend string
+	Logf    func(format string, args ...any)
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
@@ -102,11 +124,11 @@ type Deps struct {
 	// VM: preferimos no arrancar a arrancar sin la barrera.
 	Confine func(Confinamiento) error
 	// Destino, si no es nil, dice dónde escribir de verdad un fichero de
-	// snapshot pedido en path: confinado, este proceso solo escribe en el
-	// directorio de su máquina, así que un destino de fuera (el dorado de
-	// kling commit en snapshots/<nombre>/) se escribe en un temporal suyo y
-	// publicar lo deja en path (vz/internal/custodio). publicar nil: se
-	// escribe en path directamente. Nil = siempre directamente.
+	// snapshot pedido en path, o un error si este proceso no puede escribirlo
+	// (confinado, solo escribe en el directorio de su máquina; el dorado de
+	// kling commit lo publica el daemon). publicar, si no es nil, se llama al
+	// acabar para dejar lo escrito en path. publicar nil: se escribe en path
+	// directamente. Nil = siempre directamente.
 	Destino func(path string) (escribir string, publicar func() error, err error)
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
@@ -116,11 +138,24 @@ type Deps struct {
 	// regulador pausa la VM por el framework, que para también el reloj del
 	// invitado (ver cpu.go).
 	Freeze func(stop bool) error
+	// CPUCeiling, si no es nil, se llama tras cada PUT /kling/cpu con si el
+	// techo regula de verdad (pct entre 1 y menos que todas las vCPU). kling-vz
+	// suelta con él su proceso freno cuando la VM no tiene techo.
+	CPUCeiling func(active bool)
 	// HelperStopped dice si el auxiliar está parado. Con él, si el proceso
 	// freno muere a mitad de una parada se mira si de verdad dejó el
 	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone
 	// que sí.
 	HelperStopped func() (bool, error)
+	// Vsock: las máquinas que ARRANCAN en este proceso llevan virtio-vsock y
+	// el agente del invitado se alcanza por él (kling.vsock=1 en su línea de
+	// comandos); MTU, si no es 0, es la de su enlace de red. Como Graphics,
+	// una restauración usa lo que diga el snapshot.
+	Vsock bool
+	MTU   int
+	// HelperPID es el pid del auxiliar (0 si no hay). Sale en GET /kling/cpu
+	// para que el daemon le baje la QoS en batería. Nil = 0.
+	HelperPID func() int
 	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
 	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
 	// no: el framework exige los mismos dispositivos que al guardar.
@@ -207,6 +242,8 @@ type Server struct {
 	// escucha (o pasó la gracia) y rige el techo configurado.
 	cpuPct                           int
 	cpuEnMarcha, regulando, cpuListo bool
+	cpuEsperando                     bool          // ya hay un esperarAgente
+	cpuAviso                         chan struct{} // despierta al regulador (avisarCPU)
 	cpuPausado                       time.Duration
 	cpuPeriodo, cpuGracia            time.Duration // para las pruebas; 0 = por defecto
 	cpuReloj                         reloj         // para las pruebas; nil = el de verdad
@@ -239,6 +276,8 @@ func New(d Deps) *Server {
 		spec:  &spec.Spec{},
 		done:  make(chan error, 1),
 
+		cpuAviso: make(chan struct{}, 1),
+
 		globoEn: []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second,
 			4 * time.Second, 8 * time.Second, 15 * time.Second},
 	}
@@ -259,6 +298,7 @@ func (s *Server) Shutdown() {
 	s.vm, s.net = nil, nil
 	s.st = stStopped
 	s.mu.Unlock()
+	s.avisarCPU()
 	if vm != nil {
 		_ = vm.Stop()
 	}
@@ -381,8 +421,17 @@ func (s *Server) getRoot(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Unlock()
 	writeJSON(w, map[string]string{
 		"id": "anonymous-instance", "state": st.String(),
-		"vmm_version": s.d.Version, "app_name": "kling-vz",
+		"vmm_version": s.d.Version, "app_name": "kling-" + s.backend(),
 	})
+}
+
+// backend es el nombre del VMM que hay detrás del servidor: Deps.Backend, o
+// "vz" si no se dio.
+func (s *Server) backend() string {
+	if s.d.Backend == "" {
+		return "vz"
+	}
+	return s.d.Backend
 }
 
 func (s *Server) putBootSource(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +774,7 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 		case stPaused:
 			if err = s.vm.Resume(); err == nil {
 				s.st = stRunning
+				s.avisarCPU()
 			}
 		case stPendingLoad:
 			err = s.restore()
@@ -800,6 +850,12 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if err := s.vm.SaveState(memW); err != nil {
 		fault(w, fmt.Errorf("saving the machine state: %w", err))
 		return
+	}
+	// Lo que se sabe del agente viaja con el snapshot: si solo contesta por
+	// TCP, quien lo restaure no paga en cada despertar un connect de vsock
+	// fallido (vnet.Net.dialGuest).
+	if g, ok := s.net.(GuestDialerSetter); ok && s.spec.Vsock && g.GuestOnlyTCP(api.GuestPort) {
+		s.spec.AgentTCPOnly = true
 	}
 	if err := s.spec.WriteFile(snapW); err != nil {
 		fault(w, fmt.Errorf("writing the snapshot file: %w", err))
@@ -893,7 +949,7 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
-	info := map[string]any{"backend": "vz", "version": s.d.Version}
+	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
 	if s.d.Credentials != nil {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
@@ -1175,6 +1231,7 @@ func (s *Server) ensureNet() error {
 	}
 	cfg := NetConfig{
 		GuestMAC: s.spec.Network.GuestMAC,
+		MTU:      s.spec.MTU,
 		Policy:   s.d.Policy,
 		Resolver: s.d.Resolver,
 	}
@@ -1207,13 +1264,40 @@ func (s *Server) create() error {
 	if err := s.confinar(); err != nil {
 		return err
 	}
-	vm, err := s.d.Factory.Create(s.spec.Clone(), spec.TranslateBootArgs(s.spec.BootSource.BootArgs), s.net)
+	args := spec.TranslateBootArgs(s.spec.BootSource.BootArgs)
+	if s.spec.Vsock {
+		args += " " + VsockBootParam
+	}
+	vm, err := s.d.Factory.Create(s.spec.Clone(), args, s.net)
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
 	s.vm = vm
+	s.canalAgente(vm)
 	go s.watch(vm)
 	return nil
+}
+
+// VsockBootParam es lo que se añade a la línea de comandos de una VM con
+// vsock: el agente (pkg/guest) escucha entonces también por AF_VSOCK en su
+// puerto. Uno anterior lo ignora con un aviso y se le sigue hablando por TCP.
+const VsockBootParam = "kling.vsock=1"
+
+// canalAgente lleva el puerto del agente (api.GuestPort) por vsock si la VM
+// lo tiene: el reenvío del núcleo y /kling/probe siguen igual por fuera, y por
+// dentro prueban primero vsock y, si nadie contesta (un agente anterior, que
+// solo escucha TCP), la pila de usuario como siempre. Se llama con s.mu
+// tomado, tras crear la VM: también en una restauración, cuyo vsock nace
+// reiniciado y donde cada conexión es nueva.
+func (s *Server) canalAgente(vm VM) {
+	d, ok := vm.(VsockDialer)
+	g, ok2 := s.net.(GuestDialerSetter)
+	if !s.spec.Vsock || !ok || !ok2 {
+		return
+	}
+	g.SetGuestDialer(api.GuestPort, dialAgenteComprobado(func(ctx context.Context) (net.Conn, error) {
+		return d.DialVsock(ctx, uint32(api.GuestPort))
+	}), s.spec.AgentTCPOnly)
 }
 
 // confinar aplica Deps.Confine la primera vez, con la red que pide la política
@@ -1267,6 +1351,13 @@ func (s *Server) abandon() {
 }
 
 func (s *Server) start() error {
+	// Antes de create, que monta la red con la MTU del Spec.
+	if s.d.Vsock {
+		s.spec.Vsock = true
+	}
+	if s.d.MTU > 0 && s.spec.Network != nil {
+		s.spec.MTU = s.d.MTU
+	}
 	if s.spec.MachineIdentifier == "" {
 		id, err := s.d.Factory.NewMachineID()
 		if err != nil {
@@ -1287,6 +1378,7 @@ func (s *Server) start() error {
 		return fmt.Errorf("starting the VM: %w", err)
 	}
 	s.st = stRunning
+	s.avisarCPU()
 	s.applyBalloon()
 	if s.spec.Balloon != nil && s.spec.Balloon.AmountMiB > 0 {
 		go s.reaplicarGlobo(s.vm, s.globoEn)
@@ -1310,6 +1402,7 @@ func (s *Server) restore() error {
 		return fmt.Errorf("resuming the restored VM: %w", err)
 	}
 	s.st = stRunning
+	s.avisarCPU()
 	s.applyBalloon()
 	s.d.Logf("snapshot restored in %d ms (resumed after %d ms)", tRestore.Milliseconds(), time.Since(t0).Milliseconds())
 	return nil
@@ -1367,6 +1460,7 @@ func (s *Server) watch(vm VM) {
 		s.st = stStopped
 	}
 	s.mu.Unlock()
+	s.avisarCPU()
 	if !current {
 		return // una VM abandonada tras un fallo: no es el fin del proceso
 	}

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // rootID es el nodeid de la raíz, fijo en FUSE.
@@ -38,6 +39,11 @@ type node struct {
 	// fuseFS.kcMu, no la tabla.
 	openKey  cacheKey
 	openSeen bool
+
+	// typ son los bits de tipo (share.SIFMT) de la última respuesta que dio
+	// este nodo al kernel. Los usa el borrado sintético de fuse_notify.go,
+	// cuando el host ya no puede decirlos.
+	typ atomic.Uint32
 }
 
 type nodeTable struct {

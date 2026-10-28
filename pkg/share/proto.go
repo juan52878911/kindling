@@ -89,6 +89,26 @@ func (a Attach) Validate() error {
 // invitado necesita para funcionar.
 var reservedMounts = []string{"/proc", "/sys", "/dev", "/run", "/bin", "/sbin", "/lib", "/usr", "/etc"}
 
+// etcDeKindling son los directorios de /etc que son de kindling (el servicio,
+// el entorno de la imagen): una carpeta encima decidiría qué lanza el agente.
+var etcDeKindling = []string{"/etc/kindling", "/etc/kling"}
+
+// configEnEtc dice si mp es un directorio de configuración bajo /etc
+// (/etc/nginx/conf.d, /etc/mysql/conf.d): es lo que un compose monta casi
+// siempre, y tapa solo esa configuración, no /etc. /etc mismo y los de
+// kindling, no.
+func configEnEtc(mp string) bool {
+	if !strings.HasPrefix(mp, "/etc/") {
+		return false
+	}
+	for _, k := range etcDeKindling {
+		if mp == k || strings.HasPrefix(mp, k+"/") {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidMount comprueba un punto de montaje dentro del invitado.
 //
 // Las mismas reglas que un volumen (viaja por la línea de comandos del kernel en
@@ -106,7 +126,7 @@ func ValidMount(mp string) error {
 		return errors.New("a share cannot be mounted at /")
 	}
 	for _, r := range reservedMounts {
-		if mp == r || strings.HasPrefix(mp, r+"/") {
+		if (mp == r || strings.HasPrefix(mp, r+"/")) && !configEnEtc(mp) {
 			return fmt.Errorf("a share cannot be mounted at %s: it would hide %s from the guest", mp, r)
 		}
 	}
@@ -198,7 +218,69 @@ const (
 	// contesta ENOSYS, y entonces se queda en BaseIO; un agente anterior no la
 	// manda, y el daemon se queda en BaseIO.
 	OpHello byte = 17 // max_io u32 -> max_io u32
+	// OpWatch pide al daemon que avise de los cambios hechos en el host
+	// (ver EventPush). Sin argumentos ni resultado. Un daemon anterior
+	// contesta ENOSYS y la carpeta se queda con las cachés de 1 s, como antes;
+	// un agente anterior no la manda y el daemon nunca le empuja nada.
+	OpWatch byte = 18
+	// OpSymlink crea un enlace simbólico (solo rw). El destino tiene que ser
+	// relativo y quedarse dentro de la carpeta (CheckLink, LinkTraverses): un
+	// proceso del host que lo siga no sale de ella. Un daemon anterior contesta
+	// ENOSYS y el agente da EPERM, como antes.
+	OpSymlink byte = 19 // path, target -> Attr
 )
+
+// Avisos del daemon al agente (tras OpWatch). Son las únicas tramas que el
+// daemon manda sin que se las pidan: llevan el id PushID, que el agente nunca
+// usa (sus ids empiezan en 1), errno 0 y `u8 evento | ruta`. La ruta es
+// relativa a SRC, como en las operaciones. Son pistas: el agente invalida sus
+// cachés y avisa a los vigilantes del invitado, pero lo que manda sigue siendo
+// lo que contesta el host.
+const PushID uint64 = 0
+
+const (
+	// EventModify: cambió el contenido o los atributos de un fichero (también
+	// si se sustituyó por otro con rename, el guardado atómico de un editor).
+	EventModify byte = 1
+	// EventCreate: apareció la entrada (fichero o directorio).
+	EventCreate byte = 2
+	// EventDelete: desapareció la entrada.
+	EventDelete byte = 3
+)
+
+// Bye es la última trama de un cierre ordenado (ServeDrain): `PushID | ERetry`,
+// sin más. Antes de mandarla el daemon ya contestó todo lo que leyó, y
+// después no ejecuta nada: lo que el agente tenga aún sin respuesta NO se hizo
+// y se puede repetir con la sesión siguiente, en vez de darlo por perdido con
+// EIO. Sin ella, una escritura que salía justo cuando el daemon dejaba de leer
+// (congelar con una carpeta viva) recibía EIO al volver. Un agente anterior la
+// toma por una trama fuera de protocolo y corta la sesión: lo mismo que el
+// cierre que viene detrás.
+func Bye() []byte { return Response(PushID, ERetry).B }
+
+// Push construye un aviso del daemon.
+func Push(ev byte, path string) []byte {
+	e := Response(PushID, 0)
+	e.U8(ev)
+	e.Str(path)
+	return e.B
+}
+
+// ParsePush lee lo que sigue a `id | errno` en un aviso. Valida la ruta como
+// las de las operaciones: un daemon roto no debe poder nombrar `..`.
+func ParsePush(d *Dec) (byte, string, error) {
+	ev, p := d.U8(), d.Str()
+	if err := d.Done(); err != nil {
+		return 0, "", err
+	}
+	if ev < EventModify || ev > EventDelete {
+		return 0, "", fmt.Errorf("unknown event %d", ev)
+	}
+	if err := ValidPath(p); err != nil {
+		return 0, "", err
+	}
+	return ev, p, nil
+}
 
 // Flags de apertura del protocolo. Propios, y no los O_* del sistema: los de
 // Linux (el invitado) y los de macOS (un daemon con kling-vz) no coinciden.

@@ -22,4 +22,11 @@ type PoolInfo struct {
 	Template string `json:"template"`
 	Size     int    `json:"size"`  // copias que se quieren
 	Ready    int    `json:"ready"` // copias ya despiertas y reclamables
+	// Stale, si no está vacío, es que el dorado no se puede restaurar con el
+	// VMM de ahora (otro VMM: un cambio de vz a hv) y el fondo no se repondrá
+	// hasta rehacerlo; Fix son las órdenes. Error es el último fallo al
+	// reponer por otra causa.
+	Stale string `json:"stale,omitempty"`
+	Fix   string `json:"fix,omitempty"`
+	Error string `json:"error,omitempty"`
 }

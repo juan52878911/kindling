@@ -50,6 +50,10 @@ type fondoPlantilla struct {
 	hecho    chan struct{}
 	ctx      context.Context
 	cancel   context.CancelFunc
+	// obsoleto es la causa (causaObsoleto) si el dorado es de otro VMM y
+	// fallo el último error al reponer: los dos salen en GET /info para que
+	// `kling status` diga qué rehacer, en vez de quedarse en el log.
+	obsoleto, fallo string
 }
 
 func (m *Manager) fondosPath() string { return filepath.Join(m.root, "fondos.json") }
@@ -130,6 +134,29 @@ func (m *Manager) InfoFondo(name string) *api.PoolInfo {
 	out := &api.PoolInfo{Template: name}
 	if f := m.fondos[name]; f != nil {
 		out.Size, out.Ready = f.size, len(f.listas)
+		out.Stale, out.Error = f.obsoleto, f.fallo
+		if f.obsoleto != "" {
+			out.Fix = remedioDorado(name)
+		}
+	}
+	return out
+}
+
+// ProblemasFondos son los fondos con tamaño que no se reponen (dorado de
+// otro VMM, o el último alta falló), por nombre.
+func (m *Manager) ProblemasFondos() []api.PoolInfo {
+	m.fondoMu.Lock()
+	var nombres []string
+	for n, f := range m.fondos {
+		if f.size > 0 && (f.obsoleto != "" || f.fallo != "") {
+			nombres = append(nombres, n)
+		}
+	}
+	m.fondoMu.Unlock()
+	sort.Strings(nombres)
+	out := make([]api.PoolInfo, 0, len(nombres))
+	for _, n := range nombres {
+		out = append(out, *m.InfoFondo(n))
 	}
 	return out
 }
@@ -222,15 +249,27 @@ func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
 		}
 		id, err := alta(f.ctx, name)
 		if err != nil {
+			obsoleto, fallo := "", err.Error()
+			if errors.Is(err, ErrDoradoObsoleto) {
+				// Lo normal tras cambiar de VMM (vz → hv): no es un fallo
+				// pasajero, y reintentar no lo arregla.
+				obsoleto, fallo = m.causaFondo(name), ""
+			}
 			if f.ctx.Err() == nil {
-				log.Printf("pool %s: could not pre-warm a copy: %v", name, err)
+				if obsoleto != "" {
+					log.Printf("pool %s: golden is stale (%s): the pool stays empty until it is re-saved:\n%s", name, obsoleto, remedioDorado(name))
+				} else {
+					log.Printf("pool %s: could not pre-warm a copy: %v", name, err)
+				}
 			}
 			m.fondoMu.Lock()
 			f.llenando = false
+			f.obsoleto, f.fallo = obsoleto, fallo
 			m.fondoMu.Unlock()
 			return
 		}
 		m.fondoMu.Lock()
+		f.obsoleto, f.fallo = "", ""
 		if f.ctx.Err() != nil || len(f.todas) >= f.size {
 			// Lo apagaron o lo encogieron mientras nacía.
 			m.fondoMu.Unlock()
@@ -241,6 +280,17 @@ func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
 		f.listas = append(f.listas, id)
 		m.fondoMu.Unlock()
 	}
+}
+
+// causaFondo es por qué el dorado name no se puede restaurar aquí (otro VMM),
+// o "stale" si no se sabe decir mejor.
+func (m *Manager) causaFondo(name string) string {
+	if s, err := m.loadSnapshot(name); err == nil {
+		if c := causaObsoleto(s.VMM, m.origenActual().vmm); c != "" {
+			return c
+		}
+	}
+	return "stale"
 }
 
 // crearParaFondo da de alta una copia de name por el camino de siempre y

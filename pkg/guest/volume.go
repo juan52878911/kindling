@@ -103,6 +103,8 @@ var volumeState = &Volumes{}
 type Volumes struct {
 	mu      sync.Mutex
 	mounted []VolumeSpec
+	// acquired se cierra con el primer montaje (volume_wait.go).
+	acquired chan struct{}
 }
 
 // specs devuelve lo montado. Copia, para que quien la reciba no pueda alterar el
@@ -126,6 +128,7 @@ func (v *Volumes) Acquire() error {
 		return err
 	}
 	v.mounted = got
+	v.noteAcquiredLocked()
 	return nil
 }
 

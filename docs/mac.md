@@ -17,7 +17,7 @@ opción: el runtime en el propio Mac.
 | Qué | Por qué |
 |---|---|
 | Apple Silicon (arm64) | los invitados son aarch64; en un Mac Intel no hay backend `vz` |
-| macOS 14 (Sonoma) o superior | congelar y descongelar usa el guardado y restauración de estado de la VM, que llega en 14 |
+| macOS 14 (Sonoma) o superior; 15.2 para `kling-hv` | congelar y descongelar usa el guardado y restauración de estado de la VM, que llega en 14; `kling-hv` usa el GIC de Hypervisor.framework (ver la tabla de abajo) |
 | `kling-vz` firmado con `com.apple.security.virtualization` | sin ese permiso macOS no deja crear la VM; una firma ad-hoc basta |
 | e2fsprogs (`brew install e2fsprogs`) | cada microVM lleva un overlay ext4 y las imágenes se inspeccionan con `debugfs` |
 
@@ -25,11 +25,42 @@ No hace falta root: el daemon corre como tu usuario.
 
 `kling up -check` comprueba todo lo anterior y dice qué teclear para cada fallo.
 
+### Qué VMM según la versión de macOS
+
+Hay dos VMM: `kling-vz` (Virtualization.framework) y `kling-hv`
+(Hypervisor.framework, [`backend-hv.md`](backend-hv.md)). La versión se compara
+entera (15.1 no llega a 15.2):
+
+| macOS | VMM |
+|---|---|
+| 13 o anterior | ninguno |
+| 14.x (Sonoma) | `vz` |
+| 15.0 – 15.1 | `vz` |
+| 15.2 o posterior | `hv` (con `daemon.vmm auto`, si `kling-hv` pasa su sonda) |
+
+`kling-vz` se enlaza para macOS 14.0 y `kling-hv` para 15.2
+(`MACOSX_DEPLOYMENT_TARGET` en `make vz` y en la release: sin fijarlo el binario
+pide la versión del SDK con que se compiló y dyld no lo carga en un macOS
+anterior).
+
+Por qué 15.2 y no 15.0: la API del GIC de Hypervisor.framework (`hv_gic_create`,
+`hv_gic_state_*`) es de macOS 15.0 según el SDK, y `kling-hv` no usa nada más
+nuevo (lo de 15.2 es SME, que no toca). Pero `vz/internal/hvvm` se compila con
+`-mmacosx-version-min=15.2` y nadie lo ha probado en 15.0 ni 15.1; bajar el
+mínimo no gana casi a nadie (15.2 salió en diciembre de 2024) y arriesga un GIC
+sin probar. Bajarlo es cambiar ese flag, `macOSMinHV` en
+`cmd/kling/version_macos.go` y el objetivo de `make vz`/release, tras probarlo
+en un Mac con 15.0.
+
 ## Instalación
 
+Con el instalador de la release (la línea de `curl` del [README](../README.md)),
+`kling`, `kling-vz` y `kling-hv` quedan en el mismo directorio y sin la
+cuarentena de la descarga (van firmados ad-hoc, sin notarizar). Desde el repo:
+
 ```sh
-make install            # el CLI (y el daemon: es el mismo binario)
-make vz                 # compila y firma kling-vz (módulo aparte en vz/)
+make vz                 # compila y firma kling-vz y kling-hv (módulo aparte en vz/)
+make install            # el CLI (y el daemon: es el mismo binario) y los VMM de vz/bin
 brew install e2fsprogs
 kling up -check
 ```
@@ -48,17 +79,36 @@ busca `mkfs.ext4`, `debugfs`, `e2fsck` y `resize2fs` también en
 ### El backend es una opción de configuración
 
 ```sh
-kling config set daemon.vmm vz     # "vz" o "firecracker"
+kling config set daemon.vmm auto   # "auto", "hv", "vz" o "firecracker"
 kling config show                  # sin valor muestra el de la plataforma
 ```
 
-Sin valor, el daemon usa el de su plataforma: `vz` en macOS, `firecracker` en
-Linux. Se valida al escribirla y al arrancar el daemon: `vz` exige macOS en Apple
-Silicon y `firecracker` exige Linux con KVM, y el error dice cuál vale aquí.
-`KLING_VMM` la sustituye sin tocar el fichero: con un nombre (`vz`,
-`firecracker`) elige el backend; con una ruta, el binario.
+Sin valor, el daemon usa el de su plataforma: `auto` en macOS, `firecracker` en
+Linux. Se valida al escribirla y al arrancar el daemon: `auto`, `hv` y `vz`
+exigen macOS en Apple Silicon y `firecracker` exige Linux con KVM, y el error
+dice cuál vale aquí. `KLING_VMM` la sustituye sin tocar el fichero: con un
+nombre (`auto`, `hv`, `vz`, `firecracker`) elige el backend; con una ruta, el
+binario.
 
-`kling status -v` dice qué backend usa un daemon (`backend: vz`) y su arquitectura.
+Con `auto` el daemon elige **al arrancar**, una vez, y no cambia hasta que se
+reinicia:
+
+1. `hv` si macOS es 15.2 o posterior (la tabla de arriba), `kling-hv` está
+   junto a `kling` o en el `PATH`, va firmado con
+   `com.apple.security.hypervisor` y su sonda (`kling-hv --probe`: crea y
+   destruye una VM vacía con su GIC, menos de 10 ms) contesta `ok`;
+2. si no, `vz`.
+
+La elección y su motivo salen en el log (`vmm: hv (auto: macOS 26.5,
+/Users/…/kling-hv signed and probed)`), en `GET /info` (`backend_reason`) y en
+`kling status -v` (`backend: hv (auto: …)`); `kling up -check` hace la misma
+elección y, si se queda en `vz`, avisa de por qué. `daemon.vmm hv` o `vz`
+explícitos no sondean nada: `hv` falla al arrancar la primera microVM si
+`kling-hv` no vale aquí. Para probar la caída a `vz` en un Mac donde `hv`
+funciona, `KLING_HV_PROBE_FAIL=1` da la sonda por fallida.
+
+Los dorados son de un VMM: al pasar de `vz` a `hv` (o al revés) los que había
+salen obsoletos y hay que rehacerlos (`kling status` lo dice con la orden).
 
 ## Dónde vive
 
@@ -73,6 +123,10 @@ por defecto no depende de `KLING_ROOT`, para que `kling` sin `-H` lo encuentre
 arranque el daemon con la raíz que arranque.
 
 ## Conseguir imágenes
+
+Una imagen que solo existe para amd64 se importa **emulada** con qemu-user
+(`kling image import -arch amd64 <ref>` o `kling run -platform linux/amd64`):
+ver [`imagenes-amd64.md`](imagenes-amd64.md).
 
 **Imágenes de Docker**: `kling image import <ref>` (y `-archive`, y los
 registros privados de `kling registry login`) funciona en el Mac: su
@@ -117,9 +171,22 @@ cualquier Linux arm64 con KVM.
 
 ## Arrancar el daemon al iniciar sesión (launchd)
 
-A mano basta con `kling daemon` en una terminal. Para que arranque solo, un
-agente de launchd en `~/Library/LaunchAgents/dev.kindling.daemon.plist`
-(launchd no expande `~` ni `$HOME`: rutas absolutas):
+A mano basta con `kling daemon` en una terminal. Para que arranque solo:
+
+```sh
+kling up -install
+```
+
+comprueba lo de `kling up -check`, escribe el agente de launchd
+`~/Library/LaunchAgents/dev.kindling.daemon.plist` (el `kling` que lo ejecuta,
+con rutas absolutas; `KLING_ROOT`, `KLING_SOCKET`, `KLING_VMM` y `KLING_CONFIG` si están
+puestos, porque launchd no hereda la shell) y lo arranca con `launchctl
+bootstrap`. Si el plist ya existe igual, no lo toca; si es distinto, no lo pisa
+y dice cómo quitarlo. `KLING_LAUNCH_AGENT_LABEL` y `KLING_LAUNCH_AGENT_PLIST`
+cambian la etiqueta y la ruta (el log va entonces junto al plist): sirven para
+probarlo con un daemon privado sin tocar el agente de verdad.
+
+Lo que escribe es esto (launchd no expande `~` ni `$HOME`: rutas absolutas):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -157,8 +224,9 @@ launchctl bootout gui/$(id -u)/dev.kindling.daemon           # pararlo
 Con el plist instalado, `kling up` lo arranca si no está corriendo.
 
 Con el plist instalado, `kling upgrade` también actualiza el daemon: baja la
-release, verifica `kling` y `kling-vz` (y que este lleva el permiso de
-virtualización), los cambia en su sitio, lo reinicia con `launchctl bootout` y
+release, verifica `kling`, `kling-vz` y `kling-hv` (y que cada VMM lleva el
+permiso de su framework), los cambia en su sitio (si junto a `kling` está
+`kling-vz` pero no `kling-hv`, lo instala; volver atrás lo quita), lo reinicia con `launchctl bootout` y
 `bootstrap` y vuelve atrás solo si no contesta con la versión nueva
 ([`actualizar.md`](actualizar.md) §3.4). Sin el agente de launchd no sabe
 reiniciarlo: `kling upgrade -cli` cambia solo el binario. Lo prueba de punta a
@@ -186,6 +254,84 @@ Solo los procesos de tu usuario pasan por esos puertos: otra cuenta del Mac que
 conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (ver
 [`backend-vz.md`](backend-vz.md#por-qué-puertos-en-loopback-y-no-la-ip-del-invitado)).
 
+## Energía y batería
+
+En un portátil cada despertar de la CPU cuesta batería, también con las
+máquinas quietas. Lo que gasta kindling con todo ocioso, medido en un M4 con
+`top -stats pid,command,cpu,idlew,csw,power` (cambios de contexto por segundo,
+la medida más estable con el Mac ocupado; redis 7 sin clientes, 1 vCPU):
+
+| proceso | estado | antes | ahora |
+|---|---|---|---|
+| `kling-vz` | running o pausada | ~65 csw/s, POWER 0,1-0,2 | 0,1-2,6 csw/s, POWER 0,0 |
+| auxiliar de Apple | running | ~75-100 csw/s, POWER 0,5 | igual (es el invitado: ver abajo) |
+| auxiliar de Apple | pausada o congelada | 0 | 0 |
+| daemon | con máquinas, enchufado | `ps` cada 10 s (fork+exec, ~40 ms) | sysctl, ~3 ms cada 10 s |
+| daemon | en batería | — | ~0 csw/s (vuelta cada 30 s) |
+
+Qué despertaba y qué se hace:
+
+- **El regulador de CPU de `kling-vz`** medía cada 100 ms aunque no hubiera
+  techo (en vz no lo hay por defecto) y también con la VM en pausa: ahora
+  espera a que algo cambie (techo, estado de la VM) sin despertar. Con techo y
+  la VM ociosa el sueño entre medidas crece hasta 500 ms (antes 50-100 ms); lo
+  que una VM que despierta gaste de más se cobra como deuda, así que la media
+  se cumple. Tampoco se pregunta al agente cada 20 ms en el arranque si no hay
+  techo.
+- **El registro de auditoría del proxy de credenciales** tenía un ticker de 1 s
+  en cada `kling-vz`, con o sin credenciales: ahora solo se arma con algo
+  pendiente.
+- **El vigilante del daemon** (cada 10 s) lanzaba `ps -axww` para saber qué
+  `kling-vz` siguen vivos: ahora lee la tabla de procesos con `proc_listpids` y
+  `kern.procargs2`, solo los de tu usuario.
+- **El invitado**: con `HZ=100` y `NO_HZ_IDLE` (lo que ya tenía el núcleo) un
+  invitado sin carga despierta su vCPU ~7 veces por segundo; dos sysctl en la
+  línea de órdenes del núcleo (`vm.compaction_proactiveness=0`,
+  `vm.stat_interval=10`) lo bajan a ~3,7. Lo demás es de la imagen: redis
+  despierta 10 veces por segundo por su cuenta (`hz 10`) y, con ello, RCU otras
+  ~20; eso no lo arregla el núcleo, lo arregla pausarla.
+
+### Modo batería
+
+```
+kling config set daemon.battery_mode auto              # auto (defecto), on, off
+kling config set daemon.battery_pause_after_seconds 60 # 0 = 60; -1 = no pausar
+```
+
+`KLING_BATTERY_MODE` y `KLING_BATTERY_PAUSE_AFTER` mandan sobre el fichero; se
+leen al arrancar el daemon. En `auto` el daemon pregunta a `pmset -g ps` si el
+Mac va con batería, como mucho una vez por minuto (sin cgo no hay
+`IOPSCopyPowerSourcesInfo`). Con batería:
+
+1. **Baja la QoS** (`PRIO_DARWIN_BG`, lo de `taskpolicy -b`: núcleos de
+   eficiencia, E/S en segundo plano) del `kling-vz` y del auxiliar de Apple de
+   cada máquina ociosa, y se la devuelve en cuanto llega una petición.
+2. **Pausa** (no congela) la que lleva `battery_pause_after_seconds` ociosa. En
+   pausa el auxiliar no gasta nada; despertarla es reanudar (~50 ms medido el
+   primer `exec`). Exec, shell, ficheros y las llamadas al invitado
+   (`POST /machines/{ref}/guest`) la despiertan solos. Al volver al enchufe se
+   reanudan las que pausó este modo (no las que pausaste tú).
+3. **Espacia el vigilante**: una vuelta cada 30 s en vez de cada 10.
+
+Ociosa es: ninguna petición en curso contra ella (un `kling shell` abierto, un
+`exec` largo, `kling logs -f`) ni terminada hace menos de ese plazo, y su
+invitado gastando menos del 2 % de un núcleo entre dos vueltas (`cpu_ms` de
+`GET /kling/cpu`). Nunca se pausan las que alguien puede usar sin pasar por el
+daemon: las que publican puertos (`kling.ports`), las del planificador y los
+fondos (`kling ai serve`, `template pool`), las de un grafo, las de `kling db`
+y las que tienen carpetas vivas. El planificador ya duerme las suyas con su
+propio plazo.
+
+### Al dormir el Mac
+
+Con el Mac dormido no corre nada, tampoco los invitados, y su reloj (el
+contador de ARM no avanza dormido) se quedaba atrás todo lo que durmió. El
+daemon lo detecta sin notificaciones del sistema: el reloj monotónico no cuenta
+el sueño y el de pared sí. Al despertar, en la siguiente vuelta del vigilante o
+en la primera petición contra una máquina (lo que llegue antes), pone en hora
+las que corren (`POST /resync` del agente, lo mismo que tras un thaw). Las
+pausadas y congeladas se ponen en hora al despertarlas, como siempre.
+
 ## Límites frente a Linux
 
 | | Linux (firecracker) | macOS (vz) |
@@ -195,7 +341,7 @@ conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (v
 | capas con `verity` (constructores `debian`, `android`) | con un núcleo con `CONFIG_DM_VERITY` | igual, con el mismo `Image` arm64 de `scripts/builders/kernel` o el de Android: probado en un M4 (montada por `/dev/mapper`, `sha256-ce`, un byte cambiado para el arranque; [imagenes.md](imagenes.md#verity-en-kling-vz-mac-m4-2026-10-01)). Con un núcleo sin device-mapper la capa no se monta y el invitado entra en pánico; en vz eso es un bucle de reinicios con la máquina `running`, no `failed` |
 | `kling image put`, `mcp refresh-bridge` | montan la imagen con un loop | sin montar, con `debugfs -w` (e2fsprogs de Homebrew): mismo contrato (modo pedido, dueño root, copia al lado y cambio de entrada solo con la copia comprobada, crece la imagen si no cabe, e2fsck antes y después). Los enlaces simbólicos de los directorios se siguen siempre dentro de la imagen. Una ruta con comillas, barras invertidas o caracteres de control se rechaza |
 | techo de CPU por microVM (`-cpu-pct`) | cgroup v2 | lo aplica `kling-vz`, con el mismo significado que `cpu.max`: % de UN núcleo para la VM entera (2 vCPU con `-cpu-pct 50` gastan medio núcleo entre las dos; `cpu_pct_per_vcpu` de la receta es por vCPU). No hay forma de tocar un hilo de vCPU suelto (el auxiliar de Apple no da su puerto de tarea) y ni el nice ni `taskpolicy -b` son un techo, así que se para el auxiliar entero: un cubo de fichas que, al vaciarse, lo para con SIGSTOP 20 ms (un proceso freno aparte, en su propio sandbox, manda las señales). El invitado ve pasar ese tiempo, como bajo `cpu.max`; pausar la VM por el framework, lo de antes, le paraba también el reloj (23 s de retraso en 30 s regulado). Medido en un M4 con `yes` dentro: el techo se cumple (50 % con `-cpu-pct 50`, 1 y 2 vCPU) y `kling exec true` pasa de p99 117-324 ms a 34-78 ms. Hasta que el agente escucha, el techo es `max(pct, 100)`, como el impulso de arranque de Linux. Cuesta un proceso más por VM (~8 MiB) **Por defecto, sin techo** (todas las vCPU) si la máquina no pide `cpu_pct`: regular una VM de vz multiplica la pérdida de páginas de RAM del invitado que hace macOS bajo presión (#87, `prototypes/android/docs/sigill.md`); en Linux el defecto sigue siendo media vCPU |
-| jailer, bajada de privilegios | sí | el invitado vive en el proceso auxiliar de Apple, y `kling-vz` (que procesa su tráfico de red) se encierra en un perfil de sandbox al crear la VM: su directorio y los ficheros exactos de su VM (kernel, discos, el estado que restaura), nada de `secrets/` ni de otras máquinas; los dorados los coloca un proceso custodio aparte; y sale a la red solo si la máquina tiene egress, nunca a los reenvíos de otras máquinas. `KLING_VZ_NO_SANDBOX=1` lo apaga para diagnosticar |
+| jailer, bajada de privilegios | sí | el invitado vive en el proceso auxiliar de Apple, y `kling-vz` (que procesa su tráfico de red) se encierra en un perfil de sandbox al crear la VM: su directorio y los ficheros exactos de su VM (kernel, discos, el estado que restaura), nada de `secrets/` ni de otras máquinas; los dorados los publica el daemon; y sale a la red solo si la máquina tiene egress, nunca a los reenvíos de otras máquinas. `KLING_VZ_NO_SANDBOX=1` lo apaga para diagnosticar |
 | admisión por memoria | PSI (`KLING_MAX_MEM_PRESSURE`) | `kern.memorystatus_level`: por debajo del 15 % libre, 507 (`KLING_MIN_MEM_LEVEL`, 0 lo apaga) |
 | arranques simultáneos | 2 anidado, núcleos/2 (hasta 8) en hierro; restaurar y arrancar en frío comparten la puerta | dos compuertas: **3 restauraciones** (`thaw`, `run -from`; cada una copia su estado a memoria, ~324 MiB en el M4) y **4 arranques en frío**, que ya no esperan detrás de las restauraciones. Con `kern.memorystatus_level` en el 25 % o menos, una restauración espera hasta 2 s a que suba y luego se restaura de una en una. Reanudar una pausada no pasa por ninguna. `KLING_MAX_PARALLEL_BOOT` fija las dos. El prototipo vio fallos con ~20 restauraciones a la vez |
 | primer `exec` tras un arranque en frío | sondeo con dial a la IP | `GET /kling/probe` a `kling-vz` en intentos de 150 ms: un SYN mandado antes de que suba la red del invitado se pierde y la pila de usuario no lo repite hasta 1 s, justo el plazo del sondeo, que contestaba "cerrado" aunque el agente ya escuchara. Medido en el M4 (redis, 256 MiB): `run` + primer `exec` de 1,37–1,41 s a 0,52–0,59 s, y `run -wait-ready` de 1,19 s a 0,54 s. Lo que queda (~350 ms desde que `run` vuelve) es el arranque del núcleo invitado y del agente |

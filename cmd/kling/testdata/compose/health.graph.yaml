@@ -5,7 +5,8 @@
 name: health
 nodes:
   api: {image: health-api, ports: [8081]}
-  db: {image: health-db, vcpus: 2, mem_mib: 1024, ports: [5432], volumes: [{name: health-data, mount: /var/lib/postgresql/data}]}
+  db: {image: health-db, vcpus: 2, mem_mib: 1024, allow_exec: true, ports: [5432], volumes: [{name: health-data, mount: /var/lib/postgresql/data}]}
 edges:
   - {from: api, to: db, kind: link, port: 5432}
-  - {from: api, to: db, kind: depends, port: 5432}
+  - {from: api, to: db, kind: depends, health: {test: [sh, -c, "pg_isready -U app -p 5432"], interval_ms: 5000, retries: 10}}
+  - {from: db, to: api, kind: link, port: 8081}

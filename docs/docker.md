@@ -19,7 +19,7 @@ las medidas) y [cow.md](cow.md) (el almacén de copia al escribir).
 | Fijar la imagen | la etiqueta se resuelve una vez a digest y queda en la receta; `kling image recipe N` |
 | Capas `tar+zstd` | igual que las gzip: se leen con un descompresor propio, sin dependencias ([imagenes.md](imagenes.md#imágenes-de-docker-el-constructor-oci)) |
 | Saber que está lista | el `HEALTHCHECK` de la imagen, o el primer puerto de `EXPOSE`; `-wait-ready`, `kling machine ready N` |
-| Ver qué dice el servicio | `kling logs -service N` |
+| Ver qué dice el servicio | `kling logs -service N` (`-t`: la hora de cada línea, como `docker logs -t`; `-f` la sigue) |
 | Pararla como Docker | `kling stop` manda la `STOPSIGNAL` de la imagen antes de apagar; el disco de la máquina se queda |
 | Arrancarla otra vez (`docker start`) | `kling start N`: en frío, sobre su disco, con la misma imagen, memoria, volúmenes y red. El entorno de `-e` no se guarda: hay que volver a darlo (`kling start -e POSTGRES_PASSWORD N`), y si falta una clave lo dice |
 | Una plantilla caliente y copias | `kling save N plantilla` y `kling run -from plantilla`: copias listas en decenas de milisegundos con el estado de la plantilla |
@@ -124,8 +124,10 @@ imagen entera).
 
 - **`docker save | gzip`**: `image import -archive` lee el tar sin comprimir
   (o un layout OCI en un directorio); el comprimido hay que descomprimirlo antes.
-- **`-p` de Docker**: no hay publicación de puertos en el host a propósito;
-  se entra por el gateway o con `kling exec`.
+- **`-p` de Docker**: `kling run` no publica puertos en el host a propósito;
+  se entra por el gateway o con `kling exec`. Para desarrollo local,
+  `kling compose up` publica los `ports:` del compose en `127.0.0.1` mientras
+  corre ([desarrollo-local.md](desarrollo-local.md)).
 - **`docker start` sin volver a dar el entorno**: `kling start` lo exige,
   porque el daemon solo guarda los nombres de las variables. Docker guarda los
   valores con el contenedor.

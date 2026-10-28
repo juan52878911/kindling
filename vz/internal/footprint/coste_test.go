@@ -105,3 +105,18 @@ func TestTechoEnNucleosE(t *testing.T) {
 		t.Fatalf("trabajo hecho = %.3f de un núcleo P, quería ~0,25", trabajo)
 	}
 }
+
+// Contador (el de kling-hv) es la misma cuenta: la primera lectura se cobra
+// tal cual y lo que corre después en E, a lo que vale en P.
+func TestContadorCobraEComoP(t *testing.T) {
+	var c Contador
+	ms := time.Millisecond
+	if got := c.Suma(100*ms, 100*ms, 1e9, 1e9); got != 100*ms {
+		t.Fatalf("primera lectura = %v, quería 100ms", got)
+	}
+	// 1 s más en E con las instrucciones de 0,25 s en P: se cobran ~250 ms.
+	got := c.Suma(1100*ms, 100*ms, 1e9+2.5e9, 1e9)
+	if d := got - 100*ms; d < 240*ms || d > 260*ms {
+		t.Fatalf("1 s en E se cobró como %v, quería ~250ms", d)
+	}
+}

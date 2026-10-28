@@ -888,3 +888,38 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 	}
 	return nil
 }
+
+// validarShareWait acota RunRequest.ShareWait.
+func validarShareWait(n int) error {
+	if n < 0 || n > share.MaxShares {
+		return fmt.Errorf("%w: share_wait %d: use 0 to %d", ErrShareRequest, n, share.MaxShares)
+	}
+	return nil
+}
+
+// shareWaitDe es cuántas carpetas vivas espera el agente antes de lanzar el
+// servicio: las pedidas en ShareWait o, sin él, las vivas de la máquina.
+// Sin esto el servicio arrancaba antes de que el daemon conectara la
+// carpeta: `node /app/server.js` fallaba una vez y un `node --watch` sin el
+// fichero no se recuperaba.
+func shareWaitDe(pedido int, atts []api.ShareAttachment) int {
+	if pedido > 0 {
+		return pedido
+	}
+	n := 0
+	for _, s := range atts {
+		if s.Live() {
+			n++
+		}
+	}
+	return n
+}
+
+// shareWaitBootArg es kling.shares=N en la línea del kernel. Un agente
+// anterior lo ignora (avisa en la consola) y arranca el servicio sin esperar.
+func shareWaitBootArg(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %s=%d", api.ShareWaitBootParam, n)
+}

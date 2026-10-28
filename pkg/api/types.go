@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -151,6 +152,20 @@ type Machine struct {
 	// (RunRequest.Env); los valores no se guardan en ninguna parte del host.
 	// Una copia de un dorado hereda los del dorado: lleva su memoria.
 	EnvKeys []string `json:"env_keys,omitempty"`
+
+	// ShareWait es cuántas carpetas vivas espera su agente antes de lanzar el
+	// servicio (RunRequest.ShareWait; kling.shares en la línea del kernel).
+	ShareWait int `json:"share_wait,omitempty"`
+
+	// Entrypoint y Cmd son los de la máquina (RunRequest.Entrypoint/Cmd), si
+	// se dieron: el daemon los guarda para volver a dárselos en un Start.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+
+	// VolumeWait: arrancó con sus volúmenes sin montar, esperando al host
+	// (RunRequest.VolumeWait). Mientras siga así, un commit no los suelta ni
+	// se los devuelve (devolvérselos lanzaría el servicio en ella).
+	VolumeWait bool `json:"volume_wait,omitempty"`
 
 	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
@@ -360,6 +375,81 @@ type RunRequest struct {
 	// nombres). Solo en frío: con From se rechaza, porque la copia es la
 	// memoria del dorado y su servicio ya arrancó con el entorno de aquel.
 	Env []string `json:"env,omitempty"`
+	// ShareWait: el agente espera a tantas carpetas vivas (con plazo) antes
+	// de lanzar el servicio de la imagen, para que no arranque sin su código.
+	// 0 = las carpetas vivas de Shares. Sirve para preparar una plantilla sin
+	// carpetas cuyo servicio arranque cuando se le den: sus copias (From con
+	// el mismo número de carpetas vivas) las reciben tras restaurar. Un agente
+	// anterior lo ignora y arranca el servicio en seguida.
+	ShareWait int `json:"share_wait,omitempty"`
+	// Entrypoint y Cmd sustituyen a los de la imagen para el servicio de esta
+	// máquina, sin hornear otra imagen: el ENTRYPOINT y el CMD de Docker
+	// (`docker run --entrypoint x img args...`). Cmd solo cambia los
+	// argumentos y conserva el ENTRYPOINT; Entrypoint cambia el ejecutable y,
+	// sin Cmd, deja los argumentos vacíos, como Docker. Llegan por MMDS como el
+	// entorno (MachineCmdMMDSKey) y solo en frío: con From se rechazan (el
+	// servicio del dorado ya arrancó con el suyo). Un daemon sin
+	// CapabilityMachineCmd los ignoraría: el CLI la mira antes de mandarlos.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+	// VolumeWait: la máquina arranca con sus Volumes puestos pero SIN
+	// montar, y el servicio de la imagen sin lanzar, hasta que el host se los
+	// monta. Es para guardar una plantilla de un servicio con volúmenes sin
+	// congelar en su memoria la caché de un disco que después cambia: el
+	// commit no los toca (no están montados) y cada copia, al restaurarse, los
+	// monta y lanza el servicio con los datos de ahora. Necesita Volumes y no
+	// vale con From. Solo el primer arranque: un Start los monta como siempre.
+	VolumeWait bool `json:"volume_wait,omitempty"`
+}
+
+// CapabilityMachineCmd es la capacidad de GET /info que dice que el daemon
+// entiende RunRequest.Entrypoint y RunRequest.Cmd.
+const CapabilityMachineCmd = "machine-cmd"
+
+// MachineCmdBootParam (kling.cmd=1) le dice al agente que hay un comando de
+// la máquina en MMDS y que no arranque el servicio de la imagen sin él.
+const MachineCmdBootParam = "kling.cmd"
+
+// MachineCmdMMDSKey es la clave del almacén MMDS que lleva el comando de la
+// máquina (MachineCmd). Como el entorno, el daemon la borra cuando el agente
+// contesta.
+const MachineCmdMMDSKey = "machine_cmd"
+
+// MachineCmd es el comando de una máquina tal como viaja por MMDS. nil en
+// un campo es "el de la imagen".
+type MachineCmd struct {
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+}
+
+// Límites del comando de una máquina: caben con el entorno en el almacén.
+const (
+	MaxMachineCmdArgs  = 1024
+	MaxMachineCmdBytes = 32 << 10
+)
+
+// CheckMachineCmd valida un comando de máquina.
+func CheckMachineCmd(c MachineCmd) error {
+	n, total := 0, 0
+	for _, l := range [][]string{c.Entrypoint, c.Cmd} {
+		for _, a := range l {
+			if strings.ContainsRune(a, 0) {
+				return fmt.Errorf("invalid command: an argument has a NUL byte")
+			}
+			n++
+			total += len(a) + 1
+		}
+	}
+	if n > MaxMachineCmdArgs {
+		return fmt.Errorf("the command has %d arguments, over the limit of %d", n, MaxMachineCmdArgs)
+	}
+	if total > MaxMachineCmdBytes {
+		return fmt.Errorf("the command is %d bytes, over the limit of %d", total, MaxMachineCmdBytes)
+	}
+	if c.Entrypoint != nil && len(c.Entrypoint) > 0 && c.Entrypoint[0] == "" {
+		return fmt.Errorf("invalid command: the entrypoint's executable is empty")
+	}
+	return nil
 }
 
 // GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en
@@ -431,6 +521,20 @@ const LayerBootParam = "kling.layer"
 // concederse a sí mismo esa capacidad porque la línea de comandos del kernel la
 // escribe quien arranca la máquina.
 const ExecBootParam = "kling.exec"
+
+// ShareWaitBootParam (kling.shares=N) le dice al agente cuántas carpetas vivas
+// esperar antes de lanzar el servicio (RunRequest.ShareWait). Un agente
+// anterior no lo conoce: avisa y lo ignora.
+const ShareWaitBootParam = "kling.shares"
+
+// VolumeWaitBootParam (kling.volwait=1) le dice al agente que no monte sus
+// volúmenes ni lance el servicio hasta que el host se los monte
+// (RunRequest.VolumeWait).
+const VolumeWaitBootParam = "kling.volwait"
+
+// CapabilityVolumeWait es la capacidad de GET /info que dice que el daemon
+// entiende RunRequest.VolumeWait.
+const CapabilityVolumeWait = "volume-wait"
 
 // Image es una imagen de rootfs ya construida ($ROOT/images/$NAME.ext4): la base
 // de la que se arrancan las microVMs. Hasta que existió GET /images no se podían
@@ -662,6 +766,12 @@ type Snapshot struct {
 	// congelada y las instancias los heredan.
 	EnvKeys []string `json:"env_keys,omitempty"`
 
+	// ShareWait: la máquina de la que se hizo commit arrancó con su agente
+	// esperando a tantas carpetas vivas (Machine.ShareWait). Solo una
+	// plantilla así acepta carpetas vivas al instanciarla, y tantas como
+	// éstas: su servicio aún no arrancó y arranca con ellas.
+	ShareWait int `json:"share_wait,omitempty"`
+
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
@@ -874,6 +984,14 @@ type Info struct {
 	// en Linux, "vz" en macOS (kling-vz). Vacío = daemon anterior, que siempre
 	// era firecracker.
 	Backend string `json:"backend,omitempty"`
+	// BackendReason es por qué el daemon usa ese backend: "auto: …" con
+	// daemon.vmm auto (macOS), "daemon.vmm hv", "KLING_VMM=vz". Vacío en Linux
+	// y en daemons anteriores.
+	BackendReason string `json:"backend_reason,omitempty"`
+	// PoolProblems son los fondos precalentados (kling template pool) que no
+	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
+	// Vacío = todos bien o ninguno.
+	PoolProblems []PoolInfo `json:"pool_problems,omitempty"`
 	// Arch es la arquitectura del host del daemon (GOARCH: "amd64", "arm64").
 	// Las imágenes y el kernel son de una arquitectura: `kling images copy`
 	// la compara antes de mover gigas que luego no arrancarían.

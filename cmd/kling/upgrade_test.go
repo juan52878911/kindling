@@ -314,3 +314,22 @@ func TestLibPorDefecto(t *testing.T) {
 		t.Fatalf("lib %q, pista %q", got, pistaAgente())
 	}
 }
+
+// kling-hv se actualiza junto a kling-vz, y se instala si solo está kling-vz
+// (opcional: una release sin él no es un error). Sin kling-vz al lado no se
+// toca ninguno.
+func TestPiezasVMMMac(t *testing.T) {
+	dir := t.TempDir()
+	if p := piezasVMMMac(dir, "arm64"); len(p) != 0 {
+		t.Fatalf("without kling-vz next to kling: %+v", p)
+	}
+	os.WriteFile(filepath.Join(dir, "kling-vz"), []byte("vz"), 0o755)
+	p := piezasVMMMac(dir, "arm64")
+	if len(p) != 2 || p[0].Asset.Nombre != "kling-vz-darwin-arm64" || p[0].Asset.Opcional ||
+		p[1].Asset.Nombre != "kling-hv-darwin-arm64" || !p[1].Asset.Opcional || p[1].Destino != filepath.Join(dir, "kling-hv") {
+		t.Fatalf("with kling-vz: %+v", p)
+	}
+	if p := piezasVMMMac(dir, "amd64"); len(p) != 0 {
+		t.Fatalf("Intel: %+v", p)
+	}
+}

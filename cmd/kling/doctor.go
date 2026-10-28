@@ -197,7 +197,19 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		if c, ok := checkAuthz(in.info.Authz); ok {
 			out = append(out, c)
 		}
-		if c, ok := checkStale(in.snaps); ok {
+		if c, ok := checkStale(delMismoVMM(in.snaps, in.info)); ok {
+			out = append(out, c)
+		}
+		if c, ok := checkOtroVMM(in.snaps, in.info); ok {
+			out = append(out, c)
+		}
+		for _, p := range in.info.PoolProblems {
+			c := doctorCheck{Name: "pool " + p.Template, State: doctorWarn,
+				Detail: fmt.Sprintf("%d/%d ready; could not pre-warm a copy: %s", p.Ready, p.Size, firstLine(p.Error))}
+			if p.Stale != "" {
+				c.Detail = fmt.Sprintf("%d/%d ready; its golden is stale (%s)", p.Ready, p.Size, p.Stale)
+				c.Fix = strings.Join(strings.Fields(strings.ReplaceAll(p.Fix, "\n", " | ")), " ")
+			}
 			out = append(out, c)
 		}
 	}
@@ -271,6 +283,94 @@ func doctorChecks(in doctorInput) []doctorCheck {
 // ahora (otra versión de Firecracker o de kling-vz, docs/actualizar.md): run
 // -from da 409 con ellos. Sin ninguno no hay línea: no es algo que haya que
 // tener presente cuando todo está bien.
+// printPoolProblems dice en `kling status` qué fondos precalentados no se
+// reponen y qué teclear: tras cambiar de VMM (vz → hv) su dorado sale
+// obsoleto y, sin esto, solo lo contaba el log del daemon.
+func printPoolProblems(ps []api.PoolInfo) {
+	for _, p := range ps {
+		if p.Stale != "" {
+			fmt.Printf("pool:         ✗ %s: %d/%d ready, its golden is stale (%s). Re-save it:\n", p.Template, p.Ready, p.Size, p.Stale)
+			for _, l := range strings.Split(p.Fix, "\n") {
+				fmt.Printf("              %s\n", strings.TrimSpace(l))
+			}
+			continue
+		}
+		fmt.Printf("pool:         ✗ %s: %d/%d ready, could not pre-warm a copy: %s\n", p.Template, p.Ready, p.Size, firstLine(p.Error))
+	}
+}
+
+// vmmDeBackend es el nombre con que se sella un dorado hecho con ese
+// backend (meta.go: "kling-hv 0.19.0").
+func vmmDeBackend(b string) string {
+	switch b {
+	case "", "firecracker":
+		return "firecracker"
+	}
+	return "kling-" + b
+}
+
+// checkOtroVMM lista los dorados sellados por otro VMM que el del daemon: lo
+// que deja un cambio de vz a hv (daemon.vmm auto en un Mac que se actualizó).
+// Ninguno se puede restaurar; se rehacen o se vuelve al VMM de antes.
+func checkOtroVMM(snaps []*api.Snapshot, info *api.Info) (doctorCheck, bool) {
+	if info == nil {
+		return doctorCheck{}, false
+	}
+	ahora := vmmDeBackend(info.Backend)
+	porVMM := map[string][]string{}
+	var vmms []string
+	for _, s := range snaps {
+		if s == nil || s.VMM == "" {
+			continue
+		}
+		v, _, _ := strings.Cut(s.VMM, " ")
+		if v == ahora {
+			continue
+		}
+		if porVMM[v] == nil {
+			vmms = append(vmms, v)
+		}
+		porVMM[v] = append(porVMM[v], s.Name)
+	}
+	if len(vmms) == 0 {
+		return doctorCheck{}, false
+	}
+	sort.Strings(vmms)
+	var partes []string
+	volver := ""
+	for _, v := range vmms {
+		ns := porVMM[v]
+		sort.Strings(ns)
+		shown := ns
+		if len(shown) > 5 {
+			shown = append(shown[:5:5], fmt.Sprintf("and %d more", len(ns)-5))
+		}
+		partes = append(partes, fmt.Sprintf("%d made with %s: %s", len(ns), v, strings.Join(shown, ", ")))
+		if b, ok := strings.CutPrefix(v, "kling-"); ok && volver == "" && info.Backend != "firecracker" {
+			volver = "; or go back to it: kling config set daemon.vmm " + b + " and restart the daemon"
+		}
+	}
+	return doctorCheck{Name: "templates (vmm)", State: doctorWarn,
+		Detail: fmt.Sprintf("this daemon runs %s; %s", ahora, strings.Join(partes, "; ")),
+		Fix:    "re-save each: kling save -replace <machine> <name> (kling mcp import <name> -force for an imported MCP service)" + volver}, true
+}
+
+// delMismoVMM quita de snaps los sellados por otro VMM: esos los cuenta
+// checkOtroVMM, con su arreglo.
+func delMismoVMM(snaps []*api.Snapshot, info *api.Info) []*api.Snapshot {
+	ahora := vmmDeBackend(info.Backend)
+	var out []*api.Snapshot
+	for _, s := range snaps {
+		if s != nil && s.VMM != "" {
+			if v, _, _ := strings.Cut(s.VMM, " "); v != ahora {
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func checkStale(snaps []*api.Snapshot) (doctorCheck, bool) {
 	var names []string
 	for _, s := range snaps {

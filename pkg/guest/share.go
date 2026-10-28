@@ -17,6 +17,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,11 @@ type Shares struct {
 	// fromGuest dice si una petición viene del propio invitado. Variable por lo
 	// mismo: en los tests todo llega por loopback.
 	fromGuest func(r *http.Request) bool
+
+	// withSession son las carpetas que ya tuvieron sesión, y changed se
+	// cierra con cada una nueva (share_wait.go).
+	withSession map[int]bool
+	changed     chan struct{}
 }
 
 type shareMount struct {
@@ -112,8 +118,10 @@ func (s *Shares) AttachHandler() http.HandlerFunc {
 		// El lector con búfer puede traer bytes que ya leyó el servidor HTTP.
 		sess := newShareSession(&hijacked{r: brw.Reader, Conn: conn})
 		sess.hello()
+		watching := sess.watch()
 		m.fs.attach(sess)
-		log.Printf("share %d attached at %s (%s, %d KiB I/O)", a.Tag, a.Mount, a.Mode, sess.maxIO>>10)
+		s.noteAttached(a.Tag)
+		log.Printf("share %d attached at %s (%s, %d KiB I/O, host changes: %v)", a.Tag, a.Mount, a.Mode, sess.maxIO>>10, watching)
 	}
 }
 
@@ -173,6 +181,12 @@ func requestFromGuest(r *http.Request) bool {
 	rh, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return true
+	}
+	// Por vsock (kling-vz, kling-hv) la dirección es un CID: solo el host
+	// (2) cuenta como de fuera. Antes se miraba como IP, no lo era, y toda
+	// carpeta viva conectada por vsock se rechazaba.
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la.Network() == "vsock" {
+		return rh != strconv.Itoa(vmaddrCIDHost)
 	}
 	rip := net.ParseIP(rh)
 	if rip == nil || rip.IsLoopback() {

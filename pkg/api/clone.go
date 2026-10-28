@@ -32,6 +32,10 @@ func (mc *Machine) Clone() *Machine {
 	out.CredentialDomains = append([]string(nil), mc.CredentialDomains...)
 	out.CredentialAnyDatabase = append([]string(nil), mc.CredentialAnyDatabase...)
 	out.EnvKeys = append([]string(nil), mc.EnvKeys...)
+	// slices.Clone conserva nil frente a vacío: un Entrypoint vacío es "sin
+	// ENTRYPOINT", uno nil es "el de la imagen".
+	out.Entrypoint = slices.Clone(mc.Entrypoint)
+	out.Cmd = slices.Clone(mc.Cmd)
 
 	if mc.Forwards != nil {
 		out.Forwards = make(map[string]string, len(mc.Forwards))

@@ -110,9 +110,10 @@ type Defaults struct {
 // Daemon es la sección daemon.* de la configuración.
 type Daemon struct {
 	// VMM es el backend con el que el daemon arranca las microVMs:
-	// "firecracker" (Linux con KVM) o "vz" (macOS en Apple Silicon, con
-	// kling-vz). Vacío = el de la plataforma (ver DefaultVMM). KLING_VMM lo
-	// sustituye sin tocar el fichero.
+	// "firecracker" (Linux con KVM), "vz" (macOS en Apple Silicon, con
+	// kling-vz), "hv" (lo mismo con kling-hv) o "auto" (macOS: hv si este Mac
+	// lo admite, si no vz; se decide al arrancar el daemon). Vacío = el de la
+	// plataforma (ver DefaultVMM). KLING_VMM lo sustituye sin tocar el fichero.
 	VMM string `json:"vmm,omitempty"`
 
 	// ShareRoots son los directorios del host bajo los que se pueden compartir
@@ -151,6 +152,34 @@ type Daemon struct {
 	// construcción. Ver docs/imagenes.md.
 	BuildCacheMaxGiB  int `json:"build_cache_max_gib,omitempty"`
 	BuildCacheMaxDays int `json:"build_cache_max_days,omitempty"`
+
+	// BatteryMode decide el modo batería (macOS): "auto" (vacío: cuando el
+	// Mac va con batería), "on" (siempre) u "off" (nunca). En batería el
+	// daemon pausa las máquinas ociosas, les baja la QoS y espacia sus
+	// vigilantes. KLING_BATTERY_MODE lo sustituye. Ver docs/mac.md.
+	BatteryMode string `json:"battery_mode,omitempty"`
+
+	// BatteryPauseAfter son los segundos de inactividad tras los que el modo
+	// batería pausa una máquina. 0 = 60; -1 = no pausar nunca (solo QoS y
+	// vigilantes). KLING_BATTERY_PAUSE_AFTER lo sustituye.
+	BatteryPauseAfter int `json:"battery_pause_after_seconds,omitempty"`
+}
+
+// Modos de daemon.battery_mode.
+const (
+	BatteryAuto = "auto"
+	BatteryOn   = "on"
+	BatteryOff  = "off"
+)
+
+// ValidateBatteryMode dice si v es un valor válido de daemon.battery_mode
+// (vacío = auto).
+func ValidateBatteryMode(v string) error {
+	switch v {
+	case "", BatteryAuto, BatteryOn, BatteryOff:
+		return nil
+	}
+	return fmt.Errorf("daemon.battery_mode must be %q, %q or %q, not %q", BatteryAuto, BatteryOn, BatteryOff, v)
 }
 
 // Modos de daemon.cow.
@@ -173,20 +202,27 @@ func ValidateCoW(v string) error {
 const (
 	VMMFirecracker = "firecracker"
 	VMMVZ          = "vz"
+	// VMMHV es kling-hv: Hypervisor.framework con la RAM en un fichero
+	// mapeado (restaurar no copia la memoria). Mismo contrato que vz.
+	VMMHV = "hv"
+	// VMMAuto es la elección del daemon de macOS al arrancar: hv si el macOS,
+	// kling-hv y su sonda lo permiten; si no, vz (docs/mac.md).
+	VMMAuto = "auto"
 )
 
-// DefaultVMM es el backend de la plataforma: vz en macOS, firecracker en el
-// resto.
+// DefaultVMM es el backend de la plataforma: auto en macOS (hv o vz, lo
+// decide el daemon), firecracker en el resto.
 func DefaultVMM(goos string) string {
 	if goos == "darwin" {
-		return VMMVZ
+		return VMMAuto
 	}
 	return VMMFirecracker
 }
 
 // ValidateVMM dice si el backend name puede correr en goos/goarch. Es una
 // elección del usuario, pero no cualquiera vale: Firecracker es KVM y KVM es
-// Linux; kling-vz es Virtualization.framework en Apple Silicon.
+// Linux; kling-vz es Virtualization.framework y kling-hv Hypervisor.framework,
+// los dos en Apple Silicon.
 func ValidateVMM(name, goos, goarch string) error {
 	switch name {
 	case VMMFirecracker:
@@ -194,12 +230,12 @@ func ValidateVMM(name, goos, goarch string) error {
 			return fmt.Errorf("vmm %q needs Linux with KVM, and this is %s/%s: use %q here (or point the CLI at a Linux host with `kling context add`)",
 				name, goos, goarch, DefaultVMM(goos))
 		}
-	case VMMVZ:
+	case VMMVZ, VMMHV, VMMAuto:
 		if goos != "darwin" || goarch != "arm64" {
 			return fmt.Errorf("vmm %q needs macOS on Apple Silicon (darwin/arm64), and this is %s/%s", name, goos, goarch)
 		}
 	default:
-		return fmt.Errorf("unknown vmm %q: use %q or %q", name, VMMFirecracker, VMMVZ)
+		return fmt.Errorf("unknown vmm %q: use %q, %q, %q or %q", name, VMMFirecracker, VMMVZ, VMMHV, VMMAuto)
 	}
 	return nil
 }
@@ -472,6 +508,20 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.CoW = value
+		case "battery_mode":
+			if err := ValidateBatteryMode(value); err != nil {
+				return err
+			}
+			c.Daemon.BatteryMode = value
+		case "battery_pause_after_seconds":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < -1 || n > 86400 {
+				return fmt.Errorf("daemon.battery_pause_after_seconds must be between -1 (never) and 86400 (0 is the default, 60)")
+			}
+			c.Daemon.BatteryPauseAfter = n
 		case "cow_store_gib":
 			n, err := atoi()
 			if err != nil {
@@ -605,6 +655,8 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.credaudit_generations", itoa(c.Daemon.CredAuditGenerations)},
 		{"daemon.build_cache_max_gib", itoa(c.Daemon.BuildCacheMaxGiB)},
 		{"daemon.build_cache_max_days", itoa(c.Daemon.BuildCacheMaxDays)},
+		{"daemon.battery_mode", c.Daemon.BatteryMode},
+		{"daemon.battery_pause_after_seconds", itoa(c.Daemon.BatteryPauseAfter)},
 	}
 }
 

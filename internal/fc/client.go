@@ -111,6 +111,11 @@ type Drive struct {
 	IsRootDevice bool         `json:"is_root_device"`
 	IsReadOnly   bool         `json:"is_read_only"`
 	RateLimiter  *RateLimiter `json:"rate_limiter,omitempty"`
+	// KlingDisposable (extensión de kling-vz): el overlay de una máquina que se
+	// tira con ella, que puede ir sin sincronizar (docs/backend-vz.md).
+	// Firecracker rechaza los campos que no conoce: omitempty hace que con
+	// false no viaje, y el núcleo solo lo pone a true con kling-vz.
+	KlingDisposable bool `json:"kling_disposable,omitempty"`
 }
 
 // RateLimiter acota el caudal de un dispositivo. Sin esto, una sola microVM
@@ -170,6 +175,17 @@ func (c *Client) PatchDrive(ctx context.Context, driveID, pathOnHost string) err
 	return c.do(ctx, http.MethodPatch, "/drives/"+driveID, map[string]string{
 		"drive_id":     driveID,
 		"path_on_host": pathOnHost,
+	})
+}
+
+// PatchDriveDisposable es PatchDrive marcando además el disco como overlay
+// desechable (kling_disposable, ver Drive). Solo para kling-vz y solo antes de
+// crear la VM: tras cargar un snapshot con resume_vm false.
+func (c *Client) PatchDriveDisposable(ctx context.Context, driveID, pathOnHost string) error {
+	return c.do(ctx, http.MethodPatch, "/drives/"+driveID, map[string]any{
+		"drive_id":         driveID,
+		"path_on_host":     pathOnHost,
+		"kling_disposable": true,
 	})
 }
 

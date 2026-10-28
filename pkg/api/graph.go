@@ -199,9 +199,90 @@ type GraphEdge struct {
 	// invitados; Mode, cómo la monta From (ro por defecto, o rw).
 	Mount string `json:"mount,omitempty"`
 	Mode  string `json:"mode,omitempty"`
+	// Health: solo depends. To no está listo hasta que su Test, ejecutado
+	// DENTRO de To, acaba con 0: el healthcheck de Docker Compose y su
+	// condition: service_healthy. Necesita To con allow_exec (las copias de
+	// una plantilla de compose lo tienen) y un daemon con
+	// CapabilityGraphHealth. Con Port, antes el puerto.
+	Health *GraphHealth `json:"health,omitempty"`
 	// Secret es la clave real de una arista credential. NUNCA se serializa:
 	// viaja en GraphRequest.Secrets y el daemon la guarda cifrada.
 	Secret string `json:"-"`
+}
+
+// CapabilityGraphHealth es la capacidad de GET /info que dice que el daemon
+// entiende GraphEdge.Health. Uno anterior rechaza el campo (no lo conoce).
+const CapabilityGraphHealth = "graph-health"
+
+// GraphHealth es el healthcheck de una arista depends (GraphEdge.Health),
+// con los tiempos de Docker: cada intento dura como mucho TimeoutSeconds, y
+// está enfermo si no pasó en StartPeriodSeconds + Retries × IntervalMS
+// (cuando Docker lo declararía unhealthy). Lo que se espera es el primer
+// intento que pasa, así que se intenta cada StartIntervalMS (200 ms si no),
+// no cada IntervalMS: un postgres listo en 1 s no hace esperar 30.
+type GraphHealth struct {
+	Test               []string `json:"test"`
+	IntervalMS         int      `json:"interval_ms,omitempty"`
+	TimeoutSeconds     int      `json:"timeout_seconds,omitempty"`
+	Retries            int      `json:"retries,omitempty"`
+	StartPeriodSeconds int      `json:"start_period_seconds,omitempty"`
+	StartIntervalMS    int      `json:"start_interval_ms,omitempty"`
+}
+
+// Valores por defecto de GraphHealth: los de Docker, salvo el paso entre
+// intentos (Docker, 5 s en el arranque): aquí se espera a alguien en primer
+// plano.
+const (
+	GraphHealthInterval      = 30 * time.Second
+	GraphHealthTimeout       = 30 * time.Second
+	GraphHealthRetries       = 3
+	GraphHealthStartInterval = 200 * time.Millisecond
+	// GraphHealthMaxWait acota la espera total de una arista.
+	GraphHealthMaxWait = 10 * time.Minute
+)
+
+// Tiempos de h con los valores por defecto puestos.
+func (h GraphHealth) Tiempos() (intervalo, plazo time.Duration, reintentos int, arranque, pasoArranque time.Duration) {
+	intervalo = time.Duration(h.IntervalMS) * time.Millisecond
+	if intervalo <= 0 {
+		intervalo = GraphHealthInterval
+	}
+	plazo = time.Duration(h.TimeoutSeconds) * time.Second
+	if plazo <= 0 {
+		plazo = GraphHealthTimeout
+	}
+	reintentos = h.Retries
+	if reintentos <= 0 {
+		reintentos = GraphHealthRetries
+	}
+	arranque = time.Duration(h.StartPeriodSeconds) * time.Second
+	pasoArranque = time.Duration(h.StartIntervalMS) * time.Millisecond
+	if pasoArranque <= 0 {
+		pasoArranque = GraphHealthStartInterval
+	}
+	return
+}
+
+// validarSalud acota h.
+func validarSalud(desc string, h *GraphHealth) error {
+	if len(h.Test) == 0 || h.Test[0] == "" {
+		return fmt.Errorf("%s: health: test is empty", desc)
+	}
+	if len(h.Test) > 256 {
+		return fmt.Errorf("%s: health: test has %d arguments (max 256)", desc, len(h.Test))
+	}
+	for _, a := range h.Test {
+		if strings.ContainsRune(a, 0) {
+			return fmt.Errorf("%s: health: test has a NUL byte", desc)
+		}
+	}
+	if h.IntervalMS < 0 || h.TimeoutSeconds < 0 || h.Retries < 0 || h.StartPeriodSeconds < 0 || h.StartIntervalMS < 0 {
+		return fmt.Errorf("%s: health: negative times", desc)
+	}
+	if h.TimeoutSeconds > 600 || h.StartPeriodSeconds > 3600 || h.Retries > 100 || h.IntervalMS > 3600_000 || h.StartIntervalMS > 3600_000 {
+		return fmt.Errorf("%s: health: times out of range", desc)
+	}
+	return nil
 }
 
 // Key identifica una arista credential dentro del grafo: su origen y su
@@ -339,8 +420,15 @@ func validarNodo(name string, n *GraphNode) error {
 		vistos[p] = true
 	}
 	sort.Ints(n.Ports)
-	if len(n.Shares) > 0 && n.From != "" {
-		return fmt.Errorf("node %s: shared folders need a cold boot (image), not a template", name)
+	// Con plantilla, solo carpetas vivas: se conectan tras restaurar a una
+	// plantilla que las espera (RunRequest.ShareWait; lo comprueba el daemon).
+	// Una copia es un disco, y a una máquina restaurada no se le añaden.
+	if n.From != "" {
+		for _, sh := range n.Shares {
+			if !(ShareAttachment{Mode: sh.Mode}).Live() {
+				return fmt.Errorf("node %s: a copy share needs a cold boot (image), not a template; use ro or rw", name)
+			}
+		}
 	}
 	for k := range n.Labels {
 		if !KeyPattern.MatchString(k) {
@@ -355,6 +443,9 @@ func validarNodo(name string, n *GraphNode) error {
 
 func validarArista(g *Graph, e *GraphEdge) error {
 	desc := fmt.Sprintf("edge %s -> %s (%s)", e.From, e.To, e.Kind)
+	if e.Health != nil && e.Kind != GraphEdgeDepends {
+		return fmt.Errorf("%s: health is only for depends edges", desc)
+	}
 	from, ok := g.Nodes[e.From]
 	if !ok {
 		return fmt.Errorf("%s: node %q doesn't exist", desc, e.From)
@@ -404,7 +495,16 @@ func validarArista(g *Graph, e *GraphEdge) error {
 		return validarShare(desc, from, to, e)
 	case GraphEdgeDepends:
 		// Sin puerto, listo es "corriendo"; con puerto, además ese puerto
-		// contesta (y tiene que estar entre los que el destino expone).
+		// contesta (y tiene que estar entre los que el destino expone); con
+		// Health, además su test pasa dentro.
+		if e.Health != nil {
+			if err := validarSalud(desc, e.Health); err != nil {
+				return err
+			}
+			if !to.AllowExec && to.From == "" {
+				return fmt.Errorf("%s: health runs its test inside %s, which needs allow_exec: true", desc, e.To)
+			}
+		}
 		if e.Port == 0 {
 			return nil
 		}

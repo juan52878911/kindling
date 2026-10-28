@@ -1184,7 +1184,7 @@ Un fallo explotable ahí es código del invitado corriendo como el usuario, así
 ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
 
 - **El perfil de sandbox aísla a una máquina de las demás** (`vz/cmd/kling-vz/kling-vz.sb`,
-  `vz/internal/custodio`). Hasta ahora dejaba a `kling-vz` leer toda la raíz, incluido
+  `internal/machine/publicar_volcado.go`). Hasta ahora dejaba a `kling-vz` leer toda la raíz, incluido
   `secrets/snapshot.key` (la clave HMAC y la maestra de la que HKDF deriva la de cada
   `credentials.enc`), escribir en `snapshots/` y `volumes/` enteros y conectar a
   `localhost:*` aunque la máquina no tuviera red: un fallo en la pila de red, el DNS o
@@ -1198,21 +1198,24 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     `snapshots/` (dos reglas al final del perfil, por si el daemon le pasara ahí un
     disco). `kling-vz` no necesita ninguna clave de disco: las credenciales le llegan ya
     en claro por su API.
-  - **Dorados**: `kling commit` pide el volcado en `snapshots/<nombre>/`, un nombre que
-    no se sabe al confinarse. `kling-vz` lo vuelca en su directorio y un proceso
-    **custodio** (el mismo binario, lanzado antes de encerrarse, confinado en su propio
-    perfil: leer el directorio de la máquina, escribir bajo `snapshots/`, sin red) lo
-    clona (`clonefile`) a su sitio. El custodio no se fía de `kling-vz`: solo escribe
-    `snap.file` o `mem.file`, en un directorio que ya existe justo debajo de
-    `snapshots/` (lo crea el daemon) y que no tiene `meta.json`, sin seguir enlaces y
-    sin pisar un fichero que exista. Un dorado terminado no se puede tocar; lo peor que
-    hace un `kling-vz` tomado es adelantarse al commit en curso de otra máquina, que
-    falla en vez de quedar corrupto. Al clonar, lo que se escriba después en el origen
-    no llega al dorado.
-  - **Red**: escucha solo en `127.0.0.1:29000-29999` (sus reenvíos); sale al exterior
-    solo con egress distinto de none; al loopback del Mac (que para el sandbox incluye
-    `0.0.0.0`) solo en allowlist (el `-upstream 127.0.0.1:5432` de una credencial), y
-    nunca al rango de los reenvíos.
+  - **Dorados**: `kling commit` pide el volcado en el directorio de la máquina y el
+    daemon, que creó `snapshots/<nombre>/`, lo clona (`fclonefileat`) a su sitio. No se
+    fía de `kling-vz`: abre el directorio de la máquina y el volcado sin seguir enlaces,
+    exige un fichero regular, suyo y con un solo enlace (un hardlink a algo que el VMM
+    no puede leer no llega al dorado), clona desde ese descriptor a un fichero que no
+    existe, y lo que se escriba después en el origen no llega al dorado. Hasta la
+    v0.18 lo hacía un proceso custodio por máquina, confinado en su propio perfil;
+    `kling-vz` y `kling-hv` siguen sin poder escribir en `snapshots/`.
+  - **Red**: escucha en `127.0.0.1` (sus reenvíos, del rango 29000-29999; ahora el
+    perfil no lo acota por puerto, como el de `kling-hv`: una regla por puerto
+    eran ~40 ms de `sandbox_init` en cada arranque y restauración, y escuchar no da
+    acceso a otra máquina); sale al exterior solo con egress distinto de none; y nunca
+    al loopback del Mac (que para el sandbox incluye `0.0.0.0`). El `-upstream
+    127.0.0.1:5432` de una credencial lo marca el daemon, que solo acepta el puerto de
+    una credencial de esa máquina, fuera del rango de los reenvíos y que no sea el de
+    ninguna máquina, y le entrega el socket por el broker (`linkbroker.KindLoopback`).
+    Antes el perfil abría todo el loopback en allowlist salvo el rango, con 1000
+    reglas.
   - Probado con `sandbox-exec` y el perfil real (`vz/scripts/sandbox-perfil.sh`): con el
     perfil anterior, 15 de 23 comprobaciones abrían lo que no debían (leer
     `snapshot.key`, otras máquinas y dorados ajenos; escribir dorados y volúmenes ajenos;

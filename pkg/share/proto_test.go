@@ -81,12 +81,12 @@ func TestRutasYMontajes(t *testing.T) {
 			t.Errorf("ValidPath(%q) accepted", p)
 		}
 	}
-	for _, m := range []string{"/work", "/home/u/src", "/data2"} {
+	for _, m := range []string{"/work", "/home/u/src", "/data2", "/etc/nginx/conf.d", "/etc/nginx"} {
 		if err := ValidMount(m); err != nil {
 			t.Errorf("ValidMount(%q): %v", m, err)
 		}
 	}
-	for _, m := range []string{"", "work", "/", "/etc", "/usr/local/x", "/proc/1", "/a b", "/a,b", "/a:b", "/w/../etc", "/w/", "//w"} {
+	for _, m := range []string{"", "work", "/", "/etc", "/usr/local/x", "/proc/1", "/etc/kindling", "/etc/kling/x", "/a b", "/a,b", "/a:b", "/w/../etc", "/w/", "//w"} {
 		if ValidMount(m) == nil {
 			t.Errorf("ValidMount(%q) accepted", m)
 		}
@@ -111,5 +111,25 @@ func TestEnlaces(t *testing.T) {
 	}
 	if LinkTraverses("x", "a/b/up", isLink) {
 		t.Error("a link TO a link is fine: the other one is checked on its own")
+	}
+}
+
+func TestPush(t *testing.T) {
+	b := Push(EventCreate, "a/b.txt")
+	d := NewDec(b)
+	if id, errno := d.U64(), d.U32(); id != PushID || errno != 0 {
+		t.Fatalf("header %d %d", id, errno)
+	}
+	ev, p, err := ParsePush(d)
+	if err != nil || ev != EventCreate || p != "a/b.txt" {
+		t.Fatalf("%d %q %v", ev, p, err)
+	}
+	for _, bad := range [][]byte{Push(0, "x"), Push(EventModify, "../x"), Push(EventModify, "/x"), append(Push(EventModify, "x"), 0)} {
+		d := NewDec(bad)
+		d.U64()
+		d.U32()
+		if _, _, err := ParsePush(d); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
 	}
 }

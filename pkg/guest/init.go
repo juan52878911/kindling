@@ -39,6 +39,7 @@ const (
 	msRdonly = 0x1
 	msNosuid = 0x2
 	msNodev  = 0x4
+	msNoexec = 0x8
 )
 
 const (
@@ -218,6 +219,10 @@ func runInit(s initSys, environ []string) error {
 	if s.MkdirAll("/dev/shm", 0o755) == nil {
 		_ = s.Mount("tmpfs", "/dev/shm", "tmpfs", msNosuid|msNodev, "mode=1777")
 	}
+
+	// Antes que nada de la imagen: en una emulada, todo lo suyo es de otra
+	// arquitectura (binfmt.go).
+	initBinfmt(s)
 
 	hn := initHostname(s)
 	initHosts(s, hn)
