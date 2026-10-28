@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -522,13 +523,55 @@ func (p *Publicador) marcar(mq *maquina, port int) (net.Conn, error) {
 		}
 		c, err := net.DialTimeout("tcp", mc.Addr(port), 2*time.Second)
 		if err == nil {
-			return c, nil
+			// En el Mac se conecta a un reenvío de loopback, que acepta
+			// siempre y corta con un RST si en el invitado nadie escucha: si
+			// ese RST ya está, también es "aún no escucha".
+			pre, reset := asomar(c)
+			if !reset {
+				return &conPrefijo{Conn: c, pre: pre}, nil
+			}
+			c.Close()
+			err = syscall.ECONNRESET
 		}
 		if time.Now().After(limite) || p.contexto().Err() != nil {
 			return nil, err
 		}
 		time.Sleep(pasoMarcar)
 	}
+}
+
+// asomar mira, sin esperar, si c ya llegó cortada con un RST; lo que ya
+// hubiera llegado se devuelve para entregarlo.
+func asomar(c net.Conn) (pre []byte, reset bool) {
+	if err := c.SetReadDeadline(time.Now()); err != nil {
+		return nil, false
+	}
+	defer c.SetReadDeadline(time.Time{})
+	b := make([]byte, 4096)
+	n, err := c.Read(b)
+	return b[:n], err != nil && errors.Is(err, syscall.ECONNRESET)
+}
+
+// conPrefijo es una conexión con unos bytes ya leídos delante.
+type conPrefijo struct {
+	net.Conn
+	pre []byte
+}
+
+func (c *conPrefijo) Read(b []byte) (int, error) {
+	if len(c.pre) > 0 {
+		n := copy(b, c.pre)
+		c.pre = c.pre[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *conPrefijo) CloseWrite() error {
+	if cw, ok := c.Conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (p *Publicador) contexto() context.Context {
