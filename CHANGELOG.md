@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- amd64-only Docker images on arm64 hosts (Mac, Linux arm64): `kling image import -arch amd64` and `kling run -platform linux/amd64` run them with a pinned static qemu-user inside the guest, registered in binfmt_misc by the arm64 agent (opt-in, ~16x slower on CPU; see docs/imagenes-amd64.md)
 - macOS battery mode (`daemon.battery_mode: auto|on|off`, `daemon.battery_pause_after_seconds`): on battery, idle machines get background QoS and are paused after 60 s idle (never with a request in flight, published ports, pools or live shares), the watch runs every 30 s, and AC power resumes them
 - After the host sleeps, the daemon resyncs the clock of running guests (detected from wall vs monotonic clock, no extra wakeups)
 - Live shares see host edits at once: the daemon watches what the guest looked at (kqueue/inotify) and the agent invalidates the guest caches and fires inotify, so `node --watch`, nodemon or vite reload on a host edit (`docs/desarrollo-local.md`)
@@ -40,6 +41,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- arm64 guest kernel: `CONFIG_BINFMT_MISC=y` (HZ stays 250: HZ 100 made no idle difference and broke freeze/thaw with a live share). New kernel sha256, so goldens get a new seal: old ones still restore (with the existing "different kernel" warning) but keep the old kernel; rebuild them to get binfmt_misc. x86 kernel unchanged
 - macOS: new machines boot with a 16384-byte link MTU (`KLING_VZ_MTU`, 1500-65535): guest↔host throughput through a forward goes from ~600/950 to ~1900/2650 MiB/s; snapshots carry the MTU and vsock (`kling_vz` format 3, which an older `kling-vz` refuses)
 
 - `kling-vz` no longer wakes up 10 times a second per VM: the CPU regulator waits for a change when there is no ceiling (the vz default) and backs off to 500 ms with an idle VM; the credential audit log arms its flush timer only with something pending (~65 to ~1 context switches/s per VM, also paused)
