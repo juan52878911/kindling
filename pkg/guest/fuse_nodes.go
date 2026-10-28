@@ -190,6 +190,19 @@ func (t *nodeTable) detach(parent *node, name string) {
 	t.detachLocked(parent, name)
 }
 
+// orphan desengancha n de su padre si sigue colgado de él, y devuelve el id
+// del padre y el nombre que tenía (0 si ya estaba huérfano).
+func (t *nodeTable) orphan(n *node) (uint64, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p, name := n.parent, n.name
+	if p == nil || p.children[name] != n {
+		return 0, ""
+	}
+	t.detachLocked(p, name)
+	return p.id, name
+}
+
 func (t *nodeTable) detachLocked(parent *node, name string) {
 	n := parent.children[name]
 	if n == nil {

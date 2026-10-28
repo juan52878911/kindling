@@ -608,6 +608,18 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		}
 		fs.drain(n, false) // un O_TRUNC va después de lo ya escrito
 		errno, d, s := fs.callS(share.OpOpen, func(e *share.Enc) { e.Str(p); e.U32(flags) })
+		if errno == share.ENOENT {
+			// El host lo borró y el kernel aún tenía la entrada (sin aviso: ruta
+			// sin vigilar, o en el segundo de eco). Un open(O_CREAT) sobre esa
+			// entrada llega aquí como OPEN, sin O_CREAT, y daba ENOENT al
+			// volver a crear el mismo nombre. Con ESTALE el VFS repite la
+			// búsqueda revalidando (LOOKUP_REVAL): el LOOKUP ve que no existe y
+			// el open crea. El nodo se suelta para que lo nuevo sea otro.
+			if pid, name := fs.nodes.orphan(n); pid != 0 {
+				go fs.notifyEntry(pid, name)
+			}
+			return fail(share.ESTALE)
+		}
 		if errno != 0 {
 			return fail(errno)
 		}
