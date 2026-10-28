@@ -251,7 +251,7 @@ el host no lo despierta. Con WATCH:
    cada ruta de un stat, list, open, create o mkdir, con kqueue en macOS (un
    descriptor `O_EVTONLY` por ruta) e inotify en Linux (por `/proc/self/fd`
    de un `O_PATH` abierto con `os.Root`, sin descriptores). Tope de 4096 rutas
-   por sesión, expulsando la menos usada; en macOS, 8192 descriptores en todo
+   por sesión, expulsando la menos usada; en macOS, 4096 descriptores en todo
    el daemon. Lo que el invitado nunca miró no puede estar en su caché ni
    tener un vigilante: un `node_modules` sin abrir no cuesta nada.
 2. Los cambios se agrupan 15 ms y se comparan: un directorio vigilado se vuelve

@@ -17,7 +17,7 @@ import (
 // watchFDs acota los descriptores de vigilancia de todo el daemon, aparte de
 // los de ficheros abiertos (globalFDs): vigilar no debe dejar sin descriptores
 // a las operaciones.
-var watchFDs = make(chan struct{}, 8192)
+var watchFDs = make(chan struct{}, 4096)
 
 const kqNotes = syscall.NOTE_WRITE | syscall.NOTE_EXTEND | syscall.NOTE_ATTRIB |
 	syscall.NOTE_DELETE | syscall.NOTE_RENAME | syscall.NOTE_REVOKE
