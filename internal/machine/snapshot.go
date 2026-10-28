@@ -1706,7 +1706,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al
 	// detectar que ha sido restaurado.
-	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
+	// Con kling-vz y on_ttl=remove, el overlay de esta copia va sin
+	// sincronizar (desechable.go): se marca aquí, con la VM aún sin crear.
+	patch := c.PatchDrive
+	if overlayDesechable(mc) {
+		patch = c.PatchDriveDisposable
+	}
+	if err := patch(ctx, "overlay", overlay); err != nil {
 		return abortar(fmt.Errorf("repointing overlay: %w", err))
 	}
 	// Cada volumen se reapunta igual que el overlay: el dispositivo ya existe
