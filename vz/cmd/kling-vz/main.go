@@ -72,6 +72,13 @@ func logf(format string, args ...any) {
 	stdout.line("kling-vz: " + fmt.Sprintf(format, args...))
 }
 
+// frenoCaido es el error de footprint.ErrFrenoCaido visto como
+// server.ErrFreezeLost, sin repetir el mensaje.
+type frenoCaido struct{ error }
+
+func (e frenoCaido) Is(target error) bool { return target == server.ErrFreezeLost }
+func (e frenoCaido) Unwrap() error        { return e.error }
+
 // argFreno lanza este binario como proceso freno del tope de CPU (ver
 // footprint/freno_darwin.go).
 const argFreno = "--cpu-brake"
@@ -146,7 +153,14 @@ func run() int {
 				logf("warning: %v", err)
 			}
 		}
-		freeze = freno.Freeze
+		freeze = func(stop bool) error {
+			err := freno.Freeze(stop)
+			if errors.Is(err, footprint.ErrFrenoCaido) {
+				// El servidor reconoce su centinela, no el de footprint.
+				return frenoCaido{err}
+			}
+			return err
+		}
 	}
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
@@ -244,13 +258,14 @@ func run() int {
 		Resolver:  resolver,
 		// Las claves del proxy viven en la memoria de este proceso, que
 		// corre como el usuario; ver la sección 7 de SECURITY.md.
-		Credentials: creds,
-		CredIP:      vnet.GatewayIP,
-		Confine:     confine,
-		Destino:     destino,
-		CPUTime:     meter.CPUTime,
-		Freeze:      freeze,
-		Graph:       grafoMaq,
+		Credentials:   creds,
+		CredIP:        vnet.GatewayIP,
+		Confine:       confine,
+		Destino:       destino,
+		CPUTime:       meter.CPUTime,
+		Freeze:        freeze,
+		HelperStopped: meter.HelperStopped,
+		Graph:         grafoMaq,
 	})
 
 	// Un socket que sobra de un proceso muerto impediría escuchar. Solo se
@@ -292,6 +307,14 @@ func run() int {
 	case err := <-srv.Done():
 		if err != nil {
 			code = 1
+		}
+		if errors.Is(err, server.ErrFreezeLost) {
+			// El auxiliar se quedó parado sin freno: no contestaría a Stop
+			// (Shutdown esperaría para siempre). Salir ya, que al irse este
+			// proceso el sistema se lo lleva.
+			_ = hs.Close()
+			_ = creds.Close()
+			return code
 		}
 		srv.Shutdown()
 	case err := <-serveErr:

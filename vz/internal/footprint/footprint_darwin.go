@@ -18,6 +18,7 @@ package footprint
 /*
 #include <libproc.h>
 #include <sys/proc_info.h>
+#include <sys/proc.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
@@ -30,17 +31,36 @@ static long long phys_footprint(int pid) {
 	return (long long)ri.ri_phys_footprint;
 }
 
-// cpu_ns es el tiempo de CPU (usuario + sistema) de pid en nanosegundos, o -1.
-// proc_pid_rusage lo da en ticks de mach_absolute_time, no en nanosegundos
-// (en Apple Silicon un tick son ~41,7 ns): sin convertirlo, 489 ms de CPU se
-// leen como 12 ms (medido en un M4).
-static long long cpu_ns(int pid) {
-	struct rusage_info_v4 ri;
-	if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) return -1;
+// cpu_times da la CPU (usuario + sistema) de pid en nanosegundos, total y en
+// núcleos P, y las instrucciones, totales y en P (ver coste.go). 0 si va
+// bien, -1 si no. proc_pid_rusage da los tiempos en ticks de
+// mach_absolute_time, no en nanosegundos (en Apple Silicon un tick son ~41,7
+// ns): sin convertirlos, 489 ms de CPU se leían como 12 ms (medido en un M4).
+// Sin RUSAGE_INFO_V6 (macOS antiguo) se cae a la V4, que no separa P de E.
+static int cpu_times(int pid, unsigned long long out[4]) {
 	static mach_timebase_info_data_t tb;
 	if (tb.denom == 0) mach_timebase_info(&tb);
-	unsigned long long t = ri.ri_user_time + ri.ri_system_time;
-	return (long long)((__uint128_t)t * tb.numer / tb.denom);
+	struct rusage_info_v6 ri;
+	memset(&ri, 0, sizeof ri);
+	if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ri) != 0) {
+		struct rusage_info_v4 r4;
+		if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&r4) != 0) return -1;
+		out[0] = (unsigned long long)((__uint128_t)(r4.ri_user_time + r4.ri_system_time) * tb.numer / tb.denom);
+		out[1] = out[2] = out[3] = 0;
+		return 0;
+	}
+	out[0] = (unsigned long long)((__uint128_t)(ri.ri_user_time + ri.ri_system_time) * tb.numer / tb.denom);
+	out[1] = (unsigned long long)((__uint128_t)(ri.ri_user_ptime + ri.ri_system_ptime) * tb.numer / tb.denom);
+	out[2] = ri.ri_instructions;
+	out[3] = ri.ri_pinstructions;
+	return 0;
+}
+
+// is_stopped dice si pid está parado (SSTOP: un SIGSTOP sin su SIGCONT), o -1.
+static int is_stopped(int pid) {
+	struct proc_bsdinfo bi;
+	if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bi, sizeof bi) != (int)sizeof bi) return -1;
+	return bi.pbi_status == SSTOP;
 }
 
 static int pipe_handle(int pid, int fd, unsigned long long *h) {
@@ -99,6 +119,9 @@ type Meter struct {
 	mu     sync.Mutex
 	anchor uint64 // pipe_handle de la consola de la VM; 0 = aún no hay VM
 	helper int    // pid del auxiliar, cacheado
+	// cpu es la CPU equivalente de cpuPid (coste.go); se rehace si cambia.
+	cpu    contador
+	cpuPid int
 }
 
 func NewMeter() *Meter { return &Meter{} }
@@ -152,7 +175,9 @@ func buscarAuxiliar(anchor uint64, cache int) int {
 
 // CPUTime es el tiempo de CPU que lleva consumido el auxiliar de Apple que
 // aloja la VM: ahí corren sus vCPU. Es lo que mide el tope de CPU (cpu.go del
-// servidor), el equivalente a la contabilidad de un cgroup en Linux.
+// servidor), el equivalente a la contabilidad de un cgroup en Linux, con el
+// tiempo en núcleos de eficiencia cobrado a lo que vale en uno de rendimiento
+// (coste.go).
 func (m *Meter) CPUTime() (time.Duration, error) {
 	m.mu.Lock()
 	pid := m.findHelper()
@@ -160,11 +185,36 @@ func (m *Meter) CPUTime() (time.Duration, error) {
 	if pid <= 0 {
 		return 0, errors.New("the VM's helper process is not running")
 	}
-	ns := C.cpu_ns(C.int(pid))
-	if ns < 0 {
+	var v [4]C.ulonglong
+	if C.cpu_times(C.int(pid), &v[0]) != 0 {
 		return 0, errors.New("could not read the helper's CPU time")
 	}
-	return time.Duration(ns), nil
+	l := lectura{total: time.Duration(v[0]), p: time.Duration(v[1]), instr: uint64(v[2]), instrP: uint64(v[3])}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if pid != m.cpuPid {
+		m.cpu, m.cpuPid = contador{}, pid
+	}
+	return m.cpu.suma(l), nil
+}
+
+// HelperStopped dice si el auxiliar de la VM está parado (SIGSTOP). Lo mira el
+// servidor cuando muere el proceso freno: si lo dejó parado, nadie puede
+// soltarlo; si no, basta con seguir sin freno.
+func (m *Meter) HelperStopped() (bool, error) {
+	m.mu.Lock()
+	pid := m.findHelper()
+	m.mu.Unlock()
+	if pid <= 0 {
+		return false, errors.New("the VM's helper process is not running")
+	}
+	switch C.is_stopped(C.int(pid)) {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	}
+	return false, errors.New("could not read the helper's state")
 }
 
 // Bytes devuelve phys_footprint del ayudante más el de su auxiliar.

@@ -157,6 +157,41 @@ func TestCuboCumpleElTecho(t *testing.T) {
 	}
 }
 
+// La CPU del auxiliar llega en escalones (proc_pid_rusage apunta el tiempo de
+// un vCPU al salir del invitado: hasta 10 ms, medido en un M4). El cubo cobra
+// después lo que no vio: la cuota media es la misma y ninguna parada pasa de
+// cpuPausaMax.
+func TestCuboConMedidaEnEscalones(t *testing.T) {
+	const (
+		periodo = 20 * time.Millisecond
+		escalon = 10 * time.Millisecond
+	)
+	for _, tc := range []struct{ pct, vcpus, carga int }{{25, 1, 1}, {50, 1, 1}, {10, 1, 1}, {50, 2, 2}} {
+		t0 := time.Unix(0, 0)
+		c := cubo{fichas: cpuRafaga * time.Duration(tc.pct) / 100, t: t0}
+		ahora, cpu := t0, time.Duration(0)
+		var maxParada time.Duration
+		for ahora.Sub(t0) < 30*time.Second {
+			c.cuenta(ahora, cpu/escalon*escalon, tc.pct) // lo visto: hasta el último escalón
+			parar, dormir := c.decide(tc.pct, tc.vcpus, periodo)
+			if parar > 0 {
+				ahora = ahora.Add(parar)
+				maxParada = max(maxParada, parar)
+				continue
+			}
+			ahora = ahora.Add(dormir)
+			cpu += dormir * time.Duration(tc.carga)
+		}
+		frac := 100 * float64(cpu) / float64(ahora.Sub(t0))
+		if want := float64(tc.pct); frac < want*0.95 || frac > want*1.05 {
+			t.Errorf("pct %d, carga %d, medida en escalones de 10 ms: gasta %.1f %%, quería %.0f %%", tc.pct, tc.carga, frac, want)
+		}
+		if maxParada > cpuPausaMax {
+			t.Errorf("pct %d: parada de %v", tc.pct, maxParada)
+		}
+	}
+}
+
 // Una VM ociosa llena el cubo y se mide poco: como mucho una vez por
 // ráfaga/vCPU, y sin paradas.
 func TestCuboOciosoMidePoco(t *testing.T) {
@@ -226,8 +261,9 @@ func TestReguladorConRelojFalso(t *testing.T) {
 	}
 }
 
-// Hasta que el agente escucha, el techo es max(pct, 100), como el impulso de
-// arranque de Linux: 2 vCPU con pct 50 corren a un núcleo, no a medio ni a dos.
+// Hasta que el agente escucha, el techo es max(pct, 100 × min(vCPU, núcleos
+// del host)), como el impulso de arranque de Linux: 2 vCPU con pct 50 corren
+// con las dos vCPU a tope, no a medio núcleo.
 func TestReguladorImpulsoDeArranque(t *testing.T) {
 	m := nuevoSimulado(2)
 	r := rigSimulado(t, 2, m, false, nil)
@@ -235,8 +271,9 @@ func TestReguladorImpulsoDeArranque(t *testing.T) {
 	t0, c0, _, _ := m.foto()
 	m.hasta(t, t0.Add(5*time.Second))
 	t1, c1, _, _ := m.foto()
-	if frac := 100 * float64(c1-c0) / float64(t1.Sub(t0)); frac < 97 || frac > 103 {
-		t.Fatalf("arrancando gasta %.1f %%, quería 100", frac)
+	want := float64(impulsoArranque(2))
+	if frac := 100 * float64(c1-c0) / float64(t1.Sub(t0)); frac < want*0.97 || frac > want*1.03 {
+		t.Fatalf("arrancando gasta %.1f %%, quería %.0f", frac, want)
 	}
 	r.srv.mu.Lock()
 	r.srv.cpuListo = true

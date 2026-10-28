@@ -116,6 +116,11 @@ type Deps struct {
 	// regulador pausa la VM por el framework, que para también el reloj del
 	// invitado (ver cpu.go).
 	Freeze func(stop bool) error
+	// HelperStopped dice si el auxiliar está parado. Con él, si el proceso
+	// freno muere a mitad de una parada se mira si de verdad dejó el
+	// auxiliar parado antes de terminar (ver soltarFreno). Nil = se supone
+	// que sí.
+	HelperStopped func() (bool, error)
 	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
 	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
 	// no: el framework exige los mismos dispositivos que al guardar.
@@ -214,7 +219,11 @@ type Server struct {
 	// sueltaAviso: ya se avisó de que reanudar el auxiliar falla (con
 	// frenoMu); se rearma al conseguirlo.
 	sueltaAviso bool
-	frenoAviso  bool // ya se avisó de que Freeze falla (con mu)
+	// frenoPerdido: el proceso freno ya no está (Freeze devolvió
+	// ErrFreezeLost); desde entonces el regulador pausa por el framework.
+	// Con frenoMu.
+	frenoPerdido bool
+	frenoAviso   bool // ya se avisó de que Freeze falla (con mu)
 }
 
 func New(d Deps) *Server {
