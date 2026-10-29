@@ -36,13 +36,13 @@ func (m *Manager) volumePath(n string) string { return filepath.Join(m.volumesDi
 // CreateVolume crea un volumen vacío formateado en ext4.
 func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*api.Volume, error) {
 	if !reVolume.MatchString(name) {
-		return nil, fmt.Errorf("invalid volume name %q: lowercase letters, digits, hyphen and underscore", name)
+		return nil, marcado(ErrInvalidName, "invalid volume name %q: lowercase letters, digits, hyphen and underscore", name)
 	}
 	if sizeMiB <= 0 {
 		sizeMiB = defaultVolumeMiB
 	}
 	if sizeMiB > 64<<10 {
-		return nil, fmt.Errorf("size too large: %d MiB", sizeMiB)
+		return nil, peticionInvalida("size too large: %d MiB", sizeMiB)
 	}
 	if err := os.MkdirAll(m.volumesDir(), 0o755); err != nil {
 		return nil, err
@@ -57,7 +57,7 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 	}
 	defer soltar()
 	if _, err := os.Stat(path); err == nil {
-		return nil, fmt.Errorf("volume %q already exists", name)
+		return nil, marcado(os.ErrExist, "volume %q already exists", name)
 	}
 
 	// Se construye en un temporal propio y se renombra con durable.Renombrar
@@ -298,7 +298,7 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 	// El nombre llega de la URL: sin validarlo, "../images/min" borraba la
 	// imagen base de todas las capas.
 	if !reVolume.MatchString(name) {
-		return fmt.Errorf("invalid volume name %q", name)
+		return marcado(ErrInvalidName, "invalid volume name %q", name)
 	}
 	// La comprobacion y el borrado van bajo el MISMO cerrojo. Mirar primero y
 	// borrar despues dejaba una ventana en la que una microVM podia empezar a
@@ -315,7 +315,7 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 			Message: fmt.Sprintf("volume %q is %s: try again when it finishes", name, op)}
 	}
 	if users := m.volumeUsersLocked()[name].all(); len(users) > 0 {
-		return fmt.Errorf("volume %q is used by %d machine(s): %s",
+		return marcado(ErrVolumenEnUso, "volume %q is used by %d machine(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
 	if n := m.contarSnapshots(name); n > 0 && !conSnapshots {

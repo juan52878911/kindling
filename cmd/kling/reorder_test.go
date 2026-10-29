@@ -85,29 +85,6 @@ func TestReorderForImageBuild(t *testing.T) {
 	}
 }
 
-// resolveCPUPct: -cpu-pct manda; -cpu es alias deprecado; sin ninguno, 0.
-func TestResolveCPUPct(t *testing.T) {
-	mk := func(args []string) *flag.FlagSet {
-		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		fs.Int("cpu-pct", 0, "")
-		fs.Int("cpu", 0, "")
-		_ = fs.Parse(args)
-		return fs
-	}
-	if got := resolveCPUPct(mk([]string{"-cpu-pct", "100"}), 100, 0); got != 100 {
-		t.Errorf("-cpu-pct 100 -> %d, want 100", got)
-	}
-	if got := resolveCPUPct(mk([]string{"-cpu", "80"}), 0, 80); got != 80 {
-		t.Errorf("-cpu 80 (alias) -> %d, want 80", got)
-	}
-	if got := resolveCPUPct(mk(nil), 0, 0); got != 0 {
-		t.Errorf("ninguno -> %d, want 0", got)
-	}
-	if got := resolveCPUPct(mk([]string{"-cpu-pct", "100", "-cpu", "50"}), 100, 50); got != 100 {
-		t.Errorf("ambos: -cpu-pct debe ganar -> %d, want 100", got)
-	}
-}
-
 // egressForRun: con -from y sin -egress explícito, se manda vacío para que
 // runFrom() herede la política de la plantilla (A2). Sin -from, o con -egress
 // dado, se mantiene el defecto de siempre.

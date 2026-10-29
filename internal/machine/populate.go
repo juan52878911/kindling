@@ -45,7 +45,7 @@ const populateTimeout = 20 * time.Minute
 // ningún lado.
 func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (*api.PopulateResult, error) {
 	if len(req.Cmd) == 0 {
-		return nil, fmt.Errorf("missing command to execute")
+		return nil, peticionInvalida("missing command to execute")
 	}
 	mount := req.Mount
 	if mount == "" {
@@ -53,7 +53,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	}
 	image := req.Image
 	if image == "" {
-		return nil, fmt.Errorf("an image with the installer is required: " +
+		return nil, peticionInvalida("an image with the installer is required: " +
 			"build it with `kling image toolchain`")
 	}
 	memMiB := req.MemMiB

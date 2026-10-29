@@ -158,11 +158,11 @@ func sondar(root string) *api.CloneInfo {
 func (m *Manager) CloneVolume(ctx context.Context, src, dst string, permitirCopia bool) (*api.CloneVolumeResult, error) {
 	for _, n := range []string{src, dst} {
 		if !reVolume.MatchString(n) {
-			return nil, fmt.Errorf("invalid volume name %q: lowercase letters, digits, hyphen and underscore", n)
+			return nil, marcado(ErrInvalidName, "invalid volume name %q: lowercase letters, digits, hyphen and underscore", n)
 		}
 	}
 	if src == dst {
-		return nil, fmt.Errorf("source and destination are the same volume")
+		return nil, peticionInvalida("source and destination are the same volume")
 	}
 	srcPath, dstPath := m.volumePath(src), m.volumePath(dst)
 
@@ -182,7 +182,7 @@ func (m *Manager) CloneVolume(ctx context.Context, src, dst string, permitirCopi
 	defer soltarDst()
 	// Con las reservas puestas: nadie puede crear, montar ni borrar ya.
 	if _, err := os.Stat(srcPath); err != nil {
-		return nil, fmt.Errorf("volume %q not found", src)
+		return nil, marcado(ErrNoVolume, "volume %q not found", src)
 	}
 	if _, err := os.Stat(dstPath); err == nil {
 		return nil, fmt.Errorf("volume %q: %w", dst, os.ErrExist)

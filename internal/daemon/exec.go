@@ -514,7 +514,7 @@ func (s *Server) handleRenewSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.mgr.Renew(mc.ID, ttl)
 	if err != nil {
-		fail(w, execStatus(err), err)
+		fail(w, renewStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -551,7 +551,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.mgr.Renew(mc.ID, req.TTLSeconds)
 	if err != nil {
-		fail(w, execStatus(err), err)
+		fail(w, renewStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -563,8 +563,20 @@ func (s *Server) handleRemoveSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.Remove(mc.ID); err != nil {
-		fail(w, http.StatusInternalServerError, err)
+		// Como DELETE /machines/{ref}: 404 si ya no está (otro la borró entre
+		// medias), 409 su estado, 500 el host. Antes, 500 todo.
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renewStatus es el código de un error de renovar el TTL: 404 si no existe,
+// 409 si no está en marcha, 500 lo del host. Antes salía por execStatus, que
+// da 502 a lo que no conoce: aquí no hay invitado de por medio.
+func renewStatus(err error) int {
+	if errors.Is(err, machine.ErrNotRunning) {
+		return http.StatusConflict
+	}
+	return cicloStatus(err)
 }

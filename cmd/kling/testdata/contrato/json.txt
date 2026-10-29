@@ -1,0 +1,372 @@
+# Forma de la salida -json del CLI: kling <comando>:  <ruta JSON> <tipo>.
+# Lo genera TestContratoJSON (cmd/kling/contrato_json_test.go) contra un
+# daemon falso con todos los campos rellenos; para regenerarlo:
+#   go test ./cmd/kling -run TestContratoJSON -update
+# Quitar o cambiar una línea exige subir api.APIVersion (internal/contrato).
+# api: 1
+
+kling graph ls -json:  [].created_at string
+kling graph ls -json:  [].edges[].database string
+kling graph ls -json:  [].edges[].env string
+kling graph ls -json:  [].edges[].from string
+kling graph ls -json:  [].edges[].health.interval_ms number
+kling graph ls -json:  [].edges[].health.retries number
+kling graph ls -json:  [].edges[].health.start_interval_ms number
+kling graph ls -json:  [].edges[].health.start_period_seconds number
+kling graph ls -json:  [].edges[].health.test[] string
+kling graph ls -json:  [].edges[].health.timeout_seconds number
+kling graph ls -json:  [].edges[].kind string
+kling graph ls -json:  [].edges[].mode string
+kling graph ls -json:  [].edges[].mount string
+kling graph ls -json:  [].edges[].port number
+kling graph ls -json:  [].edges[].to string
+kling graph ls -json:  [].edges[].user string
+kling graph ls -json:  [].fork_of string
+kling graph ls -json:  [].generation number
+kling graph ls -json:  [].id string
+kling graph ls -json:  [].name string
+kling graph ls -json:  [].nodes.x.allow_domains[] string
+kling graph ls -json:  [].nodes.x.allow_exec bool
+kling graph ls -json:  [].nodes.x.egress string
+kling graph ls -json:  [].nodes.x.from string
+kling graph ls -json:  [].nodes.x.idle_freeze number
+kling graph ls -json:  [].nodes.x.image string
+kling graph ls -json:  [].nodes.x.labels.x string
+kling graph ls -json:  [].nodes.x.machine_id string
+kling graph ls -json:  [].nodes.x.mem_mib number
+kling graph ls -json:  [].nodes.x.ports[] number
+kling graph ls -json:  [].nodes.x.shares[].mode string
+kling graph ls -json:  [].nodes.x.shares[].mount string
+kling graph ls -json:  [].nodes.x.shares[].source string
+kling graph ls -json:  [].nodes.x.shares[].upload string
+kling graph ls -json:  [].nodes.x.state string
+kling graph ls -json:  [].nodes.x.vcpus number
+kling graph ls -json:  [].nodes.x.volumes[].drive_id string
+kling graph ls -json:  [].nodes.x.volumes[].mount string
+kling graph ls -json:  [].nodes.x.volumes[].name string
+kling graph ls -json:  [].nodes.x.volumes[].read_only bool
+kling graph ls -json:  [].nodes.x.wake string
+kling graph ls -json:  [].state string
+kling image ls -json:  [].base string
+kling image ls -json:  [].disk_bytes number
+kling image ls -json:  [].has_recipe bool
+kling image ls -json:  [].layers number
+kling image ls -json:  [].name string
+kling image ls -json:  [].size_bytes number
+kling image ls -json:  [].used_by number
+kling inspect m1:  agent.agent string
+kling inspect m1:  agent.caps[] string
+kling inspect m1:  agent.version string
+kling inspect m1:  allow_domains[] string
+kling inspect m1:  allow_exec bool
+kling inspect m1:  boot_ms number
+kling inspect m1:  cmd[] string
+kling inspect m1:  cpu_boost_pct number
+kling inspect m1:  cpu_pct number
+kling inspect m1:  cpu_pct_fixed bool
+kling inspect m1:  created_at string
+kling inspect m1:  credential_any_database[] string
+kling inspect m1:  credential_domains[] string
+kling inspect m1:  diff_base string
+kling inspect m1:  disk_bytes number
+kling inspect m1:  disk_error string
+kling inspect m1:  disk_error_at string
+kling inspect m1:  disk_errors number
+kling inspect m1:  disk_mib number
+kling inspect m1:  egress string
+kling inspect m1:  entrypoint[] string
+kling inspect m1:  env_keys[] string
+kling inspect m1:  failed_at string
+kling inspect m1:  forwards.x string
+kling inspect m1:  freeze_ms number
+kling inspect m1:  from string
+kling inspect m1:  frozen_at string
+kling inspect m1:  has_secrets bool
+kling inspect m1:  hold string
+kling inspect m1:  hooks_pending string
+kling inspect m1:  id string
+kling inspect m1:  image string
+kling inspect m1:  ip string
+kling inspect m1:  labels.x string
+kling inspect m1:  last_error string
+kling inspect m1:  mem_max_mib number
+kling inspect m1:  mem_mib number
+kling inspect m1:  mem_shared bool
+kling inspect m1:  name string
+kling inspect m1:  net_index number
+kling inspect m1:  net_mibps number
+kling inspect m1:  on_ttl string
+kling inspect m1:  pid number
+kling inspect m1:  published[].guest number
+kling inspect m1:  published[].host number
+kling inspect m1:  published[].proto string
+kling inspect m1:  ready string
+kling inspect m1:  share_wait number
+kling inspect m1:  shares[].image_bytes number
+kling inspect m1:  shares[].mode string
+kling inspect m1:  shares[].mount string
+kling inspect m1:  shares[].source string
+kling inspect m1:  shares[].status string
+kling inspect m1:  snapshot_bytes number
+kling inspect m1:  started_at string
+kling inspect m1:  state string
+kling inspect m1:  stopped_at string
+kling inspect m1:  thaw_ms number
+kling inspect m1:  transition string
+kling inspect m1:  ttl_at string
+kling inspect m1:  ttl_seconds number
+kling inspect m1:  vcpus number
+kling inspect m1:  vmm string
+kling inspect m1:  volume_wait bool
+kling inspect m1:  volumes[].drive_id string
+kling inspect m1:  volumes[].mount string
+kling inspect m1:  volumes[].name string
+kling inspect m1:  volumes[].read_only bool
+kling inspect m1:  wake.cgroup_ms number
+kling inspect m1:  wake.check_ms number
+kling inspect m1:  wake.finish_ms number
+kling inspect m1:  wake.forwards_ms number
+kling inspect m1:  wake.load_ms number
+kling inspect m1:  wake.memory_ms number
+kling inspect m1:  wake.mirror_ms number
+kling inspect m1:  wake.net_ms number
+kling inspect m1:  wake.resync_ms number
+kling inspect m1:  wake.socket_ms number
+kling inspect m1:  wake.spawn_ms number
+kling inspect m1:  wake.store_ms number
+kling inspect m1:  wake.tier string
+kling inspect m1:  wake.total_ms number
+kling inspect m1:  wake.wait_ms number
+kling ps -a -json:  [].agent.agent string
+kling ps -a -json:  [].agent.caps[] string
+kling ps -a -json:  [].agent.version string
+kling ps -a -json:  [].allow_domains[] string
+kling ps -a -json:  [].allow_exec bool
+kling ps -a -json:  [].boot_ms number
+kling ps -a -json:  [].cmd[] string
+kling ps -a -json:  [].cpu_boost_pct number
+kling ps -a -json:  [].cpu_pct number
+kling ps -a -json:  [].cpu_pct_fixed bool
+kling ps -a -json:  [].created_at string
+kling ps -a -json:  [].credential_any_database[] string
+kling ps -a -json:  [].credential_domains[] string
+kling ps -a -json:  [].diff_base string
+kling ps -a -json:  [].disk_bytes number
+kling ps -a -json:  [].disk_error string
+kling ps -a -json:  [].disk_error_at string
+kling ps -a -json:  [].disk_errors number
+kling ps -a -json:  [].disk_mib number
+kling ps -a -json:  [].egress string
+kling ps -a -json:  [].entrypoint[] string
+kling ps -a -json:  [].env_keys[] string
+kling ps -a -json:  [].failed_at string
+kling ps -a -json:  [].forwards.x string
+kling ps -a -json:  [].freeze_ms number
+kling ps -a -json:  [].from string
+kling ps -a -json:  [].frozen_at string
+kling ps -a -json:  [].has_secrets bool
+kling ps -a -json:  [].hold string
+kling ps -a -json:  [].hooks_pending string
+kling ps -a -json:  [].id string
+kling ps -a -json:  [].image string
+kling ps -a -json:  [].ip string
+kling ps -a -json:  [].labels.x string
+kling ps -a -json:  [].last_error string
+kling ps -a -json:  [].mem_max_mib number
+kling ps -a -json:  [].mem_mib number
+kling ps -a -json:  [].mem_shared bool
+kling ps -a -json:  [].name string
+kling ps -a -json:  [].net_index number
+kling ps -a -json:  [].net_mibps number
+kling ps -a -json:  [].on_ttl string
+kling ps -a -json:  [].pid number
+kling ps -a -json:  [].published[].guest number
+kling ps -a -json:  [].published[].host number
+kling ps -a -json:  [].published[].proto string
+kling ps -a -json:  [].ready string
+kling ps -a -json:  [].share_wait number
+kling ps -a -json:  [].shares[].image_bytes number
+kling ps -a -json:  [].shares[].mode string
+kling ps -a -json:  [].shares[].mount string
+kling ps -a -json:  [].shares[].source string
+kling ps -a -json:  [].shares[].status string
+kling ps -a -json:  [].snapshot_bytes number
+kling ps -a -json:  [].started_at string
+kling ps -a -json:  [].state string
+kling ps -a -json:  [].stopped_at string
+kling ps -a -json:  [].thaw_ms number
+kling ps -a -json:  [].transition string
+kling ps -a -json:  [].ttl_at string
+kling ps -a -json:  [].ttl_seconds number
+kling ps -a -json:  [].vcpus number
+kling ps -a -json:  [].vmm string
+kling ps -a -json:  [].volume_wait bool
+kling ps -a -json:  [].volumes[].drive_id string
+kling ps -a -json:  [].volumes[].mount string
+kling ps -a -json:  [].volumes[].name string
+kling ps -a -json:  [].volumes[].read_only bool
+kling ps -a -json:  [].wake.cgroup_ms number
+kling ps -a -json:  [].wake.check_ms number
+kling ps -a -json:  [].wake.finish_ms number
+kling ps -a -json:  [].wake.forwards_ms number
+kling ps -a -json:  [].wake.load_ms number
+kling ps -a -json:  [].wake.memory_ms number
+kling ps -a -json:  [].wake.mirror_ms number
+kling ps -a -json:  [].wake.net_ms number
+kling ps -a -json:  [].wake.resync_ms number
+kling ps -a -json:  [].wake.socket_ms number
+kling ps -a -json:  [].wake.spawn_ms number
+kling ps -a -json:  [].wake.store_ms number
+kling ps -a -json:  [].wake.tier string
+kling ps -a -json:  [].wake.total_ms number
+kling ps -a -json:  [].wake.wait_ms number
+kling sandbox ls -json:  [].agent.agent string
+kling sandbox ls -json:  [].agent.caps[] string
+kling sandbox ls -json:  [].agent.version string
+kling sandbox ls -json:  [].allow_domains[] string
+kling sandbox ls -json:  [].allow_exec bool
+kling sandbox ls -json:  [].boot_ms number
+kling sandbox ls -json:  [].cmd[] string
+kling sandbox ls -json:  [].cpu_boost_pct number
+kling sandbox ls -json:  [].cpu_pct number
+kling sandbox ls -json:  [].cpu_pct_fixed bool
+kling sandbox ls -json:  [].created_at string
+kling sandbox ls -json:  [].credential_any_database[] string
+kling sandbox ls -json:  [].credential_domains[] string
+kling sandbox ls -json:  [].diff_base string
+kling sandbox ls -json:  [].disk_bytes number
+kling sandbox ls -json:  [].disk_error string
+kling sandbox ls -json:  [].disk_error_at string
+kling sandbox ls -json:  [].disk_errors number
+kling sandbox ls -json:  [].disk_mib number
+kling sandbox ls -json:  [].egress string
+kling sandbox ls -json:  [].entrypoint[] string
+kling sandbox ls -json:  [].env_keys[] string
+kling sandbox ls -json:  [].failed_at string
+kling sandbox ls -json:  [].forwards.x string
+kling sandbox ls -json:  [].freeze_ms number
+kling sandbox ls -json:  [].from string
+kling sandbox ls -json:  [].frozen_at string
+kling sandbox ls -json:  [].has_secrets bool
+kling sandbox ls -json:  [].hold string
+kling sandbox ls -json:  [].hooks_pending string
+kling sandbox ls -json:  [].id string
+kling sandbox ls -json:  [].image string
+kling sandbox ls -json:  [].ip string
+kling sandbox ls -json:  [].labels.x string
+kling sandbox ls -json:  [].last_error string
+kling sandbox ls -json:  [].mem_max_mib number
+kling sandbox ls -json:  [].mem_mib number
+kling sandbox ls -json:  [].mem_shared bool
+kling sandbox ls -json:  [].name string
+kling sandbox ls -json:  [].net_index number
+kling sandbox ls -json:  [].net_mibps number
+kling sandbox ls -json:  [].on_ttl string
+kling sandbox ls -json:  [].pid number
+kling sandbox ls -json:  [].published[].guest number
+kling sandbox ls -json:  [].published[].host number
+kling sandbox ls -json:  [].published[].proto string
+kling sandbox ls -json:  [].ready string
+kling sandbox ls -json:  [].share_wait number
+kling sandbox ls -json:  [].shares[].image_bytes number
+kling sandbox ls -json:  [].shares[].mode string
+kling sandbox ls -json:  [].shares[].mount string
+kling sandbox ls -json:  [].shares[].source string
+kling sandbox ls -json:  [].shares[].status string
+kling sandbox ls -json:  [].snapshot_bytes number
+kling sandbox ls -json:  [].started_at string
+kling sandbox ls -json:  [].state string
+kling sandbox ls -json:  [].stopped_at string
+kling sandbox ls -json:  [].thaw_ms number
+kling sandbox ls -json:  [].transition string
+kling sandbox ls -json:  [].ttl_at string
+kling sandbox ls -json:  [].ttl_seconds number
+kling sandbox ls -json:  [].vcpus number
+kling sandbox ls -json:  [].vmm string
+kling sandbox ls -json:  [].volume_wait bool
+kling sandbox ls -json:  [].volumes[].drive_id string
+kling sandbox ls -json:  [].volumes[].mount string
+kling sandbox ls -json:  [].volumes[].name string
+kling sandbox ls -json:  [].volumes[].read_only bool
+kling sandbox ls -json:  [].wake.cgroup_ms number
+kling sandbox ls -json:  [].wake.check_ms number
+kling sandbox ls -json:  [].wake.finish_ms number
+kling sandbox ls -json:  [].wake.forwards_ms number
+kling sandbox ls -json:  [].wake.load_ms number
+kling sandbox ls -json:  [].wake.memory_ms number
+kling sandbox ls -json:  [].wake.mirror_ms number
+kling sandbox ls -json:  [].wake.net_ms number
+kling sandbox ls -json:  [].wake.resync_ms number
+kling sandbox ls -json:  [].wake.socket_ms number
+kling sandbox ls -json:  [].wake.spawn_ms number
+kling sandbox ls -json:  [].wake.store_ms number
+kling sandbox ls -json:  [].wake.tier string
+kling sandbox ls -json:  [].wake.total_ms number
+kling sandbox ls -json:  [].wake.wait_ms number
+kling status -json:  daemon.api number
+kling status -json:  daemon.backend string
+kling status -json:  daemon.firecracker string
+kling status -json:  daemon.kvm bool
+kling status -json:  daemon.machines number
+kling status -json:  daemon.ok bool
+kling status -json:  daemon.root string
+kling status -json:  daemon.version string
+kling status -json:  endpoint string
+kling status -json:  extensions {}
+kling template ls -json:  [].allow_domains[] string
+kling template ls -json:  [].allow_exec bool
+kling template ls -json:  [].annotations.x string
+kling template ls -json:  [].cpu_pct number
+kling template ls -json:  [].cpu_pct_fixed bool
+kling template ls -json:  [].created_at string
+kling template ls -json:  [].credential_any_database[] string
+kling template ls -json:  [].credential_domains[] string
+kling template ls -json:  [].disk_bytes number
+kling template ls -json:  [].egress string
+kling template ls -json:  [].env_keys[] string
+kling template ls -json:  [].guest_ipv6_off bool
+kling template ls -json:  [].guest_ipv6_stack bool
+kling template ls -json:  [].has_volume bool
+kling template ls -json:  [].image string
+kling template ls -json:  [].instances number
+kling template ls -json:  [].kernel_sha256 string
+kling template ls -json:  [].kling_version string
+kling template ls -json:  [].labels.x string
+kling template ls -json:  [].macos string
+kling template ls -json:  [].mem_bytes number
+kling template ls -json:  [].mem_max_mib number
+kling template ls -json:  [].mem_mib number
+kling template ls -json:  [].name string
+kling template ls -json:  [].rootfs_digest string
+kling template ls -json:  [].rootfs_sha256 string
+kling template ls -json:  [].share_wait number
+kling template ls -json:  [].signature string
+kling template ls -json:  [].sin_agente bool
+kling template ls -json:  [].snap_sha256 string
+kling template ls -json:  [].stale string
+kling template ls -json:  [].vcpus number
+kling template ls -json:  [].vmm string
+kling template ls -json:  [].volume string
+kling template ls -json:  [].volume_mount string
+kling template ls -json:  [].volume_read_only bool
+kling template ls -json:  [].volumes[].drive_id string
+kling template ls -json:  [].volumes[].mount string
+kling template ls -json:  [].volumes[].name string
+kling template ls -json:  [].volumes[].read_only bool
+kling template ls -json:  [].warnings[] string
+kling version -json:  agents[] string
+kling version -json:  api number
+kling version -json:  arch string
+kling version -json:  cli string
+kling version -json:  daemon string
+kling version -json:  daemon_api number
+kling version -json:  endpoint string
+kling version -json:  os string
+kling version -json:  vmm string
+kling version -json:  vmm_version string
+kling volume ls -json:  [].name string
+kling volume ls -json:  [].path string
+kling volume ls -json:  [].size_bytes number
+kling volume ls -json:  [].snapshots number
+kling volume ls -json:  [].used_by[] string
+kling volume ls -json:  [].used_bytes number

@@ -92,10 +92,9 @@ func TestTree(t *testing.T) {
 		t.Errorf("subBlock: %q", b)
 	}
 	for in, want := range map[string]string{
-		"add x": "mcp add x", "gateway -listen :1": "mcp serve -listen :1", "models add m": "ai model add m",
-		"chispa train": "ai chispa train", "commit a b": "save a b", "rmi x": "template rm x",
-		"snapshots ls": "template ls", "plugins": "plugin", "info -json": "status -v -json",
-		"mmds x": "machine secret x", "ps -a": "ps -a",
+		"commit a b": "save a b", "snapshots ls": "template ls", "plugins": "plugin", "ps -a": "ps -a",
+		// Los retirados en 1.0 ya no se traducen (removedAliasError).
+		"rmi x": "rmi x", "add x": "add x",
 	} {
 		f := strings.Fields(in)
 		c, a := resolveAlias(f[0], f[1:])
@@ -117,8 +116,8 @@ func TestTree(t *testing.T) {
 		"run -h": "run", "run --help": "run", "run -help": "run", "template rm -h": "template rm",
 		"ai model -h": "ai model", "ai model add -h": "ai model add", "ai model zzz -h": "ai model",
 		"exec box -h": "exec", "exec box ls -h": "exec", "run -name x -h": "run", "nope -h": "nope",
-		"ai zzz -h": "ai", "status -v -h": "status", "info -h": "status", "models add -h": "ai model add",
-		"commit -h": "save", "rmi -h": "template rm", "-h": "",
+		"ai zzz -h": "ai", "status -v -h": "status",
+		"commit -h": "save", "-h": "",
 		"help": "", "exec box -- ls -h": "", "run": "", "ps -a": "",
 	} {
 		f := strings.Fields(in)

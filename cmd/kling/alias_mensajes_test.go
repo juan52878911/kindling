@@ -13,25 +13,23 @@ import (
 	"testing"
 )
 
-// Ningún mensaje del código recomienda un nombre de antes que avisa: quien
-// siguiera la pista ("redeploy with kling chispa deploy") se llevaría el
-// "warning: kling chispa is now kling ai chispa". Mira solo literales de
+// Ningún mensaje del código recomienda un nombre retirado: quien siguiera la
+// pista ("redeploy with kling chispa deploy") se llevaría el "kling chispa was
+// removed in 1.0". Mira solo literales de
 // cadena de los .go que no son tests, en todo el repositorio (extensiones
 // incluidas); los comentarios pueden contar la historia.
 func TestMensajesSinAliasQueAvisan(t *testing.T) {
 	var viejos []string
-	for a := range aliases {
-		if !permanentAliases[a] {
-			viejos = append(viejos, regexp.QuoteMeta(a))
-		}
+	for a := range removedAliases {
+		viejos = append(viejos, regexp.QuoteMeta(a))
 	}
-	for a := range extAliases {
+	for a := range removedExtAliases {
 		viejos = append(viejos, regexp.QuoteMeta(a))
 	}
 	sort.Strings(viejos)
 	re := regexp.MustCompile(`\bkling (` + strings.Join(viejos, "|") + `)\b`)
-	// El propio aviso y la ayuda de los alias nombran los de antes a propósito.
-	permitido := regexp.MustCompile(`^warning: kling %s is now`)
+	// El propio error nombra el de antes a propósito.
+	permitido := regexp.MustCompile(`^kling %s was removed in 1.0`)
 
 	raiz, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {

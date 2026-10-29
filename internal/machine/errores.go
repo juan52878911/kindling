@@ -27,6 +27,10 @@ var (
 	// host. El daemon la contesta con 400; lo que no lleva marca es del host
 	// y sale como 500 (M13).
 	ErrRunRequest = errors.New("invalid machine request")
+	// ErrNoVolume: no hay volumen con ese nombre.
+	ErrNoVolume = errors.New("volume does not exist")
+	// ErrNoCredential: la máquina no tiene credencial en esa variable.
+	ErrNoCredential = errors.New("no credential in that variable")
 )
 
 // peticionInvalida es un error de la petición con el texto de format.

@@ -30,7 +30,7 @@ func TestRutasDeSnapshotsDeVolumen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rr := pedir(s, http.MethodPost, "/volumes/datos/snapshots", `{"name":"uno"}`); rr.Code != http.StatusOK {
+	if rr := pedir(s, http.MethodPost, "/volumes/datos/snapshots", `{"name":"uno"}`); rr.Code != http.StatusCreated {
 		t.Fatalf("snapshot = %d %s", rr.Code, rr.Body)
 	} else {
 		var snap api.VolumeSnapshot

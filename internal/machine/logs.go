@@ -32,7 +32,7 @@ const logMaxLines = 10000
 func (m *Manager) Logs(ref string, tail int) (string, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return "", fmt.Errorf("machine %q does not exist", ref)
+		return "", marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	b, err := leerConsola(m.dir(mc.ID), logMaxBytes)
 	if err != nil {

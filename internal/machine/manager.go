@@ -3467,7 +3467,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	// Las de grafo las pone el daemon y no cambian: son la mitad de la
 	// comprobación de cada arista (grafo_red.go).
 	if err := api.ValidateNoGraphLabels(labels); err != nil {
-		return err
+		return comoPeticion(err)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
@@ -3480,7 +3480,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 		// La eliminaron entre el Get y el candado. Etiquetar algo que ya no
 		// existe no es un error del que llama, pero deref nil sí tumbaba el
 		// daemon entero.
-		return fmt.Errorf("machine %q no longer exists", ref)
+		return marcado(ErrNoMachine, "machine %q no longer exists", ref)
 	}
 	cambia := cambianEtiquetasDB(live.Labels, labels)
 	live.Labels = api.MergeLabels(live.Labels, labels)

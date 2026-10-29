@@ -3,7 +3,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -1024,7 +1023,8 @@ type ProcStats struct {
 type Info struct {
 	Version string `json:"version"`
 	// API es la versión del API del daemon (APIVersion, apiversion.go): sube
-	// solo si se quita o cambia una ruta. 0 = daemon anterior, que es el API 1.
+	// solo si se quita o cambia algo del contrato (una ruta, un código, un
+	// campo). 0 = daemon anterior, que es el API 1.
 	API       int    `json:"api,omitempty"`
 	Root      string `json:"root"`
 	KVM       bool   `json:"kvm"`
@@ -1206,9 +1206,11 @@ type ImageFileResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// Error es la respuesta de error de la API.
+// Error es la respuesta de error de la API. Message es para personas; Code,
+// para programas (errorcodes.go). Vacío = daemon anterior a "error-codes".
 type Error struct {
-	Message string `json:"message"`
+	Message string    `json:"message"`
+	Code    ErrorCode `json:"code,omitempty"`
 }
 
 // GuestRequest pide al daemon que hable con el servidor que corre DENTRO de una
@@ -1388,9 +1390,13 @@ type BuildRecipeHints struct {
 // poder hacer sitio congelando otra instancia y reintentar. Comparar cadenas
 // para eso es frágil: el día que alguien reescriba el mensaje, el gateway deja
 // de hacer sitio y nadie relaciona una cosa con la otra.
+//
+// ErrorCode es el código estable del cuerpo (Error.Code); vacío si el daemon
+// es anterior a "error-codes". Las Is* lo miran antes que el texto.
 type StatusError struct {
-	Code    int
-	Message string
+	Code      int
+	Message   string
+	ErrorCode ErrorCode
 }
 
 func (e *StatusError) Error() string { return e.Message }
@@ -1419,12 +1425,12 @@ const StatusMachineLimit = 409
 
 // IsMachineLimit dice si un error es la negativa por el tope de máquinas.
 func IsMachineLimit(err error) bool {
-	var se *StatusError
-	return errors.As(err, &se) && se.Code == StatusMachineLimit && strings.Contains(se.Message, machineLimitMark)
+	return esCodigo(err, StatusMachineLimit, CodeMachineLimit, machineLimitMark)
 }
 
 // machineLimitMark marca los errores de tope de máquinas para poder
-// reconocerlos: 409 lo usan más cosas.
+// reconocerlos sin code (un daemon anterior a "error-codes", o un error del
+// manager antes de salir por el API): 409 lo usan más cosas.
 const machineLimitMark = "machine limit"
 
 // StatusTenantQuota es la negativa por la cuota de un inquilino (la de la
@@ -1437,8 +1443,7 @@ const StatusTenantQuota = 429
 
 // IsTenantQuota dice si un error es la negativa por la cuota de un inquilino.
 func IsTenantQuota(err error) bool {
-	var se *StatusError
-	return errors.As(err, &se) && se.Code == StatusTenantQuota && strings.Contains(se.Message, TenantQuotaMark)
+	return esCodigo(err, StatusTenantQuota, CodeTenantQuota, TenantQuotaMark)
 }
 
 // TenantQuotaMark marca los errores de cuota de inquilino: 429 lo usan más
@@ -1452,8 +1457,7 @@ const StatusDiskFull = 503
 
 // IsDiskFull dice si un error es la negativa por disco casi lleno.
 func IsDiskFull(err error) bool {
-	var se *StatusError
-	return errors.As(err, &se) && se.Code == StatusDiskFull && strings.Contains(se.Message, diskFullMark)
+	return esCodigo(err, StatusDiskFull, CodeDiskFull, diskFullMark)
 }
 
 // diskFullMark marca los errores de disco lleno: 503 lo usan más cosas.
@@ -1465,8 +1469,7 @@ const StatusInsufficientMemory = 507
 
 // IsInsufficientMemory dice si un error es una negativa por falta de memoria.
 func IsInsufficientMemory(err error) bool {
-	var se *StatusError
-	return errors.As(err, &se) && se.Code == StatusInsufficientMemory
+	return esCodigo(err, StatusInsufficientMemory, CodeInsufficientMemory, "")
 }
 
 // CredentialSpec es una credencial para el proxy de credenciales: la clave real

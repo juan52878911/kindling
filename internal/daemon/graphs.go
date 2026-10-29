@@ -15,12 +15,16 @@ import (
 // sobra.
 const grafoMaxCuerpo = 1 << 20
 
-// graphStatus es el código de un error de grafo sin código propio.
+// graphStatus es el código de un error de grafo sin código propio (lo que
+// está mal en la petición ya viene como api.StatusError 400 o 409 del
+// manager, y manda: ver fail): 404 si no existe, el de la centinela si un
+// nodo falla por la petición (imagen o plantilla que no existe, run inválido)
+// y 500 lo del host. Antes todo lo demás era un 400.
 func graphStatus(err error) int {
 	if errors.Is(err, machine.ErrNoGraph) {
 		return http.StatusNotFound
 	}
-	return http.StatusBadRequest
+	return cicloStatus(err)
 }
 
 func (s *Server) handleGraphUp(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +85,7 @@ func (s *Server) handleGraphSnapshot(w http.ResponseWriter, r *http.Request) {
 		fail(w, graphStatus(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	writeJSON(w, http.StatusCreated, snap)
 }
 
 func (s *Server) handleGraphFork(w http.ResponseWriter, r *http.Request) {

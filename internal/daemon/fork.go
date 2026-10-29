@@ -31,8 +31,19 @@ func forkStatus(err error) int {
 		errors.Is(err, machine.ErrSharesCommit), errors.Is(err, machine.ErrExecNotInSnapshot):
 		return http.StatusConflict
 	}
+	var callado *errAgenteCallado
+	if errors.As(err, &callado) {
+		// 504 como POST /sandboxes cuando el agente no contesta: antes, 500.
+		return http.StatusGatewayTimeout
+	}
 	return http.StatusInternalServerError
 }
+
+// errAgenteCallado es que el agente de una copia no llegó a contestar.
+type errAgenteCallado struct{ err error }
+
+func (e *errAgenteCallado) Error() string { return e.err.Error() }
+func (e *errAgenteCallado) Unwrap() error { return e.err }
 
 // validarFork aplica a la petición las reglas de POST /sandboxes: el mismo tope
 // de TTL y los mismos valores de on_ttl. Los ceros significan "los del
@@ -84,7 +95,7 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		// cuyos ganchos (su identidad) no han terminado no es aún la suya.
 		Lista: func(ctx context.Context, mc *api.Machine) error {
 			if err := s.esperarPuerto(ctx, mc, api.GuestPort, forkAgentWait); err != nil {
-				return fmt.Errorf("the guest agent of %s never answered in %s: %w", mc.Name, forkAgentWait, err)
+				return &errAgenteCallado{fmt.Errorf("the guest agent of %s never answered in %s: %w", mc.Name, forkAgentWait, err)}
 			}
 			if req.SkipReady {
 				return nil

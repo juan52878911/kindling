@@ -13,6 +13,23 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
+// volumeStatus es el código de un error de volumen sin código propio (los
+// api.StatusError del manager, 404 o 409, mandan: ver fail): 400 lo que está
+// mal en la petición, 409 lo que choca con el estado (ya existe, en uso, el
+// host no sabe clonar), el de la centinela si falla arrancar la máquina de
+// populate, y 500 lo del host.
+func volumeStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrSinClon), errors.Is(err, machine.ErrVolumenEnUso), errors.Is(err, os.ErrExist):
+		return http.StatusConflict
+	case errors.Is(err, machine.ErrInvalidName):
+		return http.StatusBadRequest
+	case errors.Is(err, machine.ErrNoVolume):
+		return http.StatusNotFound
+	}
+	return cicloStatus(err)
+}
+
 func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.mgr.Volumes())
 }
@@ -28,10 +45,10 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	// construye en .tmp y solo renombra al terminar.
 	v, err := s.mgr.CreateVolume(r.Context(), req.Name, req.SizeMiB)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, volumeStatus(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, v)
+	writeJSON(w, http.StatusCreated, v)
 }
 
 func (s *Server) handleCloneVolume(w http.ResponseWriter, r *http.Request) {
@@ -46,15 +63,10 @@ func (s *Server) handleCloneVolume(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// 409: el host no sabe clonar, o el volumen está en uso. Las dos
 		// cosas son estado, no una petición mal formada.
-		code := http.StatusBadRequest
-		if errors.Is(err, machine.ErrSinClon) || errors.Is(err, machine.ErrVolumenEnUso) ||
-			errors.Is(err, os.ErrExist) {
-			code = http.StatusConflict
-		}
-		fail(w, code, err)
+		fail(w, volumeStatus(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +76,10 @@ func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.RemoveVolume(r.PathValue("name"), conSnaps); err != nil {
-		// 409 y no 400: "lo está usando alguien" es un conflicto de estado, no
-		// una petición mal formada, y quien llama puede reintentar más tarde.
-		fail(w, http.StatusConflict, err)
+		// 409 si lo usa alguien (un conflicto de estado: se puede reintentar),
+		// 404 si no existe, 400 un nombre que no vale y 500 el disco. Antes
+		// era 409 para todo.
+		fail(w, volumeStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -91,7 +104,7 @@ func (s *Server) handlePopulateVolume(w http.ResponseWriter, r *http.Request) {
 	// corrupta que hacía entrar en pánico al invitado siguiente.
 	res, err := s.mgr.PopulateVolume(context.WithoutCancel(r.Context()), req)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, volumeStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -112,7 +125,7 @@ func boolQuery(r *http.Request, k string) (bool, error) {
 }
 
 // Los snapshots de volumen (ver machine/volume_snapshot.go). Los errores ya
-// traen su código (400, 404, 409, 507); lo que no lo trae es un fallo del host.
+// traen su código (400, 404, 409, 503); lo que no lo trae es un fallo del host.
 
 func (s *Server) handleVolumeSnapshots(w http.ResponseWriter, r *http.Request) {
 	l, err := s.mgr.VolumeSnapshots(r.PathValue("name"))
@@ -136,7 +149,7 @@ func (s *Server) handleSnapshotVolume(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	writeJSON(w, http.StatusCreated, snap)
 }
 
 func (s *Server) handleRestoreVolume(w http.ResponseWriter, r *http.Request) {

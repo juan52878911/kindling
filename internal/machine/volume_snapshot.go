@@ -470,7 +470,9 @@ func (m *Manager) cabeCopia(src string) error {
 	if falta <= libre-reserva {
 		return nil
 	}
-	return errEstado(http.StatusInsufficientStorage,
+	// 503 y no 507, como todo el disco lleno (api.StatusDiskFull): quien
+	// recibe un 507 congela para hacer sitio, y congelar escribe en disco.
+	return errEstado(api.StatusDiskFull,
 		"not enough disk for a full copy of %s: it needs %d MiB and only %d MiB are free above the "+
 			"%d MiB kept in reserve.\nThis filesystem cannot share blocks (no reflink): "+
 			"on XFS or Btrfs a snapshot costs nothing until it diverges. Remove old snapshots "+
