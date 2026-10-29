@@ -198,6 +198,11 @@ func agenteViejo(ag *api.GuestAgent, kling string) string {
 	if ag == nil || (ag.Agent != "" && ag.Agent != "kling-guest") {
 		return ""
 	}
+	// Uno que contestó sin decir nada de sí mismo (lo apuntó el daemon al
+	// arrancar una máquina de la imagen) es anterior a v0.18.
+	if ag.Agent == "" && ag.Version == "" && ag.Caps == nil {
+		return "guest agent announces nothing about itself (older than v0.18): it is outside compatibility"
+	}
 	ma, mi, ok := mayorMenor(ag.Version)
 	ka, ki, kok := mayorMenor(kling)
 	if !ok || !kok {

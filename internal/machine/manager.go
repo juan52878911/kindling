@@ -977,8 +977,10 @@ func (m *Manager) writePending() {
 	}
 	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
 	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
-	// antes, la copia de lo que ese binario sabe leer. Respaldar no pisa una
-	// que ya exista, así que es la del fichero tal como lo dejó él.
+	// antes, la copia de lo que ese binario sabe leer: el state.json de ahora,
+	// aún en un esquema que él lee (el suyo, o el que este escribió encima
+	// mientras no hizo falta más; así la copia pierde menos máquinas).
+	// Respaldar no pisa una que ya exista: la buena es la primera.
 	if m.hayPrevia && schema > m.versionPrevia {
 		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
 			log.Printf("state: not writing schema %d, because the schema %d copy could not be made: %v", schema, m.versionPrevia, err)

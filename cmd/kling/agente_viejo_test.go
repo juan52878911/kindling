@@ -14,6 +14,7 @@ func TestAgenteViejo(t *testing.T) {
 		viejo string // "" = no; si no, un trozo del motivo
 	}{
 		{nil, "0.21.0", ""},
+		{&api.GuestAgent{}, "0.21.0", "announces nothing"},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.21.0"}, "0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.3"}, "v0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.19.0"}, "0.21.0", "more than one minor"},
