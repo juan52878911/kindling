@@ -396,7 +396,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	rec := api.ImageRecipe{Name: req.Name, Base: base, GrowMB: req.GrowMB,
 		Builder: req.Builder, Spec: req.Spec, BuiltAt: time.Now(), KlingVer: Version,
 		CPUPct: hints.CPUPct, CPUPctPerVCPU: hints.CPUPctPerVCPU, GuestIPv6Stack: hints.GuestIPv6Stack,
-		Built: hints.Built}
+		Built: hints.Built, Agent: hints.Agent}
 	rb, _ := json.MarshalIndent(rec, "", "  ")
 	// 0600: el spec de un constructor puede llevar secretos y el núcleo no sabe
 	// cuáles son.

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +53,28 @@ type releaseFalsa struct {
 	alPedir func(path string)
 }
 
+// textoSumas es el SHA256SUMS de la release, en orden para que la firma
+// coincida entre peticiones.
+func (r *releaseFalsa) textoSumas() []byte {
+	nombres := make([]string, 0, len(r.assets))
+	for n := range r.assets {
+		nombres = append(nombres, n)
+	}
+	sort.Strings(nombres)
+	var b strings.Builder
+	for _, n := range nombres {
+		s := sha(r.assets[n])
+		if r.sumas != nil {
+			var ok bool
+			if s, ok = r.sumas[n]; !ok {
+				continue
+			}
+		}
+		fmt.Fprintf(&b, "%s  %s\n", s, n)
+	}
+	return []byte(b.String())
+}
+
 func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
@@ -63,18 +88,15 @@ func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
 		case req.URL.Path == "/releases/latest":
 			http.Redirect(w, req, "/releases/tag/"+r.etiqueta, http.StatusFound)
 		case req.URL.Path == pre+"SHA256SUMS":
-			var b strings.Builder
-			for n, body := range r.assets {
-				s := sha(body)
-				if r.sumas != nil {
-					var ok bool
-					if s, ok = r.sumas[n]; !ok {
-						continue
-					}
-				}
-				fmt.Fprintf(&b, "%s  %s\n", s, n)
+			w.Write(r.textoSumas())
+		case req.URL.Path == pre+NombreFirma:
+			// Firmada con la clave de test A (montaje.opciones confía en ella).
+			k, _ := claveTest(t, "a")
+			firma, err := Firmar(k, r.textoSumas(), "tag:"+r.etiqueta)
+			if err != nil {
+				t.Error(err)
 			}
-			w.Write([]byte(b.String()))
+			w.Write(firma)
 		case strings.HasPrefix(req.URL.Path, pre):
 			body, ok := r.assets[strings.TrimPrefix(req.URL.Path, pre)]
 			if !ok {
@@ -208,6 +230,7 @@ type montaje struct {
 	d                     *daemonFalso
 	svc                   *servicioFalso
 	out                   bytes.Buffer
+	claves                []ClavePublica // las de confianza: la de test A
 }
 
 const estadoV0 = `[{"id":"aaaa","state":"frozen"},{"id":"bbbb","state":"running"}]`
@@ -229,6 +252,8 @@ func nuevoMontaje(t *testing.T) *montaje {
 		"kling-guest-linux-amd64": []byte("guest nuevo"),
 	}}
 	m.srv = m.rel.servir(t)
+	_, pa := claveTest(t, "a")
+	m.claves = []ClavePublica{pa}
 	m.d = &daemonFalso{version: "v1.0.0", root: m.raiz,
 		maquinas: []*api.Machine{{ID: "aaaa", State: api.StateWarm}, {ID: "bbbb", State: api.StateRunning}},
 		dorados:  []*api.Snapshot{{Name: "pg"}}}
@@ -239,7 +264,7 @@ func nuevoMontaje(t *testing.T) *montaje {
 func (m *montaje) opciones() Opciones {
 	return Opciones{
 		Dir:    filepath.Join(m.raiz, "upgrade"),
-		Fuente: &Fuente{Repo: m.srv.URL, permitirHTTP: true},
+		Fuente: &Fuente{Repo: m.srv.URL, permitirHTTP: true, claves: m.claves},
 		Piezas: []Pieza{
 			{Asset: Asset{Nombre: "kling-linux-amd64", Corto: "kling"}, Destino: m.bin},
 			{Asset: Asset{Nombre: "kling-guest-linux-amd64", Corto: "kling-guest"}, Destino: m.guest},
@@ -313,7 +338,7 @@ func TestActualizarCambiaArrancaYVerifica(t *testing.T) {
 
 func TestEtiquetaPedidaYUltima(t *testing.T) {
 	m := nuevoMontaje(t)
-	f := &Fuente{Repo: m.srv.URL, permitirHTTP: true}
+	f := &Fuente{Repo: m.srv.URL, permitirHTTP: true, claves: m.claves}
 	if got, err := f.UltimaEtiqueta(context.Background()); err != nil || got != "v1.1.0" {
 		t.Fatalf("latest = %q, %v", got, err)
 	}
@@ -817,8 +842,9 @@ func TestRedireccionAHTTPSeRechaza(t *testing.T) {
 		}
 	}))
 	defer tls.Close()
-	f := &Fuente{Repo: tls.URL, Client: tls.Client()}
-	_, err := f.Bajar(context.Background(), "v1.1.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
+	// Antes de 1.0 y sin firma: aquí se prueba la redirección, no la firma.
+	f := &Fuente{Repo: tls.URL, Client: tls.Client(), Avisos: io.Discard}
+	_, err := f.Bajar(context.Background(), "v0.21.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "only downloaded over https") {
 		t.Fatalf("err = %v, want the https refusal", err)
 	}
@@ -1100,4 +1126,126 @@ func TestPiezaOpcionalAusenteSeOmite(t *testing.T) {
 		t.Fatal("a required asset missing from the release must fail")
 	}
 	m2.noTocado(t)
+}
+
+// -rollback mira los esquemas como Actualizar: lo que el nuevo migró vuelve
+// de su .bak y no cuenta, pero lo que creó en un formato que el viejo no lee
+// (un dorado nuevo, sin .bak) para la vuelta antes de tocar nada.
+func TestVolverAtrasCompruebaEsquemas(t *testing.T) {
+	m := nuevoMontaje(t)
+	meta := filepath.Join(m.raiz, "snapshots", "nuevo", "meta.json")
+	m.svc.alArrancar = func(v string) error {
+		if v == "v1.1.0" {
+			// Migra state.json a un esquema que el viejo no lee, con su copia.
+			os.WriteFile(filepath.Join(m.raiz, "state.json.v0.bak"), []byte(estadoV0), 0o600)
+			os.WriteFile(filepath.Join(m.raiz, "state.json"), []byte(`{"schema":3,"machines":[]}`), 0o600)
+		}
+		return nil
+	}
+	o := m.opciones()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	// Un dorado que el nuevo guardó en meta 2: el viejo (esquemasHoy) lee 1.
+	os.MkdirAll(filepath.Dir(meta), 0o700)
+	os.WriteFile(meta, []byte(`{"schema":2,"name":"nuevo"}`), 0o600)
+	m.svc.llamadas = nil
+	_, err := VolverAtras(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "golden meta.json files have schema 2") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), "state.json") {
+		t.Errorf("the migrated state.json comes back from its .bak and must not count: %v", err)
+	}
+	if leer(t, m.bin) != string(m.nuevo) || len(m.svc.llamadas) != 0 {
+		t.Errorf("a refused rollback touched something: %v", m.svc.llamadas)
+	}
+	// En seco dice lo mismo.
+	o.EnSeco = true
+	if _, err := VolverAtras(context.Background(), o); err == nil {
+		t.Error("the dry run must refuse it too")
+	}
+	// Sin ese dorado, vuelve (y el state.json sale de su copia).
+	o.EnSeco = false
+	os.Remove(meta)
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if leer(t, filepath.Join(m.raiz, "state.json")) != estadoV0 {
+		t.Error("state.json is not back from its .v0.bak")
+	}
+}
+
+// -force vuelve aunque el viejo no vaya a leerlo todo, y lo dice.
+func TestVolverAtrasForzadoConEsquemaNuevo(t *testing.T) {
+	m := nuevoMontaje(t)
+	o := m.opciones()
+	if _, err := Actualizar(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	cred := filepath.Join(m.raiz, "secrets", "credentials", "a.enc")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
+	os.WriteFile(cred, []byte("KLCS\x09cifrado"), 0o600)
+	o.Forzar = true
+	m.out.Reset()
+	if _, err := VolverAtras(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+	if !strings.Contains(m.out.String(), "rolling back anyway (-force)") || !strings.Contains(m.out.String(), "credential stores have version 9") {
+		t.Errorf("-force must say what the old one cannot read:\n%s", m.out.String())
+	}
+	if leer(t, m.bin) != string(m.viejo) {
+		t.Error("the previous kling is not back")
+	}
+}
+
+// volcadoHV arma un mem.file como el de kling-hv (vm.c, khv_snapshot): la RAM,
+// la cabecera {magia, versión, …} y al final el pie {magia, ram, off, len}.
+func volcadoHV(t *testing.T, version uint32) string {
+	t.Helper()
+	ram := make([]byte, 4096)
+	cab := make([]byte, 64)
+	binary.LittleEndian.PutUint64(cab[0:], magiaHV)
+	binary.LittleEndian.PutUint32(cab[8:], version)
+	pie := make([]byte, 32)
+	binary.LittleEndian.PutUint64(pie[0:], magiaHV)
+	binary.LittleEndian.PutUint64(pie[8:], uint64(len(ram)))
+	binary.LittleEndian.PutUint64(pie[16:], uint64(len(ram)))
+	binary.LittleEndian.PutUint64(pie[24:], uint64(len(cab)))
+	p := filepath.Join(t.TempDir(), "mem.file")
+	if err := os.WriteFile(p, append(append(ram, cab...), pie...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestVersionVolcadoHV(t *testing.T) {
+	for _, want := range []int{1, 2, 7} {
+		v, ok, err := VersionVolcadoHV(volcadoHV(t, uint32(want)))
+		if err != nil || !ok || v != want {
+			t.Errorf("version %d: got %d ok=%v err=%v", want, v, ok, err)
+		}
+	}
+	// Uno de kling-vz o de Firecracker (sin el pie) no es de kling-hv.
+	otro := filepath.Join(t.TempDir(), "mem.file")
+	os.WriteFile(otro, make([]byte, 8192), 0o600)
+	if _, ok, err := VersionVolcadoHV(otro); ok || err != nil {
+		t.Errorf("a non kling-hv file: ok=%v err=%v", ok, err)
+	}
+	corto := filepath.Join(t.TempDir(), "mem.file")
+	os.WriteFile(corto, []byte("x"), 0o600)
+	if _, ok, err := VersionVolcadoHV(corto); ok || err != nil {
+		t.Errorf("a short file: ok=%v err=%v", ok, err)
+	}
+	// Un pie que apunta fuera del fichero es un error, no un pánico.
+	malo := volcadoHV(t, 2)
+	b, _ := os.ReadFile(malo)
+	binary.LittleEndian.PutUint64(b[len(b)-16:], 1<<40)
+	os.WriteFile(malo, b, 0o600)
+	if _, ok, err := VersionVolcadoHV(malo); !ok || err == nil {
+		t.Errorf("a header out of bounds: ok=%v err=%v", ok, err)
+	}
+	if _, _, err := VersionVolcadoHV(filepath.Join(t.TempDir(), "no-existe")); err == nil {
+		t.Error("a missing file must be an error")
+	}
 }

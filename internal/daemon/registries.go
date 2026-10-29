@@ -146,7 +146,7 @@ func (s *Server) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("registry credentials for %s saved (user %q)", host, req.Username)
-	writeJSON(w, http.StatusOK, api.Registry{Host: host, Username: req.Username})
+	writeJSON(w, http.StatusCreated, api.Registry{Host: host, Username: req.Username})
 }
 
 func (s *Server) handleRegistryLogout(w http.ResponseWriter, r *http.Request) {

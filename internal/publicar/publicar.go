@@ -38,6 +38,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Maquinas es lo que el publicador necesita del gestor de máquinas.
@@ -88,9 +90,13 @@ type Publicador struct {
 
 	guardando sync.Mutex
 	guardados sync.WaitGroup // guardados en segundo plano aún en curso
-	mu        sync.Mutex
-	por       map[string]*maquina // id de máquina → sus puertos
-	ctx       context.Context
+	// intocable: publish.json lo dejó un kling más nuevo (versionPublicar):
+	// no se escribe encima, o se perdería lo que este binario no conoce.
+	intocable bool
+
+	mu  sync.Mutex
+	por map[string]*maquina // id de máquina → sus puertos
+	ctx context.Context
 }
 
 type maquina struct {
@@ -148,6 +154,10 @@ var ErrOcupado = errors.New("host port in use")
 // Mac).
 var ErrNoSoportado = errors.New("not supported")
 
+// ErrPeticion marca los errores de la petición (un puerto repetido, uno que
+// la máquina no expone): el daemon los contesta con 400.
+var ErrPeticion = errors.New("bad publish request")
+
 // Arrancar recupera las publicaciones guardadas (las de máquinas que ya no
 // existen se olvidan) y lanza el barrido: quitar las de máquinas que
 // desaparecen y, con ocioso > 0, congelar las ociosas. Vuelve en seguida; todo
@@ -193,12 +203,12 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrPeticion, err)
 		}
 		if q.Host != 0 {
 			k := q.ProtoOr() + "/" + strconv.Itoa(q.Host)
 			if vistos[k] {
-				return nil, fmt.Errorf("host port %d twice", q.Host)
+				return nil, fmt.Errorf("%w: host port %d twice", ErrPeticion, q.Host)
 			}
 			vistos[k] = true
 		}
@@ -208,7 +218,7 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 			}
 		}
 		if q.ProtoOr() == api.ProtoTCP && len(mc.Forwards) > 0 && !mc.Exposes(q.Guest) {
-			return nil, fmt.Errorf("guest port %d is not exposed by %s (add it to %s)", q.Guest, mc.Name, api.LabelPorts)
+			return nil, fmt.Errorf("%w: guest port %d is not exposed by %s (add it to %s)", ErrPeticion, q.Guest, mc.Name, api.LabelPorts)
 		}
 	}
 	p.mu.Lock()
@@ -281,14 +291,14 @@ func (p *Publicador) Comprobar(ps []api.PortPublish) error {
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPeticion, err)
 		}
 		if q.Host == 0 {
 			continue
 		}
 		k := q.ProtoOr() + "/" + strconv.Itoa(q.Host)
 		if vistos[k] {
-			return fmt.Errorf("host port %d twice", q.Host)
+			return fmt.Errorf("%w: host port %d twice", ErrPeticion, q.Host)
 		}
 		vistos[k] = true
 	}
@@ -785,22 +795,42 @@ func (p *Publicador) guardar() {
 	// último en escribir es el último estado.
 	p.guardando.Lock()
 	defer p.guardando.Unlock()
-	b, err := json.MarshalIndent(p.Lista(), "", "  ")
+	if p.intocable {
+		return
+	}
+	b, err := json.MarshalIndent(ficheroPublicar{esquema.Cabecera{Schema: versionPublicar}, p.Lista()}, "", "  ")
 	if err != nil {
 		return
 	}
-	tmp := p.ruta + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(p.ruta), 0o755); err != nil {
 		p.logf("publish: saving %s: %v", p.ruta, err)
 		return
 	}
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		p.logf("publish: saving %s: %v", p.ruta, err)
+	// La copia del formato anterior (publish.json.v0.bak) antes de migrarlo,
+	// y nada encima de uno del futuro.
+	if err := esquema.PrepararEscritura(p.ruta, versionPublicar, versionPublicar); err != nil {
+		if esquema.EsMasNuevo(err) {
+			p.intocable = true
+		}
+		p.logf("publish: not saving %s: %v", p.ruta, err)
 		return
 	}
-	if err := os.Rename(tmp, p.ruta); err != nil {
+	// Durable: un temporal fijo sin fsync podía dejar, tras un corte, un
+	// publish.json vacío o a medias, y al volver "nada publicado".
+	if err := durable.Escribir(p.ruta, append(b, '\n'), 0o600); err != nil {
 		p.logf("publish: saving %s: %v", p.ruta, err)
 	}
+}
+
+// versionPublicar es la versión de publish.json (ver pkg/esquema).
+//
+//	0: un array JSON de api.Publication (v0.20).
+//	1: {"schema": 1, "publications": [...]}.
+const versionPublicar = 1
+
+type ficheroPublicar struct {
+	esquema.Cabecera
+	Publications []api.Publication `json:"publications"`
 }
 
 func (p *Publicador) leer() []api.Publication {
@@ -814,8 +844,25 @@ func (p *Publicador) leer() []api.Publication {
 		}
 		return nil
 	}
+	v, err := esquema.Comprobar(p.ruta, b, versionPublicar)
+	if esquema.EsMasNuevo(err) {
+		p.guardando.Lock()
+		p.intocable = true
+		p.guardando.Unlock()
+		p.logf("publish: %v; nothing is published again and the file is left as it is", err)
+		return nil
+	}
 	var l []api.Publication
-	if err := json.Unmarshal(b, &l); err != nil {
+	if err == nil {
+		if v == 0 {
+			err = json.Unmarshal(b, &l)
+		} else {
+			var f ficheroPublicar
+			err = json.Unmarshal(b, &f)
+			l = f.Publications
+		}
+	}
+	if err != nil {
 		p.logf("publish: %s is not valid (%v); starting with nothing published", p.ruta, err)
 		return nil
 	}

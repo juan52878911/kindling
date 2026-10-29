@@ -394,13 +394,11 @@ func (m *Manager) liveSource(src string, roots []string) (string, error) {
 	if dataRoot, err := filepath.EvalSymlinks(m.root); err == nil && within(dataRoot, real) {
 		return "", fmt.Errorf("%s contains kindling's data root (%s) and cannot be shared", src, m.root)
 	}
-	var allowed []string
 	for _, r := range roots {
 		rr, err := filepath.EvalSymlinks(r)
 		if err != nil {
 			continue
 		}
-		allowed = append(allowed, rr)
 		if within(real, rr) {
 			return real, nil
 		}

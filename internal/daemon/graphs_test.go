@@ -39,6 +39,19 @@ func TestGraphsAPI(t *testing.T) {
 	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "needs from") {
 		t.Fatalf("nodo sin from ni image = %d %s", rr.Code, rr.Body)
 	}
+	// Estricto: un campo que este daemon no conoce (de un cliente más nuevo)
+	// es un 400 que lo nombra, no un grafo distinto del pedido.
+	for _, cuerpo := range []string{
+		`{"graph":{"name":"x","nodes":{"a":{"image":"min","futuro":true}}}}`,
+		`{"graph":{"name":"x","nodes":{"a":{"image":"min"}},"futuro":1}}`,
+		`{"graph":{"name":"x","nodes":{"a":{"image":"min"}}},"futuro":1}`,
+	} {
+		rr = call(t, h, "POST", "/graphs", cuerpo)
+		if rr.Code != 400 || !strings.Contains(rr.Body.String(), `unknown field \"futuro\"`) || !strings.Contains(rr.Body.String(), "update kling") {
+			t.Fatalf("%s = %d %s", cuerpo, rr.Code, rr.Body)
+		}
+	}
+
 	// Una arista entre máquinas ya no es un 501 en ningún sistema (en macOS
 	// la sirve el broker de enlaces): aquí falla, si falla, por arrancar.
 	con := `{"graph":{"name":"y","nodes":{"a":{"image":"min"},"b":{"image":"min","ports":[8081]}},` +

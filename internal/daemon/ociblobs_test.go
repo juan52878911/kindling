@@ -178,7 +178,7 @@ func sinLecturaParaOtros(t *testing.T, dir string) {
 }
 
 // Pasado el tope, una subida barre lo viejo de la caché de root; si aun así
-// no cabe, 507. Lo de menos de graciaCacheOCI no se barre.
+// no cabe, 503 (disco lleno). Lo de menos de graciaCacheOCI no se barre.
 func TestPutOCIBlobTope(t *testing.T) {
 	s, root := servidorBlobs(t)
 	s.SetBuildCache(func() LimitesCacheConstruccion { return LimitesCacheConstruccion{MaxGiB: 1} })
@@ -196,7 +196,7 @@ func TestPutOCIBlobTope(t *testing.T) {
 	viejo := grande('a', hace)
 	body := "capa"
 	d := "sha256:" + shaHex([]byte(body))
-	if rr := putOCIBlob(s, d, strings.NewReader(body), 500<<20); rr.Code != http.StatusInsufficientStorage &&
+	if rr := putOCIBlob(s, d, strings.NewReader(body), 500<<20); rr.Code != api.StatusDiskFull &&
 		rr.Code != http.StatusBadRequest {
 		t.Fatalf("PUT = %d %s", rr.Code, rr.Body)
 	}
@@ -206,7 +206,7 @@ func TestPutOCIBlobTope(t *testing.T) {
 	reciente := grande('c', time.Now())
 	grande('d', time.Now())
 	rr := putOCIBlob(s, d, strings.NewReader(body), int64(len(body)))
-	if rr.Code != http.StatusInsufficientStorage || !strings.Contains(rr.Body.String(), "build_cache_max_gib") {
+	if rr.Code != api.StatusDiskFull || !strings.Contains(rr.Body.String(), "build_cache_max_gib") {
 		t.Fatalf("PUT over the limit = %d %s", rr.Code, rr.Body)
 	}
 	if _, err := os.Lstat(reciente); err != nil {

@@ -41,12 +41,29 @@ const nsGrafos = "graph"
 
 var errNsGrafos = errors.New("store namespace \"graph\" is reserved: graphs are changed through /graphs")
 
+// errStoreMal es un error de la petición al store (nombre, clave o valor que
+// no valen): 400. Lo demás es del disco del host: 500 (storeStatus).
+type errStoreMal struct{ msg string }
+
+func (e *errStoreMal) Error() string { return e.msg }
+
+func storeMal(format string, a ...any) error { return &errStoreMal{fmt.Sprintf(format, a...)} }
+
+// storeStatus es el código de un error del store.
+func storeStatus(err error) int {
+	var mal *errStoreMal
+	if errors.As(err, &mal) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
 func (st *store) path(ns, key string) (string, error) {
 	if !api.KeyPattern.MatchString(ns) {
-		return "", fmt.Errorf("invalid store namespace %q", ns)
+		return "", storeMal("invalid store namespace %q", ns)
 	}
 	if key != "" && !api.KeyPattern.MatchString(key) {
-		return "", fmt.Errorf("invalid store key %q", key)
+		return "", storeMal("invalid store key %q", key)
 	}
 	if key == "" {
 		return filepath.Join(st.dir, ns), nil
@@ -68,10 +85,10 @@ func (st *store) get(ns, key string) ([]byte, error) {
 
 func (st *store) put(ns, key string, value []byte) error {
 	if len(value) > api.MaxValueBytes {
-		return fmt.Errorf("value is %d bytes; the limit is %d", len(value), api.MaxValueBytes)
+		return storeMal("value is %d bytes; the limit is %d", len(value), api.MaxValueBytes)
 	}
 	if !json.Valid(value) {
-		return fmt.Errorf("value is not valid JSON")
+		return storeMal("value is not valid JSON")
 	}
 	p, err := st.path(ns, key)
 	if err != nil {
@@ -127,7 +144,7 @@ func (st *store) keys(ns string) ([]string, error) {
 func (s *Server) handleStoreKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.store.keys(r.PathValue("ns"))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, storeStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, api.StoreKeys{Keys: keys})
@@ -140,7 +157,7 @@ func (s *Server) handleStoreGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, storeStatus(err), err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -159,7 +176,7 @@ func (s *Server) handleStorePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.put(ns, key, b); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, storeStatus(err), err)
 		return
 	}
 	s.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStored, Name: ns + "/" + key})
@@ -173,7 +190,7 @@ func (s *Server) handleStoreDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.delete(ns, key); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, storeStatus(err), err)
 		return
 	}
 	s.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStored, Name: ns + "/" + key, Message: "deleted"})

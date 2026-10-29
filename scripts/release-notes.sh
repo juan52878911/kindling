@@ -49,4 +49,6 @@ if [ -z "$BODY" ]; then
 fi
 
 printf '%s\n\n' "$BODY"
-printf '%s\n' "**Install or upgrade:** \`curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | KLING_VERSION=v$VER sh\`"
+# install.sh del propio tag y no el de main: las notas de una release no
+# cambian de significado cuando main se mueve.
+printf '%s\n' "**Install or upgrade:** \`curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/v$VER/scripts/install.sh | KLING_VERSION=v$VER sh\`"

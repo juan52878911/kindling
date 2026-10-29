@@ -161,12 +161,6 @@ func (g *Gateway) deployRecord(ctx context.Context, snapshot string) (ChispaDepl
 	return rec, nil
 }
 
-// deployLabels son las etiquetas válidas del registro de despliegue.
-func (g *Gateway) deployLabels(ctx context.Context, snapshot string) ([]string, error) {
-	rec, err := g.deployRecord(ctx, snapshot)
-	return rec.Labels, err
-}
-
 // deployLookupError es no haber podido conseguir el registro de despliegue
 // (ChispaDeployAnnotation): sin él, el gateway no tiene con qué validar lo que
 // mande la réplica, así que la tarea falla como si no hubiera réplica

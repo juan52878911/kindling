@@ -13,6 +13,13 @@
 #   KLING_E2E_RESTART='cmd' ./90-e2e.sh  cómo reiniciar el daemon (un daemon privado,
 #                                    p. ej. matarlo y relanzarlo con su -root/-socket);
 #                                    sin ella, solo con ssh:// (sudo systemctl restart kling)
+#   KLING_E2E_HTTPBIN=host           un httpbin propio (go-httpbin) en vez de httpbin.org para
+#                                    el proxy de credenciales (7, 7b). Tiene que tener IP
+#                                    PÚBLICA: el proxy no marca nunca a la red privada ni al
+#                                    loopback (pkg/credproxy, IsBlockedIP), así que un
+#                                    servidor en el propio host no sirve
+#   KLING_E2E_OFFLINE=1              sin internet: se salta lo que necesita salir (7, 7b y el
+#                                    control IPv4 de 7c), y lo dice
 #
 # Cada comprobación dice qué esperaba y qué obtuvo. Un fallo NO aborta el resto:
 # saber que fallan tres cosas relacionadas vale más que enterarse de una.
@@ -28,6 +35,8 @@ VOL3="${VOL3:-e2e-vol3}"
 # agente: la de herramientas (`kling image toolchain`) lleva kling-guest.
 IMGVOL="${IMGVOL:-toolchain}"
 KEEP="${KEEP:-0}"
+HTTPBIN="${KLING_E2E_HTTPBIN:-httpbin.org}"
+OFFLINE="${KLING_E2E_OFFLINE:-0}"
 
 pass=0; fail=0
 ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
@@ -661,8 +670,11 @@ s = socket.create_connection((socket.gethostbyname("httpbin.org"), 80), timeout=
 s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n")
 print("OTRO", s.recv(20).decode().split(" ")[1])
 '
-if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
-  out=$(printf '%s' "$PASS" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY 2>&1)
+SONDA=${SONDA//httpbin.org/$HTTPBIN}
+if [ "$OFFLINE" = 1 ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_OFFLINE=1: the credential proxy needs %s on the internet\n" "$HTTPBIN"
+elif out=$($KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove 2>&1); then
+  out=$(printf '%s' "$PASS" | $KLING machine credential "$CR" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
   contiene "$out" "placeholder" && ok "credential: la clave queda en el proxy" || bad "machine credential" "placeholder" "$out"
 
   out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" 2>&1)
@@ -705,7 +717,7 @@ if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org 
   # Rotación: la misma -env con otra clave conserva el marcador (el proceso del
   # invitado ya lo tiene en su entorno) y el proveedor ve la clave nueva.
   PASS2="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
-  printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY >/dev/null 2>&1
+  printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain "$HTTPBIN" -env E2E_KEY >/dev/null 2>&1
   out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS2" corto 2>&1)
   ph3=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
   contiene "$out" "AUTH 200" && [ "$ph1" = "$ph3" ] && ok "rotar la clave: el proveedor acepta la nueva y el marcador no cambia" \
@@ -741,8 +753,11 @@ print("OTROMETODO", pedir("POST", "/basic-auth/demo/" + real)[0])
 print("PUNTOPUNTO", pedir("GET", "/basic-auth/demo/../../anything")[0])
 t0 = time.time(); st, b = pedir("GET", "/drip?duration=150&numbytes=5&delay=0&code=200", timeout=200)
 print("DRIP", st, len(b), int(time.time() - t0))
+if st == 400 and b"longer than" in b:
+    print("DRIPTOPE", b.decode(errors="replace").replace("\n", " "))
 '
-  out=$(printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY \
+  SONDA_ALLOW=${SONDA_ALLOW//httpbin.org/$HTTPBIN}
+  out=$(printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain "$HTTPBIN" -env E2E_KEY \
     -allow-request 'GET /basic-auth/demo/*' -allow-request 'GET /drip' 2>&1)
   contiene "$out" "only these requests" && ok "credential -allow-request: la clave queda restringida" \
     || bad "credential -allow-request" "only these requests" "$out"
@@ -754,7 +769,12 @@ print("DRIP", st, len(b), int(time.time() - t0))
   contiene "$out" "PUNTOPUNTO 403" && ok "Allow: /../ no sirve para salirse de lo permitido" \
     || bad "Allow con /../" "PUNTOPUNTO 403" "$out"
   drip=$(printf '%s\n' "$out" | awk '/^DRIP /{print $2, $3, $4}')
+  # httpbin.org (go-httpbin) ya no da un /drip de más de 10 s: sin un httpbin
+  # propio (KLING_E2E_HTTPBIN) que lo sirva, no hay stream largo que probar.
   case "$drip" in
+    400*) contiene "$out" "DRIPTOPE" \
+            && printf "  \033[33mskip\033[0m  stream largo por el proxy: %s no sirve un /drip de 150 s (usa un httpbin propio en KLING_E2E_HTTPBIN)\n" "$HTTPBIN" \
+            || bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
     "200 5 "*) ok "un stream de ${drip##* } s (más que el plazo total de antes, 120 s) llega entero" ;;
     *) bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
   esac
@@ -786,16 +806,16 @@ print("DRIP", st, len(b), int(time.time() - t0))
   [ "$n_todas" -gt 0 ] && [ "$n_todas" = "$n_den" ] && ok "audit -denied: solo denegadas ($n_den)" \
     || bad "audit -denied" "todas las líneas http con denied" "$n_todas líneas, $n_den denegadas"
   out=$($KLING machine audit "$CR" -tail 3 2>&1)
-  contiene "$out" "METHOD" && contiene "$out" "httpbin.org" && ok "audit: la tabla" || bad "audit tabla" "cabecera y filas" "$out"
+  contiene "$out" "METHOD" && contiene "$out" "$HTTPBIN" && ok "audit: la tabla" || bad "audit tabla" "cabecera y filas" "$out"
   # -f: sigue el registro como `kling logs -f` sigue la consola.
   seg=$(mktemp)
   $KLING machine audit "$CR" -f -tail 1 >"$seg" 2>&1 &
   segpid=$!
   sleep 2
   $KLING exec -timeout 30s "$CR" -- python3 -c '
-import http.client
-c = http.client.HTTPConnection("httpbin.org", 80, timeout=10)
-c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/null 2>&1
+import http.client, sys
+c = http.client.HTTPConnection(sys.argv[1], 80, timeout=10)
+c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' "$HTTPBIN" >/dev/null 2>&1
   sleep 3
   kill "$segpid" 2>/dev/null; wait "$segpid" 2>/dev/null
   out=$(cat "$seg"); rm -f "$seg"
@@ -813,13 +833,21 @@ c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/n
     && ok "audit: en <root>/audit (0700 y 0600, de root), no en el directorio del VMM" \
     || bad "sitio del registro" "700 root 600 root y nada en machines/<id>" "$out vieja=$vieja"
   $KLING rm -f "$CR" >/dev/null 2>&1
-  [ "$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")" = 1 ] \
-    && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado" "sigue"
+  # rm contesta al morir el VMM y limpia en segundo plano (internal/machine/
+  # borrado.go): el registro se va con esa limpieza, no antes de contestar.
+  sigue=0
+  for _ in $(seq 1 40); do
+    sigue=$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")
+    [ "$sigue" = 1 ] && break
+    sleep 0.25
+  done
+  [ "$sigue" = 1 ] \
+    && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado en 10 s" "sigue ($sigue)"
 else
-  bad "run -egress allowlist" "una máquina" "no arrancó"
+  bad "run -egress allowlist" "una máquina" "$out"
 fi
 if $KLING run -image "$IMGVOL" -name "$CR-none" -ttl 5m -on-ttl remove >/dev/null 2>&1; then
-  out=$(printf 'x' | $KLING machine credential "$CR-none" -domain httpbin.org -env E2E_KEY 2>&1)
+  out=$(printf 'x' | $KLING machine credential "$CR-none" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
   contiene "$out" "allowlist" && ok "sin -egress allowlist, credential se niega y lo explica" \
     || bad "credential sin allowlist" "un rechazo que menciona allowlist" "$out"
   $KLING rm -f "$CR-none" >/dev/null 2>&1
@@ -832,14 +860,16 @@ step "7b. Credenciales de plantilla (lo que usa el gateway MCP)"
 TC="e2e-tcred-$$"
 TPLC="e2e-tpl-cred-$$"
 PASS3="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
-if $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org -allow-exec >/dev/null 2>&1 \
-   && $KLING save "$TC" "$TPLC" >/dev/null 2>&1; then
-  out=$(printf '%s' "$PASS3" | $KLING template credential "$TPLC" -domain httpbin.org -env E2E_KEY 2>&1)
+if [ "$OFFLINE" = 1 ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_OFFLINE=1: template credentials need %s on the internet\n" "$HTTPBIN"
+elif out=$($KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org -allow-exec 2>&1) \
+   && out=$($KLING save "$TC" "$TPLC" 2>&1); then
+  out=$(printf '%s' "$PASS3" | $KLING template credential "$TPLC" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
   contiene "$out" "every new instance" && ok "template credential: la clave queda atada a la plantilla" \
     || bad "template credential" "every new instance" "$out"
   out=$($KLING template inspect "$TPLC" -json 2>&1)
-  contiene "$out" '"credential_domains"' && contiene "$out" "httpbin.org" && ok "la plantilla lista sus dominios con credencial" \
-    || bad "template inspect" "credential_domains con httpbin.org" "$out"
+  contiene "$out" '"credential_domains"' && contiene "$out" "$HTTPBIN" && ok "la plantilla lista sus dominios con credencial" \
+    || bad "template inspect" "credential_domains con $HTTPBIN" "$out"
   # A2: sin -egress explícito, el CLI manda vacío con -from (egressForRun en
   # cmd/kling/main.go) y el daemon hereda el allowlist de la plantilla —antes
   # el CLI mandaba siempre "none" por defecto y esto exigía repetir -egress
@@ -881,7 +911,7 @@ if $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org 
   $KLING rm -f "$TC" >/dev/null 2>&1
   $KLING template rm -f "$TPLC" >/dev/null 2>&1
 else
-  bad "plantilla con allowlist" "run + save" "falló"
+  bad "plantilla con allowlist" "run + save" "$out"
 fi
 
 # ── 7d. proxy de credenciales de Postgres ────────────────────────────────────
@@ -1082,7 +1112,7 @@ for modo in none internet allowlist; do
   V6="e2e-v6-$modo-$$"
   extra=""
   [ "$modo" = "allowlist" ] && extra="-allow example.org"
-  if $KLING run -image "$IMGVOL" -name "$V6" -egress "$modo" $extra -allow-exec -ttl 5m -on-ttl remove >/dev/null 2>&1; then
+  if out=$($KLING run -image "$IMGVOL" -name "$V6" -egress "$modo" $extra -allow-exec -ttl 5m -on-ttl remove 2>&1); then
     out=$($KLING exec -timeout 60s "$V6" -- python3 -c "$SONDA_V6" 2>&1)
     contiene "$out" "ADDRS vacio" && ok "egress=$modo: el invitado no tiene ninguna dirección IPv6" \
       || bad "IPv6 addrs ($modo)" "ADDRS vacio" "$out"
@@ -1090,7 +1120,9 @@ for modo in none internet allowlist; do
       || bad "IPv6 ruta ($modo)" "RUTA vacia" "$out"
     contiene "$out" "TCP6 bloqueado" && ok "egress=$modo: una conexión IPv6 a un destino público no sale" \
       || bad "IPv6 conexión ($modo)" "TCP6 bloqueado:<errno de red>" "$out"
-    if [ "$modo" = internet ]; then
+    if [ "$modo" = internet ] && [ "$OFFLINE" = 1 ]; then
+      printf "  \033[33mskip\033[0m  KLING_E2E_OFFLINE=1: no IPv4 control to 1.1.1.1\n"
+    elif [ "$modo" = internet ]; then
       contiene "$out" "TCP4 PASO" && ok "egress=internet: la misma conexión por IPv4 sí sale (la sonda distingue)" \
         || bad "control IPv4 (internet)" "TCP4 PASO" "$out"
     else
@@ -1099,7 +1131,7 @@ for modo in none internet allowlist; do
     fi
     $KLING rm -f "$V6" >/dev/null 2>&1
   else
-    bad "run -egress $modo (sonda IPv6)" "una máquina" "no arrancó"
+    bad "run -egress $modo (sonda IPv6)" "una máquina" "$out"
   fi
 done
 

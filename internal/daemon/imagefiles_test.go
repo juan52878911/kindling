@@ -38,8 +38,8 @@ func TestPutImageFileValida(t *testing.T) {
 		{`{"path":"relativa","from_host":"kling-bridge"}`, "must be absolute", 400},
 		{`{"path":"/","from_host":"kling-bridge"}`, "invalid path", 400},
 		// Se limpia dentro de la raíz del invitado: /usr/../../x es /x, no fuera.
-		{`{"path":"/usr/../../x","from_host":"kling-bridge"}`, "does not exist", 400},
-		{`{"path":"/x","from_host":"kling-bridge"}`, "does not exist", 400}, // la imagen "img" no existe
+		{`{"path":"/usr/../../x","from_host":"kling-bridge"}`, "does not exist", 404},
+		{`{"path":"/x","from_host":"kling-bridge"}`, "does not exist", 404}, // la imagen "img" no existe
 	}
 	for _, c := range casos {
 		rr := call(t, h, "PUT", "/images/img/files", c.body)

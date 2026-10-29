@@ -48,5 +48,7 @@ func (s *Server) comprobarHost() {
 		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
 	} else if err := knet.SetupHost(); err != nil {
 		log.Printf("WARNING: couldn't install the host barrier rules: %v", err)
+	} else if aviso := avisoForward(knet.LeerFiltro); aviso != "" {
+		log.Print(aviso)
 	}
 }

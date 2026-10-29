@@ -110,6 +110,7 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 			st.Dirs++
 			st.Blocks++
 
+		//lint:ignore SA1019 los tar de antes de POSIX marcan los ficheros con TypeRegA ('\x00'), y Go ya no los traduce
 		case tar.TypeReg, tar.TypeRegA:
 			if h.Size < 0 {
 				return st, fmt.Errorf("%q has a negative size", name)

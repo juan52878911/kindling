@@ -347,11 +347,7 @@ func machineFileURL(ref, path string, q url.Values) string {
 
 func statusErrorFrom(resp *http.Response) error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var e Error
-	if json.Unmarshal(b, &e) != nil || e.Message == "" {
-		e.Message = resp.Status
-	}
-	return &StatusError{Code: resp.StatusCode, Message: e.Message}
+	return statusErrorDe(resp.StatusCode, resp.Status, b)
 }
 
 // Limits valida la petición y devuelve el plazo y el tope de salida efectivos,

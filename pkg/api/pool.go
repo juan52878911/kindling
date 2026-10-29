@@ -9,6 +9,10 @@ const (
 	LabelPoolReady = "kling.pool.ready"
 )
 
+// CapabilityPool: GET/PUT /snapshots/{name}/pool (llegó en v0.19 sin
+// capacidad; un daemon de entonces la sirve sin anunciarla).
+const CapabilityPool = "pool"
+
 // PoolMax es el tope de copias precalentadas por plantilla.
 const PoolMax = 16
 

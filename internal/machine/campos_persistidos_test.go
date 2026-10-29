@@ -17,9 +17,17 @@ package machine
 //   - Si un campo desaparece o cambia de tipo, el fichero viejo se leería mal:
 //     hay que subir su versión (y escribir la migración) antes de poder
 //     regenerar la lista; -update se niega mientras no se haya hecho.
-//   - Si solo se añaden campos, la decisión es de quien los añade: si un kling
-//     anterior puede ignorarlos, basta con regenerar la lista; si no, hay que
-//     subir la versión igual. Regenerarla es dejar constancia de que se miró.
+//   - Si se añade un campo, hay que CLASIFICARLO en clasesCampos (abajo):
+//     "ignorable" si un kling anterior que lo pierda al reescribir el fichero
+//     no cambia el comportamiento de nadie, o "con efecto" si sí, y entonces
+//     con la versión del fichero que lo protege, que tiene que ser nueva (un
+//     kling anterior la rechaza en vez de perder el campo). Sin clase, o con
+//     efecto sin subir la versión, el test falla y -update se niega. Para
+//     state.json, además, el escritor tiene que poner esa versión cuando el
+//     campo va lleno (TestCamposConEfectoSubenElEsquema).
+//
+// Los campos que ya estaban antes de las clases (≤ v0.18) no la llevan: se
+// miraron uno a uno al añadirlos, con la regla de entonces.
 //
 // Para regenerarla: go test ./internal/machine -run TestCamposPersistidos -update
 
@@ -59,12 +67,64 @@ func ficherosPersistidos() []ficheroPersistido {
 			[]reflect.Type{reflect.TypeOf(api.Machine{})}},
 		{"meta.json", metaSchema, "metaSchema (internal/machine/meta.go)",
 			[]reflect.Type{reflect.TypeOf(api.Snapshot{})}},
-		{"credentials.enc", versionAlmacen, "versionAlmacen (internal/machine/credenciales.go)",
+		{"credentials.enc", versionAlmacenMax, "versionAlmacen/versionAlmacenMax (internal/machine/credenciales.go)",
 			[]reflect.Type{reflect.TypeOf(credproxy.Credential{}), reflect.TypeOf(api.CredentialSpec{})}},
 	}
 }
 
 const rutaCampos = "testdata/esquema/campos-persistidos.txt"
+
+// claseCampo es qué pasa si un kling que no conoce el campo lo pierde al
+// reescribir el fichero.
+type claseCampo struct {
+	// efecto: perderlo cambia el comportamiento. version es la del fichero
+	// que lo protege: la que un kling anterior rechaza.
+	efecto  bool
+	version int
+	// deuda: con efecto, pero llegó sin subir la versión y ya está en todos
+	// los hosts; solo vale para campos anteriores a las clases.
+	deuda bool
+	// porque es la justificación: se lee al revisar el cambio.
+	porque string
+}
+
+func (c claseCampo) String() string {
+	switch {
+	case c.deuda:
+		return "debt"
+	case c.efecto:
+		return fmt.Sprintf("effect:%d", c.version)
+	}
+	return "ignorable"
+}
+
+// clasesCampos clasifica cada campo persistido añadido desde v0.19 (la clave
+// es "<fichero> <tipo> <campo json>", como en campos-persistidos.txt).
+var clasesCampos = map[string]claseCampo{
+	// state.json (v0.19/v0.20 los añadieron sin subir el 2; el 3 los protege).
+	"state.json api.Machine cmd":         {efecto: true, version: 3, porque: "a Start would run the image's command instead"},
+	"state.json api.Machine entrypoint":  {efecto: true, version: 3, porque: "a Start would run the image's entrypoint instead"},
+	"state.json api.Machine share_wait":  {efecto: true, version: 3, porque: "the agent would start the service before its shares"},
+	"state.json api.Machine volume_wait": {efecto: true, version: 3, porque: "a commit would release and hand back volumes it must not"},
+	"state.json api.Machine net_mibps":   {efecto: true, version: 3, porque: "a cold start would use the daemon's rate instead of the requested one"},
+	"state.json api.Machine vmm": {porque: "the next launch sets it again; a freeze carries its own in volcado.ok, " +
+		"and an older kling records its own VMM in the goldens it makes anyway"},
+	"state.json api.Machine published": {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
+	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
+	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},
+	"state.json api.PortPublish proto": {porque: "only inside published (see above)"},
+	// meta.json: v0.19 los añadió sin subir el 2. Un kling ≤ v0.18 solo
+	// reescribe un meta al anotarlo, y él no los usa: los pierde la vuelta
+	// (v0.19+ → v0.18 anota → v0.19+). Subir a 3 haría que v0.19-v0.20, que
+	// sí los entienden, rechazaran todos los dorados nuevos.
+	"meta.json api.Snapshot share_wait": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
+	"meta.json api.Snapshot sin_agente": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
+	"meta.json api.Snapshot arch":       {porque: "an older kling that drops it does not compare architectures, which it never did"},
+	// credentials.enc: ver versionAlmacenSigV4 (credenciales.go).
+	"credentials.enc credproxy.Credential AccessKeyID": {efecto: true, version: 2, porque: "a kling <= v0.18 would use a sigv4 credential as HTTP and drop it"},
+	"credentials.enc credproxy.Credential Region":      {efecto: true, version: 2, porque: "as AccessKeyID"},
+	"credentials.enc credproxy.Credential Service":     {efecto: true, version: 2, porque: "as AccessKeyID"},
+}
 
 // camposDe lista "<fichero> <tipo> <campo json> <tipo go>" de cada campo que
 // encoding/json escribe de t y de los structs del módulo a los que llega
@@ -164,6 +224,10 @@ func listaCampos() []byte {
 		}
 		sort.Strings(campos)
 		for _, c := range campos {
+			p := strings.Fields(c)
+			if cl, ok := clasesCampos[strings.Join(p[:3], " ")]; ok {
+				c += " " + cl.String()
+			}
 			b.WriteString(c + "\n")
 		}
 	}
@@ -175,10 +239,11 @@ func listaCampos() []byte {
 type listaLeida struct {
 	versiones map[string]int
 	campos    map[string]string
+	clases    map[string]string // la quinta columna, si la hay
 }
 
 func leerListaCampos(b []byte) (listaLeida, error) {
-	l := listaLeida{versiones: map[string]int{}, campos: map[string]string{}}
+	l := listaLeida{versiones: map[string]int{}, campos: map[string]string{}, clases: map[string]string{}}
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for n := 1; sc.Scan(); n++ {
 		linea := strings.TrimSpace(sc.Text())
@@ -195,6 +260,9 @@ func leerListaCampos(b []byte) (listaLeida, error) {
 			l.versiones[p[1]] = v
 		case len(p) == 4:
 			l.campos[strings.Join(p[:3], " ")] = p[3]
+		case len(p) == 5:
+			l.campos[strings.Join(p[:3], " ")] = p[3]
+			l.clases[strings.Join(p[:3], " ")] = p[4]
 		default:
 			return l, fmt.Errorf("line %d: %q", n, linea)
 		}
@@ -235,9 +303,37 @@ func cambiosCampos(antes, ahora listaLeida) (rotos, otros []string) {
 			otros = append(otros, fmt.Sprintf("version: %s %d -> %d", f, antes.versiones[f], v))
 		}
 	}
+	rotos = append(rotos, clasesSinCumplir(antes, ahora, clasesCampos)...)
 	sort.Strings(rotos)
 	sort.Strings(otros)
 	return rotos, otros
+}
+
+// clasesSinCumplir son los campos de ahora cuya clase falta o no se cumple:
+//   - uno nuevo (no está en antes) sin clase en clases;
+//   - uno nuevo de deuda (solo vale para los que ya estaban);
+//   - uno con efecto, nuevo o que cambia de clase, cuya versión no es mayor
+//     que la que ya hay en los hosts (antes) o que no ha llegado (ahora).
+func clasesSinCumplir(antes, ahora listaLeida, clases map[string]claseCampo) []string {
+	var out []string
+	for clave := range ahora.campos {
+		fichero, _, _ := strings.Cut(clave, " ")
+		_, estaba := antes.campos[clave]
+		cl, ok := clases[clave]
+		switch {
+		case !ok && !estaba:
+			out = append(out, fmt.Sprintf("added without a class: %s (classify it in clasesCampos: ignorable, or with effect and a schema bump)", clave))
+		case !ok:
+		case cl.deuda && !estaba:
+			out = append(out, fmt.Sprintf("added as debt: %s (only fields that were already on every host can be debt)", clave))
+		case cl.efecto && (!estaba || antes.clases[clave] != cl.String()):
+			if cl.version <= antes.versiones[fichero] || ahora.versiones[fichero] < cl.version {
+				out = append(out, fmt.Sprintf("field with effect without a schema bump: %s needs %s %d, and hosts already have %d (this binary reads %d)",
+					clave, fichero, cl.version, antes.versiones[fichero], ahora.versiones[fichero]))
+			}
+		}
+	}
+	return out
 }
 
 func TestCamposPersistidos(t *testing.T) {
@@ -269,7 +365,7 @@ func TestCamposPersistidos(t *testing.T) {
 				}
 			}
 		}
-		t.Fatalf("a struct persisted on disk lost or retyped fields without a schema bump:\n  %s\n\n"+
+		t.Fatalf("a struct persisted on disk changed in a way that needs a schema bump (or a field needs its class):\n  %s\n\n"+
 			"Files already on every host have those fields, and this binary would read them wrong. "+
 			"Bump %s, migrate the old version where the file is decoded (see docs/actualizar.md and pkg/esquema), "+
 			"add a fixture of the old format under testdata/esquema, and only then run\n"+
@@ -326,10 +422,97 @@ func TestCambiosCamposExigeSubirVersion(t *testing.T) {
 	if rotos, otros := cambiosCampos(antes, subido); len(rotos) != 0 || len(otros) != 2 {
 		t.Errorf("con la versión subida: rotos = %v, otros = %v", rotos, otros)
 	}
+	// Añadir un campo sin clasificarlo no se puede regenerar.
 	anadido := copia(1, map[string]string{"state.json api.Machine id": "string", "state.json api.Machine ip": "string",
 		"state.json api.Machine nuevo": "bool"})
-	if rotos, otros := cambiosCampos(antes, anadido); len(rotos) != 0 || len(otros) != 1 {
-		t.Errorf("añadir un campo: rotos = %v, otros = %v", rotos, otros)
+	if rotos, otros := cambiosCampos(antes, anadido); len(rotos) != 1 || !strings.Contains(rotos[0], "without a class") || len(otros) != 1 {
+		t.Errorf("añadir un campo sin clase: rotos = %v, otros = %v", rotos, otros)
+	}
+	const nuevo = "state.json api.Machine nuevo"
+	casos := []struct {
+		nombre  string
+		version int
+		clase   claseCampo
+		roto    string
+	}{
+		{"ignorable", 1, claseCampo{}, ""},
+		{"con efecto sin subir", 1, claseCampo{efecto: true, version: 1}, "without a schema bump"},
+		{"con efecto y versión vieja", 2, claseCampo{efecto: true, version: 1}, "without a schema bump"},
+		{"con efecto sin llegar", 2, claseCampo{efecto: true, version: 3}, "without a schema bump"},
+		{"con efecto y subida", 2, claseCampo{efecto: true, version: 2}, ""},
+		{"deuda nueva", 1, claseCampo{deuda: true}, "as debt"},
+	}
+	for _, c := range casos {
+		ahora := copia(c.version, map[string]string{"state.json api.Machine id": "string", "state.json api.Machine ip": "string", nuevo: "bool"})
+		rotos := clasesSinCumplir(antes, ahora, map[string]claseCampo{nuevo: c.clase})
+		if (c.roto == "") != (len(rotos) == 0) || (c.roto != "" && !strings.Contains(rotos[0], c.roto)) {
+			t.Errorf("%s: rotos = %v", c.nombre, rotos)
+		}
+	}
+	// Un campo que ya estaba puede quedar como deuda, o pasar a con efecto
+	// solo subiendo la versión.
+	ya := copia(1, map[string]string{"state.json api.Machine id": "string", "state.json api.Machine ip": "string"})
+	if rotos := clasesSinCumplir(antes, ya, map[string]claseCampo{"state.json api.Machine ip": {deuda: true}}); len(rotos) != 0 {
+		t.Errorf("deuda de uno que ya estaba: %v", rotos)
+	}
+	if rotos := clasesSinCumplir(antes, ya, map[string]claseCampo{"state.json api.Machine ip": {efecto: true, version: 1}}); len(rotos) != 1 {
+		t.Errorf("con efecto sin subir uno que ya estaba: %v", rotos)
+	}
+}
+
+// Para state.json, que escribe el esquema más bajo que describe el estado
+// (esquemaParaEscribir), cada campo de api.Machine con efecto tiene que subir
+// el esquema cuando va lleno: si no, la clase sería mentira.
+func TestCamposConEfectoSubenElEsquema(t *testing.T) {
+	tm := reflect.TypeOf(api.Machine{})
+	for clave, cl := range clasesCampos {
+		p := strings.Fields(clave)
+		if p[0] != "state.json" || p[1] != "api.Machine" || !cl.efecto {
+			continue
+		}
+		var mc api.Machine
+		v := reflect.ValueOf(&mc).Elem()
+		hecho := false
+		for i := 0; i < tm.NumField(); i++ {
+			nombre, _, _ := strings.Cut(tm.Field(i).Tag.Get("json"), ",")
+			if nombre != p[2] {
+				continue
+			}
+			llenar(t, v.Field(i))
+			hecho = true
+		}
+		if !hecho {
+			t.Fatalf("%s: no está en api.Machine", clave)
+		}
+		if got := esquemaParaEscribir([]api.Machine{mc}); got < cl.version {
+			t.Errorf("%s lleno: esquemaParaEscribir = %d, y su clase pide %d (añádelo a necesitaV3)", clave, got, cl.version)
+		}
+	}
+	if got := esquemaParaEscribir([]api.Machine{{ID: "x", VMM: "kling-hv 0.20.0"}}); got != versionEstado {
+		t.Errorf("una máquina sin campos con efecto: esquema %d, quería %d", got, versionEstado)
+	}
+}
+
+// llenar pone un valor no vacío en v (lo que omitempty sí escribe).
+func llenar(t *testing.T, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int64, reflect.Int32:
+		v.SetInt(1)
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.Zero(v.Type().Key()), reflect.Zero(v.Type().Elem()))
+		v.Set(m)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	default:
+		t.Fatalf("llenar: tipo %s sin caso", v.Type())
 	}
 }
 
@@ -348,7 +531,7 @@ func TestCamposDeSigueAJSON(t *testing.T) {
 		Fuera  string `json:"-"`
 		Hijos  []hijo `json:"hijos,omitempty"`
 		Otro   *hijo  `json:"otro"`
-		oculto int
+		oculto int    //lint:ignore U1000 el campo sin exportar es lo que se prueba que no cuenta
 	}
 	var campos []string
 	camposDe("f", reflect.TypeOf(raiz{}), map[reflect.Type]bool{}, &campos)

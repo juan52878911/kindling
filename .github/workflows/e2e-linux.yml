@@ -1,0 +1,190 @@
+# e2e con microVMs de verdad en Linux: lo que ci.yml no puede probar con Go
+# puro (que una microVM arranque, que el dorado despierte, el congelado
+# diferencial, `kling upgrade` de la release anterior a esta por systemd).
+#
+# Corre en ubuntu-latest si el runner expone /dev/kvm (los x64 de GitHub lo
+# hacen desde 2024, con una regla de udev para abrirlo). Si no lo expone, el
+# job lo dice con un aviso y no hace nada más: no es un fallo del código. La
+# alternativa entonces es un runner self-hosted en el laboratorio (CT 108):
+# `runs-on: [self-hosted, linux, kvm]` y el mismo scripts/93-e2e-linux-ci.sh.
+#
+# Todo se construye en el job (kernel, min, binarios): los dorados no son
+# portables entre CPUs, así que nada viene de otra máquina. El kernel se
+# guarda en caché por el hash de sus fuentes fijadas.
+name: e2e-linux
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: 'qué correr (e2e diff upgrade)'
+        default: 'e2e diff upgrade'
+      httpbin:
+        description: 'httpbin con IP pública para el proxy de credenciales'
+        default: 'httpbin.org'
+  # En un PR solo si toca lo que estas pruebas ven: tardan ~1 h.
+  pull_request:
+    paths:
+      - 'internal/machine/**'
+      - 'internal/daemon/**'
+      - 'internal/upgrade/**'
+      - 'internal/net/**'
+      - 'pkg/guest/**'
+      - 'pkg/esquema/**'
+      - 'cmd/kling-guest/**'
+      - 'cmd/kling/upgrade*.go'
+      - 'scripts/90-e2e.sh'
+      - 'scripts/93-e2e-linux-ci.sh'
+      - 'scripts/94-e2e-upgrade.sh'
+      - 'scripts/lib-e2e-upgrade.sh'
+      - 'scripts/e2e-diff-freeze.sh'
+      - 'scripts/70-build-minimal-image.sh'
+      - 'scripts/20-install-firecracker.sh'
+      - 'scripts/builders/kernel/**'
+      - '.github/workflows/e2e-linux.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: microVMs (Firecracker, KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - name: /dev/kvm
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning title=no KVM::this runner has no /dev/kvm: the microVM e2e cannot run here. Use a self-hosted runner with KVM (the lab, CT 108) with the same scripts/93-e2e-linux-ci.sh."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # El dispositivo existe pero es de root:kvm 0660: se abre a todos
+          # como hace la imagen del runner para el emulador de Android.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+          grep -Eo 'vmx|svm' /proc/cpuinfo | sort -u
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.kvm.outputs.ok == 'true'
+        with:
+          # Las etiquetas: la versión de los binarios sale de la última.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: steps.kvm.outputs.ok == 'true'
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: herramientas
+        if: steps.kvm.outputs.ok == 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            build-essential flex bison bc libelf-dev xz-utils curl e2fsprogs zstd xfsprogs openssl python3 ipset
+
+      - name: Firecracker (fijado, con su sha256)
+        if: steps.kvm.outputs.ok == 'true'
+        run: sudo CI=true bash scripts/20-install-firecracker.sh
+
+      - name: binarios
+        if: steps.kvm.outputs.ok == 'true'
+        id: bin
+        run: |
+          set -euo pipefail
+          # Una versión de release (internal/upgrade la exige para -tag):
+          # la última etiqueta con un sufijo de prerelease de este commit.
+          base=$(git describe --tags --abbrev=0)
+          ver="${base#v}-e2e.$(git rev-parse --short=8 HEAD)"
+          out="$RUNNER_TEMP/new"; mkdir -p "$out"
+          lf="-s -w -X main.Version=$ver"
+          CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-linux-amd64" ./cmd/kling
+          CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-guest-linux-amd64" ./cmd/kling-guest
+          CGO_ENABLED=0 go -C ext/mcp build -trimpath -ldflags "$lf" -o "$RUNNER_TEMP/kling-bridge" ./cmd/kling-bridge
+          ( cd "$out" && sha256sum -- * > SHA256SUMS )
+          "$out/kling-linux-amd64" version | head -1
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
+
+      - name: caché del kernel
+        if: steps.kvm.outputs.ok == 'true'
+        id: kcache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: kout
+          key: kernel-amd64-${{ hashFiles('scripts/builders/kernel/**', 'scripts/check-kernel-config.sh') }}
+
+      - name: kernel
+        if: steps.kvm.outputs.ok == 'true' && steps.kcache.outputs.cache-hit != 'true'
+        run: TARGET_ARCH=amd64 OUT="$PWD/kout" bash scripts/builders/kernel/build.sh
+
+      - name: imagen min
+        if: steps.kvm.outputs.ok == 'true'
+        id: img
+        run: |
+          set -euo pipefail
+          n="$(TARGET_ARCH=amd64 bash scripts/builders/kernel/build.sh --print-name)"
+          img="$RUNNER_TEMP/images"; mkdir -p "$img"
+          cp "kout/$n" "$img/vmlinux"
+          chmod 755 "$RUNNER_TEMP/kling-bridge"
+          sudo env KLING_ROOT="$RUNNER_TEMP/minroot" ALPINE_ARCH=x86_64 BRIDGE="$RUNNER_TEMP/kling-bridge" \
+            bash scripts/70-build-minimal-image.sh min
+          sudo cp "$RUNNER_TEMP/minroot/images/min.ext4" "$img/min.ext4"
+          ls -la "$img"
+          echo "dir=$img" >> "$GITHUB_OUTPUT"
+
+      # Un XFS en loop para /srv: el congelado diferencial en modo almacen
+      # necesita reflink, y el ext4 del runner no lo tiene.
+      - name: XFS para /srv
+        if: steps.kvm.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          sudo truncate -s 40G /mnt/srv.img
+          sudo mkfs.xfs -q -m reflink=1 /mnt/srv.img
+          sudo mkdir -p /srv
+          sudo mount -o loop /mnt/srv.img /srv
+
+      - name: e2e (90-e2e, e2e-diff-freeze, 94-e2e-upgrade)
+        if: steps.kvm.outputs.ok == 'true'
+        env:
+          NEW_DIR: ${{ steps.bin.outputs.dir }}
+          IMAGES: ${{ steps.img.outputs.dir }}
+          PARTS: ${{ inputs.parts || 'e2e diff upgrade' }}
+          KLING_E2E_HTTPBIN: ${{ inputs.httpbin || 'httpbin.org' }}
+          # 94 pregunta al API cuál es la release anterior: con el token no
+          # choca con el límite de peticiones anónimas.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sudo --preserve-env=NEW_DIR,IMAGES,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
+            bash scripts/93-e2e-linux-ci.sh
+
+      # Los tests de Go que se saltan sin root (montajes, loop, chown): aquí
+      # hay root y KVM. KLING_TEST_MOUNTS=1 los pide.
+      - name: tests de Go como root
+        if: steps.kvm.outputs.ok == 'true'
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            GOWORK=off GOTOOLCHAIN=local KLING_TEST_MOUNTS=1 \
+            go test -count=1 ./cmd/kling/ ./internal/daemon/ ./internal/machine/ ./pkg/guest/
+
+      - name: registros del daemon
+        if: failure() && steps.kvm.outputs.ok == 'true'
+        run: |
+          sudo journalctl -u kt-ci -u kt-ci-upgrade --no-pager | tail -200 || true
+          sudo dmesg | tail -50 || true

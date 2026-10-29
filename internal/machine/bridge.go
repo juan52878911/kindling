@@ -139,19 +139,6 @@ func (m *Manager) imageUsers() map[string][]string {
 	return out
 }
 
-// refreshOne monta la imagen, cambia el puente si hace falta y la desmonta.
-//
-// dentro es la ruta del puente DENTRO de ese ext4: en una imagen monolítica la
-// del invitado, y en una capa la misma bajo /upper, que es donde el build deja
-// el delta.
-//
-// Devuelve si hubo cambio. Una imagen que ya tenía el puente correcto se
-// desmonta sin tocarla: reescribirla por gusto la ensuciaría y desharía su
-// dispersión en disco.
-func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
-	return m.putOne(ctx, image, dentroPath, bridge, quiero, 0o755, false)
-}
-
 // putOne pone src en dentroPath de la imagen, creciéndola si no cabe. Con
 // create=false solo reemplaza: si el fichero no está, devuelve errNoBridge.
 func (m *Manager) putOne(ctx context.Context, image, dentroPath, bridge, quiero string, mode os.FileMode, create bool) (bool, error) {

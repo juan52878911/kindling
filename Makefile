@@ -18,7 +18,7 @@ DOMOTICA_PKG := ./examples/domotica
 CROSS_PLATS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
 # Extensiones que viven en este repo, cada una con su go.mod y su Makefile.
-EXT_DIRS := ext/mcp ext/sandbox
+EXT_DIRS := ext/db ext/mcp ext/phone ext/sandbox
 
 # Arquitectura de los binarios del daemon y del agente que se compilan para Linux.
 # Por defecto amd64 (el laboratorio habitual). Para desplegar a una VM Linux

@@ -37,7 +37,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -450,7 +450,58 @@ func (s *Server) routes() http.Handler {
 		}
 		mux.HandleFunc(rt.patron, s.autorizar(rt))
 	}
-	return conVersionAPI(sinBarrasEscapadas(mux))
+	return conVersionAPI(sinBarrasEscapadas(sinRutaEnJSON(mux)))
+}
+
+// sinRutaEnJSON contesta en JSON ({"message", "code"}, como cualquier otro
+// error) el 404 de una ruta que no existe y el 405 de un método que no le va.
+// El mux los escribía en texto plano ("404 page not found"), y quien leía el
+// cuerpo como api.Error se quedaba sin mensaje ni código. El código HTTP no
+// cambia: es lo que un cliente mira para saber que el daemon es anterior a
+// una ruta (api.IsUnsupported).
+func sinRutaEnJSON(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, patron := mux.Handler(r); patron != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		cap := &capturaMux{cab: http.Header{}}
+		mux.ServeHTTP(cap, r)
+		switch cap.code {
+		case http.StatusNotFound:
+			fail(w, cap.code, fmt.Errorf("no route %s %s in this daemon (version %s)", r.Method, r.URL.Path, Version))
+		case http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", cap.cab.Get("Allow"))
+			fail(w, cap.code, fmt.Errorf("method %s is not allowed on %s (allowed: %s)", r.Method, r.URL.Path, cap.cab.Get("Allow")))
+		default:
+			// Una redirección del mux (una ruta sin limpiar): tal cual.
+			for k, v := range cap.cab {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(cap.code)
+			_, _ = w.Write(cap.cuerpo.Bytes())
+		}
+	})
+}
+
+// capturaMux guarda lo que el mux escribe por su cuenta (sinRutaEnJSON).
+type capturaMux struct {
+	cab    http.Header
+	code   int
+	cuerpo bytes.Buffer
+}
+
+func (c *capturaMux) Header() http.Header { return c.cab }
+func (c *capturaMux) WriteHeader(code int) {
+	if c.code == 0 {
+		c.code = code
+	}
+}
+func (c *capturaMux) Write(b []byte) (int, error) {
+	if c.code == 0 {
+		c.code = http.StatusOK
+	}
+	return c.cuerpo.Write(b)
 }
 
 // usoDeMaquina son las rutas que cuentan como usar la máquina para el modo
@@ -658,7 +709,35 @@ func fail(w http.ResponseWriter, code int, err error) {
 	if errors.As(err, &se) && se.Code != 0 {
 		code = se.Code
 	}
-	writeJSON(w, code, api.Error{Message: err.Error()})
+	writeJSON(w, code, api.Error{Message: err.Error(), Code: codigoDeError(code, err)})
+}
+
+// codigoDeError es el code estable del cuerpo de error (api.ErrorCode,
+// capacidad "error-codes"): el específico si se reconoce la causa y casa con
+// su código HTTP documentado, y si no el genérico del código HTTP. Lo que
+// reconoce aquí por el texto (tope, cuota, disco) lo escribe el propio daemon
+// con las marcas de pkg/api; el cliente ya no tiene que mirarlo.
+func codigoDeError(status int, err error) api.ErrorCode {
+	switch status {
+	case http.StatusConflict:
+		switch {
+		case errors.Is(err, machine.ErrNameTaken):
+			return api.CodeNameTaken
+		case errors.Is(err, machine.ErrDoradoObsoleto):
+			return api.CodeStaleGolden
+		case api.IsMachineLimit(err):
+			return api.CodeMachineLimit
+		}
+	case api.StatusTenantQuota:
+		if api.IsTenantQuota(err) {
+			return api.CodeTenantQuota
+		}
+	case api.StatusDiskFull:
+		// El daemon solo contesta 503 por disco: el del host (admision.go),
+		// el de una copia de volumen o el tope de la caché OCI.
+		return api.CodeDiskFull
+	}
+	return api.CodeForStatus(status)
 }
 
 // jsonMaxBody es el tope de los handlers que decodifican JSON directo del
@@ -678,6 +757,30 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 func decodeJSONCon(w http.ResponseWriter, r *http.Request, v any, max int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, max)
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// decodeJSONEstricto es decodeJSONCon que rechaza los campos que este daemon
+// no conoce. Es para POST /graphs: un grafo es una descripción entera de lo
+// que se quiere, y un campo nuevo del cliente (health llegó en v0.19) que un
+// daemon viejo ignorara se perdería en silencio —el grafo nacería distinto de
+// lo pedido y nadie lo diría—. Mejor un 400 que diga qué actualizar.
+func decodeJSONEstricto(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
+	return decodificarEstricto(r.Body, v)
+}
+
+// decodificarEstricto decodifica rd en v sin admitir campos desconocidos, y
+// explica el error de uno desconocido. Lo usa también la revisión de authz,
+// que decodifica el cuerpo antes que el handler y lo recodificaría sin él.
+func decodificarEstricto(rd io.Reader, v any) error {
+	dec := json.NewDecoder(rd)
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err != nil && strings.HasPrefix(err.Error(), "json: unknown field ") {
+		return fmt.Errorf("%s: this daemon (%s) does not know that field and would drop it; "+
+			"update kling on the daemon's host, or leave the field out", strings.TrimPrefix(err.Error(), "json: "), Version)
+	}
+	return err
 }
 
 // jsonBodyStatus traduce un error de decodeJSON (o de api.LeerCuerpo) a su
@@ -892,11 +995,10 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.Resize(r.Context(), r.PathValue("ref"), req.MemMiB)
 	if err != nil {
-		code := http.StatusBadRequest
-		switch {
-		case errors.Is(err, machine.ErrNoMachine):
-			code = http.StatusNotFound
-		case errors.Is(err, machine.ErrNotRunning):
+		// 400 lo de la petición (sin mem_max_mib, fuera de rango), 404 y 409
+		// como el ciclo de vida, 500 lo del host (el globo que no se mueve).
+		code := cicloStatus(err)
+		if errors.Is(err, machine.ErrNotRunning) {
 			code = http.StatusConflict
 		}
 		fail(w, code, err)
@@ -956,7 +1058,7 @@ func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) 
 	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
 	if err != nil {
 		code := cicloStatus(err)
-		if strings.Contains(err.Error(), "has no credential") {
+		if errors.Is(err, machine.ErrNoCredential) {
 			code = http.StatusNotFound
 		}
 		fail(w, code, err)
@@ -1052,7 +1154,12 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
 	if err != nil {
-		fail(w, http.StatusNotFound, err)
+		// 404 si no hay máquina o aún no tiene consola; leerla mal es del host.
+		code := http.StatusInternalServerError
+		if errors.Is(err, machine.ErrNoMachine) || errors.Is(err, os.ErrNotExist) {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1118,7 +1225,8 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		// 404 si no existe, 400 unas etiquetas que no valen (las de grafo).
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1139,8 +1247,15 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		ReadyWait: time.Duration(req.ReadyTimeoutSeconds) * time.Second,
 	})
 	if err != nil {
-		code := http.StatusBadRequest
-		if errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady) {
+		// 400 si la petición no vale, 404 si no existe, 409 si la máquina no se
+		// puede volcar ahora, 500 si falla el host.
+		code := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, machine.ErrInvalidName) || errors.Is(err, machine.ErrRunRequest):
+			code = http.StatusBadRequest
+		case errors.Is(err, machine.ErrNoMachine):
+			code = http.StatusNotFound
+		case errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady) || errors.Is(err, machine.ErrCommitConflict):
 			code = http.StatusConflict
 		}
 		fail(w, code, err)

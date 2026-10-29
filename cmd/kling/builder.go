@@ -147,3 +147,16 @@ func builderBase(dir string) error {
 		"PKGS="+strings.Join(spec.Packages, " "), "AGENT="+agent, "ENV_FILE="+envFile)
 	return cmd.Run()
 }
+
+// agenteMetido es lo que se sabe del agente de invitado que un constructor
+// mete en la imagen (api.BuildRecipeHints.Agent): si es el de esta
+// instalación (agent == defecto, sin KLING_GUEST_AGENT), su versión es la de
+// este kling, porque se instalan y se actualizan juntos. Otro (uno puesto a
+// mano) no se sabe: nil. Las capacidades las apunta el daemon cuando la
+// primera máquina de la imagen las anuncia.
+func agenteMetido(agent, defecto string) *api.GuestAgent {
+	if agent != defecto {
+		return nil
+	}
+	return &api.GuestAgent{Agent: "kling-guest", Version: Version}
+}

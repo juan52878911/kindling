@@ -96,11 +96,11 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // la DECISIÓN junto a los digests).
 func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork, sinAgente bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q does not exist", ref)
+		return nil, marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	// El cerrojo de ciclo de vida de la plantilla, como Freeze, Stop o Remove
 	// (M-04). Commit la pausa, le cambia el disco y la vuelca: sin él, un
@@ -113,7 +113,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// congelarla, pausarla o borrarla otro.
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q does not exist", ref)
+		return nil, marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	mc = cur
 	// Como Freeze, y con más razón: el volcado de Commit ES el mem.file del
@@ -123,15 +123,15 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// cerrojo, así que o ya marcó HasSecrets o espera a que acabe el commit.
 	// Cubre también fork, que pasa por aquí.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and can't become "+
+		return nil, marcado(ErrCommitConflict, "machine %s has session secrets injected via MMDS and can't become "+
 			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+
 			"received secrets", mc.Name)
 	}
 	switch {
 	case yaPausada && mc.State != api.StatePaused:
-		return nil, fmt.Errorf("machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
+		return nil, marcado(ErrCommitConflict, "machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
 	case !yaPausada && mc.State != api.StateRunning:
-		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
+		return nil, marcado(ErrCommitConflict, "only a running machine can be committed (is %s)", mc.State)
 	}
 	if comprobar != nil {
 		if err := comprobar(mc); err != nil {
@@ -199,7 +199,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}()
 	if _, err := os.Stat(dir); err == nil {
 		if !replace {
-			return nil, fmt.Errorf("snapshot %q already exists (use `kling commit -replace` to replace it)", name)
+			return nil, marcado(ErrCommitConflict, "snapshot %q already exists (use `kling commit -replace` to replace it)", name)
 		}
 		// Reemplazar pasa por las comprobaciones de RemoveSnapshot y no por un
 		// RemoveAll directo: son las que saben negarse si el snapshot tiene
@@ -1304,7 +1304,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// OBSOLETO: hecho con un VMM que el de ahora no sabe cargar. Se falla
 	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
 	// al cargar no dice que la causa es la actualización (meta.go).
-	if causa := causaObsoleto(snap.VMM, m.origenActual().vmm); causa != "" {
+	if causa := m.causaObsoletoEn(snap.VMM, snap.Arch, m.snapDir(req.From)); causa != "" {
 		return nil, errObsoleto(req.From, causa)
 	}
 

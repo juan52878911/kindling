@@ -144,7 +144,7 @@ struct cpu_state {
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
 // 2 añade vsock al final de la cabecera; una de la versión 1 (sin él) se lee
 // como un prefijo.
-#define SNAP_VERSION 2
+#define SNAP_VERSION KHV_SNAP_VERSION
 struct snap_hdr {
   uint64_t magic;
   uint32_t version, ncpus, ndisks;
@@ -172,6 +172,16 @@ struct snap_hdr {
 struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
 };
+
+// Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
+// subir SNAP_VERSION rompería los mem.file que ya hay en disco.
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie) {
+  *magia = SNAP_MAGIC;
+  *version = SNAP_VERSION;
+  *hdr = sizeof(struct snap_hdr);
+  *hdr_v1 = SNAP_HDR_V1;
+  *pie = sizeof(struct snap_pie);
+}
 
 // ===================== configuración =====================
 

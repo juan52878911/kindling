@@ -1,0 +1,115 @@
+{
+  "schema": 2,
+  "machines": [
+    {
+      "id": "aa11bb22cc33dd44",
+      "name": "vieja",
+      "image": "eco",
+      "state": "stopped",
+      "vcpus": 5,
+      "mem_mib": 6,
+      "pid": 7,
+      "last_error": "v019-8",
+      "mem_max_mib": 9,
+      "disk_mib": 10,
+      "diff_base": "v019-11",
+      "snapshot_bytes": 12,
+      "disk_bytes": 13,
+      "created_at": "2026-10-01T10:14:00Z",
+      "started_at": "2026-10-01T10:15:00Z",
+      "frozen_at": "2026-10-01T10:16:00Z",
+      "failed_at": "2026-10-01T10:17:00Z",
+      "stopped_at": "2026-10-01T10:18:00Z",
+      "from": "svc",
+      "ip": "172.16.0.6",
+      "net_index": 21,
+      "egress": "allowlist",
+      "forwards": {
+        "v019-23": "v019-24"
+      },
+      "allow_domains": [
+        "v019-25"
+      ],
+      "ttl_seconds": 26,
+      "cpu_pct": 27,
+      "cpu_pct_fixed": true,
+      "cpu_boost_pct": 28,
+      "allow_exec": true,
+      "on_ttl": "v019-29",
+      "ttl_at": "2026-10-01T10:30:00Z",
+      "volumes": [
+        {
+          "name": "v019-31",
+          "mount": "v019-32",
+          "read_only": true,
+          "drive_id": "v019-33"
+        }
+      ],
+      "shares": [
+        {
+          "mode": "v019-34",
+          "mount": "v019-35",
+          "source": "v019-36",
+          "image_bytes": 37,
+          "status": "v019-38"
+        }
+      ],
+      "labels": {
+        "v019-39": "v019-40"
+      },
+      "has_secrets": true,
+      "env_keys": [
+        "v019-41"
+      ],
+      "share_wait": 42,
+      "entrypoint": [
+        "v019-43"
+      ],
+      "cmd": [
+        "v019-44"
+      ],
+      "volume_wait": true,
+      "ready": "v019-45",
+      "hooks_pending": "v019-46",
+      "hold": "v019-47",
+      "disk_errors": 48,
+      "disk_error_at": "2026-10-01T10:49:00Z",
+      "disk_error": "v019-50",
+      "agent": {
+        "agent": "v019-51",
+        "version": "v019-52",
+        "caps": [
+          "v019-53"
+        ]
+      },
+      "transition": "v019-54",
+      "mem_shared": true,
+      "credential_domains": [
+        "v019-55"
+      ],
+      "credential_any_database": [
+        "v019-56"
+      ],
+      "boot_ms": 57,
+      "freeze_ms": 58,
+      "thaw_ms": 59,
+      "wake": {
+        "tier": "v019-60",
+        "wait_ms": 61,
+        "check_ms": 62,
+        "store_ms": 63,
+        "mirror_ms": 64,
+        "memory_ms": 65,
+        "net_ms": 66,
+        "spawn_ms": 67,
+        "socket_ms": 68,
+        "load_ms": 69,
+        "forwards_ms": 70,
+        "resync_ms": 71,
+        "cgroup_ms": 72,
+        "finish_ms": 73,
+        "total_ms": 74
+      }
+    }
+  ]
+}

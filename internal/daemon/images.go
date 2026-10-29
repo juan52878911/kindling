@@ -35,23 +35,8 @@ const buildTimeout = 15 * time.Minute
 var (
 	// Nombre de imagen: es un componente de ruta y un nombre de servicio.
 	reName = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	// Paquete de apk.
-	reAPK = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
-	// Paquete de npm, con ámbito y versión opcionales.
-	// Los nombres de PyPI admiten punto, guion y guion bajo, y el
-	// especificador de versión va con ==, >= o ~=. Nada de eso puede empezar
-	// por guion: acabaría en `pip install $PIP` sin comillas, donde un valor
-	// que empieza por guion es un flag.
-	rePIP = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
-
-	reNPM = lazyre.New(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
-	// Variable de entorno horneada: KEY=value. La clave con la forma estricta
-	// de un identificador de shell; el valor, cualquier cosa MENOS saltos de
-	// línea y NUL — el script la escribe en el entrypoint con `printf %q`, así
-	// que el resto de caracteres viaja inerte, pero un salto de línea antes de
-	// llegar ahí partiría otras cosas y no hay ningún valor legítimo que lo
-	// necesite.
-	reEnv = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
+	// (Los de paquetes apk/npm/pip y variables horneadas viven en ext/mcp,
+	// internal/mcp/build.go, con el constructor que los usa.)
 )
 
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +114,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := os.Stat(s.recipePath(name)); err == nil {
 			img.HasRecipe = true
+			img.Agent = s.mgr.AgenteDeImagen(name)
 		}
 		out = append(out, img)
 	}
@@ -142,6 +128,11 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, err := os.ReadFile(s.recipePath(name))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Leer mal la que sí está es del host, no "no hay receta".
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusNotFound, fmt.Errorf(
 			"no recipe for %q. Images built before recipes were saved don't have one; "+

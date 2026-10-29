@@ -120,7 +120,7 @@ func TestAlmacenDePlantillaV0(t *testing.T) {
 func TestAlmacenMasNuevoNoSeToca(t *testing.T) {
 	m := managerConClaveDePrueba(t)
 	ruta := m.credPath("m1")
-	futuro := append([]byte("KLCS\x02"), bytes.Repeat([]byte{0xaa}, 64)...)
+	futuro := append([]byte("KLCS\x03"), bytes.Repeat([]byte{0xaa}, 64)...)
 	if err := os.MkdirAll(filepath.Dir(ruta), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestAlmacenMasNuevoNoSeToca(t *testing.T) {
 	if b, _ := os.ReadFile(ruta); !bytes.Equal(b, futuro) {
 		t.Fatal("el almacén del futuro cambió")
 	}
-	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 2)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 3)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("no hay nada que respaldar de un fichero que no se toca")
 	}
 }
@@ -159,5 +159,51 @@ func TestCabeceraDelAlmacenAutenticada(t *testing.T) {
 	}
 	if err := m.abrir("x", sellado[len(magiaAlmacen)+1:], "m1", &out); err == nil {
 		t.Fatal("un v1 sin su cabecera se descifró como v0")
+	}
+}
+
+// Un almacén con una credencial sigv4 se sella en KLCS 2 (un kling ≤ v0.18 la
+// usaría como HTTP y perdería sus campos al resellar), con la copia del v1
+// al lado; sin sigv4 vuelve a la v1, que leen los anteriores.
+func TestAlmacenSigV4EsV2(t *testing.T) {
+	m := managerConClaveDePrueba(t)
+	ruta := m.credPath("m1")
+	http := credproxy.Credential{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: "x"}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{http}); err != nil {
+		t.Fatal(err)
+	}
+	v1, _ := os.ReadFile(ruta)
+	if versionSellada(v1) != versionAlmacen {
+		t.Fatalf("sin sigv4: versión %d", versionSellada(v1))
+	}
+	s3 := credproxy.Credential{Env: "AWS_ACCESS_KEY_ID", Domain: "s3.example.com", Placeholder: "AKIAKLINGPLACEHOLDER",
+		Secret: "secreto", Kind: credproxy.KindSigV4, AccessKeyID: "AKIAREAL1234", Region: "us-east-1", Service: "s3"}
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{http, s3}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(ruta)
+	if versionSellada(b) != versionAlmacenSigV4 || !bytes.HasPrefix(b, []byte("KLCS\x02")) {
+		t.Fatalf("con sigv4: %q", b[:min(8, len(b))])
+	}
+	if copia, err := os.ReadFile(esquema.RutaRespaldo(ruta, 1)); err != nil || !bytes.Equal(copia, v1) {
+		t.Fatalf("la copia .v1.bak tiene que ser el almacén v1: %v", err)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || len(back) != 2 || back[1].AccessKeyID != "AKIAREAL1234" || back[1].Region != "us-east-1" {
+		t.Fatalf("v2: %+v, %v", back, err)
+	}
+	// Sin la sigv4, vuelve a la v1.
+	if err := m.guardarCredenciales("m1", []credproxy.Credential{http}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(ruta); versionSellada(b) != versionAlmacen {
+		t.Fatalf("sin sigv4 otra vez: versión %d", versionSellada(b))
+	}
+	// Y borrar el almacén borra todas sus copias.
+	if err := m.guardarCredenciales("m1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 1)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("la copia .v1.bak sigue ahí tras quitar las credenciales")
 	}
 }

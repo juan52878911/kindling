@@ -219,6 +219,11 @@ func (m *Manager) cargarGrafos() {
 			log.Printf("graph %s: can't read it: %v", id, err)
 			continue
 		}
+		if f := formatoGrafo(b); f > formatoGrafoActual {
+			log.Printf("graph %s: format %d, but this kling only understands up to %d: it was written by a newer version; "+
+				"update kling. Skipped and left as it is", id, f, formatoGrafoActual)
+			continue
+		}
 		var g api.Graph
 		if err := json.Unmarshal(b, &g); err != nil || g.ID != id {
 			log.Printf("graph %s: unreadable, skipped (its machines keep running; its edges fail closed)", id)
@@ -247,7 +252,7 @@ func (m *Manager) guardarGrafo(id string) error {
 			n.State = ""
 			c.Nodes[k] = n
 		}
-		b, err = json.MarshalIndent(c, "", "  ")
+		b, err = json.MarshalIndent(grafoEnDisco{Format: formatoGrafoActual, Graph: c}, "", "  ")
 	}
 	m.mu.RUnlock()
 	if g == nil {
@@ -259,7 +264,44 @@ func (m *Manager) guardarGrafo(id string) error {
 	if err := os.MkdirAll(m.dirGrafos(), 0o700); err != nil {
 		return err
 	}
+	// Uno de un kling más nuevo (cargarGrafos lo saltó) no se pisa: perdería
+	// lo que este binario no conoce.
+	if viejo, err := os.ReadFile(m.rutaGrafo(id)); err == nil {
+		if f := formatoGrafo(viejo); f > formatoGrafoActual {
+			return fmt.Errorf("graph %s on disk has format %d, but this kling only understands up to %d: "+
+				"it was written by a newer version; update kling. Nothing was changed", id, f, formatoGrafoActual)
+		}
+	}
 	return durable.Escribir(m.rutaGrafo(id), b, 0o600)
+}
+
+// formatoGrafoActual es la versión de store/graph/<id>.json. Se llama
+// "format" y no "schema" porque el fichero es un api.Graph tal cual, y el
+// nombre no debe chocar con un campo futuro del grafo.
+//
+//	0: el api.Graph sin campo (v0.17-v0.20).
+//	1: el mismo con "format": 1. Solo añade el campo: un kling anterior lo
+//	   ignora y lee igual, así que no hay copia .bak que guardar. Súbelo
+//	   cuando un kling anterior fuera a leer mal el grafo (perdería un campo
+//	   con efecto: p. ej. health en v0.19 se perdía en un daemon v0.18).
+const formatoGrafoActual = 1
+
+// grafoEnDisco es lo que se escribe: el grafo con su versión delante.
+type grafoEnDisco struct {
+	Format int `json:"format"`
+	*api.Graph
+}
+
+// formatoGrafo lee el campo "format" de un grafo en disco; 0 si no lo tiene
+// o no se entiende (ilegible: lo dice el Unmarshal de después).
+func formatoGrafo(b []byte) int {
+	var f struct {
+		Format int `json:"format"`
+	}
+	if json.Unmarshal(b, &f) != nil || f.Format < 0 {
+		return 0
+	}
+	return f.Format
 }
 
 // guardarSecretosGrafo cifra las claves de las aristas credential del grafo

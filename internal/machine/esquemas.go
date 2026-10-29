@@ -21,7 +21,7 @@ type Esquemas struct {
 
 // EsquemasSoportados son las versiones más nuevas que este binario sabe leer.
 func EsquemasSoportados() Esquemas {
-	return Esquemas{Estado: versionEstadoMax, Meta: metaSchema, Credenciales: versionAlmacen}
+	return Esquemas{Estado: versionEstadoMax, Meta: metaSchema, Credenciales: versionAlmacenMax}
 }
 
 // EsquemasEnDisco recorre la raíz de datos y devuelve la versión más alta de
@@ -101,17 +101,28 @@ func (s Esquemas) Incompatibles(disco Esquemas) []string {
 // sobre disco, con la copia que deja de cada uno.
 func (s Esquemas) Migraciones(disco Esquemas) []string {
 	var out []string
-	// De state.json solo se migra el 0: el 2 no es una migración, lo escribe
-	// quien tiene copias en diferencial (ver versionEstadoDiff).
+	// De state.json solo se migra siempre el 0. Del 2 en adelante se escribe
+	// el más bajo que describe el estado (esquemaParaEscribir): sube solo si
+	// hace falta, y entonces deja la copia del que había.
 	if disco.Estado == 0 && s.Estado > 0 {
 		out = append(out, "state.json: schema 0 -> 1 on start (copy at state.json.v0.bak)")
+	}
+	if s.Estado > max(disco.Estado, 1) {
+		out = append(out, fmt.Sprintf("state.json: up to schema %d once a machine needs it (copy at state.json.v%d.bak)", s.Estado, max(disco.Estado, 1)))
 	}
 	if disco.Meta < s.Meta {
 		out = append(out, fmt.Sprintf("golden meta.json: schema %d -> %d on their next write (copy at meta.json.v%d.bak)", disco.Meta, s.Meta, disco.Meta))
 	}
-	if disco.Credenciales < s.Credenciales {
-		out = append(out, fmt.Sprintf("credential stores: version %d -> %d on their next sealing (copy at <file>.v%d.bak)", disco.Credenciales, s.Credenciales, disco.Credenciales))
+	// Los almacenes, igual: el 0 pasa al 1 al sellarse, y del 1 al 2 solo
+	// los que llevan una credencial sigv4 (versionParaSellar).
+	if disco.Credenciales == 0 && s.Credenciales > 0 {
+		out = append(out, "credential stores: version 0 -> 1 on their next sealing (copy at <file>.v0.bak)")
 	}
+	if s.Credenciales > max(disco.Credenciales, 1) {
+		out = append(out, fmt.Sprintf("credential stores: up to version %d on their next sealing, only those that need it (copy at <file>.v%d.bak)",
+			s.Credenciales, max(disco.Credenciales, 1)))
+	}
+
 	return out
 }
 

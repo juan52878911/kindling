@@ -160,11 +160,20 @@ var coreTree = []section{
   graph from-compose <compose.yaml> [-o F]         translates a compose file into a graph file
       [-name N] [-script S]                        (+ the setup script); warns per unsupported key
 `},
-		{Name: "compose", Summary: "a compose.yaml for local development, in the foreground", Subcommands: []string{"up", "down"}, Usage: `  compose up [-f compose.yaml] [-p name]          imports the images in parallel, starts the graph,
-      [-keep] [-no-logs]                           shares bind mounts live (rw), publishes ports: on
+		{Name: "compose", Summary: "a compose.yaml for local development, in the foreground", Subcommands: []string{"up", "down", "ps", "logs", "exec", "stop", "start", "restart"}, Usage: `  compose up [-f compose.yaml] [-p name] [-d]      imports the images in parallel, starts the graph,
+      [-keep] [-no-logs] [-t] [-fresh]             shares bind mounts live (rw), publishes ports on
                                                    127.0.0.1 and follows every service's output;
-                                                   Ctrl-C removes the machines (-keep: leaves them)
-  compose down [-f compose.yaml] [-p name]         removes the project's graph and machines
+                                                   Ctrl-C removes the machines (-keep: leaves them;
+                                                   -d: leaves them up and returns)
+  compose down [-f compose.yaml] [-p name] [-v]    removes the project's graph, machines and ports
+                                                   (-v: and its named volumes)
+  compose ps [-f compose.yaml] [-p name]           its services, their state and ports
+  compose logs [-f] [-t] [-tail N] [service...]    the services' output (-f: follow)
+  compose exec [-T] [-w DIR] [-e K=V] <service>    runs a command in a service (a terminal if
+      <cmd>...                                     there is one)
+  compose stop [service...]                        freezes services (all without names)
+  compose start [service...]wakes them up
+  compose restart [service...]       restarts them
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
@@ -372,23 +381,30 @@ const usageTail = `CONNECTION
 
   The daemon never listens on a network port: controlling microVMs is
   equivalent to root on its host, so the only remote access is SSH.
+
+EXIT CODES
+  0    ok                        3    the daemon speaks an older API: upgrade it
+  1    error                     4    stale template (other VMM or version): re-save it
+  2    usage (command, flag)     5    the image's guest agent lacks a capability
+  130  interrupted (Ctrl-C)      N    exec, shell and try: the remote command's code
 `
 
-// aliases son los nombres de antes: se traducen a los de ahora antes de
-// enrutar. No salen en la ayuda ni en el completado.
-//
-// Fueron silenciosos de 0.14 a 0.17; ahora avisan una vez por proceso en
-// stderr ("warning: kling add is now kling mcp add", aliasWarning), y los de
-// extensiones (add, search, gateway, export, memory, migrate, models, chispa,
-// info) se retirarán en una versión que lo anuncie el CHANGELOG. commit,
-// snapshots y plugins se quedan para siempre y en silencio (permanentAliases):
-// cuestan cero y hay scripts ajenos que los usan.
+// aliases son los nombres de antes que se quedan para siempre y en silencio:
+// se traducen a los de ahora antes de enrutar y no salen en la ayuda ni en el
+// completado. Cuestan cero y hay scripts ajenos que los usan.
 var aliases = map[string]string{
 	"commit":    "save",
 	"snapshots": "template",
+	"plugins":   "plugin",
+}
+
+// removedAliases son los nombres de antes que avisaban «se retirarán» desde
+// v0.18 y se retiraron en 1.0 (CHANGELOG, ### Removed). Siguen reservados al
+// núcleo (coreCommands), para que una extensión no los coja con otro
+// significado, y contestan con un error de uso que dice el nombre nuevo.
+var removedAliases = map[string]string{
 	"rmi":       "template rm",
 	"images":    "image",
-	"plugins":   "plugin",
 	"volumes":   "volume",
 	"sandboxes": "sandbox",
 	"info":      "status -v",
@@ -399,10 +415,11 @@ var aliases = map[string]string{
 	"chispa":    "ai chispa",
 }
 
-// extAliases son los verbos que kling-mcp tenía sueltos hasta 0.13. No se
-// reservan al núcleo: una kling-mcp de 0.13 (manifiesto v1) sigue siendo su
-// dueña y los recibe tal cual; solo cuando nadie los sirve se traducen.
-var extAliases = map[string]string{
+// removedExtAliases son los verbos que kling-mcp tenía sueltos hasta 0.13,
+// retirados en 1.0 como removedAliases. No se reservan al núcleo: una
+// kling-mcp de 0.13 (manifiesto v1) sigue siendo su dueña y los recibe tal
+// cual; solo cuando nadie los sirve se dice el nombre nuevo.
+var removedExtAliases = map[string]string{
 	"add":     "mcp add",
 	"search":  "mcp search",
 	"gateway": "mcp serve",
@@ -411,33 +428,28 @@ var extAliases = map[string]string{
 	"migrate": "mcp migrate",
 }
 
-// permanentAliases no avisan nunca: ver aliases.
-var permanentAliases = map[string]bool{"commit": true, "snapshots": true, "plugins": true}
-
-// aliasWarning es el aviso para quien escribió un nombre de antes, o "" si cmd
-// no es un alias que se vaya a retirar (o una extensión instalada lo sirve
-// todavía). Va a stderr: la salida -json de stdout no cambia.
-func aliasWarning(cmd string, args []string) string {
-	if permanentAliases[cmd] {
-		return ""
+// removedAliasError es el error de quien escribió un nombre retirado en 1.0,
+// o nil si cmd no lo es (o una extensión instalada todavía lo sirve). Sale
+// con el código de uso, 2.
+func removedAliasError(cmd string) error {
+	to, ok := removedAliases[cmd]
+	if !ok {
+		if to, ok = removedExtAliases[cmd]; !ok || extensions().Lookup(cmd) != nil {
+			return nil
+		}
 	}
-	to, rest := resolveAlias(cmd, args)
-	if to == cmd && len(rest) == len(args) {
-		return ""
-	}
-	now := strings.Join(append([]string{to}, rest[:len(rest)-len(args)]...), " ")
-	return fmt.Sprintf("warning: kling %s is now kling %s", cmd, now)
+	return &errConCodigo{code: salidaUso, err: &errWithHint{
+		err:  fmt.Errorf("kling %s was removed in 1.0: use kling %s", cmd, to),
+		hint: "kling help " + strings.Fields(to)[0],
+	}}
 }
 
-// resolveAlias traduce un comando viejo a (comando, args) de ahora. Devuelve
-// lo mismo que recibió si no es un alias, o si es un verbo de extensión que
-// una extensión instalada todavía sirve.
+// resolveAlias traduce un nombre de antes de los que se quedan (aliases) a
+// (comando, args) de ahora. Devuelve lo mismo que recibió si no es uno.
 func resolveAlias(cmd string, args []string) (string, []string) {
 	to, ok := aliases[cmd]
 	if !ok {
-		if to, ok = extAliases[cmd]; !ok || extensions().Lookup(cmd) != nil {
-			return cmd, args
-		}
+		return cmd, args
 	}
 	parts := strings.Fields(to)
 	return parts[0], append(append([]string(nil), parts[1:]...), args...)
@@ -453,6 +465,9 @@ var coreCommands = func() []string {
 		}
 	}
 	for a := range aliases {
+		out = append(out, a)
+	}
+	for a := range removedAliases {
 		out = append(out, a)
 	}
 	sort.Strings(out)

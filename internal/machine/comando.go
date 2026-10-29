@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // ErrCmdRequest: el comando pedido no vale, o se pidió con From (400).
@@ -71,6 +72,9 @@ func datosArranqueMMDS(env map[string]string, c *api.MachineCmd) map[string]any 
 	}
 	if c != nil {
 		doc[api.MachineCmdMMDSKey] = c
+	}
+	if len(doc) > 0 {
+		doc[guest.MMDSVersionKey] = guest.MMDSVersion
 	}
 	return doc
 }

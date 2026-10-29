@@ -6,6 +6,46 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `docs/compatibilidad.md`: what 1.x promises, the compatibility matrix and what is left before 1.0; status codes per route and the stable `code` of each in `docs/api.md`, checked against the contract goldens by a test.
+- Linux: `kling doctor` and `kling up -check` warn when the host's FORWARD policy is DROP (Docker sets it) with no rule accepting kindling's traffic, which leaves `-egress internet`/`allowlist` machines silently without network, and print the two `iptables -A` rules that fix it; the daemon logs the same once at startup. The firewall rules kindling installs are unchanged.
+- Signed releases: `SHA256SUMS.minisig` (ed25519, minisign format) and SLSA build provenance for every asset; `kling upgrade`, `kling up` image downloads and `install.sh` (with `minisign`) check the signature. Unsigned releases are accepted with a warning until v1.0.0 and refused from then on (`docs/firmas.md`).
+- Error bodies carry a stable `code` next to `message` (`not_found`, `name_taken`, `machine_limit`, `tenant_quota`, `stale_golden`, `disk_full`, `insufficient_memory`…; capability `error-codes`); `api.IsMachineLimit`, `IsTenantQuota` and friends read it and fall back to the text with older daemons. New `api.IsNameTaken`, `IsStaleGolden`, `CodeOf`.
+- Capabilities `pool` (`GET/PUT /snapshots/{name}/pool`) and `egress-blocked` (`GET /machines/{ref}/egress`) for the two v0.19 routes that had none.
+- Contract goldens with tests: the daemon's routes and their authz action, the status code of each route, the JSON shape of every `pkg/api` type and the `-json` output of the main CLI commands; removing or changing a line fails unless `api.APIVersion` goes up.
+- Documented exit codes (`kling help`): 0 ok, 1 error, 2 usage, 3 daemon too old, 4 stale template, 5 the guest agent lacks a capability, 130 interrupted, N the remote code in `exec`/`shell`/`try`.
+- `kling version` and `status -v` show the API version, the VMM and the guest agent versions announced by the machines; `version -json` and `status -json` gain `api`, `daemon_api`, `vmm`/`backend` and `agents`.
+- `recipe.json` records the image's guest agent (`agent`: version from the builder, capabilities from the first machine that boots it); `GET /images` returns it, and `kling image ls` and `kling doctor` flag images whose agent is older than v0.18 or more than one minor behind the daemon.
+
+### Changed
+
+- `POST /machines/{ref}/commit` and `POST /machines/{ref}/publish` answer 500 to host failures (they gave 400 to everything they did not recognise); commit gives 409 when the machine is not in a committable state, has session secrets, or the name exists
+- Status codes made consistent before 1.0 freezes them (`internal/daemon/testdata/contrato/codigos.txt`): 404 instead of 400 for a missing machine in `PUT /machines/{ref}/labels` and `POST …/commit`, a missing image in `GET/PUT /images/{name}/files` and a missing source in `POST /volumes/{name}/clone`.
+- Host failures are 500 instead of 400 in resize, snapshots and annotations, pools, template credentials, graphs, the store, `POST /volumes`, populate and `POST /cow/store/grow` (501 where the platform has no store); renew gives 500 instead of 502.
+- `DELETE /volumes/{name}` answers 400/404/409/500 by cause instead of 409 for everything; `DELETE /sandboxes/{ref}` like `DELETE /machines/{ref}` instead of 500 for everything; a fork whose copy's agent never answers is 504, like `POST /sandboxes`.
+- 201 instead of 200 for `POST /volumes`, volume clones and snapshots, `POST /graphs/{ref}/snapshot` and `POST /registries` (the Go client accepts any 2xx). `POST /images` stays 200: a build reused from a concurrent request answers the same.
+- Disk full is 503 everywhere: volume copies and the OCI blob cache answered 507, which makes a gateway freeze machines to make room.
+- `PUT /images/{name}/files`: a cut body is 400 (413 only over the limit), and a missing file without `create` sets `skipped` (still 200, `error` kept for older clients).
+- `GET …/logs` and `GET /images/{name}/recipe` give 404 only when there is nothing, 500 when reading fails; `DELETE …/credentials/{env}` decides its 404 by sentinel, not by the text.
+- Unknown routes (404) and wrong methods (405) answer in JSON with `message` and `code` instead of plain text; the status code is the same.
+- The `kling compose` help lists `ps`, `logs`, `exec`, `stop`, `start` and `restart` (they already worked).
+- Versioned on-disk formats: `publish.json` and `fondos.json` get `schema: 1` (with a `.v0.bak` and durable writes), graphs `format: 1`, the CLI config `schema: 1` (and `Save` keeps keys it does not know), the freeze seal `schema: 1`, and MMDS `kling_mmds: 1`. A file from a newer kling is left untouched and the error says to update kling.
+- `state.json` moves to schema 3 only when a machine has `cmd`, `entrypoint`, `share_wait`, `volume_wait` or `net_mibps` (an older kling would drop them), and every schema bump of `state.json` (also 1 -> 2) leaves a `.v<N>.bak`.
+- Credential stores with a sigv4 credential are sealed as `KLCS 2`: kling v0.18 would use them as HTTP credentials and drop their fields.
+- `POST /graphs` rejects fields the daemon does not know (400) instead of dropping them.
+- A golden or frozen machine is stale when it was made on another architecture or with a kling-vz/kling-hv snapshot format this one does not read; kling-hv restore errors are explained like kling-vz ones.
+
+### Removed
+
+- The CLI aliases that warned since v0.18: `rmi`, `images`, `volumes`, `sandboxes`, `info`, `resize`, `squeeze`, `mmds`, `models`, `chispa`, and the kling-mcp verbs `add`, `search`, `gateway`, `export`, `memory`, `migrate`; they exit 2 naming the new command. `commit`, `snapshots` and `plugins` stay.
+- `kling run -cpu` (use `-cpu-pct`) and `kling ai chispa deploy -vcpus` (use `-cpus`): they exit 2 naming the new flag.
+
+### Fixed
+
+- The swap admission error pointed to `docs/estabilidad.md`, now `docs/auditoria-estabilidad-2026-08.md`.
+- CI: `e2e-linux.yml` installs the `base` builder for its private daemon, so the toolchain image builds and `90-e2e.sh` and `94-e2e-upgrade.sh` stop falling back to `min`; `94-e2e-upgrade.sh` and `95-e2e-upgrade-mac.sh` only expect a refreeze on `-rollback` when `state.json` was migrated (otherwise the machine stays `running`).
+
 ## [0.20.1] - 2026-10-28
 
 The v0.20.0 tag never became a release: the new job that builds the guest kernel and the `min` image failed. This is the same code, so the release notes are those of 0.20.0.
@@ -13,6 +53,16 @@ The v0.20.0 tag never became a release: the new job that builds the guest kernel
 ### Fixed
 
 - Release: `scripts/70-build-minimal-image.sh` and `packaging/homebrew/formula.sh` (and a few other scripts) were stored without the executable bit, so the release could not build the `min` image nor the Homebrew formula; CI now fails on any tracked `.sh` that is not executable (except sourced libraries).
+- `kling upgrade` downloads from `KLING_UPGRADE_REPO` when set (a fork or a local mirror; https only, still checked against the release's `SHA256SUMS`).
+- CI: `e2e-linux.yml` runs `90-e2e.sh`, `e2e-diff-freeze.sh` and `94-e2e-upgrade.sh` with real microVMs on KVM runners (nightly, on demand and on PRs that touch them), and a `lint` job runs govulncheck, staticcheck, shellcheck and `scripts/apidiff.sh` (the public Go API against the previous tag).
+- `94-e2e-upgrade.sh` and `95-e2e-upgrade-mac.sh` upgrade from the previous published release (no longer pinned to v0.17), accept any state schema, and 94 downloads the new release over https from a local server instead of `-from-dir -insecure`; 95 covers kling-hv (`VMM=hv`).
+
+### Changed
+
+- `kling upgrade -rollback` refuses, before stopping anything, when the previous kling could not read what stays on disk (a format the new one wrote without a migration copy); `-force` rolls back anyway.
+- `kling-hv -snapshot-formats` also prints its memory-file state version (`KLNGHV`), and a rollback on the Mac refuses to leave a frozen machine the previous kling-hv could not wake.
+- Release tags with a hyphen (`v1.0.0-rc.1`) are published as prereleases, so `kling upgrade` and `install.sh` do not take them as the latest, and they do not move the operator image's `:latest`.
+- `scripts/release.sh` tags the commit it checked, requires green CI on it and waits for that tag's own workflow run; release notes link the tag's `install.sh`, not main's.
 
 ## [0.20.0] - 2026-10-28
 

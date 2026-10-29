@@ -117,7 +117,7 @@ med "latencia de creación" "$(cat "$tmp"/*.ok 2>/dev/null | percentil)"
 
 # ── 3. ejecuciones concurrentes ──────────────────────────────────────────────
 step "3. $EXECS ejecuciones concurrentes repartidas entre los sandboxes"
-vivos=($($KLING sandbox ls 2>/dev/null | awk -v p="$PREFIJO" '$0 ~ p {print $2}'))
+mapfile -t vivos < <($KLING sandbox ls 2>/dev/null | awk -v p="$PREFIJO" '$0 ~ p {print $2}')
 if [ "${#vivos[@]}" -gt 0 ]; then
   tmp2=$(mktemp -d)
   for i in $(seq 1 "$EXECS"); do
@@ -194,7 +194,7 @@ for i in $(seq 1 "$K"); do
   while [ "$(jobs -r | wc -l)" -ge "$PAR" ]; do wait -n; done
 done
 wait
-ids=($($KLING ps -a 2>/dev/null | awk -v p="$PREFIJO-c" '$0 ~ p && /running/ {print $1}'))
+mapfile -t ids < <($KLING ps -a 2>/dev/null | awk -v p="$PREFIJO-c" '$0 ~ p && /running/ {print $1}')
 t0=$(date +%s%3N)
 for id in "${ids[@]}"; do $KLING freeze "$id" >/dev/null 2>&1 & done; wait
 t1=$(date +%s%3N)

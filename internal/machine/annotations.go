@@ -43,17 +43,17 @@ func (m *Manager) Snapshot(name string) (*api.Snapshot, error) {
 // error: la extensión simplemente deja de ver lo que había guardado.
 func (m *Manager) SetAnnotation(name, key string, value json.RawMessage) (*api.Snapshot, error) {
 	if !api.KeyPattern.MatchString(key) {
-		return nil, fmt.Errorf("invalid annotation key %q: lowercase letters, digits, '.', '_' or '-', up to 64", key)
+		return nil, peticionInvalida("invalid annotation key %q: lowercase letters, digits, '.', '_' or '-', up to 64", key)
 	}
 	if len(value) > api.MaxValueBytes {
-		return nil, fmt.Errorf("annotation %q is %d bytes; the limit is %d", key, len(value), api.MaxValueBytes)
+		return nil, peticionInvalida("annotation %q is %d bytes; the limit is %d", key, len(value), api.MaxValueBytes)
 	}
 	if !json.Valid(value) {
-		return nil, fmt.Errorf("annotation %q is not valid JSON", key)
+		return nil, peticionInvalida("annotation %q is not valid JSON", key)
 	}
 	return m.editMeta(name, func(s *api.Snapshot) (string, error) {
 		if _, exists := s.Annotations[key]; !exists && len(s.Annotations) >= api.MaxAnnotations {
-			return "", fmt.Errorf("snapshot %q already has %d annotations, the maximum", name, api.MaxAnnotations)
+			return "", peticionInvalida("snapshot %q already has %d annotations, the maximum", name, api.MaxAnnotations)
 		}
 		if s.Annotations == nil {
 			s.Annotations = map[string]json.RawMessage{}
@@ -67,7 +67,7 @@ func (m *Manager) SetAnnotation(name, key string, value json.RawMessage) (*api.S
 // resultado que pide quien llama —que no esté— ya se cumple.
 func (m *Manager) RemoveAnnotation(name, key string) (*api.Snapshot, error) {
 	if !api.KeyPattern.MatchString(key) {
-		return nil, fmt.Errorf("invalid annotation key %q", key)
+		return nil, peticionInvalida("invalid annotation key %q", key)
 	}
 	return m.editMeta(name, func(s *api.Snapshot) (string, error) {
 		delete(s.Annotations, key)

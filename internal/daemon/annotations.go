@@ -9,16 +9,19 @@ import (
 )
 
 // snapshotStatus traduce un error de snapshot a su código HTTP con las
-// centinelas de machine: 404 si no existe, 409 si está en uso y 400 para el
-// resto (nombre inválido, meta de un kling más nuevo...).
+// centinelas de machine: 404 si no existe, 409 si está en uso, 400 lo que
+// está mal en la petición (nombre, clave, valor) y 500 lo del host (el disco,
+// un meta.json de un kling más nuevo).
 func snapshotStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrNoSnapshot):
 		return http.StatusNotFound
 	case errors.Is(err, machine.ErrSnapshotInUse):
 		return http.StatusConflict
+	case errors.Is(err, machine.ErrInvalidName), errors.Is(err, machine.ErrRunRequest):
+		return http.StatusBadRequest
 	}
-	return http.StatusBadRequest
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {

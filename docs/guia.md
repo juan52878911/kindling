@@ -573,12 +573,11 @@ otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incor
 
 Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp add`,
 `kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
-de antes (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`,
-`kling snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) siguen
-funcionando como alias. Fueron silenciosos hasta 0.17; ahora cada uno avisa una vez en
-stderr (`warning: kling add is now kling mcp add`), y los de extensiones se retirarán en
-una versión que anunciará el CHANGELOG. `commit`, `snapshots` y `plugins` se quedan para
-siempre, en silencio.
+que avisaban desde 0.18 se retiraron en 1.0 y salen con código 2 diciendo el nombre nuevo:
+`kling mcp add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`,
+`ai model`, `ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`,
+`machine resize`, `machine squeeze` y `machine secret`. `commit`, `snapshots` y `plugins`
+se quedan para siempre, en silencio, como `save`, `template` y `plugin`.
 
 ## kling-mcp: servidores MCP bajo demanda
 
@@ -1219,7 +1218,7 @@ como suyas.
 Llevado más lejos en una prueba de estrés sobre un host de 4 GB: **142 microVMs
 simultáneas en 3,9 GB**, con la memoria libre plana mientras el PSS total crecía — y un
 rechazo determinista y explicado en la 143 en vez de un OOM. Detalles en
-[`docs/estabilidad.md`](estabilidad.md).
+[`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md).
 
 Si lo que buscas es densidad, hay además una palanca opt-in del lado del host: **zram**
 (swap comprimido en RAM) para las páginas anónimas que divergen entre copias — guía
@@ -1319,6 +1318,25 @@ dinámicamente (DNS → ipset), y todo lo demás — incluidos todos los rangos 
 sigue bloqueado. Un valor de egress desconocido es un **error**, no una caída al modo más
 permisivo. La política viaja con el snapshot del servicio, así que un servicio curado o
 reimportado la conserva.
+
+### Linux con Docker: la política del FORWARD
+
+kindling solo **añade** reglas `DROP` al `FORWARD` del host (las barreras de las redes
+privadas); lo demás que sale de las máquinas cae en la política de esa cadena. Docker la
+pone en `DROP` al arrancar, y entonces las máquinas con `-egress internet` o `allowlist`
+arrancan, contestan a `exec` (eso va por `INPUT`) y no salen a ningún sitio, sin error.
+`kling doctor` y `kling up -check` lo detectan (línea `FORWARD policy`; leer las reglas
+pide root) y el daemon lo deja en el log una vez al arrancar. El arreglo, con el daemon ya
+arrancado para que quede **detrás** de sus barreras:
+
+```sh
+sudo iptables -A FORWARD -i vh-+ -s 172.30.0.0/16 -j ACCEPT
+sudo iptables -A FORWARD -o vh-+ -d 172.30.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+```
+
+Para que sobrevivan a un reinicio, guárdalas con la herramienta de la distro
+(`iptables-persistent`, firewalld…). No pongas la política en `ACCEPT`: abriría también el
+reenvío de las redes de Docker.
 
 ## Secretos que nunca tocan un snapshot: MMDS
 
@@ -1637,7 +1655,7 @@ permite que N instancias compartan páginas.
 | [`CHANGELOG.md`](../CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](RELEASE-v0.2.0.md) y [v0.3.0](RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
 | [`docs/three-layers.md`](three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
-| [`docs/estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
+| [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](chispa.md) · [`docs/CHISPA-EVAL.md`](CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
 | [`docs/chispa-serverless.md`](chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling ai chispa deploy`, thaw y rendimiento medidos frente a en proceso |
 | [`docs/intent.md`](intent.md) | Tareas de intención del gateway de IA: plantillas → intención Chispa + Chispa-slots → codificador, con puerta; el dominio como esquema JSON o `intent.Domain` en Go |

@@ -1,0 +1,107 @@
+{
+  "schema": 2,
+  "machines": [
+    {
+      "id": "aa11bb22cc33dd44",
+      "name": "vieja",
+      "image": "eco",
+      "state": "stopped",
+      "vcpus": 5,
+      "mem_mib": 6,
+      "pid": 7,
+      "last_error": "v018-8",
+      "mem_max_mib": 9,
+      "disk_mib": 10,
+      "diff_base": "v018-11",
+      "snapshot_bytes": 12,
+      "disk_bytes": 13,
+      "created_at": "2026-10-01T10:14:00Z",
+      "started_at": "2026-10-01T10:15:00Z",
+      "frozen_at": "2026-10-01T10:16:00Z",
+      "failed_at": "2026-10-01T10:17:00Z",
+      "stopped_at": "2026-10-01T10:18:00Z",
+      "from": "svc",
+      "ip": "172.16.0.6",
+      "net_index": 21,
+      "egress": "allowlist",
+      "forwards": {
+        "v018-23": "v018-24"
+      },
+      "allow_domains": [
+        "v018-25"
+      ],
+      "ttl_seconds": 26,
+      "cpu_pct": 27,
+      "cpu_pct_fixed": true,
+      "cpu_boost_pct": 28,
+      "allow_exec": true,
+      "on_ttl": "v018-29",
+      "ttl_at": "2026-10-01T10:30:00Z",
+      "volumes": [
+        {
+          "name": "v018-31",
+          "mount": "v018-32",
+          "read_only": true,
+          "drive_id": "v018-33"
+        }
+      ],
+      "shares": [
+        {
+          "mode": "v018-34",
+          "mount": "v018-35",
+          "source": "v018-36",
+          "image_bytes": 37,
+          "status": "v018-38"
+        }
+      ],
+      "labels": {
+        "v018-39": "v018-40"
+      },
+      "has_secrets": true,
+      "env_keys": [
+        "v018-41"
+      ],
+      "ready": "v018-42",
+      "hooks_pending": "v018-43",
+      "hold": "v018-44",
+      "disk_errors": 45,
+      "disk_error_at": "2026-10-01T10:46:00Z",
+      "disk_error": "v018-47",
+      "agent": {
+        "agent": "v018-48",
+        "version": "v018-49",
+        "caps": [
+          "v018-50"
+        ]
+      },
+      "transition": "v018-51",
+      "mem_shared": true,
+      "credential_domains": [
+        "v018-52"
+      ],
+      "credential_any_database": [
+        "v018-53"
+      ],
+      "boot_ms": 54,
+      "freeze_ms": 55,
+      "thaw_ms": 56,
+      "wake": {
+        "tier": "v018-57",
+        "wait_ms": 58,
+        "check_ms": 59,
+        "store_ms": 60,
+        "mirror_ms": 61,
+        "memory_ms": 62,
+        "net_ms": 63,
+        "spawn_ms": 64,
+        "socket_ms": 65,
+        "load_ms": 66,
+        "forwards_ms": 67,
+        "resync_ms": 68,
+        "cgroup_ms": 69,
+        "finish_ms": 70,
+        "total_ms": 71
+      }
+    }
+  ]
+}

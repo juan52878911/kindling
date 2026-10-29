@@ -1,0 +1,33 @@
+{
+  "name": "eco",
+  "base": "min",
+  "packages": [
+    "v020-117"
+  ],
+  "npm": [
+    "v020-118"
+  ],
+  "pip": [
+    "v020-119"
+  ],
+  "env": [
+    "v020-120"
+  ],
+  "cmd": [
+    "v020-121"
+  ],
+  "grow_mb": 122,
+  "bundle": true,
+  "cpu_pct": 123,
+  "cpu_pct_per_vcpu": 124,
+  "guest_ipv6_stack": true,
+  "built_at": "2026-10-01T10:05:00Z",
+  "kling_version": "v020-126",
+  "builder": "v020-127",
+  "spec": {
+    "v020": 128
+  },
+  "built": {
+    "v020": 129
+  }
+}

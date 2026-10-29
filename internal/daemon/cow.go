@@ -24,7 +24,9 @@ func (s *Server) handleGrowCoWStore(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	st, err := s.mgr.GrowCoWStore(ctx, req.SizeMiB, req.AddMiB)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		// 400 un tamaño que no vale, 501 sin almacén en esta plataforma
+		// (StatusError del manager), 500 lo del host. Antes, 400 todo.
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
