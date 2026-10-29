@@ -217,11 +217,11 @@ func DetectLang(text string) string {
 	tk.Run(text)
 	es, en := 0, 0
 	for i := 0; i < tk.Len(); i++ {
-		w := string(tk.Tok(i))
-		if esWords[w] {
+		w := tk.Tok(i)
+		if esWords[string(w)] {
 			es++
 		}
-		if enWords[w] {
+		if enWords[string(w)] {
 			en++
 		}
 	}

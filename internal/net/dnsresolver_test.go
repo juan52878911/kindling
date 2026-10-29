@@ -285,7 +285,7 @@ func TestProcessInFlightBounded(t *testing.T) {
 			defer wg.Done()
 			q := buildQuery(id, "example.com", 1)
 			resp := r.process(q, false)
-			if resp != nil && len(resp) >= 4 && resp[3]&0x0F == 2 {
+			if len(resp) >= 4 && resp[3]&0x0F == 2 {
 				atomic.AddInt32(&servfail, 1)
 			}
 		}(uint16(i))
@@ -370,7 +370,7 @@ func TestProcessRejectsMismatchedAnswer(t *testing.T) {
 
 	r := newTestResolver(addr)
 	resp := r.process(buildQuery(0x1234, "example.com", 1), false)
-	if resp == nil || len(resp) < 4 || resp[3]&0x0F != 2 {
+	if len(resp) < 4 || resp[3]&0x0F != 2 {
 		t.Fatalf("esperaba SERVFAIL ante una respuesta que no casa, obtuve %v", resp)
 	}
 	if got := atomic.LoadInt32(&calls); got != 0 {
@@ -382,6 +382,7 @@ func TestProcessRejectsMismatchedAnswer(t *testing.T) {
 // ráfaga, deniega, y tras esperar recupera al menos un token.
 func TestTokenBucketAllow(t *testing.T) {
 	b := newTokenBucket(100, 2) // 100 tok/s, ráfaga 2
+	//lint:ignore SA4000 dos llamadas con efecto: cada allow() gasta un token
 	if !b.allow() || !b.allow() {
 		t.Fatal("los primeros allow() dentro de la ráfaga deberían pasar")
 	}

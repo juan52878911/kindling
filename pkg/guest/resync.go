@@ -87,7 +87,7 @@ func ResyncHandler() http.HandlerFunc {
 			return
 		}
 		host := time.Unix(0, req.UnixNano)
-		skew := host.Sub(time.Now())
+		skew := time.Until(host)
 		if err := setClock(host); err != nil {
 			http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
 			return

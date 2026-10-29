@@ -16,6 +16,7 @@ func TestPerezosa(t *testing.T) {
 	if got := r.ReplaceAllString("ab", "x$1"); got != "xb" {
 		t.Fatalf("ReplaceAllString = %q", got)
 	}
+	//lint:ignore SA4000 se prueba que Regexp() compila una vez y devuelve siempre el mismo
 	if r.String() != `^a+(b)$` || r.Regexp() != r.Regexp() {
 		t.Fatal("String/Regexp")
 	}

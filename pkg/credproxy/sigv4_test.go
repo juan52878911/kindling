@@ -714,7 +714,7 @@ func TestSigV4SinHashDeclaradoSeCalcula(t *testing.T) {
 		firmadas := strings.Split(strings.Split(strings.Split(auth, "SignedHeaders=")[1], ",")[0], ";")
 		canon := peticionCanonica(r.Method, rutaCan, queryCanonica(paresQuery(r.URL.RawQuery)), r.Header, r.Host, firmadas, hexSHA256(b))
 		if !strings.HasSuffix(auth, "Signature="+f.firmaDe(fecha, canon)) {
-			http.Error(w, "SignatureDoesNotMatch", 403)
+			http.Error(w, "SignatureDoesNotMatch", http.StatusForbidden)
 			return
 		}
 		visto = string(b)

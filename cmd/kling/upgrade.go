@@ -652,7 +652,7 @@ func programaLaunchd(out []byte) string {
 // que el socket del servicio es el que se va a esperar.
 func prepararVueltaSinDaemon(o *upgrade.Opciones, c *api.Client, unit, root string, causa error) error {
 	var argv []string
-	env := map[string]string{}
+	var env map[string]string
 	switch runtime.GOOS {
 	case "linux":
 		if !reNombreUnidad.MatchString(unit) {

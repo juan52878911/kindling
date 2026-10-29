@@ -482,7 +482,7 @@ func CheckMachineCmd(c MachineCmd) error {
 	if total > MaxMachineCmdBytes {
 		return fmt.Errorf("the command is %d bytes, over the limit of %d", total, MaxMachineCmdBytes)
 	}
-	if c.Entrypoint != nil && len(c.Entrypoint) > 0 && c.Entrypoint[0] == "" {
+	if len(c.Entrypoint) > 0 && c.Entrypoint[0] == "" {
 		return fmt.Errorf("invalid command: the entrypoint's executable is empty")
 	}
 	return nil
