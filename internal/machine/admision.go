@@ -166,7 +166,7 @@ func evaluarSwap(usado, total, libreDisco, minDisco, maxPct int64) error {
 	}
 	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
 		"the host swap is %d%% full (%d of %d MiB, and only %d MiB of disk left for it to grow; limit %d%%).\n"+
-			"Under this pressure macOS has handed guests pages of zeros (docs/estabilidad.md); another "+
+			"Under this pressure macOS has handed guests pages of zeros (docs/auditoria-estabilidad-2026-08.md); another "+
 			"microVM would make it worse.\n"+
 			"Freeze or remove idle instances (`kling ps`), free disk, or raise the limit with KLING_MAX_SWAP_PCT",
 		pct, usado, total, max(0, libreDisco-minDisco), maxPct)}

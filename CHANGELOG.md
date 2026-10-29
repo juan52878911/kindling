@@ -41,6 +41,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- The swap admission error pointed to `docs/estabilidad.md`, now `docs/auditoria-estabilidad-2026-08.md`.
 - CI: `e2e-linux.yml` installs the `base` builder for its private daemon, so the toolchain image builds and `90-e2e.sh` and `94-e2e-upgrade.sh` stop falling back to `min`; `94-e2e-upgrade.sh` only expects a refreeze on `-rollback` when `state.json` was migrated.
 
 ## [0.20.1] - 2026-10-28
