@@ -6,6 +6,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `recipe.json` records the image's guest agent (`agent`: version from the builder, capabilities from the first machine that boots it); `GET /images` returns it, and `kling image ls` and `kling doctor` flag images whose agent is older than v0.18 or more than one minor behind the daemon.
+
+
 ### Changed
 
 - Versioned on-disk formats: `publish.json` and `fondos.json` get `schema: 1` (with a `.v0.bak` and durable writes), graphs `format: 1`, the CLI config `schema: 1` (and `Save` keeps keys it does not know), the freeze seal `schema: 1`, and MMDS `kling_mmds: 1`. A file from a newer kling is left untouched and the error says to update kling.

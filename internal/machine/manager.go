@@ -426,6 +426,9 @@ type Manager struct {
 	// escrituraMu.
 	versionPrevia int
 	hayPrevia     bool
+	// recetaMu serializa agenteEnReceta (layer.go): dos máquinas de la misma
+	// imagen que contestan a la vez leerían y reescribirían la misma receta.
+	recetaMu sync.Mutex
 	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex

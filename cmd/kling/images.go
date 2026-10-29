@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -111,6 +112,16 @@ func imagesList(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	// Agentes viejos: debajo de la tabla, para no cambiar sus columnas.
+	var dmn string
+	if info, err := api.NewClient(hostOf(*host)).Info(ctx); err == nil {
+		dmn = info.Version
+	}
+	for _, img := range imgs {
+		if por := agenteViejo(img.Agent, dmn); por != "" {
+			fmt.Printf("! %s: %s; %s\n", img.Name, por, pistaRehacer)
+		}
+	}
 	// El total es la cifra que justifica las capas, y no es la suma de lo que
 	// ocupa cada servicio "completo": la base aparece UNA vez y cada capa cuesta
 	// solo su delta. Sin esta línea hay que sumarlo a mano para verlo.
@@ -170,6 +181,52 @@ func imagesToolchain(args []string) error {
 	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
 	return nil
 }
+
+// agenteViejo dice por qué el agente de invitado ag de una imagen es viejo
+// para un daemon kling (docs/actualizar.md §3: un agente viejo sigue
+// funcionando, degradado, al menos una MINOR; después `doctor` avisa y
+// `image ls` lo marca), o "" si no lo es o no se sabe. Viejo es:
+//
+//   - anterior a v0.18 (no anuncia capacidades, y un parámetro nuevo de la
+//     línea del kernel podía tumbar su PID 1): fuera de la compatibilidad;
+//   - más de una MINOR por detrás del daemon.
+//
+// Solo se juzga kling-guest (o lo que no dice su nombre: una receta de
+// antes): otro agente (kling-bridge de kindling-mcp) lleva su versión.
+// Versiones de desarrollo ("dev") no se comparan.
+func agenteViejo(ag *api.GuestAgent, kling string) string {
+	if ag == nil || (ag.Agent != "" && ag.Agent != "kling-guest") {
+		return ""
+	}
+	ma, mi, ok := mayorMenor(ag.Version)
+	ka, ki, kok := mayorMenor(kling)
+	if !ok || !kok {
+		return ""
+	}
+	desc := "v" + strings.TrimPrefix(ag.Version, "v")
+	if ma == 0 && mi < 18 {
+		return fmt.Sprintf("guest agent %s is older than v0.18: it announces no capabilities and is outside compatibility", desc)
+	}
+	// Una MINOR "por detrás" cuenta igual a través de una MAJOR (0.20 → 1.0).
+	if (ka*1000+ki)-(ma*1000+mi) > 1 {
+		return fmt.Sprintf("guest agent %s is more than one minor behind kling v%s", desc, strings.TrimPrefix(kling, "v"))
+	}
+	return ""
+}
+
+// mayorMenor lee MAJOR y MINOR de "v0.19.2" / "0.19.2-rc1".
+func mayorMenor(v string) (int, int, bool) {
+	p := strings.SplitN(strings.TrimPrefix(v, "v"), ".", 3)
+	if len(p) < 2 {
+		return 0, 0, false
+	}
+	a, err1 := strconv.Atoi(p[0])
+	i, err2 := strconv.Atoi(strings.SplitN(p[1], "-", 2)[0])
+	return a, i, err1 == nil && err2 == nil
+}
+
+// pistaRehacer es cómo se rehace una imagen para que lleve el agente nuevo.
+const pistaRehacer = "rebuild it: kling image import -replace <ref> (or compose up -fresh, kling mcp import -force)"
 
 // imagesRecipe enseña cómo se construyó una imagen.
 //

@@ -22,12 +22,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
 
@@ -167,8 +169,80 @@ func techoDeReceta(rec api.ImageRecipe, vcpus int) int {
 	return 0
 }
 
+// AgenteDeImagen es el agente de invitado que lleva image según su receta: el
+// que apuntó (ImageRecipe.Agent) o, en una receta de antes, la versión de
+// kling que la construyó, que es la del agente que metió. nil si no consta.
+func (m *Manager) AgenteDeImagen(image string) *api.GuestAgent {
+	if !validName.MatchString(image) {
+		return nil
+	}
+	b, err := os.ReadFile(m.recipePath(image))
+	if err != nil {
+		return nil
+	}
+	var rec api.ImageRecipe
+	if json.Unmarshal(b, &rec) != nil {
+		return nil
+	}
+	if rec.Agent != nil {
+		return rec.Agent
+	}
+	if rec.KlingVer != "" {
+		return &api.GuestAgent{Version: rec.KlingVer}
+	}
+	return nil
+}
+
+// agenteEnReceta apunta en la receta de image el agente que acaba de
+// anunciarse en una máquina suya, si la receta no lo tenía o solo tenía la
+// versión (lo que sabe el constructor): así `kling image ls` y `doctor` saben
+// las capacidades reales, también de imágenes construidas antes de apuntarlo.
+// Solo toca la clave "agent"; las demás quedan con su valor (en orden
+// alfabético: se reescribe como mapa para no perder ninguna que no conozca). Sin
+// receta no hace nada (no hay dónde ponerlo, y crearla mentiría sobre cómo se
+// construyó).
+func (m *Manager) agenteEnReceta(image string, ag *api.GuestAgent) {
+	if ag == nil || !validName.MatchString(image) {
+		return
+	}
+	ruta := m.recipePath(image)
+	m.recetaMu.Lock()
+	defer m.recetaMu.Unlock()
+	b, err := os.ReadFile(ruta)
+	if err != nil {
+		return
+	}
+	var claves map[string]json.RawMessage
+	if json.Unmarshal(b, &claves) != nil {
+		return
+	}
+	var previo *api.GuestAgent
+	if raw, ok := claves["agent"]; ok {
+		_ = json.Unmarshal(raw, &previo)
+	}
+	if previo != nil && (previo.Caps != nil || ag.Caps == nil) {
+		return
+	}
+	nb, err := json.Marshal(ag)
+	if err != nil {
+		return
+	}
+	claves["agent"] = nb
+	out, err := json.MarshalIndent(claves, "", "  ")
+	if err != nil {
+		return
+	}
+	perm := os.FileMode(0o600)
+	if fi, err := os.Stat(ruta); err == nil {
+		perm = fi.Mode().Perm()
+	}
+	if err := durable.Escribir(ruta, append(out, '\n'), perm); err != nil {
+		log.Printf("image %s: could not record its guest agent in the recipe: %v", image, err)
+	}
+}
+
 // recipeBase lee de la receta sobre qué base se construyó la imagen.
-//
+
 // Sin receta —o con una ilegible— se asume la base por defecto: es la que usó el
 // build salvo que se le dijera otra cosa, así que acertar es lo normal y el caso
 // contrario da un error claro en imageLayer, no un arranque raro.

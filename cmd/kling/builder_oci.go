@@ -848,7 +848,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 	// tarda el doble (medido en el lab: recall de Hindsight 0,09 s frente a
 	// 0,05 s; una consulta de Postgres que suma 3 M filas, 0,93 s frente a
 	// 0,49 s).
-	hints := api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj}
+	hints := api.BuildRecipeHints{CPUPctPerVCPU: 100, Built: bj, Agent: agenteMetido(agent, filepath.Join(lib, "kling-guest"))}
 	if reuse != nil {
 		hints.Base = reuse.Name
 	}
