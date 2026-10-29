@@ -75,6 +75,9 @@ void khv_stop(void);
 uint64_t khv_footprint(void);
 void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), instrucciones y en P
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
+// Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
+// tamaños de la cabecera (la actual y la de la versión 1) y del pie.
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie);
 
 // ---- interno ----
 

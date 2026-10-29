@@ -119,6 +119,7 @@ var clasesCampos = map[string]claseCampo{
 	// sí los entienden, rechazaran todos los dorados nuevos.
 	"meta.json api.Snapshot share_wait": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot sin_agente": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
+	"meta.json api.Snapshot arch":       {porque: "an older kling that drops it does not compare architectures, which it never did"},
 	// credentials.enc: ver versionAlmacenSigV4 (credenciales.go).
 	"credentials.enc credproxy.Credential AccessKeyID": {efecto: true, version: 2, porque: "a kling <= v0.18 would use a sigv4 credential as HTTP and drop it"},
 	"credentials.enc credproxy.Credential Region":      {efecto: true, version: 2, porque: "as AccessKeyID"},

@@ -12,6 +12,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `state.json` moves to schema 3 only when a machine has `cmd`, `entrypoint`, `share_wait`, `volume_wait` or `net_mibps` (an older kling would drop them), and every schema bump of `state.json` (also 1 -> 2) leaves a `.v<N>.bak`.
 - Credential stores with a sigv4 credential are sealed as `KLCS 2`: kling v0.18 would use them as HTTP credentials and drop their fields.
 - `POST /graphs` rejects fields the daemon does not know (400) instead of dropping them.
+- A golden or frozen machine is stale when it was made on another architecture or with a kling-vz/kling-hv snapshot format this one does not read; kling-hv restore errors are explained like kling-vz ones.
+
 
 
 ## [0.20.0] - 2026-10-28

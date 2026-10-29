@@ -32,6 +32,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -81,6 +82,9 @@ type sello struct {
 	// no resincroniza (mismo criterio que Snapshot.SinAgente) y sobrevive a un
 	// reinicio del daemon.
 	SinAgente bool `json:"sin_agente,omitempty"`
+	// Arch es la arquitectura del host que volcó (runtime.GOARCH): otra no lo
+	// carga (causaObsoletoEn). Opcional: sin él no se compara.
+	Arch string `json:"arch,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -105,7 +109,7 @@ func sellarVolcado(dir, kernelSHA, vmm, diffBase string, sinAgente bool) error {
 		return err
 	}
 	b, _ := json.Marshal(sello{Cabecera: esquema.Cabecera{Schema: versionSello}, SnapSHA256: snapSHA, MemBytes: fi.Size(),
-		At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase, SinAgente: sinAgente})
+		At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase, SinAgente: sinAgente, Arch: runtime.GOARCH})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}

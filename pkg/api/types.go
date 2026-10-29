@@ -889,6 +889,9 @@ type Snapshot struct {
 	VMM          string `json:"vmm,omitempty"`
 	MacOS        string `json:"macos,omitempty"`
 	KlingVersion string `json:"kling_version,omitempty"`
+	// Arch es la arquitectura del host que lo hizo (runtime.GOARCH): un
+	// volcado de amd64 no se restaura en arm64 ni al revés. Vacío = no consta.
+	Arch string `json:"arch,omitempty"`
 
 	// Stale, si no está vacío, es por qué este dorado no se puede restaurar
 	// con el VMM de ahora ("made with firecracker 1.12.0; this host runs

@@ -321,7 +321,7 @@ func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
 // o "stale" si no se sabe decir mejor.
 func (m *Manager) causaFondo(name string) string {
 	if s, err := m.loadSnapshot(name); err == nil {
-		if c := causaObsoleto(s.VMM, m.origenActual().vmm); c != "" {
+		if c := m.causaObsoletoEn(s.VMM, s.Arch, m.snapDir(name)); c != "" {
 			return c
 		}
 	}

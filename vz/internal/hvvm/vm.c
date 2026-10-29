@@ -173,6 +173,16 @@ struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
 };
 
+// Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
+// subir SNAP_VERSION rompería los mem.file que ya hay en disco.
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie) {
+  *magia = SNAP_MAGIC;
+  *version = SNAP_VERSION;
+  *hdr = sizeof(struct snap_hdr);
+  *hdr_v1 = SNAP_HDR_V1;
+  *pie = sizeof(struct snap_pie);
+}
+
 // ===================== configuración =====================
 
 static int ncpus = 1;

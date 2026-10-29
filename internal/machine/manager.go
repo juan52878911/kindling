@@ -3186,7 +3186,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// VMM: congelada con uno que el de ahora no sabe cargar (otro VMM u otra
 	// MAJOR.MINOR de Firecracker, ver causaObsoleto). Se dice aquí, antes de
 	// lanzar nada: el error crudo del VMM al cargar no señala la causa.
-	if causa := causaObsoleto(vmmDelVolcado(dir), m.origenActual().vmm); causa != "" {
+	if causa := m.causaObsoletoEn(vmmDelVolcado(dir), leerSello(dir).Arch, dir); causa != "" {
 		return nil, fmt.Errorf("machine %q can't be thawed: it was frozen %s, and a memory dump "+
 			"can't be loaded by another VMM version. Go back to that VMM to thaw it, or remove it "+
 			"(kling rm %s) and start it again", mc.Name, strings.Replace(causa, "made with", "with", 1), mc.Name)

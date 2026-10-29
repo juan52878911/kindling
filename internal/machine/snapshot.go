@@ -1304,7 +1304,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// OBSOLETO: hecho con un VMM que el de ahora no sabe cargar. Se falla
 	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
 	// al cargar no dice que la causa es la actualización (meta.go).
-	if causa := causaObsoleto(snap.VMM, m.origenActual().vmm); causa != "" {
+	if causa := m.causaObsoletoEn(snap.VMM, snap.Arch, m.snapDir(req.From)); causa != "" {
 		return nil, errObsoleto(req.From, causa)
 	}
 
