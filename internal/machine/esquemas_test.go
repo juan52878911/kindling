@@ -48,7 +48,14 @@ func TestEsquemasEnDisco(t *testing.T) {
 	if mal := (Esquemas{}).Incompatibles(Esquemas{Estado: 1}); len(mal) != 1 || !strings.Contains(mal[0], "state.json") {
 		t.Errorf("v0.17 against state v1: %v", mal)
 	}
-	if m := EsquemasSoportados().Migraciones(Esquemas{}); len(m) != 3 {
+	// Desde v0.17 migra todo; state.json y los almacenes, además, pueden
+	// subir más si hace falta (esquema 3, KLCS 2).
+	if m := EsquemasSoportados().Migraciones(Esquemas{}); len(m) != 5 {
 		t.Errorf("from v0.17 everything migrates: %v", m)
+	}
+	// Desde v0.20 (state 2, KLCS 1, meta 2): solo lo que sube si hace falta.
+	if m := EsquemasSoportados().Migraciones(Esquemas{Estado: 2, Meta: 2, Credenciales: 1}); len(m) != 2 ||
+		!strings.Contains(m[0], "state.json.v2.bak") || !strings.Contains(m[1], "<file>.v1.bak") {
+		t.Errorf("from v0.20: %v", m)
 	}
 }

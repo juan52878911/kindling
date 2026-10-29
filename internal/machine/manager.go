@@ -27,6 +27,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/esquema"
+	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
 
@@ -418,6 +419,13 @@ type Manager struct {
 	// antes de que arranque nada concurrente, y después solo se leen.
 	estadoIlegible  string
 	estadoIntocable bool
+	// versionPrevia es el esquema del state.json que dejó el binario anterior
+	// (hayPrevia: lo había y se leyó). La primera escritura de un esquema
+	// mayor guarda antes state.json.v<versionPrevia>.bak: sin ella, volver a
+	// ese binario no tendría qué leer. Se fijan en load; después, con
+	// escrituraMu.
+	versionPrevia int
+	hayPrevia     bool
 	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex
@@ -658,6 +666,7 @@ func (m *Manager) load() {
 		m.ponerEnCuarentena(err)
 		return
 	}
+	m.versionPrevia, m.hayPrevia = version, true
 	if version < versionEstado {
 		// La primera escritura lo pasará al formato nuevo: antes, la copia
 		// del original, que es lo que permite volver al binario anterior.
@@ -690,24 +699,49 @@ func (m *Manager) load() {
 //	   si fuera la RAM entera y la copia despertaría con la memoria rota: con
 //	   el 2 se niega a arrancar. Sin copias en diferencial se sigue escribiendo
 //	   el 1 y volver atrás es posible.
+//	3: el mismo formato, con alguna máquina que lleva un campo de v0.19/v0.20
+//	   con efecto (cmd, entrypoint, share_wait, volume_wait, net_mibps; ver
+//	   necesitaV3). Un kling ≤ v0.20 lee ≤ 2 y, en su siguiente escritura, los
+//	   perdería: la máquina volvería a arrancar con el comando de la imagen,
+//	   sin esperar a sus carpetas o con el caudal del daemon. Con el 3 se
+//	   niega a arrancar, y -rollback devuelve el state.json.v<N>.bak.
+//
+// Se escribe siempre el más bajo que describe el estado (esquemaParaEscribir),
+// para que volver atrás siga siendo posible mientras no haga falta más. Qué
+// campos piden cuál lo vigila TestCamposPersistidos (campos_persistidos_test.go).
 const versionEstado = 1
 
 // versionEstadoDiff es el esquema que se escribe si alguna máquina tiene
-// DiffBase; versionEstadoMax, el más nuevo que este binario sabe leer.
+// DiffBase; versionEstadoCampos, si alguna lleva un campo de necesitaV3;
+// versionEstadoMax, el más nuevo que este binario sabe leer.
 const (
-	versionEstadoDiff = 2
-	versionEstadoMax  = versionEstadoDiff
+	versionEstadoDiff   = 2
+	versionEstadoCampos = 3
+	versionEstadoMax    = versionEstadoCampos
 )
 
-// esquemaParaEscribir es versionEstado, o versionEstadoDiff si alguna
-// máquina depende de un diferencial.
+// esquemaParaEscribir es el esquema más bajo que describe list: versionEstado,
+// versionEstadoDiff si alguna máquina depende de un diferencial, o
+// versionEstadoCampos si alguna lleva un campo que un kling anterior perdería.
 func esquemaParaEscribir(list []api.Machine) int {
+	v := versionEstado
 	for i := range list {
+		if necesitaV3(&list[i]) {
+			return versionEstadoCampos
+		}
 		if list[i].DiffBase != "" {
-			return versionEstadoDiff
+			v = versionEstadoDiff
 		}
 	}
-	return versionEstado
+	return v
+}
+
+// necesitaV3 dice si mc lleva alguno de los campos con efecto que llegaron en
+// v0.19/v0.20 sin subir el esquema (cmd, entrypoint, share_wait, volume_wait,
+// net_mibps). Los demás de esas versiones (vmm, published) son ignorables: ver
+// clasesCampos en campos_persistidos_test.go, que exige que estén aquí.
+func necesitaV3(mc *api.Machine) bool {
+	return len(mc.Cmd) > 0 || len(mc.Entrypoint) > 0 || mc.ShareWait != 0 || mc.VolumeWait || mc.NetMiBps != 0
 }
 
 // ficheroEstado es state.json desde la versión 1.
@@ -723,8 +757,9 @@ func decodificarEstado(b []byte, version int) ([]*api.Machine, error) {
 		var list []*api.Machine
 		err := json.Unmarshal(b, &list)
 		return list, err
-	case 1, 2:
+	case 1, 2, 3:
 		var f ficheroEstado
+
 		err := json.Unmarshal(b, &f)
 		return f.Machines, err
 	}
@@ -927,14 +962,25 @@ func (m *Manager) writePending() {
 		return // ya se escribió una foto más nueva
 	}
 
+	schema := esquemaParaEscribir(list)
 	f := struct {
 		esquema.Cabecera
 		Machines []api.Machine `json:"machines"`
-	}{esquema.Cabecera{Schema: esquemaParaEscribir(list)}, list}
+	}{esquema.Cabecera{Schema: schema}, list}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		log.Printf("state: could not serialize it: %v", err)
 		return
+	}
+	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
+	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
+	// antes, la copia de lo que ese binario sabe leer. Respaldar no pisa una
+	// que ya exista, así que es la del fichero tal como lo dejó él.
+	if m.hayPrevia && schema > m.versionPrevia {
+		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
+			log.Printf("state: not writing schema %d, because the schema %d copy could not be made: %v", schema, m.versionPrevia, err)
+			return
+		}
 	}
 
 	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
@@ -2804,6 +2850,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if doc, err = m.conEntornoPendiente(mc.ID, doc); err != nil {
 		return nil, err
 	}
+	doc = guest.ConVersionMMDS(doc)
 	// Con los marcadores y el entorno pendiente puede pasarse del almacén
 	// del VMM: se dice aquí, con el tope, y no con el error crudo del VMM.
 	if b, err := json.Marshal(doc); err != nil {
@@ -3130,7 +3177,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	// Un volcado a medias no se carga: fallaría con un error de Firecracker que
 	// no señala a ninguna parte, o peor, arrancaría un invitado corrupto.
-	if err := volcadoValido(dir, mc.FrozenAt); err != nil {
+	if err := volcadoValido(dir, mc.FrozenAt); esquema.EsMasNuevo(err) {
+		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+	} else if err != nil {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}

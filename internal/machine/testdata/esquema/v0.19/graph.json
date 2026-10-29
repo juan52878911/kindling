@@ -1,0 +1,68 @@
+{
+  "id": "0123456789abcdef",
+  "name": "g",
+  "nodes": {
+    "v019-127": {
+      "from": "v019-128",
+      "image": "v019-129",
+      "vcpus": 130,
+      "mem_mib": 131,
+      "egress": "v019-132",
+      "allow_domains": [
+        "v019-133"
+      ],
+      "ports": [
+        134
+      ],
+      "wake": "v019-135",
+      "idle_freeze": 136,
+      "volumes": [
+        {
+          "name": "v019-137",
+          "mount": "v019-138",
+          "read_only": true,
+          "drive_id": "v019-139"
+        }
+      ],
+      "shares": [
+        {
+          "mode": "v019-140",
+          "mount": "v019-141",
+          "upload": "v019-142",
+          "source": "v019-143"
+        }
+      ],
+      "labels": {
+        "v019-144": "v019-145"
+      },
+      "allow_exec": true,
+      "machine_id": "v019-146"
+    }
+  },
+  "edges": [
+    {
+      "from": "v019-148",
+      "to": "v019-149",
+      "kind": "v019-150",
+      "port": 151,
+      "env": "v019-152",
+      "user": "v019-153",
+      "database": "v019-154",
+      "mount": "v019-155",
+      "mode": "v019-156",
+      "health": {
+        "test": [
+          "v019-157"
+        ],
+        "interval_ms": 158,
+        "timeout_seconds": 159,
+        "retries": 160,
+        "start_period_seconds": 161,
+        "start_interval_ms": 162
+      }
+    }
+  ],
+  "generation": 165,
+  "created_at": "2026-10-01T10:46:00Z",
+  "fork_of": "v019-167"
+}

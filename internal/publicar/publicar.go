@@ -38,6 +38,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Maquinas es lo que el publicador necesita del gestor de máquinas.
@@ -87,9 +89,14 @@ type Publicador struct {
 	plazoMarcar, barrido time.Duration
 
 	guardando sync.Mutex
-	mu        sync.Mutex
-	por       map[string]*maquina // id de máquina → sus puertos
-	ctx       context.Context
+	guardados sync.WaitGroup // guardados en segundo plano aún en curso
+	// intocable: publish.json lo dejó un kling más nuevo (versionPublicar):
+	// no se escribe encima, o se perdería lo que este binario no conoce.
+	intocable bool
+
+	mu  sync.Mutex
+	por map[string]*maquina // id de máquina → sus puertos
+	ctx context.Context
 }
 
 type maquina struct {
@@ -269,7 +276,7 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	if len(mq.puertos) > 0 {
 		p.por[mc.ID] = mq
 	}
-	go p.guardar()
+	p.guardarFondo()
 	return pubDe(mq), nil
 }
 
@@ -763,6 +770,19 @@ func (p *Publicador) ocioso(miembros []*api.Machine, pubs map[string]estadoPub, 
 
 // ── persistencia ─────────────────────────────────────────────────────────────
 
+// guardarFondo guarda sin bloquear a quien publica; Esperar aguarda a que
+// acaben los guardados en curso.
+func (p *Publicador) guardarFondo() {
+	p.guardados.Add(1)
+	go func() {
+		defer p.guardados.Done()
+		p.guardar()
+	}()
+}
+
+// Esperar vuelve cuando no queda ningún guardado en segundo plano.
+func (p *Publicador) Esperar() { p.guardados.Wait() }
+
 func (p *Publicador) guardar() {
 	if p.ruta == "" {
 		return
@@ -771,22 +791,42 @@ func (p *Publicador) guardar() {
 	// último en escribir es el último estado.
 	p.guardando.Lock()
 	defer p.guardando.Unlock()
-	b, err := json.MarshalIndent(p.Lista(), "", "  ")
+	if p.intocable {
+		return
+	}
+	b, err := json.MarshalIndent(ficheroPublicar{esquema.Cabecera{Schema: versionPublicar}, p.Lista()}, "", "  ")
 	if err != nil {
 		return
 	}
-	tmp := p.ruta + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(p.ruta), 0o755); err != nil {
 		p.logf("publish: saving %s: %v", p.ruta, err)
 		return
 	}
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		p.logf("publish: saving %s: %v", p.ruta, err)
+	// La copia del formato anterior (publish.json.v0.bak) antes de migrarlo,
+	// y nada encima de uno del futuro.
+	if err := esquema.PrepararEscritura(p.ruta, versionPublicar, versionPublicar); err != nil {
+		if esquema.EsMasNuevo(err) {
+			p.intocable = true
+		}
+		p.logf("publish: not saving %s: %v", p.ruta, err)
 		return
 	}
-	if err := os.Rename(tmp, p.ruta); err != nil {
+	// Durable: un temporal fijo sin fsync podía dejar, tras un corte, un
+	// publish.json vacío o a medias, y al volver "nada publicado".
+	if err := durable.Escribir(p.ruta, append(b, '\n'), 0o600); err != nil {
 		p.logf("publish: saving %s: %v", p.ruta, err)
 	}
+}
+
+// versionPublicar es la versión de publish.json (ver pkg/esquema).
+//
+//	0: un array JSON de api.Publication (v0.20).
+//	1: {"schema": 1, "publications": [...]}.
+const versionPublicar = 1
+
+type ficheroPublicar struct {
+	esquema.Cabecera
+	Publications []api.Publication `json:"publications"`
 }
 
 func (p *Publicador) leer() []api.Publication {
@@ -800,8 +840,25 @@ func (p *Publicador) leer() []api.Publication {
 		}
 		return nil
 	}
+	v, err := esquema.Comprobar(p.ruta, b, versionPublicar)
+	if esquema.EsMasNuevo(err) {
+		p.guardando.Lock()
+		p.intocable = true
+		p.guardando.Unlock()
+		p.logf("publish: %v; nothing is published again and the file is left as it is", err)
+		return nil
+	}
 	var l []api.Publication
-	if err := json.Unmarshal(b, &l); err != nil {
+	if err == nil {
+		if v == 0 {
+			err = json.Unmarshal(b, &l)
+		} else {
+			var f ficheroPublicar
+			err = json.Unmarshal(b, &f)
+			l = f.Publications
+		}
+	}
+	if err != nil {
 		p.logf("publish: %s is not valid (%v); starting with nothing published", p.ruta, err)
 		return nil
 	}

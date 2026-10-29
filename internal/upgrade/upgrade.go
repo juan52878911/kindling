@@ -695,11 +695,14 @@ var reBak = lazyre.New(`\.v[0-9]+\.bak$`)
 func sinBak(p string) string { return reBak.ReplaceAllString(p, "") }
 
 // baks lista las copias de migración que hay en la raíz: las de state.json,
-// los meta.json de los dorados y los almacenes de credenciales.
+// publish.json y fondos.json, los meta.json de los dorados y los almacenes de
+// credenciales.
 func baks(raiz string) []string {
 	var out []string
 	for _, patron := range []string{
 		filepath.Join(raiz, "state.json.v*.bak"),
+		filepath.Join(raiz, "publish.json.v*.bak"),
+		filepath.Join(raiz, "fondos.json.v*.bak"),
 		filepath.Join(raiz, "snapshots", "*", "meta.json.v*.bak"),
 		filepath.Join(raiz, "machines", "*", "credentials.enc.v*.bak"),
 		filepath.Join(raiz, "secrets", "credentials", "*.enc.v*.bak"),

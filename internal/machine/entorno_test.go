@@ -14,6 +14,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // El entorno se valida antes de nada, sin repetir valores en el error, y con
@@ -65,8 +66,11 @@ func TestEntornoEnMMDS(t *testing.T) {
 	if len(put) != 1 || len(patch) != 1 {
 		t.Fatalf("PUT %d, PATCH %d", len(put), len(patch))
 	}
-	var doc map[string]map[string]string
-	if err := json.Unmarshal(put[0].Cuerpo, &doc); err != nil || doc[api.MachineEnvMMDSKey]["PW"] != "s3" || len(doc) != 1 {
+	// El entorno, y la versión del contrato con el agente (kling_mmds).
+	var doc map[string]json.RawMessage
+	var env map[string]string
+	if err := json.Unmarshal(put[0].Cuerpo, &doc); err != nil || len(doc) != 2 || string(doc[guest.MMDSVersionKey]) != "1" ||
+		json.Unmarshal(doc[api.MachineEnvMMDSKey], &env) != nil || env["PW"] != "s3" {
 		t.Fatalf("PUT /mmds: %s", put[0].Cuerpo)
 	}
 	if got := strings.TrimSpace(string(patch[0].Cuerpo)); got != `{"`+api.MachineCmdMMDSKey+`":null,"`+api.MachineEnvMMDSKey+`":null}` {

@@ -139,6 +139,9 @@ func puertoLibre(t *testing.T) int {
 func nuevo(t *testing.T, f *maquinasFalsas) *Publicador {
 	t.Helper()
 	p := New(f, filepath.Join(t.TempDir(), "publish.json"), t.Logf)
+	// Antes de que TempDir borre el directorio: un guardado en curso lo
+	// llenaría mientras se vacía.
+	t.Cleanup(p.Esperar)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	p.Arrancar(ctx, nil)
@@ -241,6 +244,7 @@ func TestPublicarSobreviveAlReinicio(t *testing.T) {
 	}}
 	ruta := filepath.Join(t.TempDir(), "publish.json")
 	p1 := New(f, ruta, t.Logf)
+	t.Cleanup(p1.Esperar)
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	p1.Arrancar(ctx1, nil)
 	ma, _ := f.Get("a")
@@ -269,6 +273,7 @@ func TestPublicarSobreviveAlReinicio(t *testing.T) {
 	delete(f.ms, "b")
 	f.mu.Unlock()
 	p2 := New(f, ruta, t.Logf)
+	t.Cleanup(p2.Esperar)
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	p2.Arrancar(ctx2, nil)

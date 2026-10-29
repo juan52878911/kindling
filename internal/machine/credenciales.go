@@ -148,6 +148,18 @@ func (m *Manager) credSnapPath(name string) string {
 //
 //	v0 (hasta v0.17): nonce(12) | AES-GCM(json)             aad = dueño
 //	v1:               "KLCS" 0x01 | nonce(12) | AES-GCM(json) aad = cabecera + dueño
+//	v2:               "KLCS" 0x02, igual que la v1, y el almacén lleva alguna
+//	                  credencial sigv4 (v0.19, con AccessKeyID, Region y Service).
+//
+// Por qué la v2 (y no "ignorable"): un kling ≤ v0.18 no conoce el tipo sigv4
+// y no valida al descifrar, así que la usaría como una credencial HTTP —
+// cambiando el marcador, que en sigv4 es el access key id que va en la
+// cabecera Authorization, por la clave secreta— y al volver a sellar el
+// almacén perdería AccessKeyID, Region y Service. Con la v2 se niega a abrirlo
+// diciendo que es de un kling más nuevo. Solo se escribe si hace falta: un
+// almacén sin sigv4 sigue en la v1, que leen v0.18-v0.20 (y vuelve a ella si
+// la sigv4 se quita). El coste: v0.19 y v0.20, que sí la entienden, tampoco
+// abren uno v2; volver a ellas es `kling upgrade -rollback` (.v1.bak).
 //
 // La magia es de cuatro bytes y no uno solo porque el v0 empieza por un nonce
 // aleatorio: con un byte, uno de cada 256 almacenes viejos parecería llevar
@@ -155,11 +167,32 @@ func (m *Manager) credSnapPath(name string) string {
 // cabecera v1 que no descifra se prueba como v0 antes de dar el error.
 var magiaAlmacen = []byte("KLCS")
 
-// versionAlmacen es la versión que escribe sellar.
-const versionAlmacen = 1
+// versionAlmacen es la versión que escribe sellar si nada pide más;
+// versionAlmacenSigV4, la de un almacén con alguna credencial sigv4, y
+// versionAlmacenMax la más nueva que este binario sabe abrir.
+const (
+	versionAlmacen      = 1
+	versionAlmacenSigV4 = 2
+	versionAlmacenMax   = versionAlmacenSigV4
+)
 
-// cabeceraAlmacen es lo que va delante del nonce en la versión actual.
-func cabeceraAlmacen() []byte { return append(append([]byte(nil), magiaAlmacen...), versionAlmacen) }
+// cabeceraAlmacen es lo que va delante del nonce en la versión ver.
+func cabeceraAlmacen(ver int) []byte {
+	return append(append([]byte(nil), magiaAlmacen...), byte(ver))
+}
+
+// versionParaSellar es la versión más baja que describe v: la de sigv4 si
+// es un juego de credenciales de máquina con alguna, versionAlmacen si no.
+func versionParaSellar(v any) int {
+	if creds, ok := v.([]credproxy.Credential); ok {
+		for _, c := range creds {
+			if c.Kind == credproxy.KindSigV4 {
+				return versionAlmacenSigV4
+			}
+		}
+	}
+	return versionAlmacen
+}
 
 // versionSellada dice qué versión declara un almacén: la de su cabecera, o 0
 // si no la tiene (v0).
@@ -171,7 +204,7 @@ func versionSellada(b []byte) int {
 }
 
 // sellar cifra v con la clave del almacén; aad ata el resultado a su dueño.
-// Escribe siempre la versión actual (versionAlmacen).
+// Escribe la versión más baja que describe v (versionParaSellar).
 func (m *Manager) sellar(v any, aad string) ([]byte, error) {
 	key, err := m.claveCredenciales()
 	if err != nil {
@@ -185,7 +218,7 @@ func (m *Manager) sellar(v any, aad string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cab := cabeceraAlmacen()
+	cab := cabeceraAlmacen(versionParaSellar(v))
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
@@ -219,9 +252,9 @@ func (m *Manager) abrir(ruta string, sellado []byte, aad string, v any) error {
 	var plain []byte
 	ok := false
 	switch ver := versionSellada(sellado); {
-	case ver > versionAlmacen:
-		return &esquema.ErrMasNuevo{Ruta: ruta, Leida: ver, Soportada: versionAlmacen}
-	case ver == versionAlmacen:
+	case ver > versionAlmacenMax:
+		return &esquema.ErrMasNuevo{Ruta: ruta, Leida: ver, Soportada: versionAlmacenMax}
+	case ver >= versionAlmacen:
 		cab := sellado[:len(magiaAlmacen)+1]
 		plain, ok = abrirCon(sellado[len(cab):], append(append([]byte(nil), cab...), aad...))
 		if !ok {
@@ -251,9 +284,9 @@ func (m *Manager) abrir(ruta string, sellado []byte, aad string, v any) error {
 func escribirSellado(ruta string, sellado []byte) error {
 	if previo, err := os.ReadFile(ruta); err == nil {
 		switch v := versionSellada(previo); {
-		case v > versionAlmacen:
-			return &esquema.ErrMasNuevo{Ruta: ruta, Leida: v, Soportada: versionAlmacen}
-		case v < versionAlmacen && sellado != nil:
+		case v > versionAlmacenMax:
+			return &esquema.ErrMasNuevo{Ruta: ruta, Leida: v, Soportada: versionAlmacenMax}
+		case sellado != nil && v < versionSellada(sellado):
 			if err := esquema.Respaldar(ruta, v); err != nil {
 				return fmt.Errorf("backing up the credential store before migrating it: %w", err)
 			}
@@ -263,10 +296,13 @@ func escribirSellado(ruta string, sellado []byte) error {
 		if err := os.Remove(ruta); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		if err := os.Remove(esquema.RutaRespaldo(ruta, 0)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+		for v := 0; v < versionAlmacenMax; v++ {
+			if err := os.Remove(esquema.RutaRespaldo(ruta, v)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
 		}
 		return nil
+
 	}
 	if err := os.MkdirAll(filepath.Dir(ruta), 0o700); err != nil {
 		return err

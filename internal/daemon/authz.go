@@ -782,7 +782,13 @@ func revisarSandbox(s *Server, t string, b []byte) ([]byte, int, error) {
 }
 
 func revisarGrafo(s *Server, t string, b []byte) ([]byte, int, error) {
+	// Estricto como el handler (decodeJSONEstricto): recodificar quitaría el
+	// campo desconocido antes de que el handler pudiera rechazarlo.
+	if err := decodificarEstricto(bytes.NewReader(b), new(api.GraphRequest)); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
 	return recodificar(b, func(req *api.GraphRequest) error {
+
 		for nombre, n := range req.Graph.Nodes {
 			if err := s.revisarNacimiento(t, &n.Labels, n.From, len(n.Volumes) > 0, len(n.Shares) > 0); err != nil {
 				return errAuthz(statusDe(err), "node %s: %v", nombre, err)

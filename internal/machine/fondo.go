@@ -14,6 +14,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // FONDO DE COPIAS PRECALENTADAS DE UNA PLANTILLA.
@@ -72,6 +73,35 @@ func (m *Manager) fondoDe(name string) *fondoPlantilla {
 	return f
 }
 
+// versionFondos es la versión de fondos.json (ver pkg/esquema).
+//
+//	0: {"plantilla": tamaño, ...} sin versión (v0.19, v0.20).
+//	1: {"schema": 1, "pools": {"plantilla": tamaño, ...}}. Un kling anterior
+//	   no lo entiende y arranca sin fondos (no rompe nada: los rehace quien
+//	   vuelva a pedir `kling template pool`); -rollback devuelve el .v0.bak.
+const versionFondos = 1
+
+type ficheroFondos struct {
+	esquema.Cabecera
+	Pools map[string]int `json:"pools"`
+}
+
+// leerFondos lee fondos.json en cualquier versión conocida.
+func leerFondos(ruta string, b []byte) (map[string]int, error) {
+	v, err := esquema.Comprobar(ruta, b, versionFondos)
+	if err != nil {
+		return nil, err
+	}
+	if v == 0 {
+		var tam map[string]int
+		err := json.Unmarshal(b, &tam)
+		return tam, err
+	}
+	var f ficheroFondos
+	err = json.Unmarshal(b, &f)
+	return f.Pools, err
+}
+
 // guardarFondos escribe los tamaños pedidos. Con fondoMu.
 func (m *Manager) guardarFondos() error {
 	tam := map[string]int{}
@@ -80,8 +110,13 @@ func (m *Manager) guardarFondos() error {
 			tam[n] = f.size
 		}
 	}
-	b, err := json.MarshalIndent(tam, "", "  ")
+	b, err := json.MarshalIndent(ficheroFondos{esquema.Cabecera{Schema: versionFondos}, tam}, "", "  ")
 	if err != nil {
+		return err
+	}
+	// La copia del formato anterior antes de migrarlo, y nada encima de uno
+	// de un kling más nuevo (perdería lo que este no conoce).
+	if err := esquema.PrepararEscritura(m.fondosPath(), versionFondos, versionFondos); err != nil {
 		return err
 	}
 	return durable.Escribir(m.fondosPath(), b, 0o644)
@@ -431,11 +466,12 @@ func (m *Manager) reanudarFondos() {
 	if err != nil {
 		return
 	}
-	var tam map[string]int
-	if err := json.Unmarshal(b, &tam); err != nil {
+	tam, err := leerFondos(m.fondosPath(), b)
+	if err != nil {
 		log.Printf("pool: %s unreadable, ignoring it: %v", m.fondosPath(), err)
 		return
 	}
+
 	m.mu.RLock()
 	vivas := map[string][]string{}
 	var muertas []string

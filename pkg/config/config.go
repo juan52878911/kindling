@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -19,7 +20,19 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
+
+// Version es la versión del formato de config.json (ver pkg/esquema).
+//
+//	0: sin campo (hasta v0.20).
+//	1: con "schema": 1. Solo añade el campo: un kling anterior lo lee igual.
+//
+// A diferencia de state.json, una config de un kling más nuevo SÍ se lee (lo
+// que este binario conoce): sin ella el CLI no sabría a qué daemon hablar, ni
+// podría hacer el `kling upgrade` que lo arregla. Lo que no hace es
+// escribirla (Save devuelve el error): perdería lo que no conoce.
+const Version = 1
 
 // Config es el contenido del fichero.
 type Config struct {
@@ -50,6 +63,10 @@ type Config struct {
 	Plugins Plugins `json:"plugins,omitempty"`
 
 	path string
+	// desconocidas son las claves del fichero que este binario no conoce
+	// (las de un kling más nuevo, o puestas a mano): Save las vuelve a
+	// escribir tal cual. Antes se perdían en el primer `kling config set`.
+	desconocidas map[string]json.RawMessage
 }
 
 // Plugins es la sección plugins.* de la configuración.
@@ -270,7 +287,8 @@ func ValidateVMM(name, goos, goarch string) error {
 			return fmt.Errorf("vmm %q needs macOS on Apple Silicon (darwin/arm64), and this is %s/%s", name, goos, goarch)
 		}
 	default:
-		return fmt.Errorf("unknown vmm %q: use %q, %q, %q or %q", name, VMMFirecracker, VMMVZ, VMMHV, VMMAuto)
+		return fmt.Errorf("unknown vmm %q: use %q, %q, %q or %q (if a newer kling wrote it, update kling)", name, VMMFirecracker, VMMVZ, VMMHV, VMMAuto)
+
 	}
 	return nil
 }
@@ -366,6 +384,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
 	c.path = p
+	c.desconocidas = clavesDesconocidas(b, reflect.TypeOf(Config{}))
 	if c.Contexts == nil {
 		c.Contexts = map[string]*Context{}
 	}
@@ -400,16 +419,30 @@ func liftLegacyMemory(c *Config, raw []byte) {
 	}
 }
 
-// Save escribe la configuración de forma atómica.
+// Save escribe la configuración de forma atómica, con su versión y con las
+// claves que este binario no conoce tal como estaban.
 func (c *Config) Save() error {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(c, "", "  ")
+	b, err := json.MarshalIndent(struct {
+		Schema int `json:"schema"`
+		*Config
+	}{Version, c}, "", "  ")
 	if err != nil {
 		return err
 	}
+	if len(c.desconocidas) > 0 {
+		if b, err = mezclarDesconocidas(b, c.desconocidas); err != nil {
+			return err
+		}
+	}
 	b = append(b, '\n')
+	// La copia de la versión anterior (config.json.v0.bak) antes de migrarla,
+	// y nada encima de una de un kling más nuevo.
+	if err := esquema.PrepararEscritura(c.path, Version, Version); err != nil {
+		return err
+	}
 	// Durable: aqui vive el endpoint del daemon y el token del gateway, que los
 	// pone una persona. Perderlos en un corte no se arregla solo — hay que
 	// volver a configurarlos a mano, y el sintoma es un 401 sin explicacion.
@@ -417,6 +450,96 @@ func (c *Config) Save() error {
 		return err
 	}
 	return nil
+}
+
+// clavesDesconocidas devuelve las claves de raw (un objeto JSON) que t (un
+// struct) no tiene, y dentro de cada sección que sea a su vez un struct, las
+// suyas (como objeto, con la misma forma). "schema" y la "memory" de v0.5 no
+// cuentan.
+// Las secciones que son mapas (contexts, extensions) no se miran: todas sus
+// claves son de este binario, y conservar una borrada la resucitaría.
+func clavesDesconocidas(raw []byte, t reflect.Type) map[string]json.RawMessage {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	conocidas := camposJSON(t)
+	var out map[string]json.RawMessage
+	for k, v := range obj {
+		if (k == "schema" || k == "memory") && t == reflect.TypeOf(Config{}) {
+			continue // la escribe Save; la de v0.5 la eleva liftLegacyMemory
+		}
+		ft, ok := conocidas[k]
+		if !ok {
+			if out == nil {
+				out = map[string]json.RawMessage{}
+			}
+			out[k] = v
+			continue
+		}
+		if ft.Kind() != reflect.Struct {
+			continue
+		}
+		if sub := clavesDesconocidas(v, ft); len(sub) > 0 {
+			b, err := json.Marshal(sub)
+			if err != nil {
+				continue
+			}
+			if out == nil {
+				out = map[string]json.RawMessage{}
+			}
+			out[k] = b
+		}
+	}
+	return out
+}
+
+// camposJSON son los nombres JSON de los campos exportados de t, con su tipo.
+func camposJSON(t reflect.Type) map[string]reflect.Type {
+	out := map[string]reflect.Type{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		nombre, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if nombre == "-" {
+			continue
+		}
+		if nombre == "" {
+			nombre = f.Name
+		}
+		out[nombre] = f.Type
+	}
+	return out
+}
+
+// mezclarDesconocidas añade a b (el JSON de Save) las claves desconocidas, sin
+// pisar ninguna conocida. Las secciones se mezclan clave a clave.
+func mezclarDesconocidas(b []byte, desc map[string]json.RawMessage) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return nil, err
+	}
+	for k, v := range desc {
+		actual, ok := obj[k]
+		if !ok {
+			obj[k] = v
+			continue
+		}
+		// Una sección conocida con claves desconocidas dentro: las suyas
+		// mandan; las desconocidas se añaden (recursivo, por si anidan).
+		var a, d map[string]json.RawMessage
+		if json.Unmarshal(actual, &a) != nil || json.Unmarshal(v, &d) != nil {
+			continue
+		}
+		m, err := mezclarDesconocidas(actual, d)
+		if err != nil {
+			return nil, err
+		}
+		obj[k] = m
+	}
+	return json.MarshalIndent(obj, "", "  ")
 }
 
 // Host resuelve a qué daemon hablar, por orden de precedencia:
