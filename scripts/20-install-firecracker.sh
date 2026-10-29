@@ -37,7 +37,8 @@ command -v curl >/dev/null || { echo "falta curl" >&2; exit 1; }
 
 # Sin el agente, el hipervisor cuenta la caché de disco del invitado como memoria
 # usada. Con snapshots de cientos de MB eso llena el panel de falsos positivos.
-if [ -d /sys/class/dmi ] && ! systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then
+# En CI (CI=true, un runner de usar y tirar) no hay panel que engañar.
+if [ -z "${CI:-}" ] && [ -d /sys/class/dmi ] && ! systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then
   echo "instalando qemu-guest-agent (para que el hipervisor reporte memoria real)"
   apt-get install -y -qq qemu-guest-agent >/dev/null 2>&1 && \
     systemctl enable --now qemu-guest-agent >/dev/null 2>&1 || \
