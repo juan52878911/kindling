@@ -152,7 +152,7 @@ func run() int {
 	fs := flag.NewFlagSet("kling-hv", flag.ContinueOnError)
 	sock := fs.String("api-sock", "", "unix socket for the Firecracker-compatible API")
 	showVersion := fs.Bool("version", false, "print the version and exit")
-	formats := fs.Bool("snapshot-formats", false, "print the oldest and newest snapshot formats (kling_vz) this build reads, and exit")
+	formats := fs.Bool("snapshot-formats", false, "print the oldest and newest snapshot formats (kling_vz) this build reads and its memory-file state version (KLNGHV), and exit")
 	probe := fs.Bool("probe", false, "create and destroy an empty VM with its GIC to check Hypervisor.framework works here, and exit (0 = ok)")
 	_ = fs.String("id", "", "instance id (ignored)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -163,8 +163,11 @@ func run() int {
 		return 0
 	}
 	if *formats {
+		// Tercer número: la versión del pie de mem.file (KLNGHV), que es
+		// solo de kling-hv; quien lee dos números (kling upgrade anterior)
+		// lo ignora.
 		min, max := spec.Formatos()
-		fmt.Println(min, max)
+		fmt.Println(min, max, hvvm.VersionVolcado)
 		return 0
 	}
 	if *probe {

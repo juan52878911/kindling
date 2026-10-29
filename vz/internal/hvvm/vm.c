@@ -144,7 +144,7 @@ struct cpu_state {
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
 // 2 añade vsock al final de la cabecera; una de la versión 1 (sin él) se lee
 // como un prefijo.
-#define SNAP_VERSION 2
+#define SNAP_VERSION KHV_SNAP_VERSION
 struct snap_hdr {
   uint64_t magic;
   uint32_t version, ncpus, ndisks;

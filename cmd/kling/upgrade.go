@@ -95,6 +95,10 @@ func cmdUpgrade(args []string) error {
 		Plazo:    *timeout,
 		Out:      os.Stdout,
 	}
+	// KLING_UPGRADE_REPO cambia de dónde salen las releases (un fork, o el
+	// servidor https local de scripts/94-e2e-upgrade.sh); siempre por https y
+	// con el SHA256SUMS de la release, como desde GitHub.
+	o.Fuente.Repo = os.Getenv("KLING_UPGRADE_REPO")
 	endpoint := loadConfig().Host(*host)
 	remoto := strings.HasPrefix(endpoint, "ssh://")
 	if remoto {
@@ -486,18 +490,30 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 			// kling-vz y kling-hv escriben el mismo snap.file (kling_vz): lo
 			// que congeló el daemon nuevo lo tiene que leer el VMM viejo que
 			// lo vaya a despertar, sea cual sea el que elija daemon.vmm.
-			max := 0
+			// kling-hv además deja en el pie de mem.file su propia versión
+			// (KLNGHV), que solo lee un kling-hv que la conozca.
+			max, maxHV := 0, 0
 			for _, d := range destinos {
-				if viejo, ok := viejos[d]; ok {
-					if m := formatoMaxVZ(viejo); max == 0 || m < max {
-						max = m
-					}
+				viejo, ok := viejos[d]
+				if !ok {
+					continue
+				}
+				vz, hv := formatosVMM(viejo, filepath.Base(d) == machine.NombreVMM(machine.BackendHV))
+				if max == 0 || vz < max {
+					max = vz
+				}
+				if hv > 0 && (maxHV == 0 || hv < maxHV) {
+					maxHV = hv
 				}
 			}
 			if max == 0 {
 				return nil // ningún VMM viejo que lo despierte cambió
 			}
-			return volcadoLegible(filepath.Join(raiz, "machines", id, "snap.file"), max)
+			dir := filepath.Join(raiz, "machines", id)
+			if err := volcadoLegible(filepath.Join(dir, "snap.file"), max); err != nil || maxHV == 0 {
+				return err
+			}
+			return volcadoHVLegible(filepath.Join(dir, "mem.file"), maxHV)
 		}
 	}
 	return nil
@@ -531,17 +547,56 @@ func piezasVMMMac(dir, arch string) []upgrade.Pieza {
 // kling-vz bin: lo dice con -snapshot-formats; uno anterior a ese flag
 // (v0.17 y antes) lee solo el 1.
 func formatoMaxVZ(bin string) int {
+	max, _ := formatosVMM(bin, false)
+	return max
+}
+
+// hvSinVersion es la versión KLNGHV que lee un kling-hv que no la dice en
+// -snapshot-formats: la de todos los publicados antes de que la dijeran
+// (v0.19 y v0.20).
+const hvSinVersion = 2
+
+// formatosVMM pregunta a un VMM de macOS (-snapshot-formats: "min max" y, en
+// kling-hv, un tercer número con la versión KLNGHV) qué es lo más nuevo que
+// lee: el kling_vz del snap.file y, si esHV, la versión del pie de mem.file
+// (0 si no es kling-hv).
+func formatosVMM(bin string, esHV bool) (vz, hv int) {
+	vz = 1
+	if esHV {
+		hv = hvSinVersion
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "-snapshot-formats").Output()
 	if err != nil {
-		return 1
+		return vz, hv
 	}
-	var min, max int
-	if n, _ := fmt.Sscanf(string(out), "%d %d", &min, &max); n != 2 || max < 1 {
-		return 1
+	f := strings.Fields(string(out))
+	if len(f) >= 2 {
+		if m, err := strconv.Atoi(f[1]); err == nil && m >= 1 {
+			vz = m
+		}
 	}
-	return max
+	if esHV && len(f) >= 3 {
+		if m, err := strconv.Atoi(f[2]); err == nil && m >= 1 {
+			hv = m
+		}
+	}
+	return vz, hv
+}
+
+// volcadoHVLegible dice si el mem.file de kling-hv en p lo lee un kling-hv
+// que lee hasta la versión max. Uno que no es de kling-hv (lo congeló
+// kling-vz) pasa: ahí basta con el snap.file.
+func volcadoHVLegible(p string, max int) error {
+	v, ok, err := upgrade.VersionVolcadoHV(p)
+	if err != nil {
+		return err
+	}
+	if ok && v > max {
+		return fmt.Errorf("its kling-hv memory file has state version %d and the previous kling-hv reads up to %d", v, max)
+	}
+	return nil
 }
 
 // volcadoLegible dice si el snapshot de kling-vz en p (su snap.file) es de un
