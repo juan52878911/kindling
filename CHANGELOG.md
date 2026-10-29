@@ -12,7 +12,7 @@ The v0.20.0 tag never became a release: the new job that builds the guest kernel
 
 ### Fixed
 
-- Release: `scripts/70-build-minimal-image.sh` (and three other scripts) were stored without the executable bit, so the release could not build the `min` image; CI now fails on any script under `scripts/` that the release or the e2e run directly and is not executable.
+- Release: `scripts/70-build-minimal-image.sh` and `packaging/homebrew/formula.sh` (and a few other scripts) were stored without the executable bit, so the release could not build the `min` image nor the Homebrew formula; CI now fails on any tracked `.sh` that is not executable (except sourced libraries).
 
 ## [0.20.0] - 2026-10-28
 
