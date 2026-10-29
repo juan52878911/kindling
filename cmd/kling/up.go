@@ -34,6 +34,7 @@ import (
 
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -248,6 +249,9 @@ type probe struct {
 	// pageSize es la página del host en bytes; 0 si no se supo (un host
 	// remoto sin getconf).
 	pageSize int
+	// filtro es `iptables -S` del host, para ver la política del FORWARD;
+	// vacío si no se pudo leer (hace falta root).
+	filtro string
 }
 
 // check es una comprobación con su porqué y su remedio.
@@ -298,6 +302,9 @@ func localProbe(root string) probe {
 	}
 	p.kernel = fileExists(filepath.Join(root, "images", "vmlinux"))
 	p.baseImage = fileExists(filepath.Join(root, "images", "min.ext4"))
+	if p.iptables {
+		p.filtro, _ = knet.LeerFiltro()
+	}
 	return p
 }
 
@@ -326,6 +333,8 @@ echo "active=$(systemctl is-active kling 2>/dev/null || true)"
 echo "kernel=$(si "$([ -f "$ROOT/images/vmlinux" ] && echo 1)")"
 echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
 echo "pagesize=$(getconf PAGESIZE 2>/dev/null || true)"
+# Las reglas en una línea (| separa): leerlas pide root, y sin él va vacío.
+echo "filter=$({ iptables -S 2>/dev/null || sudo -n iptables -S 2>/dev/null; } | tr '\n' '|')"
 `
 
 // remoteProbeScript es remoteScript con sus variables delante, entrecomilladas
@@ -373,6 +382,7 @@ func remoteProbe(target, root string) (probe, error) {
 	p.active = vals["active"]
 	p.kernel, p.baseImage = yes("kernel"), yes("image")
 	p.pageSize, _ = strconv.Atoi(vals["pagesize"])
+	p.filtro = strings.ReplaceAll(vals["filter"], "|", "\n")
 	return p, nil
 }
 
@@ -534,7 +544,33 @@ func checksOf(p probe) []check {
 	if c, ok := pageCheck(p); ok {
 		cs = slices.Insert(cs, 1, c)
 	}
+	// La política del FORWARD, detrás de nft: también es de la red del host.
+	if i := slices.IndexFunc(cs, func(c check) bool { return c.label == "nft (nftables)" }); i >= 0 {
+		cs = slices.Insert(cs, i+1, forwardCheck(p))
+	}
 	return cs
+}
+
+// forwardCheck es la política del FORWARD del host: en DROP (la pone Docker)
+// y sin una regla que acepte el tráfico de los veth, las máquinas con egress
+// internet o allowlist arrancan sin salida y nada lo dice (internal/net/forward.go).
+// Es aviso, no fatal: none sigue funcionando. Sin root no se pueden leer las
+// reglas, y se dice en vez de dar un ✓ que no se ha mirado.
+func forwardCheck(p probe) check {
+	c := check{label: "FORWARD policy", ok: true, why: knet.PorQueForward, fix: knet.ArregloForward()}
+	switch {
+	case !p.iptables:
+		c.found = "not checked: no iptables"
+	case !strings.Contains(p.filtro, "-P FORWARD"):
+		c.found = "not checked: reading the rules needs root (sudo kling up -check)"
+	case knet.ForwardSinSalida(p.filtro):
+		c.ok = false
+		c.found = "DROP, and no rule accepts the traffic of kindling's veths (vh-+)"
+	default:
+		c.found = "lets kindling's machines out"
+	}
+	c.why = strings.ReplaceAll(c.why, "\n", "\n      ")
+	return c
 }
 
 // printChecks imprime el informe y devuelve cuántos fallos son fatales y

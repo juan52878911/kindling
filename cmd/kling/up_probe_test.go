@@ -164,3 +164,35 @@ func TestChecksOfArm64(t *testing.T) {
 		}
 	}
 }
+
+// Un host con Docker deja la política del FORWARD en DROP: -check lo dice (y
+// cómo arreglarlo) como aviso, no como fallo fatal. Sin root no se leen las
+// reglas, y entonces no se da por bueno en silencio.
+func TestChecksOfForwardDrop(t *testing.T) {
+	p := probe{kvm: true, firecracker: "/usr/local/bin/firecracker", ip: true, iptables: true, nft: true,
+		runAs: "kindling", runAsExists: true, buildAs: "kindling-build", buildAsExists: true,
+		root: "/var/lib/kindling", remote: true, kernel: true, baseImage: true,
+		filtro: "-P INPUT ACCEPT\n-P FORWARD DROP\n-A FORWARD -j DOCKER-USER\n-A FORWARD -i vh-+ -o vh-+ -j DROP\n"}
+	fallan := onlyFailed(checksOf(p))
+	if len(fallan) != 1 || fallan[0].label != "FORWARD policy" || fallan[0].fatal {
+		t.Fatalf("failed checks = %+v, want only a non-fatal FORWARD policy", fallan)
+	}
+	fix := strings.Join(fallan[0].fix, "\n")
+	if !strings.Contains(fix, "iptables -A FORWARD -i vh-+ -s 172.30.0.0/16 -j ACCEPT") ||
+		!strings.Contains(fix, "-o vh-+ -d 172.30.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT") {
+		t.Errorf("fix does not say what to run:\n%s", fix)
+	}
+	if checkResult(len(fallan)) == nil {
+		t.Error("-check with the FORWARD policy at DROP returned no error")
+	}
+
+	p.filtro += "-A FORWARD -s 172.30.0.0/16 -i vh-+ -j ACCEPT\n-A FORWARD -d 172.30.0.0/16 -o vh-+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n"
+	if f := onlyFailed(checksOf(p)); len(f) != 0 {
+		t.Errorf("with the fix applied: %+v", f)
+	}
+	p.filtro = ""
+	c := forwardCheck(p)
+	if !c.ok || !strings.Contains(c.found, "needs root") {
+		t.Errorf("unreadable rules: %+v", c)
+	}
+}

@@ -1319,6 +1319,25 @@ sigue bloqueado. Un valor de egress desconocido es un **error**, no una caída a
 permisivo. La política viaja con el snapshot del servicio, así que un servicio curado o
 reimportado la conserva.
 
+### Linux con Docker: la política del FORWARD
+
+kindling solo **añade** reglas `DROP` al `FORWARD` del host (las barreras de las redes
+privadas); lo demás que sale de las máquinas cae en la política de esa cadena. Docker la
+pone en `DROP` al arrancar, y entonces las máquinas con `-egress internet` o `allowlist`
+arrancan, contestan a `exec` (eso va por `INPUT`) y no salen a ningún sitio, sin error.
+`kling doctor` y `kling up -check` lo detectan (línea `FORWARD policy`; leer las reglas
+pide root) y el daemon lo deja en el log una vez al arrancar. El arreglo, con el daemon ya
+arrancado para que quede **detrás** de sus barreras:
+
+```sh
+sudo iptables -A FORWARD -i vh-+ -s 172.30.0.0/16 -j ACCEPT
+sudo iptables -A FORWARD -o vh-+ -d 172.30.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+```
+
+Para que sobrevivan a un reinicio, guárdalas con la herramienta de la distro
+(`iptables-persistent`, firewalld…). No pongas la política en `ACCEPT`: abriría también el
+reenvío de las redes de Docker.
+
 ## Secretos que nunca tocan un snapshot: MMDS
 
 Un snapshot congelado es un fichero en disco que sobrevive a la máquina — el sitio

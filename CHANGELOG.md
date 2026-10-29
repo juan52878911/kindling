@@ -9,6 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - `docs/compatibilidad.md`: what 1.x promises, the compatibility matrix and what is left before 1.0; status codes per route and the stable `code` of each in `docs/api.md`, checked against the contract goldens by a test.
+- Linux: `kling doctor` and `kling up -check` warn when the host's FORWARD policy is DROP (Docker sets it) with no rule accepting kindling's traffic, which leaves `-egress internet`/`allowlist` machines silently without network, and print the two `iptables -A` rules that fix it; the daemon logs the same once at startup. The firewall rules kindling installs are unchanged.
 - Signed releases: `SHA256SUMS.minisig` (ed25519, minisign format) and SLSA build provenance for every asset; `kling upgrade`, `kling up` image downloads and `install.sh` (with `minisign`) check the signature. Unsigned releases are accepted with a warning until v1.0.0 and refused from then on (`docs/firmas.md`).
 - Error bodies carry a stable `code` next to `message` (`not_found`, `name_taken`, `machine_limit`, `tenant_quota`, `stale_golden`, `disk_full`, `insufficient_memory`…; capability `error-codes`); `api.IsMachineLimit`, `IsTenantQuota` and friends read it and fall back to the text with older daemons. New `api.IsNameTaken`, `IsStaleGolden`, `CodeOf`.
 - Capabilities `pool` (`GET/PUT /snapshots/{name}/pool`) and `egress-blocked` (`GET /machines/{ref}/egress`) for the two v0.19 routes that had none.

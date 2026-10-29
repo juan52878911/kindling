@@ -1309,6 +1309,24 @@ blocked. An unknown egress value is an **error**, not a fall-through to the most
 permissive mode. The policy travels with the service's snapshot, so a healed or
 re-imported service keeps it.
 
+### Linux with Docker: the FORWARD policy
+
+kindling only **adds** `DROP` rules to the host's `FORWARD` chain (the private-range
+barriers); everything else the machines send falls through to that chain's policy. Docker
+sets it to `DROP` when it starts, and then machines with `-egress internet` or `allowlist`
+boot, answer `exec` (that goes through `INPUT`) and reach nothing, with no error. `kling
+doctor` and `kling up -check` detect it (the `FORWARD policy` line; reading the rules
+needs root) and the daemon logs it once at startup. The fix, with the daemon already
+running so it lands **after** its barriers:
+
+```sh
+sudo iptables -A FORWARD -i vh-+ -s 172.30.0.0/16 -j ACCEPT
+sudo iptables -A FORWARD -o vh-+ -d 172.30.0.0/16 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+```
+
+Persist them with your distro's tool (`iptables-persistent`, firewalld…). Don't set the
+policy to `ACCEPT`: that also opens forwarding for Docker's networks.
+
 ## Secrets that never touch a snapshot: MMDS
 
 A frozen snapshot is a file on disk that outlives the machine — the wrong place for an
