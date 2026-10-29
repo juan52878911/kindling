@@ -117,11 +117,11 @@ if [ "$DRY_RUN" = "0" ]; then
     fi
 fi
 
-# ext/*/go.mod citan en su require la etiqueta que se va a publicar. Con el
+# ext/*/go.mod y vz/go.mod citan en su require la etiqueta que se va a publicar. Con el
 # replace ../.. nunca se descarga, pero quien use una extensión como módulo sin
 # el replace (go get .../ext/mcp@vX) tiraría de ese require: si se queda en la
 # versión anterior, la extensión de vX compilaría contra el núcleo de vX-1.
-for m in ext/*/go.mod; do
+for m in ext/*/go.mod vz/go.mod; do
     [ -f "$m" ] || continue
     REQ=$(awk '$1=="require" && $2=="github.com/juan52878911/kindling" {print $3}' "$m")
     if [ "$REQ" != "$VERSION" ]; then
