@@ -7,9 +7,10 @@ acceso remoto es SSH (`kling dial-stdio` al otro lado). El cliente Go es
 `pkg/api.Client`; todo `kling` —y cualquier extensión— habla con el daemon por
 aquí.
 
-Los errores vuelven como `{"message": "..."}` con el código HTTP; el cliente los
-convierte en `*api.StatusError`. `507` significa "no cabe en memoria" y es lo que
-el planificador usa para desalojar y reintentar. Lo que contesta cada ruta está en
+Los errores vuelven como `{"message": "...", "code": "..."}` con el código HTTP;
+el cliente los convierte en `*api.StatusError`. `code` es estable y `message` no.
+`507` significa "no cabe en memoria" y es lo que el planificador usa para
+desalojar y reintentar. Lo que contesta cada ruta, y qué `code` lleva, está en
 [Códigos de estado por ruta](#códigos-de-estado-por-ruta).
 
 ## Capacidades
@@ -874,18 +875,23 @@ mitad a ciegas: un Android de 1 GiB se quedaba con 4 MiB disponibles).
 
 ## Códigos de estado por ruta
 
-Lo que contesta cada ruta **hoy** (v0.20), sacado de `internal/daemon`. Es una
-foto, no todavía la promesa: hay incoherencias que se arreglan antes de 1.0
-(ver [compatibilidad.md](compatibilidad.md#antes-de-10)), y al fijarlas esta
-tabla pasa a ser contrato con su test.
+Lo que contesta cada ruta, sacado de `internal/daemon`. El golden
+[`internal/daemon/testdata/contrato/codigos.txt`](../internal/daemon/testdata/contrato/codigos.txt)
+fija una petición por caso (sin VMM: los errores de petición, de estado y de
+"no existe"); `TestCodigosMatchAPIDoc` comprueba que esta tabla nombra cada
+ruta de `rutas.txt` y cada código de ese golden, así que cambiar un código
+exige tocar las dos cosas. Cambiar uno de 1.0 en adelante exige subir
+`api.APIVersion` (ver [compatibilidad.md](compatibilidad.md)).
 
 **Capas comunes**, por orden:
 
 - `sinBarrasEscapadas` (`server.go`): `400` si la ruta lleva `%2F`, `%5C` o
   `\`, exista o no.
-- El mux de Go: `404` a una ruta desconocida y `405` (con `Allow`) a un método
-  que no casa, **en texto plano**, no como `{"message"}`. Los `GET` aceptan
-  `HEAD`. `net/http` da `431` con cabeceras de más de 64 KiB.
+- El mux de Go, envuelto en `sinRutaEnJSON`: `404` a una ruta desconocida
+  (`code` `not_found`) y `405` (con `Allow`) a un método que no casa, los dos
+  en JSON como cualquier error. El `405` lleva `message` pero no `code`: no hay
+  uno propio. Los `GET` aceptan `HEAD`. `net/http` da `431` con cabeceras de
+  más de 64 KiB.
 - `autorizar` (`authz.go`), solo con política: `401` token mal formado o
   inválido; `403` sin rol, o un inquilino en una ruta de admin o escribiendo
   una plantilla compartida; `404` sobre lo ajeno. Las rutas con revisión del
@@ -894,27 +900,62 @@ tabla pasa a ser contrato con su test.
   reservadas, volúmenes o carpetas de admin), `404` (el `from` o la máquina
   upstream) o `409` (nombre ajeno en commit). `GET /info` contesta sin rol.
 - `fail`: un `*api.StatusError` con código manda sobre el del handler. Así
-  llegan a cualquier ruta que cree o despierte máquinas `409` tope de máquinas,
-  `429` cuota del inquilino, `503` disco lleno y `507` sin memoria
-  (`pkg/api/types.go`).
+  llegan a cualquier ruta que cree, despierte o copie máquinas o volúmenes
+  `409` tope de máquinas, `429` cuota del inquilino, `503` disco lleno y `507`
+  sin memoria (`pkg/api/types.go`).
 - `jsonBodyStatus`: `413` si el cuerpo pasa su tope (1 MiB salvo que se diga
-  otro), `400` con cualquier otro fallo al decodificar.
+  otro), `400` con cualquier otro fallo al decodificar, también un cuerpo
+  cortado.
 
-**Mapeos de error** (columna "Errores" de la tabla):
+**El `code` del cuerpo.** Todo error es `{"message": "...", "code": "..."}`
+(capacidad `error-codes`, `pkg/api/errorcodes.go`). `message` es para personas
+y puede cambiar de redacción; `code` es para programas y no cambia ni se
+reutiliza. Sale del código HTTP salvo cuando el daemon reconoce la causa:
 
-| Mapeo | `400` | `404` | `409` | Otro |
-|---|---|---|---|---|
-| `statusPeticion` | petición, nombre, carpetas, `env`, `cmd` | imagen o snapshot | dorado obsoleto | — |
-| `runStatus` | = `statusPeticion` | = | + exec fuera del snapshot, nombre ocupado | `500` host |
-| `cicloStatus` | = `statusPeticion` | máquina | estado no lo admite | `500` host |
-| `snapshotStatus` | **todo lo demás** | snapshot | en uso | — |
-| `removeImageStatus` | nombre | imagen | en uso | `500` |
-| `execStatus` | — | máquina | no corre, exec fuera del snapshot | `403` sin `allow_exec`; `502` resto |
-| `objetivoConAgente` | = `execStatus` | = | = | `504` el agente no contesta |
-| `estadoDeListo` | — | máquina | no corre | `500` |
-| `forkStatus` | — | máquina | no corre, no lista, no copiable, carpetas, exec | `500` |
-| `graphStatus` | **todo lo demás** | grafo | — | — |
-| `publicarStatus` | **todo lo demás** | — | puerto ocupado | `501` no soportado |
+| HTTP | `code` | Específicos |
+|---|---|---|
+| `400` | `bad_request` | — |
+| `401` | `unauthorized` | — |
+| `403` | `forbidden` | — |
+| `404` | `not_found` | — |
+| `405` | — | — |
+| `409` | `conflict` | `name_taken` (nombre de máquina cogido), `machine_limit` (tope de máquinas), `stale_golden` (dorado de otro VMM o versión) |
+| `411` | `length_required` | — |
+| `412` | `precondition_failed` | — |
+| `413` | `too_large` | — |
+| `426` | `upgrade_required` | — |
+| `429` | `too_many_requests` | `tenant_quota` (cuota del inquilino) |
+| `500` | `internal` | — |
+| `501` | `unsupported` | — |
+| `502` | `bad_gateway` | — |
+| `503` | `unavailable` | `disk_full` (el daemon solo da `503` por disco) |
+| `504` | `timeout` | — |
+| `507` | `insufficient_memory` | — |
+
+`api.CodeOf`, `api.IsNameTaken`, `api.IsMachineLimit` y compañía leen el
+`code` y, con un daemon anterior, caen al texto.
+
+**Mapeos de error** (columna "Errores" de la tabla de rutas). La regla es la
+de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
+`409` el estado que no lo admite, `500` el host.
+
+| Mapeo | `400` | `404` | `409` | `500` | Otro |
+|---|---|---|---|---|---|
+| `statusPeticion` | petición, nombre, carpetas, `env`, `cmd` | imagen o snapshot | dorado obsoleto | — | — |
+| `runStatus` | = `statusPeticion` | = | + exec fuera del snapshot, nombre ocupado | host | — |
+| `cicloStatus` | = `statusPeticion` | + máquina | + estado que no lo admite | host | — |
+| `renewStatus` | = `cicloStatus` | = | + no corre | host | — |
+| `snapshotStatus` | nombre o petición | snapshot | en uso | host | — |
+| `graphStatus` | = `cicloStatus` | + grafo | + prefijo ambiguo | host | — |
+| `volumeStatus` | = `cicloStatus` + nombre | + volumen | + sin clonado, en uso, ya existe | host | `503` sin disco para la copia |
+| `storeStatus` | espacio o clave mal formados | — | — | host | — |
+| `removeImageStatus` | nombre | imagen | en uso | host | — |
+| `imageFileStatus` | el resto | imagen, o el fichero no está | — | sin `debugfs` | — |
+| `execStatus` | — | máquina | no corre, exec fuera del snapshot | — | `403` sin `allow_exec`; `502` el resto |
+| `objetivoConAgente` | — | = `execStatus` | = | — | = `execStatus`; `504` el agente no contesta |
+| `estadoDeListo` | — | máquina | no corre | el resto | — |
+| `forkStatus` | — | máquina | no corre, no lista, no copiable, carpetas, exec | host | `504` el agente de una copia no contesta |
+| `publicarStatus` | **el resto** | — | puerto ocupado | — | `501` no soportado |
 
 | Ruta | Éxito | Errores |
 |---|---|---|
@@ -924,52 +965,53 @@ tabla pasa a ser contrato con su test.
 | `GET /machines/{ref}` | 200 | `404` |
 | `POST /machines/{ref}/freeze` · `thaw` · `pause` · `stop` | 200 | `cicloStatus`; admisión al despertar |
 | `POST /machines/{ref}/squeeze` | 200 | `cicloStatus`; `409` con `mem_shared` sin `force` |
-| `POST /machines/{ref}/resize` | 200 | `413`/`400` cuerpo (4 KiB); `404`; `409` no corre; **`400` el resto, también del host** |
+| `POST /machines/{ref}/resize` | 200 | `413`/`400` cuerpo (4 KiB); `cicloStatus` (`400` memoria fija o fuera de rango); `409` no corre |
 | `POST /machines/{ref}/mmds` | 200 | `413`/`400` cuerpo (1 MiB); `cicloStatus` |
 | `POST /machines/{ref}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `cicloStatus` |
 | `DELETE /machines/{ref}/credentials/{env}` | 200 | `cicloStatus`; `404` sin esa credencial |
 | `POST /machines/{ref}/start` | 200 | `413`/`400` cuerpo (vacío vale); `cicloStatus`; admisión |
 | `DELETE /machines/{ref}` | 204 | `cicloStatus` |
-| `PUT /machines/{ref}/labels` | 204 | `413`/`400` cuerpo; **`400` todo lo demás, también "no existe"** |
-| `POST /machines/{ref}/commit` | 201 | `413`/`400` cuerpo; `400` `ready_timeout_seconds`; `409` carpetas compartidas o no llega a lista; **`400` el resto, también "no existe"** |
-| `POST /images` | 200 | `413`/`400` cuerpo; `400` falta `builder`, nombre, base, `spec`; `412` constructor no encontrado o no ejecutable; `409` imagen en uso; `501` sin construcción con root; `500` host |
+| `PUT /machines/{ref}/labels` | 204 | `413`/`400` cuerpo; `cicloStatus` (`400` etiquetas `kling.graph*`) |
+| `POST /machines/{ref}/commit` | 201 | `413`/`400` cuerpo; `400` `ready_timeout_seconds`; `404` no existe; `409` carpetas compartidas o no llega a lista; **`400` el resto, también del host** |
+| `POST /images` | 200 (también si reutiliza la construcción de otra petición) | `413`/`400` cuerpo; `400` falta `builder`, nombre, base, `spec`; `412` constructor no encontrado o no ejecutable; `409` imagen en uso; `501` sin construcción con root; `500` host |
 | `GET /images` | 200 | — |
 | `DELETE /images/{name}` | 204 | `removeImageStatus` |
 | `GET /volumes` | 200 | — |
-| `POST /volumes` | 200 | `413`/`400` cuerpo; **`400` cualquier error** |
-| `DELETE /volumes/{name}` | 204 | `400` `?snapshots=`; `404` no existe; **`409` cualquier otro error** |
-| `POST /volumes/{name}/populate` | 200 | `413`/`400` cuerpo; `400` el resto |
-| `POST /volumes/{name}/clone` | 200 | `413`/`400` cuerpo; `409` sin clonado, en uso o el destino existe; `507` sin disco para la copia; `400` el resto |
+| `POST /volumes` | 201 | `413`/`400` cuerpo; `volumeStatus` |
+| `DELETE /volumes/{name}` | 204 | `400` `?snapshots=`; `volumeStatus` |
+| `POST /volumes/{name}/populate` | 200 | `413`/`400` cuerpo; `volumeStatus` |
+| `POST /volumes/{name}/clone` | 201 | `413`/`400` cuerpo; `volumeStatus` (`404` el origen no existe, `409` el destino sí) |
 | `GET /volumes/{name}/snapshots` | 200 | `400` nombre; `404`; `500` |
-| `POST /volumes/{name}/snapshots` · `restore` | 200 | `413`/`400` cuerpo; `400`; `404`; `409` en uso, otra operación, repetido o tope; `507` sin disco; `500` |
+| `POST /volumes/{name}/snapshots` | 201 | `413`/`400` cuerpo; `400`; `404`; `409` en uso, otra operación, repetido o tope; `503` sin disco; `500` |
+| `POST /volumes/{name}/restore` | 200 | `413`/`400` cuerpo; `400`; `404`; `409` en uso u otra operación; `503` sin disco; `500` |
 | `DELETE /volumes/{name}/snapshots/{snap}` | 204 | `400`; `404`; `409`; `500` |
 | `GET /registries` | 200 | `500` |
-| `POST /registries` | 200 | `413`/`400` cuerpo; `400` validación; `500` |
+| `POST /registries` | 201 | `413`/`400` cuerpo; `400` validación; `500` |
 | `DELETE /registries/{host}` | 204 | `400` host; `404` no había; `500` |
-| `GET /images/{name}/recipe` | 200 | `400` nombre; **`404` cualquier fallo al leerla** |
-| `GET /images/{name}/files` | 200 | `400` `max`; `404` no está en la imagen; **`400` el resto, también imagen inexistente** |
-| `PUT /images/{name}/files` | 200 (**también si el fichero no está y no hay `create`**, con `error` en el cuerpo) | **`413` cualquier fallo al leer el cuerpo** (16 MiB); `400` JSON, fuente o modo; `413` contenido > 8 MiB; `409` ocupada; `500`; `400` el resto |
+| `GET /images/{name}/recipe` | 200 | `400` nombre; `404` sin receta (o sin imagen); `500` al leerla |
+| `GET /images/{name}/files` | 200 | `400` `max`; `imageFileStatus` |
+| `PUT /images/{name}/files` | 200 (si el fichero no está y no hay `create`, `skipped` y `error` en el cuerpo) | `413` cuerpo por encima de 16 MiB; `400` cuerpo cortado, JSON, fuente o modo; `413` contenido > 8 MiB; `409` ocupada; `imageFileStatus` |
 | `GET /images/{name}/blob` (y `HEAD`) | 200 | `400` nombre o `part`; `404`; `500` |
 | `PUT /images/{name}/blob` | 201; 200 sin cambios | `400` nombre, `part`, sha o cuerpo truncado; `409` existe con otra forma o en uso; `413` > 16 GiB; `500` |
 | `GET /oci/blobs/{digest}` | 200 | `400` digest; `404` |
-| `PUT /oci/blobs/{digest}` | 201; 200 sin cambios | `400` digest, tamaño o sha; `411` sin `Content-Length`; `413` > 16 GiB; `507` caché llena; `500` |
+| `PUT /oci/blobs/{digest}` | 201; 200 sin cambios | `400` digest, tamaño o sha; `411` sin `Content-Length`; `413` > 16 GiB; `503` caché llena; `500` |
 | `GET /snapshots` | 200 | — |
 | `GET /snapshots/{name}` | 200 | `snapshotStatus` |
 | `PUT /snapshots/{name}/annotations/{key}` | 200 | `413`/`400` cuerpo; `snapshotStatus` |
 | `DELETE /snapshots/{name}/annotations/{key}` | 204 | `snapshotStatus` |
 | `PUT /snapshots/{name}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `snapshotStatus` |
 | `GET /snapshots/{name}/pool` | 200 | `snapshotStatus` |
-| `PUT /snapshots/{name}/pool` | 200 | `413`/`400` cuerpo; `snapshotStatus` |
-| `DELETE /snapshots/{name}` | 204 | `snapshotStatus` (**un error de E/S sale `400`**) |
-| `GET /store/{ns}` | 200 | **`400` cualquier error** |
-| `GET /store/{ns}/{key}` | 200 | `404`; `400` el resto |
-| `PUT /store/{ns}/{key}` | 204 | `413`/`400` cuerpo; `403` en `graph`; `400` el resto |
-| `DELETE /store/{ns}/{key}` | 204 (también si no existía) | `403` en `graph`; `400` el resto |
-| `GET /machines/{ref}/logs` | 200 texto | `400` `tail`; **`404` cualquier error** |
+| `PUT /snapshots/{name}/pool` | 200 | `413`/`400` cuerpo; `snapshotStatus` (`400` tamaño fuera de rango) |
+| `DELETE /snapshots/{name}` | 204 | `snapshotStatus` |
+| `GET /store/{ns}` | 200 | `storeStatus` |
+| `GET /store/{ns}/{key}` | 200 | `404`; `storeStatus` |
+| `PUT /store/{ns}/{key}` | 204 | `413`/`400` cuerpo; `403` en `graph`; `storeStatus` |
+| `DELETE /store/{ns}/{key}` | 204 (también si no existía) | `403` en `graph`; `storeStatus` |
+| `GET /machines/{ref}/logs` | 200 texto | `400` `tail`; `404` sin máquina o sin log; `500` al leerlo |
 | `GET /machines/{ref}/credaudit` | 200 NDJSON | `400` parámetros; `404`; `500` |
 | `GET /machines/{ref}/egress` | 200 | `404` |
 | `POST /machines/{ref}/guest` | 200 (el estado del invitado va en el cuerpo) | `413`/`400` cuerpo; `400` `path` o `max_body_bytes`; `403` puerto no expuesto; `404`; `409` no corre o no se alcanza; `502` invitado inalcanzable o respuesta de más; `504` `wait_ms` vencido |
-| `POST /machines/{ref}/renew` | 200 | `413`/`400` cuerpo; `400` ttl negativo; `404`; `409` es un sandbox o no corre; **`502` el resto** |
+| `POST /machines/{ref}/renew` | 200 | `404`; `409` es un sandbox; `413`/`400` cuerpo; `400` ttl negativo; `renewStatus` |
 | `GET /machines/{ref}/ready` | 200 (no estar lista también) | `400` `wait`; `estadoDeListo` |
 | `POST /machines/{ref}/hooks` | 200 (también si fallaron) | `400` `wait`; `409` no llegó a lista sin respuesta del agente (p. ej. uno anterior); `estadoDeListo` |
 | `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `500`; `502` |
@@ -979,25 +1021,26 @@ tabla pasa a ser contrato con su test.
 | `POST /sandboxes` | 201 | `413`/`400` cuerpo; `400` ttl, `image`/`from`, `on_ttl`, imagen sin agente; `runStatus` y admisión; `504` el agente no contesta en 2 min (se borra) |
 | `GET /sandboxes` | 200 | — |
 | `GET /sandboxes/{ref}` | 200 | `404` (también si no es un sandbox) |
-| `POST /sandboxes/{ref}/renew` | 200 | `404`; `413`/`400` cuerpo; `400` ttl; `execStatus` |
+| `POST /sandboxes/{ref}/renew` | 200 | `404`; `413`/`400` cuerpo; `400` ttl; `renewStatus` |
 | `POST /sandboxes/{ref}/fork` | 201 | `404`; `413`/`400` cuerpo; `400` validación; `forkStatus` |
-| `DELETE /sandboxes/{ref}` | 204 | `404`; **`500` cualquier error** |
-| `POST /graphs` | 201 | `413`/`400` cuerpo; `graphStatus`; `409` existe o tope; admisión |
+| `DELETE /sandboxes/{ref}` | 204 | `404` (también si no es un sandbox); `cicloStatus`, como `DELETE /machines/{ref}` |
+| `POST /graphs` | 201 | `413`/`400` cuerpo, también un campo que el daemon no conoce; `graphStatus`; `409` existe o tope; admisión |
 | `GET /graphs` | 200 | — |
-| `GET /graphs/{ref}` | 200 | `404`; `409` prefijo ambiguo; `400` el resto |
-| `POST /graphs/{ref}/freeze` · `thaw` | 200 | `graphStatus` (**un nodo en estado inválido sale `400`**); admisión |
-| `POST /graphs/{ref}/snapshot` | 200 | `413`/`400` cuerpo; `graphStatus`; `409` |
-| `POST /graphs/{ref}/fork` | 201 | `413`/`400` cuerpo; `graphStatus`; `400` `count`; `409` |
-| `DELETE /graphs/{ref}` | 204 | `graphStatus` (el host también sale `400`) |
+| `GET /graphs/{ref}` | 200 | `graphStatus` |
+| `POST /graphs/{ref}/freeze` · `thaw` | 200 | `graphStatus`; admisión |
+| `POST /graphs/{ref}/snapshot` | 201 | `413`/`400` cuerpo; `graphStatus` |
+| `POST /graphs/{ref}/fork` | 201 | `413`/`400` cuerpo; `graphStatus`; `400` `count` |
+| `DELETE /graphs/{ref}` | 204 | `graphStatus` |
 | `GET /events` | 200 NDJSON | `500` sin flusher |
 | `GET /metrics` · `GET /procstats` | 200 | — |
-| `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; **`400` cualquier error** |
+| `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; `cicloStatus` (`400` tamaño que no vale); `501` sin almacén en esta plataforma |
 | `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` puerto < 1024 (inquilino); `publicarStatus` |
 | `DELETE /machines/{ref}/publish` | 204 | `404` sin máquina o sin publicación; `400` `host` |
 | `GET /publish` | 200 | — |
 
-En **negrita**, lo que no sigue la regla de `cicloStatus` (`404` lo que no
-existe, `409` el estado, `500` el host) y se corregirá antes de 1.0.
+En **negrita**, lo que todavía no sigue la regla de `cicloStatus`: el `400`
+de un fallo del host en `commit` y el `400` de lo que `publicarStatus` no
+reconoce.
 
 ## Rutas retiradas en v0.6
 
