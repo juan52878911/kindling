@@ -18,6 +18,6 @@ overlay). `scripts/bench-cow.sh`, N instancias seguidas con `run -from`.
 - Disco: 23× menos con 32 instancias (cada una guarda solo lo que escribe).
 - Latencia máxima con 32: 456 → 113 ms (4×). Por instancia, ~30 % menos; la diferencia
   crece con el tamaño del overlay del golden (con 200 MiB la copia costaba 76 ms sola).
-- `kling info`/`kling doctor`: `store (reflink inside kindling's Btrfs store)`.
+- `kling status -v`/`kling doctor`: `store (reflink inside kindling's Btrfs store)`.
 - Tests con montajes reales en este CT (`KLING_TEST_MOUNTS=1`): `TestAlmacenBtrfsDeVerdad`,
   `TestBindDelAlmacenEnElJail`, `TestCopiarDisperso*` — PASS.

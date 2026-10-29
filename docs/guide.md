@@ -574,11 +574,11 @@ documented and switched off the same way.
 
 Since 0.14 an extension's commands live **under its name**: `kling mcp add`, `kling mcp
 serve`, `kling sbx ls`. Only `connect` is promoted to the top level. The old loose verbs
-(`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`, `kling
-snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) keep working as
-aliases. They were silent until 0.17; now each one warns once on stderr (`warning: kling
-add is now kling mcp add`), and the extension ones will be removed in a release the
-CHANGELOG announces. `commit`, `snapshots` and `plugins` stay for good, silently.
+that warned since 0.18 were removed in 1.0 and exit 2 naming the new command: `kling mcp
+add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`, `ai model`,
+`ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`, `machine resize`,
+`machine squeeze` and `machine secret`. `commit`, `snapshots` and `plugins` stay for good,
+silently, as `save`, `template` and `plugin`.
 
 ## kling-mcp: MCP servers on demand
 

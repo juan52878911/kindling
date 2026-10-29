@@ -573,12 +573,11 @@ otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incor
 
 Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp add`,
 `kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
-de antes (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`,
-`kling snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) siguen
-funcionando como alias. Fueron silenciosos hasta 0.17; ahora cada uno avisa una vez en
-stderr (`warning: kling add is now kling mcp add`), y los de extensiones se retirarán en
-una versión que anunciará el CHANGELOG. `commit`, `snapshots` y `plugins` se quedan para
-siempre, en silencio.
+que avisaban desde 0.18 se retiraron en 1.0 y salen con código 2 diciendo el nombre nuevo:
+`kling mcp add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`,
+`ai model`, `ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`,
+`machine resize`, `machine squeeze` y `machine secret`. `commit`, `snapshots` y `plugins`
+se quedan para siempre, en silencio, como `save`, `template` y `plugin`.
 
 ## kling-mcp: servidores MCP bajo demanda
 
