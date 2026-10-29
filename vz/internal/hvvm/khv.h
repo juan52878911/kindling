@@ -207,6 +207,8 @@ void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 
 // Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
 int khv_prueba(const uint8_t *datos, size_t n);
+int khv_prueba_carrera(int iters);  // QueueNum cambiando a mitad de tanda (pruebas)
+int khv_prueba_flush(void);          // estado de un FLUSH al disco de pruebas
 
 // net (tramas por un socket unix SOCK_DGRAM)
 struct vnet_state {

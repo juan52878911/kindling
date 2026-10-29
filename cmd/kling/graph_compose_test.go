@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func sinEntorno(string) (string, bool) { return "", false }
@@ -63,13 +66,101 @@ func TestComposeInterpolar(t *testing.T) {
 	env := map[string]string{"A": "uno", "VACIA": ""}
 	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 	var avisos []string
-	got := interpolarCompose("${A} ${B:-dos} ${VACIA:-tres} ${VACIA-cuatro} $$A ${FALTA}", lookup,
+	got, err := interpolarCompose("${A} ${B:-dos} ${VACIA:-tres} ${VACIA-cuatro} $$A ${FALTA} $A-x ${VACIA:?no falla con ?} pre$A", lookup,
 		func(s string) { avisos = append(avisos, s) })
-	if want := "uno dos tres  $A "; got != want {
+	if err == nil || !strings.Contains(err.Error(), "no falla con ?") {
+		t.Fatalf("${VACIA:?msg} vacía: err = %v", err)
+	}
+	if want := "uno dos tres  $A  uno-x  preuno"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	if len(avisos) != 1 || !strings.Contains(avisos[0], "FALTA") {
 		t.Errorf("avisos = %v", avisos)
+	}
+	// ${X?msg} solo falla sin definir; ${X:?msg}, también vacía.
+	if _, err := interpolarCompose("${VACIA?m}", lookup, func(string) {}); err != nil {
+		t.Errorf("${VACIA?m} definida y vacía: %v", err)
+	}
+	if _, err := interpolarCompose("${FALTA?hace falta FALTA}", lookup, func(string) {}); err == nil || !strings.Contains(err.Error(), "hace falta FALTA") {
+		t.Errorf("${FALTA?m}: %v", err)
+	}
+	// Sin msg, el de Docker.
+	if _, err := interpolarCompose("${FALTA:?}", lookup, func(string) {}); err == nil || !strings.Contains(err.Error(), "missing a value") {
+		t.Errorf("${FALTA:?}: %v", err)
+	}
+}
+
+// El .env junto al compose da las variables que la shell no tiene; la shell
+// manda.
+func TestComposeDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	contenido := "# comentario\nexport TAG=16-alpine\nPASS=\"se cr\\\"eto\"\nPIN='0123'\nUSER=desde-fichero # nota\n\nSHELL_GANA=fichero\n"
+	if err := os.WriteFile(filepath.Join(dir, ficheroVariables), []byte(contenido), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shell := map[string]string{"SHELL_GANA": "shell"}
+	lookup, err := conDotEnv(dir, func(k string) (string, bool) { v, ok := shell[k]; return v, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{"TAG": "16-alpine", "PASS": `se cr"eto`, "PIN": "0123", "USER": "desde-fichero", "SHELL_GANA": "shell"} {
+		if v, ok := lookup(k); !ok || v != want {
+			t.Errorf("%s = %q (%v), want %q", k, v, ok, want)
+		}
+	}
+	c := "services:\n  db:\n    image: postgres:${TAG}\n    environment:\n      PIN: ${PIN}\n      CODIGO: 0042\n"
+	tr, err := traducirCompose([]byte(c), "dev", false, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.vivos[0].imagen != "postgres:16-alpine" {
+		t.Errorf("imagen = %q", tr.vivos[0].imagen)
+	}
+	env := map[string]string{}
+	for _, kv := range tr.vivos[0].env {
+		env[kv[0]] = kv[1]
+	}
+	// El cero de delante no se pierde (ni del .env ni escrito en el YAML).
+	if env["PIN"] != "0123" || env["CODIGO"] != "0042" {
+		t.Errorf("env = %v", env)
+	}
+	// Una línea sin = es un error (no se ignora en silencio).
+	os.WriteFile(filepath.Join(dir, ficheroVariables), []byte("ESTO NO\n"), 0o600)
+	if _, err := conDotEnv(dir, os.LookupEnv); err == nil {
+		t.Error("aceptó una línea sin =")
+	}
+}
+
+// healthcheck: disable: true desactiva aunque haya test (en el orden que sea).
+func TestComposeHealthcheckDisable(t *testing.T) {
+	c := "services:\n  db:\n    image: postgres:16\n    healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n      disable: true\n  app:\n    image: node:22\n    depends_on:\n      db: {condition: service_healthy}\n"
+	tr, err := traducirCompose([]byte(c), "dev", false, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := tr.por["db"]; len(s.salud) != 0 {
+		t.Errorf("salud = %v con disable: true", s.salud)
+	}
+}
+
+// ports: "80" (sin host) se publica en uno libre al azar; 0.0.0.0 avisa de
+// que es 127.0.0.1; /udp se publica (solo Linux) y no es un puerto del nodo.
+func TestComposePuertosComoDocker(t *testing.T) {
+	c := "services:\n  web:\n    image: nginx\n    ports:\n      - \"80\"\n      - \"0.0.0.0:8443:443\"\n      - \"127.0.0.1::9000\"\n      - \"5353:53/udp\"\n"
+	tr, err := traducirCompose([]byte(c), "dev", false, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []api.PortPublish{{Host: 0, Guest: 80}, {Host: 8443, Guest: 443}, {Host: 0, Guest: 9000}, {Host: 5353, Guest: 53, Proto: "udp"}}
+	if got := tr.Publica["web"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("Publica = %+v", got)
+	}
+	if got := tr.por["web"].puertos; !reflect.DeepEqual(got, []int{80, 443, 9000}) {
+		t.Errorf("puertos del nodo = %v", got)
+	}
+	avisos := strings.Join(tr.Avisos, "\n")
+	if !strings.Contains(avisos, "published on 127.0.0.1 only, not on 0.0.0.0") {
+		t.Errorf("sin aviso de 0.0.0.0: %s", avisos)
 	}
 }
 

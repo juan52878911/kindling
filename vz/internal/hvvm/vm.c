@@ -197,6 +197,7 @@ struct cpu {
   bool on, on_pend;
   uint64_t on_entry, on_ctx;
   bool kick;
+  bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
   uint64_t vtimer_offset;
 };
@@ -236,6 +237,15 @@ static void salir_vcpus(void) {
   pthread_mutex_lock(&mu);
   for (int i = 0; i < n_creados; i++) ids[n++] = cpus[i].id;
   pthread_mutex_unlock(&mu);
+  if (n) hv_vcpus_exit(ids, (uint32_t)n);
+}
+
+// Con mu: vuelve a sacar los vCPU que aún no llegaron al punto de pausa.
+static void resacar_vcpus_locked(void) {
+  hv_vcpu_t ids[MAX_CPUS];
+  int n = 0;
+  for (int i = 0; i < n_creados; i++)
+    if (!cpus[i].parado) ids[n++] = cpus[i].id;
   if (n) hv_vcpus_exit(ids, (uint32_t)n);
 }
 
@@ -310,8 +320,10 @@ static void punto_pausa(struct cpu *c) {
   guardar_cpu(c);
   pthread_mutex_lock(&mu);
   n_pausados++;
+  c->parado = true;
   pthread_cond_broadcast(&cv);
   while (pausa_pedida && !parar) pthread_cond_wait(&cv, &mu);
+  c->parado = false;
   n_pausados--;
   pthread_mutex_unlock(&mu);
 }
@@ -1051,9 +1063,23 @@ int khv_pause(unsigned bit) {
   g_pausa = true;
   pthread_cond_broadcast(&cv);
   pthread_mutex_unlock(&mu);
+  // Pausar es trabajo que el host le manda al invitado: los vCPU ociosos
+  // están en UTILITY y, con el Mac cargado, tardaban decenas de ms en
+  // llegar al punto de pausa (khv_qos_impulso, como un exec).
+  khv_qos_impulso();
   salir_vcpus();
   pthread_mutex_lock(&mu);
-  while (n_pausados < ncpus && !parar) pthread_cond_wait(&cv, &mu);
+  // Un vCPU que miró pausa_pedida justo antes de que se pusiera y aún no
+  // había entrado en hv_vcpu_run no recibe la salida; dentro, en un WFI, se
+  // quedaría hasta su siguiente timer. Cada milisegundo sin todos, se vuelve
+  // a sacar a los que faltan.
+  while (n_pausados < ncpus && !parar) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 1000000;
+    if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
+    if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) resacar_vcpus_locked();
+  }
   t_pausado = mach_absolute_time();
   pthread_mutex_unlock(&mu);
   dispositivos_quietos();

@@ -43,6 +43,10 @@ type relojHost struct {
 	pared time.Time     // sin lectura monotónica
 	mono  time.Duration // desde arranqueReloj
 	hay   bool
+	// sueno es la hora de pared a la que se vio por última vez que el host
+	// había dormido; cero = no se ha visto. Una pausada desde antes no ha
+	// visto pasar ese tiempo (ver pausaAntesDelSueno).
+	sueno time.Time
 	// leer es un punto de inyección de las pruebas: la hora de pared y el
 	// tiempo monotónico. nil = los de verdad.
 	leer func() (time.Time, time.Duration)
@@ -64,14 +68,29 @@ func (r *relojHost) durmio() time.Duration {
 	hay := r.hay
 	r.pared, r.mono, r.hay = pared, mono, true
 	if hay && d >= suenoMin {
+		r.sueno = pared
 		return d
 	}
 	return 0
 }
 
+// pausaAntesDelSueno dice si una máquina pausada en desde lleva en pausa desde
+// antes del último sueño del host que se vio (M8). El reloj del invitado
+// (el temporizador de ARM en Apple Silicon) no avanza con el Mac dormido, así
+// que reanudarla sin más la devolvía con la hora de antes de cerrar la tapa:
+// revisarSueno solo resincroniza las que corren, y pausarParaDormir pausa
+// justo las que corrían. Ante la duda (pausada entre la última mirada y la
+// que vio el sueño) dice que sí: un resync de más cuesta milisegundos.
+func (r *relojHost) pausaAntesDelSueno(desde *time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return desde != nil && !r.sueno.IsZero() && desde.Before(r.sueno)
+}
+
 // revisarSueno resincroniza el reloj de las máquinas que corren si el host
-// durmió desde la última mirada. Las pausadas y las congeladas lo hacen al
-// despertarlas (Thaw ya resincroniza).
+// durmió desde la última mirada. Las congeladas lo hacen al despertarlas
+// (Thaw ya resincroniza) y las pausadas al reanudarlas si la pausa es anterior
+// al sueño (reanudarLocked, pausaAntesDelSueno).
 func (m *Manager) revisarSueno(ctx context.Context) {
 	d := m.reloj.durmio()
 	if d == 0 {

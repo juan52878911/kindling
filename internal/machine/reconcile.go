@@ -53,6 +53,12 @@ func (m *Manager) reconcile() {
 
 	for _, mc := range m.byID {
 		seen[knet.Plan(mc.NetIndex, mc.ID).NS] = true
+		// El volcado temporal de un commit que el reinicio cortó (macOS,
+		// publicar_volcado.go): ningún commit de este daemon está en curso
+		// todavía, así que nadie lo va a publicar. Sin esto, la RAM entera de
+		// la máquina se quedaba en su directorio hasta el rm (M15). Aunque el
+		// VMM siga vivo y escribiéndolo: se borra el nombre, no su descriptor.
+		quitarVolcadoTemporal(m.dir(mc.ID))
 
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.
@@ -404,8 +410,9 @@ func shortID(id string) string {
 // hasSnapshot dice si una máquina tiene un congelado completo en disco.
 func (m *Manager) hasSnapshot(id string) bool {
 	// No basta con que los ficheros existan: un volcado interrumpido también
-	// los deja. Ver volcado.go.
-	if err := volcadoValido(m.dir(id)); err != nil {
+	// los deja. Ver volcado.go. Sin FrozenAt: aquí la máquina figura running o
+	// paused, y el de una pausa no dice cuándo se escribió el volcado.
+	if err := volcadoValido(m.dir(id), nil); err != nil {
 		if !errors.Is(err, errVolcadoIncompleto) || !strings.Contains(err.Error(), "missing") {
 			log.Printf("reconcile: %s: %v", shortID(id), err)
 		}
@@ -425,14 +432,17 @@ func (m *Manager) hasSnapshot(id string) bool {
 // valga desde la vuelta siguiente.
 func (m *Manager) watch(ctx context.Context, every time.Duration) {
 	m.reloj.durmio() // la base del reloj del host
-	t := time.NewTimer(m.intervaloVigilante(every))
+	// Un solo temporizador, rearmado en cada vuelta sobre la rejilla de su
+	// intervalo (esperaAlineada): la batería y la QoS van dentro de la vuelta
+	// (vueltaBateria), no en un reloj aparte.
+	t := time.NewTimer(esperaAlineada(time.Now(), m.intervaloVigilante(every)))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			t.Reset(m.intervaloVigilante(every))
+			t.Reset(esperaAlineada(time.Now(), m.intervaloVigilante(every)))
 			// Una vuelta entera por iteracion: si cualquiera de estas tareas
 			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
 			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
@@ -448,6 +458,11 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// microVM. Justo detrás de sweep y no al final de la vuelta: el
 				// PID que mata tiene que ser de un escaneo reciente.
 				m.barrerHuerfanos(vmms)
+				// Las que un volcado fallido dejó en pausa sin poder
+				// reanudarlas (reanudar_pendiente.go).
+				m.reanudarPendientes()
+				// Y las borradas cuyo VMM no murió al primer SIGKILL (M4).
+				m.reintentarTumbas()
 				// Las carpetas vivas de las máquinas que corren y no tienen
 				// conexión (tras reiniciar el daemon, sobre todo).
 				m.ensureShares()

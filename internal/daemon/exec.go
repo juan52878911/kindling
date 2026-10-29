@@ -54,6 +54,49 @@ func (s *Server) waitAgent(ctx context.Context, mc *api.Machine) error {
 	return nil
 }
 
+// errDejoDeCorrer: la máquina se congeló (o se paró) mientras se esperaba a
+// su agente. esperarPuerto lo devuelve en cuanto lo ve, en vez de seguir
+// sondeando un reenvío muerto hasta el plazo.
+var errDejoDeCorrer = errors.New("the machine stopped running while waiting for it")
+
+// sigueCorriendo dice si id puede seguir llegando a escuchar: existe, no está
+// congelada, pausada, parada ni fallida, y no va camino de estarlo. "created"
+// cuenta como viva (aún arrancando).
+func (s *Server) sigueCorriendo(id string) bool {
+	mc, ok := s.mgr.Get(id)
+	if !ok || mc.Transition != "" {
+		return false
+	}
+	switch mc.State {
+	case api.StateWarm, api.StatePaused, api.StateStopped, api.StateFailed:
+		return false
+	}
+	return true
+}
+
+// objetivoConAgente es ExecTarget y waitAgent, lo que hacen exec, shell y
+// ficheros antes de hablar con el invitado. Si la máquina se congela entre
+// los dos —daemon.idle_freeze la congela justo cuando llega la petición, o
+// un freeze desde otra terminal—, se vuelve a pedir el objetivo, que la
+// descongela, y se espera otra vez: antes el exec esperaba 30 s a un agente
+// que ya no estaba y acababa en 504. Una sola vez: si vuelve a pasar, alguien
+// la está congelando a propósito y el error es suyo.
+func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machine, int, error) {
+	for intento := 0; ; intento++ {
+		mc, err := s.mgr.ExecTarget(ctx, ref)
+		if err != nil {
+			return nil, execStatus(err), err
+		}
+		err = s.waitAgent(ctx, mc)
+		if err == nil {
+			return mc, 0, nil
+		}
+		if !errors.Is(err, errDejoDeCorrer) || intento > 0 {
+			return nil, http.StatusGatewayTimeout, err
+		}
+	}
+}
+
 // tooOldAgent es la respuesta cuando el agente del invitado no conoce la ruta:
 // la imagen se construyó antes de v0.7.
 func tooOldAgent(mc *api.Machine) error {
@@ -75,14 +118,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	mc, err := s.mgr.ExecTarget(r.Context(), r.PathValue("ref"))
+	mc, code, err := s.objetivoConAgente(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, execStatus(err), err)
-		return
-	}
-
-	if err := s.waitAgent(r.Context(), mc); err != nil {
-		fail(w, http.StatusGatewayTimeout, err)
+		fail(w, code, err)
 		return
 	}
 	// Los marcadores de sus credenciales, delante: lo que pida el exec manda.
@@ -280,13 +318,9 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		body = io.LimitReader(r.Body, api.FileMaxUpload+1)
 	}
 
-	mc, err := s.mgr.ExecTarget(r.Context(), r.PathValue("ref"))
+	mc, code, err := s.objetivoConAgente(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, execStatus(err), err)
-		return
-	}
-	if err := s.waitAgent(r.Context(), mc); err != nil {
-		fail(w, http.StatusGatewayTimeout, err)
+		fail(w, code, err)
 		return
 	}
 	greq, err := http.NewRequestWithContext(r.Context(), r.Method, guestBase(mc)+"/files?"+q.Encode(), body)

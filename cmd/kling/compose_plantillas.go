@@ -214,6 +214,9 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 		Cmd: comandoMaquina(p, s.cmd), Entrypoint: comandoMaquina(p, s.entry),
 		WaitReady: !espera, ReadyTimeoutSeconds: int(plantillaListo.Seconds()),
 		Labels: map[string]string{labelComposeProject: proyecto, labelComposeNode: s.nodo},
+		// Red de desarrollo: las carpetas viajan por ella y las copias
+		// heredan este caudal (el de 16 MiB/s las ahogaba).
+		NetMiBps: netMiBpsCarpetas,
 	}
 	if p.volEspera {
 		// Los mismos volúmenes que el nodo: el disco del dorado tiene que
@@ -223,11 +226,16 @@ func prepararPlantilla(ctx context.Context, ops plantillaOps, proyecto string, p
 	if req.MemMiB == 0 {
 		req.MemMiB = 512
 	}
+	// Una -prep de un up anterior al que Ctrl-C pilló dentro de su Run (el
+	// daemon la creó, el CLI no llegó a borrarla) bloquearía el nombre: fuera
+	// primero (un 404 es lo normal). Y si este Run falla o se corta, también:
+	// el daemon pudo crearla igual.
+	_ = ops.Remove(context.WithoutCancel(ctx), prep)
 	mc, err := ops.Run(ctx, req)
+	defer func() { _ = ops.Remove(context.WithoutCancel(ctx), prep) }()
 	if err != nil {
 		return fmt.Errorf("starting %s: %w", prep, err)
 	}
-	defer func() { _ = ops.Remove(context.WithoutCancel(ctx), prep) }()
 	if !espera && (mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed) {
 		return fmt.Errorf("%s is running but not ready (%s): see kling logs %s", prep, mc.Ready, prep)
 	}
@@ -266,7 +274,8 @@ func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []stri
 	limite := time.Now().Add(d)
 	var ultimo error
 	for {
-		res, err := ops.Exec(ctx, ref, api.ExecRequest{Cmd: argv, TimeoutSeconds: max(int(plazo.Seconds()), 1)},
+		// Con el usuario del servicio (el user: del compose), como Docker.
+		res, err := ops.Exec(ctx, ref, api.ExecRequest{Cmd: argv, TimeoutSeconds: max(int(plazo.Seconds()), 1), User: api.ExecUserService},
 			func(string, []byte) error { return nil })
 		switch {
 		case err == nil && res.ExitCode == 0 && !res.TimedOut:

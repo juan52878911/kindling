@@ -203,6 +203,13 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		if c, ok := checkOtroVMM(in.snaps, in.info); ok {
 			out = append(out, c)
 		}
+		// Máquinas a medio camino que el daemon sigue reintentando: un freeze
+		// que no pudo reanudarla, un rm cuyo VMM sobrevivió al SIGKILL.
+		for _, a := range in.info.Stuck {
+			out = append(out, doctorCheck{Name: "machine " + a.Name, State: doctorWarn,
+				Detail: a.Transition + ": " + a.Problem,
+				Fix:    fmt.Sprintf("if it does not clear by itself, look at pid %d (ps -p %d) and restart the daemon", a.PID, a.PID)})
+		}
 		for _, p := range in.info.PoolProblems {
 			c := doctorCheck{Name: "pool " + p.Template, State: doctorWarn,
 				Detail: fmt.Sprintf("%d/%d ready; could not pre-warm a copy: %s", p.Ready, p.Size, firstLine(p.Error))}

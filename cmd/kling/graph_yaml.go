@@ -458,6 +458,11 @@ func escalarPlano(s string) any {
 	case "false", "False", "FALSE":
 		return false
 	}
+	// Un cero delante (PIN: 0123, un código postal) se queda como texto: como
+	// número perdería el cero, y en un entorno lo que cuenta es el texto.
+	if d := strings.TrimLeft(s, "+-"); len(d) > 1 && d[0] == '0' {
+		return s
+	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return n
 	}

@@ -19,12 +19,23 @@ package share
 // Los cambios que hace el propio invitado también llegan al vigilante del
 // host: se descartan los de rutas que el invitado tocó hace menos de
 // guestEcho, o sus herramientas verían cada cambio dos veces.
+//
+// Si el sistema pierde eventos (la cola de inotify se desborda: IN_Q_OVERFLOW)
+// no se sabe qué cambió, así que se repasa todo lo vigilado (resync): cada
+// directorio contra su foto y cada fichero contra su huella (tamaño, mtime,
+// inodo), y se avisa de lo que difiera. Si no se puede vigilar una ruta más
+// (el tope de descriptores de kqueue) se dice una vez en el log: esa ruta se
+// ve al caducar la caché de 1 s, pero sus vigilantes del invitado no disparan.
 
 import (
 	"container/list"
 	"errors"
 	"io"
+	"io/fs"
+	"log"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	proto "github.com/juan52878911/kindling/pkg/share"
@@ -46,11 +57,39 @@ var (
 // errNoWatch: este sistema no tiene con qué vigilar.
 var errNoWatch = errors.New("no host file watching on this system")
 
+// errWatchFull: no caben más vigilancias (descriptores de kqueue, o
+// max_user_watches de inotify).
+var errWatchFull = errors.New("too many watched paths")
+
 // rawEvent es lo que cuenta el sistema de un elemento vigilado.
 type rawEvent struct {
 	rel  string
 	dir  bool // es un directorio: cambió su lista de entradas
 	gone bool // se borró, se movió o se revocó
+	// overflow: el sistema perdió eventos (rel no cuenta); hay que repasarlo
+	// todo.
+	overflow bool
+}
+
+// Avisos de una vez por daemon: se pierden eventos o no caben más vigilancias.
+var (
+	overflowLogged atomic.Bool
+	fullLogged     atomic.Bool
+)
+
+// fingerprint es lo que se compara de un fichero vigilado tras perder eventos.
+type fingerprint struct {
+	size, mtime int64
+	ino         uint64
+	mode        fs.FileMode
+}
+
+func fingerprintOf(fi fs.FileInfo) fingerprint {
+	f := fingerprint{size: fi.Size(), mtime: fi.ModTime().UnixNano(), mode: fi.Mode()}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		f.ino = uint64(st.Ino)
+	}
+	return f
 }
 
 // watchBackend es kqueue o inotify. add y remove los llama el watcher con su
@@ -65,6 +104,7 @@ type watchEntry struct {
 	rel  string
 	dir  bool
 	snap map[string]bool // dir: sus nombres; nil si no se tomó
+	fp   fingerprint     // fichero: su huella al vigilarlo o al último aviso
 	el   *list.Element
 }
 
@@ -81,6 +121,8 @@ type watcher struct {
 	echo    map[string]time.Time
 	pend    map[string]rawEvent
 	timer   *time.Timer
+	// resync: se perdieron eventos; el próximo flush lo repasa todo.
+	resync bool
 }
 
 // newWatcher arranca la vigilancia de s para una sesión. push manda una trama
@@ -135,11 +177,16 @@ func (w *watcher) note(rel string, dir bool) {
 		w.dropLocked(w.lru.Back().Value.(*watchEntry))
 	}
 	if err := w.be.add(rel, dir); err != nil {
+		if errors.Is(err, errWatchFull) && fullLogged.CompareAndSwap(false, true) {
+			log.Printf("share %s: too many watched paths in the daemon; changes to the rest are seen after the 1 s cache and do not wake guest watchers", w.srv.dir)
+		}
 		return
 	}
 	e := &watchEntry{rel: rel, dir: dir}
 	if dir {
 		e.snap = w.snapshot(rel)
+	} else {
+		e.fp = w.fingerprint(rel)
 	}
 	e.el = w.lru.PushFront(e)
 	w.entries[rel] = e
@@ -168,6 +215,15 @@ func (w *watcher) touched(rels ...string) {
 	}
 }
 
+// fingerprint es la huella actual de rel (cero si no se puede leer).
+func (w *watcher) fingerprint(rel string) fingerprint {
+	fi, err := w.srv.root.Lstat(relPath(rel))
+	if err != nil {
+		return fingerprint{}
+	}
+	return fingerprintOf(fi)
+}
+
 // snapshot lee los nombres de un directorio (nil si no se puede o es enorme).
 func (w *watcher) snapshot(rel string) map[string]bool {
 	f, err := w.srv.root.Open(relPath(rel))
@@ -193,11 +249,15 @@ func (w *watcher) event(ev rawEvent) {
 	if w.closed {
 		return
 	}
-	if old, ok := w.pend[ev.rel]; ok {
+	if ev.overflow {
+		w.resync = true
+	} else if old, ok := w.pend[ev.rel]; ok {
 		ev.gone = ev.gone || old.gone
 		ev.dir = ev.dir || old.dir
 	}
-	w.pend[ev.rel] = ev
+	if !ev.overflow {
+		w.pend[ev.rel] = ev
+	}
 	if w.timer == nil {
 		w.timer = time.AfterFunc(watchDebounce, w.flush)
 	} else {
@@ -219,6 +279,10 @@ func (w *watcher) flush() {
 	}
 	pend := w.pend
 	w.pend = map[string]rawEvent{}
+	if w.resync {
+		w.resync = false
+		w.resyncLocked(pend)
+	}
 	now := time.Now()
 	for r, t := range w.echo {
 		if now.Sub(t) > guestEcho {
@@ -284,12 +348,37 @@ func (w *watcher) flush() {
 			}
 			e.snap = now
 		default:
+			e.fp = w.fingerprint(ev.rel)
 			add(proto.EventModify, ev.rel)
 		}
 	}
 	w.mu.Unlock()
 	for _, m := range out {
 		w.push(proto.Push(m.ev, m.rel))
+	}
+}
+
+// resyncLocked añade a pend un evento por cada ruta vigilada que pudo cambiar
+// sin que se supiera: los directorios siempre (flush los compara con su foto y
+// solo avisa de lo que difiera), los ficheros si su huella no es la de antes, y
+// lo que ya no existe como borrado.
+func (w *watcher) resyncLocked(pend map[string]rawEvent) {
+	if overflowLogged.CompareAndSwap(false, true) {
+		log.Printf("share %s: the host lost change events; rescanning the %d watched paths (logged once)", w.srv.dir, len(w.entries))
+	}
+	for r, e := range w.entries {
+		if _, ok := pend[r]; ok {
+			continue
+		}
+		fi, err := w.srv.root.Lstat(relPath(r))
+		switch {
+		case err != nil || fi.IsDir() != e.dir:
+			pend[r] = rawEvent{rel: r, dir: e.dir, gone: true}
+		case e.dir:
+			pend[r] = rawEvent{rel: r, dir: true}
+		case fingerprintOf(fi) != e.fp:
+			pend[r] = rawEvent{rel: r}
+		}
 	}
 }
 

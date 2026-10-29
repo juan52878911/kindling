@@ -49,6 +49,7 @@ func (fs *fuseFS) symlink(u uint64, parent *node, a []byte) []byte {
 	}
 	c := fs.nodes.lookup(parent, name)
 	c.typ.Store(at.Mode & share.SIFMT)
+	fs.linkChanged(c, at) // la versión de la que el kernel guardará el destino
 	return reply(u, 0, entryOut(c.id, toFattr(at, c.id)))
 }
 

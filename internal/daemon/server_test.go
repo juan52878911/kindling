@@ -7,6 +7,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -349,5 +350,38 @@ func TestGuestTransportsAcotado(t *testing.T) {
 	}
 	if n := len(g.porID); n > maxTransportesInvitado || n == 0 {
 		t.Fatalf("%d transportes, tope %d", n, maxTransportesInvitado)
+	}
+}
+
+// Una máquina congelada mientras un exec espera a su agente (idle_freeze justo
+// al llegar la petición): waitPortMientras se rinde con errDejoDeCorrer en
+// cuanto sigue dice que no, en vez de sondear un reenvío muerto hasta el
+// plazo (30 s en exec). Es lo que deja a objetivoConAgente despertarla y
+// reintentar.
+func TestWaitPortMientrasSeRindeAlCongelarse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // nadie escucha: el reenvío de una máquina ya congelada
+
+	var vueltas atomic.Int32
+	sigue := func() bool { return vueltas.Add(1) < 3 }
+	inicio := time.Now()
+	err = waitPortMientras(context.Background(), addr, 10*time.Second, sigue)
+	if !errors.Is(err, errDejoDeCorrer) {
+		t.Fatalf("waitPortMientras = %v; quería errDejoDeCorrer", err)
+	}
+	if d := time.Since(inicio); d > 2*time.Second {
+		t.Fatalf("tardó %s en rendirse con la máquina parada; debía ser casi inmediato", d)
+	}
+	// Sin sigue, el comportamiento de siempre: espera hasta el plazo.
+	inicio = time.Now()
+	if err := waitPort(context.Background(), addr, 300*time.Millisecond); err == nil || errors.Is(err, errDejoDeCorrer) {
+		t.Fatalf("waitPort = %v; quería el error del plazo", err)
+	}
+	if d := time.Since(inicio); d < 250*time.Millisecond {
+		t.Fatalf("waitPort se rindió a los %s, antes del plazo", d)
 	}
 }

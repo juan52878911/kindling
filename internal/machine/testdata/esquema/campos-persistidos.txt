@@ -44,8 +44,10 @@ state.json api.Machine mem_mib int
 state.json api.Machine mem_shared bool
 state.json api.Machine name string
 state.json api.Machine net_index int
+state.json api.Machine net_mibps int
 state.json api.Machine on_ttl string
 state.json api.Machine pid int
+state.json api.Machine published []api.PortPublish
 state.json api.Machine ready string
 state.json api.Machine share_wait int
 state.json api.Machine shares []api.ShareAttachment
@@ -58,9 +60,13 @@ state.json api.Machine transition string
 state.json api.Machine ttl_at *time.Time
 state.json api.Machine ttl_seconds int
 state.json api.Machine vcpus int
+state.json api.Machine vmm string
 state.json api.Machine volume_wait bool
 state.json api.Machine volumes []api.VolumeAttachment
 state.json api.Machine wake *api.WakePhases
+state.json api.PortPublish guest int
+state.json api.PortPublish host int
+state.json api.PortPublish proto string
 state.json api.ShareAttachment image_bytes int64
 state.json api.ShareAttachment mode string
 state.json api.ShareAttachment mount string

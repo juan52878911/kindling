@@ -152,6 +152,9 @@ func (fs *fuseFS) apply(ev pushEvent) {
 		// y esto no hace nada.
 		if c := fs.nodes.child(parent, name); c != nil {
 			fs.notifyDel(parent.id, c.id, name)
+			// Y fuera de la tabla: si el host vuelve a crear el nombre, es otro
+			// nodo, no el borrado.
+			fs.nodes.detach(parent, name)
 		}
 		fs.notifyInode(parent.id)
 	}

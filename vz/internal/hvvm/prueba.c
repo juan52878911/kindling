@@ -7,8 +7,10 @@
 // hvvm_fuzz_darwin_test.go: nada de esto debe colgar ni romper el proceso.
 // Sin VM, hv_gic_set_spi falla sin más (no hay GIC) y el globo no puede
 // remapear (no hay fichero de RAM): los caminos de las colas son los mismos.
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "khv.h"
@@ -24,12 +26,17 @@ static bool blk_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { ret
 
 static void w(mmio_fn f, uint64_t off, uint64_t v) { f(off, true, &v, 4); }
 
-int khv_prueba(const uint8_t *d, size_t n) {
+// La RAM de mentira lleva detrás una página sin permisos: lo que se salga de
+// ella por poco (un anillo mal medido) rompe el proceso aquí mismo, sin
+// esperar a que el desbordamiento pise algo que se note.
+static int preparar(void) {
   static bool listo;
   if (!listo) {
+    size_t pag = (size_t)getpagesize();
+    uint8_t *ram = mmap(NULL, PRUEBA_RAM + pag, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED || mprotect(ram + PRUEBA_RAM, pag, PROT_NONE) != 0) return -1;
     g_ram_size = PRUEBA_RAM;
-    g_ram = calloc(1, PRUEBA_RAM);
-    if (!g_ram) return -1;
+    g_ram = ram;
     char ruta[] = "/tmp/kling-hv-prueba.XXXXXX";
     int fd = mkstemp(ruta);
     if (fd < 0) return -1;
@@ -45,6 +52,11 @@ int khv_prueba(const uint8_t *d, size_t n) {
     if (vballoon_init(52, true) != 0) return -1;
     listo = true;
   }
+  return 0;
+}
+
+int khv_prueba(const uint8_t *d, size_t n) {
+  if (preparar() != 0) return -1;
   // Las primeras 64 B programan el dispositivo; el resto es la RAM.
   if (n < 64) return 0;
   memset(g_ram, 0, g_ram_size);
@@ -84,4 +96,101 @@ int khv_prueba(const uint8_t *d, size_t n) {
   w(f, 0x064, 0xff);  // InterruptACK
   w(f, 0x070, 0);
   return 0;
+}
+
+// ---- carrera de los registros de la cola contra el hilo del disco ----
+
+static volatile bool carrera_fin;
+
+// El invitado hostil: con la cola en marcha, la desarma, le pone el tamaño
+// máximo y la vuelve a armar, una y otra vez, desde otro vCPU.
+static void *carrera_vcpu(void *a) {
+  (void)a;
+  while (!carrera_fin) {
+    w(blk_mmio, 0x044, 0);
+    w(blk_mmio, 0x038, QMAX);
+    w(blk_mmio, 0x044, 1);
+    w(blk_mmio, 0x038, 4);  // con la cola lista: debe ignorarse
+    w(blk_mmio, 0x044, 0);
+    w(blk_mmio, 0x038, 4);
+    w(blk_mmio, 0x044, 1);
+  }
+  return NULL;
+}
+
+// khv_prueba_carrera atiende iters lecturas del disco mientras otro hilo
+// cambia el QueueNum. El used de 4 entradas acaba justo al final de la RAM:
+// un avail_event calculado con el QueueNum vivo (256) en vez del que comprobó
+// vq_ptrs (4) cae 2 KiB más allá, en la página de guarda. Devuelve cuántas
+// peticiones se respondieron, o -1 si no se pudo preparar; también comprueba
+// que con la cola lista el QueueNum no cambia (-2 si cambió).
+// armar_blk deja el disco 0 con una cola de 4 entradas lista: la tabla en el
+// principio de la RAM, el avail en +0x1000 y el used al final.
+static const uint64_t desc = RAM_BASE, avail = RAM_BASE + 0x1000, used = RAM_BASE + PRUEBA_RAM - 40;
+static void armar_blk(void) {
+  memset(g_ram, 0, g_ram_size);
+  w(blk_mmio, 0x070, 0);
+  w(blk_mmio, 0x024, 0);
+  w(blk_mmio, 0x020, 1u << 29);  // VIRTIO_RING_F_EVENT_IDX
+  w(blk_mmio, 0x030, 0);
+  w(blk_mmio, 0x038, 4);
+  w(blk_mmio, 0x080, (uint32_t)desc);
+  w(blk_mmio, 0x090, (uint32_t)avail);
+  w(blk_mmio, 0x0a0, (uint32_t)used);
+  w(blk_mmio, 0x084, 0);
+  w(blk_mmio, 0x094, 0);
+  w(blk_mmio, 0x0a4, 0);
+  w(blk_mmio, 0x044, 1);
+  w(blk_mmio, 0x070, 0xf);
+}
+
+int khv_prueba_carrera(int iters) {
+  if (preparar() != 0) return -1;
+  armar_blk();
+  // Con la cola lista, ni el tamaño ni las direcciones se mueven.
+  w(blk_mmio, 0x038, QMAX);
+  w(blk_mmio, 0x0a0, (uint32_t)(used - 0x1000));
+  struct vblk_state st;
+  vblk_get(0, &st);
+  if (st.q.num != 4 || st.q.used != used) return -2;
+
+  // Una lectura de un sector: cabecera (16 B), datos (512 B) y estado (1 B).
+  struct vdesc *d = gpa_ptr(desc, 3 * sizeof *d);
+  d[0] = (struct vdesc){RAM_BASE + 0x2000, 16, VIRTQ_DESC_F_NEXT, 1};
+  d[1] = (struct vdesc){RAM_BASE + 0x3000, 512, VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE, 2};
+  d[2] = (struct vdesc){RAM_BASE + 0x4000, 1, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(avail, 6 + 2 * 4);
+  carrera_fin = false;
+  pthread_t h;
+  if (pthread_create(&h, NULL, carrera_vcpu, NULL) != 0) return -1;
+  int hechas = 0;
+  for (int i = 0; i < iters; i++) {
+    av[2 + (uint16_t)i % 4] = 0;
+    __atomic_store_n(&av[1], (uint16_t)(i + 1), __ATOMIC_RELEASE);
+    vblk_prueba(0);
+    hechas = *(volatile uint16_t *)gpa_ptr(used + 2, 2);
+  }
+  carrera_fin = true;
+  pthread_join(h, NULL);
+  w(blk_mmio, 0x070, 0);
+  return hechas;
+}
+
+// khv_prueba_flush manda un FLUSH al disco 0 (un fichero normal, no
+// desechable) y devuelve el byte de estado: 0 si el F_FULLFSYNC fue bien.
+int khv_prueba_flush(void) {
+  if (preparar() != 0) return -1;
+  armar_blk();
+  struct vdesc *d = gpa_ptr(desc, 2 * sizeof *d);
+  d[0] = (struct vdesc){RAM_BASE + 0x2000, 16, VIRTQ_DESC_F_NEXT, 1};
+  d[1] = (struct vdesc){RAM_BASE + 0x4000, 1, VIRTQ_DESC_F_WRITE, 0};
+  *(uint32_t *)gpa_ptr(RAM_BASE + 0x2000, 4) = 4;  // VIRTIO_BLK_T_FLUSH
+  *(uint8_t *)gpa_ptr(RAM_BASE + 0x4000, 1) = 0xff;
+  uint16_t *av = gpa_ptr(avail, 6 + 2 * 4);
+  av[2] = 0;
+  __atomic_store_n(&av[1], 1, __ATOMIC_RELEASE);
+  vblk_prueba(0);
+  int estado = *(volatile uint8_t *)gpa_ptr(RAM_BASE + 0x4000, 1);
+  w(blk_mmio, 0x070, 0);
+  return estado;
 }

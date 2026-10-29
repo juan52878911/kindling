@@ -101,6 +101,11 @@ type Machine struct {
 	// Linux va vacío e IP basta. No leerlo a mano: usar Addr.
 	Forwards map[string]string `json:"forwards,omitempty"`
 
+	// Published son los puertos que el daemon publica en 127.0.0.1 para esta
+	// máquina (api.PortPublish). No se guarda con la máquina: lo pone el
+	// daemon al responder a POST /machines con Publish.
+	Published []PortPublish `json:"published,omitempty"`
+
 	// AllowDomains son los dominios permitidos con egress "allowlist". Viajan con
 	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
 	AllowDomains []string `json:"allow_domains,omitempty"`
@@ -111,6 +116,9 @@ type Machine struct {
 	// la receta ni del daemon. Entonces no hay impulso de arranque: manda
 	// también mientras arranca. Viaja con la máquina para que un thaw lo sepa.
 	CPUPctFixed bool `json:"cpu_pct_fixed,omitempty"`
+	// NetMiBps es el caudal de red que pidió quien la arrancó (0 = el del
+	// daemon). Viaja con la máquina para que un arranque en frío lo repita.
+	NetMiBps int `json:"net_mibps,omitempty"`
 	// CPUBoostPct es el techo con el que corre AHORA mientras termina de
 	// arrancar (impulso hasta la sonda de listo; ver
 	// internal/machine/arranque_cpu.go); 0 = su techo de siempre. Como
@@ -198,6 +206,12 @@ type Machine struct {
 	// como GuestAgent vacío: contestó, pero no dice nada de sí mismo.
 	Agent *GuestAgent `json:"agent,omitempty"`
 
+	// VMM es el VMM (y su versión) que la lanzó por última vez ("kling-vz
+	// 0.19.0", "firecracker 1.12.0"): con él se sella su volcado y se graba el
+	// dorado que se haga de ella, aunque el daemon haya cambiado de backend
+	// desde entonces. Vacío = lanzada por un daemon anterior.
+	VMM string `json:"vmm,omitempty"`
+
 	// Transition dice que una operación de ciclo de vida que va a sacarla de
 	// su estado está en curso ahora mismo (TransitionFreezing, ...). La
 	// máquina sigue figurando con su State de antes hasta que termina: un
@@ -232,6 +246,16 @@ type Machine struct {
 	// es solo la carga del snapshot; Wake.TotalMS es lo que de verdad esperó
 	// quien pidió el thaw (ver docs/despertar.md).
 	Wake *WakePhases `json:"wake,omitempty"`
+}
+
+// StuckMachine es una máquina atascada a mitad de una operación (Info.Stuck).
+type StuckMachine struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	PID        int       `json:"pid,omitempty"`
+	Transition string    `json:"transition"`
+	Since      time.Time `json:"since,omitempty"`
+	Problem    string    `json:"problem"`
 }
 
 // WakePhases es el desglose de un despertar en el daemon, en milisegundos.
@@ -327,6 +351,13 @@ type RunRequest struct {
 	// imagen como si fuera un flag.
 	CPUPctDefault int `json:"cpu_pct_default,omitempty"`
 
+	// NetMiBps es el caudal de red de la máquina en MiB/s, en cada sentido
+	// (el limitador de Firecracker). 0 = el del daemon (daemon.net_mibps, 16
+	// por defecto). Las carpetas compartidas viajan por la red: run -share y
+	// compose piden más. Con From no se aplica: la copia hereda el del
+	// dorado. En macOS no hay limitador y se ignora.
+	NetMiBps int `json:"net_mibps,omitempty"`
+
 	// WaitReady: no contestar hasta que el invitado esté listo según su imagen
 	// (ver ready.go), o hasta ReadyTimeoutSeconds (por defecto 120). La
 	// máquina se devuelve igual si no llega: Machine.Ready dice cómo quedó.
@@ -382,6 +413,11 @@ type RunRequest struct {
 	// el mismo número de carpetas vivas) las reciben tras restaurar. Un agente
 	// anterior lo ignora y arranca el servicio en seguida.
 	ShareWait int `json:"share_wait,omitempty"`
+	// Publish son puertos que el daemon publica en 127.0.0.1 en cuanto la
+	// máquina existe (como POST /machines/{ref}/publish). Todos o ninguno:
+	// uno ocupado falla la creación antes de arrancar nada. Un daemon sin
+	// api.CapabilityPublish lo ignora.
+	Publish []PortPublish `json:"publish,omitempty"`
 	// Entrypoint y Cmd sustituyen a los de la imagen para el servicio de esta
 	// máquina, sin hornear otra imagen: el ENTRYPOINT y el CMD de Docker
 	// (`docker run --entrypoint x img args...`). Cmd solo cambia los
@@ -947,6 +983,24 @@ type ProcStat struct {
 	State   State  `json:"state"`
 	PID     int    `json:"pid,omitempty"`
 	PSSMiB  int64  `json:"pss_mib"`
+	// FootprintMiB es su memoria en macOS (phys_footprint del VMM, del
+	// auxiliar de Apple y de sus hijos: lo que Monitor de Actividad llama
+	// memoria). Allí PSSMiB lleva la misma cifra, para clientes anteriores.
+	// 0 en Linux, donde la cifra buena es el PSS.
+	FootprintMiB int64 `json:"footprint_mib,omitempty"`
+	// CPUSeconds es la CPU que ha gastado su VMM (con el auxiliar y los hijos
+	// en macOS) desde que se lanzó; 0 = no se sabe. En Apple Silicon,
+	// CPUPSeconds es la parte que corrió en núcleos de rendimiento y el resto
+	// en los de eficiencia (CoreSplit dice que el reparto se conoce).
+	CPUSeconds  float64 `json:"cpu_seconds,omitempty"`
+	CPUPSeconds float64 `json:"cpu_p_seconds,omitempty"`
+	CoreSplit   bool    `json:"core_split,omitempty"`
+	// EnergyJoules es la energía que el sistema le atribuye (macOS, en
+	// julios, desde que se lanzó); 0 = no se sabe.
+	EnergyJoules float64 `json:"energy_joules,omitempty"`
+	// StateSince es desde cuándo está en su estado (arranque, congelación,
+	// pausa, parada o fallo); nil si no consta.
+	StateSince *time.Time `json:"state_since,omitempty"`
 }
 
 // ProcStats es la respuesta de GET /procstats: el consumo del conjunto.
@@ -961,6 +1015,9 @@ type ProcStats struct {
 	// daemon no la da (Linux, o un daemon anterior). Con AvailableMiB da el
 	// nivel de memoria con el que el gateway reparte el nivel pausada.
 	TotalMiB int64 `json:"total_mib,omitempty"`
+	// MemoryKind es qué mide la memoria por máquina: "pss" (Linux) o
+	// "footprint" (macOS). Vacío = daemon anterior ("pss").
+	MemoryKind string `json:"memory_kind,omitempty"`
 }
 
 // Info describe el daemon.
@@ -988,6 +1045,10 @@ type Info struct {
 	// daemon.vmm auto (macOS), "daemon.vmm hv", "KLING_VMM=vz". Vacío en Linux
 	// y en daemons anteriores.
 	BackendReason string `json:"backend_reason,omitempty"`
+	// Stuck son las máquinas que el daemon no logró llevar al estado pedido y
+	// sigue reintentando (un freeze que no pudo reanudarla, un rm cuyo VMM
+	// sobrevivió al SIGKILL). Vacío = ninguna. Lo enseña `kling doctor`.
+	Stuck []StuckMachine `json:"stuck,omitempty"`
 	// PoolProblems son los fondos precalentados (kling template pool) que no
 	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
 	// Vacío = todos bien o ninguno.

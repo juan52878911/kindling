@@ -372,3 +372,129 @@ func TestCerrarSueltaArrendamiento(t *testing.T) {
 		t.Fatal("un cierre propio no es un corte del daemon")
 	}
 }
+
+// rechazador es un destino que acepta y corta con RST tras espera: lo que
+// hace el reenvío de kling-vz cuando en el invitado nadie escucha.
+func rechazador(t *testing.T, espera time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				time.Sleep(espera)
+				_ = c.(*net.TCPConn).SetLinger(0)
+				c.Close()
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// invitadoAbortable es la conexión del invitado de vnet: Abort es un RST.
+type invitadoAbortable struct {
+	net.Conn
+	abortada chan struct{}
+}
+
+func (c *invitadoAbortable) Abort() {
+	_ = c.Conn.(*net.TCPConn).SetLinger(0)
+	c.Conn.Close()
+	close(c.abortada)
+}
+
+// 1.4: un servicio de una arista que aún no escucha da un RST al invitado en
+// seguida (como Docker), no una conexión aceptada que se cierra sin más.
+func TestServeDestinoQueNoEscuchaDaRST(t *testing.T) {
+	// El RST ya llegó cuando se mira: se rechaza el SYN, sin aceptar.
+	inmediato := rechazador(t, 0)
+	d := &daemonFalso{t: t, decidir: func(linkbroker.Request) (string, error) { return inmediato, nil }}
+	g := NewConDial(d.dial, nil, nil)
+	if err := g.Set([]Enlace{{Host: "db.graph", Port: 5432}}); err != nil {
+		t.Fatal(err)
+	}
+	rechazos, aceptadas := 0, 0
+	for i := 0; i < 20; i++ {
+		rechazada := false
+		_, red := parTCP(t)
+		inv := &invitadoAbortable{Conn: red, abortada: make(chan struct{})}
+		inicio := time.Now()
+		g.Serve(context.Background(), 5432, func() (net.Conn, error) { aceptadas++; return inv, nil }, func() { rechazada = true })
+		if time.Since(inicio) > time.Second {
+			t.Fatalf("tardó %s", time.Since(inicio))
+		}
+		if rechazada {
+			rechazos++
+			continue
+		}
+		// Llegó después de mirar: el invitado recibe un RST tras aceptar.
+		select {
+		case <-inv.abortada:
+		default:
+			t.Fatal("aceptada y sin RST")
+		}
+	}
+	if rechazos == 0 {
+		t.Logf("ningún RST llegó antes de mirar (%d aceptadas y abortadas)", aceptadas)
+	}
+
+	// El RST llega con la conexión ya aceptada: RST también al invitado.
+	tarde := rechazador(t, 50*time.Millisecond)
+	g = NewConDial((&daemonFalso{t: t, decidir: func(linkbroker.Request) (string, error) { return tarde, nil }}).dial, nil, nil)
+	if err := g.Set([]Enlace{{Host: "db.graph", Port: 5432}}); err != nil {
+		t.Fatal(err)
+	}
+	invitado, red := parTCP(t)
+	inv := &invitadoAbortable{Conn: red, abortada: make(chan struct{})}
+	hecho := make(chan struct{})
+	go func() {
+		defer close(hecho)
+		g.Serve(context.Background(), 5432, func() (net.Conn, error) { return inv, nil }, func() { t.Error("rechazó antes del RST") })
+	}()
+	_ = invitado.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err := invitado.Read(make([]byte, 1))
+	if err == nil || !strings.Contains(err.Error(), "reset") {
+		t.Fatalf("el invitado leyó %v, quería connection reset", err)
+	}
+	select {
+	case <-hecho:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve no terminó")
+	}
+
+	// Un servidor que habla primero: lo que ya mandó no se pierde al mirar.
+	saluda, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer saluda.Close()
+	go func() {
+		c, err := saluda.Accept()
+		if err == nil {
+			io.WriteString(c, "220 hola\n")
+			time.Sleep(200 * time.Millisecond)
+			c.Close()
+		}
+	}()
+	g = NewConDial((&daemonFalso{t: t, decidir: func(linkbroker.Request) (string, error) { return saluda.Addr().String(), nil }}).dial, nil, nil)
+	if err := g.Set([]Enlace{{Host: "db.graph", Port: 5432}}); err != nil {
+		t.Fatal(err)
+	}
+	invitado, red = parTCP(t)
+	go g.Serve(context.Background(), 5432, func() (net.Conn, error) {
+		time.Sleep(20 * time.Millisecond) // que el saludo ya esté cuando se mira
+		return red, nil
+	}, func() { t.Error("rechazada") })
+	_ = invitado.SetReadDeadline(time.Now().Add(3 * time.Second))
+	b, err := io.ReadAll(invitado)
+	if string(b) != "220 hola\n" {
+		t.Fatalf("saludo = %q, %v", b, err)
+	}
+}

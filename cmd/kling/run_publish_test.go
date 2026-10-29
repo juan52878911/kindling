@@ -9,15 +9,17 @@ import (
 
 func TestPublishFlag(t *testing.T) {
 	var p publishFlag
-	for _, v := range []string{"8080:80", "5432", "127.0.0.1:9229:9229", "6000:6379/tcp"} {
+	for _, v := range []string{"8080:80", "5432", "127.0.0.1:9229:9229", "6000:6379/tcp", ":3000", "5353:53/udp"} {
 		if err := p.Set(v); err != nil {
 			t.Fatalf("-p %s: %v", v, err)
 		}
 	}
-	if want := (publishFlag{{8080, 80}, {5432, 5432}, {9229, 9229}, {6000, 6379}}); !reflect.DeepEqual(p, want) {
-		t.Errorf("-p = %v", p)
+	want := publishFlag{{Host: 8080, Guest: 80}, {Host: 5432, Guest: 5432}, {Host: 9229, Guest: 9229}, {Host: 6000, Guest: 6379},
+		{Host: 0, Guest: 3000}, {Host: 5353, Guest: 53, Proto: api.ProtoUDP}}
+	if !reflect.DeepEqual(p, want) {
+		t.Errorf("-p = %+v", p)
 	}
-	for _, v := range []string{"0.0.0.0:80:80", "a:80", "1:2:3:4", "70000:1"} {
+	for _, v := range []string{"0.0.0.0:80:80", "a:80", "1:2:3:4", "70000:1", "80:"} {
 		if err := p.Set(v); err == nil {
 			t.Errorf("-p %s accepted", v)
 		}
@@ -25,7 +27,9 @@ func TestPublishFlag(t *testing.T) {
 }
 
 func TestConPuertos(t *testing.T) {
-	got := conPuertos(map[string]string{api.LabelPorts: "9000, 80", "x": "y"}, [][2]int{{8080, 80}, {3001, 3000}})
+	got := conPuertos(map[string]string{api.LabelPorts: "9000, 80", "x": "y"},
+		publishFlag{{Host: 8080, Guest: 80}, {Host: 3001, Guest: 3000}, {Host: 53, Guest: 53, Proto: api.ProtoUDP}})
+	// El de UDP no: kling.ports son los TCP que el host alcanza.
 	if got[api.LabelPorts] != "80,3000,9000" || got["x"] != "y" {
 		t.Errorf("labels = %v", got)
 	}

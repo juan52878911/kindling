@@ -67,7 +67,7 @@ func (m *Manager) imageLayer(image string) (base, layer string, err error) {
 	// sin validarlo, "../machines/<id>/overlay" arrancaba sobre el disco de
 	// otra máquina, y "../volumes/x" leía un volumen ajeno con debugfs.
 	if !validName.MatchString(image) {
-		return "", "", fmt.Errorf("invalid image name %q", image)
+		return "", "", marcado(ErrInvalidName, "invalid image name %q", image)
 	}
 	mono := m.imagePath(image)
 	if _, err := os.Stat(mono); err == nil {
@@ -78,7 +78,7 @@ func (m *Manager) imageLayer(image string) (base, layer string, err error) {
 
 	layer = m.layerPath(image)
 	if _, serr := os.Stat(layer); serr != nil {
-		return "", "", fmt.Errorf("can't find image %q in %s", image, mono)
+		return "", "", marcado(ErrNoImage, "can't find image %q in %s", image, mono)
 	}
 
 	// La base sale de la receta, que puede haber subido quien subió la

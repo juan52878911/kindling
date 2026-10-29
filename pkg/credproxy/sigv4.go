@@ -108,6 +108,8 @@ type firmaInvitado struct {
 	presignada bool
 	// fecha es X-Amz-Date de una URL prefirmada.
 	fecha time.Time
+	// firma es la que puso el invitado: sustituye a la emitida en los ecos.
+	firma string
 }
 
 // leerFirmaInvitado extrae la firma SigV4 de r. (nil, nil) es que no lleva
@@ -130,6 +132,8 @@ func leerFirmaInvitado(r *http.Request) (*firmaInvitado, error) {
 				f.accessKey, _, _ = strings.Cut(v, "/")
 			case "SignedHeaders":
 				f.firmadas = strings.Split(strings.ToLower(v), ";")
+			case "Signature":
+				f.firma = v
 			}
 		}
 		if f.accessKey == "" || len(f.firmadas) == 0 {
@@ -143,7 +147,7 @@ func leerFirmaInvitado(r *http.Request) (*firmaInvitado, error) {
 	if a := q.Get("X-Amz-Algorithm"); a != algoSigV4 {
 		return nil, errors.New("unsupported signature algorithm " + a)
 	}
-	f := firmaInvitado{presignada: true, firmadas: strings.Split(strings.ToLower(q.Get("X-Amz-SignedHeaders")), ";")}
+	f := firmaInvitado{presignada: true, firmadas: strings.Split(strings.ToLower(q.Get("X-Amz-SignedHeaders")), ";"), firma: q.Get("X-Amz-Signature")}
 	f.accessKey, _, _ = strings.Cut(q.Get("X-Amz-Credential"), "/")
 	t, err := time.Parse(formatoFecha, q.Get("X-Amz-Date"))
 	if err != nil || f.accessKey == "" {

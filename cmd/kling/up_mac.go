@@ -8,8 +8,11 @@ package main
 // como el usuario, y lo que falta se instala con Homebrew o con `make vz`.
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +21,9 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/upgrade"
+	"github.com/juan52878911/kindling/internal/zstd"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // launchAgentLabel es la etiqueta del agente de launchd que docs/mac.md
@@ -116,7 +122,8 @@ func checksMac(p probeMac) []check {
 	if macOS == "" {
 		macOS = "unknown version"
 	}
-	copyHint := "kling image copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
+	copyHint := "kling up            # downloads min and the kernel from this version's release; or:\n" +
+		"kling image copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
 	backend := p.backend
 	if backend == "" {
 		backend = machine.BackendVZ
@@ -179,7 +186,7 @@ func checksMac(p probeMac) []check {
 		{
 			label: "guest kernel", ok: p.kernel,
 			found: presence(p.kernel, "present", "missing from "+filepath.Join(p.root, "images")),
-			why:   "images can't be built on macOS: they are copied from a Linux arm64 daemon",
+			why:   "images can't be built on macOS: they come with the release or from a Linux arm64 daemon",
 			fix:   []string{copyHint},
 		},
 		{
@@ -195,6 +202,17 @@ func checksMac(p probeMac) []check {
 // Con install escribe antes el agente de launchd (launchd_mac.go).
 func upMac(root, endpoint string, checkOnly, install bool) error {
 	p := localProbeMac(root)
+	// Sin kernel o sin min, y con una release que los publica: se bajan,
+	// verificados con su SHA256SUMS, en vez de pedir un host Linux.
+	if !checkOnly && (!p.kernel || !p.baseImage) && p.arch == "arm64" {
+		ctx, cancel := ctxWithSignals()
+		err := bajarImagenesMac(ctx, &upgrade.Fuente{}, "v"+strings.TrimPrefix(Version, "v"), root, p.arch, os.Stdout)
+		cancel()
+		if err != nil {
+			fmt.Printf("images:      not downloaded (%v)\n\n", err)
+		}
+		p = localProbeMac(root)
+	}
 	fmt.Printf("kindling — local runtime on macOS (%s)  (data root: %s)\n", p.backend, root)
 	if p.motivo != "" {
 		fmt.Printf("vmm:         %s (%s)\n", p.backend, p.motivo)
@@ -285,4 +303,133 @@ func startMacDaemon(a agenteDaemon, endpoint string) error {
 	fmt.Println("daemon:      started, but not yet responding on the socket.")
 	fmt.Printf("  See why:  tail -n 50 %q\n", a.log)
 	return nil
+}
+
+// Imágenes de la release para un Mac sin host Linux ---------------------------
+
+// imagenMac es un fichero de images/ que la release publica comprimido.
+type imagenMac struct {
+	asset   string // min-arm64.ext4.zst
+	destino string // min.ext4
+	max     int64  // tope de lo descomprimido: un .zst hostil no llena el disco
+}
+
+func imagenesMac(arch string) []imagenMac {
+	return []imagenMac{
+		{asset: "vmlinux-" + arch + ".zst", destino: "vmlinux", max: 256 << 20},
+		{asset: "min-" + arch + ".ext4.zst", destino: "min.ext4", max: 2 << 30},
+	}
+}
+
+// errSinImagenes: la release no trae las imágenes (anterior a v0.20, o una
+// compilación sin etiqueta).
+var errSinImagenes = errors.New("this version's release doesn't publish them")
+
+// bajarImagenesMac deja en root/images el kernel y min de la release etiqueta
+// que falten. Lo mismo que install.sh: https, tamaño acotado y el sha256 de
+// cada asset contra el SHA256SUMS de esa release ANTES de descomprimir nada
+// (upgrade.Fuente). Lo que ya está no se toca.
+func bajarImagenesMac(ctx context.Context, f *upgrade.Fuente, etiqueta, root, arch string, out io.Writer) error {
+	if !upgrade.EtiquetaValida(etiqueta) {
+		return errSinImagenes
+	}
+	dir := filepath.Join(root, "images")
+	var faltan []imagenMac
+	var assets []upgrade.Asset
+	for _, im := range imagenesMac(arch) {
+		if !fileExists(filepath.Join(dir, im.destino)) {
+			faltan = append(faltan, im)
+			// Opcional: una release anterior no los trae y Bajar los omite.
+			assets = append(assets, upgrade.Asset{Nombre: im.asset, Opcional: true})
+		}
+	}
+	if len(faltan) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(dir, ".descarga-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	fmt.Fprintf(out, "images:      downloading %d from the %s release (checked against its SHA256SUMS)\n", len(assets), etiqueta)
+	bajados, err := f.Bajar(ctx, etiqueta, assets, tmp)
+	if err != nil {
+		return err
+	}
+	for _, im := range faltan {
+		if bajados[im.asset] == "" {
+			return errSinImagenes
+		}
+	}
+	for _, im := range faltan {
+		if err := descomprimirImagen(bajados[im.asset], filepath.Join(dir, im.destino), im.max); err != nil {
+			return fmt.Errorf("%s: %w", im.asset, err)
+		}
+		fmt.Fprintf(out, "             ✓ %s\n", filepath.Join(dir, im.destino))
+	}
+	return nil
+}
+
+// descomprimirImagen escribe el zstd src en dst (disperso: los bloques de
+// ceros no ocupan, como el ext4 original) a través de un temporal, para que
+// dst exista solo entero. Más de max bytes descomprimidos es un error.
+func descomprimirImagen(src, dst string, max int64) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".part-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	n, err := copiarDisperso(tmp, io.LimitReader(zstd.NewReader(in), max+1))
+	if err == nil && n > max {
+		err = fmt.Errorf("more than %d MiB once decompressed", max>>20)
+	}
+	if err == nil {
+		err = tmp.Truncate(n)
+	}
+	if err == nil {
+		err = tmp.Chmod(0o644)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return durable.Renombrar(tmp.Name(), dst)
+}
+
+// copiarDisperso copia r en f saltándose (Seek) los bloques de 64 KiB que son
+// todo ceros. Devuelve los bytes leídos; quien llama fija el tamaño final.
+func copiarDisperso(f *os.File, r io.Reader) (int64, error) {
+	const bloque = 64 << 10
+	buf := make([]byte, bloque)
+	ceros := make([]byte, bloque)
+	var n int64
+	for {
+		m, err := io.ReadFull(r, buf)
+		if m > 0 {
+			if bytes.Equal(buf[:m], ceros[:m]) {
+				if _, err := f.Seek(int64(m), io.SeekCurrent); err != nil {
+					return n, err
+				}
+			} else if _, err := f.Write(buf[:m]); err != nil {
+				return n, err
+			}
+			n += int64(m)
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+	}
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -581,11 +582,8 @@ func (c *copia) escribir() error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(c.dir, ficheroCopia+".tmp")
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(c.dir, ficheroCopia))
+	// Durable: es lo que -rollback lee para saber qué devolver tras un corte.
+	return durable.Escribir(filepath.Join(c.dir, ficheroCopia), append(b, '\n'), 0o600)
 }
 
 // AñadirACopia guarda en la última copia de dir los ficheros que se van a
@@ -766,14 +764,13 @@ func colocar(src, dst string) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), dst)
+	// fsync del temporal, rename y fsync del directorio: sin el último, tras
+	// un corte el directorio puede seguir apuntando al binario viejo (o a
+	// ninguno) aunque el rename hubiera vuelto bien.
+	return durable.Renombrar(tmp.Name(), dst)
 }
 
 func nombreSeguro(v string) string {

@@ -65,6 +65,26 @@ brew install e2fsprogs
 kling up -check
 ```
 
+Con **Homebrew**: cada release adjunta su fórmula (`kling.rb`, con la versión y
+el sha256 de cada binario). Instala los mismos binarios firmados (no compila
+nada), depende de e2fsprogs y trae un servicio que corre `kling daemon` como el
+agente de `kling up -install` (no instales los dos):
+
+```sh
+curl -fsSLO https://github.com/juan52878911/kindling/releases/latest/download/kling.rb
+brew install --formula ./kling.rb
+brew services start kling     # o: kling up -install, sin brew services
+```
+
+Así instalado, se actualiza con `brew upgrade kling`; `kling upgrade` lo detecta
+(binarios en el `Cellar`) y lo dice en vez de pisarlos.
+
+**El kernel y `min` vienen con la release** (desde v0.20): `kling up` los baja
+si faltan en `images/` (`vmlinux-arm64.zst` y `min-arm64.ext4.zst`),
+verificados contra el `SHA256SUMS` de la release de ese `kling`, igual que
+`install.sh`. Ya no hace falta un host Linux para el primer `kling run -image
+min`; para el resto de imágenes, ver [Conseguir imágenes](#conseguir-imágenes).
+
 `kling-vz` vive en este repositorio, en `vz/`, como **módulo Go aparte**
 (`github.com/juan52878911/kindling/vz`): necesita cgo y dependencias que el
 núcleo no tiene. Por ser otro módulo, `go test ./...` desde la raíz no entra ahí.
@@ -311,7 +331,15 @@ Mac va con batería, como mucho una vez por minuto (sin cgo no hay
    primer `exec`). Exec, shell, ficheros y las llamadas al invitado
    (`POST /machines/{ref}/guest`) la despiertan solos. Al volver al enchufe se
    reanudan las que pausó este modo (no las que pausaste tú).
-3. **Espacia el vigilante**: una vuelta cada 30 s en vez de cada 10.
+3. **Espacia el vigilante**: una vuelta cada 30 s en vez de cada 10, y cada
+   60 s si no corre ninguna máquina (las pausadas y congeladas no gastan ni
+   tienen QoS que vigilar). Sus vueltas caen siempre en la misma rejilla del
+   reloj (múltiplos de su intervalo), así que las de varios daemons despiertan
+   al Mac a la vez en lugar de repartirse por el minuto.
+
+Una petición que llega justo mientras el modo batería pausa una máquina no se
+queda colgada: al terminar la pausa el daemon mira si entró alguna y, si es
+así, la reanuda en el acto.
 
 Ociosa es: ninguna petición en curso contra ella (un `kling shell` abierto, un
 `exec` largo, `kling logs -f`) ni terminada hace menos de ese plazo, y su
@@ -330,7 +358,42 @@ daemon lo detecta sin notificaciones del sistema: el reloj monotónico no cuenta
 el sueño y el de pared sí. Al despertar, en la siguiente vuelta del vigilante o
 en la primera petición contra una máquina (lo que llegue antes), pone en hora
 las que corren (`POST /resync` del agente, lo mismo que tras un thaw). Las
-pausadas y congeladas se ponen en hora al despertarlas, como siempre.
+congeladas se ponen en hora al despertarlas, como siempre, y las pausadas al
+reanudarlas si la pausa es de antes del sueño: reanudar una pausada es solo
+`Resume`, sin resync, salvo entonces (antes se quedaban con la hora de cuando
+se cerró la tapa, también las que el vigía pausa justo antes de dormir).
+
+## Qué gasta cada máquina: `kling top` y `/metrics`
+
+En macOS no hay `/proc` ni PSS. `kling top` enseña la memoria de cada máquina
+(la huella, `phys_footprint` del VMM, del auxiliar de Apple con vz y de sus
+hijos: lo que Monitor de Actividad llama memoria), su %CPU entre dos fotos (en
+una foto suelta toma dos a un segundo) y, en Apple Silicon, qué parte corrió en
+núcleos de rendimiento:
+
+```
+$ kling top            # M4, kling-hv, un redis recién arrancado y otro congelado
+ID             SERVICE   STATE     MEM      CPU    ON P-CORES
+e526ecd3a3da   —         running   96 MiB   1.3%   47%
+
+1 alive · 1 frozen · total memory 96 MiB
+host: ~4915 MiB available of 16384 MiB (macOS memory level)
+```
+
+Lo lee el daemon sin lanzar procesos: `proc_pid_rusage` (v6) de cada VMM y de
+su auxiliar da la CPU total, la de núcleos P y la energía que macOS le
+atribuye. `/metrics` añade las mismas cifras:
+
+| serie | qué es |
+|---|---|
+| `kling_machine_footprint_mib{id,name,state}` | la huella de cada máquina viva |
+| `kling_machine_cpu_seconds_total{id,name,core}` | CPU desde que se lanzó su VMM; `core="p"` y `"e"` en Apple Silicon, `"all"` en Linux |
+| `kling_machine_energy_joules_total{id,name}` | energía de sus procesos (`ri_energy_nj`), en julios |
+| `kling_machine_state_seconds{id,name,state}` | cuánto lleva en su estado, también las congeladas y paradas |
+| `kling_host_mem_available_mib` | lo que el host aún puede dar: `kern.memorystatus_level` sobre `hw.memsize` en macOS, `MemAvailable` en Linux |
+
+El banco de energía reproducible (`scripts/94-energia-mac.sh`, sin sudo) y lo
+medido están en [benchmarks.md](benchmarks.md#energy-on-the-mac).
 
 ## Límites frente a Linux
 
@@ -347,7 +410,7 @@ pausadas y congeladas se ponen en hora al despertarlas, como siempre.
 | primer `exec` tras un arranque en frío | sondeo con dial a la IP | `GET /kling/probe` a `kling-vz` en intentos de 150 ms: un SYN mandado antes de que suba la red del invitado se pierde y la pila de usuario no lo repite hasta 1 s, justo el plazo del sondeo, que contestaba "cerrado" aunque el agente ya escuchara. Medido en el M4 (redis, 256 MiB): `run` + primer `exec` de 1,37–1,41 s a 0,52–0,59 s, y `run -wait-ready` de 1,19 s a 0,54 s. Lo que queda (~350 ms desde que `run` vuelve) es el arranque del núcleo invitado y del agente |
 | nivel pausada (`kling ai serve`) | `-paused-mib 256` | sin `-paused-mib`, derivado de la memoria del host en cada vuelta y 0 con el nivel de memoria en el 25 % o menos (ver [despertar.md](despertar.md#cómo-está-hecho)); antes de pausar se infla el globo y se deja inflado (`KLING_SQUEEZE_BEFORE_PAUSE=0` lo apaga) |
 | `squeeze` | reclama lo libre del invitado, según sus estadísticas | el framework no da estadísticas del invitado: aprieta a ciegas hasta dejarle la mitad de su memoria (nunca menos de 128 MiB) y espera a que la huella deje de bajar. Si bajó, **el globo se queda inflado**: al desinflarlo el framework repuebla las páginas y la huella vuelve entera en segundos; `deflate_on_oom` se lo devuelve al invitado si lo necesita. Solo devuelve memoria en máquinas **restauradas** (`thaw`, `run -from`): en una arrancada en frío el framework no suelta las páginas del globo (medido en macOS 26.5) y el globo vuelve a la línea base |
-| memoria por VM (`kling top`, `/procstats`) | PSS de firecracker | `phys_footprint` del ayudante y del proceso auxiliar (`GET /kling/stats`) |
+| memoria por VM (`kling top`, `/procstats`) | PSS de firecracker | `phys_footprint` del ayudante y del proceso auxiliar (`GET /kling/stats`); CPU por núcleo P/E y energía con `proc_pid_rusage` |
 | red | netns + veth + iptables | red de espacio de usuario en cada `kling-vz`, misma semántica de `egress` |
 | carpetas compartidas (`-share`) | copia con `mkfs.ext4`; vivas con un techo de 16 MiB/s por el limitador de red | copia con el `mke2fs` que haya (Homebrew o android-platform-tools; tiene que aceptar `-d`); vivas servidas desde APFS, que por defecto no distingue mayúsculas (`A` y `a` son el mismo fichero para el invitado), sin limitador de red. Ver [compartir.md](compartir.md) |
 | ruta del socket de cada VMM | holgada | puede pasar de los 104 bytes de `sun_path` con la raíz en `Application Support`: `kling-vz` se ata con `chdir` y el daemon conecta por un enlace corto en `/tmp/kling-<uid>/`. El cliente hace lo mismo con un `unix://` largo (`-H`, `$KLING_HOST`, contexto) y `dial-stdio` con su `KLING_SOCKET` |

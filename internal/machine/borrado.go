@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"log"
 	"os"
 	"sync/atomic"
@@ -46,7 +47,7 @@ func esTumba(mc *api.Machine) bool { return mc != nil && mc.Name == nombreTumba(
 func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 	id := mc.ID
 	quitarTransicion := m.marcarTransicion(id, api.TransitionRemoving)
-	m.kill(id)
+	murio := m.kill(id)
 
 	m.mu.Lock()
 	name, dueño := mc.Name, mc.Labels[api.LabelOwner]
@@ -54,7 +55,11 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 		name, dueño = live.Name, live.Labels[api.LabelOwner]
 		live.Name = nombreTumba(id)
 		live.State = api.StateStopped
-		live.PID = 0
+		// Un VMM que sobrevivió al SIGKILL deja su PID en la tumba: la
+		// limpieza no suelta nada mientras siga vivo (M4).
+		if murio {
+			live.PID = 0
+		}
 		live.Volumes, live.Shares, live.Forwards = nil, nil, nil
 		live.Labels = nil
 		live.TTLSeconds, live.TTLAt, live.OnTTL = 0, nil, ""
@@ -71,9 +76,51 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 
 	go func() {
 		defer soltar()
-		defer quitarTransicion()
-		m.limpiarTumba(id)
+		// Con el VMM aún vivo la transición se queda: `kling ps` la sigue
+		// enseñando como removing y el vigilante lo reintenta
+		// (reintentarTumbas).
+		if m.limpiarTumba(id) != errVMMVivo {
+			quitarTransicion()
+		}
 	}()
+}
+
+// errVMMVivo es el de una tumba cuyo VMM no ha muerto: no se limpia aún.
+var errVMMVivo = errors.New("its VMM is still alive after SIGKILL")
+
+// rematarVMM vuelve a matar el VMM que una tumba conserva y dice si ya no
+// existe. Solo si sigue siendo el VMM de esa máquina (liveVMs lo reconoce por
+// su línea de órdenes): un PID que murió y se reutilizó es de otro proceso.
+func (m *Manager) rematarVMM(id string, pid int) bool {
+	if pid == 0 || m.liveVMs()[id] != pid {
+		return true
+	}
+	senalMatar(pid)
+	return waitGone(pid, min(plazoMuerte, time.Second))
+}
+
+// reintentarTumbas termina las tumbas cuyo VMM no murió al borrarlas. La llama
+// el vigilante; solo mira las que conservan PID y nadie tiene tomadas.
+func (m *Manager) reintentarTumbas() {
+	m.mu.RLock()
+	var ids []string
+	for id, mc := range m.byID {
+		if esTumba(mc) && mc.PID != 0 {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		soltar, ok := m.tryLock(id)
+		if !ok {
+			continue
+		}
+		quitar := m.marcarTransicion(id, api.TransitionRemoving)
+		if m.limpiarTumba(id) != errVMMVivo {
+			quitar()
+		}
+		soltar()
+	}
 }
 
 // limpiarTumbaReintentos: veces que se intenta antes de dejar la tumba para el
@@ -87,7 +134,7 @@ const (
 // limpieza y permite sujetarla para ver la tumba o simular un corte.
 var antesDeLimpiar = func(m *Manager, id string) {}
 
-func (m *Manager) limpiarTumba(id string) {
+func (m *Manager) limpiarTumba(id string) error {
 	antesDeLimpiar(m, id)
 	for i := 0; i < limpiarTumbaReintentos; i++ {
 		m.mu.RLock()
@@ -97,20 +144,33 @@ func (m *Manager) limpiarTumba(id string) {
 		}
 		m.mu.RUnlock()
 		if mc == nil {
-			return
+			return nil
+		}
+		if mc.PID != 0 {
+			if !m.rematarVMM(id, mc.PID) {
+				log.Printf("rm: %s: VMM pid %d is still alive; its network and disk stay until it exits", shortID(id), mc.PID)
+				return errVMMVivo
+			}
+			m.mu.Lock()
+			if live := m.byID[id]; live != nil && live.PID == mc.PID {
+				live.PID = 0
+			}
+			m.mu.Unlock()
+			mc.PID = 0
 		}
 		err := m.limpiarMaquina(mc)
 		if err == nil {
-			return
+			return nil
 		}
 		log.Printf("rm: cleaning up %s failed (attempt %d/%d): %v", shortID(id), i+1, limpiarTumbaReintentos, err)
 		select {
 		case <-m.quit:
-			return
+			return err
 		case <-time.After(limpiarTumbaEspera):
 		}
 	}
 	log.Printf("rm: %s stays as a tombstone until the next daemon start", shortID(id))
+	return errors.New("cleanup failed")
 }
 
 // recuperarTumbas termina las limpiezas que un reinicio cortó. Va después de
@@ -131,9 +191,12 @@ func (m *Manager) recuperarTumbas() {
 		soltar := m.lock(id)
 		go func(id string) {
 			defer soltar()
-			defer quitar()
-			m.kill(id)
-			m.limpiarTumba(id)
+			// Sin kill: una tumba solo conserva PID si su VMM sobrevivió al
+			// SIGKILL, y tras un reinicio ese número puede ser ya de otro
+			// proceso. limpiarTumba lo remata solo si sigue siendo su VMM.
+			if m.limpiarTumba(id) != errVMMVivo {
+				quitar()
+			}
 		}(id)
 	}
 }

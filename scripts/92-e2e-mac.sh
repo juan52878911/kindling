@@ -206,6 +206,11 @@ out=$(k exec "$M" -- sh -c 'echo out; echo err >&2; exit 3' 2>"$TMPBASE/e2e-err.
 err=$(cat "$TMPBASE/e2e-err.$$"); rm -f "$TMPBASE/e2e-err.$$"
 [ "$out" = "out" ] && [ "$err" = "err" ] && [ $rc -eq 3 ] && ok "exec: stdout, stderr and exit code 3" \
   || bad "exec" "out / err / rc=3" "'$out' / '$err' / rc=$rc"
+# Qué agente lleva la imagen: uno viejo hace que la prueba mida daemon nuevo
+# con agente viejo (las mejoras de las carpetas, por ejemplo, ni se activan).
+GUEST_V=$(k exec "$M" -- /usr/local/bin/kling-guest -version 2>/dev/null | tr -d '\r')
+DAEMON_V=$(k version 2>/dev/null | sed -n 's/^daemon: \([^ ]*\).*/\1/p')
+info "guest agent in $IMG: ${GUEST_V:-unknown}, daemon: ${DAEMON_V:-unknown}"
 lat=()
 for i in 1 2 3 4 5 6 7 8 9 10; do
   t0=$(now_ms); k exec "$M" -- true >/dev/null 2>&1; t1=$(now_ms); lat+=($((t1-t0)))
@@ -391,12 +396,15 @@ if [ $rc -eq 0 ] && contiene "$out" "booted cold"; then
   out=$(k exec "$S" -- sh -c 'cat /work/a.txt /work/link; touch /work/x 2>&1; true' 2>&1)
   contiene "$out" "copied
 copied" && contiene "$out" "Read-only" && ok "copy: contents inside, read-only" || bad "copy" "copied x2 + Read-only" "$out"
-  out=$(k exec "$S" -- sh -c 'cat /w/host.txt; cd /w && echo g > g && mkdir -p d/e && mv g d/e/g2 && echo more >> d/e/g2 && ln -s x y 2>&1; cat /w/up /w/abs 2>&1; true' 2>&1)
+  # Un enlace del invitado que se queda dentro vale (node_modules/.bin, ver
+  # internal/share/symlink.go); uno que sale de la carpeta, EPERM.
+  out=$(k exec "$S" -- sh -c 'cat /w/host.txt; cd /w && echo g > g && mkdir -p d/e && mv g d/e/g2 && echo more >> d/e/g2 && ln -s d/e/g2 y && ln -s ../secret z 2>&1; cat /w/up /w/abs 2>&1; true' 2>&1)
   host=$(cat "$SHARES/rw/d/e/g2" 2>&1)
+  hlink=$(readlink "$SHARES/rw/y" 2>&1)
   contiene "$out" "one" && [ "$host" = "g
-more" ] && contiene "$out" "not permitted" && ! contiene "$out" "host secret" \
-    && ok "rw: both ways, rename and mkdir reach APFS; no symlinks; host secret unreadable" \
-    || bad "rw" "one / g+more on the host / not permitted / no secret" "$out // host: $host"
+more" ] && [ "$hlink" = "d/e/g2" ] && contiene "$out" "not permitted" && [ ! -L "$SHARES/rw/z" ] && ! contiene "$out" "host secret" \
+    && ok "rw: both ways, rename and mkdir reach APFS; a contained symlink yes, an escaping one no; host secret unreadable" \
+    || bad "rw" "one / g+more on the host / y -> d/e/g2 / not permitted / no secret" "$out // host: $host // y -> $hlink"
   echo two > "$SHARES/rw/host.txt"; sleep 1.5
   out=$(k exec "$S" -- cat /w/host.txt 2>&1)
   [ "$out" = "two" ] && ok "rw: a host edit shows up inside" || bad "host edit" "two" "$out"

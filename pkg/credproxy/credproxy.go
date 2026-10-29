@@ -824,12 +824,15 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		if resig != nil {
 			resig.f, resig.fecha, resig.prev = c.firmador(), res.fecha, res.semilla
 		}
+		// La firma emitida es la de la clave real: si vuelve en un eco (un
+		// error, una cabecera), el invitado ve la suya en su lugar.
+		red.par(res.semilla, firma.firma)
 	}
 
 	resp, err := p.client.Do(out)
 	if err != nil {
 		rec.Reason = ReasonUpstreamError
-		http.Error(w, "kindling credential proxy: upstream error: "+red.texto(err.Error()), http.StatusBadGateway)
+		http.Error(w, "kindling credential proxy: upstream error: "+red.texto(errorSinURL(err)), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -853,8 +856,10 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	// La longitud puede cambiar al redactar: que la calcule el servidor. Salvo
 	// con SigV4: los clientes de S3 exigen Content-Length en un GET. Si el
 	// redactor cambiara algo (la clave en un objeto), la longitud ya no cuadra
-	// y el servidor corta la respuesta, que el cliente ve como error.
-	if firma != nil && resp.ContentLength >= 0 {
+	// y el servidor corta la respuesta, que el cliente ve como error. Un error
+	// de S3 repite el access key id (InvalidAccessKeyId) o la firma, que el
+	// redactor cambia por los del invitado: sin longitud fija, que no se corte.
+	if firma != nil && resp.ContentLength >= 0 && resp.StatusCode < 300 {
 		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
 	} else {
 		w.Header().Del("Content-Length")
@@ -971,3 +976,14 @@ func credencialesDe(cc []credCompilada) []Credential {
 
 // cuerpoSaliente vive en cuerpo.go: qué sale con Content-Length exacto (en
 // memoria o por fichero temporal) y qué sale chunked.
+
+// errorSinURL es el texto de un error del cliente HTTP sin la URL saliente.
+// url.Error la incluye entera, y en una prefirmada SigV4 lleva el access key
+// id real y la firma real en la query: se queda la operación y la causa.
+func errorSinURL(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Op + ": " + ue.Err.Error()
+	}
+	return err.Error()
+}

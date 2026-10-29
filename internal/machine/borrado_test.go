@@ -195,3 +195,52 @@ func TestRecuperarTumbasTrasReinicio(t *testing.T) {
 	}
 	soltar()
 }
+
+// M4: si el VMM sobrevive al SIGKILL, kling rm no suelta su red, su disco ni
+// su índice de red: la tumba se queda en removing con su PID, `kling doctor`
+// la ve, y el vigilante la termina cuando el VMM por fin muere.
+func TestRemoveConElVMMVivoNoSueltaNadaHastaQueMuera(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "aa0000000000000d"
+	_, muerto := maquinaCorriendo(t, m, id)
+	m.mu.Lock()
+	m.byID[id].NetIndex = 7
+	m.mu.Unlock()
+
+	prevSenal, prevPlazo := senalMatar, plazoMuerte
+	senalMatar, plazoMuerte = func(int) {}, 20*time.Millisecond
+	t.Cleanup(func() { senalMatar, plazoMuerte = prevSenal, prevPlazo })
+
+	if err := m.Remove(id); err != nil {
+		t.Fatal(err)
+	}
+	if !m.EsperarBorrados(5 * time.Second) {
+		t.Fatal("la limpieza no soltó el cerrojo")
+	}
+	tumba, ok := m.Get(id)
+	if !ok || !esTumba(tumba) || tumba.PID == 0 || tumba.Transition != api.TransitionRemoving || tumba.NetIndex != 7 {
+		t.Fatalf("quería la tumba en removing con su PID y su red, hay %+v (%v)", tumba, ok)
+	}
+	if _, err := os.Stat(m.dir(id)); err != nil {
+		t.Fatalf("borró el directorio con el VMM vivo: %v", err)
+	}
+	if a := m.Atascadas(); len(a) != 1 || a[0].Transition != api.TransitionRemoving {
+		t.Fatalf("Atascadas = %+v", a)
+	}
+
+	// El VMM muere; la siguiente vuelta del vigilante termina el borrado.
+	senalMatar = prevSenal
+	m.reintentarTumbas()
+	select {
+	case <-muerto:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el vigilante no remató el VMM")
+	}
+	if _, ok := m.Get(id); ok {
+		t.Fatal("la tumba sigue tras morir el VMM")
+	}
+	if len(m.Atascadas()) != 0 {
+		t.Fatal("sigue atascada")
+	}
+}

@@ -40,6 +40,9 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `kindling-mcp-host.tar.gz` | lo que va en el host del daemon para MCP: unidades de systemd (`kling-gateway`, `kling-heal`), constructores y puente de invitado | — |
 | `kindling-sandbox-host.tar.gz` | unidad `kling-sandbox.service` y lo que necesita en el host | — |
 | `kindling-operator-deploy.tar.gz` | los manifiestos de `ext/sandbox/deploy/` (CRD, RBAC, namespace, deployment) | — |
+| `vmlinux-<arch>.zst` | kernel de invitado (`scripts/builders/kernel`), comprimido; `kling up` lo baja en un Mac | linux |
+| `min-<arch>.ext4.zst` | imagen base `min` (`scripts/70-build-minimal-image.sh`, con el `kling-bridge` de la release) | linux |
+| `kling.rb` | fórmula de Homebrew con la versión y los sha256 de esta release (no se publica en ningún tap) | darwin/arm64, linux |
 | `SHA256SUMS` | **un** fichero con el sha256 de todo lo anterior | — |
 
 Además, la imagen del operador se publica en
@@ -153,10 +156,14 @@ git push origin vX.Y.Z
    `kling-mcp`, `kling-bridge`, `kling-sandbox`, `kling-db`, `kling-phone` y, en Linux,
    `kindling-operator`; empaqueta los tres `.tar.gz`.
 2. **vz** (macos-15): compila y firma `kling-vz-darwin-arm64` (para macOS 14.0) y `kling-hv-darwin-arm64` (para 15.2), y comprueba su `minos`.
-3. **release**: junta todo, genera **un** `SHA256SUMS`, publica como notas el
+3. **imagenes** (ubuntu, tras build): el kernel de invitado de las dos
+   arquitecturas (cruzado para arm64) y `min` de las dos (sin paquetes no hay
+   chroot, así que también sale de x86_64), comprimidos con zstd.
+4. **release**: junta todo, genera **un** `SHA256SUMS`, rellena la fórmula de
+   Homebrew (`packaging/homebrew/formula.sh`) y añade su suma, publica como notas el
    bloque de la versión en `CHANGELOG.md` más una línea de instalación
    (`scripts/release-notes.sh`) y nada más.
-4. **imagen** (tras `release`, con `packages: write`): construye la imagen del
+5. **imagen** (tras `release`, con `packages: write`): construye la imagen del
    operador con `context: .` y `file: ext/sandbox/Dockerfile.operator` (el
    `replace ../..` necesita el núcleo en el contexto) y la empuja a GHCR.
 
@@ -198,6 +205,7 @@ Esas líneas son las notas de la release, tal cual.
 
 - **Firma de los binarios** (cosign, sigstore): `SHA256SUMS` cubre la
   integridad; la firma llegará cuando alguien la necesite.
-- **brew/scoop/aur**: `install.sh` cubre el caso general.
+- **Tap de Homebrew, scoop, aur**: la fórmula va como asset (`kling.rb`); nadie
+  la empuja a un tap.
 - **Binarios con símbolos**: se compila con `-trimpath -ldflags "-s -w"`; para
   depurar, `go build ./cmd/kling`.

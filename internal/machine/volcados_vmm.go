@@ -17,14 +17,24 @@ func VolcadosDeVMM(root, nombre string) int {
 		return n == nombre
 	}
 	total := 0
+	// Los nombres con punto no son máquinas ni dorados: son la papelera, las
+	// tumbas de un borrado o los temporales de una publicación, y un volcado
+	// que se está tirando no retiene a nadie en kling-vz.
+	oculto := func(p string) bool { return strings.HasPrefix(filepath.Base(p), ".") }
 	congeladas, _ := filepath.Glob(filepath.Join(root, "machines", "*"))
 	for _, dir := range congeladas {
+		if oculto(dir) {
+			continue
+		}
 		if de(vmmDelVolcado(dir)) {
 			total++
 		}
 	}
 	metas, _ := filepath.Glob(filepath.Join(root, "snapshots", "*", "meta.json"))
 	for _, p := range metas {
+		if oculto(filepath.Dir(p)) {
+			continue
+		}
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue

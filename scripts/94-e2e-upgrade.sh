@@ -191,7 +191,7 @@ for g in kling-guest kling-chispa; do
   src="$NEW_DIR/$g-linux-$ARCH"; [ -f "$src" ] || src="$NEW_DIR/$g"
   cp "$src" "$ROTO/$g"
 done
-out=$(kn upgrade -unit "$NAME" -from-dir "$ROTO" -timeout 15s 2>&1); rc=$?
+out=$(kn upgrade -unit "$NAME" -from-dir "$ROTO" -insecure -timeout 15s 2>&1); rc=$?
 [ $rc != 0 ] && contiene "$out" "rolled back" && ok "upgrade refused and rolled back" \
   || bad "broken upgrade" "an error and a rollback" "rc=$rc: $out"
 v=$(k version 2>&1 | sed -n 2p)
@@ -201,14 +201,14 @@ st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" |
 
 # ── 3. upgrade de verdad ─────────────────────────────────────────────────────
 step "3. Upgrade $OLD_TAG -> $NEWV"
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -dry-run 2>&1)
+out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure -dry-run 2>&1)
 contiene "$out" "state.json: schema 0 -> 1" && cmp -s "$BIN/kling" "$OLDK" \
   && ok "dry run lists the migration and changes nothing" || bad "dry run" "the plan, nothing changed" "$out"
 # Lo de justo antes, no lo del paso 1: el viejo reescribe su state.json al
 # pararse y arrancar en el paso 2, y un rm suyo se guarda un momento después.
 cp "$ROOT/state.json" "$BASE/state.before"
 t0=$(date +%s%N)
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" 2>&1); rc=$?
+out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "kling upgrade in ${ms} ms" || bad "upgrade" "upgraded" "rc=$rc: $out"
 v=$(kn version 2>&1 | sed -n 2p)
@@ -263,7 +263,7 @@ k freeze up-frozen >/dev/null 2>&1
 
 # ── 6. -rollback con el daemon caído ─────────────────────────────────────────
 step "6. kling upgrade -rollback with the daemon down"
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" 2>&1); rc=$?
+out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again" || bad "second upgrade" "upgraded" "rc=$rc: $out"
 systemctl stop "$NAME"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?

@@ -603,7 +603,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}
 	// Con qué VMM, kling y macOS se hizo: lo que permite marcarlo obsoleto
 	// cuando cambien en vez de fallar al despertar (meta.go).
-	m.grabarOrigen(snap)
+	m.grabarOrigen(snap, mc)
 	if err := m.firmar(snap); err != nil {
 		return nil, err
 	}
@@ -1841,6 +1841,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.PID = pid
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
+	mc.VMM = m.origenActual().vmm
 	mc.ThawMS = elapsed
 	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred
 	// En Firecracker la RAM de la copia es el mem.file del dorado, MAP_PRIVATE:

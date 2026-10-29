@@ -9,10 +9,19 @@ import (
 	"strings"
 )
 
-// CheckLink exige que un enlace de una copia sea relativo y que, resuelto desde
-// donde está (name, relativo a la raíz de la carpeta), no salga del árbol. Es una
-// comprobación léxica: vale si ningún componente intermedio del destino es a su
-// vez un enlace (ver LinkTraverses).
+// CheckLink exige que un enlace de una copia sea relativo, en forma canónica, y
+// que, resuelto desde donde está (name, relativo a la raíz de la carpeta), no
+// salga del árbol.
+//
+// Forma canónica: primero los "..", luego componentes que solo bajan
+// ("../../a/b", nunca "a/../b"). Un ".." tras un componente que baja se rechaza
+// aunque léxicamente se quede dentro, porque ese componente puede ser (o pasar
+// a ser después) un enlace, y entonces lo léxico y lo real no coinciden: con
+// "x -> a/up/../.." y luego "a/up -> ..", cada uno válido por separado, x sale
+// dos niveles. En forma canónica los ".." solo suben por directorios reales
+// (los padres del propio enlace) y lo que baja, si cruza otro enlace, cruza uno
+// que también cumple esto: por inducción nunca se sale, se cree en el orden
+// que se cree.
 func CheckLink(name, target string) error {
 	if target == "" || len(target) >= MaxPath || strings.ContainsRune(target, 0) {
 		return fmt.Errorf("symlink %q has an invalid target", name)
@@ -20,7 +29,24 @@ func CheckLink(name, target string) error {
 	if strings.HasPrefix(target, "/") {
 		return fmt.Errorf("symlink %q points to an absolute path (%s)", name, target)
 	}
-	if r := path.Clean(path.Join(path.Dir(name), target)); r == ".." || strings.HasPrefix(r, "../") {
+	ups, down := 0, false
+	for _, c := range strings.Split(target, "/") {
+		switch c {
+		case "", ".":
+		case "..":
+			if down {
+				return fmt.Errorf("symlink %q goes back up after going down (%s)", name, target)
+			}
+			ups++
+		default:
+			down = true
+		}
+	}
+	depth := 0
+	if d := path.Dir(name); d != "." {
+		depth = strings.Count(d, "/") + 1
+	}
+	if ups > depth {
 		return fmt.Errorf("symlink %q points outside the shared directory (%s)", name, target)
 	}
 	return nil

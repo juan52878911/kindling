@@ -182,10 +182,24 @@ func (m *Manager) origenActual() origenHost {
 	return origenHost{}
 }
 
-// grabarOrigen pone en s con qué se hace el dorado.
-func (m *Manager) grabarOrigen(s *api.Snapshot) {
+// grabarOrigen pone en s con qué se hace el dorado a partir de mc: el VMM es
+// el de la máquina, no el del daemon (ver vmmDe).
+func (m *Manager) grabarOrigen(s *api.Snapshot, mc *api.Machine) {
 	o := m.origenActual()
-	s.VMM, s.MacOS, s.KlingVersion = o.vmm, o.macOS, o.kling
+	s.VMM, s.MacOS, s.KlingVersion = m.vmmDe(mc), o.macOS, o.kling
+}
+
+// vmmDe es el VMM que corre mc: el que la lanzó (Machine.VMM), que no tiene
+// por qué ser el del daemon. Con `daemon.vmm: hv` puesto a mano sobre una raíz
+// con máquinas de kling-vz vivas, el daemon nuevo las readopta, pero quien
+// vuelca su memoria sigue siendo kling-vz: sellarla como kling-hv hacía que
+// el thaw la cargara en un VMM que no entiende su formato. Una máquina de
+// antes de este campo (vacío) cae al del daemon, como hasta ahora.
+func (m *Manager) vmmDe(mc *api.Machine) string {
+	if mc != nil && mc.VMM != "" {
+		return mc.VMM
+	}
+	return m.origenActual().vmm
 }
 
 // normalizarVMM deja la primera línea de `<vmm> --version` como "nombre

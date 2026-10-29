@@ -78,6 +78,22 @@ func ExecHandler(env []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { handleExec(env, w, r) }
 }
 
+// ExecHandlerFunc es ExecHandler con el entorno leído en cada petición (el
+// del agente cambia cuando VolumeWait monta los volúmenes).
+func ExecHandlerFunc(env func() []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { handleExec(env(), w, r) }
+}
+
+// StreamExecHandlerFunc es StreamExecHandler con el entorno de cada petición.
+func StreamExecHandlerFunc(env func() []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { handleStreamExec(env(), w, r) }
+}
+
+// ShellHandlerFunc es ShellHandler con el entorno de cada petición.
+func ShellHandlerFunc(env func() []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { ShellHandler(env())(w, r) }
+}
+
 func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)

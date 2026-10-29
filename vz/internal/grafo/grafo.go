@@ -24,12 +24,14 @@ package grafo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
@@ -188,13 +190,34 @@ func (g *Grafo) Serve(ctx context.Context, port uint16, aceptar func() (net.Conn
 	}
 	defer up.Close()
 	rec.Upstream = "machine:" + resp.Machine
+	// El destino que no escucha corta con un RST (el reenvío de su kling-vz):
+	// si ya llegó, el invitado recibe el suyo al SYN, como en Docker, en vez
+	// de una conexión aceptada que se cierra sin más. Sin esperar: lo que haya
+	// ya (datos de un servidor que habla primero) se guarda y se entrega.
+	pre, rechazado := asomar(up.TCPConn)
+	if rechazado {
+		rechazar()
+		rec.Reason = credproxy.ReasonUpstreamError
+		return
+	}
 	guest, err := aceptar()
 	if err != nil {
 		rec.Reason = credproxy.ReasonUpstreamError
 		return
 	}
 	defer guest.Close()
-	rec.ReqBytes, rec.RespBytes = copiar(guest, up)
+	if len(pre) > 0 {
+		if _, err := guest.Write(pre); err != nil {
+			return
+		}
+		rec.RespBytes += int64(len(pre))
+	}
+	sub, baj, reset := copiar(guest, up)
+	rec.ReqBytes, rec.RespBytes = sub, rec.RespBytes+baj
+	if reset && rec.RespBytes == 0 {
+		// El RST llegó después de aceptar al invitado: copiar le mandó el suyo.
+		rec.Reason = credproxy.ReasonUpstreamError
+	}
 	if up.cortada.Load() {
 		rec.Reason = credproxy.ReasonInvalidated
 	}
@@ -310,9 +333,27 @@ func (c *Conexion) Cortada() bool { return c.cortada.Load() }
 
 type closeWriter interface{ CloseWrite() error }
 
+// asomar mira, sin esperar, si el destino ya cortó la conexión con un RST
+// (nadie escucha en ese puerto). Lo que ya hubiera llegado se devuelve para
+// entregarlo.
+func asomar(c *net.TCPConn) (pre []byte, rechazado bool) {
+	if err := c.SetReadDeadline(time.Now()); err != nil {
+		return nil, false
+	}
+	defer c.SetReadDeadline(time.Time{})
+	b := make([]byte, 4096)
+	n, err := c.Read(b)
+	return b[:n], esReset(err)
+}
+
+func esReset(err error) bool {
+	return err != nil && errors.Is(err, syscall.ECONNRESET)
+}
+
 // copiar copia en los dos sentidos respetando el medio cierre, y devuelve lo
-// que fue del invitado al destino y lo que volvió.
-func copiar(guest net.Conn, up *Conexion) (subida, bajada int64) {
+// que fue del invitado al destino, lo que volvió y si el destino cortó con
+// un RST.
+func copiar(guest net.Conn, up *Conexion) (subida, bajada int64, reset bool) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -322,7 +363,19 @@ func copiar(guest net.Conn, up *Conexion) (subida, bajada int64) {
 	}()
 	go func() {
 		defer wg.Done()
-		bajada, _ = io.Copy(guest, up.TCPConn)
+		var err error
+		bajada, err = io.Copy(guest, up.TCPConn)
+		reset = esReset(err)
+		if reset && bajada == 0 {
+			// El destino rechazó la conexión: RST también para el invitado
+			// (vnet.Abortable), que además desbloquea la copia de subida.
+			if a, ok := guest.(interface{ Abort() }); ok {
+				a.Abort()
+			} else {
+				_ = guest.Close()
+			}
+			return
+		}
 		if cw, ok := guest.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		} else {
@@ -341,7 +394,7 @@ func copiar(guest net.Conn, up *Conexion) (subida, bajada int64) {
 	}()
 	wg.Wait()
 	close(hecho)
-	return subida, bajada
+	return subida, bajada, reset
 }
 
 func (g *Grafo) auditar(r credproxy.Record) {

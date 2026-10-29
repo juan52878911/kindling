@@ -24,6 +24,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/publicar"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -260,6 +261,12 @@ type Server struct {
 	construyendo   map[string]*cerrojoImagen
 	// muRegistros guarda registries.json (registries.go).
 	muRegistros sync.Mutex
+
+	// pub publica los puertos de las máquinas (publicar.go); idleFreeze es
+	// daemon.idle_freeze (nil o 0 = nunca).
+	pub        *publicar.Publicador
+	pubUna     sync.Once
+	idleFreeze func() time.Duration
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
@@ -279,6 +286,10 @@ func (s *Server) SetAuthz(p *Politica) {
 // compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en
 // cada petición: cambiarla no pide reiniciar.
 func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
+
+// SetNetMiBps fija de dónde sale daemon.net_mibps, el caudal de red por
+// defecto de cada microVM. Se lee en cada arranque en frío.
+func (s *Server) SetNetMiBps(f func() int) { s.mgr.SetNetMiBps(f) }
 
 // SetCoW fija el modo de copia de discos (daemon.cow). Se lee una vez, al
 // arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
@@ -344,7 +355,7 @@ func (s *Server) rutas() []ruta {
 	return []ruta{
 		{"GET /info", AccionInfo, nil, s.handleInfo},
 		{"GET /machines", AccionListar, nil, s.handleList},
-		{"POST /machines", AccionCrear, revisarRun, s.handleRun},
+		{"POST /machines", AccionCrear, revisarRun, s.conPublicacion(s.handleRun)},
 		{"GET /machines/{ref}", AccionMaquina, nil, s.handleGet},
 		{"POST /machines/{ref}/freeze", AccionMaquina, nil, s.handleFreeze},
 		{"POST /machines/{ref}/thaw", AccionMaquina, nil, s.handleThaw},
@@ -424,6 +435,9 @@ func (s *Server) rutas() []ruta {
 		{"GET /metrics", AccionAdmin, nil, s.handleMetrics},
 		{"GET /procstats", AccionAdmin, nil, s.handleProcStats},
 		{"POST /cow/store/grow", AccionAdmin, nil, s.handleGrowCoWStore},
+		{"POST /machines/{ref}/publish", AccionMaquina, nil, s.handlePublish},
+		{"DELETE /machines/{ref}/publish", AccionMaquina, nil, s.handleUnpublish},
+		{"GET /publish", AccionListar, nil, s.handlePublications},
 	}
 }
 
@@ -526,6 +540,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	// del host). Decir "running" sobre algo muerto haría que el gateway enrutara
 	// peticiones a la nada.
 	s.mgr.Watch(ctx, 10*time.Second)
+	s.arrancarPublicador(ctx)
 
 	srv := &http.Server{
 		Handler:     s.routes(),
@@ -700,6 +715,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if _, filtra := inquilinoDe(r); !filtra {
 		info.Tuning = s.ajustes()
 		info.PoolProblems = s.mgr.ProblemasFondos()
+		info.Stuck = s.mgr.Atascadas()
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
@@ -789,31 +805,56 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mc)
 }
 
-// runStatus traduce los errores de arrancar una máquina a códigos HTTP.
+// runStatus traduce los errores de arrancar una máquina a códigos HTTP: 4xx
+// lo que está mal en la petición (M13: un -image que no existe, un on_ttl
+// inválido, disk_mib fuera de rango, mem_max por debajo de mem salían como
+// 500), 500 lo que falla en el host.
 func runStatus(err error) int {
+	if c, ok := statusPeticion(err); ok {
+		return c
+	}
 	switch {
-	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
+	case errors.Is(err, machine.ErrExecNotInSnapshot):
 		return http.StatusConflict
-	case errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
-		return http.StatusBadRequest
 	case errors.Is(err, machine.ErrNameTaken):
 		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }
 
+// statusPeticion es el código de los errores con centinela comunes a crear
+// una máquina y a operar sobre una que existe.
+func statusPeticion(err error) (int, bool) {
+	switch {
+	case errors.Is(err, machine.ErrRunRequest), errors.Is(err, machine.ErrInvalidName),
+		errors.Is(err, machine.ErrShareRequest), errors.Is(err, machine.ErrEnvRequest), errors.Is(err, machine.ErrCmdRequest):
+		return http.StatusBadRequest, true
+	case errors.Is(err, machine.ErrNoImage), errors.Is(err, machine.ErrNoSnapshot):
+		return http.StatusNotFound, true
+	case errors.Is(err, machine.ErrDoradoObsoleto):
+		return http.StatusConflict, true
+	}
+	return 0, false
+}
+
 // cicloStatus traduce los errores de las operaciones sobre una máquina que ya
 // existe (freeze, pause, thaw, stop, rm...): 404 si no existe, 409 si su
-// estado no admite la operación. Lo demás sigue siendo 400, como siempre; un
-// api.StatusError del manager (507, 503...) manda sobre todo esto (ver fail).
+// estado no admite la operación, 400 si la petición trae algo mal (centinelas,
+// ver statusPeticion). Lo demás es del host y sale como 500 (M13: un EIO o un
+// kernel que falta se contestaban 400, como si los hubiera pedido mal el
+// cliente). Un api.StatusError del manager (507, 503...) manda sobre todo esto
+// (ver fail).
 func cicloStatus(err error) int {
+	if c, ok := statusPeticion(err); ok {
+		return c
+	}
 	switch {
 	case errors.Is(err, machine.ErrNoMachine):
 		return http.StatusNotFound
 	case errors.Is(err, machine.ErrWrongState):
 		return http.StatusConflict
 	}
-	return http.StatusBadRequest
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
@@ -1334,10 +1375,16 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 	// Entre preguntas, de 10 ms a 50 ms: con 200 ms fijos cada exec tras un
 	// arranque en frío llegaba hasta 200 ms tarde al agente que ya escuchaba.
 	paso := 10 * time.Millisecond
+	// Congelada mientras se espera (idle_freeze, otro freeze): su reenvío ya
+	// no lleva a nadie y esperar al plazo solo retrasa el error.
+	sigue := func() bool { return s.sigueCorriendo(mc.ID) }
 	for {
+		if !sigue() {
+			return errDejoDeCorrer
+		}
 		open, ok := s.mgr.ProbeGuestPort(ctx, mc.ID, port)
 		if !ok {
-			return waitPort(ctx, mc.Addr(port), time.Until(deadline))
+			return waitPortMientras(ctx, mc.Addr(port), time.Until(deadline), sigue)
 		}
 		if open {
 			return nil
@@ -1355,6 +1402,12 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 }
 
 func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
+	return waitPortMientras(ctx, addr, timeout, nil)
+}
+
+// waitPortMientras es waitPort que, además, se rinde con errDejoDeCorrer en
+// cuanto sigue (si no es nil) dice que no.
+func waitPortMientras(ctx context.Context, addr string, timeout time.Duration, sigue func() bool) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	// Backoff corto (A4): 200 ms fijos entre sondeos son 200 ms de más en el
@@ -1377,6 +1430,9 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if sigue != nil && !sigue() {
+			return errDejoDeCorrer
 		}
 		conn, err := net.DialTimeout("tcp", addr, intento)
 		if err == nil {

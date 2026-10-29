@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Con el directorio del compose, un bind mount de un directorio es una carpeta
@@ -39,7 +41,7 @@ func TestComposeEnBase(t *testing.T) {
 	if !strings.Contains(strings.Join(tr.Avisos, "\n"), "nginx.conf:/etc/nginx.conf: only directories can be shared") {
 		t.Errorf("no warning for a file bind mount: %v", tr.Avisos)
 	}
-	if got := tr.Publica["app"]; !reflect.DeepEqual(got, [][2]int{{3000, 3000}, {9229, 9229}}) {
+	if got := tr.Publica["app"]; !reflect.DeepEqual(got, []api.PortPublish{{Host: 3000, Guest: 3000}, {Host: 9229, Guest: 9229}}) {
 		t.Errorf("Publica = %v", got)
 	}
 	// Sin directorio (graph from-compose), como antes: se avisa y se salta.
