@@ -41,7 +41,7 @@ func TestConstruccionSoloLeeSuOrigen(t *testing.T) {
 	// Lo que ya hay: una capa en la verificada de otro registro, una en la de
 	// un archivo, una en la caché de blobs de root y una en la del registro
 	// que se va a construir.
-	if rr := call(t, h, "POST", "/registries", `{"host":"localhost:5000","username":"a","password":"b"}`); rr.Code != 200 {
+	if rr := call(t, h, "POST", "/registries", `{"host":"localhost:5000","username":"a","password":"b"}`); rr.Code != http.StatusCreated {
 		t.Fatalf("login: %d %s", rr.Code, rr.Body)
 	}
 	os.MkdirAll(filepath.Join(s.root, "cache"), 0o755)
