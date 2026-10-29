@@ -59,6 +59,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Live shares: recreating a file the host had just deleted (while the guest still had it cached) failed with `ENOENT`; the agent now answers `ESTALE` so the kernel looks it up again and creates it.
 - Live shares: when the host's inotify queue overflows the daemon rescans every watched path and reports what changed, instead of dropping those changes; hitting the watch limit is logged once.
+- kling-hv: pausing boosts the vCPU threads' QoS and re-kicks any vCPU that has not stopped after 1 ms (khv_pause p99 with 4 idle vCPUs on a loaded Mac: up to 104 ms before, 0.19 ms after).
+- Durable writes on macOS: one F_FULLFSYNC per write instead of two (the temp file and the frozen state get an F_BARRIERFSYNC); Go's File.Sync already was F_FULLFSYNC.
+- A freeze made by v0.8.0 or later with neither the in-progress mark nor the seal is no longer thawed as if it were a pre-seal freeze.
+- kling-hv: a guest FLUSH on a persistent disk is now F_FULLFSYNC, like kling-vz's full sync mode (a plain fsync on macOS stays in the SSD cache).
+- kling-hv: the disk thread works on its own copy of the queue, and queue size and addresses are ignored while the queue is ready (a hostile guest could write past guest RAM).
 
 ## [0.19.0] - 2026-10-28
 

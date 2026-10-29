@@ -410,8 +410,9 @@ func shortID(id string) string {
 // hasSnapshot dice si una máquina tiene un congelado completo en disco.
 func (m *Manager) hasSnapshot(id string) bool {
 	// No basta con que los ficheros existan: un volcado interrumpido también
-	// los deja. Ver volcado.go.
-	if err := volcadoValido(m.dir(id)); err != nil {
+	// los deja. Ver volcado.go. Sin FrozenAt: aquí la máquina figura running o
+	// paused, y el de una pausa no dice cuándo se escribió el volcado.
+	if err := volcadoValido(m.dir(id), nil); err != nil {
 		if !errors.Is(err, errVolcadoIncompleto) || !strings.Contains(err.Error(), "missing") {
 			log.Printf("reconcile: %s: %v", shortID(id), err)
 		}

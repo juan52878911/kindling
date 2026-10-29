@@ -39,3 +39,12 @@ func vsockReuso() (ret int, mismoFD bool) {
 	ret = int(C.khv_vsock_prueba_reuso(&c))
 	return ret, c != 0
 }
+
+// carreraCola atiende iters lecturas del disco mientras otro hilo cambia el
+// QueueNum (prueba.c): devuelve las respondidas, -1 si no se pudo preparar y
+// -2 si el QueueNum cambió con la cola lista.
+func carreraCola(iters int) int { return int(C.khv_prueba_carrera(C.int(iters))) }
+
+// flushDisco manda un FLUSH al disco de pruebas y devuelve su byte de estado
+// (0 = bien), o -1 si no se pudo preparar.
+func flushDisco() int { return int(C.khv_prueba_flush()) }

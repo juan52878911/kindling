@@ -110,3 +110,27 @@ func TestVqCadena(t *testing.T) {
 		}
 	}
 }
+
+// Un invitado que cambia el QueueNum desde otro vCPU mientras el hilo del
+// disco atiende la cola: con el número vivo en vez del copiado, el
+// avail_event se escribía 2 KiB más allá de la RAM (aquí, en la página de
+// guarda de prueba.c, y el proceso muere).
+func TestColaCambiaDeTamanoAMitad(t *testing.T) {
+	n := carreraCola(100000)
+	switch {
+	case n == -2:
+		t.Fatal("QueueNum changed while the queue was ready")
+	case n < 0:
+		t.Fatalf("could not set up the test (%d)", n)
+	case n == 0:
+		t.Fatal("no request was answered")
+	}
+}
+
+// El FLUSH de un disco que no es desechable es un F_FULLFSYNC (el fsync de
+// macOS no vacía la caché del SSD) y sobre un fichero de APFS tiene que ir bien.
+func TestFlushDelDisco(t *testing.T) {
+	if e := flushDisco(); e != 0 {
+		t.Fatalf("FLUSH status = %d, want 0", e)
+	}
+}

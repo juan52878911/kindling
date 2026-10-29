@@ -26,7 +26,7 @@ func TestVolcadoValido(t *testing.T) {
 	escribir(t, filepath.Join(dir, "mem.file"), "memoria-entera")
 
 	// Sin marcas: una máquina congelada antes de que existieran. Se acepta.
-	if err := volcadoValido(dir); err != nil {
+	if err := volcadoValido(dir, nil); err != nil {
 		t.Fatalf("anterior a los sellos: %v", err)
 	}
 
@@ -34,7 +34,7 @@ func TestVolcadoValido(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := volcadoValido(dir); !errors.Is(err, errVolcadoIncompleto) {
+	if err := volcadoValido(dir, nil); !errors.Is(err, errVolcadoIncompleto) {
 		t.Fatalf("volcado interrumpido: %v, quería errVolcadoIncompleto", err)
 	}
 
@@ -42,7 +42,7 @@ func TestVolcadoValido(t *testing.T) {
 	if err := sellarVolcado(dir, "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := volcadoValido(dir); err != nil {
+	if err := volcadoValido(dir, nil); err != nil {
 		t.Fatalf("sellado: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, marcaEnCurso)); !errors.Is(err, os.ErrNotExist) {
@@ -51,14 +51,14 @@ func TestVolcadoValido(t *testing.T) {
 
 	// La memoria quedó más corta que al sellar: truncada.
 	escribir(t, filepath.Join(dir, "mem.file"), "memoria")
-	if err := volcadoValido(dir); !errors.Is(err, errVolcadoIncompleto) {
+	if err := volcadoValido(dir, nil); !errors.Is(err, errVolcadoIncompleto) {
 		t.Fatalf("memoria truncada: %v", err)
 	}
 	escribir(t, filepath.Join(dir, "mem.file"), "memoria-entera")
 
 	// El estado cambió después de sellarlo.
 	escribir(t, filepath.Join(dir, "snap.file"), "otro-estado")
-	if err := volcadoValido(dir); !errors.Is(err, errVolcadoIncompleto) {
+	if err := volcadoValido(dir, nil); !errors.Is(err, errVolcadoIncompleto) {
 		t.Fatalf("estado cambiado: %v", err)
 	}
 
@@ -66,8 +66,33 @@ func TestVolcadoValido(t *testing.T) {
 	escribir(t, filepath.Join(dir, "snap.file"), "estado")
 	_ = sellarVolcado(dir, "", "", "", false)
 	_ = volcadoEnCurso(dir)
-	if err := volcadoValido(dir); err == nil {
+	if err := volcadoValido(dir, nil); err == nil {
 		t.Fatal("un volcado nuevo a medias no puede heredar el sello del anterior")
+	}
+}
+
+// Sin ninguna marca, el volcado solo vale si la máquina se congeló antes de que
+// existieran: una congelada después siempre deja una, y que falten las dos es
+// que un corte se llevó la de en curso a mitad de volcar.
+func TestVolcadoSinMarcasSegunCuandoSeCongelo(t *testing.T) {
+	dir := t.TempDir()
+	escribir(t, filepath.Join(dir, "snap.file"), "estado")
+	escribir(t, filepath.Join(dir, "mem.file"), "memoria")
+	antes := selloDesde.Add(-24 * time.Hour)
+	if err := volcadoValido(dir, &antes); err != nil {
+		t.Fatalf("congelada antes de los sellos: %v", err)
+	}
+	despues := selloDesde.Add(time.Hour)
+	if err := volcadoValido(dir, &despues); !errors.Is(err, errVolcadoIncompleto) {
+		t.Fatalf("congelada con sellos y sin ninguna marca: %v, quería errVolcadoIncompleto", err)
+	}
+	// Con el sello, la fecha da igual.
+	_ = volcadoEnCurso(dir)
+	if err := sellarVolcado(dir, "", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := volcadoValido(dir, &despues); err != nil {
+		t.Fatalf("sellada: %v", err)
 	}
 }
 

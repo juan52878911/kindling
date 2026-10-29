@@ -165,3 +165,31 @@ func TestRenombrarSinTemporalFalla(t *testing.T) {
 		t.Error("esperaba un error si el temporal no existe")
 	}
 }
+
+// Ordenar vale para un fichero y para un directorio (en macOS es la barrera
+// F_BARRIERFSYNC); con un descriptor cerrado no puede dar nada por bueno.
+func TestOrdenar(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Ordenar(f); err != nil {
+		t.Errorf("Ordenar(fichero): %v", err)
+	}
+	f.Close()
+	if err := Ordenar(f); err == nil {
+		t.Error("Ordenar de un fichero cerrado no falló")
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := Ordenar(d); err != nil {
+		t.Errorf("Ordenar(directorio): %v", err)
+	}
+}

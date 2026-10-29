@@ -3130,7 +3130,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	// Un volcado a medias no se carga: fallaría con un error de Firecracker que
 	// no señala a ninguna parte, o peor, arrancaría un invitado corrupto.
-	if err := volcadoValido(dir); err != nil {
+	if err := volcadoValido(dir, mc.FrozenAt); err != nil {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}

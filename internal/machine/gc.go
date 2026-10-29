@@ -372,7 +372,7 @@ func (m *Manager) retieneDatos(mc *api.Machine) string {
 	}
 	switch mc.State {
 	case api.StateFailed:
-		if volcadoValido(m.dir(mc.ID)) == nil {
+		if volcadoValido(m.dir(mc.ID), mc.FrozenAt) == nil {
 			return "it keeps a complete snapshot of its own"
 		}
 		if mc.From == "" && mc.LastErr == errProcesoDesaparecido {
