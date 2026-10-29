@@ -25,8 +25,6 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling doctor` warns about machines stuck mid-operation: a freeze that could not resume, or a removed machine whose VMM survived SIGKILL.
 - `scripts/94-energia-mac.sh`: a reproducible energy bench on the Mac (no sudo), JSON in `docs/bench-data/`.
 
-### Fixed
-
 - A dump or a golden is stamped with the VMM that launched the machine, not the daemon's: a `kling-vz` machine readopted by a daemon set to `hv` no longer looks restorable by `kling-hv`.
 - Ctrl-C on `kling freeze` no longer kills the machine: the dump finishes, and a resume that fails is retried by the daemon instead of a SIGKILL.
 - A thaw whose client left after the memory was loaded still resyncs the guest's clock and RNG.
