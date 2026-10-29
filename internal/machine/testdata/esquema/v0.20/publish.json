@@ -1,0 +1,13 @@
+[
+  {
+    "machine": "aa11bb22cc33dd44",
+    "name": "v020-174",
+    "ports": [
+      {
+        "host": 175,
+        "guest": 176,
+        "proto": "v020-177"
+      }
+    ]
+  }
+]

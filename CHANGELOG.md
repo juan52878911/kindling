@@ -15,6 +15,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Contract goldens with tests: the daemon's routes and their authz action, the status code of each route, the JSON shape of every `pkg/api` type and the `-json` output of the main CLI commands; removing or changing a line fails unless `api.APIVersion` goes up.
 - Documented exit codes (`kling help`): 0 ok, 1 error, 2 usage, 3 daemon too old, 4 stale template, 5 the guest agent lacks a capability, 130 interrupted, N the remote code in `exec`/`shell`/`try`.
 - `kling version` and `status -v` show the API version, the VMM and the guest agent versions announced by the machines; `version -json` and `status -json` gain `api`, `daemon_api`, `vmm`/`backend` and `agents`.
+- `recipe.json` records the image's guest agent (`agent`: version from the builder, capabilities from the first machine that boots it); `GET /images` returns it, and `kling image ls` and `kling doctor` flag images whose agent is older than v0.18 or more than one minor behind the daemon.
 
 ### Changed
 
@@ -27,6 +28,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET …/logs` and `GET /images/{name}/recipe` give 404 only when there is nothing, 500 when reading fails; `DELETE …/credentials/{env}` decides its 404 by sentinel, not by the text.
 - Unknown routes (404) and wrong methods (405) answer in JSON with `message` and `code` instead of plain text; the status code is the same.
 - The `kling compose` help lists `ps`, `logs`, `exec`, `stop`, `start` and `restart` (they already worked).
+- Versioned on-disk formats: `publish.json` and `fondos.json` get `schema: 1` (with a `.v0.bak` and durable writes), graphs `format: 1`, the CLI config `schema: 1` (and `Save` keeps keys it does not know), the freeze seal `schema: 1`, and MMDS `kling_mmds: 1`. A file from a newer kling is left untouched and the error says to update kling.
+- `state.json` moves to schema 3 only when a machine has `cmd`, `entrypoint`, `share_wait`, `volume_wait` or `net_mibps` (an older kling would drop them), and every schema bump of `state.json` (also 1 -> 2) leaves a `.v<N>.bak`.
+- Credential stores with a sigv4 credential are sealed as `KLCS 2`: kling v0.18 would use them as HTTP credentials and drop their fields.
+- `POST /graphs` rejects fields the daemon does not know (400) instead of dropping them.
+- A golden or frozen machine is stale when it was made on another architecture or with a kling-vz/kling-hv snapshot format this one does not read; kling-hv restore errors are explained like kling-vz ones.
 
 ### Removed
 

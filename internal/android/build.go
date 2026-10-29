@@ -16,6 +16,7 @@ import (
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // BaseBuilder es el nombre que llevan en su receta las bases que escribe
@@ -205,7 +206,8 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 	bs, _ := json.Marshal(map[string]any{"for_layer": b.name, "arch": b.spec.Arch, "info": baseInfo})
 	baseRec.Spec = bs
 	rb, _ := json.MarshalIndent(baseRec, "", "  ")
-	if err := os.WriteFile(filepath.Join(images, b.baseName+".recipe.json"), append(rb, '\n'), 0o644); err != nil {
+	// Durable, como la receta que escribe el daemon (un corte no deja una a medias).
+	if err := durable.Escribir(filepath.Join(images, b.baseName+".recipe.json"), append(rb, '\n'), 0o644); err != nil {
 		return err
 	}
 	bj, _ := json.Marshal(built)

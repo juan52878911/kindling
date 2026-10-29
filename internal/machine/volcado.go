@@ -32,11 +32,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/digest"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 const (
@@ -48,7 +50,20 @@ const (
 // 308223b9): un volcado de después sin ninguna de las dos no se da por bueno.
 var selloDesde = time.Date(2026, 9, 23, 5, 28, 42, 0, time.UTC)
 
+// versionSello es la versión de volcado.ok (ver pkg/esquema).
+//
+//	0: sin campo (v0.8-v0.20). Con los opcionales vmm y diff_base (v0.18) y
+//	   sin_agente (v0.19), que un kling anterior ignora sin daño salvo
+//	   diff_base, al que protege que state.json pase a 2 (manager.go).
+//	1: lo mismo, con "schema": 1.
+//
+// Súbela cuando un kling anterior fuera a dar por bueno un volcado que no
+// sabría cargar: uno más nuevo no se descongela (se dice que hay que
+// actualizar kling) y no se toca.
+const versionSello = 1
+
 type sello struct {
+	esquema.Cabecera
 	SnapSHA256 string    `json:"snap_sha256"`
 	MemBytes   int64     `json:"mem_bytes"`
 	At         time.Time `json:"at"`
@@ -67,6 +82,9 @@ type sello struct {
 	// no resincroniza (mismo criterio que Snapshot.SinAgente) y sobrevive a un
 	// reinicio del daemon.
 	SinAgente bool `json:"sin_agente,omitempty"`
+	// Arch es la arquitectura del host que volcó (runtime.GOARCH): otra no lo
+	// carga (causaObsoletoEn). Opcional: sin él no se compara.
+	Arch string `json:"arch,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -90,7 +108,8 @@ func sellarVolcado(dir, kernelSHA, vmm, diffBase string, sinAgente bool) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase, SinAgente: sinAgente})
+	b, _ := json.Marshal(sello{Cabecera: esquema.Cabecera{Schema: versionSello}, SnapSHA256: snapSHA, MemBytes: fi.Size(),
+		At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm, DiffBase: diffBase, SinAgente: sinAgente, Arch: runtime.GOARCH})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}
@@ -217,10 +236,17 @@ func volcadoValido(dir string, congelada *time.Time) error {
 	if err != nil {
 		return err
 	}
+	// De un kling más nuevo: no está incompleto, y no se sabe cargar. Es un
+	// *esquema.ErrMasNuevo, no errVolcadoIncompleto, para que nadie lo trate
+	// como basura (gc.go lo conserva).
+	if _, err := esquema.Comprobar(filepath.Join(dir, marcaOK), raw, versionSello); esquema.EsMasNuevo(err) {
+		return err
+	}
 	var s sello
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return fmt.Errorf("%w: unreadable seal: %v", errVolcadoIncompleto, err)
 	}
+
 	fi, err := os.Stat(filepath.Join(dir, "mem.file"))
 	if err != nil {
 		return err

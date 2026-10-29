@@ -3,6 +3,7 @@ package esquema
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,46 @@ func TestRespaldarNoPisaLaPrimera(t *testing.T) {
 	}
 	if fi, _ := os.Stat(RutaRespaldo(ruta, 0)); fi.Mode().Perm() != 0o600 {
 		t.Errorf("la copia no conserva los permisos: %v", fi.Mode().Perm())
+	}
+}
+
+// PrepararEscritura guarda la copia de una versión anterior, se niega ante
+// una del futuro y no estorba si no hay fichero o es ilegible.
+func TestPrepararEscritura(t *testing.T) {
+	dir := t.TempDir()
+	ruta := filepath.Join(dir, "f.json")
+	if err := PrepararEscritura(ruta, 1, 1); err != nil {
+		t.Fatalf("sin fichero: %v", err)
+	}
+	os.WriteFile(ruta, []byte(`[1,2]`), 0o600)
+	if err := PrepararEscritura(ruta, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(RutaRespaldo(ruta, 0)); err != nil || string(b) != `[1,2]` {
+		t.Fatalf("copia v0 = %q, %v", b, err)
+	}
+	os.WriteFile(ruta, []byte(`{"schema":1}`), 0o600)
+	if err := PrepararEscritura(ruta, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(RutaRespaldo(ruta, 1)); !os.IsNotExist(err) {
+		t.Fatal("copió un fichero que ya estaba en la versión que se escribe")
+	}
+	// Escribir una versión más baja que la del disco, dentro de lo que se
+	// entiende, no es migrar: sin copia.
+	os.WriteFile(ruta, []byte(`{"schema":3}`), 0o600)
+	if err := PrepararEscritura(ruta, 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	err := PrepararEscritura(ruta, 1, 2)
+	if !EsMasNuevo(err) {
+		t.Fatalf("fichero del futuro: err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "update kling") {
+		t.Fatalf("el mensaje no dice que hay que actualizar kling: %v", err)
+	}
+	os.WriteFile(ruta, []byte(`{"schema":"x"}`), 0o600)
+	if err := PrepararEscritura(ruta, 1, 1); err != nil {
+		t.Fatalf("ilegible: %v", err)
 	}
 }

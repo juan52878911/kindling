@@ -52,7 +52,9 @@ type doctorInput struct {
 	infoErr    error
 	// snaps son los dorados del daemon (nil si no se pudieron listar): los
 	// stale no se pueden restaurar con el VMM de ahora.
-	snaps      []*api.Snapshot
+	snaps []*api.Snapshot
+	// images: para avisar de agentes de invitado viejos (checkAgentesViejos).
+	images     []api.Image
 	plugins    []*plugin.Plugin
 	completion bool // $_KLING_COMPLETION: lo exportan los scripts de completado
 	// completionRC es que el rc de la shell carga el fichero que escribió
@@ -111,6 +113,7 @@ func cmdDoctor(args []string) error {
 	in.info, in.infoErr = api.NewClient(endpoint).Info(ctx)
 	if in.infoErr == nil {
 		in.snaps, _ = api.NewClient(endpoint).Snapshots(ctx)
+		in.images, _ = api.NewClient(endpoint).Images(ctx)
 	}
 	cancel()
 
@@ -201,6 +204,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 			out = append(out, c)
 		}
 		if c, ok := checkOtroVMM(in.snaps, in.info); ok {
+			out = append(out, c)
+		}
+		if c, ok := checkAgentesViejos(in.images, in.info.Version); ok {
 			out = append(out, c)
 		}
 		// Máquinas a medio camino que el daemon sigue reintentando: un freeze
@@ -378,7 +384,34 @@ func delMismoVMM(snaps []*api.Snapshot, info *api.Info) []*api.Snapshot {
 	return out
 }
 
+// checkAgentesViejos avisa de las imágenes cuyo agente de invitado es viejo
+// para este daemon (agenteViejo): siguen funcionando, degradadas.
+func checkAgentesViejos(imgs []api.Image, kling string) (doctorCheck, bool) {
+	var names []string
+	var por string
+	for _, img := range imgs {
+		if p := agenteViejo(img.Agent, kling); p != "" {
+			names = append(names, img.Name)
+			por = p
+		}
+	}
+	if len(names) == 0 {
+		return doctorCheck{}, false
+	}
+	shown := names
+	if len(shown) > 5 {
+		shown = append(shown[:5:5], fmt.Sprintf("and %d more", len(names)-5))
+	}
+	detail := fmt.Sprintf("%d with an old guest agent (they work, without what it lacks): %s", len(names), strings.Join(shown, ", "))
+	if len(names) == 1 {
+		detail = fmt.Sprintf("%s: %s (it works, without what it lacks)", names[0], por)
+	}
+	return doctorCheck{Name: "images", State: doctorWarn, Detail: detail,
+		Fix: "kling image ls says which; " + pistaRehacer}, true
+}
+
 func checkStale(snaps []*api.Snapshot) (doctorCheck, bool) {
+
 	var names []string
 	for _, s := range snaps {
 		if s != nil && s.Stale != "" {

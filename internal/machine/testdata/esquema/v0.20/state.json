@@ -1,0 +1,124 @@
+{
+  "schema": 2,
+  "machines": [
+    {
+      "id": "aa11bb22cc33dd44",
+      "name": "vieja",
+      "image": "eco",
+      "state": "stopped",
+      "vcpus": 5,
+      "mem_mib": 6,
+      "pid": 7,
+      "last_error": "v020-8",
+      "mem_max_mib": 9,
+      "disk_mib": 10,
+      "diff_base": "v020-11",
+      "snapshot_bytes": 12,
+      "disk_bytes": 13,
+      "created_at": "2026-10-01T10:14:00Z",
+      "started_at": "2026-10-01T10:15:00Z",
+      "frozen_at": "2026-10-01T10:16:00Z",
+      "failed_at": "2026-10-01T10:17:00Z",
+      "stopped_at": "2026-10-01T10:18:00Z",
+      "from": "svc",
+      "ip": "172.16.0.6",
+      "net_index": 21,
+      "egress": "allowlist",
+      "forwards": {
+        "v020-23": "v020-24"
+      },
+      "published": [
+        {
+          "host": 25,
+          "guest": 26,
+          "proto": "v020-27"
+        }
+      ],
+      "allow_domains": [
+        "v020-28"
+      ],
+      "ttl_seconds": 29,
+      "cpu_pct": 30,
+      "cpu_pct_fixed": true,
+      "net_mibps": 31,
+      "cpu_boost_pct": 32,
+      "allow_exec": true,
+      "on_ttl": "v020-33",
+      "ttl_at": "2026-10-01T10:34:00Z",
+      "volumes": [
+        {
+          "name": "v020-35",
+          "mount": "v020-36",
+          "read_only": true,
+          "drive_id": "v020-37"
+        }
+      ],
+      "shares": [
+        {
+          "mode": "v020-38",
+          "mount": "v020-39",
+          "source": "v020-40",
+          "image_bytes": 41,
+          "status": "v020-42"
+        }
+      ],
+      "labels": {
+        "v020-43": "v020-44"
+      },
+      "has_secrets": true,
+      "env_keys": [
+        "v020-45"
+      ],
+      "share_wait": 46,
+      "entrypoint": [
+        "v020-47"
+      ],
+      "cmd": [
+        "v020-48"
+      ],
+      "volume_wait": true,
+      "ready": "v020-49",
+      "hooks_pending": "v020-50",
+      "hold": "v020-51",
+      "disk_errors": 52,
+      "disk_error_at": "2026-10-01T10:53:00Z",
+      "disk_error": "v020-54",
+      "agent": {
+        "agent": "v020-55",
+        "version": "v020-56",
+        "caps": [
+          "v020-57"
+        ]
+      },
+      "vmm": "v020-58",
+      "transition": "v020-59",
+      "mem_shared": true,
+      "credential_domains": [
+        "v020-60"
+      ],
+      "credential_any_database": [
+        "v020-61"
+      ],
+      "boot_ms": 62,
+      "freeze_ms": 63,
+      "thaw_ms": 64,
+      "wake": {
+        "tier": "v020-65",
+        "wait_ms": 66,
+        "check_ms": 67,
+        "store_ms": 68,
+        "mirror_ms": 69,
+        "memory_ms": 70,
+        "net_ms": 71,
+        "spawn_ms": 72,
+        "socket_ms": 73,
+        "load_ms": 74,
+        "forwards_ms": 75,
+        "resync_ms": 76,
+        "cgroup_ms": 77,
+        "finish_ms": 78,
+        "total_ms": 79
+      }
+    }
+  ]
+}

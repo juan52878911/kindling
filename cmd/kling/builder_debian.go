@@ -18,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // CONSTRUCTOR "debian": una imagen Debian (trixie) fijada, con los paquetes
@@ -321,11 +322,14 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 	bs, _ := json.Marshal(map[string]any{"for_layer": req.Name, "arch": spec.Arch, "debian": base.Image, "packages": base.Packages})
 	baseRec := api.ImageRecipe{Name: baseName, Cmd: []string{}, BuiltAt: t, Builder: DebianBaseBuilder, Spec: bs}
 	rb, _ := json.MarshalIndent(baseRec, "", "  ")
-	if err := os.WriteFile(filepath.Join(images, baseName+".recipe.json"), append(rb, '\n'), 0o644); err != nil {
+	// Durable, como la receta que escribe el daemon: una receta a medias tras
+	// un corte deja la imagen sin base conocida.
+	if err := durable.Escribir(filepath.Join(images, baseName+".recipe.json"), append(rb, '\n'), 0o644); err != nil {
 		return err
 	}
 	bj, _ := json.Marshal(built)
-	hb, _ := json.MarshalIndent(api.BuildRecipeHints{Base: baseName, Built: bj}, "", "  ")
+	hb, _ := json.MarshalIndent(api.BuildRecipeHints{Base: baseName, Built: bj,
+		Agent: agenteMetido(agent, filepath.Join(lib, "kling-guest"))}, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "recipe.json"), append(hb, '\n'), 0o644); err != nil {
 		return err
 	}

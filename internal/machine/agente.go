@@ -107,11 +107,13 @@ func (m *Manager) conocerAgente(id string) {
 			ag, err := preguntarAgente(pctx, "http://"+addr)
 			pcancel()
 			if err == nil {
+				var imagen string
 				m.mu.Lock()
 				if mc := m.byID[id]; mc != nil && mc.Agent == nil {
-					mc.Agent = ag
+					mc.Agent, imagen = ag, mc.Image
 				}
 				m.mu.Unlock()
+				m.agenteEnReceta(imagen, ag)
 				return
 			}
 			select {

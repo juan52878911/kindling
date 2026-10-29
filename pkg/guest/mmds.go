@@ -67,8 +67,48 @@ const (
 	mmdsTokenTTL = "60"
 )
 
+// MMDSVersionKey es la clave del almacén MMDS con la versión del contrato
+// entre el daemon y el agente; MMDSVersion, la que escribe este daemon y la
+// más nueva que entiende este agente.
+//
+//	(sin clave): hasta v0.20. env, sessions, machine_env (v0.18), machine_cmd (v0.19).
+//	1: lo mismo, con "kling_mmds": 1.
+//
+// Súbela cuando un agente anterior fuera a entender mal el almacén (no al
+// añadir una clave: las que no conoce las ignora). Un agente que ve una
+// versión mayor que la suya avisa y sigue con lo que entiende: el almacén lo
+// pone un daemon más nuevo que la imagen, y fallar dejaría la máquina sin su
+// entorno.
+const (
+	MMDSVersionKey = "kling_mmds"
+	MMDSVersion    = 1
+)
+
+// ConVersionMMDS devuelve doc (el almacén que el daemon va a poner) con
+// MMDSVersionKey, si doc es un objeto JSON (ya decodificado o en crudo). Uno
+// que no lo es se devuelve tal cual: no es del contrato.
+func ConVersionMMDS(doc any) any {
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		b, err := json.Marshal(doc)
+		if err != nil || json.Unmarshal(b, &obj) != nil || obj == nil {
+			return doc
+		}
+	} else {
+		cp := make(map[string]any, len(obj)+1)
+		for k, v := range obj {
+			cp[k] = v
+		}
+		obj = cp
+	}
+	obj[MMDSVersionKey] = MMDSVersion
+	return obj
+}
+
 // MMDSStore es el documento JSON que sirve el metadata service.
 type MMDSStore struct {
+	// Version es MMDSVersionKey; 0 = un daemon ≤ v0.20.
+	Version  int                          `json:"kling_mmds,omitempty"`
 	Env      map[string]string            `json:"env"`
 	Sessions map[string]map[string]string `json:"sessions"`
 	// MachineEnv es el entorno de la máquina (api.MachineEnvMMDSKey): solo
@@ -196,5 +236,10 @@ func FetchMMDS() (*MMDSStore, error) {
 		log.Printf("mmds: store present but doesn't follow the {env,sessions} schema; ignoring it")
 		return nil, nil
 	}
+	if store.Version > MMDSVersion {
+		log.Printf("mmds: the store has %s=%d and this agent understands up to %d: it was written by a newer "+
+			"kling; using what this agent knows (rebuild the image to get a newer agent)", MMDSVersionKey, store.Version, MMDSVersion)
+	}
 	return &store, nil
+
 }

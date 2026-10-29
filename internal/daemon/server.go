@@ -759,6 +759,30 @@ func decodeJSONCon(w http.ResponseWriter, r *http.Request, v any, max int64) err
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
+// decodeJSONEstricto es decodeJSONCon que rechaza los campos que este daemon
+// no conoce. Es para POST /graphs: un grafo es una descripción entera de lo
+// que se quiere, y un campo nuevo del cliente (health llegó en v0.19) que un
+// daemon viejo ignorara se perdería en silencio —el grafo nacería distinto de
+// lo pedido y nadie lo diría—. Mejor un 400 que diga qué actualizar.
+func decodeJSONEstricto(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
+	return decodificarEstricto(r.Body, v)
+}
+
+// decodificarEstricto decodifica rd en v sin admitir campos desconocidos, y
+// explica el error de uno desconocido. Lo usa también la revisión de authz,
+// que decodifica el cuerpo antes que el handler y lo recodificaría sin él.
+func decodificarEstricto(rd io.Reader, v any) error {
+	dec := json.NewDecoder(rd)
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err != nil && strings.HasPrefix(err.Error(), "json: unknown field ") {
+		return fmt.Errorf("%s: this daemon (%s) does not know that field and would drop it; "+
+			"update kling on the daemon's host, or leave the field out", strings.TrimPrefix(err.Error(), "json: "), Version)
+	}
+	return err
+}
+
 // jsonBodyStatus traduce un error de decodeJSON (o de api.LeerCuerpo) a su
 // código HTTP: 413 si fue el tope de tamaño el que lo cortó, 400 para cualquier otro (JSON inválido,
 // campo con el tipo que no toca, etc).

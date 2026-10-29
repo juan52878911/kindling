@@ -552,6 +552,8 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 		{"grafo sella cada nodo", "POST", "/graphs", `{"graph":{"name":"g","nodes":{"n":{"image":"min"},"m":{"from":"snap-a"}}}}`, 299,
 			[]string{`"n":{"image":"min","labels":{"kling.owner":"a"}}`, `"m":{"from":"snap-a","labels":{"kling.owner":"a"}}`}},
 		{"grafo con plantilla ajena", "POST", "/graphs", `{"graph":{"name":"g","nodes":{"n":{"from":"snap-b"}}}}`, 404, []string{"node n"}},
+		// Un campo que este daemon no conoce no se pierde al recodificar: 400.
+		{"grafo con campo desconocido", "POST", "/graphs", `{"graph":{"name":"g","nodes":{"n":{"image":"min","futuro":1}}}}`, 400, []string{`unknown field \"futuro\"`, "update kling"}},
 		{"grafo con kling.owner", "POST", "/graphs", `{"graph":{"name":"g","nodes":{"n":{"image":"min","labels":{"kling.owner":"b"}}}}}`, 403, nil},
 		{"etiquetas: kling.owner", "PUT", "/machines/svc-a/labels", `{"kling.owner":"b"}`, 403, nil},
 		{"etiquetas: kling.db.owner ajeno", "PUT", "/machines/svc-a/labels", `{"kling.db.owner":"b"}`, 403, nil},

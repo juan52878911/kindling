@@ -1,0 +1,61 @@
+{
+  "schema": 2,
+  "name": "svc",
+  "image": "eco",
+  "created_at": "2026-10-01T10:14:00Z",
+  "vcpus": 75,
+  "mem_mib": 76,
+  "mem_max_mib": 77,
+  "mem_bytes": 78,
+  "disk_bytes": 79,
+  "instances": 80,
+  "warnings": [
+    "v018-81"
+  ],
+  "volumes": [
+    {
+      "name": "v018-82",
+      "mount": "v018-83",
+      "read_only": true,
+      "drive_id": "v018-84"
+    }
+  ],
+  "volume": "v018-85",
+  "has_volume": true,
+  "volume_mount": "v018-86",
+  "volume_read_only": true,
+  "egress": "v018-87",
+  "cpu_pct": 88,
+  "cpu_pct_fixed": true,
+  "allow_domains": [
+    "v018-89"
+  ],
+  "allow_exec": true,
+  "env_keys": [
+    "v018-90"
+  ],
+  "labels": {
+    "v018-91": "v018-92"
+  },
+  "credential_domains": [
+    "v018-93"
+  ],
+  "credential_any_database": [
+    "v018-94"
+  ],
+  "rootfs_sha256": "v018-95",
+  "snap_sha256": "v018-96",
+  "rootfs_digest": "v018-97",
+  "kernel_sha256": "v018-98",
+  "guest_ipv6_off": true,
+  "guest_ipv6_stack": true,
+  "vmm": "v018-99",
+  "macos": "v018-100",
+  "kling_version": "v018-101",
+  "signature": "v018-103",
+  "annotations": {
+    "v018-104": {
+      "v018": 105
+    }
+  }
+}

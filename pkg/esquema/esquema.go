@@ -43,8 +43,8 @@ type ErrMasNuevo struct {
 
 func (e *ErrMasNuevo) Error() string {
 	return fmt.Sprintf("%s has schema %d but this kling only understands up to %d: "+
-		"it was written by a newer version. Nothing was changed; run that version again "+
-		"(or restore %s.v%d.bak if it exists)", e.Ruta, e.Leida, e.Soportada, e.Ruta, e.Soportada)
+		"it was written by a newer version. Nothing was changed; update kling (kling upgrade) "+
+		"or run that version again (or restore %s.v%d.bak if it exists)", e.Ruta, e.Leida, e.Soportada, e.Ruta, e.Soportada)
 }
 
 // EsMasNuevo dice si err viene de un fichero del futuro.
@@ -139,6 +139,40 @@ func Respaldar(ruta string, v int) error {
 	if err := os.Rename(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return err
+	}
+	return nil
+}
+
+// PrepararEscritura es lo que hace el dueño de un fichero versionado justo
+// antes de escribir la versión nueva encima de ruta:
+//
+//   - si en disco hay una versión mayor que max (la más nueva que entiende el
+//     binario), devuelve *ErrMasNuevo y no hay que escribir: se perdería lo
+//     que este binario no conoce;
+//   - si en disco hay una versión menor que nueva, guarda la copia
+//     <ruta>.v<N>.bak (Respaldar) antes de que la escritura la migre.
+//
+// max suele ser nueva; es mayor cuando el dueño escribe la versión más baja
+// que describe lo que guarda (state.json escribe 1 si puede, aunque lea 3).
+// Un fichero que no existe, o cuya versión no se entiende (ilegible: lo trata
+// su dueño al leerlo), no impide escribir.
+func PrepararEscritura(ruta string, nueva, max int) error {
+	b, err := os.ReadFile(ruta)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	v, err := Comprobar(ruta, b, max)
+	if EsMasNuevo(err) {
+		return err
+	}
+	if err != nil {
+		return nil
+	}
+	if v < nueva {
+		return Respaldar(ruta, v)
 	}
 	return nil
 }

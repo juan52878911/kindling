@@ -123,3 +123,63 @@ func TestEstadoEsquemaConDiff(t *testing.T) {
 		t.Fatalf("no relee el esquema 2: %s %+v", m2.estadoIlegible, m2.byID)
 	}
 }
+
+// Subir de esquema respecto del que dejó el binario anterior guarda antes
+// su copia, también en 1→2 (antes no) y en →3: el state.json de v0.20 con
+// una máquina de compose pasa al 3 y volver atrás tiene su .v1.bak. Bajar
+// (la máquina se va) no es migrar y no copia nada.
+func TestEstadoSubirEsquemaDejaCopia(t *testing.T) {
+	for _, c := range []struct {
+		nombre  string
+		cambiar func(mc *api.Machine)
+		quiero  int
+	}{
+		{"diferencial", func(mc *api.Machine) { mc.DiffBase = "/x/snapshots/d/mem.file" }, versionEstadoDiff},
+		{"cmd", func(mc *api.Machine) { mc.Cmd = []string{"redis-server"} }, versionEstadoCampos},
+		{"net_mibps", func(mc *api.Machine) { mc.NetMiBps = 64 }, versionEstadoCampos},
+	} {
+		t.Run(c.nombre, func(t *testing.T) {
+			m := newTestManager(t)
+			v1 := []byte(`{"schema": 1, "machines": [{"id":"aa11bb22cc33dd44","name":"vieja","state":"stopped"}]}`)
+			if err := os.WriteFile(m.statePath(), v1, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m.load()
+			m.mu.Lock()
+			c.cambiar(m.byID["aa11bb22cc33dd44"])
+			m.persist()
+			m.mu.Unlock()
+			m.writePending()
+			b, _ := os.ReadFile(m.statePath())
+			if v, _ := esquema.Version(b); v != c.quiero {
+				t.Fatalf("schema %d; quería %d", v, c.quiero)
+			}
+			if bak, err := os.ReadFile(esquema.RutaRespaldo(m.statePath(), 1)); err != nil || !bytes.Equal(bak, v1) {
+				t.Fatalf("copia .v1.bak = %q, %v", bak, err)
+			}
+			// Lo relee este binario, y uno que lee ≤ 2 (v0.18-v0.20) se niega.
+			m2 := newTestManager(t)
+			m2.root = m.root
+			m2.load()
+			if m2.barridoBloqueado() || m2.byID["aa11bb22cc33dd44"] == nil {
+				t.Fatalf("no relee el esquema %d: %s", c.quiero, m2.estadoIlegible)
+			}
+			if c.quiero > versionEstadoDiff {
+				if _, err := esquema.Comprobar(m.statePath(), b, versionEstadoDiff); !esquema.EsMasNuevo(err) {
+					t.Fatalf("un kling v0.20 lo leería y perdería el campo: %v", err)
+				}
+			}
+		})
+	}
+	// Un estado que ya estaba en el esquema que se escribe no deja copia.
+	m := newTestManager(t)
+	if err := os.WriteFile(m.statePath(), []byte(`{"schema": 1, "machines": []}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.load()
+	m.addForTest("bb22cc33dd44ee55")
+	m.writePending()
+	if _, err := os.Stat(esquema.RutaRespaldo(m.statePath(), 1)); !os.IsNotExist(err) {
+		t.Fatalf("copió sin migrar: %v", err)
+	}
+}

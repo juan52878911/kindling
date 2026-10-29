@@ -708,7 +708,8 @@ var reBak = lazyre.New(`\.v[0-9]+\.bak$`)
 func sinBak(p string) string { return reBak.ReplaceAllString(p, "") }
 
 // baks lista las copias de migración que hay en la raíz: las de state.json,
-// los meta.json de los dorados y los almacenes de credenciales.
+// publish.json y fondos.json, los meta.json de los dorados y los almacenes de
+// credenciales.
 func baks(raiz string) []string {
 	var out []string
 	for _, patron := range versionados {
@@ -723,10 +724,13 @@ func baks(raiz string) []string {
 	return out
 }
 
-// versionados son los patrones de los ficheros de estado con versión, los
-// mismos que recorre machine.EsquemasEnDisco.
+// versionados son los patrones de los ficheros de estado con versión: los
+// que recorre machine.EsquemasEnDisco más publish.json y fondos.json, que
+// llevan su propia versión y también vuelven desde su .bak.
 var versionados = []string{
 	"state.json",
+	"publish.json",
+	"fondos.json",
 	filepath.Join("snapshots", "*", "meta.json"),
 	filepath.Join("machines", "*", "credentials.enc"),
 	filepath.Join("secrets", "credentials", "*.enc"),

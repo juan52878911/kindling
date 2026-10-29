@@ -114,6 +114,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := os.Stat(s.recipePath(name)); err == nil {
 			img.HasRecipe = true
+			img.Agent = s.mgr.AgenteDeImagen(name)
 		}
 		out = append(out, img)
 	}

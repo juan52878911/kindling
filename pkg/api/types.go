@@ -593,6 +593,12 @@ type Image struct {
 	// monolítica, que es como se construía todo antes.
 	Base string `json:"base,omitempty"`
 
+	// Agent es el agente de invitado de la imagen (ImageRecipe.Agent, o la
+	// versión de kling que la construyó si la receta es de antes). nil = no
+	// se sabe. Es lo que `kling image ls` y `kling doctor` comparan para
+	// avisar de un agente viejo.
+	Agent *GuestAgent `json:"agent,omitempty"`
+
 	// Layers cuenta las imágenes por capas que usan ESTA como base.
 	//
 	// Es lo que dice si se puede retirar: una base con capas encima no se puede
@@ -888,6 +894,9 @@ type Snapshot struct {
 	VMM          string `json:"vmm,omitempty"`
 	MacOS        string `json:"macos,omitempty"`
 	KlingVersion string `json:"kling_version,omitempty"`
+	// Arch es la arquitectura del host que lo hizo (runtime.GOARCH): un
+	// volcado de amd64 no se restaura en arm64 ni al revés. Vacío = no consta.
+	Arch string `json:"arch,omitempty"`
 
 	// Stale, si no está vacío, es por qué este dorado no se puede restaurar
 	// con el VMM de ahora ("made with firecracker 1.12.0; this host runs
@@ -1364,6 +1373,11 @@ type ImageRecipe struct {
 	// Built es lo que el constructor apuntó de lo que construyó (digests de
 	// lo descargado, la raíz de dm-verity...): BuildRecipeHints.Built.
 	Built json.RawMessage `json:"built,omitempty"`
+	// Agent es el agente de invitado que lleva la imagen: lo apunta el
+	// constructor al meterlo (versión) y el daemon lo completa con lo que
+	// anuncia la primera máquina que arranca de ella (capacidades). Vacío en
+	// las imágenes de antes; ahí vale KlingVer, la versión que la construyó.
+	Agent *GuestAgent `json:"agent,omitempty"`
 }
 
 // BuildRecipeHints es lo que un constructor puede dejar en recipe.json de su
@@ -1380,6 +1394,9 @@ type BuildRecipeHints struct {
 	GuestIPv6Stack bool `json:"guest_ipv6_stack,omitempty"`
 	// Built va tal cual a ImageRecipe.Built.
 	Built json.RawMessage `json:"built,omitempty"`
+	// Agent, el agente que el constructor metió en la imagen, si lo sabe:
+	// va a ImageRecipe.Agent.
+	Agent *GuestAgent `json:"agent,omitempty"`
 }
 
 // StatusError es un error de la API que conserva el código HTTP.

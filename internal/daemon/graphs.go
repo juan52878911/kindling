@@ -29,7 +29,7 @@ func graphStatus(err error) int {
 
 func (s *Server) handleGraphUp(w http.ResponseWriter, r *http.Request) {
 	var req api.GraphRequest
-	if err := decodeJSONCon(w, r, &req, grafoMaxCuerpo); err != nil {
+	if err := decodeJSONEstricto(w, r, &req, grafoMaxCuerpo); err != nil {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
