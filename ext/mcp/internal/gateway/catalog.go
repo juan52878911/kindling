@@ -376,13 +376,6 @@ func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[strin
 	return out, errs
 }
 
-// invalidate olvida la caché de un servicio.
-func (c *catalog) invalidate(service string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.fetched, service)
-}
-
 // ── utilidades MCP ────────────────────────────────────────────────────────────
 
 // Sin Timeout global: acota la peticion ENTERA, y una herramienta puede tardar
@@ -442,10 +435,6 @@ func resetBridge(ctx context.Context, service, base string) {
 var rpcSeq atomic.Int64
 
 func nextRPCID() int64 { return rpcSeq.Add(1) }
-
-func mcpPost(ctx context.Context, base, sid, body string) (*http.Response, error) {
-	return mcpPostAt(ctx, base+"/mcp", sid, body)
-}
 
 // mcpPostAt habla con una URL completa. Los enlaces externos la traen entera y
 // no hay por qué suponerles la ruta /mcp.

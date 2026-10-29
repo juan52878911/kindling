@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -426,6 +427,18 @@ func VolverAtras(ctx context.Context, o Opciones) (*Resultado, error) {
 	for _, b := range bakNuevos(c) {
 		o.printf("  restore %s from %s\n", sinBak(b), filepath.Base(b))
 	}
+	// Como Actualizar con el nuevo: el viejo tiene que poder leer lo que
+	// quede en disco tras devolver las copias de migración. Lo que el nuevo
+	// creó en un formato más nuevo (un dorado, un almacén de credenciales) no
+	// tiene .bak y se quedaría ahí: el viejo no arrancaría o lo perdería.
+	if mal, err := ilegiblesTrasVolver(c, viejo); err != nil {
+		return nil, fmt.Errorf("reading the state's formats: %v (run it as the daemon's user)", err)
+	} else if len(mal) > 0 {
+		if !o.Forzar {
+			return nil, fmt.Errorf("%s cannot use this daemon's data in %s after rolling back:\n  %s\nnothing was changed (-force rolls back anyway)", viejo.Kling, c.Raiz, strings.Join(mal, "\n  "))
+		}
+		o.printf("rolling back anyway (-force), although %s cannot read:\n  %s\n", viejo.Kling, strings.Join(mal, "\n  "))
+	}
 	if o.EnSeco {
 		res.EnSeco = true
 		o.printf("\n(dry run: nothing was changed)\n")
@@ -698,14 +711,8 @@ func sinBak(p string) string { return reBak.ReplaceAllString(p, "") }
 // los meta.json de los dorados y los almacenes de credenciales.
 func baks(raiz string) []string {
 	var out []string
-	for _, patron := range []string{
-		filepath.Join(raiz, "state.json.v*.bak"),
-		filepath.Join(raiz, "snapshots", "*", "meta.json.v*.bak"),
-		filepath.Join(raiz, "machines", "*", "credentials.enc.v*.bak"),
-		filepath.Join(raiz, "secrets", "credentials", "*.enc.v*.bak"),
-		filepath.Join(raiz, "store", "graph", "*.secrets.enc.v*.bak"),
-	} {
-		m, _ := filepath.Glob(patron)
+	for _, patron := range versionados {
+		m, _ := filepath.Glob(filepath.Join(raiz, patron+".v*.bak"))
 		for _, p := range m {
 			if reBak.MatchString(p) {
 				out = append(out, p)
@@ -714,6 +721,64 @@ func baks(raiz string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// versionados son los patrones de los ficheros de estado con versión, los
+// mismos que recorre machine.EsquemasEnDisco.
+var versionados = []string{
+	"state.json",
+	filepath.Join("snapshots", "*", "meta.json"),
+	filepath.Join("machines", "*", "credentials.enc"),
+	filepath.Join("secrets", "credentials", "*.enc"),
+	filepath.Join("store", "graph", "*.secrets.enc"),
+}
+
+// ilegiblesTrasVolver dice qué de la raíz de c no podría leer viejo cuando
+// VolverAtras haya devuelto a su nombre las copias de migración (bakNuevos):
+// arma una vista de la raíz con enlaces (la copia en lugar del migrado) y le
+// pasa el mismo examen que Actualizar al binario nuevo.
+func ilegiblesTrasVolver(c *copia, viejo *InfoBinario) ([]string, error) {
+	if c.Raiz == "" {
+		return nil, nil
+	}
+	vista, err := os.MkdirTemp("", "kling-rollback-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(vista)
+	vuelve := map[string]string{}
+	for _, b := range bakNuevos(c) {
+		vuelve[sinBak(b)] = b
+	}
+	for _, patron := range versionados {
+		m, _ := filepath.Glob(filepath.Join(c.Raiz, patron))
+		for _, p := range m {
+			rel, err := filepath.Rel(c.Raiz, p)
+			if err != nil {
+				return nil, err
+			}
+			src := p
+			if b, ok := vuelve[p]; ok {
+				src = b
+			}
+			dst := filepath.Join(vista, rel)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+				return nil, err
+			}
+			if err := os.Symlink(src, dst); err != nil {
+				return nil, err
+			}
+		}
+	}
+	disco, err := machine.EsquemasEnDisco(vista)
+	if err != nil {
+		return nil, err
+	}
+	soporta := viejo.Esquemas
+	if viejo.SinEsquemas {
+		soporta.Meta = disco.Meta // v0.17 leía los meta.json sin mirar la versión
+	}
+	return soporta.Incompatibles(disco), nil
 }
 
 // bakNuevos son las copias de migración que no estaban al hacer la copia: lo
@@ -1030,6 +1095,50 @@ func (o *Opciones) recongelar(ctx context.Context, c *copia, ruta string) error 
 }
 
 func despierta(st api.State) bool { return st == api.StateRunning || st == api.StatePaused }
+
+// magiaHV es la de los volcados de kling-hv ("KLNGHV02", SNAP_MAGIC de
+// vz/internal/hvvm/vm.c). mem.file acaba en un pie {magia, ram, off, len} que
+// apunta a la cabecera {magia, versión, …}; todo en little-endian (arm64).
+const magiaHV uint64 = 0x4b4c4e4748563032
+
+// VersionVolcadoHV dice la versión de estado (KHV_SNAP_VERSION) del volcado
+// de kling-hv en p, la que tiene que leer el kling-hv que lo despierte. ok es
+// false si p no es de kling-hv (lo escribió kling-vz o Firecracker): ahí solo
+// cuenta el kling_vz del snap.file. Recongelar lo usa en el Mac, vía
+// CongeladaLegible, con lo que el daemon nuevo acaba de congelar.
+func VersionVolcadoHV(p string) (v int, ok bool, err error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return 0, false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, false, err
+	}
+	var pie [32]byte
+	if fi.Size() < int64(len(pie)) {
+		return 0, false, nil
+	}
+	if _, err := f.ReadAt(pie[:], fi.Size()-int64(len(pie))); err != nil {
+		return 0, false, err
+	}
+	if binary.LittleEndian.Uint64(pie[0:]) != magiaHV {
+		return 0, false, nil
+	}
+	off, largo := binary.LittleEndian.Uint64(pie[16:]), binary.LittleEndian.Uint64(pie[24:])
+	var cab [12]byte
+	if largo < uint64(len(cab)) || off > uint64(fi.Size())-uint64(len(cab)) {
+		return 0, true, fmt.Errorf("%s: kling-hv memory file with a header out of bounds", p)
+	}
+	if _, err := f.ReadAt(cab[:], int64(off)); err != nil {
+		return 0, true, err
+	}
+	if binary.LittleEndian.Uint64(cab[0:]) != magiaHV {
+		return 0, true, fmt.Errorf("%s: kling-hv memory file whose header is not KLNGHV", p)
+	}
+	return int(binary.LittleEndian.Uint32(cab[8:])), true, nil
+}
 
 // estadosEn lee de un state.json, en cualquiera de sus versiones (v0 es una
 // lista; desde v1, un objeto con "machines"), el estado de cada máquina.

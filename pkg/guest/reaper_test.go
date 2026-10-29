@@ -70,9 +70,8 @@ func TestElEstadoNoSePierdeSiElCosechadorSeAdelanta(t *testing.T) {
 
 // Un proceso muerto por señal se distingue de uno que salió con código.
 func TestUnaSenalSeDistingueDeUnCodigo(t *testing.T) {
-	var ws syscall.WaitStatus
 	// Estado sintético: matado por SIGKILL (9).
-	ws = syscall.WaitStatus(int(syscall.SIGKILL))
+	ws := syscall.WaitStatus(int(syscall.SIGKILL))
 	if !ws.Signaled() {
 		t.Skip("la codificación de WaitStatus difiere en esta plataforma")
 	}

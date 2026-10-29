@@ -27,6 +27,12 @@
 #define VIRTIO_STRIDE 0x200ULL
 #define VIRTIO_MAX 12
 #define KHV_MAX_DISKS 8
+
+// Versión del estado del volcado (la cabecera del pie de mem.file, KLNGHV02).
+// La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
+// upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
+// nuevo congeló.
+#define KHV_SNAP_VERSION 2
 #define RAM_BASE 0x80000000ULL
 
 #define MAX_CPUS 8

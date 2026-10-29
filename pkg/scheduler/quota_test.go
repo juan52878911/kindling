@@ -69,6 +69,7 @@ func TestCuotaInflight(t *testing.T) {
 	g := &Scheduler{}
 	tnt := &tenant{name: "t", maxInflight: 2}
 
+	//lint:ignore SA4000 dos llamadas con efecto: cada una ocupa un hueco
 	if !g.tenantBegin(tnt) || !g.tenantBegin(tnt) {
 		t.Fatal("las dos primeras deberían caber")
 	}

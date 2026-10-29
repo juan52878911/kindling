@@ -306,6 +306,10 @@ func (m *machine) SetBalloonTargetMiB(mib int) error {
 
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
+// VersionVolcado es la versión del estado que escribe (y la más nueva que
+// lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.
+const VersionVolcado = C.KHV_SNAP_VERSION
+
 // Footprint es la memoria que ocupa este proceso en el host (phys_footprint):
 // aquí vive la VM entera, no hay proceso auxiliar como en vz.
 func Footprint() (uint64, error) {

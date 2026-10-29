@@ -30,18 +30,13 @@ func sustituirQuery(q string, cs []Credential) string {
 	return q
 }
 
-// sustituir cambia el marcador por la clave en una cabecera. Authorization:
+// sustituirMarcando cambia el marcador por la clave en una cabecera. Authorization:
 // Basic lleva usuario:clave en base64, así que el marcador no aparece en claro:
 // se decodifica, se sustituye y se vuelve a codificar; devuelve además el par
 // (base64 con clave, base64 con marcador) para que el redactor lo reconozca
-// aunque el eco venga sin el prefijo "Basic ".
-func sustituir(k, v string, cs []Credential) (string, [][2]string) {
-	return sustituirMarcando(k, v, cs, nil)
-}
-
-// sustituirMarcando es sustituir anotando en usadas (si no es nil) qué
-// credenciales se cambiaron de verdad: lo que el registro de auditoría llama
-// creds.
+// aunque el eco venga sin el prefijo "Basic ". Anota en usadas (si no es
+// nil) qué credenciales se cambiaron de verdad: lo que el registro de
+// auditoría llama creds.
 func sustituirMarcando(k, v string, cs []Credential, usadas marcas) (string, [][2]string) {
 	if strings.EqualFold(k, "Authorization") && len(v) > 6 && strings.EqualFold(v[:6], "basic ") {
 		enc := strings.TrimSpace(v[6:])

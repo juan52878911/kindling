@@ -14,15 +14,6 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-func indexOf(xs []string, s string) int {
-	for i, x := range xs {
-		if x == s {
-			return i
-		}
-	}
-	return -1
-}
-
 // nuevoManager crea un Manager sobre root y lo cierra al acabar el test.
 //
 // Cerrarlo no es cortesía: NewManager ya deja una escritura de state.json

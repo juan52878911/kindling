@@ -39,6 +39,16 @@ The v0.20.0 tag never became a release: the new job that builds the guest kernel
 ### Fixed
 
 - Release: `scripts/70-build-minimal-image.sh` and `packaging/homebrew/formula.sh` (and a few other scripts) were stored without the executable bit, so the release could not build the `min` image nor the Homebrew formula; CI now fails on any tracked `.sh` that is not executable (except sourced libraries).
+- `kling upgrade` downloads from `KLING_UPGRADE_REPO` when set (a fork or a local mirror; https only, still checked against the release's `SHA256SUMS`).
+- CI: `e2e-linux.yml` runs `90-e2e.sh`, `e2e-diff-freeze.sh` and `94-e2e-upgrade.sh` with real microVMs on KVM runners (nightly, on demand and on PRs that touch them), and a `lint` job runs govulncheck, staticcheck, shellcheck and `scripts/apidiff.sh` (the public Go API against the previous tag).
+- `94-e2e-upgrade.sh` and `95-e2e-upgrade-mac.sh` upgrade from the previous published release (no longer pinned to v0.17), accept any state schema, and 94 downloads the new release over https from a local server instead of `-from-dir -insecure`; 95 covers kling-hv (`VMM=hv`).
+
+### Changed
+
+- `kling upgrade -rollback` refuses, before stopping anything, when the previous kling could not read what stays on disk (a format the new one wrote without a migration copy); `-force` rolls back anyway.
+- `kling-hv -snapshot-formats` also prints its memory-file state version (`KLNGHV`), and a rollback on the Mac refuses to leave a frozen machine the previous kling-hv could not wake.
+- Release tags with a hyphen (`v1.0.0-rc.1`) are published as prereleases, so `kling upgrade` and `install.sh` do not take them as the latest, and they do not move the operator image's `:latest`.
+- `scripts/release.sh` tags the commit it checked, requires green CI on it and waits for that tag's own workflow run; release notes link the tag's `install.sh`, not main's.
 
 ## [0.20.0] - 2026-10-28
 

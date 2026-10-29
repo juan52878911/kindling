@@ -348,7 +348,7 @@ func TestCamposDeSigueAJSON(t *testing.T) {
 		Fuera  string `json:"-"`
 		Hijos  []hijo `json:"hijos,omitempty"`
 		Otro   *hijo  `json:"otro"`
-		oculto int
+		oculto int    //lint:ignore U1000 el campo sin exportar es lo que se prueba que no cuenta
 	}
 	var campos []string
 	camposDe("f", reflect.TypeOf(raiz{}), map[reflect.Type]bool{}, &campos)

@@ -120,7 +120,6 @@ func publicarEnPrimerPlano(ctx context.Context, c *api.Client, host string, mc *
 		}
 		fmt.Fprintf(os.Stderr, "Ctrl-C stops following; the machine and its ports stay (kling rm %s removes both)\n", mc.Name)
 	} else {
-		var lns []net.Listener
 		for _, p := range ps {
 			if p.ProtoOr() != api.ProtoTCP {
 				fmt.Fprintf(os.Stderr, "warning: -p %d/udp: this daemon does not publish ports; update it\n", p.Guest)
@@ -132,7 +131,6 @@ func publicarEnPrimerPlano(ctx context.Context, c *api.Client, host string, mc *
 				continue
 			}
 			defer ln.Close()
-			lns = append(lns, ln)
 			fmt.Fprintf(os.Stderr, "  127.0.0.1:%d -> %d\n", ln.Addr().(*net.TCPAddr).Port, p.Guest)
 			go publish(ctx, c, ln, mc.ID, p.Guest)
 		}

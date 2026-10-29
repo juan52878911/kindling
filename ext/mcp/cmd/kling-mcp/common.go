@@ -20,13 +20,6 @@ import (
 // Ayudantes compartidos con el CLI de kindling. Son copias: una extensión no
 // importa el paquete main del núcleo.
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
 // hostFlag registra -H en cualquier subcomando del cliente.
 //
 // Por defecto vacío a propósito: así hostOf() distingue "no me lo han dicho" de
@@ -80,13 +73,6 @@ func since(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
-}
-
-func trunc(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }
 
 // reorderFor mueve los flags delante de los posicionales para que un flag escrito
@@ -259,13 +245,6 @@ func servicesLine(url, token string) string {
 }
 
 // ── utilidades ────────────────────────────────────────────────────────────────
-
-func markYes(ok bool, yes, no string) string {
-	if ok {
-		return "✓ " + yes
-	}
-	return "✗ " + no
-}
 
 // httpOK comprueba que una URL responde 2xx. Se usa con /healthz, que está
 // abierto por diseño y por tanto no necesita token.

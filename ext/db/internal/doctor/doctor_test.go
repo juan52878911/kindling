@@ -423,7 +423,7 @@ func TestParseURL(t *testing.T) {
 }
 
 func TestSafeQuitaEscapes(t *testing.T) {
-	if s := safe("a\x1b[2Jb‮c\nd", 100); s != "a?[2Jb?c d" {
+	if s := safe("a\x1b[2Jb\u202ec\nd", 100); s != "a?[2Jb?c d" {
 		t.Fatalf("safe = %q", s)
 	}
 	if s := safe("abcdef", 3); s != "abc..." {

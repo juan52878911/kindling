@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -277,6 +278,49 @@ func TestVolcadoLegibleParaElKlingVZViejo(t *testing.T) {
 	}
 	if err := volcadoLegible(filepath.Join(dir, "no-existe"), 2); err == nil {
 		t.Fatal("a missing snapshot must not pass")
+	}
+}
+
+// kling-hv dice además la versión KLNGHV del pie de mem.file (tercer número
+// de -snapshot-formats); uno que no la dice (v0.19, v0.20) lee la 2. Un
+// mem.file de kling-hv más nuevo que eso se dice; uno de kling-vz pasa.
+func TestVolcadoHVLegibleParaElKlingHVViejo(t *testing.T) {
+	dir := t.TempDir()
+	hv020 := filepath.Join(dir, "kling-hv-v020")
+	os.WriteFile(hv020, []byte("#!/bin/sh\n[ \"$1\" = -snapshot-formats ] && echo '1 3'\n"), 0o755)
+	hvNuevo := filepath.Join(dir, "kling-hv-nuevo")
+	os.WriteFile(hvNuevo, []byte("#!/bin/sh\n[ \"$1\" = -snapshot-formats ] && echo '1 3 4'\n"), 0o755)
+	if vz, hv := formatosVMM(hv020, true); vz != 3 || hv != hvSinVersion {
+		t.Errorf("kling-hv v0.20: %d %d, want 3 %d", vz, hv, hvSinVersion)
+	}
+	if vz, hv := formatosVMM(hvNuevo, true); vz != 3 || hv != 4 {
+		t.Errorf("a kling-hv that says it: %d %d, want 3 4", vz, hv)
+	}
+	if _, hv := formatosVMM(hvNuevo, false); hv != 0 {
+		t.Errorf("kling-vz has no KLNGHV version, got %d", hv)
+	}
+	memHV := func(v uint32) string {
+		ram, cab, pie := make([]byte, 4096), make([]byte, 64), make([]byte, 32)
+		const magia = 0x4b4c4e4748563032 // "KLNGHV02"
+		binary.LittleEndian.PutUint64(cab, magia)
+		binary.LittleEndian.PutUint32(cab[8:], v)
+		binary.LittleEndian.PutUint64(pie, magia)
+		binary.LittleEndian.PutUint64(pie[16:], uint64(len(ram)))
+		binary.LittleEndian.PutUint64(pie[24:], uint64(len(cab)))
+		p := filepath.Join(t.TempDir(), "mem.file")
+		os.WriteFile(p, append(append(ram, cab...), pie...), 0o600)
+		return p
+	}
+	if err := volcadoHVLegible(memHV(2), 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := volcadoHVLegible(memHV(3), 2); err == nil || !strings.Contains(err.Error(), "state version 3") {
+		t.Fatalf("KLNGHV 3 for a kling-hv that reads 2: %v", err)
+	}
+	vz := filepath.Join(t.TempDir(), "mem.file")
+	os.WriteFile(vz, make([]byte, 8192), 0o600)
+	if err := volcadoHVLegible(vz, 2); err != nil {
+		t.Fatalf("a kling-vz memory file is not kling-hv's business: %v", err)
 	}
 }
 

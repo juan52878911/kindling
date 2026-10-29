@@ -35,10 +35,6 @@ const (
 	Fixed Kind = "fixed" // fixed:<valor>, el mismo valor en todas las filas
 )
 
-// hashed son los tipos que derivan el valor nuevo de un hash del viejo: los
-// que conservan relaciones y joins.
-var hashed = map[Kind]bool{Email: true, Name: true, Phone: true, Card: true, Text: true}
-
 // Rule es una regla: una columna y qué se hace con ella.
 type Rule struct {
 	Schema, Table, Column string

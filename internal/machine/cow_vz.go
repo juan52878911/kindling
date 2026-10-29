@@ -16,11 +16,6 @@ func clonarFichero(src, dst string) error {
 	return errors.New("FICLONE is Linux-only")
 }
 
-// clonarDescriptor: ídem.
-func clonarDescriptor(in, out *os.File) error {
-	return errors.New("FICLONE is Linux-only")
-}
-
 // Para lseek (copiarDisperso). En macOS van al revés que en Linux (allí están
 // en fadvise_linux.go).
 const (

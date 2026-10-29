@@ -796,13 +796,6 @@ func trunc(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func short(s string) string {
-	if len(s) > 8 {
-		return s[:8]
-	}
-	return s
-}
-
 // codigoVisto recuerda el codigo con el que se respondio, para poder decidir la
 // salud por el RESULTADO. httptest.NewRecorder no vale en el camino sin cuerpo
 // reenviable: ahi se sirve directo al cliente, sin bufferear.
