@@ -164,8 +164,8 @@ jobs:
       GOWORK: 'off'
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
           cache: true
@@ -210,6 +210,8 @@ jobs:
       - run: go vet ./...
       - run: GOOS=linux go vet ./...
       - run: go test -race -count=1 ./...
+      # vz es cgo y solo de macOS: su govulncheck va aquí y no en lint.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       # El mínimo de macOS de cada VMM se fija como en release.yml: sin él
       # el binario pediría la versión del SDK del runner.
       - run: ./build.sh
@@ -240,8 +242,8 @@ jobs:
       GOWORK: 'off'
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
           cache: true
@@ -249,3 +251,52 @@ jobs:
           set -o pipefail
           go test -count=1 -v -run 'Clon|Clone|Sonda' ./internal/machine/ ./internal/daemon/ | tee clon.log
           grep -q 'clon real con clonefile' clon.log
+
+  # Lo que no es un test pero caza fallos: vulnerabilidades conocidas en lo que
+  # se llama de verdad (govulncheck), análisis estático (staticcheck, con la
+  # configuración de staticcheck.conf, en Linux y macOS a la vez para que lo
+  # usado en una sola plataforma no salga como muerto), shellcheck de los
+  # scripts y la API Go pública contra la etiqueta anterior (scripts/apidiff.sh).
+  # Las herramientas van fijadas: una versión nueva que encuentre más cosas
+  # tiene que entrar con su commit, no romper main un martes.
+  lint:
+    name: lint (govulncheck, staticcheck, shellcheck, apidiff)
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # apidiff compara con la etiqueta anterior: hacen falta las etiquetas.
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          # La de release: govulncheck mira la stdlib de esta toolchain.
+          go-version: '1.27.3'
+          cache: false
+      - name: herramientas
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: govulncheck
+        run: |
+          for d in . ext/db ext/mcp ext/phone ext/sandbox; do
+            echo "== $d"
+            (cd "$d" && govulncheck ./...)
+          done
+      - name: staticcheck
+        run: |
+          for d in . ext/db ext/mcp ext/phone ext/sandbox; do
+            echo "== $d"
+            (cd "$d" && printf 'linux: GOOS=linux\ndarwin: GOOS=darwin\nlinuxarm64: GOOS=linux GOARCH=arm64\n' | staticcheck -matrix ./...)
+          done
+      # Solo avisos y errores: SC2015 (A && B || C) es el patrón de todas las
+      # comprobaciones de los e2e, donde ok y bad siempre salen con 0; más de
+      # 500 avisos de estilo no dirían nada.
+      - name: shellcheck
+        run: shellcheck --version | head -2 && shellcheck -x -S warning scripts/*.sh
+      - name: apidiff (pkg/api, pkg/plugin, pkg/config)
+        run: bash scripts/apidiff.sh
