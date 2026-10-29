@@ -79,6 +79,16 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 	if mc.OnTTL != api.OnTTLRemove {
 		m.touchTTL(mc.ID)
 	}
+	// A medio congelar (daemon.idle_freeze, un freeze desde otra terminal):
+	// sigue "running", pero su VMM va a desaparecer y el exec esperaba 30 s a
+	// un agente que ya no estaba para acabar en 504. Se espera a que suelte
+	// el cerrojo y se relee: congelada, se descongela aquí abajo.
+	if mc.Transition == api.TransitionFreezing {
+		m.lock(mc.ID)()
+		if mc, ok = m.Get(mc.ID); !ok {
+			return nil, ErrNoMachine
+		}
+	}
 	if mc.State == api.StateWarm || mc.State == api.StatePaused {
 		thawed, err := m.Thaw(ctx, mc.ID)
 		if err != nil {

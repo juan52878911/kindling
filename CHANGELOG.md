@@ -47,6 +47,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Compose: an interrupted template prep no longer blocks the next `up` ("machine name is taken"); `up`/`down` refuse a project that belongs to another compose file, and two `up` of one project don't run at once.
 - With `VolumeWait`, `NODE_PATH`/`PYTHONPATH` are computed after the volumes are mounted, for the service and for `exec`.
 - Healthchecks run as the service's `user:`, not root (`ExecRequest.User`); `healthcheck: disable: true` wins over `test`.
+- An exec, shell or file call that lands while the machine is being frozen (`daemon.idle_freeze`, or a freeze from another terminal) waits for the freeze and thaws it, instead of a 504 after 30 s or an EOF (hv, 15/15 raced execs answered; before, 1 in 3 failed).
 - Compose: `PIN: 0123` keeps its leading zero; `0.0.0.0:` ports warn that they are published on 127.0.0.1 only.
 - Live shares: recreating a file the host had just deleted (while the guest still had it cached) failed with `ENOENT`; the agent now answers `ESTALE` so the kernel looks it up again and creates it.
 - Live shares: when the host's inotify queue overflows the daemon rescans every watched path and reports what changed, instead of dropping those changes; hitting the watch limit is logged once.

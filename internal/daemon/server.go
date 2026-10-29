@@ -1375,10 +1375,16 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 	// Entre preguntas, de 10 ms a 50 ms: con 200 ms fijos cada exec tras un
 	// arranque en frío llegaba hasta 200 ms tarde al agente que ya escuchaba.
 	paso := 10 * time.Millisecond
+	// Congelada mientras se espera (idle_freeze, otro freeze): su reenvío ya
+	// no lleva a nadie y esperar al plazo solo retrasa el error.
+	sigue := func() bool { return s.sigueCorriendo(mc.ID) }
 	for {
+		if !sigue() {
+			return errDejoDeCorrer
+		}
 		open, ok := s.mgr.ProbeGuestPort(ctx, mc.ID, port)
 		if !ok {
-			return waitPort(ctx, mc.Addr(port), time.Until(deadline))
+			return waitPortMientras(ctx, mc.Addr(port), time.Until(deadline), sigue)
 		}
 		if open {
 			return nil
@@ -1396,6 +1402,12 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 }
 
 func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
+	return waitPortMientras(ctx, addr, timeout, nil)
+}
+
+// waitPortMientras es waitPort que, además, se rinde con errDejoDeCorrer en
+// cuanto sigue (si no es nil) dice que no.
+func waitPortMientras(ctx context.Context, addr string, timeout time.Duration, sigue func() bool) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	// Backoff corto (A4): 200 ms fijos entre sondeos son 200 ms de más en el
@@ -1418,6 +1430,9 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if sigue != nil && !sigue() {
+			return errDejoDeCorrer
 		}
 		conn, err := net.DialTimeout("tcp", addr, intento)
 		if err == nil {

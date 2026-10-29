@@ -41,13 +41,9 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		fail(w, jsonBodyStatus(err), fmt.Errorf("invalid body: %w", err))
 		return
 	}
-	mc, err := s.mgr.ExecTarget(r.Context(), r.PathValue("ref"))
+	mc, code, err := s.objetivoConAgente(r.Context(), r.PathValue("ref"))
 	if err != nil {
-		fail(w, execStatus(err), err)
-		return
-	}
-	if err := s.waitAgent(r.Context(), mc); err != nil {
-		fail(w, http.StatusGatewayTimeout, err)
+		fail(w, code, err)
 		return
 	}
 
