@@ -47,6 +47,9 @@ kling graph ls -json:  [].nodes.x.volumes[].name string
 kling graph ls -json:  [].nodes.x.volumes[].read_only bool
 kling graph ls -json:  [].nodes.x.wake string
 kling graph ls -json:  [].state string
+kling image ls -json:  [].agent.agent string
+kling image ls -json:  [].agent.caps[] string
+kling image ls -json:  [].agent.version string
 kling image ls -json:  [].base string
 kling image ls -json:  [].disk_bytes number
 kling image ls -json:  [].has_recipe bool
@@ -316,6 +319,7 @@ kling status -json:  extensions {}
 kling template ls -json:  [].allow_domains[] string
 kling template ls -json:  [].allow_exec bool
 kling template ls -json:  [].annotations.x string
+kling template ls -json:  [].arch string
 kling template ls -json:  [].cpu_pct number
 kling template ls -json:  [].cpu_pct_fixed bool
 kling template ls -json:  [].created_at string

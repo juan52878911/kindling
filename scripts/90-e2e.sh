@@ -753,6 +753,8 @@ print("OTROMETODO", pedir("POST", "/basic-auth/demo/" + real)[0])
 print("PUNTOPUNTO", pedir("GET", "/basic-auth/demo/../../anything")[0])
 t0 = time.time(); st, b = pedir("GET", "/drip?duration=150&numbytes=5&delay=0&code=200", timeout=200)
 print("DRIP", st, len(b), int(time.time() - t0))
+if st == 400 and b"longer than" in b:
+    print("DRIPTOPE", b.decode(errors="replace").replace("\n", " "))
 '
   SONDA_ALLOW=${SONDA_ALLOW//httpbin.org/$HTTPBIN}
   out=$(printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain "$HTTPBIN" -env E2E_KEY \
@@ -767,7 +769,12 @@ print("DRIP", st, len(b), int(time.time() - t0))
   contiene "$out" "PUNTOPUNTO 403" && ok "Allow: /../ no sirve para salirse de lo permitido" \
     || bad "Allow con /../" "PUNTOPUNTO 403" "$out"
   drip=$(printf '%s\n' "$out" | awk '/^DRIP /{print $2, $3, $4}')
+  # httpbin.org (go-httpbin) ya no da un /drip de más de 10 s: sin un httpbin
+  # propio (KLING_E2E_HTTPBIN) que lo sirva, no hay stream largo que probar.
   case "$drip" in
+    400*) contiene "$out" "DRIPTOPE" \
+            && printf "  \033[33mskip\033[0m  stream largo por el proxy: %s no sirve un /drip de 150 s (usa un httpbin propio en KLING_E2E_HTTPBIN)\n" "$HTTPBIN" \
+            || bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
     "200 5 "*) ok "un stream de ${drip##* } s (más que el plazo total de antes, 120 s) llega entero" ;;
     *) bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
   esac
@@ -826,8 +833,16 @@ c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' "$HTTPB
     && ok "audit: en <root>/audit (0700 y 0600, de root), no en el directorio del VMM" \
     || bad "sitio del registro" "700 root 600 root y nada en machines/<id>" "$out vieja=$vieja"
   $KLING rm -f "$CR" >/dev/null 2>&1
-  [ "$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")" = 1 ] \
-    && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado" "sigue"
+  # rm contesta al morir el VMM y limpia en segundo plano (internal/machine/
+  # borrado.go): el registro se va con esa limpieza, no antes de contestar.
+  sigue=0
+  for _ in $(seq 1 40); do
+    sigue=$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")
+    [ "$sigue" = 1 ] && break
+    sleep 0.25
+  done
+  [ "$sigue" = 1 ] \
+    && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado en 10 s" "sigue ($sigue)"
 else
   bad "run -egress allowlist" "una máquina" "$out"
 fi
