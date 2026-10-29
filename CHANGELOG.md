@@ -6,6 +6,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+- kling-hv: pausing boosts the vCPU threads' QoS and re-kicks any vCPU that has not stopped after 1 ms (khv_pause p99 with 4 idle vCPUs on a loaded Mac: up to 104 ms before, 0.19 ms after).
 - Durable writes on macOS: one F_FULLFSYNC per write instead of two (the temp file and the frozen state get an F_BARRIERFSYNC); Go's File.Sync already was F_FULLFSYNC.
 - A freeze made by v0.8.0 or later with neither the in-progress mark nor the seal is no longer thawed as if it were a pre-seal freeze.
 - kling-hv: a guest FLUSH on a persistent disk is now F_FULLFSYNC, like kling-vz's full sync mode (a plain fsync on macOS stays in the SSD cache).

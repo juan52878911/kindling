@@ -162,6 +162,15 @@ en segundo plano (`taskpolicy -b`, todo en E) tras una pasada en P: el mismo
 bucle pasa de 9,3 a 2,9 s (n=5). Sin más muestra en P que el arranque, la
 proporción sale ~0,9 y apenas corrige (como en vz).
 
+Pausar sube antes la QoS de los vCPU (como un exec): ociosos en `UTILITY` y con
+el Mac cargado tardaban en llegar al punto de pausa. Medido con 4 vCPU ociosos
+y pause/thaw seguidos (2026-10-28, carga ~17): sin el impulso, `khv_pause` p50
+0,3 ms, p90 28 ms, p99 104 ms (n=656) en una tanda y p99 1,0 ms, máx. 14,7 ms
+(n=200) en otra; con él, p99 0,19 ms, máx. 1,7 ms (n=200). Además, cada
+milisegundo sin todos se vuelve a llamar a `hv_vcpus_exit` sobre los que
+faltan, por si uno miró `pausa_pedida` justo antes de que se pusiera; en 600
+pausas medidas no hizo falta ni una vez.
+
 ### QoS de los hilos
 
 En macOS la QoS es la única palanca sobre el tipo de núcleo. Los vCPU van de
@@ -231,8 +240,8 @@ MiB, egress none; desde el API del daemon, p50 / p90.
 Frente a la tabla de arriba, la memoria por copia de hv sube de 13 a 16 MiB:
 es la MTU de 16 KiB (92a4d658). Con `KLING_VZ_MTU=1500` en el daemon, la
 misma prueba da 14,0 MiB por copia (n=10): ~2 MiB por copia es el precio de
-la red rápida. El freeze de hv (115 frente a 73 ms) también sube; no se
-investigó. La comprobación del canal vsock de c46f0f8b no se nota: en dos
+la red rápida. El freeze de hv (115 frente a 73 ms) también sube; ver
+[Dónde se va el freeze](#dónde-se-va-el-freeze). La comprobación del canal vsock de c46f0f8b no se nota: en dos
 vueltas alternas (n=12 cada una), thaw + primer exec 35-36 ms con ella y 46-113
 ms sin ella (el ruido del Mac), run -from + primer exec 40-41 frente a 40-43 ms.
 
@@ -254,6 +263,33 @@ La cifra de 17,4 MiB de la tabla de antes no contaba el custodio (~6 MiB por
 máquina). El thaw de hv sigue repartido en el VMM anterior (~3 ms), lanzar el
 proceso (~5 ms), cargar (de ellos ~9 de `sandbox_init`), `/resync` (2–4 ms) y
 el API. El freeze escribe también las páginas residentes.
+
+### Dónde se va el freeze
+
+Trazado por fases en el daemon (2026-10-28, redis:7-alpine, 256 MiB, egress
+none, n=12, el Mac con carga ~17 de otros agentes: los absolutos bailan ±40 %),
+p50 desde que llega la petición:
+
+| fase | ms |
+|---|---|
+| apretar el globo antes de volcar | ~10 |
+| marca `volcado.en-curso` (una escritura durable) | ~6 |
+| pausa + `khv_snapshot` (clon, `mincore`, escribir las páginas residentes, estado) | ~45 |
+| matar el VMM, perforar, kernel | ~3 |
+| llevar snap/mem/overlay al disco (barreras) | ~2 |
+| sello (`durable.Escribir`: el F_FULLFSYNC que vacía la caché del SSD) | ~30-50 |
+
+Lo que creció es el volcado y el sello, y los dos son el mismo coste: desde
+f94233c6 se escriben también las páginas residentes que el invitado solo leyó
+(~75 MiB en esta máquina), y el F_FULLFSYNC del sello tiene que llevarlas al
+SSD. Sin ellas (probado con un interruptor de prueba) el volcado baja ~15 ms y
+el sello ~10 ms, pero el thaw pasa de ~60 a ~170 ms: no compensa. La MTU de
+16 KiB (`KLING_VZ_MTU=1500`) y `KLING_HV_EVENT_IDX=0` no mueven el freeze más
+que el ruido. Antes de esta versión cada freeze hacía 7 F_FULLFSYNC (~5 ms cada
+uno en el M4 frente a 0,7 ms de una barrera F_BARRIERFSYNC); ahora 2 (la marca
+y el sello) y barreras en el resto. Queda por probar, con el Mac tranquilo,
+pedir esas páginas con `F_RDADVISE` en vez de escribirlas: en una ronda bajó a
+75 ms con thaw de 52 ms, en otra no se distinguía del ruido.
 
 ## Fondo de procesos pre-lanzados (propuesta, sin hacer)
 
