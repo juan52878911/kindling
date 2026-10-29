@@ -673,7 +673,7 @@ print("OTRO", s.recv(20).decode().split(" ")[1])
 SONDA=${SONDA//httpbin.org/$HTTPBIN}
 if [ "$OFFLINE" = 1 ]; then
   printf "  \033[33mskip\033[0m  KLING_E2E_OFFLINE=1: the credential proxy needs %s on the internet\n" "$HTTPBIN"
-elif $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+elif out=$($KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove 2>&1); then
   out=$(printf '%s' "$PASS" | $KLING machine credential "$CR" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
   contiene "$out" "placeholder" && ok "credential: la clave queda en el proxy" || bad "machine credential" "placeholder" "$out"
 
@@ -829,7 +829,7 @@ c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' "$HTTPB
   [ "$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")" = 1 ] \
     && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado" "sigue"
 else
-  bad "run -egress allowlist" "una máquina" "no arrancó"
+  bad "run -egress allowlist" "una máquina" "$out"
 fi
 if $KLING run -image "$IMGVOL" -name "$CR-none" -ttl 5m -on-ttl remove >/dev/null 2>&1; then
   out=$(printf 'x' | $KLING machine credential "$CR-none" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
@@ -847,8 +847,8 @@ TPLC="e2e-tpl-cred-$$"
 PASS3="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
 if [ "$OFFLINE" = 1 ]; then
   printf "  \033[33mskip\033[0m  KLING_E2E_OFFLINE=1: template credentials need %s on the internet\n" "$HTTPBIN"
-elif $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org -allow-exec >/dev/null 2>&1 \
-   && $KLING save "$TC" "$TPLC" >/dev/null 2>&1; then
+elif out=$($KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org -allow-exec 2>&1) \
+   && out=$($KLING save "$TC" "$TPLC" 2>&1); then
   out=$(printf '%s' "$PASS3" | $KLING template credential "$TPLC" -domain "$HTTPBIN" -env E2E_KEY 2>&1)
   contiene "$out" "every new instance" && ok "template credential: la clave queda atada a la plantilla" \
     || bad "template credential" "every new instance" "$out"
@@ -896,7 +896,7 @@ elif $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.or
   $KLING rm -f "$TC" >/dev/null 2>&1
   $KLING template rm -f "$TPLC" >/dev/null 2>&1
 else
-  bad "plantilla con allowlist" "run + save" "falló"
+  bad "plantilla con allowlist" "run + save" "$out"
 fi
 
 # ── 7d. proxy de credenciales de Postgres ────────────────────────────────────
@@ -1097,7 +1097,7 @@ for modo in none internet allowlist; do
   V6="e2e-v6-$modo-$$"
   extra=""
   [ "$modo" = "allowlist" ] && extra="-allow example.org"
-  if $KLING run -image "$IMGVOL" -name "$V6" -egress "$modo" $extra -allow-exec -ttl 5m -on-ttl remove >/dev/null 2>&1; then
+  if out=$($KLING run -image "$IMGVOL" -name "$V6" -egress "$modo" $extra -allow-exec -ttl 5m -on-ttl remove 2>&1); then
     out=$($KLING exec -timeout 60s "$V6" -- python3 -c "$SONDA_V6" 2>&1)
     contiene "$out" "ADDRS vacio" && ok "egress=$modo: el invitado no tiene ninguna dirección IPv6" \
       || bad "IPv6 addrs ($modo)" "ADDRS vacio" "$out"
@@ -1116,7 +1116,7 @@ for modo in none internet allowlist; do
     fi
     $KLING rm -f "$V6" >/dev/null 2>&1
   else
-    bad "run -egress $modo (sonda IPv6)" "una máquina" "no arrancó"
+    bad "run -egress $modo (sonda IPv6)" "una máquina" "$out"
   fi
 done
 

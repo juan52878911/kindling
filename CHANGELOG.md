@@ -38,6 +38,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The CLI aliases that warned since v0.18: `rmi`, `images`, `volumes`, `sandboxes`, `info`, `resize`, `squeeze`, `mmds`, `models`, `chispa`, and the kling-mcp verbs `add`, `search`, `gateway`, `export`, `memory`, `migrate`; they exit 2 naming the new command. `commit`, `snapshots` and `plugins` stay.
 - `kling run -cpu` (use `-cpu-pct`) and `kling ai chispa deploy -vcpus` (use `-cpus`): they exit 2 naming the new flag.
+
 ### Fixed
 
 - CI: `e2e-linux.yml` installs the `base` builder for its private daemon, so the toolchain image builds and `90-e2e.sh` and `94-e2e-upgrade.sh` stop falling back to `min`; `94-e2e-upgrade.sh` only expects a refreeze on `-rollback` when `state.json` was migrated.

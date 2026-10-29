@@ -110,6 +110,14 @@ if parte e2e; then
   printf '%s\n' "$out"
   case "$out" in *"$ROOT"*) ;; *) die "status -v does not show $ROOT: refusing to touch another daemon";; esac
 
+  # Docker (lo traen los runners de GitHub) deja la política del FORWARD del
+  # host en DROP, y kindling solo añade DROPs a esa cadena (HostEgressRules):
+  # con DROP, egress internet y allowlist no salen. Este host es desechable.
+  if iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'; then
+    echo "::warning::the host FORWARD policy is DROP (Docker?): setting it to ACCEPT on this disposable host"
+    iptables -P FORWARD ACCEPT
+  fi
+
   step "toolchain image"
   t0=$(date +%s)
   if "$BASE/bin/kling" image toolchain; then
