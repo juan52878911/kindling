@@ -44,7 +44,7 @@ func TestCloneVolumeHandler(t *testing.T) {
 		}
 		rr = postClone(s, "datos", `{"to":"rama","copy":true}`)
 	}
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusCreated {
 		t.Fatalf("clon: %d %s", rr.Code, rr.Body)
 	}
 	var res api.CloneVolumeResult

@@ -142,6 +142,11 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, err := os.ReadFile(s.recipePath(name))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Leer mal la que sí está es del host, no "no hay receta".
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusNotFound, fmt.Errorf(
 			"no recipe for %q. Images built before recipes were saved don't have one; "+

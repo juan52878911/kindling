@@ -91,10 +91,10 @@ func (m *Manager) guardarFondos() error {
 // el fondo y lo vacía. La reposición va en segundo plano: vuelve enseguida.
 func (m *Manager) SetFondo(name string, size int) (*api.PoolInfo, error) {
 	if size < 0 || size > api.PoolMax {
-		return nil, fmt.Errorf("pool size must be between 0 and %d (got %d)", api.PoolMax, size)
+		return nil, peticionInvalida("pool size must be between 0 and %d (got %d)", api.PoolMax, size)
 	}
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
 	if _, err := m.loadSnapshot(name); err != nil {
 		return nil, err

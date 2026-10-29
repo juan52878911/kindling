@@ -14,7 +14,9 @@ func TestGrowCoWStore(t *testing.T) {
 		t.Errorf("un inquilino llega: %d %s", rr.Code, rr.Body)
 	}
 	rr := como(t, h, uidAdmin, "POST", "/cow/store/grow", `{"add_mib":1024}`)
-	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "store") {
+	// Sin almacén: 501 si la plataforma no lo tiene; donde sí (Linux) y aún no
+	// se ha creado, el fallo de crecerlo es del host.
+	if (rr.Code != 501 && rr.Code != 500) || !strings.Contains(rr.Body.String(), "store") {
 		t.Errorf("admin sin almacén: %d %s", rr.Code, rr.Body)
 	}
 	rr = como(t, h, uidAdmin, "POST", "/cow/store/grow", `{"size_mib":1024,"add_mib":1024}`)

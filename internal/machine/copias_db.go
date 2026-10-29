@@ -231,7 +231,7 @@ func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachin
 		}
 	}
 	if i < 0 {
-		return nil, fmt.Errorf("machine %s has no credential in %s", cur.Name, env)
+		return nil, marcado(ErrNoCredential, "machine %s has no credential in %s", cur.Name, env)
 	}
 	if upstreamMachine != "" && creds[i].UpstreamMachine != upstreamMachine {
 		return nil, peticionInvalida("the credential in %s of %s does not go to machine %s", env, cur.Name, shortID(upstreamMachine))

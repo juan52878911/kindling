@@ -202,15 +202,16 @@ func (m *Manager) CoWInfo() *api.CoWInfo {
 // GrowCoWStore amplía el almacén de copias de disco (POST /cow/store/grow):
 // hasta sizeMiB, o en addMiB. Uno de los dos. Devuelve cómo queda.
 func (m *Manager) GrowCoWStore(ctx context.Context, sizeMiB, addMiB int64) (*api.CoWStore, error) {
-	if m.alm == nil {
-		return nil, errors.New("there is no copy-on-write store on this platform")
-	}
 	const maxMiB = 1 << 30 // 1 PiB: más es un error de unidades, no un almacén
 	switch {
 	case sizeMiB < 0 || addMiB < 0 || sizeMiB > maxMiB || addMiB > maxMiB:
-		return nil, errors.New("invalid size")
+		return nil, peticionInvalida("invalid size")
 	case (sizeMiB > 0) == (addMiB > 0):
-		return nil, errors.New("give either the new size or how much to add")
+		return nil, peticionInvalida("give either the new size or how much to add")
+	}
+	if m.alm == nil {
+		// 501: esta plataforma no lo hace (macOS clona con clonefile).
+		return nil, &api.StatusError{Code: 501, Message: "there is no copy-on-write store on this platform"}
 	}
 	if err := m.alm.crecer(ctx, sizeMiB<<20, addMiB<<20); err != nil {
 		return nil, err

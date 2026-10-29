@@ -16,6 +16,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Status codes made consistent before 1.0 freezes them (`internal/daemon/testdata/contrato/codigos.txt`): 404 instead of 400 for a missing machine in `PUT /machines/{ref}/labels` and `POST …/commit`, a missing image in `GET/PUT /images/{name}/files` and a missing source in `POST /volumes/{name}/clone`.
+- Host failures are 500 instead of 400 in resize, snapshots and annotations, pools, template credentials, graphs, the store, `POST /volumes`, populate and `POST /cow/store/grow` (501 where the platform has no store); renew gives 500 instead of 502.
+- `DELETE /volumes/{name}` answers 400/404/409/500 by cause instead of 409 for everything; `DELETE /sandboxes/{ref}` like `DELETE /machines/{ref}` instead of 500 for everything; a fork whose copy's agent never answers is 504, like `POST /sandboxes`.
+- 201 instead of 200 for `POST /volumes`, volume clones and snapshots, `POST /graphs/{ref}/snapshot` and `POST /registries` (the Go client accepts any 2xx). `POST /images` stays 200: a build reused from a concurrent request answers the same.
+- Disk full is 503 everywhere: volume copies and the OCI blob cache answered 507, which makes a gateway freeze machines to make room.
+- `PUT /images/{name}/files`: a cut body is 400 (413 only over the limit), and a missing file without `create` sets `skipped` (still 200, `error` kept for older clients).
+- `GET …/logs` and `GET /images/{name}/recipe` give 404 only when there is nothing, 500 when reading fails; `DELETE …/credentials/{env}` decides its 404 by sentinel, not by the text.
+- Unknown routes (404) and wrong methods (405) answer in JSON with `message` and `code` instead of plain text; the status code is the same.
 - The `kling compose` help lists `ps`, `logs`, `exec`, `stop`, `start` and `restart` (they already worked).
 
 ### Removed

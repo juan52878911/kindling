@@ -30,7 +30,7 @@ func TestFailPoneElCodigo(t *testing.T) {
 		{409, errors.New("graph is busy"), 409, api.CodeConflict},
 		// La causa con otro código HTTP no es la específica.
 		{400, machine.ErrDoradoObsoleto, 400, api.CodeBadRequest},
-		{503, errors.New("draining"), 503, api.CodeUnavailable},
+		{503, errors.New("no room for the copy"), 503, api.CodeDiskFull}, // el daemon solo da 503 por disco
 		{404, errors.New("nope"), 404, api.CodeNotFound},
 	} {
 		rr := httptest.NewRecorder()

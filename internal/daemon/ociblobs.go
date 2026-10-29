@@ -24,7 +24,7 @@ package daemon
 // builders_cache.go), la única que lee esa construcción. Lo subido cuenta
 // para daemon.build_cache_max_gib: si la caché de root ya pasa del tope, se
 // barre (lo que lleve más de graciaCacheOCI) y, si sigue sin caber, la subida
-// es un 507. Se barre también después de cada construcción.
+// es un 503. Se barre también después de cada construcción.
 
 import (
 	"crypto/rand"
@@ -174,7 +174,8 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.hayHueco(size) {
 		max, _ := s.limitesCacheConstruccion().efectivos()
-		fail(w, http.StatusInsufficientStorage, fmt.Errorf("the daemon's blob cache is over its limit "+
+		// 503 como el disco lleno (api.StatusDiskFull), no 507: no es memoria.
+		fail(w, api.StatusDiskFull, fmt.Errorf("the daemon's blob cache is over its limit "+
 			"(daemon.build_cache_max_gib = %d GiB) with this %d MiB blob: build what was uploaded, or raise the limit",
 			max>>30, size>>20))
 		return

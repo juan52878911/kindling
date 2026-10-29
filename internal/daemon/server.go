@@ -450,7 +450,58 @@ func (s *Server) routes() http.Handler {
 		}
 		mux.HandleFunc(rt.patron, s.autorizar(rt))
 	}
-	return conVersionAPI(sinBarrasEscapadas(mux))
+	return conVersionAPI(sinBarrasEscapadas(sinRutaEnJSON(mux)))
+}
+
+// sinRutaEnJSON contesta en JSON ({"message", "code"}, como cualquier otro
+// error) el 404 de una ruta que no existe y el 405 de un método que no le va.
+// El mux los escribía en texto plano ("404 page not found"), y quien leía el
+// cuerpo como api.Error se quedaba sin mensaje ni código. El código HTTP no
+// cambia: es lo que un cliente mira para saber que el daemon es anterior a
+// una ruta (api.IsUnsupported).
+func sinRutaEnJSON(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, patron := mux.Handler(r); patron != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		cap := &capturaMux{cab: http.Header{}}
+		mux.ServeHTTP(cap, r)
+		switch cap.code {
+		case http.StatusNotFound:
+			fail(w, cap.code, fmt.Errorf("no route %s %s in this daemon (version %s)", r.Method, r.URL.Path, Version))
+		case http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", cap.cab.Get("Allow"))
+			fail(w, cap.code, fmt.Errorf("method %s is not allowed on %s (allowed: %s)", r.Method, r.URL.Path, cap.cab.Get("Allow")))
+		default:
+			// Una redirección del mux (una ruta sin limpiar): tal cual.
+			for k, v := range cap.cab {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(cap.code)
+			_, _ = w.Write(cap.cuerpo.Bytes())
+		}
+	})
+}
+
+// capturaMux guarda lo que el mux escribe por su cuenta (sinRutaEnJSON).
+type capturaMux struct {
+	cab    http.Header
+	code   int
+	cuerpo bytes.Buffer
+}
+
+func (c *capturaMux) Header() http.Header { return c.cab }
+func (c *capturaMux) WriteHeader(code int) {
+	if c.code == 0 {
+		c.code = code
+	}
+}
+func (c *capturaMux) Write(b []byte) (int, error) {
+	if c.code == 0 {
+		c.code = http.StatusOK
+	}
+	return c.cuerpo.Write(b)
 }
 
 // usoDeMaquina son las rutas que cuentan como usar la máquina para el modo
@@ -682,9 +733,9 @@ func codigoDeError(status int, err error) api.ErrorCode {
 			return api.CodeTenantQuota
 		}
 	case api.StatusDiskFull:
-		if api.IsDiskFull(err) {
-			return api.CodeDiskFull
-		}
+		// El daemon solo contesta 503 por disco: el del host (admision.go),
+		// el de una copia de volumen o el tope de la caché OCI.
+		return api.CodeDiskFull
 	}
 	return api.CodeForStatus(status)
 }
@@ -920,11 +971,10 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.Resize(r.Context(), r.PathValue("ref"), req.MemMiB)
 	if err != nil {
-		code := http.StatusBadRequest
-		switch {
-		case errors.Is(err, machine.ErrNoMachine):
-			code = http.StatusNotFound
-		case errors.Is(err, machine.ErrNotRunning):
+		// 400 lo de la petición (sin mem_max_mib, fuera de rango), 404 y 409
+		// como el ciclo de vida, 500 lo del host (el globo que no se mueve).
+		code := cicloStatus(err)
+		if errors.Is(err, machine.ErrNotRunning) {
 			code = http.StatusConflict
 		}
 		fail(w, code, err)
@@ -984,7 +1034,7 @@ func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) 
 	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
 	if err != nil {
 		code := cicloStatus(err)
-		if strings.Contains(err.Error(), "has no credential") {
+		if errors.Is(err, machine.ErrNoCredential) {
 			code = http.StatusNotFound
 		}
 		fail(w, code, err)
@@ -1080,7 +1130,12 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
 	if err != nil {
-		fail(w, http.StatusNotFound, err)
+		// 404 si no hay máquina o aún no tiene consola; leerla mal es del host.
+		code := http.StatusInternalServerError
+		if errors.Is(err, machine.ErrNoMachine) || errors.Is(err, os.ErrNotExist) {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1146,7 +1201,8 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {
-		fail(w, http.StatusBadRequest, err)
+		// 404 si no existe, 400 unas etiquetas que no valen (las de grafo).
+		fail(w, cicloStatus(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1168,7 +1224,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady) {
+		switch {
+		case errors.Is(err, machine.ErrNoMachine):
+			code = http.StatusNotFound
+		case errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady):
 			code = http.StatusConflict
 		}
 		fail(w, code, err)

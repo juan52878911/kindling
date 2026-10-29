@@ -63,12 +63,25 @@ func parseMode(s string) (os.FileMode, error) {
 	return os.FileMode(n), nil
 }
 
+// imageFileStatus es el código de un error de leer o escribir un fichero de
+// una imagen: 404 si no hay imagen (o el fichero no está), 500 si falta
+// debugfs en el host, 400 lo demás (una ruta o un nombre que no valen).
+func imageFileStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrNoImage), errors.Is(err, machine.ErrNotInImage):
+		return http.StatusNotFound
+	case errors.Is(err, machine.ErrNoDebugfs):
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleGetImageFile(w http.ResponseWriter, r *http.Request) {
 	name, p := r.PathValue("name"), r.URL.Query().Get("path")
 	if r.URL.Query().Get("stat") == "1" {
 		st, err := s.mgr.StatImageFile(r.Context(), name, p)
 		if err != nil {
-			fail(w, http.StatusBadRequest, err)
+			fail(w, imageFileStatus(err), err)
 			return
 		}
 		writeJSON(w, http.StatusOK, st)
@@ -89,7 +102,7 @@ func (s *Server) handleGetImageFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		fail(w, imageFileStatus(err), err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -100,7 +113,8 @@ func (s *Server) handlePutImageFile(w http.ResponseWriter, r *http.Request) {
 	var req api.PutImageFileRequest
 	body, err := api.LeerCuerpo(r.Body, maxImageFileUpload*2)
 	if err != nil {
-		fail(w, http.StatusRequestEntityTooLarge, err)
+		// 413 solo si fue el tope; un cuerpo cortado es 400.
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -122,13 +136,16 @@ func (s *Server) handlePutImageFile(w http.ResponseWriter, r *http.Request) {
 	res, err := s.mgr.PutImageFile(context.WithoutCancel(r.Context()), r.PathValue("name"), req.Path, src, mode, req.Create)
 	switch {
 	case errors.Is(err, machine.ErrNotInImage):
+		// No es un fallo: no estaba y no se pidió crearlo (skipped). 200 por
+		// los clientes de antes, que miran error; los de ahora, skipped.
+		res.Skipped = true
 		res.Error = fmt.Sprintf("%s is not in the image and create was not requested", req.Path)
 		writeJSON(w, http.StatusOK, res)
 	case res.Busy:
 		res.Error = err.Error()
 		writeJSON(w, http.StatusConflict, res)
 	case err != nil:
-		fail(w, http.StatusBadRequest, err)
+		fail(w, imageFileStatus(err), err)
 	default:
 		writeJSON(w, http.StatusOK, res)
 	}

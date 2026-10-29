@@ -361,14 +361,14 @@ func TestBarridoDeTmpDeVolumenes(t *testing.T) {
 	}
 }
 
-// Sin sitio para una copia completa, 507 y nada a medias.
-func TestCopiaCompletaSinSitioEs507(t *testing.T) {
+// Sin sitio para una copia completa, 503 (disco lleno) y nada a medias.
+func TestCopiaCompletaSinSitioEs503(t *testing.T) {
 	m := newTestManager(t)
 	escribirVolumen(t, m, "datos", strings.Repeat("x", 1<<16))
 	t.Setenv("KLING_MIN_FREE_DISK_MIB", "999999999")
 	err := m.cabeCopia(m.volumePath("datos"))
-	if codigo(err) != http.StatusInsufficientStorage {
-		t.Fatalf("quería 507, dio %v", err)
+	if codigo(err) != api.StatusDiskFull {
+		t.Fatalf("quería 503, dio %v", err)
 	}
 	if !strings.Contains(err.Error(), "reflink") {
 		t.Errorf("el error debería explicar la salida (reflink): %v", err)

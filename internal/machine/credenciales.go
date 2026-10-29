@@ -810,20 +810,20 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 		return m.Snapshot(name)
 	}
 	if len(specs) == 0 {
-		return nil, errors.New("no credentials given")
+		return nil, peticionInvalida("no credentials given")
 	}
 	if snap.Egress != string(knet.EgressAllowlist) {
-		return nil, fmt.Errorf("template %s has egress %q; credentials need a template imported with -egress allowlist",
+		return nil, peticionInvalida("template %s has egress %q; credentials need a template imported with -egress allowlist",
 			name, snap.Egress)
 	}
 	if err := validarSpecs(specs); err != nil {
-		return nil, err
+		return nil, comoPeticion(err)
 	}
 	if err := sinUpstreamMaquina(specs); err != nil {
-		return nil, err
+		return nil, comoPeticion(err)
 	}
 	if err := m.comprobarUpstreams(credencialesDeSpecs(specs)); err != nil {
-		return nil, err
+		return nil, comoPeticion(err)
 	}
 	previas, err := m.cargarCredencialesPlantilla(name)
 	if err != nil {
@@ -831,12 +831,12 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	}
 	todas := fusionarSpecs(previas, specs)
 	if len(todas) > credproxy.MaxCredentials {
-		return nil, fmt.Errorf("at most %d credentials per template", credproxy.MaxCredentials)
+		return nil, peticionInvalida("at most %d credentials per template", credproxy.MaxCredentials)
 	}
 	// Postgres y MySQL juntos: MySQL en el 3306 y ninguna Postgres ahí (lo
 	// comprobaría el proxy al arrancar cada instancia; mejor decirlo ya).
 	if err := credproxy.ValidarPuertosDB(credencialesDeSpecs(todas)); err != nil {
-		return nil, err
+		return nil, comoPeticion(err)
 	}
 	sellado, err := m.sellar(todas, "snapshot:"+name)
 	if err != nil {

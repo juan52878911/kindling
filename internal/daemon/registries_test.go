@@ -21,7 +21,7 @@ func TestRegistriesAPI(t *testing.T) {
 		t.Fatalf("sin credenciales: %d %s", rr.Code, rr.Body)
 	}
 	rr := call(t, h, "POST", "/registries", `{"host":"https://GHCR.io/","username":"juan","password":"`+passPrueba+`"}`)
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"host":"ghcr.io"`) || strings.Contains(rr.Body.String(), passPrueba) {
+	if rr.Code != 201 || !strings.Contains(rr.Body.String(), `"host":"ghcr.io"`) || strings.Contains(rr.Body.String(), passPrueba) {
 		t.Fatalf("login: %d %s", rr.Code, rr.Body)
 	}
 	call(t, h, "POST", "/registries", `{"host":"localhost:5000","username":"a","password":"b"}`)

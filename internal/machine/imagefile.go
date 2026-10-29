@@ -172,7 +172,7 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 		return res, fmt.Errorf("reading %s: %w", src, err)
 	}
 	if !validName.MatchString(image) {
-		return res, fmt.Errorf("invalid image name %q", image)
+		return res, marcado(ErrInvalidName, "invalid image name %q", image)
 	}
 	_, layered := m.ImageBase(image)
 	file, dentro := m.imagePath(image), p
@@ -180,7 +180,7 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 		file, dentro = m.layerPath(image), layerGuestPath(strings.TrimPrefix(p, "/"))
 	}
 	if _, err := os.Stat(file); err != nil {
-		return res, fmt.Errorf("image %q does not exist", image)
+		return res, marcado(ErrNoImage, "image %q does not exist", image)
 	}
 	// Bajo ConImagenesQuietas: un arranque en frío que ya eligió la imagen y
 	// aún no está en byID no figura en imageUsers, y tocar el ext4 debajo de

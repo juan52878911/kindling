@@ -72,14 +72,14 @@ func (m *Manager) Resize(ctx context.Context, ref string, memMiB int) (*api.Mach
 		return nil, ErrNoMachine
 	}
 	if cur.MemMaxMiB <= 0 {
-		return nil, fmt.Errorf("%s was started without mem_max_mib, so its memory is fixed. "+
+		return nil, peticionInvalida("%s was started without mem_max_mib, so its memory is fixed. "+
 			"Start it with `kling run -mem-max N` (or commit a snapshot of one that was) to resize it", cur.Name)
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, cur.Name, cur.State)
 	}
 	if memMiB < minResizeMiB || memMiB > cur.MemMaxMiB {
-		return nil, fmt.Errorf("mem_mib has to be between %d and %d (its ceiling)", minResizeMiB, cur.MemMaxMiB)
+		return nil, peticionInvalida("mem_mib has to be between %d and %d (its ceiling)", minResizeMiB, cur.MemMaxMiB)
 	}
 
 	// Subir memoria consume RAM del host; se admite como cualquier arranque.

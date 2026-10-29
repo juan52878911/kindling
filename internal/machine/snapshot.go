@@ -96,11 +96,11 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // la DECISIÓN junto a los digests).
 func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork, sinAgente bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("machine %q does not exist", ref)
+		return nil, marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	// El cerrojo de ciclo de vida de la plantilla, como Freeze, Stop o Remove
 	// (M-04). Commit la pausa, le cambia el disco y la vuelca: sin él, un
@@ -113,7 +113,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// congelarla, pausarla o borrarla otro.
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("machine %q does not exist", ref)
+		return nil, marcado(ErrNoMachine, "machine %q does not exist", ref)
 	}
 	mc = cur
 	// Como Freeze, y con más razón: el volcado de Commit ES el mem.file del

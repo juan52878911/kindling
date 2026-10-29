@@ -133,6 +133,17 @@ var casosCodigos = []casoCodigo{
 	{"POST", "/machines/nadie/publish", `{}`},
 	{"DELETE", "/machines/nadie/publish", ""},
 	{"GET", "/publish", ""},
+	// Lo que está mal en la petición frente a lo que no existe.
+	{"PUT", "/machines/parada/labels", `{"kling.graph":"x"}`},
+	{"POST", "/machines/parada/resize", `{"mem_mib":512}`},
+	{"DELETE", "/machines/parada/credentials/FOO", ""},
+	{"GET", "/machines/parada/logs", ""},
+	{"POST", "/volumes", `{"name":"Malo"}`},
+	{"PUT", "/store/ns/k", `{`},
+	{"PUT", "/snapshots/dorado/annotations/K", `1`},
+	{"PUT", "/snapshots/dorado/annotations/k", `{`},
+	{"PUT", "/snapshots/dorado/pool", `{"size":99}`},
+	{"POST", "/cow/store/grow", `{"size_mib":1,"add_mib":1}`},
 }
 
 // servidorCodigos es el escenario de la tabla: una máquina parada, una
@@ -232,5 +243,34 @@ func TestContratoCodigos(t *testing.T) {
 	}
 	if err := contrato.Comparar("testdata/contrato/codigos.txt", api.APIVersion, cab, lineas, *actualizar); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Una ruta que no existe y un método que no le va contestan en JSON, con
+// code, sin cambiar el código HTTP (api.IsUnsupported depende de él).
+func TestSinRutaEnJSON(t *testing.T) {
+	_, h := servidorCodigos(t)
+	for _, c := range []struct {
+		method, path string
+		code         int
+		quiero       api.ErrorCode
+	}{
+		{"GET", "/no-existe", http.StatusNotFound, api.CodeNotFound},
+		{"PATCH", "/machines/parada", http.StatusMethodNotAllowed, ""},
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(c.method, c.path, nil))
+		var e api.Error
+		if err := json.Unmarshal(rr.Body.Bytes(), &e); err != nil || rr.Code != c.code || e.Message == "" || e.Code != c.quiero {
+			t.Errorf("%s %s: %d %q (%v)", c.method, c.path, rr.Code, rr.Body, err)
+		}
+		if !api.IsUnsupported(&api.StatusError{Code: rr.Code}) {
+			t.Errorf("%s %s: un cliente ya no lo ve como ruta desconocida", c.method, c.path)
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("PATCH", "/machines/parada", nil))
+	if rr.Header().Get("Allow") == "" {
+		t.Error("el 405 perdió Allow")
 	}
 }
