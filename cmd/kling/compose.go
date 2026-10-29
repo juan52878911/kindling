@@ -192,7 +192,8 @@ func printAvisos(avisos []string) {
 			strings.Contains(a, "ignored (the probe is a TCP connect") {
 			continue
 		}
-		if strings.Contains(a, "not supported") || strings.Contains(a, "not carried") {
+		if strings.Contains(a, "not supported") || strings.Contains(a, "not carried") ||
+			strings.Contains(a, "not read") || strings.Contains(a, "no equivalent") {
 			sinSoporte = true
 		}
 		fmt.Fprintln(os.Stderr, a)
