@@ -514,3 +514,36 @@ func TestParseReq(t *testing.T) {
 		t.Error("cstring")
 	}
 }
+
+// El host borra un fichero que el kernel del invitado aún tiene en caché (sin
+// aviso que llegue): un open(O_CREAT) del mismo nombre llega como OPEN del nodo
+// viejo. Tiene que dar ESTALE (el VFS repite revalidando, y entonces crea), no
+// ENOENT; y la creación que sigue funciona y es otro nodo.
+func TestHostBorraYElInvitadoRecrea(t *testing.T) {
+	dir := carpeta(t)
+	m := montar(t, dir, false)
+	e, node, _ := m.lookup(t, rootID, "hello.txt")
+	if e != 0 {
+		t.Fatal(e)
+	}
+	if err := os.Remove(filepath.Join(dir, "hello.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := m.open(t, node, linuxOWronly|linuxOTrunc); e != share.ESTALE {
+		t.Fatalf("open of a file the host deleted: errno %d, want ESTALE", e)
+	}
+	// Lo que hace el VFS con LOOKUP_REVAL: buscar otra vez, y crear.
+	if e, _, _ := m.lookup(t, rootID, "hello.txt"); e != share.ENOENT {
+		t.Fatalf("lookup after the host delete: errno %d, want ENOENT", e)
+	}
+	e, out := m.dev.pedir(t, opCreate, rootID, u32s(linuxOWronly|linuxOCreat|linuxOTrunc, 0o644, 0, 0), cstr("hello.txt"))
+	if e != 0 {
+		t.Fatalf("create of the same name: errno %d", e)
+	}
+	if nuevo := le.Uint64(out[0:]); nuevo == node {
+		t.Fatal("the new file reuses the deleted node")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hello.txt")); err != nil {
+		t.Fatalf("not on the host: %v", err)
+	}
+}

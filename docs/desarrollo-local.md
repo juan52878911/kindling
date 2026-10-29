@@ -150,11 +150,26 @@ día a día: la plantilla ya existe.
 | compose de 3 (app + postgres + redis), todo contestando | 8,6 s la primera vez (importa y prepara plantillas); 6,2 s con `-fresh` | 1,11-1,32 s (la app, la última, contesta a los 0,86-1,02 s) | 1,2 s |
 | cambio de un fichero en el host leído por el servidor del invitado | 5 ms (p50; 9 ms máx.) | | 3 ms (31 ms máx.) |
 | editar en el host → `node --watch` sirve lo nuevo | **254 ms** (antes: nunca) | | 257 ms |
-| `npm install` de express (caché caliente) en la carpeta | 1,26 s (antes: fallaba, EPERM en `.bin`) | | 0,77 s |
+| `npm install` de express (caché caliente) en la carpeta | 0,92 s (v0.20; con el agente anterior 0,89 s: lo domina el metadato, no el caudal) | | 0,77 s |
 | `npm install` en el disco de la máquina | 0,49-0,82 s | | 0,55 s |
-| escritura secuencial 1 MiB en la carpeta | 336 MB/s | | 604 MB/s |
-| escrituras de 4 KiB en la carpeta | 3 060/s | | 26 600/s |
-| lectura secuencial en la carpeta | 242 MB/s | | 3,2 GB/s |
+| escritura secuencial 1 MiB en la carpeta | **1,08 GB/s** (v0.20; antes 702 MB/s\*) | | 604 MB/s |
+| escrituras de 4 KiB en la carpeta | **26 000/s** (v0.20; antes 6 900/s\*) | | 26 600/s |
+| lectura secuencial en la carpeta, en frío | **1,15 GB/s** (v0.20; antes 560 MB/s\*) | | 3,2 GB/s |
+
+\* Las filas de la carpeta, remedidas el 2026-10-28 (p50, n=10) con el daemon
+de v0.20 en A/B, alternando en la misma tanda una máquina con el agente
+anterior y otra con el nuevo (`node:22-alpine`, 2 vCPU, 1 GiB): 20 000
+`write()` de 4 KiB y `fsync`; 200 MiB en trozos de 1 MiB y `fsync`; leerlos
+tras `drop_caches`. La primera medida de esta tabla (3 060/s, 336 y 242 MB/s)
+era con el daemon anterior y otra carga del Mac. Lo que cambia en v0.20: el
+agente contesta cada `write()` en cuanto tiene los datos y junta los
+contiguos (escritura diferida, [compartir.md](compartir.md#coherencia-y-límites)),
+lee adelantado 4 MiB en vez de 128 KiB, y el daemon deja 8 operaciones
+grandes en vuelo por sesión en vez de 4. En kling-hv, igual medido: 4 KiB
+7 200 → 27 000/s, escritura 651 → 959 MB/s, lectura 532 → 967 MB/s, `npm
+install` 0,96 → 0,90 s. `node --watch` sigue viendo un cambio del host en
+~260 ms (p50, n=10, en los dos), y congelar y descongelar 10 veces con un
+proceso escribiendo da 0 errores.
 
 ### Con volúmenes y la red del proyecto (M4, kling-vz, 2026-10-28)
 
@@ -253,11 +268,11 @@ nuevo cada vez) y la sonda. En el arranque en frío, ~0,7 s de los 1,4 s de la
 app son la primera conexión del host al agente por el reenvío de `kling-vz`,
 antes de poder conectar la carpeta.
 
-Lo que pesa en kindling: cada operación de la carpeta es un viaje de ida y
-vuelta al daemon (~0,3 ms) por el reenvío de `kling-vz`, y las escrituras van
-directas (sin write-back del kernel). Para el bucle de editar y recargar no se
-nota; para un `npm install` o un build que escribe miles de ficheros
-pequeños, sí: mejor dejarlos en el disco de la máquina (`node_modules` en un
+Lo que pesa en kindling: cada operación de metadatos de la carpeta (crear,
+`stat`, abrir, cerrar) es un viaje de ida y vuelta al daemon (~0,3 ms) por el
+reenvío de `kling-vz`; las escrituras, desde v0.20, ya no (el agente las
+difiere). Para el bucle de editar y recargar no se nota; para un `npm
+install` o un build que crea miles de ficheros pequeños, sí: mejor dejarlos en el disco de la máquina (`node_modules` en un
 volumen) cuando importe.
 
 ## Lo que falta para dejar Docker Desktop

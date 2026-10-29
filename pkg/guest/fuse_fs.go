@@ -93,6 +93,9 @@ type fuseFS struct {
 	synMu     sync.Mutex
 	syn       synthOp
 	touchHost func(op synthOp, full string) // provoca el evento de inotify (Linux)
+
+	// afterInit corre tras contestar INIT (setReadahead; nil en los tests).
+	afterInit func(mount string)
 }
 
 // cacheKey es la versión de un fichero a efectos de la caché de páginas.
@@ -137,6 +140,20 @@ func (fs *fuseFS) keepCache(n *node, at share.Attr) bool {
 		return false
 	}
 	return seen && prev == k
+}
+
+// linkChanged apunta la versión (mtime y ctime) del enlace n que acaba de dar
+// el host y dice si cambió desde el LOOKUP anterior. Con CACHE_SYMLINKS el
+// kernel guarda el destino en su caché de páginas y solo lo suelta con
+// INVAL_INODE: si el host cambió el enlace sin que llegara aviso (ruta sin
+// vigilar), esto lo detecta al caducar la entrada (1 s).
+func (fs *fuseFS) linkChanged(n *node, at share.Attr) bool {
+	k := cacheKey{mtime: at.Mtime, ctime: at.Ctime, mtimen: at.Mtimen, ctimen: at.Ctimen}
+	fs.kcMu.Lock()
+	defer fs.kcMu.Unlock()
+	prev, seen := n.linkKey, n.linkSeen
+	n.linkKey, n.linkSeen = k, true
+	return seen && prev != k
 }
 
 func newFuseFS(dev fuseDev, mount string, readOnly bool) *fuseFS {
@@ -285,6 +302,9 @@ func (fs *fuseFS) serve() {
 		switch req.opcode {
 		case opInit:
 			fs.write(fs.init(req))
+			if fs.afterInit != nil {
+				fs.afterInit(fs.mount)
+			}
 			continue
 		case opForget:
 			if len(req.arg) >= 8 {
@@ -301,6 +321,16 @@ func (fs *fuseFS) serve() {
 		case opDestroy:
 			fs.write(reply(req.unique, 0))
 			continue
+		}
+		// Un write diferible se contesta aquí mismo, sin goroutine: en una
+		// carpeta que recibe miles de escrituras pequeñas, el cambio de hilo
+		// pesaba tanto como la propia escritura. Si tendría que esperar, va
+		// por el camino normal.
+		if req.opcode == opWrite {
+			if out, ok := fs.write1(req, false); ok {
+				fs.write(out)
+				continue
+			}
 		}
 		fs.inflight <- struct{}{}
 		go func() {
@@ -342,13 +372,15 @@ func (fs *fuseFS) init(req fuseReq) []byte {
 	if readahead > share.MaxIO {
 		readahead = share.MaxIO
 	}
-	want := uint32(initAsyncRead | initAtomicOTrunc | initBigWrites | initAutoInvalData | initParallelDirop | initMaxPages)
+	want := uint32(initAsyncRead | initAtomicOTrunc | initBigWrites | initAutoInvalData | initParallelDirop | initMaxPages | initCacheSymlinks)
 	le.PutUint32(out[4:], minor)
 	le.PutUint32(out[8:], readahead)
 	le.PutUint32(out[12:], flags&want)
 	fs.autoInval.Store(flags&initAutoInvalData != 0)
-	le.PutUint16(out[16:], 16)               // max_background
-	le.PutUint16(out[18:], 12)               // congestion_threshold
+	// Peticiones en segundo plano (lectura adelantada, sobre todo) a la vez:
+	// con 16 una lectura secuencial de ventana grande se quedaba esperando.
+	le.PutUint16(out[16:], 64)               // max_background
+	le.PutUint16(out[18:], 48)               // congestion_threshold
 	le.PutUint32(out[20:], share.MaxIO)      // max_write
 	le.PutUint32(out[24:], 1)                // time_gran: nanosegundos
 	le.PutUint16(out[28:], share.MaxIO/4096) // max_pages
@@ -399,6 +431,8 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if e != 0 {
 			return fail(e)
 		}
+		// El tamaño que vea el kernel tiene que incluir lo ya escrito.
+		fs.drain(fs.nodes.child(n, name), false)
 		errno, d := fs.call(share.OpStat, func(e *share.Enc) { e.Str(p) })
 		if errno != 0 {
 			return fail(errno)
@@ -409,12 +443,17 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		}
 		c := fs.nodes.lookup(n, name)
 		c.typ.Store(at.Mode & share.SIFMT)
+		if at.Mode&share.SIFMT == share.SIFLNK && fs.linkChanged(c, at) {
+			// CACHE_SYMLINKS: el destino viejo sigue en la caché del kernel.
+			go fs.notifyInode(c.id)
+		}
 		return reply(u, 0, entryOut(c.id, toFattr(at, c.id)))
 
 	case opGetattr:
 		if len(a) < 16 {
 			return fail(share.EINVAL)
 		}
+		fs.drain(n, false)
 		if le.Uint32(a[0:])&getattrFH != 0 {
 			if h := fs.file(le.Uint64(a[8:])); h != nil {
 				errno, d := fs.handleCall(h, share.OpFstat, nil)
@@ -567,7 +606,20 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if !ok {
 			return fail(share.ENOENT)
 		}
+		fs.drain(n, false) // un O_TRUNC va después de lo ya escrito
 		errno, d, s := fs.callS(share.OpOpen, func(e *share.Enc) { e.Str(p); e.U32(flags) })
+		if errno == share.ENOENT {
+			// El host lo borró y el kernel aún tenía la entrada (sin aviso: ruta
+			// sin vigilar, o en el segundo de eco). Un open(O_CREAT) sobre esa
+			// entrada llega aquí como OPEN, sin O_CREAT, y daba ENOENT al
+			// volver a crear el mismo nombre. Con ESTALE el VFS repite la
+			// búsqueda revalidando (LOOKUP_REVAL): el LOOKUP ve que no existe y
+			// el open crea. El nodo se suelta para que lo nuevo sea otro.
+			if pid, name := fs.nodes.orphan(n); pid != 0 {
+				go fs.notifyEntry(pid, name)
+			}
+			return fail(share.ESTALE)
+		}
 		if errno != 0 {
 			return fail(errno)
 		}
@@ -609,6 +661,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if e != 0 {
 			return fail(e)
 		}
+		fs.drain(fs.nodes.child(n, name), false)
 		errno, d, s := fs.callS(share.OpCreate, func(e *share.Enc) { e.Str(p); e.U32(flags); e.U32(mode & 0o7777) })
 		if errno != 0 {
 			return fail(errno)
@@ -640,6 +693,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if h == nil {
 			return fail(share.EBADF)
 		}
+		fs.drain(h.node, false)
 		// El kernel pide hasta share.MaxIO; la sesión puede haber negociado
 		// menos (un daemon anterior se queda en BaseIO), así que se trocea. Si
 		// un trozo falla tras otros buenos, lectura corta: lo leído es válido.
@@ -670,50 +724,8 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		return reply(u, 0, chunks...)
 
 	case opWrite:
-		if len(a) < 40 {
-			return fail(share.EINVAL)
-		}
-		fh, off, size := le.Uint64(a[0:]), le.Uint64(a[8:]), le.Uint32(a[16:])
-		data := a[40:]
-		if size > share.MaxIO || int(size) != len(data) || int64(off) < 0 {
-			return fail(share.EINVAL)
-		}
-		if fs.readOnly {
-			return fail(share.EROFS)
-		}
-		h := fs.file(fh)
-		if h == nil {
-			return fail(share.EBADF)
-		}
-		// Troceado igual que la lectura. Con trozos ya escritos, un fallo da
-		// una escritura corta y no un error: el kernel (y write(2)) saben
-		// qué hacer con ella, y lo escrito, escrito está.
-		var done uint32
-		for done < size {
-			pos, rest := off+uint64(done), data[done:]
-			var asked uint32
-			errno, d := fs.handleCallRaw(h, func(s *shareSession, dh uint64) (uint32, *share.Dec) {
-				asked = min(uint32(len(rest)), s.maxIO)
-				return s.call(share.OpWrite, func(e *share.Enc) { e.U64(dh); e.U64(pos); e.Bytes(rest[:asked]) })
-			})
-			if errno != 0 {
-				if done > 0 {
-					break
-				}
-				return fail(errno)
-			}
-			w := d.U32()
-			if d.Err() != nil || w > asked {
-				return fail(share.EIO)
-			}
-			done += w
-			if w < asked {
-				break
-			}
-		}
-		out := make([]byte, writeOutSize)
-		le.PutUint32(out, done)
-		return reply(u, 0, out)
+		out, _ := fs.write1(req, true)
+		return out
 
 	case opStatfs:
 		errno, d := fs.call(share.OpStatfs, nil)
@@ -738,6 +750,8 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 			return fail(share.EINVAL)
 		}
 		if h := fs.dropFile(le.Uint64(a[0:])); h != nil {
+			// Lo diferido de este handle sale antes de cerrarlo en el daemon.
+			fs.drain(h.node, false)
 			h.mu.Lock()
 			s, dh := h.sess, h.dh
 			h.mu.Unlock()
@@ -757,12 +771,16 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if h == nil {
 			return fail(share.EBADF)
 		}
+		if e := fs.drain(h.node, true); e != 0 {
+			return fail(e)
+		}
 		errno, _ := fs.handleCall(h, share.OpFsync, nil)
 		return fail(errno)
 
 	case opFlush:
-		// Cada write ya llegó al host antes de contestar: no hay nada que vaciar.
-		return fail(0)
+		// close(2): lo diferido llega al host antes de volver, y su error, si
+		// lo hubo, es el de close.
+		return fail(fs.drain(n, true))
 
 	case opOpendir:
 		return fs.opendir(u, n)
@@ -800,6 +818,58 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		return fail(0)
 	}
 	return fail(share.ENOSYS)
+}
+
+// write1 atiende un WRITE. Con wait false solo lo hace si puede diferirlo sin
+// esperar (ok false si no: el llamador lo repite con wait true).
+func (fs *fuseFS) write1(req fuseReq, wait bool) ([]byte, bool) {
+	u, a := req.unique, req.arg
+	fail := func(errno uint32) ([]byte, bool) { return reply(u, errno), true }
+	if !wait && (fs.readOnly || !fs.wbEnabled()) {
+		return nil, false
+	}
+	n := fs.nodes.get(req.nodeid)
+	if n == nil {
+		return fail(share.ESTALE)
+	}
+	if len(a) < 40 {
+		return fail(share.EINVAL)
+	}
+	fh, off, size := le.Uint64(a[0:]), le.Uint64(a[8:]), le.Uint32(a[16:])
+	data := a[40:]
+	if size > share.MaxIO || int(size) != len(data) || int64(off) < 0 {
+		return fail(share.EINVAL)
+	}
+	if fs.readOnly {
+		return fail(share.EROFS)
+	}
+	h := fs.file(fh)
+	if h == nil {
+		return fail(share.EBADF)
+	}
+	done := size
+	if fs.wbEnabled() {
+		e, ok := fs.writeBehind(h, off, data, wait)
+		if !ok {
+			return nil, false
+		}
+		if e != 0 {
+			return fail(e)
+		}
+	} else {
+		// Con un daemon anterior (o tras cambiar de sesión a uno), lo que
+		// quedara diferido va primero.
+		if e := fs.drain(h.node, true); e != 0 {
+			return fail(e)
+		}
+		var errno uint32
+		if done, errno = fs.writeSync(h, off, data); errno != 0 {
+			return fail(errno)
+		}
+	}
+	out := make([]byte, writeOutSize)
+	le.PutUint32(out, done)
+	return reply(u, 0, out), true
 }
 
 // nameErr decide el error de un nombre inválido.
@@ -843,6 +913,7 @@ func (fs *fuseFS) setattr(u uint64, n *node, a []byte) []byte {
 	if len(a) < 88 {
 		return reply(u, share.EINVAL)
 	}
+	fs.drain(n, false) // truncar o cambiar tiempos, después de lo ya escrito
 	valid := le.Uint32(a[0:])
 	fh := le.Uint64(a[8:])
 	size := le.Uint64(a[16:])

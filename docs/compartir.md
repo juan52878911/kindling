@@ -48,9 +48,10 @@ tampoco tiene virtio-fs. Las opciones reales eran tres:
    versión.
 
 Lo que el CLI mete en el tar: directorios, ficheros regulares (los enlaces duros
-van como copias) y enlaces simbólicos relativos que no salen del directorio. Se
-salta, avisando, lo demás: sockets, dispositivos, FIFOs y enlaces que apuntan
-fuera. Los bits setuid/setgid/sticky se quitan.
+van como copias) y enlaces simbólicos relativos que no salen del directorio y
+están en forma canónica (primero los `..`, luego lo que baja: `../../a/b`, nunca
+`a/../b`). Se salta, avisando, lo demás: sockets, dispositivos, FIFOs, enlaces
+que apuntan fuera y enlaces no canónicos. Los bits setuid/setgid/sticky se quitan.
 
 Lo que el daemon ACEPTA, porque el cliente no es de fiar por serlo: solo
 entradas de tipo directorio, fichero regular y enlace simbólico; ni rutas
@@ -195,8 +196,9 @@ Daemon (`internal/share`):
   dispositivos, FIFOs y sockets del host no aparecen en los listados, `stat` los
   da por inexistentes y `open` los rechaza.
 - Lecturas y escrituras de 128 KiB como máximo, o de 1 MiB si agente y daemon lo
-  negocian al conectar (`OpHello`; uno viejo se queda en 128 KiB), con como mucho 4
-  operaciones grandes en vuelo por sesión; offsets no negativos y sin
+  negocian al conectar (`OpHello`; uno viejo se queda en 128 KiB), con como mucho 8
+  operaciones grandes en vuelo por sesión (antes 4: la lectura adelantada y las
+  escrituras diferidas se esperaban entre sí); offsets no negativos y sin
   desbordamiento.
 - Un enlace del host con destino absoluto dentro de la carpeta se lee como relativo;
   con destino fuera de ella, `readlink` da EACCES.
@@ -211,13 +213,19 @@ Daemon (`internal/share`):
   modos se recortan a `0777`: ni setuid, ni setgid, ni sticky. Si el daemon
   corre como root, lo que crea el invitado se entrega al dueño de SRC.
 - SYMLINK solo en `rw` y solo si el enlace no puede sacar a nadie de la
-  carpeta: destino relativo, que resuelto desde donde está el enlace se queda
-  dentro (la regla de las copias, `share.CheckLink`) y sin atravesar otro
-  enlace (`share.LinkTraverses`). Si no, `EPERM`. El agente traduce a relativo
+  carpeta: destino relativo y canónico (ningún `..` tras un componente que
+  baja: `x -> a/up/../..` y luego `a/up -> ..`, válidos por separado, sacaban
+  a x dos niveles), que resuelto desde donde está el enlace se queda dentro (la
+  regla de las copias, `share.CheckLink`), sin atravesar otro enlace
+  (`share.LinkTraverses`) y en un directorio nombrado sin pasar por enlaces. Si
+  no, `EPERM`. Comprobar y crear no compite con un `rename` o `rmdir`
+  concurrente: esos dos toman el árbol en exclusiva y las operaciones que crean,
+  compartido. El agente traduce a relativo
   un destino absoluto que cae dentro del propio montaje (`/app/x`); uno fuera
   (`/usr/bin/python3`) es `EPERM`. Un enlace válido podría dejar de serlo si se
   mueve más arriba (`a/b/l -> ../../x` movido a `l`): `rename` revalida el
-  enlace movido y, si un directorio sube de nivel, recorre sus enlaces (hasta
+  enlace movido (y da `EXDEV` si origen o destino se nombran a través de un
+  enlace) y, si un directorio sube de nivel, recorre sus enlaces (hasta
   20 000 entradas); si alguno saldría, `EXDEV`, y `mv` cae a copiar y borrar,
   que vuelve a pasar cada enlace por SYMLINK.
 - LINK se rechaza (`EPERM`): un enlace duro al fichero que sea es un arma
@@ -243,8 +251,26 @@ Agente (`pkg/guest`):
   host llega en milisegundos y dispara inotify en el invitado (ver abajo); con
   uno anterior, se ve en ≤ 1 s y ningún vigilante se entera. La caché de
   páginas se invalida en cada `open`.
-- Escritura directa (sin write-back): cada `write()` llega al host antes de
-  volver. Dos máquinas escribiendo el mismo fichero: gana la última escritura de
+- Escritura diferida en el agente (`pkg/guest/fuse_wb.go`), con un daemon que
+  la anuncia en `OpHello` (`CapWriteBehind`, v0.20): `write()` vuelve en cuanto
+  el agente tiene los datos; los contiguos se juntan en trozos de hasta 1 MiB y
+  salen en cuanto no hay otro en vuelo (como mucho 4 MiB pendientes por
+  fichero; más allá, `write()` espera). Leer, pedir atributos, truncar, abrir,
+  `fsync` y `close` esperan antes a que lo pendiente llegue al host, y un error
+  del host en algo ya contestado lo devuelve el siguiente `write`, `fsync` o
+  `close` de ese fichero, como en NFS. Si la máquina muere de golpe se pierde
+  lo que no hubiera llegado (como con la caché de páginas de cualquier disco).
+  Con un agente o un daemon anteriores, cada `write()` llega al host antes de
+  volver, como antes. No se usa `FUSE_WRITEBACK_CACHE` del kernel: con él Linux
+  (6.1) se queda con su tamaño y su mtime de cada fichero y deja de creer los
+  del host, así que un cambio del host sin aviso (fuera del tope de vigilancia,
+  o en el segundo de eco) no se vería nunca; y medido, la escritura secuencial
+  bajaba a ~80 MB/s por el límite de páginas sucias que el kernel pone a FUSE.
+- Lectura adelantada de 4 MiB (`/sys/class/bdi/<dev>/read_ahead_kb`, que el
+  agente sube tras INIT: el kernel le daba 128 KiB), hasta 64 peticiones en
+  segundo plano, y los destinos de los enlaces simbólicos en la caché del kernel
+  (`FUSE_CACHE_SYMLINKS`): un aviso de WATCH los invalida, y si el host cambia
+  un enlace sin aviso se ve al caducar su entrada (1 s). Dos máquinas escribiendo el mismo fichero: gana la última escritura de
   cada rango; no hay bloqueos entre máquinas (los `flock`/`fcntl` son locales a
   cada invitado).
 - `rename` con `RENAME_NOREPLACE` comprueba y luego renombra: no es atómico
@@ -252,9 +278,9 @@ Agente (`pkg/guest`):
 - Enlaces simbólicos nuevos solo dentro de la carpeta (ver arriba): `npm
   install` funciona en una carpeta `rw`; `python -m venv` necesita `--copies`
   (sus enlaces apuntan a `/usr/bin/python3`, fuera).
-- Caudal: la conexión pasa por la interfaz de red del invitado, que en
+- Caudal: en Linux la conexión pasa por la interfaz de red del invitado, que en
   Firecracker tiene un limitador de 16 MiB/s por sentido. Es el techo de lectura
-  y escritura secuencial de una carpeta viva.
+  y escritura secuencial de una carpeta viva allí.
 
 ### Cambios hechos en el host
 
@@ -273,6 +299,12 @@ el host no lo despierta. Con WATCH:
    a listar para saber qué nombre apareció o desapareció; un fichero sustituido
    por rename (el guardado atómico de un editor) es un cambio del mismo nombre.
    Lo que el propio invitado tocó en el último segundo es eco y no se avisa.
+   Si el host pierde eventos (la cola de inotify se desborda, `IN_Q_OVERFLOW`)
+   se repasa todo lo vigilado: cada directorio contra su foto y cada fichero
+   contra su huella (tamaño, mtime, inodo), y se avisa de lo que difiera. Si no
+   cabe una vigilancia más (los 4096 descriptores de macOS o
+   `max_user_watches` en Linux) se dice una vez en el log: esa ruta se ve al
+   caducar la caché de 1 s y sus vigilantes del invitado no se enteran.
 3. **El agente lo lleva al kernel** (`pkg/guest/fuse_notify.go`):
    `FUSE_NOTIFY_INVAL_INODE`, `INVAL_ENTRY` o `DELETE`, y luego hace él la
    operación que dispara inotify, desde un hilo suyo: truncar al tamaño que

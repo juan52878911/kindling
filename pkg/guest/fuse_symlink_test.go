@@ -85,3 +85,21 @@ func TestSymlinkVivo(t *testing.T) {
 		t.Fatalf("moving the symlink sub/bin up: errno %d, want EXDEV", e)
 	}
 }
+
+// Con CACHE_SYMLINKS el kernel guarda el destino: un LOOKUP que ve el enlace
+// cambiado en el host (otra mtime/ctime) tiene que decirlo, y solo entonces.
+func TestLinkChanged(t *testing.T) {
+	fs := newFuseFS(newDevFalso(), "/work", false)
+	n := &node{id: 7}
+	a := share.Attr{Mode: share.SIFLNK | 0o777, Mtime: 10, Mtimen: 1, Ctime: 10, Ctimen: 1}
+	if fs.linkChanged(n, a) {
+		t.Error("the first sight is not a change")
+	}
+	if fs.linkChanged(n, a) {
+		t.Error("same version reported as changed")
+	}
+	a.Ctimen = 2
+	if !fs.linkChanged(n, a) {
+		t.Error("a relinked symlink was not detected")
+	}
+}

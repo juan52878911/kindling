@@ -42,6 +42,9 @@ type shareSession struct {
 	// share.BaseIO salvo que hello negocie más. Se fija antes de publicar la
 	// sesión (fuseFS.attach) y no cambia después.
 	maxIO uint32
+	// caps son las capacidades que anunció el daemon en OpHello
+	// (share.Cap*); 0 con uno anterior. Como maxIO.
+	caps uint32
 
 	// events son los avisos de cambios del host (OpWatch). El lector nunca
 	// espera por ellos: si el consumidor se atasca, se pierden (son pistas; las
@@ -86,6 +89,10 @@ func (s *shareSession) hello() {
 		return
 	}
 	s.maxIO = n
+	// Un daemon anterior acaba aquí la respuesta: sin capacidades.
+	if c := d.U32(); d.Err() == nil {
+		s.caps = c
+	}
 }
 
 // watch pide los avisos de cambios del host. Igual que hello, antes de

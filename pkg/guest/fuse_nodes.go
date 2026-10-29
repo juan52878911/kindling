@@ -44,6 +44,16 @@ type node struct {
 	// este nodo al kernel. Los usa el borrado sintético de fuse_notify.go,
 	// cuando el host ya no puede decirlos.
 	typ atomic.Uint32
+
+	// wb son las escrituras diferidas pendientes (fuse_wb.go); nil si nunca
+	// hubo.
+	wb atomic.Pointer[wbState]
+
+	// linkKey es la versión del enlace simbólico (mtime y ctime) que vio el
+	// último LOOKUP, para tirar su destino de la caché del kernel
+	// (CACHE_SYMLINKS) si el host lo cambió. Con fuseFS.kcMu.
+	linkKey  cacheKey
+	linkSeen bool
 }
 
 type nodeTable struct {
@@ -178,6 +188,19 @@ func (t *nodeTable) detach(parent *node, name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.detachLocked(parent, name)
+}
+
+// orphan desengancha n de su padre si sigue colgado de él, y devuelve el id
+// del padre y el nombre que tenía (0 si ya estaba huérfano).
+func (t *nodeTable) orphan(n *node) (uint64, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p, name := n.parent, n.name
+	if p == nil || p.children[name] != n {
+		return 0, ""
+	}
+	t.detachLocked(p, name)
+	return p.id, name
 }
 
 func (t *nodeTable) detachLocked(parent *node, name string) {

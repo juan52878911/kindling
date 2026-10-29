@@ -34,8 +34,8 @@ func TestHelloNegociaElMenor(t *testing.T) {
 		if e != 0 {
 			t.Fatalf("hello(%d): %d", want, e)
 		}
-		n := d.U32()
-		if d.Done() != nil {
+		n, caps := d.U32(), d.U32()
+		if d.Done() != nil || caps&proto.CapWriteBehind == 0 {
 			t.Fatalf("hello(%d): malformed reply", want)
 		}
 		return n

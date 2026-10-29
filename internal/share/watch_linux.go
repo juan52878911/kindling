@@ -74,6 +74,9 @@ func (b *inBackend) add(rel string, dir bool) error {
 	}
 	wd, err := syscall.InotifyAddWatch(b.fd, "/proc/self/fd/"+strconv.Itoa(int(h.Fd())), mask)
 	if err != nil {
+		if errors.Is(err, syscall.ENOSPC) {
+			return errWatchFull // fs.inotify.max_user_watches
+		}
 		return err
 	}
 	w := &inWatch{wd: int32(wd), rel: rel, dir: dir}
@@ -128,6 +131,12 @@ func (b *inBackend) loop() {
 		for off := 0; off+syscall.SizeofInotifyEvent <= n; {
 			ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
 			off += syscall.SizeofInotifyEvent + int(ev.Len)
+			if ev.Mask&syscall.IN_Q_OVERFLOW != 0 {
+				// La cola del kernel se llenó y se perdieron eventos (wd -1):
+				// que el watcher lo repase todo.
+				out = append(out, rawEvent{overflow: true})
+				continue
+			}
 			w := b.byWD[ev.Wd]
 			if w == nil {
 				continue

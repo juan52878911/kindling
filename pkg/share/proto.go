@@ -216,15 +216,17 @@ const (
 	// contesta el menor de los dos. Es la primera operación de una sesión y
 	// el agente no manda nada más hasta tener la respuesta. Un daemon anterior
 	// contesta ENOSYS, y entonces se queda en BaseIO; un agente anterior no la
-	// manda, y el daemon se queda en BaseIO.
-	OpHello byte = 17 // max_io u32 -> max_io u32
+	// manda, y el daemon se queda en BaseIO. Desde v0.20 la respuesta lleva
+	// detrás las capacidades del daemon (Cap*); un agente anterior no las lee
+	// y uno nuevo con un daemon anterior se queda sin ninguna.
+	OpHello byte = 17 // max_io u32 -> max_io u32, caps u32
 	// OpWatch pide al daemon que avise de los cambios hechos en el host
 	// (ver EventPush). Sin argumentos ni resultado. Un daemon anterior
 	// contesta ENOSYS y la carpeta se queda con las cachés de 1 s, como antes;
 	// un agente anterior no la manda y el daemon nunca le empuja nada.
 	OpWatch byte = 18
 	// OpSymlink crea un enlace simbólico (solo rw). El destino tiene que ser
-	// relativo y quedarse dentro de la carpeta (CheckLink, LinkTraverses): un
+	// relativo, canónico y quedarse dentro de la carpeta (CheckLink, LinkTraverses): un
 	// proceso del host que lo siga no sale de ella. Un daemon anterior contesta
 	// ENOSYS y el agente da EPERM, como antes.
 	OpSymlink byte = 19 // path, target -> Attr
@@ -246,6 +248,14 @@ const (
 	EventCreate byte = 2
 	// EventDelete: desapareció la entrada.
 	EventDelete byte = 3
+)
+
+// Capacidades que el daemon anuncia en la respuesta a OpHello.
+const (
+	// CapWriteBehind: el agente puede contestar un write al kernel antes de
+	// que llegue al host (pkg/guest/fuse_wb.go). Este daemon atiende más
+	// operaciones grandes a la vez, y es con el que se probó.
+	CapWriteBehind uint32 = 1 << 0
 )
 
 // Bye es la última trama de un cierre ordenado (ServeDrain): `PushID | ERetry`,

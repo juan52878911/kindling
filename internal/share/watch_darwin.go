@@ -7,7 +7,6 @@ package share
 // flujo por carpeta, pero necesita cgo y el núcleo se compila sin él.
 
 import (
-	"errors"
 	"os"
 	"sync"
 	"syscall"
@@ -49,8 +48,6 @@ func newWatchBackend(root *os.Root, emit func(rawEvent)) (watchBackend, error) {
 	go b.loop()
 	return b, nil
 }
-
-var errWatchFull = errors.New("too many watched paths")
 
 func (b *kqBackend) add(rel string, dir bool) error {
 	b.mu.Lock()

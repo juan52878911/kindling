@@ -14,6 +14,18 @@ package share
 //   - sin atravesar otro enlace por el camino (proto.LinkTraverses), porque
 //     entonces lo léxico y lo real pueden no coincidir.
 //
+// Además, el directorio donde se crea el enlace se nombra sin atravesar otro
+// enlace (realDir): "a/up/l -> ../x" con "a/up -> .." se crearía de verdad en
+// la raíz y saldría un nivel, aunque léxicamente esté a dos de profundidad. A
+// través de FUSE nunca llega una ruta así (el kernel del invitado resuelve los
+// enlaces), pero un root del invitado puede hablar el protocolo a pelo.
+//
+// Comprobar y luego crear no es atómico frente a otra operación de la misma
+// carpeta: un rename concurrente podía subir de nivel el directorio entre la
+// comprobación y el symlinkat (su recorrido no veía el enlace aún por crear).
+// Server.ns lo ordena: rename y rmdir, que cambian dónde está un directorio,
+// lo toman en exclusiva; symlink y las demás que crean, compartido.
+//
 // Un enlace válido podría dejar de serlo si se mueve a un sitio menos profundo
 // ("a/b/l -> ../../x" movido a "l" apunta fuera). Por eso rename revalida: un
 // enlace movido se comprueba en su sitio nuevo, y un directorio que sube de
@@ -41,7 +53,23 @@ func (s *Server) isLink(p string) bool {
 
 // linkOK dice si un enlace en p con destino t cumple las reglas.
 func (s *Server) linkOK(p, t string) bool {
-	return proto.CheckLink(p, t) == nil && !proto.LinkTraverses(p, t, s.isLink)
+	return proto.CheckLink(p, t) == nil && s.realDir(p) && !proto.LinkTraverses(p, t, s.isLink)
+}
+
+// realDir dice si cada componente del directorio que contiene p es un
+// directorio de verdad, no un enlace (os.Root los seguiría sin salir, pero
+// entonces la profundidad real no es la de la ruta). Se mira de fuera adentro:
+// Lstat sigue los intermedios, que para entonces ya se vio que no son enlaces.
+func (s *Server) realDir(p string) bool {
+	for i := 0; i < len(p); i++ {
+		if p[i] == '/' {
+			fi, err := s.root.Lstat(p[:i])
+			if err != nil || !fi.IsDir() {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Server) symlink(p, target string) (proto.Attr, uint32) {
@@ -51,6 +79,8 @@ func (s *Server) symlink(p, target string) (proto.Attr, uint32) {
 	if p == "" {
 		return proto.Attr{}, proto.EEXIST
 	}
+	s.ns.RLock()
+	defer s.ns.RUnlock()
 	if !s.linkOK(p, target) {
 		return proto.Attr{}, proto.EPERM
 	}
@@ -72,6 +102,9 @@ func parentDepth(p string) int { return strings.Count(p, "/") }
 // renameKeepsLinks dice si mover oldp a newp deja válidos los enlaces que se
 // mueven con él. Ver el comentario del fichero.
 func (s *Server) renameKeepsLinks(oldp, newp string) bool {
+	if !s.realDir(oldp) || !s.realDir(newp) {
+		return false // la profundidad real no es la de la ruta: no se puede razonar
+	}
 	fi, err := s.root.Lstat(rel(oldp))
 	if err != nil {
 		return true // que rename dé su propio error
