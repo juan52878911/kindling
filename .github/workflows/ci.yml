@@ -83,6 +83,20 @@ jobs:
       - name: CGO_ENABLED=0 go build ./...
         run: CGO_ENABLED=0 go build ./...
 
+      # La release y los e2e ejecutan estos scripts directamente: sin el bit de
+      # ejecución en git fallan con "Permission denied" (pasó en v0.20.0). Los
+      # lib-*.sh y minimal-init.sh se cargan o se copian, no se ejecutan.
+      - name: scripts ejecutables
+        run: |
+          malos=$(git ls-files -s 'scripts/*.sh' 'scripts/**/*.sh' \
+            | awk '$1 == "100644" { print $4 }' \
+            | grep -vE '(^|/)(lib-[^/]*|minimal-init)\.sh$' || true)
+          if [ -n "$malos" ]; then
+            echo "scripts sin bit de ejecución (git update-index --chmod=+x):" >&2
+            echo "$malos" >&2
+            exit 1
+          fi
+
       - name: ext/* apuntan al núcleo del mismo commit
         run: |
           for m in ext/*/go.mod; do

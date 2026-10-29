@@ -6,6 +6,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-10-28
+
+The v0.20.0 tag never became a release: the new job that builds the guest kernel and the `min` image failed. This is the same code, so the release notes are those of 0.20.0.
+
+### Fixed
+
+- Release: `scripts/70-build-minimal-image.sh` (and three other scripts) were stored without the executable bit, so the release could not build the `min` image; CI now fails on any script under `scripts/` that the release or the e2e run directly and is not executable.
+
 ## [0.20.0] - 2026-10-28
 
 `compose up -d` with ports published by the daemon and idle projects that freeze on their own, live shares about 4x faster on the Mac, and fixes from a security and durability audit. Images and templates built before this release keep their old guest agent and today's share speed; rebuild them (`compose up -fresh`, `image import -replace`) to get the faster shares. Upgrade with `kling upgrade`.
