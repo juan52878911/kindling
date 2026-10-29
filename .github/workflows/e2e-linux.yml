@@ -97,7 +97,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            build-essential flex bison bc libelf-dev xz-utils curl e2fsprogs zstd xfsprogs openssl python3
+            build-essential flex bison bc libelf-dev xz-utils curl e2fsprogs zstd xfsprogs openssl python3 ipset
 
       - name: Firecracker (fijado, con su sha256)
         if: steps.kvm.outputs.ok == 'true'
