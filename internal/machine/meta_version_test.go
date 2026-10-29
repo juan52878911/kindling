@@ -165,7 +165,7 @@ func TestCodificarMetaConOrigen(t *testing.T) {
 	m := newTestManager(t)
 	m.FijarOrigen("v0.18.0", "Firecracker v1.12.0\n\nSupported snapshot data format versions: 5.0.0\n")
 	s := &api.Snapshot{Name: "svc", Stale: "no se guarda"}
-	m.grabarOrigen(s)
+	m.grabarOrigen(s, nil)
 	if s.VMM != "firecracker 1.12.0" || s.KlingVersion != "0.18.0" {
 		t.Fatalf("origen = %q / %q", s.VMM, s.KlingVersion)
 	}
@@ -179,7 +179,7 @@ func TestCodificarMetaConOrigen(t *testing.T) {
 	}
 	// Sin FijarOrigen (tests, un daemon sin VMM) no se graba nada.
 	s2 := &api.Snapshot{}
-	newTestManager(t).grabarOrigen(s2)
+	newTestManager(t).grabarOrigen(s2, nil)
 	if s2.VMM != "" || s2.KlingVersion != "" {
 		t.Fatalf("sin origen: %+v", s2)
 	}

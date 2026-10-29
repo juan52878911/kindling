@@ -93,6 +93,44 @@ here as separate rows.
 | Frozen replica wake, Mac | ~1.5 s | Mac rig | — | `docs/ai-gateway.md` methodology | possibly stale (A4) — worth a re-check on the vz backend, low priority |
 | CI log triage, per log through the gateway | 25 ms (Chispa ~1 µs/line) | N/A (CPU-only) | — | `docs/CI-TRIAGE-EVAL.md` methodology | unaffected |
 
+## Energy on the Mac
+
+`scripts/94-energia-mac.sh` (no sudo; adds `powermetrics` when `sudo -n` works) starts
+its own daemon on a throwaway root and samples `top -l N -c d -stats
+pid,command,power,idlew,csw`, filtered to the test's processes (the daemon, each
+`kling-hv`/`kling-vz` and, with vz, Apple's helper), in three scenarios: the daemon
+alone, three idle machines (redis 7, 256 MiB, like an idle three-service compose) and
+the same three frozen. POWER is macOS's energy impact (Activity Monitor's Energy
+column, an index, not watts); IDLEW and CSW are per second. The first `top` sample is
+dropped. JSON per run in `docs/bench-data/energia-mac-<vmm>-<label>-<date>.json`.
+
+M4 (Mac16,1, macOS 26.5.1), AC power, kling-hv, other agents' benches running on the same
+Mac (the scenarios took the `/tmp/mac-banco.lock` but processes outside the test still
+add noise), 3-minute scenarios, 36 samples of 5 s each, one run per setting
+(2026-10-28). Mean (p50) of the sum over the test's processes:
+
+| scenario | per-thread QoS on (default) | `KLING_HV_QOS=0` |
+|---|---|---|
+| daemon alone | POWER 0.11 (0.1) · 0.01 idle wakeups/s · 23 (14) csw/s | POWER 0.07 (0.1) · 0.01 · 15 (10) |
+| 3 idle machines | POWER **1.35 (1.5)** · **3.9 (4.8)** idle wakeups/s · 169 (167) csw/s | POWER **1.85 (1.8)** · **7.6 (8.0)** · 213 (205) |
+| the 3 frozen | POWER 0.11 (0.0) · 0.05 · 17 (2.4) csw/s | POWER 0.11 (0.1) · 0.04 · 17 (4.2) |
+
+Per `kling-hv` with three idle machines: POWER 0.42 with QoS, 0.59 without. With the Mac
+this busy the QoS on the vCPU threads comes out ahead (about a quarter less energy
+impact and half the idle wakeups), unlike the earlier per-thread measurement in
+[backend-hv.md](backend-hv.md#qos-de-los-hilos), which saw no saving: it stays **on by
+default**. One run per setting: repeat both back to back before quoting the gap
+precisely. Frozen machines cost what the daemon alone costs: there is no VMM left.
+
+Reproduce:
+
+```
+make build vz
+KLING=./kling VMM=hv IMAGES_DIR=<dir with vmlinux, min.ext4, redis-7-alpine.ext4> \
+  DUR=600 LABEL=qos1 ./scripts/94-energia-mac.sh
+KLING_HV_QOS=0 KLING=./kling VMM=hv IMAGES_DIR=... DUR=600 LABEL=qos0 ./scripts/94-energia-mac.sh
+```
+
 ## What this file does not cover
 
 - **VON (small local LLMs)** numbers live in [`docs/von.md`](von.md) and

@@ -347,6 +347,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	live.State = api.StateRunning
 	live.PID = pid
 	live.StartedAt = &now
+	live.VMM = m.origenActual().vmm
 	live.StoppedAt = nil
 	live.FrozenAt = nil
 	live.FailedAt = nil

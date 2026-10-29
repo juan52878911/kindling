@@ -43,6 +43,10 @@ const (
 	pausaBateriaDef = 60 * time.Second
 	// vigilanteBateria multiplica el intervalo del vigilante en batería.
 	vigilanteBateria = 3
+	// vigilanteQuieto lo multiplica en batería cuando no corre ninguna
+	// máquina: las pausadas y las congeladas no gastan ni hay QoS que
+	// vigilar, y lo que queda (TTL, recogidas, disco) aguanta un minuto.
+	vigilanteQuieto = 6
 	// cpuOciosaPct es lo que puede gastar un invitado ocioso, en % de un
 	// núcleo: un redis sin clientes gasta ~0,5 % y un agente solo, ~0,1 %.
 	cpuOciosaPct = 2
@@ -170,12 +174,37 @@ func (m *Manager) enBateriaAhora() bool {
 }
 
 // intervaloVigilante es cada cuánto da su vuelta el vigilante: every, o
-// vigilanteBateria veces más en batería.
+// vigilanteBateria veces más en batería, o vigilanteQuieto si además no corre
+// ninguna máquina (2.2: en batería no se vigila lo pausado ni lo congelado).
 func (m *Manager) intervaloVigilante(every time.Duration) time.Duration {
-	if m.EnBateria() {
-		return every * vigilanteBateria
+	if !m.EnBateria() {
+		return every
 	}
-	return every
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, mc := range m.byID {
+		if mc.State == api.StateRunning {
+			return every * vigilanteBateria
+		}
+	}
+	return every * vigilanteQuieto
+}
+
+// esperaAlineada es lo que falta hasta el siguiente múltiplo de d en el reloj
+// de pared, con d como mínimo medio intervalo. Es la holgura del vigilante:
+// sus vueltas caen siempre en la misma rejilla, así que las de varios daemons
+// (y las de este tras cada cambio de intervalo) despiertan al Mac a la vez en
+// lugar de repartirse por el minuto. Medio intervalo de mínimo: una vuelta
+// que acaba justo antes de la marca no repite al instante.
+func esperaAlineada(ahora time.Time, d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	falta := d - time.Duration(ahora.UnixNano()%int64(d))
+	if falta < d/2 {
+		falta += d
+	}
+	return falta
 }
 
 // Usar apunta que empieza una petición contra la máquina ref y devuelve la
@@ -360,7 +389,18 @@ func (m *Manager) revisarOciosa(ctx context.Context, mc *api.Machine, cfg Batter
 	}
 	b.mu.Lock()
 	u = b.usoDe(mc.ID)
-	// Si entre medias llegó una petición, la reanudará ExecTarget o Usar.
+	// Una petición que llegó mientras se pausaba (M7): Usar la vio running y
+	// sin pausada, así que no la reanudó, y entró en una VM que se paraba.
+	// Se mira ahora, con la pausa hecha: si hay alguna en curso, o acabó una
+	// desde que se decidió pausar, se reanuda ya. Las que lleguen desde aquí
+	// ven pausada y la reanudan ellas (Usar, ExecTarget).
+	if u.enCurso > 0 || u.ultimo.After(ahora) {
+		b.mu.Unlock()
+		if err := m.reanudarBat(ctx, mc.ID); err != nil {
+			log.Printf("battery: resuming %s after a request came in while pausing it: %v", mc.Name, err)
+		}
+		return
+	}
 	u.pausada = true
 	// En pausa no gasta y la QoS da igual: se devuelve ya, para que al
 	// despertarla (por donde sea) corra como siempre.

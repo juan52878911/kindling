@@ -236,3 +236,71 @@ func TestFuenteEsBateria(t *testing.T) {
 		t.Fatal("vio batería enchufado")
 	}
 }
+
+// M7: una petición que entra mientras el modo batería pausa la máquina (Usar
+// la ve running y no la reanuda) no se queda colgada de una VM en pausa: al
+// acabar la pausa se relee enCurso y se reanuda.
+func TestBateriaReanudaSiEntraUnaPeticionMientrasPausa(t *testing.T) {
+	m := newTestManager(t)
+	b := nuevoBancoBateria(t, m, BatteryConfig{Mode: config.BatteryAuto, PauseAfter: 60 * time.Second})
+	maquinaBateria(m, "ociosa", nil)
+	ctx := context.Background()
+	pausarDeVerdad := m.bat.pausar
+	var fin func()
+	m.bat.pausar = func(ctx context.Context, id string) error {
+		// Llega una petición antes de que la pausa termine.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); fin = m.Usar(ctx, id, true) }()
+		wg.Wait()
+		return pausarDeVerdad(ctx, id)
+	}
+	for range 4 {
+		m.vueltaBateria(ctx)
+		b.pasar(30 * time.Second)
+	}
+	if fin == nil {
+		t.Fatal("no se llegó a pausar")
+	}
+	defer fin()
+	if len(b.reanud) != 1 {
+		t.Fatalf("reanudadas = %v: la petición quedó en una VM en pausa", b.reanud)
+	}
+	if mc, _ := m.Get("ociosa"); mc.State != api.StateRunning {
+		t.Fatalf("estado = %s", mc.State)
+	}
+	if b.usoPausada(m, "ociosa") {
+		t.Fatal("quedó apuntada como pausada por el modo batería")
+	}
+}
+
+func (b *bancoBateria) usoPausada(m *Manager, id string) bool {
+	m.bat.mu.Lock()
+	defer m.bat.mu.Unlock()
+	u := m.bat.uso[id]
+	return u != nil && u.pausada
+}
+
+// 2.2: en batería sin ninguna máquina corriendo (pausadas o congeladas) el
+// vigilante se espacia más; y sus vueltas caen en la rejilla de su intervalo.
+func TestIntervaloVigilanteQuietoYAlineado(t *testing.T) {
+	m := newTestManager(t)
+	nuevoBancoBateria(t, m, BatteryConfig{Mode: config.BatteryOn})
+	mc := maquinaBateria(m, "a", nil)
+	if got := m.intervaloVigilante(10 * time.Second); got != 30*time.Second {
+		t.Fatalf("con una corriendo = %v", got)
+	}
+	m.mu.Lock()
+	mc.State = api.StatePaused
+	m.mu.Unlock()
+	if got := m.intervaloVigilante(10 * time.Second); got != 60*time.Second {
+		t.Fatalf("todas pausadas = %v", got)
+	}
+	base := time.Unix(1_000_040, 0) // 20 s pasado un múltiplo de 30 s
+	if got := esperaAlineada(base, 30*time.Second); got != 10*time.Second+30*time.Second {
+		t.Fatalf("a 10 s de la marca = %v, quería saltar a la siguiente", got)
+	}
+	if got := esperaAlineada(base.Add(-10*time.Second), 30*time.Second); got != 20*time.Second {
+		t.Fatalf("a 20 s de la marca = %v", got)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -27,6 +28,7 @@ func (m *Manager) ProcStats() api.ProcStats {
 		stats = append(stats, api.ProcStat{
 			ID: mc.ID, Name: mc.Name, Service: mc.Service(),
 			From: mc.From, State: mc.State, PID: mc.PID,
+			StateSince: estadoDesde(mc),
 		})
 		socks = append(socks, m.socket[mc.ID])
 	}
@@ -37,14 +39,50 @@ func (m *Manager) ProcStats() api.ProcStats {
 		// Solo las máquinas vivas tienen proceso; las warm/stopped no gastan RAM.
 		if stats[i].PID > 0 {
 			stats[i].PSSMiB = memoriaVMM(stats[i].PID, socks[i])
+			if memoriaEsHuella {
+				stats[i].FootprintMiB = stats[i].PSSMiB
+			}
 			total += stats[i].PSSMiB
+			if u, ok := cpuVMM(stats[i].PID, socks[i]); ok {
+				stats[i].CPUSeconds = u.total.Seconds()
+				stats[i].CPUPSeconds = u.p.Seconds()
+				stats[i].CoreSplit = u.conNucleos
+				stats[i].EnergyJoules = float64(u.energiaNJ) / 1e9
+			}
 		}
 	}
 	avail, free := memoriaHost()
+	tipo := "pss"
+	if memoriaEsHuella {
+		tipo = "footprint"
+	}
 	return api.ProcStats{
 		Machines: stats, ByState: byState, TotalPSSMiB: total,
 		AvailableMiB: avail, FreeMiB: free, TotalMiB: memoriaTotalPlataforma(),
+		MemoryKind: tipo,
 	}
+}
+
+// estadoDesde es desde cuándo está mc en su estado, o nil si no consta.
+func estadoDesde(mc *api.Machine) *time.Time {
+	var t *time.Time
+	switch mc.State {
+	case api.StateRunning:
+		t = mc.StartedAt
+	case api.StateWarm, api.StatePaused:
+		t = mc.FrozenAt
+	case api.StateStopped:
+		t = mc.StoppedAt
+	case api.StateFailed:
+		t = mc.FailedAt
+	case api.StateCreated:
+		t = &mc.CreatedAt
+	}
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // pssMiB devuelve el PSS del proceso en MiB leído de /proc/<pid>/smaps_rollup.

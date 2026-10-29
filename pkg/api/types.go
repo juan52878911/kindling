@@ -201,6 +201,12 @@ type Machine struct {
 	// como GuestAgent vacío: contestó, pero no dice nada de sí mismo.
 	Agent *GuestAgent `json:"agent,omitempty"`
 
+	// VMM es el VMM (y su versión) que la lanzó por última vez ("kling-vz
+	// 0.19.0", "firecracker 1.12.0"): con él se sella su volcado y se graba el
+	// dorado que se haga de ella, aunque el daemon haya cambiado de backend
+	// desde entonces. Vacío = lanzada por un daemon anterior.
+	VMM string `json:"vmm,omitempty"`
+
 	// Transition dice que una operación de ciclo de vida que va a sacarla de
 	// su estado está en curso ahora mismo (TransitionFreezing, ...). La
 	// máquina sigue figurando con su State de antes hasta que termina: un
@@ -235,6 +241,16 @@ type Machine struct {
 	// es solo la carga del snapshot; Wake.TotalMS es lo que de verdad esperó
 	// quien pidió el thaw (ver docs/despertar.md).
 	Wake *WakePhases `json:"wake,omitempty"`
+}
+
+// StuckMachine es una máquina atascada a mitad de una operación (Info.Stuck).
+type StuckMachine struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	PID        int       `json:"pid,omitempty"`
+	Transition string    `json:"transition"`
+	Since      time.Time `json:"since,omitempty"`
+	Problem    string    `json:"problem"`
 }
 
 // WakePhases es el desglose de un despertar en el daemon, en milisegundos.
@@ -957,6 +973,24 @@ type ProcStat struct {
 	State   State  `json:"state"`
 	PID     int    `json:"pid,omitempty"`
 	PSSMiB  int64  `json:"pss_mib"`
+	// FootprintMiB es su memoria en macOS (phys_footprint del VMM, del
+	// auxiliar de Apple y de sus hijos: lo que Monitor de Actividad llama
+	// memoria). Allí PSSMiB lleva la misma cifra, para clientes anteriores.
+	// 0 en Linux, donde la cifra buena es el PSS.
+	FootprintMiB int64 `json:"footprint_mib,omitempty"`
+	// CPUSeconds es la CPU que ha gastado su VMM (con el auxiliar y los hijos
+	// en macOS) desde que se lanzó; 0 = no se sabe. En Apple Silicon,
+	// CPUPSeconds es la parte que corrió en núcleos de rendimiento y el resto
+	// en los de eficiencia (CoreSplit dice que el reparto se conoce).
+	CPUSeconds  float64 `json:"cpu_seconds,omitempty"`
+	CPUPSeconds float64 `json:"cpu_p_seconds,omitempty"`
+	CoreSplit   bool    `json:"core_split,omitempty"`
+	// EnergyJoules es la energía que el sistema le atribuye (macOS, en
+	// julios, desde que se lanzó); 0 = no se sabe.
+	EnergyJoules float64 `json:"energy_joules,omitempty"`
+	// StateSince es desde cuándo está en su estado (arranque, congelación,
+	// pausa, parada o fallo); nil si no consta.
+	StateSince *time.Time `json:"state_since,omitempty"`
 }
 
 // ProcStats es la respuesta de GET /procstats: el consumo del conjunto.
@@ -971,6 +1005,9 @@ type ProcStats struct {
 	// daemon no la da (Linux, o un daemon anterior). Con AvailableMiB da el
 	// nivel de memoria con el que el gateway reparte el nivel pausada.
 	TotalMiB int64 `json:"total_mib,omitempty"`
+	// MemoryKind es qué mide la memoria por máquina: "pss" (Linux) o
+	// "footprint" (macOS). Vacío = daemon anterior ("pss").
+	MemoryKind string `json:"memory_kind,omitempty"`
 }
 
 // Info describe el daemon.
@@ -998,6 +1035,10 @@ type Info struct {
 	// daemon.vmm auto (macOS), "daemon.vmm hv", "KLING_VMM=vz". Vacío en Linux
 	// y en daemons anteriores.
 	BackendReason string `json:"backend_reason,omitempty"`
+	// Stuck son las máquinas que el daemon no logró llevar al estado pedido y
+	// sigue reintentando (un freeze que no pudo reanudarla, un rm cuyo VMM
+	// sobrevivió al SIGKILL). Vacío = ninguna. Lo enseña `kling doctor`.
+	Stuck []StuckMachine `json:"stuck,omitempty"`
 	// PoolProblems son los fondos precalentados (kling template pool) que no
 	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
 	// Vacío = todos bien o ninguno.

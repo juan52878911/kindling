@@ -376,6 +376,9 @@ type Manager struct {
 	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
 	pruebasGanchos func(ctx context.Context, id, kind string) (api.GuestReady, error)
 	pruebasMeminfo func(ctx context.Context, id string) (api.GuestMemInfo, error)
+	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
+	// resync del invitado (tests de B12).
+	pruebasAntesDeResync func()
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
@@ -386,6 +389,11 @@ type Manager struct {
 	// copia a lo que devuelven List y Get: las entradas de byID no la llevan,
 	// así que tampoco llega al estado persistido. Ver marcarTransicion.
 	transicion map[string]string
+
+	// reanudaciones son las máquinas que un volcado fallido dejó en pausa sin
+	// poder reanudarlas: el vigilante lo reintenta (reanudar_pendiente.go).
+	// Con m.mu.
+	reanudaciones map[string]reanudacion
 
 	// muertes serializa killMachine por máquina (ver killMachine). Aparte del
 	// cerrojo de ciclo de vida, que quien mata ya suele tener tomado.
@@ -1297,7 +1305,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.OnTTL = ""
 	case api.OnTTLRemove:
 	default:
-		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
+		return nil, peticionInvalida("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
 	// El entorno de la máquina (entorno.go): validado antes de reservar
 	// nada. Desde aquí solo viaja en env, nunca en la máquina.
@@ -1358,7 +1366,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
 	// hasta que se escribe, pero uno diminuto no monta ni el agente.
 	if tope := maxDiskMiB(); req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > tope {
-		return nil, fmt.Errorf("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
+		return nil, peticionInvalida("disk_mib %d: the machine's writable disk goes from %d MiB to %d MiB (0 = %d; KLING_MAX_DISK_MIB sets the maximum)",
 			req.DiskMiB, minOverlayMiB, tope, defaultOverlayMiB)
 	}
 	if err := validarNetMiBps(req.NetMiBps); err != nil {
@@ -1375,7 +1383,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.MemMiB = 256
 	}
 	if req.MemMaxMiB != 0 && req.MemMaxMiB < req.MemMiB {
-		return nil, fmt.Errorf("mem_max_mib (%d) can't be below mem_mib (%d)", req.MemMaxMiB, req.MemMiB)
+		return nil, peticionInvalida("mem_max_mib (%d) can't be below mem_mib (%d)", req.MemMaxMiB, req.MemMiB)
 	}
 	if req.MemMaxMiB == req.MemMiB {
 		req.MemMaxMiB = 0 // un techo igual a la memoria es memoria fija
@@ -1649,6 +1657,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc.PID = pid
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
+	mc.VMM = m.origenActual().vmm
 	mc.BootMS = time.Since(start).Milliseconds()
 	m.persist()
 	out := *mc
@@ -2182,7 +2191,16 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, err
 	}
 	defer soltarDisco()
-	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
+	// Si la reanudación de un volcado fallido tampoco sale, la transición se
+	// queda puesta hasta que el vigilante la reanude (reanudarPendientes): el
+	// planificador no debe enrutar a una máquina en pausa.
+	quitarTransicion := m.marcarTransicion(mc.ID, api.TransitionFreezing)
+	pendiente := false
+	defer func() {
+		if !pendiente {
+			quitarTransicion()
+		}
+	}()
 
 	dir := m.dir(mc.ID)
 	// El diferencial se vuelca aparte (mem.diff) y se funde después sobre el
@@ -2283,6 +2301,24 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, fmt.Errorf("marking the freeze as in progress: %w", err)
 	}
 
+	// Desde la pausa, el volcado no se corta con la petición (A5): un Ctrl-C en
+	// `kling freeze` cancelaba ctx con Firecracker o kling-vz aún escribiendo;
+	// el daemon borraba lo escrito, pedía Resume con el plazo de 30 s a un VMM
+	// que seguía ocupado volcando, y al no contestar la daba por fallida y la
+	// mataba. Lo único que lo limita ya es plazoVolcado.
+	ctx = context.WithoutCancel(ctx)
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// reanudar es la salida de todo volcado fallido: con el plazo largo (el
+	// VMM atiende la reanudación cuando acabe lo que tenga en curso) y, si ni
+	// así, la deja running en transición para que el vigilante lo reintente
+	// en vez de matarla.
+	reanudar := func(causa error) {
+		if rerr := lento.Resume(ctx); rerr != nil {
+			pendiente = true
+			m.apuntarReanudacion(mc, causa, rerr)
+		}
+	}
+
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
 		// Nada se volcó, pero la marca de volcado en curso ya está y la pausa
@@ -2291,14 +2327,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
 		// así que ese fallo solo se apunta.
 		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
-		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+		if rerr := c.Resume(ctx); rerr != nil {
 			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
 		}
 		return nil, err
 	}
-	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
-	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
-	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+	// Con plazo propio (lento): el de 30 s del cliente no alcanza para volcar
+	// varios GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
 	var verr error
 	if enDiff {
 		verr = lento.SnapshotDiff(ctx, snapPath, memPath)
@@ -2324,12 +2359,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// Sus volúmenes siguen montados: Freeze solo los vacía (flushVolume),
 		// no los suelta, así que no hay nada que devolverle. Pedírselo era un
 		// viaje al agente de hasta 50 s con el cerrojo tomado y el error tirado.
-		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-			// Si tampoco se puede reanudar, la máquina no es recuperable y
-			// dejarla como running sería mentir. Se marca fallida.
-			m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-			return nil, err
-		}
+		reanudar(err)
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
@@ -2354,10 +2384,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			m.borrarDiffParcialAlmacen(mc.ID)
 			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
-			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-				return nil, err
-			}
+			reanudar(err)
 			return nil, err
 		}
 		snapPath = filepath.Join(dir, "snap.file")
@@ -2380,10 +2407,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 			m.borrarDiffParcialAlmacen(mc.ID)
 			m.borrarAcumuladoDiff(mc.ID, dir)
 			m.olvidarDiffBase(mc.ID)
-			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-				return nil, err
-			}
+			reanudar(err)
 			return nil, err
 		}
 		memPath = filepath.Join(dir, "mem.file")
@@ -2464,7 +2488,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
 	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
 		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
-	} else if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm, base, sinAgente); err != nil {
+	} else if err := sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -2785,7 +2809,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if b, err := json.Marshal(doc); err != nil {
 		return nil, err
 	} else if len(b) > api.MaxMMDSBytes {
-		return nil, fmt.Errorf("the MMDS store would be %d bytes with the machine's credential placeholders, "+
+		return nil, peticionInvalida("the MMDS store would be %d bytes with the machine's credential placeholders, "+
 			"over the limit of %d", len(b), api.MaxMMDSBytes)
 	}
 	c := fc.New(sock)
@@ -2926,7 +2950,12 @@ func (m *Manager) confirmarSecreto(id string, gen uint64) {
 // a entregar las credenciales desde su almacén.
 func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.CredentialSpec) (*api.Machine, error) {
 	if len(specs) == 0 {
-		return nil, errors.New("no credentials given")
+		return nil, peticionInvalida("no credentials given")
+	}
+	// Lo mismo que valida entregarCredenciales, aquí para que un juego mal
+	// formado se conteste como error de la petición (400) y no del host.
+	if err := validarSpecs(specs); err != nil {
+		return nil, comoPeticion(err)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
@@ -2942,7 +2971,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, estadoInvalido("credentials can only be given to a running machine (it is %s)", cur.State)
 	}
 	if cur.Egress != string(knet.EgressAllowlist) {
-		return nil, fmt.Errorf("credentials need -egress allowlist (the machine has %q)", cur.Egress)
+		return nil, peticionInvalida("credentials need -egress allowlist (the machine has %q)", cur.Egress)
 	}
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
@@ -3342,9 +3371,17 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
 	var resync resultadoResync
+	if m.pruebasAntesDeResync != nil {
+		m.pruebasAntesDeResync()
+	}
 	_, sinAgenteMem := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID))
 	if !sinAgenteMem && !leerSello(m.dir(mc.ID)).SinAgente {
-		resync = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
+		// Sin el ctx de la petición (B12): con la memoria ya cargada, el
+		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
+		// cancelado hacía que resyncGuest volviera al instante: la máquina
+		// quedaba running con el reloj y el CSPRNG de cuando se congeló. El
+		// propio resync lleva su plazo (resyncPlazo).
+		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
 
@@ -3381,6 +3418,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.State = api.StateRunning
 	cur.StartedAt = &now
 	cur.FrozenAt = nil
+	cur.VMM = m.origenActual().vmm
 	cur.Hold = ""
 	cur.ThawMS = elapsed
 	cur.PID = pid
@@ -3497,6 +3535,10 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		log.Printf("warning: %v", err)
 	}
 	m.borrarVolcado(mc.ID)
+	// Y el volcado temporal de un commit que se cortó (macOS: el VMM vuelca
+	// en el directorio de su máquina, publicar_volcado.go): del tamaño de su
+	// RAM, y nadie lo va a publicar ya (M15).
+	quitarVolcadoTemporal(m.dir(mc.ID))
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -3581,7 +3623,14 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 		return nil
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
-	m.kill(mc.ID)
+	if !m.kill(mc.ID) {
+		// Con el VMM vivo no se suelta nada (M4): su red, su disco y su
+		// índice de red los sigue usando él, y dárselos a otra máquina la
+		// pondría a hablar por su interfaz. La máquina se queda como estaba,
+		// con su PID: el vigilante la ve viva y el siguiente intento la mata.
+		return fmt.Errorf("%s: its VMM (pid %d) did not exit after SIGKILL; leaving its network and disk in place",
+			mc.Name, mc.PID)
+	}
 	return m.limpiarMaquina(mc)
 }
 
@@ -3592,7 +3641,11 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) { m.killMachine(id, true, false) }
+//
+// Devuelve si el VMM ya no existe (o no lo había): uno que sobrevive a
+// waitGone conserva su PID en la máquina, y quien libera lo que usaba (Remove)
+// no debe hacerlo todavía.
+func (m *Manager) kill(id string) bool { return m.killMachine(id, true, false) }
 
 // killConservandoDisco es kill para Stop: el overlay sigue después (kling
 // start), así que el invitado vacía su caché aunque no tenga volúmenes.
@@ -3606,7 +3659,7 @@ func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true
 // pausar, que es el único momento en que el invitado podía responder.
 func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
 
-func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
+func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
@@ -3626,7 +3679,7 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
-		return
+		return true
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
@@ -3635,8 +3688,14 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 		m.stopService(mc)
 		m.flushVolume(mc, conservaDisco)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	senalMatar(pid)
 	defer func() {
+		if !murio {
+			// Sigue vivo: el PID se queda, para que se sepa y se pueda
+			// volver a matar (M4).
+			log.Printf("warning: %s: VMM pid %d still alive %s after SIGKILL", shortID(id), pid, plazoMuerte)
+			return
+		}
 		m.mu.Lock()
 		if live := m.byID[id]; live != nil && live.PID == pid {
 			live.PID = 0
@@ -3656,25 +3715,35 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) {
 	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
 	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
 	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
-	waitGone(pid, 5*time.Second)
+	return waitGone(pid, plazoMuerte)
 }
 
-// waitGone espera a que un pid desaparezca de la tabla de procesos.
+// senalMatar manda el SIGKILL a un VMM. Variable para los tests: un VMM que
+// no muere no se puede fabricar de otra forma.
+var senalMatar = func(pid int) { _ = syscall.Kill(pid, syscall.SIGKILL) }
+
+// plazoMuerte es cuánto se espera a que un VMM muera tras el SIGKILL. Variable
+// para los tests.
+var plazoMuerte = 5 * time.Second
+
+// waitGone espera a que un pid desaparezca de la tabla de procesos y dice si
+// desapareció antes del plazo.
 //
 // Kill(pid, 0) no manda señal: solo pregunta si el proceso existe. Devuelve
 // ESRCH cuando ya no —ni vivo ni zombi—, que es justo cuando su memoria está
 // reclamada. Sondea con pausas cortas porque morir tras un SIGKILL es cuestión
 // de milisegundos en el caso normal.
-func waitGone(pid int, timeout time.Duration) {
+func waitGone(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if syscall.Kill(pid, 0) == syscall.ESRCH {
-			return
+			return true
 		}
 		// 1 ms y no 20: el VMM suele morir en uno o dos, y con 20 el sondeo
 		// era la mayor parte de lo que tardaba kling rm.
 		time.Sleep(time.Millisecond)
 	}
+	return false
 }
 
 // fail da una máquina por perdida: mata su VMM, desmonta su red y su cgroup y

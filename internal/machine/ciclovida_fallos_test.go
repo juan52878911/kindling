@@ -96,9 +96,10 @@ func TestFailDeUnaMaquinaNoRegistradaNoLaResucita(t *testing.T) {
 	}
 }
 
-// M-01, el caso real: el volcado falla y la reanudación también. Freeze llama a
-// fail() con su copia; el VMM se mata, y la entrada VIVA tiene que quedar
-// failed con el error, no running con un PID muerto.
+// M-01, el caso real: el volcado falla y la reanudación también. Desde A5 no
+// se mata en el acto: queda running en transición freezing y el vigilante
+// reintenta. Si pasado plazoReanudacion sigue sin contestar, la entrada VIVA
+// queda failed con el error, no running con un PID muerto.
 func TestFreezeQueNoPuedeReanudarMarcaFallidaLaViva(t *testing.T) {
 	m := newTestManager(t)
 	m.bus = events.New()
@@ -117,6 +118,27 @@ func TestFreezeQueNoPuedeReanudarMarcaFallidaLaViva(t *testing.T) {
 	if _, err := m.Freeze(context.Background(), id); err == nil {
 		t.Fatal("Freeze con el volcado roto no devolvió error")
 	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
+		t.Fatalf("estado = %s, quería running a la espera del vigilante", viva.State)
+	}
+	if got, _ := m.Get(id); got == nil || got.Transition != api.TransitionFreezing {
+		t.Fatalf("Transition = %+v, quería freezing: el planificador le enrutaría", got)
+	}
+	if !sigueVivo(muerto) {
+		t.Fatal("mató el VMM sin dar al vigilante la ocasión de reanudarla")
+	}
+
+	// Una vuelta del vigilante dentro del plazo: sigue sin contestar, sigue igual.
+	m.reanudarPendientes()
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
+		t.Fatalf("estado tras reintentar = %s", viva.State)
+	}
+
+	// Pasado el plazo: perdida.
+	viejo := plazoReanudacion
+	plazoReanudacion = 0
+	t.Cleanup(func() { plazoReanudacion = viejo })
+	m.reanudarPendientes()
 
 	viva := vivaDe(t, m, id)
 	if viva.State != api.StateFailed {
@@ -130,8 +152,87 @@ func TestFreezeQueNoPuedeReanudarMarcaFallidaLaViva(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Error("el VMM sigue vivo: fail() no lo mató")
 	}
-	if n := len(falso.llamadasA(http.MethodPatch, "/vm")); n != 2 {
-		t.Errorf("PATCH /vm = %d llamadas, quería 2 (pausa y el intento de reanudar)", n)
+	if got, _ := m.Get(id); got != nil && got.Transition != "" {
+		t.Errorf("Transition = %q en una fallida", got.Transition)
+	}
+}
+
+// A5: si la reanudación falla y luego el VMM contesta (acabó lo que estaba
+// escribiendo), el vigilante la reanuda y le quita la transición.
+func TestFreezeReanudacionPendienteLaRecuperaElVigilante(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000005"
+	falso, muerto := maquinaCorriendo(t, m, id)
+	falso.fallar(http.MethodPut, "/snapshot/create", http.StatusBadRequest, "disk full")
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			falso.fallar(http.MethodPatch, "/vm", http.StatusBadRequest, "busy")
+		}
+	})
+	if _, err := m.Freeze(context.Background(), id); err == nil {
+		t.Fatal("Freeze con el volcado roto no devolvió error")
+	}
+	falso.dejarDeFallar(http.MethodPatch, "/vm")
+	m.reanudarPendientes()
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
+		t.Fatalf("estado = %s, quería running", viva.State)
+	}
+	if got, _ := m.Get(id); got == nil || got.Transition != "" {
+		t.Fatalf("Transition = %+v, quería vacía tras reanudar", got)
+	}
+	if len(m.Atascadas()) != 0 {
+		t.Fatal("sigue pendiente tras reanudar")
+	}
+	if !sigueVivo(muerto) {
+		t.Fatal("mató el VMM de una máquina que se reanudó")
+	}
+	pausas := falso.llamadasA(http.MethodPatch, "/vm")
+	if n := len(pausas); n != 3 || !strings.Contains(string(pausas[n-1].Cuerpo), "Resumed") {
+		t.Fatalf("PATCH /vm = %d, quería pausa, reanudación fallida y la del vigilante", n)
+	}
+}
+
+// A5: un Ctrl-C en `kling freeze` a mitad del volcado ya no lo corta. Antes
+// el ctx cancelado abortaba la petición con el VMM aún escribiendo, se borraba
+// lo escrito y la reanudación de 30 s no contestaba: SIGKILL.
+func TestFreezeCanceladoAMitadTerminaElVolcado(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
+	id := "f1ee2e0000000006"
+	falso, muerto := maquinaCorriendo(t, m, id)
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.byID[id].MemMiB = 1
+	m.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo == http.MethodPut && ruta == "/snapshot/create" {
+			// El cliente se va mientras el VMM escribe.
+			cancel()
+			time.Sleep(50 * time.Millisecond)
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("snap"), 0o644)
+			escribirPaginas(t, filepath.Join(dir, "mem.file"), paginaDe('A'))
+		}
+	})
+	if _, err := m.Freeze(ctx, id); err != nil {
+		t.Fatalf("Freeze cancelado a mitad: %v", err)
+	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateWarm {
+		t.Fatalf("estado = %s, quería frozen", viva.State)
+	}
+	select {
+	case <-muerto:
+	case <-time.After(5 * time.Second):
+		t.Error("el VMM sigue vivo tras congelar")
+	}
+	if !existe(filepath.Join(dir, marcaOK)) {
+		t.Error("el volcado no quedó sellado")
 	}
 }
 

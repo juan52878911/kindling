@@ -22,7 +22,8 @@ import (
 // IORegisterForSystemPower y avisa por stdout de que el Mac se va a dormir;
 // macOS espera su respuesta (hasta ~30 s; el vigía no espera más de 10). El
 // daemon pausa entonces las máquinas que corren, contesta, y al despertar las
-// reanuda (Thaw, que además resincroniza su reloj). Así un invitado no se
+// reanuda (Thaw; como la pausa es de antes del sueño, reanudarLocked además
+// resincroniza su reloj). Así un invitado no se
 // queda congelado a mitad de lo que hacía cuando el Mac se para por debajo,
 // sino en una pausa limpia del VMM. Si el vigía no arranca (un VMM anterior
 // sin el modo, Linux), queda lo de siempre: resincronizar al despertar.

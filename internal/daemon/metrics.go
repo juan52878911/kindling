@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -62,7 +63,68 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			mc.ID, esc(mc.Name), esc(mc.Service), esc(mc.From), mc.State, mc.PSSMiB)
 	}
 
+	escribirPorMaquina(w, ps, time.Now())
 	escribirTelemetria(w, s.mgr.Telemetria(), s.bus.Descartados())
+}
+
+// escribirPorMaquina escribe lo que hace /metrics útil también en macOS (5.1),
+// donde no hay /proc: la memoria del host según el sistema, la huella de cada
+// máquina, su CPU (repartida entre núcleos P y E en Apple Silicon), su
+// energía y cuánto lleva en su estado.
+func escribirPorMaquina(w io.Writer, ps api.ProcStats, ahora time.Time) {
+	fmt.Fprintln(w, "# HELP kling_host_mem_available_mib Memory the host can still hand out, in MiB (Linux: MemAvailable; macOS: kern.memorystatus_level of hw.memsize).")
+	fmt.Fprintln(w, "# TYPE kling_host_mem_available_mib gauge")
+	fmt.Fprintf(w, "kling_host_mem_available_mib %d\n", ps.AvailableMiB)
+
+	var vivas, todas []api.ProcStat
+	for _, mc := range ps.Machines {
+		todas = append(todas, mc)
+		if mc.PID > 0 {
+			vivas = append(vivas, mc)
+		}
+	}
+	sort.Slice(vivas, func(i, j int) bool { return vivas[i].ID < vivas[j].ID })
+	sort.Slice(todas, func(i, j int) bool { return todas[i].ID < todas[j].ID })
+
+	if ps.MemoryKind == "footprint" {
+		fmt.Fprintln(w, "# HELP kling_machine_footprint_mib Physical footprint of each live microVM (VMM, Apple's helper and children), in MiB.")
+		fmt.Fprintln(w, "# TYPE kling_machine_footprint_mib gauge")
+		for _, mc := range vivas {
+			fmt.Fprintf(w, "kling_machine_footprint_mib{id=%q,name=%q,state=%q} %d\n", mc.ID, esc(mc.Name), mc.State, mc.FootprintMiB)
+		}
+	}
+
+	fmt.Fprintln(w, "# HELP kling_machine_cpu_seconds_total CPU time used by each live microVM's VMM since it started; core is p or e on Apple Silicon, all where the split is not known.")
+	fmt.Fprintln(w, "# TYPE kling_machine_cpu_seconds_total counter")
+	for _, mc := range vivas {
+		if mc.CPUSeconds <= 0 {
+			continue
+		}
+		if mc.CoreSplit {
+			fmt.Fprintf(w, "kling_machine_cpu_seconds_total{id=%q,name=%q,core=%q} %.3f\n", mc.ID, esc(mc.Name), "p", mc.CPUPSeconds)
+			fmt.Fprintf(w, "kling_machine_cpu_seconds_total{id=%q,name=%q,core=%q} %.3f\n", mc.ID, esc(mc.Name), "e", max(mc.CPUSeconds-mc.CPUPSeconds, 0))
+		} else {
+			fmt.Fprintf(w, "kling_machine_cpu_seconds_total{id=%q,name=%q,core=%q} %.3f\n", mc.ID, esc(mc.Name), "all", mc.CPUSeconds)
+		}
+	}
+
+	fmt.Fprintln(w, "# HELP kling_machine_energy_joules_total Energy macOS attributes to each live microVM's processes since they started, in joules.")
+	fmt.Fprintln(w, "# TYPE kling_machine_energy_joules_total counter")
+	for _, mc := range vivas {
+		if mc.EnergyJoules > 0 {
+			fmt.Fprintf(w, "kling_machine_energy_joules_total{id=%q,name=%q} %.3f\n", mc.ID, esc(mc.Name), mc.EnergyJoules)
+		}
+	}
+
+	fmt.Fprintln(w, "# HELP kling_machine_state_seconds How long each machine has been in its current state, in seconds.")
+	fmt.Fprintln(w, "# TYPE kling_machine_state_seconds gauge")
+	for _, mc := range todas {
+		if mc.StateSince == nil {
+			continue
+		}
+		fmt.Fprintf(w, "kling_machine_state_seconds{id=%q,name=%q,state=%q} %.0f\n", mc.ID, esc(mc.Name), mc.State,
+			max(ahora.Sub(*mc.StateSince).Seconds(), 0))
+	}
 }
 
 // escribirTelemetria escribe los contadores del ciclo de vida: lo que se ve

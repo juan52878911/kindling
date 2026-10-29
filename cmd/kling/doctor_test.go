@@ -233,3 +233,19 @@ func TestDoctorDoradosDeOtroVMM(t *testing.T) {
 		}
 	}
 }
+
+// Las máquinas atascadas (un freeze que no pudo reanudarla, un rm cuyo VMM no
+// murió) salen como aviso con su PID.
+func TestDoctorMaquinasAtascadas(t *testing.T) {
+	in := doctorInput{cliVersion: "v1", completion: true, info: &api.Info{Version: "1", Stuck: []api.StuckMachine{
+		{ID: "ab", Name: "~rm-ab", PID: 4242, Transition: api.TransitionRemoving, Problem: "its VMM survived SIGKILL"}}}}
+	for _, c := range doctorChecks(in) {
+		if c.Name == "machine ~rm-ab" {
+			if c.State != doctorWarn || !strings.Contains(c.Detail, "removing") || !strings.Contains(c.Fix, "4242") {
+				t.Fatalf("aviso = %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("kling doctor no avisa de la máquina atascada")
+}
