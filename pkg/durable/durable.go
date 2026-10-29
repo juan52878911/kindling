@@ -15,10 +15,18 @@ import (
 //
 //  1. escribir a un temporal al lado — en el MISMO directorio, porque el rename
 //     del paso 3 solo es atomico dentro del mismo sistema de ficheros;
-//  2. fsync del TEMPORAL, o el rename acabaria apuntando a un fichero cuyo
-//     contenido todavia vive en la cache y se pierde con el corte;
+//  2. llevar el TEMPORAL al disco antes del rename (Ordenar), o el rename
+//     acabaria apuntando a un fichero cuyo contenido todavia vive en la cache
+//     y se pierde con el corte;
 //  3. rename, lo unico atomico que ofrece POSIX;
 //  4. fsync del DIRECTORIO, o el propio rename puede no haber llegado al disco.
+//
+// En macOS el fsync(2) no vacía la caché del SSD; File.Sync de Go ya hace
+// F_FULLFSYNC (internal/poll, desde Go 1.12), y cuesta ~5 ms en el M4 frente a
+// 0,2 ms de un fsync. Por eso el paso 2 no es un Sync sino Ordenar (una
+// barrera, ~0,7 ms): basta con que el contenido llegue al disco ANTES que el
+// rename, y el F_FULLFSYNC del directorio del paso 4 asienta los dos. Una
+// barrera completa por escritura, no dos.
 //
 // Saltarse el 4 es el error clasico, y el peor: al arrancar se lee el fichero
 // VIEJO y se da por bueno. No hay error, no hay hueco, no hay nada que avise —
@@ -47,7 +55,7 @@ func Escribir(ruta string, datos []byte, perm os.FileMode) error {
 		os.Remove(tmp)
 		return fmt.Errorf("writing %s: %w", tmp, err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := Ordenar(f); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("fsync %s: %w", tmp, err)
@@ -70,10 +78,10 @@ func Escribir(ruta string, datos []byte, perm os.FileMode) error {
 	return nil
 }
 
-// Renombrar mueve `tmp` a `destino` de forma durable: fsync del FICHERO
-// primero (por lo mismo que en Escribir: sin él el rename acaba apuntando a
-// contenido que todavia vive en la cache), rename, y fsync del DIRECTORIO
-// despues (o el rename mismo puede no haber llegado al disco).
+// Renombrar mueve `tmp` a `destino` de forma durable: el FICHERO al disco
+// primero (Ordenar, por lo mismo que en Escribir: sin él el rename acaba
+// apuntando a contenido que todavia vive en la cache), rename, y fsync del
+// DIRECTORIO despues (o el rename mismo puede no haber llegado al disco).
 //
 // A diferencia de Escribir, aqui el contenido ya esta en disco de antemano
 // —tipicamente un fichero grande construido por otro proceso (mkfs.ext4,
@@ -85,7 +93,7 @@ func Renombrar(tmp, destino string) error {
 	if err != nil {
 		return fmt.Errorf("opening %s to fsync before rename: %w", tmp, err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := Ordenar(f); err != nil {
 		f.Close()
 		return fmt.Errorf("fsync %s: %w", tmp, err)
 	}

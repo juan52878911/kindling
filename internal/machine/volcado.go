@@ -14,8 +14,11 @@ package machine
 //
 //   - en-curso sin ok: el volcado se interrumpió. No vale.
 //   - ok: vale si el estado y el tamaño cuadran.
-//   - ninguna de las dos: una máquina congelada antes de que esto existiera. Se
-//     acepta, que es lo que se hacía siempre; romperlas obligaría a recrearlas.
+//   - ninguna de las dos: una máquina congelada antes de que esto existiera
+//     (v0.8.0). Se acepta, que es lo que se hacía siempre; romperlas obligaría
+//     a recrearlas. Pero solo si su FrozenAt es de antes: una congelada después
+//     siempre deja una de las dos, y que falten las dos es que el disco perdió
+//     algo (un corte que se llevó la marca en curso): no vale.
 //
 // El sha256 es del snap.file y no del mem.file por lo mismo que en los dorados:
 // el estado pesa KiB y la memoria GiB, y hashear la memoria en cada thaw mataría
@@ -40,6 +43,10 @@ const (
 	marcaEnCurso = "volcado.en-curso"
 	marcaOK      = "volcado.ok"
 )
+
+// selloDesde es cuándo salió la primera versión que deja las marcas (v0.8.0,
+// 308223b9): un volcado de después sin ninguna de las dos no se da por bueno.
+var selloDesde = time.Date(2026, 9, 23, 5, 28, 42, 0, time.UTC)
 
 type sello struct {
 	SnapSHA256 string    `json:"snap_sha256"`
@@ -97,26 +104,37 @@ func sellarVolcado(dir, kernelSHA, vmm, diffBase string, sinAgente bool) error {
 // un overlay a medias. Va con la máquina ya muerta o reanudada, nunca en la
 // pausa. Los que no existen se saltan.
 //
+// Con barrera (durable.Ordenar) y no con un F_FULLFSYNC por fichero: lo
+// que importa es que lleguen al disco antes que el sello o el meta, y el
+// F_FULLFSYNC con el que acaba ese durable.Escribir los asienta a todos. En
+// macOS son ~5 ms por F_FULLFSYNC; una por congelación, no cuatro.
+//
 // snap y mem son del daemon (recuperados de la jaula con comprobación), y
 // mem.file puede ser un enlace suyo al almacén (diff_volcado.go): se siguen.
 // El overlay puede estar en un directorio del VMM: sin seguir enlaces (un
 // enlace se salta, el overlay de verdad lo da overlayParaLeer) y solo un
 // fichero regular.
 func sincronizarVolcado(snap, mem, overlay string) error {
-	if err := sincronizarFichero(snap, 0); err != nil {
+	if err := ordenarFichero(snap, 0, durable.Ordenar); err != nil {
 		return err
 	}
-	if err := sincronizarFichero(mem, 0); err != nil {
+	if err := ordenarFichero(mem, 0, durable.Ordenar); err != nil {
 		return err
 	}
-	err := sincronizarFichero(overlay, syscall.O_NOFOLLOW)
+	err := ordenarFichero(overlay, syscall.O_NOFOLLOW, durable.Ordenar)
 	if errors.Is(err, syscall.ELOOP) {
 		return nil
 	}
 	return err
 }
 
+// sincronizarFichero asienta ruta en el disco físico por sí solo (File.Sync:
+// F_FULLFSYNC en macOS), para cuando no le sigue ninguna escritura durable.
 func sincronizarFichero(ruta string, flag int) error {
+	return ordenarFichero(ruta, flag, (*os.File).Sync)
+}
+
+func ordenarFichero(ruta string, flag int, sync func(*os.File) error) error {
 	if ruta == "" {
 		return nil
 	}
@@ -132,7 +150,7 @@ func sincronizarFichero(ruta string, flag int) error {
 	if err != nil || !fi.Mode().IsRegular() {
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := sync(f); err != nil {
 		return fmt.Errorf("fsync %s: %w", filepath.Base(ruta), err)
 	}
 	return nil
@@ -176,8 +194,10 @@ func (m *Manager) borrarVolcado(id string) {
 // errVolcadoIncompleto es que el volcado no se puede usar.
 var errVolcadoIncompleto = errors.New("the frozen state is incomplete")
 
-// volcadoValido dice si el volcado de dir se puede restaurar.
-func volcadoValido(dir string) error {
+// volcadoValido dice si el volcado de dir se puede restaurar. congelada es
+// el FrozenAt de la máquina (nil si no consta): de después de selloDesde, el
+// volcado tiene que llevar sello.
+func volcadoValido(dir string, congelada *time.Time) error {
 	for _, f := range []string{"snap.file", "mem.file"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			return fmt.Errorf("%w: %s is missing", errVolcadoIncompleto, f)
@@ -187,6 +207,10 @@ func volcadoValido(dir string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		if _, err := os.Stat(filepath.Join(dir, marcaEnCurso)); err == nil {
 			return fmt.Errorf("%w: the freeze was interrupted before it finished writing", errVolcadoIncompleto)
+		}
+		if congelada != nil && congelada.After(selloDesde) {
+			return fmt.Errorf("%w: it was frozen on %s by a version that seals its freezes, and the seal is missing",
+				errVolcadoIncompleto, congelada.Format(time.RFC3339))
 		}
 		return nil // anterior a los sellos
 	}
