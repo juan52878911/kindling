@@ -166,4 +166,3 @@ func trunc(s string, n int) string {
 	}
 	return string([]rune(s)[:n-1]) + "…"
 }
-

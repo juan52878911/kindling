@@ -188,7 +188,6 @@ func usageErr(err error) error { return &plugin.ExitError{Code: 2, Err: err} }
 
 // ── teléfonos ────────────────────────────────────────────────────────────────
 
-
 // phoneName: "3" es <prefijo>-3; cualquier otra cosa, el nombre tal cual.
 func (a *app) phoneName(arg string) string {
 	if _, err := strconv.Atoi(arg); err == nil {
