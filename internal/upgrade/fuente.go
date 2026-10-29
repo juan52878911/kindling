@@ -39,7 +39,11 @@ const Repo = "https://github.com/juan52878911/kindling"
 const (
 	maxAsset = 512 << 20
 	maxSums  = 1 << 20
+	maxFirma = 4 << 10
 )
+
+// errNoEsta es un 404: el asset no está en la release.
+var errNoEsta = errors.New("not found")
 
 // reEtiqueta es una etiqueta de release: vX.Y.Z con, como mucho, un sufijo
 // de prerelease. Va en una URL y en una ruta: nada de / ni de "..".
@@ -58,6 +62,18 @@ type Fuente struct {
 	// upgrade`). Sin él, un Dir sin sumas es un error: el binario acaba
 	// ejecutándose como root y "ya está en esta máquina" no dice quién lo dejó.
 	SinVerificar bool
+
+	// VersionPropia es la versión del kling que baja (main.Version). Desde
+	// FirmaObligatoriaDesde exige SHA256SUMS.minisig aunque la release sea
+	// anterior. Vacía = solo cuenta la versión de la release.
+	VersionPropia string
+	// Avisos recibe lo que se acepta con reparos (una release sin firmar);
+	// nil = os.Stderr.
+	Avisos io.Writer
+
+	// claves son las claves de confianza; nil = ClavesRelease(). Solo los
+	// tests las cambian.
+	claves []ClavePublica
 
 	// permitirHTTP deja bajar por http:// en los tests. No se puede activar
 	// desde fuera: fuera de un test, http es un binario que cualquiera en el
@@ -201,6 +217,9 @@ func (f *Fuente) sumas(ctx context.Context, etiqueta string) (map[string]string,
 		if err != nil {
 			return nil, err
 		}
+		if err := f.comprobarFirma(ctx, etiqueta, b); err != nil {
+			return nil, err
+		}
 		return plugin.ParseSums(b), nil
 	}
 	if !EtiquetaValida(etiqueta) {
@@ -217,6 +236,9 @@ func (f *Fuente) sumas(ctx context.Context, etiqueta string) (map[string]string,
 	}
 	b, err := os.ReadFile(tmp.Name())
 	if err != nil {
+		return nil, err
+	}
+	if err := f.comprobarFirma(ctx, etiqueta, b); err != nil {
 		return nil, err
 	}
 	return plugin.ParseSums(b), nil
@@ -303,6 +325,9 @@ func (f *Fuente) descargar(ctx context.Context, u string, w io.Writer, limite in
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("GET %s: %s: %w", pu.Redacted(), resp.Status, errNoEsta)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: %s", pu.Redacted(), resp.Status)
 	}

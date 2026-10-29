@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +52,28 @@ type releaseFalsa struct {
 	alPedir func(path string)
 }
 
+// textoSumas es el SHA256SUMS de la release, en orden para que la firma
+// coincida entre peticiones.
+func (r *releaseFalsa) textoSumas() []byte {
+	nombres := make([]string, 0, len(r.assets))
+	for n := range r.assets {
+		nombres = append(nombres, n)
+	}
+	sort.Strings(nombres)
+	var b strings.Builder
+	for _, n := range nombres {
+		s := sha(r.assets[n])
+		if r.sumas != nil {
+			var ok bool
+			if s, ok = r.sumas[n]; !ok {
+				continue
+			}
+		}
+		fmt.Fprintf(&b, "%s  %s\n", s, n)
+	}
+	return []byte(b.String())
+}
+
 func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
@@ -63,18 +87,15 @@ func (r *releaseFalsa) servir(t *testing.T) *httptest.Server {
 		case req.URL.Path == "/releases/latest":
 			http.Redirect(w, req, "/releases/tag/"+r.etiqueta, http.StatusFound)
 		case req.URL.Path == pre+"SHA256SUMS":
-			var b strings.Builder
-			for n, body := range r.assets {
-				s := sha(body)
-				if r.sumas != nil {
-					var ok bool
-					if s, ok = r.sumas[n]; !ok {
-						continue
-					}
-				}
-				fmt.Fprintf(&b, "%s  %s\n", s, n)
+			w.Write(r.textoSumas())
+		case req.URL.Path == pre+NombreFirma:
+			// Firmada con la clave de test A (montaje.opciones confía en ella).
+			k, _ := claveTest(t, "a")
+			firma, err := Firmar(k, r.textoSumas(), "tag:"+r.etiqueta)
+			if err != nil {
+				t.Error(err)
 			}
-			w.Write([]byte(b.String()))
+			w.Write(firma)
 		case strings.HasPrefix(req.URL.Path, pre):
 			body, ok := r.assets[strings.TrimPrefix(req.URL.Path, pre)]
 			if !ok {
@@ -208,6 +229,7 @@ type montaje struct {
 	d                     *daemonFalso
 	svc                   *servicioFalso
 	out                   bytes.Buffer
+	claves                []ClavePublica // las de confianza: la de test A
 }
 
 const estadoV0 = `[{"id":"aaaa","state":"frozen"},{"id":"bbbb","state":"running"}]`
@@ -229,6 +251,8 @@ func nuevoMontaje(t *testing.T) *montaje {
 		"kling-guest-linux-amd64": []byte("guest nuevo"),
 	}}
 	m.srv = m.rel.servir(t)
+	_, pa := claveTest(t, "a")
+	m.claves = []ClavePublica{pa}
 	m.d = &daemonFalso{version: "v1.0.0", root: m.raiz,
 		maquinas: []*api.Machine{{ID: "aaaa", State: api.StateWarm}, {ID: "bbbb", State: api.StateRunning}},
 		dorados:  []*api.Snapshot{{Name: "pg"}}}
@@ -239,7 +263,7 @@ func nuevoMontaje(t *testing.T) *montaje {
 func (m *montaje) opciones() Opciones {
 	return Opciones{
 		Dir:    filepath.Join(m.raiz, "upgrade"),
-		Fuente: &Fuente{Repo: m.srv.URL, permitirHTTP: true},
+		Fuente: &Fuente{Repo: m.srv.URL, permitirHTTP: true, claves: m.claves},
 		Piezas: []Pieza{
 			{Asset: Asset{Nombre: "kling-linux-amd64", Corto: "kling"}, Destino: m.bin},
 			{Asset: Asset{Nombre: "kling-guest-linux-amd64", Corto: "kling-guest"}, Destino: m.guest},
@@ -313,7 +337,7 @@ func TestActualizarCambiaArrancaYVerifica(t *testing.T) {
 
 func TestEtiquetaPedidaYUltima(t *testing.T) {
 	m := nuevoMontaje(t)
-	f := &Fuente{Repo: m.srv.URL, permitirHTTP: true}
+	f := &Fuente{Repo: m.srv.URL, permitirHTTP: true, claves: m.claves}
 	if got, err := f.UltimaEtiqueta(context.Background()); err != nil || got != "v1.1.0" {
 		t.Fatalf("latest = %q, %v", got, err)
 	}
@@ -817,8 +841,9 @@ func TestRedireccionAHTTPSeRechaza(t *testing.T) {
 		}
 	}))
 	defer tls.Close()
-	f := &Fuente{Repo: tls.URL, Client: tls.Client()}
-	_, err := f.Bajar(context.Background(), "v1.1.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
+	// Antes de 1.0 y sin firma: aquí se prueba la redirección, no la firma.
+	f := &Fuente{Repo: tls.URL, Client: tls.Client(), Avisos: io.Discard}
+	_, err := f.Bajar(context.Background(), "v0.21.0", []Asset{{Nombre: "kling-linux-amd64"}}, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "only downloaded over https") {
 		t.Fatalf("err = %v, want the https refusal", err)
 	}

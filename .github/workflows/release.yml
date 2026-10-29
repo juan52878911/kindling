@@ -249,8 +249,13 @@ jobs:
     needs: [build, vz, imagenes]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
+    # Corre en el environment protegido `release`, el único con el secreto
+    # KLING_RELEASE_SIGNING_KEY (docs/firmas.md).
+    environment: release
     permissions:
       contents: write
+      id-token: write     # la atestación de procedencia (Sigstore, sin claves)
+      attestations: write
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -337,6 +342,43 @@ jobs:
           packaging/homebrew/formula.sh "$VERSION" release/SHA256SUMS > release/kling.rb
           (cd release && sha256sum kling.rb >> SHA256SUMS)
           cat release/kling.rb
+
+      # Para `go run ./internal/upgrade/firmar` (solo stdlib, sin caché).
+      - name: set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      # Firma el SHA256SUMS ya completo (con kling.rb) en el formato de
+      # minisign: kling upgrade, kling up e install.sh la comprueban con las
+      # claves de internal/upgrade/firma.go. Sin el secreto (la clave aún no
+      # existe) se salta con un aviso y la release sale sin firmar, como antes;
+      # desde v1.0.0 los clientes la rechazarían, así que ahí falla.
+      - name: firmar SHA256SUMS
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          KLING_RELEASE_SIGNING_KEY: ${{ secrets.KLING_RELEASE_SIGNING_KEY }}
+        run: |
+          set -eu
+          if [ -z "$KLING_RELEASE_SIGNING_KEY" ]; then
+            case "$VERSION" in
+              v0.*) echo "::warning::KLING_RELEASE_SIGNING_KEY no está en el environment release: $VERSION sale sin SHA256SUMS.minisig (docs/firmas.md)"
+                    exit 0 ;;
+            esac
+            echo "::error::$VERSION tiene que ir firmada y falta KLING_RELEASE_SIGNING_KEY (docs/firmas.md)"
+            exit 1
+          fi
+          go run ./internal/upgrade/firmar sign -tag "$VERSION" -in release/SHA256SUMS
+          go run ./internal/upgrade/firmar verify -tag "$VERSION" -in release/SHA256SUMS
+          cat release/SHA256SUMS.minisig
+
+      # Procedencia SLSA de cada asset (firma, fórmula y SHA256SUMS incluidos)
+      # con el OIDC del job: se comprueba con `gh attestation verify`.
+      - name: atestación de procedencia
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: release/*
 
       - name: generate release notes
         shell: bash

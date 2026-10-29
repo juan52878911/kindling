@@ -206,7 +206,7 @@ func upMac(root, endpoint string, checkOnly, install bool) error {
 	// verificados con su SHA256SUMS, en vez de pedir un host Linux.
 	if !checkOnly && (!p.kernel || !p.baseImage) && p.arch == "arm64" {
 		ctx, cancel := ctxWithSignals()
-		err := bajarImagenesMac(ctx, &upgrade.Fuente{}, "v"+strings.TrimPrefix(Version, "v"), root, p.arch, os.Stdout)
+		err := bajarImagenesMac(ctx, &upgrade.Fuente{VersionPropia: Version}, "v"+strings.TrimPrefix(Version, "v"), root, p.arch, os.Stdout)
 		cancel()
 		if err != nil {
 			fmt.Printf("images:      not downloaded (%v)\n\n", err)

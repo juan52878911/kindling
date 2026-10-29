@@ -44,6 +44,7 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `min-<arch>.ext4.zst` | imagen base `min` (`scripts/70-build-minimal-image.sh`, con el `kling-bridge` de la release) | linux |
 | `kling.rb` | fórmula de Homebrew con la versión y los sha256 de esta release (no se publica en ningún tap) | darwin/arm64, linux |
 | `SHA256SUMS` | **un** fichero con el sha256 de todo lo anterior | — |
+| `SHA256SUMS.minisig` | su firma ed25519 (minisign), cuando la clave existe ([`firmas.md`](firmas.md)) | — |
 
 Además, la imagen del operador se publica en
 `ghcr.io/juan52878911/kindling-operator:<tag>` y `:latest` (la ruta no cambia:
