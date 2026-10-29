@@ -290,16 +290,29 @@ kn stop up-stopped >/dev/null 2>&1
 step "5. kling upgrade -rollback"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
 [ $rc = 0 ] && vuelta_atras "$out" && ok "rollback" || bad "rollback" "rolled back to $OLD_TAG" "rc=$rc: $out"
-contiene "$out" "freezing $FROZEN again" && ok "the machine the new daemon woke was frozen again first" \
-  || bad "refreeze before rollback" "freezing $FROZEN again" "$out"
+# Recongelar solo hace falta si -rollback devuelve el state.json de antes
+# (el .bak de una migración): ahí está congelada. Sin migración se queda el
+# state.json que escribió el nuevo, con la máquina despierta, y el viejo la
+# adopta tal cual (KillMode=process no mata el VMM).
+if [ "$MIGRO" = yes ]; then
+  QUEDA=frozen
+  contiene "$out" "freezing $FROZEN again" && ok "the machine the new daemon woke was frozen again first" \
+    || bad "refreeze before rollback" "freezing $FROZEN again" "$out"
+else
+  QUEDA=running
+  contiene "$out" "freezing $FROZEN again" && bad "refreeze before rollback" "none (state.json was not migrated)" "$out" \
+    || ok "nothing to freeze again (state.json was not migrated, it stays as the new daemon left it)"
+fi
 v=$(k version 2>&1 | sed -n 2p)
 contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
 schema=$(schema_de "$ROOT/state.json")
 [ "$schema" = "$OLD_STATE" ] && ok "state.json back to schema $OLD_STATE" || bad "state.json after -rollback" "schema $OLD_STATE" "$schema"
 [ "$MIGRO" = no ] || { [ ! -e "$BAK" ] && ok "migration copy consumed" || bad "$(basename "$BAK")" "gone" "still there"; }
-st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen under $OLD_TAG" || bad "frozen" frozen "$st"
-out=$(k thaw up-frozen 2>&1)
-contiene "$out" "running" && ok "and $OLD_TAG thaws it" || bad "thaw under $OLD_TAG" "running" "$out"
+st=$(estado "$FROZEN"); [ "$st" = "$QUEDA" ] && ok "the machine woken by the new daemon is $QUEDA under $OLD_TAG" || bad "after -rollback" "$QUEDA" "$st"
+if [ "$QUEDA" = frozen ]; then
+  out=$(k thaw up-frozen 2>&1)
+  contiene "$out" "running" && ok "and $OLD_TAG thaws it" || bad "thaw under $OLD_TAG" "running" "$out"
+fi
 if [ -n "$EXEC" ]; then
   out=$(k exec up-frozen -- cat /tmp/mark 2>&1)
   [ "$out" = before-upgrade ] && ok "its RAM came back through both freezes" || bad "RAM under $OLD_TAG" before-upgrade "$out"

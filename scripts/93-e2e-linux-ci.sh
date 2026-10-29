@@ -66,7 +66,7 @@ parte() { echo "$PARTS" | tr ' ' '\n' | grep -qx "$1"; }
 
 arrancar() {
   systemd-run --unit "$UNIT" --collect -p KillMode=process \
-    -E "KLING_LIB_DIR=$LIB" -E "KLING_SOCKET_USER=$SOCKET_USER" -E "KLING_MIN_FREE_DISK_MIB=1024" \
+    -E "KLING_LIB_DIR=$LIB" -E "KLING_BUILDERS_DIR=$BASE/builders" -E "KLING_SOCKET_USER=$SOCKET_USER" -E "KLING_MIN_FREE_DISK_MIB=1024" \
     "$BASE/bin/kling" daemon -root "$ROOT" -socket "$SOCK" >/dev/null || return 1
   for _ in $(seq 1 60); do "$BASE/bin/kling" ps >/dev/null 2>&1 && return 0; sleep 0.5; done
   return 1
@@ -95,6 +95,15 @@ if parte e2e; then
   echo '{}' > "$KLING_CONFIG"
   install -m755 "$KLING_BIN" "$BASE/bin/kling"
   install -m755 "$GUEST_BIN" "$LIB/kling-guest"
+  # `image toolchain` usa el constructor "base", que corre como root: el
+  # daemon solo lo acepta instalado (de root, sin escritura de otros) en
+  # KLING_BUILDERS_DIR. El de packaging lanza /usr/local/bin/kling; este, el
+  # kling del daemon privado. Su motor (81-base-image.sh) lo busca en
+  # KLING_LIB_DIR.
+  install -m755 "$SCRIPTS/81-base-image.sh" "$SCRIPTS/lib-ext4-shrink.sh" "$LIB/"
+  install -d -m755 "$BASE/builders"
+  printf '#!/bin/sh\nexec %s builder base "$@"\n' "$BASE/bin/kling" > "$BASE/builders/base"
+  chmod 755 "$BASE/builders/base"
   cp "$IMAGES/vmlinux" "$IMAGES/min.ext4" "$ROOT/images/"
   arrancar || { journalctl -u "$UNIT" --no-pager | tail -30; die "the private daemon does not answer"; }
   out=$("$BASE/bin/kling" status -v 2>&1)
