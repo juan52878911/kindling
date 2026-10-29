@@ -123,15 +123,15 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// cerrojo, así que o ya marcó HasSecrets o espera a que acabe el commit.
 	// Cubre también fork, que pasa por aquí.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and can't become "+
+		return nil, marcado(ErrCommitConflict, "machine %s has session secrets injected via MMDS and can't become "+
 			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+
 			"received secrets", mc.Name)
 	}
 	switch {
 	case yaPausada && mc.State != api.StatePaused:
-		return nil, fmt.Errorf("machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
+		return nil, marcado(ErrCommitConflict, "machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
 	case !yaPausada && mc.State != api.StateRunning:
-		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
+		return nil, marcado(ErrCommitConflict, "only a running machine can be committed (is %s)", mc.State)
 	}
 	if comprobar != nil {
 		if err := comprobar(mc); err != nil {
@@ -199,7 +199,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	}()
 	if _, err := os.Stat(dir); err == nil {
 		if !replace {
-			return nil, fmt.Errorf("snapshot %q already exists (use `kling commit -replace` to replace it)", name)
+			return nil, marcado(ErrCommitConflict, "snapshot %q already exists (use `kling commit -replace` to replace it)", name)
 		}
 		// Reemplazar pasa por las comprobaciones de RemoveSnapshot y no por un
 		// RemoveAll directo: son las que saben negarse si el snapshot tiene

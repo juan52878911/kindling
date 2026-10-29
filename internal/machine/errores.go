@@ -31,6 +31,9 @@ var (
 	ErrNoVolume = errors.New("volume does not exist")
 	// ErrNoCredential: la máquina no tiene credencial en esa variable.
 	ErrNoCredential = errors.New("no credential in that variable")
+	// ErrCommitConflict: la máquina no se puede volcar ahora (no está en el
+	// estado que toca, lleva secretos de sesión) o el nombre ya existe.
+	ErrCommitConflict = errors.New("commit conflict")
 )
 
 // peticionInvalida es un error de la petición con el texto de format.

@@ -955,7 +955,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `objetivoConAgente` | — | = `execStatus` | = | — | = `execStatus`; `504` el agente no contesta |
 | `estadoDeListo` | — | máquina | no corre | el resto | — |
 | `forkStatus` | — | máquina | no corre, no lista, no copiable, carpetas, exec | host | `504` el agente de una copia no contesta |
-| `publicarStatus` | **el resto** | — | puerto ocupado | — | `501` no soportado |
+| `publicarStatus` | puerto fuera de rango, repetido, protocolo, el del agente o no expuesto | — | puerto ocupado | el resto | `501` no soportado |
 
 | Ruta | Éxito | Errores |
 |---|---|---|
@@ -972,7 +972,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /machines/{ref}/start` | 200 | `413`/`400` cuerpo (vacío vale); `cicloStatus`; admisión |
 | `DELETE /machines/{ref}` | 204 | `cicloStatus` |
 | `PUT /machines/{ref}/labels` | 204 | `413`/`400` cuerpo; `cicloStatus` (`400` etiquetas `kling.graph*`) |
-| `POST /machines/{ref}/commit` | 201 | `413`/`400` cuerpo; `400` `ready_timeout_seconds`; `404` no existe; `409` carpetas compartidas o no llega a lista; **`400` el resto, también del host** |
+| `POST /machines/{ref}/commit` | 201 | `413`/`400` cuerpo; `400` `ready_timeout_seconds`; `404` no existe; `400` nombre inválido; `409` carpetas compartidas, no llega a lista, no está en marcha, secretos de sesión o el nombre ya existe; `500` el host |
 | `POST /images` | 200 (también si reutiliza la construcción de otra petición) | `413`/`400` cuerpo; `400` falta `builder`, nombre, base, `spec`; `412` constructor no encontrado o no ejecutable; `409` imagen en uso; `501` sin construcción con root; `500` host |
 | `GET /images` | 200 | — |
 | `DELETE /images/{name}` | 204 | `removeImageStatus` |

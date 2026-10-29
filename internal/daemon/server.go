@@ -1247,11 +1247,15 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		ReadyWait: time.Duration(req.ReadyTimeoutSeconds) * time.Second,
 	})
 	if err != nil {
-		code := http.StatusBadRequest
+		// 400 si la petición no vale, 404 si no existe, 409 si la máquina no se
+		// puede volcar ahora, 500 si falla el host.
+		code := http.StatusInternalServerError
 		switch {
+		case errors.Is(err, machine.ErrInvalidName) || errors.Is(err, machine.ErrRunRequest):
+			code = http.StatusBadRequest
 		case errors.Is(err, machine.ErrNoMachine):
 			code = http.StatusNotFound
-		case errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady):
+		case errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady) || errors.Is(err, machine.ErrCommitConflict):
 			code = http.StatusConflict
 		}
 		fail(w, code, err)

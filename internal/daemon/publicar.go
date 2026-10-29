@@ -71,8 +71,10 @@ func publicarStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, publicar.ErrNoSoportado):
 		return http.StatusNotImplemented
+	case errors.Is(err, publicar.ErrPeticion):
+		return http.StatusBadRequest
 	}
-	return http.StatusBadRequest
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {

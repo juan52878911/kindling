@@ -154,6 +154,10 @@ var ErrOcupado = errors.New("host port in use")
 // Mac).
 var ErrNoSoportado = errors.New("not supported")
 
+// ErrPeticion marca los errores de la petición (un puerto repetido, uno que
+// la máquina no expone): el daemon los contesta con 400.
+var ErrPeticion = errors.New("bad publish request")
+
 // Arrancar recupera las publicaciones guardadas (las de máquinas que ya no
 // existen se olvidan) y lanza el barrido: quitar las de máquinas que
 // desaparecen y, con ocioso > 0, congelar las ociosas. Vuelve en seguida; todo
@@ -199,12 +203,12 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrPeticion, err)
 		}
 		if q.Host != 0 {
 			k := q.ProtoOr() + "/" + strconv.Itoa(q.Host)
 			if vistos[k] {
-				return nil, fmt.Errorf("host port %d twice", q.Host)
+				return nil, fmt.Errorf("%w: host port %d twice", ErrPeticion, q.Host)
 			}
 			vistos[k] = true
 		}
@@ -214,7 +218,7 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 			}
 		}
 		if q.ProtoOr() == api.ProtoTCP && len(mc.Forwards) > 0 && !mc.Exposes(q.Guest) {
-			return nil, fmt.Errorf("guest port %d is not exposed by %s (add it to %s)", q.Guest, mc.Name, api.LabelPorts)
+			return nil, fmt.Errorf("%w: guest port %d is not exposed by %s (add it to %s)", ErrPeticion, q.Guest, mc.Name, api.LabelPorts)
 		}
 	}
 	p.mu.Lock()
@@ -287,14 +291,14 @@ func (p *Publicador) Comprobar(ps []api.PortPublish) error {
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPeticion, err)
 		}
 		if q.Host == 0 {
 			continue
 		}
 		k := q.ProtoOr() + "/" + strconv.Itoa(q.Host)
 		if vistos[k] {
-			return fmt.Errorf("host port %d twice", q.Host)
+			return fmt.Errorf("%w: host port %d twice", ErrPeticion, q.Host)
 		}
 		vistos[k] = true
 	}

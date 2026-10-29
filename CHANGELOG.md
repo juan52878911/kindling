@@ -20,6 +20,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `POST /machines/{ref}/commit` and `POST /machines/{ref}/publish` answer 500 to host failures (they gave 400 to everything they did not recognise); commit gives 409 when the machine is not in a committable state, has session secrets, or the name exists
 - Status codes made consistent before 1.0 freezes them (`internal/daemon/testdata/contrato/codigos.txt`): 404 instead of 400 for a missing machine in `PUT /machines/{ref}/labels` and `POST …/commit`, a missing image in `GET/PUT /images/{name}/files` and a missing source in `POST /volumes/{name}/clone`.
 - Host failures are 500 instead of 400 in resize, snapshots and annotations, pools, template credentials, graphs, the store, `POST /volumes`, populate and `POST /cow/store/grow` (501 where the platform has no store); renew gives 500 instead of 502.
 - `DELETE /volumes/{name}` answers 400/404/409/500 by cause instead of 409 for everything; `DELETE /sandboxes/{ref}` like `DELETE /machines/{ref}` instead of 500 for everything; a fork whose copy's agent never answers is 504, like `POST /sandboxes`.
