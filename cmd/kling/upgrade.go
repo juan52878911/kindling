@@ -89,7 +89,7 @@ func cmdUpgrade(args []string) error {
 
 	o := upgrade.Opciones{
 		Etiqueta: *tag,
-		Fuente:   &upgrade.Fuente{Dir: *fromDir, SinVerificar: *inseguro},
+		Fuente:   &upgrade.Fuente{Dir: *fromDir, SinVerificar: *inseguro, VersionPropia: Version},
 		Forzar:   *force,
 		EnSeco:   *dry || *check,
 		Plazo:    *timeout,

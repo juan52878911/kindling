@@ -1454,7 +1454,34 @@ escucha en el socket (`SO_PEERCRED`/`LOCAL_PEERPID`, lo dice el kernel) es el
 de la unidad o el agente de launchd: un `KLING_HOST` hacia otro daemon no hace
 cambiar y reiniciar el de producción; con el daemon caído, si el socket de la
 unidad es el que se espera. Dos `kling upgrade` sobre la misma raíz no corren a
-la vez (`flock` en `<raíz>/upgrade/.lock`). `SHA256SUMS` sigue sin firmar (ver abajo).
+la vez (`flock` en `<raíz>/upgrade/.lock`). El `SHA256SUMS` va firmado (ver 29).
+
+### 29. Releases firmadas y con procedencia
+
+Cada release publica `SHA256SUMS.minisig`, la firma ed25519 de su `SHA256SUMS` en
+el formato de minisign, y una atestación de procedencia SLSA de cada asset
+(`actions/attest-build-provenance`, con el OIDC del job y sin claves). La clave
+privada solo existe en el secreto `KLING_RELEASE_SIGNING_KEY` del environment
+protegido `release` y en una copia fuera de línea; las públicas van compiladas en
+`internal/upgrade/firma.go` (`clavesRelease`, varias para rotar) y en
+`scripts/install.sh`. `kling upgrade` y la descarga de imágenes de `kling up`
+comprueban la firma antes de fiarse de ninguna suma: de una clave de confianza,
+sin alterar el comentario de confianza y **para esa etiqueta** (`tag:`), para que
+el `SHA256SUMS` firmado de una release vieja no sirva para colar sus binarios en
+otra. Un fallo de red al pedir la firma es un error, no «release sin firma». Una
+release sin firma se acepta con un aviso solo antes de `v1.0.0`
+(`upgrade.FirmaObligatoriaDesde`): desde ahí la rechazan tanto un kling 1.x como
+cualquier kling que baje una release ≥ 1.0. `-from-dir` comprueba la firma si el
+directorio la trae y no la exige. `install.sh` la comprueba si hay `minisign`
+instalado; sin él, solo sha256 con un aviso. Homebrew solo comprueba sha256 (la
+fórmula sale del `SHA256SUMS` firmado). Detalles, rotación y verificación a mano
+en `docs/firmas.md`.
+
+Límites: quien tenga la clave privada (o pueda publicar en el environment
+`release`) firma lo que quiera hasta que se rote; no hay lista de revocación, así
+que una clave comprometida se retira sacándola de `clavesRelease` en la siguiente
+release, y los kling anteriores siguen fiándose de ella. `kling plugins install`
+todavía comprueba solo el sha256 del `SHA256SUMS`.
 
 ## Lo que NO está resuelto
 

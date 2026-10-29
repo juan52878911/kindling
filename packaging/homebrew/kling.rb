@@ -4,6 +4,10 @@
 #
 #   brew install --formula ./kling.rb      # el asset de la release
 #
+# brew comprueba cada binario solo por su sha256. kling.rb está en el
+# SHA256SUMS firmado de la release: quien quiera más, comprueba la firma y la
+# suma de kling.rb antes de instalarla (docs/firmas.md).
+#
 # Los binarios son los de la release, no se compila nada: kling-vz y kling-hv
 # van firmados con su entitlement y una recompilación lo perdería.
 class Kling < Formula

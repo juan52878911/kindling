@@ -11,7 +11,9 @@
 #   - Detecta OS (linux/darwin) y arch (amd64/arm64).
 #   - Descarga el binario CLI correspondiente de la release.
 #   - Verifica SHA256 contra SHA256SUMS publicado en la misma release, ANTES de
-#     mover nada a su sitio.
+#     mover nada a su sitio. Si la release trae SHA256SUMS.minisig y hay
+#     `minisign`, comprueba antes la firma de SHA256SUMS con las claves de
+#     KLING_RELEASE_PUBKEYS (docs/firmas.md); sin minisign, solo sha256 y un aviso.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #   - --with mcp,sandbox baja además esas extensiones de LA MISMA
@@ -69,6 +71,14 @@ SKIP_KLING=0
 NO_COMPANIONS=0
 NO_RC="${KLING_NO_RC:-0}"
 FORCE=0
+
+# Claves públicas con las que se firman las releases (minisign, separadas por
+# espacios): las mismas que clavesRelease de internal/upgrade/firma.go, lo
+# comprueba un test. Vacía hasta que exista la clave real (docs/firmas.md).
+KLING_RELEASE_PUBKEYS=""
+# Desde esta versión mayor una release sin firma se rechaza:
+# upgrade.FirmaObligatoriaDesde (v1.0.0).
+SIGNED_FROM_MAJOR=1
 
 usage() {
     cat <<EOF
@@ -271,6 +281,7 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "(dry-run) NO descargo ni instalo nada."
     echo "Descargaría:"
     info "$BASE/SHA256SUMS"
+    info "$BASE/SHA256SUMS.minisig (si la release lo trae)"
     if [ "$SKIP_KLING" != "1" ]; then
         info "$BASE/$BIN_NAME"
         [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (si la release lo trae)"
@@ -318,8 +329,47 @@ get() {
     ok "$1 verificado"
 }
 
+# verify_sums_signature: comprueba SHA256SUMS.minisig contra
+# KLING_RELEASE_PUBKEYS con minisign, y que se firmó para esta etiqueta (el
+# tag: del comentario de confianza; si no, el SHA256SUMS firmado de otra
+# release valdría para colar sus binarios). Sin firma: error desde
+# SIGNED_FROM_MAJOR, aviso antes. Sin minisign: aviso y solo sha256.
+verify_sums_signature() {
+    TAG_MAJOR="$(printf '%s' "${TAG#v}" | cut -d. -f1)"
+    REQUIRED=0
+    case "$TAG_MAJOR" in
+        ''|*[!0-9]*) ;;
+        *) [ "$TAG_MAJOR" -ge "$SIGNED_FROM_MAJOR" ] && REQUIRED=1 ;;
+    esac
+    if ! fetch "$BASE/SHA256SUMS.minisig" "$WORK/SHA256SUMS.minisig" 2>/dev/null; then
+        rm -f "$WORK/SHA256SUMS.minisig"
+        [ "$REQUIRED" = "1" ] && fail "la release $TAG no trae SHA256SUMS.minisig: desde v${SIGNED_FROM_MAJOR}.0.0 van firmadas (docs/firmas.md)"
+        warn "la release $TAG no trae SHA256SUMS.minisig: verifico solo por sha256 (docs/firmas.md)"
+        return 0
+    fi
+    if [ -z "$KLING_RELEASE_PUBKEYS" ]; then
+        [ "$REQUIRED" = "1" ] && fail "este install.sh no trae las claves públicas de las releases: usa el de esa release"
+        warn "este install.sh no trae la clave pública de las releases: verifico solo por sha256"
+        return 0
+    fi
+    if ! command -v minisign >/dev/null 2>&1; then
+        warn "sin minisign no compruebo la firma de SHA256SUMS, solo sha256 (brew install minisign / apt install minisign)"
+        return 0
+    fi
+    for K in $KLING_RELEASE_PUBKEYS; do
+        if OUT="$(minisign -V -P "$K" -m "$WORK/SHA256SUMS" -x "$WORK/SHA256SUMS.minisig" 2>&1)"; then
+            printf '%s\n' "$OUT" | tr '\t' '\n' | grep -qx "tag:${TAG}" \
+                || fail "SHA256SUMS.minisig no está firmado para $TAG"
+            ok "firma de SHA256SUMS (minisign)"
+            return 0
+        fi
+    done
+    fail "la firma de SHA256SUMS no es válida con ninguna clave de las releases: no instalo nada"
+}
+
 info "descargando SHA256SUMS"
 fetch "$BASE/SHA256SUMS" "$WORK/SHA256SUMS" || fail "no pude descargar SHA256SUMS"
+verify_sums_signature
 ok "SHA256SUMS"
 
 # Todo se baja y se verifica ANTES de instalar nada: un fallo a medias no deja
