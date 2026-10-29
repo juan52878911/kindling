@@ -49,7 +49,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | GIC | GICv3 del framework (`hv_gic_create`, macOS 15+): el timer virtual y el WFI no salen a espacio de usuario |
 | consola | UART 16550 en MMIO: `console=ttyS0` como en Firecracker, la línea de comandos pasa **intacta** (a diferencia de vz, que la traduce) |
 | reloj | PL031 (`rtc-pl031`, el mismo que da Firecracker en arm64): un arranque en frío nace con la hora del host |
-| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `F_FULLFSYNC` del fichero (el `fsync` de macOS deja los datos en la caché del SSD), como el `synchronizationMode full` de vz; salvo en el overlay `kling_disposable` (como el `none` de vz), que no lo hace. Cuesta: 300 `write`+`fsync` de 4 KiB en el invitado, p50 0,11 → 5,2 ms por `fsync` (38 ms → 2,8 s en total) |
+| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `F_FULLFSYNC` del fichero (el `fsync` de macOS deja los datos en la caché del SSD), como el `synchronizationMode full` de vz; salvo en el overlay `kling_disposable` (como el `none` de vz), que no lo hace. Cuesta: 300 `write`+`fsync` de 4 KiB en el invitado, p50 0,1 → 4,0 ms por `fsync` (52-68 ms → 1,3 s en total), lo mismo que vz (3,9-4,2 ms) |
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
@@ -287,7 +287,9 @@ el sello ~10 ms, pero el thaw pasa de ~60 a ~170 ms: no compensa. La MTU de
 16 KiB (`KLING_VZ_MTU=1500`) y `KLING_HV_EVENT_IDX=0` no mueven el freeze más
 que el ruido. Antes de esta versión cada freeze hacía 7 F_FULLFSYNC (~5 ms cada
 uno en el M4 frente a 0,7 ms de una barrera F_BARRIERFSYNC); ahora 2 (la marca
-y el sello) y barreras en el resto. Queda por probar, con el Mac tranquilo,
+y el sello) y barreras en el resto. Medido en vueltas alternas (n=12 cada una,
+p50 del API): hv 93,5 / 94,5 → 77,9 / 72,4 ms y vz 144 / 135,5 → 124,8 /
+123,6 ms, con el thaw igual. Queda por probar, con el Mac tranquilo,
 pedir esas páginas con `F_RDADVISE` en vez de escribirlas: en una ronda bajó a
 75 ms con thaw de 52 ms, en otra no se distinguía del ruido.
 
