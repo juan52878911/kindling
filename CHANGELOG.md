@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `docs/compatibilidad.md`: what 1.x promises, the compatibility matrix and what is left before 1.0; status codes per route in `docs/api.md`.
+
 ## [0.20.0] - 2026-10-28
 
 `compose up -d` with ports published by the daemon and idle projects that freeze on their own, live shares about 4x faster on the Mac, and fixes from a security and durability audit. Images and templates built before this release keep their old guest agent and today's share speed; rebuild them (`compose up -fresh`, `image import -replace`) to get the faster shares. Upgrade with `kling upgrade`.

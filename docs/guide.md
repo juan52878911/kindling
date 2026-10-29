@@ -1210,7 +1210,7 @@ The 190 MiB difference is shared pages that each process counts as its own.
 
 Pushed further in a stress test on a 4 GB host: **142 concurrent microVMs in 3.9 GB**,
 with free memory flat while total PSS grew — and a deterministic, explained refusal at
-143 instead of an OOM. Details in [`docs/estabilidad.md`](estabilidad.md).
+143 instead of an OOM. Details in [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md).
 
 If density is what you are after, there is also an opt-in host-side lever: **zram**
 (compressed swap in RAM) for the anonymous pages that diverge between copies — measured
@@ -1612,7 +1612,7 @@ instances share pages.
 | [`CHANGELOG.md`](../CHANGELOG.md) | Per-version changes; release notes for [v0.2.0](RELEASE-v0.2.0.md) and [v0.3.0](RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](mac-arm64.md) | Apple Silicon: the Lima recipe, limits, and cold-start levers |
 | [`docs/three-layers.md`](three-layers.md) | Layered images: design, measurements, runtime families |
-| [`docs/estabilidad.md`](estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
+| [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md) | The stability & determinism audit: root causes, before/after numbers |
 | [`docs/chispa.md`](chispa.md) · [`docs/CHISPA-EVAL.md`](CHISPA-EVAL.md) | Chispa, the tiny linear classifier: features, `.chispa` format, cascade; its evaluation on real commits |
 | [`docs/chispa-serverless.md`](chispa-serverless.md) | Chispa as a serverless kindling task: one frozen golden snapshot per task, `kling ai chispa deploy`, measured thaw and throughput vs. in-process |
 | [`docs/intent.md`](intent.md) | Intent tasks of the AI gateway: templates → Chispa intent + Chispa-slots → encoder, gated; domain as a JSON schema or a Go `intent.Domain` (Spanish) |

@@ -245,7 +245,7 @@ de disco.
 
 1. **dm-verity sobre la capa** ([`verity.md`](verity.md)): hecho. Detecta y
    corrige lecturas malas, pero el fallo de verdad es en la RAM y no lo ve.
-2. **Admisión en kindling** por swap y disco: hecha (`docs/estabilidad.md`
+2. **Admisión en kindling** por swap y disco: hecha (`docs/auditoria-estabilidad-2026-08.md`
    §9). Baja el riesgo, no lo quita.
 3. **`uncached`, NVMe**: `uncached` probado, no sirve; NVMe no cambiaría lo
    que se pierde. Queda el informe a Apple (arriba) y las mitigaciones de

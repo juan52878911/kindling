@@ -93,6 +93,18 @@ failure; `kling help <command>` shows one command's help.
 Install one with `kling plugin install <name>`; every binary in a release is compatible
 with every other. Writing your own: [`docs/extensions.md`](docs/extensions.md).
 
+## Compatibility
+
+kindling is still 0.x. From 1.0 on, the core (`kling`, the daemon, `kling-guest`,
+`kling-vz`), the daemon API, the Go packages `pkg/api`, `pkg/plugin` and `pkg/config`, the
+published kernel and `min` images, and the `mcp` and `sandbox` extensions follow SemVer:
+nothing stable breaks within 1.x, anything removed is deprecated first for at least two
+minor releases or six months, and `kling upgrade` moves from one release to the next and
+back. Templates and frozen machines are a cache: when the host can no longer restore one it
+is reported stale and refrozen, not migrated. `db`, `phone`, `ai`, Android, the Kubernetes
+operator, `compose` and `kling-hv` stay experimental. The full promise, and what is still
+missing before 1.0: [`docs/compatibilidad.md`](docs/compatibilidad.md) (in Spanish).
+
 ## More
 
 - [`SECURITY.md`](SECURITY.md) — the guest is assumed hostile: threat model, barriers

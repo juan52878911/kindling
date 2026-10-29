@@ -1,14 +1,17 @@
 # Actualizar entre versiones
 
 Qué deja kindling en disco, qué se rompe al cambiar de versión y cómo hacer que
-pasar de una a la siguiente sea un comando y no una tarde. Escrito el 30 de
-septiembre de 2026, sobre `main` tras v0.17, leyendo el código: nada de esto se
-ha medido todavía en un host que actualice de verdad.
+pasar de una a la siguiente sea un comando y no una tarde. Es el **cómo**: lo
+que se promete (qué es MAJOR, MINOR y PATCH, la ventana de versiones, la
+deprecación) está en [`compatibilidad.md`](compatibilidad.md), que manda si
+los dos no dicen lo mismo.
 
-**Nadie usa kindling en producción.** Es la última vez que se puede cambiar un
-formato sin escribir su migración, así que este documento hace dos cosas: fija
-las reglas para cuando haya usuarios y lista lo que conviene romper **ahora**,
-antes de que haga falta migrarlo.
+Escrito el 30 de septiembre de 2026, sobre `main` tras v0.17, y puesto al día
+el 28 de octubre con lo que añadieron v0.18, v0.19 y v0.20 (el `schema` 2 de
+`state.json`, `kling_vz` 3, kling-hv y su volcado `KLNGHV`, `publish.json`,
+`fondos.json`, SigV4 en `credentials.enc` y el sello obligatorio). Las §4 y §5
+son el plan de entonces, que ya está hecho; lo que falta para 1.0 está en
+[`compatibilidad.md`](compatibilidad.md#antes-de-10).
 
 ---
 
@@ -37,17 +40,20 @@ antes de que haga falta migrarlo.
 Qué persiste kindling, dónde, si lleva versión y qué pasa hoy cuando lo lee un
 binario de otra versión. "Nuevo lee viejo" es actualizar; "viejo lee nuevo" es
 volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
-[`estabilidad.md`](estabilidad.md)).
+[`auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md)).
 
 ### Estado del daemon
 
 | Qué | Dónde | Versión | Nuevo lee viejo | Viejo lee nuevo |
 |---|---|---|---|---|
-| `state.json` | `internal/machine/manager.go` (`load`, `writePending`) | **`schema: 1`** desde este cambio; antes, un array sin nada | lee el array (v0), copia a `state.json.v0.bak`, escribe v1 | un kling ≤ v0.17 no entiende el objeto: lo aparta a `.corrupt-*` y entra en modo protegido (no borra nada; hay que restaurar la copia). Uno futuro con `schema` > 1: **no arranca** |
-| Campos de `api.Machine` | `pkg/api/types.go` | por el de `state.json` | los que faltan quedan a cero | **los que no conoce se pierden** en su siguiente `persist` |
+| `state.json` | `internal/machine/manager.go` (`load`, `writePending`) | **`schema: 1`** desde v0.18 (antes, un array sin nada); **`schema: 2`** si alguna máquina tiene `diff_base` (congelación en diferencial, v0.18), y vuelve a 1 cuando ya ninguna lo tiene | lee el array (v0), copia a `state.json.v0.bak`, escribe v1. **De 1 a 2 no hay copia**: la copia solo se hace desde una versión menor que 1 | un kling ≤ v0.17 no entiende el objeto: lo aparta a `.corrupt-*` y entra en modo protegido (no borra nada; hay que restaurar la copia). Todos los de v0.18 en adelante leen 1 y 2; el 2 existe para que uno que no conozca los diferenciales se niegue en vez de cargar uno como si fuese la RAM entera. Con `schema` mayor del que conoce: **no arranca** |
+| Campos de `api.Machine` | `pkg/api/types.go` | por el de `state.json` | los que faltan quedan a cero | **los que no conoce se pierden** en su siguiente `persist`. v0.19 y v0.20 añadieron `cmd`, `entrypoint`, `net_mibps`, `published`, `share_wait`, `vmm` y `volume_wait` **sin subir el `schema`**: tras un `-rollback` a v0.18 o v0.19 se pierden en silencio |
+| tumbas `~rm-<id>` | dentro de `state.json` (`internal/machine/borrado.go`, v0.19) | la de `state.json` | — | un daemon anterior las ve como máquinas y no las limpia |
 | `store/<ns>/<key>.json` | `internal/daemon/store.go` | ninguna; el daemon lo trata como opaco | lo que decida cada dueño (`mcp/links`, `graph/*`, `phone/*`) | igual: sin campo, nadie lo sabe |
 | `links.json` de v0.4 | `internal/daemon/store.go` (`comprobarLinksV04`) | — | ya no se migra (PR 11): con uno sin migrar el daemon no arranca y dice que se pase por v0.17 | un v0.4 ya no ve enlaces |
-| grafos | `store/graph/*`, `internal/machine/grafo.go` | ninguna | se ignoran los ilegibles y sus aristas cierran | ídem |
+| grafos | `store/graph/*`, `internal/machine/grafo.go` | ninguna | se ignoran los ilegibles y sus aristas cierran | ídem; y el daemon acepta campos que no conoce sin avisar: el `health` de una arista (v0.19) mandado a un v0.18 se pierde |
+| puertos publicados | `publish.json` en la raíz (`internal/publicar`, v0.20) | ninguna; un array de `api.Publication` | — | un daemon anterior no lo lee: las máquinas arrancan sin publicar. Uno ilegible se toma como "nada publicado" y se pisa al publicar otra vez |
+| fondos precalentados | `fondos.json` en la raíz (`internal/machine/fondo.go`, v0.19) | ninguna; `{"<plantilla>": N}` | — | un daemon anterior no lo lee y no mantiene el fondo |
 | `net-claims` | `/run/kindling/net-claims` (tmpfs) | ninguna; `"<pid> <ns> <hex8>"` | se vacía al reiniciar el host: sin riesgo | un daemon sin reservas solo se protege comprobando las direcciones del host |
 
 ### Snapshots y máquinas congeladas
@@ -55,11 +61,12 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
 | `snapshots/<n>/meta.json` | `api.Snapshot`, `internal/machine/meta.go` | **`schema: 1`** desde el PR 2, con `vmm`, `macos` y `kling_version`; **`schema: 2`** con `rootfs_digest` (el overlay en árbol de sha256, `pkg/digest.Tree`) en vez de `rootfs_sha256`. Un dorado v1 sigue verificándose con su sha256 plano y pasa a v2 (con `meta.json.v1.bak`) la primera vez que se reescribe; un kling de v1 se niega a un dorado v2 diciendo la versión | sin `schema` es v0: se lee igual y se copia a `meta.json.v0.bak` en la primera reescritura. `editMeta` conserva las claves que no conoce. Uno con `schema` mayor no se restaura, no se anota y no se borra. Un kling ≤ v0.17 lo lee, y al anotarlo pierde `schema` y los campos nuevos (vuelve a ser v0; la copia ya está) |
-| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. El TSC sigue con su traducción (`explainRestoreErr`) |
+| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas; desde v0.20 es el VMM que arrancó **esa máquina**, no el que el daemon usaría ahora | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. La arquitectura, el kernel y el agente **no** cuentan para `stale`. El TSC sigue con su traducción (`explainRestoreErr`) |
 | kernel del dorado | `kernel_sha256` en el meta | hash, no versión | cambiarlo solo da un aviso (`avisoKernel`): el kernel del invitado vive en `mem.file` y sigue restaurando |
-| sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; lleva `vmm` desde el PR 2 (opcional) | sin marcadores se acepta (máquina anterior al sello); sin `vmm`, no se compara |
-| `snap.file` de kling-vz | `vz/internal/spec/spec.go` | **`kling_vz`**: desde v0.18 se escribe la más baja que lo describe, 2 solo con `graphics` y 1 sin ella; `Decode` lee 1 y 2 | uno ≤ v0.17 lee la 1 (lo que congeló el nuevo despierta tras `kling upgrade -rollback`) y rechaza la 2 con su error de siempre; uno de una versión futura se rechaza diciendo que se actualice kling-vz |
+| sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; campos opcionales `vmm` (v0.18), `diff_base` (v0.18) y `sin_agente` (v0.19) | **desde v0.20 es obligatorio**: un volcado sin marcadores solo se acepta si la máquina se congeló antes de la primera versión que sella (v0.8, 2026-09-23); uno posterior sin sello no se descongela. Sin `vmm`, no se compara |
+| `snap.file` de kling-vz y kling-hv | `vz/internal/spec/spec.go` (los dos lo escriben) | **`kling_vz`**: se escribe la más baja que lo describe: 1 de base, 2 con `graphics` (v0.18), **3 con vsock o MTU** (v0.19). Como v0.19 arranca con vsock y MTU 16384, casi todo lo congelado desde entonces es 3. `Decode` lee 1 a 3, y `kling-vz -snapshot-formats` dice cuáles | uno ≤ v0.17 lee la 1; uno de v0.18 la 1 y la 2; lo que haya que despertar con un kling-vz anterior lo recongela `kling upgrade` (§3.4). Uno de una versión futura se rechaza diciendo que se actualice kling-vz |
 | `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
+| `mem.file` de kling-hv (experimental) | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 2** (vsock y globo, v0.19); lee también la 1 | un kling-hv con la cabecera 1 no lee la 2. El daemon **no traduce** ese error a "rehazlo" (`explicarRestauracion` solo conoce `kling_vz`) y `kling upgrade` no comprueba esta versión antes de volver atrás |
 | firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
 
 ### Imágenes y volúmenes
@@ -77,7 +84,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
 | `secrets/snapshot.key` | `internal/machine/firma.go` | ninguna, 32 bytes | firma y, por HKDF, cifra. Si se pierde o se regenera, **ningún dorado firmado ni almacén de credenciales vuelve a abrirse** |
-| `credentials.enc` (máquinas, plantillas y secretos de grafo) | `internal/machine/credenciales.go` | **cabecera `KLCS` + `0x01`** delante del nonce desde el PR 3 (y la cadena HKDF `"kindling credential store v1"`) | sin cabecera es v0: se lee y, al volver a sellarlo, se copia a `<fichero>.v0.bak` (quitar todas las credenciales borra también la copia). Con una versión mayor no se descifra, no se pisa y no se borra. Un kling ≤ v0.17 no descifra un v1. `NormalizarAlmacen` sigue arreglando los postgres viejos. Un binario de la misma versión que funde y vuelve a sellar **pierde los campos que no conoce**: añadir uno que importe sube el byte |
+| `credentials.enc` (máquinas, plantillas y secretos de grafo) | `internal/machine/credenciales.go` | **cabecera `KLCS` + `0x01`** delante del nonce desde el PR 3 (y la cadena HKDF `"kindling credential store v1"`) | sin cabecera es v0: se lee y, al volver a sellarlo, se copia a `<fichero>.v0.bak` (quitar todas las credenciales borra también la copia). Con una versión mayor no se descifra, no se pisa y no se borra. Un kling ≤ v0.17 no descifra un v1. `NormalizarAlmacen` sigue arreglando los postgres viejos. Un binario de la misma versión que funde y vuelve a sellar **pierde los campos que no conoce**: añadir uno que importe sube el byte. **Las credenciales SigV4 de v0.19** (clave de acceso, región y servicio) entraron sin subirlo: un v0.18 que vuelva a sellar el almacén las deja inservibles |
 | `credaudit` | `audit/<id>.jsonl` (Linux), `machines/<id>/credaudit.jsonl` (Mac) | ninguna, JSONL | el lector salta las líneas que no entiende; `prepararAuditoria` mueve el sitio viejo al nuevo |
 | `registries.json` | `internal/daemon/registries.go` | ninguna; `{"auths": {"<registro>": {"username", "password"}}}`, root 0600, en claro | un daemon anterior no lo lee: importa solo de registros públicos, como siempre. Los campos que no conoce se pierden al guardar otro `kling registry login` |
 
@@ -88,7 +95,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `manifests.json` | `pkg/plugin/cache.go` | **`format: 1`**, y cada entrada con la versión de kling y la API | caché: una versión distinta la tira entera y la rehace. Correcto: es regenerable |
 | manifiesto de extensión | `pkg/plugin/manifest.go` | **`ManifestVersion` 2** (acepta 1–2), `min_kling`, `max_api` (v0.18) | fuera de rango: la extensión sale con error en la lista, sin tumbar nada. Un `max_api` menor que el API del daemon es un aviso en `kling plugins` |
 | sidecar `.json` de cada extensión | `pkg/plugin/install.go` | ninguna | versión, url, sha256, fecha |
-| `~/.config/kling/config.json` | `pkg/config/config.go` | ninguna | claves desconocidas se ignoran |
+| `~/.config/kling/config.json` | `pkg/config/config.go` | ninguna | claves desconocidas se ignoran al leer y **se pierden al guardar** (`kling config set`). Desde v0.19 `daemon.vmm` vale `auto` por defecto en macOS: un daemon ≤ v0.18 con una configuración que diga `auto` o `hv` no arranca |
 | `/etc/default/kling`, `/etc/kling/gateway.env` | `Makefile`, `ext/mcp/Makefile` | ninguna | se crean si no existen y **no se tocan nunca más**: una variable nueva no llega a un host viejo |
 | unidades de systemd | `packaging/kling.service`, `ext/*/…` | ninguna | solo `make deploy` las reescribe. `install.sh` y `kling up` no |
 | launchd | plantilla en `docs/mac.md` | ninguna | nada la genera; `kling up` solo la carga si el daemon no responde |
@@ -102,7 +109,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 |---|---|---|
 | CLI ↔ daemon | `GET /info` da `Version`, `Capabilities` (solo se añaden, nunca se reusan: `internal/daemon/server.go`) y, desde v0.18, `api`; cada respuesta lleva `X-Kling-API` y `X-Kling-Version`. Sin `/v1` | `pkg/api` compara el API en cada petición: aviso si el daemon es más nuevo, error claro si es más viejo que `MinDaemonAPI`. `kling version` y `kling doctor` avisan si las versiones difieren |
 | extensión ↔ daemon | `Info.Has(cap)` para cada función nueva, `min_kling` y `max_api` en el manifiesto, y la misma comprobación de `X-Kling-API` que el CLI (usan `pkg/api`) | extensión vieja con núcleo nuevo: funciona mientras no se quite una ruta, y con un API mayor avisa. Nueva con núcleo viejo: 404 o `Has` falso |
-| daemon ↔ kling-vz | `GET /kling/info` con `credential_kinds` (`http-places`, `graph-link`…) | falta un tipo: "rebuild kling-vz". **La versión de kling-vz no se compara** |
+| daemon ↔ kling-vz / kling-hv | `GET /kling/info` con `credential_kinds` (`http-places`, `graph-link`…) | falta un tipo: "rebuild kling-vz". **La versión de kling-vz o kling-hv no se compara**; `kling upgrade` los cambia junto al daemon |
 | host ↔ `kling-guest` | `/healthz` JSON con `version` y `caps` (v0.18); sondeo por ruta para los anteriores | host nuevo, invitado viejo: degradación ruta a ruta. Host viejo, invitado nuevo: nada lo nota. Un puente viejo con una opción de volumen nueva **muere, y como es PID 1, el invitado entra en pánico**; desde v0.18 el agente ignora lo que no conoce |
 
 ### Cómo llega un binario nuevo al disco
@@ -115,8 +122,11 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `make deploy` | — | `scp` | sí, `restart` | no |
 | `kling up` | no baja nada | — | `enable --now` (**no reinicia uno vivo**) | — |
 
-`SHA256SUMS` no está firmado. `kling-guest`, los constructores y las unidades
-del host solo se actualizan con `make deploy`.
+`SHA256SUMS` no está firmado. `kling upgrade` cambia también `kling-guest` y
+`kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux) y `kling-vz`/`kling-hv`
+junto a `kling` (Mac), pero eso solo afecta a las imágenes que se construyan
+después: las que ya existen llevan su agente dentro. Los constructores y las
+unidades del host solo se actualizan con `make deploy`.
 
 ### Lo que más riesgo tiene
 
@@ -127,12 +137,14 @@ del host solo se actualizan con `make deploy`.
    y `state.json` la defensa es subir la versión (§3.1).*
 2. **Dorados contra otro Firecracker**: no se sabe con cuál se hicieron, y el
    fallo sale al despertar, lejos de la causa. Es el patrón exacto de §2 de
-   [`estabilidad.md`](estabilidad.md). *Resuelto para los dorados nuevos en el
+   [`auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md). *Resuelto para los dorados nuevos en el
    PR 2: el meta lo guarda y salen `stale`; los de antes no lo guardan.*
 3. **`snapshot.key`**: todo lo firmado y cifrado depende de 32 bytes sin copia.
    Una reinstalación que la regenere deja inservibles dorados y credenciales.
 4. **`kling-guest` horneado sin handshake**: nadie sabe qué agente lleva cada
    imagen, y el caso del puente viejo es un pánico, no un error.
+   *Desde el PR 4 (v0.18) el agente anuncia `version` y `caps` y se ignoran
+   los `kling.*` desconocidos; las imágenes anteriores siguen sin eso.*
 5. **Actualizar no para, no verifica y no vuelve**: `install.sh` cambia el
    binario con el daemon viejo corriendo, y nada comprueba que el nuevo arranca.
    *Resuelto en los PR 8-9: `kling upgrade` (§3.4).*
@@ -177,7 +189,8 @@ las claves que el struct no tiene. Con (a) basta para el resto.
 
 ### 3.2 Compatibilidad: qué se promete
 
-Mientras sigamos en 0.x:
+Lo que rige desde 1.0 está en [`compatibilidad.md`](compatibilidad.md). Mientras
+sigamos en 0.x:
 
 - **PATCH (0.17.x):** ningún formato cambia de versión. Se puede ir y volver.
 - **MINOR (0.18):** puede subir la versión de un formato, siempre con
@@ -187,8 +200,10 @@ Mientras sigamos en 0.x:
 - **Dorados y congeladas:** no se migran nunca. Son caché cara, no datos.
 - **Imágenes:** sobreviven a cualquier actualización. Un agente de invitado
   viejo dentro sigue funcionando con lo que tuviera (degradación, no fallo),
-  durante al menos una MINOR; después, `kling doctor` avisa y `kling image ls`
-  lo marca.
+  salvo tres casos que hoy dan la máquina por fallida con "reimport the
+  image": `-e` con un agente sin `env` (v0.18), `cmd`/`entrypoint` sin `cmd` y
+  `volume_wait` sin `volume-wait` (v0.19). Que `kling doctor` avise y
+  `kling image ls` marque los agentes viejos **no está hecho**.
 
 **Dorados obsoletos.** El meta guarda lo que los ata al host: la versión de
 Firecracker (o de kling-vz y de macOS), el `kernel_sha256` que ya hay y la
@@ -249,8 +264,8 @@ Mezclar versiones queda así:
 | CLI viejo, daemon nuevo | funciona mientras `api` sea la misma |
 | extensión fuera de `min_kling` | sale con error en `kling plugins`, no se ejecuta |
 | extensión con `max_api` menor que el API del daemon | aviso en `kling plugins` y en sus propias peticiones; se ejecuta |
-| invitado viejo | funciona sin las `caps` que le falten; `doctor` lo cuenta |
-| kling-vz de otra versión | aviso; error si falta un `credential_kind` o el `kling_vz` no casa |
+| invitado viejo | funciona sin las `caps` que le falten, salvo los tres fallos de §3.2; `doctor` todavía no lo cuenta |
+| kling-vz de otra versión | sin aviso (la versión no se compara); error si falta un `credential_kind` o el `kling_vz` no casa |
 
 ### 3.4 El flujo: `kling upgrade`
 
@@ -340,8 +355,9 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   `kling-guest` y `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux;
   si el daemon toma el agente de otro sitio con `KLING_GUEST_AGENT*`, lo dice
   con una nota y no lo toca),
-  `kling-vz` junto a `kling` (Mac, comprobando antes de parar nada que lleva el
-  permiso de virtualización). Las extensiones instaladas con `kling plugin
+  `kling-vz` y `kling-hv` junto a `kling` (Mac, comprobando antes de parar nada
+  que cada uno lleva su entitlement; `kling-hv` se instala aunque no estuviera
+  si está `kling-vz`, y una release que no lo trae no es un error). Las extensiones instaladas con `kling plugin
   install` se pasan a la misma versión después de verificar el núcleo (con sus
   compañeros, y guardadas en la misma copia para que `-rollback` las devuelva);
   con `sudo` no se tocan las de root y se dice que cada usuario corra `kling
@@ -372,7 +388,9 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
 - **Drenar y recongelar.** No hace falta: Firecracker no viene en la release,
   así que el VMM no cambia y ningún dorado ni congelada queda obsoleto; las
   microVMs en marcha siguen (`KillMode=process`) y el daemon nuevo las readopta.
-  En el Mac `kling-vz` sí cambia, pero su versión no se compara (§3.2).
+  En el Mac `kling-vz` y `kling-hv` sí cambian, pero su versión no se compara
+  (§3.2); lo que importa es el `kling_vz` de lo congelado, que se mira al
+  volver atrás (abajo). El `KLNGHV` del `mem.file` de kling-hv, no.
 - **Unidades y `/etc/default/kling`.** No se regeneran: la release no publica
   `kling.service` (lo instala `make deploy`), y lo que no se cambia no hace
   falta copiarlo.
@@ -400,11 +418,13 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   casan y el sistema de ficheros del invitado puede romperse en silencio. Así
   que, antes de parar para volver, se comparan con el `List` del daemon nuevo y
   se congelan otra vez con él. En Linux el VMM no cambia, así que su
-  `mem.file` lo lee el viejo. En el Mac `kling-vz` sí cambia: escribe el
-  formato de snapshot más bajo que describe la máquina (`kling_vz` 1 sin
-  pantalla), y antes de volver se pregunta al `kling-vz` de la copia hasta qué
-  formato lee (`-snapshot-formats`; uno de v0.17, sin esa bandera, solo el 1)
-  y se mira el `snap.file` de cada una que se congeló otra vez. Si no se puede
+  `mem.file` lo lee el viejo. En el Mac `kling-vz` y `kling-hv` sí cambian:
+  escriben el formato de snapshot más bajo que describe la máquina, y antes de
+  volver se pregunta a cada VMM de la copia hasta qué formato lee
+  (`-snapshot-formats`; uno de v0.17, sin esa bandera, solo el 1), se toma el
+  menor y se mira el `snap.file` de cada una que se congeló otra vez. Desde
+  v0.19 casi todo es `kling_vz` 3, así que volver de v0.19 o posterior a v0.18
+  deja casi siempre congeladas que el viejo no leería. Si no se puede
   (no contesta y su `state.json` dice que corren, el freeze falla o el viejo
   no leería el volcado: una con pantalla al volver a v0.17), no se vuelve atrás
   y se dice cuáles: el nuevo sigue
@@ -439,7 +459,9 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   Es lo que impide el riesgo 1 por descuido. Si solo se añaden campos, se
   regenera la lista con `go test ./internal/machine -run TestCamposPersistidos
   -update` después de decidir si un kling anterior los puede ignorar.
-- **e2e "desde la anterior"** (`scripts/94-e2e-upgrade.sh`): instalar la
+- **e2e "desde la anterior"** (`scripts/94-e2e-upgrade.sh`; hoy fijado a
+  v0.17 → HEAD, sin probar v0.18 → v0.19 ni v0.19 → v0.20, y siempre con
+  `-from-dir -insecure`): instalar la
   etiqueta N-1 con `install.sh --tag`, crear estado (una máquina parada, una
   congelada, un dorado, un volumen, una credencial, un enlace de MCP), `kling
   upgrade` al binario de HEAD (`--from-dir` para no bajarlo), y verificar que

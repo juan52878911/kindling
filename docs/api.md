@@ -9,7 +9,8 @@ aquí.
 
 Los errores vuelven como `{"message": "..."}` con el código HTTP; el cliente los
 convierte en `*api.StatusError`. `507` significa "no cabe en memoria" y es lo que
-el planificador usa para desalojar y reintentar.
+el planificador usa para desalojar y reintentar. Lo que contesta cada ruta está en
+[Códigos de estado por ruta](#códigos-de-estado-por-ruta).
 
 ## Capacidades
 
@@ -39,16 +40,16 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `authz` | v0.17 | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
 | `cow-grow` | v0.17 | `POST /cow/store/grow` (ver [cow.md](cow.md#hacer-crecer-el-almacén)) |
 | `ready` | v0.17 | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
-| `machine-env` | sin publicar | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
-| `machine-cmd` | sin publicar | `entrypoint` y `cmd` en `POST /machines` (listas, ≤ 1024 argumentos, ≤ 32 KiB): el ENTRYPOINT y el CMD de la imagen cambiados para esta máquina, con las reglas de Docker (`cmd` conserva el ENTRYPOINT; `entrypoint` sin `cmd` deja los argumentos vacíos). Por MMDS como el entorno, solo en frío (con `from`, 400); la máquina los guarda y un `start` los repite. Un agente sin la capacidad `cmd` da la máquina por fallida |
-| `graph-health` | sin publicar | `health` en una arista `depends` (`{test: [...], interval_ms, timeout_seconds, retries, start_period_seconds, start_interval_ms}`): el destino no está listo hasta que `test`, ejecutado dentro de él (necesita `allow_exec`), acaba con 0; se intenta cada `start_interval_ms` (200 ms) y está enfermo pasados `start_period + retries × interval` (ver [grafos.md](grafos.md#aristas-share-y-depends)) |
-| `volume-wait` | sin publicar | `volume_wait` en `POST /machines` (con `volumes`, sin `from`): la máquina arranca con sus volúmenes puestos y **sin montar**, y el servicio sin lanzar, hasta que el host se los monta. Un `commit` no los suelta ni se los devuelve, y cada copia los monta al restaurarse y entonces lanza el servicio: una plantilla de un postgres con su `pgdata` sin congelar la caché del disco. Solo el primer arranque (un `start` monta como siempre); un agente sin la capacidad `volume-wait` da la máquina por fallida |
-| `disk` | sin publicar | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso; tiene que caber en el disco libre del host, `503` si no, y `KLING_MAX_DISK_MIB` baja el máximo); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
-| `start` | sin publicar | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
-| `registry-auth` | sin publicar | `GET/POST /registries`, `DELETE /registries/{host}`: credenciales de registros privados que usa el constructor `oci` (ver "Registros") |
-| `oci-blobs` | sin publicar | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
-| `volume-clone` | sin publicar | `POST /volumes/{name}/clone` y `clone` en `GET /info` (la sonda de clonado; ver "Volúmenes") |
-| `publish` | sin publicar | `POST/DELETE /machines/{ref}/publish`, `GET /publish` y `publish` en `POST /machines`: el daemon publica `127.0.0.1:host` hacia un puerto de la máquina (tcp, y udp en Linux), lo guarda en su raíz y lo quita con la máquina (ver "Puertos publicados") |
+| `machine-env` | v0.18 | `env` en `POST /machines` (`["KEY=valor"]`, ≤ 256, ≤ 32 KiB): el entorno de la máquina, por MMDS al invitado; solo en frío (con `from`, 400). La máquina enseña solo `env_keys`, y un snapshot los hereda (ver [imagenes.md](imagenes.md#el-entorno-es-de-la-máquina)) |
+| `machine-cmd` | v0.19 | `entrypoint` y `cmd` en `POST /machines` (listas, ≤ 1024 argumentos, ≤ 32 KiB): el ENTRYPOINT y el CMD de la imagen cambiados para esta máquina, con las reglas de Docker (`cmd` conserva el ENTRYPOINT; `entrypoint` sin `cmd` deja los argumentos vacíos). Por MMDS como el entorno, solo en frío (con `from`, 400); la máquina los guarda y un `start` los repite. Un agente sin la capacidad `cmd` da la máquina por fallida |
+| `graph-health` | v0.19 | `health` en una arista `depends` (`{test: [...], interval_ms, timeout_seconds, retries, start_period_seconds, start_interval_ms}`): el destino no está listo hasta que `test`, ejecutado dentro de él (necesita `allow_exec`), acaba con 0; se intenta cada `start_interval_ms` (200 ms) y está enfermo pasados `start_period + retries × interval` (ver [grafos.md](grafos.md#aristas-share-y-depends)) |
+| `volume-wait` | v0.19 | `volume_wait` en `POST /machines` (con `volumes`, sin `from`): la máquina arranca con sus volúmenes puestos y **sin montar**, y el servicio sin lanzar, hasta que el host se los monta. Un `commit` no los suelta ni se los devuelve, y cada copia los monta al restaurarse y entonces lanza el servicio: una plantilla de un postgres con su `pgdata` sin congelar la caché del disco. Solo el primer arranque (un `start` monta como siempre); un agente sin la capacidad `volume-wait` da la máquina por fallida |
+| `disk` | v0.18 | `disk_mib` en `POST /machines`: el disco escribible de la máquina (64 MiB–256 GiB, 512 por defecto; disperso; tiene que caber en el disco libre del host, `503` si no, y `KLING_MAX_DISK_MIB` baja el máximo); con `from` se ignora, la copia hereda el del dorado. `diff_base` en la máquina: una copia con seguimiento de páginas sucias que se congela en diferencial respecto a ese mem.file (ver [imagenes.md](imagenes.md)) |
+| `start` | v0.18 | `POST /machines/{ref}/start` (arrancar otra vez, en frío, una máquina parada; `env` en el cuerpo) |
+| `registry-auth` | v0.18 | `GET/POST /registries`, `DELETE /registries/{host}`: credenciales de registros privados que usa el constructor `oci` (ver "Registros") |
+| `oci-blobs` | v0.18 | `GET/PUT /oci/blobs/{digest}` (los blobs de `kling image import -archive`) y `source: "archive"` en el spec del constructor `oci` |
+| `volume-clone` | v0.19 | `POST /volumes/{name}/clone` y `clone` en `GET /info` (la sonda de clonado; ver "Volúmenes") |
+| `publish` | v0.20 | `POST/DELETE /machines/{ref}/publish`, `GET /publish` y `publish` en `POST /machines`: el daemon publica `127.0.0.1:host` hacia un puerto de la máquina (tcp, y udp en Linux), lo guarda en su raíz y lo quita con la máquina (ver "Puertos publicados") |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -275,7 +276,7 @@ reconciliación, así que sobrevive a un reinicio del daemon igual que una
 running. Pausar una máquina que ya está pausada es un no-op (devuelve su
 estado tal cual); pausar una que no está `running`, o que tiene carpetas
 compartidas en vivo (no contestarían pausada y su sesión caería por
-keepalive: usa `freeze` en su lugar), da `400`.
+keepalive: usa `freeze` en su lugar), da `409`.
 
 ### `POST /machines/{ref}/resize`
 
@@ -395,7 +396,7 @@ y `auth` `mysql_native_password`, `caching_sha2_password-fast`, `caching_sha2_pa
 
 | Código | Causa |
 |---|---|
-| `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto; en macOS, `kern.memorystatus_level` por debajo de `KLING_MIN_MEM_LEVEL`, 15 % por defecto, o el swap usado por encima de `KLING_MAX_SWAP_PCT`, 85 % por defecto, de lo que puede llegar a ocupar: el swap actual más el disco libre del volumen `VM` por encima del mínimo de disco. Ver [estabilidad.md](estabilidad.md) §9) |
+| `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto; en macOS, `kern.memorystatus_level` por debajo de `KLING_MIN_MEM_LEVEL`, 15 % por defecto, o el swap usado por encima de `KLING_MAX_SWAP_PCT`, 85 % por defecto, de lo que puede llegar a ocupar: el swap actual más el disco libre del volumen `VM` por encima del mínimo de disco. Ver [auditoria-estabilidad-2026-08.md](auditoria-estabilidad-2026-08.md) §9) |
 | `503` | queda menos disco que `KLING_MIN_FREE_DISK_MIB` bajo `$KLING_ROOT` (2 GiB en Linux; 16 GiB en macOS, donde el swap crece en el mismo disco). No es un 507 a propósito: quien recibe un 507 congela para hacer sitio, y congelar escribe en disco |
 | `409` | tope de máquinas del daemon (`KLING_MAX_MACHINES`, 256) |
 | `429` | cuota del inquilino dueño (`kling.owner`) en la política de autorización: `max_machines`, `max_mem_mib` o `max_disk_mib`. El mensaje dice qué tope, cuánto lleva y cuánto pide, y lleva `quota exceeded` (`api.IsTenantQuota`). También en `run -from`, `fork`, `graph up` y `start`. Ver [authz.md](authz.md#cuotas) |
@@ -598,7 +599,7 @@ opcional:
 {"count": 2, "ttl_seconds": 600, "on_ttl": "remove", "labels": {"kling.db.state": "preparing"}}
 ```
 
-`labels` (desde sin publicar) se suman a las de cada copia en su nacimiento, sin ventana
+`labels` (desde v0.17) se suman a las de cada copia en su nacimiento, sin ventana
 en la que exista sin ellas; van con `-label k=v` (repetible) en `kling sandbox fork`. Las
 claves siguen `^[a-z0-9][a-z0-9._-]{0,63}$`, como mucho 32 etiquetas de 256 bytes de
 valor, y `kind` y `kling.fork-of` están reservadas (`400`). Un cuerpo sin `labels` se
@@ -867,6 +868,133 @@ PSS de 4533 a 5072 MiB y el host colgado. `squeeze` lo rechaza (`409`) salvo
 estadísticas del globo, `squeeze` pregunta `GET /meminfo` al agente y reclama lo
 disponible menos un cuarto de la RAM, nunca por debajo de la mitad (antes, la
 mitad a ciegas: un Android de 1 GiB se quedaba con 4 MiB disponibles).
+
+## Códigos de estado por ruta
+
+Lo que contesta cada ruta **hoy** (v0.20), sacado de `internal/daemon`. Es una
+foto, no todavía la promesa: hay incoherencias que se arreglan antes de 1.0
+(ver [compatibilidad.md](compatibilidad.md#antes-de-10)), y al fijarlas esta
+tabla pasa a ser contrato con su test.
+
+**Capas comunes**, por orden:
+
+- `sinBarrasEscapadas` (`server.go`): `400` si la ruta lleva `%2F`, `%5C` o
+  `\`, exista o no.
+- El mux de Go: `404` a una ruta desconocida y `405` (con `Allow`) a un método
+  que no casa, **en texto plano**, no como `{"message"}`. Los `GET` aceptan
+  `HEAD`. `net/http` da `431` con cabeceras de más de 64 KiB.
+- `autorizar` (`authz.go`), solo con política: `401` token mal formado o
+  inválido; `403` sin rol, o un inquilino en una ruta de admin o escribiendo
+  una plantilla compartida; `404` sobre lo ajeno. Las rutas con revisión del
+  cuerpo (`POST /machines`, credenciales, etiquetas, commit, sandboxes, fork,
+  grafos) leen hasta 1 MiB (`413`/`400`) y pueden dar `403` (etiquetas
+  reservadas, volúmenes o carpetas de admin), `404` (el `from` o la máquina
+  upstream) o `409` (nombre ajeno en commit). `GET /info` contesta sin rol.
+- `fail`: un `*api.StatusError` con código manda sobre el del handler. Así
+  llegan a cualquier ruta que cree o despierte máquinas `409` tope de máquinas,
+  `429` cuota del inquilino, `503` disco lleno y `507` sin memoria
+  (`pkg/api/types.go`).
+- `jsonBodyStatus`: `413` si el cuerpo pasa su tope (1 MiB salvo que se diga
+  otro), `400` con cualquier otro fallo al decodificar.
+
+**Mapeos de error** (columna "Errores" de la tabla):
+
+| Mapeo | `400` | `404` | `409` | Otro |
+|---|---|---|---|---|
+| `statusPeticion` | petición, nombre, carpetas, `env`, `cmd` | imagen o snapshot | dorado obsoleto | — |
+| `runStatus` | = `statusPeticion` | = | + exec fuera del snapshot, nombre ocupado | `500` host |
+| `cicloStatus` | = `statusPeticion` | máquina | estado no lo admite | `500` host |
+| `snapshotStatus` | **todo lo demás** | snapshot | en uso | — |
+| `removeImageStatus` | nombre | imagen | en uso | `500` |
+| `execStatus` | — | máquina | no corre, exec fuera del snapshot | `403` sin `allow_exec`; `502` resto |
+| `objetivoConAgente` | = `execStatus` | = | = | `504` el agente no contesta |
+| `estadoDeListo` | — | máquina | no corre | `500` |
+| `forkStatus` | — | máquina | no corre, no lista, no copiable, carpetas, exec | `500` |
+| `graphStatus` | **todo lo demás** | grafo | — | — |
+| `publicarStatus` | **todo lo demás** | — | puerto ocupado | `501` no soportado |
+
+| Ruta | Éxito | Errores |
+|---|---|---|
+| `GET /info` | 200 | — |
+| `GET /machines` | 200 | — |
+| `POST /machines` | 201 | `413`/`400` cuerpo; `400` etiquetas `kling.graph*`; `runStatus`; `409`/`429`/`503`/`507` de admisión. Con `publish`: `403` puerto < 1024 (inquilino), `409` ocupado, `501`, `400`; si no se puede publicar, la máquina se borra |
+| `GET /machines/{ref}` | 200 | `404` |
+| `POST /machines/{ref}/freeze` · `thaw` · `pause` · `stop` | 200 | `cicloStatus`; admisión al despertar |
+| `POST /machines/{ref}/squeeze` | 200 | `cicloStatus`; `409` con `mem_shared` sin `force` |
+| `POST /machines/{ref}/resize` | 200 | `413`/`400` cuerpo (4 KiB); `404`; `409` no corre; **`400` el resto, también del host** |
+| `POST /machines/{ref}/mmds` | 200 | `413`/`400` cuerpo (1 MiB); `cicloStatus` |
+| `POST /machines/{ref}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `cicloStatus` |
+| `DELETE /machines/{ref}/credentials/{env}` | 200 | `cicloStatus`; `404` sin esa credencial |
+| `POST /machines/{ref}/start` | 200 | `413`/`400` cuerpo (vacío vale); `cicloStatus`; admisión |
+| `DELETE /machines/{ref}` | 204 | `cicloStatus` |
+| `PUT /machines/{ref}/labels` | 204 | `413`/`400` cuerpo; **`400` todo lo demás, también "no existe"** |
+| `POST /machines/{ref}/commit` | 201 | `413`/`400` cuerpo; `400` `ready_timeout_seconds`; `409` carpetas compartidas o no llega a lista; **`400` el resto, también "no existe"** |
+| `POST /images` | 200 | `413`/`400` cuerpo; `400` falta `builder`, nombre, base, `spec`; `412` constructor no encontrado o no ejecutable; `409` imagen en uso; `501` sin construcción con root; `500` host |
+| `GET /images` | 200 | — |
+| `DELETE /images/{name}` | 204 | `removeImageStatus` |
+| `GET /volumes` | 200 | — |
+| `POST /volumes` | 200 | `413`/`400` cuerpo; **`400` cualquier error** |
+| `DELETE /volumes/{name}` | 204 | `400` `?snapshots=`; `404` no existe; **`409` cualquier otro error** |
+| `POST /volumes/{name}/populate` | 200 | `413`/`400` cuerpo; `400` el resto |
+| `POST /volumes/{name}/clone` | 200 | `413`/`400` cuerpo; `409` sin clonado, en uso o el destino existe; `507` sin disco para la copia; `400` el resto |
+| `GET /volumes/{name}/snapshots` | 200 | `400` nombre; `404`; `500` |
+| `POST /volumes/{name}/snapshots` · `restore` | 200 | `413`/`400` cuerpo; `400`; `404`; `409` en uso, otra operación, repetido o tope; `507` sin disco; `500` |
+| `DELETE /volumes/{name}/snapshots/{snap}` | 204 | `400`; `404`; `409`; `500` |
+| `GET /registries` | 200 | `500` |
+| `POST /registries` | 200 | `413`/`400` cuerpo; `400` validación; `500` |
+| `DELETE /registries/{host}` | 204 | `400` host; `404` no había; `500` |
+| `GET /images/{name}/recipe` | 200 | `400` nombre; **`404` cualquier fallo al leerla** |
+| `GET /images/{name}/files` | 200 | `400` `max`; `404` no está en la imagen; **`400` el resto, también imagen inexistente** |
+| `PUT /images/{name}/files` | 200 (**también si el fichero no está y no hay `create`**, con `error` en el cuerpo) | **`413` cualquier fallo al leer el cuerpo** (16 MiB); `400` JSON, fuente o modo; `413` contenido > 8 MiB; `409` ocupada; `500`; `400` el resto |
+| `GET /images/{name}/blob` (y `HEAD`) | 200 | `400` nombre o `part`; `404`; `500` |
+| `PUT /images/{name}/blob` | 201; 200 sin cambios | `400` nombre, `part`, sha o cuerpo truncado; `409` existe con otra forma o en uso; `413` > 16 GiB; `500` |
+| `GET /oci/blobs/{digest}` | 200 | `400` digest; `404` |
+| `PUT /oci/blobs/{digest}` | 201; 200 sin cambios | `400` digest, tamaño o sha; `411` sin `Content-Length`; `413` > 16 GiB; `507` caché llena; `500` |
+| `GET /snapshots` | 200 | — |
+| `GET /snapshots/{name}` | 200 | `snapshotStatus` |
+| `PUT /snapshots/{name}/annotations/{key}` | 200 | `413`/`400` cuerpo; `snapshotStatus` |
+| `DELETE /snapshots/{name}/annotations/{key}` | 204 | `snapshotStatus` |
+| `PUT /snapshots/{name}/credentials` | 200 | `413`/`400` cuerpo (256 KiB); `snapshotStatus` |
+| `GET /snapshots/{name}/pool` | 200 | `snapshotStatus` |
+| `PUT /snapshots/{name}/pool` | 200 | `413`/`400` cuerpo; `snapshotStatus` |
+| `DELETE /snapshots/{name}` | 204 | `snapshotStatus` (**un error de E/S sale `400`**) |
+| `GET /store/{ns}` | 200 | **`400` cualquier error** |
+| `GET /store/{ns}/{key}` | 200 | `404`; `400` el resto |
+| `PUT /store/{ns}/{key}` | 204 | `413`/`400` cuerpo; `403` en `graph`; `400` el resto |
+| `DELETE /store/{ns}/{key}` | 204 (también si no existía) | `403` en `graph`; `400` el resto |
+| `GET /machines/{ref}/logs` | 200 texto | `400` `tail`; **`404` cualquier error** |
+| `GET /machines/{ref}/credaudit` | 200 NDJSON | `400` parámetros; `404`; `500` |
+| `GET /machines/{ref}/egress` | 200 | `404` |
+| `POST /machines/{ref}/guest` | 200 (el estado del invitado va en el cuerpo) | `413`/`400` cuerpo; `400` `path` o `max_body_bytes`; `403` puerto no expuesto; `404`; `409` no corre o no se alcanza; `502` invitado inalcanzable o respuesta de más; `504` `wait_ms` vencido |
+| `POST /machines/{ref}/renew` | 200 | `413`/`400` cuerpo; `400` ttl negativo; `404`; `409` es un sandbox o no corre; **`502` el resto** |
+| `GET /machines/{ref}/ready` | 200 (no estar lista también) | `400` `wait`; `estadoDeListo` |
+| `POST /machines/{ref}/hooks` | 200 (también si fallaron) | `400` `wait`; `409` no llegó a lista sin respuesta del agente (p. ej. uno anterior); `estadoDeListo` |
+| `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `500`; `502` |
+| `POST /machines/{ref}/shell` | 101 | `426` sin `Upgrade`; `413`/`400` cuerpo (64 KiB); `objetivoConAgente`; `501`; `502`; `500` |
+| `GET` · `PUT` · `DELETE /machines/{ref}/files` | lo que diga el agente (2xx) | `400` sin `path`; `413` > 64 MiB; `objetivoConAgente`; `501` agente < v0.7; un 4xx del agente tal cual; un 5xx del agente, `502`; `500` |
+| `POST /shares/uploads` | 201 | `413`; `400`; `500` |
+| `POST /sandboxes` | 201 | `413`/`400` cuerpo; `400` ttl, `image`/`from`, `on_ttl`, imagen sin agente; `runStatus` y admisión; `504` el agente no contesta en 2 min (se borra) |
+| `GET /sandboxes` | 200 | — |
+| `GET /sandboxes/{ref}` | 200 | `404` (también si no es un sandbox) |
+| `POST /sandboxes/{ref}/renew` | 200 | `404`; `413`/`400` cuerpo; `400` ttl; `execStatus` |
+| `POST /sandboxes/{ref}/fork` | 201 | `404`; `413`/`400` cuerpo; `400` validación; `forkStatus` |
+| `DELETE /sandboxes/{ref}` | 204 | `404`; **`500` cualquier error** |
+| `POST /graphs` | 201 | `413`/`400` cuerpo; `graphStatus`; `409` existe o tope; admisión |
+| `GET /graphs` | 200 | — |
+| `GET /graphs/{ref}` | 200 | `404`; `409` prefijo ambiguo; `400` el resto |
+| `POST /graphs/{ref}/freeze` · `thaw` | 200 | `graphStatus` (**un nodo en estado inválido sale `400`**); admisión |
+| `POST /graphs/{ref}/snapshot` | 200 | `413`/`400` cuerpo; `graphStatus`; `409` |
+| `POST /graphs/{ref}/fork` | 201 | `413`/`400` cuerpo; `graphStatus`; `400` `count`; `409` |
+| `DELETE /graphs/{ref}` | 204 | `graphStatus` (el host también sale `400`) |
+| `GET /events` | 200 NDJSON | `500` sin flusher |
+| `GET /metrics` · `GET /procstats` | 200 | — |
+| `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; **`400` cualquier error** |
+| `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` puerto < 1024 (inquilino); `publicarStatus` |
+| `DELETE /machines/{ref}/publish` | 204 | `404` sin máquina o sin publicación; `400` `host` |
+| `GET /publish` | 200 | — |
+
+En **negrita**, lo que no sigue la regla de `cicloStatus` (`404` lo que no
+existe, `409` el estado, `500` el host) y se corregirá antes de 1.0.
 
 ## Rutas retiradas en v0.6
 

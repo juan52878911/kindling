@@ -1219,7 +1219,7 @@ como suyas.
 Llevado más lejos en una prueba de estrés sobre un host de 4 GB: **142 microVMs
 simultáneas en 3,9 GB**, con la memoria libre plana mientras el PSS total crecía — y un
 rechazo determinista y explicado en la 143 en vez de un OOM. Detalles en
-[`docs/estabilidad.md`](estabilidad.md).
+[`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md).
 
 Si lo que buscas es densidad, hay además una palanca opt-in del lado del host: **zram**
 (swap comprimido en RAM) para las páginas anónimas que divergen entre copias — guía
@@ -1637,7 +1637,7 @@ permite que N instancias compartan páginas.
 | [`CHANGELOG.md`](../CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](RELEASE-v0.2.0.md) y [v0.3.0](RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
 | [`docs/three-layers.md`](three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
-| [`docs/estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
+| [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](chispa.md) · [`docs/CHISPA-EVAL.md`](CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
 | [`docs/chispa-serverless.md`](chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling ai chispa deploy`, thaw y rendimiento medidos frente a en proceso |
 | [`docs/intent.md`](intent.md) | Tareas de intención del gateway de IA: plantillas → intención Chispa + Chispa-slots → codificador, con puerta; el dominio como esquema JSON o `intent.Domain` en Go |
