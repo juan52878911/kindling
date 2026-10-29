@@ -13,13 +13,20 @@
 # systemd (de tiempo de ejecución, en /run/systemd/system: desaparece al
 # reiniciar), su raíz bajo /srv y su socket bajo /run, y lo borra todo al acabar.
 #
-#   sudo OLD_DIR=/ruta/v0.17 NEW_DIR=/ruta/head ./94-e2e-upgrade.sh
+#   sudo NEW_DIR=/ruta/head ./94-e2e-upgrade.sh
 #
 #   OLD_DIR   kling (y kling-guest) de la versión anterior; sin él, OLD_TAG se
 #             baja con install.sh (necesita red)
-#   OLD_TAG   la etiqueta anterior (por defecto v0.17.0)
+#   OLD_TAG   la etiqueta anterior; por defecto la última release publicada
+#             anterior a la nueva (la N-1, por el API de GitHub)
 #   NEW_DIR   los binarios nuevos, con nombre de release (kling-linux-amd64…) o
 #             a secas (kling, kling-guest), y SHA256SUMS si se quiere verificar
+#   FROM      de dónde saca upgrade los nuevos: download (por defecto) los sirve
+#             como una release por https en 127.0.0.1, con certificado propio
+#             (KLING_UPGRADE_REPO + SSL_CERT_FILE), y los baja y verifica como
+#             de GitHub; dir usa -from-dir (con -insecure si no hay SHA256SUMS).
+#             download necesita openssl y que la versión nueva sea una
+#             etiqueta válida (v0.21.0-e2e.abc, no un git describe con -3-g…)
 #   NAME      nombre del daemon privado (por defecto kt-e2e-upgrade): unidad
 #             NAME.service, raíz /srv/NAME, socket /run/NAME/kling.sock
 #   IMAGES    de dónde copiar el kernel y las imágenes (/var/lib/kindling/images)
@@ -31,9 +38,10 @@
 # resto. Salida en inglés, como el CLI.
 set -uo pipefail
 
-OLD_TAG="${OLD_TAG:-v0.17.0}"
+OLD_TAG="${OLD_TAG:-}"
 OLD_DIR="${OLD_DIR:-}"
 NEW_DIR="${NEW_DIR:?NEW_DIR: directory with the new binaries}"
+FROM="${FROM:-download}"
 NAME="${NAME:-kt-e2e-upgrade}"
 IMAGES="${IMAGES:-/var/lib/kindling/images}"
 IMAGE="${IMAGE:-toolchain}"
@@ -57,27 +65,8 @@ contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 # vuelta_atras: upgrade dice "rolled back to <versión>" con la que da el binario
 # viejo: "0.17.0" el de la release (install.sh), "v0.17.0" uno sellado a mano.
 vuelta_atras() { contiene "$1" "rolled back to $OLD_TAG" || contiene "$1" "rolled back to ${OLD_TAG#v}"; }
-# mismo_estado compara dos state.json por su contenido: v0.17 los escribe
-# desde un mapa, en otro orden cada vez.
-mismo_estado() {
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-def norma(x):
-    if isinstance(x, dict):
-        return {k: norma(v) for k, v in x.items()}
-    if isinstance(x, list):
-        x = [norma(v) for v in x]
-        if all(isinstance(v, dict) and "id" in v for v in x):
-            x.sort(key=lambda v: v["id"])
-        return x
-    return x
-try:
-    a, b = (norma(json.load(open(p))) for p in sys.argv[1:3])
-except (OSError, ValueError):
-    sys.exit(1)
-sys.exit(0 if a == b else 1)
-PY
-}
+# shellcheck source=scripts/lib-e2e-upgrade.sh
+. "$(dirname "$0")/lib-e2e-upgrade.sh"
 die()  { echo "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "run it as root (sudo): it installs a systemd unit and kling upgrade needs root"
@@ -99,7 +88,24 @@ kn() { "$NEWK" "$@"; }
 # -ldflags "-X main.Version=..." (los dos "dev") upgrade contesta "nothing to
 # do" y todo lo demás falla en cascada.
 NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
-case "$NEWV" in ""|dev|"${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
+case "$NEWV" in ""|dev) die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
+if [ -z "$OLD_TAG" ]; then
+  OLD_TAG=$(ultima_release_anterior "$NEWV")
+  [ -n "$OLD_TAG" ] || die "cannot tell the release before $NEWV (GitHub API): set OLD_TAG"
+fi
+case "$NEWV" in "${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\", the same as OLD_TAG";; esac
+NEWTAG="v${NEWV#v}"
+case "$FROM" in
+  download)
+    etiqueta_valida "$NEWTAG" || die "FROM=download needs the new kling to be a release tag, and it says \"$NEWV\": build it with -X main.Version=vX.Y.Z-e2e.N, or use FROM=dir"
+    command -v openssl >/dev/null || die "FROM=download needs openssl (or use FROM=dir)" ;;
+  dir) ;;
+  *) die "FROM: download or dir" ;;
+esac
+# Los esquemas que lee el nuevo, de su boca: el kling roto del paso 2 dice
+# los mismos, y lo que se espera de la migración sale de ahí.
+NEW_SCHEMAS=$(kn upgrade -schemas 2>/dev/null) || die "the new kling does not answer upgrade -schemas"
+NEW_STATE=$(esquema_soportado "$NEWK" state)
 
 cleanup() {
   if [ "$KEEP" = 1 ]; then echo; echo "KEEP=1: $BASE and $NAME.service left as they are"; return; fi
@@ -110,8 +116,9 @@ cleanup() {
   # KillMode=process deja vivas las microVMs: las que quedaran, fuera.
   pkill -f -- "$ROOT/" >/dev/null 2>&1
   rm -f "$UNIT"; systemctl daemon-reload
+  [ -n "${SRV_PID:-}" ] && kill "$SRV_PID" >/dev/null 2>&1
   # Montajes que el daemon dejara bajo su raíz.
-  grep -o " $ROOT[^ ]*" /proc/mounts | sort -r | while read -r mnt; do umount -l "$mnt" 2>/dev/null; done
+  grep -o " ${ROOT}[^ ]*" /proc/mounts | sort -r | while read -r mnt; do umount -l "$mnt" 2>/dev/null; done
   rm -rf "$BASE" "$RUN"
 }
 trap cleanup EXIT
@@ -169,8 +176,33 @@ out=$(k run -name up-gold-src -image "$IMAGE" $EXEC 2>&1) && out=$(k save up-gol
 k rm up-gold-src >/dev/null 2>&1
 out=$(k volume create up-vol -size 64M 2>&1) && ok "volume" || bad "volume create" "a volume" "$out"
 FROZEN=$(idde up-frozen); STOPPED=$(idde up-stopped)
-schema=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('schema',0) if isinstance(d,dict) else 0)" "$ROOT/state.json")
-[ "$schema" = 0 ] && ok "state.json written by $OLD_TAG (schema 0)" || bad "old state.json" "schema 0" "$schema"
+# El esquema que escribe la anterior: 0 hasta v0.17, 1 o 2 (con copias en
+# diferencial) desde v0.18. Lo que se espera después sale de él.
+OLD_STATE=$(schema_de "$ROOT/state.json")
+case "$OLD_STATE" in
+  [0-9]*) [ "$OLD_STATE" -le "$NEW_STATE" ] && ok "state.json written by $OLD_TAG (schema $OLD_STATE; the new one reads up to $NEW_STATE)" \
+            || bad "old state.json" "a schema the new kling reads (<= $NEW_STATE)" "$OLD_STATE" ;;
+  *) bad "old state.json" "a schema" "unreadable" ;;
+esac
+
+# La release nueva, servida como la de GitHub (FROM=download): sus binarios
+# con nombre de release y su SHA256SUMS bajo /releases/download/<etiqueta>/.
+if [ "$FROM" = download ]; then
+  WWW="$BASE/www/releases/download/$NEWTAG"; mkdir -p "$WWW"
+  for g in kling kling-guest kling-chispa; do
+    src="$NEW_DIR/$g-linux-$ARCH"; [ -f "$src" ] || src="$NEW_DIR/$g"
+    [ -f "$src" ] && cp "$src" "$WWW/$g-linux-$ARCH"
+  done
+  ( cd "$WWW" && sha256sum -- * > SHA256SUMS )
+  servir_release "$BASE/www" "$NEWTAG" "$BASE" || die "could not start the local https release server ($BASE/server.log)"
+  export KLING_UPGRADE_REPO="$SRV_URL" SSL_CERT_FILE="$BASE/cert.pem"
+  NUEVO=(-tag "$NEWTAG")
+  echo "  (release $NEWTAG served at $SRV_URL)"
+elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
+  NUEVO=(-from-dir "$NEW_DIR")
+else
+  NUEVO=(-from-dir "$NEW_DIR" -insecure)
+fi
 
 # ── 2. upgrade fallido: el nuevo no arranca y se vuelve solo ─────────────────
 step "2. A new daemon that does not start is rolled back"
@@ -179,7 +211,7 @@ ROTO="$BASE/roto"; mkdir -p "$ROTO"
 cat > "$ROTO/kling" <<EOF
 #!/bin/sh
 case "\$1" in
-  upgrade) echo '{"kling":"$NEWV","api":1,"schemas":{"state":2,"meta":1,"credentials":1}}' ;;
+  upgrade) echo '$NEW_SCHEMAS' ;;
   version) echo "kling $NEWV" ;;
   *) echo "broken on purpose" >&2; exit 1 ;;
 esac
@@ -201,23 +233,36 @@ st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" |
 
 # ── 3. upgrade de verdad ─────────────────────────────────────────────────────
 step "3. Upgrade $OLD_TAG -> $NEWV"
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure -dry-run 2>&1)
-contiene "$out" "state.json: schema 0 -> 1" && cmp -s "$BIN/kling" "$OLDK" \
-  && ok "dry run lists the migration and changes nothing" || bad "dry run" "the plan, nothing changed" "$out"
+out=$(kn upgrade -unit "$NAME" "${NUEVO[@]}" -dry-run 2>&1)
+contiene "$out" "plan: " && cmp -s "$BIN/kling" "$OLDK" \
+  && ok "dry run shows the plan and changes nothing" || bad "dry run" "the plan, nothing changed" "$out"
+PLAN_MIGRA=no; contiene "$out" "state.json: schema $OLD_STATE ->" && PLAN_MIGRA=yes
+[ "$OLD_STATE" = 0 ] && [ "$PLAN_MIGRA" = no ] && bad "dry run" "state.json: schema 0 -> 1" "$out"
 # Lo de justo antes, no lo del paso 1: el viejo reescribe su state.json al
 # pararse y arrancar en el paso 2, y un rm suyo se guarda un momento después.
 cp "$ROOT/state.json" "$BASE/state.before"
 t0=$(date +%s%N)
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
+out=$(kn upgrade -unit "$NAME" "${NUEVO[@]}" 2>&1); rc=$?
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
-[ $rc = 0 ] && contiene "$out" "upgraded" && ok "kling upgrade in ${ms} ms" || bad "upgrade" "upgraded" "rc=$rc: $out"
+[ $rc = 0 ] && contiene "$out" "upgraded" && ok "kling upgrade ($FROM) in ${ms} ms" || bad "upgrade" "upgraded" "rc=$rc: $out"
+[ "$FROM" = download ] && { contiene "$out" "from release $NEWTAG" && ok "downloaded and verified from $SRV_URL" || bad "download" "from release $NEWTAG" "$out"; }
 v=$(kn version 2>&1 | sed -n 2p)
 contiene "$v" "${NEWV#v}" && ok "daemon answers as $NEWV" || bad "new daemon" "$NEWV" "$v"
 cmp -s "$BIN/kling" "$NEWK" && ok "$BIN/kling replaced" || bad "binary" "the new one" "something else"
 [ -f "$LIB/kling-guest" ] && { cmp -s "$LIB/kling-guest" "$OLD_DIR/kling-guest" && bad "kling-guest" "replaced" "the old one" || ok "kling-guest replaced"; }
-schema=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('schema'))" "$ROOT/state.json" 2>&1)
-[ "$schema" = 1 ] && ok "state.json migrated to schema 1" || bad "state.json" "schema 1" "$schema"
-mismo_estado "$ROOT/state.json.v0.bak" "$BASE/state.before" && ok "state.json.v0.bak is the old state" || bad "v0.bak" "the old state.json" "missing or different"
+schema=$(schema_de "$ROOT/state.json")
+BAK="$ROOT/state.json.v$OLD_STATE.bak"
+MIGRO=no; [ -f "$BAK" ] && MIGRO=yes
+case "$schema" in
+  [0-9]*) [ "$schema" -ge "$OLD_STATE" ] && [ "$schema" -le "$NEW_STATE" ] && ok "state.json at schema $schema (was $OLD_STATE)" \
+            || bad "state.json" "a schema between $OLD_STATE and $NEW_STATE" "$schema" ;;
+  *) bad "state.json" "a schema" "unreadable" ;;
+esac
+[ "$MIGRO" = "$PLAN_MIGRA" ] && ok "the plan said what happened (state.json migration: $MIGRO)" \
+  || bad "migration" "as in the dry run ($PLAN_MIGRA)" "$MIGRO"
+if [ "$MIGRO" = yes ]; then
+  mismo_estado "$BAK" "$BASE/state.before" && ok "$(basename "$BAK") is the old state" || bad "$(basename "$BAK")" "the old state.json" "different"
+fi
 ls "$ROOT/upgrade/backups"/*/manifest.json >/dev/null 2>&1 && ok "backup with manifest" || bad "backup" "upgrade/backups/*/manifest.json" "none"
 st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen" || bad "frozen" frozen "$st"
 st=$(estado "$STOPPED"); [ "$st" = stopped ] && ok "stopped machine still stopped" || bad "stopped" stopped "$st"
@@ -249,9 +294,9 @@ contiene "$out" "freezing $FROZEN again" && ok "the machine the new daemon woke 
   || bad "refreeze before rollback" "freezing $FROZEN again" "$out"
 v=$(k version 2>&1 | sed -n 2p)
 contiene "$v" "${OLD_TAG#v}" && ok "$OLD_TAG answers again" || bad "after -rollback" "$OLD_TAG" "$v"
-schema=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('schema',0) if isinstance(d,dict) else 0)" "$ROOT/state.json")
-[ "$schema" = 0 ] && ok "state.json back to schema 0" || bad "state.json after -rollback" "schema 0" "$schema"
-[ ! -e "$ROOT/state.json.v0.bak" ] && ok "migration copy consumed" || bad "v0.bak" "gone" "still there"
+schema=$(schema_de "$ROOT/state.json")
+[ "$schema" = "$OLD_STATE" ] && ok "state.json back to schema $OLD_STATE" || bad "state.json after -rollback" "schema $OLD_STATE" "$schema"
+[ "$MIGRO" = no ] || { [ ! -e "$BAK" ] && ok "migration copy consumed" || bad "$(basename "$BAK")" "gone" "still there"; }
 st=$(estado "$FROZEN"); [ "$st" = frozen ] && ok "frozen machine still frozen under $OLD_TAG" || bad "frozen" frozen "$st"
 out=$(k thaw up-frozen 2>&1)
 contiene "$out" "running" && ok "and $OLD_TAG thaws it" || bad "thaw under $OLD_TAG" "running" "$out"
@@ -263,8 +308,12 @@ k freeze up-frozen >/dev/null 2>&1
 
 # ── 6. -rollback con el daemon caído ─────────────────────────────────────────
 step "6. kling upgrade -rollback with the daemon down"
-out=$(kn upgrade -unit "$NAME" -from-dir "$NEW_DIR" -insecure 2>&1); rc=$?
-[ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again" || bad "second upgrade" "upgraded" "rc=$rc: $out"
+# Con FROM=download, sin -tag: la última release, por la redirección de
+# /releases/latest como en GitHub.
+OTRA=("${NUEVO[@]}"); como="$FROM"
+[ "$FROM" = download ] && { OTRA=(); como="latest release"; }
+out=$(kn upgrade -unit "$NAME" ${OTRA[@]+"${OTRA[@]}"} 2>&1); rc=$?
+[ $rc = 0 ] && contiene "$out" "upgraded" && ok "upgraded again ($como)" || bad "second upgrade" "upgraded" "rc=$rc: $out"
 systemctl stop "$NAME"
 out=$(kn upgrade -unit "$NAME" -rollback 2>&1); rc=$?
 [ $rc = 0 ] && contiene "$out" "no daemon answers" && vuelta_atras "$out" \
