@@ -87,6 +87,7 @@ type Publicador struct {
 	plazoMarcar, barrido time.Duration
 
 	guardando sync.Mutex
+	guardados sync.WaitGroup // guardados en segundo plano aún en curso
 	mu        sync.Mutex
 	por       map[string]*maquina // id de máquina → sus puertos
 	ctx       context.Context
@@ -269,7 +270,7 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	if len(mq.puertos) > 0 {
 		p.por[mc.ID] = mq
 	}
-	go p.guardar()
+	p.guardarFondo()
 	return pubDe(mq), nil
 }
 
@@ -762,6 +763,19 @@ func (p *Publicador) ocioso(miembros []*api.Machine, pubs map[string]estadoPub, 
 }
 
 // ── persistencia ─────────────────────────────────────────────────────────────
+
+// guardarFondo guarda sin bloquear a quien publica; Esperar aguarda a que
+// acaben los guardados en curso.
+func (p *Publicador) guardarFondo() {
+	p.guardados.Add(1)
+	go func() {
+		defer p.guardados.Done()
+		p.guardar()
+	}()
+}
+
+// Esperar vuelve cuando no queda ningún guardado en segundo plano.
+func (p *Publicador) Esperar() { p.guardados.Wait() }
 
 func (p *Publicador) guardar() {
 	if p.ruta == "" {
