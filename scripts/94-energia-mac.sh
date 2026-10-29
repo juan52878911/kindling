@@ -122,6 +122,7 @@ medir() {
   local pm="" pmpid=""
   if sudo -n true 2>/dev/null; then
     pm="$TMPBASE/kling-energia/$esc.pm"
+    # shellcheck disable=SC2024 # a propósito: el fichero es del usuario, solo powermetrics necesita root
     sudo -n powermetrics --samplers tasks --show-process-energy -i $((STEP*1000)) -n $((n-1)) > "$pm" 2>/dev/null &
     pmpid=$!
   fi

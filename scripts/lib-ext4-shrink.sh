@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Encogido seguro de una imagen ext4: funciones compartidas por
 # 70-build-minimal-image.sh, 71-build-glibc-base.sh y 81-base-image.sh.
 # Se importa con `. lib-ext4-shrink.sh`, no se ejecuta sola.
