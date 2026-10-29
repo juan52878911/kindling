@@ -1,0 +1,163 @@
+{
+  "bench": "energia-mac",
+  "date": "2026-10-28T19:11:53-05:00",
+  "vmm": "hv",
+  "label": "qos0",
+  "image": "redis-7-alpine",
+  "duration_s": 180,
+  "step_s": 5,
+  "env": {
+    "KLING_HV_QOS": "0"
+  },
+  "power_source": "AC Power",
+  "macos": "26.5.1",
+  "model": "Mac16,1",
+  "kling": "kling v0.18.0-283-g8b6be11a",
+  "units": {
+    "power": "macOS energy impact (top POWER)",
+    "idlew": "wakeups/s",
+    "csw": "context switches/s"
+  },
+  "scenarios": [
+    {
+      "scenario": "idle-daemon",
+      "samples": 36,
+      "processes": 1,
+      "total": {
+        "power": {
+          "mean": 0.072,
+          "p50": 0.1,
+          "p90": 0.2
+        },
+        "idlew": {
+          "mean": 0.011,
+          "p50": 0.0,
+          "p90": 0.0
+        },
+        "csw": {
+          "mean": 14.667,
+          "p50": 9.6,
+          "p90": 46.6
+        }
+      },
+      "by_role": {
+        "daemon": {
+          "power": {
+            "mean": 0.072,
+            "p50": 0.1,
+            "p90": 0.2
+          },
+          "idlew": {
+            "mean": 0.011,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "csw": {
+            "mean": 14.667,
+            "p50": 9.6,
+            "p90": 46.6
+          }
+        }
+      }
+    },
+    {
+      "scenario": "idle-3",
+      "samples": 36,
+      "processes": 4,
+      "total": {
+        "power": {
+          "mean": 1.853,
+          "p50": 1.8,
+          "p90": 2.2
+        },
+        "idlew": {
+          "mean": 7.606,
+          "p50": 8.0,
+          "p90": 12.4
+        },
+        "csw": {
+          "mean": 213.478,
+          "p50": 204.6,
+          "p90": 262.6
+        }
+      },
+      "by_role": {
+        "vmm": {
+          "power": {
+            "mean": 0.586,
+            "p50": 0.6,
+            "p90": 0.7
+          },
+          "idlew": {
+            "mean": 2.528,
+            "p50": 2.4,
+            "p90": 4.4
+          },
+          "csw": {
+            "mean": 62.531,
+            "p50": 61.2,
+            "p90": 76.0
+          }
+        },
+        "daemon": {
+          "power": {
+            "mean": 0.094,
+            "p50": 0.0,
+            "p90": 0.3
+          },
+          "idlew": {
+            "mean": 0.022,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "csw": {
+            "mean": 25.883,
+            "p50": 3.8,
+            "p90": 80.8
+          }
+        }
+      }
+    },
+    {
+      "scenario": "frozen-3",
+      "samples": 36,
+      "processes": 1,
+      "total": {
+        "power": {
+          "mean": 0.106,
+          "p50": 0.1,
+          "p90": 0.3
+        },
+        "idlew": {
+          "mean": 0.039,
+          "p50": 0.0,
+          "p90": 0.2
+        },
+        "csw": {
+          "mean": 17.167,
+          "p50": 4.2,
+          "p90": 51.0
+        }
+      },
+      "by_role": {
+        "daemon": {
+          "power": {
+            "mean": 0.106,
+            "p50": 0.1,
+            "p90": 0.3
+          },
+          "idlew": {
+            "mean": 0.039,
+            "p50": 0.0,
+            "p90": 0.2
+          },
+          "csw": {
+            "mean": 17.167,
+            "p50": 4.2,
+            "p90": 51.0
+          }
+        }
+      }
+    }
+  ]
+}

@@ -373,7 +373,7 @@ atribuye. `/metrics` añade las mismas cifras:
 | `kling_host_mem_available_mib` | lo que el host aún puede dar: `kern.memorystatus_level` sobre `hw.memsize` en macOS, `MemAvailable` en Linux |
 
 El banco de energía reproducible (`scripts/94-energia-mac.sh`, sin sudo) y lo
-medido están en [benchmarks.md](benchmarks.md#energía-en-el-mac).
+medido están en [benchmarks.md](benchmarks.md#energy-on-the-mac).
 
 ## Límites frente a Linux
 
