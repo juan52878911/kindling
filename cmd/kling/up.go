@@ -22,7 +22,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -926,20 +925,6 @@ func markYes(ok bool, yes, no string) string {
 		return "✓ " + yes
 	}
 	return "✗ " + no
-}
-
-// httpOK comprueba que una URL responde 2xx. Se usa con /healthz, que está
-// abierto por diseño y por tanto no necesita token.
-func httpOK(url string) error {
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %s", resp.Status)
-	}
-	return nil
 }
 
 // extensionUnits son las unidades de systemd que declaran las extensiones.

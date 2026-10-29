@@ -31,12 +31,11 @@ const (
 
 // Node es una plantilla analizada.
 type Node struct {
-	kind  nodeKind
-	text  string
-	kids  []*Node
-	name  string // regla o lista
-	slot  string // hueco que rellena la lista
-	count float64
+	kind nodeKind
+	text string
+	kids []*Node
+	name string // regla o lista
+	slot string // hueco que rellena la lista
 }
 
 // maxTemplateBytes acota lo que se analiza; las plantillas reales son de

@@ -20,13 +20,12 @@ import (
 // maquinasFalsas es un gestor con máquinas cuyo "invitado" es un servidor de
 // este proceso: Forwards lleva cada puerto a su dirección, como en el Mac.
 type maquinasFalsas struct {
-	mu        sync.Mutex
-	ms        map[string]*api.Machine
-	thaws     int
-	freezes   []string
-	gfreezes  []string
-	alThaw    func(mc *api.Machine) // cambia el reenvío al descongelar
-	actividad map[string]Actividad
+	mu       sync.Mutex
+	ms       map[string]*api.Machine
+	thaws    int
+	freezes  []string
+	gfreezes []string
+	alThaw   func(mc *api.Machine) // cambia el reenvío al descongelar
 }
 
 func (f *maquinasFalsas) Get(ref string) (*api.Machine, bool) {

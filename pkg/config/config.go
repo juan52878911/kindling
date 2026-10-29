@@ -745,13 +745,6 @@ func mask(s string) string {
 	return s[:4] + "…" + s[len(s)-4:]
 }
 
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return ""
-}
-
 func itoa(n int) string {
 	if n == 0 {
 		return ""

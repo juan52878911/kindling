@@ -29,11 +29,10 @@ var (
 
 // Reader descomprime un flujo .xz.
 type Reader struct {
-	r       *bufio.Reader
-	check   byte
-	block   *blockReader
-	done    bool
-	started bool
+	r     *bufio.Reader
+	check byte
+	block *blockReader
+	done  bool
 }
 
 // NewReader lee la cabecera del flujo.

@@ -102,19 +102,6 @@ func copiasFalsas(t *testing.T, m *Manager, fallarEn int) func() []api.RunReques
 	}
 }
 
-// deSnapshot devuelve las máquinas registradas que salieron del snapshot name.
-func deSnapshot(m *Manager, name string) []api.Machine {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []api.Machine
-	for _, mc := range m.byID {
-		if mc.From == name {
-			out = append(out, *mc)
-		}
-	}
-	return out
-}
-
 func snapshotsFork(t *testing.T, m *Manager) []string {
 	t.Helper()
 	dirs, _ := filepath.Glob(filepath.Join(m.root, "snapshots", "fork-*"))
