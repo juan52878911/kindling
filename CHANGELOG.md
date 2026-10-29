@@ -10,21 +10,30 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Releases ship the guest kernel and the `min` image for amd64 and arm64 (`vmlinux-<arch>.zst`, `min-<arch>.ext4.zst`), and `kling up` on a Mac downloads them when missing, checked against the release's `SHA256SUMS`: no Linux host needed for a first `kling run -image min`.
 - Homebrew: each release attaches a `kling.rb` formula (darwin-arm64 and linux, depends on e2fsprogs, with a service that runs the daemon); `kling upgrade` refuses binaries in Homebrew's Cellar and points to `brew upgrade kling`.
+- `/metrics`: `kling_machine_footprint_mib` (macOS), `kling_machine_cpu_seconds_total{core="p|e"}` (Apple Silicon; `all` on Linux), `kling_machine_energy_joules_total` (macOS), `kling_machine_state_seconds` and `kling_host_mem_available_mib`.
+- `kling top` on macOS shows each machine's memory and %CPU (and the share on P-cores) instead of "no /proc".
+- `kling doctor` warns about machines stuck mid-operation: a freeze that could not resume, or a removed machine whose VMM survived SIGKILL.
+- `scripts/94-energia-mac.sh`: a reproducible energy bench on the Mac (no sudo), JSON in `docs/bench-data/`.
+- The daemon publishes ports on 127.0.0.1 (`POST/DELETE /machines/{ref}/publish`, `GET /publish`, `RunRequest.Publish`, capability `publish`): they survive the CLI and a daemon restart, wake a frozen machine on the first connection, and go away with the machine. `kling run -p` and `kling compose up` use it; `kling ps` shows `PORTS`. UDP on Linux only.
+- `kling compose up -d`, `compose ps`, `logs [-f] [service]`, `exec`, `stop`/`start` (freeze/thaw), `restart`, `down -v`; `-f`/`-p` before the subcommand and Docker's long flags (`--detach`, `--volumes`, `--follow`...).
+- `daemon.idle_freeze` (default 10m on macOS, 0 = never): a project with published ports and no connections for that long is frozen; the next connection wakes it. `kling.idle=keep` opts out.
+- Compose reads `.env` next to the file, `$VAR` without braces, and fails on `${VAR:?msg}` like Docker. `ports: "80"` takes a free host port.
+- `docs/docker-a-kindling.md`: Docker and Compose commands and keys, one by one; compose warnings link to it.
 
 ### Changed
 
 - The per-microVM network limit is no longer a fixed 16 MiB/s: `daemon.net_mibps` (or `KLING_NET_MIBPS`) sets the default and `RunRequest.net_mibps` asks for another; `kling run -share` and compose ask for 256. Reading a shared folder in the lab went from 21 to ~167 MiB/s (p50, n=5); writes stay at ~12 MiB/s (not the limiter).
+- Live shares are faster: the agent acknowledges writes once it has the data and sends contiguous ones together (errors come back on the next write, `fsync` or `close`), reads ahead 4 MiB instead of 128 KiB, caches symlink targets, and the daemon allows 8 large operations in flight per session instead of 4. An older agent or daemon keeps the previous behaviour.
+
+### Security
+
+- Live shares: two relative symlinks that were each valid could add up to point outside the folder (`x -> a/up/../..` plus `a/up -> ..`). Targets must now be canonical (`..` only at the start), the link's directory may not be named through another link, and a concurrent `rename` can no longer race the check.
+- Credential proxy: a 502 on a presigned SigV4 URL no longer echoes the outgoing URL (real access key id and signature); the real access key id and the signature the proxy emitted are redacted in S3 errors and `Authorization` echoes.
 
 ### Fixed
 
 - `kling upgrade -from-dir` refuses a directory without `SHA256SUMS` unless you pass `-insecure`, and fsyncs the directory after swapping each binary.
 - `internal/share` builds on 32-bit Linux (`linux/arm`, `386`): stat times are widened to int64.
-- Credential proxy: a 502 on a presigned SigV4 URL no longer echoes the outgoing URL (real access key id and signature); the real access key id and the signature the proxy emitted are redacted in S3 errors and `Authorization` echoes.
-- `/metrics`: `kling_machine_footprint_mib` (macOS), `kling_machine_cpu_seconds_total{core="p|e"}` (Apple Silicon; `all` on Linux), `kling_machine_energy_joules_total` (macOS), `kling_machine_state_seconds` and `kling_host_mem_available_mib`.
-- `kling top` on macOS shows each machine's memory and %CPU (and the share on P-cores) instead of "no /proc".
-- `kling doctor` warns about machines stuck mid-operation: a freeze that could not resume, or a removed machine whose VMM survived SIGKILL.
-- `scripts/94-energia-mac.sh`: a reproducible energy bench on the Mac (no sudo), JSON in `docs/bench-data/`.
-
 - A dump or a golden is stamped with the VMM that launched the machine, not the daemon's: a `kling-vz` machine readopted by a daemon set to `hv` no longer looks restorable by `kling-hv`.
 - Ctrl-C on `kling freeze` no longer kills the machine: the dump finishes, and a resume that fails is retried by the daemon instead of a SIGKILL.
 - A thaw whose client left after the memory was loaded still resyncs the guest's clock and RNG.
@@ -34,29 +43,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Battery mode resumes a machine when a request came in while it was being paused.
 - A paused machine resumed after the Mac slept gets its clock resynced.
 - On battery the daemon's watcher wakes less when no machine runs, on a fixed grid; dot-names in the root no longer count as `kling-vz` dumps for `daemon.vmm: auto`.
-- The daemon publishes ports on 127.0.0.1 (`POST/DELETE /machines/{ref}/publish`, `GET /publish`, `RunRequest.Publish`, capability `publish`): they survive the CLI and a daemon restart, wake a frozen machine on the first connection, and go away with the machine. `kling run -p` and `kling compose up` use it; `kling ps` shows `PORTS`. UDP on Linux only.
-- `kling compose up -d`, `compose ps`, `logs [-f] [service]`, `exec`, `stop`/`start` (freeze/thaw), `restart`, `down -v`; `-f`/`-p` before the subcommand and Docker's long flags (`--detach`, `--volumes`, `--follow`...).
-- `daemon.idle_freeze` (default 10m on macOS, 0 = never): a project with published ports and no connections for that long is frozen; the next connection wakes it. `kling.idle=keep` opts out.
-- Compose reads `.env` next to the file, `$VAR` without braces, and fails on `${VAR:?msg}` like Docker. `ports: "80"` takes a free host port.
-- `docs/docker-a-kindling.md`: Docker and Compose commands and keys, one by one; compose warnings link to it.
-
-### Fixed
-
 - A graph edge to a service that is not listening yet gets a reset at once (kling-vz/kling-hv) instead of an accepted connection that closes: on hv the test compose app answers in 0.25 s instead of 2.24 s (p50).
 - Compose: an interrupted template prep no longer blocks the next `up` ("machine name is taken"); `up`/`down` refuse a project that belongs to another compose file, and two `up` of one project don't run at once.
 - With `VolumeWait`, `NODE_PATH`/`PYTHONPATH` are computed after the volumes are mounted, for the service and for `exec`.
 - Healthchecks run as the service's `user:`, not root (`ExecRequest.User`); `healthcheck: disable: true` wins over `test`.
 - Compose: `PIN: 0123` keeps its leading zero; `0.0.0.0:` ports warn that they are published on 127.0.0.1 only.
-### Security
-
-- Live shares: two relative symlinks that were each valid could add up to point outside the folder (`x -> a/up/../..` plus `a/up -> ..`). Targets must now be canonical (`..` only at the start), the link's directory may not be named through another link, and a concurrent `rename` can no longer race the check.
-
-### Changed
-
-- Live shares are faster: the agent acknowledges writes once it has the data and sends contiguous ones together (errors come back on the next write, `fsync` or `close`), reads ahead 4 MiB instead of 128 KiB, caches symlink targets, and the daemon allows 8 large operations in flight per session instead of 4. An older agent or daemon keeps the previous behaviour.
-
-### Fixed
-
 - Live shares: recreating a file the host had just deleted (while the guest still had it cached) failed with `ENOENT`; the agent now answers `ESTALE` so the kernel looks it up again and creates it.
 - Live shares: when the host's inotify queue overflows the daemon rescans every watched path and reports what changed, instead of dropping those changes; hitting the watch limit is logged once.
 - kling-hv: pausing boosts the vCPU threads' QoS and re-kicks any vCPU that has not stopped after 1 ms (khv_pause p99 with 4 idle vCPUs on a loaded Mac: up to 104 ms before, 0.19 ms after).
