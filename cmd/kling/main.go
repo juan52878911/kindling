@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -41,10 +42,11 @@ func main() {
 		printUsage(os.Stdout)
 		os.Exit(2)
 	}
-	// Los nombres de antes se traducen a los de ahora (tree.go), con un aviso
-	// en stderr salvo los que se quedan para siempre.
-	if w := aliasWarning(os.Args[1], os.Args[2:]); w != "" {
-		fmt.Fprintln(os.Stderr, w)
+	// Los nombres retirados en 1.0 dicen el de ahora; los que se quedan se
+	// traducen en silencio (tree.go).
+	if err := removedAliasError(os.Args[1]); err != nil {
+		printError(os.Stderr, err)
+		os.Exit(codigoDeSalida(err))
 	}
 	cmd, args := resolveAlias(os.Args[1], os.Args[2:])
 
@@ -76,7 +78,7 @@ func main() {
 		if xerr != nil {
 			printError(os.Stderr, xerr)
 			if code == 0 {
-				code = 1
+				code = codigoDeSalida(xerr)
 			}
 		}
 		os.Exit(code)
@@ -93,7 +95,7 @@ func main() {
 		if xerr != nil {
 			printError(os.Stderr, xerr)
 			if code == 0 {
-				code = 1
+				code = codigoDeSalida(xerr)
 			}
 		}
 		os.Exit(code)
@@ -103,7 +105,7 @@ func main() {
 		if xerr != nil {
 			printError(os.Stderr, xerr)
 			if code == 0 {
-				code = 1
+				code = codigoDeSalida(xerr)
 			}
 		}
 		os.Exit(code)
@@ -232,13 +234,47 @@ type errConCodigo struct {
 func (e *errConCodigo) Error() string { return e.err.Error() }
 func (e *errConCodigo) Unwrap() error { return e.err }
 
+// Códigos de salida del CLI (docs/guide.md, "Exit codes"). Son contrato: un
+// script los distingue sin leer el texto.
+const (
+	salidaError          = 1   // cualquier otro error
+	salidaUso            = 2   // uso: comando, flag o argumentos que no valen
+	salidaDaemonViejo    = 3   // el daemon habla un API más viejo (api.ErrDaemonTooOld)
+	salidaDoradoObsoleto = 4   // la plantilla es de otro VMM o versión: rehacerla
+	salidaAgenteSinCap   = 5   // al agente de la imagen le falta una capacidad pedida
+	salidaInterrumpido   = 130 // Ctrl-C o SIGTERM (128 + SIGINT, como una shell)
+)
+
+// codigoDeSalida es el código con el que sale el CLI tras err. exec, shell y
+// try salen con el del comando remoto (ver main).
 func codigoDeSalida(err error) int {
+	if err == nil {
+		return 0
+	}
 	var e *errConCodigo
 	if errors.As(err, &e) {
 		return e.code
 	}
+	var viejo *api.ErrDaemonTooOld
+	var sinCap *errAgenteSinCapacidad
+	switch {
+	case interrumpido.Load():
+		return salidaInterrumpido
+	case errors.As(err, &viejo):
+		return salidaDaemonViejo
+	case api.IsStaleGolden(err):
+		return salidaDoradoObsoleto
+	case errors.As(err, &sinCap):
+		return salidaAgenteSinCap
+	case strings.HasPrefix(err.Error(), "usage: "):
+		return salidaUso
+	}
 	return plugin.ExitCode(err)
 }
+
+// interrumpido se enciende cuando ctxWithSignals recibe la señal: lo que
+// falle después es la interrupción, y sale 130.
+var interrumpido atomic.Bool
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -265,25 +301,6 @@ func loadConfig() *config.Config {
 		return &config.Config{}
 	}
 	return cfg
-}
-
-// resolveCPUPct devuelve el techo de CPU eligiendo entre el flag nuevo -cpu-pct y
-// el alias deprecado -cpu. -cpu se mantiene por compatibilidad pero avisa: colisiona
-// visualmente con -cpus (número de vCPUs), a un solo carácter y en el mismo comando.
-func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
-	usedOld := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "cpu" {
-			usedOld = true
-		}
-	})
-	if usedOld {
-		fmt.Fprintln(os.Stderr, "warning: -cpu is deprecated; use -cpu-pct (it looks like -cpus, which sets vCPU count)")
-		if pct == 0 {
-			return old
-		}
-	}
-	return pct
 }
 
 // flagsGiven son los de names que se dieron en la línea de comandos, en ese
@@ -351,7 +368,22 @@ func egressForRun(fs *flag.FlagSet, from, egress, allow string, cfg *config.Conf
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
 func ctxWithSignals() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// signal.NotifyContext, apuntando que llegó la señal (codigoDeSalida).
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ch:
+			interrumpido.Store(true)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		cancel()
+	}
 }
 
 // ── daemon ────────────────────────────────────────────────────────────────────
@@ -592,7 +624,7 @@ func cmdRun(args []string) error {
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	ttl := units.SecondsVar(fs, "ttl", 0, "time until it freezes itself: 10m, 1h (bare number = seconds; 0 = never)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core (0 = default)")
-	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
+	flagRetirado(fs, "cpu", "cpu-pct")
 	service := fs.String("service", "", "service it belongs to (groups machines in topo and metrics)")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
@@ -693,7 +725,7 @@ func cmdRun(args []string) error {
 		TTLSeconds:   ttlForRun(fs, *ttl, cfg.Defaults.TTL),
 		// El flag va en CPUPct; el valor por defecto de la configuración, aparte:
 		// el del dorado y el de la receta de la imagen le ganan (ver RunRequest).
-		CPUPct:              resolveCPUPct(fs, *cpuPct, *cpu),
+		CPUPct:              *cpuPct,
 		CPUPctDefault:       cfg.Defaults.CPUPct,
 		WaitReady:           *waitReady,
 		ReadyTimeoutSeconds: int(readyTimeout.Seconds()),
@@ -712,6 +744,13 @@ func cmdRun(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if e := agenteSinCapacidad(api.RunRequest{Env: env}, mc); e != nil {
+		// El daemon la da por fallida en cuanto lo ve; el código lo dice ya.
+		if *asJSON {
+			_ = json.NewEncoder(os.Stdout).Encode(mc)
+		}
+		return e
 	}
 	if *asJSON {
 		if err := json.NewEncoder(os.Stdout).Encode(mc); err != nil {
@@ -1588,6 +1627,12 @@ func writeInfo(c *api.Client, i *api.Info) {
 		vmm = "(not found: the daemon could not run it)"
 	}
 	fmt.Printf("%-14s%s\n", backend+":", vmm)
+	fmt.Printf("api:          %d (this CLI speaks %d)\n", i.DaemonAPI(), api.APIVersion)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if ag := versionesAgente(ctx, c); len(ag) > 0 {
+		fmt.Printf("guest agent:  %s (as announced by its machines)\n", strings.Join(ag, ", "))
+	}
+	cancel()
 	fmt.Printf("machines:     %d\n", i.Machines)
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))

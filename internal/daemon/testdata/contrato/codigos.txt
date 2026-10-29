@@ -1,0 +1,115 @@
+# Códigos de estado por ruta: <ruta>  ←  <petición>  →  <HTTP> <code del cuerpo>.
+# Escenario: servidorCodigos (máquinas parada y dormida, imágenes hay y usada,
+# dorado de usada), sin VMM. Lo genera TestContratoCodigos
+# (internal/daemon/contrato_codigos_test.go):
+#   go test ./internal/daemon -run TestContratoCodigos -update
+# Cambiar un código exige subir api.APIVersion (internal/contrato).
+# api: 1
+
+DELETE /graphs/{ref}  ←  DELETE /graphs/nada  →  404 not_found
+DELETE /images/{name}  ←  DELETE /images/nada  →  404 not_found
+DELETE /images/{name}  ←  DELETE /images/usada  →  409 conflict
+DELETE /machines/{ref}  ←  DELETE /machines/nadie  →  404 not_found
+DELETE /machines/{ref}/credentials/{env}  ←  DELETE /machines/parada/credentials/mal-env  →  400 bad_request
+DELETE /machines/{ref}/files  ←  DELETE /machines/nadie/files?path=/x  →  404 not_found
+DELETE /machines/{ref}/publish  ←  DELETE /machines/nadie/publish  →  404 not_found
+DELETE /registries/{host}  ←  DELETE /registries/nada.example  →  404 not_found
+DELETE /sandboxes/{ref}  ←  DELETE /sandboxes/nadie  →  404 not_found
+DELETE /snapshots/{name}  ←  DELETE /snapshots/nada  →  404 not_found
+DELETE /snapshots/{name}/annotations/{key}  ←  DELETE /snapshots/nada/annotations/k  →  404 not_found
+DELETE /store/{ns}/{key}  ←  DELETE /store/ns/nada  →  204 -
+DELETE /volumes/{name}  ←  DELETE /volumes/nada  →  404 not_found
+DELETE /volumes/{name}/snapshots/{snap}  ←  DELETE /volumes/nada/snapshots/s1  →  404 not_found
+GET /events  ←  GET /events  →  200 -
+GET /graphs  ←  GET /graphs  →  200 -
+GET /graphs/{ref}  ←  GET /graphs/nada  →  404 not_found
+GET /images  ←  GET /images  →  200 -
+GET /images/{name}/blob  ←  GET /images/nada/blob  →  404 not_found
+GET /images/{name}/files  ←  GET /images/nada/files?path=/etc/hostname  →  400 bad_request
+GET /images/{name}/recipe  ←  GET /images/nada/recipe  →  404 not_found
+GET /info  ←  GET /info  →  200 -
+GET /machines  ←  GET /machines  →  200 -
+GET /machines/{ref}  ←  GET /machines/nadie  →  404 not_found
+GET /machines/{ref}  ←  GET /machines/parada  →  200 -
+GET /machines/{ref}/credaudit  ←  GET /machines/nadie/credaudit  →  404 not_found
+GET /machines/{ref}/egress  ←  GET /machines/nadie/egress  →  404 not_found
+GET /machines/{ref}/files  ←  GET /machines/nadie/files?path=/x  →  404 not_found
+GET /machines/{ref}/logs  ←  GET /machines/nadie/logs  →  404 not_found
+GET /machines/{ref}/ready  ←  GET /machines/nadie/ready  →  404 not_found
+GET /metrics  ←  GET /metrics  →  200 -
+GET /oci/blobs/{digest}  ←  GET /oci/blobs/malo  →  400 bad_request
+GET /procstats  ←  GET /procstats  →  200 -
+GET /publish  ←  GET /publish  →  200 -
+GET /registries  ←  GET /registries  →  200 -
+GET /sandboxes  ←  GET /sandboxes  →  200 -
+GET /sandboxes/{ref}  ←  GET /sandboxes/nadie  →  404 not_found
+GET /snapshots  ←  GET /snapshots  →  200 -
+GET /snapshots/{name}  ←  GET /snapshots/dorado  →  200 -
+GET /snapshots/{name}  ←  GET /snapshots/nada  →  404 not_found
+GET /snapshots/{name}/pool  ←  GET /snapshots/nada/pool  →  404 not_found
+GET /store/{ns}  ←  GET /store/ns  →  200 -
+GET /store/{ns}/{key}  ←  GET /store/ns/nada  →  404 not_found
+GET /volumes  ←  GET /volumes  →  200 -
+GET /volumes/{name}/snapshots  ←  GET /volumes/nada/snapshots  →  404 not_found
+POST /cow/store/grow  ←  POST /cow/store/grow {  →  400 bad_request
+POST /graphs  ←  POST /graphs {  →  400 bad_request
+POST /graphs/{ref}/fork  ←  POST /graphs/nada/fork {}  →  404 not_found
+POST /graphs/{ref}/freeze  ←  POST /graphs/nada/freeze  →  404 not_found
+POST /graphs/{ref}/snapshot  ←  POST /graphs/nada/snapshot {}  →  404 not_found
+POST /graphs/{ref}/thaw  ←  POST /graphs/nada/thaw  →  404 not_found
+POST /images  ←  POST /images {  →  400 bad_request
+POST /machines  ←  POST /machines {"image":  →  400 bad_request
+POST /machines  ←  POST /machines {"image":"../x"}  →  400 bad_request
+POST /machines  ←  POST /machines {"image":"hay","disk_mib":1}  →  400 bad_request
+POST /machines  ←  POST /machines {"image":"hay","from":"nada"}  →  404 not_found
+POST /machines  ←  POST /machines {"image":"hay","mem_mib":512,"mem_max_mib":256}  →  400 bad_request
+POST /machines  ←  POST /machines {"image":"hay","name":"parada"}  →  409 name_taken
+POST /machines  ←  POST /machines {"image":"hay","on_ttl":"explode"}  →  400 bad_request
+POST /machines  ←  POST /machines {"image":"hay"}  →  500 internal
+POST /machines  ←  POST /machines {"image":"nope"}  →  404 not_found
+POST /machines/{ref}/commit  ←  POST /machines/nadie/commit {"name":"x"}  →  400 bad_request
+POST /machines/{ref}/credentials  ←  POST /machines/parada/credentials {"credentials":[]}  →  400 bad_request
+POST /machines/{ref}/exec  ←  POST /machines/nadie/exec {  →  400 bad_request
+POST /machines/{ref}/exec  ←  POST /machines/nadie/exec {"cmd":["true"]}  →  404 not_found
+POST /machines/{ref}/freeze  ←  POST /machines/nadie/freeze  →  404 not_found
+POST /machines/{ref}/freeze  ←  POST /machines/parada/freeze  →  409 conflict
+POST /machines/{ref}/guest  ←  POST /machines/nadie/guest {}  →  404 not_found
+POST /machines/{ref}/hooks  ←  POST /machines/nadie/hooks {}  →  404 not_found
+POST /machines/{ref}/mmds  ←  POST /machines/nadie/mmds {}  →  404 not_found
+POST /machines/{ref}/mmds  ←  POST /machines/parada/mmds {}  →  409 conflict
+POST /machines/{ref}/pause  ←  POST /machines/dormida/pause  →  409 conflict
+POST /machines/{ref}/pause  ←  POST /machines/nadie/pause  →  404 not_found
+POST /machines/{ref}/pause  ←  POST /machines/parada/pause  →  409 conflict
+POST /machines/{ref}/publish  ←  POST /machines/nadie/publish {}  →  404 not_found
+POST /machines/{ref}/renew  ←  POST /machines/nadie/renew  →  404 not_found
+POST /machines/{ref}/resize  ←  POST /machines/nadie/resize {"mem_mib":  →  400 bad_request
+POST /machines/{ref}/resize  ←  POST /machines/nadie/resize {"mem_mib":512}  →  404 not_found
+POST /machines/{ref}/shell  ←  POST /machines/nadie/shell  →  426 upgrade_required
+POST /machines/{ref}/squeeze  ←  POST /machines/dormida/squeeze  →  409 conflict
+POST /machines/{ref}/squeeze  ←  POST /machines/nadie/squeeze  →  404 not_found
+POST /machines/{ref}/start  ←  POST /machines/dormida/start  →  409 conflict
+POST /machines/{ref}/start  ←  POST /machines/nadie/start  →  404 not_found
+POST /machines/{ref}/start  ←  POST /machines/parada/start  →  500 internal
+POST /machines/{ref}/stop  ←  POST /machines/nadie/stop  →  404 not_found
+POST /machines/{ref}/thaw  ←  POST /machines/nadie/thaw  →  404 not_found
+POST /machines/{ref}/thaw  ←  POST /machines/parada/thaw  →  409 conflict
+POST /registries  ←  POST /registries {  →  400 bad_request
+POST /sandboxes  ←  POST /sandboxes {  →  400 bad_request
+POST /sandboxes/{ref}/fork  ←  POST /sandboxes/nadie/fork {}  →  404 not_found
+POST /sandboxes/{ref}/renew  ←  POST /sandboxes/nadie/renew  →  404 not_found
+POST /shares/uploads  ←  POST /shares/uploads  →  201 -
+POST /volumes  ←  POST /volumes {  →  400 bad_request
+POST /volumes/{name}/clone  ←  POST /volumes/nada/clone {"to":"otro"}  →  400 bad_request
+POST /volumes/{name}/populate  ←  POST /volumes/nada/populate  →  400 bad_request
+POST /volumes/{name}/restore  ←  POST /volumes/nada/restore {}  →  400 bad_request
+POST /volumes/{name}/snapshots  ←  POST /volumes/nada/snapshots {}  →  404 not_found
+PUT /images/{name}/blob  ←  PUT /images/nada/blob x  →  400 bad_request
+PUT /images/{name}/files  ←  PUT /images/nada/files?path=/etc/hostname x  →  400 bad_request
+PUT /machines/{ref}/files  ←  PUT /machines/nadie/files?path=/x x  →  404 not_found
+PUT /machines/{ref}/labels  ←  PUT /machines/nadie/labels {}  →  400 bad_request
+PUT /oci/blobs/{digest}  ←  PUT /oci/blobs/malo x  →  400 bad_request
+PUT /snapshots/{name}/annotations/{key}  ←  PUT /snapshots/nada/annotations/k 1  →  404 not_found
+PUT /snapshots/{name}/credentials  ←  PUT /snapshots/nada/credentials {"credentials":[]}  →  404 not_found
+PUT /snapshots/{name}/pool  ←  PUT /snapshots/nada/pool {"size":1}  →  404 not_found
+PUT /store/{ns}/{key}  ←  PUT /store/graph/k 1  →  403 forbidden
+PUT /store/{ns}/{key}  ←  PUT /store/ns/k 1  →  204 -

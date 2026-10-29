@@ -6,6 +6,23 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- Error bodies carry a stable `code` next to `message` (`not_found`, `name_taken`, `machine_limit`, `tenant_quota`, `stale_golden`, `disk_full`, `insufficient_memory`…; capability `error-codes`); `api.IsMachineLimit`, `IsTenantQuota` and friends read it and fall back to the text with older daemons. New `api.IsNameTaken`, `IsStaleGolden`, `CodeOf`.
+- Capabilities `pool` (`GET/PUT /snapshots/{name}/pool`) and `egress-blocked` (`GET /machines/{ref}/egress`) for the two v0.19 routes that had none.
+- Contract goldens with tests: the daemon's routes and their authz action, the status code of each route, the JSON shape of every `pkg/api` type and the `-json` output of the main CLI commands; removing or changing a line fails unless `api.APIVersion` goes up.
+- Documented exit codes (`kling help`): 0 ok, 1 error, 2 usage, 3 daemon too old, 4 stale template, 5 the guest agent lacks a capability, 130 interrupted, N the remote code in `exec`/`shell`/`try`.
+- `kling version` and `status -v` show the API version, the VMM and the guest agent versions announced by the machines; `version -json` and `status -json` gain `api`, `daemon_api`, `vmm`/`backend` and `agents`.
+
+### Changed
+
+- The `kling compose` help lists `ps`, `logs`, `exec`, `stop`, `start` and `restart` (they already worked).
+
+### Removed
+
+- The CLI aliases that warned since v0.18: `rmi`, `images`, `volumes`, `sandboxes`, `info`, `resize`, `squeeze`, `mmds`, `models`, `chispa`, and the kling-mcp verbs `add`, `search`, `gateway`, `export`, `memory`, `migrate`; they exit 2 naming the new command. `commit`, `snapshots` and `plugins` stay.
+- `kling run -cpu` (use `-cpu-pct`) and `kling ai chispa deploy -vcpus` (use `-cpus`): they exit 2 naming the new flag.
+
 ## [0.20.0] - 2026-10-28
 
 `compose up -d` with ports published by the daemon and idle projects that freeze on their own, live shares about 4x faster on the Mac, and fixes from a security and durability audit. Images and templates built before this release keep their old guest agent and today's share speed; rebuild them (`compose up -fresh`, `image import -replace`) to get the faster shares. Upgrade with `kling upgrade`.

@@ -2,9 +2,26 @@ package api
 
 // Versión del API del daemon (docs/actualizar.md, §3.3).
 //
-// Las rutas nuevas se anuncian en Info.Capabilities y no cambian nada de esto.
-// APIVersion sube solo cuando se QUITA o se CAMBIA una ruta: entonces un
-// cliente de antes ya no puede fiarse de lo que sabía. El daemon la manda en
+// Lo nuevo se anuncia en Info.Capabilities y no cambia nada de esto.
+// APIVersion sube cuando un cliente de antes ya no puede fiarse de lo que
+// sabía, es decir, cuando se QUITA o se CAMBIA (nunca al añadir):
+//
+//   - una ruta, o la acción de autorización con la que se sirve
+//     (internal/daemon/testdata/contrato/rutas.txt);
+//   - el código de estado o el code de error que contesta una ruta
+//     documentada (internal/daemon/testdata/contrato/codigos.txt);
+//   - un campo JSON de un tipo de este paquete (nombre, opciones o tipo), un
+//     tipo exportado o el valor de una constante de cadena: estados,
+//     capacidades, códigos de error (pkg/api/testdata/json-tags.txt);
+//   - un campo de la salida -json del CLI (cmd/kling/testdata/contrato/json.txt);
+//   - la semántica de una ruta aunque no cambie su forma (p. ej. que commit
+//     pase a esperar "ready"): esto no lo ve ningún golden, es de quien revisa.
+//
+// Los goldens apuntan el APIVersion con el que se generaron ("# api: N") y
+// internal/contrato hace cumplir la regla: si una línea desaparece o cambia
+// sin que APIVersion suba, el test falla y -update se niega; al subirla hay
+// que regenerarlos todos. Subir APIVersion es un MAJOR del contrato 1.x
+// (docs/compatibilidad.md). El daemon la manda en
 // Info.API y, para que la vea cualquier petición sin preguntar /info, en la
 // cabecera X-Kling-API de cada respuesta. El cliente la compara:
 //

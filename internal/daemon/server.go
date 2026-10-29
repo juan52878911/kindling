@@ -37,7 +37,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -658,7 +658,35 @@ func fail(w http.ResponseWriter, code int, err error) {
 	if errors.As(err, &se) && se.Code != 0 {
 		code = se.Code
 	}
-	writeJSON(w, code, api.Error{Message: err.Error()})
+	writeJSON(w, code, api.Error{Message: err.Error(), Code: codigoDeError(code, err)})
+}
+
+// codigoDeError es el code estable del cuerpo de error (api.ErrorCode,
+// capacidad "error-codes"): el específico si se reconoce la causa y casa con
+// su código HTTP documentado, y si no el genérico del código HTTP. Lo que
+// reconoce aquí por el texto (tope, cuota, disco) lo escribe el propio daemon
+// con las marcas de pkg/api; el cliente ya no tiene que mirarlo.
+func codigoDeError(status int, err error) api.ErrorCode {
+	switch status {
+	case http.StatusConflict:
+		switch {
+		case errors.Is(err, machine.ErrNameTaken):
+			return api.CodeNameTaken
+		case errors.Is(err, machine.ErrDoradoObsoleto):
+			return api.CodeStaleGolden
+		case api.IsMachineLimit(err):
+			return api.CodeMachineLimit
+		}
+	case api.StatusTenantQuota:
+		if api.IsTenantQuota(err) {
+			return api.CodeTenantQuota
+		}
+	case api.StatusDiskFull:
+		if api.IsDiskFull(err) {
+			return api.CodeDiskFull
+		}
+	}
+	return api.CodeForStatus(status)
 }
 
 // jsonMaxBody es el tope de los handlers que decodifican JSON directo del

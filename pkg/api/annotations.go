@@ -124,11 +124,7 @@ func (c *Client) ImageFile(ctx context.Context, image, path string) ([]byte, err
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
-		var e Error
-		if json.Unmarshal(b, &e) != nil || e.Message == "" {
-			e.Message = resp.Status
-		}
-		return nil, &StatusError{Code: resp.StatusCode, Message: e.Message}
+		return nil, statusErrorDe(resp.StatusCode, resp.Status, b)
 	}
 	return b, nil
 }

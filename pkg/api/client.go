@@ -130,12 +130,8 @@ func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		var e Error
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if e.Message == "" {
-			e.Message = resp.Status
-		}
-		return &StatusError{Code: resp.StatusCode, Message: e.Message}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return statusErrorDe(resp.StatusCode, resp.Status, b)
 	}
 	if out == nil {
 		return nil

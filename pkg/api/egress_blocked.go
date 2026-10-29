@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// CapabilityEgressBlocked: GET /machines/{ref}/egress (llegó en v0.19 sin
+// capacidad; un daemon de entonces la sirve sin anunciarla).
+const CapabilityEgressBlocked = "egress-blocked"
+
 // BlockedDest es un destino que la política de salida de una máquina le cortó:
 // un dominio (Kind "dns") o IP:puerto (Kind "ip"), con los intentos vistos.
 // Nunca lleva datos de la conexión, solo a dónde iba.

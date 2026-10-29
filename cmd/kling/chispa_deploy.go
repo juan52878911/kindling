@@ -53,7 +53,7 @@ func cmdChispaDeploy(args []string) error {
 	// el thaw, rechazaba conexiones con 64 MiB (se quedaba corto de memoria).
 	mem := units.MiBVar(fs, "mem", 128, "microVM memory: 64M, 128M (bare number = MiB; 64-128 is usually enough; see docs/chispa-serverless.md)")
 	cpus := fs.Int("cpus", 1, "microVM vCPUs")
-	vcpusOld := fs.Int("vcpus", 0, "deprecated alias of -cpus")
+	flagRetirado(fs, "vcpus", "cpus")
 	warmText := fs.String("warm-text", "hello world", "text sent once before freezing, to touch the model's pages")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
 	rebuild := fs.Bool("rebuild", false, "rebuild the image even if one with this name exists")
@@ -67,12 +67,6 @@ func cmdChispaDeploy(args []string) error {
 		return fmt.Errorf("usage: kling ai chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128M] [-cpus 1]")
 	}
 	vcpus := cpus
-	if *vcpusOld > 0 {
-		// -cpus es el nombre en todos los demás comandos; -vcpus era el único
-		// disidente.
-		fmt.Fprintln(os.Stderr, "warning: -vcpus is deprecated; use -cpus")
-		vcpus = vcpusOld
-	}
 	name := fs.Arg(0)
 	modelBytes, err := os.ReadFile(*modelPath)
 	if err != nil {

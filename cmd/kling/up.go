@@ -808,6 +808,8 @@ func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 	type daemonInfo struct {
 		OK          bool   `json:"ok"`
 		Version     string `json:"version,omitempty"`
+		API         int    `json:"api,omitempty"`
+		Backend     string `json:"backend,omitempty"`
 		Machines    int    `json:"machines"`
 		Root        string `json:"root,omitempty"`
 		KVM         bool   `json:"kvm"`
@@ -825,6 +827,8 @@ func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 	} else {
 		report.Daemon.OK = true
 		report.Daemon.Version = info.Version
+		report.Daemon.API = info.DaemonAPI()
+		report.Daemon.Backend, _ = vmmDe(info)
 		report.Daemon.Machines = info.Machines
 		report.Daemon.Root = info.Root
 		report.Daemon.KVM = info.KVM
