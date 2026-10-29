@@ -13,7 +13,8 @@
 #
 # Pre-requisitos:
 #   - Working tree limpio (sin cambios sin commitear)
-#   - main al día con origin/main
+#   - HEAD = main = origin/main: se etiqueta el commit que se comprobó
+#   - CI verde en ese commit (gh api .../check-runs); gh autenticado
 #   - Permisos para pushear tags al repo
 #   - CHANGELOG.md con la sección "## [X.Y.Z] - AAAA-MM-DD" (inglés, una
 #     línea por cambio): es lo único que llevan las notas de la release
@@ -23,9 +24,10 @@
 #   2. Verifica que ext/*/go.mod requieran kindling en esa misma versión
 #   3. Verifica que CHANGELOG.md tenga el bloque de la versión
 #      (scripts/release-notes.sh, el mismo que usa el workflow)
-#   4. Crea un tag anotado vX.Y.Z con mensaje corto
-#   5. Push del tag → activa .github/workflows/release.yml
-#   6. (Opcional) espera a que el workflow termine y abre la release en el browser
+#   4. Verifica que todos los checks de CI de ese commit acabaron en verde
+#   5. Crea un tag anotado vX.Y.Z con mensaje corto SOBRE ESE COMMIT
+#   6. Push del tag → activa .github/workflows/release.yml
+#   7. (Opcional) espera a ESE run del workflow y abre la release en el browser
 
 # -e y -u siempre; pipefail donde el sh lo tenga (bash, zsh, dash reciente).
 # Ningún paso depende de que un error se ignore: los que pueden fallar sin que
@@ -140,6 +142,42 @@ if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
     echo "local main ($LOCAL) != origin/main ($REMOTE): fetch/merge first" >&2
     exit 1
 fi
+# Lo que se comprueba aquí (go.mod de ext/, CHANGELOG, CI) es el árbol de
+# trabajo, que es HEAD: si HEAD no es main, se comprobaría una cosa y se
+# etiquetaría otra. Se etiqueta COMMIT, explícito, y no "lo que haya en HEAD".
+COMMIT="${REMOTE:-$LOCAL}"
+HEAD_SHA=$(git rev-parse --verify HEAD 2>/dev/null || echo "")
+if [ "$HEAD_SHA" != "$COMMIT" ]; then
+    echo "HEAD ($HEAD_SHA) is not main ($COMMIT): check out main before tagging" >&2
+    [ "$DRY_RUN" = "1" ] || exit 1
+fi
+REPO=$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')
+
+# ── CI verde ───────────────────────────────────────────────────────────────
+# Todos los check runs del commit, acabados y en verde (skipped y neutral
+# cuentan como verde: un job que se salta a propósito no es un fallo). Sin
+# ninguno, tampoco: un commit que CI no ha visto no se publica.
+ci_verde() {
+    command -v gh >/dev/null 2>&1 || { echo "gh CLI not found: cannot check CI for $COMMIT" >&2; return 1; }
+    # shellcheck disable=SC2016 # el $ es de jq, no del shell
+    RESUMEN=$(gh api "repos/$REPO/commits/$COMMIT/check-runs?per_page=100" --jq '
+        [.check_runs[] | {n: .name, s: .status, c: (.conclusion // "")}] as $r
+        | ($r | length) as $total
+        | ($r | map(select(.s != "completed")) | length) as $pend
+        | ($r | map(select(.s == "completed" and (.c | IN("success","skipped","neutral") | not))) | map(.n | gsub(" "; "_"))) as $mal
+        | "\($total) \($pend) \($mal | join(","))"') || { echo "gh api check-runs failed for $COMMIT" >&2; return 1; }
+    # shellcheck disable=SC2086 # se parte a propósito en sus tres campos
+    set -- $RESUMEN
+    TOTAL=${1:-0}; PEND=${2:-0}; MAL=${3:-}
+    if [ "$TOTAL" = 0 ]; then echo "no CI check runs for $COMMIT yet" >&2; return 1; fi
+    if [ "$PEND" != 0 ]; then echo "CI still running on $COMMIT ($PEND of $TOTAL checks pending)" >&2; return 1; fi
+    if [ -n "$MAL" ]; then echo "CI failed on $COMMIT: $MAL" >&2; return 1; fi
+    echo "CI green on $COMMIT ($TOTAL checks)"
+}
+if ! ci_verde; then
+    echo "see https://github.com/$REPO/commit/$COMMIT/checks" >&2
+    [ "$DRY_RUN" = "1" ] || exit 1
+fi
 
 # ── notas ──────────────────────────────────────────────────────────────────
 # Las notas son el bloque de esta versión en CHANGELOG.md y una línea de
@@ -154,7 +192,7 @@ MSG="release $VERSION — see CHANGELOG.md"
 
 if [ "$DRY_RUN" = "1" ]; then
     echo "(dry-run) would run:"
-    echo "  git tag -a $VERSION -m \"$MSG\""
+    echo "  git tag -a $VERSION -m \"$MSG\" $COMMIT"
     echo "  git push origin $VERSION"
     echo "GitHub Actions then builds and publishes the release with these notes:"
     echo ""
@@ -162,8 +200,8 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-echo "creating annotated tag $VERSION..."
-git tag -a "$VERSION" -m "$MSG"
+echo "creating annotated tag $VERSION on $COMMIT..."
+git tag -a "$VERSION" -m "$MSG" "$COMMIT"
 
 echo "pushing $VERSION to origin (this starts the workflow)..."
 git push origin "$VERSION"
@@ -174,11 +212,11 @@ cat <<EOF
 
   .github/workflows/release.yml is running. Progress:
 
-      https://github.com/$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')/actions
+      https://github.com/$REPO/actions
 
   When it finishes, the release is at:
 
-      https://github.com/$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')/releases/tag/$VERSION
+      https://github.com/$REPO/releases/tag/$VERSION
 EOF
 
 # ── esperar al workflow (opcional) ─────────────────────────────────────────
@@ -187,9 +225,21 @@ if [ "$WAIT" = "1" ]; then
         echo "gh CLI not found, cannot wait for the workflow" >&2
         exit 0
     fi
-    echo "waiting for the workflow..."
-    REPO=$(git config --get remote.origin.url | sed 's|.*github.com[:/]||;s|\.git$||')
-    gh run watch --exit-status --repo "$REPO" || {
+    # El run de ESTE tag: sin id, `gh run watch` pregunta (o coge otro run
+    # que esté en marcha). Tarda unos segundos en aparecer tras el push.
+    RUN_ID=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        RUN_ID=$(gh run list --repo "$REPO" --workflow release.yml --commit "$COMMIT" \
+            --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)
+        [ -n "$RUN_ID" ] && break
+        sleep 5
+    done
+    if [ -z "$RUN_ID" ]; then
+        echo "no release.yml run for $COMMIT after 60 s. See https://github.com/$REPO/actions" >&2
+        exit 1
+    fi
+    echo "waiting for run $RUN_ID..."
+    gh run watch "$RUN_ID" --exit-status --repo "$REPO" || {
         echo "the workflow failed. See:" >&2
         echo "  https://github.com/$REPO/actions" >&2
         exit 1
