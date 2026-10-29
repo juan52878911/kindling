@@ -188,7 +188,6 @@ func usageErr(err error) error { return &plugin.ExitError{Code: 2, Err: err} }
 
 // ── teléfonos ────────────────────────────────────────────────────────────────
 
-var reName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
 // phoneName: "3" es <prefijo>-3; cualquier otra cosa, el nombre tal cual.
 func (a *app) phoneName(arg string) string {

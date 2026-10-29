@@ -167,16 +167,3 @@ func trunc(s string, n int) string {
 	return string([]rune(s)[:n-1]) + "…"
 }
 
-// names lista los nombres de herramienta en compacto: es lo barato del catálogo.
-func names(tools []mcp.ToolSpec) string {
-	if len(tools) == 0 {
-		return ` <span class="muted">(no catalog)</span>`
-	}
-	ns := make([]string, 0, len(tools))
-	for _, t := range tools {
-		ns = append(ns, t.Name)
-	}
-	sort.Strings(ns)
-	return fmt.Sprintf(` — %d tool(s): <span class="tools">%s</span>`,
-		len(ns), esc(strings.Join(ns, ", ")))
-}
