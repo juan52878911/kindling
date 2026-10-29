@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func enUnaConfigTemporal(t *testing.T) string {
@@ -390,4 +392,29 @@ func TestSetNetMiBps(t *testing.T) {
 		}
 	}
 	t.Fatal("daemon.net_mibps no sale en Keys")
+}
+
+// daemon.idle_freeze: 0 o una duración de al menos un minuto; vacío es 10m
+// en el Mac y nunca en Linux.
+func TestSetIdleFreeze(t *testing.T) {
+	var c Config
+	for _, v := range []string{"10m", "1h", "0", ""} {
+		if err := c.Set("daemon.idle_freeze", v); err != nil || c.Daemon.IdleFreeze != v {
+			t.Fatalf("idle_freeze %q: %v", v, err)
+		}
+	}
+	for _, v := range []string{"5s", "x", "-1m"} {
+		if err := c.Set("daemon.idle_freeze", v); err == nil {
+			t.Fatalf("aceptó idle_freeze %q", v)
+		}
+	}
+	if d, _ := ParseIdleFreeze("", "darwin"); d != 10*time.Minute {
+		t.Fatalf("Mac: %v", d)
+	}
+	if d, _ := ParseIdleFreeze("", "linux"); d != 0 {
+		t.Fatalf("Linux: %v", d)
+	}
+	if !slices.ContainsFunc(c.Keys(), func(kv [2]string) bool { return kv[0] == "daemon.idle_freeze" }) {
+		t.Fatal("daemon.idle_freeze no sale en Keys")
+	}
 }

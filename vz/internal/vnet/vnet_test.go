@@ -243,15 +243,16 @@ func TestForwardReachesGuest(t *testing.T) {
 			t.Fatalf("through the forward: %q", got)
 		}
 	}
-	// Un puerto donde el invitado no escucha: la conexión se cierra, no cuelga.
+	// Un puerto donde el invitado no escucha: la conexión se corta con un
+	// RST (no un cierre limpio, que parecería una respuesta vacía), sin colgar.
 	addr2, _ := r.n.Forward(9999)
 	c, err := net.DialTimeout("tcp", addr2, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = c.SetDeadline(time.Now().Add(7 * time.Second))
-	if _, err := c.Read(make([]byte, 1)); err == nil {
-		t.Fatal("a forward to a closed guest port must fail")
+	if _, err := c.Read(make([]byte, 1)); err == nil || !strings.Contains(err.Error(), "reset") {
+		t.Fatalf("a forward to a closed guest port must be reset, got %v", err)
 	}
 	c.Close()
 	// El reenvío acepta aunque dentro no escuche nadie; Probe sí distingue.

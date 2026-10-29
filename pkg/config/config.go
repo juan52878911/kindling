@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -168,6 +169,31 @@ type Daemon struct {
 	// la petición no pide otro. 0 = 16. KLING_NET_MIBPS lo sustituye. Se lee
 	// en cada arranque en frío; en macOS no se aplica.
 	NetMiBps int `json:"net_mibps,omitempty"`
+	// IdleFreeze es daemon.idle_freeze: una máquina con puertos publicados
+	// (kling run -p, compose up) que lleva este plazo sin conexiones se
+	// congela, y la siguiente la despierta. Una duración de Go ("10m",
+	// "90s"); "0" = nunca; vacío = 10m en macOS y nunca en Linux.
+	// KLING_IDLE_FREEZE lo sustituye. Ver docs/desarrollo-local.md.
+	IdleFreeze string `json:"idle_freeze,omitempty"`
+}
+
+// ParseIdleFreeze interpreta daemon.idle_freeze ("0" o una duración de Go de
+// al menos un minuto). Vacío es el valor por defecto de goos.
+func ParseIdleFreeze(v, goos string) (time.Duration, error) {
+	switch v {
+	case "":
+		if goos == "darwin" {
+			return 10 * time.Minute, nil
+		}
+		return 0, nil
+	case "0", "never", "off":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 0, fmt.Errorf("daemon.idle_freeze must be 0 (never) or a duration of at least 1m like 10m or 1h, not %q", v)
+	}
+	return d, nil
 }
 
 // MaxNetMiBps es el tope de daemon.net_mibps y de RunRequest.NetMiBps: por
@@ -531,6 +557,11 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.BatteryMode = value
+		case "idle_freeze":
+			if _, err := ParseIdleFreeze(value, runtime.GOOS); err != nil {
+				return err
+			}
+			c.Daemon.IdleFreeze = value
 		case "battery_pause_after_seconds":
 			n, err := atoi()
 			if err != nil {
@@ -676,6 +707,7 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.battery_mode", c.Daemon.BatteryMode},
 		{"daemon.battery_pause_after_seconds", itoa(c.Daemon.BatteryPauseAfter)},
 		{"daemon.net_mibps", itoa(c.Daemon.NetMiBps)},
+		{"daemon.idle_freeze", c.Daemon.IdleFreeze},
 	}
 }
 

@@ -149,9 +149,26 @@ type Config struct {
 type GraphLinks interface {
 	Link(port uint16) bool
 	// Serve atiende la conexión: aceptar completa la del invitado (tras
-	// tener el destino) y rechazar le manda un RST.
+	// tener el destino) y rechazar le manda un RST. La conexión que da
+	// aceptar es un Abortable: Abort la corta con un RST.
 	Serve(ctx context.Context, port uint16, aceptar func() (net.Conn, error), rechazar func())
 }
+
+// Abortable es una conexión del invitado que se puede cortar con un RST
+// (no con un cierre limpio): un destino que rechazó la conexión se ve como
+// "connection reset" en el invitado, no como una respuesta vacía.
+type Abortable interface {
+	Abort()
+}
+
+// conexionInvitado es la conexión TCP del invitado con su endpoint, para
+// poder abortarla (Abortable).
+type conexionInvitado struct {
+	*gonet.TCPConn
+	ep tcpip.Endpoint
+}
+
+func (c *conexionInvitado) Abort() { c.ep.Abort() }
 
 // PGProxy es lo que la red necesita del proxy de bases de datos
 // (*credproxy.Proxy): si tiene algo que hacer y atender una conexión dado el
@@ -482,7 +499,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 				return nil, errors.New(err.String())
 			}
 			r.Complete(false)
-			return gonet.NewTCPConn(&wq, ep), nil
+			return &conexionInvitado{TCPConn: gonet.NewTCPConn(&wq, ep), ep: ep}, nil
 		}, func() { r.Complete(true) })
 		return
 	}
@@ -728,6 +745,12 @@ func (n *Net) acceptForward(l net.Listener, port uint16) {
 			gc, err := n.dialGuest(ctx, port)
 			cancel()
 			if err != nil {
+				// Con RST, no con un cierre limpio: quien conectó (el daemon,
+				// una arista de otro invitado) ve que nadie escucha en vez de
+				// una conexión aceptada que se cierra sin decir nada.
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0)
+				}
 				c.Close()
 				return
 			}

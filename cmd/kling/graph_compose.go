@@ -33,9 +33,14 @@ type traduccionCompose struct {
 	Antes   []string // órdenes a correr antes de `graph up`
 	Avisos  []string // una línea por cosa sin equivalente
 	Proyect string
-	// Publica son los puertos publicados en el host por nodo: {host, invitado}.
-	// `graph up` no los publica; `kling compose up` sí, en 127.0.0.1.
-	Publica map[string][][2]int
+	// Publica son los puertos publicados en el host por nodo (Host 0: uno
+	// libre al azar, como `ports: "80"` en Docker). `graph up` no los publica;
+	// `kling compose up` se los pide al daemon, en 127.0.0.1.
+	Publica map[string][]api.PortPublish
+
+	// etiquetas van en cada nodo del grafo (compose up: de qué compose es el
+	// proyecto, ver labelComposeFile). Vacío en from-compose.
+	etiquetas map[string]string
 
 	// base es el directorio del compose: con él, un bind mount (./src:/app) es
 	// una carpeta compartida rw del nodo. Vacío, se avisa y se salta.
@@ -63,7 +68,7 @@ var puertosDeImagen = map[string]int{
 
 var (
 	reDNSNodo    = regexp.MustCompile(`[^a-z0-9-]+`)
-	reVarCompose = regexp.MustCompile(`\$(\$|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\})`)
+	reVarCompose = regexp.MustCompile(`\$(\$|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}|[A-Za-z_][A-Za-z0-9_]*)`)
 )
 
 type servicioCompose struct {
@@ -72,7 +77,7 @@ type servicioCompose struct {
 	imagen  string
 	arch    string // de platform: (amd64|arm64); vacía = la del daemon
 	puertos []int
-	publ    [][2]int // {host, invitado} publicados en el host
+	publ    []api.PortPublish // publicados en el host
 	shares  []api.ShareSpec
 	env     [][2]string
 	cmd     []string
@@ -101,15 +106,21 @@ type depCompose struct {
 	cond string
 }
 
-// interpolarCompose resuelve ${VAR}, ${VAR:-def}, ${VAR-def} y $$ con lookup.
-// Una variable sin valor ni defecto queda vacía y se avisa.
-func interpolarCompose(src string, lookup func(string) (string, bool), aviso func(string)) string {
-	return reVarCompose.ReplaceAllStringFunc(src, func(m string) string {
+// interpolarCompose resuelve $VAR, ${VAR}, ${VAR:-def}, ${VAR-def},
+// ${VAR:+alt}, ${VAR:?msg} y $$ con lookup, como Docker Compose. Una variable
+// sin valor ni defecto queda vacía y se avisa; ${VAR:?msg} (o ${VAR?msg})
+// sin valor es un error, con msg.
+func interpolarCompose(src string, lookup func(string) (string, bool), aviso func(string)) (string, error) {
+	var errs []error
+	out := reVarCompose.ReplaceAllStringFunc(src, func(m string) string {
 		if m == "$$" {
 			return "$"
 		}
 		sub := reVarCompose.FindStringSubmatch(m)
 		nombre, op, def := sub[2], sub[3], sub[4]
+		if nombre == "" {
+			nombre = sub[1] // $VAR, sin llaves
+		}
 		v, ok := lookup(nombre)
 		switch op {
 		case ":-":
@@ -121,8 +132,13 @@ func interpolarCompose(src string, lookup func(string) (string, bool), aviso fun
 				return def
 			}
 		case ":?", "?":
-			if v == "" {
-				aviso(fmt.Sprintf("variable %s is required but not set", nombre))
+			if (op == ":?" && v == "") || (op == "?" && !ok) {
+				msg := def
+				if msg == "" {
+					msg = "required variable " + nombre + " is missing a value"
+				}
+				errs = append(errs, fmt.Errorf("variable %s: %s", nombre, msg))
+				return ""
 			}
 		case ":+", "+":
 			if v != "" || (op == "+" && ok) {
@@ -135,6 +151,66 @@ func interpolarCompose(src string, lookup func(string) (string, bool), aviso fun
 		}
 		return v
 	})
+	return out, errors.Join(errs...)
+}
+
+// leerDotEnv lee el fichero de variables (.env) del directorio del compose:
+// KEY=valor por línea, con # de comentario, `export ` delante y comillas
+// opcionales. No existir no es un error.
+func leerDotEnv(dir string) (map[string]string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, ficheroVariables))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for i, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(strings.TrimSuffix(l, "\r"))
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		l = strings.TrimPrefix(l, "export ")
+		k, v, ok := strings.Cut(l, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			return nil, fmt.Errorf("%s line %d: expected KEY=value", ficheroVariables, i+1)
+		}
+		v = strings.TrimSpace(v)
+		switch {
+		case len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"':
+			v = strings.NewReplacer(`\n`, "\n", `\"`, `"`, `\\`, `\`).Replace(v[1 : len(v)-1])
+		case len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'':
+			v = v[1 : len(v)-1]
+		default:
+			// Un comentario tras el valor: " #" (como Docker Compose).
+			if j := strings.Index(v, " #"); j >= 0 {
+				v = strings.TrimSpace(v[:j])
+			}
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// ficheroVariables es el que lee Docker Compose junto al compose.
+const ficheroVariables = ".env"
+
+// conDotEnv es lookup con el fichero de variables de dir debajo: el entorno
+// de la shell manda sobre el fichero, como en Docker Compose.
+func conDotEnv(dir string, lookup func(string) (string, bool)) (func(string) (string, bool), error) {
+	env, err := leerDotEnv(dir)
+	if err != nil || len(env) == 0 {
+		return lookup, err
+	}
+	return func(k string) (string, bool) {
+		if v, ok := lookup(k); ok {
+			return v, true
+		}
+		v, ok := env[k]
+		return v, ok
+	}, nil
 }
 
 // traducirCompose convierte el contenido de un compose.yaml. proyecto es el
@@ -146,10 +222,13 @@ func traducirCompose(datos []byte, proyecto string, forzar bool, lookup func(str
 // traducirComposeEn es traducirCompose con el directorio del compose, del que
 // cuelgan los bind mounts relativos (ver traduccionCompose.base).
 func traducirComposeEn(datos []byte, proyecto string, forzar bool, lookup func(string) (string, bool), base string) (*traduccionCompose, error) {
-	t := &traduccionCompose{base: base, Publica: map[string][][2]int{}}
+	t := &traduccionCompose{base: base, Publica: map[string][]api.PortPublish{}}
 	avisa := func(f string, a ...any) { t.Avisos = append(t.Avisos, "warning: "+fmt.Sprintf(f, a...)) }
 
-	texto := interpolarCompose(string(datos), lookup, func(s string) { avisa("%s", s) })
+	texto, err := interpolarCompose(string(datos), lookup, func(s string) { avisa("%s", s) })
+	if err != nil {
+		return t, err
+	}
 	raiz, err := parseYAML([]byte(texto))
 	if err != nil {
 		return nil, err
@@ -463,10 +542,12 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 			spec = fmt.Sprint(e)
 		}
 		spec = strings.TrimSuffix(spec, "/tcp")
-		if strings.HasSuffix(spec, "/udp") {
-			avisa("%s%s: %s: UDP is not supported", pre, k, spec)
+		udp := strings.HasSuffix(spec, "/udp")
+		if udp && k != "ports" {
+			avisa("%s%s: %s: UDP is not supported between services (only published, ports:)", pre, k, spec)
 			continue
 		}
+		spec = strings.TrimSuffix(spec, "/udp")
 		parts := strings.Split(spec, ":")
 		cont := parts[len(parts)-1]
 		if strings.Contains(cont, "-") {
@@ -482,14 +563,38 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 			avisa("%s%s: %s: port %d is the kindling guest agent; no edge can reach it", pre, k, spec, p)
 			continue
 		}
-		if k == "ports" && len(parts) > 1 {
-			h, err := strconv.Atoi(parts[len(parts)-2])
-			if err != nil || h < 1 || h > 65535 {
-				avisa("%sports: %s: host port not understood", pre, spec)
-			} else {
-				s.publ = append(s.publ, [2]int{h, p})
-				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on 127.0.0.1:%d)", pre, spec, h)
+		if k == "ports" {
+			// "80" (sin host) o "127.0.0.1::80": uno libre al azar, como Docker.
+			h, hs := 0, ""
+			if len(parts) > 1 {
+				hs = parts[len(parts)-2]
 			}
+			if len(parts) > 2 {
+				if ip := strings.Join(parts[:len(parts)-2], ":"); ip != "127.0.0.1" && ip != "localhost" {
+					avisa("%sports: %s: published on 127.0.0.1 only, not on %s (kindling never publishes on other interfaces)", pre, spec, ip)
+				}
+			}
+			if hs != "" {
+				n, err := strconv.Atoi(hs)
+				if err != nil || n < 1 || n > 65535 {
+					avisa("%sports: %s: host port not understood", pre, spec)
+					continue
+				}
+				h = n
+			}
+			q := api.PortPublish{Host: h, Guest: p}
+			donde := "127.0.0.1:" + strconv.Itoa(h)
+			if h == 0 {
+				donde = "a free 127.0.0.1 port"
+			}
+			if udp {
+				q.Proto = api.ProtoUDP
+				s.publ = append(s.publ, q)
+				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s/udp; Linux only)", pre, spec, donde)
+				continue // las aristas son TCP: no es un puerto del nodo
+			}
+			s.publ = append(s.publ, q)
+			avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s)", pre, spec, donde)
 		}
 		if !slicesHas(s.puertos, p) {
 			s.puertos = append(s.puertos, p)
@@ -691,6 +796,13 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 		avisa("%shealthcheck: expected a map", pre)
 		return
 	}
+	desactivado := false
+	defer func() {
+		// disable: true gana a test, vaya antes o después en el fichero.
+		if desactivado {
+			s.salud = nil
+		}
+	}()
 	for _, k := range clavesOrd(m) {
 		switch k {
 		case "test":
@@ -707,7 +819,7 @@ func (t *traduccionCompose) healthcheck(s *servicioCompose, v any, pre string, a
 			}
 		case "disable":
 			if b, _ := m[k].(bool); b {
-				s.salud = nil
+				desactivado = true
 			}
 		case "interval", "timeout", "start_period", "start_interval":
 			d, err := time.ParseDuration(fmt.Sprint(m[k]))
@@ -869,6 +981,13 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 				ss[i] = "{source: " + yq(sh.Source) + ", mount: " + yq(sh.Mount) + ", mode: " + sh.Mode + "}"
 			}
 			campos = append(campos, "shares: ["+strings.Join(ss, ", ")+"]")
+		}
+		if len(t.etiquetas) > 0 {
+			var ls []string
+			for _, k := range clavesOrd(t.etiquetas) {
+				ls = append(ls, k+": "+yq(t.etiquetas[k]))
+			}
+			campos = append(campos, "labels: {"+strings.Join(ls, ", ")+"}")
 		}
 		fmt.Fprintf(&b, "  %s: {%s}\n", s.nodo, strings.Join(campos, ", "))
 	}
@@ -1228,12 +1347,16 @@ func graphFromCompose(args []string) error {
 	if err != nil {
 		return err
 	}
+	abs, _ := filepath.Abs(path)
 	proyecto := *name
 	if proyecto == "" {
-		abs, _ := filepath.Abs(path)
 		proyecto = filepath.Base(filepath.Dir(abs))
 	}
-	t, err := traducirCompose(datos, proyecto, *name != "", os.LookupEnv)
+	lookup, err := conDotEnv(filepath.Dir(abs), os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	t, err := traducirCompose(datos, proyecto, *name != "", lookup)
 	if t != nil {
 		for _, a := range t.Avisos {
 			fmt.Fprintln(os.Stderr, a)

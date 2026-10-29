@@ -78,7 +78,16 @@ type ExecRequest struct {
 	Stdin          []byte `json:"stdin,omitempty"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 	MaxOutputBytes int    `json:"max_output_bytes,omitempty"`
+	// User corre el comando con ese usuario de la imagen ("nombre", "uid",
+	// "uid:gid"), o ExecUserService: el del servicio de la imagen (el `user:`
+	// de un compose), como Docker con los healthchecks. Vacío = root. Un
+	// agente anterior lo ignora.
+	User string `json:"user,omitempty"`
 }
+
+// ExecUserService en ExecRequest.User es "el usuario del servicio de la
+// imagen" (root si no tiene servicio o no declara usuario).
+const ExecUserService = "@service"
 
 // ExecEvent es una línea del flujo NDJSON de POST /machines/{ref}/exec.
 //

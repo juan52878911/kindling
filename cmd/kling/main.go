@@ -403,6 +403,7 @@ func cmdDaemon(args []string) error {
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
+	srv.SetIdleFreeze(idleFreezeConfig())
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -608,18 +609,13 @@ func cmdRun(args []string) error {
 	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
 	var publica publishFlag
-	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST or PORT; repeatable): kling stays in the foreground following the service, and wakes the machine if frozen")
+	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST, PORT, :GUEST for a free one, /udp on Linux; repeatable): the daemon keeps it while the machine exists and wakes it if frozen; kling stays in the foreground following the service")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if len(publica) > 0 && *asJSON {
 		return errors.New("-p keeps kling in the foreground; it doesn't go with -json")
 	}
-	lns, err := escucharPuertos(publica)
-	if err != nil {
-		return err
-	}
-
 	vols, err := volumeSet(volumes, *mount, *volRO)
 	if err != nil {
 		return err
@@ -702,6 +698,7 @@ func cmdRun(args []string) error {
 		WaitReady:           *waitReady,
 		ReadyTimeoutSeconds: int(readyTimeout.Seconds()),
 		Labels:              conPuertos(labels.merge(*service), publica),
+		Publish:             publica,
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
@@ -746,7 +743,7 @@ func cmdRun(args []string) error {
 		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
 	}
 	if len(publica) > 0 {
-		publicarEnPrimerPlano(ctx, client, endpoint, mc, publica, lns)
+		publicarEnPrimerPlano(ctx, client, endpoint, mc, publica)
 		return nil
 	}
 	if *allowExec {
@@ -922,9 +919,21 @@ func cmdPS(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	list, err := api.NewClient(hostOf(*host)).List(ctx)
+	client := api.NewClient(hostOf(*host))
+	list, err := client.List(ctx)
 	if err != nil {
 		return err
+	}
+	// Los puertos que publica el daemon (uno anterior no tiene la ruta: sin
+	// columna).
+	if pubs, err := client.Publications(ctx); err == nil {
+		por := map[string][]api.PortPublish{}
+		for _, p := range pubs {
+			por[p.Machine] = p.Ports
+		}
+		for _, mc := range list {
+			mc.Published = por[mc.ID]
+		}
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(list)
@@ -944,10 +953,13 @@ func cmdPS(args []string) error {
 	// La columna de carpetas solo aparece si alguna máquina tiene: quien no
 	// las usa no paga el ancho, y los scripts que leen la tabla de siempre
 	// siguen viendo la misma.
-	conShares, conListo := false, false
+	conShares, conListo, conPorts := false, false, false
 	for _, mc := range list {
 		if len(mc.Shares) > 0 {
 			conShares = true
+		}
+		if len(mc.Published) > 0 {
+			conPorts = true
 		}
 		// Igual con READY: solo si alguna imagen declara sonda o ganchos, o
 		// alguna arranca con impulso de CPU.
@@ -962,6 +974,9 @@ func cmdPS(args []string) error {
 	}
 	if conShares {
 		head += "\tSHARES"
+	}
+	if conPorts {
+		head += "\tPORTS"
 	}
 	fmt.Fprintln(tw, head)
 	var totalDisk int64
@@ -1003,6 +1018,13 @@ func cmdPS(args []string) error {
 		}
 		if conShares {
 			row += "\t" + sharesColumn(mc)
+		}
+		if conPorts {
+			ps := api.FormatPorts(mc.Published)
+			if ps == "" {
+				ps = "-"
+			}
+			row += "\t" + ps
 		}
 		fmt.Fprintln(tw, row)
 	}
