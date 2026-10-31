@@ -45,6 +45,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The swap admission error pointed to `docs/estabilidad.md`, now `docs/auditoria-estabilidad-2026-08.md`.
 - CI: `e2e-linux.yml` installs the `base` builder for its private daemon, so the toolchain image builds and `90-e2e.sh` and `94-e2e-upgrade.sh` stop falling back to `min`; `94-e2e-upgrade.sh` and `95-e2e-upgrade-mac.sh` only expect a refreeze on `-rollback` when `state.json` was migrated (otherwise the machine stays `running`).
+- Graph and compose YAML: block scalars (`|`, `>`, with `-`/`+` chomping and `|2` indentation indicators) are read as in YAML 1.2 instead of being rejected, and their content is literal text (quotes and `#` inside no longer fail with "unterminated quoted string"); a `command: >` string splits on line breaks too.
 
 ## [0.20.1] - 2026-10-28
 
