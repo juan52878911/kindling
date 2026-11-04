@@ -23,6 +23,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS (kling-hv): DNS answers are cached per machine and A/AAAA resolve in parallel (10 lookups 1480 → 80 ms on an M4).
+- macOS (kling-hv): the balloon has its statistics queue, so `kling machine squeeze` sees guest memory (136 MiB reclaimed instead of 4 on an idle machine); snapshot state v3, v1 and v2 still restore.
+- macOS: the daemon reads hv machines' footprint and CPU locally instead of over HTTP.
 - Go packages that are not part of the public API moved from `pkg/` to `internal/` (`aigw`, `chispa`, `codificador`, `digest`, `durable`, `esquema`, `intent`, `transport`, `von`; `pkg/share` is now `internal/shareproto`). `pkg/api`, `pkg/plugin` and `pkg/config` are the 1.x Go API; what other modules of the repo import (`guest`, `credproxy`, `scheduler`, `linkbroker`, `panico`, `units`) and `lazyre` (the type of `api.KeyPattern`) stay in `pkg/`.
 - The upgrade e2e starts from the previous release's real assets, checked against its `SHA256SUMS`, instead of piping `install.sh`.
 - `docs/compatibilidad.md`: the 1.0 checklist is down to what is still open, and the guest-agent requirements (`env` v0.18, `cmd` and `volume-wait` v0.19) are documented.
@@ -58,6 +61,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-hv: a short block write was reported as success to the guest; virtio queue sizes must be a power of two; a network RX chain shorter than the frame gets nothing instead of a cut header; the device-tree builder is bounds-checked; the `mem.file` fallback is 0600; PSCI CPU_ON reads registers under the lock.
+- kling-hv vsock: connections the host closed fully kept their slot, so a guest could exhaust the 64 slots and stop `exec`.
+- macOS: kling-hv and kling-vz start with a minimal environment instead of inheriting the daemon's (tokens included).
+- A kling binary asked for its manifest no longer discovers extensions itself: a kling copy named `kling-*` in PATH made every command spawn hundreds of processes.
 - Release signing keys made with `minisign -G -W` (unencrypted, all-zero checksum) were rejected; a test now signs and verifies against the real `minisign` both ways, and CI installs it.
 - A `KLNGHV03` kling-hv snapshot was taken for a kling-vz one, so the refreeze check let it through for an older kling-hv.
 - macOS: the daemon no longer warns about missing memory/pids cgroup controllers at every start.
