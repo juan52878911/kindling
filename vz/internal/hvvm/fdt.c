@@ -11,8 +11,20 @@ static uint8_t st[16384];  // bloque de estructura
 static size_t nst;
 static char strs[2048];  // bloque de cadenas
 static size_t nstrs;
+static bool desbordado;  // algo no cupo en st/strs: fdt_build lo rechaza
+
+// cabe: si hay sitio para n bytes más en el bloque de estructura (con el
+// relleno a 4); si no, lo deja anotado y no se copia nada. La línea de
+// comandos del kernel viene del host, pero una muy larga no debe pisar
+// memoria del proceso.
+static bool cabe(size_t n) {
+  if (nst + n + 4 <= sizeof st) return true;
+  desbordado = true;
+  return false;
+}
 
 static void put32(uint32_t v) {
+  if (!cabe(4)) return;
   st[nst++] = v >> 24;
   st[nst++] = v >> 16;
   st[nst++] = v >> 8;
@@ -27,6 +39,10 @@ static uint32_t str_off(const char *s) {
   for (size_t i = 0; i < nstrs; i += strlen(strs + i) + 1)
     if (strcmp(strs + i, s) == 0) return (uint32_t)i;
   size_t o = nstrs;
+  if (nstrs + strlen(s) + 1 > sizeof strs) {
+    desbordado = true;
+    return 0;
+  }
   memcpy(strs + nstrs, s, strlen(s) + 1);
   nstrs += strlen(s) + 1;
   return (uint32_t)o;
@@ -34,6 +50,7 @@ static uint32_t str_off(const char *s) {
 
 static void node(const char *name) {
   put32(1);
+  if (!cabe(strlen(name) + 1)) return;
   memcpy(st + nst, name, strlen(name) + 1);
   nst += strlen(name) + 1;
   pad4();
@@ -45,6 +62,7 @@ static void prop(const char *name, const void *data, size_t len) {
   put32(3);
   put32((uint32_t)len);
   put32(str_off(name));
+  if (!cabe(len)) return;
   memcpy(st + nst, data, len);
   nst += len;
   pad4();
@@ -72,6 +90,7 @@ static void prop_reg(uint64_t base, uint64_t size) {
 
 size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   nst = nstrs = 0;
+  desbordado = false;
   char nombre[64];
 
   node("");
@@ -187,7 +206,7 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   // Ensamblado: cabecera (40) + reserva vacía (16) + estructura + cadenas.
   size_t off_rsv = 40, off_st = off_rsv + 16, off_str = off_st + nst;
   size_t total = off_str + nstrs;
-  if (total > cap) {
+  if (desbordado || total > cap) {
     fallo("device tree too large (%zu bytes)", total);
     return 0;
   }

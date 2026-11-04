@@ -158,7 +158,10 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
         break;
       case 0x024: m->drv_feat_sel = v; break;
       case 0x030: m->queue_sel = v; break;
-      case 0x038: if (q && v <= QMAX) q->num = v; break;
+      // QueueNum: potencia de dos (virtio 2.6). Con otro tamaño los índices
+      // de 16 bits del driver y los del dispositivo se desencajan al dar la
+      // vuelta en 65536, y el anillo queda a medias.
+      case 0x038: if (q && v && v <= QMAX && (v & (v - 1)) == 0) q->num = v; break;
       case 0x044: if (q) q->ready = v & 1; break;
       case 0x050:
         *cola = v;
@@ -299,7 +302,20 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
             break;
           case 1:  // OUT
             if (b->ro) r = -1;
-            else r = pwrite(b->fd, d, ch[k].len, (off_t)off);
+            else {
+              // Hasta el último byte o error: un pwrite corto (ENOSPC con el
+              // overlay lleno, EINTR) con r >= 0 se daba por bueno y el
+              // sistema de ficheros del invitado creía escritos sectores que
+              // no lo estaban.
+              uint32_t hecho = 0;
+              while (hecho < ch[k].len) {
+                ssize_t w = pwrite(b->fd, (uint8_t *)d + hecho, ch[k].len - hecho, (off_t)(off + hecho));
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) break;
+                hecho += (uint32_t)w;
+              }
+              r = hecho == ch[k].len ? (ssize_t)hecho : -1;
+            }
             break;
           case 4: break;  // FLUSH: sin datos
           case 8: {       // GET_ID

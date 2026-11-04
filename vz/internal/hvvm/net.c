@@ -88,8 +88,11 @@ static bool rx_entregar(const uint8_t *trama, size_t n, bool *sin_buf) {
   memset(pkt, 0, HDR);
   pkt[10] = 1;  // num_buffers
   memcpy(pkt + HDR, trama, n);
-  // Lo que no quepa en la cadena se pierde (trama truncada), como antes.
-  uint32_t off = vq_escribir(q, desc, head, pkt, (uint32_t)(HDR + n));
+  // Una cadena más corta que la trama no recibe media trama (ni media
+  // cabecera): el búfer vuelve con 0 bytes y la trama se pierde entera,
+  // que es lo que un driver espera de un paquete que no le cabe.
+  uint32_t off = 0;
+  if (vq_capacidad(q, desc, head) >= HDR + n) off = vq_escribir(q, desc, head, pkt, (uint32_t)(HDR + n));
   uint16_t viejo = *(volatile uint16_t *)(used + 2);
   vq_push(q, used, head, off);
   // En NAPI el driver no quiere una interrupción por trama: la pide al acabar.

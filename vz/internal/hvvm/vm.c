@@ -405,11 +405,14 @@ static bool psci(struct cpu *c) {
         r = PSCI_RET_INVALID;
         break;
       }
+      // Los registros se leen antes de tomar mu: VOK sale del hilo si HVF
+      // falla, y hacerlo con mu cogido dejaría pause/stop esperando siempre.
+      uint64_t entry = get_x(c, 2), ctx = get_x(c, 3);
       pthread_mutex_lock(&mu);
       if (cpus[t].on || cpus[t].on_pend) r = PSCI_RET_ALREADY_ON;
       else {
-        cpus[t].on_entry = get_x(c, 2);
-        cpus[t].on_ctx = get_x(c, 3);
+        cpus[t].on_entry = entry;
+        cpus[t].on_ctx = ctx;
         cpus[t].on_pend = true;
         pthread_cond_broadcast(&cv);
         r = 0;
@@ -1180,8 +1183,9 @@ int khv_snapshot(const char *mem_out) {
   if (fclonefileat(base_fd, AT_FDCWD, mem_out, 0) == 0) {
     fd = open(mem_out, O_RDWR);
   } else {
-    // Otro volumen o sin clones: copia de los datos.
-    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0644);
+    // Otro volumen o sin clones: copia de los datos. 0600: lleva toda la RAM
+    // del invitado (secretos ya leídos incluidos), como el clon.
+    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd >= 0 && fcopyfile(base_fd, fd, NULL, COPYFILE_DATA) != 0) {
       fallo("copying the RAM file to %s: %s", mem_out, strerror(errno));
       goto fin;
