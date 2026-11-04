@@ -245,6 +245,9 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	// sería corromperlo. Muere antes: desde reclamarParada figura created, y
 	// el barrido de huérfanos ya no lo tocaría.
 	eraFallida := mc.State == api.StateFailed
+	// Lo que tenía de failed, por si el arranque falla antes de tocar su
+	// volcado (ver devolver).
+	errFallida, fallidaEn := mc.LastErr, mc.FailedAt
 	if eraFallida {
 		if err := m.matarVMMDeFallida(mc); err != nil {
 			return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
@@ -258,8 +261,17 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	// devolver deja la máquina parada otra vez, con el motivo: un arranque
 	// que falla no la convierte en failed (la recogería el GC), y se puede
 	// reintentar con lo que faltaba.
+	//
+	// Salvo una failed que aún conserva su volcado entero (volcadoBorrado
+	// dice si ya se retiró, justo antes de lanzar el VMM): parada, su volcado
+	// seguía en disco pero ya no lo cargaba nadie, porque Thaw solo
+	// descongela warm o failed. Vuelve a failed, con su error y su fecha de
+	// antes, y un thaw la sigue pudiendo restaurar (thawFallida comprueba que
+	// el disco no se tocó después del volcado; un e2fsck que lo arregló
+	// cuenta como tocarlo).
 	var netcfg *knet.Net
 	var pid int
+	volcadoBorrado := false
 	devolver := func(err error) (*api.Machine, error) {
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
@@ -269,17 +281,31 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 			m.desmontarRed(netcfg, mc.ID)
 		}
 		m.releaseCPU(mc.ID)
+		conVolcado := eraFallida && !volcadoBorrado && volcadoValido(dir, nil) == nil
 		m.mu.Lock()
 		if live := m.byID[mc.ID]; live != nil {
 			now := time.Now()
-			live.State = api.StateStopped
+			if conVolcado {
+				live.State = api.StateFailed
+				live.LastErr = errFallida
+				live.FailedAt = fallidaEn
+				if live.FailedAt == nil {
+					live.FailedAt = &now
+				}
+			} else {
+				live.State = api.StateStopped
+				live.LastErr = err.Error()
+				live.StoppedAt = &now
+			}
 			live.PID = 0
-			live.LastErr = err.Error()
-			live.StoppedAt = &now
 			delete(m.socket, mc.ID)
 			m.persist()
 		}
 		m.mu.Unlock()
+		if conVolcado {
+			log.Printf("start: %s: failed before booting (%v); it stays failed with its memory dump", mc.Name, err)
+			return nil, fmt.Errorf("%w (it stays failed and keeps its memory dump: kling thaw %s restores it)", err, mc.Name)
+		}
 		return nil, err
 	}
 
@@ -338,6 +364,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	// reconcile dándola por warm) pondría aquella memoria sobre otro disco.
 	if eraFallida {
 		m.borrarVolcado(mc.ID)
+		volcadoBorrado = true
 	}
 	start := time.Now()
 	m.persistirYa()
