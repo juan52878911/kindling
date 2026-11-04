@@ -427,6 +427,50 @@ static void reiniciar_sysregs(struct cpu *c) {
       logf_("cpu%d: could not reset sysreg %#x", c->idx, SYSREGS[i]);
 }
 
+// cpu_guardada deja en d el estado de c que va en el snapshot, con mu. Un
+// CPU_ON pendiente va como ya entrado (ver khv_snapshot); devuelve true en
+// ese caso. Un ajuste_vtimer pendiente va sumado: c->st es de cuando el hilo
+// entró en el punto de pausa y el ajuste de una pausa anterior solo se aplica
+// al salir; si llega otra (el núcleo, el regulador) antes de que el hilo
+// corra, el snapshot llevaba el offset viejo y el restaurado saltaba lo que
+// duró aquella pausa (el soft lockup que el ajuste quería evitar).
+static bool cpu_guardada(struct cpu_state *d, const struct cpu *c) {
+  *d = c->st;
+  d->vtimer_offset += c->ajuste_vtimer;
+  if (c->on_pend && !c->on) {
+    estado_cpu_on(d, &c->inicial, c->on_entry, c->on_ctx);
+    return true;
+  }
+  return false;
+}
+
+// khv_prueba_vtimer_pendiente comprueba sin VM que cpu_guardada suma el
+// ajuste pendiente al offset guardado (y no lo pierde con un CPU_ON
+// pendiente). 0 si cuadra; si no, el número de la comprobación que falló.
+int khv_prueba_vtimer_pendiente(void) {
+  static struct cpu c;
+  static struct cpu_state d;
+  memset(&c, 0, sizeof c);
+  c.st.vtimer_offset = 1000;
+  c.st.pc = 0x1234;
+  c.on = true;
+  c.ajuste_vtimer = 250;
+  if (cpu_guardada(&d, &c)) return 1;
+  if (d.vtimer_offset != 1250 || d.pc != 0x1234) return 2;
+  // Lo guardado no se aplica: el hilo lo sigue sumando al salir.
+  if (c.ajuste_vtimer != 250 || c.st.vtimer_offset != 1000) return 3;
+  c.ajuste_vtimer = 0;
+  cpu_guardada(&d, &c);
+  if (d.vtimer_offset != 1000) return 4;
+  c.on = false;
+  c.on_pend = true;
+  c.on_entry = 0x80000000;
+  c.ajuste_vtimer = 7;
+  if (!cpu_guardada(&d, &c)) return 5;
+  if (d.vtimer_offset != 1007 || d.pc != 0x80000000) return 6;
+  return 0;
+}
+
 int khv_prueba_cpu_on(void) {
   static struct cpu_state ini, d;
   memset(&ini, 0, sizeof ini);
@@ -973,6 +1017,64 @@ static void dispositivos_despertar(void) {
   if (hay_vsock) vsock_despertar();
 }
 
+// dispositivos_quietos espera sin plazo (a que un hilo de disco suelte su
+// petición, a que la red termine un rx) y khv_pause la llamaba con op_mu
+// cogido: un dispositivo atascado dejaba freeze y stop colgados igual que un
+// vCPU que no llega a la pausa. La hace un hilo aparte (uno solo, de vida
+// larga: el regulador de CPU pausa cada pocos ms y un pthread_create por
+// pausa sería caro) y khv_pause la espera con plazo. Si vence, el hilo sigue
+// dentro y termina cuando el dispositivo se suelte; la siguiente petición
+// espera a que acabe la anterior y vuelve a pasar. Con q_mu.
+static pthread_mutex_t q_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t q_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t q_pedidas, q_hechas;
+static bool q_hilo;
+
+static void *quietos_hilo(void *arg) {
+  (void)arg;
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+  pthread_mutex_lock(&q_mu);
+  for (;;) {
+    while (q_hechas == q_pedidas) pthread_cond_wait(&q_cv, &q_mu);
+    uint64_t n = q_pedidas;
+    pthread_mutex_unlock(&q_mu);
+    dispositivos_quietos();
+    pthread_mutex_lock(&q_mu);
+    q_hechas = n;
+    pthread_cond_broadcast(&q_cv);
+  }
+  return NULL;
+}
+
+// dispositivos_quietos_plazo: true si los dispositivos quedaron quietos antes
+// de plazo_ns. Sin hilo (pthread_create falló) lo hace aquí, sin plazo, como
+// antes.
+static bool dispositivos_quietos_plazo(uint64_t plazo_ns) {
+  pthread_mutex_lock(&q_mu);
+  if (!q_hilo) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, quietos_hilo, NULL) != 0) {
+      pthread_mutex_unlock(&q_mu);
+      dispositivos_quietos();
+      return true;
+    }
+    pthread_detach(t);
+    q_hilo = true;
+  }
+  uint64_t n = ++q_pedidas;
+  pthread_cond_broadcast(&q_cv);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += (time_t)(plazo_ns / 1000000000ULL);
+  ts.tv_nsec += (long)(plazo_ns % 1000000000ULL);
+  if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
+  while (q_hechas < n)
+    if (pthread_cond_timedwait(&q_cv, &q_mu, &ts) == ETIMEDOUT) break;
+  bool ok = q_hechas >= n;
+  pthread_mutex_unlock(&q_mu);
+  return ok;
+}
+
 // soltar deja correr la VM por primera vez. Con mu.
 static void soltar_locked(void) {
   if (restaurando) {
@@ -1484,6 +1586,11 @@ int khv_pause(unsigned bit) {
     g_pausa = false;
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
+    // Los hilos de red, vsock y disco que vieron g_pausa esperan en su cv
+    // hasta que alguien los despierte (como en khv_resume); sin esto la VM
+    // parecía correr pero exec, red y disco seguían parados hasta el
+    // siguiente aviso del invitado.
+    dispositivos_despertar();
     fallo("vCPU did not pause in time (%d of %d still running after %d ms)", faltan, ncpus,
           (int)(PAUSA_PLAZO_NS / 1000000));
     logf_("%s", errbuf);
@@ -1492,7 +1599,27 @@ int khv_pause(unsigned bit) {
   }
   t_pausado = mach_absolute_time();
   pthread_mutex_unlock(&mu);
-  dispositivos_quietos();
+  // Los dispositivos, con el mismo plazo. Si no llegan, se deshace la pausa
+  // como arriba, pero con los vCPU ya parados: si la pausa era del núcleo se
+  // les suma lo que duró (como en khv_resume) y el invitado no ve el salto.
+  if (!dispositivos_quietos_plazo(PAUSA_PLAZO_NS)) {
+    pthread_mutex_lock(&mu);
+    if (pausa_reloj && t_pausado) {
+      uint64_t d = mach_absolute_time() - t_pausado;
+      for (int i = 0; i < ncpus; i++) cpus[i].ajuste_vtimer += d;
+    }
+    pausa_bits = antes;
+    pausa_reloj = false;
+    pausa_pedida = false;
+    g_pausa = false;
+    pthread_cond_broadcast(&cv);
+    pthread_mutex_unlock(&mu);
+    dispositivos_despertar();
+    fallo("devices did not quiesce in time (%d ms)", (int)(PAUSA_PLAZO_NS / 1000000));
+    logf_("%s", errbuf);
+    pthread_mutex_unlock(&op_mu);
+    return -1;
+  }
   uart_flush();
   pthread_mutex_unlock(&op_mu);
   return parar ? -1 : 0;
@@ -1576,13 +1703,8 @@ int khv_snapshot(const char *mem_out) {
   // Con todos en pausa nadie toca on_pend, pero se lee con mu como en psci.
   unsigned pendientes = 0;
   pthread_mutex_lock(&mu);
-  for (int i = 0; i < ncpus; i++) {
-    h.cpu[i] = cpus[i].st;
-    if (cpus[i].on_pend && !cpus[i].on) {
-      estado_cpu_on(&h.cpu[i], &cpus[i].inicial, cpus[i].on_entry, cpus[i].on_ctx);
-      pendientes |= 1u << i;
-    }
-  }
+  for (int i = 0; i < ncpus; i++)
+    if (cpu_guardada(&h.cpu[i], &cpus[i])) pendientes |= 1u << i;
   pthread_mutex_unlock(&mu);
   for (int i = 0; i < ncpus; i++)
     if (pendientes & (1u << i)) logf_("cpu%d: pending CPU_ON saved as already entered", i);
