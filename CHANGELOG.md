@@ -23,6 +23,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- kling-hv is stable in 1.0 (VMM and `KLNGHV` snapshot format). Until CI has an Apple Silicon runner, each release runs `92-e2e-mac.sh` and `95-e2e-upgrade-mac.sh` with `VMM=hv` by hand, and `release.sh` refuses a 1.0+ tag without it (the `e2e-mac.yml` job green on the commit, or `KLING_E2E_HV=<sha>`).
 - macOS (kling-hv): DNS answers are cached per machine and A/AAAA resolve in parallel (10 lookups 1480 → 80 ms on an M4).
 - macOS (kling-hv): the balloon has its statistics queue, so `kling machine squeeze` sees guest memory (136 MiB reclaimed instead of 4 on an idle machine); snapshot state v3, v1 and v2 still restore.
 - macOS (kling-hv): free page reporting returns memory the guest frees without a squeeze (100 MB freed: footprint 193 -> 95 MiB in 11 s); balloon releases are batched (~5300 remaps per squeeze -> ~9); snapshot state v4, v1 to v3 still restore.
@@ -70,6 +71,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `release.sh` only read a single-line `require`, so it saw no kindling version in `vz/go.mod` (a `require ( … )` block) and would refuse every tag.
 - macOS (kling-hv, kling-vz): the VMM API socket only accepts the daemon's user.
 - macOS (kling-hv): a failed balloon remap no longer ends the VM.
 - A daemon that loses a guest's vsock (an older agent's listener died) goes straight to TCP after three failures within 30 s instead of paying a failed vsock connect on every connection, and tries vsock again once a minute.

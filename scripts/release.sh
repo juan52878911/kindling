@@ -127,7 +127,9 @@ fi
 # versión anterior, la extensión de vX compilaría contra el núcleo de vX-1.
 for m in ext/*/go.mod vz/go.mod; do
     [ -f "$m" ] || continue
-    REQ=$(awk '$1=="require" && $2=="github.com/juan52878911/kindling" {print $3}' "$m")
+    # Una línea (require M v) o dentro de un bloque require ( … ), como vz/go.mod.
+    REQ=$(awk '$1=="require" && $2=="github.com/juan52878911/kindling" {print $3}
+               $1=="github.com/juan52878911/kindling" && $2 ~ /^v/ {print $2}' "$m" | head -n 1)
     if [ "$REQ" != "$VERSION" ]; then
         echo "$m requires kindling ${REQ:-(nothing)}, not $VERSION; update it before tagging" >&2
         [ "$DRY_RUN" = "1" ] || exit 1
