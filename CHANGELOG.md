@@ -27,7 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS (kling-hv): the balloon has its statistics queue, so `kling machine squeeze` sees guest memory (136 MiB reclaimed instead of 4 on an idle machine); snapshot state v3, v1 and v2 still restore.
 - macOS (kling-hv): free page reporting returns memory the guest frees without a squeeze (100 MB freed: footprint 193 -> 95 MiB in 11 s); balloon releases are batched (~5300 remaps per squeeze -> ~9); snapshot state v4, v1 to v3 still restore.
 - macOS (kling-hv): the guest clock stops while a machine is paused (a long pause logged soft lockups and RCU stalls) and is resynced in the background on resume.
-- macOS (kling-hv): network and vsock receive straight into guest buffers (upload 345-374 -> 387-416 MiB/s, download 558-624 -> 610-673 MiB/s, less VMM CPU); closed vsock host ends are seen through kqueue instead of a 1 s probe.
+- macOS (kling-hv): network and vsock receive straight into guest buffers; closed vsock host ends are seen through kqueue instead of a 1 s probe. Through a published port on an M4 (`nc -l` in a 256 MiB guest, 3 VMs x 3 transfers, timed until `nc` exits), against the VMM just before this change: upload 512 MiB 1408 -> 2115 MiB/s median (905-2660), download 256 MiB 747 -> 803 MiB/s (668-855), same VMM CPU.
 - The first exec after a cold boot is ~40-55 ms faster: the agent probe no longer waits out a probe sent before the guest's vsock was up, and the agent sets the MMDS route over netlink instead of running `ip`.
 - The guest clock is resynced right after boot (the RTC only has whole seconds, so each boot started up to 0.5 s off; now within a few ms).
 - `kling machine squeeze` polls the balloon every 10-40 ms instead of 100 ms.
@@ -83,6 +83,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Bounded maps: the share watcher's echo marks, the MCP gateway usage memory, phone screenshots and sandbox in-flight counters.
 - Guest agent: an `EINTR` or `ECONNABORTED` from the vsock `accept` killed its vsock listener until the machine restarted (seconds into any exec load on hv and vz); with the guest network up the daemon silently fell back to TCP, without it every exec failed. Images need the new agent to get the fix.
 - kling-hv: taking a vCPU offline and back online (CPU hotplug) crashed the guest kernel; CPU_ON now resets the vCPU's system registers.
+- `exec` interrupted by a freeze, stop, removal or VMM death says so ("the machine was frozen while the command ran") instead of a raw `EOF` or a generic cut; before the headers or with `?wait=1` it is a 409.
+- `exec` of a command that prints nothing for more than 5 min no longer fails with "timeout awaiting response headers": the daemon waits for the guest's headers as long as for the body (the command's timeout plus 30 s).
 - kling-hv: the guest no longer sees SVE/SME on an M4 (it advertised sve2 without sve and OpenSSL died with SIGILL, #183 on hv).
 - kling-hv: a freeze during a pending CPU_ON left that vCPU dead after restore; the balloon no longer writes guest RAM during a snapshot; a pause that cannot stop every vCPU gives up after 5 s with an error instead of hanging freeze/stop.
 - kling-hv: a stalled console reader can no longer block a vCPU (output is dropped and counted); a timed-out vsock dial frees its slot; the network RX thread is stopped before its socket is closed; each snapshot state version must have its own header length.

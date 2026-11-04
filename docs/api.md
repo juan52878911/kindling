@@ -529,6 +529,16 @@ invitado dejó de contestar). Un código distinto de cero no es un error HTTP. C
 El daemon no se fía del invitado: recorta cada flujo al tope pedido y garantiza que
 hay exactamente un evento final. Cerrar la conexión mata el comando.
 
+Un comando callado no corta nada antes de su plazo: el agente no manda las
+cabeceras hasta la primera salida, y el daemon las espera tanto como el cuerpo
+(`timeout_seconds` más 30 s), no los 5 min del resto de peticiones al invitado.
+
+Si la máquina se congela, se para, falla o se borra con el exec en curso (un
+`freeze` desde otra terminal, `daemon.idle_freeze`), el evento final es un
+`error` que lo dice ("the machine was frozen while the command ran"), y si se
+cortó antes de las cabeceras o con `?wait=1`, un `409` con ese mensaje en vez
+de un `502` con un EOF. No se reintenta solo: el comando pudo llegar a correr.
+
 **Plazas del agente.** El agente corre a la vez como mucho 64 exec (los de
 `wait=1` y los de streaming, juntos) y 8 shells por microVM. Lleno, el daemon
 contesta `429` con `code` `guest_busy` y `Retry-After: 1`, en exec y en
@@ -1021,7 +1031,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /machines/{ref}/renew` | 200 | `404`; `409` es un sandbox; `413`/`400` cuerpo; `400` ttl negativo; `renewStatus` |
 | `GET /machines/{ref}/ready` | 200 (no estar lista también) | `400` `wait`; `estadoDeListo` |
 | `POST /machines/{ref}/hooks` | 200 (también si fallaron) | `400` `wait`; `409` no llegó a lista sin respuesta del agente (p. ej. uno anterior); `estadoDeListo` |
-| `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy` (64 exec a la vez); `500`; `502` |
+| `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy` (64 exec a la vez); `409` la máquina se congeló o paró con el exec en curso; `500`; `502` |
 | `POST /machines/{ref}/shell` | 101 | `426` sin `Upgrade`; `413`/`400` cuerpo (64 KiB); `objetivoConAgente`; `501`; `429` `guest_busy` (8 shells a la vez); `502`; `500` |
 | `GET` · `PUT` · `DELETE /machines/{ref}/files` | lo que diga el agente (2xx) | `400` sin `path`; `413` > 64 MiB; `objetivoConAgente`; `501` agente < v0.7; un 4xx del agente tal cual; un 5xx del agente, `502`; `500` |
 | `POST /shares/uploads` | 201 | `413`; `400`; `500` |

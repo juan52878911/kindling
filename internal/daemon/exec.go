@@ -97,6 +97,47 @@ func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machin
 	}
 }
 
+// execInterrumpido explica por qué se cortó un exec en curso cuando fue porque
+// la máquina dejó de correr mientras tanto: un freeze (daemon.idle_freeze o
+// desde otra terminal), un stop, un rm o el VMM muerto se llevan el reenvío
+// con el invitado, y lo que llegaba era un EOF pelado ("talking to the guest
+// agent: Post ...: EOF") o el corte genérico de readExecEvents, sin decir que
+// el comando no falló por sí mismo. Devuelve nil si la máquina sigue
+// corriendo: entonces el error original es el bueno.
+//
+// No se reintenta: el comando pudo llegar a arrancar (o a acabar) en el
+// invitado, y repetirlo no es seguro. Quien llama decide.
+func (s *Server) execInterrumpido(id string) error {
+	mc, ok := s.mgr.Get(id)
+	if !ok {
+		return errors.New("the machine was removed while the command ran")
+	}
+	switch {
+	case mc.Transition == api.TransitionFreezing || mc.State == api.StateWarm:
+		return errors.New("the machine was frozen while the command ran; run it again (exec thaws it)")
+	case mc.Transition == api.TransitionRemoving:
+		return errors.New("the machine was removed while the command ran")
+	case mc.Transition == api.TransitionStopping || mc.State == api.StateStopped:
+		return errors.New("the machine was stopped while the command ran")
+	case mc.State == api.StateFailed:
+		return errors.New("the machine failed (its VMM died) while the command ran")
+	}
+	return nil
+}
+
+// explicarCorte cambia el evento de corte de readExecEvents (msgCorte) por
+// execInterrumpido si la máquina id dejó de correr. Los demás eventos, y los
+// cortes con la máquina aún viva, pasan tal cual.
+func (s *Server) explicarCorte(id string, ev api.ExecEvent) api.ExecEvent {
+	if !strings.HasPrefix(ev.Error, msgCorte) {
+		return ev
+	}
+	if err := s.execInterrumpido(id); err != nil {
+		ev.Error = err.Error()
+	}
+	return ev
+}
+
 // tooOldAgent es la respuesta cuando el agente del invitado no conoce la ruta:
 // la imagen se construyó antes de v0.7.
 func tooOldAgent(mc *api.Machine) error {
@@ -129,6 +170,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if code == http.StatusNotImplemented {
 			err = tooOldAgent(mc)
+		} else if code == http.StatusBadGateway {
+			// La conexión se cayó antes de las cabeceras: si es que la
+			// máquina se congeló o paró entretanto, se dice eso (409).
+			if e := s.execInterrumpido(mc.ID); e != nil {
+				code, err = http.StatusConflict, e
+			}
 		}
 		fail(w, code, err)
 		return
@@ -139,7 +186,13 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("wait") == "1" {
 		res, err := aggregateExec(events)
 		if err != nil {
-			fail(w, http.StatusBadGateway, err)
+			code := http.StatusBadGateway
+			if strings.HasPrefix(err.Error(), msgCorte) {
+				if e := s.execInterrumpido(mc.ID); e != nil {
+					code, err = http.StatusConflict, e
+				}
+			}
+			fail(w, code, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
@@ -151,6 +204,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	fl, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
 	for ev := range events {
+		if ev.Error != "" {
+			ev = s.explicarCorte(mc.ID, ev)
+		}
 		if enc.Encode(ev) != nil {
 			// Quien llamaba se fue. Al volver, el contexto de la petición se
 			// cancela, se corta la conexión con el invitado y el agente mata el
@@ -190,6 +246,10 @@ func execBodyTimeout(req api.ExecRequest) time.Duration {
 // el agente no conoce la ruta; 429: tiene llenas sus plazas de exec).
 func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.ReadCloser, int, error) {
 	body, _ := json.Marshal(req)
+	// El agente no manda las cabeceras hasta la primera salida del comando: uno
+	// callado las retrasa hasta acabar. Se esperan lo mismo que el cuerpo, su
+	// timeout más execBodyGrace, no los plazoCabeceras (5 min) de siempre.
+	ctx = conPlazoCabeceras(ctx, execBodyTimeout(req))
 	greq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec/stream", bytes.NewReader(body))
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
@@ -243,6 +303,11 @@ func invitadoOcupado(msg []byte) error {
 	return &ocupado{msg: "guest agent: " + strings.TrimSpace(string(msg))}
 }
 
+// msgCorte es el principio del evento de error que readExecEvents manda cuando
+// el flujo se acaba sin evento final; handleExec lo reconoce para explicarlo
+// (explicarCorte).
+const msgCorte = "the guest stopped answering before the command finished"
+
 // readExecEvents lee el flujo del invitado y lo pasa como eventos ya validados.
 // Garantiza lo que el invitado podría no cumplir: que ningún flujo pase de
 // maxOut, que los flujos se llamen stdout o stderr, y que haya exactamente un
@@ -285,7 +350,7 @@ func readExecEvents(body io.Reader, maxOut int) <-chan api.ExecEvent {
 				}
 			}
 		}
-		msg := "the guest stopped answering before the command finished"
+		msg := msgCorte
 		if err := sc.Err(); err != nil {
 			msg += ": " + err.Error()
 		}
