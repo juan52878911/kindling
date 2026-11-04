@@ -186,7 +186,7 @@ agente ≥ 1.0 tiene las tres.
 | Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-3): lo que este no lee sale `stale` | **sí** |
 | Daemon ↔ kling-hv (experimental) | la misma versión que el daemon | `KLNGHV` (estado v3, lee v1 y v2, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
 | macOS | kling-vz ≥ 14.0, kling-hv ≥ 15.2. El `mem.file` de vz está ligado a la build de macOS: si no restaura, se rehace | `minos` comprobado en CI; `macos` en el meta | **sí** |
-| Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta | **sí**; **pendiente** que salga en `doctor` |
+| Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta y en el sello; `kernel_sha256` y `kernel_mismatch` en `/info`, que `kling doctor` enseña | **sí** |
 | Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | `arch` en el meta y en el sello: otra sale `stale` | **sí** |
 | Host Linux | KVM, ext4/XFS/btrfs (reflink opcional), systemd para `kling upgrade` | `kling doctor` | **sí** |
 | Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`internal/esquema`); fijaciones de v0.17 a v0.20 y `campos-persistidos.txt` en `internal/machine/testdata/esquema/` | **sí** |
@@ -199,11 +199,6 @@ agente ≥ 1.0 tiene las tres.
 Lo que falta para que este documento sea verdad. Sale del inventario de
 contratos del 2026-10-28; cuando se cumpla una línea, se quita de aquí y su fila
 de la matriz pasa a **sí**.
-
-**VMM y agente**
-
-- `kling doctor` muestra el `kernel_sha256` del kernel instalado y avisa de los
-  dorados congelados con otro.
 
 **Pruebas y release**
 
