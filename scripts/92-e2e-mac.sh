@@ -327,7 +327,10 @@ else
 fi
 rm -f "$f" "$f.back"
 
-out=$(printf 'echo tty-$((6*7))\nexit 5\n' | script -q /dev/null "$KLING" shell "$M" 2>&1); rc=$?
+# La entrada llega un segundo después, como al teclear: lo escrito antes de que
+# la shell del invitado esté leyendo se pierde (script manda ^D al acabar su
+# entrada), siempre con dash y dos de cada tres veces con busybox.
+out=$( (sleep 1; printf 'echo tty-$((6*7))\nexit 5\n') | script -q /dev/null "$KLING" shell "$M" 2>&1); rc=$?
 out=$(printf '%s' "$out" | tr -d '\r')
 contiene "$out" "tty-42" && [ $rc -eq 5 ] && ok "shell over a pty (script): output and exit code 5" \
   || bad "shell" "tty-42 and rc=5" "rc=$rc $(printf '%s' "$out" | tail -3)"
