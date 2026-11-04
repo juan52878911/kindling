@@ -298,7 +298,8 @@ func (m *Manager) causaObsoletoEn(vmm, arch, dir string) string {
 // Formatos de volcado que lee el VMM que va con este daemon (kling-vz y
 // kling-hv se publican y actualizan juntos con él). Tienen que casar con
 // vz/internal/spec.FormatVersion y con SNAP_MAGIC/SNAP_VERSION de
-// vz/internal/hvvm/vm.c (que fija TestCabeceraKLNGHV en ese paquete).
+// vz/internal/hvvm/vm.c (que fija TestCabeceraKLNGHV en ese paquete); lo
+// comprueba TestFormatosCasanConVZ leyendo esas fuentes.
 const (
 	formatoVZMax  = 3
 	magiaHV       = 0x4b4c4e4748563032 // "KLNGHV02"
