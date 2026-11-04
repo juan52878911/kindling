@@ -196,7 +196,7 @@ discriminación, umbral optimista bajo el cambio de distribución.
 ```sh
 scripts/chispa-eval.sh /tmp/chispa ~/Documents/GitHub/* ~/Github/*      # 60/20/20
 TRAIN_PCT=70 VALID_PCT=10 scripts/chispa-eval.sh /tmp/chispa70 ~/Documents/GitHub/* ~/Github/*
-go test ./pkg/chispa -run X -bench Predict -benchtime 2s
+go test ./internal/chispa -run X -bench Predict -benchtime 2s
 ```
 
 Con `SOURCE_DATE_EPOCH=0` (lo fija el script) y la misma semilla, los `.chispa` salen

@@ -44,8 +44,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // Lo que se configura (daemon.cow). Mismos valores que pkg/config.

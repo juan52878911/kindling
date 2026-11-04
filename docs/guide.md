@@ -928,7 +928,7 @@ slots with the same layered idea: exact templates, then Chispa and a Chispa-slot
 then a sentence encoder whose layer is gated by `kling ai eval` (McNemar on whole
 commands), and escalates the rest. What the domain knows — templates, slot values, which
 slots an intent needs — comes from a JSON schema file, or from a Go `intent.Domain` that a
-program embedding `pkg/aigw` registers. Guide: [`docs/intent.md`](intent.md).
+program embedding `internal/aigw` registers. Guide: [`docs/intent.md`](intent.md).
 
 ```sh
 kling ai serve                                  # registry in ~/.config/kling/ai.json

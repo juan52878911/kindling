@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // El daemon solo corre en Linux y macOS. Esto existe para que el paquete

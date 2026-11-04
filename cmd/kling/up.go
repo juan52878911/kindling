@@ -35,10 +35,10 @@ import (
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
-	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // runAsDefault es el usuario sin privilegios con el que el daemon lanza

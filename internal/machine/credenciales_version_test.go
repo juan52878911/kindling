@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/credproxy"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // managerConClaveDePrueba es un manager con la clave de host con la que se

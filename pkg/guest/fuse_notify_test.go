@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // conectarConWatch abre una sesión como hace el attach del agente: hello y

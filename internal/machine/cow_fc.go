@@ -19,7 +19,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // ioctlFICLONE es FICLONE (_IOW(0x94, 9, int)), igual en amd64 y arm64. Sin

@@ -8,7 +8,7 @@ import (
 	"time"
 	"unsafe"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Números de llamada de XNU (bsd/kern/syscalls.master). El paquete syscall de

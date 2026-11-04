@@ -27,7 +27,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/lazyre"
+	"github.com/juan52878911/kindling/internal/lazyre"
 )
 
 // ManifestVersion es la versión del formato del manifiesto que escriben las

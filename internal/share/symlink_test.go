@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 func (c *cliente) symlink(p, t string) uint32 {

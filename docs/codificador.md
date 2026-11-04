@@ -76,7 +76,7 @@ kling ai model embed enc-e5-1 "turn on the lights"
 ### Servirlo: un VON más
 
 No hay constructor nuevo: el codificador es una entrada del catálogo de VON con
-`Kind: "embed"` (`pkg/von/embed.go`). El constructor `llm` es el de siempre;
+`Kind: "embed"` (`internal/von/embed.go`). El constructor `llm` es el de siempre;
 solo cambian los argumentos de `llama-server` (`--embeddings --pooling mean
 --ubatch-size 512 --batch-size 512`: un modelo no causal procesa cada entrada
 en un solo lote) y el calentamiento del dorado, que manda frases reales en los
@@ -90,7 +90,7 @@ dos idiomas en vez de una respuesta de chat. La máquina lleva la etiqueta
   (Linux).
 - API: `POST /v1/embeddings` (OpenAI) en el puerto 8000 de cada réplica.
 
-## La cabeza (`pkg/codificador`)
+## La cabeza (`internal/codificador`)
 
 Sobre el vector congelado, una red de una capa oculta (384 → 256 ReLU → 28) o una
 regresión logística multinomial (`-hidden 0`), en Go puro, sin dependencias:
@@ -332,14 +332,14 @@ disco para el entorno de Python.
 
 | fichero | qué |
 |---|---|
-| `pkg/von/embed.go` | kind `embed`: catálogo (e5-small, MiniLM), argumentos de `llama-server`, calentamiento, `von.Embed` |
+| `internal/von/embed.go` | kind `embed`: catálogo (e5-small, MiniLM), argumentos de `llama-server`, calentamiento, `von.Embed` |
 | `cmd/kling/builder_llm.go` | un GGUF convertido se toma de la caché por hash (no se descarga) |
 | `scripts/encoder-gguf.sh` | conversión reproducible y fijada; `-install` a la caché del constructor |
-| `pkg/codificador` | cliente de embeddings (acotado), caché `.jemb`, cabeza, `.jenc`, entrenamiento, k-NN, `Layer` |
-| `pkg/intent/intent.go` | capa 3 en la cascada (`Encoder`, `DecideContext`) |
+| `internal/codificador` | cliente de embeddings (acotado), caché `.jemb`, cabeza, `.jenc`, entrenamiento, k-NN, `Layer` |
+| `internal/intent/intent.go` | capa 3 en la cascada (`Encoder`, `DecideContext`) |
 | `examples/domotica/internal/domotica/indirect.jsonl` | órdenes indirectas escritas a mano, con reparto |
 | `examples/domotica/internal/tools/encoder.go` | `kindling-domotica embed`, `train-encoder`; `-encoder` en `decide` y `eval` |
 | `cmd/kling/ai_intent.go` | `kling ai eval` de una tarea de intención |
-| `pkg/aigw/intent.go` | tareas de intención en `/v1/decide`, la réplica del codificador por `pkg/scheduler`, su evaluación y su puerta |
+| `internal/aigw/intent.go` | tareas de intención en `/v1/decide`, la réplica del codificador por `pkg/scheduler`, su evaluación y su puerta |
 | `scripts/98-encoder-bench.sh` | las cifras de latencia y memoria |
 | `scripts/encoder-setfit/` | la receta del ajuste fino (sin ejecutar) |

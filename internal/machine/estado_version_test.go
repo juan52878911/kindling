@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Un state.json de un kling más nuevo no se lee, no se aparta y no se pisa:

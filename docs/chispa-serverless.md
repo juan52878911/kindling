@@ -98,7 +98,7 @@ arrancar y sirve:
   `chispa.Model.PredictFull` en proceso, sin perder etiquetas cuando `top_k` no
   acota la escalada.
 
-El invitado no es de fiar: el gateway (`pkg/aigw/chispaguest.go`) valida cada
+El invitado no es de fiar: el gateway (`internal/aigw/chispaguest.go`) valida cada
 campo de esa respuesta (etiqueta dentro del modelo, probabilidades y umbral
 finitos y en rango, número de candidatos y de evidencia acotado) antes de
 usarla, y nunca se fía del `"confident"` que mande kling-chispa —lo recalcula del
@@ -141,7 +141,7 @@ Una tarea de intención del gateway (`/v1/decide`, [intent.md](intent.md); la
 de la habitación de demo, [domotica.md](domotica.md)) usa el mismo camino: si
 su `model` es un modelo `"backend": "microvm"`, la
 capa 2 pregunta a la réplica del dorado (`askChispaGuest` en
-`pkg/aigw/chispaguest.go`, lo mismo que `/v1/classify`: etiquetas validadas
+`internal/aigw/chispaguest.go`, lo mismo que `/v1/classify`: etiquetas validadas
 contra el registro de despliegue, confianza recalculada en el gateway). Con
 `kling ai chispa deploy <tarea> -model intent.chispa -slots slots.chispas` el
 registro guarda también los huecos del `.chispas` (y su sha256), y la réplica
@@ -253,7 +253,7 @@ defecto y, con estos números delante, la más barata con diferencia.
 ### Carga bajo demanda en proceso, medida (Mac mini M4)
 
 Esta parte no usa ninguna microVM: es `chispaCache`
-([chispa.md](chispa.md), `pkg/aigw/chispacache.go`) por sí sola, con un registro de 0,
+([chispa.md](chispa.md), `internal/aigw/chispacache.go`) por sí sola, con un registro de 0,
 10 y 100 modelos (mismo fichero `.chispa` de 1,5 MB en memoria copiado a rutas
 distintas, para que cada entrada del registro sea un modelo distinto a
 efectos de la caché).
@@ -295,11 +295,11 @@ caliente:
 | 32 | 113 024 | 180 µs | 1,32 ms |
 
 Para comparar con Chispa puro sin HTTP ni JSON de por medio, en la misma
-máquina (`go test ./pkg/chispa -bench Predict -cpu 1,4`): 1,8 µs/predicción a un
+máquina (`go test ./internal/chispa -bench Predict -cpu 1,4`): 1,8 µs/predicción a un
 núcleo, 529 ns/op agregado a 4 núcleos (~1,9 M/s; con los 10 núcleos del M4,
 del orden de los ~3,4 M/s de [chispa.md](chispa.md)). La diferencia entre esto y los
 113 000/s de la tabla de arriba es JSON + HTTP + el socket Unix, no Chispa: por
-eso un cliente que puede permitirse hablar Go directo con `pkg/chispa`
+eso un cliente que puede permitirse hablar Go directo con `internal/chispa`
 (embebiéndolo, no por HTTP) sigue siendo la opción más barata de todas.
 
 ## Latencia de despertar

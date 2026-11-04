@@ -3,7 +3,7 @@
 // modelos serverless en microVMs. No es parte de kindling ni una extensión de
 // `kling`: es un programa aparte que usa kindling como cualquier aplicación,
 // por su API HTTP (pkg/api, el gateway de IA) y embebiendo el gateway de IA
-// (pkg/aigw) con su propio dominio de intenciones.
+// (internal/aigw) con su propio dominio de intenciones.
 //
 //	kindling-domotica gateway -config ai.json     el gateway de IA con el dominio "smart-room"
 //	kindling-domotica room -gateway ai.sock       la página de la habitación

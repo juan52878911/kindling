@@ -38,7 +38,7 @@ import (
 	"syscall"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 var (

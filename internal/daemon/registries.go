@@ -13,9 +13,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // CREDENCIALES DE REGISTROS PRIVADOS.

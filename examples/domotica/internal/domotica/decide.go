@@ -4,22 +4,22 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
-	"github.com/juan52878911/kindling/pkg/intent"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
+	"github.com/juan52878911/kindling/internal/intent"
 )
 
-// La cascada de capas es la genérica de kindling (pkg/intent), la misma que
+// La cascada de capas es la genérica de kindling (internal/intent), la misma que
 // sirve el gateway de IA en /v1/decide: aquí solo está lo que sabe de la
 // habitación (Domain: plantillas, léxico, taxonomía) y la Decision de la
 // demo, que añade lo de la capa 4.
 
-// Capas de la decisión (pkg/intent).
+// Capas de la decisión (internal/intent).
 const (
 	LayerTemplate = intent.LayerTemplate // emparejador de órdenes de la demo
 	LayerChispa   = intent.LayerChispa   // intención Chispa + huecos Chispa-slots
 	LayerNone     = intent.LayerNone     // ninguna capa rápida contesta
-	LayerEncoder  = intent.LayerEncoder  // capa 3: codificador de frases + cabeza (pkg/codificador)
+	LayerEncoder  = intent.LayerEncoder  // capa 3: codificador de frases + cabeza (internal/codificador)
 	EscalateTo    = intent.EscalateTo    // la capa 3
 	EscalateVON   = intent.EscalateVON   // la capa 4: un LLM pequeño con salida JSON
 )
@@ -40,7 +40,7 @@ const (
 )
 
 // Decision es lo que devuelve Decide: qué hacer, con qué, qué capa lo decidió
-// y si hay que escalar. Es la de pkg/intent (el mismo JSON que devuelve el
+// y si hay que escalar. Es la de internal/intent (el mismo JSON que devuelve el
 // gateway en /v1/decide) con los huecos de la habitación y lo de la capa 4.
 type Decision struct {
 	Lang          string       `json:"lang"`
@@ -72,7 +72,7 @@ type Decision struct {
 	LLM   *LLMStats `json:"llm,omitempty"`
 }
 
-// FromIntent convierte una decisión de pkg/intent tomada con Domain.
+// FromIntent convierte una decisión de internal/intent tomada con Domain.
 func FromIntent(g intent.Decision) Decision {
 	s, _ := g.Slots.(Slots)
 	return Decision{Lang: g.Lang, Intent: g.Intent, Slots: s, Layer: g.Layer, Confident: g.Confident,
@@ -98,7 +98,7 @@ type (
 	RemoteAnswer = intent.RemoteAnswer
 	// RemoteIntent es la capa 2 servida serverless.
 	RemoteIntent = intent.Remote
-	// IntentEncoder es la capa 3 (pkg/codificador.Layer).
+	// IntentEncoder es la capa 3 (internal/codificador.Layer).
 	IntentEncoder = intent.Encoder
 )
 
@@ -119,7 +119,7 @@ type Decider struct {
 	OnlyEncoder bool
 }
 
-// Generic es la cascada de pkg/intent con el dominio de la habitación.
+// Generic es la cascada de internal/intent con el dominio de la habitación.
 func (d *Decider) Generic() *intent.Decider {
 	return &intent.Decider{Domain: Domain{Matcher: d.Matcher}, Intent: d.Intent, Remote: d.Remote, Slots: d.Slots,
 		NoTemplate: d.NoTemplate, FinalOOS: d.FinalOOS, Encoder: d.Encoder, OnlyEncoder: d.OnlyEncoder}
@@ -136,7 +136,7 @@ func (d *Decider) DecideContext(ctx context.Context, text, lang string) Decision
 	return FromIntent(d.Generic().DecideContext(ctx, text, lang))
 }
 
-// Domain es la habitación de demo para pkg/intent: las plantillas de la demo
+// Domain es la habitación de demo para internal/intent: las plantillas de la demo
 // (capa 1), el léxico que convierte huecos en valores, la taxonomía (qué
 // completa y qué necesita cada intención) y las órdenes múltiples. Es lo que
 // el gateway de la demo (kindling-domotica gateway) registra como dominio

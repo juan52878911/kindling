@@ -20,11 +20,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/scheduler"
-	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // GATEWAY DE IA: `kling ai`.

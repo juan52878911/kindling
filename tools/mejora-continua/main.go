@@ -1,6 +1,6 @@
 // Command mejora-continua simula el bucle de mejora continua de Chispa
 // (docs/mejora-continua.md) con el gateway de verdad, en proceso y sin daemon:
-// el mismo pkg/aigw que sirve `kling ai serve`, con sus capturas, su
+// el mismo internal/aigw que sirve `kling ai serve`, con sus capturas, su
 // /v1/feedback, su cola de revisión y su `retrain` con puerta.
 //
 // Lo único simulado son los que contestan cuando Chispa duda:
@@ -37,8 +37,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/aigw"
-	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/chispa"
 )
 
 func main() {

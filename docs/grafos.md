@@ -398,7 +398,7 @@ controlarlo. Sin él, la arista recibe `401`. Detalle y tabla medida en
 **Gateway de IA (Chispa/VON): siguiente paso, sin código.** La cascada es hoy Chispa
 (una microVM pequeña que clasifica) y, si duda, VON (modelos mayores en microVMs), cada
 una despertada y congelada por `pkg/scheduler` con su pool de réplicas
-(`pkg/aigw/guestpool.go`). Como grafo sería `chispa` eager y `von` `lazy`, con una arista
+(`internal/aigw/guestpool.go`). Como grafo sería `chispa` eager y `von` `lazy`, con una arista
 `link` `chispa -> von`: VON solo tiene máquina cuando Chispa escala. No se prototipa
 porque tocaría el planificador actual, y hay tres cosas que el grafo aún no cubre y que
 el planificador sí: (1) **réplicas por servicio y tope por inquilino** (`MaxInflight`,

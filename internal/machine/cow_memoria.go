@@ -39,7 +39,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // sufijoBaseMemoria distingue en bases/<snap> el espejo de la memoria del del

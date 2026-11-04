@@ -214,7 +214,7 @@ func comprobarDNSDe(post posterCrudo, host string) error {
 // catálogo de snapshots y la etiqueta "service", pero no hablan MCP: pedirles
 // tools/list da un 404 y health/heal los marcaban enfermos a todos (visto en el
 // e2e del lab con chispa-room y los x86-*). Las etiquetas son las que ponen
-// pkg/von (von.model, von.kind) y `kling ai chispa deploy` (chispa.task); se
+// internal/von (von.model, von.kind) y `kling ai chispa deploy` (chispa.task); se
 // repiten aquí para no atar la extensión a esos paquetes.
 func esModeloIA(s *api.Snapshot) bool {
 	for _, l := range []string{"von.model", "von.kind", "chispa.task"} {

@@ -2,7 +2,7 @@ package plantilla
 
 // Los tests corren contra un daemon FALSO: un httptest sobre un socket Unix que
 // sirve las rutas que usa Construir. Tiene que ser Unix y no http:// porque el
-// cliente de kindling no habla TCP a propósito (pkg/transport: un daemon de
+// cliente de kindling no habla TCP a propósito (internal/transport: un daemon de
 // microVMs equivale a root en su host), así que api.NewClient solo entiende
 // unix:// y ssh://.
 

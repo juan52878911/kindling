@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Límites del agente. Ver docs/compartir.md.

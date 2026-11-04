@@ -26,11 +26,11 @@ import (
 
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/plugin"
-	"github.com/juan52878911/kindling/pkg/transport"
 	"github.com/juan52878911/kindling/pkg/units"
 )
 

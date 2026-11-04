@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 func newTestMatcher(t testing.TB) *Matcher {

@@ -4,7 +4,7 @@ Chispa es un modelo lineal (regresión logística) que se entrena fuera, pesa un
 dos megas y responde en microsegundos. Sirve para las decisiones pequeñas que no
 merecen un modelo de lenguaje: de qué tipo es este evento, a qué herramienta va
 esta petición de un agente, si esta entrada se filtra o pasa. Vive en el núcleo
-de kindling (`pkg/chispa`, `pkg/chispa/train`, `kling ai chispa`), en Go puro, sin cgo ni
+de kindling (`internal/chispa`, `internal/chispa/train`, `kling ai chispa`), en Go puro, sin cgo ni
 dependencias externas.
 
 Su razón de ser es la **cascada**: el gateway le pregunta primero a Chispa; si Chispa
@@ -176,7 +176,7 @@ versiones propias (`detExp`, `detLog`) hechas solo de operaciones IEEE. Los test
 dorados de hash, extracción, entrenamiento y probabilidades (bit a bit) pasan
 igual en arm64 nativo y con `GOARCH=amd64` (Rosetta).
 
-Medido en un Apple M4 (`go test ./pkg/chispa -bench Predict`), texto de 200
+Medido en un Apple M4 (`go test ./internal/chispa -bench Predict`), texto de 200
 caracteres, modelo de 10 clases a 2^18 cubos:
 
 | Características | ns/predicción | reservas |
@@ -233,7 +233,7 @@ sesgos, temperatura y umbrales son finitos y razonables, y recalcula el hash de 
 especificación. Un fichero corrupto u hostil da error, nunca pánico: lo prueban un
 test de truncados y bytes cambiados (también con el CRC recalculado, para que no
 baste el CRC) y `FuzzLoad` (11 M de ejecuciones sin fallo en la sesión en que se
-escribió; `go test ./pkg/chispa -run X -fuzz FuzzLoad -fuzztime 30s`).
+escribió; `go test ./internal/chispa -run X -fuzz FuzzLoad -fuzztime 30s`).
 
 ## CLI
 

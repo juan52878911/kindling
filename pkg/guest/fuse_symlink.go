@@ -10,7 +10,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 func (fs *fuseFS) symlink(u uint64, parent *node, a []byte) []byte {

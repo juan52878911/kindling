@@ -20,10 +20,10 @@ import (
 
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
+	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
-	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/scripts"
 )
 

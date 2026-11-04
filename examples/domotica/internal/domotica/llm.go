@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // CAPA 4: UN LLM PEQUEÑO (VON) PARA LO QUE LAS CAPAS RÁPIDAS NO SABEN.

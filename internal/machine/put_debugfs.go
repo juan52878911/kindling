@@ -38,7 +38,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/lazyre"
+	"github.com/juan52878911/kindling/internal/lazyre"
 )
 
 // maxEnlacesRuta es cuántos enlaces simbólicos se siguen al resolver una ruta

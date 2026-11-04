@@ -45,8 +45,8 @@ Kubernetes, `compose` (el subconjunto de Compose que se acepta) y **kling-hv**
 (como VMM, y su formato de volcado `KLNGHV`).
 
 **Interno:** el resto de `pkg/` (`guest`, `credproxy`, `scheduler`,
-`linkbroker`, `durable`, `esquema`, `lazyre`, `panico`, `units`…: pasará a
-`internal/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
+`linkbroker`, `panico`, `units`: siguen en `pkg/` solo porque los importan
+otros módulos del repo, `ext/*` y `vz/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
 `upgrade -schemas`), las variables `KLING_VZ_*`, `KLING_HV_*` y `KLING_TEST_*`,
 la salida para humanos de la CLI (columnas, textos, colores: para scripts,
 `-json`), el texto de los mensajes de error (para decidir, el código), y los
@@ -174,7 +174,7 @@ agente ≥ 1.0 tiene las tres.
 | Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta | **sí**; **pendiente** que salga en `doctor` |
 | Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | `arch` en el meta y en el sello: otra sale `stale` | **sí** |
 | Host Linux | KVM, ext4/XFS/btrfs (reflink opcional), systemd para `kling upgrade` | `kling doctor` | **sí** |
-| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`pkg/esquema`); fijaciones de v0.17 a v0.20 y `campos-persistidos.txt` en `internal/machine/testdata/esquema/` | **sí** |
+| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`internal/esquema`); fijaciones de v0.17 a v0.20 y `campos-persistidos.txt` en `internal/machine/testdata/esquema/` | **sí** |
 | Go API | `pkg/api`, `pkg/plugin`, `pkg/config` | SemVer de Go; `scripts/apidiff.sh` en CI contra la etiqueta anterior | **sí** |
 
 ---
@@ -184,11 +184,6 @@ agente ≥ 1.0 tiene las tres.
 Lo que falta para que este documento sea verdad. Sale del inventario de
 contratos del 2026-10-28; cuando se cumpla una línea, se quita de aquí y su fila
 de la matriz pasa a **sí**.
-
-**Go**
-
-- Mover a `internal/` el `pkg/` que no es público (todo menos `pkg/api`,
-  `pkg/plugin` y `pkg/config`).
 
 **VMM y agente**
 

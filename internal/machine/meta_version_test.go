@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // ponerFijacion copia testdata/esquema/<fichero> como meta.json del dorado name.
