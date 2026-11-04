@@ -14,6 +14,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
 // MEJORA CONTINUA: `kling ai review|feedback|retrain|rollback`. Todo pasa por
@@ -264,15 +265,16 @@ func aiRetrain(args []string) error {
 	evalData := fs.String("eval", "", "data to re-evaluate the cascade after promoting (default: learn.heldout; intent task: rows JSONL)")
 	noEval := fs.Bool("no-eval", false, "don't re-evaluate the cascade: it stays off until kling ai eval")
 	host := hostFlag(fs)
-	mem := fs.Int("mem", 64, "microvm task: memory of the new version's golden snapshot (MiB)")
-	vcpus := fs.Int("vcpus", 1, "microvm task: vCPUs of the new version's golden snapshot")
+	mem := units.MiBVar(fs, "mem", 64, "microvm task: memory of the new version's golden snapshot: 64M, 128M (bare number = MiB)")
+	cpus := fs.Int("cpus", 1, "microvm task: vCPUs of the new version's golden snapshot")
+	flagRetirado(fs, "vcpus", "cpus")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai retrain <task> [-dry-run] [-trust-teacher NAME] [-rule mcnemar|no-regression] [-eval data.jsonl]")
+		return fmt.Errorf("usage: kling ai retrain <task> [-dry-run] [-trust-teacher NAME] [-rule mcnemar|no-regression] [-eval data.jsonl] [-mem 64M] [-cpus N]")
 	}
 	task := fs.Arg(0)
 	c, err := mk()
@@ -317,7 +319,7 @@ func aiRetrain(args []string) error {
 	dc := api.NewClient(hostOf(*host))
 	if err := chispaDeploy(ctx, dc, chispaDeployOptions{
 		Name: rep.Snapshot, Model: rep.CandidateModel, ModelName: task + "@" + rep.Version,
-		MemMiB: *mem, VCPUs: *vcpus, Replace: true, Rebuild: true, Wait: 2 * time.Minute,
+		MemMiB: *mem, VCPUs: *cpus, Replace: true, Rebuild: true, Wait: 2 * time.Minute,
 	}); err != nil {
 		return fmt.Errorf("deploying %s: %w (the version stays pending; retrain again to retry)", rep.Snapshot, err)
 	}
