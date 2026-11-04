@@ -243,6 +243,15 @@ func memoriaTotalPlataforma() int64 { return 0 }
 // confinamiento es el jailer).
 func (m *Manager) entornoVMM() []string { return nil }
 
+// entornoProceso: en Linux el VMM hereda el entorno del daemon (nil = el de
+// este proceso), más extra si lo hay.
+func entornoProceso(extra []string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	return append(os.Environ(), extra...)
+}
+
 // techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
 // flag, ni su dorado, ni su receta, ni la configuración). En Linux, media vCPU
 // (defaultCPUPct): el cgroup no cuesta nada al invitado.

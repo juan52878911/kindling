@@ -2085,8 +2085,8 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File, entorno ...string) (*exec.Cmd, bool, error) {
 	nuevo := func() *exec.Cmd {
 		cmd := exec.Command(argv[0], argv[1:]...)
-		if len(entorno) > 0 {
-			cmd.Env = append(os.Environ(), entorno...)
+		if env := entornoProceso(entorno); env != nil {
+			cmd.Env = env
 		}
 		cmd.Stdout, cmd.Stderr = logf, logf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

@@ -776,6 +776,33 @@ func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
 //
 // Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.
+// entornoProceso es el entorno con el que arranca el VMM: lo que necesita
+// para correr y lo que lo configura, y nada más. El daemon corre bajo el
+// agente de launchd con el entorno de la sesión del usuario, donde viven
+// cosas como KLING_TOKEN o claves de otras herramientas; el VMM es el
+// proceso que habla con el invitado y no tiene por qué llevarlas.
+func entornoProceso(extra []string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if entornoVMMPermitido(k) {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
+}
+
+func entornoVMMPermitido(k string) bool {
+	switch k {
+	case "PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ",
+		"GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG", "GOTRACEBACK":
+		return true
+	}
+	// KLING_FAKE_VZ_*: el VMM de mentira de los tests (vz_test.go) lee ahí
+	// qué simular; nunca lleva secretos.
+	return strings.HasPrefix(k, "KLING_HV_") || strings.HasPrefix(k, "KLING_VZ_") || strings.HasPrefix(k, "KLING_FAKE_VZ_")
+}
+
 func (m *Manager) entornoVMM() []string {
 	env := []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
 	// El registro de auditoría de su proxy: tamaño y generaciones.
