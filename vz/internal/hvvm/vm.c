@@ -221,6 +221,12 @@ struct cpu {
   hv_vcpu_exit_t *exit;
   bool on, on_pend;
   uint64_t on_entry, on_ctx;
+  // Los registros de sistema recién creado el vCPU (los de reinicio de HVF,
+  // con su MPIDR): lo que un CPU_ON le vuelve a poner. Un vCPU que se apagó
+  // (CPU_OFF) conserva su SCTLR, TTBR, TCR y VBAR de la vida anterior; sin
+  // esto la entrada física del CPU_ON corría con la MMU encendida y el
+  // kernel moría en un Oops.
+  struct cpu_state inicial;
   bool kick;
   bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
@@ -248,6 +254,7 @@ static pthread_mutex_t fin_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fin_cv = PTHREAD_COND_INITIALIZER;
 static bool fin_hecho;
 static int fin_codigo;
+static int fin_motivo = KHV_FIN_NADA;  // con fin_mu
 
 void vcpu_kick_all(void) {
   pthread_mutex_lock(&mu);
@@ -274,12 +281,13 @@ static void resacar_vcpus_locked(void) {
   if (n) hv_vcpus_exit(ids, (uint32_t)n);
 }
 
-void fin_vm(int codigo, const char *motivo) {
+static void fin_vm_por(int codigo, int por, const char *motivo) {
   pthread_mutex_lock(&fin_mu);
   bool primero = !fin_hecho;
   if (primero) {
     fin_hecho = true;
     fin_codigo = codigo;
+    fin_motivo = por;
     if (codigo != 0) fallo("%s", motivo);
   }
   pthread_cond_broadcast(&fin_cv);
@@ -293,6 +301,15 @@ void fin_vm(int codigo, const char *motivo) {
   uart_flush();
 }
 
+void fin_vm(int codigo, const char *motivo) { fin_vm_por(codigo, codigo ? KHV_FIN_FALLO : KHV_FIN_PARADA, motivo); }
+
+int khv_fin_motivo(void) {
+  pthread_mutex_lock(&fin_mu);
+  int m = fin_motivo;
+  pthread_mutex_unlock(&fin_mu);
+  return m;
+}
+
 int khv_wait(void) {
   pthread_mutex_lock(&fin_mu);
   while (!fin_hecho) pthread_cond_wait(&fin_cv, &fin_mu);
@@ -301,10 +318,9 @@ int khv_wait(void) {
   return c;
 }
 
-void khv_stop(void) { fin_vm(0, "stopped"); }
+void khv_stop(void) { fin_vm_por(0, KHV_FIN_PARADA, "stopped"); }
 
-static void guardar_cpu(struct cpu *c) {
-  struct cpu_state *s = &c->st;
+static void guardar_cpu(struct cpu *c, struct cpu_state *s) {
   for (int i = 0; i < 31; i++) hv_vcpu_get_reg(c->id, HV_REG_X0 + i, &s->x[i]);
   hv_vcpu_get_reg(c->id, HV_REG_PC, &s->pc);
   hv_vcpu_get_reg(c->id, HV_REG_CPSR, &s->cpsr);
@@ -340,9 +356,90 @@ static void cargar_cpu(struct cpu *c) {
   c->on = s->on;
 }
 
+// CPSR de la entrada de un vCPU: EL1h con DAIF enmascarado.
+#define CPSR_ENTRADA 0x3c5
+
+// estado_cpu_on deja en d lo que tiene un vCPU justo al entrar por un CPU_ON:
+// los registros de sistema de reinicio (ini), PC en la entrada, X0 con el
+// contexto y encendido. Lo demás de d (GIC, timer) se queda.
+static void estado_cpu_on(struct cpu_state *d, const struct cpu_state *ini, uint64_t entry, uint64_t ctx) {
+  memcpy(d->sys, ini->sys, sizeof d->sys);
+  memcpy(d->sys_ok, ini->sys_ok, sizeof d->sys_ok);
+  memset(d->x, 0, sizeof d->x);
+  d->x[0] = ctx;
+  d->pc = entry;
+  d->cpsr = CPSR_ENTRADA;
+  d->on = 1;
+}
+
+// reiniciar_sysregs vuelve a poner en el vCPU los registros de sistema que
+// tenía al crearse (c->inicial), como un encendido de verdad: SCTLR_EL1 de
+// reinicio (MMU y cachés apagadas), TTBR/TCR/MAIR/VBAR/CPACR a cero, el timer
+// virtual apagado. Desde el hilo del vCPU.
+static void reiniciar_sysregs(struct cpu *c) {
+  for (size_t i = 0; i < NSYS; i++)
+    if (c->inicial.sys_ok[i] && hv_vcpu_set_sys_reg(c->id, SYSREGS[i], c->inicial.sys[i]) != HV_SUCCESS)
+      logf_("cpu%d: could not reset sysreg %#x", c->idx, SYSREGS[i]);
+}
+
+int khv_prueba_cpu_on(void) {
+  static struct cpu_state ini, d;
+  memset(&ini, 0, sizeof ini);
+  memset(&d, 0xab, sizeof d);
+  for (size_t i = 0; i < NSYS; i++) ini.sys[i] = 0x1000 + i, ini.sys_ok[i] = 1;
+  d.on = 0;
+  estado_cpu_on(&d, &ini, 0x80001234, 0x42);
+  if (!d.on) return 1;
+  if (d.pc != 0x80001234 || d.x[0] != 0x42 || d.cpsr != CPSR_ENTRADA) return 2;
+  for (int i = 1; i < 31; i++)
+    if (d.x[i] != 0) return 3;
+  for (size_t i = 0; i < NSYS; i++)
+    if (d.sys[i] != 0x1000 + i || !d.sys_ok[i]) return 4;
+  // Lo que no es del CPU_ON (el GIC, el timer) se queda como estaba.
+  if (d.icc[0] != 0xababababababababULL || d.vtimer_offset != 0xababababababababULL) return 5;
+  return 0;
+}
+
+// Campos de los registros de identificación (Arm ARM, D19.2).
+#define ID_PFR0_SVE (0xfULL << 32)
+#define ID_PFR1_SME (0xfULL << 24)
+
+void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *smfr0) {
+  *pfr0 &= ~ID_PFR0_SVE;
+  *pfr1 &= ~ID_PFR1_SME;
+  *zfr0 = 0;
+  *smfr0 = 0;
+}
+
+// filtrar_id aplica khv_filtrar_id al vCPU recién creado. Pasa en el arranque
+// en frío y en la restauración (los ID_* no van en el snapshot: cada vCPU
+// nuevo los lee de HVF y los filtra). Un fallo no es fatal: el invitado vería
+// lo de antes del arreglo.
+static void filtrar_id(struct cpu *c) {
+  uint64_t pfr0 = 0, pfr1 = 0, zfr0 = 0, smfr0 = 0;
+  bool con_zfr = false;
+  if (__builtin_available(macOS 15.2, *)) con_zfr = true;
+  if (hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_ID_AA64PFR0_EL1, &pfr0) != HV_SUCCESS ||
+      hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_ID_AA64PFR1_EL1, &pfr1) != HV_SUCCESS) {
+    logf_("cpu%d: could not read ID_AA64PFR*_EL1", c->idx);
+    return;
+  }
+  khv_filtrar_id(&pfr0, &pfr1, &zfr0, &smfr0);
+  if (hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ID_AA64PFR0_EL1, pfr0) != HV_SUCCESS ||
+      hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ID_AA64PFR1_EL1, pfr1) != HV_SUCCESS)
+    logf_("cpu%d: could not filter ID_AA64PFR*_EL1", c->idx);
+  if (con_zfr) {
+    if (__builtin_available(macOS 15.2, *)) {
+      if (hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ID_AA64ZFR0_EL1, zfr0) != HV_SUCCESS ||
+          hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ID_AA64SMFR0_EL1, smfr0) != HV_SUCCESS)
+        logf_("cpu%d: could not clear ID_AA64ZFR0/SMFR0_EL1", c->idx);
+    }
+  }
+}
+
 // Punto seguro: el hilo del vCPU guarda su estado y espera a que se reanude.
 static void punto_pausa(struct cpu *c) {
-  guardar_cpu(c);
+  guardar_cpu(c, &c->st);
   pthread_mutex_lock(&mu);
   n_pausados++;
   c->parado = true;
@@ -401,8 +498,13 @@ static void mmio(struct cpu *c, uint64_t ipa, bool w, unsigned srt, int size, bo
 #define PSCI_RET_INVALID ((uint64_t)-2)
 #define PSCI_RET_ALREADY_ON ((uint64_t)-4)
 
-// Devuelve false si la VM debe terminar.
-static bool psci(struct cpu *c) {
+// Lo que dice psci: seguir, o la VM termina porque el invitado se apagó o
+// pidió reiniciarse.
+#define PSCI_SEGUIR 0
+#define PSCI_APAGAR 1
+#define PSCI_REINICIAR 2
+
+static int psci(struct cpu *c) {
   uint64_t fn = get_x(c, 0), r = PSCI_RET_NOT_SUPPORTED;
   switch ((uint32_t)fn) {
     case 0x84000000: r = 0x00010000; break;  // PSCI_VERSION 1.0
@@ -412,7 +514,7 @@ static bool psci(struct cpu *c) {
       pthread_mutex_lock(&mu);
       c->on = false;
       pthread_mutex_unlock(&mu);
-      return true;
+      return PSCI_SEGUIR;
     case 0x84000003:
     case 0xC4000003: {  // CPU_ON
       uint64_t t = get_x(c, 1) & 0xff;
@@ -442,9 +544,11 @@ static bool psci(struct cpu *c) {
       break;
     }
     case 0x84000006: r = 2; break;  // MIGRATE_INFO_TYPE: no hace falta migrar
-    case 0x84000008:                // SYSTEM_OFF
-    case 0x84000009:                // SYSTEM_RESET (reboot=k, panic=1)
-      return false;
+    case 0x84000008: return PSCI_APAGAR;  // SYSTEM_OFF
+    // SYSTEM_RESET (reboot=k, panic=1): reiniciar en el sitio pediría volver a
+    // cargar el kernel y rehacer los dispositivos; la VM termina, pero con su
+    // motivo (KHV_FIN_REINICIO), no como un fallo.
+    case 0x84000009: return PSCI_REINICIAR;
     case 0x8400000A: {  // PSCI_FEATURES
       uint32_t f = (uint32_t)get_x(c, 1);
       switch (f) {
@@ -457,7 +561,13 @@ static bool psci(struct cpu *c) {
     }
   }
   set_x(c, 0, r);
-  return true;
+  return PSCI_SEGUIR;
+}
+
+// fin_psci termina la VM por lo que devolvió psci (APAGAR o REINICIAR).
+static void fin_psci(int p) {
+  if (p == PSCI_REINICIAR) fin_vm_por(0, KHV_FIN_REINICIO, "the guest rebooted (SYSTEM_RESET)");
+  else fin_vm_por(0, KHV_FIN_APAGADO, "the guest powered off");
 }
 
 // ===================== QoS =====================
@@ -625,6 +735,11 @@ static void *vcpu_hilo(void *arg) {
   khv_qos_dispositivo();  // base UTILITY; los overrides la suben con trabajo (qos_subir)
   hv_return_t r = hv_vcpu_create(&c->id, &c->exit, NULL);
   if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
+  if (r == HV_SUCCESS) {
+    filtrar_id(c);
+    guardar_cpu(c, &c->inicial);
+    c->inicial.on = 0;
+  }
   pthread_mutex_lock(&mu);
   if (r != HV_SUCCESS) {
     pthread_mutex_unlock(&mu);
@@ -651,7 +766,7 @@ static void *vcpu_hilo(void *arg) {
     if (c->idx == 0) {
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, kernel_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, fdt_gpa));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, 0x3c5));  // EL1h, DAIF enmascarado
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
       c->on = true;
     }
   }
@@ -672,9 +787,10 @@ static void *vcpu_hilo(void *arg) {
       }
       pthread_mutex_unlock(&mu);
       if (!empezar) continue;
+      reiniciar_sysregs(c);
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, c->on_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, c->on_ctx));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, 0x3c5));
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
     }
     if (t_primer_run < 0 && c->idx == 0) t_primer_run = ms_desde_inicio();
     VOK(hv_vcpu_run(c->id));
@@ -699,19 +815,23 @@ static void *vcpu_hilo(void *arg) {
             avanzar_pc(c);
             break;
           }
-          case 0x16:  // HVC: PSCI (el PC ya apunta a la siguiente instrucción)
-            if (!psci(c)) {
-              fin_vm(0, "the guest powered off");
+          case 0x16: {  // HVC: PSCI (el PC ya apunta a la siguiente instrucción)
+            int p = psci(c);
+            if (p != PSCI_SEGUIR) {
+              fin_psci(p);
               return NULL;
             }
             break;
-          case 0x17:  // SMC
-            if (!psci(c)) {
-              fin_vm(0, "the guest powered off");
+          }
+          case 0x17: {  // SMC
+            int p = psci(c);
+            if (p != PSCI_SEGUIR) {
+              fin_psci(p);
               return NULL;
             }
             avanzar_pc(c);
             break;
+          }
           case 0x18: {  // MSR/MRS atrapado: lecturas a 0, escrituras ignoradas
             unsigned rt = (syn >> 5) & 0x1f;
             static int avisos;
@@ -765,6 +885,12 @@ static void dispositivos_quietos(void) {
   for (int i = 0; i < ndisks; i++) vblk_quieto(i);
   if (hay_red) vnet_quieto();
   if (hay_vsock) vsock_quieto();
+  // El globo no tiene hilo propio, pero khv_balloon_stats (desde Go) escribe
+  // en la cola de estadísticas, en la RAM del invitado. Mira g_pausa con el
+  // cerrojo del globo y lo suelta tras escribir; g_pausa ya está puesta, así
+  // que tomar ese cerrojo una vez (vballoon_actual) espera a la que estuviera
+  // dentro, y las siguientes ven la pausa y no tocan nada.
+  if (hay_globo) (void)vballoon_actual();
 }
 
 static void dispositivos_despertar(void) {
@@ -1109,6 +1235,9 @@ int khv_restore(const char *mem_path) {
   return 0;
 }
 
+// Lo más que espera khv_pause a que todos los vCPU lleguen al punto de pausa.
+#define PAUSA_PLAZO_NS (5ULL * 1000000000ULL)
+
 int khv_pause(unsigned bit) {
   pthread_mutex_lock(&op_mu);
   pthread_mutex_lock(&mu);
@@ -1133,12 +1262,38 @@ int khv_pause(unsigned bit) {
   // había entrado en hv_vcpu_run no recibe la salida; dentro, en un WFI, se
   // quedaría hasta su siguiente timer. Cada milisegundo sin todos, se vuelve
   // a sacar a los que faltan.
+  //
+  // Con un plazo (PAUSA_PLAZO_NS): un vCPU que no llega nunca al punto de
+  // pausa (su hilo bloqueado fuera de hv_vcpu_run, en un dispositivo) dejaba
+  // freeze y stop esperando para siempre con op_mu cogido. Pasado el plazo se
+  // deshace la pausa: los que ya estaban parados siguen, la VM queda
+  // corriendo como antes y khv_pause devuelve el error para que el núcleo lo
+  // diga.
+  uint64_t limite = mach_absolute_time() + (uint64_t)((__uint128_t)PAUSA_PLAZO_NS * tb.denom / tb.numer);
+  bool a_tiempo = true;
   while (n_pausados < ncpus && !parar) {
+    if (mach_absolute_time() >= limite) {
+      a_tiempo = false;
+      break;
+    }
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_nsec += 1000000;
     if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
     if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) resacar_vcpus_locked();
+  }
+  if (!a_tiempo) {
+    int faltan = ncpus - n_pausados;
+    pausa_bits = antes;
+    pausa_pedida = false;
+    g_pausa = false;
+    pthread_cond_broadcast(&cv);
+    pthread_mutex_unlock(&mu);
+    fallo("vCPU did not pause in time (%d of %d still running after %d ms)", faltan, ncpus,
+          (int)(PAUSA_PLAZO_NS / 1000000));
+    logf_("%s", errbuf);
+    pthread_mutex_unlock(&op_mu);
+    return -1;
   }
   t_pausado = mach_absolute_time();
   pthread_mutex_unlock(&mu);
@@ -1209,7 +1364,23 @@ int khv_snapshot(const char *mem_out) {
   if (hay_vsock) vsock_get(&h.vsock);
   h.hay_globo = hay_globo;
   if (hay_globo) vballoon_get(&h.globo);
-  for (int i = 0; i < ncpus; i++) h.cpu[i] = cpus[i].st;
+  // Un CPU_ON pendiente (on_pend, on_entry, on_ctx) no va en la cabecera:
+  // se guarda como si ya hubiera entrado, con el estado que le pone el hilo
+  // del vCPU al atenderlo (estado_cpu_on). Así el formato no cambia y el vCPU
+  // restaurado arranca en su entrada en vez de quedarse apagado para siempre.
+  // Con todos en pausa nadie toca on_pend, pero se lee con mu como en psci.
+  unsigned pendientes = 0;
+  pthread_mutex_lock(&mu);
+  for (int i = 0; i < ncpus; i++) {
+    h.cpu[i] = cpus[i].st;
+    if (cpus[i].on_pend && !cpus[i].on) {
+      estado_cpu_on(&h.cpu[i], &cpus[i].inicial, cpus[i].on_entry, cpus[i].on_ctx);
+      pendientes |= 1u << i;
+    }
+  }
+  pthread_mutex_unlock(&mu);
+  for (int i = 0; i < ncpus; i++)
+    if (pendientes & (1u << i)) logf_("cpu%d: pending CPU_ON saved as already entered", i);
   hv_gic_state_t gs = hv_gic_state_create();
   if (!gs) {
     fallo("hv_gic_state_create returned NULL");

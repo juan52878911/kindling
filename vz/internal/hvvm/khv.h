@@ -76,7 +76,7 @@ int khv_restore(const char *mem_path);
 int khv_pause(unsigned bit);
 int khv_resume(unsigned bit);
 int khv_snapshot(const char *mem_out);
-int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó
+int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó o se reinició
 void khv_stop(void);
 uint64_t khv_footprint(void);
 void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), instrucciones y en P
@@ -85,6 +85,23 @@ void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
                       uint64_t *pie);
+// Por qué terminó la VM (khv_wait ya volvió): el invitado se apagó
+// (SYSTEM_OFF), pidió reiniciarse (SYSTEM_RESET: kling-hv no reinicia en el
+// sitio, la VM termina igual pero no es un fallo), la paró el host o falló.
+#define KHV_FIN_NADA 0
+#define KHV_FIN_APAGADO 1
+#define KHV_FIN_REINICIO 2
+#define KHV_FIN_PARADA 3
+#define KHV_FIN_FALLO 4
+int khv_fin_motivo(void);
+// khv_filtrar_id quita SVE y SME de los registros de identificación que ve el
+// invitado (issue #183): en el M4 HVF anuncia sve2, svei8mm y svebf16 en
+// ID_AA64ZFR0_EL1 sin SVE, y OpenSSL moría con SIGILL al usarlas.
+void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *smfr0);
+// khv_prueba_cpu_on comprueba sin VM el estado que se guarda de un vCPU con
+// un CPU_ON pendiente (vm.c): 0 si cuadra, o el número de la comprobación
+// que falló.
+int khv_prueba_cpu_on(void);
 
 // ---- interno ----
 
