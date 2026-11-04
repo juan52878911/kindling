@@ -232,6 +232,13 @@ func (g *transportesInvitado) RoundTrip(req *http.Request) (*http.Response, erro
 		cancel()
 		return nil, fmt.Errorf("%w (%s)", errPlazoCabeceras, d)
 	}
+	// Un 101 (shell, carpetas vivas) trae un cuerpo en el que también se
+	// escribe: quien lo recibe lo toma como io.ReadWriteCloser, y envolverlo
+	// en un ReadCloser rompía kling shell ("could not be taken over").
+	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
+		resp.Body = &cuerpoRWConCancel{ReadWriteCloser: rwc, cancel: cancel}
+		return resp, nil
+	}
 	resp.Body = &cuerpoConCancel{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
 }
@@ -244,6 +251,18 @@ type cuerpoConCancel struct {
 
 func (c *cuerpoConCancel) Close() error {
 	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
+// cuerpoRWConCancel es cuerpoConCancel para la conexión de un 101.
+type cuerpoRWConCancel struct {
+	io.ReadWriteCloser
+	cancel context.CancelFunc
+}
+
+func (c *cuerpoRWConCancel) Close() error {
+	err := c.ReadWriteCloser.Close()
 	c.cancel()
 	return err
 }
