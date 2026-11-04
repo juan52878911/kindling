@@ -716,6 +716,16 @@ func memoriaVMM(pid int, sock string) int64 {
 	if sock == "" {
 		return 0
 	}
+	if backendVMM == BackendHV {
+		// Con kling-hv la VM vive en su propio proceso y GET /kling/stats
+		// devuelve su phys_footprint, lo mismo que da proc_pid_rusage desde
+		// aquí: se ahorra un viaje HTTP por máquina en cada kling top y en
+		// cada lectura de métricas. Redondeo hacia arriba, como el ayudante.
+		if b := huellaBytes(pid); b > 0 {
+			return (b+(1<<20-1))>>20 + (huellaHijosBytes(pid)+(1<<19))>>20
+		}
+		return 0
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	n, err := fc.New(sock).KlingFootprintMiB(ctx)
