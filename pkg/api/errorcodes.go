@@ -140,3 +140,27 @@ func IsStaleGolden(err error) bool {
 
 // staleGoldenMark es el texto de ErrDoradoObsoleto del daemon.
 const staleGoldenMark = "stale golden snapshot"
+
+// WriteError escribe un error con el cuerpo del daemon, {"message", "code"},
+// para que el gateway y el scheduler contesten como él y un cliente lea su
+// code con CodeOf o las Is* (statusErrorDe). Sin code, el genérico del estado.
+func WriteError(w http.ResponseWriter, status int, code ErrorCode, msg string) {
+	if code == "" {
+		code = CodeForStatus(status)
+	}
+	h := w.Header()
+	// Lo mismo que quita http.Error: un Content-Length o una codificación
+	// puestos para el cuerpo que ya no va.
+	h.Del("Content-Length")
+	h.Del("Content-Encoding")
+	h.Set("Content-Type", "application/json")
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(Error{Message: msg, Code: code})
+}
+
+// HTTPError es WriteError con la firma de http.Error y el code genérico del
+// estado: sustituye a http.Error donde el error no tiene un code propio.
+func HTTPError(w http.ResponseWriter, msg string, status int) {
+	WriteError(w, status, "", msg)
+}

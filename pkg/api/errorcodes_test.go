@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -49,6 +50,32 @@ func TestClienteLeeElCodigo(t *testing.T) {
 	_, err := c.Get(context.Background(), "x")
 	if !IsMachineLimit(err) || CodeOf(err) != CodeMachineLimit || err.Error() != "lo que sea" {
 		t.Fatalf("%#v", err)
+	}
+}
+
+// El gateway y el scheduler escriben sus errores con WriteError/HTTPError: el
+// cliente tiene que leerles el code igual que al daemon.
+func TestWriteErrorLoLeeElCliente(t *testing.T) {
+	for _, c := range []struct {
+		escribir func(http.ResponseWriter)
+		status   int
+		code     ErrorCode
+		cuota    bool
+	}{
+		{func(w http.ResponseWriter) {
+			WriteError(w, StatusTenantQuota, CodeTenantQuota, `tenant "a" has reached its quota`)
+		}, 429, CodeTenantQuota, true},
+		{func(w http.ResponseWriter) { HTTPError(w, "tool \"x\" did not respond", http.StatusBadGateway) }, 502, CodeBadGateway, false},
+		{func(w http.ResponseWriter) { HTTPError(w, "missing Authorization header", http.StatusUnauthorized) }, 401, CodeUnauthorized, false},
+		// Un 429 sin code propio no es la cuota del inquilino.
+		{func(w http.ResponseWriter) { HTTPError(w, "slow down", http.StatusTooManyRequests) }, 429, CodeTooManyRequests, false},
+	} {
+		cl := clienteDePrueba(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { c.escribir(w) }))
+		_, err := cl.Get(context.Background(), "x")
+		var se *StatusError
+		if !errors.As(err, &se) || se.Code != c.status || CodeOf(err) != c.code || IsTenantQuota(err) != c.cuota {
+			t.Errorf("%d %s: %#v", c.status, c.code, err)
+		}
 	}
 }
 

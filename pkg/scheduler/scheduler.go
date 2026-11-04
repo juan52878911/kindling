@@ -814,7 +814,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 		}
 
 		log.Printf("proxy %s: %v", service, err)
-		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
+		api.HTTPError(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
 
 	// Quien llama la registra (primaria o réplica) y la desmarca con el mismo
