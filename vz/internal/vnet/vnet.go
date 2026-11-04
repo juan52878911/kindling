@@ -202,6 +202,10 @@ type Net struct {
 	closed    bool
 	wg        sync.WaitGroup
 
+	// ahora es el reloj de los caminos de SetGuestDialer; nil es time.Now.
+	// Los tests lo cambian para no esperar ventanas reales.
+	ahora func() time.Time
+
 	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
 	dnsUDP, dnsTCP, udpFlows, tcpFlows chan struct{}
 }
@@ -787,14 +791,35 @@ type camino struct {
 	// mudo: conecta pero nadie contesta por él (ErrCaminoMudo); hasta que
 	// muera este proceso se va por TCP, sin apuntarlo en el snapshot.
 	// fallos: dials por vsock seguidos que fallaron con TCP vivo tras haber
-	// contestado (ok); al llegar a fallosVsockMuerto se da por muerto (mudo).
-	ok, soloTCP, mudo bool
-	fallos            int
+	// contestado (ok), el primero en primerFallo; al llegar a
+	// fallosVsockMuerto dentro de ventanaFallosVsock se da por muerto.
+	// muerto: su escucha de vsock murió; se va por TCP y se vuelve a probar
+	// vsock una vez a partir de reintento, por si la escucha volvió.
+	ok, soloTCP, mudo, muerto bool
+	fallos                    int
+	primerFallo, reintento    time.Time
 }
 
 // fallosVsockMuerto son los fallos seguidos por vsock, con TCP contestando, que
 // hacen falta para dejar de probarlo. Uno suelto puede ser carga pasajera.
 const fallosVsockMuerto = 3
+
+// ventanaFallosVsock acota los fallos de fallosVsockMuerto: solo cuentan si
+// caen dentro de esta ventana desde el primero. Sin ella, tres fallos sueltos
+// en horas de un VMM de larga vida lo dejaban en TCP para siempre.
+const ventanaFallosVsock = 30 * time.Second
+
+// reintentoVsockMuerto es cada cuánto se vuelve a probar un vsock dado por
+// muerto: si la escucha volvió (un agente reiniciado), se usa otra vez.
+const reintentoVsockMuerto = time.Minute
+
+// reloj es la hora para los caminos de SetGuestDialer.
+func (n *Net) reloj() time.Time {
+	if n.ahora != nil {
+		return n.ahora()
+	}
+	return time.Now()
+}
 
 // ErrCaminoMudo lo devuelve un dial de SetGuestDialer que conectó pero vio que
 // por ahí nadie contesta. No es un agente anterior (que ni conecta): el
@@ -848,7 +873,14 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 	cam := n.guestDial[int(port)]
 	var dial func(ctx context.Context) (net.Conn, error)
 	if cam != nil && !cam.soloTCP && !cam.mudo {
-		dial = cam.dial
+		if !cam.muerto {
+			dial = cam.dial
+		} else if t := n.reloj(); !t.Before(cam.reintento) {
+			// Toca reintentar: se aplaza el siguiente ya, para que las
+			// conexiones a la vez no prueben todas.
+			cam.reintento = t.Add(reintentoVsockMuerto)
+			dial = cam.dial
+		}
 	}
 	n.mu.Unlock()
 	probado := false
@@ -859,11 +891,15 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 		if err == nil {
 			n.mu.Lock()
 			primera := !cam.ok
-			cam.ok = true
+			volvio := cam.muerto
+			cam.ok, cam.muerto = true, false
 			cam.fallos = 0
 			n.mu.Unlock()
 			if primera {
 				n.cfg.Logf("guest port %d reached over vsock", port)
+			}
+			if volvio {
+				n.cfg.Logf("guest port %d answers over vsock again: using vsock", port)
 			}
 			return c, nil
 		}
@@ -892,16 +928,24 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 			cam.soloTCP = true
 		}
 		// Contestó por vsock alguna vez y ahora no, con TCP vivo, varias
-		// veces seguidas: su escucha de vsock murió (un agente anterior a la
-		// 1.0 la perdía con un EINTR). Hasta que acabe este proceso, directo
-		// por TCP: si no, cada conexión pagaba antes un connect de vsock
-		// fallido. No va al snapshot (no es soloTCP): tras un thaw o un
-		// arranque, el agente vuelve a escuchar por vsock.
+		// veces seguidas en poco tiempo: su escucha de vsock murió (un agente
+		// anterior a la 1.0 la perdía con un EINTR). Se va directo por TCP
+		// (si no, cada conexión pagaba antes un connect de vsock fallido) y
+		// vsock se reintenta de vez en cuando. No va al snapshot (no es
+		// soloTCP): tras un thaw o un arranque, el agente vuelve a escuchar
+		// por vsock. Un reintento fallido de un camino ya muerto no cuenta.
 		murio := false
-		if cam.ok && !cam.mudo {
-			cam.fallos++
+		if cam.ok && !cam.mudo && !cam.muerto {
+			t := n.reloj()
+			if cam.fallos == 0 || t.Sub(cam.primerFallo) > ventanaFallosVsock {
+				cam.fallos, cam.primerFallo = 1, t
+			} else {
+				cam.fallos++
+			}
 			if cam.fallos >= fallosVsockMuerto {
-				cam.mudo, murio = true, true
+				cam.muerto, murio = true, true
+				cam.fallos = 0
+				cam.reintento = t.Add(reintentoVsockMuerto)
 			}
 		}
 		n.mu.Unlock()
@@ -909,7 +953,7 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 			n.cfg.Logf("guest port %d answers over TCP but not over vsock (an older guest agent): using TCP from now on", port)
 		}
 		if murio {
-			n.cfg.Logf("guest port %d stopped answering over vsock but answers over TCP (its vsock listener died): using TCP until this process ends", port)
+			n.cfg.Logf("guest port %d stopped answering over vsock but answers over TCP (its vsock listener died): using TCP, retrying vsock every %s", port, reintentoVsockMuerto)
 		}
 	}
 	return gc, err
