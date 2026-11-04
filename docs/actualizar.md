@@ -66,7 +66,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; campos opcionales `vmm` (v0.18), `diff_base` (v0.18) y `sin_agente` (v0.19) | **desde v0.20 es obligatorio**: un volcado sin marcadores solo se acepta si la máquina se congeló antes de la primera versión que sella (v0.8, 2026-09-23); uno posterior sin sello no se descongela. Sin `vmm`, no se compara |
 | `snap.file` de kling-vz y kling-hv | `vz/internal/spec/spec.go` (los dos lo escriben) | **`kling_vz`**: se escribe la más baja que lo describe: 1 de base, 2 con `graphics` (v0.18), **3 con vsock o MTU** (v0.19). Como v0.19 arranca con vsock y MTU 16384, casi todo lo congelado desde entonces es 3. `Decode` lee 1 a 3, y `kling-vz -snapshot-formats` dice cuáles | uno ≤ v0.17 lee la 1; uno de v0.18 la 1 y la 2; lo que haya que despertar con un kling-vz anterior lo recongela `kling upgrade` (§3.4). Uno de una versión futura se rechaza diciendo que se actualice kling-vz |
 | `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
-| `mem.file` de kling-hv (experimental) | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 2** (vsock y globo, v0.19); lee también la 1 | un kling-hv con la cabecera 1 no lee la 2. El daemon **no traduce** ese error a "rehazlo" (`explicarRestauracion` solo conoce `kling_vz`) y `kling upgrade` no comprueba esta versión antes de volver atrás |
+| `mem.file` de kling-hv (experimental) | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 4**: 2 vsock y globo (v0.19), 3 la cola de estadísticas del globo, 4 la de páginas libres (v1.0). Lee 1 a 3 y cada versión con su propia longitud de cabecera; escribe siempre la 4 | uno anterior no lee la 4 y se rechaza diciendo que se actualice. `explicarRestauracion` traduce el error a "rehazlo" y `kling upgrade` comprueba esta versión antes de volver atrás (`versionHVMax`, ver `TestFormatosCasanConVZ`) |
 | firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
 
 ### Imágenes y volúmenes
@@ -390,7 +390,7 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   microVMs en marcha siguen (`KillMode=process`) y el daemon nuevo las readopta.
   En el Mac `kling-vz` y `kling-hv` sí cambian, pero su versión no se compara
   (§3.2); lo que importa es el `kling_vz` de lo congelado, que se mira al
-  volver atrás (abajo). El `KLNGHV` del `mem.file` de kling-hv, no.
+  volver atrás (abajo), y lo mismo el `KLNGHV` del `mem.file` de kling-hv.
 - **Unidades y `/etc/default/kling`.** No se regeneran: la release no publica
   `kling.service` (lo instala `make deploy`), y lo que no se cambia no hace
   falta copiarlo.

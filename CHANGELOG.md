@@ -25,6 +25,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - macOS (kling-hv): DNS answers are cached per machine and A/AAAA resolve in parallel (10 lookups 1480 → 80 ms on an M4).
 - macOS (kling-hv): the balloon has its statistics queue, so `kling machine squeeze` sees guest memory (136 MiB reclaimed instead of 4 on an idle machine); snapshot state v3, v1 and v2 still restore.
+- macOS (kling-hv): free page reporting returns memory the guest frees without a squeeze (100 MB freed: footprint 193 -> 95 MiB in 11 s); balloon releases are batched (~5300 remaps per squeeze -> ~9); snapshot state v4, v1 to v3 still restore.
+- macOS (kling-hv): the guest clock stops while a machine is paused (a long pause logged soft lockups and RCU stalls) and is resynced in the background on resume.
+- macOS (kling-hv): network and vsock receive straight into guest buffers (upload 345-374 -> 387-416 MiB/s, download 558-624 -> 610-673 MiB/s, less VMM CPU); closed vsock host ends are seen through kqueue instead of a 1 s probe.
+- The first exec after a cold boot is ~40-55 ms faster: the agent probe no longer waits out a probe sent before the guest's vsock was up, and the agent sets the MMDS route over netlink instead of running `ip`.
+- The guest clock is resynced right after boot (the RTC only has whole seconds, so each boot started up to 0.5 s off; now within a few ms).
+- `kling machine squeeze` polls the balloon every 10-40 ms instead of 100 ms.
+- `kling doctor` shows the installed kernel and the templates and frozen machines made with another one; `GET /info` adds `kernel_sha256` and `kernel_mismatch`.
+- `install.sh` requires minisign from v1.0.0 (`KLING_INSECURE_NO_MINISIGN=1` to skip); releases run the lint and apidiff and refuse a 1.0+ tag without release public keys; an `API-Break:` trailer must name the packages it excuses.
+- ext/db: its regexps compile lazily (`--kling-manifest`, also run by its git hook: 0.72 ms and ~20k allocations of init -> 0.02 ms); ext/sandbox requires kling 0.17.0.
 - macOS: the daemon reads hv machines' footprint and CPU locally instead of over HTTP.
 - Go packages that are not part of the public API moved from `pkg/` to `internal/` (`aigw`, `chispa`, `codificador`, `digest`, `durable`, `esquema`, `intent`, `transport`, `von`; `pkg/share` is now `internal/shareproto`). `pkg/api`, `pkg/plugin` and `pkg/config` are the 1.x Go API; what other modules of the repo import (`guest`, `credproxy`, `scheduler`, `linkbroker`, `panico`, `units`) and `lazyre` (the type of `api.KeyPattern`) stay in `pkg/`.
 - The upgrade e2e starts from the previous release's real assets, checked against its `SHA256SUMS`, instead of piping `install.sh`.
@@ -61,6 +70,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS (kling-hv, kling-vz): the VMM API socket only accepts the daemon's user.
+- macOS (kling-hv): a failed balloon remap no longer ends the VM.
+- A daemon that loses a guest's vsock (an older agent's listener died) goes straight to TCP after three failures instead of paying a failed vsock connect on every connection.
+- The reason a VMM ended (e.g. the guest rebooted) is in the failure event; `kling start` clears the previous thaw timings; a freeze right after boot waits for the agent before asking it to flush its volumes.
+- kling-bridge: `-session-idle 0` no longer panics, a failed listener cleans up its HTTP child, and the proxy session table is capped.
+- Linux: removing a credential edge removes its DNAT/ACCEPT rules; a graph fork writes its fork mark before the template meta, like a machine fork.
+- Bounded maps: the share watcher's echo marks, the MCP gateway usage memory, phone screenshots and sandbox in-flight counters.
 - Guest agent: an `EINTR` or `ECONNABORTED` from the vsock `accept` killed its vsock listener until the machine restarted (seconds into any exec load on hv and vz); with the guest network up the daemon silently fell back to TCP, without it every exec failed. Images need the new agent to get the fix.
 - kling-hv: taking a vCPU offline and back online (CPU hotplug) crashed the guest kernel; CPU_ON now resets the vCPU's system registers.
 - kling-hv: the guest no longer sees SVE/SME on an M4 (it advertised sve2 without sve and OpenSSL died with SIGILL, #183 on hv).
