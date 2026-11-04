@@ -19,7 +19,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-var actualizar = flag.Bool("update", false, "regenerate testdata/contrato/json.txt")
+var actualizar = flag.Bool("update", false, "regenerate the goldens in testdata/contrato")
 
 // comandosJSON son los comandos cuya salida -json es contrato
 // (docs/compatibilidad.md): la forma (claves y tipos), no los valores.
