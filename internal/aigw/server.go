@@ -144,14 +144,26 @@ func errType(code int) string {
 	}
 }
 
+// plazoClasificar es el techo de un classify/decide: la escalada a VON
+// (VONTimeout) más margen para despertar la réplica y clasificar en ella
+// (readyTimeout del planificador: 20 s en frío).
+func (g *Gateway) plazoClasificar() time.Duration {
+	return g.opts.VONTimeout + 30*time.Second
+}
+
 func (g *Gateway) handleClassify(endpoint string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ClassifyRequest
 		if !decodeBody(w, r, &req) {
 			return
 		}
+		// Techo de la petición entera: clasificar en la réplica (despertarla
+		// incluido) no tenía plazo, solo la escalada a VON. Un invitado que
+		// acepta y no contesta retenía al cliente hasta que este se rindiera.
+		ctx, cancel := context.WithTimeout(r.Context(), g.plazoClasificar())
+		defer cancel()
 		if tc := g.config().Tasks[req.Task]; endpoint == "decide" && tc != nil && tc.Intent != nil {
-			resp, err := g.Decide(r.Context(), req)
+			resp, err := g.Decide(ctx, req)
 			if err != nil {
 				writeErr(w, err)
 				return
@@ -159,7 +171,7 @@ func (g *Gateway) handleClassify(endpoint string) http.HandlerFunc {
 			writeJSON(w, resp)
 			return
 		}
-		resp, err := g.Classify(r.Context(), endpoint, req)
+		resp, err := g.Classify(ctx, endpoint, req)
 		if err != nil {
 			writeErr(w, err)
 			return

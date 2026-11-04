@@ -157,7 +157,7 @@ func New(o Options) (*Gateway, error) {
 		}
 	}
 	g := &Gateway{
-		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle), auditSem: make(chan struct{}, 1),
+		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle, max(o.ProxyTimeout, o.VONTimeout)), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
 	}

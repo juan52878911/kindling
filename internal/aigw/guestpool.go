@@ -50,20 +50,27 @@ const guestConnsPerReplica = 64
 // no uno compartido para poder cerrar las conexiones de UNA réplica cuando se
 // duerme sin tocar las de las demás.
 type guestPool struct {
-	idleTimeout time.Duration
-	mu          sync.Mutex
-	byAddr      map[string]*http.Transport
+	idleTimeout   time.Duration
+	headerTimeout time.Duration // 0 = sin tope (solo el contexto)
+	mu            sync.Mutex
+	byAddr        map[string]*http.Transport
 }
 
 // newGuestPool crea el pool. idle es el plazo de inactividad del segador: las
 // conexiones ociosas se cierran a la mitad, antes de que la réplica se duerma
 // con ellas abiertas.
-func newGuestPool(idle time.Duration) *guestPool {
+//
+// cabeceras es el tope de espera a las cabeceras de una réplica: el plazo más
+// largo de una petición legítima (ProxyTimeout: un chat sin stream manda las
+// cabeceras al terminar). Cada camino pone el suyo en el contexto; este es el
+// respaldo de los que no lo ponen, para que un invitado que acepta y no
+// contesta no retenga la petición sin fin.
+func newGuestPool(idle, cabeceras time.Duration) *guestPool {
 	t := idle / 2
 	if t <= 0 || t > 90*time.Second {
 		t = 90 * time.Second
 	}
-	return &guestPool{idleTimeout: t, byAddr: map[string]*http.Transport{}}
+	return &guestPool{idleTimeout: t, headerTimeout: cabeceras, byAddr: map[string]*http.Transport{}}
 }
 
 // transport devuelve el transporte de addr, creándolo si no existe. El
@@ -83,6 +90,7 @@ func (p *guestPool) transport(addr string) *http.Transport {
 		MaxIdleConns:           guestConnsPerReplica,
 		MaxIdleConnsPerHost:    guestConnsPerReplica,
 		IdleConnTimeout:        p.idleTimeout,
+		ResponseHeaderTimeout:  p.headerTimeout,
 	}
 	p.byAddr[addr] = t
 	return t
