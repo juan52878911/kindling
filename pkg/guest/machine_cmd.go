@@ -23,12 +23,6 @@ func MachineCmdRequired() bool {
 	return cmdlineParams().values[api.MachineCmdBootParam] == "1"
 }
 
-// loadMachineCmd lee solo el comando de la máquina (ver loadMachineBoot).
-func loadMachineCmd(fetch func() (*MMDSStore, error)) (*api.MachineCmd, error) {
-	b := loadMachineBoot(false, true, fetch)
-	return b.cmd, b.cmdErr
-}
-
 // applyMachineCmd es applyMachineBoot solo para el comando: lo guarda para
 // StartService, y si no puede leerlo el servicio no arrancará.
 func (a *Agent) applyMachineCmd(required bool, fetch func() (*MMDSStore, error)) {

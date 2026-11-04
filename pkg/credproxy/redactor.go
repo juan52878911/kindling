@@ -258,7 +258,7 @@ func (r *redactor) Write(p []byte) (int, error) {
 		buf = append(r.tail, p...)
 	}
 	for _, pr := range r.pares {
-		if bytes.Index(buf, pr.old) < 0 {
+		if !bytes.Contains(buf, pr.old) {
 			continue
 		}
 		if pr.marca != nil {
