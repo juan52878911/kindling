@@ -2,6 +2,7 @@ package share
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -124,12 +125,23 @@ func TestPush(t *testing.T) {
 	if err != nil || ev != EventCreate || p != "a/b.txt" {
 		t.Fatalf("%d %q %v", ev, p, err)
 	}
-	for _, bad := range [][]byte{Push(0, "x"), Push(EventModify, "../x"), Push(EventModify, "/x"), append(Push(EventModify, "x"), 0)} {
+	for _, bad := range [][]byte{Push(EventModify, "../x"), Push(EventModify, "/x"), append(Push(EventModify, "x"), 0),
+		Push(0, "../x"), append(Push(9, "x"), 0)} {
 		d := NewDec(bad)
 		d.U64()
 		d.U32()
-		if _, _, err := ParsePush(d); err == nil {
-			t.Errorf("accepted %v", bad)
+		if _, _, err := ParsePush(d); err == nil || errors.Is(err, ErrUnknownEvent) {
+			t.Errorf("malformed %v: %v", bad, err)
+		}
+	}
+	// Un evento que no conocemos (de un daemon más nuevo) en una trama sana
+	// no es un error de protocolo: se distingue para saltarlo.
+	for _, ev := range []byte{0, EventDelete + 1, 255} {
+		d := NewDec(Push(ev, "a/b"))
+		d.U64()
+		d.U32()
+		if _, _, err := ParsePush(d); !errors.Is(err, ErrUnknownEvent) {
+			t.Errorf("event %d: %v, want ErrUnknownEvent", ev, err)
 		}
 	}
 }

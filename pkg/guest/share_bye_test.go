@@ -52,3 +52,37 @@ func TestShareSessionByeDevuelveRetry(t *testing.T) {
 		})
 	}
 }
+
+// Un aviso con un tipo de evento que el agente no conoce (de un daemon más
+// nuevo) se salta y la sesión sigue: cerrarla dejaría al agente reconectando
+// cada 200 ms. Uno mal formado sí la cierra.
+func TestShareSessionSaltaEventoDesconocido(t *testing.T) {
+	a, b := net.Pipe()
+	s := newShareSession(b)
+	defer s.close()
+	defer a.Close()
+	for _, f := range [][]byte{share.Push(share.EventDelete+7, "nuevo"), share.Push(share.EventCreate, "a.txt")} {
+		if err := share.WriteFrame(a, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case ev := <-s.events:
+		if ev.ev != share.EventCreate || ev.path != "a.txt" {
+			t.Fatalf("aviso %+v", ev)
+		}
+	case <-s.done:
+		t.Fatal("la sesión se cerró por un evento desconocido")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no llegó el aviso conocido")
+	}
+
+	if err := share.WriteFrame(a, share.Push(share.EventCreate, "../fuera")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("un aviso mal formado no cerró la sesión")
+	}
+}

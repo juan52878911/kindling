@@ -86,3 +86,45 @@ func TestApplyMachineEnvYServicio(t *testing.T) {
 		t.Fatal("no anuncia la capacidad env")
 	}
 }
+
+// El entorno y el comando salen de la MISMA lectura: con un MMDS mudo se
+// espera una tanda de reintentos, no dos; con uno sano, una sola petición.
+func TestApplyMachineBootUnaLectura(t *testing.T) {
+	defer func(n int, p time.Duration) { machineEnvTries, machineEnvPause = n, p }(machineEnvTries, machineEnvPause)
+	machineEnvPause, machineEnvTries = 0, 5
+
+	n := 0
+	a := &Agent{}
+	a.applyMachineBoot(true, true, func() (*MMDSStore, error) { n++; return nil, errors.New("mudo") })
+	if n != machineEnvTries || a.envErr == nil || a.cmdErr == nil {
+		t.Fatalf("intentos %d (want %d), envErr %v, cmdErr %v", n, machineEnvTries, a.envErr, a.cmdErr)
+	}
+
+	n = 0
+	b := &Agent{Env: []string{"PATH=/bin"}}
+	b.applyMachineBoot(true, true, func() (*MMDSStore, error) {
+		n++
+		return &MMDSStore{
+			MachineEnv: map[string]string{"PW": "x"},
+			MachineCmd: &api.MachineCmd{Cmd: []string{"node", "otro.js"}},
+		}, nil
+	})
+	if n != 1 || b.envErr != nil || b.cmdErr != nil || !slices.Contains(b.Env, "PW=x") || b.machineCmd == nil {
+		t.Fatalf("intentos %d, env %q, cmd %+v, errores %v %v", n, b.Env, b.machineCmd, b.envErr, b.cmdErr)
+	}
+
+	// Uno llega y el otro no: se reintenta solo por el que falta.
+	n = 0
+	c := &Agent{}
+	c.applyMachineBoot(true, true, func() (*MMDSStore, error) {
+		n++
+		st := &MMDSStore{MachineEnv: map[string]string{"PW": "x"}}
+		if n == 3 {
+			st.MachineCmd = &api.MachineCmd{Cmd: []string{"sh"}}
+		}
+		return st, nil
+	})
+	if n != 3 || c.envErr != nil || c.cmdErr != nil || c.machineCmd == nil {
+		t.Fatalf("intentos %d, errores %v %v", n, c.envErr, c.cmdErr)
+	}
+}

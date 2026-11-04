@@ -41,6 +41,10 @@ func handleStreamExec(env []string, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
 	}
+	if !takeExec(w) {
+		return
+	}
+	defer execLim.give()
 	var req api.ExecRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2*api.ExecMaxStdin+64<<10)).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid body: %v", err), http.StatusBadRequest)

@@ -89,9 +89,32 @@ func StreamExecHandlerFunc(env func() []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { handleStreamExec(env(), w, r) }
 }
 
-// ShellHandlerFunc es ShellHandler con el entorno de cada petición.
+// ShellHandlerFunc es ShellHandler con el entorno de cada petición. Antes
+// creaba un ShellHandler (y con él un tope nuevo) en cada petición, y
+// maxShells no acotaba nada.
 func ShellHandlerFunc(env func() []string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) { ShellHandler(env())(w, r) }
+	return shellHandler(env)
+}
+
+// maxExecs acota los /exec y /exec/stream en curso a la vez, entre los dos.
+// Cada uno es un proceso con sus tuberías y su búfer de salida; sin tope,
+// quien alcance el agente puede llevar a PID 1 al OOM en un invitado de
+// 128-256 MiB. Lleno, se contesta 429 como con las shells.
+const maxExecs = 64
+
+var execLim = &slotLimiter{max: maxExecs}
+
+// takeExec ocupa una plaza de exec o contesta 429. Si devuelve true, quien
+// llama la suelta con execLim.give.
+func takeExec(w http.ResponseWriter) bool {
+	if execLim.take() {
+		return true
+	}
+	execLim.mu.Lock()
+	max := execLim.max
+	execLim.mu.Unlock()
+	http.Error(w, fmt.Sprintf("too many commands running in this microVM (limit %d)", max), http.StatusTooManyRequests)
+	return false
 }
 
 func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
@@ -99,6 +122,10 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
 	}
+	if !takeExec(w) {
+		return
+	}
+	defer execLim.give()
 	r.Body = http.MaxBytesReader(w, r.Body, execMaxBody)
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
