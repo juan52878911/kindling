@@ -61,6 +61,20 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A freeze whose seal could not be written left a `warm` machine that could never be thawed; it now fails the machine and keeps its disk.
+- Two `commit`s with the same name from different machines no longer overwrite each other; the second gets a conflict.
+- A crash between a fork's snapshot meta and its `fork-of` mark left an orphan fork nobody swept.
+- `stop` of a machine removed while waiting for its lock reports not found instead of acting on a stale copy.
+- Machine ids never share the 8-hex prefix that names their netns and cgroup with a live machine (a collision tore down the other machine's network).
+- Linux: changing a graph removes the link DNAT/ACCEPT rules of edges that are gone or moved slot.
+- DNS resolver handlers are bounded before they start and waited for on stop, so nothing seeds after teardown.
+- kling-hv: a truncated or inconsistent `mem.file` is rejected with an error instead of crashing the VMM on restore; the GIC state size is capped.
+- Guest agent: an unknown share event from a newer daemon is skipped instead of dropping the share session; `/exec` and `/exec/stream` are capped at 64 concurrent requests (429), and the 8-shell cap now actually applies; write-behind keeps at most 16 chunks in flight per file; the machine env and command are read from MMDS in one retry cycle (worst case ~12 s instead of ~23 s before `/healthz`).
+- `kling status -json` exits 1 when the daemon does not answer, like the text output.
+- `kling plugins` and every command no longer run `kling-hv` and `kling-unpack` as if they were extensions.
+- `kling ai`: classify/decide and the guest pool have timeouts.
+- Performance: an `exec` no longer rewrites the whole state on every TTL refresh (25-220 µs and up to 940 KB per exec with 100-500 machines, now 59 ns); the credential proxy redactor copies only when a secret matches and precomputes its variants (256 KiB body: 2.9-10.8 MB to 33 KB allocated); the MCP gateway probes a sticky instance once per request instead of twice; instance transports drop idle connections after 30 s and close them when the instance goes away.
+- Tests: the contract now has a golden of every command's flags (`testdata/contrato/flags.txt`), the exit-code 5 wiring, the agent `cmd`/`volume-wait` capabilities, and the snapshot format constants against the vz sources.
 - kling-hv: a short block write was reported as success to the guest; virtio queue sizes must be a power of two; a network RX chain shorter than the frame gets nothing instead of a cut header; the device-tree builder is bounds-checked; the `mem.file` fallback is 0600; PSCI CPU_ON reads registers under the lock.
 - kling-hv vsock: connections the host closed fully kept their slot, so a guest could exhaust the 64 slots and stop `exec`.
 - macOS: kling-hv and kling-vz start with a minimal environment instead of inheriting the daemon's (tokens included).
