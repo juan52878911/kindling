@@ -61,6 +61,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Guest agent: an `EINTR` or `ECONNABORTED` from the vsock `accept` killed its vsock listener until the machine restarted (seconds into any exec load on hv and vz); with the guest network up the daemon silently fell back to TCP, without it every exec failed. Images need the new agent to get the fix.
 - kling-hv: taking a vCPU offline and back online (CPU hotplug) crashed the guest kernel; CPU_ON now resets the vCPU's system registers.
 - kling-hv: the guest no longer sees SVE/SME on an M4 (it advertised sve2 without sve and OpenSSL died with SIGILL, #183 on hv).
 - kling-hv: a freeze during a pending CPU_ON left that vCPU dead after restore; the balloon no longer writes guest RAM during a snapshot; a pause that cannot stop every vCPU gives up after 5 s with an error instead of hanging freeze/stop.

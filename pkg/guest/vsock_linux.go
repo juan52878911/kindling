@@ -63,18 +63,26 @@ func (l *vsockListener) Accept() (net.Conn, error) {
 	var nfd int
 	var aerr error
 	err = rc.Read(func(fd uintptr) bool {
-		// Sin dirección de vuelta: syscall.Accept4 la traduciría y, con
-		// una familia que no conoce, cerraría la conexión y daría error.
-		r, _, e := syscall.Syscall6(syscall.SYS_ACCEPT4, fd, 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
-		switch e {
-		case 0:
-			nfd, aerr = int(r), nil
-		case syscall.EAGAIN:
-			return false
-		default:
-			aerr = os.NewSyscallError("accept4", e)
+		for {
+			// Sin dirección de vuelta: syscall.Accept4 la traduciría y, con
+			// una familia que no conoce, cerraría la conexión y daría error.
+			r, _, e := syscall.Syscall6(syscall.SYS_ACCEPT4, fd, 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
+			switch e {
+			case 0:
+				nfd, aerr = int(r), nil
+			case syscall.EAGAIN:
+				return false
+			case syscall.EINTR, syscall.ECONNABORTED:
+				// Una señal (Go manda SIGURG para expropiar) o una conexión
+				// que el otro lado cerró antes del accept: se reintenta en el
+				// acto. Devolverlos mataba el listener, y http.Server.Serve
+				// dejaba al agente sin vsock hasta reiniciar la máquina.
+				continue
+			default:
+				aerr = os.NewSyscallError("accept4", e)
+			}
+			return true
 		}
-		return true
 	})
 	if err != nil {
 		if errors.Is(err, os.ErrClosed) {
