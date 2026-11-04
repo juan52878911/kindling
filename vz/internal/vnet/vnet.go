@@ -73,6 +73,8 @@ const (
 
 	dialTimeout = 10 * time.Second
 	udpIdle     = 60 * time.Second
+	// dnsParalelo: consultas en vuelo por socket UDP del invitado.
+	dnsParalelo = 4
 	dnsIdle     = 10 * time.Second
 
 	// Topes de lo que el invitado puede tener abierto a la vez contra este
@@ -594,18 +596,31 @@ func (n *Net) handleUDP(r *udp.ForwarderRequest) bool {
 	return true
 }
 
+// serveDNSUDP atiende las consultas de un socket UDP del invitado. Cada una
+// va en su goroutine (hasta dnsParalelo por socket): el resolver de un
+// cliente manda A y AAAA seguidas por el mismo socket y, en serie, la
+// segunda esperaba el viaje entero de la primera al upstream.
 func (n *Net) serveDNSUDP(c *gonet.UDPConn) {
 	defer c.Close()
 	buf := make([]byte, 4096)
+	sem := make(chan struct{}, dnsParalelo)
+	var wmu sync.Mutex
 	for {
 		_ = c.SetReadDeadline(time.Now().Add(dnsIdle))
 		k, err := c.Read(buf)
 		if err != nil {
 			return
 		}
-		if resp := n.cfg.Resolver.Process(n.ctx, append([]byte(nil), buf[:k]...), false); resp != nil {
-			_, _ = c.Write(resp)
-		}
+		q := append([]byte(nil), buf[:k]...)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem }()
+			if resp := n.cfg.Resolver.Process(n.ctx, q, false); resp != nil {
+				wmu.Lock()
+				_, _ = c.Write(resp)
+				wmu.Unlock()
+			}
+		}()
 	}
 }
 
