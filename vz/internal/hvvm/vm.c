@@ -1531,6 +1531,46 @@ int khv_restore(const char *mem_path) {
 // Lo más que espera khv_pause a que todos los vCPU lleguen al punto de pausa.
 #define PAUSA_PLAZO_NS (5ULL * 1000000000ULL)
 
+// Los dispositivos quedaron quietos (dispositivos_quietos_plazo) en la pausa
+// en curso. Con op_mu. Solo lo necesita una pausa del núcleo (KHV_PAUSA_API):
+// el snapshot no puede ver la RAM a medio escribir por un dispositivo. Al
+// regulador de CPU (KHV_PAUSA_FRENO, cada pocos ms) le basta con los vCPU
+// parados: los hilos de los dispositivos ven g_pausa y se paran solos en su
+// siguiente vuelta, y lo que tuvieran en curso puede acabar sin estorbar.
+static bool disp_quietos;
+
+// quietos_o_deshacer deja quietos los dispositivos para una pausa del núcleo
+// con los vCPU ya parados. Si no llegan en el plazo, la pausa vuelve a ser la
+// de antes: con antes == 0 se deshace entera (a los vCPU se les suma lo que
+// duró, como en khv_resume, y el invitado no ve el salto; los dispositivos se
+// despiertan); con antes != 0 (la del regulador sigue) solo se quita el bit.
+// Con op_mu; -1 si no llegaron.
+static int quietos_o_deshacer(unsigned antes) {
+  if (dispositivos_quietos_plazo(PAUSA_PLAZO_NS)) {
+    disp_quietos = true;
+    uart_flush();
+    return 0;
+  }
+  pthread_mutex_lock(&mu);
+  pausa_bits = antes;
+  bool reloj = pausa_reloj;
+  pausa_reloj = false;  // antes no tenía KHV_PAUSA_API: la habría dejado quieta
+  if (antes == 0) {
+    if (reloj && t_pausado) {
+      uint64_t d = mach_absolute_time() - t_pausado;
+      for (int i = 0; i < ncpus; i++) cpus[i].ajuste_vtimer += d;
+    }
+    pausa_pedida = false;
+    g_pausa = false;
+    pthread_cond_broadcast(&cv);
+  }
+  pthread_mutex_unlock(&mu);
+  if (antes == 0) dispositivos_despertar();
+  fallo("devices did not quiesce in time (%d ms)", (int)(PAUSA_PLAZO_NS / 1000000));
+  logf_("%s", errbuf);
+  return -1;
+}
+
 int khv_pause(unsigned bit) {
   pthread_mutex_lock(&op_mu);
   pthread_mutex_lock(&mu);
@@ -1540,9 +1580,13 @@ int khv_pause(unsigned bit) {
   // núcleo y puede durar lo que quiera.
   if (bit & KHV_PAUSA_API) pausa_reloj = true;
   if (antes != 0 || !liberada || parar) {
+    // La del regulador pasa a ser del núcleo: sus dispositivos no se
+    // pararon (ver disp_quietos), así que se paran ahora.
+    bool falta = (bit & KHV_PAUSA_API) && antes != 0 && liberada && !parar && !disp_quietos;
     pthread_mutex_unlock(&mu);
+    int r = falta ? quietos_o_deshacer(antes) : 0;
     pthread_mutex_unlock(&op_mu);
-    return 0;
+    return r;
   }
   pausa_pedida = true;
   g_pausa = true;
@@ -1599,28 +1643,12 @@ int khv_pause(unsigned bit) {
   }
   t_pausado = mach_absolute_time();
   pthread_mutex_unlock(&mu);
-  // Los dispositivos, con el mismo plazo. Si no llegan, se deshace la pausa
-  // como arriba, pero con los vCPU ya parados: si la pausa era del núcleo se
-  // les suma lo que duró (como en khv_resume) y el invitado no ve el salto.
-  if (!dispositivos_quietos_plazo(PAUSA_PLAZO_NS)) {
-    pthread_mutex_lock(&mu);
-    if (pausa_reloj && t_pausado) {
-      uint64_t d = mach_absolute_time() - t_pausado;
-      for (int i = 0; i < ncpus; i++) cpus[i].ajuste_vtimer += d;
-    }
-    pausa_bits = antes;
-    pausa_reloj = false;
-    pausa_pedida = false;
-    g_pausa = false;
-    pthread_cond_broadcast(&cv);
-    pthread_mutex_unlock(&mu);
-    dispositivos_despertar();
-    fallo("devices did not quiesce in time (%d ms)", (int)(PAUSA_PLAZO_NS / 1000000));
-    logf_("%s", errbuf);
+  // Los dispositivos, con el mismo plazo, solo para una pausa del núcleo (ver
+  // disp_quietos).
+  if ((bit & KHV_PAUSA_API) && quietos_o_deshacer(antes) < 0) {
     pthread_mutex_unlock(&op_mu);
     return -1;
   }
-  uart_flush();
   pthread_mutex_unlock(&op_mu);
   return parar ? -1 : 0;
 }
@@ -1650,6 +1678,7 @@ int khv_resume(unsigned bit) {
       pthread_cond_broadcast(&cv);
       despertar = true;
     }
+    disp_quietos = false;
   }
   pthread_mutex_unlock(&mu);
   if (despertar) dispositivos_despertar();
@@ -1665,7 +1694,8 @@ int khv_snapshot(const char *mem_out) {
   unsigned char *v = NULL;
   static struct snap_hdr h;
   pthread_mutex_lock(&mu);
-  bool en_pausa = liberada && pausa_pedida && n_pausados == ncpus;
+  // disp_quietos: una pausa solo del regulador no paró los dispositivos.
+  bool en_pausa = liberada && pausa_pedida && n_pausados == ncpus && disp_quietos;
   pthread_mutex_unlock(&mu);
   if (!en_pausa) {
     fallo("the VM must be paused to snapshot it");
