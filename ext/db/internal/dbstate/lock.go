@@ -10,15 +10,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // LocksDir es el subdirectorio de los cerrojos.
 const LocksDir = "locks"
 
 // lockPattern es un nombre de cerrojo: lo único que entra en la ruta.
-var lockPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var lockPattern = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // ErrLocked: otro proceso tiene el cerrojo y no lo soltó a tiempo.
 var ErrLocked = errors.New("locked by another kling db process")

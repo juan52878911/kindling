@@ -25,11 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 //go:embed seed.sql
@@ -81,9 +82,9 @@ func (c *config) target(addr string) target {
 }
 
 var (
-	reIdent  = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,30}$`)
+	reIdent  = lazyre.New(`^[a-z_][a-z0-9_]{0,30}$`)
 	reModes  = map[string]bool{"kindling-run": true, "kindling-fork": true, "docker": true, "template": true}
-	reRunTag = regexp.MustCompile(`[^a-z0-9]`)
+	reRunTag = lazyre.New(`[^a-z0-9]`)
 )
 
 func splitList(s string) []string {

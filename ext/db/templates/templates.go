@@ -17,16 +17,17 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 //go:embed empty crm-demo
 var files embed.FS
 
 // namePattern es un nombre de plantilla incluida: sin barras ni puntos.
-var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,40}$`)
+var namePattern = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,40}$`)
 
 // Info describe una plantilla.
 type Info struct {

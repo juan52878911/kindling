@@ -14,13 +14,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // redisAdmin es el cliente del administrador dentro de la copia (el mismo que
@@ -31,7 +31,7 @@ const redisAdmin = `c=$(command -v redis-cli || command -v valkey-cli) && REDISC
 // los dos lados usan la misma orden.
 const RedisAdminClient = redisAdmin
 
-var reHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var reHex64 = lazyre.New(`^[0-9a-f]{64}$`)
 
 // redisCmd manda un comando (fijo, o con un nombre ya validado) al cliente
 // del administrador y devuelve su salida.

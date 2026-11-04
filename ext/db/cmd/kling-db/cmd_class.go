@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +34,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -49,7 +49,7 @@ const (
 
 // classPattern es un prefijo: cabe en una etiqueta (api.KeyPattern) y, con
 // "-NNN" detrás, en un nombre de máquina.
-var classPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
+var classPattern = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 
 const classUsage = "usage: kling db class -n N [-prefix P] [-ttl D] [-parallel K] [-passwords FILE] <golden>\n" +
 	"       kling db class ls [-prefix P] [-json] [-passwords FILE]\n" +

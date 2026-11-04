@@ -30,13 +30,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -63,7 +63,7 @@ esac
 `
 
 // roleNamePattern: identificador simple, hasta los 63 bytes de Postgres.
-var roleNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+var roleNamePattern = lazyre.New(`^[a-z_][a-z0-9_]{0,62}$`)
 
 // reservedRoles son nombres con significado especial en SQL o en pg_hba.conf.
 var reservedRoles = map[string]bool{

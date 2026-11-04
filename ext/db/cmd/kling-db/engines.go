@@ -35,12 +35,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -189,7 +189,7 @@ const redisAdmin = `c=$(command -v redis-cli || command -v valkey-cli) && REDISC
 // redisPing dice si el servidor contesta al administrador.
 const redisPing = redisAdmin + " PING"
 
-var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var hex64 = lazyre.New(`^[0-9a-f]{64}$`)
 
 // redisHash es lo que Redis guarda de una clave: SHA-256 en hexadecimal.
 func redisHash(pw string) string {

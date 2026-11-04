@@ -45,7 +45,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +52,7 @@ import (
 	"github.com/juan52878911/kindling/ext/db/internal/dbmask"
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -73,7 +73,7 @@ const (
 // sliceTablePattern: la tabla de -table, [esquema.]nombre sin comillas. Un
 // nombre que necesite comillas no se admite aquí (sí en las tablas
 // relacionadas, que vienen del catálogo ya citadas).
-var sliceTablePattern = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_$]{0,62}\.)?[A-Za-z_][A-Za-z0-9_$]{0,62}$`)
+var sliceTablePattern = lazyre.New(`^([A-Za-z_][A-Za-z0-9_$]{0,62}\.)?[A-Za-z_][A-Za-z0-9_$]{0,62}$`)
 
 // statsWarning es el aviso que acompaña a slice y al informe de observación.
 const statsWarning = "timings from a slice do not represent production: it holds a few rows and its own planner statistics, so plans and durations differ. " +

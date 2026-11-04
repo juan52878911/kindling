@@ -28,13 +28,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -47,9 +47,9 @@ const (
 
 // snapNamePattern: el nombre que pone el usuario. Corto para que el nombre de
 // la plantilla (dbsnap- + 8 + - + nombre) quepa en los 64 de namePattern.
-var snapNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+var snapNamePattern = lazyre.New(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
-var lineagePattern = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
+var lineagePattern = lazyre.New(`^[0-9a-f]{8,64}$`)
 
 // lineage es el id con el que esta copia firma sus puntos de guardado.
 func lineage(mc *api.Machine) string {

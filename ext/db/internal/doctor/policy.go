@@ -1,8 +1,9 @@
 package doctor
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Detección de políticas RLS "fail-open": expresiones que dejan pasar TODAS
@@ -18,12 +19,12 @@ import (
 // que devuelve pg_policies (deparseadas, con paréntesis y casts ::text), y
 // prefiere avisar de más a callarse.
 
-var reTenantVar = regexp.MustCompile(`(?i)current_setting\(\s*'([^']{1,63})'`)
+var reTenantVar = lazyre.New(`(?i)current_setting\(\s*'([^']{1,63})'`)
 
 // tenantVars devuelve las variables que la expresión lee con current_setting.
 func tenantVars(expr string) []string {
 	var out []string
-	for _, m := range reTenantVar.FindAllStringSubmatch(expr, -1) {
+	for _, m := range reTenantVar.Regexp().FindAllStringSubmatch(expr, -1) {
 		out = append(out, m[1])
 	}
 	return out
@@ -126,9 +127,9 @@ func nullOrEmptyTest(low string, s, e int) (string, bool) {
 }
 
 var (
-	reEqEmpty = regexp.MustCompile(`^=\s*''(\s*::\s*[a-z ]+)?`)
-	reEmptyEq = regexp.MustCompile(`''(\s*::\s*[a-z]+)?\s*=\s*\(*\s*$`)
-	reColumn  = regexp.MustCompile(`^([a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*$`)
+	reEqEmpty = lazyre.New(`^=\s*''(\s*::\s*[a-z ]+)?`)
+	reEmptyEq = lazyre.New(`''(\s*::\s*[a-z]+)?\s*=\s*\(*\s*$`)
+	reColumn  = lazyre.New(`^([a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*$`)
 	sqlWords  = map[string]bool{"null": true, "false": true, "current_user": true, "session_user": true, "current_role": true, "user": true}
 )
 

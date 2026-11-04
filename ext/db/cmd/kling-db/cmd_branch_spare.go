@@ -40,11 +40,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const spareEnv = "KLING_DB_BRANCH_SPARE"
@@ -60,7 +60,7 @@ SELECT md5(concat_ws('|', pg_current_snapshot()::text,
   md5(pg_read_file(current_setting('hba_file')))));
 `
 
-var fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var fingerprintPattern = lazyre.New(`^[0-9a-f]{32}$`)
 
 // fingerprint es la huella de la copia mc, que tiene que estar en marcha.
 func (a *app) fingerprint(ctx context.Context, mc *api.Machine) (string, error) {

@@ -10,13 +10,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
-var reNoNombre = regexp.MustCompile(`[^a-z0-9]+`)
+var reNoNombre = lazyre.New(`[^a-z0-9]+`)
 
 // nombreImagenOCI es el nombre de la imagen importada para ese ref. Lleva un
 // prefijo propio: la importación no es la plana (el servicio de la imagen va

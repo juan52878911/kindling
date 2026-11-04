@@ -23,12 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"unicode"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -203,8 +204,8 @@ func splitTable(t string) (schema, name string, ok bool) {
 // "statement" (protocolo simple) y "execute" (extendido); parse y bind se
 // descartan para no contar tres veces la misma.
 var (
-	logPrefixRe = regexp.MustCompile(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? \S+ \[\d+\] `)
-	logStmtRe   = regexp.MustCompile(`(?s)^\S+ \S+ \S+ \[\d+\] u=\S* d=(\S*) h=\S* LOG:  duration: ([0-9.]+) ms  (?:statement|execute [^:]*): (.*)$`)
+	logPrefixRe = lazyre.New(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? \S+ \[\d+\] `)
+	logStmtRe   = lazyre.New(`(?s)^\S+ \S+ \S+ \[\d+\] u=\S* d=(\S*) h=\S* LOG:  duration: ([0-9.]+) ms  (?:statement|execute [^:]*): (.*)$`)
 )
 
 // analyzeObserveLog agrupa las sentencias de la base db que nombran la tabla
@@ -417,7 +418,7 @@ func normalizeSQL(s string) string {
 	}, strings.TrimSpace(out))
 }
 
-var listRe = regexp.MustCompile(`\?(?: ?, ?\?)+`)
+var listRe = lazyre.New(`\?(?: ?, ?\?)+`)
 
 // touchesTable dice si la sentencia normalizada nombra la tabla: como
 // identificador (sin comillas, sin distinguir mayúsculas; o entre comillas,
