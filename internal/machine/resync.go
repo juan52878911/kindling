@@ -252,7 +252,7 @@ func resyncNota(t time.Duration, ok bool) string {
 // resync—. Equivocarse aquí solo deja sin poner el reloj de UNA máquina: un
 // thaw no tiene clones con los que compartir el CSPRNG.
 func (m *Manager) agenteEscucha(ctx context.Context, id string) bool {
-	if open, ok := m.ProbeGuestPort(ctx, id, api.GuestPort); ok {
+	if open, ok := m.sondearPuerto(ctx, id, api.GuestPort, false); ok {
 		return open
 	}
 	m.mu.RLock()

@@ -97,7 +97,7 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		sock := m.socket[id]
 		m.mu.RUnlock()
 		if sock != "" {
-			if ok, err := sondearPuertoVMM(ctx, sock, port); err == nil && ok {
+			if ok, err := sondearPuertoVMM(ctx, sock, port, true); err == nil && ok {
 				return nil
 			}
 		}
@@ -121,18 +121,31 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 const intentoSondeoVZ = 150 * time.Millisecond
 
 // sondearPuertoVMM pregunta a kling-vz (sock) si algo escucha en port dentro
-// del invitado, en un intento corto (intentoSondeoVZ). Un intento agotado con
-// ctx aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
-// quien llama vuelve a preguntar.
-func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
-	ictx, cancel := context.WithTimeout(ctx, intentoSondeoVZ)
-	defer cancel()
-	open, err := fc.New(sock).KlingProbe(ictx, port)
-	if err != nil && ctx.Err() == nil && errors.Is(ictx.Err(), context.DeadlineExceeded) {
-		return false, nil
+// del invitado, en un plazo corto (intentoSondeoVZ). Un plazo agotado con ctx
+// aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
+// quien llama vuelve a preguntar. Escalonado (sondeo_escalonado.go): un
+// intento colgado no se espera entero. Con esperar, un "cerrado" se vuelve a
+// preguntar cada pasoCerradoVZ hasta el plazo: lo que quiere quien espera a
+// que el agente escuche.
+func sondearPuertoVMM(ctx context.Context, sock string, port int, esperar bool) (bool, error) {
+	paso := time.Duration(0)
+	if esperar {
+		paso = pasoCerradoVZ
 	}
-	return open, err
+	return sondearEscalonado(ctx, intentoSondeoVZ, escalonSondeoVZ, paso, func(ictx context.Context) (bool, error) {
+		return fc.New(sock).KlingProbe(ictx, port)
+	})
 }
+
+// escalonSondeoVZ es cada cuánto sale un intento nuevo mientras los
+// anteriores no contestan, y pasoCerradoVZ cuánto se espera tras un
+// "cerrado" para volver a preguntar. Como mucho intentoSondeoVZ/pasoCerradoVZ
+// peticiones por llamada, todas al socket local del VMM, y cada una le cuesta
+// al invitado un RST.
+const (
+	escalonSondeoVZ = 20 * time.Millisecond
+	pasoCerradoVZ   = 5 * time.Millisecond
+)
 
 // capacidadGrafo comprueba que el kling-vz de c sabe pedir conexiones al
 // daemon (credproxy.CapGraphLink).

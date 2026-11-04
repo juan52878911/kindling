@@ -197,7 +197,18 @@ func (m *Manager) ImageHasAgent(ctx context.Context, image string) (bool, error)
 //
 // En macOS es la única forma fiable: el reenvío de loopback lo abre kling-vz y
 // acepta la conexión escuche el invitado o no.
+//
+// Es la pregunta de quien ESPERA a que algo escuche (exec, listo): un
+// "cerrado" se repite unos ms dentro del plazo de un intento antes de
+// devolverlo (ver sondearEscalonado). Quien solo quiere saber si escucha ya
+// usa sondearPuerto con esperar false.
 func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open, ok bool) {
+	return m.sondearPuerto(ctx, id, port, true)
+}
+
+// sondearPuerto es ProbeGuestPort; con esperar false, un "cerrado" se
+// devuelve en el acto.
+func (m *Manager) sondearPuerto(ctx context.Context, id string, port int, esperar bool) (open, ok bool) {
 	m.mu.RLock()
 	mc := m.byID[id]
 	sock := m.socket[id]
@@ -209,7 +220,7 @@ func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open
 	if !fwd || sock == "" {
 		return false, false
 	}
-	open, err := sondearPuertoVMM(ctx, sock, port)
+	open, err := sondearPuertoVMM(ctx, sock, port, esperar)
 	if err != nil {
 		// Un kling-vz anterior a /kling/probe: se sondea el reenvío.
 		return false, false

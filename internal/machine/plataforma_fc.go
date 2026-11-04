@@ -206,7 +206,7 @@ const minDiscoLibrePlataforma = 2048
 
 // sondearPuertoVMM: en Linux no hay /kling/probe al que preguntar
 // (ProbeGuestPort no llega aquí sin reenvíos); se deja la pregunta tal cual.
-func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
+func sondearPuertoVMM(ctx context.Context, sock string, port int, _ bool) (bool, error) {
 	return fc.New(sock).KlingProbe(ctx, port)
 }
 
