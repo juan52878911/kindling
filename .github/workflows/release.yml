@@ -52,9 +52,64 @@ jobs:
           DIR: ${{ matrix.dir }}
         run: make -C "$DIR" test
 
+  # El job `lint` de ci.yml, otra vez y sobre el commit de la etiqueta: make test
+  # no pasa govulncheck, staticcheck, shellcheck ni apidiff, y una etiqueta
+  # puede caer en un commit cuyo CI no acabó o falló (workflow_dispatch, o un
+  # tag a mano sin scripts/release.sh). Se repite en vez de leer el resultado
+  # de ci.yml por la API porque así no depende de qué run de ci.yml casa con
+  # este commit ni de si ya terminó. Las herramientas, fijadas como en ci.yml:
+  # cambiarlas es cambiarlas en los dos. Antes, `firmar check`: desde v1.0.0
+  # sin claves públicas de release compiladas no se compila nada.
+  lint:
+    name: lint (claves, govulncheck, staticcheck, shellcheck, apidiff)
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # apidiff compara con la etiqueta anterior: hacen falta las etiquetas.
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: claves de release (firmar check)
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          VERSION="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          go run ./internal/upgrade/firmar check -tag "$VERSION"
+      - name: herramientas
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261014143641-f0251eb4aa3e
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: govulncheck
+        run: |
+          for d in . ext/db ext/mcp ext/phone ext/sandbox; do
+            echo "== $d"
+            (cd "$d" && govulncheck ./...)
+          done
+      - name: staticcheck
+        run: |
+          for d in . ext/db ext/mcp ext/phone ext/sandbox; do
+            echo "== $d"
+            (cd "$d" && printf 'linux: GOOS=linux\ndarwin: GOOS=darwin\nlinuxarm64: GOOS=linux GOARCH=arm64\n' | staticcheck -matrix ./...)
+          done
+      - name: shellcheck
+        run: shellcheck --version | head -2 && shellcheck -x -S warning scripts/*.sh
+      # Con HEAD en la etiqueta, apidiff.sh compara con la anterior (HEAD^).
+      - name: apidiff (pkg/api, pkg/plugin, pkg/config)
+        run: bash scripts/apidiff.sh
+
   build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
-    needs: test
+    needs: [test, lint]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -151,7 +206,7 @@ jobs:
   # build-hv.sh (strip, re-firma): se perdería el entitlement.
   vz:
     name: build kling-vz and kling-hv darwin/arm64
-    needs: test
+    needs: [test, lint]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -377,6 +432,7 @@ jobs:
             echo "::error::$VERSION tiene que ir firmada y falta KLING_RELEASE_SIGNING_KEY (docs/firmas.md)"
             exit 1
           fi
+          go run ./internal/upgrade/firmar check -tag "$VERSION"
           go run ./internal/upgrade/firmar sign -tag "$VERSION" -in release/SHA256SUMS
           go run ./internal/upgrade/firmar verify -tag "$VERSION" -in release/SHA256SUMS
           cat release/SHA256SUMS.minisig
