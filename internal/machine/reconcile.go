@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -72,6 +73,10 @@ func (m *Manager) reconcile() {
 			}
 			mc.PID = pid
 			liveCg[cgName(mc.ID)] = true
+			// No es hijo nuestro: su salida se espera con el kernel, no con
+			// cmd.Wait (ver esperarVMM). Nunca llama a nada en el acto, así
+			// que vale con m.mu tomado.
+			m.vigilarAdoptado(mc.ID, pid)
 			// Su netns y reglas sobrevivieron al daemon, pero el resolver dinámico
 			// del modo allowlist es una goroutine nuestra y murió con nosotros.
 			// Reanudarlo, o su DNS (DNATeado a un puerto sin nadie) se quedaría mudo.
@@ -583,13 +588,8 @@ func (m *Manager) sweep() map[string]int {
 		if (mc.State != api.StateRunning && mc.State != api.StatePaused) || mc.PID != v.pid || m.byID[mc.ID] != mc {
 			continue
 		}
-		now := time.Now()
-		mc.State = api.StateFailed
-		mc.LastErr = errProcesoDesaparecido
-		mc.FailedAt = &now
-		mc.PID = 0
-		delete(m.socket, mc.ID)
-		died = append(died, mc)
+		m.marcarMuertaLocked(mc)
+		died = append(died, mc.Clone())
 	}
 	if len(died) > 0 {
 		m.persist()
@@ -601,14 +601,120 @@ func (m *Manager) sweep() map[string]int {
 
 	// Fuera del mutex: publicar eventos y liberar red puede tardar.
 	for _, mc := range died {
-		m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-		m.releaseCPU(mc.ID)
-		m.bus.Publish(api.Event{
-			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
-			Message: errProcesoDesaparecido,
-		})
+		m.trasMorir(mc, "")
 	}
 	return vmms
+}
+
+// marcarMuertaLocked deja failed una máquina running o pausada cuyo VMM ya no
+// existe. Con m.mu tomado; quien llama persiste y después llama a trasMorir.
+func (m *Manager) marcarMuertaLocked(mc *api.Machine) {
+	now := time.Now()
+	mc.State = api.StateFailed
+	mc.LastErr = errProcesoDesaparecido
+	mc.FailedAt = &now
+	mc.PID = 0
+	delete(m.socket, mc.ID)
+}
+
+// trasMorir es lo que queda tras marcarMuertaLocked, fuera de m.mu: soltar su
+// red y su CPU, asentar su overlay si iba sin sincronizar (lo que escribió
+// sigue en la caché del host, y una failed conserva su disco) y avisar.
+// detalle, si lo hay, es cómo terminó el proceso ("signal: killed").
+func (m *Manager) trasMorir(mc *api.Machine, detalle string) {
+	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
+	m.releaseCPU(mc.ID)
+	if err := m.asentarOverlay(mc); err != nil {
+		log.Printf("warning: %s: %v", shortID(mc.ID), err)
+	}
+	msg := errProcesoDesaparecido
+	if detalle != "" {
+		msg += " (" + detalle + ")"
+	}
+	m.bus.Publish(api.Event{
+		Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
+		Message: msg, Owner: mc.Labels[api.LabelOwner],
+	})
+}
+
+// SALIDA DEL VMM.
+//
+// El vigilante (sweep) da una vuelta cada 10 s, y en batería cada 30: una
+// máquina cuyo VMM moría estando ociosa (un kill -9, un jetsam de macOS)
+// seguía "running" en `kling ps` ese rato, y `kling start` contestaba que la
+// había arrancado sin hacer nada. Ahora la salida del proceso se ve en el
+// acto: con cmd.Wait si es hijo nuestro (esperarVMM), y con kqueue (macOS) o
+// pidfd (Linux) si es uno readoptado tras reiniciar el daemon
+// (vigilarSalida). El vigilante sigue de respaldo para lo que esto no vea.
+
+// esperarVMM recoge el VMM recién lanzado cmd de la máquina id cuando
+// termina, cierra su consola y mira si la máquina se ha quedado sin él.
+func (m *Manager) esperarVMM(id string, cmd *exec.Cmd, logf *os.File) {
+	_ = cmd.Wait()
+	logf.Close()
+	detalle := ""
+	if cmd.ProcessState != nil {
+		detalle = cmd.ProcessState.String()
+	}
+	m.vmmTermino(id, detalle)
+}
+
+// vigilarAdoptado avisa cuando muera el VMM pid de la máquina id, que no es
+// hijo de este daemon (lo lanzó uno anterior). Si la plataforma no sabe
+// esperar a un proceso ajeno, queda el vigilante.
+func (m *Manager) vigilarAdoptado(id string, pid int) {
+	if !vigilarSalida(pid, func() { m.vmmTermino(id, "") }) {
+		log.Printf("reconcile: can't watch the VMM of %s (pid %d) for its exit; the watcher will notice it",
+			shortID(id), pid)
+	}
+}
+
+// vmmTermino: un VMM de la máquina id ha terminado. No se sabe si era el
+// suyo de ahora ni si alguien lo mató a propósito, así que se espera al
+// cerrojo de ciclo de vida: Stop, Freeze, Remove y compañía matan su VMM con
+// él tomado y lo sueltan con el estado ya cambiado (stopped, warm, borrada).
+// Con el cerrojo en la mano, si sigue running o pausada y su VMM no está, es
+// que murió solo.
+func (m *Manager) vmmTermino(id, detalle string) {
+	defer m.lock(id)()
+	m.comprobarVMMLocked(id, detalle)
+}
+
+// comprobarVMMLocked marca failed la máquina id si figura running o pausada
+// y su VMM ya no existe. Con el cerrojo de ciclo de vida de id tomado (no
+// m.mu). Dice si la marcó.
+func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
+	m.mu.RLock()
+	mc := m.byID[id]
+	if mc == nil || (mc.State != api.StateRunning && mc.State != api.StatePaused) {
+		m.mu.RUnlock()
+		return false
+	}
+	pid := mc.PID
+	m.mu.RUnlock()
+	// adopt fuera de m.mu: en macOS lee la tabla de procesos. Mira la línea
+	// de órdenes, no solo el PID: el que terminó pudo ser un VMM anterior, y
+	// un PID reciclado no cuenta como vivo.
+	if _, vivo := m.adopt(&api.Machine{ID: id, PID: pid}); vivo {
+		return false
+	}
+	m.mu.Lock()
+	mc = m.byID[id]
+	if mc == nil || (mc.State != api.StateRunning && mc.State != api.StatePaused) || mc.PID != pid {
+		m.mu.Unlock()
+		return false
+	}
+	m.marcarMuertaLocked(mc)
+	m.persist()
+	copia := mc.Clone()
+	m.mu.Unlock()
+	if detalle != "" {
+		log.Printf("watch: the VMM of %s (pid %d) exited (%s): failed", shortID(id), pid, detalle)
+	} else {
+		log.Printf("watch: the VMM of %s (pid %d) exited: failed", shortID(id), pid)
+	}
+	m.trasMorir(copia, detalle)
+	return true
 }
 
 // vmmSigue dice si el VMM pid sigue siendo el de la máquina id, mirando

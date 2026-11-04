@@ -2117,8 +2117,9 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 		logf.Close()
 		return 0, false, fmt.Errorf("launching firecracker: %w", err)
 	}
-	// Sin Wait() el proceso quedaría zombi al terminar.
-	go func() { _ = cmd.Wait(); logf.Close() }()
+	// Sin Wait() el proceso quedaría zombi al terminar; y si muere solo, la
+	// máquina deja de figurar running en el acto (esperarVMM).
+	go m.esperarVMM(id, cmd, logf)
 	return cmd.Process.Pid, enCg, nil
 }
 
@@ -3140,8 +3141,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if !ok {
 		return nil, noExiste(ref)
 	}
+	// Running con su VMM vivo; si murió sin que nadie lo viera, queda failed
+	// y sigue abajo como tal (ver comprobarVMMLocked).
 	if cur.State == api.StateRunning {
-		return cur, nil
+		if !m.comprobarVMMLocked(cur.ID, "") {
+			return cur, nil
+		}
+		if cur, ok = m.Get(mc.ID); !ok {
+			return nil, noExiste(ref)
+		}
 	}
 	// Pausada: solo reanudar (ver pausa.go).
 	if cur.State == api.StatePaused {
@@ -3168,8 +3176,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return out, nil
 	}
 	mc = cur
-	if mc.State != api.StateWarm {
-		return nil, estadoInvalido("only a warm or paused machine can be thawed (it is %s)", mc.State)
+	// Una failed con su volcado entero se descongela de él (ver thawFallida).
+	if mc.State == api.StateFailed {
+		if err := m.thawFallida(mc); err != nil {
+			return nil, err
+		}
+	} else if mc.State != api.StateWarm {
+		return nil, estadoInvalido("only a warm, paused or failed machine can be thawed (it is %s)", mc.State)
 	}
 	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
 	// que el invitado lo descubra con un EIO al escribir.
@@ -3530,6 +3543,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.State = api.StateRunning
 	cur.StartedAt = &now
 	cur.FrozenAt = nil
+	cur.FailedAt, cur.LastErr = nil, "" // si venía de failed
 	cur.VMM = m.origenActual().vmm
 	cur.Hold = ""
 	cur.ThawMS = elapsed

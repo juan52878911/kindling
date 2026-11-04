@@ -1280,6 +1280,9 @@ func cmdStart(args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 	for _, ref := range fs.Args() {
+		// Lo de antes, para saber si de verdad arrancó: a una que ya corre
+		// el daemon la devuelve tal cual, con su StartedAt de entonces.
+		antes, _ := c.Get(ctx, ref)
 		mc, err := c.Start(ctx, ref, env)
 		if err != nil {
 			// Un daemon anterior no tiene la ruta: el 404 del enrutador no
@@ -1292,9 +1295,24 @@ func cmdStart(args []string) error {
 			}
 			return err
 		}
+		if !arrancoAhora(antes, mc) {
+			fmt.Printf("%s  %s  (already running, nothing to start)\n", mc.ID[:12], mc.State)
+			continue
+		}
 		fmt.Printf("%s  %s  (cold boot from its disk, %d ms)\n", mc.ID[:12], mc.State, mc.BootMS)
 	}
 	return nil
+}
+
+// arrancoAhora dice si la respuesta de un start (después) es un arranque de
+// verdad y no la máquina que ya corría (antes, nil si no se pudo leer): el
+// daemon contesta a un start sobre una running sin tocarla, con el mismo
+// StartedAt. Sin antes se da por arrancada, como hasta ahora.
+func arrancoAhora(antes, despues *api.Machine) bool {
+	if antes == nil || antes.State != api.StateRunning || antes.StartedAt == nil || despues.StartedAt == nil {
+		return true
+	}
+	return !despues.StartedAt.Equal(*antes.StartedAt)
 }
 
 // cmdSqueeze aprieta el globo de una o varias microVMs running para devolver al
