@@ -61,6 +61,18 @@ func (m *Manager) reconcile() {
 		// VMM siga vivo y escribiéndolo: se borra el nombre, no su descriptor.
 		quitarVolcadoTemporal(m.dir(mc.ID))
 
+		// El VMM que el último Freeze dejó vivo (vmmDeCongelado, guardado en
+		// disco) no se readopta: su volcado ya está sellado y la máquina es
+		// warm. Readoptarlo la daba por running, y al morir el proceso
+		// quedaba failed con su volcado. Sigue como si no estuviera vivo;
+		// killOrphanVMMs, abajo, lo mata, y si sobrevive, Thaw (thawVMMViejo).
+		if pid, alive := live[mc.ID]; alive && m.vmmCongeladoEnDisco(mc.ID, pid) {
+			log.Printf("reconcile: %s (%s): the VMM its last freeze left alive (pid %d) is still there; not re-adopting it",
+				mc.Name, shortID(mc.ID), pid)
+			delete(live, mc.ID)
+		} else if !alive {
+			_ = os.Remove(filepath.Join(m.dir(mc.ID), ficheroVMMCongelado))
+		}
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.
 			m.socket[mc.ID] = m.socketDe(mc.ID, pid)
@@ -666,11 +678,18 @@ func (m *Manager) esperarVMM(id string, cmd *exec.Cmd, logf *os.File) {
 // hijo de este daemon (lo lanzó uno anterior). Si la plataforma no sabe
 // esperar a un proceso ajeno, queda el vigilante.
 func (m *Manager) vigilarAdoptado(id string, pid int) {
-	if !vigilarSalida(pid, func() { m.vmmTermino(id, "") }) {
+	// kqueue y pidfd dicen que terminó, no cómo: sin código de salida, el log
+	// decía "exited: failed" sin más. Se dice por qué falta, y
+	// comprobarVMMLocked añade lo que el VMM dejara en su consola.
+	if !vigilarSalida(pid, func() { m.vmmTermino(id, detalleAdoptado) }) {
 		log.Printf("reconcile: can't watch the VMM of %s (pid %d) for its exit; the watcher will notice it",
 			shortID(id), pid)
 	}
 }
+
+// detalleAdoptado es el detalle de la salida de un VMM readoptado, del que
+// no hay código de salida (no es hijo de este daemon).
+const detalleAdoptado = "re-adopted, no exit status"
 
 // vmmTermino: un VMM de la máquina id ha terminado. No se sabe si era el
 // suyo de ahora ni si alguien lo mató a propósito, así que se espera al
