@@ -17,8 +17,10 @@ import (
 // Tres sustantivos —imagen (rootfs, arranca en frío) → plantilla (snapshot
 // dorado, arranca en ms) → máquina— y doce verbos de uso diario en primer
 // nivel; lo demás vive bajo su sustantivo (template, image, volume, machine,
-// context, config, plugin) o bajo la extensión que lo aporta (ai, mcp). Los
-// nombres de antes siguen funcionando como alias silenciosos (ver aliases).
+// context, config, plugin) o bajo la extensión que lo aporta (ai, mcp). De los
+// nombres de antes, unos pocos siguen como alias silenciosos (aliases) y el
+// resto se retiró en 1.0 con un error que dice el nombre nuevo
+// (removedAliases, removedExtAliases).
 
 // section es un grupo de comandos en `kling help all`.
 type section struct {
@@ -32,21 +34,28 @@ type section struct {
 // coreTree son los comandos del núcleo, en el orden en que salen.
 var coreTree = []section{
 	{title: "START HERE", cmds: []plugin.Command{
-		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check]                                      gets the runtime ready: KVM,
+		{Name: "up", Summary: "gets the runtime ready and starts the daemon", Usage: `  up [-check] [-root DIR] [-install]               gets the runtime ready: KVM,
                                                    nftables, user, images, daemon
-                                                   and extension units
+                                                   and extension units (-check: only
+                                                   check; -install: macOS, start the
+                                                   daemon at login)
 `},
-		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]           downloads and verifies a release,
-      [-dry-run] [-force] [-unit NAME]             checks it reads the state, backs up,
-                                                   restarts the daemon with it, checks
+		{Name: "upgrade", Summary: "replaces kling and the daemon with another release; rolls back if it fails", Usage: `  upgrade [-tag vX.Y.Z | -from-dir DIR]            downloads and verifies a release,
+      [-dry-run|-check] [-force] [-unit NAME]      checks it reads the state, backs up,
+      [-timeout 60s] [-insecure] [-cli]            restarts the daemon with it, checks
                                                    /info, machines and templates, and
                                                    rolls back by itself if not (sudo
                                                    on Linux; -unit must run the daemon
-                                                   on the socket; -cli: only this
-                                                   binary; guest agents only in
-                                                   KLING_LIB_DIR)
+                                                   on the socket; -timeout: for the new
+                                                   daemon to answer; -insecure: a
+                                                   -from-dir without SHA256SUMS; -cli:
+                                                   only this binary; guest agents only
+                                                   in KLING_LIB_DIR; -version: same as
+                                                   -tag)
   upgrade -rollback [-root DIR]                    back to the last backup, also with
                                                    the daemon down
+  upgrade -schemas                                 this binary's version and the state
+                                                   formats it reads, as JSON
 `},
 		{Name: "status", Summary: "which piece is up and which is missing", Usage: `  status [-v] [-json]                              which piece is up and which is
                                                    missing (-v: daemon details)
@@ -55,10 +64,12 @@ var coreTree = []section{
                                                    extensions and completion; prints
                                                    the fix for each ✗
 `},
-		{Name: "try", Summary: "runs a command in a throwaway microVM and removes it", MachineArgs: nil, Usage: `  try [-image I | -from T] [-mem 256M]             runs a command in a throwaway
-      [-egress none|internet|allowlist] [-keep]    microVM and removes it (no
-      [--] [cmd [args...]]                         command: a shell); exits with
-                                                   the command's exit code
+		{Name: "try", Summary: "runs a command in a throwaway microVM and removes it", MachineArgs: nil, Usage: `  try [-image I | -from T] [-mem 256M] [-cpus N]   runs a command in a throwaway
+      [-egress none|internet|allowlist]            microVM and removes it (no
+      [-allow dom1,dom2] [-keep] [-ttl 10m]        command: a shell); exits with
+      [--] [cmd [args...]]                         the command's exit code; -ttl:
+                                                   its lifetime if kling dies, or
+                                                   with -keep
 `},
 		{Name: "help", Summary: "help for one command, with its flags", Subcommands: []string{"all"}, Usage: `  help [<command> [<subcommand>]] | all            help for one command, with its
                                                    flags; all: every command
@@ -66,30 +77,41 @@ var coreTree = []section{
 	}},
 	{title: "MACHINES", cmds: []plugin.Command{
 		{Name: "run", Summary: "creates and starts a microVM", Usage: `  run [-name N] [-image I | -from T]               creates and starts a microVM from
-      [-cpus N] [-mem 256M]                        an image (cold boot) or a template;
-      [-e K=V] [-env-file F]                       a Docker reference (redis:7-alpine,
-                                                   ghcr.io/o/r:tag) is imported first;
-                                                   -e goes to this machine, not the image
-      [-egress none|internet|allowlist]            (~ms); network egress (default:
+      [-platform linux/amd64|linux/arm64]          an image (cold boot) or a template (~ms);
+      [-cpus N] [-mem 256M]                        a Docker reference (redis:7-alpine,
+      [-e K=V] [-env-file F]                       ghcr.io/o/r:tag) is imported first
+                                                   (-platform: which one); -e goes to
+                                                   this machine, not the image
+      [-egress none|internet|allowlist]            network egress (default:
       [-allow dom1,dom2]                           none) and domains allowed
       [-ttl 10m] [-cpu-pct PCT]                    auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
+      [-mount /data] [-volume-ro]                  (-mount, -volume-ro: for a single
+                                                   -volume)
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of
                                                    freezing
       [-mem-max 2G] [-disk 4G]                     ceiling for machine resize; its
                                                    writable disk (default 512M)
       [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only
-                                                   copy (default), or live
+      [-share-wait N]                              copy (default), or live; the service
+                                                   waits for N live shares
+      [-p HOST:GUEST] (repeatable)                 publishes a guest port on 127.0.0.1
+                                                   for as long as the machine exists;
+                                                   kling stays following the service
       [-wait-ready] [-ready-timeout 2m]            return once ready by the image's
                                                    own probe and post-restore hooks
+      [-json]                                      prints the machine as JSON
 `},
 		{Name: "ps", Summary: "lists the machines", Usage: `  ps [-a] [-q] [-json]                             lists the machines (-a: stopped
                                                    too; -q: only IDs)
 `},
 		{Name: "inspect", Summary: "a machine in JSON", MachineArgs: []string{""}, Usage: `  inspect <ref>                                    a machine in JSON, shares included
 `},
-		{Name: "logs", Summary: "microVM serial console", MachineArgs: []string{""}, Usage: `  logs [-f] [-tail N] <ref>                        microVM serial console (-f: follow)
+		{Name: "logs", Summary: "microVM serial console", MachineArgs: []string{""}, Usage: `  logs [-f] [-tail N] [-raw] <ref>                 microVM serial console (-f: follow;
+                                                   -raw: escape sequences as they are)
+  logs -service [-t] [-f] [-tail N] <ref>          the image's service output instead
+                                                   (-t: when each line arrived)
 `},
 		{Name: "freeze", Summary: "freezes into a snapshot: 0 RAM, thaws in ms", MachineArgs: []string{""}, Usage: `  freeze <ref>...                                  dumps it to a snapshot -> frozen
                                                    (no CPU, no RAM; thaw ~30 ms)
@@ -111,9 +133,11 @@ var coreTree = []section{
                                                    (asks first for several; -f: no)
 `},
 		{Name: "save", Summary: "turns a machine into a template", MachineArgs: []string{""}, Usage: `  save [-replace] [-force] <ref> <name>            freezes a machine as a reusable
-                                                   template: run -from <name>; waits
-                                                   until the guest serves and is ready
-                                                   by its image's probe (-force: no)
+      [-wait 2m] [-warm=false]                     template: run -from <name>; waits
+                                                   up to -wait until the guest serves
+                                                   and is ready by its image's probe
+                                                   (-force: no); -warm=false: smaller,
+                                                   without the runtime started
   save -audit [-audit-for 5s] <ref>                lists what was never open or mapped
                                                    on the machine; saves nothing
 `},
@@ -122,23 +146,26 @@ var coreTree = []section{
 		{Name: "exec", Summary: "runs a command inside, streaming its output", MachineArgs: []string{""}, Usage: `  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming
       <ref> [--] <cmd> [args...]                   its output; exits with its code
       [-e K] [-env-file F]                         secrets: from this env or a file
-                                                   (K=V shows in ps)
+      [-max-output BYTES]                          (K=V shows in ps); -max-output: per
+                                                   stream (default 8 MiB)
 `},
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [--] [cmd [args...]]                         (Ctrl-C reaches the program)
 `},
-		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp <local|-> <ref>:<path>                        copies a file into a machine
+		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] <local|-> <ref>:<path>           copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it
 `},
 		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "fork", "rm"}, MachineArgs: []string{"renew", "fork", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
-      [-egress none|internet|allowlist]            no network by default; when idle it
-      [-on-ttl remove|freeze] [-q]                 is destroyed, or frozen at zero cost
-      [-mem 256M] [-cpus N] [-volume ...]          and woken by the next exec
-      [-share SRC:DST[:copy|ro|rw]]                host folder inside, as in run
+      [-name N] [-egress none|internet|allowlist]  no network by default; when idle it
+      [-allow dom1,dom2] [-on-ttl remove|freeze]   is destroyed, or frozen at zero cost
+      [-mem 256M] [-cpus N] [-cpu-pct PCT] [-q]    and woken by the next exec; -share:
+      [-volume ...] [-share SRC:DST[:copy|ro|rw]]  host folder inside, as in run
+      [-wait-ready]                                -wait-ready: as in run
   sandbox ls [-q] [-json]                          lists them
   sandbox renew <sb> [-ttl 10m]                    extends its lifetime
   sandbox fork <sb> [-n N] [-ttl 10m]              branches a live one into N copies
-      [-on-ttl remove|freeze] [-q] [-json]         (memory, processes and disk as of now)
+      [-on-ttl remove|freeze] [-q] [-json]         (memory, processes and disk as of now;
+      [-label k=v]... [-skip-ready]                -skip-ready: don't wait for them)
   sandbox rm [-f] <sb>...                          destroys them
 `},
 	}},
@@ -172,8 +199,8 @@ var coreTree = []section{
   compose exec [-T] [-w DIR] [-e K=V] <service>    runs a command in a service (a terminal if
       <cmd>...                                     there is one)
   compose stop [service...]                        freezes services (all without names)
-  compose start [service...]wakes them up
-  compose restart [service...]       restarts them
+  compose start [service...]                       wakes them up
+  compose restart [service...]                     restarts them
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
@@ -203,15 +230,15 @@ var coreTree = []section{
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
 		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
-                                                   on the daemon (extensions ship them)
+      [-base IMAGE] [-grow MiB]                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
       [-e K=V] [-env-file F] [-user U]             Docker or root: the tag resolves to a
       [-entrypoint ARG]... [-restart R]            digest, every layer (tar, gzip or
-      [-max-size 4G] [-arch A] [-- cmd args...]    zstd) is checked by sha256. -- replaces
-                                                   its CMD; -e bakes values into the
-                                                   image (per machine: kling run -image
-                                                   <ref> -e KEY). Images without sh
-                                                   (distroless, scratch) boot with the
+      [-max-size 4G] [-arch A] [-emulate]          zstd) is checked by sha256. -- replaces
+      [-on-restore restart|signal:SIG]             its CMD; -e bakes values into the
+      [-init image] [-slim] [-isolate]             image (per machine: kling run -image
+      [-ulimit K=V]... [-sysctl K=V]...            <ref> -e KEY). Images without sh
+      [-- cmd args...]                             (distroless, scratch) boot with the
                                                    agent's init in Go. Blobs stay cached,
                                                    bounded by daemon.build_cache_max_gib
                                                    and _days
@@ -235,9 +262,9 @@ var coreTree = []section{
                                                    template or a machine uses it)
   image copy <image> -from H [-to H]               streams an image (and its kernel
                                                    and base) between daemons
-  image toolchain                                  builds the image with npm and pip
+  image toolchain [-as NAME]                       builds the image with npm and pip
                                                    (try and volume populate use it)
-  image build-tools                                builds the image where "image import
+  image build-tools [-as NAME]                     builds the image where "image import
                                                    -isolate" flattens layers
 `},
 		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
@@ -257,13 +284,14 @@ var coreTree = []section{
   volume ls [-q] [-json]                           lists them
   volume rm [-f] [-snapshots] <name>...            removes them (-snapshots: and theirs)
   volume rm <name>@<snapshot>...                   removes snapshots
-  volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
-  volume snapshot <name> [snap]                    copies it while nothing writes to it
+  volume populate <name> [-image I] [-mem 512M]    installs packages inside a microVM
+      [-mount /data] -- <cmd>
+  volume snapshot <name> [snap] [-json]            copies it while nothing writes to it
                                                    (default snap: UTC time)
   volume snapshots <name> [-q] [-json]             lists its snapshots
-  volume restore [-f] <name> <snap>                goes back to a snapshot; the current
+  volume restore [-f] [-json] <name> <snap>        goes back to a snapshot; the current
                                                    state is kept in <name>@undo
-  volume clone <src> <dst> [-copy]                 instant copy-on-write clone (XFS, btrfs, APFS)
+  volume clone <src> <dst> [-copy] [-json]         instant copy-on-write clone (XFS, btrfs, APFS)
 `},
 	}},
 	{title: "OBSERVATION", cmds: []plugin.Command{
@@ -273,7 +301,8 @@ var coreTree = []section{
 	}},
 	{title: "CONFIGURATION", cmds: []plugin.Command{
 		{Name: "context", Summary: "known daemons", Subcommands: []string{"ls", "add", "use", "rm"}, Usage: `  context [ls] [-json]                             lists known daemons
-  context add <name> <host>                        adds one and activates it
+  context add <name> <host> [-description D]       adds one and activates it
+      [-use=false]                                 (-use=false: only adds it)
   context use <name>                               switches daemon
   context rm <name>                                removes it
 `},
@@ -284,8 +313,9 @@ var coreTree = []section{
 		{Name: "plugin", Summary: "installed extensions", Subcommands: []string{"ls", "install", "rm", "enable", "disable"}, Usage: `  plugin [ls] [-json]                              installed extensions, their status
                                                    and source
   plugin install <name>[@vX.Y.Z]                   download from the kindling release
-          [-from URL] [-file PATH] [-sha256 H]     (sha256-checked)
-  plugin rm <name>                                 remove one installed by it
+          [-from URL] [-file PATH] [-sha256 H]     (sha256-checked); -dir: into this
+          [-dir DIR]                               directory, not the extensions one
+  plugin rm <name> [-dir DIR]                      remove one installed by it
   plugin enable|disable <name>                     turn an extension (also a built-in
                                                    one) on or off
 `},
@@ -304,21 +334,22 @@ var coreTree = []section{
                                                    memory to the host (-force: also a
                                                    copy sharing its template's memory)
   machine secret <ref> [-f store.json] [-hooks]    injects secrets via MMDS (shared by all sessions)
-                                                   (stdin if no -f); it can no longer
+      [-hooks-wait 1m]                             (stdin if no -f); it can no longer
                                                    be frozen. -hooks: then runs the
                                                    image's post-restore hooks; after
                                                    that, '{}' empties it and lifts
                                                    the mark
-  machine ready <ref> [-wait 1m] [-json]           ready by its image's probe
+  machine ready <ref> [-wait D] [-json]            ready by its image's probe
                                                    (/etc/kindling/ready) and hooks?
                                                    An agent that does not answer is "waiting"; on
                                                    a host without debugfs, only for the first 30 s
                                                    after starting or restoring if it never answered
+                                                   (-wait: up to D for it; default: ask once)
   machine hooks <ref> [-wait 1m] [-json]           runs its post-restore hooks again
                                                    (/etc/kindling/post-restore.d)
   machine credential <ref> -domain D -env VAR      hands an API key to the credential
       [-allow-request 'GET /v1/x']...              proxy: the guest only sees a
-      [-f keyfile]                                 placeholder in VAR, swapped for the
+      [-f keyfile] [-rm]                           placeholder in VAR, swapped for the
                                                    key on requests to http://D (needs
                                                    -egress allowlist; stdin if no -f;
                                                    repeat -env to rotate the key)
@@ -331,7 +362,8 @@ var coreTree = []section{
                                                    and X-Api-Key; -header X adds a
                                                    header, -query the query string and
                                                    -body the body (unsafe if the
-                                                   provider echoes it: an LLM)
+                                                   provider echoes it: an LLM). -rm
+                                                   withdraws the key in -env
   machine credential <ref> -type postgres          a database password: the guest
       -domain D -user R -database B [-port P]      connects in plain text to D (any
       [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as
@@ -340,7 +372,7 @@ var coreTree = []section{
                                                    (SCRAM), -ca-file adds a CA
       [-upstream H:P] [-tls-server-name N]         -upstream: connect to H:P instead of
       [-upstream-tls verify-full|disable]          D:P (a Docker or LAN database;
-                                                   loopback allowed); -tls-server-name:
+      (-any-database instead of -database)         loopback allowed); -tls-server-name:
                                                    verify the cert as N; -upstream-tls
                                                    disable: no TLS, SCRAM-SHA-256 only
                                                    (see docs/postgres.md)
@@ -366,7 +398,11 @@ var coreTree = []section{
 		{Name: "events", Summary: "stream of daemon events", Usage: `  events [-json]                                   stream of daemon events
 `},
 		{Name: "daemon", Summary: "starts the core", Usage: `  daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config
-                                                   daemon.vmm, or $KLING_VMM)
+      [-socket-user U] [-run-as U] [-build-as U]   daemon.vmm, or $KLING_VMM);
+      [-authz FILE]                                -socket-user: who gets the socket;
+                                                   -run-as, -build-as: unprivileged
+                                                   users for Firecracker and the image
+                                                   builder; -authz: docs/authz.md
 `},
 		{Name: "dial-stdio", Summary: "remote end of the SSH transport", Hidden: true},
 		{Name: "builder", Summary: "runs an image builder (the daemon calls it)", Hidden: true},
