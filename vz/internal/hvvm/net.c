@@ -5,6 +5,9 @@
 // VZFileHandleNetworkDeviceAttachment, así que la red de espacio de usuario de
 // kling-vz (vz/internal/vnet) sirve tal cual al otro lado.
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -24,6 +27,11 @@ static uint16_t mtu;
 // puesto (bajo mu, en vnet_quieto) el hilo no escribe en el invitado.
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // hay búferes de rx, o se reanudó
+// El hilo de recepción y cómo pararlo (vnet_parar): rx_desp despierta su poll.
+static pthread_t rx_t;
+static bool rx_vivo;
+static bool rx_parar;
+static int rx_desp[2] = {-1, -1};
 
 static void irq(void) { vmmio_irq(&s.m, intid); }
 
@@ -104,23 +112,54 @@ static bool rx_entregar(const uint8_t *trama, size_t n, bool *sin_buf) {
   return true;
 }
 
-// RX: lee tramas del socket y las mete en los búferes del invitado.
+// rx_errorf deja en stderr por qué termina el hilo de recepción: sin él la
+// red del invitado se quedaba muda sin rastro. Antes vacía la consola, como
+// los diagnósticos de vm.c, para no partirle una línea.
+static void rx_errorf(const char *que, int e) {
+  uart_flush();
+  dprintf(2, "kling-hv: net: the receive thread stops (%s: %s); the guest gets no more frames\n", que, strerror(e));
+}
+
+// RX: lee tramas del socket y las mete en los búferes del invitado. Espera en
+// poll sobre el socket y rx_desp, no en recv: vnet_parar lo despierta y lo
+// espera antes de que Go cierre el fd. Cerrar el fd con el hilo dentro de
+// recv no lo despierta en macOS, y su número podía reusarse con el hilo aún
+// leyendo de él (otro socket del proceso).
 static void *rx_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
   static uint8_t trama[65536];
   for (;;) {
-    ssize_t n = recv(fd, trama, sizeof trama, 0);
-    if (n < 0) {
+    struct pollfd pf[2] = {{.fd = fd, .events = POLLIN}, {.fd = rx_desp[0], .events = POLLIN}};
+    int r = poll(pf, 2, -1);
+    if (__atomic_load_n(&rx_parar, __ATOMIC_ACQUIRE)) return NULL;
+    if (r < 0) {
       if (errno == EINTR) continue;
+      rx_errorf("poll", errno);
+      return NULL;
+    }
+    if (pf[1].revents & POLLIN) {
+      char b[16];
+      while (read(rx_desp[0], b, sizeof b) > 0) {
+      }
+    }
+    if (!(pf[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+    ssize_t n = recv(fd, trama, sizeof trama, MSG_DONTWAIT);
+    if (n < 0) {
+      int e = errno;
+      if (e == EINTR) continue;
+      // Un HUP sin nada que leer no se va: seguir sería girar en vacío.
+      if (e == EAGAIN && !((pf[0].revents & (POLLHUP | POLLERR)) && !(pf[0].revents & POLLIN))) continue;
+      rx_errorf("recv", e == EAGAIN ? EPIPE : e);
       return NULL;
     }
     khv_qos_impulso();  // el host le manda trabajo al invitado (vm.c, QoS)
     pthread_mutex_lock(&mu);
     for (int intentos = 0;; intentos++) {
       // Con la VM en pausa (restaurando o haciendo snapshot) no se toca la
-      // RAM: la trama espera a que corra.
-      while (g_pausa) pthread_cond_wait(&cv, &mu);
+      // RAM: la trama espera a que corra (o a vnet_parar).
+      while (g_pausa && !rx_parar) pthread_cond_wait(&cv, &mu);
+      if (rx_parar) break;
       bool sin_buf;
       if (rx_entregar(trama, (size_t)n, &sin_buf) || !sin_buf || intentos >= 20) break;
       // Sin búferes libres: esperar a que el invitado reponga (notify de la
@@ -142,11 +181,40 @@ void vnet_init(int net_fd, const uint8_t m[6], int mtu_enlace, uint32_t id) {
   // admite el spec (hasta 65535).
   mtu = mtu_enlace > 1500 && mtu_enlace <= 65535 ? (uint16_t)mtu_enlace : 0;
   intid = id;
-  if (fd >= 0) {
-    pthread_t t;
-    pthread_create(&t, NULL, rx_hilo, NULL);
-    pthread_detach(t);
+  rx_parar = false;
+  if (fd < 0) return;
+  if (rx_desp[0] < 0 && pipe(rx_desp) == 0) {
+    for (int i = 0; i < 2; i++) {
+      fcntl(rx_desp[i], F_SETFL, O_NONBLOCK);
+      fcntl(rx_desp[i], F_SETFD, FD_CLOEXEC);
+    }
   }
+  if (rx_desp[0] < 0) {
+    rx_errorf("pipe", errno);
+    return;
+  }
+  rx_vivo = pthread_create(&rx_t, NULL, rx_hilo, NULL) == 0;
+}
+
+// vnet_parar saca al hilo de recepción y lo espera: después nadie usa el fd
+// de la red y Go puede cerrarlo (vnet.Net.Close) sin que el número, reusado,
+// le llegue a un recv de este hilo o a un send de tx. Idempotente; la llama
+// machine.Stop tras khv_stop.
+void vnet_parar(void) {
+  pthread_mutex_lock(&mu);
+  __atomic_store_n(&rx_parar, true, __ATOMIC_RELEASE);
+  pthread_cond_broadcast(&cv);
+  bool esperar = rx_vivo;
+  rx_vivo = false;
+  pthread_mutex_unlock(&mu);
+  if (esperar) {
+    char b = 1;
+    (void)!write(rx_desp[1], &b, 1);
+    pthread_join(rx_t, NULL);
+  }
+  pthread_mutex_lock(&mu);
+  fd = -1;  // tx (vCPU, con mu) ya no manda nada
+  pthread_mutex_unlock(&mu);
 }
 
 bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {

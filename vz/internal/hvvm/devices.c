@@ -3,6 +3,9 @@
 // Dispositivos que no son virtio: la UART 16550 (la consola ttyS0 que kindling
 // ya usa con Firecracker) y el reloj PL031 (el mismo RTC que da Firecracker en
 // arm64: sin él el invitado de un arranque en frío nace en 1970).
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -15,25 +18,72 @@
 // donde se mezcla con los diagnósticos de kling-hv sin partir líneas). Una
 // línea a medias (el prompt de un shell) sale al llenarse el búfer, en la
 // siguiente pausa o al terminar.
+//
+// Se escribe desde el hilo del vCPU con u_mu tomado, así que la escritura no
+// puede bloquear: con un lector atascado (Go sin copiar, su stdout lleno) un
+// write bloqueante dejaba el vCPU dentro del MMIO, khv_pause esperándolo sin
+// plazo y, con u_mu tomado, también khv_stop (uart_flush). El fd es un dup
+// propio en O_NONBLOCK (el flag es de la descripción: también lo ven los
+// diagnósticos de vm.c, que escriben en la misma tubería; Go no escribe en
+// ella) y lo que no cabe se tira y se cuenta en u_perdidos. Cada write es de
+// 512 bytes como mucho (PIPE_BUF en macOS): entra entero o nada, sin líneas
+// partidas.
 static pthread_mutex_t u_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct uart_state u;
 static uint32_t u_intid;
 static int u_fd = -1;
 static char u_buf[512];
 static size_t u_n;
+static uint64_t u_perdidos;    // bytes de consola tirados desde uart_init
+static uint64_t u_sin_avisar;  // de ellos, los que aún no se avisaron en la consola
 
 void uart_init(uint32_t intid, int fd) {
+  pthread_mutex_lock(&u_mu);
   u_intid = intid;
-  u_fd = fd;
+  if (u_fd >= 0) close(u_fd);
+  u_fd = fd >= 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : -1;
+  if (u_fd >= 0) fcntl(u_fd, F_SETFL, fcntl(u_fd, F_GETFL) | O_NONBLOCK);
+  u_n = 0;
+  u_perdidos = u_sin_avisar = 0;
   memset(&u, 0, sizeof u);
+  pthread_mutex_unlock(&u_mu);
+}
+
+// uart_perdidos: los bytes de consola tirados por falta de lector.
+uint64_t uart_perdidos(void) {
+  pthread_mutex_lock(&u_mu);
+  uint64_t n = u_perdidos;
+  pthread_mutex_unlock(&u_mu);
+  return n;
+}
+
+// u_escribir manda d (n <= PIPE_BUF) entera o nada; false si no cabe.
+static bool u_escribir(const char *d, size_t n) {
+  for (;;) {
+    ssize_t w = write(u_fd, d, n);
+    if (w == (ssize_t)n) return true;
+    if (w < 0 && errno == EINTR) continue;
+    return false;  // EAGAIN (lector atascado), EPIPE (sin lector) o un write corto
+  }
 }
 
 static void u_vaciar(void) {
-  size_t o = 0;
-  while (u_fd >= 0 && o < u_n) {
-    ssize_t w = write(u_fd, u_buf + o, u_n - o);
-    if (w <= 0) break;  // sin lector: la consola se pierde, la VM sigue
-    o += (size_t)w;
+  if (u_n == 0) return;
+  if (u_fd < 0) {
+    u_n = 0;
+    return;
+  }
+  // Tras una pérdida lo primero que vuelve a caber es el aviso: quien lea la
+  // consola sabe que le falta un trozo.
+  if (u_sin_avisar) {
+    char aviso[96];
+    int a = snprintf(aviso, sizeof aviso, "\n[kling-hv: console reader stalled, %llu bytes dropped]\n",
+                     (unsigned long long)u_sin_avisar);
+    if (a > 0 && (size_t)a < sizeof aviso && u_escribir(aviso, (size_t)a)) u_sin_avisar = 0;
+  }
+  if (u_sin_avisar || !u_escribir(u_buf, u_n)) {
+    u_perdidos += u_n;
+    u_sin_avisar += u_n;
   }
   u_n = 0;
 }

@@ -626,8 +626,16 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
     }
     if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) {
       if (c->gen == gen && c->estado == C_CONECTANDO) {
-        c->p_request = false;
-        c->p_rst = true;  // que el invitado olvide la petición
+        // El slot se suelta ya. Antes quedaba con p_rst esperando un búfer
+        // de rx para mandar el RST: con un invitado que no repone (colgado,
+        // sin driver) no llegaba nunca, y 64 dials así agotaban los slots.
+        // Si la petición llegó a salir, el RST va por la cola sin slot; un
+        // RESPONSE tardío a ese puerto ya no encuentra conexión y recibe
+        // otro RST (paquete).
+        uint32_t lport = c->lport, gport = c->gport;
+        bool enviada = !c->p_request;
+        liberar(c);
+        if (enviada) encolar_rst(lport, gport);
         despertar_hilo();
       }
       ret = -ETIMEDOUT;
@@ -779,4 +787,66 @@ int khv_vsock_prueba_cierre(int medio) {
   pthread_mutex_unlock(&mu);
   if (medio) close(sv[1]);
   return pedido;
+}
+
+struct prueba_plazo {
+  uint32_t puerto;
+  int ret;
+};
+
+static void *prueba_marcar_plazo(void *arg) {
+  struct prueba_plazo *p = arg;
+  p->ret = khv_vsock_dial(p->puerto, 100);
+  return NULL;
+}
+
+// khv_vsock_prueba_plazo reproduce un dial que vence sin que el invitado
+// reponga búferes de rx (no hay invitado: rx_poner siempre falla). enviada:
+// la petición ya había salido (se simula quitando p_request), así que el RST
+// tiene que quedar en la cola sin slot. Devuelve 1 si el dial dio -ETIMEDOUT,
+// el slot quedó libre y el RST está (o no) en la cola según enviada; 0 si el
+// slot sigue ocupado, -EPROTO si el RST no es el esperado y otro negativo si
+// no se pudo preparar. No puede convivir con una VM de verdad en el proceso.
+int khv_vsock_prueba_plazo(int enviada) {
+  if (!activo) vsock_init(53);
+  struct prueba_plazo p = {.puerto = PRUEBA_PUERTO + 2 + (enviada ? 1 : 0), .ret = 1};
+  pthread_mutex_lock(&mu);
+  n_rst = 0;
+  pthread_mutex_unlock(&mu);
+  pthread_t t;
+  if (pthread_create(&t, NULL, prueba_marcar_plazo, &p) != 0) return -EAGAIN;
+  struct vconn *c = NULL;
+  for (int i = 0; i < 2000 && !c; i++) {
+    pthread_mutex_lock(&mu);
+    for (int j = 0; j < VS_MAXCONN && !c; j++)
+      if (conns[j].estado == C_CONECTANDO && conns[j].gport == p.puerto) c = &conns[j];
+    if (!c) {
+      pthread_mutex_unlock(&mu);
+      usleep(1000);
+    }
+  }
+  if (!c) {
+    pthread_join(t, NULL);
+    return -EBUSY;
+  }
+  uint32_t lport = c->lport;
+  if (enviada) c->p_request = false;  // como si bombear ya la hubiera puesto
+  pthread_mutex_unlock(&mu);
+  pthread_join(t, NULL);
+  if (p.ret >= 0) {
+    close(p.ret);
+    return -EISCONN;
+  }
+  if (p.ret != -ETIMEDOUT) return p.ret;
+  pthread_mutex_lock(&mu);
+  int r = 1;
+  for (int j = 0; j < VS_MAXCONN; j++)
+    if (conns[j].estado != C_LIBRE && conns[j].gport == p.puerto) r = 0;
+  bool hay_rst = false;
+  for (int j = 0; j < n_rst; j++)
+    if (rst_cola[j].src == lport && rst_cola[j].dst == p.puerto) hay_rst = true;
+  if (r == 1 && hay_rst != (enviada != 0)) r = -EPROTO;
+  n_rst = 0;
+  pthread_mutex_unlock(&mu);
+  return r;
 }
