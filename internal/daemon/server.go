@@ -709,6 +709,9 @@ func fail(w http.ResponseWriter, code int, err error) {
 	if errors.As(err, &se) && se.Code != 0 {
 		code = se.Code
 	}
+	if code == http.StatusTooManyRequests && errors.Is(err, errInvitadoOcupado) {
+		w.Header().Set("Retry-After", guestBusyRetryAfter)
+	}
 	writeJSON(w, code, api.Error{Message: err.Error(), Code: codigoDeError(code, err)})
 }
 
@@ -729,6 +732,9 @@ func codigoDeError(status int, err error) api.ErrorCode {
 			return api.CodeMachineLimit
 		}
 	case api.StatusTenantQuota:
+		if errors.Is(err, errInvitadoOcupado) {
+			return api.CodeGuestBusy
+		}
 		if api.IsTenantQuota(err) {
 			return api.CodeTenantQuota
 		}

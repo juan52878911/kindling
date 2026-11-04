@@ -54,8 +54,11 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	guest, err := openGuestShell(r.Context(), guestBase(mc), req)
 	if err != nil {
 		code := http.StatusBadGateway
-		if errors.Is(err, api.ErrShellUnsupported) {
+		switch {
+		case errors.Is(err, api.ErrShellUnsupported):
 			code, err = http.StatusNotImplemented, tooOldAgent(mc)
+		case errors.Is(err, errInvitadoOcupado):
+			code = http.StatusTooManyRequests
 		}
 		fail(w, code, err)
 		return
@@ -113,6 +116,9 @@ func openGuestShell(ctx context.Context, base string, req api.ShellRequest) (io.
 	switch resp.StatusCode {
 	case http.StatusNotFound, http.StatusUpgradeRequired, http.StatusNotImplemented:
 		return nil, fmt.Errorf("%w: %s", api.ErrShellUnsupported, strings.TrimSpace(string(msg)))
+	case http.StatusTooManyRequests:
+		// Las 8 shells del agente ocupadas: 429 guest_busy, como el exec.
+		return nil, invitadoOcupado(msg)
 	}
 	return nil, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
 }

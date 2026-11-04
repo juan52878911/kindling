@@ -327,3 +327,78 @@ func TestExecBodyTimeout(t *testing.T) {
 		t.Fatalf("el plazo de exec (%s) no debe ser menor que guestProgressTimeout (%s)", got, guestProgressTimeout)
 	}
 }
+
+// agenteQueContesta es un agente que contesta a ruta con ese estado y ese
+// texto plano, como pkg/guest cuando tiene todas sus plazas ocupadas.
+func agenteQueContesta(t *testing.T, ruta string, status int, msg string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(ruta, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, msg, status)
+	})
+	g := httptest.NewServer(mux)
+	t.Cleanup(g.Close)
+	return g
+}
+
+// El agente lleno (64 exec a la vez) no es un agente muerto: 429 guest_busy
+// con Retry-After, no 502 bad_gateway. Antes cualquier estado distinto de 400
+// salía como 502 y quien llamaba no podía saber que bastaba con reintentar.
+func TestExecConElInvitadoLlenoEs429(t *testing.T) {
+	g := agenteQueContesta(t, "/exec/stream", http.StatusTooManyRequests, "too many commands running in this microVM (limit 64)")
+	_, code, err := openGuestExec(context.Background(), g.URL, api.ExecRequest{Cmd: []string{"true"}})
+	if code != http.StatusTooManyRequests || !errors.Is(err, errInvitadoOcupado) {
+		t.Fatalf("full agent: %d %v", code, err)
+	}
+	rr := httptest.NewRecorder()
+	fail(rr, code, err)
+	comprobarOcupado(t, rr, "too many commands running in this microVM (limit 64)")
+
+	// Un 500 del agente sigue siendo 502: no todo lo que no es 400 es 429.
+	roto := agenteQueContesta(t, "/exec/stream", http.StatusInternalServerError, "boom")
+	if _, code, err := openGuestExec(context.Background(), roto.URL, api.ExecRequest{Cmd: []string{"true"}}); code != http.StatusBadGateway || errors.Is(err, errInvitadoOcupado) {
+		t.Fatalf("broken agent: %d %v", code, err)
+	}
+}
+
+func TestShellConElInvitadoLlenoEs429(t *testing.T) {
+	g := agenteQueContesta(t, "/exec/pty", http.StatusTooManyRequests, "too many shells open in this microVM (limit 8)")
+	_, err := openGuestShell(context.Background(), g.URL, api.ShellRequest{})
+	if !errors.Is(err, errInvitadoOcupado) || errors.Is(err, api.ErrShellUnsupported) {
+		t.Fatalf("full agent: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	fail(rr, http.StatusTooManyRequests, err)
+	comprobarOcupado(t, rr, "too many shells open in this microVM (limit 8)")
+}
+
+func comprobarOcupado(t *testing.T, rr *httptest.ResponseRecorder, texto string) {
+	t.Helper()
+	var e api.Error
+	if rr.Code != http.StatusTooManyRequests || json.Unmarshal(rr.Body.Bytes(), &e) != nil || e.Code != api.CodeGuestBusy {
+		t.Fatalf("%d %s, want 429 guest_busy", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(e.Message, texto) {
+		t.Errorf("message %q lost the agent's text %q", e.Message, texto)
+	}
+	if rr.Header().Get("Retry-After") != guestBusyRetryAfter {
+		t.Errorf("Retry-After %q", rr.Header().Get("Retry-After"))
+	}
+	// Del lado del cliente, IsGuestBusy lo reconoce y no lo confunde con la cuota.
+	se := &api.StatusError{Code: rr.Code, Message: e.Message, ErrorCode: e.Code}
+	if !api.IsGuestBusy(se) || api.IsTenantQuota(se) {
+		t.Errorf("IsGuestBusy %v IsTenantQuota %v", api.IsGuestBusy(se), api.IsTenantQuota(se))
+	}
+}
+
+// Un 429 que no viene del agente (la cuota del inquilino) no lleva
+// Retry-After ni guest_busy.
+func TestFailCuotaNoEsInvitadoLleno(t *testing.T) {
+	rr := httptest.NewRecorder()
+	fail(rr, http.StatusTooManyRequests, &api.StatusError{Code: api.StatusTenantQuota, Message: "tenant a: " + api.TenantQuotaMark})
+	var e api.Error
+	_ = json.Unmarshal(rr.Body.Bytes(), &e)
+	if e.Code != api.CodeTenantQuota || rr.Header().Get("Retry-After") != "" {
+		t.Fatalf("%s %q", rr.Body.String(), rr.Header().Get("Retry-After"))
+	}
+}
