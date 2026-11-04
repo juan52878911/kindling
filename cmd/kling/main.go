@@ -195,8 +195,9 @@ func main() {
 }
 
 // cmdMachine agrupa lo que se hace a una máquina viva y casi nadie teclea:
-// `kling machine resize|squeeze|secret|credential|audit`. Los nombres de antes (resize,
-// squeeze, mmds) son alias.
+// `kling machine resize|squeeze|secret|credential|audit|ready|hooks`. El único
+// alias es `machine mmds` (= secret); los sueltos de antes (resize, squeeze,
+// mmds) se retiraron en 1.0 (removedAliases).
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit|ready|hooks> <ref> [...]")

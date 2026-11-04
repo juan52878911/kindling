@@ -17,8 +17,10 @@ import (
 // Tres sustantivos —imagen (rootfs, arranca en frío) → plantilla (snapshot
 // dorado, arranca en ms) → máquina— y doce verbos de uso diario en primer
 // nivel; lo demás vive bajo su sustantivo (template, image, volume, machine,
-// context, config, plugin) o bajo la extensión que lo aporta (ai, mcp). Los
-// nombres de antes siguen funcionando como alias silenciosos (ver aliases).
+// context, config, plugin) o bajo la extensión que lo aporta (ai, mcp). De los
+// nombres de antes, unos pocos siguen como alias silenciosos (aliases) y el
+// resto se retiró en 1.0 con un error que dice el nombre nuevo
+// (removedAliases, removedExtAliases).
 
 // section es un grupo de comandos en `kling help all`.
 type section struct {
