@@ -137,7 +137,8 @@ func cmdExec(args []string) (int, error) {
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	res, err := api.NewClient(hostOf(*host)).Exec(ctx, ref, req, func(stream string, data []byte) error {
+	c := api.NewClient(hostOf(*host))
+	res, err := c.Exec(ctx, ref, req, func(stream string, data []byte) error {
 		var err error
 		if stream == "stderr" {
 			_, err = os.Stderr.Write(data)
@@ -147,6 +148,9 @@ func cmdExec(args []string) (int, error) {
 		return err
 	})
 	if err != nil {
+		if ctx.Err() == nil && !api.IsNotFound(err) {
+			avisarEgress(ctx, c, ref)
+		}
 		return 1, err
 	}
 	if res.TimedOut {
@@ -154,6 +158,11 @@ func cmdExec(args []string) (int, error) {
 	}
 	if res.Truncated {
 		fmt.Fprintln(os.Stderr, "kling: output truncated at the limit (-max-output)")
+	}
+	if res.ExitCode != 0 {
+		// Como run con una máquina que no llega a estar lista: un fallo con
+		// egress cortado (un npx sin registro) no dice que fue la red.
+		avisarEgress(ctx, c, ref)
 	}
 	return res.ExitCode, nil
 }

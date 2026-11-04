@@ -122,6 +122,7 @@ func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.
 		if ctx.Err() != nil {
 			return 130, errors.New("interrupted")
 		}
+		avisarEgressA(ctx, stderr, c, mc.ID)
 		return 1, err
 	}
 	if res.TimedOut {
@@ -129,6 +130,12 @@ func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.
 	}
 	if res.Truncated {
 		fmt.Fprintln(stderr, "kling: output truncated at the limit")
+	}
+	if res.ExitCode != 0 {
+		// Antes del borrado (diferido): después ya no hay máquina a la que
+		// preguntar. Un npx que no llega al registro con egress none falla
+		// con un error de red que no nombra el egress.
+		avisarEgressA(ctx, stderr, c, mc.ID)
 	}
 	return res.ExitCode, nil
 }

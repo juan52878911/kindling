@@ -156,3 +156,32 @@ func TestTryImagenPorDefectoPresente(t *testing.T) {
 		t.Fatalf("sin GET /images se sigue: %v", err)
 	}
 }
+
+// Un comando que falla con conexiones cortadas por el egress lo dice, antes
+// de borrar el sandbox (después ya no hay a quién preguntar).
+func TestTryAvisaDelEgressAlFallar(t *testing.T) {
+	for _, exit := range []int{0, 1} {
+		d := &tryDaemon{exit: exit}
+		m := d.mux()
+		m.HandleFunc("GET /machines/{ref}/egress", func(w http.ResponseWriter, r *http.Request) {
+			d.mu.Lock()
+			borrado := len(d.removed) > 0
+			d.mu.Unlock()
+			if borrado {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.EgressBlocked{Egress: "none", Total: 3,
+				Destinations: []api.BlockedDest{{Dest: "registry.npmjs.org", Kind: "dns", Count: 3}}})
+		})
+		var out, errOut bytes.Buffer
+		o := tryOptions{cmd: []string{"npx", "x"}, req: api.SandboxRequest{Image: "i"}}
+		if _, err := runTry(context.Background(), fakeDaemon(t, m), o, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		avisa := strings.Contains(errOut.String(), "registry.npmjs.org")
+		if avisa != (exit != 0) {
+			t.Errorf("exit %d: aviso de egress %v, stderr %q", exit, avisa, errOut.String())
+		}
+	}
+}
