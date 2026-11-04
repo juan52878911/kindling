@@ -63,12 +63,21 @@ func cmdTry(args []string) (int, error) {
 		Image: *image, From: *from, MemMiB: *mem, VCPUs: *cpus,
 		Egress: *egress, AllowDomains: splitDomains(allow.String()), TTLSeconds: int(ttl.Seconds()),
 	}}
-	if o.req.Image == "" && o.req.From == "" {
+	porDefecto := o.req.Image == "" && o.req.From == ""
+	if porDefecto {
 		o.req.Image = tryDefaultImage
 	}
 
 	endpoint := hostOf(*host)
 	c := api.NewClient(endpoint)
+	if porDefecto {
+		ctx, stop := ctxWithSignals()
+		err := imagenTryDisponible(ctx, c)
+		stop()
+		if err != nil {
+			return 1, err
+		}
+	}
 	if len(cmd) > 0 {
 		ctx, stop := ctxWithSignals()
 		defer stop()
@@ -122,6 +131,36 @@ func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.
 		fmt.Fprintln(stderr, "kling: output truncated at the limit")
 	}
 	return res.ExitCode, nil
+}
+
+// imagenTryDisponible comprueba, antes de crear nada, que la imagen por
+// defecto existe: una instalación recién hecha no la trae, y el error del
+// daemon ("image does not exist") llegaba después de pedir el sandbox y sin
+// decir que hay que construirla. No la construye: tarda minutos y descarga
+// node y python, y eso lo decide quien lo pide. Si no se puede listar (un
+// daemon viejo, un fallo de red) se sigue como antes: el daemon dirá lo suyo.
+func imagenTryDisponible(ctx context.Context, c *api.Client) error {
+	imgs, err := c.Images(ctx)
+	if err != nil {
+		return nil
+	}
+	hayMin := false
+	for _, im := range imgs {
+		switch im.Name {
+		case tryDefaultImage:
+			return nil
+		case "min":
+			hayMin = true
+		}
+	}
+	hint := "kling image toolchain   (builds it: node, python and the guest agent; takes a few minutes)"
+	if hayMin {
+		hint += "\n     or use the small image you already have:  kling try -image min -- <cmd>"
+	}
+	return &errWithHint{
+		err:  fmt.Errorf("kling try uses the image %q by default, and this daemon doesn't have it", tryDefaultImage),
+		hint: hint,
+	}
 }
 
 // tryCreate crea el sandbox y lo cuenta por stderr: stdout es del comando, y
