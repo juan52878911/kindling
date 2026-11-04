@@ -121,6 +121,17 @@ static uint16_t used_idx(void) {
 
 enum { RX_PUESTA, RX_VACIO, RX_SIN_BUF, RX_ERROR };
 
+// rx_hay_buf dice si el invitado tiene búferes de rx sin usar. Con mu.
+static bool rx_hay_buf(void) {
+  struct vq *q = &s.q[0];
+  uint16_t *avail;
+  uint8_t *used;
+  struct vdesc *desc;
+  if (!vq_ptrs(q, &avail, &used, &desc)) return false;
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  return q->last_avail != *(volatile uint16_t *)&avail[1];
+}
+
 // rx_una recibe la siguiente trama del socket directamente en el siguiente
 // búfer de rx del invitado (recvmsg con sus búferes como iovec, detrás de la
 // cabecera): una sola pasada por la cadena y ninguna copia intermedia. Con
@@ -249,6 +260,10 @@ static bool rx_vaciar(int *err) {
     bool hay = poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN);
     pthread_mutex_lock(&mu);
     if (!hay) return true;
+    // El invitado pudo reponer y avisar mientras mu estaba suelto: ese
+    // broadcast de cv ya pasó y esperarlo dormía los 50 ms enteros con
+    // búferes libres (la subida al invitado caía de ~1 GiB/s a ~200 MiB/s).
+    if (rx_hay_buf()) continue;
     if (intentos++ >= 20) {
       // Se tira la trama que espera, sin gastar búfer.
       static uint8_t tirar[TRAMA_MAX];
@@ -262,7 +277,11 @@ static bool rx_vaciar(int *err) {
       clock_gettime(CLOCK_REALTIME, &ts);
       ts.tv_nsec += 50000000;
       if (ts.tv_nsec >= 1000000000) ts.tv_sec++, ts.tv_nsec -= 1000000000;
-      pthread_cond_timedwait(&cv, &mu, &ts);
+      // En bucle sobre la condición: un broadcast de cv puede ser de otra
+      // cosa (pausa, parar), y uno anterior a esta espera ya no llega.
+      while (!rx_hay_buf() && !rx_parar && !g_pausa) {
+        if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) break;
+      }
     }
     viejo = used_idx();
   }
