@@ -874,11 +874,37 @@ func (m *Manager) flushVolume(mc *api.Machine, conservaDisco bool) {
 		return
 	}
 	resp, err := listoClient.Do(req)
+	if err != nil && m.agenteArrancando(ctx, mc) {
+		// Recién arrancada en frío (un freeze justo detrás de `kling run`):
+		// su agente aún no escuchaba. Se le espera un poco y se repite, en
+		// vez de avisar de un vaciado que nadie pudo hacer.
+		if waitGuest(ctx, "http://"+mc.Addr(api.GuestPort), esperaAgenteVaciado) == nil {
+			if req, err2 := http.NewRequestWithContext(ctx, http.MethodPost, url, nil); err2 == nil {
+				resp, err = listoClient.Do(req)
+			}
+		}
+	}
 	if err != nil {
 		log.Printf("%s: guest did not flush its volumes before dying: %v", mc.Name, err)
 		return
 	}
 	resp.Body.Close()
+}
+
+// esperaAgenteVaciado es cuánto se espera, como mucho, a que escuche el agente
+// de una máquina que aún arranca antes de pedirle que vacíe (dentro del
+// plazo del propio vaciado). Un arranque en frío tarda ~0,15 s en el M4.
+const esperaAgenteVaciado = 2 * time.Second
+
+// agenteArrancando dice si mc parece estar arrancando su agente: aún no ha
+// contestado nunca (conocerAgente no lo ha apuntado), arrancó hace menos de
+// vigiaAgenteMax y su imagen lo trae. Una máquina sin agente no se espera.
+func (m *Manager) agenteArrancando(ctx context.Context, mc *api.Machine) bool {
+	if m.agenteDe(mc.ID) != nil || mc.StartedAt == nil || time.Since(*mc.StartedAt) > vigiaAgenteMax {
+		return false
+	}
+	tiene, err := m.ImageHasAgent(ctx, mc.Image)
+	return err == nil && tiene
 }
 
 // hayQueVaciar dice si pedirle al invitado que vacíe su caché antes de
