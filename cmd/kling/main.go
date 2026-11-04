@@ -1522,8 +1522,15 @@ func cmdTopo(args []string) error {
 		return err
 	}
 
+	// En macOS no hay KVM: el VMM es kling-hv o kling-vz, y Firecrack trae su
+	// versión. Decir "no KVM" ahí parecía una avería.
 	kvm := "no KVM"
-	if info.KVM {
+	switch {
+	case info.Backend == "hv":
+		kvm = "hv (Hypervisor.framework)"
+	case info.Backend == "vz":
+		kvm = "vz (Virtualization.framework)"
+	case info.KVM:
 		kvm = "KVM ok"
 	}
 	fmt.Printf("kindling  %s\n", c.Endpoint())
