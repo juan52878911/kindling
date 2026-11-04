@@ -640,6 +640,53 @@ func TestStopEsperaAlArranque(t *testing.T) {
 	}
 }
 
+// Stop que espera el cerrojo mientras la borran: al conseguirlo ya no existe,
+// y lo dice. Antes seguía con la copia de antes de esperar: desmontaba su red,
+// borraba su volcado y contestaba "stopped" de una máquina que no estaba.
+func TestStopDeUnaBorradaMientrasEsperaNoExiste(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000007"
+	m.addForTest(id)
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Un testigo: Stop borra el volcado de la máquina que para.
+	testigo := filepath.Join(dir, "snap.file")
+	if err := os.WriteFile(testigo, []byte("snap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	soltar := m.lock(id) // el Remove que la está borrando
+	parada := make(chan error, 1)
+	go func() {
+		_, err := m.Stop(id)
+		parada <- err
+	}()
+	select {
+	case err := <-parada:
+		t.Fatalf("Stop no esperó al cerrojo: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	m.mu.Lock()
+	delete(m.byID, id)
+	m.mu.Unlock()
+	soltar()
+
+	select {
+	case err := <-parada:
+		if !errors.Is(err, ErrNoMachine) {
+			t.Fatalf("Stop de una borrada = %v, quería ErrNoMachine", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop no terminó")
+	}
+	if _, err := os.Stat(testigo); err != nil {
+		t.Errorf("Stop siguió con la copia de antes y tocó su directorio: %v", err)
+	}
+}
+
 // Freeze sobre una máquina que estaba arrancando: espera el cerrojo y, al
 // conseguirlo, vuelve a leerla. Antes seguía con la copia de ANTES de esperar
 // y rechazaba una máquina recién arrancada "por estar created".

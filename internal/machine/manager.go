@@ -3580,10 +3580,15 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	// Lo que vio Get antes de esperar el cerrojo puede no valer ya: si la
 	// máquina estaba arrancando, su NetIndex era aún el de antes de montar la
-	// red, y desmontar con él dejaba la red de verdad montada.
-	if cur, ok := m.get(mc.ID); ok {
-		mc = cur
+	// red, y desmontar con él dejaba la red de verdad montada. Y si ya no
+	// está (la borraron mientras esperábamos), no hay nada que parar: seguir
+	// con la copia de antes desmontaba su red y borraba su volcado otra vez,
+	// como hace Freeze.
+	cur, ok := m.get(mc.ID)
+	if !ok {
+		return nil, noExiste(ref)
 	}
+	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.killConservandoDisco(mc.ID)
 	// El overlay se conserva para kling start: si iba sin sincronizar, se
