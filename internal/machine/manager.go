@@ -278,6 +278,8 @@ type Manager struct {
 	// vmmDeCongelado: id -> PID del VMM que un Freeze terminado mató sin verlo
 	// morir (siguió vivo tras el SIGKILL y plazoMuerte). Ese proceso es de un
 	// volcado ya sellado: Thaw no lo readopta, lo mata (ver thawVMMViejo).
+	// Se guarda también en el directorio de la máquina (ficheroVMMCongelado):
+	// un reinicio del daemon lo readoptaba como running.
 	vmmDeCongelado sync.Map
 
 	// bat es el modo batería (bateria.go); reloj, la vigilancia del sueño del
@@ -2523,7 +2525,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// ese VMM es de este freeze: se apunta para que Thaw no lo tome por uno
 	// suyo y lo readopte (vmmDeCongelado).
 	if pidViejo := mc.PID; !m.killPaused(mc.ID) && pidViejo > 0 {
-		m.vmmDeCongelado.Store(mc.ID, pidViejo)
+		m.apuntarVMMDeCongelado(mc.ID, pidViejo)
 	}
 	// Si despertó de un diferencial, el VMM mapeaba mem.full (base + diff):
 	// muerto el VMM no lo lee nadie. Un freeze diferencial ya lo retiró al
@@ -3238,6 +3240,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, err
 		}
 		delete(live, mc.ID)
+	} else if _, marcado := m.vmmDeCongelado.Load(mc.ID); marcado && live[mc.ID] == 0 {
+		// El VMM que dejó vivo su freeze ya se fue solo: la marca sobra.
+		m.olvidarVMMDeCongelado(mc.ID)
 	}
 	if live[mc.ID] > 0 {
 		pid := live[mc.ID]
@@ -3274,6 +3279,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		cur.CPUPct = techo
 		m.socket[mc.ID] = sock
 		m.persist()
+		// Como en reconcile: si no es hijo de este daemon, nadie hace
+		// cmd.Wait por él, y su muerte solo la vería el vigilante a la vuelta
+		// siguiente (10 s). Si lo es, esperarVMM ya lo vigila y el segundo
+		// aviso no marca nada (comprobarVMMLocked lo ve ya failed).
+		m.vigilarAdoptado(mc.ID, pid)
 		out := *cur
 		m.mu.Unlock()
 		m.startShares(mc.ID)
@@ -3835,9 +3845,52 @@ func (m *Manager) esVMMDeCongelado(id string, pid int) bool {
 		return false
 	}
 	if v.(int) != pid {
-		m.vmmDeCongelado.Delete(id)
+		m.olvidarVMMDeCongelado(id)
 		return false
 	}
+	return true
+}
+
+// ficheroVMMCongelado guarda, en el directorio de la máquina, el PID de
+// vmmDeCongelado. La marca era solo de memoria: si el daemon se reiniciaba
+// con ese VMM aún vivo, reconcile lo readoptaba como running, la warm dejaba
+// de serlo y, al morir el proceso, quedaba failed (ver vmmCongeladoEnDisco).
+const ficheroVMMCongelado = "vmm-congelado.pid"
+
+// apuntarVMMDeCongelado marca pid como el VMM que el Freeze de id dejó vivo,
+// en memoria y en disco. Si no se puede escribir se avisa: la marca de
+// memoria vale igual mientras viva este daemon.
+func (m *Manager) apuntarVMMDeCongelado(id string, pid int) {
+	m.vmmDeCongelado.Store(id, pid)
+	f := filepath.Join(m.dir(id), ficheroVMMCongelado)
+	if err := os.WriteFile(f, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		log.Printf("warning: %s: couldn't save the pid of the VMM its freeze left alive: %v", shortID(id), err)
+	}
+}
+
+// olvidarVMMDeCongelado quita la marca de id, de memoria y de disco.
+func (m *Manager) olvidarVMMDeCongelado(id string) {
+	m.vmmDeCongelado.Delete(id)
+	_ = os.Remove(filepath.Join(m.dir(id), ficheroVMMCongelado))
+}
+
+// vmmCongeladoEnDisco dice si pid, vivo y de la máquina id, es el VMM que su
+// último Freeze dejó vivo según la marca guardada en disco. Lo usa reconcile
+// al arrancar el daemon: si lo es, la marca vuelve a la memoria (Thaw lo
+// matará en vez de readoptarlo) y el proceso no se readopta. Una marca de
+// otro PID ya no es de nadie y se borra. Sin E/S de red: vale con m.mu tomado.
+func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
+	f := filepath.Join(m.dir(id), ficheroVMMCongelado)
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return false
+	}
+	apuntado, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || apuntado <= 0 || apuntado != pid {
+		_ = os.Remove(f)
+		return false
+	}
+	m.vmmDeCongelado.Store(id, pid)
 	return true
 }
 
@@ -3854,7 +3907,7 @@ func (m *Manager) thawVMMViejo(mc *api.Machine, pid int) error {
 		return fmt.Errorf("machine %q can't be thawed: the VMM of its last freeze (pid %d) is still alive %s after SIGKILL",
 			mc.Name, pid, plazoMuerte)
 	}
-	m.vmmDeCongelado.Delete(mc.ID)
+	m.olvidarVMMDeCongelado(mc.ID)
 	return nil
 }
 
