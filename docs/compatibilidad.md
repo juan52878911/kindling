@@ -25,9 +25,13 @@ interno**, aunque se pueda usar.
 - La API HTTP del daemon: rutas, campos JSON, capacidades de `GET /info`,
   códigos de estado documentados en [`api.md`](api.md) y las cabeceras
   `X-Kling-API`/`X-Kling-Version`.
-- La CLI del núcleo: comandos y flags de `kling help all`, la salida `-json`
-  (son los tipos de `pkg/api`), los códigos de salida y las variables de
-  cliente `KLING_HOST`, `KLING_CONFIG` y `KLING_AUTHZ_TOKEN`.
+- La CLI del núcleo: comandos y flags de `kling help all` (los flags de cada
+  comando los fija `cmd/kling/testdata/contrato/flags.txt`), la salida `-json`,
+  los códigos de salida y las variables de cliente `KLING_HOST`, `KLING_CONFIG`
+  y `KLING_AUTHZ_TOKEN`. La salida `-json` es casi siempre un tipo de
+  `pkg/api`, pero no toda: `status`, `version`, `doctor` y `plugins` escriben
+  estructuras propias. La forma de la de los comandos principales, `status` y
+  `version` incluidos, la fija `cmd/kling/testdata/contrato/json.txt`.
 - Go: **solo** `pkg/api`, `pkg/plugin` y `pkg/config`.
 - Los formatos en disco versionados: `state.json`, `meta.json` de los dorados,
   `credentials.enc` (`KLCS`), `publish.json`, `fondos.json`, el sello
@@ -77,7 +81,9 @@ Una sola versión para todo el repo. En lo estable:
   salida nuevos para casos nuevos, `caps` del agente y opcodes de
   `kling-share`;
 - subir el `schema` de un formato, **siempre** con migración desde el anterior
-  y su copia `.v<N>.bak`;
+  y su copia `.v<N>.bak`. La excepción son los grafos: su `format` 1 solo
+  añade el campo, que un kling anterior ignora y lee igual, así que se migran
+  sin copia (`internal/machine/grafo.go`);
 - escribir una versión nueva de `kling_vz` o `KLNGHV`, siempre la más baja que
   describe la máquina;
 - deprecar (abajo), y cambiar lo experimental.
@@ -96,9 +102,13 @@ Los dorados (`kling save`, plantillas) y las máquinas congeladas guardan memori
 de una VM, ligada al VMM, al kernel, a la arquitectura y, en el Mac, a la build
 de macOS. **No se promete restaurarlos entre MINOR.** Lo que se promete:
 
-1. **Detección**: uno que el host ya no puede restaurar sale `stale` con la causa
-   y la orden para rehacerlo, antes de llegar al VMM; nunca un fallo crudo al
-   despertar.
+1. **Detección**: uno que el host sabe que ya no puede restaurar (otro VMM, otra
+   MAJOR.MINOR de Firecracker, otra arquitectura, un formato de volcado de
+   kling-vz o kling-hv que este no lee) sale `stale` con la causa y la orden
+   para rehacerlo, antes de llegar al VMM. La build de macOS no se compara por
+   adelantado, porque no hay regla conocida de cuándo Virtualization deja de
+   aceptar un estado guardado: si no restaura, el error lo dice y da la orden
+   para rehacerlo. En ningún caso un fallo crudo al despertar.
 2. **Recongelación**: `kling upgrade` congela otra vez, con el VMM que lo vaya a
    despertar, lo que el cambio dejaría ilegible, o se niega antes de tocar nada.
 
