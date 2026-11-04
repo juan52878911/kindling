@@ -66,10 +66,7 @@ var puertosDeImagen = map[string]int{
 	"mongo": 27017, "memcached": 11211, "rabbitmq": 5672,
 }
 
-var (
-	reDNSNodo    = regexp.MustCompile(`[^a-z0-9-]+`)
-	reVarCompose = regexp.MustCompile(`\$(\$|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}|[A-Za-z_][A-Za-z0-9_]*)`)
-)
+var reDNSNodo = regexp.MustCompile(`[^a-z0-9-]+`)
 
 type servicioCompose struct {
 	nombre  string // el del compose
@@ -107,51 +104,141 @@ type depCompose struct {
 }
 
 // interpolarCompose resuelve $VAR, ${VAR}, ${VAR:-def}, ${VAR-def},
-// ${VAR:+alt}, ${VAR:?msg} y $$ con lookup, como Docker Compose. Una variable
-// sin valor ni defecto queda vacía y se avisa; ${VAR:?msg} (o ${VAR?msg})
-// sin valor es un error, con msg.
+// ${VAR:+alt}, ${VAR+alt}, ${VAR:?msg}, ${VAR?msg} y $$ con lookup, como
+// Docker Compose, incluidos los anidados (${A:-${B:-x}}): el defecto, la
+// alternativa y el mensaje se interpolan a su vez, y solo la rama que se usa
+// (una rama sin usar no avisa ni falla). Una variable sin valor ni defecto
+// queda vacía y se avisa; ${VAR:?msg} (o ${VAR?msg}) sin valor es un error,
+// con msg. Lo que no es una variable válida (${}, ${1A}, un ${ sin cerrar)
+// se deja tal cual.
 func interpolarCompose(src string, lookup func(string) (string, bool), aviso func(string)) (string, error) {
 	var errs []error
-	out := reVarCompose.ReplaceAllStringFunc(src, func(m string) string {
-		if m == "$$" {
-			return "$"
-		}
-		sub := reVarCompose.FindStringSubmatch(m)
-		nombre, op, def := sub[2], sub[3], sub[4]
-		if nombre == "" {
-			nombre = sub[1] // $VAR, sin llaves
-		}
-		v, ok := lookup(nombre)
-		switch op {
-		case ":-":
-			if v == "" {
-				return def
-			}
-		case "-":
-			if !ok {
-				return def
-			}
-		case ":?", "?":
-			if (op == ":?" && v == "") || (op == "?" && !ok) {
-				msg := def
-				if msg == "" {
-					msg = "required variable " + nombre + " is missing a value"
-				}
-				errs = append(errs, fmt.Errorf("variable %s: %s", nombre, msg))
-				return ""
-			}
-		case ":+", "+":
-			if v != "" || (op == "+" && ok) {
-				return def
-			}
-			return ""
-		}
-		if !ok {
-			aviso(fmt.Sprintf("variable %s is not set; using an empty value", nombre))
-		}
-		return v
-	})
+	out := interpolarComposeRec(src, lookup, aviso, &errs)
 	return out, errors.Join(errs...)
+}
+
+func interpolarComposeRec(src string, lookup func(string) (string, bool), aviso func(string), errs *[]error) string {
+	var b strings.Builder
+	for i := 0; i < len(src); {
+		if src[i] != '$' || i+1 == len(src) {
+			b.WriteByte(src[i])
+			i++
+			continue
+		}
+		switch n := src[i+1]; {
+		case n == '$':
+			b.WriteByte('$')
+			i += 2
+		case n == '{':
+			fin := cierreVarCompose(src, i+2)
+			if fin < 0 {
+				b.WriteString(src[i:]) // ${ sin cerrar: literal
+				return b.String()
+			}
+			if v, ok := expandirVarCompose(src[i+2:fin], lookup, aviso, errs); ok {
+				b.WriteString(v)
+			} else {
+				b.WriteString(src[i : fin+1])
+			}
+			i = fin + 1
+		case inicioNombreCompose(n):
+			j := i + 1 + largoNombreCompose(src[i+1:])
+			b.WriteString(valorVarCompose(src[i+1:j], lookup, aviso))
+			i = j
+		default:
+			b.WriteByte('$')
+			i++
+		}
+	}
+	return b.String()
+}
+
+// cierreVarCompose da el índice de la } que cierra el ${ cuyo cuerpo empieza
+// en desde, emparejando llaves (las de un ${ anidado, un $${ escapado o un
+// JSON de defecto) y saltando los $$; -1 si no cierra.
+func cierreVarCompose(src string, desde int) int {
+	prof := 1
+	for k := desde; k < len(src); k++ {
+		switch {
+		case src[k] == '$' && k+1 < len(src) && src[k+1] == '$':
+			k++
+		case src[k] == '{':
+			prof++
+		case src[k] == '}':
+			if prof--; prof == 0 {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
+// expandirVarCompose resuelve el cuerpo de un ${...}; false si no es válido.
+func expandirVarCompose(cuerpo string, lookup func(string) (string, bool), aviso func(string), errs *[]error) (string, bool) {
+	l := largoNombreCompose(cuerpo)
+	if l == 0 || !inicioNombreCompose(cuerpo[0]) {
+		return "", false
+	}
+	nombre, resto := cuerpo[:l], cuerpo[l:]
+	if resto == "" {
+		return valorVarCompose(nombre, lookup, aviso), true
+	}
+	op := ""
+	for _, o := range []string{":-", ":?", ":+", "-", "?", "+"} {
+		if strings.HasPrefix(resto, o) {
+			op = o
+			break
+		}
+	}
+	if op == "" {
+		return "", false
+	}
+	arg := func() string { return interpolarComposeRec(resto[len(op):], lookup, aviso, errs) }
+	v, ok := lookup(nombre)
+	switch op {
+	case ":-", "-":
+		if !ok || (op == ":-" && v == "") {
+			return arg(), true
+		}
+		return v, true
+	case ":?", "?":
+		if !ok || (op == ":?" && v == "") {
+			msg := arg()
+			if msg == "" {
+				msg = "required variable " + nombre + " is missing a value"
+			}
+			*errs = append(*errs, fmt.Errorf("variable %s: %s", nombre, msg))
+			return "", true
+		}
+		return v, true
+	default: // ":+", "+"
+		if (op == "+" && ok) || v != "" {
+			return arg(), true
+		}
+		return "", true
+	}
+}
+
+func valorVarCompose(nombre string, lookup func(string) (string, bool), aviso func(string)) string {
+	v, ok := lookup(nombre)
+	if !ok {
+		aviso(fmt.Sprintf("variable %s is not set; using an empty value", nombre))
+	}
+	return v
+}
+
+func inicioNombreCompose(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// largoNombreCompose: cuántos bytes del principio de s forman un nombre
+// [A-Za-z0-9_]* (quien llama mira que empiece por letra o _).
+func largoNombreCompose(s string) int {
+	k := 0
+	for k < len(s) && (inicioNombreCompose(s[k]) || (s[k] >= '0' && s[k] <= '9')) {
+		k++
+	}
+	return k
 }
 
 // leerDotEnv lee el fichero de variables (.env) del directorio del compose:
@@ -524,6 +611,10 @@ func motivoNoSoportado(k string) string {
 	return "not supported"
 }
 
+// maxRangoPuertos: un rango de ports:/expose: más largo no se expande (cada
+// puerto publicado es un listener del daemon).
+const maxRangoPuertos = 1024
+
 func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre string, avisa func(string, ...any)) {
 	l, ok := v.([]any)
 	if !ok {
@@ -534,9 +625,19 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 		var spec string
 		switch x := e.(type) {
 		case map[string]any:
+			// Sintaxis larga: [host_ip:][published:]target[/protocol].
 			spec = fmt.Sprint(x["target"])
+			ip, _ := x["host_ip"].(string)
 			if p, ok := x["published"]; ok && p != nil {
 				spec = fmt.Sprintf("%v:%s", p, spec)
+			} else if ip != "" {
+				spec = ":" + spec
+			}
+			if ip != "" {
+				spec = ip + ":" + spec
+			}
+			if pr, _ := x["protocol"].(string); pr != "" {
+				spec += "/" + strings.ToLower(pr)
 			}
 		default:
 			spec = fmt.Sprint(e)
@@ -549,58 +650,98 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 		}
 		spec = strings.TrimSuffix(spec, "/udp")
 		parts := strings.Split(spec, ":")
-		cont := parts[len(parts)-1]
-		if strings.Contains(cont, "-") {
-			avisa("%s%s: %s: port ranges are not supported", pre, k, spec)
-			continue
-		}
-		p, err := strconv.Atoi(cont)
-		if err != nil || p < 1 || p > 65535 {
+		guests, ok := rangoPuertos(parts[len(parts)-1])
+		if !ok {
 			avisa("%s%s: %s: not a port", pre, k, spec)
 			continue
 		}
-		if p == api.GuestPort {
-			avisa("%s%s: %s: port %d is the kindling guest agent; no edge can reach it", pre, k, spec, p)
+		if len(guests) > maxRangoPuertos {
+			avisa("%s%s: %s: port range longer than %d; not carried", pre, k, spec, maxRangoPuertos)
 			continue
 		}
+		// "80" (sin host) o "127.0.0.1::80": uno libre al azar, como Docker.
+		hosts := make([]int, len(guests))
 		if k == "ports" {
-			// "80" (sin host) o "127.0.0.1::80": uno libre al azar, como Docker.
-			h, hs := 0, ""
-			if len(parts) > 1 {
-				hs = parts[len(parts)-2]
-			}
 			if len(parts) > 2 {
 				if ip := strings.Join(parts[:len(parts)-2], ":"); ip != "127.0.0.1" && ip != "localhost" {
 					avisa("%sports: %s: published on 127.0.0.1 only, not on %s (kindling never publishes on other interfaces)", pre, spec, ip)
 				}
 			}
-			if hs != "" {
-				n, err := strconv.Atoi(hs)
-				if err != nil || n < 1 || n > 65535 {
-					avisa("%sports: %s: host port not understood", pre, spec)
+			if len(parts) > 1 {
+				if hs := parts[len(parts)-2]; hs != "" {
+					hr, ok := rangoPuertos(hs)
+					switch {
+					case !ok:
+						avisa("%sports: %s: host port not understood", pre, spec)
+						continue
+					case len(hr) == len(guests):
+						hosts = hr
+					case len(guests) == 1:
+						// Docker prueba los del rango hasta dar con uno libre;
+						// aquí, el primero.
+						hosts = hr[:1]
+						avisa("%sports: %s: published on 127.0.0.1:%d, the first port of the host range", pre, spec, hr[0])
+					default:
+						avisa("%sports: %s: host and container port ranges differ in length", pre, spec)
+						continue
+					}
+				}
+			}
+		}
+		for i, p := range guests {
+			if p == api.GuestPort {
+				avisa("%s%s: %s: port %d is the kindling guest agent; no edge can reach it", pre, k, spec, p)
+				continue
+			}
+			if k == "ports" {
+				h := hosts[i]
+				q := api.PortPublish{Host: h, Guest: p}
+				if udp {
+					q.Proto = api.ProtoUDP
+				}
+				// El mismo puerto del host en otra IP (127.0.0.1:80 y
+				// 192.168.1.5:80, o la IPv4 y la IPv6) es aquí uno solo.
+				if h != 0 && slices.ContainsFunc(s.publ, func(o api.PortPublish) bool { return o.Host == h && o.ProtoOr() == q.ProtoOr() }) {
+					if !slices.Contains(s.publ, q) {
+						avisa("%sports: %s: 127.0.0.1:%d is already published for another container port; skipped (kindling publishes on 127.0.0.1 only)", pre, spec, h)
+					}
 					continue
 				}
-				h = n
-			}
-			q := api.PortPublish{Host: h, Guest: p}
-			donde := "127.0.0.1:" + strconv.Itoa(h)
-			if h == 0 {
-				donde = "a free 127.0.0.1 port"
-			}
-			if udp {
-				q.Proto = api.ProtoUDP
+				donde := "127.0.0.1:" + strconv.Itoa(h)
+				if h == 0 {
+					donde = "a free 127.0.0.1 port"
+				}
 				s.publ = append(s.publ, q)
-				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s/udp; Linux only)", pre, spec, donde)
-				continue // las aristas son TCP: no es un puerto del nodo
+				if udp {
+					avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s/udp; Linux only)", pre, spec, donde)
+					continue // las aristas son TCP: no es un puerto del nodo
+				}
+				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s)", pre, spec, donde)
 			}
-			s.publ = append(s.publ, q)
-			avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s)", pre, spec, donde)
-		}
-		if !slicesHas(s.puertos, p) {
-			s.puertos = append(s.puertos, p)
+			if !slicesHas(s.puertos, p) {
+				s.puertos = append(s.puertos, p)
+			}
 		}
 	}
 	sort.Ints(s.puertos)
+}
+
+// rangoPuertos lee "80" o "8000-8010" (incluidos); false si no son puertos.
+func rangoPuertos(s string) ([]int, bool) {
+	a, b, esRango := strings.Cut(s, "-")
+	if !esRango {
+		b = a
+	}
+	i, err1 := strconv.Atoi(a)
+	j, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || i < 1 || j > 65535 || j < i {
+		return nil, false
+	}
+	out := make([]int, 0, j-i+1)
+	for p := i; p <= j; p++ {
+		out = append(out, p)
+	}
+	return out, true
 }
 
 func (t *traduccionCompose) entorno(s *servicioCompose, v any, pre string, avisa func(string, ...any)) {
@@ -993,10 +1134,11 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 	}
 
 	// Enlaces: como en la red de un proyecto de Docker Compose, cada servicio
-	// alcanza a todos los de sus redes, no solo a los de depends_on. Si no
-	// caben en el tope de aristas, solo los que se usan: depends_on y los
-	// hosts que nombra el entorno.
-	enlaces := enlacesCompose(vivos, por, false, avisa)
+	// alcanza a todos los de sus redes, no solo a los de depends_on. Un
+	// servicio cuyos enlaces no caben en el tope por nodo (sus proxies de
+	// enlace) se queda con los que usa: depends_on y los hosts que nombra el
+	// entorno; si no cabe el grafo entero, todos.
+	enlaces := enlacesCompose(vivos, por, nil, avisa)
 	var deps []string
 	for _, s := range vivos {
 		for _, d := range s.deps {
@@ -1034,10 +1176,28 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 			deps = append(deps, dep+"}")
 		}
 	}
-	if len(enlaces)+len(deps) > api.GraphMaxEdges {
+	solo := map[string]bool{}
+	if len(enlaces)+len(deps) > api.GraphMaxTotalEdges {
 		avisa("the project network needs %d edges, over the limit of %d: only the links to depends_on and to the hosts named in environment are kept",
-			len(enlaces)+len(deps), api.GraphMaxEdges)
-		enlaces = enlacesCompose(vivos, por, true, func(string, ...any) {})
+			len(enlaces)+len(deps), api.GraphMaxTotalEdges)
+		for _, s := range vivos {
+			solo[s.nombre] = true
+		}
+	} else {
+		salen := map[string]int{}
+		for _, l := range enlaces {
+			salen[strings.Fields(strings.TrimPrefix(l, "  - {from: "))[0]]++
+		}
+		for _, s := range vivos {
+			if n := salen[s.nodo+","]; n > api.GraphMaxEdges {
+				avisa("service %s: reaching every service of its networks needs %d links, over the limit of %d per node: only those to depends_on and to the hosts named in environment are kept",
+					s.nombre, n, api.GraphMaxEdges)
+				solo[s.nombre] = true
+			}
+		}
+	}
+	if len(solo) > 0 {
+		enlaces = enlacesCompose(vivos, por, solo, func(string, ...any) {})
 	}
 	aristas := append(enlaces, deps...)
 	sort.SliceStable(aristas, func(i, j int) bool { return claveArista(aristas[i]) < claveArista(aristas[j]) })
@@ -1107,7 +1267,7 @@ func puertoReservado(p int) bool { return p == 53 || p == 80 || p == 443 }
 // alcanza un solo nodo por puerto: si dos destinos exponen el mismo, gana el
 // de depends_on o el que nombra el entorno, y luego el primero por nombre.
 // soloUsados deja solo esos (depends_on y entorno).
-func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, soloUsados bool, avisa func(string, ...any)) []string {
+func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, soloUsados map[string]bool, avisa func(string, ...any)) []string {
 	var out []string
 	for _, s := range vivos {
 		usado := func(o *servicioCompose) bool {
@@ -1123,7 +1283,7 @@ func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, s
 		}
 		var destinos []*servicioCompose
 		for _, o := range vivos {
-			if alcanza(s, o) && (!soloUsados || usado(o)) {
+			if alcanza(s, o) && (!soloUsados[s.nombre] || usado(o)) {
 				destinos = append(destinos, o)
 			}
 		}

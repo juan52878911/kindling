@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -527,7 +528,82 @@ func createVolumeImage(ctx context.Context, path string, sizeMiB int) error {
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}
+	quitarLostFound(ctx, path)
 	return nil
+}
+
+// quitarLostFound borra el lost+found que deja mke2fs en un volumen nuevo: el
+// de Docker está vacío, e initdb (PGDATA en la raíz del volumen, como en la
+// imagen oficial de postgres) se niega a inicializar un directorio que tenga
+// algo. Solo lo quita si está vacío y es lo único de la raíz.
+//
+// Las capas y raíces de las imágenes no pasan por aquí (internal/ext4 con
+// LostFound: true): un rootfs sí lo quiere.
+//
+// Mejor esfuerzo: sin debugfs (un Mac sin e2fsprogs completo) el volumen
+// sirve igual, con su lost+found. e2fsck -f (repairVolume, en cada arranque)
+// lo vuelve a crear, y repairVolume lo quita otra vez mientras el volumen
+// siga virgen; cuando ya tiene datos se queda (initdb ya no mira).
+//
+// Lo que se pierde: la marca de pkg/guest (seedMark) vive en lost+found. Sin
+// él, un volumen que siga vacío vuelve a heredar dueño y modo de la imagen en
+// cada arranque hasta que tenga algo, que es lo que hace Docker con un
+// volumen vacío.
+func quitarLostFound(ctx context.Context, path string) {
+	bin := debugfsBin()
+	if bin == "" {
+		return
+	}
+	run := func(orden string) string {
+		c := exec.CommandContext(ctx, bin, "-w", "-R", orden, path)
+		c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+		out, _ := c.CombinedOutput()
+		return string(out)
+	}
+	if !soloLostFoundVacio(run("ls -l /"), run("ls -l /lost+found")) {
+		return
+	}
+	// debugfs sale con 0 aunque la orden falle: lo que diga, al log.
+	if out := sinCabeceraDebugfs(run("rmdir /lost+found")); out != "" {
+		log.Printf("volume %s: keeping lost+found: %s", filepath.Base(path), out)
+	}
+}
+
+// soloLostFoundVacio mira la salida de debugfs `ls -l` de la raíz y de
+// lost+found: la raíz no tiene más que ., .. y lost+found, y lost+found, solo
+// . y .. .
+func soloLostFoundVacio(raiz, lf string) bool {
+	nombres := func(s string) []string {
+		var out []string
+		for _, l := range strings.Split(s, "\n") {
+			f := strings.Fields(l)
+			// inodo  modo  (n)  uid  gid  tamaño  fecha...  nombre
+			if len(f) < 4 || !strings.HasPrefix(f[2], "(") {
+				continue
+			}
+			// Inodo 0: un hueco libre del directorio, sin nombre.
+			if n, err := strconv.ParseUint(f[0], 10, 64); err != nil || n == 0 {
+				continue
+			}
+			out = append(out, f[len(f)-1])
+		}
+		return out
+	}
+	r, l := nombres(raiz), nombres(lf)
+	slices.Sort(r)
+	slices.Sort(l)
+	return slices.Equal(r, []string{".", "..", "lost+found"}) && slices.Equal(l, []string{".", ".."})
+}
+
+// sinCabeceraDebugfs quita la línea de versión que debugfs escribe siempre.
+func sinCabeceraDebugfs(s string) string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "debugfs ") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // repairVolume repasa el sistema de ficheros antes de entregárselo al invitado.
@@ -548,9 +624,35 @@ func repairVolume(ctx context.Context, path string) {
 		log.Printf("volume %s: e2fsck could not check it (%v); mounting anyway",
 			filepath.Base(path), err)
 	case reparado:
+		// e2fsck -f crea lost+found si falta, y en un volumen nuevo falta a
+		// propósito (quitarLostFound): se vuelve a quitar mientras siga
+		// virgen, y eso solo no es una reparación.
+		if resto, ok := sinLostFoundCreado(out); ok {
+			quitarLostFound(ctx, path)
+			if soloResumenE2fsck(resto) {
+				return
+			}
+		}
 		log.Printf("volume %s: repaired before mounting: %s",
 			filepath.Base(path), strings.TrimSpace(string(out)))
 	}
+}
+
+// reLostFoundCreado es la línea de e2fsck -p cuando crea /lost+found.
+var reLostFoundCreado = lazyre.New(`^[^:]+: /lost\+found not found\.\s+CREATED\.$`)
+
+// sinLostFoundCreado quita de la salida de e2fsck la línea de haber creado
+// lost+found; ok dice si estaba.
+func sinLostFoundCreado(out []byte) (resto []byte, ok bool) {
+	var ls []string
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if reLostFoundCreado.MatchString(strings.TrimSpace(l)) {
+			ok = true
+			continue
+		}
+		ls = append(ls, l)
+	}
+	return []byte(strings.Join(ls, "\n")), ok
 }
 
 // plazoE2fsck es cuánto se deja a e2fsck. Corre como root sobre imágenes y
@@ -564,8 +666,12 @@ var plazoE2fsck = 5 * time.Minute
 // ordenE2fsck prepara la orden; variable para que los tests pongan otra.
 // -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría preguntas
 // a un stdin que no existe y se quedaría colgado.
+// En inglés (LC_ALL=C): su salida se analiza (soloResumenE2fsck,
+// reLostFoundCreado).
 var ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
-	return e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
+	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
+	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	return c
 }
 
 // revisarExt4 pasa e2fsck por path con plazo (plazoE2fsck) y traduce su

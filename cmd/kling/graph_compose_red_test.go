@@ -76,8 +76,9 @@ func TestComposeRedNone(t *testing.T) {
 	}
 }
 
-// Más aristas que el tope: quedan solo las que se usan.
-func TestComposeRedTope(t *testing.T) {
+// La red de un proyecto de 11 servicios es una malla completa (110 links):
+// el tope de 64 es por nodo, no del grafo.
+func TestComposeRedMalla(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("services:\n")
 	for i := 0; i < 10; i++ {
@@ -88,10 +89,61 @@ func TestComposeRedTope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(tr.Grafo, "kind: link"); n != 1 {
-		t.Errorf("%d links, want 1:\n%s", n, tr.Grafo)
+	if n := strings.Count(tr.Grafo, "kind: link"); n != 110 {
+		t.Errorf("%d links, want 110", n)
 	}
-	if !strings.Contains(strings.Join(tr.Avisos, "\n"), "over the limit of 64") {
+	if strings.Contains(strings.Join(tr.Avisos, "\n"), "over the limit") {
+		t.Errorf("avisos = %v", tr.Avisos)
+	}
+}
+
+// Un servicio que alcanzaría más de 64 puertos se queda con los que usa; los
+// demás conservan la malla.
+func TestComposeRedTopePorNodo(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("services:\n")
+	for i := 0; i < 5; i++ {
+		var ps []string
+		for j := 0; j < 14; j++ {
+			ps = append(ps, fmt.Sprintf("\"%d\"", 9000+i*100+j))
+		}
+		fmt.Fprintf(&b, "  s%d: {image: x/s, ports: [%s]}\n", i, strings.Join(ps, ", "))
+	}
+	b.WriteString("  app: {image: x/app, depends_on: [s1]}\n")
+	tr, err := traducirCompose([]byte(b.String()), "p", false, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(tr.Grafo, "{from: app, to: s1, kind: link"); n != 14 {
+		t.Errorf("app -> s1: %d links, want 14:\n%s", n, tr.Grafo)
+	}
+	if strings.Contains(tr.Grafo, "{from: app, to: s0,") {
+		t.Errorf("app still reaches s0:\n%s", tr.Grafo)
+	}
+	if n := strings.Count(tr.Grafo, "{from: s0, to: s4, kind: link"); n != 14 {
+		t.Errorf("s0 -> s4: %d links, want 14", n)
+	}
+	if !strings.Contains(strings.Join(tr.Avisos, "\n"), "service app: reaching every service of its networks needs 70 links, over the limit of 64 per node") {
+		t.Errorf("avisos = %v", tr.Avisos)
+	}
+}
+
+// Más aristas que el tope del grafo: quedan solo las que se usan.
+func TestComposeRedTope(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("services:\n")
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&b, "  s%d: {image: x/s, ports: [\"%d\", \"%d\"]}\n", i, 9000+i, 10000+i)
+	}
+	b.WriteString("  app: {image: x/app, ports: [\"3000\"], depends_on: [s1]}\n")
+	tr, err := traducirCompose([]byte(b.String()), "p", false, sinEntorno)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(tr.Grafo, "kind: link"); n != 2 {
+		t.Errorf("%d links, want 2:\n%s", n, tr.Grafo)
+	}
+	if !strings.Contains(strings.Join(tr.Avisos, "\n"), "over the limit of 1024") {
 		t.Errorf("avisos = %v", tr.Avisos)
 	}
 }

@@ -282,21 +282,62 @@ func TestValidateGraphShare(t *testing.T) {
 	}
 }
 
-// Tamaño: 32 nodos y 64 aristas como mucho.
+// Tamaño: 32 nodos, 64 aristas de red por nodo y 1024 en todo el grafo.
 func TestValidateGraphTamaño(t *testing.T) {
 	g := Graph{Name: "grande", Nodes: map[string]GraphNode{}}
 	for i := 0; i <= GraphMaxNodes; i++ {
-		g.Nodes[fmt.Sprintf("n%d", i)] = GraphNode{Image: "min", Ports: []int{1000}}
+		g.Nodes[fmt.Sprintf("n%d", i)] = GraphNode{Image: "min", Ports: []int{1000 + i}}
 	}
 	if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), "nodes") {
 		t.Fatalf("33 nodos: %v", err)
 	}
 	delete(g.Nodes, "n32")
-	for i := 0; i <= GraphMaxEdges; i++ {
-		g.Edges = append(g.Edges, GraphEdge{From: fmt.Sprintf("n%d", i%32), To: fmt.Sprintf("n%d", (i+1)%32), Kind: GraphEdgeLink, Port: 1000})
+	// La malla completa de 32 nodos (992 aristas, la red de un compose)
+	// cabe: 64 no es el tope de todo el grafo.
+	for i := 0; i < GraphMaxNodes; i++ {
+		for j := 0; j < GraphMaxNodes; j++ {
+			if i != j {
+				g.Edges = append(g.Edges, GraphEdge{From: fmt.Sprintf("n%d", i), To: fmt.Sprintf("n%d", j), Kind: GraphEdgeLink, Port: 1000 + j})
+			}
+		}
 	}
-	if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), "edges") {
-		t.Fatalf("65 aristas: %v", err)
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatalf("malla de %d aristas: %v", len(g.Edges), err)
+	}
+	for len(g.Edges) <= GraphMaxTotalEdges {
+		g.Edges = append(g.Edges, GraphEdge{From: fmt.Sprintf("n%d", len(g.Edges)%32), To: "n0", Kind: GraphEdgeDepends})
+	}
+	if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), "edges; the limit is 1024") {
+		t.Fatalf("%d aristas: %v", len(g.Edges), err)
+	}
+}
+
+// Un nodo no puede tener más de 64 aristas de red salientes (sus proxies de
+// enlace); las depends no cuentan.
+func TestValidateGraphAristasPorNodo(t *testing.T) {
+	g := Graph{Name: "radial", Nodes: map[string]GraphNode{"o": {Image: "min"}}}
+	for i := 0; i < 5; i++ {
+		ps := make([]int, graphMaxPorts)
+		for j := range ps {
+			ps[j] = 2000 + i*graphMaxPorts + j
+		}
+		g.Nodes[fmt.Sprintf("d%d", i)] = GraphNode{Image: "min", Ports: ps}
+	}
+	add := func(n int) {
+		for k := 0; k < n; k++ {
+			i := k / graphMaxPorts
+			g.Edges = append(g.Edges, GraphEdge{From: "o", To: fmt.Sprintf("d%d", i), Kind: GraphEdgeLink, Port: 2000 + k})
+		}
+	}
+	add(GraphMaxEdges)
+	g.Edges = append(g.Edges, GraphEdge{From: "o", To: "d4", Kind: GraphEdgeDepends})
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatalf("64 links y una depends: %v", err)
+	}
+	g.Edges = nil
+	add(GraphMaxEdges + 1)
+	if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), "per node") {
+		t.Fatalf("65 links de un nodo: %v", err)
 	}
 }
 
