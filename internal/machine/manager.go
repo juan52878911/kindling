@@ -1316,6 +1316,50 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// nuevoIDMaquina acuña el id de una máquina nueva. La red y el cgroup se
+// nombran con su prefijo (knet.Corto), no con el id entero, así que un prefijo
+// repetido haría que Setup, que empieza por Teardown, tirase netns, resolver y
+// credproxy de la máquina viva que ya lo lleva. Se repite el sorteo hasta dar
+// con uno libre, mirando byID y los acuñados que aún no han llegado a él.
+func (m *Manager) nuevoIDMaquina() string { return m.idLibre(newID) }
+
+// acuñados guarda los prefijos recién dados, hasta que la máquina llega a byID o
+// pasa plazoAcuñado: cubre la ventana entre acuñar y publicar, en la que dos
+// arranques a la vez no se verían en byID.
+var acuñados = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: make(map[string]time.Time)}
+
+const plazoAcuñado = 10 * time.Minute
+
+func (m *Manager) idLibre(generar func() string) string {
+	m.mu.RLock()
+	vivos := make(map[string]bool, len(m.byID))
+	for id := range m.byID {
+		vivos[knet.Corto(id)] = true
+	}
+	m.mu.RUnlock()
+
+	acuñados.Lock()
+	defer acuñados.Unlock()
+	ahora := time.Now()
+	for p, t := range acuñados.m {
+		if vivos[p] || ahora.Sub(t) > plazoAcuñado {
+			delete(acuñados.m, p)
+		}
+	}
+	for {
+		id := generar()
+		p := knet.Corto(id)
+		if _, ocupado := acuñados.m[p]; ocupado || vivos[p] {
+			continue
+		}
+		acuñados.m[p] = ahora
+		return id
+	}
+}
+
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	mc, err := m.run(ctx, req)
@@ -1456,7 +1500,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
-	id := newID()
+	id := m.nuevoIDMaquina()
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}

@@ -631,3 +631,79 @@ func setupHostInput() error {
 	}
 	return nil
 }
+
+// reglasEnlaceSobrantes recibe lo que lista `iptables -S` en el netns (nat
+// PREROUTING y FORWARD) y devuelve, listas para pasar a iptables, las -D de las
+// reglas de enlace (las de reglasEnlace) que no corresponden a puertos, el puerto de
+// cada arista en el orden de sus slots. Una regla
+// de enlace es la que va a n.HostIP:<puerto del rango de enlaces>: el DNAT que
+// lleva ahí el puerto de la arista y el ACCEPT de ese puerto. Las demás (DNS,
+// credenciales, egreso) no se tocan.
+func (n *Net) reglasEnlaceSobrantes(nat, forward []string, puertos []int) [][]string {
+	// Puerto de la arista -> slot, y slots en uso.
+	quiero := make(map[int]int, len(puertos))
+	for slot, p := range puertos {
+		quiero[p] = slot
+	}
+	slotDe := func(p int) (int, bool) {
+		if p < linkBasePortRango || p >= linkBasePortRango+linkMaxPortsRango {
+			return 0, false
+		}
+		return p - linkBasePortRango, true
+	}
+	// valor devuelve el argumento que sigue a la opción, o "".
+	valor := func(f []string, opt string) string {
+		for i := 0; i+1 < len(f); i++ {
+			if f[i] == opt {
+				return f[i+1]
+			}
+		}
+		return ""
+	}
+	esHostIP := func(d string) bool { return d == n.HostIP || d == n.HostIP+"/32" }
+	// borrar convierte la línea de -S (-A cadena ...) en su -D.
+	borrar := func(pre []string, f []string) []string {
+		out := append(append([]string{}, pre...), "-D")
+		return append(out, f[1:]...)
+	}
+
+	var sobran [][]string
+	for _, linea := range nat {
+		f := strings.Fields(linea)
+		if len(f) < 2 || f[0] != "-A" || f[1] != "PREROUTING" || valor(f, "-j") != "DNAT" {
+			continue
+		}
+		host, puerto, err := stdnet.SplitHostPort(valor(f, "--to-destination"))
+		if err != nil || host != n.HostIP {
+			continue
+		}
+		p, err := strconv.Atoi(puerto)
+		if err != nil {
+			continue
+		}
+		slot, ok := slotDe(p)
+		if !ok {
+			continue
+		}
+		dport, err := strconv.Atoi(valor(f, "--dport"))
+		if s, sigue := quiero[dport]; err == nil && sigue && s == slot {
+			continue
+		}
+		sobran = append(sobran, borrar([]string{"-t", "nat"}, f))
+	}
+	for _, linea := range forward {
+		f := strings.Fields(linea)
+		if len(f) < 2 || f[0] != "-A" || f[1] != "FORWARD" || valor(f, "-j") != "ACCEPT" || !esHostIP(valor(f, "-d")) {
+			continue
+		}
+		p, err := strconv.Atoi(valor(f, "--dport")) // un rango (a:b) no es de un enlace
+		if err != nil {
+			continue
+		}
+		if slot, ok := slotDe(p); !ok || slot < len(puertos) {
+			continue
+		}
+		sobran = append(sobran, borrar(nil, f))
+	}
+	return sobran
+}

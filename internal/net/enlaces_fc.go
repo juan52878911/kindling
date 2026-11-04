@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	stdnet "net"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,6 +163,14 @@ func SetGraph(n *Net, spec GraphSpec) error {
 		grafosRed[n.NS] = g
 	}
 	grafoMu.Unlock()
+
+	// Antes de poner nada, fuera las reglas de enlace que ya no son de ninguna
+	// arista: un DNAT viejo P -> slot llevaría el puerto P a la arista que
+	// ahora ocupe ese slot. Se miran las reglas del netns y no lo que recuerda
+	// el daemon, que tras un reinicio no recuerda nada.
+	if err := n.quitarReglasEnlaceSobrantes(links); err != nil {
+		return err
+	}
 
 	var hosts []string
 	quedan := map[string]bool{}
@@ -338,6 +347,36 @@ func (n *Net) reglasEnlace(port, slot int) [][]string {
 		sinInvalid([]string{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf, "-p", "tcp", "-d", n.HostIP,
 			"--dport", strconv.Itoa(linkBasePort + slot), "-j", "ACCEPT"}),
 	}
+}
+
+// quitarReglasEnlaceSobrantes borra del netns las reglas de enlace que no son
+// de links (ya ordenados: el slot de cada uno es su índice).
+func (n *Net) quitarReglasEnlaceSobrantes(links []LinkSpec) error {
+	listar := func(args ...string) ([]string, error) {
+		out, err := exec.Command("ip", append([]string{"netns", "exec", n.NS, "iptables"}, args...)...).Output()
+		if err != nil {
+			return nil, fmt.Errorf("graph: iptables %s: %w", strings.Join(args, " "), err)
+		}
+		return strings.Split(string(out), "\n"), nil
+	}
+	nat, err := listar("-t", "nat", "-S", "PREROUTING")
+	if err != nil {
+		return err
+	}
+	forward, err := listar("-S", "FORWARD")
+	if err != nil {
+		return err
+	}
+	puertos := make([]int, len(links))
+	for i, l := range links {
+		puertos[i] = l.Port
+	}
+	for _, r := range n.reglasEnlaceSobrantes(nat, forward, puertos) {
+		if err := run(append([]string{"ip", "netns", "exec", n.NS, "iptables"}, r...)...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sinInvalid añade "! --ctstate INVALID" a un ACCEPT que se inserta con -I 1:

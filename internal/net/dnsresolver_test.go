@@ -230,6 +230,7 @@ func newTestResolver(upstream string) *dnsResolver {
 		upstream: upstream,
 		sem:      make(chan struct{}, dnsMaxInFlight),
 		tcpSem:   make(chan struct{}, dnsMaxTCPConns),
+		udpSem:   make(chan struct{}, dnsMaxUDPHandlers),
 		limiter:  newTokenBucket(1e6, 1e6), // sin límite de tasa en estos tests
 		seeded:   make(map[string]time.Time),
 	}
@@ -486,5 +487,112 @@ func TestServeTCPAcotaConexiones(t *testing.T) {
 	}
 	if n := len(r.tcpSem); n >= dnsMaxTCPConns {
 		t.Fatalf("la plaza de una conexión cerrada no se liberó: %d", n)
+	}
+}
+
+// arrancarEnLocal pone a escuchar r en 127.0.0.1 (UDP y TCP, puertos libres)
+// como lo hace startDNSResolverModo, sin netns. Devuelve la dirección UDP.
+func arrancarEnLocal(t *testing.T, r *dnsResolver) *stdnet.UDPAddr {
+	t.Helper()
+	udp, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: stdnet.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: stdnet.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.udp, r.tcp, r.quit = udp, tcp, make(chan struct{})
+	r.wg.Add(2)
+	go r.serveUDP()
+	go r.serveTCP()
+	return udp.LocalAddr().(*stdnet.UDPAddr)
+}
+
+// stop espera también a las goroutines que atienden consultas, y corta su
+// conexión al upstream: al volver no queda ninguna que siembre el ipset de un
+// netns que Teardown borra justo después (y que otra máquina podría reutilizar).
+func TestStopEsperaYNoSiembraTarde(t *testing.T) {
+	var llegadas int32
+	addr, closeFn := fakeUpstream(t, func(q []byte) []byte {
+		atomic.AddInt32(&llegadas, 1)
+		time.Sleep(700 * time.Millisecond) // el upstream contesta cuando ya se ha parado
+		return buildAnswerFor(q, "1.2.3.4", 300)
+	})
+	defer closeFn()
+	var siembras int32
+	restore := fakeEjecutar(&siembras)
+	defer restore()
+
+	r := newTestResolver(addr)
+	dir := arrancarEnLocal(t, r)
+	c, err := stdnet.DialUDP("udp4", nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write(buildQuery(7, "example.com", 1)); err != nil {
+		t.Fatal(err)
+	}
+	for plazo := time.Now().Add(2 * time.Second); atomic.LoadInt32(&llegadas) == 0; {
+		if time.Now().After(plazo) {
+			t.Fatal("la consulta no llegó al upstream")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t0 := time.Now()
+	r.stop()
+	if d := time.Since(t0); d > 500*time.Millisecond {
+		t.Errorf("stop tardó %v: debería cortar la consulta en vuelo, no esperar al upstream", d)
+	}
+	time.Sleep(time.Second) // más que lo que tarda el upstream
+	if n := atomic.LoadInt32(&siembras); n != 0 {
+		t.Fatalf("%d siembras después de stop", n)
+	}
+}
+
+// La plaza de una consulta UDP se toma antes de lanzar su goroutine: con todas
+// ocupadas, el datagrama se descarta sin llegar a process (ni al upstream).
+func TestUDPSinPlazaNoLanzaGoroutine(t *testing.T) {
+	var llegadas int32
+	addr, closeFn := fakeUpstream(t, func(q []byte) []byte {
+		atomic.AddInt32(&llegadas, 1)
+		return buildAnswerFor(q, "1.2.3.4", 300)
+	})
+	defer closeFn()
+	restore := fakeEjecutar(nil)
+	defer restore()
+
+	r := newTestResolver(addr)
+	for i := 0; i < dnsMaxUDPHandlers; i++ {
+		r.udpSem <- struct{}{}
+	}
+	dir := arrancarEnLocal(t, r)
+	defer r.stop()
+	c, err := stdnet.DialUDP("udp4", nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write(buildQuery(8, "example.com", 1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 512)); err == nil {
+		t.Fatal("respuesta con todas las plazas ocupadas")
+	}
+	if n := atomic.LoadInt32(&llegadas); n != 0 {
+		t.Fatalf("el upstream vio %d consultas", n)
+	}
+
+	// Liberada una plaza, se atiende.
+	<-r.udpSem
+	if _, err := c.Write(buildQuery(9, "example.com", 1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 512)); err != nil {
+		t.Fatalf("sin respuesta con una plaza libre: %v", err)
 	}
 }
