@@ -131,8 +131,9 @@ func New() (*Agent, error) {
 	a.Env = LibraryEnv(os.Environ(), a.Volumes.Specs())
 	// El entorno de la máquina, encima del de la imagen: antes de escuchar,
 	// que es cuando el daemon lo borra de MMDS.
-	a.applyMachineEnv(MachineEnvRequired(), FetchMMDS)
-	a.applyMachineCmd(MachineCmdRequired(), FetchMMDS)
+	// Una sola lectura (con sus reintentos) para los dos: con un MMDS mudo,
+	// dos seguidas doblaban la espera antes de /healthz.
+	a.applyMachineBoot(MachineEnvRequired(), MachineCmdRequired(), FetchMMDS)
 	a.Env = cpuQuirkEnv(a.Env)
 	readyState.setEnv(a.Env)
 	logBiblioteca(a.Env)
