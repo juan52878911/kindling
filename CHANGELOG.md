@@ -72,7 +72,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - macOS (kling-hv, kling-vz): the VMM API socket only accepts the daemon's user.
 - macOS (kling-hv): a failed balloon remap no longer ends the VM.
-- A daemon that loses a guest's vsock (an older agent's listener died) goes straight to TCP after three failures instead of paying a failed vsock connect on every connection.
+- A daemon that loses a guest's vsock (an older agent's listener died) goes straight to TCP after three failures within 30 s instead of paying a failed vsock connect on every connection, and tries vsock again once a minute.
+- `exec` and `shell` answer 429 `guest_busy` with `Retry-After` when the guest agent is at its limit (64 commands, 8 shells), instead of 502 `bad_gateway`.
+- kling-hv: a pause that times out wakes the device threads again (they could stay asleep with the VM running); device quiesce has the same 5 s deadline; CPU-ceiling pauses no longer quiesce devices; a snapshot right after a resume keeps the guest clock adjustment.
+- A daemon restart no longer re-adopts the VMM a freeze left alive (the machine kept `warm` is no longer marked `failed`); a thaw that re-adopts a VMM watches it; a re-adopted VMM's death says why; a failed `start` of a `failed` machine keeps it `failed` with its dump when nothing was booted.
+- The background clock resync takes the machine's lifecycle lock and skips a machine that was frozen, stopped or rebooted meanwhile; a freeze waits for it at most ~100 ms.
 - The reason a VMM ended (e.g. the guest rebooted) is in the failure event; `kling start` clears the previous thaw timings; a freeze right after boot waits for the agent before asking it to flush its volumes.
 - kling-bridge: `-session-idle 0` no longer panics, a failed listener cleans up its HTTP child, and the proxy session table is capped.
 - Linux: removing a credential edge removes its DNAT/ACCEPT rules; a graph fork writes its fork mark before the template meta, like a machine fork.
