@@ -134,6 +134,11 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resul
 		res, err = resyncOnce(ctx, "http://"+addr, kind)
 	}
 	took := time.Since(start)
+	if err != nil && errors.Is(context.Cause(ctx), errResyncCede) {
+		// Lo cortó resyncEnFondo para dejar paso a una operación de ciclo de
+		// vida: no es un fallo del agente.
+		return resultadoResync{took: took}
+	}
 	if err != nil {
 		if clave != "" && errors.Is(err, errResyncNadie) {
 			m.resyncSinAgente.Store(clave, time.Now().Add(resyncSinAgenteTTL))
@@ -162,7 +167,9 @@ func (m *Manager) resyncArranque(id string, ag *api.GuestAgent) {
 	if !ag.Has(guest.CapResyncClock) {
 		return
 	}
-	m.resyncGuest(context.Background(), id, "", guest.ResyncBoot)
+	if ej, ok := m.ejecucionDe(id); ok {
+		m.resyncEnFondo(id, ej, guest.ResyncBoot)
+	}
 }
 
 // resyncTrasReanudar pone en hora, en segundo plano, una máquina que se
@@ -175,19 +182,111 @@ func (m *Manager) resyncArranque(id string, ag *api.GuestAgent) {
 // lo único que entiende (le sube la generación, pero es eso o un reloj
 // atrasado lo que duró la pausa).
 func (m *Manager) resyncTrasReanudar(id string) {
-	if m.agenteDe(id).Has(guest.CapResyncClock) {
-		go m.resyncGuest(context.Background(), id, "", guest.ResyncResume)
+	// La ejecución se toma ahora, con la reanudación recién hecha: si cuando
+	// le toque al resync la máquina es otra (congelada y despertada, parada),
+	// no se manda.
+	ej, ok := m.ejecucionDe(id)
+	if !ok {
 		return
 	}
+	if m.agenteDe(id).Has(guest.CapResyncClock) {
+		go m.resyncEnFondo(id, ej, guest.ResyncResume)
+		return
+	}
+	if strings.HasPrefix(ej.vmm, "kling-hv") {
+		go m.resyncEnFondo(id, ej, api.ResyncThaw)
+	}
+}
+
+// ejecucion identifica una ejecución de una máquina: el mismo VMM (proceso y
+// binario) desde el mismo arranque o reanudación.
+type ejecucion struct {
+	vmm     string
+	pid     int
+	startAt time.Time
+}
+
+// ejecucionDe es la ejecución de la máquina id si está running.
+func (m *Manager) ejecucionDe(id string) (ejecucion, bool) {
 	m.mu.RLock()
-	hv := false
-	if mc := m.byID[id]; mc != nil {
-		hv = strings.HasPrefix(mc.VMM, "kling-hv")
+	defer m.mu.RUnlock()
+	mc := m.byID[id]
+	if mc == nil || mc.State != api.StateRunning {
+		return ejecucion{}, false
 	}
-	m.mu.RUnlock()
-	if hv {
-		go m.resyncGuest(context.Background(), id, "", api.ResyncThaw)
+	ej := ejecucion{vmm: mc.VMM, pid: mc.PID}
+	if mc.StartedAt != nil {
+		ej.startAt = *mc.StartedAt
 	}
+	return ej, true
+}
+
+// errResyncCede es la causa con la que resyncEnFondo corta su resync para
+// dejar paso a otra operación sobre la máquina.
+var errResyncCede = errors.New("resync yields to a lifecycle operation")
+
+// resyncCedeMax es lo que se deja acabar a un resync en segundo plano cuando
+// otra operación (un Freeze, un Pause) espera el cerrojo de la máquina. Uno
+// sano tarda milisegundos; uno más lento es un invitado colgado, y esperarle
+// el resyncPlazo entero sería retrasar esa operación por nada.
+const resyncCedeMax = 100 * time.Millisecond
+
+// pasoCede es cada cuánto mira resyncEnFondo si alguien espera el cerrojo.
+const pasoCede = 5 * time.Millisecond
+
+// resyncEnFondo es el resync que nadie espera (tras arrancar o reanudar), con
+// el cerrojo de ciclo de vida de la máquina tomado y solo si sigue en la
+// ejecución ej. Sin el cerrojo, un Freeze justo tras la reanudación volcaba
+// el invitado con el POST /resync a medias: al despertar, el agente acababa
+// de aplicar una hora vieja. Con él, el Freeze espera a que acabe o, si
+// tarda, lo corta (resyncCedeMax); y si el Freeze llegó antes, el resync ya
+// no ve la misma ejecución y no se manda.
+func (m *Manager) resyncEnFondo(id string, ej ejecucion, kind string) {
+	defer m.lock(id)()
+	if ahora, ok := m.ejecucionDe(id); !ok || ahora != ej || m.enTransicion(id) {
+		return
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	go func() {
+		t := time.NewTicker(pasoCede)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			if !m.lifecycle.esperan(id) {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(resyncCedeMax):
+				cancel(errResyncCede)
+			}
+			return
+		}
+	}()
+	m.resyncGuest(ctx, id, "", kind)
+}
+
+// enTransicion dice si la máquina id tiene una transición marcada
+// (marcarTransicion): se va a congelar, parar o borrar, o un volcado fallido
+// la dejó en pausa a la espera del vigilante.
+func (m *Manager) enTransicion(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.transicion[id] != ""
+}
+
+// esperan dice si alguien, además de quien lo tiene, espera el cerrojo de id.
+// refs cuenta a los que lo tienen y a los que lo esperan (ver cerrojo).
+func (c *cerrojos) esperan(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.m[id]
+	return e != nil && e.refs > 1
 }
 
 // kindSinRestaurar es el Restore del resync de una máquina que sigue siendo
