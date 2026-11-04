@@ -1134,10 +1134,11 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 	}
 
 	// Enlaces: como en la red de un proyecto de Docker Compose, cada servicio
-	// alcanza a todos los de sus redes, no solo a los de depends_on. Si no
-	// caben en el tope de aristas, solo los que se usan: depends_on y los
-	// hosts que nombra el entorno.
-	enlaces := enlacesCompose(vivos, por, false, avisa)
+	// alcanza a todos los de sus redes, no solo a los de depends_on. Un
+	// servicio cuyos enlaces no caben en el tope por nodo (sus proxies de
+	// enlace) se queda con los que usa: depends_on y los hosts que nombra el
+	// entorno; si no cabe el grafo entero, todos.
+	enlaces := enlacesCompose(vivos, por, nil, avisa)
 	var deps []string
 	for _, s := range vivos {
 		for _, d := range s.deps {
@@ -1175,10 +1176,28 @@ func grafoDeCompose(t *traduccionCompose, proyecto string, vivos []*servicioComp
 			deps = append(deps, dep+"}")
 		}
 	}
-	if len(enlaces)+len(deps) > api.GraphMaxEdges {
+	solo := map[string]bool{}
+	if len(enlaces)+len(deps) > api.GraphMaxTotalEdges {
 		avisa("the project network needs %d edges, over the limit of %d: only the links to depends_on and to the hosts named in environment are kept",
-			len(enlaces)+len(deps), api.GraphMaxEdges)
-		enlaces = enlacesCompose(vivos, por, true, func(string, ...any) {})
+			len(enlaces)+len(deps), api.GraphMaxTotalEdges)
+		for _, s := range vivos {
+			solo[s.nombre] = true
+		}
+	} else {
+		salen := map[string]int{}
+		for _, l := range enlaces {
+			salen[strings.Fields(strings.TrimPrefix(l, "  - {from: "))[0]]++
+		}
+		for _, s := range vivos {
+			if n := salen[s.nodo+","]; n > api.GraphMaxEdges {
+				avisa("service %s: reaching every service of its networks needs %d links, over the limit of %d per node: only those to depends_on and to the hosts named in environment are kept",
+					s.nombre, n, api.GraphMaxEdges)
+				solo[s.nombre] = true
+			}
+		}
+	}
+	if len(solo) > 0 {
+		enlaces = enlacesCompose(vivos, por, solo, func(string, ...any) {})
 	}
 	aristas := append(enlaces, deps...)
 	sort.SliceStable(aristas, func(i, j int) bool { return claveArista(aristas[i]) < claveArista(aristas[j]) })
@@ -1248,7 +1267,7 @@ func puertoReservado(p int) bool { return p == 53 || p == 80 || p == 443 }
 // alcanza un solo nodo por puerto: si dos destinos exponen el mismo, gana el
 // de depends_on o el que nombra el entorno, y luego el primero por nombre.
 // soloUsados deja solo esos (depends_on y entorno).
-func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, soloUsados bool, avisa func(string, ...any)) []string {
+func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, soloUsados map[string]bool, avisa func(string, ...any)) []string {
 	var out []string
 	for _, s := range vivos {
 		usado := func(o *servicioCompose) bool {
@@ -1264,7 +1283,7 @@ func enlacesCompose(vivos []*servicioCompose, por map[string]*servicioCompose, s
 		}
 		var destinos []*servicioCompose
 		for _, o := range vivos {
-			if alcanza(s, o) && (!soloUsados || usado(o)) {
+			if alcanza(s, o) && (!soloUsados[s.nombre] || usado(o)) {
 				destinos = append(destinos, o)
 			}
 		}

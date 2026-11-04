@@ -103,7 +103,18 @@ const GraphDomain = "graph"
 // sino de que un fichero no pueda encargar cientos de máquinas o de reglas.
 const (
 	GraphMaxNodes = 32
+	// GraphMaxEdges: aristas link y credential que SALEN de un nodo. Este sí
+	// es de capacidad: cada una es un proxy de enlace en un puerto del host
+	// de la dirección del nodo (el rango 5400-5463 de internal/net, una
+	// regla de ACCEPT), un hueco del grafo de kling-vz (grafo.MaxEnlaces) y
+	// GraphMaxConnsPerEdge sesiones del broker de enlaces de su máquina.
 	GraphMaxEdges = 64
+	// GraphMaxTotalEdges: aristas de todo el grafo, de cualquier tipo. Ningún
+	// recurso compartido entre nodos crece con ellas (los proxies y las
+	// reglas son del netns de cada origen); es el tope de que un fichero no
+	// encargue miles de reglas. Cabe la malla de una red de Docker Compose
+	// de unos 30 servicios con un puerto cada uno.
+	GraphMaxTotalEdges = 1024
 	// GraphMaxConnsPerEdge: conexiones a la vez por arista link; la siguiente
 	// se cierra en el acto.
 	GraphMaxConnsPerEdge = 16
@@ -359,8 +370,8 @@ func ValidateGraph(g *Graph) error {
 	if len(g.Nodes) > GraphMaxNodes {
 		return fmt.Errorf("graph %s has %d nodes; the limit is %d", g.Name, len(g.Nodes), GraphMaxNodes)
 	}
-	if len(g.Edges) > GraphMaxEdges {
-		return fmt.Errorf("graph %s has %d edges; the limit is %d", g.Name, len(g.Edges), GraphMaxEdges)
+	if len(g.Edges) > GraphMaxTotalEdges {
+		return fmt.Errorf("graph %s has %d edges; the limit is %d", g.Name, len(g.Edges), GraphMaxTotalEdges)
 	}
 	// Lo que pone el daemon no se acepta de fuera.
 	g.ID, g.State, g.Generation, g.ForkOf = "", "", 0, ""
@@ -558,6 +569,7 @@ func validarAristasJuntas(g *Graph) error {
 	puertos := map[clave]string{} // (origen, puerto) -> destino
 	envs := map[string]bool{}     // origen/variable
 	vistas := map[string]bool{}
+	salen := map[string]int{} // aristas de red por origen
 	for _, e := range g.Edges {
 		k := e.From + "\x00" + e.To + "\x00" + e.Kind + "\x00" + strconv.Itoa(e.Port) + "\x00" + e.Mount
 		if vistas[k] {
@@ -574,6 +586,9 @@ func validarAristasJuntas(g *Graph) error {
 				e.From, e.Port, otro, e.To)
 		}
 		puertos[clave{e.From, e.Port}] = e.To
+		if salen[e.From]++; salen[e.From] == GraphMaxEdges+1 {
+			return fmt.Errorf("node %s has more than %d link and credential edges; the limit is %d per node", e.From, GraphMaxEdges, GraphMaxEdges)
+		}
 		if e.Kind == GraphEdgeCredential {
 			if envs[e.Key()] {
 				return fmt.Errorf("node %s has two credential edges with env %s", e.From, e.Env)
