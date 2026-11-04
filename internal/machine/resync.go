@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 
@@ -169,13 +170,24 @@ func (m *Manager) resyncArranque(id string, ag *api.GuestAgent) {
 // mientras está pausada y su reloj se queda atrás lo que duró la pausa; con
 // KVM sigue al del host y el agente, al ver que no hay desfase, no lo toca
 // (guest.ResyncResume). No retrasa la reanudación: quien despierta la
-// máquina no espera a esto. Solo a un agente que anuncia
-// guest.CapResyncClock; a uno anterior, solo si el host durmió (como antes).
+// máquina no espera a esto. A un agente anterior (sin guest.CapResyncClock)
+// solo bajo kling-hv, donde el reloj sí se queda atrás: como api.ResyncThaw,
+// lo único que entiende (le sube la generación, pero es eso o un reloj
+// atrasado lo que duró la pausa).
 func (m *Manager) resyncTrasReanudar(id string) {
-	if !m.agenteDe(id).Has(guest.CapResyncClock) {
+	if m.agenteDe(id).Has(guest.CapResyncClock) {
+		go m.resyncGuest(context.Background(), id, "", guest.ResyncResume)
 		return
 	}
-	go m.resyncGuest(context.Background(), id, "", guest.ResyncResume)
+	m.mu.RLock()
+	hv := false
+	if mc := m.byID[id]; mc != nil {
+		hv = strings.HasPrefix(mc.VMM, "kling-hv")
+	}
+	m.mu.RUnlock()
+	if hv {
+		go m.resyncGuest(context.Background(), id, "", api.ResyncThaw)
+	}
 }
 
 // kindSinRestaurar es el Restore del resync de una máquina que sigue siendo

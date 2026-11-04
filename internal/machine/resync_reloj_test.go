@@ -165,3 +165,34 @@ func TestCuerpoResyncHoraAlLeer(t *testing.T) {
 		t.Fatalf("time %v taken before the read (%v)", time.Unix(0, req.UnixNano), antes)
 	}
 }
+
+// Bajo kling-hv el contador del invitado se para en la pausa: a un agente
+// anterior también se le pone en hora al reanudar, con el único Restore que
+// entiende.
+func TestReanudarAgenteAnteriorEnHV(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	agente, pedidos := agenteReloj(t, nil)
+	id := newID()
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	pausada := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	mc.State, mc.FrozenAt, mc.VMM = api.StatePaused, &pausada, "kling-hv 0.20.1"
+	mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+	mc.Agent = &api.GuestAgent{Caps: []string{api.GuestCapResync}}
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	cur, _ := m.Get(id)
+	if _, err := m.reanudarLocked(context.Background(), cur, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case req := <-pedidos:
+		if req.Restore != api.ResyncThaw {
+			t.Fatalf("Restore = %q, want %q", req.Restore, api.ResyncThaw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no /resync after resuming under kling-hv")
+	}
+}
