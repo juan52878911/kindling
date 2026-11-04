@@ -248,7 +248,10 @@ jobs:
       - run: bin/kling-hv --version
 
   # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que
-  # aquí el clon es de verdad.
+  # aquí el clon es de verdad. Además corren enteros internal/machine e
+  # internal/daemon: los tests _vz, _darwin y con //go:build darwin no corren
+  # en ningún otro sitio. No arrancan ninguna VM (el VMM es un doble), así que
+  # valen en un runner sin virtualización.
   clon-apfs:
     name: clon real (apfs)
     runs-on: macos-14
@@ -265,6 +268,7 @@ jobs:
           set -o pipefail
           go test -count=1 -v -run 'Clon|Clone|Sonda' ./internal/machine/ ./internal/daemon/ | tee clon.log
           grep -q 'clon real con clonefile' clon.log
+      - run: go test -race -count=1 ./internal/machine/ ./internal/daemon/
 
   # Lo que no es un test pero caza fallos: vulnerabilidades conocidas en lo que
   # se llama de verdad (govulncheck), análisis estático (staticcheck, con la
