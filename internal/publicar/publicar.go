@@ -37,9 +37,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Maquinas es lo que el publicador necesita del gestor de máquinas.
@@ -822,7 +822,7 @@ func (p *Publicador) guardar() {
 	}
 }
 
-// versionPublicar es la versión de publish.json (ver pkg/esquema).
+// versionPublicar es la versión de publish.json (ver internal/esquema).
 //
 //	0: un array JSON de api.Publication (v0.20).
 //	1: {"schema": 1, "publications": [...]}.

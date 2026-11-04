@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Shares son las carpetas vivas montadas en este invitado, por tag.

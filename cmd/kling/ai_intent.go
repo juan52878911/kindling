@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
-	"github.com/juan52878911/kindling/pkg/aigw"
-	"github.com/juan52878911/kindling/pkg/intent"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/intent"
 )
 
 // `kling ai eval` y `kling ai retrain -eval` de una tarea de intención
-// (pkg/intent, pkg/aigw/intent.go): filas etiquetadas con la orden entera.
+// (internal/intent, internal/aigw/intent.go): filas etiquetadas con la orden entera.
 
 // readRowsFile lee filas JSONL ({"text","lang","intent","slots"}) y devuelve
 // también su sha256.

@@ -21,7 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // MaxCopyEntries acota el número de entradas de una subida: cada una es un

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // mudo es un backend que no cuenta nada: lo que pase en el host se pierde,

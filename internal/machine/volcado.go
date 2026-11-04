@@ -36,9 +36,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/digest"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
+	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 )
 
 const (
@@ -50,7 +50,7 @@ const (
 // 308223b9): un volcado de después sin ninguna de las dos no se da por bueno.
 var selloDesde = time.Date(2026, 9, 23, 5, 28, 42, 0, time.UTC)
 
-// versionSello es la versión de volcado.ok (ver pkg/esquema).
+// versionSello es la versión de volcado.ok (ver internal/esquema).
 //
 //	0: sin campo (v0.8-v0.20). Con los opcionales vmm y diff_base (v0.18) y
 //	   sin_agente (v0.19), que un kling anterior ignora sin daño salvo

@@ -47,7 +47,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/lazyre"
+	"github.com/juan52878911/kindling/internal/lazyre"
 )
 
 const (

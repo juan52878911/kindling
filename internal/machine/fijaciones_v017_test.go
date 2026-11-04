@@ -23,8 +23,8 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 func leerFijacionV017(t *testing.T, fichero string) []byte {

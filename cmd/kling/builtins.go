@@ -8,8 +8,8 @@ import (
 
 // EXTENSIÓN INCORPORADA: `ai`.
 //
-// El gateway de IA (pkg/aigw), los clasificadores Chispa (pkg/chispa) y los
-// LLM pequeños de VON (pkg/von) siguen dentro del binario —no merece la pena
+// El gateway de IA (internal/aigw), los clasificadores Chispa (internal/chispa) y los
+// LLM pequeños de VON (internal/von) siguen dentro del binario —no merece la pena
 // un segundo ejecutable para ellos—, pero pasan por el mismo camino que una
 // extensión externa: `kling plugin ls` la lista como "built in", su ayuda y
 // su completado salen de este manifiesto (una sola fuente) y quien no la

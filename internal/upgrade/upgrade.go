@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/juan52878911/kindling/pkg/lazyre"
+	"github.com/juan52878911/kindling/internal/lazyre"
 	"io"
 	"os"
 	"os/exec"
@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -702,7 +702,7 @@ func (o *Opciones) restaurar(ctx context.Context, c *copia, conEstado bool) erro
 	return errors.Join(errs...)
 }
 
-// reBak es la copia que deja una migración (pkg/esquema.RutaRespaldo).
+// reBak es la copia que deja una migración (internal/esquema.RutaRespaldo).
 var reBak = lazyre.New(`\.v[0-9]+\.bak$`)
 
 func sinBak(p string) string { return reBak.ReplaceAllString(p, "") }

@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // BaseBuilder es el nombre que llevan en su receta las bases que escribe

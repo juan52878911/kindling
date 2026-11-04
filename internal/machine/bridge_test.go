@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // Nunca se toca la imagen base de una microVM viva.

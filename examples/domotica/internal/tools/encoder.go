@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/codificador"
-	"github.com/juan52878911/kindling/pkg/von"
+	"github.com/juan52878911/kindling/internal/codificador"
+	"github.com/juan52878911/kindling/internal/von"
 )
 
 // La capa 3 desde la CLI: calcular embeddings (una vez, a una caché), entrenar

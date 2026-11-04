@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/lazyre"
+	"github.com/juan52878911/kindling/internal/lazyre"
 )
 
 // Tipos de manifiesto que se aceptan.

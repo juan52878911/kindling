@@ -15,14 +15,14 @@ import (
 
 	"log"
 
+	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/fc"
+	"github.com/juan52878911/kindling/internal/lazyre"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/digest"
-	"github.com/juan52878911/kindling/pkg/esquema"
-	"github.com/juan52878911/kindling/pkg/lazyre"
 
-	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 var validName = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)

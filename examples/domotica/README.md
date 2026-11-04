@@ -7,7 +7,7 @@ que se maneja con órdenes de voz (como texto) en español o inglés. Es un
 `kindling-domotica`, que kling ni instala ni publica ni descubre como
 extensión (`make domotica` lo compila). Tiene tres piezas:
 
-- `kindling-domotica gateway`: el gateway de IA **de kindling** (`pkg/aigw`,
+- `kindling-domotica gateway`: el gateway de IA **de kindling** (`internal/aigw`,
   el mismo que `kling ai serve`) con el dominio de la habitación dentro. Las
   tareas de intención de kindling ([docs/intent.md](../../docs/intent.md))
   toman su dominio de un esquema JSON o de un `intent.Domain` en Go; la
@@ -235,7 +235,7 @@ del daemon y el del gateway no salen del host (0600).
 | fichero | qué |
 |---|---|
 | `main.go` | `kindling-domotica`: despacha los subcomandos |
-| `gateway.go` | `kindling-domotica gateway`: el gateway de kindling (`pkg/aigw`) con el dominio `smart-room` registrado |
+| `gateway.go` | `kindling-domotica gateway`: el gateway de kindling (`internal/aigw`) con el dominio `smart-room` registrado |
 | `room.go` | `kindling-domotica room`: flags, cliente del gateway, puerta de la capa 4, panel de máquinas (pkg/api) |
 | `internal/domotica/` | lo que sabe de la habitación: plantillas, léxico, números, taxonomía (su `intent.Domain`), capa 4 y evaluaciones |
 | `internal/tools/` | `decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm` (escribe el registro de la capa 4) |

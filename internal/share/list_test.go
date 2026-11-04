@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // listar pide las páginas de p desde cookie con páginas de max bytes, como el

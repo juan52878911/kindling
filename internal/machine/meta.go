@@ -2,7 +2,7 @@ package machine
 
 // El meta.json de un dorado: su versión, lo que no conoce y con qué se hizo.
 //
-// VERSIÓN. Desde la v1 lleva "schema": 1 (pkg/esquema). Sin el campo es la v0,
+// VERSIÓN. Desde la v1 lleva "schema": 1 (internal/esquema). Sin el campo es la v0,
 // lo de hasta v0.17: se lee igual y la primera vez que el daemon lo reescribe
 // (una anotación, unas credenciales) deja antes la copia meta.json.v0.bak. Uno
 // con un schema mayor lo escribió un kling más nuevo: no se restaura, no se
@@ -36,13 +36,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // metaSchema es la versión de meta.json que escribe este binario.
 //
-// v2: el overlay va en rootfs_digest (sha256 en árbol, pkg/digest.Tree) y no
+// v2: el overlay va en rootfs_digest (sha256 en árbol, internal/digest.Tree) y no
 // en rootfs_sha256. Un kling de v1 no lo comprobaría y su firma no casaría:
 // por eso sube la versión, y ese kling se niega diciendo cuál encontró.
 const metaSchema = 2

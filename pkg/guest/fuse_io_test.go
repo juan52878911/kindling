@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // conectarConHello es conectar haciendo lo que hace el attach de verdad:

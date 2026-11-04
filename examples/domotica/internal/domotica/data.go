@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Slots son los huecos de una orden, ya normalizados: dispositivo y zona

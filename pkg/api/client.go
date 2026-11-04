@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/transport"
+	"github.com/juan52878911/kindling/internal/transport"
 )
 
 // Client habla con el daemon. El transporte (socket local o SSH) es

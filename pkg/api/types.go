@@ -838,7 +838,7 @@ type Snapshot struct {
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
 	// RootfsDigest sustituye a RootfsSHA256 desde meta.json v2: el overlay en
-	// árbol de sha256 (pkg/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
+	// árbol de sha256 (internal/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
 	// sin leer los huecos. Un dorado lleva uno de los dos.
 	RootfsDigest string `json:"rootfs_digest,omitempty"`
 

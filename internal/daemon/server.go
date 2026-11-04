@@ -61,7 +61,7 @@ var guestProgressTimeout = 60 * time.Second
 // /machines/{ref}/guest. No puede ser guestProgressTimeout: un servidor MCP
 // Streamable HTTP contesta con cabeceras de text/event-stream enseguida y manda
 // el evento con el resultado cuando la herramienta acaba, y una respuesta de
-// chat/completions sin streaming (pkg/von) puede tardar minutos en un modelo en
+// chat/completions sin streaming (internal/von) puede tardar minutos en un modelo en
 // CPU. Se le da el mismo margen que a las cabeceras (ResponseHeaderTimeout de
 // guestClient): lo que sí sigue acotado es el goteo infinito.
 var guestProxyIdleTimeout = 5 * time.Minute

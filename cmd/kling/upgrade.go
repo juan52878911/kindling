@@ -27,12 +27,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
-	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 func cmdUpgrade(args []string) error {

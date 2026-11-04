@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/digest"
+	"github.com/juan52878911/kindling/internal/digest"
 )
 
 // ext4Prueba crea un ext4 vacío de tam MiB y lo prepara con órdenes de
