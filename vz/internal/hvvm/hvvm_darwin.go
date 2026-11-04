@@ -7,6 +7,10 @@ package hvvm
 #cgo LDFLAGS: -framework Hypervisor
 #include <stdlib.h>
 #include "khv.h"
+
+// De devices.c y net.c (khv.h es de vm.c).
+uint64_t uart_perdidos(void);
+void vnet_parar(void);
 */
 import "C"
 
@@ -206,6 +210,11 @@ func (m *machine) esperar() {
 	if code != 0 {
 		err = errors.New(C.GoString(C.khv_error()))
 	}
+	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop).
+	C.vnet_parar()
+	if n := ConsoleDropped(); n > 0 && m.f.Logf != nil {
+		m.f.Logf("the console reader stalled: %d bytes of guest console were dropped", n)
+	}
 	m.stopped <- err
 }
 
@@ -234,8 +243,16 @@ func (m *machine) Resume() error {
 
 func (m *machine) Stop() error {
 	C.khv_stop()
+	// El servidor cierra la red justo después (Server.Shutdown): antes, el
+	// hilo de recepción del C tiene que haber soltado su fd.
+	C.vnet_parar()
 	return nil
 }
+
+// ConsoleDropped son los bytes de la consola del invitado que se tiraron
+// porque su lector no daba abasto: la UART no bloquea nunca al vCPU (ver
+// devices.c).
+func ConsoleDropped() uint64 { return uint64(C.uart_perdidos()) }
 
 // SaveState escribe el fichero de memoria del snapshot (RAM + estado) en path.
 func (m *machine) SaveState(path string) error {
