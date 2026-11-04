@@ -635,6 +635,17 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err != nil {
 		return nil, err
 	}
+	// La marca de fork ANTES del meta: con el meta escrito el snapshot vale y
+	// sweepSnapshotLeftovers ya no lo recoge, y sin la marca barrerForks no lo
+	// ve. Escrita después (como estaba en Fork), un corte entre las dos dejaba
+	// un dorado que no recogía nadie. Al revés no hay hueco: marca sin meta son
+	// restos de un commit, que el barrido de restos aparta. El fsync del
+	// directorio de writeMeta asienta también su entrada.
+	if deFork {
+		if err := os.WriteFile(filepath.Join(dir, forkMarca), []byte(mc.ID+"\n"), 0o644); err != nil {
+			return nil, fmt.Errorf("marking fork snapshot %s: %w", name, err)
+		}
+	}
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}

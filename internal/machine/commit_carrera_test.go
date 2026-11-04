@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -95,5 +96,54 @@ func esperarCanal(t *testing.T, c <-chan struct{}, msg string) {
 	case <-c:
 	case <-time.After(10 * time.Second):
 		t.Fatal(msg)
+	}
+}
+
+// La marca de fork se escribe antes que el meta.json: con el meta ya en disco
+// el snapshot no es un resto de commit, y sin la marca barrerForks tampoco lo
+// ve. Antes Fork la escribía después de commit, y un corte entre las dos
+// dejaba un dorado temporal que no recogía nadie.
+func TestCommitDeForkMarcaAntesDelMeta(t *testing.T) {
+	if _, err := exec.LookPath("fallocate"); err != nil && !volcadoEnLaMaquina {
+		t.Skip("sin fallocate no se puede perforar el volcado")
+	}
+	m := newTestManager(t)
+	const id = "c0aa170000000103"
+	falso := plantillaSinProceso(t, m, id)
+	if err := os.WriteFile(m.KernelPath(), []byte("vmlinux de prueba"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := nombreSnapshotFork(id)
+	dir := m.snapDir(name)
+	// Donde escribiría el VMM: en macOS, en el directorio de su máquina, y el
+	// daemon lo publica (publicar_volcado.go); en Linux, en el del snapshot.
+	snapTmp, memTmp := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+	if volcadoEnLaMaquina {
+		snapTmp, memTmp = filepath.Join(m.dir(id), volcadoTmpSnap), filepath.Join(m.dir(id), volcadoTmpMem)
+	}
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(snapTmp, []byte("estado"), 0o644)
+			_ = os.WriteFile(memTmp, make([]byte, 1<<20), 0o644)
+		}
+	})
+
+	if _, err := m.commit(context.Background(), id, name, false, nil, false, true, false); err != nil {
+		t.Fatalf("commit de fork: %v", err)
+	}
+	marca, err := os.Stat(filepath.Join(dir, forkMarca))
+	if err != nil {
+		t.Fatalf("commit de fork no dejó la marca: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, forkMarca)); string(b) != id+"\n" {
+		t.Errorf("la marca dice %q, quería el id del original", b)
+	}
+	meta, err := os.Stat(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marca.ModTime().After(meta.ModTime()) {
+		t.Errorf("la marca (%s) es posterior al meta.json (%s): un corte entre los dos deja un fork huérfano",
+			marca.ModTime().Format(time.RFC3339Nano), meta.ModTime().Format(time.RFC3339Nano))
 	}
 }
