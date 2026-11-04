@@ -61,9 +61,9 @@ func TestEtiquetaValida(t *testing.T) {
 		{"v１.2.3", false},
 		{"v٣.2.3", false},
 		{"v1.2.3-ñ", false},
-		{"v1.2.3-‮", false},
+		{"v1.2.3-\u202e", false},
 		{"v1․2․3", false}, // U+2024, un «punto» que no lo es
-		{"v1.2.3-rc​", false},
+		{"v1.2.3-rc\u200b", false},
 	}
 	for _, c := range casos {
 		if got := EtiquetaValida(c.etiqueta); got != c.vale {
