@@ -201,10 +201,8 @@ func TestRestaurarRecortadoEnCadaFrontera(t *testing.T) {
 // Una cabecera con la versión 3 se tiene que leer con el tamaño de la 3: con
 // el hdr_len de la 1 o de la 2, khv_restore la trataría como v3 sobre bytes
 // que no lo son (con la 2, el globo de la v2 leído con la forma de la v3).
-// Hoy vm.c acepta la versión actual con cualquier hdr_len conocido; hasta que
-// lo compruebe, esta prueba se salta y dice por qué.
+// khv_restore la rechaza por la versión, antes de mirar la máquina.
 func TestRestaurarVersionConOtraCabecera(t *testing.T) {
-	var aceptadas []string
 	for _, c := range []struct {
 		nombre string
 		hdrLen uint64
@@ -213,15 +211,8 @@ func TestRestaurarVersionConOtraCabecera(t *testing.T) {
 		{"v3 con la cabecera de la v2", hdrV2Fijada},
 	} {
 		err := restaurarSinVM(memFile(t, magiaFijada, versionFijada, c.hdrLen))
-		if !errConocido(err) {
-			t.Fatalf("%s: %v", c.nombre, err)
+		if err == nil || !strings.Contains(err.Error(), errVersion) {
+			t.Errorf("%s: want %q, got %v", c.nombre, errVersion, err)
 		}
-		if strings.Contains(err.Error(), errMaquina) {
-			aceptadas = append(aceptadas, c.nombre)
-		}
-	}
-	if len(aceptadas) > 0 {
-		t.Skipf("known gap in khv_restore (vm.c): version %d is accepted with another version's hdr_len: %s",
-			versionFijada, strings.Join(aceptadas, ", "))
 	}
 }

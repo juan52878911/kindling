@@ -1135,10 +1135,14 @@ int khv_restore(const char *mem_path) {
     fallo("%s is not a kling-hv memory file (or was written by another version)", mem_path);
     return -1;
   }
-  if (h.version != SNAP_VERSION && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1) &&
+  // Cada versión con el tamaño de cabecera de esa versión y ningún otro: una
+  // v3 con el hdr_len de la 2 haría leer el globo de la v2 con la forma de la
+  // v3 (y con el de la 1, ceros donde van el vsock y el globo).
+  if (!(h.version == SNAP_VERSION && pie.hdr_len == sizeof h) && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1) &&
       !(h.version == 2 && pie.hdr_len == SNAP_HDR_V2)) {
     close(fd);
-    fallo("%s: snapshot state version %u, this kling-hv reads %u", mem_path, h.version, SNAP_VERSION);
+    fallo("%s: snapshot state version %u with a %llu-byte header, this kling-hv reads %u (%zu bytes)", mem_path, h.version,
+          (unsigned long long)pie.hdr_len, SNAP_VERSION, sizeof h);
     return -1;
   }
   // La disposición la fija khv_snapshot: RAM en [0, ram_size), la cabecera
