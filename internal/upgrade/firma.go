@@ -300,6 +300,33 @@ func firmarCon(k ClavePrivada, datos []byte, comentario string, prehash bool) ([
 		base64.StdEncoding.EncodeToString(global) + "\n"), nil
 }
 
+// ClavesListasPara comprueba, antes de etiquetar o publicar etiqueta, que las
+// claves compiladas (claves, ClavesRelease() en este checkout) dejan
+// verificarla. Desde FirmaObligatoriaDesde una release cuyo kling no trae
+// ninguna clave no la acepta nadie: ni su propio `kling upgrade` la siguiente
+// vez, ni install.sh. firmante, si no es nil, es la pública de la clave con la
+// que se va a firmar: tiene que estar entre claves (con cualquier versión),
+// o los clientes con claves rechazarían la firma.
+func ClavesListasPara(etiqueta string, claves []ClavePublica, firmante *ClavePublica) error {
+	if !EtiquetaValida(etiqueta) {
+		return fmt.Errorf("invalid tag %q", etiqueta)
+	}
+	if len(claves) == 0 && versionAlMenos(etiqueta, FirmaObligatoriaDesde) {
+		return fmt.Errorf("%s must be signed (from %s on) and clavesRelease in internal/upgrade/firma.go is empty: "+
+			"add the public key line there and in KLING_RELEASE_PUBKEYS of scripts/install.sh first (docs/firmas.md)", etiqueta, FirmaObligatoriaDesde)
+	}
+	if firmante == nil {
+		return nil
+	}
+	for _, c := range claves {
+		if c.ID == firmante.ID && c.Clave.Equal(firmante.Clave) {
+			return nil
+		}
+	}
+	return fmt.Errorf("the signing key %s is not in clavesRelease of this checkout: add %s there and in "+
+		"KLING_RELEASE_PUBKEYS of scripts/install.sh (docs/firmas.md)", firmante.IDHex(), firmante.String())
+}
+
 // versionAlMenos dice si la etiqueta vX.Y.Z[-pre] llega a min (también
 // vX.Y.Z). El sufijo de prerelease no cuenta: v1.0.0-rc1 ya es v1.0.0 a
 // efectos de exigir firma. Lo que no es una versión ("dev", "") no llega.
