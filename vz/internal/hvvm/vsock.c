@@ -20,6 +20,7 @@
 #include <mach/mach_time.h>
 #include <poll.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -66,6 +67,7 @@ struct vconn {
   bool cerrar;        // cierre completo del invitado: RST en cuanto se vacíe pend
   int resultado;      // para quien marca: 0 esperando, 1 abierta, -1 rechazada
   uint64_t t_cierre;  // mach_absolute_time() del SHUTDOWN completo que se mandó
+  bool vigilada;      // su cierre completo lo avisa kq (ver vigilar)
   // gen sube al liberar el slot y al tomarlo: quien marca reconoce así su
   // conexión. El fd no basta: liberar lo cierra y el dial siguiente que tome
   // el slot puede recibir el mismo número.
@@ -78,6 +80,10 @@ static bool activo;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // quien marca espera aquí; también la reanudación
 static int despertador[2] = {-1, -1};
+// kq avisa, sin sondear, de que Go cerró del todo su extremo de una conexión
+// que el poll ya no mira (ver vigilar). -1 si no se pudo crear: entonces la
+// sonda de cada segundo (sondear_cerradas).
+static int kq = -1;
 static struct vconn conns[VS_MAXCONN];
 static uint32_t sig_puerto = 49152;
 static struct {
@@ -402,11 +408,37 @@ static bool bombear(const bool *listo) {
   return puesto;
 }
 
+// por_cerrar: la conexión ya no tiene nada que leer ni escribir (host_eof, o
+// el invitado ya no recibe) y falta saber si Go cierra su extremo del todo.
+static bool por_cerrar(const struct vconn *c) {
+  if (c->estado != C_ABIERTA || c->npend || !(c->host_eof || c->guest_sordo)) return false;
+  if ((c->p_shut & SHUT_RCV_F) && (c->p_shut & SHUT_SEND_F)) return false;
+  return !c->t_cierre;
+}
+
+// vigilar apunta el fd de una conexión por_cerrar en kq: EVFILT_WRITE con
+// EV_CLEAR avisa al apuntarlo y luego solo cuando el socket cambia; con el
+// otro extremo cerrado del todo el aviso trae EV_EOF (ya no se puede mandar
+// nada), lo mismo que la sonda veía como POLLHUP sin POLLOUT. Un medio cierre
+// de Go (CloseWrite) no lo pone. Si ya estaba cerrado, el aviso llega al
+// apuntarlo. Cerrar el fd (liberar) lo quita de kq. false si no se pudo (sin
+// kq): entonces la mira sondear_cerradas. Con mu.
+static bool vigilar(struct vconn *c, int i) {
+  if (c->vigilada) return true;
+  if (kq < 0) return false;
+  struct kevent ev;
+  EV_SET(&ev, (uintptr_t)c->fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, (void *)(intptr_t)i);
+  if (kevent(kq, &ev, 1, NULL, 0, NULL) != 0) return false;
+  c->vigilada = true;
+  return true;
+}
+
 // armar_poll llena pf con los fd de las conexiones abiertas que esperan algo
 // y devuelve cuántos; idx[k] es el slot de pf[k]. Con mu. Una conexión sin
 // nada que leer ni escribir (host_eof, o el invitado ya no recibe) no entra:
 // en macOS poll no avisa de POLLHUP con events = 0, y pedir POLLOUT la
-// tendría siempre lista. A esas las mira sondear_cerradas cada segundo.
+// tendría siempre lista. A esas las vigila kq (vigilar); sin kq, las mira
+// sondear_cerradas cada segundo.
 static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
   int n = 0;
   for (int i = 0; i < VS_MAXCONN; i++) {
@@ -417,7 +449,7 @@ static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
     if (c->npend) ev |= POLLOUT;
     if (c->t_cierre) *plazo = 500;
     if (!ev) {
-      if ((c->host_eof || c->guest_sordo) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+      if (por_cerrar(c) && !vigilar(c, i) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
       continue;
     }
     idx[n] = i;
@@ -429,22 +461,44 @@ static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
   return n;
 }
 
-// sondear_cerradas mira, sin esperar, las conexiones que armar_poll no
-// vigila: con el otro extremo cerrado del todo (close en Go) POLLOUT devuelve
-// solo POLLHUP; con un medio cierre (CloseWrite) devuelve POLLOUT. Al primero
-// se le pide al invitado el cierre completo, que contesta con RST (o el
-// plazo de 2 s lo da por hecho) y libera el slot. Antes esas conexiones no
-// se miraban y, si el invitado tampoco mandaba RST, el slot y el fd quedaban
-// ocupados para siempre: 64 así y ya no había exec. Con mu.
+// sondear_cerradas mira, sin esperar, las conexiones por_cerrar que kq no
+// vigila (solo pasa sin kq): con el otro extremo cerrado del todo (close en
+// Go) POLLOUT devuelve solo POLLHUP; con un medio cierre (CloseWrite)
+// devuelve POLLOUT. Al primero se le pide al invitado el cierre completo, que
+// contesta con RST (o el plazo de 2 s lo da por hecho) y libera el slot.
+// Antes esas conexiones no se miraban y, si el invitado tampoco mandaba RST,
+// el slot y el fd quedaban ocupados para siempre: 64 así y ya no había exec.
+// Con mu.
 static void sondear_cerradas(void) {
   for (int i = 0; i < VS_MAXCONN; i++) {
     struct vconn *c = &conns[i];
-    if (c->estado != C_ABIERTA || c->npend || !(c->host_eof || c->guest_sordo)) continue;
-    if ((c->p_shut & SHUT_RCV_F) && (c->p_shut & SHUT_SEND_F)) continue;
-    if (c->t_cierre) continue;
+    if (!por_cerrar(c) || c->vigilada) continue;
     struct pollfd pf = {.fd = c->fd, .events = POLLOUT};
     if (poll(&pf, 1, 0) > 0 && (pf.revents & (POLLHUP | POLLERR)) && !(pf.revents & POLLOUT))
       c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+  }
+}
+
+// atender_kq recoge, sin esperar, los avisos de kq: a la conexión cuyo
+// extremo de Go se cerró del todo se le pide al invitado el cierre completo,
+// como hacía sondear_cerradas. Un aviso sin EV_EOF (el socket cambió por
+// otra cosa) no dice nada. El slot se comprueba por su fd y por vigilada: el
+// aviso de un fd ya cerrado no llega (close lo quita de kq), y un slot
+// reusado empieza sin vigilada. Con mu.
+static void atender_kq(void) {
+  if (kq < 0) return;
+  struct kevent evs[16];
+  const struct timespec cero = {0, 0};
+  for (;;) {
+    int n = kevent(kq, NULL, 0, evs, 16, &cero);
+    for (int k = 0; k < n; k++) {
+      intptr_t i = (intptr_t)evs[k].udata;
+      if (i < 0 || i >= VS_MAXCONN || !(evs[k].flags & EV_EOF)) continue;
+      struct vconn *c = &conns[i];
+      if (!c->vigilada || c->fd < 0 || (uintptr_t)c->fd != evs[k].ident || !por_cerrar(c)) continue;
+      c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+    }
+    if (n < 16) return;
   }
 }
 
@@ -454,26 +508,31 @@ static void tras_poll(const struct pollfd *pf, const int *idx, int n, bool *list
   for (int k = 0; k < n; k++) {
     struct vconn *c = &conns[idx[k]];
     if (c->estado != C_ABIERTA || c->fd != pf[k].fd) continue;
-    if (pf[k].revents & POLLOUT) vaciar(c);
+    // Con algo pendiente para Go y su extremo cerrado del todo, poll da
+    // POLLHUP sin POLLOUT: vaciar se entera (EPIPE, y RST al invitado). Antes
+    // el fd volvía listo en cada vuelta sin que nadie lo atendiera, y el hilo
+    // giraba en vacío.
+    if ((pf[k].revents & POLLOUT) || (c->npend && (pf[k].revents & (POLLHUP | POLLERR)))) vaciar(c);
     if (pf[k].revents & (POLLIN | POLLHUP | POLLERR)) listo[idx[k]] = true;
   }
+  atender_kq();
   sondear_cerradas();
 }
 
 static void *vs_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
-  struct pollfd pf[1 + VS_MAXCONN];
+  // pf[0] es el despertador, pf[1] kq (un kqueue se espera con poll: está
+  // listo cuando tiene avisos) y luego van las conexiones de armar_poll.
+  struct pollfd pf[2 + VS_MAXCONN];
   int idx[VS_MAXCONN];
   bool listo[VS_MAXCONN];
   for (;;) {
-    int n = 0;
     int plazo = -1;
     pthread_mutex_lock(&mu);
-    pf[n].fd = despertador[0];
-    pf[n].events = POLLIN;
-    n++;
-    n = armar_poll(pf + 1, idx, &plazo) + 1;
+    pf[0] = (struct pollfd){.fd = despertador[0], .events = POLLIN};
+    pf[1] = (struct pollfd){.fd = kq, .events = POLLIN};  // sin kq (-1), poll lo salta
+    int n = armar_poll(pf + 2, idx, &plazo) + 2;
     pthread_mutex_unlock(&mu);
     int r = poll(pf, (nfds_t)n, plazo);
     if (r < 0 && errno != EINTR) return NULL;
@@ -485,7 +544,7 @@ static void *vs_hilo(void *a) {
     pthread_mutex_lock(&mu);
     // Con la VM en pausa no se toca la RAM del invitado.
     while (g_pausa) pthread_cond_wait(&cv, &mu);
-    tras_poll(pf + 1, idx, n - 1, listo);
+    tras_poll(pf + 2, idx, n - 2, listo);
     // Un cierre al que el invitado no contesta con RST en 2 s se da por hecho.
     uint64_t ahora = mach_absolute_time();
     for (int i = 0; i < VS_MAXCONN; i++)
@@ -515,6 +574,7 @@ void vsock_init(uint32_t id) {
       fcntl(despertador[i], F_SETFD, FD_CLOEXEC);
     }
   }
+  if (kq < 0) kq = kqueue();  // un kqueue no pasa a los hijos: no hace falta FD_CLOEXEC
   activo = true;
   pthread_t t;
   pthread_create(&t, NULL, vs_hilo, NULL);
@@ -756,8 +816,12 @@ int khv_vsock_prueba_reuso(int *coincide_fd) {
 // que no recibe más (SHUT_RCV) y aquí ya no hay nada que leer ni escribir,
 // así que la conexión no entraba en el poll; Go cierra su extremo y nadie se
 // entera. medio: Go solo cierra su escritura (CloseWrite), que NO debe
-// cerrar la conexión. Devuelve 1 si una pasada de poll dejó pedido el cierre
-// completo (SEND|RCV) al invitado, 0 si no, negativo si no se pudo preparar.
+// cerrar la conexión. Devuelve 1 si, tras cerrar Go, una pasada dejó pedido
+// el cierre completo (SEND|RCV) al invitado, 0 si no, negativo si no se pudo
+// preparar o si la conexión no quedó en kq (-ETIME: sin la sonda de cada
+// segundo nadie la habría mirado) o se pidió el cierre antes de que Go
+// cerrara (-EPROTO). Como en la VM, la conexión ya está vigilada cuando Go
+// cierra: el aviso llega por kq, no al apuntarla.
 int khv_vsock_prueba_cierre(int medio) {
   if (!activo) vsock_init(53);
   pthread_mutex_lock(&mu);
@@ -772,17 +836,36 @@ int khv_vsock_prueba_cierre(int medio) {
   c->p_request = false;
   c->guest_sordo = true;
   c->host_eof = true;
-  if (medio) shutdown(sv[1], SHUT_WR);
-  else close(sv[1]);
   struct pollfd pf[VS_MAXCONN];
   int idx[VS_MAXCONN];
   bool listo[VS_MAXCONN];
   int plazo = -1;
+  // Primera pasada con los dos extremos abiertos: la apunta en kq, que no
+  // debe dar el cierre por hecho.
   int n = armar_poll(pf, idx, &plazo);
   if (n > 0) poll(pf, (nfds_t)n, 0);
   tras_poll(pf, idx, n, listo);
-  int pedido = (c->p_shut & SHUT_SEND_F) && (c->p_shut & SHUT_RCV_F) ? 1 : 0;
-  if (plazo != 1000) pedido = -ETIME;  // sin la sonda periódica no se habría mirado
+  int pedido = -ETIME;
+  if (c->vigilada && plazo < 0) {
+    pedido = (c->p_shut & SHUT_SEND_F) && (c->p_shut & SHUT_RCV_F) ? -EPROTO : 0;
+    if (medio) shutdown(sv[1], SHUT_WR);
+    else close(sv[1]);
+    // El aviso lo encola el kernel al cerrar; se espera en kq como vs_hilo,
+    // con un plazo (corto con medio, que no debe avisar de cierre).
+    for (int i = 0; pedido == 0 && i < 10; i++) {
+      struct pollfd pk = {.fd = kq, .events = POLLIN};
+      poll(&pk, 1, medio ? 10 : 100);
+      plazo = -1;
+      n = armar_poll(pf, idx, &plazo);
+      if (n > 0) poll(pf, (nfds_t)n, 0);
+      tras_poll(pf, idx, n, listo);
+      if ((c->p_shut & SHUT_SEND_F) && (c->p_shut & SHUT_RCV_F)) pedido = 1;
+    }
+  } else if (medio) {
+    shutdown(sv[1], SHUT_WR);
+  } else {
+    close(sv[1]);
+  }
   liberar(c);
   pthread_mutex_unlock(&mu);
   if (medio) close(sv[1]);
