@@ -21,7 +21,13 @@ interno**, aunque se pueda usar.
 
 **Estable:**
 
-- El núcleo: `kling` (CLI y daemon), `kling-guest` y `kling-vz`.
+- El núcleo: `kling` (CLI y daemon), `kling-guest`, `kling-vz` y **kling-hv**
+  (como VMM y su formato de volcado `KLNGHV`). kling-hv es estable con una
+  condición: hasta que haya un runner Apple Silicon en CI, cada release pasa a
+  mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv` en un Mac con
+  Apple Silicon, y `scripts/release.sh` no etiqueta sin eso
+  ([`releases.md`](releases.md), paso 3b). Sus límites (8 vCPU, 8 discos,
+  sin pantalla) están en [`backend-hv.md`](backend-hv.md).
 - La API HTTP del daemon: rutas, campos JSON, capacidades de `GET /info`,
   códigos de estado documentados en [`api.md`](api.md) y las cabeceras
   `X-Kling-API`/`X-Kling-Version`.
@@ -45,8 +51,7 @@ interno**, aunque se pueda usar.
 - Las extensiones **mcp** (con `kling-bridge`) y **sandbox**.
 
 **Experimental:** `db`, `phone`, `ai` y Chispa, Android, el operador de
-Kubernetes, `compose` (el subconjunto de Compose que se acepta) y **kling-hv**
-(como VMM, y su formato de volcado `KLNGHV`).
+Kubernetes y `compose` (el subconjunto de Compose que se acepta).
 
 **Interno:** el resto de `pkg/` (`guest`, `credproxy`, `scheduler`,
 `linkbroker`, `panico`, `units`: siguen en `pkg/` solo porque los importan
@@ -184,7 +189,7 @@ agente ≥ 1.0 tiene las tres.
 | Daemon ↔ agente | ver la ventana de arriba | `caps` de `/healthz`; `kling.*` desconocidos se ignoran; `agent` en `recipe.json` | **sí**, con los [requisitos del agente](#ventana-de-versiones) |
 | Daemon ↔ Firecracker | la MAJOR.MINOR fijada por cada release (hoy 1.17); otra deja los dorados `stale` | `vmm` en `meta.json` y en el sello | **sí** |
 | Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-3): lo que este no lee sale `stale` | **sí** |
-| Daemon ↔ kling-hv (experimental) | la misma versión que el daemon | `KLNGHV` (estado v4, lee v1 a v3, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
+| Daemon ↔ kling-hv | la misma versión que el daemon | `KLNGHV` (estado v4, lee v1 a v3, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
 | macOS | kling-vz ≥ 14.0, kling-hv ≥ 15.2. El `mem.file` de vz está ligado a la build de macOS: si no restaura, se rehace | `minos` comprobado en CI; `macos` en el meta | **sí** |
 | Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta y en el sello; `kernel_sha256` y `kernel_mismatch` en `/info`, que `kling doctor` enseña | **sí** |
 | Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | `arch` en el meta y en el sello: otra sale `stale` | **sí** |
@@ -203,8 +208,11 @@ de la matriz pasa a **sí**.
 **Pruebas y release**
 
 - e2e con microVMs en un runner Apple Silicon, incluido el de `kling upgrade`
-  desde la release anterior (`95-e2e-upgrade-mac.sh`); el de Linux con KVM ya
-  corre en `e2e-linux.yml`, también el de upgrade desde la release anterior.
+  desde la release anterior (`95-e2e-upgrade-mac.sh`): `e2e-mac.yml` ya está
+  escrito y se enciende con la variable `KLING_MAC_RUNNER=true`. Mientras no
+  lo haya, se corren a mano antes de cada release (`release.sh` lo exige con
+  `KLING_E2E_HV`). El de Linux con KVM ya corre en `e2e-linux.yml`, también
+  el de upgrade desde la release anterior.
 - El secreto `KLING_RELEASE_SIGNING_KEY` en el environment `release`
   ([`firmas.md`](firmas.md)): desde v1.0.0 `kling upgrade` rechaza una release
   sin firmar.

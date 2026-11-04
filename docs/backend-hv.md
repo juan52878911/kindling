@@ -303,6 +303,11 @@ pedir esas páginas con `F_RDADVISE` en vez de escribirlas: en una ronda bajó a
 
 ## Estabilidad de `kling-hv`
 
+Estable desde 1.0 ([`compatibilidad.md`](compatibilidad.md)), con una
+condición mientras no haya un runner Apple Silicon en CI: cada release pasa a
+mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv`, y
+`scripts/release.sh` no etiqueta sin eso ([`releases.md`](releases.md)).
+
 Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
 
 ### Probado

@@ -142,6 +142,13 @@ sudo OLD_DIR=<kling de la anterior> NEW_DIR=<binarios de HEAD> scripts/94-e2e-up
 #     la anterior y de HEAD, sellados, y las imágenes de un daemon Linux arm64
 OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmlinux, min.ext4…> scripts/95-e2e-upgrade-mac.sh
 
+# 3c. kling-hv es estable desde 1.0 con esta condición: los dos e2e del Mac con
+#     VMM=hv en un Apple Silicon, sobre el commit que se va a etiquetar. Sin el
+#     runner de e2e-mac.yml, a mano, y release.sh lo exige con KLING_E2E_HV
+VMM=hv KLING=<kling de HEAD> scripts/92-e2e-mac.sh
+VMM=hv OLD_DIR=<la anterior, con kling-hv> NEW_DIR=<HEAD> IMAGES_DIR=<…> scripts/95-e2e-upgrade-mac.sh
+export KLING_E2E_HV=$(git rev-parse --short=12 main)
+
 # 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```

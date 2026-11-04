@@ -103,7 +103,8 @@ nothing stable breaks within 1.x, anything removed is deprecated first for at le
 minor releases or six months, and `kling upgrade` moves from one release to the next and
 back. Templates and frozen machines are a cache: when the host can no longer restore one it
 is reported stale and refrozen, not migrated. `db`, `phone`, `ai`, Android, the Kubernetes
-operator, `compose` and `kling-hv` stay experimental. The full promise:
+operator and `compose` stay experimental; `kling-hv` is stable, with its
+macOS e2e run by hand on Apple Silicon before every release until CI has a runner. The full promise:
 [`docs/compatibilidad.md`](docs/compatibilidad.md) (in Spanish).
 
 ## More

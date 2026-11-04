@@ -26,7 +26,9 @@
 #      (`firmar check`, docs/firmas.md)
 #   3. Verifica que CHANGELOG.md tenga el bloque de la versión
 #      (scripts/release-notes.sh, el mismo que usa el workflow)
-#   4. Verifica que todos los checks de CI de ese commit acabaron en verde
+#   4. Verifica que todos los checks de CI de ese commit acabaron en verde y,
+#      desde v1.0.0, que el e2e de kling-hv pasó en un Apple Silicon (el job
+#      de e2e-mac.yml, o a mano con KLING_E2E_HV=<sha>; docs/releases.md)
 #   5. Crea un tag anotado vX.Y.Z con mensaje corto SOBRE ESE COMMIT
 #   6. Push del tag → activa .github/workflows/release.yml
 #   7. (Opcional) espera a ESE run del workflow y abre la release en el browser
@@ -202,6 +204,33 @@ if ! ci_verde; then
     echo "see https://github.com/$REPO/commit/$COMMIT/checks" >&2
     [ "$DRY_RUN" = "1" ] || exit 1
 fi
+
+# ── e2e de kling-hv ────────────────────────────────────────────────────────
+# kling-hv es estable desde 1.0 con una condición (compatibilidad.md): cada
+# release pasa 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv en un Apple
+# Silicon. Vale el job de e2e-mac.yml en verde sobre este commit (skipped no
+# vale: es lo que sale sin runner) o, a mano, KLING_E2E_HV=<sha de COMMIT>
+# tras correrlos (releases.md, paso 3b).
+e2e_hv_hecho() {
+    if [ -n "${KLING_E2E_HV:-}" ]; then
+        case "$COMMIT" in
+            "$KLING_E2E_HV"*) [ "${#KLING_E2E_HV}" -ge 7 ] && { echo "kling-hv e2e run by hand on $KLING_E2E_HV"; return 0; } ;;
+        esac
+        echo "KLING_E2E_HV=$KLING_E2E_HV is not $COMMIT (at least 7 characters of it)" >&2
+        return 1
+    fi
+    if command -v gh >/dev/null 2>&1; then
+        C=$(gh api "repos/$REPO/commits/$COMMIT/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.name == "microVMs (kling-hv, Hypervisor.framework)" and .conclusion == "success")] | length' 2>/dev/null || echo 0)
+        if [ "${C:-0}" -gt 0 ]; then echo "kling-hv e2e green on the Apple Silicon runner"; return 0; fi
+    fi
+    echo "kling-hv e2e not run on $COMMIT: run 92-e2e-mac.sh and 95-e2e-upgrade-mac.sh with VMM=hv on an Apple Silicon Mac, then KLING_E2E_HV=$(printf '%.12s' "$COMMIT") (docs/releases.md)" >&2
+    return 1
+}
+case "${VERSION#v}" in
+    0.*) ;;
+    *) e2e_hv_hecho || { [ "$DRY_RUN" = "1" ] || exit 1; } ;;
+esac
 
 # ── notas ──────────────────────────────────────────────────────────────────
 # Las notas son el bloque de esta versión en CHANGELOG.md y una línea de
