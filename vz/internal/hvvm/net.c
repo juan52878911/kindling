@@ -29,6 +29,13 @@ static uint16_t mtu;
 // puesto (bajo mu, en vnet_quieto) el hilo no escribe en el invitado.
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // hay búferes de rx, o se reanudó
+// rx_en_curso: el hilo de recepción está dentro de recvmsg, sin mu, escribiendo
+// en un búfer de rx del invitado que ya tomó (rx_una). Mientras, ni la pausa
+// (vnet_quieto), ni un estado nuevo (vnet_set), ni el driver tocando la
+// configuración o reiniciando el dispositivo siguen: esperan en cv_rx. Así
+// el recvmsg no tiene mu tomado y el vCPU puede mandar (tx) a la vez.
+static bool rx_en_curso;
+static pthread_cond_t cv_rx = PTHREAD_COND_INITIALIZER;
 // El hilo de recepción y cómo pararlo (vnet_parar): rx_desp despierta su poll.
 static pthread_t rx_t;
 static bool rx_vivo;
@@ -117,9 +124,9 @@ enum { RX_PUESTA, RX_VACIO, RX_SIN_BUF, RX_ERROR };
 // rx_una recibe la siguiente trama del socket directamente en el siguiente
 // búfer de rx del invitado (recvmsg con sus búferes como iovec, detrás de la
 // cabecera): una sola pasada por la cadena y ninguna copia intermedia. Con
-// mu y la VM corriendo. RX_VACIO: no hay trama (el búfer no se gasta);
-// RX_SIN_BUF: no hay búfer, y la trama sigue en el socket; RX_ERROR: recv
-// falló (en *err). Sin driver la trama se tira. Una cadena que no vale, o
+// mu y la VM corriendo; lo suelta durante recvmsg (ver rx_en_curso).
+// RX_VACIO: no hay trama (el búfer no se gasta); RX_SIN_BUF: no hay búfer, y
+// la trama sigue en el socket; RX_ERROR: recv falló (en *err). Sin driver la trama se tira. Una cadena que no vale, o
 // más corta que la trama, no recibe media trama (ni media cabecera): el
 // búfer vuelve con 0 bytes y la trama se pierde entera, que es lo que un
 // driver espera de un paquete que no le cabe.
@@ -155,11 +162,19 @@ static int rx_una(int *err) {
     m.msg_iov = &t;  // se recibe para tirarla
     m.msg_iovlen = 1;
   }
+  rx_en_curso = true;
+  pthread_mutex_unlock(&mu);
   ssize_t r = recvmsg(fd, &m, MSG_DONTWAIT);
+  int e = errno;
+  pthread_mutex_lock(&mu);
+  rx_en_curso = false;
+  pthread_cond_broadcast(&cv_rx);
   if (r < 0) {
-    *err = errno;
-    return errno == EAGAIN ? RX_VACIO : RX_ERROR;
+    *err = e;
+    return e == EAGAIN ? RX_VACIO : RX_ERROR;
   }
+  // La cola es la misma que antes de soltar mu: quien la cambia espera a
+  // rx_en_curso.
   uint32_t len = 0;
   if (vale && !(m.msg_flags & MSG_TRUNC)) {
     uint8_t cab[HDR] = {0};
@@ -170,6 +185,12 @@ static int rx_una(int *err) {
   q->last_avail++;
   vq_push(q, used, head, len);
   return RX_PUESTA;
+}
+
+// esperar_rx espera a que el hilo de recepción salga de recvmsg (ver
+// rx_en_curso). Con mu.
+static void esperar_rx(void) {
+  while (rx_en_curso) pthread_cond_wait(&cv_rx, &mu);
 }
 
 // rx_errorf deja en stderr por qué termina el hilo de recepción: sin él la
@@ -220,8 +241,14 @@ static bool rx_vaciar(int *err) {
       return false;
     }
     if (r == RX_VACIO) break;
-    // RX_SIN_BUF
+    // RX_SIN_BUF: si no hay trama esperando, no hay nada que esperar (el
+    // aviso del siguiente búfer ya está pedido). Mirarlo sin mu.
     rx_avisar(viejo);
+    pthread_mutex_unlock(&mu);
+    struct pollfd pf = {.fd = fd, .events = POLLIN};
+    bool hay = poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN);
+    pthread_mutex_lock(&mu);
+    if (!hay) return true;
     if (intentos++ >= 20) {
       // Se tira la trama que espera, sin gastar búfer.
       static uint8_t tirar[TRAMA_MAX];
@@ -342,6 +369,10 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
     pthread_mutex_unlock(&mu);
     return true;
   }
+  // Una escritura que no es un notify (0x50) ni el ACK de una interrupción
+  // (0x64) puede cambiar las colas o reiniciar el dispositivo: no con una
+  // trama entrando en un búfer de rx (ver rx_en_curso).
+  if (escribir && off != 0x50 && off != 0x64) esperar_rx();
   uint32_t cola = 0;
   // VIRTIO_NET_F_MAC (5), VIRTIO_NET_F_STATUS (16) y, con una MTU mayor que
   // 1500, VIRTIO_NET_F_MTU (3): el virtio_net de Linux la adopta solo, como con
@@ -373,10 +404,12 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   return true;
 }
 
-// vnet_quieto: con g_pausa ya puesto, tomar mu garantiza que el hilo de rx no
-// está a mitad de escribir en el invitado (lo hace con mu tomado).
+// vnet_quieto: con g_pausa ya puesto, tomar mu y esperar a rx_en_curso
+// garantiza que el hilo de rx no está a mitad de escribir en el invitado (lo
+// hace con mu tomado, o dentro de recvmsg con rx_en_curso).
 void vnet_quieto(void) {
   pthread_mutex_lock(&mu);
+  esperar_rx();
   pthread_mutex_unlock(&mu);
 }
 
@@ -400,6 +433,7 @@ void vnet_reafirmar(void) {
 
 void vnet_set(const struct vnet_state *i) {
   pthread_mutex_lock(&mu);
+  esperar_rx();
   s = *i;
   pthread_mutex_unlock(&mu);
 }
