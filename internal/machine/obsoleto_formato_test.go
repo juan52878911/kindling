@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,7 +68,7 @@ func TestCausaObsoletoEn(t *testing.T) {
 		t.Errorf("formato que se lee: %q", c)
 	}
 	memHV(t, dir, magiaHV, versionHVMax+1)
-	if c := m.causaObsoletoEn("kling-hv 0.22.0", "", dir); !strings.Contains(c, "v3") || !strings.HasPrefix(c, "made with") {
+	if c := m.causaObsoletoEn("kling-hv 0.22.0", "", dir); !strings.Contains(c, "up to v"+strconv.Itoa(versionHVMax)) || !strings.HasPrefix(c, "made with") {
 		t.Errorf("versión de cabecera mayor: %q", c)
 	}
 	memHV(t, dir, magiaHVPrefix<<16|0x3033, 1) // "KLNGHV03"

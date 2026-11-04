@@ -14,12 +14,12 @@ import (
 )
 
 // formatoSnap es la disposición del mem.file de kling-hv (vm.c): la magia, la
-// versión de la cabecera, su tamaño, el de la versión 1 y el del pie.
-func formatoSnap() (magia uint64, version uint32, hdr, hdrV1, hdrV2, pie uint64) {
-	var m, h, h1, h2, p C.uint64_t
+// versión de la cabecera, su tamaño, el de las versiones 1, 2 y 3 y el del pie.
+func formatoSnap() (magia uint64, version uint32, hdr, hdrV1, hdrV2, hdrV3, pie uint64) {
+	var m, h, h1, h2, h3, p C.uint64_t
 	var v C.uint32_t
-	C.khv_formato_snap(&m, &v, &h, &h1, &h2, &p)
-	return uint64(m), uint32(v), uint64(h), uint64(h1), uint64(h2), uint64(p)
+	C.khv_formato_snap(&m, &v, &h, &h1, &h2, &h3, &p)
+	return uint64(m), uint32(v), uint64(h), uint64(h1), uint64(h2), uint64(h3), uint64(p)
 }
 
 // restaurarSinVM llama a khv_restore sobre path sin VM creada. Solo para los

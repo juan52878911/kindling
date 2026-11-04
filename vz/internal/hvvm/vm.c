@@ -44,6 +44,9 @@
 static uint64_t t_inicio;
 static mach_timebase_info_data_t tb;
 static char errbuf[512];
+// errbuf lo escriben hilos distintos (Go en una llamada, un vCPU al terminar
+// la VM): err_mu evita que Go lea un mensaje a medio escribir.
+static pthread_mutex_t err_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static double abs_a_ms(uint64_t d) { return (double)d * tb.numer / tb.denom / 1e6; }
 double ms_desde_inicio(void) { return abs_a_ms(mach_absolute_time() - t_inicio); }
@@ -51,11 +54,20 @@ double ms_desde_inicio(void) { return abs_a_ms(mach_absolute_time() - t_inicio);
 void fallo(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
+  pthread_mutex_lock(&err_mu);
   vsnprintf(errbuf, sizeof errbuf, fmt, ap);
+  pthread_mutex_unlock(&err_mu);
   va_end(ap);
 }
 
 const char *khv_error(void) { return errbuf; }
+
+void khv_error_copia(char *buf, size_t n) {
+  if (n == 0) return;
+  pthread_mutex_lock(&err_mu);
+  snprintf(buf, n, "%s", errbuf);
+  pthread_mutex_unlock(&err_mu);
+}
 
 // TRY: llamada a Hypervisor.framework en la preparación (devuelve -1).
 #define TRY(x)                                                \
@@ -79,19 +91,30 @@ const char *khv_error(void) { return errbuf; }
     }                                                         \
   } while (0)
 
-static void logf_(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static int log_fd = 2;
-static void logf_(const char *fmt, ...) {
+static void vlogf_(const char *fmt, va_list ap) {
   char b[512];
   int n = snprintf(b, sizeof b, "kling-hv: ");
-  va_list ap;
-  va_start(ap, fmt);
   n += vsnprintf(b + n, sizeof b - (size_t)n, fmt, ap);
-  va_end(ap);
   if (n > (int)sizeof b - 2) n = (int)sizeof b - 2;
   b[n++] = '\n';
   uart_flush();
   (void)!write(log_fd, b, (size_t)n);
+}
+
+static void logf_(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void logf_(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vlogf_(fmt, ap);
+  va_end(ap);
+}
+
+void khv_log(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vlogf_(fmt, ap);
+  va_end(ap);
 }
 
 uint8_t *g_ram;
@@ -143,9 +166,9 @@ struct cpu_state {
 
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
 // 2 añade vsock y el globo al final de la cabecera; 3 le da al globo su cola
-// de estadísticas (struct vballoon_state crece). Una cabecera de la versión
-// 1 se lee como un prefijo; una de la 2, igual salvo el globo, que se
-// convierte (vballoon_state_v2).
+// de estadísticas (struct vballoon_state crece) y 4 la del informe de páginas
+// libres. Una cabecera de la versión 1 se lee como un prefijo; una de la 2 o
+// la 3, igual salvo el globo, que se convierte (vballoon_state_v2 y _v3).
 #define SNAP_VERSION KHV_SNAP_VERSION
 struct snap_hdr {
   uint64_t magic;
@@ -173,9 +196,11 @@ struct snap_hdr {
 // La versión 2 era sizeof(struct snap_hdr) con el globo de entonces: el
 // final redondeado a la alineación de la cabecera (16, por los registros
 // SIMD de cpu_state).
-#define SNAP_HDR_V2                                                                                   \
-  ((offsetof(struct snap_hdr, globo) + sizeof(struct vballoon_state_v2) + _Alignof(struct snap_hdr) - 1) & \
+#define SNAP_HDR_GLOBO(t)                                                                    \
+  ((offsetof(struct snap_hdr, globo) + sizeof(t) + _Alignof(struct snap_hdr) - 1) & \
    ~(_Alignof(struct snap_hdr) - 1))
+#define SNAP_HDR_V2 SNAP_HDR_GLOBO(struct vballoon_state_v2)
+#define SNAP_HDR_V3 SNAP_HDR_GLOBO(struct vballoon_state_v3)
 
 struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
@@ -189,12 +214,13 @@ struct snap_pie {
 // Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
 // subir SNAP_VERSION rompería los mem.file que ya hay en disco.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
-                      uint64_t *pie) {
+                      uint64_t *hdr_v3, uint64_t *pie) {
   *magia = SNAP_MAGIC;
   *version = SNAP_VERSION;
   *hdr = sizeof(struct snap_hdr);
   *hdr_v1 = SNAP_HDR_V1;
   *hdr_v2 = SNAP_HDR_V2;
+  *hdr_v3 = SNAP_HDR_V3;
   *pie = sizeof(struct snap_pie);
 }
 
@@ -231,6 +257,10 @@ struct cpu {
   bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
   uint64_t vtimer_offset;
+  // Lo que tiene que sumar a su vtimer_offset al salir del punto de pausa (lo
+  // que duró una pausa del núcleo), con mu. Ver khv_resume.
+  uint64_t ajuste_vtimer;
+  uint32_t fallos_ram;  // fallos de etapa 2 seguidos en la RAM (ver ram_reparar_ipa)
 };
 
 static struct cpu cpus[MAX_CPUS];
@@ -248,6 +278,11 @@ static uint64_t kernel_entry, fdt_gpa;
 static uint64_t nuevo_vtimer_offset;  // calculado al soltar una restauración
 static uint64_t snap_t_pausa;         // de la restauración pendiente
 static uint64_t t_pausado;            // mach_absolute_time() de la última pausa
+// La pausa en curso la pidió (también) el núcleo (KHV_PAUSA_API): al
+// reanudar, el contador virtual se adelanta lo que duró y el invitado no ve
+// el salto. Las del regulador de CPU (KHV_PAUSA_FRENO) son de milisegundos y
+// el reloj sigue, como bajo cpu.max. Con mu.
+static bool pausa_reloj;
 static double t_primer_run = -1, t_restaurado = -1;
 
 static pthread_mutex_t fin_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -255,6 +290,7 @@ static pthread_cond_t fin_cv = PTHREAD_COND_INITIALIZER;
 static bool fin_hecho;
 static int fin_codigo;
 static int fin_motivo = KHV_FIN_NADA;  // con fin_mu
+static char fin_texto[256];            // el motivo tal cual (con fin_mu): errbuf lo pisa el siguiente fallo
 
 void vcpu_kick_all(void) {
   pthread_mutex_lock(&mu);
@@ -288,6 +324,7 @@ static void fin_vm_por(int codigo, int por, const char *motivo) {
     fin_hecho = true;
     fin_codigo = codigo;
     fin_motivo = por;
+    snprintf(fin_texto, sizeof fin_texto, "%s", motivo);
     if (codigo != 0) fallo("%s", motivo);
   }
   pthread_cond_broadcast(&fin_cv);
@@ -306,6 +343,14 @@ void fin_vm(int codigo, const char *motivo) { fin_vm_por(codigo, codigo ? KHV_FI
 int khv_fin_motivo(void) {
   pthread_mutex_lock(&fin_mu);
   int m = fin_motivo;
+  pthread_mutex_unlock(&fin_mu);
+  return m;
+}
+
+int khv_fin(char *buf, size_t n) {
+  pthread_mutex_lock(&fin_mu);
+  int m = fin_motivo;
+  if (n) snprintf(buf, n, "%s", fin_texto);
   pthread_mutex_unlock(&fin_mu);
   return m;
 }
@@ -447,7 +492,20 @@ static void punto_pausa(struct cpu *c) {
   while (pausa_pedida && !parar) pthread_cond_wait(&cv, &mu);
   c->parado = false;
   n_pausados--;
+  uint64_t aj = c->ajuste_vtimer;
+  c->ajuste_vtimer = 0;
   pthread_mutex_unlock(&mu);
+  // CNTVCT = mach_absolute_time - offset: subir el offset lo que duró la
+  // pausa deja el contador donde estaba al pausar. Sin esto, tras una pausa
+  // de más de ~20 s el invitado veía saltar el tiempo y daba soft lockups y
+  // RCU stalls ("CPU#1 stuck for 319s"). Lo hace el hilo del vCPU: HVF solo
+  // deja tocar el offset desde el suyo.
+  if (aj && !parar) {
+    uint64_t off = c->vtimer_offset;
+    if (hv_vcpu_get_vtimer_offset(c->id, &off) != HV_SUCCESS) off = c->vtimer_offset;
+    c->vtimer_offset = off + aj;
+    VOK(hv_vcpu_set_vtimer_offset(c->id, c->vtimer_offset));
+  }
 }
 
 static void set_x(struct cpu *c, unsigned r, uint64_t v) {
@@ -730,6 +788,8 @@ static void volcar(struct cpu *c, const char *por) {
         far, esr);
 }
 
+static int ram_reparar_ipa(struct cpu *c, uint64_t ipa);
+
 static void *vcpu_hilo(void *arg) {
   struct cpu *c = arg;
   khv_qos_dispositivo();  // base UTILITY; los overrides la suben con trabajo (qos_subir)
@@ -803,6 +863,19 @@ static void *vcpu_hilo(void *arg) {
       case HV_EXIT_REASON_EXCEPTION: {
         uint64_t syn = c->exit->exception.syndrome;
         unsigned ec = (syn >> 26) & 0x3f;
+        uint64_t ipa = c->exit->exception.physical_address;
+        if ((ec == 0x24 || ec == 0x20) && ipa >= RAM_BASE && ipa - RAM_BASE < g_ram_size) {
+          // Un fallo de etapa 2 en la RAM: una página que ram_soltar no pudo
+          // volver a dar a HVF (o que otro vCPU está cambiando ahora mismo).
+          // Se repara y se repite la instrucción, sin avanzar el PC.
+          if (ram_reparar_ipa(c, ipa) != 0) {
+            volcar(c, "guest RAM fault");
+            fin_vm(1, "a guest RAM page could not be mapped again");
+            return NULL;
+          }
+          break;
+        }
+        c->fallos_ram = 0;
         switch (ec) {
           case 0x24: {  // data abort desde EL inferior: MMIO
             if (!(syn & (1u << 24))) {
@@ -888,9 +961,10 @@ static void dispositivos_quietos(void) {
   // El globo no tiene hilo propio, pero khv_balloon_stats (desde Go) escribe
   // en la cola de estadísticas, en la RAM del invitado. Mira g_pausa con el
   // cerrojo del globo y lo suelta tras escribir; g_pausa ya está puesta, así
-  // que tomar ese cerrojo una vez (vballoon_actual) espera a la que estuviera
-  // dentro, y las siguientes ven la pausa y no tocan nada.
-  if (hay_globo) (void)vballoon_actual();
+  // que tomar ese cerrojo una vez espera a la que estuviera dentro, y las
+  // siguientes ven la pausa y no tocan nada. De paso suelta lo pendiente:
+  // una máquina pausada tras un squeeze no retiene esas páginas.
+  if (hay_globo) vballoon_vaciar();
 }
 
 static void dispositivos_despertar(void) {
@@ -910,6 +984,7 @@ static void soltar_locked(void) {
     nuevo_vtimer_offset = mach_absolute_time() - cnt;
     t_restaurado = ms_desde_inicio();
   }
+  pausa_reloj = false;  // el offset de la restauración ya lo tiene en cuenta
   liberada = true;
   arrancar = true;
   g_pausa = false;
@@ -1010,17 +1085,112 @@ static int mapear_ram(int fd) {
 // phys_footprint. Es lo único que lo consigue con un mapeo MAP_PRIVATE de
 // fichero: madvise (FREE, FREE_REUSABLE, DONTNEED) no baja la huella de esas
 // páginas (medido en macOS 26.5). HVF lleva su propio mapeo de la región, así
-// que también se rehace. Si eso falla, la RAM del invitado queda rota: la VM
-// termina.
+// que también se rehace: primero se quita de HVF, luego se cambia el mapeo del
+// proceso y al final se vuelve a dar a HVF. Así un fallo nunca deja al
+// invitado viendo páginas distintas de las del host:
+//   - si hv_vm_unmap falla no se ha tocado nada (las páginas siguen sucias);
+//   - si el mmap falla, XNU deja el mapeo anterior y se vuelve a dar a HVF;
+//   - si hv_vm_map falla (dos veces), el tramo queda como hueco (huecos) y
+//     se vuelve a mapear cuando el invitado lo toque (ram_reparar_ipa) o lo
+//     reciba de vuelta (ram_reparar). Antes la VM terminaba: un globo podía
+//     tumbar a su propio invitado.
+// Solo se llama con páginas que el invitado no usa (en el globo o informadas
+// como libres): ningún vCPU las toca mientras no están en HVF.
+static pthread_mutex_t hueco_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *huecos;           // una entrada por página del host fuera de HVF, con hueco_mu
+static volatile uint64_t n_huecos;
+static uint32_t avisos_ram;       // fallos ya contados en la consola (con hueco_mu)
+
+#define RAM_PERMISOS (HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC)
+
+static void aviso_ram(const char *que, uint64_t off, uint64_t len, hv_return_t r) {
+  if (avisos_ram++ < 8)
+    logf_("balloon: %s of guest RAM [%#llx, +%#llx) failed: 0x%x (the pages stay mapped and dirty)", que,
+          (unsigned long long)(RAM_BASE + off), (unsigned long long)len, (unsigned)r);
+}
+
+// Con hueco_mu: vuelve a dar a HVF los huecos de [desde, hasta) (páginas).
+static int reparar_locked(uint64_t desde, uint64_t hasta) {
+  int ret = 0;
+  for (uint64_t p = desde; p < hasta;) {
+    if (!huecos[p]) {
+      p++;
+      continue;
+    }
+    uint64_t q = p;
+    while (q < hasta && huecos[q]) q++;
+    hv_return_t r = hv_vm_map(g_ram + p * PAGINA, RAM_BASE + p * PAGINA, (q - p) * PAGINA, RAM_PERMISOS);
+    if (r == HV_SUCCESS) {
+      memset(huecos + p, 0, (size_t)(q - p));
+      n_huecos -= q - p;
+    } else {
+      ret = -1;
+    }
+    p = q;
+  }
+  return ret;
+}
+
+int ram_reparar(uint64_t off, uint64_t len) {
+  if (n_huecos == 0 || !huecos || off >= g_ram_size) return 0;
+  if (len > g_ram_size - off) len = g_ram_size - off;
+  pthread_mutex_lock(&hueco_mu);
+  int r = reparar_locked(off / PAGINA, (off + len + PAGINA - 1) / PAGINA);
+  pthread_mutex_unlock(&hueco_mu);
+  return r;
+}
+
 int ram_soltar(uint64_t off, uint64_t len) {
-  if (!g_ram || off > g_ram_size || len > g_ram_size - off || (off | len) % PAGINA) return -1;
-  if (mmap(g_ram + off, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, base_fd, (off_t)off) == MAP_FAILED)
-    return -1;
-  if (hv_vm_unmap(RAM_BASE + off, len) != HV_SUCCESS ||
-      hv_vm_map(g_ram + off, RAM_BASE + off, len, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) != HV_SUCCESS) {
-    fin_vm(1, "remapping guest RAM for the balloon failed");
+  if (!g_ram || off > g_ram_size || len > g_ram_size - off || (off | len) % PAGINA || len == 0) return -1;
+  pthread_mutex_lock(&hueco_mu);
+  // Un hueco dentro del tramo haría fallar el hv_vm_unmap del tramo entero.
+  if (n_huecos && reparar_locked(off / PAGINA, (off + len) / PAGINA) != 0) {
+    pthread_mutex_unlock(&hueco_mu);
     return -1;
   }
+  hv_return_t r = hv_vm_unmap(RAM_BASE + off, len);
+  if (r != HV_SUCCESS) {
+    aviso_ram("hv_vm_unmap", off, len, r);
+    pthread_mutex_unlock(&hueco_mu);
+    return -1;
+  }
+  bool hecho = mmap(g_ram + off, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, base_fd, (off_t)off) != MAP_FAILED;
+  if (!hecho) aviso_ram("mmap", off, len, (hv_return_t)errno);
+  r = hv_vm_map(g_ram + off, RAM_BASE + off, len, RAM_PERMISOS);
+  if (r != HV_SUCCESS) r = hv_vm_map(g_ram + off, RAM_BASE + off, len, RAM_PERMISOS);
+  if (r != HV_SUCCESS) {
+    aviso_ram("hv_vm_map", off, len, r);
+    if (!huecos) huecos = calloc((size_t)(g_ram_size / PAGINA), 1);
+    if (!huecos) {
+      // Sin dónde apuntarlo no hay forma de arreglarlo luego.
+      pthread_mutex_unlock(&hueco_mu);
+      fin_vm(1, "remapping guest RAM for the balloon failed (and no memory to track it)");
+      return -1;
+    }
+    for (uint64_t p = off / PAGINA; p < (off + len) / PAGINA; p++)
+      if (!huecos[p]) huecos[p] = 1, n_huecos++;
+    hecho = false;
+  }
+  pthread_mutex_unlock(&hueco_mu);
+  return hecho ? 0 : -1;
+}
+
+// ram_reparar_ipa atiende un fallo de etapa 2 del vCPU c en la RAM (ipa):
+// vuelve a mapear el hueco, o, si no lo era, espera al ram_soltar que lo
+// tuviera quitado (hueco_mu). 0 para repetir la instrucción; -1 si la misma
+// página sigue fallando (la VM termina con el volcado del vCPU).
+static int ram_reparar_ipa(struct cpu *c, uint64_t ipa) {
+  uint64_t pag = (ipa - RAM_BASE) / PAGINA;
+  pthread_mutex_lock(&hueco_mu);
+  bool era = huecos && huecos[pag];
+  int r = era ? reparar_locked(pag, pag + 1) : 0;
+  pthread_mutex_unlock(&hueco_mu);
+  if (era && r == 0) {
+    c->fallos_ram = 0;
+    return 0;
+  }
+  if (++c->fallos_ram > 64) return -1;
+  if (r != 0) usleep(1000);  // HVF sin recursos ahora mismo: otra vez en un momento
   return 0;
 }
 
@@ -1127,7 +1297,8 @@ int khv_restore(const char *mem_path) {
   static struct snap_hdr h;
   if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof pie ||
       leer_todo(fd, &pie, sizeof pie, st.st_size - (off_t)sizeof pie) != 0 || pie.magic != SNAP_MAGIC ||
-      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1 && pie.hdr_len != SNAP_HDR_V2) ||
+      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1 && pie.hdr_len != SNAP_HDR_V2 &&
+       pie.hdr_len != SNAP_HDR_V3) ||
       pie.hdr_off > (uint64_t)st.st_size ||
       pie.hdr_len > (uint64_t)st.st_size - pie.hdr_off ||
       (memset(&h, 0, sizeof h), leer_todo(fd, &h, pie.hdr_len, (off_t)pie.hdr_off)) != 0 || h.magic != SNAP_MAGIC) {
@@ -1139,7 +1310,7 @@ int khv_restore(const char *mem_path) {
   // v3 con el hdr_len de la 2 haría leer el globo de la v2 con la forma de la
   // v3 (y con el de la 1, ceros donde van el vsock y el globo).
   if (!(h.version == SNAP_VERSION && pie.hdr_len == sizeof h) && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1) &&
-      !(h.version == 2 && pie.hdr_len == SNAP_HDR_V2)) {
+      !(h.version == 2 && pie.hdr_len == SNAP_HDR_V2) && !(h.version == 3 && pie.hdr_len == SNAP_HDR_V3)) {
     close(fd);
     fallo("%s: snapshot state version %u with a %llu-byte header, this kling-hv reads %u (%zu bytes)", mem_path, h.version,
           (unsigned long long)pie.hdr_len, SNAP_VERSION, sizeof h);
@@ -1179,6 +1350,22 @@ int khv_restore(const char *mem_path) {
     h.globo.q[1] = g2.q[1];
     h.globo.num_pages = g2.num_pages;
     h.globo.actual = g2.actual;
+  } else if (h.version == 3) {
+    // Lo mismo con la 3, sin la cola del informe de páginas libres: no se
+    // ofrecía, así que el invitado restaurado no la negoció.
+    struct vballoon_state_v3 g3;
+    if (leer_todo(fd, &g3, sizeof g3, (off_t)(pie.hdr_off + offsetof(struct snap_hdr, globo))) != 0) {
+      close(fd);
+      fallo("%s: reading the balloon state", mem_path);
+      return -1;
+    }
+    memset(&h.globo, 0, sizeof h.globo);
+    h.globo.m = g3.m;
+    memcpy(h.globo.q, g3.q, sizeof g3.q);
+    h.globo.num_pages = g3.num_pages;
+    h.globo.actual = g3.actual;
+    h.globo.stats_head = g3.stats_head;
+    h.globo.stats_pend = g3.stats_pend;
   }
   if (h.ram_size != g_ram_size || (int)h.ncpus != ncpus || (int)h.ndisks != ndisks || (bool)h.hay_red != hay_red ||
       (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || (bool)h.hay_globo != hay_globo ||
@@ -1247,6 +1434,9 @@ int khv_pause(unsigned bit) {
   pthread_mutex_lock(&mu);
   unsigned antes = pausa_bits;
   pausa_bits |= bit;
+  // También si la pausa ya estaba (la del regulador): desde ahora es del
+  // núcleo y puede durar lo que quiera.
+  if (bit & KHV_PAUSA_API) pausa_reloj = true;
   if (antes != 0 || !liberada || parar) {
     pthread_mutex_unlock(&mu);
     pthread_mutex_unlock(&op_mu);
@@ -1289,6 +1479,7 @@ int khv_pause(unsigned bit) {
   if (!a_tiempo) {
     int faltan = ncpus - n_pausados;
     pausa_bits = antes;
+    pausa_reloj = false;  // antes era 0: no había otra pausa
     pausa_pedida = false;
     g_pausa = false;
     pthread_cond_broadcast(&cv);
@@ -1317,6 +1508,16 @@ int khv_resume(unsigned bit) {
       soltar_locked();
       despertar = true;
     } else if (pausa_pedida) {
+      // El contador virtual no avanza durante una pausa del núcleo: cada
+      // vCPU suma lo que duró a su offset al salir del punto de pausa (como
+      // la restauración en soltar_locked). El reloj de pared del invitado
+      // queda atrasado eso mismo: lo arregla el /resync del agente, que el
+      // núcleo tiene que pedir tras reanudar.
+      if (pausa_reloj && t_pausado) {
+        uint64_t d = mach_absolute_time() - t_pausado;
+        for (int i = 0; i < ncpus; i++) cpus[i].ajuste_vtimer += d;
+      }
+      pausa_reloj = false;
       pausa_pedida = false;
       g_pausa = false;
       pthread_cond_broadcast(&cv);

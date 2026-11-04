@@ -18,20 +18,23 @@ import (
 // causaFormatoVolcado) lee la magia y la versión con las mismas constantes.
 const (
 	magiaFijada   = 0x4b4c4e4748563032 // "KLNGHV02"
-	versionFijada = 3
-	hdrFijada     = 11744 // sizeof(struct snap_hdr) en la versión 3 (el globo con su cola de estadísticas)
+	versionFijada = 4
+	hdrFijada     = 11776 // sizeof(struct snap_hdr) en la versión 4 (el globo con la cola del informe de libres)
+	hdrV3Fijada   = 11744 // la versión 3: el globo con la cola de estadísticas y sin la del informe
 	hdrV2Fijada   = 11696 // la versión 2: el globo sin esa cola
 	hdrV1Fijada   = 11384 // offsetof(struct snap_hdr, hay_vsock): la versión 1
 	pieFijado     = 32
 )
 
 func TestCabeceraKLNGHV(t *testing.T) {
-	magia, version, hdr, hdrV1, hdrV2, pie := formatoSnap()
-	if magia != magiaFijada || version != versionFijada || hdr != hdrFijada || hdrV1 != hdrV1Fijada || hdrV2 != hdrV2Fijada || pie != pieFijado {
-		t.Fatalf("the kling-hv memory file layout changed: magic %#x version %d header %d (v1 %d, v2 %d) footer %d; "+
-			"fixed: %#x %d %d (%d, %d) %d. If struct snap_hdr changed, bump SNAP_VERSION (and read the old one), "+
+	magia, version, hdr, hdrV1, hdrV2, hdrV3, pie := formatoSnap()
+	if magia != magiaFijada || version != versionFijada || hdr != hdrFijada || hdrV1 != hdrV1Fijada || hdrV2 != hdrV2Fijada ||
+		hdrV3 != hdrV3Fijada || pie != pieFijado {
+		t.Fatalf("the kling-hv memory file layout changed: magic %#x version %d header %d (v1 %d, v2 %d, v3 %d) footer %d; "+
+			"fixed: %#x %d %d (%d, %d, %d) %d. If struct snap_hdr changed, bump SNAP_VERSION (and read the old one), "+
 			"update internal/machine (magiaHV, versionHVMax) and only then these constants",
-			magia, version, hdr, hdrV1, hdrV2, pie, magiaFijada, versionFijada, hdrFijada, hdrV1Fijada, hdrV2Fijada, pieFijado)
+			magia, version, hdr, hdrV1, hdrV2, hdrV3, pie, magiaFijada, versionFijada, hdrFijada, hdrV1Fijada, hdrV2Fijada,
+			hdrV3Fijada, pieFijado)
 	}
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], magia)
@@ -145,10 +148,12 @@ func TestRestaurarCabeceraKLNGHV(t *testing.T) {
 	}{
 		{"otra magia", 0x4b4c4e4748563031, versionFijada, hdrFijada, "is not a kling-hv memory file"},
 		{"hdr_len de nadie", magiaFijada, versionFijada, hdrFijada - 8, "is not a kling-hv memory file"},
-		{"versión del futuro", magiaFijada, versionFijada + 1, hdrFijada, "this kling-hv reads 3"},
-		{"v1 con la cabecera de la v3", magiaFijada, 1, hdrFijada, "this kling-hv reads 3"},
-		{"v2 con la cabecera de la v3", magiaFijada, 2, hdrFijada, "this kling-hv reads 3"},
-		{"v3", magiaFijada, versionFijada, hdrFijada, "does not match the configured machine"},
+		{"versión del futuro", magiaFijada, versionFijada + 1, hdrFijada, "this kling-hv reads 4"},
+		{"v1 con la cabecera de la v4", magiaFijada, 1, hdrFijada, "this kling-hv reads 4"},
+		{"v2 con la cabecera de la v4", magiaFijada, 2, hdrFijada, "this kling-hv reads 4"},
+		{"v3 con la cabecera de la v4", magiaFijada, 3, hdrFijada, "this kling-hv reads 4"},
+		{"v4", magiaFijada, versionFijada, hdrFijada, "does not match the configured machine"},
+		{"v3", magiaFijada, 3, hdrV3Fijada, "does not match the configured machine"},
 		{"v2", magiaFijada, 2, hdrV2Fijada, "does not match the configured machine"},
 		{"v1", magiaFijada, 1, hdrV1Fijada, "does not match the configured machine"},
 	}

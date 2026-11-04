@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -66,13 +67,29 @@ func (f *Factory) NewMachineID() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-func errC(op string) error {
-	return fmt.Errorf("%s: %s", op, C.GoString(C.khv_error()))
+// ultimoError es khv_error copiado con su cerrojo: lo escriben también los
+// hilos de vCPU (un fallo que termina la VM) mientras Go lo lee.
+func ultimoError() string {
+	var b [512]C.char
+	C.khv_error_copia(&b[0], C.size_t(len(b)))
+	return C.GoString(&b[0])
 }
 
-// motivoFin dice por qué terminó la VM (khv_fin_motivo), o "" si sigue.
-func motivoFin() string {
-	switch C.khv_fin_motivo() {
+func errC(op string) error {
+	return fmt.Errorf("%s: %s", op, ultimoError())
+}
+
+// FinMotivo dice por qué terminó la VM de este proceso, en una línea para el
+// log ("" mientras sigue): el invitado se apagó o se reinició, la paró el
+// host, o el fallo que la terminó (un vCPU que salió con una excepción que
+// no se atiende, un remapeo de la RAM imposible...), con el texto que dio
+// vm.c al terminarla y no el último de khv_error, que el siguiente fallo
+// pisa. Vale desde cualquier goroutine y en cualquier momento.
+func FinMotivo() string {
+	var b [256]C.char
+	m := C.khv_fin(&b[0], C.size_t(len(b)))
+	texto := C.GoString(&b[0])
+	switch m {
 	case C.KHV_FIN_APAGADO:
 		return "the guest powered off"
 	case C.KHV_FIN_REINICIO:
@@ -80,19 +97,26 @@ func motivoFin() string {
 	case C.KHV_FIN_PARADA:
 		return "stopped by the host"
 	case C.KHV_FIN_FALLO:
-		return C.GoString(C.khv_error())
+		if texto == "" {
+			texto = ultimoError()
+		}
+		return "failed: " + texto
 	}
 	return ""
 }
 
 // errPausa es el error de un khv_pause o khv_resume que devolvió -1: si la
-// VM ya terminó, eso y por qué; si no, el texto de vm.c (un vCPU que no llegó
-// a pausarse a tiempo, por ejemplo), y la VM sigue corriendo.
-func errPausa() error {
-	if por := motivoFin(); por != "" {
-		return fmt.Errorf("the VM has stopped: %s", por)
+// VM ya terminó, eso y por qué (FinMotivo); si no, el texto de vm.c (un vCPU
+// que no llegó a pausarse a tiempo, por ejemplo), y la VM sigue corriendo.
+// Siempre con texto: el servidor lo registra tal cual.
+func errPausa(op string) error {
+	if por := FinMotivo(); por != "" {
+		return fmt.Errorf("%s: the VM has stopped: %s", op, por)
 	}
-	return errors.New(C.GoString(C.khv_error()))
+	if e := ultimoError(); e != "" {
+		return fmt.Errorf("%s: %s", op, e)
+	}
+	return fmt.Errorf("%s failed", op)
 }
 
 // Create configura la VM: el GIC y los dispositivos, sin RAM todavía (la pone
@@ -227,16 +251,14 @@ type machine struct {
 	net     *os.File // se guarda para que no lo cierre el recolector
 	vsock   bool
 	memMiB  int
-	fin     string // por qué terminó (motivoFin); se escribe antes de enviar a stopped
 }
 
 func (m *machine) esperar() {
 	code := C.khv_wait()
 	var err error
 	if code != 0 {
-		err = errors.New(C.GoString(C.khv_error()))
+		err = errors.New(strings.TrimPrefix(FinMotivo(), "failed: "))
 	}
-	m.fin = motivoFin()
 	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop).
 	C.vnet_parar()
 	if n := ConsoleDropped(); n > 0 && m.f.Logf != nil {
@@ -256,14 +278,14 @@ func (m *machine) Start() error {
 
 func (m *machine) Pause() error {
 	if C.khv_pause(C.KHV_PAUSA_API) != 0 {
-		return errPausa()
+		return errPausa("pausing")
 	}
 	return nil
 }
 
 func (m *machine) Resume() error {
 	if C.khv_resume(C.KHV_PAUSA_API) != 0 {
-		return errPausa()
+		return errPausa("resuming")
 	}
 	return nil
 }
@@ -368,8 +390,26 @@ func (m *machine) BalloonStats() (free, available, total uint64, actualMiB int, 
 
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
-// EndReason dice por qué terminó la VM; vale tras recibir de Stopped.
-func (m *machine) EndReason() string { return m.fin }
+// BalloonCounters son las cuentas del globo de esta VM: páginas del host (16
+// KiB) que tiene soltadas ahora, las devueltas por el informe de páginas
+// libres (acumulado), los tramos soltados, lo que costaron y los que fallaron
+// (sin terminar la VM: las páginas se quedan sucias).
+type BalloonCounters struct {
+	ReleasedPages, ReportedPages, Runs, Failed uint64
+	Spent                                      time.Duration
+}
+
+// Balloon da las cuentas del globo (balloon.c, khv_balloon_cuentas).
+func Balloon() BalloonCounters {
+	var v [C.KHV_BALLOON_NCUENTAS]C.uint64_t
+	C.khv_balloon_cuentas(&v[0])
+	return BalloonCounters{ReleasedPages: uint64(v[0]), ReportedPages: uint64(v[1]), Runs: uint64(v[2]),
+		Spent: time.Duration(v[3]), Failed: uint64(v[4])}
+}
+
+// EndReason dice por qué terminó la VM (FinMotivo): "" mientras corre; tras
+// recibir de Stopped, siempre el motivo.
+func (m *machine) EndReason() string { return FinMotivo() }
 
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.
@@ -419,7 +459,9 @@ func CPUTime() (time.Duration, error) {
 
 // Freeze para (o reanuda) los vCPU para el regulador de CPU: lo que en vz es
 // SIGSTOP al auxiliar. El reloj del invitado sigue corriendo, como bajo
-// cpu.max; es independiente de la pausa del núcleo (PATCH /vm).
+// cpu.max; es independiente de la pausa del núcleo (PATCH /vm), que sí lo
+// para: tras ella el invitado sigue donde estaba y su reloj de pared queda
+// atrasado lo que duró (lo arregla el /resync del agente).
 func Freeze(stop bool) error {
 	var r C.int
 	if stop {
@@ -428,7 +470,10 @@ func Freeze(stop bool) error {
 		r = C.khv_resume(C.KHV_PAUSA_FRENO)
 	}
 	if r != 0 {
-		return errPausa()
+		if stop {
+			return errPausa("throttling (stopping the vCPUs)")
+		}
+		return errPausa("throttling (releasing the vCPUs)")
 	}
 	return nil
 }

@@ -19,7 +19,7 @@ const (
 	errMaquina   = "does not match the configured machine"
 )
 
-// volcadoBueno es un mem.file v3 que pasa la validación: 4 KiB de RAM, la
+// volcadoBueno es un mem.file (de la versión dada) que pasa la validación: 4 KiB de RAM, la
 // cabecera, 64 bytes de GIC y el pie. Devuelve sus bytes y dónde empieza
 // cada sección.
 func volcadoBueno(t *testing.T, version uint32, hdrLen uint64) (b []byte, hdr, gic, pie int) {
@@ -78,7 +78,8 @@ func TestRestaurarCabeceraBitsCambiados(t *testing.T) {
 		version uint32
 		hdrLen  uint64
 	}{
-		{"v3", versionFijada, hdrFijada},
+		{"v4", versionFijada, hdrFijada},
+		{"v3", 3, hdrV3Fijada},
 		{"v1", 1, hdrV1Fijada},
 	} {
 		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.hdrLen)
@@ -148,7 +149,8 @@ func TestRestaurarRecortadoEnCadaFrontera(t *testing.T) {
 		version uint32
 		hdrLen  uint64
 	}{
-		{"v3", versionFijada, hdrFijada},
+		{"v4", versionFijada, hdrFijada},
+		{"v3", 3, hdrV3Fijada},
 		{"v1", 1, hdrV1Fijada},
 	} {
 		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.hdrLen)
@@ -198,17 +200,18 @@ func TestRestaurarRecortadoEnCadaFrontera(t *testing.T) {
 	}
 }
 
-// Una cabecera con la versión 3 se tiene que leer con el tamaño de la 3: con
-// el hdr_len de la 1 o de la 2, khv_restore la trataría como v3 sobre bytes
-// que no lo son (con la 2, el globo de la v2 leído con la forma de la v3).
+// Una cabecera con la versión 4 se tiene que leer con el tamaño de la 4: con
+// el hdr_len de la 1, la 2 o la 3, khv_restore la trataría como v4 sobre
+// bytes que no lo son (con la 2 o la 3, su globo leído con la forma de la v4).
 // khv_restore la rechaza por la versión, antes de mirar la máquina.
 func TestRestaurarVersionConOtraCabecera(t *testing.T) {
 	for _, c := range []struct {
 		nombre string
 		hdrLen uint64
 	}{
-		{"v3 con la cabecera de la v1", hdrV1Fijada},
-		{"v3 con la cabecera de la v2", hdrV2Fijada},
+		{"v4 con la cabecera de la v1", hdrV1Fijada},
+		{"v4 con la cabecera de la v2", hdrV2Fijada},
+		{"v4 con la cabecera de la v3", hdrV3Fijada},
 	} {
 		err := restaurarSinVM(memFile(t, magiaFijada, versionFijada, c.hdrLen))
 		if err == nil || !strings.Contains(err.Error(), errVersion) {
