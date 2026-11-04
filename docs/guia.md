@@ -867,7 +867,8 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y
 El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
 carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina
 con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la interfaz de
-red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
+red del invitado, con un techo en Firecracker de 256 MiB/s por sentido (lo pide una máquina con
+carpetas; las demás tienen `daemon.net_mibps`, 16 MiB/s por defecto). Diseño, límites y
 modelo de amenaza: [`docs/compartir.md`](compartir.md).
 
 ## LLM pequeños bajo demanda (VON)
@@ -1292,7 +1293,7 @@ incluido **lo que no está resuelto** — está en [SECURITY.md](../SECURITY.md)
 | Daemon inalcanzable por red | Solo socket Unix; acceso remoto exclusivamente por SSH |
 | VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo el grupo `kvm` |
 | Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; cgroup de CPU por máquina; tope de 256 |
+| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas); cgroup de CPU por máquina; tope de 256 |
 | Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
 | Sin secretos en snapshots | los secretos se inyectan vía MMDS (comunes a todas las sesiones de la máquina), solo en la máquina viva |
 

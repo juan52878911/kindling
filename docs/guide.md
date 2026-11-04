@@ -859,8 +859,9 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # live, read-write
 
 The guest cannot create symlinks, hard links or device nodes in a live share
 (`npm install --no-bin-links` works), sees everything as owned by root, and a machine with
-shares cannot be committed. Live shares go through the guest's network device, capped at
-16 MiB/s per direction on Firecracker. Design, limits and threat model:
+shares cannot be committed. Live shares go through the guest's network device, capped on
+Firecracker at 256 MiB/s per direction (a machine with shares asks for that; others get
+`daemon.net_mibps`, 16 MiB/s by default). Design, limits and threat model:
 [`docs/compartir.md`](compartir.md).
 
 ## Small LLMs on demand (VON)
@@ -1282,7 +1283,7 @@ The guest is third-party code: assume it is hostile. The full threat model — i
 | Daemon unreachable over the network | Unix socket only; remote access exclusively over SSH |
 | Unprivileged VMM | `setpriv` to a service user: **CapEff 0**, `no_new_privs`, only the `kvm` group |
 | No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
-| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine; CPU cgroup per machine; cap of 256 |
+| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares); CPU cgroup per machine; cap of 256 |
 | No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
 | No secrets in snapshots | secrets are injected via MMDS (shared by every session of the machine), into the live machine only |
 

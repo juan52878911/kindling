@@ -156,8 +156,8 @@ backend.
 
 ### 4. Una microVM no puede degradar a las demás
 
-- **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red, con limitadores
-  de Firecracker.
+- **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red (`daemon.net_mibps`,
+  hasta 10240; 256 en una máquina con carpetas), con limitadores de Firecracker.
 - **Techo de CPU por máquina** con su propio cgroup (`-cpu-pct`, 50% de un core por
   defecto): un invitado en bucle no se come el host.
 - **Tope de máquinas** (`MaxMachines = 256`) para que un cliente comprometido no agote el host.
