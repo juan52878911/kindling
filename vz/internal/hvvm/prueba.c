@@ -64,7 +64,7 @@ int khv_prueba(const uint8_t *d, size_t n) {
   memcpy(g_ram, d + 64, l);
 
   mmio_fn devs[] = {blk_mmio, vnet_mmio, vrng_mmio, vsock_mmio, vballoon_mmio};
-  int ncolas[] = {1, 2, 1, 3, 2};
+  int ncolas[] = {1, 2, 1, 3, 3};
   int k = d[0] % 5;
   mmio_fn f = devs[k];
   w(f, 0x070, 0);  // reset: cada prueba empieza de cero

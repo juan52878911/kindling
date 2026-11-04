@@ -32,7 +32,7 @@
 // La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
 // upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
 // nuevo congeló.
-#define KHV_SNAP_VERSION 2
+#define KHV_SNAP_VERSION 3
 #define RAM_BASE 0x80000000ULL
 
 #define MAX_CPUS 8
@@ -83,7 +83,8 @@ void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), i
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
-void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie);
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
+                      uint64_t *pie);
 
 // ---- interno ----
 
@@ -266,9 +267,28 @@ int khv_vsock_prueba_cierre(int medio);
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {
   struct vmmio m;
-  struct vq q[2];
+  struct vq q[3];              // inflate, deflate, stats
   uint32_t num_pages, actual;  // en marcos de 4 KiB
+  // El búfer de estadísticas que el driver dejó y el dispositivo retiene
+  // (se le devuelve para pedir otras): su head, y si lo hay.
+  uint16_t stats_head;
+  uint8_t stats_pend, pad;
 };
+// La versión 2 del snapshot no tenía la cola de estadísticas: khv_restore
+// la lee con esta forma y la convierte.
+struct vballoon_state_v2 {
+  struct vmmio m;
+  struct vq q[2];
+  uint32_t num_pages, actual;
+};
+// KHV_BALLOON_NSTATS: etiquetas de virtio-balloon (VIRTIO_BALLOON_S_*).
+#define KHV_BALLOON_NSTATS 16
+// khv_balloon_stats devuelve las últimas estadísticas del invitado (bytes,
+// por etiqueta) y el globo actual en marcos, y le pide otras nuevas; si no
+// hay ninguna todavía (recién restaurado) o tienen más de un segundo espera
+// hasta espera_ms a que lleguen. -1 sin globo o con la VM en pausa; -2 si el driver nunca ha
+// dado estadísticas (no negoció la cola).
+int khv_balloon_stats(uint64_t out[KHV_BALLOON_NSTATS], uint32_t *actual, int espera_ms);
 int vballoon_init(uint32_t intid, bool deflate_on_oom);
 bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
 void vballoon_objetivo(uint32_t marcos);

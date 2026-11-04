@@ -1,7 +1,7 @@
 //go:build darwin && arm64
 
-// virtio-balloon (virtio-mmio, id 5; colas inflate=0 y deflate=1, sin la de
-// estadísticas): el techo de memoria (-mem-max) y kling squeeze.
+// virtio-balloon (virtio-mmio, id 5; colas inflate=0, deflate=1 y stats=2):
+// el techo de memoria (-mem-max) y kling squeeze.
 //
 // El invitado entrega marcos de 4 KiB (VIRTIO_BALLOON_PFN_SHIFT) y la página
 // del host es de 16 KiB, así que se lleva un mapa de bits de marcos inflados y
@@ -13,7 +13,9 @@
 // que estuvo en el globo no le importa lo que tenga.
 //
 // Corre en el hilo del vCPU: un mmap y un remapeo de HVF por tramo contiguo.
+#include <mach/mach_time.h>
 #include <string.h>
+#include <time.h>
 
 #include "khv.h"
 
@@ -27,6 +29,18 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *mapa;  // un bit por marco de 4 KiB de la RAM
 static uint64_t nmarcos;
 static uint64_t paginas_sueltas;  // páginas del host soltadas ahora mismo
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+// Últimas estadísticas del invitado (VIRTIO_BALLOON_S_*, en bytes) y cuántas
+// veces han llegado: 0 = el driver no negoció la cola o aún no las dio.
+static uint64_t stats[KHV_BALLOON_NSTATS];
+static uint32_t stats_gen;
+static uint64_t stats_t;  // mach_absolute_time() de las últimas
+static mach_timebase_info_data_t tb;
+
+static uint64_t ms_abs(uint64_t ms) {
+  if (tb.denom == 0) mach_timebase_info(&tb);
+  return ms * 1000000ULL * tb.denom / tb.numer;
+}
 
 static void irq(void) { vmmio_irq(&s.m, intid); }
 
@@ -95,12 +109,96 @@ static void cola(int qi, bool inflar) {
   }
 }
 
+// cola_stats recoge el búfer de estadísticas que deja el driver (pares
+// {le16 etiqueta, le64 valor}, sin relleno) y se lo queda: devolvérselo es
+// la forma de pedir otras (khv_balloon_stats). Con mu.
+static void cola_stats(void) {
+  struct vq *q = &s.q[2];
+  uint16_t *avail;
+  uint8_t *used;
+  struct vdesc *desc;
+  if (!vq_ptrs(q, &avail, &used, &desc)) return;
+  int vueltas = 0;
+  for (;;) {
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (q->last_avail == *(volatile uint16_t *)&avail[1] || vueltas++ >= (int)q->num) break;
+    uint16_t head = avail[2 + q->last_avail % q->num];
+    q->last_avail++;
+    uint8_t buf[KHV_BALLOON_NSTATS * 10];
+    uint32_t n = vq_leer(q, desc, head, buf, sizeof buf) / 10;
+    for (uint32_t k = 0; k < n; k++) {
+      uint16_t tag;
+      uint64_t val;
+      memcpy(&tag, buf + k * 10, 2);
+      memcpy(&val, buf + k * 10 + 2, 8);
+      if (tag < KHV_BALLOON_NSTATS) stats[tag] = val;
+    }
+    // Solo se retiene uno: si el driver dejó más, los anteriores vuelven.
+    if (s.stats_pend) vq_push(q, used, s.stats_head, 0);
+    s.stats_head = head;
+    s.stats_pend = 1;
+    stats_gen++;
+    stats_t = mach_absolute_time();
+  }
+  pthread_cond_broadcast(&cv);
+}
+
+int khv_balloon_stats(uint64_t out[KHV_BALLOON_NSTATS], uint32_t *actual, int espera_ms) {
+  pthread_mutex_lock(&mu);
+  if (!mapa || g_pausa) {
+    pthread_mutex_unlock(&mu);
+    return -1;
+  }
+  // Sin estadísticas aún y sin búfer del driver: no negoció la cola. Con
+  // búfer (restaurado de un snapshot: el driver lo dejó en otra vida de este
+  // proceso) se le devuelve y se esperan las primeras.
+  if (stats_gen == 0 && !s.stats_pend) {
+    pthread_mutex_unlock(&mu);
+    return -2;
+  }
+  // Se devuelven las últimas y se piden otras; se espera a que lleguen solo
+  // si no hay ninguna (recién restaurado) o tienen más de un segundo (las
+  // del arranque, en el primer squeeze). Como el sondeo de Firecracker: el
+  // que pregunta cada 100 ms mientras el globo se infla ve las de la vuelta
+  // anterior, y el driver, que las recoge en una cola de trabajo, no lo
+  // retiene.
+  uint32_t gen = stats_gen;
+  bool esperar = stats_gen == 0 || mach_absolute_time() - stats_t > ms_abs(1000);
+  if (s.stats_pend) {
+    uint16_t *avail;
+    uint8_t *used;
+    struct vdesc *desc;
+    if (vq_ptrs(&s.q[2], &avail, &used, &desc)) {
+      vq_push(&s.q[2], used, s.stats_head, 0);
+      s.stats_pend = 0;
+      s.m.isr |= 1;
+      irq();
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += (long)espera_ms * 1000000L;
+    ts.tv_sec += ts.tv_nsec / 1000000000L;
+    ts.tv_nsec %= 1000000000L;
+    while (esperar && stats_gen == gen && !g_pausa && pthread_cond_timedwait(&cv, &mu, &ts) == 0) {
+    }
+  }
+  memcpy(out, stats, sizeof stats);
+  *actual = s.actual;
+  pthread_mutex_unlock(&mu);
+  return 0;
+}
+
 int vballoon_init(uint32_t id, bool deflate_on_oom) {
   intid = id;
   memset(&s, 0, sizeof s);
-  // VIRTIO_BALLOON_F_DEFLATE_ON_OOM (2): el invitado puede desinflar solo si
-  // se queda sin memoria, como el deflate_on_oom de Firecracker.
-  feat = deflate_on_oom ? (1u << 2) : 0;
+  // VIRTIO_BALLOON_F_STATS_VQ (1): la cola de estadísticas, con la que
+  // kling squeeze sabe cuánta memoria libre tiene el invitado sin preguntar
+  // al agente. VIRTIO_BALLOON_F_DEFLATE_ON_OOM (2): el invitado puede
+  // desinflar solo si se queda sin memoria, como el deflate_on_oom de
+  // Firecracker.
+  feat = (1u << 1) | (deflate_on_oom ? (1u << 2) : 0);
+  memset(stats, 0, sizeof stats);
+  stats_gen = 0;
   nmarcos = g_ram_size / MARCO;
   mapa = calloc((size_t)(nmarcos + 7) / 8, 1);
   if (!mapa) {
@@ -126,10 +224,11 @@ bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
     return true;
   }
   uint32_t c = 0;
-  switch (vmmio_acceso(&s.m, s.q, 2, 5, feat, off, escribir, val, &c)) {
+  switch (vmmio_acceso(&s.m, s.q, 3, 5, feat, off, escribir, val, &c)) {
     case VM_NOTIFY:
       if (c == 0) cola(0, true);
       else if (c == 1) cola(1, false);
+      else if (c == 2) cola_stats();
       break;
     case VM_ISR: irq(); break;
     case VM_RESET: {
@@ -142,6 +241,8 @@ bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
       memset(&s, 0, sizeof s);
       s.m.nivel = nivel;
       s.num_pages = num;
+      stats_gen = 0;
+      memset(stats, 0, sizeof stats);
       irq();
       break;
     }

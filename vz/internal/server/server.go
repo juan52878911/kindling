@@ -634,11 +634,21 @@ func (s *Server) patchBalloon(w http.ResponseWriter, r *http.Request) {
 	noContent(w)
 }
 
-// getBalloonStats: el framework no da estadísticas del invitado, así que la
-// memoria va a 0, que el núcleo lee como "desconocido".
+// balloonStatser lo cumple el VMM que sabe leer las estadísticas del globo
+// del invitado (kling-hv, con su cola de estadísticas). Los bytes son los de
+// virtio-balloon; ActualMiB lo inflado ahora mismo.
+type balloonStatser interface {
+	BalloonStats() (free, available, total uint64, actualMiB int, ok bool)
+}
+
+// getBalloonStats: con kling-hv, lo que dice el driver del invitado (y
+// kling squeeze reclama lo libre sin preguntar al agente); con kling-vz el
+// framework no da estadísticas, así que la memoria va a 0, que el núcleo lee
+// como "desconocido".
 func (s *Server) getBalloonStats(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	b := s.spec.Balloon
+	vm := s.vm
 	var amount int
 	if b != nil {
 		amount = b.AmountMiB
@@ -647,6 +657,15 @@ func (s *Server) getBalloonStats(w http.ResponseWriter, _ *http.Request) {
 	if b == nil {
 		fault(w, errors.New("the balloon device is not configured"))
 		return
+	}
+	if bs, ok := vm.(balloonStatser); ok && vm != nil {
+		if free, avail, total, actual, ok := bs.BalloonStats(); ok {
+			writeJSON(w, map[string]any{
+				"target_mib": amount, "actual_mib": actual,
+				"free_memory": free, "available_memory": avail, "total_memory": total,
+			})
+			return
+		}
 	}
 	writeJSON(w, map[string]any{
 		"target_mib": amount, "actual_mib": amount,

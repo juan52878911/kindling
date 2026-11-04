@@ -303,7 +303,7 @@ const (
 	formatoVZMax  = 3
 	magiaHV       = 0x4b4c4e4748563032 // "KLNGHV02"
 	magiaHVPrefix = 0x4b4c4e474856     // "KLNGHV", sin la generación
-	versionHVMax  = 2
+	versionHVMax  = 3
 )
 
 // causaFormatoVolcado mira el volcado de dir: "kling_vz" de snap.file para

@@ -142,8 +142,10 @@ struct cpu_state {
 };
 
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
-// 2 añade vsock al final de la cabecera; una de la versión 1 (sin él) se lee
-// como un prefijo.
+// 2 añade vsock y el globo al final de la cabecera; 3 le da al globo su cola
+// de estadísticas (struct vballoon_state crece). Una cabecera de la versión
+// 1 se lee como un prefijo; una de la 2, igual salvo el globo, que se
+// convierte (vballoon_state_v2).
 #define SNAP_VERSION KHV_SNAP_VERSION
 struct snap_hdr {
   uint64_t magic;
@@ -168,6 +170,12 @@ struct snap_hdr {
   struct vballoon_state globo;
 };
 #define SNAP_HDR_V1 offsetof(struct snap_hdr, hay_vsock)
+// La versión 2 era sizeof(struct snap_hdr) con el globo de entonces: el
+// final redondeado a la alineación de la cabecera (16, por los registros
+// SIMD de cpu_state).
+#define SNAP_HDR_V2                                                                                   \
+  ((offsetof(struct snap_hdr, globo) + sizeof(struct vballoon_state_v2) + _Alignof(struct snap_hdr) - 1) & \
+   ~(_Alignof(struct snap_hdr) - 1))
 
 struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
@@ -175,11 +183,13 @@ struct snap_pie {
 
 // Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
 // subir SNAP_VERSION rompería los mem.file que ya hay en disco.
-void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie) {
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
+                      uint64_t *pie) {
   *magia = SNAP_MAGIC;
   *version = SNAP_VERSION;
   *hdr = sizeof(struct snap_hdr);
   *hdr_v1 = SNAP_HDR_V1;
+  *hdr_v2 = SNAP_HDR_V2;
   *pie = sizeof(struct snap_pie);
 }
 
@@ -986,14 +996,16 @@ int khv_restore(const char *mem_path) {
   static struct snap_hdr h;
   if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof pie ||
       leer_todo(fd, &pie, sizeof pie, st.st_size - (off_t)sizeof pie) != 0 || pie.magic != SNAP_MAGIC ||
-      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1) || pie.hdr_off > (uint64_t)st.st_size ||
+      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1 && pie.hdr_len != SNAP_HDR_V2) ||
+      pie.hdr_off > (uint64_t)st.st_size ||
       pie.hdr_len > (uint64_t)st.st_size - pie.hdr_off ||
       (memset(&h, 0, sizeof h), leer_todo(fd, &h, pie.hdr_len, (off_t)pie.hdr_off)) != 0 || h.magic != SNAP_MAGIC) {
     close(fd);
     fallo("%s is not a kling-hv memory file (or was written by another version)", mem_path);
     return -1;
   }
-  if (h.version != SNAP_VERSION && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1)) {
+  if (h.version != SNAP_VERSION && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1) &&
+      !(h.version == 2 && pie.hdr_len == SNAP_HDR_V2)) {
     close(fd);
     fallo("%s: snapshot state version %u, this kling-hv reads %u", mem_path, h.version, SNAP_VERSION);
     return -1;
@@ -1002,6 +1014,23 @@ int khv_restore(const char *mem_path) {
     // Una cabecera anterior no tiene vsock ni globo: el invitado nunca vio
     // esos dispositivos (van detrás de los demás), así que no existen.
     hay_vsock = hay_globo = false;
+  } else if (h.version == 2) {
+    // El globo de la versión 2 (sin cola de estadísticas) quedó leído con
+    // la forma nueva: se vuelve a leer con la suya y se convierte. Sus dos
+    // colas y su estado siguen; la de estadísticas la negociará el driver
+    // solo si arranca de nuevo (un invitado restaurado no la vio).
+    struct vballoon_state_v2 g2;
+    if (leer_todo(fd, &g2, sizeof g2, (off_t)(pie.hdr_off + offsetof(struct snap_hdr, globo))) != 0) {
+      close(fd);
+      fallo("%s: reading the balloon state", mem_path);
+      return -1;
+    }
+    memset(&h.globo, 0, sizeof h.globo);
+    h.globo.m = g2.m;
+    h.globo.q[0] = g2.q[0];
+    h.globo.q[1] = g2.q[1];
+    h.globo.num_pages = g2.num_pages;
+    h.globo.actual = g2.actual;
   }
   if (h.ram_size != g_ram_size || (int)h.ncpus != ncpus || (int)h.ndisks != ndisks || (bool)h.hay_red != hay_red ||
       (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || (bool)h.hay_globo != hay_globo ||

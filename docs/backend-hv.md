@@ -53,7 +53,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
-| globo | virtio-balloon sin cola de estadísticas: `squeeze`, `-mem-max` y `resize` (abajo) |
+| globo | virtio-balloon con cola de estadísticas (`VIRTIO_BALLOON_F_STATS_VQ`): `GET /balloon/statistics` da la memoria libre, disponible y total que ve el driver del invitado, así que `squeeze` reclama lo libre de verdad sin preguntar al agente; `-mem-max` y `resize` (abajo) |
 | sin | pantalla |
 
 Todas las colas pasan por un único recorrido de cadenas con topes
@@ -124,6 +124,14 @@ vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
 [ram, ...)   estado: vCPU, dispositivos, estado del GIC
 pie (32 B)   magia KLNGHV02, tamaño de la RAM, dónde está el estado
 ```
+
+El estado lleva una versión (3 desde que el globo tiene su cola de
+estadísticas; la 2 la añadía a él y a vsock al final): un `kling-hv` lee
+las anteriores, que son un prefijo de la suya (la 2 convierte el globo), y
+el daemon rechaza una del futuro con el mensaje de `versionHVMax`
+(`internal/machine/meta.go`). Un invitado restaurado de una versión 2 no
+negoció la cola de estadísticas: `squeeze` vuelve al agente hasta que
+arranque de nuevo.
 
 Se hace clonando (APFS, `fclonefileat`) el fichero que respalda la RAM y
 escribiendo encima las páginas que el invitado cambió según `mincore`

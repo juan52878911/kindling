@@ -304,6 +304,24 @@ func (m *machine) SetBalloonTargetMiB(mib int) error {
 	return nil
 }
 
+// BalloonStats son las estadísticas de memoria que da el driver del globo
+// del invitado (VIRTIO_BALLOON_F_STATS_VQ), en bytes, y el globo actual en
+// MiB; ok=false si la VM no tiene globo, está en pausa o el driver no
+// negoció la cola (un invitado restaurado de antes de que existiera). Es lo
+// que sirve GET /balloon/statistics (server.balloonStatser).
+func (m *machine) BalloonStats() (free, available, total uint64, actualMiB int, ok bool) {
+	var v [C.KHV_BALLOON_NSTATS]C.uint64_t
+	var actual C.uint32_t
+	// Las últimas que dio el driver, pidiéndole otras para la próxima vez;
+	// si tienen más de un segundo (o no hay, recién restaurado) se esperan
+	// hasta 100 ms.
+	if C.khv_balloon_stats(&v[0], &actual, 100) != 0 {
+		return 0, 0, 0, 0, false
+	}
+	// Etiquetas de virtio-balloon: 4 MEMFREE, 5 MEMTOT, 6 AVAIL.
+	return uint64(v[4]), uint64(v[6]), uint64(v[5]), int(actual) / 256, true
+}
+
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
