@@ -1428,7 +1428,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		req.CPUPct = m.techoCPUPorDefecto(snap.Image, max(req.VCPUs, snap.VCPUs), req.CPUPctDefault)
 	}
 
-	id := newID()
+	id := m.nuevoIDMaquina()
 	if req.Name == "" {
 		req.Name = req.From + "-" + id[:6]
 	}

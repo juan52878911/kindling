@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -122,7 +123,7 @@ func topeImpulso(pct, vcpus, nucleos int) int {
 
 // dirCgroup es el directorio del cgroup de la máquina id.
 func (m *Manager) dirCgroup(id string) string {
-	return filepath.Join(m.cgroupRoot, "kl-"+id[:8])
+	return filepath.Join(m.cgroupRoot, "kl-"+knet.Corto(id))
 }
 
 // escribirCPUMax fija el techo de CPU en el cgroup dir. cpu.max =
