@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -198,16 +197,14 @@ func TestVigilarSalidaDeUnProcesoQueYaNoExiste(t *testing.T) {
 	pid := cmd.Process.Pid
 	_ = cmd.Wait()
 	avisado := make(chan struct{})
-	var dentro sync.Mutex // tomado mientras dura vigilarSalida
-	dentro.Lock()
+	fuera := make(chan struct{}) // se cierra cuando vuelve vigilarSalida
 	if !vigilarSalida(pid, func() {
-		dentro.Lock() // si fn corriera dentro de la llamada, esto la colgaría
-		dentro.Unlock()
+		<-fuera // si fn corriera dentro de la llamada, esto la colgaría
 		close(avisado)
 	}) {
 		t.Skip("esta plataforma no sabe vigilar procesos ajenos")
 	}
-	dentro.Unlock()
+	close(fuera)
 	select {
 	case <-avisado:
 	case <-time.After(3 * time.Second):
