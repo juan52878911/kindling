@@ -158,7 +158,9 @@ donde lo busca, y `kling upgrade` lo cambia con lo demás. Para usar otro,
 puerto de `EXPOSE` no se publica solo en el host: el gateway o `-label
 kling.ports=N` (ver [`docker.md`](docker.md)).
 
-El resto de imágenes (`min`, MCP, chispa...) **no se construyen en macOS**:
+Los constructores `debian` y `oci` (y `android`) también corren en el Mac: son Go
+puro, y el daemon los ejecuta como `kling builder <nombre>`. El resto de imágenes
+(`min`, MCP, chispa..., de los constructores de shell) **no se construyen en macOS**:
 necesitan root, dispositivos loop y chroot de Linux. `POST /images` contesta 501
 y dice qué hacer. Se construyen en un host Linux y se **copian**:
 
@@ -400,7 +402,7 @@ medido están en [benchmarks.md](benchmarks.md#energy-on-the-mac).
 | | Linux (firecracker) | macOS (vz) |
 |---|---|---|
 | memoria de una restauración | se comparte el `mem.file` del dorado por copia en escritura: una copia más cuesta lo que diverge | **~350 MiB por VM**: el framework copia el estado a memoria al restaurar; la densidad de dorados es mucho menor |
-| construir imágenes | sí (`kling image build`, `toolchain`) | **no**: se copian (`kling image copy`) |
+| construir imágenes | sí (`kling image build`, `toolchain`) | con los constructores sin root (`debian`, `oci`, `android`, y `kling image import`); las de los constructores de shell se copian (`kling image copy`) |
 | capas con `verity` (constructores `debian`, `android`) | con un núcleo con `CONFIG_DM_VERITY` | igual, con el mismo `Image` arm64 de `scripts/builders/kernel` o el de Android: probado en un M4 (montada por `/dev/mapper`, `sha256-ce`, un byte cambiado para el arranque; [imagenes.md](imagenes.md#verity-en-kling-vz-mac-m4-2026-10-01)). Con un núcleo sin device-mapper la capa no se monta y el invitado entra en pánico; en vz eso es un bucle de reinicios con la máquina `running`, no `failed` |
 | `kling image put`, `mcp refresh-bridge` | montan la imagen con un loop | sin montar, con `debugfs -w` (e2fsprogs de Homebrew): mismo contrato (modo pedido, dueño root, copia al lado y cambio de entrada solo con la copia comprobada, crece la imagen si no cabe, e2fsck antes y después). Los enlaces simbólicos de los directorios se siguen siempre dentro de la imagen. Una ruta con comillas, barras invertidas o caracteres de control se rechaza |
 | techo de CPU por microVM (`-cpu-pct`) | cgroup v2 | lo aplica `kling-vz`, con el mismo significado que `cpu.max`: % de UN núcleo para la VM entera (2 vCPU con `-cpu-pct 50` gastan medio núcleo entre las dos; `cpu_pct_per_vcpu` de la receta es por vCPU). No hay forma de tocar un hilo de vCPU suelto (el auxiliar de Apple no da su puerto de tarea) y ni el nice ni `taskpolicy -b` son un techo, así que se para el auxiliar entero: un cubo de fichas que, al vaciarse, lo para con SIGSTOP 20 ms (un proceso freno aparte, en su propio sandbox, manda las señales). El invitado ve pasar ese tiempo, como bajo `cpu.max`; pausar la VM por el framework, lo de antes, le paraba también el reloj (23 s de retraso en 30 s regulado). Medido en un M4 con `yes` dentro: el techo se cumple (50 % con `-cpu-pct 50`, 1 y 2 vCPU) y `kling exec true` pasa de p99 117-324 ms a 34-78 ms. Hasta que el agente escucha, el techo es `max(pct, 100)`, como el impulso de arranque de Linux. Cuesta un proceso más por VM (~8 MiB) **Por defecto, sin techo** (todas las vCPU) si la máquina no pide `cpu_pct`: regular una VM de vz multiplica la pérdida de páginas de RAM del invitado que hace macOS bajo presión (#87, `prototypes/android/docs/sigill.md`); en Linux el defecto sigue siendo media vCPU |

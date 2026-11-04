@@ -339,9 +339,11 @@ Shell completion ships with the binary: `source <(kling completion bash)` or
 
 **Native (v0.9, macOS 14+):** the daemon runs on the Mac itself with the `vz` backend —
 one `kling-vz` helper per microVM, speaking Firecracker's API on top of
-Virtualization.framework. No root, no Linux VM. Images are built on a Linux arm64 host and
-streamed over with `kling image copy <name> -from ssh://user@host`. Restores cost ~350
-MiB each (no shared golden memory), and there are no image builds, CPU caps or jailer.
+Virtualization.framework. No root, no Linux VM. The rootless builders (`debian`, `oci`,
+`android`, and `kling image import`) run on the Mac; images from the shell builders (`min`,
+MCP...) are built on a Linux arm64 host and streamed over with
+`kling image copy <name> -from ssh://user@host`. Restores cost ~350 MiB each (no shared
+golden memory), and there are no CPU caps or jailer.
 Install, launchd agent and limits: [`docs/mac.md`](mac.md).
 
 ```sh

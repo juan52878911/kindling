@@ -342,10 +342,11 @@ El autocompletado viene con el binario: `source <(kling completion bash)` o
 
 **Nativo (v0.9, macOS 14+):** el daemon corre en el propio Mac con el backend `vz` —un
 ayudante `kling-vz` por microVM que habla el API de Firecracker sobre
-Virtualization.framework—. Sin root y sin VM Linux. Las imágenes se construyen en un
-host Linux arm64 y se traen con `kling image copy <nombre> -from ssh://usuario@host`.
-Cada restauración cuesta ~350 MiB (no se comparte la memoria del dorado), y no hay
-construcción de imágenes, techo de CPU ni jailer. Instalación, agente de launchd y
+Virtualization.framework—. Sin root y sin VM Linux. Los constructores sin root (`debian`,
+`oci`, `android` y `kling image import`) corren en el Mac; las imágenes de los
+constructores de shell (`min`, MCP...) se construyen en un host Linux arm64 y se traen
+con `kling image copy <nombre> -from ssh://usuario@host`. Cada restauración cuesta
+~350 MiB (no se comparte la memoria del dorado), y no hay techo de CPU ni jailer. Instalación, agente de launchd y
 límites: [`docs/mac.md`](mac.md).
 
 ```sh
