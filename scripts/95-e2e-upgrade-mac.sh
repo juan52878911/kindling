@@ -32,6 +32,8 @@
 #               macOS Go no lee SSL_CERT_FILE, así que no hay servidor local
 #   IMAGES_DIR  vmlinux, min.ext4 y, si está, toolchain.layer.ext4 con su receta
 #               (los de un daemon Linux arm64: docs/mac.md)
+#   KLING_MIN_FREE_DISK_MIB  pasa al daemon de launchd (en el Mac no arranca
+#               máquinas con menos de 16 GiB libres si no)
 #   BASE        dónde vive todo (por defecto $TMPDIR/kt-e2e-upgrade-mac)
 #   KEEP=1      no limpia al terminar
 #
@@ -183,6 +185,14 @@ VMM_ENV=""
 [ -n "$VMM" ] && VMM_ENV="    <key>KLING_VMM</key>
     <string>$VMM</string>
 "
+# Y el mínimo de disco libre, si se dio: en el Mac son 16 GiB por defecto.
+case "${KLING_MIN_FREE_DISK_MIB:-}" in
+  "") ;;
+  *[!0-9]*) die "KLING_MIN_FREE_DISK_MIB: a number of MiB";;
+  *) VMM_ENV="$VMM_ENV    <key>KLING_MIN_FREE_DISK_MIB</key>
+    <string>$KLING_MIN_FREE_DISK_MIB</string>
+";;
+esac
 copiar() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 for f in vmlinux min.ext4; do copiar "$IMAGES_DIR/$f" "$ROOT/images/$f" || die "no $IMAGES_DIR/$f"; done
 IMAGE=min
