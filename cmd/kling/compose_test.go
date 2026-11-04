@@ -68,3 +68,27 @@ func TestShellWords(t *testing.T) {
 		t.Error("unbalanced quote accepted")
 	}
 }
+
+// compose exec manda stdin como kling exec: si no es una terminal, o con -i.
+// Una terminal en stdin con la salida a una tubería no se lee sin pedirlo.
+func TestModoComposeExec(t *testing.T) {
+	casos := []struct {
+		sinTTY, conStdin, stdinTTY, stdoutTTY bool
+		sub                                   string
+		conI                                  bool
+	}{
+		{false, false, true, true, "shell", false},
+		{false, true, true, true, "shell", false},
+		{true, false, true, true, "exec", false},
+		{false, false, true, false, "exec", false}, // | tee
+		{false, true, true, false, "exec", true},   // | tee con -i
+		{false, false, false, true, "exec", true},  // < fichero
+		{true, false, false, false, "exec", true},
+	}
+	for _, c := range casos {
+		sub, conI := modoComposeExec(c.sinTTY, c.conStdin, c.stdinTTY, c.stdoutTTY)
+		if sub != c.sub || conI != c.conI {
+			t.Errorf("%+v: %s -i=%v", c, sub, conI)
+		}
+	}
+}
