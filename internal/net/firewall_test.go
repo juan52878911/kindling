@@ -249,3 +249,64 @@ func TestApplyIPv6BarrierSiguePeseAUnSysctlQueFalla(t *testing.T) {
 		t.Fatalf("un sysctl que falla no debe tumbar applyIPv6Barrier: %v", err)
 	}
 }
+
+// SetGraph no solo pone reglas de enlace: quita las de aristas que ya no están
+// o que cambiaron de slot. Si no, el DNAT viejo P -> slot llevaría el puerto P
+// a la arista nueva que ocupe ese slot. Lo demás del netns no se toca.
+func TestReglasEnlaceSobrantes(t *testing.T) {
+	n := Plan(5, "0123456789abcdef")
+	h := n.HostIP
+	dnat := func(dport, slot int) string {
+		return fmt.Sprintf("-A PREROUTING -d %s/32 -i %s -p tcp -m tcp --dport %d -j DNAT --to-destination %s:%d",
+			h, TapName, dport, h, linkBasePortRango+slot)
+	}
+	accept := func(slot int) string {
+		return fmt.Sprintf("-A FORWARD -d %s/32 -i %s -o %s -p tcp -m tcp --dport %d -m conntrack ! --ctstate INVALID -j ACCEPT",
+			h, TapName, n.NSIf, linkBasePortRango+slot)
+	}
+	// Antes: api:8080 (slot 0), db:5432 (slot 1), web:9000 (slot 2).
+	nat := []string{
+		"-P PREROUTING ACCEPT",
+		dnat(8080, 0), dnat(5432, 1), dnat(9000, 2),
+		fmt.Sprintf("-A PREROUTING -i %s -p udp -m udp --dport 53 -j DNAT --to-destination %s:%d", TapName, h, dnsPort),
+		fmt.Sprintf("-A PREROUTING -d %s/32 -i %s -p tcp -m tcp --dport 5432 -j DNAT --to-destination %s:%d", h, TapName, h, pgPort),
+		fmt.Sprintf("-A PREROUTING -i %s -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.9.9.9:%d", TapName, linkBasePortRango),
+		"",
+	}
+	forward := []string{
+		"-P FORWARD DROP",
+		accept(0), accept(1), accept(2),
+		fmt.Sprintf("-A FORWARD -d %s/32 -i %s -o %s -p udp -m udp --dport %d -j ACCEPT", h, TapName, n.NSIf, dnsPort),
+		fmt.Sprintf("-A FORWARD -d %s/32 -p tcp -m tcp --dport %d:%d -j ACCEPT", h, linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1),
+	}
+	// Después: db:5432 (slot 0) y zz:7000 (slot 1).
+	got := map[string]bool{}
+	for _, r := range n.reglasEnlaceSobrantes(nat, forward, []int{5432, 7000}) {
+		got[strings.Join(r, " ")] = true
+	}
+	want := map[string]bool{
+		"-t nat " + strings.Replace(dnat(8080, 0), "-A", "-D", 1): true,
+		"-t nat " + strings.Replace(dnat(5432, 1), "-A", "-D", 1): true,
+		"-t nat " + strings.Replace(dnat(9000, 2), "-A", "-D", 1): true,
+		strings.Replace(accept(2), "-A", "-D", 1):                 true,
+	}
+	if len(got) != len(want) {
+		t.Errorf("sobran %d reglas, quería %d: %v", len(got), len(want), got)
+	}
+	for r := range want {
+		if !got[r] {
+			t.Errorf("no se borra: %s", r)
+		}
+	}
+
+	// Idempotente: con las reglas ya al día no sobra nada.
+	nat = []string{dnat(5432, 0), dnat(7000, 1)}
+	forward = []string{accept(0), accept(1)}
+	if r := n.reglasEnlaceSobrantes(nat, forward, []int{5432, 7000}); len(r) != 0 {
+		t.Errorf("con las reglas al día sobran %v", r)
+	}
+	// Sin aristas se va todo lo de enlace.
+	if r := n.reglasEnlaceSobrantes(nat, forward, nil); len(r) != 4 {
+		t.Errorf("sin aristas sobran %d reglas, quería 4: %v", len(r), r)
+	}
+}
