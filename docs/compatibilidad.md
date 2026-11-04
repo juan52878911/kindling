@@ -84,8 +84,12 @@ Una sola versión para todo el repo. En lo estable:
   y su copia `.v<N>.bak`. La excepción son los grafos: su `format` 1 solo
   añade el campo, que un kling anterior ignora y lee igual, así que se migran
   sin copia (`internal/machine/grafo.go`);
-- escribir una versión nueva de `kling_vz` o `KLNGHV`, siempre la más baja que
-  describe la máquina;
+- escribir una versión nueva de `kling_vz` (siempre la más baja que describe
+  la máquina) o de `KLNGHV`. `kling-hv` escribe **siempre la suya**
+  (`SNAP_VERSION` en `vz/internal/hvvm/vm.c`), sea cual sea la máquina, y no
+  hay bajada: lo que congela un `kling-hv` con la v3 no lo lee uno que solo
+  lee la v2, así que volver a una release anterior deja esas congeladas y
+  dorados `stale` (`kling upgrade -rollback` lo comprueba antes de volver);
 - deprecar (abajo), y cambiar lo experimental.
 
 **PATCH** (1.x.y): arreglos. Ningún formato cambia de versión, así que se puede
