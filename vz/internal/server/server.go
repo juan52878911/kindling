@@ -48,6 +48,12 @@ type VM interface {
 	Stopped() <-chan error
 }
 
+// endReasoner es la VM que sabe decir por qué terminó (kling-hv: el
+// invitado se apagó, pidió reiniciarse...). Vale tras recibir de Stopped.
+type endReasoner interface {
+	EndReason() string
+}
+
 // VsockDialer es lo que una VM con virtio-vsock (Spec.Vsock) ofrece: una
 // conexión nueva al puerto port del invitado.
 type VsockDialer interface {
@@ -1485,6 +1491,8 @@ func (s *Server) watch(vm VM) {
 	}
 	if err != nil {
 		s.d.Logf("the VM stopped with an error: %v", err)
+	} else if r, ok := vm.(endReasoner); ok && r.EndReason() != "" {
+		s.d.Logf("the guest stopped: %s", r.EndReason())
 	} else {
 		s.d.Logf("the guest stopped")
 	}

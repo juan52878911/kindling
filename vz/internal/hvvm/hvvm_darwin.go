@@ -70,6 +70,31 @@ func errC(op string) error {
 	return fmt.Errorf("%s: %s", op, C.GoString(C.khv_error()))
 }
 
+// motivoFin dice por qué terminó la VM (khv_fin_motivo), o "" si sigue.
+func motivoFin() string {
+	switch C.khv_fin_motivo() {
+	case C.KHV_FIN_APAGADO:
+		return "the guest powered off"
+	case C.KHV_FIN_REINICIO:
+		return "the guest rebooted (SYSTEM_RESET)"
+	case C.KHV_FIN_PARADA:
+		return "stopped by the host"
+	case C.KHV_FIN_FALLO:
+		return C.GoString(C.khv_error())
+	}
+	return ""
+}
+
+// errPausa es el error de un khv_pause o khv_resume que devolvió -1: si la
+// VM ya terminó, eso y por qué; si no, el texto de vm.c (un vCPU que no llegó
+// a pausarse a tiempo, por ejemplo), y la VM sigue corriendo.
+func errPausa() error {
+	if por := motivoFin(); por != "" {
+		return fmt.Errorf("the VM has stopped: %s", por)
+	}
+	return errors.New(C.GoString(C.khv_error()))
+}
+
 // Create configura la VM: el GIC y los dispositivos, sin RAM todavía (la pone
 // Start, o RestoreState con el fichero del snapshot). La línea de comandos es
 // la de Firecracker tal cual (consola ttyS0, sin PCI): kling-hv tiene el mismo
@@ -202,6 +227,7 @@ type machine struct {
 	net     *os.File // se guarda para que no lo cierre el recolector
 	vsock   bool
 	memMiB  int
+	fin     string // por qué terminó (motivoFin); se escribe antes de enviar a stopped
 }
 
 func (m *machine) esperar() {
@@ -210,6 +236,7 @@ func (m *machine) esperar() {
 	if code != 0 {
 		err = errors.New(C.GoString(C.khv_error()))
 	}
+	m.fin = motivoFin()
 	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop).
 	C.vnet_parar()
 	if n := ConsoleDropped(); n > 0 && m.f.Logf != nil {
@@ -229,14 +256,14 @@ func (m *machine) Start() error {
 
 func (m *machine) Pause() error {
 	if C.khv_pause(C.KHV_PAUSA_API) != 0 {
-		return errors.New("the VM has stopped")
+		return errPausa()
 	}
 	return nil
 }
 
 func (m *machine) Resume() error {
 	if C.khv_resume(C.KHV_PAUSA_API) != 0 {
-		return errors.New("the VM has stopped")
+		return errPausa()
 	}
 	return nil
 }
@@ -341,6 +368,9 @@ func (m *machine) BalloonStats() (free, available, total uint64, actualMiB int, 
 
 func (m *machine) Stopped() <-chan error { return m.stopped }
 
+// EndReason dice por qué terminó la VM; vale tras recibir de Stopped.
+func (m *machine) EndReason() string { return m.fin }
+
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.
 const VersionVolcado = C.KHV_SNAP_VERSION
@@ -398,7 +428,7 @@ func Freeze(stop bool) error {
 		r = C.khv_resume(C.KHV_PAUSA_FRENO)
 	}
 	if r != 0 {
-		return errors.New("the VM has stopped")
+		return errPausa()
 	}
 	return nil
 }
