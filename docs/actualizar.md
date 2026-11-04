@@ -100,7 +100,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | unidades de systemd | `packaging/kling.service`, `ext/*/…` | ninguna | solo `make deploy` las reescribe. `install.sh` y `kling up` no |
 | launchd | plantilla en `docs/mac.md` | ninguna | nada la genera; `kling up` solo la carga si el daemon no responde |
 | tokens de `ext/phone` | almacén `phone/<id>` y `phone-tokens/…/<id>.json` | ninguna | — |
-| anotación `phone` del dorado | `ext/phone/golden.go` | lleva `daemon_version` y la de `phoned`, **no la de su formato** | — |
+| anotación `phone` del dorado | `ext/phone/cmd/kling-phone/golden.go` | lleva `daemon_version` y la de `phoned`, **no la de su formato** | — |
 | `kling-phoned` | `prototypes/android/phoned`, API `/v1/*` | `/v1` y `version` en `/v1/health` | es lo único con prefijo de API; vive en el invitado |
 
 ### Protocolos

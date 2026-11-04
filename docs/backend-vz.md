@@ -163,7 +163,7 @@ pila de usuario como siempre. Los demás puertos (`kling.ports`) van por TCP.
   petición contesta, y después nada; dentro, las interrupciones del vsock no
   se mueven y su ISR está a 0, mientras el agente contesta por TCP. Es del
   dispositivo del framework (con `kling-hv`, cuyo vsock es nuestro, no se vio
-  en 240 `up`). `kling-vz` lo vigila (`internal/server/canal_agente.go`): la
+  en 240 `up`). `kling-vz` lo vigila (`vz/internal/server/canal_agente.go`): la
   primera conexión de cada proceso va precedida de un `GET /healthz` por
   vsock, y una conexión que escribió y lleva 1 s sin leer nada lanza la misma
   prueba; si no contesta, ese proceso sigue por TCP (`guest port 8080
