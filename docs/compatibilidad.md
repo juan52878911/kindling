@@ -193,12 +193,9 @@ de la matriz pasa a **sí**.
 
 **Pruebas y release**
 
-- e2e de `kling upgrade` desde la release N-1 real (v0.20.1; hoy desde v0.17 y
-  con `-from-dir -insecure`), en Linux y en el Mac, incluido kling-hv.
-- e2e con microVMs en un runner Apple Silicon (el de Linux con KVM ya corre en
-  `e2e-linux.yml`).
-- Test cruzado de la firma con el `minisign` de verdad: lo que firma
-  `internal/upgrade/firmar` lo verifica `minisign -V`, y al revés.
+- e2e con microVMs en un runner Apple Silicon, incluido el de `kling upgrade`
+  desde la release anterior (`95-e2e-upgrade-mac.sh`); el de Linux con KVM ya
+  corre en `e2e-linux.yml`, también el de upgrade desde la release anterior.
 - El secreto `KLING_RELEASE_SIGNING_KEY` en el environment `release`
   ([`firmas.md`](firmas.md)): desde v1.0.0 `kling upgrade` rechaza una release
   sin firmar.

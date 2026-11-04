@@ -23,6 +23,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Go packages that are not part of the public API moved from `pkg/` to `internal/` (`aigw`, `chispa`, `codificador`, `digest`, `durable`, `esquema`, `intent`, `transport`, `von`; `pkg/share` is now `internal/shareproto`). `pkg/api`, `pkg/plugin` and `pkg/config` are the 1.x Go API; what other modules of the repo import (`guest`, `credproxy`, `scheduler`, `linkbroker`, `panico`, `units`) and `lazyre` (the type of `api.KeyPattern`) stay in `pkg/`.
+- The upgrade e2e starts from the previous release's real assets, checked against its `SHA256SUMS`, instead of piping `install.sh`.
+- `docs/compatibilidad.md`: the 1.0 checklist is down to what is still open, and the guest-agent requirements (`env` v0.18, `cmd` and `volume-wait` v0.19) are documented.
 - Graphs: the 64-edge limit is per node (each link needs its own proxy port), with 1024 edges per graph; `kling compose` keeps the full project network and only cuts back services that would go over 64.
 - New volumes are empty, without `lost+found`, like Docker's: Postgres `initdb` works on a volume root.
 - Extensions exit with the core's codes (2 usage, 3 daemon too old, 4 stale golden, 128+signal when killed); `kling mcp heal` reports "still unhealthy" with 6 instead of 3.
@@ -55,6 +58,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Release signing keys made with `minisign -G -W` (unencrypted, all-zero checksum) were rejected; a test now signs and verifies against the real `minisign` both ways, and CI installs it.
+- A `KLNGHV03` kling-hv snapshot was taken for a kling-vz one, so the refreeze check let it through for an older kling-hv.
 - macOS: the daemon no longer warns about missing memory/pids cgroup controllers at every start.
 - The arm64 `kling-bridge` binary is no longer tracked in git.
 - Docs: no more pre-1.0 version banners, removed aliases or `-vcpus`; live shares are capped at 256 MiB/s, not 16; image builds work on macOS; stale paths and links; SECURITY.md describes DNS tunnelling through an allowlisted domain.
