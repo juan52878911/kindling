@@ -786,8 +786,15 @@ type camino struct {
 	// invitado no lo tiene (un agente anterior) y no se vuelve a probar.
 	// mudo: conecta pero nadie contesta por él (ErrCaminoMudo); hasta que
 	// muera este proceso se va por TCP, sin apuntarlo en el snapshot.
+	// fallos: dials por vsock seguidos que fallaron con TCP vivo tras haber
+	// contestado (ok); al llegar a fallosVsockMuerto se da por muerto (mudo).
 	ok, soloTCP, mudo bool
+	fallos            int
 }
+
+// fallosVsockMuerto son los fallos seguidos por vsock, con TCP contestando, que
+// hacen falta para dejar de probarlo. Uno suelto puede ser carga pasajera.
+const fallosVsockMuerto = 3
 
 // ErrCaminoMudo lo devuelve un dial de SetGuestDialer que conectó pero vio que
 // por ahí nadie contesta. No es un agente anterior (que ni conecta): el
@@ -853,6 +860,7 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 			n.mu.Lock()
 			primera := !cam.ok
 			cam.ok = true
+			cam.fallos = 0
 			n.mu.Unlock()
 			if primera {
 				n.cfg.Logf("guest port %d reached over vsock", port)
@@ -883,9 +891,25 @@ func (n *Net) dialGuest(ctx context.Context, port uint16) (net.Conn, error) {
 		if descartar {
 			cam.soloTCP = true
 		}
+		// Contestó por vsock alguna vez y ahora no, con TCP vivo, varias
+		// veces seguidas: su escucha de vsock murió (un agente anterior a la
+		// 1.0 la perdía con un EINTR). Hasta que acabe este proceso, directo
+		// por TCP: si no, cada conexión pagaba antes un connect de vsock
+		// fallido. No va al snapshot (no es soloTCP): tras un thaw o un
+		// arranque, el agente vuelve a escuchar por vsock.
+		murio := false
+		if cam.ok && !cam.mudo {
+			cam.fallos++
+			if cam.fallos >= fallosVsockMuerto {
+				cam.mudo, murio = true, true
+			}
+		}
 		n.mu.Unlock()
 		if descartar {
 			n.cfg.Logf("guest port %d answers over TCP but not over vsock (an older guest agent): using TCP from now on", port)
+		}
+		if murio {
+			n.cfg.Logf("guest port %d stopped answering over vsock but answers over TCP (its vsock listener died): using TCP until this process ends", port)
 		}
 	}
 	return gc, err

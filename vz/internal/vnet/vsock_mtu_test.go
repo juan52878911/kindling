@@ -108,6 +108,45 @@ func TestGuestDialerConVueltaATCP(t *testing.T) {
 	}
 }
 
+// Un vsock que contestó y deja de hacerlo con TCP vivo (la escucha del agente
+// murió) se deja de probar tras fallosVsockMuerto fallos seguidos, no al
+// primero; y no se apunta como soloTCP (no viajaría al snapshot).
+func TestGuestDialerVsockMuerto(t *testing.T) {
+	r := newRig(t, "")
+	escucharEnInvitado(t, r.g, 8080, "tcp")
+	var falla atomic.Bool
+	var llamadas atomic.Int32
+	r.n.SetGuestDialer(8080, func(ctx context.Context) (net.Conn, error) {
+		llamadas.Add(1)
+		if falla.Load() {
+			return nil, errors.New("connection reset by peer")
+		}
+		a, b := net.Pipe()
+		go func() {
+			defer b.Close()
+			line, _ := bufio.NewReader(b).ReadString('\n')
+			fmt.Fprintf(b, "vsock %s", line)
+		}()
+		return a, nil
+	}, false)
+	addr, _ := r.n.Forward(8080)
+	if got := pedir(t, addr, "a"); got != "vsock a\n" {
+		t.Fatalf("%q", got)
+	}
+	falla.Store(true)
+	for i := 0; i < fallosVsockMuerto+3; i++ {
+		if got := pedir(t, addr, "b"); got != "tcp b\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+	if n := llamadas.Load(); n != 1+fallosVsockMuerto {
+		t.Fatalf("vsock se probó %d veces, quiero %d", n, 1+fallosVsockMuerto)
+	}
+	if r.n.GuestOnlyTCP(8080) {
+		t.Fatal("una escucha muerta no es un agente anterior: no debe ir al snapshot")
+	}
+}
+
 // Un agente anterior no escucha por vsock: cuando falla vsock y TCP contesta,
 // se deja de probar vsock (cada intento fallido cuesta ms). Mientras el
 // invitado arranca y no contesta ninguno, no se decide nada.
