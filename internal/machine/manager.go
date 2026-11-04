@@ -1792,7 +1792,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Y qué agente lleva (agente.go). Un arranque en frío puede estrenar
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
-	m.conocerAgente(id)
+	m.conocerAgenteY(id, func(ag *api.GuestAgent) { m.resyncArranque(id, ag) })
 	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
 	}

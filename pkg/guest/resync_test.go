@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +161,67 @@ func TestResyncSubeLaGeneracion(t *testing.T) {
 		if err != nil || string(b) != fmt.Sprintf("%d\n", want) {
 			t.Fatalf("fichero de generación = %q (%v), quiero %d", b, err, want)
 		}
+	}
+}
+
+func cuerpoKind(t *testing.T, nano int64, kind string) string {
+	b, err := json.Marshal(api.GuestResync{UnixNano: nano, Entropy: bytes.Repeat([]byte{1}, api.GuestResyncEntropy), Restore: kind})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// Tras un arranque en frío el reloj se pone siempre (el RTC va a segundos),
+// pero no es una restauración: ni sube la generación ni renueva identidad.
+func TestResyncArranqueNoCuentaComoRestauracion(t *testing.T) {
+	reloj, ent := falsos(t, nil, nil)
+	generation = 0
+	host := time.Now().Add(400 * time.Millisecond)
+	rr := postResync(t, cuerpoKind(t, host.UnixNano(), ResyncBoot))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("código %d: %s", rr.Code, rr.Body)
+	}
+	if !reloj.Equal(host) || len(*ent) == 0 {
+		t.Fatalf("reloj = %v (quería %v), entropía %d bytes", reloj, host, len(*ent))
+	}
+	var res api.GuestResyncResult
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if res.Generation != 0 || generation != 0 || len(res.Renewed) != 0 {
+		t.Fatalf("generation %d/%d renewed %v: a boot is not a restore", res.Generation, generation, res.Renewed)
+	}
+	if _, err := os.Stat(generationFile); !os.IsNotExist(err) {
+		t.Fatalf("wrote %s: %v", generationFile, err)
+	}
+}
+
+// Tras reanudar, un reloj que va bien no se toca (solo sumaría lo que tardó la
+// petición); uno que se quedó atrás (kling-hv para el contador), sí.
+func TestResyncReanudarSoloSiHaceFalta(t *testing.T) {
+	reloj, _ := falsos(t, nil, nil)
+	generation = 0
+	rr := postResync(t, cuerpoKind(t, time.Now().UnixNano(), ResyncResume))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("código %d: %s", rr.Code, rr.Body)
+	}
+	if !reloj.IsZero() {
+		t.Fatalf("set the clock to %v with no skew", reloj)
+	}
+	host := time.Now().Add(2 * time.Second)
+	rr = postResync(t, cuerpoKind(t, host.UnixNano(), ResyncResume))
+	var res api.GuestResyncResult
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if !reloj.Equal(host) || res.SkewMS < 1900 {
+		t.Fatalf("reloj = %v (quería %v), skew %d ms", reloj, host, res.SkewMS)
+	}
+	if generation != 0 {
+		t.Fatalf("generation %d: a resume is not a restore", generation)
+	}
+}
+
+// El agente anuncia que entiende los resync que no son restauraciones.
+func TestCapsAnunciaResyncReloj(t *testing.T) {
+	if !slices.Contains((&Agent{}).Caps(), CapResyncClock) {
+		t.Fatalf("caps %v without %s", (&Agent{}).Caps(), CapResyncClock)
 	}
 }

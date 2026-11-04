@@ -415,7 +415,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	impulso.entregar()
 	m.vigilarListo(mc.ID, nil)
 	m.olvidarAgente(mc.ID)
-	m.conocerAgente(mc.ID)
+	m.conocerAgenteY(mc.ID, func(ag *api.GuestAgent) { m.resyncArranque(mc.ID, ag) })
 	if len(bootEnv) > 0 || comandoDe(mc) != nil {
 		m.retirarEntornoMMDS(mc.ID, mc.Name, bootEnv)
 	}
