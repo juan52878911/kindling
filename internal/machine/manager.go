@@ -1792,7 +1792,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Y qué agente lleva (agente.go). Un arranque en frío puede estrenar
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
-	m.conocerAgente(id)
+	m.conocerAgenteY(id, func(ag *api.GuestAgent) { m.resyncArranque(id, ag) })
 	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
 	}
@@ -2840,16 +2840,33 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 // waitBalloon espera a que el globo alcance ~el objetivo. El inflado lo hace el
 // driver del invitado a su ritmo; sin esta espera mediríamos el RSS antes de que
 // soltara nada. Plazo corto: si el invitado no coopera, no bloqueamos.
+//
+// Se pregunta a los 10 ms y se dobla hasta pasoGloboMax: con 100 ms fijos, un
+// squeeze de punta a punta tardaba ~120 ms casi todos de esperar a la
+// siguiente pregunta, y el globo suele llegar en decenas de ms. Preguntar es
+// una petición al socket local del VMM.
 func waitBalloon(ctx context.Context, c *fc.Client, targetMiB int) {
 	deadline := time.Now().Add(3 * time.Second)
+	paso := pasoGloboMin
 	for time.Now().Before(deadline) {
 		s, err := c.BalloonStats(ctx)
 		if err == nil && s.ActualMiB >= targetMiB-16 {
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(paso):
+		}
+		paso = min(2*paso, pasoGloboMax)
 	}
 }
+
+// Ritmo de waitBalloon.
+const (
+	pasoGloboMin = 10 * time.Millisecond
+	pasoGloboMax = 40 * time.Millisecond
+)
 
 // procRSSMiB lee el RSS del proceso (VmRSS de /proc/<pid>/status) en MiB. Es la
 // cifra del host que cae cuando el globo devuelve páginas. Devuelve 0 si no se

@@ -11,10 +11,12 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // Tras cada restauración el invitado despierta con la memoria del snapshot: el
@@ -150,6 +152,55 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resul
 	return resultadoResync{took: took, ok: true, listo: res.Ready}
 }
 
+// resyncArranque pone en hora el invitado id recién arrancado en frío, en
+// cuanto su agente contesta (ag, de conocerAgenteY). El kernel toma la hora
+// del RTC, que va a segundos, y le suma medio segundo: cada arranque nacía
+// hasta ±0,5 s desfasado del host (medido en el M4 con kling-hv: de -492 a
+// +416 ms en seis arranques). Solo a un agente que anuncia
+// guest.CapResyncClock: uno anterior lo contaría como una restauración.
+func (m *Manager) resyncArranque(id string, ag *api.GuestAgent) {
+	if !ag.Has(guest.CapResyncClock) {
+		return
+	}
+	m.resyncGuest(context.Background(), id, "", guest.ResyncBoot)
+}
+
+// resyncTrasReanudar pone en hora, en segundo plano, una máquina que se
+// acaba de reanudar. Con kling-hv el contador virtual del invitado se para
+// mientras está pausada y su reloj se queda atrás lo que duró la pausa; con
+// KVM sigue al del host y el agente, al ver que no hay desfase, no lo toca
+// (guest.ResyncResume). No retrasa la reanudación: quien despierta la
+// máquina no espera a esto. A un agente anterior (sin guest.CapResyncClock)
+// solo bajo kling-hv, donde el reloj sí se queda atrás: como api.ResyncThaw,
+// lo único que entiende (le sube la generación, pero es eso o un reloj
+// atrasado lo que duró la pausa).
+func (m *Manager) resyncTrasReanudar(id string) {
+	if m.agenteDe(id).Has(guest.CapResyncClock) {
+		go m.resyncGuest(context.Background(), id, "", guest.ResyncResume)
+		return
+	}
+	m.mu.RLock()
+	hv := false
+	if mc := m.byID[id]; mc != nil {
+		hv = strings.HasPrefix(mc.VMM, "kling-hv")
+	}
+	m.mu.RUnlock()
+	if hv {
+		go m.resyncGuest(context.Background(), id, "", api.ResyncThaw)
+	}
+}
+
+// kindSinRestaurar es el Restore del resync de una máquina que sigue siendo
+// la misma (reanudada, o el host despertó): guest.ResyncResume si su agente
+// lo entiende, que no lo cuenta como restauración; si no, api.ResyncThaw,
+// lo único que entiende uno anterior.
+func (m *Manager) kindSinRestaurar(id string) string {
+	if m.agenteDe(id).Has(guest.CapResyncClock) {
+		return guest.ResyncResume
+	}
+	return api.ResyncThaw
+}
+
 // avisarResync registra por qué no se resincronizó, una vez por imagen y
 // motivo: con un agente viejo cada thaw daría el mismo aviso.
 func (m *Manager) avisarResync(image, name string, err error) {
@@ -197,16 +248,15 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	if _, err := rand.Read(ent); err != nil {
 		return out, err
 	}
-	// La hora se toma lo más tarde posible: lo que tarde la petición es el
-	// error que queda en el invitado.
-	body, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(), Entropy: ent, Restore: kind})
+	body, err := nuevoCuerpoResync(ent, kind)
 	if err != nil {
 		return out, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+api.GuestResyncPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+api.GuestResyncPath, body)
 	if err != nil {
 		return out, err
 	}
+	req.ContentLength = int64(body.n)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := resyncClient.Do(req)
 	if err != nil {
@@ -234,6 +284,41 @@ func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, 
 	return out, nil
 }
 
+// cuerpoResync es el cuerpo de POST /resync con la hora tomada lo más tarde
+// posible: cuando el cliente HTTP lo lee para mandarlo, con la conexión ya
+// hecha. Lo que tarde la petición desde ese instante es el error que queda en
+// el invitado; tomada antes de conectar, sumaba el connect entero (por el
+// reenvío y el vsock de kling-vz/kling-hv), varios ms.
+type cuerpoResync struct {
+	ent  []byte
+	kind string
+	// n es la longitud que se anuncia (Content-Length): la del cuerpo hecho
+	// al crearlo. UnixNano tiene 19 cifras de 2001 a 2286, así que el de
+	// la primera lectura mide lo mismo; si no, se manda el primero.
+	n     int
+	listo []byte
+	r     *bytes.Reader
+}
+
+func nuevoCuerpoResync(ent []byte, kind string) (*cuerpoResync, error) {
+	b, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(), Entropy: ent, Restore: kind})
+	if err != nil {
+		return nil, err
+	}
+	return &cuerpoResync{ent: ent, kind: kind, n: len(b), listo: b}, nil
+}
+
+func (c *cuerpoResync) Read(p []byte) (int, error) {
+	if c.r == nil {
+		b, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(), Entropy: c.ent, Restore: c.kind})
+		if err != nil || len(b) != c.n {
+			b = c.listo
+		}
+		c.r = bytes.NewReader(b)
+	}
+	return c.r.Read(p)
+}
+
 // resyncNota es el añadido al mensaje del evento: deja ver en `kling events`
 // cuánto cuesta el resync sin instrumentar nada.
 func resyncNota(t time.Duration, ok bool) string {
@@ -252,7 +337,7 @@ func resyncNota(t time.Duration, ok bool) string {
 // resync—. Equivocarse aquí solo deja sin poner el reloj de UNA máquina: un
 // thaw no tiene clones con los que compartir el CSPRNG.
 func (m *Manager) agenteEscucha(ctx context.Context, id string) bool {
-	if open, ok := m.ProbeGuestPort(ctx, id, api.GuestPort); ok {
+	if open, ok := m.sondearPuerto(ctx, id, api.GuestPort, false); ok {
 		return open
 	}
 	m.mu.RLock()

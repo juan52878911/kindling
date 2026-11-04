@@ -388,6 +388,9 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	// Nunca 0: BootMS > 0 es lo que dice que arrancó en frío y ya no mapea
 	// el mem.file de su dorado aunque conserve From (ver mapeaSuDorado).
 	live.BootMS = max(time.Since(start).Milliseconds(), 1)
+	// Lo que midió la última transición de antes (un thaw, su desglose) ya no
+	// es de esta: `kling ps` seguía enseñando "thaw N ms" bajo LAST OP.
+	live.ThawMS, live.Wake = 0, nil
 	live.TTLAt = &now
 	live.CPUPct = mc.CPUPct
 	live.IP, live.NetIndex = netcfg.NSIP, netcfg.Index
@@ -415,7 +418,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	impulso.entregar()
 	m.vigilarListo(mc.ID, nil)
 	m.olvidarAgente(mc.ID)
-	m.conocerAgente(mc.ID)
+	m.conocerAgenteY(mc.ID, func(ag *api.GuestAgent) { m.resyncArranque(mc.ID, ag) })
 	if len(bootEnv) > 0 || comandoDe(mc) != nil {
 		m.retirarEntornoMMDS(mc.ID, mc.Name, bootEnv)
 	}

@@ -83,7 +83,7 @@ type Agent struct {
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
 		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
-		api.GuestCapVolumeWait}
+		api.GuestCapVolumeWait, CapResyncClock}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
