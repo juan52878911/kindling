@@ -375,9 +375,9 @@ distribución que el oro).
 
 ## Código
 
-`pkg/aigw/learn.go` (configuración, almacén, captura, filtro, `/v1/feedback`),
+`internal/aigw/learn.go` (configuración, almacén, captura, filtro, `/v1/feedback`),
 `learn_review.go` (casos, auditoría, validación de maestros, filtro de
 acuerdo, cola de revisión), `learn_retrain.go` (sombra, puerta, versiones,
 promoción, rollback), `learn_http.go` (rutas, `/v1/tasks`, métricas);
-`cmd/kling/ai_learn.go`; `pkg/chispa/train` (peso por ejemplo);
+`cmd/kling/ai_learn.go`; `internal/chispa/train` (peso por ejemplo);
 `tools/mejora-continua` (la simulación).

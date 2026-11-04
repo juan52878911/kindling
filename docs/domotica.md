@@ -9,7 +9,7 @@ solo entra si su evaluación mejora la anterior.
 | capa | qué | coste | estado |
 |---|---|---|---|
 | 1 | emparejador de las órdenes de la demo (`Matcher`) | ~1,5 µs | aquí |
-| 2 | Chispa: intención (`pkg/chispa`) + huecos (`pkg/chispa/slots`, Chispa-slots) | ~3–5 µs | aquí |
+| 2 | Chispa: intención (`internal/chispa`) + huecos (`internal/chispa/slots`, Chispa-slots) | ~3–5 µs | aquí |
 | 3 | codificador de frases (multilingual-e5-small, embeddings de llama.cpp en una microVM) + cabeza `.jenc` | ~3 ms | [codificador.md](codificador.md) |
 | 4 | LLM pequeño (VON, Qwen2.5-1.5B) con salida JSON restringida y validada: varias órdenes en una, valores relativos, paráfrasis | 1–3 s | [abajo](#capa-4-un-llm-con-salida-json) |
 
@@ -18,7 +18,7 @@ solo entra si su evaluación mejora la anterior.
 programa aparte, `kindling-domotica` (`make domotica`), que usa kindling como
 cualquier aplicación: kling no tiene un subcomando `domotica` ni lo instala ni
 lo publica. Lo que sí es de kindling es lo genérico que la demo usa: la cascada
-de intención y huecos ([pkg/intent](../pkg/intent), tareas `"intent"` del
+de intención y huecos ([internal/intent](../internal/intent), tareas `"intent"` del
 gateway, [intent.md](intent.md)), Chispa y Chispa-slots, el codificador y el
 gateway de IA. La habitación es un `intent.Domain` en Go
 (`examples/domotica/internal/domotica`: plantillas, léxico, taxonomía) y
@@ -170,7 +170,7 @@ cada una una `Layer` (`Decide(ctx, text, lang) (Decision, error)`). La traza
 La habitación de demo que lo enseña todo es un ejemplo aparte:
 [examples/domotica](../examples/domotica/README.md).
 
-## Chispa-slots (`pkg/chispa/slots`)
+## Chispa-slots (`internal/chispa/slots`)
 
 El extractor de huecos en la filosofía de Chispa:
 
@@ -223,14 +223,14 @@ distintas se rechazan en vez de dar huecos basura. `FuzzLoad` lo prueba.
 | `examples/domotica/internal/domotica/numbers.go` | números con palabras es/en, unidades |
 | `examples/domotica/internal/domotica/template.go` | analizador y expansor de plantillas estilo hassil (muestreo determinista y enumeración) |
 | `examples/domotica/internal/domotica/demo.go`, `matcher.go` | órdenes de la demo y capa 1 |
-| `examples/domotica/internal/domotica/decide.go` | la habitación como `intent.Domain` y su `Decision`; la cascada y su política de escalado son las de `pkg/intent` |
+| `examples/domotica/internal/domotica/decide.go` | la habitación como `intent.Domain` y su `Decision`; la cascada y su política de escalado son las de `internal/intent` |
 | `examples/domotica/internal/domotica/keywords.go` | línea base de reglas (solo para evaluar) |
 | `examples/domotica/internal/domotica/eval.go`, `challenge.jsonl` | métricas y frases de reto |
-| `pkg/chispa/slots` | Chispa-slots: tokenizador, modelo, `.chispas`, entrenamiento |
+| `internal/chispa/slots` | Chispa-slots: tokenizador, modelo, `.chispas`, entrenamiento |
 | `examples/domotica/cmd/domotica-data` | descarga, YAML, MASSIVE, Home Assistant, repartos |
 | `examples/domotica/internal/domotica/layer.go` | `Layer`, `Cascade`, `Trace`, `Action`: la cascada con capas enchufables |
 | `examples/domotica/internal/domotica/llm.go` | capa 4: prompt, esquema, `ParseLLM`, `Veto`, `VON` |
 | `examples/domotica/internal/domotica/gateway.go` | las capas por el gateway: `/v1/decide`, `/v1/generate`, `/metrics` |
 | `examples/domotica/internal/domotica/layer4eval.go` | evaluación y puerta de la capa 4 |
 | `examples/domotica` | el programa `kindling-domotica`: `gateway` (el de kindling con el dominio `smart-room`), `room` (la página) y las herramientas en `internal/tools` (`decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm`) |
-| `pkg/intent`, `pkg/aigw/intent.go` | lo genérico del núcleo: la cascada, la tarea `"intent"` de `/v1/decide`, su puerta y `kling ai eval` ([intent.md](intent.md)) |
+| `internal/intent`, `internal/aigw/intent.go` | lo genérico del núcleo: la cascada, la tarea `"intent"` de `/v1/decide`, su puerta y `kling ai eval` ([intent.md](intent.md)) |

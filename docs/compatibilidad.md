@@ -44,8 +44,8 @@ Kubernetes, `compose` (el subconjunto de Compose que se acepta) y **kling-hv**
 (como VMM, y su formato de volcado `KLNGHV`).
 
 **Interno:** el resto de `pkg/` (`guest`, `credproxy`, `scheduler`,
-`linkbroker`, `durable`, `esquema`, `lazyre`, `panico`, `units`…: pasará a
-`internal/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
+`linkbroker`, `panico`, `units`: siguen en `pkg/` solo porque los importan
+otros módulos del repo, `ext/*` y `vz/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
 `upgrade -schemas`), las variables `KLING_VZ_*`, `KLING_HV_*` y `KLING_TEST_*`,
 la salida para humanos de la CLI (columnas, textos, colores: para scripts,
 `-json`), el texto de los mensajes de error (para decidir, el código), y los
@@ -155,7 +155,7 @@ silencio, `commit`, `snapshots` y `plugins`.
 | Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta | **sí**; **pendiente** que salga en `doctor` |
 | Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | ninguno | **pendiente**: la arquitectura no cuenta para `stale` |
 | Host Linux | KVM, ext4/XFS/btrfs (reflink opcional), systemd para `kling upgrade` | `kling doctor` | **sí** |
-| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`pkg/esquema`) | **sí** `state.json`, `meta.json`, `credentials.enc`; **pendiente** el resto y la disciplina de subir versión |
+| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`internal/esquema`) | **sí** `state.json`, `meta.json`, `credentials.enc`; **pendiente** el resto y la disciplina de subir versión |
 | Go API | `pkg/api`, `pkg/plugin`, `pkg/config` | SemVer de Go | **pendiente** `apidiff` en CI |
 
 ---
@@ -215,8 +215,8 @@ de la matriz pasa a **sí**.
 - e2e de `kling upgrade` desde la release N-1 real (hoy fijado a v0.17 y con
   `-from-dir -insecure`), en Linux y en el Mac, incluido kling-hv.
 - e2e con microVMs en CI (Linux con KVM y un runner Apple Silicon).
-- `apidiff` para `pkg/api|plugin|config`; mover el resto de `pkg/` a
-  `internal/`.
+- `apidiff` para `pkg/api|plugin|config`; sacar de `pkg/` lo que queda
+  (`guest`, `credproxy`, `scheduler`, `linkbroker`, `panico`, `units`).
 - Firma de `SHA256SUMS` verificada por `kling upgrade`, `install.sh` y la
   fórmula, atestación de procedencia en `release.yml` y notarización de los
   binarios de macOS.

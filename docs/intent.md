@@ -4,12 +4,12 @@ Una **tarea de intención** del gateway de IA (`"intent"` en `ai.json`) decide
 qué orden hay en un texto corto —«abre un ticket para facturación», «pon la
 luz del salón en azul»— como una intención y sus huecos, con capas de coste
 creciente, y dice a dónde escalar lo que ninguna contesta con confianza. Es la
-cascada de [`pkg/intent`](../pkg/intent), servida en `POST /v1/decide`:
+cascada de [`internal/intent`](../internal/intent), servida en `POST /v1/decide`:
 
 | capa | qué | coste | cuándo |
 |---|---|---|---|
 | 1. plantillas | órdenes conocidas, coincidencia exacta | µs | siempre primero |
-| 2. Chispa + Chispa-slots | intención ([chispa.md](chispa.md)) y huecos (`.chispas`, `pkg/chispa/slots`) | µs en el proceso; ms serverless | si no encaja una plantilla |
+| 2. Chispa + Chispa-slots | intención ([chispa.md](chispa.md)) y huecos (`.chispas`, `internal/chispa/slots`) | µs en el proceso; ms serverless | si no encaja una plantilla |
 | 3. codificador | un codificador de frases (kind `embed`) y su cabeza `.jenc` ([codificador.md](codificador.md)) | ms, en una microVM | si su evaluación la respalda |
 | 4. — | lo que queda sale con `escalate: "von"` | | lo decide quien llama |
 

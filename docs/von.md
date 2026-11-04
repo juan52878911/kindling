@@ -111,7 +111,7 @@ Q4_K_M no): [von-cpu.md](von-cpu.md) tiene las cifras y la configuración
 recomendada por modelo.
 
 Cada entrada lleva revisión de Hugging Face (commit, no rama), sha256, licencia
-y dónde leerla (`pkg/von`, `kling ai model ls`); el constructor verifica el hash
+y dónde leerla (`internal/von`, `kling ai model ls`); el constructor verifica el hash
 antes de meter nada en la imagen.
 
 **Licencias.** En el catálogo por defecto solo entran modelos que se pueden usar
@@ -146,7 +146,7 @@ pequeños (0.6B, 1.7B, 4B; Apache-2.0). Un GGUF propio:
 
 **La imagen** es una capa sobre la base `glibc-trixie`. llama.cpp es la versión
 `b11147` en los **binarios oficiales** (`llama-b11147-bin-ubuntu-{arm64,x64}`,
-sha256 de GitHub fijado en `pkg/von`), no una compilación propia: traen
+sha256 de GitHub fijado en `internal/von`), no una compilación propia: traen
 `GGML_CPU_ALL_VARIANTS`, una biblioteca por nivel de instrucciones (armv8.0,
 8.2+dotprod, 8.6+i8mm, 9.2+SVE2; SSE4.2…AVX-512 en x86) que se elige al arrancar
 según la CPU, que es exactamente la base portable que habría que compilar a mano,
@@ -156,7 +156,7 @@ constructor llama con `SUITE=trixie`. De la tarball solo entran `llama-server`, 
 bibliotecas y las variantes de CPU (~30 MiB).
 
 Dentro: `/models/<fichero>.gguf`, `/opt/llama.cpp/`, `/etc/von/run.sh` (los
-argumentos de `llama-server`, generados en `pkg/von`) y `/etc/von/model.json` (qué
+argumentos de `llama-server`, generados en `internal/von`) y `/etc/von/model.json` (qué
 modelo, hash, contexto, versión de llama.cpp). El entrypoint arranca `run.sh` en
 segundo plano, lo relanza si muere, y cede el PID 1 a `kling-guest`, así que `kling
 exec`/`cp` siguen funcionando (`-allow-exec` por defecto en los modelos). El log
@@ -539,7 +539,7 @@ calidad, no por velocidad; `claude/von-cpu` decide si Q4_0 entra al catálogo.
 
 ### Chispa en x86
 
-`pkg/chispa`, `pkg/chispa/slots` y `examples/domotica/internal/domotica` no dependen de VON ni de una
+`internal/chispa`, `internal/chispa/slots` y `examples/domotica/internal/domotica` no dependen de VON ni de una
 microVM: corren en el proceso del CLI. Medido en el mismo i7-8700T
 (`go test -bench=. -run=^$ -cpu=1,4`, cross-compilado a linux/amd64), frente a
 la tabla del M4 en [chispa.md](chispa.md#inferencia-y-determinismo):

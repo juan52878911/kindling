@@ -33,7 +33,7 @@ room`) y trae las herramientas para entrenar y evaluar sus capas
 ## Cómo está hecha
 
 ```
-navegador ──HTTP/SSE──> kindling-domotica  ──POST /v1/decide────> kindling-domotica gateway (pkg/aigw + dominio smart-room)
+navegador ──HTTP/SSE──> kindling-domotica  ──POST /v1/decide────> kindling-domotica gateway (internal/aigw + dominio smart-room)
                          room: simulador,      (capas 1–3)          ├─ plantillas + Chispa: en su proceso (µs) o serverless (ms)
                          API JSON + SSE,     ──POST /v1/generate──>  ├─ codificador: réplica de un dorado kind embed (ms)
                          página embebida        (capa 4)            └─ LLM: réplica de un dorado VON (s)
