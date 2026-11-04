@@ -181,6 +181,11 @@ struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
 };
 
+// Tope del estado del GIC que acepta khv_restore: el de una VM real (MAX_CPUS
+// redistribuidores) cabe con mucha holgura; un gic_size mayor es un fichero
+// roto o ajeno, y sin tope sería un malloc del tamaño que diga el fichero.
+#define SNAP_GIC_MAX (16ULL << 20)
+
 // Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
 // subir SNAP_VERSION rompería los mem.file que ya hay en disco.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
@@ -1010,6 +1015,19 @@ int khv_restore(const char *mem_path) {
     fallo("%s: snapshot state version %u, this kling-hv reads %u", mem_path, h.version, SNAP_VERSION);
     return -1;
   }
+  // La disposición la fija khv_snapshot: RAM en [0, ram_size), la cabecera
+  // justo detrás, el estado del GIC y el pie al final. Un fichero recortado o
+  // ajeno que no cuadre se rechaza aquí: mapear_ram mapea ram_size bytes del
+  // fichero y, si es más corto, el invitado tocaría páginas tras el final y
+  // el VMM moriría de SIGBUS en vez de dar un error.
+  if (pie.hdr_off != pie.ram_size || h.ram_size != pie.ram_size || h.gic_size > SNAP_GIC_MAX ||
+      pie.hdr_off + pie.hdr_len > (uint64_t)st.st_size - sizeof pie ||
+      h.gic_size > (uint64_t)st.st_size - sizeof pie - pie.hdr_off - pie.hdr_len) {
+    close(fd);
+    fallo("%s: truncated or inconsistent kling-hv memory file (size %lld, ram %llu, header at %llu+%llu, GIC %llu)",
+          mem_path, (long long)st.st_size, h.ram_size, pie.hdr_off, pie.hdr_len, h.gic_size);
+    return -1;
+  }
   if (h.version == 1) {
     // Una cabecera anterior no tiene vsock ni globo: el invitado nunca vio
     // esos dispositivos (van detrás de los demás), así que no existen.
@@ -1042,7 +1060,7 @@ int khv_restore(const char *mem_path) {
           h.hay_vsock, hay_vsock, h.hay_globo, hay_globo);
     return -1;
   }
-  void *gdata = h.gic_size <= (uint64_t)st.st_size ? malloc(h.gic_size) : NULL;
+  void *gdata = malloc(h.gic_size ? h.gic_size : 1);
   if (!gdata || leer_todo(fd, gdata, h.gic_size, (off_t)(pie.hdr_off + pie.hdr_len)) != 0) {
     free(gdata);
     close(fd);
