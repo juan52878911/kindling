@@ -149,8 +149,10 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// Como argumento --api-sock (ver vmmDeLinea): con la ruta en cualquier
+	// sitio, un curl al socket pasaba por el VMM.
 	sock := m.dir(mc.ID) + "/fc.sock"
-	if !strings.Contains(out, sock) {
+	if !strings.Contains(out, argSocketVMM+" "+sock) {
 		return "", false
 	}
 	if _, err := os.Stat(sock); err != nil {

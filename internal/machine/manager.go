@@ -275,6 +275,11 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// vmmDeCongelado: id -> PID del VMM que un Freeze terminado mató sin verlo
+	// morir (siguió vivo tras el SIGKILL y plazoMuerte). Ese proceso es de un
+	// volcado ya sellado: Thaw no lo readopta, lo mata (ver thawVMMViejo).
+	vmmDeCongelado sync.Map
+
 	// bat es el modo batería (bateria.go); reloj, la vigilancia del sueño del
 	// host (despertar_host.go).
 	bat   bateria
@@ -2512,7 +2517,14 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// killPaused y no kill: el invitado lleva pausado desde antes del snapshot y
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
-	m.killPaused(mc.ID)
+	//
+	// killPaused espera a que el proceso desaparezca (con plazo). Si sigue
+	// vivo, el volcado vale igual —la VM llevaba pausada desde antes—, pero
+	// ese VMM es de este freeze: se apunta para que Thaw no lo tome por uno
+	// suyo y lo readopte (vmmDeCongelado).
+	if pidViejo := mc.PID; !m.killPaused(mc.ID) && pidViejo > 0 {
+		m.vmmDeCongelado.Store(mc.ID, pidViejo)
+	}
 	// Si despertó de un diferencial, el VMM mapeaba mem.full (base + diff):
 	// muerto el VMM no lo lee nadie. Un freeze diferencial ya lo retiró al
 	// fundir; uno completo (tras un commit, con el diff apagado o sin base) lo
@@ -3204,6 +3216,12 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// tipo que no se nota hasta mucho después.
 	live := m.liveVMs()
 	crono.marca(&crono.p.CheckMS)
+	if pid := live[mc.ID]; pid > 0 && m.esVMMDeCongelado(mc.ID, pid) {
+		if err := m.thawVMMViejo(mc, pid); err != nil {
+			return nil, err
+		}
+		delete(live, mc.ID)
+	}
 	if live[mc.ID] > 0 {
 		pid := live[mc.ID]
 		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
@@ -3788,7 +3806,40 @@ func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true
 // el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
 // morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
 // pausar, que es el único momento en que el invitado podía responder.
-func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
+// Dice, como kill, si el VMM ya no existe.
+func (m *Manager) killPaused(id string) bool { return m.killMachine(id, false, false) }
+
+// esVMMDeCongelado dice si pid es el VMM que mató el último Freeze de id sin
+// verlo morir (vmmDeCongelado). Uno distinto (o ninguno apuntado) olvida la
+// marca: ese proceso ya no está.
+func (m *Manager) esVMMDeCongelado(id string, pid int) bool {
+	v, ok := m.vmmDeCongelado.Load(id)
+	if !ok {
+		return false
+	}
+	if v.(int) != pid {
+		m.vmmDeCongelado.Delete(id)
+		return false
+	}
+	return true
+}
+
+// thawVMMViejo mata el VMM pid que dejó vivo el Freeze de mc antes de que
+// Thaw arranque el nuevo. Readoptarlo era dar por buena una VM que ya se
+// volcó y se mandó matar: moría después y la máquina quedaba running sin
+// proceso, y luego failed. Y arrancar otro con él vivo serían dos VMM sobre el
+// mismo overlay. Si tampoco muere ahora, no se descongela.
+func (m *Manager) thawVMMViejo(mc *api.Machine, pid int) error {
+	log.Printf("thaw: %s (%s): the VMM of its last freeze (pid %d) is still alive; killing it first",
+		mc.Name, shortID(mc.ID), pid)
+	senalMatar(pid)
+	if !waitGone(pid, plazoMuerte) {
+		return fmt.Errorf("machine %q can't be thawed: the VMM of its last freeze (pid %d) is still alive %s after SIGKILL",
+			mc.Name, pid, plazoMuerte)
+	}
+	m.vmmDeCongelado.Delete(mc.ID)
+	return nil
+}
 
 func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
