@@ -63,6 +63,19 @@ func TestNewMachineID(t *testing.T) {
 // dial toma antes de que despierte: el primero no puede quedarse con la
 // conexión del segundo (que reconocía solo por el número de fd) ni mandarle
 // un RST.
+// Una conexión que el invitado dejó de leer y Go cerró del todo tiene que
+// pedirle el cierre completo (y con él su RST, o el plazo de 2 s): antes no
+// entraba en el poll y el slot y su fd se quedaban para siempre. Un medio
+// cierre de Go (CloseWrite) no debe cerrarla.
+func TestVsockCierreDelHost(t *testing.T) {
+	if got := vsockCierre(false); got != 1 {
+		t.Fatalf("Go cerró del todo: cierre completo pedido = %d, quiero 1", got)
+	}
+	if got := vsockCierre(true); got != 0 {
+		t.Fatalf("Go solo cerró su escritura: cierre completo pedido = %d, quiero 0", got)
+	}
+}
+
 func TestVsockDialSlotReusado(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		ret, mismo := vsockReuso()

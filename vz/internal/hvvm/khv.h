@@ -261,6 +261,7 @@ void vsock_despertar(void);
 int khv_vsock_dial(uint32_t port, int plazo_ms);
 // khv_vsock_prueba_reuso: solo para las pruebas (ver vsock.c).
 int khv_vsock_prueba_reuso(int *coincide_fd);
+int khv_vsock_prueba_cierre(int medio);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {

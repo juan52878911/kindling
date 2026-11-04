@@ -40,6 +40,17 @@ func vsockReuso() (ret int, mismoFD bool) {
 	return ret, c != 0
 }
 
+// vsockCierre: una conexión que el invitado medio cerró y Go cierra del todo
+// (medio=false) o solo por su lado de escritura (medio=true); devuelve si una
+// pasada de poll pidió al invitado el cierre completo (khv_vsock_prueba_cierre).
+func vsockCierre(medio bool) int {
+	m := C.int(0)
+	if medio {
+		m = 1
+	}
+	return int(C.khv_vsock_prueba_cierre(m))
+}
+
 // carreraCola atiende iters lecturas del disco mientras otro hilo cambia el
 // QueueNum (prueba.c): devuelve las respondidas, -1 si no se pudo preparar y
 // -2 si el QueueNum cambió con la cola lista.
