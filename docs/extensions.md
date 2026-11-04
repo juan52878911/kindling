@@ -214,9 +214,12 @@ extensión aparece en `kling plugin ls` con `STATUS error: …` y ya.
 
 `kling <comando>` hace `exec` de la extensión, que **reemplaza** al proceso de
 `kling`: el código de salida, las señales y la terminal son los suyos. Con
-`plugin.Main`: 0 si el comando devuelve `nil`, 1 con cualquier error, 2 para un
-comando desconocido, y lo que quieras con `&plugin.ExitError{Code: n, Err: err}`
-(el 3 de `kling mcp heal`, que systemd interpreta, llega intacto).
+`plugin.Main`: 0 si el comando devuelve `nil`, 2 para un comando desconocido o
+un error de uso, 3 si el daemon es demasiado viejo, 4 si un dorado está obsoleto,
+1 con cualquier otro error (los mismos [códigos que el núcleo](guia.md#códigos-de-salida)),
+y lo que quieras con `&plugin.ExitError{Code: n, Err: err}`: el 6 de `kling mcp heal`
+(«sigue sin salud»), que systemd interpreta, llega intacto. Usa códigos a partir
+del 6 para no chocar con los del núcleo.
 
 ### Entorno
 
