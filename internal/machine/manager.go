@@ -542,12 +542,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		m.CgroupWarning = err.Error()
 	} else {
 		m.cgroupRoot = cg
-		m.cgroupMemoria, m.cgroupProcesos = controladoresDelegados(cg)
-		if !m.cgroupMemoria {
-			log.Printf("warning: the memory cgroup controller is not available: no memory.max per microVM")
-		}
-		if !m.cgroupProcesos {
-			log.Printf("warning: the pids cgroup controller is not available: no pids.max per microVM")
+		var avisos []string
+		m.cgroupMemoria, m.cgroupProcesos, avisos = revisarControladores(cg)
+		for _, a := range avisos {
+			log.Print(a)
 		}
 	}
 
@@ -3848,4 +3846,21 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	m.invalidarSesiones(id, "failed")
 	// Con el dueño: destino puede ser una que ya no está registrada.
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error(), Owner: dueño})
+}
+
+// revisarControladores dice qué controladores tendrán los cgroups de las
+// microVMs bajo cg y qué avisos dar. Sin raíz (macOS: allí no hay cgroups y
+// el techo de CPU lo pone kling-vz) no hay nada que avisar: no es una carencia.
+func revisarControladores(cg string) (memoria, procesos bool, avisos []string) {
+	if cg == "" {
+		return false, false, nil
+	}
+	memoria, procesos = controladoresDelegados(cg)
+	if !memoria {
+		avisos = append(avisos, "warning: the memory cgroup controller is not available: no memory.max per microVM")
+	}
+	if !procesos {
+		avisos = append(avisos, "warning: the pids cgroup controller is not available: no pids.max per microVM")
+	}
+	return memoria, procesos, avisos
 }

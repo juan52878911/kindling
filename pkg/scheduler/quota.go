@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // errTenantInstances lo devuelve ensure() cuando despertar/crear una instancia
@@ -136,7 +138,7 @@ func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
 // authFail responde el 401 con la pista de cómo autenticarse.
 func authFail(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kindling"`)
-	http.Error(w, "missing Authorization header: Bearer <token>, or the token is invalid.\n"+
+	api.HTTPError(w, "missing Authorization header: Bearer <token>, or the token is invalid.\n"+
 		"The token lives in gateway.token on the host where the gateway runs.", http.StatusUnauthorized)
 }
 

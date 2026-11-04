@@ -22,7 +22,7 @@ func TestHealNoDiceTodoSanoConElServicioCaido(t *testing.T) {
 		t.Fatalf("heal returned nil:\n%s", out)
 	}
 	var ee *plugin.ExitError
-	if errors.As(err, &ee) && ee.Code == 3 {
-		t.Errorf("a record failure must not be exit 3 (treated as success by the unit): %v", err)
+	if errors.As(err, &ee) && ee.Code == salidaSigueEnfermo {
+		t.Errorf("a record failure must not be exit %d (treated as success by the unit): %v", salidaSigueEnfermo, err)
 	}
 }

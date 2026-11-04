@@ -131,17 +131,23 @@ func TestArgvReimportarPropagaElHost(t *testing.T) {
 // pude ni empezar". Si las dos salieran con 1, la unidad tendria que tratarlas
 // igual — y marcar las dos como exito esconde la segunda, que es la grave.
 func TestElCodigoDeSalidaDistingueNoPuedeEmpezarDeSigueRoto(t *testing.T) {
-	sigueRoto := &plugin.ExitError{Code: 3, Err: errors.New("2 service(s) still unhealthy")}
-	if got := plugin.ExitCode(sigueRoto); got != 3 {
-		t.Errorf("servicio aun enfermo: codigo %d, esperaba 3", got)
+	sigueRoto := &plugin.ExitError{Code: salidaSigueEnfermo, Err: errors.New("2 service(s) still unhealthy")}
+	if got := plugin.ExitCode(sigueRoto); got != salidaSigueEnfermo {
+		t.Errorf("servicio aun enfermo: codigo %d, esperaba %d", got, salidaSigueEnfermo)
+	}
+	// Y no puede ser uno del contrato del núcleo: el 3 es "daemon viejo".
+	for _, nucleo := range []int{plugin.ExitFailure, plugin.ExitUsage, plugin.ExitDaemonOld, plugin.ExitStaleGolden, 5, plugin.ExitInterrupted} {
+		if salidaSigueEnfermo == nucleo {
+			t.Errorf("el código de heal (%d) choca con uno del núcleo", salidaSigueEnfermo)
+		}
 	}
 	noPudoEmpezar := errors.New("cannot talk to the daemon at /run/kling.sock")
 	if got := plugin.ExitCode(noPudoEmpezar); got != 1 {
 		t.Errorf("no pudo hablar con el daemon: codigo %d, esperaba 1", got)
 	}
 	// Y tiene que sobrevivir a que alguien lo envuelva por el camino.
-	if got := plugin.ExitCode(fmt.Errorf("heal: %w", sigueRoto)); got != 3 {
-		t.Errorf("envuelto: codigo %d, esperaba 3", got)
+	if got := plugin.ExitCode(fmt.Errorf("heal: %w", sigueRoto)); got != salidaSigueEnfermo {
+		t.Errorf("envuelto: codigo %d, esperaba %d", got, salidaSigueEnfermo)
 	}
 }
 

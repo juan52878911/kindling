@@ -182,7 +182,7 @@ func TestIncorporadas(t *testing.T) {
 		Manifest: Manifest{ManifestVersion: 1, Name: "mcp", Version: "0.5.0",
 			Commands: []Command{{Name: "mcp"}, {Name: "run", TopLevel: true}}, Hooks: []string{HookStatus}},
 		Commands: map[string]func([]string) error{
-			"mcp": func(a []string) error { llamado = a; return &ExitError{Code: 3} },
+			"mcp": func(a []string) error { llamado = a; return &ExitError{Code: 6} },
 		},
 		Hooks: map[string]func([]string, io.Writer) error{
 			HookStatus: func(_ []string, w io.Writer) error { _, err := io.WriteString(w, "mcp: ok\n"); return err },
@@ -194,7 +194,7 @@ func TestIncorporadas(t *testing.T) {
 		t.Fatalf("incorporada mal registrada")
 	}
 	err := Exec(p, "mcp", []string{"heal"}, "")
-	if ExitCode(err) != 3 || len(llamado) != 1 || llamado[0] != "heal" {
+	if ExitCode(err) != 6 || len(llamado) != 1 || llamado[0] != "heal" {
 		t.Fatalf("una incorporada corre en proceso y conserva su código: code=%d args=%v", ExitCode(err), llamado)
 	}
 	out, err := RunHook(context.Background(), p, HookStatus, nil, "")
@@ -279,6 +279,40 @@ func TestVersionAtLeast(t *testing.T) {
 		if got := VersionAtLeast(c.have, c.want); got != c.ok {
 			t.Errorf("VersionAtLeast(%q, %q) = %v", c.have, c.want, got)
 		}
+	}
+}
+
+// Una extensión externa decide su código con ExitCode; incorporada, lo decide
+// el núcleo. Los dos tienen que dar el mismo para los errores del contrato.
+func TestExitCodeSigueElContratoDelNucleo(t *testing.T) {
+	for _, c := range []struct {
+		err    error
+		quiero int
+	}{
+		{nil, 0},
+		{errors.New("boom"), ExitFailure},
+		{fmt.Errorf("usage: kling mcp add <name>"), ExitUsage},
+		{fmt.Errorf("list: %w", &api.ErrDaemonTooOld{Version: "0.17.0"}), ExitDaemonOld},
+		{&api.StatusError{Code: 409, Message: "x", ErrorCode: api.CodeStaleGolden}, ExitStaleGolden},
+		// El código explícito manda sobre lo que envuelva.
+		{&ExitError{Code: 9, Err: &api.ErrDaemonTooOld{}}, 9},
+	} {
+		if got := ExitCode(c.err); got != c.quiero {
+			t.Errorf("%v: %d, quería %d", c.err, got, c.quiero)
+		}
+	}
+}
+
+// Una extensión externa muerta por una señal sale con 128+señal, como en una
+// shell; antes RunChild devolvía -1 y kling salía con 255.
+func TestRunChildMuertaPorSenal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kling-senal")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nkill -TERM $$\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, err := RunChild(&Plugin{Name: "senal", Path: path}, "x", nil, "")
+	if err != nil || code != 128+15 {
+		t.Fatalf("code=%d err=%v; quiero 143", code, err)
 	}
 }
 

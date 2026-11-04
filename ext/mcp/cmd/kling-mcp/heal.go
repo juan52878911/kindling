@@ -251,7 +251,7 @@ func mcpHeal(args []string) error {
 	default:
 		fmt.Printf("\n%d unhealthy, %d rebuilt\n", rotos, curados)
 	}
-	// No poder grabar la salud no es el 3 (sondeé y grabé, algo sigue roto): el
+	// No poder grabar la salud no es el 6 (sondeé y grabé, algo sigue roto): el
 	// vigía no hizo su trabajo y la unidad tiene que fallar, con el 1.
 	if sinGrabar > 0 {
 		return fmt.Errorf("the health of %d service(s) couldn't be recorded", sinGrabar)
@@ -261,7 +261,13 @@ func mcpHeal(args []string) error {
 		// salud de cada uno—, solo que algo sigue roto por una causa que no se
 		// cura reconstruyendo. Eso no es un fallo de la unidad; que no pudiera
 		// hablar con el daemon, si.
-		return &plugin.ExitError{Code: 3, Err: fmt.Errorf("%d service(s) still unhealthy", rotos-curados)}
+		return &plugin.ExitError{Code: salidaSigueEnfermo, Err: fmt.Errorf("%d service(s) still unhealthy", rotos-curados)}
 	}
 	return nil
 }
+
+// salidaSigueEnfermo es el código de "sondeé y grabé, pero algo sigue roto".
+// Era el 3, que en el contrato del núcleo es "el daemon es demasiado viejo"
+// (plugin.ExitDaemonOld): un script no podía distinguirlos. El 6 es el primero
+// libre tras los del núcleo (1-5); kling-heal.service lo da por éxito.
+const salidaSigueEnfermo = 6

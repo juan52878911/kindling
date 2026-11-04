@@ -316,7 +316,7 @@ func mcpVerify(args []string) error {
 	if ejercidas < len(tools) {
 		// Se dice AQUI, no en el resumen: un ✓ con la mitad de las herramientas
 		// sin llamar es la clase de senal que no puede fallar.
-		fmt.Printf("✓ %d de %d (las demas no respondieron)\n", ejercidas, len(tools))
+		fmt.Printf("✓ %d of %d (the others did not respond)\n", ejercidas, len(tools))
 	} else {
 		fmt.Println("✓")
 	}

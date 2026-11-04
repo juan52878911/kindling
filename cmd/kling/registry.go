@@ -116,7 +116,7 @@ func leerSecreto(in *os.File, tty bool, aviso string) (string, error) {
 			case <-sig:
 				restore()
 				fmt.Fprintln(os.Stderr)
-				os.Exit(130)
+				os.Exit(salidaInterrumpido)
 			case <-hecho:
 			}
 		}()
