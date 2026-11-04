@@ -164,6 +164,7 @@ cleanup() {
   pkill -KILL -f "$VMMB --api-sock $ROOT/" 2>/dev/null
   rm -f "$KLING_CONFIG"
   rm -rf "$SHARES" "${DBSTAGE:-}" "${GTMP:-}"
+  rmdir "$(dirname "$SHARES")" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -509,7 +510,8 @@ more" ] && [ "$hlink" = "d/e/g2" ] && contiene "$out" "not permitted" && [ ! -L 
   out=$(k exec "$S" -- cat /w/host.txt 2>&1)
   [ "$out" = "two" ] && ok "rw: a host edit shows up inside" || bad "host edit" "two" "$out"
   out=$(k exec -timeout 5m "$S" -- sh -c 'dd if=/dev/zero of=/w/big bs=1M count=200 conv=fsync 2>&1 | tail -1; echo 3 > /proc/sys/vm/drop_caches; dd if=/w/big of=/dev/null bs=1M 2>&1 | tail -1; rm /w/big' 2>&1)
-  SH_W=$(echo "$out" | sed -n 1p | grep -o '[0-9.]*[MG]B/s' || true); SH_R=$(echo "$out" | sed -n 2p | grep -o '[0-9.]*[MG]B/s' || true)
+  # busybox dice "400.0MB/s" y el dd de coreutils (Debian) "400 MB/s".
+  SH_W=$(echo "$out" | sed -n 1p | grep -o '[0-9][0-9.]* *[kMG]B/s' || true); SH_R=$(echo "$out" | sed -n 2p | grep -o '[0-9][0-9.]* *[kMG]B/s' || true)
   [ -n "$SH_W" ] && [ -n "$SH_R" ] && ok "rw: sequential write $SH_W, read $SH_R" || bad "throughput" "two dd results" "$out"
   SH_SMALL=$(k exec -timeout 5m "$S" -- python3 -c '
 import os, time
