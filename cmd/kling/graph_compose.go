@@ -611,6 +611,10 @@ func motivoNoSoportado(k string) string {
 	return "not supported"
 }
 
+// maxRangoPuertos: un rango de ports:/expose: más largo no se expande (cada
+// puerto publicado es un listener del daemon).
+const maxRangoPuertos = 1024
+
 func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre string, avisa func(string, ...any)) {
 	l, ok := v.([]any)
 	if !ok {
@@ -621,9 +625,19 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 		var spec string
 		switch x := e.(type) {
 		case map[string]any:
+			// Sintaxis larga: [host_ip:][published:]target[/protocol].
 			spec = fmt.Sprint(x["target"])
+			ip, _ := x["host_ip"].(string)
 			if p, ok := x["published"]; ok && p != nil {
 				spec = fmt.Sprintf("%v:%s", p, spec)
+			} else if ip != "" {
+				spec = ":" + spec
+			}
+			if ip != "" {
+				spec = ip + ":" + spec
+			}
+			if pr, _ := x["protocol"].(string); pr != "" {
+				spec += "/" + strings.ToLower(pr)
 			}
 		default:
 			spec = fmt.Sprint(e)
@@ -636,58 +650,98 @@ func (t *traduccionCompose) puertosDe(s *servicioCompose, k string, v any, pre s
 		}
 		spec = strings.TrimSuffix(spec, "/udp")
 		parts := strings.Split(spec, ":")
-		cont := parts[len(parts)-1]
-		if strings.Contains(cont, "-") {
-			avisa("%s%s: %s: port ranges are not supported", pre, k, spec)
-			continue
-		}
-		p, err := strconv.Atoi(cont)
-		if err != nil || p < 1 || p > 65535 {
+		guests, ok := rangoPuertos(parts[len(parts)-1])
+		if !ok {
 			avisa("%s%s: %s: not a port", pre, k, spec)
 			continue
 		}
-		if p == api.GuestPort {
-			avisa("%s%s: %s: port %d is the kindling guest agent; no edge can reach it", pre, k, spec, p)
+		if len(guests) > maxRangoPuertos {
+			avisa("%s%s: %s: port range longer than %d; not carried", pre, k, spec, maxRangoPuertos)
 			continue
 		}
+		// "80" (sin host) o "127.0.0.1::80": uno libre al azar, como Docker.
+		hosts := make([]int, len(guests))
 		if k == "ports" {
-			// "80" (sin host) o "127.0.0.1::80": uno libre al azar, como Docker.
-			h, hs := 0, ""
-			if len(parts) > 1 {
-				hs = parts[len(parts)-2]
-			}
 			if len(parts) > 2 {
 				if ip := strings.Join(parts[:len(parts)-2], ":"); ip != "127.0.0.1" && ip != "localhost" {
 					avisa("%sports: %s: published on 127.0.0.1 only, not on %s (kindling never publishes on other interfaces)", pre, spec, ip)
 				}
 			}
-			if hs != "" {
-				n, err := strconv.Atoi(hs)
-				if err != nil || n < 1 || n > 65535 {
-					avisa("%sports: %s: host port not understood", pre, spec)
+			if len(parts) > 1 {
+				if hs := parts[len(parts)-2]; hs != "" {
+					hr, ok := rangoPuertos(hs)
+					switch {
+					case !ok:
+						avisa("%sports: %s: host port not understood", pre, spec)
+						continue
+					case len(hr) == len(guests):
+						hosts = hr
+					case len(guests) == 1:
+						// Docker prueba los del rango hasta dar con uno libre;
+						// aquí, el primero.
+						hosts = hr[:1]
+						avisa("%sports: %s: published on 127.0.0.1:%d, the first port of the host range", pre, spec, hr[0])
+					default:
+						avisa("%sports: %s: host and container port ranges differ in length", pre, spec)
+						continue
+					}
+				}
+			}
+		}
+		for i, p := range guests {
+			if p == api.GuestPort {
+				avisa("%s%s: %s: port %d is the kindling guest agent; no edge can reach it", pre, k, spec, p)
+				continue
+			}
+			if k == "ports" {
+				h := hosts[i]
+				q := api.PortPublish{Host: h, Guest: p}
+				if udp {
+					q.Proto = api.ProtoUDP
+				}
+				// El mismo puerto del host en otra IP (127.0.0.1:80 y
+				// 192.168.1.5:80, o la IPv4 y la IPv6) es aquí uno solo.
+				if h != 0 && slices.ContainsFunc(s.publ, func(o api.PortPublish) bool { return o.Host == h && o.ProtoOr() == q.ProtoOr() }) {
+					if !slices.Contains(s.publ, q) {
+						avisa("%sports: %s: 127.0.0.1:%d is already published for another container port; skipped (kindling publishes on 127.0.0.1 only)", pre, spec, h)
+					}
 					continue
 				}
-				h = n
-			}
-			q := api.PortPublish{Host: h, Guest: p}
-			donde := "127.0.0.1:" + strconv.Itoa(h)
-			if h == 0 {
-				donde = "a free 127.0.0.1 port"
-			}
-			if udp {
-				q.Proto = api.ProtoUDP
+				donde := "127.0.0.1:" + strconv.Itoa(h)
+				if h == 0 {
+					donde = "a free 127.0.0.1 port"
+				}
 				s.publ = append(s.publ, q)
-				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s/udp; Linux only)", pre, spec, donde)
-				continue // las aristas son TCP: no es un puerto del nodo
+				if udp {
+					avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s/udp; Linux only)", pre, spec, donde)
+					continue // las aristas son TCP: no es un puerto del nodo
+				}
+				avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s)", pre, spec, donde)
 			}
-			s.publ = append(s.publ, q)
-			avisa("%sports: %s: graph up does not publish it on the host (kling compose up does, on %s)", pre, spec, donde)
-		}
-		if !slicesHas(s.puertos, p) {
-			s.puertos = append(s.puertos, p)
+			if !slicesHas(s.puertos, p) {
+				s.puertos = append(s.puertos, p)
+			}
 		}
 	}
 	sort.Ints(s.puertos)
+}
+
+// rangoPuertos lee "80" o "8000-8010" (incluidos); false si no son puertos.
+func rangoPuertos(s string) ([]int, bool) {
+	a, b, esRango := strings.Cut(s, "-")
+	if !esRango {
+		b = a
+	}
+	i, err1 := strconv.Atoi(a)
+	j, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || i < 1 || j > 65535 || j < i {
+		return nil, false
+	}
+	out := make([]int, 0, j-i+1)
+	for p := i; p <= j; p++ {
+		out = append(out, p)
+	}
+	return out, true
 }
 
 func (t *traduccionCompose) entorno(s *servicioCompose, v any, pre string, avisa func(string, ...any)) {

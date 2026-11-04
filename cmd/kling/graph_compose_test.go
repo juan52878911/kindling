@@ -214,6 +214,62 @@ func TestComposePuertosComoDocker(t *testing.T) {
 	}
 }
 
+// Rangos, el mismo puerto del host en dos IPs (Docker los abre los dos; aquí
+// es uno: 127.0.0.1) y la sintaxis larga con host_ip y protocol.
+func TestComposePuertosRangosEIPs(t *testing.T) {
+	c := `services:
+  web:
+    image: nginx
+    ports:
+      - "8000-8002:9000-9002"
+      - "127.0.0.1:8080:80"
+      - "192.168.1.5:8080:80"
+      - "[::1]:8080:80"
+      - "10.0.0.1:8080:81"
+      - "7000-7005:70"
+      - "6000-6001:60-62"
+      - "5000-5001"
+      - target: 53
+        published: "5353"
+        host_ip: 0.0.0.0
+        protocol: udp
+      - target: 3000
+        host_ip: 127.0.0.1
+    expose:
+      - "4000-4001"
+`
+	tr, err := traducirCompose([]byte(c), "dev", false, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []api.PortPublish{
+		{Host: 8000, Guest: 9000}, {Host: 8001, Guest: 9001}, {Host: 8002, Guest: 9002},
+		{Host: 8080, Guest: 80}, {Host: 7000, Guest: 70},
+		{Host: 0, Guest: 5000}, {Host: 0, Guest: 5001},
+		{Host: 5353, Guest: 53, Proto: "udp"}, {Host: 0, Guest: 3000},
+	}
+	if got := tr.Publica["web"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("Publica = %+v", got)
+	}
+	if got := tr.por["web"].puertos; !reflect.DeepEqual(got, []int{70, 80, 3000, 4000, 4001, 5000, 5001, 9000, 9001, 9002}) {
+		t.Errorf("puertos del nodo = %v", got)
+	}
+	avisos := strings.Join(tr.Avisos, "\n")
+	for _, w := range []string{
+		"10.0.0.1:8080:81: 127.0.0.1:8080 is already published for another container port",
+		"7000-7005:70: published on 127.0.0.1:7000, the first port of the host range",
+		"6000-6001:60-62: host and container port ranges differ in length",
+		"not on 0.0.0.0",
+	} {
+		if !strings.Contains(avisos, w) {
+			t.Errorf("sin aviso %q:\n%s", w, avisos)
+		}
+	}
+	if strings.Count(avisos, "already published") != 1 {
+		t.Errorf("la misma publicación en otra IP no avisa de duplicado:\n%s", avisos)
+	}
+}
+
 func TestComposeMemoria(t *testing.T) {
 	for in, want := range map[string]int{"512m": 512, "1g": 1024, "256MB": 256, "1073741824": 1024, "2048k": 2} {
 		if got := memoriaMiB(in, "x", func(string, ...any) {}); got != want {
