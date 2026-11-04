@@ -157,6 +157,60 @@ func TestFreezeQueNoPuedeReanudarMarcaFallidaLaViva(t *testing.T) {
 	}
 }
 
+// Un sello que falla tras matar el VMM: antes solo se avisaba y la máquina
+// quedaba warm con volcado.en-curso en disco, que volcadoValido lee como un
+// freeze interrumpido; el Thaw pedía `kling rm` y no había VMM al que volver.
+// Ahora queda failed, con el error, y sin el volcado que nadie cargaría.
+func TestFreezeConSelloFallidoQuedaFallida(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000006"
+	// Sin proceso detrás (PID 0), como TestFreezeSeVeEnTransicion: así corre
+	// también fuera de Linux, y matar el VMM no es lo que se prueba aquí.
+	m.addForTest(id)
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	falso := nuevoFcFalso(t)
+	m.mu.Lock()
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	// El volcado "escribe" la memoria pero no el estado: digest.File del
+	// snap.file falla al sellar.
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			if err := os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 4096), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+
+	if _, err := m.Freeze(context.Background(), id); err == nil {
+		t.Fatal("Freeze con el sello roto no devolvió error")
+	} else if !strings.Contains(err.Error(), "sealing") {
+		t.Errorf("error = %v: no dice que falló el sello", err)
+	}
+	viva := vivaDe(t, m, id)
+	if viva.State != api.StateFailed {
+		t.Fatalf("estado = %s, quería failed: warm con un volcado sin sellar no se descongela", viva.State)
+	}
+	if !strings.Contains(viva.LastErr, "sealing") {
+		t.Errorf("LastErr = %q: no cuenta por qué falló", viva.LastErr)
+	}
+	for _, f := range []string{marcaEnCurso, marcaOK, "mem.file", "snap.file"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			t.Errorf("queda %s de un volcado que no vale", f)
+		}
+	}
+	m.mu.RLock()
+	_, haySocket := m.socket[id]
+	m.mu.RUnlock()
+	if haySocket {
+		t.Error("queda el socket de un VMM muerto")
+	}
+}
+
 // A5: si la reanudación falla y luego el VMM contesta (acabó lo que estaba
 // escribiendo), el vigilante la reanuda y le quita la transición.
 func TestFreezeReanudacionPendienteLaRecuperaElVigilante(t *testing.T) {
@@ -599,6 +653,13 @@ func TestFreezeEsperaAlArranqueYReleeLaMaquina(t *testing.T) {
 	m.mu.Lock()
 	mc.State = api.StateCreated // como la deja Run al publicarla
 	m.mu.Unlock()
+	// Como un VMM de verdad: el volcado deja los dos ficheros, o no hay sello.
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(m.dir(id), "snap.file"), []byte("snap"), 0o644)
+			_ = os.WriteFile(filepath.Join(m.dir(id), "mem.file"), []byte("mem"), 0o644)
+		}
+	})
 
 	soltar := m.lock(id) // Run arrancándola
 	congelada := make(chan error, 1)

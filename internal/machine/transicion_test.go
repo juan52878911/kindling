@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -33,6 +34,13 @@ func TestFreezeSeVeEnTransicion(t *testing.T) {
 		visto bool
 	)
 	falso.enGancho(func(metodo, ruta string) {
+		// Como un VMM de verdad: el volcado deja los dos ficheros, o el sello
+		// falla y la máquina queda failed.
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(m.dir(id), "snap.file"), []byte("snap"), 0o644)
+			_ = os.WriteFile(filepath.Join(m.dir(id), "mem.file"), []byte("mem"), 0o644)
+			return
+		}
 		if metodo != http.MethodPatch || ruta != "/vm" {
 			return
 		}
