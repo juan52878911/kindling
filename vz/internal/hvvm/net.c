@@ -13,8 +13,10 @@
 #include <unistd.h>
 
 #include "khv.h"
+#include "vq_iov.h"
 
 #define HDR 12  // virtio_net_hdr_v1 (con num_buffers)
+#define TRAMA_MAX 65536
 
 static struct vnet_state s;
 static int fd = -1;
@@ -35,6 +37,20 @@ static int rx_desp[2] = {-1, -1};
 
 static void irq(void) { vmmio_irq(&s.m, intid); }
 
+// tx_mandar manda la trama de la cadena head como un datagrama, sin copiarla:
+// sendmsg con los búferes de lectura del invitado (sin la cabecera). Una
+// cadena que no vale, sin trama o mayor que TRAMA_MAX se descarta. Nunca
+// bloquea (MSG_DONTWAIT): con el otro extremo lleno (ENOBUFS, EAGAIN) la
+// trama se pierde y TCP reintenta; esperar dejaría el vCPU dentro del MMIO.
+static void tx_mandar(const struct vq *q, const struct vdesc *desc, uint16_t head) {
+  static struct iovec iov[QMAX], datos[QMAX];
+  uint64_t total;
+  int n = vq_iov(q, desc, head, false, iov, QMAX, &total);
+  if (fd < 0 || n <= 0 || total <= HDR || total > TRAMA_MAX + HDR) return;
+  struct msghdr m = {.msg_iov = datos, .msg_iovlen = iov_tramo(iov, n, HDR, total - HDR, datos)};
+  (void)!sendmsg(fd, &m, MSG_DONTWAIT);
+}
+
 // TX: cada cadena es cabecera + trama; se manda la trama como un datagrama.
 // Desde el hilo del vCPU (notify de la cola 1), con mu.
 static void tx(void) {
@@ -45,7 +61,6 @@ static void tx(void) {
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   bool hecho = false;
   uint16_t viejo = *(volatile uint16_t *)(used + 2);
-  static uint8_t buf[65536 + HDR];
   for (uint32_t vueltas = 0;; vueltas++) {  // ver b_procesar en virtio.c
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1]) {
@@ -59,8 +74,7 @@ static void tx(void) {
     }
     uint16_t head = avail[2 + q->last_avail % q->num];
     q->last_avail++;
-    size_t n = vq_leer(q, desc, head, buf, sizeof buf);  // 0 si la cadena no vale o no cabe
-    if (fd >= 0 && n > HDR) send(fd, buf + HDR, n - HDR, 0);  // ENOBUFS: se pierde, TCP reintenta
+    tx_mandar(q, desc, head);
     vq_push(q, used, head, 0);
     hecho = true;
   }
@@ -73,43 +87,89 @@ static void tx(void) {
   }
 }
 
-// Mete la trama en el siguiente búfer de rx; false si no hay (o no hay driver).
-// Con mu.
-static bool rx_entregar(const uint8_t *trama, size_t n, bool *sin_buf) {
+// rx_avisar interrumpe al invitado, si lo pide, por las tramas puestas desde
+// que used valía viejo. Con mu.
+static void rx_avisar(uint16_t viejo) {
   struct vq *q = &s.q[0];
   uint16_t *avail;
   uint8_t *used;
   struct vdesc *desc;
-  *sin_buf = false;
-  if (!vq_ptrs(q, &avail, &used, &desc)) return false;
-  __atomic_thread_fence(__ATOMIC_ACQUIRE);
-  // Sin búferes: con EVENT_IDX se pide el aviso del siguiente (mientras los
-  // haya, el driver repone sin avisar) y se vuelve a mirar.
-  if (q->last_avail == *(volatile uint16_t *)&avail[1] && !vq_pedir_aviso(&s.m, q, avail, used)) {
-    *sin_buf = true;
-    return false;
-  }
-  uint16_t head = avail[2 + q->last_avail % q->num];
-  q->last_avail++;
-  static uint8_t pkt[HDR + 65536];
-  if (n > sizeof pkt - HDR) n = sizeof pkt - HDR;
-  memset(pkt, 0, HDR);
-  pkt[10] = 1;  // num_buffers
-  memcpy(pkt + HDR, trama, n);
-  // Una cadena más corta que la trama no recibe media trama (ni media
-  // cabecera): el búfer vuelve con 0 bytes y la trama se pierde entera,
-  // que es lo que un driver espera de un paquete que no le cabe.
-  uint32_t off = 0;
-  if (vq_capacidad(q, desc, head) >= HDR + n) off = vq_escribir(q, desc, head, pkt, (uint32_t)(HDR + n));
-  uint16_t viejo = *(volatile uint16_t *)(used + 2);
-  vq_push(q, used, head, off);
+  if (!vq_ptrs(q, &avail, &used, &desc)) return;
   // En NAPI el driver no quiere una interrupción por trama: la pide al acabar.
-  if (vq_interrumpir(&s.m, q, avail, viejo, (uint16_t)(viejo + 1))) {
+  if (vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) {
     __atomic_fetch_add(&khv_avisos[KHV_N_NET_IRQ], 1, __ATOMIC_RELAXED);
     s.m.isr |= 1;
     irq();
   }
-  return true;
+}
+
+// used_idx es el índice de used ahora (0 sin driver).
+static uint16_t used_idx(void) {
+  struct vq *q = &s.q[0];
+  uint16_t *avail;
+  uint8_t *used;
+  struct vdesc *desc;
+  return vq_ptrs(q, &avail, &used, &desc) ? *(volatile uint16_t *)(used + 2) : 0;
+}
+
+enum { RX_PUESTA, RX_VACIO, RX_SIN_BUF, RX_ERROR };
+
+// rx_una recibe la siguiente trama del socket directamente en el siguiente
+// búfer de rx del invitado (recvmsg con sus búferes como iovec, detrás de la
+// cabecera): una sola pasada por la cadena y ninguna copia intermedia. Con
+// mu y la VM corriendo. RX_VACIO: no hay trama (el búfer no se gasta);
+// RX_SIN_BUF: no hay búfer, y la trama sigue en el socket; RX_ERROR: recv
+// falló (en *err). Sin driver la trama se tira. Una cadena que no vale, o
+// más corta que la trama, no recibe media trama (ni media cabecera): el
+// búfer vuelve con 0 bytes y la trama se pierde entera, que es lo que un
+// driver espera de un paquete que no le cabe.
+static int rx_una(int *err) {
+  static struct iovec iov[QMAX], datos[QMAX];
+  static uint8_t tirar[TRAMA_MAX];
+  struct vq *q = &s.q[0];
+  uint16_t *avail;
+  uint8_t *used;
+  struct vdesc *desc;
+  struct msghdr m = {0};
+  struct iovec t = {.iov_base = tirar, .iov_len = sizeof tirar};
+  if (!vq_ptrs(q, &avail, &used, &desc)) {
+    m.msg_iov = &t;
+    m.msg_iovlen = 1;
+    ssize_t r = recvmsg(fd, &m, MSG_DONTWAIT);
+    if (r >= 0) return RX_PUESTA;
+    *err = errno;
+    return errno == EAGAIN ? RX_VACIO : RX_ERROR;
+  }
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  // Sin búferes: con EVENT_IDX se pide el aviso del siguiente (mientras los
+  // haya, el driver repone sin avisar) y se vuelve a mirar.
+  if (q->last_avail == *(volatile uint16_t *)&avail[1] && !vq_pedir_aviso(&s.m, q, avail, used)) return RX_SIN_BUF;
+  uint16_t head = avail[2 + q->last_avail % q->num];
+  uint64_t cap = 0;
+  int n = vq_iov(q, desc, head, true, iov, QMAX, &cap);
+  bool vale = n > 0 && cap > HDR;
+  if (vale) {
+    m.msg_iov = datos;
+    m.msg_iovlen = iov_tramo(iov, n, HDR, cap - HDR, datos);
+  } else {
+    m.msg_iov = &t;  // se recibe para tirarla
+    m.msg_iovlen = 1;
+  }
+  ssize_t r = recvmsg(fd, &m, MSG_DONTWAIT);
+  if (r < 0) {
+    *err = errno;
+    return errno == EAGAIN ? RX_VACIO : RX_ERROR;
+  }
+  uint32_t len = 0;
+  if (vale && !(m.msg_flags & MSG_TRUNC)) {
+    uint8_t cab[HDR] = {0};
+    cab[10] = 1;  // num_buffers
+    iov_poner(iov, n, cab, HDR);
+    len = HDR + (uint32_t)r;
+  }
+  q->last_avail++;
+  vq_push(q, used, head, len);
+  return RX_PUESTA;
 }
 
 // rx_errorf deja en stderr por qué termina el hilo de recepción: sin él la
@@ -120,6 +180,69 @@ static void rx_errorf(const char *que, int e) {
   dprintf(2, "kling-hv: net: the receive thread stops (%s: %s); the guest gets no more frames\n", que, strerror(e));
 }
 
+// rx_vaciar mete en el invitado todas las tramas que haya en el socket, con
+// una interrupción por tanda (la que pida el driver) y no una por trama. Sin
+// búferes libres espera a que el invitado reponga (notify de la cola 0), como
+// mucho 1 s por trama; luego la tira, como antes, para que un invitado que no
+// repone no deje al otro extremo lleno para siempre. Con mu; false si recv
+// falló (en *err) y el hilo debe terminar.
+static bool rx_vaciar(int *err) {
+  uint16_t viejo = used_idx();
+  int intentos = 0;
+  bool impulso = false;
+  for (;;) {
+    // Con la VM en pausa (restaurando o haciendo snapshot) no se toca la
+    // RAM: la trama espera a que corra (o a vnet_parar).
+    if (g_pausa && !rx_parar) {
+      rx_avisar(viejo);
+      while (g_pausa && !rx_parar) pthread_cond_wait(&cv, &mu);
+      viejo = used_idx();
+    }
+    if (rx_parar) break;
+    int r = rx_una(err);
+    if (r == RX_PUESTA) {
+      intentos = 0;
+      if (!impulso) {
+        khv_qos_impulso();  // el host le manda trabajo al invitado (vm.c, QoS)
+        impulso = true;
+      }
+      // En una ráfaga larga el driver no espera al final para ver las
+      // primeras: se le avisa cada 32 (si lo pide).
+      if ((uint16_t)(used_idx() - viejo) >= 32) {
+        rx_avisar(viejo);
+        viejo = used_idx();
+      }
+      continue;
+    }
+    if (r == RX_ERROR) {
+      if (*err == EINTR) continue;
+      rx_avisar(viejo);
+      return false;
+    }
+    if (r == RX_VACIO) break;
+    // RX_SIN_BUF
+    rx_avisar(viejo);
+    if (intentos++ >= 20) {
+      // Se tira la trama que espera, sin gastar búfer.
+      static uint8_t tirar[TRAMA_MAX];
+      if (recv(fd, tirar, sizeof tirar, MSG_DONTWAIT) < 0 && errno != EAGAIN && errno != EINTR) {
+        *err = errno;
+        return false;
+      }
+      intentos = 0;
+    } else {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 50000000;
+      if (ts.tv_nsec >= 1000000000) ts.tv_sec++, ts.tv_nsec -= 1000000000;
+      pthread_cond_timedwait(&cv, &mu, &ts);
+    }
+    viejo = used_idx();
+  }
+  rx_avisar(viejo);
+  return true;
+}
+
 // RX: lee tramas del socket y las mete en los búferes del invitado. Espera en
 // poll sobre el socket y rx_desp, no en recv: vnet_parar lo despierta y lo
 // espera antes de que Go cierre el fd. Cerrar el fd con el hilo dentro de
@@ -128,7 +251,6 @@ static void rx_errorf(const char *que, int e) {
 static void *rx_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
-  static uint8_t trama[65536];
   for (;;) {
     struct pollfd pf[2] = {{.fd = fd, .events = POLLIN}, {.fd = rx_desp[0], .events = POLLIN}};
     int r = poll(pf, 2, -1);
@@ -144,33 +266,20 @@ static void *rx_hilo(void *a) {
       }
     }
     if (!(pf[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-    ssize_t n = recv(fd, trama, sizeof trama, MSG_DONTWAIT);
-    if (n < 0) {
-      int e = errno;
-      if (e == EINTR) continue;
-      // Un HUP sin nada que leer no se va: seguir sería girar en vacío.
-      if (e == EAGAIN && !((pf[0].revents & (POLLHUP | POLLERR)) && !(pf[0].revents & POLLIN))) continue;
-      rx_errorf("recv", e == EAGAIN ? EPIPE : e);
+    // Un HUP sin nada que leer no se va: seguir sería girar en vacío.
+    bool colgado = (pf[0].revents & (POLLHUP | POLLERR)) && !(pf[0].revents & POLLIN);
+    int err = 0;
+    pthread_mutex_lock(&mu);
+    bool ok = rx_vaciar(&err);
+    pthread_mutex_unlock(&mu);
+    if (!ok) {
+      rx_errorf("recv", err);
       return NULL;
     }
-    khv_qos_impulso();  // el host le manda trabajo al invitado (vm.c, QoS)
-    pthread_mutex_lock(&mu);
-    for (int intentos = 0;; intentos++) {
-      // Con la VM en pausa (restaurando o haciendo snapshot) no se toca la
-      // RAM: la trama espera a que corra (o a vnet_parar).
-      while (g_pausa && !rx_parar) pthread_cond_wait(&cv, &mu);
-      if (rx_parar) break;
-      bool sin_buf;
-      if (rx_entregar(trama, (size_t)n, &sin_buf) || !sin_buf || intentos >= 20) break;
-      // Sin búferes libres: esperar a que el invitado reponga (notify de la
-      // cola 0), como mucho 1 s en total; luego la trama se pierde.
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_nsec += 50000000;
-      if (ts.tv_nsec >= 1000000000) ts.tv_sec++, ts.tv_nsec -= 1000000000;
-      pthread_cond_timedwait(&cv, &mu, &ts);
+    if (colgado) {
+      rx_errorf("recv", EPIPE);
+      return NULL;
     }
-    pthread_mutex_unlock(&mu);
   }
 }
 

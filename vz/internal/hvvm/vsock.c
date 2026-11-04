@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "khv.h"
+#include "vq_iov.h"
 
 #define VS_HOST_CID 2
 #define VS_GUEST_CID 3
@@ -253,9 +254,18 @@ static void tx(void) {
 
 // ---------- rx: lo que va al invitado (hilo vs_hilo, con mu) ----------
 
-// Mete un paquete en el siguiente búfer de rx. false si no hay búfer o no cabe
-// (el que llama ya miró la capacidad con rx_capacidad).
-static bool rx_poner(struct vs_hdr *h, const uint8_t *d) {
+// El siguiente búfer de rx del invitado, como iovec: rx_mirar lo prepara (una
+// sola pasada por la cadena) sin gastarlo, y rx_cerrar lo devuelve lleno.
+static struct {
+  uint16_t head;
+  int n;
+  uint64_t cap;
+  struct iovec iov[QMAX];
+} rxb;
+
+// rx_mirar prepara rxb con el siguiente búfer de rx; false si no hay (o no
+// hay driver). Una cadena que no vale queda con cap 0: no cabe nada. Con mu.
+static bool rx_mirar(void) {
   struct vq *q = &s.q[0];
   uint16_t *avail;
   uint8_t *used;
@@ -263,28 +273,31 @@ static bool rx_poner(struct vs_hdr *h, const uint8_t *d) {
   if (!vq_ptrs(q, &avail, &used, &desc)) return false;
   __atomic_thread_fence(__ATOMIC_ACQUIRE);
   if (q->last_avail == *(volatile uint16_t *)&avail[1]) return false;
-  uint16_t head = avail[2 + q->last_avail % q->num];
-  static uint8_t buf[VS_HDR + VS_PAYLOAD];
-  memcpy(buf, h, VS_HDR);
-  if (h->len) memcpy(buf + VS_HDR, d, h->len);
-  uint32_t total = VS_HDR + h->len;
-  if (vq_capacidad(q, desc, head) < total) return false;
-  q->last_avail++;
-  vq_escribir(q, desc, head, buf, total);
-  vq_push(q, used, head, total);
+  rxb.head = avail[2 + q->last_avail % q->num];
+  rxb.n = vq_iov(q, desc, rxb.head, true, rxb.iov, QMAX, &rxb.cap);
+  if (rxb.n < 0) rxb.n = 0, rxb.cap = 0;
   return true;
 }
 
-// Bytes que caben en el siguiente búfer de rx (0 si no hay).
-static uint32_t rx_capacidad(void) {
+// rx_cerrar escribe la cabecera h al principio del búfer de rx_mirar (los
+// datos, si los hay, ya están detrás) y lo devuelve al invitado. Con mu.
+static void rx_cerrar(const struct vs_hdr *h) {
   struct vq *q = &s.q[0];
   uint16_t *avail;
   uint8_t *used;
   struct vdesc *desc;
-  if (!vq_ptrs(q, &avail, &used, &desc)) return 0;
-  __atomic_thread_fence(__ATOMIC_ACQUIRE);
-  if (q->last_avail == *(volatile uint16_t *)&avail[1]) return 0;
-  return vq_capacidad(q, desc, avail[2 + q->last_avail % q->num]);
+  if (!vq_ptrs(q, &avail, &used, &desc)) return;
+  iov_poner(rxb.iov, rxb.n, h, VS_HDR);
+  q->last_avail++;
+  vq_push(q, used, rxb.head, VS_HDR + h->len);
+}
+
+// Mete un paquete de control (sin datos) en el siguiente búfer de rx. false
+// si no hay búfer o no cabe.
+static bool rx_poner(struct vs_hdr *h) {
+  if (!rx_mirar() || rxb.cap < VS_HDR) return false;
+  rx_cerrar(h);
+  return true;
 }
 
 static void cabecera(struct vs_hdr *h, struct vconn *c, uint16_t op, uint32_t len, uint32_t flags) {
@@ -336,17 +349,17 @@ static bool bombear(const bool *listo) {
     h.dst_port = rst_cola[0].dst;
     h.type = TYPE_STREAM;
     h.op = OP_RST;
-    if (!rx_poner(&h, NULL)) return puesto;
+    if (!rx_poner(&h)) return puesto;
     puesto = true;
     memmove(rst_cola, rst_cola + 1, sizeof rst_cola[0] * (size_t)(--n_rst));
   }
-  static uint8_t datos[VS_PAYLOAD];
+  static struct iovec datos[QMAX];
   for (int i = 0; i < VS_MAXCONN; i++) {
     struct vconn *c = &conns[i];
     if (c->estado == C_LIBRE) continue;
     if (c->p_rst) {
       cabecera(&h, c, OP_RST, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       liberar(c);
       continue;
@@ -354,20 +367,21 @@ static bool bombear(const bool *listo) {
     if (c->p_request) {
       khv_qos_impulso();  // una conexión nueva del host: trabajo (vm.c, QoS)
       cabecera(&h, c, OP_REQUEST, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_request = false;
     }
     if (c->estado != C_ABIERTA) continue;
-    // Datos: tantos paquetes como dejen el crédito y los búferes.
+    // Datos: tantos paquetes como dejen el crédito y los búferes, leídos del
+    // socket directamente en el búfer del invitado, detrás de la cabecera.
     while (listo[i] && !c->host_eof && !c->guest_sordo) {
-      uint32_t cap = rx_capacidad(), cr = credito(c);
-      if (cap <= VS_HDR) return puesto;
+      uint32_t cr = credito(c);
+      if (!rx_mirar() || rxb.cap <= VS_HDR) return puesto;
       if (cr == 0) break;
-      uint32_t n = cap - VS_HDR;
+      uint64_t n = rxb.cap - VS_HDR;
       if (n > cr) n = cr;
       if (n > VS_PAYLOAD) n = VS_PAYLOAD;
-      ssize_t r = read(c->fd, datos, n);
+      ssize_t r = readv(c->fd, datos, iov_tramo(rxb.iov, rxb.n, VS_HDR, n, datos));
       if (r < 0) {
         if (errno != EAGAIN && errno != EINTR) c->p_rst = true;
         break;
@@ -379,10 +393,7 @@ static bool bombear(const bool *listo) {
       }
       khv_qos_impulso();
       cabecera(&h, c, OP_RW, (uint32_t)r, 0);
-      if (!rx_poner(&h, datos)) {  // no pasa: la capacidad ya se miró con mu
-        c->p_rst = true;
-        break;
-      }
+      rx_cerrar(&h);
       c->tx_cnt += (uint32_t)r;
       puesto = true;
     }
@@ -392,7 +403,7 @@ static bool bombear(const bool *listo) {
       uint32_t f = c->p_shut;
       if (c->host_eof && c->npend == 0 && c->guest_eof) f |= SHUT_RCV_F;
       cabecera(&h, c, OP_SHUTDOWN, 0, f);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_shut = 0;
       // Tras un cierre completo el invitado debe contestar con RST.
@@ -400,7 +411,7 @@ static bool bombear(const bool *listo) {
     }
     if (c->p_credit) {
       cabecera(&h, c, OP_CREDIT_UPDATE, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_credit = false;
     }
