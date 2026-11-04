@@ -263,7 +263,11 @@ func ParsearClavePrivada(b []byte) (ClavePrivada, error) {
 	r := d[54:]
 	copy(k.ID[:], r[:8])
 	sk := r[8:72]
-	if subtle.ConstantTimeCompare(sumaClaveSecreta(k.ID, sk), r[72:]) != 1 {
+	// `minisign -G -W` (0.12) deja la suma a ceros en una clave sin cifrar, y
+	// minisign no la mira: se acepta así. La coherencia de la clave la
+	// comprueba igual NewKeyFromSeed abajo.
+	if chk := r[72:]; !bytes.Equal(chk, make([]byte, len(chk))) &&
+		subtle.ConstantTimeCompare(sumaClaveSecreta(k.ID, sk), chk) != 1 {
 		return k, errors.New("minisign secret key checksum mismatch")
 	}
 	k.Clave = ed25519.NewKeyFromSeed(sk[:32])
