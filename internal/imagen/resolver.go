@@ -14,8 +14,8 @@ import (
 
 	"github.com/juan52878911/kindling/internal/deb"
 	"github.com/juan52878911/kindling/internal/ext4"
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/internal/xz"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // RESOLVER PAQUETES CONTRA UN SNAPSHOT. El constructor debian añade paquetes

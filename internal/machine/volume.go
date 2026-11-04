@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // reVolume acota el nombre: es un componente de ruta.

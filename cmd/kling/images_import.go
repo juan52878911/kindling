@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/units"
 )
 

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // ETIQUETAS. Pull solo acepta digests: una etiqueta se mueve y lo que se

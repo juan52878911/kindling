@@ -26,8 +26,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un

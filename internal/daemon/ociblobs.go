@@ -39,8 +39,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 var reOCIDigest = lazyre.New(`^sha256:[0-9a-f]{64}$`)

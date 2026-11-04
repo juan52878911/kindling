@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Spec es lo que el constructor "llm" recibe en el spec de POST /images. O un

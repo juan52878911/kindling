@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"io"
 	"os"
 	"os/exec"

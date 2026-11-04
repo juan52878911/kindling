@@ -46,7 +46,8 @@ Kubernetes, `compose` (el subconjunto de Compose que se acepta) y **kling-hv**
 
 **Interno:** el resto de `pkg/` (`guest`, `credproxy`, `scheduler`,
 `linkbroker`, `panico`, `units`: siguen en `pkg/` solo porque los importan
-otros módulos del repo, `ext/*` y `vz/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
+otros módulos del repo, `ext/*` y `vz/`; `lazyre` sigue porque es el tipo de
+`api.KeyPattern` y cambia solo con `pkg/api`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
 `upgrade -schemas`), las variables `KLING_VZ_*`, `KLING_HV_*` y `KLING_TEST_*`,
 la salida para humanos de la CLI (columnas, textos, colores: para scripts,
 `-json`), el texto de los mensajes de error (para decidir, el código), y los

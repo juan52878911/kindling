@@ -46,7 +46,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // ResolveMachineFunc da la dirección ("ip:puerto") por la que el proxy llega

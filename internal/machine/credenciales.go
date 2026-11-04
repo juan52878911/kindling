@@ -68,10 +68,10 @@ import (
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/fc"
-	"github.com/juan52878911/kindling/internal/lazyre"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (

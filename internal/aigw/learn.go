@@ -23,7 +23,7 @@ import (
 	"unicode"
 
 	"github.com/juan52878911/kindling/internal/chispa"
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // MEJORA CONTINUA: que Chispa aprenda lo que otros resolvieron por él.

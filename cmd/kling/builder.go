@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/android"
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CONSTRUCTORES DEL NÚCLEO.

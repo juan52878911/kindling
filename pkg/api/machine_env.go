@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CapabilityMachineEnv es la capacidad de GET /info que dice que el daemon

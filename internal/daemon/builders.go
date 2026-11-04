@@ -19,8 +19,8 @@ import (
 
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/imagen"
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CONSTRUCTORES DE IMÁGENES.

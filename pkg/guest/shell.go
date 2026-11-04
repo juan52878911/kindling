@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/lazyre"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // maxShells acota las sesiones simultáneas por microVM. Cada una es una shell y
