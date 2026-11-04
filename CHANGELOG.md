@@ -61,6 +61,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-hv: taking a vCPU offline and back online (CPU hotplug) crashed the guest kernel; CPU_ON now resets the vCPU's system registers.
+- kling-hv: the guest no longer sees SVE/SME on an M4 (it advertised sve2 without sve and OpenSSL died with SIGILL, #183 on hv).
+- kling-hv: a freeze during a pending CPU_ON left that vCPU dead after restore; the balloon no longer writes guest RAM during a snapshot; a pause that cannot stop every vCPU gives up after 5 s with an error instead of hanging freeze/stop.
+- kling-hv: a stalled console reader can no longer block a vCPU (output is dropped and counted); a timed-out vsock dial frees its slot; the network RX thread is stopped before its socket is closed; each snapshot state version must have its own header length.
+- kling-hv: pause errors and the reason the VM ended (e.g. a guest reboot) are reported instead of "the VM has stopped".
+- A dead VMM is noticed at once (it took 22-30 s), also for VMMs re-adopted after a daemon restart; `start` cold-boots a `failed` machine with its disk and `thaw` restores one whose dump is still valid; `start` no longer claims a cold boot it did not do.
+- macOS and Linux: any process naming a machine's API socket (a `curl --unix-socket` polling it) was taken for its VMM, so a thaw could re-adopt it and the machine ended `failed`; only `--api-sock` processes count now, and a thaw kills a VMM its freeze left behind.
 - A freeze whose seal could not be written left a `warm` machine that could never be thawed; it now fails the machine and keeps its disk.
 - Two `commit`s with the same name from different machines no longer overwrite each other; the second gets a conflict.
 - A crash between a fork's snapshot meta and its `fork-of` mark left an orphan fork nobody swept.
