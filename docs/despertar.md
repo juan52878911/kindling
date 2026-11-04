@@ -8,7 +8,7 @@ sin romper nada); lo que no funcionó también está contado.
 Todo medido en el mismo sitio que [chispa-serverless.md](chispa-serverless.md):
 Intel **i7-8700T**, Proxmox CT 105 (Debian 12, kernel 6.17, KVM sin anidar,
 NVMe), Firecracker 1.17 **con jailer**. La carga es una tarea Chispa de 28
-etiquetas (`kling ai chispa deploy -mem 128 -vcpus 1`, dorado de ~70 MiB) detrás de
+etiquetas (`kling ai chispa deploy -mem 128 -cpus 1`, dorado de ~70 MiB) detrás de
 `kling ai serve`, 10 ciclos por medida con `scripts/99-thaw-bench.sh`.
 
 ## Resultado

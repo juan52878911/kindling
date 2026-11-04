@@ -8,7 +8,7 @@ installed, `kling mcp`, `kling mcp add`, `kling mcp search`, `kling connect`, `k
 `kling mcp export`, `kling mcp memory` and `kling mcp migrate` appear in the same `kling` you already
 use, in its help and in its shell completion.
 
-> Status: part of **kindling v0.13.0** (unreleased). Until v0.4.0 this was the separate
+> Status: part of **kindling** since v0.13.0. Until v0.4.0 this was the separate
 > kindling-mcp repository (archived; its releases are still there); since kindling
 > v0.13.0 it lives in `ext/mcp` of the kindling repository and ships in the same release
 > as the core, with the same version. Every binary in a release is compatible with every

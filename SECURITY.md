@@ -1497,7 +1497,7 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   máquina cuyo `-disk` no quepa en el disco libre y crear máquinas nuevas con el disco
   casi lleno, pero no reserva: las que ya corren pueden seguir llenando los suyos hasta
   su tamaño, y entre todas pasar de lo libre.
-- **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
+- **El cifrado en reposo es cosa del disco, no de kindling.** `kling status -v` dice si
   `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
   microVMs. Receta en `docs/cifrado.md`.
 - **Sin política de autorización, el daemon confía en quien alcanza su socket.** Es el
@@ -1622,7 +1622,7 @@ kling ps -a          # qué había, con su IP y su política de salida
 kling topo           # de qué snapshot salió cada instancia
 ```
 
-Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling rmi` se
+Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling template rm` se
 niega si quedan vivas.
 
 ## Reportar una vulnerabilidad
