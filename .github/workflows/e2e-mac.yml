@@ -1,0 +1,154 @@
+# e2e del Mac con kling-hv: lo que el job `vz` de ci.yml no puede probar en un
+# runner de GitHub (son VMs sin virtualización anidada, kern.hv_support 0):
+# arrancar, congelar y despertar microVMs de verdad con Hypervisor.framework
+# (scripts/92-e2e-mac.sh) y `kling upgrade` de la release anterior a esta con
+# el agente de launchd (scripts/95-e2e-upgrade-mac.sh), los dos con VMM=hv.
+#
+# Necesita un runner self-hosted en un Mac con Apple Silicon y macOS 15.2 o
+# posterior, con las etiquetas `self-hosted, macOS, ARM64`. Sin runner, el job
+# no se encola: solo corre si la variable del repo KLING_MAC_RUNNER vale
+# 'true' (Settings → Secrets and variables → Actions → Variables). Si no, sale
+# como saltado y no deja nada esperando para siempre.
+#
+# El runner tiene que ser una cuenta de usuario PROPIA, con su sesión abierta
+# (el runner como LaunchAgent, no como LaunchDaemon): 95 instala y quita un
+# agente dev.kindling.daemon en gui/<uid>, que no existe sin sesión. Las dos
+# pruebas levantan un daemon privado (su raíz, su socket y una configuración
+# vacía bajo $RUNNER_TEMP) y nunca hablan con el de un usuario; 95 se niega si
+# esa cuenta ya tiene su agente o su plist, y aquí se para antes, con el motivo.
+#
+# Las imágenes no se construyen en el Mac: vmlinux, min.ext4 y la capa de IMG
+# (toolchain por defecto) con su receta, sacadas de un daemon Linux arm64
+# (docs/mac.md), en el directorio de la variable KLING_MAC_IMAGES_DIR o en
+# ~/kling-e2e-images. Las pruebas las clonan (cp -c), no las cambian.
+name: e2e-mac
+
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: 'qué correr (e2e upgrade)'
+        default: 'e2e upgrade'
+  # En un PR solo si toca lo que estas pruebas ven.
+  pull_request:
+    paths:
+      - 'vz/**'
+      - 'internal/machine/**'
+      - 'scripts/92-e2e-mac.sh'
+      - 'scripts/95-e2e-upgrade-mac.sh'
+      - 'scripts/lib-e2e-upgrade.sh'
+      - '.github/workflows/e2e-mac.yml'
+
+permissions:
+  contents: read
+
+# Un solo Mac: 92 y 95 usan sockets fijos en /tmp y la etiqueta de launchd del
+# usuario, así que dos ejecuciones a la vez en la misma cuenta chocarían.
+concurrency:
+  group: e2e-mac
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: microVMs (kling-hv, Hypervisor.framework)
+    # Además, nunca el PR de un fork: correría su código en el Mac del runner.
+    if: >-
+      vars.KLING_MAC_RUNNER == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 120
+    env:
+      GOWORK: 'off'
+      VMM: hv
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # git describe: 95 necesita una versión de release para el kling nuevo.
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: |
+            go.sum
+            vz/go.sum
+
+      - name: Mac, images and no user daemon in the way
+        id: pre
+        env:
+          IMAGES: ${{ vars.KLING_MAC_IMAGES_DIR }}
+          IMG: ${{ vars.KLING_MAC_E2E_IMG || 'toolchain' }}
+        run: |
+          set -euo pipefail
+          sw_vers
+          [ "$(sysctl -n kern.hv_support)" = 1 ] || { echo "::error::kern.hv_support is not 1: this Mac has no hypervisor for kling-hv"; exit 1; }
+          dir="${IMAGES:-$HOME/kling-e2e-images}"
+          for f in vmlinux min.ext4 "$IMG.layer.ext4"; do
+            [ -f "$dir/$f" ] || { echo "::error::$dir/$f is missing (see the header of e2e-mac.yml)"; exit 1; }
+          done
+          # El agente del usuario de esta cuenta no se toca: 95 lo reemplazaría.
+          if launchctl print "gui/$(id -u)/dev.kindling.daemon" >/dev/null 2>&1 \
+             || [ -e "$HOME/Library/LaunchAgents/dev.kindling.daemon.plist" ]; then
+            echo "::error::this runner account runs its own kindling daemon (dev.kindling.daemon): use a dedicated account for the runner"
+            exit 1
+          fi
+          # Todo lo de las pruebas (raíces, registros, configuración) va bajo
+          # $RUNNER_TEMP y se borra con el job.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "images=$dir" >> "$GITHUB_OUTPUT"
+          echo "img=$IMG" >> "$GITHUB_OUTPUT"
+
+      # kling con la versión de git describe (sin la v, como release.yml), y
+      # los dos VMM firmados ad hoc con su entitlement, juntos.
+      - name: build
+        id: bin
+        run: |
+          set -euo pipefail
+          v=$(git describe --tags --always)
+          dir="$RUNNER_TEMP/new"
+          mkdir -p "$dir"
+          go build -trimpath -ldflags "-X main.Version=${v#v}" -o "$dir/kling" ./cmd/kling
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.Version=${v#v}" -o "$dir/kling-guest" ./cmd/kling-guest
+          OUT="$dir/kling-vz" VERSION="$v" vz/build.sh
+          OUT="$dir/kling-hv" VERSION="$v" vz/build-hv.sh
+          echo "kling ${v#v}"
+          "$dir/kling-hv" --probe
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: 92-e2e-mac (VMM=hv)
+        if: contains(inputs.parts || 'e2e upgrade', 'e2e')
+        env:
+          KLING: ${{ steps.bin.outputs.dir }}/kling
+          IMAGES_DIR: ${{ steps.pre.outputs.images }}
+          IMG: ${{ steps.pre.outputs.img }}
+        run: bash scripts/92-e2e-mac.sh
+
+      - name: 95-e2e-upgrade-mac (VMM=hv)
+        if: (success() || failure()) && contains(inputs.parts || 'e2e upgrade', 'upgrade')
+        env:
+          NEW_DIR: ${{ steps.bin.outputs.dir }}
+          IMAGES_DIR: ${{ steps.pre.outputs.images }}
+          # Para el API de releases (la N-1) sin el límite anónimo.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/95-e2e-upgrade-mac.sh
+
+      # Las pruebas limpian lo suyo; esto es por si una se cortó a medias (el
+      # tope del job, un cancel). Solo procesos de las raíces y binarios de
+      # las pruebas (no todo $RUNNER_TEMP: ahí vive también el guion de este
+      # paso), y el agente de launchd y su plist solo si apuntan ahí.
+      - name: cleanup
+        if: always()
+        run: |
+          for d in kling-e2e-mac kt-e2e-upgrade-mac new; do
+            pkill -f -- "$RUNNER_TEMP/$d/" || true
+          done
+          a="gui/$(id -u)/dev.kindling.daemon"
+          plist="$HOME/Library/LaunchAgents/dev.kindling.daemon.plist"
+          if launchctl print "$a" 2>/dev/null | grep -q -- "$RUNNER_TEMP/"; then
+            launchctl bootout "$a" || true
+          fi
+          if [ -f "$plist" ] && grep -q -- "$RUNNER_TEMP/" "$plist"; then
+            rm -f "$plist"
+          fi
