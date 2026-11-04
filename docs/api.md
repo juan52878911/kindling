@@ -53,7 +53,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `publish` | v0.20 | `POST/DELETE /machines/{ref}/publish`, `GET /publish` y `publish` en `POST /machines`: el daemon publica `127.0.0.1:host` hacia un puerto de la máquina (tcp, y udp en Linux), lo guarda en su raíz y lo quita con la máquina (ver "Puertos publicados") |
 | `pool` | v0.19 (anunciada desde 1.0) | `GET /snapshots/{name}/pool` (el `PoolInfo` de la plantilla: `size`, `ready`, `stale`/`fix` si el dorado no se puede restaurar, `error`) y `PUT /snapshots/{name}/pool` con `{"size": N}` (0–16; 0 lo apaga y lo vacía): copias precalentadas que `run -from` reclama en milisegundos. 404 si la plantilla no existe |
 | `egress-blocked` | v0.19 (anunciada desde 1.0) | `GET /machines/{ref}/egress`: `{egress, total, destinations: [{dest, kind: dns\|ip, count}]}`, los destinos que la política de salida le cortó a la máquina (nunca datos de la conexión); 404 si no existe |
-| `error-codes` | sin publicar | el cuerpo de error lleva `code` además de `message`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`, `name_taken`, `machine_limit`, `stale_golden`, `length_required`, `precondition_failed`, `too_large`, `upgrade_required`, `tenant_quota`, `too_many_requests`, `internal`, `unsupported`, `bad_gateway`, `unavailable`, `disk_full`, `timeout`, `insufficient_memory` (`pkg/api/errorcodes.go`). `message` es para personas y puede cambiar de redacción; `code` no cambia. Un error que no es JSON (el 404/405 del enrutador) no lo lleva |
+| `error-codes` | sin publicar | el cuerpo de error lleva `code` además de `message`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`, `name_taken`, `machine_limit`, `stale_golden`, `length_required`, `precondition_failed`, `too_large`, `upgrade_required`, `tenant_quota`, `too_many_requests`, `guest_busy`, `internal`, `unsupported`, `bad_gateway`, `unavailable`, `disk_full`, `timeout`, `insufficient_memory` (`pkg/api/errorcodes.go`). `message` es para personas y puede cambiar de redacción; `code` no cambia. Un error que no es JSON (el 404/405 del enrutador) no lo lleva |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -529,6 +529,13 @@ invitado dejó de contestar). Un código distinto de cero no es un error HTTP. C
 El daemon no se fía del invitado: recorta cada flujo al tope pedido y garantiza que
 hay exactamente un evento final. Cerrar la conexión mata el comando.
 
+**Plazas del agente.** El agente corre a la vez como mucho 64 exec (los de
+`wait=1` y los de streaming, juntos) y 8 shells por microVM. Lleno, el daemon
+contesta `429` con `code` `guest_busy` y `Retry-After: 1`, en exec y en
+`shell` (antes del `101`): el agente está vivo y basta con reintentar cuando
+acabe alguno (`api.IsGuestBusy`). Un `502` es otra cosa: el agente no contestó
+bien.
+
 ### `/machines/{ref}/files?path=/ruta/absoluta`
 
 | Método | Qué hace |
@@ -924,7 +931,7 @@ reutiliza. Sale del código HTTP salvo cuando el daemon reconoce la causa:
 | `412` | `precondition_failed` | — |
 | `413` | `too_large` | — |
 | `426` | `upgrade_required` | — |
-| `429` | `too_many_requests` | `tenant_quota` (cuota del inquilino) |
+| `429` | `too_many_requests` | `tenant_quota` (cuota del inquilino), `guest_busy` (el agente del invitado ya corre sus 64 exec o sus 8 shells; lleva `Retry-After`) |
 | `500` | `internal` | — |
 | `501` | `unsupported` | — |
 | `502` | `bad_gateway` | — |
@@ -951,7 +958,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `storeStatus` | espacio o clave mal formados | — | — | host | — |
 | `removeImageStatus` | nombre | imagen | en uso | host | — |
 | `imageFileStatus` | el resto | imagen, o el fichero no está | — | sin `debugfs` | — |
-| `execStatus` | — | máquina | no corre, exec fuera del snapshot | — | `403` sin `allow_exec`; `502` el resto |
+| `execStatus` | — | máquina | no corre, exec fuera del snapshot | — | `403` sin `allow_exec`; `429` `guest_busy` el agente está lleno; `502` el resto |
 | `objetivoConAgente` | — | = `execStatus` | = | — | = `execStatus`; `504` el agente no contesta |
 | `estadoDeListo` | — | máquina | no corre | el resto | — |
 | `forkStatus` | — | máquina | no corre, no lista, no copiable, carpetas, exec | host | `504` el agente de una copia no contesta |
@@ -1014,8 +1021,8 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /machines/{ref}/renew` | 200 | `404`; `409` es un sandbox; `413`/`400` cuerpo; `400` ttl negativo; `renewStatus` |
 | `GET /machines/{ref}/ready` | 200 (no estar lista también) | `400` `wait`; `estadoDeListo` |
 | `POST /machines/{ref}/hooks` | 200 (también si fallaron) | `400` `wait`; `409` no llegó a lista sin respuesta del agente (p. ej. uno anterior); `estadoDeListo` |
-| `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `500`; `502` |
-| `POST /machines/{ref}/shell` | 101 | `426` sin `Upgrade`; `413`/`400` cuerpo (64 KiB); `objetivoConAgente`; `501`; `502`; `500` |
+| `POST /machines/{ref}/exec` | 200 (NDJSON, o JSON con `wait=1`) | `413`/`400` cuerpo; `400` límites; `objetivoConAgente`; `501` agente anterior; `429` `guest_busy` (64 exec a la vez); `500`; `502` |
+| `POST /machines/{ref}/shell` | 101 | `426` sin `Upgrade`; `413`/`400` cuerpo (64 KiB); `objetivoConAgente`; `501`; `429` `guest_busy` (8 shells a la vez); `502`; `500` |
 | `GET` · `PUT` · `DELETE /machines/{ref}/files` | lo que diga el agente (2xx) | `400` sin `path`; `413` > 64 MiB; `objetivoConAgente`; `501` agente < v0.7; un 4xx del agente tal cual; un 5xx del agente, `502`; `500` |
 | `POST /shares/uploads` | 201 | `413`; `400`; `500` |
 | `POST /sandboxes` | 201 | `413`/`400` cuerpo; `400` ttl, `image`/`from`, `on_ttl`, imagen sin agente; `runStatus` y admisión; `504` el agente no contesta en 2 min (se borra) |

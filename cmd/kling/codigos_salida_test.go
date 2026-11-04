@@ -25,6 +25,8 @@ func TestCodigosDeSalida(t *testing.T) {
 		{&api.StatusError{Code: 409, Message: "x", ErrorCode: api.CodeStaleGolden}, salidaDoradoObsoleto},
 		{&api.StatusError{Code: 409, Message: "stale golden snapshot: made with vz"}, salidaDoradoObsoleto},
 		{&api.StatusError{Code: 409, Message: "x", ErrorCode: api.CodeConflict}, salidaError},
+		// Un invitado lleno (429 guest_busy) es un error corriente: 1.
+		{&api.StatusError{Code: 429, Message: "x", ErrorCode: api.CodeGuestBusy}, salidaError},
 		{&errAgenteSinCapacidad{maquina: "m", faltan: []string{"env"}}, salidaAgenteSinCap},
 		{&plugin.ExitError{Code: 9}, 9},
 		{removedAliasError("rmi"), salidaUso},

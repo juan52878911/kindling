@@ -187,7 +187,7 @@ func execBodyTimeout(req api.ExecRequest) time.Duration {
 
 // openGuestExec pide al agente del invitado en base que ejecute req y devuelve
 // su flujo NDJSON. Si falla, code es el estado HTTP con el que contestar (501:
-// el agente no conoce la ruta).
+// el agente no conoce la ruta; 429: tiene llenas sus plazas de exec).
 func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.ReadCloser, int, error) {
 	body, _ := json.Marshal(req)
 	greq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec/stream", bytes.NewReader(body))
@@ -213,11 +213,34 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		return nil, http.StatusNotImplemented, errors.New("the guest agent has no exec streaming")
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	code := http.StatusBadGateway
-	if resp.StatusCode == http.StatusBadRequest {
-		code = http.StatusBadRequest
+	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		return nil, http.StatusBadRequest, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+	case http.StatusTooManyRequests:
+		return nil, http.StatusTooManyRequests, invitadoOcupado(msg)
 	}
-	return nil, code, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+	return nil, http.StatusBadGateway, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+}
+
+// errInvitadoOcupado: el agente del invitado contestó 429 porque ya corre
+// todos los exec (64) o todas las shells (8) que admite. Se contesta 429 con
+// code guest_busy y Retry-After, no 502: quien llama tiene que poder
+// distinguir "espera y reintenta" de "el agente no contesta".
+var errInvitadoOcupado = errors.New("the guest agent is busy")
+
+// guestBusyRetryAfter son los segundos del Retry-After de un guest_busy. Es
+// una pista, no una promesa: una plaza se libra cuando acaba un comando.
+const guestBusyRetryAfter = "1"
+
+// ocupado es el error de un 429 del agente: su texto es el del agente (dice
+// el tope) y errors.Is lo reconoce como errInvitadoOcupado.
+type ocupado struct{ msg string }
+
+func (e *ocupado) Error() string        { return e.msg }
+func (e *ocupado) Is(target error) bool { return target == errInvitadoOcupado }
+
+func invitadoOcupado(msg []byte) error {
+	return &ocupado{msg: "guest agent: " + strings.TrimSpace(string(msg))}
 }
 
 // readExecEvents lee el flujo del invitado y lo pasa como eventos ya validados.

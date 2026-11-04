@@ -55,6 +55,12 @@ func hintFor(err error) string {
 	if errors.As(err, &wh) {
 		return wh.hint
 	}
+	// 429 guest_busy: el agente está vivo pero lleno (64 exec o 8 shells a la
+	// vez). Sale con 1, como cualquier error; la pista dice que no es una
+	// caída y que basta con reintentar.
+	if api.IsGuestBusy(err) {
+		return "retry when some of the commands or shells already running in that microVM finish"
+	}
 	msg := err.Error()
 	for _, h := range hints {
 		if containsAll(msg, h.match) {
