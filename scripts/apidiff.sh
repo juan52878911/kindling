@@ -7,10 +7,41 @@
 #
 # ETIQUETA por defecto: la última alcanzable desde HEAD^ (la anterior a esta,
 # esté HEAD etiquetado o no). Un cambio incompatible hecho a propósito se
-# declara con una línea "API-Break: <motivo>" en el mensaje de algún commit
-# entre ETIQUETA y HEAD; entonces se informa y no falla. Necesita apidiff
+# declara en el mensaje de algún commit entre ETIQUETA y HEAD con una línea
+#
+#   API-Break: pkg/api[, pkg/config]: <motivo>
+#
+# que nombra los paquetes que rompe, antes de los dos puntos: solo esos se
+# informan sin fallar; un cambio incompatible en otro paquete sigue fallando.
+# Un "API-Break: <motivo>" sin paquetes no excusa ninguno. Necesita apidiff
 # (golang.org/x/exp/cmd/apidiff) en el PATH, o APIDIFF=ruta.
+#
+#   scripts/apidiff.sh --declared < mensajes
+#
+# imprime, uno por línea, los paquetes que declaran las líneas API-Break: de
+# esos mensajes de commit (lo que usa la comprobación; para probarla).
 set -euo pipefail
+
+# declarados lee mensajes de commit por la entrada y escribe los paquetes que
+# nombran sus líneas "API-Break: <paquetes>: <motivo>": lo de antes del primer
+# ":" tras la etiqueta, partido por espacios y comas. Solo cuentan los que
+# empiezan por pkg/, para que un motivo sin lista ("API-Break: quita X") no
+# cuele una palabra suelta como paquete.
+declarados() {
+  { grep '^API-Break:' || true; } | while IFS= read -r l; do
+    resto=${l#API-Break:}
+    case "$resto" in
+      *:*) lista=${resto%%:*} ;;
+      *)   continue ;;
+    esac
+    printf '%s\n' "$lista" | tr ',' ' ' | tr -s ' \t' '\n' | { grep '^pkg/' || true; }
+  done | sort -u
+}
+
+if [ "${1:-}" = "--declared" ]; then
+  declarados
+  exit 0
+fi
 
 cd "$(dirname "$0")/.."
 APIDIFF="${APIDIFF:-apidiff}"
@@ -44,12 +75,20 @@ for p in $PKGS; do
 done
 
 if [ -n "$roto" ]; then
-  if git log --format=%B "$BASE..HEAD" | grep -q '^API-Break:'; then
-    echo "incompatible changes in$roto, declared with API-Break:"
-    git log --format=%B "$BASE..HEAD" | grep '^API-Break:' | sed 's/^/  /'
-    exit 0
+  permitidos=$(git log --format=%B "$BASE..HEAD" | declarados)
+  sin=""
+  for p in $roto; do
+    if printf '%s\n' "$permitidos" | grep -qxF "$p"; then
+      echo "incompatible changes in $p, declared with API-Break:"
+    else
+      sin="$sin $p"
+    fi
+  done
+  if [ -n "$sin" ]; then
+    echo "::error::incompatible API changes in$sin since $BASE; if they are on purpose, say why in a commit with a line 'API-Break: <package>[, <package>]: <reason>' naming each one (and in CHANGELOG)" >&2
+    exit 1
   fi
-  echo "::error::incompatible API changes in$roto since $BASE; if they are on purpose, say why in a commit with a line 'API-Break: <reason>' (and in CHANGELOG)" >&2
-  exit 1
+  git log --format=%B "$BASE..HEAD" | grep '^API-Break:' | sed 's/^/  /'
+  exit 0
 fi
 echo "public Go API compatible with $BASE"

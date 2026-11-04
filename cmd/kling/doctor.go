@@ -209,6 +209,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		if c, ok := checkAgentesViejos(in.images, in.info.Version); ok {
 			out = append(out, c)
 		}
+		if c, ok := checkKernel(in.info); ok {
+			out = append(out, c)
+		}
 		// Máquinas a medio camino que el daemon sigue reintentando: un freeze
 		// que no pudo reanudarla, un rm cuyo VMM sobrevivió al SIGKILL.
 		for _, a := range in.info.Stuck {
@@ -366,6 +369,49 @@ func checkOtroVMM(snaps []*api.Snapshot, info *api.Info) (doctorCheck, bool) {
 	return doctorCheck{Name: "templates (vmm)", State: doctorWarn,
 		Detail: fmt.Sprintf("this daemon runs %s; %s", ahora, strings.Join(partes, "; ")),
 		Fix:    "re-save each: kling save -replace <machine> <name> (kling mcp import <name> -force for an imported MCP service)" + volver}, true
+}
+
+// checkKernel dice qué vmlinux está instalado (su sha256, abreviado como en
+// `kling plugins`) y avisa
+// de los dorados y las congeladas grabados con otro (K2): siguen restaurando,
+// porque el kernel del invitado va en su memoria, pero su próximo arranque en
+// frío usaría el nuevo. Un daemon anterior no manda el sha: no hay línea.
+func checkKernel(info *api.Info) (doctorCheck, bool) {
+	if info == nil || info.KernelSHA256 == "" {
+		return doctorCheck{}, false
+	}
+	c := doctorCheck{Name: "kernel", State: doctorOK, Detail: "kernel_sha256 " + shortSHA(info.KernelSHA256)}
+	if len(info.KernelMismatch) == 0 {
+		return c, true
+	}
+	var dorados, maquinas []string
+	for _, k := range info.KernelMismatch {
+		n := k.Name + " (" + shortSHA(k.KernelSHA256) + ")"
+		if k.Kind == "machine" {
+			maquinas = append(maquinas, n)
+		} else {
+			dorados = append(dorados, n)
+		}
+	}
+	var partes []string
+	if len(dorados) > 0 {
+		partes = append(partes, fmt.Sprintf("%d template(s) made with another kernel: %s", len(dorados), recortarLista(dorados, 5)))
+	}
+	if len(maquinas) > 0 {
+		partes = append(partes, fmt.Sprintf("%d frozen machine(s) made with another kernel: %s", len(maquinas), recortarLista(maquinas, 5)))
+	}
+	c.State = doctorWarn
+	c.Detail += "; " + strings.Join(partes, "; ") + ". They still restore (the guest kernel lives in their memory); a cold boot would use the new one"
+	c.Fix = "nothing to do to keep using them; to move a template to this kernel, re-save it: kling save -replace <machine> <name>"
+	return c, true
+}
+
+// recortarLista une ns con comas y, pasado max, dice cuántos más quedan.
+func recortarLista(ns []string, max int) string {
+	if len(ns) > max {
+		ns = append(ns[:max:max], fmt.Sprintf("and %d more", len(ns)-max))
+	}
+	return strings.Join(ns, ", ")
 }
 
 // delMismoVMM quita de snaps los sellados por otro VMM: esos los cuenta

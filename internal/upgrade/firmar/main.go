@@ -6,6 +6,7 @@
 //	go run ./internal/upgrade/firmar genkey -dir DIR
 //	KLING_RELEASE_SIGNING_KEY=… go run ./internal/upgrade/firmar sign -tag vX.Y.Z -in release/SHA256SUMS
 //	go run ./internal/upgrade/firmar verify -tag vX.Y.Z -in SHA256SUMS [-sig SHA256SUMS.minisig] [-pub k.pub]
+//	[KLING_RELEASE_SIGNING_KEY=…] go run ./internal/upgrade/firmar check -tag vX.Y.Z
 package main
 
 import (
@@ -22,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: firmar genkey|sign|verify [flags]")
+		fmt.Fprintln(os.Stderr, "usage: firmar genkey|sign|verify|check [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -33,6 +34,8 @@ func main() {
 		err = sign(os.Args[2:])
 	case "verify":
 		err = verify(os.Args[2:])
+	case "check":
+		err = check(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -72,6 +75,32 @@ func genkey(args []string) error {
 	}
 	fmt.Printf("secret key: %s\npublic key: %s\nkey id:     %s\npublic key line (internal/upgrade/firma.go clavesRelease, scripts/install.sh KLING_RELEASE_PUBKEYS):\n%s\n",
 		sec, pub, k.Publica().IDHex(), k.Publica().String())
+	return nil
+}
+
+// check es la comprobación de antes de etiquetar (scripts/release.sh) y del
+// primer job de release.yml: una etiqueta desde upgrade.FirmaObligatoriaDesde
+// con clavesRelease vacía se para ahí, y no tras compilar todo. Con
+// KLING_RELEASE_SIGNING_KEY en el entorno comprueba además que su pública
+// está entre las compiladas.
+func check(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	tag := fs.String("tag", "", "release tag about to be published")
+	_ = fs.Parse(args)
+	var firmante *upgrade.ClavePublica
+	if sec := os.Getenv("KLING_RELEASE_SIGNING_KEY"); sec != "" {
+		k, err := upgrade.ParsearClavePrivada([]byte(sec))
+		if err != nil {
+			return err
+		}
+		p := k.Publica()
+		firmante = &p
+	}
+	claves := upgrade.ClavesRelease()
+	if err := upgrade.ClavesListasPara(*tag, claves, firmante); err != nil {
+		return err
+	}
+	fmt.Printf("release keys ok for %s (%d key(s) built in)\n", *tag, len(claves))
 	return nil
 }
 

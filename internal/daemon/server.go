@@ -815,7 +815,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info.EncryptedAtRest = &cifrado
 	}
 	// Los ajustes del host no son de ningún inquilino, ni sus fondos.
-	if _, filtra := inquilinoDe(r); !filtra {
+	_, filtra := inquilinoDe(r)
+	s.infoKernel(&info, !filtra)
+	if !filtra {
 		info.Tuning = s.ajustes()
 		info.PoolProblems = s.mgr.ProblemasFondos()
 		info.Stuck = s.mgr.Atascadas()

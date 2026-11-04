@@ -291,3 +291,37 @@ func TestClavesInstallSHIgualesQueLasDeKling(t *testing.T) {
 	}
 	_ = ClavesRelease() // y que se leen
 }
+
+// Antes de etiquetar (firmar check, en release.sh y release.yml): desde v1.0.0
+// (un -rc incluido) sin claves compiladas no se publica, y la clave con la que
+// se va a firmar tiene que estar entre las compiladas con cualquier versión.
+func TestClavesListasPara(t *testing.T) {
+	_, a := claveTest(t, "a")
+	_, b := claveTest(t, "b")
+	casos := []struct {
+		tag      string
+		claves   []ClavePublica
+		firmante *ClavePublica
+		error    string
+	}{
+		{"v0.21.0", nil, nil, ""},
+		{"v1.0.0", nil, nil, "clavesRelease"},
+		{"v1.0.0-rc1", nil, nil, "clavesRelease"},
+		{"v2.3.4", []ClavePublica{}, nil, "clavesRelease"},
+		{"v1.0.0", []ClavePublica{a}, nil, ""},
+		{"v1.0.0", []ClavePublica{a}, &a, ""},
+		{"v1.0.0", []ClavePublica{b, a}, &a, ""},
+		{"v1.0.0", []ClavePublica{b}, &a, a.IDHex()},
+		{"v0.21.0", nil, &a, a.IDHex()},
+		{"main", []ClavePublica{a}, nil, "invalid tag"},
+	}
+	for _, c := range casos {
+		err := ClavesListasPara(c.tag, c.claves, c.firmante)
+		switch {
+		case c.error == "" && err != nil:
+			t.Errorf("%s %d claves: %v", c.tag, len(c.claves), err)
+		case c.error != "" && (err == nil || !strings.Contains(err.Error(), c.error)):
+			t.Errorf("%s %d claves: error %v, quería uno con %q", c.tag, len(c.claves), err, c.error)
+		}
+	}
+}

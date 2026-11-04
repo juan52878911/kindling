@@ -21,7 +21,9 @@
 #
 # Lo que hace:
 #   1. Verifica que el working tree esté limpio
-#   2. Verifica que ext/*/go.mod requieran kindling en esa misma versión
+#   2. Verifica que ext/*/go.mod requieran kindling en esa misma versión, y
+#      desde v1.0.0 que haya claves públicas de release compiladas
+#      (`firmar check`, docs/firmas.md)
 #   3. Verifica que CHANGELOG.md tenga el bloque de la versión
 #      (scripts/release-notes.sh, el mismo que usa el workflow)
 #   4. Verifica que todos los checks de CI de ese commit acabaron en verde
@@ -129,6 +131,28 @@ for m in ext/*/go.mod vz/go.mod; do
         [ "$DRY_RUN" = "1" ] || exit 1
     fi
 done
+
+# Claves de las releases: desde v1.0.0 (un -rc incluido) la release va firmada
+# y sus binarios tienen que traer la pública (clavesRelease de
+# internal/upgrade/firma.go, KLING_RELEASE_PUBKEYS de install.sh); si no, el
+# workflow fallaría tras compilarlo todo, o peor, un kling 1.x sin claves no
+# aceptaría ninguna release. Lo comprueba `firmar check` (con
+# KLING_RELEASE_SIGNING_KEY en el entorno, también que es su clave). Sin Go,
+# lo mismo a mano sobre install.sh, que un test obliga a coincidir.
+if command -v go >/dev/null 2>&1; then
+    if ! go run ./internal/upgrade/firmar check -tag "$VERSION"; then
+        [ "$DRY_RUN" = "1" ] || exit 1
+    fi
+else
+    MAJOR=$(printf '%s' "${VERSION#v}" | cut -d. -f1)
+    case "$MAJOR" in
+        ''|*[!0-9]*) ;;
+        *) if [ "$MAJOR" -ge 1 ] && grep -q '^KLING_RELEASE_PUBKEYS=""' scripts/install.sh; then
+               echo "$VERSION must be signed and there are no release public keys (KLING_RELEASE_PUBKEYS, clavesRelease): see docs/firmas.md" >&2
+               [ "$DRY_RUN" = "1" ] || exit 1
+           fi ;;
+    esac
+fi
 
 # main al día. Sin fetch, origin/main es el de la última vez que se trajo y la
 # comparación no dice nada.
