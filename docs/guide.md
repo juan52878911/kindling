@@ -13,7 +13,7 @@ A Firecracker microVM runtime with golden snapshots: machines that wake in
 milliseconds from a file on disk, with kernel-level isolation, behind a docker-like CLI
 called `kling`. What runs inside is up to you, and `kling` grows through extensions.
 
-> Status: **v0.17.0 — disposable databases, microVM graphs and copy-on-write disks, on Linux and macOS.** `kling` manages
+> Status: **1.0 — stable: the core, the daemon API and the CLI follow SemVer ([`compatibilidad.md`](compatibilidad.md)), on Linux and macOS.** `kling` manages
 > microVMs with networking, golden snapshots, isolation, persistent volumes, layered
 > images, events, image builders, a documented daemon API and throwaway sandboxes with
 > streaming exec. Hosting MCP servers on demand — the use kindling was born for — and
@@ -189,7 +189,7 @@ curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # A specific version (it installs the latest release by default; on top of an
 # existing install it needs --force, or use kling upgrade -tag):
-curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
+curl -fsSL .../install.sh | sh -s -- --tag v1.0.0
 
 # Custom prefix:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -206,7 +206,7 @@ disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Ki
 
 ```sh
 sudo kling upgrade               # Linux: the daemon of kling.service, to the latest release
-kling upgrade -tag v0.18.0       # macOS (launchd agent), or a specific release
+kling upgrade -tag v1.0.0        # macOS (launchd agent), or a specific release
 kling upgrade -dry-run           # download, verify and print the plan
 kling upgrade -rollback          # back to the binaries saved by the last upgrade,
                                  # also with the daemon down (it reads its unit)
@@ -1650,6 +1650,9 @@ instances share pages.
 | [`docs/releases.md`](releases.md) | One tag, one release: every asset, `SHA256SUMS`, how to cut a release |
 
 ## Roadmap
+
+> Historical: the phases that took kindling from a lab experiment to v0.4. What
+> changed after that is in [`CHANGELOG.md`](../CHANGELOG.md).
 
 - [x] **Phase 1** — Lab: a microVM that boots, snapshot/restore measured
 - [x] **Phase 1.5** — `kling`: lifecycle, states, events, local and SSH transport
