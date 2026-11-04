@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // maxCalls acota las operaciones en vuelo hacia el daemon por carpeta. El

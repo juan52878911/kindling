@@ -13,11 +13,11 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/aigw"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/train"
-	"github.com/juan52878911/kindling/pkg/codificador"
-	"github.com/juan52878911/kindling/pkg/intent"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/train"
+	"github.com/juan52878911/kindling/internal/codificador"
+	"github.com/juan52878911/kindling/internal/intent"
 )
 
 // El gateway de kindling con el dominio de la habitación: una tarea de

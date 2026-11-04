@@ -40,7 +40,7 @@ import (
 	"io/fs"
 	"strings"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // maxRenameScan acota lo que se recorre al subir un directorio de nivel.

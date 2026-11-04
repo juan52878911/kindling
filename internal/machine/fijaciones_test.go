@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // versionesFijadas son las fijaciones con su state.json y el esquema que este

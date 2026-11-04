@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // CONSTRUCTOR "debian": una imagen Debian (trixie) fijada, con los paquetes

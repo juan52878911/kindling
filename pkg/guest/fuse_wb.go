@@ -36,7 +36,7 @@ package guest
 import (
 	"sync"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // wbMaxBytes acota lo pendiente (acumulado y en vuelo) por nodo.

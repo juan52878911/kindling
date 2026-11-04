@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // CONSTRUCTOR "chispa": una imagen con un modelo Chispa (y, opcional, sus huecos)

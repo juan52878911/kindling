@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Snapshot devuelve un snapshot por nombre, con los mismos campos calculados

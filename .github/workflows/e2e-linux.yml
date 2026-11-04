@@ -32,7 +32,7 @@ on:
       - 'internal/upgrade/**'
       - 'internal/net/**'
       - 'pkg/guest/**'
-      - 'pkg/esquema/**'
+      - 'internal/esquema/**'
       - 'cmd/kling-guest/**'
       - 'cmd/kling/upgrade*.go'
       - 'scripts/90-e2e.sh'

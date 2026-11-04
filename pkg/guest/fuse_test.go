@@ -15,7 +15,7 @@ import (
 	"time"
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // devFalso es un /dev/fuse en memoria: el test hace de kernel.

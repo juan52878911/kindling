@@ -3,7 +3,7 @@
 # conversor de llama.cpp, TODO fijado: la revisión de los pesos en Hugging Face
 # (y el sha256 de cada fichero), la versión de llama.cpp (la misma b11147 que
 # sirve los modelos), la de uv y las de los paquetes de Python. El resultado se
-# compara con el sha256 del catálogo (pkg/von/embed.go): si no coincide, no se
+# compara con el sha256 del catálogo (internal/von/embed.go): si no coincide, no se
 # instala.
 #
 # Por qué convertir y no descargar un GGUF: ni intfloat ni sentence-transformers

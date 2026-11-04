@@ -16,13 +16,13 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/intent"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
-	"github.com/juan52878911/kindling/pkg/intent"
 )
 
-// kindling-domotica gateway: el gateway de IA de kindling (pkg/aigw, el mismo
+// kindling-domotica gateway: el gateway de IA de kindling (internal/aigw, el mismo
 // que `kling ai serve`) con el dominio de la habitación dentro. Las tareas de
 // intención de kindling toman su dominio de un fichero de datos ("schema") o
 // de uno en Go que registra el programa que embebe el gateway; la habitación

@@ -20,10 +20,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/internal/zstd"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // launchAgentLabel es la etiqueta del agente de launchd que docs/mac.md

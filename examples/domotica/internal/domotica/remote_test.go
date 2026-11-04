@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
-// fakeRemote es una Chispa serverless de mentira (lo que pkg/aigw ya validó).
+// fakeRemote es una Chispa serverless de mentira (lo que internal/aigw ya validó).
 type fakeRemote struct {
 	ans   RemoteAnswer
 	err   error

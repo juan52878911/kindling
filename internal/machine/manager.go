@@ -21,12 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
@@ -690,7 +690,7 @@ func (m *Manager) load() {
 }
 
 // versionEstado es la versión del formato de state.json que escribe este
-// binario (ver pkg/esquema). Súbela cuando un kling anterior fuera a leer mal
+// binario (ver internal/esquema). Súbela cuando un kling anterior fuera a leer mal
 // lo que se escribe, y añade el caso a decodificarEstado.
 //
 //	0: un array JSON de máquinas, sin campo (hasta v0.17).

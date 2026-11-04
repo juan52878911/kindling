@@ -13,9 +13,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/units"
-	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // MODELOS VON: `kling ai model` (antes `kling models`).
@@ -417,7 +417,7 @@ func modelsAsk(args []string) error {
 
 // modelsEmbed pide el vector de un texto a un codificador (kind embed) y
 // enseña su tamaño, su norma y lo que tardó: para comprobar una réplica, no
-// para usar los vectores (eso es pkg/codificador).
+// para usar los vectores (eso es internal/codificador).
 func modelsEmbed(args []string) error {
 	fs := flag.NewFlagSet("models embed", flag.ExitOnError)
 	host := hostFlag(fs)

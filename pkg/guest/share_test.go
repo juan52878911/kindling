@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // attachar hace lo que el daemon: POST /share/attach con Upgrade y, si el

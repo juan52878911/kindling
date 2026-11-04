@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/examples/ci-triage/triage"
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
 )
 
 // ai.json es el registro de ejemplo: el gateway lo acepta, tiene las tres

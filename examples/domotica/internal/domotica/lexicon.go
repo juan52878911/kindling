@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Léxico de la habitación de demo: nombres canónicos de zonas, dispositivos y

@@ -22,11 +22,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	hostshare "github.com/juan52878911/kindling/internal/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // ShareConfig es la configuración de carpetas compartidas del daemon.

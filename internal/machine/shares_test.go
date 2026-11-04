@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Una máquina con carpetas compartidas no se convierte en snapshot: 409.

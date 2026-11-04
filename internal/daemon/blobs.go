@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // blobTarget es el fichero de una parte de una imagen.

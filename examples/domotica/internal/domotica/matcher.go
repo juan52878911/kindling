@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Marcadores con los que el emparejador sustituye zonas, números y colores.

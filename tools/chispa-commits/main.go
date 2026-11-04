@@ -34,7 +34,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/internal/chispa"
 )
 
 var types = []string{"build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"}

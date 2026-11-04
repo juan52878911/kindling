@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -88,6 +89,56 @@ func TestCausaObsoletoEn(t *testing.T) {
 	m.FijarOrigen("0.21.0", "Firecracker v1.12.0")
 	if c := m.causaObsoletoEn("firecracker 1.12.1", "", vz); c != "" {
 		t.Errorf("firecracker con parche: %q", c)
+	}
+}
+
+// cabeceraHV y causaFormatoVolcado con mem.file rotos: lo que no se entiende no
+// marca el dorado como obsoleto (lo dirá la restauración), y otra generación
+// de la magia con otra disposición se reconoce solo por la magia.
+func TestCabeceraHVTruncadaOMala(t *testing.T) {
+	dir := t.TempDir()
+	ruta := filepath.Join(dir, "mem.file")
+	memHV(t, dir, magiaHV, versionHVMax)
+	bueno, err := os.ReadFile(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Truncado: sin el pie, o solo con el pie (la cabecera se cortó).
+	for _, b := range [][]byte{bueno[:31], bueno[:len(bueno)-32], bueno[len(bueno)-32:]} {
+		os.WriteFile(ruta, b, 0o600)
+		m, v, err := cabeceraHV(ruta)
+		if v != 0 {
+			t.Errorf("%d bytes: version %d read from a truncated file", len(b), v)
+		}
+		if err == nil && m != magiaHV {
+			t.Errorf("%d bytes: magic %x with no error", len(b), m)
+		}
+		if c := causaFormatoVolcado(dir, "kling-hv"); c != "" {
+			t.Errorf("%d bytes: truncated file marked stale: %q", len(b), c)
+		}
+	}
+	// La cabecera no lleva la magia del pie: magia sí, versión no.
+	malo := bytes.Clone(bueno)
+	binary.LittleEndian.PutUint64(malo[64:], 0x1122334455667788)
+	os.WriteFile(ruta, malo, 0o600)
+	if m, v, err := cabeceraHV(ruta); err != nil || m != magiaHV || v != 0 {
+		t.Errorf("header with another magic: %x %d %v", m, v, err)
+	}
+	if c := causaFormatoVolcado(dir, "kling-hv"); c != "" {
+		t.Errorf("header with another magic marked stale: %q", c)
+	}
+	// Otra generación con una cabecera que no se sabe leer: obsoleto por la magia.
+	otra := bytes.Clone(bueno)
+	binary.LittleEndian.PutUint64(otra[len(otra)-32:], magiaHVPrefix<<16|0x3033)
+	binary.LittleEndian.PutUint64(otra[len(otra)-8:], 4) // hdr_len de nadie
+	os.WriteFile(ruta, otra, 0o600)
+	if c := causaFormatoVolcado(dir, "kling-hv"); !strings.Contains(c, "KLNGHV03") {
+		t.Errorf("another generation: %q", c)
+	}
+	// Ni un fichero que falta.
+	os.Remove(ruta)
+	if c := causaFormatoVolcado(dir, "kling-hv"); c != "" {
+		t.Errorf("missing mem.file: %q", c)
 	}
 }
 

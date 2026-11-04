@@ -10,7 +10,7 @@
 // cargado, listo para que `kling ai serve` lo despierte con la primera
 // petición (docs/chispa-serverless.md).
 //
-// Estático, sin cgo ni dependencias externas (igual que pkg/chispa): un solo
+// Estático, sin cgo ni dependencias externas (igual que internal/chispa): un solo
 // binario por arquitectura basta para la imagen mínima.
 package main
 
@@ -26,15 +26,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Version se fija al compilar: -ldflags "-X main.Version=..."
 var Version = "dev"
 
 // maxBody es el cuerpo máximo de una petición: el mismo límite que usa el
-// gateway de IA para el texto de una tarea (pkg/aigw.maxText), para que un
+// gateway de IA para el texto de una tarea (internal/aigw.maxText), para que un
 // cliente no note la diferencia si habla directamente con la réplica.
 const maxBody = 64 << 10
 
@@ -103,7 +103,7 @@ func main() {
 }
 
 // server sirve las peticiones de clasificación. m es inmutable tras cargarlo
-// (pkg/chispa.Model), así que no hace falta ningún candado.
+// (internal/chispa.Model), así que no hace falta ningún candado.
 type server struct {
 	model *chispa.Model
 	slots *slots.Model
@@ -114,7 +114,7 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // classifyRequest es el cuerpo de POST /v1/classify: el mismo esquema que
-// pkg/aigw.ClassifyRequest usa para hablar con Chispa (text, fields), para que el
+// internal/aigw.ClassifyRequest usa para hablar con Chispa (text, fields), para que el
 // gateway pueda reenviar la petición tal cual cuando la tarea vive en una
 // microVM en vez de en su propio proceso.
 type classifyRequest struct {
@@ -122,7 +122,7 @@ type classifyRequest struct {
 	Fields map[string]any `json:"fields,omitempty"`
 	// Explain pide la distribución completa y la evidencia también cuando Chispa
 	// contesta seguro (cuesta reservas de memoria); el gateway la usa para
-	// depurar o cuando el cliente pide explain=true (pkg/aigw.ClassifyRequest).
+	// depurar o cuando el cliente pide explain=true (internal/aigw.ClassifyRequest).
 	Explain bool `json:"explain,omitempty"`
 }
 
@@ -132,7 +132,7 @@ type classifyRequest struct {
 // dice el modelo.
 //
 // Candidates trae SIEMPRE la distribución ENTERA (no un top-N) cuando va: es
-// lo mismo que pkg/chispa.Model.PredictFull da en proceso, para que el gateway
+// lo mismo que internal/chispa.Model.PredictFull da en proceso, para que el gateway
 // pueda tratar una tarea con backend "microvm" exactamente igual que una en
 // proceso (top_k, la plantilla de la cascada, etc. sin perder etiquetas).
 type classifyResponse struct {
@@ -170,7 +170,7 @@ func (s *server) handleClassify(w http.ResponseWriter, r *http.Request) {
 	// Camino rápido: Predict no reserva memoria. Solo se pide la distribución
 	// completa (PredictFull, con reservas) cuando Chispa duda o el cliente pide
 	// explain: es la misma regla que sigue el gateway en proceso
-	// (pkg/aigw.Classify), en una sola vuelta en vez de dos.
+	// (internal/aigw.Classify), en una sola vuelta en vez de dos.
 	p := s.model.Predict(in)
 	resp := classifyResponse{
 		Label: p.Label, Prob: p.Prob, Threshold: p.Threshold,

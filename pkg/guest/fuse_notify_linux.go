@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // lockThread ata el notificador a su hilo para siempre: su id es el que

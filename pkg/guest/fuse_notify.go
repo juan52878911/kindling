@@ -29,7 +29,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Códigos de aviso de FUSE (fuse_notify_code).

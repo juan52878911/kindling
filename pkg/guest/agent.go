@@ -37,8 +37,8 @@ import (
 	"strings"
 	"sync"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Agent es el estado del agente de invitado de este proceso.
