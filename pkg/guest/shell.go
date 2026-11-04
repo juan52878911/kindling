@@ -41,22 +41,25 @@ const hangupGrace = 2 * time.Second
 // así que no se acepta cualquier cosa.
 var reTerm = lazyre.New(`^[A-Za-z0-9._-]{1,64}$`)
 
-type shellLimiter struct {
-	mu sync.Mutex
-	n  int
+// slotLimiter cuenta plazas ocupadas con un tope (max). Lo usan las shells
+// (maxShells) y los exec (maxExecs).
+type slotLimiter struct {
+	mu  sync.Mutex
+	n   int
+	max int
 }
 
-func (s *shellLimiter) take() bool {
+func (s *slotLimiter) take() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.n >= maxShells {
+	if s.n >= s.max {
 		return false
 	}
 	s.n++
 	return true
 }
 
-func (s *shellLimiter) give() {
+func (s *slotLimiter) give() {
 	s.mu.Lock()
 	if s.n > 0 {
 		s.n--
@@ -66,11 +69,17 @@ func (s *shellLimiter) give() {
 
 // ShellHandler sirve POST /exec/pty con Upgrade: kling-shell/1.
 func ShellHandler(env []string) http.HandlerFunc {
-	lim := &shellLimiter{}
-	return func(w http.ResponseWriter, r *http.Request) { handleShell(env, lim, w, r) }
+	return shellHandler(func() []string { return env })
 }
 
-func handleShell(env []string, lim *shellLimiter, w http.ResponseWriter, r *http.Request) {
+// shellHandler es ShellHandler con el entorno de cada petición. El tope es
+// del manejador, no de la petición: se crea una vez.
+func shellHandler(env func() []string) http.HandlerFunc {
+	lim := &slotLimiter{max: maxShells}
+	return func(w http.ResponseWriter, r *http.Request) { handleShell(env(), lim, w, r) }
+}
+
+func handleShell(env []string, lim *slotLimiter, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
