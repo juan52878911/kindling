@@ -107,6 +107,7 @@ enlazadas:
 · [Memoria: real vs caché](#memoria-qué-es-real-y-qué-es-caché)
 
 **Referencia**
+· [Códigos de salida](#códigos-de-salida)
 · [Requisitos](#requisitos)
 · [Scripts](#scripts)
 · [Mapa de la documentación](#mapa-de-la-documentación)
@@ -1612,6 +1613,27 @@ permite que N instancias compartan páginas.
 ---
 
 # Referencia
+
+## Códigos de salida
+
+Los códigos de salida de `kling` son parte del contrato de 1.x
+([`compatibilidad.md`](compatibilidad.md)): un script distingue los fallos sin leer el
+mensaje.
+
+| Código | Qué significa |
+|---|---|
+| `0` | Bien |
+| `1` | Cualquier otro error |
+| `2` | Uso: comando, flag o argumentos que no valen (también un nombre de comando retirado en 1.0) |
+| `3` | El daemon habla un API más viejo que este `kling`: actualiza el daemon |
+| `4` | Dorado obsoleto: la plantilla es de otro VMM o de otra versión; vuelve a congelarla |
+| `5` | Al agente de invitado de la imagen le falta una capacidad que pidió el comando |
+| `130` | Interrumpido con Ctrl-C o SIGTERM (128 + SIGINT, como una shell) |
+
+`kling exec`, `kling shell` y `kling try` salen con el código del comando que corrió
+dentro de la microVM (un `1` de `grep` no es un fallo de kling); solo usan la tabla de
+arriba cuando kling falla antes de tener uno. Un comando de una extensión sale con el
+código de la extensión.
 
 ## Requisitos
 

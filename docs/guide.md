@@ -106,6 +106,7 @@ sections:
 · [Memory: real vs cache](#memory-what-is-real-and-what-is-cache)
 
 **Reference**
+· [Exit codes](#exit-codes)
 · [Requirements](#requirements)
 · [Scripts](#scripts)
 · [Documentation map](#documentation-map)
@@ -1588,6 +1589,27 @@ instances share pages.
 ---
 
 # Reference
+
+## Exit codes
+
+`kling`'s exit codes are part of the 1.x contract
+([`compatibilidad.md`](compatibilidad.md)): a script can tell failures apart without
+parsing the message.
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Any other error |
+| `2` | Usage: unknown command, bad flag or arguments (also a command name removed in 1.0) |
+| `3` | The daemon speaks an older API than this `kling`: upgrade the daemon |
+| `4` | Stale golden snapshot: the template was made by another VMM or version; refreeze it |
+| `5` | The guest agent in the image lacks a capability the command asked for |
+| `130` | Interrupted by Ctrl-C or SIGTERM (128 + SIGINT, like a shell) |
+
+`kling exec`, `kling shell` and `kling try` exit with the code of the command that ran
+inside the microVM (a `1` from `grep` is not a kling failure); they only fall back to the
+table above when kling itself fails before getting one. An extension command exits with
+the extension's own code.
 
 ## Requirements
 
