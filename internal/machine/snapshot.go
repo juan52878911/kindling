@@ -27,6 +27,11 @@ import (
 
 var validName = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// antesDeCrearDirSnapshot, si no es nil, corre en un commit entre comprobar
+// que el nombre está libre y crear su directorio: es la ventana en la que otro
+// commit con el mismo nombre puede adelantarse. Solo para tests.
+var antesDeCrearDirSnapshot func(name string)
+
 func (m *Manager) snapDir(name string) string {
 	return filepath.Join(m.root, "snapshots", name)
 }
@@ -343,7 +348,22 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 	}()
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Exclusivo (Mkdir, no MkdirAll): el Stat de arriba no excluye a nadie.
+	// m.lock es por máquina y reserveDir cuenta, no cierra, así que dos commit
+	// con el mismo nombre desde máquinas distintas pasaban los dos el Stat y
+	// volcaban en el mismo directorio; la limpieza del que fallaba borraba los
+	// ficheros del otro. Ahora el segundo se encuentra el directorio hecho,
+	// falla como si ya existiera y, sin creado, no borra nada que no sea suyo.
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return nil, err
+	}
+	if antesDeCrearDirSnapshot != nil {
+		antesDeCrearDirSnapshot(name)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, marcado(ErrCommitConflict, "snapshot %q already exists: another commit is writing it", name)
+		}
 		return nil, err
 	}
 	creado = true
@@ -614,6 +634,17 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	b, err := codificarMeta(snap, nil)
 	if err != nil {
 		return nil, err
+	}
+	// La marca de fork ANTES del meta: con el meta escrito el snapshot vale y
+	// sweepSnapshotLeftovers ya no lo recoge, y sin la marca barrerForks no lo
+	// ve. Escrita después (como estaba en Fork), un corte entre las dos dejaba
+	// un dorado que no recogía nadie. Al revés no hay hueco: marca sin meta son
+	// restos de un commit, que el barrido de restos aparta. El fsync del
+	// directorio de writeMeta asienta también su entrada.
+	if deFork {
+		if err := os.WriteFile(filepath.Join(dir, forkMarca), []byte(mc.ID+"\n"), 0o644); err != nil {
+			return nil, fmt.Errorf("marking fork snapshot %s: %w", name, err)
+		}
 	}
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err

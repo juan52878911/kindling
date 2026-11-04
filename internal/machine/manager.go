@@ -2577,12 +2577,28 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		base = mc.DiffBase
 	}
 	// A disco antes del sello, con el VMM ya muerto: no alarga la pausa
-	// (elapsed se midió arriba). Sin poder sincronizar no se sella: el volcado
-	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
-	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
-		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
-	} else if err := sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); err != nil {
-		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
+	// (elapsed se midió arriba). Sin poder sincronizar no se sella, y un
+	// volcado sin sellar NO vale: volcado.en-curso sigue ahí y volcadoValido
+	// lo lee como un freeze interrumpido, así que el Thaw pediría `kling rm`.
+	// Y el VMM ya está muerto: no hay a qué volver. La máquina queda failed,
+	// con el error y su disco (se puede arrancar de nuevo), y sin el volcado
+	// que nadie va a cargar.
+	serr := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID))
+	if serr != nil {
+		serr = fmt.Errorf("syncing the frozen state to disk: %w", serr)
+	} else if serr = sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); serr != nil {
+		serr = fmt.Errorf("sealing the frozen state: %w", serr)
+	}
+	if serr != nil {
+		// Como tras un diff fallido: el acumulado y su base tampoco valen ya.
+		m.borrarVolcado(mc.ID)
+		m.borrarAcumuladoDiff(mc.ID, dir)
+		m.olvidarDiffBase(mc.ID)
+		m.mu.Lock()
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		m.fail(mc, serr)
+		return nil, serr
 	}
 
 	m.mu.Lock()
@@ -3608,10 +3624,15 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	// Lo que vio Get antes de esperar el cerrojo puede no valer ya: si la
 	// máquina estaba arrancando, su NetIndex era aún el de antes de montar la
-	// red, y desmontar con él dejaba la red de verdad montada.
-	if cur, ok := m.get(mc.ID); ok {
-		mc = cur
+	// red, y desmontar con él dejaba la red de verdad montada. Y si ya no
+	// está (la borraron mientras esperábamos), no hay nada que parar: seguir
+	// con la copia de antes desmontaba su red y borraba su volcado otra vez,
+	// como hace Freeze.
+	cur, ok := m.get(mc.ID)
+	if !ok {
+		return nil, noExiste(ref)
 	}
+	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.killConservandoDisco(mc.ID)
 	// El overlay se conserva para kling start: si iba sin sincronizar, se
