@@ -98,7 +98,7 @@ func resumirContenido(c []struct {
 	Text string `json:"text"`
 }) string {
 	if len(c) == 0 {
-		return "la herramienta devolvio un error sin texto"
+		return "the tool returned an error with no text"
 	}
 	t := strings.TrimSpace(c[0].Text)
 	t = strings.ReplaceAll(t, "\n", " | ")

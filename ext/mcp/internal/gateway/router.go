@@ -93,7 +93,7 @@ func NewRouter(hosts []RouterHost) *Router {
 // el token no se compruebe dos veces.
 func (r *Router) Handler(token string) http.Handler {
 	if len(r.hosts) == 0 {
-		panic("gateway: Router sin hosts")
+		panic("gateway: Router with no hosts")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
