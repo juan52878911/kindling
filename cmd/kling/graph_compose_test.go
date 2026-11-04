@@ -90,6 +90,56 @@ func TestComposeInterpolar(t *testing.T) {
 	}
 }
 
+// Anidados y casos límite, como compose-go: el defecto se interpola y solo
+// se evalúa la rama que se usa.
+func TestComposeInterpolarAnidado(t *testing.T) {
+	env := map[string]string{"A": "uno", "B": "dos", "VACIA": ""}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	casos := []struct {
+		in, want string
+		avisos   int
+		err      string
+	}{
+		{in: "${FALTA:-${B}}", want: "dos"},
+		{in: "${A:-${B}}", want: "uno"},
+		{in: "${FALTA:-${OTRA:-x}}", want: "x"},
+		{in: "${FALTA:-${OTRA:-${B}}}/z", want: "dos/z"},
+		{in: "${VACIA-${B}}", want: ""},
+		{in: "${FALTA-${B}-y}", want: "dos-y"},
+		{in: "${A:+${B}}", want: "dos"},
+		{in: "${A+${FALTA}}", want: "", avisos: 1},
+		{in: "${VACIA:+${FALTA}}", want: ""},       // rama sin usar: sin aviso
+		{in: "${A:-${FALTA:?nunca}}", want: "uno"}, // ni error
+		{in: "${FALTA:-${OTRA:?falta OTRA}}", err: "falta OTRA"},
+		{in: "${FALTA:?falta ${A}}", err: "falta uno"},
+		{in: "${FALTA:-$$B}", want: "$B"},
+		{in: "${FALTA:-a$${B}c}", want: "a${B}c"},
+		{in: "$${A:-x}", want: "${A:-x}"},
+		{in: `${FALTA:-{"k":1}}`, want: `{"k":1}`},
+		{in: "${FALTA:-http://${B}:80/}", want: "http://dos:80/"},
+		{in: "${A}${B}$A$B", want: "unodosunodos"},
+		{in: "${}", want: "${}"},
+		{in: "${1A}", want: "${1A}"},
+		{in: "${A sin cerrar", want: "${A sin cerrar"},
+		{in: "${A!x}", want: "${A!x}"},
+		{in: "fin$", want: "fin$"},
+		{in: "$1 $-", want: "$1 $-"},
+	}
+	for _, c := range casos {
+		var avisos []string
+		got, err := interpolarCompose(c.in, lookup, func(s string) { avisos = append(avisos, s) })
+		if c.err != "" {
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Errorf("%q: err = %v, want %q", c.in, err, c.err)
+			}
+			continue
+		}
+		if err != nil || got != c.want || len(avisos) != c.avisos {
+			t.Errorf("%q = %q, %v (avisos %v); want %q (%d avisos)", c.in, got, err, avisos, c.want, c.avisos)
+		}
+	}
+}
+
 // El .env junto al compose da las variables que la shell no tiene; la shell
 // manda.
 func TestComposeDotEnv(t *testing.T) {

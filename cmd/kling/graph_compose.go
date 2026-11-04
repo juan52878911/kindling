@@ -66,10 +66,7 @@ var puertosDeImagen = map[string]int{
 	"mongo": 27017, "memcached": 11211, "rabbitmq": 5672,
 }
 
-var (
-	reDNSNodo    = regexp.MustCompile(`[^a-z0-9-]+`)
-	reVarCompose = regexp.MustCompile(`\$(\$|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}|[A-Za-z_][A-Za-z0-9_]*)`)
-)
+var reDNSNodo = regexp.MustCompile(`[^a-z0-9-]+`)
 
 type servicioCompose struct {
 	nombre  string // el del compose
@@ -107,51 +104,141 @@ type depCompose struct {
 }
 
 // interpolarCompose resuelve $VAR, ${VAR}, ${VAR:-def}, ${VAR-def},
-// ${VAR:+alt}, ${VAR:?msg} y $$ con lookup, como Docker Compose. Una variable
-// sin valor ni defecto queda vacía y se avisa; ${VAR:?msg} (o ${VAR?msg})
-// sin valor es un error, con msg.
+// ${VAR:+alt}, ${VAR+alt}, ${VAR:?msg}, ${VAR?msg} y $$ con lookup, como
+// Docker Compose, incluidos los anidados (${A:-${B:-x}}): el defecto, la
+// alternativa y el mensaje se interpolan a su vez, y solo la rama que se usa
+// (una rama sin usar no avisa ni falla). Una variable sin valor ni defecto
+// queda vacía y se avisa; ${VAR:?msg} (o ${VAR?msg}) sin valor es un error,
+// con msg. Lo que no es una variable válida (${}, ${1A}, un ${ sin cerrar)
+// se deja tal cual.
 func interpolarCompose(src string, lookup func(string) (string, bool), aviso func(string)) (string, error) {
 	var errs []error
-	out := reVarCompose.ReplaceAllStringFunc(src, func(m string) string {
-		if m == "$$" {
-			return "$"
-		}
-		sub := reVarCompose.FindStringSubmatch(m)
-		nombre, op, def := sub[2], sub[3], sub[4]
-		if nombre == "" {
-			nombre = sub[1] // $VAR, sin llaves
-		}
-		v, ok := lookup(nombre)
-		switch op {
-		case ":-":
-			if v == "" {
-				return def
-			}
-		case "-":
-			if !ok {
-				return def
-			}
-		case ":?", "?":
-			if (op == ":?" && v == "") || (op == "?" && !ok) {
-				msg := def
-				if msg == "" {
-					msg = "required variable " + nombre + " is missing a value"
-				}
-				errs = append(errs, fmt.Errorf("variable %s: %s", nombre, msg))
-				return ""
-			}
-		case ":+", "+":
-			if v != "" || (op == "+" && ok) {
-				return def
-			}
-			return ""
-		}
-		if !ok {
-			aviso(fmt.Sprintf("variable %s is not set; using an empty value", nombre))
-		}
-		return v
-	})
+	out := interpolarComposeRec(src, lookup, aviso, &errs)
 	return out, errors.Join(errs...)
+}
+
+func interpolarComposeRec(src string, lookup func(string) (string, bool), aviso func(string), errs *[]error) string {
+	var b strings.Builder
+	for i := 0; i < len(src); {
+		if src[i] != '$' || i+1 == len(src) {
+			b.WriteByte(src[i])
+			i++
+			continue
+		}
+		switch n := src[i+1]; {
+		case n == '$':
+			b.WriteByte('$')
+			i += 2
+		case n == '{':
+			fin := cierreVarCompose(src, i+2)
+			if fin < 0 {
+				b.WriteString(src[i:]) // ${ sin cerrar: literal
+				return b.String()
+			}
+			if v, ok := expandirVarCompose(src[i+2:fin], lookup, aviso, errs); ok {
+				b.WriteString(v)
+			} else {
+				b.WriteString(src[i : fin+1])
+			}
+			i = fin + 1
+		case inicioNombreCompose(n):
+			j := i + 1 + largoNombreCompose(src[i+1:])
+			b.WriteString(valorVarCompose(src[i+1:j], lookup, aviso))
+			i = j
+		default:
+			b.WriteByte('$')
+			i++
+		}
+	}
+	return b.String()
+}
+
+// cierreVarCompose da el índice de la } que cierra el ${ cuyo cuerpo empieza
+// en desde, emparejando llaves (las de un ${ anidado, un $${ escapado o un
+// JSON de defecto) y saltando los $$; -1 si no cierra.
+func cierreVarCompose(src string, desde int) int {
+	prof := 1
+	for k := desde; k < len(src); k++ {
+		switch {
+		case src[k] == '$' && k+1 < len(src) && src[k+1] == '$':
+			k++
+		case src[k] == '{':
+			prof++
+		case src[k] == '}':
+			if prof--; prof == 0 {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
+// expandirVarCompose resuelve el cuerpo de un ${...}; false si no es válido.
+func expandirVarCompose(cuerpo string, lookup func(string) (string, bool), aviso func(string), errs *[]error) (string, bool) {
+	l := largoNombreCompose(cuerpo)
+	if l == 0 || !inicioNombreCompose(cuerpo[0]) {
+		return "", false
+	}
+	nombre, resto := cuerpo[:l], cuerpo[l:]
+	if resto == "" {
+		return valorVarCompose(nombre, lookup, aviso), true
+	}
+	op := ""
+	for _, o := range []string{":-", ":?", ":+", "-", "?", "+"} {
+		if strings.HasPrefix(resto, o) {
+			op = o
+			break
+		}
+	}
+	if op == "" {
+		return "", false
+	}
+	arg := func() string { return interpolarComposeRec(resto[len(op):], lookup, aviso, errs) }
+	v, ok := lookup(nombre)
+	switch op {
+	case ":-", "-":
+		if !ok || (op == ":-" && v == "") {
+			return arg(), true
+		}
+		return v, true
+	case ":?", "?":
+		if !ok || (op == ":?" && v == "") {
+			msg := arg()
+			if msg == "" {
+				msg = "required variable " + nombre + " is missing a value"
+			}
+			*errs = append(*errs, fmt.Errorf("variable %s: %s", nombre, msg))
+			return "", true
+		}
+		return v, true
+	default: // ":+", "+"
+		if (op == "+" && ok) || v != "" {
+			return arg(), true
+		}
+		return "", true
+	}
+}
+
+func valorVarCompose(nombre string, lookup func(string) (string, bool), aviso func(string)) string {
+	v, ok := lookup(nombre)
+	if !ok {
+		aviso(fmt.Sprintf("variable %s is not set; using an empty value", nombre))
+	}
+	return v
+}
+
+func inicioNombreCompose(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// largoNombreCompose: cuántos bytes del principio de s forman un nombre
+// [A-Za-z0-9_]* (quien llama mira que empiece por letra o _).
+func largoNombreCompose(s string) int {
+	k := 0
+	for k < len(s) && (inicioNombreCompose(s[k]) || (s[k] >= '0' && s[k] <= '9')) {
+		k++
+	}
+	return k
 }
 
 // leerDotEnv lee el fichero de variables (.env) del directorio del compose:
