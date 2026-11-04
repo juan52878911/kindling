@@ -200,6 +200,20 @@ if [ -f "$IMAGES_DIR/toolchain.layer.ext4" ] && [ -f "$IMAGES_DIR/toolchain.reci
   copiar "$IMAGES_DIR/toolchain.layer.ext4" "$ROOT/images/toolchain.layer.ext4"
   cp "$IMAGES_DIR/toolchain.recipe.json" "$ROOT/images/"
   IMAGE=toolchain
+else
+  # Sin toolchain, la e2e-tools que 92 construye y deja en KLING_E2E_CACHE
+  # (con agente). min no lo lleva, y sin agente `save` no llega a guardar: su
+  # comprobación de que el invitado sirve es la del puerto del agente.
+  E2E_IMGS="${KLING_E2E_CACHE:-$HOME/.cache/kling-e2e}/images"
+  E2E_FILES="e2e-tools.layer.ext4 e2e-tools.recipe.json e2e-tools-base.ext4 e2e-tools-base.recipe.json"
+  todos=1
+  for f in $E2E_FILES; do [ -f "$E2E_IMGS/$f" ] || todos=0; done
+  if [ "$todos" = 1 ]; then
+    for f in $E2E_FILES; do copiar "$E2E_IMGS/$f" "$ROOT/images/$f" || die "copying $E2E_IMGS/$f"; done
+    IMAGE=e2e-tools
+  else
+    echo "warning: no toolchain in IMAGES_DIR and no e2e-tools in $E2E_IMGS (92-e2e-mac.sh builds it): using min, which has no guest agent, so save cannot pass" >&2
+  fi
 fi
 mkdir -p "$(dirname "$PLIST")"
 cat > "$PLIST" <<EOF

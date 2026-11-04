@@ -135,7 +135,8 @@ for p in $E2E; do
     95)
       if [ "$AGENTE" = 1 ]; then R95=agent; continue; fi
       say "95-e2e-upgrade-mac.sh (VMM=hv)"
-      VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" bash "$HERE/95-e2e-upgrade-mac.sh"
+      VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" KLING_E2E_CACHE="$KLING_E2E_CACHE" \
+        bash "$HERE/95-e2e-upgrade-mac.sh"
       R95=$?
       ;;
   esac
