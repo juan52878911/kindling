@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -228,7 +229,7 @@ func (m *Manager) releaseCPU(id string) {
 	if m.cgroupRoot == "" {
 		return
 	}
-	dir := filepath.Join(m.cgroupRoot, "kl-"+id[:8])
+	dir := filepath.Join(m.cgroupRoot, "kl-"+knet.Corto(id))
 	for i := 0; i < 20; i++ {
 		if err := os.Remove(dir); err == nil || os.IsNotExist(err) {
 			return
