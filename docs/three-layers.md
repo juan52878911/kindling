@@ -6,7 +6,7 @@
 > `-base python`); el resumen de uso está en la [guía completa](guia.md#imágenes-por-capas-una-base-por-familia-de-runtime).
 
 Objetivo: dejar de duplicar la base (~110–130 MiB reales, ~810 MiB lógicos) en
-cada imagen de servicio. Hoy `scripts/80-mcp-image.sh` hace `cp base → $NAME.ext4`
+cada imagen de servicio. Hoy `ext/mcp/scripts/80-mcp-image.sh` hace `cp base → $NAME.ext4`
 y el resultado es un ext4 monolítico donde casi todo son bytes idénticos entre
 servicios. Con capas: **base ro compartida una vez + una capa de servicio ro
 pequeña (solo el delta) + el overlay rw por máquina que ya existe.**
@@ -48,7 +48,7 @@ pone en `kling.layer`.
 
 ## Cambios por fichero
 
-### 1. `scripts/80-mcp-image.sh` (Stage 1 — construir la capa)
+### 1. `ext/mcp/scripts/80-mcp-image.sh` (Stage 1 — construir la capa)
 - Sustituir `cp base→DEST` (l.156) por: crear `$NAME.layer.ext4` vacío
   (`createOverlay`-style: truncate + mkfs.ext4 -O ^has_journal -E nodiscard),
   montarlo, montar la base ro, y `mount -t overlay -o

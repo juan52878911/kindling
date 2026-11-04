@@ -226,7 +226,7 @@ base glibc** —un script hermano que traiga un rootfs de Debian— y que
 
 ### Lo que ya está resuelto
 
-El puente **ya es agnóstico al motor**. `cmd/kling-bridge/browser.go` lee
+El puente **ya es agnóstico al motor**. `ext/mcp/cmd/kling-bridge/browser.go` lee
 `/etc/kling/browser.json` con `sidecar`, `ready_url` y `session_args`, y su propio
 comentario lo dice: *«no sabe (ni le importa) que es Chromium»*. La infraestructura
 para tener dos motores y cambiar el defecto **existe**; lo que falta es la base

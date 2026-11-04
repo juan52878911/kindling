@@ -72,7 +72,7 @@ JSON.
 La clave nunca va en el fichero ni sale por la API: viaja una vez al daemon, que la
 guarda cifrada (`store/graph/<id>.secrets.enc`) para los nodos lazy y los forks.
 
-Límites: 32 nodos, 64 aristas, 16 conexiones a la vez por arista `link`. Todas las
+Límites: 32 nodos, 64 aristas por nodo y 1024 por grafo, 16 conexiones a la vez por arista `link`. Todas las
 aristas de un nodo llegan por la misma dirección (la del host en su veth en Linux, la
 pasarela de su red en macOS), así que un nodo alcanza **un nodo por puerto**, y los
 puertos 53, 80 y 443 no valen en un `link` (son el DNS y el proxy de credenciales de
@@ -96,7 +96,7 @@ y las órdenes previas (`-script`, y también como comentario en la cabecera del
 | `services.X` | nodo `X` (etiqueta DNS: `mi_web` pasa a `mi-web`, con aviso) con la imagen `<grafo>-X` |
 | `image`, `environment`, `command`, `entrypoint`, `user`, `restart` | un `kling image import <image> -name <grafo>-X -e K=V … -- cmd` (los valores quedan **horneados** en la imagen, como con `image import -e`) |
 | `ports`, `expose` | `ports` del nodo (el puerto del contenedor; publicar en el host no existe y se avisa) |
-| red del proyecto | como en Docker Compose, cada servicio alcanza a todos los demás: una arista `link` de cada nodo a cada puerto de cada otro (un nodo alcanza un nodo por puerto: si dos exponen el mismo, gana el de `depends_on` o el que nombra el entorno). `networks:` lo restringe a los que comparten red; `network_mode: none`, a ninguno. Si no caben en las 64 aristas, solo las de `depends_on` y las del entorno, con aviso |
+| red del proyecto | como en Docker Compose, cada servicio alcanza a todos los demás: una arista `link` de cada nodo a cada puerto de cada otro (un nodo alcanza un nodo por puerto: si dos exponen el mismo, gana el de `depends_on` o el que nombra el entorno). `networks:` lo restringe a los que comparten red; `network_mode: none`, a ninguno. Si un servicio pasaría de 64 aristas, a ese solo le quedan las de `depends_on` y las del entorno, con aviso |
 | `depends_on` | una arista `depends`; `condition: service_healthy` con `healthcheck` le pone `health` (el `test` de verdad, dentro del destino, que lleva `allow_exec`) |
 | `healthcheck` | `test`, `interval`, `timeout`, `retries`, `start_period` y `start_interval` van a la `health` de la arista (con un daemon sin `graph-health`, `compose up` vuelve a la sonda TCP del puerto, con aviso) |
 | volúmenes con nombre | `kling volume create <grafo>-V` y `volumes` del nodo (`:ro` incluido) |

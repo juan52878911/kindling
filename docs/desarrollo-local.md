@@ -292,6 +292,6 @@ volumen) cuando importe.
   puertos, volúmenes anónimos, un fichero suelto como bind mount, y
   `service_completed_successfully`.
 - **Caudal de la carpeta** (tabla de arriba) y, en Linux, el limitador de red
-  de 16 MiB/s de Firecracker.
+  de Firecracker, que con carpetas sube a 256 MiB/s por sentido.
 - **El arranque en frío** paga ~0,7 s en la primera conexión al agente por el
   reenvío de `kling-vz`.

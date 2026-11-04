@@ -2,12 +2,15 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El token con nombre resuelve a su tenant y lo cuelga del contexto; el token
@@ -48,6 +51,11 @@ func TestAuthResuelveTenant(t *testing.T) {
 		}
 		if c.wantCode == http.StatusOK && w.Body.String() != c.wantTenant {
 			t.Errorf("%q: tenant %q, want %q", c.header, w.Body.String(), c.wantTenant)
+		}
+		// El 401 lleva el cuerpo del daemon, con su code estable.
+		var e api.Error
+		if c.wantCode == http.StatusUnauthorized && (json.Unmarshal(w.Body.Bytes(), &e) != nil || e.Code != api.CodeUnauthorized || e.Message == "") {
+			t.Errorf("%q: cuerpo del 401 sin code: %q", c.header, w.Body.String())
 		}
 	}
 }

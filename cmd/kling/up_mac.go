@@ -186,7 +186,7 @@ func checksMac(p probeMac) []check {
 		{
 			label: "guest kernel", ok: p.kernel,
 			found: presence(p.kernel, "present", "missing from "+filepath.Join(p.root, "images")),
-			why:   "images can't be built on macOS: they come with the release or from a Linux arm64 daemon",
+			why:   "every microVM boots it; it isn't built on macOS: it comes with the release or from a Linux arm64 daemon (images from Docker or Debian do build here)",
 			fix:   []string{copyHint},
 		},
 		{

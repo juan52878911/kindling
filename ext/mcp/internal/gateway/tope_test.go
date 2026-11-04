@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
@@ -38,5 +40,32 @@ func TestTopeDeReplicasEs503YNoAnotaFallo(t *testing.T) {
 	g.newSessionError(rec, req, "echo", errors.New("restore failed"))
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("error genérico: code = %d, quería 502", rec.Code)
+	}
+}
+
+// Los errores del gateway llevan el cuerpo del daemon, {"message","code"}: un
+// cliente distingue la cuota del inquilino de un 429 cualquiera por el code,
+// no por la frase.
+func TestErroresDelGatewayLlevanCodeEstable(t *testing.T) {
+	g := New(nil, 0, false, 0, "")
+	req := httptest.NewRequest(http.MethodPost, "/mcp/echo", nil)
+	for _, c := range []struct {
+		err    error
+		status int
+		code   api.ErrorCode
+	}{
+		{fmt.Errorf("%w: tenant t has 2 instance(s)", scheduler.ErrTenantInstances), http.StatusTooManyRequests, api.CodeTenantQuota},
+		{fmt.Errorf("%w: max 16", scheduler.ErrMaxReplicas), http.StatusServiceUnavailable, api.CodeUnavailable},
+		{errors.New("restore failed"), http.StatusBadGateway, api.CodeBadGateway},
+	} {
+		rec := httptest.NewRecorder()
+		g.newSessionError(rec, req, "echo", c.err)
+		var e api.Error
+		if rec.Code != c.status || json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Code != c.code || e.Message == "" {
+			t.Errorf("%v: %d %q; quería %d con code %s", c.err, rec.Code, rec.Body.String(), c.status, c.code)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("%v: Content-Type %q", c.err, ct)
+		}
 	}
 }

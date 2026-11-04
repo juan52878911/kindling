@@ -279,8 +279,10 @@ Agente (`pkg/guest`):
   install` funciona en una carpeta `rw`; `python -m venv` necesita `--copies`
   (sus enlaces apuntan a `/usr/bin/python3`, fuera).
 - Caudal: en Linux la conexión pasa por la interfaz de red del invitado, que en
-  Firecracker tiene un limitador de 16 MiB/s por sentido. Es el techo de lectura
-  y escritura secuencial de una carpeta viva allí.
+  Firecracker tiene un limitador por sentido: 16 MiB/s por defecto
+  (`daemon.net_mibps`), y 256 MiB/s en una máquina con carpetas, que `run -share` y
+  `compose` piden al crearla. Es el techo de lectura y escritura secuencial de una
+  carpeta viva allí.
 
 ### Cambios hechos en el host
 
@@ -332,7 +334,8 @@ que crea, consulta y borra 1000 ficheros de 1 KiB:
 | macOS, kling-vz (M4) | ~490 MB/s | ~190 MB/s | ~1230/s | ~10 200/s | ~4 000/s |
 | disco de la propia máquina (referencia, macOS) | 1,9 GB/s | 880 MB/s | ~80 000/s | — | — |
 
-En Linux el techo es el limitador de red de la microVM (16 MiB/s por sentido) y
+En Linux el techo era el limitador de red de la microVM (estas cifras se tomaron con
+16 MiB/s por sentido, antes de que una máquina con carpetas pidiera 256 MiB/s) y
 la latencia de ida y vuelta de la virtualización anidada (~0,8 ms por
 operación). `npm install express` dentro de la carpeta tardó 56 s frente a 45 s
 en el disco de la máquina (la red domina); extraer el paquete npm entero (1284

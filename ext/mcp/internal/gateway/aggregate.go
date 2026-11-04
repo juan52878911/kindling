@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
@@ -99,7 +100,7 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "only POST and DELETE", http.StatusMethodNotAllowed)
+		api.HTTPError(w, "only POST and DELETE", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -112,7 +113,7 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	// mandar un JSON sin fin y tumbar al gateway compartido por memoria.
 	r.Body = http.MaxBytesReader(w, r.Body, maxProxyBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		api.HTTPError(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 

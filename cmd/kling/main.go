@@ -195,8 +195,9 @@ func main() {
 }
 
 // cmdMachine agrupa lo que se hace a una máquina viva y casi nadie teclea:
-// `kling machine resize|squeeze|secret|credential|audit`. Los nombres de antes (resize,
-// squeeze, mmds) son alias.
+// `kling machine resize|squeeze|secret|credential|audit|ready|hooks`. El único
+// alias es `machine mmds` (= secret); los sueltos de antes (resize, squeeze,
+// mmds) se retiraron en 1.0 (removedAliases).
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit|ready|hooks> <ref> [...]")
@@ -870,8 +871,15 @@ func cmdSave(args []string) error {
 	defer stop()
 
 	c := api.NewClient(hostOf(*host))
+	skipReady := *force
 	if !*force {
-		if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
+		// Una imagen sin servicio (un sandbox, una de herramientas) no tiene
+		// nada que esperar: la espera solo agotaba el plazo entero.
+		sinServicio, nadaQueEsperar := sinServicioQueEsperar(ctx, c, fs.Arg(0))
+		if sinServicio {
+			fmt.Printf("note: %s's image declares no service; not waiting for one to serve\n", fs.Arg(0))
+			skipReady = nadaQueEsperar
+		} else if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
 			return err
 		}
 	}
@@ -879,7 +887,7 @@ func cmdSave(args []string) error {
 	// El daemon además espera a que el invitado esté listo según su imagen
 	// (sonda y ganchos): un dorado a medio arrancar lo está en cada copia.
 	snap, err := c.CommitWith(ctx, fs.Arg(0), api.CommitRequest{
-		Name: fs.Arg(1), Replace: *replace, SkipReady: *force,
+		Name: fs.Arg(1), Replace: *replace, SkipReady: skipReady,
 		ReadyTimeoutSeconds: int(espera.Seconds()),
 	})
 	if err != nil {
@@ -891,6 +899,39 @@ func cmdSave(args []string) error {
 	}
 	next("kling run -from %s", snap.Name)
 	return nil
+}
+
+// sinServicioPlazo acota las preguntas de sinServicioQueEsperar: el agente ya
+// arrancado contesta en milisegundos, y si no contesta se espera como siempre.
+const sinServicioPlazo = 5 * time.Second
+
+// sinServicioQueEsperar pregunta al agente de invitado de ref si su imagen
+// declara un servicio (GET /service) y, si no, si declara sonda o ganchos de
+// listo (GET /ready). sinServicio solo es true si el agente dijo que no hay
+// servicio; nadaQueEsperar, si además no hay sonda ni ganchos, y entonces la
+// espera del daemon tampoco aporta nada. Ante cualquier duda (un agente
+// anterior sin /service, uno que aún no contesta) los dos son false: se
+// espera como siempre.
+func sinServicioQueEsperar(ctx context.Context, c *api.Client, ref string) (sinServicio, nadaQueEsperar bool) {
+	ctx, cancel := context.WithTimeout(ctx, sinServicioPlazo)
+	defer cancel()
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{Method: "GET", Path: api.GuestServicePath + "?tail=0"})
+	if err != nil || resp.Status != http.StatusOK {
+		return false, false
+	}
+	var svc api.GuestService
+	if json.Unmarshal([]byte(resp.Body), &svc) != nil || svc.Declared {
+		return false, false
+	}
+	resp, err = c.Guest(ctx, ref, api.GuestRequest{Method: "GET", Path: api.GuestReadyPath})
+	if err != nil || (resp.Status != http.StatusOK && resp.Status != http.StatusServiceUnavailable) {
+		return true, false
+	}
+	var r api.GuestReady
+	if json.Unmarshal([]byte(resp.Body), &r) != nil {
+		return true, false
+	}
+	return true, !r.Declares()
 }
 
 // listoParaCongelar exige que el invitado SIRVA antes de convertirse en dorado.
@@ -1482,8 +1523,15 @@ func cmdTopo(args []string) error {
 		return err
 	}
 
+	// En macOS no hay KVM: el VMM es kling-hv o kling-vz, y Firecrack trae su
+	// versión. Decir "no KVM" ahí parecía una avería.
 	kvm := "no KVM"
-	if info.KVM {
+	switch {
+	case info.Backend == "hv":
+		kvm = "hv (Hypervisor.framework)"
+	case info.Backend == "vz":
+		kvm = "vz (Virtualization.framework)"
+	case info.KVM:
 		kvm = "KVM ok"
 	}
 	fmt.Printf("kindling  %s\n", c.Endpoint())

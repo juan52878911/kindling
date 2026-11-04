@@ -381,7 +381,8 @@ de su netns (`kling inspect <copia>`, campo `ip`), no `172.16.0.2`.
 
 ## En macOS: el golden desde una plantilla
 
-El backend vz no construye imágenes (hace falta root, dispositivos loop y chroot en Linux).
+El backend vz no corre los constructores de shell (hace falta root, dispositivos loop y
+chroot en Linux).
 En su lugar, `db-golden.sh build -from <plantilla>` arranca desde una plantilla que ya trae
 Postgres instalado, con la memoria y las CPU de su snapshot y el egress forzado a `none`:
 

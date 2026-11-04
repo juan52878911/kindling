@@ -182,9 +182,9 @@ de la matriz pasa a **sí**.
 - Capacidad y documentación para `GET/PUT /snapshots/{name}/pool` y
   `GET /machines/{ref}/egress`.
 - Golden de la salida `-json` de cada comando; códigos de salida documentados
-  (hoy 0 bien, 1 error, 2 uso, el del proceso remoto en `exec`, 130
-  interrumpido) y específicos para daemon incompatible, dorado obsoleto y agente
-  sin capacidad.
+  en [la guía](guia.md#códigos-de-salida) (0 bien, 1 error, 2 uso, 3 daemon
+  incompatible, 4 dorado obsoleto, 5 agente sin capacidad, 130 interrumpido; el
+  del proceso remoto en `exec`, `shell` y `try`).
 - `kling status -v` y `kling version` muestran API, VMM y agente; el árbol de
   ayuda de `compose` coincide con lo que acepta.
 - Retirar los alias avisados (ver [Deprecación](#deprecación)) y decidir los

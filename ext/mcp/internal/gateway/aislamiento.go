@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
@@ -79,7 +80,7 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 	// sesión caían en la primaria compartida, que un servicio aislado no debe
 	// tener: se contesta sin despertar nada.
 	if r.Method != http.MethodPost || r.GetBody == nil {
-		http.Error(w, "this service isolates each session: start one with initialize (POST)",
+		api.HTTPError(w, "this service isolates each session: start one with initialize (POST)",
 			http.StatusBadRequest)
 		return
 	}
@@ -96,7 +97,7 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 	g.End(e)
 	if rec.excedido {
 		g.ReleaseIsolated(ctx, key)
-		http.Error(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
+		api.HTTPError(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
 			http.StatusBadGateway)
 		return
 	}
@@ -106,7 +107,7 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 	if guestSID != "" && rec.Code < 400 {
 		if err := g.BindGuest(key, guestSID, service, e); err != nil {
 			g.ReleaseIsolated(ctx, key)
-			http.Error(w, fmt.Sprintf("could not register the session for %q: %v", service, err),
+			api.HTTPError(w, fmt.Sprintf("could not register the session for %q: %v", service, err),
 				http.StatusInternalServerError)
 			return
 		}
@@ -150,14 +151,14 @@ func (g *Gateway) recuperarAislada(w http.ResponseWriter, r *http.Request, servi
 	}
 	if errors.Is(err, scheduler.ErrSessionLost) || errors.Is(err, scheduler.ErrNoSuchSession) {
 		g.Forget(ext)
-		http.Error(w, "the isolated MCP session was lost with its machine; start a new one with initialize",
+		api.HTTPError(w, "the isolated MCP session was lost with its machine; start a new one with initialize",
 			http.StatusNotFound)
 		return nil
 	}
 	if errors.Is(err, scheduler.ErrTenantInstances) {
-		http.Error(w, fmt.Sprintf("could not wake the session of %q: %v", service, err), http.StatusTooManyRequests)
+		api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota, fmt.Sprintf("could not wake the session of %q: %v", service, err))
 		return nil
 	}
-	http.Error(w, fmt.Sprintf("could not wake the session of %q: %v", service, err), http.StatusBadGateway)
+	api.HTTPError(w, fmt.Sprintf("could not wake the session of %q: %v", service, err), http.StatusBadGateway)
 	return nil
 }

@@ -90,6 +90,56 @@ func TestComposeInterpolar(t *testing.T) {
 	}
 }
 
+// Anidados y casos límite, como compose-go: el defecto se interpola y solo
+// se evalúa la rama que se usa.
+func TestComposeInterpolarAnidado(t *testing.T) {
+	env := map[string]string{"A": "uno", "B": "dos", "VACIA": ""}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	casos := []struct {
+		in, want string
+		avisos   int
+		err      string
+	}{
+		{in: "${FALTA:-${B}}", want: "dos"},
+		{in: "${A:-${B}}", want: "uno"},
+		{in: "${FALTA:-${OTRA:-x}}", want: "x"},
+		{in: "${FALTA:-${OTRA:-${B}}}/z", want: "dos/z"},
+		{in: "${VACIA-${B}}", want: ""},
+		{in: "${FALTA-${B}-y}", want: "dos-y"},
+		{in: "${A:+${B}}", want: "dos"},
+		{in: "${A+${FALTA}}", want: "", avisos: 1},
+		{in: "${VACIA:+${FALTA}}", want: ""},       // rama sin usar: sin aviso
+		{in: "${A:-${FALTA:?nunca}}", want: "uno"}, // ni error
+		{in: "${FALTA:-${OTRA:?falta OTRA}}", err: "falta OTRA"},
+		{in: "${FALTA:?falta ${A}}", err: "falta uno"},
+		{in: "${FALTA:-$$B}", want: "$B"},
+		{in: "${FALTA:-a$${B}c}", want: "a${B}c"},
+		{in: "$${A:-x}", want: "${A:-x}"},
+		{in: `${FALTA:-{"k":1}}`, want: `{"k":1}`},
+		{in: "${FALTA:-http://${B}:80/}", want: "http://dos:80/"},
+		{in: "${A}${B}$A$B", want: "unodosunodos"},
+		{in: "${}", want: "${}"},
+		{in: "${1A}", want: "${1A}"},
+		{in: "${A sin cerrar", want: "${A sin cerrar"},
+		{in: "${A!x}", want: "${A!x}"},
+		{in: "fin$", want: "fin$"},
+		{in: "$1 $-", want: "$1 $-"},
+	}
+	for _, c := range casos {
+		var avisos []string
+		got, err := interpolarCompose(c.in, lookup, func(s string) { avisos = append(avisos, s) })
+		if c.err != "" {
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Errorf("%q: err = %v, want %q", c.in, err, c.err)
+			}
+			continue
+		}
+		if err != nil || got != c.want || len(avisos) != c.avisos {
+			t.Errorf("%q = %q, %v (avisos %v); want %q (%d avisos)", c.in, got, err, avisos, c.want, c.avisos)
+		}
+	}
+}
+
 // El .env junto al compose da las variables que la shell no tiene; la shell
 // manda.
 func TestComposeDotEnv(t *testing.T) {
@@ -161,6 +211,62 @@ func TestComposePuertosComoDocker(t *testing.T) {
 	avisos := strings.Join(tr.Avisos, "\n")
 	if !strings.Contains(avisos, "published on 127.0.0.1 only, not on 0.0.0.0") {
 		t.Errorf("sin aviso de 0.0.0.0: %s", avisos)
+	}
+}
+
+// Rangos, el mismo puerto del host en dos IPs (Docker los abre los dos; aquí
+// es uno: 127.0.0.1) y la sintaxis larga con host_ip y protocol.
+func TestComposePuertosRangosEIPs(t *testing.T) {
+	c := `services:
+  web:
+    image: nginx
+    ports:
+      - "8000-8002:9000-9002"
+      - "127.0.0.1:8080:80"
+      - "192.168.1.5:8080:80"
+      - "[::1]:8080:80"
+      - "10.0.0.1:8080:81"
+      - "7000-7005:70"
+      - "6000-6001:60-62"
+      - "5000-5001"
+      - target: 53
+        published: "5353"
+        host_ip: 0.0.0.0
+        protocol: udp
+      - target: 3000
+        host_ip: 127.0.0.1
+    expose:
+      - "4000-4001"
+`
+	tr, err := traducirCompose([]byte(c), "dev", false, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []api.PortPublish{
+		{Host: 8000, Guest: 9000}, {Host: 8001, Guest: 9001}, {Host: 8002, Guest: 9002},
+		{Host: 8080, Guest: 80}, {Host: 7000, Guest: 70},
+		{Host: 0, Guest: 5000}, {Host: 0, Guest: 5001},
+		{Host: 5353, Guest: 53, Proto: "udp"}, {Host: 0, Guest: 3000},
+	}
+	if got := tr.Publica["web"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("Publica = %+v", got)
+	}
+	if got := tr.por["web"].puertos; !reflect.DeepEqual(got, []int{70, 80, 3000, 4000, 4001, 5000, 5001, 9000, 9001, 9002}) {
+		t.Errorf("puertos del nodo = %v", got)
+	}
+	avisos := strings.Join(tr.Avisos, "\n")
+	for _, w := range []string{
+		"10.0.0.1:8080:81: 127.0.0.1:8080 is already published for another container port",
+		"7000-7005:70: published on 127.0.0.1:7000, the first port of the host range",
+		"6000-6001:60-62: host and container port ranges differ in length",
+		"not on 0.0.0.0",
+	} {
+		if !strings.Contains(avisos, w) {
+			t.Errorf("sin aviso %q:\n%s", w, avisos)
+		}
+	}
+	if strings.Count(avisos, "already published") != 1 {
+		t.Errorf("la misma publicación en otra IP no avisa de duplicado:\n%s", avisos)
 	}
 }
 

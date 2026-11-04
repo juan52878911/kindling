@@ -8,6 +8,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling compose`: nested interpolation like Docker Compose (`${A:-${B:-x}}`, `-`, `?`, `:+`, `$$`), port ranges (`8000-8002:9000-9002`), long-syntax `host_ip` and `protocol`, and the same host port on several IPs as one publication.
+- `kling compose exec -i` sends stdin when it is a terminal, like `kling exec -i`.
+- The exit-code section of the guide (`docs/guide.md#exit-codes`).
 - `docs/compatibilidad.md`: what 1.x promises, the compatibility matrix and what is left before 1.0; status codes per route and the stable `code` of each in `docs/api.md`, checked against the contract goldens by a test.
 - Linux: `kling doctor` and `kling up -check` warn when the host's FORWARD policy is DROP (Docker sets it) with no rule accepting kindling's traffic, which leaves `-egress internet`/`allowlist` machines silently without network, and print the two `iptables -A` rules that fix it; the daemon logs the same once at startup. The firewall rules kindling installs are unchanged.
 - Signed releases: `SHA256SUMS.minisig` (ed25519, minisign format) and SLSA build provenance for every asset; `kling upgrade`, `kling up` image downloads and `install.sh` (with `minisign`) check the signature. Unsigned releases are accepted with a warning until v1.0.0 and refused from then on (`docs/firmas.md`).
@@ -20,6 +23,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Graphs: the 64-edge limit is per node (each link needs its own proxy port), with 1024 edges per graph; `kling compose` keeps the full project network and only cuts back services that would go over 64.
+- New volumes are empty, without `lost+found`, like Docker's: Postgres `initdb` works on a volume root.
+- Extensions exit with the core's codes (2 usage, 3 daemon too old, 4 stale golden, 128+signal when killed); `kling mcp heal` reports "still unhealthy" with 6 instead of 3.
+- Gateway and scheduler errors (429 tenant quota, 401, 502) are JSON with a stable `code`.
+- `kling ai retrain` takes `-cpus` and sizes for `-mem`; `-vcpus` exits 2.
+- `kling try` checks its image exists before creating anything and suggests `kling image toolchain` or `-image min`; `kling save` skips the serving wait when the image declares no service.
+- `kling exec`, `try` and `shell` say when a failed command was blocked by the egress policy.
+- macOS: `topo`, `status` and `up` show hv/vz instead of KVM text, and the build 501 lists every rootless builder.
+- `kling help` lists every flag each command defines (checked by a test).
 - `POST /machines/{ref}/commit` and `POST /machines/{ref}/publish` answer 500 to host failures (they gave 400 to everything they did not recognise); commit gives 409 when the machine is not in a committable state, has session secrets, or the name exists
 - Status codes made consistent before 1.0 freezes them (`internal/daemon/testdata/contrato/codigos.txt`): 404 instead of 400 for a missing machine in `PUT /machines/{ref}/labels` and `POST …/commit`, a missing image in `GET/PUT /images/{name}/files` and a missing source in `POST /volumes/{name}/clone`.
 - Host failures are 500 instead of 400 in resize, snapshots and annotations, pools, template credentials, graphs, the store, `POST /volumes`, populate and `POST /cow/store/grow` (501 where the platform has no store); renew gives 500 instead of 502.
@@ -43,6 +55,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: the daemon no longer warns about missing memory/pids cgroup controllers at every start.
+- The arm64 `kling-bridge` binary is no longer tracked in git.
+- Docs: no more pre-1.0 version banners, removed aliases or `-vcpus`; live shares are capped at 256 MiB/s, not 16; image builds work on macOS; stale paths and links; SECURITY.md describes DNS tunnelling through an allowlisted domain.
+- e2fsck runs with `LC_ALL=C`, so its summary-only check matches on localised hosts.
+- CI: the macOS job runs the whole `internal/machine` and `internal/daemon` suites, not only the clone tests.
 - The swap admission error pointed to `docs/estabilidad.md`, now `docs/auditoria-estabilidad-2026-08.md`.
 - CI: `e2e-linux.yml` installs the `base` builder for its private daemon, so the toolchain image builds and `90-e2e.sh` and `94-e2e-upgrade.sh` stop falling back to `min`; `94-e2e-upgrade.sh` and `95-e2e-upgrade-mac.sh` only expect a refreeze on `-rollback` when `state.json` was migrated (otherwise the machine stays `running`).
 

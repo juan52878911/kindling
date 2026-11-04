@@ -6,11 +6,11 @@ abierto y conviértelo automáticamente en un servicio que se levanta bajo deman
 milisegundos, con aislamiento a nivel de kernel.
 
 kling-mcp es una **extensión de `kling`**: no añade un comando nuevo que aprender. Una
-vez instalada, `kling mcp`, `kling add`, `kling search`, `kling connect`, `kling gateway`,
-`kling export`, `kling memory` y `kling migrate` aparecen en el mismo `kling` que ya usas,
+vez instalada, `kling mcp`, `kling mcp add`, `kling mcp search`, `kling connect`, `kling mcp serve`,
+`kling mcp export`, `kling mcp memory` y `kling mcp migrate` aparecen en el mismo `kling` que ya usas,
 en su ayuda y en su completado.
 
-> Estado: parte de **kindling v0.13.0** (sin publicar). Hasta v0.4.0 esto era el
+> Estado: parte de **kindling** desde v0.13.0. Hasta v0.4.0 esto era el
 > repositorio aparte kindling-mcp (archivado; sus releases siguen allí); desde kindling
 > v0.13.0 vive en `ext/mcp` del repositorio de kindling y sale en la misma release que el
 > núcleo, con la misma versión. Todos los binarios de una release son compatibles entre
@@ -63,11 +63,11 @@ No hace falta saber empaquetar nada. `kling` habla con el registro oficial
 (`registry.modelcontextprotocol.io`):
 
 ```sh
-kling search filesystem                    # qué hay, y qué puede empaquetar solo
-kling add io.github.domdomegg/filesystem-mcp
+kling mcp search filesystem                # qué hay, y qué puede empaquetar solo
+kling mcp add io.github.domdomegg/filesystem-mcp
 ```
 
-`kling add` construye la imagen, arranca una plantilla, le pregunta qué sabe hacer, la
+`kling mcp add` construye la imagen, arranca una plantilla, le pregunta qué sabe hacer, la
 congela como snapshot dorado y guarda su catálogo. Desde entonces, listar sus capacidades
 **no despierta la microVM**.
 
@@ -271,7 +271,7 @@ sesión 2 (recién creada):     pid=309 llamadas_en_esta_sesion=1
 ## Modo efímero: una microVM por acción
 
 ```sh
-kling gateway -ephemeral -prewarm 3
+kling mcp serve -ephemeral -prewarm 3
 ```
 
 Cada llamada recibe **su propia microVM**: se toma una del fondo de máquinas
@@ -504,7 +504,7 @@ kling config set gateway.url http://192.168.2.60:8080
 ## Migrar un MCP existente sin romper nada
 
 ```sh
-kling migrate <mcp> -install <cliente>
+kling mcp migrate <mcp> -install <cliente>
 ```
 
 `migrate` mueve a kindling un servidor MCP que ya usas **conservando el nombre de la
@@ -555,10 +555,10 @@ binario del puente se instala siempre, eso sí, así que encenderla es un comand
 proyecto.
 
 ```sh
-kling memory status            # si está activa y contra qué
-kling memory install-service   # deja el puente local como servicio permanente (macOS)
-kling memory enable            # usa engram; -service <svc> para otro
-kling memory disable
+kling mcp memory status        # si está activa y contra qué
+kling mcp memory install-service # deja el puente local como servicio permanente (macOS)
+kling mcp memory enable        # usa engram; -service <svc> para otro
+kling mcp memory disable
 ```
 
 Cuando está activa, el gateway anota en el servicio de memoria qué herramienta resolvió
@@ -623,7 +623,7 @@ en su host. El gateway sí escucha, pero lo único que sabe hacer es despertar i
 de snapshots que ya existen.
 
 ```sh
-kling gateway -listen 127.0.0.1:8080 -idle 5m   # genera el token la primera vez
+kling mcp serve -listen 127.0.0.1:8080 -idle 5m   # genera el token la primera vez
 
 # El gateway EXIGE token: despertar un snapshot es ejecutar código, y el daemon
 # se protege no escuchando, pero el gateway sí escucha.
@@ -684,7 +684,7 @@ Un snapshot no viaja entre daemons: un servicio vive en el host donde se import�
 varios a la vez, en vez de a uno solo:
 
 ```sh
-kling gateway -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
 ```
 
 `/mcp/<servicio>` va al host que lo tiene en su catálogo; si lo tienen varios, al que
@@ -733,8 +733,8 @@ kindling en el host **no** actualiza el puente de los servicios ya empaquetados:
 ```sh
 kling mcp refresh-bridge              # todas
 kling mcp refresh-bridge semgrep      # solo una
-kling images rm <imagen>          # retirar una imagen que ya no usa nadie
-kling images recipe <imagen>      # cómo se construyó
+kling image rm <imagen>           # retirar una imagen que ya no usa nadie
+kling image recipe <imagen>       # cómo se construyó
 ```
 
 Esto no es una función que falta, es un fallo desconcertante si se te olvida: un puente

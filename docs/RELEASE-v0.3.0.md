@@ -83,7 +83,7 @@ el `thaw` es de milisegundos y la RAM se comparte (~40× de ahorro), pero cada r
 **nueva** arranca en frío en ~16 s bajo KVM anidado (vs ~3 s en Linux/x86 nativo), y el
 paralelismo práctico ronda las ~8 réplicas concurrentes antes de que la compuerta de
 arranque serialice. Ideal para desarrollo local y evaluación, no para alta concurrencia en
-Mac. Receta completa y límites en [`docs/mac-arm64.md`](docs/mac-arm64.md).
+Mac. Receta completa y límites en [`docs/mac-arm64.md`](mac-arm64.md).
 
 ---
 
@@ -112,7 +112,7 @@ Mac. Receta completa y límites en [`docs/mac-arm64.md`](docs/mac-arm64.md).
   y la inyección de secretos por sesión.
 - Para usar la misma herramienta en paralelo no hace falta nada: el gateway crea réplicas
   solo. Ajusta las cuotas por tenant si repartes un mismo token.
-- En Mac: sigue [`docs/mac-arm64.md`](docs/mac-arm64.md); necesitas M3+ y `nested virt`.
+- En Mac: sigue [`docs/mac-arm64.md`](mac-arm64.md); necesitas M3+ y `nested virt`.
 
 ---
 

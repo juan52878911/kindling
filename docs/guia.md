@@ -14,7 +14,7 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.17.0 — bases de datos desechables, grafos de microVMs y discos con copia al escribir, en Linux y en macOS.** `kling` gestiona
+> Estado: **1.0 — estable: el núcleo, el API del daemon y la CLI siguen SemVer ([`compatibilidad.md`](compatibilidad.md)), en Linux y en macOS.** `kling` gestiona
 > microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
 > capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
 > usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
@@ -107,6 +107,7 @@ enlazadas:
 · [Memoria: real vs caché](#memoria-qué-es-real-y-qué-es-caché)
 
 **Referencia**
+· [Códigos de salida](#códigos-de-salida)
 · [Requisitos](#requisitos)
 · [Scripts](#scripts)
 · [Mapa de la documentación](#mapa-de-la-documentación)
@@ -192,7 +193,7 @@ curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # Versión concreta (por defecto instala la última release; encima de una
 # instalación que ya existe pide --force, o usa kling upgrade -tag):
-curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
+curl -fsSL .../install.sh | sh -s -- --tag v1.0.0
 
 # Prefijo personalizado:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -209,7 +210,7 @@ disco. **Windows no está soportado** — el código usa syscalls POSIX (`syscal
 
 ```sh
 sudo kling upgrade               # Linux: el daemon de kling.service, a la última release
-kling upgrade -tag v0.18.0       # macOS (agente de launchd), o una release concreta
+kling upgrade -tag v1.0.0        # macOS (agente de launchd), o una release concreta
 kling upgrade -dry-run           # baja, verifica e imprime el plan
 kling upgrade -rollback          # vuelve a los binarios guardados por la última,
                                  # también con el daemon caído (lee su unidad)
@@ -341,10 +342,11 @@ El autocompletado viene con el binario: `source <(kling completion bash)` o
 
 **Nativo (v0.9, macOS 14+):** el daemon corre en el propio Mac con el backend `vz` —un
 ayudante `kling-vz` por microVM que habla el API de Firecracker sobre
-Virtualization.framework—. Sin root y sin VM Linux. Las imágenes se construyen en un
-host Linux arm64 y se traen con `kling image copy <nombre> -from ssh://usuario@host`.
-Cada restauración cuesta ~350 MiB (no se comparte la memoria del dorado), y no hay
-construcción de imágenes, techo de CPU ni jailer. Instalación, agente de launchd y
+Virtualization.framework—. Sin root y sin VM Linux. Los constructores sin root (`debian`,
+`oci`, `android` y `kling image import`) corren en el Mac; las imágenes de los
+constructores de shell (`min`, MCP...) se construyen en un host Linux arm64 y se traen
+con `kling image copy <nombre> -from ssh://usuario@host`. Cada restauración cuesta
+~350 MiB (no se comparte la memoria del dorado), y no hay techo de CPU ni jailer. Instalación, agente de launchd y
 límites: [`docs/mac.md`](mac.md).
 
 ```sh
@@ -866,7 +868,8 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y
 El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
 carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina
 con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la interfaz de
-red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
+red del invitado, con un techo en Firecracker de 256 MiB/s por sentido (lo pide una máquina con
+carpetas; las demás tienen `daemon.net_mibps`, 16 MiB/s por defecto). Diseño, límites y
 modelo de amenaza: [`docs/compartir.md`](compartir.md).
 
 ## LLM pequeños bajo demanda (VON)
@@ -1291,7 +1294,7 @@ incluido **lo que no está resuelto** — está en [SECURITY.md](../SECURITY.md)
 | Daemon inalcanzable por red | Solo socket Unix; acceso remoto exclusivamente por SSH |
 | VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo el grupo `kvm` |
 | Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; cgroup de CPU por máquina; tope de 256 |
+| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas); cgroup de CPU por máquina; tope de 256 |
 | Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
 | Sin secretos en snapshots | los secretos se inyectan vía MMDS (comunes a todas las sesiones de la máquina), solo en la máquina viva |
 
@@ -1613,6 +1616,27 @@ permite que N instancias compartan páginas.
 
 # Referencia
 
+## Códigos de salida
+
+Los códigos de salida de `kling` son parte del contrato de 1.x
+([`compatibilidad.md`](compatibilidad.md)): un script distingue los fallos sin leer el
+mensaje.
+
+| Código | Qué significa |
+|---|---|
+| `0` | Bien |
+| `1` | Cualquier otro error |
+| `2` | Uso: comando, flag o argumentos que no valen (también un nombre de comando retirado en 1.0) |
+| `3` | El daemon habla un API más viejo que este `kling`: actualiza el daemon |
+| `4` | Dorado obsoleto: la plantilla es de otro VMM o de otra versión; vuelve a congelarla |
+| `5` | Al agente de invitado de la imagen le falta una capacidad que pidió el comando |
+| `130` | Interrumpido con Ctrl-C o SIGTERM (128 + SIGINT, como una shell) |
+
+`kling exec`, `kling shell` y `kling try` salen con el código del comando que corrió
+dentro de la microVM (un `1` de `grep` no es un fallo de kling); solo usan la tabla de
+arriba cuando kling falla antes de tener uno. Un comando de una extensión sale con el
+código de la extensión.
+
 ## Requisitos
 
 - Un host con KVM y `cpu: host` (o equivalente) para que pasen las extensiones de
@@ -1674,6 +1698,9 @@ permite que N instancias compartan páginas.
 | [`docs/releases.md`](releases.md) | Una etiqueta, una release: todos los assets, `SHA256SUMS`, cómo publicar |
 
 ## Hoja de ruta
+
+> Histórica: las fases que llevaron kindling del laboratorio a la v0.4. Lo que
+> cambió después está en [`CHANGELOG.md`](../CHANGELOG.md).
 
 - [x] **Fase 1** — Laboratorio: una microVM que arranca, snapshot/restore medido
 - [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH

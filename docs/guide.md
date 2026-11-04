@@ -13,7 +13,7 @@ A Firecracker microVM runtime with golden snapshots: machines that wake in
 milliseconds from a file on disk, with kernel-level isolation, behind a docker-like CLI
 called `kling`. What runs inside is up to you, and `kling` grows through extensions.
 
-> Status: **v0.17.0 — disposable databases, microVM graphs and copy-on-write disks, on Linux and macOS.** `kling` manages
+> Status: **1.0 — stable: the core, the daemon API and the CLI follow SemVer ([`compatibilidad.md`](compatibilidad.md)), on Linux and macOS.** `kling` manages
 > microVMs with networking, golden snapshots, isolation, persistent volumes, layered
 > images, events, image builders, a documented daemon API and throwaway sandboxes with
 > streaming exec. Hosting MCP servers on demand — the use kindling was born for — and
@@ -106,6 +106,7 @@ sections:
 · [Memory: real vs cache](#memory-what-is-real-and-what-is-cache)
 
 **Reference**
+· [Exit codes](#exit-codes)
 · [Requirements](#requirements)
 · [Scripts](#scripts)
 · [Documentation map](#documentation-map)
@@ -189,7 +190,7 @@ curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # A specific version (it installs the latest release by default; on top of an
 # existing install it needs --force, or use kling upgrade -tag):
-curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
+curl -fsSL .../install.sh | sh -s -- --tag v1.0.0
 
 # Custom prefix:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -206,7 +207,7 @@ disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Ki
 
 ```sh
 sudo kling upgrade               # Linux: the daemon of kling.service, to the latest release
-kling upgrade -tag v0.18.0       # macOS (launchd agent), or a specific release
+kling upgrade -tag v1.0.0        # macOS (launchd agent), or a specific release
 kling upgrade -dry-run           # download, verify and print the plan
 kling upgrade -rollback          # back to the binaries saved by the last upgrade,
                                  # also with the daemon down (it reads its unit)
@@ -338,9 +339,11 @@ Shell completion ships with the binary: `source <(kling completion bash)` or
 
 **Native (v0.9, macOS 14+):** the daemon runs on the Mac itself with the `vz` backend —
 one `kling-vz` helper per microVM, speaking Firecracker's API on top of
-Virtualization.framework. No root, no Linux VM. Images are built on a Linux arm64 host and
-streamed over with `kling image copy <name> -from ssh://user@host`. Restores cost ~350
-MiB each (no shared golden memory), and there are no image builds, CPU caps or jailer.
+Virtualization.framework. No root, no Linux VM. The rootless builders (`debian`, `oci`,
+`android`, and `kling image import`) run on the Mac; images from the shell builders (`min`,
+MCP...) are built on a Linux arm64 host and streamed over with
+`kling image copy <name> -from ssh://user@host`. Restores cost ~350 MiB each (no shared
+golden memory), and there are no CPU caps or jailer.
 Install, launchd agent and limits: [`docs/mac.md`](mac.md).
 
 ```sh
@@ -858,8 +861,9 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # live, read-write
 
 The guest cannot create symlinks, hard links or device nodes in a live share
 (`npm install --no-bin-links` works), sees everything as owned by root, and a machine with
-shares cannot be committed. Live shares go through the guest's network device, capped at
-16 MiB/s per direction on Firecracker. Design, limits and threat model:
+shares cannot be committed. Live shares go through the guest's network device, capped on
+Firecracker at 256 MiB/s per direction (a machine with shares asks for that; others get
+`daemon.net_mibps`, 16 MiB/s by default). Design, limits and threat model:
 [`docs/compartir.md`](compartir.md).
 
 ## Small LLMs on demand (VON)
@@ -1281,7 +1285,7 @@ The guest is third-party code: assume it is hostile. The full threat model — i
 | Daemon unreachable over the network | Unix socket only; remote access exclusively over SSH |
 | Unprivileged VMM | `setpriv` to a service user: **CapEff 0**, `no_new_privs`, only the `kvm` group |
 | No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
-| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine; CPU cgroup per machine; cap of 256 |
+| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares); CPU cgroup per machine; cap of 256 |
 | No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
 | No secrets in snapshots | secrets are injected via MMDS (shared by every session of the machine), into the live machine only |
 
@@ -1589,6 +1593,27 @@ instances share pages.
 
 # Reference
 
+## Exit codes
+
+`kling`'s exit codes are part of the 1.x contract
+([`compatibilidad.md`](compatibilidad.md)): a script can tell failures apart without
+parsing the message.
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Any other error |
+| `2` | Usage: unknown command, bad flag or arguments (also a command name removed in 1.0) |
+| `3` | The daemon speaks an older API than this `kling`: upgrade the daemon |
+| `4` | Stale golden snapshot: the template was made by another VMM or version; refreeze it |
+| `5` | The guest agent in the image lacks a capability the command asked for |
+| `130` | Interrupted by Ctrl-C or SIGTERM (128 + SIGINT, like a shell) |
+
+`kling exec`, `kling shell` and `kling try` exit with the code of the command that ran
+inside the microVM (a `1` from `grep` is not a kling failure); they only fall back to the
+table above when kling itself fails before getting one. An extension command exits with
+the extension's own code.
+
 ## Requirements
 
 - A host with KVM and `cpu: host` (or equivalent) so the virtualization extensions get through
@@ -1650,6 +1675,9 @@ instances share pages.
 | [`docs/releases.md`](releases.md) | One tag, one release: every asset, `SHA256SUMS`, how to cut a release |
 
 ## Roadmap
+
+> Historical: the phases that took kindling from a lab experiment to v0.4. What
+> changed after that is in [`CHANGELOG.md`](../CHANGELOG.md).
 
 - [x] **Phase 1** — Lab: a microVM that boots, snapshot/restore measured
 - [x] **Phase 1.5** — `kling`: lifecycle, states, events, local and SSH transport

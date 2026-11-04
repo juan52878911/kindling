@@ -93,7 +93,7 @@ func NewRouter(hosts []RouterHost) *Router {
 // el token no se compruebe dos veces.
 func (r *Router) Handler(token string) http.Handler {
 	if len(r.hosts) == 0 {
-		panic("gateway: Router sin hosts")
+		panic("gateway: Router with no hosts")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -249,7 +249,7 @@ func (r *Router) byAvailableMemory(ctx context.Context, hosts []*RouterHost) []*
 func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 	service := req.PathValue("service")
 	if service == "" {
-		http.Error(w, "missing service in path", http.StatusBadRequest)
+		api.HTTPError(w, "missing service in path", http.StatusBadRequest)
 		return
 	}
 	ctx := req.Context()
@@ -285,7 +285,7 @@ func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 
 	candidates := r.hostsFor(ctx, service)
 	if len(candidates) == 0 {
-		http.Error(w, fmt.Sprintf("service %q not found on any configured host", service), http.StatusNotFound)
+		api.HTTPError(w, fmt.Sprintf("service %q not found on any configured host", service), http.StatusNotFound)
 		return
 	}
 	candidates = r.byAvailableMemory(ctx, candidates)
@@ -376,7 +376,7 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Method != http.MethodPost {
-		http.Error(w, "only POST and DELETE", http.StatusMethodNotAllowed)
+		api.HTTPError(w, "only POST and DELETE", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -389,7 +389,7 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 	// mandar un JSON sin fin y tumbar al gateway compartido por memoria.
 	req.Body = http.MaxBytesReader(w, req.Body, maxProxyBody)
 	if err := json.NewDecoder(req.Body).Decode(&rpc); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		api.HTTPError(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 

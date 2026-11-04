@@ -156,8 +156,8 @@ backend.
 
 ### 4. Una microVM no puede degradar a las demás
 
-- **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red, con limitadores
-  de Firecracker.
+- **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red (`daemon.net_mibps`,
+  hasta 10240; 256 en una máquina con carpetas), con limitadores de Firecracker.
 - **Techo de CPU por máquina** con su propio cgroup (`-cpu-pct`, 50% de un core por
   defecto): un invitado en bucle no se come el host.
 - **Tope de máquinas** (`MaxMachines = 256`) para que un cliente comprometido no agote el host.
@@ -1497,7 +1497,7 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   máquina cuyo `-disk` no quepa en el disco libre y crear máquinas nuevas con el disco
   casi lleno, pero no reserva: las que ya corren pueden seguir llenando los suyos hasta
   su tamaño, y entre todas pasar de lo libre.
-- **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
+- **El cifrado en reposo es cosa del disco, no de kindling.** `kling status -v` dice si
   `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
   microVMs. Receta en `docs/cifrado.md`.
 - **Sin política de autorización, el daemon confía en quien alcanza su socket.** Es el
@@ -1598,6 +1598,17 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   (`-listen 0.0.0.0:9100`) y avisa: `install-service` por la terminal y el propio puente
   en su log. Dentro de la microVM el `/entrypoint` generado pide `-listen :8080`, donde
   lo busca el gateway; ahí, como PID 1, no avisa.
+- **`allowlist` no cierra el túnel por DNS de un dominio permitido.** El resolver de cada
+  microVM (`internal/net/dnsresolver.go`) contesta REFUSED a un dominio no listado, pero
+  reenvía los **subdominios** de uno permitido, porque un CDN los necesita. Si el
+  atacante controla el NS autoritativo de un dominio de la allowlist (o de una zona por
+  debajo), el invitado puede sacar datos codificados en las consultas
+  (`<datos>.dominio-permitido`) y recibirlos en las respuestas, sin abrir ninguna
+  conexión. Cerrarlo exige un resolver autoritativo propio; hasta entonces, permitir un
+  dominio es confiar en quien sirve su DNS. Tampoco se siembran registros **AAAA**: el
+  ipset y las reglas son solo IPv4, y el invitado no puede usar IPv6 porque
+  `applyIPv6Barrier` lo apaga en su namespace antes de que el resolver entre en juego;
+  un servicio solo accesible por IPv6 no se alcanza en `allowlist`.
 - **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
   silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
   este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del
@@ -1622,7 +1633,7 @@ kling ps -a          # qué había, con su IP y su política de salida
 kling topo           # de qué snapshot salió cada instancia
 ```
 
-Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling rmi` se
+Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling template rm` se
 niega si quedan vivas.
 
 ## Reportar una vulnerabilidad

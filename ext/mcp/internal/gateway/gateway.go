@@ -196,7 +196,7 @@ func logging(h http.Handler) http.Handler {
 func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 	snaps, err := g.Client().Snapshots(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		api.HTTPError(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -227,7 +227,7 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	service := r.PathValue("service")
 	if service == "" {
-		http.Error(w, "missing service in path", http.StatusBadRequest)
+		api.HTTPError(w, "missing service in path", http.StatusBadRequest)
 		return
 	}
 
@@ -248,7 +248,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		body, err := api.LeerCuerpo(r.Body, maxProxyBody)
 		_ = r.Body.Close()
 		if err != nil {
-			http.Error(w, "could not read body", http.StatusBadRequest)
+			api.HTTPError(w, "could not read body", http.StatusBadRequest)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -288,7 +288,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sesión sí sigue (abre el stream de esa conversación en el puente).
 	if r.Method == http.MethodGet && r.Header.Get(SessionHeader) == "" {
 		w.Header().Set("Allow", "POST, DELETE")
-		http.Error(w, "this endpoint does not offer a standalone SSE stream; use POST",
+		api.HTTPError(w, "this endpoint does not offer a standalone SSE stream; use POST",
 			http.StatusMethodNotAllowed)
 		return
 	}
@@ -305,10 +305,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// begin/end, así que basta contabilizar aquí una vez.
 	tnt := scheduler.TenantFrom(r.Context())
 	if !g.TenantBegin(tnt) {
-		http.Error(w, fmt.Sprintf(
+		api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota, fmt.Sprintf(
 			"429: tenant %q has reached its quota of %d in-flight requests.\n"+
 				"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
-			tnt.Name(), tnt.MaxInflight()), http.StatusTooManyRequests)
+			tnt.Name(), tnt.MaxInflight()))
 		return
 	}
 	defer g.TenantEnd(tnt)
@@ -340,7 +340,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// reenvía al invitado —que podría tener una sesión con ese id, de
 			// otro cliente—. 404 es lo que pide el transporte Streamable HTTP
 			// para una sesión que no existe: el cliente rehace el initialize.
-			http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+			api.HTTPError(w, "unknown or expired MCP session; start a new one with initialize",
 				http.StatusNotFound)
 			return
 		}
@@ -360,7 +360,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if rt = g.Route(ext); rt == nil {
-				http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+				api.HTTPError(w, "unknown or expired MCP session; start a new one with initialize",
 					http.StatusNotFound)
 				return
 			}
@@ -375,11 +375,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				g.Forget(ext)
 				if errors.Is(err, scheduler.ErrTenantInstances) {
-					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
-						http.StatusTooManyRequests)
+					api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota,
+						fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err))
 					return
 				}
-				http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
+				api.HTTPError(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
 					http.StatusBadGateway)
 				return
 			}
@@ -387,7 +387,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				// Máquina distinta: su puente no conoce esta sesión. Se olvida y
 				// el cliente rehace el handshake contra la instancia nueva.
 				g.Forget(ext)
-				http.Error(w, "the MCP session was lost with its instance; start a new one with initialize",
+				api.HTTPError(w, "the MCP session was lost with its instance; start a new one with initialize",
 					http.StatusNotFound)
 				return
 			}
@@ -395,7 +395,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// que reapuntar al proxy nuevo.
 			g.Rebind(ext, e)
 			if rt = g.Route(ext); rt == nil {
-				http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+				api.HTTPError(w, "unknown or expired MCP session; start a new one with initialize",
 					http.StatusNotFound)
 				return
 			}
@@ -432,7 +432,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Sesión NUEVA de un servicio que aísla cada sesión: microVM propia.
 	aislado, err := g.aislado(r.Context(), service)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		api.HTTPError(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	if aislado {
@@ -568,7 +568,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		e.Proxy().ServeHTTP(rec, r)
 		g.End(e)
 		if rec.excedido {
-			http.Error(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
+			api.HTTPError(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
 				http.StatusBadGateway)
 			return
 		}
@@ -603,7 +603,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 				}
 			}
 			if berr != nil {
-				http.Error(w, fmt.Sprintf("could not register the session for %q: %v", service, berr),
+				api.HTTPError(w, fmt.Sprintf("could not register the session for %q: %v", service, berr),
 					http.StatusInternalServerError)
 				return
 			}
@@ -623,7 +623,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		_, _ = w.Write(rec.Body.Bytes())
 		return
 	}
-	http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
+	api.HTTPError(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
 		http.StatusServiceUnavailable)
 }
 
@@ -662,19 +662,19 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, servic
 	// La cuota de instancias del tenant es un 429 (reparto justo), no un 502: el
 	// servicio no falla, es que este tenant ya tiene todas las suyas.
 	if errors.Is(err, scheduler.ErrTenantInstances) {
-		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
+		api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota, fmt.Sprintf("could not prepare %q: %v", service, err))
 		return
 	}
 	// El tope de réplicas tampoco es un fallo del servicio: está sano y lleno.
 	// Anotarlo como fallo lo marcaba roto en el meta justo cuando más se usaba,
 	// y un 502 invita a pensar en el invitado. 503: que el cliente reintente.
 	if errors.Is(err, scheduler.ErrMaxReplicas) {
-		http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full (%v)", service, err),
+		api.HTTPError(w, fmt.Sprintf("could not place session for %q: all replicas full (%v)", service, err),
 			http.StatusServiceUnavailable)
 		return
 	}
 	g.anotarFallo(service, err)
-	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
+	api.HTTPError(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
 }
 
 // anotarFallo guarda en el snapshot que este servicio no se pudo preparar.
@@ -777,7 +777,7 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *mcp
 	base := strings.TrimSuffix(l.URL, "/mcp")
 	target, err := url.Parse(base)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid link URL: %v", err), http.StatusInternalServerError)
+		api.HTTPError(w, fmt.Sprintf("invalid link URL: %v", err), http.StatusInternalServerError)
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
