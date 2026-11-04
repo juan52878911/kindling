@@ -74,7 +74,12 @@ Mientras el secreto no exista, el paso «firmar SHA256SUMS» de `release.yml` se
 salta con un aviso y la release 0.x sale sin firma, como hasta ahora. Una
 release ≥ 1.0 sin secreto falla en ese paso. Con el secreto puesto y la pública
 sin añadir al código, el paso también falla: `firmar sign` comprueba la firma
-contra las claves compiladas de ese mismo commit antes de publicarla.
+contra las claves compiladas de ese mismo commit antes de publicarla. Una
+etiqueta ≥ 1.0 (un `-rc` incluido) con `clavesRelease` vacía no llega ni a
+compilarse: la paran `scripts/release.sh` antes de crearla y el job `lint` de
+`release.yml` con `go run ./internal/upgrade/firmar check -tag vX.Y.Z`, que
+con `KLING_RELEASE_SIGNING_KEY` en el entorno comprueba además que su pública
+está entre las compiladas.
 
 ## Rotar la clave
 
