@@ -174,8 +174,8 @@ var coreTree = []section{
   compose exec [-T] [-w DIR] [-e K=V] <service>    runs a command in a service (a terminal if
       <cmd>...                                     there is one)
   compose stop [service...]                        freezes services (all without names)
-  compose start [service...]wakes them up
-  compose restart [service...]       restarts them
+  compose start [service...]                       wakes them up
+  compose restart [service...]                     restarts them
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
