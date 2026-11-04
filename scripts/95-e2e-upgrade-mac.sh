@@ -16,11 +16,14 @@
 #   NEW_DIR=/ruta/head IMAGES_DIR=/ruta/imagenes ./95-e2e-upgrade-mac.sh
 #
 #   OLD_DIR     kling, kling-vz (firmado) y, si lo trae, kling-hv de la versión
-#               anterior; sin él, OLD_TAG se baja con install.sh (necesita red)
+#               anterior; sin él, se bajan los de la release OLD_TAG de GitHub
+#               y se comprueban contra su SHA256SUMS (necesita red)
 #   OLD_TAG     su etiqueta; por defecto la última release publicada anterior
-#               a la nueva (la N-1, por el API de GitHub)
+#               a la nueva (la N-1, por el API de GitHub; v0.20.1 si el API no
+#               contesta)
 #   NEW_DIR     kling, kling-vz y kling-hv de este árbol (nombres de release o
-#               a secas); SHA256SUMS si se quiere -from-dir sin -insecure
+#               a secas); upgrade los toma con -from-dir de una copia con su
+#               SHA256SUMS (el de NEW_DIR si lo trae; si no, uno hecho aquí)
 #   VMM         vz o hv: con qué VMM corre el daemon (KLING_VMM); vacío = el
 #               que elija el daemon. Con hv se prueba además que la vuelta
 #               atrás mira la versión KLNGHV de lo que congela el nuevo
@@ -59,7 +62,7 @@ bad()  { printf "  \033[31mFAIL\033[0m  %s\n     want: %s\n     got:  %s\n" "$1"
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 # vuelta_atras: upgrade dice "rolled back to <versión>" con la que da el binario
-# viejo: "0.17.0" el de la release (install.sh), "v0.17.0" uno sellado a mano.
+# viejo: "0.20.1" el de la release, "v0.20.1" uno sellado a mano.
 vuelta_atras() { contiene "$1" "rolled back to $OLD_TAG" || contiene "$1" "rolled back to ${OLD_TAG#v}"; }
 die()  { echo "$*" >&2; exit 1; }
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
@@ -92,8 +95,7 @@ kn() { "$NEWK" "$@"; }
 NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
 case "$NEWV" in ""|dev) die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
 if [ -z "$OLD_TAG" ]; then
-  OLD_TAG=$(ultima_release_anterior "$NEWV")
-  [ -n "$OLD_TAG" ] || die "cannot tell the release before $NEWV (GitHub API): set OLD_TAG"
+  OLD_TAG=$(release_anterior "$NEWV")
 fi
 case "$NEWV" in "${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\", the same as OLD_TAG";; esac
 NEWTAG="v${NEWV#v}"
@@ -106,7 +108,8 @@ if [ -n "${KLING_UPGRADE_REPO:-}" ]; then
 elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
   FROM="$NEW_DIR"; NUEVO=(-from-dir "$NEW_DIR")
 else
-  FROM="$NEW_DIR (unverified)"; NUEVO=(-from-dir "$NEW_DIR" -insecure)
+  # Sin -insecure: una copia con su SHA256SUMS (paso 0, ya con $BASE hecho).
+  FROM="$BASE/new"; NUEVO=(-from-dir "$BASE/new")
 fi
 
 our_procs() { pgrep -f -- "$ROOT/" | wc -l | tr -d ' '; }
@@ -161,8 +164,13 @@ mkdir -p "$BIN" "$ROOT/images"
 echo '{}' > "$KLING_CONFIG"
 if [ -z "$OLD_DIR" ]; then
   OLD_DIR="$BASE/old"; mkdir -p "$OLD_DIR"
-  curl -fsSL "https://raw.githubusercontent.com/juan52878911/kindling/$OLD_TAG/scripts/install.sh" \
-    | sh -s -- --tag "$OLD_TAG" --prefix "$OLD_DIR" --no-rc --force >/dev/null || die "install.sh --tag $OLD_TAG failed"
+  bajar_release "$OLD_TAG" "$OLD_DIR" kling-darwin-arm64:kling kling-vz-darwin-arm64:kling-vz "?kling-hv-darwin-arm64:kling-hv" \
+    || die "could not download release $OLD_TAG"
+  ok "release $OLD_TAG downloaded and checked against its SHA256SUMS"
+fi
+if [ "$FROM" = "$BASE/new" ]; then
+  preparar_nuevos "$BASE/new" "$NEW_DIR" kling-darwin-arm64 kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-guest-linux-arm64 \
+    || die "could not stage $NEW_DIR"
 fi
 OLDK0=$(pieza "$OLD_DIR" kling); OLDVZ=$(pieza "$OLD_DIR" kling-vz); OLDHV=$(pieza_opc "$OLD_DIR" kling-hv)
 [ "$VMM" = hv ] && [ -z "$OLDHV" ] && die "VMM=hv and $OLD_TAG has no kling-hv"

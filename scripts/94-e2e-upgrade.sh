@@ -15,16 +15,19 @@
 #
 #   sudo NEW_DIR=/ruta/head ./94-e2e-upgrade.sh
 #
-#   OLD_DIR   kling (y kling-guest) de la versión anterior; sin él, OLD_TAG se
-#             baja con install.sh (necesita red)
+#   OLD_DIR   kling (y kling-guest) de la versión anterior; sin él, se bajan
+#             los binarios de la release OLD_TAG de GitHub y se comprueban
+#             contra su SHA256SUMS (necesita red)
 #   OLD_TAG   la etiqueta anterior; por defecto la última release publicada
-#             anterior a la nueva (la N-1, por el API de GitHub)
+#             anterior a la nueva (la N-1, por el API de GitHub; v0.20.1 si el
+#             API no contesta)
 #   NEW_DIR   los binarios nuevos, con nombre de release (kling-linux-amd64…) o
 #             a secas (kling, kling-guest), y SHA256SUMS si se quiere verificar
 #   FROM      de dónde saca upgrade los nuevos: download (por defecto) los sirve
 #             como una release por https en 127.0.0.1, con certificado propio
 #             (KLING_UPGRADE_REPO + SSL_CERT_FILE), y los baja y verifica como
-#             de GitHub; dir usa -from-dir (con -insecure si no hay SHA256SUMS).
+#             de GitHub; dir usa -from-dir con una copia de NEW_DIR y su
+#             SHA256SUMS (el de NEW_DIR si lo trae; si no, uno hecho aquí).
 #             download necesita openssl y que la versión nueva sea una
 #             etiqueta válida (v0.21.0-e2e.abc, no un git describe con -3-g…)
 #   NAME      nombre del daemon privado (por defecto kt-e2e-upgrade): unidad
@@ -63,7 +66,7 @@ bad()  { printf "  \033[31mFAIL\033[0m  %s\n     want: %s\n     got:  %s\n" "$1"
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 # vuelta_atras: upgrade dice "rolled back to <versión>" con la que da el binario
-# viejo: "0.17.0" el de la release (install.sh), "v0.17.0" uno sellado a mano.
+# viejo: "0.20.1" el de la release, "v0.20.1" uno sellado a mano.
 vuelta_atras() { contiene "$1" "rolled back to $OLD_TAG" || contiene "$1" "rolled back to ${OLD_TAG#v}"; }
 # shellcheck source=scripts/lib-e2e-upgrade.sh
 . "$(dirname "$0")/lib-e2e-upgrade.sh"
@@ -90,8 +93,7 @@ kn() { "$NEWK" "$@"; }
 NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
 case "$NEWV" in ""|dev) die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
 if [ -z "$OLD_TAG" ]; then
-  OLD_TAG=$(ultima_release_anterior "$NEWV")
-  [ -n "$OLD_TAG" ] || die "cannot tell the release before $NEWV (GitHub API): set OLD_TAG"
+  OLD_TAG=$(release_anterior "$NEWV")
 fi
 case "$NEWV" in "${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\", the same as OLD_TAG";; esac
 NEWTAG="v${NEWV#v}"
@@ -129,8 +131,9 @@ mkdir -p "$BIN" "$LIB" "$ROOT/images" "$RUN"
 chmod 755 "$BASE" "$ROOT"   # el usuario del VMM tiene que poder atravesarla
 if [ -z "$OLD_DIR" ]; then
   OLD_DIR="$BASE/old"; mkdir -p "$OLD_DIR"
-  curl -fsSL "https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh" \
-    | sh -s -- --tag "$OLD_TAG" --prefix "$OLD_DIR" --no-rc --force >/dev/null || die "install.sh --tag $OLD_TAG failed"
+  bajar_release "$OLD_TAG" "$OLD_DIR" "kling-linux-$ARCH:kling" "kling-guest-linux-$ARCH:kling-guest" \
+    || die "could not download release $OLD_TAG"
+  ok "release $OLD_TAG downloaded and checked against its SHA256SUMS"
 fi
 install -m755 "$OLD_DIR/kling" "$BIN/kling"
 install -m755 "$OLD_DIR/kling" "$OLDK"
@@ -201,7 +204,10 @@ if [ "$FROM" = download ]; then
 elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
   NUEVO=(-from-dir "$NEW_DIR")
 else
-  NUEVO=(-from-dir "$NEW_DIR" -insecure)
+  # Sin -insecure: una copia con su SHA256SUMS, que upgrade comprueba.
+  preparar_nuevos "$BASE/new" "$NEW_DIR" "kling-linux-$ARCH" "kling-guest-linux-$ARCH" "kling-chispa-linux-$ARCH" \
+    || die "could not stage $NEW_DIR"
+  NUEVO=(-from-dir "$BASE/new")
 fi
 
 # ── 2. upgrade fallido: el nuevo no arranca y se vuelve solo ─────────────────
