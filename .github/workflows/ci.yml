@@ -49,6 +49,15 @@ jobs:
           cache: true
           cache-dependency-path: ${{ matrix.dir }}/go.mod
 
+      # Para la prueba cruzada de firmas con el minisign de verdad
+      # (internal/upgrade/minisign_test.go; sin él se salta).
+      - name: instalar minisign
+        if: matrix.dir == '.'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          minisign -v
+
       - name: make test cross
         env:
           DIR: ${{ matrix.dir }}
