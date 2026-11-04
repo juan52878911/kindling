@@ -184,6 +184,36 @@ func TestPublicarYDespertar(t *testing.T) {
 	}
 }
 
+// El puerto de una máquina borrada se puede volver a publicar en el acto, sin
+// esperar al barrido (`kling rm` y en seguida `run -p` al mismo puerto).
+func TestPuertoDeBorradaSeReusaYa(t *testing.T) {
+	srv := eco(t)
+	fw := map[string]string{"80": srv.Addr().String()}
+	f := &maquinasFalsas{ms: map[string]*api.Machine{
+		"a": {ID: "a", Name: "a", State: api.StateRunning, Forwards: fw, Labels: map[string]string{api.LabelPorts: "80"}},
+		"b": {ID: "b", Name: "b", State: api.StateRunning, Forwards: fw, Labels: map[string]string{api.LabelPorts: "80"}},
+	}}
+	p := nuevo(t, f) // su barrido es de 2 s: lo de abajo pasa antes
+	ma, _ := f.Get("a")
+	mb, _ := f.Get("b")
+	h := puertoLibre(t)
+	if _, err := p.Publicar(ma, []api.PortPublish{{Host: h, Guest: 80}}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	delete(f.ms, "a")
+	f.mu.Unlock()
+	if err := p.Comprobar([]api.PortPublish{{Host: h, Guest: 80}}); err != nil {
+		t.Fatalf("Comprobar: %v", err)
+	}
+	if _, err := p.Publicar(mb, []api.PortPublish{{Host: h, Guest: 80}}); err != nil {
+		t.Fatalf("Publicar: %v", err)
+	}
+	if got, err := pedir(t, "127.0.0.1:"+strconv.Itoa(h), "x"); err != nil || got != "eco:x" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
 // Un puerto ocupado (por otra máquina o por otro proceso) falla y no deja
 // publicado ninguno de los demás.
 func TestPublicarTodoONada(t *testing.T) {
