@@ -675,22 +675,46 @@ func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
 
 // nivelBajoParaRestaurar espera hasta esperaNivelRestoreVZ a que el nivel de
 // memoria pase de nivelRestoreVZ, y dice si sigue sin pasar.
+//
+// Si espera, lo dice en el registro: en un Mac con el nivel rondando el
+// umbral, un thaw de ~30 ms tardaba 0,7-1 s y solo se veía como "wait" (o
+// "other" en `kling thaw`), sin saber de qué.
 func nivelBajoParaRestaurar(ctx context.Context) bool {
-	limite := time.Now().Add(esperaNivelRestoreVZ)
+	t0 := time.Now()
+	limite := t0.Add(esperaNivelRestoreVZ)
+	primero := -1
 	for {
 		n := nivelMemoriaVZ()
+		if primero < 0 {
+			primero = n
+		}
 		if n < 0 || n > nivelRestoreVZ {
+			avisarEsperaNivel(primero, n, time.Since(t0), false)
 			return false
 		}
-		if !time.Now().Before(limite) {
+		if !time.Now().Before(limite) || ctx.Err() != nil {
+			avisarEsperaNivel(primero, n, time.Since(t0), true)
 			return true
 		}
 		select {
 		case <-ctx.Done():
-			return true
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// avisarEsperaNivel apunta una espera de nivelBajoParaRestaurar (nada si no
+// esperó). sigueBajo: se restaura igual, pero de una en una.
+func avisarEsperaNivel(antes, despues int, d time.Duration, sigueBajo bool) {
+	if d < 50*time.Millisecond {
+		return
+	}
+	que := "it rose to " + strconv.Itoa(despues) + "%"
+	if sigueBajo {
+		que = "it stayed at " + strconv.Itoa(despues) + "%, so restores go one at a time"
+	}
+	log.Printf("restore: waited %d ms for the host's free memory (kern.memorystatus_level %d%%, needs more than %d%%): %s",
+		d.Milliseconds(), antes, nivelRestoreVZ, que)
 }
 
 // plazoApretonPausa acota el apretón antes de pausar: el invitado tiene que
