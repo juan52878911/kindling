@@ -601,7 +601,7 @@ func (m *Manager) sweep() map[string]int {
 
 	// Fuera del mutex: publicar eventos y liberar red puede tardar.
 	for _, mc := range died {
-		m.trasMorir(mc, "")
+		m.trasMorir(mc, m.motivoFinVMM(mc.ID))
 	}
 	return vmms
 }
@@ -620,7 +620,10 @@ func (m *Manager) marcarMuertaLocked(mc *api.Machine) {
 // trasMorir es lo que queda tras marcarMuertaLocked, fuera de m.mu: soltar su
 // red y su CPU, asentar su overlay si iba sin sincronizar (lo que escribió
 // sigue en la caché del host, y una failed conserva su disco) y avisar.
-// detalle, si lo hay, es cómo terminó el proceso ("signal: killed").
+// detalle, si lo hay, es cómo terminó el proceso ("signal: killed") y lo que
+// dijo el VMM al acabar ("the guest stopped: ..."). Va en el evento y no en
+// LastErr, que se queda en errProcesoDesaparecido: retieneDatos lo compara
+// tal cual (y un daemon anterior que lea state.json, también).
 func (m *Manager) trasMorir(mc *api.Machine, detalle string) {
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -708,6 +711,14 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 	m.persist()
 	copia := mc.Clone()
 	m.mu.Unlock()
+	// Lo que dijo el VMM al acabar (fin_vmm.go): con el código de salida
+	// solo, un reinicio del invitado era "exit status 0".
+	if motivo := m.motivoFinVMM(id); motivo != "" {
+		if detalle != "" {
+			detalle += "; "
+		}
+		detalle += motivo
+	}
 	if detalle != "" {
 		log.Printf("watch: the VMM of %s (pid %d) exited (%s): failed", shortID(id), pid, detalle)
 	} else {
