@@ -1598,6 +1598,17 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   (`-listen 0.0.0.0:9100`) y avisa: `install-service` por la terminal y el propio puente
   en su log. Dentro de la microVM el `/entrypoint` generado pide `-listen :8080`, donde
   lo busca el gateway; ahí, como PID 1, no avisa.
+- **`allowlist` no cierra el túnel por DNS de un dominio permitido.** El resolver de cada
+  microVM (`internal/net/dnsresolver.go`) contesta REFUSED a un dominio no listado, pero
+  reenvía los **subdominios** de uno permitido, porque un CDN los necesita. Si el
+  atacante controla el NS autoritativo de un dominio de la allowlist (o de una zona por
+  debajo), el invitado puede sacar datos codificados en las consultas
+  (`<datos>.dominio-permitido`) y recibirlos en las respuestas, sin abrir ninguna
+  conexión. Cerrarlo exige un resolver autoritativo propio; hasta entonces, permitir un
+  dominio es confiar en quien sirve su DNS. Tampoco se siembran registros **AAAA**: el
+  ipset y las reglas son solo IPv4, y el invitado no puede usar IPv6 porque
+  `applyIPv6Barrier` lo apaga en su namespace antes de que el resolver entre en juego;
+  un servicio solo accesible por IPv6 no se alcanza en `allowlist`.
 - **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
   silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
   este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del
