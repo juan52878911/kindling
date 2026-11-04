@@ -63,10 +63,7 @@ func init() {
 		_, err := m.Thaw(ctx, id)
 		return err
 	}
-	commitNodoPausado = func(ctx context.Context, m *Manager, id, name string) error {
-		_, err := m.commitPausada(ctx, id, name)
-		return err
-	}
+	commitNodoPausado = volcarNodoPausado
 	borrarSnapshotGrafo = func(m *Manager, name string) error { return m.removeSnapshot(name, true) }
 	soltarVolumenesNodo = func(_ context.Context, m *Manager, id string) error {
 		mc, ok := m.Get(id)
@@ -82,6 +79,33 @@ func init() {
 		}
 		return m.acquireVolumes(mc)
 	}
+}
+
+// claveCommitDeFork marca en el contexto que el volcado consistente es el de
+// un GraphFork. Va en el contexto y no como argumento de commitNodoPausado
+// para no cambiar la firma que sustituyen los tests.
+type claveCommitDeFork struct{}
+
+func conCommitDeFork(ctx context.Context) context.Context {
+	return context.WithValue(ctx, claveCommitDeFork{}, true)
+}
+
+func esCommitDeFork(ctx context.Context) bool {
+	v, _ := ctx.Value(claveCommitDeFork{}).(bool)
+	return v
+}
+
+// volcarNodoPausado es commitNodoPausado de verdad: commitPausada o, en un
+// GraphFork (esCommitDeFork), lo mismo con deFork, que hace que commit
+// escriba la marca de fork ANTES del meta.json, como en el fork de una
+// máquina.
+func volcarNodoPausado(ctx context.Context, m *Manager, id, name string) error {
+	if esCommitDeFork(ctx) {
+		_, err := m.commit(ctx, id, name, false, nil, true, true, false)
+		return err
+	}
+	_, err := m.commitPausada(ctx, id, name)
+	return err
 }
 
 // nodoMaquina es un nodo instanciado con su máquina.
@@ -456,7 +480,14 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 	}
 	// Un nodo que no vuelve a congelarse queda en el log: el fork no tiene
 	// dónde avisar sin cambiar su respuesta.
-	plantillas, _, err := m.snapshotConsistente(ctx, gid, nombre)
+	//
+	// Con conCommitDeFork cada plantilla nace ya marcada como de fork: la
+	// marca se escribe antes de su meta.json (ver commit). Escrita después,
+	// como estaba, un corte entre las dos dejaba una plantilla válida que no
+	// era ni resto de commit (sweepSnapshotLeftovers) ni fork (barrerForks),
+	// y no la recogía nadie. Como el temporal de un fork de máquina, tampoco
+	// se sincroniza ni se hashea su overlay: se restaura en esta llamada.
+	plantillas, _, err := m.snapshotConsistente(conCommitDeFork(ctx), gid, nombre)
 	if err != nil {
 		return nil, fmt.Errorf("forking graph %s: %w", orig.Name, err)
 	}
@@ -483,7 +514,13 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 				origen = nd.id
 			}
 		}
-		if err := os.WriteFile(filepath.Join(m.snapDir(p), forkMarca), []byte(origen+"\n"), 0o644); err != nil {
+		// commit ya la dejó; esto solo cubre un commitNodoPausado sustituido
+		// que no la escriba (los tests).
+		marca := filepath.Join(m.snapDir(p), forkMarca)
+		if _, err := os.Stat(marca); err == nil {
+			continue
+		}
+		if err := os.WriteFile(marca, []byte(origen+"\n"), 0o644); err != nil {
 			return nil, fmt.Errorf("marking fork template %s: %w", p, err)
 		}
 	}
