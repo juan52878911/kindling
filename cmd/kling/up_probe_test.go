@@ -196,3 +196,17 @@ func TestChecksOfForwardDrop(t *testing.T) {
 		t.Errorf("unreadable rules: %+v", c)
 	}
 }
+
+// Con el daemon caído, status no habla de KVM ni de firecracker en un Mac con
+// el daemon local; por ssh:// el otro lado puede ser Linux.
+func TestLineasVMMSinDaemon(t *testing.T) {
+	mac := strings.Join(lineasVMMSinDaemon("darwin", "/Users/x/Library/kling.sock"), "\n")
+	if strings.Contains(mac, "KVM") || strings.Contains(mac, "firecracker") || !strings.Contains(mac, "hv or vz") {
+		t.Fatalf("macOS: %q", mac)
+	}
+	for _, l := range [][2]string{{"linux", "/run/kling.sock"}, {"darwin", "ssh://u@linux"}} {
+		if s := strings.Join(lineasVMMSinDaemon(l[0], l[1]), "\n"); !strings.Contains(s, "KVM") || !strings.Contains(s, "firecracker") {
+			t.Fatalf("%v: %q", l, s)
+		}
+	}
+}

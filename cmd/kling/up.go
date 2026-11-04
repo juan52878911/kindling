@@ -751,6 +751,23 @@ func privileged(argv ...string) []string {
 	return append([]string{"sudo"}, argv...)
 }
 
+// lineasVMMSinDaemon son las líneas de status sobre el VMM cuando el daemon
+// no contesta. En un Mac con el daemon local no hay KVM ni firecracker que
+// preguntar: el backend es hv o vz. Un endpoint ssh:// puede ser un Linux
+// (o no): ahí se queda la versión de Linux, la de siempre.
+func lineasVMMSinDaemon(goos, endpoint string) []string {
+	if goos == "darwin" && !strings.HasPrefix(endpoint, "ssh://") {
+		return []string{
+			"backend:      ? (reported by the daemon: hv or vz on macOS)",
+			"VMM:          ? (kling-hv or kling-vz, reported by the daemon)",
+		}
+	}
+	return []string{
+		"KVM:          ? (reported by the daemon)",
+		"firecracker:  ? (reported by the daemon)",
+	}
+}
+
 // ── kling status ──────────────────────────────────────────────────────────────
 
 // cmdStatus responde a "¿está esto en pie?" mirando las cuatro capas que
@@ -786,8 +803,9 @@ func cmdStatus(args []string) error {
 		// Sin daemon no se sabe de KVM ni de firecracker: lo reporta él. Se
 		// dice explícitamente en vez de omitir las líneas, para que no parezca
 		// que se comprobaron y estaban bien.
-		fmt.Printf("KVM:          ? (reported by the daemon)\n")
-		fmt.Printf("firecracker:  ? (reported by the daemon)\n")
+		for _, l := range lineasVMMSinDaemon(runtime.GOOS, c.Endpoint()) {
+			fmt.Println(l)
+		}
 	} else {
 		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
 		if *verbose {

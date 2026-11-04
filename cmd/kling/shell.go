@@ -10,6 +10,7 @@ package main
 // eco es lo primero que se recuerda de una herramienta.
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -78,7 +79,8 @@ func cmdShell(args []string) (int, error) {
 	// El contexto solo cubre el diálogo hasta el 101: después la conexión ya no
 	// es del http.Client y cancelar no la cierra (ver api.Client.Shell).
 	ctx, stop := ctxWithSignals()
-	conn, err := api.NewClient(hostOf(*host)).Shell(ctx, ref, req)
+	c := api.NewClient(hostOf(*host))
+	conn, err := c.Shell(ctx, ref, req)
 	stop()
 	if err != nil {
 		if errors.Is(err, api.ErrShellUnsupported) {
@@ -160,6 +162,13 @@ func cmdShell(args []string) (int, error) {
 			return 1, fmt.Errorf("terminated by %v", s)
 		}
 		return 1, fmt.Errorf("connection to %s closed", ref)
+	}
+	if err == nil && code != 0 {
+		// Como exec: si salió mal y el egress cortó conexiones, se dice. Con
+		// la terminal ya restaurada (restore se puede llamar dos veces: el
+		// defer lo repite), o el aviso saldría escalonado.
+		restore()
+		avisarEgress(context.Background(), c, ref)
 	}
 	return code, err
 }

@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,10 +48,17 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !construirImagenes && !constructoresSinRoot[req.Builder] {
-		fail(w, http.StatusNotImplemented, errors.New("this daemon can't build images: building needs root, loop "+
-			"devices and chroot on Linux (only the builders written in Go, like \"android\", run here). "+
-			"Build the image on a Linux host and copy it here:\n"+
-			"  kling image copy <name> -from ssh://user@linux-host"))
+		// Los que sí corren aquí, en orden: en macOS son los de las imágenes de
+		// Docker y Debian, y nombrar solo android hacía creer que nada más.
+		sinRoot := make([]string, 0, len(constructoresSinRoot))
+		for n := range constructoresSinRoot {
+			sinRoot = append(sinRoot, n)
+		}
+		sort.Strings(sinRoot)
+		fail(w, http.StatusNotImplemented, fmt.Errorf("this daemon can't build this image: building it needs root, loop "+
+			"devices and chroot on Linux. Only the builders written in Go run here (%s: kling run <docker-image>, "+
+			"kling image import). Build the image on a Linux host and copy it here:\n"+
+			"  kling image copy <name> -from ssh://user@linux-host", strings.Join(sinRoot, ", ")))
 		return
 	}
 	if req.Builder == "" {

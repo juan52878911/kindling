@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -39,7 +40,12 @@ func avisoEgress(ctx context.Context, c any, ref string) string {
 
 // avisarEgress imprime por stderr el aviso de avisoEgress, si lo hay.
 func avisarEgress(ctx context.Context, c any, ref string) {
+	avisarEgressA(ctx, os.Stderr, c, ref)
+}
+
+// avisarEgressA es avisarEgress hacia w.
+func avisarEgressA(ctx context.Context, w io.Writer, c any, ref string) {
 	if a := avisoEgress(ctx, c, ref); a != "" {
-		fmt.Fprintln(os.Stderr, "kling: "+a)
+		fmt.Fprintln(w, "kling: "+a)
 	}
 }

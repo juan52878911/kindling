@@ -777,12 +777,15 @@ func composeLogs(g globalesCompose, args []string) error {
 
 // composeExec corre un comando en un servicio: con una terminal delante,
 // como `docker compose exec` (kling shell); si no, o con -T, kling exec, con
-// la entrada estándar si no es una terminal.
+// la entrada estándar si no es una terminal o si se pide con -i (ver
+// modoComposeExec).
 func composeExec(g globalesCompose, args []string) error {
 	fs := flag.NewFlagSet("compose exec", flag.ExitOnError)
 	host, file, name := flagsCompose(fs, g, false)
 	sinTTY := fs.Bool("T", false, "no terminal (kling exec): for scripts and pipes")
 	fs.BoolVar(sinTTY, "no-tty", false, "same as -T")
+	conStdin := fs.Bool("i", false, "without a terminal, send stdin to the command even when it is a terminal (read until Ctrl-D, up to 1 MiB)")
+	fs.BoolVar(conStdin, "interactive", false, "same as -i")
 	dir := fs.String("w", "", "working directory inside the service")
 	fs.StringVar(dir, "workdir", "", "same as -w")
 	var env multiFlag
@@ -794,7 +797,7 @@ func composeExec(g globalesCompose, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return errors.New("usage: kling compose exec [-T] [-w DIR] [-e K=V] <service> <cmd> [args...]")
+		return errors.New("usage: kling compose exec [-T] [-i] [-w DIR] [-e K=V] <service> <cmd> [args...]")
 	}
 	servicio, cmd := rest[0], rest[1:]
 	if cmd[0] == "--" {
@@ -807,16 +810,22 @@ func composeExec(g globalesCompose, args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
-	nodos, _, err := serviciosDe(ctx, c, proyecto, []string{servicio})
+	nodos, gr, err := serviciosDe(ctx, c, proyecto, []string{servicio})
 	if err != nil {
 		return err
 	}
-	sub := "exec"
+	maquina := proyecto + "-" + nodos[0]
+	if err := composeExecPermitido(gr.Nodes[nodos[0]], servicio, maquina); err != nil {
+		return err
+	}
+	stdinTTY := isTerminal(os.Stdin.Fd())
+	sub, conI := modoComposeExec(*sinTTY, *conStdin, stdinTTY, isTerminal(os.Stdout.Fd()))
 	var a []string
-	if !*sinTTY && isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd()) {
-		sub = "shell"
-	} else if !isTerminal(os.Stdin.Fd()) {
+	if conI {
 		a = append(a, "-i")
+		if stdinTTY {
+			fmt.Fprintln(os.Stderr, "kling: reading stdin until Ctrl-D")
+		}
 	}
 	if *dir != "" {
 		a = append(a, "-w", *dir)
@@ -824,7 +833,7 @@ func composeExec(g globalesCompose, args []string) error {
 	for _, e := range env {
 		a = append(a, "-e", e)
 	}
-	argv := append(append(append([]string{sub}, a...), proyecto+"-"+nodos[0], "--"), cmd...)
+	argv := append(append(append([]string{sub}, a...), maquina, "--"), cmd...)
 	x := selfCmd(context.Background(), *host, argv...)
 	x.Stdin, x.Stdout, x.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := x.Run(); err != nil {
@@ -835,6 +844,38 @@ func composeExec(g globalesCompose, args []string) error {
 		return err
 	}
 	return nil
+}
+
+// modoComposeExec decide cómo corre compose exec: kling shell si hay una
+// terminal a los dos lados (y no -T), como docker compose exec; si no, kling
+// exec. Con exec, la entrada estándar va con -i cuando no es una terminal (una
+// tubería, un fichero, /dev/null) o cuando se pide con -i, igual que en kling
+// exec, que solo la manda si se le pide: una terminal en stdin con la salida
+// a una tubería (`| tee`) no se lee hasta Ctrl-D sin que nadie lo diga, que
+// parecería colgado.
+func modoComposeExec(sinTTY, conStdin, stdinTTY, stdoutTTY bool) (sub string, conI bool) {
+	if !sinTTY && stdinTTY && stdoutTTY {
+		return "shell", false
+	}
+	return "exec", conStdin || !stdinTTY
+}
+
+// composeExecPermitido falla, antes de lanzar nada, si la máquina del
+// servicio no tiene exec: el error del daemon recomienda `kling run
+// -allow-exec`, que en un compose no hay dónde poner. Las que salen de una
+// plantilla caliente (From) lo tienen siempre; las que arrancan en frío desde
+// su imagen solo si el grafo lo pide.
+func composeExecPermitido(n api.GraphNode, servicio, maquina string) error {
+	if n.From != "" || n.AllowExec {
+		return nil
+	}
+	return &errWithHint{
+		err: fmt.Errorf("service %s can't run commands: its machine %s was booted from its image without allow_exec "+
+			"(kling exec and kling shell need it)", servicio, maquina),
+		hint: "kling compose up -fresh   (services boot from warm templates, which have exec; one with named volumes " +
+			"needs a daemon that can wait for them, so update the daemon first)\n" +
+			"     in a graph file, set allow_exec: true on the node",
+	}
 }
 
 // errSilencioso: el código de salida lo dice todo (el comando ya escribió

@@ -117,3 +117,71 @@ func TestTryBorraAunqueFalleElExec(t *testing.T) {
 		t.Fatalf("un exec fallido no ha de dejar el sandbox vivo: %v", d.removed)
 	}
 }
+
+// imagesMux es un daemon falso con estas imágenes en GET /images.
+func imagesMux(nombres ...string) *http.ServeMux {
+	m := http.NewServeMux()
+	m.HandleFunc("GET /images", func(w http.ResponseWriter, r *http.Request) {
+		imgs := []api.Image{}
+		for _, n := range nombres {
+			imgs = append(imgs, api.Image{Name: n})
+		}
+		_ = json.NewEncoder(w).Encode(imgs)
+	})
+	return m
+}
+
+func TestTryImagenPorDefectoAusente(t *testing.T) {
+	err := imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("min", "otra")))
+	if err == nil || !strings.Contains(err.Error(), `"toolchain"`) {
+		t.Fatalf("sin toolchain ha de fallar nombrándola: %v", err)
+	}
+	h := hintFor(err)
+	if !strings.Contains(h, "kling image toolchain") || !strings.Contains(h, "-image min") {
+		t.Fatalf("la pista ha de dar el comando que la construye y -image min: %q", h)
+	}
+
+	err = imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("otra")))
+	if err == nil || strings.Contains(hintFor(err), "-image min") {
+		t.Fatalf("sin min no se sugiere -image min: %v / %q", err, hintFor(err))
+	}
+}
+
+func TestTryImagenPorDefectoPresente(t *testing.T) {
+	if err := imagenTryDisponible(context.Background(), fakeDaemon(t, imagesMux("min", "toolchain"))); err != nil {
+		t.Fatal(err)
+	}
+	// Un daemon que no sabe listar no bloquea: el daemon dirá lo suyo.
+	if err := imagenTryDisponible(context.Background(), fakeDaemon(t, http.NewServeMux())); err != nil {
+		t.Fatalf("sin GET /images se sigue: %v", err)
+	}
+}
+
+// Un comando que falla con conexiones cortadas por el egress lo dice, antes
+// de borrar el sandbox (después ya no hay a quién preguntar).
+func TestTryAvisaDelEgressAlFallar(t *testing.T) {
+	for _, exit := range []int{0, 1} {
+		d := &tryDaemon{exit: exit}
+		m := d.mux()
+		m.HandleFunc("GET /machines/{ref}/egress", func(w http.ResponseWriter, r *http.Request) {
+			d.mu.Lock()
+			borrado := len(d.removed) > 0
+			d.mu.Unlock()
+			if borrado {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.EgressBlocked{Egress: "none", Total: 3,
+				Destinations: []api.BlockedDest{{Dest: "registry.npmjs.org", Kind: "dns", Count: 3}}})
+		})
+		var out, errOut bytes.Buffer
+		o := tryOptions{cmd: []string{"npx", "x"}, req: api.SandboxRequest{Image: "i"}}
+		if _, err := runTry(context.Background(), fakeDaemon(t, m), o, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		avisa := strings.Contains(errOut.String(), "registry.npmjs.org")
+		if avisa != (exit != 0) {
+			t.Errorf("exit %d: aviso de egress %v, stderr %q", exit, avisa, errOut.String())
+		}
+	}
+}
