@@ -34,6 +34,8 @@ var notPlugins = map[string]bool{
 	"kling-bridge-local": true,
 	"kling-guest":        true,
 	"kling-vz":           true, // VMM nativo de macOS, junto a kling
+	"kling-hv":           true, // VMM de Hypervisor.framework, junto a kling
+	"kling-unpack":       true, // descompresor de capas OCI (rust/kling-unpack)
 	"kling-chispa":       true, // servidor de clasificadores dentro de la imagen
 	"kling-daemon":       true,
 	"kling-builder":      true,

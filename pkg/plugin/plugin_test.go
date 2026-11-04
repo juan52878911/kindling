@@ -39,6 +39,8 @@ func TestMain(m *testing.M) {
 		// Estos no son extensiones y no se les debe pedir nada.
 		"kling-bridge": "#!/bin/sh\necho called >> \"$0.called\"\n",
 		"kling-guest":  "#!/bin/sh\necho called >> \"$0.called\"\n",
+		"kling-hv":     "#!/bin/sh\necho called >> \"$0.called\"\n",
+		"kling-unpack": "#!/bin/sh\necho called >> \"$0.called\"\n",
 	}
 	for name, body := range scripts {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
@@ -103,13 +105,41 @@ func TestDescubrimiento(t *testing.T) {
 			t.Errorf("una extensión inutilizable (%s) no puede recibir comandos", name)
 		}
 	}
-	for _, name := range []string{"bridge", "guest", "notexec"} {
+	for _, name := range []string{"bridge", "guest", "hv", "unpack", "notexec"} {
 		if find(r, name) != nil {
 			t.Errorf("kling-%s no es una extensión y no debe listarse", name)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "kling-bridge.called")); err == nil {
-		t.Error("se ejecutó kling-bridge para pedirle un manifiesto")
+	for _, name := range []string{"kling-bridge", "kling-guest", "kling-hv", "kling-unpack"} {
+		if _, err := os.Stat(filepath.Join(dir, name+".called")); err == nil {
+			t.Errorf("se ejecutó %s para pedirle un manifiesto", name)
+		}
+	}
+}
+
+// Cada binario kling-* que construye el repo (cmd/ y vz/cmd/, más el
+// descompresor de rust/) es un compañero: si falta en notPlugins, `kling
+// plugins` lo lista con error y cada ayuda o status lo lanza sin parar.
+func TestLosBinariosDelRepoSonCompaneros(t *testing.T) {
+	var nombres []string
+	for _, d := range []string{"../../cmd", "../../vz/cmd", "../../rust"} {
+		entradas, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entradas {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "kling-") {
+				nombres = append(nombres, e.Name())
+			}
+		}
+	}
+	if len(nombres) < 4 {
+		t.Fatalf("pocos binarios kling-* en el repo (%v): ¿se movieron los directorios?", nombres)
+	}
+	for _, n := range nombres {
+		if !IsCompanion(n) {
+			t.Errorf("%s lo construye el repo y no está en notPlugins", n)
+		}
 	}
 }
 
