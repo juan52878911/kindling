@@ -82,10 +82,13 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	return &out, nil
 }
 
-// reanudarLocked despierta una pausada: Resume y, en el caso normal, nada más.
-// Sin resync: es la misma máquina sin clones, y el reloj del invitado sigue al
-// del host durante la pausa. Salvo si el host durmió desde que se pausó (M8):
-// dormido, el reloj del invitado no avanza, y se resincroniza tras reanudar.
+// reanudarLocked despierta una pausada: Resume y, en el caso normal, nada más
+// en el camino de quien la despierta. Es la misma máquina sin clones, así que
+// no hace falta entropía nueva; el reloj sí: con kling-hv el contador del
+// invitado se para durante la pausa y vuelve atrasado lo que duró. Se pone en
+// hora en segundo plano (resyncTrasReanudar), y el agente solo lo toca si va
+// desfasado. Si el host durmió desde que se pausó (M8), antes de devolverla:
+// dormido, el reloj del invitado no avanza con ningún VMM.
 // Se llama con el candado de la máquina tomado.
 func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cronoFases) (*api.Machine, error) {
 	// Antes de nada, si el host durmió y nadie lo ha visto aún: es lo que
@@ -119,8 +122,11 @@ func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cr
 	m.mu.Unlock()
 	if m.reloj.pausaAntesDelSueno(mc.FrozenAt) {
 		// Sin el ctx de quien despierta: reanudada, el reloj tiene que quedar
-		// bien aunque se vaya (resyncGuest lleva su plazo).
-		m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
+		// bien aunque se vaya (resyncGuest lleva su plazo). Un agente que
+		// sabe que reanudar no es restaurar no sube la generación.
+		m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", m.kindSinRestaurar(mc.ID))
+	} else {
+		m.resyncTrasReanudar(mc.ID)
 	}
 	return &out, nil
 }

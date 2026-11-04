@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
@@ -32,6 +34,80 @@ func agenteReloj(t *testing.T, soltar chan struct{}) (*httptest.Server, chan api
 	}))
 	t.Cleanup(srv.Close)
 	return srv, pedidos
+}
+
+// Reanudar una pausada pone su reloj en hora (kling-hv para el contador del
+// invitado durante la pausa), pero en segundo plano: reanudarLocked vuelve sin
+// esperar al /resync. Y como "resume", que el agente no cuenta como
+// restauración.
+func TestReanudarPoneElRelojEnSegundoPlano(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	soltar := make(chan struct{})
+	defer close(soltar)
+	agente, pedidos := agenteReloj(t, soltar)
+
+	id := newID()
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	pausada := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	mc.State, mc.FrozenAt = api.StatePaused, &pausada
+	mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+	mc.Agent = &api.GuestAgent{Caps: []string{api.GuestCapResync, guest.CapResyncClock}}
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+
+	cur, _ := m.Get(id)
+	hecho := make(chan error, 1)
+	go func() {
+		_, err := m.reanudarLocked(context.Background(), cur, nil)
+		hecho <- err
+	}()
+	select {
+	case err := <-hecho:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resuming waited for the guest's /resync")
+	}
+	select {
+	case req := <-pedidos:
+		if req.Restore != guest.ResyncResume {
+			t.Fatalf("Restore = %q, want %q", req.Restore, guest.ResyncResume)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no /resync after resuming")
+	}
+}
+
+// Un agente anterior (sin guest.CapResyncClock) no recibe nada al reanudar
+// salvo si el host durmió (TestReanudarTrasDormirResincroniza): lo tomaría
+// por una restauración.
+func TestReanudarAgenteAnteriorSinResync(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	agente, pedidos := agenteReloj(t, nil)
+	id := newID()
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest(id)
+	pausada := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	mc.State, mc.FrozenAt = api.StatePaused, &pausada
+	mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+	mc.Agent = &api.GuestAgent{Caps: []string{api.GuestCapResync}}
+	m.socket[id] = falso.Sock
+	m.mu.Unlock()
+	cur, _ := m.Get(id)
+	if _, err := m.reanudarLocked(context.Background(), cur, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case req := <-pedidos:
+		t.Fatalf("resync %+v to an agent that predates resume", req)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 // Tras un arranque en frío, en cuanto el agente contesta: un /resync "boot"

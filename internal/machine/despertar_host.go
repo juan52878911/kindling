@@ -108,7 +108,7 @@ func (m *Manager) revisarSueno(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.resyncGuest(ctx, id, "", api.ResyncThaw)
+			m.resyncGuest(ctx, id, "", m.kindSinRestaurar(id))
 		}()
 	}
 	wg.Wait()

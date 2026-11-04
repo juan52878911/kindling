@@ -164,6 +164,31 @@ func (m *Manager) resyncArranque(id string, ag *api.GuestAgent) {
 	m.resyncGuest(context.Background(), id, "", guest.ResyncBoot)
 }
 
+// resyncTrasReanudar pone en hora, en segundo plano, una máquina que se
+// acaba de reanudar. Con kling-hv el contador virtual del invitado se para
+// mientras está pausada y su reloj se queda atrás lo que duró la pausa; con
+// KVM sigue al del host y el agente, al ver que no hay desfase, no lo toca
+// (guest.ResyncResume). No retrasa la reanudación: quien despierta la
+// máquina no espera a esto. Solo a un agente que anuncia
+// guest.CapResyncClock; a uno anterior, solo si el host durmió (como antes).
+func (m *Manager) resyncTrasReanudar(id string) {
+	if !m.agenteDe(id).Has(guest.CapResyncClock) {
+		return
+	}
+	go m.resyncGuest(context.Background(), id, "", guest.ResyncResume)
+}
+
+// kindSinRestaurar es el Restore del resync de una máquina que sigue siendo
+// la misma (reanudada, o el host despertó): guest.ResyncResume si su agente
+// lo entiende, que no lo cuenta como restauración; si no, api.ResyncThaw,
+// lo único que entiende uno anterior.
+func (m *Manager) kindSinRestaurar(id string) string {
+	if m.agenteDe(id).Has(guest.CapResyncClock) {
+		return guest.ResyncResume
+	}
+	return api.ResyncThaw
+}
+
 // avisarResync registra por qué no se resincronizó, una vez por imagen y
 // motivo: con un agente viejo cada thaw daría el mismo aviso.
 func (m *Manager) avisarResync(image, name string, err error) {
