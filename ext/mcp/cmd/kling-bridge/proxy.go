@@ -138,10 +138,36 @@ func (b *bridge) spawnProxyChild() error {
 	log.Printf("http mode: MCP server started (pid %d), waiting on %s", cmd.Process.Pid, b.childAddr())
 
 	if err := waitForPort(b.childAddr(), 40*time.Second); err != nil {
-		matarGrupo(cmd)
+		b.pmu.Lock()
+		if b.proxyChild == cmd {
+			b.proxyChild = nil
+		}
+		b.pmu.Unlock()
+		matarYEsperar(cmd)
 		return err
 	}
 	return nil
+}
+
+// esperaHijoProxy acota cuánto se espera a que el hijo HTTP muera tras el
+// SIGKILL. Siendo PID 1 puede que lo recoja antes el cosechador (Wait devuelve
+// ECHILD al momento); fuera de la microVM es este Wait quien lo recoge.
+const esperaHijoProxy = 2 * time.Second
+
+// matarYEsperar mata el grupo del hijo y espera, con plazo, a que salga: sin el
+// Wait quedaría como zombi fuera de la microVM, y sin el plazo un hijo que no
+// muere (D en un montaje colgado) bloquearía el apagado del puente.
+func matarYEsperar(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	matarGrupo(cmd)
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(esperaHijoProxy):
+	}
 }
 
 // restartProxyChild mata el servidor compartido y arranca otro limpio. Lo usa
@@ -153,9 +179,7 @@ func (b *bridge) restartProxyChild() error {
 	old := b.proxyChild
 	b.proxyChild = nil
 	b.pmu.Unlock()
-	if old != nil && old.Process != nil {
-		matarGrupo(old)
-	}
+	matarYEsperar(old)
 	return b.spawnProxyChild()
 }
 
@@ -166,9 +190,7 @@ func (b *bridge) stopProxyChild() {
 	c := b.proxyChild
 	b.proxyChild = nil
 	b.pmu.Unlock()
-	if c != nil && c.Process != nil {
-		matarGrupo(c)
-	}
+	matarYEsperar(c)
 }
 
 // waitForPort espera a que algo acepte conexiones TCP en addr, o falla al
@@ -207,13 +229,46 @@ func (b *bridge) handleProxy(w http.ResponseWriter, r *http.Request) {
 	b.proxy.ServeHTTP(w, r)
 }
 
+// maxProxySeen acota el rastro de Mcp-Session-Id. El reaper de ociosas lo
+// vacía por edad, pero solo si corre (-session-idle > 0) y solo cada idle/4:
+// un cliente que abre sesiones sin parar, o un id inventado por petición, lo
+// haría crecer sin límite en la memoria del PID 1 entretanto. Cada entrada
+// pesa ~100 B; 4096 sesiones vivas a la vez es mucho más de lo que un
+// servidor compartido atiende.
+const maxProxySeen = 4096
+
 func (b *bridge) touchProxySession(sid string) {
+	var echada string
 	b.mu.Lock()
 	if b.proxySeen == nil {
 		b.proxySeen = map[string]time.Time{}
 	}
+	if _, ok := b.proxySeen[sid]; !ok && len(b.proxySeen) >= maxProxySeen {
+		echada = b.evictOldestProxyLocked()
+	}
 	b.proxySeen[sid] = time.Now()
 	b.mu.Unlock()
+	// La desalojada se cierra en el servidor como si hubiera vencido: olvidarla
+	// sin el DELETE dejaría su estado allí para siempre, que es justo lo que el
+	// rastro existe para evitar. Fuera del candado y sin bloquear la petición.
+	if echada != "" && b.service != nil {
+		go b.deleteProxySession(echada)
+	}
+}
+
+// evictOldestProxyLocked retira la sesión con la actividad más antigua y
+// devuelve su id. Es O(n), pero solo corre con el rastro lleno, es decir, en
+// el caso patológico que el tope existe para contener.
+func (b *bridge) evictOldestProxyLocked() string {
+	var vieja string
+	var cuando time.Time
+	for sid, t := range b.proxySeen {
+		if vieja == "" || t.Before(cuando) {
+			vieja, cuando = sid, t
+		}
+	}
+	delete(b.proxySeen, vieja)
+	return vieja
 }
 
 func (b *bridge) forgetProxySession(sid string) {

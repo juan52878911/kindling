@@ -63,7 +63,7 @@ func main() {
 	// (exposedWarning).
 	listen := flag.String("listen", defaultListenFor(os.Getpid() == 1),
 		"where to listen (non-loopback exposes it without authentication; :8080 as PID 1 in a microVM)")
-	idle := flag.Duration("session-idle", 10*time.Minute, "idle time before closing a session")
+	idle := flag.Duration("session-idle", 10*time.Minute, "idle time before closing a session (0 or less = never)")
 	// 0 = derivarlo de la memoria del invitado. El flag sigue existiendo para
 	// forzarlo, porque la estimación por sesión es eso, una estimación.
 	maxSessions := flag.Int("max-sessions", 0,
@@ -174,6 +174,8 @@ Options:
 		b.service = svc
 		log.Printf("http mode: MCP server on :%d (shared by all sessions, no per-session isolation)", svc.Port)
 		if err := b.startProxy(); err != nil {
+			b.stopProxyChild()
+			agent.Close()
 			log.Fatalf("http mode: %v", err)
 		}
 	}
@@ -222,7 +224,15 @@ Options:
 		}
 	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		// log.Fatal saldría sin recoger nada: fuera de la microVM (no somos PID
+		// 1) el servidor HTTP del modo proxy, ya arrancado, quedaría huérfano y
+		// ocupando su puerto para el siguiente intento. Se limpia como en el
+		// apagado normal y luego se sale con error.
+		log.Print(err)
+		b.closeAll()
+		b.stopProxyChild()
+		agent.Close()
+		os.Exit(1)
 	}
 
 	<-shutdownDone
@@ -1038,8 +1048,16 @@ func (s *session) close() {
 
 // reapIdle cierra las sesiones abandonadas. Cada una es un proceso vivo dentro de
 // la microVM: sin esto, un cliente que se va sin despedirse las acumula.
+//
+// Con b.idle <= 0 la cosecha queda desactivada: time.NewTicker entra en pánico
+// con un periodo no positivo, y siendo PID 1 ese pánico tumba al invitado
+// entero. Un cuarto de un idle de menos de 4 ns también da 0, de ahí el mínimo.
 func (b *bridge) reapIdle(ctx context.Context) {
-	t := time.NewTicker(b.idle / 4)
+	if b.idle <= 0 {
+		log.Printf("idle session reaping disabled (-session-idle %s)", b.idle)
+		return
+	}
+	t := time.NewTicker(max(b.idle/4, time.Millisecond))
 	defer t.Stop()
 	for {
 		select {
