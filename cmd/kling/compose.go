@@ -810,11 +810,14 @@ func composeExec(g globalesCompose, args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
-	nodos, _, err := serviciosDe(ctx, c, proyecto, []string{servicio})
+	nodos, gr, err := serviciosDe(ctx, c, proyecto, []string{servicio})
 	if err != nil {
 		return err
 	}
 	maquina := proyecto + "-" + nodos[0]
+	if err := composeExecPermitido(gr.Nodes[nodos[0]], servicio, maquina); err != nil {
+		return err
+	}
 	stdinTTY := isTerminal(os.Stdin.Fd())
 	sub, conI := modoComposeExec(*sinTTY, *conStdin, stdinTTY, isTerminal(os.Stdout.Fd()))
 	var a []string
@@ -855,6 +858,24 @@ func modoComposeExec(sinTTY, conStdin, stdinTTY, stdoutTTY bool) (sub string, co
 		return "shell", false
 	}
 	return "exec", conStdin || !stdinTTY
+}
+
+// composeExecPermitido falla, antes de lanzar nada, si la máquina del
+// servicio no tiene exec: el error del daemon recomienda `kling run
+// -allow-exec`, que en un compose no hay dónde poner. Las que salen de una
+// plantilla caliente (From) lo tienen siempre; las que arrancan en frío desde
+// su imagen solo si el grafo lo pide.
+func composeExecPermitido(n api.GraphNode, servicio, maquina string) error {
+	if n.From != "" || n.AllowExec {
+		return nil
+	}
+	return &errWithHint{
+		err: fmt.Errorf("service %s can't run commands: its machine %s was booted from its image without allow_exec "+
+			"(kling exec and kling shell need it)", servicio, maquina),
+		hint: "kling compose up -fresh   (services boot from warm templates, which have exec; one with named volumes " +
+			"needs a daemon that can wait for them, so update the daemon first)\n" +
+			"     in a graph file, set allow_exec: true on the node",
+	}
 }
 
 // errSilencioso: el código de salida lo dice todo (el comando ya escribió

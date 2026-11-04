@@ -92,3 +92,19 @@ func TestModoComposeExec(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeExecSinAllowExec(t *testing.T) {
+	if err := composeExecPermitido(api.GraphNode{From: "p-db-1234"}, "db", "p-db"); err != nil {
+		t.Fatalf("de plantilla tiene exec: %v", err)
+	}
+	if err := composeExecPermitido(api.GraphNode{Image: "p-db", AllowExec: true}, "db", "p-db"); err != nil {
+		t.Fatalf("con allow_exec: %v", err)
+	}
+	err := composeExecPermitido(api.GraphNode{Image: "p-db"}, "db", "p-db")
+	if err == nil || !strings.Contains(err.Error(), "allow_exec") || !strings.Contains(err.Error(), "p-db") {
+		t.Fatalf("error: %v", err)
+	}
+	if h := hintFor(err); !strings.Contains(h, "kling compose up -fresh") || !strings.Contains(h, "allow_exec: true") {
+		t.Fatalf("la pista ha de decir qué hacer: %q", h)
+	}
+}
