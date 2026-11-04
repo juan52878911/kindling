@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,5 +436,35 @@ func TestAgregadorNoCambiaDeMaquinaEnSilencio(t *testing.T) {
 	d.mu.Unlock()
 	if despues != antes {
 		t.Fatalf("se creó otra máquina en silencio (%d creadas, antes %d)", despues, antes)
+	}
+}
+
+// Una petición sticky a una instancia viva sondea UNA vez, no dos: cada sondeo
+// es un dial al invitado (en Linux, ARP y SYN). Se cuentan las conexiones que
+// acepta el invitado: el proxy reutiliza la suya, así que el resto son sondeos.
+func TestStickySondeaUnaVezPorPeticion(t *testing.T) {
+	v := &invitadoRepetidor{nombre: "A"}
+	s := httptest.NewUnstartedServer(v)
+	var aceptadas atomic.Int64
+	s.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			aceptadas.Add(1)
+		}
+	}
+	s.Start()
+	t.Cleanup(s.Close)
+	d := &daemonAislado{service: "notas", invitados: []string{strings.TrimPrefix(s.URL, "http://")}}
+	h := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "").Handler("")
+	sid := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit).Header().Get(SessionHeader)
+	antes := aceptadas.Load()
+	const n = 10
+	for range n {
+		if rec := pedir(t, h, "POST", "/mcp/notas", sid, cuerpoCall); rec.Code != 200 {
+			t.Fatalf("sticky: %d %s", rec.Code, rec.Body)
+		}
+	}
+	// n sondeos y, como mucho, una conexión nueva del proxy.
+	if got := aceptadas.Load() - antes; got > n+1 {
+		t.Fatalf("%d conexiones al invitado en %d peticiones sticky: se sondea más de una vez", got, n)
 	}
 }

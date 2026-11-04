@@ -186,3 +186,43 @@ func BenchmarkGuestClassify(b *testing.B) {
 	b.ReportMetric(float64(b.N)/d.Seconds(), "req/s")
 	b.ReportMetric(float64(fg.conns.Load()), "conns")
 }
+
+// TestGuestHeaderTimeout: una réplica que acepta la conexión y no contesta no
+// retiene la clasificación sin fin aunque quien llama no ponga plazo: el
+// transporte corta a ResponseHeaderTimeout (el plazo más largo de una petición
+// legítima).
+func TestGuestHeaderTimeout(t *testing.T) {
+	fin := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-fin:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(fin) })
+	cfg := microVMConfig(t, &ModelConfig{Kind: KindChispa, Backend: BackendMicroVM, Snapshot: "chispa-commits"}, &TaskConfig{Chispa: "commits"})
+	const plazo = 300 * time.Millisecond
+	g, err := New(Options{Config: cfg, Replicas: &fakeReplicas{addr: strings.TrimPrefix(srv.URL, "http://")},
+		ProxyTimeout: plazo, VONTimeout: plazo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.deploy = fakeDeployLookup{"chispa-commits": {Labels: []string{"fix", "feat", "docs"}}}
+	if rt := g.guests.transport("x").ResponseHeaderTimeout; rt != plazo {
+		t.Fatalf("ResponseHeaderTimeout = %v, want %v", rt, plazo)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.Classify(context.Background(), "classify", ClassifyRequest{Task: "kind", Text: "fix the bug"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a guest that never answers cannot produce a classification")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Classify kept waiting on a guest that never answers")
+	}
+}

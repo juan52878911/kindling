@@ -171,7 +171,23 @@ type par struct {
 }
 
 func nuevoRedactor(w io.Writer, cs []Credential) *redactor {
-	r := &redactor{w: w}
+	return nuevoRedactorPares(w, paresRedaccion(cs))
+}
+
+// nuevoRedactorPares es nuevoRedactor con los pares ya calculados (los
+// precalcula SetCredentials por dominio: variantes() cuesta un json, cuatro
+// base64 y un hex por clave y no cambia entre peticiones). pares se comparte
+// entre peticiones y ServeHTTP añade pares propios (r.par): se recorta la
+// capacidad para que slices.Insert copie siempre en vez de escribir en el
+// array que ven las demás peticiones.
+func nuevoRedactorPares(w io.Writer, pares []par) *redactor {
+	return &redactor{w: w, pares: slices.Clip(pares)}
+}
+
+// paresRedaccion son las sustituciones clave→marcador de cs, en todas las
+// formas de variantes() y de más larga a más corta.
+func paresRedaccion(cs []Credential) []par {
+	r := &redactor{}
 	for _, c := range cs {
 		for _, v := range variantes(c.Secret) {
 			r.par(v, c.Placeholder)
@@ -183,7 +199,7 @@ func nuevoRedactor(w io.Writer, cs []Credential) *redactor {
 			r.par(c.AccessKeyID, c.Placeholder)
 		}
 	}
-	return r
+	return r.pares
 }
 
 // par añade una sustitución old→new. Una vacía o idéntica no aporta nada.
@@ -208,11 +224,12 @@ func (r *redactor) par(old, new string) {
 
 // texto redacta una cadena suelta (cabeceras, mensajes de error).
 func (r *redactor) texto(s string) string {
-	b := []byte(s)
 	for _, p := range r.pares {
-		b = bytes.ReplaceAll(b, p.old, p.new)
+		if strings.Contains(s, string(p.old)) {
+			s = strings.ReplaceAll(s, string(p.old), string(p.new))
+		}
 	}
-	return string(b)
+	return s
 }
 
 // retener dice cuántos bytes del final de buf hay que guardar porque coinciden
@@ -232,9 +249,19 @@ func (r *redactor) retener(buf []byte) int {
 }
 
 func (r *redactor) Write(p []byte) (int, error) {
-	buf := append(r.tail, p...)
+	// Sin cola retenida se trabaja sobre p tal cual: solo se lee, y una
+	// sustitución devuelve un buffer nuevo. Así una respuesta sin claves (lo
+	// habitual) no se copia ni una vez; antes cada par copiaba el trozo entero
+	// aunque no apareciera (bytes.ReplaceAll copia siempre).
+	buf := p
+	if len(r.tail) > 0 {
+		buf = append(r.tail, p...)
+	}
 	for _, pr := range r.pares {
-		if pr.marca != nil && bytes.Contains(buf, pr.old) {
+		if bytes.Index(buf, pr.old) < 0 {
+			continue
+		}
+		if pr.marca != nil {
 			pr.marca()
 		}
 		buf = bytes.ReplaceAll(buf, pr.old, pr.new)

@@ -352,8 +352,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Dos formas de que la instancia haya muerto bajo la sesión: que el
 		// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
 		// congelara por TTL (aún figura, pero el invitado no responde). Lo
-		// segundo solo se ve comprobando vida.
-		if (e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort))) && g.IsIsolated(ext) {
+		// segundo solo se ve comprobando vida, y se comprueba UNA vez por
+		// petición (antes eran dos dials seguidos cuando estaba viva).
+		//
+		// No se cachea: con una confirmación de hace unos segundos, una
+		// conexión keep-alive a un invitado pausado escribe la petición y
+		// espera la respuesta hasta ResponseHeaderTimeout (minutos), que es el
+		// cuelgue de arriba. TestSesionAisladaCongeladaPorDebajo lo fija.
+		vivo := e != nil && scheduler.AliveAddr(rt.Addr(GuestPort))
+		if !vivo && g.IsIsolated(ext) {
 			// Sesión aislada: solo SU máquina sirve, congelada o no. Ver
 			// aislamiento.go.
 			if e = g.recuperarAislada(w, r, rt.Service(), rt.MachineID(), ext); e == nil {
@@ -364,8 +371,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 					http.StatusNotFound)
 				return
 			}
+			// Recién despertada: se confirma antes de enrutar (camino raro).
+			vivo = scheduler.AliveAddr(rt.Addr(GuestPort))
 		}
-		if e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort)) {
+		if !vivo {
 			// Se invalida la instancia congelada (si aún figura) para que
 			// ensure la reconstruya en vez de devolverla tal cual, y se
 			// reconstruye la primaria del servicio.

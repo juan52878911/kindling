@@ -386,8 +386,12 @@ type Proxy struct {
 	// ocultar son las claves de TODAS las credenciales en las formas de
 	// variantes(): lo que rutaAuditada enmascara si aparece en una ruta.
 	ocultar []string
-	sem     chan struct{}
-	client  *http.Client
+	// redaccion son, por dominio, los pares del redactor de la respuesta
+	// (paresRedaccion de sus credenciales): se calculan en SetCredentials y
+	// no en cada petición.
+	redaccion map[string][]par
+	sem       chan struct{}
+	client    *http.Client
 	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
 	// tengan que esperar minutos.
 	idle, max time.Duration
@@ -564,6 +568,10 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
 	sort.Strings(domains)
+	redaccion := make(map[string][]par, len(byDomain))
+	for d, cc := range byDomain {
+		redaccion[d] = paresRedaccion(credencialesDe(cc))
+	}
 	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión
 	// hacia una máquina cuya credencial desaparece o cambia (kling db detach,
 	// otra copia bajo la misma variable) se corta aquí, y una que se registre
@@ -571,7 +579,7 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	p.mu.Lock()
-	p.creds, p.ocultar, p.pg, p.my = byDomain, ocultar, pg, my
+	p.creds, p.ocultar, p.redaccion, p.pg, p.my = byDomain, ocultar, redaccion, pg, my
 	p.mu.Unlock()
 	p.cortarSesionesHuerfanasLocked(pg)
 	return domains, nil
@@ -609,7 +617,7 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	}
 	host = strings.TrimSuffix(host, ".")
 	p.mu.RLock()
-	todas, ocultar := p.creds[host], p.ocultar
+	todas, ocultar, redaccion := p.creds[host], p.ocultar, p.redaccion[host]
 	p.mu.RUnlock()
 
 	// w mide lo que se contesta; sw (el del servidor) solo va a
@@ -718,7 +726,7 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 
 	// La respuesta se redacta con TODAS las credenciales del dominio, también
 	// las que no se usaron: defensa en profundidad, no cuesta nada.
-	red := nuevoRedactor(escritorVigilado{w: w, v: v, p: pl}, credencialesDe(todas))
+	red := nuevoRedactorPares(escritorVigilado{w: w, v: v, p: pl}, redaccion)
 
 	var (
 		body   io.Reader
