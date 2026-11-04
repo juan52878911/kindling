@@ -169,11 +169,15 @@ func dialPublico(lookup LookupFunc, d *net.Dialer) func(ctx context.Context, net
 // sistema y el dialer de dialPublico.
 func salidaSegura(lookup LookupFunc) *http.Transport {
 	return &http.Transport{
-		Proxy:                 nil,
-		DialContext:           dialPublico(lookup, &net.Dialer{Timeout: 10 * time.Second}),
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          16,
+		Proxy:             nil,
+		DialContext:       dialPublico(lookup, &net.Dialer{Timeout: 10 * time.Second}),
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+		ForceAttemptHTTP2: true,
+		MaxIdleConns:      16,
+		// Por defecto caben 2 en reposo por host: con varias peticiones a la
+		// vez al mismo proveedor por HTTP/1.1, el resto se cerraba al acabar
+		// y la siguiente pagaba otro handshake TLS.
+		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       60 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: HeaderTimeout,
