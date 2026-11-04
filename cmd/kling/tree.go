@@ -197,7 +197,7 @@ var coreTree = []section{
   compose ps [-f compose.yaml] [-p name]           its services, their state and ports
   compose logs [-f] [-t] [-tail N] [service...]    the services' output (-f: follow)
   compose exec [-T] [-w DIR] [-e K=V] <service>    runs a command in a service (a terminal if
-      <cmd>...                                     there is one)
+      [-i] <cmd>...                                there is one)
   compose stop [service...]                        freezes services (all without names)
   compose start [service...]                       wakes them up
   compose restart [service...]                     restarts them
