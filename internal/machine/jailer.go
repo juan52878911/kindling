@@ -337,7 +337,7 @@ func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string,
 		logf.Close()
 		return 0, "", false, fmt.Errorf("launching jailer: %w", err)
 	}
-	go func() { _ = cmd.Wait(); logf.Close() }()
+	go m.esperarVMM(id, cmd, logf)
 
 	return cmd.Process.Pid, m.jailSock(id), enCg, nil
 }

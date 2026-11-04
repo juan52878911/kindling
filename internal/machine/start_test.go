@@ -102,8 +102,11 @@ func TestStartSoloArrancaParadas(t *testing.T) {
 	if _, err := m.Start(context.Background(), mc.ID, nil); err == nil || !strings.Contains(err.Error(), "kling thaw") {
 		t.Fatalf("Start de una congelada = %v; quería que remitiera a thaw", err)
 	}
+	// Que corre de verdad: con un VMM vivo (una running muerta se arranca,
+	// ver TestStartDeUnaRunningMuertaLaArrancaDeVerdad).
+	vmm := vmmQueSeVe(t, m, mc.ID)
 	m.mu.Lock()
-	m.byID[mc.ID].State = api.StateRunning
+	m.byID[mc.ID].State, m.byID[mc.ID].PID = api.StateRunning, vmm.Process.Pid
 	m.mu.Unlock()
 	out, err := m.Start(context.Background(), mc.ID, nil)
 	if err != nil || out.State != api.StateRunning {

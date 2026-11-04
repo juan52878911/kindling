@@ -66,7 +66,7 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		return nil, noExiste(id)
 	}
 	if !arrancable(live) {
-		return nil, estadoInvalido("only a stopped machine can be started (it is %s)", live.State)
+		return nil, estadoInvalido("only a stopped or failed machine can be started (it is %s)", live.State)
 	}
 	// Vuelve a contar como máquina y como memoria de su dueño (su disco ya
 	// contaba): se decide aquí, en la misma sección crítica en que deja de
@@ -84,6 +84,7 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		}
 	}
 	live.State = api.StateCreated
+	live.FailedAt = nil
 	// VolumeWait es del primer arranque: un Start monta como siempre (nadie
 	// le mandaría el acquire).
 	live.VolumeWait = false
@@ -100,12 +101,15 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 	return vols, nil
 }
 
-// arrancable: parada, o created sin VMM. Lo segundo es un arranque que no
-// terminó porque el daemon murió en medio (el cerrojo, que es de memoria, ya
-// no lo tiene nadie): con el cerrojo de ciclo de vida tomado, una created no
-// la está arrancando nadie más.
+// arrancable: parada, created sin VMM o failed. Lo segundo es un arranque
+// que no terminó porque el daemon murió en medio (el cerrojo, que es de
+// memoria, ya no lo tiene nadie): con el cerrojo de ciclo de vida tomado, una
+// created no la está arrancando nadie más. Lo tercero, una cuyo VMM murió (o
+// cuyo arranque o descongelado falló): mientras conserve su disco se arranca
+// en frío sobre él como una parada; start comprueba que lo tenga.
 func arrancable(mc *api.Machine) bool {
-	return mc.State == api.StateStopped || (mc.State == api.StateCreated && mc.PID == 0)
+	return mc.State == api.StateStopped || (mc.State == api.StateCreated && mc.PID == 0) ||
+		(mc.State == api.StateFailed && mc.LastErr != errOverlaySinAsentar)
 }
 
 // Start arranca en frío una máquina parada sobre su propio disco. env es el
@@ -130,15 +134,27 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	if !ok {
 		return nil, noExiste(ref)
 	}
+	// Running de verdad, con su VMM vivo: no hay nada que arrancar. Si el VMM
+	// murió y nadie lo ha visto aún (ver vmmTermino), se apunta failed aquí y
+	// se arranca en frío como cualquier failed: contestar con la máquina tal
+	// cual era decir que había arrancado sin hacer nada.
 	if cur.State == api.StateRunning {
-		return cur, nil
+		if !m.comprobarVMMLocked(cur.ID, "") {
+			return cur, nil
+		}
+		if cur, ok = m.Get(mc.ID); !ok {
+			return nil, noExiste(ref)
+		}
 	}
 	if !arrancable(cur) {
 		hint := ""
-		if cur.State == api.StateWarm || cur.State == api.StatePaused {
+		switch {
+		case cur.State == api.StateWarm || cur.State == api.StatePaused:
 			hint = " (kling thaw wakes it with its memory)"
+		case cur.State == api.StateFailed:
+			hint = ": " + cur.LastErr
 		}
-		return nil, estadoInvalido("only a stopped machine can be started (it is %s)%s", cur.State, hint)
+		return nil, estadoInvalido("only a stopped or failed machine can be started (it is %s)%s", cur.State, hint)
 	}
 	mc = cur
 	// Lo que no necesita nada del host, primero: un entorno incompleto no
@@ -224,6 +240,16 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	}
 	defer releaseMem()
 
+	// Una failed no debería tener VMM; si aún le queda uno (un fallo que no
+	// lo mató), es un huérfano sobre su mismo overlay, y arrancar otro encima
+	// sería corromperlo. Muere antes: desde reclamarParada figura created, y
+	// el barrido de huérfanos ya no lo tocaría.
+	eraFallida := mc.State == api.StateFailed
+	if eraFallida {
+		if err := m.matarVMMDeFallida(mc); err != nil {
+			return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
+		}
+	}
 	vols, err := m.reclamarParada(mc.ID)
 	if err != nil {
 		return nil, err
@@ -307,6 +333,12 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 		return devolver(err)
 	}
 
+	// El volcado que pueda conservar una failed deja de valer en cuanto el
+	// invitado arranque y escriba en su disco: cargarlo después (un thaw, o
+	// reconcile dándola por warm) pondría aquella memoria sobre otro disco.
+	if eraFallida {
+		m.borrarVolcado(mc.ID)
+	}
 	start := time.Now()
 	m.persistirYa()
 	pid, err = m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg,
@@ -409,4 +441,60 @@ func (m *Manager) imagenBorrada(image string) bool {
 		}
 	}
 	return true
+}
+
+// matarVMMDeFallida mata el VMM que pueda quedarle a una failed y espera a
+// que desaparezca. Con el cerrojo de ciclo de vida tomado.
+func (m *Manager) matarVMMDeFallida(mc *api.Machine) error {
+	pid := m.liveVMs()[mc.ID]
+	if pid <= 0 {
+		return nil
+	}
+	log.Printf("%s (%s) is failed but its VMM is still alive (pid %d): killing it first", mc.Name, shortID(mc.ID), pid)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if !waitGone(pid, 5*time.Second) {
+		return fmt.Errorf("its old VMM (pid %d) did not die", pid)
+	}
+	return nil
+}
+
+// thawFallida es lo que Thaw pide a una failed antes de cargar su volcado:
+// uno completo (volcadoValido), que el VMM que lo volcó ya no esté vivo y que
+// su disco no haya cambiado desde el volcado. Una que murió durante el resync
+// de un thaw conserva el volcado del que se despertó, y es su RAM entera;
+// pero si después de él el invitado llegó a escribir en el overlay, cargar
+// aquella memoria sobre este disco es corromperlo (la caché del invitado ya
+// no casa con lo que hay debajo), y entonces solo cabe arrancarla en frío.
+func (m *Manager) thawFallida(mc *api.Machine) error {
+	dir := m.dir(mc.ID)
+	if err := volcadoValido(dir, nil); err != nil {
+		return fmt.Errorf("machine %q is failed (%s) and has no usable memory dump (%v): "+
+			"kling start boots it from its disk", mc.Name, mc.LastErr, err)
+	}
+	if err := diskSinTocarDesdeVolcado(dir); err != nil {
+		return fmt.Errorf("machine %q is failed (%s) and %v: thawing it would corrupt it; "+
+			"kling start boots it from its disk", mc.Name, mc.LastErr, err)
+	}
+	return m.matarVMMDeFallida(mc)
+}
+
+// diskSinTocarDesdeVolcado falla si el overlay de dir se modificó después de
+// sellar el volcado (marcaOK). Sin sello (volcados anteriores a los sellos)
+// se compara con mem.file.
+func diskSinTocarDesdeVolcado(dir string) error {
+	ref, err := os.Stat(filepath.Join(dir, marcaOK))
+	if err != nil {
+		if ref, err = os.Stat(filepath.Join(dir, "mem.file")); err != nil {
+			return err
+		}
+	}
+	disco, err := os.Stat(filepath.Join(dir, "overlay.ext4"))
+	if err != nil {
+		return fmt.Errorf("its disk is gone (%v)", err)
+	}
+	if disco.ModTime().After(ref.ModTime()) {
+		return fmt.Errorf("its disk was written after its memory dump (%s, dump %s)",
+			disco.ModTime().Format(time.RFC3339), ref.ModTime().Format(time.RFC3339))
+	}
+	return nil
 }
