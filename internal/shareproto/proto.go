@@ -276,15 +276,24 @@ func Push(ev byte, path string) []byte {
 	return e.B
 }
 
+// ErrUnknownEvent es un aviso bien formado con un tipo de evento que este
+// lado no conoce: el de un daemon más nuevo. Quien lo reciba lo salta y
+// sigue; solo un aviso mal formado justifica cerrar la sesión.
+var ErrUnknownEvent = errors.New("unknown share event")
+
 // ParsePush lee lo que sigue a `id | errno` en un aviso. Valida la ruta como
-// las de las operaciones: un daemon roto no debe poder nombrar `..`.
+// las de las operaciones: un daemon roto no debe poder nombrar `..`. Un tipo
+// de evento desconocido en una trama válida da ErrUnknownEvent (con errors.Is).
 func ParsePush(d *Dec) (byte, string, error) {
 	ev, p := d.U8(), d.Str()
 	if err := d.Done(); err != nil {
 		return 0, "", err
 	}
+	if err := ValidPath(p); err != nil {
+		return 0, "", err
+	}
 	if ev < EventModify || ev > EventDelete {
-		return 0, "", fmt.Errorf("unknown event %d", ev)
+		return ev, "", fmt.Errorf("%w %d", ErrUnknownEvent, ev)
 	}
 	if err := ValidPath(p); err != nil {
 		return 0, "", err
