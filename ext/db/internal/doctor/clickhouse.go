@@ -8,19 +8,19 @@ package doctor
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // chAdmin es el cliente del administrador dentro de la copia (el mismo que usa
 // kling db); las consultas van por stdin.
 const chAdmin = `exec clickhouse-client --host 127.0.0.1 --multiquery`
 
-var reCHSHA = regexp.MustCompile(`IDENTIFIED WITH sha256_hash BY '([0-9A-Fa-f]{64})'`)
+var reCHSHA = lazyre.New(`IDENTIFIED WITH sha256_hash BY '([0-9A-Fa-f]{64})'`)
 
 func chQuery(ctx context.Context, k klingc.Kling, id, sql string) (string, error) {
 	out, err := k.Run(ctx, strings.NewReader(sql+"\n"), "exec", "-i", id, "--", "sh", "-c", chAdmin)
@@ -97,7 +97,7 @@ func clickhouseCopy(ctx context.Context, k klingc.Kling, mc *api.Machine, state 
 }
 
 // reCHHostIP son las IP de la cláusula HOST IP '...' de un SHOW CREATE USER.
-var reCHHostIP = regexp.MustCompile(`IP '([^']*)'`)
+var reCHHostIP = lazyre.New(`IP '([^']*)'`)
 
 // chSoloLocal dice si el SHOW CREATE USER de un usuario solo le deja entrar
 // desde el propio invitado: HOST LOCAL (lo que da users.d con 127.0.0.1 y ::1),
@@ -116,7 +116,7 @@ func chSoloLocal(def string) bool {
 	if strings.Contains(host, "NAME ") || strings.Contains(host, "REGEXP ") || strings.Contains(host, "LIKE ") {
 		return false
 	}
-	ips := reCHHostIP.FindAllStringSubmatch(host, -1)
+	ips := reCHHostIP.Regexp().FindAllStringSubmatch(host, -1)
 	for _, m := range ips {
 		if m[1] != "127.0.0.1" && m[1] != "::1" {
 			return false

@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -38,7 +38,7 @@ const (
 )
 
 // envNamePattern es el nombre de un grafo (el del núcleo: etiqueta DNS corta).
-var envNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,23}$`)
+var envNamePattern = lazyre.New(`^[a-z0-9][a-z0-9-]{0,23}$`)
 
 // envOpts son las opciones de env up.
 type envOpts struct {

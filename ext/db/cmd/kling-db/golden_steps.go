@@ -35,13 +35,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // goldenStep es un paso tras el golden base: un comando en el agente o un
@@ -208,10 +208,10 @@ func parseSteps(args []string) (rest []string, o stepOpts, ok bool, err error) {
 }
 
 // stepGoldenName: el de db-golden.sh, con sitio para "-base" y "-agent".
-var stepGoldenName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,34}$`)
+var stepGoldenName = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,34}$`)
 
 // envLine es una línea KEY=VALUE de -env-file.
-var envLine = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+var envLine = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // checkEnvFile exige un fichero normal, 0600 como mucho (puede llevar claves)
 // y solo con líneas KEY=VALUE, comentarios o vacías.

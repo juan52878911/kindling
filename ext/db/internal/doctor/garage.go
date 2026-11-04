@@ -9,15 +9,15 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
-var reGarageKey = regexp.MustCompile(`\bGK[0-9a-f]{24}\b`)
+var reGarageKey = lazyre.New(`\bGK[0-9a-f]{24}\b`)
 
 func garageCopy(ctx context.Context, k klingc.Kling, mc *api.Machine, state string, r *report) error {
 	golden := mc.Labels[LabelGolden]
@@ -25,7 +25,7 @@ func garageCopy(ctx context.Context, k klingc.Kling, mc *api.Machine, state stri
 	if err != nil {
 		return fmt.Errorf("doctor: cannot query Garage in %s: %w", safe(mc.Name, 64), err)
 	}
-	keys := reGarageKey.FindAllString(string(out), -1)
+	keys := reGarageKey.Regexp().FindAllString(string(out), -1)
 	if golden == "" {
 		r.add("DB059", Info, "", "not a kling db copy (no %s label): copy checks skipped", LabelGolden)
 		return nil

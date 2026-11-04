@@ -11,7 +11,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Revisión de una máquina: las comprobaciones A por psql dentro del invitado
@@ -27,10 +27,10 @@ import (
 // reloj y clientes heredados.
 
 var (
-	reDB     = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	reDB     = lazyre.New(`^[a-z_][a-z0-9_]{0,62}$`)
 	reRole   = reDB
-	reGolden = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	reID     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	reGolden = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	reID     = lazyre.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
 // maxSkew es el desvío de reloj tolerado entre invitado y host.

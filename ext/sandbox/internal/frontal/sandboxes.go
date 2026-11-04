@@ -560,8 +560,19 @@ func codigoReservar(err error) int {
 func (s *Servidor) liberar(t *Tenant, plantilla string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.enVuelo[t.Nombre]--
-	s.enVuelo[clavePlantilla(t, plantilla)]--
+	s.bajarEnVueloLocked(t.Nombre)
+	s.bajarEnVueloLocked(clavePlantilla(t, plantilla))
+}
+
+// bajarEnVueloLocked descuenta una creación en vuelo y borra la clave al
+// llegar a cero: un contador a 0 cuenta lo mismo que uno ausente, y dejarlo
+// hacía crecer el mapa con cada par tenant/plantilla que pasó por el frontal.
+func (s *Servidor) bajarEnVueloLocked(k string) {
+	if s.enVuelo[k] <= 1 {
+		delete(s.enVuelo, k)
+		return
+	}
+	s.enVuelo[k]--
 }
 
 // errSinPlantilla es que la plantilla no está construida en ningún host.

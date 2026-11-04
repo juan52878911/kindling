@@ -168,7 +168,12 @@ func SetGraph(n *Net, spec GraphSpec) error {
 	// arista: un DNAT viejo P -> slot llevaría el puerto P a la arista que
 	// ahora ocupe ese slot. Se miran las reglas del netns y no lo que recuerda
 	// el daemon, que tras un reinicio no recuerda nada.
-	if err := n.quitarReglasEnlaceSobrantes(links); err != nil {
+	//
+	// Lo mismo con las de credenciales en none e internet (en allowlist las
+	// pone y las mantiene applyAllowlist): si el nodo ya no tiene aristas
+	// credential, fuera sus DNAT y ACCEPT.
+	quitarCred := spec.Egress != EgressAllowlist && !spec.Credentials
+	if err := n.quitarReglasEnlaceSobrantes(links, quitarCred); err != nil {
 		return err
 	}
 
@@ -293,8 +298,8 @@ func InvalidarEnlaces(ids ...string) int {
 // Sin aristas credential no se ponen: el DNAT de Postgres lleva TODO el TCP a
 // n.HostIP (salvo 80/443) al proxy, y un nodo con solo aristas link no tiene
 // por qué alcanzar un proxy que no le sirve de nada (aunque no escuche nadie
-// por él, es superficie que sobra). Una vez puestas no se quitan si luego
-// desaparece la arista: las aristas de un grafo no cambian en vivo.
+// por él, es superficie que sobra). Si luego desaparece la última arista
+// credential, SetGraph las quita (reglasCredSobrantes).
 func (n *Net) reglasGrafo(e Egress, creds bool) [][]string {
 	dnsTarget := fmt.Sprintf("%s:%d", n.HostIP, dnsPort)
 	var reglas [][]string
@@ -350,8 +355,9 @@ func (n *Net) reglasEnlace(port, slot int) [][]string {
 }
 
 // quitarReglasEnlaceSobrantes borra del netns las reglas de enlace que no son
-// de links (ya ordenados: el slot de cada uno es su índice).
-func (n *Net) quitarReglasEnlaceSobrantes(links []LinkSpec) error {
+// de links (ya ordenados: el slot de cada uno es su índice) y, con quitarCred,
+// las de los proxies de credenciales (reglasCredSobrantes).
+func (n *Net) quitarReglasEnlaceSobrantes(links []LinkSpec, quitarCred bool) error {
 	listar := func(args ...string) ([]string, error) {
 		out, err := exec.Command("ip", append([]string{"netns", "exec", n.NS, "iptables"}, args...)...).Output()
 		if err != nil {
@@ -371,7 +377,11 @@ func (n *Net) quitarReglasEnlaceSobrantes(links []LinkSpec) error {
 	for i, l := range links {
 		puertos[i] = l.Port
 	}
-	for _, r := range n.reglasEnlaceSobrantes(nat, forward, puertos) {
+	sobran := n.reglasEnlaceSobrantes(nat, forward, puertos)
+	if quitarCred {
+		sobran = append(sobran, n.reglasCredSobrantes(nat, forward)...)
+	}
+	for _, r := range sobran {
 		if err := run(append([]string{"ip", "netns", "exec", n.NS, "iptables"}, r...)...); err != nil {
 			return err
 		}

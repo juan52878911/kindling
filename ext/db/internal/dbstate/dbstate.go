@@ -23,8 +23,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CopiesDir es el subdirectorio de las copias.
@@ -32,7 +33,7 @@ const CopiesDir = "copies"
 
 // idPattern es un id de máquina de kindling (8 bytes en hex; se admite más
 // largo por si crece). Es lo único que entra en una ruta.
-var idPattern = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
+var idPattern = lazyre.New(`^[0-9a-f]{8,64}$`)
 
 // Dir es la raíz del estado.
 func Dir() (string, error) {

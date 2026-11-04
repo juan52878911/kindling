@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +27,7 @@ import (
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/ext/db/internal/mysqlpw"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // LabelEngine es el motor de una copia ("mysql", "redis", "sqlite"; sin
@@ -125,7 +125,7 @@ type myDefinerRow struct {
 	Definer string `json:"definer"`
 }
 
-var reGrantee = regexp.MustCompile(`^'(.*)'@'(.*)'$`)
+var reGrantee = lazyre.New(`^'(.*)'@'(.*)'$`)
 
 // hostLocal dice si una cuenta solo entra desde el propio invitado.
 func hostLocal(h string) bool {

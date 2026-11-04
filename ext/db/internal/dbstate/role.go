@@ -10,12 +10,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // rolePattern es un nombre de rol admitido (el mismo que valida kling db role).
-var rolePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+var rolePattern = lazyre.New(`^[a-z_][a-z0-9_]{0,62}$`)
 
 // RolePasswordPath es el fichero de la contraseña del rol de la copia con ese id.
 func RolePasswordPath(id, role string) (string, error) {

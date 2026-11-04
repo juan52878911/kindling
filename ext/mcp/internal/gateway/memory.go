@@ -35,15 +35,49 @@ type memory struct {
 	mu      sync.Mutex
 	session string
 	// hits cuenta, en esta ejecución, qué herramienta resolvió qué consulta.
-	// Evita ir a la memoria remota en cada búsqueda.
-	hits map[string]map[string]int // consulta normalizada -> herramienta -> veces
+	// Evita ir a la memoria remota en cada búsqueda. Acotado a maxHits
+	// consultas (se olvida la de uso más antiguo): el gateway vive semanas y
+	// cada consulta distinta era una entrada para siempre, que además Rank
+	// recorre entera en cada búsqueda.
+	hits map[string]*hitEntry // consulta normalizada -> entrada
+	seq  uint64               // reloj lógico de uso para el desalojo
 }
+
+// hitEntry son las herramientas que resolvieron una consulta, y cuándo se
+// usó por última vez (seq de memory).
+type hitEntry struct {
+	byTool map[string]int
+	used   uint64
+}
+
+const (
+	// maxHits acota las consultas recordadas en memoria. Rank las recorre
+	// todas, así que el tope también fija lo que cuesta ordenar.
+	maxHits = 2048
+	// maxQueryLen recorta la consulta guardada: una búsqueda de 1 MiB no debe
+	// quedarse en la memoria del gateway tal cual.
+	maxQueryLen = 512
+)
 
 func newMemory(gw *Gateway, service string) *memory {
 	if service == "" {
 		return nil
 	}
-	return &memory{gw: gw, service: service, hits: map[string]map[string]int{}}
+	return &memory{gw: gw, service: service, hits: map[string]*hitEntry{}}
+}
+
+// evictOldestLocked olvida la consulta de uso más antiguo. O(n), pero solo
+// con el mapa lleno, y n es maxHits.
+func (m *memory) evictOldestLocked() {
+	var vieja string
+	var menor uint64
+	first := true
+	for q, e := range m.hits {
+		if first || e.used < menor {
+			vieja, menor, first = q, e.used, false
+		}
+	}
+	delete(m.hits, vieja)
 }
 
 func normalize(q string) string {
@@ -60,12 +94,7 @@ func (m *memory) Record(ctx context.Context, query, tool string) {
 	}
 	q := normalize(query)
 
-	m.mu.Lock()
-	if m.hits[q] == nil {
-		m.hits[q] = map[string]int{}
-	}
-	m.hits[q][tool]++
-	m.mu.Unlock()
+	m.note(q, tool)
 
 	go func() {
 		panico.Contener("gateway.memory", func() {
@@ -78,6 +107,24 @@ func (m *memory) Record(ctx context.Context, query, tool string) {
 	}()
 }
 
+// note suma un acierto de tool para la consulta (ya normalizada) q.
+func (m *memory) note(q, tool string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq++
+	k := trunc(q, maxQueryLen)
+	e := m.hits[k]
+	if e == nil {
+		if len(m.hits) >= maxHits {
+			m.evictOldestLocked()
+		}
+		e = &hitEntry{byTool: map[string]int{}}
+		m.hits[k] = e
+	}
+	e.byTool[tool]++
+	e.used = m.seq
+}
+
 // Rank reordena una lista de herramientas poniendo delante las que ya
 // resolvieron consultas parecidas.
 func (m *memory) Rank(query string, tools []Tool) []Tool {
@@ -88,13 +135,13 @@ func (m *memory) Rank(query string, tools []Tool) []Tool {
 
 	m.mu.Lock()
 	scores := map[string]int{}
-	for past, byTool := range m.hits {
+	for past, e := range m.hits {
 		// Coincidencia laxa: basta con que una consulta pasada comparta términos
 		// con la actual. No hace falta más finura para ordenar cuatro resultados.
 		if !shareTerms(past, q) {
 			continue
 		}
-		for tool, n := range byTool {
+		for tool, n := range e.byTool {
 			scores[tool] += n
 		}
 	}

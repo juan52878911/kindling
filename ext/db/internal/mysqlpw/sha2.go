@@ -16,7 +16,8 @@ package mysqlpw
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"regexp"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CachingSHA2Plugin es el nombre del plugin cuyo hash da CachingSHA2Hash.
@@ -30,7 +31,7 @@ const (
 
 // reSHA2 es la forma de un hash de caching_sha2_password con sal del
 // alfabeto de crypt: los que da CachingSHA2Hash.
-var reSHA2 = regexp.MustCompile(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
+var reSHA2 = lazyre.New(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
 
 // ValidCachingSHA2Hash dice si h tiene la forma de un hash que kling db sabe
 // comprobar y meter en SQL sin escapar.

@@ -24,11 +24,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -39,12 +39,12 @@ const (
 )
 
 var (
-	envPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+	envPattern = lazyre.New(`^[A-Z_][A-Z0-9_]{0,63}$`)
 	// hostPattern es lo que acepta el proxy como dominio de una credencial
 	// (credproxy.ValidarDominio): etiquetas DNS y un dominio de primer nivel
 	// de letras.
-	hostPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
-	noHostChar  = regexp.MustCompile(`[^a-z0-9-]+`)
+	hostPattern = lazyre.New(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+	noHostChar  = lazyre.New(`[^a-z0-9-]+`)
 )
 
 // attachOpts son los flags de attach.
@@ -217,7 +217,7 @@ func cmdDetach(args []string) error {
 
 // reMachineID es un id de máquina completo: detach lo admite aunque la copia
 // ya no exista (la borraron sin detach antes).
-var reMachineID = regexp.MustCompile(`^[0-9a-f]{16,64}$`)
+var reMachineID = lazyre.New(`^[0-9a-f]{16,64}$`)
 
 func (a *app) detach(ctx context.Context, agentRef, copyRef, owner, env string) error {
 	if err := validOwner(owner); err != nil {

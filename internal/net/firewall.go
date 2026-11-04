@@ -651,29 +651,15 @@ func (n *Net) reglasEnlaceSobrantes(nat, forward []string, puertos []int) [][]st
 		}
 		return p - linkBasePortRango, true
 	}
-	// valor devuelve el argumento que sigue a la opción, o "".
-	valor := func(f []string, opt string) string {
-		for i := 0; i+1 < len(f); i++ {
-			if f[i] == opt {
-				return f[i+1]
-			}
-		}
-		return ""
-	}
 	esHostIP := func(d string) bool { return d == n.HostIP || d == n.HostIP+"/32" }
-	// borrar convierte la línea de -S (-A cadena ...) en su -D.
-	borrar := func(pre []string, f []string) []string {
-		out := append(append([]string{}, pre...), "-D")
-		return append(out, f[1:]...)
-	}
 
 	var sobran [][]string
 	for _, linea := range nat {
 		f := strings.Fields(linea)
-		if len(f) < 2 || f[0] != "-A" || f[1] != "PREROUTING" || valor(f, "-j") != "DNAT" {
+		if len(f) < 2 || f[0] != "-A" || f[1] != "PREROUTING" || valorOpcion(f, "-j") != "DNAT" {
 			continue
 		}
-		host, puerto, err := stdnet.SplitHostPort(valor(f, "--to-destination"))
+		host, puerto, err := stdnet.SplitHostPort(valorOpcion(f, "--to-destination"))
 		if err != nil || host != n.HostIP {
 			continue
 		}
@@ -685,25 +671,80 @@ func (n *Net) reglasEnlaceSobrantes(nat, forward []string, puertos []int) [][]st
 		if !ok {
 			continue
 		}
-		dport, err := strconv.Atoi(valor(f, "--dport"))
+		dport, err := strconv.Atoi(valorOpcion(f, "--dport"))
 		if s, sigue := quiero[dport]; err == nil && sigue && s == slot {
 			continue
 		}
-		sobran = append(sobran, borrar([]string{"-t", "nat"}, f))
+		sobran = append(sobran, borrarLineaS([]string{"-t", "nat"}, f))
 	}
 	for _, linea := range forward {
 		f := strings.Fields(linea)
-		if len(f) < 2 || f[0] != "-A" || f[1] != "FORWARD" || valor(f, "-j") != "ACCEPT" || !esHostIP(valor(f, "-d")) {
+		if len(f) < 2 || f[0] != "-A" || f[1] != "FORWARD" || valorOpcion(f, "-j") != "ACCEPT" || !esHostIP(valorOpcion(f, "-d")) {
 			continue
 		}
-		p, err := strconv.Atoi(valor(f, "--dport")) // un rango (a:b) no es de un enlace
+		p, err := strconv.Atoi(valorOpcion(f, "--dport")) // un rango (a:b) no es de un enlace
 		if err != nil {
 			continue
 		}
 		if slot, ok := slotDe(p); !ok || slot < len(puertos) {
 			continue
 		}
-		sobran = append(sobran, borrar(nil, f))
+		sobran = append(sobran, borrarLineaS(nil, f))
+	}
+	return sobran
+}
+
+// valorOpcion devuelve el argumento que sigue a opt en una línea de
+// `iptables -S` ya partida, o "".
+func valorOpcion(f []string, opt string) string {
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == opt {
+			return f[i+1]
+		}
+	}
+	return ""
+}
+
+// borrarLineaS convierte una línea de -S (-A cadena ...) en su -D, con pre
+// (p. ej. "-t", "nat") delante.
+func borrarLineaS(pre []string, f []string) []string {
+	out := append(append([]string{}, pre...), "-D")
+	return append(out, f[1:]...)
+}
+
+// reglasCredSobrantes es reglasEnlaceSobrantes para las aristas credential:
+// recibe lo que lista `iptables -S` en el netns (nat PREROUTING y FORWARD) y
+// devuelve las -D de las reglas de los proxies de credenciales (las de
+// credNATRules y credForwardRules) que haya. SetGraph la usa cuando el nodo ya
+// no tiene aristas credential en egress none o internet: sin quitarlas, el
+// DNAT de todo el TCP hacia n.HostIP seguiría llevando al invitado a un proxy
+// que ya no le sirve, y con otra arista que reutilice el puerto quedaría
+// tapada. Se reconocen por el destino, no por el texto: el DNAT va a
+// n.HostIP:<credPort|pgPort|myPort> y el ACCEPT a n.HostIP con uno de esos
+// puertos de destino. Las de DNS y enlaces van a otros puertos.
+func (n *Net) reglasCredSobrantes(nat, forward []string) [][]string {
+	esCred := func(p string) bool { return p == credPortStr || p == pgPortStr || p == myPortStr }
+	esHostIP := func(d string) bool { return d == n.HostIP || d == n.HostIP+"/32" }
+
+	var sobran [][]string
+	for _, linea := range nat {
+		f := strings.Fields(linea)
+		if len(f) < 2 || f[0] != "-A" || f[1] != "PREROUTING" || valorOpcion(f, "-j") != "DNAT" {
+			continue
+		}
+		host, puerto, err := stdnet.SplitHostPort(valorOpcion(f, "--to-destination"))
+		if err != nil || host != n.HostIP || !esCred(puerto) {
+			continue
+		}
+		sobran = append(sobran, borrarLineaS([]string{"-t", "nat"}, f))
+	}
+	for _, linea := range forward {
+		f := strings.Fields(linea)
+		if len(f) < 2 || f[0] != "-A" || f[1] != "FORWARD" || valorOpcion(f, "-j") != "ACCEPT" ||
+			!esHostIP(valorOpcion(f, "-d")) || !esCred(valorOpcion(f, "--dport")) {
+			continue
+		}
+		sobran = append(sobran, borrarLineaS(nil, f))
 	}
 	return sobran
 }

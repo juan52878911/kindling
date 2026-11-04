@@ -5,9 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // NewSalt es la sal de una construcción: 256 bits al azar, en hex (nada que
@@ -21,7 +22,7 @@ func NewSalt() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-var saltPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var saltPattern = lazyre.New(`^[0-9a-f]{64}$`)
 
 // MaskMarker va en MaskSQL (los tests lo buscan).
 const MaskMarker = "kling-db:clone-mask"

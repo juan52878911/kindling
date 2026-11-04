@@ -39,12 +39,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/db/internal/doctor"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -672,7 +672,7 @@ func commonCols(a, b *dbTable) []string {
 	return cols
 }
 
-var reFingerprint = regexp.MustCompile(`^R ([0-9a-f]{16}) ([0-9a-f]{16})$`)
+var reFingerprint = lazyre.New(`^R ([0-9a-f]{16}) ([0-9a-f]{16})$`)
 
 // fingerprints devuelve huella de clave -> huella de fila de una tabla.
 func (a *app) fingerprints(ctx context.Context, s *diffSide, t *dbTable, cols []string, salt string, step, limit int64) (map[string]string, error) {

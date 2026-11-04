@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Etiquetas de una copia. Todas cumplen api.KeyPattern (sin '/'): el daemon
@@ -54,9 +54,9 @@ var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, label
 
 var (
 	// nombres de máquina y de plantilla (validName del núcleo).
-	namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+	namePattern = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 	// rol y base: identificadores simples de SQL, sin comillas que escapar.
-	identPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,30}$`)
+	identPattern = lazyre.New(`^[a-z_][a-z0-9_]{0,30}$`)
 )
 
 // backend es lo que la extensión pide a kindling.
