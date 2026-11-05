@@ -57,6 +57,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -191,32 +192,122 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	if onTTL == "" {
 		onTTL = src.OnTTL
 	}
-	// Una a una y no en paralelo: la puerta de arranque (enterLaunch) las
-	// serializaría igual, y así la reserva de memoria de cada una ve ya
-	// anclado el mem.file de la anterior en vez de N reservas a ciegas.
-	for i := 0; i < n; i++ {
-		mc, err := restaurarFork(ctx, m, api.RunRequest{
-			Name:       nombreCopia(src.Name),
+	// Los nombres, antes y en orden: la copia i se llama igual la restaure
+	// quien la restaure.
+	nombres := make([]string, n)
+	for i := range nombres {
+		nombres[i] = nombreCopia(src.Name)
+	}
+	req := func(i int) api.RunRequest {
+		return api.RunRequest{
+			Name:       nombres[i],
 			From:       name,
 			AllowExec:  src.AllowExec,
 			TTLSeconds: ttl,
 			OnTTL:      onTTL,
 			Labels:     api.MergeLabels(opt.Labels, map[string]string{api.LabelForkOf: src.ID}),
-		})
-		if err != nil {
-			return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
 		}
-		out = append(out, mc)
+	}
+	if aLaVez := copiasForkALaVez(); aLaVez > 1 && n > 1 {
+		out, errOut = m.restaurarCopiasFork(ctx, src.Name, n, aLaVez, req, opt.Lista)
+		if errOut != nil {
+			return "", nil, errOut
+		}
 		t.marca("restore")
-		if opt.Lista != nil {
-			if err := opt.Lista(ctx, mc); err != nil {
+	} else {
+		// Una a una y no en paralelo: la puerta de arranque (enterLaunch) las
+		// serializaría igual, y así la reserva de memoria de cada una ve ya
+		// anclado el mem.file de la anterior en vez de N reservas a ciegas.
+		for i := 0; i < n; i++ {
+			mc, err := restaurarFork(ctx, m, req(i))
+			if err != nil {
 				return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
 			}
-			t.marca("agent")
+			out = append(out, mc)
+			t.marca("restore")
+			if opt.Lista != nil {
+				if err := opt.Lista(ctx, mc); err != nil {
+					return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
+				}
+				t.marca("agent")
+			}
 		}
 	}
 	log.Printf("fork: %s branched into %d copies from snapshot %s: %s", src.Name, n, name, t)
 	return name, out, nil
+}
+
+// copiasForkALaVez es cuántas copias de un fork se restauran a la vez. Con
+// kling-hv, las que admite la puerta de restauraciones (lanzamientoPlataforma,
+// 8): restaurar mapea el volcado sin copiarlo (restaurarComparteMemoria), así
+// que no hay reservas de memoria a ciegas que temer, y una a una se esperaban
+// en serie a la puerta que sí las dejaba entrar juntas. Con kling-vz y en
+// Linux, una a una (ver Fork).
+func copiasForkALaVez() int {
+	if backendVMM == BackendHV {
+		return max(1, lanzamientoPlataforma())
+	}
+	return 1
+}
+
+// restaurarCopiasFork restaura las n copias de un fork, como mucho aLaVez a
+// la vez, y devuelve las que salieron en el orden de req (la copia i es
+// req(i)). Cada una pasa por lista, si la hay, en cuanto se restaura. El
+// primer fallo cancela las que faltan, se esperan todas y se devuelve ese
+// fallo: deshacerFork se lleva luego todas las del snapshot, las terminadas y
+// las que salieron a medias, igual que en serie.
+func (m *Manager) restaurarCopiasFork(ctx context.Context, srcName string, n, aLaVez int,
+	req func(int) api.RunRequest, lista func(context.Context, *api.Machine) error) ([]*api.Machine, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out := make([]*api.Machine, n)
+	var (
+		mu      sync.Mutex
+		primero error
+		wg      sync.WaitGroup
+	)
+	fallo := func(i int, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if primero == nil {
+			primero = fmt.Errorf("fork %d of %d from %s: %w", i+1, n, srcName, err)
+			cancel()
+		}
+	}
+	huecos := make(chan struct{}, aLaVez)
+	for i := 0; i < n; i++ {
+		select {
+		case huecos <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if err := ctx.Err(); err != nil {
+			fallo(i, err) // nada si ya falló otra: ese es el fallo
+			break
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-huecos }()
+			mc, err := restaurarFork(ctx, m, req(i))
+			if err != nil {
+				fallo(i, err)
+				return
+			}
+			mu.Lock()
+			out[i] = mc
+			mu.Unlock()
+			if lista != nil {
+				if err := lista(ctx, mc); err != nil {
+					fallo(i, err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if primero != nil {
+		return nil, primero
+	}
+	return out, nil
 }
 
 // puedeRamificarse descarta, antes de pausar nada, las máquinas que no se

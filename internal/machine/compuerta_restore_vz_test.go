@@ -109,4 +109,14 @@ func TestCompuertaRestoreHVNivelBajoNoFrena(t *testing.T) {
 	if len(m.launchGate) != 0 {
 		t.Fatalf("quedan huecos tomados: %d", len(m.launchGate))
 	}
+	// Y las copias de un fork entran juntas por esa misma compuerta.
+	if n := copiasForkALaVez(); n != restoresSimultaneosHV {
+		t.Fatalf("copias de fork a la vez con hv = %d, quiero %d", n, restoresSimultaneosHV)
+	}
+	if err := ElegirBackend(BackendVZ); err != nil {
+		t.Fatal(err)
+	}
+	if n := copiasForkALaVez(); n != 1 {
+		t.Fatalf("copias de fork a la vez con vz = %d, quiero 1", n)
+	}
 }
