@@ -3233,19 +3233,26 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// adelante arrancaría un SEGUNDO firecracker sobre el mismo overlay.ext4:
 	// dos VMMs escribiendo el mismo sistema de ficheros es corrupción, y del
 	// tipo que no se nota hasta mucho después.
-	live := m.liveVMs()
+	//
+	// Solo hace falta el de esta máquina (vmmVivoDe): en macOS mira primero
+	// los PID que ya se conocen, en vez de la tabla de procesos entera.
+	var pistas []int
+	if v, ok := m.vmmDeCongelado.Load(mc.ID); ok {
+		pistas = append(pistas, v.(int))
+	}
+	vivo := m.vmmVivoDe(mc.ID, append(pistas, mc.PID)...)
 	crono.marca(&crono.p.CheckMS)
-	if pid := live[mc.ID]; pid > 0 && m.esVMMDeCongelado(mc.ID, pid) {
-		if err := m.thawVMMViejo(mc, pid); err != nil {
+	if vivo > 0 && m.esVMMDeCongelado(mc.ID, vivo) {
+		if err := m.thawVMMViejo(mc, vivo); err != nil {
 			return nil, err
 		}
-		delete(live, mc.ID)
-	} else if _, marcado := m.vmmDeCongelado.Load(mc.ID); marcado && live[mc.ID] == 0 {
+		vivo = 0
+	} else if _, marcado := m.vmmDeCongelado.Load(mc.ID); marcado && vivo == 0 {
 		// El VMM que dejó vivo su freeze ya se fue solo: la marca sobra.
 		m.olvidarVMMDeCongelado(mc.ID)
 	}
-	if live[mc.ID] > 0 {
-		pid := live[mc.ID]
+	if vivo > 0 {
+		pid := vivo
 		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
 			mc.Name, mc.ID[:8], pid)
 		// Con su socket real: si corre en jail, el del chroot (ver socketDe).

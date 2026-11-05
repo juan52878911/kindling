@@ -13,10 +13,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -137,6 +139,44 @@ func (m *Manager) liveVMs() map[string]int {
 		return map[string]int{}
 	}
 	return vmmsDeTabla(tabla, filepath.Join(m.root, "machines")+"/")
+}
+
+// vmmVivoDe es liveVMs()[id] para una sola máquina, sin leer la línea de
+// órdenes de todos los procesos del Mac (unos 3 ms con ~700 procesos, en cada
+// thaw). Primero mira los PID que ya se conocen (pistas: el apuntado en el
+// estado, el que dejó vivo su freeze): si uno es un VMM con el socket de id en
+// su línea de órdenes, es ese. Si ninguno lo es y en su socket no escucha
+// nadie (no existe, o ECONNREFUSED: el fichero de un VMM que ya murió), no hay
+// VMM suyo vivo: todo VMM nuestro escucha en él (waitSocket) desde que
+// arranca hasta que sale. Cualquier otra cosa (alguien contesta, un plazo, un
+// error raro) no es concluyente y se mira la tabla entera, como antes.
+func (m *Manager) vmmVivoDe(id string, pistas ...int) int {
+	prefix := filepath.Join(m.root, "machines") + "/"
+	buf := make([]byte, procArgsMax)
+	for _, pid := range pistas {
+		if pid <= 0 {
+			continue
+		}
+		if l, err := lineaDeOrdenes(int32(pid), buf); err == nil && vmmDeLinea(l, prefix) == id {
+			return pid
+		}
+	}
+	if !nadieEscuchaEn(m.dir(id) + "/fc.sock") {
+		return m.liveVMs()[id]
+	}
+	return 0
+}
+
+// nadieEscuchaEn dice si es seguro que en el socket unix sock no escucha
+// nadie: no existe o rechaza la conexión. Un error de otro tipo no lo
+// asegura (false).
+func nadieEscuchaEn(sock string) bool {
+	c, err := net.DialTimeout("unix", sock, 100*time.Millisecond)
+	if err == nil {
+		c.Close()
+		return false
+	}
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // adopt comprueba que el PID apuntado sigue siendo el VMM de esta máquina: los

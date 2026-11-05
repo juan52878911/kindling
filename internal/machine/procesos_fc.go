@@ -14,6 +14,11 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
+// vmmVivoDe es el VMM vivo de id según liveVMs (0 si no hay). En Linux se
+// escanea /proc entero como siempre: con el jailer el socket está en el
+// chroot y las pistas no ahorran nada que importe. pistas son para macOS.
+func (m *Manager) vmmVivoDe(id string, _ ...int) int { return m.liveVMs()[id] }
+
 // liveVMs escanea /proc y devuelve qué microVM posee cada firecracker vivo.
 //
 // Es adopt() del revés: en vez de "¿sigue vivo el PID que apunté?", pregunta
