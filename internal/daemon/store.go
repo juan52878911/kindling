@@ -25,9 +25,47 @@ import (
 // No vive en machine.Manager porque no tiene nada que ver con máquinas: es
 // estado de extensiones que tiene que estar en el host del daemon (donde corre
 // el gateway) y no en el del CLI.
+//
+// Las escrituras de una misma clave van de una en una; las de claves
+// distintas, a la vez: cada put es una escritura durable (fsync, 1-5 ms), y
+// con un cerrojo global una extensión que guarda mucho frenaba a todas. No
+// hay nada que ate unas claves a otras: get y keys no toman cerrojo (cada
+// fichero se sustituye entero con un rename) y cada clave es su fichero.
 type store struct {
 	dir string
 	mu  sync.Mutex
+	// claves son los cerrojos de las claves que alguien escribe ahora,
+	// por ruta; se quitan al soltarlos el último.
+	claves map[string]*cerrojoClave
+}
+
+type cerrojoClave struct {
+	sync.Mutex
+	usos int
+}
+
+// cerrar toma el cerrojo de la clave de ruta p y devuelve cómo soltarlo.
+func (st *store) cerrar(p string) func() {
+	st.mu.Lock()
+	if st.claves == nil {
+		st.claves = map[string]*cerrojoClave{}
+	}
+	c := st.claves[p]
+	if c == nil {
+		c = &cerrojoClave{}
+		st.claves[p] = c
+	}
+	c.usos++
+	st.mu.Unlock()
+	c.Lock()
+	return func() {
+		c.Unlock()
+		st.mu.Lock()
+		if c.usos--; c.usos == 0 {
+			delete(st.claves, p)
+		}
+		st.mu.Unlock()
+	}
 }
 
 var errStoreNotFound = errors.New("not found")
@@ -94,8 +132,7 @@ func (st *store) put(ns, key string, value []byte) error {
 	if err != nil {
 		return err
 	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
+	defer st.cerrar(p)()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
@@ -109,8 +146,7 @@ func (st *store) delete(ns, key string) error {
 	if err != nil {
 		return err
 	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
+	defer st.cerrar(p)()
 	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
