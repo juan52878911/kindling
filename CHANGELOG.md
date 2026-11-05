@@ -6,6 +6,16 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- kling-hv: live shares (`-share SRC:DST:ro|rw`) go over virtio-fs when the guest kernel supports it: the guest kernel talks FUSE to the same Go server the agent used, now inside kling-hv, with the same `internal/share` session and `os.Root` in the daemon. On an M4: metadata 3-5x faster (1000 creates 1.5 s → 0.3 s, `find` of 2000 files 31 → 15 ms), sequential I/O ~2x (reads ~0.7 → 1.45 GB/s, writes ~0.5-0.6 → 1.2-1.4 GB/s); freeze/thaw keeps open files and pending writes. Host changes are seen after the 1 s cache and no longer wake inotify watchers in the guest on those shares; `KLING_HV_VIRTIOFS=0` goes back to FUSE. Templates (`-share-wait`, `compose up`), kling-vz, Firecracker, older agents and kernels without virtio-fs keep FUSE automatically. `docs/backend-hv.md`.
+- arm64 guest kernel: `CONFIG_VIRTIO_FS=y` (required by `scripts/check-kernel-config.sh`).
+
+### Changed
+
+- kling-hv memory file state v5 (virtio-fs devices) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4 / `kling_vz` ≤ 3.
+- kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

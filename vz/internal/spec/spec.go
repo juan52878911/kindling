@@ -33,7 +33,10 @@ import (
 //   - 3: vsock (el dispositivo virtio-vsock del canal con el agente) y mtu
 //     (la MTU del enlace). Uno anterior restauraría sin vsock o con MTU 1500
 //     un invitado que los espera.
-const FormatVersion = 3
+//   - 4: kling_virtiofs (las carpetas vivas por virtio-fs de kling-hv, con el
+//     estado de su servidor FUSE). Uno anterior restauraría sin esos
+//     dispositivos un invitado que los tiene montados.
+const FormatVersion = 4
 
 // minFormatVersion es la más vieja que se sigue leyendo. Un snapshot de la 1
 // no tiene graphics, que es justo lo que significa leerla con este código.
@@ -46,8 +49,26 @@ func Formatos() (min, max int) { return minFormatVersion, FormatVersion }
 
 // maxSnapshotJSON acota lo que se lee del fichero de snapshot. El fichero viene
 // de disco y lo escribe este mismo programa, pero un fichero corrupto o ajeno no
-// debe poder hacer que el ayudante reserve memoria sin límite.
-const maxSnapshotJSON = 1 << 20
+// debe poder hacer que el ayudante reserve memoria sin límite. Lo que más pesa
+// es el estado de las carpetas por virtio-fs (VirtioFS.State): la tabla de
+// nodos tiene tope (262 144 por carpeta, ~40 B cada uno).
+const maxSnapshotJSON = 128 << 20
+
+// MaxVirtioFS es cuántas carpetas por virtio-fs admite una VM (las de
+// shareproto.MaxShares).
+const MaxVirtioFS = 8
+
+// VirtioFS es una carpeta viva que kling-hv sirve por un dispositivo
+// virtio-fs (docs/backend-hv.md): el invitado la monta por su Tag
+// (shareproto.VirtioFSTag) y el núcleo conecta la sesión
+// kling-share/1 por POST /kling/share/attach. State solo va en un snapshot:
+// lo que el servidor FUSE sabía (nodos y ficheros abiertos), porque el kernel
+// del invitado sigue nombrándolos al restaurar.
+type VirtioFS struct {
+	Tag      int    `json:"tag"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+	State    []byte `json:"state,omitempty"`
+}
 
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
@@ -132,6 +153,9 @@ type Spec struct {
 	// agente del invitado contesta por TCP y no por vsock (uno anterior). No
 	// cambia la máquina, solo por dónde se prueba primero al restaurarla.
 	AgentTCPOnly bool `json:"agent_tcp_only,omitempty"`
+	// VirtioFS: las carpetas vivas por virtio-fs (solo kling-hv; PUT
+	// /kling/shares). Como Vsock, viajan en el snapshot.
+	VirtioFS []VirtioFS `json:"kling_virtiofs,omitempty"`
 }
 
 // Límites de la MTU que acepta VZFileHandleNetworkDeviceAttachment.
@@ -200,9 +224,28 @@ func (s *Spec) Validate() error {
 	if s.MTU != 0 && (s.MTU < MinMTU || s.MTU > MaxMTU) {
 		return fmt.Errorf("mtu %d: must be between %d and %d", s.MTU, MinMTU, MaxMTU)
 	}
+	if err := ValidateVirtioFS(s.VirtioFS); err != nil {
+		return err
+	}
 	if s.Balloon != nil && s.Balloon.AmountMiB >= s.MachineConfig.MemSizeMiB {
 		return fmt.Errorf("balloon amount_mib (%d) must be below mem_size_mib (%d)",
 			s.Balloon.AmountMiB, s.MachineConfig.MemSizeMiB)
+	}
+	return nil
+}
+
+// ValidateVirtioFS acota las carpetas por virtio-fs: como mucho MaxVirtioFS,
+// con tags de 0 a MaxVirtioFS-1 y sin repetir.
+func ValidateVirtioFS(v []VirtioFS) error {
+	if len(v) > MaxVirtioFS {
+		return fmt.Errorf("at most %d virtio-fs shares (got %d)", MaxVirtioFS, len(v))
+	}
+	seen := map[int]bool{}
+	for _, f := range v {
+		if f.Tag < 0 || f.Tag >= MaxVirtioFS || seen[f.Tag] {
+			return fmt.Errorf("virtio-fs tag %d: must be unique and between 0 and %d", f.Tag, MaxVirtioFS-1)
+		}
+		seen[f.Tag] = true
 	}
 	return nil
 }
@@ -303,6 +346,8 @@ func (s *Spec) WriteFile(path string) error {
 // distinta de 1500, 2 con pantalla, 1 si no.
 func (s *Spec) formato() int {
 	switch {
+	case len(s.VirtioFS) > 0:
+		return 4
 	case s.Vsock || (s.MTU != 0 && s.MTU != MinMTU):
 		return 3
 	case s.Graphics != nil:

@@ -72,6 +72,7 @@ state.json api.ShareAttachment mode string
 state.json api.ShareAttachment mount string
 state.json api.ShareAttachment source string
 state.json api.ShareAttachment status string
+state.json api.ShareAttachment transport string ignorable
 state.json api.VolumeAttachment drive_id string
 state.json api.VolumeAttachment mount string
 state.json api.VolumeAttachment name string

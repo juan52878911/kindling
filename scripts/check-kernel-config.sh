@@ -115,6 +115,9 @@ REQUIRED_arm64=(
   PCI VIRTIO_PCI VIRTIO_CONSOLE
   # imágenes amd64 con qemu-user (docs/imagenes-amd64.md)
   BINFMT_MISC
+  # carpetas compartidas vivas de kling-hv por virtio-fs (docs/compartir.md);
+  # con un kernel sin él, kling-hv cae al FUSE por vsock
+  VIRTIO_FS
 )
 
 FORBIDDEN_COMMON=(

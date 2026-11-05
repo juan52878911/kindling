@@ -53,12 +53,15 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
+| carpetas | virtio-fs (`vfs.c`), un dispositivo por carpeta viva (`-share …:ro\|rw`): el kernel del invitado habla FUSE con el mismo servidor del agente, ahora en el proceso de `kling-hv` (abajo) |
 | globo | virtio-balloon con cola de estadísticas (`VIRTIO_BALLOON_F_STATS_VQ`): `GET /balloon/statistics` da la memoria libre, disponible y total que ve el driver del invitado, así que `squeeze` reclama lo libre de verdad sin preguntar al agente; `-mem-max` y `resize` (abajo) |
 | sin | pantalla |
 
 Todas las colas pasan por un único recorrido de cadenas con topes
 (`vq_cadena`: índices fuera de la tabla, ciclos, descriptores indirectos —no
-se ofrecen— y cadenas más largas que la cola son inválidas) y cada aviso
+se ofrecen, salvo en virtio-fs— y cadenas más largas que la cola son
+inválidas; un anillo sin la alineación de virtio deja la cola sin atender) y
+cada aviso
 atiende como mucho una vuelta de la cola: un invitado que pusiera el anillo
 `used` encima del `avail` dejaba un hilo de dispositivo girando para siempre, y
 con él cualquier pausa o snapshot. Una petición de disco sin byte de estado o
@@ -72,7 +75,7 @@ reenvío más 7 × [20.000 ficheros de 4 KiB + sync, 256 MiB + fsync]): los avis
 de rx de red pasan de ~30.000 a ~100, las interrupciones de red de ~198.000 a
 ~112.000 (−45 %) y los avisos de disco de ~6.300 a ~3.200 (−48 %); el caudal
 (~2.300-2.600 / ~1.700-1.900 MiB/s) y los tiempos de disco quedan dentro del
-ruido. `go test -fuzz FuzzColas ./internal/hvvm` programa los cinco dispositivos con
+ruido. `go test -fuzz FuzzColas ./internal/hvvm` programa los seis dispositivos con
 datos al azar sobre una RAM de mentira (`prueba.c`); el fuzz de Go no ve la
 cobertura del C, así que es aleatorio puro (8 M de ejecuciones en 90 s sin
 fallos).
@@ -114,6 +117,145 @@ credencial lo marca el daemon por el broker), así que una máquina en allowlist
 ya no compila 1000 reglas para cerrar el rango de los reenvíos. Lo que queda
 de `sandbox_init` (~9 ms, `go test -bench SandboxInit ./internal/sandbox` en
 vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
+
+### Carpetas vivas por virtio-fs
+
+Con `kling-hv`, las carpetas `-share SRC:DST:ro|rw` de un arranque en frío no
+pasan por el agente: el kernel del invitado las monta con `mount -t virtiofs` y
+habla FUSE con el host por las colas de un dispositivo virtio-fs (device id 26;
+la cola de alta prioridad, con los FORGET, y una de peticiones; tag
+`kling-share-N`, con N el tag de la carpeta). El diseño de las carpetas está en
+[compartir.md](compartir.md); lo que cambia es dónde corre cada pieza:
+
+```
+ invitado                  kling-hv (host)                                   daemon (host)
+ proceso ─ VFS ─ virtiofs ─▶ vfs.c: colas ─▶ pkg/guest.HostFS ─kling-share/1─▶ internal/share
+            (colas virtio)   (copia, valida)  (el fuseFS del agente)  (unix)     os.Root(SRC)
+```
+
+1. **Al arrancar**, el núcleo pide un dispositivo por carpeta viva (`PUT
+   /kling/shares`, antes de `InstanceStart`; `carpetasAntesDeArrancar` en
+   `internal/machine/plataforma_vz.go`) y apunta en la máquina
+   `transport: virtiofs`. `kling-vz` contesta que no (501) y todo sigue por
+   FUSE.
+2. **El attach** pide al agente `Transport: virtiofs`: el agente monta el
+   dispositivo de ese tag y contesta 200 sin tomar la conexión, y el núcleo
+   conecta la sesión `kling-share/1` con `kling-hv` (`POST /kling/share/attach`
+   con Upgrade, por el socket de su API), donde la recoge el servidor FUSE de
+   ese dispositivo. La sesión, `os.Root`, `share_roots` y lo que valida el host
+   son lo de siempre (`internal/share`, en el daemon): `kling-hv` no abre nunca
+   SRC, así que su sandbox no cambia.
+3. **El servidor FUSE** es el del agente (`fuseFS`, `pkg/guest`) tal cual, con
+   su tabla de nodos, sus handles, la lectura adelantada y la escritura
+   diferida; `pkg/guest.HostFS` lo envuelve para leer las peticiones de un
+   dispositivo en vez de `/dev/fuse`. Sin WATCH: virtio-fs no tiene en Linux
+   cola de avisos (`FUSE_NOTIFY_*`), y el truco de inotify del agente
+   (operaciones sintéticas dentro del invitado) no se puede hacer desde fuera.
+
+**El puente C↔Go** es cgo, sin hilo de C ni socket: una goroutine por
+dispositivo llama a `khv_vfs_leer`, que espera en la cv del dispositivo a que
+haya petición (la despierta el notify del vCPU), valida la cadena y copia su
+parte de lectura al búfer de Go; `khv_vfs_responder` escribe la respuesta en la
+parte de escritura. El C solo transporta y valida, como el resto de
+dispositivos (`vfs_cadena`: lecturas antes que escrituras, todo dentro de la
+RAM, sin ciclos, una tabla indirecta como mucho y solo como descriptor único
+—se ofrece `VIRTIO_RING_F_INDIRECT_DESC`: una petición de 1 MiB son ~260
+búferes y la cola tiene 256—, la cabecera FUSE entera y nada más grande que lo
+negociado en INIT). Go no ve el `unique` del invitado: el C lo cambia por una
+ficha (generación, cola, head) y lo repone al escribir la respuesta, así que dos
+peticiones con el mismo `unique`, o una respuesta tardía a una cadena que ya no
+espera (tras un reset), no escriben donde no deben. FORGET y BATCH_FORGET se
+devuelven en seguida (no llevan respuesta) y los avisos de Go (`unique` 0) se
+tiran. Las cadenas que contesta el propio C (inválidas) van de 512 en 512 por
+despertar. Con la VM en pausa nadie toca la RAM: las dos llamadas esperan, y
+pausar espera a las que estuvieran dentro, como con los discos.
+
+**Congelar y descongelar.** El servidor FUSE vive en un proceso que muere al
+congelar, y el kernel restaurado sigue nombrando sus nodos y sus handles:
+
+- el estado del dispositivo (las colas y, por cola, qué heads tenía Go leídos
+  sin contestar) va en la cabecera del `mem.file`, que sube a la **versión
+  5**; al restaurar, esas peticiones se le vuelven a dar a Go antes que las
+  nuevas;
+- lo que sabe el servidor FUSE (cada nodo con su padre y su nombre, los
+  ficheros y directorios abiertos, y lo escrito por la escritura diferida que
+  aún no llegó al host) va en el `snap.file`, en `kling_virtiofs[].state`, que
+  sube `kling_vz` a **4**. Un fichero abierto se reabre por ruta en la sesión
+  nueva, como en el agente.
+
+Una máquina sin carpetas por virtio-fs sigue escribiendo la versión 4 y un
+`kling_vz` de 3 o menos: un `kling-hv` anterior (`kling upgrade -rollback`) la
+lee. Lo que se repite al restaurar es lo que estaba en vuelo en el momento
+exacto de la pausa (el núcleo corta antes las sesiones, así que casi siempre es
+una operación que no llegó a salir): una escritura repetida es idempotente; un
+`mkdir`, `unlink` o `rename` que sí llegó al host y se repite contesta
+`EEXIST` o `ENOENT`, como el `EIO` que recibe hoy por FUSE lo que está en
+vuelo. Medido en el M4: congelar a mitad de escribir 300 MB (con 63 MB
+escritos) tarda 170 ms; tras descongelar el fichero llega entero (el mismo
+sha256), el proceso que lo tenía abierto sigue escribiendo y el que tenía el
+cwd dentro de la carpeta sigue allí.
+
+**Cuándo no hay virtio-fs** (y todo va por FUSE, como antes, sin hacer nada):
+
+- un kernel sin `CONFIG_VIRTIO_FS` (los anteriores a esta versión): el
+  `mount -t virtiofs` falla, el agente contesta 501 con
+  `X-Kling-Share-Transport: fuse` y el núcleo repite el attach por FUSE;
+- un agente anterior: no sabe de `Transport`, monta por FUSE y contesta 101;
+- `kling-vz` y Firecracker: no tienen el dispositivo;
+- `KLING_HV_VIRTIOFS=0` en el entorno del daemon (que pasa a `kling-hv`);
+- las plantillas: `run -share-wait N` y `run -from` con carpetas no llevan
+  dispositivo (la máquina de la plantilla se creó sin carpetas, y un
+  dispositivo virtio-mmio no se añade en caliente), así que `kling compose up`
+  sigue por FUSE.
+
+`kling ps -json` dice por dónde va cada carpeta con sesión
+(`"transport": "virtiofs"`; sin el campo, FUSE).
+
+**El kernel.** `CONFIG_VIRTIO_FS=y` está en
+`scripts/builders/kernel/config-arm64` (y `scripts/check-kernel-config.sh` lo
+exige en arm64), sin `FUSE_DAX`. Un snapshot lleva su kernel dentro del
+`mem.file` (al restaurar no se vuelve a leer el `vmlinux`), así que un kernel
+nuevo no invalida plantillas ni congeladas: siguen despertando con el suyo, y
+sus carpetas, por FUSE. Por eso ninguna clave tiene que cambiar con el kernel:
+el dispositivo solo se crea en un arranque en frío, que siempre usa el
+`vmlinux` de ahora, y si ese kernel no lo tiene, el agente lo dice y se cae a
+FUSE. Una plantilla vieja sigue con su kernel hasta que se rehace;
+`KernelSHA256` del snapshot dice con cuál se hizo.
+
+**DAX** (la ventana de memoria compartida de virtio-fs, con la que el invitado
+mapearía las páginas del host sin copiarlas) no está: pide una región de la
+IPA mapeada bajo demanda a trozos de ficheros del host (`FUSE_SETUPMAPPING`),
+con `hv_vm_map` por trozo y su invalidación al congelar. Queda en Pendiente.
+
+Medido en el M4 (macOS 26, daemon privado, máquina de 512 MiB y 1 vCPU al
+100 %, mediana de 3 vueltas; 2000 ficheros de 0,5-4 KiB en 20 directorios, uno
+de 200 MiB con la caché del invitado vaciada antes de leer, `dd` de 200 MiB con
+`conv=fsync`, `git status` de un clon de kindling de 2470 entradas, y crear,
+mirar y borrar 1000 ficheros desde `sh`); en ms salvo los MB/s:
+
+| | ro FUSE (kernel anterior) | ro FUSE (kernel nuevo) | ro virtio-fs | rw FUSE (kernel anterior) | rw FUSE (kernel nuevo) | rw virtio-fs |
+|---|---|---|---|---|---|---|
+| `find \| wc` en frío | 31 | 38 | 15 | 39 | 30 | 10 |
+| `find \| wc` en caliente | 22 | 21 | 7 | 29 | 27 | 9 |
+| `cat` de los 2000 | 1122 | 1239 | 548 | 1162 | 1037 | 543 |
+| lectura secuencial (`dd`) | 667 MB/s | 859 MB/s | 1456 MB/s | 743 MB/s | 741 MB/s | 1446 MB/s |
+| escritura secuencial (`dd`, a la carpeta rw) | 643 MB/s | 470 MB/s | 1184 MB/s | 504 MB/s | 517 MB/s | 1370 MB/s |
+| `git status` en frío | 1397 | 1100 | 832 | 1259 | 1345 | 822 |
+| `git status` en caliente | 1009 | 617 | 595 | 214 | 254 | 135 |
+| crear 1000 | 1469 | 1510 | 312 | 1397 | 2009 | 356 |
+| `stat` de 1000 | 230 | 232 | 55 | 260 | 241 | 56 |
+| borrar 1000 | 527 | 510 | 139 | 543 | 606 | 140 |
+
+«Kernel anterior» es el `vmlinux` instalado, sin virtio-fs; «kernel nuevo», el de
+esta versión con `KLING_HV_VIRTIOFS=0`, para separar lo que es del kernel de lo
+que es del transporte. Los metadatos van 3-5× más rápido (cada operación era un
+viaje por vsock al agente y otro del agente al host; ahora es uno, por un socket
+unix entre dos procesos del Mac) y la E/S secuencial ~2×. En `ro`, `git status`
+en caliente mejora poco porque no puede escribir el índice y vuelve a mirarlo
+todo. La sesión de virtio-fs lleva búferes de 2 MiB en su socket unix
+(`fc.ShareSockBuf`, en los dos extremos): con los 8 KiB por defecto de macOS,
+una escritura de 1 MiB eran 128 idas y vueltas entre los dos procesos, y la
+lectura secuencial se quedaba en ~850 MB/s y la escritura en ~450.
 
 ## El fichero de memoria del snapshot
 
@@ -378,9 +520,10 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   de vCPU, dispositivos y GIC va dentro del `mem.file`, tras la RAM. Una
   cabecera cambiada sin cambiar de tamaño solo la para la validación de
   `khv_restore` (magia, versión, tamaños, `ram_size`, `gic_size`), no una suma.
-- **Sin bajada de versión**: `kling-hv` escribe siempre su `SNAP_VERSION`
-  (hoy 4), aunque la máquina se pudiera describir con una anterior, así que
-  un `kling-hv` viejo no lee lo que congela uno nuevo (ver
+- **Bajada de versión a medias**: `kling-hv` escribe la versión 4 del estado
+  si la máquina no tiene carpetas por virtio-fs y la 5 si las tiene, nunca
+  una anterior a la 4 aunque la máquina se pudiera describir con ella, así
+  que un `kling-hv` de antes de la 4 no lee lo que congela uno nuevo (ver
   [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback` lo mira
   antes de volver.
 
@@ -408,6 +551,12 @@ los ~9 ms), que es otra auditoría.
 ## Pendiente
 
 - Pantalla.
+- virtio-fs: DAX (ver Carpetas vivas por virtio-fs); los avisos de cambios del
+  host (WATCH) y su inotify en el invitado, que por virtio-fs se pierden (un
+  cambio del host se ve al caducar la caché de 1 s, y `node --watch` no se
+  entera: `KLING_HV_VIRTIOFS=0` vuelve a FUSE); y las plantillas con
+  `-share-wait`, que siguen por FUSE porque su máquina se crea sin
+  dispositivo.
 - `sandbox_init` cuesta ~9 ms (4 de base y 5 de `system.sb`) y ~3 MiB por
   proceso; ver el fondo de procesos, arriba.
 - El vigía de energía (`--power-events`) se registra y se prueba con

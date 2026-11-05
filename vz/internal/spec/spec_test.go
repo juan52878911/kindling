@@ -166,12 +166,12 @@ func TestSnapshotEscribeLaVersionMasBaja(t *testing.T) {
 	}
 }
 
-// Lo que dice -snapshot-formats: lee de la 1 a la 3. La versión va fijada
+// Lo que dice -snapshot-formats: lee de la 1 a la 4. La versión va fijada
 // aquí y no comparada con FormatVersion (eso no rompería nunca): subirla es
 // un cambio de formato que tiene que pasar también por formatoVZMax en
 // internal/machine/meta.go del núcleo (lo comprueba TestFormatosCasanConVZ).
 func TestFormatos(t *testing.T) {
-	const fijada = 3
+	const fijada = 4
 	if min, max := Formatos(); min != 1 || max != fijada {
 		t.Fatalf("Formatos() = %d %d; fijada 1 %d. Si FormatVersion subió, sube formatoVZMax en "+
 			"internal/machine/meta.go y solo entonces esta constante", min, max, fijada)

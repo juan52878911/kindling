@@ -78,13 +78,13 @@ func TestCausaObsoletoEn(t *testing.T) {
 
 	m.FijarOrigen("0.21.0", "kling-vz 0.21.0")
 	vz := t.TempDir()
-	os.WriteFile(filepath.Join(vz, "snap.file"), []byte(`{"kling_vz": 3}`), 0o600)
-	if c := m.causaObsoletoEn("kling-vz 0.20.0", "", vz); c != "" {
-		t.Errorf("kling_vz 3: %q", c)
-	}
 	os.WriteFile(filepath.Join(vz, "snap.file"), []byte(`{"kling_vz": 4}`), 0o600)
-	if c := m.causaObsoletoEn("kling-vz 0.22.0", "", vz); !strings.Contains(c, "format 4") {
+	if c := m.causaObsoletoEn("kling-vz 0.20.0", "", vz); c != "" {
 		t.Errorf("kling_vz 4: %q", c)
+	}
+	os.WriteFile(filepath.Join(vz, "snap.file"), []byte(`{"kling_vz": 5}`), 0o600)
+	if c := m.causaObsoletoEn("kling-vz 0.22.0", "", vz); !strings.Contains(c, "format 5") {
+		t.Errorf("kling_vz 5: %q", c)
 	}
 	// Firecracker: solo VMM y arquitectura; no se lee nada del volcado.
 	m.FijarOrigen("0.21.0", "Firecracker v1.12.0")

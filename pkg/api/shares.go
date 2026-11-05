@@ -36,6 +36,13 @@ type ShareAttachment struct {
 	Source string `json:"source,omitempty"`
 	// ImageBytes es el tamaño del disco (ext4) de una copia.
 	ImageBytes int64 `json:"image_bytes,omitempty"`
+	// Transport es por dónde llega una carpeta viva al kernel del invitado:
+	// "virtiofs" por un dispositivo virtio-fs de kling-hv (docs/backend-hv.md),
+	// vacío por FUSE a través del agente (lo de siempre). Guardado, es lo que
+	// el VMM ofreció al arrancar; en una respuesta con Status "attached", por
+	// dónde va la sesión de verdad (un agente anterior o un kernel sin
+	// virtio-fs caen a FUSE).
+	Transport string `json:"transport,omitempty"`
 	// Status es el estado de una carpeta viva: "attached", "detached" (sin
 	// sesión ahora mismo: la máquina está congelada o reconectando) o
 	// "error: ...". No se guarda: lo calcula el daemon al responder.

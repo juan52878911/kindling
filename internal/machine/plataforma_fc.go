@@ -10,6 +10,7 @@ package machine
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -70,6 +71,15 @@ func delegacionCgroups() (string, error) { return ensureDelegation() }
 // redAntesDeArrancar no hace nada en Linux: la red ya la montó el namespace
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
+
+// carpetasAntesDeArrancar no hace nada en Linux: Firecracker no tiene
+// virtio-fs y las carpetas vivas van por FUSE (docs/compartir.md).
+func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id string) {}
+
+// attachVirtioFS: en Linux no hay virtio-fs.
+func (m *Manager) attachVirtioFS(ctx context.Context, mc *api.Machine, tag int) (io.ReadWriteCloser, error) {
+	return nil, fc.ErrNoVirtioFS
+}
 
 // fijarAuditoriaPlataforma: en Linux los proxies son del daemon (internal/net).
 func fijarAuditoriaPlataforma(c credproxy.AuditConfig) { knet.SetCredAudit(c) }

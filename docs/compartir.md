@@ -20,16 +20,21 @@ API está en [api.md](api.md).
 ## Por qué así
 
 El kernel del invitado (el vmlinux 6.1 de la CI de Firecracker, el mismo que usa
-kling-vz en macOS) trae NFS y FUSE, y no trae virtio-fs ni 9p. Firecracker
+kling-vz en macOS) traía NFS y FUSE, y no virtio-fs ni 9p. Firecracker
 tampoco tiene virtio-fs. Las opciones reales eran tres:
 
 - **NFS**: descartado. Exige un servidor NFS del kernel del host expuesto a
   invitados que consideramos hostiles; es mucha superficie en ring 0 para
   compartir una carpeta.
-- **virtio-fs**: no existe en Firecracker ni en el kernel del invitado.
+- **virtio-fs**: no existe en Firecracker ni existía en el kernel del invitado.
 - **Copia + FUSE**: lo que se hace. La copia no añade superficie (es un disco
   más). FUSE deja la superficie en código nuestro, en Go, en espacio de usuario,
   con el daemon validando cada petición.
+
+En kling-hv (macOS), que es un VMM nuestro, las carpetas vivas van además por
+virtio-fs: el kernel arm64 de kindling lo trae desde esta versión, y el
+dispositivo lleva las peticiones FUSE al **mismo** servidor en Go del agente,
+que habla con el mismo `internal/share` (ver [kling-hv](#kling-hv-virtio-fs)).
 
 ## Modo copy
 
@@ -323,6 +328,54 @@ Medido en un M4 (kling-vz), con un servidor de Node en la carpeta: editar en
 el host y que `curl` devuelva lo nuevo tarda 254 ms con `node --watch` (Docker
 Desktop: 257 ms); sin WATCH no recargaba nunca.
 
+### kling-hv: virtio-fs
+
+Con kling-hv, el kernel del invitado no habla FUSE con el agente sino con el
+host, por un dispositivo virtio-fs por carpeta que el agente monta con
+`mount -t virtiofs kling-share-N DST`. El servidor FUSE es el `fuseFS` del
+agente (la tabla de nodos, los handles, la escritura diferida, las mismas
+validaciones), que corre dentro de kling-hv (`pkg/guest.HostFS`), y su sesión
+`kling-share/1` va al `internal/share` del daemon, con su `os.Root`, como
+siempre: el daemon la abre contra el socket de kling-hv (`POST
+/kling/share/attach`) en vez de contra el agente. En el attach el daemon pide
+`Transport: virtiofs`; el agente contesta 200 si montó, o 501 con
+`X-Kling-Share-Transport: fuse` si no puede (kernel sin virtio-fs, máquina sin
+el dispositivo), y entonces todo sigue por FUSE como aquí se describe. El
+detalle (el puente C↔Go, qué se guarda al congelar, cuándo no se usa) está en
+[backend-hv.md](backend-hv.md#carpetas-vivas-por-virtio-fs).
+
+Lo que cambia para quien la usa:
+
+- **Rapidez**: los metadatos 3-5× y la E/S secuencial ~2× (tabla abajo).
+- **Cambios del host**: sin WATCH (virtio-fs no tiene cola de avisos en
+  Linux), un cambio hecho en el host se ve al caducar la caché (1 s) y no
+  despierta a inotify en el invitado: `node --watch`, nodemon o vite no recargan
+  solos con una carpeta de `kling run -share` por virtio-fs.
+  `KLING_HV_VIRTIOFS=0` en el entorno del daemon vuelve a FUSE.
+  `kling compose up` no cambia: sus servicios salen de plantillas, que siguen
+  por FUSE.
+- **Congelar y descongelar**, igual que por FUSE: el estado del servidor va en
+  el snapshot.
+
+Medido en el M4 (macOS 26, daemon privado, máquina de 512 MiB y 1 vCPU al
+100 %, mediana de 3 vueltas; 2000 ficheros de 0,5-4 KiB en 20 directorios, uno
+de 200 MiB con la caché del invitado vaciada antes de leer, `dd` de 200 MiB con
+`conv=fsync`, `git status` de un clon de kindling de 2470 entradas, y crear,
+mirar y borrar 1000 ficheros desde `sh`); en ms salvo los MB/s:
+
+| | ro FUSE (kernel anterior) | ro FUSE (kernel nuevo) | ro virtio-fs | rw FUSE (kernel anterior) | rw FUSE (kernel nuevo) | rw virtio-fs |
+|---|---|---|---|---|---|---|
+| `find \| wc` en frío | 31 | 38 | 15 | 39 | 30 | 10 |
+| `find \| wc` en caliente | 22 | 21 | 7 | 29 | 27 | 9 |
+| `cat` de los 2000 | 1122 | 1239 | 548 | 1162 | 1037 | 543 |
+| lectura secuencial (`dd`) | 667 MB/s | 859 MB/s | 1456 MB/s | 743 MB/s | 741 MB/s | 1446 MB/s |
+| escritura secuencial (`dd`, a la carpeta rw) | 643 MB/s | 470 MB/s | 1184 MB/s | 504 MB/s | 517 MB/s | 1370 MB/s |
+| `git status` en frío | 1397 | 1100 | 832 | 1259 | 1345 | 822 |
+| `git status` en caliente | 1009 | 617 | 595 | 214 | 254 | 135 |
+| crear 1000 | 1469 | 1510 | 312 | 1397 | 2009 | 356 |
+| `stat` de 1000 | 230 | 232 | 55 | 260 | 241 | 56 |
+| borrar 1000 | 527 | 510 | 139 | 543 | 606 | 140 |
+
 ### Medidas
 
 Con `dd` de 200 MiB (vaciando la caché del invitado antes de leer) y un script
@@ -374,4 +427,5 @@ encuentre (el de Homebrew o el de android-platform-tools sirven; tiene que
 aceptar `-d`) y sirve las carpetas vivas desde APFS: sin distinción de
 mayúsculas por defecto, así que `A` y `a` son el mismo fichero para el
 invitado. La conexión viaja por el reenvío de puertos de kling-vz, sin
-limitador de caudal.
+limitador de caudal. Con kling-hv, por virtio-fs cuando se puede (ver
+[kling-hv](#kling-hv-virtio-fs)).

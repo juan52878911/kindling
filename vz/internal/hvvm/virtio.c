@@ -17,6 +17,11 @@
 
 bool vq_ptrs(struct vq *q, uint16_t **avail, uint8_t **used, struct vdesc **desc) {
   if (!q->ready || q->num == 0 || q->num > QMAX) return false;
+  // Las alineaciones que exige virtio (2.7: tabla a 16, avail a 2, used a 4).
+  // Un driver que no las cumple está roto, y los accesos de 16 y 32 bits a
+  // un anillo desalineado son comportamiento indefinido en C (lo encontró
+  // UBSan con el fuzz de las colas).
+  if (q->desc % 16 || q->avail % 2 || q->used % 4) return false;
   *avail = gpa_ptr(q->avail, 6 + 2 * (uint64_t)q->num);
   *used = gpa_ptr(q->used, 6 + 8 * (uint64_t)q->num);
   *desc = gpa_ptr(q->desc, 16 * (uint64_t)q->num);

@@ -58,7 +58,43 @@ func semillas() [][]byte {
 	binary.LittleEndian.PutUint32(blkFuera[0x3000:], 1) // OUT
 	binary.LittleEndian.PutUint64(blkFuera[0x3008:], 1<<40)
 	sinEstado := ramCon([][4]uint64{{ramBase + 0x3000, 16, 0, 0}}, 0)
-	for dev := byte(0); dev < 5; dev++ {
+	// virtio-fs (dev 5): una petición FUSE buena (cabecera de 40 B y sitio
+	// para la respuesta), la misma por una tabla indirecta, un FORGET (sin
+	// respuesta), una cabecera corta, una indirecta dentro de otra, una
+	// lectura tras una escritura y el mismo head dos veces en vuelo.
+	fuse := func(ram []byte, at int, opcode uint32) {
+		binary.LittleEndian.PutUint32(ram[at:], 40)
+		binary.LittleEndian.PutUint32(ram[at+4:], opcode)
+		binary.LittleEndian.PutUint64(ram[at+8:], 0x1234)
+	}
+	vfsBuena := ramCon([][4]uint64{{ramBase + 0x3000, 40, 1, 1}, {ramBase + 0x3100, 256, 2, 0}}, 0, 0)
+	fuse(vfsBuena, 0x3000, 1)
+	vfsInd := ramCon([][4]uint64{{ramBase + 0x3800, 32, 4, 0}}, 0)
+	for i, d := range [][4]uint64{{ramBase + 0x3000, 40, 1, 1}, {ramBase + 0x3100, 256, 2, 0}} {
+		o := 0x3800 + i*16
+		binary.LittleEndian.PutUint64(vfsInd[o:], d[0])
+		binary.LittleEndian.PutUint32(vfsInd[o+8:], uint32(d[1]))
+		binary.LittleEndian.PutUint16(vfsInd[o+12:], uint16(d[2]))
+		binary.LittleEndian.PutUint16(vfsInd[o+14:], uint16(d[3]))
+	}
+	fuse(vfsInd, 0x3000, 3)
+	vfsForget := ramCon([][4]uint64{{ramBase + 0x3000, 48, 0, 0}}, 0)
+	fuse(vfsForget, 0x3000, 2)
+	vfsCorta := ramCon([][4]uint64{{ramBase + 0x3000, 16, 1, 1}, {ramBase + 0x3100, 256, 2, 0}}, 0)
+	vfsIndInd := ramCon([][4]uint64{{ramBase + 0x3800, 16, 4, 0}}, 0)
+	binary.LittleEndian.PutUint64(vfsIndInd[0x3800:], ramBase+0x3800)
+	binary.LittleEndian.PutUint32(vfsIndInd[0x3808:], 16)
+	binary.LittleEndian.PutUint16(vfsIndInd[0x380c:], 4)
+	vfsAlReves := ramCon([][4]uint64{{ramBase + 0x3100, 256, 3, 1}, {ramBase + 0x3000, 40, 0, 0}}, 0)
+	for _, ram := range [][]byte{vfsBuena, vfsInd, vfsForget, vfsCorta, vfsIndInd, vfsAlReves} {
+		for _, num := range []uint16{1, 2, 256} {
+			s = append(s, cola(5, num, 0, 0x1000, 0x2000, ram))
+		}
+	}
+	// Anillos desalineados (used a 2 bytes de su alineación): los accesos de
+	// 32 bits a él eran comportamiento indefinido (UBSan, en vq_push).
+	s = append(s, cola(5, 2, 0, 0x1000, 0x2002, vfsBuena), cola(0, 2, 0, 0x1001, 0x2000, vfsBuena))
+	for dev := byte(0); dev < 6; dev++ {
 		for _, num := range []uint16{0, 1, 2, 256, 257, 0xffff} {
 			for _, ram := range [][]byte{ciclo, indirecta, enorme, fuera, blkFuera, sinEstado} {
 				s = append(s, cola(dev, num, 0, 0x1000, 0x2000, ram))
