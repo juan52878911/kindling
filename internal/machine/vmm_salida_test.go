@@ -28,7 +28,7 @@ func vmmQueSeVe(t *testing.T, m *Manager, id string) *exec.Cmd {
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30; :", sock)
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30; :", argSocketVMM, sock)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
