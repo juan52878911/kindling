@@ -3311,17 +3311,21 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}
+	// El sello, leído una vez para todo el thaw (VMM, arquitectura, kernel,
+	// base del diferencial, sin agente): antes se leía y se parseaba en cada
+	// pregunta. Con el cerrojo de la máquina tomado nadie lo reescribe.
+	sl := leerSello(dir)
 	// VMM: congelada con uno que el de ahora no sabe cargar (otro VMM u otra
 	// MAJOR.MINOR de Firecracker, ver causaObsoleto). Se dice aquí, antes de
 	// lanzar nada: el error crudo del VMM al cargar no señala la causa.
-	if causa := m.causaObsoletoEn(vmmDelVolcado(dir), leerSello(dir).Arch, dir); causa != "" {
+	if causa := m.causaObsoletoEn(sl.VMM, sl.Arch, dir); causa != "" {
 		return nil, fmt.Errorf("machine %q can't be thawed: it was frozen %s, and a memory dump "+
 			"can't be loaded by another VMM version. Go back to that VMM to thaw it, or remove it "+
 			"(kling rm %s) and start it again", mc.Name, strings.Replace(causa, "made with", "with", 1), mc.Name)
 	}
 	// KERNEL (K2), como runFrom con los dorados: solo se avisa, porque
 	// descongelar no usa vmlinux (ver avisoKernel).
-	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
+	if aviso := m.avisoKernel(sl.KernelSHA256, fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
 	// Admisión de memoria, como Run y runFrom: descongelar devuelve al host
@@ -3354,7 +3358,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	defer releaseMem()
 	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
-	base := leerSello(dir).DiffBase
+	base := sl.DiffBase
 	if base != "" {
 		if err := m.baseDiffValida(mc, base); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
@@ -3536,14 +3540,26 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
+	crono.marca(&crono.p.ForwardsMS)
 	// Sus credenciales (credenciales.go): el proxy y el resolver se rehicieron
 	// con la red si esta se había desmontado, y el VMM es nuevo, así que los
 	// marcadores vuelven a MMDS. Un fallo no tumba el thaw: la máquina sirve y
 	// el dominio con credencial falla cerrado, y queda dicho en el log.
-	if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
-		log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
-	}
-	crono.marca(&crono.p.ForwardsMS)
+	//
+	// A la vez que el resync de abajo: no dependen la una del otro. La
+	// entrega habla con el VMM (MMDS, c) y con el proxy del host; el resync,
+	// con el agente del invitado (reloj, entropía, generación), que no lee
+	// MMDS ni las credenciales. Lo que sí las necesita, los ganchos tras
+	// restaurar (POST /hooks), se lanza después, con las dos terminadas. Y la
+	// máquina no se da por running hasta que acaban las dos. Escribe en mc
+	// (CredentialAnyDatabase), que nadie más toca hasta esperarla.
+	credsHechas := make(chan struct{})
+	go func() {
+		defer close(credsHechas)
+		if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
+			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
+		}
+	}()
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
@@ -3552,7 +3568,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		m.pruebasAntesDeResync()
 	}
 	_, sinAgenteMem := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID))
-	if !sinAgenteMem && !leerSello(m.dir(mc.ID)).SinAgente {
+	if !sinAgenteMem && !sl.SinAgente {
 		// Sin el ctx de la petición (B12): con la memoria ya cargada, el
 		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
 		// cancelado hacía que resyncGuest volviera al instante: la máquina
@@ -3560,7 +3576,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// propio resync lleva su plazo (resyncPlazo).
 		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
 	}
-	crono.marca(&crono.p.ResyncMS)
+	<-credsHechas
+	crono.marca(&crono.p.ResyncMS) // con la entrega de credenciales, que va a la vez
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
