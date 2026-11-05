@@ -857,6 +857,11 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.spec.MachineConfig != nil && s.spec.MachineConfig.Nested {
+		// El estado de EL2 no va en el snapshot (docs/backend-hv.md).
+		fault(w, errors.New("snapshots of a nested-virtualization VM are not supported"))
+		return
+	}
 	if s.st != stPaused {
 		fault(w, fmt.Errorf("the microVM must be paused to create a snapshot (it is %s)", s.estado()))
 		return

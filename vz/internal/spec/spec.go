@@ -57,6 +57,11 @@ type BootSource struct {
 type MachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMiB int `json:"mem_size_mib"`
+	// Nested: virtualización anidada (solo kling-hv; docs/backend-hv.md). No
+	// es del API de Firecracker, que rechaza campos que no conoce: el núcleo
+	// solo lo manda cuando lo pide la máquina. Una máquina anidada no tiene
+	// snapshot, así que el campo no llega a ningún snapshot.json.
+	Nested bool `json:"kling_nested,omitempty"`
 }
 
 type Drive struct {

@@ -98,13 +98,19 @@ func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
 
 // construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
 // virtio) y devuelve el DTB, o nil si no se pudo construir.
-func construirFDT() []byte {
+func construirFDT() []byte { return construirFDTAnidada(false) }
+
+// construirFDTAnidada: lo mismo para una VM con EL2 o sin él.
+func construirFDTAnidada(anidada bool) []byte {
 	buf := make([]byte, 1<<16)
 	args := C.CString("console=ttyS0")
 	defer C.free(unsafe.Pointer(args))
 	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: 2, bootargs: args, dist_size: 0x10000,
 		redist_size: 0x20000, uart_spi: 33, rtc_spi: 34, nvirtio: 1}
 	p.virtio_spi[0] = 35
+	if anidada {
+		p.nested = 1
+	}
 	n := C.fdt_build(unsafe.Pointer(&buf[0]), C.size_t(len(buf)), &p)
 	if n == 0 {
 		return nil

@@ -320,6 +320,9 @@ func puedeRamificarse(src *api.Machine) error {
 	// Igual que Freeze, y por lo mismo: el secreto vive en la RAM, y el
 	// volcado acabaría en un mem.file en disco que además comparten todas las
 	// copias.
+	if src.Nested {
+		return fmt.Errorf("%w: %s can't be forked: %s", ErrFork, src.Name, errAnidadaSinVolcado)
+	}
 	if src.HasSecrets {
 		return fmt.Errorf("%w: %s has session secrets injected via MMDS, and a fork would write them "+
 			"to disk and hand them to every copy", ErrFork, src.Name)

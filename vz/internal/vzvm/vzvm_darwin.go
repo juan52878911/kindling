@@ -53,6 +53,10 @@ func (f *Factory) NewMachineID() (string, error) {
 }
 
 func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (server.VM, error) {
+	if s.MachineConfig.Nested {
+		// Virtualization.framework no da EL2 a sus VM Linux; kling-hv sí.
+		return nil, errors.New("kling-vz does not support nested virtualization (use the kling-hv backend)")
+	}
 	boot, err := vz.NewLinuxBootLoader(s.BootSource.KernelImagePath, vz.WithCommandLine(bootArgs))
 	if err != nil {
 		return nil, fmt.Errorf("kernel %s: %w", s.BootSource.KernelImagePath, err)

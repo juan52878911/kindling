@@ -126,6 +126,8 @@ type Machine struct {
 
 	// AllowExec: la máquina acepta exec y ficheros (ver RunRequest.AllowExec).
 	AllowExec bool `json:"allow_exec,omitempty"`
+	// Nested: virtualización anidada (ver RunRequest.Nested). No se congela.
+	Nested bool `json:"nested,omitempty"`
 	// OnTTL: "remove" si se destruye al vencer el TTL; vacío = se congela.
 	OnTTL string `json:"on_ttl,omitempty"`
 
@@ -378,6 +380,13 @@ type RunRequest struct {
 	// máquina con AllowExec (si no, 409); y al revés, las máquinas de un snapshot
 	// con AllowExec la tienen siempre, se pida o no.
 	AllowExec bool `json:"allow_exec,omitempty"`
+
+	// Nested arranca la máquina con virtualización anidada: el invitado
+	// arranca en EL2 con un kernel con KVM (images/vmlinux-nested) y puede
+	// correr Firecracker dentro. Solo con el backend kling-hv en un Mac que lo
+	// admita (M3 o posterior, macOS 15 o posterior; docs/backend-hv.md), sin
+	// From. Una máquina así no se congela, ni se hace snapshot o fork de ella.
+	Nested bool `json:"nested,omitempty"`
 
 	// OnTTL es qué pasa cuando vence TTLSeconds: "freeze" (por defecto) o
 	// "remove".

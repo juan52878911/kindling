@@ -40,6 +40,11 @@ const CapabilityStart = "start"
 // fijo de 512 MiB sin un solo error.
 const CapabilityDisk = "disk"
 
+// CapabilityNested es la capacidad de GET /info que dice que el daemon
+// entiende RunRequest.Nested. Un daemon anterior ignoraría el campo y
+// arrancaría una máquina sin virtualización anidada sin decir nada.
+const CapabilityNested = "nested"
+
 // MachineEnvBootParam le dice al agente que hay entorno de la máquina en MMDS
 // y que no arranque el servicio sin él.
 const MachineEnvBootParam = "kling.env"

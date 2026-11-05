@@ -325,6 +325,14 @@ func TestErrorsAndUnknownRoutes(t *testing.T) {
 	r.mustFail("PUT", "/kling/forwards", `{"ports":[8080]}`, "not up yet")
 }
 
+// Una VM anidada (kling_nested) no tiene snapshot: se niega antes de mirar
+// el estado, sin tocar el VMM.
+func TestSnapshotAnidadaSeNiega(t *testing.T) {
+	r := newRig(t)
+	r.must("PUT", "/machine-config", `{"vcpu_count":1,"mem_size_mib":256,"kling_nested":true}`)
+	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"/a","mem_file_path":"/b"}`, "nested-virtualization")
+}
+
 func TestCommitSnapshotSequence(t *testing.T) {
 	r := newRig(t)
 	dir := t.TempDir()

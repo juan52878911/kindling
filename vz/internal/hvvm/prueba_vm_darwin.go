@@ -20,5 +20,8 @@ func filtrarID(pfr0, pfr1, zfr0, smfr0 uint64) (uint64, uint64, uint64, uint64) 
 // pendiente cuadra.
 func pruebaCPUOn() int { return int(C.khv_prueba_cpu_on()) }
 
+// sysregISS es khv_sysreg_iss: el hv_sys_reg_t de un MSR/MRS atrapado.
+func sysregISS(iss uint64) uint16 { return uint16(C.khv_sysreg_iss(C.uint64_t(iss))) }
+
 // finMotivo es khv_fin_motivo: KHV_FIN_NADA mientras la VM no haya terminado.
 func finMotivo() int { return int(C.khv_fin_motivo()) }

@@ -1,0 +1,15 @@
+# Variante "nested" del kernel arm64 (VARIANT=nested build.sh), sobre
+# config-common + config-arm64: KVM para las máquinas anidadas de kling-hv
+# (kling run -nested, docs/backend-hv.md), que arrancan en EL2 y pueden correr
+# Firecracker dentro. Es un kernel aparte (images/vmlinux-nested): el normal no
+# lleva esto, así que su sha256 (el que firma los dorados) no cambia.
+#
+# Va integrado (sin módulos, check-kernel-config.sh lo exige). Con VHE el
+# kernel se queda en EL2 y KVM corre ahí mismo; sin EL2 (una máquina normal)
+# KVM solo avisa de que no hay modo HYP y sigue.
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+
+# Lo que pide Firecracker dentro del invitado para su red (tap). La vsock de
+# Firecracker es un socket unix del anfitrión: no hace falta vhost.
+CONFIG_TUN=y

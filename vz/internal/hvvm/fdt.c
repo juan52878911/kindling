@@ -150,7 +150,9 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   node("psci");
   static const char psci_compat[] = "arm,psci-1.0\0arm,psci-0.2";
   prop("compatible", psci_compat, sizeof psci_compat);
-  prop_str("method", "hvc");
+  // Con EL2 el kernel corre en EL2 y su HVC no sale del invitado (va a su
+  // propio vector); el SMC sí lo atrapa HVF (vm.c, EC 0x17).
+  prop_str("method", p->nested ? "smc" : "hvc");
   end();
 
   snprintf(nombre, sizeof nombre, "intc@%llx", GIC_DIST_BASE);
@@ -162,6 +164,12 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
     uint64_t rs = p->redist_size * p->ncpus;
     uint32_t c[8] = {0, (uint32_t)GIC_DIST_BASE, 0, (uint32_t)p->dist_size, 0, (uint32_t)GIC_REDIST_BASE, rs >> 32, (uint32_t)rs};
     prop_cells("reg", c, 8);
+  }
+  if (p->nested) {
+    // Interrupción de mantenimiento del interfaz de virtualización (ICH_*):
+    // PPI 9 (HV_GIC_INT_MAINTENANCE = INTID 25). Sin ella KVM no usa el vGIC.
+    uint32_t c[3] = {1, 9, 4};
+    prop_cells("interrupts", c, 3);
   }
   prop_u32("phandle", PH_GIC);
   end();

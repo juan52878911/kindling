@@ -233,6 +233,7 @@ kling run:  -mem
 kling run:  -mem-max
 kling run:  -mount
 kling run:  -name
+kling run:  -nested
 kling run:  -on-ttl
 kling run:  -p
 kling run:  -platform

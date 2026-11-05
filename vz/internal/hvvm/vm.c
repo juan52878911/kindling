@@ -152,6 +152,18 @@ static const hv_gic_icc_reg_t ICCREGS[] = {
 };
 #define NICC (sizeof ICCREGS / sizeof ICCREGS[0])
 
+// Registros EL2 de una VM anidada que un CPU_ON vuelve a poner como al crear
+// el vCPU (ver reiniciar_sysregs): los que un kernel en EL2 deja a su gusto
+// (MMU de EL2, vectores, HCR) y que el siguiente encendido no debe heredar.
+// No van en el snapshot: una VM anidada no se congela (khv_snapshot).
+static const hv_sys_reg_t SYSREGS_EL2[] = {
+    HV_SYS_REG_SCTLR_EL2, HV_SYS_REG_HCR_EL2,   HV_SYS_REG_CPTR_EL2,  HV_SYS_REG_MDCR_EL2,
+    HV_SYS_REG_TCR_EL2,   HV_SYS_REG_TTBR0_EL2, HV_SYS_REG_TTBR1_EL2, HV_SYS_REG_MAIR_EL2,
+    HV_SYS_REG_VBAR_EL2,  HV_SYS_REG_CNTHCTL_EL2, HV_SYS_REG_CNTHP_CTL_EL2, HV_SYS_REG_VTTBR_EL2,
+    HV_SYS_REG_VTCR_EL2,
+};
+#define NSYS_EL2 (sizeof SYSREGS_EL2 / sizeof SYSREGS_EL2[0])
+
 struct cpu_state {
   uint64_t x[31], pc, cpsr, fpcr, fpsr;
   hv_simd_fp_uchar16_t q[32];
@@ -231,6 +243,14 @@ static int ndisks;
 static char *disk_path[KHV_MAX_DISKS];
 static bool disk_ro[KHV_MAX_DISKS];
 static bool hay_red, hay_rng, hay_vsock, hay_globo;
+static bool anidada;  // VM con EL2 (khv_config.nested)
+
+// Una VM anidada no se congela ni se restaura: el estado de EL2 (sus
+// registros, los ICH_* del interfaz de virtualización del GIC, el timer de
+// EL2 y lo que HVF guarde de un invitado de segundo nivel en marcha) no va en
+// la cabecera v4, y no hay forma de comprobar desde aquí que hv_gic_state lo
+// lleve entero. Mejor un error claro que un snapshot que restaura un KVM roto.
+#define ERR_SNAP_ANIDADA "snapshots of a nested-virtualization VM are not supported"
 static int net_fd = -1;
 static uint8_t net_mac[6];
 static int net_mtu;
@@ -253,6 +273,8 @@ struct cpu {
   // esto la entrada física del CPU_ON corría con la MMU encendida y el
   // kernel moría en un Oops.
   struct cpu_state inicial;
+  uint64_t inicial_el2[NSYS_EL2];  // lo mismo para los EL2 de una VM anidada
+  uint8_t inicial_el2_ok[NSYS_EL2];
   bool kick;
   bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
@@ -411,8 +433,12 @@ static void cargar_cpu(struct cpu *c) {
   c->on = s->on;
 }
 
-// CPSR de la entrada de un vCPU: EL1h con DAIF enmascarado.
+// CPSR de la entrada de un vCPU: EL1h con DAIF enmascarado; en una VM
+// anidada, EL2h (el kernel arranca en EL2 y decide él si baja a EL1 o se
+// queda con VHE, como en una máquina física).
 #define CPSR_ENTRADA 0x3c5
+#define CPSR_ENTRADA_EL2 0x3c9
+#define CPSR_INICIO (anidada ? CPSR_ENTRADA_EL2 : CPSR_ENTRADA)
 
 // estado_cpu_on deja en d lo que tiene un vCPU justo al entrar por un CPU_ON:
 // los registros de sistema de reinicio (ini), PC en la entrada, X0 con el
@@ -435,6 +461,16 @@ static void reiniciar_sysregs(struct cpu *c) {
   for (size_t i = 0; i < NSYS; i++)
     if (c->inicial.sys_ok[i] && hv_vcpu_set_sys_reg(c->id, SYSREGS[i], c->inicial.sys[i]) != HV_SUCCESS)
       logf_("cpu%d: could not reset sysreg %#x", c->idx, SYSREGS[i]);
+  if (!anidada) return;
+  for (size_t i = 0; i < NSYS_EL2; i++)
+    if (c->inicial_el2_ok[i] && hv_vcpu_set_sys_reg(c->id, SYSREGS_EL2[i], c->inicial_el2[i]) != HV_SUCCESS)
+      logf_("cpu%d: could not reset EL2 sysreg %#x", c->idx, SYSREGS_EL2[i]);
+}
+
+// guardar_el2 apunta los EL2 de reinicio de un vCPU recién creado.
+static void guardar_el2(struct cpu *c) {
+  for (size_t i = 0; i < NSYS_EL2; i++)
+    c->inicial_el2_ok[i] = hv_vcpu_get_sys_reg(c->id, SYSREGS_EL2[i], &c->inicial_el2[i]) == HV_SUCCESS;
 }
 
 // cpu_guardada deja en d el estado de c que va en el snapshot, con mu. Un
@@ -830,7 +866,9 @@ static void wfi(struct cpu *c) {
   hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_CNTV_CTL_EL0, &ctl);
   hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_CNTV_CVAL_EL0, &cval);
   uint64_t ahora = mach_absolute_time();
-  uint64_t tope_ns = ncpus > 1 ? 2000000 : 1000000000;  // 2 ms con SMP, 1 s si no
+  // 2 ms con SMP o con EL2 (el kernel puede estar usando el timer de EL2,
+  // CNTHP, que aquí no se mira), 1 s si no.
+  uint64_t tope_ns = ncpus > 1 || anidada ? 2000000 : 1000000000;
   if ((ctl & 1) && !(ctl & 2)) {
     uint64_t vence = cval + c->vtimer_offset;
     if (vence <= ahora) return;
@@ -860,6 +898,33 @@ static void volcar(struct cpu *c, const char *por) {
 }
 
 static int ram_reparar_ipa(struct cpu *c, uint64_t ipa);
+
+// khv_sysreg_iss traduce el ISS de un MSR/MRS atrapado (EC 0x18: Op0, Op2,
+// Op1, CRn, Rt, CRm, dirección) a la codificación de hv_sys_reg_t (la de
+// MRS: Op0:Op1:CRn:CRm:Op2, p. ej. CNTHCTL_EL2 = 0xe708).
+uint16_t khv_sysreg_iss(uint64_t iss) {
+  unsigned op0 = (iss >> 20) & 3, op2 = (iss >> 17) & 7, op1 = (iss >> 14) & 7, crn = (iss >> 10) & 0xf,
+           crm = (iss >> 1) & 0xf;
+  return (uint16_t)(op0 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2);
+}
+
+// sysreg_el2: en una VM con EL2, HVF devuelve al VMM algunos accesos del
+// kernel a registros de EL2 que él mismo lleva (medido en el M4 con macOS
+// 26.5: CNTHCTL_EL2, que el kernel escribe en init_el2). Se atienden con
+// hv_vcpu_{get,set}_sys_reg, como hace QEMU. true si el registro era de HVF;
+// false si HVF no lo conoce (queda como antes: lectura a 0, escritura
+// ignorada).
+static bool sysreg_el2(struct cpu *c, uint64_t syn) {
+  hv_sys_reg_t r = (hv_sys_reg_t)khv_sysreg_iss(syn);
+  unsigned rt = (syn >> 5) & 0x1f;
+  if (syn & 1) {
+    uint64_t v = 0;
+    if (hv_vcpu_get_sys_reg(c->id, r, &v) != HV_SUCCESS) return false;
+    set_x(c, rt, v);
+    return true;
+  }
+  return hv_vcpu_set_sys_reg(c->id, r, get_x(c, rt)) == HV_SUCCESS;
+}
 
 // LOS vCPU SE CREAN EN ORDEN DE ÍNDICE.
 //
@@ -929,6 +994,7 @@ static void *vcpu_hilo(void *arg) {
     // estado_cpu_on): leer el resto era una pasada de más por vCPU en cada
     // restauración.
     guardar_sysregs(c, &c->inicial);
+    if (anidada) guardar_el2(c);
   }
   pthread_mutex_lock(&mu);
   if (r != HV_SUCCESS) {
@@ -956,7 +1022,7 @@ static void *vcpu_hilo(void *arg) {
     if (c->idx == 0) {
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, kernel_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, fdt_gpa));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_INICIO));
       c->on = true;
     }
   }
@@ -980,7 +1046,7 @@ static void *vcpu_hilo(void *arg) {
       reiniciar_sysregs(c);
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, c->on_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, c->on_ctx));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_INICIO));
     }
     if (t_primer_run < 0 && c->idx == 0) t_primer_run = ms_desde_inicio();
     VOK(hv_vcpu_run(c->id));
@@ -1037,6 +1103,10 @@ static void *vcpu_hilo(void *arg) {
           }
           case 0x18: {  // MSR/MRS atrapado: lecturas a 0, escrituras ignoradas
             unsigned rt = (syn >> 5) & 0x1f;
+            if (anidada && sysreg_el2(c, syn)) {
+              avanzar_pc(c);
+              break;
+            }
             static int avisos;
             if (avisos++ < 10) logf_("cpu%d: trapped sysreg iss=%#llx", c->idx, syn & 0x1ffffff);
             if (syn & 1) set_x(c, rt, 0);
@@ -1184,6 +1254,11 @@ static void soltar_locked(void) {
 static bool vm_tocada;
 bool khv_vm_tocada(void) { return vm_tocada; }
 
+int khv_el2_soportado(void) {
+  bool si = false;
+  return hv_vm_config_get_el2_supported(&si) == HV_SUCCESS && si;
+}
+
 int khv_create(const struct khv_config *c) {
   t_inicio = mach_absolute_time();
   mach_timebase_info(&tb);
@@ -1197,6 +1272,11 @@ int khv_create(const struct khv_config *c) {
   }
   if (c->ndisks < 1 || c->ndisks > KHV_MAX_DISKS) {
     fallo("between 1 and %d drives", KHV_MAX_DISKS);
+    return -1;
+  }
+  // Antes de tocar HVF: sin EL2 el proceso sigue sirviendo para otra VM.
+  if (c->nested && !khv_el2_soportado()) {
+    fallo("nested virtualization is not supported on this Mac (needs an Apple M3 or later and macOS 15 or later)");
     return -1;
   }
   ncpus = c->ncpus;
@@ -1229,7 +1309,19 @@ int khv_create(const struct khv_config *c) {
   // Desde aquí un fallo deja el proceso inservible para otra VM
   // (Hypervisor.framework admite una por proceso y no hay vuelta atrás).
   vm_tocada = true;
-  TRY(hv_vm_create(NULL));
+  anidada = c->nested != 0;
+  if (anidada) {
+    hv_vm_config_t vc = hv_vm_config_create();
+    hv_return_t r = hv_vm_config_set_el2_enabled(vc, true);
+    if (r == HV_SUCCESS) r = hv_vm_create(vc);
+    os_release(vc);
+    if (r != HV_SUCCESS) {
+      fallo("hv_vm_create with EL2 (nested virtualization) failed: 0x%x", (unsigned)r);
+      return -1;
+    }
+  } else {
+    TRY(hv_vm_create(NULL));
+  }
   hv_gic_config_t g = hv_gic_config_create();
   TRY(hv_gic_config_set_distributor_base(g, GIC_DIST_BASE));
   TRY(hv_gic_config_set_redistributor_base(g, GIC_REDIST_BASE));
@@ -1414,7 +1506,7 @@ static int cargar_kernel(void) {
   close(fd);
 
   struct fdt_params p = {.ram_size = g_ram_size, .ncpus = ncpus, .bootargs = cmdline, .uart_spi = uart_intid,
-                         .rtc_spi = rtc_intid, .nvirtio = nvirtio};
+                         .rtc_spi = rtc_intid, .nvirtio = nvirtio, .nested = anidada};
   size_t sz;
   hv_gic_get_distributor_size(&sz);
   p.dist_size = sz;
@@ -1475,6 +1567,10 @@ static int escribir_todo(int fd, const void *b, size_t n, off_t off) {
 }
 
 int khv_restore(const char *mem_path) {
+  if (anidada) {
+    fallo(ERR_SNAP_ANIDADA);
+    return -1;
+  }
   int fd = open(mem_path, O_RDONLY);
   if (fd < 0) {
     fallo("open %s: %s", mem_path, strerror(errno));
@@ -1786,6 +1882,10 @@ int khv_resume(unsigned bit) {
 }
 
 int khv_snapshot(const char *mem_out) {
+  if (anidada) {
+    fallo(ERR_SNAP_ANIDADA);
+    return -1;
+  }
   pthread_mutex_lock(&op_mu);
   int ret = -1;
   int fd = -1;
