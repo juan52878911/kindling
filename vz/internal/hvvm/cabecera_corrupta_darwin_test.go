@@ -22,9 +22,9 @@ const (
 // volcadoBueno es un mem.file (de la versión dada) que pasa la validación: 4 KiB de RAM, la
 // cabecera, 64 bytes de GIC y el pie. Devuelve sus bytes y dónde empieza
 // cada sección.
-func volcadoBueno(t *testing.T, version uint32, hdrLen uint64) (b []byte, hdr, gic, pie int) {
+func volcadoBueno(t testing.TB, version, ncpus uint32, hdrLen uint64) (b []byte, hdr, gic, pie int) {
 	t.Helper()
-	ruta := escribirMem(t, memSpec{magia: magiaFijada, version: version, hdrLen: hdrLen, gicHdr: 64, gic: 64})
+	ruta := escribirMem(t, memSpec{magia: magiaFijada, version: version, ncpus: ncpus, hdrLen: hdrLen, gicHdr: 64, gic: 64})
 	b, err := os.ReadFile(ruta)
 	if err != nil {
 		t.Fatal(err)
@@ -44,12 +44,24 @@ func volcadoBueno(t *testing.T, version uint32, hdrLen uint64) (b []byte, hdr, g
 // restaurarBytes escribe b en ruta y llama a khv_restore. Si el proceso
 // muriera (SIGBUS al mapear lo que no hay, un malloc absurdo), el test entero
 // cae: lo que se prueba es que eso no pase nunca.
-func restaurarBytes(t *testing.T, ruta string, b []byte) error {
+func restaurarBytes(t testing.TB, ruta string, b []byte) error {
 	t.Helper()
 	if err := os.WriteFile(ruta, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return restaurarSinVM(ruta)
+}
+
+// volcadosBuenos: los de cada versión que se prueban rotos.
+var volcadosBuenos = []struct {
+	nombre         string
+	version, ncpus uint32
+	hdrLen         uint64
+}{
+	{"v5", versionFijada, 10, hdrV5(10)},
+	{"v4", v4Fijada, 2, hdrFijada},
+	{"v3", 3, 1, hdrV3Fijada},
+	{"v1", 1, 1, hdrV1Fijada},
 }
 
 func errConocido(err error) bool {
@@ -73,16 +85,8 @@ func errConocido(err error) bool {
 // «Estabilidad de kling-hv»).
 func TestRestaurarCabeceraBitsCambiados(t *testing.T) {
 	ruta := filepath.Join(t.TempDir(), "mem.file")
-	for _, v := range []struct {
-		nombre  string
-		version uint32
-		hdrLen  uint64
-	}{
-		{"v4", versionFijada, hdrFijada},
-		{"v3", 3, hdrV3Fijada},
-		{"v1", 1, hdrV1Fijada},
-	} {
-		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.hdrLen)
+	for _, v := range volcadosBuenos {
+		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.ncpus, v.hdrLen)
 		// Campos cuya corrupción se tiene que rechazar en la validación:
 		// [desde, hasta) dentro del fichero.
 		vigilados := [][2]int{
@@ -116,7 +120,7 @@ func TestRestaurarCabeceraBitsCambiados(t *testing.T) {
 				}
 				// La versión 3 con la cabecera de otra versión: hueco
 				// conocido, lo vigila TestRestaurarVersionConOtraCabecera.
-				if off == hdr+8 && uint32(b[off]) == versionFijada && v.version != versionFijada {
+				if off == hdr+8 && uint32(b[off]) == v4Fijada && v.version != v4Fijada {
 					continue
 				}
 				if vigilado(off) && strings.Contains(err.Error(), errMaquina) {
@@ -144,16 +148,8 @@ func TestRestaurarCabeceraBitsCambiados(t *testing.T) {
 // (abajo).
 func TestRestaurarRecortadoEnCadaFrontera(t *testing.T) {
 	ruta := filepath.Join(t.TempDir(), "mem.file")
-	for _, v := range []struct {
-		nombre  string
-		version uint32
-		hdrLen  uint64
-	}{
-		{"v4", versionFijada, hdrFijada},
-		{"v3", 3, hdrV3Fijada},
-		{"v1", 1, hdrV1Fijada},
-	} {
-		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.hdrLen)
+	for _, v := range volcadosBuenos {
+		bueno, hdr, gic, pie := volcadoBueno(t, v.version, v.ncpus, v.hdrLen)
 		fronteras := []int{0, 1, hdr, gic, pie, len(bueno)}
 		// Los campos de la cabecera que se validan también son fronteras.
 		fronteras = append(fronteras, hdr+8, hdr+12, hdr+offRAMHdr, hdr+offRAMHdr+8, hdr+offGICHdr, hdr+offGICHdr+8)
@@ -213,9 +209,30 @@ func TestRestaurarVersionConOtraCabecera(t *testing.T) {
 		{"v4 con la cabecera de la v2", hdrV2Fijada},
 		{"v4 con la cabecera de la v3", hdrV3Fijada},
 	} {
-		err := restaurarSinVM(memFile(t, magiaFijada, versionFijada, c.hdrLen))
+		err := restaurarSinVM(memFile(t, magiaFijada, v4Fijada, c.hdrLen))
 		if err == nil || !strings.Contains(err.Error(), errVersion) {
 			t.Errorf("%s: want %q, got %v", c.nombre, errVersion, err)
 		}
 	}
+}
+
+// FuzzCabecera: lo que va detrás de la RAM (cabecera, GIC y pie) con bytes
+// cualesquiera, a partir de volcados buenos de cada versión (la 5 con 10
+// vCPU). khv_restore nunca rompe el proceso ni deja pasar uno que no
+// cuadre: siempre uno de sus errores (aquí, sin VM, como mucho el de la
+// máquina que no casa).
+func FuzzCabecera(f *testing.F) {
+	for _, v := range volcadosBuenos {
+		b, hdr, _, _ := volcadoBueno(f, v.version, v.ncpus, v.hdrLen)
+		f.Add(b[hdr:])
+	}
+	ram := make([]byte, 4096)
+	// Un fichero por proceso: cada trabajador del fuzz es un proceso y dentro
+	// de él las llamadas van una tras otra.
+	ruta := filepath.Join(f.TempDir(), "mem.file")
+	f.Fuzz(func(t *testing.T, cola []byte) {
+		if err := restaurarBytes(t, ruta, append(append([]byte{}, ram...), cola...)); !errConocido(err) {
+			t.Fatalf("%d bytes after the RAM: %v", len(cola), err)
+		}
+	})
 }

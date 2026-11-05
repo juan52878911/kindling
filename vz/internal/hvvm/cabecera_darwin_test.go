@@ -18,23 +18,29 @@ import (
 // causaFormatoVolcado) lee la magia y la versión con las mismas constantes.
 const (
 	magiaFijada   = 0x4b4c4e4748563032 // "KLNGHV02"
-	versionFijada = 4
-	hdrFijada     = 11776 // sizeof(struct snap_hdr) en la versión 4 (el globo con la cola del informe de libres)
+	versionFijada = 5                  // la 4 con los vCPU de más de 8 detrás
+	v4Fijada      = 4
+	hdrFijada     = 11776 // la cabecera de la versión 4 (el globo con la cola del informe de libres)
 	hdrV3Fijada   = 11744 // la versión 3: el globo con la cola de estadísticas y sin la del informe
 	hdrV2Fijada   = 11696 // la versión 2: el globo sin esa cola
 	hdrV1Fijada   = 11384 // offsetof(struct snap_hdr, hay_vsock): la versión 1
 	pieFijado     = 32
+	cpuFijada     = 1296 // sizeof(struct cpu_state): lo que crece la cabecera de la 5 por vCPU de más
+	cpusV4Fijado  = 8    // los vCPU que caben en la cabecera de la 4
 )
 
+// hdrV5 es la cabecera de la versión 5 con n vCPU (n > cpusV4Fijado).
+func hdrV5(n uint64) uint64 { return hdrFijada + (n-cpusV4Fijado)*cpuFijada }
+
 func TestCabeceraKLNGHV(t *testing.T) {
-	magia, version, hdr, hdrV1, hdrV2, hdrV3, pie := formatoSnap()
+	magia, version, hdr, hdrV1, hdrV2, hdrV3, pie, cpu, cpusV4 := formatoSnap()
 	if magia != magiaFijada || version != versionFijada || hdr != hdrFijada || hdrV1 != hdrV1Fijada || hdrV2 != hdrV2Fijada ||
-		hdrV3 != hdrV3Fijada || pie != pieFijado {
-		t.Fatalf("the kling-hv memory file layout changed: magic %#x version %d header %d (v1 %d, v2 %d, v3 %d) footer %d; "+
-			"fixed: %#x %d %d (%d, %d, %d) %d. If struct snap_hdr changed, bump SNAP_VERSION (and read the old one), "+
-			"update internal/machine (magiaHV, versionHVMax) and only then these constants",
-			magia, version, hdr, hdrV1, hdrV2, hdrV3, pie, magiaFijada, versionFijada, hdrFijada, hdrV1Fijada, hdrV2Fijada,
-			hdrV3Fijada, pieFijado)
+		hdrV3 != hdrV3Fijada || pie != pieFijado || cpu != cpuFijada || cpusV4 != cpusV4Fijado {
+		t.Fatalf("the kling-hv memory file layout changed: magic %#x version %d header %d (v1 %d, v2 %d, v3 %d) footer %d "+
+			"cpu %d (%d in v4); fixed: %#x %d %d (%d, %d, %d) %d %d (%d). If struct snap_hdr changed, bump SNAP_VERSION "+
+			"(and read the old one), update internal/machine (magiaHV, versionHVMax) and only then these constants",
+			magia, version, hdr, hdrV1, hdrV2, hdrV3, pie, cpu, cpusV4, magiaFijada, versionFijada, hdrFijada, hdrV1Fijada,
+			hdrV2Fijada, hdrV3Fijada, pieFijado, cpuFijada, cpusV4Fijado)
 	}
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], magia)
@@ -56,18 +62,19 @@ func memFile(t *testing.T, magia uint64, version uint32, hdrLen uint64) string {
 // cabecera, y gic, los bytes del GIC que van detrás de ella.
 type memSpec struct {
 	magia                              uint64
-	version                            uint32
+	version, ncpus                     uint32
 	hdrLen                             uint64
 	ramFichero, ramPie, hdrOff, ramHdr uint64
 	gicHdr, gic                        uint64
 }
 
 const (
-	offRAMHdr = 24              // offsetof(struct snap_hdr, ram_size)
-	offGICHdr = hdrV1Fijada - 8 // offsetof(struct snap_hdr, gic_size): justo antes de hay_vsock
+	offCPUsHdr = 12              // offsetof(struct snap_hdr, ncpus)
+	offRAMHdr  = 24              // offsetof(struct snap_hdr, ram_size)
+	offGICHdr  = hdrV1Fijada - 8 // offsetof(struct snap_hdr, gic_size): justo antes de hay_vsock
 )
 
-func escribirMem(t *testing.T, m memSpec) string {
+func escribirMem(t testing.TB, m memSpec) string {
 	t.Helper()
 	ram := m.ramFichero
 	if ram == 0 {
@@ -85,6 +92,7 @@ func escribirMem(t *testing.T, m memSpec) string {
 	h := b[ram:]
 	binary.LittleEndian.PutUint64(h[0:], m.magia)
 	binary.LittleEndian.PutUint32(h[8:], m.version)
+	binary.LittleEndian.PutUint32(h[offCPUsHdr:], m.ncpus)
 	binary.LittleEndian.PutUint64(h[offRAMHdr:], m.ramHdr)
 	if m.hdrLen > offGICHdr {
 		binary.LittleEndian.PutUint64(h[offGICHdr:], m.gicHdr)
@@ -108,7 +116,7 @@ func escribirMem(t *testing.T, m memSpec) string {
 func TestRestaurarMemRecortado(t *testing.T) {
 	const roto = "truncated or inconsistent kling-hv memory file"
 	v3 := func(m memSpec) memSpec {
-		m.magia, m.version, m.hdrLen = magiaFijada, versionFijada, hdrFijada
+		m.magia, m.version, m.hdrLen = magiaFijada, v4Fijada, hdrFijada
 		return m
 	}
 	casos := []struct {
@@ -139,26 +147,38 @@ func TestRestaurarMemRecortado(t *testing.T) {
 // (explicarRestauracion en internal/machine/meta.go). Una cabecera buena pasa
 // de ahí y falla al compararla con la máquina (aquí no hay ninguna).
 func TestRestaurarCabeceraKLNGHV(t *testing.T) {
+	const lee = "this kling-hv reads up to 5"
 	casos := []struct {
 		nombre  string
 		magia   uint64
 		version uint32
+		ncpus   uint32
 		hdrLen  uint64
 		quiero  string
 	}{
-		{"otra magia", 0x4b4c4e4748563031, versionFijada, hdrFijada, "is not a kling-hv memory file"},
-		{"hdr_len de nadie", magiaFijada, versionFijada, hdrFijada - 8, "is not a kling-hv memory file"},
-		{"versión del futuro", magiaFijada, versionFijada + 1, hdrFijada, "this kling-hv reads 4"},
-		{"v1 con la cabecera de la v4", magiaFijada, 1, hdrFijada, "this kling-hv reads 4"},
-		{"v2 con la cabecera de la v4", magiaFijada, 2, hdrFijada, "this kling-hv reads 4"},
-		{"v3 con la cabecera de la v4", magiaFijada, 3, hdrFijada, "this kling-hv reads 4"},
-		{"v4", magiaFijada, versionFijada, hdrFijada, "does not match the configured machine"},
-		{"v3", magiaFijada, 3, hdrV3Fijada, "does not match the configured machine"},
-		{"v2", magiaFijada, 2, hdrV2Fijada, "does not match the configured machine"},
-		{"v1", magiaFijada, 1, hdrV1Fijada, "does not match the configured machine"},
+		{"otra magia", 0x4b4c4e4748563031, v4Fijada, 1, hdrFijada, "is not a kling-hv memory file"},
+		{"hdr_len de nadie", magiaFijada, v4Fijada, 1, hdrFijada - 8, "is not a kling-hv memory file"},
+		{"hdr_len de la v5 sin un vCPU entero", magiaFijada, versionFijada, 10, hdrV5(10) - 16, "is not a kling-hv memory file"},
+		{"hdr_len mayor que el de 64 vCPU", magiaFijada, versionFijada, 65, hdrV5(65), "is not a kling-hv memory file"},
+		{"versión del futuro", magiaFijada, versionFijada + 1, 1, hdrFijada, lee},
+		{"v1 con la cabecera de la v4", magiaFijada, 1, 1, hdrFijada, lee},
+		{"v2 con la cabecera de la v4", magiaFijada, 2, 1, hdrFijada, lee},
+		{"v3 con la cabecera de la v4", magiaFijada, 3, 1, hdrFijada, lee},
+		// La 5 es solo para más de 8 vCPU, y con la cabecera de sus vCPU.
+		{"v5 con 8 vCPU", magiaFijada, versionFijada, 8, hdrFijada, lee},
+		{"v5 con la cabecera de otros vCPU", magiaFijada, versionFijada, 10, hdrV5(11), lee},
+		{"v5 con más vCPU de los que caben", magiaFijada, versionFijada, 65, hdrV5(64), lee},
+		{"v4 con 10 vCPU", magiaFijada, v4Fijada, 10, hdrFijada, lee},
+		{"v4 con 10 vCPU y la cabecera de la v5", magiaFijada, v4Fijada, 10, hdrV5(10), lee},
+		{"v5", magiaFijada, versionFijada, 10, hdrV5(10), "does not match the configured machine"},
+		{"v5 con 64 vCPU", magiaFijada, versionFijada, 64, hdrV5(64), "does not match the configured machine"},
+		{"v4", magiaFijada, v4Fijada, 8, hdrFijada, "does not match the configured machine"},
+		{"v3", magiaFijada, 3, 2, hdrV3Fijada, "does not match the configured machine"},
+		{"v2", magiaFijada, 2, 1, hdrV2Fijada, "does not match the configured machine"},
+		{"v1", magiaFijada, 1, 0, hdrV1Fijada, "does not match the configured machine"},
 	}
 	for _, c := range casos {
-		err := restaurarSinVM(memFile(t, c.magia, c.version, c.hdrLen))
+		err := restaurarSinVM(escribirMem(t, memSpec{magia: c.magia, version: c.version, ncpus: c.ncpus, hdrLen: c.hdrLen}))
 		if err == nil || !strings.Contains(err.Error(), c.quiero) {
 			t.Errorf("%s: %v; quería %q", c.nombre, err, c.quiero)
 		}

@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -414,6 +415,15 @@ func (m *machine) EndReason() string { return FinMotivo() }
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.
 const VersionVolcado = C.KHV_SNAP_VERSION
+
+// MaxVCPUs es el tope de vCPU de una máquina de kling-hv en este Mac: lo que
+// deja Hypervisor.framework (64 en el M4, y MAX_CPUS de khv.h como mucho) sin
+// pasar de los núcleos del host. Más vCPU que núcleos no corre más y deja al
+// invitado esperando a hilos que el host no puede atender a la vez (un
+// spinlock del kernel invitado gira mientras su dueño no tiene núcleo).
+func MaxVCPUs() int {
+	return min(int(C.khv_max_vcpus()), runtime.NumCPU())
+}
 
 // Footprint es la memoria que ocupa este proceso en el host (phys_footprint):
 // aquí vive la VM entera, no hay proceso auxiliar como en vz.

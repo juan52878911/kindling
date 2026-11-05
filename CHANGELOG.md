@@ -6,6 +6,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- kling-hv: os_signpost intervals (subsystem `dev.kindling.hv`) for the cold boot, restore and freeze phases, plus events for the first guest instruction, the agent's first vsock answer and slow vCPU exits; free when nobody traces. `KLING_HV_TRACE=1` also logs a one-line breakdown per boot, restore and freeze (`docs/backend-hv.md`).
+
+### Changed
+
+- kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

@@ -109,6 +109,10 @@ func invalidarAgentePlataforma(n *knet.Net) int { return knet.InvalidarAgente(n)
 // proxies de enlace de todas las máquinas (internal/net).
 func invalidarEnlacesPlataforma(ids ...string) int { return knet.InvalidarEnlaces(ids...) }
 
+// maxVCPUsPlataforma: en Linux el núcleo no pone tope a vcpus; lo pone
+// Firecracker (32) al configurar la máquina.
+func maxVCPUsPlataforma() int { return 0 }
+
 // invalidarOrigenPlataforma no hace nada en Linux: las sesiones que pidió una
 // máquina las corta invalidarAgente (su proxy es del daemon).
 func invalidarOrigenPlataforma(string) int { return 0 }

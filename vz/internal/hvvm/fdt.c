@@ -137,12 +137,14 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   prop_u32("#address-cells", 1);
   prop_u32("#size-cells", 0);
   for (int i = 0; i < p->ncpus; i++) {
-    snprintf(nombre, sizeof nombre, "cpu@%d", i);
+    // reg es la afinidad del MPIDR (Aff1 y Aff0), la que le pone vm.c.
+    uint32_t aff = (uint32_t)khv_mpidr_aff(i);
+    snprintf(nombre, sizeof nombre, "cpu@%x", aff);
     node(nombre);
     prop_str("device_type", "cpu");
     prop_str("compatible", "arm,arm-v8");
     prop_str("enable-method", "psci");
-    prop_u32("reg", i);
+    prop_u32("reg", aff);
     end();
   }
   end();

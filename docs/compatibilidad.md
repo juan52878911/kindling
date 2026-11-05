@@ -26,7 +26,7 @@ interno**, aunque se pueda usar.
   condición: hasta que haya un runner Apple Silicon en CI, cada release pasa a
   mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv` en un Mac con
   Apple Silicon, y `scripts/release.sh` no etiqueta sin eso
-  ([`releases.md`](releases.md), paso 3b). Sus límites (8 vCPU, 8 discos,
+  ([`releases.md`](releases.md), paso 3b). Sus límites (64 vCPU y no más que núcleos, 8 discos,
   sin pantalla) están en [`backend-hv.md`](backend-hv.md).
 - La API HTTP del daemon: rutas, campos JSON, capacidades de `GET /info`,
   códigos de estado documentados en [`api.md`](api.md) y las cabeceras

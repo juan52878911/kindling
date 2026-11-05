@@ -114,7 +114,11 @@ type Deps struct {
 	// Backend es el nombre que dan GET / y GET /kling/info: "vz" (vacío) o
 	// "hv" (kling-hv, el VMM sobre Hypervisor.framework, vz/internal/hvvm).
 	Backend string
-	Logf    func(format string, args ...any)
+	// MaxVCPUs es el tope de vcpu_count del VMM en este Mac (kling-hv: lo
+	// que deja Hypervisor.framework y los núcleos del host); 0 = sin tope
+	// propio, lo dice el framework al crear la VM.
+	MaxVCPUs int
+	Logf     func(format string, args ...any)
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
@@ -482,6 +486,10 @@ func (s *Server) putMachineConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.VCPUCount < 1 || m.MemSizeMiB < 1 {
 		fault(w, errors.New("vcpu_count and mem_size_mib must be positive"))
+		return
+	}
+	if err := spec.ValidateVCPUs(m.VCPUCount, s.d.MaxVCPUs); err != nil {
+		fault(w, err)
 		return
 	}
 	s.mu.Lock()

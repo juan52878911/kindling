@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -869,6 +870,12 @@ func (m *Manager) entornoVMM() []string {
 	}
 	return env
 }
+
+// maxVCPUsPlataforma: en macOS, una vCPU por núcleo del host como mucho. Es
+// el tope de Virtualization.framework (maximumAllowedCPUCount) y el que pone
+// kling-hv (hvvm.MaxVCPUs, que además no pasa de lo que deja
+// Hypervisor.framework): decirlo aquí da el error antes de lanzar el VMM.
+func maxVCPUsPlataforma() int { return runtime.NumCPU() }
 
 // techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
 // flag, ni su dorado, ni su receta, ni la configuración). En macOS, sin techo

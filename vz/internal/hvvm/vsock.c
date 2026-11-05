@@ -241,6 +241,8 @@ static bool paquete(const struct vs_hdr *h, const struct iovec *d, int nd) {
         c->estado = C_ABIERTA;
         c->resultado = 1;
         pthread_cond_broadcast(&cv);
+        // La primera conexión aceptada: el agente ya escucha (ver traza.c).
+        khv_traza_hito(KHV_H_AGENTE);
       }
       break;
     case OP_RST: liberar(c); break;

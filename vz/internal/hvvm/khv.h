@@ -32,10 +32,34 @@
 // La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
 // upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
 // nuevo congeló.
-#define KHV_SNAP_VERSION 4
+#define KHV_SNAP_VERSION 5
 #define RAM_BASE 0x80000000ULL
 
-#define MAX_CPUS 8
+// Tope de vCPU de kling-hv. Hypervisor.framework da 64 en el M4
+// (hv_vm_get_max_vcpu_count) y el GIC reserva redistribuidores para 256;
+// khv_max_vcpus lo baja a lo que diga el framework en este Mac. El kernel de
+// kindling se compila con CONFIG_NR_CPUS=32: con más, el invitado ve 32.
+#define MAX_CPUS 64
+// MPIDR (afinidad) del vCPU i: grupos de 8 en Aff0 y el grupo en Aff1, como
+// los clústeres de un SoC. Hasta 8 vCPU es el MPIDR de siempre (Aff0 = i), el
+// que llevan los snapshots de antes. Aff0 cabe así en la TargetList de 16 bits
+// de ICC_SGI1R_EL1 sin el Range Selector, que el GIC de HVF no anuncia.
+#define KHV_CPUS_GRUPO 8
+static inline uint64_t khv_mpidr_aff(int i) {
+  return ((uint64_t)(i / KHV_CPUS_GRUPO) << 8) | (uint64_t)(i % KHV_CPUS_GRUPO);
+}
+// khv_mpidr_idx: el índice del vCPU con esa afinidad (la de PSCI CPU_ON y
+// AFFINITY_INFO: Aff3 en los bits 39:32, Aff2-0 en 23:0), o -1 si no es de
+// ninguno.
+static inline int khv_mpidr_idx(uint64_t aff, int n) {
+  uint64_t a0 = aff & 0xff, a1 = (aff >> 8) & 0xff;
+  if ((aff >> 16) != 0 || a0 >= KHV_CPUS_GRUPO) return -1;  // Aff2 o Aff3, o fuera del grupo
+  uint64_t i = a1 * KHV_CPUS_GRUPO + a0;
+  return i < (uint64_t)n ? (int)i : -1;
+}
+// khv_max_vcpus: los vCPU que admite khv_create en este Mac (MAX_CPUS o lo
+// que diga Hypervisor.framework, si es menos).
+int khv_max_vcpus(void);
 #define PAGINA 16384ULL
 
 // ---- API para Go ----
@@ -85,7 +109,7 @@ void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
-                      uint64_t *hdr_v3, uint64_t *pie);
+                      uint64_t *hdr_v3, uint64_t *pie, uint64_t *cpu, uint32_t *cpus_v4);
 // Por qué terminó la VM (khv_wait ya volvió): el invitado se apagó
 // (SYSTEM_OFF), pidió reiniciarse (SYSTEM_RESET: kling-hv no reinicia en el
 // sitio, la VM termina igual pero no es un fallo), la paró el host o falló.
@@ -340,6 +364,65 @@ int khv_balloon(uint32_t marcos);
 // costaron y tramos que fallaron (acumulados).
 #define KHV_BALLOON_NCUENTAS 5
 void khv_balloon_cuentas(uint64_t out[KHV_BALLOON_NCUENTAS]);
+
+// ---- trazas (traza.c) ----
+// Intervalos de os_signpost (subsistema dev.kindling.hv, categoría «fases»)
+// para las fases del arranque, la restauración y el freeze, e hitos (eventos)
+// la primera vez que pasan. Sin nadie trazando (Instruments, xctrace) cuestan
+// una lectura de mach_absolute_time por fase. KLING_HV_TRACE=1 escribe además
+// en la consola de kling-hv una línea con los tiempos de cada fase.
+//
+// X(enumerado, nombre del intervalo): el nombre tiene que ser un literal. Las
+// del freeze van de KHV_F_PAUSA en adelante (traza.c las separa así).
+#define KHV_FASES(X)                          \
+  X(KHV_F_VM, "vm+gic")                       \
+  X(KHV_F_DISP, "dispositivos")               \
+  X(KHV_F_RAM, "ram")                         \
+  X(KHV_F_KERNEL, "kernel+fdt")               \
+  X(KHV_F_VCPUS, "vcpus")                     \
+  X(KHV_F_LEER, "leer-estado")                \
+  X(KHV_F_DISP_ESTADO, "estado-dispositivos") \
+  X(KHV_F_GIC, "estado-gic")                  \
+  X(KHV_F_CPU, "estado-cpu")                  \
+  X(KHV_F_PAUSA, "pausa")                     \
+  X(KHV_F_SNAP_ESTADO, "snap-estado")         \
+  X(KHV_F_SNAP_CLON, "snap-clon")             \
+  X(KHV_F_SNAP_PAGINAS, "snap-paginas")       \
+  X(KHV_F_SNAP_ESCRIBIR, "snap-cabecera")
+#define KHV_HITOS(X)                          \
+  X(KHV_H_SOLTAR, "soltar")                   \
+  X(KHV_H_PRIMER_RUN, "primer-run")           \
+  X(KHV_H_UART, "primer-uart")                \
+  X(KHV_H_VIRTIO, "primer-virtio")            \
+  X(KHV_H_AGENTE, "agente")
+#define KHV_ENUM_(e, s) e,
+enum { KHV_FASES(KHV_ENUM_) KHV_F_N };
+enum { KHV_HITOS(KHV_ENUM_) KHV_H_N };
+#undef KHV_ENUM_
+// khv_traza_iniciar: al principio de khv_create (lee KLING_HV_TRACE).
+void khv_traza_iniciar(uint64_t t_inicio);
+uint64_t khv_traza_empieza(int fase);       // devuelve la marca para khv_traza_acaba
+void khv_traza_acaba(int fase, uint64_t t0);
+// khv_traza_hito apunta la primera vez que pasa h (las siguientes, una
+// lectura). KHV_H_AGENTE escribe el resumen del arranque o la restauración.
+extern volatile uint8_t khv_hitos_vistos[KHV_H_N];
+void khv_traza_hito_(int h);
+static inline void khv_traza_hito(int h) {
+  if (__builtin_expect(!khv_hitos_vistos[h], 0)) khv_traza_hito_(h);
+}
+void khv_traza_restaurando(void);  // el resumen es de una restauración
+// Salidas de vCPU caras: con alguien trazando, un evento por cada salida que
+// tardó más de KHV_SALIDA_CARA_NS en atenderse.
+#define KHV_SALIDA_CARA_NS 50000ULL
+bool khv_traza_activa(void);
+void khv_traza_salida(int cpu, unsigned ec, uint64_t ipa, uint64_t ns);
+// khv_traza_resumen escribe en buf la línea del resumen (la del log); para
+// las pruebas y para quien no lea la consola.
+void khv_traza_resumen(char *buf, size_t n);
+void khv_traza_freeze(void);  // resumen del freeze (con KLING_HV_TRACE=1)
+// khv_traza_prueba: un arranque de mentira (fases y hitos seguidos, sin VM)
+// desde cero y su resumen en buf. Solo para las pruebas.
+void khv_traza_prueba(char *buf, size_t n);
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);
