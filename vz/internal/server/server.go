@@ -352,6 +352,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
 	mux.HandleFunc("PUT /kling/credentials", s.putKlingCredentials)
 	mux.HandleFunc("PUT /kling/graph", s.putKlingGraph)
+	mux.HandleFunc("PUT /kling/host-ports", s.putKlingHostPorts)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
@@ -999,7 +1000,8 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
 		if s.d.Graph != nil {
-			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink)
+			// Y los puentes al host (-host-port), que también pide al daemon.
+			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink, grafo.CapPuentes)
 		}
 		info["credential_kinds"] = kinds
 	}
@@ -1046,6 +1048,36 @@ func (s *Server) putKlingGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.d.Policy.SetGraphHosts(body.Hosts, s.d.CredIP)
+	noContent(w)
+}
+
+// putKlingHostPorts fija los puentes al host de la máquina (kling run
+// -host-port; sustituye los anteriores, la lista vacía los quita): cada
+// conexión del invitado a la pasarela en un puerto de puente se pide al
+// daemon, que marca el loopback del Mac. Abre esos puertos de la pasarela en
+// todos los modos de egress, y nada más: la política no cambia. Con alguno,
+// el DNS contesta además host.kindling.internal con la pasarela.
+func (s *Server) putKlingHostPorts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Ports []grafo.Puente `json:"ports"`
+	}
+	if err := decode(r, maxConfigBody, &body); err != nil {
+		fault(w, err)
+		return
+	}
+	if s.d.Graph == nil || !s.d.CredIP.IsValid() {
+		fault(w, errors.New("this kling-vz has no link broker: the daemon did not set KLING_VZ_BROKER"))
+		return
+	}
+	if err := s.d.Graph.SetPuentes(body.Ports); err != nil {
+		fault(w, err)
+		return
+	}
+	ip := s.d.CredIP
+	if len(body.Ports) == 0 {
+		ip = netip.Addr{}
+	}
+	s.d.Policy.SetHostBridge(ip)
 	noContent(w)
 }
 

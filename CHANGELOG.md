@@ -9,6 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - The daemon reacts to host memory pressure before jetsam (or the OOM killer) kills VMMs: on warn it squeezes idle machines, on critical it also freezes the largest idle one, rate-limited and with hysteresis. macOS reads `kern.memorystatus_vm_pressure_level`, Linux PSI. `daemon.memory_pressure=off` (or `KLING_MEMORY_PRESSURE=off`) turns it off; `/metrics` gains `kling_memory_pressure_level`, `kling_memory_pressure_actions_total` and `kling_memory_pressure_reclaimed_mib_total` (`docs/mac.md#presión-de-memoria`).
+- macOS: `kling run -host-port PORT|HOST:GUEST` lets the guest reach a TCP port of the Mac's loopback (Ollama, `llama-server` with Metal) at `host.kindling.internal` / `172.16.0.1`; only the listed ports, also with `-egress none`, set only from the host and kept across freeze/thaw (`host_ports` in `POST /machines`, capability `host-ports`). Each connection is dialled by the daemon through the link broker and audited. Linux rejects it. A `state.json` with such a machine is written as schema 4, which older klings refuse (`docs/mac.md#servicios-del-mac-desde-el-invitado--host-port`).
 
 ## [1.0.0] - 2026-11-05
 

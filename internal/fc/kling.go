@@ -146,6 +146,22 @@ func (c *Client) SetKlingCredentials(ctx context.Context, creds []KlingCredentia
 	return c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, nil)
 }
 
+// KlingHostPort es un puente al host (PUT /kling/host-ports): el puerto Host
+// del loopback del Mac en el puerto Guest de la pasarela.
+type KlingHostPort struct {
+	Host  int `json:"host"`
+	Guest int `json:"guest"`
+}
+
+// SetKlingHostPorts fija los puentes al host de la máquina (sustituye los
+// anteriores).
+func (c *Client) SetKlingHostPorts(ctx context.Context, ps []KlingHostPort) error {
+	if ps == nil {
+		ps = []KlingHostPort{}
+	}
+	return c.doOut(ctx, http.MethodPut, "/kling/host-ports", map[string]any{"ports": ps}, nil)
+}
+
 // SetKlingGraph fija las aristas del nodo (sustituye las anteriores).
 func (c *Client) SetKlingGraph(ctx context.Context, g KlingGraph) error {
 	if g.Links == nil {

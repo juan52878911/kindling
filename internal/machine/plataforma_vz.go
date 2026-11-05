@@ -222,6 +222,10 @@ func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
 // aloja cada VM, y el daemon corre sin root.
 const jailerPosible = false
 
+// puenteHostSoportado: kling-hv y kling-vz atienden -host-port en su pasarela
+// (puente_host.go).
+const puenteHostSoportado = true
+
 // restaurarComparteMemoria: Virtualization.framework copia la memoria al
 // restaurar (RestoreMachineState); las copias no comparten nada. kling-hv sí
 // la comparte: mapea el fichero (ElegirBackend).
@@ -253,9 +257,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	m.mu.RLock()
 	mc := m.byID[id]
 	var red fc.KlingNetwork
+	var puentes []api.HostPort
 	if mc != nil {
 		red.Egress = mc.Egress
 		red.AllowDomains = append([]string(nil), mc.AllowDomains...)
+		puentes = append([]api.HostPort(nil), mc.HostPorts...)
 	}
 	m.mu.RUnlock()
 	if mc == nil {
@@ -272,6 +278,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	// fallo no impide arrancar: las aristas fallan cerradas, y se dice.
 	if err := enviarGrafoVZ(ctx, m, c, id); err != nil {
 		log.Printf("%s woke up without its graph edges: %v", shortID(id), err)
+	}
+	// Los puentes al host (-host-port, puente_host.go), también antes de que
+	// corra. Aquí un fallo sí impide arrancar: se pidieron al crearla.
+	if err := enviarPuentesVZ(ctx, c, puentes); err != nil {
+		return err
 	}
 	// Las credenciales que la máquina ya tuviera (un thaw o un reinicio), al
 	// kling-vz nuevo ANTES de que el invitado corra: despierta con el dominio

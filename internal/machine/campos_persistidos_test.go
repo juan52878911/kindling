@@ -113,6 +113,10 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
 	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},
 	"state.json api.PortPublish proto": {porque: "only inside published (see above)"},
+	// v1.1: el 4 los protege (versionEstadoPuentes).
+	"state.json api.Machine host_ports": {efecto: true, version: 4, porque: "a thaw or start would lose the bridge to the host service"},
+	"state.json api.HostPort host":      {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
+	"state.json api.HostPort guest":     {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
 	// meta.json: v0.19 los añadió sin subir el 2. Un kling ≤ v0.18 solo
 	// reescribe un meta al anotarlo, y él no los usa: los pierde la vuelta
 	// (v0.19+ → v0.18 anota → v0.19+). Subir a 3 haría que v0.19-v0.20, que

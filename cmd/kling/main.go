@@ -656,6 +656,8 @@ func cmdRun(args []string) error {
 	fs.Var(&shares, "share", shareUsage)
 	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
+	var hostPorts hostPortFlag
+	fs.Var(&hostPorts, "host-port", "macOS: let the guest reach this TCP port of the Mac's loopback at host.kindling.internal (172.16.0.1): PORT or HOST:GUEST, like 11434 for Ollama (repeatable; opens only that port, even with -egress none)")
 	var publica publishFlag
 	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST, PORT, :GUEST for a free one, /udp on Linux; repeatable): the daemon keeps it while the machine exists and wakes it if frozen; kling stays in the foreground following the service")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -705,7 +707,7 @@ func cmdRun(args []string) error {
 				"-"+strings.Join(dados, ", -"), *from)
 		}
 	}
-	if len(env) > 0 || (*disk > 0 && *from == "") {
+	if len(env) > 0 || (*disk > 0 && *from == "") || len(hostPorts) > 0 {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
 		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
@@ -717,6 +719,9 @@ func cmdRun(args []string) error {
 		}
 		if *disk > 0 && *from == "" && !slices.Contains(info.Capabilities, api.CapabilityDisk) {
 			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
+		}
+		if len(hostPorts) > 0 && !slices.Contains(info.Capabilities, api.CapabilityHostPorts) {
+			return fmt.Errorf("the daemon (%s) does not take -host-port: update it (it is macOS only)", info.Version)
 		}
 	}
 	if *from == "" && esRefDocker(imagen) {
@@ -738,6 +743,7 @@ func cmdRun(args []string) error {
 		DiskMiB:      *disk,
 		Egress:       egressReq,
 		AllowDomains: allowReq,
+		HostPorts:    hostPorts,
 		TTLSeconds:   ttlForRun(fs, *ttl, cfg.Defaults.TTL),
 		// El flag va en CPUPct; el valor por defecto de la configuración, aparte:
 		// el del dorado y el de la receta de la imagen le ganan (ver RunRequest).

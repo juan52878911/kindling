@@ -109,6 +109,12 @@ type Machine struct {
 	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
 	AllowDomains []string `json:"allow_domains,omitempty"`
 
+	// HostPorts son los puertos del host que se le abrieron al crearla
+	// (RunRequest.HostPorts). Viajan con la máquina, como AllowDomains, para
+	// que un thaw o un start rehagan el mismo puente; no pasan a sus
+	// snapshots ni a sus forks.
+	HostPorts []HostPort `json:"host_ports,omitempty"`
+
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 	// CPUPctFixed: CPUPct lo pidió quien la arrancó (-cpu-pct), no salió de
@@ -334,6 +340,13 @@ type RunRequest struct {
 	// Todo lo demás se descarta (IP directa, resolver ajeno, dominio no listado).
 	// Se ignora en los otros modos.
 	AllowDomains []string `json:"allow_domains,omitempty"`
+
+	// HostPorts son puertos TCP del loopback del host que el invitado alcanza
+	// en la pasarela (HostBridgeIP, HostBridgeName): un Ollama o un
+	// llama-server con Metal en el Mac, en vez de una GPU virtual. Solo macOS
+	// (kling-hv, kling-vz). Abren ESOS puertos aunque Egress sea "none", y
+	// nada más (CapabilityHostPorts, docs/mac.md).
+	HostPorts []HostPort `json:"host_ports,omitempty"`
 
 	// TTLSeconds congela la máquina automáticamente pasado ese tiempo. Es la
 	// pieza que hace "serverless" el modelo: una herramienta ociosa deja de

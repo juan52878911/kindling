@@ -291,6 +291,18 @@ func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byt
 	if !ok {
 		return RespondError(query, 1) // FORMERR
 	}
+	if ip, esPuente, ok := r.Policy.HostBridge(name); esPuente {
+		// host.kindling.internal: la pasarela si la máquina tiene puentes
+		// al host, y si no, no existe. Como los de grafo, en todos los modos
+		// y sin reenviar ni sembrar.
+		if !ok {
+			return RespondError(query, 3) // NXDOMAIN
+		}
+		if qtype == 1 {
+			return RespondA(query, ip, CredTTL)
+		}
+		return RespondError(query, 0) // NOERROR sin respuestas
+	}
 	if ip, esGrafo, ok := r.Policy.GraphHost(name); esGrafo {
 		// Un nombre de grafo: solo los de las aristas de ESTE nodo, y siempre
 		// con la pasarela (la red pide al daemon a dónde va cada conexión).

@@ -87,6 +87,8 @@ kling inspect m1:  frozen_at string
 kling inspect m1:  has_secrets bool
 kling inspect m1:  hold string
 kling inspect m1:  hooks_pending string
+kling inspect m1:  host_ports[].guest number
+kling inspect m1:  host_ports[].host number
 kling inspect m1:  id string
 kling inspect m1:  image string
 kling inspect m1:  ip string
@@ -170,6 +172,8 @@ kling ps -a -json:  [].frozen_at string
 kling ps -a -json:  [].has_secrets bool
 kling ps -a -json:  [].hold string
 kling ps -a -json:  [].hooks_pending string
+kling ps -a -json:  [].host_ports[].guest number
+kling ps -a -json:  [].host_ports[].host number
 kling ps -a -json:  [].id string
 kling ps -a -json:  [].image string
 kling ps -a -json:  [].ip string
@@ -253,6 +257,8 @@ kling sandbox ls -json:  [].frozen_at string
 kling sandbox ls -json:  [].has_secrets bool
 kling sandbox ls -json:  [].hold string
 kling sandbox ls -json:  [].hooks_pending string
+kling sandbox ls -json:  [].host_ports[].guest number
+kling sandbox ls -json:  [].host_ports[].host number
 kling sandbox ls -json:  [].id string
 kling sandbox ls -json:  [].image string
 kling sandbox ls -json:  [].ip string

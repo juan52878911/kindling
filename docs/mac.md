@@ -276,6 +276,54 @@ Solo los procesos de tu usuario pasan por esos puertos: otra cuenta del Mac que
 conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (ver
 [`backend-vz.md`](backend-vz.md#por-qué-puertos-en-loopback-y-no-la-ip-del-invitado)).
 
+## Servicios del Mac desde el invitado: `-host-port`
+
+Lo contrario: que el invitado llegue a un servicio que corre en el Mac. El caso
+es un modelo local con Metal (Ollama, `llama-server`), que dentro de una VM no
+tendría GPU. En vez de una GPU virtual, un puente a ese puerto:
+
+```
+ollama serve                                   # escucha en 127.0.0.1:11434
+kling run -name agente -allow-exec -host-port 11434
+kling exec agente -- wget -qO- http://host.kindling.internal:11434/api/tags
+```
+
+- `-host-port PUERTO` deja el `127.0.0.1:PUERTO` del Mac en `172.16.0.1:PUERTO`
+  del invitado (la pasarela de su red); `-host-port HOST:GUEST` lo pone en otro
+  (`-host-port 8080:18080`: el `llama-server` del 8080 en el 18080).
+  `host.kindling.internal` resuelve a `172.16.0.1` en el DNS de la máquina, y
+  solo si tiene algún puente. Se repite (o lleva comas), hasta 16.
+- Solo TCP y solo los puertos listados. Lo fija quien crea la máquina (`kling
+  run`, `POST /machines` con `host_ports`); nada del invitado lo pide ni lo
+  cambia. Viaja con la máquina: un freeze/thaw o un stop/start lo rehacen. No
+  pasa a sus snapshots ni a sus forks.
+- **Egress**: abre esos puertos de la pasarela en todos los modos, también con
+  `-egress none`, y nada más; la política no cambia (una máquina `none` con
+  `-host-port 11434` sigue sin poder salir a ninguna otra parte, ni a otro
+  puerto del Mac). Sin la opción el loopback del Mac no se alcanza por ningún
+  camino: `127.0.0.1` es el del invitado y la pasarela no reenvía al Mac.
+- Cada conexión la marca el daemon, no el VMM: `kling-hv` y `kling-vz` corren
+  confinados y su perfil de sandbox no abre el loopback. La red de la máquina
+  la pide por el broker de enlaces (como las aristas de los grafos y el
+  `-upstream 127.0.0.1` del proxy de credenciales), y el daemon comprueba que
+  ese puerto es de esa máquina. Queda una línea por conexión en su registro de
+  auditoría (`kling machine credaudit`, `kind: link`, `host.kindling.internal:PUERTO`)
+  y, mientras dura, cuenta como uso: una máquina con una petición al modelo en
+  curso no es ociosa para la [presión de memoria](#presión-de-memoria).
+- No valen como puerto del invitado el 53, el 80 ni el 443 (DNS y proxy de
+  credenciales en la pasarela) y, en el Mac, ninguno del rango de reenvíos
+  (29000-29999), donde están los invitados de las demás máquinas. El 8080
+  (el de `llama-server`) sí vale.
+- El servicio tiene que escuchar en `127.0.0.1` (o en todas): lo que solo
+  escuche en otra interfaz no se alcanza. Si no escucha, el invitado recibe un
+  RST, como contra un puerto cerrado.
+
+Un `state.json` con alguna máquina con puentes se escribe con el esquema 4: un
+kling anterior se niega a arrancar sobre él en vez de perderlos.
+
+En Linux no hay puente (el invitado vive en un namespace y llegar al loopback
+del host pediría un proxy por puerto dentro de él): `-host-port` da error.
+
 ## Energía y batería
 
 En un portátil cada despertar de la CPU cuesta batería, también con las

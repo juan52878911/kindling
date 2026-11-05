@@ -716,6 +716,10 @@ func (m *Manager) load() {
 //	   perdería: la máquina volvería a arrancar con el comando de la imagen,
 //	   sin esperar a sus carpetas o con el caudal del daemon. Con el 3 se
 //	   niega a arrancar, y -rollback devuelve el state.json.v<N>.bak.
+//	4: el mismo formato, con alguna máquina con puentes al host (host_ports,
+//	   kling run -host-port). Un kling ≤ v1.0 los perdería en su siguiente
+//	   escritura y la máquina despertaría sin llegar a su servicio del host;
+//	   con el 4 se niega a arrancar.
 //
 // Se escribe siempre el más bajo que describe el estado (esquemaParaEscribir),
 // para que volver atrás siga siendo posible mientras no haga falta más. Qué
@@ -726,9 +730,10 @@ const versionEstado = 1
 // DiffBase; versionEstadoCampos, si alguna lleva un campo de necesitaV3;
 // versionEstadoMax, el más nuevo que este binario sabe leer.
 const (
-	versionEstadoDiff   = 2
-	versionEstadoCampos = 3
-	versionEstadoMax    = versionEstadoCampos
+	versionEstadoDiff    = 2
+	versionEstadoCampos  = 3
+	versionEstadoPuentes = 4
+	versionEstadoMax     = versionEstadoPuentes
 )
 
 // esquemaParaEscribir es el esquema más bajo que describe list: versionEstado,
@@ -737,10 +742,13 @@ const (
 func esquemaParaEscribir(list []api.Machine) int {
 	v := versionEstado
 	for i := range list {
-		if necesitaV3(&list[i]) {
-			return versionEstadoCampos
+		if len(list[i].HostPorts) > 0 {
+			return versionEstadoPuentes
 		}
-		if list[i].DiffBase != "" {
+		if necesitaV3(&list[i]) {
+			v = versionEstadoCampos
+		}
+		if list[i].DiffBase != "" && v < versionEstadoDiff {
 			v = versionEstadoDiff
 		}
 	}
@@ -768,7 +776,7 @@ func decodificarEstado(b []byte, version int) ([]*api.Machine, error) {
 		var list []*api.Machine
 		err := json.Unmarshal(b, &list)
 		return list, err
-	case 1, 2, 3:
+	case 1, 2, 3, 4:
 		var f ficheroEstado
 
 		err := json.Unmarshal(b, &f)
@@ -1423,6 +1431,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err := validarVolumeWait(req); err != nil {
 		return nil, err
 	}
+	if err := validarPuentesHost(req.HostPorts); err != nil {
+		return nil, err
+	}
+	req.HostPorts = append([]api.HostPort(nil), req.HostPorts...)
 	req.Env = nil
 	if err := validarShareWait(req.ShareWait); err != nil {
 		return nil, err
@@ -1716,6 +1728,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Lock()
 	mc.IP, mc.NetIndex, mc.Egress = netcfg.NSIP, netcfg.Index, string(egress)
 	mc.AllowDomains = req.AllowDomains
+	mc.HostPorts = req.HostPorts
 	m.mu.Unlock()
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.

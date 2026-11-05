@@ -1,11 +1,13 @@
 # Campos que kindling persiste en disco. Generado por TestCamposPersistidos
 # (internal/machine/campos_persistidos_test.go): léelo antes de tocarlo.
-version state.json 3
+version state.json 4
 version meta.json 2
 version credentials.enc 2
 state.json api.GuestAgent agent string
 state.json api.GuestAgent caps []string
 state.json api.GuestAgent version string
+state.json api.HostPort guest int effect:4
+state.json api.HostPort host int effect:4
 state.json api.Machine agent *api.GuestAgent
 state.json api.Machine allow_domains []string
 state.json api.Machine allow_exec bool
@@ -34,6 +36,7 @@ state.json api.Machine frozen_at *time.Time
 state.json api.Machine has_secrets bool
 state.json api.Machine hold string
 state.json api.Machine hooks_pending string
+state.json api.Machine host_ports []api.HostPort effect:4
 state.json api.Machine id string
 state.json api.Machine image string
 state.json api.Machine ip string
