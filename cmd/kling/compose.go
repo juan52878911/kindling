@@ -351,13 +351,16 @@ func composeUp(g globalesCompose, args []string) error {
 		return err
 	}
 	defer cerrojo.Close()
-	if err := comprobarDueno(ctx, c, t.Proyect, abs); err != nil {
-		return err
-	}
-	info, err := c.Info(ctx)
+	// Grafo, máquinas e Info de una vez y en paralelo: lo que sigue (dueño,
+	// sustituir el proyecto, huérfanas) se decide con eso.
+	v, err := verProyecto(ctx, c, t.Proyect, true)
 	if err != nil {
 		return err
 	}
+	if err := v.dueno(t.Proyect, abs); err != nil {
+		return err
+	}
+	info := v.info
 	publicaDaemon := slices.Contains(info.Capabilities, api.CapabilityPublish)
 	if *detach && !publicaDaemon {
 		return fmt.Errorf("the daemon (%s) does not publish ports itself, so -d would leave them unpublished: update it, or run without -d", info.Version)
@@ -365,8 +368,12 @@ func composeUp(g globalesCompose, args []string) error {
 	t.etiquetas = map[string]string{labelComposeProject: t.Proyect, labelComposeFile: abs}
 
 	// Un up de un proyecto que ya está: se sustituye (sus volúmenes siguen).
-	quitarProyecto(ctx, c, t.Proyect)
-	quitarHuerfanas(ctx, c, t)
+	if quitarProyectoDe(ctx, c, t.Proyect, v.g) && v.ms != nil {
+		quitarHuerfanasDe(ctx, c, t, v.sinGrafo(v.g))
+	} else {
+		// El grafo no se fue (o no se pudo listar): se mira de nuevo.
+		quitarHuerfanas(ctx, c, t)
+	}
 	// Un puerto ocupado se dice antes de importar ni preparar nada.
 	if esLocal(endpoint) {
 		if err := comprobarPuertosLibres(t); err != nil {
@@ -431,36 +438,6 @@ func composeUp(g globalesCompose, args []string) error {
 	return nil
 }
 
-// publicarCompose pide al daemon que publique los ports: de cada nodo. Un
-// puerto ocupado es un error (el up se deshace); UDP en el Mac, un aviso.
-func publicarCompose(ctx context.Context, c *api.Client, t *traduccionCompose) error {
-	for _, nodo := range clavesOrd(t.Publica) {
-		pub, err := c.Publish(ctx, t.Proyect+"-"+nodo, t.Publica[nodo])
-		var se *api.StatusError
-		if errors.As(err, &se) && se.Code == 501 {
-			// Solo UDP: los TCP del nodo, sin él.
-			var tcp []api.PortPublish
-			for _, p := range t.Publica[nodo] {
-				if p.ProtoOr() == api.ProtoTCP {
-					tcp = append(tcp, p)
-				}
-			}
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", nodo, se.Message)
-			if len(tcp) == 0 {
-				continue
-			}
-			pub, err = c.Publish(ctx, t.Proyect+"-"+nodo, tcp)
-		}
-		if err != nil {
-			return fmt.Errorf("%s: publishing its ports: %w", nodo, err)
-		}
-		for _, p := range pub.Ports {
-			fmt.Fprintf(os.Stderr, "  %-12s %s\n", nodo, p.String())
-		}
-	}
-	return nil
-}
-
 // esLocal dice si el daemon de endpoint corre en esta máquina (un socket
 // Unix): entonces sus puertos publicados son los de aquí.
 func esLocal(endpoint string) bool {
@@ -521,24 +498,9 @@ func cerrojoProyecto(endpoint, proyecto string) (io.Closer, error) {
 	return f, nil
 }
 
-// comprobarDueno se niega a tocar un proyecto que es de otro compose (otro
+// duenoDe se niega a tocar un proyecto que es de otro compose (otro
 // fichero con el mismo nombre de proyecto) o un grafo que no hizo compose.
 // abs vacío acepta cualquier compose (down -p sin fichero).
-func comprobarDueno(ctx context.Context, c *api.Client, proyecto, abs string) error {
-	g, err := c.Graph(ctx, proyecto)
-	var se *api.StatusError
-	if errors.As(err, &se) && se.Code == 404 {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	ms, err := c.List(ctx)
-	if err != nil {
-		return err
-	}
-	return duenoDe(g, ms, proyecto, abs)
-}
 
 func duenoDe(g *api.Graph, ms []*api.Machine, proyecto, abs string) error {
 	deCompose, maquinas := false, 0
@@ -571,14 +533,28 @@ func quitarProyecto(ctx context.Context, c *api.Client, proyecto string) {
 	if err != nil {
 		return
 	}
+	quitarProyectoDe(ctx, c, proyecto, g)
+}
+
+// quitarProyectoDe es quitarProyecto con el grafo ya pedido (nil: no hay
+// nada que quitar). Los puertos de los nodos se dejan de publicar en
+// paralelo. Dice si el grafo ya no está.
+func quitarProyectoDe(ctx context.Context, c *api.Client, proyecto string, g *api.Graph) bool {
+	if g == nil {
+		return true
+	}
+	var ids []string
 	for _, n := range g.Nodes {
 		if n.MachineID != "" {
-			_ = c.Unpublish(ctx, n.MachineID)
+			ids = append(ids, n.MachineID)
 		}
 	}
+	enParalelo(len(ids), paraleloCompose, func(i int) { _ = c.Unpublish(ctx, ids[i]) })
 	if err := c.GraphRemove(ctx, proyecto); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: removing %s: %v\n", proyecto, err)
+		return false
 	}
+	return true
 }
 
 // quitarHuerfanas borra las máquinas <proyecto>-<nodo> de un grafo que ya
@@ -594,6 +570,12 @@ func quitarHuerfanas(ctx context.Context, c *api.Client, t *traduccionCompose) {
 	if err != nil {
 		return
 	}
+	quitarHuerfanasDe(ctx, c, t, ms)
+}
+
+// quitarHuerfanasDe es quitarHuerfanas con las máquinas ya listadas (sin las
+// del grafo que se acaba de quitar).
+func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose, ms []*api.Machine) {
 	nombres := map[string]bool{}
 	for _, s := range t.vivos {
 		nombres[t.Proyect+"-"+s.nodo] = true
@@ -623,17 +605,17 @@ func composeDown(g globalesCompose, args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
-	if err := comprobarDueno(ctx, c, proyecto, abs); err != nil {
+	v, err := verProyecto(ctx, c, proyecto, false)
+	if err != nil {
 		return err
 	}
-	if _, err := c.Graph(ctx, proyecto); err != nil {
-		var se *api.StatusError
-		if !errors.As(err, &se) || se.Code != 404 {
-			return err
-		}
+	if err := v.dueno(proyecto, abs); err != nil {
+		return err
+	}
+	if v.g == nil {
 		fmt.Printf("%s is not up\n", proyecto)
 	} else {
-		quitarProyecto(ctx, c, proyecto)
+		quitarProyectoDe(ctx, c, proyecto, v.g)
 		fmt.Printf("%s removed (its machines and ports)\n", proyecto)
 	}
 	if *vols {
@@ -703,20 +685,34 @@ func composePS(g globalesCompose, args []string) error {
 	if err != nil {
 		return err
 	}
-	pubs, _ := c.Publications(ctx)
+	// Las publicaciones y cada máquina se piden a la vez; la tabla sale en
+	// el orden de los nodos.
+	var pubs []api.Publication
+	listas := make(chan struct{})
+	go func() {
+		defer close(listas)
+		pubs, _ = c.Publications(ctx)
+	}()
+	maqs := make([]*api.Machine, len(nodos))
+	enParalelo(len(nodos), paraleloCompose, func(i int) {
+		if id := gr.Nodes[nodos[i]].MachineID; id != "" {
+			if m, err := c.Get(ctx, id); err == nil {
+				maqs[i] = m
+			}
+		}
+	})
+	<-listas
 	puertos := map[string][]api.PortPublish{}
 	for _, p := range pubs {
 		puertos[p.Machine] = p.Ports
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "SERVICE\tMACHINE\tSTATE\tPORTS")
-	for _, n := range nodos {
+	for i, n := range nodos {
 		nd := gr.Nodes[n]
 		maq, estado := "-", nd.State
-		if nd.MachineID != "" {
-			if m, err := c.Get(ctx, nd.MachineID); err == nil {
-				maq, estado = m.Name, string(m.State)
-			}
+		if m := maqs[i]; m != nil {
+			maq, estado = m.Name, string(m.State)
 		}
 		if estado == "" {
 			estado = "not started (lazy)"
