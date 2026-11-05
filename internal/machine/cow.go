@@ -279,7 +279,7 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 	}
 	hecho := cowModoCopy
 	if modo == cowModoClone {
-		hecho = cowModoClone // macOS: cp -c es clonefile en APFS
+		hecho = cowModoClone // macOS: fclonefileat en APFS (clonarRuta)
 	}
 	m.cow.contar(hecho)
 	return hecho, nil
