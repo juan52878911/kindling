@@ -219,15 +219,18 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		cmd := strings.Join(args[i+1:], " ")
 		switch {
 		case strings.Contains(string(in), purgeMarker) && strings.HasSuffix(cmd, "sh -s"):
-			f.purgedHBA = append(f.purgedHBA, mc.ID)
-			return nil, nil
-		case strings.Contains(string(in), purgeMarker):
+			// purgeScript: comprueba Postgres, purga los roles y, si no
+			// queda ninguno, pg_hba.conf, en el mismo exec.
+			if f.pgDown {
+				return []byte(purgeNotReady + "\n"), nil
+			}
 			f.purged = append(f.purged, mc.ID)
 			if f.purgeLeaves {
 				return []byte("0\n1\n"), nil
 			}
 			delete(f.roRoles, mc.ID)
-			return []byte("0\n0\n"), nil
+			f.purgedHBA = append(f.purgedHBA, mc.ID)
+			return []byte("0\n0\n0\n"), nil
 		case strings.Contains(string(in), redisRotateMarker) && strings.HasSuffix(cmd, "sh -s"):
 			// El guion de rotación de Redis: U=<usuario>, A=<hash> y, al
 			// preparar, la clave nueva del administrador.

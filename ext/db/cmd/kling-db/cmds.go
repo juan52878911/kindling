@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -324,13 +325,8 @@ func (a *app) forkWith(ctx context.Context, src string, n int, owner string, ext
 			c.Labels[l[0]] = l[1]
 		}
 	}
-	for _, c := range copies {
-		end := a.tr.span("phase prepare")
-		err := a.prepare(ctx, c)
-		end()
-		if err != nil {
-			return undo(err)
-		}
+	if err := a.prepareAll(ctx, copies); err != nil {
+		return undo(err)
 	}
 	for _, c := range copies {
 		if err := a.setState(ctx, c.ID, stateReady); err != nil {
@@ -339,6 +335,57 @@ func (a *app) forkWith(ctx context.Context, src string, n int, owner string, ext
 		c.Labels[labelState] = stateReady
 	}
 	return copies, nil
+}
+
+// prepareAtOnce acota cuántas copias de un fork se preparan a la vez: cada una
+// son un par de `kling exec` (la purga y la rotación) que esperan sobre todo
+// al invitado.
+const prepareAtOnce = 8
+
+// prepareAll prepara las copias de un fork a la vez (como mucho
+// prepareAtOnce): en serie, N copias eran N veces la espera de sus exec. El
+// primer fallo cancela las que faltan; se espera a todas antes de volver, para
+// que quien deshace no borre una copia que otra goroutine aún prepara.
+func (a *app) prepareAll(ctx context.Context, copies []*api.Machine) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu    sync.Mutex
+		first error
+		wg    sync.WaitGroup
+	)
+	slots := make(chan struct{}, prepareAtOnce)
+	for _, c := range copies {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(c *api.Machine) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			end := a.tr.span("phase prepare")
+			err := a.prepare(ctx, c)
+			end()
+			if err != nil {
+				mu.Lock()
+				if first == nil {
+					first = err
+					cancel()
+				}
+				mu.Unlock()
+			}
+		}(c)
+	}
+	wg.Wait()
+	if first == nil {
+		// Sin fallo propio: si algo canceló, fue quien llamó.
+		return ctx.Err()
+	}
+	return first
 }
 
 // ── connect ──────────────────────────────────────────────────────────────────

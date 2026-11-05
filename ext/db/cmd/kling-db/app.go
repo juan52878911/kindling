@@ -404,9 +404,8 @@ func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 		}
 		return a.rotateClickHouse(ctx, mc.ID, role)
 	}
-	if err := a.waitPostgres(ctx, mc.ID); err != nil {
-		return err
-	}
+	// Sin esperar antes a Postgres: la purga lo comprueba en el mismo exec y,
+	// si aún no acepta conexiones, espera aquí (waitPostgres) y repite.
 	pgdb := db
 	if engineOf(mc.Labels) == engineFerret {
 		// La base de FerretDB es de Mongo: en Postgres todo vive en la base
@@ -451,7 +450,9 @@ SELECT count(*) FROM pg_authid WHERE shobj_description(oid, 'pg_authid') = '` + 
 
 // purgeHBAScript quita de pg_hba.conf las líneas de kling db role (acaban en
 // "# kling-db") y recarga. Se busca el fichero con SHOW hba_file.
-const purgeHBAScript = "# " + purgeMarker + "\n" + hbaPrelude + `if grep -q ' # kling-db$' "$F"; then
+const purgeHBAScript = "# " + purgeMarker + "\n" + hbaPrelude + purgeHBABody
+
+const purgeHBABody = `if grep -q ' # kling-db$' "$F"; then
   T=$(mktemp)
   grep -v ' # kling-db$' "$F" > "$T" || true
   cat "$T" > "$F"
@@ -461,21 +462,55 @@ fi
 if grep -q ' # kling-db$' "$F"; then echo "pg_hba.conf still has kling-db lines" >&2; exit 1; fi
 `
 
+// purgeNotReady es lo que contesta purgeScript si Postgres aún no acepta
+// conexiones: no ha tocado nada.
+const purgeNotReady = "kling-db:not-ready"
+
+// purgeSQLEnd cierra el here-document con el SQL de purgeROSQL. La base pasó
+// identPattern: el SQL no puede tener una línea así.
+const purgeSQLEnd = "KLING_DB_PURGE_SQL"
+
+// purgeScript es la purga entera en un solo exec (como root, sh -s): antes
+// eran tres (pg_isready, el psql de purgeROSQL y purgeHBAScript), cada uno un
+// viaje de kling exec por copia. En orden: si Postgres no acepta conexiones,
+// contesta purgeNotReady sin tocar nada; luego el SQL, como postgres por el
+// socket local, y si queda algún rol contesta la cuenta y para ahí (las
+// líneas de pg_hba.conf se quedan, como antes); por último pg_hba.conf. La
+// última línea de la salida es la cuenta de roles que quedan ("0" si todo
+// fue bien).
+func purgeScript(db string) string {
+	return "# " + purgeMarker + "\nset -eu\n" +
+		"if ! su -s /bin/sh postgres -c 'pg_isready -q -h /run/postgresql'; then echo " + purgeNotReady + "; exit 0; fi\n" +
+		"N=$(su -s /bin/sh postgres -c '" + psqlSuper + "' <<'" + purgeSQLEnd + "'\n" +
+		fmt.Sprintf(purgeROSQL, db) + purgeSQLEnd + "\n" +
+		")\n" +
+		"N=$(printf '%s\\n' \"$N\" | tail -n 1)\n" +
+		"if [ \"$N\" != 0 ]; then printf '%s\\n' \"$N\"; exit 0; fi\n" +
+		hbaPrelude + purgeHBABody + "echo 0\n"
+}
+
 // purgeInheritedRoles quita los roles de solo lectura heredados y sus líneas
-// de pg_hba.conf. Si no puede, la copia no se da por lista.
+// de pg_hba.conf (purgeScript). Si Postgres aún no acepta conexiones, lo
+// espera (waitPostgres) y repite. Si no puede, la copia no se da por lista.
 func (a *app) purgeInheritedRoles(ctx context.Context, id, db string) error {
-	out, err := a.k.Run(ctx, strings.NewReader(fmt.Sprintf(purgeROSQL, db)), "exec", "-i", "-timeout", "60s", id, "--",
-		"su", "-s", "/bin/sh", "postgres", "-c", psqlSuper)
-	if err != nil {
-		return fmt.Errorf("removing the inherited read-only roles of %s: %w", shortID(id), err)
+	for intento := 0; ; intento++ {
+		out, err := a.k.Run(ctx, strings.NewReader(purgeScript(db)), "exec", "-i", "-timeout", "60s", id, "--", "sh", "-s")
+		if err != nil {
+			return fmt.Errorf("removing the inherited read-only roles and pg_hba.conf lines of %s: %w", shortID(id), err)
+		}
+		switch n := lastLine(string(out)); {
+		case n == purgeNotReady && intento == 0:
+			if err := a.waitPostgres(ctx, id); err != nil {
+				return err
+			}
+		case n == purgeNotReady:
+			return fmt.Errorf("postgres in %s stopped accepting connections", shortID(id))
+		case n != "0":
+			return fmt.Errorf("removing the inherited read-only roles of %s: %q left", shortID(id), n)
+		default:
+			return nil
+		}
 	}
-	if n := lastLine(string(out)); n != "0" {
-		return fmt.Errorf("removing the inherited read-only roles of %s: %q left", shortID(id), n)
-	}
-	if _, err := a.k.Run(ctx, strings.NewReader(purgeHBAScript), "exec", "-i", "-timeout", "60s", id, "--", "sh", "-s"); err != nil {
-		return fmt.Errorf("removing the inherited pg_hba.conf lines of %s: %w", shortID(id), err)
-	}
-	return nil
 }
 
 // destroy borra una copia y su contraseña. Se usa al deshacer: los errores se
