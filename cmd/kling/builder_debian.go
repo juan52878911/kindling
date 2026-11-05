@@ -196,7 +196,7 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 	}
 
 	lock := imagen.DebianLock[spec.Arch]
-	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf}
+	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf, Agent: agent}
 	base, err := imagen.PrepareBase(ctx, &oci.Client{Cache: filepath.Join(cache, "oci"), Log: log}, lock, spec.Arch, lock.Packages, d)
 	if err != nil {
 		return err
