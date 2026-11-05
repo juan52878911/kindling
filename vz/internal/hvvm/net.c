@@ -16,7 +16,10 @@
 #include "vq_iov.h"
 
 #define HDR 12  // virtio_net_hdr_v1 (con num_buffers)
-#define TRAMA_MAX 65536
+// La trama más grande: la MTU más alta que se admite (65535, spec.MaxMTU)
+// más la cabecera Ethernet. Con 65536 justos, a MTU 65535 el invitado mandaba
+// tramas de 65549 bytes que tx_mandar tiraba, y TCP se quedaba parado.
+#define TRAMA_MAX (65535 + 14)
 
 static struct vnet_state s;
 static int fd = -1;
@@ -342,8 +345,8 @@ static void *rx_hilo(void *a) {
 void vnet_init(int net_fd, const uint8_t m[6], int mtu_enlace, uint32_t id) {
   fd = net_fd;
   memcpy(mac, m, 6);
-  // Las tramas caben en los búferes de tx y rx (64 KiB) con cualquier MTU que
-  // admite el spec (hasta 65535).
+  // Las tramas caben en TRAMA_MAX con cualquier MTU que admite el spec (hasta
+  // 65535).
   mtu = mtu_enlace > 1500 && mtu_enlace <= 65535 ? (uint16_t)mtu_enlace : 0;
   intid = id;
   rx_parar = false;
