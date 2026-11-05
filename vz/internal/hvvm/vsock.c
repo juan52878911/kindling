@@ -21,6 +21,7 @@
 #include <poll.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -159,22 +160,38 @@ static void vaciar(struct vconn *c) {
 
 // ---------- tx: lo que manda el invitado (hilo del vCPU, con mu) ----------
 
-static void rw(struct vconn *c, const uint8_t *d, uint32_t n) {
+// iov_sacar copia a dst los primeros len bytes de iov (que ya se sabe que los
+// tiene).
+static void iov_sacar(void *dst, const struct iovec *iov, int n, size_t len) {
+  uint8_t *o = dst;
+  for (int j = 0; j < n && len > 0; j++) {
+    size_t d = iov[j].iov_len < len ? iov[j].iov_len : len;
+    memcpy(o, iov[j].iov_base, d);
+    o += d;
+    len -= d;
+  }
+}
+
+// rw escribe en fd los n bytes de datos que manda el invitado, directamente
+// desde sus búferes (d, nd iovec, ya medidos y dentro de la RAM); lo que no
+// cabe va a pend.
+static void rw(struct vconn *c, const struct iovec *d, int nd, uint32_t n) {
   if (c->estado != C_ABIERTA || c->guest_eof) return;
-  if (c->npend == 0) {
-    ssize_t w = write(c->fd, d, n);
+  uint32_t salto = 0;
+  if (c->npend == 0 && n > 0) {  // writev sin iovec da EINVAL
+    ssize_t w = writev(c->fd, d, nd);
     if (w < 0 && errno != EAGAIN && errno != EINTR) {
       c->p_rst = true;
       return;
     }
     if (w > 0) {
-      d += w;
-      n -= (uint32_t)w;
+      salto = (uint32_t)w;
       c->fwd_cnt += (uint32_t)w;
     }
   }
-  if (n > 0) {
-    if (c->npend + n > VS_BUF) {  // se saltó el crédito
+  uint32_t resto = n - salto;
+  if (resto > 0) {
+    if (c->npend + resto > VS_BUF) {  // se saltó el crédito
       c->p_rst = true;
       return;
     }
@@ -182,19 +199,40 @@ static void rw(struct vconn *c, const uint8_t *d, uint32_t n) {
       c->p_rst = true;
       return;
     }
-    memcpy(c->pend + c->npend, d, n);
-    c->npend += n;
+    static struct iovec tramo[QMAX];
+    int k = iov_tramo(d, nd, salto, resto, tramo);
+    iov_sacar(c->pend + c->npend, tramo, k, resto);
+    c->npend += resto;
   }
   if (c->fwd_cnt - c->fwd_avisado >= VS_BUF / 4) c->p_credit = true;
 }
 
-static void paquete(const struct vs_hdr *h, const uint8_t *d) {
-  if (h->type != TYPE_STREAM || h->src_cid != VS_GUEST_CID || h->dst_cid != VS_HOST_CID) return;
+// mira resume lo de una conexión que decide qué hace vs_hilo: qué fd espera
+// en poll (armar_poll, por_cerrar) y qué manda (bombear, vaciar). Si un
+// paquete del invitado no lo cambia, el hilo no tiene nada nuevo que hacer
+// por él y no hace falta despertarlo. Cualquier campo que lean esas
+// funciones y cambie tx tiene que estar aquí: si no, el hilo se queda
+// esperando en poll con el conjunto viejo (un despertar perdido).
+static uint32_t mira(const struct vconn *c) {
+  return (uint32_t)c->estado | (uint32_t)c->p_request << 2 | (uint32_t)c->p_credit << 3 |
+         (uint32_t)c->p_rst << 4 | (uint32_t)(c->p_shut != 0) << 5 | (uint32_t)(c->npend > 0) << 6 |
+         (uint32_t)(credito(c) > 0) << 7 | (uint32_t)c->host_eof << 8 | (uint32_t)c->guest_eof << 9 |
+         (uint32_t)c->guest_sordo << 10 | (uint32_t)c->cerrar << 11;
+}
+
+// paquete atiende un paquete del invitado con su cabecera h y sus datos (d,
+// nd iovec, h->len bytes). Devuelve si cambió algo que vs_hilo tenga que ver:
+// un RST por mandar, o lo que resume mira (crédito que se abre, una conexión
+// que se abre o se libera, pend que se llena o se vacía, un cierre...).
+static bool paquete(const struct vs_hdr *h, const struct iovec *d, int nd) {
+  if (h->type != TYPE_STREAM || h->src_cid != VS_GUEST_CID || h->dst_cid != VS_HOST_CID) return false;
   struct vconn *c = buscar(h->dst_port, h->src_port);
   if (!c) {
+    int n = n_rst;
     if (h->op != OP_RST) encolar_rst(h->dst_port, h->src_port);
-    return;
+    return n_rst != n;
   }
+  uint32_t antes = mira(c), gen = c->gen;
   c->peer_buf = h->buf_alloc;
   c->peer_fwd = h->fwd_cnt;
   switch (h->op) {
@@ -214,12 +252,13 @@ static void paquete(const struct vs_hdr *h, const uint8_t *d) {
       c->cerrar = c->guest_eof && c->guest_sordo;
       vaciar(c);
       break;
-    case OP_RW: rw(c, d, h->len); break;
+    case OP_RW: rw(c, d, nd, h->len); break;
     case OP_CREDIT_REQUEST: c->p_credit = true; break;
     case OP_CREDIT_UPDATE: break;  // el crédito ya se apuntó
     case OP_REQUEST:               // el invitado no puede abrir conexiones con el host
     default: c->p_rst = true;
   }
+  return c->gen != gen || mira(c) != antes;
 }
 
 static void tx(void) {
@@ -228,19 +267,25 @@ static void tx(void) {
   uint8_t *used;
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
-  static uint8_t buf[VS_HDR + VS_PAYLOAD];
-  bool hecho = false;
+  // Los búferes del invitado como iovec: la cabecera se copia (se lee una
+  // vez, el invitado puede cambiarla mientras tanto) y los datos van de su
+  // RAM al socket sin pasar por un búfer intermedio. Los topes, los de
+  // vq_leer: cadena válida, dentro de la RAM y de VS_HDR + VS_PAYLOAD como
+  // mucho; si no, el paquete se descarta entero.
+  static struct iovec iov[QMAX], datos[QMAX];
+  bool hecho = false, despertar = false;
   int vueltas = 0;
   for (;;) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1] || vueltas++ >= (int)q->num) break;
     uint16_t head = avail[2 + q->last_avail % q->num];
     q->last_avail++;
-    uint32_t n = vq_leer(q, desc, head, buf, sizeof buf);
-    if (n >= VS_HDR) {
+    uint64_t n = 0;
+    int ni = vq_iov(q, desc, head, false, iov, QMAX, &n);
+    if (ni > 0 && n >= VS_HDR && n <= VS_HDR + VS_PAYLOAD) {
       struct vs_hdr h;
-      memcpy(&h, buf, VS_HDR);
-      if (h.len <= n - VS_HDR) paquete(&h, buf + VS_HDR);
+      iov_sacar(&h, iov, ni, VS_HDR);
+      if (h.len <= n - VS_HDR && paquete(&h, datos, iov_tramo(iov, ni, VS_HDR, h.len, datos))) despertar = true;
     }
     vq_push(q, used, head, 0);
     hecho = true;
@@ -249,7 +294,10 @@ static void tx(void) {
     s.m.isr |= 1;
     irq();
   }
-  despertar_hilo();
+  // Solo si vs_hilo tiene algo nuevo (paquete): antes era en cada aviso, y
+  // cada paquete de datos del invitado costaba una vuelta del hilo (write al
+  // pipe, poll, armar_poll con todas las conexiones) sin nada que hacer.
+  if (despertar) despertar_hilo();
 }
 
 // ---------- rx: lo que va al invitado (hilo vs_hilo, con mu) ----------
@@ -943,4 +991,116 @@ int khv_vsock_prueba_plazo(int enviada) {
   n_rst = 0;
   pthread_mutex_unlock(&mu);
   return r;
+}
+
+#define PRUEBA_TX 6
+
+static void prueba_w(uint64_t off, uint64_t v) { vsock_mmio(off, true, &v, 4); }
+
+// khv_vsock_prueba_tx manda, como el invitado, PRUEBA_TX paquetes RW por la
+// cola de tx a una conexión abierta, cada uno con la cabecera y los datos en
+// tres búferes: uno de 4000 bytes y los demás de VS_PAYLOAD. Pasan del
+// socket (VS_BUF) y Go no lee todavía, así que el resto va a pend y lo tiene
+// que vaciar vs_hilo cuando Go lea: si el aviso de que hay pend no lo
+// despertara, se quedaría en poll sin mirar POLLOUT. enviado trae los
+// 4000 + (PRUEBA_TX - 1) * VS_PAYLOAD bytes; lee desde Go (el otro extremo)
+// hasta out (cap bytes) y devuelve cuántos llegaron en plazo, o negativo si
+// no se pudo preparar; *uso_pend dice si algo tuvo que esperar en pend. Con
+// su propia RAM y sin pausa, y lo deja todo como estaba. No puede convivir
+// con una VM de verdad.
+int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend) {
+  *uso_pend = 0;
+  if (!activo) vsock_init(53);
+  const uint64_t tam = 1 << 20;
+  uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (ram == MAP_FAILED) return -ENOMEM;
+  pthread_mutex_lock(&mu);
+  uint8_t *ram_antes = g_ram;
+  uint64_t tam_antes = g_ram_size;
+  bool pausa_antes = g_pausa;
+  g_ram = ram;
+  g_ram_size = tam;
+  g_pausa = false;  // sin VM empieza en pausa: vs_hilo no haría nada
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  // La cola de tx (1): tabla en +0, avail en +0x1000, used en +0x2000.
+  prueba_w(0x070, 0);
+  prueba_w(0x030, 1);
+  prueba_w(0x038, 8);
+  prueba_w(0x080, (uint32_t)RAM_BASE);
+  prueba_w(0x090, (uint32_t)(RAM_BASE + 0x1000));
+  prueba_w(0x0a0, (uint32_t)(RAM_BASE + 0x2000));
+  prueba_w(0x084, 0);
+  prueba_w(0x094, 0);
+  prueba_w(0x0a4, 0);
+  prueba_w(0x044, 1);
+  prueba_w(0x070, 0xf);
+
+  pthread_mutex_lock(&mu);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 5, sv, &gen, &err);
+  if (c) {
+    c->estado = C_ABIERTA;
+    c->p_request = false;
+  }
+  uint32_t lport = c ? c->lport : 0;
+  pthread_mutex_unlock(&mu);
+  int ret = c ? 0 : (err ? err : -EBUSY);
+  if (c) {
+    fcntl(sv[1], F_SETFL, O_NONBLOCK);
+    struct vdesc *d = (struct vdesc *)(ram);
+    uint16_t *av = (uint16_t *)(ram + 0x1000);
+    uint64_t o = 0;
+    if (4000 + (PRUEBA_TX - 1) * VS_PAYLOAD > cap) ret = -E2BIG;
+    for (int p = 0; p < PRUEBA_TX && ret == 0; p++) {
+      uint32_t len = p == 0 ? 4000 : VS_PAYLOAD;
+      struct vs_hdr h = {.src_cid = VS_GUEST_CID, .dst_cid = VS_HOST_CID, .src_port = PRUEBA_PUERTO + 5,
+                         .dst_port = lport, .len = len, .type = TYPE_STREAM, .op = OP_RW,
+                         .buf_alloc = VS_BUF};
+      // tx copia o escribe los datos antes de volver del notify: la RAM se
+      // puede reusar en el paquete siguiente.
+      uint64_t cab = 0x3000;
+      memcpy(ram + cab, &h, VS_HDR);
+      // Dos trozos de datos, con un hueco entre ellos.
+      uint64_t datos = 0x10000;
+      uint32_t a = len / 4, b = len - a;
+      memcpy(ram + datos, enviado + o, a);
+      memcpy(ram + datos + a + 0x800, enviado + o + a, b);
+      uint16_t base = (uint16_t)(p % 2 * 3);
+      d[base] = (struct vdesc){RAM_BASE + cab, VS_HDR, VIRTQ_DESC_F_NEXT, (uint16_t)(base + 1)};
+      d[base + 1] = (struct vdesc){RAM_BASE + datos, a, VIRTQ_DESC_F_NEXT, (uint16_t)(base + 2)};
+      d[base + 2] = (struct vdesc){RAM_BASE + datos + a + 0x800, b, 0, 0};
+      o += len;
+      av[2 + p % 8] = base;
+      __atomic_store_n(&av[1], (uint16_t)(p + 1), __ATOMIC_RELEASE);
+      prueba_w(0x050, 1);  // notify de la cola de tx
+    }
+    pthread_mutex_lock(&mu);
+    *uso_pend = c->gen == gen && c->npend > 0;  // Go aún no lee: nadie la vacía
+    pthread_mutex_unlock(&mu);
+    // Go lee: lo que no cupo sale de pend por el hilo.
+    uint32_t leido = 0;
+    for (int i = 0; ret == 0 && leido < o && i < 200; i++) {
+      ssize_t r = read(sv[1], out + leido, cap - leido);
+      if (r > 0) leido += (uint32_t)r;
+      else {
+        struct pollfd pf = {.fd = sv[1], .events = POLLIN};
+        poll(&pf, 1, 10);
+      }
+    }
+    if (ret == 0) ret = (int)leido;
+    pthread_mutex_lock(&mu);
+    if (c->gen == gen) liberar(c);
+    pthread_mutex_unlock(&mu);
+    close(sv[1]);
+  }
+  prueba_w(0x070, 0);
+  pthread_mutex_lock(&mu);
+  g_ram = ram_antes;
+  g_ram_size = tam_antes;
+  g_pausa = pausa_antes;
+  pthread_mutex_unlock(&mu);
+  munmap(ram, tam);
+  return ret;
 }

@@ -3,7 +3,11 @@
 package hvvm
 
 /*
+#include <stdlib.h>
 #include "khv.h"
+int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
+                  uint32_t *usado);
+int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
 
@@ -59,3 +63,51 @@ func carreraCola(iters int) int { return int(C.khv_prueba_carrera(C.int(iters)))
 // flushDisco manda un FLUSH al disco de pruebas y devuelve su byte de estado
 // (0 = bien), o -1 si no se pudo preparar.
 func flushDisco() int { return int(C.khv_prueba_flush()) }
+
+// esDisco manda una petición IN (tipo 0) u OUT (1) al disco de pruebas con
+// un búfer por cada lens (khv_prueba_es); datos va y vuelve. Devuelve el byte
+// de estado (-1 si no se pudo preparar) y la longitud del used.
+func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) (estado int, usado uint32) {
+	var u C.uint32_t
+	var pl *C.uint32_t
+	if len(lens) > 0 {
+		pl = (*C.uint32_t)(unsafe.Pointer(&lens[0]))
+	}
+	var pd *C.uint8_t
+	if len(datos) > 0 {
+		pd = (*C.uint8_t)(unsafe.Pointer(&datos[0]))
+	}
+	e := C.khv_prueba_es(C.uint32_t(tipo), C.uint64_t(sector), pl, C.int(len(lens)), pd, C.int(malo), &u)
+	return int(e), uint32(u)
+}
+
+// vsockTx manda como el invitado los bytes de enviado (4000 y cinco de
+// 64 KiB) en seis paquetes por la cola de tx (khv_vsock_prueba_tx) y devuelve lo que leyó Go,
+// si algo tuvo que esperar en pend, y el código de error (negativo) si no se
+// pudo preparar.
+func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
+	out := make([]byte, len(enviado)+1)
+	var p C.int
+	r := C.khv_vsock_prueba_tx((*C.uint8_t)(unsafe.Pointer(&out[0])), C.uint32_t(len(out)),
+		(*C.uint8_t)(unsafe.Pointer(&enviado[0])), &p)
+	if r < 0 {
+		return nil, false, int(r)
+	}
+	return out[:r], p != 0, 0
+}
+
+// construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
+// virtio) y devuelve el DTB, o nil si no se pudo construir.
+func construirFDT() []byte {
+	buf := make([]byte, 1<<16)
+	args := C.CString("console=ttyS0")
+	defer C.free(unsafe.Pointer(args))
+	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: 2, bootargs: args, dist_size: 0x10000,
+		redist_size: 0x20000, uart_spi: 33, rtc_spi: 34, nvirtio: 1}
+	p.virtio_spi[0] = 35
+	n := C.fdt_build(unsafe.Pointer(&buf[0]), C.size_t(len(buf)), &p)
+	if n == 0 {
+		return nil
+	}
+	return buf[:n]
+}
