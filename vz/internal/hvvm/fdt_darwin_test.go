@@ -66,6 +66,18 @@ func propsChosen(t *testing.T, dtb []byte) map[string][]byte {
 	return nodosFDT(t, dtb)["/chosen"]
 }
 
+// propsNodo: las propiedades del nodo hijo de la raíz cuyo nombre empieza por
+// prefijo ("chosen", "psci", "intc@").
+func propsNodo(t *testing.T, dtb []byte, prefijo string) map[string][]byte {
+	t.Helper()
+	for r, props := range nodosFDT(t, dtb) {
+		if strings.HasPrefix(r, "/"+prefijo) && !strings.Contains(r[1:], "/") {
+			return props
+		}
+	}
+	return nil
+}
+
 // TestFDTSemillas: /chosen lleva kaslr-seed (u64) y rng-seed (al menos 64
 // bytes), y son otras en cada construcción: un arranque en frío no puede
 // repetir las del anterior.
@@ -145,6 +157,37 @@ func TestFDTCPUs(t *testing.T) {
 // TestMPIDR: khv_mpidr_idx deshace khv_mpidr_aff para cada vCPU de la
 // máquina y rechaza lo que no es de ninguno (otro grupo, Aff0 fuera del
 // grupo, Aff2 o Aff3, uno de más). Es lo que mira PSCI CPU_ON.
+// TestFDTAnidada: con EL2 el PSCI va por SMC (un HVC desde EL2 no sale del
+// invitado) y el GIC anuncia su interrupción de mantenimiento (PPI 9), que
+// KVM necesita para el vGIC; sin EL2 nada de eso cambia.
+func TestFDTAnidada(t *testing.T) {
+	normal, anidada := construirFDTAnidada(false), construirFDTAnidada(true)
+	if normal == nil || anidada == nil {
+		t.Fatal("fdt_build failed")
+	}
+	if m := string(propsNodo(t, normal, "psci")["method"]); m != "hvc\x00" {
+		t.Errorf("psci method without EL2 = %q, want hvc", m)
+	}
+	if _, ok := propsNodo(t, normal, "intc@")["interrupts"]; ok {
+		t.Error("the GIC has a maintenance interrupt without EL2")
+	}
+	if m := string(propsNodo(t, anidada, "psci")["method"]); m != "smc\x00" {
+		t.Errorf("psci method with EL2 = %q, want smc", m)
+	}
+	irq := propsNodo(t, anidada, "intc@")["interrupts"]
+	want := []byte{0, 0, 0, 1, 0, 0, 0, 9, 0, 0, 0, 4}
+	if !bytes.Equal(irq, want) {
+		t.Errorf("GIC interrupts with EL2 = %x, want PPI 9 level (%x)", irq, want)
+	}
+	// El nodo del timer ya lleva el PPI del hipervisor (10) en los dos.
+	for _, d := range [][]byte{normal, anidada} {
+		tm := propsNodo(t, d, "timer")["interrupts"]
+		if len(tm) != 48 || binary.BigEndian.Uint32(tm[40:]) != 10 {
+			t.Errorf("timer interrupts = %x, want the hypervisor PPI 10 last", tm)
+		}
+	}
+}
+
 func TestMPIDR(t *testing.T) {
 	const n = 64
 	for i := 0; i < n; i++ {

@@ -115,7 +115,7 @@ func TestSnapshotImagenPrepNoLlevaNadaDeLaMaquina(t *testing.T) {
 	deMaquina := map[string]bool{"From": true, "AllowDomains": true, "TTLSeconds": true, "CPUPctDefault": true,
 		"WaitReady": true, "ReadyTimeoutSeconds": true, "Volumes": true, "Volume": true, "VolumeMount": true,
 		"VolumeReadOnly": true, "Shares": true, "OnTTL": true, "Env": true, "ShareWait": true, "Publish": true,
-		"Entrypoint": true, "Cmd": true, "VolumeWait": true, "Fresh": true, "HostPorts": true}
+		"Entrypoint": true, "Cmd": true, "VolumeWait": true, "Fresh": true, "HostPorts": true, "Nested": true}
 	tipo := reflect.TypeOf(prep)
 	v := reflect.ValueOf(prep)
 	for i := 0; i < tipo.NumField(); i++ {

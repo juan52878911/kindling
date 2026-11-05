@@ -720,9 +720,10 @@ func (m *Manager) load() {
 //	   sin esperar a sus carpetas o con el caudal del daemon. Con el 3 se
 //	   niega a arrancar, y -rollback devuelve el state.json.v<N>.bak.
 //	4: el mismo formato, con alguna máquina con puentes al host (host_ports,
-//	   kling run -host-port). Un kling ≤ v1.0 los perdería en su siguiente
-//	   escritura y la máquina despertaría sin llegar a su servicio del host;
-//	   con el 4 se niega a arrancar.
+//	   kling run -host-port) o anidada (nested, anidada.go). Un kling ≤ v1.0
+//	   los perdería en su siguiente escritura: la máquina despertaría sin
+//	   llegar a su servicio del host, o un start la arrancaría sin EL2 ni KVM
+//	   y freeze/commit/fork dejarían de negarse. Con el 4 se niega a arrancar.
 //
 // Se escribe siempre el más bajo que describe el estado (esquemaParaEscribir),
 // para que volver atrás siga siendo posible mientras no haga falta más. Qué
@@ -736,16 +737,18 @@ const (
 	versionEstadoDiff    = 2
 	versionEstadoCampos  = 3
 	versionEstadoPuentes = 4
+	versionEstadoAnidada = versionEstadoPuentes
 	versionEstadoMax     = versionEstadoPuentes
 )
 
 // esquemaParaEscribir es el esquema más bajo que describe list: versionEstado,
 // versionEstadoDiff si alguna máquina depende de un diferencial, o
-// versionEstadoCampos si alguna lleva un campo que un kling anterior perdería.
+// versionEstadoCampos si alguna lleva un campo que un kling anterior perdería,
+// o versionEstadoAnidada si alguna es anidada.
 func esquemaParaEscribir(list []api.Machine) int {
 	v := versionEstado
 	for i := range list {
-		if len(list[i].HostPorts) > 0 {
+		if len(list[i].HostPorts) > 0 || list[i].Nested {
 			return versionEstadoPuentes
 		}
 		if necesitaV3(&list[i]) {
@@ -1421,6 +1424,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	default:
 		return nil, peticionInvalida("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
+	if err := m.validarAnidada(req); err != nil {
+		return nil, err
+	}
 	// El entorno de la máquina (entorno.go): validado antes de reservar
 	// nada. Desde aquí solo viaja en env, nunca en la máquina.
 	env, err := entornoDePeticion(req)
@@ -1631,8 +1637,8 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 	defer releaseMem()
-	if _, err := os.Stat(m.KernelPath()); err != nil {
-		return nil, fmt.Errorf("missing kernel at %s", m.KernelPath())
+	if _, err := os.Stat(m.kernelDe(req.Nested)); err != nil {
+		return nil, fmt.Errorf("missing kernel at %s", m.kernelDe(req.Nested))
 	}
 
 	// Sin agente de invitado no hay quien monte los volúmenes.
@@ -1705,6 +1711,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		Volumes:   attachments(vols),
 		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
+		Nested:    req.Nested,
 		TTLAt:     &creada,
 		EnvKeys:   api.MachineEnvKeys(env),
 		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
@@ -2008,7 +2015,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		}
 		// layer va con cadena vacía si la imagen es monolítica; prepareJail las
 		// ignora.
-		toLink := []string{m.KernelPath(), base, layer, overlay}
+		toLink := []string{m.kernelDe(m.anidadaDe(id)), base, layer, overlay}
 		for _, v := range vols {
 			toLink = append(toLink, v.path)
 		}
@@ -2039,7 +2046,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
 		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait) +
 		imgSnapBootArg(m.esPrepImagen(id))
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
+	anidada := m.anidadaDe(id)
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.kernelDe(anidada), BootArgs: args}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -2134,7 +2142,9 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if memMaxMiB > memMiB {
 		tamano, globo = memMaxMiB, memMaxMiB-memMiB
 	}
-	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: tamano}); err != nil {
+	// Nested solo viaja si se pidió: Firecracker rechaza los campos que no
+	// conoce (y validarAnidada ya exigió kling-hv).
+	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: tamano, KlingNested: anidada}); err != nil {
 		return pid, err
 	}
 	// virtio-balloon a 0: no reclama nada al arrancar, pero deja el dispositivo
@@ -2334,6 +2344,9 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// modelo MMDS existe para impedir, así que preferimos fallar claro a filtrar.
 	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
 	// vuelca nada a disco) o `stop`/`rm`.
+	if mc.Nested {
+		return nil, estadoInvalido("machine %s can't be frozen: %s", mc.ID[:12], errAnidadaSinVolcado)
+	}
 	if mc.HasSecrets {
 		return nil, estadoInvalido("machine %s has session secrets injected via MMDS and "+
 			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+

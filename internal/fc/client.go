@@ -142,6 +142,10 @@ func Limit(bytesPerSec int64) *RateLimiter {
 type MachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMiB int `json:"mem_size_mib"`
+	// KlingNested es una extensión de kling-hv (virtualización anidada,
+	// docs/backend-hv.md). omitempty: Firecracker rechaza los campos que no
+	// conoce, y el núcleo solo lo pone con kling-hv (como Drive.KlingDisposable).
+	KlingNested bool `json:"kling_nested,omitempty"`
 }
 
 type NetworkInterface struct {

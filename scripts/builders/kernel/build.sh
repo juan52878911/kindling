@@ -5,6 +5,8 @@
 #   TARGET_ARCH=arm64 scripts/builders/kernel/build.sh  # cruzado (aarch64-linux-gnu-)
 #   OUT=/opt/fc scripts/builders/kernel/build.sh        # dónde dejar el resultado
 #   CONFIG_ONLY=1 scripts/builders/kernel/build.sh      # solo .config + comprobación
+#   VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh
+#                                                       # con KVM, para kling run -nested
 #   scripts/builders/kernel/build.sh --print-name       # nombre del fichero y nada más
 #
 # No es un constructor del daemon (/usr/local/lib/kindling/builders/): corre en
@@ -14,7 +16,8 @@
 #   1. descarga linux-$KERNEL_VERSION.tar.xz de kernel.org (versión y sha256
 #      fijados en kernel.pin) a una cache y comprueba el sha256;
 #   2. lo extrae limpio en un directorio temporal;
-#   3. aplica config-common + config-$TARGET_ARCH con `allnoconfig` y después
+#   3. aplica config-common + config-$TARGET_ARCH (+ config-$TARGET_ARCH-$VARIANT
+#      si hay VARIANT) con `allnoconfig` y después
 #      `olddefconfig`; avisa de cada opción pedida que no llegó al .config
 #      (dependencia no satisfecha o nombre que no existe en esta versión);
 #   4. pasa scripts/check-kernel-config.sh: si falla, no se compila;
@@ -71,7 +74,18 @@ else
   CROSS_COMPILE="${CROSS_COMPILE:-$CROSS_DEF}"
 fi
 
+# VARIANT: un kernel aparte con un fragmento más encima (config-$arch-$VARIANT)
+# y su propio nombre; el normal no cambia. "nested" lleva KVM para las
+# máquinas anidadas de kling-hv (docs/backend-hv.md), que lo cargan desde
+# images/vmlinux-nested; las demás siguen con images/vmlinux.
+VARIANT="${VARIANT:-}"
 NAME="vmlinux-${KERNEL_VERSION}-kindling-${TARGET_ARCH}"
+if [ -n "$VARIANT" ]; then
+  [[ "$VARIANT" =~ ^[a-z0-9]+$ ]] || { echo "invalid VARIANT '$VARIANT'" >&2; exit 1; }
+  [ -f "$HERE/config-$TARGET_ARCH-$VARIANT" ] || {
+    echo "no variant '$VARIANT' for $TARGET_ARCH (missing config-$TARGET_ARCH-$VARIANT)" >&2; exit 1; }
+  NAME="$NAME-$VARIANT"
+fi
 if [ "${1:-}" = "--print-name" ]; then
   echo "$NAME"
   exit 0
@@ -156,7 +170,7 @@ kmake() { make -C "$SRC" ARCH="$KARCH" CROSS_COMPILE="$CROSS_COMPILE" "$@"; }
 
 # ── 3. configuración ─────────────────────────────────────────────────────────
 FRAG="$WORK/fragment.config"
-cat "$HERE/config-common" "$HERE/config-$TARGET_ARCH" >"$FRAG"
+cat "$HERE/config-common" "$HERE/config-$TARGET_ARCH" ${VARIANT:+"$HERE/config-$TARGET_ARCH-$VARIANT"} >"$FRAG"
 kmake -s KCONFIG_ALLCONFIG="$FRAG" allnoconfig
 kmake -s olddefconfig
 
@@ -203,6 +217,7 @@ cp "$SRC/$IMG" "$OUT/$NAME"
   echo "kernel_version=$KERNEL_VERSION"
   echo "tarball_sha256=$KERNEL_SHA256"
   echo "target_arch=$TARGET_ARCH"
+  [ -z "$VARIANT" ] || echo "variant=$VARIANT"
   echo "fragment_sha256=$(sha256sum "$FRAG" | cut -d' ' -f1)"
   echo "source_date_epoch=$SOURCE_DATE_EPOCH"
   echo "compiler=$("${CROSS_COMPILE}gcc" --version | head -1)"

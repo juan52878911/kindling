@@ -107,6 +107,7 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.Machine share_wait":  {efecto: true, version: 3, porque: "the agent would start the service before its shares"},
 	"state.json api.Machine volume_wait": {efecto: true, version: 3, porque: "a commit would release and hand back volumes it must not"},
 	"state.json api.Machine net_mibps":   {efecto: true, version: 3, porque: "a cold start would use the daemon's rate instead of the requested one"},
+	"state.json api.Machine nested":      {efecto: true, version: 4, porque: "a Start would boot it without EL2 and KVM, and freeze/commit/fork would stop refusing it"},
 	"state.json api.Machine vmm": {porque: "the next launch sets it again; a freeze carries its own in volcado.ok, " +
 		"and an older kling records its own VMM in the goldens it makes anyway"},
 	"state.json api.Machine image_snapshot": {porque: "an older kling sees the copy as cold-booted: it only loses the shared-memory " +

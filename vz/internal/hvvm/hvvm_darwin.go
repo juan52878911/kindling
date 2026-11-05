@@ -124,6 +124,13 @@ func errPausa(op string) error {
 // Start, o RestoreState con el fichero del snapshot). La línea de comandos es
 // la de Firecracker tal cual (consola ttyS0, sin PCI): kling-hv tiene el mismo
 // hardware, así que el bootArgs traducido para vz no sirve.
+// ErrSinEL2 es el error de pedir virtualización anidada en un Mac cuyo
+// Hypervisor.framework no da EL2 a sus VM.
+const ErrSinEL2 = "nested virtualization is not supported on this Mac (needs an Apple M3 or later and macOS 15 or later)"
+
+// EL2Soportado dice si este Mac puede crear VM anidadas (con EL2).
+func EL2Soportado() bool { return C.khv_el2_soportado() != 0 }
+
 func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -141,6 +148,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	if s.Graphics != nil {
 		return nil, errors.New("kling-hv has no display device")
 	}
+	if s.MachineConfig.Nested && C.khv_el2_soportado() == 0 {
+		return nil, errors.New(ErrSinEL2)
+	}
 
 	// La consola va por una tubería: el C escribe líneas enteras y aquí se
 	// copian a Console, que las serializa con los diagnósticos.
@@ -155,6 +165,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	var cfg C.struct_khv_config
 	cfg.ncpus = C.int(s.MachineConfig.VCPUCount)
 	cfg.mem_size = C.uint64_t(uint64(s.MachineConfig.MemSizeMiB) << 20)
+	if s.MachineConfig.Nested {
+		cfg.nested = 1
+	}
 	var libres []unsafe.Pointer
 	cstr := func(v string) *C.char {
 		p := C.CString(v)

@@ -91,6 +91,10 @@ struct khv_config {
   int vsock;       // virtio-vsock (el agente por AF_VSOCK)
   int balloon;     // virtio-balloon: 0 sin globo, 1 con él, 2 con deflate_on_oom
   int console_fd;  // salida de la UART
+  // Virtualización anidada (docs/backend-hv.md): la VM se crea con EL2
+  // (hv_vm_config_set_el2_enabled) y el kernel empieza en EL2h, así que puede
+  // llevar KVM. Sin snapshot: khv_snapshot la rechaza.
+  int nested;
 };
 
 // Bits de pausa: la VM corre solo con todos a cero. El núcleo (PATCH /vm) y el
@@ -101,6 +105,9 @@ struct khv_config {
 const char *khv_error(void);
 void khv_error_copia(char *buf, size_t n);  // copia de khv_error (con su cerrojo)
 int khv_create(const struct khv_config *c);
+// khv_el2_soportado: 1 si este Mac da EL2 a sus VM (M3 o posterior con
+// macOS 15 o posterior), 0 si no; no crea nada.
+int khv_el2_soportado(void);
 bool khv_vm_tocada(void);  // si khv_create llegó a crear la VM (el proceso ya no sirve para otra)
 int khv_boot(void);
 int khv_restore(const char *mem_path);
@@ -136,6 +143,8 @@ void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *sm
 // un CPU_ON pendiente (vm.c): 0 si cuadra, o el número de la comprobación
 // que falló.
 int khv_prueba_cpu_on(void);
+// khv_sysreg_iss: el hv_sys_reg_t del ISS de un MSR/MRS atrapado (EC 0x18).
+uint16_t khv_sysreg_iss(uint64_t iss);
 
 // ---- interno ----
 
@@ -166,6 +175,9 @@ struct fdt_params {
   uint32_t rtc_spi;
   int nvirtio;
   uint32_t virtio_spi[VIRTIO_MAX];
+  // VM con EL2: PSCI por SMC (un HVC desde EL2 se queda en el propio
+  // invitado) y el GIC anuncia su interrupción de mantenimiento (PPI 9).
+  int nested;
 };
 size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p);
 

@@ -92,6 +92,8 @@ var coreTree = []section{
                                                    -volume)
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of
                                                    freezing
+      [-nested]                                    nested virtualization (kling-hv):
+                                                   KVM inside, never frozen
       [-mem-max 2G] [-disk 4G]                     ceiling for machine resize; its
                                                    writable disk (default 512M)
       [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only

@@ -127,6 +127,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// tomado y la máquina releída: un PutMMDS concurrente toma el mismo
 	// cerrojo, así que o ya marcó HasSecrets o espera a que acabe el commit.
 	// Cubre también fork, que pasa por aquí.
+	if mc.Nested {
+		return nil, marcado(ErrCommitConflict, "machine %s can't become a snapshot: %s", mc.Name, errAnidadaSinVolcado)
+	}
 	if mc.HasSecrets {
 		return nil, marcado(ErrCommitConflict, "machine %s has session secrets injected via MMDS and can't become "+
 			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+

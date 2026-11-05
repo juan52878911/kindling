@@ -576,6 +576,106 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   vCPU (ver [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback`
   mira la versión de cada fichero antes de volver.
 
+## Virtualización anidada (`kling run -nested`)
+
+Para correr Firecracker (o cualquier KVM) dentro de una máquina del Mac, y con
+ello los e2e de Linux sin salir del portátil. Es opt-in por máquina y solo de
+kling-hv: Hypervisor.framework da EL2 a sus VM desde macOS 15 en un M3 o
+posterior (`hv_vm_config_get_el2_supported`; en el M4 con macOS 26.5 da
+`true`). Virtualization.framework no lo da a una VM Linux, así que kling-vz
+rechaza la opción, y en Linux (Firecracker) el daemon también.
+
+```sh
+VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh   # en el lab
+cp vmlinux-6.1.140-kindling-arm64-nested <raíz>/images/vmlinux-nested
+kling run -name kvm -nested -allow-exec -mem 1G <imagen>
+kling exec kvm -- ls -l /dev/kvm
+```
+
+**Lo que hace kling-hv** (`vm.c`, `fdt.c`), solo con `kling_nested` en
+`PUT /machine-config` (la extensión que manda el núcleo; Firecracker no la
+conoce y el núcleo no la pone si no se pide):
+
+- crea la VM con `hv_vm_config_set_el2_enabled` y arranca cada vCPU (el 0 y
+  los de `CPU_ON`) en **EL2h** (CPSR `0x3c9`). El kernel decide: con VHE se
+  queda en EL2 (`CPU: All CPU(s) started at EL2`) y KVM corre ahí;
+- en el FDT, **PSCI por SMC** (un HVC desde EL2 va al propio vector del
+  invitado; el SMC lo atrapa HVF y `vm.c` ya lo atendía) y la **interrupción
+  de mantenimiento** del GIC (PPI 9 = INTID 25, `HV_GIC_INT_MAINTENANCE`) en
+  el nodo `intc`, que es lo que KVM busca para el vGIC (`vgic interrupt
+  IRQ9`). El GIC de HVF da el interfaz de virtualización por registros
+  (`ICH_*`, sin región GICV/GICH: KVM dice `no GICV resource entry` y usa
+  GICv3 por sistema). El timer ya anunciaba el PPI del hipervisor (10 =
+  `HV_GIC_INT_EL2_PHYSICAL_TIMER`), que es el que usa un kernel en EL2; HVF
+  no da el timer virtual de EL2 (PPI 12), y sin él va bien;
+- **registros de EL2 que HVF devuelve al VMM**: en el M4, `MSR CNTHCTL_EL2`
+  sale como MSR atrapado (EC 0x18, ISS `0x313802`). Sin atenderlo el kernel
+  se quedaba colgado en el arranque del timer; ahora `sysreg_el2` traduce el
+  ISS (`khv_sysreg_iss`) y lo pasa a `hv_vcpu_{get,set}_sys_reg`, como QEMU.
+  Lo que HVF no conoce sigue como antes (lectura a 0, escritura ignorada);
+- un `CPU_ON` vuelve a poner también los EL2 de reinicio (SCTLR, HCR, CPTR,
+  MDCR, TCR, TTBR0/1, MAIR, VBAR, CNTHCTL, CNTHP_CTL, VTTBR, VTCR del vCPU
+  recién creado), como ya hacía con los de EL1;
+- el WFI de respaldo (que con el GIC de HVF no se usa) se acota a 2 ms: no
+  mira el timer de EL2.
+
+**Sin snapshot, a propósito**. Una máquina anidada no se congela, ni se
+guarda (`save`/commit), ni se bifurca: `khv_snapshot` y `khv_restore` lo
+rechazan, el servidor también (`PUT /snapshot/create`: «snapshots of a
+nested-virtualization VM are not supported») y el núcleo antes que ellos
+(Freeze 409, commit 409, fork 409, con el porqué), como con `HasSecrets`; su
+TTL de congelar se retira una vez, diciéndolo en el log. El estado de EL2 son
+los registros de EL2, los `ICH_*` (con las list registers de un invitado de
+segundo nivel en vuelo), el timer de EL2 y lo que HVF lleve por dentro de un
+invitado anidado en marcha; nada de eso va en la cabecera v4, y no hay forma
+de comprobar desde fuera que `hv_gic_state` guarde los `ICH_*`. Guardarlo
+pediría una cabecera v5 y, sobre todo, una prueba de que un KVM con un
+invitado vivo sobrevive al viaje; para el caso de uso (arrancar, correr los
+e2e, tirar) no compensa. La cabecera v4 no cambia (`TestCabeceraKLNGHV`).
+
+**Kernel aparte**. El de siempre no lleva KVM; la variante `nested`
+(`scripts/builders/kernel/config-arm64-nested`: `VIRTUALIZATION`, `KVM`,
+`TUN`) es otro fichero, `images/vmlinux-nested`, que el núcleo usa solo para
+las anidadas (`kernelDe`, `internal/machine/anidada.go`). Así el sha256 de
+`images/vmlinux`, que firma los dorados, no cambia y no se invalida ninguna
+plantilla. Comprobado: el `.config` normal sale byte a byte igual con el
+`build.sh` de antes y el de ahora (`CONFIG_ONLY=1`, `cmp`). Sin el kernel
+anidado, `run -nested` es un 400 que dice cómo construirlo. `state.json` pasa
+al esquema 4 mientras haya alguna máquina anidada (un kling ≤ 1.0 perdería el
+campo y la arrancaría sin EL2); sin ellas sigue escribiendo el de antes.
+
+**Probado** (M4, macOS 26.5.1, kling-hv directo por su API, 2 vCPU, 512 MiB):
+el kernel anidado arranca en EL2 con `kvm [1]: Hyp mode initialized
+successfully`, el invitado ve `/dev/kvm` y **una microVM de Firecracker
+v1.17.0 aarch64 arranca dentro** (1 vCPU, 128 MiB, el mismo kernel, el disco
+raíz del invitado como su disco) hasta su init y sale limpia: de lanzar
+Firecracker a que termina, 2,8 s de reloj del invitado, que incluyen la
+consola serie con earlycon a dos niveles y el segundo de `panic=1`. El kernel
+de siempre también arranca en EL2 (sin KVM). Pausa y reanudación funcionan;
+el snapshot se niega.
+
+Coste del arranque (ms de `InstanceStart` a que `init=/bin/echo` escribe,
+`quiet`, n=7, mediana y rango, en serie):
+
+| kernel | sin EL2 | con EL2 |
+|---|---|---|
+| `vmlinux` de siempre (6.1.177) | 136 (125-194) | 161 (141-251) |
+| `vmlinux-nested` (6.1.140 + KVM) | 112 (101-175) | 131 (126-190) |
+
+EL2 cuesta unos 20-25 ms por arranque en frío; las máquinas sin `-nested` no
+cambian de camino (misma VM, mismo CPSR, mismo FDT).
+
+**Lo que falta**:
+
+- los e2e de Linux dentro: la anidada solo tiene `TUN` de más. Para un daemon
+  de kindling dentro harían falta además puente, netfilter y lo que pida
+  `scripts/check-kernel-config.sh` para un anfitrión, y no está probado;
+- el invitado de segundo nivel corre en EL1: no se puede anidar otra vez;
+- PMU: con EL2, HVF manda a `ID_AA64DFR0_EL1.PMUVer`; no se ha mirado qué ve
+  KVM ahí ni si `perf` funciona en el invitado;
+- SMP del invitado de segundo nivel y carga sostenida dentro: solo probada
+  una microVM de 1 vCPU que arranca y sale.
+
 ## Fondo de procesos pre-lanzados (propuesta, sin hacer)
 
 La idea: tener unos `kling-hv` ya arrancados esperando un `snapshot/load`

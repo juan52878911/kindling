@@ -102,6 +102,7 @@ kling inspect m1:  mem_max_mib number
 kling inspect m1:  mem_mib number
 kling inspect m1:  mem_shared bool
 kling inspect m1:  name string
+kling inspect m1:  nested bool
 kling inspect m1:  net_index number
 kling inspect m1:  net_mibps number
 kling inspect m1:  on_ttl string
@@ -189,6 +190,7 @@ kling ps -a -json:  [].mem_max_mib number
 kling ps -a -json:  [].mem_mib number
 kling ps -a -json:  [].mem_shared bool
 kling ps -a -json:  [].name string
+kling ps -a -json:  [].nested bool
 kling ps -a -json:  [].net_index number
 kling ps -a -json:  [].net_mibps number
 kling ps -a -json:  [].on_ttl string
@@ -276,6 +278,7 @@ kling sandbox ls -json:  [].mem_max_mib number
 kling sandbox ls -json:  [].mem_mib number
 kling sandbox ls -json:  [].mem_shared bool
 kling sandbox ls -json:  [].name string
+kling sandbox ls -json:  [].nested bool
 kling sandbox ls -json:  [].net_index number
 kling sandbox ls -json:  [].net_mibps number
 kling sandbox ls -json:  [].on_ttl string

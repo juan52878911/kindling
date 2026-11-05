@@ -648,6 +648,7 @@ func cmdRun(args []string) error {
 	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	allowExec := fs.Bool("allow-exec", false, "enable kling exec and kling cp on this machine (decided at boot; snapshots keep it)")
+	nested := fs.Bool("nested", false, "nested virtualization: the guest boots at EL2 with a KVM kernel and can run Firecracker (kling-hv backend on an M3+ Mac only; the machine can't be frozen, saved or forked)")
 	onTTL := fs.String("on-ttl", "", "what happens when -ttl runs out: freeze (default) or remove")
 	waitReady := fs.Bool("wait-ready", false, "return once the guest is ready by its image's own probe and post-restore hooks, not just when its agent answers")
 	readyTimeout := fs.Duration("ready-timeout", 0, "with -wait-ready, how long to wait (default 2m)")
@@ -708,7 +709,10 @@ func cmdRun(args []string) error {
 				"-"+strings.Join(dados, ", -"), *from)
 		}
 	}
-	if len(env) > 0 || (*disk > 0 && *from == "") || len(hostPorts) > 0 {
+	if *nested && *from != "" {
+		return fmt.Errorf("-nested does not go with -from: a nested machine has no snapshot to copy")
+	}
+	if len(env) > 0 || (*disk > 0 && *from == "") || len(hostPorts) > 0 || *nested {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
 		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
@@ -723,6 +727,9 @@ func cmdRun(args []string) error {
 		}
 		if len(hostPorts) > 0 && !slices.Contains(info.Capabilities, api.CapabilityHostPorts) {
 			return fmt.Errorf("the daemon (%s) does not take -host-port: update it (it is macOS only)", info.Version)
+		}
+		if *nested && !slices.Contains(info.Capabilities, api.CapabilityNested) {
+			return fmt.Errorf("the daemon (%s) does not take -nested: update it", info.Version)
 		}
 	}
 	if *fresh && *from != "" {
@@ -763,6 +770,7 @@ func cmdRun(args []string) error {
 		Volumes:   vols,
 		Shares:    shareSpecs,
 		AllowExec: *allowExec,
+		Nested:    *nested,
 		OnTTL:     *onTTL,
 		Env:       env,
 		ShareWait: *shareWait,

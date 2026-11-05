@@ -915,6 +915,17 @@ func (m *Manager) handleFreezeFailure(id string, err error) {
 	// siempre y no se aplicaba nunca. Se apaga el TTL de esa máquina, una vez y
 	// diciéndolo: lo que promete `ttl` no se puede cumplir aquí, y fingir que
 	// sigue vigente es peor que retirarlo.
+	// Una máquina anidada tampoco se congela nunca (anidada.go): misma salida.
+	if cur.Nested {
+		m.mu.Lock()
+		if vivo := m.byID[id]; vivo != nil {
+			vivo.TTLSeconds = 0
+			m.persist()
+		}
+		m.mu.Unlock()
+		log.Printf("ttl: %s runs with nested virtualization and can't be frozen; dropping its TTL (%v)", shortID(id), err)
+		return
+	}
 	if cur.HasSecrets {
 		m.mu.Lock()
 		if vivo := m.byID[id]; vivo != nil {

@@ -296,6 +296,7 @@ func TestForkRechazaAntesDePausar(t *testing.T) {
 		m.mu.Lock()
 		viva := m.byID[id]
 		viva.State, viva.HasSecrets, viva.Volumes, viva.Shares, viva.CredentialDomains = api.StateRunning, false, nil, nil, nil
+		viva.Nested = false
 		f(viva)
 		m.mu.Unlock()
 	}
@@ -311,6 +312,7 @@ func TestForkRechazaAntesDePausar(t *testing.T) {
 		{"negativo", "caja", ForkOptions{Count: -1}, func(*api.Machine) {}, ErrFork},
 		{"dormida", "caja", ForkOptions{}, func(v *api.Machine) { v.State = api.StateWarm }, ErrNotRunning},
 		{"secretos", "caja", ForkOptions{}, func(v *api.Machine) { v.HasSecrets = true }, ErrFork},
+		{"anidada", "caja", ForkOptions{}, func(v *api.Machine) { v.Nested = true }, ErrFork},
 		{"volumen rw", "caja", ForkOptions{}, func(v *api.Machine) {
 			v.Volumes = []api.VolumeAttachment{{Name: "datos", Mount: "/data"}}
 		}, ErrFork},

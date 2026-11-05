@@ -138,6 +138,7 @@ func TestEstadoSubirEsquemaDejaCopia(t *testing.T) {
 		{"cmd", func(mc *api.Machine) { mc.Cmd = []string{"redis-server"} }, versionEstadoCampos},
 		{"net_mibps", func(mc *api.Machine) { mc.NetMiBps = 64 }, versionEstadoCampos},
 		{"host_ports", func(mc *api.Machine) { mc.HostPorts = []api.HostPort{{Host: 11434, Guest: 11434}} }, versionEstadoPuentes},
+		{"nested", func(mc *api.Machine) { mc.Nested = true }, versionEstadoAnidada},
 	} {
 		t.Run(c.nombre, func(t *testing.T) {
 			m := newTestManager(t)

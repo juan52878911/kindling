@@ -269,6 +269,10 @@ func (m *Manager) motivoSinSnapshotImagen(req api.RunRequest) string {
 	switch {
 	case req.Fresh:
 		return "fresh"
+	case req.Nested:
+		// Una anidada no se congela (anidada.go): ni sale de un snapshot ni
+		// lo prepara.
+		return "nested"
 	case req.From != "":
 		return "from a template"
 	case len(req.VolumeSet()) > 0:
