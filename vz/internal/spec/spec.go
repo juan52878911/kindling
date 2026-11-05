@@ -230,6 +230,18 @@ func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) 
 	return fmt.Errorf("drive %q is not configured", id)
 }
 
+// ValidateVCPUs comprueba vcpu_count contra el tope del VMM (max; 0 = sin
+// tope propio: lo dice el framework al crear la VM).
+func ValidateVCPUs(n, max int) error {
+	if n < 1 {
+		return errors.New("vcpu_count must be positive")
+	}
+	if max > 0 && n > max {
+		return fmt.Errorf("vcpu_count %d: this VMM runs at most %d vCPUs on this Mac (its cores and what the hypervisor allows)", n, max)
+	}
+	return nil
+}
+
 // Validate comprueba que haya lo mínimo para crear la VM.
 func (s *Spec) Validate() error {
 	if s.BootSource == nil || s.BootSource.KernelImagePath == "" {

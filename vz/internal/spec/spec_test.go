@@ -320,3 +320,16 @@ func TestSyncDelDisco(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateVCPUs(t *testing.T) {
+	for _, c := range []struct {
+		n, max int
+		ok     bool
+	}{
+		{1, 0, true}, {64, 0, true}, {10, 10, true}, {11, 10, false}, {0, 10, false}, {-1, 0, false},
+	} {
+		if err := ValidateVCPUs(c.n, c.max); (err == nil) != c.ok {
+			t.Errorf("ValidateVCPUs(%d, %d) = %v", c.n, c.max, err)
+		}
+	}
+}

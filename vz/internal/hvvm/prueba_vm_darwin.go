@@ -20,5 +20,13 @@ func filtrarID(pfr0, pfr1, zfr0, smfr0 uint64) (uint64, uint64, uint64, uint64) 
 // pendiente cuadra.
 func pruebaCPUOn() int { return int(C.khv_prueba_cpu_on()) }
 
+// trazaPrueba hace un arranque de mentira para traza.c (khv_traza_prueba) y
+// devuelve su resumen.
+func trazaPrueba() string {
+	var b [768]C.char
+	C.khv_traza_prueba(&b[0], C.size_t(len(b)))
+	return C.GoString(&b[0])
+}
+
 // finMotivo es khv_fin_motivo: KHV_FIN_NADA mientras la VM no haya terminado.
 func finMotivo() int { return int(C.khv_fin_motivo()) }

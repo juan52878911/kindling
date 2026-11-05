@@ -45,7 +45,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 
 | | |
 |---|---|
-| CPU | hasta 8 vCPU, un hilo cada una; PSCI por HVC (`CPU_ON`, `SYSTEM_OFF/RESET`) |
+| CPU | hasta 64 vCPU (lo que deje `hv_vm_get_max_vcpu_count`, 64 en el M4) y nunca más que núcleos del host; un hilo cada una; PSCI por HVC (`CPU_ON`, `SYSTEM_OFF/RESET`). El MPIDR va en grupos de 8 (Aff0 = i % 8, Aff1 = i / 8: el noveno es `cpu@100` en el FDT), así que hasta 8 vCPU es el de siempre. El kernel de kindling se compila con `CONFIG_NR_CPUS=32`: con más vCPU, el invitado ve 32 |
 | GIC | GICv3 del framework (`hv_gic_create`, macOS 15+): el timer virtual y el WFI no salen a espacio de usuario |
 | consola | UART 16550 en MMIO: `console=ttyS0` como en Firecracker, la línea de comandos pasa **intacta** (a diferencia de vz, que la traduce) |
 | reloj | PL031 (`rtc-pl031`, el mismo que da Firecracker en arm64): un arranque en frío nace con la hora del host |
@@ -220,7 +220,14 @@ El estado lleva una versión (4 desde el free page reporting del globo; la 3
 le dio su cola de estadísticas y la 2 lo añadía a él y a vsock al final): un `kling-hv` lee
 las anteriores, que son un prefijo de la suya (la 2 convierte el globo), y
 el daemon rechaza una del futuro con el mensaje de `versionHVMax`
-(`internal/machine/meta.go`). Un invitado restaurado de una versión 2 no
+(`internal/machine/meta.go`). La 5 es la 4 con el estado de los vCPU que no
+caben en la cabecera de la 4 (del noveno en adelante) detrás, solo los que
+tiene la máquina (`hdr_len` = 11 776 + 1 296 por vCPU de más). Una máquina de
+hasta 8 vCPU se sigue guardando como 4, byte a byte igual que antes: la lee
+un `kling-hv` anterior. Probado en el M4: un dorado de 8 vCPU congelado por
+esta versión lo descongela el `kling-hv` de main (v4) y al revés; uno de 10
+vCPU se guarda como 5 (`hdr_len` 14 368, GIC 123 KiB) y vuelve con `nproc` 10
+y las 10 trabajando. Un invitado restaurado de una versión 2 no
 negoció la cola de estadísticas: `squeeze` vuelve al agente hasta que
 arranque de nuevo.
 
@@ -393,6 +400,91 @@ p50 del API): hv 93,5 / 94,5 → 77,9 / 72,4 ms y vz 144 / 135,5 → 124,8 /
 123,6 ms, con el thaw igual. Con `F_RDADVISE` (arriba), el p50 del freeze en
 hv quedó en 67 ms.
 
+### Trazas: dónde se va el arranque
+
+`kling-hv` marca con `os_signpost` (subsistema `dev.kindling.hv`, categoría
+`fases`; `vz/internal/hvvm/traza.c`) intervalos para cada fase: `vm+gic`,
+`dispositivos`, `ram`, `kernel+fdt` y `vcpus` en un arranque en frío;
+`leer-estado`, `ram`, `estado-dispositivos`, `vcpus`, `estado-gic` y
+`estado-cpu` en una restauración; `pausa`, `snap-estado`, `snap-clon`,
+`snap-paginas` y `snap-cabecera` en un freeze. Y eventos: `soltar` (la VM
+corre), `primer-run` (el primer `hv_vcpu_run`), `primer-virtio` y
+`primer-uart` (el kernel llega a sus drivers), `agente` (la primera conexión
+vsock que acepta el invitado: el agente escucha) y `salida-cara` (una salida
+de vCPU que tardó más de 50 µs en atenderse, con su EC y su dirección). Sin
+nadie trazando no cuestan nada más que una marca de tiempo por fase.
+
+Para verlos, con Xcode, Instruments (plantilla *os_signpost* o *Points of
+Interest*, adjuntado a todos los procesos) o
+
+```
+xctrace record --template 'os_signpost' --all-processes --time-limit 10s
+```
+
+y, sin Xcode, `log stream --signpost --predicate 'subsystem == "dev.kindling.hv"'`.
+Con `KLING_HV_TRACE=1` en el entorno del daemon (pasa a `kling-hv` como todo
+`KLING_HV_*`) cada `kling-hv` escribe además en su log (el `firecracker.log` de
+la máquina) una línea con el desglose cuando el agente responde, y otra tras
+cada freeze:
+
+```
+kling-hv: trace boot ms: process 17.2 | vm+gic 0.06 dispositivos 0.14 ram 0.11 kernel+fdt 3.25 vcpus 0.12 wait 0.09 | ->primer-run 0.01 ->primer-uart 15.15 ->primer-virtio 14.86 ->agente 111.28 | total 115.10
+kling-hv: trace freeze ms: pausa 0.04 snap-estado 2.40 snap-clon 0.16 snap-paginas 24.02 snap-cabecera 0.29
+```
+
+`process` es de que arranca el proceso a `khv_create` (Go, el sandbox y las
+llamadas de configuración del daemon); `wait`, lo que pasa entre fases antes
+de soltar la VM (Go y el API); los `->` cuentan desde que se suelta y `total`
+va de `khv_create` al agente.
+
+Medido el 2026-11-05 (M4, macOS 26.5, el Mac en uso: carga 2,5-5; daemon
+privado, imagen `e2e-tools`, 256 MiB, egress none; con 10 vCPU, 512 MiB),
+medianas en ms (n=10 con 1 vCPU, n=5 con 10). La primera columna «desde el
+daemon» es `kling run` + primer `exec`, `freeze` y `thaw` + primer `exec`:
+
+| arranque en frío | 1 vCPU | 10 vCPU |
+|---|---|---|
+| desde el daemon: run + primer exec | 165 | 207 |
+| proceso → `khv_create` | 17,2 | 17,3 |
+| `vm+gic` + `dispositivos` + `ram` | 0,3 | 0,3 |
+| `kernel+fdt` (leer 18 MB de kernel en la RAM) | 3,3 (3-18) | 3,3 |
+| `vcpus` (crearlos en orden) | 0,1 | 0,6 |
+| soltar → primer acceso a virtio (kernel) | 14,9 | 30,1 |
+| soltar → agente (kernel + init + agente) | 111 | 151 |
+| `khv_create` → agente | 115 | 155 |
+
+| restauración (thaw) | 1 vCPU | 10 vCPU |
+|---|---|---|
+| desde el daemon: thaw + primer exec | 47,5 | 50 |
+| proceso → `khv_create` | 17,1 | 17,5 |
+| `leer-estado` + `ram` (mapear el `mem.file`) | 0,35 | 0,46 |
+| `vcpus` | 0,08 | 0,50 |
+| `estado-gic` (`hv_gic_set_state` y reafirmar las líneas) | 1,52 | 1,53 |
+| resume → agente | 1,0 | 0,9 |
+| `khv_create` → agente | 3,2 | 3,6 |
+
+| freeze | 1 vCPU | 10 vCPU |
+|---|---|---|
+| desde el daemon | 71 | 95 |
+| `snap-estado` (vCPU, dispositivos, GIC) | 2,4 | 2,4 |
+| `snap-paginas` (`mincore`, escribir lo sucio, `F_RDADVISE`) | 24 | 39 |
+
+Lo que domina el arranque en frío es el invitado, no el VMM: de los ~115 ms
+de `khv_create` al agente, `kling-hv` pone ~4 (la mayor parte, copiar el
+kernel en la RAM) y el resto es el kernel y el init. Su `dmesg` (con
+`initcall_debug`, solo para medirlo) da ~15 ms hasta los drivers, ~24 ms de
+`ip_auto_config` (los `msleep` de la configuración de IP del kernel, `ip=`
+en la línea de comandos; quitar `VIRTIO_NET_F_STATUS` no lo mueve: 30,8 ms), ~26 ms entre liberar la
+memoria de init y lanzar `/sbin/overlay-init` (`mark_readonly` espera a un
+periodo de gracia de RCU; con `rcupdate.rcu_expedited=1` el agente llegó a
+los 85-108 ms en 5 arranques, frente a ~111, dentro del ruido del Mac) y
+~30 ms de init hasta que el agente escucha. Nada de eso se recorta desde el
+VMM sin tocar el kernel o su línea de comandos (que es del núcleo y la
+comparte Firecracker), así que no se ha cambiado. En la restauración el VMM
+pone ~3 ms (la mitad, el estado del GIC, que es del framework); lo que se ve
+desde el daemon son el lanzamiento del proceso (~17 ms, ~9 de ellos
+`sandbox_init`, ver arriba) y el `/resync` y el API.
+
 ## Estabilidad de `kling-hv`
 
 Estable desde 1.0 ([`compatibilidad.md`](compatibilidad.md)), con una
@@ -446,11 +538,17 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
 
 ### Límites
 
-- **8 vCPU y 8 discos** por máquina (`MAX_CPUS` y `KHV_MAX_DISKS` en
-  `khv.h`; `khv_create` en `vm.c` y `hvvm_darwin.go` los comprueban). El
-  daemon no lo mira antes: una máquina con su raíz, sus capas, sus copias y
-  sus volúmenes puede pasar de 8 discos y falla tarde, al crear la VM, con
-  `kling-hv supports at most 8 drives`.
+- **8 discos** por máquina (`KHV_MAX_DISKS` en `khv.h`; `khv_create` en
+  `vm.c` y `hvvm_darwin.go` lo comprueban). El daemon no lo mira antes: una
+  máquina con su raíz, sus capas, sus copias y sus volúmenes puede pasar de 8
+  discos y falla tarde, al crear la VM, con `kling-hv supports at most 8
+  drives`.
+- **vCPU**: hasta `MAX_CPUS` (64) o lo que deje Hypervisor.framework, y no
+  más que núcleos del host. Lo comprueban el daemon al pedir la máquina
+  (`maxVCPUsPlataforma` en `internal/machine/plataforma_vz.go`: una vCPU por
+  núcleo en macOS, también para vz), `kling-hv` en `PUT /machine-config`
+  (`hvvm.MaxVCPUs`) y `khv_create`. Más vCPU que núcleos no corre más y deja
+  al invitado esperando a hilos que el host no atiende a la vez.
 - **Sin pantalla ni ventana**: una máquina con pantalla se rechaza
   (`kling-hv has no display device`). `KLING_VZ_GRAPHICS`, `KLING_VZ_WINDOW` y
   `KLING_VZ_DISK_CACHING`/`KLING_VZ_DISK_SYNC` pasan al entorno de `kling-hv`
@@ -469,11 +567,11 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   de vCPU, dispositivos y GIC va dentro del `mem.file`, tras la RAM. Una
   cabecera cambiada sin cambiar de tamaño solo la para la validación de
   `khv_restore` (magia, versión, tamaños, `ram_size`, `gic_size`), no una suma.
-- **Sin bajada de versión**: `kling-hv` escribe siempre su `SNAP_VERSION`
-  (hoy 4), aunque la máquina se pudiera describir con una anterior, así que
-  un `kling-hv` viejo no lee lo que congela uno nuevo (ver
-  [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback` lo mira
-  antes de volver.
+- **Bajada de versión solo hasta 8 vCPU**: `kling-hv` escribe la versión más
+  vieja que describe la máquina (la 4 hasta 8 vCPU, la 5 con más), así que un
+  `kling-hv` viejo lee lo que congela uno nuevo salvo una máquina de más de 8
+  vCPU (ver [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback`
+  mira la versión de cada fichero antes de volver.
 
 ## Fondo de procesos pre-lanzados (propuesta, sin hacer)
 

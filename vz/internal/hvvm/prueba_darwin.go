@@ -116,13 +116,13 @@ func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
 	return out[:r], p != 0, 0
 }
 
-// construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
-// virtio) y devuelve el DTB, o nil si no se pudo construir.
-func construirFDT() []byte {
+// construirFDT llama a fdt_build con una VM de mentira (ncpus vCPU, 256 MiB,
+// un virtio) y devuelve el DTB, o nil si no se pudo construir.
+func construirFDT(ncpus int) []byte {
 	buf := make([]byte, 1<<16)
 	args := C.CString("console=ttyS0")
 	defer C.free(unsafe.Pointer(args))
-	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: 2, bootargs: args, dist_size: 0x10000,
+	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: C.int(ncpus), bootargs: args, dist_size: 0x10000,
 		redist_size: 0x20000, uart_spi: 33, rtc_spi: 34, nvirtio: 1}
 	p.virtio_spi[0] = 35
 	n := C.fdt_build(unsafe.Pointer(&buf[0]), C.size_t(len(buf)), &p)
@@ -131,3 +131,10 @@ func construirFDT() []byte {
 	}
 	return buf[:n]
 }
+
+// mpidrAff y mpidrIdx: khv_mpidr_aff y khv_mpidr_idx de khv.h.
+func mpidrAff(i int) uint64          { return uint64(C.khv_mpidr_aff(C.int(i))) }
+func mpidrIdx(aff uint64, n int) int { return int(C.khv_mpidr_idx(C.uint64_t(aff), C.int(n))) }
+
+// maxVCPUsC es khv_max_vcpus (no crea ninguna VM).
+func maxVCPUsC() int { return int(C.khv_max_vcpus()) }

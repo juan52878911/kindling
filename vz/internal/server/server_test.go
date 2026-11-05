@@ -259,6 +259,15 @@ func (r *rig) configure(dir string) {
 
 // --- tests ---
 
+// El tope de vCPU del VMM (Deps.MaxVCPUs, el de kling-hv en este Mac): lo de
+// más se rechaza en PUT /machine-config, antes de crear la VM.
+func TestMachineConfigMaxVCPUs(t *testing.T) {
+	r := newRig(t)
+	r.srv.d.MaxVCPUs = 10
+	r.mustFail("PUT", "/machine-config", `{"vcpu_count":11,"mem_size_mib":512}`, "at most 10 vCPUs")
+	r.must("PUT", "/machine-config", `{"vcpu_count":10,"mem_size_mib":512}`)
+}
+
 func TestBootSequence(t *testing.T) {
 	r := newRig(t)
 	if out := r.must("GET", "/", ""); !strings.Contains(out, `"Not started"`) {

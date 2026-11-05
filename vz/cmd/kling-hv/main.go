@@ -282,6 +282,7 @@ func run() int {
 		Footprint:   hvvm.Footprint,
 		Version:     version,
 		Backend:     "hv",
+		MaxVCPUs:    hvvm.MaxVCPUs(),
 		Logf:        logf,
 		Policy:      policy,
 		Resolver:    resolver,

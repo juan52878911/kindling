@@ -1463,6 +1463,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.VCPUs <= 0 {
 		req.VCPUs = 1
 	}
+	if tope := maxVCPUsPlataforma(); tope > 0 && req.VCPUs > tope {
+		return nil, peticionInvalida("vcpus %d: this host runs at most %d vCPUs per machine (one per core)", req.VCPUs, tope)
+	}
 	// El disco escribible: disperso, así que un tamaño grande no cuesta nada
 	// hasta que se escribe, pero uno diminuto no monta ni el agente.
 	if tope := maxDiskMiB(); req.DiskMiB < 0 || (req.DiskMiB > 0 && req.DiskMiB < minOverlayMiB) || req.DiskMiB > tope {

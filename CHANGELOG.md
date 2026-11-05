@@ -10,6 +10,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - Per-volume sync mode on macOS: `-volume name:/mount:sync=barrier|none` (API `VolumeAttachment.sync`). `full` (default) keeps `F_FULLFSYNC` on every guest flush; `barrier` uses `F_BARRIERFSYNC` (kling-vz: `fsync`), 300 guest fsyncs ~1.7 s → ~0.1 s; `none` skips flushes (~10 ms) and can leave the volume's ext4 broken if the Mac goes down. Writable volumes only; accepted and ignored on Firecracker.
 - kling-hv: virtio-blk `DISCARD` and `WRITE_ZEROES` on writable disks (`F_PUNCHHOLE`, unaligned edges written as zeros): `fstrim` in the guest gives the space back to the host (216 → 16 MiB after deleting 200 MiB).
+- kling-hv: os_signpost intervals (subsystem `dev.kindling.hv`) for the cold boot, restore and freeze phases, plus events for the first guest instruction, the agent's first vsock answer and slow vCPU exits; free when nobody traces. `KLING_HV_TRACE=1` also logs a one-line breakdown per boot, restore and freeze (`docs/backend-hv.md`).
+
+### Changed
+
+- kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
 
 ## [1.0.0] - 2026-11-05
 
