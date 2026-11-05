@@ -271,6 +271,10 @@ static unsigned pausa_bits;      // con mu
 static volatile bool pausa_pedida;
 static volatile bool parar;      // la VM terminó: los hilos de vCPU salen
 static int n_pausados, n_creados;
+// vCPU parados que ya guardaron su estado en c->st (con mu). Solo lo hace una
+// pausa del núcleo (KHV_PAUSA_API), que es la que puede acabar en snapshot:
+// las del regulador (KHV_PAUSA_FRENO) se paran sin leer los registros.
+static int n_guardados;
 static int n_turno;              // vCPU que ya llamaron a hv_vcpu_create (con mu)
 static bool arrancar;            // la VM puede empezar a correr
 static bool restaurando;         // los hilos cargan cpu_state antes de correr
@@ -366,6 +370,11 @@ int khv_wait(void) {
 
 void khv_stop(void) { fin_vm_por(0, KHV_FIN_PARADA, "stopped"); }
 
+// guardar_sysregs deja en s solo los registros de sistema de c.
+static void guardar_sysregs(struct cpu *c, struct cpu_state *s) {
+  for (size_t i = 0; i < NSYS; i++) s->sys_ok[i] = hv_vcpu_get_sys_reg(c->id, SYSREGS[i], &s->sys[i]) == HV_SUCCESS;
+}
+
 static void guardar_cpu(struct cpu *c, struct cpu_state *s) {
   for (int i = 0; i < 31; i++) hv_vcpu_get_reg(c->id, HV_REG_X0 + i, &s->x[i]);
   hv_vcpu_get_reg(c->id, HV_REG_PC, &s->pc);
@@ -373,7 +382,7 @@ static void guardar_cpu(struct cpu *c, struct cpu_state *s) {
   hv_vcpu_get_reg(c->id, HV_REG_FPCR, &s->fpcr);
   hv_vcpu_get_reg(c->id, HV_REG_FPSR, &s->fpsr);
   for (int i = 0; i < 32; i++) hv_vcpu_get_simd_fp_reg(c->id, HV_SIMD_FP_REG_Q0 + i, &s->q[i]);
-  for (size_t i = 0; i < NSYS; i++) s->sys_ok[i] = hv_vcpu_get_sys_reg(c->id, SYSREGS[i], &s->sys[i]) == HV_SUCCESS;
+  guardar_sysregs(c, s);
   for (size_t i = 0; i < NICC; i++) s->icc_ok[i] = hv_gic_get_icc_reg(c->id, ICCREGS[i], &s->icc[i]) == HV_SUCCESS;
   hv_vcpu_get_vtimer_offset(c->id, &s->vtimer_offset);
   bool m = false;
@@ -527,14 +536,31 @@ static void filtrar_id(struct cpu *c) {
   }
 }
 
-// Punto seguro: el hilo del vCPU guarda su estado y espera a que se reanude.
+// Punto seguro: el hilo del vCPU espera a que se reanude. Su estado (c->st)
+// solo lo guarda si la pausa es (o pasa a ser) del núcleo: el regulador de
+// CPU pausa cada pocos ms y no lo necesita. HVF solo deja leer los registros
+// desde el hilo del vCPU, así que una pausa del regulador que el núcleo hace
+// suya lo despierta para que guarde (ver khv_pause). Sin correr entre medias
+// lo guardado sigue valiendo aunque la pausa del núcleo acabe y vuelva.
 static void punto_pausa(struct cpu *c) {
-  guardar_cpu(c, &c->st);
   pthread_mutex_lock(&mu);
   n_pausados++;
   c->parado = true;
   pthread_cond_broadcast(&cv);
-  while (pausa_pedida && !parar) pthread_cond_wait(&cv, &mu);
+  bool guardado = false;
+  while (pausa_pedida && !parar) {
+    if (!guardado && (pausa_bits & KHV_PAUSA_API)) {
+      pthread_mutex_unlock(&mu);
+      guardar_cpu(c, &c->st);
+      pthread_mutex_lock(&mu);
+      guardado = true;
+      n_guardados++;
+      pthread_cond_broadcast(&cv);
+      continue;
+    }
+    pthread_cond_wait(&cv, &mu);
+  }
+  if (guardado) n_guardados--;
   c->parado = false;
   n_pausados--;
   uint64_t aj = c->ajuste_vtimer;
@@ -899,8 +925,10 @@ static void *vcpu_hilo(void *arg) {
   if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
   if (r == HV_SUCCESS) {
     filtrar_id(c);
-    guardar_cpu(c, &c->inicial);
-    c->inicial.on = 0;
+    // De inicial solo se usan los registros de sistema (reiniciar_sysregs,
+    // estado_cpu_on): leer el resto era una pasada de más por vCPU en cada
+    // restauración.
+    guardar_sysregs(c, &c->inicial);
   }
   pthread_mutex_lock(&mu);
   if (r != HV_SUCCESS) {
@@ -1641,6 +1669,16 @@ int khv_pause(unsigned bit) {
     // La del regulador pasa a ser del núcleo: sus dispositivos no se
     // pararon (ver disp_quietos), así que se paran ahora.
     bool falta = (bit & KHV_PAUSA_API) && antes != 0 && liberada && !parar && !disp_quietos;
+    // Los vCPU que paró el regulador no guardaron su estado: se les despierta
+    // para que lo guarden (punto_pausa) antes de que haya snapshot.
+    bool guardar = (bit & KHV_PAUSA_API) && antes != 0 && liberada && !parar;
+    if (guardar) {
+      pthread_cond_broadcast(&cv);
+      pthread_mutex_unlock(&mu);
+      khv_qos_impulso();
+      pthread_mutex_lock(&mu);
+      while (n_guardados < ncpus && !parar) pthread_cond_wait(&cv, &mu);
+    }
     pthread_mutex_unlock(&mu);
     int r = falta ? quietos_o_deshacer(antes) : 0;
     pthread_mutex_unlock(&op_mu);
@@ -1652,8 +1690,10 @@ int khv_pause(unsigned bit) {
   pthread_mutex_unlock(&mu);
   // Pausar es trabajo que el host le manda al invitado: los vCPU ociosos
   // están en UTILITY y, con el Mac cargado, tardaban decenas de ms en
-  // llegar al punto de pausa (khv_qos_impulso, como un exec).
-  khv_qos_impulso();
+  // llegar al punto de pausa (khv_qos_impulso, como un exec). Solo para la
+  // del núcleo: la del regulador es justo para que el invitado corra menos,
+  // y subirle la QoS en cada una le daba núcleos P a lo que se frena.
+  if (bit & KHV_PAUSA_API) khv_qos_impulso();
   salir_vcpus();
   pthread_mutex_lock(&mu);
   // Un vCPU que miró pausa_pedida justo antes de que se pusiera y aún no
@@ -1669,7 +1709,8 @@ int khv_pause(unsigned bit) {
   // diga.
   uint64_t limite = mach_absolute_time() + (uint64_t)((__uint128_t)PAUSA_PLAZO_NS * tb.denom / tb.numer);
   bool a_tiempo = true;
-  while (n_pausados < ncpus && !parar) {
+  // La del núcleo espera también a que cada uno guarde su estado.
+  while ((n_pausados < ncpus || ((bit & KHV_PAUSA_API) && n_guardados < ncpus)) && !parar) {
     if (mach_absolute_time() >= limite) {
       a_tiempo = false;
       break;
@@ -1753,7 +1794,7 @@ int khv_snapshot(const char *mem_out) {
   static struct snap_hdr h;
   pthread_mutex_lock(&mu);
   // disp_quietos: una pausa solo del regulador no paró los dispositivos.
-  bool en_pausa = liberada && pausa_pedida && n_pausados == ncpus && disp_quietos;
+  bool en_pausa = liberada && pausa_pedida && n_pausados == ncpus && n_guardados == ncpus && disp_quietos;
   pthread_mutex_unlock(&mu);
   if (!en_pausa) {
     fallo("the VM must be paused to snapshot it");
