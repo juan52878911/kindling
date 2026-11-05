@@ -1,7 +1,11 @@
 package machine
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -92,5 +96,46 @@ func TestMotivoFinVMMNoSigueEnlaces(t *testing.T) {
 	}
 	if got := m.motivoFinVMM(id); got != "" {
 		t.Fatalf("read through a link: %q", got)
+	}
+}
+
+// Un restore que falla con la API del VMM cortada (EOF) porque el VMM murió
+// dice que murió y lo último de su consola; con el VMM vivo, o con otro
+// error, el error no cambia.
+func TestVMMCaidoEnLaRestauracion(t *testing.T) {
+	m := newTestManager(t)
+	id := "dead0000000000c3"
+	if err := os.MkdirAll(m.dir(id), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logf, err := abrirConsola(m.dir(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := logf.WriteString("[ 0.1] guest line\nFIXME: \"Handle no active virtual interrupt, EOIR1 0x1b\" line 209\n\n"); err != nil {
+		t.Fatal(err)
+	}
+	logf.Close()
+	muerto := exec.Command("true")
+	if err := muerto.Run(); err != nil {
+		t.Fatal(err)
+	}
+	eof := fmt.Errorf("opening port forwards: %w", io.EOF)
+	got := m.vmmCaido(eof, id, muerto.Process.Pid)
+	if !errors.Is(got, io.EOF) || !strings.Contains(got.Error(), "exited during the restore") ||
+		!strings.Contains(got.Error(), `EOIR1 0x1b" line 209`) {
+		t.Errorf("dead VMM: %v", got)
+	}
+	vivo := exec.Command("sleep", "30")
+	if err := vivo.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = vivo.Process.Kill(); _ = vivo.Wait() }()
+	if got := m.vmmCaido(eof, id, vivo.Process.Pid); got != eof {
+		t.Errorf("live VMM: %v, want the error unchanged", got)
+	}
+	otro := errors.New("repointing overlay: no such drive")
+	if got := m.vmmCaido(otro, id, muerto.Process.Pid); got != otro {
+		t.Errorf("other error: %v, want it unchanged", got)
 	}
 }

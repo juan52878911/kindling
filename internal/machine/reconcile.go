@@ -737,6 +737,12 @@ func (m *Manager) comprobarVMMLocked(id, detalle string) bool {
 			detalle += "; "
 		}
 		detalle += motivo
+	} else if strings.HasPrefix(detalle, "signal: ") {
+		// Muerto de una señal (un SIGTRAP de HVF, un jetsam): sin línea de
+		// fin, lo último de su consola suele decir por qué.
+		if l := m.ultimaLineaConsola(id); l != "" {
+			detalle += "; last console line: " + l
+		}
 	}
 	if detalle != "" {
 		log.Printf("watch: the VMM of %s (pid %d) exited (%s): failed", shortID(id), pid, detalle)

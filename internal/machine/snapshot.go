@@ -1678,6 +1678,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// memoria. El arranque en frío ya aprendió esta lección (ver Run); este
 	// camino no la había copiado.
 	abortar := func(err error) (*api.Machine, error) {
+		// Antes de matarlo: si la API se cortó porque el VMM ya había muerto,
+		// el error lo dice (y no un EOF a secas).
+		err = m.vmmCaido(err, id, pid)
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}

@@ -2,8 +2,13 @@ package machine
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 	"unicode"
 )
 
@@ -76,4 +81,56 @@ func sanearMotivo(s string) string {
 		s = string(r[:maxMotivoFinVMM]) + "…"
 	}
 	return strings.TrimSpace(s)
+}
+
+// ultimaLineaConsola es la última línea no vacía de la consola de la máquina
+// id, saneada y acotada, o "". Cuando el VMM muere de una señal no deja su
+// línea de fin, y lo último que escribió suele ser el porqué: kling-hv
+// muerto por HVF dejaba 'FIXME: "Handle no active virtual interrupt, EOIR1
+// 0x1b"', y la consola se borraba con la copia de un fork deshecho.
+func (m *Manager) ultimaLineaConsola(id string) string {
+	cola, err := leerCola(filepath.Join(m.dir(id), "firecracker.log"), 4<<10)
+	if err != nil {
+		return ""
+	}
+	cola = bytes.TrimRight(cola, "\r\n\t ")
+	if i := bytes.LastIndexByte(cola, '\n'); i >= 0 {
+		cola = cola[i+1:]
+	}
+	return sanearMotivo(string(cola))
+}
+
+// plazoVMMCaido es lo que se espera a que desaparezca el proceso del VMM
+// tras cortarse su API: esperarVMM lo recoge en cuanto sale.
+const plazoVMMCaido = 500 * time.Millisecond
+
+// conexionCortada dice si err es la API del VMM cerrándose a media petición.
+func conexionCortada(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+// vmmCaido explica un error de restauración que es solo la API del VMM
+// cortada ("Put http://localhost/kling/forwards: EOF"): si el proceso pid ya
+// no existe, lo dice, con lo último de su consola. Si sigue vivo, o el error
+// es otro, lo devuelve tal cual.
+func (m *Manager) vmmCaido(err error, id string, pid int) error {
+	if err == nil || pid <= 0 || !conexionCortada(err) {
+		return err
+	}
+	for fin := time.Now().Add(plazoVMMCaido); ; {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			break
+		}
+		if time.Now().After(fin) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	msg := "the VMM process exited during the restore (it crashed, or the system killed it for memory; the daemon log has its exit status)"
+	if l := m.ultimaLineaConsola(id); l != "" {
+		msg += "; last line of its console: " + l
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
