@@ -79,16 +79,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	agent, err := guest.New()
+	// Diferido: escucha sin esperar a MMDS (pkg/guest NewDeferred). /healthz
+	// y lo que depende del entorno de la máquina esperan a FinishBoot.
+	agent, err := guest.NewDeferred()
 	if err != nil {
 		log.Fatalf("volume: %v", err)
 	}
 	agent.Name, agent.Version = "kling-guest", Version
 	mux := http.NewServeMux()
 	agent.Register(mux)
-	// El servicio de la imagen, si declara uno (/etc/kindling/service.json):
-	// con los volúmenes ya montados.
-	agent.StartService()
+	// El entorno y el comando de la máquina y, con ellos, el servicio de la
+	// imagen si declara uno (/etc/kindling/service.json), con los volúmenes ya
+	// montados: mientras se escucha.
+	go agent.FinishBoot()
 
 	srv := &http.Server{
 		Addr:    *listen,

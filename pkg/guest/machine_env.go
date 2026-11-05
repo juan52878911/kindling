@@ -3,11 +3,11 @@ package guest
 // El entorno de la máquina (api.RunRequest.Env, ver pkg/api/machine_env.go).
 //
 // El daemon lo deja en MMDS antes de arrancar y pone kling.env=1 en la línea
-// del kernel. El agente lo lee UNA vez, al arrancar y antes de escuchar (el
-// daemon lo borra del almacén en cuanto el agente contesta), y lo guarda solo
-// en su memoria: ningún fichero del invitado lo lleva. Va encima del entorno
-// de la imagen —el de /etc/kling/env que cargó el /entrypoint—: con la misma
-// clave gana la máquina.
+// del kernel. El agente lo lee UNA vez, al arrancar y antes de contestar a
+// /healthz (el daemon lo borra del almacén en cuanto el agente contesta), y
+// lo guarda solo en su memoria: ningún fichero del invitado lo lleva. Va
+// encima del entorno de la imagen —el de /etc/kling/env que cargó el
+// /entrypoint—: con la misma clave gana la máquina.
 //
 // Si kling.env=1 y no se puede leer, el servicio NO arranca: un servicio que
 // arranca sin la contraseña o sin la opción de seguridad que se le pasó es

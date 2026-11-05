@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -34,22 +35,41 @@ func (m *Manager) ProcStats() api.ProcStats {
 	}
 	m.mu.RUnlock()
 
-	var total int64
+	// En macOS la memoria y la CPU de cada máquina pueden ser un viaje al
+	// ayudante por su socket (hasta 2 s de plazo cada uno): se preguntan
+	// varias máquinas a la vez, y en cada una las dos cosas a la vez. Cada
+	// goroutine escribe solo en su stats[i].
+	sem := make(chan struct{}, paraleloStats)
+	var wg sync.WaitGroup
 	for i := range stats {
 		// Solo las máquinas vivas tienen proceso; las warm/stopped no gastan RAM.
-		if stats[i].PID > 0 {
-			stats[i].PSSMiB = memoriaVMM(stats[i].PID, socks[i])
-			if memoriaEsHuella {
-				stats[i].FootprintMiB = stats[i].PSSMiB
-			}
-			total += stats[i].PSSMiB
-			if u, ok := cpuVMM(stats[i].PID, socks[i]); ok {
-				stats[i].CPUSeconds = u.total.Seconds()
-				stats[i].CPUPSeconds = u.p.Seconds()
-				stats[i].CoreSplit = u.conNucleos
-				stats[i].EnergyJoules = float64(u.energiaNJ) / 1e9
-			}
+		if stats[i].PID <= 0 {
+			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(st *api.ProcStat, sock string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			mem := make(chan int64, 1)
+			go func() { mem <- memoriaVMM(st.PID, sock) }()
+			u, ok := cpuVMM(st.PID, sock)
+			st.PSSMiB = <-mem
+			if memoriaEsHuella {
+				st.FootprintMiB = st.PSSMiB
+			}
+			if ok {
+				st.CPUSeconds = u.total.Seconds()
+				st.CPUPSeconds = u.p.Seconds()
+				st.CoreSplit = u.conNucleos
+				st.EnergyJoules = float64(u.energiaNJ) / 1e9
+			}
+		}(&stats[i], socks[i])
+	}
+	wg.Wait()
+	var total int64
+	for i := range stats {
+		total += stats[i].PSSMiB
 	}
 	avail, free := memoriaHost()
 	tipo := "pss"
@@ -62,6 +82,9 @@ func (m *Manager) ProcStats() api.ProcStats {
 		MemoryKind: tipo,
 	}
 }
+
+// paraleloStats: cuántas máquinas se miden a la vez en ProcStats.
+const paraleloStats = 8
 
 // estadoDesde es desde cuándo está mc en su estado, o nil si no consta.
 func estadoDesde(mc *api.Machine) *time.Time {

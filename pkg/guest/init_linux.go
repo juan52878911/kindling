@@ -3,6 +3,7 @@
 package guest
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"syscall"
@@ -45,6 +46,15 @@ func (linuxInit) AppendFile(p string, b []byte) error {
 		err = cerr
 	}
 	return err
+}
+
+func (linuxInit) ReadHead(p string, n int) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(n)))
 }
 
 func (linuxInit) Exec(path string, argv, env []string) error { return syscall.Exec(path, argv, env) }

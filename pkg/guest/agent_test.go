@@ -1,10 +1,57 @@
 package guest
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+// Con NewDeferred el agente escucha antes de leer MMDS, pero /healthz no
+// contesta hasta que FinishBoot acaba: el daemon borra el entorno de MMDS en
+// cuanto el agente le contesta. Las rutas de volúmenes no esperan.
+func TestArranqueDiferidoEsperaAlEntorno(t *testing.T) {
+	a := &Agent{Reaper: DefaultReaper, Volumes: &Volumes{}, diferido: true, arrancado: make(chan struct{})}
+	mux := http.NewServeMux()
+	a.Register(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("POST", "/volume/sync", nil))
+	if rr.Code != 204 {
+		t.Fatalf("/volume/sync durante el arranque: %d", rr.Code)
+	}
+
+	// Un cliente que se cansa antes: 503, no un "ok" sin entorno.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil).WithContext(ctx))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/healthz con el arranque a medias: %d, quería 503", rr.Code)
+	}
+
+	hecho := make(chan int)
+	go func() {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+		hecho <- rr.Code
+	}()
+	select {
+	case c := <-hecho:
+		t.Fatalf("/healthz contestó (%d) antes de acabar el arranque", c)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(a.arrancado)
+	select {
+	case c := <-hecho:
+		if c != 200 {
+			t.Fatalf("/healthz tras el arranque: %d", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("/healthz sigue esperando tras el arranque")
+	}
+}
 
 // Las rutas que el daemon usa con cualquier invitado tienen que existir, y
 // /exec NO sin el parámetro del kernel: en una máquina de servicio ni se registra.
