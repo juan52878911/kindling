@@ -94,6 +94,8 @@ func (f *fakeInit) ReadHead(p string, n int) ([]byte, error) {
 	return b, err
 }
 
+func (f *fakeInit) Restart() error { return f.call("restart") }
+
 func (f *fakeInit) DMCreate(name string, targets []dmTarget) (string, error) {
 	var t []string
 	for _, x := range targets {

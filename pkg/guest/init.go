@@ -41,6 +41,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -128,6 +129,33 @@ type initSys interface {
 	// DMCreate pone el dispositivo de device-mapper name, de solo lectura,
 	// con la tabla targets, y devuelve la ruta de su nodo (init_verity.go).
 	DMCreate(name string, targets []dmTarget) (string, error)
+	// Restart reinicia el invitado en el acto (reboot(2)): con reboot=k
+	// panic=1 el anfitrión lo ve como un pánico y da la máquina por fallida.
+	Restart() error
+}
+
+// plazoMontarVerity acota el montaje de la capa detrás de dm-verity. Con FEC
+// y un hash raíz que no cuadra, el kernel se queda corrigiendo sin fin dentro
+// de mount(2): ni vuelve ni da error, y la máquina seguía "running" sin
+// agente. Un montaje sano lee solo el superbloque.
+var plazoMontarVerity = 60 * time.Second
+
+// montarVerity monta la capa verificada con plazoMontarVerity. Si se pasa,
+// reinicia: salir no basta, porque el hilo atascado en mount(2) no deja morir
+// al PID 1 y el kernel nunca llegaría al pánico.
+func montarVerity(s initSys, layer string) error {
+	hecho := make(chan error, 1)
+	go func() { hecho <- s.Mount(layer, "/overlay/svc", "ext4", msRdonly, "") }()
+	select {
+	case err := <-hecho:
+		return err
+	case <-time.After(plazoMontarVerity):
+		log.Printf("dm-verity: mounting the service layer did not finish in %s; refusing to boot unverified, restarting", plazoMontarVerity)
+		if err := s.Restart(); err != nil {
+			return fmt.Errorf("restarting after the dm-verity mount timed out: %w", err)
+		}
+		return fmt.Errorf("dm-verity: mounting the service layer timed out")
+	}
 }
 
 // Init hace de PID 1 y no vuelve: acaba en el agente o, si algo que el
@@ -193,11 +221,16 @@ func runInit(s initSys, environ []string) error {
 		// Con la tabla de verity en la base, la capa se lee a través de
 		// dm-verity: un bloque que no cuadra con su hash da EIO en vez de
 		// entrar en la caché como bueno. Si no se puede, se para aquí.
+		orig := layer
 		var err error
 		if layer, err = initVerity(s, layer); err != nil {
 			return err
 		}
-		if err := must(s.Mount(layer, "/overlay/svc", "ext4", msRdonly, ""), "mounting the service layer "+layer); err != nil {
+		montar := func() error { return s.Mount(layer, "/overlay/svc", "ext4", msRdonly, "") }
+		if layer != orig {
+			montar = func() error { return montarVerity(s, layer) }
+		}
+		if err := must(montar(), "mounting the service layer "+layer); err != nil {
 			return err
 		}
 		lower = "/overlay/svc/upper:/"

@@ -43,7 +43,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
   - Network rx and tx have separate locks.
   - Throttle pauses no longer save every register or raise QoS.
 - Guests:
-  - Debian-built images boot with the Go init, dm-verity included and still fail-closed, instead of a shell script.
+  - Debian-built images boot with the Go init, dm-verity included and still fail-closed, instead of a shell script. A verified layer mount that hangs (FEC with a wrong root hash) restarts the guest after 60 s, so the machine is marked failed instead of staying `running` with no agent.
   - The agent starts listening before it reads MMDS.
 - kling-hv is stable in 1.0 (VMM and `KLNGHV` snapshot format). Until CI has an Apple Silicon runner, each release runs `92-e2e-mac.sh` and `95-e2e-upgrade-mac.sh` with `VMM=hv` by hand, and `release.sh` refuses a 1.0+ tag without it (the `e2e-mac.yml` job green on the commit, or `KLING_E2E_HV=<sha>`).
 - macOS (kling-hv): DNS answers are cached per machine and A/AAAA resolve in parallel (10 lookups 1480 → 80 ms on an M4).

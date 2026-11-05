@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 const tablaPrueba = "# dm-verity de la capa (constructor debian de kindling). Lo lee /sbin/overlay-init.\n" +
@@ -32,6 +33,42 @@ func TestInitVerityPlan(t *testing.T) {
 	g.files[VerityConfPath] = tablaPrueba
 	if err := runInit(g, nil); err != nil || strings.Contains(strings.Join(g.calls, "\n"), "dmcreate") {
 		t.Fatalf("without a layer: %v\n%s", err, strings.Join(g.calls, "\n"))
+	}
+}
+
+// montajeAtascado es un fakeInit cuyo mount de /dev/mapper no vuelve, como
+// el de FEC corrigiendo sin fin con un hash raíz que no cuadra.
+type montajeAtascado struct {
+	*fakeInit
+	soltar chan struct{}
+}
+
+func (m montajeAtascado) Mount(src, target, fstype string, flags uintptr, data string) error {
+	if strings.HasPrefix(src, "/dev/mapper/") {
+		<-m.soltar
+		return errors.New("soltado")
+	}
+	return m.fakeInit.Mount(src, target, fstype, flags, data)
+}
+
+// Un montaje verificado que no acaba reinicia el invitado en vez de quedarse
+// colgado (o de seguir sin la capa): el anfitrión lo da por fallido.
+func TestInitVerityMontajeConPlazo(t *testing.T) {
+	old := plazoMontarVerity
+	plazoMontarVerity = 20 * time.Millisecond
+	defer func() { plazoMontarVerity = old }()
+	f := newFakeInit()
+	f.files["/proc/cmdline"] = "kling.layer=/dev/vdc"
+	f.files[VerityConfPath] = tablaPrueba
+	m := montajeAtascado{f, make(chan struct{})}
+	defer close(m.soltar)
+	err := runInit(m, nil)
+	plan := strings.Join(f.calls, "\n")
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.HasSuffix(plan, "restart") {
+		t.Fatalf("err %v\n%s", err, plan)
+	}
+	if strings.Contains(plan, "pivot_root") || strings.Contains(plan, "mount overlay") {
+		t.Fatalf("booted on after the timeout:\n%s", plan)
 	}
 }
 

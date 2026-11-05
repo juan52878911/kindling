@@ -14,6 +14,8 @@ type linuxInit struct{}
 
 func osInitSys() (initSys, error) { return linuxInit{}, nil }
 
+func (linuxInit) Restart() error { return syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART) }
+
 func (linuxInit) Mount(src, target, fstype string, flags uintptr, data string) error {
 	return syscall.Mount(src, target, fstype, flags, data)
 }
