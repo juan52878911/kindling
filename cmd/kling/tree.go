@@ -100,6 +100,9 @@ var coreTree = []section{
       [-p HOST:GUEST] (repeatable)                 publishes a guest port on 127.0.0.1
                                                    for as long as the machine exists;
                                                    kling stays following the service
+      [-host-port PORT|HOST:GUEST] (repeatable)    macOS: the guest reaches that TCP
+                                                   port of the Mac's 127.0.0.1 at
+                                                   host.kindling.internal (Ollama...)
       [-wait-ready] [-ready-timeout 2m]            return once ready by the image's
                                                    own probe and post-restore hooks
       [-json]                                      prints the machine as JSON

@@ -276,6 +276,54 @@ Solo los procesos de tu usuario pasan por esos puertos: otra cuenta del Mac que
 conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (ver
 [`backend-vz.md`](backend-vz.md#por-qué-puertos-en-loopback-y-no-la-ip-del-invitado)).
 
+## Servicios del Mac desde el invitado: `-host-port`
+
+Lo contrario: que el invitado llegue a un servicio que corre en el Mac. El caso
+es un modelo local con Metal (Ollama, `llama-server`), que dentro de una VM no
+tendría GPU. En vez de una GPU virtual, un puente a ese puerto:
+
+```
+ollama serve                                   # escucha en 127.0.0.1:11434
+kling run -name agente -allow-exec -host-port 11434
+kling exec agente -- wget -qO- http://host.kindling.internal:11434/api/tags
+```
+
+- `-host-port PUERTO` deja el `127.0.0.1:PUERTO` del Mac en `172.16.0.1:PUERTO`
+  del invitado (la pasarela de su red); `-host-port HOST:GUEST` lo pone en otro
+  (`-host-port 8080:18080`: el `llama-server` del 8080 en el 18080).
+  `host.kindling.internal` resuelve a `172.16.0.1` en el DNS de la máquina, y
+  solo si tiene algún puente. Se repite (o lleva comas), hasta 16.
+- Solo TCP y solo los puertos listados. Lo fija quien crea la máquina (`kling
+  run`, `POST /machines` con `host_ports`); nada del invitado lo pide ni lo
+  cambia. Viaja con la máquina: un freeze/thaw o un stop/start lo rehacen. No
+  pasa a sus snapshots ni a sus forks.
+- **Egress**: abre esos puertos de la pasarela en todos los modos, también con
+  `-egress none`, y nada más; la política no cambia (una máquina `none` con
+  `-host-port 11434` sigue sin poder salir a ninguna otra parte, ni a otro
+  puerto del Mac). Sin la opción el loopback del Mac no se alcanza por ningún
+  camino: `127.0.0.1` es el del invitado y la pasarela no reenvía al Mac.
+- Cada conexión la marca el daemon, no el VMM: `kling-hv` y `kling-vz` corren
+  confinados y su perfil de sandbox no abre el loopback. La red de la máquina
+  la pide por el broker de enlaces (como las aristas de los grafos y el
+  `-upstream 127.0.0.1` del proxy de credenciales), y el daemon comprueba que
+  ese puerto es de esa máquina. Queda una línea por conexión en su registro de
+  auditoría (`kling machine credaudit`, `kind: link`, `host.kindling.internal:PUERTO`)
+  y, mientras dura, cuenta como uso: una máquina con una petición al modelo en
+  curso no es ociosa para la [presión de memoria](#presión-de-memoria).
+- No valen como puerto del invitado el 53, el 80 ni el 443 (DNS y proxy de
+  credenciales en la pasarela) y, en el Mac, ninguno del rango de reenvíos
+  (29000-29999), donde están los invitados de las demás máquinas. El 8080
+  (el de `llama-server`) sí vale.
+- El servicio tiene que escuchar en `127.0.0.1` (o en todas): lo que solo
+  escuche en otra interfaz no se alcanza. Si no escucha, el invitado recibe un
+  RST, como contra un puerto cerrado.
+
+Un `state.json` con alguna máquina con puentes se escribe con el esquema 4: un
+kling anterior se niega a arrancar sobre él en vez de perderlos.
+
+En Linux no hay puente (el invitado vive en un namespace y llegar al loopback
+del host pediría un proxy por puerto dentro de él): `-host-port` da error.
+
 ## Energía y batería
 
 En un portátil cada despertar de la CPU cuesta batería, también con las
@@ -365,6 +413,63 @@ reanudarlas si la pausa es de antes del sueño: reanudar una pausada es solo
 `Resume`, sin resync, salvo entonces (antes se quedaban con la hora de cuando
 se cerró la tapa, también las que el vigía pausa justo antes de dormir).
 
+## Presión de memoria
+
+Cuando macOS se queda sin memoria, jetsam mata procesos, y un VMM es de los
+que más ocupan: la máquina moría sin aviso con lo que tuviera sin guardar. La
+admisión ya decía que no a arrancar otra con poca memoria; ahora el daemon
+también hace sitio con las que corren. En cada vuelta del vigilante (cada
+10 s; 30 s en batería) lee `kern.memorystatus_vm_pressure_level` (un sysctl,
+sin cgo ni procesos: 1 normal, 2 aviso, 4 crítico) y:
+
+- **en aviso**, aprieta el globo (`kling squeeze`) de las máquinas ociosas:
+  devuelve al Mac la RAM que su invitado tiene libre o en caché, sin parar
+  nada;
+- **en crítico**, además congela (`kling freeze`) la ociosa que más ocupa: su
+  RAM va a disco y la siguiente petición la despierta.
+
+```
+kling config set daemon.memory_pressure auto   # auto (defecto) u off
+```
+
+`KLING_MEMORY_PRESSURE` manda sobre el fichero; se lee al arrancar el daemon.
+
+Ociosa es lo del modo batería, más estricto: ninguna petición en curso (exec,
+shell, ficheros, `logs -f`) ni terminada hace menos de 2 minutos (ni arrancada
+hace menos), ninguna sesión del broker de aristas, y su VMM gastando menos del
+2 % de un núcleo entre dos vueltas. Nunca se tocan las que alguien puede usar
+sin pasar por el daemon (puertos publicados, servicios del planificador,
+fondos, grafos, `kling db`, carpetas vivas): esas las duerme
+`daemon.idle_freeze` o el planificador con su propio plazo. Las copias de un
+dorado que comparten su memoria no se aprietan (subiría la memoria del host,
+ver `kling squeeze`), pero sí se pueden congelar. Antes de congelar se vuelve a
+mirar con el cerrojo de la máquina tomado: si entre medias le llegó una
+petición, no se toca.
+
+Primero las de más huella y, a igualdad, las que llevan más sin uso. Con freno
+para no apretar en bucle mientras el nivel no baja:
+
+| freno | valor |
+|---|---|
+| por vuelta que actúa | 2 apretones y 1 congelación |
+| entre dos vueltas que actúan | 30 s (lo que tarda el nivel en notar lo devuelto) |
+| antes de volver a apretar la misma máquina | 10 min (también si la apretó `makeRoom` al arrancar otra) |
+| para dar el nivel por bajado | 30 s seguidos por debajo; subir es inmediato |
+
+La primera vuelta con presión solo toma la referencia de CPU de cada VMM, así
+que lo primero se hace a los ~20 s. Cada cambio de nivel y cada acción quedan
+en el log del daemon (`memory pressure: warn (was normal)`, `memory pressure
+(warn): squeezed idle web, 312 MiB back to the host …`), el apretón y la
+congelación salen en el bus de eventos como cualquier otro (`machine.frozen`)
+y `/metrics` lleva `kling_memory_pressure_level`,
+`kling_memory_pressure_actions_total{action="squeeze"|"freeze"}` y
+`kling_memory_pressure_reclaimed_mib_total`.
+
+En Linux se hace lo mismo con PSI (`some avg10` de `/proc/pressure/memory`):
+aviso desde el 10 %, crítico desde el 40 % (por encima del 20 % con el que la
+admisión deja de arrancar máquinas). Sin PSI en el núcleo no hay señal y no se
+hace nada.
+
 ## Qué gasta cada máquina: `kling top` y `/metrics`
 
 En macOS no hay `/proc` ni PSS. `kling top` enseña la memoria de cada máquina
@@ -393,6 +498,8 @@ atribuye. `/metrics` añade las mismas cifras:
 | `kling_machine_energy_joules_total{id,name}` | energía de sus procesos (`ri_energy_nj`), en julios |
 | `kling_machine_state_seconds{id,name,state}` | cuánto lleva en su estado, también las congeladas y paradas |
 | `kling_host_mem_available_mib` | lo que el host aún puede dar: `kern.memorystatus_level` sobre `hw.memsize` en macOS, `MemAvailable` en Linux |
+| `kling_memory_pressure_level` | el nivel de presión con el que actúa el daemon (1, 2, 4; 0 = no se sabe o apagado): ver [Presión de memoria](#presión-de-memoria) |
+| `kling_memory_pressure_actions_total{action}` | apretones y congelaciones por presión |
 
 El banco de energía reproducible (`scripts/94-energia-mac.sh`, sin sudo) y lo
 medido están en [benchmarks.md](benchmarks.md#energy-on-the-mac).

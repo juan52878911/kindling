@@ -226,6 +226,7 @@ kling run:  -e
 kling run:  -egress
 kling run:  -env-file
 kling run:  -from
+kling run:  -host-port
 kling run:  -image
 kling run:  -json
 kling run:  -label

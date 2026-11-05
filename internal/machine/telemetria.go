@@ -77,6 +77,13 @@ type telemetria struct {
 	rechazos  map[int]*atomic.Int64
 	gcExpulsa atomic.Int64
 	huerfanos atomic.Int64
+
+	// La reacción a la presión de memoria (presion_memoria.go): el nivel
+	// en vigor (0 = no se sabe o apagada) y lo que hizo.
+	presionNivel       atomic.Int64
+	presionAprieta     atomic.Int64
+	presionCongela     atomic.Int64
+	presionDevueltaMiB atomic.Int64
 }
 
 // Los mapas se rellenan una vez y después solo se leen: los valores son
@@ -148,6 +155,14 @@ type Telemetria struct {
 	DiscoLibreMiB int64
 	// PendienteMiB es la memoria reservada por arranques en curso.
 	PendienteMiB int64
+	// PresionNivel es el nivel de presión de memoria en vigor (1 normal, 2
+	// aviso, 4 crítico; 0 = no se sabe o daemon.memory_pressure=off), y
+	// PresionApretones, PresionCongelaciones y PresionDevueltaMiB, lo que
+	// hizo el daemon por ella.
+	PresionNivel         int64
+	PresionApretones     int64
+	PresionCongelaciones int64
+	PresionDevueltaMiB   int64
 }
 
 // Telemetria toma la foto de los contadores, el disco libre y la memoria
@@ -159,6 +174,11 @@ func (m *Manager) Telemetria() Telemetria {
 		ExpulsionesGC:    tel.gcExpulsa.Load(),
 		HuerfanosMatados: tel.huerfanos.Load(),
 		DiscoLibreMiB:    -1,
+
+		PresionNivel:         tel.presionNivel.Load(),
+		PresionApretones:     tel.presionAprieta.Load(),
+		PresionCongelaciones: tel.presionCongela.Load(),
+		PresionDevueltaMiB:   tel.presionDevueltaMiB.Load(),
 	}
 	for o, c := range tel.ops {
 		out.OK[o], out.Fallos[o] = c.ok.Load(), c.fallos.Load()

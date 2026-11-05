@@ -137,6 +137,7 @@ func TestEstadoSubirEsquemaDejaCopia(t *testing.T) {
 		{"diferencial", func(mc *api.Machine) { mc.DiffBase = "/x/snapshots/d/mem.file" }, versionEstadoDiff},
 		{"cmd", func(mc *api.Machine) { mc.Cmd = []string{"redis-server"} }, versionEstadoCampos},
 		{"net_mibps", func(mc *api.Machine) { mc.NetMiBps = 64 }, versionEstadoCampos},
+		{"host_ports", func(mc *api.Machine) { mc.HostPorts = []api.HostPort{{Host: 11434, Guest: 11434}} }, versionEstadoPuentes},
 	} {
 		t.Run(c.nombre, func(t *testing.T) {
 			m := newTestManager(t)

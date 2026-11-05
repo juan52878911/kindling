@@ -132,6 +132,11 @@ type Policy struct {
 	// resolver del núcleo.
 	graphHosts map[string]bool
 	graphIP    netip.Addr
+
+	// hostIP, si es válida, es la IP con la que el DNS contesta
+	// HostBridgeName en todos los modos: la máquina tiene puentes al host
+	// (kling run -host-port). Sin ellos el nombre no existe.
+	hostIP netip.Addr
 }
 
 // NewPolicy empieza en none: si el núcleo nunca manda PUT /kling/network, la
@@ -233,6 +238,29 @@ func (p *Policy) CredHost(name string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return p.credIP, true
+}
+
+// HostBridgeName es api.HostBridgeName.
+const HostBridgeName = "host.kindling.internal"
+
+// SetHostBridge hace que el DNS conteste HostBridgeName con ip; una IP no
+// válida lo quita.
+func (p *Policy) SetHostBridge(ip netip.Addr) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hostIP = ip
+}
+
+// HostBridge dice si name es HostBridgeName (esPuente) y, si la máquina
+// tiene puentes, con qué IP se contesta (ok). Nunca se reenvía ni se siembra.
+func (p *Policy) HostBridge(name string) (ip netip.Addr, esPuente, ok bool) {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if name != HostBridgeName {
+		return netip.Addr{}, false, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.hostIP, true, p.hostIP.IsValid()
 }
 
 // GraphSuffix es el sufijo de los nombres de grafo (api.GraphDomain).

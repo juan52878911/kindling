@@ -1604,6 +1604,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		DiskMiB: discoMiB,
 		IP:      netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
+		HostPorts:    req.HostPorts,
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct, CPUPctFixed: cpuFijo,
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,

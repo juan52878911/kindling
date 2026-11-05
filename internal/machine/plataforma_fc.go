@@ -67,6 +67,9 @@ func privilegiosPlataforma(runAs string) (*Privileges, string) { return resolveP
 // delegacionCgroups prepara el cgroup donde se limita la CPU de cada VMM.
 func delegacionCgroups() (string, error) { return ensureDelegation() }
 
+// puenteHostSoportado: en Linux no hay puentes al host (puente_host.go).
+const puenteHostSoportado = false
+
 // redAntesDeArrancar no hace nada en Linux: la red ya la montó el namespace
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }

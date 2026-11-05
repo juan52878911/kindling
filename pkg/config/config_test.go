@@ -394,6 +394,22 @@ func TestSetNetMiBps(t *testing.T) {
 	t.Fatal("daemon.net_mibps no sale en Keys")
 }
 
+// daemon.memory_pressure: auto (o vacío) u off.
+func TestSetMemoryPressure(t *testing.T) {
+	var c Config
+	for _, v := range []string{"auto", "off", ""} {
+		if err := c.Set("daemon.memory_pressure", v); err != nil || c.Daemon.MemoryPressure != v {
+			t.Fatalf("memory_pressure %q: %v", v, err)
+		}
+	}
+	if err := c.Set("daemon.memory_pressure", "on"); err == nil {
+		t.Fatal("aceptó memory_pressure on")
+	}
+	if !slices.ContainsFunc(c.Keys(), func(kv [2]string) bool { return kv[0] == "daemon.memory_pressure" }) {
+		t.Fatal("daemon.memory_pressure no sale en Keys")
+	}
+}
+
 // daemon.idle_freeze: 0 o una duración de al menos un minuto; vacío es 10m
 // en el Mac y nunca en Linux.
 func TestSetIdleFreeze(t *testing.T) {

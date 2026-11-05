@@ -182,6 +182,14 @@ type Daemon struct {
 	// vigilantes). KLING_BATTERY_PAUSE_AFTER lo sustituye.
 	BatteryPauseAfter int `json:"battery_pause_after_seconds,omitempty"`
 
+	// MemoryPressure decide si el daemon reacciona a la presión de memoria
+	// del host: "auto" (vacío: donde el host la publica, macOS con
+	// kern.memorystatus_vm_pressure_level y Linux con PSI) u "off". Con
+	// presión aprieta los globos de las máquinas ociosas y, si es crítica,
+	// las congela, antes de que jetsam (o el OOM killer) mate VMMs.
+	// KLING_MEMORY_PRESSURE lo sustituye. Ver docs/mac.md.
+	MemoryPressure string `json:"memory_pressure,omitempty"`
+
 	// NetMiBps es el caudal de red por microVM (MiB/s en cada sentido) cuando
 	// la petición no pide otro. 0 = 16. KLING_NET_MIBPS lo sustituye. Se lee
 	// en cada arranque en frío; en macOS no se aplica.
@@ -232,6 +240,22 @@ func ValidateBatteryMode(v string) error {
 		return nil
 	}
 	return fmt.Errorf("daemon.battery_mode must be %q, %q or %q, not %q", BatteryAuto, BatteryOn, BatteryOff, v)
+}
+
+// Modos de daemon.memory_pressure.
+const (
+	MemoryPressureAuto = "auto"
+	MemoryPressureOff  = "off"
+)
+
+// ValidateMemoryPressure dice si v es un valor válido de
+// daemon.memory_pressure (vacío = auto).
+func ValidateMemoryPressure(v string) error {
+	switch v {
+	case "", MemoryPressureAuto, MemoryPressureOff:
+		return nil
+	}
+	return fmt.Errorf("daemon.memory_pressure must be %q or %q, not %q", MemoryPressureAuto, MemoryPressureOff, v)
 }
 
 // Modos de daemon.cow.
@@ -680,6 +704,11 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.BatteryMode = value
+		case "memory_pressure":
+			if err := ValidateMemoryPressure(value); err != nil {
+				return err
+			}
+			c.Daemon.MemoryPressure = value
 		case "idle_freeze":
 			if _, err := ParseIdleFreeze(value, runtime.GOOS); err != nil {
 				return err
@@ -831,6 +860,7 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.battery_pause_after_seconds", itoa(c.Daemon.BatteryPauseAfter)},
 		{"daemon.net_mibps", itoa(c.Daemon.NetMiBps)},
 		{"daemon.idle_freeze", c.Daemon.IdleFreeze},
+		{"daemon.memory_pressure", c.Daemon.MemoryPressure},
 	}
 }
 

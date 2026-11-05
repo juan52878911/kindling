@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -285,6 +286,12 @@ func (m *Manager) atenderBroker(c *net.UnixConn, origen string) {
 // el proxy de Linux, marca el destino y comprueba que sigue siendo el que el
 // grafo (o el attach) dice. Devuelve el socket y la máquina destino.
 func (m *Manager) abrirDestinoBroker(ctx context.Context, origen string, req linkbroker.Request) (*net.TCPConn, string, error) {
+	// Un puente al host (-host-port) es del loopback del Mac, donde no hay
+	// agente de ningún invitado (los reenvíos van en su rango, que
+	// abrirLoopbackBroker rechaza): el 8080 de un llama-server vale.
+	if req.Kind == linkbroker.KindLoopback && m.puertoHostDeMaquina(origen, req.Port) {
+		return m.abrirLoopbackBroker(ctx, origen, req.Port)
+	}
 	// Nunca el agente del invitado, sea cual sea la arista o la credencial.
 	if req.Port == api.GuestPort {
 		return nil, "", fmt.Errorf("port %d is the guest agent and is never reachable by an edge", req.Port)
@@ -373,19 +380,24 @@ func (m *Manager) abrirLoopbackBroker(ctx context.Context, origen string, port i
 	if credproxy.PuertoReservado(port) {
 		return nil, "", fmt.Errorf("port %d is in kindling's reserved forward range", port)
 	}
-	creds, err := m.cargarCredenciales(origen)
-	if err != nil {
-		return nil, "", err
-	}
 	var up string
-	for _, c := range creds {
-		if p, ok := credproxy.UpstreamPuertoLoopback(c.Upstream); ok && p == port {
-			up = c.Upstream
-			break
+	if m.puertoHostDeMaquina(origen, port) {
+		// Un puente al host que se fijó al crearla (puente_host.go).
+		up = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	} else {
+		creds, err := m.cargarCredenciales(origen)
+		if err != nil {
+			return nil, "", err
+		}
+		for _, c := range creds {
+			if p, ok := credproxy.UpstreamPuertoLoopback(c.Upstream); ok && p == port {
+				up = c.Upstream
+				break
+			}
 		}
 	}
 	if up == "" {
-		return nil, "", fmt.Errorf("machine %s has no credential with a loopback upstream on port %d", shortID(origen), port)
+		return nil, "", fmt.Errorf("machine %s has no credential with a loopback upstream and no host port (-host-port) on port %d", shortID(origen), port)
 	}
 	m.mu.RLock()
 	maq, hit := m.puertosReenviadosLocked()[port]

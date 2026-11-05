@@ -68,6 +68,10 @@ type Grafo struct {
 	mu      sync.RWMutex
 	enlaces map[uint16]string        // puerto -> host
 	sems    map[uint16]chan struct{} // puerto -> conexiones a la vez
+	// puentes: puerto de la pasarela -> puerto del loopback del host
+	// (kling run -host-port, puentes.go), con sus conexiones a la vez.
+	puentes    map[uint16]int
+	semPuentes map[uint16]chan struct{}
 }
 
 // New devuelve el grafo de una máquina que pregunta al daemon por el socket
@@ -140,12 +144,13 @@ func (g *Grafo) Set(enlaces []Enlace) error {
 	return nil
 }
 
-// Link dice si port de la pasarela es una arista link.
+// Link dice si port de la pasarela es una arista link o un puente al host.
 func (g *Grafo) Link(port uint16) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	_, ok := g.enlaces[port]
-	return ok
+	_, puente := g.puentes[port]
+	return ok || puente
 }
 
 func (g *Grafo) enlace(port uint16) (string, chan struct{}, bool) {
@@ -161,6 +166,10 @@ func (g *Grafo) enlace(port uint16) (string, chan struct{}, bool) {
 // la del invitado y se copian los dos sentidos hasta que uno cierre o el
 // daemon corte el arrendamiento. Una línea de auditoría por conexión.
 func (g *Grafo) Serve(ctx context.Context, port uint16, aceptar func() (net.Conn, error), rechazar func()) {
+	if hp, sem, ok := g.puente(port); ok {
+		g.servirPuente(ctx, port, hp, sem, aceptar, rechazar)
+		return
+	}
 	inicio := time.Now()
 	host, sem, ok := g.enlace(port)
 	rec := credproxy.Record{Kind: credproxy.KindLink, Host: net.JoinHostPort(host, strconv.Itoa(int(port)))}
@@ -190,6 +199,12 @@ func (g *Grafo) Serve(ctx context.Context, port uint16, aceptar func() (net.Conn
 	}
 	defer up.Close()
 	rec.Upstream = "machine:" + resp.Machine
+	unir(up, aceptar, rechazar, &rec)
+}
+
+// unir completa la conexión del invitado con up, ya pedida al daemon, y
+// copia los dos sentidos; lo que pase queda en rec.
+func unir(up *Conexion, aceptar func() (net.Conn, error), rechazar func(), rec *credproxy.Record) {
 	// El destino que no escucha corta con un RST (el reenvío de su kling-vz):
 	// si ya llegó, el invitado recibe el suyo al SYN, como en Docker, en vez
 	// de una conexión aceptada que se cierra sin más. Sin esperar: lo que haya
