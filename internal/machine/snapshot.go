@@ -646,6 +646,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			return nil, fmt.Errorf("marking fork snapshot %s: %w", name, err)
 		}
 	}
+	// Lo mismo con la de un snapshot por imagen (snapshot_imagen.go): sin
+	// ella sería un dorado más en `kling snapshots`.
+	if marca, ok := m.marcaImagenPendiente(name); ok {
+		if err := os.WriteFile(filepath.Join(dir, marcaImagen), marca, 0o644); err != nil {
+			return nil, fmt.Errorf("marking image snapshot %s: %w", name, err)
+		}
+	}
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
@@ -709,6 +716,11 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 	out := make([]*api.Snapshot, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		// Los snapshots por imagen son una caché del daemon, no dorados del
+		// usuario: tienen su propia lista (SnapshotsImagen).
+		if esSnapshotImagen(m.snapDir(e.Name())) {
 			continue
 		}
 		s, disco, err := m.loadSnapshotCached(e.Name())
@@ -1171,7 +1183,7 @@ func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string)
 	if !restos {
 		var users []string
 		for _, mc := range m.byID {
-			if mc.From == name && mc.State != api.StateStopped {
+			if snapshotDeOrigen(mc) == name && mc.State != api.StateStopped {
 				users = append(users, mc.Name)
 			}
 		}
@@ -1300,6 +1312,15 @@ func explainRestoreErr(err error, what, remedy string) error {
 // en privado, así que comparten las páginas que no escriben y solo divergen las
 // que tocan. La segunda instancia y las siguientes salen casi gratis en RAM.
 func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	return m.runFromCon(ctx, req, nil)
+}
+
+// runFromCon es runFrom; con ai, la restauración de un snapshot por imagen
+// (snapshot_imagen.go): req viene ya normalizada por run como para un
+// arranque en frío, nada se hereda del snapshot salvo lo que ya fija su clave
+// (vCPU, memoria, disco, exec), y lo propio de la máquina se le da tras el
+// resync. Para quien la ve, una máquina arrancada en frío.
+func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranqueImagen) (*api.Machine, error) {
 	// Antes de reservar el snapshot y de publicar nada (ver Run).
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
@@ -1336,6 +1357,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
 	// al cargar no dice que la causa es la actualización (meta.go).
 	if causa := m.causaObsoletoEn(snap.VMM, snap.Arch, m.snapDir(req.From)); causa != "" {
+		if ai != nil {
+			ai.danado = true
+		}
 		return nil, errObsoleto(req.From, causa)
 	}
 
@@ -1345,9 +1369,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// sola señal de la causa. Se falla aquí, claro y pronto, antes de copiar el
 	// overlay y de arrancar el VMM.
 	if err := m.comprobarFirma(snap); err != nil {
+		if ai != nil {
+			ai.danado = true
+		}
 		return nil, err
 	}
 	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
+		if ai != nil {
+			ai.danado = true
+		}
 		return nil, err
 	}
 	// KERNEL (K2): solo se avisa. Ver avisoKernel.
@@ -1358,7 +1388,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// avisoIPv6Invitado.
 	// Si la imagen del dorado pide la pila IPv6, no hay nada que avisar: es lo
 	// declarado, y rehacer el dorado no lo cambiaría.
-	if aviso := m.avisoIPv6Invitado(req.From, snap.GuestIPv6Off || m.ipv6DeReceta(snap.Image)); aviso != "" {
+	if aviso := m.avisoIPv6Invitado(req.From, snap.GuestIPv6Off || m.ipv6DeReceta(snap.Image) || ai != nil); aviso != "" {
 		log.Print(aviso)
 		// m.bus es nil en algún arnés de test que ejercita runFrom sin
 		// necesitar el bus de eventos para nada más; en producción (NewManager)
@@ -1386,7 +1416,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// dentro del invitado que no señalaba a ninguna parte.
 	//
 	// Lo que venga en la petición manda; el snapshot solo rellena el hueco.
-	if req.Egress == "" {
+	// El de un snapshot por imagen es el de su máquina de preparación (sin
+	// red): no se hereda, como no lo heredaría un arranque en frío.
+	if req.Egress == "" && ai == nil {
 		req.Egress = snap.Egress
 		// Los dominios permitidos viajan con el egress: si se hereda uno, se hereda
 		// el otro, o un servicio importado con allowlist despertaría con la lista
@@ -1421,6 +1453,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// quien pide trae uno distinto del del dorado: el planificador del gateway
 	// manda siempre el del dorado, y eso no es pedirlo.
 	cpuFijo := snap.CPUPctFixed || (req.CPUPct > 0 && req.CPUPct != snap.CPUPct)
+	if ai != nil {
+		// run ya lo decidió como para un arranque en frío.
+		cpuFijo = ai.cpuFijo
+	}
 	if req.CPUPct <= 0 {
 		req.CPUPct = snap.CPUPct
 	}
@@ -1431,6 +1467,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	id := m.nuevoIDMaquina()
 	if req.Name == "" {
 		req.Name = req.From + "-" + id[:6]
+		if ai != nil {
+			req.Name = snap.Image + "-" + id[:6] // como en frío
+		}
 	}
 	// Reserva de memoria, igual que en Run y por la misma razón: el gateway
 	// despierta varios servicios a la vez cuando el anfitrión aprieta, y sin
@@ -1444,6 +1483,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	etiquetas := api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels)
 	// Su disco es una copia del overlay del dorado: su tamaño lógico.
 	discoMiB := tamañoLogicoMiB(filepath.Join(m.snapDir(req.From), "overlay.ext4"))
+	if ai != nil {
+		// Las de la máquina de preparación no son de esta; el disco, el que
+		// pidió (su clave lo fija).
+		etiquetas, discoMiB = req.Labels, req.DiskMiB
+	}
 	if err := m.comprobarCuota(etiquetas[api.LabelOwner], UsoCuota{
 		Maquinas: 1, MemMiB: memCuota(snap.MemMiB, snap.MemMaxMiB), DiscoMiB: discoCuota(discoMiB)}); err != nil {
 		return nil, err
@@ -1596,8 +1640,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 
 	creada := time.Now()
+	from, deImagen := req.From, ""
+	if ai != nil {
+		from, deImagen = "", req.From
+	}
 	mc := &api.Machine{
-		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
+		ID: id, Name: req.Name, Image: snap.Image, From: from, ImageSnapshot: deImagen,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB, MemMaxMiB: snap.MemMaxMiB,
 		DiskMiB: discoMiB,
 		IP:      netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
@@ -1613,6 +1661,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
+	if ai != nil {
+		// Lo suyo, como en frío: sus nombres de variables y su comando.
+		mc.EnvKeys, mc.ShareWait, mc.NetMiBps = api.MachineEnvKeys(ai.env), 0, req.NetMiBps
+		if ai.comando != nil {
+			mc.Entrypoint, mc.Cmd = ai.comando.Entrypoint, ai.comando.Cmd
+		}
+	}
 	// El cerrojo de ciclo de vida, igual que en Run y por lo mismo (M-06): sin
 	// él, un Remove concurrente veía la máquina en created con PID 0, borraba
 	// su directorio y su entrada, y esta función seguía restaurando un VMM que
@@ -1627,6 +1682,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 	publicada = true
+	if ai != nil {
+		ai.id = id
+	}
 
 	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
 	// como encender en frío, y es EL camino del gateway cuando despierta varios
@@ -1766,7 +1824,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// entera (F-01).
 	// Con seguimiento de páginas sucias si la copia se va a congelar en
 	// diferencial (diff_volcado.go): solo lo que escriba desde el dorado.
-	enDiff := congelarEnDiff()
+	// No la de un snapshot por imagen: su volcado no debe depender de una
+	// caché que el daemon poda (ni de un campo, ImageSnapshot, que un kling
+	// anterior no conoce).
+	enDiff := congelarEnDiff() && ai == nil
 	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshotTracking(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false, enDiff); err != nil {
@@ -1836,6 +1897,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
 	resync := m.resyncInstancia(ctx, id, snap)
+	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
+	// agente lanza el servicio. Sin resync no: sus procesos nacerían con el
+	// CSPRNG de la plantilla.
+	if ai != nil {
+		if !resync.ok {
+			return abortar(fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
+		}
+		if err := m.entregarMaquina(ctx, id, ai); err != nil {
+			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
+		}
+	}
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -1889,12 +1961,22 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.mu.Unlock()
 	tel.exito(OpRun, DurRestore, elapsed)
 
-	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
-	// imagen (identidad por copia, etc.), en segundo plano.
-	m.trasRestaurar(ctx, id, api.ResyncInstance, resync)
-	// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
-	// normal) o no declara sonda; si no, cuando la pase.
-	impulso.entregarRestaurada(resync.listo)
+	if ai != nil {
+		// Como tras un arranque en frío: sin ganchos de restauración (el
+		// servicio acaba de nacer), la vigía de "listo" desde cero, y el
+		// impulso hasta que pase la sonda.
+		m.tocarSnapshotImagen(req.From)
+		m.conocerAgente(id)
+		impulso.entregar()
+		m.vigilarListo(id, nil)
+	} else {
+		// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
+		// imagen (identidad por copia, etc.), en segundo plano.
+		m.trasRestaurar(ctx, id, api.ResyncInstance, resync)
+		// Fin del impulso de arranque: ya, si el dorado se guardó listo (lo
+		// normal) o no declara sonda; si no, cuando la pase.
+		impulso.entregarRestaurada(resync.listo)
+	}
 	m.mu.RLock()
 	out := *mc
 	m.mu.RUnlock()
@@ -1910,8 +1992,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.decorarShares(&out)
 	}
 
-	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))})
+	msg := fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resync.took, resync.ok))
+	if ai != nil {
+		msg = fmt.Sprintf("started from the image snapshot %s in %d ms", req.From, elapsed)
+	}
+	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name, Message: msg})
 	return &out, nil
 }
 

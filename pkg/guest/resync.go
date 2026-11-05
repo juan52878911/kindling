@@ -190,7 +190,8 @@ func validarResync(req api.GuestResync) error {
 // /volume/release desmonta los volúmenes por debajo del servidor, /exec ejecuta,
 // /share conecta una carpeta del host.
 var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share",
-	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath, api.GuestServicePath, api.GuestProcsPath}
+	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath, api.GuestServicePath, api.GuestProcsPath,
+	"/machine"}
 
 // IsControlPath dice si p (una ruta ya limpia, con path.Clean) es una ruta de
 // control del agente y no algo que un cliente del servicio deba alcanzar.

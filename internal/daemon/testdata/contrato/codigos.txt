@@ -7,6 +7,7 @@
 # api: 1
 
 DELETE /graphs/{ref}  ←  DELETE /graphs/nada  →  404 not_found
+DELETE /image-snapshots  ←  DELETE /image-snapshots  →  200 -
 DELETE /images/{name}  ←  DELETE /images/nada  →  404 not_found
 DELETE /images/{name}  ←  DELETE /images/usada  →  409 conflict
 DELETE /machines/{ref}  ←  DELETE /machines/nadie  →  404 not_found
@@ -24,6 +25,7 @@ DELETE /volumes/{name}/snapshots/{snap}  ←  DELETE /volumes/nada/snapshots/s1 
 GET /events  ←  GET /events  →  200 -
 GET /graphs  ←  GET /graphs  →  200 -
 GET /graphs/{ref}  ←  GET /graphs/nada  →  404 not_found
+GET /image-snapshots  ←  GET /image-snapshots  →  200 -
 GET /images  ←  GET /images  →  200 -
 GET /images/{name}/blob  ←  GET /images/nada/blob  →  404 not_found
 GET /images/{name}/files  ←  GET /images/nada/files?path=/etc/hostname  →  404 not_found

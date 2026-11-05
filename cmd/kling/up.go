@@ -836,6 +836,9 @@ func cmdStatus(args []string) error {
 			}
 			fmt.Printf("firecracker:  %s\n", fc)
 		}
+		if l := lineaSnapshotsImagen(info.ImageSnapshots); l != "" {
+			fmt.Printf("image snaps:  %s\n", l)
+		}
 		printPoolProblems(info.PoolProblems)
 	}
 
@@ -1001,4 +1004,17 @@ func extensionUnits() []string {
 		}
 	}
 	return out
+}
+
+// lineaSnapshotsImagen resume los snapshots por imagen para `kling status`
+// ("" con un daemon que no los tiene).
+func lineaSnapshotsImagen(i *api.ImageSnapshotsInfo) string {
+	if i == nil {
+		return ""
+	}
+	if !i.Enabled {
+		return "off (" + i.Reason + ")"
+	}
+	return fmt.Sprintf("%d · %s of %s · kling run -image restores them instead of booting cold",
+		i.Count, human(i.DiskBytes), human(i.CapBytes))
 }

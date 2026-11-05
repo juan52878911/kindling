@@ -90,6 +90,13 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	for _, snap := range s.mgr.Snapshots() {
 		usedBy[snap.Image]++
 	}
+	// Los snapshots por imagen no la retienen (image rm los borra con ella):
+	// van aparte.
+	snapsImg, bytesImg := map[string]int{}, map[string]int64{}
+	for _, si := range s.mgr.SnapshotsImagen() {
+		snapsImg[si.Image]++
+		bytesImg[si.Image] += si.DiskBytes
+	}
 	names := s.mgr.Images()
 
 	// Primera pasada: quién se apoya en quién. Una base con capas encima no se
@@ -107,7 +114,8 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	out := make([]api.Image, 0, len(names))
 	for _, name := range names {
 		img := api.Image{Name: name, UsedBy: usedBy[name],
-			Base: base[name], Layers: layers[name]}
+			Base: base[name], Layers: layers[name],
+			ImageSnapshots: snapsImg[name], ImageSnapshotBytes: bytesImg[name]}
 		// El fichero que se mide es el de la imagen: su capa si va por capas, el
 		// ext4 entero si es monolítica.
 		if fi, err := os.Stat(s.mgr.ImageFile(name)); err == nil {
@@ -150,4 +158,18 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(b)
+}
+
+// handleImageSnapshots es GET /image-snapshots: los snapshots por imagen que
+// el daemon guarda para `run -image` (docs/snapshot-imagen.md).
+func (s *Server) handleImageSnapshots(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.mgr.SnapshotsImagen())
+}
+
+// handlePruneImageSnapshots es DELETE /image-snapshots: borra los que nadie
+// usa. Son una caché: lo único que se pierde es que la próxima run de cada
+// imagen arranque en frío.
+func (s *Server) handlePruneImageSnapshots(w http.ResponseWriter, r *http.Request) {
+	n, b := s.mgr.PodarSnapshotsImagen()
+	writeJSON(w, http.StatusOK, api.ImageSnapshotsPrune{Removed: n, FreedBytes: b})
 }

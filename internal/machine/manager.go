@@ -107,6 +107,9 @@ const (
 
 // Manager gestiona todas las microVMs del daemon.
 type Manager struct {
+	// img es el estado de los snapshots por imagen (snapshot_imagen.go).
+	img estadoImagen
+
 	// fondos son las copias precalentadas por plantilla (fondo.go); fondoMu
 	// los protege y nunca se toma con m.mu cogido.
 	fondoMu sync.Mutex
@@ -1446,6 +1449,15 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		if req.ShareWait > 0 {
 			return nil, fmt.Errorf("%w: share_wait is decided at a cold boot; a copy waits for what its template waited for", ErrShareRequest)
 		}
+		// Un snapshot por imagen no es una plantilla: su agente espera a que
+		// le den una máquina, y solo run -image sabe dársela.
+		if validName.MatchString(req.From) && esSnapshotImagen(m.snapDir(req.From)) {
+			return nil, peticionInvalida("%s is an image snapshot (a cache of the daemon), not a template: run -image %s",
+				req.From, imagenDeSnapshotImagen(m.snapDir(req.From)))
+		}
+		if req.Fresh {
+			return nil, peticionInvalida("fresh goes with image: a copy of a template always restores it")
+		}
 		// Una copia ya despierta del fondo de la plantilla, si la hay y la
 		// petición no pide nada que se decida al restaurar (fondo.go).
 		if mc, ok := m.reclamarFondo(ctx, req); ok {
@@ -1494,6 +1506,32 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	cpuFijo := req.CPUPct > 0
 	if req.CPUPct <= 0 {
 		req.CPUPct = m.techoCPUPorDefecto(req.Image, req.VCPUs, req.CPUPctDefault)
+	}
+
+	// Con un snapshot de la imagen con estos mismos parámetros, se restaura
+	// en vez de arrancar en frío; sin él, se arranca en frío y se prepara uno
+	// en segundo plano para la próxima (snapshot_imagen.go). Cualquier fallo
+	// al restaurar acaba en el arranque en frío de siempre.
+	var claveImg *claveImagen
+	if m.motivoSinSnapshotImagen(req) == "" {
+		if c, err := m.claveImagenDe(req); err == nil {
+			if m.snapshotImagenListo(c) {
+				ai := &arranqueImagen{env: env, comando: comando, cpuFijo: cpuFijo}
+				mc, err := m.runDesdeImagen(ctx, req, c, ai)
+				if err == nil {
+					return mc, nil
+				}
+				if ctx.Err() != nil {
+					return nil, err
+				}
+				log.Printf("image snapshot %s of %s: %v; booting cold", c.nombre(), req.Image, err)
+				if ai.fallaDelSnapshot() {
+					m.descartarSnapshotImagen(c, err)
+				}
+			} else {
+				claveImg = &c
+			}
+		}
 	}
 
 	if err := m.checkMachineLimit(); err != nil {
@@ -1790,7 +1828,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	impulso.entregar()
 	// Para `kling ps`: si la imagen declara una sonda, cuándo termina de
 	// arrancar (listo.go). En segundo plano; -wait-ready espera aparte.
-	m.vigilarListo(id, nil)
+	// La de preparación de un snapshot por imagen no lanza su servicio: su
+	// sonda no pasaría nunca (snapshot_imagen.go).
+	if !m.esPrepImagen(id) {
+		m.vigilarListo(id, nil)
+	}
 	// Y qué agente lleva (agente.go). Un arranque en frío puede estrenar
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
@@ -1803,6 +1845,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
+	if claveImg != nil {
+		m.quizaPrepararImagen(req, *claveImg)
+	}
 	return &out, nil
 }
 
@@ -1973,7 +2018,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		return pid, fmt.Errorf("%w: it travels via MMDS, and this machine has no network", ErrCmdRequest)
 	}
 	args := bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack) + envBootArg(len(env) > 0) +
-		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait)
+		cmdBootArg(comando) + volWaitBootArg(m.esperaVolumenDe(id)) + shareWaitBootArg(shareWait) +
+		imgSnapBootArg(m.esPrepImagen(id))
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: args}); err != nil {
 		return pid, err
 	}

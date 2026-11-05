@@ -507,6 +507,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				m.mu.Unlock()
 				// Los snapshots temporales de fork sin copias (ver fork.go).
 				m.barrerForks()
+				// Los snapshots por imagen que ya no valen o no caben en su
+				// tope (snapshot_imagen.go).
+				m.podarSnapshotsImagen(topeSnapshotsImagen())
 				m.vaciarPapelera()
 				// Overlays del almacén de discos sin máquina, y bases de
 				// dorados que ya no existen (ver cow.go).

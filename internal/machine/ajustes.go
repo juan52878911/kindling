@@ -46,6 +46,10 @@ func (m *Manager) Ajustes() map[string]string {
 	if r := stoppedRetention(); r > 0 {
 		retParada = r.String()
 	}
+	imgSnaps := "on"
+	if ok, _ := snapshotsImagenActivos(); !ok {
+		imgSnaps = "off"
+	}
 	return map[string]string{
 		"KLING_MIN_FREE_DISK_MIB":   strconv.FormatInt(minFreeDiskMiB(), 10),
 		"KLING_MAX_DISK_MIB":        strconv.Itoa(maxDiskMiB()),
@@ -67,6 +71,8 @@ func (m *Manager) Ajustes() map[string]string {
 		"KLING_FREE_PAGE_REPORTING": onOff(informePaginasLibres()),
 		"KLING_STOPPED_RETENTION":   retParada,
 		"KLING_COW_STORE_GIB":       cowGiB,
+		"KLING_IMAGE_SNAPSHOTS":     imgSnaps,
+		"KLING_IMAGE_SNAPSHOT_MIB":  strconv.FormatInt(topeSnapshotsImagen()>>20, 10),
 		"cow":                       cow,
 	}
 }

@@ -53,6 +53,8 @@ kling image ls -json:  [].agent.version string
 kling image ls -json:  [].base string
 kling image ls -json:  [].disk_bytes number
 kling image ls -json:  [].has_recipe bool
+kling image ls -json:  [].image_snapshot_bytes number
+kling image ls -json:  [].image_snapshots number
 kling image ls -json:  [].layers number
 kling image ls -json:  [].name string
 kling image ls -json:  [].size_bytes number
@@ -89,6 +91,7 @@ kling inspect m1:  hold string
 kling inspect m1:  hooks_pending string
 kling inspect m1:  id string
 kling inspect m1:  image string
+kling inspect m1:  image_snapshot string
 kling inspect m1:  ip string
 kling inspect m1:  labels.x string
 kling inspect m1:  last_error string
@@ -172,6 +175,7 @@ kling ps -a -json:  [].hold string
 kling ps -a -json:  [].hooks_pending string
 kling ps -a -json:  [].id string
 kling ps -a -json:  [].image string
+kling ps -a -json:  [].image_snapshot string
 kling ps -a -json:  [].ip string
 kling ps -a -json:  [].labels.x string
 kling ps -a -json:  [].last_error string
@@ -255,6 +259,7 @@ kling sandbox ls -json:  [].hold string
 kling sandbox ls -json:  [].hooks_pending string
 kling sandbox ls -json:  [].id string
 kling sandbox ls -json:  [].image string
+kling sandbox ls -json:  [].image_snapshot string
 kling sandbox ls -json:  [].ip string
 kling sandbox ls -json:  [].labels.x string
 kling sandbox ls -json:  [].last_error string

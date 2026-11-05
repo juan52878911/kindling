@@ -27,14 +27,15 @@ import (
 // overlay-init antes de que el agente exista, pero es del mismo contrato y no
 // merece aviso.
 var knownBootParams = map[string]bool{
-	volumeBootParam:         true,
-	execBootParam:           true,
-	api.MachineEnvBootParam: true,
-	api.MachineCmdBootParam: true,
-	api.VolumeWaitBootParam: true,
-	api.ShareWaitBootParam:  true,
-	"kling.layer":           true,
-	vsockBootParam:          true,
+	volumeBootParam:            true,
+	execBootParam:              true,
+	api.MachineEnvBootParam:    true,
+	api.MachineCmdBootParam:    true,
+	api.VolumeWaitBootParam:    true,
+	api.ShareWaitBootParam:     true,
+	api.ImageSnapshotBootParam: true,
+	"kling.layer":              true,
+	vsockBootParam:             true,
 }
 
 // bootParams es lo que se leyó de /proc/cmdline: los kling.* conocidos con su

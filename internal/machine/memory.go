@@ -170,7 +170,7 @@ func (m *Manager) shareAnchoredLocked(shareKey string) bool {
 		return true
 	}
 	for _, mc := range m.byID {
-		if mc.From == shareKey && mc.State == api.StateRunning && mapeaSuDorado(mc) {
+		if snapshotDeOrigen(mc) == shareKey && mc.State == api.StateRunning && mapeaSuDorado(mc) {
 			return true
 		}
 	}
@@ -184,7 +184,19 @@ func (m *Manager) shareAnchoredLocked(shareKey string) bool {
 // inflaba la caché caliente y daba el dorado por anclado: un run -from
 // reservaba solo 1/shareReserveDiv sin que nadie mapeara el fichero.
 func mapeaSuDorado(mc *api.Machine) bool {
-	return mc.From != "" && mc.BootMS == 0
+	return snapshotDeOrigen(mc) != "" && mc.BootMS == 0
+}
+
+// snapshotDeOrigen es el snapshot cuya memoria mapea (o mapeaba al nacer) mc: su
+// dorado (From) o su snapshot por imagen (ImageSnapshot). Para lo mecánico
+// —memoria compartida, la base de un volcado diferencial, no borrarlo con
+// instancias vivas— los dos son lo mismo; para lo demás, una máquina de un
+// snapshot por imagen es una arrancada en frío.
+func snapshotDeOrigen(mc *api.Machine) string {
+	if mc.From != "" {
+		return mc.From
+	}
+	return mc.ImageSnapshot
 }
 
 // hotMemFilesMiBLocked estima cuánta caché de página es atribuible a los
@@ -218,7 +230,7 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 			continue
 		}
 		if mapeaSuDorado(mc) {
-			count(mc.From)
+			count(snapshotDeOrigen(mc))
 		}
 		// Una máquina descongelada mapea su propio volcado, no el dorado: éste SÍ
 		// cambia con lo que el invitado va escribiendo, así que no se cachea.

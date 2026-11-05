@@ -86,6 +86,11 @@ type Machine struct {
 
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
+	// ImageSnapshot es el snapshot por imagen del que se restauró en vez de
+	// arrancar en frío (docs/snapshot-imagen.md). Para todo lo demás es una
+	// máquina arrancada en frío de Image: From vacío, su entorno y su comando
+	// propios, y su disco la única copia de lo que escriba.
+	ImageSnapshot string `json:"image_snapshot,omitempty"`
 
 	// IP por la que el host alcanza esta microVM. Dentro, todas las máquinas
 	// usan la misma dirección: la diferenciación vive en el host.
@@ -435,6 +440,52 @@ type RunRequest struct {
 	// monta y lanza el servicio con los datos de ahora. Necesita Volumes y no
 	// vale con From. Solo el primer arranque: un Start los monta como siempre.
 	VolumeWait bool `json:"volume_wait,omitempty"`
+	// Fresh arranca en frío aunque haya un snapshot de la imagen con estos
+	// parámetros, y no guarda uno (docs/snapshot-imagen.md). Solo con Image.
+	Fresh bool `json:"fresh,omitempty"`
+}
+
+// CapabilityImageSnapshots es la capacidad de GET /info que dice que el
+// daemon restaura `run -image` de un snapshot por imagen cuando puede, y que
+// entiende RunRequest.Fresh y GET/DELETE /image-snapshots.
+const CapabilityImageSnapshots = "image-snapshots"
+
+// ImageSnapshot es un snapshot por imagen (GET /image-snapshots): una caché
+// del daemon, no un dorado del usuario. Lo que lo distingue de otro de la
+// misma imagen son los parámetros que cambian el estado del invitado.
+type ImageSnapshot struct {
+	Name      string    `json:"name"`
+	Image     string    `json:"image"`
+	VCPUs     int       `json:"vcpus"`
+	MemMiB    int       `json:"mem_mib"`
+	MemMaxMiB int       `json:"mem_max_mib,omitempty"`
+	DiskMiB   int       `json:"disk_mib"`
+	AllowExec bool      `json:"allow_exec,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	LastUsed  time.Time `json:"last_used"`
+	// DiskBytes es lo que ocupa en disco (memoria volcada, disco y estado).
+	DiskBytes int64 `json:"disk_bytes"`
+	// Instances son las máquinas vivas restauradas de aquí.
+	Instances int `json:"instances"`
+	// Stale dice por qué ya no se usará (la imagen o el kernel cambiaron); el
+	// daemon lo borra en cuanto nadie lo usa.
+	Stale string `json:"stale,omitempty"`
+}
+
+// ImageSnapshotsPrune es la respuesta de DELETE /image-snapshots.
+type ImageSnapshotsPrune struct {
+	Removed    int   `json:"removed"`
+	FreedBytes int64 `json:"freed_bytes"`
+}
+
+// ImageSnapshotsInfo es el resumen de GET /info: si están activos (y si no,
+// por qué), cuántos hay, lo que ocupan y el tope de disco.
+type ImageSnapshotsInfo struct {
+	Enabled   bool   `json:"enabled"`
+	Reason    string `json:"reason,omitempty"`
+	Count     int    `json:"count"`
+	DiskBytes int64  `json:"disk_bytes"`
+	CapBytes  int64  `json:"cap_bytes"`
 }
 
 // CapabilityMachineCmd es la capacidad de GET /info que dice que el daemon
@@ -605,6 +656,12 @@ type Image struct {
 	// borrar aunque no tenga snapshots propios — se llevaría por delante todos
 	// esos servicios, que solo guardan su delta.
 	Layers int `json:"layers,omitempty"`
+
+	// ImageSnapshots y ImageSnapshotBytes son sus snapshots por imagen
+	// (docs/snapshot-imagen.md) y lo que ocupan: una caché del daemon, que
+	// no la retiene (image rm los borra con ella).
+	ImageSnapshots     int   `json:"image_snapshots,omitempty"`
+	ImageSnapshotBytes int64 `json:"image_snapshot_bytes,omitempty"`
 }
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.
@@ -1058,6 +1115,9 @@ type Info struct {
 	// sigue reintentando (un freeze que no pudo reanudarla, un rm cuyo VMM
 	// sobrevivió al SIGKILL). Vacío = ninguna. Lo enseña `kling doctor`.
 	Stuck []StuckMachine `json:"stuck,omitempty"`
+	// ImageSnapshots resume los snapshots por imagen (docs/snapshot-imagen.md).
+	// nil = daemon anterior.
+	ImageSnapshots *ImageSnapshotsInfo `json:"image_snapshots,omitempty"`
 	// PoolProblems son los fondos precalentados (kling template pool) que no
 	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
 	// Vacío = todos bien o ninguno.

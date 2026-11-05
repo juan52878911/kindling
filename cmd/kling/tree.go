@@ -101,6 +101,8 @@ var coreTree = []section{
                                                    kling stays following the service
       [-wait-ready] [-ready-timeout 2m]            return once ready by the image's
                                                    own probe and post-restore hooks
+      [-fresh]                                     boot cold even if the daemon keeps a
+                                                   snapshot of the image (and save none)
       [-json]                                      prints the machine as JSON
 `},
 		{Name: "ps", Summary: "lists the machines", Usage: `  ps [-a] [-q] [-json]                             lists the machines (-a: stopped
@@ -228,7 +230,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools", "snapshots"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
       [-base IMAGE] [-grow MiB]                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
@@ -266,6 +268,9 @@ var coreTree = []section{
                                                    (try and volume populate use it)
   image build-tools [-as NAME]                     builds the image where "image import
                                                    -isolate" flattens layers
+  image snapshots [ls|prune] [-json]               the snapshots the daemon keeps so that
+                                                   run -image restores instead of booting
+                                                   cold; prune removes the unused ones
 `},
 		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
                                                    the daemon; the password or token is

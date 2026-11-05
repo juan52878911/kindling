@@ -23,6 +23,8 @@
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
 //	POST /volume/acquire     los vuelve a montar (después de restaurar)
 //	POST /share/attach       carpeta compartida en vivo (Upgrade: kling-share/1)
+//	POST /machine/start      entorno y comando de la máquina a un agente que
+//	                         espera (kling.imgsnap=1, arranque_tardio.go)
 //	POST /exec               solo si el kernel arrancó con kling.exec=1
 //	POST /exec/stream        ídem, en streaming (sandboxes)
 //	POST /exec/pty           ídem, con pseudoterminal: la shell interactiva
@@ -86,6 +88,14 @@ type Agent struct {
 	diferido  bool
 	espera    bool
 	finUna    sync.Once
+
+	// tardio: kling.imgsnap=1 y este agente puede cumplirlo
+	// (arranque_tardio.go). preparado se cierra cuando FinishBoot acaba lo
+	// que no es de la máquina; arrancado, con POST /machine/start. inicioUna
+	// hace que ese arranque sea uno solo, y que Close lo impida.
+	tardio    bool
+	preparado chan struct{}
+	inicioUna sync.Once
 }
 
 // Caps son las capacidades que anuncia /healthz: las rutas que Register sirve
@@ -94,6 +104,9 @@ func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
 		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
 		api.GuestCapVolumeWait, CapResyncClock}
+	if a.tardio {
+		caps = append(caps, api.GuestCapLateStart)
+	}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -151,6 +164,7 @@ func NewDeferred() (*Agent, error) {
 		return nil, err
 	}
 	a.arrancado = make(chan struct{})
+	a.prepararTardio()
 	return a, nil
 }
 
@@ -211,6 +225,13 @@ func (a *Agent) FinishBoot() {
 	}
 	a.finUna.Do(func() {
 		SetupMMDSRoute()
+		if a.tardio {
+			// Ni entorno, ni comando, ni servicio: los trae POST
+			// /machine/start (arranque_tardio.go).
+			log.Printf("machine start: waiting for the host (%s=1)", api.ImageSnapshotBootParam)
+			close(a.preparado)
+			return
+		}
 		a.completarArranque()
 		a.StartService()
 		close(a.arrancado)
@@ -270,7 +291,7 @@ func (a *Agent) recalcularBiblioteca() {
 // capacidad de ejecutar comandos que solo depende de no ser alcanzable acaba
 // siendo alcanzada.
 func (a *Agent) Register(mux *http.ServeMux) {
-	mux.HandleFunc(api.GuestHealthPath, a.enArranque(a.handleHealthz))
+	mux.HandleFunc(api.GuestHealthPath, a.enPreparado(a.handleHealthz))
 	mux.HandleFunc("/dns", DNSHandler)
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
@@ -286,7 +307,11 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	mux.HandleFunc(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
 	// /procs: los procesos vivos, para que `kling save` avise de los que el
 	// dorado copiaría con sus aleatorios en memoria (procs.go).
-	mux.HandleFunc(api.GuestProcsPath, a.enArranque(ProcsHandler()))
+	mux.HandleFunc(api.GuestProcsPath, a.enPreparado(ProcsHandler()))
+	// /machine/start: solo en una máquina que espera al host.
+	if a.tardio {
+		mux.HandleFunc(api.GuestStartPath, a.handleStart)
+	}
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
@@ -335,6 +360,7 @@ func (a *Agent) Close() {
 	// Un FinishBoot a medias acaba antes (y uno sin empezar ya no empieza):
 	// si no, lanzaría el servicio después de pararlo, sin volúmenes.
 	a.finUna.Do(func() {})
+	a.inicioUna.Do(func() {})
 	// El servicio primero: es quien escribe en los volúmenes.
 	StopService()
 	shareState.Close()

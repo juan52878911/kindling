@@ -65,6 +65,8 @@ var casosCodigos = []casoCodigo{
 	{"GET", "/images", ""},
 	{"DELETE", "/images/nada", ""},
 	{"DELETE", "/images/usada", ""},
+	{"GET", "/image-snapshots", ""},
+	{"DELETE", "/image-snapshots", ""},
 	{"GET", "/volumes", ""},
 	{"POST", "/volumes", `{`},
 	{"DELETE", "/volumes/nada", ""},

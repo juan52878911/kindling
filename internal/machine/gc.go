@@ -125,6 +125,14 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		return
 	}
 	antes := pct
+	// Lo primero, los snapshots por imagen que nadie usa: son una caché, y
+	// perderlos solo cuesta un arranque en frío (snapshot_imagen.go).
+	if lib := m.podarSnapshotsImagen(0); lib > 0 {
+		log.Printf("gc: disk at %d%%, removed unused image snapshots (%d MiB)", pct, lib>>20)
+		if m.diskUsedPct() < target {
+			return
+		}
+	}
 
 	type cand struct {
 		id    string

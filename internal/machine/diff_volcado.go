@@ -346,7 +346,7 @@ func abrirPropio(ruta string, flag int) (*os.File, error) {
 // baseDiffValida dice si base es el mem.file del dorado del que viene la
 // copia: el sello vive en un directorio del VMM y no se le cree otra ruta.
 func (m *Manager) baseDiffValida(mc *api.Machine, base string) error {
-	if mc.From == "" || base != filepath.Join(m.snapDir(mc.From), "mem.file") {
+	if snapshotDeOrigen(mc) == "" || base != filepath.Join(m.snapDir(snapshotDeOrigen(mc)), "mem.file") {
 		return fmt.Errorf("its seal points at %q, which is not the memory of its golden snapshot", base)
 	}
 	return nil

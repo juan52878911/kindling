@@ -16,7 +16,7 @@ import (
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|import|cat|put|copy> [...]")
+		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|import|cat|put|copy|snapshots> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -42,8 +42,10 @@ func cmdImages(args []string) error {
 		return imagesPut(args[1:])
 	case "copy", "cp":
 		return imagesCopy(args[1:])
+	case "snapshots":
+		return imagesSnapshots(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, import, cat, put or copy", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, import, cat, put, copy or snapshots", args[0])
 	}
 }
 
@@ -130,7 +132,84 @@ func imagesList(args []string) error {
 		fmt.Print(" — each base counted once, shared by its layers")
 	}
 	fmt.Println(".")
+	// Los snapshots por imagen, aparte: no son de la imagen ni la retienen.
+	var nSnap int
+	var bSnap int64
+	for _, img := range imgs {
+		nSnap += img.ImageSnapshots
+		bSnap += img.ImageSnapshotBytes
+	}
+	if nSnap > 0 {
+		fmt.Printf("Image snapshots: %d, %s (kling run restores them instead of booting cold; kling image snapshots)\n", nSnap, human(bSnap))
+	}
 	return nil
+}
+
+// imagesSnapshots es `kling image snapshots [ls|prune]`: los snapshots por
+// imagen que el daemon guarda para que `run -image` restaure en vez de
+// arrancar en frío (docs/snapshot-imagen.md).
+func imagesSnapshots(args []string) error {
+	sub := "ls"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("image snapshots "+sub, flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	if sub == "prune" || sub == "rm" {
+		r, err := c.PruneImageSnapshots(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(r)
+		}
+		fmt.Printf("removed %d image snapshot(s), %s freed (the next run of each image boots cold)\n", r.Removed, human(r.FreedBytes))
+		return nil
+	}
+	if sub != "ls" && sub != "list" {
+		return fmt.Errorf("unknown subcommand %q: use kling image snapshots [ls|prune]", sub)
+	}
+	{
+		l, err := c.ImageSnapshots(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(l)
+		}
+		if len(l) == 0 {
+			fmt.Println("No image snapshots yet: the daemon saves one the first time an image is run (kling run -image)")
+			return nil
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(tw, "IMAGE\tVCPUS\tMEM\tDISK\tON DISK\tLAST USED\tIN USE\tNOTE")
+		var total int64
+		for _, s := range l {
+			nota := "—"
+			if s.Stale != "" {
+				nota = "stale: " + s.Stale
+			}
+			exec := ""
+			if s.AllowExec {
+				exec = " exec"
+			}
+			total += s.DiskBytes
+			fmt.Fprintf(tw, "%s\t%d\t%d MiB\t%d MiB%s\t%s\t%s\t%d\t%s\n", s.Image, s.VCPUs, s.MemMiB, s.DiskMiB, exec,
+				human(s.DiskBytes), s.LastUsed.Local().Format("2006-01-02 15:04"), s.Instances, nota)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		fmt.Printf("\nTotal on disk: %s across %d image snapshot(s).\n", human(total), len(l))
+		return nil
+	}
 }
 
 // ToolchainImage es la imagen con instaladores que usa `volume populate`.

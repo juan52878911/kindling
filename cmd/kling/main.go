@@ -614,6 +614,7 @@ func cmdRun(args []string) error {
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
 	platform := fs.String("platform", "", "with a Docker -image: linux/amd64 or linux/arm64, as in docker run; amd64 on an arm64 daemon runs emulated with qemu-user (docs/imagenes-amd64.md)")
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
+	fresh := fs.Bool("fresh", false, "boot cold even if the daemon has a snapshot of this image (and don't save one); see docs/snapshot-imagen.md")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
@@ -704,6 +705,9 @@ func cmdRun(args []string) error {
 			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
 		}
 	}
+	if *fresh && *from != "" {
+		return errors.New("-fresh goes with -image: a copy of a template always restores it")
+	}
 	if *from == "" && esRefDocker(imagen) {
 		if imagen, err = asegurarImagenDockerPlataforma(ctx, client, imagen, *platform); err != nil {
 			return err
@@ -742,6 +746,7 @@ func cmdRun(args []string) error {
 		Env:       env,
 		ShareWait: *shareWait,
 		NetMiBps:  netMiBpsDeCarpetas(len(shareSpecs)),
+		Fresh:     *fresh,
 	})
 	if err != nil {
 		return err
@@ -764,6 +769,8 @@ func cmdRun(args []string) error {
 	}
 	if mc.From != "" {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
+	} else if mc.ImageSnapshot != "" {
+		fmt.Printf("%s  %s  started from its image snapshot in %d ms\n", mc.ID[:12], mc.Name, mc.ThawMS)
 	} else {
 		fmt.Printf("%s  %s  booted cold in %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
 	}
