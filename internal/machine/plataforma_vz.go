@@ -445,17 +445,24 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 	return nil
 }
 
-// copiarDisco clona con clonefile de APFS (`cp -c`): la copia es instantánea
-// y no ocupa nada hasta que alguna de las dos se escribe, que es lo que en
-// Linux da --reflink o --sparse. Si el volumen no es APFS, cp cae solo a una
-// copia normal.
+// copiarDisco clona con clonefile de APFS: la copia es instantánea y no ocupa
+// nada hasta que alguna de las dos se escribe, que es lo que en Linux da
+// --reflink o --sparse. Clona con fclonefileat (clonarRuta), sin lanzar un
+// proceso por disco; si no puede (no es APFS, otro volumen, dst ya existe...)
+// hace lo de siempre, `cp -c`, que cae solo a una copia normal.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clonarRuta(src, dst) == nil {
+		return nil, nil
+	}
 	return exec.CommandContext(ctx, "cp", "-c", src, dst).CombinedOutput()
 }
 
 // clonarDisco copia un volumen para un snapshot o un restore y dice cómo. En
-// APFS, `cp -c` clona con clonefile: instantáneo y sin ocupar nada hasta que
-// las copias divergen ("clone"). Fuera de APFS cp caería sin avisar a una copia
+// APFS clona con clonefile: instantáneo y sin ocupar nada hasta que las copias
+// divergen ("clone"). Fuera de APFS `cp -c` caería sin avisar a una copia
 // completa, así que se mira antes el sistema de ficheros y, si no es APFS, se
 // pasa por antesDeCopiar como cualquier copia completa ("copy").
 func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() error) (string, error) {
@@ -465,6 +472,10 @@ func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() erro
 			return "", err
 		}
 		modo, args = "copy", []string{src, dst}
+	} else if err := ctx.Err(); err != nil {
+		return "", err
+	} else if clonarRuta(src, dst) == nil {
+		return modo, nil
 	}
 	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
 		_ = os.Remove(dst)
