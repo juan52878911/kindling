@@ -86,6 +86,11 @@ type Machine struct {
 
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
+	// ImageSnapshot es el snapshot por imagen del que se restauró en vez de
+	// arrancar en frío (docs/snapshot-imagen.md). Para todo lo demás es una
+	// máquina arrancada en frío de Image: From vacío, su entorno y su comando
+	// propios, y su disco la única copia de lo que escriba.
+	ImageSnapshot string `json:"image_snapshot,omitempty"`
 
 	// IP por la que el host alcanza esta microVM. Dentro, todas las máquinas
 	// usan la misma dirección: la diferenciación vive en el host.
@@ -109,6 +114,12 @@ type Machine struct {
 	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
 	AllowDomains []string `json:"allow_domains,omitempty"`
 
+	// HostPorts son los puertos del host que se le abrieron al crearla
+	// (RunRequest.HostPorts). Viajan con la máquina, como AllowDomains, para
+	// que un thaw o un start rehagan el mismo puente; no pasan a sus
+	// snapshots ni a sus forks.
+	HostPorts []HostPort `json:"host_ports,omitempty"`
+
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 	// CPUPctFixed: CPUPct lo pidió quien la arrancó (-cpu-pct), no salió de
@@ -126,6 +137,8 @@ type Machine struct {
 
 	// AllowExec: la máquina acepta exec y ficheros (ver RunRequest.AllowExec).
 	AllowExec bool `json:"allow_exec,omitempty"`
+	// Nested: virtualización anidada (ver RunRequest.Nested). No se congela.
+	Nested bool `json:"nested,omitempty"`
 	// OnTTL: "remove" si se destruye al vencer el TTL; vacío = se congela.
 	OnTTL string `json:"on_ttl,omitempty"`
 
@@ -335,6 +348,13 @@ type RunRequest struct {
 	// Se ignora en los otros modos.
 	AllowDomains []string `json:"allow_domains,omitempty"`
 
+	// HostPorts son puertos TCP del loopback del host que el invitado alcanza
+	// en la pasarela (HostBridgeIP, HostBridgeName): un Ollama o un
+	// llama-server con Metal en el Mac, en vez de una GPU virtual. Solo macOS
+	// (kling-hv, kling-vz). Abren ESOS puertos aunque Egress sea "none", y
+	// nada más (CapabilityHostPorts, docs/mac.md).
+	HostPorts []HostPort `json:"host_ports,omitempty"`
+
 	// TTLSeconds congela la máquina automáticamente pasado ese tiempo. Es la
 	// pieza que hace "serverless" el modelo: una herramienta ociosa deja de
 	// costar CPU y RAM sin intervención de nadie.
@@ -378,6 +398,13 @@ type RunRequest struct {
 	// máquina con AllowExec (si no, 409); y al revés, las máquinas de un snapshot
 	// con AllowExec la tienen siempre, se pida o no.
 	AllowExec bool `json:"allow_exec,omitempty"`
+
+	// Nested arranca la máquina con virtualización anidada: el invitado
+	// arranca en EL2 con un kernel con KVM (images/vmlinux-nested) y puede
+	// correr Firecracker dentro. Solo con el backend kling-hv en un Mac que lo
+	// admita (M3 o posterior, macOS 15 o posterior; docs/backend-hv.md), sin
+	// From. Una máquina así no se congela, ni se hace snapshot o fork de ella.
+	Nested bool `json:"nested,omitempty"`
 
 	// OnTTL es qué pasa cuando vence TTLSeconds: "freeze" (por defecto) o
 	// "remove".
@@ -435,6 +462,52 @@ type RunRequest struct {
 	// monta y lanza el servicio con los datos de ahora. Necesita Volumes y no
 	// vale con From. Solo el primer arranque: un Start los monta como siempre.
 	VolumeWait bool `json:"volume_wait,omitempty"`
+	// Fresh arranca en frío aunque haya un snapshot de la imagen con estos
+	// parámetros, y no guarda uno (docs/snapshot-imagen.md). Solo con Image.
+	Fresh bool `json:"fresh,omitempty"`
+}
+
+// CapabilityImageSnapshots es la capacidad de GET /info que dice que el
+// daemon restaura `run -image` de un snapshot por imagen cuando puede, y que
+// entiende RunRequest.Fresh y GET/DELETE /image-snapshots.
+const CapabilityImageSnapshots = "image-snapshots"
+
+// ImageSnapshot es un snapshot por imagen (GET /image-snapshots): una caché
+// del daemon, no un dorado del usuario. Lo que lo distingue de otro de la
+// misma imagen son los parámetros que cambian el estado del invitado.
+type ImageSnapshot struct {
+	Name      string    `json:"name"`
+	Image     string    `json:"image"`
+	VCPUs     int       `json:"vcpus"`
+	MemMiB    int       `json:"mem_mib"`
+	MemMaxMiB int       `json:"mem_max_mib,omitempty"`
+	DiskMiB   int       `json:"disk_mib"`
+	AllowExec bool      `json:"allow_exec,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	LastUsed  time.Time `json:"last_used"`
+	// DiskBytes es lo que ocupa en disco (memoria volcada, disco y estado).
+	DiskBytes int64 `json:"disk_bytes"`
+	// Instances son las máquinas vivas restauradas de aquí.
+	Instances int `json:"instances"`
+	// Stale dice por qué ya no se usará (la imagen o el kernel cambiaron); el
+	// daemon lo borra en cuanto nadie lo usa.
+	Stale string `json:"stale,omitempty"`
+}
+
+// ImageSnapshotsPrune es la respuesta de DELETE /image-snapshots.
+type ImageSnapshotsPrune struct {
+	Removed    int   `json:"removed"`
+	FreedBytes int64 `json:"freed_bytes"`
+}
+
+// ImageSnapshotsInfo es el resumen de GET /info: si están activos (y si no,
+// por qué), cuántos hay, lo que ocupan y el tope de disco.
+type ImageSnapshotsInfo struct {
+	Enabled   bool   `json:"enabled"`
+	Reason    string `json:"reason,omitempty"`
+	Count     int    `json:"count"`
+	DiskBytes int64  `json:"disk_bytes"`
+	CapBytes  int64  `json:"cap_bytes"`
 }
 
 // CapabilityMachineCmd es la capacidad de GET /info que dice que el daemon
@@ -517,6 +590,35 @@ type VolumeAttachment struct {
 	// Vacío en máquinas y snapshots anteriores a este campo; quien restaura
 	// aplica entonces la heurística de siempre.
 	DriveID string `json:"drive_id,omitempty"`
+	// Sync es qué hace un flush del invitado (fsync, sync, el journal de
+	// ext4) en este volumen, en macOS (kling-hv y kling-vz):
+	//
+	//   - "" o VolumeSyncFull: llega al disco físico (F_FULLFSYNC). Lo de
+	//     siempre, y lo único que aguanta un corte de luz.
+	//   - VolumeSyncBarrier: solo orden (F_BARRIERFSYNC; en kling-vz, el
+	//     fsync de macOS). Un corte puede llevarse los últimos segundos
+	//     escritos, pero no deja el sistema de ficheros a medias.
+	//   - VolumeSyncNone: el flush no hace nada. Si el Mac se cae, el ext4
+	//     del volumen puede quedar roto: solo para volúmenes de desarrollo
+	//     que se pueden tirar.
+	//
+	// Solo en volúmenes de escritura. Firecracker lo ignora: sus discos van
+	// con la caché de siempre (docs/volumes.md). No va al meta del snapshot:
+	// es de la máquina que lo pidió, y una réplica de un dorado vuelve a
+	// full salvo que lo pida ella.
+	Sync string `json:"sync,omitempty"`
+}
+
+// Modos de VolumeAttachment.Sync.
+const (
+	VolumeSyncFull    = "full"
+	VolumeSyncBarrier = "barrier"
+	VolumeSyncNone    = "none"
+)
+
+// ValidVolumeSync dice si v es un modo de VolumeAttachment.Sync ("" = full).
+func ValidVolumeSync(v string) bool {
+	return v == "" || v == VolumeSyncFull || v == VolumeSyncBarrier || v == VolumeSyncNone
 }
 
 // MaxVolumes acota cuántos puede llevar una microVM.
@@ -605,6 +707,12 @@ type Image struct {
 	// borrar aunque no tenga snapshots propios — se llevaría por delante todos
 	// esos servicios, que solo guardan su delta.
 	Layers int `json:"layers,omitempty"`
+
+	// ImageSnapshots y ImageSnapshotBytes son sus snapshots por imagen
+	// (docs/snapshot-imagen.md) y lo que ocupan: una caché del daemon, que
+	// no la retiene (image rm los borra con ella).
+	ImageSnapshots     int   `json:"image_snapshots,omitempty"`
+	ImageSnapshotBytes int64 `json:"image_snapshot_bytes,omitempty"`
 }
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.
@@ -1058,6 +1166,9 @@ type Info struct {
 	// sigue reintentando (un freeze que no pudo reanudarla, un rm cuyo VMM
 	// sobrevivió al SIGKILL). Vacío = ninguna. Lo enseña `kling doctor`.
 	Stuck []StuckMachine `json:"stuck,omitempty"`
+	// ImageSnapshots resume los snapshots por imagen (docs/snapshot-imagen.md).
+	// nil = daemon anterior.
+	ImageSnapshots *ImageSnapshotsInfo `json:"image_snapshots,omitempty"`
 	// PoolProblems son los fondos precalentados (kling template pool) que no
 	// se pueden reponer: su dorado es de otro VMM, o el último intento falló.
 	// Vacío = todos bien o ninguno.

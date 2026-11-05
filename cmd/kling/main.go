@@ -433,6 +433,7 @@ func cmdDaemon(args []string) error {
 	srv.SetNetMiBps(netMiBpsConfig)
 	srv.SetCoW(cowConfig())
 	srv.SetBattery(batteryConfig())
+	srv.SetMemPressure(memPressureConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
@@ -550,6 +551,20 @@ func batteryConfig() machine.BatteryConfig {
 	return c
 }
 
+// memPressureConfig lee daemon.memory_pressure; KLING_MEMORY_PRESSURE manda
+// sobre el fichero. Un valor que no se entiende se avisa y se queda en auto.
+func memPressureConfig() machine.MemPressureConfig {
+	mode := loadConfig().Daemon.MemoryPressure
+	if v, ok := os.LookupEnv("KLING_MEMORY_PRESSURE"); ok {
+		mode = v
+	}
+	if err := config.ValidateMemoryPressure(mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.MemoryPressureAuto)
+		mode = config.MemoryPressureAuto
+	}
+	return machine.MemPressureConfig{Mode: mode}
+}
+
 // cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
 // KLING_COW_STORE_GIB mandan sobre el fichero. Un valor que no se entiende se
 // avisa y se queda en auto.
@@ -614,6 +629,7 @@ func cmdRun(args []string) error {
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
 	platform := fs.String("platform", "", "with a Docker -image: linux/amd64 or linux/arm64, as in docker run; amd64 on an arm64 daemon runs emulated with qemu-user (docs/imagenes-amd64.md)")
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
+	fresh := fs.Bool("fresh", false, "boot cold even if the daemon has a snapshot of this image (and don't save one); see docs/snapshot-imagen.md")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
@@ -628,10 +644,11 @@ func cmdRun(args []string) error {
 	flagRetirado(fs, "cpu", "cpu-pct")
 	service := fs.String("service", "", "service it belongs to (groups machines in topo and metrics)")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro][:sync=barrier|none] (repeatable)")
 	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	allowExec := fs.Bool("allow-exec", false, "enable kling exec and kling cp on this machine (decided at boot; snapshots keep it)")
+	nested := fs.Bool("nested", false, "nested virtualization: the guest boots at EL2 with a KVM kernel and can run Firecracker (kling-hv backend on an M3+ Mac only; the machine can't be frozen, saved or forked)")
 	onTTL := fs.String("on-ttl", "", "what happens when -ttl runs out: freeze (default) or remove")
 	waitReady := fs.Bool("wait-ready", false, "return once the guest is ready by its image's own probe and post-restore hooks, not just when its agent answers")
 	readyTimeout := fs.Duration("ready-timeout", 0, "with -wait-ready, how long to wait (default 2m)")
@@ -641,6 +658,8 @@ func cmdRun(args []string) error {
 	fs.Var(&shares, "share", shareUsage)
 	shareWait := fs.Int("share-wait", 0, "the image's service waits for this many live shares before starting (default: the -share ro/rw given); save a machine started with it and its copies (run -from with that many -share) start the service with theirs")
 	asJSON := fs.Bool("json", false, "print the machine as JSON (id, name, ip, ready...) for scripts and agents")
+	var hostPorts hostPortFlag
+	fs.Var(&hostPorts, "host-port", "macOS: let the guest reach this TCP port of the Mac's loopback at host.kindling.internal (172.16.0.1): PORT or HOST:GUEST, like 11434 for Ollama (repeatable; opens only that port, even with -egress none)")
 	var publica publishFlag
 	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST, PORT, :GUEST for a free one, /udp on Linux; repeatable): the daemon keeps it while the machine exists and wakes it if frozen; kling stays in the foreground following the service")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -690,7 +709,10 @@ func cmdRun(args []string) error {
 				"-"+strings.Join(dados, ", -"), *from)
 		}
 	}
-	if len(env) > 0 || (*disk > 0 && *from == "") {
+	if *nested && *from != "" {
+		return fmt.Errorf("-nested does not go with -from: a nested machine has no snapshot to copy")
+	}
+	if len(env) > 0 || (*disk > 0 && *from == "") || len(hostPorts) > 0 || *nested {
 		// Un daemon anterior ignoraría el campo y la máquina arrancaría sin
 		// su entorno, o con el disco fijo de 512 MiB, sin un solo error.
 		info, err := client.Info(ctx)
@@ -703,6 +725,15 @@ func cmdRun(args []string) error {
 		if *disk > 0 && *from == "" && !slices.Contains(info.Capabilities, api.CapabilityDisk) {
 			return fmt.Errorf("the daemon (%s) does not take -disk: update it", info.Version)
 		}
+		if len(hostPorts) > 0 && !slices.Contains(info.Capabilities, api.CapabilityHostPorts) {
+			return fmt.Errorf("the daemon (%s) does not take -host-port: update it (it is macOS only)", info.Version)
+		}
+		if *nested && !slices.Contains(info.Capabilities, api.CapabilityNested) {
+			return fmt.Errorf("the daemon (%s) does not take -nested: update it", info.Version)
+		}
+	}
+	if *fresh && *from != "" {
+		return errors.New("-fresh goes with -image: a copy of a template always restores it")
 	}
 	if *from == "" && esRefDocker(imagen) {
 		if imagen, err = asegurarImagenDockerPlataforma(ctx, client, imagen, *platform); err != nil {
@@ -723,6 +754,7 @@ func cmdRun(args []string) error {
 		DiskMiB:      *disk,
 		Egress:       egressReq,
 		AllowDomains: allowReq,
+		HostPorts:    hostPorts,
 		TTLSeconds:   ttlForRun(fs, *ttl, cfg.Defaults.TTL),
 		// El flag va en CPUPct; el valor por defecto de la configuración, aparte:
 		// el del dorado y el de la receta de la imagen le ganan (ver RunRequest).
@@ -738,10 +770,12 @@ func cmdRun(args []string) error {
 		Volumes:   vols,
 		Shares:    shareSpecs,
 		AllowExec: *allowExec,
+		Nested:    *nested,
 		OnTTL:     *onTTL,
 		Env:       env,
 		ShareWait: *shareWait,
 		NetMiBps:  netMiBpsDeCarpetas(len(shareSpecs)),
+		Fresh:     *fresh,
 	})
 	if err != nil {
 		return err
@@ -764,6 +798,8 @@ func cmdRun(args []string) error {
 	}
 	if mc.From != "" {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
+	} else if mc.ImageSnapshot != "" {
+		fmt.Printf("%s  %s  started from its image snapshot in %d ms\n", mc.ID[:12], mc.Name, mc.ThawMS)
 	} else {
 		fmt.Printf("%s  %s  booted cold in %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
 	}

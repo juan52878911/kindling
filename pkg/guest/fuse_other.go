@@ -8,6 +8,12 @@ import "fmt"
 // montar de verdad solo pasa dentro de la microVM.
 func setReadahead(string) {}
 
+func mountVirtioFS(tag, target string, readOnly bool) (func(), error) {
+	return nil, fmt.Errorf("%w: shares only mount inside the microVM", errNoFUSE)
+}
+
+func readaheadVirtioFS(string) {}
+
 func mountFUSE(target string, readOnly bool) (fuseDev, func(), error) {
 	return nil, nil, fmt.Errorf("%w: shares only mount inside the microVM", errNoFUSE)
 }

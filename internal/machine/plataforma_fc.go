@@ -9,7 +9,9 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -67,9 +70,30 @@ func privilegiosPlataforma(runAs string) (*Privileges, string) { return resolveP
 // delegacionCgroups prepara el cgroup donde se limita la CPU de cada VMM.
 func delegacionCgroups() (string, error) { return ensureDelegation() }
 
+// puenteHostSoportado: en Linux no hay puentes al host (puente_host.go).
+const puenteHostSoportado = false
+
 // redAntesDeArrancar no hace nada en Linux: la red ya la montó el namespace
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
+
+// transporteCarpeta: en Linux no hay virtio-fs, y pedirlo es un error (sin
+// pedirlo, FUSE como siempre).
+func transporteCarpeta(pedido string) (string, error) {
+	if pedido == share.TransportVirtioFS {
+		return "", errors.New("virtio-fs shares need kling-hv (macOS); Firecracker serves live shares over FUSE")
+	}
+	return "", nil
+}
+
+// carpetasAntesDeArrancar no hace nada en Linux: Firecracker no tiene
+// virtio-fs y las carpetas vivas van por FUSE (docs/compartir.md).
+func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id string) {}
+
+// attachVirtioFS: en Linux no hay virtio-fs.
+func (m *Manager) attachVirtioFS(ctx context.Context, mc *api.Machine, tag int) (io.ReadWriteCloser, error) {
+	return nil, fc.ErrNoVirtioFS
+}
 
 // fijarAuditoriaPlataforma: en Linux los proxies son del daemon (internal/net).
 func fijarAuditoriaPlataforma(c credproxy.AuditConfig) { knet.SetCredAudit(c) }
@@ -108,6 +132,10 @@ func invalidarAgentePlataforma(n *knet.Net) int { return knet.InvalidarAgente(n)
 // invalidarEnlacesPlataforma corta las sesiones de enlace hacia ids en los
 // proxies de enlace de todas las máquinas (internal/net).
 func invalidarEnlacesPlataforma(ids ...string) int { return knet.InvalidarEnlaces(ids...) }
+
+// maxVCPUsPlataforma: en Linux el núcleo no pone tope a vcpus; lo pone
+// Firecracker (32) al configurar la máquina.
+func maxVCPUsPlataforma() int { return 0 }
 
 // invalidarOrigenPlataforma no hace nada en Linux: las sesiones que pidió una
 // máquina las corta invalidarAgente (su proxy es del daemon).

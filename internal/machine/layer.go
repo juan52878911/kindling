@@ -453,6 +453,10 @@ func (m *Manager) removeImageQuieta(name string) error {
 		}
 	}
 	m.mu.RUnlock()
+	// Sus snapshots por imagen se van con ella: sin su rootfs no restauran.
+	if err := m.borrarSnapshotsImagenDe(name); err != nil {
+		return marcado(ErrImageInUse, "image %q: %v", name, err)
+	}
 
 	borrado := false
 	for _, ruta := range []string{m.imagePath(name), m.layerPath(name), m.recipePath(name)} {

@@ -37,6 +37,7 @@ func (mc *Machine) Clone() *Machine {
 	out.Entrypoint = slices.Clone(mc.Entrypoint)
 	out.Cmd = slices.Clone(mc.Cmd)
 	out.Published = slices.Clone(mc.Published)
+	out.HostPorts = slices.Clone(mc.HostPorts)
 
 	if mc.Forwards != nil {
 		out.Forwards = make(map[string]string, len(mc.Forwards))

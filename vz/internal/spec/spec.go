@@ -33,7 +33,10 @@ import (
 //   - 3: vsock (el dispositivo virtio-vsock del canal con el agente) y mtu
 //     (la MTU del enlace). Uno anterior restauraría sin vsock o con MTU 1500
 //     un invitado que los espera.
-const FormatVersion = 3
+//   - 4: kling_virtiofs (las carpetas vivas por virtio-fs de kling-hv, con el
+//     estado de su servidor FUSE). Uno anterior restauraría sin esos
+//     dispositivos un invitado que los tiene montados.
+const FormatVersion = 4
 
 // minFormatVersion es la más vieja que se sigue leyendo. Un snapshot de la 1
 // no tiene graphics, que es justo lo que significa leerla con este código.
@@ -46,8 +49,26 @@ func Formatos() (min, max int) { return minFormatVersion, FormatVersion }
 
 // maxSnapshotJSON acota lo que se lee del fichero de snapshot. El fichero viene
 // de disco y lo escribe este mismo programa, pero un fichero corrupto o ajeno no
-// debe poder hacer que el ayudante reserve memoria sin límite.
-const maxSnapshotJSON = 1 << 20
+// debe poder hacer que el ayudante reserve memoria sin límite. Lo que más pesa
+// es el estado de las carpetas por virtio-fs (VirtioFS.State): la tabla de
+// nodos tiene tope (262 144 por carpeta, ~40 B cada uno).
+const maxSnapshotJSON = 128 << 20
+
+// MaxVirtioFS es cuántas carpetas por virtio-fs admite una VM (las de
+// shareproto.MaxShares).
+const MaxVirtioFS = 8
+
+// VirtioFS es una carpeta viva que kling-hv sirve por un dispositivo
+// virtio-fs (docs/backend-hv.md): el invitado la monta por su Tag
+// (shareproto.VirtioFSTag) y el núcleo conecta la sesión
+// kling-share/1 por POST /kling/share/attach. State solo va en un snapshot:
+// lo que el servidor FUSE sabía (nodos y ficheros abiertos), porque el kernel
+// del invitado sigue nombrándolos al restaurar.
+type VirtioFS struct {
+	Tag      int    `json:"tag"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+	State    []byte `json:"state,omitempty"`
+}
 
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
@@ -57,6 +78,11 @@ type BootSource struct {
 type MachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMiB int `json:"mem_size_mib"`
+	// Nested: virtualización anidada (solo kling-hv; docs/backend-hv.md). No
+	// es del API de Firecracker, que rechaza campos que no conoce: el núcleo
+	// solo lo manda cuando lo pide la máquina. Una máquina anidada no tiene
+	// snapshot, así que el campo no llega a ningún snapshot.json.
+	Nested bool `json:"kling_nested,omitempty"`
 }
 
 type Drive struct {
@@ -72,12 +98,47 @@ type Drive struct {
 	// db; lo decide el núcleo, que es quien sabe qué es cada drive. No va
 	// al snapshot (WriteFile lo quita): quien restaure lo vuelve a decir.
 	Disposable bool `json:"kling_disposable,omitempty"`
+	// Sync (extensión de kling-vz y kling-hv, opcional): qué hace un flush
+	// del invitado en este disco. Vacío o "full", llegar al disco físico (lo
+	// de siempre); "barrier", solo orden (F_BARRIERFSYNC en kling-hv, el
+	// modo fsync de vz); "none", nada. Lo pide quien monta un volumen
+	// (api.VolumeAttachment.Sync, docs/backend-hv.md). A diferencia de
+	// Disposable SÍ va al snapshot: un thaw no reapunta los volúmenes y debe
+	// seguir como estaba; al restaurar un dorado con volúmenes el núcleo lo
+	// vuelve a decir siempre (PATCH), así que una réplica no hereda el modo
+	// del dorado. Un kling-vz anterior lo ignora al leerlo (full, lo seguro).
+	Sync string `json:"kling_sync,omitempty"`
+}
+
+// Modos de Drive.Sync.
+const (
+	SyncModeFull    = "full"
+	SyncModeBarrier = "barrier"
+	SyncModeNone    = "none"
+)
+
+// ValidSync dice si v es un valor admitido de Drive.Sync ("" es full).
+func ValidSync(v string) bool {
+	return v == "" || v == SyncModeFull || v == SyncModeBarrier || v == SyncModeNone
 }
 
 // SyncNone dice si el disco puede ir sin sincronizar: marcado desechable,
 // de escritura y que no sea la raíz.
 func (d Drive) SyncNone() bool {
 	return d.Disposable && !d.IsReadOnly && !d.IsRootDevice
+}
+
+// SyncMode es el modo de sincronización efectivo del disco: none si es el
+// overlay desechable (SyncNone), full si es de solo lectura o la raíz (nada
+// que sincronizar, o nada que relajar), y si no el pedido en Sync.
+func (d Drive) SyncMode() string {
+	switch {
+	case d.SyncNone():
+		return SyncModeNone
+	case d.IsReadOnly || d.IsRootDevice || d.Sync == "":
+		return SyncModeFull
+	}
+	return d.Sync
 }
 
 type NetworkInterface struct {
@@ -132,6 +193,9 @@ type Spec struct {
 	// agente del invitado contesta por TCP y no por vsock (uno anterior). No
 	// cambia la máquina, solo por dónde se prueba primero al restaurarla.
 	AgentTCPOnly bool `json:"agent_tcp_only,omitempty"`
+	// VirtioFS: las carpetas vivas por virtio-fs (solo kling-hv; PUT
+	// /kling/shares). Como Vsock, viajan en el snapshot.
+	VirtioFS []VirtioFS `json:"kling_virtiofs,omitempty"`
 }
 
 // Límites de la MTU que acepta VZFileHandleNetworkDeviceAttachment.
@@ -171,16 +235,40 @@ func (s *Spec) PatchDrivePath(id, path string) error {
 // PatchDrive cambia la ruta registrada de un drive existente y, si
 // disposable no es nil, si es desechable.
 func (s *Spec) PatchDrive(id, path string, disposable *bool) error {
+	return s.PatchDriveModes(id, path, disposable, nil)
+}
+
+// PatchDriveModes es PatchDrive que, si sync no es nil, cambia además el
+// modo de sincronización (Drive.Sync).
+func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) error {
+	if sync != nil && !ValidSync(*sync) {
+		return fmt.Errorf("kling_sync %q: use full, barrier or none", *sync)
+	}
 	for i := range s.Drives {
 		if s.Drives[i].DriveID == id {
 			s.Drives[i].PathOnHost = path
 			if disposable != nil {
 				s.Drives[i].Disposable = *disposable
 			}
+			if sync != nil {
+				s.Drives[i].Sync = *sync
+			}
 			return nil
 		}
 	}
 	return fmt.Errorf("drive %q is not configured", id)
+}
+
+// ValidateVCPUs comprueba vcpu_count contra el tope del VMM (max; 0 = sin
+// tope propio: lo dice el framework al crear la VM).
+func ValidateVCPUs(n, max int) error {
+	if n < 1 {
+		return errors.New("vcpu_count must be positive")
+	}
+	if max > 0 && n > max {
+		return fmt.Errorf("vcpu_count %d: this VMM runs at most %d vCPUs on this Mac (its cores and what the hypervisor allows)", n, max)
+	}
+	return nil
 }
 
 // Validate comprueba que haya lo mínimo para crear la VM.
@@ -194,15 +282,39 @@ func (s *Spec) Validate() error {
 	if len(s.Drives) == 0 {
 		return errors.New("no drives configured")
 	}
+	for _, d := range s.Drives {
+		if !ValidSync(d.Sync) {
+			return fmt.Errorf("drive %q: kling_sync %q: use full, barrier or none", d.DriveID, d.Sync)
+		}
+	}
 	if g := s.Graphics; g != nil && (g.Width < 64 || g.Height < 64 || g.Width > 8192 || g.Height > 8192) {
 		return fmt.Errorf("graphics %dx%d: each side must be between 64 and 8192 pixels", g.Width, g.Height)
 	}
 	if s.MTU != 0 && (s.MTU < MinMTU || s.MTU > MaxMTU) {
 		return fmt.Errorf("mtu %d: must be between %d and %d", s.MTU, MinMTU, MaxMTU)
 	}
+	if err := ValidateVirtioFS(s.VirtioFS); err != nil {
+		return err
+	}
 	if s.Balloon != nil && s.Balloon.AmountMiB >= s.MachineConfig.MemSizeMiB {
 		return fmt.Errorf("balloon amount_mib (%d) must be below mem_size_mib (%d)",
 			s.Balloon.AmountMiB, s.MachineConfig.MemSizeMiB)
+	}
+	return nil
+}
+
+// ValidateVirtioFS acota las carpetas por virtio-fs: como mucho MaxVirtioFS,
+// con tags de 0 a MaxVirtioFS-1 y sin repetir.
+func ValidateVirtioFS(v []VirtioFS) error {
+	if len(v) > MaxVirtioFS {
+		return fmt.Errorf("at most %d virtio-fs shares (got %d)", MaxVirtioFS, len(v))
+	}
+	seen := map[int]bool{}
+	for _, f := range v {
+		if f.Tag < 0 || f.Tag >= MaxVirtioFS || seen[f.Tag] {
+			return fmt.Errorf("virtio-fs tag %d: must be unique and between 0 and %d", f.Tag, MaxVirtioFS-1)
+		}
+		seen[f.Tag] = true
 	}
 	return nil
 }
@@ -303,6 +415,8 @@ func (s *Spec) WriteFile(path string) error {
 // distinta de 1500, 2 con pantalla, 1 si no.
 func (s *Spec) formato() int {
 	switch {
+	case len(s.VirtioFS) > 0:
+		return 4
 	case s.Vsock || (s.MTU != 0 && s.MTU != MinMTU):
 		return 3
 	case s.Graphics != nil:

@@ -204,8 +204,8 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 	if err != nil {
 		return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
 	}
-	if _, err := os.Stat(m.KernelPath()); err != nil {
-		return nil, fmt.Errorf("missing kernel at %s", m.KernelPath())
+	if _, err := os.Stat(m.kernelDe(mc.Nested)); err != nil {
+		return nil, fmt.Errorf("missing kernel at %s", m.kernelDe(mc.Nested))
 	}
 	// Sus copias de carpetas (-share SRC:DST): los ext4 siguen en su
 	// directorio, detrás de los volúmenes como en Run.

@@ -114,7 +114,11 @@ type Deps struct {
 	// Backend es el nombre que dan GET / y GET /kling/info: "vz" (vacío) o
 	// "hv" (kling-hv, el VMM sobre Hypervisor.framework, vz/internal/hvvm).
 	Backend string
-	Logf    func(format string, args ...any)
+	// MaxVCPUs es el tope de vcpu_count del VMM en este Mac (kling-hv: lo
+	// que deja Hypervisor.framework y los núcleos del host); 0 = sin tope
+	// propio, lo dice el framework al crear la VM.
+	MaxVCPUs int
+	Logf     func(format string, args ...any)
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
@@ -352,7 +356,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
 	mux.HandleFunc("PUT /kling/credentials", s.putKlingCredentials)
 	mux.HandleFunc("PUT /kling/graph", s.putKlingGraph)
+	mux.HandleFunc("PUT /kling/host-ports", s.putKlingHostPorts)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
+	mux.HandleFunc("PUT /kling/shares", s.putKlingShares)
+	mux.HandleFunc("POST /kling/share/attach", s.postShareAttach)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
 	mux.HandleFunc("PUT /kling/cpu", s.putKlingCPU)
@@ -384,6 +391,10 @@ func (f *faultRecorder) WriteHeader(code int) {
 	f.status = code
 	f.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap deja llegar a la conexión (http.ResponseController): POST
+// /kling/share/attach la toma para la sesión.
+func (f *faultRecorder) Unwrap() http.ResponseWriter { return f.ResponseWriter }
 
 func (f *faultRecorder) Write(b []byte) (int, error) {
 	if f.status == 0 {
@@ -484,6 +495,10 @@ func (s *Server) putMachineConfig(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("vcpu_count and mem_size_mib must be positive"))
 		return
 	}
+	if err := spec.ValidateVCPUs(m.VCPUCount, s.d.MaxVCPUs); err != nil {
+		fault(w, err)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.preBoot(); err != nil {
@@ -534,6 +549,9 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		// InstanceStart o con un snapshot cargado pendiente de reanudar),
 		// que es cuando se eligen los modos del disco.
 		Disposable *bool `json:"kling_disposable"`
+		// Sync: ver spec.Drive. Igual que Disposable, solo antes de crear
+		// la VM: el núcleo lo vuelve a decir al restaurar un volumen.
+		Sync *string `json:"kling_sync"`
 	}
 	if err := decode(r, maxConfigBody, &d); err != nil {
 		fault(w, err)
@@ -553,7 +571,11 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("kling_disposable can only change before the VM is created"))
 		return
 	}
-	if err := s.spec.PatchDrive(r.PathValue("id"), d.PathOnHost, d.Disposable); err != nil {
+	if d.Sync != nil && s.st != stConfiguring && s.st != stPendingLoad {
+		fault(w, errors.New("kling_sync can only change before the VM is created"))
+		return
+	}
+	if err := s.spec.PatchDriveModes(r.PathValue("id"), d.PathOnHost, d.Disposable, d.Sync); err != nil {
 		fault(w, err)
 		return
 	}
@@ -857,6 +879,11 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.spec.MachineConfig != nil && s.spec.MachineConfig.Nested {
+		// El estado de EL2 no va en el snapshot (docs/backend-hv.md).
+		fault(w, errors.New("snapshots of a nested-virtualization VM are not supported"))
+		return
+	}
 	if s.st != stPaused {
 		fault(w, fmt.Errorf("the microVM must be paused to create a snapshot (it is %s)", s.estado()))
 		return
@@ -902,7 +929,13 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if g, ok := s.net.(GuestDialerSetter); ok && s.spec.Vsock && g.GuestOnlyTCP(api.GuestPort) {
 		s.spec.AgentTCPOnly = true
 	}
-	if err := s.spec.WriteFile(snapW); err != nil {
+	if err := s.guardarEstadoShares(); err != nil {
+		fault(w, err)
+		return
+	}
+	err = s.spec.WriteFile(snapW)
+	s.soltarEstadoShares()
+	if err != nil {
 		fault(w, fmt.Errorf("writing the snapshot file: %w", err))
 		return
 	}
@@ -999,7 +1032,8 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 		kinds := credentialKinds
 		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
 		if s.d.Graph != nil {
-			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink)
+			// Y los puentes al host (-host-port), que también pide al daemon.
+			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink, grafo.CapPuentes)
 		}
 		info["credential_kinds"] = kinds
 	}
@@ -1046,6 +1080,36 @@ func (s *Server) putKlingGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.d.Policy.SetGraphHosts(body.Hosts, s.d.CredIP)
+	noContent(w)
+}
+
+// putKlingHostPorts fija los puentes al host de la máquina (kling run
+// -host-port; sustituye los anteriores, la lista vacía los quita): cada
+// conexión del invitado a la pasarela en un puerto de puente se pide al
+// daemon, que marca el loopback del Mac. Abre esos puertos de la pasarela en
+// todos los modos de egress, y nada más: la política no cambia. Con alguno,
+// el DNS contesta además host.kindling.internal con la pasarela.
+func (s *Server) putKlingHostPorts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Ports []grafo.Puente `json:"ports"`
+	}
+	if err := decode(r, maxConfigBody, &body); err != nil {
+		fault(w, err)
+		return
+	}
+	if s.d.Graph == nil || !s.d.CredIP.IsValid() {
+		fault(w, errors.New("this kling-vz has no link broker: the daemon did not set KLING_VZ_BROKER"))
+		return
+	}
+	if err := s.d.Graph.SetPuentes(body.Ports); err != nil {
+		fault(w, err)
+		return
+	}
+	ip := s.d.CredIP
+	if len(body.Ports) == 0 {
+		ip = netip.Addr{}
+	}
+	s.d.Policy.SetHostBridge(ip)
 	noContent(w)
 }
 
@@ -1317,6 +1381,8 @@ func (s *Server) create() error {
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
+	// El estado de las carpetas por virtio-fs de un snapshot ya lo tiene la VM.
+	s.soltarEstadoShares()
 	s.vm = vm
 	s.canalAgente(vm)
 	go s.watch(vm)

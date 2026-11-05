@@ -35,6 +35,10 @@ func TestModosDisco(t *testing.T) {
 		{"env automatic en la base", base, "automatic", "", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeFull, true},
 		{"env sync en el desechable", efimero, "", "full", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeFull, true},
 		{"env none en el persistente", overlay, "", "none", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeNone, false},
+		{"volumen barrier", spec.Drive{DriveID: "volume0", Sync: "barrier"}, "", "", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeFsync, false},
+		{"volumen none", spec.Drive{DriveID: "volume0", Sync: "none"}, "", "", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeNone, false},
+		{"volumen full", spec.Drive{DriveID: "volume0", Sync: "full"}, "", "", vz.DiskImageCachingModeAutomatic, vz.DiskImageSynchronizationModeFull, true},
+		{"none en solo lectura", spec.Drive{DriveID: "volume0", IsReadOnly: true, Sync: "none"}, "", "", vz.DiskImageCachingModeCached, vz.DiskImageSynchronizationModeFull, false},
 	} {
 		cm, sm, def, err := modosDisco(tc.d, tc.envC, tc.envS)
 		if err != nil {

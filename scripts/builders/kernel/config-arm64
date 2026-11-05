@@ -103,3 +103,12 @@ CONFIG_BINFMT_MISC=y
 # CONFIG_SOFTLOCKUP_DETECTOR is not set
 # CONFIG_DETECT_HUNG_TASK is not set
 # CONFIG_WQ_WATCHDOG is not set
+
+# virtio-fs: las carpetas compartidas vivas de kling-hv (docs/compartir.md,
+# docs/backend-hv.md) van por un dispositivo virtio-fs que el agente monta con
+# `mount -t virtiofs`; el FUSE por /dev/fuse (FUSE_FS, config-common) queda
+# para kling-vz y Firecracker, que no tienen ese dispositivo, y para un kling-hv
+# con un kernel anterior. Sin DAX (FUSE_DAX): la ventana de memoria compartida
+# no está hecha.
+CONFIG_VIRTIO_FS=y
+# CONFIG_FUSE_DAX is not set

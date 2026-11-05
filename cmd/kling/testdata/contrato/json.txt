@@ -38,6 +38,7 @@ kling graph ls -json:  [].nodes.x.ports[] number
 kling graph ls -json:  [].nodes.x.shares[].mode string
 kling graph ls -json:  [].nodes.x.shares[].mount string
 kling graph ls -json:  [].nodes.x.shares[].source string
+kling graph ls -json:  [].nodes.x.shares[].transport string
 kling graph ls -json:  [].nodes.x.shares[].upload string
 kling graph ls -json:  [].nodes.x.state string
 kling graph ls -json:  [].nodes.x.vcpus number
@@ -45,6 +46,7 @@ kling graph ls -json:  [].nodes.x.volumes[].drive_id string
 kling graph ls -json:  [].nodes.x.volumes[].mount string
 kling graph ls -json:  [].nodes.x.volumes[].name string
 kling graph ls -json:  [].nodes.x.volumes[].read_only bool
+kling graph ls -json:  [].nodes.x.volumes[].sync string
 kling graph ls -json:  [].nodes.x.wake string
 kling graph ls -json:  [].state string
 kling image ls -json:  [].agent.agent string
@@ -53,6 +55,8 @@ kling image ls -json:  [].agent.version string
 kling image ls -json:  [].base string
 kling image ls -json:  [].disk_bytes number
 kling image ls -json:  [].has_recipe bool
+kling image ls -json:  [].image_snapshot_bytes number
+kling image ls -json:  [].image_snapshots number
 kling image ls -json:  [].layers number
 kling image ls -json:  [].name string
 kling image ls -json:  [].size_bytes number
@@ -87,8 +91,11 @@ kling inspect m1:  frozen_at string
 kling inspect m1:  has_secrets bool
 kling inspect m1:  hold string
 kling inspect m1:  hooks_pending string
+kling inspect m1:  host_ports[].guest number
+kling inspect m1:  host_ports[].host number
 kling inspect m1:  id string
 kling inspect m1:  image string
+kling inspect m1:  image_snapshot string
 kling inspect m1:  ip string
 kling inspect m1:  labels.x string
 kling inspect m1:  last_error string
@@ -96,6 +103,7 @@ kling inspect m1:  mem_max_mib number
 kling inspect m1:  mem_mib number
 kling inspect m1:  mem_shared bool
 kling inspect m1:  name string
+kling inspect m1:  nested bool
 kling inspect m1:  net_index number
 kling inspect m1:  net_mibps number
 kling inspect m1:  on_ttl string
@@ -110,6 +118,7 @@ kling inspect m1:  shares[].mode string
 kling inspect m1:  shares[].mount string
 kling inspect m1:  shares[].source string
 kling inspect m1:  shares[].status string
+kling inspect m1:  shares[].transport string
 kling inspect m1:  snapshot_bytes number
 kling inspect m1:  started_at string
 kling inspect m1:  state string
@@ -125,6 +134,7 @@ kling inspect m1:  volumes[].drive_id string
 kling inspect m1:  volumes[].mount string
 kling inspect m1:  volumes[].name string
 kling inspect m1:  volumes[].read_only bool
+kling inspect m1:  volumes[].sync string
 kling inspect m1:  wake.cgroup_ms number
 kling inspect m1:  wake.check_ms number
 kling inspect m1:  wake.finish_ms number
@@ -170,8 +180,11 @@ kling ps -a -json:  [].frozen_at string
 kling ps -a -json:  [].has_secrets bool
 kling ps -a -json:  [].hold string
 kling ps -a -json:  [].hooks_pending string
+kling ps -a -json:  [].host_ports[].guest number
+kling ps -a -json:  [].host_ports[].host number
 kling ps -a -json:  [].id string
 kling ps -a -json:  [].image string
+kling ps -a -json:  [].image_snapshot string
 kling ps -a -json:  [].ip string
 kling ps -a -json:  [].labels.x string
 kling ps -a -json:  [].last_error string
@@ -179,6 +192,7 @@ kling ps -a -json:  [].mem_max_mib number
 kling ps -a -json:  [].mem_mib number
 kling ps -a -json:  [].mem_shared bool
 kling ps -a -json:  [].name string
+kling ps -a -json:  [].nested bool
 kling ps -a -json:  [].net_index number
 kling ps -a -json:  [].net_mibps number
 kling ps -a -json:  [].on_ttl string
@@ -193,6 +207,7 @@ kling ps -a -json:  [].shares[].mode string
 kling ps -a -json:  [].shares[].mount string
 kling ps -a -json:  [].shares[].source string
 kling ps -a -json:  [].shares[].status string
+kling ps -a -json:  [].shares[].transport string
 kling ps -a -json:  [].snapshot_bytes number
 kling ps -a -json:  [].started_at string
 kling ps -a -json:  [].state string
@@ -208,6 +223,7 @@ kling ps -a -json:  [].volumes[].drive_id string
 kling ps -a -json:  [].volumes[].mount string
 kling ps -a -json:  [].volumes[].name string
 kling ps -a -json:  [].volumes[].read_only bool
+kling ps -a -json:  [].volumes[].sync string
 kling ps -a -json:  [].wake.cgroup_ms number
 kling ps -a -json:  [].wake.check_ms number
 kling ps -a -json:  [].wake.finish_ms number
@@ -253,8 +269,11 @@ kling sandbox ls -json:  [].frozen_at string
 kling sandbox ls -json:  [].has_secrets bool
 kling sandbox ls -json:  [].hold string
 kling sandbox ls -json:  [].hooks_pending string
+kling sandbox ls -json:  [].host_ports[].guest number
+kling sandbox ls -json:  [].host_ports[].host number
 kling sandbox ls -json:  [].id string
 kling sandbox ls -json:  [].image string
+kling sandbox ls -json:  [].image_snapshot string
 kling sandbox ls -json:  [].ip string
 kling sandbox ls -json:  [].labels.x string
 kling sandbox ls -json:  [].last_error string
@@ -262,6 +281,7 @@ kling sandbox ls -json:  [].mem_max_mib number
 kling sandbox ls -json:  [].mem_mib number
 kling sandbox ls -json:  [].mem_shared bool
 kling sandbox ls -json:  [].name string
+kling sandbox ls -json:  [].nested bool
 kling sandbox ls -json:  [].net_index number
 kling sandbox ls -json:  [].net_mibps number
 kling sandbox ls -json:  [].on_ttl string
@@ -276,6 +296,7 @@ kling sandbox ls -json:  [].shares[].mode string
 kling sandbox ls -json:  [].shares[].mount string
 kling sandbox ls -json:  [].shares[].source string
 kling sandbox ls -json:  [].shares[].status string
+kling sandbox ls -json:  [].shares[].transport string
 kling sandbox ls -json:  [].snapshot_bytes number
 kling sandbox ls -json:  [].started_at string
 kling sandbox ls -json:  [].state string
@@ -291,6 +312,7 @@ kling sandbox ls -json:  [].volumes[].drive_id string
 kling sandbox ls -json:  [].volumes[].mount string
 kling sandbox ls -json:  [].volumes[].name string
 kling sandbox ls -json:  [].volumes[].read_only bool
+kling sandbox ls -json:  [].volumes[].sync string
 kling sandbox ls -json:  [].wake.cgroup_ms number
 kling sandbox ls -json:  [].wake.check_ms number
 kling sandbox ls -json:  [].wake.finish_ms number
@@ -357,6 +379,7 @@ kling template ls -json:  [].volumes[].drive_id string
 kling template ls -json:  [].volumes[].mount string
 kling template ls -json:  [].volumes[].name string
 kling template ls -json:  [].volumes[].read_only bool
+kling template ls -json:  [].volumes[].sync string
 kling template ls -json:  [].warnings[] string
 kling version -json:  agents[] string
 kling version -json:  api number

@@ -2,7 +2,10 @@
 
 package hvvm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Issue #183: en el M4 HVF anuncia sve2/svei8mm/svebf16 en ID_AA64ZFR0_EL1 sin
 // SVE, y OpenSSL moría con SIGILL. Al invitado no le llega nada de SVE ni de
@@ -32,6 +35,25 @@ func TestFiltrarIDQuitaSVEySME(t *testing.T) {
 func TestCPUOnPendienteEnElSnapshot(t *testing.T) {
 	if r := pruebaCPUOn(); r != 0 {
 		t.Fatalf("khv_prueba_cpu_on failed check %d", r)
+	}
+}
+
+// El resumen de KLING_HV_TRACE: las fases de antes de soltar la VM por
+// orden, la espera, los hitos desde que se soltó y el total hasta el agente.
+func TestTrazaResumen(t *testing.T) {
+	r := trazaPrueba()
+	for _, s := range []string{"trace boot ms:", " ram ", " kernel+fdt ", " vcpus ", " wait ", "->primer-run ", "->agente ", "| total "} {
+		if !strings.Contains(r, s) {
+			t.Errorf("summary %q lacks %q", r, s)
+		}
+	}
+	if i, j := strings.Index(r, " ram "), strings.Index(r, " kernel+fdt "); i < 0 || j < i {
+		t.Errorf("summary %q: phases out of order", r)
+	}
+	for _, s := range []string{"pausa", "snap-", "estado-cpu", "->primer-uart"} {
+		if strings.Contains(r, s) {
+			t.Errorf("summary %q has %q, which did not happen before the agent", r, s)
+		}
 	}
 }
 

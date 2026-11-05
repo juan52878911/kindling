@@ -11,8 +11,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 )
@@ -146,6 +148,22 @@ func (c *Client) SetKlingCredentials(ctx context.Context, creds []KlingCredentia
 	return c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, nil)
 }
 
+// KlingHostPort es un puente al host (PUT /kling/host-ports): el puerto Host
+// del loopback del Mac en el puerto Guest de la pasarela.
+type KlingHostPort struct {
+	Host  int `json:"host"`
+	Guest int `json:"guest"`
+}
+
+// SetKlingHostPorts fija los puentes al host de la máquina (sustituye los
+// anteriores).
+func (c *Client) SetKlingHostPorts(ctx context.Context, ps []KlingHostPort) error {
+	if ps == nil {
+		ps = []KlingHostPort{}
+	}
+	return c.doOut(ctx, http.MethodPut, "/kling/host-ports", map[string]any{"ports": ps}, nil)
+}
+
 // SetKlingGraph fija las aristas del nodo (sustituye las anteriores).
 func (c *Client) SetKlingGraph(ctx context.Context, g KlingGraph) error {
 	if g.Links == nil {
@@ -222,4 +240,78 @@ func (c *Client) KlingProbe(ctx context.Context, port int) (bool, error) {
 		return false, err
 	}
 	return r.Open, nil
+}
+
+// KlingVirtioFS es una carpeta viva que kling-hv sirve por virtio-fs (PUT
+// /kling/shares): su tag (el de share.Attach) y si es de solo lectura.
+type KlingVirtioFS struct {
+	Tag      int  `json:"tag"`
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// KlingShares pide a kling-hv, antes de arrancar, un dispositivo virtio-fs por
+// carpeta viva (docs/backend-hv.md). kling-vz, y un kling-hv anterior, no lo
+// tienen: el error lo dice, y las carpetas van por FUSE como siempre.
+func (c *Client) KlingShares(ctx context.Context, shares []KlingVirtioFS) error {
+	return c.doOut(ctx, http.MethodPut, "/kling/shares", map[string][]KlingVirtioFS{"shares": shares}, nil)
+}
+
+// ErrNoVirtioFS es lo que da KlingShareAttach con un VMM que no sirve esa
+// carpeta por virtio-fs.
+var ErrNoVirtioFS = errors.New("the VMM does not serve this share over virtio-fs")
+
+// ShareSockBuf son los búferes de envío y recepción de la conexión de una
+// carpeta por virtio-fs, en los dos extremos (aquí y en kling-hv): dos
+// escrituras máximas de kling-share/1.
+const ShareSockBuf = 2 << 20
+
+// KlingShareAttach conecta la sesión proto (kling-share/1) de la carpeta tag
+// con el servidor FUSE de su dispositivo virtio-fs en kling-hv: POST
+// /kling/share/attach con Upgrade, como el attach al agente. Devuelve la
+// conexión, que vive lo que viva la sesión (sin plazo: la corta ctx).
+func (c *Client) KlingShareAttach(ctx context.Context, tag int, proto string) (io.ReadWriteCloser, error) {
+	body, _ := json.Marshal(map[string]int{"tag": tag})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/kling/share/attach", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", proto)
+	// Su propia conexión, con búferes grandes: los de un socket unix de macOS
+	// son de 8 KiB (net.local.stream.sendspace), y una escritura de 1 MiB
+	// (share.MaxIO) por ahí eran 128 idas y vueltas entre los dos procesos:
+	// la escritura secuencial se quedaba en ~300 MB/s.
+	h := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			conn, err := dialUnix(ctx, c.sock)
+			if uc, ok := conn.(*net.UnixConn); ok {
+				_ = uc.SetReadBuffer(ShareSockBuf)
+				_ = uc.SetWriteBuffer(ShareSockBuf)
+			}
+			return conn, err
+		},
+		DisableKeepAlives: true,
+	}}
+	resp, err := h.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		defer resp.Body.Close()
+		var e struct {
+			FaultMessage string `json:"fault_message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxRespuestaKling)).Decode(&e)
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented {
+			return nil, fmt.Errorf("%w: %s", ErrNoVirtioFS, e.FaultMessage)
+		}
+		return nil, fmt.Errorf("kling-hv POST /kling/share/attach: %s: %s", resp.Status, e.FaultMessage)
+	}
+	rwc, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		resp.Body.Close()
+		return nil, errors.New("kling-hv: the share connection could not be taken over")
+	}
+	return rwc, nil
 }

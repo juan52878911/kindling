@@ -325,6 +325,23 @@ func (m *Manager) resolveShares(ctx context.Context, req api.RunRequest, vols []
 		default:
 			return nil, bad("invalid mode %q: use copy, ro or rw", s.Mode)
 		}
+		// Por dónde va: virtio-fs solo si se pide (o lo pide el daemon por
+		// defecto); carpetasAntesDeArrancar lo confirma con el VMM al arrancar.
+		switch s.Transport {
+		case "", share.TransportFUSE, share.TransportVirtioFS:
+		default:
+			return nil, bad("invalid share transport %q: use virtiofs or fuse", s.Transport)
+		}
+		if s.Transport != "" && mode == share.ModeCopy {
+			return nil, bad("%s: a copy share has no transport (virtiofs and fuse are for ro and rw)", s.Mount)
+		}
+		if mode != share.ModeCopy {
+			t, err := transporteCarpeta(s.Transport)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %s: %v", ErrShareRequest, s.Mount, err)
+			}
+			rs.att.Transport = t
+		}
 		out = append(out, rs)
 	}
 	// Cada copia es un disco más; con los volúmenes, el invitado tiene un
@@ -509,6 +526,9 @@ type shareTag struct {
 	mu  sync.Mutex
 	// status: "attached", "detached" o "error: ...".
 	status string
+	// via es por dónde va la sesión que hay (o la última): share.TransportVirtioFS
+	// o "" (FUSE por el agente). Lo que se enseña como Transport.
+	via string
 	// first se cierra en el primer attach o en el primer error permanente.
 	first     chan struct{}
 	firstOnce sync.Once
@@ -525,6 +545,18 @@ func (t *shareTag) get() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.status
+}
+
+func (t *shareTag) attached(via string) {
+	t.mu.Lock()
+	t.status, t.via = "attached", via
+	t.mu.Unlock()
+}
+
+func (t *shareTag) getVia() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.via
 }
 
 func (t *shareTag) settle(err error) {
@@ -736,15 +768,30 @@ func (m *Manager) shareStatus(id string) map[int]string {
 	return out
 }
 
+// shareVias es por dónde va cada carpeta viva de id ahora (shareTag.via).
+func (m *Manager) shareVias(id string) map[int]string {
+	m.sup().mu.Lock()
+	run := m.sup().runs[id]
+	m.sup().mu.Unlock()
+	out := map[int]string{}
+	if run == nil {
+		return out
+	}
+	for _, t := range run.tags {
+		out[t.tag] = t.getVia()
+	}
+	return out
+}
+
 // decorarShares copia las carpetas de out y rellena el estado de las vivas.
 // Copia porque out comparte el slice con la máquina guardada.
 func (m *Manager) decorarShares(out *api.Machine) {
 	if len(out.Shares) == 0 {
 		return
 	}
-	st := map[int]string{}
+	st, via := map[int]string{}, map[int]string{}
 	if out.State == api.StateRunning && hasLiveShares(out) {
-		st = m.shareStatus(out.ID)
+		st, via = m.shareStatus(out.ID), m.shareVias(out.ID)
 	}
 	sh := make([]api.ShareAttachment, len(out.Shares))
 	copy(sh, out.Shares)
@@ -753,6 +800,12 @@ func (m *Manager) decorarShares(out *api.Machine) {
 			sh[i].Status = st[i]
 			if sh[i].Status == "" {
 				sh[i].Status = "detached"
+			}
+			// Con sesión, el transporte es el de verdad: un agente anterior,
+			// o un kernel sin virtio-fs, la tienen por FUSE aunque el VMM
+			// diera el dispositivo.
+			if sh[i].Status == "attached" {
+				sh[i].Transport = via[i]
 			}
 		}
 	}
@@ -835,18 +888,40 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 	}
 	defer srv.Close()
 
-	body, _ := json.Marshal(share.Attach{Tag: t.tag, Mount: s.Mount, Mode: s.Mode})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+mc.Addr(api.GuestPort)+share.AttachPath, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", share.Proto)
-	resp, err := shareClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("talking to the guest agent: %w", err)
+	// Por virtio-fs (kling-hv) el agente monta y contesta 200, y la sesión va
+	// a kling-hv; si no puede, 501 con HeaderTransport y se repite por FUSE.
+	// Al revés, un agente que ya la tiene por virtio-fs (una máquina que el
+	// daemon readoptó sin saberlo) pide virtio-fs. Un agente anterior ignora
+	// Transport y monta por FUSE (101): se sirve por esa conexión, como antes.
+	transporte := s.Transport
+	var resp *http.Response
+	for intento := 0; ; intento++ {
+		resp, err = m.pedirAttach(ctx, mc, share.Attach{Tag: t.tag, Mount: s.Mount, Mode: s.Mode, Transport: transporte})
+		if err != nil {
+			return fmt.Errorf("talking to the guest agent: %w", err)
+		}
+		pide := resp.Header.Get(share.HeaderTransport)
+		if resp.StatusCode == http.StatusOK && transporte == share.TransportVirtioFS && pide == share.TransportVirtioFS {
+			resp.Body.Close()
+			rwc, err := m.attachVirtioFS(ctx, mc, t.tag)
+			if err != nil {
+				return fmt.Errorf("connecting the virtio-fs share to kling-hv: %w", err)
+			}
+			return m.servirShare(ctx, drain, mc, s, t, srv, rwc, share.TransportVirtioFS)
+		}
+		if resp.StatusCode == http.StatusNotImplemented && intento == 0 {
+			if transporte != "" && pide == "fuse" {
+				resp.Body.Close()
+				transporte = ""
+				continue
+			}
+			if transporte == "" && pide == share.TransportVirtioFS {
+				resp.Body.Close()
+				transporte = share.TransportVirtioFS
+				continue
+			}
+		}
+		break
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		defer resp.Body.Close()
@@ -877,9 +952,32 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 		resp.Body.Close()
 		return errors.New("the guest connection could not be taken over")
 	}
-	t.set("attached")
+	return m.servirShare(ctx, drain, mc, s, t, srv, rwc, "")
+}
+
+// pedirAttach hace POST /share/attach al agente de mc con a.
+func (m *Manager) pedirAttach(ctx context.Context, mc *api.Machine, a share.Attach) (*http.Response, error) {
+	body, _ := json.Marshal(a)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+mc.Addr(api.GuestPort)+share.AttachPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// También por virtio-fs, aunque el agente conteste 200: uno anterior no
+	// sabe de Transport y contesta 101, y sin esto no se podría tomar la
+	// conexión.
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", share.Proto)
+	return shareClient.Do(req)
+}
+
+// servirShare sirve la carpeta s por rwc hasta que la sesión se corta.
+func (m *Manager) servirShare(ctx context.Context, drain <-chan struct{}, mc *api.Machine, s api.ShareAttachment,
+	t *shareTag, srv *hostshare.Server, rwc io.ReadWriteCloser, via string) error {
+	t.attached(via)
 	t.settle(nil)
-	err = srv.ServeDrain(ctx, drain, rwc)
+	err := srv.ServeDrain(ctx, drain, rwc)
 	_ = rwc.Close()
 	if err != nil && ctx.Err() == nil {
 		log.Printf("%s: shared folder %s: session ended: %v", mc.Name, s.Mount, err)

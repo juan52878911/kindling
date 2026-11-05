@@ -389,6 +389,8 @@ machines:     7
 
 $ kling run -name mcp-demo
 efad9e5f7003  mcp-demo  booted cold in 54 ms
+# (la siguiente run de la misma imagen restaura su snapshot por imagen:
+#  "started from its image snapshot", ver docs/snapshot-imagen.md)
 
 $ kling freeze mcp-demo
 efad9e5f7003  frozen  (754 ms, 256 MiB on disk)
@@ -819,6 +821,25 @@ libs     2.0G      109M      0       mi-servicio-1a98a4, otra-mas
 
 Cuatro es el techo, porque cada uno es un disco y los discos se nombran por letra.
 
+**Cuánto se fía un volumen del disco (macOS).** Cada `fsync` del invitado llega por
+defecto al disco físico (`F_FULLFSYNC`), y eso cuesta: 300 `fsync` en un volumen,
+~1,7 s en un M4. Un volumen de escritura puede pedir menos al final de su `-volume`:
+
+```sh
+kling run -name dev -volume datos:/data:sync=barrier   # solo orden: ~0,1 s
+kling run -name dev -volume cache:/cache:sync=none      # nada: ~10 ms
+```
+
+`barrier` (`F_BARRIERFSYNC`) garantiza el orden pero no espera a la caché del SSD: si
+el Mac se cae, se pueden perder los últimos segundos escritos, no el sistema de
+ficheros. **`none` no lleva nada al disco: si el Mac se cae (corte de luz, pánico), el
+ext4 del volumen puede quedar roto**; solo para volúmenes de desarrollo que se pueden
+tirar. Un cierre limpio del Mac no pierde nada en ningún modo. El modo es de la máquina
+que lo pidió: sobrevive a `freeze`/`thaw` y a `stop`/`start`, pero no va en el dorado
+(una réplica vuelve a `full` salvo que lo pida). En solo lectura no tiene sentido y se
+rechaza. En Linux (Firecracker) se acepta y se ignora: sus discos ya no llevan los
+flush del invitado al disco físico. Detalles y cifras en `docs/backend-hv.md`.
+
 **El conjunto de discos queda fijado al congelar.** Firecracker no añade ni quita discos
 en una VM restaurada — solo deja reapuntar cada uno a otro fichero — así que cambiar
 cuántos volúmenes lleva un servicio significa reimportarlo, y kling lo dice exactamente
@@ -845,7 +866,7 @@ cambiar en silencio la versión que usa un servicio que ya funcionaba.
 
 ## Compartir una carpeta del host
 
-`-share SRC:DST[:copy|ro|rw]` mete una carpeta del host dentro de una máquina
+`-share SRC:DST[:copy|ro|rw[:virtiofs]]` mete una carpeta del host dentro de una máquina
 (`kling run` y `kling sandbox create`, repetible):
 
 ```sh
@@ -864,6 +885,12 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y
   menos de un segundo; `ro` lo impone el daemon, no solo el montaje. Sobrevive a
   `freeze`/`thaw` y a reiniciar el daemon, y funciona con `egress none`. Solo se pueden
   compartir en vivo carpetas bajo `daemon.share_roots` (vacío por defecto).
+- **:virtiofs** (solo kling-hv, en macOS): `-share /srv/code/app:/src:rw:virtiofs` sirve la
+  carpeta viva por virtio-fs, sin pasar por el agente: los metadatos van 3-5× más rápido y la
+  E/S ~2×, pero un cambio hecho en el host no despierta a los vigilantes del invitado
+  (`node --watch`, vite): se ve al cabo de un segundo. Sin `:virtiofs`, FUSE como siempre;
+  `KLING_HV_VIRTIOFS=1` en el daemon lo hace el defecto (`:fuse` lo quita para una carpeta) y
+  `=0` lo prohíbe ([`docs/compartir.md`](compartir.md#kling-hv-virtio-fs)).
 
 El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
 carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina
@@ -1678,6 +1705,7 @@ código de la extensión.
 | [`SECURITY.md`](../SECURITY.md) | Modelo de amenaza, barreras, y lo que NO está resuelto |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](RELEASE-v0.2.0.md) y [v0.3.0](RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
+| [`docs/snapshot-imagen.md`](snapshot-imagen.md) | Snapshots por imagen: `kling run -image` restaura en vez de arrancar en frío; qué se guarda, la clave, cuándo no, tope de disco |
 | [`docs/three-layers.md`](three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](chispa.md) · [`docs/CHISPA-EVAL.md`](CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |

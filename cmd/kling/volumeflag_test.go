@@ -71,3 +71,34 @@ func TestElOrdenDeLosVolumenesSeConserva(t *testing.T) {
 		t.Errorf("la forma corta dejó de funcionar: %+v %v", got, err)
 	}
 }
+
+// El modo de sincronización va al final (:sync=MODE) y se combina con el
+// resto; en solo lectura no tiene sentido y se rechaza.
+func TestSintaxisDeVolumeSync(t *testing.T) {
+	casos := []struct {
+		entrada, nombre, mount, sync string
+		ro                           bool
+	}{
+		{"dev:/data:sync=none", "dev", "/data", "none", false},
+		{"dev:/data:rw:sync=barrier", "dev", "/data", "barrier", false},
+		{"dev:sync=full", "dev", "", "full", false},
+		{"libs:/libs:ro:sync=full", "libs", "/libs", "full", true},
+	}
+	for _, c := range casos {
+		var f volumeFlag
+		if err := f.Set(c.entrada); err != nil {
+			t.Errorf("%q: %v", c.entrada, err)
+			continue
+		}
+		got := f[0]
+		if got.Name != c.nombre || got.Mount != c.mount || got.ReadOnly != c.ro || got.Sync != c.sync {
+			t.Errorf("%q -> %+v", c.entrada, got)
+		}
+	}
+	for _, malo := range []string{"dev:/data:sync=", "dev:/data:sync=fsync", "libs:/libs:ro:sync=none"} {
+		var f volumeFlag
+		if err := f.Set(malo); err == nil {
+			t.Errorf("aceptó %q", malo)
+		}
+	}
+}

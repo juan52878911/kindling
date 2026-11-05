@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -515,6 +517,17 @@ func TestVolumenesQueNoTienenSentido(t *testing.T) {
 			[]api.VolumeAttachment{{Name: "a", Mount: "/con,coma"}},
 			"no spaces or commas",
 		},
+		{
+			"un modo de sincronización que no existe",
+			[]api.VolumeAttachment{{Name: "a", Mount: "/x", Sync: "fsync"}},
+			"use full, barrier or none",
+		},
+		{
+			// En solo lectura no hay flush que relajar: pedirlo es un error.
+			"sync en un volumen de solo lectura",
+			[]api.VolumeAttachment{{Name: "a", Mount: "/x", ReadOnly: true, Sync: api.VolumeSyncNone}},
+			"only applies to writable volumes",
+		},
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
@@ -765,5 +778,52 @@ func TestE2fsckSoloRecuentosNoEsReparar(t *testing.T) {
 		if err != nil || reparado != c.reparado {
 			t.Errorf("%q (sale %d): reparado=%v err=%v, quería %v", c.salida, c.codigo, reparado, err, c.reparado)
 		}
+	}
+}
+
+// El modo de sincronización de un volumen llega al VMM solo con kling-hv y
+// kling-vz, siempre explícito (full si no se pidió nada, para que una réplica
+// no herede el del dorado), se guarda en la máquina y NO en el meta del
+// snapshot.
+func TestSyncDeVolumen(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.volumesDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(m.volumePath(n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vols, err := m.resolveVolumes(api.RunRequest{Volumes: []api.VolumeAttachment{
+		{Name: "a", Mount: "/a", Sync: api.VolumeSyncNone},
+		{Name: "b", Mount: "/b", Sync: api.VolumeSyncBarrier},
+		{Name: "c", Mount: "/c", ReadOnly: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []string{BackendVZ, BackendHV} {
+		got := []string{syncDeVolumen(b, vols[0]), syncDeVolumen(b, vols[1]), syncDeVolumen(b, vols[2])}
+		if got[0] != "none" || got[1] != "barrier" || got[2] != "full" {
+			t.Fatalf("%s: kling_sync %v, quiero [none barrier full]", b, got)
+		}
+	}
+	for _, v := range vols {
+		if s := syncDeVolumen(BackendFirecracker, v); s != "" {
+			t.Fatalf("Firecracker no conoce kling_sync y le llegaría %q", s)
+		}
+	}
+	att := attachments(vols)
+	if att[0].Sync != api.VolumeSyncNone || att[1].Sync != api.VolumeSyncBarrier {
+		t.Fatalf("la máquina no recuerda el modo: %+v", att)
+	}
+	meta := sinSync(att)
+	if meta[0].Sync != "" || meta[1].Sync != "" || att[0].Sync != api.VolumeSyncNone {
+		t.Fatalf("sinSync: meta %+v, máquina %+v", meta, att)
+	}
+	b, _ := json.Marshal(fc.Drive{DriveID: "volume0", PathOnHost: "/x"})
+	if strings.Contains(string(b), "kling_sync") {
+		t.Fatalf("un drive sin modo no debe llevar kling_sync: %s", b)
 	}
 }

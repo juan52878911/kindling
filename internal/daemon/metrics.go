@@ -182,6 +182,17 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 	fmt.Fprintln(w, "# HELP kling_pending_mib Memory reserved by microVMs that are starting right now, in MiB.")
 	fmt.Fprintln(w, "# TYPE kling_pending_mib gauge")
 	fmt.Fprintf(w, "kling_pending_mib %d\n", t.PendienteMiB)
+
+	fmt.Fprintln(w, "# HELP kling_memory_pressure_level Host memory pressure the daemon acts on: 1 normal, 2 warn, 4 critical, 0 unknown or daemon.memory_pressure=off.")
+	fmt.Fprintln(w, "# TYPE kling_memory_pressure_level gauge")
+	fmt.Fprintf(w, "kling_memory_pressure_level %d\n", t.PresionNivel)
+	fmt.Fprintln(w, "# HELP kling_memory_pressure_actions_total Idle machines the daemon squeezed or froze because of host memory pressure.")
+	fmt.Fprintln(w, "# TYPE kling_memory_pressure_actions_total counter")
+	fmt.Fprintf(w, "kling_memory_pressure_actions_total{action=\"squeeze\"} %d\n", t.PresionApretones)
+	fmt.Fprintf(w, "kling_memory_pressure_actions_total{action=\"freeze\"} %d\n", t.PresionCongelaciones)
+	fmt.Fprintln(w, "# HELP kling_memory_pressure_reclaimed_mib_total Memory those squeezes gave back to the host, in MiB.")
+	fmt.Fprintln(w, "# TYPE kling_memory_pressure_reclaimed_mib_total counter")
+	fmt.Fprintf(w, "kling_memory_pressure_reclaimed_mib_total %d\n", t.PresionDevueltaMiB)
 }
 
 // esc escapa un valor de etiqueta según el formato de Prometheus: barra, comilla

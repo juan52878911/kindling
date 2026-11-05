@@ -27,6 +27,12 @@ type ShareSpec struct {
 	// que estar bajo algún daemon.share_roots. En copy solo se guarda para
 	// enseñarlo (lo que el cliente dijo que subía).
 	Source string `json:"source,omitempty"`
+	// Transport, en ro y rw: "virtiofs" la pide por virtio-fs (kling-hv:
+	// 3-5× los metadatos y ~2× la E/S, pero sin avisos de los cambios del
+	// host: ver docs/compartir.md), "fuse" por FUSE aunque el daemon tenga
+	// virtio-fs por defecto (KLING_HV_VIRTIOFS=1), y vacío, lo que diga el
+	// daemon (FUSE si no se le dijo nada).
+	Transport string `json:"transport,omitempty"`
 }
 
 // ShareAttachment es una carpeta compartida de una máquina.
@@ -36,6 +42,13 @@ type ShareAttachment struct {
 	Source string `json:"source,omitempty"`
 	// ImageBytes es el tamaño del disco (ext4) de una copia.
 	ImageBytes int64 `json:"image_bytes,omitempty"`
+	// Transport es por dónde llega una carpeta viva al kernel del invitado:
+	// "virtiofs" por un dispositivo virtio-fs de kling-hv (docs/backend-hv.md),
+	// vacío por FUSE a través del agente (lo de siempre). Guardado, es lo que
+	// el VMM ofreció al arrancar; en una respuesta con Status "attached", por
+	// dónde va la sesión de verdad (un agente anterior o un kernel sin
+	// virtio-fs caen a FUSE).
+	Transport string `json:"transport,omitempty"`
 	// Status es el estado de una carpeta viva: "attached", "detached" (sin
 	// sesión ahora mismo: la máquina está congelada o reconectando) o
 	// "error: ...". No se guarda: lo calcula el daemon al responder.
@@ -63,21 +76,33 @@ type ShareUpload struct {
 func ParseShare(v string) (ShareSpec, error) {
 	mode := share.ModeCopy
 	rest := v
-	if i := strings.LastIndex(v, ":"); i >= 0 {
-		switch m := v[i+1:]; m {
-		case share.ModeCopy, share.ModeRO, share.ModeRW:
-			mode, rest = m, v[:i]
+	// SRC:DST:ro|rw:virtiofs (o :fuse): el transporte va detrás del modo y
+	// solo con un modo vivo.
+	transport := ""
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		switch t := rest[i+1:]; t {
+		case share.TransportVirtioFS, share.TransportFUSE:
+			transport, rest = t, rest[:i]
 		}
+	}
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		switch m := rest[i+1:]; m {
+		case share.ModeCopy, share.ModeRO, share.ModeRW:
+			mode, rest = m, rest[:i]
+		}
+	}
+	if transport != "" && mode != share.ModeRO && mode != share.ModeRW {
+		return ShareSpec{}, fmt.Errorf("invalid share %q: :%s goes after ro or rw (SRC:DST:ro|rw:%s)", v, transport, transport)
 	}
 	i := strings.LastIndex(rest, ":")
 	if i <= 0 || i == len(rest)-1 {
-		return ShareSpec{}, fmt.Errorf("invalid share %q: use SRC:DST[:copy|ro|rw]", v)
+		return ShareSpec{}, fmt.Errorf("invalid share %q: use SRC:DST[:copy|ro|rw[:virtiofs|fuse]]", v)
 	}
 	src, dst := rest[:i], rest[i+1:]
 	if err := share.ValidMount(dst); err != nil {
 		return ShareSpec{}, fmt.Errorf("share %q: %w", v, err)
 	}
-	return ShareSpec{Mode: mode, Mount: dst, Source: src}, nil
+	return ShareSpec{Mode: mode, Mount: dst, Source: src, Transport: transport}, nil
 }
 
 // UploadShare sube un tar (el contenido de una carpeta en modo copy) y devuelve

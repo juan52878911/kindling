@@ -71,7 +71,32 @@ type Attach struct {
 	Tag   int    `json:"tag"`
 	Mount string `json:"mount"`
 	Mode  string `json:"mode"`
+	// Transport es por dónde llega la carpeta al kernel del invitado: "" es
+	// FUSE por /dev/fuse con la sesión en esta misma conexión (lo de siempre);
+	// TransportVirtioFS, un dispositivo virtio-fs de kling-hv que el agente
+	// monta con `mount -t virtiofs` y cuya sesión va del daemon a kling-hv.
+	// Entonces el agente contesta 200 en vez de 101, o 501 con HeaderTransport
+	// "fuse" si no puede (kernel sin virtio-fs, no hay dispositivo, o la
+	// carpeta ya está montada por FUSE): el daemon repite sin Transport. Un
+	// agente anterior no lo conoce y monta por FUSE (101).
+	Transport string `json:"transport,omitempty"`
 }
+
+// TransportVirtioFS es Attach.Transport para virtio-fs.
+const TransportVirtioFS = "virtiofs"
+
+// TransportFUSE es lo que pide una carpeta (api.ShareSpec.Transport) que va por
+// FUSE aunque el daemon tenga virtio-fs por defecto, y lo que dice
+// HeaderTransport cuando el agente no puede montar por virtio-fs.
+const TransportFUSE = "fuse"
+
+// HeaderTransport es la cabecera con la que el agente dice por dónde montó
+// (o, con 501, por dónde hay que pedírselo).
+const HeaderTransport = "X-Kling-Share-Transport"
+
+// VirtioFSTag es el tag del dispositivo virtio-fs de la carpeta tag: lo que
+// da kling-hv en la configuración del dispositivo y lo que monta el agente.
+func VirtioFSTag(tag int) string { return fmt.Sprintf("kling-share-%d", tag) }
 
 // Validate comprueba un Attach. Lo usan los dos lados: el daemon antes de
 // mandarlo y el agente antes de montar nada.
@@ -81,6 +106,9 @@ func (a Attach) Validate() error {
 	}
 	if a.Mode != ModeRO && a.Mode != ModeRW {
 		return fmt.Errorf("invalid live share mode %q: use %q or %q", a.Mode, ModeRO, ModeRW)
+	}
+	if a.Transport != "" && a.Transport != TransportVirtioFS {
+		return fmt.Errorf("invalid share transport %q", a.Transport)
 	}
 	return ValidMount(a.Mount)
 }

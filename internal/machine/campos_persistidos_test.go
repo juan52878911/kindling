@@ -107,12 +107,22 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.Machine share_wait":  {efecto: true, version: 3, porque: "the agent would start the service before its shares"},
 	"state.json api.Machine volume_wait": {efecto: true, version: 3, porque: "a commit would release and hand back volumes it must not"},
 	"state.json api.Machine net_mibps":   {efecto: true, version: 3, porque: "a cold start would use the daemon's rate instead of the requested one"},
+	"state.json api.Machine nested":      {efecto: true, version: 4, porque: "a Start would boot it without EL2 and KVM, and freeze/commit/fork would stop refusing it"},
 	"state.json api.Machine vmm": {porque: "the next launch sets it again; a freeze carries its own in volcado.ok, " +
 		"and an older kling records its own VMM in the goldens it makes anyway"},
+	"state.json api.Machine image_snapshot": {porque: "an older kling sees the copy as cold-booted: it only loses the shared-memory " +
+		"estimate and the guard that keeps the image snapshot while the copy runs; the copy keeps the files it opened, and its " +
+		"freezes never depend on the snapshot (no diff freeze)"},
 	"state.json api.Machine published": {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
 	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
 	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},
 	"state.json api.PortPublish proto": {porque: "only inside published (see above)"},
+	// v1.1: el 4 los protege (versionEstadoPuentes).
+	"state.json api.Machine host_ports": {efecto: true, version: 4, porque: "a thaw or start would lose the bridge to the host service"},
+	"state.json api.HostPort host":      {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
+	"state.json api.HostPort guest":     {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
+	"state.json api.ShareAttachment transport": {porque: "only says which transport to try first: an older kling that drops it " +
+		"asks for FUSE and the agent answers which one the share has (shareproto.HeaderTransport)"},
 	// meta.json: v0.19 los añadió sin subir el 2. Un kling ≤ v0.18 solo
 	// reescribe un meta al anotarlo, y él no los usa: los pierde la vuelta
 	// (v0.19+ → v0.18 anota → v0.19+). Subir a 3 haría que v0.19-v0.20, que
@@ -120,6 +130,10 @@ var clasesCampos = map[string]claseCampo{
 	"meta.json api.Snapshot share_wait": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot sin_agente": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot arch":       {porque: "an older kling that drops it does not compare architectures, which it never did"},
+	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
+	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
+	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +
+		"losing it on a round trip falls back to full, the durable default"},
 	// credentials.enc: ver versionAlmacenSigV4 (credenciales.go).
 	"credentials.enc credproxy.Credential AccessKeyID": {efecto: true, version: 2, porque: "a kling <= v0.18 would use a sigv4 credential as HTTP and drop it"},
 	"credentials.enc credproxy.Credential Region":      {efecto: true, version: 2, porque: "as AccessKeyID"},

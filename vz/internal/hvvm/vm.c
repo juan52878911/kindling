@@ -152,6 +152,18 @@ static const hv_gic_icc_reg_t ICCREGS[] = {
 };
 #define NICC (sizeof ICCREGS / sizeof ICCREGS[0])
 
+// Registros EL2 de una VM anidada que un CPU_ON vuelve a poner como al crear
+// el vCPU (ver reiniciar_sysregs): los que un kernel en EL2 deja a su gusto
+// (MMU de EL2, vectores, HCR) y que el siguiente encendido no debe heredar.
+// No van en el snapshot: una VM anidada no se congela (khv_snapshot).
+static const hv_sys_reg_t SYSREGS_EL2[] = {
+    HV_SYS_REG_SCTLR_EL2, HV_SYS_REG_HCR_EL2,   HV_SYS_REG_CPTR_EL2,  HV_SYS_REG_MDCR_EL2,
+    HV_SYS_REG_TCR_EL2,   HV_SYS_REG_TTBR0_EL2, HV_SYS_REG_TTBR1_EL2, HV_SYS_REG_MAIR_EL2,
+    HV_SYS_REG_VBAR_EL2,  HV_SYS_REG_CNTHCTL_EL2, HV_SYS_REG_CNTHP_CTL_EL2, HV_SYS_REG_VTTBR_EL2,
+    HV_SYS_REG_VTCR_EL2,
+};
+#define NSYS_EL2 (sizeof SYSREGS_EL2 / sizeof SYSREGS_EL2[0])
+
 struct cpu_state {
   uint64_t x[31], pc, cpsr, fpcr, fpsr;
   hv_simd_fp_uchar16_t q[32];
@@ -166,10 +178,21 @@ struct cpu_state {
 
 #define SNAP_MAGIC 0x4b4c4e4748563032ULL  // "KLNGHV02"
 // 2 añade vsock y el globo al final de la cabecera; 3 le da al globo su cola
-// de estadísticas (struct vballoon_state crece) y 4 la del informe de páginas
+// de estadísticas (struct vballoon_state crece), 4 la del informe de páginas
 // libres. Una cabecera de la versión 1 se lee como un prefijo; una de la 2 o
 // la 3, igual salvo el globo, que se convierte (vballoon_state_v2 y _v3).
+//
+// La 5 es la 4 con los vCPU que no caben en cpu[] (más de SNAP_CPUS_V4)
+// detrás, solo los que tiene la máquina: hdr_len = SNAP_HDR_V5(ncpus). Una
+// máquina de hasta SNAP_CPUS_V4 vCPU se sigue guardando como 4, byte a byte
+// igual que antes, y la lee un kling-hv anterior (kling upgrade y su vuelta
+// atrás miran la versión de cada fichero).
+//
+// La 6 es la 4 (o la 5, con más de SNAP_CPUS_V4 vCPU) con la sección de
+// virtio-fs detrás (struct snap_vfs, abajo). Solo la escribe una máquina con
+// carpetas por virtio-fs: las demás siguen siendo 4 o 5, igual que antes.
 #define SNAP_VERSION KHV_SNAP_VERSION
+#define SNAP_CPUS_V4 8
 struct snap_hdr {
   uint64_t magic;
   uint32_t version, ncpus, ndisks;
@@ -184,15 +207,24 @@ struct snap_hdr {
   struct vnet_state vnet;
   uint8_t hay_rng;
   struct vrng_state vrng;
-  struct cpu_state cpu[MAX_CPUS];
+  struct cpu_state cpu[SNAP_CPUS_V4];
   uint64_t gic_size;
   // versión 2
   uint8_t hay_vsock;
   struct vvsock_state vsock;
   uint8_t hay_globo;
   struct vballoon_state globo;
+  // versión 5: del vCPU SNAP_CPUS_V4 en adelante (en el fichero, solo los
+  // que hay)
+  struct cpu_state cpu_mas[MAX_CPUS - SNAP_CPUS_V4];
 };
 #define SNAP_HDR_V1 offsetof(struct snap_hdr, hay_vsock)
+// La 4 acaba donde empieza cpu_mas: los dos van alineados a 16 (cpu_state),
+// y es el sizeof(struct snap_hdr) que tenía (lo comprueba el _Static_assert).
+#define SNAP_HDR_V4 offsetof(struct snap_hdr, cpu_mas)
+#define SNAP_HDR_V5(n) (SNAP_HDR_V4 + (size_t)((n) - SNAP_CPUS_V4) * sizeof(struct cpu_state))
+_Static_assert(MAX_CPUS > SNAP_CPUS_V4, "cpu_mas would be empty");
+
 // La versión 2 era sizeof(struct snap_hdr) con el globo de entonces: el
 // final redondeado a la alineación de la cabecera (16, por los registros
 // SIMD de cpu_state).
@@ -201,27 +233,87 @@ struct snap_hdr {
    ~(_Alignof(struct snap_hdr) - 1))
 #define SNAP_HDR_V2 SNAP_HDR_GLOBO(struct vballoon_state_v2)
 #define SNAP_HDR_V3 SNAP_HDR_GLOBO(struct vballoon_state_v3)
+_Static_assert(SNAP_HDR_V4 == SNAP_HDR_GLOBO(struct vballoon_state), "v4 changed");
+
+// hdr_cpu: el estado del vCPU i en la cabecera (cpu[] o cpu_mas[]).
+static struct cpu_state *hdr_cpu(struct snap_hdr *h, int i) {
+  return i < SNAP_CPUS_V4 ? &h->cpu[i] : &h->cpu_mas[i - SNAP_CPUS_V4];
+}
+
+// snap_hdr_len: los bytes de cabecera de un fichero de versión v con n vCPU
+// (0 si esa combinación no existe). Cada versión con su tamaño y ningún otro:
+// una v3 con el hdr_len de la 2 haría leer el globo de la v2 con la forma de
+// la v3 (y con el de la 1, ceros donde van el vsock y el globo); una de hasta
+// la 4 con más de SNAP_CPUS_V4 vCPU dejaría a los demás a cero.
+static size_t snap_hdr_len(uint32_t v, uint32_t n) {
+  if (n > MAX_CPUS) return 0;  // n = 0 pasa: lo rechaza la comparación con la máquina
+  if (v == 5) return n > SNAP_CPUS_V4 ? SNAP_HDR_V5(n) : 0;
+  // La 6: la cabecera de la 4 o de la 5, según los vCPU; la sección de
+  // virtio-fs va aparte (SNAP_VFS_LEN).
+  if (v == 6) return n > SNAP_CPUS_V4 ? SNAP_HDR_V5(n) : SNAP_HDR_V4;
+  if (n > SNAP_CPUS_V4) return 0;
+  switch (v) {
+    case 1: return SNAP_HDR_V1;
+    case 2: return SNAP_HDR_V2;
+    case 3: return SNAP_HDR_V3;
+    case 4: return SNAP_HDR_V4;
+  }
+  return 0;
+}
+
+// versión 6: virtio-fs. Va detrás de la cabecera de la 4 (hasta SNAP_CPUS_V4
+// vCPU) o de la 5 (con los demás vCPU), así que se combina con las dos: el
+// número de dispositivos y el estado de cada uno, solo los que hay
+// (hdr_len = snap_hdr_len(6, ncpus) + SNAP_VFS_LEN(nvfs)).
+struct snap_vfs {
+  uint32_t nvfs, pad[3];
+  struct vvfs_state vfs[KHV_MAX_VFS];
+};
+#define SNAP_VFS_CAB offsetof(struct snap_vfs, vfs)
+#define SNAP_VFS_LEN(n) (SNAP_VFS_CAB + (size_t)(n) * sizeof(struct vvfs_state))
+
+// snap_forma dice si len es el hdr_len de alguna versión con algún número de
+// vCPU y de dispositivos virtio-fs (antes de leer la versión: lo que no tiene
+// ninguna forma no es de kling-hv). La que le toca a cada versión la mira
+// después snap_hdr_len.
+static bool snap_forma(uint64_t len) {
+  if (len == SNAP_HDR_V1 || len == SNAP_HDR_V2 || len == SNAP_HDR_V3) return true;
+  for (int n = SNAP_CPUS_V4; n <= MAX_CPUS; n++) {
+    uint64_t base = n == SNAP_CPUS_V4 ? SNAP_HDR_V4 : SNAP_HDR_V5(n);
+    if (len == base) return true;
+    if (len > base && len - base >= SNAP_VFS_LEN(1) && len - base <= SNAP_VFS_LEN(KHV_MAX_VFS) &&
+        (len - base - SNAP_VFS_CAB) % sizeof(struct vvfs_state) == 0)
+      return true;
+  }
+  return false;
+}
 
 struct snap_pie {
   uint64_t magic, ram_size, hdr_off, hdr_len;
 };
 
 // Tope del estado del GIC que acepta khv_restore: el de una VM real (MAX_CPUS
-// redistribuidores) cabe con mucha holgura; un gic_size mayor es un fichero
-// roto o ajeno, y sin tope sería un malloc del tamaño que diga el fichero.
+// redistribuidores; con 10 vCPU ocupa ~123 KiB) cabe con mucha holgura; un
+// gic_size mayor es un fichero roto o ajeno, y sin tope sería un malloc del
+// tamaño que diga el fichero.
 #define SNAP_GIC_MAX (16ULL << 20)
 
 // Lo fija TestCabeceraKLNGHV (cabecera_darwin_test.go): cambiar snap_hdr sin
 // subir SNAP_VERSION rompería los mem.file que ya hay en disco.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
-                      uint64_t *hdr_v3, uint64_t *pie) {
+                      uint64_t *hdr_v3, uint64_t *pie, uint64_t *cpu, uint32_t *cpus_v4, uint64_t *vfs_cab,
+                      uint64_t *vfs) {
   *magia = SNAP_MAGIC;
   *version = SNAP_VERSION;
-  *hdr = sizeof(struct snap_hdr);
+  *hdr = SNAP_HDR_V4;
   *hdr_v1 = SNAP_HDR_V1;
   *hdr_v2 = SNAP_HDR_V2;
   *hdr_v3 = SNAP_HDR_V3;
   *pie = sizeof(struct snap_pie);
+  *cpu = sizeof(struct cpu_state);
+  *cpus_v4 = SNAP_CPUS_V4;
+  *vfs_cab = SNAP_VFS_CAB;
+  *vfs = sizeof(struct vvfs_state);
 }
 
 // ===================== configuración =====================
@@ -231,12 +323,22 @@ static int ndisks;
 static char *disk_path[KHV_MAX_DISKS];
 static bool disk_ro[KHV_MAX_DISKS];
 static bool hay_red, hay_rng, hay_vsock, hay_globo;
+static bool anidada;  // VM con EL2 (khv_config.nested)
+
+// Una VM anidada no se congela ni se restaura: el estado de EL2 (sus
+// registros, los ICH_* del interfaz de virtualización del GIC, el timer de
+// EL2 y lo que HVF guarde de un invitado de segundo nivel en marcha) no va en
+// la cabecera v4, y no hay forma de comprobar desde aquí que hv_gic_state lo
+// lleve entero. Mejor un error claro que un snapshot que restaura un KVM roto.
+#define ERR_SNAP_ANIDADA "snapshots of a nested-virtualization VM are not supported"
 static int net_fd = -1;
 static uint8_t net_mac[6];
 static int net_mtu;
 static char *kernel_path, *cmdline, *ram_dir;
-static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
+static uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_SLOTS];
 static int slot_net = -1, slot_rng = -1, slot_vsock = -1, slot_globo = -1, nvirtio;
+// virtio-fs: nvfs dispositivos en los slots slot_vfs.. (tras los demás).
+static int nvfs, slot_vfs = -1;
 
 // ===================== vCPU =====================
 
@@ -253,6 +355,8 @@ struct cpu {
   // esto la entrada física del CPU_ON corría con la MMU encendida y el
   // kernel moría en un Oops.
   struct cpu_state inicial;
+  uint64_t inicial_el2[NSYS_EL2];  // lo mismo para los EL2 de una VM anidada
+  uint8_t inicial_el2_ok[NSYS_EL2];
   bool kick;
   bool parado;          // en punto_pausa (con mu)
   struct cpu_state st;  // destino del guardado / origen de la restauración
@@ -411,8 +515,12 @@ static void cargar_cpu(struct cpu *c) {
   c->on = s->on;
 }
 
-// CPSR de la entrada de un vCPU: EL1h con DAIF enmascarado.
+// CPSR de la entrada de un vCPU: EL1h con DAIF enmascarado; en una VM
+// anidada, EL2h (el kernel arranca en EL2 y decide él si baja a EL1 o se
+// queda con VHE, como en una máquina física).
 #define CPSR_ENTRADA 0x3c5
+#define CPSR_ENTRADA_EL2 0x3c9
+#define CPSR_INICIO (anidada ? CPSR_ENTRADA_EL2 : CPSR_ENTRADA)
 
 // estado_cpu_on deja en d lo que tiene un vCPU justo al entrar por un CPU_ON:
 // los registros de sistema de reinicio (ini), PC en la entrada, X0 con el
@@ -435,6 +543,16 @@ static void reiniciar_sysregs(struct cpu *c) {
   for (size_t i = 0; i < NSYS; i++)
     if (c->inicial.sys_ok[i] && hv_vcpu_set_sys_reg(c->id, SYSREGS[i], c->inicial.sys[i]) != HV_SUCCESS)
       logf_("cpu%d: could not reset sysreg %#x", c->idx, SYSREGS[i]);
+  if (!anidada) return;
+  for (size_t i = 0; i < NSYS_EL2; i++)
+    if (c->inicial_el2_ok[i] && hv_vcpu_set_sys_reg(c->id, SYSREGS_EL2[i], c->inicial_el2[i]) != HV_SUCCESS)
+      logf_("cpu%d: could not reset EL2 sysreg %#x", c->idx, SYSREGS_EL2[i]);
+}
+
+// guardar_el2 apunta los EL2 de reinicio de un vCPU recién creado.
+static void guardar_el2(struct cpu *c) {
+  for (size_t i = 0; i < NSYS_EL2; i++)
+    c->inicial_el2_ok[i] = hv_vcpu_get_sys_reg(c->id, SYSREGS_EL2[i], &c->inicial_el2[i]) == HV_SUCCESS;
 }
 
 // cpu_guardada deja en d el estado de c que va en el snapshot, con mu. Un
@@ -597,17 +715,20 @@ static void mmio(struct cpu *c, uint64_t ipa, bool w, unsigned srt, int size, bo
   uint64_t v = w ? get_x(c, srt) : 0;
   if (w && size < 8) v &= (1ULL << (size * 8)) - 1;
   if (ipa >= UART_BASE && ipa < UART_BASE + UART_SIZE) {
+    if (w) khv_traza_hito(KHV_H_UART);
     uart_mmio(ipa - UART_BASE, w, &v);
   } else if (ipa >= RTC_BASE && ipa < RTC_BASE + RTC_SIZE) {
     rtc_mmio(ipa - RTC_BASE, w, &v, size);
-  } else if (ipa >= VIRTIO_BASE && ipa < VIRTIO_BASE + VIRTIO_MAX * VIRTIO_STRIDE) {
+  } else if (ipa >= VIRTIO_BASE && ipa < VIRTIO_BASE + VIRTIO_SLOTS * VIRTIO_STRIDE) {
     int slot = (int)((ipa - VIRTIO_BASE) / VIRTIO_STRIDE);
     uint64_t off = (ipa - VIRTIO_BASE) % VIRTIO_STRIDE;
+    khv_traza_hito(KHV_H_VIRTIO);
     if (slot < ndisks) vblk_mmio(slot, off, w, &v, size);
     else if (slot == slot_net) vnet_mmio(off, w, &v, size);
     else if (slot == slot_rng) vrng_mmio(off, w, &v, size);
     else if (slot == slot_vsock) vsock_mmio(off, w, &v, size);
     else if (slot == slot_globo) vballoon_mmio(off, w, &v, size);
+    else if (nvfs > 0 && slot >= slot_vfs && slot < slot_vfs + nvfs) vvfs_mmio(slot - slot_vfs, off, w, &v, size);
     else v = 0;
   } else {
     static int avisos;
@@ -646,8 +767,8 @@ static int psci(struct cpu *c) {
       return PSCI_SEGUIR;
     case 0x84000003:
     case 0xC4000003: {  // CPU_ON
-      uint64_t t = get_x(c, 1) & 0xff;
-      if (t >= (uint64_t)ncpus) {
+      int t = khv_mpidr_idx(get_x(c, 1), ncpus);
+      if (t < 0) {
         r = PSCI_RET_INVALID;
         break;
       }
@@ -668,8 +789,8 @@ static int psci(struct cpu *c) {
     }
     case 0x84000004:
     case 0xC4000004: {  // AFFINITY_INFO
-      uint64_t t = get_x(c, 1) & 0xff;
-      r = t < (uint64_t)ncpus ? (cpus[t].on ? 0 : 1) : PSCI_RET_INVALID;
+      int t = khv_mpidr_idx(get_x(c, 1), ncpus);
+      r = t >= 0 ? (cpus[t].on ? 0 : 1) : PSCI_RET_INVALID;
       break;
     }
     case 0x84000006: r = 2; break;  // MIGRATE_INFO_TYPE: no hace falta migrar
@@ -830,7 +951,9 @@ static void wfi(struct cpu *c) {
   hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_CNTV_CTL_EL0, &ctl);
   hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_CNTV_CVAL_EL0, &cval);
   uint64_t ahora = mach_absolute_time();
-  uint64_t tope_ns = ncpus > 1 ? 2000000 : 1000000000;  // 2 ms con SMP, 1 s si no
+  // 2 ms con SMP o con EL2 (el kernel puede estar usando el timer de EL2,
+  // CNTHP, que aquí no se mira), 1 s si no.
+  uint64_t tope_ns = ncpus > 1 || anidada ? 2000000 : 1000000000;
   if ((ctl & 1) && !(ctl & 2)) {
     uint64_t vence = cval + c->vtimer_offset;
     if (vence <= ahora) return;
@@ -860,6 +983,33 @@ static void volcar(struct cpu *c, const char *por) {
 }
 
 static int ram_reparar_ipa(struct cpu *c, uint64_t ipa);
+
+// khv_sysreg_iss traduce el ISS de un MSR/MRS atrapado (EC 0x18: Op0, Op2,
+// Op1, CRn, Rt, CRm, dirección) a la codificación de hv_sys_reg_t (la de
+// MRS: Op0:Op1:CRn:CRm:Op2, p. ej. CNTHCTL_EL2 = 0xe708).
+uint16_t khv_sysreg_iss(uint64_t iss) {
+  unsigned op0 = (iss >> 20) & 3, op2 = (iss >> 17) & 7, op1 = (iss >> 14) & 7, crn = (iss >> 10) & 0xf,
+           crm = (iss >> 1) & 0xf;
+  return (uint16_t)(op0 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2);
+}
+
+// sysreg_el2: en una VM con EL2, HVF devuelve al VMM algunos accesos del
+// kernel a registros de EL2 que él mismo lleva (medido en el M4 con macOS
+// 26.5: CNTHCTL_EL2, que el kernel escribe en init_el2). Se atienden con
+// hv_vcpu_{get,set}_sys_reg, como hace QEMU. true si el registro era de HVF;
+// false si HVF no lo conoce (queda como antes: lectura a 0, escritura
+// ignorada).
+static bool sysreg_el2(struct cpu *c, uint64_t syn) {
+  hv_sys_reg_t r = (hv_sys_reg_t)khv_sysreg_iss(syn);
+  unsigned rt = (syn >> 5) & 0x1f;
+  if (syn & 1) {
+    uint64_t v = 0;
+    if (hv_vcpu_get_sys_reg(c->id, r, &v) != HV_SUCCESS) return false;
+    set_x(c, rt, v);
+    return true;
+  }
+  return hv_vcpu_set_sys_reg(c->id, r, get_x(c, rt)) == HV_SUCCESS;
+}
 
 // LOS vCPU SE CREAN EN ORDEN DE ÍNDICE.
 //
@@ -922,13 +1072,14 @@ static void *vcpu_hilo(void *arg) {
   turno_esperar(c->idx);
   hv_return_t r = hv_vcpu_create(&c->id, &c->exit, NULL);
   turno_pasar();
-  if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
+  if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, khv_mpidr_aff(c->idx) | (1ULL << 31));
   if (r == HV_SUCCESS) {
     filtrar_id(c);
     // De inicial solo se usan los registros de sistema (reiniciar_sysregs,
     // estado_cpu_on): leer el resto era una pasada de más por vCPU en cada
     // restauración.
     guardar_sysregs(c, &c->inicial);
+    if (anidada) guardar_el2(c);
   }
   pthread_mutex_lock(&mu);
   if (r != HV_SUCCESS) {
@@ -949,14 +1100,16 @@ static void *vcpu_hilo(void *arg) {
   if (parar) return NULL;
 
   if (restaurando) {
+    uint64_t tr = c->idx == 0 ? khv_traza_empieza(KHV_F_CPU) : 0;
     cargar_cpu(c);
+    if (c->idx == 0) khv_traza_acaba(KHV_F_CPU, tr);
   } else {
     // Arranque en frío: el kernel empieza en el vCPU 0.
     VOK(hv_vcpu_get_vtimer_offset(c->id, &c->vtimer_offset));
     if (c->idx == 0) {
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, kernel_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, fdt_gpa));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_INICIO));
       c->on = true;
     }
   }
@@ -980,10 +1133,16 @@ static void *vcpu_hilo(void *arg) {
       reiniciar_sysregs(c);
       VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, c->on_entry));
       VOK(hv_vcpu_set_reg(c->id, HV_REG_X0, c->on_ctx));
-      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_ENTRADA));
+      VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, CPSR_INICIO));
     }
-    if (t_primer_run < 0 && c->idx == 0) t_primer_run = ms_desde_inicio();
+    if (t_primer_run < 0 && c->idx == 0) {
+      t_primer_run = ms_desde_inicio();
+      khv_traza_hito(KHV_H_PRIMER_RUN);
+    }
     VOK(hv_vcpu_run(c->id));
+    // Con alguien trazando, lo que cuesta atender la salida (no el WFI, que
+    // es esperar): un evento si pasa de KHV_SALIDA_CARA_NS.
+    uint64_t t_salida = khv_traza_activa() ? mach_absolute_time() : 0;
     switch (c->exit->reason) {
       case HV_EXIT_REASON_CANCELED: break;
       case HV_EXIT_REASON_VTIMER_ACTIVATED:
@@ -1037,6 +1196,10 @@ static void *vcpu_hilo(void *arg) {
           }
           case 0x18: {  // MSR/MRS atrapado: lecturas a 0, escrituras ignoradas
             unsigned rt = (syn >> 5) & 0x1f;
+            if (anidada && sysreg_el2(c, syn)) {
+              avanzar_pc(c);
+              break;
+            }
             static int avisos;
             if (avisos++ < 10) logf_("cpu%d: trapped sysreg iss=%#llx", c->idx, syn & 0x1ffffff);
             if (syn & 1) set_x(c, rt, 0);
@@ -1060,6 +1223,12 @@ static void *vcpu_hilo(void *arg) {
         fin_vm(1, m);
         return NULL;
       }
+    }
+    if (t_salida && c->exit->reason == HV_EXIT_REASON_EXCEPTION) {
+      uint64_t syn = c->exit->exception.syndrome;
+      unsigned ec = (syn >> 26) & 0x3f;
+      uint64_t ns = (uint64_t)((__uint128_t)(mach_absolute_time() - t_salida) * tb.numer / tb.denom);
+      if (ec != 0x01 && ns > KHV_SALIDA_CARA_NS) khv_traza_salida(c->idx, ec, c->exit->exception.physical_address, ns);
     }
   }
 }
@@ -1095,12 +1264,14 @@ static void dispositivos_quietos(void) {
   // siguientes ven la pausa y no tocan nada. De paso suelta lo pendiente:
   // una máquina pausada tras un squeeze no retiene esas páginas.
   if (hay_globo) vballoon_vaciar();
+  for (int i = 0; i < nvfs; i++) vvfs_quieto(i);
 }
 
 static void dispositivos_despertar(void) {
   for (int i = 0; i < ndisks; i++) vblk_despertar(i);
   if (hay_red) vnet_despertar();
   if (hay_vsock) vsock_despertar();
+  for (int i = 0; i < nvfs; i++) vvfs_despertar(i);
 }
 
 // dispositivos_quietos espera sin plazo (a que un hilo de disco suelte su
@@ -1173,6 +1344,7 @@ static void soltar_locked(void) {
     t_restaurado = ms_desde_inicio();
   }
   pausa_reloj = false;  // el offset de la restauración ya lo tiene en cuenta
+  khv_traza_hito(KHV_H_SOLTAR);
   liberada = true;
   arrancar = true;
   g_pausa = false;
@@ -1184,11 +1356,24 @@ static void soltar_locked(void) {
 static bool vm_tocada;
 bool khv_vm_tocada(void) { return vm_tocada; }
 
+int khv_max_vcpus(void) {
+  uint32_t m = 0;
+  if (hv_vm_get_max_vcpu_count(&m) != HV_SUCCESS || m == 0) return MAX_CPUS;
+  return m < MAX_CPUS ? (int)m : MAX_CPUS;
+}
+
+int khv_el2_soportado(void) {
+  bool si = false;
+  return hv_vm_config_get_el2_supported(&si) == HV_SUCCESS && si;
+}
+
 int khv_create(const struct khv_config *c) {
   t_inicio = mach_absolute_time();
   mach_timebase_info(&tb);
-  if (c->ncpus < 1 || c->ncpus > MAX_CPUS) {
-    fallo("vcpu_count must be between 1 and %d", MAX_CPUS);
+  khv_traza_iniciar(t_inicio);
+  int maxc = khv_max_vcpus();
+  if (c->ncpus < 1 || c->ncpus > maxc) {
+    fallo("vcpu_count must be between 1 and %d", maxc);
     return -1;
   }
   if (c->mem_size < (64ULL << 20) || c->mem_size % PAGINA) {
@@ -1197,6 +1382,11 @@ int khv_create(const struct khv_config *c) {
   }
   if (c->ndisks < 1 || c->ndisks > KHV_MAX_DISKS) {
     fallo("between 1 and %d drives", KHV_MAX_DISKS);
+    return -1;
+  }
+  // Antes de tocar HVF: sin EL2 el proceso sigue sirviendo para otra VM.
+  if (c->nested && !khv_el2_soportado()) {
+    fallo("nested virtualization is not supported on this Mac (needs an Apple M3 or later and macOS 15 or later)");
     return -1;
   }
   ncpus = c->ncpus;
@@ -1225,11 +1415,31 @@ int khv_create(const struct khv_config *c) {
     fallo("too many virtio devices (%d, at most %d)", nvirtio, VIRTIO_MAX);
     return -1;
   }
+  if (c->nvfs < 0 || c->nvfs > KHV_MAX_VFS) {
+    fallo("at most %d virtio-fs devices", KHV_MAX_VFS);
+    return -1;
+  }
+  nvfs = c->nvfs;
+  slot_vfs = nvirtio;
+  nvirtio += nvfs;
 
   // Desde aquí un fallo deja el proceso inservible para otra VM
   // (Hypervisor.framework admite una por proceso y no hay vuelta atrás).
   vm_tocada = true;
-  TRY(hv_vm_create(NULL));
+  uint64_t tr = khv_traza_empieza(KHV_F_VM);
+  anidada = c->nested != 0;
+  if (anidada) {
+    hv_vm_config_t vc = hv_vm_config_create();
+    hv_return_t r = hv_vm_config_set_el2_enabled(vc, true);
+    if (r == HV_SUCCESS) r = hv_vm_create(vc);
+    os_release(vc);
+    if (r != HV_SUCCESS) {
+      fallo("hv_vm_create with EL2 (nested virtualization) failed: 0x%x", (unsigned)r);
+      return -1;
+    }
+  } else {
+    TRY(hv_vm_create(NULL));
+  }
   hv_gic_config_t g = hv_gic_config_create();
   TRY(hv_gic_config_set_distributor_base(g, GIC_DIST_BASE));
   TRY(hv_gic_config_set_redistributor_base(g, GIC_REDIST_BASE));
@@ -1239,20 +1449,29 @@ int khv_create(const struct khv_config *c) {
   TRY(hv_gic_get_spi_interrupt_range(&spi_base, &spi_n));
   uart_intid = spi_base + 1;
   rtc_intid = spi_base + 2;
-  for (int i = 0; i < VIRTIO_MAX; i++) virtio_intid[i] = spi_base + 16 + (uint32_t)i;
+  if (spi_n < 16 + VIRTIO_SLOTS) {
+    fallo("the GIC has %u SPIs, kling-hv needs %d", spi_n, 16 + VIRTIO_SLOTS);
+    return -1;
+  }
+  for (int i = 0; i < VIRTIO_SLOTS; i++) virtio_intid[i] = spi_base + 16 + (uint32_t)i;
+  khv_traza_acaba(KHV_F_VM, tr);
 
+  tr = khv_traza_empieza(KHV_F_DISP);
   uart_init(uart_intid, c->console_fd);
   log_fd = c->console_fd >= 0 ? c->console_fd : 2;
   rtc_init();
   for (int i = 0; i < ndisks; i++) {
     disk_path[i] = strdup(c->disks[i].path);
     disk_ro[i] = c->disks[i].ro != 0;
-    if (vblk_init(i, disk_path[i], disk_ro[i], c->disks[i].sin_flush != 0, virtio_intid[i]) != 0) return -1;
+    if (vblk_init(i, disk_path[i], disk_ro[i], c->disks[i].sinc, virtio_intid[i]) != 0) return -1;
   }
   if (hay_red) vnet_init(net_fd, net_mac, net_mtu, virtio_intid[slot_net]);
   if (hay_rng) vrng_init(virtio_intid[slot_rng]);
   if (hay_vsock) vsock_init(virtio_intid[slot_vsock]);
   if (hay_globo && vballoon_init(virtio_intid[slot_globo], c->balloon == 2) != 0) return -1;
+  for (int i = 0; i < nvfs; i++)
+    if (vvfs_init(i, c->vfs_tags[i], virtio_intid[slot_vfs + i]) != 0) return -1;
+  khv_traza_acaba(KHV_F_DISP, tr);
   return 0;
 }
 
@@ -1414,7 +1633,7 @@ static int cargar_kernel(void) {
   close(fd);
 
   struct fdt_params p = {.ram_size = g_ram_size, .ncpus = ncpus, .bootargs = cmdline, .uart_spi = uart_intid,
-                         .rtc_spi = rtc_intid, .nvirtio = nvirtio};
+                         .rtc_spi = rtc_intid, .nvirtio = nvirtio, .nested = anidada};
   size_t sz;
   hv_gic_get_distributor_size(&sz);
   p.dist_size = sz;
@@ -1431,6 +1650,7 @@ int khv_boot(void) {
   // La RAM de un arranque en frío: un fichero disperso del tamaño de la RAM,
   // borrado nada más abrirlo (el snapshot lo clona por su fd).
   char ruta[1024];
+  uint64_t tr = khv_traza_empieza(KHV_F_RAM);
   snprintf(ruta, sizeof ruta, "%s/.kling-hv-ram.XXXXXX", ram_dir);
   int fd = mkstemp(ruta);
   if (fd < 0) {
@@ -1444,8 +1664,13 @@ int khv_boot(void) {
     return -1;
   }
   if (mapear_ram(fd) != 0) return -1;
+  khv_traza_acaba(KHV_F_RAM, tr);
+  tr = khv_traza_empieza(KHV_F_KERNEL);
   if (cargar_kernel() != 0) return -1;
+  khv_traza_acaba(KHV_F_KERNEL, tr);
+  tr = khv_traza_empieza(KHV_F_VCPUS);
   if (crear_vcpus() != 0) return -1;
+  khv_traza_acaba(KHV_F_VCPUS, tr);
   pthread_mutex_lock(&mu);
   soltar_locked();
   pthread_mutex_unlock(&mu);
@@ -1475,6 +1700,12 @@ static int escribir_todo(int fd, const void *b, size_t n, off_t off) {
 }
 
 int khv_restore(const char *mem_path) {
+  if (anidada) {
+    fallo(ERR_SNAP_ANIDADA);
+    return -1;
+  }
+  khv_traza_restaurando();
+  uint64_t tr = khv_traza_empieza(KHV_F_LEER);
   int fd = open(mem_path, O_RDONLY);
   if (fd < 0) {
     fallo("open %s: %s", mem_path, strerror(errno));
@@ -1485,23 +1716,37 @@ int khv_restore(const char *mem_path) {
   static struct snap_hdr h;
   if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof pie ||
       leer_todo(fd, &pie, sizeof pie, st.st_size - (off_t)sizeof pie) != 0 || pie.magic != SNAP_MAGIC ||
-      (pie.hdr_len != sizeof h && pie.hdr_len != SNAP_HDR_V1 && pie.hdr_len != SNAP_HDR_V2 &&
-       pie.hdr_len != SNAP_HDR_V3) ||
+      !snap_forma(pie.hdr_len) ||
       pie.hdr_off > (uint64_t)st.st_size ||
       pie.hdr_len > (uint64_t)st.st_size - pie.hdr_off ||
-      (memset(&h, 0, sizeof h), leer_todo(fd, &h, pie.hdr_len, (off_t)pie.hdr_off)) != 0 || h.magic != SNAP_MAGIC) {
+      (memset(&h, 0, sizeof h), leer_todo(fd, &h, pie.hdr_len < sizeof h ? pie.hdr_len : sizeof h, (off_t)pie.hdr_off)) != 0 ||
+      h.magic != SNAP_MAGIC) {
     close(fd);
     fallo("%s is not a kling-hv memory file (or was written by another version)", mem_path);
     return -1;
   }
-  // Cada versión con el tamaño de cabecera de esa versión y ningún otro: una
-  // v3 con el hdr_len de la 2 haría leer el globo de la v2 con la forma de la
-  // v3 (y con el de la 1, ceros donde van el vsock y el globo).
-  if (!(h.version == SNAP_VERSION && pie.hdr_len == sizeof h) && !(h.version == 1 && pie.hdr_len == SNAP_HDR_V1) &&
-      !(h.version == 2 && pie.hdr_len == SNAP_HDR_V2) && !(h.version == 3 && pie.hdr_len == SNAP_HDR_V3)) {
+  // Cada versión con el tamaño de cabecera de esa versión (y de sus vCPU; en
+  // la 6, más la sección de virtio-fs con sus dispositivos).
+  size_t cab = snap_hdr_len(h.version, h.ncpus);
+  static struct snap_vfs sv;
+  memset(&sv, 0, sizeof sv);
+  if (h.version == 6 && cab > 0) {
+    uint64_t resto = pie.hdr_len > cab ? pie.hdr_len - cab : 0;
+    if (resto < SNAP_VFS_LEN(1) || resto > SNAP_VFS_LEN(KHV_MAX_VFS) ||
+        (resto - SNAP_VFS_CAB) % sizeof(struct vvfs_state) != 0 ||
+        leer_todo(fd, &sv, resto, (off_t)(pie.hdr_off + cab)) != 0 || SNAP_VFS_LEN(sv.nvfs) != resto ||
+        (memset(&h, 0, sizeof h), leer_todo(fd, &h, cab, (off_t)pie.hdr_off)) != 0) {
+      cab = 0;
+    } else {
+      cab = pie.hdr_len;
+    }
+  }
+  if (cab == 0 || cab != pie.hdr_len) {
     close(fd);
-    fallo("%s: snapshot state version %u with a %llu-byte header, this kling-hv reads %u (%zu bytes)", mem_path, h.version,
-          (unsigned long long)pie.hdr_len, SNAP_VERSION, sizeof h);
+    fallo("%s: snapshot state version %u with %u vCPU and a %llu-byte header, this kling-hv reads up to %u (%zu bytes "
+          "up to %d vCPU, %zu more per vCPU, %d at most)",
+          mem_path, h.version, h.ncpus, (unsigned long long)pie.hdr_len, SNAP_VERSION, (size_t)SNAP_HDR_V4, SNAP_CPUS_V4,
+          sizeof(struct cpu_state), MAX_CPUS);
     return -1;
   }
   // La disposición la fija khv_snapshot: RAM en [0, ram_size), la cabecera
@@ -1557,12 +1802,12 @@ int khv_restore(const char *mem_path) {
   }
   if (h.ram_size != g_ram_size || (int)h.ncpus != ncpus || (int)h.ndisks != ndisks || (bool)h.hay_red != hay_red ||
       (bool)h.hay_rng != hay_rng || (bool)h.hay_vsock != hay_vsock || (bool)h.hay_globo != hay_globo ||
-      h.uart_intid != uart_intid) {
+      (int)sv.nvfs != nvfs || h.uart_intid != uart_intid) {
     close(fd);
     fallo("the snapshot does not match the configured machine (ram %llu/%llu, cpus %u/%d, disks %u/%d, net %u/%d, "
-          "rng %u/%d, vsock %u/%d, balloon %u/%d)",
+          "rng %u/%d, vsock %u/%d, balloon %u/%d, virtio-fs %u/%d)",
           h.ram_size, g_ram_size, h.ncpus, ncpus, h.ndisks, ndisks, h.hay_red, hay_red, h.hay_rng, hay_rng,
-          h.hay_vsock, hay_vsock, h.hay_globo, hay_globo);
+          h.hay_vsock, hay_vsock, h.hay_globo, hay_globo, sv.nvfs, nvfs);
     return -1;
   }
   void *gdata = malloc(h.gic_size ? h.gic_size : 1);
@@ -1572,10 +1817,14 @@ int khv_restore(const char *mem_path) {
     fallo("%s: GIC state truncated", mem_path);
     return -1;
   }
+  khv_traza_acaba(KHV_F_LEER, tr);
+  tr = khv_traza_empieza(KHV_F_RAM);
   if (mapear_ram(fd) != 0) {
     free(gdata);
     return -1;
   }
+  khv_traza_acaba(KHV_F_RAM, tr);
+  tr = khv_traza_empieza(KHV_F_DISP_ESTADO);
   uart_set(&h.uart);
   rtc_set(&h.rtc);
   for (int i = 0; i < ndisks; i++) vblk_set(i, &h.vblk[i]);
@@ -1587,11 +1836,16 @@ int khv_restore(const char *mem_path) {
   if (hay_rng) vrng_set(&h.vrng);
   if (hay_vsock) vsock_set(&h.vsock);
   if (hay_globo) vballoon_set(&h.globo);
+  for (int i = 0; i < nvfs; i++) vvfs_set(i, &sv.vfs[i]);
   restaurando = true;
+  khv_traza_acaba(KHV_F_DISP_ESTADO, tr);
+  tr = khv_traza_empieza(KHV_F_VCPUS);
   if (crear_vcpus() != 0) {
     free(gdata);
     return -1;
   }
+  khv_traza_acaba(KHV_F_VCPUS, tr);
+  tr = khv_traza_empieza(KHV_F_GIC);
   hv_return_t r = hv_gic_set_state(gdata, h.gic_size);
   free(gdata);
   if (r != HV_SUCCESS) {
@@ -1607,7 +1861,10 @@ int khv_restore(const char *mem_path) {
   if (hay_rng) vrng_reafirmar();
   if (hay_vsock) vsock_reafirmar();
   if (hay_globo) vballoon_reafirmar();
+  for (int i = 0; i < nvfs; i++) vvfs_reafirmar(i);
   for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
+  khv_traza_acaba(KHV_F_GIC, tr);
+  for (int i = 0; i < ncpus; i++) cpus[i].st = *hdr_cpu(&h, i);
   snap_t_pausa = h.t_pausa;
   // Queda en pausa hasta khv_resume: los PATCH de discos del núcleo ya
   // llegaron antes de crear la VM, pero el núcleo reanuda cuando quiere.
@@ -1658,6 +1915,9 @@ static int quietos_o_deshacer(unsigned antes) {
 }
 
 int khv_pause(unsigned bit) {
+  // Solo la del núcleo: la del regulador va cada pocos ms.
+  bool trazar = bit & KHV_PAUSA_API;
+  uint64_t tr = trazar ? khv_traza_empieza(KHV_F_PAUSA) : 0;
   pthread_mutex_lock(&op_mu);
   pthread_mutex_lock(&mu);
   unsigned antes = pausa_bits;
@@ -1682,6 +1942,7 @@ int khv_pause(unsigned bit) {
     pthread_mutex_unlock(&mu);
     int r = falta ? quietos_o_deshacer(antes) : 0;
     pthread_mutex_unlock(&op_mu);
+    if (trazar) khv_traza_acaba(KHV_F_PAUSA, tr);
     return r;
   }
   pausa_pedida = true;
@@ -1749,6 +2010,7 @@ int khv_pause(unsigned bit) {
     return -1;
   }
   pthread_mutex_unlock(&op_mu);
+  if (trazar) khv_traza_acaba(KHV_F_PAUSA, tr);
   return parar ? -1 : 0;
 }
 
@@ -1786,6 +2048,10 @@ int khv_resume(unsigned bit) {
 }
 
 int khv_snapshot(const char *mem_out) {
+  if (anidada) {
+    fallo(ERR_SNAP_ANIDADA);
+    return -1;
+  }
   pthread_mutex_lock(&op_mu);
   int ret = -1;
   int fd = -1;
@@ -1800,9 +2066,11 @@ int khv_snapshot(const char *mem_out) {
     fallo("the VM must be paused to snapshot it");
     goto fin;
   }
+  uint64_t tr = khv_traza_empieza(KHV_F_SNAP_ESTADO);
   memset(&h, 0, sizeof h);
   h.magic = SNAP_MAGIC;
-  h.version = SNAP_VERSION;
+  // La versión más vieja que lo dice todo: la 4 hasta SNAP_CPUS_V4 vCPU.
+  h.version = ncpus > SNAP_CPUS_V4 ? 5 : 4;
   h.ncpus = (uint32_t)ncpus;
   h.ndisks = (uint32_t)ndisks;
   h.ram_size = g_ram_size;
@@ -1825,18 +2093,22 @@ int khv_snapshot(const char *mem_out) {
   if (hay_vsock) vsock_get(&h.vsock);
   h.hay_globo = hay_globo;
   if (hay_globo) vballoon_get(&h.globo);
+  static struct snap_vfs sv;
+  memset(&sv, 0, sizeof sv);
+  sv.nvfs = (uint32_t)nvfs;
+  for (int i = 0; i < nvfs; i++) vvfs_get(i, &sv.vfs[i]);
+  if (nvfs > 0) h.version = 6;
   // Un CPU_ON pendiente (on_pend, on_entry, on_ctx) no va en la cabecera:
   // se guarda como si ya hubiera entrado, con el estado que le pone el hilo
   // del vCPU al atenderlo (estado_cpu_on). Así el formato no cambia y el vCPU
   // restaurado arranca en su entrada en vez de quedarse apagado para siempre.
   // Con todos en pausa nadie toca on_pend, pero se lee con mu como en psci.
-  unsigned pendientes = 0;
+  bool pendientes[MAX_CPUS] = {0};
   pthread_mutex_lock(&mu);
-  for (int i = 0; i < ncpus; i++)
-    if (cpu_guardada(&h.cpu[i], &cpus[i])) pendientes |= 1u << i;
+  for (int i = 0; i < ncpus; i++) pendientes[i] = cpu_guardada(hdr_cpu(&h, i), &cpus[i]);
   pthread_mutex_unlock(&mu);
   for (int i = 0; i < ncpus; i++)
-    if (pendientes & (1u << i)) logf_("cpu%d: pending CPU_ON saved as already entered", i);
+    if (pendientes[i]) logf_("cpu%d: pending CPU_ON saved as already entered", i);
   hv_gic_state_t gs = hv_gic_state_create();
   if (!gs) {
     fallo("hv_gic_state_create returned NULL");
@@ -1851,6 +2123,8 @@ int khv_snapshot(const char *mem_out) {
   }
   os_release(gs);
   h.gic_size = gsz;
+  khv_traza_acaba(KHV_F_SNAP_ESTADO, tr);
+  tr = khv_traza_empieza(KHV_F_SNAP_CLON);
 
   // Memoria: clon del fichero que respalda la RAM + las páginas que el
   // invitado cambió (copiadas por el CoW de MAP_PRIVATE). mincore da el mapa.
@@ -1874,6 +2148,8 @@ int khv_snapshot(const char *mem_out) {
     fallo("truncating %s: %s", mem_out, strerror(errno));
     goto fin;
   }
+  khv_traza_acaba(KHV_F_SNAP_CLON, tr);
+  tr = khv_traza_empieza(KHV_F_SNAP_PAGINAS);
   size_t np = g_ram_size / PAGINA;
   v = malloc(np);
   if (!v || mincore(g_ram, g_ram_size, (char *)v) != 0) {
@@ -1911,13 +2187,22 @@ int khv_snapshot(const char *mem_out) {
     }
     i = j;
   }
-  struct snap_pie pie = {.magic = SNAP_MAGIC, .ram_size = g_ram_size, .hdr_off = g_ram_size, .hdr_len = sizeof h};
-  if (escribir_todo(fd, &h, sizeof h, (off_t)g_ram_size) != 0 ||
-      escribir_todo(fd, gdata, gsz, (off_t)(g_ram_size + sizeof h)) != 0 ||
-      escribir_todo(fd, &pie, sizeof pie, (off_t)(g_ram_size + sizeof h + gsz)) != 0) {
+  khv_traza_acaba(KHV_F_SNAP_PAGINAS, tr);
+  tr = khv_traza_empieza(KHV_F_SNAP_ESCRIBIR);
+  // La cabecera de la 4 (o de la 5, con más vCPU) tal cual y, con virtio-fs
+  // (la 6), su sección detrás.
+  size_t hl = snap_hdr_len(h.version, h.ncpus);
+  size_t vl = nvfs > 0 ? SNAP_VFS_LEN(nvfs) : 0;
+  struct snap_pie pie = {.magic = SNAP_MAGIC, .ram_size = g_ram_size, .hdr_off = g_ram_size, .hdr_len = hl + vl};
+  if (escribir_todo(fd, &h, hl, (off_t)g_ram_size) != 0 ||
+      (vl > 0 && escribir_todo(fd, &sv, vl, (off_t)(g_ram_size + hl)) != 0) ||
+      escribir_todo(fd, gdata, gsz, (off_t)(g_ram_size + hl + vl)) != 0 ||
+      escribir_todo(fd, &pie, sizeof pie, (off_t)(g_ram_size + hl + vl + gsz)) != 0) {
     fallo("writing the state to %s: %s", mem_out, strerror(errno));
     goto fin;
   }
+  khv_traza_acaba(KHV_F_SNAP_ESCRIBIR, tr);
+  khv_traza_freeze();
   ret = 0;
 fin:
   if (fd >= 0) close(fd);

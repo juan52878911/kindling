@@ -38,7 +38,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -376,6 +376,10 @@ func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
 // SetBattery fija el modo batería (ver internal/machine/bateria.go).
 func (s *Server) SetBattery(c machine.BatteryConfig) { s.mgr.SetBattery(c) }
 
+// SetMemPressure fija la reacción a la presión de memoria del host (ver
+// internal/machine/presion_memoria.go).
+func (s *Server) SetMemPressure(c machine.MemPressureConfig) { s.mgr.SetMemPressure(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {
@@ -451,6 +455,8 @@ func (s *Server) rutas() []ruta {
 		{"POST /images", AccionAdmin, nil, s.handleBuildImage},
 		{"GET /images", AccionImagenes, nil, s.handleImages},
 		{"DELETE /images/{name}", AccionAdmin, nil, s.handleRemoveImage},
+		{"GET /image-snapshots", AccionAdmin, nil, s.handleImageSnapshots},
+		{"DELETE /image-snapshots", AccionAdmin, nil, s.handlePruneImageSnapshots},
 		{"GET /volumes", AccionAdmin, nil, s.handleVolumes},
 		{"POST /volumes", AccionAdmin, nil, s.handleCreateVolume},
 		{"DELETE /volumes/{name}", AccionAdmin, nil, s.handleRemoveVolume},
@@ -905,6 +911,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info.Tuning = s.ajustes()
 		info.PoolProblems = s.mgr.ProblemasFondos()
 		info.Stuck = s.mgr.Atascadas()
+		info.ImageSnapshots = s.mgr.InfoSnapshotsImagen()
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion

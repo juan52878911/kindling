@@ -26,7 +26,7 @@ interno**, aunque se pueda usar.
   condición: hasta que haya un runner Apple Silicon en CI, cada release pasa a
   mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv` en un Mac con
   Apple Silicon, y `scripts/release.sh` no etiqueta sin eso
-  ([`releases.md`](releases.md), paso 3b). Sus límites (8 vCPU, 8 discos,
+  ([`releases.md`](releases.md), paso 3b). Sus límites (64 vCPU y no más que núcleos, 8 discos,
   sin pantalla) están en [`backend-hv.md`](backend-hv.md).
 - La API HTTP del daemon: rutas, campos JSON, capacidades de `GET /info`,
   códigos de estado documentados en [`api.md`](api.md) y las cabeceras
@@ -90,11 +90,13 @@ Una sola versión para todo el repo. En lo estable:
   añade el campo, que un kling anterior ignora y lee igual, así que se migran
   sin copia (`internal/machine/grafo.go`);
 - escribir una versión nueva de `kling_vz` (siempre la más baja que describe
-  la máquina) o de `KLNGHV`. `kling-hv` escribe **siempre la suya**
-  (`SNAP_VERSION` en `vz/internal/hvvm/vm.c`), sea cual sea la máquina, y no
-  hay bajada: lo que congela un `kling-hv` con la v3 no lo lee uno que solo
-  lee la v2, así que volver a una release anterior deja esas congeladas y
-  dorados `stale` (`kling upgrade -rollback` lo comprueba antes de volver);
+  la máquina) o de `KLNGHV`. `kling-hv` escribe la v4, la v5 en una máquina
+  de más de 8 vCPU y la v6 en una con carpetas por virtio-fs (`SNAP_VERSION`
+  en `vz/internal/hvvm/vm.c`; tabla en [backend-hv.md](backend-hv.md)), y
+  nunca una anterior a la 4: lo que congela un
+  `kling-hv` con la v3 no lo lee uno que solo lee la v2, así que volver a una
+  release anterior deja esas congeladas y dorados `stale` (`kling upgrade
+  -rollback` lo comprueba antes de volver);
 - deprecar (abajo), y cambiar lo experimental.
 
 **PATCH** (1.x.y): arreglos. Ningún formato cambia de versión, así que se puede
@@ -188,8 +190,8 @@ agente ≥ 1.0 tiene las tres.
 | Extensión ↔ daemon | `min_kling` ≤ versión del núcleo; `max_api` ≥ API del daemon | manifiesto v2 | **sí** `min_kling` (error); `max_api` solo avisa |
 | Daemon ↔ agente | ver la ventana de arriba | `caps` de `/healthz`; `kling.*` desconocidos se ignoran; `agent` en `recipe.json` | **sí**, con los [requisitos del agente](#ventana-de-versiones) |
 | Daemon ↔ Firecracker | la MAJOR.MINOR fijada por cada release (hoy 1.17); otra deja los dorados `stale` | `vmm` en `meta.json` y en el sello | **sí** |
-| Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-3): lo que este no lee sale `stale` | **sí** |
-| Daemon ↔ kling-hv | la misma versión que el daemon | `KLNGHV` (estado v4, lee v1 a v3, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
+| Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-4; 4 con carpetas por virtio-fs): lo que este no lee sale `stale` | **sí** |
+| Daemon ↔ kling-hv | la misma versión que el daemon | `KLNGHV` (v4; v5 con más de 8 vCPU, v6 con virtio-fs; lee v1 a v6, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
 | macOS | kling-vz ≥ 14.0, kling-hv ≥ 15.2. El `mem.file` de vz está ligado a la build de macOS: si no restaura, se rehace | `minos` comprobado en CI; `macos` en el meta | **sí** |
 | Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta y en el sello; `kernel_sha256` y `kernel_mismatch` en `/info`, que `kling doctor` enseña | **sí** |
 | Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | `arch` en el meta y en el sello: otra sale `stale` | **sí** |

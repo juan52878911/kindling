@@ -7,6 +7,7 @@ package hvvm
 #include "khv.h"
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
                   uint32_t *usado);
+uint32_t khv_prueba_cfg(uint32_t off);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
@@ -81,6 +82,25 @@ func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) 
 	return int(e), uint32(u)
 }
 
+// cfgDisco lee 4 bytes de los registros o la configuración (desde 0x100)
+// del disco de pruebas.
+func cfgDisco(off uint32) uint32 { return uint32(C.khv_prueba_cfg(C.uint32_t(off))) }
+
+// modoDisco cambia si el disco de pruebas es de solo lectura y su modo de
+// sincronización (C.KHV_SINC_*).
+func modoDisco(ro bool, sinc int) { C.vblk_prueba_modo(0, C.bool(ro), C.int(sinc)) }
+
+// Los modos de sincronización de khv.h, para las pruebas.
+const (
+	sincFull    = int(C.KHV_SINC_FULL)
+	sincBarrier = int(C.KHV_SINC_BARRIER)
+	sincNone    = int(C.KHV_SINC_NONE)
+)
+
+// bloquesDisco: los bloques de 512 B que ocupa el fichero del disco de
+// pruebas (st_blocks), o -1.
+func bloquesDisco() int64 { return int64(C.vblk_prueba_bloques(0)) }
+
 // vsockTx manda como el invitado los bytes de enviado (4000 y cinco de
 // 64 KiB) en seis paquetes por la cola de tx (khv_vsock_prueba_tx) y devuelve lo que leyó Go,
 // si algo tuvo que esperar en pend, y el código de error (negativo) si no se
@@ -96,18 +116,33 @@ func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
 	return out[:r], p != 0, 0
 }
 
-// construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
-// virtio) y devuelve el DTB, o nil si no se pudo construir.
-func construirFDT() []byte {
+// construirFDT llama a fdt_build con una VM de mentira (ncpus vCPU, 256 MiB,
+// un virtio) y devuelve el DTB, o nil si no se pudo construir.
+func construirFDT(ncpus int) []byte { return construirFDTOpts(ncpus, false) }
+
+// construirFDTAnidada: lo mismo con 2 vCPU, con EL2 o sin él.
+func construirFDTAnidada(anidada bool) []byte { return construirFDTOpts(2, anidada) }
+
+func construirFDTOpts(ncpus int, anidada bool) []byte {
 	buf := make([]byte, 1<<16)
 	args := C.CString("console=ttyS0")
 	defer C.free(unsafe.Pointer(args))
-	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: 2, bootargs: args, dist_size: 0x10000,
+	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: C.int(ncpus), bootargs: args, dist_size: 0x10000,
 		redist_size: 0x20000, uart_spi: 33, rtc_spi: 34, nvirtio: 1}
 	p.virtio_spi[0] = 35
+	if anidada {
+		p.nested = 1
+	}
 	n := C.fdt_build(unsafe.Pointer(&buf[0]), C.size_t(len(buf)), &p)
 	if n == 0 {
 		return nil
 	}
 	return buf[:n]
 }
+
+// mpidrAff y mpidrIdx: khv_mpidr_aff y khv_mpidr_idx de khv.h.
+func mpidrAff(i int) uint64          { return uint64(C.khv_mpidr_aff(C.int(i))) }
+func mpidrIdx(aff uint64, n int) int { return int(C.khv_mpidr_idx(C.uint64_t(aff), C.int(n))) }
+
+// maxVCPUsC es khv_max_vcpus (no crea ninguna VM).
+func maxVCPUsC() int { return int(C.khv_max_vcpus()) }

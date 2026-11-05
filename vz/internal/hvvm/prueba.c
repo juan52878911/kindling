@@ -23,6 +23,7 @@ static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] 
 typedef bool (*mmio_fn)(uint64_t off, bool escribir, uint64_t *val, int size);
 
 static bool blk_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vblk_mmio(0, off, escribir, val, size); }
+static bool vfs_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vvfs_mmio(0, off, escribir, val, size); }
 
 static void w(mmio_fn f, uint64_t off, uint64_t v) { f(off, true, &v, 4); }
 
@@ -50,7 +51,7 @@ static int preparar(void) {
     if (fd < 0) return -1;
     if (ftruncate(fd, 1 << 20) != 0) return -1;
     close(fd);
-    int r = vblk_init(0, ruta, false, false, 48);
+    int r = vblk_init(0, ruta, false, KHV_SINC_FULL, 48);
     unlink(ruta);
     if (r != 0) return -1;
     static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
@@ -58,6 +59,7 @@ static int preparar(void) {
     vrng_init(50);
     vsock_init(51);
     if (vballoon_init(52, true) != 0) return -1;
+    if (vvfs_init(0, "kling-share-0", 53) != 0) return -1;
     listo = true;
   }
   return 0;
@@ -71,9 +73,9 @@ int khv_prueba(const uint8_t *d, size_t n) {
   size_t l = n - 64 < g_ram_size ? n - 64 : g_ram_size;
   memcpy(g_ram, d + 64, l);
 
-  mmio_fn devs[] = {blk_mmio, vnet_mmio, vrng_mmio, vsock_mmio, vballoon_mmio};
-  int ncolas[] = {1, 2, 1, 3, 3};
-  int k = d[0] % 5;
+  mmio_fn devs[] = {blk_mmio, vnet_mmio, vrng_mmio, vsock_mmio, vballoon_mmio, vfs_mmio};
+  int ncolas[] = {1, 2, 1, 3, 3, 2};
+  int k = d[0] % 6;
   mmio_fn f = devs[k];
   w(f, 0x070, 0);  // reset: cada prueba empieza de cero
   for (int q = 0; q < ncolas[k]; q++) {
@@ -101,6 +103,9 @@ int khv_prueba(const uint8_t *d, size_t n) {
   for (int q = 0; q < ncolas[k]; q++) w(f, 0x050, (uint64_t)q);
   if (k == 0) vblk_prueba(0);
   if (k == 4) vballoon_objetivo(rd32(d + 60));
+  // virtio-fs: lo que Go contestaría, con tamaños de los datos (a veces más
+  // de lo que cabe en la cadena) y respuestas repetidas.
+  if (k == 5) vvfs_prueba(0, d + 40, 6);
   w(f, 0x064, 0xff);  // InterruptACK
   w(f, 0x070, 0);
   return 0;
@@ -203,10 +208,20 @@ int khv_prueba_flush(void) {
   return estado;
 }
 
-// khv_prueba_es manda al disco 0 una petición tipo (0 IN, 1 OUT) en sector
-// con nd búferes de datos de lens[i] bytes, cada uno en su trozo de 64 KiB de
-// la RAM (no seguidos: preadv/pwritev tienen que repartirlos bien). datos
-// trae lo que se escribe (OUT) y vuelve con lo leído (IN). El búfer malo (o
+// khv_prueba_cfg lee 4 bytes de los registros (off < 0x100) o de la
+// configuración (0x100 en adelante) del disco 0.
+uint32_t khv_prueba_cfg(uint32_t off) {
+  if (preparar() != 0) return 0;
+  uint64_t v = 0;
+  vblk_mmio(0, off, false, &v, 4);
+  return (uint32_t)v;
+}
+
+// khv_prueba_es manda al disco 0 una petición tipo (0 IN, 1 OUT, 11 DISCARD,
+// 13 WRITE_ZEROES...) en sector con nd búferes de datos de lens[i] bytes,
+// cada uno en su trozo de 64 KiB de la RAM (no seguidos: preadv/pwritev
+// tienen que repartirlos bien). datos trae lo que se escribe (OUT y los
+// segmentos de DISCARD y WRITE_ZEROES) y vuelve con lo leído (IN). El búfer malo (o
 // -1) apunta fuera de la RAM. Deja en *usado la longitud del used y devuelve
 // el byte de estado, o -1 si no se pudo preparar.
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
@@ -237,7 +252,7 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
   for (int i = 0; i < nd; i++) {
     if (lens[i] > 0x10000) return -1;
     uint64_t a = buf + (uint64_t)i * 0x10000;
-    if (tipo == 1) memcpy(gpa_ptr(a, lens[i]), datos + o, lens[i]);
+    if (tipo != 0) memcpy(gpa_ptr(a, lens[i]), datos + o, lens[i]);
     if (i == malo) a = RAM_BASE + PRUEBA_RAM;
     uint16_t f = VIRTQ_DESC_F_NEXT | (tipo == 0 ? VIRTQ_DESC_F_WRITE : 0);
     d[1 + i] = (struct vdesc){a, lens[i], f, (uint16_t)(2 + i)};

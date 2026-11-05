@@ -4,6 +4,7 @@ package hvvm
 
 import (
 	"io"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -32,6 +33,21 @@ func TestCreateRechazaLoQueNoTiene(t *testing.T) {
 	s.Graphics = &spec.Graphics{Width: 640, Height: 480}
 	if _, err := f.Create(s, "", nil); err == nil || !strings.Contains(err.Error(), "display") {
 		t.Fatalf("graphics: %v", err)
+	}
+	// Más vCPU de los que deja Hypervisor.framework (o MAX_CPUS): khv_create
+	// lo rechaza antes de crear la VM.
+	s = specMinimo(1)
+	s.MachineConfig.VCPUCount = maxVCPUsC() + 1
+	if _, err := f.Create(s, "", nil); err == nil || !strings.Contains(err.Error(), "vcpu_count must be between 1 and") {
+		t.Fatalf("%d vCPU: %v", s.MachineConfig.VCPUCount, err)
+	}
+}
+
+// MaxVCPUs: lo que deja el framework sin pasar de los núcleos del host.
+func TestMaxVCPUs(t *testing.T) {
+	m := MaxVCPUs()
+	if m < 1 || m > runtime.NumCPU() || m > maxVCPUsC() {
+		t.Fatalf("MaxVCPUs() = %d (host %d cores, khv_max_vcpus %d)", m, runtime.NumCPU(), maxVCPUsC())
 	}
 }
 

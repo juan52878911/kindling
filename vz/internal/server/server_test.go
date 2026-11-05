@@ -259,6 +259,15 @@ func (r *rig) configure(dir string) {
 
 // --- tests ---
 
+// El tope de vCPU del VMM (Deps.MaxVCPUs, el de kling-hv en este Mac): lo de
+// más se rechaza en PUT /machine-config, antes de crear la VM.
+func TestMachineConfigMaxVCPUs(t *testing.T) {
+	r := newRig(t)
+	r.srv.d.MaxVCPUs = 10
+	r.mustFail("PUT", "/machine-config", `{"vcpu_count":11,"mem_size_mib":512}`, "at most 10 vCPUs")
+	r.must("PUT", "/machine-config", `{"vcpu_count":10,"mem_size_mib":512}`)
+}
+
 func TestBootSequence(t *testing.T) {
 	r := newRig(t)
 	if out := r.must("GET", "/", ""); !strings.Contains(out, `"Not started"`) {
@@ -323,6 +332,14 @@ func TestErrorsAndUnknownRoutes(t *testing.T) {
 	r.mustFail("PUT", "/snapshot/create", `{"snapshot_type":"Diff","snapshot_path":"/a","mem_file_path":"/b"}`, "Full")
 	r.mustFail("PUT", "/kling/network", `{"egress":"everything"}`, "unknown egress policy")
 	r.mustFail("PUT", "/kling/forwards", `{"ports":[8080]}`, "not up yet")
+}
+
+// Una VM anidada (kling_nested) no tiene snapshot: se niega antes de mirar
+// el estado, sin tocar el VMM.
+func TestSnapshotAnidadaSeNiega(t *testing.T) {
+	r := newRig(t)
+	r.must("PUT", "/machine-config", `{"vcpu_count":1,"mem_size_mib":256,"kling_nested":true}`)
+	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"/a","mem_file_path":"/b"}`, "nested-virtualization")
 }
 
 func TestCommitSnapshotSequence(t *testing.T) {
@@ -813,7 +830,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
 		return nil, errors.New("no daemon in this test")
 	}, nil, nil)
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","graph-link"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","graph-link","host-ports"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")

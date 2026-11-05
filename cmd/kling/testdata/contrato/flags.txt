@@ -225,7 +225,9 @@ kling run:  -disk
 kling run:  -e
 kling run:  -egress
 kling run:  -env-file
+kling run:  -fresh
 kling run:  -from
+kling run:  -host-port
 kling run:  -image
 kling run:  -json
 kling run:  -label
@@ -233,6 +235,7 @@ kling run:  -mem
 kling run:  -mem-max
 kling run:  -mount
 kling run:  -name
+kling run:  -nested
 kling run:  -on-ttl
 kling run:  -p
 kling run:  -platform

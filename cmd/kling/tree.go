@@ -86,21 +86,31 @@ var coreTree = []section{
       [-allow dom1,dom2]                           none) and domains allowed
       [-ttl 10m] [-cpu-pct PCT]                    auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by service
-      [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
+      [-volume NAME[:/mount][:ro][:sync=MODE]]     storage that survives the machine
+                                                   (repeatable; MODE full|barrier|none)
       [-mount /data] [-volume-ro]                  (-mount, -volume-ro: for a single
                                                    -volume)
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of
                                                    freezing
+      [-nested]                                    nested virtualization (kling-hv):
+                                                   KVM inside, never frozen
       [-mem-max 2G] [-disk 4G]                     ceiling for machine resize; its
                                                    writable disk (default 512M)
-      [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only
-      [-share-wait N]                              copy (default), or live; the service
-                                                   waits for N live shares
+      [-share SRC:DST[:copy|ro|rw[:virtiofs]]]     host folder inside: a read-only
+      [-share-wait N]                              copy (default), or live (:virtiofs:
+                                                   faster on kling-hv, but no host-change
+                                                   events); the service waits for N
+                                                   live shares
       [-p HOST:GUEST] (repeatable)                 publishes a guest port on 127.0.0.1
                                                    for as long as the machine exists;
                                                    kling stays following the service
+      [-host-port PORT|HOST:GUEST] (repeatable)    macOS: the guest reaches that TCP
+                                                   port of the Mac's 127.0.0.1 at
+                                                   host.kindling.internal (Ollama...)
       [-wait-ready] [-ready-timeout 2m]            return once ready by the image's
                                                    own probe and post-restore hooks
+      [-fresh]                                     boot cold even if the daemon keeps a
+                                                   snapshot of the image (and save none)
       [-json]                                      prints the machine as JSON
 `},
 		{Name: "ps", Summary: "lists the machines", Usage: `  ps [-a] [-q] [-json]                             lists the machines (-a: stopped
@@ -228,7 +238,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools", "snapshots"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
       [-base IMAGE] [-grow MiB]                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
@@ -266,6 +276,9 @@ var coreTree = []section{
                                                    (try and volume populate use it)
   image build-tools [-as NAME]                     builds the image where "image import
                                                    -isolate" flattens layers
+  image snapshots [ls|prune] [-json]               the snapshots the daemon keeps so that
+                                                   run -image restores instead of booting
+                                                   cold; prune removes the unused ones
 `},
 		{Name: "registry", Summary: "credentials for private registries, kept on the daemon", Subcommands: []string{"login", "logout", "ls", "import"}, Usage: `  registry login <registry> [-u user]              saves the registry's credentials on
                                                    the daemon; the password or token is

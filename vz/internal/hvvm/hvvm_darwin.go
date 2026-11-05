@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -123,6 +124,13 @@ func errPausa(op string) error {
 // Start, o RestoreState con el fichero del snapshot). La línea de comandos es
 // la de Firecracker tal cual (consola ttyS0, sin PCI): kling-hv tiene el mismo
 // hardware, así que el bootArgs traducido para vz no sirve.
+// ErrSinEL2 es el error de pedir virtualización anidada en un Mac cuyo
+// Hypervisor.framework no da EL2 a sus VM.
+const ErrSinEL2 = "nested virtualization is not supported on this Mac (needs an Apple M3 or later and macOS 15 or later)"
+
+// EL2Soportado dice si este Mac puede crear VM anidadas (con EL2).
+func EL2Soportado() bool { return C.khv_el2_soportado() != 0 }
+
 func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -140,6 +148,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	if s.Graphics != nil {
 		return nil, errors.New("kling-hv has no display device")
 	}
+	if s.MachineConfig.Nested && C.khv_el2_soportado() == 0 {
+		return nil, errors.New(ErrSinEL2)
+	}
 
 	// La consola va por una tubería: el C escribe líneas enteras y aquí se
 	// copian a Console, que las serializa con los diagnósticos.
@@ -154,6 +165,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	var cfg C.struct_khv_config
 	cfg.ncpus = C.int(s.MachineConfig.VCPUCount)
 	cfg.mem_size = C.uint64_t(uint64(s.MachineConfig.MemSizeMiB) << 20)
+	if s.MachineConfig.Nested {
+		cfg.nested = 1
+	}
 	var libres []unsafe.Pointer
 	cstr := func(v string) *C.char {
 		p := C.CString(v)
@@ -180,10 +194,16 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		if d.IsReadOnly {
 			cfg.disks[i].ro = 1
 		}
-		// El overlay desechable (kling_disposable): sus FLUSH no hacen fsync,
-		// como el synchronizationMode none de vz.
-		if d.SyncNone() {
-			cfg.disks[i].sin_flush = 1
+		// Qué hace un FLUSH del invitado (spec.Drive.SyncMode): el overlay
+		// desechable (kling_disposable) va sin fsync, como el
+		// synchronizationMode none de vz; un volumen, lo que pidió.
+		switch d.SyncMode() {
+		case spec.SyncModeBarrier:
+			cfg.disks[i].sinc = C.KHV_SINC_BARRIER
+		case spec.SyncModeNone:
+			cfg.disks[i].sinc = C.KHV_SINC_NONE
+		default:
+			cfg.disks[i].sinc = C.KHV_SINC_FULL
 		}
 	}
 	cfg.net_fd = -1
@@ -222,6 +242,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		}
 	}
 	cfg.console_fd = C.int(pw.Fd())
+	if err := configurarVirtioFS(&cfg, s.VirtioFS, cstr); err != nil {
+		return nil, err
+	}
 
 	if C.khv_create(&cfg) != 0 {
 		err := errC("creating the VM")
@@ -232,8 +255,14 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		return nil, err
 	}
 	f.creada = true
+	carpetas, err := crearCarpetas(s.VirtioFS)
+	if err != nil {
+		err = fmt.Errorf("creating the VM: %w", err)
+		f.inservible(err)
+		return nil, err
+	}
 	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock,
-		memMiB: s.MachineConfig.MemSizeMiB}
+		memMiB: s.MachineConfig.MemSizeMiB, carpetas: carpetas}
 	go m.esperar()
 	return m, nil
 }
@@ -251,6 +280,8 @@ type machine struct {
 	net     *os.File // se guarda para que no lo cierre el recolector
 	vsock   bool
 	memMiB  int
+	// carpetas son los dispositivos virtio-fs y sus servidores (vfs_darwin.go).
+	carpetas []*carpeta
 }
 
 func (m *machine) esperar() {
@@ -259,8 +290,10 @@ func (m *machine) esperar() {
 	if code != 0 {
 		err = errors.New(strings.TrimPrefix(FinMotivo(), "failed: "))
 	}
-	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop).
+	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop), y
+	// los lectores de virtio-fs también.
 	C.vnet_parar()
+	cerrarCarpetas(m.carpetas)
 	if n := ConsoleDropped(); n > 0 && m.f.Logf != nil {
 		m.f.Logf("the console reader stalled: %d bytes of guest console were dropped", n)
 	}
@@ -414,6 +447,15 @@ func (m *machine) EndReason() string { return FinMotivo() }
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.
 const VersionVolcado = C.KHV_SNAP_VERSION
+
+// MaxVCPUs es el tope de vCPU de una máquina de kling-hv en este Mac: lo que
+// deja Hypervisor.framework (64 en el M4, y MAX_CPUS de khv.h como mucho) sin
+// pasar de los núcleos del host. Más vCPU que núcleos no corre más y deja al
+// invitado esperando a hilos que el host no puede atender a la vez (un
+// spinlock del kernel invitado gira mientras su dueño no tiene núcleo).
+func MaxVCPUs() int {
+	return min(int(C.khv_max_vcpus()), runtime.NumCPU())
+}
 
 // Footprint es la memoria que ocupa este proceso en el host (phys_footprint):
 // aquí vive la VM entera, no hay proceso auxiliar como en vz.

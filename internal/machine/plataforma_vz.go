@@ -10,11 +10,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -222,6 +225,10 @@ func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
 // aloja cada VM, y el daemon corre sin root.
 const jailerPosible = false
 
+// puenteHostSoportado: kling-hv y kling-vz atienden -host-port en su pasarela
+// (puente_host.go).
+const puenteHostSoportado = true
+
 // restaurarComparteMemoria: Virtualization.framework copia la memoria al
 // restaurar (RestoreMachineState); las copias no comparten nada. kling-hv sí
 // la comparte: mapea el fichero (ElegirBackend).
@@ -253,9 +260,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	m.mu.RLock()
 	mc := m.byID[id]
 	var red fc.KlingNetwork
+	var puentes []api.HostPort
 	if mc != nil {
 		red.Egress = mc.Egress
 		red.AllowDomains = append([]string(nil), mc.AllowDomains...)
+		puentes = append([]api.HostPort(nil), mc.HostPorts...)
 	}
 	m.mu.RUnlock()
 	if mc == nil {
@@ -272,6 +281,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	// fallo no impide arrancar: las aristas fallan cerradas, y se dice.
 	if err := enviarGrafoVZ(ctx, m, c, id); err != nil {
 		log.Printf("%s woke up without its graph edges: %v", shortID(id), err)
+	}
+	// Los puentes al host (-host-port, puente_host.go), también antes de que
+	// corra. Aquí un fallo sí impide arrancar: se pidieron al crearla.
+	if err := enviarPuentesVZ(ctx, c, puentes); err != nil {
+		return err
 	}
 	// Las credenciales que la máquina ya tuviera (un thaw o un reinicio), al
 	// kling-vz nuevo ANTES de que el invitado corra: despierta con el dominio
@@ -819,6 +833,71 @@ func memoriaFisicaMiB() int64 {
 	return int64(leerUint64LE(s) >> 20)
 }
 
+// transporteCarpeta decide por dónde va una carpeta viva según lo que pidió
+// (api.ShareSpec.Transport) y KLING_HV_VIRTIOFS en el entorno del daemon:
+// sin pedir nada, FUSE, salvo con KLING_HV_VIRTIOFS=1 (virtio-fs por
+// defecto); con KLING_HV_VIRTIOFS=0, pedir virtio-fs es un error. FUSE es lo
+// de siempre porque virtio-fs no lleva los avisos de cambios del host (los
+// vigilantes de node --watch, vite... no se enteran): docs/compartir.md.
+func transporteCarpeta(pedido string) (string, error) {
+	env := os.Getenv("KLING_HV_VIRTIOFS")
+	switch pedido {
+	case share.TransportVirtioFS:
+		if env == "0" {
+			return "", errors.New("virtio-fs shares are disabled on this daemon (KLING_HV_VIRTIOFS=0)")
+		}
+		return share.TransportVirtioFS, nil
+	case "":
+		if env == "1" {
+			return share.TransportVirtioFS, nil
+		}
+	}
+	return "", nil
+}
+
+// carpetasAntesDeArrancar pide al VMM, antes de crear la VM, un dispositivo
+// virtio-fs por cada carpeta viva que va por él (ShareAttachment.Transport,
+// docs/backend-hv.md). Lo hace kling-hv; kling-vz y un kling-hv anterior
+// dicen que no, y esas carpetas pasan a FUSE, como siempre. No es fatal.
+func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id string) {
+	m.mu.RLock()
+	var pedidas []fc.KlingVirtioFS
+	nombre := id
+	if mc := m.byID[id]; mc != nil {
+		nombre = mc.Name
+		for tag, s := range mc.Shares {
+			if s.Live() && s.Transport == share.TransportVirtioFS {
+				pedidas = append(pedidas, fc.KlingVirtioFS{Tag: tag, ReadOnly: s.Mode == share.ModeRO})
+			}
+		}
+	}
+	m.mu.RUnlock()
+	if len(pedidas) == 0 {
+		return
+	}
+	err := c.KlingShares(ctx, pedidas)
+	if err == nil {
+		return
+	}
+	log.Printf("%s: the VMM has no virtio-fs (%v): its shares go over FUSE", nombre, err)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mc := m.byID[id]; mc != nil {
+		// Una copia: persist lee el slice de la máquina fuera de este cerrojo.
+		nuevas := slices.Clone(mc.Shares)
+		for i := range nuevas {
+			nuevas[i].Transport = ""
+		}
+		mc.Shares = nuevas
+	}
+}
+
+// attachVirtioFS conecta la sesión de la carpeta tag con el servidor FUSE de
+// su dispositivo virtio-fs, en el kling-hv de mc.
+func (m *Manager) attachVirtioFS(ctx context.Context, mc *api.Machine, tag int) (io.ReadWriteCloser, error) {
+	return fc.New(m.socketDe(mc.ID, mc.PID)).KlingShareAttach(ctx, tag, share.Proto)
+}
+
 // fijarAuditoriaPlataforma: en macOS cada kling-vz lleva su proxy; la
 // configuración le llega en entornoVMM.
 func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
@@ -869,6 +948,12 @@ func (m *Manager) entornoVMM() []string {
 	}
 	return env
 }
+
+// maxVCPUsPlataforma: en macOS, una vCPU por núcleo del host como mucho. Es
+// el tope de Virtualization.framework (maximumAllowedCPUCount) y el que pone
+// kling-hv (hvvm.MaxVCPUs, que además no pasa de lo que deja
+// Hypervisor.framework): decirlo aquí da el error antes de lanzar el VMM.
+func maxVCPUsPlataforma() int { return runtime.NumCPU() }
 
 // techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
 // flag, ni su dorado, ni su receta, ni la configuración). En macOS, sin techo

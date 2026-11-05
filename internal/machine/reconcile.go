@@ -507,6 +507,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				m.mu.Unlock()
 				// Los snapshots temporales de fork sin copias (ver fork.go).
 				m.barrerForks()
+				// Los snapshots por imagen que ya no valen o no caben en su
+				// tope (snapshot_imagen.go).
+				m.podarSnapshotsImagen(topeSnapshotsImagen())
+				m.barrerPrepImagen()
 				m.vaciarPapelera()
 				// Overlays del almacén de discos sin máquina, y bases de
 				// dorados que ya no existen (ver cow.go).
@@ -525,6 +529,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// el modo batería (bateria.go).
 				m.revisarSueno(ctx)
 				m.vueltaBateria(ctx)
+				// Y la presión de memoria: apretar o congelar ociosas antes
+				// de que jetsam (o el OOM killer) mate VMMs.
+				m.vigilarPresion(ctx)
 			})
 		}
 	}
@@ -908,6 +915,17 @@ func (m *Manager) handleFreezeFailure(id string, err error) {
 	// siempre y no se aplicaba nunca. Se apaga el TTL de esa máquina, una vez y
 	// diciéndolo: lo que promete `ttl` no se puede cumplir aquí, y fingir que
 	// sigue vigente es peor que retirarlo.
+	// Una máquina anidada tampoco se congela nunca (anidada.go): misma salida.
+	if cur.Nested {
+		m.mu.Lock()
+		if vivo := m.byID[id]; vivo != nil {
+			vivo.TTLSeconds = 0
+			m.persist()
+		}
+		m.mu.Unlock()
+		log.Printf("ttl: %s runs with nested virtualization and can't be frozen; dropping its TTL (%v)", shortID(id), err)
+		return
+	}
 	if cur.HasSecrets {
 		m.mu.Lock()
 		if vivo := m.byID[id]; vivo != nil {
