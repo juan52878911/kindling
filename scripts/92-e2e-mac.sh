@@ -38,7 +38,9 @@
 # las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta) y
 # las de la 6f (kling db: KLING_DB, KLING_E2E_DB_GOLDEN, KLING_E2E_DB_SEED_MB; sin
 # Go ni red se salta, y lo dice) y las KLING_E2E_DB_GOLDEN* de 6h (la arista
-# credential; si 6f construyó su golden, lo usa).
+# credential; si 6f construyó su golden, lo usa). KLING_E2E_LOGS (un directorio):
+# si la prueba falla, ahí van el log del daemon y la consola de cada máquina
+# antes de que la limpieza los borre.
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -152,7 +154,24 @@ stop_daemon() {
   DPID=""
 }
 
+# guardar_logs copia en KLING_E2E_LOGS el log del daemon, `ps -a` y la consola
+# de cada máquina que quede (las copias de un fork deshecho ya no están: su
+# muerte la cuenta el log del daemon).
+guardar_logs() {
+  [ -n "${KLING_E2E_LOGS:-}" ] || return 0
+  mkdir -p "$KLING_E2E_LOGS/machines" || return 0
+  [ -f "$LOG" ] && cp "$LOG" "$KLING_E2E_LOGS/daemon.log"
+  [ -n "$DPID" ] && k ps -a > "$KLING_E2E_LOGS/ps.txt" 2>&1
+  local f
+  for f in "$ROOT"/machines/*/firecracker.log; do
+    [ -f "$f" ] && cp "$f" "$KLING_E2E_LOGS/machines/$(basename "$(dirname "$f")").log"
+  done
+  echo "logs kept in $KLING_E2E_LOGS"
+}
+
 cleanup() {
+  local rc=$?
+  { [ "$rc" != 0 ] || [ "$fail" -gt 0 ]; } && guardar_logs
   if [ "$KEEP" = "1" ]; then echo; echo "KEEP=1: not cleaning up. Daemon pid $DPID, root $ROOT"; return; fi
   echo; echo "cleaning up..."
   if [ -n "$DPID" ]; then

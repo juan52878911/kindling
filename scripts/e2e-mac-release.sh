@@ -16,7 +16,8 @@
 # min.ext4 (KLING_E2E_DATA, por defecto ~/Library/Application Support/kindling/images),
 # clonados con cp -c; si no están, se bajan de la última release y se comprueban
 # contra su SHA256SUMS. Lo único que queda es la caché de la imagen de 92
-# (KLING_E2E_CACHE, por defecto ~/.cache/kling-e2e).
+# (KLING_E2E_CACHE, por defecto ~/.cache/kling-e2e) y, si una prueba falla, sus
+# logs en KLING_E2E_CACHE/logs/<sha12>-<prueba>/ (el script dice dónde).
 #
 # 95 instala su propio agente de launchd con la etiqueta dev.kindling.daemon
 # (la que reinicia `kling upgrade`) y se niega si el usuario ya tiene uno. Este
@@ -122,22 +123,42 @@ fi
 echo "vmlinux sha256 $(sha256_de "$IMGS/vmlinux" | cut -c1-12)"
 
 # ── las pruebas ──────────────────────────────────────────────────────────────
+# Los logs de una prueba que falla sobreviven al borrado de $WORK: el log de su
+# daemon y la consola de cada máquina (los copia la propia prueba, antes de su
+# limpieza) y los informes de fallo de kling-hv/kling-vz que macOS dejó
+# mientras corría, en KLING_E2E_CACHE/logs/<sha12>-<prueba>/. Las imágenes no.
+LOGS="$KLING_E2E_CACHE/logs"
+MARCA="$WORK/empezado"; : > "$MARCA"
+logs_de() { # logs_de <prueba> <código>
+  local d="$LOGS/$SHA-$1" f
+  if [ "$2" = 0 ]; then rm -rf "$d"; return; fi
+  mkdir -p "$d/crashes" || return
+  for f in "$HOME"/Library/Logs/DiagnosticReports/kling-hv* "$HOME"/Library/Logs/DiagnosticReports/kling-vz*; do
+    [ -f "$f" ] && [ "$f" -nt "$MARCA" ] && cp "$f" "$d/crashes/"
+  done
+  rmdir "$d/crashes" 2>/dev/null
+  echo "logs of $1 kept in $d"
+}
 R92=-; R95=-
 for p in $E2E; do
   case "$p" in
     92)
       say "92-e2e-mac.sh (VMM=hv)"
+      rm -rf "$LOGS/$SHA-92"
       VMM=hv KLING="$BIN/kling" KLING_DB="$WORK/plugins/kling-db" IMAGES_DIR="$IMGS" \
         ROOT="$WORK/92/Library/Application Support/kindling-e2e-a-deliberately-long-root" \
-        LOG="$WORK/92/daemon.log" bash "$HERE/92-e2e-mac.sh"
+        LOG="$WORK/92/daemon.log" KLING_E2E_LOGS="$LOGS/$SHA-92" bash "$HERE/92-e2e-mac.sh"
       R92=$?
+      logs_de 92 "$R92"
       ;;
     95)
       if [ "$AGENTE" = 1 ]; then R95=agent; continue; fi
       say "95-e2e-upgrade-mac.sh (VMM=hv)"
+      rm -rf "$LOGS/$SHA-95"
       VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" KLING_E2E_CACHE="$KLING_E2E_CACHE" \
-        bash "$HERE/95-e2e-upgrade-mac.sh"
+        KLING_E2E_LOGS="$LOGS/$SHA-95" bash "$HERE/95-e2e-upgrade-mac.sh"
       R95=$?
+      logs_de 95 "$R95"
       ;;
   esac
 done

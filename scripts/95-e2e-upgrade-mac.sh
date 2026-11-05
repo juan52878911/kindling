@@ -36,6 +36,7 @@
 #               máquinas con menos de 16 GiB libres si no)
 #   BASE        dónde vive todo (por defecto $TMPDIR/kt-e2e-upgrade-mac)
 #   KEEP=1      no limpia al terminar
+#   KLING_E2E_LOGS=dir   si falla, deja ahí el log del daemon y las consolas
 #
 # Cada comprobación dice qué esperaba y qué obtuvo; un fallo no aborta el
 # resto. Salida en inglés, como el CLI.
@@ -115,7 +116,22 @@ else
 fi
 
 our_procs() { pgrep -f -- "$ROOT/" | wc -l | tr -d ' '; }
+# guardar_logs: como en 92, el log del daemon, `ps -a` y las consolas de las
+# máquinas van a KLING_E2E_LOGS si la prueba falla, antes de borrar $BASE.
+guardar_logs() {
+  [ -n "${KLING_E2E_LOGS:-}" ] || return 0
+  mkdir -p "$KLING_E2E_LOGS/machines" || return 0
+  [ -f "$LOG" ] && cp "$LOG" "$KLING_E2E_LOGS/daemon.log"
+  [ -n "${NEWK:-}" ] && kn ps -a > "$KLING_E2E_LOGS/ps.txt" 2>&1
+  local f
+  for f in "$ROOT"/machines/*/firecracker.log; do
+    [ -f "$f" ] && cp "$f" "$KLING_E2E_LOGS/machines/$(basename "$(dirname "$f")").log"
+  done
+  echo "logs kept in $KLING_E2E_LOGS"
+}
 cleanup() {
+  local rc=$?
+  { [ "$rc" != 0 ] || [ "$fail" -gt 0 ]; } && guardar_logs
   if [ "$KEEP" = 1 ]; then echo; echo "KEEP=1: $BASE and $PLIST left as they are"; return; fi
   echo; echo "cleaning up..."
   for m in $(kn ps -a -q 2>/dev/null); do kn rm -f "$m" >/dev/null 2>&1; done
