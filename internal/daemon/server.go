@@ -376,6 +376,10 @@ func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
 // SetBattery fija el modo batería (ver internal/machine/bateria.go).
 func (s *Server) SetBattery(c machine.BatteryConfig) { s.mgr.SetBattery(c) }
 
+// SetMemPressure fija la reacción a la presión de memoria del host (ver
+// internal/machine/presion_memoria.go).
+func (s *Server) SetMemPressure(c machine.MemPressureConfig) { s.mgr.SetMemPressure(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {

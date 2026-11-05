@@ -525,6 +525,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// el modo batería (bateria.go).
 				m.revisarSueno(ctx)
 				m.vueltaBateria(ctx)
+				// Y la presión de memoria: apretar o congelar ociosas antes
+				// de que jetsam (o el OOM killer) mate VMMs.
+				m.vigilarPresion(ctx)
 			})
 		}
 	}

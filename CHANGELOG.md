@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- The daemon reacts to host memory pressure before jetsam (or the OOM killer) kills VMMs: on warn it squeezes idle machines, on critical it also freezes the largest idle one, rate-limited and with hysteresis. macOS reads `kern.memorystatus_vm_pressure_level`, Linux PSI. `daemon.memory_pressure=off` (or `KLING_MEMORY_PRESSURE=off`) turns it off; `/metrics` gains `kling_memory_pressure_level`, `kling_memory_pressure_actions_total` and `kling_memory_pressure_reclaimed_mib_total` (`docs/mac.md#presión-de-memoria`).
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

@@ -286,6 +286,9 @@ type Manager struct {
 	// host (despertar_host.go).
 	bat   bateria
 	reloj relojHost
+	// pres es la reacción a la presión de memoria del host
+	// (presion_memoria.go).
+	pres presionMemoria
 
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada

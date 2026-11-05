@@ -433,6 +433,7 @@ func cmdDaemon(args []string) error {
 	srv.SetNetMiBps(netMiBpsConfig)
 	srv.SetCoW(cowConfig())
 	srv.SetBattery(batteryConfig())
+	srv.SetMemPressure(memPressureConfig())
 	srv.SetAuthz(pol)
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
@@ -548,6 +549,20 @@ func batteryConfig() machine.BatteryConfig {
 		c.PauseAfter = -1
 	}
 	return c
+}
+
+// memPressureConfig lee daemon.memory_pressure; KLING_MEMORY_PRESSURE manda
+// sobre el fichero. Un valor que no se entiende se avisa y se queda en auto.
+func memPressureConfig() machine.MemPressureConfig {
+	mode := loadConfig().Daemon.MemoryPressure
+	if v, ok := os.LookupEnv("KLING_MEMORY_PRESSURE"); ok {
+		mode = v
+	}
+	if err := config.ValidateMemoryPressure(mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.MemoryPressureAuto)
+		mode = config.MemoryPressureAuto
+	}
+	return machine.MemPressureConfig{Mode: mode}
 }
 
 // cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
