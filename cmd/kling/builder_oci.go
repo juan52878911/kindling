@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
@@ -775,7 +776,9 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		if err := os.Chmod(tmp, 0o644); err != nil {
 			return err
 		}
-		if err := os.Rename(tmp, filepath.Join(images, req.Name+".ext4")); err != nil {
+		// Durable: sin fsync antes del rename, un corte deja publicado un ext4
+		// cuyo contenido aún vivía en la caché (un .ext4 a medias que arranca).
+		if err := durable.Renombrar(tmp, filepath.Join(images, req.Name+".ext4")); err != nil {
 			return err
 		}
 		logf("image: %d MiB, %d files", stats.Bytes()>>20, stats.Files)
@@ -805,7 +808,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 		if err := os.Chmod(tmp, 0o644); err != nil {
 			return err
 		}
-		if err := os.Rename(tmp, filepath.Join(images, req.Name+".layer.ext4")); err != nil {
+		if err := durable.Renombrar(tmp, filepath.Join(images, req.Name+".layer.ext4")); err != nil {
 			return err
 		}
 		logf("layer over %s (%d of %d layers shared): %d MiB, %d files", reuse.Name, k, len(img.Layers), stats.Bytes()>>20, stats.Files)
