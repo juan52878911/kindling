@@ -2007,6 +2007,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 			// barrera no puede depender de que el invitado se porte bien.
 			IsReadOnly:  v.readOnly,
 			RateLimiter: fc.Limit(diskBytesPerSec),
+			// Qué hace un flush del invitado: solo kling-hv y kling-vz.
+			KlingSync: syncDeVolumen(backendVMM, v),
 		}); err != nil {
 			return pid, err
 		}

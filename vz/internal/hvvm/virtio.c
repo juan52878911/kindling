@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -216,7 +217,8 @@ static uint64_t cfg_leer(const void *cfg, size_t n, uint64_t o, int size) {
 struct vblk {
   int fd;
   bool ro;
-  bool sin_flush;  // desechable: los FLUSH del invitado no hacen fsync
+  int sinc;       // KHV_SINC_*: qué hace un FLUSH del invitado
+  uint32_t alin;  // sectores por bloque del sistema de ficheros del host (F_PUNCHHOLE)
   uint64_t sectores;
   uint32_t intid;
   struct vblk_state s;
@@ -255,6 +257,91 @@ static int64_t b_es(struct vblk *b, bool escribir, int n, uint64_t total, uint64
     hecho += (uint64_t)r;
   }
   return (int64_t)hecho;
+}
+
+// Tipos de petición de DISCARD y WRITE_ZEROES (VIRTIO_BLK_T_*) y sus topes,
+// que van en la configuración: sectores por segmento y segmentos por
+// petición. Un DISCARD solo escribe ceros en los bordes que no llenan un
+// bloque, así que puede ser grande y de muchos segmentos (fstrim los junta);
+// un WRITE_ZEROES sin unmap escribe ceros de verdad, y la tanda del hilo del
+// disco (que no deja pausar la VM mientras dura) no debe pasar de unas
+// decenas de MiB: un segmento (Linux no manda más) de 32 MiB.
+#define B_T_DISCARD 11
+#define B_T_WRITE_ZEROES 13
+#define B_DESCARTE_MAX (1u << 22)  // 2 GiB
+#define B_CEROS_MAX (1u << 16)     // 32 MiB
+#define B_SEGS 32  // los del DISCARD; WRITE_ZEROES, uno
+#define B_UNMAP 1u  // VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP, el único flag que existe
+
+static const uint8_t b_cero[64 << 10];
+
+// b_ceros escribe len bytes a cero desde off; 0 si fue bien.
+static int b_ceros(struct vblk *b, uint64_t off, uint64_t len) {
+  while (len > 0) {
+    size_t l = len < sizeof b_cero ? (size_t)len : sizeof b_cero;
+    ssize_t r = pwrite(b->fd, b_cero, l, (off_t)off);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) return -1;
+    off += (uint64_t)r;
+    len -= (uint64_t)r;
+  }
+  return 0;
+}
+
+// b_hueco devuelve al host [off, off+len) con F_PUNCHHOLE. APFS solo lo admite
+// en bloques enteros de su tamaño: lo de dentro se libera y los bordes sueltos
+// se escriben con ceros, así que después todo el tramo se lee como ceros. Si
+// el sistema de ficheros no sabe hacer huecos, escribe ceros en todo el tramo
+// con ceros_si_no (WRITE_ZEROES) o lo deja estar (un DISCARD es un consejo).
+static int b_hueco(struct vblk *b, uint64_t off, uint64_t len, bool ceros_si_no) {
+  uint64_t bs = (uint64_t)b->alin * 512, fin = off + len;
+  uint64_t a = (off + bs - 1) / bs * bs, z = fin / bs * bs;
+  if (a >= z) return b_ceros(b, off, len);
+  struct fpunchhole ph = {.fp_flags = 0, .reserved = 0, .fp_offset = (off_t)a, .fp_length = (off_t)(z - a)};
+  if (fcntl(b->fd, F_PUNCHHOLE, &ph) != 0) {
+    if (errno != ENOTSUP) return -1;
+    return ceros_si_no ? b_ceros(b, off, len) : 0;
+  }
+  return b_ceros(b, off, a - off) != 0 || b_ceros(b, z, fin - z) != 0 ? -1 : 0;
+}
+
+// b_descartar atiende un DISCARD (ceros = false) o un WRITE_ZEROES: sus nd
+// búferes de datos son segmentos {sector u64, num_sectors u32, flags u32}.
+// Devuelve el byte de estado. Primero copia (el invitado puede cambiar su
+// RAM mientras tanto) y valida TODOS los segmentos, como read/write validan
+// sus sectores: uno malo y no se toca nada.
+static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, int nd) {
+  struct {
+    uint64_t sector;
+    uint32_t num, flags;
+  } seg[B_SEGS];
+  if (b->ro) return 1;
+  uint64_t n = 0;
+  for (int k = 0; k < nd; k++) {
+    const uint8_t *p = gpa_ptr(d[k].addr, d[k].len);
+    if (!p || d[k].len % sizeof seg[0] != 0 || n + d[k].len / sizeof seg[0] > (ceros ? 1 : B_SEGS)) return 1;
+    memcpy(&seg[n], p, d[k].len);
+    n += d[k].len / sizeof seg[0];
+  }
+  if (n == 0) return 1;
+  uint32_t tope = ceros ? B_CEROS_MAX : B_DESCARTE_MAX;
+  for (uint64_t i = 0; i < n; i++) {
+    // Un flag desconocido, o unmap en un DISCARD, es UNSUPP (virtio 1.2,
+    // 5.2.6.2); fuera del disco o más largo que el tope, IOERR.
+    if ((seg[i].flags & ~B_UNMAP) != 0 || (!ceros && seg[i].flags != 0)) return 2;
+    if (seg[i].sector > b->sectores || seg[i].num > b->sectores - seg[i].sector || seg[i].num > tope) return 1;
+  }
+  for (uint64_t i = 0; i < n; i++) {
+    uint64_t off = seg[i].sector * 512, len = (uint64_t)seg[i].num * 512;
+    if (len == 0) continue;
+    // WRITE_ZEROES sin unmap: el invitado quiere los bloques asignados
+    // (fallocate sin PUNCH_HOLE, REQ_NOUNMAP), ceros de verdad.
+    int r = !ceros ? b_hueco(b, off, len, false)
+            : (seg[i].flags & B_UNMAP) ? b_hueco(b, off, len, true)
+                                       : b_ceros(b, off, len);
+    if (r != 0) return 1;
+  }
+  return 0;
 }
 
 // Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
@@ -362,8 +449,11 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
           if (b->ro || b_es(b, true, ni, total, off) != (int64_t)total) estado = 1;
         }
         if (malo) estado = 1;
+      } else if (hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES) {
+        estado = b_descartar(b, hdr.type == B_T_WRITE_ZEROES, ch + 1, n - 2);
       }
-      for (int k = 1; k < n - 1 && estado == 0 && hdr.type != 0 && hdr.type != 1; k++) {
+      bool hecha = hdr.type == 0 || hdr.type == 1 || hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES;
+      for (int k = 1; k < n - 1 && estado == 0 && !hecha; k++) {
         // El resto, uno a uno: sus búferes solo tienen que estar en la RAM.
         void *d = gpa_ptr(ch[k].addr, ch[k].len);
         if (!d) {
@@ -385,15 +475,20 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         }
         if (r < 0) estado = 1;
       }
-      if (hdr.type == 4 && estado == 0 && !b->sin_flush) {
-        // F_FULLFSYNC: el fsync de macOS deja los datos en la caché del SSD, y
-        // un corte se los lleva aunque el invitado ya oyó que estaban. Es lo
-        // que hace kling-vz (VZDiskImageSynchronizationModeFull). Donde no se
-        // admite (un volumen de red), fsync, como hace Go. El overlay
-        // desechable (kling_disposable) ni eso, como el synchronizationMode
-        // none de vz: lo escrito queda en la caché del host, y el núcleo lo
-        // asienta antes de conservar el disco (internal/machine/desechable.go).
-        if (fcntl(b->fd, F_FULLFSYNC) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) estado = 1;
+      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE) {
+        // full, F_FULLFSYNC: el fsync de macOS deja los datos en la caché del
+        // SSD, y un corte se los lleva aunque el invitado ya oyó que estaban.
+        // Es lo que hace kling-vz (VZDiskImageSynchronizationModeFull).
+        // barrier, F_BARRIERFSYNC: lo de antes del FLUSH llega al SSD antes
+        // que lo de después (el journal de ext4 queda coherente), pero no
+        // espera a que salga de su caché: un corte puede llevarse los últimos
+        // FLUSH, no dejar el sistema de ficheros a medias. Donde no se admite
+        // (un volumen de red), fsync, como hace Go. none no hace nada: el
+        // overlay desechable (kling_disposable, como el synchronizationMode
+        // none de vz; el núcleo lo asienta antes de conservar el disco,
+        // internal/machine/desechable.go) o un volumen que se pidió así.
+        int op = b->sinc == KHV_SINC_BARRIER ? F_BARRIERFSYNC : F_FULLFSYNC;
+        if (fcntl(b->fd, op) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) estado = 1;
       }
     }
     if (sp) *sp = estado;  // sin byte de estado (cadena inválida) no hay dónde decirlo
@@ -450,7 +545,23 @@ void vblk_prueba(int idx) {
   pthread_mutex_unlock(&b->mu);
 }
 
-int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid) {
+// vblk_prueba_modo cambia ro y sinc del disco idx (solo pruebas, con la cola
+// quieta).
+void vblk_prueba_modo(int idx, bool ro, int sinc) {
+  pthread_mutex_lock(&blks[idx].mu);
+  blks[idx].ro = ro;
+  blks[idx].sinc = sinc;
+  pthread_mutex_unlock(&blks[idx].mu);
+}
+
+// vblk_prueba_bloques: los bloques de 512 B que ocupa el fichero del disco
+// idx (pruebas: lo que devuelve un DISCARD).
+int64_t vblk_prueba_bloques(int idx) {
+  struct stat st;
+  return fstat(blks[idx].fd, &st) == 0 ? (int64_t)st.st_blocks : -1;
+}
+
+int vblk_init(int idx, const char *ruta, bool ro, int sinc, uint32_t intid) {
   struct vblk *b = &blks[idx];
   b->fd = open(ruta, ro ? O_RDONLY : O_RDWR);
   if (b->fd < 0) {
@@ -461,7 +572,12 @@ int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid
   fstat(b->fd, &st);
   b->sectores = (uint64_t)st.st_size / 512;
   b->ro = ro;
-  b->sin_flush = sin_flush && !ro;
+  b->sinc = ro || sinc < KHV_SINC_FULL || sinc > KHV_SINC_NONE ? KHV_SINC_FULL : sinc;
+  // F_PUNCHHOLE solo admite bloques enteros del sistema de ficheros (4 KiB
+  // en APFS): es la alineación que se anuncia al invitado.
+  struct statfs sf;
+  uint32_t bs = fstatfs(b->fd, &sf) == 0 ? sf.f_bsize : 4096;
+  b->alin = bs >= 512 && bs <= (1u << 20) && bs % 512 == 0 ? bs / 512 : 8;
   b->intid = intid;
   memset(&b->s, 0, sizeof b->s);
   pthread_mutex_init(&b->mu, NULL);
@@ -475,19 +591,28 @@ int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid
 static uint64_t b_features(struct vblk *b) {
   // VIRTIO_BLK_F_SEG_MAX (2), VIRTIO_BLK_F_RO (5), VIRTIO_BLK_F_FLUSH (9) y
   // VIRTIO_RING_F_EVENT_IDX (29): el driver avisa y recibe interrupciones solo
-  // cuando hace falta, no por cada petición.
-  return (1u << 2) | (1u << 9) | khv_event_idx | (b->ro ? (1u << 5) : 0);
+  // cuando hace falta, no por cada petición. En los de escritura,
+  // VIRTIO_BLK_F_DISCARD (13) y VIRTIO_BLK_F_WRITE_ZEROES (14): lo que el
+  // invitado borra (fstrim, mount -o discard) vuelve al host como huecos.
+  return (1u << 2) | (1u << 9) | khv_event_idx | (b->ro ? (1u << 5) : (1u << 13) | (1u << 14));
 }
 
 bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size) {
   struct vblk *b = &blks[idx];
   pthread_mutex_lock(&b->mu);
-  if (off >= 0x100) {  // configuración: capacity (u64), size_max (u32), seg_max (u32)
+  if (off >= 0x100) {
+    // Configuración (struct virtio_blk_config): capacity (u64, 0),
+    // seg_max (u32, 12) y, desde 36, max_discard_sectors, max_discard_seg,
+    // discard_sector_alignment, max_write_zeroes_sectors,
+    // max_write_zeroes_seg (u32) y write_zeroes_may_unmap (u8, 56).
     if (!escribir) {
       uint8_t cfg[64] = {0};
       memcpy(cfg, &b->sectores, 8);
       uint32_t segmax = QMAX - 2;
       memcpy(cfg + 12, &segmax, 4);
+      uint32_t dz[5] = {B_DESCARTE_MAX, B_SEGS, b->alin, B_CEROS_MAX, 1};
+      memcpy(cfg + 36, dz, sizeof dz);
+      cfg[56] = 1;
       *val = cfg_leer(cfg, sizeof cfg, off - 0x100, size);
     }
     pthread_mutex_unlock(&b->mu);

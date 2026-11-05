@@ -58,9 +58,23 @@ func semillas() [][]byte {
 	binary.LittleEndian.PutUint32(blkFuera[0x3000:], 1) // OUT
 	binary.LittleEndian.PutUint64(blkFuera[0x3008:], 1<<40)
 	sinEstado := ramCon([][4]uint64{{ramBase + 0x3000, 16, 0, 0}}, 0)
+	// DISCARD y WRITE_ZEROES: dos segmentos (uno bueno y uno que se sale del
+	// disco o lleva flags), en dos búferes, el segundo de 17 B.
+	descarte := func(tipo uint32, flags uint32) []byte {
+		r := ramCon([][4]uint64{{ramBase + 0x3000, 16, 1, 1}, {ramBase + 0x3100, 16, 1, 2},
+			{ramBase + 0x3200, 17, 1, 3}, {ramBase + 0x3300, 1, 2, 0}}, 0, 1)
+		binary.LittleEndian.PutUint32(r[0x3000:], tipo)
+		binary.LittleEndian.PutUint64(r[0x3100:], 8)
+		binary.LittleEndian.PutUint32(r[0x3108:], 64)
+		binary.LittleEndian.PutUint64(r[0x3200:], 1<<63)
+		binary.LittleEndian.PutUint32(r[0x3208:], 0xffffffff)
+		binary.LittleEndian.PutUint32(r[0x320c:], flags)
+		return r
+	}
 	for dev := byte(0); dev < 5; dev++ {
 		for _, num := range []uint16{0, 1, 2, 256, 257, 0xffff} {
-			for _, ram := range [][]byte{ciclo, indirecta, enorme, fuera, blkFuera, sinEstado} {
+			for _, ram := range [][]byte{ciclo, indirecta, enorme, fuera, blkFuera, sinEstado,
+				descarte(11, 0), descarte(11, 1), descarte(13, 1), descarte(13, 0xfe)} {
 				s = append(s, cola(dev, num, 0, 0x1000, 0x2000, ram))
 			}
 		}

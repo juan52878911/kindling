@@ -72,12 +72,47 @@ type Drive struct {
 	// db; lo decide el núcleo, que es quien sabe qué es cada drive. No va
 	// al snapshot (WriteFile lo quita): quien restaure lo vuelve a decir.
 	Disposable bool `json:"kling_disposable,omitempty"`
+	// Sync (extensión de kling-vz y kling-hv, opcional): qué hace un flush
+	// del invitado en este disco. Vacío o "full", llegar al disco físico (lo
+	// de siempre); "barrier", solo orden (F_BARRIERFSYNC en kling-hv, el
+	// modo fsync de vz); "none", nada. Lo pide quien monta un volumen
+	// (api.VolumeAttachment.Sync, docs/backend-hv.md). A diferencia de
+	// Disposable SÍ va al snapshot: un thaw no reapunta los volúmenes y debe
+	// seguir como estaba; al restaurar un dorado con volúmenes el núcleo lo
+	// vuelve a decir siempre (PATCH), así que una réplica no hereda el modo
+	// del dorado. Un kling-vz anterior lo ignora al leerlo (full, lo seguro).
+	Sync string `json:"kling_sync,omitempty"`
+}
+
+// Modos de Drive.Sync.
+const (
+	SyncModeFull    = "full"
+	SyncModeBarrier = "barrier"
+	SyncModeNone    = "none"
+)
+
+// ValidSync dice si v es un valor admitido de Drive.Sync ("" es full).
+func ValidSync(v string) bool {
+	return v == "" || v == SyncModeFull || v == SyncModeBarrier || v == SyncModeNone
 }
 
 // SyncNone dice si el disco puede ir sin sincronizar: marcado desechable,
 // de escritura y que no sea la raíz.
 func (d Drive) SyncNone() bool {
 	return d.Disposable && !d.IsReadOnly && !d.IsRootDevice
+}
+
+// SyncMode es el modo de sincronización efectivo del disco: none si es el
+// overlay desechable (SyncNone), full si es de solo lectura o la raíz (nada
+// que sincronizar, o nada que relajar), y si no el pedido en Sync.
+func (d Drive) SyncMode() string {
+	switch {
+	case d.SyncNone():
+		return SyncModeNone
+	case d.IsReadOnly || d.IsRootDevice || d.Sync == "":
+		return SyncModeFull
+	}
+	return d.Sync
 }
 
 type NetworkInterface struct {
@@ -171,11 +206,23 @@ func (s *Spec) PatchDrivePath(id, path string) error {
 // PatchDrive cambia la ruta registrada de un drive existente y, si
 // disposable no es nil, si es desechable.
 func (s *Spec) PatchDrive(id, path string, disposable *bool) error {
+	return s.PatchDriveModes(id, path, disposable, nil)
+}
+
+// PatchDriveModes es PatchDrive que, si sync no es nil, cambia además el
+// modo de sincronización (Drive.Sync).
+func (s *Spec) PatchDriveModes(id, path string, disposable *bool, sync *string) error {
+	if sync != nil && !ValidSync(*sync) {
+		return fmt.Errorf("kling_sync %q: use full, barrier or none", *sync)
+	}
 	for i := range s.Drives {
 		if s.Drives[i].DriveID == id {
 			s.Drives[i].PathOnHost = path
 			if disposable != nil {
 				s.Drives[i].Disposable = *disposable
+			}
+			if sync != nil {
+				s.Drives[i].Sync = *sync
 			}
 			return nil
 		}
@@ -193,6 +240,11 @@ func (s *Spec) Validate() error {
 	}
 	if len(s.Drives) == 0 {
 		return errors.New("no drives configured")
+	}
+	for _, d := range s.Drives {
+		if !ValidSync(d.Sync) {
+			return fmt.Errorf("drive %q: kling_sync %q: use full, barrier or none", d.DriveID, d.Sync)
+		}
 	}
 	if g := s.Graphics; g != nil && (g.Width < 64 || g.Height < 64 || g.Width > 8192 || g.Height > 8192) {
 		return fmt.Errorf("graphics %dx%d: each side must be between 64 and 8192 pixels", g.Width, g.Height)

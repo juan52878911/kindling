@@ -120,6 +120,10 @@ var clasesCampos = map[string]claseCampo{
 	"meta.json api.Snapshot share_wait": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot sin_agente": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot arch":       {porque: "an older kling that drops it does not compare architectures, which it never did"},
+	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
+	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
+	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +
+		"losing it on a round trip falls back to full, the durable default"},
 	// credentials.enc: ver versionAlmacenSigV4 (credenciales.go).
 	"credentials.enc credproxy.Credential AccessKeyID": {efecto: true, version: 2, porque: "a kling <= v0.18 would use a sigv4 credential as HTTP and drop it"},
 	"credentials.enc credproxy.Credential Region":      {efecto: true, version: 2, porque: "as AccessKeyID"},

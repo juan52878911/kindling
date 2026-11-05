@@ -517,6 +517,35 @@ type VolumeAttachment struct {
 	// Vacío en máquinas y snapshots anteriores a este campo; quien restaura
 	// aplica entonces la heurística de siempre.
 	DriveID string `json:"drive_id,omitempty"`
+	// Sync es qué hace un flush del invitado (fsync, sync, el journal de
+	// ext4) en este volumen, en macOS (kling-hv y kling-vz):
+	//
+	//   - "" o VolumeSyncFull: llega al disco físico (F_FULLFSYNC). Lo de
+	//     siempre, y lo único que aguanta un corte de luz.
+	//   - VolumeSyncBarrier: solo orden (F_BARRIERFSYNC; en kling-vz, el
+	//     fsync de macOS). Un corte puede llevarse los últimos segundos
+	//     escritos, pero no deja el sistema de ficheros a medias.
+	//   - VolumeSyncNone: el flush no hace nada. Si el Mac se cae, el ext4
+	//     del volumen puede quedar roto: solo para volúmenes de desarrollo
+	//     que se pueden tirar.
+	//
+	// Solo en volúmenes de escritura. Firecracker lo ignora: sus discos van
+	// con la caché de siempre (docs/volumes.md). No va al meta del snapshot:
+	// es de la máquina que lo pidió, y una réplica de un dorado vuelve a
+	// full salvo que lo pida ella.
+	Sync string `json:"sync,omitempty"`
+}
+
+// Modos de VolumeAttachment.Sync.
+const (
+	VolumeSyncFull    = "full"
+	VolumeSyncBarrier = "barrier"
+	VolumeSyncNone    = "none"
+)
+
+// ValidVolumeSync dice si v es un modo de VolumeAttachment.Sync ("" = full).
+func ValidVolumeSync(v string) bool {
+	return v == "" || v == VolumeSyncFull || v == VolumeSyncBarrier || v == VolumeSyncNone
 }
 
 // MaxVolumes acota cuántos puede llevar una microVM.

@@ -311,7 +311,7 @@ func sandboxCreate(args []string) error {
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro][:sync=barrier|none] (repeatable)")
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
 	quiet := fs.Bool("q", false, "print only the id")

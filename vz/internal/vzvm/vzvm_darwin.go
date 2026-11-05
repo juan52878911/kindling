@@ -373,8 +373,9 @@ func adjuntoDisco(d spec.Drive) (*vz.DiskImageStorageDeviceAttachment, error) {
 //   - De escritura: la caché por defecto del framework (automatic).
 //   - Sincronización: la del framework (full: cada flush del invitado llega
 //     al disco físico) salvo en el overlay desechable de una máquina no
-//     persistente (spec.Drive.SyncNone), que va con none. Volúmenes y discos
-//     de db nunca vienen marcados.
+//     persistente (spec.Drive.SyncNone), que va con none, y en un volumen
+//     montado con sync=barrier (fsync: el de macOS, que no vacía la caché
+//     del SSD; vz no tiene F_BARRIERFSYNC) o sync=none (spec.Drive.SyncMode).
 //
 // KLING_VZ_DISK_CACHING=cached|uncached|automatic y
 // KLING_VZ_DISK_SYNC=full|fsync|none mandan sobre lo anterior, para todos los
@@ -398,7 +399,10 @@ func modosDisco(d spec.Drive, envCaching, envSync string) (vz.DiskImageCachingMo
 		return 0, 0, false, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", envCaching)
 	}
 	sm := vz.DiskImageSynchronizationModeFull
-	if d.SyncNone() {
+	switch d.SyncMode() {
+	case spec.SyncModeBarrier:
+		sm = vz.DiskImageSynchronizationModeFsync
+	case spec.SyncModeNone:
 		sm = vz.DiskImageSynchronizationModeNone
 	}
 	switch envSync {

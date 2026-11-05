@@ -45,6 +45,7 @@ kling graph ls -json:  [].nodes.x.volumes[].drive_id string
 kling graph ls -json:  [].nodes.x.volumes[].mount string
 kling graph ls -json:  [].nodes.x.volumes[].name string
 kling graph ls -json:  [].nodes.x.volumes[].read_only bool
+kling graph ls -json:  [].nodes.x.volumes[].sync string
 kling graph ls -json:  [].nodes.x.wake string
 kling graph ls -json:  [].state string
 kling image ls -json:  [].agent.agent string
@@ -125,6 +126,7 @@ kling inspect m1:  volumes[].drive_id string
 kling inspect m1:  volumes[].mount string
 kling inspect m1:  volumes[].name string
 kling inspect m1:  volumes[].read_only bool
+kling inspect m1:  volumes[].sync string
 kling inspect m1:  wake.cgroup_ms number
 kling inspect m1:  wake.check_ms number
 kling inspect m1:  wake.finish_ms number
@@ -208,6 +210,7 @@ kling ps -a -json:  [].volumes[].drive_id string
 kling ps -a -json:  [].volumes[].mount string
 kling ps -a -json:  [].volumes[].name string
 kling ps -a -json:  [].volumes[].read_only bool
+kling ps -a -json:  [].volumes[].sync string
 kling ps -a -json:  [].wake.cgroup_ms number
 kling ps -a -json:  [].wake.check_ms number
 kling ps -a -json:  [].wake.finish_ms number
@@ -291,6 +294,7 @@ kling sandbox ls -json:  [].volumes[].drive_id string
 kling sandbox ls -json:  [].volumes[].mount string
 kling sandbox ls -json:  [].volumes[].name string
 kling sandbox ls -json:  [].volumes[].read_only bool
+kling sandbox ls -json:  [].volumes[].sync string
 kling sandbox ls -json:  [].wake.cgroup_ms number
 kling sandbox ls -json:  [].wake.check_ms number
 kling sandbox ls -json:  [].wake.finish_ms number
@@ -357,6 +361,7 @@ kling template ls -json:  [].volumes[].drive_id string
 kling template ls -json:  [].volumes[].mount string
 kling template ls -json:  [].volumes[].name string
 kling template ls -json:  [].volumes[].read_only bool
+kling template ls -json:  [].volumes[].sync string
 kling template ls -json:  [].warnings[] string
 kling version -json:  agents[] string
 kling version -json:  api number

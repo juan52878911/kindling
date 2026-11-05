@@ -819,6 +819,25 @@ libs     2.0G      109M      0       mi-servicio-1a98a4, otra-mas
 
 Cuatro es el techo, porque cada uno es un disco y los discos se nombran por letra.
 
+**Cuánto se fía un volumen del disco (macOS).** Cada `fsync` del invitado llega por
+defecto al disco físico (`F_FULLFSYNC`), y eso cuesta: 300 `fsync` en un volumen,
+~1,7 s en un M4. Un volumen de escritura puede pedir menos al final de su `-volume`:
+
+```sh
+kling run -name dev -volume datos:/data:sync=barrier   # solo orden: ~0,1 s
+kling run -name dev -volume cache:/cache:sync=none      # nada: ~10 ms
+```
+
+`barrier` (`F_BARRIERFSYNC`) garantiza el orden pero no espera a la caché del SSD: si
+el Mac se cae, se pueden perder los últimos segundos escritos, no el sistema de
+ficheros. **`none` no lleva nada al disco: si el Mac se cae (corte de luz, pánico), el
+ext4 del volumen puede quedar roto**; solo para volúmenes de desarrollo que se pueden
+tirar. Un cierre limpio del Mac no pierde nada en ningún modo. El modo es de la máquina
+que lo pidió: sobrevive a `freeze`/`thaw` y a `stop`/`start`, pero no va en el dorado
+(una réplica vuelve a `full` salvo que lo pida). En solo lectura no tiene sentido y se
+rechaza. En Linux (Firecracker) se acepta y se ignora: sus discos ya no llevan los
+flush del invitado al disco físico. Detalles y cifras en `docs/backend-hv.md`.
+
 **El conjunto de discos queda fijado al congelar.** Firecracker no añade ni quita discos
 en una VM restaurada — solo deja reapuntar cada uno a otro fichero — así que cambiar
 cuántos volúmenes lleva un servicio significa reimportarlo, y kling lo dice exactamente

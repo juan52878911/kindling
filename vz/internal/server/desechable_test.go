@@ -22,3 +22,22 @@ func TestDiscoDesechable(t *testing.T) {
 	// Solo la ruta sigue valiendo con la VM creada (Commit).
 	r.must("PATCH", "/drives/overlay", `{"drive_id":"overlay","path_on_host":"`+dir+`/o2.ext4"}`)
 }
+
+// kling_sync, como kling_disposable: por PUT o PATCH antes de crear la VM, y
+// después se rechaza; un modo que no existe tampoco pasa.
+func TestDiscoSync(t *testing.T) {
+	r := newRig(t)
+	dir := t.TempDir()
+	r.configure(dir)
+	r.must("PUT", "/drives/volume0", `{"drive_id":"volume0","path_on_host":"`+dir+`/v.ext4","is_read_only":false,"kling_sync":"none"}`)
+	r.mustFail("PATCH", "/drives/volume0", `{"drive_id":"volume0","path_on_host":"`+dir+`/v.ext4","kling_sync":"fsync"}`, "kling_sync")
+	r.must("PATCH", "/drives/volume0", `{"drive_id":"volume0","path_on_host":"`+dir+`/v.ext4","kling_sync":"barrier"}`)
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	_, s, _ := r.f.last()
+	for _, d := range s.Drives {
+		if want := map[bool]string{true: "barrier", false: ""}[d.DriveID == "volume0"]; d.Sync != want {
+			t.Fatalf("drive %s: kling_sync %q, quiero %q", d.DriveID, d.Sync, want)
+		}
+	}
+	r.mustFail("PATCH", "/drives/volume0", `{"drive_id":"volume0","path_on_host":"`+dir+`/v2.ext4","kling_sync":"full"}`, "kling_sync")
+}

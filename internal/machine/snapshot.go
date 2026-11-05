@@ -616,7 +616,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
 		// servicio sin volumen y la herramienta escribe en un overlay que muere
 		// con la máquina — sin un solo error por ningún lado.
-		Volumes:   mc.Volumes,
+		// Sin el modo de sincronización: es de esta máquina, y una réplica
+		// vuelve a full salvo que lo pida (api.VolumeAttachment.Sync).
+		Volumes:   sinSync(mc.Volumes),
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 		SinAgente: sinAgente,
@@ -1812,7 +1814,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// found, de forma determinista y sin arreglo salvo reimportar.
 	usados := make([]string, len(vols))
 	for i, v := range vols {
-		id, err := m.patchVolumeDrive(ctx, c, grabados[i], i, len(vols), v.path)
+		id, err := m.patchVolumeDrive(ctx, c, grabados[i], i, len(vols), v.path, syncDeVolumen(backendVMM, v))
 		if err != nil {
 			return abortar(fmt.Errorf("repointing volume %s: %w", v.name, err))
 		}
@@ -1941,14 +1943,18 @@ func writeMeta(dir string, b []byte) error {
 // campo— cae en la heurística de siempre, y si esa falla con un solo volumen,
 // reintenta con el nombre antiguo: eso cura los snapshots que la heurística ya
 // dejó rotos, sin exigir reimportar el servicio.
+//
+// sync, si no está vacío, es el kling_sync que se manda con la ruta
+// (syncDeVolumen): el volumen de una réplica no hereda el modo del dorado.
 func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
-	grabado api.VolumeAttachment, i, total int, path string) (string, error) {
+	grabado api.VolumeAttachment, i, total int, path, sync string) (string, error) {
 
 	id := grabado.DriveID
 	if id == "" {
 		id = volumeDriveID(i)
 	}
-	err := c.PatchDrive(ctx, id, path)
+	patch := func(id string) error { return c.PatchDriveSync(ctx, id, path, sync) }
+	err := patch(id)
 	if err == nil {
 		return id, nil
 	}
@@ -1956,7 +1962,7 @@ func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
 	// "volume0" o se llama "volume", nunca los dos. Así que reintentar no puede
 	// reapuntar el disco de otro por error.
 	if total == 1 && id != legacyVolumeDriveID {
-		if err2 := c.PatchDrive(ctx, legacyVolumeDriveID, path); err2 == nil {
+		if err2 := patch(legacyVolumeDriveID); err2 == nil {
 			log.Printf("this snapshot's disk is called %q, not %q (legacy chain); "+
 				"noted for next time", legacyVolumeDriveID, id)
 			return legacyVolumeDriveID, nil

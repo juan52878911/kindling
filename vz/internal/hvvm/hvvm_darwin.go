@@ -180,10 +180,16 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		if d.IsReadOnly {
 			cfg.disks[i].ro = 1
 		}
-		// El overlay desechable (kling_disposable): sus FLUSH no hacen fsync,
-		// como el synchronizationMode none de vz.
-		if d.SyncNone() {
-			cfg.disks[i].sin_flush = 1
+		// Qué hace un FLUSH del invitado (spec.Drive.SyncMode): el overlay
+		// desechable (kling_disposable) va sin fsync, como el
+		// synchronizationMode none de vz; un volumen, lo que pidió.
+		switch d.SyncMode() {
+		case spec.SyncModeBarrier:
+			cfg.disks[i].sinc = C.KHV_SINC_BARRIER
+		case spec.SyncModeNone:
+			cfg.disks[i].sinc = C.KHV_SINC_NONE
+		default:
+			cfg.disks[i].sinc = C.KHV_SINC_FULL
 		}
 	}
 	cfg.net_fd = -1

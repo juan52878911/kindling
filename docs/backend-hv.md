@@ -49,7 +49,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | GIC | GICv3 del framework (`hv_gic_create`, macOS 15+): el timer virtual y el WFI no salen a espacio de usuario |
 | consola | UART 16550 en MMIO: `console=ttyS0` como en Firecracker, la línea de comandos pasa **intacta** (a diferencia de vz, que la traduce) |
 | reloj | PL031 (`rtc-pl031`, el mismo que da Firecracker en arm64): un arranque en frío nace con la hora del host |
-| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `F_FULLFSYNC` del fichero (el `fsync` de macOS deja los datos en la caché del SSD), como el `synchronizationMode full` de vz; salvo en el overlay `kling_disposable` (como el `none` de vz), que no lo hace. Cuesta: 300 `write`+`fsync` de 4 KiB en el invitado, p50 0,1 → 4,0 ms por `fsync` (52-68 ms → 1,3 s en total), lo mismo que vz (3,9-4,2 ms) |
+| discos | virtio-mmio block, uno por drive en el orden de las peticiones; cada disco tiene su hilo (el vCPU no espera a la E/S). Un FLUSH es un `F_FULLFSYNC` del fichero (el `fsync` de macOS deja los datos en la caché del SSD), como el `synchronizationMode full` de vz; salvo en el overlay `kling_disposable` (como el `none` de vz), que no lo hace, y en un volumen montado con otro modo (`kling_sync`, [abajo](#sincronización-de-los-discos)). Cuesta: 300 `write`+`fsync` de 4 KiB en el invitado, p50 0,1 → 4,0 ms por `fsync` (52-68 ms → 1,3 s en total), lo mismo que vz (3,9-4,2 ms). Los de escritura ofrecen `DISCARD` y `WRITE_ZEROES` ([abajo](#discard-y-write_zeroes)) |
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
@@ -114,6 +114,97 @@ credencial lo marca el daemon por el broker), así que una máquina en allowlist
 ya no compila 1000 reglas para cerrar el rango de los reenvíos. Lo que queda
 de `sandbox_init` (~9 ms, `go test -bench SandboxInit ./internal/sandbox` en
 vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
+
+### Sincronización de los discos
+
+Qué hace un `VIRTIO_BLK_T_FLUSH` del invitado (un `fsync`, un `sync`, el
+commit del journal de ext4) lo decide cada drive con `kling_sync` en
+`PUT`/`PATCH /drives` (`spec.Drive.Sync`, `KHV_SINC_*` en `khv.h`):
+
+| modo | FLUSH | si el Mac se cae (corte de luz, pánico) |
+|---|---|---|
+| `full` (por defecto) | `F_FULLFSYNC`: espera a que el SSD vacíe su caché | lo que el invitado vio asentado está en disco |
+| `barrier` | `F_BARRIERFSYNC`: lo de antes del FLUSH llega al SSD antes que lo de después, sin esperar a su caché | se pueden perder los últimos FLUSH, pero en orden: el journal de ext4 queda coherente y el sistema de ficheros monta |
+| `none` | nada (el overlay `kling_disposable` va siempre así) | lo escrito puede no estar, y en cualquier orden: **el ext4 puede quedar roto** |
+
+Donde `F_FULLFSYNC` o `F_BARRIERFSYNC` no se admiten (un volumen de red), un
+`fsync`. Un cierre limpio del Mac no pierde nada en ningún modo: lo escrito
+está en la caché del host y macOS lo lleva al disco; lo que se juega es un
+corte. Los drives de solo lectura y la raíz van siempre en `full` (no hay
+nada que relajar). El modo **va en el estado del snapshot**: un `thaw` no
+reapunta los volúmenes y sigue como estaba; al restaurar un dorado, el núcleo
+lo vuelve a mandar siempre (`full` si la réplica no pidió otro), así que una
+réplica no hereda el del dorado. Un `kling-hv` anterior ignora el campo
+(`full`).
+
+Desde la CLI, solo para volúmenes de escritura: `-volume datos:/data:sync=barrier`
+(ver `docs/guia.md`, «Varios volúmenes»). Con `kling-vz`, `barrier` es su
+`synchronizationMode fsync` (vz no tiene `F_BARRIERFSYNC`: el `fsync` de macOS
+no vacía la caché del SSD y no promete orden) y `none` el suyo. Con Firecracker
+(Linux) el modo **se acepta y se ignora**: sus discos van con la caché por
+defecto (`cache_type` sin poner, `Unsafe`), que no anuncia flush al invitado,
+así que no hay nada que relajar; rechazarlo rompería un mismo script o compose
+entre Mac y Linux, y el overlay desechable ya hace lo mismo (el campo solo
+viaja a `kling-vz` y `kling-hv`).
+
+Medido (M4 16 GiB, macOS 26.5, el Mac en uso por otros agentes, daemon
+privado, un volumen de 256 MiB, 3 tandas de 300 `pwrite` de 4 KiB + `fsync`
+en el invitado, ms por tanda):
+
+| modo | 300 `fsync` |
+|---|---|
+| sin `sync=` (full) | 1997 / 1749 / 1756 |
+| `full` | 1962 / 1621 / 1652 |
+| `barrier` | 146 / 152 / 104 |
+| `none` | 18 / 10 / 10 |
+
+En el host, sin invitado (`TestFlushModos`: 300 × 4 KiB + FLUSH sobre el
+fichero de prueba): 1,34 s / 153 ms / 7 ms. `barrier` es ~12× más rápido que
+`full` y conserva el orden; `none` solo para volúmenes de desarrollo que se
+pueden perder.
+
+### DISCARD y WRITE_ZEROES
+
+Los discos de escritura ofrecen `VIRTIO_BLK_F_DISCARD` y
+`VIRTIO_BLK_F_WRITE_ZEROES` (los de solo lectura no, y rechazan las dos
+peticiones con IOERR). Lo que el invitado borra vuelve al host: un `fstrim`
+(o `mount -o discard`) hace huecos en el fichero del overlay o del volumen con
+`fcntl(F_PUNCHHOLE)`. APFS solo los hace en bloques enteros de su tamaño
+(`f_bsize`, 4 KiB), que es la `discard_sector_alignment` que se anuncia; los
+bordes que no llenan un bloque se escriben con ceros (`pwrite`), así que
+después todo el tramo se lee como ceros. `WRITE_ZEROES` con `unmap` hace lo
+mismo; sin `unmap` (`REQ_NOUNMAP`: `fallocate -z` sobre el dispositivo) escribe
+ceros de verdad y deja los bloques asignados. Si el sistema de ficheros del
+host no sabe hacer huecos, `WRITE_ZEROES` escribe ceros y `DISCARD` no hace
+nada (es un consejo).
+
+Configuración: `max_discard_sectors` 2 GiB y `max_discard_seg` 32;
+`max_write_zeroes_sectors` 32 MiB y `max_write_zeroes_seg` 1 (Linux no manda
+más; ceros sin `unmap` ocupan el hilo del disco, que no deja pausar la VM
+mientras dura); `write_zeroes_may_unmap` 1. Cada segmento
+(`{sector, num_sectors, flags}`) se copia de la RAM del invitado y se valida
+**antes** de tocar nada, como los sectores de un read/write: fuera del disco,
+desbordes, más largo que el tope, más segmentos de los anunciados o un búfer
+que no es múltiplo de 16 son IOERR; un flag desconocido, o `unmap` en un
+`DISCARD`, UNSUPP (virtio 1.2, 5.2.6). Uno malo y no se toca ningún segmento.
+
+El kernel del invitado (6.1) no necesita nada: `virtio_blk` lee las features y
+ext4 hace `FITRIM`. Medido (mismo Mac, un volumen de 512 MiB, `st_blocks` del
+fichero en el host):
+
+| paso | en disco |
+|---|---|
+| volumen recién arrancado | 16 MiB |
+| `dd` de 200 MiB al azar + `sync` | 216 MiB |
+| `rm` + `sync` (sin `fstrim`) | 216 MiB |
+| `fstrim -v /data` (487 MiB recortados) | 16 MiB |
+
+Sobre el dispositivo crudo (volumen de 128 MiB desmontado en el invitado, 64
+MiB al azar): `fallocate -z` de 16 MiB lee ceros y sigue en 64 MiB;
+`fallocate -p` de 16 MiB (WRITE_ZEROES con `unmap`) y `blkdiscard` de 16 MiB
+leen ceros y bajan a 48 y 32 MiB; lo de al lado sigue intacto. Un fichero
+escrito antes de `fstrim` y `fallocate -z` conserva su md5 con la caché del
+invitado vaciada y tras rearrancar la máquina.
 
 ## El fichero de memoria del snapshot
 

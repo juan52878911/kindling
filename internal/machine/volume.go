@@ -351,6 +351,7 @@ type resolvedVolume struct {
 	path     string // en el anfitrión
 	mount    string // dentro del invitado
 	readOnly bool
+	sync     string // api.VolumeAttachment.Sync
 }
 
 // resolveVolumes valida la petición de montaje y devuelve las rutas del host.
@@ -443,7 +444,16 @@ func comprobarVolumenes(m *Manager, req api.RunRequest, inUse map[string]volumeU
 		}
 		puntos[mp] = true
 
-		out = append(out, resolvedVolume{name: v.Name, path: p, mount: mp, readOnly: v.ReadOnly})
+		// El modo de sincronización (api.VolumeAttachment.Sync): solo en
+		// escritura, y con Firecracker se acepta y se ignora (syncDeVolumen).
+		if !api.ValidVolumeSync(v.Sync) {
+			return nil, fmt.Errorf("volume %q: sync %q: use full, barrier or none", v.Name, v.Sync)
+		}
+		if v.ReadOnly && v.Sync != "" && v.Sync != api.VolumeSyncFull {
+			return nil, fmt.Errorf("volume %q: sync=%s only applies to writable volumes", v.Name, v.Sync)
+		}
+
+		out = append(out, resolvedVolume{name: v.Name, path: p, mount: mp, readOnly: v.ReadOnly, sync: v.Sync})
 	}
 	return out, nil
 }
@@ -460,7 +470,36 @@ func attachments(vols []resolvedVolume) []api.VolumeAttachment {
 		// boot() registra en SetDrive. A partir de este momento viaja con la
 		// máquina y con cada snapshot que salga de ella.
 		out[i] = api.VolumeAttachment{Name: v.name, Mount: v.mount,
-			ReadOnly: v.readOnly, DriveID: volumeDriveID(i)}
+			ReadOnly: v.readOnly, DriveID: volumeDriveID(i), Sync: v.sync}
+	}
+	return out
+}
+
+// syncDeVolumen es el kling_sync que se manda al VMM para un volumen: solo a
+// kling-hv y kling-vz, que son los que lo conocen (Firecracker rechaza los
+// campos que no conoce, y sus discos no anuncian flush al invitado: no hay
+// nada que relajar), y siempre explícito ("full" si no se pidió nada) para
+// que al restaurar un dorado el volumen no herede el modo con que se congeló.
+func syncDeVolumen(backend string, v resolvedVolume) string {
+	if !vmmAdmiteDesechable(backend) {
+		return ""
+	}
+	if v.readOnly || v.sync == "" {
+		return api.VolumeSyncFull
+	}
+	return v.sync
+}
+
+// sinSync devuelve los adjuntos sin el modo de sincronización, para el meta
+// de un snapshot (api.VolumeAttachment.Sync: es de la máquina, no del
+// snapshot). Slice nuevo: vols puede ser el de una máquina publicada.
+func sinSync(vols []api.VolumeAttachment) []api.VolumeAttachment {
+	if len(vols) == 0 {
+		return vols
+	}
+	out := append([]api.VolumeAttachment(nil), vols...)
+	for i := range out {
+		out[i].Sync = ""
 	}
 	return out
 }

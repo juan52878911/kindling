@@ -628,7 +628,7 @@ func cmdRun(args []string) error {
 	flagRetirado(fs, "cpu", "cpu-pct")
 	service := fs.String("service", "", "service it belongs to (groups machines in topo and metrics)")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro][:sync=barrier|none] (repeatable)")
 	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	allowExec := fs.Bool("allow-exec", false, "enable kling exec and kling cp on this machine (decided at boot; snapshots keep it)")

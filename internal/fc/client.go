@@ -116,6 +116,10 @@ type Drive struct {
 	// Firecracker rechaza los campos que no conoce: omitempty hace que con
 	// false no viaje, y el núcleo solo lo pone a true con kling-vz.
 	KlingDisposable bool `json:"kling_disposable,omitempty"`
+	// KlingSync (extensión de kling-vz y kling-hv): qué hace un flush del
+	// invitado en un volumen (api.VolumeAttachment.Sync). Como el de arriba,
+	// vacío no viaja, y el núcleo solo lo rellena con esos dos VMM.
+	KlingSync string `json:"kling_sync,omitempty"`
 }
 
 // RateLimiter acota el caudal de un dispositivo. Sin esto, una sola microVM
@@ -186,6 +190,20 @@ func (c *Client) PatchDriveDisposable(ctx context.Context, driveID, pathOnHost s
 		"drive_id":         driveID,
 		"path_on_host":     pathOnHost,
 		"kling_disposable": true,
+	})
+}
+
+// PatchDriveSync es PatchDrive mandando además el modo de sincronización
+// (kling_sync, ver Drive) si sync no está vacío. Como PatchDriveDisposable,
+// solo para kling-vz y kling-hv y solo antes de crear la VM.
+func (c *Client) PatchDriveSync(ctx context.Context, driveID, pathOnHost, sync string) error {
+	if sync == "" {
+		return c.PatchDrive(ctx, driveID, pathOnHost)
+	}
+	return c.do(ctx, http.MethodPatch, "/drives/"+driveID, map[string]any{
+		"drive_id":     driveID,
+		"path_on_host": pathOnHost,
+		"kling_sync":   sync,
 	})
 }
 

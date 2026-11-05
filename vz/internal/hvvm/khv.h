@@ -43,8 +43,14 @@
 struct khv_disk {
   const char *path;
   int ro;
-  int sin_flush;  // overlay desechable (spec.Drive.SyncNone): FLUSH no llega al host
+  int sinc;  // KHV_SINC_*: qué hace un FLUSH del invitado (spec.Drive.SyncMode)
 };
+
+// Modos de sincronización de un disco (docs/backend-hv.md): full, F_FULLFSYNC
+// en cada FLUSH (por defecto); barrier, F_BARRIERFSYNC (orden, sin vaciar la
+// caché del SSD); none, el FLUSH no hace nada (overlay desechable o volumen
+// de desarrollo que se puede perder).
+enum { KHV_SINC_FULL = 0, KHV_SINC_BARRIER = 1, KHV_SINC_NONE = 2 };
 
 struct khv_config {
   int ncpus;
@@ -229,7 +235,7 @@ struct vblk_state {
   struct vmmio m;
   struct vq q;
 };
-int vblk_init(int idx, const char *ruta, bool ro, bool sin_flush, uint32_t intid);
+int vblk_init(int idx, const char *ruta, bool ro, int sinc, uint32_t intid);
 bool vblk_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size);
 void vblk_get(int idx, struct vblk_state *s);
 void vblk_reafirmar(int idx);
@@ -237,6 +243,8 @@ void vblk_set(int idx, const struct vblk_state *s);
 void vblk_quieto(int idx);     // espera a que el hilo del disco no toque la RAM
 void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaurar)
 void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
+void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
+int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
 
 // Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
 int khv_prueba(const uint8_t *datos, size_t n);

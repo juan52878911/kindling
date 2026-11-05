@@ -813,6 +813,25 @@ libs     2.0G      109M      0       my-service-1a98a4, another-one
 
 Four is the ceiling, because each one is a disk and disks are named by letter.
 
+**How much a volume trusts the disk (macOS).** By default every guest `fsync` reaches
+the physical disk (`F_FULLFSYNC`), and that costs: 300 `fsync` on a volume take
+~1.7 s on an M4. A writable volume can ask for less at the end of its `-volume`:
+
+```sh
+kling run -name dev -volume data:/data:sync=barrier   # ordering only: ~0.1 s
+kling run -name dev -volume cache:/cache:sync=none     # nothing: ~10 ms
+```
+
+`barrier` (`F_BARRIERFSYNC`) keeps the order but does not wait for the SSD cache: if
+the Mac goes down, the last seconds written can be lost, not the filesystem. **`none`
+takes nothing to the disk: if the Mac goes down (power cut, panic), the volume's ext4
+can be left broken**; only for development volumes you can throw away. A clean Mac
+shutdown loses nothing in any mode. The mode belongs to the machine that asked for it:
+it survives `freeze`/`thaw` and `stop`/`start`, but is not stored in a golden (a
+replica goes back to `full` unless it asks). It makes no sense read-only and is
+rejected. On Linux (Firecracker) it is accepted and ignored: its disks already do not
+take guest flushes to the physical disk. Details and numbers in `docs/backend-hv.md`.
+
 **The set of disks is fixed at freeze time.** Firecracker will not add or remove drives on a
 restored VM — it only lets you repoint each one at a different file — so changing how many
 volumes a service carries means re-importing it, and kling says exactly that instead of

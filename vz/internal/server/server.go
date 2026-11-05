@@ -534,6 +534,9 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		// InstanceStart o con un snapshot cargado pendiente de reanudar),
 		// que es cuando se eligen los modos del disco.
 		Disposable *bool `json:"kling_disposable"`
+		// Sync: ver spec.Drive. Igual que Disposable, solo antes de crear
+		// la VM: el núcleo lo vuelve a decir al restaurar un volumen.
+		Sync *string `json:"kling_sync"`
 	}
 	if err := decode(r, maxConfigBody, &d); err != nil {
 		fault(w, err)
@@ -553,7 +556,11 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("kling_disposable can only change before the VM is created"))
 		return
 	}
-	if err := s.spec.PatchDrive(r.PathValue("id"), d.PathOnHost, d.Disposable); err != nil {
+	if d.Sync != nil && s.st != stConfiguring && s.st != stPendingLoad {
+		fault(w, errors.New("kling_sync can only change before the VM is created"))
+		return
+	}
+	if err := s.spec.PatchDriveModes(r.PathValue("id"), d.PathOnHost, d.Disposable, d.Sync); err != nil {
 		fault(w, err)
 		return
 	}

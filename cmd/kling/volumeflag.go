@@ -15,6 +15,8 @@ import (
 //
 // Sintaxis:  nombre  ·  nombre:/punto/de/montaje  ·  nombre:/punto:ro
 //
+//	· nombre:/punto:sync=barrier|none   (al final; ver api.VolumeAttachment.Sync)
+//
 // La forma corta de un solo volumen (-volume X -mount Y -volume-ro) se conserva
 // por compatibilidad: scripts de v0.1.0 y CLIs antiguos que hablan con un daemon
 // nuevo. NO se documenta a propósito — documentar dos sintaxis para lo mismo
@@ -38,6 +40,12 @@ func (f *volumeFlag) Set(s string) error {
 	// nombre: así un punto de montaje puede llevar dos puntos si algún día hace
 	// falta, sin que el nombre se lo coma.
 	rest := s
+	if i := strings.LastIndex(rest, ":sync="); i >= 0 {
+		rest, v.Sync = rest[:i], rest[i+len(":sync="):]
+		if !api.ValidVolumeSync(v.Sync) || v.Sync == "" {
+			return fmt.Errorf("volume %q: sync=%q: use sync=full, sync=barrier or sync=none", s, v.Sync)
+		}
+	}
 	if r, ro := strings.CutSuffix(rest, ":ro"); ro {
 		rest, v.ReadOnly = r, true
 	} else if r, rw := strings.CutSuffix(rest, ":rw"); rw {
@@ -45,7 +53,10 @@ func (f *volumeFlag) Set(s string) error {
 	}
 	v.Name, v.Mount, _ = strings.Cut(rest, ":")
 	if v.Name == "" {
-		return fmt.Errorf("missing name in %q; use name[:/mount/point][:ro]", s)
+		return fmt.Errorf("missing name in %q; use name[:/mount/point][:ro][:sync=MODE]", s)
+	}
+	if v.ReadOnly && v.Sync != "" && v.Sync != api.VolumeSyncFull {
+		return fmt.Errorf("volume %q: sync=%s only applies to writable volumes", v.Name, v.Sync)
 	}
 	if v.Mount != "" && !strings.HasPrefix(v.Mount, "/") {
 		return fmt.Errorf("mount point of %q must be an absolute path: %q", v.Name, v.Mount)

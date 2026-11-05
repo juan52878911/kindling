@@ -270,3 +270,53 @@ func TestParseMTUYVsock(t *testing.T) {
 		t.Error("ParseVsock(si) debía fallar")
 	}
 }
+
+// El modo de sincronización de un volumen (kling_sync) SÍ va al snapshot (un
+// thaw no reapunta los volúmenes), un PATCH lo cambia, y Validate rechaza
+// lo que no es un modo. SyncMode: el desechable manda, y en solo lectura o
+// la raíz siempre es full.
+func TestSyncDelDisco(t *testing.T) {
+	s := sample()
+	s.PutDrive(Drive{DriveID: "volume0", PathOnHost: "/v/a.ext4", Sync: SyncModeNone})
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := s.WriteFile(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := got.Drives[len(got.Drives)-1]
+	if d.Sync != SyncModeNone || d.SyncMode() != SyncModeNone {
+		t.Fatalf("tras el snapshot: %+v", d)
+	}
+	b := SyncModeBarrier
+	if err := got.PatchDriveModes("volume0", "/v/b.ext4", nil, &b); err != nil {
+		t.Fatal(err)
+	}
+	if d := got.Drives[len(got.Drives)-1]; d.PathOnHost != "/v/b.ext4" || d.SyncMode() != SyncModeBarrier {
+		t.Fatalf("tras PATCH: %+v", d)
+	}
+	malo := "fsync"
+	if err := got.PatchDriveModes("volume0", "/v/b.ext4", nil, &malo); err == nil {
+		t.Fatal("PATCH aceptó kling_sync=fsync")
+	}
+	got.Drives[len(got.Drives)-1].Sync = "fsync"
+	if err := got.Validate(); err == nil || !strings.Contains(err.Error(), "kling_sync") {
+		t.Fatalf("Validate con kling_sync=fsync: %v", err)
+	}
+	for _, c := range []struct {
+		d    Drive
+		want string
+	}{
+		{Drive{}, SyncModeFull},
+		{Drive{Sync: SyncModeBarrier}, SyncModeBarrier},
+		{Drive{Sync: SyncModeBarrier, Disposable: true}, SyncModeNone},
+		{Drive{Sync: SyncModeNone, IsReadOnly: true}, SyncModeFull},
+		{Drive{Sync: SyncModeNone, IsRootDevice: true}, SyncModeFull},
+	} {
+		if got := c.d.SyncMode(); got != c.want {
+			t.Errorf("%+v: SyncMode %q, quiero %q", c.d, got, c.want)
+		}
+	}
+}

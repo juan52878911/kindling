@@ -86,7 +86,8 @@ var coreTree = []section{
       [-allow dom1,dom2]                           none) and domains allowed
       [-ttl 10m] [-cpu-pct PCT]                    auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by service
-      [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
+      [-volume NAME[:/mount][:ro][:sync=MODE]]     storage that survives the machine
+                                                   (repeatable; MODE full|barrier|none)
       [-mount /data] [-volume-ro]                  (-mount, -volume-ro: for a single
                                                    -volume)
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of

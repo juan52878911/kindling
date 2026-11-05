@@ -141,3 +141,33 @@ func TestAsentarOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// PatchDriveSync manda kling_sync solo si hay modo: vacío es el PatchDrive de
+// siempre, que es lo que recibe Firecracker.
+func TestPatchDriveSyncMandaElCampo(t *testing.T) {
+	f := nuevoFcFalso(t)
+	c := fc.New(f.Sock)
+	if err := c.PatchDriveSync(context.Background(), "volume0", "/a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PatchDriveSync(context.Background(), "volume0", "/b", "barrier"); err != nil {
+		t.Fatal(err)
+	}
+	ll := f.todas()
+	if len(ll) != 2 {
+		t.Fatalf("quiero 2 llamadas, hay %d", len(ll))
+	}
+	if strings.Contains(string(ll[0].Cuerpo), "kling_sync") {
+		t.Fatalf("sin modo no debe viajar kling_sync: %s", ll[0].Cuerpo)
+	}
+	var d struct {
+		PathOnHost string  `json:"path_on_host"`
+		Sync       *string `json:"kling_sync"`
+	}
+	if err := json.Unmarshal(ll[1].Cuerpo, &d); err != nil {
+		t.Fatal(err)
+	}
+	if ll[1].Ruta != "/drives/volume0" || d.PathOnHost != "/b" || d.Sync == nil || *d.Sync != "barrier" {
+		t.Fatalf("PatchDriveSync mandó %s %s", ll[1].Ruta, ll[1].Cuerpo)
+	}
+}

@@ -7,6 +7,7 @@ package hvvm
 #include "khv.h"
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
                   uint32_t *usado);
+uint32_t khv_prueba_cfg(uint32_t off);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
@@ -80,6 +81,25 @@ func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) 
 	e := C.khv_prueba_es(C.uint32_t(tipo), C.uint64_t(sector), pl, C.int(len(lens)), pd, C.int(malo), &u)
 	return int(e), uint32(u)
 }
+
+// cfgDisco lee 4 bytes de los registros o la configuración (desde 0x100)
+// del disco de pruebas.
+func cfgDisco(off uint32) uint32 { return uint32(C.khv_prueba_cfg(C.uint32_t(off))) }
+
+// modoDisco cambia si el disco de pruebas es de solo lectura y su modo de
+// sincronización (C.KHV_SINC_*).
+func modoDisco(ro bool, sinc int) { C.vblk_prueba_modo(0, C.bool(ro), C.int(sinc)) }
+
+// Los modos de sincronización de khv.h, para las pruebas.
+const (
+	sincFull    = int(C.KHV_SINC_FULL)
+	sincBarrier = int(C.KHV_SINC_BARRIER)
+	sincNone    = int(C.KHV_SINC_NONE)
+)
+
+// bloquesDisco: los bloques de 512 B que ocupa el fichero del disco de
+// pruebas (st_blocks), o -1.
+func bloquesDisco() int64 { return int64(C.vblk_prueba_bloques(0)) }
 
 // vsockTx manda como el invitado los bytes de enviado (4000 y cinco de
 // 64 KiB) en seis paquetes por la cola de tx (khv_vsock_prueba_tx) y devuelve lo que leyó Go,

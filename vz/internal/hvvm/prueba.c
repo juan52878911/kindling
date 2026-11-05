@@ -50,7 +50,7 @@ static int preparar(void) {
     if (fd < 0) return -1;
     if (ftruncate(fd, 1 << 20) != 0) return -1;
     close(fd);
-    int r = vblk_init(0, ruta, false, false, 48);
+    int r = vblk_init(0, ruta, false, KHV_SINC_FULL, 48);
     unlink(ruta);
     if (r != 0) return -1;
     static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
@@ -203,10 +203,20 @@ int khv_prueba_flush(void) {
   return estado;
 }
 
-// khv_prueba_es manda al disco 0 una petición tipo (0 IN, 1 OUT) en sector
-// con nd búferes de datos de lens[i] bytes, cada uno en su trozo de 64 KiB de
-// la RAM (no seguidos: preadv/pwritev tienen que repartirlos bien). datos
-// trae lo que se escribe (OUT) y vuelve con lo leído (IN). El búfer malo (o
+// khv_prueba_cfg lee 4 bytes de los registros (off < 0x100) o de la
+// configuración (0x100 en adelante) del disco 0.
+uint32_t khv_prueba_cfg(uint32_t off) {
+  if (preparar() != 0) return 0;
+  uint64_t v = 0;
+  vblk_mmio(0, off, false, &v, 4);
+  return (uint32_t)v;
+}
+
+// khv_prueba_es manda al disco 0 una petición tipo (0 IN, 1 OUT, 11 DISCARD,
+// 13 WRITE_ZEROES...) en sector con nd búferes de datos de lens[i] bytes,
+// cada uno en su trozo de 64 KiB de la RAM (no seguidos: preadv/pwritev
+// tienen que repartirlos bien). datos trae lo que se escribe (OUT y los
+// segmentos de DISCARD y WRITE_ZEROES) y vuelve con lo leído (IN). El búfer malo (o
 // -1) apunta fuera de la RAM. Deja en *usado la longitud del used y devuelve
 // el byte de estado, o -1 si no se pudo preparar.
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
@@ -237,7 +247,7 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
   for (int i = 0; i < nd; i++) {
     if (lens[i] > 0x10000) return -1;
     uint64_t a = buf + (uint64_t)i * 0x10000;
-    if (tipo == 1) memcpy(gpa_ptr(a, lens[i]), datos + o, lens[i]);
+    if (tipo != 0) memcpy(gpa_ptr(a, lens[i]), datos + o, lens[i]);
     if (i == malo) a = RAM_BASE + PRUEBA_RAM;
     uint16_t f = VIRTQ_DESC_F_NEXT | (tipo == 0 ? VIRTQ_DESC_F_WRITE : 0);
     d[1 + i] = (struct vdesc){a, lens[i], f, (uint16_t)(2 + i)};
