@@ -652,9 +652,16 @@ func (m *Manager) enterBoot(ctx context.Context) (func(), error) {
 
 // enterRestore toma un hueco en la compuerta de restauraciones (launchGate)
 // y, con el nivel de memoria bajo, también el de "de una en una".
+//
+// Con kling-hv no hay espera por nivel ni "de una en una": el freno se pensó
+// para kling-vz, que copia el mem.file entero al restaurar; kling-hv mapea la
+// memoria del volcado y la va poblando según se toca
+// (restaurarComparteMemoria), así que restaurar no dispara la presión. En un
+// Mac al 24-27 % libre un tercio de los thaw/fork de hv tardaban 0,6-1,9 s en
+// vez de 30-40 ms solo por esa espera. La admisión dura (minMemLevel) sigue.
 func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
 	release, err := m.enterLaunch(ctx)
-	if err != nil || m.launchGate == nil {
+	if err != nil || m.launchGate == nil || backendVMM == BackendHV {
 		return release, err
 	}
 	if !nivelBajoParaRestaurar(ctx) {
