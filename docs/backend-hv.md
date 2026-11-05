@@ -125,8 +125,8 @@ vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
 pie (32 B)   magia KLNGHV02, tamaño de la RAM, dónde está el estado
 ```
 
-El estado lleva una versión (3 desde que el globo tiene su cola de
-estadísticas; la 2 la añadía a él y a vsock al final): un `kling-hv` lee
+El estado lleva una versión (4 desde el free page reporting del globo; la 3
+le dio su cola de estadísticas y la 2 lo añadía a él y a vsock al final): un `kling-hv` lee
 las anteriores, que son un prefijo de la suya (la 2 convierte el globo), y
 el daemon rechaza una del futuro con el mensaje de `versionHVMax`
 (`internal/machine/meta.go`). Un invitado restaurado de una versión 2 no
@@ -148,13 +148,15 @@ el reloj de pared lo arregla `/resync` del agente, como con vz.
 Nadie escribe un fichero de memoria después de crearlo: lo exige el mapeo
 `MAP_PRIVATE` (sus páginas limpias son las del fichero).
 
-El snapshot escribe también las páginas residentes que el invitado solo leyó
+El snapshot pide también las páginas residentes que el invitado solo leyó
 (`MINCORE_INCORE`): el clon es otro vnode y no comparte la caché unificada con
-su base, así que una página que no se escribe la tendría que leer del SSD el
+su base, así que una página que nadie pide la tendría que leer del SSD el
 invitado restaurado. Sin ello, el thaw de una máquina ya descongelada antes
 tardaba 60-90 ms en el primer `/resync` (cada interrupción del invitado
-esperaba a un fallo de página); con ello, 2-4 ms. Lo escrito queda en la
-caché.
+esperaba a un fallo de página); con ello, 2-4 ms. Antes se reescribían; ahora
+se piden con `F_RDADVISE` a la caché del clon, en segundo plano y sin copiarlas
+(`vm.c`): el freeze va en torno al doble de rápido y lo congelado ocupa menos
+(76 → 60 MB en el M4).
 
 ## Pausa y techo de CPU
 
@@ -297,9 +299,8 @@ que el ruido. Antes de esta versión cada freeze hacía 7 F_FULLFSYNC (~5 ms cad
 uno en el M4 frente a 0,7 ms de una barrera F_BARRIERFSYNC); ahora 2 (la marca
 y el sello) y barreras en el resto. Medido en vueltas alternas (n=12 cada una,
 p50 del API): hv 93,5 / 94,5 → 77,9 / 72,4 ms y vz 144 / 135,5 → 124,8 /
-123,6 ms, con el thaw igual. Queda por probar, con el Mac tranquilo,
-pedir esas páginas con `F_RDADVISE` en vez de escribirlas: en una ronda bajó a
-75 ms con thaw de 52 ms, en otra no se distinguía del ruido.
+123,6 ms, con el thaw igual. Con `F_RDADVISE` (arriba), el p50 del freeze en
+hv quedó en 67 ms.
 
 ## Estabilidad de `kling-hv`
 
@@ -378,7 +379,7 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   cabecera cambiada sin cambiar de tamaño solo la para la validación de
   `khv_restore` (magia, versión, tamaños, `ram_size`, `gic_size`), no una suma.
 - **Sin bajada de versión**: `kling-hv` escribe siempre su `SNAP_VERSION`
-  (hoy 3), aunque la máquina se pudiera describir con una anterior, así que
+  (hoy 4), aunque la máquina se pudiera describir con una anterior, así que
   un `kling-hv` viejo no lee lo que congela uno nuevo (ver
   [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback` lo mira
   antes de volver.
