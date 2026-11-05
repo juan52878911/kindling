@@ -667,6 +667,11 @@ de amenaza están en [compartir.md](compartir.md).
 ]}
 ```
 
+- `transport` (solo `ro` y `rw`): `"virtiofs"` la sirve por virtio-fs en kling-hv (más
+  rápida, sin avisos de cambios del host), `"fuse"` por FUSE aunque el daemon tenga
+  virtio-fs por defecto; vacío, lo del daemon (FUSE salvo `KLING_HV_VIRTIOFS=1`). En Linux,
+  o con `KLING_HV_VIRTIOFS=0`, `"virtiofs"` es un 400. En la máquina, `transport` dice por
+  dónde va la carpeta con sesión ([compartir.md](compartir.md#kling-hv-virtio-fs)).
 - `mode: copy` (por defecto): una copia de solo lectura. `upload` es el id que
   devolvió `POST /shares/uploads`; se consume al arrancar. `source` solo se
   guarda para enseñarlo.

@@ -833,17 +833,40 @@ func memoriaFisicaMiB() int64 {
 	return int64(leerUint64LE(s) >> 20)
 }
 
+// transporteCarpeta decide por dónde va una carpeta viva según lo que pidió
+// (api.ShareSpec.Transport) y KLING_HV_VIRTIOFS en el entorno del daemon:
+// sin pedir nada, FUSE, salvo con KLING_HV_VIRTIOFS=1 (virtio-fs por
+// defecto); con KLING_HV_VIRTIOFS=0, pedir virtio-fs es un error. FUSE es lo
+// de siempre porque virtio-fs no lleva los avisos de cambios del host (los
+// vigilantes de node --watch, vite... no se enteran): docs/compartir.md.
+func transporteCarpeta(pedido string) (string, error) {
+	env := os.Getenv("KLING_HV_VIRTIOFS")
+	switch pedido {
+	case share.TransportVirtioFS:
+		if env == "0" {
+			return "", errors.New("virtio-fs shares are disabled on this daemon (KLING_HV_VIRTIOFS=0)")
+		}
+		return share.TransportVirtioFS, nil
+	case "":
+		if env == "1" {
+			return share.TransportVirtioFS, nil
+		}
+	}
+	return "", nil
+}
+
 // carpetasAntesDeArrancar pide al VMM, antes de crear la VM, un dispositivo
-// virtio-fs por carpeta viva (docs/backend-hv.md) y apunta en la máquina por
-// dónde irá cada una (ShareAttachment.Transport). Lo hace kling-hv; kling-vz
-// y un kling-hv anterior dicen que no, y las carpetas van por FUSE como
-// siempre. No es fatal: sin dispositivo, FUSE.
+// virtio-fs por cada carpeta viva que va por él (ShareAttachment.Transport,
+// docs/backend-hv.md). Lo hace kling-hv; kling-vz y un kling-hv anterior
+// dicen que no, y esas carpetas pasan a FUSE, como siempre. No es fatal.
 func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id string) {
 	m.mu.RLock()
 	var pedidas []fc.KlingVirtioFS
+	nombre := id
 	if mc := m.byID[id]; mc != nil {
+		nombre = mc.Name
 		for tag, s := range mc.Shares {
-			if s.Live() {
+			if s.Live() && s.Transport == share.TransportVirtioFS {
 				pedidas = append(pedidas, fc.KlingVirtioFS{Tag: tag, ReadOnly: s.Mode == share.ModeRO})
 			}
 		}
@@ -852,19 +875,18 @@ func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id 
 	if len(pedidas) == 0 {
 		return
 	}
-	transporte := share.TransportVirtioFS
-	if err := c.KlingShares(ctx, pedidas); err != nil {
-		transporte = ""
+	err := c.KlingShares(ctx, pedidas)
+	if err == nil {
+		return
 	}
+	log.Printf("%s: the VMM has no virtio-fs (%v): its shares go over FUSE", nombre, err)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if mc := m.byID[id]; mc != nil {
 		// Una copia: persist lee el slice de la máquina fuera de este cerrojo.
 		nuevas := slices.Clone(mc.Shares)
 		for i := range nuevas {
-			if nuevas[i].Live() {
-				nuevas[i].Transport = transporte
-			}
+			nuevas[i].Transport = ""
 		}
 		mc.Shares = nuevas
 	}

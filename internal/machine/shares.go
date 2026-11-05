@@ -325,6 +325,23 @@ func (m *Manager) resolveShares(ctx context.Context, req api.RunRequest, vols []
 		default:
 			return nil, bad("invalid mode %q: use copy, ro or rw", s.Mode)
 		}
+		// Por dónde va: virtio-fs solo si se pide (o lo pide el daemon por
+		// defecto); carpetasAntesDeArrancar lo confirma con el VMM al arrancar.
+		switch s.Transport {
+		case "", share.TransportFUSE, share.TransportVirtioFS:
+		default:
+			return nil, bad("invalid share transport %q: use virtiofs or fuse", s.Transport)
+		}
+		if s.Transport != "" && mode == share.ModeCopy {
+			return nil, bad("%s: a copy share has no transport (virtiofs and fuse are for ro and rw)", s.Mount)
+		}
+		if mode != share.ModeCopy {
+			t, err := transporteCarpeta(s.Transport)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %s: %v", ErrShareRequest, s.Mount, err)
+			}
+			rs.att.Transport = t
+		}
 		out = append(out, rs)
 	}
 	// Cada copia es un disco más; con los volúmenes, el invitado tiene un

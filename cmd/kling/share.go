@@ -35,8 +35,10 @@ func (s *shareFlag) Set(v string) error {
 	return nil
 }
 
-const shareUsage = "host folder inside the machine: SRC:DST[:copy|ro|rw] (repeatable). " +
-	"copy (default) uploads a read-only snapshot of a local folder; ro/rw serve a folder on the daemon host live"
+const shareUsage = "host folder inside the machine: SRC:DST[:copy|ro|rw[:virtiofs|fuse]] (repeatable). " +
+	"copy (default) uploads a read-only snapshot of a local folder; ro/rw serve a folder on the daemon host live; " +
+	":virtiofs serves it over virtio-fs on kling-hv (3-5x faster metadata, ~2x I/O, but host changes don't wake " +
+	"watchers in the guest), :fuse forces FUSE when the daemon defaults to virtio-fs"
 
 // remoteEndpoint dice si el daemon está al otro lado de SSH: entonces las rutas
 // locales no significan nada allí.

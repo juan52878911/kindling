@@ -9,6 +9,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -74,6 +76,15 @@ const puenteHostSoportado = false
 // redAntesDeArrancar no hace nada en Linux: la red ya la montó el namespace
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
+
+// transporteCarpeta: en Linux no hay virtio-fs, y pedirlo es un error (sin
+// pedirlo, FUSE como siempre).
+func transporteCarpeta(pedido string) (string, error) {
+	if pedido == share.TransportVirtioFS {
+		return "", errors.New("virtio-fs shares need kling-hv (macOS); Firecracker serves live shares over FUSE")
+	}
+	return "", nil
+}
 
 // carpetasAntesDeArrancar no hace nada en Linux: Firecracker no tiene
 // virtio-fs y las carpetas vivas van por FUSE (docs/compartir.md).

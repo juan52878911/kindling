@@ -31,8 +31,8 @@ tampoco tiene virtio-fs. Las opciones reales eran tres:
   más). FUSE deja la superficie en código nuestro, en Go, en espacio de usuario,
   con el daemon validando cada petición.
 
-En kling-hv (macOS), que es un VMM nuestro, las carpetas vivas van además por
-virtio-fs: el kernel arm64 de kindling lo trae desde esta versión, y el
+En kling-hv (macOS), que es un VMM nuestro, una carpeta viva puede ir además
+por virtio-fs si se pide (`-share SRC:DST:rw:virtiofs`): el kernel arm64 de kindling lo trae desde esta versión, y el
 dispositivo lleva las peticiones FUSE al **mismo** servidor en Go del agente,
 que habla con el mismo `internal/share` (ver [kling-hv](#kling-hv-virtio-fs)).
 
@@ -330,8 +330,8 @@ Desktop: 257 ms); sin WATCH no recargaba nunca.
 
 ### kling-hv: virtio-fs
 
-Con kling-hv, el kernel del invitado no habla FUSE con el agente sino con el
-host, por un dispositivo virtio-fs por carpeta que el agente monta con
+Con kling-hv y `:virtiofs`, el kernel del invitado no habla FUSE con el agente
+sino con el host, por un dispositivo virtio-fs por carpeta que el agente monta con
 `mount -t virtiofs kling-share-N DST`. El servidor FUSE es el `fuseFS` del
 agente (la tabla de nodos, los handles, la escritura diferida, las mismas
 validaciones), que corre dentro de kling-hv (`pkg/guest.HostFS`), y su sesión
@@ -344,18 +344,25 @@ el dispositivo), y entonces todo sigue por FUSE como aquí se describe. El
 detalle (el puente C↔Go, qué se guarda al congelar, cuándo no se usa) está en
 [backend-hv.md](backend-hv.md#carpetas-vivas-por-virtio-fs).
 
-Lo que cambia para quien la usa:
+**Es opt-in por carpeta**, porque cambia velocidad por avisos: por virtio-fs
+los metadatos van 3-5× más rápido y la E/S secuencial ~2× (tabla abajo),
+pero se pierden los avisos de cambios del host (WATCH): un cambio hecho en el
+Mac se ve al caducar la caché del invitado (1 s) y no despierta a inotify, así
+que `node --watch`, nodemon o vite no recargan solos. Para un flujo de
+desarrollo con vigilantes, FUSE (lo de siempre); para compilar, instalar
+dependencias, `git` o leer mucho, virtio-fs.
 
-- **Rapidez**: los metadatos 3-5× y la E/S secuencial ~2× (tabla abajo).
-- **Cambios del host**: sin WATCH (virtio-fs no tiene cola de avisos en
-  Linux), un cambio hecho en el host se ve al caducar la caché (1 s) y no
-  despierta a inotify en el invitado: `node --watch`, nodemon o vite no recargan
-  solos con una carpeta de `kling run -share` por virtio-fs.
-  `KLING_HV_VIRTIOFS=0` en el entorno del daemon vuelve a FUSE.
-  `kling compose up` no cambia: sus servicios salen de plantillas, que siguen
-  por FUSE.
-- **Congelar y descongelar**, igual que por FUSE: el estado del servidor va en
-  el snapshot.
+- `-share SRC:DST:ro|rw:virtiofs` (API: `ShareSpec.transport: "virtiofs"`) la
+  pide por virtio-fs; sin nada, FUSE.
+- `KLING_HV_VIRTIOFS=1` en el entorno del daemon hace virtio-fs el defecto;
+  entonces `:fuse` (`transport: "fuse"`) pide FUSE para una carpeta.
+- `KLING_HV_VIRTIOFS=0` lo prohíbe: pedir `:virtiofs` es un error (400).
+- En Linux (Firecracker) pedir `:virtiofs` es un error; en kling-vz la
+  carpeta va por FUSE.
+
+`kling compose up` sigue por FUSE (sus servicios salen de plantillas, que no
+llevan el dispositivo). Congelar y descongelar funcionan igual que por FUSE:
+el estado del servidor va en el snapshot.
 
 Medido en el M4 (macOS 26, daemon privado, máquina de 512 MiB y 1 vCPU al
 100 %, mediana de 3 vueltas; 2000 ficheros de 0,5-4 KiB en 20 directorios, uno

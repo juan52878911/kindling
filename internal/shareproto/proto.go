@@ -85,6 +85,11 @@ type Attach struct {
 // TransportVirtioFS es Attach.Transport para virtio-fs.
 const TransportVirtioFS = "virtiofs"
 
+// TransportFUSE es lo que pide una carpeta (api.ShareSpec.Transport) que va por
+// FUSE aunque el daemon tenga virtio-fs por defecto, y lo que dice
+// HeaderTransport cuando el agente no puede montar por virtio-fs.
+const TransportFUSE = "fuse"
+
 // HeaderTransport es la cabecera con la que el agente dice por dónde montó
 // (o, con 501, por dónde hay que pedírselo).
 const HeaderTransport = "X-Kling-Share-Transport"

@@ -38,6 +38,7 @@ kling graph ls -json:  [].nodes.x.ports[] number
 kling graph ls -json:  [].nodes.x.shares[].mode string
 kling graph ls -json:  [].nodes.x.shares[].mount string
 kling graph ls -json:  [].nodes.x.shares[].source string
+kling graph ls -json:  [].nodes.x.shares[].transport string
 kling graph ls -json:  [].nodes.x.shares[].upload string
 kling graph ls -json:  [].nodes.x.state string
 kling graph ls -json:  [].nodes.x.vcpus number
@@ -117,6 +118,7 @@ kling inspect m1:  shares[].mode string
 kling inspect m1:  shares[].mount string
 kling inspect m1:  shares[].source string
 kling inspect m1:  shares[].status string
+kling inspect m1:  shares[].transport string
 kling inspect m1:  snapshot_bytes number
 kling inspect m1:  started_at string
 kling inspect m1:  state string
@@ -205,6 +207,7 @@ kling ps -a -json:  [].shares[].mode string
 kling ps -a -json:  [].shares[].mount string
 kling ps -a -json:  [].shares[].source string
 kling ps -a -json:  [].shares[].status string
+kling ps -a -json:  [].shares[].transport string
 kling ps -a -json:  [].snapshot_bytes number
 kling ps -a -json:  [].started_at string
 kling ps -a -json:  [].state string
@@ -293,6 +296,7 @@ kling sandbox ls -json:  [].shares[].mode string
 kling sandbox ls -json:  [].shares[].mount string
 kling sandbox ls -json:  [].shares[].source string
 kling sandbox ls -json:  [].shares[].status string
+kling sandbox ls -json:  [].shares[].transport string
 kling sandbox ls -json:  [].snapshot_bytes number
 kling sandbox ls -json:  [].started_at string
 kling sandbox ls -json:  [].state string

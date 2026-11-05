@@ -1574,6 +1574,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	var shareAtts []api.ShareAttachment
 	for _, sh := range shares {
+		// La máquina de la plantilla se creó sin carpetas, así que tampoco
+		// con dispositivos virtio-fs (no se añaden en caliente): por FUSE.
+		sh.att.Transport = ""
 		shareAtts = append(shareAtts, sh.att)
 	}
 	for _, v := range vols {

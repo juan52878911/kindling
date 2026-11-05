@@ -211,12 +211,28 @@ invitado vaciada y tras rearrancar la máquina.
 
 ### Carpetas vivas por virtio-fs
 
-Con `kling-hv`, las carpetas `-share SRC:DST:ro|rw` de un arranque en frío no
-pasan por el agente: el kernel del invitado las monta con `mount -t virtiofs` y
+Con `kling-hv`, las carpetas `-share SRC:DST:ro|rw:virtiofs` de un arranque en
+frío no pasan por el agente: el kernel del invitado las monta con `mount -t virtiofs` y
 habla FUSE con el host por las colas de un dispositivo virtio-fs (device id 26;
 la cola de alta prioridad, con los FORGET, y una de peticiones; tag
 `kling-share-N`, con N el tag de la carpeta). El diseño de las carpetas está en
 [compartir.md](compartir.md); lo que cambia es dónde corre cada pieza:
+
+**Es opt-in por carpeta**, porque cambia velocidad por avisos: por virtio-fs
+los metadatos van 3-5× más rápido y la E/S secuencial ~2× (tabla abajo),
+pero se pierden los avisos de cambios del host (WATCH): un cambio hecho en el
+Mac se ve al caducar la caché del invitado (1 s) y no despierta a inotify, así
+que `node --watch`, nodemon o vite no recargan solos. Para un flujo de
+desarrollo con vigilantes, FUSE (lo de siempre); para compilar, instalar
+dependencias, `git` o leer mucho, virtio-fs.
+
+- `-share SRC:DST:ro|rw:virtiofs` (API: `ShareSpec.transport: "virtiofs"`) la
+  pide por virtio-fs; sin nada, FUSE.
+- `KLING_HV_VIRTIOFS=1` en el entorno del daemon hace virtio-fs el defecto;
+  entonces `:fuse` (`transport: "fuse"`) pide FUSE para una carpeta.
+- `KLING_HV_VIRTIOFS=0` lo prohíbe: pedir `:virtiofs` es un error (400).
+- En Linux (Firecracker) pedir `:virtiofs` es un error; en kling-vz la
+  carpeta va por FUSE.
 
 ```
  invitado                  kling-hv (host)                                   daemon (host)
@@ -224,11 +240,12 @@ la cola de alta prioridad, con los FORGET, y una de peticiones; tag
             (colas virtio)   (copia, valida)  (el fuseFS del agente)  (unix)     os.Root(SRC)
 ```
 
-1. **Al arrancar**, el núcleo pide un dispositivo por carpeta viva (`PUT
-   /kling/shares`, antes de `InstanceStart`; `carpetasAntesDeArrancar` en
-   `internal/machine/plataforma_vz.go`) y apunta en la máquina
-   `transport: virtiofs`. `kling-vz` contesta que no (501) y todo sigue por
-   FUSE.
+1. **Al crear la máquina** se decide por dónde va cada carpeta viva
+   (`transporteCarpeta` en `internal/machine/plataforma_vz.go`) y se apunta en
+   ella (`transport: virtiofs`). **Al arrancar**, el núcleo pide un
+   dispositivo por cada una de esas (`PUT /kling/shares`, antes de
+   `InstanceStart`; `carpetasAntesDeArrancar`). `kling-vz` contesta que no
+   (501) y esas carpetas pasan a FUSE.
 2. **El attach** pide al agente `Transport: virtiofs`: el agente monta el
    dispositivo de ese tag y contesta 200 sin tomar la conexión, y el núcleo
    conecta la sesión `kling-share/1` con `kling-hv` (`POST /kling/share/attach`
@@ -289,12 +306,14 @@ cwd dentro de la carpeta sigue allí.
 
 **Cuándo no hay virtio-fs** (y todo va por FUSE, como antes, sin hacer nada):
 
+- no se pidió (`:virtiofs`, o `KLING_HV_VIRTIOFS=1` en el daemon);
 - un kernel sin `CONFIG_VIRTIO_FS` (los anteriores a esta versión): el
   `mount -t virtiofs` falla, el agente contesta 501 con
   `X-Kling-Share-Transport: fuse` y el núcleo repite el attach por FUSE;
 - un agente anterior: no sabe de `Transport`, monta por FUSE y contesta 101;
 - `kling-vz` y Firecracker: no tienen el dispositivo;
-- `KLING_HV_VIRTIOFS=0` en el entorno del daemon (que pasa a `kling-hv`);
+- `KLING_HV_VIRTIOFS=0` en el entorno del daemon (que pasa a `kling-hv`, que
+  entonces tampoco crea dispositivos);
 - las plantillas: `run -share-wait N` y `run -from` con carpetas no llevan
   dispositivo (la máquina de la plantilla se creó sin carpetas, y un
   dispositivo virtio-mmio no se añade en caliente), así que `kling compose up`
@@ -866,7 +885,7 @@ los ~9 ms), que es otra auditoría.
 - virtio-fs: DAX (ver Carpetas vivas por virtio-fs); los avisos de cambios del
   host (WATCH) y su inotify en el invitado, que por virtio-fs se pierden (un
   cambio del host se ve al caducar la caché de 1 s, y `node --watch` no se
-  entera: `KLING_HV_VIRTIOFS=0` vuelve a FUSE); y las plantillas con
+  entera: por eso virtio-fs es opt-in por carpeta); y las plantillas con
   `-share-wait`, que siguen por FUSE porque su máquina se crea sin
   dispositivo.
 - `sandbox_init` cuesta ~9 ms (4 de base y 5 de `system.sb`) y ~3 MiB por

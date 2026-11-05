@@ -96,9 +96,11 @@ var coreTree = []section{
                                                    KVM inside, never frozen
       [-mem-max 2G] [-disk 4G]                     ceiling for machine resize; its
                                                    writable disk (default 512M)
-      [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only
-      [-share-wait N]                              copy (default), or live; the service
-                                                   waits for N live shares
+      [-share SRC:DST[:copy|ro|rw[:virtiofs]]]     host folder inside: a read-only
+      [-share-wait N]                              copy (default), or live (:virtiofs:
+                                                   faster on kling-hv, but no host-change
+                                                   events); the service waits for N
+                                                   live shares
       [-p HOST:GUEST] (repeatable)                 publishes a guest port on 127.0.0.1
                                                    for as long as the machine exists;
                                                    kling stays following the service

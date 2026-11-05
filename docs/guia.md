@@ -866,7 +866,7 @@ cambiar en silencio la versión que usa un servicio que ya funcionaba.
 
 ## Compartir una carpeta del host
 
-`-share SRC:DST[:copy|ro|rw]` mete una carpeta del host dentro de una máquina
+`-share SRC:DST[:copy|ro|rw[:virtiofs]]` mete una carpeta del host dentro de una máquina
 (`kling run` y `kling sandbox create`, repetible):
 
 ```sh
@@ -885,6 +885,12 @@ kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y
   menos de un segundo; `ro` lo impone el daemon, no solo el montaje. Sobrevive a
   `freeze`/`thaw` y a reiniciar el daemon, y funciona con `egress none`. Solo se pueden
   compartir en vivo carpetas bajo `daemon.share_roots` (vacío por defecto).
+- **:virtiofs** (solo kling-hv, en macOS): `-share /srv/code/app:/src:rw:virtiofs` sirve la
+  carpeta viva por virtio-fs, sin pasar por el agente: los metadatos van 3-5× más rápido y la
+  E/S ~2×, pero un cambio hecho en el host no despierta a los vigilantes del invitado
+  (`node --watch`, vite): se ve al cabo de un segundo. Sin `:virtiofs`, FUSE como siempre;
+  `KLING_HV_VIRTIOFS=1` en el daemon lo hace el defecto (`:fuse` lo quita para una carpeta) y
+  `=0` lo prohíbe ([`docs/compartir.md`](compartir.md#kling-hv-virtio-fs)).
 
 El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
 carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina

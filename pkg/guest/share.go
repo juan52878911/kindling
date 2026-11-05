@@ -192,7 +192,7 @@ func (s *Shares) attachVirtio(w http.ResponseWriter, a share.Attach) {
 	code, err := s.mountVirtioFor(a)
 	if err != nil {
 		if code == http.StatusNotImplemented {
-			w.Header().Set(share.HeaderTransport, "fuse")
+			w.Header().Set(share.HeaderTransport, share.TransportFUSE)
 		}
 		http.Error(w, err.Error(), code)
 		return
