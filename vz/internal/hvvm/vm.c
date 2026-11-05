@@ -1880,27 +1880,34 @@ int khv_snapshot(const char *mem_out) {
     fallo("mincore: %s", strerror(errno));
     goto fin;
   }
-  // También las páginas residentes que el invitado solo leyó (MINCORE_INCORE):
-  // el clon es otro vnode y no comparte la caché unificada con su base, así
-  // que una página que no se escribe aquí la tendría que leer del SSD el
-  // invitado restaurado al tocarla. Con la congelación de una máquina ya
-  // restaurada eso eran 60-90 ms de fallos de página en el primer /resync
-  // tras el thaw (2-4 ms escribiéndolas). Lo escrito queda en la caché.
-  const unsigned char mascara =
-      MINCORE_INCORE | MINCORE_MODIFIED | MINCORE_COPIED | MINCORE_ANONYMOUS | MINCORE_PAGED_OUT;
+  // Las páginas residentes que el invitado solo leyó (MINCORE_INCORE, sin
+  // cambios) ya están en el clon, pero el clon es otro vnode y no comparte la
+  // caché unificada con su base: el invitado restaurado las tendría que leer
+  // del SSD al tocarlas (sin nada, el thaw -> primer exec pasaba de ~55 a
+  // ~130 ms en el M4). Antes se reescribían, que las ensuciaba en el clon (se
+  // dejaban de compartir sus bloques con la base y se iban al disco) y doblaba
+  // el freeze (~180 -> ~90 ms, 53 MiB limpios frente a 5 sucios con -mem 256).
+  // F_RDADVISE las pide a la caché del clon en segundo plano y sin copiarlas.
+  const unsigned char sucia = MINCORE_MODIFIED | MINCORE_COPIED | MINCORE_ANONYMOUS | MINCORE_PAGED_OUT;
   // Lo inflado en el globo no se escribe: al invitado no le importa qué tenga.
   for (size_t i = 0; i < np; i++)
     if (hay_globo && vballoon_inflada(i)) v[i] = 0;
   for (size_t i = 0; i < np;) {
-    if (!(v[i] & mascara)) {
-      i++;
-      continue;
-    }
-    size_t j = i;
-    while (j < np && (v[j] & mascara)) j++;
-    if (escribir_todo(fd, g_ram + i * PAGINA, (j - i) * PAGINA, (off_t)(i * PAGINA)) != 0) {
+    // 2: hay que escribirla; 1: solo leída (a la caché); 0: nada.
+    int k = v[i] & sucia ? 2 : v[i] & MINCORE_INCORE ? 1 : 0;
+    size_t j = i + 1;
+    while (j < np && (v[j] & sucia ? 2 : v[j] & MINCORE_INCORE ? 1 : 0) == k) j++;
+    if (k == 2 && escribir_todo(fd, g_ram + i * PAGINA, (j - i) * PAGINA, (off_t)(i * PAGINA)) != 0) {
       fallo("writing %s: %s", mem_out, strerror(errno));
       goto fin;
+    }
+    // ra_count es un int: por tramos de 1 GiB como mucho. Es un consejo; si
+    // no se atiende, el invitado las lee al tocarlas, como sin él.
+    for (size_t p = i; k == 1 && p < j;) {
+      size_t n = j - p < (1u << 30) / PAGINA ? j - p : (1u << 30) / PAGINA;
+      struct radvisory ra = {.ra_offset = (off_t)(p * PAGINA), .ra_count = (int)(n * PAGINA)};
+      (void)fcntl(fd, F_RDADVISE, &ra);
+      p += n;
     }
     i = j;
   }
