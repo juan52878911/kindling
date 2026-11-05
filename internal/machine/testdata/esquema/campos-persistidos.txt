@@ -39,6 +39,7 @@ state.json api.Machine hooks_pending string
 state.json api.Machine host_ports []api.HostPort effect:4
 state.json api.Machine id string
 state.json api.Machine image string
+state.json api.Machine image_snapshot string ignorable
 state.json api.Machine ip string
 state.json api.Machine labels map[string]string
 state.json api.Machine last_error string

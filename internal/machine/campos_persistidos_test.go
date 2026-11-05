@@ -109,6 +109,9 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.Machine net_mibps":   {efecto: true, version: 3, porque: "a cold start would use the daemon's rate instead of the requested one"},
 	"state.json api.Machine vmm": {porque: "the next launch sets it again; a freeze carries its own in volcado.ok, " +
 		"and an older kling records its own VMM in the goldens it makes anyway"},
+	"state.json api.Machine image_snapshot": {porque: "an older kling sees the copy as cold-booted: it only loses the shared-memory " +
+		"estimate and the guard that keeps the image snapshot while the copy runs; the copy keeps the files it opened, and its " +
+		"freezes never depend on the snapshot (no diff freeze)"},
 	"state.json api.Machine published": {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
 	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
 	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},

@@ -225,6 +225,7 @@ kling run:  -disk
 kling run:  -e
 kling run:  -egress
 kling run:  -env-file
+kling run:  -fresh
 kling run:  -from
 kling run:  -host-port
 kling run:  -image

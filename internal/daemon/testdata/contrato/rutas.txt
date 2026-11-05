@@ -5,6 +5,7 @@
 # api: 1
 
 DELETE /graphs/{ref}  graph
+DELETE /image-snapshots  admin
 DELETE /images/{name}  admin
 DELETE /machines/{ref}  machine
 DELETE /machines/{ref}/credentials/{env}  machine
@@ -20,6 +21,7 @@ DELETE /volumes/{name}/snapshots/{snap}  admin
 GET /events  list
 GET /graphs  list
 GET /graphs/{ref}  graph
+GET /image-snapshots  admin
 GET /images  images.list
 GET /images/{name}/blob  admin
 GET /images/{name}/files  admin

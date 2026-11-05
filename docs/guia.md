@@ -389,6 +389,8 @@ machines:     7
 
 $ kling run -name mcp-demo
 efad9e5f7003  mcp-demo  booted cold in 54 ms
+# (la siguiente run de la misma imagen restaura su snapshot por imagen:
+#  "started from its image snapshot", ver docs/snapshot-imagen.md)
 
 $ kling freeze mcp-demo
 efad9e5f7003  frozen  (754 ms, 256 MiB on disk)
@@ -1697,6 +1699,7 @@ código de la extensión.
 | [`SECURITY.md`](../SECURITY.md) | Modelo de amenaza, barreras, y lo que NO está resuelto |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](RELEASE-v0.2.0.md) y [v0.3.0](RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
+| [`docs/snapshot-imagen.md`](snapshot-imagen.md) | Snapshots por imagen: `kling run -image` restaura en vez de arrancar en frío; qué se guarda, la clave, cuándo no, tope de disco |
 | [`docs/three-layers.md`](three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/auditoria-estabilidad-2026-08.md`](auditoria-estabilidad-2026-08.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](chispa.md) · [`docs/CHISPA-EVAL.md`](CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |

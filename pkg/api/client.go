@@ -191,6 +191,18 @@ func (c *Client) Images(ctx context.Context) ([]Image, error) {
 	return l, c.do(ctx, http.MethodGet, "/images", nil, &l)
 }
 
+// ImageSnapshots lista los snapshots por imagen del daemon.
+func (c *Client) ImageSnapshots(ctx context.Context) ([]ImageSnapshot, error) {
+	var l []ImageSnapshot
+	return l, c.do(ctx, http.MethodGet, "/image-snapshots", nil, &l)
+}
+
+// PruneImageSnapshots borra los snapshots por imagen que nadie usa.
+func (c *Client) PruneImageSnapshots(ctx context.Context) (*ImageSnapshotsPrune, error) {
+	var out ImageSnapshotsPrune
+	return &out, c.do(ctx, http.MethodDelete, "/image-snapshots", nil, &out)
+}
+
 // ImageRecipe devuelve cómo se construyó una imagen.
 func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, error) {
 	var rec ImageRecipe

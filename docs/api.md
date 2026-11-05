@@ -53,6 +53,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `publish` | v0.20 | `POST/DELETE /machines/{ref}/publish`, `GET /publish` y `publish` en `POST /machines`: el daemon publica `127.0.0.1:host` hacia un puerto de la máquina (tcp, y udp en Linux), lo guarda en su raíz y lo quita con la máquina (ver "Puertos publicados") |
 | `pool` | v0.19 (anunciada desde 1.0) | `GET /snapshots/{name}/pool` (el `PoolInfo` de la plantilla: `size`, `ready`, `stale`/`fix` si el dorado no se puede restaurar, `error`) y `PUT /snapshots/{name}/pool` con `{"size": N}` (0–16; 0 lo apaga y lo vacía): copias precalentadas que `run -from` reclama en milisegundos. 404 si la plantilla no existe |
 | `egress-blocked` | v0.19 (anunciada desde 1.0) | `GET /machines/{ref}/egress`: `{egress, total, destinations: [{dest, kind: dns\|ip, count}]}`, los destinos que la política de salida le cortó a la máquina (nunca datos de la conexión); 404 si no existe |
+| `image-snapshots` | sin publicar | snapshots por imagen ([`snapshot-imagen.md`](snapshot-imagen.md)): un `POST /machines` con `image` (sin volúmenes ni carpetas) restaura un snapshot de esa imagen con los mismos parámetros en vez de arrancar en frío, y le da después su entorno y su comando; la máquina lleva `image_snapshot` y `thaw_ms`. Sin snapshot, arranca en frío y el daemon guarda uno en segundo plano. `fresh` en `POST /machines` arranca en frío sin guardarlo. `GET /image-snapshots` los lista y `DELETE /image-snapshots` borra los que nadie usa; `image_snapshots` en `GET /info` y en cada imagen de `GET /images` |
 | `error-codes` | sin publicar | el cuerpo de error lleva `code` además de `message`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`, `name_taken`, `machine_limit`, `stale_golden`, `length_required`, `precondition_failed`, `too_large`, `upgrade_required`, `tenant_quota`, `too_many_requests`, `guest_busy`, `internal`, `unsupported`, `bad_gateway`, `unavailable`, `disk_full`, `timeout`, `insufficient_memory` (`pkg/api/errorcodes.go`). `message` es para personas y puede cambiar de redacción; `code` no cambia. Un error que no es JSON (el 404/405 del enrutador) no lo lleva |
 | `host-ports` | sin publicar | `POST /machines` acepta `host_ports: [{host, guest}]` (hasta 16; solo macOS, en Linux es un 400): el invitado alcanza el puerto TCP `host` del 127.0.0.1 del Mac en `172.16.0.1:guest` (`host.kindling.internal`), también con egress `none`, y nada más. `guest` no puede ser 53, 80 ni 443; `host`, no el rango de reenvíos (29000-29999). Viaja con la máquina (`Machine.host_ports`), no con sus snapshots ni sus forks. Ver [mac.md](mac.md#servicios-del-mac-desde-el-invitado--host-port) |
 
@@ -132,7 +133,9 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `GET /images/{name}/files?path=/p[&max=N]` | el contenido de un fichero de dentro (1 MiB por defecto, hasta 64) |
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |
 | `PUT /images/{name}/files` | pone un fichero dentro (`path`, `mode`, `content_b64` hasta 8 MiB o `from_host` relativo a `/usr/local/lib/kindling`, `create`); se niega si la imagen está en uso. En Linux monta la imagen; en macOS escribe con `debugfs -w`, sin montarla (ver [mac.md](mac.md)) |
-| `DELETE /images/{name}` | la borra si nada la usa |
+| `DELETE /images/{name}` | la borra si nada la usa (y sus snapshots por imagen) |
+| `GET /image-snapshots` | los snapshots por imagen ([`snapshot-imagen.md`](snapshot-imagen.md)): imagen, parámetros, último uso, ocupación, copias vivas y `stale` si ya no valen |
+| `DELETE /image-snapshots` | borra los que nadie usa: `{removed, freed_bytes}` |
 | `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
 | `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto, también si la está leyendo un arranque en vuelo (vuelve a intentarlo) |
 | `GET /oci/blobs/{digest}` | `{digest, size}` si el blob (`sha256:<64 hex>`) ya está en la caché de blobs OCI del daemon (`$KLING_ROOT/cache/oci`, o en la verificada si los constructores corren sin root), `404` si no; le pone la fecha de hoy para el barrido. No lo sirve: es para no volver a subirlo |
@@ -994,6 +997,8 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /images` | 200 (también si reutiliza la construcción de otra petición) | `413`/`400` cuerpo; `400` falta `builder`, nombre, base, `spec`; `412` constructor no encontrado o no ejecutable; `409` imagen en uso; `501` sin construcción con root; `500` host |
 | `GET /images` | 200 | — |
 | `DELETE /images/{name}` | 204 | `removeImageStatus` |
+| `GET /image-snapshots` | 200 | — |
+| `DELETE /image-snapshots` | 200 | — |
 | `GET /volumes` | 200 | — |
 | `POST /volumes` | 201 | `413`/`400` cuerpo; `volumeStatus` |
 | `DELETE /volumes/{name}` | 204 | `400` `?snapshots=`; `volumeStatus` |
