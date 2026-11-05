@@ -3,6 +3,7 @@
 package hvvm
 
 /*
+#include <stdlib.h>
 #include "khv.h"
 */
 import "C"
@@ -59,3 +60,19 @@ func carreraCola(iters int) int { return int(C.khv_prueba_carrera(C.int(iters)))
 // flushDisco manda un FLUSH al disco de pruebas y devuelve su byte de estado
 // (0 = bien), o -1 si no se pudo preparar.
 func flushDisco() int { return int(C.khv_prueba_flush()) }
+
+// construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
+// virtio) y devuelve el DTB, o nil si no se pudo construir.
+func construirFDT() []byte {
+	buf := make([]byte, 1<<16)
+	args := C.CString("console=ttyS0")
+	defer C.free(unsafe.Pointer(args))
+	p := C.struct_fdt_params{ram_size: 256 << 20, ncpus: 2, bootargs: args, dist_size: 0x10000,
+		redist_size: 0x20000, uart_spi: 33, rtc_spi: 34, nvirtio: 1}
+	p.virtio_spi[0] = 35
+	n := C.fdt_build(unsafe.Pointer(&buf[0]), C.size_t(len(buf)), &p)
+	if n == 0 {
+		return nil
+	}
+	return buf[:n]
+}
