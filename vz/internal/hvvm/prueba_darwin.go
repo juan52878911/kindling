@@ -7,6 +7,7 @@ package hvvm
 #include "khv.h"
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
                   uint32_t *usado);
+int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
 
@@ -78,6 +79,21 @@ func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) 
 	}
 	e := C.khv_prueba_es(C.uint32_t(tipo), C.uint64_t(sector), pl, C.int(len(lens)), pd, C.int(malo), &u)
 	return int(e), uint32(u)
+}
+
+// vsockTx manda como el invitado los bytes de enviado (4000 y cinco de
+// 64 KiB) en seis paquetes por la cola de tx (khv_vsock_prueba_tx) y devuelve lo que leyó Go,
+// si algo tuvo que esperar en pend, y el código de error (negativo) si no se
+// pudo preparar.
+func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
+	out := make([]byte, len(enviado)+1)
+	var p C.int
+	r := C.khv_vsock_prueba_tx((*C.uint8_t)(unsafe.Pointer(&out[0])), C.uint32_t(len(out)),
+		(*C.uint8_t)(unsafe.Pointer(&enviado[0])), &p)
+	if r < 0 {
+		return nil, false, int(r)
+	}
+	return out[:r], p != 0, 0
 }
 
 // construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
