@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- Image snapshots: `kling run -image X` restores a snapshot of `X` instead of booting cold. The first run with given parameters boots cold and the daemon saves one in the background from a separate machine that carries nothing of any run (no env, command, volumes, shares, secrets or network) and whose agent waits before starting the service; each copy is resynced and then gets its own env and command, so its service starts fresh. Measured on kling-hv (M4, small Alpine image): ~150 → ~45 ms until the agent answers. `-fresh` and `KLING_IMAGE_SNAPSHOTS=0` opt out; skipped with volumes, shares, kling-vz and agents that cannot wait. LRU-pruned under `KLING_IMAGE_SNAPSHOT_MIB` (1 GiB on macOS, 4 GiB on Linux), removed with `kling image rm`; `kling image snapshots [ls|prune]`, a line in `kling status` and `kling image ls`, `GET`/`DELETE /image-snapshots` (`docs/snapshot-imagen.md`).
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

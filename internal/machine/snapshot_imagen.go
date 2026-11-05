@@ -69,8 +69,10 @@ const (
 	// hacen al preparar o al entregar (el formato del volcado, GuestStart):
 	// los de antes dejan de valer solos.
 	versionClaveImagen = 1
-	// plazoPrepImagen acota la preparación entera.
+	// plazoPrepImagen acota la preparación entera; plazoAgentePrep, la
+	// espera a que conteste su agente.
 	plazoPrepImagen = 2 * time.Minute
+	plazoAgentePrep = 20 * time.Second
 	// reintentoPrepImagen: tras un fallo que puede ser del momento (memoria,
 	// disco, un host cargado), cuándo se vuelve a intentar con esa clave.
 	reintentoPrepImagen = 10 * time.Minute
@@ -512,6 +514,12 @@ func (m *Manager) prepararImagen(ctx context.Context, req api.RunRequest, c clav
 	if estimado > tope {
 		return &errImagenIncompatible{motivo: fmt.Sprintf("it would need up to %d MiB and KLING_IMAGE_SNAPSHOT_MIB allows %d", estimado>>20, tope>>20)}
 	}
+	// Sin agente no hay nadie que espere ni que conteste: ni se arranca.
+	if base, layer, err := m.imageLayer(c.Image); err == nil {
+		if has, herr := m.imageHasBridgeCached(ctx, base, layer); herr == nil && !has {
+			return &errImagenIncompatible{motivo: "it has no guest agent"}
+		}
+	}
 	m.podarSnapshotsImagen(tope - estimado)
 
 	prep := prefijoPrepImagen + newID()[:8]
@@ -600,9 +608,36 @@ func comprobarPrepImagen(mc *api.Machine) error {
 	return nil
 }
 
+// barrerPrepImagen borra las máquinas de preparación que ya no prepara
+// nadie: las que dejó un daemon que murió (o se reinició) a mitad, o una
+// cuyo borrado falló. Solo con el nombre Y la etiqueta: una máquina del
+// usuario no lleva las dos por casualidad.
+func (m *Manager) barrerPrepImagen() {
+	var huerfanas []string
+	m.mu.RLock()
+	for id, mc := range m.byID {
+		if strings.HasPrefix(mc.Name, prefijoPrepImagen) && mc.Labels[labelPrepImagen] != "" {
+			huerfanas = append(huerfanas, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range huerfanas {
+		if m.esPrepImagen(id) {
+			continue // en marcha
+		}
+		if err := m.Remove(id); err != nil {
+			log.Printf("image snapshot: couldn't remove a leftover preparation machine %s: %v", shortID(id), err)
+		}
+	}
+}
+
 // esperarAgentePrep espera a que el agente de la máquina de preparación diga
 // qué es (conocerAgente lo apunta en la máquina).
 func (m *Manager) esperarAgentePrep(ctx context.Context, id string) (*api.GuestAgent, error) {
+	// Un agente sano contesta en décimas; sin plazo propio, una imagen cuyo
+	// agente no arranca retendría la máquina de preparación el plazo entero.
+	ctx, cancel := context.WithTimeout(ctx, plazoAgentePrep)
+	defer cancel()
 	for {
 		if ag := m.agenteDe(id); ag != nil {
 			return ag, nil

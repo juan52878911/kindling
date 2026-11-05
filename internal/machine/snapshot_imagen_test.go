@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -431,5 +432,39 @@ func TestSnapshotImagenOrigen(t *testing.T) {
 	var inc *errImagenIncompatible
 	if !errors.As(error(&errImagenIncompatible{motivo: "x"}), &inc) {
 		t.Fatal("errImagenIncompatible")
+	}
+}
+
+// Una máquina de preparación que dejó un daemon muerto a mitad se barre; una
+// en marcha o una del usuario con un nombre parecido, no.
+func TestSnapshotImagenBarrePreparacionesHuerfanas(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	huerfana := m.addForTest("h")
+	enMarcha := m.addForTest("e")
+	delUsuario := m.addForTest("u")
+	m.mu.Lock()
+	huerfana.Name, huerfana.Labels = prefijoPrepImagen+"viejo", map[string]string{labelPrepImagen: "kling-img-x"}
+	huerfana.State = api.StateStopped
+	enMarcha.Name, enMarcha.Labels = prefijoPrepImagen+"ahora", map[string]string{labelPrepImagen: "kling-img-y"}
+	enMarcha.State = api.StateStopped
+	delUsuario.Name = prefijoPrepImagen + "mia"
+	delUsuario.State = api.StateStopped
+	m.mu.Unlock()
+	m.img.mu.Lock()
+	m.img.iniciar()
+	m.img.prep[enMarcha.Name] = true
+	m.img.mu.Unlock()
+	m.barrerPrepImagen()
+	// Borrar deja una tumba que se limpia en segundo plano (borrado.go).
+	vive := func(id string) bool { mc, ok := m.Get(id); return ok && !esTumba(mc) }
+	if vive("h") {
+		t.Error("la huérfana sigue")
+	}
+	if !vive("e") {
+		t.Error("borró una preparación en marcha")
+	}
+	if !vive("u") {
+		t.Error("borró una máquina del usuario sin la etiqueta")
 	}
 }

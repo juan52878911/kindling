@@ -210,6 +210,9 @@ cargado no se ve ahorro, y el vigilante añade ~0,5 despertares/s por máquina.
   `MemShared` y la reserva de la segunda en adelante es la fracción divergente
   (`shareReserveDiv`), como en Firecracker.
 - La compuerta de restauraciones deja pasar 8 a la vez (3 con vz).
+- `kling run -image` restaura un snapshot por imagen en vez de arrancar en frío
+  (con vz no: restaurar carga la RAM entera). Medido: de ~150 a ~45 ms hasta
+  que contesta el agente ([snapshot-imagen.md](snapshot-imagen.md)).
 - El congelado diferencial sigue siendo solo de Firecracker: el fichero de
   memoria de hv ya es un clon de su base más lo sucio.
 - `GET /kling/stats` es el `phys_footprint` del propio `kling-hv` (no hay

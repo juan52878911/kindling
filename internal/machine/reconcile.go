@@ -510,6 +510,7 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// Los snapshots por imagen que ya no valen o no caben en su
 				// tope (snapshot_imagen.go).
 				m.podarSnapshotsImagen(topeSnapshotsImagen())
+				m.barrerPrepImagen()
 				m.vaciarPapelera()
 				// Overlays del almacén de discos sin máquina, y bases de
 				// dorados que ya no existen (ver cow.go).
