@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -829,6 +831,49 @@ func memoriaFisicaMiB() int64 {
 		return 0
 	}
 	return int64(leerUint64LE(s) >> 20)
+}
+
+// carpetasAntesDeArrancar pide al VMM, antes de crear la VM, un dispositivo
+// virtio-fs por carpeta viva (docs/backend-hv.md) y apunta en la máquina por
+// dónde irá cada una (ShareAttachment.Transport). Lo hace kling-hv; kling-vz
+// y un kling-hv anterior dicen que no, y las carpetas van por FUSE como
+// siempre. No es fatal: sin dispositivo, FUSE.
+func (m *Manager) carpetasAntesDeArrancar(ctx context.Context, c *fc.Client, id string) {
+	m.mu.RLock()
+	var pedidas []fc.KlingVirtioFS
+	if mc := m.byID[id]; mc != nil {
+		for tag, s := range mc.Shares {
+			if s.Live() {
+				pedidas = append(pedidas, fc.KlingVirtioFS{Tag: tag, ReadOnly: s.Mode == share.ModeRO})
+			}
+		}
+	}
+	m.mu.RUnlock()
+	if len(pedidas) == 0 {
+		return
+	}
+	transporte := share.TransportVirtioFS
+	if err := c.KlingShares(ctx, pedidas); err != nil {
+		transporte = ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mc := m.byID[id]; mc != nil {
+		// Una copia: persist lee el slice de la máquina fuera de este cerrojo.
+		nuevas := slices.Clone(mc.Shares)
+		for i := range nuevas {
+			if nuevas[i].Live() {
+				nuevas[i].Transport = transporte
+			}
+		}
+		mc.Shares = nuevas
+	}
+}
+
+// attachVirtioFS conecta la sesión de la carpeta tag con el servidor FUSE de
+// su dispositivo virtio-fs, en el kling-hv de mc.
+func (m *Manager) attachVirtioFS(ctx context.Context, mc *api.Machine, tag int) (io.ReadWriteCloser, error) {
+	return fc.New(m.socketDe(mc.ID, mc.PID)).KlingShareAttach(ctx, tag, share.Proto)
 }
 
 // fijarAuditoriaPlataforma: en macOS cada kling-vz lleva su proxy; la

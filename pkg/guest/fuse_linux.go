@@ -61,6 +61,43 @@ func mountFUSE(target string, readOnly bool) (fuseDev, func(), error) {
 	return fdDev(fd), unmount, nil
 }
 
+// mountVirtioFS monta en target el dispositivo virtio-fs de tag (kling-hv):
+// el kernel habla FUSE con el host por las colas del dispositivo, sin
+// /dev/fuse ni el agente de por medio. virtiofs ya pone allow_other y
+// default_permissions; nosuid y nodev, como en FUSE.
+func mountVirtioFS(tag, target string, readOnly bool) (func(), error) {
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return nil, err
+	}
+	flags := uintptr(syscall.MS_NOSUID | syscall.MS_NODEV)
+	if readOnly {
+		flags |= syscall.MS_RDONLY
+	}
+	// ENODEV: el kernel no tiene virtiofs; EINVAL o ENOENT: no hay
+	// dispositivo con ese tag. Da igual cuál: quien llama cae a FUSE.
+	if err := syscall.Mount(tag, target, "virtiofs", flags, ""); err != nil {
+		return nil, fmt.Errorf("mount -t virtiofs %s: %w", tag, err)
+	}
+	return func() {
+		if err := syscall.Unmount(target, syscall.MNT_DETACH); err != nil {
+			log.Printf("share: could not unmount %s: %v", target, err)
+		}
+	}, nil
+}
+
+// readaheadVirtioFS sube la lectura adelantada de un montaje virtio-fs en
+// cuanto el kernel ha procesado INIT, que es cuando deja de recortarla (ver
+// setReadahead). virtiofs manda INIT en segundo plano al montar: un statfs
+// espera a que esté contestado (y a que el daemon conecte la sesión, que viene
+// detrás del 200 de este attach).
+func readaheadVirtioFS(target string) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(target, &st); err != nil {
+		return
+	}
+	setReadahead(target)
+}
+
 // readaheadKB es la lectura adelantada de una carpeta viva. El kernel le da a
 // un montaje FUSE la de cualquier dispositivo (128 KiB) por mucho que INIT
 // pida más, y con eso una lectura secuencial va a un viaje al host por cada

@@ -242,6 +242,9 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		}
 	}
 	cfg.console_fd = C.int(pw.Fd())
+	if err := configurarVirtioFS(&cfg, s.VirtioFS, cstr); err != nil {
+		return nil, err
+	}
 
 	if C.khv_create(&cfg) != 0 {
 		err := errC("creating the VM")
@@ -252,8 +255,14 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 		return nil, err
 	}
 	f.creada = true
+	carpetas, err := crearCarpetas(s.VirtioFS)
+	if err != nil {
+		err = fmt.Errorf("creating the VM: %w", err)
+		f.inservible(err)
+		return nil, err
+	}
 	m := &machine{f: f, stopped: make(chan error, 1), consola: pw, net: netFile, vsock: s.Vsock,
-		memMiB: s.MachineConfig.MemSizeMiB}
+		memMiB: s.MachineConfig.MemSizeMiB, carpetas: carpetas}
 	go m.esperar()
 	return m, nil
 }
@@ -271,6 +280,8 @@ type machine struct {
 	net     *os.File // se guarda para que no lo cierre el recolector
 	vsock   bool
 	memMiB  int
+	// carpetas son los dispositivos virtio-fs y sus servidores (vfs_darwin.go).
+	carpetas []*carpeta
 }
 
 func (m *machine) esperar() {
@@ -279,8 +290,10 @@ func (m *machine) esperar() {
 	if code != 0 {
 		err = errors.New(strings.TrimPrefix(FinMotivo(), "failed: "))
 	}
-	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop).
+	// La VM ya no corre: el hilo de recepción de la red sobra (ver Stop), y
+	// los lectores de virtio-fs también.
 	C.vnet_parar()
+	cerrarCarpetas(m.carpetas)
 	if n := ConsoleDropped(); n > 0 && m.f.Logf != nil {
 		m.f.Logf("the console reader stalled: %d bytes of guest console were dropped", n)
 	}

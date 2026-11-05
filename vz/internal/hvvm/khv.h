@@ -27,12 +27,17 @@
 #define VIRTIO_STRIDE 0x200ULL
 #define VIRTIO_MAX 12
 #define KHV_MAX_DISKS 8
+// virtio-fs (vfs.c): un dispositivo por carpeta viva, detrás de los demás. La
+// cabecera del snapshot guarda los INTID de los VIRTIO_MAX primeros: los de
+// estos salen del mismo spi_base, así que no hace falta.
+#define KHV_MAX_VFS 8
+#define VIRTIO_SLOTS (VIRTIO_MAX + KHV_MAX_VFS)
 
 // Versión del estado del volcado (la cabecera del pie de mem.file, KLNGHV02).
 // La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
 // upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
 // nuevo congeló.
-#define KHV_SNAP_VERSION 5
+#define KHV_SNAP_VERSION 6
 #define RAM_BASE 0x80000000ULL
 
 // Tope de vCPU de kling-hv. Hypervisor.framework da 64 en el M4
@@ -95,6 +100,8 @@ struct khv_config {
   // (hv_vm_config_set_el2_enabled) y el kernel empieza en EL2h, así que puede
   // llevar KVM. Sin snapshot: khv_snapshot la rechaza.
   int nested;
+  int nvfs;        // virtio-fs: cuántos, con su tag (lo que monta el invitado)
+  const char *vfs_tags[KHV_MAX_VFS];
 };
 
 // Bits de pausa: la VM corre solo con todos a cero. El núcleo (PATCH /vm) y el
@@ -122,7 +129,8 @@ void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
 void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
-                      uint64_t *hdr_v3, uint64_t *pie, uint64_t *cpu, uint32_t *cpus_v4);
+                      uint64_t *hdr_v3, uint64_t *pie, uint64_t *cpu, uint32_t *cpus_v4, uint64_t *vfs_cab,
+                      uint64_t *vfs);
 // Por qué terminó la VM (khv_wait ya volvió): el invitado se apagó
 // (SYSTEM_OFF), pidió reiniciarse (SYSTEM_RESET: kling-hv no reinicia en el
 // sitio, la VM termina igual pero no es un fallo), la paró el host o falló.
@@ -174,7 +182,7 @@ struct fdt_params {
   uint32_t uart_spi;     // INTID
   uint32_t rtc_spi;
   int nvirtio;
-  uint32_t virtio_spi[VIRTIO_MAX];
+  uint32_t virtio_spi[VIRTIO_SLOTS];
   // VM con EL2: PSCI por SMC (un HVC desde EL2 se queda en el propio
   // invitado) y el GIC anuncia su interrupción de mantenimiento (PPI 9).
   int nested;
@@ -443,6 +451,34 @@ void khv_traza_freeze(void);  // resumen del freeze (con KLING_HV_TRACE=1)
 // khv_traza_prueba: un arranque de mentira (fases y hitos seguidos, sin VM)
 // desde cero y su resumen en buf. Solo para las pruebas.
 void khv_traza_prueba(char *buf, size_t n);
+
+// virtio-fs (ver vfs.c): la cola de alta prioridad y una de peticiones.
+#define VFS_NQ 2
+#define VFS_TAG_MAX 36
+struct vvfs_state {
+  struct vmmio m;
+  struct vq q[VFS_NQ];
+  // Las peticiones que Go tenía leídas sin contestar, por cola y head: al
+  // restaurar se le vuelven a dar.
+  uint8_t vuelo[VFS_NQ][QMAX / 8];
+};
+int vvfs_init(int idx, const char *tag, uint32_t intid);
+bool vvfs_mmio(int idx, uint64_t off, bool escribir, uint64_t *val, int size);
+void vvfs_get(int idx, struct vvfs_state *s);
+void vvfs_reafirmar(int idx);
+void vvfs_set(int idx, const struct vvfs_state *s);
+void vvfs_quieto(int idx);
+void vvfs_despertar(int idx);
+void vvfs_prueba(int idx, const uint8_t *resp, size_t nresp);  // atiende las colas aquí (pruebas)
+// API para Go. khv_vfs_leer espera una petición FUSE del dispositivo idx y la
+// copia a buf (como mucho cap bytes): devuelve su tamaño, o -1 si el
+// dispositivo se cerró (khv_vfs_cerrar) o no existe. khv_vfs_responder
+// escribe la respuesta (una entera, con su cabecera FUSE) en la cadena de la
+// petición que dice su unique: 0 si fue a alguna parte (o era un aviso, que
+// se tira), -1 si nadie la esperaba.
+int khv_vfs_leer(int idx, void *buf, uint32_t cap);
+int khv_vfs_responder(int idx, const void *src, uint32_t len);
+void khv_vfs_cerrar(int idx);
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);

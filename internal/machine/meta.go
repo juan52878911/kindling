@@ -301,10 +301,10 @@ func (m *Manager) causaObsoletoEn(vmm, arch, dir string) string {
 // vz/internal/hvvm/vm.c (que fija TestCabeceraKLNGHV en ese paquete); lo
 // comprueba TestFormatosCasanConVZ leyendo esas fuentes.
 const (
-	formatoVZMax  = 3
+	formatoVZMax  = 4
 	magiaHV       = 0x4b4c4e4748563032 // "KLNGHV02"
 	magiaHVPrefix = 0x4b4c4e474856     // "KLNGHV", sin la generación
-	versionHVMax  = 5
+	versionHVMax  = 6
 )
 
 // causaFormatoVolcado mira el volcado de dir: "kling_vz" de snap.file para

@@ -18,10 +18,11 @@ import (
 // Client apunta al socket de una instancia concreta de Firecracker.
 type Client struct {
 	http *http.Client
+	sock string
 }
 
 func New(socketPath string) *Client {
-	return &Client{http: &http.Client{
+	return &Client{sock: socketPath, http: &http.Client{
 		// Sin keep-alive: cada Client es de usar y tirar, y la conexión ociosa
 		// que dejaría cada uno se quedaría abierta contra el VMM. El servidor
 		// de API de Firecracker admite pocas a la vez: tras unos cuantos
@@ -54,7 +55,7 @@ const plazoPorDefecto = 30 * time.Second
 func (c *Client) ConPlazo(d time.Duration) *Client {
 	h := *c.http
 	h.Timeout = max(d, 0)
-	return &Client{http: &h}
+	return &Client{http: &h, sock: c.sock}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) error {

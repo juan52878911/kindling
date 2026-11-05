@@ -2166,6 +2166,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
 		return pid, err
 	}
+	// Y las carpetas vivas por virtio-fs, si el VMM lo tiene (kling-hv).
+	m.carpetasAntesDeArrancar(ctx, c, id)
 	if err := c.Start(ctx); err != nil {
 		return pid, err
 	}

@@ -121,6 +121,8 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.Machine host_ports": {efecto: true, version: 4, porque: "a thaw or start would lose the bridge to the host service"},
 	"state.json api.HostPort host":      {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
 	"state.json api.HostPort guest":     {efecto: true, version: 4, porque: "only inside host_ports (see above)"},
+	"state.json api.ShareAttachment transport": {porque: "only says which transport to try first: an older kling that drops it " +
+		"asks for FUSE and the agent answers which one the share has (shareproto.HeaderTransport)"},
 	// meta.json: v0.19 los añadió sin subir el 2. Un kling ≤ v0.18 solo
 	// reescribe un meta al anotarlo, y él no los usa: los pierde la vuelta
 	// (v0.19+ → v0.18 anota → v0.19+). Subir a 3 haría que v0.19-v0.20, que

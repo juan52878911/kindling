@@ -23,6 +23,7 @@ static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] 
 typedef bool (*mmio_fn)(uint64_t off, bool escribir, uint64_t *val, int size);
 
 static bool blk_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vblk_mmio(0, off, escribir, val, size); }
+static bool vfs_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vvfs_mmio(0, off, escribir, val, size); }
 
 static void w(mmio_fn f, uint64_t off, uint64_t v) { f(off, true, &v, 4); }
 
@@ -58,6 +59,7 @@ static int preparar(void) {
     vrng_init(50);
     vsock_init(51);
     if (vballoon_init(52, true) != 0) return -1;
+    if (vvfs_init(0, "kling-share-0", 53) != 0) return -1;
     listo = true;
   }
   return 0;
@@ -71,9 +73,9 @@ int khv_prueba(const uint8_t *d, size_t n) {
   size_t l = n - 64 < g_ram_size ? n - 64 : g_ram_size;
   memcpy(g_ram, d + 64, l);
 
-  mmio_fn devs[] = {blk_mmio, vnet_mmio, vrng_mmio, vsock_mmio, vballoon_mmio};
-  int ncolas[] = {1, 2, 1, 3, 3};
-  int k = d[0] % 5;
+  mmio_fn devs[] = {blk_mmio, vnet_mmio, vrng_mmio, vsock_mmio, vballoon_mmio, vfs_mmio};
+  int ncolas[] = {1, 2, 1, 3, 3, 2};
+  int k = d[0] % 6;
   mmio_fn f = devs[k];
   w(f, 0x070, 0);  // reset: cada prueba empieza de cero
   for (int q = 0; q < ncolas[k]; q++) {
@@ -101,6 +103,9 @@ int khv_prueba(const uint8_t *d, size_t n) {
   for (int q = 0; q < ncolas[k]; q++) w(f, 0x050, (uint64_t)q);
   if (k == 0) vblk_prueba(0);
   if (k == 4) vballoon_objetivo(rd32(d + 60));
+  // virtio-fs: lo que Go contestaría, con tamaños de los datos (a veces más
+  // de lo que cabe en la cadena) y respuestas repetidas.
+  if (k == 5) vvfs_prueba(0, d + 40, 6);
   w(f, 0x064, 0xff);  // InterruptACK
   w(f, 0x070, 0);
   return 0;

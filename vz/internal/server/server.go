@@ -358,6 +358,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /kling/graph", s.putKlingGraph)
 	mux.HandleFunc("PUT /kling/host-ports", s.putKlingHostPorts)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
+	mux.HandleFunc("PUT /kling/shares", s.putKlingShares)
+	mux.HandleFunc("POST /kling/share/attach", s.postShareAttach)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
 	mux.HandleFunc("PUT /kling/cpu", s.putKlingCPU)
@@ -389,6 +391,10 @@ func (f *faultRecorder) WriteHeader(code int) {
 	f.status = code
 	f.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap deja llegar a la conexión (http.ResponseController): POST
+// /kling/share/attach la toma para la sesión.
+func (f *faultRecorder) Unwrap() http.ResponseWriter { return f.ResponseWriter }
 
 func (f *faultRecorder) Write(b []byte) (int, error) {
 	if f.status == 0 {
@@ -923,7 +929,13 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if g, ok := s.net.(GuestDialerSetter); ok && s.spec.Vsock && g.GuestOnlyTCP(api.GuestPort) {
 		s.spec.AgentTCPOnly = true
 	}
-	if err := s.spec.WriteFile(snapW); err != nil {
+	if err := s.guardarEstadoShares(); err != nil {
+		fault(w, err)
+		return
+	}
+	err = s.spec.WriteFile(snapW)
+	s.soltarEstadoShares()
+	if err != nil {
 		fault(w, fmt.Errorf("writing the snapshot file: %w", err))
 		return
 	}
@@ -1369,6 +1381,8 @@ func (s *Server) create() error {
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
+	// El estado de las carpetas por virtio-fs de un snapshot ya lo tiene la VM.
+	s.soltarEstadoShares()
 	s.vm = vm
 	s.canalAgente(vm)
 	go s.watch(vm)

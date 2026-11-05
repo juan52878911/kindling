@@ -58,7 +58,9 @@ var volcadosBuenos = []struct {
 	version, ncpus uint32
 	hdrLen         uint64
 }{
-	{"v5", versionFijada, 10, hdrV5(10)},
+	{"v6", versionFijada, 2, hdrV6(2, 1)},
+	{"v6 con 10 vCPU", versionFijada, 10, hdrV6(10, 2)},
+	{"v5", v5Fijada, 10, hdrV5(10)},
 	{"v4", v4Fijada, 2, hdrFijada},
 	{"v3", 3, 1, hdrV3Fijada},
 	{"v1", 1, 1, hdrV1Fijada},
