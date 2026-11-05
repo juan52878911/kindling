@@ -120,3 +120,35 @@ func TestEsperarAgenteRepiteUnaPeticionPerdida(t *testing.T) {
 		t.Fatalf("agente = %+v tras %d peticiones: la primera, perdida, se comió la espera", ag, pedidas.Load())
 	}
 }
+
+// Entre intentos esperarAgente dobla desde pasoListoPrimero: tres fallos
+// cuestan 25+50+100 ms, no 3×250.
+func TestEsperarAgenteDoblaElPaso(t *testing.T) {
+	var pedidas atomic.Int32
+	m, id := managerConInvitado(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pedidas.Add(1) <= 3 {
+			// Aún no escucha: un error de transporte.
+			if hj, ok := w.(http.Hijacker); ok {
+				if c, _, err := hj.Hijack(); err == nil {
+					c.Close()
+				}
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: "kling-guest", Caps: []string{api.GuestCapEnv}})
+	}))
+	m.byID[id].State = api.StateRunning
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	ag := m.esperarAgente(ctx, id)
+	d := time.Since(t0)
+	if ag == nil {
+		t.Fatalf("no contestó tras %d peticiones", pedidas.Load())
+	}
+	if d < 7*pasoListoPrimero || d >= 3*pasoListo {
+		t.Fatalf("tres fallos costaron %v: quiero el paso doblando desde %v", d, pasoListoPrimero)
+	}
+}
