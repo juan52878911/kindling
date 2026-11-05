@@ -271,6 +271,7 @@ static unsigned pausa_bits;      // con mu
 static volatile bool pausa_pedida;
 static volatile bool parar;      // la VM terminó: los hilos de vCPU salen
 static int n_pausados, n_creados;
+static int n_turno;              // vCPU que ya llamaron a hv_vcpu_create (con mu)
 static bool arrancar;            // la VM puede empezar a correr
 static bool restaurando;         // los hilos cargan cpu_state antes de correr
 static bool liberada;            // ya se soltaron los vCPU (con mu)
@@ -834,10 +835,67 @@ static void volcar(struct cpu *c, const char *por) {
 
 static int ram_reparar_ipa(struct cpu *c, uint64_t ipa);
 
+// LOS vCPU SE CREAN EN ORDEN DE ÍNDICE.
+//
+// hv_gic_state_get_data guarda los redistribuidores por orden de creación
+// del vCPU en HVF, y hv_gic_set_state los reparte igual; cpu_state, en
+// cambio, va por índice (MPIDR). Con los hilos creando cada uno el suyo a la
+// vez, el orden era el que saliera: un snapshot de una VM cuyo cpu1 se creó
+// primero, restaurado con el cpu0 primero, le daba a cada vCPU el
+// redistribuidor del otro. Casi siempre no se nota (los dos están ociosos),
+// pero si el snapshot pilló a un vCPU dentro del manejador del timer (PPI 27
+// activa en SU redistribuidor), su EOI llega a uno donde no está activa y HVF
+// mata el proceso con SIGTRAP ("FIXME: Handle no active virtual interrupt,
+// EOIR1 0x1b"): kling-hv moría a los ~50 ms de restaurar, y el daemon veía un
+// EOF en el PUT /kling/forwards. Con el turno, el vCPU i es siempre el i-ésimo
+// que se crea, al arrancar y al restaurar.
+static void turno_esperar(int idx) {
+  pthread_mutex_lock(&mu);
+  while (n_turno != idx) pthread_cond_wait(&cv, &mu);
+  pthread_mutex_unlock(&mu);
+}
+
+// turno_pasar va tras hv_vcpu_create, haya salido bien o no: un fallo no
+// puede dejar esperando a los que vienen detrás.
+static void turno_pasar(void) {
+  pthread_mutex_lock(&mu);
+  n_turno++;
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+}
+
+// khv_prueba_turno_vcpus comprueba sin VM que el turno ordena la creación:
+// hilos que llegan al revés (el último índice primero) pasan por orden. 0 si
+// cuadra, o 1 + la posición del primero que se coló.
+#define PRUEBA_TURNO_N 8
+static int prueba_turno_orden[PRUEBA_TURNO_N], prueba_turno_pos;
+static void *prueba_turno_hilo(void *arg) {
+  int idx = (int)(intptr_t)arg;
+  usleep((useconds_t)(PRUEBA_TURNO_N - idx) * 2000);  // llegan al revés
+  turno_esperar(idx);
+  prueba_turno_orden[prueba_turno_pos++] = idx;  // solo uno tiene el turno
+  turno_pasar();
+  return NULL;
+}
+int khv_prueba_turno_vcpus(void) {
+  pthread_t h[PRUEBA_TURNO_N];
+  n_turno = 0;
+  prueba_turno_pos = 0;
+  for (int i = PRUEBA_TURNO_N - 1; i >= 0; i--)
+    if (pthread_create(&h[i], NULL, prueba_turno_hilo, (void *)(intptr_t)i) != 0) return 100;
+  for (int i = 0; i < PRUEBA_TURNO_N; i++) pthread_join(h[i], NULL);
+  n_turno = 0;
+  for (int i = 0; i < PRUEBA_TURNO_N; i++)
+    if (prueba_turno_orden[i] != i) return 1 + i;
+  return 0;
+}
+
 static void *vcpu_hilo(void *arg) {
   struct cpu *c = arg;
   khv_qos_dispositivo();  // base UTILITY; los overrides la suben con trabajo (qos_subir)
+  turno_esperar(c->idx);
   hv_return_t r = hv_vcpu_create(&c->id, &c->exit, NULL);
+  turno_pasar();
   if (r == HV_SUCCESS) r = hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_MPIDR_EL1, (uint64_t)c->idx | (1ULL << 31));
   if (r == HV_SUCCESS) {
     filtrar_id(c);
