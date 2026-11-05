@@ -29,14 +29,22 @@ static void w(mmio_fn f, uint64_t off, uint64_t v) { f(off, true, &v, 4); }
 // La RAM de mentira lleva detrás una página sin permisos: lo que se salga de
 // ella por poco (un anillo mal medido) rompe el proceso aquí mismo, sin
 // esperar a que el desbordamiento pise algo que se note.
+// En cada llamada se vuelve a poner: otra prueba del paquete (un khv_create
+// que rechaza la configuración) puede haber dejado g_ram_size con el tamaño
+// de su VM, y el memset de la RAM pisaría la guarda.
 static int preparar(void) {
   static bool listo;
+  static uint8_t *propia;
+  if (listo) {
+    g_ram = propia;
+    g_ram_size = PRUEBA_RAM;
+  }
   if (!listo) {
     size_t pag = (size_t)getpagesize();
     uint8_t *ram = mmap(NULL, PRUEBA_RAM + pag, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (ram == MAP_FAILED || mprotect(ram + PRUEBA_RAM, pag, PROT_NONE) != 0) return -1;
     g_ram_size = PRUEBA_RAM;
-    g_ram = ram;
+    g_ram = propia = ram;
     char ruta[] = "/tmp/kling-hv-prueba.XXXXXX";
     int fd = mkstemp(ruta);
     if (fd < 0) return -1;
