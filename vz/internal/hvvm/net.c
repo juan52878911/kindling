@@ -16,7 +16,10 @@
 #include "vq_iov.h"
 
 #define HDR 12  // virtio_net_hdr_v1 (con num_buffers)
-#define TRAMA_MAX 65536
+// La trama más grande: la MTU más alta que se admite (65535, spec.MaxMTU)
+// más la cabecera Ethernet. Con 65536 justos, a MTU 65535 el invitado mandaba
+// tramas de 65549 bytes que tx_mandar tiraba, y TCP se quedaba parado.
+#define TRAMA_MAX (65535 + 14)
 
 static struct vnet_state s;
 static int fd = -1;
@@ -27,7 +30,15 @@ static uint8_t mac[6];
 static uint16_t mtu;
 // mu protege el estado y la RAM que toca el hilo de recepción: con g_pausa
 // puesto (bajo mu, en vnet_quieto) el hilo no escribe en el invitado.
+// mu_tx es el de la cola de tx: el vCPU manda (tx) sin esperar a que el hilo
+// de rx suelte mu, y el hilo mete tramas mientras el vCPU manda (la bajada
+// desde el invitado iba a la mitad que la subida por compartir mu). Lo que
+// cambia las colas o el dispositivo entero (configuración, reset, vnet_set,
+// vnet_parar) toma los dos. mu_irq es el de isr y el nivel de la línea, que
+// tocan las dos colas y el ACK del driver. Orden: mu, mu_tx, mu_irq.
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t mu_tx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t mu_irq = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // hay búferes de rx, o se reanudó
 // rx_en_curso: el hilo de recepción está dentro de recvmsg, sin mu, escribiendo
 // en un búfer de rx del invitado que ya tomó (rx_una). Mientras, ni la pausa
@@ -44,6 +55,16 @@ static int rx_desp[2] = {-1, -1};
 
 static void irq(void) { vmmio_irq(&s.m, intid); }
 
+// interrumpir marca la interrupción de cola usada y sube la línea. Con mu o
+// mu_tx (la cola que la pide); toma mu_irq.
+static void interrumpir(void) {
+  __atomic_fetch_add(&khv_avisos[KHV_N_NET_IRQ], 1, __ATOMIC_RELAXED);
+  pthread_mutex_lock(&mu_irq);
+  s.m.isr |= 1;
+  irq();
+  pthread_mutex_unlock(&mu_irq);
+}
+
 // tx_mandar manda la trama de la cadena head como un datagrama, sin copiarla:
 // sendmsg con los búferes de lectura del invitado (sin la cabecera). Una
 // cadena que no vale, sin trama o mayor que TRAMA_MAX se descarta. Nunca
@@ -59,7 +80,7 @@ static void tx_mandar(const struct vq *q, const struct vdesc *desc, uint16_t hea
 }
 
 // TX: cada cadena es cabecera + trama; se manda la trama como un datagrama.
-// Desde el hilo del vCPU (notify de la cola 1), con mu.
+// Desde el hilo del vCPU (notify de la cola 1), con mu_tx (no mu).
 static void tx(void) {
   struct vq *q = &s.q[1];
   uint16_t *avail;
@@ -87,11 +108,7 @@ static void tx(void) {
   }
   // Con EVENT_IDX el driver de Linux pide la interrupción de tx solo cuando
   // le hace falta liberar (napi_tx), no por cada trama.
-  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) {
-    __atomic_fetch_add(&khv_avisos[KHV_N_NET_IRQ], 1, __ATOMIC_RELAXED);
-    s.m.isr |= 1;
-    irq();
-  }
+  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
 }
 
 // rx_avisar interrumpe al invitado, si lo pide, por las tramas puestas desde
@@ -103,11 +120,7 @@ static void rx_avisar(uint16_t viejo) {
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   // En NAPI el driver no quiere una interrupción por trama: la pide al acabar.
-  if (vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) {
-    __atomic_fetch_add(&khv_avisos[KHV_N_NET_IRQ], 1, __ATOMIC_RELAXED);
-    s.m.isr |= 1;
-    irq();
-  }
+  if (vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
 }
 
 // used_idx es el índice de used ahora (0 sin driver).
@@ -332,8 +345,8 @@ static void *rx_hilo(void *a) {
 void vnet_init(int net_fd, const uint8_t m[6], int mtu_enlace, uint32_t id) {
   fd = net_fd;
   memcpy(mac, m, 6);
-  // Las tramas caben en los búferes de tx y rx (64 KiB) con cualquier MTU que
-  // admite el spec (hasta 65535).
+  // Las tramas caben en TRAMA_MAX con cualquier MTU que admite el spec (hasta
+  // 65535).
   mtu = mtu_enlace > 1500 && mtu_enlace <= 65535 ? (uint16_t)mtu_enlace : 0;
   intid = id;
   rx_parar = false;
@@ -368,11 +381,40 @@ void vnet_parar(void) {
     pthread_join(rx_t, NULL);
   }
   pthread_mutex_lock(&mu);
-  fd = -1;  // tx (vCPU, con mu) ya no manda nada
+  pthread_mutex_lock(&mu_tx);
+  fd = -1;  // tx (vCPU, con mu_tx) ya no manda nada
+  pthread_mutex_unlock(&mu_tx);
   pthread_mutex_unlock(&mu);
 }
 
 bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
+  // Los dos accesos de cada trama van sin mu: el notify de tx (QueueNotify,
+  // 0x50, no toca más estado que la cola 1) y el ACK de la interrupción
+  // (0x64, solo isr). Así el vCPU no espera al hilo de rx.
+  if (escribir && off == 0x50) {
+    uint32_t cola = (uint32_t)*val;
+    if (cola == 1) {
+      __atomic_fetch_add(&khv_avisos[KHV_N_NET_TX], 1, __ATOMIC_RELAXED);
+      pthread_mutex_lock(&mu_tx);
+      tx();
+      pthread_mutex_unlock(&mu_tx);
+    } else if (cola == 0) {
+      // Con mu: el hilo de rx mira rx_hay_buf y se duerme en cv sin soltarlo
+      // entre medias, así que este aviso no se pierde (ver rx_vaciar).
+      __atomic_fetch_add(&khv_avisos[KHV_N_NET_RX], 1, __ATOMIC_RELAXED);
+      pthread_mutex_lock(&mu);
+      pthread_cond_broadcast(&cv);
+      pthread_mutex_unlock(&mu);
+    }
+    return true;
+  }
+  if (escribir && off == 0x64) {
+    pthread_mutex_lock(&mu_irq);
+    s.m.isr &= ~(uint32_t)*val;
+    irq();
+    pthread_mutex_unlock(&mu_irq);
+    return true;
+  }
   pthread_mutex_lock(&mu);
   if (off >= 0x100) {  // configuración: mac[6], status u16, max_virtqueue_pairs u16, mtu u16
     if (!escribir) {
@@ -390,8 +432,12 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   }
   // Una escritura que no es un notify (0x50) ni el ACK de una interrupción
   // (0x64) puede cambiar las colas o reiniciar el dispositivo: no con una
-  // trama entrando en un búfer de rx (ver rx_en_curso).
-  if (escribir && off != 0x50 && off != 0x64) esperar_rx();
+  // trama entrando en un búfer de rx (ver rx_en_curso) ni con tx a medias.
+  if (escribir) {
+    esperar_rx();
+    pthread_mutex_lock(&mu_tx);
+  }
+  pthread_mutex_lock(&mu_irq);
   uint32_t cola = 0;
   // VIRTIO_NET_F_MAC (5), VIRTIO_NET_F_STATUS (16) y, con una MTU mayor que
   // 1500, VIRTIO_NET_F_MTU (3): el virtio_net de Linux la adopta solo, como con
@@ -400,35 +446,28 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   // VIRTIO_RING_F_EVENT_IDX (29): avisos e interrupciones solo cuando hacen
   // falta (ver vq_interrumpir y vq_pedir_aviso en virtio.c).
   uint64_t feat = (1u << 5) | (1u << 16) | khv_event_idx | (mtu ? (1u << 3) : 0);
-  switch (vmmio_acceso(&s.m, s.q, 2, 1, feat, off, escribir, val, &cola)) {
-    case VM_NOTIFY:
-      if (cola == 1) {
-        __atomic_fetch_add(&khv_avisos[KHV_N_NET_TX], 1, __ATOMIC_RELAXED);
-        tx();
-      } else if (cola == 0) {
-        __atomic_fetch_add(&khv_avisos[KHV_N_NET_RX], 1, __ATOMIC_RELAXED);
-        pthread_cond_broadcast(&cv);
-      }
-      break;
-    case VM_ISR: irq(); break;
-    case VM_RESET: {
-      uint8_t nivel = s.m.nivel;
-      memset(&s, 0, sizeof s);
-      s.m.nivel = nivel;
-      irq();
-      break;
-    }
+  // Notify e ISR ya se atendieron arriba.
+  if (vmmio_acceso(&s.m, s.q, 2, 1, feat, off, escribir, val, &cola) == VM_RESET) {
+    uint8_t nivel = s.m.nivel;
+    memset(&s, 0, sizeof s);
+    s.m.nivel = nivel;
+    irq();
   }
+  pthread_mutex_unlock(&mu_irq);
+  if (escribir) pthread_mutex_unlock(&mu_tx);
   pthread_mutex_unlock(&mu);
   return true;
 }
 
 // vnet_quieto: con g_pausa ya puesto, tomar mu y esperar a rx_en_curso
 // garantiza que el hilo de rx no está a mitad de escribir en el invitado (lo
-// hace con mu tomado, o dentro de recvmsg con rx_en_curso).
+// hace con mu tomado, o dentro de recvmsg con rx_en_curso). tx corre en un
+// vCPU, ya parado; tomar mu_tx lo asegura igual.
 void vnet_quieto(void) {
   pthread_mutex_lock(&mu);
   esperar_rx();
+  pthread_mutex_lock(&mu_tx);
+  pthread_mutex_unlock(&mu_tx);
   pthread_mutex_unlock(&mu);
 }
 
@@ -438,21 +477,35 @@ void vnet_despertar(void) {
   pthread_mutex_unlock(&mu);
 }
 
-void vnet_get(struct vnet_state *o) {
+// todo_bloquear toma los tres cerrojos (en su orden), para copiar o cambiar
+// el estado entero.
+static void todo_bloquear(void) {
   pthread_mutex_lock(&mu);
-  *o = s;
+  esperar_rx();
+  pthread_mutex_lock(&mu_tx);
+  pthread_mutex_lock(&mu_irq);
+}
+
+static void todo_soltar(void) {
+  pthread_mutex_unlock(&mu_irq);
+  pthread_mutex_unlock(&mu_tx);
   pthread_mutex_unlock(&mu);
+}
+
+void vnet_get(struct vnet_state *o) {
+  todo_bloquear();
+  *o = s;
+  todo_soltar();
 }
 
 void vnet_reafirmar(void) {
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&mu_irq);
   hv_gic_set_spi(intid, s.m.nivel);
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&mu_irq);
 }
 
 void vnet_set(const struct vnet_state *i) {
-  pthread_mutex_lock(&mu);
-  esperar_rx();
+  todo_bloquear();
   s = *i;
-  pthread_mutex_unlock(&mu);
+  todo_soltar();
 }
