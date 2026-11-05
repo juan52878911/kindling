@@ -1961,7 +1961,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	}
 
 	c := fc.New(sock)
-	if err := waitSocket(ctx, c); err != nil {
+	if err := m.waitSocket(ctx, c, id, pid); err != nil {
 		return pid, err
 	}
 	// El entorno y el comando de la máquina van por MMDS, que cuelga de la red.
@@ -2179,12 +2179,24 @@ const precargaMaxBytes = 512 << 20
 // milisegundo los primeros 200 ms (un Ping a un socket Unix cuesta decenas de
 // µs) y cada 10 ms después. Con un paso fijo de 10 ms cada thaw pagaba un paso
 // entero de espera (10,7 ms medidos) para un socket listo en ~1 ms.
-func waitSocket(ctx context.Context, c *fc.Client) error {
+//
+// Si el proceso pid (el VMM, o el jailer que se hace él) ya no existe, no se
+// espera más: un VMM que muere al lanzarse (un ejecutable que no está, una
+// opción que no entiende) costaba los 5 s enteros y un error que no decía
+// por qué. esperarVMM lo recoge en cuanto muere, así que no queda zombi.
+func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid int) error {
 	start := time.Now()
 	deadline := start.Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if c.Ping(ctx) == nil {
 			return nil
+		}
+		if pid > 0 && syscall.Kill(pid, 0) == syscall.ESRCH {
+			msg := "launching the VMM: it exited before its API socket answered"
+			if l := m.ultimaLineaConsola(id); l != "" {
+				msg += "; last line of its console: " + l
+			}
+			return errors.New(msg)
 		}
 		paso := time.Millisecond
 		if time.Since(start) > 200*time.Millisecond {
@@ -3485,7 +3497,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SocketMS)
@@ -3513,7 +3525,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SocketMS)

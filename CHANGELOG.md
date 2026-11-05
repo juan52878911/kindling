@@ -97,6 +97,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
 - The OCI builder now fsyncs the ext4 before renaming it into place.
 - The `service` of a debian-built image didn't get `kling run -e` variables (`exec` did): the shell `/entrypoint` started it before the agent read them. The agent now supervises it from `/etc/kindling/service.json`, like a Docker image's, so its output is in `kling logs -service`. Rebuild an image to pick this up.
+- A VMM that died right after launch cost 5 s of waiting for its socket and an error that said nothing. Start, thaw and restore now fail at once, quoting the last line of its console.
 
 - `release.sh` only read a single-line `require`, so it saw no kindling version in `vz/go.mod` (a `require ( … )` block) and would refuse every tag.
 - macOS (kling-hv, kling-vz): the VMM API socket only accepts the daemon's user.

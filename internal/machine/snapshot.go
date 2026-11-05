@@ -1701,7 +1701,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			return abortar(err)
 		}
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, id, pid); err != nil {
 			return abortar(err)
 		}
 		// Poblar el jail entre el arranque de jailer y la carga: el snapshot y
@@ -1751,7 +1751,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			return abortar(err)
 		}
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, id, pid); err != nil {
 			return abortar(err)
 		}
 	}

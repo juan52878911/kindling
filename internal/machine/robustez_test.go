@@ -30,7 +30,7 @@ func vmmFalso(t *testing.T, m *Manager, id string) (int, <-chan struct{}) {
 	}
 	sock := filepath.Join(m.dir(id), "fc.sock")
 	// Igual que en reconcile_test: el sh sigue vivo y conserva la ruta en $0.
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30", sock)
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30", argSocketVMM, sock)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
