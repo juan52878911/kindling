@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Sin OpHello (un agente anterior) la sesión habla BaseIO: una lectura mayor

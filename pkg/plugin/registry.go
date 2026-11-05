@@ -34,6 +34,8 @@ var notPlugins = map[string]bool{
 	"kling-bridge-local": true,
 	"kling-guest":        true,
 	"kling-vz":           true, // VMM nativo de macOS, junto a kling
+	"kling-hv":           true, // VMM de Hypervisor.framework, junto a kling
+	"kling-unpack":       true, // descompresor de capas OCI (rust/kling-unpack)
 	"kling-chispa":       true, // servidor de clasificadores dentro de la imagen
 	"kling-daemon":       true,
 	"kling-builder":      true,
@@ -139,8 +141,19 @@ func SearchPath() []string {
 }
 
 // Discover encuentra las extensiones y resuelve qué comando sirve cada una.
+// EnvManifest lo lleva el entorno de una extensión mientras contesta a
+// --kling-manifest. Un kling que lo ve no descubre extensiones: es él mismo
+// (una copia llamada kling-algo en el PATH: kling-old, kling-v0.20) al que
+// otro kling le pide el manifiesto, y descubrir desde ahí lo volvía a lanzar
+// a él, sin fin, hasta que el PATH entero era procesos kling-old (medido:
+// 382 a la vez y carga 50 en un M4 con una sola copia).
+const EnvManifest = "KLING_MANIFEST_OF"
+
 func Discover(ctx context.Context, o Options) *Registry {
 	r := &Registry{owner: map[string]*Plugin{}}
+	if os.Getenv(EnvManifest) != "" {
+		return r
+	}
 	core := map[string]bool{}
 	for _, c := range o.Core {
 		core[c] = true
@@ -260,7 +273,7 @@ func runManifest(ctx context.Context, path string) ([]byte, error) {
 	out := limitedBuffer{max: maxManifestBytes}
 	cmd := exec.CommandContext(ctx, path, "--kling-manifest")
 	cmd.Stdout = &out
-	cmd.Env = Env("")
+	cmd.Env = append(Env(""), EnvManifest+"="+path)
 	// Sin WaitDelay, matar la extensión al vencer el plazo no basta: si dejó un
 	// nieto con la salida abierta (un script que llama a sleep), Run espera a que
 	// ese nieto la cierre y el plazo no sirve de nada.

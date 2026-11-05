@@ -44,8 +44,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // Lo que se configura (daemon.cow). Mismos valores que pkg/config.
@@ -279,7 +279,7 @@ func (m *Manager) clonarOverlayInstancia(ctx context.Context, snap, src, id, dst
 	}
 	hecho := cowModoCopy
 	if modo == cowModoClone {
-		hecho = cowModoClone // macOS: cp -c es clonefile en APFS
+		hecho = cowModoClone // macOS: fclonefileat en APFS (clonarRuta)
 	}
 	m.cow.contar(hecho)
 	return hecho, nil

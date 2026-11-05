@@ -312,6 +312,8 @@ func run() int {
 	}
 	_ = os.Chmod(bindPath, 0o600)
 	defer os.Remove(bindPath)
+	// Solo el usuario del daemon habla con la API (ver peercred.SameUser).
+	l = peercred.SameUser(l, logf)
 
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)

@@ -23,6 +23,44 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Faster on macOS:
+  - kling-hv restores no longer wait for the host's memory level: it maps memory lazily, and on a busy Mac that wait turned ~1 in 3 thaws/forks from ~40 ms into 1-2 s.
+  - `fork -n N` restores up to 8 copies at once on kling-hv.
+  - `kling db fork` prepares copies in parallel, with 2 execs per copy instead of 4.
+  - The first connection to a just-thawed service retries from 5 ms instead of a flat 100 ms.
+  - Waits for the agent and for compose templates back off from 25 ms.
+  - Disks are cloned with `fclonefileat` instead of exec'ing `cp -c`.
+  - A thaw checks the machine's own VMM pid instead of scanning every process.
+  - The thaw tail delivers credentials alongside the resync.
+  - `compose up` asks the daemon once and publishes in parallel.
+  - `kling up` runs `codesign` once per binary.
+  - `/metrics` measures machines in parallel.
+  - The state store locks per key.
+- kling-hv:
+  - Freeze is about 2× faster: clean pages are read-advised instead of rewritten.
+  - Disk requests use one `preadv`/`pwritev`.
+  - vsock tx writes straight from guest buffers and wakes its thread only on change.
+  - Network rx and tx have separate locks.
+  - Throttle pauses no longer save every register or raise QoS.
+- Guests:
+  - Debian-built images boot with the Go init, dm-verity included and still fail-closed, instead of a shell script. A verified layer mount that hangs (FEC with a wrong root hash) restarts the guest after 60 s, so the machine is marked failed instead of staying `running` with no agent.
+  - The agent starts listening before it reads MMDS.
+- kling-hv is stable in 1.0 (VMM and `KLNGHV` snapshot format). Until CI has an Apple Silicon runner, each release runs `92-e2e-mac.sh` and `95-e2e-upgrade-mac.sh` with `VMM=hv` by hand, and `release.sh` refuses a 1.0+ tag without it (the `e2e-mac.yml` job green on the commit, or `KLING_E2E_HV=<sha>`).
+- macOS (kling-hv): DNS answers are cached per machine and A/AAAA resolve in parallel (10 lookups 1480 → 80 ms on an M4).
+- macOS (kling-hv): the balloon has its statistics queue, so `kling machine squeeze` sees guest memory (136 MiB reclaimed instead of 4 on an idle machine); snapshot state v3, v1 and v2 still restore.
+- macOS (kling-hv): free page reporting returns memory the guest frees without a squeeze (100 MB freed: footprint 193 -> 95 MiB in 11 s); balloon releases are batched (~5300 remaps per squeeze -> ~9); snapshot state v4, v1 to v3 still restore.
+- macOS (kling-hv): the guest clock stops while a machine is paused (a long pause logged soft lockups and RCU stalls) and is resynced in the background on resume.
+- macOS (kling-hv): network and vsock receive straight into guest buffers; closed vsock host ends are seen through kqueue instead of a 1 s probe. Through a published port on an M4 (`nc -l` in a 256 MiB guest, 3 VMs x 3 transfers, timed until `nc` exits), against the VMM just before this change: upload 512 MiB 1408 -> 2115 MiB/s median (905-2660), download 256 MiB 747 -> 803 MiB/s (668-855), same VMM CPU.
+- The first exec after a cold boot is ~40-55 ms faster: the agent probe no longer waits out a probe sent before the guest's vsock was up, and the agent sets the MMDS route over netlink instead of running `ip`.
+- The guest clock is resynced right after boot (the RTC only has whole seconds, so each boot started up to 0.5 s off; now within a few ms).
+- `kling machine squeeze` polls the balloon every 10-40 ms instead of 100 ms.
+- `kling doctor` shows the installed kernel and the templates and frozen machines made with another one; `GET /info` adds `kernel_sha256` and `kernel_mismatch`.
+- `install.sh` requires minisign from v1.0.0 (`KLING_INSECURE_NO_MINISIGN=1` to skip); releases run the lint and apidiff and refuse a 1.0+ tag without release public keys; an `API-Break:` trailer must name the packages it excuses.
+- ext/db: its regexps compile lazily (`--kling-manifest`, also run by its git hook: 0.72 ms and ~20k allocations of init -> 0.02 ms); ext/sandbox requires kling 0.17.0.
+- macOS: the daemon reads hv machines' footprint and CPU locally instead of over HTTP.
+- Go packages that are not part of the public API moved from `pkg/` to `internal/` (`aigw`, `chispa`, `codificador`, `digest`, `durable`, `esquema`, `intent`, `transport`, `von`; `pkg/share` is now `internal/shareproto`). `pkg/api`, `pkg/plugin` and `pkg/config` are the 1.x Go API; what other modules of the repo import (`guest`, `credproxy`, `scheduler`, `linkbroker`, `panico`, `units`) and `lazyre` (the type of `api.KeyPattern`) stay in `pkg/`.
+- The upgrade e2e starts from the previous release's real assets, checked against its `SHA256SUMS`, instead of piping `install.sh`.
+- `docs/compatibilidad.md`: the 1.0 checklist is down to what is still open, and the guest-agent requirements (`env` v0.18, `cmd` and `volume-wait` v0.19) are documented.
 - Graphs: the 64-edge limit is per node (each link needs its own proxy port), with 1024 edges per graph; `kling compose` keeps the full project network and only cuts back services that would go over 64.
 - New volumes are empty, without `lost+found`, like Docker's: Postgres `initdb` works on a volume root.
 - Extensions exit with the core's codes (2 usage, 3 daemon too old, 4 stale golden, 128+signal when killed); `kling mcp heal` reports "still unhealthy" with 6 instead of 3.
@@ -55,6 +93,55 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-hv guests ran without KASLR. The FDT now carries `kaslr-seed` and `rng-seed` on every cold boot, and the guest kernel trusts the bootloader seed. Clones never boot again, so they don't reuse a seed.
+- kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
+- The OCI builder now fsyncs the ext4 before renaming it into place.
+- The `service` of a debian-built image didn't get `kling run -e` variables (`exec` did): the shell `/entrypoint` started it before the agent read them. The agent now supervises it from `/etc/kindling/service.json`, like a Docker image's, so its output is in `kling logs -service`. Rebuild an image to pick this up.
+- A VMM that died right after launch cost 5 s of waiting for its socket and an error that said nothing. Start, thaw and restore now fail at once, quoting the last line of its console.
+
+- `release.sh` only read a single-line `require`, so it saw no kindling version in `vz/go.mod` (a `require ( … )` block) and would refuse every tag.
+- macOS (kling-hv, kling-vz): the VMM API socket only accepts the daemon's user.
+- macOS (kling-hv): a failed balloon remap no longer ends the VM.
+- A daemon that loses a guest's vsock (an older agent's listener died) goes straight to TCP after three failures within 30 s instead of paying a failed vsock connect on every connection, and tries vsock again once a minute.
+- `exec` and `shell` answer 429 `guest_busy` with `Retry-After` when the guest agent is at its limit (64 commands, 8 shells), instead of 502 `bad_gateway`.
+- kling-hv: a pause that times out wakes the device threads again (they could stay asleep with the VM running); device quiesce has the same 5 s deadline; CPU-ceiling pauses no longer quiesce devices; a snapshot right after a resume keeps the guest clock adjustment.
+- A daemon restart no longer re-adopts the VMM a freeze left alive (the machine kept `warm` is no longer marked `failed`); a thaw that re-adopts a VMM watches it; a re-adopted VMM's death says why; a failed `start` of a `failed` machine keeps it `failed` with its dump when nothing was booted.
+- The background clock resync takes the machine's lifecycle lock and skips a machine that was frozen, stopped or rebooted meanwhile; a freeze waits for it at most ~100 ms.
+- The reason a VMM ended (e.g. the guest rebooted) is in the failure event; `kling start` clears the previous thaw timings; a freeze right after boot waits for the agent before asking it to flush its volumes.
+- kling-bridge: `-session-idle 0` no longer panics, a failed listener cleans up its HTTP child, and the proxy session table is capped.
+- Linux: removing a credential edge removes its DNAT/ACCEPT rules; a graph fork writes its fork mark before the template meta, like a machine fork.
+- Bounded maps: the share watcher's echo marks, the MCP gateway usage memory, phone screenshots and sandbox in-flight counters.
+- Guest agent: an `EINTR` or `ECONNABORTED` from the vsock `accept` killed its vsock listener until the machine restarted (seconds into any exec load on hv and vz); with the guest network up the daemon silently fell back to TCP, without it every exec failed. Images need the new agent to get the fix.
+- kling-hv: restoring a 2+ vCPU snapshot taken while a vCPU was in the timer handler could kill the VMM (SIGTRAP from Hypervisor.framework, seen as `EOF` on `kling db fork`); vCPUs are now created in index order so each gets its own GIC redistributor back. Templates saved by older builds with 2+ vCPUs may need rebuilding. A VMM that dies during a restore is now reported as such, with its last console line.
+- kling-hv: taking a vCPU offline and back online (CPU hotplug) crashed the guest kernel; CPU_ON now resets the vCPU's system registers.
+- `exec` interrupted by a freeze, stop, removal or VMM death says so ("the machine was frozen while the command ran") instead of a raw `EOF` or a generic cut; before the headers or with `?wait=1` it is a 409.
+- `exec` of a command that prints nothing for more than 5 min no longer fails with "timeout awaiting response headers": the daemon waits for the guest's headers as long as for the body (the command's timeout plus 30 s).
+- kling-hv: the guest no longer sees SVE/SME on an M4 (it advertised sve2 without sve and OpenSSL died with SIGILL, #183 on hv).
+- kling-hv: a freeze during a pending CPU_ON left that vCPU dead after restore; the balloon no longer writes guest RAM during a snapshot; a pause that cannot stop every vCPU gives up after 5 s with an error instead of hanging freeze/stop.
+- kling-hv: a stalled console reader can no longer block a vCPU (output is dropped and counted); a timed-out vsock dial frees its slot; the network RX thread is stopped before its socket is closed; each snapshot state version must have its own header length.
+- kling-hv: pause errors and the reason the VM ended (e.g. a guest reboot) are reported instead of "the VM has stopped".
+- A dead VMM is noticed at once (it took 22-30 s), also for VMMs re-adopted after a daemon restart; `start` cold-boots a `failed` machine with its disk and `thaw` restores one whose dump is still valid; `start` no longer claims a cold boot it did not do.
+- macOS and Linux: any process naming a machine's API socket (a `curl --unix-socket` polling it) was taken for its VMM, so a thaw could re-adopt it and the machine ended `failed`; only `--api-sock` processes count now, and a thaw kills a VMM its freeze left behind.
+- A freeze whose seal could not be written left a `warm` machine that could never be thawed; it now fails the machine and keeps its disk.
+- Two `commit`s with the same name from different machines no longer overwrite each other; the second gets a conflict.
+- A crash between a fork's snapshot meta and its `fork-of` mark left an orphan fork nobody swept.
+- `stop` of a machine removed while waiting for its lock reports not found instead of acting on a stale copy.
+- Machine ids never share the 8-hex prefix that names their netns and cgroup with a live machine (a collision tore down the other machine's network).
+- Linux: changing a graph removes the link DNAT/ACCEPT rules of edges that are gone or moved slot.
+- DNS resolver handlers are bounded before they start and waited for on stop, so nothing seeds after teardown.
+- kling-hv: a truncated or inconsistent `mem.file` is rejected with an error instead of crashing the VMM on restore; the GIC state size is capped.
+- Guest agent: an unknown share event from a newer daemon is skipped instead of dropping the share session; `/exec` and `/exec/stream` are capped at 64 concurrent requests (429), and the 8-shell cap now actually applies; write-behind keeps at most 16 chunks in flight per file; the machine env and command are read from MMDS in one retry cycle (worst case ~12 s instead of ~23 s before `/healthz`).
+- `kling status -json` exits 1 when the daemon does not answer, like the text output.
+- `kling plugins` and every command no longer run `kling-hv` and `kling-unpack` as if they were extensions.
+- `kling ai`: classify/decide and the guest pool have timeouts.
+- Performance: an `exec` no longer rewrites the whole state on every TTL refresh (25-220 µs and up to 940 KB per exec with 100-500 machines, now 59 ns); the credential proxy redactor copies only when a secret matches and precomputes its variants (256 KiB body: 2.9-10.8 MB to 33 KB allocated); the MCP gateway probes a sticky instance once per request instead of twice; instance transports drop idle connections after 30 s and close them when the instance goes away.
+- Tests: the contract now has a golden of every command's flags (`testdata/contrato/flags.txt`), the exit-code 5 wiring, the agent `cmd`/`volume-wait` capabilities, and the snapshot format constants against the vz sources.
+- kling-hv: a short block write was reported as success to the guest; virtio queue sizes must be a power of two; a network RX chain shorter than the frame gets nothing instead of a cut header; the device-tree builder is bounds-checked; the `mem.file` fallback is 0600; PSCI CPU_ON reads registers under the lock.
+- kling-hv vsock: connections the host closed fully kept their slot, so a guest could exhaust the 64 slots and stop `exec`.
+- macOS: kling-hv and kling-vz start with a minimal environment instead of inheriting the daemon's (tokens included).
+- A kling binary asked for its manifest no longer discovers extensions itself: a kling copy named `kling-*` in PATH made every command spawn hundreds of processes.
+- Release signing keys made with `minisign -G -W` (unencrypted, all-zero checksum) were rejected; a test now signs and verifies against the real `minisign` both ways, and CI installs it.
+- A `KLNGHV03` kling-hv snapshot was taken for a kling-vz one, so the refreeze check let it through for an older kling-hv.
 - macOS: the daemon no longer warns about missing memory/pids cgroup controllers at every start.
 - The arm64 `kling-bridge` binary is no longer tracked in git.
 - Docs: no more pre-1.0 version banners, removed aliases or `-vcpus`; live shares are capped at 256 MiB/s, not 16; image builds work on macOS; stale paths and links; SECURITY.md describes DNS tunnelling through an allowlisted domain.

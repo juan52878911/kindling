@@ -21,9 +21,13 @@ func extension() *plugin.Builtin {
 			ManifestVersion: plugin.ManifestVersion,
 			Name:            "sandbox",
 			Version:         strings.TrimPrefix(Version, "v"),
-			MinKling:        "0.7.0",
-			Summary:         "sandboxes for code agents: templates, tenants and several hosts",
-			HelpGroup:       "SERVE",
+			// 0.17.0 por los grafos (GraphUp/Freeze/Thaw/Remove y las aristas de
+			// credencial): es la API más nueva del núcleo que usa el frontal.
+			// Con un núcleo anterior los comandos se instalaban y fallaban con
+			// 404 en vez de con un aviso de versión al instalar.
+			MinKling:  "0.17.0",
+			Summary:   "sandboxes for code agents: templates, tenants and several hosts",
+			HelpGroup: "SERVE",
 			Commands: []plugin.Command{{
 				Name:     "sbx",
 				TopLevel: true,

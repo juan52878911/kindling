@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/units"
 )

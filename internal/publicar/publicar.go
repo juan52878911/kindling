@@ -37,9 +37,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Maquinas es lo que el publicador necesita del gestor de máquinas.
@@ -66,7 +66,12 @@ const (
 	// plazoMarcar: lo que se reintenta conectar con un servicio que aún no
 	// escucha (acaba de arrancar o de descongelarse).
 	plazoMarcar = 15 * time.Second
-	pasoMarcar  = 100 * time.Millisecond
+	// pasoMarcar: la espera entre intentos empieza en pasoMarcarMin y se
+	// dobla hasta pasoMarcar. Tras un deshielo el servicio suele escuchar en
+	// pocos ms: con un paso fijo de 100 ms la primera conexión pagaba casi
+	// siempre esos 100 ms enteros.
+	pasoMarcarMin = 5 * time.Millisecond
+	pasoMarcar    = 100 * time.Millisecond
 	// udpOcioso: un flujo UDP sin paquetes durante esto se cierra.
 	udpOcioso = 60 * time.Second
 	// barrido: cada cuánto se quitan las publicaciones de máquinas que ya
@@ -200,6 +205,10 @@ func (p *Publicador) Arrancar(ctx context.Context, ocioso func() time.Duration) 
 // host que ya publicaba para ella se sustituye. Todos o ninguno. Devuelve lo
 // que queda publicado (con el puerto que tocó a los Host 0).
 func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publication, error) {
+	// Los puertos de máquinas ya borradas se sueltan ya, no en el próximo
+	// barrido: `kling rm` y en seguida `run -p` al mismo puerto fallaba con
+	// «published for» la borrada durante hasta 2 s.
+	p.barrer()
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
@@ -288,6 +297,7 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 // máquina nueva: válidos, sin repetir, ninguno de otra máquina y libres en el
 // host (se abren y se cierran). Es la comprobación de antes de crearla.
 func (p *Publicador) Comprobar(ps []api.PortPublish) error {
+	p.barrer() // ver Publicar
 	vistos := map[string]bool{}
 	for _, q := range ps {
 		if err := q.Validate(); err != nil {
@@ -527,6 +537,10 @@ func (p *Publicador) despertar(mq *maquina) (*api.Machine, error) {
 // servicio aún no escucha.
 func (p *Publicador) marcar(mq *maquina, port int) (net.Conn, error) {
 	limite := time.Now().Add(p.plazoMarcar)
+	paso := pasoMarcarMin
+	// sondeado: el intento anterior ya se saltó la espera porque el sondeo
+	// dijo que escuchaba; si aun así falla, se espera (sin bucle caliente).
+	sondeado := false
 	for {
 		mc, err := p.despertar(mq)
 		if err != nil {
@@ -547,8 +561,43 @@ func (p *Publicador) marcar(mq *maquina, port int) (net.Conn, error) {
 		if time.Now().After(limite) || p.contexto().Err() != nil {
 			return nil, err
 		}
-		time.Sleep(pasoMarcar)
+		if !sondeado && p.escuchaYa(mq.id, port, limite) {
+			sondeado = true
+			continue
+		}
+		sondeado = false
+		time.Sleep(paso)
+		paso = siguientePaso(paso, pasoMarcar)
 	}
+}
+
+// sondeador lo cumple el gestor que sabe preguntar al VMM si algo escucha
+// en un puerto del invitado (machine.Manager.ProbeGuestPort). ok=false: no se
+// puede preguntar así (Linux, sin reenvío) y se reintenta a ciegas.
+type sondeador interface {
+	ProbeGuestPort(ctx context.Context, id string, port int) (open, ok bool)
+}
+
+// escuchaYa, entre dos intentos de marcar: si el gestor sabe sondear el
+// puerto (macOS), pregunta y dice si ya escucha, para reintentar en el acto
+// en vez de esperar el paso. El sondeo ya espera unos ms a que se abra.
+func (p *Publicador) escuchaYa(id string, port int, limite time.Time) bool {
+	s, ok := p.m.(sondeador)
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithDeadline(p.contexto(), limite)
+	defer cancel()
+	open, ok := s.ProbeGuestPort(ctx, id, port)
+	return ok && open
+}
+
+// siguientePaso dobla la espera entre intentos sin pasar de tope.
+func siguientePaso(paso, tope time.Duration) time.Duration {
+	if paso *= 2; paso > tope {
+		return tope
+	}
+	return paso
 }
 
 // asomar mira, sin esperar, si c ya llegó cortada con un RST; lo que ya
@@ -822,7 +871,7 @@ func (p *Publicador) guardar() {
 	}
 }
 
-// versionPublicar es la versión de publish.json (ver pkg/esquema).
+// versionPublicar es la versión de publish.json (ver internal/esquema).
 //
 //	0: un array JSON de api.Publication (v0.20).
 //	1: {"schema": 1, "publications": [...]}.

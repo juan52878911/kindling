@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // Pruebas del nodo N2 del plan de remediación: Commit bajo el cerrojo de ciclo

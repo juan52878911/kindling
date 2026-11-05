@@ -17,11 +17,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -33,10 +33,10 @@ const (
 var garageCLI = []string{"/garage", "-c", "/etc/garage.toml"}
 
 // reGarageKey saca los identificadores de acceso de un `garage key list`.
-var reGarageKey = regexp.MustCompile(`\bGK[0-9a-f]{24}\b`)
+var reGarageKey = lazyre.New(`\bGK[0-9a-f]{24}\b`)
 
 // reBucket: lo que Garage admite como nombre (3-63, minúsculas, dígitos, '-').
-var reBucket = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+var reBucket = lazyre.New(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 // garageExec lanza /garage <args> dentro de la copia id.
 func (a *app) garageExec(ctx context.Context, id string, args ...string) ([]byte, error) {
@@ -99,7 +99,7 @@ func (a *app) setGarageKey(ctx context.Context, id, user, bucket, pw string) err
 	if _, err := a.garageExec(ctx, id, "bucket", "allow", "--read", "--write", "--owner", bucket, "--key", ak); err != nil {
 		return fail("bucket allow")
 	}
-	for _, k := range reGarageKey.FindAllString(string(old), -1) {
+	for _, k := range reGarageKey.Regexp().FindAllString(string(old), -1) {
 		if k == ak {
 			continue
 		}
@@ -111,7 +111,7 @@ func (a *app) setGarageKey(ctx context.Context, id, user, bucket, pw string) err
 	if err != nil {
 		return fail("key list")
 	}
-	if ks := reGarageKey.FindAllString(string(out), -1); len(ks) != 1 || ks[0] != ak {
+	if ks := reGarageKey.Regexp().FindAllString(string(out), -1); len(ks) != 1 || ks[0] != ak {
 		return fmt.Errorf("rotating the key of %s: the copy does not hold exactly the new key", shortID(id))
 	}
 	return nil

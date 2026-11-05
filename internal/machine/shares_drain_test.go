@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Al apagar el daemon, drainShares corta los bucles de las carpetas vivas (aquí

@@ -187,9 +187,13 @@ func saludArgv(test []string) []string {
 
 // Plazos de la preparación.
 var (
-	plantillaListo  = 2 * time.Minute
-	plantillaPaso   = 200 * time.Millisecond
-	plantillaAgente = 30 * time.Second
+	plantillaListo = 2 * time.Minute
+	// Entre dos intentos de esperarOrden se espera plantillaPasoMin y se
+	// dobla hasta plantillaPaso: un healthcheck que pasa enseguida no paga
+	// 200 ms por intento.
+	plantillaPasoMin = 25 * time.Millisecond
+	plantillaPaso    = 200 * time.Millisecond
+	plantillaAgente  = 30 * time.Second
 )
 
 // prepararPlantilla arranca la máquina de preparación de p, espera a que esté
@@ -272,6 +276,7 @@ func comandoMaquina(p *plantillaCompose, l []string) []string {
 // mucho d.
 func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []string, d, plazo time.Duration) error {
 	limite := time.Now().Add(d)
+	paso := min(plantillaPasoMin, plantillaPaso)
 	var ultimo error
 	for {
 		// Con el usuario del servicio (el user: del compose), como Docker.
@@ -291,8 +296,9 @@ func esperarOrden(ctx context.Context, ops plantillaOps, ref string, argv []stri
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(plantillaPaso):
+		case <-time.After(paso):
 		}
+		paso = min(2*paso, plantillaPaso)
 	}
 }
 

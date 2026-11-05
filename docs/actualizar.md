@@ -18,7 +18,7 @@ son el plan de entonces, que ya está hecho; lo que falta para 1.0 está en
 ## 1. La regla, en corto
 
 1. **Todo fichero que kindling persiste lleva `"schema": N`.** Sin el campo es
-   la versión 0 (lo de antes). `pkg/esquema` es lo común: leer la versión,
+   la versión 0 (lo de antes). `internal/esquema` es lo común: leer la versión,
    reconocer el fichero del futuro y guardar la copia.
 2. **Migrar es hacia delante, de N a N+1, con copia.** Antes de la primera
    escritura que cambia la versión, `<fichero>.v<N>.bak`. La copia buena es la
@@ -60,13 +60,13 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
-| `snapshots/<n>/meta.json` | `api.Snapshot`, `internal/machine/meta.go` | **`schema: 1`** desde el PR 2, con `vmm`, `macos` y `kling_version`; **`schema: 2`** con `rootfs_digest` (el overlay en árbol de sha256, `pkg/digest.Tree`) en vez de `rootfs_sha256`. Un dorado v1 sigue verificándose con su sha256 plano y pasa a v2 (con `meta.json.v1.bak`) la primera vez que se reescribe; un kling de v1 se niega a un dorado v2 diciendo la versión | sin `schema` es v0: se lee igual y se copia a `meta.json.v0.bak` en la primera reescritura. `editMeta` conserva las claves que no conoce. Uno con `schema` mayor no se restaura, no se anota y no se borra. Un kling ≤ v0.17 lo lee, y al anotarlo pierde `schema` y los campos nuevos (vuelve a ser v0; la copia ya está) |
-| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas; desde v0.20 es el VMM que arrancó **esa máquina**, no el que el daemon usaría ahora | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. La arquitectura, el kernel y el agente **no** cuentan para `stale`. El TSC sigue con su traducción (`explainRestoreErr`) |
+| `snapshots/<n>/meta.json` | `api.Snapshot`, `internal/machine/meta.go` | **`schema: 1`** desde el PR 2, con `vmm`, `macos` y `kling_version`; **`schema: 2`** con `rootfs_digest` (el overlay en árbol de sha256, `internal/digest.Tree`) en vez de `rootfs_sha256`. Un dorado v1 sigue verificándose con su sha256 plano y pasa a v2 (con `meta.json.v1.bak`) la primera vez que se reescribe; un kling de v1 se niega a un dorado v2 diciendo la versión | sin `schema` es v0: se lee igual y se copia a `meta.json.v0.bak` en la primera reescritura. `editMeta` conserva las claves que no conoce. Uno con `schema` mayor no se restaura, no se anota y no se borra. Un kling ≤ v0.17 lo lee, y al anotarlo pierde `schema` y los campos nuevos (vuelve a ser v0; la copia ya está) |
+| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas; desde v0.20 es el VMM que arrancó **esa máquina**, no el que el daemon usaría ahora | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. La arquitectura sí cuenta (`arch` en el meta y en el sello: uno de otra sale `stale` diciendo la del host); el kernel y el agente **no**. El TSC sigue con su traducción (`explainRestoreErr`) |
 | kernel del dorado | `kernel_sha256` en el meta | hash, no versión | cambiarlo solo da un aviso (`avisoKernel`): el kernel del invitado vive en `mem.file` y sigue restaurando |
 | sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; campos opcionales `vmm` (v0.18), `diff_base` (v0.18) y `sin_agente` (v0.19) | **desde v0.20 es obligatorio**: un volcado sin marcadores solo se acepta si la máquina se congeló antes de la primera versión que sella (v0.8, 2026-09-23); uno posterior sin sello no se descongela. Sin `vmm`, no se compara |
 | `snap.file` de kling-vz y kling-hv | `vz/internal/spec/spec.go` (los dos lo escriben) | **`kling_vz`**: se escribe la más baja que lo describe: 1 de base, 2 con `graphics` (v0.18), **3 con vsock o MTU** (v0.19). Como v0.19 arranca con vsock y MTU 16384, casi todo lo congelado desde entonces es 3. `Decode` lee 1 a 3, y `kling-vz -snapshot-formats` dice cuáles | uno ≤ v0.17 lee la 1; uno de v0.18 la 1 y la 2; lo que haya que despertar con un kling-vz anterior lo recongela `kling upgrade` (§3.4). Uno de una versión futura se rechaza diciendo que se actualice kling-vz |
 | `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
-| `mem.file` de kling-hv (experimental) | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 2** (vsock y globo, v0.19); lee también la 1 | un kling-hv con la cabecera 1 no lee la 2. El daemon **no traduce** ese error a "rehazlo" (`explicarRestauracion` solo conoce `kling_vz`) y `kling upgrade` no comprueba esta versión antes de volver atrás |
+| `mem.file` de kling-hv | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 4**: 2 vsock y globo (v0.19), 3 la cola de estadísticas del globo, 4 la de páginas libres (v1.0). Lee 1 a 3 y cada versión con su propia longitud de cabecera; escribe siempre la 4 | uno anterior no lee la 4 y se rechaza diciendo que se actualice. `explicarRestauracion` traduce el error a "rehazlo" y `kling upgrade` comprueba esta versión antes de volver atrás (`versionHVMax`, ver `TestFormatosCasanConVZ`) |
 | firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
 
 ### Imágenes y volúmenes
@@ -155,7 +155,7 @@ unidades del host solo se actualizan con `make deploy`.
 
 ### 3.1 Formatos: `schema` en todo lo que se escribe
 
-`pkg/esquema` da tres piezas: `Comprobar(ruta, datos, soportada)`, que
+`internal/esquema` da tres piezas: `Comprobar(ruta, datos, soportada)`, que
 devuelve la versión o `*ErrMasNuevo`; `Respaldar(ruta, v)`, la copia `.v<v>.bak`
 que no se pisa; y `Cabecera`, el campo `schema` para incrustar. Cada dueño de un
 fichero escribe su `switch` de versiones (como `decodificarEstado` en
@@ -390,7 +390,7 @@ Los pasos son los de arriba, con estas diferencias, y por qué:
   microVMs en marcha siguen (`KillMode=process`) y el daemon nuevo las readopta.
   En el Mac `kling-vz` y `kling-hv` sí cambian, pero su versión no se compara
   (§3.2); lo que importa es el `kling_vz` de lo congelado, que se mira al
-  volver atrás (abajo). El `KLNGHV` del `mem.file` de kling-hv, no.
+  volver atrás (abajo), y lo mismo el `KLNGHV` del `mem.file` de kling-hv.
 - **Unidades y `/etc/default/kling`.** No se regeneran: la release no publica
   `kling.service` (lo instala `make deploy`), y lo que no se cambia no hace
   falta copiarlo.
@@ -544,7 +544,7 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 
 | # | PR | Qué incluye | Esfuerzo |
 |---|---|---|---|
-| 1 | **`pkg/esquema` y `state.json` v1** | helper común, `schema` en `state.json`, copia `.v0.bak`, el daemon no arranca con uno del futuro. Tests: versión 0 migra con copia; futura se rechaza sin pisarla | S — **hecho** |
+| 1 | **`internal/esquema` y `state.json` v1** | helper común, `schema` en `state.json`, copia `.v0.bak`, el daemon no arranca con uno del futuro. Tests: versión 0 migra con copia; futura se rechaza sin pisarla | S — **hecho** |
 | 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0`), `macos` y `kling_version` en el meta; `stale` con causa en `kling template ls`/`inspect` y en `kling doctor`; `run -from` y `thaw` se niegan con la orden; conservar claves desconocidas en `editMeta` | M — **hecho** |
 | 3 | `credentials.enc` con byte de versión | `KLCS` + `0x01` delante del nonce, también en plantillas y secretos de grafo; sin él es v0 y se reescribe (con copia) en el siguiente sellado; un byte mayor se rechaza sin tocar el fichero | S — **hecho** |
 | 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge` (y las opciones de volumen que no conocen: solo lectura); `/healthz` JSON si se pide con `Accept`; versión y `caps` del agente en la máquina (`api.Machine.Agent`), no en la receta: construir no arranca el invitado | M — **hecho** |

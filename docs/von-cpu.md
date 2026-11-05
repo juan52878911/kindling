@@ -311,7 +311,7 @@ SmolLM2-360M Q8_0 y la imagen de siempre relanzada con `--cache-ram 64`:
   prefijos, que en SmolLM2 es grande (~40 KiB por token).
 
 La construcción de una imagen nueva con `--cache-ram 64` (el constructor `llm`)
-está cubierta por los tests de `pkg/von` (`RunScript`) pero no se hizo en el
+está cubierta por los tests de `internal/von` (`RunScript`) pero no se hizo en el
 laboratorio: su daemon es compartido y no se le cambió el binario. De punta a
 punta en el Mac sí se probaron `kling ai model add -prefix`, `kling ai prime`
 (dos tareas; repetirlo no hace nada) y el gateway sirviendo una tarea con

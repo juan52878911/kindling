@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Números escritos con palabras, en español e inglés, sobre tokens ya

@@ -16,11 +16,14 @@
 #   NEW_DIR=/ruta/head IMAGES_DIR=/ruta/imagenes ./95-e2e-upgrade-mac.sh
 #
 #   OLD_DIR     kling, kling-vz (firmado) y, si lo trae, kling-hv de la versión
-#               anterior; sin él, OLD_TAG se baja con install.sh (necesita red)
+#               anterior; sin él, se bajan los de la release OLD_TAG de GitHub
+#               y se comprueban contra su SHA256SUMS (necesita red)
 #   OLD_TAG     su etiqueta; por defecto la última release publicada anterior
-#               a la nueva (la N-1, por el API de GitHub)
+#               a la nueva (la N-1, por el API de GitHub; v0.20.1 si el API no
+#               contesta)
 #   NEW_DIR     kling, kling-vz y kling-hv de este árbol (nombres de release o
-#               a secas); SHA256SUMS si se quiere -from-dir sin -insecure
+#               a secas); upgrade los toma con -from-dir de una copia con su
+#               SHA256SUMS (el de NEW_DIR si lo trae; si no, uno hecho aquí)
 #   VMM         vz o hv: con qué VMM corre el daemon (KLING_VMM); vacío = el
 #               que elija el daemon. Con hv se prueba además que la vuelta
 #               atrás mira la versión KLNGHV de lo que congela el nuevo
@@ -29,8 +32,11 @@
 #               macOS Go no lee SSL_CERT_FILE, así que no hay servidor local
 #   IMAGES_DIR  vmlinux, min.ext4 y, si está, toolchain.layer.ext4 con su receta
 #               (los de un daemon Linux arm64: docs/mac.md)
+#   KLING_MIN_FREE_DISK_MIB  pasa al daemon de launchd (en el Mac no arranca
+#               máquinas con menos de 16 GiB libres si no)
 #   BASE        dónde vive todo (por defecto $TMPDIR/kt-e2e-upgrade-mac)
 #   KEEP=1      no limpia al terminar
+#   KLING_E2E_LOGS=dir   si falla, deja ahí el log del daemon y las consolas
 #
 # Cada comprobación dice qué esperaba y qué obtuvo; un fallo no aborta el
 # resto. Salida en inglés, como el CLI.
@@ -59,7 +65,7 @@ bad()  { printf "  \033[31mFAIL\033[0m  %s\n     want: %s\n     got:  %s\n" "$1"
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 # vuelta_atras: upgrade dice "rolled back to <versión>" con la que da el binario
-# viejo: "0.17.0" el de la release (install.sh), "v0.17.0" uno sellado a mano.
+# viejo: "0.20.1" el de la release, "v0.20.1" uno sellado a mano.
 vuelta_atras() { contiene "$1" "rolled back to $OLD_TAG" || contiene "$1" "rolled back to ${OLD_TAG#v}"; }
 die()  { echo "$*" >&2; exit 1; }
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
@@ -92,8 +98,7 @@ kn() { "$NEWK" "$@"; }
 NEWV=$(kn version 2>/dev/null | awk 'NR==1{print $2}')
 case "$NEWV" in ""|dev) die "the new kling says version \"$NEWV\": build NEW_DIR with -ldflags \"-X main.Version=\$(git describe --tags)\"";; esac
 if [ -z "$OLD_TAG" ]; then
-  OLD_TAG=$(ultima_release_anterior "$NEWV")
-  [ -n "$OLD_TAG" ] || die "cannot tell the release before $NEWV (GitHub API): set OLD_TAG"
+  OLD_TAG=$(release_anterior "$NEWV")
 fi
 case "$NEWV" in "${OLD_TAG}"|"${OLD_TAG#v}") die "the new kling says version \"$NEWV\", the same as OLD_TAG";; esac
 NEWTAG="v${NEWV#v}"
@@ -106,11 +111,27 @@ if [ -n "${KLING_UPGRADE_REPO:-}" ]; then
 elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
   FROM="$NEW_DIR"; NUEVO=(-from-dir "$NEW_DIR")
 else
-  FROM="$NEW_DIR (unverified)"; NUEVO=(-from-dir "$NEW_DIR" -insecure)
+  # Sin -insecure: una copia con su SHA256SUMS (paso 0, ya con $BASE hecho).
+  FROM="$BASE/new"; NUEVO=(-from-dir "$BASE/new")
 fi
 
 our_procs() { pgrep -f -- "$ROOT/" | wc -l | tr -d ' '; }
+# guardar_logs: como en 92, el log del daemon, `ps -a` y las consolas de las
+# máquinas van a KLING_E2E_LOGS si la prueba falla, antes de borrar $BASE.
+guardar_logs() {
+  [ -n "${KLING_E2E_LOGS:-}" ] || return 0
+  mkdir -p "$KLING_E2E_LOGS/machines" || return 0
+  [ -f "$LOG" ] && cp "$LOG" "$KLING_E2E_LOGS/daemon.log"
+  [ -n "${NEWK:-}" ] && kn ps -a > "$KLING_E2E_LOGS/ps.txt" 2>&1
+  local f
+  for f in "$ROOT"/machines/*/firecracker.log; do
+    [ -f "$f" ] && cp "$f" "$KLING_E2E_LOGS/machines/$(basename "$(dirname "$f")").log"
+  done
+  echo "logs kept in $KLING_E2E_LOGS"
+}
 cleanup() {
+  local rc=$?
+  { [ "$rc" != 0 ] || [ "$fail" -gt 0 ]; } && guardar_logs
   if [ "$KEEP" = 1 ]; then echo; echo "KEEP=1: $BASE and $PLIST left as they are"; return; fi
   echo; echo "cleaning up..."
   for m in $(kn ps -a -q 2>/dev/null); do kn rm -f "$m" >/dev/null 2>&1; done
@@ -161,8 +182,13 @@ mkdir -p "$BIN" "$ROOT/images"
 echo '{}' > "$KLING_CONFIG"
 if [ -z "$OLD_DIR" ]; then
   OLD_DIR="$BASE/old"; mkdir -p "$OLD_DIR"
-  curl -fsSL "https://raw.githubusercontent.com/juan52878911/kindling/$OLD_TAG/scripts/install.sh" \
-    | sh -s -- --tag "$OLD_TAG" --prefix "$OLD_DIR" --no-rc --force >/dev/null || die "install.sh --tag $OLD_TAG failed"
+  bajar_release "$OLD_TAG" "$OLD_DIR" kling-darwin-arm64:kling kling-vz-darwin-arm64:kling-vz "?kling-hv-darwin-arm64:kling-hv" \
+    || die "could not download release $OLD_TAG"
+  ok "release $OLD_TAG downloaded and checked against its SHA256SUMS"
+fi
+if [ "$FROM" = "$BASE/new" ]; then
+  preparar_nuevos "$BASE/new" "$NEW_DIR" kling-darwin-arm64 kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-guest-linux-arm64 \
+    || die "could not stage $NEW_DIR"
 fi
 OLDK0=$(pieza "$OLD_DIR" kling); OLDVZ=$(pieza "$OLD_DIR" kling-vz); OLDHV=$(pieza_opc "$OLD_DIR" kling-hv)
 [ "$VMM" = hv ] && [ -z "$OLDHV" ] && die "VMM=hv and $OLD_TAG has no kling-hv"
@@ -175,6 +201,14 @@ VMM_ENV=""
 [ -n "$VMM" ] && VMM_ENV="    <key>KLING_VMM</key>
     <string>$VMM</string>
 "
+# Y el mínimo de disco libre, si se dio: en el Mac son 16 GiB por defecto.
+case "${KLING_MIN_FREE_DISK_MIB:-}" in
+  "") ;;
+  *[!0-9]*) die "KLING_MIN_FREE_DISK_MIB: a number of MiB";;
+  *) VMM_ENV="$VMM_ENV    <key>KLING_MIN_FREE_DISK_MIB</key>
+    <string>$KLING_MIN_FREE_DISK_MIB</string>
+";;
+esac
 copiar() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 for f in vmlinux min.ext4; do copiar "$IMAGES_DIR/$f" "$ROOT/images/$f" || die "no $IMAGES_DIR/$f"; done
 IMAGE=min
@@ -182,6 +216,20 @@ if [ -f "$IMAGES_DIR/toolchain.layer.ext4" ] && [ -f "$IMAGES_DIR/toolchain.reci
   copiar "$IMAGES_DIR/toolchain.layer.ext4" "$ROOT/images/toolchain.layer.ext4"
   cp "$IMAGES_DIR/toolchain.recipe.json" "$ROOT/images/"
   IMAGE=toolchain
+else
+  # Sin toolchain, la e2e-tools que 92 construye y deja en KLING_E2E_CACHE
+  # (con agente). min no lo lleva, y sin agente `save` no llega a guardar: su
+  # comprobación de que el invitado sirve es la del puerto del agente.
+  E2E_IMGS="${KLING_E2E_CACHE:-$HOME/.cache/kling-e2e}/images"
+  E2E_FILES="e2e-tools.layer.ext4 e2e-tools.recipe.json e2e-tools-base.ext4 e2e-tools-base.recipe.json"
+  todos=1
+  for f in $E2E_FILES; do [ -f "$E2E_IMGS/$f" ] || todos=0; done
+  if [ "$todos" = 1 ]; then
+    for f in $E2E_FILES; do copiar "$E2E_IMGS/$f" "$ROOT/images/$f" || die "copying $E2E_IMGS/$f"; done
+    IMAGE=e2e-tools
+  else
+    echo "warning: no toolchain in IMAGES_DIR and no e2e-tools in $E2E_IMGS (92-e2e-mac.sh builds it): using min, which has no guest agent, so save cannot pass" >&2
+  fi
 fi
 mkdir -p "$(dirname "$PLIST")"
 cat > "$PLIST" <<EOF

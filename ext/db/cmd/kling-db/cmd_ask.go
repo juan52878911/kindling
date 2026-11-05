@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -35,6 +34,7 @@ import (
 	"github.com/juan52878911/kindling/ext/db/internal/askllm"
 	"github.com/juan52878911/kindling/ext/db/internal/sqlguard"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -142,7 +142,7 @@ func (o askOpts) check(question string) error {
 }
 
 // modelPattern acepta nombres como claude-sonnet-5 o minimax-coding-plan/MiniMax-M2.7.
-var modelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$`)
+var modelPattern = lazyre.New(`^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$`)
 
 // askResult es lo que se imprime (y la salida de -json).
 type askResult struct {
@@ -570,7 +570,7 @@ Rules:
 
 // reMissing reconoce el error de Postgres por una tabla o columna que no existe.
 // Solo se usa el identificador (que salió de la SQL del propio modelo).
-var reMissing = regexp.MustCompile(`ERROR:\s+(relation|column) "?([A-Za-z_][A-Za-z0-9_.]{0,127})"? does not exist`)
+var reMissing = lazyre.New(`ERROR:\s+(relation|column) "?([A-Za-z_][A-Za-z0-9_.]{0,127})"? does not exist`)
 
 // missingIdent devuelve una línea para el modelo si err es "no existe" de una
 // tabla o una columna que aparece en la SQL del propio modelo; nada de lo demás

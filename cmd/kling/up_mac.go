@@ -18,12 +18,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/internal/zstd"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // launchAgentLabel es la etiqueta del agente de launchd que docs/mac.md
@@ -96,7 +97,48 @@ func entitlementDe(backend string) string {
 // tieneEntitlement mira si el binario está firmado con ese permiso. Sin él, el
 // framework se niega a crear la VM y el error llega tarde y críptico, en el
 // primer arranque.
+//
+// La salida de codesign se recuerda por fichero (ruta, tamaño y fecha) dentro
+// del proceso: kling up preguntaba dos veces por el mismo kling-hv (al
+// elegir el backend y al comprobar el Mac), y cada codesign son decenas de ms.
+// Un binario que se cambia o se vuelve a firmar cambia de fecha y se mira de
+// nuevo.
 func tieneEntitlement(path, ent string) bool {
+	clave := path
+	if fi, err := os.Stat(path); err == nil {
+		clave = fmt.Sprintf("%s\x00%d\x00%d", path, fi.Size(), fi.ModTime().UnixNano())
+	} else {
+		return firmadoCon(path, ent)
+	}
+	firmasMu.Lock()
+	out, ok := firmas[clave]
+	firmasMu.Unlock()
+	if !ok {
+		var err error
+		if out, err = leerEntitlements(path); err != nil {
+			return false
+		}
+		firmasMu.Lock()
+		firmas[clave] = out
+		firmasMu.Unlock()
+	}
+	return strings.Contains(out, ent)
+}
+
+var (
+	firmasMu sync.Mutex
+	firmas   = map[string]string{}
+)
+
+// firmadoCon es tieneEntitlement sin recordar nada.
+func firmadoCon(path, ent string) bool {
+	out, err := leerEntitlements(path)
+	return err == nil && strings.Contains(out, ent)
+}
+
+// leerEntitlements son los permisos con los que va firmado path, como los
+// da codesign.
+func leerEntitlements(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "codesign", "-d", "--entitlements", "-", "--xml", path).CombinedOutput()
@@ -104,10 +146,10 @@ func tieneEntitlement(path, ent string) bool {
 		// codesign antiguo sin --xml.
 		out, err = exec.CommandContext(ctx, "codesign", "-d", "--entitlements", ":-", path).CombinedOutput()
 		if err != nil {
-			return false
+			return "", err
 		}
 	}
-	return strings.Contains(string(out), ent)
+	return string(out), nil
 }
 
 func checksMac(p probeMac) []check {

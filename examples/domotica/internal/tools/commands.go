@@ -17,14 +17,14 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 )
 
 // Los subcomandos de kindling-domotica que trabajan con los modelos de la
 // habitación sin gateway (salvo eval-llm): decidir, evaluar y entrenar las
 // capas. Plantillas de la demo → Chispa (intención) + Chispa-slots (huecos),
-// con la cascada de pkg/intent; lo que no es confiado dice a qué capa
+// con la cascada de internal/intent; lo que no es confiado dice a qué capa
 // escalar. Ver docs/domotica.md.
 
 // Usage son las líneas de estos subcomandos en la ayuda de kindling-domotica.

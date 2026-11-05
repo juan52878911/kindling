@@ -48,6 +48,12 @@ type VM interface {
 	Stopped() <-chan error
 }
 
+// endReasoner es la VM que sabe decir por qué terminó (kling-hv: el
+// invitado se apagó, pidió reiniciarse...). Vale tras recibir de Stopped.
+type endReasoner interface {
+	EndReason() string
+}
+
 // VsockDialer es lo que una VM con virtio-vsock (Spec.Vsock) ofrece: una
 // conexión nueva al puerto port del invitado.
 type VsockDialer interface {
@@ -231,6 +237,10 @@ type Server struct {
 
 	done     chan error
 	doneOnce sync.Once
+	// fin es por qué se paró la VM (watch), para que los errores de la API
+	// lo digan: sin él, un pause tras apagarse el invitado solo decía
+	// "Stopped". Con mu.
+	fin string
 
 	globoEn []time.Duration // ver reaplicarGlobo; campo para las pruebas
 
@@ -261,6 +271,7 @@ type Server struct {
 	// Con frenoMu.
 	frenoPerdido bool
 	frenoAviso   bool // ya se avisó de que Freeze falla (con mu)
+	pausaAviso   bool // ya se avisó de que el regulador no pudo pausar (con mu; se rearma al conseguirlo)
 }
 
 func New(d Deps) *Server {
@@ -285,6 +296,15 @@ func New(d Deps) *Server {
 
 // Done recibe cuando la VM se ha parado y el proceso debe terminar.
 func (s *Server) Done() <-chan error { return s.done }
+
+// estado es s.st para los errores de la API, con el motivo si la VM se
+// paró. Con mu.
+func (s *Server) estado() string {
+	if s.st == stStopped && s.fin != "" {
+		return fmt.Sprintf("%s (%s)", s.st, s.fin)
+	}
+	return s.st.String()
+}
 
 func (s *Server) finish(err error) {
 	s.doneOnce.Do(func() { s.done <- err })
@@ -526,7 +546,7 @@ func (s *Server) patchDrive(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st == stStopped {
-		fault(w, errors.New("the microVM has stopped"))
+		fault(w, fmt.Errorf("the microVM has stopped%s", entreParentesis(s.fin)))
 		return
 	}
 	if d.Disposable != nil && s.st != stConfiguring && s.st != stPendingLoad {
@@ -634,11 +654,21 @@ func (s *Server) patchBalloon(w http.ResponseWriter, r *http.Request) {
 	noContent(w)
 }
 
-// getBalloonStats: el framework no da estadísticas del invitado, así que la
-// memoria va a 0, que el núcleo lee como "desconocido".
+// balloonStatser lo cumple el VMM que sabe leer las estadísticas del globo
+// del invitado (kling-hv, con su cola de estadísticas). Los bytes son los de
+// virtio-balloon; ActualMiB lo inflado ahora mismo.
+type balloonStatser interface {
+	BalloonStats() (free, available, total uint64, actualMiB int, ok bool)
+}
+
+// getBalloonStats: con kling-hv, lo que dice el driver del invitado (y
+// kling squeeze reclama lo libre sin preguntar al agente); con kling-vz el
+// framework no da estadísticas, así que la memoria va a 0, que el núcleo lee
+// como "desconocido".
 func (s *Server) getBalloonStats(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	b := s.spec.Balloon
+	vm := s.vm
 	var amount int
 	if b != nil {
 		amount = b.AmountMiB
@@ -647,6 +677,15 @@ func (s *Server) getBalloonStats(w http.ResponseWriter, _ *http.Request) {
 	if b == nil {
 		fault(w, errors.New("the balloon device is not configured"))
 		return
+	}
+	if bs, ok := vm.(balloonStatser); ok && vm != nil {
+		if free, avail, total, actual, ok := bs.BalloonStats(); ok {
+			writeJSON(w, map[string]any{
+				"target_mib": amount, "actual_mib": actual,
+				"free_memory": free, "available_memory": avail, "total_memory": total,
+			})
+			return
+		}
 	}
 	writeJSON(w, map[string]any{
 		"target_mib": amount, "actual_mib": amount,
@@ -761,13 +800,17 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 				s.st = stPaused
 				break
 			}
+			// El texto del VMM llega tal cual al núcleo: un vCPU que no se
+			// paró a tiempo, o que el invitado se apagó (y por qué).
 			if err = s.vm.Pause(); err == nil {
 				s.st = stPaused
+			} else {
+				err = fmt.Errorf("cannot pause: %w", err)
 			}
 		case stPaused, stPendingLoad:
 			// Idempotente, como en Firecracker.
 		default:
-			err = fmt.Errorf("cannot pause: the microVM is %s", s.st)
+			err = fmt.Errorf("cannot pause: the microVM is %s", s.estado())
 		}
 	case "Resumed":
 		switch s.st {
@@ -775,12 +818,14 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 			if err = s.vm.Resume(); err == nil {
 				s.st = stRunning
 				s.avisarCPU()
+			} else {
+				err = fmt.Errorf("cannot resume: %w", err)
 			}
 		case stPendingLoad:
 			err = s.restore()
 		case stRunning:
 		default:
-			err = fmt.Errorf("cannot resume: the microVM is %s", s.st)
+			err = fmt.Errorf("cannot resume: the microVM is %s", s.estado())
 		}
 	default:
 		err = fmt.Errorf("invalid state %q (use Paused or Resumed)", v.State)
@@ -813,7 +858,7 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st != stPaused {
-		fault(w, fmt.Errorf("the microVM must be paused to create a snapshot (it is %s)", s.st))
+		fault(w, fmt.Errorf("the microVM must be paused to create a snapshot (it is %s)", s.estado()))
 		return
 	}
 	t0 := time.Now()
@@ -1454,20 +1499,47 @@ func (s *Server) reaplicarGlobo(vm VM, en []time.Duration) {
 
 func (s *Server) watch(vm VM) {
 	err := <-vm.Stopped()
+	// El motivo vale tras Stopped (endReasoner); también con un error, que
+	// puede no decir lo mismo (kling-hv: el error de vm.c y el motivo).
+	motivo := ""
+	if r, ok := vm.(endReasoner); ok {
+		motivo = r.EndReason()
+	}
 	s.mu.Lock()
 	current := s.vm == vm
 	if current {
 		s.st = stStopped
+		switch {
+		case err != nil && motivo != "" && motivo != err.Error():
+			s.fin = err.Error() + "; " + motivo
+		case err != nil:
+			s.fin = err.Error()
+		default:
+			s.fin = motivo
+		}
 	}
 	s.mu.Unlock()
 	s.avisarCPU()
 	if !current {
 		return // una VM abandonada tras un fallo: no es el fin del proceso
 	}
-	if err != nil {
+	switch {
+	case err != nil && motivo != "" && motivo != err.Error():
+		s.d.Logf("the VM stopped with an error: %v (end reason: %s)", err, motivo)
+	case err != nil:
 		s.d.Logf("the VM stopped with an error: %v", err)
-	} else {
+	case motivo != "":
+		s.d.Logf("the guest stopped: %s", motivo)
+	default:
 		s.d.Logf("the guest stopped")
 	}
 	s.finish(err)
+}
+
+// entreParentesis es " (t)", o nada sin t.
+func entreParentesis(t string) string {
+	if t == "" {
+		return ""
+	}
+	return " (" + t + ")"
 }

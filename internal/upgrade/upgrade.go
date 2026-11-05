@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -702,7 +702,7 @@ func (o *Opciones) restaurar(ctx context.Context, c *copia, conEstado bool) erro
 	return errors.Join(errs...)
 }
 
-// reBak es la copia que deja una migración (pkg/esquema.RutaRespaldo).
+// reBak es la copia que deja una migración (internal/esquema.RutaRespaldo).
 var reBak = lazyre.New(`\.v[0-9]+\.bak$`)
 
 func sinBak(p string) string { return reBak.ReplaceAllString(p, "") }
@@ -1108,7 +1108,8 @@ const magiaHV uint64 = 0x4b4c4e4748563032
 // VersionVolcadoHV dice la versión de estado (KHV_SNAP_VERSION) del volcado
 // de kling-hv en p, la que tiene que leer el kling-hv que lo despierte. ok es
 // false si p no es de kling-hv (lo escribió kling-vz o Firecracker): ahí solo
-// cuenta el kling_vz del snap.file. Recongelar lo usa en el Mac, vía
+// cuenta el kling_vz del snap.file. Uno de kling-hv que no se sabe leer
+// (truncado, otra generación de la magia) es un error con ok true. Recongelar lo usa en el Mac, vía
 // CongeladaLegible, con lo que el daemon nuevo acaba de congelar.
 func VersionVolcadoHV(p string) (v int, ok bool, err error) {
 	f, err := os.Open(p)
@@ -1127,8 +1128,16 @@ func VersionVolcadoHV(p string) (v int, ok bool, err error) {
 	if _, err := f.ReadAt(pie[:], fi.Size()-int64(len(pie))); err != nil {
 		return 0, false, err
 	}
-	if binary.LittleEndian.Uint64(pie[0:]) != magiaHV {
-		return 0, false, nil
+	if m := binary.LittleEndian.Uint64(pie[0:]); m != magiaHV {
+		if m>>16 != magiaHV>>16 {
+			return 0, false, nil
+		}
+		// "KLNGHV" con otra generación ("KLNGHV03"): es de kling-hv, pero de
+		// una disposición que este no sabe leer ni, por tanto, comparar. Pasarlo
+		// como si fuera de kling-vz despertaría lo que el viejo no lee.
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], m)
+		return 0, true, fmt.Errorf("%s: kling-hv memory file of another generation (%q)", p, b[:])
 	}
 	off, largo := binary.LittleEndian.Uint64(pie[16:]), binary.LittleEndian.Uint64(pie[24:])
 	var cab [12]byte

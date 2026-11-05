@@ -28,7 +28,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +36,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/db/internal/askllm"
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -53,10 +53,10 @@ const (
 
 // reportPattern es el nombre de un informe: va en rutas, en una etiqueta y,
 // tras "rpt-", en el nombre de la copia.
-var reportPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
+var reportPattern = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 
 // everyPattern es un periodo: N minutos, horas, días o semanas.
-var everyPattern = regexp.MustCompile(`^([1-9][0-9]{0,3})(m|h|d|w)$`)
+var everyPattern = lazyre.New(`^([1-9][0-9]{0,3})(m|h|d|w)$`)
 
 func parseEvery(s string) (time.Duration, error) {
 	m := everyPattern.FindStringSubmatch(s)

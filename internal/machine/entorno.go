@@ -143,7 +143,13 @@ func (m *Manager) retirarEntornoMMDS(id, nombre string, env map[string]string) {
 
 // esperarAgente pregunta al agente de id por su /healthz hasta que conteste
 // o venza ctx. nil si no contestó o la máquina dejó de estar en marcha.
+//
+// Entre intentos, de pasoListoPrimero doblando hasta pasoListo, como la vigía
+// del agente (agente.go): con el paso fijo de 250 ms, un agente que empezaba
+// a escuchar justo tras el primer fallo llegaba un cuarto de segundo tarde.
+// El plazo total es el de ctx, el mismo de siempre.
 func (m *Manager) esperarAgente(ctx context.Context, id string) *api.GuestAgent {
+	paso := pasoListoPrimero
 	for ctx.Err() == nil {
 		m.mu.RLock()
 		mc := m.byID[id]
@@ -166,8 +172,9 @@ func (m *Manager) esperarAgente(ctx context.Context, id string) *api.GuestAgent 
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(pasoListo):
+		case <-time.After(paso):
 		}
+		paso = min(2*paso, pasoListo)
 	}
 	return nil
 }

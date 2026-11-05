@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // cliente es un agente mínimo: manda una petición y espera su respuesta.

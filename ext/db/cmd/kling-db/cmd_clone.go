@@ -46,13 +46,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbmask"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -75,7 +75,10 @@ const (
 )
 
 // goldenNamePattern es lo que acepta db-golden.sh como nombre.
-var goldenNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,40}$`)
+var goldenNamePattern = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,40}$`)
+
+// memPattern es lo que acepta -mem (MiB, o con sufijo M/G).
+var memPattern = lazyre.New(`^[0-9]+[MG]?$`)
 
 // cloneSource es la base de producción, sin contraseña.
 type cloneSource struct {
@@ -367,7 +370,7 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 	if o.source.tls == "disable" && (o.caPEM != "" || o.tlsServerName != "") {
 		return nil, errors.New("sslmode=disable excludes -ca and -tls-server-name")
 	}
-	if !regexp.MustCompile(`^[0-9]+[MG]?$`).MatchString(o.mem) {
+	if !memPattern.MatchString(o.mem) {
 		return nil, fmt.Errorf("invalid -mem %q", o.mem)
 	}
 	if o.image != "" && !namePattern.MatchString(o.image) || o.from != "" && !namePattern.MatchString(o.from) {

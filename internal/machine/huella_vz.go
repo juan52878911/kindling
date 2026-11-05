@@ -102,7 +102,8 @@ func cpuVMM(pid int, sock string) (usoCPU, bool) {
 	if !ok {
 		return usoCPU{}, false
 	}
-	if sock != "" {
+	// kling-hv no tiene auxiliar: no hay a quién preguntar.
+	if sock != "" && backendVMM != BackendHV {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		e, err := fc.New(sock).KlingCPUState(ctx)
 		cancel()

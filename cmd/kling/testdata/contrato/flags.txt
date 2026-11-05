@@ -1,0 +1,377 @@
+# Flags de cada comando del CLI: kling <FlagSet>:  -<flag>.
+# Lo genera TestContratoFlags (cmd/kling/sinopsis_flags_test.go) leyendo
+# los FlagSets de nombre literal del código; para regenerarlo:
+#   go test ./cmd/kling -run TestContratoFlags -update
+# Quitar o cambiar una línea exige subir api.APIVersion (internal/contrato).
+# api: 1
+
+kling audit:  -H
+kling audit:  -denied
+kling audit:  -f
+kling audit:  -json
+kling audit:  -since
+kling audit:  -tail
+kling compose down:  -H
+kling compose down:  -f
+kling compose down:  -file
+kling compose down:  -p
+kling compose down:  -project-name
+kling compose down:  -v
+kling compose down:  -volumes
+kling compose exec:  -H
+kling compose exec:  -T
+kling compose exec:  -e
+kling compose exec:  -env
+kling compose exec:  -f
+kling compose exec:  -file
+kling compose exec:  -i
+kling compose exec:  -interactive
+kling compose exec:  -no-tty
+kling compose exec:  -p
+kling compose exec:  -project-name
+kling compose exec:  -w
+kling compose exec:  -workdir
+kling compose logs:  -H
+kling compose logs:  -f
+kling compose logs:  -file
+kling compose logs:  -follow
+kling compose logs:  -p
+kling compose logs:  -project-name
+kling compose logs:  -t
+kling compose logs:  -tail
+kling compose logs:  -timestamps
+kling compose ps:  -H
+kling compose ps:  -f
+kling compose ps:  -file
+kling compose ps:  -p
+kling compose ps:  -project-name
+kling compose up:  -H
+kling compose up:  -d
+kling compose up:  -detach
+kling compose up:  -f
+kling compose up:  -file
+kling compose up:  -fresh
+kling compose up:  -keep
+kling compose up:  -no-logs
+kling compose up:  -p
+kling compose up:  -project-name
+kling compose up:  -t
+kling compose up:  -timestamps
+kling config get:  -reveal
+kling config show:  -json
+kling context add:  -description
+kling context add:  -use
+kling context ls:  -json
+kling cow grow:  -H
+kling cow:  -H
+kling cp:  -H
+kling cp:  -mode
+kling credential:  -H
+kling credential:  -allow-request
+kling credential:  -any-database
+kling credential:  -body
+kling credential:  -ca-file
+kling credential:  -database
+kling credential:  -domain
+kling credential:  -env
+kling credential:  -f
+kling credential:  -header
+kling credential:  -port
+kling credential:  -query
+kling credential:  -rm
+kling credential:  -tls-server-name
+kling credential:  -type
+kling credential:  -upstream
+kling credential:  -upstream-tls
+kling credential:  -user
+kling daemon:  -authz
+kling daemon:  -build-as
+kling daemon:  -firecracker
+kling daemon:  -root
+kling daemon:  -run-as
+kling daemon:  -socket
+kling daemon:  -socket-user
+kling doctor:  -H
+kling doctor:  -json
+kling events:  -H
+kling events:  -json
+kling exec:  -H
+kling exec:  -e
+kling exec:  -env-file
+kling exec:  -i
+kling exec:  -max-output
+kling exec:  -timeout
+kling exec:  -w
+kling graph audit:  -H
+kling graph audit:  -all
+kling graph audit:  -denied
+kling graph audit:  -json
+kling graph audit:  -since
+kling graph audit:  -tail
+kling graph fork:  -H
+kling graph fork:  -json
+kling graph fork:  -n
+kling graph fork:  -q
+kling graph from-compose:  -name
+kling graph from-compose:  -o
+kling graph from-compose:  -script
+kling graph inspect:  -H
+kling graph inspect:  -json
+kling graph ls:  -H
+kling graph ls:  -json
+kling graph ls:  -q
+kling graph rm:  -H
+kling graph rm:  -f
+kling graph snapshot:  -H
+kling graph snapshot:  -json
+kling graph snapshot:  -name
+kling graph up:  -H
+kling graph up:  -json
+kling graph up:  -q
+kling image build-tools:  -H
+kling image build-tools:  -as
+kling image import:  -H
+kling image import:  -arch
+kling image import:  -archive
+kling image import:  -cpus
+kling image import:  -e
+kling image import:  -egress
+kling image import:  -emulate
+kling image import:  -entrypoint
+kling image import:  -env-file
+kling image import:  -image
+kling image import:  -init
+kling image import:  -isolate
+kling image import:  -json
+kling image import:  -max-size
+kling image import:  -mem
+kling image import:  -name
+kling image import:  -on-restore
+kling image import:  -replace
+kling image import:  -restart
+kling image import:  -slim
+kling image import:  -step
+kling image import:  -step-timeout
+kling image import:  -sysctl
+kling image import:  -template
+kling image import:  -ulimit
+kling image import:  -user
+kling image import:  -wait
+kling image import:  -warm
+kling image ls:  -H
+kling image ls:  -json
+kling image ls:  -q
+kling image rm:  -H
+kling image rm:  -f
+kling images build:  -H
+kling images build:  -base
+kling images build:  -builder
+kling images build:  -grow
+kling images build:  -spec
+kling images cat:  -H
+kling images cat:  -stat
+kling images copy:  -from
+kling images copy:  -to
+kling images put:  -H
+kling images put:  -create
+kling images put:  -file
+kling images put:  -from-host
+kling images put:  -mode
+kling images recipe:  -H
+kling images toolchain:  -H
+kling images toolchain:  -as
+kling inspect:  -H
+kling logs:  -H
+kling logs:  -f
+kling logs:  -raw
+kling logs:  -service
+kling logs:  -t
+kling logs:  -tail
+kling machine hooks:  -H
+kling machine hooks:  -json
+kling machine hooks:  -wait
+kling machine ready:  -H
+kling machine ready:  -json
+kling machine ready:  -wait
+kling machine resize:  -H
+kling machine resize:  -mem
+kling mmds:  -H
+kling mmds:  -f
+kling mmds:  -hooks
+kling mmds:  -hooks-wait
+kling plugin ls:  -json
+kling plugins install:  -dir
+kling plugins install:  -file
+kling plugins install:  -from
+kling plugins install:  -sha256
+kling plugins rm:  -dir
+kling ps:  -H
+kling ps:  -a
+kling ps:  -json
+kling ps:  -q
+kling registry import:  -H
+kling registry import:  -config
+kling registry login:  -H
+kling registry login:  -u
+kling registry logout:  -H
+kling registry ls:  -H
+kling registry ls:  -json
+kling run:  -H
+kling run:  -allow
+kling run:  -allow-exec
+kling run:  -cpu-pct
+kling run:  -cpus
+kling run:  -disk
+kling run:  -e
+kling run:  -egress
+kling run:  -env-file
+kling run:  -from
+kling run:  -image
+kling run:  -json
+kling run:  -label
+kling run:  -mem
+kling run:  -mem-max
+kling run:  -mount
+kling run:  -name
+kling run:  -on-ttl
+kling run:  -p
+kling run:  -platform
+kling run:  -ready-timeout
+kling run:  -service
+kling run:  -share
+kling run:  -share-wait
+kling run:  -ttl
+kling run:  -volume
+kling run:  -volume-ro
+kling run:  -wait-ready
+kling sandbox create:  -H
+kling sandbox create:  -allow
+kling sandbox create:  -cpu-pct
+kling sandbox create:  -cpus
+kling sandbox create:  -egress
+kling sandbox create:  -from
+kling sandbox create:  -image
+kling sandbox create:  -mem
+kling sandbox create:  -name
+kling sandbox create:  -on-ttl
+kling sandbox create:  -q
+kling sandbox create:  -share
+kling sandbox create:  -ttl
+kling sandbox create:  -volume
+kling sandbox create:  -wait-ready
+kling sandbox fork:  -H
+kling sandbox fork:  -json
+kling sandbox fork:  -label
+kling sandbox fork:  -n
+kling sandbox fork:  -on-ttl
+kling sandbox fork:  -q
+kling sandbox fork:  -skip-ready
+kling sandbox fork:  -ttl
+kling sandbox ls:  -H
+kling sandbox ls:  -json
+kling sandbox ls:  -q
+kling sandbox renew:  -H
+kling sandbox renew:  -ttl
+kling sandbox rm:  -H
+kling sandbox rm:  -f
+kling save:  -H
+kling save:  -audit
+kling save:  -audit-for
+kling save:  -force
+kling save:  -replace
+kling save:  -wait
+kling save:  -warm
+kling shell:  -H
+kling shell:  -e
+kling shell:  -env-file
+kling shell:  -t
+kling shell:  -w
+kling squeeze:  -H
+kling squeeze:  -force
+kling start:  -H
+kling start:  -e
+kling start:  -env-file
+kling status:  -H
+kling status:  -json
+kling status:  -v
+kling template credential:  -H
+kling template credential:  -allow-request
+kling template credential:  -any-database
+kling template credential:  -body
+kling template credential:  -ca-file
+kling template credential:  -clear
+kling template credential:  -database
+kling template credential:  -domain
+kling template credential:  -env
+kling template credential:  -f
+kling template credential:  -header
+kling template credential:  -port
+kling template credential:  -query
+kling template credential:  -tls-server-name
+kling template credential:  -type
+kling template credential:  -upstream
+kling template credential:  -upstream-tls
+kling template credential:  -user
+kling template inspect:  -H
+kling template inspect:  -json
+kling template ls:  -H
+kling template ls:  -json
+kling template ls:  -q
+kling template pool:  -H
+kling template pool:  -n
+kling top:  -H
+kling top:  -json
+kling top:  -watch
+kling topo:  -H
+kling try:  -H
+kling try:  -allow
+kling try:  -cpus
+kling try:  -egress
+kling try:  -from
+kling try:  -image
+kling try:  -keep
+kling try:  -mem
+kling try:  -ttl
+kling up:  -H
+kling up:  -check
+kling up:  -install
+kling up:  -root
+kling upgrade:  -H
+kling upgrade:  -check
+kling upgrade:  -cli
+kling upgrade:  -dry-run
+kling upgrade:  -force
+kling upgrade:  -from-dir
+kling upgrade:  -insecure
+kling upgrade:  -rollback
+kling upgrade:  -root
+kling upgrade:  -schemas
+kling upgrade:  -tag
+kling upgrade:  -timeout
+kling upgrade:  -unit
+kling upgrade:  -version
+kling version:  -H
+kling version:  -json
+kling volume clone:  -H
+kling volume clone:  -copy
+kling volume clone:  -json
+kling volume create:  -H
+kling volume create:  -size
+kling volume ls:  -H
+kling volume ls:  -json
+kling volume ls:  -q
+kling volume populate:  -H
+kling volume populate:  -image
+kling volume populate:  -mem
+kling volume populate:  -mount
+kling volume restore:  -H
+kling volume restore:  -f
+kling volume restore:  -json
+kling volume rm:  -H
+kling volume rm:  -f
+kling volume rm:  -snapshots
+kling volume snapshot:  -H
+kling volume snapshot:  -json
+kling volume snapshots:  -H
+kling volume snapshots:  -json
+kling volume snapshots:  -q

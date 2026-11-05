@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/contrato"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // La sinopsis de tree.go se escribe a mano y se queda atrás cuando un comando
@@ -136,6 +139,13 @@ func (a *analizadorFlags) flagsDe(body ast.Node, v string, vistos map[string]boo
 				}
 				return true
 			}
+			// ef.register(fs): un método del paquete que registra sobre fs.
+			if len(call.Args) > 0 {
+				if arg, ok := call.Args[0].(*ast.Ident); ok && arg.Name == v && a.funcs["."+fn.Sel.Name] != nil {
+					out = append(out, a.ayudante("."+fn.Sel.Name, vistos)...)
+					return true
+				}
+			}
 			// units.MiBVar(fs, "mem", …) y compañía.
 			if id, ok := fn.X.(*ast.Ident); ok && id.Name == "units" && len(call.Args) > 0 {
 				if arg, ok := call.Args[0].(*ast.Ident); ok && arg.Name == v {
@@ -211,7 +221,10 @@ func sinopsisDe(fsName string) string {
 	return c.Usage
 }
 
-func TestSinopsisListaCadaFlag(t *testing.T) {
+// paqueteFlags lee el código de cmd/kling (sin los tests) y prepara el
+// analizador de flags con sus funciones.
+func paqueteFlags(t *testing.T) (*token.FileSet, *analizadorFlags, []*ast.File) {
+	t.Helper()
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -233,13 +246,24 @@ func TestSinopsisListaCadaFlag(t *testing.T) {
 		}
 		files = append(files, f)
 		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
-				a.funcs[fd.Name.Name] = fd
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				// Los métodos (ef.register(fs)) van como ".nombre": desde la
+				// llamada no se sabe el tipo del receptor.
+				if fd.Recv != nil {
+					a.funcs["."+fd.Name.Name] = fd
+				} else {
+					a.funcs[fd.Name.Name] = fd
+				}
 			}
 		}
 	}
+	return fset, a, files
+}
 
-	comprobados := 0
+// porCadaFlagSet llama a fn con cada `v := flag.NewFlagSet("nombre", …)` de
+// nombre literal: la función que lo crea, la variable y el nombre. Los de
+// nombre calculado ("compose "+que, op) no se pueden casar con nada desde aquí.
+func porCadaFlagSet(files []*ast.File, fn func(as *ast.AssignStmt, fd *ast.FuncDecl, v, fsName string)) {
 	for _, f := range files {
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
@@ -266,65 +290,69 @@ func TestSinopsisListaCadaFlag(t *testing.T) {
 				if !ok {
 					return true
 				}
-				// Los de nombre calculado ("compose "+que, op) no se pueden
-				// casar con su sinopsis desde aquí.
-				fsName, ok := primerLiteral(call.Args[:1])
-				if !ok {
-					return true
-				}
-				for _, p := range fsSinArbol {
-					if strings.HasPrefix(fsName, p) {
-						return true
-					}
-				}
-				syn := sinopsisDe(fsName)
-				pos := fset.Position(as.Pos())
-				if syn == "" {
-					t.Errorf("%s: FlagSet %q has no synopsis in tree.go", pos, fsName)
-					return true
-				}
-				comprobados++
-				permitidos := map[string]bool{}
-				for _, k := range []string{"*", fsName} {
-					for _, n := range flagsSinSinopsis[k] {
-						permitidos[n] = true
-					}
-				}
-				// Por variable destino: falta si no sale ninguno de sus nombres.
-				enSinopsis := func(fl string) bool {
-					re := regexp.MustCompile(`(^|[^\w-])-` + regexp.QuoteMeta(fl) + `($|[^\w-])`)
-					return permitidos[fl] || re.MatchString(syn)
-				}
-				var orden []string
-				grupos := map[string][]string{}
-				for _, fl := range a.flagsDe(fd.Body, v.Name, map[string]bool{}) {
-					k := fl.dest
-					if k == "" {
-						k = "-" + fl.name
-					}
-					if _, ok := grupos[k]; !ok {
-						orden = append(orden, k)
-					}
-					grupos[k] = append(grupos[k], fl.name)
-				}
-				var faltan []string
-				for _, k := range orden {
-					visto := false
-					for _, fl := range grupos[k] {
-						visto = visto || enSinopsis(fl)
-					}
-					if !visto {
-						faltan = append(faltan, "-"+strings.Join(grupos[k], "/-"))
-					}
-				}
-				if len(faltan) > 0 {
-					sort.Strings(faltan)
-					t.Errorf("%s: %s defines %s but its synopsis in tree.go does not show it", pos, fsName, strings.Join(faltan, " "))
+				if fsName, ok := primerLiteral(call.Args[:1]); ok {
+					fn(as, fd, v.Name, fsName)
 				}
 				return true
 			})
 		}
 	}
+}
+
+func TestSinopsisListaCadaFlag(t *testing.T) {
+	fset, a, files := paqueteFlags(t)
+	comprobados := 0
+	porCadaFlagSet(files, func(as *ast.AssignStmt, fd *ast.FuncDecl, v, fsName string) {
+		for _, p := range fsSinArbol {
+			if strings.HasPrefix(fsName, p) {
+				return
+			}
+		}
+		syn := sinopsisDe(fsName)
+		pos := fset.Position(as.Pos())
+		if syn == "" {
+			t.Errorf("%s: FlagSet %q has no synopsis in tree.go", pos, fsName)
+			return
+		}
+		comprobados++
+		permitidos := map[string]bool{}
+		for _, k := range []string{"*", fsName} {
+			for _, n := range flagsSinSinopsis[k] {
+				permitidos[n] = true
+			}
+		}
+		// Por variable destino: falta si no sale ninguno de sus nombres.
+		enSinopsis := func(fl string) bool {
+			re := regexp.MustCompile(`(^|[^\w-])-` + regexp.QuoteMeta(fl) + `($|[^\w-])`)
+			return permitidos[fl] || re.MatchString(syn)
+		}
+		var orden []string
+		grupos := map[string][]string{}
+		for _, fl := range a.flagsDe(fd.Body, v, map[string]bool{}) {
+			k := fl.dest
+			if k == "" {
+				k = "-" + fl.name
+			}
+			if _, ok := grupos[k]; !ok {
+				orden = append(orden, k)
+			}
+			grupos[k] = append(grupos[k], fl.name)
+		}
+		var faltan []string
+		for _, k := range orden {
+			visto := false
+			for _, fl := range grupos[k] {
+				visto = visto || enSinopsis(fl)
+			}
+			if !visto {
+				faltan = append(faltan, "-"+strings.Join(grupos[k], "/-"))
+			}
+		}
+		if len(faltan) > 0 {
+			sort.Strings(faltan)
+			t.Errorf("%s: %s defines %s but its synopsis in tree.go does not show it", pos, fsName, strings.Join(faltan, " "))
+		}
+	})
 	if comprobados < 40 {
 		t.Fatalf("only %d flag sets checked: the parser lost track of how commands define their flags", comprobados)
 	}
@@ -351,5 +379,44 @@ func TestSinopsisAlineada(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// La lista de flags de cada comando, sacada de los FlagSets del código y
+// comparada con testdata/contrato/flags.txt. Quitar un flag es incompatible
+// (docs/compatibilidad.md) y falla aquí aunque se borre también de tree.go,
+// que TestSinopsisListaCadaFlag no lo ve; uno nuevo pide -update:
+//
+//	go test ./cmd/kling -run TestContratoFlags -update
+func TestContratoFlags(t *testing.T) {
+	_, a, files := paqueteFlags(t)
+	vistas := map[string]bool{}
+	var lineas []string
+	porCadaFlagSet(files, func(_ *ast.AssignStmt, fd *ast.FuncDecl, v, fsName string) {
+		for _, p := range fsSinArbol {
+			if strings.HasPrefix(fsName, p) {
+				return
+			}
+		}
+		for _, fl := range a.flagsDe(fd.Body, v, map[string]bool{}) {
+			l := "kling " + fsName + ":  -" + fl.name
+			if !vistas[l] {
+				vistas[l] = true
+				lineas = append(lineas, l)
+			}
+		}
+	})
+	if len(lineas) < 200 {
+		t.Fatalf("only %d flags found: the parser lost track of how commands define their flags", len(lineas))
+	}
+	cab := []string{
+		"Flags de cada comando del CLI: kling <FlagSet>:  -<flag>.",
+		"Lo genera TestContratoFlags (cmd/kling/sinopsis_flags_test.go) leyendo",
+		"los FlagSets de nombre literal del código; para regenerarlo:",
+		"  go test ./cmd/kling -run TestContratoFlags -update",
+		"Quitar o cambiar una línea exige subir api.APIVersion (internal/contrato).",
+	}
+	if err := contrato.Comparar("testdata/contrato/flags.txt", api.APIVersion, cab, lineas, *actualizar); err != nil {
+		t.Fatal(err)
 	}
 }

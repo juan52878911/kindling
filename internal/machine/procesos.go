@@ -9,15 +9,26 @@ import "strings"
 // corran también en Linux: es texto, y un fallo aquí deja VMMs huérfanos
 // reteniendo RAM o, peor, mata el de una máquina viva.
 
+// argSocketVMM es el argumento con el que el daemon le da su socket a un VMM
+// (manager.go, startVMM): kling-vz, kling-hv y firecracker lo llaman igual.
+const argSocketVMM = "--api-sock"
+
 // vmmDeLinea devuelve el id de la máquina cuyo socket aparece en la línea de
-// órdenes, o "" si no es un VMM de este daemon. prefix es
+// órdenes como --api-sock, o "" si no es un VMM de este daemon. prefix es
 // "<raíz>/machines/".
+//
+// Tiene que ser el argumento --api-sock, no la ruta en cualquier sitio: un
+// curl --unix-socket .../fc.sock que sondeaba el API de una máquina (o un
+// tail, un lsof) pasaba por su VMM. Thaw lo «readoptaba» en vez de arrancar
+// uno, la máquina quedaba running con el PID del curl y fallaba en cuanto
+// este terminaba; y el vigilante lo mataba como VMM huérfano.
 func vmmDeLinea(linea, prefix string) string {
-	i := strings.Index(linea, prefix)
+	marca := argSocketVMM + " " + prefix
+	i := strings.Index(linea, marca)
 	if i < 0 {
 		return ""
 	}
-	id, _, ok := strings.Cut(linea[i+len(prefix):], "/fc.sock")
+	id, _, ok := strings.Cut(linea[i+len(marca):], "/fc.sock")
 	if !ok || id == "" || strings.ContainsAny(id, "/ ") {
 		return ""
 	}
@@ -41,7 +52,7 @@ func vmmsDeTabla(tabla map[int]string, prefix string) map[string]int {
 func vivosDeVMMEnTabla(tabla map[int]string, prefix, nombre string) int {
 	n := 0
 	for _, linea := range tabla {
-		i := strings.Index(linea, prefix)
+		i := strings.Index(linea, argSocketVMM+" "+prefix)
 		if i < 0 || vmmDeLinea(linea, prefix) == "" {
 			continue
 		}

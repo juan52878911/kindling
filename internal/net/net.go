@@ -107,15 +107,25 @@ func exec_ok(args []string) bool {
 	return exec.Command(args[0], args[1:]...).Run() == nil
 }
 
+// LargoCorto es cuántos caracteres del id nombran la red de una máquina (netns,
+// veth) y su cgroup. Dos máquinas vivas no pueden compartirlos: Setup empieza
+// por Teardown y se llevaría la red de la otra. Quien acuña los ids lo vigila.
+const LargoCorto = 8
+
+// Corto devuelve la parte del id que nombra la red y el cgroup de la máquina.
+func Corto(id string) string {
+	if len(id) > LargoCorto {
+		return id[:LargoCorto]
+	}
+	return id
+}
+
 // Plan calcula el direccionamiento de una microVM a partir de su índice.
 // Cada máquina consume una /30: 16384 máquinas en 172.30.0.0/16.
 func Plan(index int, id string) *Net {
 	third := index / 64
 	fourth := (index % 64) * 4
-	short := id
-	if len(short) > 8 {
-		short = short[:8]
-	}
+	short := Corto(id)
 	return &Net{
 		NS:     "kl-" + short,
 		HostIf: "vh-" + short,

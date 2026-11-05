@@ -97,7 +97,7 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 		sock := m.socket[id]
 		m.mu.RUnlock()
 		if sock != "" {
-			if ok, err := sondearPuertoVMM(ctx, sock, port); err == nil && ok {
+			if ok, err := sondearPuertoVMM(ctx, sock, port, true); err == nil && ok {
 				return nil
 			}
 		}
@@ -121,18 +121,31 @@ func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, p
 const intentoSondeoVZ = 150 * time.Millisecond
 
 // sondearPuertoVMM pregunta a kling-vz (sock) si algo escucha en port dentro
-// del invitado, en un intento corto (intentoSondeoVZ). Un intento agotado con
-// ctx aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
-// quien llama vuelve a preguntar.
-func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
-	ictx, cancel := context.WithTimeout(ctx, intentoSondeoVZ)
-	defer cancel()
-	open, err := fc.New(sock).KlingProbe(ictx, port)
-	if err != nil && ctx.Err() == nil && errors.Is(ictx.Err(), context.DeadlineExceeded) {
-		return false, nil
+// del invitado, en un plazo corto (intentoSondeoVZ). Un plazo agotado con ctx
+// aún vivo es "todavía no" (false, nil), no un kling-vz sin /kling/probe:
+// quien llama vuelve a preguntar. Escalonado (sondeo_escalonado.go): un
+// intento colgado no se espera entero. Con esperar, un "cerrado" se vuelve a
+// preguntar cada pasoCerradoVZ hasta el plazo: lo que quiere quien espera a
+// que el agente escuche.
+func sondearPuertoVMM(ctx context.Context, sock string, port int, esperar bool) (bool, error) {
+	paso := time.Duration(0)
+	if esperar {
+		paso = pasoCerradoVZ
 	}
-	return open, err
+	return sondearEscalonado(ctx, intentoSondeoVZ, escalonSondeoVZ, paso, func(ictx context.Context) (bool, error) {
+		return fc.New(sock).KlingProbe(ictx, port)
+	})
 }
+
+// escalonSondeoVZ es cada cuánto sale un intento nuevo mientras los
+// anteriores no contestan, y pasoCerradoVZ cuánto se espera tras un
+// "cerrado" para volver a preguntar. Como mucho intentoSondeoVZ/pasoCerradoVZ
+// peticiones por llamada, todas al socket local del VMM, y cada una le cuesta
+// al invitado un RST.
+const (
+	escalonSondeoVZ = 20 * time.Millisecond
+	pasoCerradoVZ   = 5 * time.Millisecond
+)
 
 // capacidadGrafo comprueba que el kling-vz de c sabe pedir conexiones al
 // daemon (credproxy.CapGraphLink).
@@ -432,17 +445,24 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 	return nil
 }
 
-// copiarDisco clona con clonefile de APFS (`cp -c`): la copia es instantánea
-// y no ocupa nada hasta que alguna de las dos se escribe, que es lo que en
-// Linux da --reflink o --sparse. Si el volumen no es APFS, cp cae solo a una
-// copia normal.
+// copiarDisco clona con clonefile de APFS: la copia es instantánea y no ocupa
+// nada hasta que alguna de las dos se escribe, que es lo que en Linux da
+// --reflink o --sparse. Clona con fclonefileat (clonarRuta), sin lanzar un
+// proceso por disco; si no puede (no es APFS, otro volumen, dst ya existe...)
+// hace lo de siempre, `cp -c`, que cae solo a una copia normal.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clonarRuta(src, dst) == nil {
+		return nil, nil
+	}
 	return exec.CommandContext(ctx, "cp", "-c", src, dst).CombinedOutput()
 }
 
 // clonarDisco copia un volumen para un snapshot o un restore y dice cómo. En
-// APFS, `cp -c` clona con clonefile: instantáneo y sin ocupar nada hasta que
-// las copias divergen ("clone"). Fuera de APFS cp caería sin avisar a una copia
+// APFS clona con clonefile: instantáneo y sin ocupar nada hasta que las copias
+// divergen ("clone"). Fuera de APFS `cp -c` caería sin avisar a una copia
 // completa, así que se mira antes el sistema de ficheros y, si no es APFS, se
 // pasa por antesDeCopiar como cualquier copia completa ("copy").
 func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() error) (string, error) {
@@ -452,6 +472,10 @@ func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() erro
 			return "", err
 		}
 		modo, args = "copy", []string{src, dst}
+	} else if err := ctx.Err(); err != nil {
+		return "", err
+	} else if clonarRuta(src, dst) == nil {
+		return modo, nil
 	}
 	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
 		_ = os.Remove(dst)
@@ -639,9 +663,16 @@ func (m *Manager) enterBoot(ctx context.Context) (func(), error) {
 
 // enterRestore toma un hueco en la compuerta de restauraciones (launchGate)
 // y, con el nivel de memoria bajo, también el de "de una en una".
+//
+// Con kling-hv no hay espera por nivel ni "de una en una": el freno se pensó
+// para kling-vz, que copia el mem.file entero al restaurar; kling-hv mapea la
+// memoria del volcado y la va poblando según se toca
+// (restaurarComparteMemoria), así que restaurar no dispara la presión. En un
+// Mac al 24-27 % libre un tercio de los thaw/fork de hv tardaban 0,6-1,9 s en
+// vez de 30-40 ms solo por esa espera. La admisión dura (minMemLevel) sigue.
 func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
 	release, err := m.enterLaunch(ctx)
-	if err != nil || m.launchGate == nil {
+	if err != nil || m.launchGate == nil || backendVMM == BackendHV {
 		return release, err
 	}
 	if !nivelBajoParaRestaurar(ctx) {
@@ -662,22 +693,46 @@ func (m *Manager) enterRestore(ctx context.Context) (func(), error) {
 
 // nivelBajoParaRestaurar espera hasta esperaNivelRestoreVZ a que el nivel de
 // memoria pase de nivelRestoreVZ, y dice si sigue sin pasar.
+//
+// Si espera, lo dice en el registro: en un Mac con el nivel rondando el
+// umbral, un thaw de ~30 ms tardaba 0,7-1 s y solo se veía como "wait" (o
+// "other" en `kling thaw`), sin saber de qué.
 func nivelBajoParaRestaurar(ctx context.Context) bool {
-	limite := time.Now().Add(esperaNivelRestoreVZ)
+	t0 := time.Now()
+	limite := t0.Add(esperaNivelRestoreVZ)
+	primero := -1
 	for {
 		n := nivelMemoriaVZ()
+		if primero < 0 {
+			primero = n
+		}
 		if n < 0 || n > nivelRestoreVZ {
+			avisarEsperaNivel(primero, n, time.Since(t0), false)
 			return false
 		}
-		if !time.Now().Before(limite) {
+		if !time.Now().Before(limite) || ctx.Err() != nil {
+			avisarEsperaNivel(primero, n, time.Since(t0), true)
 			return true
 		}
 		select {
 		case <-ctx.Done():
-			return true
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// avisarEsperaNivel apunta una espera de nivelBajoParaRestaurar (nada si no
+// esperó). sigueBajo: se restaura igual, pero de una en una.
+func avisarEsperaNivel(antes, despues int, d time.Duration, sigueBajo bool) {
+	if d < 50*time.Millisecond {
+		return
+	}
+	que := "it rose to " + strconv.Itoa(despues) + "%"
+	if sigueBajo {
+		que = "it stayed at " + strconv.Itoa(despues) + "%, so restores go one at a time"
+	}
+	log.Printf("restore: waited %d ms for the host's free memory (kern.memorystatus_level %d%%, needs more than %d%%): %s",
+		d.Milliseconds(), antes, nivelRestoreVZ, que)
 }
 
 // plazoApretonPausa acota el apretón antes de pausar: el invitado tiene que
@@ -714,6 +769,16 @@ func (m *Manager) apretarAntesDePausar(ctx context.Context, cur *api.Machine) in
 // la memoria por máquina que dan kling top y las métricas se quedaba corta.
 func memoriaVMM(pid int, sock string) int64 {
 	if sock == "" {
+		return 0
+	}
+	if backendVMM == BackendHV {
+		// Con kling-hv la VM vive en su propio proceso y GET /kling/stats
+		// devuelve su phys_footprint, lo mismo que da proc_pid_rusage desde
+		// aquí: se ahorra un viaje HTTP por máquina en cada kling top y en
+		// cada lectura de métricas. Redondeo hacia arriba, como el ayudante.
+		if b := huellaBytes(pid); b > 0 {
+			return (b+(1<<20-1))>>20 + (huellaHijosBytes(pid)+(1<<19))>>20
+		}
 		return 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -766,6 +831,33 @@ func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
 //
 // Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.
+// entornoProceso es el entorno con el que arranca el VMM: lo que necesita
+// para correr y lo que lo configura, y nada más. El daemon corre bajo el
+// agente de launchd con el entorno de la sesión del usuario, donde viven
+// cosas como KLING_TOKEN o claves de otras herramientas; el VMM es el
+// proceso que habla con el invitado y no tiene por qué llevarlas.
+func entornoProceso(extra []string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if entornoVMMPermitido(k) {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
+}
+
+func entornoVMMPermitido(k string) bool {
+	switch k {
+	case "PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ",
+		"GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG", "GOTRACEBACK":
+		return true
+	}
+	// KLING_FAKE_VZ_*: el VMM de mentira de los tests (vz_test.go) lee ahí
+	// qué simular; nunca lleva secretos.
+	return strings.HasPrefix(k, "KLING_HV_") || strings.HasPrefix(k, "KLING_VZ_") || strings.HasPrefix(k, "KLING_FAKE_VZ_")
+}
+
 func (m *Manager) entornoVMM() []string {
 	env := []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
 	// El registro de auditoría de su proxy: tamaño y generaciones.

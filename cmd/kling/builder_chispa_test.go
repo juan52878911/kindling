@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/train"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/train"
 )
 
 // tinyChispa entrena un modelo mínimo y devuelve sus bytes .chispa, para probar el

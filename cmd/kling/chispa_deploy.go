@@ -16,10 +16,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/units"
 )
 
@@ -128,7 +128,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 		spec.SlotsB64 = base64.StdEncoding.EncodeToString(o.Slots)
 		sum := sha256.Sum256(o.Slots)
 		// Los huecos también van al registro: el gateway valida contra ellos
-		// los que mande la réplica (pkg/aigw/chispaguest.go).
+		// los que mande la réplica (internal/aigw/chispaguest.go).
 		rec.Slots, rec.SlotsSha256 = sm.SlotNames(), hex.EncodeToString(sum[:])
 	}
 	if o.WarmText == "" {
@@ -194,7 +194,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	// El gateway no tiene el .chispa de origen a mano (puede vivir en otra
 	// máquina, o el daemon estar al otro lado de un SSH) y, sobre todo, no
 	// puede fiarse de las etiquetas que le mande el propio invitado
-	// (pkg/aigw/chispaguest.go): se graban aquí, en el dorado, como la fuente de
+	// (internal/aigw/chispaguest.go): se graban aquí, en el dorado, como la fuente de
 	// verdad que classifyGuest valida contra la respuesta de la réplica.
 	if _, err := c.SetAnnotation(ctx, name, aigw.ChispaDeployAnnotation, rec); err != nil {
 		return fmt.Errorf("recording %s on the snapshot (needed by the gateway to trust replica answers): %w", aigw.ChispaDeployAnnotation, err)

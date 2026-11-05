@@ -14,6 +14,11 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
+// vmmVivoDe es el VMM vivo de id según liveVMs (0 si no hay). En Linux se
+// escanea /proc entero como siempre: con el jailer el socket está en el
+// chroot y las pistas no ahorran nada que importe. pistas son para macOS.
+func (m *Manager) vmmVivoDe(id string, _ ...int) int { return m.liveVMs()[id] }
+
 // liveVMs escanea /proc y devuelve qué microVM posee cada firecracker vivo.
 //
 // Es adopt() del revés: en vez de "¿sigue vivo el PID que apunté?", pregunta
@@ -38,8 +43,10 @@ func (m *Manager) liveVMs() map[string]int {
 		}
 		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
 		for i, arg := range args {
-			// Camino normal: el socket lleva el prefijo de machines/.
-			if rest, ok := strings.CutPrefix(arg, prefix); ok {
+			// Camino normal: el socket lleva el prefijo de machines/, y es el
+			// argumento de --api-sock (ver vmmDeLinea: un curl --unix-socket
+			// al mismo socket no es un VMM).
+			if rest, ok := strings.CutPrefix(arg, prefix); ok && i > 0 && args[i-1] == argSocketVMM {
 				if id, ok := strings.CutSuffix(rest, "/fc.sock"); ok && id != "" && !strings.Contains(id, "/") {
 					out[id] = pid
 				}
@@ -85,9 +92,15 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 			return sock, true
 		}
 	}
-	line := strings.ReplaceAll(string(cmdline), "\x00", " ")
 	sock := m.dir(mc.ID) + "/fc.sock"
-	if !strings.Contains(line, sock) {
+	suyo := false
+	for i := 1; i < len(args); i++ {
+		if args[i] == sock && args[i-1] == argSocketVMM {
+			suyo = true
+			break
+		}
+	}
+	if !suyo {
 		return "", false
 	}
 	if _, err := os.Stat(sock); err != nil {

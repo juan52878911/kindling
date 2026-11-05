@@ -30,9 +30,9 @@ import (
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/examples/domotica/room"
+	"github.com/juan52878911/kindling/internal/chispa"
+	"github.com/juan52878911/kindling/internal/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )

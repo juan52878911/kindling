@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/digest"
+	"github.com/juan52878911/kindling/internal/digest"
 )
 
 // imagenFalsa es un directorio que hace de imagen montada, y otro FUERA de

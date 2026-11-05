@@ -59,6 +59,147 @@ type Resolver struct {
 	topes    sync.Once
 	enVuelo  chan struct{}
 	limitado *cubo
+
+	// Caché de respuestas positivas del upstream, por nombre y tipo, el
+	// tiempo que diga el menor TTL de la respuesta (acotado por MaxCacheTTL).
+	// Es de este proceso, o sea de esta microVM: nadie la siembra desde otra.
+	// Lo que ahorra es el viaje al upstream (~100 ms a 1.1.1.1 en una red
+	// corriente) en cada nombre repetido, que es casi todos: un cliente HTTP
+	// resuelve el mismo host en cada conexión.
+	cacheMu sync.Mutex
+	cache   map[string]entradaDNS
+	ahora   func() time.Time // nil = time.Now (las pruebas lo cambian)
+}
+
+// Topes de la caché de respuestas.
+const (
+	MaxCacheTTL     = 5 * time.Minute
+	MaxCacheEntries = 512
+	// NegCacheTTL: una respuesta NOERROR sin registros (AAAA de un nombre
+	// solo IPv4, lo más común) se recuerda este tiempo.
+	NegCacheTTL = 30 * time.Second
+)
+
+type entradaDNS struct {
+	resp  []byte // sin el id (los dos primeros bytes van a cero)
+	vence time.Time
+}
+
+func (r *Resolver) reloj() time.Time {
+	if r.ahora != nil {
+		return r.ahora()
+	}
+	return time.Now()
+}
+
+func claveDNS(name string, qtype uint16) string {
+	return strings.TrimSuffix(strings.ToLower(name), ".") + "/" + string(rune(qtype>>8)) + string(rune(qtype&0xff))
+}
+
+// deCache devuelve la respuesta guardada para la pregunta, con el id de
+// query, o nil.
+func (r *Resolver) deCache(query []byte, name string, qtype uint16) []byte {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	e, ok := r.cache[claveDNS(name, qtype)]
+	if !ok {
+		return nil
+	}
+	if !r.reloj().Before(e.vence) {
+		delete(r.cache, claveDNS(name, qtype))
+		return nil
+	}
+	out := make([]byte, len(e.resp))
+	copy(out, e.resp)
+	copy(out[0:2], query[0:2])
+	return out
+}
+
+// aCache guarda resp si es una respuesta que vale la pena recordar: NOERROR,
+// no truncada, y con TTL > 0 en todos sus registros (uno a 0 pide no
+// recordar nada). Vacía (sin registros) se guarda NegCacheTTL.
+func (r *Resolver) aCache(name string, qtype uint16, resp []byte) {
+	if len(resp) < 12 || resp[2]&0x02 != 0 || resp[3]&0x0F != 0 {
+		return
+	}
+	ttl, n, ok := ttlMinimo(resp)
+	if !ok {
+		return
+	}
+	d := NegCacheTTL
+	if n > 0 {
+		if ttl == 0 {
+			return
+		}
+		d = time.Duration(ttl) * time.Second
+	}
+	if d > MaxCacheTTL {
+		d = MaxCacheTTL
+	}
+	guardado := make([]byte, len(resp))
+	copy(guardado, resp)
+	guardado[0], guardado[1] = 0, 0
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if r.cache == nil {
+		r.cache = make(map[string]entradaDNS)
+	}
+	if len(r.cache) >= MaxCacheEntries {
+		ahora := r.reloj()
+		for k, e := range r.cache {
+			if !ahora.Before(e.vence) {
+				delete(r.cache, k)
+			}
+		}
+		for k := range r.cache { // sigue llena: fuera una cualquiera
+			if len(r.cache) < MaxCacheEntries {
+				break
+			}
+			delete(r.cache, k)
+		}
+	}
+	r.cache[claveDNS(name, qtype)] = entradaDNS{resp: guardado, vence: r.reloj().Add(d)}
+}
+
+// ttlMinimo recorre las secciones de respuesta y autoridad y devuelve el
+// menor TTL y cuántos registros hay en la de respuesta; ok=false si el
+// mensaje está mal formado.
+func ttlMinimo(msg []byte) (ttl uint32, respuestas int, ok bool) {
+	if len(msg) < 12 {
+		return 0, 0, false
+	}
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	an := int(binary.BigEndian.Uint16(msg[6:8]))
+	ns := int(binary.BigEndian.Uint16(msg[8:10]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		_, next, ok := readName(msg, off)
+		if !ok || next+4 > len(msg) {
+			return 0, 0, false
+		}
+		off = next + 4
+	}
+	ttl = ^uint32(0)
+	for i := 0; i < an+ns; i++ {
+		_, next, ok := readName(msg, off)
+		if !ok || next+10 > len(msg) {
+			return 0, 0, false
+		}
+		off = next
+		t := binary.BigEndian.Uint32(msg[off+4 : off+8])
+		rdlen := int(binary.BigEndian.Uint16(msg[off+8 : off+10]))
+		off += 10 + rdlen
+		if off > len(msg) {
+			return 0, 0, false
+		}
+		if t < ttl {
+			ttl = t
+		}
+	}
+	if an+ns == 0 {
+		ttl = 0
+	}
+	return ttl, an, true
 }
 
 // reenviar pasa la consulta al upstream si caben en los topes (MaxInFlight,
@@ -182,9 +323,13 @@ func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byt
 		// intento, y no sale nada del host.
 		return RespondError(query, 5)
 	}
-	resp, ok := r.reenviar(ctx, query, viaTCP)
-	if !ok {
-		return RespondError(query, 2) // SERVFAIL
+	resp := r.deCache(query, name, qtype)
+	if resp == nil {
+		var ok bool
+		if resp, ok = r.reenviar(ctx, query, viaTCP); !ok {
+			return RespondError(query, 2) // SERVFAIL
+		}
+		r.aCache(name, qtype, resp)
 	}
 	if r.Policy.Mode() == Allowlist {
 		// Sembrar ANTES de responder: la IP que el invitado usará ya está

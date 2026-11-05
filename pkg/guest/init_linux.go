@@ -3,6 +3,7 @@
 package guest
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"syscall"
@@ -12,6 +13,8 @@ import (
 type linuxInit struct{}
 
 func osInitSys() (initSys, error) { return linuxInit{}, nil }
+
+func (linuxInit) Restart() error { return syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART) }
 
 func (linuxInit) Mount(src, target, fstype string, flags uintptr, data string) error {
 	return syscall.Mount(src, target, fstype, flags, data)
@@ -45,6 +48,15 @@ func (linuxInit) AppendFile(p string, b []byte) error {
 		err = cerr
 	}
 	return err
+}
+
+func (linuxInit) ReadHead(p string, n int) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(n)))
 }
 
 func (linuxInit) Exec(path string, argv, env []string) error { return syscall.Exec(path, argv, env) }

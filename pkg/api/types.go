@@ -838,7 +838,7 @@ type Snapshot struct {
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
 	// RootfsDigest sustituye a RootfsSHA256 desde meta.json v2: el overlay en
-	// árbol de sha256 (pkg/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
+	// árbol de sha256 (internal/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
 	// sin leer los huecos. Un dorado lleva uno de los dos.
 	RootfsDigest string `json:"rootfs_digest,omitempty"`
 
@@ -1084,6 +1084,26 @@ type Info struct {
 	// fuera de rango deja el defecto). Solo a un admin o sin política; nil =
 	// daemon anterior.
 	Tuning map[string]string `json:"tuning,omitempty"`
+	// KernelSHA256 es el sha256 del vmlinux instalado ahora (el que usaría el
+	// próximo arranque en frío). Vacío = daemon anterior, o sin kernel.
+	KernelSHA256 string `json:"kernel_sha256,omitempty"`
+	// KernelMismatch son los dorados y las máquinas congeladas grabados con
+	// otro kernel que el instalado (K2). Restaurarlos y descongelarlas sigue
+	// funcionando (el kernel del invitado va en su memoria); lo que usaría el
+	// nuevo es su siguiente arranque en frío. Solo a un admin o sin política,
+	// como Stuck. Vacío = ninguno, o daemon anterior.
+	KernelMismatch []KernelMismatch `json:"kernel_mismatch,omitempty"`
+}
+
+// KernelMismatch es un dorado o una máquina congelada grabados con un kernel
+// distinto del instalado.
+type KernelMismatch struct {
+	// Kind es "snapshot" (un dorado, meta.json) o "machine" (una congelada,
+	// el sello volcado.ok).
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	// KernelSHA256 es el kernel con el que se grabó.
+	KernelSHA256 string `json:"kernel_sha256"`
 }
 
 // AuthzInfo es el estado de la autorización del daemon visto por quien llama.

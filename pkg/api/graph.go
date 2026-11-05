@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/lazyre"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Etiquetas que el daemon pone a cada máquina de un grafo. Nadie más puede

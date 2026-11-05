@@ -142,6 +142,19 @@ sudo OLD_DIR=<kling de la anterior> NEW_DIR=<binarios de HEAD> scripts/94-e2e-up
 #     la anterior y de HEAD, sellados, y las imágenes de un daemon Linux arm64
 OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmlinux, min.ext4…> scripts/95-e2e-upgrade-mac.sh
 
+# 3c. kling-hv es estable desde 1.0 con esta condición: los dos e2e del Mac con
+#     VMM=hv en un Apple Silicon, sobre el commit que se va a etiquetar. Sin el
+#     runner de e2e-mac.yml, a mano, y release.sh lo exige con KLING_E2E_HV.
+#     Un solo comando en un Mac pelado (sin Linux ni Lima): compila todo de
+#     HEAD, clona vmlinux y min.ext4 del kindling instalado (o los baja de la
+#     última release), construye la imagen de 92 con el constructor debian
+#     (e2e-tools, en caché en ~/.cache/kling-e2e), baja la release anterior
+#     para 95 y, si pasan los dos, imprime la línea de export. 95 necesita
+#     que tu dev.kindling.daemon esté parado: si no, corre 92, dice cómo
+#     pararlo y se puede seguir con E2E=95 (la marca de 92 se guarda por commit)
+scripts/e2e-mac-release.sh
+export KLING_E2E_HV=<lo que imprime: el sha de 12 de HEAD>
+
 # 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```

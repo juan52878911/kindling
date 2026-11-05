@@ -35,10 +35,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -65,7 +65,7 @@ const (
 )
 
 // settingPattern: una variable propia de Postgres lleva un punto (app.tenant_id).
-var settingPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,30}\.[a-z_][a-z0-9_]{0,30}$`)
+var settingPattern = lazyre.New(`^[a-z_][a-z0-9_]{0,30}\.[a-z_][a-z0-9_]{0,30}$`)
 
 type tcOpts struct {
 	role, column, setting string

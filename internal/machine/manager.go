@@ -21,12 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
@@ -274,6 +274,13 @@ type Manager struct {
 	// resyncSinAgente: qué restauraciones no tienen agente al que resincronizar
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
+
+	// vmmDeCongelado: id -> PID del VMM que un Freeze terminado mató sin verlo
+	// morir (siguió vivo tras el SIGKILL y plazoMuerte). Ese proceso es de un
+	// volcado ya sellado: Thaw no lo readopta, lo mata (ver thawVMMViejo).
+	// Se guarda también en el directorio de la máquina (ficheroVMMCongelado):
+	// un reinicio del daemon lo readoptaba como running.
+	vmmDeCongelado sync.Map
 
 	// bat es el modo batería (bateria.go); reloj, la vigilancia del sueño del
 	// host (despertar_host.go).
@@ -690,7 +697,7 @@ func (m *Manager) load() {
 }
 
 // versionEstado es la versión del formato de state.json que escribe este
-// binario (ver pkg/esquema). Súbela cuando un kling anterior fuera a leer mal
+// binario (ver internal/esquema). Súbela cuando un kling anterior fuera a leer mal
 // lo que se escribe, y añade el caso a decodificarEstado.
 //
 //	0: un array JSON de máquinas, sin campo (hasta v0.17).
@@ -1316,6 +1323,50 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// nuevoIDMaquina acuña el id de una máquina nueva. La red y el cgroup se
+// nombran con su prefijo (knet.Corto), no con el id entero, así que un prefijo
+// repetido haría que Setup, que empieza por Teardown, tirase netns, resolver y
+// credproxy de la máquina viva que ya lo lleva. Se repite el sorteo hasta dar
+// con uno libre, mirando byID y los acuñados que aún no han llegado a él.
+func (m *Manager) nuevoIDMaquina() string { return m.idLibre(newID) }
+
+// acuñados guarda los prefijos recién dados, hasta que la máquina llega a byID o
+// pasa plazoAcuñado: cubre la ventana entre acuñar y publicar, en la que dos
+// arranques a la vez no se verían en byID.
+var acuñados = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: make(map[string]time.Time)}
+
+const plazoAcuñado = 10 * time.Minute
+
+func (m *Manager) idLibre(generar func() string) string {
+	m.mu.RLock()
+	vivos := make(map[string]bool, len(m.byID))
+	for id := range m.byID {
+		vivos[knet.Corto(id)] = true
+	}
+	m.mu.RUnlock()
+
+	acuñados.Lock()
+	defer acuñados.Unlock()
+	ahora := time.Now()
+	for p, t := range acuñados.m {
+		if vivos[p] || ahora.Sub(t) > plazoAcuñado {
+			delete(acuñados.m, p)
+		}
+	}
+	for {
+		id := generar()
+		p := knet.Corto(id)
+		if _, ocupado := acuñados.m[p]; ocupado || vivos[p] {
+			continue
+		}
+		acuñados.m[p] = ahora
+		return id
+	}
+}
+
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	mc, err := m.run(ctx, req)
@@ -1456,7 +1507,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
 	// reserva tiene que existir antes de que empiece nada lento.
-	id := newID()
+	id := m.nuevoIDMaquina()
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}
@@ -1743,7 +1794,7 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Y qué agente lleva (agente.go). Un arranque en frío puede estrenar
 	// imagen reconstruida: lo que se supiera de antes no vale.
 	m.olvidarAgente(id)
-	m.conocerAgente(id)
+	m.conocerAgenteY(id, func(ag *api.GuestAgent) { m.resyncArranque(id, ag) })
 	if len(env) > 0 || comando != nil {
 		m.retirarEntornoMMDS(id, mc.Name, env)
 	}
@@ -1910,7 +1961,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	}
 
 	c := fc.New(sock)
-	if err := waitSocket(ctx, c); err != nil {
+	if err := m.waitSocket(ctx, c, id, pid); err != nil {
 		return pid, err
 	}
 	// El entorno y el comando de la máquina van por MMDS, que cuelga de la red.
@@ -2073,8 +2124,9 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 		logf.Close()
 		return 0, false, fmt.Errorf("launching firecracker: %w", err)
 	}
-	// Sin Wait() el proceso quedaría zombi al terminar.
-	go func() { _ = cmd.Wait(); logf.Close() }()
+	// Sin Wait() el proceso quedaría zombi al terminar; y si muere solo, la
+	// máquina deja de figurar running en el acto (esperarVMM).
+	go m.esperarVMM(id, cmd, logf)
 	return cmd.Process.Pid, enCg, nil
 }
 
@@ -2085,8 +2137,8 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File, entorno ...string) (*exec.Cmd, bool, error) {
 	nuevo := func() *exec.Cmd {
 		cmd := exec.Command(argv[0], argv[1:]...)
-		if len(entorno) > 0 {
-			cmd.Env = append(os.Environ(), entorno...)
+		if env := entornoProceso(entorno); env != nil {
+			cmd.Env = env
 		}
 		cmd.Stdout, cmd.Stderr = logf, logf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -2127,12 +2179,24 @@ const precargaMaxBytes = 512 << 20
 // milisegundo los primeros 200 ms (un Ping a un socket Unix cuesta decenas de
 // µs) y cada 10 ms después. Con un paso fijo de 10 ms cada thaw pagaba un paso
 // entero de espera (10,7 ms medidos) para un socket listo en ~1 ms.
-func waitSocket(ctx context.Context, c *fc.Client) error {
+//
+// Si el proceso pid (el VMM, o el jailer que se hace él) ya no existe, no se
+// espera más: un VMM que muere al lanzarse (un ejecutable que no está, una
+// opción que no entiende) costaba los 5 s enteros y un error que no decía
+// por qué. esperarVMM lo recoge en cuanto muere, así que no queda zombi.
+func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid int) error {
 	start := time.Now()
 	deadline := start.Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if c.Ping(ctx) == nil {
 			return nil
+		}
+		if pid > 0 && syscall.Kill(pid, 0) == syscall.ESRCH {
+			msg := "launching the VMM: it exited before its API socket answered"
+			if l := m.ultimaLineaConsola(id); l != "" {
+				msg += "; last line of its console: " + l
+			}
+			return errors.New(msg)
 		}
 		paso := time.Millisecond
 		if time.Since(start) > 200*time.Millisecond {
@@ -2467,7 +2531,14 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	// killPaused y no kill: el invitado lleva pausado desde antes del snapshot y
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
-	m.killPaused(mc.ID)
+	//
+	// killPaused espera a que el proceso desaparezca (con plazo). Si sigue
+	// vivo, el volcado vale igual —la VM llevaba pausada desde antes—, pero
+	// ese VMM es de este freeze: se apunta para que Thaw no lo tome por uno
+	// suyo y lo readopte (vmmDeCongelado).
+	if pidViejo := mc.PID; !m.killPaused(mc.ID) && pidViejo > 0 {
+		m.apuntarVMMDeCongelado(mc.ID, pidViejo)
+	}
 	// Si despertó de un diferencial, el VMM mapeaba mem.full (base + diff):
 	// muerto el VMM no lo lee nadie. Un freeze diferencial ya lo retiró al
 	// fundir; uno completo (tras un commit, con el diff apagado o sin base) lo
@@ -2533,12 +2604,28 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		base = mc.DiffBase
 	}
 	// A disco antes del sello, con el VMM ya muerto: no alarga la pausa
-	// (elapsed se midió arriba). Sin poder sincronizar no se sella: el volcado
-	// vale mientras viva el daemon, pero tras un corte no se daría por bueno.
-	if err := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID)); err != nil {
-		log.Printf("warning: %s: not sealing the frozen state: %v", mc.Name, err)
-	} else if err := sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); err != nil {
-		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
+	// (elapsed se midió arriba). Sin poder sincronizar no se sella, y un
+	// volcado sin sellar NO vale: volcado.en-curso sigue ahí y volcadoValido
+	// lo lee como un freeze interrumpido, así que el Thaw pediría `kling rm`.
+	// Y el VMM ya está muerto: no hay a qué volver. La máquina queda failed,
+	// con el error y su disco (se puede arrancar de nuevo), y sin el volcado
+	// que nadie va a cargar.
+	serr := sincronizarVolcado(snapPath, memPath, m.overlayParaLeer(mc.ID))
+	if serr != nil {
+		serr = fmt.Errorf("syncing the frozen state to disk: %w", serr)
+	} else if serr = sellarVolcado(dir, kernelSHA, m.vmmDe(mc), base, sinAgente); serr != nil {
+		serr = fmt.Errorf("sealing the frozen state: %w", serr)
+	}
+	if serr != nil {
+		// Como tras un diff fallido: el acumulado y su base tampoco valen ya.
+		m.borrarVolcado(mc.ID)
+		m.borrarAcumuladoDiff(mc.ID, dir)
+		m.olvidarDiffBase(mc.ID)
+		m.mu.Lock()
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		m.fail(mc, serr)
+		return nil, serr
 	}
 
 	m.mu.Lock()
@@ -2767,16 +2854,33 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 // waitBalloon espera a que el globo alcance ~el objetivo. El inflado lo hace el
 // driver del invitado a su ritmo; sin esta espera mediríamos el RSS antes de que
 // soltara nada. Plazo corto: si el invitado no coopera, no bloqueamos.
+//
+// Se pregunta a los 10 ms y se dobla hasta pasoGloboMax: con 100 ms fijos, un
+// squeeze de punta a punta tardaba ~120 ms casi todos de esperar a la
+// siguiente pregunta, y el globo suele llegar en decenas de ms. Preguntar es
+// una petición al socket local del VMM.
 func waitBalloon(ctx context.Context, c *fc.Client, targetMiB int) {
 	deadline := time.Now().Add(3 * time.Second)
+	paso := pasoGloboMin
 	for time.Now().Before(deadline) {
 		s, err := c.BalloonStats(ctx)
 		if err == nil && s.ActualMiB >= targetMiB-16 {
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(paso):
+		}
+		paso = min(2*paso, pasoGloboMax)
 	}
 }
+
+// Ritmo de waitBalloon.
+const (
+	pasoGloboMin = 10 * time.Millisecond
+	pasoGloboMax = 40 * time.Millisecond
+)
 
 // procRSSMiB lee el RSS del proceso (VmRSS de /proc/<pid>/status) en MiB. Es la
 // cifra del host que cae cuando el globo devuelve páginas. Devuelve 0 si no se
@@ -3080,8 +3184,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if !ok {
 		return nil, noExiste(ref)
 	}
+	// Running con su VMM vivo; si murió sin que nadie lo viera, queda failed
+	// y sigue abajo como tal (ver comprobarVMMLocked).
 	if cur.State == api.StateRunning {
-		return cur, nil
+		if !m.comprobarVMMLocked(cur.ID, "") {
+			return cur, nil
+		}
+		if cur, ok = m.Get(mc.ID); !ok {
+			return nil, noExiste(ref)
+		}
 	}
 	// Pausada: solo reanudar (ver pausa.go).
 	if cur.State == api.StatePaused {
@@ -3108,8 +3219,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return out, nil
 	}
 	mc = cur
-	if mc.State != api.StateWarm {
-		return nil, estadoInvalido("only a warm or paused machine can be thawed (it is %s)", mc.State)
+	// Una failed con su volcado entero se descongela de él (ver thawFallida).
+	if mc.State == api.StateFailed {
+		if err := m.thawFallida(mc); err != nil {
+			return nil, err
+		}
+	} else if mc.State != api.StateWarm {
+		return nil, estadoInvalido("only a warm, paused or failed machine can be thawed (it is %s)", mc.State)
 	}
 	// Su disco vive en el almacén y no queda sitio: se dice ahora, antes de
 	// que el invitado lo descubra con un EIO al escribir.
@@ -3129,10 +3245,26 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// adelante arrancaría un SEGUNDO firecracker sobre el mismo overlay.ext4:
 	// dos VMMs escribiendo el mismo sistema de ficheros es corrupción, y del
 	// tipo que no se nota hasta mucho después.
-	live := m.liveVMs()
+	//
+	// Solo hace falta el de esta máquina (vmmVivoDe): en macOS mira primero
+	// los PID que ya se conocen, en vez de la tabla de procesos entera.
+	var pistas []int
+	if v, ok := m.vmmDeCongelado.Load(mc.ID); ok {
+		pistas = append(pistas, v.(int))
+	}
+	vivo := m.vmmVivoDe(mc.ID, append(pistas, mc.PID)...)
 	crono.marca(&crono.p.CheckMS)
-	if live[mc.ID] > 0 {
-		pid := live[mc.ID]
+	if vivo > 0 && m.esVMMDeCongelado(mc.ID, vivo) {
+		if err := m.thawVMMViejo(mc, vivo); err != nil {
+			return nil, err
+		}
+		vivo = 0
+	} else if _, marcado := m.vmmDeCongelado.Load(mc.ID); marcado && vivo == 0 {
+		// El VMM que dejó vivo su freeze ya se fue solo: la marca sobra.
+		m.olvidarVMMDeCongelado(mc.ID)
+	}
+	if vivo > 0 {
+		pid := vivo
 		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
 			mc.Name, mc.ID[:8], pid)
 		// Con su socket real: si corre en jail, el del chroot (ver socketDe).
@@ -3166,6 +3298,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		cur.CPUPct = techo
 		m.socket[mc.ID] = sock
 		m.persist()
+		// Como en reconcile: si no es hijo de este daemon, nadie hace
+		// cmd.Wait por él, y su muerte solo la vería el vigilante a la vuelta
+		// siguiente (10 s). Si lo es, esperarVMM ya lo vigila y el segundo
+		// aviso no marca nada (comprobarVMMLocked lo ve ya failed).
+		m.vigilarAdoptado(mc.ID, pid)
 		out := *cur
 		m.mu.Unlock()
 		m.startShares(mc.ID)
@@ -3186,17 +3323,21 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}
+	// El sello, leído una vez para todo el thaw (VMM, arquitectura, kernel,
+	// base del diferencial, sin agente): antes se leía y se parseaba en cada
+	// pregunta. Con el cerrojo de la máquina tomado nadie lo reescribe.
+	sl := leerSello(dir)
 	// VMM: congelada con uno que el de ahora no sabe cargar (otro VMM u otra
 	// MAJOR.MINOR de Firecracker, ver causaObsoleto). Se dice aquí, antes de
 	// lanzar nada: el error crudo del VMM al cargar no señala la causa.
-	if causa := m.causaObsoletoEn(vmmDelVolcado(dir), leerSello(dir).Arch, dir); causa != "" {
+	if causa := m.causaObsoletoEn(sl.VMM, sl.Arch, dir); causa != "" {
 		return nil, fmt.Errorf("machine %q can't be thawed: it was frozen %s, and a memory dump "+
 			"can't be loaded by another VMM version. Go back to that VMM to thaw it, or remove it "+
 			"(kling rm %s) and start it again", mc.Name, strings.Replace(causa, "made with", "with", 1), mc.Name)
 	}
 	// KERNEL (K2), como runFrom con los dorados: solo se avisa, porque
 	// descongelar no usa vmlinux (ver avisoKernel).
-	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
+	if aviso := m.avisoKernel(sl.KernelSHA256, fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
 		log.Print(aviso)
 	}
 	// Admisión de memoria, como Run y runFrom: descongelar devuelve al host
@@ -3229,7 +3370,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	defer releaseMem()
 	// Congelada en diferencial (diff_volcado.go): el VMM carga de un solo
 	// fichero, base + diff, que se construye aquí y vive mientras corra.
-	base := leerSello(dir).DiffBase
+	base := sl.DiffBase
 	if base != "" {
 		if err := m.baseDiffValida(mc, base); err != nil {
 			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
@@ -3356,7 +3497,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SocketMS)
@@ -3384,7 +3525,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
-		if err := waitSocket(ctx, c); err != nil {
+		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SocketMS)
@@ -3411,14 +3552,26 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
+	crono.marca(&crono.p.ForwardsMS)
 	// Sus credenciales (credenciales.go): el proxy y el resolver se rehicieron
 	// con la red si esta se había desmontado, y el VMM es nuevo, así que los
 	// marcadores vuelven a MMDS. Un fallo no tumba el thaw: la máquina sirve y
 	// el dominio con credencial falla cerrado, y queda dicho en el log.
-	if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
-		log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
-	}
-	crono.marca(&crono.p.ForwardsMS)
+	//
+	// A la vez que el resync de abajo: no dependen la una del otro. La
+	// entrega habla con el VMM (MMDS, c) y con el proxy del host; el resync,
+	// con el agente del invitado (reloj, entropía, generación), que no lee
+	// MMDS ni las credenciales. Lo que sí las necesita, los ganchos tras
+	// restaurar (POST /hooks), se lanza después, con las dos terminadas. Y la
+	// máquina no se da por running hasta que acaban las dos. Escribe en mc
+	// (CredentialAnyDatabase), que nadie más toca hasta esperarla.
+	credsHechas := make(chan struct{})
+	go func() {
+		defer close(credsHechas)
+		if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
+			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
+		}
+	}()
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
@@ -3427,7 +3580,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		m.pruebasAntesDeResync()
 	}
 	_, sinAgenteMem := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID))
-	if !sinAgenteMem && !leerSello(m.dir(mc.ID)).SinAgente {
+	if !sinAgenteMem && !sl.SinAgente {
 		// Sin el ctx de la petición (B12): con la memoria ya cargada, el
 		// thaw sigue hasta el final aunque quien lo pidió se vaya, y un ctx
 		// cancelado hacía que resyncGuest volviera al instante: la máquina
@@ -3435,7 +3588,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// propio resync lleva su plazo (resyncPlazo).
 		resync = m.resyncGuest(context.WithoutCancel(ctx), mc.ID, "", api.ResyncThaw)
 	}
-	crono.marca(&crono.p.ResyncMS)
+	<-credsHechas
+	crono.marca(&crono.p.ResyncMS) // con la entrega de credenciales, que va a la vez
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -3470,6 +3624,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.State = api.StateRunning
 	cur.StartedAt = &now
 	cur.FrozenAt = nil
+	cur.FailedAt, cur.LastErr = nil, "" // si venía de failed
 	cur.VMM = m.origenActual().vmm
 	cur.Hold = ""
 	cur.ThawMS = elapsed
@@ -3564,10 +3719,15 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	// Lo que vio Get antes de esperar el cerrojo puede no valer ya: si la
 	// máquina estaba arrancando, su NetIndex era aún el de antes de montar la
-	// red, y desmontar con él dejaba la red de verdad montada.
-	if cur, ok := m.get(mc.ID); ok {
-		mc = cur
+	// red, y desmontar con él dejaba la red de verdad montada. Y si ya no
+	// está (la borraron mientras esperábamos), no hay nada que parar: seguir
+	// con la copia de antes desmontaba su red y borraba su volcado otra vez,
+	// como hace Freeze.
+	cur, ok := m.get(mc.ID)
+	if !ok {
+		return nil, noExiste(ref)
 	}
+	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.killConservandoDisco(mc.ID)
 	// El overlay se conserva para kling start: si iba sin sincronizar, se
@@ -3709,7 +3869,83 @@ func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true
 // el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
 // morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
 // pausar, que es el único momento en que el invitado podía responder.
-func (m *Manager) killPaused(id string) { m.killMachine(id, false, false) }
+// Dice, como kill, si el VMM ya no existe.
+func (m *Manager) killPaused(id string) bool { return m.killMachine(id, false, false) }
+
+// esVMMDeCongelado dice si pid es el VMM que mató el último Freeze de id sin
+// verlo morir (vmmDeCongelado). Uno distinto (o ninguno apuntado) olvida la
+// marca: ese proceso ya no está.
+func (m *Manager) esVMMDeCongelado(id string, pid int) bool {
+	v, ok := m.vmmDeCongelado.Load(id)
+	if !ok {
+		return false
+	}
+	if v.(int) != pid {
+		m.olvidarVMMDeCongelado(id)
+		return false
+	}
+	return true
+}
+
+// ficheroVMMCongelado guarda, en el directorio de la máquina, el PID de
+// vmmDeCongelado. La marca era solo de memoria: si el daemon se reiniciaba
+// con ese VMM aún vivo, reconcile lo readoptaba como running, la warm dejaba
+// de serlo y, al morir el proceso, quedaba failed (ver vmmCongeladoEnDisco).
+const ficheroVMMCongelado = "vmm-congelado.pid"
+
+// apuntarVMMDeCongelado marca pid como el VMM que el Freeze de id dejó vivo,
+// en memoria y en disco. Si no se puede escribir se avisa: la marca de
+// memoria vale igual mientras viva este daemon.
+func (m *Manager) apuntarVMMDeCongelado(id string, pid int) {
+	m.vmmDeCongelado.Store(id, pid)
+	f := filepath.Join(m.dir(id), ficheroVMMCongelado)
+	if err := os.WriteFile(f, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		log.Printf("warning: %s: couldn't save the pid of the VMM its freeze left alive: %v", shortID(id), err)
+	}
+}
+
+// olvidarVMMDeCongelado quita la marca de id, de memoria y de disco.
+func (m *Manager) olvidarVMMDeCongelado(id string) {
+	m.vmmDeCongelado.Delete(id)
+	_ = os.Remove(filepath.Join(m.dir(id), ficheroVMMCongelado))
+}
+
+// vmmCongeladoEnDisco dice si pid, vivo y de la máquina id, es el VMM que su
+// último Freeze dejó vivo según la marca guardada en disco. Lo usa reconcile
+// al arrancar el daemon: si lo es, la marca vuelve a la memoria (Thaw lo
+// matará en vez de readoptarlo) y el proceso no se readopta. Una marca de
+// otro PID ya no es de nadie y se borra. Sin E/S de red: vale con m.mu tomado.
+func (m *Manager) vmmCongeladoEnDisco(id string, pid int) bool {
+	f := filepath.Join(m.dir(id), ficheroVMMCongelado)
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return false
+	}
+	apuntado, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || apuntado <= 0 || apuntado != pid {
+		_ = os.Remove(f)
+		return false
+	}
+	m.vmmDeCongelado.Store(id, pid)
+	return true
+}
+
+// thawVMMViejo mata el VMM pid que dejó vivo el Freeze de mc antes de que
+// Thaw arranque el nuevo. Readoptarlo era dar por buena una VM que ya se
+// volcó y se mandó matar: moría después y la máquina quedaba running sin
+// proceso, y luego failed. Y arrancar otro con él vivo serían dos VMM sobre el
+// mismo overlay. Si tampoco muere ahora, no se descongela.
+func (m *Manager) thawVMMViejo(mc *api.Machine, pid int) error {
+	log.Printf("thaw: %s (%s): the VMM of its last freeze (pid %d) is still alive; killing it first",
+		mc.Name, shortID(mc.ID), pid)
+	senalMatar(pid)
+	if !waitGone(pid, plazoMuerte) {
+		return fmt.Errorf("machine %q can't be thawed: the VMM of its last freeze (pid %d) is still alive %s after SIGKILL",
+			mc.Name, pid, plazoMuerte)
+	}
+	m.olvidarVMMDeCongelado(mc.ID)
+	return nil
+}
 
 func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y

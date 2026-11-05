@@ -79,9 +79,7 @@ func (w *wall) running(ctx context.Context) ([]*api.Machine, error) {
 				m[p.Name] = p
 			}
 		}
-		w.mu.Lock()
-		w.byName, w.listAt = m, time.Now()
-		w.mu.Unlock()
+		w.setRunning(m)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -91,6 +89,20 @@ func (w *wall) running(ctx context.Context) ([]*api.Machine, error) {
 	}
 	sortNatural(out)
 	return out, nil
+}
+
+// setRunning cambia la lista de teléfonos en marcha y suelta las capturas de
+// los que ya no están: sin esto, cada teléfono que pasó por el muro dejaba su
+// último PNG (cientos de KiB) en memoria mientras viviera el proceso.
+func (w *wall) setRunning(m map[string]*api.Machine) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.byName, w.listAt = m, time.Now()
+	for name := range w.shots {
+		if m[name] == nil {
+			delete(w.shots, name)
+		}
+	}
 }
 
 func (w *wall) machine(ctx context.Context, name string) (*api.Machine, error) {
@@ -156,11 +168,21 @@ func (w *wall) healthLoop(ctx context.Context) {
 func (w *wall) shot(ctx context.Context, name string) ([]byte, error) {
 	w.mu.Lock()
 	sc := w.shots[name]
-	if sc == nil {
-		sc = &shotCache{}
-		w.shots[name] = sc
-	}
 	w.mu.Unlock()
+	if sc == nil {
+		// La entrada se crea solo para un teléfono que existe: el nombre viene
+		// de la URL, y antes cualquier nombre válido dejaba una entrada para
+		// siempre.
+		if _, err := w.machine(ctx, name); err != nil {
+			return nil, err
+		}
+		w.mu.Lock()
+		if sc = w.shots[name]; sc == nil {
+			sc = &shotCache{}
+			w.shots[name] = sc
+		}
+		w.mu.Unlock()
+	}
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	if sc.png != nil && time.Since(sc.at) < 250*time.Millisecond {

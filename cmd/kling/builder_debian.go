@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // CONSTRUCTOR "debian": una imagen Debian (trixie) fijada, con los paquetes
@@ -60,8 +60,10 @@ type DebianSpec struct {
 	Lock []imagen.DebPin `json:"lock,omitempty"`
 	// Env son variables KEY=VALUE que el /entrypoint carga de /etc/kling/env (0600).
 	Env []string `json:"env,omitempty"`
-	// Service es un ejecutable de la imagen que el /entrypoint arranca (y
-	// relanza) antes de ceder el PID 1 al agente. Vacío: solo el agente.
+	// Service es un ejecutable de la imagen que supervisa el agente (lo
+	// arranca y lo relanza, como el de una imagen de Docker: service.json).
+	// Así recibe el entorno de la máquina (kling run -e), que solo tiene el
+	// agente. Vacío: solo el agente.
 	Service string `json:"service,omitempty"`
 	// Verity pone la capa detrás de dm-verity con FECRoots raíces de
 	// Reed-Solomon (por defecto 2; 0 = sin FEC).
@@ -70,6 +72,12 @@ type DebianSpec struct {
 	// BaseName es cómo se llama la base (por defecto "<nombre>-base", o la
 	// base de la petición). Es de esta capa: con verity lleva su tabla.
 	BaseName string `json:"base_name,omitempty"`
+}
+
+// debianService es el service.json de Service: como root, desde /, y
+// relanzado siempre, que es lo que hacía el bucle del /entrypoint de antes.
+func debianService(service string) api.ServiceSpec {
+	return api.ServiceSpec{Argv: []string{service}, Entrypoint: []string{service}, Restart: api.RestartAlways}
 }
 
 func (s DebianSpec) fecRoots() int {
@@ -196,7 +204,7 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 	}
 
 	lock := imagen.DebianLock[spec.Arch]
-	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf}
+	d := imagen.Debs{Cache: cache, Snapshot: lock.Snapshot, T: t, Marca: marcaDebian, Logf: logf, Agent: agent}
 	base, err := imagen.PrepareBase(ctx, &oci.Client{Cache: filepath.Join(cache, "oci"), Log: log}, lock, spec.Arch, lock.Packages, d)
 	if err != nil {
 		return err
@@ -248,7 +256,7 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 		data string
 		mode uint32
 	}{
-		{"/entrypoint", imagen.Entrypoint(marcaDebian, spec.Env, spec.Service), 0o755},
+		{"/entrypoint", imagen.Entrypoint(marcaDebian, spec.Env, ""), 0o755},
 		{"/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", 0o644},
 		{"/etc/kindling/IMAGE.txt", fmt.Sprintf("kindling_builder=debian\ndebian=%s\nsnapshot=%s\npackages=%s\nbuilt_at=%s\n",
 			base.Image, lock.Snapshot, strings.Join(added, " "), t.Format("2006-01-02T15:04:05Z")), 0o644},
@@ -270,6 +278,13 @@ func buildDebian(ctx context.Context, dir string, log io.Writer) error {
 		}
 		if n == nil || !n.IsReg() || n.Mode&0o111 == 0 {
 			return fmt.Errorf("service %s is not an executable file in the image", spec.Service)
+		}
+		b, err := json.Marshal(debianService(spec.Service))
+		if err != nil {
+			return err
+		}
+		if err := imagen.Put(upper, api.GuestServiceSpec, append(b, '\n'), 0o644, t); err != nil {
+			return err
 		}
 	}
 

@@ -342,6 +342,44 @@ func TestGuestTransportsOlvidaSoloEsaIP(t *testing.T) {
 	}
 }
 
+// Un 101 del agente (kling shell, las carpetas vivas) sale de RoundTrip con
+// un cuerpo en el que se escribe: el plazo de las cabeceras lo envolvía en un
+// ReadCloser y la shell fallaba con "could not be taken over".
+func TestGuestTransportsCuerpoDe101Escribible(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n")
+		_ = brw.Flush()
+		line, _ := brw.ReadString('\n')
+		_, _ = brw.WriteString("eco " + line)
+		_ = brw.Flush()
+	}))
+	t.Cleanup(srv.Close)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "x")
+	resp, err := (&http.Client{Transport: &transportesInvitado{}}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	rwc, ok := resp.Body.(io.ReadWriteCloser)
+	if resp.StatusCode != http.StatusSwitchingProtocols || !ok {
+		t.Fatalf("status %d, cuerpo %T: quería 101 y un io.ReadWriteCloser", resp.StatusCode, resp.Body)
+	}
+	if _, err := rwc.Write([]byte("hola\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 9)
+	if _, err := io.ReadFull(rwc, buf); err != nil || string(buf) != "eco hola\n" {
+		t.Fatalf("leído %q, %v", buf, err)
+	}
+}
+
 // El mapa de transportes está acotado: pasado el tope se empieza de cero.
 func TestGuestTransportsAcotado(t *testing.T) {
 	g := &transportesInvitado{}

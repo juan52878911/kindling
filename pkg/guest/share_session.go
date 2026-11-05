@@ -5,11 +5,12 @@ package guest
 // secuestrada, los papeles se invierten: el agente pide y el daemon contesta.
 
 import (
+	"errors"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // maxCalls acota las operaciones en vuelo hacia el daemon por carpeta. El
@@ -126,6 +127,11 @@ func (s *shareSession) readLoop() {
 		}
 		if id == share.PushID {
 			ev, p, err := share.ParsePush(d)
+			if errno == 0 && errors.Is(err, share.ErrUnknownEvent) {
+				// Un aviso de un daemon más nuevo: se salta. Cerrar aquí
+				// dejaría al agente reconectando sin fin contra él.
+				continue
+			}
 			if err != nil || errno != 0 {
 				return // un daemon que no sigue el protocolo: fuera
 			}

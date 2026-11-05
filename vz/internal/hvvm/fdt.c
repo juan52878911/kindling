@@ -3,6 +3,8 @@
 // Generador de device tree (FDT v17) en memoria: lo justo para que el kernel
 // de kindling arranque (memoria, cpus, GICv3, timer, PSCI, 16550, PL031,
 // virtio-mmio).
+#define __STDC_WANT_LIB_EXT1__ 1  // memset_s: borrar las semillas sin que el compilador lo quite
+#include <stdlib.h>
 #include <string.h>
 
 #include "khv.h"
@@ -11,8 +13,20 @@ static uint8_t st[16384];  // bloque de estructura
 static size_t nst;
 static char strs[2048];  // bloque de cadenas
 static size_t nstrs;
+static bool desbordado;  // algo no cupo en st/strs: fdt_build lo rechaza
+
+// cabe: si hay sitio para n bytes más en el bloque de estructura (con el
+// relleno a 4); si no, lo deja anotado y no se copia nada. La línea de
+// comandos del kernel viene del host, pero una muy larga no debe pisar
+// memoria del proceso.
+static bool cabe(size_t n) {
+  if (nst + n + 4 <= sizeof st) return true;
+  desbordado = true;
+  return false;
+}
 
 static void put32(uint32_t v) {
+  if (!cabe(4)) return;
   st[nst++] = v >> 24;
   st[nst++] = v >> 16;
   st[nst++] = v >> 8;
@@ -27,6 +41,10 @@ static uint32_t str_off(const char *s) {
   for (size_t i = 0; i < nstrs; i += strlen(strs + i) + 1)
     if (strcmp(strs + i, s) == 0) return (uint32_t)i;
   size_t o = nstrs;
+  if (nstrs + strlen(s) + 1 > sizeof strs) {
+    desbordado = true;
+    return 0;
+  }
   memcpy(strs + nstrs, s, strlen(s) + 1);
   nstrs += strlen(s) + 1;
   return (uint32_t)o;
@@ -34,6 +52,7 @@ static uint32_t str_off(const char *s) {
 
 static void node(const char *name) {
   put32(1);
+  if (!cabe(strlen(name) + 1)) return;
   memcpy(st + nst, name, strlen(name) + 1);
   nst += strlen(name) + 1;
   pad4();
@@ -45,6 +64,7 @@ static void prop(const char *name, const void *data, size_t len) {
   put32(3);
   put32((uint32_t)len);
   put32(str_off(name));
+  if (!cabe(len)) return;
   memcpy(st + nst, data, len);
   nst += len;
   pad4();
@@ -67,11 +87,16 @@ static void prop_reg(uint64_t base, uint64_t size) {
   prop_cells("reg", c, 4);
 }
 
+// Bytes de rng-seed: con 32 (256 bits acreditados) el crng ya queda listo; 64
+// dan margen.
+#define FDT_RNG_SEED 64
+
 #define PH_GIC 1
 #define PH_CLK 2
 
 size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   nst = nstrs = 0;
+  desbordado = false;
   char nombre[64];
 
   node("");
@@ -80,11 +105,27 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   prop_str("compatible", "linux,dummy-virt");
   prop_u32("interrupt-parent", PH_GIC);
 
+  // Semillas nuevas en cada arranque en frío: kaslr-seed para que arm64
+  // reubique el núcleo (sin ella KASLR no tiene de dónde sacar el azar, HVF
+  // no ofrece RNDR) y rng-seed para que el crng arranque inicializado sin
+  // esperar al virtio-rng (el núcleo solo la acredita con
+  // CONFIG_RANDOM_TRUST_BOOTLOADER, ver config-common). Las dos las borra el
+  // núcleo al leerlas (kaslr-seed a 0, rng-seed con FDT_NOP), así que el
+  // DTB que queda en la RAM, y con él los snapshots y sus clones, no las
+  // lleva. Los clones parten de un snapshot y no pasan por aquí.
+  uint64_t kaslr;
+  uint8_t semilla[FDT_RNG_SEED];
+  arc4random_buf(&kaslr, sizeof kaslr);
+  arc4random_buf(semilla, sizeof semilla);
   node("chosen");
   prop_str("bootargs", p->bootargs);
   snprintf(nombre, sizeof nombre, "/uart@%llx", UART_BASE);
   prop_str("stdout-path", nombre);
+  prop("kaslr-seed", &kaslr, sizeof kaslr);  // u64; da igual el orden de bytes
+  prop("rng-seed", semilla, sizeof semilla);
   end();
+  memset_s(&kaslr, sizeof kaslr, 0, sizeof kaslr);
+  memset_s(semilla, sizeof semilla, 0, sizeof semilla);
 
   snprintf(nombre, sizeof nombre, "memory@%llx", RAM_BASE);
   node(nombre);
@@ -187,7 +228,8 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   // Ensamblado: cabecera (40) + reserva vacía (16) + estructura + cadenas.
   size_t off_rsv = 40, off_st = off_rsv + 16, off_str = off_st + nst;
   size_t total = off_str + nstrs;
-  if (total > cap) {
+  if (desbordado || total > cap) {
+    memset_s(st, sizeof st, 0, nst);
     fallo("device tree too large (%zu bytes)", total);
     return 0;
   }
@@ -198,5 +240,7 @@ size_t fdt_build(void *buf, size_t cap, const struct fdt_params *p) {
   for (int i = 0; i < 10; i++) ((uint32_t *)b)[i] = __builtin_bswap32(h[i]);
   memcpy(b + off_st, st, nst);
   memcpy(b + off_str, strs, nstrs);
+  // Las semillas no se quedan en el proceso: solo en el DTB del invitado.
+  memset_s(st, sizeof st, 0, nst);
   return total;
 }

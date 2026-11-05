@@ -162,7 +162,8 @@ func TestResolverProcess(t *testing.T) {
 		t.Fatal("a truncated question must get FORMERR")
 	}
 	r.Exchange = func(context.Context, []byte, bool) ([]byte, error) { return nil, errors.New("down") }
-	if resp := r.Process(context.Background(), q, false); rcode(resp) != 2 {
+	// Otro nombre: el de antes ya está en la caché y no iría al upstream.
+	if resp := r.Process(context.Background(), BuildQuery("down.example.com", 1), false); rcode(resp) != 2 {
 		t.Fatal("an upstream failure must get SERVFAIL")
 	}
 }

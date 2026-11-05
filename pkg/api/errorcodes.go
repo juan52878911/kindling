@@ -40,6 +40,7 @@ const (
 	CodeUpgradeRequired    ErrorCode = "upgrade_required"    // 426
 	CodeTenantQuota        ErrorCode = "tenant_quota"        // 429: cuota del inquilino agotada
 	CodeTooManyRequests    ErrorCode = "too_many_requests"   // 429 que no es la cuota
+	CodeGuestBusy          ErrorCode = "guest_busy"          // 429: el agente del invitado tiene llenas sus plazas de exec o de shell
 	CodeInternal           ErrorCode = "internal"            // 500: fallo del host
 	CodeUnsupported        ErrorCode = "unsupported"         // 501: este daemon o este VMM no lo hace
 	CodeBadGateway         ErrorCode = "bad_gateway"         // 502: el invitado no contestó bien
@@ -140,6 +141,18 @@ func IsStaleGolden(err error) bool {
 
 // staleGoldenMark es el texto de ErrDoradoObsoleto del daemon.
 const staleGoldenMark = "stale golden snapshot"
+
+// IsGuestBusy dice si un error es la negativa del agente del invitado porque
+// ya corre todos los exec (64) o todas las shells (8) que admite: 429 con
+// Retry-After, en exec y en shell. No es que el agente esté muerto (eso es
+// 502): se reintenta cuando acabe alguno.
+func IsGuestBusy(err error) bool {
+	return esCodigo(err, http.StatusTooManyRequests, CodeGuestBusy, guestBusyMark)
+}
+
+// guestBusyMark es el texto con el que el agente cuenta que está lleno, para
+// un daemon sin code (que de todos modos contestaba 502, no 429).
+const guestBusyMark = "in this microVM (limit"
 
 // WriteError escribe un error con el cuerpo del daemon, {"message", "code"},
 // para que el gateway y el scheduler contesten como él y un cliente lea su

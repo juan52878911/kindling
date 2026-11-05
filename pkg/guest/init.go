@@ -1,19 +1,31 @@
 package guest
 
-// El init en Go: el /sbin/overlay-init de las imágenes de Docker sin sh.
+// El init en Go: el /sbin/overlay-init de las imágenes de Docker sin sh y
+// de las bases del constructor debian.
 //
 // Hace lo mismo que scripts/minimal-init.sh, paso a paso y con los mismos
 // fallos tolerados, pero sin pedir nada a la imagen: ni sh, ni mount, ni
-// pivot_root. Es lo que deja importar una imagen distroless, una scratch con
-// un binario estático o traefik/whoami. El constructor oci lo pone cuando a la
-// imagen le faltan las herramientas del script (cmd/kling/builder_oci.go):
-// /sbin/overlay-init es entonces un enlace a /usr/local/bin/kling-guest, y
-// kling-guest, al verse llamado así, hace de init (cmd/kling-guest).
+// pivot_root, ni dmsetup. Es lo que deja importar una imagen distroless, una
+// scratch con un binario estático o traefik/whoami. El constructor oci lo pone
+// cuando a la imagen le faltan las herramientas del script
+// (cmd/kling/builder_oci.go), y el debian en toda base cuyo agente lo trae
+// (internal/imagen Base.Write): /sbin/overlay-init es entonces un enlace a
+// /usr/local/bin/kling-guest, y kling-guest, al verse llamado así, hace de
+// init (cmd/kling-guest). Con el script eran unos 25 fork+exec (sh, mount,
+// mkdir, ln, dmsetup...) antes de llegar al agente.
 //
-// Al acabar no ejecuta /entrypoint, que es un script de sh: hace lo que hace
-// el /entrypoint del constructor (internal/imagen Entrypoint), cargar
-// /etc/kling/env encima de PATH y HOME y ceder el PID 1 al agente, con un
-// exec y no en el mismo proceso, para que el agente arranque limpio.
+// Con la capa detrás de dm-verity (la tabla en VerityConfPath), pone el
+// dispositivo con los ioctl de device-mapper (init_verity.go) y falla cerrado
+// como el script: sin verity, la capa no se monta.
+//
+// Al acabar, en una imagen de Docker no ejecuta /entrypoint, que es un
+// script de sh: hace lo que hace el /entrypoint del constructor (internal/
+// imagen Entrypoint), cargar /etc/kling/env encima de PATH y HOME y ceder el
+// PID 1 al agente, con un exec y no en el mismo proceso, para que el agente
+// arranque limpio. En una base de kindling, el /entrypoint de la capa manda,
+// como en el script: si es el que genera el constructor sin servicio
+// (PlainEntrypoint), se hace aquí lo mismo sin sh; si es otro, se le cede
+// el PID 1.
 //
 // Las llamadas al sistema van por initSys, y así el plan entero (qué se monta,
 // dónde y en qué orden; qué se escribe en /etc/hosts) se prueba con un sistema
@@ -29,6 +41,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -111,6 +124,38 @@ type initSys interface {
 	Exec(path string, argv, env []string) error
 	// Spawn lanza un proceso hijo con la consola de este y no lo espera.
 	Spawn(path string, argv, env []string) error
+	// ReadHead lee como mucho n bytes del principio de p.
+	ReadHead(p string, n int) ([]byte, error)
+	// DMCreate pone el dispositivo de device-mapper name, de solo lectura,
+	// con la tabla targets, y devuelve la ruta de su nodo (init_verity.go).
+	DMCreate(name string, targets []dmTarget) (string, error)
+	// Restart reinicia el invitado en el acto (reboot(2)): con reboot=k
+	// panic=1 el anfitrión lo ve como un pánico y da la máquina por fallida.
+	Restart() error
+}
+
+// plazoMontarVerity acota el montaje de la capa detrás de dm-verity. Con FEC
+// y un hash raíz que no cuadra, el kernel se queda corrigiendo sin fin dentro
+// de mount(2): ni vuelve ni da error, y la máquina seguía "running" sin
+// agente. Un montaje sano lee solo el superbloque.
+var plazoMontarVerity = 60 * time.Second
+
+// montarVerity monta la capa verificada con plazoMontarVerity. Si se pasa,
+// reinicia: salir no basta, porque el hilo atascado en mount(2) no deja morir
+// al PID 1 y el kernel nunca llegaría al pánico.
+func montarVerity(s initSys, layer string) error {
+	hecho := make(chan error, 1)
+	go func() { hecho <- s.Mount(layer, "/overlay/svc", "ext4", msRdonly, "") }()
+	select {
+	case err := <-hecho:
+		return err
+	case <-time.After(plazoMontarVerity):
+		log.Printf("dm-verity: mounting the service layer did not finish in %s; refusing to boot unverified, restarting", plazoMontarVerity)
+		if err := s.Restart(); err != nil {
+			return fmt.Errorf("restarting after the dm-verity mount timed out: %w", err)
+		}
+		return fmt.Errorf("dm-verity: mounting the service layer timed out")
+	}
 }
 
 // Init hace de PID 1 y no vuelve: acaba en el agente o, si algo que el
@@ -173,7 +218,19 @@ func runInit(s initSys, environ []string) error {
 		if err := must(s.MkdirAll("/overlay/svc", 0o755), "creating /overlay/svc"); err != nil {
 			return err
 		}
-		if err := must(s.Mount(layer, "/overlay/svc", "ext4", msRdonly, ""), "mounting the service layer "+layer); err != nil {
+		// Con la tabla de verity en la base, la capa se lee a través de
+		// dm-verity: un bloque que no cuadra con su hash da EIO en vez de
+		// entrar en la caché como bueno. Si no se puede, se para aquí.
+		orig := layer
+		var err error
+		if layer, err = initVerity(s, layer); err != nil {
+			return err
+		}
+		montar := func() error { return s.Mount(layer, "/overlay/svc", "ext4", msRdonly, "") }
+		if layer != orig {
+			montar = func() error { return montarVerity(s, layer) }
+		}
+		if err := must(montar(), "mounting the service layer "+layer); err != nil {
 			return err
 		}
 		lower = "/overlay/svc/upper:/"
@@ -201,7 +258,8 @@ func runInit(s initSys, environ []string) error {
 	_ = s.Mount("sysfs", "/sys", "sysfs", 0, "")
 	_ = s.Mount("devtmpfs", "/dev", "devtmpfs", 0, "")
 	// /tmp y /run: los de la imagen en una de Docker; tmpfs en las bases.
-	if s.Stat(ociMarker) != nil {
+	oci := s.Stat(ociMarker) == nil
+	if !oci {
 		_ = s.Mount("tmpfs", "/tmp", "tmpfs", 0, "")
 		_ = s.Mount("tmpfs", "/run", "tmpfs", 0, "")
 	}
@@ -227,7 +285,26 @@ func runInit(s initSys, environ []string) error {
 	hn := initHostname(s)
 	initHosts(s, hn)
 
-	env := initEnv(s, environ)
+	// En una base de kindling, el /entrypoint de la capa, como el script.
+	cargarEnv := true
+	if !oci {
+		var ceder bool
+		if cargarEnv, ceder = initEntrypoint(s); ceder {
+			ep := setEnv(setEnv(append([]string{}, environ...), "PATH", initPATH), "HOME", initHOME)
+			err := s.Exec(entrypointPath, []string{entrypointPath}, ep)
+			if err == nil {
+				return nil // solo con un initSys falso: el de verdad no vuelve
+			}
+			// El script, sin un /entrypoint ejecutable, caía a un shell; aquí,
+			// al agente, que al menos contesta al host.
+			log.Printf("warning: starting %s: %v; starting the agent instead", entrypointPath, err)
+			cargarEnv = true
+		}
+	}
+	env := setEnv(setEnv(append([]string{}, environ...), "PATH", initPATH), "HOME", initHOME)
+	if cargarEnv {
+		env = initEnv(s, environ)
+	}
 	if svc, ok := initImageService(s); ok {
 		return execImageInit(s, svc, env)
 	}
@@ -269,6 +346,67 @@ func execImageInit(s initSys, svc api.ServiceSpec, env []string) error {
 		return fmt.Errorf("starting the image's init %s: %w", bin, err)
 	}
 	return nil
+}
+
+// entrypointPath es el /entrypoint de la capa.
+const entrypointPath = "/entrypoint"
+
+// maxEntrypointGenerado es más de lo que mide cualquier /entrypoint del
+// constructor sin servicio: uno más largo no es de los generados, y no se lee
+// entero (puede ser un binario).
+const maxEntrypointGenerado = 4 << 10
+
+// initEntrypoint mira el /entrypoint de la capa: sin él, el agente con el
+// entorno de la imagen (cargarEnv); el que genera el constructor sin servicio,
+// lo mismo sin sh (cargarEnv si el suyo carga /etc/kling/env); cualquier otro
+// (con servicio, el de un MCP), ceder: hay que ejecutarlo.
+func initEntrypoint(s initSys) (cargarEnv, ceder bool) {
+	b, err := s.ReadHead(entrypointPath, maxEntrypointGenerado+1)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, false
+	}
+	if err != nil {
+		// Está pero no se lee: que lo diga el exec, como el [ -x ] del script.
+		return false, true
+	}
+	if env, ok := PlainEntrypoint(b); ok {
+		return env, false
+	}
+	return false, true
+}
+
+// PlainEntrypoint dice si b es el /entrypoint que escribe internal/imagen
+// Entrypoint sin servicio, y si carga /etc/kling/env (lo prueba
+// internal/imagen contra lo que genera). Solo
+// esas líneas, en ese orden: con cualquier otra cosa el /entrypoint hace algo
+// que aquí no se sabe hacer, y se ejecuta.
+func PlainEntrypoint(b []byte) (cargaEnv, ok bool) {
+	if len(b) > maxEntrypointGenerado {
+		return false, false
+	}
+	lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	want := []string{"#!/bin/sh", "", "export PATH=" + initPATH, "export HOME=" + initHOME}
+	if len(lines) == 6 {
+		want = append(want, ". "+guestEnvPath)
+		cargaEnv = true
+	}
+	want = append(want, "exec "+guestAgentPath+" -listen :8080")
+	if len(lines) != len(want) {
+		return false, false
+	}
+	for i, l := range lines {
+		if i == 1 {
+			// El comentario con el nombre del constructor.
+			if !strings.HasPrefix(l, "# ") || strings.ContainsAny(l, "`$;&|<>") {
+				return false, false
+			}
+			continue
+		}
+		if l != want[i] {
+			return false, false
+		}
+	}
+	return cargaEnv, true
 }
 
 // initLayerDev es el valor de kling.layer en la línea de comandos del kernel

@@ -36,11 +36,17 @@ package guest
 import (
 	"sync"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // wbMaxBytes acota lo pendiente (acumulado y en vuelo) por nodo.
 const wbMaxBytes = 4 * share.MaxIO
+
+// wbMaxFlying acota los trozos en vuelo por nodo, y con ellos las goroutines
+// de wbFly. wbMaxBytes no basta: con escrituras pequeñas y no contiguas cada
+// una es su propio trozo, y 4 MiB en trozos de 4 KiB eran 1024 a la vez. Más
+// allá, como con los bytes, contrapresión.
+const wbMaxFlying = 16
 
 // wbChunk es un trozo contiguo de un handle: acumulándose o en vuelo.
 type wbChunk struct {
@@ -94,7 +100,7 @@ func (fs *fuseFS) writeBehind(h *fileHandle, off uint64, data []byte, wait bool)
 	for {
 		c := st.cur
 		if c != nil && (c.h != h || c.end() != off || len(c.data)+len(data) > share.MaxIO) {
-			if !wait && st.clashLocked(c) {
+			if !wait && (st.clashLocked(c) || len(st.flying) >= wbMaxFlying) {
 				return 0, false
 			}
 			fs.wbSendLocked(st)
@@ -121,7 +127,7 @@ func (fs *fuseFS) writeBehind(h *fileHandle, off uint64, data []byte, wait bool)
 	st.bytes += len(data)
 	// Sale ya si no vuela nada (group commit) o si está lleno; uno lleno que
 	// se solapa con algo en vuelo espera a que wbFly lo mande.
-	if len(st.flying) == 0 || (len(st.cur.data) >= share.MaxIO && !st.clashLocked(st.cur)) {
+	if len(st.flying) == 0 || (len(st.cur.data) >= share.MaxIO && len(st.flying) < wbMaxFlying && !st.clashLocked(st.cur)) {
 		fs.wbSendLocked(st)
 	}
 	return 0, true
@@ -138,13 +144,14 @@ func (st *wbState) clashLocked(c *wbChunk) bool {
 }
 
 // wbSendLocked manda st.cur. Si se solapa con algo en vuelo, espera antes a
-// que eso conteste: el orden de dos escrituras al mismo rango importa.
+// que eso conteste: el orden de dos escrituras al mismo rango importa. Con
+// wbMaxFlying trozos en vuelo, también espera a que vuelva uno.
 func (fs *fuseFS) wbSendLocked(st *wbState) {
 	c := st.cur
 	if c == nil {
 		return
 	}
-	for st.clashLocked(c) {
+	for st.clashLocked(c) || len(st.flying) >= wbMaxFlying {
 		st.cond.Wait()
 		if st.cur != c {
 			return // lo mandó otro mientras se esperaba
@@ -170,8 +177,9 @@ func (fs *fuseFS) wbFly(st *wbState, c *wbChunk) {
 	if errno != 0 && st.err == 0 {
 		st.err = errno
 	}
-	// Lo que se acumuló mientras volaba este sale ya (group commit).
-	if len(st.flying) == 0 && st.cur != nil {
+	// Lo que se acumuló mientras volaba este sale ya (group commit); y uno
+	// lleno que esperaba plaza, también.
+	if c := st.cur; c != nil && (len(st.flying) == 0 || (len(c.data) >= share.MaxIO && !st.clashLocked(c))) {
 		fs.wbSendLocked(st)
 	}
 	st.cond.Broadcast()

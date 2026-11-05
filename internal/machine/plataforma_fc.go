@@ -206,7 +206,7 @@ const minDiscoLibrePlataforma = 2048
 
 // sondearPuertoVMM: en Linux no hay /kling/probe al que preguntar
 // (ProbeGuestPort no llega aquí sin reenvíos); se deja la pregunta tal cual.
-func sondearPuertoVMM(ctx context.Context, sock string, port int) (bool, error) {
+func sondearPuertoVMM(ctx context.Context, sock string, port int, _ bool) (bool, error) {
 	return fc.New(sock).KlingProbe(ctx, port)
 }
 
@@ -242,6 +242,15 @@ func memoriaTotalPlataforma() int64 { return 0 }
 // entornoVMM: Firecracker no necesita nada más que el entorno del daemon (su
 // confinamiento es el jailer).
 func (m *Manager) entornoVMM() []string { return nil }
+
+// entornoProceso: en Linux el VMM hereda el entorno del daemon (nil = el de
+// este proceso), más extra si lo hay.
+func entornoProceso(extra []string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	return append(os.Environ(), extra...)
+}
 
 // techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
 // flag, ni su dorado, ni su receta, ni la configuración). En Linux, media vCPU

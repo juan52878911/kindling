@@ -17,15 +17,16 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // NativePlugin es el nombre del plugin cuyo hash da NativeHash.
 const NativePlugin = "mysql_native_password"
 
 // reHash es la forma de un hash de mysql_native_password.
-var reHash = regexp.MustCompile(`^\*[0-9A-F]{40}$`)
+var reHash = lazyre.New(`^\*[0-9A-F]{40}$`)
 
 // NativeHash es el authentication_string de mysql_native_password para pw:
 // "*" y 40 dígitos hexadecimales en mayúsculas.

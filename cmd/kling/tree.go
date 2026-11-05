@@ -150,7 +150,7 @@ var coreTree = []section{
                                                    stream (default 8 MiB)
 `},
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
-      [--] [cmd [args...]]                         (Ctrl-C reaches the program)
+      [-env-file F] [--] [cmd [args...]]           (Ctrl-C reaches the program)
 `},
 		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] <local|-> <ref>:<path>           copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it

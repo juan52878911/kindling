@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/von"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
-	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // CONSTRUCTOR "llm": una imagen VON (llama-server + un GGUF) como capa sobre

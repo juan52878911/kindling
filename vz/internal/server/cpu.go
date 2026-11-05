@@ -393,9 +393,15 @@ func (s *Server) frenar(vm VM) bool {
 			s.d.Logf("warning: could not stop the VM's helper for the CPU ceiling, pausing the VM instead: %v", err)
 		}
 	}
-	if vm.Pause() != nil {
+	if err := vm.Pause(); err != nil {
+		// Sin regulador la VM corre sin techo: que quede dicho y por qué.
+		if !s.pausaAviso {
+			s.pausaAviso = true
+			s.d.Logf("warning: the CPU ceiling could not pause the VM: %v", err)
+		}
 		return false
 	}
+	s.pausaAviso = false
 	s.regulando = true
 	return true
 }

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/juan52878911/kindling/pkg/esquema"
+	"github.com/juan52878911/kindling/internal/esquema"
 )
 
 // Esquemas son las versiones de los ficheros de estado versionados (ver

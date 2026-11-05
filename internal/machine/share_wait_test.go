@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // kling.shares=N: el agente espera a las carpetas vivas pedidas, o a las

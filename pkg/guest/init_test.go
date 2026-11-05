@@ -9,7 +9,6 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -21,12 +20,13 @@ type fakeInit struct {
 	files  map[string]string
 	links  map[string]string
 	fail   map[string]error // por llamada apuntada: "mount /dev/vdb /overlay ext4 0 "
+	rerr   map[string]error // ReadFile de esa ruta falla así
 	exec   []string
 	execEv []string
 }
 
 func newFakeInit() *fakeInit {
-	return &fakeInit{files: map[string]string{}, links: map[string]string{}, fail: map[string]error{}}
+	return &fakeInit{files: map[string]string{}, links: map[string]string{}, fail: map[string]error{}, rerr: map[string]error{}}
 }
 
 func (f *fakeInit) call(s string) error {
@@ -43,6 +43,9 @@ func (f *fakeInit) PivotRoot(n, o string) error            { return f.call("pivo
 func (f *fakeInit) Chdir(d string) error                   { return f.call("cd " + d) }
 
 func (f *fakeInit) ReadFile(p string) ([]byte, error) {
+	if err := f.rerr[p]; err != nil {
+		return nil, err
+	}
 	if b, ok := f.files[p]; ok {
 		return []byte(b), nil
 	}
@@ -81,6 +84,27 @@ func (f *fakeInit) Symlink(t, p string) error {
 func (f *fakeInit) Exec(p string, argv, env []string) error {
 	f.exec, f.execEv = argv, env
 	return f.call("exec " + p)
+}
+
+func (f *fakeInit) ReadHead(p string, n int) ([]byte, error) {
+	b, err := f.ReadFile(p)
+	if len(b) > n {
+		b = b[:n]
+	}
+	return b, err
+}
+
+func (f *fakeInit) Restart() error { return f.call("restart") }
+
+func (f *fakeInit) DMCreate(name string, targets []dmTarget) (string, error) {
+	var t []string
+	for _, x := range targets {
+		t = append(t, fmt.Sprintf("%d %d %s %s", x.start, x.length, x.kind, x.params))
+	}
+	if err := f.call("dmcreate " + name + " " + strings.Join(t, ";")); err != nil {
+		return "", err
+	}
+	return "/dev/mapper/" + name, nil
 }
 
 func (f *fakeInit) Spawn(p string, argv, env []string) error {
@@ -292,11 +316,13 @@ func TestInitHostname(t *testing.T) {
 // El entorno del agente: el del kernel, PATH y HOME del /entrypoint, y encima
 // /etc/kling/env tal como lo escribe imagen.EnvFile, comillas incluidas. Una
 // línea que no se entiende se salta sin que su valor llegue al registro.
+// imagen.EnvFile llega por envFileImagen (export_test.go): internal/imagen
+// importa este paquete y no se puede importar desde dentro.
 func TestInitEnv(t *testing.T) {
 	vars := []string{"PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b",
 		"MULTI=a\nb'\n\nc # no\n", "AFTER=1"}
 	f := newFakeInit()
-	f.files[guestEnvPath] = imagen.EnvFile(vars) + "export BAD=$(rm -rf /)\nnot a line\nexport 1X='v'\n"
+	f.files[guestEnvPath] = envFileImagen(vars) + "export BAD=$(rm -rf /)\nnot a line\nexport 1X='v'\n"
 	env := initEnv(f, []string{"TERM=linux", "HOME=/"})
 	want := []string{"TERM=linux", "HOME=/root", "PATH=/app/bin:/bin", "QUOTE=it's \"x\" $HOME `y`", "EMPTY=", "SP=a  b\tc", "EQ=a=b",
 		"MULTI=a\nb'\n\nc # no\n", "AFTER=1"}

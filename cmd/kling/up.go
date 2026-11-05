@@ -35,10 +35,10 @@ import (
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
-	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // runAsDefault es el usuario sin privilegios con el que el daemon lanza
@@ -903,7 +903,14 @@ func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 		}
 		report.Extensions[p.Name] = out
 	}
-	return json.NewEncoder(os.Stdout).Encode(report)
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return err
+	}
+	if !report.Daemon.OK {
+		// Igual que el texto: el informe va entero y el código lo dice.
+		return &errConCodigo{code: 1, err: errDoctorQuiet}
+	}
+	return nil
 }
 
 func hasKVM() bool { return fileExists("/dev/kvm") }

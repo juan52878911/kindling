@@ -934,7 +934,7 @@ un etiquetador Chispa-slots, luego un codificador de frases cuya capa enciende `
 eval` (McNemar sobre la orden completa), y escala el resto. Lo que sabe el dominio
 —plantillas, valores de los huecos, qué huecos necesita cada intención— sale de un
 esquema JSON, o de un `intent.Domain` en Go que registra el programa que embebe
-`pkg/aigw`. Guía: [`docs/intent.md`](intent.md).
+`internal/aigw`. Guía: [`docs/intent.md`](intent.md).
 
 ```sh
 kling ai serve                                  # registro en ~/.config/kling/ai.json

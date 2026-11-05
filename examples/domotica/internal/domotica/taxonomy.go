@@ -5,7 +5,7 @@
 //
 //  1. emparejador de plantillas (microsegundos, exacto para los textos de la
 //     demo; Matcher),
-//  2. Chispa: intención con pkg/chispa y huecos con pkg/chispa/slots (microsegundos),
+//  2. Chispa: intención con internal/chispa y huecos con internal/chispa/slots (microsegundos),
 //  3. y 4. —un codificador de frases y un LLM pequeño con salida JSON— son
 //     fases posteriores: aquí solo se marca qué debe escalar a ellas.
 //

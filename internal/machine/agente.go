@@ -78,7 +78,11 @@ func (m *Manager) agenteDe(id string) *api.GuestAgent {
 // se sabe (una máquina descongelada lleva el mismo agente que al congelarse),
 // no pregunta. No se persiste aquí: viaja con la máquina en el siguiente
 // guardado del estado.
-func (m *Manager) conocerAgente(id string) {
+func (m *Manager) conocerAgente(id string) { m.conocerAgenteY(id, nil) }
+
+// conocerAgenteY es conocerAgente, y cuando el agente contesta llama a
+// despues con lo que dijo (en la misma goroutine de fondo).
+func (m *Manager) conocerAgenteY(id string, despues func(*api.GuestAgent)) {
 	if m.agenteDe(id) != nil {
 		return
 	}
@@ -92,6 +96,10 @@ func (m *Manager) conocerAgente(id string) {
 			case <-ctx.Done():
 			}
 		}()
+		// Tras un arranque en frío el agente escucha a las décimas: empezar
+		// con el paso entero (250 ms) dejaba el reloj del invitado sin poner
+		// (ver resyncArranque) ese rato.
+		paso := pasoListoPrimero
 		for ctx.Err() == nil {
 			m.mu.RLock()
 			mc := m.byID[id]
@@ -103,23 +111,31 @@ func (m *Manager) conocerAgente(id string) {
 			if addr == "" {
 				return
 			}
-			pctx, pcancel := context.WithTimeout(ctx, plazoPeticionAgente)
-			ag, err := preguntarAgente(pctx, "http://"+addr)
-			pcancel()
-			if err == nil {
-				var imagen string
-				m.mu.Lock()
-				if mc := m.byID[id]; mc != nil && mc.Agent == nil {
-					mc.Agent, imagen = ag, mc.Image
+			// En macOS el reenvío acepta siempre: el VMM dice antes si
+			// alguien escucha, sin dejar una petición colgada en él.
+			if open, ok := m.ProbeGuestPort(ctx, id, api.GuestPort); !ok || open {
+				pctx, pcancel := context.WithTimeout(ctx, plazoPeticionAgente)
+				ag, err := preguntarAgente(pctx, "http://"+addr)
+				pcancel()
+				if err == nil {
+					var imagen string
+					m.mu.Lock()
+					if mc := m.byID[id]; mc != nil && mc.Agent == nil {
+						mc.Agent, imagen = ag, mc.Image
+					}
+					m.mu.Unlock()
+					m.agenteEnReceta(imagen, ag)
+					if despues != nil {
+						despues(ag)
+					}
+					return
 				}
-				m.mu.Unlock()
-				m.agenteEnReceta(imagen, ag)
-				return
 			}
 			select {
 			case <-ctx.Done():
-			case <-time.After(pasoListo):
+			case <-time.After(paso):
 			}
+			paso = min(2*paso, pasoListo)
 		}
 	}()
 }

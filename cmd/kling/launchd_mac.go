@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/config"
-	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // agenteDaemon es el agente de launchd del daemon.

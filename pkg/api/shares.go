@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // ShareSpec es una carpeta compartida pedida en POST /machines (RunRequest.Shares)

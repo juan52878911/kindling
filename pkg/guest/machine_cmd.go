@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -24,43 +23,10 @@ func MachineCmdRequired() bool {
 	return cmdlineParams().values[api.MachineCmdBootParam] == "1"
 }
 
-// loadMachineCmd lee el comando de la máquina con fetch, con los mismos
-// reintentos que el entorno.
-func loadMachineCmd(fetch func() (*MMDSStore, error)) (*api.MachineCmd, error) {
-	var last error
-	for i := 0; i < machineEnvTries; i++ {
-		if i > 0 {
-			time.Sleep(machineEnvPause)
-		}
-		st, err := fetch()
-		switch {
-		case err != nil:
-			last = err
-		case st == nil || st.MachineCmd == nil:
-			last = errors.New("the MMDS store has no " + api.MachineCmdMMDSKey)
-		default:
-			if err := api.CheckMachineCmd(*st.MachineCmd); err != nil {
-				return nil, err
-			}
-			return st.MachineCmd, nil
-		}
-	}
-	return nil, fmt.Errorf("reading the machine command from MMDS: %w", last)
-}
-
-// applyMachineCmd, con kling.cmd=1, lee el comando de la máquina y lo guarda
-// para StartService. Si no puede, el servicio no arrancará.
+// applyMachineCmd es applyMachineBoot solo para el comando: lo guarda para
+// StartService, y si no puede leerlo el servicio no arrancará.
 func (a *Agent) applyMachineCmd(required bool, fetch func() (*MMDSStore, error)) {
-	if !required {
-		return
-	}
-	c, err := loadMachineCmd(fetch)
-	if err != nil {
-		a.cmdErr = err
-		log.Printf("machine command: %v; the service will not start without it", err)
-		return
-	}
-	a.machineCmd = c
+	a.applyMachineBoot(false, required, fetch)
 }
 
 // machineArgv es el Argv del servicio con el comando de la máquina encima

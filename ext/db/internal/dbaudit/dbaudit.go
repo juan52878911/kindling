@@ -11,13 +11,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Tope de líneas del log que se leen del invitado y ventana de espera de los
@@ -42,7 +42,7 @@ type Entry struct {
 	Client string    `json:"client,omitempty"`
 }
 
-var machineRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var machineRe = lazyre.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // Run escribe en w la línea de tiempo de machine (una copia Postgres) de los
 // últimos since.
@@ -156,7 +156,7 @@ func safe(s string) string {
 }
 
 // Prefijo del golden: log_line_prefix = '%m [%p] u=%u d=%d h=%h '.
-var lineRe = regexp.MustCompile(`^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) UTC \[\d+\] u=(\S*) d=(\S*) h=(\S*) (LOG|FATAL):  (.*)$`)
+var lineRe = lazyre.New(`^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) UTC \[\d+\] u=(\S*) d=(\S*) h=(\S*) (LOG|FATAL):  (.*)$`)
 
 // ParseLog extrae las conexiones, desconexiones y autenticaciones fallidas.
 // Ignora cualquier otra línea: no se copia texto libre del log.

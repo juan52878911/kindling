@@ -327,3 +327,161 @@ func TestExecBodyTimeout(t *testing.T) {
 		t.Fatalf("el plazo de exec (%s) no debe ser menor que guestProgressTimeout (%s)", got, guestProgressTimeout)
 	}
 }
+
+// agenteQueContesta es un agente que contesta a ruta con ese estado y ese
+// texto plano, como pkg/guest cuando tiene todas sus plazas ocupadas.
+func agenteQueContesta(t *testing.T, ruta string, status int, msg string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(ruta, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, msg, status)
+	})
+	g := httptest.NewServer(mux)
+	t.Cleanup(g.Close)
+	return g
+}
+
+// El agente lleno (64 exec a la vez) no es un agente muerto: 429 guest_busy
+// con Retry-After, no 502 bad_gateway. Antes cualquier estado distinto de 400
+// salía como 502 y quien llamaba no podía saber que bastaba con reintentar.
+func TestExecConElInvitadoLlenoEs429(t *testing.T) {
+	g := agenteQueContesta(t, "/exec/stream", http.StatusTooManyRequests, "too many commands running in this microVM (limit 64)")
+	_, code, err := openGuestExec(context.Background(), g.URL, api.ExecRequest{Cmd: []string{"true"}})
+	if code != http.StatusTooManyRequests || !errors.Is(err, errInvitadoOcupado) {
+		t.Fatalf("full agent: %d %v", code, err)
+	}
+	rr := httptest.NewRecorder()
+	fail(rr, code, err)
+	comprobarOcupado(t, rr, "too many commands running in this microVM (limit 64)")
+
+	// Un 500 del agente sigue siendo 502: no todo lo que no es 400 es 429.
+	roto := agenteQueContesta(t, "/exec/stream", http.StatusInternalServerError, "boom")
+	if _, code, err := openGuestExec(context.Background(), roto.URL, api.ExecRequest{Cmd: []string{"true"}}); code != http.StatusBadGateway || errors.Is(err, errInvitadoOcupado) {
+		t.Fatalf("broken agent: %d %v", code, err)
+	}
+}
+
+func TestShellConElInvitadoLlenoEs429(t *testing.T) {
+	g := agenteQueContesta(t, "/exec/pty", http.StatusTooManyRequests, "too many shells open in this microVM (limit 8)")
+	_, err := openGuestShell(context.Background(), g.URL, api.ShellRequest{})
+	if !errors.Is(err, errInvitadoOcupado) || errors.Is(err, api.ErrShellUnsupported) {
+		t.Fatalf("full agent: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	fail(rr, http.StatusTooManyRequests, err)
+	comprobarOcupado(t, rr, "too many shells open in this microVM (limit 8)")
+}
+
+func comprobarOcupado(t *testing.T, rr *httptest.ResponseRecorder, texto string) {
+	t.Helper()
+	var e api.Error
+	if rr.Code != http.StatusTooManyRequests || json.Unmarshal(rr.Body.Bytes(), &e) != nil || e.Code != api.CodeGuestBusy {
+		t.Fatalf("%d %s, want 429 guest_busy", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(e.Message, texto) {
+		t.Errorf("message %q lost the agent's text %q", e.Message, texto)
+	}
+	if rr.Header().Get("Retry-After") != guestBusyRetryAfter {
+		t.Errorf("Retry-After %q", rr.Header().Get("Retry-After"))
+	}
+	// Del lado del cliente, IsGuestBusy lo reconoce y no lo confunde con la cuota.
+	se := &api.StatusError{Code: rr.Code, Message: e.Message, ErrorCode: e.Code}
+	if !api.IsGuestBusy(se) || api.IsTenantQuota(se) {
+		t.Errorf("IsGuestBusy %v IsTenantQuota %v", api.IsGuestBusy(se), api.IsTenantQuota(se))
+	}
+}
+
+// Un 429 que no viene del agente (la cuota del inquilino) no lleva
+// Retry-After ni guest_busy.
+func TestFailCuotaNoEsInvitadoLleno(t *testing.T) {
+	rr := httptest.NewRecorder()
+	fail(rr, http.StatusTooManyRequests, &api.StatusError{Code: api.StatusTenantQuota, Message: "tenant a: " + api.TenantQuotaMark})
+	var e api.Error
+	_ = json.Unmarshal(rr.Body.Bytes(), &e)
+	if e.Code != api.CodeTenantQuota || rr.Header().Get("Retry-After") != "" {
+		t.Fatalf("%s %q", rr.Body.String(), rr.Header().Get("Retry-After"))
+	}
+}
+
+// Un exec que se corta porque la máquina dejó de correr a medias (un freeze de
+// daemon.idle_freeze, un stop, un rm) no debe llegar como un EOF pelado ni como
+// el corte genérico: se dice qué le pasó a la máquina. Con la máquina viva, o
+// con otro error, el mensaje original se queda.
+func TestExecInterrumpidoDiceQuePaso(t *testing.T) {
+	root := t.TempDir()
+	sembradas := []*api.Machine{
+		{ID: "a1a1a1a1a1a1a1a1", Name: "helada", State: api.StateWarm},
+		{ID: "b2b2b2b2b2b2b2b2", Name: "parada", State: api.StateStopped},
+		{ID: "c3c3c3c3c3c3c3c3", Name: "rota", State: api.StateFailed},
+	}
+	b, _ := json.Marshal(sembradas)
+	if err := os.WriteFile(filepath.Join(root, "state.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bus := events.New()
+	mgr, err := machine.NewManager(root, "", "", bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mgr.Close)
+	s := &Server{mgr: mgr, root: root, bus: bus}
+
+	corte := api.ExecEvent{Error: msgCorte + ": EOF"}
+	for id, want := range map[string]string{
+		"a1a1a1a1a1a1a1a1": "frozen while the command ran",
+		"b2b2b2b2b2b2b2b2": "stopped while the command ran",
+		"c3c3c3c3c3c3c3c3": "failed (its VMM died) while the command ran",
+		"d4d4d4d4d4d4d4d4": "removed while the command ran",
+	} {
+		if got := s.explicarCorte(id, corte).Error; !strings.Contains(got, want) {
+			t.Errorf("%s: corte = %q; quería que dijera %q", id, got, want)
+		}
+		if err := s.execInterrumpido(id); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: execInterrumpido = %v; quería %q", id, err, want)
+		}
+	}
+	// Un error del propio comando (no el corte) no se toca aunque la máquina
+	// ya no corra.
+	otro := api.ExecEvent{Error: "exec: \"nada\": executable file not found in $PATH"}
+	if got := s.explicarCorte("a1a1a1a1a1a1a1a1", otro); got.Error != otro.Error {
+		t.Errorf("error del comando cambiado: %q", got.Error)
+	}
+}
+
+// El agente real no manda las cabeceras de /exec/stream hasta la primera
+// salida del comando: uno callado más largo que plazoCabeceras (5 min de
+// verdad) acababa en "timeout awaiting response headers". openGuestExec espera
+// las cabeceras lo que el timeout del comando más execBodyGrace; el resto de
+// peticiones al invitado siguen con plazoCabeceras.
+func TestExecCalladoNoVenceLasCabeceras(t *testing.T) {
+	viejo := plazoCabeceras
+	plazoCabeceras = 200 * time.Millisecond
+	t.Cleanup(func() { plazoCabeceras = viejo })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/exec/stream", guest.StreamExecHandler(nil))
+	g := httptest.NewServer(mux)
+	defer g.Close()
+	req := api.ExecRequest{Cmd: []string{"sleep", "0.8"}, TimeoutSeconds: 5}
+
+	// Con el plazo de siempre, el agente real lo agota: así era el fallo.
+	b, _ := json.Marshal(req)
+	resp, err := guestClient.Post(g.URL+"/exec/stream", "application/json", strings.NewReader(string(b)))
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("el agente mandó las cabeceras antes de la salida: la prueba ya no reproduce el fallo")
+	}
+	if !errors.Is(err, errPlazoCabeceras) {
+		t.Fatalf("POST sin plazo propio = %v; quería errPlazoCabeceras", err)
+	}
+
+	body, code, err := openGuestExec(context.Background(), g.URL, req)
+	if err != nil {
+		t.Fatalf("exec callado: %d %v", code, err)
+	}
+	defer body.Close()
+	res, err := aggregateExec(readExecEvents(body, 1<<20))
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("exec callado = %+v, %v; quería exit 0", res, err)
+	}
+}

@@ -13,7 +13,9 @@
 #   - Verifica SHA256 contra SHA256SUMS publicado en la misma release, ANTES de
 #     mover nada a su sitio. Si la release trae SHA256SUMS.minisig y hay
 #     `minisign`, comprueba antes la firma de SHA256SUMS con las claves de
-#     KLING_RELEASE_PUBKEYS (docs/firmas.md); sin minisign, solo sha256 y un aviso.
+#     KLING_RELEASE_PUBKEYS (docs/firmas.md). Sin minisign: antes de v1.0.0,
+#     solo sha256 y un aviso; desde v1.0.0 (un -rc incluido), error salvo
+#     KLING_INSECURE_NO_MINISIGN=1.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #   - --with mcp,sandbox baja además esas extensiones de LA MISMA
@@ -55,6 +57,9 @@
 #   KLING_WITH      extensiones a instalar, como --with (ej. mcp,sandbox)
 #   KLING_PLUGIN_PATH  su primer directorio es donde van las extensiones
 #   KLING_NO_RC     =1 no toca tu rc (como --no-rc)
+#   KLING_INSECURE_NO_MINISIGN  =1 instala una release >= v1.0.0 sin minisign,
+#                   comprobando solo el sha256 (sin la firma no se sabe de dónde
+#                   viene el SHA256SUMS: solo si no puedes instalar minisign)
 
 set -u
 # NOTA: usamos `set -u` pero NO `set -e`. Los tests `[ ... ]` que comparan
@@ -101,7 +106,8 @@ Uso: install.sh [opciones]
   -h, --help         muestra esta ayuda
 
 Variables de entorno equivalentes: KLING_VERSION, KLING_PREFIX, KLING_REPO,
-KLING_WITH.
+KLING_WITH. Desde v1.0.0 hace falta minisign para comprobar la firma;
+KLING_INSECURE_NO_MINISIGN=1 instala sin él, solo con sha256.
 EOF
 }
 
@@ -333,7 +339,9 @@ get() {
 # KLING_RELEASE_PUBKEYS con minisign, y que se firmó para esta etiqueta (el
 # tag: del comentario de confianza; si no, el SHA256SUMS firmado de otra
 # release valdría para colar sus binarios). Sin firma: error desde
-# SIGNED_FROM_MAJOR, aviso antes. Sin minisign: aviso y solo sha256.
+# SIGNED_FROM_MAJOR, aviso antes. Sin minisign, igual: error desde
+# SIGNED_FROM_MAJOR (como `kling upgrade`, que no instala sin firma
+# comprobada), salvo KLING_INSECURE_NO_MINISIGN=1; antes, aviso y solo sha256.
 verify_sums_signature() {
     TAG_MAJOR="$(printf '%s' "${TAG#v}" | cut -d. -f1)"
     REQUIRED=0
@@ -353,6 +361,12 @@ verify_sums_signature() {
         return 0
     fi
     if ! command -v minisign >/dev/null 2>&1; then
+        if [ "$REQUIRED" = "1" ] && [ "${KLING_INSECURE_NO_MINISIGN:-0}" != "1" ]; then
+            fail "desde v${SIGNED_FROM_MAJOR}.0.0 compruebo la firma de SHA256SUMS y no encuentro minisign.
+  Instálalo y repite: brew install minisign (macOS), apt install minisign (Debian/Ubuntu),
+  dnf install minisign (Fedora) o https://jedisct1.github.io/minisign/.
+  Sin él, solo con sha256 y bajo tu responsabilidad: KLING_INSECURE_NO_MINISIGN=1"
+        fi
         warn "sin minisign no compruebo la firma de SHA256SUMS, solo sha256 (brew install minisign / apt install minisign)"
         return 0
     fi

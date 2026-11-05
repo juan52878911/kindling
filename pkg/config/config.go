@@ -19,11 +19,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 )
 
-// Version es la versión del formato de config.json (ver pkg/esquema).
+// Version es la versión del formato de config.json (ver internal/esquema).
 //
 //	0: sin campo (hasta v0.20).
 //	1: con "schema": 1. Solo añade el campo: un kling anterior lo lee igual.

@@ -18,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/internal/deb"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/oci"
+	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/scripts"
 )
 
@@ -41,6 +42,10 @@ type Debs struct {
 	T        time.Time
 	Marca    Marca
 	Logf     func(format string, a ...any)
+	// Agent es el kling-guest de la arquitectura de la base. Con él (y si
+	// sabe hacer de init, guest.InitMarker), Base.Write pone el init en Go
+	// en vez de minimal-init.sh. Vacío, el de sh, como siempre.
+	Agent string
 }
 
 func (d Debs) logf(format string, a ...any) {
@@ -320,6 +325,7 @@ type Base struct {
 	Image    string   // la imagen OCI de la que salió (repo@digest)
 	Packages []string // los .deb añadidos, "nombre=versión"
 	debs     Debs
+	arch     string
 }
 
 // PrepareBase arma la base: la imagen de lock (para arch) con los .deb pins
@@ -356,33 +362,86 @@ func PrepareBase(ctx context.Context, c *oci.Client, lock DebianBase, arch strin
 	if err := d.Ajustar(root, true); err != nil {
 		return nil, err
 	}
-	return &Base{Root: root, Streams: streams, Image: img.Ref, Packages: names, debs: d}, nil
+	return &Base{Root: root, Streams: streams, Image: img.Ref, Packages: names, debs: d, arch: arch}, nil
+}
+
+// guestAgentPath es donde PutAgent deja el agente.
+const guestAgentPath = "/usr/local/bin/kling-guest"
+
+// initEnGo dice si la base lleva el init en Go y, si no, por qué ("" si ni
+// se pidió: sin Agent). Hace falta un agente que sepa hacer de init y, con
+// verity, que su init busque la tabla y el dispositivo de esta Marca: si no,
+// arrancaría la capa sin verificar.
+func (b *Base) initEnGo(table string) (bool, string) {
+	if b.debs.Agent == "" {
+		return false, ""
+	}
+	f, err := os.Open(b.debs.Agent)
+	if err != nil {
+		return false, err.Error()
+	}
+	ok, err := guest.HasInitMarker(f)
+	f.Close()
+	switch {
+	case err != nil:
+		return false, err.Error()
+	case !ok:
+		return false, "the guest agent predates the Go init"
+	}
+	m := b.debs.Marca
+	if table != "" && (m.VerityConf() != guest.VerityConfPath || m.DM != guest.VerityDM) {
+		return false, "the Go init does not know this builder's verity table"
+	}
+	return true, ""
 }
 
 // Status es el /var/lib/dpkg/status de la base (del que parte el de una capa
 // que instala más paquetes).
 func (b *Base) Status() []byte { return StatusOf(b.Root) }
 
-// Write pone el resolv.conf, el init (minimal-init.sh; con table, el que
-// monta la capa a través de dm-verity, y la tabla) y los puntos de montaje, y
-// escribe la base en dst.
+// Write pone el resolv.conf, el init (con table, el que monta la capa a
+// través de dm-verity, y la tabla) y los puntos de montaje, y escribe la base
+// en dst.
+//
+// El init es el de Go (pkg/guest/init.go: el agente, enlazado como
+// overlay-init) si initEnGo lo permite, y si no minimal-init.sh. El de Go se
+// ahorra los ~25 fork+exec del script, dmsetup incluido, antes del agente.
 func (b *Base) Write(dst string, uuid [16]byte, table string) (ext4.Stats, error) {
 	t, m := b.debs.T, b.debs.Marca
 	if err := Put(b.Root, "/etc/resolv.conf", []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0o644, t); err != nil {
 		return ext4.Stats{}, err
 	}
-	init := scripts.MinimalInit
+	goInit, por := b.initEnGo(table)
+	if !goInit && por != "" {
+		b.debs.logf("base init: minimal-init.sh (%s)", por)
+	}
 	if table != "" {
-		var err error
-		if init, err = VerityInit(init, m); err != nil {
-			return ext4.Stats{}, err
-		}
 		if err := Put(b.Root, m.VerityConf(), VerityFile(m, table), 0o644, t); err != nil {
 			return ext4.Stats{}, err
 		}
 	}
-	if err := Put(b.Root, "/usr/sbin/overlay-init", []byte(init), 0o755, t); err != nil {
-		return ext4.Stats{}, err
+	if goInit {
+		// El agente en la base, y no solo en la capa: el init corre antes de
+		// montarla. Luego cede el PID 1 al de la raíz ya montada (el de la
+		// capa, que lo tapa), que es el que cambia un recambio del agente.
+		if err := PutAgent(b.Root, b.debs.Agent, b.arch, t); err != nil {
+			return ext4.Stats{}, err
+		}
+		if err := Link(b.Root, "/usr/sbin/overlay-init", guestAgentPath, t); err != nil {
+			return ext4.Stats{}, err
+		}
+		TouchParent(b.Root, "/usr/sbin/overlay-init", t)
+	} else {
+		init := scripts.MinimalInit
+		if table != "" {
+			var err error
+			if init, err = VerityInit(init, m); err != nil {
+				return ext4.Stats{}, err
+			}
+		}
+		if err := Put(b.Root, "/usr/sbin/overlay-init", []byte(init), 0o755, t); err != nil {
+			return ext4.Stats{}, err
+		}
 	}
 	for _, d := range []string{"/overlay", "/rom", "/run"} {
 		if _, err := b.Root.MkdirAll(d, 0o755, 0, 0, t); err != nil {

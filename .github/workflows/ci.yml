@@ -49,6 +49,15 @@ jobs:
           cache: true
           cache-dependency-path: ${{ matrix.dir }}/go.mod
 
+      # Para la prueba cruzada de firmas con el minisign de verdad
+      # (internal/upgrade/minisign_test.go; sin él se salta).
+      - name: instalar minisign
+        if: matrix.dir == '.'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          minisign -v
+
       - name: make test cross
         env:
           DIR: ${{ matrix.dir }}
@@ -224,6 +233,26 @@ jobs:
       - run: go vet ./...
       - run: GOOS=linux go vet ./...
       - run: go test -race -count=1 ./...
+      # Las pruebas de C de kling-hv (prueba.c, RAM de mentira, sin VM ni
+      # entitlement) con ASan y UBSan. Con tope: en macOS 26.5 el runtime de
+      # ASan se cuelga al arrancar (scripts/sanitizers-hv.sh); si el runner
+      # llegara a eso, que falle por tiempo y no se quede la hora entera.
+      - name: kling-hv C tests with ASan and UBSan
+        run: ./scripts/sanitizers-hv.sh
+        timeout-minutes: 15
+      # El fuzz de las colas virtio, corto: aleatorio puro (Go no ve la
+      # cobertura del C), así que 30 s por commit suman con el tiempo.
+      - name: FuzzColas (30 s)
+        run: go test -run '^$' -fuzz '^FuzzColas$' -fuzztime 30s ./internal/hvvm/
+        timeout-minutes: 5
+      # Lo que encuentre el fuzz queda en testdata/fuzz: se guarda para
+      # reproducirlo en local (go test -run FuzzColas/<id>).
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-colas
+          path: vz/internal/hvvm/testdata/fuzz
+          if-no-files-found: ignore
       # vz es cgo y solo de macOS: su govulncheck va aquí y no en lint.
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       # El mínimo de macOS de cada VMM se fija como en release.yml: sin él
@@ -246,6 +275,28 @@ jobs:
       - run: codesign -d --entitlements - bin/kling-hv 2>&1 | grep -q com.apple.security.hypervisor
       - run: otool -l bin/kling-hv | grep -A4 LC_BUILD_VERSION | grep -q 'minos 15.2$'
       - run: bin/kling-hv --version
+      # La sonda que mira `daemon.vmm auto`. Los runners de GitHub son VMs sin
+      # virtualización anidada (kern.hv_support 0): ahí hv_vm_create no puede
+      # ir bien, y lo que se comprueba es que la sonda conteste con su código
+      # 1 y el motivo en vez de colgarse o morir de una señal, que es lo que
+      # el daemon necesita para caer a vz. Con hipervisor tiene que dar "ok".
+      - name: kling-hv --probe
+        timeout-minutes: 2
+        run: |
+          hv=$(sysctl -n kern.hv_support 2>/dev/null || echo 0)
+          rc=0
+          out=$(bin/kling-hv --probe 2>&1) || rc=$?
+          echo "kern.hv_support=$hv; kling-hv --probe: exit $rc: $out"
+          if [ "$hv" = 1 ]; then
+            [ "$rc" -eq 0 ] && [ "$out" = ok ]
+          else
+            [ "$rc" -eq 1 ] || { echo "::error::kling-hv --probe exited $rc (want 1 without a hypervisor)"; exit 1; }
+            case "$out" in
+              *"hv_vm_create failed"*|*"hv_gic_create failed"*) ;;
+              *) echo "::error::kling-hv --probe did not say why it failed: $out"; exit 1 ;;
+            esac
+            echo "::notice::no hypervisor on this runner (kern.hv_support=$hv): the probe answered \"$out\""
+          fi
 
   # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que
   # aquí el clon es de verdad. Además corren enteros internal/machine e

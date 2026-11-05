@@ -17,16 +17,30 @@
 #   IMAGES_DIR=/ruta ./92-e2e-mac.sh                    las clona (cp -c) de un directorio
 #   KEEP=1 ./92-e2e-mac.sh                              no limpia (para inspeccionar)
 #   VMM=hv ./92-e2e-mac.sh                              contra kling-hv (Hypervisor.framework)
+#   scripts/e2e-mac-release.sh                          todo para el paso 3c de releases.md
+#
+# Sin FROM ni IMAGES_DIR la prueba se basta sola en un Mac pelado: el núcleo
+# (vmlinux) lo clona con cp -c del kindling instalado (KLING_E2E_DATA, por
+# defecto ~/Library/Application Support/kindling/images, solo se lee) y la
+# imagen la construye con el constructor debian, sin root, en el daemon de la
+# prueba: e2e-tools, de scripts/e2e-tools.spec.json (python3 y wget sobre
+# trixie, con su lock: no baja índices). Se guarda en KLING_E2E_CACHE (por
+# defecto ~/.cache/kling-e2e) y solo se rehace si cambian el spec o el agente.
+# El agente del invitado es KLING_GUEST_AGENT, el kling-guest junto a KLING o,
+# si no hay, uno compilado aquí con go.
 #
 # Variables: VMM (vz o hv, el backend; su kling-vz o kling-hv va junto a KLING),
 # KLING (binario; el VMM junto a él o KLING_VMM), ROOT (por defecto
 # una ruta a propósito más larga que sun_path), SOCK, IMG (imagen con agente de
-# invitado, por defecto toolchain), BRIDGE_IMG (imagen con puente MCP en 8080,
+# invitado: toolchain si FROM, IMAGES_DIR o $ROOT/images la traen; si no,
+# e2e-tools), BRIDGE_IMG (imagen con puente MCP en 8080,
 # por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10),
 # las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta) y
 # las de la 6f (kling db: KLING_DB, KLING_E2E_DB_GOLDEN, KLING_E2E_DB_SEED_MB; sin
 # Go ni red se salta, y lo dice) y las KLING_E2E_DB_GOLDEN* de 6h (la arista
-# credential; si 6f construyó su golden, lo usa).
+# credential; si 6f construyó su golden, lo usa). KLING_E2E_LOGS (un directorio):
+# si la prueba falla, ahí van el log del daemon y la consola de cada máquina
+# antes de que la limpieza los borre.
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -38,7 +52,7 @@ case "$KLING" in */*) KLING="$(cd "$(dirname "$KLING")" && pwd)/$(basename "$KLI
 TMPBASE="${TMPDIR:-/tmp}"; TMPBASE="${TMPBASE%/}"
 ROOT="${ROOT:-$TMPBASE/kling-e2e-mac/Library/Application Support/kindling-e2e-a-deliberately-long-root}"
 SOCK="${SOCK:-/tmp/kling-e2e-$(id -u).sock}"
-IMG="${IMG:-toolchain}"
+IMG="${IMG:-}"   # vacío: se decide en el paso 0 (toolchain o e2e-tools)
 BRIDGE_IMG="${BRIDGE_IMG:-fetch}"
 MEM="${MEM:-256}"
 BURST="${BURST:-10}"
@@ -58,6 +72,13 @@ export KLING_HOST="unix://$SOCK"
 # contexto activo...) no cambie lo que se mide: una configuración vacía.
 export KLING_CONFIG="${TMPBASE}/kling-e2e-mac-config-$$.json"
 export KLING_MAX_PARALLEL_BOOT="${KLING_MAX_PARALLEL_BOOT:-4}"
+# El daemon no arranca máquinas con menos de 16 GiB libres en el Mac; la prueba
+# entera cabe en unos 2 GiB y se corre en Macs de trabajo con el disco justo.
+export KLING_MIN_FREE_DISK_MIB="${KLING_MIN_FREE_DISK_MIB:-4096}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+KLING_E2E_DATA="${KLING_E2E_DATA:-$HOME/Library/Application Support/kindling/images}"
+KLING_E2E_CACHE="${KLING_E2E_CACHE:-$HOME/.cache/kling-e2e}"
+E2E_SPEC="$HERE/e2e-tools.spec.json"
 # Carpetas compartidas vivas: el daemon de la prueba solo sirve las de aquí.
 SHARES="$TMPBASE/kling-e2e-mac/shares-$$"
 export KLING_SHARE_ROOTS="$SHARES"
@@ -133,7 +154,24 @@ stop_daemon() {
   DPID=""
 }
 
+# guardar_logs copia en KLING_E2E_LOGS el log del daemon, `ps -a` y la consola
+# de cada máquina que quede (las copias de un fork deshecho ya no están: su
+# muerte la cuenta el log del daemon).
+guardar_logs() {
+  [ -n "${KLING_E2E_LOGS:-}" ] || return 0
+  mkdir -p "$KLING_E2E_LOGS/machines" || return 0
+  [ -f "$LOG" ] && cp "$LOG" "$KLING_E2E_LOGS/daemon.log"
+  [ -n "$DPID" ] && k ps -a > "$KLING_E2E_LOGS/ps.txt" 2>&1
+  local f
+  for f in "$ROOT"/machines/*/firecracker.log; do
+    [ -f "$f" ] && cp "$f" "$KLING_E2E_LOGS/machines/$(basename "$(dirname "$f")").log"
+  done
+  echo "logs kept in $KLING_E2E_LOGS"
+}
+
 cleanup() {
+  local rc=$?
+  { [ "$rc" != 0 ] || [ "$fail" -gt 0 ]; } && guardar_logs
   if [ "$KEEP" = "1" ]; then echo; echo "KEEP=1: not cleaning up. Daemon pid $DPID, root $ROOT"; return; fi
   echo; echo "cleaning up..."
   if [ -n "$DPID" ]; then
@@ -145,10 +183,54 @@ cleanup() {
   pkill -KILL -f "$VMMB --api-sock $ROOT/" 2>/dev/null
   rm -f "$KLING_CONFIG"
   rm -rf "$SHARES" "${DBSTAGE:-}" "${GTMP:-}"
+  rmdir "$(dirname "$SHARES")" 2>/dev/null
 }
 trap cleanup EXIT
 
 APPLE_BEFORE=$(apple_vms)
+
+# agente_invitado deja en $ROOT/lib/kling-guest el agente (Linux arm64) que meten
+# los constructores debian y oci: KLING_GUEST_AGENT, el kling-guest junto a
+# KLING o uno compilado aquí con go, sellado con la versión de KLING. Nunca el
+# del kindling instalado: sería el de otra versión.
+agente_invitado() {
+  local a="${KLING_GUEST_AGENT:-}" v
+  mkdir -p "$ROOT/lib"
+  if [ -z "$a" ]; then
+    case "$KLING" in */*) [ -f "$(dirname "$KLING")/kling-guest" ] && a="$(dirname "$KLING")/kling-guest";; esac
+  fi
+  if [ -n "$a" ]; then
+    contiene "$(file -b "$a" 2>&1)" "ELF 64-bit LSB executable, ARM aarch64" \
+      || { echo "$a is not a linux/arm64 kling-guest" >&2; return 1; }
+    cp "$a" "$ROOT/lib/kling-guest"; return
+  fi
+  command -v go >/dev/null && [ -d "$HERE/../cmd/kling-guest" ] \
+    || { echo "no guest agent: set KLING_GUEST_AGENT, put kling-guest next to $KLING, or install go" >&2; return 1; }
+  v=$("$KLING" version 2>/dev/null | awk 'NR==1{print $2}')
+  (cd "$HERE/.." && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+    -ldflags "-s -w -X main.Version=${v:-dev}" -o "$ROOT/lib/kling-guest" ./cmd/kling-guest)
+}
+# La caché de e2e-tools: la imagen (capa y base, con sus recetas) y, aparte,
+# lo que el constructor bajó (los .deb y la base de Debian), para que una imagen
+# rehecha porque cambió el agente no vuelva a bajar nada. La clave es el spec
+# más el agente que lleva dentro.
+E2E_FILES="e2e-tools.layer.ext4 e2e-tools.recipe.json e2e-tools-base.ext4 e2e-tools-base.recipe.json"
+e2e_clave() { cat "$E2E_SPEC" "$ROOT/lib/kling-guest" | shasum -a 256 | awk '{print $1}'; }
+e2e_de_cache() {
+  local c="$KLING_E2E_CACHE/images" f
+  [ -f "$c/e2e-tools.key" ] && [ "$(cat "$c/e2e-tools.key")" = "$1" ] || return 1
+  for f in $E2E_FILES; do [ -f "$c/$f" ] || return 1; done
+  for f in $E2E_FILES; do rm -f "$ROOT/images/$f"; cp -c "$c/$f" "$ROOT/images/$f" || return 1; done
+}
+e2e_a_cache() {
+  local c="$KLING_E2E_CACHE/images" f
+  mkdir -p "$c" "$KLING_E2E_CACHE/builder" && rm -f "$c/e2e-tools.key" || return 1
+  for f in $E2E_FILES; do
+    cp -c "$ROOT/images/$f" "$c/$f.tmp" && mv -f "$c/$f.tmp" "$c/$f" || return 1
+  done
+  [ -d "$ROOT/cache" ] && cp -cR "$ROOT/cache/." "$KLING_E2E_CACHE/builder/"
+  echo "$1" > "$c/e2e-tools.key"
+}
 
 # ── 0. imágenes y daemon ──────────────────────────────────────────────────────
 step "0. Setup"
@@ -159,6 +241,30 @@ if [ -n "$IMAGES_DIR" ]; then
     [ -f "$f" ] && [ ! -f "$ROOT/images/$(basename "$f")" ] && cp -c "$f" "$ROOT/images/"
   done
 fi
+# El núcleo, si nadie lo ha traído: un clon (cp -c) del kindling instalado, que
+# solo se lee.
+if [ ! -f "$ROOT/images/vmlinux" ]; then
+  if [ -f "$KLING_E2E_DATA/vmlinux" ] && cp -c "$KLING_E2E_DATA/vmlinux" "$ROOT/images/vmlinux"; then
+    info "vmlinux cloned from $KLING_E2E_DATA"
+  else
+    echo "no vmlinux: set IMAGES_DIR, FROM or KLING_E2E_DATA (a directory with vmlinux)" >&2; exit 1
+  fi
+fi
+if [ -z "$IMG" ]; then
+  if [ -n "$FROM" ] || [ -f "$ROOT/images/toolchain.layer.ext4" ] || [ -f "$ROOT/images/toolchain.ext4" ]; then IMG=toolchain; else IMG=e2e-tools; fi
+fi
+E2E_BUILD=""
+if [ "$IMG" = e2e-tools ] && [ -z "$FROM" ]; then
+  agente_invitado || { echo "e2e-tools needs a linux/arm64 guest agent" >&2; exit 1; }
+  E2E_KEY=$(e2e_clave)
+  if e2e_de_cache "$E2E_KEY"; then
+    info "image e2e-tools from the cache in $KLING_E2E_CACHE (key ${E2E_KEY:0:12})"
+  else
+    E2E_BUILD=1
+    # Lo que bajaron construcciones anteriores, para no bajarlo otra vez.
+    [ -d "$KLING_E2E_CACHE/builder" ] && mkdir -p "$ROOT/cache" && cp -cR "$KLING_E2E_CACHE/builder/." "$ROOT/cache/"
+  fi
+fi
 if pgrep -f "kling daemon -root $ROOT" >/dev/null; then
   echo "a daemon is already running on $ROOT; stop it first" >&2; exit 1
 fi
@@ -168,8 +274,19 @@ if [ -n "$FROM" ]; then
     out=$(k image copy "$i" -from "$FROM" 2>&1) && ok "images copy $i from $FROM" || bad "images copy $i" "copied" "$out"
   done
 fi
+if [ -n "$E2E_BUILD" ]; then
+  t0=$(now_ms)
+  if out=$(k image build e2e-tools -builder debian -spec "$E2E_SPEC" 2>&1); then
+    ok "image e2e-tools built with the debian builder ($(( ($(now_ms)-t0)/1000 )) s)"
+    e2e_a_cache "$E2E_KEY" && info "cached in $KLING_E2E_CACHE (key ${E2E_KEY:0:12})" || info "could not cache it in $KLING_E2E_CACHE"
+  else
+    echo "could not build e2e-tools (the debian builder needs network the first time):" >&2
+    printf '%s\n' "$out" | tail -5 >&2; exit 1
+  fi
+fi
 imgs=$(k image ls 2>&1)
 contiene "$imgs" "$IMG " || { echo "image $IMG is not in $ROOT/images; set FROM or IMAGES_DIR" >&2; exit 1; }
+info "guest image: $IMG"
 HAVE_BRIDGE=0; contiene "$imgs" "$BRIDGE_IMG " && HAVE_BRIDGE=1
 
 # Un segundo daemon sobre la misma raíz tiene que negarse: si no, cada uno
@@ -211,6 +328,9 @@ err=$(cat "$TMPBASE/e2e-err.$$"); rm -f "$TMPBASE/e2e-err.$$"
 GUEST_V=$(k exec "$M" -- /usr/local/bin/kling-guest -version 2>/dev/null | tr -d '\r')
 DAEMON_V=$(k version 2>/dev/null | sed -n 's/^daemon: \([^ ]*\).*/\1/p')
 info "guest agent in $IMG: ${GUEST_V:-unknown}, daemon: ${DAEMON_V:-unknown}"
+# Con apk (toolchain, Alpine) el golden de 6f se hace sobre IMG; sin él
+# (e2e-tools, Debian), desde la imagen de Docker de Postgres.
+HAS_APK=0; [ "$(k exec "$M" -- sh -c 'command -v apk >/dev/null && echo yes' 2>/dev/null)" = yes ] && HAS_APK=1
 lat=()
 for i in 1 2 3 4 5 6 7 8 9 10; do
   t0=$(now_ms); k exec "$M" -- true >/dev/null 2>&1; t1=$(now_ms); lat+=($((t1-t0)))
@@ -226,7 +346,10 @@ else
 fi
 rm -f "$f" "$f.back"
 
-out=$(printf 'echo tty-$((6*7))\nexit 5\n' | script -q /dev/null "$KLING" shell "$M" 2>&1); rc=$?
+# La entrada llega un segundo después, como al teclear: lo escrito antes de que
+# la shell del invitado esté leyendo se pierde (script manda ^D al acabar su
+# entrada), siempre con dash y dos de cada tres veces con busybox.
+out=$( (sleep 1; printf 'echo tty-$((6*7))\nexit 5\n') | script -q /dev/null "$KLING" shell "$M" 2>&1); rc=$?
 out=$(printf '%s' "$out" | tr -d '\r')
 contiene "$out" "tty-42" && [ $rc -eq 5 ] && ok "shell over a pty (script): output and exit code 5" \
   || bad "shell" "tty-42 and rc=5" "rc=$rc $(printf '%s' "$out" | tail -3)"
@@ -409,7 +532,8 @@ more" ] && [ "$hlink" = "d/e/g2" ] && contiene "$out" "not permitted" && [ ! -L 
   out=$(k exec "$S" -- cat /w/host.txt 2>&1)
   [ "$out" = "two" ] && ok "rw: a host edit shows up inside" || bad "host edit" "two" "$out"
   out=$(k exec -timeout 5m "$S" -- sh -c 'dd if=/dev/zero of=/w/big bs=1M count=200 conv=fsync 2>&1 | tail -1; echo 3 > /proc/sys/vm/drop_caches; dd if=/w/big of=/dev/null bs=1M 2>&1 | tail -1; rm /w/big' 2>&1)
-  SH_W=$(echo "$out" | sed -n 1p | grep -o '[0-9.]*[MG]B/s' || true); SH_R=$(echo "$out" | sed -n 2p | grep -o '[0-9.]*[MG]B/s' || true)
+  # busybox dice "400.0MB/s" y el dd de coreutils (Debian) "400 MB/s".
+  SH_W=$(echo "$out" | sed -n 1p | grep -o '[0-9][0-9.]* *[kMG]B/s' || true); SH_R=$(echo "$out" | sed -n 2p | grep -o '[0-9][0-9.]* *[kMG]B/s' || true)
   [ -n "$SH_W" ] && [ -n "$SH_R" ] && ok "rw: sequential write $SH_W, read $SH_R" || bad "throughput" "two dd results" "$out"
   SH_SMALL=$(k exec -timeout 5m "$S" -- python3 -c '
 import os, time
@@ -912,7 +1036,6 @@ sys.exit(1)" >/dev/null 2>&1; }
 # file that is searched at the end for every password: it must find none.
 
 step "6f. kling db"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 DBSTAGE=$(mktemp -d "$TMPBASE/kling-e2e-db.XXXXXX")
 DBSKIP=""
 DBREALDIR="$HOME/.local/state/kling-db"
@@ -940,7 +1063,27 @@ elif ! k db --help >/dev/null 2>&1; then
 fi
 [ -n "$DBSKIP" ] || k db --help >/dev/null 2>&1 || DBSKIP="the kling-db plugin is not usable"
 
-# 2. the golden, if none was given
+# 2. the golden, if none was given. Sin apk en IMG, kling db golden -from-oci
+# (KLING_E2E_DB_OCI, postgres:16-alpine por defecto): la misma db-golden.sh
+# sobre la imagen de Docker importada, con el constructor oci.
+if [ -z "$DBSKIP" ] && [ -z "$DBG" ] && [ "$HAS_APK" = 0 ]; then
+  DBOCI="${KLING_E2E_DB_OCI:-postgres:16-alpine}"; DBG="$P-pg"
+  if ! curl -sSI -m 8 -o /dev/null https://registry-1.docker.io/v2/ 2>/dev/null; then
+    DBSKIP="no network to fetch $DBOCI; the golden cannot be built"
+  elif [ ! -s "$ROOT/lib/kling-guest" ] && ! agente_invitado; then
+    DBSKIP="no guest agent for the oci builder"
+  else
+    info "building the golden $DBG from $DBOCI (IMG has no apk)"
+    if gout=$(KLING="$KLING" k db golden -script "$HERE/db-golden.sh" -from-oci "$DBOCI" build -mem "${KLING_E2E_DB_MEM:-1G}" \
+                -seed-mb "${KLING_E2E_DB_SEED_MB:-8}" -state "$DBSTAGE/golden-state" "$DBG" 2>&1 </dev/null); then
+      ok "kling db golden -from-oci $DBOCI: golden $DBG"; DBBUILT=1
+      DBREALDIR="$DBSTAGE/golden-state"
+      [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ] || KLING_E2E_DB_GOLDEN_PASSWORD=$(cat "$DBREALDIR/$DBG/password" 2>/dev/null)
+    else
+      bad "kling db golden -from-oci $DBOCI" "golden built" "$(printf '%s' "$gout" | tail -4)"; DBSKIP="the golden did not build"
+    fi
+  fi
+fi
 if [ -z "$DBSKIP" ] && [ -z "$DBG" ]; then
   if ! curl -sSI -m 8 -o /dev/null https://dl-cdn.alpinelinux.org/ 2>/dev/null; then
     DBSKIP="no network to fetch postgresql16 (apk); the golden cannot be built"
@@ -1445,7 +1588,7 @@ EOF
 fi
 
 # El golden de 6f, si lo construyó este script, ya no hace falta.
-if [ "$DBBUILT" = 1 ]; then k template rm "$DBG" >/dev/null 2>&1; k template rm "$GBASE" >/dev/null 2>&1; fi
+if [ "$DBBUILT" = 1 ]; then k template rm "$DBG" >/dev/null 2>&1; [ -n "${GBASE:-}" ] && k template rm "$GBASE" >/dev/null 2>&1; fi
 
 # ── 9. nada suelto ───────────────────────────────────────────────────────────
 step "9. leftovers"

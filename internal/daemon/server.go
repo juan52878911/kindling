@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -47,7 +48,7 @@ var Capabilities = []string{"annotations", "store", "builders", "image-files", "
 // hasta GuestMaxBodyCap de búfer del daemon— sí (D-01).
 //
 // Deliberadamente NO toca la espera de las CABECERAS: eso sigue siendo
-// ResponseHeaderTimeout en guestClient, generoso a propósito porque una
+// plazoCabeceras en guestClient, generoso a propósito porque una
 // herramienta dentro del invitado (un escaneo de semgrep, por ejemplo) puede
 // tardar lo suyo en tener algo que contestar. Es la lectura del cuerpo, una
 // vez que ya se sabe que hay alguien al otro lado, la que no debe poder
@@ -61,8 +62,8 @@ var guestProgressTimeout = 60 * time.Second
 // /machines/{ref}/guest. No puede ser guestProgressTimeout: un servidor MCP
 // Streamable HTTP contesta con cabeceras de text/event-stream enseguida y manda
 // el evento con el resultado cuando la herramienta acaba, y una respuesta de
-// chat/completions sin streaming (pkg/von) puede tardar minutos en un modelo en
-// CPU. Se le da el mismo margen que a las cabeceras (ResponseHeaderTimeout de
+// chat/completions sin streaming (internal/von) puede tardar minutos en un modelo en
+// CPU. Se le da el mismo margen que a las cabeceras (plazoCabeceras de
 // guestClient): lo que sí sigue acotado es el goteo infinito.
 var guestProxyIdleTimeout = 5 * time.Minute
 
@@ -176,17 +177,94 @@ func (g *transportesInvitado) de(host string) *http.Transport {
 		}
 		g.porID = map[string]*http.Transport{}
 	}
+	// Sin ResponseHeaderTimeout: lo pone RoundTrip por petición (plazoCabeceras).
 	t := &http.Transport{
-		ResponseHeaderTimeout: 5 * time.Minute,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
 	}
 	g.porID[host] = t
 	return t
 }
 
+// plazoCabeceras es cuánto se esperan las cabeceras del invitado si la petición
+// no dice otra cosa (conPlazoCabeceras). Es por petición y no el
+// ResponseHeaderTimeout del transporte porque /exec/stream necesita más: el
+// agente no manda las cabeceras hasta la primera salida del comando, y un
+// comando callado con -timeout de más de 5 min acababa en "net/http: timeout
+// awaiting response headers" aunque estuviera trabajando. Variable y no const
+// solo para que los tests puedan acortarla.
+var plazoCabeceras = 5 * time.Minute
+
+type clavePlazoCabeceras struct{}
+
+// conPlazoCabeceras hace que las peticiones al invitado hechas con ctx esperen
+// sus cabeceras hasta d en vez de plazoCabeceras.
+func conPlazoCabeceras(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, clavePlazoCabeceras{}, d)
+}
+
+// errPlazoCabeceras: el invitado no mandó las cabeceras a tiempo.
+var errPlazoCabeceras = errors.New("timeout awaiting response headers from the guest")
+
 func (g *transportesInvitado) RoundTrip(req *http.Request) (*http.Response, error) {
-	return g.de(req.URL.Host).RoundTrip(req)
+	d := plazoCabeceras
+	if v, ok := req.Context().Value(clavePlazoCabeceras{}).(time.Duration); ok && v > 0 {
+		d = v
+	}
+	// El plazo solo cubre hasta las cabeceras: se cancela un contexto propio si
+	// vence antes, y si no se para el reloj y el cuerpo sigue con el de quien
+	// llama (cancel se suelta al cerrarlo).
+	ctx, cancel := context.WithCancel(req.Context())
+	var vencido atomic.Bool
+	reloj := time.AfterFunc(d, func() { vencido.Store(true); cancel() })
+	resp, err := g.de(req.URL.Host).RoundTrip(req.WithContext(ctx))
+	parado := reloj.Stop()
+	if err != nil {
+		cancel()
+		if vencido.Load() {
+			err = fmt.Errorf("%w (%s)", errPlazoCabeceras, d)
+		}
+		return nil, err
+	}
+	if !parado {
+		// Venció justo al llegar las cabeceras: el cuerpo ya está cancelado.
+		resp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("%w (%s)", errPlazoCabeceras, d)
+	}
+	// Un 101 (shell, carpetas vivas) trae un cuerpo en el que también se
+	// escribe: quien lo recibe lo toma como io.ReadWriteCloser, y envolverlo
+	// en un ReadCloser rompía kling shell ("could not be taken over").
+	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
+		resp.Body = &cuerpoRWConCancel{ReadWriteCloser: rwc, cancel: cancel}
+		return resp, nil
+	}
+	resp.Body = &cuerpoConCancel{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// cuerpoConCancel suelta el contexto de RoundTrip al cerrar el cuerpo.
+type cuerpoConCancel struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cuerpoConCancel) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
+// cuerpoRWConCancel es cuerpoConCancel para la conexión de un 101.
+type cuerpoRWConCancel struct {
+	io.ReadWriteCloser
+	cancel context.CancelFunc
+}
+
+func (c *cuerpoRWConCancel) Close() error {
+	err := c.ReadWriteCloser.Close()
+	c.cancel()
+	return err
 }
 
 // CloseIdleConnections cierra las ociosas de todos (http.Client lo reenvía).
@@ -709,6 +787,9 @@ func fail(w http.ResponseWriter, code int, err error) {
 	if errors.As(err, &se) && se.Code != 0 {
 		code = se.Code
 	}
+	if code == http.StatusTooManyRequests && errors.Is(err, errInvitadoOcupado) {
+		w.Header().Set("Retry-After", guestBusyRetryAfter)
+	}
 	writeJSON(w, code, api.Error{Message: err.Error(), Code: codigoDeError(code, err)})
 }
 
@@ -729,6 +810,9 @@ func codigoDeError(status int, err error) api.ErrorCode {
 			return api.CodeMachineLimit
 		}
 	case api.StatusTenantQuota:
+		if errors.Is(err, errInvitadoOcupado) {
+			return api.CodeGuestBusy
+		}
 		if api.IsTenantQuota(err) {
 			return api.CodeTenantQuota
 		}
@@ -815,7 +899,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info.EncryptedAtRest = &cifrado
 	}
 	// Los ajustes del host no son de ningún inquilino, ni sus fondos.
-	if _, filtra := inquilinoDe(r); !filtra {
+	_, filtra := inquilinoDe(r)
+	s.infoKernel(&info, !filtra)
+	if !filtra {
 		info.Tuning = s.ajustes()
 		info.PoolProblems = s.mgr.ProblemasFondos()
 		info.Stuck = s.mgr.Atascadas()

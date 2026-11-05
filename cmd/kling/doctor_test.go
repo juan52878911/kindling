@@ -177,6 +177,39 @@ func TestWriteTuning(t *testing.T) {
 	}
 }
 
+// El kernel instalado sale siempre que el daemon lo manda; con dorados o
+// congeladas de otro kernel la línea avisa y los nombra.
+func TestDoctorKernel(t *testing.T) {
+	buscar := func(in doctorInput) *doctorCheck {
+		for _, c := range doctorChecks(in) {
+			if c.Name == "kernel" {
+				return &c
+			}
+		}
+		return nil
+	}
+	in := doctorInput{cliVersion: "v1", completion: true, info: &api.Info{Version: "1"}}
+	if c := buscar(in); c != nil {
+		t.Fatalf("un daemon anterior no manda el sha: sin línea, no %+v", c)
+	}
+	in.info.KernelSHA256 = "0123456789abcdef0123"
+	c := buscar(in)
+	if c == nil || c.State != doctorOK || c.Detail != "kernel_sha256 0123456789ab" {
+		t.Fatalf("kernel = %+v", c)
+	}
+	in.info.KernelMismatch = []api.KernelMismatch{
+		{Kind: "snapshot", Name: "pg", KernelSHA256: "ffffffffffffffff"},
+		{Kind: "machine", Name: "web", KernelSHA256: "eeeeeeeeeeeeeeee"},
+	}
+	c = buscar(in)
+	if c == nil || c.State != doctorWarn ||
+		!strings.Contains(c.Detail, "1 template(s) made with another kernel: pg (ffffffffffff)") ||
+		!strings.Contains(c.Detail, "1 frozen machine(s) made with another kernel: web (eeeeeeeeeeee)") ||
+		!strings.Contains(c.Fix, "kling save -replace") {
+		t.Fatalf("kernel con otros = %+v", c)
+	}
+}
+
 func TestDoctorStale(t *testing.T) {
 	in := doctorInput{cliVersion: "v1", info: &api.Info{Version: "1"}, completion: true,
 		snaps: []*api.Snapshot{{Name: "ok"}, {Name: "viejo", Stale: "firecracker 1.12 → 1.17"}}}

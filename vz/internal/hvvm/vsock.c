@@ -20,11 +20,14 @@
 #include <mach/mach_time.h>
 #include <poll.h>
 #include <string.h>
+#include <sys/event.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "khv.h"
+#include "vq_iov.h"
 
 #define VS_HOST_CID 2
 #define VS_GUEST_CID 3
@@ -66,6 +69,7 @@ struct vconn {
   bool cerrar;        // cierre completo del invitado: RST en cuanto se vacíe pend
   int resultado;      // para quien marca: 0 esperando, 1 abierta, -1 rechazada
   uint64_t t_cierre;  // mach_absolute_time() del SHUTDOWN completo que se mandó
+  bool vigilada;      // su cierre completo lo avisa kq (ver vigilar)
   // gen sube al liberar el slot y al tomarlo: quien marca reconoce así su
   // conexión. El fd no basta: liberar lo cierra y el dial siguiente que tome
   // el slot puede recibir el mismo número.
@@ -78,6 +82,10 @@ static bool activo;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // quien marca espera aquí; también la reanudación
 static int despertador[2] = {-1, -1};
+// kq avisa, sin sondear, de que Go cerró del todo su extremo de una conexión
+// que el poll ya no mira (ver vigilar). -1 si no se pudo crear: entonces la
+// sonda de cada segundo (sondear_cerradas).
+static int kq = -1;
 static struct vconn conns[VS_MAXCONN];
 static uint32_t sig_puerto = 49152;
 static struct {
@@ -152,22 +160,38 @@ static void vaciar(struct vconn *c) {
 
 // ---------- tx: lo que manda el invitado (hilo del vCPU, con mu) ----------
 
-static void rw(struct vconn *c, const uint8_t *d, uint32_t n) {
+// iov_sacar copia a dst los primeros len bytes de iov (que ya se sabe que los
+// tiene).
+static void iov_sacar(void *dst, const struct iovec *iov, int n, size_t len) {
+  uint8_t *o = dst;
+  for (int j = 0; j < n && len > 0; j++) {
+    size_t d = iov[j].iov_len < len ? iov[j].iov_len : len;
+    memcpy(o, iov[j].iov_base, d);
+    o += d;
+    len -= d;
+  }
+}
+
+// rw escribe en fd los n bytes de datos que manda el invitado, directamente
+// desde sus búferes (d, nd iovec, ya medidos y dentro de la RAM); lo que no
+// cabe va a pend.
+static void rw(struct vconn *c, const struct iovec *d, int nd, uint32_t n) {
   if (c->estado != C_ABIERTA || c->guest_eof) return;
-  if (c->npend == 0) {
-    ssize_t w = write(c->fd, d, n);
+  uint32_t salto = 0;
+  if (c->npend == 0 && n > 0) {  // writev sin iovec da EINVAL
+    ssize_t w = writev(c->fd, d, nd);
     if (w < 0 && errno != EAGAIN && errno != EINTR) {
       c->p_rst = true;
       return;
     }
     if (w > 0) {
-      d += w;
-      n -= (uint32_t)w;
+      salto = (uint32_t)w;
       c->fwd_cnt += (uint32_t)w;
     }
   }
-  if (n > 0) {
-    if (c->npend + n > VS_BUF) {  // se saltó el crédito
+  uint32_t resto = n - salto;
+  if (resto > 0) {
+    if (c->npend + resto > VS_BUF) {  // se saltó el crédito
       c->p_rst = true;
       return;
     }
@@ -175,19 +199,40 @@ static void rw(struct vconn *c, const uint8_t *d, uint32_t n) {
       c->p_rst = true;
       return;
     }
-    memcpy(c->pend + c->npend, d, n);
-    c->npend += n;
+    static struct iovec tramo[QMAX];
+    int k = iov_tramo(d, nd, salto, resto, tramo);
+    iov_sacar(c->pend + c->npend, tramo, k, resto);
+    c->npend += resto;
   }
   if (c->fwd_cnt - c->fwd_avisado >= VS_BUF / 4) c->p_credit = true;
 }
 
-static void paquete(const struct vs_hdr *h, const uint8_t *d) {
-  if (h->type != TYPE_STREAM || h->src_cid != VS_GUEST_CID || h->dst_cid != VS_HOST_CID) return;
+// mira resume lo de una conexión que decide qué hace vs_hilo: qué fd espera
+// en poll (armar_poll, por_cerrar) y qué manda (bombear, vaciar). Si un
+// paquete del invitado no lo cambia, el hilo no tiene nada nuevo que hacer
+// por él y no hace falta despertarlo. Cualquier campo que lean esas
+// funciones y cambie tx tiene que estar aquí: si no, el hilo se queda
+// esperando en poll con el conjunto viejo (un despertar perdido).
+static uint32_t mira(const struct vconn *c) {
+  return (uint32_t)c->estado | (uint32_t)c->p_request << 2 | (uint32_t)c->p_credit << 3 |
+         (uint32_t)c->p_rst << 4 | (uint32_t)(c->p_shut != 0) << 5 | (uint32_t)(c->npend > 0) << 6 |
+         (uint32_t)(credito(c) > 0) << 7 | (uint32_t)c->host_eof << 8 | (uint32_t)c->guest_eof << 9 |
+         (uint32_t)c->guest_sordo << 10 | (uint32_t)c->cerrar << 11;
+}
+
+// paquete atiende un paquete del invitado con su cabecera h y sus datos (d,
+// nd iovec, h->len bytes). Devuelve si cambió algo que vs_hilo tenga que ver:
+// un RST por mandar, o lo que resume mira (crédito que se abre, una conexión
+// que se abre o se libera, pend que se llena o se vacía, un cierre...).
+static bool paquete(const struct vs_hdr *h, const struct iovec *d, int nd) {
+  if (h->type != TYPE_STREAM || h->src_cid != VS_GUEST_CID || h->dst_cid != VS_HOST_CID) return false;
   struct vconn *c = buscar(h->dst_port, h->src_port);
   if (!c) {
+    int n = n_rst;
     if (h->op != OP_RST) encolar_rst(h->dst_port, h->src_port);
-    return;
+    return n_rst != n;
   }
+  uint32_t antes = mira(c), gen = c->gen;
   c->peer_buf = h->buf_alloc;
   c->peer_fwd = h->fwd_cnt;
   switch (h->op) {
@@ -207,12 +252,13 @@ static void paquete(const struct vs_hdr *h, const uint8_t *d) {
       c->cerrar = c->guest_eof && c->guest_sordo;
       vaciar(c);
       break;
-    case OP_RW: rw(c, d, h->len); break;
+    case OP_RW: rw(c, d, nd, h->len); break;
     case OP_CREDIT_REQUEST: c->p_credit = true; break;
     case OP_CREDIT_UPDATE: break;  // el crédito ya se apuntó
     case OP_REQUEST:               // el invitado no puede abrir conexiones con el host
     default: c->p_rst = true;
   }
+  return c->gen != gen || mira(c) != antes;
 }
 
 static void tx(void) {
@@ -221,19 +267,25 @@ static void tx(void) {
   uint8_t *used;
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
-  static uint8_t buf[VS_HDR + VS_PAYLOAD];
-  bool hecho = false;
+  // Los búferes del invitado como iovec: la cabecera se copia (se lee una
+  // vez, el invitado puede cambiarla mientras tanto) y los datos van de su
+  // RAM al socket sin pasar por un búfer intermedio. Los topes, los de
+  // vq_leer: cadena válida, dentro de la RAM y de VS_HDR + VS_PAYLOAD como
+  // mucho; si no, el paquete se descarta entero.
+  static struct iovec iov[QMAX], datos[QMAX];
+  bool hecho = false, despertar = false;
   int vueltas = 0;
   for (;;) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1] || vueltas++ >= (int)q->num) break;
     uint16_t head = avail[2 + q->last_avail % q->num];
     q->last_avail++;
-    uint32_t n = vq_leer(q, desc, head, buf, sizeof buf);
-    if (n >= VS_HDR) {
+    uint64_t n = 0;
+    int ni = vq_iov(q, desc, head, false, iov, QMAX, &n);
+    if (ni > 0 && n >= VS_HDR && n <= VS_HDR + VS_PAYLOAD) {
       struct vs_hdr h;
-      memcpy(&h, buf, VS_HDR);
-      if (h.len <= n - VS_HDR) paquete(&h, buf + VS_HDR);
+      iov_sacar(&h, iov, ni, VS_HDR);
+      if (h.len <= n - VS_HDR && paquete(&h, datos, iov_tramo(iov, ni, VS_HDR, h.len, datos))) despertar = true;
     }
     vq_push(q, used, head, 0);
     hecho = true;
@@ -242,14 +294,26 @@ static void tx(void) {
     s.m.isr |= 1;
     irq();
   }
-  despertar_hilo();
+  // Solo si vs_hilo tiene algo nuevo (paquete): antes era en cada aviso, y
+  // cada paquete de datos del invitado costaba una vuelta del hilo (write al
+  // pipe, poll, armar_poll con todas las conexiones) sin nada que hacer.
+  if (despertar) despertar_hilo();
 }
 
 // ---------- rx: lo que va al invitado (hilo vs_hilo, con mu) ----------
 
-// Mete un paquete en el siguiente búfer de rx. false si no hay búfer o no cabe
-// (el que llama ya miró la capacidad con rx_capacidad).
-static bool rx_poner(struct vs_hdr *h, const uint8_t *d) {
+// El siguiente búfer de rx del invitado, como iovec: rx_mirar lo prepara (una
+// sola pasada por la cadena) sin gastarlo, y rx_cerrar lo devuelve lleno.
+static struct {
+  uint16_t head;
+  int n;
+  uint64_t cap;
+  struct iovec iov[QMAX];
+} rxb;
+
+// rx_mirar prepara rxb con el siguiente búfer de rx; false si no hay (o no
+// hay driver). Una cadena que no vale queda con cap 0: no cabe nada. Con mu.
+static bool rx_mirar(void) {
   struct vq *q = &s.q[0];
   uint16_t *avail;
   uint8_t *used;
@@ -257,28 +321,31 @@ static bool rx_poner(struct vs_hdr *h, const uint8_t *d) {
   if (!vq_ptrs(q, &avail, &used, &desc)) return false;
   __atomic_thread_fence(__ATOMIC_ACQUIRE);
   if (q->last_avail == *(volatile uint16_t *)&avail[1]) return false;
-  uint16_t head = avail[2 + q->last_avail % q->num];
-  static uint8_t buf[VS_HDR + VS_PAYLOAD];
-  memcpy(buf, h, VS_HDR);
-  if (h->len) memcpy(buf + VS_HDR, d, h->len);
-  uint32_t total = VS_HDR + h->len;
-  if (vq_capacidad(q, desc, head) < total) return false;
-  q->last_avail++;
-  vq_escribir(q, desc, head, buf, total);
-  vq_push(q, used, head, total);
+  rxb.head = avail[2 + q->last_avail % q->num];
+  rxb.n = vq_iov(q, desc, rxb.head, true, rxb.iov, QMAX, &rxb.cap);
+  if (rxb.n < 0) rxb.n = 0, rxb.cap = 0;
   return true;
 }
 
-// Bytes que caben en el siguiente búfer de rx (0 si no hay).
-static uint32_t rx_capacidad(void) {
+// rx_cerrar escribe la cabecera h al principio del búfer de rx_mirar (los
+// datos, si los hay, ya están detrás) y lo devuelve al invitado. Con mu.
+static void rx_cerrar(const struct vs_hdr *h) {
   struct vq *q = &s.q[0];
   uint16_t *avail;
   uint8_t *used;
   struct vdesc *desc;
-  if (!vq_ptrs(q, &avail, &used, &desc)) return 0;
-  __atomic_thread_fence(__ATOMIC_ACQUIRE);
-  if (q->last_avail == *(volatile uint16_t *)&avail[1]) return 0;
-  return vq_capacidad(q, desc, avail[2 + q->last_avail % q->num]);
+  if (!vq_ptrs(q, &avail, &used, &desc)) return;
+  iov_poner(rxb.iov, rxb.n, h, VS_HDR);
+  q->last_avail++;
+  vq_push(q, used, rxb.head, VS_HDR + h->len);
+}
+
+// Mete un paquete de control (sin datos) en el siguiente búfer de rx. false
+// si no hay búfer o no cabe.
+static bool rx_poner(struct vs_hdr *h) {
+  if (!rx_mirar() || rxb.cap < VS_HDR) return false;
+  rx_cerrar(h);
+  return true;
 }
 
 static void cabecera(struct vs_hdr *h, struct vconn *c, uint16_t op, uint32_t len, uint32_t flags) {
@@ -330,17 +397,17 @@ static bool bombear(const bool *listo) {
     h.dst_port = rst_cola[0].dst;
     h.type = TYPE_STREAM;
     h.op = OP_RST;
-    if (!rx_poner(&h, NULL)) return puesto;
+    if (!rx_poner(&h)) return puesto;
     puesto = true;
     memmove(rst_cola, rst_cola + 1, sizeof rst_cola[0] * (size_t)(--n_rst));
   }
-  static uint8_t datos[VS_PAYLOAD];
+  static struct iovec datos[QMAX];
   for (int i = 0; i < VS_MAXCONN; i++) {
     struct vconn *c = &conns[i];
     if (c->estado == C_LIBRE) continue;
     if (c->p_rst) {
       cabecera(&h, c, OP_RST, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       liberar(c);
       continue;
@@ -348,20 +415,21 @@ static bool bombear(const bool *listo) {
     if (c->p_request) {
       khv_qos_impulso();  // una conexión nueva del host: trabajo (vm.c, QoS)
       cabecera(&h, c, OP_REQUEST, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_request = false;
     }
     if (c->estado != C_ABIERTA) continue;
-    // Datos: tantos paquetes como dejen el crédito y los búferes.
+    // Datos: tantos paquetes como dejen el crédito y los búferes, leídos del
+    // socket directamente en el búfer del invitado, detrás de la cabecera.
     while (listo[i] && !c->host_eof && !c->guest_sordo) {
-      uint32_t cap = rx_capacidad(), cr = credito(c);
-      if (cap <= VS_HDR) return puesto;
+      uint32_t cr = credito(c);
+      if (!rx_mirar() || rxb.cap <= VS_HDR) return puesto;
       if (cr == 0) break;
-      uint32_t n = cap - VS_HDR;
+      uint64_t n = rxb.cap - VS_HDR;
       if (n > cr) n = cr;
       if (n > VS_PAYLOAD) n = VS_PAYLOAD;
-      ssize_t r = read(c->fd, datos, n);
+      ssize_t r = readv(c->fd, datos, iov_tramo(rxb.iov, rxb.n, VS_HDR, n, datos));
       if (r < 0) {
         if (errno != EAGAIN && errno != EINTR) c->p_rst = true;
         break;
@@ -373,10 +441,7 @@ static bool bombear(const bool *listo) {
       }
       khv_qos_impulso();
       cabecera(&h, c, OP_RW, (uint32_t)r, 0);
-      if (!rx_poner(&h, datos)) {  // no pasa: la capacidad ya se miró con mu
-        c->p_rst = true;
-        break;
-      }
+      rx_cerrar(&h);
       c->tx_cnt += (uint32_t)r;
       puesto = true;
     }
@@ -386,7 +451,7 @@ static bool bombear(const bool *listo) {
       uint32_t f = c->p_shut;
       if (c->host_eof && c->npend == 0 && c->guest_eof) f |= SHUT_RCV_F;
       cabecera(&h, c, OP_SHUTDOWN, 0, f);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_shut = 0;
       // Tras un cierre completo el invitado debe contestar con RST.
@@ -394,7 +459,7 @@ static bool bombear(const bool *listo) {
     }
     if (c->p_credit) {
       cabecera(&h, c, OP_CREDIT_UPDATE, 0, 0);
-      if (!rx_poner(&h, NULL)) return puesto;
+      if (!rx_poner(&h)) return puesto;
       puesto = true;
       c->p_credit = false;
     }
@@ -402,32 +467,131 @@ static bool bombear(const bool *listo) {
   return puesto;
 }
 
+// por_cerrar: la conexión ya no tiene nada que leer ni escribir (host_eof, o
+// el invitado ya no recibe) y falta saber si Go cierra su extremo del todo.
+static bool por_cerrar(const struct vconn *c) {
+  if (c->estado != C_ABIERTA || c->npend || !(c->host_eof || c->guest_sordo)) return false;
+  if ((c->p_shut & SHUT_RCV_F) && (c->p_shut & SHUT_SEND_F)) return false;
+  return !c->t_cierre;
+}
+
+// vigilar apunta el fd de una conexión por_cerrar en kq: EVFILT_WRITE con
+// EV_CLEAR avisa al apuntarlo y luego solo cuando el socket cambia; con el
+// otro extremo cerrado del todo el aviso trae EV_EOF (ya no se puede mandar
+// nada), lo mismo que la sonda veía como POLLHUP sin POLLOUT. Un medio cierre
+// de Go (CloseWrite) no lo pone. Si ya estaba cerrado, el aviso llega al
+// apuntarlo. Cerrar el fd (liberar) lo quita de kq. false si no se pudo (sin
+// kq): entonces la mira sondear_cerradas. Con mu.
+static bool vigilar(struct vconn *c, int i) {
+  if (c->vigilada) return true;
+  if (kq < 0) return false;
+  struct kevent ev;
+  EV_SET(&ev, (uintptr_t)c->fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, (void *)(intptr_t)i);
+  if (kevent(kq, &ev, 1, NULL, 0, NULL) != 0) return false;
+  c->vigilada = true;
+  return true;
+}
+
+// armar_poll llena pf con los fd de las conexiones abiertas que esperan algo
+// y devuelve cuántos; idx[k] es el slot de pf[k]. Con mu. Una conexión sin
+// nada que leer ni escribir (host_eof, o el invitado ya no recibe) no entra:
+// en macOS poll no avisa de POLLHUP con events = 0, y pedir POLLOUT la
+// tendría siempre lista. A esas las vigila kq (vigilar); sin kq, las mira
+// sondear_cerradas cada segundo.
+static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
+  int n = 0;
+  for (int i = 0; i < VS_MAXCONN; i++) {
+    struct vconn *c = &conns[i];
+    if (c->estado != C_ABIERTA) continue;
+    short ev = 0;
+    if (!c->host_eof && !c->guest_sordo && credito(c) > 0) ev |= POLLIN;
+    if (c->npend) ev |= POLLOUT;
+    if (c->t_cierre) *plazo = 500;
+    if (!ev) {
+      if (por_cerrar(c) && !vigilar(c, i) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+      continue;
+    }
+    idx[n] = i;
+    pf[n].fd = c->fd;
+    pf[n].events = ev;
+    pf[n].revents = 0;
+    n++;
+  }
+  return n;
+}
+
+// sondear_cerradas mira, sin esperar, las conexiones por_cerrar que kq no
+// vigila (solo pasa sin kq): con el otro extremo cerrado del todo (close en
+// Go) POLLOUT devuelve solo POLLHUP; con un medio cierre (CloseWrite)
+// devuelve POLLOUT. Al primero se le pide al invitado el cierre completo, que
+// contesta con RST (o el plazo de 2 s lo da por hecho) y libera el slot.
+// Antes esas conexiones no se miraban y, si el invitado tampoco mandaba RST,
+// el slot y el fd quedaban ocupados para siempre: 64 así y ya no había exec.
+// Con mu.
+static void sondear_cerradas(void) {
+  for (int i = 0; i < VS_MAXCONN; i++) {
+    struct vconn *c = &conns[i];
+    if (!por_cerrar(c) || c->vigilada) continue;
+    struct pollfd pf = {.fd = c->fd, .events = POLLOUT};
+    if (poll(&pf, 1, 0) > 0 && (pf.revents & (POLLHUP | POLLERR)) && !(pf.revents & POLLOUT))
+      c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+  }
+}
+
+// atender_kq recoge, sin esperar, los avisos de kq: a la conexión cuyo
+// extremo de Go se cerró del todo se le pide al invitado el cierre completo,
+// como hacía sondear_cerradas. Un aviso sin EV_EOF (el socket cambió por
+// otra cosa) no dice nada. El slot se comprueba por su fd y por vigilada: el
+// aviso de un fd ya cerrado no llega (close lo quita de kq), y un slot
+// reusado empieza sin vigilada. Con mu.
+static void atender_kq(void) {
+  if (kq < 0) return;
+  struct kevent evs[16];
+  const struct timespec cero = {0, 0};
+  for (;;) {
+    int n = kevent(kq, NULL, 0, evs, 16, &cero);
+    for (int k = 0; k < n; k++) {
+      intptr_t i = (intptr_t)evs[k].udata;
+      if (i < 0 || i >= VS_MAXCONN || !(evs[k].flags & EV_EOF)) continue;
+      struct vconn *c = &conns[i];
+      if (!c->vigilada || c->fd < 0 || (uintptr_t)c->fd != evs[k].ident || !por_cerrar(c)) continue;
+      c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+    }
+    if (n < 16) return;
+  }
+}
+
+// tras_poll aplica lo que poll vio en los n fd de armar_poll. Con mu.
+static void tras_poll(const struct pollfd *pf, const int *idx, int n, bool *listo) {
+  memset(listo, 0, sizeof(bool) * VS_MAXCONN);
+  for (int k = 0; k < n; k++) {
+    struct vconn *c = &conns[idx[k]];
+    if (c->estado != C_ABIERTA || c->fd != pf[k].fd) continue;
+    // Con algo pendiente para Go y su extremo cerrado del todo, poll da
+    // POLLHUP sin POLLOUT: vaciar se entera (EPIPE, y RST al invitado). Antes
+    // el fd volvía listo en cada vuelta sin que nadie lo atendiera, y el hilo
+    // giraba en vacío.
+    if ((pf[k].revents & POLLOUT) || (c->npend && (pf[k].revents & (POLLHUP | POLLERR)))) vaciar(c);
+    if (pf[k].revents & (POLLIN | POLLHUP | POLLERR)) listo[idx[k]] = true;
+  }
+  atender_kq();
+  sondear_cerradas();
+}
+
 static void *vs_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
-  struct pollfd pf[1 + VS_MAXCONN];
+  // pf[0] es el despertador, pf[1] kq (un kqueue se espera con poll: está
+  // listo cuando tiene avisos) y luego van las conexiones de armar_poll.
+  struct pollfd pf[2 + VS_MAXCONN];
   int idx[VS_MAXCONN];
   bool listo[VS_MAXCONN];
   for (;;) {
-    int n = 0;
     int plazo = -1;
     pthread_mutex_lock(&mu);
-    pf[n].fd = despertador[0];
-    pf[n].events = POLLIN;
-    n++;
-    for (int i = 0; i < VS_MAXCONN; i++) {
-      struct vconn *c = &conns[i];
-      if (c->estado != C_ABIERTA) continue;
-      short ev = 0;
-      if (!c->host_eof && !c->guest_sordo && credito(c) > 0) ev |= POLLIN;
-      if (c->npend) ev |= POLLOUT;
-      if (c->t_cierre) plazo = 500;
-      if (!ev) continue;
-      idx[n - 1] = i;
-      pf[n].fd = c->fd;
-      pf[n].events = ev;
-      n++;
-    }
+    pf[0] = (struct pollfd){.fd = despertador[0], .events = POLLIN};
+    pf[1] = (struct pollfd){.fd = kq, .events = POLLIN};  // sin kq (-1), poll lo salta
+    int n = armar_poll(pf + 2, idx, &plazo) + 2;
     pthread_mutex_unlock(&mu);
     int r = poll(pf, (nfds_t)n, plazo);
     if (r < 0 && errno != EINTR) return NULL;
@@ -439,13 +603,7 @@ static void *vs_hilo(void *a) {
     pthread_mutex_lock(&mu);
     // Con la VM en pausa no se toca la RAM del invitado.
     while (g_pausa) pthread_cond_wait(&cv, &mu);
-    memset(listo, 0, sizeof listo);
-    for (int k = 1; k < n; k++) {
-      struct vconn *c = &conns[idx[k - 1]];
-      if (c->estado != C_ABIERTA || c->fd != pf[k].fd) continue;
-      if (pf[k].revents & POLLOUT) vaciar(c);
-      if (pf[k].revents & (POLLIN | POLLHUP | POLLERR)) listo[idx[k - 1]] = true;
-    }
+    tras_poll(pf + 2, idx, n - 2, listo);
     // Un cierre al que el invitado no contesta con RST en 2 s se da por hecho.
     uint64_t ahora = mach_absolute_time();
     for (int i = 0; i < VS_MAXCONN; i++)
@@ -475,6 +633,7 @@ void vsock_init(uint32_t id) {
       fcntl(despertador[i], F_SETFD, FD_CLOEXEC);
     }
   }
+  if (kq < 0) kq = kqueue();  // un kqueue no pasa a los hijos: no hace falta FD_CLOEXEC
   activo = true;
   pthread_t t;
   pthread_create(&t, NULL, vs_hilo, NULL);
@@ -586,8 +745,16 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
     }
     if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) {
       if (c->gen == gen && c->estado == C_CONECTANDO) {
-        c->p_request = false;
-        c->p_rst = true;  // que el invitado olvide la petición
+        // El slot se suelta ya. Antes quedaba con p_rst esperando un búfer
+        // de rx para mandar el RST: con un invitado que no repone (colgado,
+        // sin driver) no llegaba nunca, y 64 dials así agotaban los slots.
+        // Si la petición llegó a salir, el RST va por la cola sin slot; un
+        // RESPONSE tardío a ese puerto ya no encuentra conexión y recibe
+        // otro RST (paquete).
+        uint32_t lport = c->lport, gport = c->gport;
+        bool enviada = !c->p_request;
+        liberar(c);
+        if (enviada) encolar_rst(lport, gport);
         despertar_hilo();
       }
       ret = -ETIMEDOUT;
@@ -702,4 +869,238 @@ int khv_vsock_prueba_reuso(int *coincide_fd) {
     return 1;
   }
   return tocada ? -EPROTO : a.ret;
+}
+
+// khv_vsock_prueba_cierre reproduce la fuga de un slot: el invitado ya dijo
+// que no recibe más (SHUT_RCV) y aquí ya no hay nada que leer ni escribir,
+// así que la conexión no entraba en el poll; Go cierra su extremo y nadie se
+// entera. medio: Go solo cierra su escritura (CloseWrite), que NO debe
+// cerrar la conexión. Devuelve 1 si, tras cerrar Go, una pasada dejó pedido
+// el cierre completo (SEND|RCV) al invitado, 0 si no, negativo si no se pudo
+// preparar o si la conexión no quedó en kq (-ETIME: sin la sonda de cada
+// segundo nadie la habría mirado) o se pidió el cierre antes de que Go
+// cerrara (-EPROTO). Como en la VM, la conexión ya está vigilada cuando Go
+// cierra: el aviso llega por kq, no al apuntarla.
+int khv_vsock_prueba_cierre(int medio) {
+  if (!activo) vsock_init(53);
+  pthread_mutex_lock(&mu);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 1, sv, &gen, &err);
+  if (!c) {
+    pthread_mutex_unlock(&mu);
+    return err ? err : -EBUSY;
+  }
+  c->estado = C_ABIERTA;
+  c->p_request = false;
+  c->guest_sordo = true;
+  c->host_eof = true;
+  struct pollfd pf[VS_MAXCONN];
+  int idx[VS_MAXCONN];
+  bool listo[VS_MAXCONN];
+  int plazo = -1;
+  // Primera pasada con los dos extremos abiertos: la apunta en kq, que no
+  // debe dar el cierre por hecho.
+  int n = armar_poll(pf, idx, &plazo);
+  if (n > 0) poll(pf, (nfds_t)n, 0);
+  tras_poll(pf, idx, n, listo);
+  int pedido = -ETIME;
+  if (c->vigilada && plazo < 0) {
+    pedido = (c->p_shut & SHUT_SEND_F) && (c->p_shut & SHUT_RCV_F) ? -EPROTO : 0;
+    if (medio) shutdown(sv[1], SHUT_WR);
+    else close(sv[1]);
+    // El aviso lo encola el kernel al cerrar; se espera en kq como vs_hilo,
+    // con un plazo (corto con medio, que no debe avisar de cierre).
+    for (int i = 0; pedido == 0 && i < 10; i++) {
+      struct pollfd pk = {.fd = kq, .events = POLLIN};
+      poll(&pk, 1, medio ? 10 : 100);
+      plazo = -1;
+      n = armar_poll(pf, idx, &plazo);
+      if (n > 0) poll(pf, (nfds_t)n, 0);
+      tras_poll(pf, idx, n, listo);
+      if ((c->p_shut & SHUT_SEND_F) && (c->p_shut & SHUT_RCV_F)) pedido = 1;
+    }
+  } else if (medio) {
+    shutdown(sv[1], SHUT_WR);
+  } else {
+    close(sv[1]);
+  }
+  liberar(c);
+  pthread_mutex_unlock(&mu);
+  if (medio) close(sv[1]);
+  return pedido;
+}
+
+struct prueba_plazo {
+  uint32_t puerto;
+  int ret;
+};
+
+static void *prueba_marcar_plazo(void *arg) {
+  struct prueba_plazo *p = arg;
+  p->ret = khv_vsock_dial(p->puerto, 100);
+  return NULL;
+}
+
+// khv_vsock_prueba_plazo reproduce un dial que vence sin que el invitado
+// reponga búferes de rx (no hay invitado: rx_poner siempre falla). enviada:
+// la petición ya había salido (se simula quitando p_request), así que el RST
+// tiene que quedar en la cola sin slot. Devuelve 1 si el dial dio -ETIMEDOUT,
+// el slot quedó libre y el RST está (o no) en la cola según enviada; 0 si el
+// slot sigue ocupado, -EPROTO si el RST no es el esperado y otro negativo si
+// no se pudo preparar. No puede convivir con una VM de verdad en el proceso.
+int khv_vsock_prueba_plazo(int enviada) {
+  if (!activo) vsock_init(53);
+  struct prueba_plazo p = {.puerto = PRUEBA_PUERTO + 2 + (enviada ? 1 : 0), .ret = 1};
+  pthread_mutex_lock(&mu);
+  n_rst = 0;
+  pthread_mutex_unlock(&mu);
+  pthread_t t;
+  if (pthread_create(&t, NULL, prueba_marcar_plazo, &p) != 0) return -EAGAIN;
+  struct vconn *c = NULL;
+  for (int i = 0; i < 2000 && !c; i++) {
+    pthread_mutex_lock(&mu);
+    for (int j = 0; j < VS_MAXCONN && !c; j++)
+      if (conns[j].estado == C_CONECTANDO && conns[j].gport == p.puerto) c = &conns[j];
+    if (!c) {
+      pthread_mutex_unlock(&mu);
+      usleep(1000);
+    }
+  }
+  if (!c) {
+    pthread_join(t, NULL);
+    return -EBUSY;
+  }
+  uint32_t lport = c->lport;
+  if (enviada) c->p_request = false;  // como si bombear ya la hubiera puesto
+  pthread_mutex_unlock(&mu);
+  pthread_join(t, NULL);
+  if (p.ret >= 0) {
+    close(p.ret);
+    return -EISCONN;
+  }
+  if (p.ret != -ETIMEDOUT) return p.ret;
+  pthread_mutex_lock(&mu);
+  int r = 1;
+  for (int j = 0; j < VS_MAXCONN; j++)
+    if (conns[j].estado != C_LIBRE && conns[j].gport == p.puerto) r = 0;
+  bool hay_rst = false;
+  for (int j = 0; j < n_rst; j++)
+    if (rst_cola[j].src == lport && rst_cola[j].dst == p.puerto) hay_rst = true;
+  if (r == 1 && hay_rst != (enviada != 0)) r = -EPROTO;
+  n_rst = 0;
+  pthread_mutex_unlock(&mu);
+  return r;
+}
+
+#define PRUEBA_TX 6
+
+static void prueba_w(uint64_t off, uint64_t v) { vsock_mmio(off, true, &v, 4); }
+
+// khv_vsock_prueba_tx manda, como el invitado, PRUEBA_TX paquetes RW por la
+// cola de tx a una conexión abierta, cada uno con la cabecera y los datos en
+// tres búferes: uno de 4000 bytes y los demás de VS_PAYLOAD. Pasan del
+// socket (VS_BUF) y Go no lee todavía, así que el resto va a pend y lo tiene
+// que vaciar vs_hilo cuando Go lea: si el aviso de que hay pend no lo
+// despertara, se quedaría en poll sin mirar POLLOUT. enviado trae los
+// 4000 + (PRUEBA_TX - 1) * VS_PAYLOAD bytes; lee desde Go (el otro extremo)
+// hasta out (cap bytes) y devuelve cuántos llegaron en plazo, o negativo si
+// no se pudo preparar; *uso_pend dice si algo tuvo que esperar en pend. Con
+// su propia RAM y sin pausa, y lo deja todo como estaba. No puede convivir
+// con una VM de verdad.
+int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend) {
+  *uso_pend = 0;
+  if (!activo) vsock_init(53);
+  const uint64_t tam = 1 << 20;
+  uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (ram == MAP_FAILED) return -ENOMEM;
+  pthread_mutex_lock(&mu);
+  uint8_t *ram_antes = g_ram;
+  uint64_t tam_antes = g_ram_size;
+  bool pausa_antes = g_pausa;
+  g_ram = ram;
+  g_ram_size = tam;
+  g_pausa = false;  // sin VM empieza en pausa: vs_hilo no haría nada
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  // La cola de tx (1): tabla en +0, avail en +0x1000, used en +0x2000.
+  prueba_w(0x070, 0);
+  prueba_w(0x030, 1);
+  prueba_w(0x038, 8);
+  prueba_w(0x080, (uint32_t)RAM_BASE);
+  prueba_w(0x090, (uint32_t)(RAM_BASE + 0x1000));
+  prueba_w(0x0a0, (uint32_t)(RAM_BASE + 0x2000));
+  prueba_w(0x084, 0);
+  prueba_w(0x094, 0);
+  prueba_w(0x0a4, 0);
+  prueba_w(0x044, 1);
+  prueba_w(0x070, 0xf);
+
+  pthread_mutex_lock(&mu);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 5, sv, &gen, &err);
+  if (c) {
+    c->estado = C_ABIERTA;
+    c->p_request = false;
+  }
+  uint32_t lport = c ? c->lport : 0;
+  pthread_mutex_unlock(&mu);
+  int ret = c ? 0 : (err ? err : -EBUSY);
+  if (c) {
+    fcntl(sv[1], F_SETFL, O_NONBLOCK);
+    struct vdesc *d = (struct vdesc *)(ram);
+    uint16_t *av = (uint16_t *)(ram + 0x1000);
+    uint64_t o = 0;
+    if (4000 + (PRUEBA_TX - 1) * VS_PAYLOAD > cap) ret = -E2BIG;
+    for (int p = 0; p < PRUEBA_TX && ret == 0; p++) {
+      uint32_t len = p == 0 ? 4000 : VS_PAYLOAD;
+      struct vs_hdr h = {.src_cid = VS_GUEST_CID, .dst_cid = VS_HOST_CID, .src_port = PRUEBA_PUERTO + 5,
+                         .dst_port = lport, .len = len, .type = TYPE_STREAM, .op = OP_RW,
+                         .buf_alloc = VS_BUF};
+      // tx copia o escribe los datos antes de volver del notify: la RAM se
+      // puede reusar en el paquete siguiente.
+      uint64_t cab = 0x3000;
+      memcpy(ram + cab, &h, VS_HDR);
+      // Dos trozos de datos, con un hueco entre ellos.
+      uint64_t datos = 0x10000;
+      uint32_t a = len / 4, b = len - a;
+      memcpy(ram + datos, enviado + o, a);
+      memcpy(ram + datos + a + 0x800, enviado + o + a, b);
+      uint16_t base = (uint16_t)(p % 2 * 3);
+      d[base] = (struct vdesc){RAM_BASE + cab, VS_HDR, VIRTQ_DESC_F_NEXT, (uint16_t)(base + 1)};
+      d[base + 1] = (struct vdesc){RAM_BASE + datos, a, VIRTQ_DESC_F_NEXT, (uint16_t)(base + 2)};
+      d[base + 2] = (struct vdesc){RAM_BASE + datos + a + 0x800, b, 0, 0};
+      o += len;
+      av[2 + p % 8] = base;
+      __atomic_store_n(&av[1], (uint16_t)(p + 1), __ATOMIC_RELEASE);
+      prueba_w(0x050, 1);  // notify de la cola de tx
+    }
+    pthread_mutex_lock(&mu);
+    *uso_pend = c->gen == gen && c->npend > 0;  // Go aún no lee: nadie la vacía
+    pthread_mutex_unlock(&mu);
+    // Go lee: lo que no cupo sale de pend por el hilo.
+    uint32_t leido = 0;
+    for (int i = 0; ret == 0 && leido < o && i < 200; i++) {
+      ssize_t r = read(sv[1], out + leido, cap - leido);
+      if (r > 0) leido += (uint32_t)r;
+      else {
+        struct pollfd pf = {.fd = sv[1], .events = POLLIN};
+        poll(&pf, 1, 10);
+      }
+    }
+    if (ret == 0) ret = (int)leido;
+    pthread_mutex_lock(&mu);
+    if (c->gen == gen) liberar(c);
+    pthread_mutex_unlock(&mu);
+    close(sv[1]);
+  }
+  prueba_w(0x070, 0);
+  pthread_mutex_lock(&mu);
+  g_ram = ram_antes;
+  g_ram_size = tam_antes;
+  g_pausa = pausa_antes;
+  pthread_mutex_unlock(&mu);
+  munmap(ram, tam);
+  return ret;
 }

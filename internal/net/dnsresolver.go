@@ -47,6 +47,7 @@ package net
 //     resolver ajeno no listado queda igualmente bloqueado por el FORWARD.
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -82,6 +83,14 @@ const dnsMaxInFlight = 32
 // de tokens lo ven: solo cuentan consultas ya leídas. Por encima del tope la
 // conexión se cierra en el acto.
 const dnsMaxTCPConns = 64
+
+// dnsMaxUDPHandlers acota las goroutines que atienden consultas UDP A LA VEZ.
+// La plaza se toma ANTES de lanzar la goroutine: sin esto, una ráfaga lanzaba
+// una por datagrama y los topes de process (cubo, en-vuelo) solo se miraban
+// ya dentro, con la goroutine creada. Por encima, el datagrama se descarta sin
+// procesar (el cliente reintenta). Holgado respecto a dnsMaxInFlight: las
+// respuestas locales (grafo, credenciales, REFUSED) no esperan a nadie.
+const dnsMaxUDPHandlers = 4 * dnsMaxInFlight
 
 // dnsRate y dnsBurst son el cubo de tokens por resolver: ~200 consultas/s en
 // régimen, ráfaga de hasta 400 antes de empezar a devolver SERVFAIL. Es
@@ -132,6 +141,7 @@ type dnsResolver struct {
 
 	sem     chan struct{} // semáforo de en-vuelo, capacidad dnsMaxInFlight
 	tcpSem  chan struct{} // conexiones TCP abiertas, capacidad dnsMaxTCPConns
+	udpSem  chan struct{} // goroutines UDP vivas, capacidad dnsMaxUDPHandlers
 	limiter *tokenBucket  // cubo de tokens, tasa dnsRate / ráfaga dnsBurst
 
 	// Nombres cortados por la política (bloqueos.go).
@@ -252,6 +262,7 @@ func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 		quit:     make(chan struct{}),
 		sem:      make(chan struct{}, dnsMaxInFlight),
 		tcpSem:   make(chan struct{}, dnsMaxTCPConns),
+		udpSem:   make(chan struct{}, dnsMaxUDPHandlers),
 		limiter:  newTokenBucket(dnsRate, dnsBurst),
 		seeded:   make(map[string]time.Time),
 	}
@@ -276,11 +287,41 @@ func stopResolver(ns string) {
 	}
 }
 
+// stop cierra los sockets y espera a TODAS las goroutines del resolver, las
+// que atienden consultas incluidas (van en r.wg): al volver, ninguna siembra ya
+// el ipset ni escribe en el netns, que Teardown borra justo después y que una
+// máquina nueva con el mismo nombre podría reutilizar. Las conexiones que
+// siguen abiertas (la del invitado por TCP, la del upstream) se cortan al
+// cerrarse quit, para no esperar a sus plazos.
 func (r *dnsResolver) stop() {
 	close(r.quit)
 	r.udp.Close()
 	r.tcp.Close()
 	r.wg.Wait()
+}
+
+// cortarAlParar cierra c si el resolver se para antes de que se llame a la
+// función que devuelve (con defer, al acabar con c).
+func (r *dnsResolver) cortarAlParar(c io.Closer) func() {
+	hecho := make(chan struct{})
+	go func() {
+		select {
+		case <-r.quit:
+			_ = c.Close()
+		case <-hecho:
+		}
+	}()
+	return func() { close(hecho) }
+}
+
+// parado dice si stop ya empezó.
+func (r *dnsResolver) parado() bool {
+	select {
+	case <-r.quit:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *dnsResolver) serveUDP() {
@@ -298,7 +339,15 @@ func (r *dnsResolver) serveUDP() {
 			}
 		}
 		query := append([]byte(nil), buf[:nread]...)
+		select {
+		case r.udpSem <- struct{}{}:
+		default:
+			continue // por encima de dnsMaxUDPHandlers: se descarta
+		}
+		r.wg.Add(1)
 		go func() {
+			defer r.wg.Done()
+			defer func() { <-r.udpSem }()
 			resp := r.process(query, false)
 			if resp == nil {
 				return
@@ -324,7 +373,9 @@ func (r *dnsResolver) serveTCP() {
 		}
 		select {
 		case r.tcpSem <- struct{}{}:
+			r.wg.Add(1)
 			go func() {
+				defer r.wg.Done()
 				defer func() { <-r.tcpSem }()
 				r.handleTCP(conn)
 			}()
@@ -339,6 +390,7 @@ func (r *dnsResolver) serveTCP() {
 // romper esos casos sin dejar de aplicar la allowlist y el sembrado.
 func (r *dnsResolver) handleTCP(conn stdnet.Conn) {
 	defer conn.Close()
+	defer r.cortarAlParar(conn)()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	var l [2]byte
 	if _, err := io.ReadFull(conn, l[:]); err != nil {
@@ -444,6 +496,10 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		// upstream (o alguien en camino) devuelve una respuesta que no pedimos.
 		return respondError(query, 2) // SERVFAIL
 	}
+	if r.parado() {
+		// Teardown en curso: el netns y su ipset están a punto de irse.
+		return respondError(query, 2) // SERVFAIL
+	}
 	// Sembrar el ipset con las IPv4 que vamos a devolver, ANTES de responder: así
 	// la IP que el invitado usará ya está permitida cuando abra la conexión.
 	// Se siembran TODOS los A de la respuesta, no solo los cuyo owner == qname:
@@ -521,12 +577,29 @@ func (r *dnsResolver) forward(query []byte, viaTCP bool) ([]byte, error) {
 	return r.forwardUDP(query)
 }
 
+// marcarUpstream abre la conexión al upstream con plazo de 3 s, que se corta
+// antes si el resolver se para.
+func (r *dnsResolver) marcarUpstream(red string) (stdnet.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		select {
+		case <-r.quit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	var d stdnet.Dialer
+	return d.DialContext(ctx, red, r.upstream)
+}
+
 func (r *dnsResolver) forwardUDP(query []byte) ([]byte, error) {
-	c, err := stdnet.DialTimeout("udp", r.upstream, 3*time.Second)
+	c, err := r.marcarUpstream("udp")
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
+	defer r.cortarAlParar(c)()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Write(query); err != nil {
 		return nil, err
@@ -540,11 +613,12 @@ func (r *dnsResolver) forwardUDP(query []byte) ([]byte, error) {
 }
 
 func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
-	c, err := stdnet.DialTimeout("tcp", r.upstream, 3*time.Second)
+	c, err := r.marcarUpstream("tcp")
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
+	defer r.cortarAlParar(c)()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	var l [2]byte
 	binary.BigEndian.PutUint16(l[:], uint16(len(query)))

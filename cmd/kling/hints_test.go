@@ -26,6 +26,8 @@ func TestHintFor(t *testing.T) {
 		{&api.StatusError{Code: 404, Message: "404 page not found"}, "kling version"},
 		{&errWithHint{err: errors.New("x"), hint: "do y"}, "do y"},
 		{fmt.Errorf("wrapped: %w", &errWithHint{err: errors.New("x"), hint: "do z"}), "do z"},
+		{&api.StatusError{Code: 429, Message: "guest agent: too many commands running in this microVM (limit 64)", ErrorCode: api.CodeGuestBusy}, "retry when some"},
+		{&api.StatusError{Code: 429, Message: "tenant a: quota exceeded", ErrorCode: api.CodeTenantQuota}, ""},
 		{errors.New("something else entirely"), ""},
 		// Un error que ya dice qué hacer no recibe otra pista.
 		{errors.New("volume \"v\" not found: create it with `kling volume create v`"), ""},

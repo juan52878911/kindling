@@ -108,6 +108,131 @@ func TestGuestDialerConVueltaATCP(t *testing.T) {
 	}
 }
 
+// relojFalso es un reloj que solo avanza cuando el test lo pide.
+type relojFalso struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (r *relojFalso) ahora() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.t
+}
+
+func (r *relojFalso) avanzar(d time.Duration) {
+	r.mu.Lock()
+	r.t = r.t.Add(d)
+	r.mu.Unlock()
+}
+
+// vsockQueFalla pone en el puerto 8080 un camino propio que contesta "vsock
+// <línea>" salvo con falla puesto, y cuenta sus llamadas.
+func vsockQueFalla(r *rig, falla *atomic.Bool, llamadas *atomic.Int32) {
+	r.n.SetGuestDialer(8080, func(ctx context.Context) (net.Conn, error) {
+		llamadas.Add(1)
+		if falla.Load() {
+			return nil, errors.New("connection reset by peer")
+		}
+		a, b := net.Pipe()
+		go func() {
+			defer b.Close()
+			line, _ := bufio.NewReader(b).ReadString('\n')
+			fmt.Fprintf(b, "vsock %s", line)
+		}()
+		return a, nil
+	}, false)
+}
+
+// Un vsock que contestó y deja de hacerlo con TCP vivo (la escucha del agente
+// murió) se deja de probar tras fallosVsockMuerto fallos seguidos, no al
+// primero; no se apunta como soloTCP (no viajaría al snapshot); y se reintenta
+// pasado reintentoVsockMuerto, de modo que una escucha que volvió se usa otra
+// vez.
+func TestGuestDialerVsockMuerto(t *testing.T) {
+	r := newRig(t, "")
+	reloj := &relojFalso{t: time.Unix(1_000_000, 0)}
+	r.n.ahora = reloj.ahora
+	escucharEnInvitado(t, r.g, 8080, "tcp")
+	var falla atomic.Bool
+	var llamadas atomic.Int32
+	vsockQueFalla(r, &falla, &llamadas)
+	addr, _ := r.n.Forward(8080)
+	if got := pedir(t, addr, "a"); got != "vsock a\n" {
+		t.Fatalf("%q", got)
+	}
+	falla.Store(true)
+	for i := 0; i < fallosVsockMuerto+3; i++ {
+		if got := pedir(t, addr, "b"); got != "tcp b\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+	if n := llamadas.Load(); n != 1+fallosVsockMuerto {
+		t.Fatalf("vsock se probó %d veces, quiero %d", n, 1+fallosVsockMuerto)
+	}
+	if r.n.GuestOnlyTCP(8080) {
+		t.Fatal("una escucha muerta no es un agente anterior: no debe ir al snapshot")
+	}
+
+	// Pasado el plazo se reintenta una vez; si sigue muerta, otro plazo
+	// entero sin probarla.
+	reloj.avanzar(reintentoVsockMuerto)
+	for i := 0; i < 3; i++ {
+		if got := pedir(t, addr, "c"); got != "tcp c\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+	if n := llamadas.Load(); n != 2+fallosVsockMuerto {
+		t.Fatalf("tras el plazo vsock se probó %d veces, quiero %d", n, 2+fallosVsockMuerto)
+	}
+
+	// La escucha vuelve: el siguiente reintento la ve y desde ahí se usa.
+	falla.Store(false)
+	if got := pedir(t, addr, "d"); got != "tcp d\n" {
+		t.Fatalf("antes del plazo sigue por TCP: %q", got)
+	}
+	reloj.avanzar(reintentoVsockMuerto)
+	for i := 0; i < 3; i++ {
+		if got := pedir(t, addr, "e"); got != "vsock e\n" {
+			t.Fatalf("la escucha volvió: %q", got)
+		}
+	}
+}
+
+// Los fallos solo cuentan dentro de ventanaFallosVsock: fallos sueltos y
+// separados en un VMM de larga vida no lo dejan en TCP.
+func TestGuestDialerVsockFallosSueltos(t *testing.T) {
+	r := newRig(t, "")
+	reloj := &relojFalso{t: time.Unix(1_000_000, 0)}
+	r.n.ahora = reloj.ahora
+	escucharEnInvitado(t, r.g, 8080, "tcp")
+	var falla atomic.Bool
+	var llamadas atomic.Int32
+	vsockQueFalla(r, &falla, &llamadas)
+	addr, _ := r.n.Forward(8080)
+	if got := pedir(t, addr, "a"); got != "vsock a\n" {
+		t.Fatalf("%q", got)
+	}
+	falla.Store(true)
+	// Muchos más fallos que fallosVsockMuerto, pero de dos en dos y con más
+	// de una ventana entre medias: ninguno da el camino por muerto.
+	for i := 0; i < 3*fallosVsockMuerto; i++ {
+		if i%(fallosVsockMuerto-1) == 0 {
+			reloj.avanzar(ventanaFallosVsock + time.Second)
+		}
+		if got := pedir(t, addr, "b"); got != "tcp b\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+	if n, quiero := llamadas.Load(), int32(1+3*fallosVsockMuerto); n != quiero {
+		t.Fatalf("vsock se probó %d veces, quiero %d (en cada petición)", n, quiero)
+	}
+	falla.Store(false)
+	if got := pedir(t, addr, "c"); got != "vsock c\n" {
+		t.Fatalf("sigue en vsock: %q", got)
+	}
+}
+
 // Un agente anterior no escucha por vsock: cuando falla vsock y TCP contesta,
 // se deja de probar vsock (cada intento fallido cuesta ms). Mientras el
 // invitado arranca y no contesta ninguno, no se decide nada.

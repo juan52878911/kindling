@@ -40,6 +40,83 @@ print(mejor[1] if mejor else "")
 ' "$1"
 }
 
+# La última release publicada antes de 1.0: la N-1 de la que parten 94 y 95
+# si el API de GitHub no contesta (límite de peticiones anónimas). Con el API
+# manda lo que diga ultima_release_anterior.
+RELEASE_ANTERIOR_FIJA="v0.20.1"
+
+# release_anterior NUEVA: ultima_release_anterior o, si el API no contesta,
+# RELEASE_ANTERIOR_FIJA (avisando por stderr).
+release_anterior() {
+  local t
+  t=$(ultima_release_anterior "$1")
+  if [ -z "$t" ]; then
+    echo "  (GitHub API did not answer: starting from $RELEASE_ANTERIOR_FIJA)" >&2
+    t="$RELEASE_ANTERIOR_FIJA"
+  fi
+  printf '%s\n' "$t"
+}
+
+# sha256_de FICHERO: su sha256 (sha256sum en Linux, shasum en macOS).
+sha256_de() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  fi
+}
+
+# bajar_release ETIQUETA DIR ASSET:NOMBRE...: baja de la release ETIQUETA de
+# GitHub (KLING_E2E_REPO) su SHA256SUMS y cada ASSET, comprueba cada uno
+# contra SHA256SUMS y lo deja en DIR/NOMBRE, ejecutable. Un ASSET con "?"
+# delante es opcional: si SHA256SUMS no lo lista, se omite (kling-hv antes de
+# v0.19). Lo que no casa no queda en DIR. Sin install.sh: los binarios de la
+# release tal cual, sin un script de main por medio que cambie con el tiempo.
+bajar_release() {
+  local tag="$1" dir="$2" repo="${KLING_E2E_REPO:-juan52878911/kindling}" par asset nombre opc quiero tengo
+  shift 2
+  local url="https://github.com/$repo/releases/download/$tag"
+  mkdir -p "$dir/.bajando" || return 1
+  curl -fsSL --retry 3 --max-time 60 -o "$dir/.bajando/SHA256SUMS" "$url/SHA256SUMS" \
+    || { echo "cannot download $url/SHA256SUMS" >&2; return 1; }
+  for par in "$@"; do
+    asset="${par%%:*}"; nombre="${par#*:}"; opc=0
+    case "$asset" in "?"*) opc=1; asset="${asset#?}";; esac
+    quiero=$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' "$dir/.bajando/SHA256SUMS")
+    if [ -z "$quiero" ]; then
+      [ "$opc" = 1 ] && continue
+      echo "$asset is not in the SHA256SUMS of $tag" >&2; return 1
+    fi
+    curl -fsSL --retry 3 --max-time 300 -o "$dir/.bajando/$asset" "$url/$asset" \
+      || { echo "cannot download $url/$asset" >&2; return 1; }
+    tengo=$(sha256_de "$dir/.bajando/$asset")
+    [ "$tengo" = "$quiero" ] \
+      || { echo "$asset of $tag: sha256 $tengo, SHA256SUMS lists $quiero" >&2; rm -f "$dir/.bajando/$asset"; return 1; }
+    chmod 755 "$dir/.bajando/$asset"
+    mv -f "$dir/.bajando/$asset" "$dir/$nombre" || return 1
+  done
+  mv -f "$dir/.bajando/SHA256SUMS" "$dir/SHA256SUMS.release" && rmdir "$dir/.bajando"
+}
+
+# preparar_nuevos DIR ORIGEN NOMBRE...: copia a DIR los NOMBRE (nombres de
+# release, kling-darwin-arm64…) que estén en ORIGEN con ese nombre o a secas
+# (kling), y escribe su SHA256SUMS: así `kling upgrade -from-dir DIR` verifica
+# lo que instala en vez de necesitar -insecure. Falla si no copia ninguno.
+preparar_nuevos() {
+  local dir="$1" origen="$2" n corto src hay=0
+  shift 2
+  mkdir -p "$dir" || return 1
+  for n in "$@"; do
+    corto="${n%-darwin-*}"; corto="${corto%-linux-*}"
+    src="$origen/$n"; [ -f "$src" ] || src="$origen/$corto"
+    [ -f "$src" ] || continue
+    cp -p "$src" "$dir/$n" || return 1   # cp conserva la firma de kling-vz
+    printf '%s  %s\n' "$(sha256_de "$dir/$n")" "$n" >> "$dir/SHA256SUMS"
+    hay=1
+  done
+  [ "$hay" = 1 ]
+}
+
 # schema_de FICHERO: el "schema" de un state.json (0 si es una lista, el
 # formato de antes de v0.18; vacío si no se puede leer).
 schema_de() {

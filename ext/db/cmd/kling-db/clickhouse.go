@@ -14,11 +14,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const chPort = 9000
@@ -32,7 +32,7 @@ var chReservedUsers = map[string]bool{"default": true}
 
 // reCHHash saca el hash de un SHOW CREATE USER con los secretos a la vista (en
 // TSVRaw: sin TSVRaw, el cliente escapa las comillas).
-var reCHHash = regexp.MustCompile(`IDENTIFIED WITH sha256_hash BY '([0-9A-Fa-f]{64})'`)
+var reCHHash = lazyre.New(`IDENTIFIED WITH sha256_hash BY '([0-9A-Fa-f]{64})'`)
 
 // waitClickHouse espera a que el servidor de la copia conteste al administrador.
 func (a *app) waitClickHouse(ctx context.Context, id string) error {

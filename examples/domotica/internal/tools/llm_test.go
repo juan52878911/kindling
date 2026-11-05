@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
 )
 
 // La tarea de generación de la capa 4 tiene que ser válida para el gateway

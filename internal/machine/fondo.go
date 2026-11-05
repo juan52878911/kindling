@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/durable"
-	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // FONDO DE COPIAS PRECALENTADAS DE UNA PLANTILLA.
@@ -73,7 +73,7 @@ func (m *Manager) fondoDe(name string) *fondoPlantilla {
 	return f
 }
 
-// versionFondos es la versión de fondos.json (ver pkg/esquema).
+// versionFondos es la versión de fondos.json (ver internal/esquema).
 //
 //	0: {"plantilla": tamaño, ...} sin versión (v0.19, v0.20).
 //	1: {"schema": 1, "pools": {"plantilla": tamaño, ...}}. Un kling anterior

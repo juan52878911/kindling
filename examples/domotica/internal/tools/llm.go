@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
-	"github.com/juan52878911/kindling/pkg/aigw"
+	"github.com/juan52878911/kindling/internal/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 

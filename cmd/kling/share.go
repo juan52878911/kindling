@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // shareFlag acumula -share repetidos. Se validan al parsear: un error de

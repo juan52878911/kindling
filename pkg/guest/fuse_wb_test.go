@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 func writeIn(fh, off uint64, size int) []byte {
@@ -136,6 +136,44 @@ func TestWriteBehindNoConDaemonAnterior(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "s")); string(b) != "abc" {
 		t.Fatalf("host has %q right after the write, want abc", b)
+	}
+	m.dev.pedir(t, opRelease, node, u64s(fh, 0, 0))
+}
+
+// Escrituras pequeñas y no contiguas: cada una es su propio trozo. En vuelo
+// nunca hay más de wbMaxFlying por nodo, y todo llega al host en orden.
+func TestWriteBehindAcotaLosTrozosEnVuelo(t *testing.T) {
+	m, dir := montarWB(t)
+	e, out := m.dev.pedir(t, opCreate, rootID, u32s(linuxORdwr|linuxOCreat, 0o644, 0, 0), cstr("salteado"))
+	if e != 0 {
+		t.Fatalf("create: %d", e)
+	}
+	node, fh := le.Uint64(out[0:]), le.Uint64(out[entryOutSize:])
+	n := m.fs.nodes.get(node)
+	const trozos = 300
+	want := make([]byte, trozos*4096)
+	peor := 0
+	// De atrás adelante: ninguna es contigua a la anterior.
+	for i := trozos - 1; i >= 0; i-- {
+		b := bytes.Repeat([]byte{byte('a' + i%26)}, 4096)
+		copy(want[i*4096:], b)
+		if e, _ := m.dev.pedir(t, opWrite, node, writeIn(fh, uint64(i*4096), 4096), b); e != 0 {
+			t.Fatalf("write %d: %d", i, e)
+		}
+		if st := n.wb.Load(); st != nil {
+			st.mu.Lock()
+			peor = max(peor, len(st.flying))
+			st.mu.Unlock()
+		}
+	}
+	if peor > wbMaxFlying {
+		t.Fatalf("%d chunks in flight, limit %d", peor, wbMaxFlying)
+	}
+	if e, _ := m.dev.pedir(t, opFlush, node, u64s(fh, 0, 0)); e != 0 {
+		t.Fatalf("flush: %d", e)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "salteado")); !bytes.Equal(b, want) {
+		t.Fatalf("the host has %d bytes, want %d", len(b), len(want))
 	}
 	m.dev.pedir(t, opRelease, node, u64s(fh, 0, 0))
 }

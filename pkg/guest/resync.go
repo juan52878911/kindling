@@ -88,11 +88,22 @@ func ResyncHandler() http.HandlerFunc {
 		}
 		host := time.Unix(0, req.UnixNano)
 		skew := time.Until(host)
-		if err := setClock(host); err != nil {
-			http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
-			return
+		// Tras reanudar una pausada el reloj suele estar bien (KVM no para el
+		// contador): ponerlo ahí solo sumaría lo que tardó la petición. Se
+		// pone si va desfasado de verdad (kling-hv sí lo para).
+		poner := req.Restore != ResyncResume || skew > resyncUmbralReanudar || skew < -resyncUmbralReanudar
+		if poner {
+			if err := setClock(host); err != nil {
+				http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
-		gen := bumpGeneration()
+		// Un arranque en frío o una reanudación no son restauraciones: ni
+		// suben la generación ni cambian la identidad.
+		gen := generation
+		if !resyncSinRestaurar(req.Restore) {
+			gen = bumpGeneration()
+		}
 		// Una copia de un dorado no es la misma máquina: machine-id propio.
 		// Al descongelar la misma máquina no se toca.
 		var renewed []string
@@ -108,6 +119,29 @@ func ResyncHandler() http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st, Generation: gen, Renewed: renewed})
 	}
 }
+
+// Valores de GuestResync.Restore que no son restauraciones, y la capacidad
+// de /healthz que dice que el agente los entiende. Un agente anterior los
+// tomaría por una restauración más (subiría la generación), así que el host
+// solo los manda a quien anuncia CapResyncClock.
+const (
+	// ResyncBoot: justo tras un arranque en frío. El kernel toma la hora del
+	// RTC, que va a segundos (el PL031 de arm64), y le suma medio segundo:
+	// el invitado nace hasta ±0,5 s desfasado del host.
+	ResyncBoot = "boot"
+	// ResyncResume: tras reanudar una máquina pausada (sin volcarla).
+	ResyncResume = "resume"
+	// CapResyncClock: el agente entiende ResyncBoot y ResyncResume.
+	CapResyncClock = "resync-clock"
+)
+
+// resyncUmbralReanudar: tras ResyncResume, un desfase menor que esto no se
+// corrige (sería ruido de la propia petición).
+const resyncUmbralReanudar = 5 * time.Millisecond
+
+// resyncSinRestaurar dice si kind es de los que solo ponen el reloj y la
+// entropía, sin contar como restauración.
+func resyncSinRestaurar(kind string) bool { return kind == ResyncBoot || kind == ResyncResume }
 
 // generation cuenta las restauraciones de este invitado; generationFile es
 // donde se publica (variable para los tests).

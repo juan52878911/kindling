@@ -103,6 +103,17 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 }
 
 // touchTTL reinicia el reloj del TTL de una máquina que se acaba de usar.
+//
+// En memoria, siempre: es lo que mira el vigilante. A disco no en cada exec:
+// persist() copia TODAS las máquinas con el candado global tomado (medido:
+// 27 µs y 190 KiB con 100 máquinas, 180 µs y 920 KiB con 500), y con exec
+// seguidos persistLoop reescribía y sincronizaba state.json cada 250 ms. Solo
+// se encola una foto cuando el reloj cruza a otra ventana de
+// ttlPersistirCada: el de disco nunca va más atrás que esa ventana (más el
+// debounce de persistLoop). Tras un reinicio, el TTL vence como mucho eso
+// antes de lo debido, que en un plazo de inactividad es lo de menos; y
+// cualquier otra transición se lo lleva al disco antes, porque la foto es
+// de todo.
 func (m *Manager) touchTTL(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -111,8 +122,17 @@ func (m *Manager) touchTTL(id string) {
 		return
 	}
 	ahora := time.Now()
+	antes := mc.TTLAt
 	mc.TTLAt = &ahora
-	m.persist()
+	if cada := ttlPersistirCada(mc.TTLSeconds); antes == nil || !antes.Truncate(cada).Equal(ahora.Truncate(cada)) {
+		m.persist()
+	}
+}
+
+// ttlPersistirCada es cuánto puede quedarse atrás en disco el reloj del TTL
+// que reinicia un exec: un 10 % del plazo, entre 1 s y 30 s.
+func ttlPersistirCada(ttlSeconds int) time.Duration {
+	return min(max(time.Duration(ttlSeconds)*time.Second/10, time.Second), 30*time.Second)
 }
 
 // Renew hace que el TTL de la máquina venza ttlSeconds a partir de ahora.
@@ -177,7 +197,18 @@ func (m *Manager) ImageHasAgent(ctx context.Context, image string) (bool, error)
 //
 // En macOS es la única forma fiable: el reenvío de loopback lo abre kling-vz y
 // acepta la conexión escuche el invitado o no.
+//
+// Es la pregunta de quien ESPERA a que algo escuche (exec, listo): un
+// "cerrado" se repite unos ms dentro del plazo de un intento antes de
+// devolverlo (ver sondearEscalonado). Quien solo quiere saber si escucha ya
+// usa sondearPuerto con esperar false.
 func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open, ok bool) {
+	return m.sondearPuerto(ctx, id, port, true)
+}
+
+// sondearPuerto es ProbeGuestPort; con esperar false, un "cerrado" se
+// devuelve en el acto.
+func (m *Manager) sondearPuerto(ctx context.Context, id string, port int, esperar bool) (open, ok bool) {
 	m.mu.RLock()
 	mc := m.byID[id]
 	sock := m.socket[id]
@@ -189,7 +220,7 @@ func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open
 	if !fwd || sock == "" {
 		return false, false
 	}
-	open, err := sondearPuertoVMM(ctx, sock, port)
+	open, err := sondearPuertoVMM(ctx, sock, port, esperar)
 	if err != nil {
 		// Un kling-vz anterior a /kling/probe: se sondea el reenvío.
 		return false, false

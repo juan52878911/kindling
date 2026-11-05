@@ -37,8 +37,8 @@ import (
 	"strings"
 	"sync"
 
+	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Agent es el estado del agente de invitado de este proceso.
@@ -76,6 +76,16 @@ type Agent struct {
 	// no se pudo leer (machine_cmd.go).
 	machineCmd *api.MachineCmd
 	cmdErr     error
+
+	// arrancado se cierra cuando el entorno y el comando de la máquina ya
+	// están aplicados y el servicio lanzado: hasta entonces las rutas que
+	// dependen de ellos esperan (enArranque). nil (un Agent de las pruebas,
+	// o el de New) no espera. diferido y espera son lo que FinishBoot tiene
+	// pendiente con NewDeferred.
+	arrancado chan struct{}
+	diferido  bool
+	espera    bool
+	finUna    sync.Once
 }
 
 // Caps son las capacidades que anuncia /healthz: las rutas que Register sirve
@@ -83,7 +93,7 @@ type Agent struct {
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
 		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
-		api.GuestCapVolumeWait}
+		api.GuestCapVolumeWait, CapResyncClock}
 	// "service" solo si la imagen declara uno: el daemon pide pararlo antes
 	// de matar la máquina, y sin servicio sería un viaje para nada.
 	if ServiceDeclared() {
@@ -110,18 +120,54 @@ func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // volúmenes. Si el kernel pidió un volumen y no se puede montar devuelve error:
 // es mejor morir al arrancar —se ve en la consola serie— que dejar que algo
 // escriba en un directorio del overlay que desaparece con la máquina.
+//
+// Lee el entorno y el comando de la máquina de MMDS antes de volver: quien lo
+// embebe (el puente) los usa en cuanto lo tiene. NewDeferred deja esa parte
+// para después de escuchar.
 func New() (*Agent, error) {
-	a := &Agent{Reaper: DefaultReaper, Volumes: volumeState}
+	a, err := newAgent(false)
+	if err != nil {
+		return nil, err
+	}
+	a.completarArranque()
+	return a, nil
+}
+
+// NewDeferred es New sin lo que espera a MMDS: la ruta a 169.254.169.254, el
+// entorno y el comando de la máquina. Se escucha enseguida y FinishBoot lo
+// hace después; mientras tanto /healthz y lo que depende del entorno esperan
+// (enArranque). Con un MMDS mudo eran hasta ~12 s sin escuchar.
+//
+// /healthz espera y no contesta "pendiente" porque el daemon borra el entorno
+// de MMDS en cuanto el agente le contesta, sea lo que sea
+// (internal/machine retirarEntornoMMDS): contestar antes de leerlo sería
+// perderlo. Lo que se gana es no tener que volver a llamar: la respuesta sale
+// en el instante en que el entorno está, sin conexiones rechazadas ni pausas
+// entre intentos, y las rutas que no lo necesitan (volúmenes, carpetas, DNS)
+// ya atienden.
+func NewDeferred() (*Agent, error) {
+	a, err := newAgent(true)
+	if err != nil {
+		return nil, err
+	}
+	a.arrancado = make(chan struct{})
+	return a, nil
+}
+
+func newAgent(diferido bool) (*Agent, error) {
+	a := &Agent{Reaper: DefaultReaper, Volumes: volumeState, diferido: diferido}
 	go a.Reaper.Run()
 
 	// Best-effort: si nadie usa secretos por MMDS es inocuo, y si se usan es
-	// esta ruta la que los hace legibles.
-	SetupMMDSRoute()
+	// esta ruta la que los hace legibles. Diferido, la pone FinishBoot.
+	if !diferido {
+		SetupMMDSRoute()
+	}
 
 	// Con kling.volwait=1 los monta el host (POST /volume/acquire) cuando
 	// toque: volume_wait.go.
-	espera := volumeWaitWanted()
-	if espera {
+	a.espera = volumeWaitWanted()
+	if a.espera {
 		log.Printf("volumes: left unmounted until the host asks (%s=1)", api.VolumeWaitBootParam)
 	} else if err := a.Volumes.Acquire(); err != nil {
 		return nil, err
@@ -129,14 +175,23 @@ func New() (*Agent, error) {
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
 	// saber cuáles traen paquetes.
 	a.Env = LibraryEnv(os.Environ(), a.Volumes.Specs())
-	// El entorno de la máquina, encima del de la imagen: antes de escuchar,
-	// que es cuando el daemon lo borra de MMDS.
-	a.applyMachineEnv(MachineEnvRequired(), FetchMMDS)
-	a.applyMachineCmd(MachineCmdRequired(), FetchMMDS)
+	return a, nil
+}
+
+// completarArranque aplica el entorno y el comando de la máquina.
+func (a *Agent) completarArranque() {
+	// El entorno de la máquina, encima del de la imagen: antes de contestar a
+	// /healthz, que es cuando el daemon lo borra de MMDS.
+	// Una sola lectura (con sus reintentos) para los dos: con un MMDS mudo,
+	// dos seguidas doblaban la espera antes de /healthz.
+	a.envMu.Lock()
+	a.applyMachineBoot(MachineEnvRequired(), MachineCmdRequired(), FetchMMDS)
 	a.Env = cpuQuirkEnv(a.Env)
-	readyState.setEnv(a.Env)
-	logBiblioteca(a.Env)
-	if espera {
+	env := append([]string(nil), a.Env...)
+	a.envMu.Unlock()
+	readyState.setEnv(env)
+	logBiblioteca(env)
+	if a.espera {
 		// Sin los volúmenes montados, LibraryEnv no ve sus paquetes: cuando el
 		// host los monte, otra vez (los exec también, no solo el servicio).
 		go func() {
@@ -144,7 +199,40 @@ func New() (*Agent, error) {
 			a.recalcularBiblioteca()
 		}()
 	}
-	return a, nil
+}
+
+// FinishBoot es lo que NewDeferred dejó pendiente —la ruta a MMDS, el
+// entorno y el comando de la máquina—, arranca el servicio de la imagen y
+// abre las rutas que esperaban. Una vez; con New no hace nada (el servicio lo
+// arranca quien llama, con StartService).
+func (a *Agent) FinishBoot() {
+	if !a.diferido {
+		return
+	}
+	a.finUna.Do(func() {
+		SetupMMDSRoute()
+		a.completarArranque()
+		a.StartService()
+		close(a.arrancado)
+	})
+}
+
+// enArranque hace esperar a h hasta que FinishBoot acabe (o el cliente se
+// vaya). /healthz contestado es, para el daemon, "ya leyó su entorno"; un
+// /exec o un /ready antes correrían sin él.
+func (a *Agent) enArranque(h http.HandlerFunc) http.HandlerFunc {
+	if a.arrancado == nil {
+		return h
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-a.arrancado:
+		case <-r.Context().Done():
+			http.Error(w, "the guest agent is still booting", http.StatusServiceUnavailable)
+			return
+		}
+		h(w, r)
+	}
 }
 
 func logBiblioteca(env []string) {
@@ -182,23 +270,23 @@ func (a *Agent) recalcularBiblioteca() {
 // capacidad de ejecutar comandos que solo depende de no ser alcanzable acaba
 // siendo alcanzada.
 func (a *Agent) Register(mux *http.ServeMux) {
-	mux.HandleFunc(api.GuestHealthPath, a.handleHealthz)
+	mux.HandleFunc(api.GuestHealthPath, a.enArranque(a.handleHealthz))
 	mux.HandleFunc("/dns", DNSHandler)
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
 	mux.HandleFunc(api.GuestResyncPath, ResyncHandler())
 	// /ready y /hooks: la sonda y los ganchos que declara la imagen. Sin
 	// kling.exec: ejecutan lo que la imagen trae, nunca lo que pida quien llama.
-	mux.HandleFunc(api.GuestReadyPath, ReadyHandler())
-	mux.HandleFunc(api.GuestHooksPath, HooksHandler())
+	mux.HandleFunc(api.GuestReadyPath, a.enArranque(ReadyHandler()))
+	mux.HandleFunc(api.GuestHooksPath, a.enArranque(HooksHandler()))
 	mux.HandleFunc(api.GuestMemInfoPath, MemInfoHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
-	mux.HandleFunc(api.GuestServicePath, ServiceHandler())
-	mux.HandleFunc(api.GuestServiceStopPath, ServiceStopHandler())
+	mux.HandleFunc(api.GuestServicePath, a.enArranque(ServiceHandler()))
+	mux.HandleFunc(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
 	// /procs: los procesos vivos, para que `kling save` avise de los que el
 	// dorado copiaría con sus aleatorios en memoria (procs.go).
-	mux.HandleFunc(api.GuestProcsPath, ProcsHandler())
+	mux.HandleFunc(api.GuestProcsPath, a.enArranque(ProcsHandler()))
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
@@ -232,10 +320,10 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	if ExecEnabled() {
 		// El entorno de cada exec se lee al llegar: con VolumeWait cambia al
 		// montarse los volúmenes.
-		mux.HandleFunc("/exec", ExecHandlerFunc(a.Entorno))
-		mux.HandleFunc("/exec/stream", StreamExecHandlerFunc(a.Entorno))
-		mux.HandleFunc("/exec/pty", ShellHandlerFunc(a.Entorno))
-		mux.HandleFunc("/files", FilesHandler())
+		mux.HandleFunc("/exec", a.enArranque(ExecHandlerFunc(a.Entorno)))
+		mux.HandleFunc("/exec/stream", a.enArranque(StreamExecHandlerFunc(a.Entorno)))
+		mux.HandleFunc("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
+		mux.HandleFunc("/files", a.enArranque(FilesHandler()))
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
 	}
 }
@@ -244,6 +332,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 // escribiendo en ellos: desmontar por debajo de un proceso vivo pierde sus
 // escrituras.
 func (a *Agent) Close() {
+	// Un FinishBoot a medias acaba antes (y uno sin empezar ya no empieza):
+	// si no, lanzaría el servicio después de pararlo, sin volúmenes.
+	a.finUna.Do(func() {})
 	// El servicio primero: es quien escribe en los volúmenes.
 	StopService()
 	shareState.Close()

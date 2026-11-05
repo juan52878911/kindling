@@ -21,17 +21,28 @@ interno**, aunque se pueda usar.
 
 **Estable:**
 
-- El núcleo: `kling` (CLI y daemon), `kling-guest` y `kling-vz`.
+- El núcleo: `kling` (CLI y daemon), `kling-guest`, `kling-vz` y **kling-hv**
+  (como VMM y su formato de volcado `KLNGHV`). kling-hv es estable con una
+  condición: hasta que haya un runner Apple Silicon en CI, cada release pasa a
+  mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv` en un Mac con
+  Apple Silicon, y `scripts/release.sh` no etiqueta sin eso
+  ([`releases.md`](releases.md), paso 3b). Sus límites (8 vCPU, 8 discos,
+  sin pantalla) están en [`backend-hv.md`](backend-hv.md).
 - La API HTTP del daemon: rutas, campos JSON, capacidades de `GET /info`,
   códigos de estado documentados en [`api.md`](api.md) y las cabeceras
   `X-Kling-API`/`X-Kling-Version`.
-- La CLI del núcleo: comandos y flags de `kling help all`, la salida `-json`
-  (son los tipos de `pkg/api`), los códigos de salida y las variables de
-  cliente `KLING_HOST`, `KLING_CONFIG` y `KLING_AUTHZ_TOKEN`.
+- La CLI del núcleo: comandos y flags de `kling help all` (los flags de cada
+  comando los fija `cmd/kling/testdata/contrato/flags.txt`), la salida `-json`,
+  los códigos de salida y las variables de cliente `KLING_HOST`, `KLING_CONFIG`
+  y `KLING_AUTHZ_TOKEN`. La salida `-json` es casi siempre un tipo de
+  `pkg/api`, pero no toda: `status`, `version`, `doctor` y `plugins` escriben
+  estructuras propias. La forma de la de los comandos principales, `status` y
+  `version` incluidos, la fija `cmd/kling/testdata/contrato/json.txt`.
 - Go: **solo** `pkg/api`, `pkg/plugin` y `pkg/config`.
 - Los formatos en disco versionados: `state.json`, `meta.json` de los dorados,
-  `credentials.enc` y los que se vayan versionando (ver
-  [Antes de 1.0](#antes-de-10)).
+  `credentials.enc` (`KLCS`), `publish.json`, `fondos.json`, el sello
+  `volcado.ok`, los grafos (`format`), la configuración del CLI (`schema`) y
+  MMDS (`kling_mmds`).
 - Los protocolos: daemon ↔ agente (`/healthz` con `caps`, parámetros `kling.*`),
   carpetas compartidas `kling-share/1`, extensiones (`KLING_PLUGIN_API=1`,
   manifiesto v2) y MMDS (`env`, `machine_env`, `machine_cmd`).
@@ -40,12 +51,12 @@ interno**, aunque se pueda usar.
 - Las extensiones **mcp** (con `kling-bridge`) y **sandbox**.
 
 **Experimental:** `db`, `phone`, `ai` y Chispa, Android, el operador de
-Kubernetes, `compose` (el subconjunto de Compose que se acepta) y **kling-hv**
-(como VMM, y su formato de volcado `KLNGHV`).
+Kubernetes y `compose` (el subconjunto de Compose que se acepta).
 
 **Interno:** el resto de `pkg/` (`guest`, `credproxy`, `scheduler`,
-`linkbroker`, `durable`, `esquema`, `lazyre`, `panico`, `units`…: pasará a
-`internal/`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
+`linkbroker`, `panico`, `units`: siguen en `pkg/` solo porque los importan
+otros módulos del repo, `ext/*` y `vz/`; `lazyre` sigue porque es el tipo de
+`api.KeyPattern` y cambia solo con `pkg/api`), `internal/`, los comandos ocultos (`dial-stdio`, `builder`,
 `upgrade -schemas`), las variables `KLING_VZ_*`, `KLING_HV_*` y `KLING_TEST_*`,
 la salida para humanos de la CLI (columnas, textos, colores: para scripts,
 `-json`), el texto de los mensajes de error (para decidir, el código), y los
@@ -75,9 +86,15 @@ Una sola versión para todo el repo. En lo estable:
   salida nuevos para casos nuevos, `caps` del agente y opcodes de
   `kling-share`;
 - subir el `schema` de un formato, **siempre** con migración desde el anterior
-  y su copia `.v<N>.bak`;
-- escribir una versión nueva de `kling_vz` o `KLNGHV`, siempre la más baja que
-  describe la máquina;
+  y su copia `.v<N>.bak`. La excepción son los grafos: su `format` 1 solo
+  añade el campo, que un kling anterior ignora y lee igual, así que se migran
+  sin copia (`internal/machine/grafo.go`);
+- escribir una versión nueva de `kling_vz` (siempre la más baja que describe
+  la máquina) o de `KLNGHV`. `kling-hv` escribe **siempre la suya**
+  (`SNAP_VERSION` en `vz/internal/hvvm/vm.c`), sea cual sea la máquina, y no
+  hay bajada: lo que congela un `kling-hv` con la v3 no lo lee uno que solo
+  lee la v2, así que volver a una release anterior deja esas congeladas y
+  dorados `stale` (`kling upgrade -rollback` lo comprueba antes de volver);
 - deprecar (abajo), y cambiar lo experimental.
 
 **PATCH** (1.x.y): arreglos. Ningún formato cambia de versión, así que se puede
@@ -94,9 +111,13 @@ Los dorados (`kling save`, plantillas) y las máquinas congeladas guardan memori
 de una VM, ligada al VMM, al kernel, a la arquitectura y, en el Mac, a la build
 de macOS. **No se promete restaurarlos entre MINOR.** Lo que se promete:
 
-1. **Detección**: uno que el host ya no puede restaurar sale `stale` con la causa
-   y la orden para rehacerlo, antes de llegar al VMM; nunca un fallo crudo al
-   despertar.
+1. **Detección**: uno que el host sabe que ya no puede restaurar (otro VMM, otra
+   MAJOR.MINOR de Firecracker, otra arquitectura, un formato de volcado de
+   kling-vz o kling-hv que este no lee) sale `stale` con la causa y la orden
+   para rehacerlo, antes de llegar al VMM. La build de macOS no se compara por
+   adelantado, porque no hay regla conocida de cuándo Virtualization deja de
+   aceptar un estado guardado: si no restaura, el error lo dice y da la orden
+   para rehacerlo. En ningún caso un fallo crudo al despertar.
 2. **Recongelación**: `kling upgrade` congela otra vez, con el VMM que lo vaya a
    despertar, lo que el cambio dejaría ilegible, o se niega antes de tocar nada.
 
@@ -117,11 +138,12 @@ Para quitar algo estable:
 
 Lo experimental no necesita deprecación: basta la línea en el CHANGELOG.
 
-**Al entrar en 1.0** se retiran los alias que hoy avisan "se retirarán":
-`rmi`, `images`, `volumes`, `sandboxes`, `info`, `resize`, `squeeze`, `mmds`,
-`models`, `chispa` y los verbos sueltos de MCP `add`, `search`, `gateway`,
-`export`, `memory`, `migrate` (`cmd/kling/tree.go`). Se quedan para siempre, en
-silencio, `commit`, `snapshots` y `plugins`.
+**En 1.0** se retiraron los alias que avisaban desde v0.18: `rmi`, `images`,
+`volumes`, `sandboxes`, `info`, `resize`, `squeeze`, `mmds`, `models`, `chispa`
+y los verbos sueltos de MCP `add`, `search`, `gateway`, `export`, `memory`,
+`migrate`, y los flags `run -cpu` y `ai chispa deploy -vcpus`. Salen con el
+código 2 y dicen el nombre nuevo. Se quedan para siempre, en silencio,
+`commit`, `snapshots` y `plugins`.
 
 ---
 
@@ -133,92 +155,66 @@ silencio, `commit`, `snapshots` y `plugins`.
 | `kling upgrade` de N-1 a N | garantizado y probado en cada release; de más atrás, encadenando, sin prueba |
 | `kling upgrade -rollback` de N a N-1 | garantizado: binarios, copias `.v<N>.bak` y recongelación |
 | imagen con agente ≥ 1.0 en cualquier daemon 1.x | funciona; lo que el agente no sepa se degrada, nunca es un fallo duro ni un pánico |
-| imagen con agente de v0.18 a 0.x | se intenta degradar, sin garantía; hoy hay tres fallos duros conocidos (abajo) |
+| imagen con agente de v0.18 a 0.x | funciona con los requisitos de abajo; lo demás se degrada, sin garantía |
 | imagen con agente anterior a v0.18 | **fuera del contrato**: reimportarla |
+
+**Requisitos del agente.** Tres peticiones necesitan una capacidad del agente
+(`caps` de `/healthz`) y **no se degradan**: un servicio que arranca sin su
+entorno o con otro comando parecería sano y no lo es.
+
+| Petición | Capacidad | Agente mínimo |
+|---|---|---|
+| entorno (`kling run -e`, `RunRequest.Env`) | `env` | v0.18 |
+| comando (`RunRequest.Cmd`/`Entrypoint`: imágenes Docker, `kling compose`) | `cmd` | v0.19 |
+| esperar a los volúmenes (`RunRequest.VolumeWait`) | `volume-wait` | v0.19 |
+
+Con un agente que no la anuncia, el daemon da la máquina por fallida en cuanto
+el agente contesta (`failed`, con un error que pide reimportar la imagen); si
+la máquina sale de un dorado cuyo agente ya se conoce, `kling run -e` sale
+además con el código 5 ([códigos de salida](guia.md#códigos-de-salida)).
+`kling doctor` e `image ls` señalan antes las imágenes de agente viejo. Todo
+agente ≥ 1.0 tiene las tres.
 
 ---
 
 ## Matriz de compatibilidad
 
-"Hoy" dice si v0.20 ya lo cumple; lo pendiente está en
+"Hoy" dice si la rama de 1.0 ya lo cumple; lo pendiente está en
 [Antes de 1.0](#antes-de-10).
 
 | Eje | Soportado en 1.x | Mecanismo | Hoy |
 |---|---|---|---|
-| CLI ↔ daemon | misma `APIVersion` (1). Aviso si el daemon es más nuevo; error si es más viejo que `MinDaemonAPI` | `X-Kling-API` en cada respuesta, `api` en `/info` | **sí** el mecanismo; **pendiente** que la regla de `APIVersion` cubra códigos de estado y semántica, y los goldens que la vigilen |
+| CLI ↔ daemon | misma `APIVersion` (1). Aviso si el daemon es más nuevo; error si es más viejo que `MinDaemonAPI` | `X-Kling-API` en cada respuesta, `api` en `/info`; goldens de rutas, códigos de estado, tags JSON y `-json` (`internal/contrato`) | **sí** |
 | Extensión ↔ daemon | `min_kling` ≤ versión del núcleo; `max_api` ≥ API del daemon | manifiesto v2 | **sí** `min_kling` (error); `max_api` solo avisa |
-| Daemon ↔ agente | ver la ventana de arriba | `caps` de `/healthz`; `kling.*` desconocidos se ignoran | **pendiente**: `-e`, `cmd`/`entrypoint` y `volume_wait` con un agente que no los tiene dan la máquina por fallida ("reimport the image") |
+| Daemon ↔ agente | ver la ventana de arriba | `caps` de `/healthz`; `kling.*` desconocidos se ignoran; `agent` en `recipe.json` | **sí**, con los [requisitos del agente](#ventana-de-versiones) |
 | Daemon ↔ Firecracker | la MAJOR.MINOR fijada por cada release (hoy 1.17); otra deja los dorados `stale` | `vmm` en `meta.json` y en el sello | **sí** |
-| Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-3) | **sí** el volcado; **pendiente** comparar la versión de `/kling/info` |
-| Daemon ↔ kling-hv (experimental) | la misma versión que el daemon | `KLNGHV` (cabecera v2, lee v1) | **pendiente**: `upgrade` no mira `KLNGHV`, el daemon no traduce su error, la cabecera C no tiene test |
+| Daemon ↔ kling-vz | la misma versión que el daemon: `kling upgrade` los cambia juntos | `kling_vz` del volcado (1-3): lo que este no lee sale `stale` | **sí** |
+| Daemon ↔ kling-hv | la misma versión que el daemon | `KLNGHV` (estado v4, lee v1 a v3, fijada por `TestCabeceraKLNGHV`); `stale` y `kling upgrade` la comprueban | **sí** |
 | macOS | kling-vz ≥ 14.0, kling-hv ≥ 15.2. El `mem.file` de vz está ligado a la build de macOS: si no restaura, se rehace | `minos` comprobado en CI; `macos` en el meta | **sí** |
-| Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta | **sí**; **pendiente** que salga en `doctor` |
-| Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | ninguno | **pendiente**: la arquitectura no cuenta para `stale` |
+| Kernel de invitado | cambiarlo avisa y el dorado sigue (el kernel vive en su memoria) | `kernel_sha256` en el meta y en el sello; `kernel_sha256` y `kernel_mismatch` en `/info`, que `kling doctor` enseña | **sí** |
+| Arquitectura | amd64 y arm64; los dorados no se mueven entre ellas | `arch` en el meta y en el sello: otra sale `stale` | **sí** |
 | Host Linux | KVM, ext4/XFS/btrfs (reflink opcional), systemd para `kling upgrade` | `kling doctor` | **sí** |
-| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`pkg/esquema`) | **sí** `state.json`, `meta.json`, `credentials.enc`; **pendiente** el resto y la disciplina de subir versión |
-| Go API | `pkg/api`, `pkg/plugin`, `pkg/config` | SemVer de Go | **pendiente** `apidiff` en CI |
+| Formatos en disco | los estables se leen de N-1 y se rechazan los del futuro sin pisarlos | `schema`, `.v<N>.bak` (`internal/esquema`); fijaciones de v0.17 a v0.20 y `campos-persistidos.txt` en `internal/machine/testdata/esquema/` | **sí** |
+| Go API | `pkg/api`, `pkg/plugin`, `pkg/config` | SemVer de Go; `scripts/apidiff.sh` en CI contra la etiqueta anterior | **sí** |
 
 ---
 
 ## Antes de 1.0
 
-Lo que hay que hacer para que este documento sea verdad. Sale del inventario de
+Lo que falta para que este documento sea verdad. Sale del inventario de
 contratos del 2026-10-28; cuando se cumpla una línea, se quita de aquí y su fila
 de la matriz pasa a **sí**.
 
-**API y CLI**
-
-- Golden de la tabla de rutas (método, patrón, acción de authz), de los códigos
-  de estado por ruta y de los tags JSON de todo `pkg/api` (hoy solo
-  `Machine`, `Snapshot` y `CredentialSpec`), y un test que exija subir
-  `APIVersion` o la MAJOR si cambian.
-- Arreglar las incoherencias de códigos de estado (los `400` para "no existe" o
-  para errores del host, `DELETE /volumes/{name}` siempre `409`,
-  `DELETE /sandboxes/{ref}` siempre `500`, `507` para disco lleno en
-  volúmenes y en la caché OCI…) y fijar la tabla de
-  [`api.md`](api.md#códigos-de-estado-por-ruta).
-- Un `code` estable en `api.Error`; que `IsMachineLimit`/`IsTenantQuota` dejen
-  de comparar el texto del mensaje.
-- Capacidad y documentación para `GET/PUT /snapshots/{name}/pool` y
-  `GET /machines/{ref}/egress`.
-- Golden de la salida `-json` de cada comando; códigos de salida documentados
-  en [la guía](guia.md#códigos-de-salida) (0 bien, 1 error, 2 uso, 3 daemon
-  incompatible, 4 dorado obsoleto, 5 agente sin capacidad, 130 interrumpido; el
-  del proceso remoto en `exec`, `shell` y `try`).
-- `kling status -v` y `kling version` muestran API, VMM y agente; el árbol de
-  ayuda de `compose` coincide con lo que acepta.
-- Retirar los alias avisados (ver [Deprecación](#deprecación)) y decidir los
-  flags deprecados (`run -cpu`, `chispa deploy -vcpus`).
-
-**Formatos en disco**
-
-- Versionar `publish.json`, `fondos.json`, el sello `volcado.ok`, los grafos
-  (`format`), la configuración del CLI (`schema`, y conservar claves desconocidas
-  al guardar) y MMDS.
-- Copia `.v1.bak` al pasar `state.json` de 1 a 2; `credentials.enc` a `KLCS` 2 por
-  los campos de SigV4 (o declararlos ignorables con test); decidir qué hacer
-  con los campos de v0.19/v0.20 que se añadieron sin subir el `schema`.
-- Fijaciones de v0.18, v0.19 y v0.20 en `internal/machine/testdata/esquema/`.
-- Daemon estricto (o con eco de lo ignorado) en `POST /graphs`.
-
-**VMM y agente**
-
-- `stale` con arquitectura y con la versión de kling-vz/kling-hv; traducir el
-  error de `KLNGHV`, test de su cabecera y que `kling upgrade` la compruebe.
-- `kling doctor` e `image ls` señalan agentes viejos; la versión del agente va
-  en `recipe.json`.
-- Degradar en vez de fallar con `-e`, `cmd` y `volume_wait` en agentes
-  anteriores, o dejarlo como requisito documentado de la ventana.
-
 **Pruebas y release**
 
-- e2e de `kling upgrade` desde la release N-1 real (hoy fijado a v0.17 y con
-  `-from-dir -insecure`), en Linux y en el Mac, incluido kling-hv.
-- e2e con microVMs en CI (Linux con KVM y un runner Apple Silicon).
-- `apidiff` para `pkg/api|plugin|config`; mover el resto de `pkg/` a
-  `internal/`.
-- Firma de `SHA256SUMS` verificada por `kling upgrade`, `install.sh` y la
-  fórmula, atestación de procedencia en `release.yml` y notarización de los
-  binarios de macOS.
-- `prerelease` para las `-rc` (que `kling upgrade` no las tome como la
-  última).
+- e2e con microVMs en un runner Apple Silicon, incluido el de `kling upgrade`
+  desde la release anterior (`95-e2e-upgrade-mac.sh`): `e2e-mac.yml` ya está
+  escrito y se enciende con la variable `KLING_MAC_RUNNER=true`. Mientras no
+  lo haya, se corren a mano antes de cada release (`release.sh` lo exige con
+  `KLING_E2E_HV`). El de Linux con KVM ya corre en `e2e-linux.yml`, también
+  el de upgrade desde la release anterior.
+- El secreto `KLING_RELEASE_SIGNING_KEY` en el environment `release`
+  ([`firmas.md`](firmas.md)): desde v1.0.0 `kling upgrade` rechaza una release
+  sin firmar.
+- Notarización de los binarios de macOS.
+- El tap de Homebrew que publique la fórmula que ya genera `release.yml`.

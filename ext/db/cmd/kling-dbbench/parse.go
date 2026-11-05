@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Los parsers de este fichero leen la salida de las herramientas que el banco
@@ -25,8 +25,8 @@ type runInfo struct {
 }
 
 var (
-	reRunFrom = regexp.MustCompile(`^([0-9a-f]{12})\s+(\S+)\s+instantiated from (\S+) in (\d+) ms`)
-	reRunCold = regexp.MustCompile(`^([0-9a-f]{12})\s+(\S+)\s+booted cold in (\d+) ms`)
+	reRunFrom = lazyre.New(`^([0-9a-f]{12})\s+(\S+)\s+instantiated from (\S+) in (\d+) ms`)
+	reRunCold = lazyre.New(`^([0-9a-f]{12})\s+(\S+)\s+booted cold in (\d+) ms`)
 )
 
 // parseRunOutput lee la primera línea de `kling run`:

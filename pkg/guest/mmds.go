@@ -47,12 +47,14 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -128,6 +130,7 @@ type MMDSStore struct {
 // invitado haga ARP directamente por 169.254.169.254, que es a quien Firecracker
 // responde interceptando en el dispositivo virtio-net.
 //
+// Por netlink, y si el kernel lo rechaza, con `ip` (mmds_ruta.go).
 // Best-effort: si falla (imagen mínima sin `ip`, kernel sin la ruta), se avisa y se
 // sigue. Sin ruta, la lectura de MMDS fallará limpio en fetchMMDS y la sesión
 // arranca sin secretos, como hasta ahora.
@@ -136,6 +139,14 @@ type MMDSStore struct {
 // imagen traiga `iproute2` y de que la ruta on-link baste para que Firecracker
 // intercepte. Hay que confirmarlo en hardware; ver el reporte de la tarea.
 func SetupMMDSRoute() {
+	// Primero por netlink (mmds_ruta.go): sin fork ni `ip`.
+	switch err := rutaNetlink([4]byte{169, 254, 169, 254}, "eth0"); {
+	case err == nil:
+		log.Printf("mmds: route to 169.254.169.254 via eth0 ready")
+		return
+	case errors.Is(err, syscall.EEXIST):
+		return
+	}
 	ipBin, err := exec.LookPath("ip")
 	if err != nil {
 		// La imagen mínima puede no traer iproute2. No hay un /sys equivalente para

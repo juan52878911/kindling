@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/esquema"
+	"github.com/juan52878911/kindling/internal/esquema"
 )
 
 // Save escribe "schema", deja la copia de la config sin versión y conserva

@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/juan52878911/kindling/ext/db/internal/doctor"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // table pasa una tabla descubierta al informe, con el análisis estático de sus
@@ -267,7 +267,7 @@ func newTCResults() *tcResults {
 	return &tcResults{sel: map[string]tcSelRow{}, err: map[string]string{}, write: map[string]tcWriteRow{}, other: map[string]bool{}}
 }
 
-var sqlstatePattern = regexp.MustCompile(`^[0-9A-Z]{5}$`)
+var sqlstatePattern = lazyre.New(`^[0-9A-Z]{5}$`)
 
 // parseTCOutput lee las líneas del script; lo que no reconoce se ignora.
 func parseTCOutput(out string) *tcResults {
@@ -561,7 +561,7 @@ func writeTenantReport(w io.Writer, rep *tcReport, asJSON bool) error {
 }
 
 // reLiteral es una cadena SQL entre comillas simples (” dentro es una comilla).
-var reLiteral = regexp.MustCompile(`'(?:[^']|'')*'`)
+var reLiteral = lazyre.New(`'(?:[^']|'')*'`)
 
 // sinLiterales quita los valores de la expresión de una política antes de
 // enseñarla: una política puede nombrar un inquilino concreto
@@ -582,4 +582,4 @@ func sinLiterales(expr string) string {
 }
 
 // reNombreAjuste es un literal con forma de nombre de ajuste de Postgres.
-var reNombreAjuste = regexp.MustCompile(`^'[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*'$`)
+var reNombreAjuste = lazyre.New(`^'[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*'$`)

@@ -50,7 +50,7 @@ func TestLiveVMsEncuentraLaMaquinaPorSuSocket(t *testing.T) {
 	// el fork y el exec el hijo tiene el MISMO cmdline que el padre, ruta
 	// incluida; liveVMs a veces se quedaba con ese pid (CI de #180). `read` es
 	// del propio shell: espera sin hijos mientras la tubería siga abierta.
-	cmd := exec.Command("/bin/sh", "-c", "read x", sock)
+	cmd := exec.Command("/bin/sh", "-c", "read x", argSocketVMM, sock)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

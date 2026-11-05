@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // Límites del lado del host. Ver docs/compartir.md.
@@ -34,7 +34,7 @@ const (
 	// handles él, no deja al daemon sin descriptores.
 	maxHandles = 1024
 	// maxHandlesPerMachine acota los descriptores abiertos por TODAS las
-	// carpetas de UNA máquina (puede tener hasta 8, ver pkg/share.MaxShares):
+	// carpetas de UNA máquina (puede tener hasta 8, ver internal/shareproto.MaxShares):
 	// sin este tope una sola máquina hostil con 8 carpetas y 1024 handles cada
 	// una (8192) se comería buena parte del presupuesto global y dejaría a las
 	// demás sin descriptores. Ver S-03 en docs/compartir.md.

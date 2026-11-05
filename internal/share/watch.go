@@ -38,7 +38,7 @@ import (
 	"syscall"
 	"time"
 
-	proto "github.com/juan52878911/kindling/pkg/share"
+	proto "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 var (
@@ -52,6 +52,12 @@ var (
 	// guestEcho: cuánto tiempo se considera eco un cambio en una ruta que tocó
 	// el invitado.
 	guestEcho = time.Second
+	// maxEcho acota las marcas de eco de una sesión. Se purgan por edad en
+	// flush, pero flush solo corre si el host cuenta algo: un invitado que
+	// escribe rutas que nadie vigila las apuntaba para siempre. Pasado el tope
+	// se deja de apuntar: lo peor es que el invitado oiga su propio cambio,
+	// una invalidación de más, no un dato perdido.
+	maxEcho = 8192
 )
 
 // errNoWatch: este sistema no tiene con qué vigilar.
@@ -119,8 +125,10 @@ type watcher struct {
 	entries map[string]*watchEntry
 	lru     *list.List // *watchEntry; el más reciente delante
 	echo    map[string]time.Time
-	pend    map[string]rawEvent
-	timer   *time.Timer
+	// echoSweep: última purga de echo por edad hecha desde touched.
+	echoSweep time.Time
+	pend      map[string]rawEvent
+	timer     *time.Timer
 	// resync: se perdieron eventos; el próximo flush lo repasa todo.
 	resync bool
 }
@@ -210,8 +218,27 @@ func (w *watcher) touched(rels ...string) {
 	if w.closed {
 		return
 	}
+	// Purga por edad también aquí, como mucho una vez por guestEcho (o al
+	// llegar al tope): así el mapa no guarda más que el último par de
+	// segundos aunque flush no corra nunca.
+	if now.Sub(w.echoSweep) > guestEcho || len(w.echo) >= maxEcho {
+		w.purgeEchoLocked(now)
+		w.echoSweep = now
+	}
 	for _, r := range rels {
+		if _, ok := w.echo[r]; !ok && len(w.echo) >= maxEcho {
+			continue
+		}
 		w.echo[r] = now
+	}
+}
+
+// purgeEchoLocked suelta las marcas de eco que ya vencieron.
+func (w *watcher) purgeEchoLocked(now time.Time) {
+	for r, t := range w.echo {
+		if now.Sub(t) > guestEcho {
+			delete(w.echo, r)
+		}
 	}
 }
 
@@ -284,11 +311,7 @@ func (w *watcher) flush() {
 		w.resyncLocked(pend)
 	}
 	now := time.Now()
-	for r, t := range w.echo {
-		if now.Sub(t) > guestEcho {
-			delete(w.echo, r)
-		}
-	}
+	w.purgeEchoLocked(now)
 	isEcho := func(r string) bool { t, ok := w.echo[r]; return ok && now.Sub(t) <= guestEcho }
 
 	var out []pushMsg

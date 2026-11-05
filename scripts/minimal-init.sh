@@ -7,6 +7,12 @@
 # Saltarse systemd es la diferencia entre ~80 MB y ~36 MB de working set
 # congelado. Una microVM efímera que solo sirve una herramienta no necesita
 # gestor de servicios, ni journal, ni resolución de dependencias de arranque.
+#
+# pkg/guest/init.go es el mismo init en Go, sin fork ni exec: lo llevan las
+# bases del constructor debian cuyo agente lo trae y las imágenes de Docker
+# sin sh. Este script sigue para las demás (android, las de scripts/, las de
+# Docker con sh y las construidas con un agente anterior): lo que cambie aquí
+# tiene que cambiar allí, y al revés.
 set -e
 
 # El kernel arranca a PID 1 sin entorno. Sin PATH, cualquier programa invocado

@@ -165,6 +165,10 @@ CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_BALLOON=y
 CONFIG_HW_RANDOM=y
 CONFIG_HW_RANDOM_VIRTIO=y
+# La rng-seed que pone kling-hv en el DTB (vz/internal/hvvm/fdt.c) solo deja el
+# crng inicializado si se acredita; en 6.1 lo decide esto (allnoconfig lo
+# apaga aunque su valor por defecto sea y). Se mezcla igual sin ello.
+CONFIG_RANDOM_TRUST_BOOTLOADER=y
 
 # ── dispositivos: solo consola ───────────────────────────────────────────────
 CONFIG_DEVTMPFS=y

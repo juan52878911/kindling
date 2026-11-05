@@ -5,7 +5,8 @@ Cada release de kindling lleva dos pruebas de origen, además del `SHA256SUMS`:
 - **`SHA256SUMS.minisig`**: la firma ed25519 del `SHA256SUMS` en el formato de
   [minisign](https://jedisct1.github.io/minisign/). Como el `SHA256SUMS` lista el
   sha256 de cada asset, firmarlo firma todos. La comprueban `kling upgrade`, la
-  descarga de imágenes de `kling up` y `scripts/install.sh` (si hay `minisign`).
+  descarga de imágenes de `kling up` y `scripts/install.sh` (con `minisign`, que
+  desde v1.0.0 necesita).
 - **Atestación de procedencia** (SLSA, Sigstore) de cada asset, hecha por
   `actions/attest-build-provenance` con el OIDC del job de `release.yml`: dice qué
   workflow, commit y etiqueta produjeron cada fichero. No usa ningún secreto. Se
@@ -25,12 +26,16 @@ tenga `gh`.
 | Release sin `SHA256SUMS.minisig` | aviso, solo sha256 | **error** |
 | Release firmada y un kling sin claves compiladas | aviso, solo sha256 | **error** |
 | `-from-dir` sin firma | aviso | aviso |
-| `install.sh` sin `minisign` instalado | aviso, solo sha256 | aviso, solo sha256 |
+| `install.sh` sin `minisign` instalado | aviso, solo sha256 | **error**, salvo `KLING_INSECURE_NO_MINISIGN=1` (aviso, solo sha256) |
 
 «Desde v1.0.0» cuenta dos cosas (`upgrade.FirmaObligatoriaDesde`): la versión de
 la release que se baja (un `-rc` de la 1.0 ya cuenta) y la del kling que la baja.
 Un kling 1.x no instala una release sin firmar, ni siquiera una 0.x; para eso
 queda `-from-dir` con los binarios y su `SHA256SUMS`.
+En `install.sh` cuenta solo la versión que se instala: no hay un kling
+previo que mirar. `KLING_INSECURE_NO_MINISIGN=1` es para un host donde no se
+puede instalar minisign: sin la firma, el sha256 solo prueba que la descarga
+coincide con el `SHA256SUMS` que vino del mismo sitio.
 
 La firma lleva en su comentario de confianza `tag:<etiqueta>`, y kling exige que
 coincida con la release que pidió: si no, el `SHA256SUMS` firmado de una release
@@ -69,7 +74,12 @@ Mientras el secreto no exista, el paso «firmar SHA256SUMS» de `release.yml` se
 salta con un aviso y la release 0.x sale sin firma, como hasta ahora. Una
 release ≥ 1.0 sin secreto falla en ese paso. Con el secreto puesto y la pública
 sin añadir al código, el paso también falla: `firmar sign` comprueba la firma
-contra las claves compiladas de ese mismo commit antes de publicarla.
+contra las claves compiladas de ese mismo commit antes de publicarla. Una
+etiqueta ≥ 1.0 (un `-rc` incluido) con `clavesRelease` vacía no llega ni a
+compilarse: la paran `scripts/release.sh` antes de crearla y el job `lint` de
+`release.yml` con `go run ./internal/upgrade/firmar check -tag vX.Y.Z`, que
+con `KLING_RELEASE_SIGNING_KEY` en el entorno comprueba además que su pública
+está entre las compiladas.
 
 ## Rotar la clave
 

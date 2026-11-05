@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juan52878911/kindling/pkg/share"
+	share "github.com/juan52878911/kindling/internal/shareproto"
 )
 
 // fuseDevNum es el número de /dev/fuse (misc, 10:229).

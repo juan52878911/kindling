@@ -53,7 +53,7 @@ Los dorados no se comparten entre backends: el sello del snapshot lleva
 | red | virtio-mmio net a un socket `SOCK_DGRAM` (una trama por datagrama): el contrato de `VZFileHandleNetworkDeviceAttachment`, así que `vnet` sirve tal cual. MTU 16384 en las máquinas que arrancan (`KLING_VZ_MTU`, como vz), anunciada con `VIRTIO_NET_F_MTU`; viaja en el snapshot |
 | entropía | virtio-rng (`PUT /entropy`), con `arc4random_buf` |
 | vsock | virtio-vsock (`vsock.c`): el canal con el agente, el mismo contrato que `kling-vz` (abajo) |
-| globo | virtio-balloon sin cola de estadísticas: `squeeze`, `-mem-max` y `resize` (abajo) |
+| globo | virtio-balloon con cola de estadísticas (`VIRTIO_BALLOON_F_STATS_VQ`): `GET /balloon/statistics` da la memoria libre, disponible y total que ve el driver del invitado, así que `squeeze` reclama lo libre de verdad sin preguntar al agente; `-mem-max` y `resize` (abajo) |
 | sin | pantalla |
 
 Todas las colas pasan por un único recorrido de cadenas con topes
@@ -125,6 +125,14 @@ vz/) es fijo: ~4 ms un perfil vacío y ~5 ms `system.sb`.
 pie (32 B)   magia KLNGHV02, tamaño de la RAM, dónde está el estado
 ```
 
+El estado lleva una versión (4 desde el free page reporting del globo; la 3
+le dio su cola de estadísticas y la 2 lo añadía a él y a vsock al final): un `kling-hv` lee
+las anteriores, que son un prefijo de la suya (la 2 convierte el globo), y
+el daemon rechaza una del futuro con el mensaje de `versionHVMax`
+(`internal/machine/meta.go`). Un invitado restaurado de una versión 2 no
+negoció la cola de estadísticas: `squeeze` vuelve al agente hasta que
+arranque de nuevo.
+
 Se hace clonando (APFS, `fclonefileat`) el fichero que respalda la RAM y
 escribiendo encima las páginas que el invitado cambió según `mincore`
 (`MODIFIED|COPIED|ANONYMOUS|PAGED_OUT`), más el estado. Un arranque en frío
@@ -140,13 +148,15 @@ el reloj de pared lo arregla `/resync` del agente, como con vz.
 Nadie escribe un fichero de memoria después de crearlo: lo exige el mapeo
 `MAP_PRIVATE` (sus páginas limpias son las del fichero).
 
-El snapshot escribe también las páginas residentes que el invitado solo leyó
+El snapshot pide también las páginas residentes que el invitado solo leyó
 (`MINCORE_INCORE`): el clon es otro vnode y no comparte la caché unificada con
-su base, así que una página que no se escribe la tendría que leer del SSD el
+su base, así que una página que nadie pide la tendría que leer del SSD el
 invitado restaurado. Sin ello, el thaw de una máquina ya descongelada antes
 tardaba 60-90 ms en el primer `/resync` (cada interrupción del invitado
-esperaba a un fallo de página); con ello, 2-4 ms. Lo escrito queda en la
-caché.
+esperaba a un fallo de página); con ello, 2-4 ms. Antes se reescribían; ahora
+se piden con `F_RDADVISE` a la caché del clon, en segundo plano y sin copiarlas
+(`vm.c`): el freeze va en torno al doble de rápido y lo congelado ocupa menos
+(76 → 60 MB en el M4).
 
 ## Pausa y techo de CPU
 
@@ -289,9 +299,90 @@ que el ruido. Antes de esta versión cada freeze hacía 7 F_FULLFSYNC (~5 ms cad
 uno en el M4 frente a 0,7 ms de una barrera F_BARRIERFSYNC); ahora 2 (la marca
 y el sello) y barreras en el resto. Medido en vueltas alternas (n=12 cada una,
 p50 del API): hv 93,5 / 94,5 → 77,9 / 72,4 ms y vz 144 / 135,5 → 124,8 /
-123,6 ms, con el thaw igual. Queda por probar, con el Mac tranquilo,
-pedir esas páginas con `F_RDADVISE` en vez de escribirlas: en una ronda bajó a
-75 ms con thaw de 52 ms, en otra no se distinguía del ruido.
+123,6 ms, con el thaw igual. Con `F_RDADVISE` (arriba), el p50 del freeze en
+hv quedó en 67 ms.
+
+## Estabilidad de `kling-hv`
+
+Estable desde 1.0 ([`compatibilidad.md`](compatibilidad.md)), con una
+condición mientras no haya un runner Apple Silicon en CI: cada release pasa a
+mano `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` con `VMM=hv`, y
+`scripts/release.sh` no etiqueta sin eso ([`releases.md`](releases.md)).
+
+Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
+
+### Probado
+
+- **Ciclos largos**: un soak de 60 ciclos seguidos sin un fallo.
+- **Invitado hostil**: abuso de los registros MMIO, de la red y del globo
+  desde el invitado, sin cuelgues ni caídas del proceso; además del fuzz de
+  `FuzzColas` (arriba), que el CI corre 30 s en cada commit.
+- **Presión de memoria sin pérdida de páginas**: con el Mac apretado, el
+  invitado no pierde páginas. La RAM es un
+  `mmap(MAP_PRIVATE)` del `mem.file`, que es inmutable (nadie lo escribe tras
+  crearlo): una página limpia que macOS suelta se vuelve a leer del fichero, y
+  una sucia va al swap como cualquier página anónima. El #87 de vz (páginas
+  del invitado que se pierden bajo presión cuando se regula la VM) no tiene
+  por dónde darse aquí.
+- **Reloj tras un thaw**: el contador virtual sigue donde se pausó y el
+  `/resync` del agente pone la hora de pared: comprobado que el invitado
+  descongelado tiene la hora del host.
+- **Cabecera del volcado**: `go test ./internal/hvvm` (en `vz/`) cambia bits
+  en cada byte de la cabecera y del pie y recorta el fichero en cada frontera
+  de sección; `khv_restore` rechaza todo lo que no cuadra antes de mapear la
+  RAM o devuelve un error, sin romper el proceso
+  (`cabecera_corrupta_darwin_test.go`).
+- **Los dispositivos con sanitizadores**: `vz/scripts/sanitizers-hv.sh` corre
+  las pruebas de C sin VM (`prueba.c`, RAM de mentira, sin entitlement) con
+  `-fsanitize=address,undefined`; el CI lo pasa en cada commit.
+- **De punta a punta en el CI**: `.github/workflows/e2e-mac.yml` corre
+  `scripts/92-e2e-mac.sh` y `scripts/95-e2e-upgrade-mac.sh` con `VMM=hv`
+  cada noche y en los PR que tocan `vz/` o `internal/machine/`, en un runner
+  self-hosted con Apple Silicon. Solo corre si la variable del repo
+  `KLING_MAC_RUNNER` vale `true`: sin runner, el job sale saltado. En el job
+  `vz` de `ci.yml` (un runner de GitHub, sin hipervisor) `kling-hv --probe`
+  solo puede comprobar que la sonda contesta su fallo en vez de colgarse.
+
+### Sin probar
+
+- **Sueño y despertar del Mac** con máquinas vivas (ver «Pendiente»).
+- **Disco lleno**: un snapshot o un overlay que no caben. El sello
+  (`volcado.ok`) evita dar por buena una congelación a medias, pero no hay
+  prueba de qué ve el invitado cuando su overlay no puede crecer.
+- **vsock con carga**: muchas conexiones a la vez y transferencias largas en
+  paralelo. Lo comprobado son 20 MB de `kling cp` y el agente con `eth0`
+  caído.
+
+### Límites
+
+- **8 vCPU y 8 discos** por máquina (`MAX_CPUS` y `KHV_MAX_DISKS` en
+  `khv.h`; `khv_create` en `vm.c` y `hvvm_darwin.go` los comprueban). El
+  daemon no lo mira antes: una máquina con su raíz, sus capas, sus copias y
+  sus volúmenes puede pasar de 8 discos y falla tarde, al crear la VM, con
+  `kling-hv supports at most 8 drives`.
+- **Sin pantalla ni ventana**: una máquina con pantalla se rechaza
+  (`kling-hv has no display device`). `KLING_VZ_GRAPHICS`, `KLING_VZ_WINDOW` y
+  `KLING_VZ_DISK_CACHING`/`KLING_VZ_DISK_SYNC` pasan al entorno de `kling-hv`
+  (el daemon deja pasar todo `KLING_VZ_*`, `entornoVMMPermitido` en
+  `internal/machine/plataforma_vz.go`) y `kling-hv` los ignora.
+- **`daemon.vmm auto` vuelve a vz sin mirar lo de hv**: la elección
+  (`cmd/kling/vmm_auto.go`) protege lo que congeló vz (no pasa a hv si lo
+  hay), pero no al revés. Si la sonda de `kling-hv` falla un día, o falta tras
+  una instalación a medias, el daemon arranca con vz y las congeladas y
+  dorados de hv salen `stale` (`causaObsoleto` en
+  `internal/machine/meta.go`: «made with kling-hv …; this host runs
+  kling-vz …») hasta que vuelva hv. No se pierden; `kling status -v` dice por
+  qué se eligió vz. Para no depender de la sonda: `daemon.vmm hv`.
+- **El estado del volcado no lleva suma**: `volcado.ok` sella el sha256 del
+  `snap.file` (el JSON) y solo el **tamaño** del `mem.file`, y en hv el estado
+  de vCPU, dispositivos y GIC va dentro del `mem.file`, tras la RAM. Una
+  cabecera cambiada sin cambiar de tamaño solo la para la validación de
+  `khv_restore` (magia, versión, tamaños, `ram_size`, `gic_size`), no una suma.
+- **Sin bajada de versión**: `kling-hv` escribe siempre su `SNAP_VERSION`
+  (hoy 4), aunque la máquina se pudiera describir con una anterior, así que
+  un `kling-hv` viejo no lee lo que congela uno nuevo (ver
+  [compatibilidad.md](compatibilidad.md)); `kling upgrade -rollback` lo mira
+  antes de volver.
 
 ## Fondo de procesos pre-lanzados (propuesta, sin hacer)
 

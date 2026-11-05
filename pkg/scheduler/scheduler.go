@@ -602,6 +602,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 		// Murió por debajo: se descarta y se reconstruye.
 		g.mu.Lock()
 		delete(g.services, service)
+		e.cerrarConexiones()
 	}
 	g.mu.Unlock()
 
@@ -757,10 +758,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// herramienta puede tardar. Un escaneo de semgrep sobre un repo pasa del
 	// minuto sin que nada vaya mal, y con 60 s el gateway lo mataba y devolvía
 	// un 502 que parecía un fallo del servicio.
-	e.proxy.Transport = &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 5 * time.Minute,
-	}
+	e.proxy.Transport = transporteInvitado()
 	e.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		// UNA sola oportunidad, y solo si el cuerpo se puede reenviar.
 		//
@@ -903,16 +901,45 @@ func (g *Scheduler) olvidarInstancia(service, machineID string) {
 	g.removeEntryLocked(service, machineID)
 }
 
+// transporteInvitado es el transporte del proxy de una instancia. Las
+// conexiones en reposo se cierran solas a los 30 s (sin plazo se quedaban
+// abiertas hacia invitados congelados o destruidos) y caben 16 por instancia:
+// varias sesiones a la vez no reabren conexión en cada petición, que es lo que
+// pasaba con el tope por defecto de 2.
+func transporteInvitado() *http.Transport {
+	return &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 5 * time.Minute,
+		IdleConnTimeout:       30 * time.Second,
+		MaxIdleConnsPerHost:   16,
+	}
+}
+
+// cerrarConexiones suelta las conexiones en reposo del proxy de la instancia:
+// sale del mapa (muerta, congelada o retirada) y su invitado ya no las va a
+// atender. Si vuelve (reponerEntryLocked), el proxy abre otras. Solo cierra
+// sockets ociosos, así que vale con g.mu tomado.
+func (e *entry) cerrarConexiones() {
+	if e.proxy == nil {
+		return
+	}
+	if t, ok := e.proxy.Transport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
+}
+
 // removeEntryLocked quita una instancia del servicio, sea la primaria o una
 // réplica. Se llama con g.mu tomado.
 func (g *Scheduler) removeEntryLocked(service, machineID string) {
 	if e := g.services[service]; e != nil && e.machineID == machineID {
 		delete(g.services, service)
+		e.cerrarConexiones()
 		return
 	}
 	es := g.extra[service]
 	for i, e := range es {
 		if e.machineID == machineID {
+			e.cerrarConexiones()
 			g.extra[service] = append(es[:i], es[i+1:]...)
 			if len(g.extra[service]) == 0 {
 				delete(g.extra, service)

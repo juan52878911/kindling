@@ -32,7 +32,7 @@
 // La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
 // upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
 // nuevo congeló.
-#define KHV_SNAP_VERSION 2
+#define KHV_SNAP_VERSION 4
 #define RAM_BASE 0x80000000ULL
 
 #define MAX_CPUS 8
@@ -69,6 +69,7 @@ struct khv_config {
 #define KHV_PAUSA_FRENO 2u
 
 const char *khv_error(void);
+void khv_error_copia(char *buf, size_t n);  // copia de khv_error (con su cerrojo)
 int khv_create(const struct khv_config *c);
 bool khv_vm_tocada(void);  // si khv_create llegó a crear la VM (el proceso ya no sirve para otra)
 int khv_boot(void);
@@ -76,26 +77,49 @@ int khv_restore(const char *mem_path);
 int khv_pause(unsigned bit);
 int khv_resume(unsigned bit);
 int khv_snapshot(const char *mem_out);
-int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó
+int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó o se reinició
 void khv_stop(void);
 uint64_t khv_footprint(void);
 void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), instrucciones y en P
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
-void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *pie);
+void khv_formato_snap(uint64_t *magia, uint32_t *version, uint64_t *hdr, uint64_t *hdr_v1, uint64_t *hdr_v2,
+                      uint64_t *hdr_v3, uint64_t *pie);
+// Por qué terminó la VM (khv_wait ya volvió): el invitado se apagó
+// (SYSTEM_OFF), pidió reiniciarse (SYSTEM_RESET: kling-hv no reinicia en el
+// sitio, la VM termina igual pero no es un fallo), la paró el host o falló.
+#define KHV_FIN_NADA 0
+#define KHV_FIN_APAGADO 1
+#define KHV_FIN_REINICIO 2
+#define KHV_FIN_PARADA 3
+#define KHV_FIN_FALLO 4
+int khv_fin_motivo(void);
+// khv_fin: lo mismo y, en buf, el motivo con que terminó ("" si sigue): el
+// texto del fallo, que khv_error pierde con el siguiente.
+int khv_fin(char *buf, size_t n);
+// khv_filtrar_id quita SVE y SME de los registros de identificación que ve el
+// invitado (issue #183): en el M4 HVF anuncia sve2, svei8mm y svebf16 en
+// ID_AA64ZFR0_EL1 sin SVE, y OpenSSL moría con SIGILL al usarlas.
+void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *smfr0);
+// khv_prueba_cpu_on comprueba sin VM el estado que se guarda de un vCPU con
+// un CPU_ON pendiente (vm.c): 0 si cuadra, o el número de la comprobación
+// que falló.
+int khv_prueba_cpu_on(void);
 
 // ---- interno ----
 
 double ms_desde_inicio(void);
 void fallo(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  // fija khv_error
+void khv_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  // a la consola, con "kling-hv: "
 void fin_vm(int codigo, const char *motivo);  // la VM termina (desde cualquier hilo)
 
 // ---- memoria del invitado ----
 extern uint8_t *g_ram;
 extern uint64_t g_ram_size;
 void *gpa_ptr(uint64_t gpa, uint64_t len);  // NULL si se sale de la RAM
-int ram_soltar(uint64_t off, uint64_t len);  // devuelve esas páginas al fichero (globo)
+int ram_soltar(uint64_t off, uint64_t len);   // devuelve esas páginas al fichero (globo)
+int ram_reparar(uint64_t off, uint64_t len);  // vuelve a dar a HVF lo que ram_soltar no pudo
 
 // Pausa de los dispositivos: con g_pausa los hilos de disco y red no tocan la
 // RAM (restaurando o haciendo snapshot). La cambia vm.c con mu_dev.
@@ -261,17 +285,49 @@ void vsock_despertar(void);
 int khv_vsock_dial(uint32_t port, int plazo_ms);
 // khv_vsock_prueba_reuso: solo para las pruebas (ver vsock.c).
 int khv_vsock_prueba_reuso(int *coincide_fd);
+int khv_vsock_prueba_cierre(int medio);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {
   struct vmmio m;
-  struct vq q[2];
+  // inflate, deflate, stats e informe de páginas libres, con los índices que
+  // negoció el driver: sin la de estadísticas, el informe es la 2.
+  struct vq q[4];
   uint32_t num_pages, actual;  // en marcos de 4 KiB
+  // El búfer de estadísticas que el driver dejó y el dispositivo retiene
+  // (se le devuelve para pedir otras): su head, y si lo hay.
+  uint16_t stats_head;
+  uint8_t stats_pend, pad;
 };
+// La versión 3 del snapshot no tenía la cola del informe de libres:
+// khv_restore la lee con esta forma y la convierte (el invitado no la vio).
+struct vballoon_state_v3 {
+  struct vmmio m;
+  struct vq q[3];
+  uint32_t num_pages, actual;
+  uint16_t stats_head;
+  uint8_t stats_pend, pad;
+};
+// La versión 2 del snapshot no tenía la cola de estadísticas: khv_restore
+// la lee con esta forma y la convierte.
+struct vballoon_state_v2 {
+  struct vmmio m;
+  struct vq q[2];
+  uint32_t num_pages, actual;
+};
+// KHV_BALLOON_NSTATS: etiquetas de virtio-balloon (VIRTIO_BALLOON_S_*).
+#define KHV_BALLOON_NSTATS 16
+// khv_balloon_stats devuelve las últimas estadísticas del invitado (bytes,
+// por etiqueta) y el globo actual en marcos, y le pide otras nuevas; si no
+// hay ninguna todavía (recién restaurado) o tienen más de un segundo espera
+// hasta espera_ms a que lleguen. -1 sin globo o con la VM en pausa; -2 si el driver nunca ha
+// dado estadísticas (no negoció la cola).
+int khv_balloon_stats(uint64_t out[KHV_BALLOON_NSTATS], uint32_t *actual, int espera_ms);
 int vballoon_init(uint32_t intid, bool deflate_on_oom);
 bool vballoon_mmio(uint64_t off, bool escribir, uint64_t *val, int size);
 void vballoon_objetivo(uint32_t marcos);
 uint32_t vballoon_actual(void);
+void vballoon_vaciar(void);  // suelta lo pendiente del globo (al pausar)
 uint64_t vballoon_sueltas(void);
 bool vballoon_inflada(uint64_t pagina);
 void vballoon_get(struct vballoon_state *s);
@@ -279,6 +335,11 @@ void vballoon_reafirmar(void);
 void vballoon_set(const struct vballoon_state *s);
 // khv_balloon fija el globo en marcos de 4 KiB; -1 si la VM no tiene globo.
 int khv_balloon(uint32_t marcos);
+// khv_balloon_cuentas: páginas del host (16 KiB) soltadas ahora por el globo,
+// devueltas por el informe de libres (acumulado), tramos soltados, ns que
+// costaron y tramos que fallaron (acumulados).
+#define KHV_BALLOON_NCUENTAS 5
+void khv_balloon_cuentas(uint64_t out[KHV_BALLOON_NCUENTAS]);
 
 // ---- despertar de vCPU en WFI ----
 void vcpu_kick_all(void);
