@@ -5,6 +5,8 @@ package hvvm
 /*
 #include <stdlib.h>
 #include "khv.h"
+int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
+                  uint32_t *usado);
 */
 import "C"
 
@@ -60,6 +62,23 @@ func carreraCola(iters int) int { return int(C.khv_prueba_carrera(C.int(iters)))
 // flushDisco manda un FLUSH al disco de pruebas y devuelve su byte de estado
 // (0 = bien), o -1 si no se pudo preparar.
 func flushDisco() int { return int(C.khv_prueba_flush()) }
+
+// esDisco manda una petición IN (tipo 0) u OUT (1) al disco de pruebas con
+// un búfer por cada lens (khv_prueba_es); datos va y vuelve. Devuelve el byte
+// de estado (-1 si no se pudo preparar) y la longitud del used.
+func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) (estado int, usado uint32) {
+	var u C.uint32_t
+	var pl *C.uint32_t
+	if len(lens) > 0 {
+		pl = (*C.uint32_t)(unsafe.Pointer(&lens[0]))
+	}
+	var pd *C.uint8_t
+	if len(datos) > 0 {
+		pd = (*C.uint8_t)(unsafe.Pointer(&datos[0]))
+	}
+	e := C.khv_prueba_es(C.uint32_t(tipo), C.uint64_t(sector), pl, C.int(len(lens)), pd, C.int(malo), &u)
+	return int(e), uint32(u)
+}
 
 // construirFDT llama a fdt_build con una VM de mentira (2 vCPU, 256 MiB, un
 // virtio) y devuelve el DTB, o nil si no se pudo construir.

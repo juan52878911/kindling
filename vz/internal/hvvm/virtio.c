@@ -7,9 +7,11 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "khv.h"
+#include "vq_iov.h"
 
 // ===================== común =====================
 
@@ -222,9 +224,38 @@ struct vblk {
   pthread_cond_t cv;  // hay trabajo, o el hilo acabó una tanda
   bool pend, ocupado, vivo;
   pthread_t hilo;
+  // Para b_procesar, que solo corre con ocupado puesto: la cadena copiada y
+  // sus datos como iovec (los sectores de una petición son contiguos, así
+  // que van en un solo preadv/pwritev), sin 8 KiB de pila por petición.
+  struct vdesc ch[QMAX];
+  struct iovec iov[QMAX], tramo[QMAX];
 };
 
 static struct vblk blks[KHV_MAX_DISKS];
+
+// Tope de bytes por llamada a preadv/pwritev: read y write de macOS no pasan
+// de INT_MAX, y una petición que reúne varios búferes podría.
+#define B_TOPE_ES (1u << 30)
+
+// b_es lee (escribir = false) o escribe los total bytes de iov[0..n), que en
+// el disco van seguidos desde off, con preadv/pwritev; reintenta lo que quede
+// tras una llamada corta o un EINTR. Devuelve los bytes hechos (menos que
+// total: fin de fichero al leer o una escritura que no avanza) o -1 si hubo
+// error.
+static int64_t b_es(struct vblk *b, bool escribir, int n, uint64_t total, uint64_t off) {
+  uint64_t hecho = 0;
+  while (hecho < total) {
+    uint64_t l = total - hecho < B_TOPE_ES ? total - hecho : B_TOPE_ES;
+    int k = iov_tramo(b->iov, n, hecho, l, b->tramo);
+    ssize_t r = escribir ? pwritev(b->fd, b->tramo, k, (off_t)(off + hecho))
+                         : preadv(b->fd, b->tramo, k, (off_t)(off + hecho));
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return -1;
+    if (r == 0) break;
+    hecho += (uint64_t)r;
+  }
+  return (int64_t)hecho;
+}
 
 // Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
 // con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
@@ -267,7 +298,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
     q->last_avail++;
 
     // Recorre la cadena: cabecera, datos, estado (1 byte, el último).
-    struct vdesc ch[QMAX];
+    struct vdesc *ch = b->ch;
     int n = vq_cadena(q, desc, head, ch, QMAX);
     if (n < 0) n = 0;
     uint32_t escrito = 0;
@@ -283,40 +314,64 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
     } else {
       memcpy(&hdr, hp, sizeof hdr);
       uint64_t off = hdr.sector * 512;
-      for (int k = 1; k < n - 1 && estado == 0; k++) {
+      if (hdr.type == 0 || hdr.type == 1) {
+        // IN y OUT: los búferes de datos, en orden, hasta el primero que no
+        // vale (fuera de la RAM o fuera del disco: un pwrite más allá del
+        // final haría crecer el overlay a voluntad del invitado). Los de
+        // antes se leen o escriben igual, como cuando iba uno a uno, y la
+        // petición acaba en error.
+        int ni = 0;
+        uint64_t total = 0;
+        bool malo = false;
+        for (int k = 1; k < n - 1; k++) {
+          void *d = gpa_ptr(ch[k].addr, ch[k].len);
+          if (!d || hdr.sector > b->sectores || ch[k].len > (b->sectores * 512 - off) || off > b->sectores * 512) {
+            malo = true;
+            break;
+          }
+          b->iov[ni].iov_base = d;
+          b->iov[ni].iov_len = ch[k].len;
+          ni++;
+          total += ch[k].len;
+          off += ch[k].len;
+        }
+        off = hdr.sector * 512;
+        if (ni > 0 && hdr.type == 0) {
+          // Lo que pase del final del fichero se lee como ceros.
+          int64_t r = b_es(b, false, ni, total, off);
+          if (r < 0) {
+            estado = 1;
+          } else {
+            uint64_t z = (uint64_t)r;
+            for (int j = 0; j < ni; j++) {
+              size_t l = b->iov[j].iov_len;
+              if (z >= l) {
+                z -= l;
+                continue;
+              }
+              memset((uint8_t *)b->iov[j].iov_base + z, 0, l - z);
+              z = 0;
+            }
+            escrito += (uint32_t)total;
+          }
+        } else if (ni > 0) {
+          // Hasta el último byte o error: un pwrite corto (ENOSPC con el
+          // overlay lleno, EINTR) con r >= 0 se daba por bueno y el sistema
+          // de ficheros del invitado creía escritos sectores que no lo
+          // estaban.
+          if (b->ro || b_es(b, true, ni, total, off) != (int64_t)total) estado = 1;
+        }
+        if (malo) estado = 1;
+      }
+      for (int k = 1; k < n - 1 && estado == 0 && hdr.type != 0 && hdr.type != 1; k++) {
+        // El resto, uno a uno: sus búferes solo tienen que estar en la RAM.
         void *d = gpa_ptr(ch[k].addr, ch[k].len);
-        // Ni fuera de la RAM ni fuera del disco: un pwrite más allá del final
-        // haría crecer el overlay a voluntad del invitado.
-        bool rw = hdr.type == 0 || hdr.type == 1;
-        if (!d || (rw && (hdr.sector > b->sectores || ch[k].len > (b->sectores * 512 - off) ||
-                          off > b->sectores * 512))) {
+        if (!d) {
           estado = 1;
           break;
         }
         ssize_t r = 0;
         switch (hdr.type) {
-          case 0:  // IN
-            r = pread(b->fd, d, ch[k].len, (off_t)off);
-            if (r >= 0 && (uint32_t)r < ch[k].len) memset((uint8_t *)d + r, 0, ch[k].len - (uint32_t)r);
-            if (r >= 0) r = ch[k].len, escrito += ch[k].len;
-            break;
-          case 1:  // OUT
-            if (b->ro) r = -1;
-            else {
-              // Hasta el último byte o error: un pwrite corto (ENOSPC con el
-              // overlay lleno, EINTR) con r >= 0 se daba por bueno y el
-              // sistema de ficheros del invitado creía escritos sectores que
-              // no lo estaban.
-              uint32_t hecho = 0;
-              while (hecho < ch[k].len) {
-                ssize_t w = pwrite(b->fd, (uint8_t *)d + hecho, ch[k].len - hecho, (off_t)(off + hecho));
-                if (w < 0 && errno == EINTR) continue;
-                if (w <= 0) break;
-                hecho += (uint32_t)w;
-              }
-              r = hecho == ch[k].len ? (ssize_t)hecho : -1;
-            }
-            break;
           case 4: break;  // FLUSH: sin datos
           case 8: {       // GET_ID
             char id[20] = "kling-hv";
@@ -329,7 +384,6 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
           default: estado = 2;
         }
         if (r < 0) estado = 1;
-        off += ch[k].len;
       }
       if (hdr.type == 4 && estado == 0 && !b->sin_flush) {
         // F_FULLFSYNC: el fsync de macOS deja los datos en la caché del SSD, y

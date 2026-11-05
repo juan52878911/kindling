@@ -194,3 +194,60 @@ int khv_prueba_flush(void) {
   w(blk_mmio, 0x070, 0);
   return estado;
 }
+
+// khv_prueba_es manda al disco 0 una petición tipo (0 IN, 1 OUT) en sector
+// con nd búferes de datos de lens[i] bytes, cada uno en su trozo de 64 KiB de
+// la RAM (no seguidos: preadv/pwritev tienen que repartirlos bien). datos
+// trae lo que se escribe (OUT) y vuelve con lo leído (IN). El búfer malo (o
+// -1) apunta fuera de la RAM. Deja en *usado la longitud del used y devuelve
+// el byte de estado, o -1 si no se pudo preparar.
+int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
+                  uint32_t *usado) {
+  if (preparar() != 0 || nd < 0 || nd > 8) return -1;
+  const uint64_t d0 = RAM_BASE, av = RAM_BASE + 0x1000, us = RAM_BASE + 0x2000;
+  const uint64_t cab = RAM_BASE + 0x3000, est = RAM_BASE + 0x4000, buf = RAM_BASE + 0x10000;
+  memset(g_ram, 0, g_ram_size);
+  w(blk_mmio, 0x070, 0);
+  w(blk_mmio, 0x030, 0);
+  w(blk_mmio, 0x038, 16);
+  w(blk_mmio, 0x080, (uint32_t)d0);
+  w(blk_mmio, 0x090, (uint32_t)av);
+  w(blk_mmio, 0x0a0, (uint32_t)us);
+  w(blk_mmio, 0x084, 0);
+  w(blk_mmio, 0x094, 0);
+  w(blk_mmio, 0x0a4, 0);
+  w(blk_mmio, 0x044, 1);
+  w(blk_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, 16 * sizeof *d);
+  struct {
+    uint32_t type, reserved;
+    uint64_t sector;
+  } h = {tipo, 0, sector};
+  memcpy(gpa_ptr(cab, sizeof h), &h, sizeof h);
+  d[0] = (struct vdesc){cab, sizeof h, VIRTQ_DESC_F_NEXT, 1};
+  size_t o = 0;
+  for (int i = 0; i < nd; i++) {
+    if (lens[i] > 0x10000) return -1;
+    uint64_t a = buf + (uint64_t)i * 0x10000;
+    if (tipo == 1) memcpy(gpa_ptr(a, lens[i]), datos + o, lens[i]);
+    if (i == malo) a = RAM_BASE + PRUEBA_RAM;
+    uint16_t f = VIRTQ_DESC_F_NEXT | (tipo == 0 ? VIRTQ_DESC_F_WRITE : 0);
+    d[1 + i] = (struct vdesc){a, lens[i], f, (uint16_t)(2 + i)};
+    o += lens[i];
+  }
+  d[1 + nd] = (struct vdesc){est, 1, VIRTQ_DESC_F_WRITE, 0};
+  *(uint8_t *)gpa_ptr(est, 1) = 0xff;
+  uint16_t *a = gpa_ptr(av, 6 + 2 * 16);
+  a[2] = 0;
+  __atomic_store_n(&a[1], 1, __ATOMIC_RELEASE);
+  vblk_prueba(0);
+  o = 0;
+  for (int i = 0; i < nd; i++) {
+    if (tipo == 0 && i != malo) memcpy(datos + o, gpa_ptr(buf + (uint64_t)i * 0x10000, lens[i]), lens[i]);
+    o += lens[i];
+  }
+  *usado = *(volatile uint32_t *)gpa_ptr(us + 8, 4);  // used.ring[0].len
+  int e = *(volatile uint8_t *)gpa_ptr(est, 1);
+  w(blk_mmio, 0x070, 0);
+  return e;
+}
