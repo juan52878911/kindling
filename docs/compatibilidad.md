@@ -3,8 +3,8 @@
 Qué promete kindling 1.x. Este documento es el **qué**: es normativo, y si el
 código no lo cumple el fallo es del código. El **cómo** (qué hace
 `kling upgrade` con cada fichero, cómo volver atrás) está en
-[`actualizar.md`](actualizar.md). Hasta 1.0 rige lo que dice ese documento para
-0.x; lo que hoy no se cumple está en [Antes de 1.0](#antes-de-10).
+[`actualizar.md`](actualizar.md), que es también lo que rigió para 0.x. Rige
+desde v1.0.0; lo que aún no tiene su mecanismo está en [Pendiente](#pendiente).
 
 ---
 
@@ -179,8 +179,8 @@ agente ≥ 1.0 tiene las tres.
 
 ## Matriz de compatibilidad
 
-"Hoy" dice si la rama de 1.0 ya lo cumple; lo pendiente está en
-[Antes de 1.0](#antes-de-10).
+"Hoy" dice si 1.0 ya lo cumple; lo pendiente está en
+[Pendiente](#pendiente).
 
 | Eje | Soportado en 1.x | Mecanismo | Hoy |
 |---|---|---|---|
@@ -199,11 +199,11 @@ agente ≥ 1.0 tiene las tres.
 
 ---
 
-## Antes de 1.0
+## Pendiente
 
-Lo que falta para que este documento sea verdad. Sale del inventario de
-contratos del 2026-10-28; cuando se cumpla una línea, se quita de aquí y su fila
-de la matriz pasa a **sí**.
+Lo que aún no tiene el mecanismo que este documento da por hecho. Sale del
+inventario de contratos del 2026-10-28; cuando se cumpla una línea, se quita de
+aquí y su fila de la matriz pasa a **sí**.
 
 **Pruebas y release**
 
@@ -213,8 +213,5 @@ de la matriz pasa a **sí**.
   lo haya, se corren a mano antes de cada release (`release.sh` lo exige con
   `KLING_E2E_HV`). El de Linux con KVM ya corre en `e2e-linux.yml`, también
   el de upgrade desde la release anterior.
-- El secreto `KLING_RELEASE_SIGNING_KEY` en el environment `release`
-  ([`firmas.md`](firmas.md)): desde v1.0.0 `kling upgrade` rechaza una release
-  sin firmar.
 - Notarización de los binarios de macOS.
 - El tap de Homebrew que publique la fórmula que ya genera `release.yml`.

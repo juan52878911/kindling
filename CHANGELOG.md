@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-05
+
+kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.
+
 ### Added
 
 - `kling compose`: nested interpolation like Docker Compose (`${A:-${B:-x}}`, `-`, `?`, `:+`, `$$`), port ranges (`8000-8002:9000-9002`), long-syntax `host_ip` and `protocol`, and the same host port on several IPs as one publication.
@@ -613,7 +617,11 @@ On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and 
 
 - Stateful snapshots no longer break restores
 
-[Unreleased]: https://github.com/juan52878911/kindling/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/juan52878911/kindling/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/juan52878911/kindling/compare/v0.20.1...v1.0.0
+[0.20.1]: https://github.com/juan52878911/kindling/releases/tag/v0.20.1
+[0.20.0]: https://github.com/juan52878911/kindling/releases/tag/v0.20.0
+[0.19.0]: https://github.com/juan52878911/kindling/releases/tag/v0.19.0
 [0.18.0]: https://github.com/juan52878911/kindling/releases/tag/v0.18.0
 [0.17.0]: https://github.com/juan52878911/kindling/releases/tag/v0.17.0
 [0.16.0]: https://github.com/juan52878911/kindling/releases/tag/v0.16.0
