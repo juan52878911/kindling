@@ -22,6 +22,7 @@ import (
 	"github.com/juan52878911/kindling/internal/oci/ocitest"
 	"github.com/juan52878911/kindling/internal/verity"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 func testELF(machine uint16) string {
@@ -197,8 +198,17 @@ func TestBuildDebian(t *testing.T) {
 	if cat(up, "/var/lib/dpkg/info/libhello1:amd64.list") == "" {
 		t.Fatal("dpkg list")
 	}
-	if e := cat(up, "/entrypoint"); strings.Contains(e, "GREETING") || !strings.Contains(e, ". /etc/kling/env\n") || !strings.Contains(e, "'/usr/bin/hello'") {
+	// El servicio lo supervisa el agente (service.json), no el /entrypoint:
+	// así le llega el entorno de la máquina. El /entrypoint queda el sencillo
+	// que el init en Go reconoce y se salta.
+	if e := cat(up, "/entrypoint"); strings.Contains(e, "GREETING") || !strings.Contains(e, ". /etc/kling/env\n") || strings.Contains(e, "hello") {
 		t.Fatalf("entrypoint:\n%s", e)
+	} else if env, ok := guest.PlainEntrypoint([]byte(e)); !ok || !env {
+		t.Fatalf("entrypoint not the plain one (%v %v):\n%s", ok, env, e)
+	}
+	var svc api.ServiceSpec
+	if err := json.Unmarshal([]byte(cat(up, api.GuestServiceSpec)), &svc); err != nil || len(svc.Argv) != 1 || svc.Argv[0] != "/usr/bin/hello" || svc.Restart != api.RestartAlways {
+		t.Fatalf("service.json: %v %+v", err, svc)
 	}
 	if n := up.Lookup("/etc/kling/env"); n == nil || n.Mode&0o777 != 0o600 || n.UID != 0 || cat(up, "/etc/kling/env") != "export GREETING='hi'\n" {
 		t.Fatalf("env file: %+v %q", n, cat(up, "/etc/kling/env"))
