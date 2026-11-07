@@ -666,11 +666,17 @@ func (c *Config) Set(key, value string) error {
 			if err != nil {
 				return err
 			}
+			if n != 0 && (n < 16 || n > 1048576) {
+				return fmt.Errorf("defaults.mem_mib must be 0 (the default, 256) or 16-1048576 MiB, not %d", n)
+			}
 			c.Defaults.MemMiB = n
 		case "vcpus":
 			n, err := atoi()
 			if err != nil {
 				return err
+			}
+			if n != 0 && (n < 1 || n > 256) {
+				return fmt.Errorf("defaults.vcpus must be 0 (the default, 1) or 1-256, not %d", n)
 			}
 			c.Defaults.VCPUs = n
 		case "cpu_pct":
@@ -678,11 +684,17 @@ func (c *Config) Set(key, value string) error {
 			if err != nil {
 				return err
 			}
+			if n != 0 && (n < 1 || n > 25600) {
+				return fmt.Errorf("defaults.cpu_pct must be 0 (the default) or 1-25600 (100 = one core), not %d", n)
+			}
 			c.Defaults.CPUPct = n
 		case "ttl_seconds":
 			n, err := atoi()
 			if err != nil {
 				return err
+			}
+			if n != 0 && (n < 1 || n > 31536000) {
+				return fmt.Errorf("defaults.ttl_seconds must be 0 (never) or 1-31536000 (a year), not %d", n)
 			}
 			c.Defaults.TTL = n
 		default:

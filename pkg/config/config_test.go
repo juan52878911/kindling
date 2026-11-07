@@ -186,6 +186,41 @@ func TestSetRechazaLoQueNoEntiende(t *testing.T) {
 	}
 }
 
+// defaults.* numéricos: 0 es «el de siempre» (como daemon.*), un negativo o un
+// valor absurdo se rechaza en Set en vez de llegar a cada `kling run`.
+func TestSetDefaultsNumericosEnRango(t *testing.T) {
+	enUnaConfigTemporal(t)
+	c, _ := Load()
+	for _, mal := range [][2]string{
+		{"defaults.mem_mib", "-1"},
+		{"defaults.mem_mib", "8"},
+		{"defaults.mem_mib", "2000000"},
+		{"defaults.vcpus", "-2"},
+		{"defaults.vcpus", "1000"},
+		{"defaults.cpu_pct", "-50"},
+		{"defaults.cpu_pct", "30000"},
+		{"defaults.ttl_seconds", "-1"},
+		{"defaults.ttl_seconds", "99999999999"},
+	} {
+		if err := c.Set(mal[0], mal[1]); err == nil {
+			t.Errorf("Set(%q, %q) se aceptó", mal[0], mal[1])
+		}
+	}
+	if c.Defaults.MemMiB != 0 || c.Defaults.VCPUs != 0 || c.Defaults.CPUPct != 0 || c.Defaults.TTL != 0 {
+		t.Errorf("un valor rechazado quedó guardado: %+v", c.Defaults)
+	}
+	for _, bien := range [][2]string{
+		{"defaults.mem_mib", "0"}, {"defaults.mem_mib", "512"},
+		{"defaults.vcpus", "0"}, {"defaults.vcpus", "4"},
+		{"defaults.cpu_pct", "0"}, {"defaults.cpu_pct", "200"},
+		{"defaults.ttl_seconds", "0"}, {"defaults.ttl_seconds", "3600"},
+	} {
+		if err := c.Set(bien[0], bien[1]); err != nil {
+			t.Errorf("Set(%q, %q): %v", bien[0], bien[1], err)
+		}
+	}
+}
+
 // El token no puede salir entero al listar la configuracion: `kling config` se
 // pega en incidencias y en capturas de pantalla.
 func TestElTokenSaleEnmascarado(t *testing.T) {
