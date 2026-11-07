@@ -402,6 +402,9 @@ type Manager struct {
 	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
 	// resync del invitado (tests de B12).
 	pruebasAntesDeResync func()
+	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
+	// antes de escanear los procesos. Para las pruebas.
+	pruebasEscaneoHuerfanos func()
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
