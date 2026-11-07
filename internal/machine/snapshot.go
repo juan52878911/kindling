@@ -1691,7 +1691,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
-	if err := m.publicar(mc); err != nil {
+	if err := m.publicarCon(ctx, mc); err != nil {
 		m.desmontarRed(netcfg, id)
 		os.RemoveAll(dir)
 		return nil, err

@@ -168,6 +168,9 @@ type Manager struct {
 	// nombresNaciendo son los nombres de las máquinas que run está creando y
 	// aún no están en byID (reservarNombre). Bajo mu.
 	nombresNaciendo map[string]bool
+	// naciendo cuenta los huecos del tope de máquinas apartados para las que
+	// run está creando y aún no están en byID (reservarHueco). Bajo mu.
+	naciendo int
 	// arrancando cuenta, por imagen, los arranques en frío de run que ya la
 	// eligieron y aún no están en byID (reservarImagen); arrancandoTotal, todos,
 	// que leen además el kernel. Bajo mu, y se apuntan con imgMu: ver
@@ -1464,7 +1467,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	// Jailer bloqueado: lo PRIMERO, antes de reservar ni publicar nada. Más
 	// tarde el abort pasaba por fail() y cada intento dejaba una entrada
-	// fallida en byID que contaba para checkMachineLimit. El check de boot()
+	// fallida en byID que contaba para el tope de máquinas. El check de boot()
 	// se queda como red.
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
@@ -1473,9 +1476,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
 	// dejaba sin freno justo donde más falta hace.
-	if err := m.checkMachineLimit(); err != nil {
+	hueco, err := m.reservarHueco()
+	if err != nil {
 		return nil, err
 	}
+	defer m.soltarHueco(hueco)
+	ctx = conHueco(ctx, hueco)
 	switch req.OnTTL {
 	case "", api.OnTTLFreeze:
 		req.OnTTL = ""
@@ -1617,9 +1623,6 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		}
 	}
 
-	if err := m.checkMachineLimit(); err != nil {
-		return nil, err
-	}
 	// La cuota del dueño, antes de nada caro: solo un filtro, publicar decide.
 	if err := m.comprobarCuota(req.Labels[api.LabelOwner], UsoCuota{
 		Maquinas: 1, MemMiB: memCuota(req.MemMiB, req.MemMaxMiB), DiscoMiB: discoCuota(req.DiskMiB)}); err != nil {
@@ -1788,12 +1791,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// una máquina que ya no existía (M-06). Ahora esperan a que termine.
 	//
 	// Justo antes de publicar y no nada más generar el id: hasta aquí nadie
-	// puede nombrarla, y lo de arriba (checkMachineLimit → gcFailed) sí puede
+	// puede nombrarla, y lo de arriba (reservarHueco → gcFailed) sí puede
 	// esperar el cerrojo de OTRA máquina. Ver doc.go.
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
-	if err := m.publicar(mc); err != nil {
+	if err := m.publicarCon(ctx, mc); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
