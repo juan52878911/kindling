@@ -61,11 +61,23 @@ func TestVMMVivoDe(t *testing.T) {
 		t.Fatal(err)
 	}
 	sock := m.dir(id) + "/fc.sock"
-	falso := exec.Command("/bin/sh", "-c", "sleep 30; :", "kling-hv", argSocketVMM, sock)
+	// /bin/bash y no /bin/sh: en macOS /bin/sh es un lanzador que hace exec
+	// de bash con el mismo argv, y en ese exec kern.procargs2 da EIO/EINVAL;
+	// la línea de órdenes ya tenía el socket antes, así que la espera de abajo
+	// no lo cubría y la tabla (que se salta las líneas ilegibles) no lo veía.
+	// Y read, builtin, en vez de sleep: sin fork, ningún hijo comparte un
+	// rato su línea de órdenes (y su socket) antes de su exec.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	falso := exec.Command("/bin/bash", "-c", "read -r _", "kling-hv", argSocketVMM, sock)
+	falso.Stdin = r
 	if err := falso.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = falso.Process.Kill(); _ = falso.Wait() })
+	r.Close()
+	t.Cleanup(func() { _ = falso.Process.Kill(); _ = falso.Wait(); w.Close() })
 	pid := falso.Process.Pid
 	// Hasta que arranca sh, su línea de órdenes es la del fork.
 	plazo := time.Now().Add(5 * time.Second)
