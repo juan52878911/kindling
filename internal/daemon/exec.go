@@ -559,9 +559,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	// una máquina que iba a funcionar. Medido con 36 sandboxes de 1,5 GiB
 	// arrancando en ráfaga.
 	if err := s.esperarPuerto(r.Context(), mc, api.GuestPort, 2*time.Minute); err != nil {
-		_ = s.mgr.Remove(mc.ID)
-		fail(w, http.StatusGatewayTimeout, fmt.Errorf("the sandbox booted but its guest agent never answered in 2m: %w.\n"+
-			"The host is probably saturated: check `kling top` and `kling ps`, and give it fewer or smaller sandboxes", err))
+		fail(w, http.StatusGatewayTimeout, s.abandonarSandbox(mc, err))
 		return
 	}
 	writeJSON(w, http.StatusCreated, mc)
@@ -690,4 +688,17 @@ func validarTopesRun(labels map[string]string, domains []string) error {
 		return err
 	}
 	return api.ValidateAllowDomains(domains)
+}
+
+// abandonarSandbox borra un sandbox cuyo agente no llegó a contestar y
+// devuelve el error para el cliente. Si no se puede borrar, se dice en el log
+// y en el error, con el ID: si no, queda una máquina que nadie sabe que existe.
+func (s *Server) abandonarSandbox(mc *api.Machine, causa error) error {
+	msg := fmt.Errorf("the sandbox booted but its guest agent never answered in 2m: %w.\n"+
+		"The host is probably saturated: check `kling top` and `kling ps`, and give it fewer or smaller sandboxes", causa)
+	if err := s.mgr.Remove(mc.ID); err != nil {
+		log.Printf("sandbox %s (%s): couldn't remove it after its agent never answered: %v", mc.Name, mc.ID, err)
+		return fmt.Errorf("%w\nIt could not be removed either (%v): remove it with kling rm %s", msg, err, mc.ID)
+	}
+	return msg
 }
