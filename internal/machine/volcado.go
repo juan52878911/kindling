@@ -94,6 +94,19 @@ func volcadoEnCurso(dir string) error {
 	return durable.Escribir(filepath.Join(dir, marcaEnCurso), []byte(time.Now().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
+// retirarSello quita el sello del volcado de dir porque ya no vale: el
+// invitado que salió de él reanudó y escribe en su disco. El volcado se queda
+// (un thaw en diferencial sigue midiendo contra él), pero nadie lo vuelve a
+// cargar: reconcile da por warm una running sin proceso con el volcado
+// sellado.
+//
+// No basta con borrar el sello: sin sello ni FrozenAt, volcadoValido lo toma
+// por un volcado anterior a los sellos y lo da por bueno. Se deja la marca de
+// volcado en curso (volcadoEnCurso), que lo invalida igual que uno a medias
+// hasta que el siguiente Freeze lo selle o un Stop lo borre. Es durable: la
+// marca llega al disco antes de que el invitado vacíe el suyo.
+func retirarSello(dir string) error { return volcadoEnCurso(dir) }
+
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
 // y en su sitio, y retira la marca de volcado en curso. kernelSHA es el
 // sha256 del vmlinux instalado y vmm el VMM que volcó; vacíos, el sello no

@@ -99,6 +99,9 @@ func TestRemovePurgaLoQueQuedabaPorID(t *testing.T) {
 	maquinaConDir(t, m, id, "web")
 	m.noteFreezeFailure(id)
 	m.resyncSinAgente.Store(claveThaw(id), time.Time{})
+	m.mu.Lock()
+	m.squeezedAt = map[string]time.Time{id: time.Now()}
+	m.mu.Unlock()
 
 	if err := m.Remove("web"); err != nil {
 		t.Fatal(err)
@@ -108,9 +111,13 @@ func TestRemovePurgaLoQueQuedabaPorID(t *testing.T) {
 	}
 	m.mu.RLock()
 	_, cuenta := m.freezeFails[id]
+	_, apretada := m.squeezedAt[id]
 	m.mu.RUnlock()
 	if cuenta {
 		t.Error("quedó su cuenta de freezes fallidos")
+	}
+	if apretada {
+		t.Error("quedó su hora del último apretón del globo")
 	}
 	if _, ok := m.resyncSinAgente.Load(claveThaw(id)); ok {
 		t.Error("quedó su marca de sin agente")
