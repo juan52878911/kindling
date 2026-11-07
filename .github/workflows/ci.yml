@@ -305,7 +305,7 @@ jobs:
   # valen en un runner sin virtualización.
   clon-apfs:
     name: clon real (apfs)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GOWORK: 'off'
       GOTOOLCHAIN: local
