@@ -457,8 +457,11 @@ type Manager struct {
 	// recetaMu serializa agenteEnReceta (layer.go): dos máquinas de la misma
 	// imagen que contestan a la vez leerían y reescribirían la misma receta.
 	recetaMu sync.Mutex
-	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
-	// un temporal de nombre fijo y dos a la vez se lo pisarían.
+	// escrituraMu serializa las escrituras de state.json. No por el temporal
+	// (durable.Escribir usa uno de nombre único) sino por el orden: sin él,
+	// una foto vieja escrita tarde pisaría a una nueva (ver escritoGen), y
+	// quien saca la foto pendiente la escribe o la repone sin soltarlo (ver
+	// writePending). También protege versionPrevia, hayPrevia y fallosEstado.
 	escrituraMu sync.Mutex
 
 	// shares lleva las conexiones de las carpetas compartidas en vivo, y
