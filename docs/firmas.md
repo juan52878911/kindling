@@ -25,13 +25,26 @@ tenga `gh`.
 | Firma inválida, de otra clave o de otra etiqueta | **error** | **error** |
 | Release sin `SHA256SUMS.minisig` | aviso, solo sha256 | **error** |
 | Release firmada y un kling sin claves compiladas | aviso, solo sha256 | **error** |
-| `-from-dir` sin firma | aviso | aviso |
+| `-from-dir` sin firma | aviso | **error**, salvo `-insecure` (aviso, solo sha256) |
+| `-from-dir` con firma inválida o de otra clave | **error** | **error**, también con `-insecure` |
 | `install.sh` sin `minisign` instalado | aviso, solo sha256 | **error**, salvo `KLING_INSECURE_NO_MINISIGN=1` (aviso, solo sha256) |
 
 «Desde v1.0.0» cuenta dos cosas (`upgrade.FirmaObligatoriaDesde`): la versión de
 la release que se baja (un `-rc` de la 1.0 ya cuenta) y la del kling que la baja.
 Un kling 1.x no instala una release sin firmar, ni siquiera una 0.x; para eso
-queda `-from-dir` con los binarios y su `SHA256SUMS`.
+queda `-from-dir` con los binarios, su `SHA256SUMS` y `-insecure`.
+Con `-from-dir` solo cuenta la versión del kling que instala (la de los
+binarios del directorio no se sabe sin ejecutarlos, y eso es justo lo que la
+firma tiene que ir antes). El `SHA256SUMS` de un directorio viene de al lado de
+los binarios: sin firma no prueba quién los dejó, y `upgrade` los ejecuta
+(para leer su versión) y los instala como root. `-insecure` es para los
+binarios que uno compila: salta la firma que falta, pero el `SHA256SUMS`, si
+está, se sigue comprobando, y una firma presente e inválida sigue siendo un
+error. Los e2e de upgrade (`scripts/94-e2e-upgrade.sh` y
+`scripts/95-e2e-upgrade-mac.sh`) pasan `-insecure` en sus caminos de
+`-from-dir` cuando el directorio no trae `SHA256SUMS.minisig`: sus binarios son
+de una compilación local. No hay clave de prueba inyectable: una que se
+pudiera inyectar en un binario de release sería una puerta trasera.
 En `install.sh` cuenta solo la versión que se instala: no hay un kling
 previo que mirar. `KLING_INSECURE_NO_MINISIGN=1` es para un host donde no se
 puede instalar minisign: sin la firma, el sha256 solo prueba que la descarga

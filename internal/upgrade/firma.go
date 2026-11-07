@@ -377,14 +377,17 @@ const NombreFirma = "SHA256SUMS.minisig"
 //   - sin firma: error si es obligatoria (firmaObligatoria), si no, aviso;
 //   - con firma y sin claves en este binario: lo mismo que sin firma.
 //
-// Un Dir (-from-dir) no la exige nunca: son binarios que el usuario trae,
-// a menudo compilados por él; si trae SHA256SUMS.minisig, se comprueba.
+// Un Dir (-from-dir) la exige igual desde FirmaObligatoriaDesde: su
+// SHA256SUMS viene del mismo directorio que los binarios, así que sin firma
+// no prueba nada, y Sondear los ejecuta antes de instalarlos como root. Solo
+// SinVerificar (-insecure) lo rebaja a aviso, para binarios que el usuario
+// compiló él mismo. Una firma presente se comprueba siempre.
 func (f *Fuente) comprobarFirma(ctx context.Context, etiqueta string, sumas []byte) error {
 	firma, donde, err := f.leerFirma(ctx, etiqueta)
 	if err != nil {
 		return err
 	}
-	obligatoria := f.Dir == "" && f.firmaObligatoria(etiqueta)
+	obligatoria := f.firmaObligatoria(etiqueta) && !(f.Dir != "" && f.SinVerificar)
 	claves := f.claves
 	if claves == nil {
 		claves = ClavesRelease()
@@ -395,11 +398,16 @@ func (f *Fuente) comprobarFirma(ctx context.Context, etiqueta string, sumas []by
 			motivo = "this kling has no release signing key built in to check " + donde + "'s " + NombreFirma
 		}
 		if obligatoria {
+			if f.Dir != "" {
+				return fmt.Errorf("%s: from %s on a directory needs it too, refusing it (pass -insecure to install binaries you built yourself; docs/firmas.md)", motivo, FirmaObligatoriaDesde)
+			}
 			return fmt.Errorf("%s: releases are signed from %s on, refusing it (docs/firmas.md)", motivo, FirmaObligatoriaDesde)
 		}
 		cuando := fmt.Sprintf(" (releases must be signed from %s on, docs/firmas.md)", FirmaObligatoriaDesde)
-		if f.Dir != "" {
-			cuando = ""
+		if f.Dir != "" && f.SinVerificar {
+			cuando = " (-insecure)"
+		} else if f.Dir != "" {
+			cuando = fmt.Sprintf(" (from %s on a directory needs it unless -insecure, docs/firmas.md)", FirmaObligatoriaDesde)
 		}
 		fmt.Fprintf(f.avisos(), "warning: %s; checked against SHA256SUMS only%s\n", motivo, cuando)
 		return nil

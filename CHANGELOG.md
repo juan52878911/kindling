@@ -19,10 +19,18 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
+- The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
 - kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+
+### Security
+
+- `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
+- `sudo kling upgrade -cli` keeps its download and backups in root's home (from the user database, not `HOME` or `XDG_STATE_HOME`, which sudo passes on macOS), and every upgrade run as root refuses a working directory that someone other than root can change, so the user can't swap the verified binary before root installs it.
+- The CLI warns when `config.json` holds `gateway.token` or `gateway.tokens` and is readable by group or others, as `kling ai` already does for its registry (`chmod 600` it).
 
 ## [1.0.0] - 2026-11-05
 
