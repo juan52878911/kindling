@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -151,4 +152,83 @@ func TestElSegadorReponeLaQueNoPudoCongelar(t *testing.T) {
 	if g.adquiriendo["m1"] {
 		t.Fatal("quedó marcada en adquiriendo")
 	}
+}
+
+// ensure encontraba muerta la primaria y la descartaba con un delete a pelo:
+// las sesiones fijadas a ella seguían apuntando a la máquina vieja aunque la
+// nueva fuera otra, con su proxy hacia un invitado que ya no existe.
+func TestEnsureLimpiaLasRutasDeLaPrimariaMuerta(t *testing.T) {
+	puerto := agenteFalso(t)
+	nueva := instanciaVieja("m2")
+	nueva.State, nueva.IP = api.StateRunning, "127.0.0.1"
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m2": nueva}} // m1 ya no existe
+	g := conDaemonFalso(t, d)
+	g.Port = puerto
+	vieja := &entry{machineID: "m1", ip: "10.0.0.9", lastUse: time.Now(), renewedAt: time.Now()}
+	g.services["svc"] = vieja
+	g.routes["s1"] = &sessionRoute{service: "svc", machineID: "m1", lastUse: time.Now()}
+	g.routes["otra"] = &sessionRoute{service: "otro", machineID: "m9", lastUse: time.Now()}
+
+	e, err := g.ensure(context.Background(), "svc")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if e.machineID != "m2" {
+		t.Fatalf("ensure = %s; quería la nueva m2", e.machineID)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if rt := g.routes["s1"]; rt != nil {
+		t.Errorf("la sesión s1 sigue fijada a la máquina muerta %s", rt.machineID)
+	}
+	if g.routes["otra"] == nil {
+		t.Error("se borró la ruta de otra máquina")
+	}
+}
+
+// Si lo que vuelve es la MISMA máquina (el daemon la había congelado), su
+// sesión sigue viva en el invitado: la ruta se conserva para el rebind.
+func TestEnsureConservaLasRutasSiVuelveLaMismaMaquina(t *testing.T) {
+	puerto := agenteFalso(t)
+	mc := instanciaVieja("m1")
+	mc.IP = "127.0.0.1" // congelada: alive da false y acquire la descongela
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": mc}}
+	g := conDaemonFalso(t, d)
+	g.Port = puerto
+	g.services["svc"] = &entry{machineID: "m1", ip: mc.IP, lastUse: time.Now(), renewedAt: time.Now()}
+	g.routes["s1"] = &sessionRoute{service: "svc", machineID: "m1", lastUse: time.Now()}
+
+	e, err := g.ensure(context.Background(), "svc")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if e.machineID != "m1" {
+		t.Fatalf("ensure = %s; quería m1 descongelada", e.machineID)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.routes["s1"] == nil {
+		t.Error("se olvidó la sesión de una máquina que solo estaba congelada")
+	}
+}
+
+// agenteFalso escucha en 127.0.0.1 y acepta conexiones: lo justo para que
+// esperarListo dé por lista la herramienta. Devuelve el puerto.
+func agenteFalso(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
 }

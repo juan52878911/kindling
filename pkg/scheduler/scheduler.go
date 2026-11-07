@@ -569,6 +569,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 
 	tnt := tenantFrom(ctx)
 
+	var muerta string // la primaria que se descartó por muerta, si la hubo
 	g.mu.Lock()
 	if e, ok := g.services[service]; ok {
 		e.lastUse = time.Now()
@@ -599,10 +600,11 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 			g.mu.Unlock()
 			return e, nil
 		}
-		// Murió por debajo: se descarta y se reconstruye.
+		// Murió por debajo (o el daemon la congeló): se descarta como
+		// cualquier otra retirada y se reconstruye.
 		g.mu.Lock()
-		delete(g.services, service)
-		e.cerrarConexiones()
+		g.removeEntryLocked(service, e.machineID)
+		muerta = e.machineID
 	}
 	g.mu.Unlock()
 
@@ -615,8 +617,29 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 	g.services[service] = e
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	// Si volvió la MISMA máquina (estaba congelada), sus sesiones siguen vivas
+	// en el invitado y el gateway solo las reapunta (rebind). Si es otra, las
+	// rutas a la vieja apuntan a un invitado que ya no existe: se olvidan, y
+	// el cliente rehace el initialize con un 404 en vez de un 502.
+	if muerta != "" && muerta != e.machineID {
+		g.olvidarRutasLocked(service, muerta)
+	}
 	g.mu.Unlock()
 	return e, nil
+}
+
+// olvidarRutasLocked quita las sesiones fijadas a la máquina machineID del
+// servicio, salvo las aisladas (su máquina es suya y la gestiona aislada.go).
+// Se llama con g.mu tomado.
+func (g *Scheduler) olvidarRutasLocked(service, machineID string) {
+	for sid, rt := range g.routes {
+		if _, aislada := g.aisladas[sid]; aislada {
+			continue
+		}
+		if rt.service == service && rt.machineID == machineID {
+			delete(g.routes, sid)
+		}
+	}
 }
 
 // buildEntry despierta o crea UNA instancia del servicio y la devuelve montada
