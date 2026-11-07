@@ -317,10 +317,16 @@ static void *rx_hilo(void *a) {
   khv_qos_dispositivo();
   for (;;) {
     struct pollfd pf[2] = {{.fd = fd, .events = POLLIN}, {.fd = rx_desp[0], .events = POLLIN}};
-    int r = poll(pf, 2, -1);
+    int r = khv_poll(KHV_POLL_RED, pf, 2, -1);
     if (__atomic_load_n(&rx_parar, __ATOMIC_ACQUIRE)) return NULL;
     if (r < 0) {
       if (errno == EINTR) continue;
+      // EAGAIN: poll no pudo reservar memoria y otra llamada puede ir bien.
+      // Terminar dejaba al invitado sin red para siempre.
+      if (errno == EAGAIN) {
+        usleep(1000);
+        continue;
+      }
       rx_errorf("poll", errno);
       return NULL;
     }

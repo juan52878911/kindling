@@ -156,3 +156,8 @@ func maxVCPUsC() int { return int(C.khv_max_vcpus()) }
 
 // usedDelDispositivo: ver khv_prueba_used en prueba.c.
 func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
+
+// pollRed y pollVsock: un poll que falla con EAGAIN no mata el hilo de la
+// red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
+func pollRed() int   { return int(C.khv_prueba_poll_red()) }
+func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }

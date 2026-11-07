@@ -28,6 +28,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - kling-hv: the network receive thread no longer stops for good when the guest offers an rx chain whose buffers add up to more than 2 GiB (overlapping descriptors); Darwin's `recvmsg` rejected it with `EINVAL` and the guest lost its network. The chain is capped to the largest frame, and an `EINVAL` drops the frame and returns the buffer empty.
 - kling-hv: virtqueues keep their own used index instead of reading `used.idx` back from guest RAM, as the virtio spec requires, so what the guest writes there no longer moves the device. Memory-file state keeps its shape and version (the index lives in former padding, flagged in the header): older snapshots restore by taking it from their RAM, and older kling-hv builds still read new files.
+- kling-hv: a transient `EAGAIN` from `poll` (Darwin returns it when it cannot allocate its internal structures) no longer stops the network receive thread or the vsock thread for good; they retry after 1 ms. The vsock thread also logs why it stops instead of dying silently.
 
 ## [1.0.0] - 2026-11-05
 

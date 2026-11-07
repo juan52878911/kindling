@@ -393,3 +393,59 @@ int khv_prueba_used(void) {
   w(rng_mmio, 0x070, 0);
   return r;
 }
+
+// khv_prueba_poll_red: el hilo de recepción de verdad, sobre un par de
+// datagramas, con el primer poll fallando con EAGAIN (khv_poll). Después una
+// trama tiene que llegar a la cola 0. 0 si llega.
+int khv_prueba_poll_red(void) {
+  if (preparar() != 0) return -100;
+  memset(g_ram, 0, g_ram_size);
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) return -100;
+  const uint64_t d0 = RAM_BASE, av0 = RAM_BASE + 0x1000, us0 = RAM_BASE + 0x2000;
+  w(vnet_mmio, 0x070, 0);
+  w(vnet_mmio, 0x030, 0);
+  w(vnet_mmio, 0x038, 4);
+  w(vnet_mmio, 0x080, (uint32_t)d0);
+  w(vnet_mmio, 0x090, (uint32_t)av0);
+  w(vnet_mmio, 0x0a0, (uint32_t)us0);
+  w(vnet_mmio, 0x084, 0);
+  w(vnet_mmio, 0x094, 0);
+  w(vnet_mmio, 0x0a4, 0);
+  w(vnet_mmio, 0x044, 1);
+  w(vnet_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, 4 * sizeof *d);
+  for (int i = 0; i < 4; i++) d[i] = (struct vdesc){RAM_BASE + 0x4000 + 0x800 * (uint64_t)i, 0x800, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(av0, 6 + 2 * 4);
+  for (int i = 0; i < 4; i++) av[2 + i] = (uint16_t)i;
+  av[1] = 4;
+  volatile uint16_t *uidx = gpa_ptr(us0 + 2, 2);
+  static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
+  // Sin VM todo empieza en pausa, y el hilo esperaría a que corriera.
+  bool pausa_antes = g_pausa;
+  g_pausa = false;
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 1, __ATOMIC_RELEASE);
+  vnet_init(sv[0], mac, 16384, 49);
+  for (int i = 0; i < 1000 && __atomic_load_n(&khv_poll_fallos[KHV_POLL_RED], __ATOMIC_ACQUIRE); i++) usleep(1000);
+  uint8_t trama[60] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  int r = send(sv[1], trama, sizeof trama, 0) == (ssize_t)sizeof trama ? -1 : -100;
+  for (int i = 0; r == -1 && i < 2000; i++) {
+    if (*uidx == 1) r = 0;
+    else usleep(1000);
+  }
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 0, __ATOMIC_RELEASE);
+  vnet_parar();
+  g_pausa = pausa_antes;
+  w(vnet_mmio, 0x070, 0);
+  vnet_init(-1, mac, 16384, 49);
+  close(sv[0]);
+  close(sv[1]);
+  return r;
+}
+
+// khv_prueba_poll_vsock: khv_vsock_prueba_poll con los dispositivos de
+// prueba ya puestos (vsock_init arranca vs_hilo).
+int khv_prueba_poll_vsock(void) {
+  if (preparar() != 0) return -100;
+  return khv_vsock_prueba_poll();
+}

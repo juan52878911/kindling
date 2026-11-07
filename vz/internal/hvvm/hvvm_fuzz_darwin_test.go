@@ -236,3 +236,25 @@ func TestUsedIdxEsDelDispositivo(t *testing.T) {
 		t.Fatalf("step %d failed", r)
 	}
 }
+
+// poll de Darwin puede fallar con EAGAIN (no pudo reservar memoria) y otra
+// llamada ir bien. El hilo de recepción de la red y el del vsock terminaban
+// con cualquier error que no fuera EINTR: el invitado se quedaba sin red, o
+// sin agente, para siempre.
+func TestPollEAGAINNoMataLaRed(t *testing.T) {
+	switch r := pollRed(); {
+	case r == -100:
+		t.Fatal("could not set up the test")
+	case r != 0:
+		t.Fatal("after poll failed with EAGAIN, no frame reached the guest: the rx thread stopped")
+	}
+}
+
+func TestPollEAGAINNoMataElVsock(t *testing.T) {
+	switch r := pollVsock(); {
+	case r == -100:
+		t.Fatal("could not set up the test")
+	case r != 0:
+		t.Fatal("after poll failed with EAGAIN, the vsock thread stopped")
+	}
+}

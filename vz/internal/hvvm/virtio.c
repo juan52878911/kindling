@@ -99,6 +99,17 @@ void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len) {
   *(volatile uint16_t *)(used + 2) = q->used_idx;
 }
 
+int khv_poll_fallos[KHV_POLL_N];
+
+int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo) {
+  int f = __atomic_load_n(&khv_poll_fallos[quien], __ATOMIC_ACQUIRE);
+  if (f > 0 && __atomic_compare_exchange_n(&khv_poll_fallos[quien], &f, f - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    errno = EAGAIN;
+    return -1;
+  }
+  return poll(pf, n, plazo);
+}
+
 void vq_used_de_ram(struct vq *q) {
   uint16_t *avail;
   uint8_t *used;
