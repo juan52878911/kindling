@@ -43,9 +43,10 @@ const FirmaObligatoriaDesde = "v1.0.0"
 // quita una release después (docs/firmas.md §Rotar). Tiene que coincidir con
 // KLING_RELEASE_PUBKEYS de scripts/install.sh (lo comprueba un test).
 //
-// Vacía hasta que Juan genere la clave real: hasta entonces una release
-// firmada se acepta con aviso, y desde FirmaObligatoriaDesde no se acepta.
-var clavesRelease = []string{}
+// La primera se generó para v1.0.0 (id 13863DEEC162AF3D).
+var clavesRelease = []string{
+	"RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN",
+}
 
 // ClavesRelease devuelve las claves de clavesRelease ya leídas.
 func ClavesRelease() []ClavePublica {
