@@ -162,8 +162,8 @@ func TestFijacionesFondos(t *testing.T) {
 			}
 			m.fondoMu.Lock()
 			m.fondoDe("svc").size = tam["svc"]
-			err = m.guardarFondos()
 			m.fondoMu.Unlock()
+			err = m.guardarFondos()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,9 +183,7 @@ func TestFijacionesFondos(t *testing.T) {
 			if _, err := leerFondos(m.fondosPath(), futuro); !esquema.EsMasNuevo(err) {
 				t.Fatalf("leerFondos del futuro = %v", err)
 			}
-			m.fondoMu.Lock()
 			err = m.guardarFondos()
-			m.fondoMu.Unlock()
 			if !esquema.EsMasNuevo(err) {
 				t.Fatalf("guardarFondos sobre uno del futuro = %v", err)
 			}

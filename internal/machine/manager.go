@@ -114,6 +114,12 @@ type Manager struct {
 	// los protege y nunca se toma con m.mu cogido.
 	fondoMu sync.Mutex
 	fondos  map[string]*fondoPlantilla
+	// fondosGen numera las fotos de los tamaños (con fondoMu); fondosEscritoGen
+	// es la última que llegó a fondos.json, y fondosEscMu serializa esas
+	// escrituras, que van fuera de fondoMu (ver guardarFondos).
+	fondosGen        uint64
+	fondosEscMu      sync.Mutex
+	fondosEscritoGen uint64
 	// altaFondo crea una copia para el fondo; nil = crearParaFondo. Punto de
 	// inyección de las pruebas: el fondo es concurrencia, y eso no se ejercita
 	// si cada copia exige KVM.
