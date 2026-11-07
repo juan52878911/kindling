@@ -83,9 +83,10 @@ cmd_image() {
   # PostGIS, pg_cron, pg_partman), con su propio script.
   if [ "${1:-}" = -ext ]; then
     shift
+    hermano db-image-ext.sh
     exec bash "$HERE/db-image-ext.sh" "$@"
   fi
-  [ -f "$HERE/recipes/pg16.recipe.json" ] || die "falta scripts/recipes/pg16.recipe.json"
+  [ -f "$HERE/recipes/pg16.recipe.json" ] || die "scripts/recipes/pg16.recipe.json is missing (run it from a kindling checkout: kling db golden -script <checkout>/scripts/db-golden.sh image), or skip the image: kling db golden -from-oci postgres:16-alpine build <name>"
   say "construyendo la imagen pg16 (Alpine + postgresql16); tarda unos minutos"
   "${K[@]}" image build pg16 -builder base -base min -grow 512 -spec "$HERE/recipes/pg16.recipe.json"
   "${K[@]}" image recipe pg16
@@ -599,6 +600,20 @@ while [ $# -gt 0 ]; do
     *)         args+=("$1"); shift ;;
   esac
 done
+# hermano comprueba que un script de al lado existe: el db-golden.sh que va
+# dentro de kling-db (instalado, sin checkout) no los trae.
+hermano() {
+  [ -f "$HERE/$1" ] || die "$1 is not next to this db-golden.sh (the one built into kling-db only builds Postgres from -from-oci or -from): run it from a kindling checkout, kling db golden -script <checkout>/scripts/db-golden.sh ..."
+}
+case "$engine" in
+  postgres) ;;
+  mysql|mariadb) hermano db-golden-mysql.sh ;;
+  redis|valkey) hermano db-golden-redis.sh ;;
+  sqlite) hermano db-golden-sqlite.sh ;;
+  ferretdb|mongo|mongodb) hermano db-golden-ferretdb.sh ;;
+  clickhouse) hermano db-golden-clickhouse.sh ;;
+  garage|s3) hermano db-golden-garage.sh ;;
+esac
 case "$engine" in
   postgres) ;;
   mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;

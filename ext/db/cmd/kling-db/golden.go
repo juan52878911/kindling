@@ -91,10 +91,11 @@ func cmdGolden(args []string) error {
 // runGoldenScript ejecuta db-golden.sh con esos argumentos, el mismo kling y
 // el mismo daemon que usa kling db. Lo comparten golden y clone.
 func runGoldenScript(ctx context.Context, scriptFlag, host string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	path, err := findGoldenScript(scriptFlag)
+	path, borrar, err := findGoldenScript(scriptFlag)
 	if err != nil {
 		return err
 	}
+	defer borrar()
 	bin, err := klingc.Resolve()
 	if err != nil {
 		return err
@@ -124,17 +125,21 @@ func runGoldenScript(ctx context.Context, scriptFlag, host string, args []string
 	return err
 }
 
-// findGoldenScript busca db-golden.sh: el flag, la variable, o junto al
+// findGoldenScript busca db-golden.sh: el flag, la variable, junto al
 // binario (bin/kling-db → share/kindling/db-golden.sh, o en su mismo
-// directorio). A propósito NO busca en el directorio actual: ejecutar el
-// scripts/ de un repositorio cualquiera por estar dentro sería ejecutar código
-// ajeno sin pedirlo.
-func findGoldenScript(flagPath string) (string, error) {
+// directorio) o, si no hay ninguno, el que va dentro del binario
+// (golden_embebido.go). A propósito NO busca en el directorio actual: ejecutar
+// el scripts/ de un repositorio cualquiera por estar dentro sería ejecutar
+// código ajeno sin pedirlo. borrar retira el temporal del embebido.
+func findGoldenScript(flagPath string) (path string, borrar func(), err error) {
+	nada := func() {}
 	if flagPath != "" {
-		return checkScript(flagPath)
+		p, err := checkScript(flagPath)
+		return p, nada, err
 	}
 	if p := os.Getenv(goldenScriptEnv); p != "" {
-		return checkScript(p)
+		p, err := checkScript(p)
+		return p, nada, err
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
@@ -143,12 +148,11 @@ func findGoldenScript(flagPath string) (string, error) {
 			filepath.Join(dir, "db-golden.sh"),
 		} {
 			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
-				return p, nil
+				return p, nada, nil
 			}
 		}
 	}
-	return "", errors.New("db-golden.sh not found: from a kindling checkout run\n" +
-		"  kling db golden -script scripts/db-golden.sh build ...   (or set $" + goldenScriptEnv + ")")
+	return guionEmbebido()
 }
 
 func checkScript(p string) (string, error) {
