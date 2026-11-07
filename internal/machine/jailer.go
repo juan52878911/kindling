@@ -34,9 +34,11 @@ package machine
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -268,6 +270,11 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 		"--exec-file", fc,
 		"--chroot-base-dir", m.jailBase(),
 		"--cgroup-version", "2",
+		// Espacio de PID propio: Firecracker es su PID 1 y no ve (ni puede
+		// señalar, ni leer en /proc) ningún otro proceso del host. jailer
+		// hace fork, apunta el PID del hijo en <root>/<exec>.pid y sale: ver
+		// pidDelHijo.
+		"--new-pid-ns",
 	}
 	if m.priv.Enabled {
 		argv = append(argv,
@@ -337,7 +344,52 @@ func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string,
 		logf.Close()
 		return 0, "", false, fmt.Errorf("launching jailer: %w", err)
 	}
-	go m.esperarVMM(id, cmd, logf)
+	// Con --new-pid-ns el jailer que lanzamos no es el VMM: hace fork y sale.
+	// Firecracker queda huérfano (lo recoge init) y su PID, el del host, es
+	// el que deja apuntado jailer. Se vigila por pidfd como uno readoptado.
+	err = cmd.Wait()
+	logf.Close()
+	if err != nil {
+		return 0, "", false, fmt.Errorf("jailer: %w", err)
+	}
+	pid, err := m.pidDelHijo(id, argv)
+	if err != nil {
+		return 0, "", false, err
+	}
+	if !vigilarSalida(pid, func() { m.vmmTermino(id, detalleEnjaulado) }) {
+		log.Printf("jailer: can't watch the VMM of %s (pid %d) for its exit; the watcher will notice it",
+			shortID(id), pid)
+	}
+	return pid, m.jailSock(id), enCg, nil
+}
 
-	return cmd.Process.Pid, m.jailSock(id), enCg, nil
+// detalleEnjaulado es el detalle de la salida de un VMM enjaulado: no es hijo
+// del daemon (lo es del jailer, que ya salió), así que no hay código de salida.
+const detalleEnjaulado = "jailed in its own PID namespace, no exit status"
+
+// pidDelHijo lee el PID de Firecracker que jailer --new-pid-ns apunta en
+// <root>/<nombre del ejecutable>.pid. Lo escribe el jailer (root) antes de
+// salir, y Firecracker aún no ha arrancado ningún invitado: nada que lo haya
+// podido reescribir. Aun así se abre sin seguir enlaces.
+func (m *Manager) pidDelHijo(id string, argv []string) (int, error) {
+	i := slices.Index(argv, "--exec-file")
+	if i < 0 || i+1 >= len(argv) {
+		return 0, fmt.Errorf("jailer argv without --exec-file")
+	}
+	ruta := filepath.Join(m.jailRoot(id), filepath.Base(argv[i+1])+".pid")
+	fd, err := syscall.Open(ruta, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, fmt.Errorf("reading the VMM pid from jailer: %s: %w", ruta, err)
+	}
+	b := make([]byte, 32)
+	n, _ := syscall.Read(fd, b)
+	_ = syscall.Close(fd)
+	if n < 0 {
+		n = 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b[:n])))
+	if err != nil || pid <= 1 {
+		return 0, fmt.Errorf("jailer left a bad pid file %s: %q", ruta, b[:n])
+	}
+	return pid, nil
 }
