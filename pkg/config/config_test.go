@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -84,6 +85,55 @@ func TestHostRespetaBanderaEntornoYFichero(t *testing.T) {
 	}
 	if got := c.Host("ssh://de-la-bandera"); got != "ssh://de-la-bandera" {
 		t.Errorf("la bandera debería ganar a todo: %q", got)
+	}
+}
+
+// Un config.json con tokens del gateway que otros pueden leer (escrito a mano,
+// copiado con cp o de antes de durable) avisa al cargarlo, como hace
+// `kling ai` con su registro; sin tokens, o con 0600, calla.
+func TestAvisoConfigConTokensLegible(t *testing.T) {
+	p := enUnaConfigTemporal(t)
+	var avisos bytes.Buffer
+	viejo := Avisos
+	Avisos = &avisos
+	defer func() { Avisos = viejo }()
+
+	escribir := func(contenido string, modo os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(contenido), modo); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, modo); err != nil {
+			t.Fatal(err)
+		}
+		avisos.Reset()
+		if _, err := Load(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escribir(`{"gateway":{"token":"secreto"}}`, 0o644)
+	if !strings.Contains(avisos.String(), "chmod 600") {
+		t.Errorf("token en un 0644 sin aviso: %q", avisos.String())
+	}
+	// Una sola vez por orden, aunque se cargue varias veces.
+	avisos.Reset()
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if avisos.Len() != 0 {
+		t.Errorf("aviso repetido: %q", avisos.String())
+	}
+	escribir(`{"gateway":{"tokens":[{"name":"a","token":"secreto"}]}}`, 0o640)
+	if !strings.Contains(avisos.String(), "chmod 600") {
+		t.Errorf("tokens en un 0640 sin aviso: %q", avisos.String())
+	}
+	escribir(`{"gateway":{"token":"secreto"}}`, 0o600)
+	if avisos.Len() != 0 {
+		t.Errorf("0600 con aviso: %q", avisos.String())
+	}
+	escribir(`{"defaults":{"image":"min"}}`, 0o644)
+	if avisos.Len() != 0 {
+		t.Errorf("sin tokens con aviso: %q", avisos.String())
 	}
 }
 

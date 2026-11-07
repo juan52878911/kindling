@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
@@ -391,6 +393,12 @@ func Path() string {
 	return filepath.Join(base, "kling", "config.json")
 }
 
+// Avisos recibe lo que Load acepta con reparos (un fichero con tokens que
+// otros pueden leer); nil = os.Stderr. Los tests lo cambian.
+var Avisos io.Writer
+
+var avisados sync.Map
+
 // Load lee la configuración. Un fichero ausente no es un error: se devuelve una
 // configuración vacía y utilizable.
 func Load() (*Config, error) {
@@ -408,12 +416,37 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
 	c.path = p
+	avisarSiTokensLegibles(p, c)
 	c.desconocidas = clavesDesconocidas(b, reflect.TypeOf(Config{}))
 	if c.Contexts == nil {
 		c.Contexts = map[string]*Context{}
 	}
 	liftLegacyMemory(c, b)
 	return c, nil
+}
+
+// avisarSiTokensLegibles avisa si p lleva tokens del gateway y otros pueden
+// leerlo, como `kling ai` con su registro (allí es un error: el gateway de IA
+// arranca con él; aquí basta un aviso para no dejar sin CLI a nadie). Save
+// escribe 0600, pero un fichero editado o copiado a mano puede no serlo.
+func avisarSiTokensLegibles(p string, c *Config) {
+	if c.Gateway.Token == "" && len(c.Gateway.Tokens) == 0 {
+		return
+	}
+	st, err := os.Stat(p)
+	if err != nil || st.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	// Una vez por fichero y modo: el CLI carga la configuración varias veces
+	// en una misma orden.
+	if _, ya := avisados.LoadOrStore(fmt.Sprintf("%s %v", p, st.Mode().Perm()), true); ya {
+		return
+	}
+	w := Avisos
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "warning: %s holds gateway tokens and is readable by others (%v): chmod 600 it\n", p, st.Mode().Perm())
 }
 
 // legacyMemory es la sección "memory" de v0.5 y anteriores. Era de kindling-mcp
