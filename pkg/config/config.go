@@ -568,10 +568,13 @@ func mezclarDesconocidas(b []byte, desc map[string]json.RawMessage) ([]byte, err
 
 // Host resuelve a qué daemon hablar, por orden de precedencia:
 //
-//	-H  >  $KLING_HOST  >  contexto activo  >  socket local
+//	-H  >  $KLING_HOST  >  contexto activo  >  $KLING_SOCKET  >  socket local
 //
 // El flag gana siempre para que una invocación puntual no obligue a cambiar de
-// contexto ni a tocar el fichero.
+// contexto ni a tocar el fichero. KLING_SOCKET es el socket en el que escucha
+// `kling daemon`: con él puesto, un daemon privado y su cliente se encuentran
+// con la misma variable, pero cede ante un contexto o KLING_HOST, que se
+// ponen a propósito para el cliente.
 func (c *Config) Host(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -581,6 +584,12 @@ func (c *Config) Host(flagValue string) string {
 	}
 	if ctx, ok := c.Contexts[c.CurrentContext]; ok && ctx.Host != "" {
 		return ctx.Host
+	}
+	if v := os.Getenv("KLING_SOCKET"); v != "" {
+		if strings.HasPrefix(v, "unix://") {
+			return v
+		}
+		return "unix://" + v
 	}
 	return ""
 }

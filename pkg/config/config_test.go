@@ -15,6 +15,7 @@ func enUnaConfigTemporal(t *testing.T) string {
 	p := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("KLING_CONFIG", p)
 	t.Setenv("KLING_HOST", "")
+	t.Setenv("KLING_SOCKET", "")
 	return p
 }
 
@@ -83,6 +84,33 @@ func TestHostRespetaBanderaEntornoYFichero(t *testing.T) {
 	}
 	if got := c.Host("ssh://de-la-bandera"); got != "ssh://de-la-bandera" {
 		t.Errorf("la bandera debería ganar a todo: %q", got)
+	}
+}
+
+// KLING_SOCKET es el último escalón: el socket de un daemon privado
+// (KLING_SOCKET=... kling daemon) lo encuentra el cliente con la misma
+// variable, pero un contexto activo o KLING_HOST mandan sobre él.
+func TestHostKlingSocketUltimoEscalon(t *testing.T) {
+	enUnaConfigTemporal(t)
+	t.Setenv("KLING_HOST", "")
+	t.Setenv("KLING_SOCKET", "/run/privado/kling.sock")
+	c, _ := Load()
+	c.CurrentContext = ""
+	if got := c.Host(""); got != "unix:///run/privado/kling.sock" {
+		t.Errorf("solo KLING_SOCKET: %q", got)
+	}
+	t.Setenv("KLING_SOCKET", "unix:///run/privado/kling.sock")
+	if got := c.Host(""); got != "unix:///run/privado/kling.sock" {
+		t.Errorf("KLING_SOCKET con unix://: %q", got)
+	}
+	c.CurrentContext = "pruebas"
+	c.Contexts["pruebas"] = &Context{Host: "unix:///del/fichero.sock"}
+	if got := c.Host(""); got != "unix:///del/fichero.sock" {
+		t.Errorf("el contexto debería ganar a KLING_SOCKET: %q", got)
+	}
+	t.Setenv("KLING_HOST", "ssh://del-entorno")
+	if got := c.Host(""); got != "ssh://del-entorno" {
+		t.Errorf("KLING_HOST debería ganar a KLING_SOCKET: %q", got)
 	}
 }
 
