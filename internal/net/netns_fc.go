@@ -8,6 +8,7 @@ package net
 
 import (
 	"fmt"
+	stdnet "net"
 	"os"
 	"os/exec"
 	"strings"
@@ -31,7 +32,16 @@ func nsIP(third, fourth int) string {
 // domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
 // que se deja salir. En los demás modos se ignora.
 func (n *Net) Setup(egress Egress, domains []string, owner int) error {
-	n.Teardown() // restos de una ejecución anterior
+	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
+	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
+	// máquina (otro daemon con un id que empieza igual), y Teardown la dejaría
+	// corriendo e incomunicada.
+	if existeRed(n) {
+		if ips := ipsVeth(n.HostIf); len(ips) > 0 && !contiene(ips, n.HostIP) {
+			return fmt.Errorf("%w: %s has %s, planned %s", ErrRedAjena, n.HostIf, strings.Join(ips, ","), n.HostIP)
+		}
+	}
+	n.Teardown()
 
 	if err := run("ip", "netns", "add", n.NS); err != nil {
 		return err
@@ -177,6 +187,34 @@ func (n *Net) Teardown() {
 	stopCredProxy(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
+}
+
+// Sustituibles en tests: mirar la red de verdad pide /sys y un veth.
+var (
+	existeRed = (*Net).Exists
+	ipsVeth   = func(ifname string) []string {
+		ifc, err := stdnet.InterfaceByName(ifname)
+		if err != nil {
+			return nil
+		}
+		addrs, _ := ifc.Addrs()
+		var ips []string
+		for _, a := range addrs {
+			if ipn, ok := a.(*stdnet.IPNet); ok && ipn.IP.To4() != nil {
+				ips = append(ips, ipn.IP.String())
+			}
+		}
+		return ips
+	}
+)
+
+func contiene(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 // Exists dice si el namespace y el veth del lado del host siguen ahí: lo que

@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -47,6 +48,12 @@ func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains 
 		uid = m.priv.UID
 	}
 	if err := montarRedHost(n, egress, domains, uid); err != nil {
+		if errors.Is(err, knet.ErrRedAjena) {
+			// No es nuestra: ni se desmonta ni se queda marcada como propia
+			// (el barrido de huérfanos se la llevaría).
+			m.olvidarRedPropia(n.NS)
+			return err
+		}
 		// Un Setup que falla a medias deja el namespace, el veth y sus
 		// reglas; quien llama no los desmontaba, y barrerNamespaces solo
 		// corre al arrancar el daemon: cada fallo era una red huérfana (y su
