@@ -1481,6 +1481,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
 	}
+	// El nombre de la imagen llega de la petición: se valida al entrar, antes
+	// de que nada lo use (reservarImagen, la receta en techoCPUPorDefecto, la
+	// clave del snapshot por imagen). Vacío es "default", que vale.
+	if req.Image != "" && !validName.MatchString(req.Image) {
+		return nil, marcado(ErrInvalidName, "invalid image name %q", req.Image)
+	}
 	// El tope va ANTES de bifurcar: restaurar desde un snapshot es tan capaz de
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
