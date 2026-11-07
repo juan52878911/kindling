@@ -253,8 +253,9 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// El servidor corta cada petición a los 30 s de lectura (ver Listen). Aquí
-	// no: gigas por SSH no caben en 30 s, y el tamaño ya está acotado arriba.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
+	// no: gigas por SSH no caben en 30 s. Lo que hay es un plazo de
+	// inactividad (cuerpoSubida).
+	body := cuerpoSubida(w, r)
 
 	if err := os.MkdirAll(filepath.Dir(t.path), 0o755); err != nil {
 		fail(w, http.StatusInternalServerError, err)
@@ -274,7 +275,7 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 
 	h := sha256.New()
 	// +1 para distinguir "justo el tope" de "se pasó" sin leer lo que sobra.
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r.Body, api.MaxBlobBytes+1))
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, api.MaxBlobBytes+1))
 	if err != nil {
 		limpiar()
 		fail(w, http.StatusBadRequest, fmt.Errorf("receiving the %s: %w", t.part, err))
@@ -404,4 +405,33 @@ func (s *Server) formaContraria(t blobTarget) (string, bool) {
 		return "", false
 	}
 	return otra, true
+}
+
+// plazoSubidaInactiva es cuánto puede pasar un PUT de blob sin que llegue un
+// byte antes de cortarlo. Variable para los tests.
+var plazoSubidaInactiva = 2 * time.Minute
+
+// cuerpoSubida pone a r.Body un plazo de INACTIVIDAD: antes de cada Read
+// renueva el plazo de lectura de la conexión. Las subidas no tienen el de 30 s
+// del servidor (gigas por SSH no caben), pero un cliente que deja la conexión
+// abierta sin mandar nada no puede retener para siempre el FD, el temporal de
+// hasta MaxBlobBytes ni, en OCI, el cerrojo de la caché.
+//
+// No vale wrapGuestBodyCon: su Close sobre el cuerpo de una petición del
+// servidor espera al mismo mutex que tiene el Read bloqueado y no destraba
+// nada. El plazo de la conexión sí: el Read vuelve con un error de timeout.
+func cuerpoSubida(w http.ResponseWriter, r *http.Request) io.Reader {
+	return &lecturaConPlazo{rc: http.NewResponseController(w), body: r.Body, plazo: plazoSubidaInactiva}
+}
+
+type lecturaConPlazo struct {
+	rc    *http.ResponseController
+	body  io.Reader
+	plazo time.Duration
+}
+
+func (l *lecturaConPlazo) Read(b []byte) (int, error) {
+	// Sin soporte (un ResponseRecorder en los tests) se lee sin plazo.
+	_ = l.rc.SetReadDeadline(time.Now().Add(l.plazo))
+	return l.body.Read(b)
 }

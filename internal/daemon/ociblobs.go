@@ -182,9 +182,9 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	s.muCacheOCI.RLock()
 	defer s.muCacheOCI.RUnlock()
-	// Sin el plazo de lectura de 30 s del servidor: gigas por SSH no caben, y
-	// el tamaño ya está acotado.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
+	// Sin el plazo de lectura de 30 s del servidor (gigas por SSH no caben),
+	// pero con uno de inactividad: un cliente callado no retiene el cerrojo.
+	body := cuerpoSubida(w, r)
 	// Un temporal propio por subida (dos a la vez del mismo blob no se pisan),
 	// en el mismo directorio para que el renombrado sea atómico, y acabado en
 	// .part como los de las descargas: nadie lo toma por un blob.
@@ -198,7 +198,7 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	limpiar := func() { f.Close(); _ = os.Remove(tmp) }
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r.Body, size+1))
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, size+1))
 	if err != nil {
 		limpiar()
 		fail(w, http.StatusBadRequest, fmt.Errorf("receiving blob %s: %w", digest, err))
