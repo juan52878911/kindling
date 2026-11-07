@@ -3811,7 +3811,14 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	}
 	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
-	m.killConservandoDisco(mc.ID)
+	if !m.killConservandoDisco(mc.ID) {
+		// Como en Remove (M4): con el VMM vivo —p. ej. en estado D— no se
+		// suelta nada. Darla por parada con PID 0 dejaba que kling start
+		// lanzase un segundo VMM sobre el mismo overlay. Se queda como
+		// estaba, con su PID y su red; el siguiente intento la vuelve a matar.
+		return nil, fmt.Errorf("%s: its VMM (pid %d) did not exit after SIGKILL; leaving its network and disk in place",
+			mc.Name, mc.PID)
+	}
 	// El overlay se conserva para kling start: si iba sin sincronizar, se
 	// asienta antes de decir stopped (desechable.go).
 	if err := m.asentarOverlay(mc); err != nil {
@@ -3943,7 +3950,8 @@ func (m *Manager) kill(id string) bool { return m.killMachine(id, true, false) }
 
 // killConservandoDisco es kill para Stop: el overlay sigue después (kling
 // start), así que el invitado vacía su caché aunque no tenga volúmenes.
-func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true) }
+// Dice, como kill, si el VMM ya no existe.
+func (m *Manager) killConservandoDisco(id string) bool { return m.killMachine(id, true, true) }
 
 // killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
 //
