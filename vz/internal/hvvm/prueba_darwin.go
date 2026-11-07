@@ -17,11 +17,17 @@ import "unsafe"
 // probarColas pasa data por los dispositivos virtio como lo haría un invitado
 // hostil (prueba.c), sin VM. Solo para las pruebas: usa la RAM de mentira de
 // prueba.c y no puede convivir con una VM de verdad en el mismo proceso.
-func probarColas(data []byte) {
+// Devuelve el errno con el que habría muerto el hilo de recepción de la red
+// (0 si sigue vivo).
+func probarColas(data []byte) int {
 	if len(data) == 0 {
-		return
+		return 0
 	}
-	C.khv_prueba((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	r := int(C.khv_prueba((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data))))
+	if r < 0 {
+		return 0 // no se pudo montar el banco: como antes, no es un fallo del invitado
+	}
+	return r
 }
 
 // cadena llama a vq_cadena con una tabla de descriptores (addr, len, flags,

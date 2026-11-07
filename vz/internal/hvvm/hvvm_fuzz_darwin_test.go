@@ -118,13 +118,42 @@ func semillas() [][]byte {
 		s = append(s, cola(dev, 4, 0, 0, 0, ciclo))
 		s = append(s, cola(dev, 256, 0x100000-16, 0x100000-6, 0x100000-6, ciclo))
 	}
+	s = append(s, rxSolapada())
 	return s
+}
+
+// rxSolapada es una cadena de rx de 256 descriptores escribibles que se
+// solapan sobre la misma RAM (la grande, de 16 MiB) y suman casi 4 GiB. El
+// recvmsg de Darwin rechaza con EINVAL una suma de iov_len mayor que
+// INT_MAX, y con eso moría el hilo de recepción: el invitado se quedaba sin
+// red para siempre.
+func rxSolapada() []byte {
+	const num = 256
+	descs := make([][4]uint64, num)
+	for i := range descs {
+		flags, next := uint64(3), uint64(i+1) // NEXT | WRITE
+		if i == num-1 {
+			flags, next = 2, 0
+		}
+		descs[i] = [4]uint64{ramBase + 0x4000, 16<<20 - 0x4000, flags, next}
+	}
+	b := cola(1, num, 0, 0x1000, 0x2000, ramCon(descs, 0))
+	b[1] = 1 // la RAM grande (prueba.c)
+	return b
+}
+
+func TestRxCadenaDeMasDe2GiB(t *testing.T) {
+	if e := probarColas(rxSolapada()); e != 0 {
+		t.Fatalf("the rx thread would stop with errno %d: the guest would lose its network", e)
+	}
 }
 
 // Las semillas corren siempre, también sin -fuzz.
 func TestColasHostiles(t *testing.T) {
-	for _, s := range semillas() {
-		probarColas(s)
+	for i, s := range semillas() {
+		if e := probarColas(s); e != 0 {
+			t.Errorf("seed %d: the rx thread would stop with errno %d", i, e)
+		}
 	}
 }
 
@@ -135,7 +164,9 @@ func FuzzColas(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		probarColas(data)
+		if e := probarColas(data); e != 0 {
+			t.Fatalf("the rx thread would stop with errno %d", e)
+		}
 	})
 }
 

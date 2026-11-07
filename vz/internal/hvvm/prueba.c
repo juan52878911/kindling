@@ -11,11 +11,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "khv.h"
 
 #define PRUEBA_RAM (1ULL << 20)
+// La RAM grande deja cadenas de 256 descriptores solapados de casi 16 MiB:
+// más de INT_MAX bytes en una sola cadena, que recvmsg de Darwin rechaza con
+// EINVAL (ver rx_una en net.c).
+#define PRUEBA_RAM_GRANDE (16ULL << 20)
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -65,10 +70,34 @@ static int preparar(void) {
   return 0;
 }
 
+// ram_grande cambia la RAM de mentira por una de PRUEBA_RAM_GRANDE, también
+// con su página de guarda detrás. preparar vuelve a la pequeña.
+static int ram_grande(void) {
+  static uint8_t *grande;
+  if (!grande) {
+    size_t pag = (size_t)getpagesize();
+    uint8_t *ram = mmap(NULL, PRUEBA_RAM_GRANDE + pag, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED || mprotect(ram + PRUEBA_RAM_GRANDE, pag, PROT_NONE) != 0) return -1;
+    grande = ram;
+  }
+  g_ram = grande;
+  g_ram_size = PRUEBA_RAM_GRANDE;
+  return 0;
+}
+
+// red_prueba: el otro extremo de la red de mentira (un par de datagramas,
+// como el socket que le da Go) por el que llega una trama a cada prueba de
+// la red; red[0] hace de socket del VMM.
+static int red[2] = {-1, -1};
+
+// Devuelve 0, o el errno con el que habría muerto el hilo de recepción de la
+// red (y el invitado se habría quedado sin red para siempre).
 int khv_prueba(const uint8_t *d, size_t n) {
   if (preparar() != 0) return -1;
   // Las primeras 64 B programan el dispositivo; el resto es la RAM.
   if (n < 64) return 0;
+  // El bit 0 del byte 1: la RAM grande.
+  if ((d[1] & 1) && ram_grande() != 0) return -1;
   memset(g_ram, 0, g_ram_size);
   size_t l = n - 64 < g_ram_size ? n - 64 : g_ram_size;
   memcpy(g_ram, d + 64, l);
@@ -101,6 +130,17 @@ int khv_prueba(const uint8_t *d, size_t n) {
     f(rd16(a) % 0x200, a[1] & 4, &v, sz);
   }
   for (int q = 0; q < ncolas[k]; q++) w(f, 0x050, (uint64_t)q);
+  int rx = 0;
+  if (k == 1) {
+    // Una trama llega por la red y se mete en la cola 0 como lo haría el
+    // hilo de recepción; lo que no entre se tira para la siguiente prueba.
+    if (red[0] < 0 && socketpair(AF_UNIX, SOCK_DGRAM, 0, red) != 0) return -1;
+    uint8_t trama[60] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    (void)!send(red[1], trama, sizeof trama, MSG_DONTWAIT);
+    rx = vnet_prueba_rx(red[0]);
+    while (recv(red[0], trama, sizeof trama, MSG_DONTWAIT) >= 0) {
+    }
+  }
   if (k == 0) vblk_prueba(0);
   if (k == 4) vballoon_objetivo(rd32(d + 60));
   // virtio-fs: lo que Go contestaría, con tamaños de los datos (a veces más
@@ -108,7 +148,7 @@ int khv_prueba(const uint8_t *d, size_t n) {
   if (k == 5) vvfs_prueba(0, d + 40, 6);
   w(f, 0x064, 0xff);  // InterruptACK
   w(f, 0x070, 0);
-  return 0;
+  return rx;
 }
 
 // ---- carrera de los registros de la cola contra el hilo del disco ----

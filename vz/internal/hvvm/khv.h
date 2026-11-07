@@ -307,6 +307,7 @@ void vnet_reafirmar(void);
 void vnet_set(const struct vnet_state *s);
 void vnet_quieto(void);
 void vnet_despertar(void);
+int vnet_prueba_rx(int red);  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
 // rng
 struct vrng_state {

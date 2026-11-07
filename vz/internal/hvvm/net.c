@@ -180,8 +180,11 @@ static int rx_una(int *err) {
   int n = vq_iov(q, desc, head, true, iov, QMAX, &cap);
   bool vale = n > 0 && cap > HDR;
   if (vale) {
+    // Una trama no pasa de TRAMA_MAX: más búfer no sirve, y una cadena de
+    // descriptores solapados sobre la misma RAM puede sumar más de INT_MAX
+    // bytes, que recvmsg de Darwin rechaza con EINVAL.
     m.msg_iov = datos;
-    m.msg_iovlen = iov_tramo(iov, n, HDR, cap - HDR, datos);
+    m.msg_iovlen = iov_tramo(iov, n, HDR, cap - HDR < TRAMA_MAX ? cap - HDR : TRAMA_MAX, datos);
   } else {
     m.msg_iov = &t;  // se recibe para tirarla
     m.msg_iovlen = 1;
@@ -193,6 +196,14 @@ static int rx_una(int *err) {
   pthread_mutex_lock(&mu);
   rx_en_curso = false;
   pthread_cond_broadcast(&cv_rx);
+  if (r < 0 && e == EINVAL && vale) {
+    // El búfer del invitado no le vale a recvmsg (con el tope de arriba no
+    // debería pasar): la trama se tira y el búfer vuelve con 0 bytes, como
+    // una cadena que no vale. Terminar el hilo dejaba al invitado sin red.
+    (void)!recv(fd, tirar, sizeof tirar, MSG_DONTWAIT);
+    r = 0;
+    vale = false;
+  }
   if (r < 0) {
     *err = e;
     return e == EAGAIN ? RX_VACIO : RX_ERROR;
@@ -508,4 +519,21 @@ void vnet_set(const struct vnet_state *i) {
   todo_bloquear();
   s = *i;
   todo_soltar();
+}
+
+// ---------- solo para las pruebas (prueba.c) ----------
+
+// vnet_prueba_rx mete en la cola 0 las tramas que haya en el socket red, como
+// el hilo de recepción pero aquí mismo y sin esperar búferes (un fuzz no
+// puede dormir 1 s por entrada). Devuelve 0, o el errno con el que el hilo de
+// recepción habría terminado y dejado al invitado sin red.
+int vnet_prueba_rx(int red) {
+  pthread_mutex_lock(&mu);
+  int propio = fd, err = 0, r;
+  fd = red;
+  for (int n = 0; (r = rx_una(&err)) == RX_PUESTA && n < 2 * QMAX; n++) {
+  }
+  fd = propio;
+  pthread_mutex_unlock(&mu);
+  return r == RX_ERROR && err != EINTR ? err : 0;
 }
