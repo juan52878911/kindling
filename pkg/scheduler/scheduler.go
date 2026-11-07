@@ -1626,6 +1626,13 @@ func (g *Scheduler) Drain(ctx context.Context) {
 	g.soltarAisladas(ctx)
 }
 
+// apartada es una víctima del segador mientras se duerme: su entrada, por si
+// hay que reponerla, y el candado que se le tomó (nil si es una réplica).
+type apartada struct {
+	e *entry
+	l *sync.Mutex
+}
+
 func (g *Scheduler) reapOnce(ctx context.Context) {
 	type victim = dormida
 	var victims []victim
@@ -1652,15 +1659,44 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			}
 		}
 	}
+	// Cada víctima se aparta como tomarPausada aparta una pausada: con el
+	// candado de quien la despertaría (el del servicio si es la primaria, el
+	// de su sesión si es de una aislada) y marcada en g.adquiriendo hasta que
+	// dormir acabe con ella. Sin las dos cosas, un acquire concurrente no la
+	// encontraba en el mapa, la veía "running" sin Transition en su List(), la
+	// adoptaba y le ataba sesiones, y el freeze llegaba por debajo: 502 en la
+	// primera petición. El candado hace esperar a ensure e isolatedSession
+	// hasta que acabe el freeze (y entonces la descongelan); la marca aparta
+	// al resto. TryLock, como evictLRU: si está ocupado alguien la está usando
+	// ahora mismo, y se deja para la siguiente vuelta.
+	//
 	// Las direcciones se resuelven antes de quitarlas del mapa: después ya no
 	// queda la entrada de la que sacarlas.
 	var dormidas []dormida
 	var addrs []string
+	apartadas := map[string]apartada{}
 	for _, v := range victims {
-		if e := g.entryByMachineLocked(v.service, v.id); e != nil {
-			dormidas = append(dormidas, v)
-			addrs = append(addrs, e.Addr(g.port()))
+		e := g.entryByMachineLocked(v.service, v.id)
+		if e == nil || g.adquiriendo[v.id] {
+			continue
 		}
+		var l *sync.Mutex
+		switch {
+		case e.aislada != "":
+			l = g.aisladaLock(e.aislada)
+		case g.services[v.service] == e:
+			l = g.ensureLock(v.service)
+		}
+		if l != nil && !l.TryLock() {
+			continue
+		}
+		if g.adquiriendo == nil {
+			g.adquiriendo = map[string]bool{}
+		}
+		g.adquiriendo[v.id] = true
+		apartadas[v.id] = apartada{e: e, l: l}
+		dormidas = append(dormidas, v)
+		addrs = append(addrs, e.Addr(g.port()))
 		g.removeEntryLocked(v.service, v.id)
 	}
 	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
@@ -1713,7 +1749,21 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			g.OnSleep(v.service, addrs[i])
 		}
 	}
-	g.dormir(ctx, victims)
+	g.dormir(ctx, dormidas, func(v dormida, ok bool) {
+		a := apartadas[v.id]
+		g.mu.Lock()
+		delete(g.adquiriendo, v.id)
+		// Si no se pudo dormir sigue despierta: se repone, como en evictLRU.
+		// Fuera del mapa el gateway la cree inexistente y el siguiente acquire
+		// la adoptaría desde List() sin su tenant ni su lastUse.
+		if !ok {
+			g.reponerEntryLocked(v.service, a.e)
+		}
+		g.mu.Unlock()
+		if a.l != nil {
+			a.l.Unlock()
+		}
+	})
 	g.enfriarPausadas(ctx)
 	for _, id := range renovar {
 		g.renovarTTL(ctx, id)

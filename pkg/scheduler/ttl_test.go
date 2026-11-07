@@ -51,6 +51,16 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	partes := strings.Split(strings.TrimPrefix(r.URL.Path, "/machines/"), "/")
+	if r.Method == http.MethodGet && len(partes) == 1 {
+		mc := d.maquinas[partes[0]]
+		if mc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		c := *mc
+		responder(&c)
+		return
+	}
 	if len(partes) != 2 || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
