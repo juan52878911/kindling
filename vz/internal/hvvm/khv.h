@@ -12,6 +12,7 @@
 #include <Hypervisor/Hypervisor.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -213,11 +214,18 @@ void rtc_get(struct rtc_state *s);
 void rtc_set(const struct rtc_state *s);
 
 // ---- virtio-mmio ----
+// used_idx es el índice de used del dispositivo (virtio 2.7.8: solo él lo
+// escribe). vq_push lo lleva aquí y lo publica en el anillo; nunca se lee de
+// la RAM, donde el invitado puede escribir lo que quiera. Va en el relleno
+// que había detrás de last_avail: struct vq mide lo mismo y las cabeceras de
+// los snapshots no cambian de forma (ver SNAP_F_USED_IDX en vm.c).
 struct vq {
   uint32_t num, ready;
   uint64_t desc, avail, used;
   uint16_t last_avail;
+  uint16_t used_idx;
 };
+_Static_assert(sizeof(struct vq) == 40 && offsetof(struct vq, used_idx) == 34, "struct vq is in the snapshot");
 struct vdesc {
   uint64_t addr;
   uint32_t len;
@@ -229,6 +237,9 @@ struct vdesc {
 #define VIRTQ_DESC_F_INDIRECT 4
 bool vq_ptrs(struct vq *q, uint16_t **avail, uint8_t **used, struct vdesc **desc);
 void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len);
+// vq_used_de_ram toma used_idx del anillo used en la RAM: solo al restaurar
+// un snapshot de antes de que el dispositivo lo guardara (ver vm.c).
+void vq_used_de_ram(struct vq *q);
 // Cadenas de descriptores, con todos los topes: vq_cadena copia la cadena de
 // head en out (como mucho max) y devuelve cuántos tiene, o -1 si es inválida
 // (índice fuera de la tabla, más larga que la cola, indirecta). vq_leer junta

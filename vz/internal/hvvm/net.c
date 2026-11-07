@@ -88,7 +88,7 @@ static void tx(void) {
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   bool hecho = false;
-  uint16_t viejo = *(volatile uint16_t *)(used + 2);
+  uint16_t viejo = q->used_idx;
   for (uint32_t vueltas = 0;; vueltas++) {  // ver b_procesar en virtio.c
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1]) {
@@ -108,7 +108,7 @@ static void tx(void) {
   }
   // Con EVENT_IDX el driver de Linux pide la interrupción de tx solo cuando
   // le hace falta liberar (napi_tx), no por cada trama.
-  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
+  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, q->used_idx)) interrumpir();
 }
 
 // rx_avisar interrumpe al invitado, si lo pide, por las tramas puestas desde
@@ -120,17 +120,11 @@ static void rx_avisar(uint16_t viejo) {
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   // En NAPI el driver no quiere una interrupción por trama: la pide al acabar.
-  if (vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
+  if (vq_interrumpir(&s.m, q, avail, viejo, q->used_idx)) interrumpir();
 }
 
-// used_idx es el índice de used ahora (0 sin driver).
-static uint16_t used_idx(void) {
-  struct vq *q = &s.q[0];
-  uint16_t *avail;
-  uint8_t *used;
-  struct vdesc *desc;
-  return vq_ptrs(q, &avail, &used, &desc) ? *(volatile uint16_t *)(used + 2) : 0;
-}
+// used_idx es el índice de used de rx ahora (el del dispositivo).
+static uint16_t used_idx(void) { return s.q[0].used_idx; }
 
 enum { RX_PUESTA, RX_VACIO, RX_SIN_BUF, RX_ERROR };
 

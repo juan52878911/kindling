@@ -8,6 +8,7 @@ package hvvm
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
                   uint32_t *usado);
 uint32_t khv_prueba_cfg(uint32_t off);
+int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
@@ -152,3 +153,6 @@ func mpidrIdx(aff uint64, n int) int { return int(C.khv_mpidr_idx(C.uint64_t(aff
 
 // maxVCPUsC es khv_max_vcpus (no crea ninguna VM).
 func maxVCPUsC() int { return int(C.khv_max_vcpus()) }
+
+// usedDelDispositivo: ver khv_prueba_used en prueba.c.
+func usedDelDispositivo() int { return int(C.khv_prueba_used()) }

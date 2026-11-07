@@ -154,9 +154,9 @@ static void vfs_devolver(struct vvfs *v, int cola, uint16_t head, uint32_t len) 
   uint8_t *used;
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;  // el driver quitó la cola: nadie espera
-  uint16_t viejo = *(volatile uint16_t *)(used + 2);
+  uint16_t viejo = q->used_idx;
   vq_push(q, used, head, len);
-  if (vq_interrumpir(&v->s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) {
+  if (vq_interrumpir(&v->s.m, q, avail, viejo, q->used_idx)) {
     v->s.m.isr |= 1;
     vmmio_irq(&v->s.m, v->intid);
   }

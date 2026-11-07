@@ -215,3 +215,24 @@ func TestFlushDelDisco(t *testing.T) {
 		t.Fatalf("FLUSH status = %d, want 0", e)
 	}
 }
+
+// used.idx lo escribe solo el dispositivo (virtio 2.7.8): uno que lo leía de
+// la RAM seguía desde donde lo dejara el invitado, y el estado del
+// dispositivo dependía de lo que escribiera él.
+func TestUsedIdxEsDelDispositivo(t *testing.T) {
+	switch r := usedDelDispositivo(); r {
+	case 0:
+	case -1:
+		t.Fatal("the first request did not land in used entry 0")
+	case -2:
+		t.Fatal("after the guest overwrote used.idx, the device followed it instead of its own counter")
+	case -3:
+		t.Fatal("the snapshot state does not carry used_idx, or restore followed the guest RAM")
+	case -4:
+		t.Fatal("an old snapshot (no used_idx in its state) did not take used.idx from its RAM")
+	case -5:
+		t.Fatal("re-arming the queue did not reset used_idx")
+	default:
+		t.Fatalf("step %d failed", r)
+	}
+}

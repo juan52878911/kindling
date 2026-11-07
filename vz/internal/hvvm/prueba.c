@@ -314,3 +314,82 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
   w(blk_mmio, 0x070, 0);
   return e;
 }
+
+// ---- used.idx es del dispositivo, no del invitado ----
+
+static bool rng_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vrng_mmio(off, escribir, val, size); }
+
+// khv_prueba_used: un invitado que escribe used.idx (que es del dispositivo)
+// entre dos peticiones al virtio-rng. La segunda tiene que ir a la entrada 1
+// del anillo used y dejar used.idx en 2, no seguir desde lo que puso el
+// invitado. 0 si va bien; si no, el paso que falló (negativo).
+int khv_prueba_used(void) {
+  if (preparar() != 0) return -100;
+  memset(g_ram, 0, g_ram_size);
+  const uint64_t d0 = RAM_BASE, av0 = RAM_BASE + 0x1000, us0 = RAM_BASE + 0x2000;
+  w(rng_mmio, 0x070, 0);
+  w(rng_mmio, 0x030, 0);
+  w(rng_mmio, 0x038, 4);
+  w(rng_mmio, 0x080, (uint32_t)d0);
+  w(rng_mmio, 0x090, (uint32_t)av0);
+  w(rng_mmio, 0x0a0, (uint32_t)us0);
+  w(rng_mmio, 0x084, 0);
+  w(rng_mmio, 0x094, 0);
+  w(rng_mmio, 0x0a4, 0);
+  w(rng_mmio, 0x044, 1);
+  w(rng_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, 4 * sizeof *d);
+  for (int i = 0; i < 4; i++) d[i] = (struct vdesc){RAM_BASE + 0x3000 + 0x100 * (uint64_t)i, 16, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(av0, 6 + 2 * 4);
+  volatile uint16_t *uidx = gpa_ptr(us0 + 2, 2);
+  uint32_t *anillo = gpa_ptr(us0 + 4, 8 * 4);
+  int r = 0;
+  // Una petición: entra en la entrada 0 y used.idx pasa a 1.
+  av[2] = 0;
+  av[1] = 1;
+  w(rng_mmio, 0x050, 0);
+  if (*uidx != 1 || anillo[0] != 0 || anillo[1] != 16) r = -1;
+  // El invitado pisa used.idx; la siguiente sigue donde iba el dispositivo.
+  if (!r) {
+    *uidx = 0x1235;
+    av[3] = 1;
+    av[1] = 2;
+    w(rng_mmio, 0x050, 0);
+    if (*uidx != 2 || anillo[2] != 1 || anillo[3] != 16) r = -2;
+  }
+  // Snapshot y restauración: el estado lleva el contador, y lo que haya en
+  // la RAM al restaurar no cuenta.
+  struct vrng_state st;
+  if (!r) {
+    vrng_get(&st);
+    if (st.q.used_idx != 2) r = -3;
+    *uidx = 0x777;
+    vrng_set(&st);
+    av[4] = 2;
+    av[1] = 3;
+    w(rng_mmio, 0x050, 0);
+    if (!r && (*uidx != 3 || anillo[4] != 2)) r = -3;
+  }
+  // Un snapshot de antes (sin SNAP_F_USED_IDX): used_idx a cero en el
+  // fichero y el bueno en el anillo used de su RAM.
+  if (!r) {
+    vrng_get(&st);
+    st.q.used_idx = 0;
+    vq_used_de_ram(&st.q);
+    if (st.q.used_idx != 3) r = -4;
+    vrng_set(&st);
+    av[5] = 3;
+    av[1] = 4;
+    w(rng_mmio, 0x050, 0);
+    if (!r && (*uidx != 4 || anillo[6] != 3)) r = -4;
+  }
+  // Una cola que se vuelve a armar empieza en 0 (el driver deja used a cero).
+  if (!r) {
+    w(rng_mmio, 0x044, 0);
+    w(rng_mmio, 0x044, 1);
+    vrng_get(&st);
+    if (st.q.used_idx != 0) r = -5;
+  }
+  w(rng_mmio, 0x070, 0);
+  return r;
+}
