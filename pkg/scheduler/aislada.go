@@ -245,7 +245,11 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		if !mc.Reachable() {
 			return fallo(fmt.Errorf("machine %s of the isolated session is running but unreachable", short(id)))
 		}
-		g.renovarTTL(ctx, id)
+		// Como en acquire: si el daemon rechaza la renovación, el Get era
+		// viejo (ya no corre, o ya no existe) y no se adopta.
+		if err := g.renovarTTL(ctx, id); renovacionRechazada(err) {
+			return fallo(err)
+		}
 		return mc, "adopt", nil
 	case api.StatePaused, api.StateWarm:
 		// Igual que acquire: el TTL se renueva ANTES del thaw, o el vigilante
