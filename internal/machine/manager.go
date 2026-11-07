@@ -3693,6 +3693,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
+	// Reanudado: el volcado ya no describe su disco. Se retira el sello antes
+	// de nada más, y no tras persistir el running: si el daemon muere con su
+	// VMM entre medias, state.json aún dice warm (o running, y reconcile la
+	// pasa a warm si el sello sigue) y el siguiente thaw cargaría aquella
+	// memoria sobre el disco ya escrito. Sin sello, falla cerrado. Si no se
+	// puede retirar, abortar no lo arreglaría (el invitado ya corrió): se avisa.
+	if err := retirarSello(dir); err != nil {
+		log.Printf("warning: thaw: %s: couldn't retire the seal of the memory dump it was thawed from: %v", mc.Name, err)
+	}
 	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
