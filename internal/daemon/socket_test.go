@@ -88,3 +88,43 @@ func TestEscucharSocketNoSigueEnlaces(t *testing.T) {
 		t.Fatalf("%s is %v after the swap, want the daemon's socket", ruta, li.Mode())
 	}
 }
+
+// Al salir, el daemon borra su socket solo si sigue siendo el suyo: si otro
+// daemon ya escucha en la misma ruta (un reinicio solapado, un segundo daemon
+// con el mismo -socket), no le deja sin socket.
+func TestQuitarSocketSoloSiEsElMio(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ruta := filepath.Join(dir, "k.sock")
+
+	ln1, err := escucharSocket(ruta, false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln1.Close()
+	mio, err := os.Lstat(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Otro daemon toma la ruta.
+	ln2, err := escucharSocket(ruta, false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+	suyo, _ := os.Lstat(ruta)
+
+	quitarSocketSiEsMio(ruta, mio)
+	if fi, err := os.Lstat(ruta); err != nil || !os.SameFile(fi, suyo) {
+		t.Fatalf("se borró el socket del otro daemon: %v %v", fi, err)
+	}
+	quitarSocketSiEsMio(ruta, suyo)
+	if _, err := os.Lstat(ruta); !os.IsNotExist(err) {
+		t.Fatalf("el socket propio sigue ahí: %v", err)
+	}
+	// Sin identidad (no se pudo leer al crearlo) no se borra nada.
+	quitarSocketSiEsMio(ruta, nil)
+}

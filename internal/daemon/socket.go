@@ -90,3 +90,19 @@ func avisarDirectorioSocket(dir string) {
 			"anyone who can write there can replace the socket; use a directory like /run/kling", dir, p.Perm())
 	}
 }
+
+// quitarSocketSiEsMio borra ruta solo si sigue siendo el socket que este
+// daemon creó (mismo dispositivo e inode que mio). Si otro daemon ya escucha
+// en esa ruta (un reinicio que se solapa con la salida de este, un segundo
+// daemon con el mismo -socket), borrarlo le dejaría sin socket y a sus
+// clientes sin forma de llegar. Sin mio, no se borra nada.
+func quitarSocketSiEsMio(ruta string, mio os.FileInfo) {
+	if mio == nil {
+		return
+	}
+	fi, err := os.Lstat(ruta)
+	if err != nil || !os.SameFile(fi, mio) {
+		return
+	}
+	_ = os.Remove(ruta)
+}

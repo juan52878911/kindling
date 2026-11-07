@@ -670,6 +670,11 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Quién es el socket, para borrarlo al salir solo si sigue siendo este.
+	mio, err := os.Lstat(s.socket)
+	if err != nil {
+		log.Printf("warning: can't stat the new socket %s (it won't be removed on exit): %v", s.socket, err)
+	}
 
 	// Vigilancia de vida: una microVM puede morir sola (pánico del invitado, OOM
 	// del host). Decir "running" sobre algo muerto haría que el gateway enrutara
@@ -746,7 +751,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	// la última transición hace que el arranque siguiente reconstruya algo
 	// que no es.
 	s.mgr.Close()
-	_ = os.Remove(s.socket)
+	quitarSocketSiEsMio(s.socket, mio)
 	return nil
 }
 
