@@ -331,3 +331,30 @@ func TestHostEgressRulesCierranVethAVethYOrigenFalso(t *testing.T) {
 		}
 	}
 }
+
+// El allowlist también va de un golpe con iptables-restore (antes, ~25
+// procesos de iptables uno a uno en el arranque): las dos vías dejan las
+// mismas reglas, y el set se crea antes de que las reglas lo nombren.
+func TestAllowlistYRestorePonenLoMismo(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	var quiere, got []string
+	for _, r := range n.reglasAllowlist() {
+		quiere = append(quiere, "iptables "+strings.Join(r, " "))
+	}
+	aplicadas := reglasAplicadas(t, n, EgressAllowlist)
+	if len(aplicadas) == 0 || aplicadas[0][0] != "ipset" || aplicadas[0][1] != "create" {
+		t.Fatalf("lo primero no es crear el set: %v", aplicadas)
+	}
+	for _, r := range aplicadas {
+		if r[0] == "iptables" {
+			got = append(got, strings.Join(r, " "))
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(quiere, "\n") {
+		t.Errorf("una a una =\n%s\nrestore =\n%s", strings.Join(got, "\n"), strings.Join(quiere, "\n"))
+	}
+	in := restoreInput(n.reglasAllowlist())
+	if !strings.Contains(in, "--match-set "+n.setName()+" dst -j ACCEPT\n-A FORWARD -i tap0 -j DROP\nCOMMIT\n") {
+		t.Errorf("entrada de iptables-restore del allowlist:\n%s", in)
+	}
+}
