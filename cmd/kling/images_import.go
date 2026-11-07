@@ -317,7 +317,7 @@ func imagesImport(args []string) error {
 		next("kling run -from %s", snap.Name)
 		return nil
 	}
-	next("kling run -image %s -mem 512M -wait-ready", *name)
+	next("kling run -image %s -mem 512M -wait-ready   ·   kling try -image %s -- <cmd>", *name, *name)
 	return nil
 }
 

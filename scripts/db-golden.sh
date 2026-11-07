@@ -83,9 +83,10 @@ cmd_image() {
   # PostGIS, pg_cron, pg_partman), con su propio script.
   if [ "${1:-}" = -ext ]; then
     shift
+    hermano db-image-ext.sh
     exec bash "$HERE/db-image-ext.sh" "$@"
   fi
-  [ -f "$HERE/recipes/pg16.recipe.json" ] || die "falta scripts/recipes/pg16.recipe.json"
+  [ -f "$HERE/recipes/pg16.recipe.json" ] || die "scripts/recipes/pg16.recipe.json is missing (run it from a kindling checkout: kling db golden -script <checkout>/scripts/db-golden.sh image), or skip the image: kling db golden -from-oci postgres:16-alpine build <name>"
   say "construyendo la imagen pg16 (Alpine + postgresql16); tarda unos minutos"
   "${K[@]}" image build pg16 -builder base -base min -grow 512 -spec "$HERE/recipes/pg16.recipe.json"
   "${K[@]}" image recipe pg16
@@ -329,7 +330,13 @@ mkdir -p /run/postgresql /var/log/postgresql /var/lib/dbgolden/in
 chmod 755 /var/lib/dbgolden /var/lib/dbgolden/in
 chown postgres:postgres /run/postgresql /var/log/postgresql
 install -d -o postgres -g postgres -m 0700 "\$D"
-su -s /bin/sh postgres -c "initdb -D \$D -E UTF8 --locale=C.UTF-8 --auth-local=peer --auth-host=scram-sha-256" >/var/log/initdb.out 2>&1 || { cat /var/log/initdb.out; exit 1; }
+# -N: sin un fsync por fichero (4,2 s de 4,5 en el Mac con kling-hv). Lo
+# escrito llega al disco con el sync de antes de congelar, igual que el resto.
+su -s /bin/sh postgres -c "initdb -N -D \$D -E UTF8 --locale=C.UTF-8 --auth-local=peer --auth-host=scram-sha-256" >/var/log/initdb.out 2>&1 || { cat /var/log/initdb.out; exit 1; }
+# fsync solo se apaga mientras dura la construcción (el CHECKPOINT costaba
+# 1,4 s): va en postgresql.auto.conf, que antes de congelar se vacía con ALTER
+# SYSTEM RESET y un sync. Las copias nacen con lo que diga postgresql.conf.
+echo "fsync = off" >> "\$D/postgresql.auto.conf"
 cat > "\$D/pg_hba.conf" <<'HBA'
 # Solo el rol de la aplicación entra por red, y con SCRAM. El superusuario,
 # solo por el socket local y como el usuario del sistema postgres.
@@ -485,7 +492,9 @@ SQL
 
   local n=0 dest who="PGOPTIONS='-c role=$role'"
   [ "$as_super" -eq 0 ] || who="PGOPTIONS=''"
-  for f in "${files[@]}"; do
+  # Sin -migrations ni -seed no hay ficheros, y en la bash 3.2 de macOS
+  # "${files[@]}" de un array vacío con set -u es «unbound variable».
+  for f in ${files[@]+"${files[@]}"}; do
     n=$((n + 1))
     dest="/var/lib/dbgolden/in/$(printf '%03d' "$n").sql"
     say "aplicando $(basename "$f")"
@@ -518,6 +527,19 @@ SQL
   done
   quiet "${K[@]}" exec "$m" -- su -s /bin/sh postgres -c \
     "psql -X -q -v ON_ERROR_STOP=1 -d postgres -c CHECKPOINT"
+  # fsync vuelve a lo de postgresql.conf (on, salvo un -conf que diga otra
+  # cosa) y se espera a que lo vea una sesión nueva: el postmaster relee la
+  # configuración de forma asíncrona. Después, sync: es lo que pide la
+  # documentación de Postgres al volver a encender fsync, y lo que lleva al
+  # disco lo que initdb -N y el CHECKPOINT dejaron en la caché del invitado.
+  quiet "${K[@]}" exec "$m" -- su -s /bin/sh postgres -c '
+psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "ALTER SYSTEM RESET fsync" -c "SELECT pg_reload_conf()" >/dev/null || exit 1
+i=0
+while [ "$(psql -X -At -d postgres -c "SELECT coalesce(sourcefile, '"'"''"'"') LIKE '"'"'%postgresql.auto.conf'"'"' FROM pg_settings WHERE name = '"'"'fsync'"'"'")" != f ]; do
+  i=$((i + 1)); [ $i -lt 100 ] || { echo "fsync is still off after the reload" >&2; exit 1; }
+  sleep 0.05
+done
+sync'
 
   # Un dorado no puede llevar clientes conectados: sus sockets y sus claves de
   # cancelación se repartirían idénticos a todas las copias.
@@ -578,6 +600,20 @@ while [ $# -gt 0 ]; do
     *)         args+=("$1"); shift ;;
   esac
 done
+# hermano comprueba que un script de al lado existe: el db-golden.sh que va
+# dentro de kling-db (instalado, sin checkout) no los trae.
+hermano() {
+  [ -f "$HERE/$1" ] || die "$1 is not next to this db-golden.sh (the one built into kling-db only builds Postgres from -from-oci or -from): run it from a kindling checkout, kling db golden -script <checkout>/scripts/db-golden.sh ..."
+}
+case "$engine" in
+  postgres) ;;
+  mysql|mariadb) hermano db-golden-mysql.sh ;;
+  redis|valkey) hermano db-golden-redis.sh ;;
+  sqlite) hermano db-golden-sqlite.sh ;;
+  ferretdb|mongo|mongodb) hermano db-golden-ferretdb.sh ;;
+  clickhouse) hermano db-golden-clickhouse.sh ;;
+  garage|s3) hermano db-golden-garage.sh ;;
+esac
 case "$engine" in
   postgres) ;;
   mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;

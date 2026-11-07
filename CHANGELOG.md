@@ -16,6 +16,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Image snapshots: `kling run -image X` restores a snapshot of `X` instead of booting cold. The first run with given parameters boots cold and the daemon saves one in the background from a separate machine that carries nothing of any run (no env, command, volumes, shares, secrets or network) and whose agent waits before starting the service; each copy is resynced and then gets its own env and command, so its service starts fresh. Measured on kling-hv (M4, small Alpine image): ~150 → ~45 ms until the agent answers. `-fresh` and `KLING_IMAGE_SNAPSHOTS=0` opt out; skipped with volumes, shares, kling-vz and agents that cannot wait. LRU-pruned under `KLING_IMAGE_SNAPSHOT_MIB` (1 GiB on macOS, 4 GiB on Linux), removed with `kling image rm`; `kling image snapshots [ls|prune]`, a line in `kling status` and `kling image ls`, `GET`/`DELETE /image-snapshots` (`docs/snapshot-imagen.md`).
 - kling-hv: live shares can go over virtio-fs, opt-in per share: `-share SRC:DST:ro|rw:virtiofs` (API `ShareSpec.transport`). The guest kernel talks FUSE to the same Go server the agent used, now inside kling-hv, with the same `internal/share` session and `os.Root` in the daemon. On an M4: metadata 3-5x faster (1000 creates 1.5 s → 0.3 s), sequential I/O ~2x (reads ~0.7 → 1.45 GB/s, writes ~0.5-0.6 → 1.2-1.4 GB/s); freeze/thaw keeps open files and pending writes. The trade-off: host changes are seen after the 1 s cache and don't wake watchers in the guest (`node --watch`, vite), so shares stay on FUSE unless asked. `KLING_HV_VIRTIOFS=1` makes virtio-fs the daemon default (`:fuse` opts a share out), `=0` forbids it. Templates (`-share-wait`, `compose up`), kling-vz, older agents and kernels without virtio-fs use FUSE; Linux rejects `:virtiofs`. `docs/compartir.md`.
 - arm64 guest kernel: `CONFIG_VIRTIO_FS=y` (required by `scripts/check-kernel-config.sh`).
+- `kling db up` with no template uses `pg` and builds it from `postgres:16-alpine` the first time (`-from-oci REF` for a named template that is missing); `-json` prints what is needed to connect (password only with `-dsn`), `-dsn` prints the URL. On an M4, zero to the first query in one command and 14.9 s, download included; then ~0.1 s per copy.
+- `kling db sql <copy> "SQL" [-json]`: SQL from the host without psql, as the app role or `-role`; JSON gives columns, rows (NULL as null) and command tags.
+- `kling try -image` takes a Docker reference (imported the first time, like `run -image`), and `kling try -json` prints one object with `exit_code`, `stdout`, `stderr`, `ready_ms` and `duration_ms`.
 
 ### Changed
 
@@ -23,6 +26,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+- `db-golden.sh build` runs `initdb -N` and keeps `fsync=off` only while building (reset with `ALTER SYSTEM RESET` and a `sync` before the freeze): 8.2 → 1.8 s on an M4. The script also ships inside `kling-db`, so `kling db golden` works without a checkout (other engines still need one, and say so).
+- `kling run -image <ref>` reuses the image a plain `kling image import <ref>` left (same options) instead of importing it again under another name.
+
+### Fixed
+
+- `db-golden.sh build` with no `-migrations` or `-seed` failed on macOS (bash 3.2, `files[@]: unbound variable`).
 
 ## [1.0.0] - 2026-11-05
 

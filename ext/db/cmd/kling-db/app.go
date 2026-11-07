@@ -99,6 +99,9 @@ type app struct {
 	// background lanza kling-db con esos argumentos en segundo plano, sin
 	// esperarlo (lo que -switch deja para después). nil: se hace en el acto.
 	background func(args []string) error
+	// runGolden ejecuta db-golden.sh con esos argumentos y la salida a w
+	// (kling db up sin plantilla la construye la primera vez).
+	runGolden func(ctx context.Context, host string, args []string, w io.Writer) error
 }
 
 func newApp(host string) (*app, error) {
@@ -119,11 +122,23 @@ func newApp(host string) (*app, error) {
 		readyWait:  30 * time.Second,
 		tr:         newTracer(os.Stderr),
 		background: spawnBackground,
+		runGolden: func(ctx context.Context, host string, args []string, w io.Writer) error {
+			return runGoldenScript(ctx, "", host, args, nil, w, w)
+		},
 	}
 	if a.tr != nil {
 		a.k = tracedBackend{backend: cli, t: a.tr}
 	}
 	return a, nil
+}
+
+// runGoldenTo construye una plantilla con db-golden.sh, con lo que diga el
+// script a w.
+func (a *app) runGoldenTo(ctx context.Context, host string, args []string, w io.Writer) error {
+	if a.runGolden == nil {
+		return errors.New("this kling db cannot build templates")
+	}
+	return a.runGolden(ctx, host, args, w)
 }
 
 func isTerminal(f *os.File) bool {

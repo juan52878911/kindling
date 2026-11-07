@@ -20,6 +20,33 @@ invitado solo su SHA-256, y `connect -redis`/`redis://`. SQLite: una microVM con
 fichero y `sqlite3`, sin red ni clave (`connect -sqlite`). MongoDB no, y por qué. Todo en
 [db-engines.md](db-engines.md).
 
+### En un comando
+
+```sh
+kling db up -dsn                         # una copia lista y su URL (con la clave) en stdout
+kling db up -json                        # lo mismo en JSON: name, host, port, user, database, password_file
+kling db up -json -dsn                   # el JSON con url (lleva la clave)
+kling db sql <copia> "select now()"      # SQL desde el host, sin psql; -json: columnas, filas y null
+kling db rm <copia>
+```
+
+`kling db up` sin plantilla usa `pg` y, si no existe, la construye la primera vez desde
+`postgres:16-alpine` (`golden -from-oci`): unos 15 s con la descarga (la red manda: 108 MiB),
+1,8 s si la imagen ya está, y después cada copia sale en ~0,1 s. El script de la plantilla
+va dentro de `kling-db`: no hace falta un checkout. Para otra imagen o un esquema propio,
+`kling db up crm -from-oci pgvector/pgvector:pg16` o `kling db golden -from-oci <imagen>
+build -migrations DIR crm`. Lo que cuenta la construcción solo sale si falla.
+
+Medido en un Mac M4 (kling-hv, daemon privado, 2026-11-07), de cero a la primera consulta:
+
+| camino | antes | ahora |
+|---|---|---|
+| sin imagen ni plantilla | falla en macOS (bash 3.2) sin `-seed`; con el arreglo, 3 comandos, un checkout y ~23 s | `kling db up` + `kling db sql`: 1 comando, 14,9 s |
+| imagen bajada, sin plantilla | `golden build`: 8,2 s | 1,8 s (`initdb -N` y `fsync=off` solo mientras se construye) |
+| con plantilla | `up` 107 ms; sin psql en el host, la consulta por `kling exec` | `up -dsn` ~115 ms; `sql` ~28 ms |
+
+### Paso a paso
+
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
 kling db up pg -name t1                  # una copia lista, con su propia contraseña
@@ -36,10 +63,11 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 
 | comando | qué hace |
 |---|---|
-| `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
+| `up [<plantilla>] [-name N] [-ttl D] [-owner T] [-from-oci REF] [-json] [-dsn]` | sin plantilla, `pg` (construida desde `postgres:16-alpine` la primera vez; con `-from-oci`, una plantilla nombrada que falte se construye desde esa imagen). `-json`: lo necesario para conectar, sin la clave; `-dsn`: la URL con la clave (pregunta si stdout es una terminal). Después, `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
 | `ls [-owner T] [-json]` (o `ps`) | las copias del dueño: motor, golden, estado y edad. Marca con `!` y explica debajo la que el daemon retuvo porque el almacén de copia al escribir se llenó (se reanuda sola tras `kling cow grow`) y la que vio errores de disco ([cow.md](cow.md#almacén-lleno)) |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
 | `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
+| `sql <copia> "SQL" [-role R] [-json] [-timeout 30s] \| -f FICHERO\|-` | ejecuta SQL desde el host sin psql (cliente propio, `ext/db/internal/pgmini`), como el rol de la aplicación o `-role`, con la clave del host, que no sale del proceso. Una tabla por sentencia; `-json`: `{results: [{command, columns, rows}]}`, con `null` para NULL, y `error` si el servidor contesta uno (sale con 1). Solo Postgres |
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña (en macOS, por el broker de enlaces del daemon); ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |

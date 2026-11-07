@@ -332,6 +332,7 @@ kling try:  -cpus
 kling try:  -egress
 kling try:  -from
 kling try:  -image
+kling try:  -json
 kling try:  -keep
 kling try:  -mem
 kling try:  -ttl

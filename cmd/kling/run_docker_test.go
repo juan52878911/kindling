@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/oci"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Un nombre de kindling nunca es una referencia; una referencia lleva
@@ -141,5 +143,50 @@ func TestAsegurarImagenDockerAvisaAlReutilizar(t *testing.T) {
 	}
 	if !strings.Contains(string(salida), "before restart policies") || !strings.Contains(string(salida), "-name "+name+" -replace") {
 		t.Errorf("no avisó de la imagen antigua: %q", salida)
+	}
+}
+
+// run -image <ref> reutiliza la imagen que dejó `kling image import <ref>`
+// (mismo spec) en vez de bajarla otra vez con otro nombre; con otras opciones
+// (aquí, otro entrypoint) no.
+func TestAsegurarImagenDockerReutilizaLaDeImport(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("HOME", cfg)
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("AppData", cfg)
+	for _, tc := range []struct {
+		spec  string
+		reusa bool
+	}{
+		{`{"ref":"alpine:3.20","restart":"on-failure"}`, true},
+		{`{"ref":"docker.io/library/alpine:3.20","restart":"on-failure"}`, true},
+		{`{"ref":"alpine:3.20","restart":"on-failure","entrypoint":["sleep"]}`, false},
+		{`{"ref":"ghcr.io/x/alpine:3.20","restart":"on-failure"}`, false},
+	} {
+		m := http.NewServeMux()
+		m.HandleFunc("GET /images", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[{"name":"alpine-3-20","has_recipe":true}]`))
+		})
+		m.HandleFunc("GET /images/{name}/recipe", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"name":"alpine-3-20","builder":"oci","spec":` + tc.spec + `}`))
+		})
+		var construyo atomic.Bool
+		m.HandleFunc("POST /images", func(w http.ResponseWriter, r *http.Request) {
+			construyo.Store(true)
+			var req api.BuildImageRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(api.BuildImageResult{Name: req.Name})
+		})
+		c := fakeDaemon(t, m)
+		got, err := asegurarImagenDocker(context.Background(), c, "alpine:3.20")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.reusa && (got != "alpine-3-20" || construyo.Load()) {
+			t.Errorf("%s: got %q (built %v), want the imported alpine-3-20", tc.spec, got, construyo.Load())
+		}
+		if !tc.reusa && (got == "alpine-3-20" || !construyo.Load()) {
+			t.Errorf("%s: reused an import with other options or another ref (%q)", tc.spec, got)
+		}
 	}
 }
