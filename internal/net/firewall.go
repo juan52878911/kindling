@@ -544,19 +544,44 @@ const HostSubnet = hostPrefix + ".0.0/16"
 // exec, carpetas compartidas, resync), el resolver DNS del modo allowlist, el
 // proxy de credenciales y los proxies de enlace de los grafos, todos en el
 // lado host de cada veth.
-func HostInputRules() [][]string {
+//
+// Y solo los de SU veth: `-m addrtype --dst-type LOCAL --limit-iface-in` exige
+// que el destino sea una dirección del interfaz por el que entra el paquete.
+// Con `-d HostSubnet` a secas, la máquina A llegaba al resolver, al proxy de
+// credenciales, al de Postgres o a las aristas de la máquina B por la HostIP
+// de B (el host es "weak host": entrega en local cualquier dirección suya
+// venga por donde venga). Una regla para todas, sin una por veth que montar y
+// desmontar.
+func HostInputRules() [][]string { return hostInputRules(true) }
+
+// reglasInputViejas son las de versiones anteriores (sin el addrtype). Se
+// quitan al arrancar: si se quedaran, sus ACCEPT seguirían abriendo la HostIP
+// de cualquier máquina a todas las demás.
+func reglasInputViejas() [][]string {
+	r := hostInputRules(false)
+	return r[1 : len(r)-1] // las respuestas y el DROP no han cambiado
+}
+
+func hostInputRules(soloSuVeth bool) [][]string {
 	base := []string{"iptables", "-I", "INPUT", "1", "-i", "vh-+", "-s", HostSubnet}
 	regla := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
+	servicio := func(proto, puerto string) []string {
+		r := regla("-d", HostSubnet)
+		if soloSuVeth {
+			r = append(r, "-m", "addrtype", "--dst-type", "LOCAL", "--limit-iface-in")
+		}
+		return append(r, "-p", proto, "--dport", puerto, "-j", "ACCEPT")
+	}
 	return [][]string{
 		regla("-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
-		regla("-d", HostSubnet, "-p", "udp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
-		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
-		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(credPort), "-j", "ACCEPT"),
-		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(pgPort), "-j", "ACCEPT"),
-		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(myPort), "-j", "ACCEPT"),
+		servicio("udp", strconv.Itoa(dnsPort)),
+		servicio("tcp", strconv.Itoa(dnsPort)),
+		servicio("tcp", strconv.Itoa(credPort)),
+		servicio("tcp", strconv.Itoa(pgPort)),
+		servicio("tcp", strconv.Itoa(myPort)),
 		// Los proxies de enlace de los grafos (enlaces_fc.go), también en el
 		// lado host de cada veth.
-		regla("-d", HostSubnet, "-p", "tcp", "--dport", fmt.Sprintf("%d:%d", linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1), "-j", "ACCEPT"),
+		servicio("tcp", fmt.Sprintf("%d:%d", linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1)),
 		regla("-j", "DROP"),
 	}
 }
@@ -605,32 +630,47 @@ func SetupHost() error {
 // haya y se insertan de nuevo en orden, para no dejar el DROP delante de los
 // ACCEPT.
 func setupHostInput() error {
+	quitadas := 0
+	quitar := func(r []string) {
+		for comprobarRegla(sinPosicion(r, "-C")) {
+			if err := ejecutar(sinPosicion(r, "-D")...); err != nil {
+				break
+			}
+			quitadas++
+		}
+	}
+	for _, r := range reglasInputViejas() {
+		quitar(r)
+	}
 	reglas := HostInputRules()
-	todas := true
+	// -C dice si una regla está, no dónde. Si había reglas viejas, otra
+	// versión del daemon reinsertó las suyas arriba —con el DROP, que es el
+	// mismo— y las nuestras pueden haber quedado detrás de él: se reinsertan
+	// todas, en orden, aunque estén.
+	todas := quitadas == 0
 	for _, r := range reglas {
-		if !exec_ok(sinPosicion(r, "-C")) {
-			todas = false
+		if !todas {
 			break
 		}
+		todas = comprobarRegla(sinPosicion(r, "-C"))
 	}
 	if todas {
 		return nil
 	}
 	for _, r := range reglas {
-		for exec_ok(sinPosicion(r, "-C")) {
-			if err := run(sinPosicion(r, "-D")...); err != nil {
-				break
-			}
-		}
+		quitar(r)
 	}
 	// -I INPUT 1 en orden inverso: la primera de la lista acaba la primera.
 	for i := len(reglas) - 1; i >= 0; i-- {
-		if err := run(reglas[i]...); err != nil {
+		if err := ejecutar(reglas[i]...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// comprobarRegla es exec_ok detrás de una variable, para los tests.
+var comprobarRegla = exec_ok
 
 // reglasEnlaceSobrantes recibe lo que lista `iptables -S` en el netns (nat
 // PREROUTING y FORWARD) y devuelve, listas para pasar a iptables, las -D de las
