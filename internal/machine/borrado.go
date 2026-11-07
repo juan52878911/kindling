@@ -230,6 +230,9 @@ func (m *Manager) limpiarMaquina(mc *api.Machine) error {
 	delete(m.socket, mc.ID)
 	delete(m.discoMedido, mc.ID)
 	delete(m.freezeFails, mc.ID)
+	// Y la hora de su último apretón del globo: sin esto se quedaba para
+	// siempre, una entrada por cada máquina que pasó por el daemon.
+	delete(m.squeezedAt, mc.ID)
 	m.persist()
 	m.mu.Unlock()
 	// La marca de "sin agente" de su último freeze: sin esto se quedaba hasta
