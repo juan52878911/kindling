@@ -1719,8 +1719,13 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	var c *fc.Client
 	snapDir := m.snapDir(req.From)
 
-	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa).
-	m.persistirYa()
+	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa);
+	// si no puede, no se lanza.
+	if err := m.persistirYa(); err != nil {
+		m.desmontarRed(netcfg, id)
+		m.fail(mc, err)
+		return nil, err
+	}
 
 	// El VMM nace ya en su cgroup, como en Thaw, con el techo de ARRANQUE: un
 	// núcleo entero mientras restaura y hasta que contesta su agente (resync);

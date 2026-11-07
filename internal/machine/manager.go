@@ -426,6 +426,9 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// fallosEstado cuenta las escrituras seguidas de state.json que fallaron
+	// (para la espera del reintento). Con escrituraMu.
+	fallosEstado uint
 	// estadoIlegible no está vacío si state.json no se pudo leer (ver load):
 	// el daemon no borra ni mata nada por no conocerlo. estadoIntocable, si
 	// además no se pudo apartar: tampoco se escribe encima. Se fijan en load,
@@ -890,7 +893,7 @@ func (m *Manager) barridoBloqueado() bool { return m.estadoIlegible != "" }
 // vivo, por ejemplo). Y una copia por valor no basta: comparte con la viva los
 // arrays de Volumes, Shares o AllowDomains y los mapas de Labels y Forwards, y
 // cualquier escritura en su sitio sobre ellos corre con el Marshal (M-03).
-func (m *Manager) persist() {
+func (m *Manager) persist() uint64 {
 	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		list = append(list, *mc.Clone())
@@ -898,6 +901,7 @@ func (m *Manager) persist() {
 
 	m.stateMu.Lock()
 	m.pendGen++
+	gen := m.pendGen
 	m.pending, m.hasPend = list, true
 	m.stateMu.Unlock()
 
@@ -908,6 +912,7 @@ func (m *Manager) persist() {
 	case m.wake <- struct{}{}:
 	default:
 	}
+	return gen
 }
 
 const (
@@ -955,37 +960,80 @@ func (m *Manager) persistLoop() {
 			// Contenido: si volcar el estado entrara en panico, el proceso
 			// entero moriria y las microVM quedarian huerfanas. Perder UNA
 			// escritura es recuperable; perder el daemon, no.
-			panico.Contener("persistLoop", m.writePending)
+			panico.Contener("persistLoop", func() { _ = m.writePending() })
 
 		case <-m.quit:
 			if timer != nil {
 				timer.Stop()
 			}
-			panico.Contener("persistLoop (cierre)", m.writePending)
+			panico.Contener("persistLoop (cierre)", func() { _ = m.writePending() })
 			return
 		}
 	}
 }
 
-// writePending vuelca la última foto, si hay alguna.
-func (m *Manager) writePending() {
+// escribirEstado es la escritura de state.json. Variable para los tests: un
+// disco que falla no se puede fabricar de otra forma.
+var escribirEstado = durable.Escribir
+
+// reintentoEstadoMax acota la espera entre reintentos de una escritura de
+// state.json que falló.
+const reintentoEstadoMax = 10 * time.Second
+
+// writePending vuelca la última foto, si hay alguna, y dice si no pudo.
+//
+// escrituraMu se toma ANTES de sacar la foto: quien la saca la escribe o la
+// repone sin soltarlo, así que persistirYa, al tomarlo detrás, ve ya en
+// escritoGen el resultado de cualquier escritura en curso.
+func (m *Manager) writePending() error {
+	m.escrituraMu.Lock()
+	defer m.escrituraMu.Unlock()
 	m.stateMu.Lock()
 	if !m.hasPend {
 		m.stateMu.Unlock()
-		return
+		return nil
 	}
 	list, gen := m.pending, m.pendGen
 	m.pending, m.hasPend = nil, false
 	m.stateMu.Unlock()
 
-	m.escrituraMu.Lock()
-	defer m.escrituraMu.Unlock()
 	if m.estadoIntocable {
-		return // ver ponerEnCuarentena
+		return nil // ver ponerEnCuarentena
 	}
 	if gen <= m.escritoGen {
-		return // ya se escribió una foto más nueva
+		return nil // ya se escribió una foto más nueva
 	}
+	err := m.escribirFoto(list, gen)
+	if err == nil {
+		m.fallosEstado = 0
+		return nil
+	}
+	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
+	// (gen crece siempre, así que la pendiente la incluye), y se reintenta
+	// con espera creciente. Antes se perdía: solo quedaba en el log, y un
+	// VMM recién lanzado vivía sin su máquina en disco.
+	m.stateMu.Lock()
+	if !m.hasPend {
+		m.pending, m.pendGen, m.hasPend = list, gen, true
+	}
+	m.stateMu.Unlock()
+	m.fallosEstado++
+	espera := persistDebounce << min(m.fallosEstado, 8)
+	if espera > reintentoEstadoMax {
+		espera = reintentoEstadoMax
+	}
+	log.Printf("state: %v; retrying in %s", err, espera)
+	time.AfterFunc(espera, func() {
+		select {
+		case m.wake <- struct{}{}:
+		default:
+		}
+	})
+	return err
+}
+
+// escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
+func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 
 	schema := esquemaParaEscribir(list)
 	f := struct {
@@ -994,8 +1042,7 @@ func (m *Manager) writePending() {
 	}{esquema.Cabecera{Schema: schema}, list}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		log.Printf("state: could not serialize it: %v", err)
-		return
+		return fmt.Errorf("could not serialize it: %w", err)
 	}
 	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
 	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
@@ -1005,19 +1052,18 @@ func (m *Manager) writePending() {
 	// Respaldar no pisa una que ya exista: la buena es la primera.
 	if m.hayPrevia && schema > m.versionPrevia {
 		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
-			log.Printf("state: not writing schema %d, because the schema %d copy could not be made: %v", schema, m.versionPrevia, err)
-			return
+			return fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
 		}
 	}
 
 	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
 	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
 	// mal en el otro, que es lo que pasaba con links.json.
-	if err := durable.Escribir(m.statePath(), b, 0o644); err != nil {
-		log.Printf("state: could not persist it: %v", err)
-		return
+	if err := escribirEstado(m.statePath(), b, 0o644); err != nil {
+		return fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
+	return nil
 }
 
 // persistirYa escribe el estado AHORA, sin esperar al debounce. Se llama SIN m.mu.
@@ -1028,11 +1074,24 @@ func (m *Manager) writePending() {
 // correcto para un huérfano, lo incorrecto para una máquina que alguien acababa
 // de crear—. Con esto, un VMM vivo siempre tiene su registro escrito, y el que
 // no lo tiene es un huérfano de verdad.
-func (m *Manager) persistirYa() {
+//
+// Devuelve error si la foto no llegó a disco: quien iba a lanzar el VMM no
+// debe hacerlo (la foto queda pendiente y se reintenta sola). En modo
+// protegido (estadoIntocable) no se escribe a propósito y no es un error.
+func (m *Manager) persistirYa() error {
 	m.mu.RLock()
-	m.persist()
+	gen := m.persist()
 	m.mu.RUnlock()
-	m.writePending()
+	err := m.writePending()
+	m.escrituraMu.Lock()
+	defer m.escrituraMu.Unlock()
+	if m.estadoIntocable || m.escritoGen >= gen {
+		return nil
+	}
+	if err == nil {
+		err = errors.New("its write failed")
+	}
+	return fmt.Errorf("state not saved to disk: %w", err)
 }
 
 // cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
@@ -1786,7 +1845,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	m.persistirYa()
+	// Sin su máquina en disco no se lanza (ver persistirYa).
+	if err := m.persistirYa(); err != nil {
+		m.desmontarRed(netcfg, id)
+		return abandonar(err)
+	}
 	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env, mc.ShareWait)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
