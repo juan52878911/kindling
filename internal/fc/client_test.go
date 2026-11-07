@@ -175,3 +175,26 @@ func TestConPlazoAcotaSoloLaCopia(t *testing.T) {
 		t.Errorf("con un plazo holgado fallo: %v", err)
 	}
 }
+
+// Sin fault_message, el error no puede acabar en ": " vacío: lleva lo que
+// dijo Firecracker (su cuerpo) o, sin cuerpo, solo el código.
+func TestUnErrorSinFaultMessageDiceLoQueContesto(t *testing.T) {
+	for _, c := range []struct{ cuerpo, quiere string }{
+		{"no soy json", "no soy json"},
+		{`{"otra":"cosa"}`, `{"otra":"cosa"}`},
+		{"", "500 Internal Server Error"},
+	} {
+		cl, _, _ := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(c.cuerpo))
+		})
+		for _, err := range []error{cl.Resume(context.Background()), func() error { _, err := cl.BalloonStats(context.Background()); return err }()} {
+			if err == nil {
+				t.Fatalf("cuerpo %q: un 500 se dio por bueno", c.cuerpo)
+			}
+			if strings.HasSuffix(err.Error(), ": ") || !strings.Contains(err.Error(), c.quiere) {
+				t.Errorf("cuerpo %q: error %q; quería que dijese %q", c.cuerpo, err, c.quiere)
+			}
+		}
+	}
+}
