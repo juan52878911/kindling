@@ -2338,8 +2338,11 @@ const precargaMaxBytes = 512 << 20
 func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid int) error {
 	start := time.Now()
 	deadline := start.Add(5 * time.Second)
+	// Cada Ping con su plazo: un VMM que acepta y no contesta se comía los
+	// 30 s por defecto del cliente en el primero, muy por encima de los 5 s.
+	ping := c.ConPlazo(plazoPing)
 	for time.Now().Before(deadline) {
-		if c.Ping(ctx) == nil {
+		if ping.Ping(ctx) == nil {
 			return nil
 		}
 		if pid > 0 && syscall.Kill(pid, 0) == syscall.ESRCH {
@@ -2357,6 +2360,10 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 	}
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
+
+// plazoPing es el tope de cada Ping de waitSocket: el socket de un VMM vivo
+// contesta en microsegundos.
+const plazoPing = 200 * time.Millisecond
 
 // errYaNoToca es la respuesta de freezeSi y removeSi cuando, con el cerrojo
 // tomado, la máquina ya no cumple lo que justificaba la operación.
