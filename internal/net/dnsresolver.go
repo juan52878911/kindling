@@ -643,7 +643,7 @@ func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
 // add por-entrada con timeout caduca solo cuando expira el registro.
 //
 // DEDUPE (N-01): si ya sembramos esta IP y su caducidad en memoria sigue
-// vigente, no volvemos a hacer el fork+exec de ipset. Sin esto, un dominio
+// vigente, no volvemos a sembrarla. Sin esto, un dominio
 // consultado a ráfaga re-siembra (con un fork por query) una IP que YA está en
 // el ipset con el mismo timeout: coste de proceso sin ningún beneficio.
 func (r *dnsResolver) seed(ip string, ttl uint32) {
@@ -664,8 +664,7 @@ func (r *dnsResolver) seed(ip string, ttl uint32) {
 	r.seeded[ip] = expira
 	r.seedMu.Unlock()
 
-	if err := ejecutar("ip", "netns", "exec", r.ns, "ipset", "add", r.set, ip,
-		"timeout", fmt.Sprintf("%d", to), "-exist"); err != nil {
+	if err := anadirIPSet(r.ns, r.set, ip, to); err != nil {
 		// No quedó en el ipset: sin olvidarla aquí, el dedupe impediría
 		// reintentarlo durante todo el TTL y el invitado vería cerrada una IP
 		// que su DNS sí resolvió. Solo si la entrada sigue siendo la nuestra.

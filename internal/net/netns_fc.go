@@ -186,6 +186,7 @@ func (n *Net) Teardown() {
 	// Los enlaces antes que el proxy de credenciales: escriben en su auditor.
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
+	cerrarIPSet(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
 }
@@ -264,6 +265,7 @@ func TeardownNamespace(ns string) {
 	stopResolver(ns)
 	stopGraph(ns)
 	stopCredProxy(ns)
+	cerrarIPSet(ns)
 	quiet("ip", "netns", "del", ns)
 	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
 }

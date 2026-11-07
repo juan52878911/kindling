@@ -326,7 +326,7 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 		return errReglas
 	}
 	for _, ip := range ips {
-		_ = ns("ipset", "add", set, ip, "-exist")
+		_ = anadirIPSet(n.NS, set, ip, 0)
 	}
 
 	// Arrancar el resolver dinámico del host para este netns. Debe quedar vivo
