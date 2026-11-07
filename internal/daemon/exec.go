@@ -182,8 +182,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer body.Close()
 
-	events := readExecEvents(body, maxOut)
-	if r.URL.Query().Get("wait") == "1" {
+	wait := r.URL.Query().Get("wait") == "1"
+	events := readExecEvents(body, topeSalidaExec(maxOut, wait))
+	if wait {
 		res, err := aggregateExec(events)
 		if err != nil {
 			code := http.StatusBadGateway
@@ -357,6 +358,15 @@ func readExecEvents(body io.Reader, maxOut int) <-chan api.ExecEvent {
 		ch <- api.ExecEvent{Error: msg}
 	}()
 	return ch
+}
+
+// topeSalidaExec es el tope por flujo de un exec: el pedido, salvo con ?wait=1,
+// que lo junta todo en memoria y no pasa de api.ExecWaitMaxOutput.
+func topeSalidaExec(maxOut int, wait bool) int {
+	if wait && maxOut > api.ExecWaitMaxOutput {
+		return api.ExecWaitMaxOutput
+	}
+	return maxOut
 }
 
 // aggregateExec junta el flujo en un resultado (?wait=1).
