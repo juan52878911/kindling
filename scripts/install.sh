@@ -79,8 +79,8 @@ FORCE=0
 
 # Claves públicas con las que se firman las releases (minisign, separadas por
 # espacios): las mismas que clavesRelease de internal/upgrade/firma.go, lo
-# comprueba un test. Vacía hasta que exista la clave real (docs/firmas.md).
-KLING_RELEASE_PUBKEYS=""
+# comprueba un test (docs/firmas.md).
+KLING_RELEASE_PUBKEYS="RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN"
 # Desde esta versión mayor una release sin firma se rechaza:
 # upgrade.FirmaObligatoriaDesde (v1.0.0).
 SIGNED_FROM_MAJOR=1
