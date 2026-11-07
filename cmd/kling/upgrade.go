@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -215,9 +216,25 @@ func ejecutableReal() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
+// geteuidCLI es os.Geteuid; los tests lo cambian para probar el camino de root.
+var geteuidCLI = os.Geteuid
+
 // dirEstadoUsuario es ~/.local/state/kling/upgrade: donde van las copias de
 // una actualización del CLI, que no tiene raíz de daemon.
+//
+// Como root (sudo kling upgrade -cli) es el ~ de root según la base de
+// usuarios, no el HOME ni el XDG_STATE_HOME del entorno: sudo en macOS
+// conserva HOME, y un directorio del usuario le dejaría cambiar el binario
+// verificado antes de que root lo instale (upgrade.bloquear lo rechaza).
+// Sin ~ de root, un directorio temporal de root, como el del daemon en su
+// raíz; entonces un -rollback no encontrará esas copias.
 func dirEstadoUsuario() (string, error) {
+	if geteuidCLI() == 0 {
+		if u, err := user.LookupId("0"); err == nil && filepath.IsAbs(u.HomeDir) && u.HomeDir != "/" {
+			return filepath.Join(u.HomeDir, ".local", "state", "kling", "upgrade"), nil
+		}
+		return os.MkdirTemp("", "kling-upgrade-cli-")
+	}
 	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
 		return filepath.Join(d, "kling", "upgrade"), nil
 	}

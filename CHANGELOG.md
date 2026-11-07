@@ -27,6 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
+- `sudo kling upgrade -cli` keeps its download and backups in root's home (from the user database, not `HOME` or `XDG_STATE_HOME`, which sudo passes on macOS), and every upgrade run as root refuses a working directory that someone other than root can change, so the user can't swap the verified binary before root installs it.
 
 ## [1.0.0] - 2026-11-05
 
