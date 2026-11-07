@@ -92,12 +92,7 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 	// ese camino, que es el habitual cuando iptables-restore está instalado.
 
 	if e == EgressAllowlist {
-		for _, r := range n.forwardBase() {
-			if err := ns(append([]string{"iptables"}, r...)...); err != nil {
-				return err
-			}
-		}
-		return n.applyAllowlist(ns, domains)
+		return n.applyAllowlist(ns, domains, nil, false)
 	}
 
 	// none e internet: las mismas reglas que pone de un golpe restoreRules (ver
@@ -286,7 +281,12 @@ func setNameFromNS(ns string) string {
 //   - Tunneling por SUBDOMINIOS de un dominio permitido: se reenvían (un CDN los
 //     necesita), así que un dominio permitido con NS autoritativo del atacante
 //     sigue siendo un canal. Ver dnsresolver.go.
-func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
+//
+// previas son reglas que van delante (el DNAT de entrada de Setup). Con
+// restore, todas van en UN iptables-restore, como none e internet: una a una
+// eran ~25 procesos de iptables que releen el conjunto entero cada uno. Sin
+// restore (no está instalado), una a una.
+func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas [][]string, restore bool) error {
 	if _, err := exec.LookPath("ipset"); err != nil {
 		return fmt.Errorf("allowlist mode needs ipset and it is not installed: %w", err)
 	}
@@ -305,8 +305,47 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// forzaremos al invitado, y metemos solo IPv4 públicas. Las privadas se
 	// descartan aquí para que un resolver envenenado no cuele 169.254 (metadatos)
 	// ni 192.168 (LAN de casa) en la lista de permitidos.
-	for _, ip := range resolverSemillas(domains) {
+	// Se resuelve mientras se ponen las reglas: son independientes, y el
+	// set ya existe para el --match-set.
+	semillas := make(chan []string, 1)
+	go func() { semillas <- resolverSemillas(domains) }()
+
+	reglas := append(append([][]string{}, previas...), n.reglasAllowlist()...)
+	var errReglas error
+	if restore {
+		errReglas = n.restoreRules(reglas)
+	} else {
+		for _, r := range reglas {
+			if errReglas = ns(append([]string{"iptables"}, r...)...); errReglas != nil {
+				break
+			}
+		}
+	}
+	ips := <-semillas
+	if errReglas != nil {
+		return errReglas
+	}
+	for _, ip := range ips {
 		_ = ns("ipset", "add", set, ip, "-exist")
+	}
+
+	// Arrancar el resolver dinámico del host para este netns. Debe quedar vivo
+	// ANTES de devolver: es quien siembra el ipset con las IP reales (y su TTL) que
+	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
+	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
+	return startDNSResolver(n, domains)
+}
+
+// reglasAllowlist son las reglas del modo allowlist como argumentos de
+// iptables (con -t si no es filter), en orden: las pone applyAllowlist de un
+// golpe con iptables-restore o una a una.
+func (n *Net) reglasAllowlist() [][]string {
+	set := n.setName()
+	rules := n.forwardBase()
+	sinIptables := func(rs [][]string) {
+		for _, r := range rs {
+			rules = append(rules, r[1:])
+		}
 	}
 
 	// Forzar el DNS del invitado a NUESTRO resolver del host: cualquier salida al
@@ -317,11 +356,9 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// solo responde por los dominios permitidos y siembra la IP antes de devolverla.
 	dnsTarget := fmt.Sprintf("%s:%d", n.HostIP, dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
-		if err := ns("iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+		rules = append(rules, []string{"-t", "nat", "-A", "PREROUTING", "-i", TapName,
 			"-p", proto, "--dport", "53", "-j", "DNAT",
-			"--to-destination", dnsTarget); err != nil {
-			return err
-		}
+			"--to-destination", dnsTarget})
 	}
 
 	// Proxy de credenciales (credproxy.go): el resolver contesta con n.HostIP para
@@ -329,11 +366,7 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// credNATRules llevan el 80/443 al proxy HTTP y el resto de puertos TCP al
 	// de Postgres. Si la máquina no tiene credenciales no escucha nadie y la
 	// conexión se rechaza: las reglas no abren nada que no sean los proxies.
-	for _, r := range n.credNATRules() {
-		if err := ns(r...); err != nil {
-			return err
-		}
-	}
+	sinIptables(n.credNATRules())
 
 	// FORWARD, en orden (la primera que casa gana):
 	//   1. DNS hacia nuestro resolver del host: permitido. Tras el DNAT el destino
@@ -342,40 +375,22 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	//      de credenciales en n.HostIP:credPort y n.HostIP:pgPort.
 	dnsPortStr := fmt.Sprintf("%d", dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
-		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"); err != nil {
-			return err
-		}
+		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"})
 	}
-	for _, r := range n.credForwardRules() {
-		if err := ns(r...); err != nil {
-			return err
-		}
-	}
+	sinIptables(n.credForwardRules())
 	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
-	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+	rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
 		"-m", "conntrack", "--ctstate", "NEW",
-		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"); err != nil {
-		return err
-	}
+		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"})
 	//   3. Todo lo demás que entre por tap0: DROP (forwardCierre), sea NEW o no.
 	//      Esto bloquea IP directa, dominios no listados y cualquier otro
 	//      puerto/destino.
-	if err := ns(append([]string{"iptables"}, forwardCierre()...)...); err != nil {
-		return err
-	}
+	rules = append(rules, forwardCierre())
 
 	// El host enmascara hacia internet y vuelve a bloquear las redes privadas como
 	// segunda barrera (HostEgressRules), igual que en modo internet.
-	if err := ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"); err != nil {
-		return err
-	}
-
-	// Arrancar el resolver dinámico del host para este netns. Debe quedar vivo
-	// ANTES de devolver: es quien siembra el ipset con las IP reales (y su TTL) que
-	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
-	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
-	return startDNSResolver(n, domains)
+	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
 }
 
 // credNATRules son los DNAT del proxy de credenciales, en orden (el primero que

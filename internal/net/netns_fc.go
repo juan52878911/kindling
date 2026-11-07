@@ -130,23 +130,24 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
 	dnat := []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}
-	// none e internet van en UN iptables-restore con todas sus reglas: cada
+	// Los tres modos van en UN iptables-restore con todas sus reglas: cada
 	// iptables por separado es un proceso que relee el conjunto de reglas (~3
-	// ms cada uno). allowlist sigue su camino (ipset, resolver).
-	if egress != EgressAllowlist {
-		if _, err := exec.LookPath("iptables-restore"); err == nil {
-			reglas := append([][]string{dnat}, n.egressRules(egress)...)
-			if egress == EgressNone {
-				// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
-				// todo): así sabemos QUÉ nombre quiso y el aviso de red
-				// cortada puede decirlo (bloqueos.go).
-				reglas = append(reglas, n.reglasGrafo(EgressNone, false)...)
-			}
-			if err := n.restoreRules(reglas); err != nil {
-				return err
-			}
-			return n.arrancarRegistroNone(egress)
+	// ms cada uno). allowlist además crea su ipset y arranca su resolver.
+	if _, err := exec.LookPath("iptables-restore"); err == nil {
+		if egress == EgressAllowlist {
+			return n.applyAllowlist(ns, domains, [][]string{dnat}, true)
 		}
+		reglas := append([][]string{dnat}, n.egressRules(egress)...)
+		if egress == EgressNone {
+			// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
+			// todo): así sabemos QUÉ nombre quiso y el aviso de red
+			// cortada puede decirlo (bloqueos.go).
+			reglas = append(reglas, n.reglasGrafo(EgressNone, false)...)
+		}
+		if err := n.restoreRules(reglas); err != nil {
+			return err
+		}
+		return n.arrancarRegistroNone(egress)
 	}
 	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {
 		return err
