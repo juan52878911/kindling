@@ -670,6 +670,11 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Quién es el socket, para borrarlo al salir solo si sigue siendo este.
+	mio, err := os.Lstat(s.socket)
+	if err != nil {
+		log.Printf("warning: can't stat the new socket %s (it won't be removed on exit): %v", s.socket, err)
+	}
 
 	// Vigilancia de vida: una microVM puede morir sola (pánico del invitado, OOM
 	// del host). Decir "running" sobre algo muerto haría que el gateway enrutara
@@ -746,7 +751,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	// la última transición hace que el arranque siguiente reconstruya algo
 	// que no es.
 	s.mgr.Close()
-	_ = os.Remove(s.socket)
+	quitarSocketSiEsMio(s.socket, mio)
 	return nil
 }
 
@@ -789,6 +794,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // cuando ve un 507— y aplastarla con un 500 genérico la perdería justo donde
 // hace falta.
 func fail(w http.ResponseWriter, code int, err error) {
+	failCon(w, code, err, err.Error())
+}
+
+// failCon es fail con otro mensaje: el code del cuerpo sigue saliendo de err.
+func failCon(w http.ResponseWriter, code int, err error, msg string) {
 	var se *api.StatusError
 	if errors.As(err, &se) && se.Code != 0 {
 		code = se.Code
@@ -796,7 +806,52 @@ func fail(w http.ResponseWriter, code int, err error) {
 	if code == http.StatusTooManyRequests && errors.Is(err, errInvitadoOcupado) {
 		w.Header().Set("Retry-After", guestBusyRetryAfter)
 	}
-	writeJSON(w, code, api.Error{Message: err.Error(), Code: codigoDeError(code, err)})
+	writeJSON(w, code, api.Error{Message: msg, Code: codigoDeError(code, err)})
+}
+
+// failInterno es fail para errores que pueden llevar datos internos del host:
+// rutas bajo s.root (un *os.PathError) u otras cadenas que se pasan en
+// internos (la IP del invitado). El admin los ve tal cual; a un inquilino le
+// llega publico, y el detalle va al log del daemon.
+func (s *Server) failInterno(w http.ResponseWriter, r *http.Request, code int, err error, publico string, internos ...string) {
+	if _, filtrar := inquilinoDe(r); !filtrar || !s.llevaDatosInternos(err, internos) {
+		fail(w, code, err)
+		return
+	}
+	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	failCon(w, code, err, publico+" (the daemon log has the details)")
+}
+
+func (s *Server) llevaDatosInternos(err error, internos []string) bool {
+	var pe *os.PathError
+	var le *os.LinkError
+	if errors.As(err, &pe) || errors.As(err, &le) {
+		return true
+	}
+	msg := err.Error()
+	if s.root != "" && strings.Contains(msg, s.root) {
+		return true
+	}
+	for _, x := range internos {
+		if x != "" && strings.Contains(msg, x) {
+			return true
+		}
+	}
+	return false
+}
+
+// failGuest es failInterno para POST /machines/{ref}/guest: addr es la
+// dirección interna del invitado. Al inquilino se le deja la causa de red sin
+// direcciones ("connect: connection refused", "i/o timeout"), que es lo que
+// necesita para saber si el servicio no escucha o no contesta.
+func (s *Server) failGuest(w http.ResponseWriter, r *http.Request, code int, err error, addr string, port int, name string) {
+	causa := "it failed"
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		causa = op.Err.Error()
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	s.failInterno(w, r, code, err, fmt.Sprintf("calling port %d of %s: %s", port, name, causa), addr, host)
 }
 
 // codigoDeError es el code estable del cuerpo de error (api.ErrorCode,
@@ -980,6 +1035,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	decodeMS := time.Since(start).Milliseconds()
 	// kling.graph y kling.graph.* las pone solo el daemon (grafos).
 	if err := api.ValidateNoGraphLabels(req.Labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validarTopesRun(req.Labels, req.AllowDomains); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -1252,7 +1311,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, machine.ErrNoMachine) || errors.Is(err, os.ErrNotExist) {
 			code = http.StatusNotFound
 		}
-		fail(w, code, err)
+		s.failInterno(w, r, code, err, "reading the console log of "+r.PathValue("ref"))
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1270,7 +1329,7 @@ func (s *Server) handleCredAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	recs, err := s.mgr.CredAudit(r.PathValue("ref"), q)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
+		s.failInterno(w, r, http.StatusInternalServerError, err, "reading the credential audit log of "+r.PathValue("ref"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -1315,6 +1374,10 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	var labels map[string]string
 	if err := decodeJSON(w, r, &labels); err != nil {
 		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	if err := api.ValidateLabels(labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {
@@ -1486,7 +1549,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	}
 	out, code, err := proxyGuest(r.Context(), addr, req, esperar)
 	if err != nil {
-		fail(w, code, err)
+		s.failGuest(w, r, code, err, addr, port, mc.Name)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)

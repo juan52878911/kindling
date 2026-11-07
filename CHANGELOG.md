@@ -23,6 +23,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+- `exec ?wait=1` caps each stream at 8 MiB (`api.ExecWaitMaxOutput`) and marks the result `truncated`; the NDJSON stream still allows 64 MiB.
+- Run, sandbox, fork and `PUT /machines/{ref}/labels` reject more than 64 labels or 4 KiB of labels, and run and sandbox more than 256 `allow_domains`, with a 400.
+
+### Fixed
+
+- Blob uploads (`PUT /images/{name}/blob`, `PUT /oci/blobs/{digest}`) are cut after 2 minutes without data; a stalled client kept an FD, a temp file and, for OCI, the cache lock that sweeps and other uploads need.
+- Errors seen by non-admin callers of `logs`, `credaudit` and `guest` no longer include host paths or the guest's internal address; the detail goes to the daemon log.
+- The daemon removes its socket on exit only if it is still the one it created.
+- A sandbox whose agent never answered and that could not be removed is logged, and the error names its ID.
 
 ## [1.0.0] - 2026-11-05
 

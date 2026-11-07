@@ -529,7 +529,9 @@ El último evento es siempre `exit` (con `truncated` si se cortó la salida y
 `timed_out` si lo mató el plazo, código 137) o `error` (no se pudo ejecutar, o el
 invitado dejó de contestar). Un código distinto de cero no es un error HTTP. Con
 `?wait=1` la respuesta es un único objeto: `exit_code`, `stdout`, `stderr` (base64),
-`duration_ms`, `truncated`, `timed_out`.
+`duration_ms`, `truncated`, `timed_out`. Como el daemon la junta en memoria, ahí
+cada flujo se recorta a 8 MiB (`api.ExecWaitMaxOutput`) aunque `max_output_bytes`
+pida más, y lo que sobra se marca con `truncated`; el flujo NDJSON admite 64 MiB.
 
 El daemon no se fía del invitado: recorta cada flujo al tope pedido y garantiza que
 hay exactamente un evento final. Cerrar la conexión mata el comando.
