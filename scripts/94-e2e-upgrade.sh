@@ -203,11 +203,16 @@ if [ "$FROM" = download ]; then
   echo "  (release $NEWTAG served at $SRV_URL)"
 elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
   NUEVO=(-from-dir "$NEW_DIR")
+  # Desde v1.0.0 un -from-dir sin SHA256SUMS.minisig se rechaza: los
+  # binarios del e2e son de una compilación local, sin firma de release.
+  # -insecure solo salta la firma; el SHA256SUMS se sigue comprobando.
+  [ -f "$NEW_DIR/SHA256SUMS.minisig" ] || NUEVO+=(-insecure)
 else
-  # Sin -insecure: una copia con su SHA256SUMS, que upgrade comprueba.
+  # Una copia con su SHA256SUMS hecho aquí, que upgrade comprueba; -insecure
+  # solo salta la firma, que no hay.
   preparar_nuevos "$BASE/new" "$NEW_DIR" "kling-linux-$ARCH" "kling-guest-linux-$ARCH" "kling-chispa-linux-$ARCH" \
     || die "could not stage $NEW_DIR"
-  NUEVO=(-from-dir "$BASE/new")
+  NUEVO=(-from-dir "$BASE/new" -insecure)
 fi
 
 # ── 2. upgrade fallido: el nuevo no arranca y se vuelve solo ─────────────────

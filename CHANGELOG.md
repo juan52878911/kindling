@@ -24,6 +24,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
 
+### Security
+
+- `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

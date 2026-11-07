@@ -41,7 +41,7 @@ func cmdUpgrade(args []string) error {
 	tag := fs.String("tag", "", "release to upgrade to, vX.Y.Z (default: the latest)")
 	fs.StringVar(tag, "version", "", "same as -tag")
 	fromDir := fs.String("from-dir", "", "take the binaries from this directory (release names or plain ones, checked against its SHA256SUMS) instead of downloading them")
-	inseguro := fs.Bool("insecure", false, "with -from-dir: install the binaries even if the directory has no SHA256SUMS to check them against")
+	inseguro := fs.Bool("insecure", false, "with -from-dir: install the binaries even if the directory has no SHA256SUMS, or no SHA256SUMS.minisig, to check them against")
 	dry := fs.Bool("dry-run", false, "download, verify and print the plan; change nothing")
 	check := fs.Bool("check", false, "same as -dry-run")
 	rollback := fs.Bool("rollback", false, "go back to the binaries (and migrated files) saved by the last upgrade")
