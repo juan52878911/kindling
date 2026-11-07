@@ -29,6 +29,9 @@ type call struct {
 // run -from, sandbox fork, exec (pg_isready y el psql de la rotación), thaw,
 // rm y SetLabels. Apunta cada llamada.
 type fakeKling struct {
+	// imports son las referencias de `image import` (kling db up sin
+	// plantilla la construye desde una).
+	imports   []string
 	mu        sync.Mutex
 	calls     []call
 	snaps     map[string]*api.Snapshot
@@ -166,7 +169,7 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 	case len(args) >= 3 && args[0] == "template" && args[1] == "inspect":
 		s, ok := f.snaps[args[2]]
 		if !ok {
-			return fail("no template %s", args[2])
+			return fail("kling template: exit status 1: error: snapshot %q does not exist", args[2])
 		}
 		return json.Marshal(s)
 
@@ -386,6 +389,10 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			return fail("no machine")
 		}
 		mc.State = api.StateRunning
+		return nil, nil
+
+	case len(args) >= 3 && args[0] == "image" && args[1] == "import":
+		f.imports = append(f.imports, args[2])
 		return nil, nil
 
 	case args[0] == "rm":

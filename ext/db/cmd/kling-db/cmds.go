@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,12 +72,19 @@ func cmdUp(args []string) error {
 	fs, host, owner := newFlags("up")
 	name := fs.String("name", "", "name of the copy (default: <template>-<random>)")
 	ttl := fs.Duration("ttl", 0, "lifetime of the copy (freezes when it runs out; 0 = none)")
+	fromOCI := fs.String("from-oci", "", "if the template does not exist yet, build it from this Docker image (default for "+defaultTemplate+": "+defaultTemplateOCI+")")
+	asJSON := fs.Bool("json", false, "print the copy as JSON (name, id, host, port, user, database, password_file; url with -dsn)")
+	dsn := fs.Bool("dsn", false, "print the DSN WITH the password (asks first if stdout is a terminal)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 {
-		return usageErr("usage: kling db up <template> [-name N] [-ttl D] [-owner T]")
+	if len(pos) > 1 {
+		return usageErr("usage: kling db up [<template>] [-name N] [-ttl D] [-owner T] [-from-oci REF] [-json] [-dsn]")
+	}
+	tpl := defaultTemplate
+	if len(pos) == 1 {
+		tpl = pos[0]
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -84,12 +92,145 @@ func cmdUp(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
-	mc, err := a.up(ctx, pos[0], *name, *ttl, *owner)
+	// Sin plantilla dada, la de siempre se construye la primera vez: el camino
+	// de un comando («dame un Postgres») no pide pasos previos. Con una
+	// plantilla nombrada, solo si se dice de qué imagen (-from-oci).
+	auto := *fromOCI
+	if auto == "" && len(pos) == 0 {
+		auto = defaultTemplateOCI
+	}
+	if err := a.ensureTemplate(ctx, *host, tpl, auto); err != nil {
+		return err
+	}
+	mc, err := a.up(ctx, tpl, *name, *ttl, *owner)
 	if err != nil {
 		return err
 	}
-	a.printReady(mc)
+	return a.printUp(ctx, mc, *asJSON, *dsn)
+}
+
+// defaultTemplate es la plantilla de `kling db up` sin argumentos, y
+// defaultTemplateOCI la imagen de la que se construye si no existe.
+const (
+	defaultTemplate    = "pg"
+	defaultTemplateOCI = "postgres:16-alpine"
+)
+
+// ensureTemplate comprueba que la plantilla tpl existe y, si no y hay imagen
+// (ref), la construye con db-golden.sh -from-oci, con un cerrojo para que dos
+// `db up` a la vez no la construyan dos veces. Lo del script va a stderr:
+// stdout es de la copia (o de su JSON).
+func (a *app) ensureTemplate(ctx context.Context, host, tpl, ref string) error {
+	if !namePattern.MatchString(tpl) {
+		return fmt.Errorf("invalid template name %q", tpl)
+	}
+	_, err := a.template(ctx, tpl)
+	if err == nil || !errNoTemplate(err) {
+		return err
+	}
+	if ref == "" {
+		return fmt.Errorf("no template %q yet; make it once with\n"+
+			"  kling db up %s -from-oci postgres:16-alpine     (or any Postgres image: pgvector/pgvector:pg16...)\n"+
+			"  kling db golden -from-oci <image> build -migrations DIR %s   (with your schema)\n"+
+			"or use the default one, built the first time: kling db up", tpl, tpl, tpl)
+	}
+	unlock, err := dbstate.Lock(ctx, "golden-"+tpl, 10*time.Minute, func() {
+		fmt.Fprintf(a.stderr, "waiting for another kling db that is building %s...\n", tpl)
+	})
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := a.template(ctx, tpl); err == nil {
+		return nil // la construyó el que tenía el cerrojo
+	}
+	start := time.Now()
+	fmt.Fprintf(a.stderr, "no template %s yet: building it from %s (once; the first time downloads the image)...\n", tpl, ref)
+	img, err := importarOCI(ctx, a.k, ref)
+	if err != nil {
+		return err
+	}
+	args, err := ociArgs([]string{"build", tpl}, img)
+	if err != nil {
+		return err
+	}
+	// Lo que cuenta el script (pasos, avisos de la plantilla) solo se enseña si
+	// falla: quien pidió una base quiere la base, no la construcción.
+	var log bytes.Buffer
+	if err := a.runGoldenTo(ctx, host, args, &log); err != nil {
+		a.stderr.Write(log.Bytes())
+		return fmt.Errorf("building the template %s from %s: %w\n  to retry with the build steps on screen: kling db golden -from-oci %s build %s", tpl, ref, err, ref, tpl)
+	}
+	fmt.Fprintf(a.stderr, "template %s ready in %s; next time kling db up starts from it in ~0.1 s\n", tpl, time.Since(start).Round(100*time.Millisecond))
 	return nil
+}
+
+// errNoTemplate dice si el error de template() es que la plantilla no existe
+// (y no otro fallo, que no se arregla construyéndola).
+func errNoTemplate(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "does not exist")
+}
+
+// upJSON es la copia en -json: todo lo que hace falta para conectar salvo la
+// clave, que solo va (en url) si se pide con -dsn.
+type upJSON struct {
+	Name         string `json:"name"`
+	ID           string `json:"id"`
+	Template     string `json:"template"`
+	Engine       string `json:"engine"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	User         string `json:"user"`
+	Database     string `json:"database"`
+	PasswordFile string `json:"password_file"`
+	URL          string `json:"url,omitempty"`
+}
+
+// printUp cuenta la copia recién hecha: el texto de siempre, el DSN (-dsn) o
+// el JSON (-json, con url si además -dsn).
+func (a *app) printUp(ctx context.Context, mc *api.Machine, asJSON, dsn bool) error {
+	if !asJSON && !dsn {
+		a.printReady(mc)
+		return nil
+	}
+	engine := engineOf(mc.Labels)
+	role, db, err := roleDB(mc.Labels)
+	if err != nil {
+		return err
+	}
+	h, port, err := hostAddr(mc)
+	if err != nil {
+		// El reenvío del Mac puede no estar aún en lo que devolvió el run.
+		if mc2, ierr := a.inspect(ctx, mc.ID); ierr == nil {
+			h, port, err = hostAddr(mc2)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	pwPath, _ := dbstate.PasswordPath(mc.ID)
+	var url string
+	if dsn {
+		if a.stdoutTTY() && !a.confirm(fmt.Sprintf("This prints the password of %s to the terminal. Continue? [y/N] ", mc.Name)) {
+			fmt.Fprintf(a.stderr, "nothing printed; %s is ready: kling db connect %s -dsn | <your tool>\n", mc.Name, mc.Name)
+			return errors.New("aborted")
+		}
+		pw, err := dbstate.ReadPassword(mc.ID)
+		if err != nil {
+			return err
+		}
+		url = engineDSN(engine, role, pw, h, port, db)
+	}
+	if !asJSON {
+		fmt.Fprintln(a.stdout, url)
+		return nil
+	}
+	enc := json.NewEncoder(a.stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(upJSON{
+		Name: mc.Name, ID: mc.ID, Template: mc.Labels[labelGolden], Engine: engine,
+		Host: h, Port: port, User: role, Database: db, PasswordFile: pwPath, URL: url,
+	})
 }
 
 // up crea una copia de golden y la deja lista. Si algo falla después de
