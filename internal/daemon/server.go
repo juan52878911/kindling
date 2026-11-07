@@ -983,6 +983,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := validarTopesRun(req.Labels, req.AllowDomains); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
 		fail(w, runStatus(err), err)
@@ -1315,6 +1319,10 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	var labels map[string]string
 	if err := decodeJSON(w, r, &labels); err != nil {
 		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	if err := api.ValidateLabels(labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {

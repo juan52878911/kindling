@@ -475,6 +475,10 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := validarTopesRun(req.Labels, req.AllowDomains); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	ttl := req.TTLSeconds
 	if ttl == 0 {
 		ttl = api.SandboxDefaultTTL
@@ -677,4 +681,13 @@ func renewStatus(err error) int {
 		return http.StatusConflict
 	}
 	return cicloStatus(err)
+}
+
+// validarTopesRun aplica los topes de entrada de run y sandbox: etiquetas y
+// allow_domains (api.ValidateLabels, api.ValidateAllowDomains).
+func validarTopesRun(labels map[string]string, domains []string) error {
+	if err := api.ValidateLabels(labels); err != nil {
+		return err
+	}
+	return api.ValidateAllowDomains(domains)
 }
