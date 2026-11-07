@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -303,10 +305,8 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// forzaremos al invitado, y metemos solo IPv4 públicas. Las privadas se
 	// descartan aquí para que un resolver envenenado no cuele 169.254 (metadatos)
 	// ni 192.168 (LAN de casa) en la lista de permitidos.
-	for _, d := range domains {
-		for _, ip := range resolvePublicIPv4(d) {
-			_ = ns("ipset", "add", set, ip, "-exist")
-		}
+	for _, ip := range resolverSemillas(domains) {
+		_ = ns("ipset", "add", set, ip, "-exist")
 	}
 
 	// Forzar el DNS del invitado a NUESTRO resolver del host: cualquier salida al
@@ -432,12 +432,54 @@ func (n *Net) credForwardRules() [][]string {
 // las privadas/link-local se descartan por seguridad (resolver envenenado).
 // Solo IPv4: las reglas de este fichero son iptables v4. Sin IP falla CERRADO:
 // el dominio simplemente no se permite.
-func resolvePublicIPv4(domain string) []string {
+func resolvePublicIPv4(ctx context.Context, domain string) []string {
 	domain = strings.TrimSpace(domain)
 	if domain == "" {
 		return nil
 	}
-	return credproxy.LookupPublicIPv4(context.Background(), DNSResolver+":53", domain)
+	return buscarIPv4(ctx, DNSResolver+":53", domain)
+}
+
+// buscarIPv4 es credproxy.LookupPublicIPv4 detrás de una variable, para los
+// tests.
+var buscarIPv4 = credproxy.LookupPublicIPv4
+
+// plazoSemillas es lo que puede tardar, EN TOTAL, el sembrado estático del
+// ipset al montar la red. Antes se resolvía dominio a dominio sin plazo: cada
+// uno de 20 a 70 ms medidos en el lab, y hasta 3 × 2 s si el resolver perdía
+// datagramas, todo en el camino del arranque. El sembrado es la red de
+// seguridad: el resolver dinámico siembra de todos modos cada IP que el
+// invitado pregunte, antes de contestarle. Un dominio que no llegue a tiempo
+// se queda sin semilla, no sin acceso.
+const plazoSemillas = 500 * time.Millisecond
+
+// resolverSemillas resuelve los dominios A LA VEZ, con plazoSemillas para
+// todos, y devuelve las IPv4 públicas que hayan llegado, sin repetir y en el
+// orden de los dominios.
+func resolverSemillas(domains []string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), plazoSemillas)
+	defer cancel()
+	res := make([][]string, len(domains))
+	var wg sync.WaitGroup
+	for i, d := range domains {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res[i] = resolvePublicIPv4(ctx, d)
+		}()
+	}
+	wg.Wait()
+	visto := map[string]bool{}
+	var out []string
+	for _, ips := range res {
+		for _, ip := range ips {
+			if !visto[ip] {
+				visto[ip] = true
+				out = append(out, ip)
+			}
+		}
+	}
+	return out
 }
 
 // isBlockedIP dice si una IP cae en alguno de los rangos que jamás se permiten,
