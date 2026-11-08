@@ -16,6 +16,7 @@
 package net
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -92,6 +93,12 @@ func run(args ...string) error {
 	}
 	return nil
 }
+
+// ErrRedAjena: el netns y el veth que tocan a esta máquina ya existen y el
+// veth tiene una IP que no es la planificada. Lo más probable es que sean de
+// una máquina viva de otro daemon del host cuyo id empieza igual (ver
+// LargoCorto): Setup no los derriba, y quien llama tampoco debe.
+var ErrRedAjena = errors.New("network namespace already in use with another address")
 
 // ejecutar es run detrás de una variable: dnsresolver.go y applyEgress la
 // llaman en vez de run directamente para que sus tests puedan sustituirla por

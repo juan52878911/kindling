@@ -1,9 +1,11 @@
 package net
 
 import (
+	"errors"
 	"fmt"
 	stdnet "net"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -308,5 +310,108 @@ func TestReglasEnlaceSobrantes(t *testing.T) {
 	// Sin aristas se va todo lo de enlace.
 	if r := n.reglasEnlaceSobrantes(nat, forward, nil); len(r) != 4 {
 		t.Errorf("sin aristas sobran %d reglas, quería 4: %v", len(r), r)
+	}
+}
+
+// iptablesFalso simula la cadena INPUT para setupHostInput: -C, -D e -I 1.
+type iptablesFalso struct{ input []string }
+
+func (f *iptablesFalso) clave(args []string) string {
+	return strings.Join(args[3:], " ") // tras "iptables -X INPUT"
+}
+
+func (f *iptablesFalso) comprobar(args []string) bool {
+	return slices.Contains(f.input, f.clave(args))
+}
+
+func (f *iptablesFalso) ejecutar(args ...string) error {
+	switch args[1] {
+	case "-D":
+		if i := slices.Index(f.input, f.clave(args)); i >= 0 {
+			f.input = slices.Delete(f.input, i, i+1)
+			return nil
+		}
+		return errors.New("no existe")
+	case "-I":
+		f.input = slices.Insert(f.input, 0, strings.Join(args[4:], " "))
+		return nil
+	}
+	return fmt.Errorf("inesperado: %v", args)
+}
+
+// La HostIP de una máquina solo se alcanza por su propio veth: el ACCEPT de
+// cada servicio del host (DNS, credenciales, Postgres, MySQL, aristas) exige
+// que el destino sea del interfaz de entrada. Medido en el lab: con la regla
+// vieja, desde el netns A `nc -z <HostIP de B> 5380` conectaba.
+func TestHostInputSoloAlcanzaSuPropioVeth(t *testing.T) {
+	for _, r := range HostInputRules() {
+		l := strings.Join(r, " ")
+		if strings.Contains(l, "--dport") && !strings.Contains(l, "-m addrtype --dst-type LOCAL --limit-iface-in") {
+			t.Errorf("servicio abierto a la HostIP de cualquier máquina: %s", l)
+		}
+	}
+}
+
+// Al arrancar sobre un host con las reglas de una versión anterior, sus
+// ACCEPT sin addrtype se quitan: si se quedaran delante del DROP, seguirían
+// dejando pasar a todos.
+func TestSetupHostInputQuitaLasReglasViejas(t *testing.T) {
+	f := &iptablesFalso{}
+	viejas := append(append([][]string{HostInputRules()[0]}, reglasInputViejas()...), HostInputRules()[len(HostInputRules())-1])
+	for i := len(viejas) - 1; i >= 0; i-- {
+		_ = f.ejecutar(viejas[i]...)
+	}
+	f.input = append(f.input, "-p tcp --dport 22 -j ACCEPT") // algo del administrador
+	oldC, oldE := comprobarRegla, ejecutar
+	t.Cleanup(func() { comprobarRegla, ejecutar = oldC, oldE })
+	comprobarRegla, ejecutar = f.comprobar, f.ejecutar
+
+	if err := setupHostInput(); err != nil {
+		t.Fatal(err)
+	}
+	var quiere []string
+	for _, r := range HostInputRules() {
+		quiere = append(quiere, strings.Join(r[4:], " "))
+	}
+	quiere = append(quiere, "-p tcp --dport 22 -j ACCEPT")
+	if !slices.Equal(f.input, quiere) {
+		t.Fatalf("INPUT =\n%s\nquería\n%s", strings.Join(f.input, "\n"), strings.Join(quiere, "\n"))
+	}
+}
+
+// Un daemon de la versión anterior que arranca después del nuestro borra el
+// DROP y la regla de respuestas (son las mismas en las dos versiones) y mete
+// su juego completo arriba: nuestros ACCEPT quedan detrás de su DROP. Al
+// volver a arrancar el nuestro, quitar las viejas no basta: hay que volver a
+// ordenar (visto en el lab: el DNS del invitado se quedó sin respuesta).
+func TestSetupHostInputReordenaTrasOtraVersion(t *testing.T) {
+	f := &iptablesFalso{}
+	oldC, oldE := comprobarRegla, ejecutar
+	t.Cleanup(func() { comprobarRegla, ejecutar = oldC, oldE })
+	comprobarRegla, ejecutar = f.comprobar, f.ejecutar
+	if err := setupHostInput(); err != nil {
+		t.Fatal(err)
+	}
+	// Lo que hace el setupHostInput de la versión anterior.
+	nuevas := HostInputRules()
+	viejas := append(append([][]string{nuevas[0]}, reglasInputViejas()...), nuevas[len(nuevas)-1])
+	for _, r := range viejas {
+		for f.comprobar(sinPosicion(r, "-C")) {
+			_ = f.ejecutar(sinPosicion(r, "-D")...)
+		}
+	}
+	for i := len(viejas) - 1; i >= 0; i-- {
+		_ = f.ejecutar(viejas[i]...)
+	}
+
+	if err := setupHostInput(); err != nil {
+		t.Fatal(err)
+	}
+	var quiere []string
+	for _, r := range nuevas {
+		quiere = append(quiere, strings.Join(r[4:], " "))
+	}
+	if !slices.Equal(f.input, quiere) {
+		t.Fatalf("INPUT =\n%s\nquería\n%s", strings.Join(f.input, "\n"), strings.Join(quiere, "\n"))
 	}
 }
