@@ -9,5 +9,3 @@ import "errors"
 func anadirIPSetNetlink(ns, set, ip string, timeout int) error {
 	return errors.ErrUnsupported
 }
-
-func cerrarIPSet(ns string) {}
