@@ -82,7 +82,14 @@ type dormida struct {
 // dormir pone a dormir las víctimas del segador: pausa las que mejor
 // puntúan mientras quepan en el presupuesto y congela el resto. Sin
 // presupuesto (o sin un daemon que sepa pausar) congela todas, como siempre.
-func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
+//
+// hecho (si no es nil) se llama una vez por víctima en cuanto acaba con ella,
+// con ok=false si no se pudo pausar ni congelar: es cuando el segador suelta
+// la marca y el candado con que la apartó (ver reapOnce).
+func (g *Scheduler) dormir(ctx context.Context, victims []dormida, hecho func(v dormida, ok bool)) {
+	if hecho == nil {
+		hecho = func(dormida, bool) {}
+	}
 	pausar := g.pauseFn
 	if pausar == nil {
 		pausar = func(id string) error { _, err := g.client.Pause(ctx, id); return err }
@@ -131,6 +138,7 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 		}
 		g.pausadas[v.id] = pausada{service: v.service, memMiB: v.memMiB, at: time.Now(), aislada: v.aislada}
 		g.mu.Unlock()
+		hecho(v, true)
 		log.Printf("%s: paused due to inactivity", v.service)
 	}
 	for _, v := range victims {
@@ -139,8 +147,10 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 		}
 		if err := congelar(v.id); err != nil {
 			log.Printf("reap %s: %v", v.service, err)
+			hecho(v, false)
 			continue
 		}
+		hecho(v, true)
 		log.Printf("%s: frozen due to inactivity", v.service)
 	}
 }

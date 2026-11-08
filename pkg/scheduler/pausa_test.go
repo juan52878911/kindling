@@ -39,7 +39,7 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 		{"chispa", "m-ch", 128, ""}, // 10/128
 		{"fria", "m-fria", 128, ""}, // 1/128: puntúa menos, pero aún cabe
 		{"nadie", "m-nadie", 64, ""},
-	})
+	}, nil)
 	if !pausadas["m-ch"] || !pausadas["m-fria"] {
 		t.Errorf("pausadas = %v; esperaba chispa y fria (caben 256)", pausadas)
 	}
@@ -51,7 +51,7 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 	}
 	// El presupuesto se cuenta con lo ya pausado.
 	g.pop.observe("otra")
-	g.dormir(context.Background(), []dormida{{"otra", "m-otra", 64, ""}})
+	g.dormir(context.Background(), []dormida{{"otra", "m-otra", 64, ""}}, nil)
 	if pausadas["m-otra"] || !congeladas["m-otra"] {
 		t.Errorf("sin presupuesto libre, otra debía congelarse")
 	}
@@ -61,7 +61,7 @@ func TestDormirPausaLoPequenoYPopular(t *testing.T) {
 func TestDormirSinPresupuestoCongela(t *testing.T) {
 	g, pausadas, congeladas := gwPausas(0)
 	g.pop.observe("chispa")
-	g.dormir(context.Background(), []dormida{{"chispa", "m-ch", 64, ""}})
+	g.dormir(context.Background(), []dormida{{"chispa", "m-ch", 64, ""}}, nil)
 	if len(pausadas) != 0 || !congeladas["m-ch"] {
 		t.Errorf("pausadas=%v congeladas=%v", pausadas, congeladas)
 	}
@@ -197,9 +197,9 @@ func TestPausadasSeCongelanAlBajarLaMemoria(t *testing.T) {
 
 	g.pop.observe("a")
 	g.pop.observe("b")
-	g.dormir(context.Background(), []dormida{{"a", "m-a", 1536, ""}})
+	g.dormir(context.Background(), []dormida{{"a", "m-a", 1536, ""}}, nil)
 	time.Sleep(time.Millisecond) // que b sea la más nueva
-	g.dormir(context.Background(), []dormida{{"b", "m-b", 1536, ""}})
+	g.dormir(context.Background(), []dormida{{"b", "m-b", 1536, ""}}, nil)
 	if !pausadas["m-a"] || !pausadas["m-b"] {
 		t.Fatalf("con memoria de sobra debían pausarse las dos: %v", pausadas)
 	}
@@ -216,7 +216,7 @@ func TestPausadasSeCongelanAlBajarLaMemoria(t *testing.T) {
 		t.Fatalf("en el freno debía congelarse b: %v", congeladas)
 	}
 	g.pop.observe("c")
-	g.dormir(context.Background(), []dormida{{"c", "m-c", 64, ""}})
+	g.dormir(context.Background(), []dormida{{"c", "m-c", 64, ""}}, nil)
 	if pausadas["m-c"] || !congeladas["m-c"] {
 		t.Errorf("en el freno no se pausa: pausadas=%v", pausadas)
 	}

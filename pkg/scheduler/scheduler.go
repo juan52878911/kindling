@@ -210,6 +210,10 @@ type Scheduler struct {
 	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
 	// acabar con dos entradas sobre ella. Se toca con mu.
 	adquiriendo map[string]bool
+	// sinRenovar son las máquinas cuya última renovación del TTL falló: el
+	// segador las renueva en su vuelta siguiente sin esperar al umbral (ver
+	// renovarTTL). Se toca con mu.
+	sinRenovar map[string]bool
 	// tenantCreando cuenta, por tenant, las instancias que se están
 	// creando/despertando pero aún no están registradas en g.services/g.extra:
 	// sin esto, dos buildEntry concurrentes de SERVICIOS DISTINTOS del mismo
@@ -569,6 +573,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 
 	tnt := tenantFrom(ctx)
 
+	var muerta string // la primaria que se descartó por muerta, si la hubo
 	g.mu.Lock()
 	if e, ok := g.services[service]; ok {
 		e.lastUse = time.Now()
@@ -599,10 +604,11 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 			g.mu.Unlock()
 			return e, nil
 		}
-		// Murió por debajo: se descarta y se reconstruye.
+		// Murió por debajo (o el daemon la congeló): se descarta como
+		// cualquier otra retirada y se reconstruye.
 		g.mu.Lock()
-		delete(g.services, service)
-		e.cerrarConexiones()
+		g.removeEntryLocked(service, e.machineID)
+		muerta = e.machineID
 	}
 	g.mu.Unlock()
 
@@ -615,8 +621,29 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 	g.services[service] = e
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	// Si volvió la MISMA máquina (estaba congelada), sus sesiones siguen vivas
+	// en el invitado y el gateway solo las reapunta (rebind). Si es otra, las
+	// rutas a la vieja apuntan a un invitado que ya no existe: se olvidan, y
+	// el cliente rehace el initialize con un 404 en vez de un 502.
+	if muerta != "" && muerta != e.machineID {
+		g.olvidarRutasLocked(service, muerta)
+	}
 	g.mu.Unlock()
 	return e, nil
+}
+
+// olvidarRutasLocked quita las sesiones fijadas a la máquina machineID del
+// servicio, salvo las aisladas (su máquina es suya y la gestiona aislada.go).
+// Se llama con g.mu tomado.
+func (g *Scheduler) olvidarRutasLocked(service, machineID string) {
+	for sid, rt := range g.routes {
+		if _, aislada := g.aisladas[sid]; aislada {
+			continue
+		}
+		if rt.service == service && rt.machineID == machineID {
+			delete(g.routes, sid)
+		}
+	}
 }
 
 // buildEntry despierta o crea UNA instancia del servicio y la devuelve montada
@@ -931,6 +958,7 @@ func (e *entry) cerrarConexiones() {
 // removeEntryLocked quita una instancia del servicio, sea la primaria o una
 // réplica. Se llama con g.mu tomado.
 func (g *Scheduler) removeEntryLocked(service, machineID string) {
+	delete(g.sinRenovar, machineID)
 	if e := g.services[service]; e != nil && e.machineID == machineID {
 		delete(g.services, service)
 		e.cerrarConexiones()
@@ -1045,11 +1073,13 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	// La elección y la marca van juntas bajo g.mu (sin E/S: la lista ya se
 	// leyó): así dos acquire concurrentes nunca eligen la misma máquina, y
 	// ninguno adopta una que ya es instancia de este servicio.
+	// descartadas son las que este acquire ya eligió y no le sirvieron.
+	descartadas := map[string]bool{}
 	pick := func(state api.State) *api.Machine {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		for _, m := range machines {
-			if !match(m) || m.State != state || g.adquiriendo[m.ID] || g.entryByMachineLocked(service, m.ID) != nil {
+			if !match(m) || m.State != state || descartadas[m.ID] || g.adquiriendo[m.ID] || g.entryByMachineLocked(service, m.ID) != nil {
 				continue
 			}
 			// A medio congelar, parar o borrar (por el TTL del daemon, un
@@ -1075,16 +1105,29 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 	// tiene que ser otra máquina, y lo que corre ya es instancia de alguien.
 	// Puede traer el reloj del TTL a punto de vencer (la dejó otro gateway, o
 	// este antes de reiniciarse): se renueva al adoptarla.
-	if !fresh {
-		if m := pick(api.StateRunning); m != nil {
-			t := time.Now()
-			g.renovarTTL(ctx, m.ID)
-			tr.Renew += time.Since(t)
-			if g.OnAdopt != nil {
-				g.OnAdopt(ctx, service, m)
-			}
-			return m, "adopt", nil
+	//
+	// Si el daemon rechaza la renovación (ya no existe, o no está en marcha:
+	// la lista era vieja), no se adopta y se prueba la siguiente. Si falla por
+	// otra cosa se adopta igual, y el segador la reintenta (g.sinRenovar).
+	for !fresh {
+		m := pick(api.StateRunning)
+		if m == nil {
+			break
 		}
+		t := time.Now()
+		err := g.renovarTTL(ctx, m.ID)
+		tr.Renew += time.Since(t)
+		if renovacionRechazada(err) {
+			g.mu.Lock()
+			delete(g.adquiriendo, m.ID)
+			g.mu.Unlock()
+			descartadas[m.ID] = true
+			continue
+		}
+		if g.OnAdopt != nil {
+			g.OnAdopt(ctx, service, m)
+		}
+		return m, "adopt", nil
 	}
 	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
 	if m := pick(api.StatePaused); m != nil {
@@ -1222,15 +1265,41 @@ func (g *Scheduler) ttlSeconds() int {
 // gateway viva, y si muere, vence.
 //
 // Contra un daemon sin la capacidad "renew" no hace nada: queda lo de antes.
-func (g *Scheduler) renovarTTL(ctx context.Context, id string) {
+//
+// Un fallo no se da por renovado: la máquina queda en g.sinRenovar y el segador
+// la vuelve a renovar en su vuelta siguiente. Devuelve el error para quien
+// tenga que decidir algo con él (ver renovacionRechazada); nil si no había
+// nada que renovar.
+func (g *Scheduler) renovarTTL(ctx context.Context, id string) error {
 	// Sin TTL (MachineTTL negativo) no hay reloj que renovar: renovar con 0
 	// solo le costaría al daemon una llamada por instancia en cada vuelta.
 	if g.client == nil || g.ttlSeconds() == 0 || !g.sabeRenovar(ctx) {
-		return
+		return nil
 	}
-	if _, err := g.client.Renew(ctx, id, g.ttlSeconds()); err != nil {
+	_, err := g.client.Renew(ctx, id, g.ttlSeconds())
+	g.mu.Lock()
+	if err != nil {
+		if g.sinRenovar == nil {
+			g.sinRenovar = map[string]bool{}
+		}
+		g.sinRenovar[id] = true
+	} else {
+		delete(g.sinRenovar, id)
+	}
+	g.mu.Unlock()
+	if err != nil {
 		log.Printf("renew ttl %s: %v", short(id), err)
 	}
+	return err
+}
+
+// renovacionRechazada dice si el daemon rechazó la renovación por la máquina
+// misma —no existe (404) o no está en marcha (409)— y no por un fallo suyo.
+// Eso no se arregla insistiendo: la instancia no es adoptable ni vale la
+// pena seguir latiendo por ella.
+func renovacionRechazada(err error) bool {
+	var se *api.StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusConflict)
 }
 
 // mantenerTTL renueva el TTL de una máquina que no es del planificador —una del
@@ -1626,6 +1695,13 @@ func (g *Scheduler) Drain(ctx context.Context) {
 	g.soltarAisladas(ctx)
 }
 
+// apartada es una víctima del segador mientras se duerme: su entrada, por si
+// hay que reponerla, y el candado que se le tomó (nil si es una réplica).
+type apartada struct {
+	e *entry
+	l *sync.Mutex
+}
+
 func (g *Scheduler) reapOnce(ctx context.Context) {
 	type victim = dormida
 	var victims []victim
@@ -1652,15 +1728,44 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			}
 		}
 	}
+	// Cada víctima se aparta como tomarPausada aparta una pausada: con el
+	// candado de quien la despertaría (el del servicio si es la primaria, el
+	// de su sesión si es de una aislada) y marcada en g.adquiriendo hasta que
+	// dormir acabe con ella. Sin las dos cosas, un acquire concurrente no la
+	// encontraba en el mapa, la veía "running" sin Transition en su List(), la
+	// adoptaba y le ataba sesiones, y el freeze llegaba por debajo: 502 en la
+	// primera petición. El candado hace esperar a ensure e isolatedSession
+	// hasta que acabe el freeze (y entonces la descongelan); la marca aparta
+	// al resto. TryLock, como evictLRU: si está ocupado alguien la está usando
+	// ahora mismo, y se deja para la siguiente vuelta.
+	//
 	// Las direcciones se resuelven antes de quitarlas del mapa: después ya no
 	// queda la entrada de la que sacarlas.
 	var dormidas []dormida
 	var addrs []string
+	apartadas := map[string]apartada{}
 	for _, v := range victims {
-		if e := g.entryByMachineLocked(v.service, v.id); e != nil {
-			dormidas = append(dormidas, v)
-			addrs = append(addrs, e.Addr(g.port()))
+		e := g.entryByMachineLocked(v.service, v.id)
+		if e == nil || g.adquiriendo[v.id] {
+			continue
 		}
+		var l *sync.Mutex
+		switch {
+		case e.aislada != "":
+			l = g.aisladaLock(e.aislada)
+		case g.services[v.service] == e:
+			l = g.ensureLock(v.service)
+		}
+		if l != nil && !l.TryLock() {
+			continue
+		}
+		if g.adquiriendo == nil {
+			g.adquiriendo = map[string]bool{}
+		}
+		g.adquiriendo[v.id] = true
+		apartadas[v.id] = apartada{e: e, l: l}
+		dormidas = append(dormidas, v)
+		addrs = append(addrs, e.Addr(g.port()))
 		g.removeEntryLocked(v.service, v.id)
 	}
 	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
@@ -1688,19 +1793,25 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	if ttl := time.Duration(g.ttlSeconds()) * time.Second; ttl > 0 && ttl/3 < umbral {
 		umbral = ttl / 3
 	}
-	var renovar []string
-	marcar := func(e *entry) {
-		if g.ttlSeconds() > 0 && time.Since(e.renewedAt) >= umbral {
-			e.renewedAt = time.Now()
-			renovar = append(renovar, e.machineID)
+	// La que falló en su última renovación (g.sinRenovar) se reintenta ya,
+	// sin esperar al umbral. renewedAt se apunta cuando la renovación sale
+	// bien, no antes: apuntarla al elegir daba por hecha una que fallaba.
+	type porRenovar struct {
+		service string
+		e       *entry
+	}
+	var renovar []porRenovar
+	marcar := func(svc string, e *entry) {
+		if g.ttlSeconds() > 0 && (g.sinRenovar[e.machineID] || time.Since(e.renewedAt) >= umbral) {
+			renovar = append(renovar, porRenovar{svc, e})
 		}
 	}
-	for _, e := range g.services {
-		marcar(e)
+	for svc, e := range g.services {
+		marcar(svc, e)
 	}
-	for _, es := range g.extra {
+	for svc, es := range g.extra {
 		for _, e := range es {
-			marcar(e)
+			marcar(svc, e)
 		}
 	}
 	g.mu.Unlock()
@@ -1713,10 +1824,38 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			g.OnSleep(v.service, addrs[i])
 		}
 	}
-	g.dormir(ctx, victims)
+	g.dormir(ctx, dormidas, func(v dormida, ok bool) {
+		a := apartadas[v.id]
+		g.mu.Lock()
+		delete(g.adquiriendo, v.id)
+		// Si no se pudo dormir sigue despierta: se repone, como en evictLRU.
+		// Fuera del mapa el gateway la cree inexistente y el siguiente acquire
+		// la adoptaría desde List() sin su tenant ni su lastUse.
+		if !ok {
+			g.reponerEntryLocked(v.service, a.e)
+		}
+		g.mu.Unlock()
+		if a.l != nil {
+			a.l.Unlock()
+		}
+	})
 	g.enfriarPausadas(ctx)
-	for _, id := range renovar {
-		g.renovarTTL(ctx, id)
+	for _, r := range renovar {
+		err := g.renovarTTL(ctx, r.e.machineID)
+		g.mu.Lock()
+		switch {
+		case err == nil:
+			r.e.renewedAt = time.Now()
+		case renovacionRechazada(err):
+			// Ya no existe o no está en marcha (el daemon la congeló o la
+			// borró por debajo): se descarta, y el siguiente ensure la
+			// reconstruye o la descongela. Solo si sigue siendo esa entrada.
+			if g.entryByMachineLocked(r.service, r.e.machineID) == r.e {
+				log.Printf("%s: dropping instance %s, its TTL can't be renewed: %v", r.service, short(r.e.machineID), err)
+				g.removeEntryLocked(r.service, r.e.machineID)
+			}
+		}
+		g.mu.Unlock()
 	}
 	for _, a := range caducadas {
 		g.destruirAislada(ctx, a, "expired")
