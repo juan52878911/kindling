@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -61,11 +60,9 @@ func TestVMMVivoDe(t *testing.T) {
 		t.Fatal(err)
 	}
 	sock := m.dir(id) + "/fc.sock"
-	falso := exec.Command("/bin/sh", "-c", "sleep 30; :", "kling-hv", argSocketVMM, sock)
-	if err := falso.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = falso.Process.Kill(); _ = falso.Wait() })
+	// Sin lanzador ni fork (ver lanzarProcesoFalso): la tabla entera tiene que
+	// verlo igual que las pistas.
+	falso, _ := lanzarProcesoFalso(t, "kling-hv", argSocketVMM, sock)
 	pid := falso.Process.Pid
 	// Hasta que arranca sh, su línea de órdenes es la del fork.
 	plazo := time.Now().Add(5 * time.Second)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -50,15 +49,8 @@ func TestLiveVMsEncuentraLaMaquinaPorSuSocket(t *testing.T) {
 	// el fork y el exec el hijo tiene el MISMO cmdline que el padre, ruta
 	// incluida; liveVMs a veces se quedaba con ese pid (CI de #180). `read` es
 	// del propio shell: espera sin hijos mientras la tubería siga abierta.
-	cmd := exec.Command("/bin/sh", "-c", "read x", argSocketVMM, sock)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
-	}
-	t.Cleanup(func() { stdin.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// Todo eso lo hace ya lanzarProcesoFalso.
+	cmd, _ := lanzarProcesoFalso(t, argSocketVMM, sock)
 
 	// Esperar a que el cmdline del hijo sea visible: Start() vuelve al fork, no
 	// al exec, y liveVMs lee /proc.
