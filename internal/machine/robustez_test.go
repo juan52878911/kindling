@@ -3,7 +3,6 @@ package machine
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -29,20 +28,8 @@ func vmmFalso(t *testing.T, m *Manager, id string) (int, <-chan struct{}) {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(m.dir(id), "fc.sock")
-	// Igual que en reconcile_test: el sh sigue vivo y conserva la ruta en $0.
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30", argSocketVMM, sock)
-	if err := cmd.Start(); err != nil {
-		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
-	}
-	muerto := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(muerto) }()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		select {
-		case <-muerto:
-		case <-time.After(5 * time.Second):
-		}
-	})
+	// El shell sigue vivo y conserva la ruta en su línea (lanzarProcesoFalso).
+	cmd, muerto := lanzarProcesoFalso(t, argSocketVMM, sock)
 	esperarCmdline(t, cmd.Process.Pid, sock)
 	return cmd.Process.Pid, muerto
 }

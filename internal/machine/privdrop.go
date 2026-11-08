@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Privileges describe el usuario sin privilegios con el que corre Firecracker.
@@ -136,35 +137,64 @@ func (p *Privileges) EnsureReadable(dir string) {
 	p.recorrer(dir, 0)
 }
 
-// EnsureWritable es EnsureReadable para datos que el VMM sí escribe (los
-// volúmenes): el dueño es el usuario del VMM.
-func (p *Privileges) EnsureWritable(dir string) {
-	if !p.Enabled {
+// recorrer aplica dueño y modo a un árbol que puede estar en manos del VMM
+// (el directorio de un snapshot recién escrito). Todo va dentro de un os.Root
+// y por descriptor: se abre cada entrada (openat relativo, que no sale del
+// árbol aunque haya enlaces), se decide con fstat y se aplica fchown/fchmod al
+// mismo fd. Con filepath.Walk + chmod por ruta, un Firecracker comprometido
+// podía cambiar mem.file por un enlace a un fichero de root entre el Lstat y
+// el Chmod, y el chmod lo seguía.
+func (p *Privileges) recorrer(dir string, uid int) {
+	r, err := os.OpenRoot(dir)
+	if err != nil {
 		return
 	}
-	p.recorrer(dir, p.UID)
+	defer r.Close()
+	p.recorrerEn(r, ".", uid)
 }
 
-func (p *Privileges) recorrer(dir string, uid int) {
-	_ = filepath.Walk(dir, func(ruta string, fi os.FileInfo, err error) error {
-		if err != nil || fi == nil {
-			return nil // un fichero que desaparece a mitad no es motivo de parada
+// abrirEnRaiz abre rel sin salir de r. O_NONBLOCK: una FIFO plantada no cuelga
+// al daemon. Un enlace que apunte dentro del árbol se sigue (os.Root lo
+// resuelve sin salir de él); el Lstat previo solo evita tocarlo dos veces.
+func abrirEnRaiz(r *os.Root, rel string) (*os.File, os.FileInfo, error) {
+	if fi, err := r.Lstat(rel); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, os.ErrNotExist
+	}
+	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, fi, nil
+}
+
+func (p *Privileges) recorrerEn(r *os.Root, rel string, uid int) {
+	f, fi, err := abrirEnRaiz(r, rel)
+	if err != nil {
+		return // enlace, o un fichero que desaparece a mitad
+	}
+	defer f.Close()
+	switch {
+	case fi.Mode().IsRegular() && strings.HasSuffix(fi.Name(), ".recipe.json"):
+		// La receta puede llevar secretos (kling add -env) y el VMM no la
+		// lee nunca: solo root.
+		_ = f.Chown(0, 0)
+		_ = f.Chmod(0o600)
+	case fi.Mode().IsRegular():
+		_ = f.Chown(uid, p.GID)
+		_ = f.Chmod(0o640)
+	case fi.IsDir():
+		_ = f.Chown(uid, p.GID)
+		_ = f.Chmod(0o750)
+		nombres, _ := f.Readdirnames(-1)
+		for _, n := range nombres {
+			p.recorrerEn(r, filepath.Join(rel, n), uid)
 		}
-		switch {
-		case fi.Mode().IsRegular() && strings.HasSuffix(fi.Name(), ".recipe.json"):
-			// La receta puede llevar secretos (kling add -env) y el VMM no la
-			// lee nunca: solo root.
-			_ = os.Lchown(ruta, 0, 0)
-			_ = os.Chmod(ruta, 0o600)
-		case fi.IsDir():
-			_ = os.Lchown(ruta, uid, p.GID)
-			_ = os.Chmod(ruta, 0o750)
-		case fi.Mode().IsRegular():
-			_ = os.Lchown(ruta, uid, p.GID)
-			_ = os.Chmod(ruta, 0o640)
-		}
-		return nil
-	})
+	}
 }
 
 // EnsureImageReadable deja legibles para el VMM los ficheros de una imagen
@@ -211,11 +241,21 @@ func restringirRaiz(root string, p *Privileges) {
 // cerrarVolcado quita la lectura a los demás de un volcado recién escrito
 // (mem.file y snap.file): Firecracker los crea 0644. Sin tocar el dueño.
 func cerrarVolcado(dir string) {
-	for _, f := range []string{"mem.file", "snap.file"} {
-		ruta := filepath.Join(dir, f)
-		if fi, err := os.Lstat(ruta); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o007 != 0 {
-			_ = os.Chmod(ruta, fi.Mode().Perm()&^0o007)
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+	for _, nombre := range []string{"mem.file", "snap.file"} {
+		// Por descriptor, como recorrer: el directorio puede ser del VMM.
+		f, fi, err := abrirEnRaiz(r, nombre)
+		if err != nil {
+			continue
 		}
+		if fi.Mode().IsRegular() && fi.Mode().Perm()&0o007 != 0 {
+			_ = f.Chmod(fi.Mode().Perm() &^ 0o007)
+		}
+		f.Close()
 	}
 }
 
