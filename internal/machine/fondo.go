@@ -102,14 +102,44 @@ func leerFondos(ruta string, b []byte) (map[string]int, error) {
 	return f.Pools, err
 }
 
-// guardarFondos escribe los tamaños pedidos. Con fondoMu.
-func (m *Manager) guardarFondos() error {
+// fotoFondos son los tamaños pedidos en un momento, numerados (gen) para que
+// una escritura tardía no pise a una más nueva.
+type fotoFondos struct {
+	tam map[string]int
+	gen uint64
+}
+
+// fotoFondosLocked toma la foto de los tamaños. Con fondoMu.
+func (m *Manager) fotoFondosLocked() fotoFondos {
 	tam := map[string]int{}
 	for n, f := range m.fondos {
 		if f.size > 0 {
 			tam[n] = f.size
 		}
 	}
+	m.fondosGen++
+	return fotoFondos{tam: tam, gen: m.fondosGen}
+}
+
+// guardarFondos escribe los tamaños pedidos. SIN fondoMu: lo toma para la
+// foto y escribe fuera.
+func (m *Manager) guardarFondos() error {
+	m.fondoMu.Lock()
+	foto := m.fotoFondosLocked()
+	m.fondoMu.Unlock()
+	return m.escribirFondos(foto)
+}
+
+// escribirFondos lleva foto a fondos.json. Se llama SIN fondoMu: son dos
+// fsync, y con el candado tomado un disco lento paraba cada reclamación y cada
+// relleno de todos los fondos. Una foto más vieja que la ya escrita sobra.
+func (m *Manager) escribirFondos(foto fotoFondos) error {
+	m.fondosEscMu.Lock()
+	defer m.fondosEscMu.Unlock()
+	if foto.gen <= m.fondosEscritoGen {
+		return nil
+	}
+	tam := foto.tam
 	b, err := json.MarshalIndent(ficheroFondos{esquema.Cabecera{Schema: versionFondos}, tam}, "", "  ")
 	if err != nil {
 		return err
@@ -119,8 +149,15 @@ func (m *Manager) guardarFondos() error {
 	if err := esquema.PrepararEscritura(m.fondosPath(), versionFondos, versionFondos); err != nil {
 		return err
 	}
-	return durable.Escribir(m.fondosPath(), b, 0o644)
+	if err := escribirFondosEn(m.fondosPath(), b, 0o644); err != nil {
+		return err
+	}
+	m.fondosEscritoGen = foto.gen
+	return nil
 }
+
+// escribirFondosEn es la escritura de fondos.json. Variable para los tests.
+var escribirFondosEn = durable.Escribir
 
 // SetFondo fija cuántas copias despiertas mantiene la plantilla name. 0 apaga
 // el fondo y lo vacía. La reposición va en segundo plano: vuelve enseguida.
@@ -150,11 +187,12 @@ func (m *Manager) SetFondo(name string, size int) (*api.PoolInfo, error) {
 		delete(f.todas, id)
 		sobran = append(sobran, id)
 	}
-	err := m.guardarFondos()
+	foto := m.fotoFondosLocked()
 	m.fondoMu.Unlock()
 	for _, id := range sobran {
 		go m.retirarDelFondo(id)
 	}
+	err := m.escribirFondos(foto)
 	if err != nil {
 		return nil, fmt.Errorf("saving the pool size: %w", err)
 	}
@@ -226,11 +264,15 @@ func (m *Manager) vaciarFondo(name string, olvidar bool) {
 		ids = append(ids, id)
 	}
 	delete(m.fondos, name)
-	var err error
+	var foto fotoFondos
 	if olvidar {
-		err = m.guardarFondos()
+		foto = m.fotoFondosLocked()
 	}
 	m.fondoMu.Unlock()
+	var err error
+	if olvidar {
+		err = m.escribirFondos(foto)
+	}
 	if err != nil {
 		log.Printf("pool %s: saving sizes: %v", name, err)
 	}

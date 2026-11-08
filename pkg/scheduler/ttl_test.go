@@ -25,6 +25,9 @@ type daemonFalso struct {
 	llamadas []string
 	// sinRenew hace de daemon anterior a la capacidad "renew".
 	sinRenew bool
+	// fallarRenew son los códigos con que fallarán las próximas renovaciones
+	// de cada máquina, uno por llamada.
+	fallarRenew map[string][]int
 }
 
 func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +54,16 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	partes := strings.Split(strings.TrimPrefix(r.URL.Path, "/machines/"), "/")
+	if r.Method == http.MethodGet && len(partes) == 1 {
+		mc := d.maquinas[partes[0]]
+		if mc == nil {
+			http.NotFound(w, r)
+			return
+		}
+		c := *mc
+		responder(&c)
+		return
+	}
 	if len(partes) != 2 || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
@@ -70,6 +83,11 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "renew":
 		if d.sinRenew {
 			http.NotFound(w, r)
+			return
+		}
+		if cs := d.fallarRenew[partes[0]]; len(cs) > 0 {
+			d.fallarRenew[partes[0]] = cs[1:]
+			http.Error(w, `{"error":"renew failed"}`, cs[0])
 			return
 		}
 		// Como handleRenew: un sandbox tiene su propia ruta, con su tope.

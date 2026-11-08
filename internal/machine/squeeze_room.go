@@ -174,7 +174,7 @@ func maxMachines() int {
 	return defaultMaxMachines
 }
 
-// checkMachineLimit rechaza cuando ya no caben más máquinas, con un error que se
+// reservarHueco rechaza cuando ya no caben más máquinas, con un error que se
 // puede DISTINGUIR de la falta de memoria.
 //
 // Antes era un error genérico, y eso tenía una consecuencia concreta: el
@@ -182,35 +182,80 @@ func maxMachines() int {
 // llamaba recibía "limit of 256 machines reached" sin saber que la mayoría eran
 // máquinas paradas o fallidas que se recogen solas. El mensaje ahora dice de qué
 // están hechas esas 256.
-func (m *Manager) checkMachineLimit() error {
+//
+// Comprobar y actuar van juntos: si cabe, aparta en el acto un hueco para la
+// que va a nacer (m.naciendo), contado con byID bajo m.mu. Antes solo se
+// miraba len(byID), sin las que estaban naciendo, y N peticiones a la vez
+// pasaban todas con un solo hueco libre. El hueco lo gasta publicarCon al
+// meterla en byID; si no llega a publicarse, lo devuelve soltarHueco.
+func (m *Manager) reservarHueco() (*hueco, error) {
 	tope := maxMachines()
-
-	m.mu.RLock()
-	n := len(m.byID)
-	porEstado := map[api.State]int{}
-	for _, mc := range m.byID {
-		porEstado[mc.State]++
-	}
-	m.mu.RUnlock()
-
-	if n < tope {
-		return nil
+	h, n, porEstado := m.intentarHueco(tope)
+	if h != nil {
+		return h, nil
 	}
 	// Recoger cadáveres antes de rendirse: una failed vieja ocupa un hueco y se
 	// iba a recoger sola en la siguiente vuelta del vigilante de todos modos.
 	if porEstado[api.StateFailed] > 0 || porEstado[api.StateStopped] > 0 {
 		m.gcFailed()
-		m.mu.RLock()
-		n = len(m.byID)
-		m.mu.RUnlock()
-		if n < tope {
-			return nil
+		if h, n, porEstado = m.intentarHueco(tope); h != nil {
+			return h, nil
 		}
 	}
-	return &api.StatusError{Code: api.StatusMachineLimit, Message: fmt.Sprintf(
+	return nil, &api.StatusError{Code: api.StatusMachineLimit, Message: fmt.Sprintf(
 		"%s reached: %d of %d machines (%d running, %d warm, %d failed, %d stopped).\n"+
 			"Remove what you don't need (`kling ps -a`, `kling rm`), or raise the cap with KLING_MAX_MACHINES on the daemon",
 		machineLimitMarkText, n, tope,
 		porEstado[api.StateRunning], porEstado[api.StateWarm],
 		porEstado[api.StateFailed], porEstado[api.StateStopped])}
+}
+
+// hueco es el sitio que reservarHueco apartó para una máquina que nace.
+// usado, con m.mu: ya se gastó (publicada) o se devolvió.
+type hueco struct{ usado bool }
+
+// intentarHueco aparta un hueco si cabe; si no, dice cuántas cuentan y de qué
+// estado son, para el error.
+func (m *Manager) intentarHueco(tope int) (*hueco, int, map[api.State]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(m.byID) + m.naciendo
+	if n < tope {
+		m.naciendo++
+		return &hueco{}, n, nil
+	}
+	porEstado := map[api.State]int{}
+	for _, mc := range m.byID {
+		porEstado[mc.State]++
+	}
+	return nil, n, porEstado
+}
+
+// gastarHuecoLocked da por gastado h (la máquina ya está en byID, que la
+// cuenta). Con m.mu tomado. h nil o ya usado: nada.
+func (m *Manager) gastarHuecoLocked(h *hueco) {
+	if h != nil && !h.usado {
+		h.usado = true
+		m.naciendo--
+	}
+}
+
+// soltarHueco devuelve h si no se gastó: la máquina no llegó a publicarse.
+func (m *Manager) soltarHueco(h *hueco) {
+	m.mu.Lock()
+	m.gastarHuecoLocked(h)
+	m.mu.Unlock()
+}
+
+// claveHueco lleva el hueco de run por el contexto hasta publicarCon: entre
+// medias está runFromCon, y el hueco tiene que llegar por todos sus caminos.
+type claveHueco struct{}
+
+func conHueco(ctx context.Context, h *hueco) context.Context {
+	return context.WithValue(ctx, claveHueco{}, h)
+}
+
+func huecoDe(ctx context.Context) *hueco {
+	h, _ := ctx.Value(claveHueco{}).(*hueco)
+	return h
 }
