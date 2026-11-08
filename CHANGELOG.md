@@ -26,6 +26,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
+- A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
+- A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.
+- The machine cap counts machines that are still being created, so concurrent `run`s can't overshoot it.
+- Smaller fixes: `fondos.json` is written outside the pool lock, the last-squeeze time is forgotten when a machine is removed, each Firecracker API ping while waiting for the socket has a 200 ms timeout, reconcile scans for orphan VMMs without holding the global lock, `run` validates the image name first, and Firecracker errors without `fault_message` say what it answered.
 - Scheduler: the reaper no longer freezes an idle instance underneath a concurrent acquire that adopts it (502 on its first request); victims are held with the waker's lock and the in-acquire mark until frozen, and one that fails to freeze goes back to the map.
 - Scheduler: `ensure` drops a dead primary through the normal removal path and forgets the sessions bound to it when the rebuilt one is a different machine.
 - Scheduler: a failed TTL renewal is no longer taken as done; the reaper retries it on its next pass and drops the instance when the daemon rejects it (404/409), and a running machine whose renewal is rejected is not adopted.

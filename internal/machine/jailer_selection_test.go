@@ -236,7 +236,7 @@ func TestBootSeNiegaSiJailerEstaBloqueado(t *testing.T) {
 
 // Con jailer bloqueado, Run, runFrom y Thaw se niegan ANTES de publicar,
 // reservar o montar nada: ni una entrada fallida en byID (contaría para
-// checkMachineLimit y se acumularía con cada reintento del gateway) ni una
+// reservarHueco y se acumularía con cada reintento del gateway) ni una
 // reserva de snapshot colgada.
 func TestJailerBloqueadoNoDejaRastro(t *testing.T) {
 	m := newTestManager(t)
