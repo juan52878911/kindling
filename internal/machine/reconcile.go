@@ -27,6 +27,13 @@ import (
 // vivas. Sin esto, kling afirmaría cosas falsas: máquinas "running" cuyo proceso
 // murió, o namespaces de máquinas que ya no existen.
 func (m *Manager) reconcile() {
+	m.reconciliarEstado()
+	// Fuera de m.mu: escanea los procesos (ver killOrphanVMMs).
+	m.killOrphanVMMs()
+}
+
+// reconciliarEstado es reconcile salvo la caza de VMMs huérfanos.
+func (m *Manager) reconciliarEstado() {
 	// Lo primero es MIRAR, y hacerlo fuera del lock porque lee /proc.
 	//
 	// El estado en disco no es la verdad: se escribe con debounce y fuera del
@@ -166,7 +173,6 @@ func (m *Manager) reconcile() {
 	m.barrerNamespaces(seen)
 
 	m.sweepMachineDirs()
-	m.killOrphanVMMs()
 	fc.BarrerEnlaces(m.root)
 }
 
@@ -182,12 +188,22 @@ func (m *Manager) reconcile() {
 // elimina: el kill de Remove lee ese PID 0 y no mata nada, así que el VMM queda
 // huérfano reteniendo su RAM para siempre, con el daemon sano y sin nada en su
 // estado que lo explique. liveVMs sí lo ve (escanea /proc), y es la única forma
-// de reconciliar con la realidad. Se llama con m.mu tomado.
+// de reconciliar con la realidad.
+//
+// Se llama SIN m.mu: el escaneo de /proc (un ps en macOS) va fuera, como en
+// sweepOrphanVMMs, y el candado solo para decidir. Escanear con él tomado
+// congelaba ps, run y thaw mientras duraba.
 func (m *Manager) killOrphanVMMs() {
 	if m.barridoBloqueado() {
 		return
 	}
-	for id, pid := range m.liveVMs() {
+	if m.pruebasEscaneoHuerfanos != nil {
+		m.pruebasEscaneoHuerfanos()
+	}
+	live := m.liveVMs()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, pid := range live {
 		mc := m.byID[id]
 		// Vivo y debería estarlo: no se toca.
 		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused) {
