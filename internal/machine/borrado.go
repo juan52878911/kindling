@@ -68,7 +68,10 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 	// Escrita ya, no con el debounce: contestar "borrada" con la tumba aún sin
 	// escribir dejaría, si el daemon muere en esos 250 ms, una máquina viva con
 	// su nombre de siempre.
-	m.persistirYa()
+	if err := m.persistirYa(); err != nil {
+		// La tumba sigue pendiente y se reintenta sola (writePending).
+		log.Printf("warning: rm %s: %v", name, err)
+	}
 	// El evento del borrado sale aquí, cuando el nombre ya está libre, y con
 	// el nombre y el dueño de antes: la tumba ya no los tiene, y sin el dueño
 	// el inquilino no lo vería (daemon/authz.go, eventoVisible).
@@ -227,6 +230,9 @@ func (m *Manager) limpiarMaquina(mc *api.Machine) error {
 	delete(m.socket, mc.ID)
 	delete(m.discoMedido, mc.ID)
 	delete(m.freezeFails, mc.ID)
+	// Y la hora de su último apretón del globo: sin esto se quedaba para
+	// siempre, una entrada por cada máquina que pasó por el daemon.
+	delete(m.squeezedAt, mc.ID)
 	m.persist()
 	m.mu.Unlock()
 	// La marca de "sin agente" de su último freeze: sin esto se quedaba hasta

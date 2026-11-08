@@ -367,7 +367,11 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 		volcadoBorrado = true
 	}
 	start := time.Now()
-	m.persistirYa()
+	// Sin su máquina en disco no se lanza: un VMM sin registro es, al volver
+	// el daemon, un huérfano que reconcile mata (ver persistirYa).
+	if err := m.persistirYa(); err != nil {
+		return devolver(err)
+	}
 	pid, err = m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg,
 		append(vols, copies...), mc.AllowExec, m.ipv6DeReceta(mc.Image), bootEnv, shareWaitDe(mc.ShareWait, mc.Shares))
 	if err != nil {
