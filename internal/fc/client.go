@@ -10,8 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -78,13 +80,31 @@ func (c *Client) do(ctx context.Context, method, path string, body any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		var e struct {
-			FaultMessage string `json:"fault_message"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		return fmt.Errorf("firecracker %s %s: %s: %s", method, path, resp.Status, e.FaultMessage)
+		return errorDeFirecracker(method, path, resp)
 	}
 	return nil
+}
+
+// errorDeFirecracker es el error de una respuesta >= 300: con su
+// fault_message si lo trae; si no, con lo que contestó (recortado), y sin
+// cuerpo, solo con el código. Antes, sin fault_message, el error acababa en
+// ": " y no decía nada.
+func errorDeFirecracker(method, path string, resp *http.Response) error {
+	cuerpo, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	var e struct {
+		FaultMessage string `json:"fault_message"`
+	}
+	motivo := ""
+	if json.Unmarshal(cuerpo, &e) == nil {
+		motivo = e.FaultMessage
+	}
+	if motivo == "" {
+		motivo = strings.TrimSpace(string(cuerpo))
+	}
+	if motivo == "" {
+		return fmt.Errorf("firecracker %s %s: %s", method, path, resp.Status)
+	}
+	return fmt.Errorf("firecracker %s %s: %s: %s", method, path, resp.Status, motivo)
 }
 
 // Ping comprueba que el socket responde; se usa para esperar el arranque.
@@ -392,11 +412,7 @@ func (c *Client) BalloonStats(ctx context.Context) (*BalloonStats, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		var e struct {
-			FaultMessage string `json:"fault_message"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		return nil, fmt.Errorf("firecracker GET /balloon/statistics: %s: %s", resp.Status, e.FaultMessage)
+		return nil, errorDeFirecracker(http.MethodGet, "/balloon/statistics", resp)
 	}
 	var s BalloonStats
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
