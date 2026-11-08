@@ -114,6 +114,12 @@ type Manager struct {
 	// los protege y nunca se toma con m.mu cogido.
 	fondoMu sync.Mutex
 	fondos  map[string]*fondoPlantilla
+	// fondosGen numera las fotos de los tamaños (con fondoMu); fondosEscritoGen
+	// es la última que llegó a fondos.json, y fondosEscMu serializa esas
+	// escrituras, que van fuera de fondoMu (ver guardarFondos).
+	fondosGen        uint64
+	fondosEscMu      sync.Mutex
+	fondosEscritoGen uint64
 	// altaFondo crea una copia para el fondo; nil = crearParaFondo. Punto de
 	// inyección de las pruebas: el fondo es concurrencia, y eso no se ejercita
 	// si cada copia exige KVM.
@@ -168,6 +174,9 @@ type Manager struct {
 	// nombresNaciendo son los nombres de las máquinas que run está creando y
 	// aún no están en byID (reservarNombre). Bajo mu.
 	nombresNaciendo map[string]bool
+	// naciendo cuenta los huecos del tope de máquinas apartados para las que
+	// run está creando y aún no están en byID (reservarHueco). Bajo mu.
+	naciendo int
 	// arrancando cuenta, por imagen, los arranques en frío de run que ya la
 	// eligieron y aún no están en byID (reservarImagen); arrancandoTotal, todos,
 	// que leen además el kernel. Bajo mu, y se apuntan con imgMu: ver
@@ -393,6 +402,9 @@ type Manager struct {
 	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
 	// resync del invitado (tests de B12).
 	pruebasAntesDeResync func()
+	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
+	// antes de escanear los procesos. Para las pruebas.
+	pruebasEscaneoHuerfanos func()
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
@@ -426,6 +438,9 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// fallosEstado cuenta las escrituras seguidas de state.json que fallaron
+	// (para la espera del reintento). Con escrituraMu.
+	fallosEstado uint
 	// estadoIlegible no está vacío si state.json no se pudo leer (ver load):
 	// el daemon no borra ni mata nada por no conocerlo. estadoIntocable, si
 	// además no se pudo apartar: tampoco se escribe encima. Se fijan en load,
@@ -442,8 +457,11 @@ type Manager struct {
 	// recetaMu serializa agenteEnReceta (layer.go): dos máquinas de la misma
 	// imagen que contestan a la vez leerían y reescribirían la misma receta.
 	recetaMu sync.Mutex
-	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
-	// un temporal de nombre fijo y dos a la vez se lo pisarían.
+	// escrituraMu serializa las escrituras de state.json. No por el temporal
+	// (durable.Escribir usa uno de nombre único) sino por el orden: sin él,
+	// una foto vieja escrita tarde pisaría a una nueva (ver escritoGen), y
+	// quien saca la foto pendiente la escribe o la repone sin soltarlo (ver
+	// writePending). También protege versionPrevia, hayPrevia y fallosEstado.
 	escrituraMu sync.Mutex
 
 	// shares lleva las conexiones de las carpetas compartidas en vivo, y
@@ -890,7 +908,7 @@ func (m *Manager) barridoBloqueado() bool { return m.estadoIlegible != "" }
 // vivo, por ejemplo). Y una copia por valor no basta: comparte con la viva los
 // arrays de Volumes, Shares o AllowDomains y los mapas de Labels y Forwards, y
 // cualquier escritura en su sitio sobre ellos corre con el Marshal (M-03).
-func (m *Manager) persist() {
+func (m *Manager) persist() uint64 {
 	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		list = append(list, *mc.Clone())
@@ -898,6 +916,7 @@ func (m *Manager) persist() {
 
 	m.stateMu.Lock()
 	m.pendGen++
+	gen := m.pendGen
 	m.pending, m.hasPend = list, true
 	m.stateMu.Unlock()
 
@@ -908,6 +927,7 @@ func (m *Manager) persist() {
 	case m.wake <- struct{}{}:
 	default:
 	}
+	return gen
 }
 
 const (
@@ -955,37 +975,80 @@ func (m *Manager) persistLoop() {
 			// Contenido: si volcar el estado entrara en panico, el proceso
 			// entero moriria y las microVM quedarian huerfanas. Perder UNA
 			// escritura es recuperable; perder el daemon, no.
-			panico.Contener("persistLoop", m.writePending)
+			panico.Contener("persistLoop", func() { _ = m.writePending() })
 
 		case <-m.quit:
 			if timer != nil {
 				timer.Stop()
 			}
-			panico.Contener("persistLoop (cierre)", m.writePending)
+			panico.Contener("persistLoop (cierre)", func() { _ = m.writePending() })
 			return
 		}
 	}
 }
 
-// writePending vuelca la última foto, si hay alguna.
-func (m *Manager) writePending() {
+// escribirEstado es la escritura de state.json. Variable para los tests: un
+// disco que falla no se puede fabricar de otra forma.
+var escribirEstado = durable.Escribir
+
+// reintentoEstadoMax acota la espera entre reintentos de una escritura de
+// state.json que falló.
+const reintentoEstadoMax = 10 * time.Second
+
+// writePending vuelca la última foto, si hay alguna, y dice si no pudo.
+//
+// escrituraMu se toma ANTES de sacar la foto: quien la saca la escribe o la
+// repone sin soltarlo, así que persistirYa, al tomarlo detrás, ve ya en
+// escritoGen el resultado de cualquier escritura en curso.
+func (m *Manager) writePending() error {
+	m.escrituraMu.Lock()
+	defer m.escrituraMu.Unlock()
 	m.stateMu.Lock()
 	if !m.hasPend {
 		m.stateMu.Unlock()
-		return
+		return nil
 	}
 	list, gen := m.pending, m.pendGen
 	m.pending, m.hasPend = nil, false
 	m.stateMu.Unlock()
 
-	m.escrituraMu.Lock()
-	defer m.escrituraMu.Unlock()
 	if m.estadoIntocable {
-		return // ver ponerEnCuarentena
+		return nil // ver ponerEnCuarentena
 	}
 	if gen <= m.escritoGen {
-		return // ya se escribió una foto más nueva
+		return nil // ya se escribió una foto más nueva
 	}
+	err := m.escribirFoto(list, gen)
+	if err == nil {
+		m.fallosEstado = 0
+		return nil
+	}
+	// La foto no llegó a disco: se repone, salvo que ya haya otra más nueva
+	// (gen crece siempre, así que la pendiente la incluye), y se reintenta
+	// con espera creciente. Antes se perdía: solo quedaba en el log, y un
+	// VMM recién lanzado vivía sin su máquina en disco.
+	m.stateMu.Lock()
+	if !m.hasPend {
+		m.pending, m.pendGen, m.hasPend = list, gen, true
+	}
+	m.stateMu.Unlock()
+	m.fallosEstado++
+	espera := persistDebounce << min(m.fallosEstado, 8)
+	if espera > reintentoEstadoMax {
+		espera = reintentoEstadoMax
+	}
+	log.Printf("state: %v; retrying in %s", err, espera)
+	time.AfterFunc(espera, func() {
+		select {
+		case m.wake <- struct{}{}:
+		default:
+		}
+	})
+	return err
+}
+
+// escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
+func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 
 	schema := esquemaParaEscribir(list)
 	f := struct {
@@ -994,8 +1057,7 @@ func (m *Manager) writePending() {
 	}{esquema.Cabecera{Schema: schema}, list}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		log.Printf("state: could not serialize it: %v", err)
-		return
+		return fmt.Errorf("could not serialize it: %w", err)
 	}
 	// Un esquema mayor que el que dejó el binario anterior (1→2 con la
 	// primera copia en diferencial, →3 con el primer campo de necesitaV3):
@@ -1005,19 +1067,18 @@ func (m *Manager) writePending() {
 	// Respaldar no pisa una que ya exista: la buena es la primera.
 	if m.hayPrevia && schema > m.versionPrevia {
 		if err := esquema.Respaldar(m.statePath(), m.versionPrevia); err != nil {
-			log.Printf("state: not writing schema %d, because the schema %d copy could not be made: %v", schema, m.versionPrevia, err)
-			return
+			return fmt.Errorf("not writing schema %d, because the schema %d copy could not be made: %w", schema, m.versionPrevia, err)
 		}
 	}
 
 	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
 	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
 	// mal en el otro, que es lo que pasaba con links.json.
-	if err := durable.Escribir(m.statePath(), b, 0o644); err != nil {
-		log.Printf("state: could not persist it: %v", err)
-		return
+	if err := escribirEstado(m.statePath(), b, 0o644); err != nil {
+		return fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
+	return nil
 }
 
 // persistirYa escribe el estado AHORA, sin esperar al debounce. Se llama SIN m.mu.
@@ -1028,11 +1089,24 @@ func (m *Manager) writePending() {
 // correcto para un huérfano, lo incorrecto para una máquina que alguien acababa
 // de crear—. Con esto, un VMM vivo siempre tiene su registro escrito, y el que
 // no lo tiene es un huérfano de verdad.
-func (m *Manager) persistirYa() {
+//
+// Devuelve error si la foto no llegó a disco: quien iba a lanzar el VMM no
+// debe hacerlo (la foto queda pendiente y se reintenta sola). En modo
+// protegido (estadoIntocable) no se escribe a propósito y no es un error.
+func (m *Manager) persistirYa() error {
 	m.mu.RLock()
-	m.persist()
+	gen := m.persist()
 	m.mu.RUnlock()
-	m.writePending()
+	err := m.writePending()
+	m.escrituraMu.Lock()
+	defer m.escrituraMu.Unlock()
+	if m.estadoIntocable || m.escritoGen >= gen {
+		return nil
+	}
+	if err == nil {
+		err = errors.New("its write failed")
+	}
+	return fmt.Errorf("state not saved to disk: %w", err)
 }
 
 // cierreOperacionesMax es cuánto espera Close a las operaciones de ciclo de
@@ -1405,18 +1479,27 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	// Jailer bloqueado: lo PRIMERO, antes de reservar ni publicar nada. Más
 	// tarde el abort pasaba por fail() y cada intento dejaba una entrada
-	// fallida en byID que contaba para checkMachineLimit. El check de boot()
+	// fallida en byID que contaba para el tope de máquinas. El check de boot()
 	// se queda como red.
 	if m.JailerBlocked != "" {
 		return nil, errors.New(m.JailerBlocked)
+	}
+	// El nombre de la imagen llega de la petición: se valida al entrar, antes
+	// de que nada lo use (reservarImagen, la receta en techoCPUPorDefecto, la
+	// clave del snapshot por imagen). Vacío es "default", que vale.
+	if req.Image != "" && !validName.MatchString(req.Image) {
+		return nil, marcado(ErrInvalidName, "invalid image name %q", req.Image)
 	}
 	// El tope va ANTES de bifurcar: restaurar desde un snapshot es tan capaz de
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
 	// dejaba sin freno justo donde más falta hace.
-	if err := m.checkMachineLimit(); err != nil {
+	hueco, err := m.reservarHueco()
+	if err != nil {
 		return nil, err
 	}
+	defer m.soltarHueco(hueco)
+	ctx = conHueco(ctx, hueco)
 	switch req.OnTTL {
 	case "", api.OnTTLFreeze:
 		req.OnTTL = ""
@@ -1558,9 +1641,6 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		}
 	}
 
-	if err := m.checkMachineLimit(); err != nil {
-		return nil, err
-	}
 	// La cuota del dueño, antes de nada caro: solo un filtro, publicar decide.
 	if err := m.comprobarCuota(req.Labels[api.LabelOwner], UsoCuota{
 		Maquinas: 1, MemMiB: memCuota(req.MemMiB, req.MemMaxMiB), DiscoMiB: discoCuota(req.DiskMiB)}); err != nil {
@@ -1729,12 +1809,12 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// una máquina que ya no existía (M-06). Ahora esperan a que termine.
 	//
 	// Justo antes de publicar y no nada más generar el id: hasta aquí nadie
-	// puede nombrarla, y lo de arriba (checkMachineLimit → gcFailed) sí puede
+	// puede nombrarla, y lo de arriba (reservarHueco → gcFailed) sí puede
 	// esperar el cerrojo de OTRA máquina. Ver doc.go.
 	soltarCiclo := m.lockUnaVez(id)
 	defer soltarCiclo()
 	// La cuota de su dueño se decide al publicarla (cuota_inquilino.go).
-	if err := m.publicar(mc); err != nil {
+	if err := m.publicarCon(ctx, mc); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -1786,7 +1866,11 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	m.persistirYa()
+	// Sin su máquina en disco no se lanza (ver persistirYa).
+	if err := m.persistirYa(); err != nil {
+		m.desmontarRed(netcfg, id)
+		return abandonar(err)
+	}
 	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image), env, mc.ShareWait)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
@@ -2266,8 +2350,11 @@ const precargaMaxBytes = 512 << 20
 func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid int) error {
 	start := time.Now()
 	deadline := start.Add(5 * time.Second)
+	// Cada Ping con su plazo: un VMM que acepta y no contesta se comía los
+	// 30 s por defecto del cliente en el primero, muy por encima de los 5 s.
+	ping := c.ConPlazo(plazoPing)
 	for time.Now().Before(deadline) {
-		if c.Ping(ctx) == nil {
+		if ping.Ping(ctx) == nil {
 			return nil
 		}
 		if pid > 0 && syscall.Kill(pid, 0) == syscall.ESRCH {
@@ -2285,6 +2372,10 @@ func (m *Manager) waitSocket(ctx context.Context, c *fc.Client, id string, pid i
 	}
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
+
+// plazoPing es el tope de cada Ping de waitSocket: el socket de un VMM vivo
+// contesta en microsegundos.
+const plazoPing = 200 * time.Millisecond
 
 // errYaNoToca es la respuesta de freezeSi y removeSi cuando, con el cerrojo
 // tomado, la máquina ya no cumple lo que justificaba la operación.
@@ -3630,6 +3721,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
+	// Reanudado: el volcado ya no describe su disco. Se retira el sello antes
+	// de nada más, y no tras persistir el running: si el daemon muere con su
+	// VMM entre medias, state.json aún dice warm (o running, y reconcile la
+	// pasa a warm si el sello sigue) y el siguiente thaw cargaría aquella
+	// memoria sobre el disco ya escrito. Sin sello, falla cerrado. Si no se
+	// puede retirar, abortar no lo arreglaría (el invitado ya corrió): se avisa.
+	if err := retirarSello(dir); err != nil {
+		log.Printf("warning: thaw: %s: couldn't retire the seal of the memory dump it was thawed from: %v", mc.Name, err)
+	}
 	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
@@ -3811,7 +3911,14 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	}
 	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
-	m.killConservandoDisco(mc.ID)
+	if !m.killConservandoDisco(mc.ID) {
+		// Como en Remove (M4): con el VMM vivo —p. ej. en estado D— no se
+		// suelta nada. Darla por parada con PID 0 dejaba que kling start
+		// lanzase un segundo VMM sobre el mismo overlay. Se queda como
+		// estaba, con su PID y su red; el siguiente intento la vuelve a matar.
+		return nil, fmt.Errorf("%s: its VMM (pid %d) did not exit after SIGKILL; leaving its network and disk in place",
+			mc.Name, mc.PID)
+	}
 	// El overlay se conserva para kling start: si iba sin sincronizar, se
 	// asienta antes de decir stopped (desechable.go).
 	if err := m.asentarOverlay(mc); err != nil {
@@ -3943,7 +4050,8 @@ func (m *Manager) kill(id string) bool { return m.killMachine(id, true, false) }
 
 // killConservandoDisco es kill para Stop: el overlay sigue después (kling
 // start), así que el invitado vacía su caché aunque no tenga volúmenes.
-func (m *Manager) killConservandoDisco(id string) { m.killMachine(id, true, true) }
+// Dice, como kill, si el VMM ya no existe.
+func (m *Manager) killConservandoDisco(id string) bool { return m.killMachine(id, true, true) }
 
 // killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
 //

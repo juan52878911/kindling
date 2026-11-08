@@ -34,21 +34,7 @@ func vmmVivoDe(t *testing.T, m *Manager, id string) (*exec.Cmd, <-chan struct{})
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "read x", argSocketVMM, sock)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
-	}
-	fin := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(fin) }()
-	t.Cleanup(func() {
-		stdin.Close()
-		_ = cmd.Process.Kill()
-		<-fin
-	})
+	cmd, fin := lanzarProcesoFalso(t, argSocketVMM, sock)
 	for i := 0; i < 400; i++ {
 		if m.liveVMs()[id] == cmd.Process.Pid {
 			if _, ok := m.adopt(&api.Machine{ID: id, PID: cmd.Process.Pid}); ok {

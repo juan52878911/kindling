@@ -42,3 +42,28 @@ func TestMontarRedQueFallaNoDejaLaRedAMedias(t *testing.T) {
 		t.Fatal("la red quedó apuntada como montada")
 	}
 }
+
+// Si Setup dice que la red es de otro daemon (ErrRedAjena), montarRed no la
+// desmonta: hacerlo dejaría la máquina viva del otro incomunicada.
+func TestMontarRedNoDesmontaLaRedAjena(t *testing.T) {
+	m := newTestManager(t)
+	var desmontadas []string
+	oldM, oldD := montarRedHost, desmontarRedHost
+	t.Cleanup(func() { montarRedHost, desmontarRedHost = oldM, oldD })
+	montarRedHost = func(n *knet.Net, _ knet.Egress, _ []string, _ int) error {
+		return knet.ErrRedAjena
+	}
+	desmontarRedHost = func(n *knet.Net) { desmontadas = append(desmontadas, n.NS) }
+
+	id := "c0ffee0000000002"
+	n := knet.Plan(8, id)
+	if err := m.montarRed(n, id, knet.EgressNone, nil); !errors.Is(err, knet.ErrRedAjena) {
+		t.Fatalf("err = %v, quería ErrRedAjena", err)
+	}
+	if len(desmontadas) != 0 {
+		t.Fatalf("desmontó %v: era la red de otro daemon", desmontadas)
+	}
+	if m.redEsPropia(n.NS) {
+		t.Fatalf("%s quedó marcada como propia: el barrido se la llevaría", n.NS)
+	}
+}

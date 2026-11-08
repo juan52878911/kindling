@@ -18,6 +18,7 @@ package machine
 // (comprobarCuota): es solo un filtro; la decisión es la de publicar.
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -166,12 +167,21 @@ func (m *Manager) comprobarCuotaSin(owner string, pide UsoCuota, excluir string)
 // publicar mete una máquina recién creada en byID si le cabe a su dueño, en
 // la misma sección crítica en que se cuenta (ver arriba).
 func (m *Manager) publicar(mc *api.Machine) error {
+	return m.publicarCon(context.Background(), mc)
+}
+
+// publicarCon es publicar gastando, en la misma sección crítica, el hueco del
+// tope de máquinas que run apartó en ctx (reservarHueco): la máquina pasa de
+// contar como naciendo a contar en byID sin que nadie la vea dos veces ni
+// ninguna.
+func (m *Manager) publicarCon(ctx context.Context, mc *api.Machine) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.cuotaExcedidaLocked(mc.Labels[api.LabelOwner], usoDe(mc), ""); err != nil {
 		return err
 	}
 	m.byID[mc.ID] = mc
+	m.gastarHuecoLocked(huecoDe(ctx))
 	m.persist()
 	return nil
 }

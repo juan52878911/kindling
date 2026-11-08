@@ -41,7 +41,7 @@
 // vez. Quien ya tiene uno y quiere otra máquina usa tryLock y se la salta si
 // está ocupada (makeRoom, soltarRedesDormidas). Por eso Run y runFrom toman el
 // suyo justo antes de publicar la máquina en byID y no antes: lo previo
-// (checkMachineLimit → gcFailed → Remove de OTRA máquina) sí puede esperar el
+// (reservarHueco → gcFailed → Remove de OTRA máquina) sí puede esperar el
 // cerrojo de otra, y hasta publicarla nadie puede nombrar el id nuevo, así que
 // tomarlo antes no protegería nada.
 //

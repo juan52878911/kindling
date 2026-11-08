@@ -4,7 +4,6 @@ package machine
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -22,14 +21,9 @@ func TestSocketDeUnaMaquinaJailed(t *testing.T) {
 	if err := os.WriteFile(sock, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Como firecracker tras el exec de jailer: "--id <id>" en su línea. El
-	// shell sigue vivo esperando a sleep, así que su cmdline lo conserva (ver
-	// TestLiveVMsEncuentraLaMaquinaPorSuSocket).
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30", "--id", id)
-	if err := cmd.Start(); err != nil {
-		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// Como firecracker tras el exec de jailer: "--id <id>" en su línea (ver
+	// lanzarProcesoFalso).
+	cmd, _ := lanzarProcesoFalso(t, "--id", id)
 	esperarCmdline(t, cmd.Process.Pid, id)
 
 	if got := m.socketDe(id, cmd.Process.Pid); got != sock {

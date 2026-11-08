@@ -181,7 +181,7 @@ func startCredProxy(n *Net, auditPath string) (*credProxy, error) {
 func newCredProxy(auditPath string) *credProxy {
 	p := &credProxy{}
 	p.proxy = credproxy.New(credproxy.Options{
-		Lookup:         func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
+		Lookup:         func(ctx context.Context, host string) []string { return resolvePublicIPv4(ctx, host) },
 		TempDir:        credTempDir(),
 		AuditPath:      auditPath,
 		Audit:          auditCfg(),

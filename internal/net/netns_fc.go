@@ -8,6 +8,7 @@ package net
 
 import (
 	"fmt"
+	stdnet "net"
 	"os"
 	"os/exec"
 	"strings"
@@ -31,7 +32,16 @@ func nsIP(third, fourth int) string {
 // domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
 // que se deja salir. En los demás modos se ignora.
 func (n *Net) Setup(egress Egress, domains []string, owner int) error {
-	n.Teardown() // restos de una ejecución anterior
+	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
+	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
+	// máquina (otro daemon con un id que empieza igual), y Teardown la dejaría
+	// corriendo e incomunicada.
+	if existeRed(n) {
+		if ips := ipsVeth(n.HostIf); len(ips) > 0 && !contiene(ips, n.HostIP) {
+			return fmt.Errorf("%w: %s has %s, planned %s", ErrRedAjena, n.HostIf, strings.Join(ips, ","), n.HostIP)
+		}
+	}
+	n.Teardown()
 
 	if err := run("ip", "netns", "add", n.NS); err != nil {
 		return err
@@ -120,23 +130,24 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
 	dnat := []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}
-	// none e internet van en UN iptables-restore con todas sus reglas: cada
+	// Los tres modos van en UN iptables-restore con todas sus reglas: cada
 	// iptables por separado es un proceso que relee el conjunto de reglas (~3
-	// ms cada uno). allowlist sigue su camino (ipset, resolver).
-	if egress != EgressAllowlist {
-		if _, err := exec.LookPath("iptables-restore"); err == nil {
-			reglas := append([][]string{dnat}, n.egressRules(egress)...)
-			if egress == EgressNone {
-				// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
-				// todo): así sabemos QUÉ nombre quiso y el aviso de red
-				// cortada puede decirlo (bloqueos.go).
-				reglas = append(reglas, n.reglasGrafo(EgressNone, false)...)
-			}
-			if err := n.restoreRules(reglas); err != nil {
-				return err
-			}
-			return n.arrancarRegistroNone(egress)
+	// ms cada uno). allowlist además crea su ipset y arranca su resolver.
+	if _, err := exec.LookPath("iptables-restore"); err == nil {
+		if egress == EgressAllowlist {
+			return n.applyAllowlist(ns, domains, [][]string{dnat}, true)
 		}
+		reglas := append([][]string{dnat}, n.egressRules(egress)...)
+		if egress == EgressNone {
+			// El DNS del invitado pasa por nuestro resolver (NXDOMAIN a
+			// todo): así sabemos QUÉ nombre quiso y el aviso de red
+			// cortada puede decirlo (bloqueos.go).
+			reglas = append(reglas, n.reglasGrafo(EgressNone, false)...)
+		}
+		if err := n.restoreRules(reglas); err != nil {
+			return err
+		}
+		return n.arrancarRegistroNone(egress)
 	}
 	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {
 		return err
@@ -175,8 +186,37 @@ func (n *Net) Teardown() {
 	// Los enlaces antes que el proxy de credenciales: escriben en su auditor.
 	stopGraph(n.NS)
 	stopCredProxy(n.NS)
+	cerrarIPSet(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
+}
+
+// Sustituibles en tests: mirar la red de verdad pide /sys y un veth.
+var (
+	existeRed = (*Net).Exists
+	ipsVeth   = func(ifname string) []string {
+		ifc, err := stdnet.InterfaceByName(ifname)
+		if err != nil {
+			return nil
+		}
+		addrs, _ := ifc.Addrs()
+		var ips []string
+		for _, a := range addrs {
+			if ipn, ok := a.(*stdnet.IPNet); ok && ipn.IP.To4() != nil {
+				ips = append(ips, ipn.IP.String())
+			}
+		}
+		return ips
+	}
+)
+
+func contiene(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 // Exists dice si el namespace y el veth del lado del host siguen ahí: lo que
@@ -225,6 +265,7 @@ func TeardownNamespace(ns string) {
 	stopResolver(ns)
 	stopGraph(ns)
 	stopCredProxy(ns)
+	cerrarIPSet(ns)
 	quiet("ip", "netns", "del", ns)
 	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
 }
