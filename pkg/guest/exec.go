@@ -15,13 +15,17 @@ package guest
 // que tarde o temprano alguien alcanza.
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os/exec"
+	"runtime/debug"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -183,27 +187,67 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 		DefaultReaper.Forget(cmd.Process.Pid)
 	}
 
-	resp := execResponse{Output: out.String(), Truncated: out.truncated}
+	code := 0
+	var cola string
 	if err != nil {
-		code, ok := ExitCodeOf(err)
+		var ok bool
+		code, ok = ExitCodeOf(err)
 		// El proceso pudo terminar y fallar solo el ESPERARLO (WaitDelay agotado
 		// por un nieto que sostenía la tubería): si hay estado de salida, ese es
 		// el resultado, no "no pude ejecutarlo".
 		if !ok && cmd.ProcessState != nil {
 			code, ok = ExitCodeOf(&exec.ExitError{ProcessState: cmd.ProcessState})
 		}
-		if ok {
-			resp.ExitCode = code
-		} else {
+		if !ok {
 			// Ni siquiera se pudo lanzar: no existe el binario, o no hay
 			// permisos. Eso sí es un fallo de la petición, y el mensaje tiene
 			// que decirlo porque no habrá salida que lo explique.
-			resp.ExitCode = -1
-			resp.Output += fmt.Sprintf("\ncould not execute %q: %v", req.Cmd[0], err)
+			code = -1
+			cola = fmt.Sprintf("\ncould not execute %q: %v", req.Cmd[0], err)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = writeExecResponse(w, code, out, cola)
+	// Tras una salida grande, la memoria vuelve al sistema ya y no cuando le
+	// toque al recolector: en un invitado pequeño son MiB que el globo puede
+	// reclamar. Con una pequeña no compensa una GC entera.
+	if out.size >= execLiberarDesde {
+		out.reset()
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		liberarMemoria()
+	}
+}
+
+// execLiberarDesde es la salida a partir de la cual /exec devuelve la memoria
+// al sistema al acabar.
+const execLiberarDesde = 4 << 20
+
+// liberarMemoria es debug.FreeOSMemory; variable para los tests.
+var liberarMemoria = debug.FreeOSMemory
+
+// writeExecResponse escribe la misma respuesta que json.Encoder sobre
+// execResponse, pero sin construirla en memoria: la salida va de los bloques
+// de out a w escapada por trozos. Antes out.String() la copiaba entera y
+// json la volvía a copiar escapada, y el pico eran 3-4× la salida. Los
+// campos salen en otro orden (exit_code primero, como antes), y quien
+// decodifica no lo nota.
+func writeExecResponse(w io.Writer, code int, out *cappedBuffer, cola string) error {
+	bw := bufio.NewWriterSize(w, 32<<10)
+	fmt.Fprintf(bw, `{"exit_code":%d,"output":`, code)
+	if cola != "" {
+		// La cola va dentro del mismo string: se escribe como un bloque más.
+		out.appendRaw([]byte(cola))
+	}
+	if err := out.writeJSONString(bw); err != nil {
+		return err
+	}
+	if out.truncated {
+		bw.WriteString(`,"truncated":true`)
+	}
+	bw.WriteString("}\n")
+	return bw.Flush()
 }
 
 // cappedBuffer junta stdout y stderr como un bytes.Buffer, pero deja de crecer
@@ -211,14 +255,25 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 // cortar la tubería mataría el proceso con SIGPIPE, y un comando que habla de
 // más no tiene por qué fallar por eso; el exceso simplemente no se guarda.
 //
+// Guarda en bloques y no en un solo slice: un bytes.Buffer que crece doblando
+// copia lo que lleva en cada paso y llega a tener reservado el doble de la
+// salida. Los bloques empiezan en 4 KiB (un `echo ok` no reserva más) y
+// doblan hasta 256 KiB.
+//
 // Es seguro pasarla a la vez como cmd.Stdout y cmd.Stderr: al ser el mismo
 // puntero, os/exec sirve ambos por una sola tubería y un solo escritor a la
 // vez, así que no hace falta cerrojo propio.
 type cappedBuffer struct {
-	buf       bytes.Buffer
+	bloques   [][]byte
+	size      int
 	left      int
 	truncated bool
 }
+
+const (
+	cappedBloqueMin = 4 << 10
+	cappedBloqueMax = 256 << 10
+)
 
 func newCappedBuffer(max int) *cappedBuffer {
 	return &cappedBuffer{left: max}
@@ -237,8 +292,151 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		c.truncated = true
 	}
 	c.left -= len(p)
-	c.buf.Write(p)
+	c.appendRaw(p)
 	return n, nil
 }
 
-func (c *cappedBuffer) String() string { return c.buf.String() }
+// appendRaw añade p sin mirar el tope.
+func (c *cappedBuffer) appendRaw(p []byte) {
+	c.size += len(p)
+	for len(p) > 0 {
+		if k := len(c.bloques); k == 0 || len(c.bloques[k-1]) == cap(c.bloques[k-1]) {
+			tam := cappedBloqueMin
+			if k > 0 {
+				tam = min(2*cap(c.bloques[k-1]), cappedBloqueMax)
+			}
+			c.bloques = append(c.bloques, make([]byte, 0, tam))
+		}
+		b := &c.bloques[len(c.bloques)-1]
+		n := min(len(p), cap(*b)-len(*b))
+		*b = append(*b, p[:n]...)
+		p = p[n:]
+	}
+}
+
+// reset suelta los bloques.
+func (c *cappedBuffer) reset() { c.bloques, c.size = nil, 0 }
+
+func (c *cappedBuffer) String() string {
+	var sb strings.Builder
+	sb.Grow(c.size)
+	for _, b := range c.bloques {
+		sb.Write(b)
+	}
+	return sb.String()
+}
+
+// writeJSONString escribe lo guardado como un string de JSON, con las mismas
+// reglas que encoding/json: <, > y & escapados, U+2028 y U+2029 también, y
+// cada byte de UTF-8 inválido como U+FFFD. Una runa partida entre dos bloques
+// se junta antes de decodificarla.
+func (c *cappedBuffer) writeJSONString(w *bufio.Writer) error {
+	w.WriteByte('"')
+	var resto [utf8.UTFMax]byte // el principio de una runa que sigue en el bloque siguiente
+	nr := 0
+	for i, b := range c.bloques {
+		ultimo := i == len(c.bloques)-1
+		if nr > 0 {
+			// Completa la runa partida con lo justo del bloque nuevo.
+			k := min(len(b), utf8.UTFMax-nr)
+			var junta [2 * utf8.UTFMax]byte
+			n := copy(junta[:], resto[:nr])
+			n += copy(junta[n:], b[:k])
+			_, tam := utf8.DecodeRune(junta[:n])
+			if tam <= nr {
+				// Lo de antes era inválido por sí solo: un U+FFFD por byte, y el
+				// bloque nuevo empieza limpio.
+				escaparJSON(w, resto[:nr])
+				nr = 0
+			} else {
+				escaparJSON(w, junta[:tam])
+				b = b[tam-nr:]
+				nr = 0
+			}
+		}
+		if !ultimo {
+			// Lo que al final del bloque es el principio de una runa sin
+			// acabar se queda para el siguiente.
+			if cola := runaIncompleta(b); cola > 0 {
+				nr = copy(resto[:], b[len(b)-cola:])
+				b = b[:len(b)-cola]
+			}
+		}
+		escaparJSON(w, b)
+	}
+	if nr > 0 {
+		escaparJSON(w, resto[:nr])
+	}
+	w.WriteByte('"')
+	return nil
+}
+
+// runaIncompleta dice cuántos bytes del final de b son el principio de una
+// runa de UTF-8 que no acaba en b (0 si no hay).
+func runaIncompleta(b []byte) int {
+	for i := 1; i < utf8.UTFMax && i <= len(b); i++ {
+		c := b[len(b)-i]
+		if c < utf8.RuneSelf {
+			return 0
+		}
+		if utf8.RuneStart(c) {
+			if utf8.FullRune(b[len(b)-i:]) {
+				return 0
+			}
+			return i
+		}
+	}
+	return 0
+}
+
+const hexJSON = "0123456789abcdef"
+
+// escaparJSON escribe b escapado como dentro de un string de JSON.
+func escaparJSON(w *bufio.Writer, b []byte) {
+	ini := 0
+	for i := 0; i < len(b); {
+		if c := b[i]; c < utf8.RuneSelf {
+			if c >= 0x20 && c != '"' && c != '\\' && c != '<' && c != '>' && c != '&' {
+				i++
+				continue
+			}
+			w.Write(b[ini:i])
+			switch c {
+			case '"', '\\':
+				w.WriteByte('\\')
+				w.WriteByte(c)
+			case '\n':
+				w.WriteString(`\n`)
+			case '\r':
+				w.WriteString(`\r`)
+			case '\t':
+				w.WriteString(`\t`)
+			default:
+				w.WriteString(`\u00`)
+				w.WriteByte(hexJSON[c>>4])
+				w.WriteByte(hexJSON[c&0xf])
+			}
+			i++
+			ini = i
+			continue
+		}
+		r, tam := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && tam == 1 {
+			w.Write(b[ini:i])
+			w.WriteString(`\ufffd`)
+			i++
+			ini = i
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			w.Write(b[ini:i])
+			w.WriteString(`\u202`)
+			w.WriteByte(hexJSON[r&0xf])
+			i += tam
+			ini = i
+			continue
+		}
+		i += tam
+	}
+	w.Write(b[ini:])
+}

@@ -843,6 +843,7 @@ Rutas del agente, de control (el gateway no las reenvía):
 GET  /ready   → 200 | 503  {"ready":bool,"probe":bool,"has_hooks":bool,"hooks":"running|done|failed","detail":"...","start_period_seconds":N}
 POST /hooks?restore=instance|thaw|manual → 202 (409 si ya corren)
 GET  /meminfo → {"total_mib":N,"available_mib":N}
+POST /drop-caches → {"cached_before_mib":N,"cached_after_mib":N}   (capacidad drop-caches)
 GET  /procs   → {"count":N,"names":["node"],"covered":N,"host_keys":["/etc/ssh/ssh_host_ed25519_key"]}   (capacidad procs)
 ```
 

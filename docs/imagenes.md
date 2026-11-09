@@ -267,10 +267,12 @@ imágenes tienen el mismo árbol (solo cambian la referencia y el digest de
 **El servicio lo supervisa el agente** (`pkg/guest/service.go`), no un bucle de
 shell: lo arranca después de montar los volúmenes, con el usuario de la imagen
 (resuelto con su `/etc/passwd`, sin libc), en su propio grupo de procesos, y lo
-relanza si muere (de 1 a 30 s de espera). Su salida va a la consola (`kling
-logs`) y a `/var/log/kling-service.log`, que es lo que enseña `kling logs
--service` (con `-f` para seguirla); `GET /service` del agente da su estado y la
-cola del log.
+relanza si muere (de 1 a 30 s de espera). Su salida va entera a
+`/var/log/kling-service.log`, que es lo que enseña `kling logs -service` (con
+`-f` para seguirla), y a la consola (`kling logs`) solo los primeros 64 KiB de
+cada arranque, con una línea que avisa del corte: cada byte por la consola
+emulada cuesta CPU en el host, y un servicio que habla mucho la pagaba dos
+veces. `GET /service` del agente da su estado y la cola del log.
 
 **Parada limpia.** El agente anuncia la capacidad `service` en `/healthz` solo si
 la imagen declara un servicio. A esas máquinas, `kling stop` y `kling rm` les

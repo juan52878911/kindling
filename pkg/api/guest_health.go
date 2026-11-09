@@ -24,6 +24,8 @@ const (
 	GuestCapService = "service"  // la imagen declara un servicio: GET /service, POST /service/stop (guest_service.go)
 	GuestCapEnv     = "env"      // lee el entorno de la máquina de MMDS con kling.env=1 (machine_env.go)
 	GuestCapProcs   = "procs"    // GET /procs (guest_procs.go)
+	// POST /drop-caches (GuestDropCachesPath)
+	GuestCapDropCaches = "drop-caches"
 )
 
 // GuestHealth es la respuesta JSON de GET /healthz.

@@ -24,6 +24,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `-json` on `save`, `freeze`, `thaw`, `pause`, `stop`, `rm`, `start`, `cp` and `machine squeeze|resize|secret|credential`: they print what they left, one line per ref. With `-json` an error is one `{"error","code","try"}` line on stderr. The conventions (stdout/stderr, keys, codes, flags) are in `docs/guide.md#cli-conventions-output-json-flags`.
 - `kling doctor` checks the daemon's socket and its free disk against the admission minimum; `/info` reports `disk_free_bytes` (admin view).
 - Hints from the daemon's error codes: `disk_full` and `insufficient_memory` say what to do; a missing kernel points to `kling up -check`, an invalid name gives the naming rules, and `kling db` without the extension says what to install.
+- Guest agent: `POST /drop-caches` syncs and drops the guest page cache, returning `Cached` before and after (capability `drop-caches`, control path). The host does not call it yet.
 
 ### Changed
 
@@ -43,6 +44,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
 - A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
 - `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
+- Service output reaches the console (`kling logs`) only for the first 64 KiB of each start, then a notice; `kling logs -service` still has all of it.
+- The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
 
 ### Security
 
@@ -64,6 +67,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `/exec` no longer holds 3-5x its output in guest memory: the output is escaped straight into the response (16 MiB of output: 80 → 17 MiB allocated).
+- Pending write-behind on live shares is capped at 16 MiB across all files, not just 4 MiB per file.
 - macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
 - The watcher contains panics per step: a panic in one task (say `sweep`) no longer skips the TTL, gc and memory-pressure steps of every round. TTL expiry runs in the background, two machines at a time, so a slow freeze no longer stalls the watcher for everyone.
 - Daemon shutdown waits for the background watchers (and the memory-pressure work they start) before returning, so a late TTL freeze or removal no longer rewrites `state.json` after `Close`; background freezes and removals don't start once shutdown begins, and the last state write is retried for up to 2 s instead of once.

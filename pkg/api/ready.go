@@ -109,6 +109,21 @@ const ReadyMaxWaitSeconds = 30 * 60
 // apretaba a ciegas hasta la mitad de la RAM y un Android se quedaba sin nada.
 const GuestMemInfoPath = "/meminfo"
 
+// GuestDropCachesPath (POST) suelta la caché de páginas del invitado
+// (`echo 1 > /proc/sys/vm/drop_caches`, tras un sync) y contesta
+// GuestDropCaches. Ruta de control. Es para antes de apretar, congelar o
+// guardar un dorado: esa caché (lo leído de vda/vdb) no cuenta como libre, ni
+// el globo ni el free page reporting la devuelven al host, y un dorado la
+// copia a cada instancia. Capacidad GuestCapDropCaches.
+const GuestDropCachesPath = "/drop-caches"
+
+// GuestDropCaches es la respuesta de POST /drop-caches: el Cached de
+// /proc/meminfo antes y después.
+type GuestDropCaches struct {
+	CachedBeforeMiB int `json:"cached_before_mib"`
+	CachedAfterMiB  int `json:"cached_after_mib"`
+}
+
 // GuestMemInfo es la respuesta de GET /meminfo.
 type GuestMemInfo struct {
 	TotalMiB     int `json:"total_mib"`
