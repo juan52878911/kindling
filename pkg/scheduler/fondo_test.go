@@ -145,3 +145,59 @@ func TestPrewarmSinHistorialRellenaTodo(t *testing.T) {
 		t.Fatalf("precalentó %v, quería [a b]", got)
 	}
 }
+
+// M10: el coste de cada copia es su huella medida, no mem_mib entero. Con
+// 500 MiB de presupuesto y un dorado de 512 MiB cuya copia corriendo pesa
+// 150 de PSS, caben tres; contando mem_mib no cabía ninguna.
+func TestPrewarmCuentaLaHuellaReal(t *testing.T) {
+	d := &daemonFondo{
+		snaps: []*api.Snapshot{snapDe("a", 512)},
+		procStats: &api.ProcStats{
+			AvailableMiB: prewarmMarginMiB + 500,
+			Machines: []api.ProcStat{
+				{ID: "a1", From: "a-gold", State: api.StateRunning, PSSMiB: 150},
+				// Una congelada no cuenta para la media.
+				{ID: "a2", From: "a-gold", State: api.StateWarm, PSSMiB: 0},
+			},
+		},
+	}
+	g, c := gwFondo(t, d, 3)
+	prewarmar(g)
+	if n := c.de("a"); n != 3 {
+		t.Fatalf("precalentó %d, quería 3 (500 MiB / 150 de huella)", n)
+	}
+}
+
+// Sin una copia medida se sigue contando mem_mib, y la huella nunca cuenta más
+// que mem_mib.
+func TestPrewarmSinHuellaCuentaMemMiB(t *testing.T) {
+	d := &daemonFondo{
+		snaps: []*api.Snapshot{snapDe("a", 256)},
+		procStats: &api.ProcStats{
+			AvailableMiB: prewarmMarginMiB + 600,
+			Machines:     []api.ProcStat{{From: "otro", State: api.StateRunning, PSSMiB: 10}},
+		},
+	}
+	g, c := gwFondo(t, d, 4)
+	prewarmar(g)
+	if n := c.de("a"); n != 2 {
+		t.Fatalf("precalentó %d, quería 2 (600 MiB / 256)", n)
+	}
+	if b, _ := g.prewarmBudget(context.Background()); b != 600 {
+		t.Errorf("presupuesto %d, quería 600", b)
+	}
+	d.procStats.Machines = []api.ProcStat{{From: "a-gold", State: api.StateRunning, PSSMiB: 900}}
+	if _, coste := g.prewarmBudget(context.Background()); coste("a-gold", 256) != 256 {
+		t.Errorf("coste %d con huella > mem_mib, quería 256", coste("a-gold", 256))
+	}
+}
+
+// M10: si el daemon no da su memoria, presupuesto fijo y no "sin límite".
+func TestPrewarmSinMemoriaDelDaemonUsaPresupuestoFijo(t *testing.T) {
+	d := &daemonFondo{snaps: []*api.Snapshot{snapDe("a", 512)}} // /procstats falla
+	g, c := gwFondo(t, d, 4)
+	prewarmar(g)
+	if want := prewarmPresupuestoDef / 512; c.de("a") != want {
+		t.Fatalf("precalentó %d, quería %d (presupuesto fijo de %d MiB)", c.de("a"), want, prewarmPresupuestoDef)
+	}
+}
