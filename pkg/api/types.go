@@ -1114,6 +1114,21 @@ type ProcStat struct {
 	// EnergyJoules es la energía que el sistema le atribuye (macOS, en
 	// julios, desde que se lanzó); 0 = no se sabe.
 	EnergyJoules float64 `json:"energy_joules,omitempty"`
+	// Despertares de su VMM desde que se lanzó (0 = no se sabe). macOS da
+	// los que sacan al paquete de CPU del reposo (WakeupsPkgIdle) y los de
+	// interrupción (WakeupsInterrupt), con el auxiliar y los hijos; Linux,
+	// los cambios de contexto voluntarios de todos sus hilos.
+	WakeupsPkgIdle    uint64 `json:"wakeups_pkg_idle,omitempty"`
+	WakeupsInterrupt  uint64 `json:"wakeups_interrupt,omitempty"`
+	VoluntarySwitches uint64 `json:"voluntary_switches,omitempty"`
+	// DiskReadBytes y DiskWriteBytes son la E/S de disco real de su VMM
+	// desde que se lanzó (sin lo servido por la caché de páginas).
+	DiskReadBytes  uint64 `json:"disk_read_bytes,omitempty"`
+	DiskWriteBytes uint64 `json:"disk_write_bytes,omitempty"`
+	// CPUThrottledSeconds es lo que su techo de CPU la lleva frenada
+	// (throttled_usec de su cgroup en Linux, el regulador de kling-vz o
+	// kling-hv en macOS); nil = no se sabe o no tiene techo que medir.
+	CPUThrottledSeconds *float64 `json:"cpu_throttled_seconds,omitempty"`
 	// StateSince es desde cuándo está en su estado (arranque, congelación,
 	// pausa, parada o fallo); nil si no consta.
 	StateSince *time.Time `json:"state_since,omitempty"`

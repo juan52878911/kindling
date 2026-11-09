@@ -501,6 +501,9 @@ atribuye. `/metrics` añade las mismas cifras:
 | `kling_machine_cpu_seconds_total{id,name,core}` | CPU desde que se lanzó su VMM; `core="p"` y `"e"` en Apple Silicon, `"all"` en Linux |
 | `kling_machine_energy_joules_total{id,name}` | energía de sus procesos (`ri_energy_nj`), en julios |
 | `kling_machine_state_seconds{id,name,state}` | cuánto lleva en su estado, también las congeladas y paradas |
+| `kling_machine_wakeups_total{id,name,kind}` | despertares (`ri_pkg_idle_wkups`, `ri_interrupt_wkups`), los de `powermetrics --show-process-wakeups` sin sudo; el daemon tiene los suyos en `kling_daemon_wakeups_total` |
+| `kling_machine_disk_bytes_total{id,name,op}` · `kling_machine_cpu_throttled_seconds_total{id,name}` | disco real (`ri_diskio_*`) y lo frenado por el regulador de CPU |
+| `kling_daemon_footprint_mib` · `kling_battery_on` | la huella del daemon y si el modo batería está en vigor; el resto, en [api.md](api.md#métricas-de-recursos) |
 | `kling_host_mem_available_mib` | lo que el host aún puede dar: `kern.memorystatus_level` sobre `hw.memsize` en macOS, `MemAvailable` en Linux |
 | `kling_memory_pressure_level` | el nivel de presión con el que actúa el daemon (1, 2, 4; 0 = no se sabe o apagado): ver [Presión de memoria](#presión-de-memoria) |
 | `kling_memory_pressure_actions_total{action}` | apretones y congelaciones por presión |

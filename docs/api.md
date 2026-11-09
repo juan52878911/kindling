@@ -57,6 +57,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `nested` | sin publicar | `nested` en `POST /machines` (y en la máquina): virtualización anidada, el invitado arranca en EL2 con `images/vmlinux-nested` (con KVM) y puede correr Firecracker dentro. Solo con el backend kling-hv en un Mac M3 o posterior con macOS 15+ (si no, `400` en el daemon o error de `kling-hv` al arrancar); con `from`, `400`. Una máquina así no se congela, ni se guarda ni se bifurca (`409`), y su TTL de congelar se retira (ver [backend-hv.md](backend-hv.md#virtualización-anidada-kling-run--nested)) |
 | `error-codes` | sin publicar | el cuerpo de error lleva `code` además de `message`: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`, `name_taken`, `machine_limit`, `stale_golden`, `length_required`, `precondition_failed`, `too_large`, `upgrade_required`, `tenant_quota`, `too_many_requests`, `guest_busy`, `internal`, `unsupported`, `bad_gateway`, `unavailable`, `disk_full`, `timeout`, `insufficient_memory` (`pkg/api/errorcodes.go`). `message` es para personas y puede cambiar de redacción; `code` no cambia. Un error que no es JSON (el 404/405 del enrutador) no lo lleva |
 | `host-ports` | sin publicar | `POST /machines` acepta `host_ports: [{host, guest}]` (hasta 16; solo macOS, en Linux es un 400): el invitado alcanza el puerto TCP `host` del 127.0.0.1 del Mac en `172.16.0.1:guest` (`host.kindling.internal`), también con egress `none`, y nada más. `guest` no puede ser 53, 80 ni 443; `host`, no el rango de reenvíos (29000-29999). Viaja con la máquina (`Machine.host_ports`), no con sus snapshots ni sus forks. Ver [mac.md](mac.md#servicios-del-mac-desde-el-invitado--host-port) |
+| `pprof` | sin publicar | `GET /debug/pprof/` (y `goroutine`, `heap`, `allocs`, `profile`, `trace`, `cmdline`… debajo): los perfiles de Go del propio daemon, como `net/http/pprof`. Solo admin; un inquilino recibe `403`. Ver "Métricas de recursos" |
 
 Las credenciales `type: "postgres"` (con `port`, `user`, `database`, `any_database`,
 `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials`
@@ -71,8 +72,9 @@ que anuncia `db-attach` las entiende.
 |---|---|
 | `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)), `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)) y `tuning` (los ajustes efectivos del daemon que se cambian por entorno, `KLING_MAX_MACHINES`, `KLING_MIN_FREE_DISK_MIB`…, con el valor que aplica de verdad; solo a un admin o sin política; `kling doctor` los enseña), `kernel_sha256` (el sha256 del kernel instalado, desde v1.0) y `kernel_mismatch` (dorados y máquinas congeladas hechos con otro kernel: `kind`, `name`, `kernel_sha256`; solo a un admin o sin política). Contesta también a quien no tiene rol, sin contarle máquinas |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s. Un suscriptor que no lee a tiempo pierde eventos; cuando vuelve a haber sitio recibe antes del siguiente un `events.dropped` con `dropped` (cuántos; a un inquilino solo se le dice que hubo pérdida) |
-| `GET /metrics` | métricas Prometheus en texto: máquinas por estado, memoria del host y PSS por microVM; `kling_operations_total{op,result}` (run, thaw, freeze, start; un rechazo o un error de quien llama no es `error`), `kling_admission_rejections_total{code}` (409 tope, 429 cuota de inquilino, 503 disco, 507 memoria), el histograma `kling_operation_duration_ms{kind}` (boot —el arranque en frío de un run o de un start—, restore, thaw, resume, freeze; `thaw` y `resume` son el despertar entero, `wake.total_ms`, no solo `thaw_ms`), `kling_gc_evictions_total`, `kling_orphan_vmms_killed_total`, `kling_events_dropped_total`, `kling_disk_free_mib`, `kling_pending_mib` (memoria de los arranques en curso), y `kling_memory_pressure_level`, `kling_memory_pressure_actions_total{action}` y `kling_memory_pressure_reclaimed_mib_total` (la reacción a la presión de memoria, [mac.md](mac.md#presión-de-memoria)). Los contadores empiezan en 0 con cada daemon |
-| `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
+| `GET /metrics` | métricas Prometheus en texto: máquinas por estado, memoria del host y PSS por microVM; `kling_operations_total{op,result}` (run, thaw, freeze, start; un rechazo o un error de quien llama no es `error`), `kling_admission_rejections_total{code}` (409 tope, 429 cuota de inquilino, 503 disco, 507 memoria), el histograma `kling_operation_duration_ms{kind}` (boot —el arranque en frío de un run o de un start—, restore, thaw, resume, freeze; `thaw` y `resume` son el despertar entero, `wake.total_ms`, no solo `thaw_ms`), `kling_gc_evictions_total`, `kling_orphan_vmms_killed_total`, `kling_events_dropped_total`, `kling_disk_free_mib`, `kling_pending_mib` (memoria de los arranques en curso), `kling_memory_pressure_level`, `kling_memory_pressure_actions_total{action}` y `kling_memory_pressure_reclaimed_mib_total` (la reacción a la presión de memoria, [mac.md](mac.md#presión-de-memoria)), y lo que gastan el daemon y cada VMM: despertares, disco, CPU frenada, huella, batería y fases del despertar (ver "Métricas de recursos"). Los contadores empiezan en 0 con cada daemon |
+| `GET /procstats` | memoria por microVM (PSS) y del host, en JSON; también la CPU, los despertares (`wakeups_pkg_idle`, `wakeups_interrupt`, `voluntary_switches`), el disco (`disk_read_bytes`, `disk_write_bytes`) y `cpu_throttled_seconds` de cada una |
+| `GET /debug/pprof/` | perfiles de Go del daemon (`net/http/pprof`); solo admin, capacidad `pprof` |
 | `POST /cow/store/grow` | amplía en caliente el almacén de copias de disco (`size_mib`, el tamaño nuevo, o `add_mib`, cuánto añadir); devuelve el `store` como en `GET /info`. Solo admin; capacidad `cow-grow`. Ver [cow.md](cow.md#hacer-crecer-el-almacén) |
 
 ### Máquinas
@@ -421,6 +423,42 @@ los puertos de loopback por los que el host llega a cada puerto expuesto del
 invitado (allí todos los invitados comparten IP). Quien hable con un invitado sin
 pasar por el daemon resuelve la dirección con `api.Machine.Addr(puerto)`, que usa
 el reenvío si lo hay y `ip:puerto` si no.
+
+## Métricas de recursos
+
+Lo que hace falta para medir desde kindling cuánto despiertan, leen del disco y
+gastan el daemon y cada VMM, sin `powermetrics` ni `perf`. Las series por
+máquina, como el resto, solo las ve el admin; las del daemon, cualquier rol.
+
+| serie | qué es |
+|---|---|
+| `kling_machine_wakeups_total{id,name,kind}` | despertares del VMM desde que se lanzó. macOS: `kind="pkg_idle"` (los que sacan al paquete de CPU del reposo, `ri_pkg_idle_wkups`) e `"interrupt"` (`ri_interrupt_wkups`), con el auxiliar de Apple y los hijos; es lo que cuenta la columna de `powermetrics --show-process-wakeups`. Linux: `kind="voluntary_switch"`, los cambios de contexto voluntarios de todos sus hilos (`/proc/<pid>/task/*/status`), lo más parecido que da `/proc` |
+| `kling_machine_disk_bytes_total{id,name,op}` | bytes que el VMM leyó (`op="read"`) y escribió (`"write"`) en el disco de verdad, sin lo servido por la caché de páginas: `ri_diskio_bytes*` en macOS, `read_bytes`/`write_bytes` de `/proc/<pid>/io` en Linux. Un thaw que lee el `mem.file` entero se ve aquí |
+| `kling_machine_cpu_throttled_seconds_total{id,name}` | lo que el techo de CPU lleva frenada la máquina: `throttled_usec` de su cgroup en Linux (solo con cgroups delegados), el regulador de `kling-vz` o `kling-hv` en macOS (`throttled_ms` de `GET /kling/cpu`; con `kling-hv`, solo las máquinas con `cpu_pct`, para no preguntar a todas en cada lectura) |
+| `kling_daemon_footprint_mib` · `kling_daemon_rss_mib` | memoria del proceso del daemon: `phys_footprint` en macOS y PSS en Linux; y la residente |
+| `kling_daemon_cpu_seconds_total` · `kling_daemon_wakeups_total{kind}` | su CPU y sus despertares, con los mismos `kind` que las máquinas |
+| `kling_daemon_goroutines` | goroutines vivas en el daemon |
+| `kling_battery_on` | 1 mientras el modo batería está en vigor (con batería y `daemon.battery=auto`, o `daemon.battery=on`; ver [mac.md](mac.md)) |
+| `kling_wake_phase_ms_total{kind,phase}` | lo que sumaron las fases de los despertares que salieron bien (`kind="thaw"` desde disco, `"resume"` desde pausa; `phase` como los campos de `wake`: `wait`, `check`, `store`, `mirror`, `memory`, `net`, `spawn`, `socket`, `load`, `forwards`, `resync`, `cgroup`, `finish`). Dividido por `kling_operation_duration_ms_count` del mismo `kind`, la media de cada fase |
+
+Los despertares por segundo salen de `rate()`, o de dos lecturas a mano
+(`SOCK` es el socket del daemon):
+
+```
+curl -s --unix-socket "$SOCK" http://k/metrics | grep -E '^kling_(daemon_wakeups|machine_wakeups|battery_on)'
+sleep 60
+curl -s --unix-socket "$SOCK" http://k/metrics | grep -E '^kling_(daemon_wakeups|machine_wakeups)'
+```
+
+`GET /debug/pprof/` sirve los perfiles de Go del daemon, como `net/http/pprof`
+(capacidad `pprof`). Solo el admin: un volcado de goroutines enseña rutas y
+argumentos de todas las máquinas, y `profile?seconds=N` deja a quien llama elegir
+cuánto perfilar. Por el socket:
+
+```
+curl -s --unix-socket "$SOCK" 'http://k/debug/pprof/goroutine?debug=1' | head
+curl -s --unix-socket "$SOCK" -o cpu.pprof 'http://k/debug/pprof/profile?seconds=30' && go tool pprof cpu.pprof
+```
 
 ## Grafos
 
@@ -902,6 +940,14 @@ estadísticas del globo, `squeeze` pregunta `GET /meminfo` al agente y reclama l
 disponible menos un cuarto de la RAM, nunca por debajo de la mitad (antes, la
 mitad a ciegas: un Android de 1 GiB se quedaba con 4 MiB disponibles).
 
+**Estadísticas del globo.** En Firecracker el invitado reporta su memoria cada
+10 s (antes, cada segundo: un despertar por segundo y máquina que nadie leía).
+`squeeze`, el apretón al estar lista y el de antes de volcar bajan el intervalo
+a 1 s con `PATCH /balloon/statistics`, que hace que el invitado reporte en el
+acto, y reclaman con esas cifras; al acabar vuelve a 10 s. Un dorado o un
+volcado anterior trae 1 s grabado y se deja en 10 s al restaurarlo. Si el
+invitado no contesta en 250 ms, se aprieta con su último informe.
+
 ## Códigos de estado por ruta
 
 Lo que contesta cada ruta, sacado de `internal/daemon`. El golden
@@ -1063,7 +1109,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `POST /graphs/{ref}/fork` | 201 | `413`/`400` cuerpo; `graphStatus`; `400` `count` |
 | `DELETE /graphs/{ref}` | 204 | `graphStatus` |
 | `GET /events` | 200 NDJSON | `500` sin flusher |
-| `GET /metrics` · `GET /procstats` | 200 | — |
+| `GET /metrics` · `GET /procstats` · `GET /debug/pprof/` | 200 | — |
 | `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; `cicloStatus` (`400` tamaño que no vale); `501` sin almacén en esta plataforma |
 | `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` puerto < 1024 (inquilino); `publicarStatus` |
 | `DELETE /machines/{ref}/publish` | 204 | `404` sin máquina o sin publicación; `400` `host` |

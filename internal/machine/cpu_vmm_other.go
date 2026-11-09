@@ -9,14 +9,6 @@ import (
 	"time"
 )
 
-// usoCPU es lo que gastó un proceso. Fuera de macOS solo se sabe el total:
-// ni reparto entre núcleos ni energía.
-type usoCPU struct {
-	total, p   time.Duration
-	energiaNJ  uint64
-	conNucleos bool
-}
-
 // memoriaEsHuella: en Linux la memoria por máquina es el PSS.
 const memoriaEsHuella = false
 

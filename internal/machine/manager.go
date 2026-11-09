@@ -2910,11 +2910,6 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	return &out, nil
 }
 
-// balloonStatsPollSec es cada cuánto reporta el globo sus estadísticas. Hace
-// falta >0 para poder leer la memoria libre del invitado antes de apretarlo; 1 s
-// es barato (el hilo vive dentro del invitado) y suficientemente fresco.
-const balloonStatsPollSec = 1
-
 // balloonSqueezeMarginMiB es el colchón que se le deja al invitado al apretar:
 // se reclama su memoria libre MENOS este margen, para no dejarlo pegado al borde
 // del OOM justo después.
@@ -2996,11 +2991,14 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool,
 	}
 	c := fc.New(sock)
 
-	stats, err := c.BalloonStats(ctx)
+	// Con un informe recién pedido: en reposo el invitado reporta cada 10 s
+	// (globo_ritmo.go).
+	stats, volverAlReposo, err := estadisticasFrescas(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("the balloon is not available on this instance "+
 			"(reimport the image to record it in the snapshot): %w", err)
 	}
+	defer volverAlReposo()
 	freeMiB := int(stats.FreeMemory >> 20)
 	rssBefore := rssVMM(pid, sock)
 
@@ -3809,6 +3807,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	elapsed := time.Since(start).Milliseconds()
 	crono.marca(&crono.p.LoadMS)
+	// Un volcado de antes de globo_ritmo.go trae las estadísticas cada 1 s.
+	ritmoGloboReposo(ctx, c)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
