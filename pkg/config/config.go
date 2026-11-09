@@ -145,6 +145,16 @@ type Daemon struct {
 	// ShareCopyMaxMiB acota el contenido de una carpeta en modo copy. 0 = 1024.
 	ShareCopyMaxMiB int `json:"share_copy_max_mib,omitempty"`
 
+	// Cuota de cada carpeta rw, contada como crecimiento neto en cada arranque
+	// de la máquina (docs/compartir.md). 0 = el valor por defecto; -1 = sin
+	// tope. ShareMaxMiB: bytes (32768 = 32 GiB); ShareMaxFiles: entradas nuevas
+	// (1 000 000); ShareMinFreeMiB: lo que tiene que quedar libre en el disco
+	// del host (1024). KLING_SHARE_MAX_MIB, KLING_SHARE_MAX_FILES y
+	// KLING_SHARE_MIN_FREE_MIB los sustituyen sin tocar el fichero.
+	ShareMaxMiB     int `json:"share_max_mib,omitempty"`
+	ShareMaxFiles   int `json:"share_max_files,omitempty"`
+	ShareMinFreeMiB int `json:"share_min_free_mib,omitempty"`
+
 	// CoW decide cómo recibe una instancia creada desde un dorado (run -from,
 	// fork) su copia del overlay: "auto" (vacío), "reflink-store" u "off". Ver
 	// docs/cow.md. KLING_COW lo sustituye sin tocar el fichero. Se lee al
@@ -739,6 +749,22 @@ func (c *Config) Set(key, value string) error {
 				return fmt.Errorf("daemon.share_copy_max_mib can't be negative")
 			}
 			c.Daemon.ShareCopyMaxMiB = n
+		case "share_max_mib", "share_max_files", "share_min_free_mib":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < -1 {
+				return fmt.Errorf("daemon.%s must be -1 (no limit), 0 (default) or positive", field)
+			}
+			switch field {
+			case "share_max_mib":
+				c.Daemon.ShareMaxMiB = n
+			case "share_max_files":
+				c.Daemon.ShareMaxFiles = n
+			default:
+				c.Daemon.ShareMinFreeMiB = n
+			}
 		case "net_mibps":
 			n, err := atoi()
 			if err != nil {
@@ -904,6 +930,9 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.vmm", c.Daemon.VMM},
 		{"daemon.share_roots", strings.Join(c.Daemon.ShareRoots, ",")},
 		{"daemon.share_copy_max_mib", itoa(c.Daemon.ShareCopyMaxMiB)},
+		{"daemon.share_max_mib", itoa(c.Daemon.ShareMaxMiB)},
+		{"daemon.share_max_files", itoa(c.Daemon.ShareMaxFiles)},
+		{"daemon.share_min_free_mib", itoa(c.Daemon.ShareMinFreeMiB)},
 		{"daemon.cow", c.Daemon.CoW},
 		{"daemon.cow_store_gib", itoa(c.Daemon.CoWStoreGiB)},
 		{"daemon.credaudit_max_mib", itoa(c.Daemon.CredAuditMiB)},

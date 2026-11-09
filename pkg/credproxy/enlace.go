@@ -76,6 +76,11 @@ type LinkOptions struct {
 	Target string
 	// Resolve se llama en cada conexión aceptada.
 	Resolve ResolveLinkFunc
+	// Recheck, si no es nil, se llama tras marcar con lo que dio Resolve: un
+	// error es "eso ya no es el destino" (la máquina se borró y otra heredó
+	// su dirección entre Resolve y el dial, por ejemplo) y la conexión
+	// marcada se cierra sin que pase un byte. Igual que el broker de macOS.
+	Recheck func(addr, machine string) error
 	// MaxConns: conexiones a la vez; 0 = 16.
 	MaxConns int
 	// ResolveTimeout acota Resolve (despertar un nodo incluido); 0 = 2 min.
@@ -211,8 +216,11 @@ func (e *Enlace) Serve(ln net.Listener) error {
 		select {
 		case e.sem <- struct{}{}:
 		default:
-			_ = c.Close()
+			// Primero el registro y luego el cierre: quien vea el cierre ya lo
+			// encuentra en la cola del auditor. Al revés, un Close del auditor
+			// entre los dos (justo tras ver el cierre) lo perdía.
 			e.auditar(Record{Kind: KindLink, Host: e.o.Name, Reason: ReasonBusy})
+			_ = c.Close()
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), e.o.ResolveTimeout)
@@ -292,6 +300,17 @@ func (e *Enlace) atender(ctx context.Context, s *sesionEnlace, guest net.Conn) {
 	if err != nil {
 		rec.Reason = ReasonUpstreamError
 		return
+	}
+	// Invalidar no cubre una sesión que resolvió justo después de que se
+	// invalidara al destino y antes de que cambiara su estado: lo marcado se
+	// vuelve a comprobar aquí.
+	if e.o.Recheck != nil {
+		if err := e.o.Recheck(addr, maquina); err != nil {
+			_ = up.Close()
+			rec.Reason = ReasonInvalidated
+			e.o.Logf("link %s: %v", e.o.Name, err)
+			return
+		}
 	}
 	if !s.unir(up) {
 		rec.Reason = ReasonInvalidated

@@ -51,6 +51,12 @@ func enlaceDePrueba(t *testing.T, o LinkOptions) (*Enlace, string, string) {
 	if err != nil {
 		t.Skipf("sin TCP local: %v", err)
 	}
+	return enlaceDePruebaEn(t, o, ln)
+}
+
+// enlaceDePruebaEn: lo mismo sobre un listener dado.
+func enlaceDePruebaEn(t *testing.T, o LinkOptions, ln net.Listener) (*Enlace, string, string) {
+	t.Helper()
 	audPath := filepath.Join(t.TempDir(), AuditFile)
 	aud := NewAuditor(audPath, nil)
 	if o.Destino == nil {
@@ -342,6 +348,93 @@ func TestEnlaceTopeDeConexiones(t *testing.T) {
 	}
 }
 
+// lnFrenado da conexiones cuyo Close cierra el socket y luego espera a
+// soltar: hace de Serve desalojado justo después de cerrar la que rechaza.
+type lnFrenado struct {
+	net.Listener
+	soltar chan struct{}
+}
+
+func (l lnFrenado) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return connFrenada{c, l.soltar}, nil
+}
+
+type connFrenada struct {
+	net.Conn
+	soltar chan struct{}
+}
+
+func (c connFrenada) Close() error {
+	err := c.Conn.Close()
+	<-c.soltar
+	return err
+}
+
+// El busy de la conexión rechazada ya está en la auditoría cuando el
+// cliente ve el cierre. Antes Serve cerraba y luego auditaba: quien leía la
+// auditoría tras ver el cierre (el test del tope, o un Close del enlace y
+// del auditor) podía llegar antes que el registro, que se perdía.
+func TestEnlaceBusyAntesDelCierre(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("sin TCP local: %v", err)
+	}
+	soltar := make(chan struct{})
+	defer close(soltar) // al final: Serve sigue (en el registro, si va tarde)
+	e, addr, audPath := enlaceDePruebaEn(t, LinkOptions{MaxConns: 1, Resolve: func(ctx context.Context) (string, string, error) {
+		<-ctx.Done()
+		return "", "", ctx.Err()
+	}}, lnFrenado{ln, soltar})
+	// La primera ocupa el tope: se queda resolviendo hasta el Close del
+	// enlace (en el Cleanup, ya con soltar cerrado).
+	c1, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	for i := 0; i < 200; i++ {
+		e.mu.Lock()
+		n := len(e.sesiones)
+		e.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c2, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c2.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := c2.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("la segunda conexión no se cerró en el acto: %v", err)
+	}
+	c2.Close()
+	// Serve sigue frenado en el Close de c2: lo que haya auditado ya es lo
+	// que verá quien cierre el auditor ahora.
+	_ = e.o.Auditor.Close()
+	f, err := os.Open(audPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	busy := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var r Record
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Reason == ReasonBusy {
+			busy++
+		}
+	}
+	if busy != 1 {
+		t.Fatalf("auditoría al ver el cierre: %d busy, quería 1", busy)
+	}
+}
+
 // Los motivos de un Resolve fallido llegan a la auditoría.
 func TestEnlaceMotivos(t *testing.T) {
 	casos := map[error]string{
@@ -353,5 +446,55 @@ func TestEnlaceMotivos(t *testing.T) {
 		if got := motivoResolucion(err); got != want {
 			t.Errorf("%v -> %q, quería %q", err, got, want)
 		}
+	}
+}
+
+// Tras marcar se vuelve a mirar que el destino sigue siendo el resuelto (lo
+// que hace el broker de macOS): si entre Resolve y el dial la máquina se
+// borró y otra heredó su dirección, la conexión marcada se cierra sin que
+// pase un byte, y la auditoría dice invalidated.
+func TestEnlaceRecompruebaTrasMarcar(t *testing.T) {
+	destino, aceptadas := ecoTCP(t)
+	var cambiada atomic.Bool
+	var vistos atomic.Value
+	e, addr, audPath := enlaceDePrueba(t, LinkOptions{
+		Resolve: func(context.Context) (string, string, error) { return destino, "b000000000000001", nil },
+		Recheck: func(a, maquina string) error {
+			vistos.Store(a + " " + maquina)
+			if cambiada.Load() {
+				return errors.New("machine b0000000 changed while connecting to it")
+			}
+			return nil
+		},
+	})
+	if got, err := ecoEnlace(t, addr, "hola"); err != nil || got != "hola" {
+		t.Fatalf("con el destino vigente: %q %v", got, err)
+	}
+	if v, _ := vistos.Load().(string); v != destino+" b000000000000001" {
+		t.Fatalf("Recheck recibió %q", v)
+	}
+	cambiada.Store(true)
+	if got, err := ecoEnlace(t, addr, "hola"); err == nil {
+		t.Fatalf("con el destino cambiado la conexión pasó: %q", got)
+	}
+	// El eco cuenta en su goroutine: puede ir detrás del cierre que ve el
+	// cliente.
+	for i := 0; i < 200 && aceptadas.Load() < 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := aceptadas.Load(); n != 2 {
+		t.Fatalf("el destino aceptó %d conexiones, esperaba 2 (la segunda se cierra tras marcar)", n)
+	}
+	var invalidadas int
+	for _, r := range registrosEnlace(t, e, audPath) {
+		if r.Reason == ReasonInvalidated {
+			invalidadas++
+			if r.ReqBytes != 0 {
+				t.Errorf("la invalidada pasó %d bytes", r.ReqBytes)
+			}
+		}
+	}
+	if invalidadas != 1 {
+		t.Fatalf("%d registros invalidated, esperaba 1", invalidadas)
 	}
 }

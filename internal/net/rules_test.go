@@ -14,20 +14,24 @@ import (
 func TestEgressRulesOrden(t *testing.T) {
 	n := Plan(1, "abcdef0123")
 	none := n.egressRules(EgressNone)
-	if len(none) != 3 || strings.Join(none[0], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
+	if len(none) != 4 || strings.Join(none[0], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
 		!strings.Contains(strings.Join(none[1], " "), "ESTABLISHED,RELATED -j ACCEPT") ||
-		strings.Join(none[2], " ") != "-A FORWARD -i tap0 -j DROP" {
+		strings.Join(none[2], " ") != "-A FORWARD -i tap0 -j DROP" ||
+		strings.Join(none[3], " ") != strings.Join(topeTotalNuevas(), " ") {
 		t.Fatalf("none = %v", none)
 	}
 	inet := n.egressRules(EgressInternet)
-	if len(inet) != 4+len(blocked) {
+	if len(inet) != 5+len(blocked) {
 		t.Fatalf("internet: %d reglas", len(inet))
 	}
-	if strings.Join(inet[len(inet)-2], " ") != strings.Join(topeNuevas(), " ") {
-		t.Errorf("la penúltima de internet debe ser el tope de nuevas: %v", inet[len(inet)-2])
+	if strings.Join(inet[len(inet)-3], " ") != strings.Join(topeNuevas(), " ") {
+		t.Errorf("la última del FORWARD de internet debe ser el tope de nuevas: %v", inet[len(inet)-3])
 	}
-	if strings.Join(inet[len(inet)-1], " ") != "-t nat -A POSTROUTING -o vg-abcdef01 -j MASQUERADE" {
-		t.Errorf("la última de internet debe ser el MASQUERADE: %v", inet[len(inet)-1])
+	if strings.Join(inet[len(inet)-2], " ") != "-t nat -A POSTROUTING -o vg-abcdef01 -j MASQUERADE" {
+		t.Errorf("tras el FORWARD de internet va el MASQUERADE: %v", inet[len(inet)-2])
+	}
+	if strings.Join(inet[len(inet)-1], " ") != strings.Join(topeTotalNuevas(), " ") {
+		t.Errorf("la última de internet debe ser el tope total: %v", inet[len(inet)-1])
 	}
 	for i, cidr := range blocked {
 		if got := strings.Join(inet[2+i], " "); got != "-A FORWARD -i tap0 -d "+cidr+" -j DROP" {
@@ -266,7 +270,7 @@ func TestApplyEgressYRestorePonenLoMismo(t *testing.T) {
 	// de INVALID y cierra con el DROP sin ctstate.
 	in := restoreInput(n.egressRules(EgressNone))
 	if !strings.HasPrefix(in, "*filter\n-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP\n") ||
-		!strings.HasSuffix(in, "\n-A FORWARD -i tap0 -j DROP\nCOMMIT\n") {
+		!strings.Contains(in, "\n-A FORWARD -i tap0 -j DROP\nCOMMIT\n") {
 		t.Errorf("entrada de iptables-restore de none:\n%s", in)
 	}
 }
@@ -394,5 +398,46 @@ func TestRafagaDeNuevasSeCorta(t *testing.T) {
 	}
 	if !strings.Contains(restoreInput(n.reglasAllowlist()), "-m hashlimit --hashlimit-above 300/s --hashlimit-burst 300 --hashlimit-mode dstip --hashlimit-name kl-nuevas -j DROP\n-A FORWARD -i tap0 -o "+n.NSIf+" -m conntrack --ctstate NEW -m set") {
 		t.Errorf("el tope no va justo delante del ACCEPT de nuevas:\n%s", restoreInput(n.reglasAllowlist()))
+	}
+}
+
+// El tope total de conexiones nuevas por máquina va en mangle PREROUTING en
+// los tres modos: ahí conntrack ya clasificó el paquete pero aún no confirmó
+// la entrada, así que lo descartado no ocupa la tabla de conntrack del host.
+// Va delante de los DNAT y de los ACCEPT que reglasGrafo inserta en FORWARD,
+// y cubre también lo que va al INPUT del netns.
+func TestTopeTotalDeNuevasEnLosTresModos(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	quiero := "*mangle\n-A PREROUTING -i tap0 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 1000/s --hashlimit-burst 2000 --hashlimit-name kl-total -j DROP\nCOMMIT\n"
+	for nombre, reglas := range map[string][][]string{
+		"none":      n.egressRules(EgressNone),
+		"internet":  n.egressRules(EgressInternet),
+		"allowlist": n.reglasAllowlist(),
+	} {
+		if !strings.Contains(restoreInput(reglas), quiero) {
+			t.Errorf("%s: falta el tope total de nuevas en mangle:\n%s", nombre, restoreInput(reglas))
+		}
+	}
+}
+
+// Los sysctl de endurecimiento del netns: los que se pueden por netns, en
+// todas sus interfaces. nf_conntrack_max no: fuera del netns inicial es de
+// solo lectura y su fallo solo ensuciaría el log.
+func TestSysctlsNetns(t *testing.T) {
+	got := strings.Join(sysctlsNetns("vg-abcdef01"), " ")
+	for _, iface := range []string{"all", "default", TapName, "vg-abcdef01"} {
+		for _, kv := range []string{"rp_filter=1", "accept_source_route=0", "accept_redirects=0", "send_redirects=0", "arp_ignore=1"} {
+			if clave := "net.ipv4.conf." + iface + "." + kv; !strings.Contains(got, clave) {
+				t.Errorf("falta %s en %s", clave, got)
+			}
+		}
+	}
+	for _, kv := range []string{"net.netfilter.nf_conntrack_udp_timeout=10", "net.netfilter.nf_conntrack_tcp_timeout_syn_sent=30"} {
+		if !strings.Contains(got, kv) {
+			t.Errorf("falta %s en %s", kv, got)
+		}
+	}
+	if strings.Contains(got, "nf_conntrack_max") {
+		t.Errorf("nf_conntrack_max no es por netns: %s", got)
 	}
 }
