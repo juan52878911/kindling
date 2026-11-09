@@ -80,16 +80,23 @@ func TestDecidirJailerAutomaticoSeNiegaSiFaltaAlgo(t *testing.T) {
 	}
 }
 
-// Actualizar un host que corría como root, con jailer pero sin el usuario de
-// servicio: antes de P7 se jaileaba como root, y así sigue, con un aviso que
-// lleva el motivo. Sin binario no hay nada que ejecutar, aun como root.
-func TestDecidirJailerAutomaticoComoRootSinUsuarioJailaYAvisa(t *testing.T) {
+// Un host que corre como root, con jailer pero sin el usuario de servicio:
+// antes se jaileaba como root, con un aviso. Pero jailer como root deja al VMM
+// con escritura (CAP_DAC_OVERRIDE) sobre los hardlinks del jail, que son el
+// MISMO inodo que el kernel, las bases y los dorados de todas las microVMs.
+// Ahora se niega, y el mensaje dice cómo crear el usuario y cómo forzarlo.
+func TestDecidirJailerAutomaticoComoRootSinUsuarioBloquea(t *testing.T) {
 	jailed, blocked, warn := decidirJailer(true, "", true, false, "user kindling doesn't exist", true)
-	if !jailed || blocked != "" {
-		t.Fatalf("binario + root sin usuario = (%v, %q), quería jailear sin bloquear", jailed, blocked)
+	if jailed || blocked == "" {
+		t.Fatalf("binario + root sin usuario = (%v, %q), quería bloquear", jailed, blocked)
 	}
-	if !strings.Contains(warn, "ROOT") || !strings.Contains(warn, "user kindling doesn't exist") {
-		t.Errorf("debería avisar de que corre como root, con el motivo: %q", warn)
+	if warn != "" {
+		t.Errorf("el bloqueo no es un aviso de arranque: %q", warn)
+	}
+	for _, quiero := range []string{"user kindling doesn't exist", "useradd", "KLING_JAILER=1"} {
+		if !strings.Contains(blocked, quiero) {
+			t.Errorf("el bloqueo debería mencionar %q: %q", quiero, blocked)
+		}
 	}
 	if jailed, blocked, _ := decidirJailer(true, "", false, false, "", true); jailed || blocked == "" {
 		t.Fatalf("sin binario, aun como root, debe bloquear: (%v, %q)", jailed, blocked)
@@ -120,8 +127,12 @@ func TestDecidirJailerForzadoIgnoraElUsuarioPeroNoElBinario(t *testing.T) {
 	// KLING_JAILER=1: se respeta aunque falte el usuario sin privilegios
 	// (jailer cae a --uid/--gid 0, ver jailerArgv), pero sigue sin haber nada
 	// que ejecutar si falta el propio binario.
-	if jailed, blocked, warn := decidirJailer(true, "1", true, false, "", false); !jailed || blocked != "" || warn != "" {
-		t.Fatalf("forzado con binario y sin usuario = (%v, %q, %q), quería (true, \"\", \"\")", jailed, blocked, warn)
+	if jailed, blocked, warn := decidirJailer(true, "1", true, false, "", false); !jailed || blocked != "" || !strings.Contains(warn, "ROOT") {
+		t.Fatalf("forzado con binario y sin usuario = (%v, %q, %q), quería jailear avisando de ROOT", jailed, blocked, warn)
+	}
+	// Con el usuario listo, forzar no tiene nada de qué avisar.
+	if _, _, warn := decidirJailer(true, "1", true, true, "", true); warn != "" {
+		t.Fatalf("forzado con usuario no debería avisar: %q", warn)
 	}
 	jailed, blocked, warn := decidirJailer(true, "1", false, true, "", false)
 	if jailed {

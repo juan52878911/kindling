@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -99,5 +100,126 @@ func TestSnapshotSinFirma(t *testing.T) {
 	t.Setenv("KLING_REQUIRE_SIGNED", "1")
 	if err := m.comprobarFirma(s); !errors.Is(err, errFirma) {
 		t.Fatalf("exigiendo firma: %v", err)
+	}
+}
+
+// B2: la firma v2 cubre lo que la v1 dejaba fuera y sí decide cómo nace una
+// instancia. Cambiar cualquiera de esos campos en meta.json la rompe.
+func TestFirmaV2CubreEtiquetasTopesEntornoYMemoria(t *testing.T) {
+	m := newTestManager(t)
+	s := snapDePrueba()
+	s.Labels = map[string]string{api.LabelPorts: "8080", api.LabelOwner: "ana"}
+	s.MemMaxMiB, s.CPUPct, s.EnvKeys = 512, 50, []string{"TOKEN"}
+	s.MemDigest = "sha256-tree-4m:aa"
+	if err := m.firmar(s); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(s.Signature, firmaV2) {
+		t.Fatalf("una firma nueva debería ser v2: %q", s.Signature)
+	}
+	if err := m.comprobarFirma(s); err != nil {
+		t.Fatalf("recién firmada: %v", err)
+	}
+	for nombre, tocar := range map[string]func(*api.Snapshot){
+		"abrir un puerto": func(s *api.Snapshot) {
+			s.Labels = map[string]string{api.LabelPorts: "8080,22", api.LabelOwner: "ana"}
+		},
+		"cambiar de dueño": func(s *api.Snapshot) {
+			s.Labels = map[string]string{api.LabelPorts: "8080", api.LabelOwner: "eva"}
+		},
+		"subir el techo":   func(s *api.Snapshot) { s.MemMaxMiB = 8192 },
+		"quitar el tope":   func(s *api.Snapshot) { s.CPUPct = 0 },
+		"fijar el tope":    func(s *api.Snapshot) { s.CPUPctFixed = true },
+		"cambiar el env":   func(s *api.Snapshot) { s.EnvKeys = nil },
+		"cambiar la RAM":   func(s *api.Snapshot) { s.MemDigest = "sha256-tree-4m:bb" },
+		"bajar a firma v1": func(s *api.Snapshot) { s.Signature = strings.TrimPrefix(s.Signature, firmaV2) },
+		"y lo de siempre":  func(s *api.Snapshot) { s.AllowExec = true },
+		"otra versión":     func(s *api.Snapshot) { s.Signature = "v3:" + strings.TrimPrefix(s.Signature, firmaV2) },
+	} {
+		c := *s
+		tocar(&c)
+		if err := m.comprobarFirma(&c); !errors.Is(err, errFirma) {
+			t.Errorf("%s: la firma siguió valiendo (%v)", nombre, err)
+		}
+	}
+
+	// Las credenciales no van en meta.json (se leen del almacén sellado) y se
+	// ponen después del commit: no la invalidan.
+	c := *s
+	c.CredentialDomains = []string{"api.example.com"}
+	if err := m.comprobarFirma(&c); err != nil {
+		t.Errorf("las credenciales invalidaron la firma: %v", err)
+	}
+}
+
+// Los dorados firmados en v1 siguen valiendo, con lo que la v1 cubría: no hay
+// que rehacer los dorados de nadie para actualizar.
+func TestFirmaV1SigueValiendo(t *testing.T) {
+	m := newTestManager(t)
+	s := snapDePrueba()
+	s.Labels = map[string]string{api.LabelPorts: "8080"}
+	sum, err := m.macDe(contenidoFirmado(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Signature = hex.EncodeToString(sum) // como la escribía firmar() antes de B2
+	if err := m.comprobarFirma(s); err != nil {
+		t.Fatalf("una firma v1 dejó de valer: %v", err)
+	}
+	c := *s
+	c.AllowExec = true
+	if err := m.comprobarFirma(&c); !errors.Is(err, errFirma) {
+		t.Errorf("la v1 dejó de cubrir la política: %v", err)
+	}
+}
+
+// Lo que pide el informe, de punta a punta por meta.json: un dorado con
+// kling.ports cambiado a mano en el fichero no pasa la firma.
+func TestMetaConPuertosAlteradosNoPasaLaFirma(t *testing.T) {
+	m := newTestManager(t)
+	s := snapDePrueba()
+	s.Labels = map[string]string{api.LabelPorts: "8080"}
+	if err := m.firmar(s); err != nil {
+		t.Fatal(err)
+	}
+	b, err := codificarMeta(s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leido, _, err := decodificarMeta("meta.json", b); err != nil || m.comprobarFirma(leido) != nil {
+		t.Fatalf("el meta intacto no pasa: %v", err)
+	}
+	alterado := strings.Replace(string(b), `"kling.ports": "8080"`, `"kling.ports": "8080,22"`, 1)
+	if alterado == string(b) {
+		t.Fatalf("el meta no tiene la etiqueta como se esperaba:\n%s", b)
+	}
+	leido, _, err := decodificarMeta("meta.json", []byte(alterado))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.comprobarFirma(leido); !errors.Is(err, errFirma) {
+		t.Fatalf("kling.ports alterado en meta.json pasó la firma: %v", err)
+	}
+}
+
+// Etiquetas y entorno vacíos (no nil) al firmar vuelven como nil de meta.json
+// (omitempty): la firma tiene que seguir valiendo tras la vuelta.
+func TestFirmaV2VacioYAusenteFirmanIgual(t *testing.T) {
+	m := newTestManager(t)
+	s := snapDePrueba()
+	s.Labels, s.EnvKeys = map[string]string{}, []string{}
+	if err := m.firmar(s); err != nil {
+		t.Fatal(err)
+	}
+	b, err := codificarMeta(s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leido, _, err := decodificarMeta("meta.json", b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.comprobarFirma(leido); err != nil {
+		t.Fatalf("vacío firmado, nil leído: %v", err)
 	}
 }

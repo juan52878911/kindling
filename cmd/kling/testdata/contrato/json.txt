@@ -375,6 +375,7 @@ kling save -force -json m1 tpl:  kling_version string
 kling save -force -json m1 tpl:  labels.x string
 kling save -force -json m1 tpl:  macos string
 kling save -force -json m1 tpl:  mem_bytes number
+kling save -force -json m1 tpl:  mem_digest string
 kling save -force -json m1 tpl:  mem_max_mib number
 kling save -force -json m1 tpl:  mem_mib number
 kling save -force -json m1 tpl:  name string
@@ -430,6 +431,7 @@ kling template ls -json:  [].kling_version string
 kling template ls -json:  [].labels.x string
 kling template ls -json:  [].macos string
 kling template ls -json:  [].mem_bytes number
+kling template ls -json:  [].mem_digest string
 kling template ls -json:  [].mem_max_mib number
 kling template ls -json:  [].mem_mib number
 kling template ls -json:  [].name string

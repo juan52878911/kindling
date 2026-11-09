@@ -11,7 +11,10 @@ package machine
 //
 // La firma es un HMAC-SHA256 con una clave que solo existe en este host y solo
 // lee root. Cubre lo que decide cómo nace una instancia: los hashes de los
-// ficheros y la política (exec, red, dominios, volúmenes). NO cubre las
+// ficheros y la política (exec, red, dominios, volúmenes). Desde la v2 (B2)
+// también las etiquetas (kling.ports decide qué puertos alcanza el host,
+// kling.owner de quién es), los topes (mem_max_mib, cpu_pct), los nombres del
+// entorno y el digest del mem.file: ver contenidoFirmadoV2. NO cubre las
 // anotaciones, que cambian después del commit por diseño y no deciden nada de
 // eso. Tampoco cubre KernelSHA256 (K2): es una comprobación de compatibilidad
 // entre el snapshot y el vmlinux instalado, no una decisión de arranque, y
@@ -130,15 +133,76 @@ func contenidoFirmado(s *api.Snapshot) []byte {
 	return b
 }
 
-// firmar rellena s.Signature.
-func (m *Manager) firmar(s *api.Snapshot) error {
+// firmaV2 es el prefijo de las firmas v2. Una v1 es el hex a secas: no lleva
+// ":", así que no hay forma de confundirlas.
+const firmaV2 = "v2:"
+
+// contenidoFirmadoV2 es lo que cubre la firma v2: todo lo de la v1 y, además,
+// lo que la v1 dejaba fuera y sí decide cómo nace una instancia (B2):
+//
+//   - Labels: kling.ports dice a qué puertos del invitado deja llegar el
+//     daemon, y kling.owner de quién es la plantilla.
+//   - MemMaxMiB, CPUPct y CPUPctFixed: los topes con que nace cada copia.
+//   - EnvKeys: qué variables hay que volver a pedir al arrancarla.
+//   - MemDigest: el mem.file, que es la RAM (y el kernel) del invitado. Sin él
+//     la firma cubría el estado de los vCPU pero no la memoria que restauran.
+//
+// CredentialDomains y CredentialAnyDatabase NO: no se guardan en meta.json
+// (anotarCredencialesPlantilla los rellena al leer, desde el almacén sellado
+// con AEAD y el nombre del dorado como dato asociado, que ya detecta un
+// cambio), y se pueden poner después del commit (SetSnapshotCredentials):
+// cubrirlos invalidaría la firma de una plantilla al darle credenciales.
+//
+// Los mapas se serializan con las claves en orden (encoding/json), así que
+// las etiquetas firman lo mismo se lean como se lean. El campo V separa los
+// dominios: ningún contenido v1 coincide con uno v2.
+//
+// Vacío y ausente firman igual: meta.json los guarda con omitempty, así que
+// un mapa o una lista vacíos al hacer commit vuelven como nil al leerlo, y
+// firmar {} y comprobar null rompía la firma del propio host. Pasaba con todo
+// nodo de grafo, cuyas etiquetas son solo de grafo y el commit las quita
+// (sinEtiquetasGrafo deja un mapa vacío). No debilita nada: el fichero no
+// puede distinguir los dos casos, y ninguno de los dos decide algo distinto.
+func contenidoFirmadoV2(s *api.Snapshot) []byte {
+	labels, envKeys := s.Labels, s.EnvKeys
+	if len(labels) == 0 {
+		labels = nil
+	}
+	if len(envKeys) == 0 {
+		envKeys = nil
+	}
+	b, _ := json.Marshal(struct {
+		V           int
+		V1          json.RawMessage
+		Labels      map[string]string
+		MemMaxMiB   int
+		CPUPct      int
+		CPUPctFixed bool
+		EnvKeys     []string
+		MemDigest   string
+	}{2, contenidoFirmado(s), labels, s.MemMaxMiB, s.CPUPct, s.CPUPctFixed,
+		envKeys, s.MemDigest})
+	return b
+}
+
+// macDe calcula el HMAC de contenido con la clave del host.
+func (m *Manager) macDe(contenido []byte) ([]byte, error) {
 	clave, err := m.claveFirma()
 	if err != nil {
-		return fmt.Errorf("snapshot signing key: %w", err)
+		return nil, fmt.Errorf("snapshot signing key: %w", err)
 	}
 	mac := hmac.New(sha256.New, clave)
-	mac.Write(contenidoFirmado(s))
-	s.Signature = hex.EncodeToString(mac.Sum(nil))
+	mac.Write(contenido)
+	return mac.Sum(nil), nil
+}
+
+// firmar rellena s.Signature, siempre en v2.
+func (m *Manager) firmar(s *api.Snapshot) error {
+	sum, err := m.macDe(contenidoFirmadoV2(s))
+	if err != nil {
+		return err
+	}
+	s.Signature = firmaV2 + hex.EncodeToString(sum)
 	return nil
 }
 
@@ -147,6 +211,12 @@ var errFirma = errors.New("snapshot signature does not match")
 
 // comprobarFirma exige que el snapshot lo firmara este host. Uno sin firma es
 // anterior a esto: se acepta, salvo con KLING_REQUIRE_SIGNED=1.
+//
+// Una firma v1 (hex sin prefijo, los dorados de antes de B2) se comprueba
+// como siempre, sobre contenidoFirmado: sigue valiendo, y sigue sin cubrir lo
+// que añade la v2. Rehacer el dorado (kling save) lo pasa a v2. Una v2 no se
+// puede rebajar a v1: la v1 de ese contenido no la calculó nadie, y sin la
+// clave no se puede calcular.
 func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 	if s.Signature == "" {
 		if os.Getenv("KLING_REQUIRE_SIGNED") == "1" {
@@ -154,14 +224,15 @@ func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 		}
 		return nil
 	}
-	clave, err := m.claveFirma()
-	if err != nil {
-		return fmt.Errorf("snapshot signing key: %w", err)
+	contenido, firma := contenidoFirmado(s), s.Signature
+	if resto, ok := strings.CutPrefix(firma, firmaV2); ok {
+		contenido, firma = contenidoFirmadoV2(s), resto
 	}
-	mac := hmac.New(sha256.New, clave)
-	mac.Write(contenidoFirmado(s))
-	esperada := mac.Sum(nil)
-	got, err := hex.DecodeString(s.Signature)
+	esperada, err := m.macDe(contenido)
+	if err != nil {
+		return err
+	}
+	got, err := hex.DecodeString(firma)
 	if err != nil || !hmac.Equal(got, esperada) {
 		return fmt.Errorf("%w: %q was modified outside kindling, or was made on another host. "+
 			"Snapshots are bound to the host that made them; recommit it here", errFirma, s.Name)

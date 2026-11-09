@@ -53,9 +53,11 @@ func TestEsquemasEnDisco(t *testing.T) {
 	if m := EsquemasSoportados().Migraciones(Esquemas{}); len(m) != 5 {
 		t.Errorf("from v0.17 everything migrates: %v", m)
 	}
-	// Desde v0.20 (state 2, KLCS 1, meta 2): solo lo que sube si hace falta.
-	if m := EsquemasSoportados().Migraciones(Esquemas{Estado: 2, Meta: 2, Credenciales: 1}); len(m) != 2 ||
-		!strings.Contains(m[0], "state.json.v2.bak") || !strings.Contains(m[1], "<file>.v1.bak") {
+	// Desde v0.20 (state 2, KLCS 1, meta 2): lo que sube si hace falta, y los
+	// meta.json, que pasan al 3 (firma v2) al reescribirse.
+	if m := EsquemasSoportados().Migraciones(Esquemas{Estado: 2, Meta: 2, Credenciales: 1}); len(m) != 3 ||
+		!strings.Contains(m[0], "state.json.v2.bak") || !strings.Contains(m[1], "meta.json.v2.bak") ||
+		!strings.Contains(m[2], "<file>.v1.bak") {
 		t.Errorf("from v0.20: %v", m)
 	}
 }

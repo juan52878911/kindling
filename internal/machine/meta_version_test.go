@@ -80,7 +80,7 @@ func TestMetaV0SeMigraConCopia(t *testing.T) {
 // listado lo enseña a medias ni una anotación lo reescribe sin sus campos.
 func TestMetaMasNuevoNoSeToca(t *testing.T) {
 	m := annotTestManager(t)
-	original := ponerFijacion(t, m, "svc", "meta.v3.json")
+	original := ponerFijacion(t, m, "svc", "meta.v4.json")
 	ruta := filepath.Join(m.snapDir("svc"), "meta.json")
 
 	if _, err := m.loadSnapshot("svc"); !esquema.EsMasNuevo(err) {
@@ -102,7 +102,7 @@ func TestMetaMasNuevoNoSeToca(t *testing.T) {
 	if err != nil || !bytes.Equal(b, original) {
 		t.Fatalf("el meta del futuro cambió: %v\n%s", err, b)
 	}
-	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 2)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(esquema.RutaRespaldo(ruta, 4)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("no hay nada que respaldar de un fichero que no se toca")
 	}
 }
@@ -111,7 +111,7 @@ func TestMetaMasNuevoNoSeToca(t *testing.T) {
 // nuevo está entero aunque este binario no lo entienda, y ninguno se aparta.
 func TestRecuperarReemplazosRespetaElMetaDelFuturo(t *testing.T) {
 	m := annotTestManager(t)
-	ponerFijacion(t, m, "svc", "meta.v3.json")
+	ponerFijacion(t, m, "svc", "meta.v4.json")
 	anterior := filepath.Join(m.root, "snapshots", ".svc"+sufijoAnterior)
 	if err := os.MkdirAll(anterior, 0o755); err != nil {
 		t.Fatal(err)

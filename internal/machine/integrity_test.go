@@ -167,3 +167,44 @@ func TestVerifyIntegrityEnArbol(t *testing.T) {
 		t.Errorf("the error should show the hex of the digest: %v", err)
 	}
 }
+
+// B2: el mem.file entra en la verificación. Una página reescrita en la RAM de
+// un dorado, conservando tamaño y fecha, ya no pasa; y la huella lo incluye,
+// así que el veredicto recordado no tapa un mem.file distinto.
+func TestVerifyIntegrityCubreMemFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "snap.file"), []byte("volcado"), 0o644)
+	mem := filepath.Join(dir, "mem.file")
+	f, err := os.Create(mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Truncate(64 << 20) // perforado, como tras perforarHuecos
+	f.WriteAt([]byte("kernel"), 4096)
+	f.Close()
+	memDigest, _ := digest.Tree(mem)
+	snapSHA, _ := digest.File(filepath.Join(dir, "snap.file"))
+	snap := &api.Snapshot{Name: "svc", SnapSHA256: snapSHA, MemDigest: memDigest}
+
+	m := &Manager{}
+	if err := m.verifyIntegrity(snap, dir); err != nil {
+		t.Fatalf("an intact mem.file failed: %v", err)
+	}
+	st, _ := os.Stat(mem)
+	f, _ = os.OpenFile(mem, os.O_WRONLY, 0)
+	f.WriteAt([]byte("KERNEL"), 4096)
+	f.Close()
+	os.Chtimes(mem, st.ModTime(), st.ModTime()) // mismo tamaño y misma fecha
+
+	// Con el veredicto recordado de antes la huella no cambia: es el límite
+	// conocido (ver huellaSnapshot). Un daemon recién arrancado sí lo ve.
+	err = (&Manager{}).verifyIntegrity(snap, dir)
+	if err == nil || !strings.Contains(err.Error(), "mem.file") {
+		t.Fatalf("a rewritten page of mem.file went unnoticed: %v", err)
+	}
+	// Y un mem.file de otro tamaño invalida el veredicto recordado.
+	os.Truncate(mem, 32<<20)
+	if err := m.verifyIntegrity(snap, dir); err == nil {
+		t.Fatal("the remembered verdict hid a different mem.file")
+	}
+}

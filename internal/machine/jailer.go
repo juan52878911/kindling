@@ -23,8 +23,8 @@ package machine
 // al arrancar (ver JailerWarning), porque apagar la barrera más fuerte a
 // propósito no debería pasar desapercibida. KLING_JAILER=1 la fuerza aunque
 // falte el usuario —jailer exige uid/gid: sin usuario de servicio se le da
-// root explícito, igual que antes—, pero si falta el propio binario sigue sin
-// haber nada que ejecutar.
+// root explícito, igual que antes, y se avisa al arrancar—, pero si falta el
+// propio binario sigue sin haber nada que ejecutar.
 //
 // El chroot exige que TODO lo que Firecracker abre esté dentro: kernel,
 // snapshot, overlay y volúmenes. Se enlazan con HARDLINK, no copia: el mem.file
@@ -76,8 +76,9 @@ func jailerBinPresent() bool {
 // son si el binario está en PATH y si el usuario sin privilegios (con el
 // grupo kvm) quedó listo (ver Privileges.Enabled); userReason es por qué no
 // lo está (Privileges.Motivo), para que el bloqueo diga la causa real. Vacío,
-// se usa un texto genérico. root es si el daemon corre como root: con el
-// binario, basta para jailear aunque falte el usuario (como antes de P7).
+// se usa un texto genérico. root es si el daemon corre como root: antes
+// bastaba, con el binario, para jailear como root aunque faltara el usuario;
+// desde A3 solo cambia el mensaje del bloqueo (ver abajo).
 //
 // jailed dice si hay que arrancar dentro del jail. blocked, si no está vacío,
 // es el motivo por el que Run, runFrom y Thaw deben NEGARSE a arrancar
@@ -86,7 +87,8 @@ func jailerBinPresent() bool {
 // respeta aunque falte el usuario (ver jailerArgv), aunque no si falta el
 // propio binario, que no hay cómo ejecutar—. startupWarn, si no está vacío,
 // es el aviso de SEGURIDAD que hay que imprimir UNA VEZ al arrancar el daemon:
-// solo con el opt-out explícito, porque apagar la barrera más fuerte a
+// con el opt-out explícito, o con KLING_JAILER=1 sin usuario (jailer como
+// root), porque apagar la barrera más fuerte a
 // propósito merece ruido, no una nota discreta en un log que nadie relee.
 func decidirJailer(posible bool, forced string, binPresent, userReady bool, userReason string, root bool) (jailed bool, blocked, startupWarn string) {
 	if !posible {
@@ -99,6 +101,15 @@ func decidirJailer(posible bool, forced string, binPresent, userReady bool, user
 				"PATH: install it (sudo ./scripts/20-install-firecracker.sh) or point " +
 				"KLING_JAILER_BIN at it", ""
 		}
+		if !userReady {
+			// Forzado sin usuario: se respeta (es la salida explícita del
+			// bloqueo de arriba), pero merece el mismo ruido que KLING_JAILER=0.
+			return true, "", "jailer forced with KLING_JAILER=1 runs Firecracker as ROOT, with " +
+				"no privilege drop inside the jail: a VMM that escaped its guest could write " +
+				"through the jail's hardlinks to the kernel, base images and golden snapshots " +
+				"shared by every microVM (SECURITY.md §11). Create the unprivileged service " +
+				"user (kindling, in the kvm group) to drop root."
+		}
 		return true, "", ""
 	case "0":
 		return false, "", "jailer disabled by KLING_JAILER=0: microVMs run WITHOUT the " +
@@ -109,19 +120,25 @@ func decidirJailer(posible bool, forced string, binPresent, userReady bool, user
 	if binPresent && userReady {
 		return true, "", ""
 	}
-	// Binario y root, pero sin usuario de servicio: el daemon de antes de P7
-	// jaileaba igual, como root (ver jailerArgv), y negarse aquí dejaba sin
-	// arrancar ni despertar nada a quien actualizaba ese host. Se sigue
-	// jaileando, con aviso: el chroot sigue ahí; lo que falta es bajar de root.
+	// Binario y root, pero sin usuario de servicio: el daemon de antes jaileaba
+	// igual, como root (ver jailerArgv), con un aviso. Ya no (A3): con --uid 0
+	// el VMM conserva CAP_DAC_OVERRIDE dentro del chroot, y los ficheros del
+	// jail son HARDLINKS, el mismo inodo que el kernel, las bases y los
+	// dorados de TODAS las microVMs. Un Firecracker comprometido podría
+	// reescribirlos para las siguientes. El chroot no protege de eso; bajar de
+	// root sí. Se bloquea como cuando falta el usuario, y el mensaje dice cómo
+	// crearlo y cómo forzar el modo viejo (KLING_JAILER=1) si se acepta.
 	if binPresent && root {
 		motivo := userReason
 		if motivo == "" {
 			motivo = "the unprivileged service user doesn't exist or lacks the kvm group"
 		}
-		return true, "", "jailer runs Firecracker as ROOT, with no privilege drop inside the " +
-			"jail: " + motivo + " (sudo useradd --system --no-create-home --shell " +
-			"/usr/sbin/nologin kindling && sudo usermod -aG kvm kindling, or pass " +
-			"-run-as/KLING_RUN_AS)"
+		return false, "refusing to start: jailer would run Firecracker as ROOT because " + motivo +
+			"; as root the VMM can write through the jail's hardlinks to the kernel, base " +
+			"images and golden snapshots shared by every microVM. Create the user (sudo " +
+			"useradd --system --no-create-home --shell /usr/sbin/nologin kindling && sudo " +
+			"usermod -aG kvm kindling, or pass -run-as/KLING_RUN_AS) and restart the daemon; " +
+			"KLING_JAILER=1 forces jailing as root anyway (SECURITY.md §11)", ""
 	}
 	var missing []string
 	if !binPresent {
@@ -164,7 +181,9 @@ func (m *Manager) jailPath(id, hostPath string) string {
 }
 
 // jailSock es el socket de la API dentro del jail, visto desde el anfitrión.
-// jailer lo crea en <root>/run/firecracker.socket.
+// jailer lo crea en <root>/run/firecracker.socket. internal/fc reconoce esa
+// forma (run/firecracker.socket) y exige que quien atiende esté enjaulado en
+// <root> (M3, internal/fc/par.go): no cambiarla sin cambiar aquello.
 func (m *Manager) jailSock(id string) string {
 	return filepath.Join(m.jailRoot(id), "run", "firecracker.socket")
 }

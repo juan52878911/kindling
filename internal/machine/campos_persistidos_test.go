@@ -130,6 +130,9 @@ var clasesCampos = map[string]claseCampo{
 	"meta.json api.Snapshot share_wait": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot sin_agente": {deuda: true, porque: "lost only if a kling <= v0.18 annotates the golden"},
 	"meta.json api.Snapshot arch":       {porque: "an older kling that drops it does not compare architectures, which it never did"},
+	// B2: el 3 llega con la firma v2, que lo cubre; un kling anterior no la
+	// entendería y daría el dorado por manipulado.
+	"meta.json api.Snapshot mem_digest": {efecto: true, version: 3, porque: "covered by the v2 signature an older kling can't check"},
 	// El modo de sincronización de un volumen (api.VolumeAttachment.Sync).
 	"meta.json api.VolumeAttachment sync": {porque: "never written to meta.json (sinSync strips it): a replica asks for its own"},
 	"state.json api.VolumeAttachment sync": {porque: "an older kling and its kling-hv have no sync modes at all; " +
