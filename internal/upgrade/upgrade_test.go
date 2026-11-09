@@ -1250,6 +1250,24 @@ func TestVersionVolcadoHV(t *testing.T) {
 	}
 }
 
+// Una release firmada con una clave que este kling no conoce (la rotaron) dice
+// la salida: pasar por la release intermedia que trae las dos.
+func TestClaveRotadaDiceLaSalida(t *testing.T) {
+	m := nuevoMontaje(t)
+	_, pb := claveTest(t, "b")
+	m.claves = []ClavePublica{pb} // la release va firmada con A
+	_, err := Actualizar(context.Background(), m.opciones())
+	if !errors.Is(err, ErrClaveDesconocida) {
+		t.Fatalf("err = %v, want ErrClaveDesconocida", err)
+	}
+	for _, s := range []string{"intermediate release", "kling upgrade -tag", "docs/firmas.md"} {
+		if !strings.Contains(err.Error(), s) {
+			t.Errorf("err = %v, missing %q", err, s)
+		}
+	}
+	m.noTocado(t)
+}
+
 // Sin sitio para los binarios nuevos se falla antes de parar el daemon: con
 // ENOSPC a media instalación, volver atrás tampoco cabría.
 func TestSinEspacioNoPara(t *testing.T) {
