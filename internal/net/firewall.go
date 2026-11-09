@@ -297,7 +297,10 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	// entrada). El resolver dinámico añade cada IP con "timeout <ttl-real>", así
 	// que caduca sola cuando expira el registro. El sembrado estático de abajo va
 	// sin timeout (permanente): es la red de seguridad.
-	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "-exist"); err != nil {
+	// maxelem acota la memoria del set en el kernel (por defecto 65536): un
+	// invitado que llena el set recibe HASH_FULL y no siembra más, sin afectar
+	// a las demás máquinas.
+	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "maxelem", strconv.Itoa(ipsetMaxElem), "-exist"); err != nil {
 		return err
 	}
 

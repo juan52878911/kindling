@@ -71,6 +71,18 @@ const dnsPort = 5333
 // DNS y el SYN del invitado, cerrando en falso una conexión legítima.
 const dnsMinTTL = 60
 
+// dnsMaxTTL (segundos) es el techo de ese timeout. Un upstream (o un NS
+// autoritativo de un subdominio permitido) puede anunciar TTL de días: sin
+// techo, cada IP sembrada ocuparía el ipset ese tiempo y el set se llenaría
+// de entradas que ya nadie usa.
+const dnsMaxTTL = 3600
+
+// dnsMaxASembrar es cuántos registros A de UNA respuesta sembramos como
+// mucho. Un NS hostil puede contestar con cientos de A por consulta y llenar
+// el ipset (maxelem ipsetMaxElem) en unas pocas consultas; ningún cliente
+// legítimo necesita más que unos pocos para conectar.
+const dnsMaxASembrar = 16
+
 // dnsMaxInFlight acota cuántas consultas de ESTE resolver pueden estar a la vez
 // esperando al upstream (socket abierto + goroutine bloqueada en Read). Sin
 // tope, un invitado hostil lanzando miles de queries/s hace que el DAEMON abra
@@ -507,7 +519,12 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 	// Se siembran TODOS los A de la respuesta, no solo los cuyo owner == qname:
 	// restringir por owner rompería CNAME hacia un CDN (hallazgo #4 del plan),
 	// donde el A real cuelga del nombre canónico, no del que preguntamos.
-	for _, rec := range extractA(resp) {
+	// Como mucho dnsMaxASembrar por respuesta: el resto se devuelve igual,
+	// pero no entra en el ipset.
+	for i, rec := range extractA(resp) {
+		if i == dnsMaxASembrar {
+			break
+		}
 		r.seed(rec.ip, rec.ttl)
 	}
 	return resp
@@ -690,6 +707,9 @@ func (r *dnsResolver) seed(ip string, ttl uint32) {
 	to := int(ttl)
 	if to < dnsMinTTL {
 		to = dnsMinTTL
+	}
+	if to > dnsMaxTTL || ttl > dnsMaxTTL {
+		to = dnsMaxTTL // ttl > dnsMaxTTL cubre el desbordamiento de int en 32 bits
 	}
 	expira := time.Now().Add(time.Duration(to) * time.Second)
 
