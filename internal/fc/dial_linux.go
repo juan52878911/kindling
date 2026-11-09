@@ -10,6 +10,10 @@ import (
 	"syscall"
 )
 
+// oPath es O_PATH (0x200000 en todas las arquitecturas Linux de Go). El paquete
+// syscall solo lo define en algunas (arm64 sí, amd64 no).
+const oPath = 0x200000
+
 // dialVMM conecta al socket de la API de un VMM sin seguir enlaces en el
 // último componente y comprueba quién atiende (M3, ver par.go).
 //
@@ -19,7 +23,7 @@ func dialVMM(ctx context.Context, path string) (net.Conn, error) {
 	if !ComprobarJaula {
 		return dialUnix(ctx, path)
 	}
-	fd, err := syscall.Open(path, syscall.O_PATH|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	fd, err := syscall.Open(path, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Addr: &net.UnixAddr{Name: path, Net: "unix"}, Err: os.NewSyscallError("open", err)}
 	}
