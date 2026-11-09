@@ -187,7 +187,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ %s  template of task %s  (%s of memory, %s in total)\n",
+	fmt.Printf(uiMarks().ok+" %s  template of task %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, name, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
 	next("kling run -from %s", name)
 

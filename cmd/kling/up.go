@@ -608,9 +608,9 @@ func printChecks(cs []check, host string) (fatal, warn int) {
 		fmt.Printf("  (checked on %s)\n", host)
 	}
 	for _, c := range cs {
-		mark := "✓"
+		mark := uiMarks().ok
 		if !c.ok {
-			mark = "✗"
+			mark = uiMarks().fail
 			if c.fatal {
 				fatal++
 			} else {
@@ -828,7 +828,7 @@ func cmdStatus(args []string) error {
 
 	info, daemonErr := c.Info(ctx)
 	if err := daemonErr; err != nil {
-		fmt.Printf("daemon:       ✗ not responding (%v)\n", err)
+		fmt.Printf("daemon:       "+uiMarks().fail+" not responding (%v)\n", err)
 		fmt.Printf("              diagnose and start it with:  kling up\n")
 		// Sin daemon no se sabe de KVM ni de firecracker: lo reporta él. Se
 		// dice explícitamente en vez de omitir las líneas, para que no parezca
@@ -837,7 +837,7 @@ func cmdStatus(args []string) error {
 			fmt.Println(l)
 		}
 	} else {
-		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
+		fmt.Printf("daemon:       "+uiMarks().ok+" %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
 		if *verbose {
 			writeInfo(c, info)
 		}
@@ -845,9 +845,9 @@ func cmdStatus(args []string) error {
 			// macOS: sin KVM ni firecracker; el VMM es kling-vz (o kling-hv).
 			vz := strings.TrimSpace(info.Firecrack)
 			if vz == "" {
-				vz = "✗ not found or not running — see `kling up`"
+				vz = uiMarks().fail + " not found or not running — see `kling up`"
 			} else {
-				vz = "✓ " + vz
+				vz = uiMarks().ok + " " + vz
 			}
 			if info.Backend == "hv" {
 				fmt.Printf("backend:      hv (Hypervisor.framework)\n")
@@ -860,9 +860,9 @@ func cmdStatus(args []string) error {
 			fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
 			fc := strings.TrimSpace(info.Firecrack)
 			if fc == "" {
-				fc = "✗ not found — install it with scripts/20-install-firecracker.sh"
+				fc = uiMarks().fail + " not found — install it with scripts/20-install-firecracker.sh"
 			} else {
-				fc = "✓ " + fc
+				fc = uiMarks().ok + " " + fc
 			}
 			fmt.Printf("firecracker:  %s\n", fc)
 		}
@@ -1020,9 +1020,9 @@ func presence(ok bool, yes, no string) string {
 
 func markYes(ok bool, yes, no string) string {
 	if ok {
-		return "✓ " + yes
+		return uiMarks().ok + " " + yes
 	}
-	return "✗ " + no
+	return uiMarks().fail + " " + no
 }
 
 // extensionUnits son las unidades de systemd que declaran las extensiones.

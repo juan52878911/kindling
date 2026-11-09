@@ -321,13 +321,13 @@ func doctorChecks(in doctorInput) []doctorCheck {
 func printPoolProblems(ps []api.PoolInfo) {
 	for _, p := range ps {
 		if p.Stale != "" {
-			fmt.Printf("pool:         ✗ %s: %d/%d ready, its golden is stale (%s). Re-save it:\n", p.Template, p.Ready, p.Size, p.Stale)
+			fmt.Printf("pool:         "+uiMarks().fail+" %s: %d/%d ready, its golden is stale (%s). Re-save it:\n", p.Template, p.Ready, p.Size, p.Stale)
 			for _, l := range strings.Split(p.Fix, "\n") {
 				fmt.Printf("              %s\n", strings.TrimSpace(l))
 			}
 			continue
 		}
-		fmt.Printf("pool:         ✗ %s: %d/%d ready, could not pre-warm a copy: %s\n", p.Template, p.Ready, p.Size, firstLine(p.Error))
+		fmt.Printf("pool:         "+uiMarks().fail+" %s: %d/%d ready, could not pre-warm a copy: %s\n", p.Template, p.Ready, p.Size, firstLine(p.Error))
 	}
 }
 

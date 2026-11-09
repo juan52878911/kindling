@@ -251,10 +251,10 @@ func imagesToolchain(args []string) error {
 		Spec:    spec,
 	})
 	if err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		return err
 	}
-	fmt.Printf("✓ %s\n\n", res.Path)
+	fmt.Printf(uiMarks().ok+" %s\n\n", res.Path)
 	fmt.Println("You can now populate volumes without installing anything on the host:")
 	fmt.Printf("  kling volume populate <vol> -- npm install --prefix /data --ignore-scripts lodash\n")
 	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
@@ -422,11 +422,11 @@ func imagesRm(args []string) error {
 	var fallos int
 	for _, n := range fs.Args() {
 		if err := c.RemoveImage(ctx, n); err != nil {
-			fmt.Printf("  ✗  %-24s %v\n", n, err)
+			fmt.Printf("  "+uiMarks().fail+"  %-24s %v\n", n, err)
 			fallos++
 			continue
 		}
-		fmt.Printf("  ✓  %-24s removed\n", n)
+		fmt.Printf("  "+uiMarks().ok+"  %-24s removed\n", n)
 	}
 	if fallos > 0 {
 		return fmt.Errorf("%d image(s) could not be removed", fallos)

@@ -238,7 +238,7 @@ func modelsAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ %s  template of %s  (%s of memory, %s in total)\n",
+	fmt.Printf(uiMarks().ok+" %s  template of %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, res.Ref, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
 	next("kling run -from %s", name)
 	if len(pre) > 0 {
@@ -337,7 +337,7 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 		Name: name, Base: von.BaseImage, Builder: "llm", Spec: b,
 	})
 	if err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		var se *api.StatusError
 		if errors.As(err, &se) && (se.Code == 412 || se.Code == 501) {
 			// 412: un daemon Linux sin el constructor instalado. 501: macOS, que
@@ -348,7 +348,7 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 		}
 		return err
 	}
-	fmt.Printf("✓ %s\n", time.Since(t0).Round(time.Second))
+	fmt.Printf(uiMarks().ok+" %s\n", time.Since(t0).Round(time.Second))
 	for _, l := range strings.Split(strings.TrimSpace(out.Output), "\n") {
 		if strings.HasPrefix(l, "downloaded ") || strings.HasPrefix(l, "imagen ") || strings.HasPrefix(l, "model ") {
 			fmt.Println("  " + l)

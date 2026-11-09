@@ -183,7 +183,7 @@ func instalarAgente(a agenteDaemon, root string) error {
 	nuevo, err := escribirPlist(a, plistDaemon(a, exe, entornoDelAgente(root)))
 	switch {
 	case errors.Is(err, errPlistDistinto):
-		fmt.Printf("agent:       ✗ %s already exists and differs from what -install would write.\n", a.plist)
+		fmt.Printf("agent:       "+uiMarks().fail+" %s already exists and differs from what -install would write.\n", a.plist)
 		fmt.Println("  To replace it:")
 		fmt.Printf("    launchctl bootout %s/%s\n", a.dominio(), a.label)
 		fmt.Printf("    rm %q\n", a.plist)
@@ -192,9 +192,9 @@ func instalarAgente(a agenteDaemon, root string) error {
 	case err != nil:
 		return fmt.Errorf("writing %s: %w", a.plist, err)
 	case nuevo:
-		fmt.Printf("agent:       ✓ wrote %s (log: %s)\n", a.plist, a.log)
+		fmt.Printf("agent:       "+uiMarks().ok+" wrote %s (log: %s)\n", a.plist, a.log)
 	default:
-		fmt.Printf("agent:       ✓ %s already installed\n", a.plist)
+		fmt.Printf("agent:       "+uiMarks().ok+" %s already installed\n", a.plist)
 	}
 	return nil
 }

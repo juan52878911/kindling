@@ -416,18 +416,18 @@ func volumePopulate(args []string) error {
 		Volume: name, Mount: *mount, Image: *image, Cmd: cmd, MemMiB: *mem,
 	})
 	if err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		return err
 	}
 	if res.ExitCode != 0 {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		// La salida completa, no un resumen: si un install falla, el motivo
 		// está en su propia salida y recortarla obliga a repetirlo todo para
 		// verlo.
 		fmt.Fprintln(os.Stderr, res.Output)
 		return fmt.Errorf("the command exited with code %d", res.ExitCode)
 	}
-	fmt.Println("✓")
+	fmt.Println(uiMarks().ok)
 	if res.Output != "" {
 		fmt.Println(indent(strings.TrimRight(res.Output, "\n")))
 	}

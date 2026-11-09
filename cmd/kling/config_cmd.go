@@ -71,12 +71,12 @@ func contextList(args []string) error {
 		return err
 	}
 	if v := os.Getenv("KLING_HOST"); v != "" {
-		fmt.Printf("\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
+		fmt.Fprintf(os.Stderr, "\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
 	} else if v := os.Getenv("KLING_SOCKET"); v != "" {
 		if ctx, ok := cfg.Contexts[cfg.CurrentContext]; ok && ctx.Host != "" {
-			fmt.Printf("\nNOTE: $KLING_SOCKET=%s is ignored: the active context picks the daemon.\n", v)
+			fmt.Fprintf(os.Stderr, "\nNOTE: $KLING_SOCKET=%s is ignored: the active context picks the daemon.\n", v)
 		} else {
-			fmt.Printf("\nNOTE: no active context with a host: talking to $KLING_SOCKET=%s.\n", v)
+			fmt.Fprintf(os.Stderr, "\nNOTE: no active context with a host: talking to $KLING_SOCKET=%s.\n", v)
 		}
 	}
 	return nil

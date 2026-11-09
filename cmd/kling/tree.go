@@ -62,7 +62,7 @@ var coreTree = []section{
 `},
 		{Name: "doctor", Summary: "checks runtime, daemon, versions, extensions and completion", Usage: `  doctor [-json]                                   checks runtime, daemon, versions,
                                                    extensions and completion; prints
-                                                   the fix for each ✗
+                                                   the fix for each failing check
 `},
 		{Name: "try", Summary: "runs a command in a throwaway microVM and removes it", MachineArgs: nil, Usage: `  try [-image I | -from T] [-mem 256M] [-cpus N]   runs a command in a throwaway
       [-egress none|internet|allowlist]            microVM and removes it (no

@@ -911,7 +911,7 @@ func aiPrime(args []string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		fmt.Printf("✓ %s  %d prefix(es), %v tokens, %s of memory, %s\n", g.Snapshot.Name, len(pre), g.PrefixTokens,
+		fmt.Printf(uiMarks().ok+" %s  %d prefix(es), %v tokens, %s of memory, %s\n", g.Snapshot.Name, len(pre), g.PrefixTokens,
 			human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
 	}
 	return errors.Join(errs...)

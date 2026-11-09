@@ -989,7 +989,7 @@ func sinServicioQueEsperar(ctx context.Context, c *api.Client, ref string) (sinS
 func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration, warm bool) error {
 	fmt.Fprintf(os.Stderr, "checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
-		fmt.Fprintln(os.Stderr, "✗")
+		fmt.Fprintln(os.Stderr, uiMarks().fail)
 		if api.IsNotFound(err) {
 			// No hay máquina: ni puerto ni plazo que explicar (fallaba en
 			// milisegundos diciendo "not serving ... after 2m0s").
@@ -1012,11 +1012,11 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: ruta, Method: "POST"})
 	switch {
 	case err == nil && resp.Status == 204 && warm:
-		fmt.Fprintln(os.Stderr, "✓ (serving, session state reset, runtime prewarmed)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving, session state reset, runtime prewarmed)")
 	case err == nil && resp.Status == 204:
-		fmt.Fprintln(os.Stderr, "✓ (serving, session state reset, no prewarm)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving, session state reset, no prewarm)")
 	default:
-		fmt.Fprintln(os.Stderr, "✓ (serving)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving)")
 	}
 	return nil
 }
@@ -1160,13 +1160,15 @@ func cmdPS(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	// El pie y los avisos no son filas: a stderr, para que quien lee la tabla
+	// por una tubería solo vea la tabla.
 	if totalDisk > 0 {
-		fmt.Printf("\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
+		fmt.Fprintf(os.Stderr, "\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
 	}
 	if len(avisos) > 0 {
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		for _, a := range avisos {
-			fmt.Println("! " + a)
+			fmt.Fprintln(os.Stderr, "! "+a)
 		}
 	}
 	return nil
@@ -1851,9 +1853,9 @@ func cloneSummary(c *api.CloneInfo) string {
 	}
 	parts := []string{head}
 	for _, d := range c.Dirs {
-		mark := "✓"
+		mark := uiMarks().ok
 		if !d.Reflink {
-			mark = "✗"
+			mark = uiMarks().fail
 			if d.Error != "" {
 				mark += " " + d.Error
 			}

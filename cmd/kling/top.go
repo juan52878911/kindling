@@ -75,8 +75,9 @@ func cmdTop(args []string) error {
 		return nil
 	}
 
-	// Modo -watch: repinta hasta que se cancele con Ctrl-C. \033[H\033[2J limpia
-	// la pantalla y sube el cursor, como hace top.
+	// Modo -watch: repinta hasta que se cancele con Ctrl-C (borradoDePantalla).
+	tty := isTerminal(os.Stdout.Fd())
+	primera := true
 	t := time.NewTicker(*watch)
 	defer t.Stop()
 	var antes *api.ProcStats
@@ -87,7 +88,8 @@ func cmdTop(args []string) error {
 			return err
 		}
 		ahora := time.Now()
-		fmt.Print("\033[H\033[2J")
+		fmt.Print(borradoDePantalla(tty, primera))
+		primera = false
 		printTop(os.Stdout, ps, antes, ahora.Sub(tAntes), c.Endpoint(), ahora)
 		antes, tAntes = ps, ahora
 		select {
@@ -96,6 +98,20 @@ func cmdTop(args []string) error {
 		case <-t.C:
 		}
 	}
+}
+
+// borradoDePantalla es lo que va antes de cada foto de -watch: en una terminal
+// sin NO_COLOR, \033[H\033[2J (limpia la pantalla y sube el cursor, como top);
+// si no (una tubería, un log, quien no quiere secuencias), una línea en
+// blanco entre fotos, para que se puedan leer seguidas.
+func borradoDePantalla(tty, primera bool) string {
+	if _, plano := os.LookupEnv("NO_COLOR"); tty && !plano {
+		return "\033[H\033[2J"
+	}
+	if primera {
+		return ""
+	}
+	return "\n"
 }
 
 // conCPU dice si el daemon da la CPU por máquina (uno anterior a 0.20 no).
