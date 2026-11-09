@@ -181,9 +181,16 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Las series por tenant: todas para un admin, la suya para los demás. Los
+	// nombres de los otros tenants (y cuánto usan) no son de quien pregunta.
+	visibles := []Tenant{*tenantDe(r)}
+	if visibles[0].Admin {
+		visibles = s.tenants
+	}
+
 	fmt.Fprintln(w, "# HELP kling_sandbox_machines Live sandboxes by tenant and state.")
 	fmt.Fprintln(w, "# TYPE kling_sandbox_machines gauge")
-	for _, t := range s.tenants {
+	for _, t := range visibles {
 		for _, st := range estadosConocidos {
 			fmt.Fprintf(w, "kling_sandbox_machines{tenant=%q,state=%q} %d\n",
 				t.Nombre, st, porTenantEstado[[2]string{t.Nombre, string(st)}])
@@ -229,7 +236,7 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP kling_sandbox_shell_sessions Open interactive shell sessions, by tenant.")
 	fmt.Fprintln(w, "# TYPE kling_sandbox_shell_sessions gauge")
 	abiertas := s.shells.foto()
-	for _, t := range s.tenants {
+	for _, t := range visibles {
 		fmt.Fprintf(w, "kling_sandbox_shell_sessions{tenant=%q} %d\n", t.Nombre, abiertas[t.Nombre])
 	}
 }

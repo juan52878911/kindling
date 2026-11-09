@@ -118,7 +118,7 @@ func (s *Servidor) instanciasEnCadaHost(ctx context.Context) (map[*hosts.Host][]
 		if errs[i] != nil {
 			// Un daemon sin la capacidad "graphs" no tiene grafos: no es un fallo.
 			if !api.IsUnsupported(errs[i]) {
-				fallos = append(fallos, fmt.Errorf("%s: %w", h.Nombre, errs[i]))
+				fallos = append(fallos, deHost(h, errs[i]))
 			}
 			continue
 		}
@@ -154,7 +154,7 @@ func (s *Servidor) buscarGrafo(ctx context.Context, t *Tenant, id string) (*host
 	}
 	ins, err := instancias(ctx, h)
 	if err != nil {
-		return nil, plantilla.Instancia{}, fmt.Errorf("%s: %w", h.Nombre, err)
+		return nil, plantilla.Instancia{}, deHost(h, err)
 	}
 	for _, in := range ins {
 		if in.Grafo.ID == ref && in.De(t.Nombre) {
@@ -237,7 +237,7 @@ func (s *Servidor) handleGrafo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.Cliente.GraphRemove(r.Context(), in.Grafo.ID); err != nil {
-			fail(w, http.StatusBadGateway, fmt.Errorf("%s: %w", h.Nombre, err))
+			fail(w, http.StatusBadGateway, deHost(h, err))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

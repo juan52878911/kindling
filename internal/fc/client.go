@@ -160,6 +160,15 @@ func Limit(bytesPerSec int64) *RateLimiter {
 	return &RateLimiter{Bandwidth: &TokenBucket{Size: bytesPerSec, RefillTime: 1000}}
 }
 
+// LimitOps es Limit con además un tope de operaciones por segundo (en una
+// interfaz de red, tramas). Solo con bytes, una inundación de paquetes
+// pequeños cabe en el caudal y llega a cientos de miles por segundo.
+func LimitOps(bytesPerSec, opsPerSec int64) *RateLimiter {
+	l := Limit(bytesPerSec)
+	l.Ops = &TokenBucket{Size: opsPerSec, RefillTime: 1000}
+	return l
+}
+
 type MachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMiB int `json:"mem_size_mib"`

@@ -38,6 +38,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
 - Live shares: a directory inside kindling's data root (e.g. `<root>/volumes`) can't be shared even when `daemon.share_roots` covers its parent.
 - Live shares: every attach, thaw or daemon restart checks that the directory it opens has the device/inode that was validated; a share swapped for a symlink (`mv proj proj.old; ln -s /etc proj`) is refused instead of served.
+- Linux allowlist DNS: queries go upstream with a TXID drawn from `crypto/rand` instead of the one the guest chose, and the answer must carry it; the guest gets its own TXID back. A guest knowing the TXID only had to guess the port to plant a spoofed answer that seeds the ipset.
+- Linux allowlist: the per-machine ipset has `maxelem 8192`, at most 16 A records per DNS answer are seeded, seeded TTLs are capped at 3600 s, and a full set (or any other error the kernel answers over netlink) no longer falls back to forking `ipset` on every query; only a missing netlink path does.
+- Linux: in `internet` and `allowlist` egress, new packets from a machine are capped at 300/s per destination IP (`hashlimit`, burst 300; needs the `xt_hashlimit` module), so a guest can't flood an allowed IP through the host; a one-way UDP flood counts as new packets. The Firecracker network rate limiter also caps frames per second (`ops`: the bandwidth over 512 bytes, at least 8192; 32768/s at the default 16 MiB/s), so small packets can't reach hundreds of thousands per second within the byte budget.
+- Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
 
 ### Fixed
 
@@ -79,6 +83,17 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - `db-golden.sh build` with no `-migrations` or `-seed` failed on macOS (bash 3.2, `files[@]: unbound variable`).
+
+### Security
+
+- kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
+- kling-sandbox: `/v1/hosts`, which returns the daemons' socket paths and addresses, needs an admin tenant (`KLING_SANDBOX_ADMINS=name,...`), and `/v1/metrics` only shows the caller's own per-tenant series unless the caller is an admin. Errors from a host that did not answer name the host but no longer include its endpoint or the network error (those go to the gateway log); the `X-Kindling-Partial` warning does the same.
+
+### Fixed
+
+- kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
+- kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
+- `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
 
 ## [1.0.0] - 2026-11-05
 
