@@ -701,7 +701,7 @@ func TestRecetaConBaseInvalidaSeRechaza(t *testing.T) {
 	}
 }
 
-// e2fsck corre como root sobre discos que escribe un invitado: tiene plazo, y
+// e2fsck corre sobre discos que escribe un invitado: tiene plazo, y
 // su código de salida se lee como la máscara que es.
 func TestRevisarExt4PlazoYCodigos(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -710,8 +710,8 @@ func TestRevisarExt4PlazoYCodigos(t *testing.T) {
 	orden, plazo := ordenE2fsck, plazoE2fsck
 	t.Cleanup(func() { ordenE2fsck, plazoE2fsck = orden, plazo })
 	sale := func(codigo int) {
-		ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("echo salida; exit %d", codigo))
+		ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
+			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("echo salida; exit %d", codigo)), nil, nil
 		}
 	}
 	for _, c := range []struct {
@@ -728,8 +728,8 @@ func TestRevisarExt4PlazoYCodigos(t *testing.T) {
 	}
 
 	// Un e2fsck que no acaba se corta al plazo.
-	ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30"), nil, nil
 	}
 	plazoE2fsck = 200 * time.Millisecond
 	inicio := time.Now()
@@ -771,8 +771,8 @@ func TestE2fsckSoloRecuentosNoEsReparar(t *testing.T) {
 		if err := os.WriteFile(f, []byte(c.salida+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		ordenE2fsck = func(ctx context.Context, _ string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("cat %s; exit %d", f, c.codigo))
+		ordenE2fsck = func(ctx context.Context, _ string) (*exec.Cmd, func(), error) {
+			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("cat %s; exit %d", f, c.codigo)), nil, nil
 		}
 		reparado, _, err := revisarExt4(context.Background(), "overlay.ext4")
 		if err != nil || reparado != c.reparado {
