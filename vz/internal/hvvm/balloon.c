@@ -44,6 +44,16 @@
 // 32 MiB. Acota lo que tarda una tanda en el hilo del vCPU (y cuánto tarda la
 // huella en bajar si el invitado no llega al objetivo).
 #define UMBRAL_PEND 2048
+// Cuota del informe de páginas libres: páginas del host que se sueltan por
+// segundo, 1 GiB/s. El driver de Linux informa cada 2 s en bloques de 2 MiB,
+// como mucho 64 MiB por búfer, así que no se acerca; un invitado que informa
+// una y otra vez del mismo bloque remapeaba su RAM a voluntad bajo mu (que
+// también toman las estadísticas y la pausa). Cada tramo cuenta al menos un
+// bloque de 2 MiB, porque lo que cuesta es el tramo (un hv_vm_unmap, un mmap
+// y un hv_vm_map). Lo que pasa de la cuota se devuelve sin soltar: es solo
+// memoria que tarda más en bajar. Reiniciar el dispositivo no la repone.
+#define INFORME_CUOTA (65536ULL)
+#define INFORME_MIN_TRAMO ((2ULL << 20) / PAGINA)
 
 static struct vballoon_state s;
 static uint32_t intid;
@@ -60,6 +70,7 @@ static uint64_t paginas_sueltas;             // páginas del host soltadas ahora
 // Contadores acumulados (khv_balloon_cuentas): páginas devueltas por el
 // informe de libres, tramos soltados y lo que costaron.
 static uint64_t c_informadas, c_tramos, c_ns, c_fallos;
+static uint64_t informe_fichas, informe_t;  // la cuota (informe_cobrar)
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 // Últimas estadísticas del invitado (VIRTIO_BALLOON_S_*, en bytes) y cuántas
 // veces han llegado: 0 = el driver no negoció la cola o aún no las dio.
@@ -203,6 +214,25 @@ static void cola(int qi, bool inflar) {
   }
 }
 
+// informe_cobrar descuenta de la cuota del informe un tramo de pags páginas
+// (al menos INFORME_MIN_TRAMO); false si no queda. Las fichas se reponen a
+// INFORME_CUOTA por segundo, hasta un segundo de reserva. Con mu.
+static bool informe_cobrar(uint64_t pags) {
+  uint64_t ahora = mach_absolute_time();
+  if (informe_t == 0) {
+    informe_fichas = INFORME_CUOTA;
+  } else {
+    uint64_t ns = abs_ns(ahora - informe_t);
+    informe_fichas = ns >= 1000000000ULL ? INFORME_CUOTA : informe_fichas + ns * INFORME_CUOTA / 1000000000ULL;
+    if (informe_fichas > INFORME_CUOTA) informe_fichas = INFORME_CUOTA;
+  }
+  informe_t = ahora;
+  if (pags < INFORME_MIN_TRAMO) pags = INFORME_MIN_TRAMO;
+  if (informe_fichas < pags) return false;
+  informe_fichas -= pags;
+  return true;
+}
+
 // cola_informe atiende el informe de páginas libres: cada búfer es una
 // cadena de descriptores (de escritura) con bloques libres del invitado, que
 // no los toca hasta recibirlo de vuelta. Se sueltan las páginas del host que
@@ -244,6 +274,10 @@ static void cola_informe(int qi) {
       uint64_t a = tramos[k][0], b = tramos[k][1];
       for (k++; k < nt && tramos[k][0] <= b; k++)
         if (tramos[k][1] > b) b = tramos[k][1];
+      if (!informe_cobrar(b - a)) {
+        if (log_globo) khv_log("balloon: free page report of %llu pages over quota", (unsigned long long)(b - a));
+        continue;
+      }
       if (soltar_tramo(a, b) == 0) c_informadas += b - a;
       if (log_globo) khv_log("balloon: free page report of %llu pages", (unsigned long long)(b - a));
     }
@@ -367,6 +401,7 @@ int vballoon_init(uint32_t id, bool deflate_on_oom) {
   nmarcos = g_ram_size / MARCO;
   npaginas = g_ram_size / PAGINA;
   n_inflados = n_pend = paginas_sueltas = 0;
+  informe_fichas = informe_t = 0;
   pend_min = UINT64_MAX;
   pend_max = 0;
   free(mapa);
