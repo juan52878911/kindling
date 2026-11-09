@@ -11,8 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -227,48 +227,9 @@ func (c consoleWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// cleanConsole cambia cada carácter de control (C0 salvo \n, \r y \t, DEL y
-// C1, que algunos terminales leen como ESC [) por su forma escapada visible:
-// ESC sale como \x1b y no empieza ninguna secuencia. Los bytes que no son UTF-8
-// válido salen también escapados.
-func cleanConsole(s string) string {
-	clean := true
-	for _, r := range s {
-		if r == utf8.RuneError || controlRune(r) {
-			clean = false
-			break
-		}
-	}
-	if clean {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		r, n := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && n <= 1:
-			fmt.Fprintf(&b, "\\x%02x", s[i])
-		case controlRune(r):
-			if r < 0x80 {
-				fmt.Fprintf(&b, "\\x%02x", r)
-			} else {
-				fmt.Fprintf(&b, "\\u%04x", r)
-			}
-		default:
-			b.WriteString(s[i : i+n])
-		}
-		i += n
-	}
-	return b.String()
-}
-
-func controlRune(r rune) bool {
-	switch r {
-	case '\n', '\r', '\t':
-		return false
-	}
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
-}
+// cleanConsole es saneado.Consola: la consola del invitado conserva \n, \r y
+// \t; el resto de caracteres de control sale escapado.
+func cleanConsole(s string) string { return saneado.Consola(s) }
 
 func splitLines(s string) []string {
 	s = strings.TrimRight(s, "\n")
