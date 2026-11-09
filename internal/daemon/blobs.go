@@ -15,7 +15,6 @@ package daemon
 // una imagen en uso por un contenido distinto.
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -29,6 +28,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -262,60 +262,43 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Temporal en el MISMO directorio, para que el renombrado final sea
-	// atómico: o está el fichero viejo o el nuevo entero, nunca medio.
-	var rnd [6]byte
-	_, _ = rand.Read(rnd[:])
-	tmp := filepath.Join(filepath.Dir(t.path), "."+filepath.Base(t.path)+".tmp-"+hex.EncodeToString(rnd[:]))
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	limpiar := func() { f.Close(); _ = os.Remove(tmp) }
-
-	h := sha256.New()
-	// +1 para distinguir "justo el tope" de "se pasó" sin leer lo que sobra.
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, api.MaxBlobBytes+1))
-	if err != nil {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("receiving the %s: %w", t.part, err))
-		return
-	}
-	if n > api.MaxBlobBytes {
-		limpiar()
-		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the %s exceeds %d bytes", t.part, api.MaxBlobBytes))
-		return
-	}
-	if r.ContentLength >= 0 && n != r.ContentLength {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("the %s arrived truncated: %d of %d bytes", t.part, n, r.ContentLength))
-		return
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if want != "" && got != want {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("the %s arrived corrupted: sha256 %s, expected %s", t.part, got, want))
-		return
-	}
-	// Durable antes de renombrar: un corte justo después no puede dejar una
+	// atómico: o está el fichero viejo o el nuevo entero, nunca medio. En
+	// disco antes de renombrar: un corte justo después no puede dejar una
 	// imagen con el nombre bueno y el contenido a medias.
-	if err := f.Sync(); err != nil {
-		limpiar()
-		fail(w, http.StatusInternalServerError, err)
+	o := durable.Opciones{SHA256: want, Max: api.MaxBlobBytes, Patron: "." + filepath.Base(t.path) + ".tmp-*"}
+	if r.ContentLength > 0 {
+		o.Size = r.ContentLength
+	}
+	rec, err := durable.Recibir(filepath.Dir(t.path), body, o)
+	if err != nil {
+		var (
+			el *durable.ErrLectura
+			ed *durable.ErrDemasiado
+			et *durable.ErrTamaño
+			eh *durable.ErrSHA256
+		)
+		switch {
+		case errors.As(err, &el):
+			fail(w, http.StatusBadRequest, fmt.Errorf("receiving the %s: %w", t.part, el.Err))
+		case errors.As(err, &ed):
+			fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the %s exceeds %d bytes", t.part, api.MaxBlobBytes))
+		case errors.As(err, &et):
+			fail(w, http.StatusBadRequest, fmt.Errorf("the %s arrived truncated: %d of %d bytes", t.part, et.N, et.Quiero))
+		case errors.As(err, &eh):
+			fail(w, http.StatusBadRequest, fmt.Errorf("the %s arrived corrupted: sha256 %s, expected %s", t.part, eh.Got, want))
+		default:
+			fail(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
+	n, got := rec.N, rec.SHA256
 
 	res := api.BlobPutResult{Name: t.name, Part: t.part, Size: n, Sha256: got}
 	// El sha256 de lo que hay se calcula aquí, fuera del cerrojo: con una
 	// imagen sin sidecar son gigas que leer, y dentro bloquearían todos los
 	// arranques. Dentro se vuelve a pedir y sale de la caché.
 	if _, err := cachedSHA256(t.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(tmp)
+		rec.Descartar()
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -344,7 +327,7 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		if err := os.Rename(tmp, t.path); err != nil {
+		if err := rec.Publicar(t.path); err != nil {
 			return err
 		}
 		// El sidecar ya con el hash que se acaba de verificar (`got`): evita
@@ -354,12 +337,12 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		_ = os.Remove(tmp)
+		rec.Descartar()
 		fail(w, status, err)
 		return
 	}
 	if res.Unchanged {
-		_ = os.Remove(tmp)
+		rec.Descartar()
 		writeJSON(w, http.StatusOK, res)
 		return
 	}

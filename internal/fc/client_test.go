@@ -198,3 +198,15 @@ func TestUnErrorSinFaultMessageDiceLoQueContesto(t *testing.T) {
 		}
 	}
 }
+
+// LimitOps manda a Firecracker los dos cubos, bytes y operaciones, con los
+// nombres de su API.
+func TestLimitOpsLlevaLosDosCubos(t *testing.T) {
+	b, err := json.Marshal(LimitOps(16<<20, 32768))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"bandwidth":{"size":16777216,"refill_time":1000},"ops":{"size":32768,"refill_time":1000}}`; string(b) != want {
+		t.Fatalf("LimitOps = %s, quería %s", b, want)
+	}
+}

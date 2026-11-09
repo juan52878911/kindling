@@ -92,14 +92,14 @@ grupo. Llegar al socket ya no basta para mandar; sin regla, todo es `403`.
 | Acción | Rutas | admin | tenant:X | sin rol |
 |---|---|---|---|---|
 | `info` | `GET /info` | todo | sus máquinas en la cuenta | contesta solo versión, capacidades y su `authz` (ni raíz, ni carpetas, ni almacén) |
-| `list` | `GET /machines`, `/sandboxes`, `/snapshots`, `/graphs`, `/events` | todo | solo lo suyo (y las plantillas compartidas) | 403 |
+| `list` | `GET /machines`, `/sandboxes`, `/snapshots`, `/graphs`, `/events`, `/metrics` | todo | solo lo suyo (y las plantillas compartidas); en `/metrics`, las series del host sin las de cada máquina | 403 |
 | `create` | `POST /machines`, `/sandboxes`, `/graphs` | todo | sí, con su dueño sellado (abajo) | 403 |
 | `machine` | todo `/machines/{ref}/...` y `/sandboxes/{ref}/...` | todo | solo las suyas; las demás, 404 | 403 |
 | `snapshot.read` | `GET /snapshots/{name}` | todo | suyos y compartidos | 403 |
 | `snapshot.write` | anotaciones, credenciales de plantilla, `DELETE /snapshots/{name}` | todo | solo suyos; una compartida, 403 | 403 |
 | `graph` | todo `/graphs/{ref}/...` | todo | solo los suyos | 403 |
 | `images.list` | `GET /images` | todo | sí (las imágenes base son de todos) | 403 |
-| `admin` | construir y borrar imágenes, sus ficheros y blobs, volúmenes, `/store`, `/shares/uploads`, `/metrics`, `/procstats` | todo | 403 | 403 |
+| `admin` | construir y borrar imágenes, sus ficheros y blobs, volúmenes, `/store`, `/shares/uploads`, `/procstats` | todo | 403 | 403 |
 
 Lo ajeno responde como lo que no existe (`404`): un inquilino no puede sondear
 nombres de otros por sus códigos de error.

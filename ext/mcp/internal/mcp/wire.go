@@ -92,3 +92,10 @@ func GuestPost(body, session string) api.GuestRequest {
 	}
 	return req
 }
+
+// MaxToolResult es el tope de UN mensaje del servidor MCP: lo aplica el puente
+// al leer la salida del proceso (una línea de stdio) y el gateway al leer la
+// respuesta del puente. Tiene que ser el mismo número en los dos lados: con 16
+// MiB en el puente y 8 en el gateway, un resultado entre los dos pasaba el
+// puente y moría después. Pasado el tope se falla, no se trunca.
+const MaxToolResult = 16 << 20

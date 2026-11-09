@@ -126,6 +126,7 @@ func nombres(m map[string]string) []string {
 //
 //	KLING_SANDBOX_TOKEN=xxx                              un inquilino "default", sin tope
 //	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máximo de sandboxes[:máximo de shells]]
+//	KLING_SANDBOX_ADMINS=ana                             tenants que ven /v1/hosts y las métricas de todos
 func leerTenants() ([]frontal.Tenant, error) {
 	var out []frontal.Tenant
 	if v := os.Getenv("KLING_SANDBOX_TOKEN"); v != "" {
@@ -162,6 +163,22 @@ func leerTenants() ([]frontal.Tenant, error) {
 	}
 	if len(out) == 0 {
 		return nil, errors.New("no tenants: set KLING_SANDBOX_TOKEN (or KLING_SANDBOX_TENANTS) before serving")
+	}
+	// Los admins ven /v1/hosts y las métricas de todos los tenants.
+	for _, n := range strings.Split(os.Getenv("KLING_SANDBOX_ADMINS"), ",") {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		hay := false
+		for i := range out {
+			if out[i].Nombre == n {
+				out[i].Admin, hay = true, true
+			}
+		}
+		if !hay {
+			return nil, fmt.Errorf("KLING_SANDBOX_ADMINS: %q is not a tenant", n)
+		}
 	}
 	return out, nil
 }

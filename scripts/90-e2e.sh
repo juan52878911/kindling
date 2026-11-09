@@ -548,14 +548,20 @@ more" && ! contiene "$out" "f3" && contiene "$out" "755" && ! contiene "$out" "4
       && ok "rw: create, mkdir, rename, append, unlink reach the host (setuid dropped)" \
       || failE "rw on the host" "hi/more, no f3, mode 755" "$out"
 
-    # Nada sale de la carpeta: los enlaces del host se resuelven DENTRO del
-    # invitado (su /etc, no el del host), el secreto del host no se lee, y el
-    # invitado no puede crear enlaces ni nodos.
-    out=$($KLING exec "$SH-rw" -- sh -c 'cat /w/up 2>&1; cat /w/abs 2>&1; head -1 /w/etc/os-release; ln -s /etc/shadow /w/l 2>&1; ln /w/d/e/f2 /w/h 2>&1; mkfifo /w/p 2>&1; true' 2>&1)
-    ! contiene "$out" "host secret" && contiene "$out" "Alpine" \
+    # Nada sale de la carpeta. Un enlace del host con destino absoluto fuera de
+    # ella (etc -> /etc, abs -> el secreto) da EACCES en readlink: ni se enseña
+    # la ruta del host ni se sigue, ni en el host ni en el invitado (ver
+    # linkInterno en internal/share y docs/compartir.md). Uno relativo que sube
+    # (up) se resuelve en el invitado, donde no hay nada. El secreto y el
+    # os-release del host no se leen, y el invitado no puede crear enlaces ni
+    # nodos.
+    hostrel=$(hostsh "head -1 /etc/os-release")
+    out=$($KLING exec "$SH-rw" -- sh -c 'cat /w/up 2>&1; cat /w/abs 2>&1; head -1 /w/etc/os-release 2>&1; ln -s /etc/shadow /w/l 2>&1; ln /w/d/e/f2 /w/h 2>&1; mkfifo /w/p 2>&1; true' 2>&1)
+    ! contiene "$out" "host secret" && ! contiene "$out" "$hostrel" \
+      && [ "$(printf '%s\n' "$out" | grep -Ec '/w/(abs|etc/os-release).*Permission denied' || true)" = "2" ] \
       && [ "$(printf '%s\n' "$out" | grep -c 'not permitted' || true)" = "3" ] \
-      && ok "rw: host symlinks resolve in the guest, no symlink/hardlink/mknod, host secret unreadable" \
-      || failE "escape attempts" "no 'host secret', guest os-release, 3 x not permitted" "$out"
+      && ok "rw: absolute host symlinks out of the share are EACCES, no symlink/hardlink/mknod, host secret unreadable" \
+      || failE "escape attempts" "no 'host secret' nor host os-release, EACCES on abs and etc, 3 x not permitted" "$out"
 
     # Carga tipo npm install: el paquete npm entero (miles de ficheros) se
     # extrae en la carpeta y se ejecuta desde ella.

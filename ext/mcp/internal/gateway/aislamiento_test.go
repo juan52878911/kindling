@@ -328,7 +328,7 @@ func TestAgregadorConServicioAislado(t *testing.T) {
 	if vivas != 2 {
 		t.Fatalf("quedan %d máquinas; quería las 2 de las conversaciones (la del catálogo se destruye)", vivas)
 	}
-	gw.agg.drop(ctx, "c1")
+	gw.agg.drop(ctx, "c1", "")
 	d.mu.Lock()
 	vivas = len(d.maquinas)
 	d.mu.Unlock()

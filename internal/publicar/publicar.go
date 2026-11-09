@@ -912,7 +912,18 @@ func (p *Publicador) leer() []api.Publication {
 		}
 	}
 	if err != nil {
-		p.logf("publish: %s is not valid (%v); starting with nothing published", p.ruta, err)
+		// Se aparta, como state.json: Arrancar escribe enseguida la lista
+		// vacía encima y lo publicado antes se perdería sin remedio. Si ni
+		// siquiera se puede renombrar, no se escribe.
+		destino := p.ruta + ".corrupt-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		if rerr := os.Rename(p.ruta, destino); rerr != nil {
+			p.guardando.Lock()
+			p.intocable = true
+			p.guardando.Unlock()
+			p.logf("publish: %s is not valid (%v) and could not be set aside (%v); nothing is published again and the file is left as it is", p.ruta, err, rerr)
+			return nil
+		}
+		p.logf("publish: %s is not valid (%v); moved to %s, starting with nothing published", p.ruta, err, destino)
 		return nil
 	}
 	return l

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -621,43 +622,31 @@ func copiarVerificado(src *os.Root, nombre, dst, digest string, u *usuarioConstr
 	case fi.Size() > max:
 		return 0, errSinSitio
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-")
-	if err != nil {
-		return 0, err
-	}
-	defer os.Remove(tmp.Name()) // si llega a dst, ya no existe con este nombre
-	defer tmp.Close()
-	hs := sha256.New()
 	// Lo que dice el fstat y ni un byte más: si el fichero creciera (no
 	// debería: no queda nadie suyo vivo) no se copia lo que no se miró.
-	n, err := io.Copy(io.MultiWriter(tmp, hs), io.LimitReader(f, fi.Size()))
+	rec, err := durable.Recibir(filepath.Dir(dst), io.LimitReader(f, fi.Size()), durable.Opciones{
+		SHA256: digest, Size: fi.Size(), Perm: 0o640, Patron: ".tmp-*",
+		Preparar: func(t *os.File) error {
+			if os.Geteuid() == 0 {
+				return t.Chown(0, int(u.GID))
+			}
+			return nil
+		}})
 	if err != nil {
-		return 0, err
-	}
-	if n != fi.Size() {
-		return 0, fmt.Errorf("short read (%d of %d bytes)", n, fi.Size())
-	}
-	if got := "sha256:" + hex.EncodeToString(hs.Sum(nil)); got != digest {
-		return 0, fmt.Errorf("sha256 mismatch (got %s)", got)
-	}
-	if os.Geteuid() == 0 {
-		if err := tmp.Chown(0, int(u.GID)); err != nil {
-			return 0, err
+		var et *durable.ErrTamaño
+		var eh *durable.ErrSHA256
+		switch {
+		case errors.As(err, &et):
+			return 0, fmt.Errorf("short read (%d of %d bytes)", et.N, fi.Size())
+		case errors.As(err, &eh):
+			return 0, fmt.Errorf("sha256 mismatch (got sha256:%s)", eh.Got)
 		}
-	}
-	if err := tmp.Chmod(0o640); err != nil {
 		return 0, err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := rec.Publicar(dst); err != nil {
 		return 0, err
 	}
-	if err := tmp.Close(); err != nil {
-		return 0, err
-	}
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return 0, err
-	}
-	return n, nil
+	return rec.N, nil
 }
 
 // trasAbrirPropia es para los tests: el constructor cambiando su caché justo

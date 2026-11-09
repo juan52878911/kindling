@@ -34,7 +34,7 @@ func cmdConnect(args []string) error {
 	all := fs.Bool("all", false, "a single entry that gathers ALL services")
 	only := fs.String("only", "", "with -all: limit to these services, comma-separated")
 	expand := fs.Bool("expand", false, "with -all: load the full catalog instead of meta-tools")
-	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
+	tokenFile := tokenFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -44,7 +44,10 @@ func cmdConnect(args []string) error {
 
 	cfg := loadConfig()
 	gw := config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host)))
-	token := config.Or(*tokenFlag, cfg.Gateway.Token)
+	token, err := clientToken(*tokenFile, cfg)
+	if err != nil {
+		return err
+	}
 
 	// Entrada agregada: un solo servidor MCP que reúne a todos.
 	if *all {

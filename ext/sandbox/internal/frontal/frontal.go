@@ -68,6 +68,10 @@ type Tenant struct {
 	// sandbox nuevo, pero sí un proceso del daemon y una conexión que este
 	// frontal mantiene en pie, y ambos son un recurso que un tenant puede acaparar.
 	MaxShells int
+	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
+	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
+	// /v1/hosts es un 403 y /v1/metrics solo enseña las series del que llama.
+	Admin bool
 }
 
 // Opciones configura el frontal.
@@ -102,12 +106,15 @@ type Servidor struct {
 	log      *log.Logger
 	mux      *http.ServeMux
 
-	// mu protege enVuelo y serializa la reclamación de precalentadas. Las
+	// mu protege enVuelo y reclamos, y aparta las precalentadas que se reclaman. Las
 	// cuotas se cuentan contra lo que el daemon tiene vivo, y una creación tarda
 	// segundos en aparecer ahí: sin contar las que están en camino, N peticiones
 	// simultáneas pasarían todas la cuota.
 	mu      sync.Mutex
 	enVuelo map[string]int
+	// reclamos son las precalentadas que se están reclamando o se reclamaron
+	// hace poco (ver reclamarPrecalentada); también bajo mu.
+	reclamos map[string]reclamo
 
 	// shells cuenta las sesiones de shell abiertas por tenant AHORA MISMO. Sirve
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la
@@ -194,10 +201,11 @@ func (s *Servidor) rutas() {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /v1/health", s.handleHealth)
 	m.Handle("GET /v1/hosts", s.auth(http.HandlerFunc(s.handleHosts)))
-	// Cualquier token de tenant vale para /v1/metrics y /v1/templates: no dan
-	// nada de OTROS tenants (métricas agregadas, catálogo de plantillas), y
-	// exigir un token distinto solo obligaría a repartir un segundo secreto sin
-	// ganar nada a cambio.
+	// /v1/hosts es solo para admin (handleHosts). Cualquier token de tenant
+	// vale para /v1/metrics y /v1/templates: no dan nada de OTROS tenants (las
+	// series por tenant solo las ve entero un admin; el resto, el catálogo de
+	// plantillas y los totales agregados), y exigir un token distinto solo
+	// obligaría a repartir un segundo secreto sin ganar nada a cambio.
 	m.Handle("GET /v1/metrics", s.auth(http.HandlerFunc(s.handleMetrics)))
 	m.Handle("GET /v1/templates", s.auth(http.HandlerFunc(s.handleTemplates)))
 	m.Handle("POST /v1/sandboxes", s.auth(http.HandlerFunc(s.handleCrear)))
@@ -271,7 +279,13 @@ func (s *Servidor) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hosts": len(s.reg.Todos())})
 }
 
+// handleHosts enseña los daemons de detrás con sus endpoints: rutas de
+// sockets y direcciones internas que son del operador, no de un tenant.
 func (s *Servidor) handleHosts(w http.ResponseWriter, r *http.Request) {
+	if !tenantDe(r).Admin {
+		fail(w, http.StatusForbidden, errors.New("listing the hosts needs an admin token"))
+		return
+	}
 	writeJSON(w, http.StatusOK, s.reg.Estados(r.Context()))
 }
 
@@ -281,17 +295,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// fail responde un error con su código. Si el error viene del daemon con
-// código propio, ese manda: un 507 o un 409 del daemon significan algo concreto
-// para quien llama y aplastarlos con un 502 perdería justo eso.
-func fail(w http.ResponseWriter, code int, err error) {
-	var se *api.StatusError
-	if errors.As(err, &se) && se.Code != 0 {
-		code = se.Code
-	}
-	writeJSON(w, code, api.Error{Message: err.Error()})
 }
 
 // codigoDeHost traduce el error de hosts.Intentar a un estado HTTP.

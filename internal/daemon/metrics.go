@@ -24,6 +24,11 @@ func (s *Server) handleProcStats(w http.ResponseWriter, r *http.Request) {
 // tiene ninguna externa.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	ps := s.mgr.ProcStats()
+	// Un inquilino ve las cifras del host, no las máquinas: las series por
+	// máquina llevan el ID y el nombre de todas, también las ajenas.
+	if _, filtrar := inquilinoDe(r); filtrar {
+		ps.Machines = nil
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
 	// microVMs por estado. Se emiten los estados conocidos aunque estén a 0 para

@@ -20,8 +20,11 @@ func TestEgressRulesOrden(t *testing.T) {
 		t.Fatalf("none = %v", none)
 	}
 	inet := n.egressRules(EgressInternet)
-	if len(inet) != 3+len(blocked) {
+	if len(inet) != 4+len(blocked) {
 		t.Fatalf("internet: %d reglas", len(inet))
+	}
+	if strings.Join(inet[len(inet)-2], " ") != strings.Join(topeNuevas(), " ") {
+		t.Errorf("la penúltima de internet debe ser el tope de nuevas: %v", inet[len(inet)-2])
 	}
 	if strings.Join(inet[len(inet)-1], " ") != "-t nat -A POSTROUTING -o vg-abcdef01 -j MASQUERADE" {
 		t.Errorf("la última de internet debe ser el MASQUERADE: %v", inet[len(inet)-1])
@@ -72,6 +75,7 @@ type paquete struct {
 	dport                    int
 	estado                   string // NEW, ESTABLISHED, INVALID, UNTRACKED...
 	enSet                    bool   // la IP destino está en el ipset del allowlist
+	rafaga                   bool   // pasa del tope de --hashlimit-above
 }
 
 // veredicto recorre las reglas de FORWARD de la tabla filter (argumentos de
@@ -159,6 +163,11 @@ func casa(t *testing.T, r []string, p paquete) (string, bool) {
 			for _, e := range strings.Split(r[i+1], ",") {
 				m = m || e == p.estado
 			}
+		case "--hashlimit-above":
+			m = p.rafaga
+		case "--hashlimit-burst", "--hashlimit-mode", "--hashlimit-name":
+			i++
+			continue
 		case "--match-set":
 			m = p.enSet
 			i++ // el "dst"
@@ -356,5 +365,34 @@ func TestAllowlistYRestorePonenLoMismo(t *testing.T) {
 	in := restoreInput(n.reglasAllowlist())
 	if !strings.Contains(in, "--match-set "+n.setName()+" dst -j ACCEPT\n-A FORWARD -i tap0 -j DROP\nCOMMIT\n") {
 		t.Errorf("entrada de iptables-restore del allowlist:\n%s", in)
+	}
+}
+
+// Una ráfaga de paquetes NEW por encima del tope se descarta en internet y en
+// allowlist, también hacia una IP permitida; por debajo del tope, pasa. Lo
+// establecido no lo cuenta el tope.
+func TestRafagaDeNuevasSeCorta(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	permitida := paquete{in: TapName, out: n.NSIf, src: GuestIP, dst: "93.184.216.34", proto: "udp", dport: 9, estado: "NEW", enSet: true}
+	for nombre, reglas := range map[string][][]string{
+		"internet":  n.egressRules(EgressInternet),
+		"allowlist": n.reglasAllowlist(),
+	} {
+		if got := veredicto(t, reglas, permitida); got != "ACCEPT" {
+			t.Errorf("%s: una nueva bajo el tope = %s, quería ACCEPT", nombre, got)
+		}
+		rafaga := permitida
+		rafaga.rafaga = true
+		if got := veredicto(t, reglas, rafaga); got != "DROP" {
+			t.Errorf("%s: una ráfaga de nuevas = %s, quería DROP", nombre, got)
+		}
+		establecida := rafaga
+		establecida.estado = "ESTABLISHED"
+		if got := veredicto(t, reglas, establecida); got != "ACCEPT" {
+			t.Errorf("%s: lo establecido en ráfaga = %s, quería ACCEPT", nombre, got)
+		}
+	}
+	if !strings.Contains(restoreInput(n.reglasAllowlist()), "-m hashlimit --hashlimit-above 300/s --hashlimit-burst 300 --hashlimit-mode dstip --hashlimit-name kl-nuevas -j DROP\n-A FORWARD -i tap0 -o "+n.NSIf+" -m conntrack --ctstate NEW -m set") {
+		t.Errorf("el tope no va justo delante del ACCEPT de nuevas:\n%s", restoreInput(n.reglasAllowlist()))
 	}
 }
