@@ -348,6 +348,15 @@ type entry struct {
 	// herramienta en paralelo. Se fija al crear la instancia y no cambia.
 	maxSessions int
 
+	// reservas son las sesiones nuevas que pickInstance/scaleOut entregaron
+	// aquí y que aún no tienen ruta: el initialize va en camino. Cuentan para
+	// maxSessions; sin ellas, N initialize concurrentes leían todos el mismo
+	// hueco y elegían la misma instancia (y el puente rechazaba a N-1). Se
+	// sueltan en end —el initialize acaba antes de fijar la sesión— o al
+	// vencer reservaPlazo, por si quien la pidió no llega a usarla. Se toca
+	// con g.mu.
+	reservas []time.Time
+
 	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
 	memMiB int
 
@@ -380,6 +389,12 @@ func (g *Scheduler) end(e *entry) {
 	if e.inflight > 0 {
 		e.inflight--
 	}
+	// La petición que acaba puede no ser la que reservó (no llevan nombre),
+	// pero soltar antes de tiempo solo deja pasar a otra al puente, que la
+	// rechaza y el gateway escala: lo de antes, nunca una fuga.
+	if len(e.reservas) > 0 {
+		e.reservas = e.reservas[1:]
+	}
 	e.lastUse = time.Now()
 	g.mu.Unlock()
 }
@@ -409,12 +424,17 @@ type sessionRoute struct {
 // elegida si hay una con hueco de sesión y sin saturar de trabajo; si todas las
 // que tienen hueco están saturadas, devuelve nil y la menos cargada de ellas
 // (libre), por si no se puede escalar. Pura, para poder probarla sin daemon.
+//
+// Las reservas (sesiones con el initialize en camino) cuentan para elegir,
+// pero no para libre: si no se puede escalar, compartir con una sesión que
+// quizá no llegue es mejor que rechazar. Se llama con g.mu tomado.
 func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight int) (elegida, libre *entry) {
 	for _, e := range entries {
-		if sesiones(e.machineID) >= e.maxSessions {
+		n := sesiones(e.machineID)
+		if n >= e.maxSessions {
 			continue
 		}
-		if maxInflight <= 0 || e.inflight < maxInflight {
+		if n+e.reservasLocked() < e.maxSessions && (maxInflight <= 0 || e.inflight < maxInflight) {
 			return e, nil
 		}
 		if libre == nil || e.inflight < libre.inflight {
@@ -424,12 +444,36 @@ func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight in
 	return nil, libre
 }
 
+// reservaPlazo es lo que dura una reserva de sesión que nadie suelta.
+const reservaPlazo = 30 * time.Second
+
+// reservarLocked apunta en e una sesión nueva en camino. Con g.mu tomado.
+func (e *entry) reservarLocked() {
+	e.reservas = append(e.reservas, time.Now())
+}
+
+// reservasLocked cuenta las reservas vigentes de e, olvidando las vencidas.
+// Con g.mu tomado.
+func (e *entry) reservasLocked() int {
+	i := 0
+	for i < len(e.reservas) && time.Since(e.reservas[i]) > reservaPlazo {
+		i++
+	}
+	e.reservas = e.reservas[i:]
+	return len(e.reservas)
+}
+
 func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenant) (*entry, error) {
 	if _, err := g.ensure(ctx, service); err != nil {
 		return nil, err
 	}
+	// La elegida se reserva con el mismo candado con que se eligió: soltarlo
+	// antes dejaba a N initialize concurrentes leer el mismo hueco.
 	g.mu.Lock()
 	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	if elegida != nil {
+		elegida.reservarLocked()
+	}
 	g.mu.Unlock()
 	if elegida != nil {
 		return elegida, nil
@@ -442,6 +486,9 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	// es mejor que una rechazada.
 	e, err := g.scaleOut(ctx, service, tnt)
 	if err != nil && libre != nil {
+		g.mu.Lock()
+		libre.reservarLocked()
+		g.mu.Unlock()
 		return libre, nil
 	}
 	return e, err
@@ -646,6 +693,38 @@ func (g *Scheduler) olvidarRutasLocked(service, machineID string) {
 	}
 }
 
+// soltarSinEscuchar se deshace de una máquina ya despierta cuya herramienta no
+// llegó a escuchar: no queda registrada como instancia, así que el segador no
+// la ve, y con MachineTTL negativo nada más la pararía nunca. Una recién
+// restaurada se borra, como hace el fondo (no guarda nada de nadie); una
+// adoptada o descongelada se congela: conserva su estado, que en una sesión
+// aislada es la sesión, y queda para el siguiente acquire.
+func (g *Scheduler) soltarSinEscuchar(ctx context.Context, service, id, how string) {
+	// Sin el ctx de quien llama: puede ser justo el que venció esperando.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var err error
+	hecho := "frozen"
+	switch {
+	case how == "restore":
+		hecho = "removed"
+		if g.removeFn != nil {
+			err = g.removeFn(rctx, id)
+		} else {
+			err = g.client.Remove(rctx, id)
+		}
+	case g.freezeFn != nil:
+		err = g.freezeFn(id)
+	default:
+		_, err = g.client.Freeze(rctx, id)
+	}
+	if err != nil && !api.IsNotFound(err) {
+		log.Printf("%s: machine %s never listened and could not be %s: %v", service, short(id), hecho, err)
+		return
+	}
+	log.Printf("%s: machine %s never listened; %s", service, short(id), hecho)
+}
+
 // buildEntry despierta o crea UNA instancia del servicio y la devuelve montada
 // (con su proxy), SIN registrarla: quien llama decide si es la primaria
 // (g.services) o una réplica de scale-out (g.extra). Aplica siempre la cuota de
@@ -746,6 +825,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// proxy ya reintentan con otra.
 	if how != "resume" {
 		if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
+			g.soltarSinEscuchar(ctx, service, mc.ID, how)
 			return nil, fmt.Errorf("tool did not start listening: %w", err)
 		}
 	}
@@ -1020,6 +1100,7 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	e.reservarLocked() // nace para la sesión que la pidió (ver pickInstance)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
 	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
@@ -1130,20 +1211,25 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		return m, "adopt", nil
 	}
 	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
+	//
+	// Sale del registro de pausadas solo si el thaw sale bien: si falla, sigue
+	// pausada en el daemon, y fuera del registro nadie la congelaría (RAM sin
+	// dueño). Mientras dura el thaw la aparta g.adquiriendo.
 	if m := pick(api.StatePaused); m != nil {
-		g.mu.Lock()
-		delete(g.pausadas, m.ID)
-		g.mu.Unlock()
 		t := time.Now()
 		th, err := g.client.Thaw(ctx, m.ID)
 		tr.Wake += time.Since(t)
 		if th != nil {
 			tr.Daemon = th.Wake
 		}
-		if err != nil {
-			g.mu.Lock()
+		g.mu.Lock()
+		if err == nil {
+			delete(g.pausadas, m.ID)
+		} else {
 			delete(g.adquiriendo, m.ID)
-			g.mu.Unlock()
+		}
+		g.mu.Unlock()
+		if err != nil {
 			return nil, "", err
 		}
 		// El TTL se renueva después y en segundo plano: una pausada cuenta como
@@ -1273,10 +1359,20 @@ func (g *Scheduler) ttlSeconds() int {
 func (g *Scheduler) renovarTTL(ctx context.Context, id string) error {
 	// Sin TTL (MachineTTL negativo) no hay reloj que renovar: renovar con 0
 	// solo le costaría al daemon una llamada por instancia en cada vuelta.
-	if g.client == nil || g.ttlSeconds() == 0 || !g.sabeRenovar(ctx) {
+	if g.client == nil || g.ttlSeconds() == 0 {
 		return nil
 	}
-	_, err := g.client.Renew(ctx, id, g.ttlSeconds())
+	// Si el daemon no contesta ni a /info, la renovación tampoco se hizo: es
+	// un fallo como cualquier otro (a g.sinRenovar), no un "no hay nada que
+	// renovar". Tratarlo como lo segundo dejaba sin latido a la instancia
+	// hasta que tocara por umbral, y al adoptarla, sin renovar.
+	sabe, err := g.sabeRenovar(ctx)
+	if err == nil && !sabe {
+		return nil
+	}
+	if err == nil {
+		_, err = g.client.Renew(ctx, id, g.ttlSeconds())
+	}
 	g.mu.Lock()
 	if err != nil {
 		if g.sinRenovar == nil {
@@ -1324,7 +1420,12 @@ func renovacionRechazada(err error) bool {
 // sin la capacidad "renew" no hace nada, como renovarTTL.
 func (g *Scheduler) mantenerTTL(ctx context.Context, id string) (release func()) {
 	nada := func() {}
-	if g.client == nil || !g.sabeRenovar(ctx) {
+	if g.client == nil {
+		return nada
+	}
+	// Sin saber si renueva (/info falló) se intenta igual: un daemon sin la
+	// capacidad contesta 404 y se queda en nada, como si se supiera.
+	if sabe, err := g.sabeRenovar(ctx); err == nil && !sabe {
 		return nada
 	}
 	mc, err := g.client.Renew(ctx, id, 0)
@@ -1370,26 +1471,27 @@ func (g *Scheduler) mantenerTTL(ctx context.Context, id string) (release func())
 }
 
 // sabeRenovar pregunta UNA vez al daemon si anuncia la capacidad "renew". Si no
-// contesta, no se apunta nada y se vuelve a preguntar la próxima vez.
-func (g *Scheduler) sabeRenovar(ctx context.Context) bool {
+// contesta, no se apunta nada, devuelve el error y se vuelve a preguntar la
+// próxima vez: un fallo pasajero no es "no sabe".
+func (g *Scheduler) sabeRenovar(ctx context.Context) (bool, error) {
 	switch g.renewCap.Load() {
 	case 1:
-		return true
+		return true, nil
 	case 2:
-		return false
+		return false, nil
 	}
 	info, err := g.client.Info(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if info.Has("renew") {
 		g.renewCap.Store(1)
-		return true
+		return true, nil
 	}
 	if g.renewCap.CompareAndSwap(0, 2) {
 		log.Printf("the daemon can't renew machine TTLs (no \"renew\" capability): an instance may be frozen by its TTL while in use; upgrade kindling")
 	}
-	return false
+	return false, nil
 }
 
 func (g *Scheduler) snapshotFor(ctx context.Context, service string) (*api.Snapshot, error) {
@@ -1752,12 +1854,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		var l *sync.Mutex
 		switch {
 		case e.aislada != "":
-			l = g.aisladaLock(e.aislada)
+			if l = g.probarAislada(e.aislada); l == nil {
+				continue
+			}
 		case g.services[v.service] == e:
-			l = g.ensureLock(v.service)
-		}
-		if l != nil && !l.TryLock() {
-			continue
+			if l = g.ensureLock(v.service); !l.TryLock() {
+				continue
+			}
 		}
 		if g.adquiriendo == nil {
 			g.adquiriendo = map[string]bool{}
@@ -1775,6 +1878,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	// que la sesión sobrevive al thaw. Las caduca SessionTTL, no idle.
 	for sid, rt := range g.routes {
 		if _, aislada := g.aisladas[sid]; aislada {
+			continue
+		}
+		// lastUse es cuándo LLEGÓ la última petición: una llamada de cinco
+		// minutos la deja vieja mientras sigue corriendo, y borrar la ruta
+		// daba 404 a la siguiente de esa sesión. Su instancia con trabajo en
+		// vuelo no se congela (arriba), así que su sesión sigue valiendo.
+		if e := g.entryByMachineLocked(rt.service, rt.machineID); e != nil && e.inflight > 0 {
 			continue
 		}
 		if time.Since(rt.lastUse) > g.idle {
@@ -1816,6 +1926,26 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	g.mu.Unlock()
 
+	// El latido va ANTES de dormir y de enfriar las pausadas: congelar varias
+	// tarda segundos (cada freeze vuelca la memoria), y una instancia con el
+	// TTL al límite podía vencer en el daemon mientras esperaba su turno.
+	for _, r := range renovar {
+		err := g.renovarTTL(ctx, r.e.machineID)
+		g.mu.Lock()
+		switch {
+		case err == nil:
+			r.e.renewedAt = time.Now()
+		case renovacionRechazada(err):
+			// Ya no existe o no está en marcha (el daemon la congeló o la
+			// borró por debajo): se descarta, y el siguiente ensure la
+			// reconstruye o la descongela. Solo si sigue siendo esa entrada.
+			if g.entryByMachineLocked(r.service, r.e.machineID) == r.e {
+				log.Printf("%s: dropping instance %s, its TTL can't be renewed: %v", r.service, short(r.e.machineID), err)
+				g.removeEntryLocked(r.service, r.e.machineID)
+			}
+		}
+		g.mu.Unlock()
+	}
 	// Antes de dormirlas, con el invitado aún corriendo: así el cierre de sus
 	// conexiones ociosas llega a él y el volcado no guarda conexiones a medias
 	// que al despertar el host ya no reconoce.
@@ -1840,23 +1970,6 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		}
 	})
 	g.enfriarPausadas(ctx)
-	for _, r := range renovar {
-		err := g.renovarTTL(ctx, r.e.machineID)
-		g.mu.Lock()
-		switch {
-		case err == nil:
-			r.e.renewedAt = time.Now()
-		case renovacionRechazada(err):
-			// Ya no existe o no está en marcha (el daemon la congeló o la
-			// borró por debajo): se descarta, y el siguiente ensure la
-			// reconstruye o la descongela. Solo si sigue siendo esa entrada.
-			if g.entryByMachineLocked(r.service, r.e.machineID) == r.e {
-				log.Printf("%s: dropping instance %s, its TTL can't be renewed: %v", r.service, short(r.e.machineID), err)
-				g.removeEntryLocked(r.service, r.e.machineID)
-			}
-		}
-		g.mu.Unlock()
-	}
 	for _, a := range caducadas {
 		g.destruirAislada(ctx, a, "expired")
 	}
@@ -1994,13 +2107,15 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
 		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
 		// de SU servicio, y un Lock aquí podría cruzarse con él.
-		vlock := g.ensureLock(elegido)
+		var vlock *sync.Mutex
 		if victima != nil && victima.aislada != "" {
 			// La de una sesión aislada se despierta bajo SU candado, no el
 			// del servicio (ver isolatedSession).
-			vlock = g.aisladaLock(victima.aislada)
+			vlock = g.probarAislada(victima.aislada)
+		} else if l := g.ensureLock(elegido); l.TryLock() {
+			vlock = l
 		}
-		if !vlock.TryLock() {
+		if vlock == nil {
 			devolver()
 			continue // esa esta ocupada; se prueba otra
 		}

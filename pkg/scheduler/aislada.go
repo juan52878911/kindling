@@ -90,9 +90,51 @@ func (g *Scheduler) sessionTTL() time.Duration {
 // El candado no se borra al cerrar la sesión: alguien puede estar esperándolo,
 // y uno nuevo para la misma clave dejaría a dos dueños a la vez. Los que ya no
 // son de ninguna sesión los poda el barrido (podarCandados).
+//
+// Devuelve el candado SIN tomar, y entre que se obtiene y se toma el barrido
+// puede podarlo: quien lo use tiene que tomarlo con bloquearAislada o
+// probarAislada, que comprueban que sigue siendo el de la clave.
 func (g *Scheduler) aisladaLock(key string) *sync.Mutex {
 	v, _ := g.aisladaMu.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// esCandadoVigente dice si l sigue siendo el candado de la sesión key.
+func (g *Scheduler) esCandadoVigente(key string, l *sync.Mutex) bool {
+	v, ok := g.aisladaMu.Load(key)
+	return ok && v.(*sync.Mutex) == l
+}
+
+// bloquearAislada toma el candado de la sesión key y lo devuelve tomado.
+//
+// Si el barrido lo podó mientras se esperaba (estaba libre: quien lo esperaba
+// aún no lo tenía), tomarlo no excluye a nadie —el siguiente aisladaLock
+// crea otro—, así que se suelta y se toma el nuevo. Con el candado vigente
+// tomado el barrido ya no lo poda: solo poda los libres.
+func (g *Scheduler) bloquearAislada(key string) *sync.Mutex {
+	for {
+		l := g.aisladaLock(key)
+		l.Lock()
+		if g.esCandadoVigente(key, l) {
+			return l
+		}
+		l.Unlock()
+	}
+}
+
+// probarAislada es bloquearAislada sin esperar: devuelve el candado tomado, o
+// nil si alguien lo tiene.
+func (g *Scheduler) probarAislada(key string) *sync.Mutex {
+	for {
+		l := g.aisladaLock(key)
+		if !l.TryLock() {
+			return nil
+		}
+		if g.esCandadoVigente(key, l) {
+			return l
+		}
+		l.Unlock()
+	}
 }
 
 // libreLocked dice si nadie tiene el candado de la sesión key ahora mismo. Si
@@ -100,8 +142,8 @@ func (g *Scheduler) aisladaLock(key string) *sync.Mutex {
 // que tome el candado después puede ver la sesión a medio quitar (isolatedSession
 // mira g.aisladas bajo g.mu). Se llama con g.mu tomado.
 func (g *Scheduler) libreLocked(key string) bool {
-	l := g.aisladaLock(key)
-	if !l.TryLock() {
+	l := g.probarAislada(key)
+	if l == nil {
 		return false
 	}
 	l.Unlock()
@@ -115,8 +157,7 @@ func (g *Scheduler) libreLocked(key string) bool {
 // dorado; sin create devuelve ErrNoSuchSession. Nunca devuelve otra máquina que
 // la de la sesión: es la garantía entera.
 func (g *Scheduler) isolatedSession(ctx context.Context, service, key string, tnt *tenant, create bool) (*entry, error) {
-	lock := g.aisladaLock(key)
-	lock.Lock()
+	lock := g.bloquearAislada(key)
 	defer lock.Unlock()
 
 	g.mu.Lock()
@@ -231,13 +272,20 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		g.adquiriendo = map[string]bool{}
 	}
 	g.adquiriendo[id] = true
-	delete(g.pausadas, id)
 	g.mu.Unlock()
+	// Sale del registro de pausadas solo al despertarla: si el thaw falla sigue
+	// pausada en el daemon y el registro es lo único que la acaba congelando.
 	fallo := func(err error) (*api.Machine, string, error) {
 		g.mu.Lock()
 		delete(g.adquiriendo, id)
 		g.mu.Unlock()
 		return nil, "", err
+	}
+	despierta := func(mc *api.Machine, how string) (*api.Machine, string, error) {
+		g.mu.Lock()
+		delete(g.pausadas, id)
+		g.mu.Unlock()
+		return mc, how, nil
 	}
 
 	switch mc.State {
@@ -250,7 +298,7 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		if err := g.renovarTTL(ctx, id); renovacionRechazada(err) {
 			return fallo(err)
 		}
-		return mc, "adopt", nil
+		return despierta(mc, "adopt")
 	case api.StatePaused, api.StateWarm:
 		// Igual que acquire: el TTL se renueva ANTES del thaw, o el vigilante
 		// del daemon podría volver a congelarla entre medias.
@@ -270,7 +318,7 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		if mc.State == api.StatePaused {
 			how = "resume"
 		}
-		return th, how, nil
+		return despierta(th, how)
 	}
 	return fallo(fmt.Errorf("machine %s of the isolated session is %s", short(id), mc.State))
 }
@@ -374,8 +422,7 @@ func (g *Scheduler) releaseIsolated(ctx context.Context, key string) bool {
 	// Bajo el candado de la sesión: si alguien la está despertando, se espera
 	// a que acabe. Sin esto, un despertar a medias volvía a registrar la
 	// máquina justo después de destruirla, y quedaba una sesión fantasma.
-	lock := g.aisladaLock(key)
-	lock.Lock()
+	lock := g.bloquearAislada(key)
 	defer lock.Unlock()
 	g.mu.Lock()
 	a := g.aisladas[key]
@@ -468,7 +515,9 @@ func (g *Scheduler) barrerAisladas(ctx context.Context) {
 
 // podarCandadosLocked olvida los candados de sesiones que ya no existen. Solo
 // los libres: uno tomado es de alguien que está creando o cerrando esa clave.
-// Se llama con g.mu tomado.
+// Uno libre puede tenerlo ya en la mano alguien que aún no lo ha tomado; por
+// eso se toman siempre con bloquearAislada/probarAislada, que al ver que se
+// podó cogen el nuevo. Se llama con g.mu tomado.
 func (g *Scheduler) podarCandadosLocked() {
 	g.aisladaMu.Range(func(k, v any) bool {
 		key := k.(string)

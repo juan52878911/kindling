@@ -28,6 +28,11 @@ type daemonFalso struct {
 	// fallarRenew son los códigos con que fallarán las próximas renovaciones
 	// de cada máquina, uno por llamada.
 	fallarRenew map[string][]int
+	// fallarThaw son los códigos con que fallarán los thaw de cada máquina
+	// (todos), sin tocar su estado.
+	fallarThaw map[string]int
+	// fallarInfo es cuántas de las próximas GET /info fallarán con un 503.
+	fallarInfo int
 }
 
 func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +42,11 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responder := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 
 	if r.Method == http.MethodGet && r.URL.Path == "/info" {
+		if d.fallarInfo > 0 {
+			d.fallarInfo--
+			http.Error(w, `{"error":"busy"}`, http.StatusServiceUnavailable)
+			return
+		}
 		caps := []string{"exec", "sandboxes"}
 		if !d.sinRenew {
 			caps = append(caps, "renew")
@@ -76,6 +86,10 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ahora := time.Now()
 	switch partes[1] {
 	case "thaw":
+		if c := d.fallarThaw[partes[0]]; c != 0 {
+			http.Error(w, `{"error":"thaw failed"}`, c)
+			return
+		}
 		mc.State = api.StateRunning
 		mc.StartedAt = &ahora
 	case "freeze":
