@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -117,16 +116,6 @@ func TestExtensionsDir(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/xdg")
 	if extensionsDir() != "/xdg/kling/plugins" {
 		t.Fatal(extensionsDir())
-	}
-}
-
-func TestCaptureStdout(t *testing.T) {
-	out, err := captureStdout(func() error {
-		fmt.Print("hola\n")
-		return errors.New("x")
-	})
-	if out != "hola\n" || err == nil {
-		t.Fatalf("%q %v", out, err)
 	}
 }
 

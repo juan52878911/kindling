@@ -1204,6 +1204,11 @@ type Info struct {
 	// nuevo es su siguiente arranque en frío. Solo a un admin o sin política,
 	// como Stuck. Vacío = ninguno, o daemon anterior.
 	KernelMismatch []KernelMismatch `json:"kernel_mismatch,omitempty"`
+	// DiskFreeBytes es el disco libre bajo Root (lo que puede usar quien no es
+	// root, statfs Bavail): lo que mira la admisión antes de crear una
+	// máquina. Solo a un admin o sin política, como Tuning. 0 = daemon
+	// anterior, o no se pudo medir.
+	DiskFreeBytes int64 `json:"disk_free_bytes,omitempty"`
 }
 
 // KernelMismatch es un dorado o una máquina congelada grabados con un kernel

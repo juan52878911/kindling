@@ -83,6 +83,33 @@ func cmdUp(args []string) error {
 	}
 }
 
+// runtimeChecks son las comprobaciones de `kling up -check` para el daemon de
+// hostFlag, sin imprimir nada: las que `kling doctor -json` da en checks[].
+// Sigue el mismo orden de decisión que cmdUp.
+func runtimeChecks(hostFlag string) []check {
+	endpoint := loadConfig().Host(hostFlag)
+	root := os.Getenv("KLING_ROOT")
+	switch {
+	case strings.HasPrefix(endpoint, "ssh://"):
+		target := sshTarget(endpoint)
+		p, err := remoteProbe(target, config.Or(root, "/var/lib/kindling"))
+		if err != nil {
+			return []check{{label: "ssh " + target, fatal: true,
+				found: fmt.Sprintf("couldn't check it: %v", err),
+				why:   "the runtime of the active context is checked over ssh",
+				fix:   []string{"ssh " + target + " uname -a"}}}
+		}
+		return checksOf(p)
+	case runtime.GOOS == "darwin":
+		return checksMac(localProbeMac(config.Or(root, transport.DefaultRoot())))
+	case hasKVM():
+		return checksOf(localProbe(config.Or(root, transport.DefaultRoot())))
+	}
+	return []check{{label: "/dev/kvm", fatal: true, found: "missing",
+		why: "Firecracker only runs on KVM: without it there are no microVMs on this machine",
+		fix: []string{"kling up   (explains why, and how to use a Linux host instead)"}}}
+}
+
 // upHere prepara y arranca el runtime en ESTA máquina.
 func upHere(root string, checkOnly bool) error {
 	fmt.Printf("kindling — local runtime  (data root: %s)\n", root)

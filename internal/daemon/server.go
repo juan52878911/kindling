@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -967,6 +968,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info.PoolProblems = s.mgr.ProblemasFondos()
 		info.Stuck = s.mgr.Atascadas()
 		info.ImageSnapshots = s.mgr.InfoSnapshotsImagen()
+		// El mismo statfs que la admisión (Bavail): lo que puede crecer.
+		var st syscall.Statfs_t
+		if syscall.Statfs(s.root, &st) == nil {
+			info.DiskFreeBytes = int64(st.Bavail) * int64(st.Bsize)
+		}
 	}
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
