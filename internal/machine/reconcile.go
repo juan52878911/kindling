@@ -528,8 +528,9 @@ type pasoVigilante struct {
 // daemon que sigue vivo pero ha dejado de reconciliar no da ningún síntoma, y
 // eso es peor que caerse.
 func (m *Manager) vueltaVigilante(ctx context.Context) {
-	// El escaneo de sweep, para barrerHuerfanos. Si sweep cae, nil: sin
-	// escaneo reciente no se mata a nadie (barrerHuerfanos no tiene a quién).
+	// El escaneo de sweep, para barrerHuerfanos. Si sweep cae, o en esta
+	// vuelta no escaneó (sin VMs, ver sweep), nil: sin escaneo reciente no se
+	// mata a nadie (barrerHuerfanos no tiene a quién).
 	var vmms map[string]int
 	pasos := []pasoVigilante{
 		{"sweep", func() { vmms = m.sweep() }},
@@ -617,6 +618,10 @@ func (m *Manager) vueltaVigilante(ctx context.Context) {
 	}
 }
 
+// vueltasEscaneoSinVMs: sin máquinas running ni pausadas, sweep busca VMMs
+// huérfanos una vuelta de cada tantas (un minuto con el vigilante de 10 s).
+const vueltasEscaneoSinVMs = 6
+
 // errProcesoDesaparecido es el LastErr de una máquina que CORRÍA y cuyo VMM
 // murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
 const errProcesoDesaparecido = "the microVM process disappeared"
@@ -644,10 +649,26 @@ func (m *Manager) sweep() map[string]int {
 			vistas = append(vistas, vista{mc, mc.PID})
 		}
 	}
+	sospechosos := len(m.orphanSeen) > 0
 	m.mu.RUnlock()
 	// El escaneo DESPUÉS de copiar: una máquina que pasó a running justo antes
 	// de la copia ya tiene su VMM en la tabla. Al revés, se daría por muerta.
-	vmms := m.liveVMs()
+	//
+	// Sin ninguna running ni pausada el escaneo solo sirve para los huérfanos,
+	// y recorrer todos los procesos del host cada 10 s para no encontrar nada
+	// es el grueso del trabajo del daemon en reposo: se hace en la primera
+	// vuelta sin VMs y después una de cada vueltasEscaneoSinVMs, o en la
+	// siguiente si la anterior vio un sospechoso (barrerHuerfanos lo quiere
+	// ver dos veces). nil: esta vuelta no hubo escaneo.
+	var vmms map[string]int
+	if len(vistas) > 0 || sospechosos || m.vueltasSinVMs%vueltasEscaneoSinVMs == 0 {
+		vmms = m.liveVMs()
+	}
+	if len(vistas) > 0 {
+		m.vueltasSinVMs = 0
+	} else {
+		m.vueltasSinVMs++
+	}
 	var muertas []vista
 	for _, v := range vistas {
 		if m.vmmSigue(vmms, v.mc.ID, v.pid) {

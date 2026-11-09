@@ -15,6 +15,14 @@
 //	VMM -> daemon   "sleep <id>"   el Mac se va a dormir
 //	daemon -> VMM   "ack <id>"     ya están pausadas: que duerma
 //	VMM -> daemon   "wake"         despertó
+//	VMM -> daemon   "power battery" | "power ac"   de dónde come: al
+//	                               arrancar y en cada cambio (ac es también
+//	                               un SAI: lo que no es la batería del Mac)
+//
+// Lo de la fuente ahorra al daemon preguntarla con pmset (un proceso por
+// minuto): IOPSCreateLimitedPowerNotification avisa solo del cambio. Un daemon
+// anterior ignora esas líneas, y uno nuevo con un vigía anterior sigue
+// preguntando él.
 //
 // Sin respuesta en PlazoAck se deja dormir igual: nunca se retrasa el sueño
 // más que eso. El sueño por inactividad, que pregunta antes, no se veta.
@@ -23,6 +31,7 @@ package energia
 /*
 #cgo LDFLAGS: -framework IOKit -framework CoreFoundation
 int energiaRegistrar(void);
+int energiaFuente(void);
 void energiaCorrer(void);
 void energiaPermitir(long id);
 */
@@ -37,6 +46,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -54,9 +64,39 @@ type evento struct {
 
 var eventos = make(chan evento, 16)
 
+// fuente es la última lectura de la fuente (energiaFuente: 1 batería, 0
+// corriente, -1 no se sabe) y fuentes avisa de que cambió. Aparte de
+// eventos y sin bloquear: el aviso llega en el run loop, y mientras se espera
+// un ack no debe atascarlo; vale la última.
+const sinLeer = -2
+
+var (
+	fuente  atomic.Int32
+	fuentes = make(chan struct{}, 1)
+)
+
 //export energiaEvento
 func energiaEvento(tipo C.int, id C.long) {
+	if tipo == 3 {
+		fuente.Store(int32(id))
+		select {
+		case fuentes <- struct{}{}:
+		default:
+		}
+		return
+	}
 	eventos <- evento{dormir: tipo == 1, id: int64(id)}
+}
+
+// lineaFuente es la línea para el daemon de la lectura v ("" si no se sabe).
+func lineaFuente(v int32) string {
+	switch v {
+	case 1:
+		return "power battery"
+	case 0:
+		return "power ac"
+	}
+	return ""
 }
 
 // Perfil es el sandbox del vigía: abrir IOPMrootDomain y nada más (ni
@@ -82,6 +122,7 @@ func Main(aplicar func(perfil string, pares []string) error) int {
 // respuestas por r hasta que r se cierra (el daemon murió). Devuelve el
 // código de salida.
 func Servir(r io.Reader, w io.Writer) int {
+	fuente.Store(sinLeer)
 	listo := make(chan error, 1)
 	go func() {
 		// El aviso llega por el run loop del hilo que se registró.
@@ -111,10 +152,22 @@ func Servir(r io.Reader, w io.Writer) int {
 		close(cerrado)
 	}()
 	fmt.Fprintln(w, "ready")
+	// La primera lectura, si el aviso no trajo ya otra más nueva.
+	fuente.CompareAndSwap(sinLeer, int32(C.energiaFuente()))
+	dicha := ""
+	decirFuente := func() {
+		if l := lineaFuente(fuente.Load()); l != "" && l != dicha {
+			fmt.Fprintln(w, l)
+			dicha = l
+		}
+	}
+	decirFuente()
 	for {
 		select {
 		case <-cerrado:
 			return 0
+		case <-fuentes:
+			decirFuente()
 		case e := <-eventos:
 			if !e.dormir {
 				fmt.Fprintln(w, "wake")

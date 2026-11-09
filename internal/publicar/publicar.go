@@ -102,6 +102,9 @@ type Publicador struct {
 	mu  sync.Mutex
 	por map[string]*maquina // id de máquina → sus puertos
 	ctx context.Context
+	// aviso despierta al barrido dormido cuando se publica algo: sin
+	// publicaciones no hay nada que barrer ni que congelar.
+	aviso chan struct{}
 }
 
 type maquina struct {
@@ -142,8 +145,9 @@ func New(m Maquinas, ruta string, logf func(string, ...any)) *Publicador {
 		escucharUDP: func(a string) (net.PacketConn, error) { return net.ListenPacket("udp", a) },
 		ahora:       time.Now,
 		plazoMarcar: plazoMarcar, barrido: barrido,
-		por: map[string]*maquina{},
-		ctx: context.Background(),
+		por:   map[string]*maquina{},
+		ctx:   context.Background(),
+		aviso: make(chan struct{}, 1),
 	}
 }
 
@@ -182,15 +186,28 @@ func (p *Publicador) Arrancar(ctx context.Context, ocioso func() time.Duration) 
 	}
 	p.guardar()
 	go func() {
-		t := time.NewTicker(p.barrido)
+		// Sin publicaciones el barrido duerme hasta que Publicar avisa: un
+		// daemon en reposo no despierta cada 2 s para no hacer nada.
+		t := time.NewTimer(p.barrido)
 		defer t.Stop()
 		for {
+			if !p.hayPublicaciones() {
+				t.Stop()
+				select {
+				case <-ctx.Done():
+					p.cerrarTodo()
+					return
+				case <-p.aviso:
+				}
+				t.Reset(p.barrido)
+			}
 			select {
 			case <-ctx.Done():
 				p.cerrarTodo()
 				return
 			case <-t.C:
 			}
+			t.Reset(p.barrido)
 			p.barrer()
 			if ocioso != nil {
 				if d := ocioso(); d > 0 {
@@ -288,9 +305,20 @@ func (p *Publicador) Publicar(mc *api.Machine, ps []api.PortPublish) (*api.Publi
 	sort.Slice(mq.puertos, func(i, j int) bool { return mq.puertos[i].Host < mq.puertos[j].Host })
 	if len(mq.puertos) > 0 {
 		p.por[mc.ID] = mq
+		select {
+		case p.aviso <- struct{}{}:
+		default: // ya había un aviso pendiente
+		}
 	}
 	p.guardarFondo()
 	return pubDe(mq), nil
+}
+
+// hayPublicaciones dice si queda alguna máquina con puertos publicados.
+func (p *Publicador) hayPublicaciones() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.por) > 0
 }
 
 // Comprobar dice, sin publicar nada, si ps se podrían publicar para una

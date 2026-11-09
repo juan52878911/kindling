@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // TestAbrirConsolaSobreviveATruncar prueba la razón de ser de O_APPEND: un
@@ -153,6 +155,65 @@ func TestRotarConsolasRotaSoloLoQuePasaElTope(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(m.dir(idPequeno), "firecracker.log.1")); !os.IsNotExist(err) {
 		t.Fatalf("la máquina pequeña no debía rotar (err=%v)", err)
+	}
+}
+
+// Una máquina congelada o parada no escribe en su consola: el vigilante no la
+// abre en cada vuelta. La que acaba de dejar de correr sí se revisa una última
+// vez, por lo que escribió desde la vuelta anterior.
+func TestRotarConsolasSoloDeLasVivas(t *testing.T) {
+	m := newTestManager(t)
+	ids := map[api.State]string{
+		api.StateRunning: "viva0000000000000000",
+		api.StateWarm:    "congelada00000000000",
+		api.StateStopped: "parada00000000000000",
+	}
+	grande := bytes.Repeat([]byte("y"), int(consolaMaxBytes)+1)
+	for st, id := range ids {
+		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		m.addForTest(id).State = st
+		if err := os.WriteFile(filepath.Join(m.dir(id), "firecracker.log"), grande, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rotada := func(id string) bool {
+		_, err := os.Stat(filepath.Join(m.dir(id), "firecracker.log.1"))
+		return err == nil
+	}
+
+	m.rotarConsolas()
+	if !rotada(ids[api.StateRunning]) {
+		t.Fatal("la que corre debía rotar")
+	}
+	for _, st := range []api.State{api.StateWarm, api.StateStopped} {
+		if rotada(ids[st]) {
+			t.Fatalf("la %s no escribe en su consola: no debía abrirse", st)
+		}
+	}
+
+	// Escribe de más y se congela antes de la vuelta siguiente: se rota igual.
+	viva := ids[api.StateRunning]
+	if err := os.WriteFile(filepath.Join(m.dir(viva), "firecracker.log"), grande, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(m.dir(viva), "firecracker.log.1"))
+	m.mu.Lock()
+	m.byID[viva].State = api.StateWarm
+	m.mu.Unlock()
+	m.rotarConsolas()
+	if !rotada(viva) {
+		t.Fatal("la que acaba de congelarse debía revisarse una última vez")
+	}
+	// Y ya no más.
+	if err := os.WriteFile(filepath.Join(m.dir(viva), "firecracker.log"), grande, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(m.dir(viva), "firecracker.log.1"))
+	m.rotarConsolas()
+	if rotada(viva) {
+		t.Fatal("una congelada desde hace una vuelta no debía abrirse")
 	}
 }
 

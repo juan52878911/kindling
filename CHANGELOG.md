@@ -29,6 +29,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Changed
 
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
+- Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
+- macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
 - A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
