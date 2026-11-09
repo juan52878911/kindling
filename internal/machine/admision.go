@@ -140,6 +140,10 @@ func minFreeDiskMiB() int64 {
 	return minDiscoLibrePlataforma
 }
 
+// MinFreeDiskMiB es minFreeDiskMiB para el daemon, que avisa al arrancar si
+// el disco ya está cerca de ese mínimo.
+func MinFreeDiskMiB() int64 { return minFreeDiskMiB() }
+
 // maxDiskMiB es el tope de RunRequest.DiskMiB: KLING_MAX_DISK_MIB, que solo
 // puede bajarlo (entre minOverlayMiB y maxOverlayMiB).
 func maxDiskMiB() int {

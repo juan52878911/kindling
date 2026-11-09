@@ -717,6 +717,9 @@ func (s *Server) Listen(ctx context.Context) error {
 	// Sigue siendo AVISO y no error: el daemon vale para inspeccionar estado aunque no
 	// pueda arrancar nada. Pero ahora los nombra TODOS de golpe.
 	s.comprobarHost()
+	if aviso := avisoDisco(s.mgr.Telemetria().DiscoLibreMiB, machine.MinFreeDiskMiB(), s.root); aviso != "" {
+		log.Print(aviso)
+	}
 
 	if s.mgr.PrivWarning != "" {
 		log.Printf("SECURITY WARNING: %s", s.mgr.PrivWarning)
@@ -754,6 +757,26 @@ func (s *Server) Listen(ctx context.Context) error {
 	s.mgr.Close()
 	quitarSocketSiEsMio(s.socket, mio)
 	return nil
+}
+
+// avisoDisco es el aviso de arranque por poco disco bajo raiz (libre y
+// minimo en MiB; libre < 0 = no se pudo medir): por debajo del mínimo no se
+// admite ninguna máquina, y cerca de él (menos del doble) cada congelación
+// puede ser la que lo cruce. Sin aviso, "".
+func avisoDisco(libre, minimo int64, raiz string) string {
+	switch {
+	case minimo <= 0:
+		return ""
+	case libre < 0:
+		return fmt.Sprintf("WARNING: couldn't measure the free disk under %s: the disk admission checks are off", raiz)
+	case libre < minimo:
+		return fmt.Sprintf("WARNING: only %d MiB of disk left under %s, below the %d MiB minimum: no machine "+
+			"will be admitted until there is more (KLING_MIN_FREE_DISK_MIB)", libre, raiz, minimo)
+	case libre < 2*minimo:
+		return fmt.Sprintf("WARNING: only %d MiB of disk left under %s, close to the %d MiB minimum below which "+
+			"no machine is admitted (KLING_MIN_FREE_DISK_MIB)", libre, raiz, minimo)
+	}
+	return ""
 }
 
 // socketOwner resuelve a quién ceder el socket: al usuario indicado por
