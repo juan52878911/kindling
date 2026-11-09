@@ -51,6 +51,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- A read-write live share could fill the host's disk: writes, `truncate` and new files had no limit. The daemon now keeps a per-share quota of net growth in bytes (`daemon.share_max_mib`, default 32 GiB) and new entries (`daemon.share_max_files`, default 1,000,000), and refuses writes and creates when the host filesystem drops below `daemon.share_min_free_mib` (default 1 GiB); going over returns `ENOSPC` and changes nothing. `-1` disables a limit; `KLING_SHARE_MAX_MIB`, `KLING_SHARE_MAX_FILES` and `KLING_SHARE_MIN_FREE_MIB` override the file. Applies to FUSE and virtio-fs (`docs/compartir.md#cuota-de-las-carpetas-rw`).
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
