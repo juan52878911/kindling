@@ -2,6 +2,7 @@ package credproxy
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -131,6 +132,78 @@ func TestProxyTechoAbsoluto(t *testing.T) {
 	}
 	if dur < 600*time.Millisecond || dur > 3*time.Second {
 		t.Errorf("cortado a los %v; quería ~600ms", dur)
+	}
+}
+
+// cierreLento retrasa el cierre del socket hacia el proveedor. tls.Conn.Close
+// manda primero el close_notify y luego cierra el socket: en ese hueco el
+// proveedor ve que el cliente se fue, su handler vuelve, net/http escribe el
+// chunk final y el lector del transporte, aún vivo, lo lee. El cuerpo da
+// io.EOF en vez del error del contexto. Sin el retraso el hueco es de
+// microsegundos (TestProxyTechoAbsoluto fallaba así ~1 de cada 13 veces en CI).
+type cierreLento struct{ net.Conn }
+
+func (c cierreLento) Close() error {
+	time.Sleep(100 * time.Millisecond)
+	return c.Conn.Close()
+}
+
+// Cuando el proxy corta (techo o inactividad) y el proveedor contesta al corte
+// cerrando su respuesta LIMPIA, el invitado tiene que ver un error igual: lo
+// que llegó está truncado.
+func TestProxyCorteConFinLimpioDelProveedor(t *testing.T) {
+	casos := []struct {
+		nombre    string
+		idle, max time.Duration
+		cada      time.Duration // 0: un evento y silencio
+	}{
+		{"techo", time.Second, 400 * time.Millisecond, 50 * time.Millisecond},
+		{"inactividad", 300 * time.Millisecond, 10 * time.Second, 0},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
+				for {
+					if _, err := io.WriteString(w, "data: x\n\n"); err != nil {
+						return
+					}
+					w.(http.Flusher).Flush()
+					var tick <-chan time.Time
+					if c.cada > 0 {
+						tick = time.After(c.cada)
+					}
+					select {
+					case <-r.Context().Done():
+						return // fin limpio: net/http cierra el chunked
+					case <-tick:
+					}
+				}
+			}, credsUna(), func(p *Proxy) {
+				conPlazos(c.idle, c.max)(p)
+				tr := p.client.Transport.(*http.Transport)
+				dial := tr.DialContext
+				tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					cn, err := dial(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+					return cierreLento{cn}, nil
+				}
+			})
+
+			resp, err := pedirStream(t, srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err == nil {
+				t.Fatalf("el corte debería verse como error, llegó %q como si estuviera entero", body)
+			}
+			if !strings.Contains(string(body), "data: x") {
+				t.Errorf("lo anterior al corte debería haber llegado: %q", body)
+			}
+		})
 	}
 }
 
