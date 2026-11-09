@@ -394,11 +394,20 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	ctx := req.Context()
+	notificacion := len(rpc.ID) == 0 || string(rpc.ID) == "null"
+	if notificacion && req.Header.Get(SessionHeader) == "" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	s, sid, created := ra.session(req)
+	if s == nil {
+		api.HTTPError(w, errSesionDesconocida.Error(), http.StatusNotFound)
+		return
+	}
 	if created {
 		w.Header().Set(SessionHeader, sid)
 	}
-	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
+	if notificacion {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -419,9 +428,11 @@ func (ra *routerAgg) session(req *http.Request) (*routerSession, string, bool) {
 			s.lastUse = time.Now()
 		}
 		ra.mu.Unlock()
-		if ok {
-			return s, sid, false
+		if !ok {
+			// Lo mismo que en un solo host (ver aggregator.session): 404.
+			return nil, "", false
 		}
+		return s, sid, false
 	}
 	m := modeProxy
 	if mode(req.URL.Query().Get("mode")) == modeExpand {
