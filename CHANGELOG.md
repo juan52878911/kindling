@@ -39,6 +39,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- OCI cache: two builds downloading the same blob at once (always possible on macOS, where builds aren't serialised) no longer share a fixed `<hex>.part`: the first could publish a file with a hole of zeros as verified, and since cached blobs are trusted by size the gzip CRC error came back on every build. Each download gets its own temporary, and a layer that fails to decompress is removed from the cache.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
 - A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.

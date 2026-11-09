@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -349,10 +350,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 			return nil, fmt.Errorf("manifest %s: sha256 mismatch (got %s)", digest, got)
 		}
 		if err := os.MkdirAll(filepath.Dir(c.BlobPath(digest)), 0o755); err == nil {
-			tmp := c.BlobPath(digest) + ".part"
-			if os.WriteFile(tmp, body, 0o644) == nil {
-				_ = os.Rename(tmp, c.BlobPath(digest))
-			}
+			guardarBlob(c.BlobPath(digest), body)
 		}
 	}
 	c.usar(digest)
@@ -460,7 +458,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 		budget.Store(c.MaxBytes * maxUnpackRatio)
 	}
 	// Una descarga por digest: una imagen puede repetir una capa (las vacías)
-	// y dos descargas a la vez al mismo .part se pisarían.
+	// y no hace falta bajarla dos veces.
 	type fetch struct {
 		once sync.Once
 		path string
@@ -523,6 +521,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 					<-zs
 				}
 				if err != nil {
+					c.desalojar(l, err)
 					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
 					return
 				}
@@ -558,6 +557,12 @@ func acquire(ctx context.Context, sem chan struct{}) bool {
 func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
 	rc, err := OpenLayer(l)
 	if err != nil {
+		// Abrir el fichero es otra cosa; lo demás es la cabecera, que no se
+		// entiende (ni gzip ni zstd, o un gzip con la cabecera rota).
+		var pe *fs.PathError
+		if !errors.As(err, &pe) {
+			err = &errCapaDañada{err}
+		}
 		return err
 	}
 	defer rc.Close()
@@ -574,6 +579,52 @@ func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max 
 		return fmt.Errorf("unpacking: %w", err)
 	}
 	return nil
+}
+
+// errCapaDañada envuelve un fallo del descompresor (un CRC32 de gzip, un
+// xxhash64 de zstd, un flujo que no se entiende): lo que está en la caché no
+// es la capa que se verificó, aunque mida lo mismo.
+type errCapaDañada struct{ err error }
+
+func (e *errCapaDañada) Error() string { return e.err.Error() }
+func (e *errCapaDañada) Unwrap() error { return e.err }
+
+// desalojar saca de la caché propia el blob de una capa que no descomprime:
+// cached() solo mira el tamaño y nunca rehashea, así que sin esto el mismo
+// error volvía en cada construcción. Solo la caché de c (las verificadas son
+// de root y no se tocan desde aquí) y solo si l.Path es de verdad ese blob.
+func (c *Client) desalojar(l Layer, err error) {
+	var d *errCapaDañada
+	if !errors.As(err, &d) || l.Path != c.BlobPath(l.Digest) {
+		return
+	}
+	if os.Remove(l.Path) == nil {
+		c.logf("removed %s from the cache: it does not decompress (%v)", short(l.Digest), d.err)
+	}
+}
+
+// guardarBlob deja en la caché un blob pequeño ya verificado (un
+// manifiesto) con un temporal propio y rename. Es solo una caché: si no se
+// puede, no pasa nada.
+func guardarBlob(dst string, body []byte) {
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".part-*")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	_, err = f.Write(body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
 }
 
 // unpackReader para si se cancela ctx (otra capa falló) y, con left, descuenta
@@ -593,6 +644,9 @@ func (u *unpackReader) Read(p []byte) (int, error) {
 	n, err := u.r.Read(p)
 	if u.left != nil && u.left.Add(-int64(n)) < 0 {
 		return n, fmt.Errorf("the image unpacks to more than %d MiB", u.max>>20)
+	}
+	if err != nil && err != io.EOF && u.ctx.Err() == nil {
+		err = &errCapaDañada{err}
 	}
 	return n, err
 }
@@ -864,13 +918,23 @@ func (c *Client) download(ctx context.Context, registry, repo string, d Descript
 		return err
 	}
 	defer resp.Body.Close()
-	tmp := dst + ".part"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	// Un temporal propio por descarga: con uno fijo (<hex>.part y O_TRUNC),
+	// dos construcciones que bajaban el mismo blob a la vez se lo truncaban
+	// la una a la otra, y la primera publicaba un fichero con un hueco de
+	// ceros dándolo por verificado (su hash era el de su flujo, no el del
+	// fichero). Acaba en .part-*: el barrido del arranque los reconoce.
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".part-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	defer os.Remove(tmp)
 	defer f.Close()
+	// CreateTemp lo crea 0600; la caché es legible (cached() solo pide que no
+	// lo escriban grupo ni otros).
+	if err := f.Chmod(0o644); err != nil {
+		return err
+	}
 	t0 := time.Now()
 	timer := time.AfterFunc(stall, cancel)
 	defer timer.Stop()
