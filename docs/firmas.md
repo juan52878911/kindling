@@ -83,9 +83,11 @@ script imprime los pasos:
    la línea `RW…` en `clavesRelease` de `internal/upgrade/firma.go` y en
    `KLING_RELEASE_PUBKEYS` de `scripts/install.sh` (un test exige que coincidan).
 
-Mientras el secreto no exista, el paso «firmar SHA256SUMS» de `release.yml` se
-salta con un aviso y la release 0.x sale sin firma, como hasta ahora. Una
-release ≥ 1.0 sin secreto falla en ese paso. Con el secreto puesto y la pública
+La clave existe desde v1.0.0 (id `13863DEEC162AF3D`, la única de
+`clavesRelease`) y el secreto está en el environment `release`. Si faltara, el
+paso «firmar SHA256SUMS» de `release.yml` se salta con un aviso solo en una
+0.x (que sale sin firma, como las anteriores a 1.0); una release ≥ 1.0 sin
+secreto falla en ese paso, antes de crear el borrador. Con el secreto puesto y la pública
 sin añadir al código, el paso también falla: `firmar sign` comprueba la firma
 contra las claves compiladas de ese mismo commit antes de publicarla. Una
 etiqueta ≥ 1.0 (un `-rc` incluido) con `clavesRelease` vacía no llega ni a

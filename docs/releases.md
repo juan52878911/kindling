@@ -43,13 +43,15 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `vmlinux-<arch>.zst` | kernel de invitado (`scripts/builders/kernel`), comprimido; `kling up` lo baja en un Mac | linux |
 | `min-<arch>.ext4.zst` | imagen base `min` (`scripts/70-build-minimal-image.sh`, con el `kling-bridge` de la release) | linux |
 | `kling.rb` | fórmula de Homebrew con la versión y los sha256 de esta release (no se publica en ningún tap) | darwin/arm64, linux |
+| `vmlinux-<versión>-kindling-<arch>-android` | kernel Android del prototipo (`prototypes/android/kernel`), con su `.sha256`, `.config` y `.buildinfo` | linux |
 | `SHA256SUMS` | **un** fichero con el sha256 de todo lo anterior | — |
-| `SHA256SUMS.minisig` | su firma ed25519 (minisign), cuando la clave existe ([`firmas.md`](firmas.md)) | — |
+| `SHA256SUMS.minisig` | su firma ed25519 (minisign); obligatoria desde v1.0.0 ([`firmas.md`](firmas.md)) | — |
 
 Además, la imagen del operador se publica en
 `ghcr.io/juan52878911/kindling-operator:<tag>` y `:latest` (la ruta no cambia:
-la imagen se llama por el paquete, no por el repo), y
-`ext/sandbox/deploy/deployment.yaml` apunta a la etiqueta.
+la imagen se llama por el paquete, no por el repo), y el `deployment.yaml`
+de `kindling-operator-deploy.tar.gz` apunta a esa etiqueta (el del repo lleva
+una de ejemplo; el job release la cambia en la copia que empaqueta).
 
 Windows no está soportado (el código usa `syscall.Kill`, `Setsid`, `Stat_t`).
 
@@ -133,8 +135,11 @@ git checkout main && git pull --rebase && git status
 #    (y su enlace al final del fichero)
 git commit -am "changelog: vX.Y.Z"
 
-# 3. actualizar desde la anterior, en el laboratorio (KVM y root; ver actualizar.md §3.5),
-#    con los binarios sellados (-ldflags "-X main.Version=..."): si no, el script se para
+# 3. Linux: lo corre el job e2e de release.yml sobre la etiqueta (90-e2e.sh con
+#    kling db y carpetas vivas, e2e-diff-freeze.sh y 94-e2e-upgrade.sh desde la
+#    release anterior) y el nocturno e2e-linux.yml sobre main; si falla, no hay
+#    release. Para probarlo antes en el laboratorio (KVM y root; actualizar.md §3.5),
+#    con los binarios sellados (-ldflags "-X main.Version=..."):
 sudo OLD_DIR=<kling de la anterior> NEW_DIR=<binarios de HEAD> scripts/94-e2e-upgrade.sh
 
 # 3b. lo mismo en el Mac, con el agente de launchd (instala uno suyo y lo
@@ -144,7 +149,9 @@ OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmli
 
 # 3c. kling-hv es estable desde 1.0 con esta condición: los dos e2e del Mac con
 #     VMM=hv en un Apple Silicon, sobre el commit que se va a etiquetar. Sin el
-#     runner de e2e-mac.yml, a mano, y release.sh lo exige con KLING_E2E_HV.
+#     runner de e2e-mac.yml, a mano, y release.sh lo exige: el commit status
+#     e2e-mac/kling-hv que publica el script (con gh autenticado y el commit
+#     empujado) o KLING_E2E_HV.
 #     Un solo comando en un Mac pelado (sin Linux ni Lima): compila todo de
 #     HEAD, clona vmlinux y min.ext4 del kindling instalado (o los baja de la
 #     última release), construye la imagen de 92 con el constructor debian
@@ -153,7 +160,7 @@ OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmli
 #     que tu dev.kindling.daemon esté parado: si no, corre 92, dice cómo
 #     pararlo y se puede seguir con E2E=95 (la marca de 92 se guarda por commit)
 scripts/e2e-mac-release.sh
-export KLING_E2E_HV=<lo que imprime: el sha de 12 de HEAD>
+export KLING_E2E_HV=<lo que imprime: el sha de 12 de HEAD>   # solo si no pudo publicar el status
 
 # 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
@@ -181,32 +188,48 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    `-trimpath -s -w -X main.Version=`): `kling`, `kling-mcp`, `kling-bridge`,
    `kling-sandbox`, `kling-db`, `kling-phone` y, en Linux, `kling-guest`,
    `kling-chispa` y `kindling-operator`.
-3. **vz** (tras test, macos-15): compila y firma (ad hoc, con su entitlement)
-   `kling-vz-darwin-arm64` para macOS 14.0 y `kling-hv-darwin-arm64` para 15.2,
-   y comprueba el entitlement y el `minos` de cada uno.
+3. **vz** (tras test, macos-15): gofmt, vet (también `GOOS=linux`) y
+   `go test -race` de `vz/`, que la matriz de test no ve; después compila y
+   firma (ad hoc, con su entitlement) `kling-vz-darwin-arm64` para macOS 14.0
+   y `kling-hv-darwin-arm64` para 15.2, y comprueba el entitlement y el
+   `minos` de cada uno.
 4. **imagenes** (tras build, ubuntu x86_64): el kernel de invitado de las dos
    arquitecturas (`scripts/builders/kernel/build.sh`, cruzado para arm64) y
    `min` de las dos (`scripts/70-build-minimal-image.sh` con el `kling-bridge`
    de esta release; sin paquetes no hay chroot, así que también sale de
    x86_64), comprimidos con `zstd -19`.
-5. **release** (tras build, vz e imagenes; `contents: write`): junta los
-   artefactos, empaqueta los tres `.tar.gz`, **compara la lista de assets con
-   el contrato escrito en el propio job** (si falta o sobra uno, no se
-   publica), genera **un** `SHA256SUMS`, rellena la fórmula de Homebrew
-   (`packaging/homebrew/formula.sh`) y añade su suma, y publica como notas el
-   bloque de la versión en `CHANGELOG.md` más una línea de instalación
-   (`scripts/release-notes.sh`; sin bloque no hay release).
-6. **imagen** (tras release, `packages: write`): construye la imagen del
+5. **e2e** (tras test y lint): `e2e-linux.yml` entero como `workflow_call`
+   sobre el commit de la etiqueta, con `require_kvm` (un runner sin `/dev/kvm`
+   falla en vez de avisar): microVMs de verdad con Firecracker, `90-e2e.sh`
+   con `kling db` y carpetas vivas, `e2e-diff-freeze.sh` y `94-e2e-upgrade.sh`
+   desde la release anterior. Unos 5 min con el kernel en la caché del nocturno.
+6. **android** (tras test y lint): `android-kernels.yml` como `workflow_call`,
+   los kernels Android del prototipo (arm64 y amd64) con su sha256, su
+   `.config` y su `.buildinfo`, como artefactos de este run.
+7. **release** (tras build, vz, imagenes, e2e y android; `contents: write`):
+   junta los artefactos, empaqueta los tres `.tar.gz` (el del operador con la
+   etiqueta de esta release en `deployment.yaml`), **compara la lista de
+   assets con el contrato escrito en el propio job** (si falta o sobra uno, no
+   se publica), genera **un** `SHA256SUMS`, rellena la fórmula de Homebrew
+   (`packaging/homebrew/formula.sh`) y añade su suma, firma `SHA256SUMS`
+   ([`firmas.md`](firmas.md)), atesta la procedencia de cada asset y usa como
+   notas el bloque de la versión en `CHANGELOG.md` más una línea de
+   instalación (`scripts/release-notes.sh`; sin bloque no hay release). La
+   publicación es atómica: crea la release como **borrador** con todo, comprueba
+   que GitHub tiene exactamente los ficheros de `release/` (nombre, tamaño,
+   estado y sha256) y solo entonces la publica. Repetir el job borra el
+   borrador de un intento anterior; una release ya publicada no se toca.
+8. **imagen** (tras release, `packages: write`): construye la imagen del
    operador para linux/amd64 y linux/arm64 con `context: .` y
    `file: ext/sandbox/Dockerfile.operator` (el `replace ../..` necesita el
    núcleo en el contexto) y la empuja a GHCR con la etiqueta y `:latest`.
 
-Aparte, `android-kernels.yml` se dispara al publicarse la release y le sube los
-kernels Android del prototipo (arm64 y amd64) con su sha256, su `.config` y una
-atestación de procedencia de Sigstore.
+El e2e del Mac (92 y 95 con kling-hv) no está en el workflow mientras
+`e2e-mac.yml` no tenga runner: lo exige `scripts/release.sh` antes de crear la
+etiqueta (paso 3c).
 
-El CI de cada push y PR (`.github/workflows/ci.yml`, solo lectura, actions
-fijadas por SHA salvo en los `clon-*`):
+El CI de cada push y PR (`.github/workflows/ci.yml`, solo lectura, todas las
+actions fijadas por SHA):
 
 | Job | Runner | Qué comprueba |
 |---|---|---|
@@ -216,12 +239,14 @@ fijadas por SHA salvo en los `clon-*`):
 | **workspace** | ubuntu | `go build` y `go vet` con el `go.work` (que `go.work.sum` no se quede atrás) |
 | **clon-reflink** | ubuntu, Go 1.24 | los tests de clonado sobre un XFS y un btrfs en loop, exigiendo que el reflink haya ocurrido de verdad |
 | **vz** | macos-15 | en `vz/`: gofmt, vet (también `GOOS=linux`), `go test -race`, y `build.sh`/`build-hv.sh` con su entitlement, su `minos` y `--version` |
-| **clon-apfs** | macos-14, Go 1.24 | los mismos tests de clonado sobre APFS (`clonefile`) |
+| **clon-apfs** | macos-15, Go 1.24 | los mismos tests de clonado sobre APFS (`clonefile`) |
+| **lint** | ubuntu | govulncheck, staticcheck (linux, darwin, linux/arm64), shellcheck de `scripts/` y apidiff de `pkg/api`, `pkg/plugin` y `pkg/config` |
 
-Ninguno arranca una microVM: los runners hospedados no dan KVM ni
-virtualización anidada en macOS. Los e2e con VMs (`90-e2e.sh`,
-`92-e2e-mac.sh`, `94`/`95-e2e-upgrade*.sh`) se corren a mano en el
-laboratorio y en el Mac, como dice el paso 3 de arriba.
+Ninguno arranca una microVM. Las de Linux las arranca `e2e-linux.yml` en un
+runner x64 con `/dev/kvm` (cada noche, en los PR que tocan lo que prueba y en
+cada release); macOS no da virtualización anidada en los runners hospedados,
+así que `92-e2e-mac.sh` y `95-e2e-upgrade-mac.sh` se corren en un Mac con
+`scripts/e2e-mac-release.sh`, como dice el paso 3c de arriba.
 
 ## Versionado
 
@@ -258,10 +283,11 @@ Esas líneas son las notas de la release, tal cual.
 
 ## Qué no automatizamos (todavía)
 
-- **Firma de los binarios y de `SHA256SUMS`**, y notarización en macOS:
-  `SHA256SUMS` cubre la integridad, no la autoría (solo los kernels Android
-  llevan atestación). Está en la lista de
-  [`compatibilidad.md`](compatibilidad.md#antes-de-10).
+- **Firma de cada binario y notarización en macOS**: la autoría la cubren la
+  firma de `SHA256SUMS` (minisign, [`firmas.md`](firmas.md)) y la atestación
+  de procedencia de cada asset; los binarios sueltos no llevan firma propia
+  (`kling-vz` y `kling-hv`, solo la ad hoc con su entitlement) y nada está
+  notarizado.
 - **Tap de Homebrew, scoop, aur**: la fórmula va como asset (`kling.rb`); nadie
   la empuja a un tap.
 - **Binarios con símbolos**: se compila con `-trimpath -ldflags "-s -w"`; para
