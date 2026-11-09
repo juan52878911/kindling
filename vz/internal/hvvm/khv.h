@@ -155,6 +155,10 @@ void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *sm
 int khv_prueba_cpu_on(void);
 // khv_sysreg_iss: el hv_sys_reg_t del ISS de un MSR/MRS atrapado (EC 0x18).
 uint16_t khv_sysreg_iss(uint64_t iss);
+// khv_sea_destino: EL, vector, PSTATE y ESR del aborto externo que recibe el
+// invitado por un data abort sin ISV (vm.c).
+int khv_sea_destino(uint64_t cpsr, uint64_t hcr, bool el2, uint64_t syn, uint64_t *off, uint64_t *cpsr_nuevo,
+                    uint64_t *esr);
 
 // ---- interno ----
 
