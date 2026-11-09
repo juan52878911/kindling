@@ -128,6 +128,12 @@ func servirVZFalso(sock, logPath string) {
 				linea += " disposable=" + strconv.FormatBool(*d.Disposable)
 			}
 		}
+		if r.URL.Path == "/snapshot/load" && os.Getenv(envFakeVZRechazaCarga) != "" {
+			apuntar(linea)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"fault_message":"fake: load rejected"}`)
+			return
+		}
 		switch r.URL.Path {
 		case "/kling/info":
 			apuntar(linea)
@@ -533,6 +539,10 @@ func TestVZBootConRaizLarga(t *testing.T) {
 		t.Fatalf("liveVMs con la raíz con espacios y larga: %v", m.liveVMs())
 	}
 }
+
+// envFakeVZRechazaCarga hace que el falso conteste con un 400 al
+// PUT /snapshot/load: un VMM que rechaza la carga sin reanudar nada.
+const envFakeVZRechazaCarga = "KLING_FAKE_VZ_RECHAZA_CARGA"
 
 // envFakeVZLibera hace que la huella del falso baje con lo inflado.
 const envFakeVZLibera = "KLING_FAKE_VZ_LIBERA"
