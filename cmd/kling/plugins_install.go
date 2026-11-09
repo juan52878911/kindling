@@ -25,7 +25,7 @@ func init() { plugin.DefaultSumsVerifier = upgrade.VerificadorDeSumas(nil) }
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	var pos []string
 	for {
-		if err := fs.Parse(args); err != nil {
+		if err := parseFlags(fs, args); err != nil {
 			return nil, err
 		}
 		args = fs.Args()
@@ -42,23 +42,18 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 
 // pluginsInstall es `kling plugin install <nombre>[@vX.Y.Z]`.
 func pluginsInstall(args []string) error {
-	fs := flag.NewFlagSet("plugins install", flag.ExitOnError)
+	fs := flag.NewFlagSet("plugins install", flag.ContinueOnError)
 	from := fs.String("from", "", "https URL of the extension binary (its SHA256SUMS is looked up next to it)")
 	file := fs.String("file", "", "install a local binary instead of downloading one")
 	sum := fs.String("sha256", "", "expected sha256 of the binary")
 	dir := fs.String("dir", "", "install into this directory instead of the extensions directory")
 	insecure := fs.Bool("insecure", false, "install even if the SHA256SUMS has no SHA256SUMS.minisig (a signature that is there is still checked)")
-	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: kling plugin install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR] [-insecure]")
-		fs.PrintDefaults()
-	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		fs.Usage()
-		return errors.New("plugins install needs exactly one extension name")
+		return errUso("usage: kling plugin install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR] [-insecure]")
 	}
 	name, tag, _ := strings.Cut(pos[0], "@")
 	name = strings.TrimPrefix(name, "kling-")
@@ -144,14 +139,14 @@ func inSearchPath(dir string) bool {
 // pluginsRm es `kling plugin rm <nombre>`: solo borra lo que está en el
 // directorio de extensiones.
 func pluginsRm(args []string) error {
-	fs := flag.NewFlagSet("plugins rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("plugins rm", flag.ContinueOnError)
 	dir := fs.String("dir", "", "extensions directory to remove it from")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: kling plugin rm <name> [-dir DIR]")
+		return errUso("usage: kling plugin rm <name> [-dir DIR]")
 	}
 	name := strings.TrimPrefix(pos[0], "kling-")
 	if !plugin.ValidName(name) {
@@ -187,7 +182,7 @@ func pluginsEnable(args []string, enable bool) error {
 		verb = "enable"
 	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: kling plugin %s <name>", verb)
+		return errUso("usage: kling plugin %s <name>", verb)
 	}
 	name := strings.TrimPrefix(args[0], "kling-")
 	if !plugin.ValidName(name) {

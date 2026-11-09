@@ -45,7 +45,7 @@ func chispaLabels(name string, extra map[string]string) map[string]string {
 }
 
 func cmdChispaDeploy(args []string) error {
-	fs := flag.NewFlagSet("chispa deploy", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa deploy", flag.ContinueOnError)
 	host := hostFlag(fs)
 	modelPath := fs.String("model", "", "the .chispa to deploy (required)")
 	slotsPath := fs.String("slots", "", "optional .chispas (slots, docs/intent.md)")
@@ -60,11 +60,11 @@ func cmdChispaDeploy(args []string) error {
 	reuse := fs.Bool("reuse-image", false, "the image already exists with this same -model (built on a Linux host and brought with `kling image copy`): make only the golden snapshot")
 	allowExec := fs.Bool("allow-exec", false, "keep kling exec/cp working in this task's machines (debugging)")
 	wait := fs.Duration("wait", 2*time.Minute, "how long to wait for kling-chispa to answer /healthz")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *modelPath == "" {
-		return fmt.Errorf("usage: kling ai chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128M] [-cpus 1]")
+		return errUso("usage: kling ai chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128M] [-cpus 1]")
 	}
 	vcpus := cpus
 	name := fs.Arg(0)
@@ -187,7 +187,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ %s  template of task %s  (%s of memory, %s in total)\n",
+	fmt.Printf(uiMarks().ok+" %s  template of task %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, name, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
 	next("kling run -from %s", name)
 
@@ -203,10 +203,10 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 }
 
 func cmdChispaLs(args []string) error {
-	fs := flag.NewFlagSet("chispa ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -238,14 +238,14 @@ func cmdChispaLs(args []string) error {
 }
 
 func cmdChispaRm(args []string) error {
-	fs := flag.NewFlagSet("chispa rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	keepImage := fs.Bool("keep-image", false, "remove only the golden snapshot")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai chispa rm <task> [-keep-image]")
+		return errUso("usage: kling ai chispa rm <task> [-keep-image]")
 	}
 	name := fs.Arg(0)
 	ctx, stop := ctxWithSignals()

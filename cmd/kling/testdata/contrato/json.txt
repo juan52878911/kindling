@@ -5,6 +5,14 @@
 # Quitar o cambiar una línea exige subir api.APIVersion (internal/contrato).
 # api: 1
 
+kling context ls -json:  contexts[] (empty)
+kling context ls -json:  current string
+kling context ls -json:  endpoint string
+kling cp -json @local m1:/tmp/x:  machine string
+kling cp -json @local m1:/tmp/x:  mode string
+kling cp -json @local m1:/tmp/x:  path string
+kling cp -json @local m1:/tmp/x:  size number
+kling freeze -json m1:  = kling inspect m1
 kling graph ls -json:  [].created_at string
 kling graph ls -json:  [].edges[].database string
 kling graph ls -json:  [].edges[].env string
@@ -150,6 +158,20 @@ kling inspect m1:  wake.store_ms number
 kling inspect m1:  wake.tier string
 kling inspect m1:  wake.total_ms number
 kling inspect m1:  wake.wait_ms number
+kling machine credential -json -rm m1 -env K:  = kling inspect m1
+kling machine resize -json -mem 512M m1:  = kling inspect m1
+kling machine secret -json -f @store m1:  = kling inspect m1
+kling machine squeeze -json m1:  guest_free_mib number
+kling machine squeeze -json m1:  id string
+kling machine squeeze -json m1:  reclaimed_mib number
+kling machine squeeze -json m1:  rss_mib number
+kling pause -json m1:  = kling inspect m1
+kling plugin ls -json:  [].builtin bool
+kling plugin ls -json:  [].disabled bool
+kling plugin ls -json:  [].name string
+kling plugin ls -json:  [].state string
+kling plugin ls -json:  [].status string
+kling plugin ls -json:  [].version string
 kling ps -a -json:  [].agent.agent string
 kling ps -a -json:  [].agent.caps[] string
 kling ps -a -json:  [].agent.version string
@@ -239,6 +261,9 @@ kling ps -a -json:  [].wake.store_ms number
 kling ps -a -json:  [].wake.tier string
 kling ps -a -json:  [].wake.total_ms number
 kling ps -a -json:  [].wake.wait_ms number
+kling rm -json m1:  id string
+kling rm -json m1:  name string
+kling rm -json m1:  state string
 kling sandbox ls -json:  [].agent.agent string
 kling sandbox ls -json:  [].agent.caps[] string
 kling sandbox ls -json:  [].agent.version string
@@ -328,6 +353,50 @@ kling sandbox ls -json:  [].wake.store_ms number
 kling sandbox ls -json:  [].wake.tier string
 kling sandbox ls -json:  [].wake.total_ms number
 kling sandbox ls -json:  [].wake.wait_ms number
+kling save -force -json m1 tpl:  allow_domains[] string
+kling save -force -json m1 tpl:  allow_exec bool
+kling save -force -json m1 tpl:  annotations.x string
+kling save -force -json m1 tpl:  arch string
+kling save -force -json m1 tpl:  cpu_pct number
+kling save -force -json m1 tpl:  cpu_pct_fixed bool
+kling save -force -json m1 tpl:  created_at string
+kling save -force -json m1 tpl:  credential_any_database[] string
+kling save -force -json m1 tpl:  credential_domains[] string
+kling save -force -json m1 tpl:  disk_bytes number
+kling save -force -json m1 tpl:  egress string
+kling save -force -json m1 tpl:  env_keys[] string
+kling save -force -json m1 tpl:  guest_ipv6_off bool
+kling save -force -json m1 tpl:  guest_ipv6_stack bool
+kling save -force -json m1 tpl:  has_volume bool
+kling save -force -json m1 tpl:  image string
+kling save -force -json m1 tpl:  instances number
+kling save -force -json m1 tpl:  kernel_sha256 string
+kling save -force -json m1 tpl:  kling_version string
+kling save -force -json m1 tpl:  labels.x string
+kling save -force -json m1 tpl:  macos string
+kling save -force -json m1 tpl:  mem_bytes number
+kling save -force -json m1 tpl:  mem_max_mib number
+kling save -force -json m1 tpl:  mem_mib number
+kling save -force -json m1 tpl:  name string
+kling save -force -json m1 tpl:  rootfs_digest string
+kling save -force -json m1 tpl:  rootfs_sha256 string
+kling save -force -json m1 tpl:  share_wait number
+kling save -force -json m1 tpl:  signature string
+kling save -force -json m1 tpl:  sin_agente bool
+kling save -force -json m1 tpl:  snap_sha256 string
+kling save -force -json m1 tpl:  stale string
+kling save -force -json m1 tpl:  vcpus number
+kling save -force -json m1 tpl:  vmm string
+kling save -force -json m1 tpl:  volume string
+kling save -force -json m1 tpl:  volume_mount string
+kling save -force -json m1 tpl:  volume_read_only bool
+kling save -force -json m1 tpl:  volumes[].drive_id string
+kling save -force -json m1 tpl:  volumes[].mount string
+kling save -force -json m1 tpl:  volumes[].name string
+kling save -force -json m1 tpl:  volumes[].read_only bool
+kling save -force -json m1 tpl:  volumes[].sync string
+kling save -force -json m1 tpl:  warnings[] string
+kling start -json m1:  = kling inspect m1
 kling status -json:  daemon.api number
 kling status -json:  daemon.backend string
 kling status -json:  daemon.firecracker string
@@ -338,6 +407,7 @@ kling status -json:  daemon.root string
 kling status -json:  daemon.version string
 kling status -json:  endpoint string
 kling status -json:  extensions {}
+kling stop -json m1:  = kling inspect m1
 kling template ls -json:  [].allow_domains[] string
 kling template ls -json:  [].allow_exec bool
 kling template ls -json:  [].annotations.x string
@@ -381,6 +451,7 @@ kling template ls -json:  [].volumes[].name string
 kling template ls -json:  [].volumes[].read_only bool
 kling template ls -json:  [].volumes[].sync string
 kling template ls -json:  [].warnings[] string
+kling thaw -json m1:  = kling inspect m1
 kling version -json:  agents[] string
 kling version -json:  api number
 kling version -json:  arch string

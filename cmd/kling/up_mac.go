@@ -339,7 +339,7 @@ func startMacDaemon(a agenteDaemon, endpoint string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if info := waitDaemonEn(ctx, endpoint); info != nil {
-		fmt.Printf("daemon:      ✓ responding (%s, backend %s)\n", info.Version, info.Backend)
+		fmt.Printf("daemon:      "+uiMarks().ok+" responding (%s, backend %s)\n", info.Version, info.Backend)
 		return nil
 	}
 	fmt.Println("daemon:      started, but not yet responding on the socket.")
@@ -410,7 +410,7 @@ func bajarImagenesMac(ctx context.Context, f *upgrade.Fuente, etiqueta, root, ar
 		if err := descomprimirImagen(bajados[im.asset], filepath.Join(dir, im.destino), im.max); err != nil {
 			return fmt.Errorf("%s: %w", im.asset, err)
 		}
-		fmt.Fprintf(out, "             ✓ %s\n", filepath.Join(dir, im.destino))
+		fmt.Fprintf(out, "             "+uiMarks().ok+" %s\n", filepath.Join(dir, im.destino))
 	}
 	return nil
 }

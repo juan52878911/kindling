@@ -16,15 +16,15 @@ import (
 
 // cmdReady es `kling machine ready <ref> [-wait 60s] [-json]`.
 func cmdReady(args []string) error {
-	fs := flag.NewFlagSet("machine ready", flag.ExitOnError)
+	fs := flag.NewFlagSet("machine ready", flag.ContinueOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 0, "wait up to this long for it to be ready (0 = just ask)")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling machine ready <ref> [-wait 60s] [-json]")
+		return errUso("usage: kling machine ready <ref> [-wait 60s] [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -37,15 +37,15 @@ func cmdReady(args []string) error {
 
 // cmdHooks es `kling machine hooks <ref> [-wait 60s]`.
 func cmdHooks(args []string) error {
-	fs := flag.NewFlagSet("machine hooks", flag.ExitOnError)
+	fs := flag.NewFlagSet("machine hooks", flag.ContinueOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", time.Minute, "wait up to this long for the hooks to finish (0 = start them and return)")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling machine hooks <ref> [-wait 60s] [-json]")
+		return errUso("usage: kling machine hooks <ref> [-wait 60s] [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

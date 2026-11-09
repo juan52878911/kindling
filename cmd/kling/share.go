@@ -192,13 +192,13 @@ func writeTar(w io.Writer, dir string) ([]string, error) {
 // cmdInspect es `kling inspect <ref>`: la máquina entera en JSON, con el estado
 // de sus carpetas compartidas.
 func cmdInspect(args []string) error {
-	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling inspect <ref>")
+		return errUso("usage: kling inspect <ref>")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

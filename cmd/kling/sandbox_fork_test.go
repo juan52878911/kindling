@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"net/http"
 	"reflect"
 	"strings"
@@ -15,7 +14,7 @@ import (
 )
 
 func TestParseSandboxFork(t *testing.T) {
-	o, err := parseSandboxFork([]string{"caja"}, flag.ContinueOnError)
+	o, err := parseSandboxFork([]string{"caja"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +23,7 @@ func TestParseSandboxFork(t *testing.T) {
 	}
 
 	// Los flags pueden ir detrás del sandbox, como en el resto de kling.
-	o, err = parseSandboxFork([]string{"caja", "-n", "4", "-ttl", "30m", "-on-ttl", "freeze", "-q"}, flag.ContinueOnError)
+	o, err = parseSandboxFork([]string{"caja", "-n", "4", "-ttl", "30m", "-on-ttl", "freeze", "-q"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,13 +31,13 @@ func TestParseSandboxFork(t *testing.T) {
 	if o.ref != "caja" || !reflect.DeepEqual(o.req, want) || !o.quiet {
 		t.Fatalf("con flags: %+v, quería %+v", o, want)
 	}
-	if o, err = parseSandboxFork([]string{"-json", "-ttl", "90", "caja"}, flag.ContinueOnError); err != nil ||
+	if o, err = parseSandboxFork([]string{"-json", "-ttl", "90", "caja"}); err != nil ||
 		!o.asJSON || o.req.TTLSeconds != 90 {
 		t.Fatalf("-ttl en segundos y -json: %+v %v", o, err)
 	}
 
 	// -label repetido, validado con las reglas de la API.
-	o, err = parseSandboxFork([]string{"caja", "-label", "kling.db.state=preparing", "-label", "a=b"}, flag.ContinueOnError)
+	o, err = parseSandboxFork([]string{"caja", "-label", "kling.db.state=preparing", "-label", "a=b"})
 	if err != nil || !reflect.DeepEqual(o.req.Labels, map[string]string{"kling.db.state": "preparing", "a": "b"}) {
 		t.Fatalf("-label: %+v %v", o.req.Labels, err)
 	}
@@ -56,7 +55,7 @@ func TestParseSandboxFork(t *testing.T) {
 		"flag extraño":     {"caja", "-x"},
 	}
 	for nombre, args := range malos {
-		if _, err := parseSandboxFork(args, flag.ContinueOnError); err == nil {
+		if _, err := parseSandboxFork(args); err == nil {
 			t.Errorf("%s (%v): se aceptó", nombre, args)
 		}
 	}

@@ -66,13 +66,19 @@ type doctorInput struct {
 	extDirOK     bool     // existe
 	companions   []string // compañeros (kling-bridge…) que viven en extDir
 	pathDirs     []string // $PATH partido
+	// socket es el socket Unix del daemon visto desde aquí (sondearSocket);
+	// nil si el endpoint no es un socket local (ssh://).
+	socket *socketProbe
 }
 
 func cmdDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 
@@ -81,12 +87,12 @@ func cmdDoctor(args []string) error {
 		upArgs = append(upArgs, "-H", *host)
 	}
 	// El runtime lo diagnostica `kling up -check`, que ya imprime cada
-	// comprobación con su arreglo; no se duplica aquí. En JSON su texto va
-	// dentro del informe.
-	var runtimeOut string
+	// comprobación con su arreglo; no se duplica aquí. En JSON son las mismas
+	// comprobaciones (runtimeChecks), una por entrada de checks[].
 	var runtimeErr error
+	var deRuntime []doctorCheck
 	if *asJSON {
-		runtimeOut, runtimeErr = captureStdout(func() error { return cmdUp(upArgs) })
+		deRuntime = doctorDeRuntime(runtimeChecks(*host))
 	} else {
 		fmt.Println("── runtime (kling up -check) ──")
 		runtimeErr = cmdUp(upArgs)
@@ -117,12 +123,17 @@ func cmdDoctor(args []string) error {
 	}
 	cancel()
 
+	in.socket = sondearSocket(endpoint)
 	checks := doctorChecks(in)
-	rt := doctorCheck{Name: "runtime", State: doctorOK, Detail: "kling up -check"}
-	if runtimeErr != nil {
-		rt.State, rt.Detail, rt.Fix = doctorFail, runtimeErr.Error(), "kling up"
+	if *asJSON {
+		checks = append(deRuntime, checks...)
+	} else {
+		rt := doctorCheck{Name: "runtime", State: doctorOK, Detail: "kling up -check"}
+		if runtimeErr != nil {
+			rt.State, rt.Detail, rt.Fix = doctorFail, runtimeErr.Error(), "kling up"
+		}
+		checks = append([]doctorCheck{rt}, checks...)
 	}
-	checks = append([]doctorCheck{rt}, checks...)
 
 	failed := 0
 	for _, c := range checks {
@@ -136,11 +147,10 @@ func cmdDoctor(args []string) error {
 			tuning = in.info.Tuning
 		}
 		out := struct {
-			OK      bool              `json:"ok"`
-			Checks  []doctorCheck     `json:"checks"`
-			Runtime string            `json:"runtime_report,omitempty"`
-			Tuning  map[string]string `json:"tuning,omitempty"`
-		}{failed == 0, checks, runtimeOut, tuning}
+			OK     bool              `json:"ok"`
+			Checks []doctorCheck     `json:"checks"`
+			Tuning map[string]string `json:"tuning,omitempty"`
+		}{failed == 0, checks, tuning}
 		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 			return err
 		}
@@ -176,8 +186,14 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		d.State, d.Detail = doctorOK, fmt.Sprintf("%s at %s, %d machine(s)", in.info.Version, in.endpoint, in.info.Machines)
 	}
 	out = append(out, d)
+	if c, ok := checkSocket(in.socket); ok {
+		out = append(out, c)
+	}
 
 	if in.infoErr == nil && in.info != nil {
+		if c, ok := checkDisco(in.info); ok {
+			out = append(out, c)
+		}
 		v := doctorCheck{Name: "versions"}
 		cli, dmn := strings.TrimPrefix(in.cliVersion, "v"), strings.TrimPrefix(in.info.Version, "v")
 		switch {
@@ -305,13 +321,13 @@ func doctorChecks(in doctorInput) []doctorCheck {
 func printPoolProblems(ps []api.PoolInfo) {
 	for _, p := range ps {
 		if p.Stale != "" {
-			fmt.Printf("pool:         ✗ %s: %d/%d ready, its golden is stale (%s). Re-save it:\n", p.Template, p.Ready, p.Size, p.Stale)
+			fmt.Printf("pool:         "+uiMarks().fail+" %s: %d/%d ready, its golden is stale (%s). Re-save it:\n", p.Template, p.Ready, p.Size, p.Stale)
 			for _, l := range strings.Split(p.Fix, "\n") {
 				fmt.Printf("              %s\n", strings.TrimSpace(l))
 			}
 			continue
 		}
-		fmt.Printf("pool:         ✗ %s: %d/%d ready, could not pre-warm a copy: %s\n", p.Template, p.Ready, p.Size, firstLine(p.Error))
+		fmt.Printf("pool:         "+uiMarks().fail+" %s: %d/%d ready, could not pre-warm a copy: %s\n", p.Template, p.Ready, p.Size, firstLine(p.Error))
 	}
 }
 
@@ -582,31 +598,6 @@ func extensionsDir() string {
 		return ""
 	}
 	return d
-}
-
-// captureStdout ejecuta fn con os.Stdout apuntando a una tubería y devuelve lo
-// que escribió (hasta 1 MiB). Sirve para meter el informe de `up -check`, que
-// escribe directamente en os.Stdout, dentro del JSON de doctor.
-func captureStdout(fn func() error) (string, error) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return "", fn()
-	}
-	orig := os.Stdout
-	os.Stdout = w
-	done := make(chan string)
-	go func() {
-		var b bytes.Buffer
-		_, _ = io.Copy(&b, io.LimitReader(r, 1<<20))
-		_, _ = io.Copy(io.Discard, r) // lo que pase del límite se tira, sin bloquear a fn
-		done <- b.String()
-	}()
-	ferr := fn()
-	os.Stdout = orig
-	w.Close()
-	out := <-done
-	r.Close()
-	return out, ferr
 }
 
 // checkAuthz cuenta si el daemon autoriza por operación (docs/authz.md) y con

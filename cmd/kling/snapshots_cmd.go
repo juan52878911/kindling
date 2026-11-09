@@ -38,20 +38,20 @@ func cmdTemplate(args []string) error {
 	case "pool":
 		return snapshotsPool(args)
 	}
-	return fmt.Errorf("unknown subcommand %q: use ls, rm, inspect, credential or pool", sub)
+	return errUsoDe("template", fmt.Errorf("unknown subcommand %q: use ls, rm, inspect, credential or pool", sub))
 }
 
 // snapshotsPool es `kling template pool`: mantiene N copias de la plantilla ya
 // despiertas, para que `run -from` reclame una en vez de restaurarla.
 func snapshotsPool(args []string) error {
-	fs := flag.NewFlagSet("template pool", flag.ExitOnError)
+	fs := flag.NewFlagSet("template pool", flag.ContinueOnError)
 	host := hostFlag(fs)
 	n := fs.Int("n", -1, "copies to keep awake (0 turns the pool off and empties it)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling template pool <template> [-n N]   (without -n, shows the pool)")
+		return errUso("usage: kling template pool <template> [-n N]   (without -n, shows the pool)")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -81,15 +81,15 @@ func snapshotsPool(args []string) error {
 // credential` a cada réplica. Como allí, la clave no viaja por la línea de
 // comandos: -f o stdin.
 func snapshotsCredential(args []string) error {
-	fs := flag.NewFlagSet("template credential", flag.ExitOnError)
+	fs := flag.NewFlagSet("template credential", flag.ContinueOnError)
 	host := hostFlag(fs)
 	cf := credentialFlags(fs)
 	clear := fs.Bool("clear", false, "remove every credential of the template")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
-		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
+		return errUso("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling template credential <template> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
@@ -329,11 +329,11 @@ func leerClave(file string) (string, error) {
 }
 
 func snapshotsList(args []string) error {
-	fs := flag.NewFlagSet("template ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("template ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only names (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -398,14 +398,14 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 }
 
 func snapshotsRemove(name string, args []string) error {
-	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling %s <template>...", name)
+		return errUso("usage: kling %s <template>...", name)
 	}
 	if !*force && !confirmMany("template", fs.Args()) {
 		return errAborted
@@ -423,14 +423,14 @@ func snapshotsRemove(name string, args []string) error {
 }
 
 func snapshotsInspect(args []string) error {
-	fs := flag.NewFlagSet("template inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("template inspect", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling template inspect <template> [-json]")
+		return errUso("usage: kling template inspect <template> [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

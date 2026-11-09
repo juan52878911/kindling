@@ -30,7 +30,7 @@ func TestLifecycleSigueTrasUnFallo(t *testing.T) {
 	c := fakeDaemon(t, m)
 
 	var out, errw bytes.Buffer
-	err := runLifecycle(context.Background(), c, "rm", []string{"a", "b", "c"}, &out, &errw)
+	err := runLifecycle(context.Background(), c, "rm", []string{"a", "b", "c"}, false, &out, &errw)
 	if err == nil || codigoDeSalida(err) != 1 || err.Error() != "" {
 		t.Fatalf("err = %v; quería salir con 1 sin repetir el error", err)
 	}
@@ -49,11 +49,11 @@ func TestLifecycleSigueTrasUnFallo(t *testing.T) {
 
 	// Con una sola ref, el error sale tal cual (con su pista y su código).
 	errw.Reset()
-	if err := runLifecycle(context.Background(), c, "rm", []string{"b"}, &out, &errw); err == nil || err.Error() == "" || errw.Len() != 0 {
+	if err := runLifecycle(context.Background(), c, "rm", []string{"b"}, false, &out, &errw); err == nil || err.Error() == "" || errw.Len() != 0 {
 		t.Fatalf("una ref: err = %v, stderr = %q", err, errw.String())
 	}
 	// Todo bien: sin error.
-	if err := runLifecycle(context.Background(), c, "rm", []string{"a", "c"}, &out, &errw); err != nil {
+	if err := runLifecycle(context.Background(), c, "rm", []string{"a", "c"}, false, &out, &errw); err != nil {
 		t.Fatalf("todo bien: %v", err)
 	}
 }

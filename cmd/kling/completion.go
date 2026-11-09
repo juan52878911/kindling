@@ -35,7 +35,7 @@ var completionShells = []string{"bash", "zsh", "fish"}
 
 func cmdCompletion(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: kling completion bash|zsh|fish|install [shell]\n" +
+		return errUso("usage: kling completion bash|zsh|fish|install [shell]\n" +
 			"  bash:     source <(kling completion bash)\n" +
 			"  zsh:      source <(kling completion zsh)   (after `autoload -U compinit && compinit`)\n" +
 			"  fish:     kling completion fish | source\n" +

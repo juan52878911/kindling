@@ -88,7 +88,7 @@ func resolveEnv(env, files []string, lookup func(string) (string, bool), read fu
 // stderr, y kling termina con el código del comando remoto: se puede usar en
 // scripts igual que si el comando corriera aquí.
 func cmdExec(args []string) (int, error) {
-	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	host := hostFlag(fs)
 	stdin := fs.Bool("i", false, "send local stdin to the command (up to 1 MiB)")
 	var ef envFlags
@@ -96,24 +96,19 @@ func cmdExec(args []string) (int, error) {
 	dir := fs.String("w", "", "working directory inside the machine")
 	timeout := fs.Duration("timeout", 0, "kill the command after this long (default 5m, max 1h)")
 	maxOut := fs.Int("max-output", 0, "bytes of stdout and of stderr to keep (default 8 MiB, max 64 MiB)")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return 2, err
+	if err := parseFlags(fs, args); err != nil {
+		return codigoDeSalida(err), err
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		fs.Usage()
-		return 2, errors.New("missing machine or command")
+		return 2, errUso("usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
 	}
 	ref, cmd := rest[0], rest[1:]
 	if cmd[0] == "--" {
 		cmd = cmd[1:]
 	}
 	if len(cmd) == 0 {
-		return 2, errors.New("missing command")
+		return 2, errUso("usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <machine|sandbox> [--] <cmd> [args...]")
 	}
 	env, err := ef.resolve()
 	if err != nil {
@@ -170,21 +165,20 @@ func cmdExec(args []string) (int, error) {
 // cmdCp es `kling cp <src> <dst>`, donde uno de los dos es <máquina>:<ruta>.
 // "-" es la entrada o la salida estándar.
 func cmdCp(args []string) error {
-	fs := flag.NewFlagSet("cp", flag.ExitOnError)
+	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
 	host := hostFlag(fs)
 	mode := fs.String("mode", "", "permissions of the copied file inside the machine (octal, default 0644)")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling cp [-mode 0755] <local|-> <machine>:<path>\n       kling cp <machine>:<path> <local|->")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "print what was copied as JSON (machine, path, size; dest when copying out)")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		fs.Usage()
-		return errors.New("need a source and a destination")
+		return errUso("usage: kling cp [-mode 0755] <local|-> <machine>:<path>\n       kling cp <machine>:<path> <local|->")
 	}
 	src, dst := fs.Arg(0), fs.Arg(1)
+	if *asJSON && dst == "-" {
+		return errUsoDe("cp", errors.New("-json needs a destination file: with - the file itself goes to stdout"))
+	}
 	srcRef, srcPath, srcRemote := splitRemote(src)
 	dstRef, dstPath, dstRemote := splitRemote(dst)
 	if srcRemote == dstRemote {
@@ -229,6 +223,9 @@ func cmdCp(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(copiaJSON{Machine: dstRef, Path: st.Path, Size: st.Size, Mode: st.Mode})
+		}
 		fmt.Fprintf(os.Stderr, "%s:%s  %s  %s\n", dstRef, st.Path, human(st.Size), st.Mode)
 		return nil
 	}
@@ -250,8 +247,21 @@ func cmdCp(args []string) error {
 		defer f.Close()
 		w = f
 	}
-	_, err = io.Copy(w, rc)
-	return err
+	n, err := io.Copy(w, rc)
+	if err != nil || !*asJSON {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(copiaJSON{Machine: srcRef, Path: srcPath, Size: n, Dest: dst})
+}
+
+// copiaJSON es lo que `kling cp -json` dice de una copia: la máquina y la ruta
+// de dentro, el tamaño y, al sacar un fichero, dónde quedó.
+type copiaJSON struct {
+	Machine string `json:"machine"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	Mode    string `json:"mode,omitempty"`
+	Dest    string `json:"dest,omitempty"`
 }
 
 // splitRemote separa "máquina:/ruta". Una ruta local con ':' se escribe con ./
@@ -278,7 +288,7 @@ func baseName(p string) string {
 // cmdSandbox es `kling sandbox create|ls|renew|fork|rm`.
 func cmdSandbox(args []string) error {
 	if len(args) == 0 {
-		return &errWithHint{err: errors.New("usage: kling sandbox <create|ls|renew|fork|rm> [...]"),
+		return &errWithHint{err: errUso("usage: kling sandbox <create|ls|renew|fork|rm> [...]"),
 			hint: "kling try -- <cmd>   (create, run and remove in one go)"}
 	}
 	switch args[0] {
@@ -293,11 +303,11 @@ func cmdSandbox(args []string) error {
 	case "rm", "remove":
 		return sandboxRemove(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use create, ls, renew, fork or rm", args[0])
+	return errUsoDe("sandbox", fmt.Errorf("unknown subcommand %q: use create, ls, renew, fork or rm", args[0]))
 }
 
 func sandboxCreate(args []string) error {
-	fs := flag.NewFlagSet("sandbox create", flag.ExitOnError)
+	fs := flag.NewFlagSet("sandbox create", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "sandbox name")
 	image := fs.String("image", "", "image with the guest agent (e.g. toolchain)")
@@ -316,7 +326,7 @@ func sandboxCreate(args []string) error {
 	fs.Var(&shares, "share", shareUsage)
 	quiet := fs.Bool("q", false, "print only the id")
 	waitReady := fs.Bool("wait-ready", false, "return once the guest is ready by its image's probe and post-restore hooks")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -362,11 +372,11 @@ func sandboxCreate(args []string) error {
 }
 
 func sandboxList(args []string) error {
-	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("sandbox ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output (same shape as ps -json)")
 	quiet := fs.Bool("q", false, "print only IDs (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -418,14 +428,14 @@ func sandboxList(args []string) error {
 }
 
 func sandboxRenew(args []string) error {
-	fs := flag.NewFlagSet("sandbox renew", flag.ExitOnError)
+	fs := flag.NewFlagSet("sandbox renew", flag.ContinueOnError)
 	host := hostFlag(fs)
 	ttl := units.DurationVar(fs, "ttl", 0, "new lifetime from now: 10m, 1h (bare number = seconds; default 10m)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling sandbox renew <sandbox> [-ttl 30m]")
+		return errUso("usage: kling sandbox renew <sandbox> [-ttl 30m]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -443,14 +453,14 @@ func sandboxRenew(args []string) error {
 }
 
 func sandboxRemove(args []string) error {
-	fs := flag.NewFlagSet("sandbox rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("sandbox rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errors.New("usage: kling sandbox rm <sandbox>...")
+		return errUso("usage: kling sandbox rm <sandbox>...")
 	}
 	if !*force && !confirmMany("sandbox", fs.Args()) {
 		return errAborted

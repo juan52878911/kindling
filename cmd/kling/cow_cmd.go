@@ -16,13 +16,13 @@ func cmdCoW(args []string) error {
 	if len(args) > 0 && args[0] == "grow" {
 		return cmdCoWGrow(args[1:])
 	}
-	fs := flag.NewFlagSet("cow", flag.ExitOnError)
+	fs := flag.NewFlagSet("cow", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unknown subcommand %q: use grow", fs.Arg(0))
+		return errUsoDe("cow", fmt.Errorf("unknown subcommand %q: use grow", fs.Arg(0)))
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -50,13 +50,13 @@ func cmdCoW(args []string) error {
 }
 
 func cmdCoWGrow(args []string) error {
-	fs := flag.NewFlagSet("cow grow", flag.ExitOnError)
+	fs := flag.NewFlagSet("cow grow", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return &errWithHint{err: errors.New("usage: kling cow grow <size>|+<size>"),
+		return &errWithHint{err: errUso("usage: kling cow grow <size>|+<size>"),
 			hint: "kling cow grow 32G  (new size)   or   kling cow grow +8G  (how much to add)"}
 	}
 	req, err := parseCrecimiento(fs.Arg(0))

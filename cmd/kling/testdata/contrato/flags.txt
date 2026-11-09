@@ -65,6 +65,7 @@ kling context ls:  -json
 kling cow grow:  -H
 kling cow:  -H
 kling cp:  -H
+kling cp:  -json
 kling cp:  -mode
 kling credential:  -H
 kling credential:  -allow-request
@@ -76,6 +77,7 @@ kling credential:  -domain
 kling credential:  -env
 kling credential:  -f
 kling credential:  -header
+kling credential:  -json
 kling credential:  -port
 kling credential:  -query
 kling credential:  -rm
@@ -194,11 +196,13 @@ kling machine ready:  -H
 kling machine ready:  -json
 kling machine ready:  -wait
 kling machine resize:  -H
+kling machine resize:  -json
 kling machine resize:  -mem
 kling mmds:  -H
 kling mmds:  -f
 kling mmds:  -hooks
 kling mmds:  -hooks-wait
+kling mmds:  -json
 kling plugin ls:  -json
 kling plugins install:  -dir
 kling plugins install:  -file
@@ -282,6 +286,7 @@ kling save:  -H
 kling save:  -audit
 kling save:  -audit-for
 kling save:  -force
+kling save:  -json
 kling save:  -replace
 kling save:  -wait
 kling save:  -warm
@@ -292,9 +297,11 @@ kling shell:  -t
 kling shell:  -w
 kling squeeze:  -H
 kling squeeze:  -force
+kling squeeze:  -json
 kling start:  -H
 kling start:  -e
 kling start:  -env-file
+kling start:  -json
 kling status:  -H
 kling status:  -json
 kling status:  -v

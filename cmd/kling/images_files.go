@@ -14,17 +14,17 @@ import (
 //
 //	kling image build <name> -builder <b> [-spec spec.json|-] [-base B] [-grow MiB]
 func imagesBuild(args []string) error {
-	fs := flag.NewFlagSet("images build", flag.ExitOnError)
+	fs := flag.NewFlagSet("images build", flag.ContinueOnError)
 	host := hostFlag(fs)
 	builder := fs.String("builder", "", "builder installed on the daemon (/usr/local/lib/kindling/builders/<name>)")
 	specFile := fs.String("spec", "", "JSON file with the builder's spec ('-' = stdin)")
 	base := fs.String("base", "", "base image")
 	grow := fs.Int("grow", 0, "MiB to reserve for the layer")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *builder == "" {
-		return fmt.Errorf("usage: kling image build <name> -builder <builder> [-spec spec.json|-] [-base B] [-grow MiB]")
+		return errUso("usage: kling image build <name> -builder <builder> [-spec spec.json|-] [-base B] [-grow MiB]")
 	}
 	req := api.BuildImageRequest{Name: fs.Arg(0), Builder: *builder, Base: *base, GrowMB: *grow}
 	if *specFile != "" {
@@ -59,14 +59,14 @@ func imagesBuild(args []string) error {
 
 // imagesCat imprime un fichero de dentro de una imagen.
 func imagesCat(args []string) error {
-	fs := flag.NewFlagSet("images cat", flag.ExitOnError)
+	fs := flag.NewFlagSet("images cat", flag.ContinueOnError)
 	host := hostFlag(fs)
 	stat := fs.Bool("stat", false, "only say whether it is there, its size and sha256")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: kling image cat <image> </path/inside> [-stat]")
+		return errUso("usage: kling image cat <image> </path/inside> [-stat]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -93,17 +93,17 @@ func imagesCat(args []string) error {
 
 // imagesPut mete un fichero en una imagen ya construida.
 func imagesPut(args []string) error {
-	fs := flag.NewFlagSet("images put", flag.ExitOnError)
+	fs := flag.NewFlagSet("images put", flag.ContinueOnError)
 	host := hostFlag(fs)
 	file := fs.String("file", "", "local file to upload (up to 8 MiB)")
 	fromHost := fs.String("from-host", "", "file in the daemon's /usr/local/lib/kindling instead of a local one")
 	mode := fs.String("mode", "0644", "permissions inside the image")
 	create := fs.Bool("create", false, "create it if the image doesn't have it (default: only replace)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 || (*file == "") == (*fromHost == "") {
-		return fmt.Errorf("usage: kling image put <image> </path/inside> (-file local | -from-host name) [-mode 0755] [-create]")
+		return errUso("usage: kling image put <image> </path/inside> (-file local | -from-host name) [-mode 0755] [-create]")
 	}
 	req := api.PutImageFileRequest{Path: fs.Arg(1), Mode: *mode, FromHost: *fromHost, Create: *create}
 	if *file != "" {

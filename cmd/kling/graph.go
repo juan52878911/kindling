@@ -47,7 +47,7 @@ func cmdGraph(args []string) error {
 	case "from-compose":
 		return graphFromCompose(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use up, ls, inspect, audit, freeze, thaw, snapshot, fork, rm or from-compose", args[0])
+	return errUsoDe("graph", fmt.Errorf("unknown subcommand %q: use up, ls, inspect, audit, freeze, thaw, snapshot, fork, rm or from-compose", args[0]))
 }
 
 // fileGraph es el fichero de un grafo: el api.Graph de siempre y, en cada
@@ -181,13 +181,13 @@ func errSinGrafos(err error) error {
 }
 
 func graphUp(args []string) error {
-	fs := flag.NewFlagSet("graph up", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph up", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only the graph id")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling graph up <file.json|file.yaml> [-json] [-q]")
+		return errUso("usage: kling graph up <file.json|file.yaml> [-json] [-q]")
 	}
 	path := fs.Arg(0)
 	datos, err := os.ReadFile(path)
@@ -253,11 +253,11 @@ func puertosTexto(ps []int) string {
 }
 
 func graphList(args []string) error {
-	fs := flag.NewFlagSet("graph ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only the names")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	gs, err := api.NewClient(hostOf(*host)).Graphs(ctx)
@@ -294,12 +294,12 @@ func graphList(args []string) error {
 }
 
 func graphInspect(args []string) error {
-	fs := flag.NewFlagSet("graph inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph inspect", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling graph inspect <graph> [-json]")
+		return errUso("usage: kling graph inspect <graph> [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -350,11 +350,11 @@ func escribirGrafo(w io.Writer, g *api.Graph) {
 }
 
 func graphLifecycle(verbo string, args []string) error {
-	fs := flag.NewFlagSet("graph "+verbo, flag.ExitOnError)
+	fs := flag.NewFlagSet("graph "+verbo, flag.ContinueOnError)
 	host := hostFlag(fs)
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling graph %s <graph>", verbo)
+		return errUso("usage: kling graph %s <graph>", verbo)
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -378,13 +378,13 @@ func graphLifecycle(verbo string, args []string) error {
 }
 
 func graphSnapshot(args []string) error {
-	fs := flag.NewFlagSet("graph snapshot", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph snapshot", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "prefix of the templates (default: the graph's name)")
 	asJSON := fs.Bool("json", false, "JSON output")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling graph snapshot <graph> [-name N] [-json]")
+		return errUso("usage: kling graph snapshot <graph> [-name N] [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -420,14 +420,14 @@ func printGraphSnapshot(out, errOut io.Writer, s *api.GraphSnapshot, d time.Dura
 }
 
 func graphFork(args []string) error {
-	fs := flag.NewFlagSet("graph fork", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph fork", flag.ContinueOnError)
 	host := hostFlag(fs)
 	n := fs.Int("n", 1, fmt.Sprintf("how many copies (1-%d)", api.GraphForkMax))
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only the names of the new graphs")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling graph fork <graph> [-n N] [-q] [-json]")
+		return errUso("usage: kling graph fork <graph> [-n N] [-q] [-json]")
 	}
 	if *n < 1 || *n > api.GraphForkMax {
 		return fmt.Errorf("-n must be between 1 and %d", api.GraphForkMax)
@@ -462,12 +462,12 @@ func graphFork(args []string) error {
 }
 
 func graphRemove(args []string) error {
-	fs := flag.NewFlagSet("graph rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "don't ask when removing several")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() == 0 {
-		return errors.New("usage: kling graph rm [-f] <graph>...")
+		return errUso("usage: kling graph rm [-f] <graph>...")
 	}
 	if !*force && !confirmMany("graph", fs.Args()) {
 		return errAborted

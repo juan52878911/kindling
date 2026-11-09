@@ -36,23 +36,18 @@ var errShellClosed = errors.New("connection closed")
 // Termina con el código de la shell remota, igual que exec: un `kling shell sb
 // -- make test` sirve en un script tanto como fuera de él.
 func cmdShell(args []string) (int, error) {
-	fs := flag.NewFlagSet("shell", flag.ExitOnError)
+	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
 	host := hostFlag(fs)
 	var ef envFlags
 	ef.register(fs)
 	dir := fs.String("w", "", "working directory inside the machine")
 	term := fs.String("t", "", "TERM seen by the program inside (default $TERM, or xterm)")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling shell [-e K=V|K] [-env-file F] [-w DIR] [-t TERM] <machine|sandbox> [--] [cmd [args...]]")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return 2, err
+	if err := parseFlags(fs, args); err != nil {
+		return codigoDeSalida(err), err
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		fs.Usage()
-		return 2, errors.New("missing machine")
+		return 2, errUso("usage: kling shell [-e K=V|K] [-env-file F] [-w DIR] [-t TERM] <machine|sandbox> [--] [cmd [args...]]")
 	}
 	ref, cmd := rest[0], rest[1:]
 	if len(cmd) > 0 && cmd[0] == "--" {

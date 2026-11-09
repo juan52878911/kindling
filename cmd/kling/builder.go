@@ -48,7 +48,7 @@ var (
 
 func cmdBuilder(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: kling builder base|llm|chispa|android|debian|oci <workdir>  (the daemon runs it; see docs/api.md)")
+		return errUso("usage: kling builder base|llm|chispa|android|debian|oci <workdir>  (the daemon runs it; see docs/api.md)")
 	}
 	if os.Getenv("KLING_BUILD_LIMITS") == "1" && os.Geteuid() != 0 {
 		// El daemon lo bajó al usuario de construcción: topes antes de leer

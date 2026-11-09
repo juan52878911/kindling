@@ -200,7 +200,7 @@ func main() {
 // mmds) se retiraron en 1.0 (removedAliases).
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit|ready|hooks> <ref> [...]")
+		return errUso("usage: kling machine <resize|squeeze|secret|credential|audit|ready|hooks> <ref> [...]")
 	}
 	switch args[0] {
 	case "resize":
@@ -218,7 +218,7 @@ func cmdMachine(args []string) error {
 	case "hooks":
 		return cmdHooks(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret, credential, audit, ready or hooks", args[0])
+	return errUsoDe("machine", fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret, credential, audit, ready or hooks", args[0]))
 }
 
 // errConCodigo deja que un comando pida un codigo de salida concreto.
@@ -267,7 +267,7 @@ func codigoDeSalida(err error) int {
 		return salidaDoradoObsoleto
 	case errors.As(err, &sinCap):
 		return salidaAgenteSinCap
-	case strings.HasPrefix(err.Error(), "usage: "):
+	case esUso(err):
 		return salidaUso
 	}
 	return plugin.ExitCode(err)
@@ -390,7 +390,7 @@ func ctxWithSignals() (context.Context, context.CancelFunc) {
 // ── daemon ────────────────────────────────────────────────────────────────────
 
 func cmdDaemon(args []string) error {
-	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	socket := fs.String("socket", envOr("KLING_SOCKET", transport.DefaultSocketPath()), "Unix socket to serve")
 	root := fs.String("root", envOr("KLING_ROOT", transport.DefaultRoot()), "data directory")
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
@@ -398,7 +398,7 @@ func cmdDaemon(args []string) error {
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
 	buildAs := fs.String("build-as", envOr("KLING_BUILD_AS", "kindling-build"), "unprivileged user the oci image builder runs as (not the Firecracker one)")
 	authzPath := fs.String("authz", os.Getenv("KLING_AUTHZ"), "authz policy file (default "+daemon.RutaAuthzPorDefecto+" if it exists; see docs/authz.md)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	// Una ruta explícita tiene que existir: arrancar sin política creyendo
@@ -626,7 +626,7 @@ func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
 }
 
 func cmdRun(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "machine name")
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
@@ -665,7 +665,7 @@ func cmdRun(args []string) error {
 	fs.Var(&hostPorts, "host-port", "macOS: let the guest reach this TCP port of the Mac's loopback at host.kindling.internal (172.16.0.1): PORT or HOST:GUEST, like 11434 for Ollama (repeatable; opens only that port, even with -egress none)")
 	var publica publishFlag
 	fs.Var(&publica, "p", "publish 127.0.0.1:HOST to the guest's port GUEST (HOST:GUEST, PORT, :GUEST for a free one, /udp on Linux; repeatable): the daemon keeps it while the machine exists and wakes it if frozen; kling stays in the foreground following the service")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if len(publica) > 0 && *asJSON {
@@ -868,7 +868,7 @@ func (l labelFlag) merge(service string) map[string]string {
 // cmdSave es `kling save <ref> <name>` (antes `commit`): una máquina viva se
 // convierte en plantilla de la que `run -from` instancia en milisegundos.
 func cmdSave(args []string) error {
-	fs := flag.NewFlagSet("save", flag.ExitOnError)
+	fs := flag.NewFlagSet("save", flag.ContinueOnError)
 	host := hostFlag(fs)
 	// Reemplazar es opt-in: los snapshots quedan atados al TSC del host y un
 	// reinicio los invalida todos, así que rehacerlos con el mismo nombre es
@@ -891,19 +891,20 @@ func cmdSave(args []string) error {
 	// guarda ni quita nada (ver save_audit.go).
 	audit := fs.Bool("audit", false, "report the files never seen open or mapped on this machine (for what to trim); saves nothing")
 	auditFor := fs.Duration("audit-for", 5*time.Second, "with -audit: how long to sample what is in use")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "print the template as JSON (name, mem_bytes, warnings...) for scripts and agents")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *audit {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: kling save -audit [-audit-for 5s] <ref>")
+			return errUso("usage: kling save -audit [-audit-for 5s] <ref>")
 		}
 		ctx, stop := ctxWithSignals()
 		defer stop()
 		return cmdSaveAudit(ctx, api.NewClient(hostOf(*host)), fs.Arg(0), *auditFor)
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling save [-replace] [-force] [-warm=false] <ref> <template-name>\n       kling save -audit <ref>")
+		return errUso("usage: kling save [-replace] [-force] [-warm=false] <ref> <template-name>\n       kling save -audit <ref>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -916,7 +917,7 @@ func cmdSave(args []string) error {
 		// nada que esperar: la espera solo agotaba el plazo entero.
 		sinServicio, nadaQueEsperar := sinServicioQueEsperar(ctx, c, fs.Arg(0))
 		if sinServicio {
-			fmt.Printf("note: %s's image declares no service; not waiting for one to serve\n", fs.Arg(0))
+			fmt.Fprintf(os.Stderr, "note: %s's image declares no service; not waiting for one to serve\n", fs.Arg(0))
 			skipReady = nadaQueEsperar
 		} else if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
 			return err
@@ -931,6 +932,9 @@ func cmdSave(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(snap)
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
 	for _, w := range snap.Warnings {
@@ -986,13 +990,19 @@ func sinServicioQueEsperar(ctx context.Context, c *api.Client, ref string) (sinS
 // puente (HTTP nativo) el /reset no existe y no es un fallo — el puerto abierto
 // es cuanto se puede comprobar.
 func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration, warm bool) error {
-	fmt.Printf("checking the guest is serving before freezing... ")
+	fmt.Fprintf(os.Stderr, "checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
-		fmt.Println("✗")
+		fmt.Fprintln(os.Stderr, uiMarks().fail)
 		if api.IsNotFound(err) {
 			// No hay máquina: ni puerto ni plazo que explicar (fallaba en
 			// milisegundos diciendo "not serving ... after 2m0s").
 			return fmt.Errorf("%s: %w", ref, err)
+		}
+		var se *api.StatusError
+		if !errors.As(err, &se) {
+			// No contestó el daemon (no hay socket, el ssh no llega): el
+			// invitado no tiene nada que ver, y la pista es la del transporte.
+			return err
 		}
 		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
 	}
@@ -1005,11 +1015,11 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: ruta, Method: "POST"})
 	switch {
 	case err == nil && resp.Status == 204 && warm:
-		fmt.Println("✓ (serving, session state reset, runtime prewarmed)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving, session state reset, runtime prewarmed)")
 	case err == nil && resp.Status == 204:
-		fmt.Println("✓ (serving, session state reset, no prewarm)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving, session state reset, no prewarm)")
 	default:
-		fmt.Println("✓ (serving)")
+		fmt.Fprintln(os.Stderr, uiMarks().ok+" (serving)")
 	}
 	return nil
 }
@@ -1026,12 +1036,15 @@ func mensajeNoSirve(ref, espera string) string {
 }
 
 func cmdPS(args []string) error {
-	fs := flag.NewFlagSet("ps", flag.ExitOnError)
+	fs := flag.NewFlagSet("ps", flag.ContinueOnError)
 	host := hostFlag(fs)
 	all := fs.Bool("a", false, "include stopped ones")
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only machine IDs (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 
@@ -1150,13 +1163,15 @@ func cmdPS(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	// El pie y los avisos no son filas: a stderr, para que quien lee la tabla
+	// por una tubería solo vea la tabla.
 	if totalDisk > 0 {
-		fmt.Printf("\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
+		fmt.Fprintf(os.Stderr, "\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
 	}
 	if len(avisos) > 0 {
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		for _, a := range avisos {
-			fmt.Println("! " + a)
+			fmt.Fprintln(os.Stderr, "! "+a)
 		}
 	}
 	return nil
@@ -1220,17 +1235,18 @@ func since(t time.Time) string {
 }
 
 func cmdLifecycle(op string, args []string) error {
-	fs := flag.NewFlagSet(op, flag.ExitOnError)
+	fs := flag.NewFlagSet(op, flag.ContinueOnError)
 	host := hostFlag(fs)
 	var force *bool
 	if op == "rm" {
 		force = fs.Bool("f", false, "do not ask for confirmation")
 	}
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "one JSON line per machine: the machine as it is now (rm: its id, name and state \"removed\")")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling %s <ref>...", op)
+		return errUso("usage: kling %s <ref>...", op)
 	}
 	if op == "rm" && !*force && !confirmMany("machine", fs.Args()) {
 		return errAborted
@@ -1240,17 +1256,33 @@ func cmdLifecycle(op string, args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 
-	return runLifecycle(ctx, c, op, fs.Args(), os.Stdout, os.Stderr)
+	return runLifecycle(ctx, c, op, fs.Args(), *asJSON, os.Stdout, os.Stderr)
+}
+
+// maquinaBorrada es lo que `kling rm -json` dice de cada una.
+type maquinaBorrada struct {
+	ID    string `json:"id"`
+	Name  string `json:"name,omitempty"`
+	State string `json:"state"` // "removed"
 }
 
 // runLifecycle aplica op a cada ref. Como docker, un fallo no detiene el
 // resto: el error de cada uno va a stderr y al final se sale con 1. Con una
 // sola ref se devuelve su error tal cual, para que conserve pista y código.
-func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, out, errw io.Writer) error {
+// Con asJSON, una línea JSON por máquina en out.
+func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, asJSON bool, out, errw io.Writer) error {
 	fallos := 0
+	enc := json.NewEncoder(out)
 	for _, ref := range refs {
 		var mc *api.Machine
 		var err error
+		borrada := maquinaBorrada{ID: ref, State: "removed"}
+		if op == "rm" && asJSON {
+			// Para dar su id y su nombre, que la respuesta del rm no trae.
+			if antes, gerr := c.Get(ctx, ref); gerr == nil {
+				borrada.ID, borrada.Name = antes.ID, antes.Name
+			}
+		}
 		switch op {
 		case "freeze":
 			mc, err = c.Freeze(ctx, ref)
@@ -1275,6 +1307,14 @@ func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, 
 			continue
 		}
 		switch {
+		case asJSON && op == "rm":
+			if err := enc.Encode(borrada); err != nil {
+				return err
+			}
+		case asJSON:
+			if err := enc.Encode(mc); err != nil {
+				return err
+			}
 		case op == "rm":
 			fmt.Fprintln(out, ref)
 		case op == "freeze":
@@ -1297,15 +1337,16 @@ func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, 
 // se guarda (solo sus nombres), así que hay que volver a darlo; el daemon dice
 // qué claves faltan.
 func cmdStart(args []string) error {
-	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	host := hostFlag(fs)
 	var ef envFlags
 	ef.register(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "one JSON line per machine: the machine as it is now")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling start [-e K=V|K] [-env-file F] <ref>...")
+		return errUso("usage: kling start [-e K=V|K] [-env-file F] <ref>...")
 	}
 	env, err := ef.resolve()
 	if err != nil {
@@ -1334,6 +1375,12 @@ func cmdStart(args []string) error {
 			}
 			return err
 		}
+		if *asJSON {
+			if err := json.NewEncoder(os.Stdout).Encode(mc); err != nil {
+				return err
+			}
+			continue
+		}
 		if !arrancoAhora(antes, mc) {
 			fmt.Printf("%s  %s  (already running, nothing to start)\n", mc.ID[:12], mc.State)
 			continue
@@ -1358,14 +1405,15 @@ func arrancoAhora(antes, despues *api.Machine) bool {
 // host la RAM que el invitado tiene libre, sin congelarlas. A diferencia de
 // freeze, la máquina sigue viva y atendiendo: es el ahorro barato entre sesiones.
 func cmdSqueeze(args []string) error {
-	fs := flag.NewFlagSet("squeeze", flag.ExitOnError)
+	fs := flag.NewFlagSet("squeeze", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("force", false, "squeeze also a copy that shares memory with its template (Firecracker): usually makes the host use MORE memory")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "one JSON line per machine: what was returned (id, reclaimed_mib...)")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling machine squeeze <ref>...")
+		return errUso("usage: kling machine squeeze <ref>...")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -1374,6 +1422,12 @@ func cmdSqueeze(args []string) error {
 		res, err := c.SqueezeWith(ctx, ref, *force)
 		if err != nil {
 			return err
+		}
+		if *asJSON {
+			if err := json.NewEncoder(os.Stdout).Encode(res); err != nil {
+				return err
+			}
+			continue
 		}
 		fmt.Printf("%s  ~%d MiB returned to the host  (guest free %d MiB, RSS now %d MiB)\n",
 			res.ID[:12], res.ReclaimedMiB, res.GuestFreeMiB, res.RSSMiB)
@@ -1399,16 +1453,17 @@ func cmdSqueeze(args []string) error {
 // El secreto NO viaja por la línea de comandos (cualquiera lee /proc/<pid>/cmdline):
 // se lee de un fichero o de la entrada estándar.
 func cmdMMDS(args []string) error {
-	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
+	fs := flag.NewFlagSet("mmds", flag.ContinueOnError)
 	host := hostFlag(fs)
 	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
 	hooks := fs.Bool("hooks", false, "then run the image's post-restore hooks and wait for them (they read the secret)")
 	hooksWait := fs.Duration("hooks-wait", time.Minute, "with -hooks, how long to wait for them")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "print the machine as JSON (has_secrets says whether it can be frozen)")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling machine secret <ref> [-f store.json] [-hooks]  (reads stdin if no -f)")
+		return errUso("usage: kling machine secret <ref> [-f store.json] [-hooks]  (reads stdin if no -f)")
 	}
 
 	var raw []byte
@@ -1449,7 +1504,12 @@ func cmdMMDS(args []string) error {
 			}
 			return fmt.Errorf("%s: post-restore hooks did not finish (%s)%s", mc.Name, res.Ready, detalle)
 		}
-		fmt.Printf("%s  post-restore hooks done in %d ms\n", mc.ID[:12], res.WaitedMS)
+		if !*asJSON {
+			fmt.Printf("%s  post-restore hooks done in %d ms\n", mc.ID[:12], res.WaitedMS)
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	if !mc.HasSecrets {
 		fmt.Printf("%s  MMDS store emptied (no secrets: it can be frozen)\n", mc.ID[:12])
@@ -1471,16 +1531,17 @@ func cmdMMDS(args []string) error {
 // proxy sale por HTTPS). Como en cmdMMDS, la clave NO viaja por la línea de
 // comandos: se lee de -f o de stdin.
 func cmdCredential(args []string) error {
-	fs := flag.NewFlagSet("credential", flag.ExitOnError)
+	fs := flag.NewFlagSet("credential", flag.ContinueOnError)
 	host := hostFlag(fs)
 	cf := credentialFlags(fs)
 	rm := fs.Bool("rm", false, "withdraw the credential in -env from the machine (its placeholder stops working; open postgres sessions that used it are cut)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "print the machine as JSON")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *rm {
 		if fs.NArg() < 1 || *cf.env == "" {
-			return fmt.Errorf("usage: kling machine credential -rm <ref> -env NAME")
+			return errUso("usage: kling machine credential -rm <ref> -env NAME")
 		}
 		ctx, stop := ctxWithSignals()
 		defer stop()
@@ -1488,11 +1549,14 @@ func cmdCredential(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(mc)
+		}
 		fmt.Printf("%s  %s withdrawn from the credential proxy\n", mc.ID[:12], *cf.env)
 		return nil
 	}
 	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
-		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-header X-Name]... [-query] [-body] [-f keyfile]  (reads stdin if no -f)\n" +
+		return errUso("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-header X-Name]... [-query] [-body] [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling machine credential <ref> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
 			"       kling machine credential -rm <ref> -env NAME")
@@ -1509,6 +1573,9 @@ func cmdCredential(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	if spec.Type == credproxy.KindPostgres || spec.Type == credproxy.KindMySQL {
 		fmt.Printf("%s  %s now holds a placeholder; the password only goes to %s through the proxy\n",
@@ -1529,10 +1596,13 @@ func cmdCredential(args []string) error {
 // ── observación ───────────────────────────────────────────────────────────────
 
 func cmdEvents(args []string) error {
-	fs := flag.NewFlagSet("events", flag.ExitOnError)
+	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "one JSON line per event")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 
@@ -1557,9 +1627,12 @@ func cmdEvents(args []string) error {
 // uno y por dónde se alcanzan. Agrupa por snapshot porque es la relación que
 // determina el coste: las instancias de un mismo snapshot comparten memoria.
 func cmdTopo(args []string) error {
-	fs := flag.NewFlagSet("topo", flag.ExitOnError)
+	fs := flag.NewFlagSet("topo", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 
@@ -1783,9 +1856,9 @@ func cloneSummary(c *api.CloneInfo) string {
 	}
 	parts := []string{head}
 	for _, d := range c.Dirs {
-		mark := "✓"
+		mark := uiMarks().ok
 		if !d.Reflink {
-			mark = "✗"
+			mark = uiMarks().fail
 			if d.Error != "" {
 				mark += " " + d.Error
 			}
@@ -1798,20 +1871,24 @@ func cloneSummary(c *api.CloneInfo) string {
 // cmdResize es `kling machine resize <ref> -mem N`: sube o baja la memoria de
 // una máquina sin reiniciarla, dentro del techo con el que arrancó.
 func cmdResize(args []string) error {
-	fs := flag.NewFlagSet("machine resize", flag.ExitOnError)
+	fs := flag.NewFlagSet("machine resize", flag.ContinueOnError)
 	host := hostFlag(fs)
 	mem := units.MiBVar(fs, "mem", 0, "new memory: 512M, 2G (bare number = MiB)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "print the machine as JSON")
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *mem <= 0 {
-		return fmt.Errorf("usage: kling machine resize <machine> -mem 512M")
+		return errUso("usage: kling machine resize <machine> -mem 512M")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	mc, err := api.NewClient(hostOf(*host)).Resize(ctx, fs.Arg(0), *mem)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	fmt.Printf("%s  %d MiB (ceiling %d)\n", mc.Name, mc.MemMiB, mc.MemMaxMiB)
 	return nil

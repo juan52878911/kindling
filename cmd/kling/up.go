@@ -51,12 +51,12 @@ const buildAsDefault = "kindling-build"
 // ── kling up ──────────────────────────────────────────────────────────────────
 
 func cmdUp(args []string) error {
-	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	host := hostFlag(fs)
 	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
 	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *install && (runtime.GOOS != "darwin" || *checkOnly) {
@@ -81,6 +81,33 @@ func cmdUp(args []string) error {
 	default:
 		return explainNoRuntime()
 	}
+}
+
+// runtimeChecks son las comprobaciones de `kling up -check` para el daemon de
+// hostFlag, sin imprimir nada: las que `kling doctor -json` da en checks[].
+// Sigue el mismo orden de decisión que cmdUp.
+func runtimeChecks(hostFlag string) []check {
+	endpoint := loadConfig().Host(hostFlag)
+	root := os.Getenv("KLING_ROOT")
+	switch {
+	case strings.HasPrefix(endpoint, "ssh://"):
+		target := sshTarget(endpoint)
+		p, err := remoteProbe(target, config.Or(root, "/var/lib/kindling"))
+		if err != nil {
+			return []check{{label: "ssh " + target, fatal: true,
+				found: fmt.Sprintf("couldn't check it: %v", err),
+				why:   "the runtime of the active context is checked over ssh",
+				fix:   []string{"ssh " + target + " uname -a"}}}
+		}
+		return checksOf(p)
+	case runtime.GOOS == "darwin":
+		return checksMac(localProbeMac(config.Or(root, transport.DefaultRoot())))
+	case hasKVM():
+		return checksOf(localProbe(config.Or(root, transport.DefaultRoot())))
+	}
+	return []check{{label: "/dev/kvm", fatal: true, found: "missing",
+		why: "Firecracker only runs on KVM: without it there are no microVMs on this machine",
+		fix: []string{"kling up   (explains why, and how to use a Linux host instead)"}}}
 }
 
 // upHere prepara y arranca el runtime en ESTA máquina.
@@ -581,9 +608,9 @@ func printChecks(cs []check, host string) (fatal, warn int) {
 		fmt.Printf("  (checked on %s)\n", host)
 	}
 	for _, c := range cs {
-		mark := "✓"
+		mark := uiMarks().ok
 		if !c.ok {
-			mark = "✗"
+			mark = uiMarks().fail
 			if c.fatal {
 				fatal++
 			} else {
@@ -776,13 +803,16 @@ func lineasVMMSinDaemon(goos, endpoint string) []string {
 // No devuelve error cuando algo está caído: la respuesta ES el informe. Un
 // diagnóstico que aborta en la primera línea rota es justo el que no sirve.
 func cmdStatus(args []string) error {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output (the daemon, plus what each extension reports)")
 	verbose := fs.Bool("v", false, "daemon details: root, backend, capabilities, share roots (what `kling status -v` printed)")
 	// Los flags que no son del núcleo (p. ej. -gateway, de la extensión MCP)
 	// se ignoran aquí y llegan intactos a los ganchos.
-	if err := fs.Parse(knownFlags(fs, reorderFor(fs, args))); err != nil {
+	if err := parseFlags(fs, knownFlags(fs, reorderFor(fs, args))); err != nil {
+		return err
+	}
+	if err := sinPosicionales(fs, args); err != nil {
 		return err
 	}
 
@@ -798,7 +828,7 @@ func cmdStatus(args []string) error {
 
 	info, daemonErr := c.Info(ctx)
 	if err := daemonErr; err != nil {
-		fmt.Printf("daemon:       ✗ not responding (%v)\n", err)
+		fmt.Printf("daemon:       "+uiMarks().fail+" not responding (%v)\n", err)
 		fmt.Printf("              diagnose and start it with:  kling up\n")
 		// Sin daemon no se sabe de KVM ni de firecracker: lo reporta él. Se
 		// dice explícitamente en vez de omitir las líneas, para que no parezca
@@ -807,7 +837,7 @@ func cmdStatus(args []string) error {
 			fmt.Println(l)
 		}
 	} else {
-		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
+		fmt.Printf("daemon:       "+uiMarks().ok+" %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
 		if *verbose {
 			writeInfo(c, info)
 		}
@@ -815,9 +845,9 @@ func cmdStatus(args []string) error {
 			// macOS: sin KVM ni firecracker; el VMM es kling-vz (o kling-hv).
 			vz := strings.TrimSpace(info.Firecrack)
 			if vz == "" {
-				vz = "✗ not found or not running — see `kling up`"
+				vz = uiMarks().fail + " not found or not running — see `kling up`"
 			} else {
-				vz = "✓ " + vz
+				vz = uiMarks().ok + " " + vz
 			}
 			if info.Backend == "hv" {
 				fmt.Printf("backend:      hv (Hypervisor.framework)\n")
@@ -830,9 +860,9 @@ func cmdStatus(args []string) error {
 			fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
 			fc := strings.TrimSpace(info.Firecrack)
 			if fc == "" {
-				fc = "✗ not found — install it with scripts/20-install-firecracker.sh"
+				fc = uiMarks().fail + " not found — install it with scripts/20-install-firecracker.sh"
 			} else {
-				fc = "✓ " + fc
+				fc = uiMarks().ok + " " + fc
 			}
 			fmt.Printf("firecracker:  %s\n", fc)
 		}
@@ -990,9 +1020,9 @@ func presence(ok bool, yes, no string) string {
 
 func markYes(ok bool, yes, no string) string {
 	if ok {
-		return "✓ " + yes
+		return uiMarks().ok + " " + yes
 	}
-	return "✗ " + no
+	return uiMarks().fail + " " + no
 }
 
 // extensionUnits son las unidades de systemd que declaran las extensiones.

@@ -33,14 +33,14 @@ func cmdContext(args []string) error {
 	case "rm", "remove":
 		return contextRemove(rest)
 	default:
-		return fmt.Errorf("usage: kling context [ls|use <name>|add <name> <host>|rm <name>]")
+		return errUso("usage: kling context [ls|use <name>|add <name> <host>|rm <name>]")
 	}
 }
 
 func contextList(args []string) error {
-	fs := flag.NewFlagSet("context ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("context ls", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, err := config.Load()
@@ -71,12 +71,12 @@ func contextList(args []string) error {
 		return err
 	}
 	if v := os.Getenv("KLING_HOST"); v != "" {
-		fmt.Printf("\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
+		fmt.Fprintf(os.Stderr, "\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
 	} else if v := os.Getenv("KLING_SOCKET"); v != "" {
 		if ctx, ok := cfg.Contexts[cfg.CurrentContext]; ok && ctx.Host != "" {
-			fmt.Printf("\nNOTE: $KLING_SOCKET=%s is ignored: the active context picks the daemon.\n", v)
+			fmt.Fprintf(os.Stderr, "\nNOTE: $KLING_SOCKET=%s is ignored: the active context picks the daemon.\n", v)
 		} else {
-			fmt.Printf("\nNOTE: no active context with a host: talking to $KLING_SOCKET=%s.\n", v)
+			fmt.Fprintf(os.Stderr, "\nNOTE: no active context with a host: talking to $KLING_SOCKET=%s.\n", v)
 		}
 	}
 	return nil
@@ -105,7 +105,7 @@ func writeContextsJSON(w io.Writer, cfg *config.Config) error {
 
 func contextUse(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: kling context use <name>")
+		return errUso("usage: kling context use <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -132,18 +132,18 @@ func contextUse(args []string) error {
 }
 
 func contextAdd(args []string) error {
-	fs := flag.NewFlagSet("context add", flag.ExitOnError)
+	fs := flag.NewFlagSet("context add", flag.ContinueOnError)
 	desc := fs.String("description", "", "description")
 	use := fs.Bool("use", true, "activate it after adding")
 
 	// El paquete flag deja de parsear en el primer argumento posicional, así que
 	// `context add lab ssh://... -description X` perdería el flag en silencio.
 	// Se separan a mano para que el orden no importe.
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling context add <name> <host>\n" +
+		return errUso("usage: kling context add <name> <host>\n" +
 			"  host: ssh://user@machine  or  /run/kling.sock")
 	}
 	name, host := fs.Arg(0), fs.Arg(1)
@@ -174,7 +174,7 @@ func contextAdd(args []string) error {
 
 func contextRemove(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: kling context rm <name>")
+		return errUso("usage: kling context rm <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -269,7 +269,7 @@ func cmdConfig(args []string) error {
 	case "set":
 		return configSet(os.Stdout, os.Stdin, args[1:])
 	default:
-		return fmt.Errorf("usage: kling config [show|path|get <key> [-reveal]|set <key> <value|->]")
+		return errUso("usage: kling config [show|path|get <key> [-reveal]|set <key> <value|->]")
 	}
 }
 
@@ -281,7 +281,7 @@ func cmdConfig(args []string) error {
 func configGet(w io.Writer, key string, args []string) error {
 	fs := flag.NewFlagSet("config get", flag.ContinueOnError)
 	reveal := fs.Bool("reveal", false, "print secrets in full (for a pipe, not a screen)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, err := config.Load()
@@ -310,7 +310,7 @@ func configGet(w io.Writer, key string, args []string) error {
 // argumento queda en `ps` y en el historial del shell.
 func configSet(w io.Writer, stdin io.Reader, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: kling config set <key> <value|->\n" +
+		return errUso("usage: kling config set <key> <value|->\n" +
 			"  e.g.: kling config set defaults.image min\n" +
 			"        kling config set gateway.token - < token-file   (a secret: from stdin, not argv)")
 	}
@@ -388,9 +388,9 @@ func valueOf(cfg *config.Config, key string) string {
 }
 
 func configShow(args []string) error {
-	fs := flag.NewFlagSet("config show", flag.ExitOnError)
+	fs := flag.NewFlagSet("config show", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "JSON output (secrets masked, as in the table)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, err := config.Load()

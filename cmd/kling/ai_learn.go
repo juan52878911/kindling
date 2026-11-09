@@ -30,17 +30,17 @@ func defaultBy() string {
 }
 
 func aiReview(args []string) error {
-	fs := flag.NewFlagSet("ai review", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai review", flag.ContinueOnError)
 	n := fs.Int("n", 20, "cases to show (at most 500)")
 	interactive := fs.Bool("i", false, "go through the cases one by one and record the answers")
 	by := fs.String("by", defaultBy(), "who is reviewing (stored with each label)")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai review <task> [-n 20] [-i] [-json]")
+		return errUso("usage: kling ai review <task> [-n 20] [-i] [-json]")
 	}
 	task := fs.Arg(0)
 	c, err := mk()
@@ -156,7 +156,7 @@ func printTeachers(ts []aigw.TeacherTrust) {
 }
 
 func aiFeedback(args []string) error {
-	fs := flag.NewFlagSet("ai feedback", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai feedback", flag.ContinueOnError)
 	id := fs.String("id", "", "the id of a gateway answer")
 	label := fs.String("label", "", "the right label")
 	discard := fs.Bool("discard", false, "the case should never train (ambiguous, garbage)")
@@ -167,11 +167,11 @@ func aiFeedback(args []string) error {
 	by := fs.String("by", defaultBy(), "who labels (stored with the label)")
 	imp := fs.String("import", "", `JSONL of labels to import: {"text", "fields"?, "label", "by"?} or {"id", "label"} per line`)
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai feedback <task> -id ID -label L | -id ID -discard | -text T -label L | -import labels.jsonl")
+		return errUso("usage: kling ai feedback <task> -id ID -label L | -id ID -discard | -text T -label L | -import labels.jsonl")
 	}
 	task := fs.Arg(0)
 	c, err := mk()
@@ -255,7 +255,7 @@ func importFeedback(c *aiClient, task, path, by string) error {
 }
 
 func aiRetrain(args []string) error {
-	fs := flag.NewFlagSet("ai retrain", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai retrain", flag.ContinueOnError)
 	dry := fs.Bool("dry-run", false, "train and measure, but never promote")
 	var trust stringsFlag
 	fs.Var(&trust, "trust-teacher", "use this teacher's labels without validation (repeatable; recorded in the report)")
@@ -270,11 +270,11 @@ func aiRetrain(args []string) error {
 	flagRetirado(fs, "vcpus", "cpus")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai retrain <task> [-dry-run] [-trust-teacher NAME] [-rule mcnemar|no-regression] [-eval data.jsonl] [-mem 64M] [-cpus N]")
+		return errUso("usage: kling ai retrain <task> [-dry-run] [-trust-teacher NAME] [-rule mcnemar|no-regression] [-eval data.jsonl] [-mem 64M] [-cpus N]")
 	}
 	task := fs.Arg(0)
 	c, err := mk()
@@ -375,14 +375,14 @@ func printRetrain(rep *aigw.RetrainReport) {
 }
 
 func aiRollback(args []string) error {
-	fs := flag.NewFlagSet("ai rollback", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai rollback", flag.ContinueOnError)
 	to := fs.String("to", "", "version to serve (default: the previous one)")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai rollback <task> [-to vN]")
+		return errUso("usage: kling ai rollback <task> [-to vN]")
 	}
 	c, err := mk()
 	if err != nil {

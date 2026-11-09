@@ -106,6 +106,7 @@ sections:
 · [Memory: real vs cache](#memory-what-is-real-and-what-is-cache)
 
 **Reference**
+· [CLI conventions: output, JSON, flags](#cli-conventions-output-json-flags)
 · [Exit codes](#exit-codes)
 · [Requirements](#requirements)
 · [Scripts](#scripts)
@@ -1612,6 +1613,66 @@ instances share pages.
 
 # Reference
 
+## CLI conventions: output, JSON, flags
+
+`kling` is written to be driven by people and by programs (scripts, CI, AI agents) with
+the same commands. These rules hold for every core command and are checked by
+`TestConvencionCLI` (`cmd/kling/convencion_test.go`); the `-json` shapes are fixed in
+[`cmd/kling/testdata/contrato/json.txt`](../cmd/kling/testdata/contrato/json.txt).
+
+**stdout is data, stderr is everything else.** A table, an id or a JSON document goes to
+stdout; progress (`checking the guest is serving...`), notes, warnings (`! m1: on hold`,
+`NOTE: $KLING_HOST ...`), the `next:` line and errors go to stderr. `kling ps -q | xargs
+kling rm` and `kling ps -json | jq` see only rows.
+
+**`-json`.** Every listing (`ps`, `image ls`, `template ls`, `volume ls`, `graph ls`,
+`sandbox ls`, `context ls`, `plugin ls`, `status`, `version`, `top`, `events`, `doctor`)
+and every command that changes something (`run`, `save`, `freeze`, `thaw`, `pause`,
+`stop`, `rm`, `start`, `cp`, `machine squeeze|resize|secret|credential`) takes `-json`, a
+plain boolean flag. A command that acts on several refs prints one JSON line per ref
+(JSON Lines). What each one prints:
+
+| Command | JSON |
+|---|---|
+| `run`, `freeze`, `thaw`, `pause`, `stop`, `start`, `machine resize\|secret\|credential` | the machine, as `kling inspect` shows it |
+| `rm` | `{"id", "name", "state": "removed"}` |
+| `save` | the template (`kling template ls -json` element) |
+| `machine squeeze` | `{"id", "reclaimed_mib", "guest_free_mib", "rss_mib"}` |
+| `cp` | `{"machine", "path", "size"}` plus `mode` going in, `dest` coming out (`-json` needs a file, not `-`) |
+| `doctor` | `{"ok", "checks": [{"name", "state", "detail", "fix"}]}`, one entry per check, `kling up -check`'s included |
+
+**Keys.** An object that is a thing has `id` (the full id; tables show 12 characters)
+and/or `name`; its condition is `state` (`running`, `frozen`, `ok`, `warn`, `fail`,
+`removed`...), never `status` (`plugin ls` still prints `status` next to `state` for 1.x
+scripts). Sizes carry their unit in the key (`mem_mib`, `size`, `disk_free_bytes`) and
+times are RFC 3339.
+
+**Errors.** Without `-json`, an error is `error: <what>` and, when there is a clear next
+step, a second line `try: <command>`. With `-json`, it is one line on stderr:
+
+```json
+{"error":"cannot talk to the daemon at /run/kling.sock: ...","code":"error","try":"kling doctor"}
+```
+
+`error` is for people and may be reworded; `code` is stable: the daemon's error code when
+it sent one (`not_found`, `name_taken`, `disk_full`, `insufficient_memory`, the list in
+`pkg/api/errorcodes.go`), or one of the CLI's own: `usage`, `daemon_too_old`,
+`stale_golden`, `agent_capability`, `interrupted`, `error`. `try` is left out when there
+is no hint. The exit code is the same with or without `-json`.
+
+**Flags.** Flags go before or after the arguments (`kling rm m1 -f`), except after `--`
+or the command of `exec`, `shell` and `compose exec`. A flag that does not exist, a bad
+value or a missing argument is a usage error: exit code `2`, `error:` and `try: kling
+help <command>`, never the flag package's raw list. `-h` prints the command's help.
+Common meanings: `-json` JSON output, `-q` only ids, `-a` include stopped ones, `-f`
+don't ask (or follow, in `logs` and `audit`), `-H` the daemon endpoint (socket or
+`ssh://user@host`; else `$KLING_HOST`, the active context, the local socket), `-e K=V`
+environment, `-w DIR` working directory, `-force` skip a safety check.
+
+**Marks and colour.** `✓`, `!` and `✗` become `ok`, `!!` and `xx` with `NO_COLOR` set,
+and `kling top -watch` only clears the screen with escape sequences on a terminal
+without `NO_COLOR`.
+
 ## Exit codes
 
 `kling`'s exit codes are part of the 1.x contract
@@ -1622,7 +1683,7 @@ parsing the message.
 |---|---|
 | `0` | Success |
 | `1` | Any other error |
-| `2` | Usage: unknown command, bad flag or arguments (also a command name removed in 1.0) |
+| `2` | Usage: unknown command or subcommand, bad flag, missing or extra arguments (also a command name removed in 1.0) |
 | `3` | The daemon speaks an older API than this `kling`: upgrade the daemon |
 | `4` | Stale golden snapshot: the template was made by another VMM or version; refreeze it |
 | `5` | The guest agent in the image lacks a capability the command asked for |

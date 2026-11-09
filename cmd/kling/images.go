@@ -16,7 +16,7 @@ import (
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|import|cat|put|copy|snapshots> [...]")
+		return errUso("usage: kling image <ls|rm|toolchain|recipe|build|import|cat|put|copy|snapshots> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -45,7 +45,7 @@ func cmdImages(args []string) error {
 	case "snapshots":
 		return imagesSnapshots(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, import, cat, put, copy or snapshots", args[0])
+		return errUsoDe("image", fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, import, cat, put, copy or snapshots", args[0]))
 	}
 }
 
@@ -53,11 +53,11 @@ func cmdImages(args []string) error {
 // snapshots dorados que salen de cada una: una imagen con 0 es candidata a
 // retirar; con >0, quitarla dejaría esos servicios sin base.
 func imagesList(args []string) error {
-	fs := flag.NewFlagSet("image ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("image ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only names (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -153,10 +153,10 @@ func imagesSnapshots(args []string) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
 	}
-	fs := flag.NewFlagSet("image snapshots "+sub, flag.ExitOnError)
+	fs := flag.NewFlagSet("image snapshots "+sub, flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -174,7 +174,7 @@ func imagesSnapshots(args []string) error {
 		return nil
 	}
 	if sub != "ls" && sub != "list" {
-		return fmt.Errorf("unknown subcommand %q: use kling image snapshots [ls|prune]", sub)
+		return errUsoDe("image snapshots", fmt.Errorf("unknown subcommand %q: use kling image snapshots [ls|prune]", sub))
 	}
 	{
 		l, err := c.ImageSnapshots(ctx)
@@ -227,10 +227,10 @@ const ToolchainImage = "toolchain"
 // `volume populate` instala paquetes dentro de una microVM en vez de en el
 // anfitrión. La construye el constructor "base" del núcleo.
 func imagesToolchain(args []string) error {
-	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
+	fs := flag.NewFlagSet("images toolchain", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("as", ToolchainImage, "image name")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -251,10 +251,10 @@ func imagesToolchain(args []string) error {
 		Spec:    spec,
 	})
 	if err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		return err
 	}
-	fmt.Printf("✓ %s\n\n", res.Path)
+	fmt.Printf(uiMarks().ok+" %s\n\n", res.Path)
 	fmt.Println("You can now populate volumes without installing anything on the host:")
 	fmt.Printf("  kling volume populate <vol> -- npm install --prefix /data --ignore-scripts lodash\n")
 	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
@@ -318,13 +318,13 @@ const pistaRehacer = "rebuild it: kling image import -replace <ref> (or compose 
 // sobrevivía del comando era el /entrypoint de dentro —y leerlo exige montarla—
 // mientras que los paquetes instalados no quedaban registrados en ninguna parte.
 func imagesRecipe(args []string) error {
-	fs := flag.NewFlagSet("images recipe", flag.ExitOnError)
+	fs := flag.NewFlagSet("images recipe", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling image recipe <image>")
+		return errUso("usage: kling image recipe <image>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -403,14 +403,14 @@ func maskSpecEnv(spec json.RawMessage) json.RawMessage {
 // imagen de la que cuelga un dorado, no da un error al borrar: da un invitado
 // que no arranca, mucho despues.
 func imagesRm(args []string) error {
-	fs := flag.NewFlagSet("image rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("image rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling image rm <image> [<image>...]")
+		return errUso("usage: kling image rm <image> [<image>...]")
 	}
 	if !*force && !confirmMany("image", fs.Args()) {
 		return errAborted
@@ -422,11 +422,11 @@ func imagesRm(args []string) error {
 	var fallos int
 	for _, n := range fs.Args() {
 		if err := c.RemoveImage(ctx, n); err != nil {
-			fmt.Printf("  ✗  %-24s %v\n", n, err)
+			fmt.Printf("  "+uiMarks().fail+"  %-24s %v\n", n, err)
 			fallos++
 			continue
 		}
-		fmt.Printf("  ✓  %-24s removed\n", n)
+		fmt.Printf("  "+uiMarks().ok+"  %-24s removed\n", n)
 	}
 	if fallos > 0 {
 		return fmt.Errorf("%d image(s) could not be removed", fallos)
@@ -438,14 +438,14 @@ func imagesRm(args []string) error {
 // imágenes en un Mac, donde no se pueden construir. El CLI hace de tubería
 // entre los dos daemons (GET de uno, PUT al otro) y no guarda nada en disco.
 func imagesCopy(args []string) error {
-	fs := flag.NewFlagSet("images copy", flag.ExitOnError)
+	fs := flag.NewFlagSet("images copy", flag.ContinueOnError)
 	from := fs.String("from", "", "daemon to copy from (ssh://user@host or a socket)")
 	to := fs.String("to", "", "daemon to copy to (default: the usual one: -H, $KLING_HOST, context or local socket)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *from == "" {
-		return fmt.Errorf("usage: kling image copy <name> -from <host> [-to <host>]\n" +
+		return errUso("usage: kling image copy <name> -from <host> [-to <host>]\n" +
 			"  e.g. kling image copy min -from ssh://user@linux-arm64-host")
 	}
 	name := fs.Arg(0)

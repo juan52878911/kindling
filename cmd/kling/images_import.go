@@ -37,7 +37,7 @@ import (
 // Se mantiene por compatibilidad, con un aviso: lo que es de cada máquina
 // va en `kling run -e`, que no lo hornea (pkg/api/machine_env.go).
 func imagesImport(args []string) error {
-	fs := flag.NewFlagSet("image import", flag.ExitOnError)
+	fs := flag.NewFlagSet("image import", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "image name (default: from the reference, e.g. postgres-17-alpine)")
 	arch := fs.String("arch", "", "amd64 or arm64 (default: the daemon's); amd64 on an arm64 daemon runs emulated (see -emulate)")
@@ -69,7 +69,7 @@ func imagesImport(args []string) error {
 	warmEgress := fs.String("egress", "", "with -warm: egress of the preparation machine: none | internet (default: the daemon's)")
 	warmWait := fs.Duration("wait", machine.DefaultReadyWait, "with -warm: how long to wait for the service to be ready, at boot and at save")
 	stepTimeout := fs.Duration("step-timeout", 10*time.Minute, "with -warm: kill a -step after this long")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if !*warm {
@@ -91,7 +91,7 @@ func imagesImport(args []string) error {
 		return fmt.Errorf("-image only goes with -archive")
 	}
 	if len(rest) == 0 || rest[0] == "--" {
-		return fmt.Errorf("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]\n" +
+		return errUso("usage: kling image import <ref> [-name N] [-replace] [-e K=V] [-env-file F] [-json] [-- cmd args...]\n" +
 			"       kling image import -archive <file.tar|dir> [-image repo:tag] [...]")
 	}
 	var ref oci.ImageRef

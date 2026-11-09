@@ -1494,13 +1494,13 @@ func slicesHas(l []int, x int) bool {
 
 // graphFromCompose es `kling graph from-compose`.
 func graphFromCompose(args []string) error {
-	fs := flag.NewFlagSet("graph from-compose", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph from-compose", flag.ContinueOnError)
 	out := fs.String("o", "", "write the graph here (default: stdout)")
 	name := fs.String("name", "", "graph name (default: name: of the file, or the directory's)")
 	pre := fs.String("script", "", "also write the commands to run before graph up (volume create, image import) as a shell script")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling graph from-compose <compose.yaml> [-o graph.yaml] [-name N] [-script setup.sh]")
+		return errUso("usage: kling graph from-compose <compose.yaml> [-o graph.yaml] [-name N] [-script setup.sh]")
 	}
 	path := fs.Arg(0)
 	datos, err := os.ReadFile(path)

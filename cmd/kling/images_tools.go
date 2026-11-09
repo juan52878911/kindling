@@ -17,10 +17,10 @@ const BuildToolsImage = "kling-build-tools"
 // /usr/local/lib/kindling/kling en el daemon (from_host): tiene que ser el del
 // propio daemon, o el constructor de dentro y el de fuera no harían lo mismo.
 func imagesBuildTools(args []string) error {
-	fs := flag.NewFlagSet("image build-tools", flag.ExitOnError)
+	fs := flag.NewFlagSet("image build-tools", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("as", BuildToolsImage, "image name")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -30,7 +30,7 @@ func imagesBuildTools(args []string) error {
 	fmt.Printf("Building %q: the min base plus the oci builder (kling) inside... ", *name)
 	spec, _ := json.Marshal(BaseSpec{})
 	if _, err := cli.BuildImage(ctx, api.BuildImageRequest{Name: *name, Base: "min", GrowMB: 256, Builder: "base", Spec: spec}); err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		return err
 	}
 	res, err := cli.PutImageFile(ctx, *name, api.PutImageFileRequest{Path: "/usr/local/bin/kling", Mode: "0755",
@@ -39,10 +39,10 @@ func imagesBuildTools(args []string) error {
 		err = fmt.Errorf("%s", res.Error)
 	}
 	if err != nil {
-		fmt.Println("✗")
+		fmt.Println(uiMarks().fail)
 		return fmt.Errorf("%w\n(the daemon needs its own binary in its lib dir: sudo install -m755 /usr/local/bin/kling /usr/local/lib/kindling/kling)", err)
 	}
-	fmt.Println("✓")
+	fmt.Println(uiMarks().ok)
 	fmt.Printf("Now: kling image import -isolate <ref>\n")
 	return nil
 }
