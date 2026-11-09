@@ -262,6 +262,35 @@ func TestServe(t *testing.T) {
 	}
 }
 
+// `kling help <ext> <cmd>` lanza `kling-ext cmd -h` con FlagHelpEnv para sacar
+// los flags. Ese proceso no puede ejecutar el comando: imprime los flags que
+// la extensión registró con HelpFlags, o nada.
+func TestFlagHelpNoEjecuta(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "ran")
+	t.Setenv("HELLO_MARK", mark)
+	flags := FlagHelp(filepath.Join(dir, "kling-hello"), "hello")
+	if _, err := os.Stat(mark); err == nil {
+		t.Fatal("kling help hello hello ran the command")
+	}
+	if !strings.Contains(flags, "-loud") {
+		t.Fatalf("the flags registered with HelpFlags are missing: %q", flags)
+	}
+	if got := FlagHelp(filepath.Join(dir, "kling-hello"), "fail"); got != "" {
+		t.Fatalf("a command without HelpFlags printed %q", got)
+	}
+
+	t.Setenv(FlagHelpEnv, "1")
+	ran := false
+	m := Manifest{Name: "x", Version: "1", Commands: []Command{{Name: "a"}}}
+	cmds := map[string]func([]string) error{"a": func([]string) error { ran = true; return nil }}
+	var out, errb bytes.Buffer
+	for _, args := range [][]string{{"a", "-h"}, {"a", "sub", "-h"}, {"a"}} {
+		if code := serve(m, cmds, nil, args, &out, &errb); code != 0 || ran {
+			t.Fatalf("serve %q with %s: code %d, ran %v", args, FlagHelpEnv, code, ran)
+		}
+	}
+}
+
 // Una extensión compilada con Main declara el API del daemon que conoce, y con
 // un daemon más nuevo `kling plugins` la avisa en vez de dejar que falle.
 func TestMaxAPI(t *testing.T) {

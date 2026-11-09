@@ -2,9 +2,11 @@ package plugin
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -27,6 +29,18 @@ import (
 func Main(m Manifest, cmds map[string]func(args []string) error, hooks map[string]func(args []string, w io.Writer) error) {
 	os.Exit(serve(m, cmds, hooks, os.Args[1:], os.Stdout, os.Stderr))
 }
+
+// helpFlags son los FlagSet que la ayuda imprime sin ejecutar el comando.
+var helpFlags = map[string]func() *flag.FlagSet{}
+
+// HelpFlags registra, antes de Main, cómo construir los flags del comando cmd
+// ("add", o "db branch" para un subcomando) para que `kling help` los muestre.
+// La ayuda nunca ejecuta el comando para sacarlos: uno sin HelpFlags sale sin
+// FLAGS. Lo normal es que el comando use la misma función:
+//
+//	func addFlags() *flag.FlagSet { fs := flag.NewFlagSet("mcp add", flag.ExitOnError); fs.String("as", "", "..."); return fs }
+//	plugin.HelpFlags("add", addFlags)
+func HelpFlags(cmd string, fs func() *flag.FlagSet) { helpFlags[cmd] = fs }
 
 func serve(m Manifest, cmds map[string]func([]string) error, hooks map[string]func([]string, io.Writer) error,
 	args []string, stdout, stderr io.Writer) int {
@@ -80,9 +94,25 @@ func serve(m Manifest, cmds map[string]func([]string) error, hooks map[string]fu
 		fmt.Fprintf(stderr, "error: unknown command %q\ntry: %s help\n", prefix+" "+args[0], prefix)
 		return 2
 	}
-	// `kling-mcp add -h`: la ayuda uniforme, salvo que sea el proceso que
-	// imprime los flags para ella (ver FlagHelp).
-	if len(args) == 2 && IsHelpArg(args[1]) && os.Getenv(FlagHelpEnv) == "" && m.Command(args[0]) != nil {
+	// El proceso que FlagHelp lanza para la ayuda no ejecuta nada: un comando
+	// que no parsea flags tomaría el -h por un argumento más y haría su trabajo
+	// (`kling help db drop` borraría). Imprime los flags de HelpFlags, si los
+	// hay, como hace el núcleo con los que no están en noFlagHelp.
+	if os.Getenv(FlagHelpEnv) != "" {
+		path := args
+		if IsHelpArg(path[len(path)-1]) {
+			path = path[:len(path)-1]
+		}
+		if mk := helpFlags[strings.Join(path, " ")]; mk != nil {
+			if fs := mk(); fs != nil {
+				fs.SetOutput(stdout)
+				fs.PrintDefaults()
+			}
+		}
+		return 0
+	}
+	// `kling-mcp add -h`: la ayuda uniforme.
+	if len(args) == 2 && IsHelpArg(args[1]) && m.Command(args[0]) != nil {
 		return commandHelp(m, args[0], stdout, stderr)
 	}
 	if err := f(args[1:]); err != nil {

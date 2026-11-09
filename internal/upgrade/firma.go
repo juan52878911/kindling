@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
 // Firma de releases (docs/firmas.md). El SHA256SUMS de cada release va firmado
@@ -430,6 +432,51 @@ func (f *Fuente) comprobarFirma(ctx context.Context, etiqueta string, sumas []by
 		}
 	}
 	return nil
+}
+
+// VerificadorDeSumas es la regla de comprobarFirma para el SHA256SUMS de las
+// extensiones (`kling plugin install`, pkg/plugin no puede importar este
+// paquete): con firma, válida, de una clave de claves (nil = ClavesRelease())
+// y, si se sabe la release, para esa etiqueta; sin firma, error desde
+// FirmaObligatoriaDesde (la release o este kling) salvo Insecure (-insecure), y si no,
+// aviso.
+func VerificadorDeSumas(claves []ClavePublica) plugin.SumsVerifier {
+	return plugin.SumsVerifierFunc(func(c plugin.SumsCheck) error {
+		ks := claves
+		if ks == nil {
+			ks = ClavesRelease()
+		}
+		avisos := c.Warn
+		if avisos == nil {
+			avisos = os.Stderr
+		}
+		if c.Sig == nil || len(ks) == 0 {
+			motivo := c.Where + " has no " + NombreFirma
+			if c.Sig != nil {
+				motivo = "this kling has no release signing key built in to check " + c.Where + "'s " + NombreFirma
+			}
+			obligatoria := versionAlMenos(c.Tag, FirmaObligatoriaDesde) || versionAlMenos(c.CoreVersion, FirmaObligatoriaDesde)
+			if obligatoria && !c.Insecure {
+				return fmt.Errorf("%s: releases are signed from %s on, refusing it (pass -insecure to install it anyway; docs/firmas.md)", motivo, FirmaObligatoriaDesde)
+			}
+			cuando := fmt.Sprintf(" (releases must be signed from %s on, docs/firmas.md)", FirmaObligatoriaDesde)
+			if c.Insecure {
+				cuando = " (-insecure)"
+			}
+			fmt.Fprintf(avisos, "warning: %s; checked against SHA256SUMS only%s\n", motivo, cuando)
+			return nil
+		}
+		comentario, err := VerificarFirma(c.Sums, c.Sig, ks)
+		if err != nil {
+			return fmt.Errorf("%s: %s: %w", c.Where, NombreFirma, err)
+		}
+		if c.Tag != "" {
+			if t := CampoComentario(comentario, "tag"); t != c.Tag {
+				return fmt.Errorf("%s: %s is signed for release %q, not for %s: refusing it", c.Where, NombreFirma, t, c.Tag)
+			}
+		}
+		return nil
+	})
 }
 
 // firmaObligatoria: la release o este kling llegan a FirmaObligatoriaDesde.

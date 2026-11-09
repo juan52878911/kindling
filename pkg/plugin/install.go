@@ -110,6 +110,13 @@ type InstallOptions struct {
 	Client *http.Client
 	// ReleaseURL sustituye a la constante (tests). Vacío = ReleaseURL.
 	ReleaseURL string
+	// Insecure (-insecure) rebaja a aviso que el SHA256SUMS de fuera no traiga
+	// SHA256SUMS.minisig. Una firma que está se comprueba igual.
+	Insecure bool
+	// VerifySums comprueba esa firma. nil = DefaultSumsVerifier.
+	VerifySums SumsVerifier
+	// Warnings recibe los avisos. nil = os.Stderr.
+	Warnings io.Writer
 
 	// allowHTTP deja descargar por http:// en los tests del paquete. No se
 	// puede activar desde fuera a propósito: fuera de un test, http es un
@@ -136,6 +143,50 @@ func DevVersion(v string) bool {
 	return strings.ContainsAny(v, "-+ ")
 }
 
+// SigName es la firma minisign del SHA256SUMS, al lado de él.
+const SigName = "SHA256SUMS.minisig"
+
+// maxSigBytes acota SHA256SUMS.minisig: son cuatro líneas.
+const maxSigBytes = 4 << 10
+
+// SumsCheck es lo que se le pasa a un SumsVerifier.
+type SumsCheck struct {
+	Sums []byte
+	// Sig es SHA256SUMS.minisig; nil si no está.
+	Sig []byte
+	// Tag es la release ("v1.0.0"); vacío con -from y -file, que no la saben.
+	Tag         string
+	CoreVersion string
+	// Where nombra el origen en los mensajes.
+	Where string
+	// Insecure: -insecure.
+	Insecure bool
+	Warn     io.Writer
+}
+
+// SumsVerifier decide si un SHA256SUMS se acepta según su firma. Es el de
+// internal/upgrade (la misma regla que `kling upgrade`), que este paquete no
+// puede importar porque lo usan las extensiones: el núcleo lo pone en
+// DefaultSumsVerifier. Es una interfaz y no un func para que InstallOptions
+// siga siendo comparable (apidiff).
+type SumsVerifier interface {
+	Verify(SumsCheck) error
+}
+
+// SumsVerifierFunc hace de una función un SumsVerifier.
+type SumsVerifierFunc func(SumsCheck) error
+
+// Verify llama a f.
+func (f SumsVerifierFunc) Verify(c SumsCheck) error { return f(c) }
+
+// DefaultSumsVerifier es el SumsVerifier de Install cuando las opciones no
+// traen uno. nil = sin forma de comprobar firmas: lo de fuera se rechaza
+// salvo -insecure.
+var DefaultSumsVerifier SumsVerifier
+
+// errNotFound: el servidor contestó 404.
+var errNotFound = errors.New("not found")
+
 // source es de dónde sale cada fichero: una URL base (release o directorio
 // del asset de -from) o un directorio local (-file).
 type source struct {
@@ -143,6 +194,7 @@ type source struct {
 	client  *http.Client
 	baseURL string // termina en "/"
 	baseDir string
+	tag     string            // la release, si se instala de una
 	sums    map[string]string // nombre de asset -> sha256
 	sumsErr error
 	loaded  bool
@@ -231,6 +283,7 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 			rel = ReleaseURL
 		}
 		src.baseURL = strings.TrimSuffix(rel, "/") + "/" + tag + "/"
+		src.tag = tag
 		mainURL = src.baseURL + asset
 	}
 
@@ -363,6 +416,9 @@ func (s *source) fetch(ctx context.Context, asset, local, want string) ([]byte, 
 		listed, inSums = sums[filepath.Base(local)]
 	}
 	switch {
+	case local != "" && sumsErr != nil:
+		// El SHA256SUMS de al lado está pero no se lee o su firma no vale.
+		return nil, "", fmt.Errorf("%s: %v", asset, sumsErr)
 	case want != "" && got != want:
 		return nil, "", fmt.Errorf("%s: sha256 mismatch: got %s, want %s", asset, got, want)
 	case inSums && got != listed:
@@ -398,8 +454,59 @@ func (s *source) loadSums(ctx context.Context) (map[string]string, error) {
 		s.sumsErr = fmt.Errorf("SHA256SUMS: %v", err)
 		return s.sums, s.sumsErr
 	}
+	if err := s.checkSig(ctx, b); err != nil {
+		s.sumsErr = err
+		return s.sums, s.sumsErr
+	}
 	s.sums = ParseSums(b)
 	return s.sums, nil
+}
+
+// checkSig pasa SHA256SUMS por su firma con la regla de `kling upgrade`: el
+// SHA256SUMS de fuera viene del mismo sitio que los binarios, y sin firma no
+// prueba nada. Uno local (-file) sin firma vale: lo que hay en el directorio
+// ya está en la máquina de quien instala; con firma, se comprueba. Un fallo al
+// leer la firma que no sea un 404 es un error, no «sin firma»: un corte de
+// red no rebaja la comprobación.
+func (s *source) checkSig(ctx context.Context, sums []byte) error {
+	var sig []byte
+	var err error
+	where := s.tag
+	if s.baseDir != "" {
+		where = s.baseDir
+		sig, err = readFileLimited(filepath.Join(s.baseDir, SigName), maxSigBytes)
+		if os.IsNotExist(err) {
+			return nil
+		}
+	} else {
+		if where == "" {
+			where = s.baseURL
+		}
+		sig, err = s.get(ctx, s.baseURL+SigName, maxSigBytes)
+		if errors.Is(err, errNotFound) {
+			sig, err = nil, nil
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %v", SigName, err)
+	}
+	warn := s.o.Warnings
+	if warn == nil {
+		warn = os.Stderr
+	}
+	v := s.o.VerifySums
+	if v == nil {
+		v = DefaultSumsVerifier
+	}
+	if v == nil {
+		if s.o.Insecure && sig == nil {
+			fmt.Fprintf(warn, "warning: %s: %s not checked (-insecure)\n", where, SigName)
+			return nil
+		}
+		return fmt.Errorf("%s: this build of kling cannot check %s, refusing it", where, SigName)
+	}
+	return v.Verify(SumsCheck{Sums: sums, Sig: sig, Tag: s.tag, CoreVersion: s.o.CoreVersion,
+		Where: where, Insecure: s.o.Insecure, Warn: warn})
 }
 
 // ParseSums lee el formato de sha256sum: "<hex>  <nombre>" o "<hex> *<nombre>".
@@ -437,6 +544,9 @@ func (s *source) get(ctx context.Context, u string, limit int64) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("GET %s: %s: %w", pu.Redacted(), resp.Status, errNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", pu.Redacted(), resp.Status)
 	}

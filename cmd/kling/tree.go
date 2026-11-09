@@ -330,8 +330,10 @@ var coreTree = []section{
 		{Name: "plugin", Summary: "installed extensions", Subcommands: []string{"ls", "install", "rm", "enable", "disable"}, Usage: `  plugin [ls] [-json]                              installed extensions, their status
                                                    and source
   plugin install <name>[@vX.Y.Z]                   download from the kindling release
-          [-from URL] [-file PATH] [-sha256 H]     (sha256-checked); -dir: into this
-          [-dir DIR]                               directory, not the extensions one
+          [-from URL] [-file PATH] [-sha256 H]     (sha256 and signature checked); -dir:
+          [-dir DIR] [-insecure]                   into this directory, not the
+                                                   extensions one; -insecure: accept
+                                                   an unsigned SHA256SUMS
   plugin rm <name> [-dir DIR]                      remove one installed by it
   plugin enable|disable <name>                     turn an extension (also a built-in
                                                    one) on or off

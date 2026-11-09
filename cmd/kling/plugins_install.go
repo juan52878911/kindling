@@ -10,9 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
+
+// Las extensiones se bajan con la misma regla de firma que el núcleo
+// (`kling plugin install` y las que `kling upgrade` actualiza).
+func init() { plugin.DefaultSumsVerifier = upgrade.VerificadorDeSumas(nil) }
 
 // parseInterspersed parsea fs dejando que los flags vayan antes o después de
 // los argumentos: `kling plugin install mcp -from URL` es lo que teclea la
@@ -42,8 +47,9 @@ func pluginsInstall(args []string) error {
 	file := fs.String("file", "", "install a local binary instead of downloading one")
 	sum := fs.String("sha256", "", "expected sha256 of the binary")
 	dir := fs.String("dir", "", "install into this directory instead of the extensions directory")
+	insecure := fs.Bool("insecure", false, "install even if the SHA256SUMS has no SHA256SUMS.minisig (a signature that is there is still checked)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: kling plugin install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR]")
+		fmt.Fprintln(fs.Output(), "usage: kling plugin install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR] [-insecure]")
 		fs.PrintDefaults()
 	}
 	pos, err := parseInterspersed(fs, args)
@@ -81,6 +87,7 @@ func pluginsInstall(args []string) error {
 		SHA256:      *sum,
 		Dir:         *dir,
 		CoreVersion: strings.TrimPrefix(Version, "v"),
+		Insecure:    *insecure,
 	})
 	if err != nil {
 		return err
