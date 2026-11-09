@@ -31,6 +31,15 @@ func trazaPrueba() string {
 // sysregISS es khv_sysreg_iss: el hv_sys_reg_t de un MSR/MRS atrapado.
 func sysregISS(iss uint64) uint16 { return uint16(C.khv_sysreg_iss(C.uint64_t(iss))) }
 
+// seaDestino es khv_sea_destino: el EL, el desplazamiento en su tabla de
+// vectores, el PSTATE de entrada y el ESR del aborto externo que recibe el
+// invitado por un data abort sin ISV.
+func seaDestino(cpsr, hcr uint64, el2 bool, syn uint64) (el int, off, cpsrNuevo, esr uint64) {
+	var o, n, e C.uint64_t
+	r := C.khv_sea_destino(C.uint64_t(cpsr), C.uint64_t(hcr), C.bool(el2), C.uint64_t(syn), &o, &n, &e)
+	return int(r), uint64(o), uint64(n), uint64(e)
+}
+
 // finMotivo es khv_fin_motivo: KHV_FIN_NADA mientras la VM no haya terminado.
 func finMotivo() int { return int(C.khv_fin_motivo()) }
 

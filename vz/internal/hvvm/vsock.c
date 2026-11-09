@@ -23,6 +23,7 @@
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -104,6 +105,35 @@ static void despertar_hilo(void) {
   }
 }
 
+// El fd de una conexión no se cierra mientras vs_hilo lo espera en poll:
+// close de un fd que otro hilo tiene en poll puede quedarse esperando en el
+// kernel para siempre (visto en macOS 26.5: el hilo de la prueba de tx
+// colgado en close con mu tomado, y vs_hilo en poll sin plazo; con un RST del
+// invitado le pasaría al vCPU). Con en_poll > 0, liberar deja el fd en
+// diferidos y despierta al hilo, que lo cierra al salir de poll. Con mu.
+static int en_poll;  // hilos de vsock dentro de poll (uno; dos en las pruebas)
+static int diferidos[2 * VS_MAXCONN];
+static int n_diferidos;
+
+static void cerrar_fd(int fd) {
+  if (en_poll > 0) {
+    despertar_hilo();
+    if (n_diferidos < (int)(sizeof diferidos / sizeof diferidos[0])) {
+      diferidos[n_diferidos++] = fd;
+      return;
+    }
+    // Sin hueco (no debería pasar: el hilo vacía la lista en cada vuelta):
+    // cerrar ya, con el hilo ya avisado para que salga de poll.
+  }
+  close(fd);
+}
+
+// Con mu, y con en_poll a 0: ningún hilo los tiene en poll.
+static void cerrar_diferidos(void) {
+  for (int i = 0; i < n_diferidos; i++) close(diferidos[i]);
+  n_diferidos = 0;
+}
+
 static uint64_t ms_abs(uint64_t ms) { return ms * 1000000ULL * tb.denom / tb.numer; }
 
 static uint32_t credito(const struct vconn *c) {
@@ -112,7 +142,7 @@ static uint32_t credito(const struct vconn *c) {
 }
 
 static void liberar(struct vconn *c) {
-  if (c->fd >= 0) close(c->fd);
+  if (c->fd >= 0) cerrar_fd(c->fd);
   free(c->pend);
   int estado = c->estado;
   uint32_t gen = c->gen + 1;
@@ -598,19 +628,25 @@ static void *vs_hilo(void *a) {
     pf[0] = (struct pollfd){.fd = despertador[0], .events = POLLIN};
     pf[1] = (struct pollfd){.fd = kq, .events = POLLIN};  // sin kq (-1), poll lo salta
     int n = armar_poll(pf + 2, idx, &plazo) + 2;
+    en_poll++;
     pthread_mutex_unlock(&mu);
     __atomic_fetch_add(&vs_vueltas, 1, __ATOMIC_RELEASE);
     int r = khv_poll(KHV_POLL_VSOCK, pf, (nfds_t)n, plazo);
-    if (r < 0 && errno == EAGAIN) {
+    int e = errno;
+    pthread_mutex_lock(&mu);
+    if (--en_poll == 0) cerrar_diferidos();
+    if (r < 0 && e == EAGAIN) {
       // poll no pudo reservar memoria; otra llamada puede ir bien. Terminar
       // dejaba al invitado sin agente (y sin canal) para siempre.
+      pthread_mutex_unlock(&mu);
       usleep(1000);
       continue;
     }
-    if (r < 0 && errno != EINTR) {
+    if (r < 0 && e != EINTR) {
+      pthread_mutex_unlock(&mu);
       // Que no se pierda en silencio, como en net.c.
       uart_flush();
-      dprintf(2, "kling-hv: vsock: the device thread stops (poll: %s); the guest gets no more packets\n", strerror(errno));
+      dprintf(2, "kling-hv: vsock: the device thread stops (poll: %s); the guest gets no more packets\n", strerror(e));
       return NULL;
     }
     if (pf[0].revents & POLLIN) {
@@ -618,7 +654,6 @@ static void *vs_hilo(void *a) {
       while (read(despertador[0], b, sizeof b) > 0) {
       }
     }
-    pthread_mutex_lock(&mu);
     // Con la VM en pausa no se toca la RAM del invitado.
     while (g_pausa) pthread_cond_wait(&cv, &mu);
     tras_poll(pf + 2, idx, n - 2, listo);
@@ -645,14 +680,19 @@ void vsock_init(uint32_t id) {
     conns[i].fd = -1;
     conns[i].estado = C_LIBRE;
   }
+  if (kq < 0) kq = kqueue();  // un kqueue no pasa a los hijos: no hace falta FD_CLOEXEC
+  activo = true;
+  // Un hilo por proceso: las pruebas llaman a vsock_init más de una vez, y
+  // un segundo vs_hilo con su propio poll dejaba diferidos sin cerrar.
+  static bool hilo;
+  if (hilo) return;
+  hilo = true;
   if (pipe(despertador) == 0) {
     for (int i = 0; i < 2; i++) {
       fcntl(despertador[i], F_SETFL, O_NONBLOCK);
       fcntl(despertador[i], F_SETFD, FD_CLOEXEC);
     }
   }
-  if (kq < 0) kq = kqueue();  // un kqueue no pasa a los hijos: no hace falta FD_CLOEXEC
-  activo = true;
   pthread_t t;
   pthread_create(&t, NULL, vs_hilo, NULL);
   pthread_detach(t);
@@ -1146,6 +1186,76 @@ int khv_vsock_prueba_poll(void) {
     }
   }
   __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 0, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&mu);
+  g_pausa = pausa_antes;
+  pthread_mutex_unlock(&mu);
+  return r;
+}
+
+// khv_vsock_prueba_fd_en_poll: liberar una conexión cuyo fd espera vs_hilo
+// en poll (sin plazo) no lo cierra desde este hilo, que podría quedarse en
+// close para siempre (cerrar_fd): lo cierra el hilo al salir de poll, y Go ve
+// el fin. 0 si cuadra; 1 si el fd ya estaba cerrado al volver de liberar; 2
+// si Go no vio el fin en 2 s; 3 si el hilo no llegó a esperar el fd en poll;
+// otro negativo si no se pudo preparar. No puede convivir con una VM.
+int khv_vsock_prueba_fd_en_poll(void) {
+  if (!activo) vsock_init(53);
+  pthread_mutex_lock(&mu);
+  bool pausa_antes = g_pausa;
+  g_pausa = false;  // sin VM empieza en pausa
+  pthread_cond_broadcast(&cv);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 6, sv, &gen, &err);
+  if (!c) {
+    g_pausa = pausa_antes;
+    pthread_mutex_unlock(&mu);
+    return err ? err : -EBUSY;
+  }
+  c->estado = C_ABIERTA;
+  c->p_request = false;
+  c->peer_buf = VS_BUF;  // con crédito: el hilo espera POLLIN en su fd
+  unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
+  despertar_hilo();
+  pthread_mutex_unlock(&mu);
+  // Dos vueltas después del aviso ya armó poll con la conexión (la primera
+  // pudo armarse antes); en_poll dice que sigue dentro. Hasta entonces se le
+  // avisa en cada intento, o se quedaría en poll sin dar la segunda.
+  int r = 3;
+  for (int i = 0; i < 2000 && r == 3; i++) {
+    pthread_mutex_lock(&mu);
+    if (en_poll > 0 && __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE) - antes >= 2) r = 0;
+    else pthread_mutex_unlock(&mu);
+    if (r == 3) {
+      despertar_hilo();
+      usleep(1000);
+    }
+  }
+  if (r == 0) {  // con mu
+    struct stat st0, st1;
+    int fd = c->fd;
+    bool abierto = fstat(fd, &st0) == 0;
+    liberar(c);
+    if (!abierto || fstat(fd, &st1) != 0 || st1.st_ino != st0.st_ino) r = 1;
+    pthread_mutex_unlock(&mu);
+  } else {
+    pthread_mutex_lock(&mu);
+    if (c->gen == gen) liberar(c);
+    pthread_mutex_unlock(&mu);
+  }
+  if (r == 0) {
+    fcntl(sv[1], F_SETFL, O_NONBLOCK);
+    r = 2;
+    for (int i = 0; i < 200 && r == 2; i++) {
+      char b;
+      if (read(sv[1], &b, 1) == 0) r = 0;
+      else {
+        struct pollfd pf = {.fd = sv[1], .events = POLLIN};
+        poll(&pf, 1, 10);
+      }
+    }
+  }
+  close(sv[1]);
   pthread_mutex_lock(&mu);
   g_pausa = pausa_antes;
   pthread_mutex_unlock(&mu);

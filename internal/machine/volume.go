@@ -253,6 +253,9 @@ func (m *Manager) reservarVolumenes(req api.RunRequest, id, nombre string) ([]re
 	if err != nil {
 		return nil, err
 	}
+	if err := m.adjudicarVolumenesLocked(vols); err != nil {
+		return nil, err
+	}
 	if m.volReservas == nil {
 		m.volReservas = map[string][]reservaVolumen{}
 	}
@@ -274,6 +277,7 @@ func (m *Manager) soltarReservas(id string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var soltados []string
 	for nombre, rs := range m.volReservas {
 		quedan := rs[:0]
 		for _, r := range rs {
@@ -281,12 +285,65 @@ func (m *Manager) soltarReservas(id string) {
 				quedan = append(quedan, r)
 			}
 		}
+		if len(quedan) < len(rs) {
+			soltados = append(soltados, nombre)
+		}
 		if len(quedan) == 0 {
 			delete(m.volReservas, nombre)
 		} else {
 			m.volReservas[nombre] = quedan
 		}
 	}
+	// Un arranque que falló no deja el disco en manos del VMM; uno que llegó
+	// a byID lo conserva, porque ahí ya cuenta como escritor.
+	m.ajustarDuenosLocked(soltados)
+}
+
+// readmitirVolumenes vuelve a admitir los volúmenes de una máquina failed que
+// se va a descongelar de su volcado, como reclamarParada los de una parada:
+// nadie más puede tenerlos en escritura (ni leerlos, si ella escribe), y
+// recuperan el dueño que les toca.
+func (m *Manager) readmitirVolumenes(mc *api.Machine) error {
+	if len(mc.Volumes) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	vols, err := comprobarVolumenes(m, api.RunRequest{Volumes: mc.Volumes}, m.volumeUsersLocked())
+	if err != nil {
+		return err
+	}
+	return m.adjudicarVolumenesLocked(vols)
+}
+
+// nombresVolumenes son los nombres de unos volúmenes montados.
+func nombresVolumenes(vs []api.VolumeAttachment) []string {
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, v.Name)
+	}
+	return out
+}
+
+// adjudicarVolumenesLocked da a cada volumen admitido el dueño que le toca
+// (duenoVolumen): el usuario del VMM al que lo monta en escritura, que es el
+// único que lo tiene; root a uno que se monta de solo lectura, aunque lo haya
+// dejado del VMM un escritor que murió sin pasar por aquí. Es lo que impide
+// que el VMM de un lector lo abra en escritura (M2). Si no se puede, no se
+// admite: arrancar sin ello sería montar «ro» un disco que el VMM puede
+// escribir. Deshace lo que ya hubiera cedido.
+func (m *Manager) adjudicarVolumenesLocked(vols []resolvedVolume) error {
+	for i, v := range vols {
+		if err := m.duenoVolumen(v.path, !v.readOnly); err != nil {
+			for _, w := range vols[:i] {
+				if !w.readOnly {
+					_ = m.duenoVolumen(w.path, false)
+				}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // RemoveVolume borra un volumen, salvo que alguien lo esté usando.
@@ -594,9 +651,13 @@ func quitarLostFound(ctx context.Context, path string) {
 	if bin == "" {
 		return
 	}
+	im := imagenDebugfs{bin: bin, file: path}
 	run := func(orden string) string {
-		c := exec.CommandContext(ctx, bin, "-w", "-R", orden, path)
-		c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+		c, fin, err := im.cmd(ctx, []string{"-w", "-R", orden})
+		if err != nil {
+			return err.Error()
+		}
+		defer fin()
 		out, _ := c.CombinedOutput()
 		return string(out)
 	}
@@ -725,20 +786,43 @@ var entornoE2fsck = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "
 // con los privilegios del daemon sino confinado (confinarE2fs), con el disco
 // por descriptor.
 var ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", rutaE2fsck)
+	fin, err := confinarSobreDisco(c, path, true)
 	if err != nil {
 		return nil, nil, err
 	}
-	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", rutaE2fsck)
+	return c, fin, nil
+}
+
+// confinarSobreDisco prepara c, una orden de e2fsprogs (e2fsck, resize2fs,
+// debugfs) que recibe el disco como rutaE2fsck, para correr confinada sobre
+// path: lo abre (en escritura si escribir), se lo pasa como descriptor 3,
+// seguido de extra (4, 5...), le deja el entorno mínimo (entornoE2fsck) y la
+// encierra (confinarE2fs). Todas leen un ext4 que pudo escribir un invitado
+// (A1). Devuelve con qué deshacer lo que se tocó del disco y cerrarlo, para
+// después de que la orden acabe.
+func confinarSobreDisco(c *exec.Cmd, path string, escribir bool, extra ...*os.File) (func(), error) {
+	flag := os.O_RDONLY
+	if escribir {
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, flag, 0)
+	if err != nil {
+		return nil, err
+	}
 	c.Env = entornoE2fsck
-	c.ExtraFiles = []*os.File{f}
-	deshacer, err := confinarE2fs(c, f)
+	c.ExtraFiles = append([]*os.File{f}, extra...)
+	deshacer, err := confinarDisco(c, f)
 	if err != nil {
 		f.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	return c, func() { deshacer(); f.Close() }, nil
+	return func() { deshacer(); f.Close() }, nil
 }
+
+// confinarDisco es confinarE2fs; variable para que las pruebas con un debugfs
+// de mentira (un guion de sh) lo dejen correr sin el encierro.
+var confinarDisco = confinarE2fs
 
 // revisarExt4 pasa e2fsck por path con plazo (plazoE2fsck) y traduce su
 // código de salida, que es una máscara de bits (e2fsck(8)): 0 sin errores, 1
