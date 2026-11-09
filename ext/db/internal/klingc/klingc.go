@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -143,6 +144,37 @@ func (c *CLI) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte,
 		return out.Bytes(), &Error{Args: append([]string(nil), args...), Stderr: msg, Err: err}
 	}
 	return out.Bytes(), nil
+}
+
+// Streamer es un Kling que escribe la salida estándar a un io.Writer en vez de
+// a memoria (`kling cp <máquina>:<ruta> -` de algo grande).
+type Streamer interface {
+	RunTo(ctx context.Context, w io.Writer, args ...string) error
+}
+
+// RunTo implementa Streamer. Si w falla (un tope), la tubería se cierra, el
+// hijo muere al escribir y RunTo devuelve error: quien pone el tope sabe por
+// qué.
+func (c *CLI) RunTo(ctx context.Context, w io.Writer, args ...string) error {
+	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	cmd.Env = c.env()
+	cmd.Stdout = w
+	// Un nieto con la tubería abierta no deja colgado a Wait tras el plazo.
+	cmd.WaitDelay = 5 * time.Second
+	var errb bytes.Buffer
+	if c.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(&errb, c.Stderr)
+	} else {
+		cmd.Stderr = &errb
+	}
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errb.String())
+		if len(msg) > maxStderr {
+			msg = "..." + msg[len(msg)-maxStderr:]
+		}
+		return &Error{Args: append([]string(nil), args...), Stderr: msg, Err: err}
+	}
+	return nil
 }
 
 // Command es `kling <args...>` sin ejecutar, con el mismo binario y el mismo

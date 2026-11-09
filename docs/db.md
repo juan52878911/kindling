@@ -818,7 +818,9 @@ contraseña se rechaza (acabaría en `ps` y en el historial).
    viejo. Si una regla no cabe en su columna (un correo en un entero), si choca una
    restricción única o si queda un valor viejo, la transacción se deshace y **no queda
    golden**.
-8. **El golden es otra máquina.** Se vuelca el cluster ya enmascarado, la máquina de
+8. **El golden es otra máquina.** Se vuelca el cluster ya enmascarado y se trae al host
+   con un tope (`-max-dump`, 8G por defecto) y un plazo de una hora: un volcado mayor o
+   una copia que no acaba paran la construcción. La máquina de
    construcción se destruye y `db-golden.sh build -seed <volcado>` construye el golden
    en una máquina **nueva** con `egress none`, como cualquier otro golden (rol `app`,
    base `appdb`, clave solo en el host). El golden nunca ha visto un dato sin

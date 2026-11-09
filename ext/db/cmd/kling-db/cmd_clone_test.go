@@ -40,8 +40,9 @@ type cloneFake struct {
 	maskErr error
 	// dumpErr hace fallar el volcado de producción.
 	dumpErr error
-	// seedContent es lo que "copia" kling cp al host.
+	// seedContent es lo que "copia" kling cp al host; cpHangs la deja colgada.
 	seedContent string
+	cpHangs     bool
 	// discover, fillErr y fixup contestan los pasos de kling db slice.
 	discover string
 	fillErr  error
@@ -65,7 +66,12 @@ func newCloneFake() *cloneFake {
 	}
 }
 
-func (f *cloneFake) Run(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+func (f *cloneFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+	if args[0] == "cp" && f.cpHangs {
+		// Un FIFO en el invitado: la copia no acaba hasta que se la mata.
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	var in []byte
 	if stdin != nil {
 		in, _ = io.ReadAll(stdin)
@@ -91,8 +97,10 @@ func (f *cloneFake) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		delete(f.alive, args[len(args)-1])
 		return nil, nil
 	case "cp":
-		dst := args[2]
-		return nil, os.WriteFile(dst, []byte(f.seedContent), 0o600)
+		if args[2] != "-" {
+			return nil, fmt.Errorf("kling cp to a file instead of stdout: %v", args)
+		}
+		return []byte(f.seedContent), nil
 	case "exec":
 		s := string(in)
 		switch {

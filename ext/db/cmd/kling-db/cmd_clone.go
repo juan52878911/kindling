@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbmask"
+	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/ext/db/internal/pgmini"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
@@ -72,6 +73,12 @@ const (
 	maxPasswordBytes = 4096
 	// maxCAPEM acota el -ca.
 	maxCAPEM = 1 << 20
+	// defaultMaxDump es el tope por defecto del volcado enmascarado que se trae
+	// al host (-max-dump): el invitado no llena el disco del host.
+	defaultMaxDump = 8 << 30
+	// cloneCopyTimeout acota esa copia: un FIFO o un fichero que no acaba no
+	// deja a kling db colgado.
+	cloneCopyTimeout = time.Hour
 	// pgDumpMaxServer es la versión más nueva que puede volcar el pg_dump 16
 	// de la imagen pg16.
 	pgDumpMaxServer = 169999
@@ -170,6 +177,8 @@ type cloneOpts struct {
 	image, from   string
 	mem           string
 	jsonOut       bool
+	// maxDump es el tope en bytes del volcado enmascarado (0: defaultMaxDump).
+	maxDump int64
 	// slice, si no es nil, cambia el volcado entero por una tabla y sus filas
 	// relacionadas (kling db slice, cmd_slice.go).
 	slice *sliceSpec
@@ -177,7 +186,7 @@ type cloneOpts struct {
 
 // cloneFlags son los flags que comparten clone y slice.
 type cloneFlags struct {
-	host, mask, golden, ca, serverName, image, from, mem, script *string
+	host, mask, golden, ca, serverName, image, from, mem, script, maxDump *string
 
 	allowUnmasked, strict, allowWriter, pwStdin, replace, asSuper, jsonOut *bool
 }
@@ -200,6 +209,7 @@ func addCloneFlags(fs *flag.FlagSet) *cloneFlags {
 		mem:           fs.String("mem", "2G", "memory of the builder: the unmasked copy lives in its RAM"),
 		script:        fs.String("script", "", "path of scripts/db-golden.sh (default: $"+goldenScriptEnv+", or installed next to kling-db)"),
 		jsonOut:       fs.Bool("json", false, "print the report as JSON"),
+		maxDump:       fs.String("max-dump", "8G", "largest masked dump copied to the host (MiB, or with M/G); bigger fails"),
 	}
 }
 
@@ -217,6 +227,9 @@ func (f *cloneFlags) opts(rawURL string) (cloneOpts, error) {
 		mask:        dbmask.Options{AllowUnmasked: *f.allowUnmasked, Strict: *f.strict},
 		allowWriter: *f.allowWriter, replace: *f.replace, asSuper: *f.asSuper,
 		image: *f.image, from: *f.from, mem: *f.mem, jsonOut: *f.jsonOut}
+	if o.maxDump, err = parseSizeMG(*f.maxDump); err != nil {
+		return cloneOpts{}, usageErr("-max-dump: %v", err)
+	}
 	data, err := readLimited(*f.mask, 1<<20+1)
 	if err != nil {
 		return cloneOpts{}, err
@@ -316,6 +329,8 @@ type cloner struct {
 	tmpDir string
 	// sliceRes es lo que cargó un slice (con cloneOpts.slice).
 	sliceRes *sliceResult
+	// copyTimeout acota la copia del volcado al host (0: cloneCopyTimeout).
+	copyTimeout time.Duration
 	// probe consulta el rol en el servidor de origen desde el host y devuelve
 	// la línea "probe|super|tablas escribibles|versión" (hostProbe; sustituible
 	// en los tests). nil: no se construye.
@@ -530,9 +545,7 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		"pg_dump -h "+cloneDir+" -p "+clonePort+" -d staging --no-owner --no-privileges -f "+cloneDir+"/masked.sql"); err != nil {
 		return nil, fmt.Errorf("dumping the masked copy: %w", err)
 	}
-	// kling cp escribe con os.Create: sobre un fichero que ya existe conserva
-	// su modo (0600).
-	if _, err := c.a.k.Run(ctx, nil, "cp", builder+":"+cloneDir+"/masked.sql", seed); err != nil {
+	if err := c.copyOut(ctx, builder+":"+cloneDir+"/masked.sql", seed, o.maxDump); err != nil {
 		return nil, fmt.Errorf("copying the masked dump: %w", err)
 	}
 	// La máquina de construcción sobra ya: se destruye ANTES de construir el
@@ -554,6 +567,82 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		return nil, fmt.Errorf("building the golden %s: %w", o.golden, err)
 	}
 	return dbmask.NewReport(o.golden, o.source.String(), plan, res), nil
+}
+
+// parseSizeMG lee un tamaño como -mem: MiB, o con sufijo M o G.
+func parseSizeMG(v string) (int64, error) {
+	if !memPattern.MatchString(v) {
+		return 0, fmt.Errorf("invalid size %q", v)
+	}
+	mul := int64(1 << 20)
+	switch v[len(v)-1] {
+	case 'G':
+		mul, v = 1<<30, v[:len(v)-1]
+	case 'M':
+		v = v[:len(v)-1]
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)/mul {
+		return 0, fmt.Errorf("invalid size %q", v)
+	}
+	return n * mul, nil
+}
+
+// copyOut trae src (<máquina>:<ruta>) a dst, que ya existe (0600), con un
+// tope de bytes y un plazo: lo que haya en esa ruta lo decide el invitado (un
+// FIFO que no acaba, un fichero enorme) y no puede colgar a kling db ni
+// llenar el disco del host.
+func (c *cloner) copyOut(ctx context.Context, src, dst string, max int64) error {
+	if max <= 0 {
+		max = defaultMaxDump
+	}
+	timeout := c.copyTimeout
+	if timeout <= 0 {
+		timeout = cloneCopyTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	lw := &cappedWriter{w: f, left: max}
+	args := []string{"cp", src, "-"}
+	if s, ok := c.a.k.(klingc.Streamer); ok {
+		err = s.RunTo(ctx, lw, args...)
+	} else {
+		var out []byte
+		if out, err = c.a.k.Run(ctx, nil, args...); err == nil {
+			_, err = lw.Write(out)
+		}
+	}
+	switch {
+	case lw.over:
+		return fmt.Errorf("the dump is over %d bytes (-max-dump)", max)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("no end after %s", timeout)
+	case err != nil:
+		return err
+	}
+	return f.Close()
+}
+
+// cappedWriter escribe hasta left bytes; el siguiente falla.
+type cappedWriter struct {
+	w    io.Writer
+	left int64
+	over bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.left {
+		w.over = true
+		return 0, errors.New("over the limit")
+	}
+	n, err := w.w.Write(p)
+	w.left -= int64(n)
+	return n, err
 }
 
 func countUpdates(p *dbmask.Plan) int {

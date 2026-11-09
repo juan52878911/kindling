@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Un builder que miente sobre el rol no recibe la credencial: la comprobación
@@ -67,6 +68,60 @@ func TestCloneSinSondaNoConstruye(t *testing.T) {
 	}
 	if len(ct.f.creds) != 0 {
 		t.Fatal("the credential reached the proxy")
+	}
+}
+
+// Un volcado más grande que -max-dump no se trae entero: falla, no queda
+// golden ni temporal, y no se escribe más del tope.
+func TestCloneVolcadoSobreElTope(t *testing.T) {
+	ct := newCloneTest(t)
+	ct.f.seedContent = strings.Repeat("x", 4096)
+	o := ct.opts(t, cloneRules)
+	o.maxDump = 1024
+	_, err := ct.c.run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "-max-dump") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(ct.golden) != 0 {
+		t.Fatal("a golden was built")
+	}
+	ct.sinRastro(t)
+}
+
+// Una copia que no acaba (un FIFO en el invitado) se corta al plazo.
+func TestCloneVolcadoQueNoAcaba(t *testing.T) {
+	ct := newCloneTest(t)
+	ct.f.cpHangs = true
+	ct.c.copyTimeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := ct.c.run(context.Background(), ct.opts(t, cloneRules))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "no end after") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the copy of the dump hung")
+	}
+	if len(ct.golden) != 0 {
+		t.Fatal("a golden was built")
+	}
+	ct.sinRastro(t)
+}
+
+func TestParseSizeMG(t *testing.T) {
+	for in, want := range map[string]int64{"8G": 8 << 30, "512M": 512 << 20, "100": 100 << 20} {
+		if got, err := parseSizeMG(in); err != nil || got != want {
+			t.Errorf("%s = %d, %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"", "0", "1T", "-1G", "99999999999999999G"} {
+		if _, err := parseSizeMG(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
 	}
 }
 
