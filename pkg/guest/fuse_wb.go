@@ -48,6 +48,76 @@ const wbMaxBytes = 4 * share.MaxIO
 // allá, como con los bytes, contrapresión.
 const wbMaxFlying = 16
 
+// wbGlobalMax acota lo pendiente de TODOS los nodos del proceso (en el agente,
+// todas las carpetas; en kling-hv, las de su única VM). wbMaxBytes es por
+// nodo: un `tar x` que deja muchos ficheros escribiéndose a la vez eran
+// 4 MiB por fichero sin suma acotada, y en un invitado de 256 MiB eso es el
+// OOM. Lleno, el write espera como con el tope por nodo.
+const wbGlobalMax = 16 * share.MaxIO
+
+// wbBudget son los bytes pendientes de todos los nodos.
+type wbBudget struct {
+	mu   sync.Mutex
+	cond sync.Cond
+	used int
+	max  int
+}
+
+var wbGlobal = newWBBudget(wbGlobalMax)
+
+func newWBBudget(max int) *wbBudget {
+	b := &wbBudget{max: max}
+	b.cond.L = &b.mu
+	return b
+}
+
+// tryTake reserva n si caben. Con nada reservado caben siempre: un write
+// solo nunca se queda esperando a sí mismo.
+func (b *wbBudget) tryTake(n int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used > 0 && b.used+n > b.max {
+		return false
+	}
+	b.used += n
+	return true
+}
+
+// take reserva n, esperando a que quepan.
+func (b *wbBudget) take(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.used > 0 && b.used+n > b.max {
+		b.cond.Wait()
+	}
+	b.used += n
+}
+
+// force reserva n aunque no quepan: lo pendiente que trae un estado
+// restaurado ya está en memoria.
+func (b *wbBudget) force(n int) {
+	b.mu.Lock()
+	b.used += n
+	b.mu.Unlock()
+}
+
+// give devuelve n.
+func (b *wbBudget) give(n int) {
+	if n == 0 {
+		return
+	}
+	b.mu.Lock()
+	b.used -= n
+	b.mu.Unlock()
+	b.cond.Broadcast()
+}
+
+func (b *wbBudget) enUso() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
+}
+
 // wbChunk es un trozo contiguo de un handle: acumulándose o en vuelo.
 type wbChunk struct {
 	h    *fileHandle
@@ -88,6 +158,21 @@ func wbOf(n *node) *wbState {
 // trozo que se solapa con otro en vuelo) devuelve ok false sin tocar nada, y
 // el llamador lo repite en su goroutine con wait true.
 func (fs *fuseFS) writeBehind(h *fileHandle, off uint64, data []byte, wait bool) (errno uint32, ok bool) {
+	// El tope global, antes del cerrojo del nodo y sin tenerlo: lo reservado
+	// lo devuelve wbFly, que necesita ese cerrojo, y esperar con él cogido
+	// podría no acabar nunca.
+	if !wbGlobal.tryTake(len(data)) {
+		if !wait {
+			return 0, false
+		}
+		wbGlobal.take(len(data))
+	}
+	encolado := false
+	defer func() {
+		if !encolado {
+			wbGlobal.give(len(data))
+		}
+	}()
 	st := wbOf(h.node)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -125,6 +210,7 @@ func (fs *fuseFS) writeBehind(h *fileHandle, off uint64, data []byte, wait bool)
 	}
 	st.cur.data = append(st.cur.data, data...)
 	st.bytes += len(data)
+	encolado = true
 	// Sale ya si no vuela nada (group commit) o si está lleno; uno lleno que
 	// se solapa con algo en vuelo espera a que wbFly lo mande.
 	if len(st.flying) == 0 || (len(st.cur.data) >= share.MaxIO && len(st.flying) < wbMaxFlying && !st.clashLocked(st.cur)) {
@@ -165,6 +251,7 @@ func (fs *fuseFS) wbSendLocked(st *wbState) {
 // wbFly escribe c en el host y lo retira de lo pendiente.
 func (fs *fuseFS) wbFly(st *wbState, c *wbChunk) {
 	errno := fs.writeAll(c.h, c.off, c.data)
+	wbGlobal.give(len(c.data))
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for i, f := range st.flying {
