@@ -385,8 +385,15 @@ func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[strin
 // plazo real lo pone el contexto de quien llama; aqui solo se acota la ESPERA A
 // LAS CABECERAS, que es lo unico que de verdad indica un invitado que no
 // arranca frente a uno que trabaja.
+//
+// Sin seguir redirecciones: al otro lado esta el puente DENTRO del invitado, y
+// un invitado con root podia contestar un 307 con Location hacia otra microVM o
+// hacia el loopback del host y el gateway repetia alli la llamada. El 3xx llega
+// como una respuesta mas (un error HTTP). Igual que el proxy de los enlaces
+// externos, que con httputil.ReverseProxy tampoco sigue ninguna.
 var httpc = &http.Client{
-	Transport: &http.Transport{ResponseHeaderTimeout: 5 * time.Minute},
+	Transport:     &http.Transport{ResponseHeaderTimeout: 5 * time.Minute},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
 // errStaleSession marca la unica condicion que justifica rehacer el handshake:
