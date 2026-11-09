@@ -69,15 +69,47 @@ void khv_error_copia(char *buf, size_t n) {
   pthread_mutex_unlock(&err_mu);
 }
 
+// sin_recursos: la preparación falló con HV_NO_RESOURCES. Es del Mac entero,
+// no del proceso: hay un cupo de VMs de Hypervisor.framework para todo el
+// sistema (127 medidas en un M4, compartido con kling-vz), y la VM 128 lo da
+// en hv_vm_create. khv_sin_recursos lo dice para que el error sea de
+// capacidad y no uno genérico.
+static bool sin_recursos;
+bool khv_sin_recursos(void) { return sin_recursos; }
+
+static void fallo_hv(const char *que, hv_return_t r) {
+  if (r == HV_NO_RESOURCES) {
+    sin_recursos = true;
+    fallo("%s failed: 0x%x (HV_NO_RESOURCES: this Mac has no room for another Hypervisor.framework VM)", que,
+          (unsigned)r);
+    return;
+  }
+  fallo("%s failed: 0x%x", que, (unsigned)r);
+}
+
 // TRY: llamada a Hypervisor.framework en la preparación (devuelve -1).
 #define TRY(x)                                                \
   do {                                                        \
     hv_return_t _r = (x);                                     \
     if (_r != HV_SUCCESS) {                                   \
-      fallo("%s failed: 0x%x", #x, (unsigned)_r);             \
+      fallo_hv(#x, _r);                                       \
       return -1;                                              \
     }                                                         \
   } while (0)
+
+// khv_prueba_sin_recursos (pruebas, sin VM): un TRY que falla con r; dice si
+// quedó marcado como falta de recursos (y lo desmarca).
+static int prueba_try(hv_return_t r) {
+  TRY(r);
+  return 0;
+}
+bool khv_prueba_sin_recursos(int r) {
+  sin_recursos = false;
+  prueba_try((hv_return_t)r);
+  bool v = sin_recursos;
+  sin_recursos = false;
+  return v;
+}
 
 // VOK: lo mismo en un hilo de vCPU: un fallo termina la VM.
 #define VOK(x)                                                \
@@ -853,19 +885,28 @@ static void fin_psci(int p) {
 // vuelta lenta. Un vCPU que corre en el invitado no sale a espacio de usuario
 // en cientos de ms (el timer y el WFI los resuelve el framework), así que no
 // puede medirse a sí mismo: lo mide el hilo vigilante con thread_info, cada
-// QOS_RAPIDA mientras están arriba y cada QOS_LENTA en reposo (la única
-// vuelta que hace una VM ociosa: medio despertar por segundo). Baja tras dos
-// medidas seguidas por debajo de una décima de núcleo. Arranca arriba: el
-// arranque y una restauración quieren los núcleos P. KLING_HV_QOS=0 lo apaga
-// todo (los hilos quedan con la QoS de siempre).
+// QOS_RAPIDA mientras están arriba. En reposo el vigilante no mira el reloj:
+// lo despiertan los tics del invitado. Un vCPU ocupado tiene el tic del
+// kernel (HZ 250; NO_HZ_IDLE solo lo para en reposo) y cada vencimiento del
+// timer virtual sale a espacio de usuario (HV_EXIT_REASON_VTIMER_ACTIVATED):
+// QOS_TICS salidas abajo (0,2 s de un vCPU ocupado; uno ocioso da ~0,7/s)
+// abren una ventana de QOS_RAPIDA en la que se mide. QOS_LENTA es solo la red
+// por si eso fallara: antes era la vuelta fija de 2 s, medio despertar por
+// segundo por VM ociosa. Baja tras dos medidas seguidas por debajo de una
+// décima de núcleo. Arranca arriba: el arranque y una restauración quieren
+// los núcleos P. KLING_HV_QOS=0 lo apaga todo (los hilos quedan con la QoS de
+// siempre).
 #define QOS_RAPIDA_MS 200
-#define QOS_LENTA_MS 2000
+#define QOS_LENTA_MS 60000
+#define QOS_TICS 50
 static bool qos_activa;
 static volatile bool qos_alta;  // con overrides puestos; se lee sin qos_mu en el impulso
 static pthread_override_t qos_ov[MAX_CPUS];
 static pthread_mutex_t qos_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t qos_cv = PTHREAD_COND_INITIALIZER;
 static int qos_n;  // vCPU que vigila
+static uint32_t qos_tics;    // salidas del timer virtual abajo desde la última vuelta (atómico)
+static uint32_t qos_vueltas; // vueltas del vigilante (pruebas)
 
 void khv_qos_dispositivo(void) {
   if (qos_activa) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
@@ -897,6 +938,16 @@ void khv_qos_impulso(void) {
   pthread_mutex_unlock(&qos_mu);
 }
 
+// qos_tic, desde el vCPU en cada salida del timer virtual: con los vCPU abajo,
+// la QOS_TICS-ésima despierta al vigilante para que mida. Arriba, nada.
+static void qos_tic(void) {
+  if (!qos_activa || qos_alta) return;
+  if (__atomic_add_fetch(&qos_tics, 1, __ATOMIC_RELAXED) != QOS_TICS) return;
+  pthread_mutex_lock(&qos_mu);
+  pthread_cond_broadcast(&qos_cv);
+  pthread_mutex_unlock(&qos_mu);
+}
+
 static uint64_t hilo_cpu_ns(pthread_t h) {
   thread_basic_info_data_t bi;
   mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
@@ -911,18 +962,21 @@ static void *qos_vigilante(void *a) {
   uint64_t antes[MAX_CPUS] = {0}, t_antes = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for (int i = 0; i < qos_n; i++) antes[i] = hilo_cpu_ns(cpus[i].hilo);
   int bajas = 0;
+  bool midiendo = false;  // ventana abierta por los tics
   pthread_mutex_lock(&qos_mu);
   for (;;) {
     bool estaba = qos_alta;
+    if (!estaba && !midiendo) __atomic_store_n(&qos_tics, 0, __ATOMIC_RELAXED);
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
-                   (uint64_t)(estaba ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
+                   (uint64_t)(estaba || midiendo ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
     ts.tv_sec = (time_t)(fin / 1000000000ULL);
     ts.tv_nsec = (long)(fin % 1000000000ULL);
-    // Un impulso en reposo despierta antes: la ventana empieza ahí.
+    // Un impulso o los tics en reposo despiertan antes: la ventana empieza ahí.
     int r = pthread_cond_timedwait(&qos_cv, &qos_mu, &ts);
     if (parar) break;
+    __atomic_add_fetch(&qos_vueltas, 1, __ATOMIC_RELAXED);
     uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dw = ahora - t_antes, max = 0;
     t_antes = ahora;
     for (int i = 0; i < qos_n; i++) {
@@ -930,7 +984,13 @@ static void *qos_vigilante(void *a) {
       if (c - antes[i] > max) max = c - antes[i];
       antes[i] = c;
     }
-    if (r != ETIMEDOUT && !estaba) continue;  // despertado por un impulso: medir desde aquí
+    if (r != ETIMEDOUT && !estaba) {
+      // Un impulso (ya arriba) o los tics: medir desde aquí. Un despertar
+      // espurio con los tics a cero vuelve a la espera larga.
+      midiendo = !qos_alta && __atomic_load_n(&qos_tics, __ATOMIC_RELAXED) >= QOS_TICS;
+      continue;
+    }
+    midiendo = false;
     if (qos_alta) {
       bajas = max * 10 < dw ? bajas + 1 : 0;
       if (bajas >= 2) qos_bajar(), bajas = 0;
@@ -953,6 +1013,69 @@ static void qos_empezar(void) {
   pthread_t t;
   if (pthread_create(&t, NULL, qos_vigilante, NULL) == 0) pthread_detach(t);
 }
+
+// khv_prueba_qos (pruebas, sin VM): el vigilante sobre un hilo que hace de
+// vCPU. Con ocupado, el hilo gira y da un tic cada 4 ms (HZ 250) y devuelve
+// los ms hasta que el vigilante lo sube, o -1 si no lo sube en plazo_ms. Sin
+// él, el hilo duerme sin tics y devuelve las vueltas del vigilante en
+// plazo_ms (una VM ociosa no debe despertarlo).
+static volatile bool prueba_qos_fin;
+static void *prueba_qos_vcpu(void *a) {
+  bool ocupado = a != NULL;
+  uint64_t tic = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  while (!prueba_qos_fin) {
+    if (!ocupado) {
+      usleep(1000);
+      continue;
+    }
+    uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (ahora - tic >= 4000000ULL) qos_tic(), tic = ahora;
+  }
+  return NULL;
+}
+
+int khv_prueba_qos(int ocupado, int plazo_ms) {
+  if (qos_n != 0 || cpus[0].hilo != NULL) return -2;  // hay una VM de verdad
+  prueba_qos_fin = false;
+  pthread_t v, w;
+  if (pthread_create(&v, NULL, prueba_qos_vcpu, ocupado ? (void *)1 : NULL) != 0) return -2;
+  bool activa = qos_activa;
+  pthread_mutex_lock(&qos_mu);
+  qos_activa = true;
+  cpus[0].hilo = v;
+  qos_n = 1;
+  qos_alta = false;
+  __atomic_store_n(&qos_vueltas, 0, __ATOMIC_RELAXED);
+  pthread_mutex_unlock(&qos_mu);
+  uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  if (pthread_create(&w, NULL, qos_vigilante, NULL) != 0) return -2;
+  int res = -1;
+  while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 < (uint64_t)plazo_ms * 1000000ULL) {
+    if (ocupado && qos_alta) {
+      res = (int)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000000ULL);
+      break;
+    }
+    usleep(5000);
+  }
+  if (!ocupado) res = (int)__atomic_load_n(&qos_vueltas, __ATOMIC_RELAXED);
+  pthread_mutex_lock(&qos_mu);
+  parar = true;
+  pthread_cond_broadcast(&qos_cv);
+  pthread_mutex_unlock(&qos_mu);
+  pthread_join(w, NULL);
+  prueba_qos_fin = true;
+  pthread_join(v, NULL);
+  pthread_mutex_lock(&qos_mu);
+  parar = false;
+  qos_n = 0;
+  qos_activa = activa;
+  memset(&cpus[0].hilo, 0, sizeof cpus[0].hilo);
+  pthread_mutex_unlock(&qos_mu);
+  return res;
+}
+
+// khv_prueba_qos_lenta_ms: el plazo de la vuelta de reposo (pruebas).
+int khv_prueba_qos_lenta_ms(void) { return QOS_LENTA_MS; }
 
 // WFI de respaldo: con el GIC de HVF el framework resuelve el WFI dentro y
 // esto no se usa (medido en el prototipo). Si llega, dormir hasta el
@@ -1160,6 +1283,7 @@ static void *vcpu_hilo(void *arg) {
       case HV_EXIT_REASON_VTIMER_ACTIVATED:
         // Con el GIC de HVF el kernel inyecta el PPI 27; basta con desenmascarar.
         hv_vcpu_set_vtimer_mask(c->id, false);
+        qos_tic();
         break;
       case HV_EXIT_REASON_EXCEPTION: {
         uint64_t syn = c->exit->exception.syndrome;
@@ -1446,7 +1570,7 @@ int khv_create(const struct khv_config *c) {
     if (r == HV_SUCCESS) r = hv_vm_create(vc);
     os_release(vc);
     if (r != HV_SUCCESS) {
-      fallo("hv_vm_create with EL2 (nested virtualization) failed: 0x%x", (unsigned)r);
+      fallo_hv("hv_vm_create with EL2 (nested virtualization)", r);
       return -1;
     }
   } else {

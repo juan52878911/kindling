@@ -48,6 +48,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
 - Service output reaches the console (`kling logs`) only for the first 64 KiB of each start, then a notice; `kling logs -service` still has all of it.
 - The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
+- kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
+- kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 
 ### Security
 
