@@ -102,6 +102,11 @@ func sembrar(t *testing.T, root string) {
 		{ID: "bbbb000000000001", Name: "caja-b", State: api.StateWarm, Labels: etq(api.LabelOwner, "b", api.LabelKind, api.KindSandbox)},
 		{ID: "dddd000000000001", Name: "del-admin", State: api.StateWarm},
 	}
+	// Con FrozenAt, /metrics saca series por máquina (TestMetricsPorRol).
+	desde := time.Now().Add(-time.Minute)
+	for _, m := range maquinas {
+		m.FrozenAt = &desde
+	}
 	b, _ := json.Marshal(maquinas)
 	if err := os.WriteFile(filepath.Join(root, "state.json"), b, 0o600); err != nil {
 		t.Fatal(err)

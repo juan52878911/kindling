@@ -549,7 +549,7 @@ const (
 	// AccionGrafo: todo lo que actúa sobre el grafo {ref}: tiene que ser suyo.
 	AccionGrafo Accion = "graph"
 	// AccionAdmin: solo admin (imágenes, volúmenes, store, carpetas del host,
-	// métricas del host).
+	// /procstats). /metrics es AccionListar: los inquilinos ven las del host.
 	AccionAdmin Accion = "admin"
 )
 

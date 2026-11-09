@@ -516,7 +516,8 @@ func (s *Server) rutas() []ruta {
 		{"POST /graphs/{ref}/fork", AccionGrafo, nil, s.handleGraphFork},
 		{"DELETE /graphs/{ref}", AccionGrafo, nil, s.handleGraphRemove},
 		{"GET /events", AccionListar, nil, s.handleEvents},
-		{"GET /metrics", AccionAdmin, nil, s.handleMetrics},
+		// Cualquier rol válido; las series por máquina, solo el admin (ver handleMetrics).
+		{"GET /metrics", AccionListar, nil, s.handleMetrics},
 		{"GET /procstats", AccionAdmin, nil, s.handleProcStats},
 		{"POST /cow/store/grow", AccionAdmin, nil, s.handleGrowCoWStore},
 		{"POST /machines/{ref}/publish", AccionMaquina, nil, s.handlePublish},
