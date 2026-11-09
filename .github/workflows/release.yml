@@ -217,6 +217,16 @@ jobs:
           # Como en build: la toolchain parcheada, no el mínimo de vz/go.mod.
           go-version: '1.27.3'
           cache-dependency-path: vz/go.sum
+      # vz/ es un módulo aparte con cgo que la matriz de test (ubuntu) no ve:
+      # sus tests, como el job vz de ci.yml, antes de compilar lo publicado.
+      # No arrancan ninguna VM (el VMM es un doble).
+      - name: gofmt, vet y go test -race de vz/
+        working-directory: vz
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          GOOS=linux go vet ./...
+          go test -race -count=1 ./...
       - name: build y firma
         shell: bash
         env:
