@@ -93,3 +93,27 @@ func TestPublishJSONFijacionV020(t *testing.T) {
 		t.Fatalf("copia v0: %v", err)
 	}
 }
+
+// Un publish.json ilegible (truncado por un disco lleno) se aparta a
+// publish.json.corrupt-<ns> antes de que la primera escritura lo pise con una
+// lista vacía.
+func TestPublishJSONCorruptoSeAparta(t *testing.T) {
+	dir := t.TempDir()
+	ruta := filepath.Join(dir, "publish.json")
+	roto := `{"schema":1,"publications":[{"machine":"a","po`
+	if err := os.WriteFile(ruta, []byte(roto), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(&maquinasFalsas{ms: map[string]*api.Machine{}}, ruta, t.Logf)
+	if l := p.leer(); l != nil {
+		t.Fatalf("leer = %+v", l)
+	}
+	p.guardar()
+	apartados, _ := filepath.Glob(ruta + ".corrupt-*")
+	if len(apartados) != 1 {
+		t.Fatalf("apartados = %v, quiero uno", apartados)
+	}
+	if b, _ := os.ReadFile(apartados[0]); string(b) != roto {
+		t.Fatalf("lo apartado = %q", b)
+	}
+}

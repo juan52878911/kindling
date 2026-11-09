@@ -245,3 +245,66 @@ func TestFondoDoradoObsoletoSeInforma(t *testing.T) {
 		t.Fatalf("con viejo apagado: %+v", ps)
 	}
 }
+
+// conEsperasFondo cambia las esperas entre reintentos de la reposición.
+func conEsperasFondo(t *testing.T, e ...time.Duration) {
+	t.Helper()
+	antes := esperasFondo
+	esperasFondo = e
+	t.Cleanup(func() { esperasFondo = antes })
+}
+
+// Un fallo pasajero al reponer (un 507 con el host apretado) no deja el fondo
+// vacío hasta reiniciar: se reintenta con espera creciente.
+func TestFondoReintentaTrasUnFallo(t *testing.T) {
+	conEsperasFondo(t, time.Millisecond, 2*time.Millisecond, 4*time.Millisecond)
+	m, creadas := fondoDePrueba(t, 1)
+	bien := m.altaFondo
+	var fallos atomic.Int32
+	m.altaFondo = func(ctx context.Context, name string) (string, error) {
+		if fallos.Add(1) <= 2 {
+			return "", &api.StatusError{Code: api.StatusInsufficientMemory, Message: "not enough memory"}
+		}
+		return bien(ctx, name)
+	}
+	if _, ok := m.reclamarFondo(context.Background(), api.RunRequest{From: "dorado", Name: "mia"}); !ok {
+		t.Fatal("no reclamó")
+	}
+	esperar(t, "fondo repuesto tras dos fallos", func() bool { return m.InfoFondo("dorado").Ready == 1 })
+	if n := creadas.Load(); n != 2 || fallos.Load() != 3 {
+		t.Fatalf("creadas %d, intentos %d; quería 2 y 3", n, fallos.Load())
+	}
+	if p := m.InfoFondo("dorado"); p.Error != "" {
+		t.Fatalf("el error se queda tras reponer: %+v", p)
+	}
+}
+
+// Agotados los reintentos, el fondo vacío se vuelve a llenar en cuanto
+// alguien intenta reclamar de él.
+func TestFondoVacioSeReponeAlReclamar(t *testing.T) {
+	conEsperasFondo(t) // sin reintentos
+	m, _ := fondoDePrueba(t, 1)
+	bien := m.altaFondo
+	var falla atomic.Bool
+	falla.Store(true)
+	m.altaFondo = func(ctx context.Context, name string) (string, error) {
+		if falla.Load() {
+			return "", &api.StatusError{Code: api.StatusInsufficientMemory, Message: "not enough memory"}
+		}
+		return bien(ctx, name)
+	}
+	if _, ok := m.reclamarFondo(context.Background(), api.RunRequest{From: "dorado"}); !ok {
+		t.Fatal("no reclamó")
+	}
+	esperar(t, "reposición rendida", func() bool {
+		m.fondoMu.Lock()
+		defer m.fondoMu.Unlock()
+		f := m.fondos["dorado"]
+		return !f.llenando && f.fallo != ""
+	})
+	falla.Store(false)
+	if _, ok := m.reclamarFondo(context.Background(), api.RunRequest{From: "dorado"}); ok {
+		t.Fatal("reclamó de un fondo vacío")
+	}
+	esperar(t, "fondo repuesto al reclamar", func() bool { return m.InfoFondo("dorado").Ready == 1 })
+}

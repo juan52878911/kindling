@@ -834,6 +834,7 @@ func actualizarExtensiones(dirCopia, version, fromDir string) {
 	}
 	dir, err := plugin.InstallDir()
 	if err != nil {
+		fmt.Printf("warning: extensions not upgraded: finding their directory: %v\n  retry with: kling upgrade -cli\n", err)
 		return
 	}
 	hechas := actualizarExtensionesEn(dir, dirCopia, version, fromDir, plugin.InstallOptions{})
@@ -847,11 +848,16 @@ func actualizarExtensiones(dirCopia, version, fromDir string) {
 // La versión del núcleo llega sin la "v" (main.Version la pone así
 // release.yml); la etiqueta de la release la lleva.
 func actualizarExtensionesEn(dir, dirCopia, version, fromDir string, base plugin.InstallOptions) []string {
+	etiqueta := "v" + strings.TrimPrefix(version, "v")
 	ents, err := os.ReadDir(dir)
 	if err != nil {
+		// Sin directorio no hay extensiones; cualquier otro fallo las deja en
+		// la versión vieja con el núcleo nuevo, y eso se dice.
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("warning: extensions not upgraded: %v\n  retry with: kling upgrade -cli\n", err)
+		}
 		return nil
 	}
-	etiqueta := "v" + strings.TrimPrefix(version, "v")
 	var hechas []string
 	for _, e := range ents {
 		n, ok := strings.CutPrefix(e.Name(), "kling-")
@@ -860,6 +866,11 @@ func actualizarExtensionesEn(dir, dirCopia, version, fromDir string, base plugin
 		}
 		bin := filepath.Join(dir, e.Name())
 		sc, err := plugin.ReadSidecar(bin)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// Sin kling-<n>.json no la instaló plugin install; con uno roto sí.
+			fmt.Printf("warning: extension %s not upgraded: %v\n  retry with: kling plugin install %s@%s\n", n, err, n, etiqueta)
+			continue
+		}
 		if err != nil || sc.Version == version || strings.TrimPrefix(sc.Version, "v") == strings.TrimPrefix(version, "v") {
 			continue
 		}
