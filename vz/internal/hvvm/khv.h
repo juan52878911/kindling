@@ -514,5 +514,7 @@ void vcpu_kick_all(void);
 // salida, sin esperar a medir que están ocupados.
 void khv_qos_dispositivo(void);
 void khv_qos_impulso(void);
+int khv_prueba_qos(int ocupado, int plazo_ms);  // el vigilante sin VM (pruebas, vm.c)
+int khv_prueba_qos_lenta_ms(void);
 
 #endif

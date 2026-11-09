@@ -33,3 +33,18 @@ func sysregISS(iss uint64) uint16 { return uint16(C.khv_sysreg_iss(C.uint64_t(is
 
 // finMotivo es khv_fin_motivo: KHV_FIN_NADA mientras la VM no haya terminado.
 func finMotivo() int { return int(C.khv_fin_motivo()) }
+
+// pruebaQoS es khv_prueba_qos (vm.c): el vigilante de QoS sin VM. Con ocupado,
+// los ms hasta que sube un vCPU que gira con tics (-1 si no en plazoMs); sin
+// él, las vueltas que dio en plazoMs con un vCPU ocioso. -2: no se pudo
+// preparar.
+func pruebaQoS(ocupado bool, plazoMs int) int {
+	o := 0
+	if ocupado {
+		o = 1
+	}
+	return int(C.khv_prueba_qos(C.int(o), C.int(plazoMs)))
+}
+
+// qosLentaMs es QOS_LENTA_MS (vm.c), la vuelta de reposo del vigilante.
+func qosLentaMs() int { return int(C.khv_prueba_qos_lenta_ms()) }

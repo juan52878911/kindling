@@ -467,8 +467,11 @@ En macOS la QoS es la única palanca sobre el tipo de núcleo. Los vCPU van de
 base en `QOS_CLASS_UTILITY` y suben a `USER_INITIATED` con un override mientras
 tienen trabajo: en el acto cuando el host le manda algo al invitado (datos o una
 conexión por vsock, tramas de red) y, si gastan más de medio núcleo por su
-cuenta, en la vuelta lenta de un hilo vigilante (cada 2 s en reposo, 200 ms
-arriba); bajan tras 400 ms por debajo de una décima de núcleo. Los hilos de
+cuenta, cuando lo mide un hilo vigilante (cada 200 ms arriba; abajo no mira
+el reloj: lo despiertan 50 salidas del timer virtual, 0,2 s de tics de un vCPU
+ocupado, y solo cada 60 s como red de seguridad; hasta 2026-11 era una vuelta
+fija de 2 s, medio despertar por segundo por VM ociosa); bajan tras 400 ms por
+debajo de una décima de núcleo. Los hilos de
 disco, red y vsock van en `UTILITY`. Nunca `BACKGROUND`: eso lo pone el modo
 batería del daemon a todo el proceso, solo con la máquina ociosa.
 `KLING_HV_QOS=0` lo apaga. Medido (M4 con carga ~10 de otros procesos, n=15):
