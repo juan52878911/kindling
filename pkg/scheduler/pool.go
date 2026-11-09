@@ -39,6 +39,10 @@ type pool struct {
 	// lo que estuviera a medio calentar se retira solo en vez de quedar en una
 	// cola que ya nadie va a recorrer.
 	closed bool
+	// pendientes son las máquinas que se sacaron del fondo para destruirlas y
+	// cuyo Remove falló: siguen vivas, ya no se entregan a nadie, y se vuelven
+	// a intentar en cada evictStale y en drain.
+	pendientes []string
 
 	// wg cuenta las reposiciones en vuelo para que drain pueda esperarlas.
 	wg sync.WaitGroup
@@ -154,7 +158,7 @@ func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 					// contexto ya cancelado hay que usar uno nuevo o el Remove se
 					// iría sin hacer nada.
 					rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-					_ = p.removeFn(rm, vm.id)
+					_ = p.quitar(rm, vm.id) // si falla queda en pendientes y lo dice
 					cancel()
 					return
 				}
@@ -235,6 +239,7 @@ func (p *pool) drain(ctx context.Context) {
 		log.Printf("pool: prewarmed instances did not finish within %s; continuing cleanup", drainGrace)
 	}
 
+	p.reintentarPendientes(ctx)
 	p.mu.Lock()
 	all := p.ready
 	p.ready = map[string][]*warmVM{}
@@ -242,8 +247,35 @@ func (p *pool) drain(ctx context.Context) {
 
 	for _, q := range all {
 		for _, vm := range q {
-			_ = p.removeFn(ctx, vm.id)
+			_ = p.quitar(ctx, vm.id)
 		}
+	}
+}
+
+// quitar destruye una máquina que ya salió del fondo. Si el daemon no la
+// borra, sigue viva reteniendo RAM: queda en pendientes para reintentarlo, y el
+// error vuelve a quien llama, que no debe darla por retirada. Una que ya no
+// existe sí cuenta como retirada.
+func (p *pool) quitar(ctx context.Context, id string) error {
+	err := p.removeFn(ctx, id)
+	if err == nil || api.IsNotFound(err) {
+		return nil
+	}
+	log.Printf("pool: removing prewarmed instance %s failed (will retry): %v", short(id), err)
+	p.mu.Lock()
+	p.pendientes = append(p.pendientes, id)
+	p.mu.Unlock()
+	return err
+}
+
+// reintentarPendientes vuelve a borrar las que un Remove anterior no borró.
+func (p *pool) reintentarPendientes(ctx context.Context) {
+	p.mu.Lock()
+	ids := p.pendientes
+	p.pendientes = nil
+	p.mu.Unlock()
+	for _, id := range ids {
+		_ = p.quitar(ctx, id)
 	}
 }
 
@@ -254,6 +286,7 @@ func (p *pool) drain(ctx context.Context) {
 func (p *pool) evictStale(ctx context.Context, maxAge time.Duration) {
 	var dead []*warmVM
 
+	p.reintentarPendientes(ctx)
 	p.mu.Lock()
 	for svc, q := range p.ready {
 		keep := q[:0]
@@ -268,11 +301,14 @@ func (p *pool) evictStale(ctx context.Context, maxAge time.Duration) {
 	}
 	p.mu.Unlock()
 
+	quitadas := 0
 	for _, vm := range dead {
-		_ = p.removeFn(ctx, vm.id)
+		if p.quitar(ctx, vm.id) == nil {
+			quitadas++
+		}
 	}
-	if len(dead) > 0 {
-		log.Printf("pool: %d instance(s) removed due to age", len(dead))
+	if quitadas > 0 {
+		log.Printf("pool: %d instance(s) removed due to age", quitadas)
 	}
 }
 
@@ -306,7 +342,11 @@ func (p *pool) evictOne(ctx context.Context) bool {
 	if elegida == nil {
 		return false
 	}
-	_ = p.removeFn(ctx, elegida.id)
+	// Si no se borró sigue viva: no ha liberado nada, y decir que sí haría
+	// que quien pide sitio reintentara para chocar otra vez con lo mismo.
+	if p.quitar(ctx, elegida.id) != nil {
+		return false
+	}
 	log.Printf("pool: removed an instance of %s to make room", deSvc)
 	return true
 }

@@ -38,7 +38,7 @@ type pausada struct {
 	memMiB  int
 	at      time.Time
 	// aislada es la clave de la sesión aislada dueña de la máquina, si lo es
-	// (ver candadoPausada).
+	// (ver probarCandadoPausada).
 	aislada string
 }
 
@@ -307,14 +307,18 @@ func (g *Scheduler) tomarPausadaMasVieja() (string, pausada, func(congelada bool
 	return "", pausada{}, nil
 }
 
-// candadoPausada es el candado bajo el que se despierta esa máquina: el del
-// servicio (ensure → acquire) o, si es de una sesión aislada, el de la sesión
-// (isolatedSession → despertarAislada).
-func (g *Scheduler) candadoPausada(p pausada) *sync.Mutex {
+// probarCandadoPausada toma, sin esperar, el candado bajo el que se despierta
+// esa máquina: el del servicio (ensure → acquire) o, si es de una sesión
+// aislada, el de la sesión (isolatedSession → despertarAislada). nil si está
+// ocupado.
+func (g *Scheduler) probarCandadoPausada(p pausada) *sync.Mutex {
 	if p.aislada != "" {
-		return g.aisladaLock(p.aislada)
+		return g.probarAislada(p.aislada)
 	}
-	return g.ensureLock(p.service)
+	if l := g.ensureLock(p.service); l.TryLock() {
+		return l
+	}
+	return nil
 }
 
 // tomarPausada saca del registro la pausada id para congelarla, con el mismo
@@ -330,8 +334,8 @@ func (g *Scheduler) candadoPausada(p pausada) *sync.Mutex {
 // (nil: cualquiera). Si no, devuelve con qué soltarla al acabar: con
 // congelada=false la repone en el registro (G-04).
 func (g *Scheduler) tomarPausada(id string, p pausada, vale func(pausada) bool) func(congelada bool) {
-	l := g.candadoPausada(p)
-	if !l.TryLock() {
+	l := g.probarCandadoPausada(p)
+	if l == nil {
 		return nil
 	}
 	g.mu.Lock()
