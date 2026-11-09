@@ -17,6 +17,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -480,14 +481,136 @@ func (m *Manager) cabeCopia(src string) error {
 		filepath.Base(src), falta>>20, max(libre, 0)>>20, reserva>>20)
 }
 
-// permisosVolumen deja un fichero de volumen escribible por el VMM, como lo
-// dejaba EnsureWritable: dueño el usuario del VMM, grupo el suyo, 0640.
+// permisosVolumen deja un fichero de volumen recién hecho (creado, clonado,
+// restaurado) como está un volumen que nadie monta en escritura: de root, con
+// el grupo del VMM y 0640 (ver duenoVolumen).
 func (m *Manager) permisosVolumen(ruta string) {
+	if err := m.duenoVolumen(ruta, false); err != nil {
+		log.Printf("volumes: %v", err)
+	}
+}
+
+// duenoVolumen pone el dueño de un volumen según quién lo monta (hallazgo M2
+// de la revisión de escapes). Antes era siempre del usuario del VMM, y el «ro»
+// de un -volume x:ro solo vivía en la configuración del disco: el VMM de un
+// lector podía abrir el fichero en escritura (es su dueño) y corromper lo que
+// leen los demás y heredará el siguiente escritor.
+//
+// Ahora el VMM solo es dueño mientras una máquina lo tiene en escritura, que
+// es en exclusiva (comprobarVolumenes: con un escritor no entra nadie más, ni a
+// leer). El resto del tiempo es de root, con el grupo del VMM y 0640: los
+// lectores lo abren por grupo, de solo lectura. Todos los VMM son el mismo
+// usuario, así que lo que separa a un lector de un escritor es el dueño.
+//
+// Sin usuario del VMM (sin jailer) no hay nada que separar: el VMM es root. En
+// macOS tampoco: kling-vz es el usuario del daemon, y lo que deja un disco de
+// solo lectura es su sandbox (vz/internal/sandbox: los discos ro van a la
+// lista de lectura del perfil).
+func (m *Manager) duenoVolumen(ruta string, escritor bool) error {
+	if m.priv == nil || !m.priv.Enabled {
+		return nil
+	}
+	uid := os.Geteuid()
+	if escritor {
+		uid = m.priv.UID
+	}
+	if err := cederVolumen(ruta, uid, m.priv.GID); err != nil {
+		return fmt.Errorf("volume %s: setting its owner: %w", filepath.Base(ruta), err)
+	}
+	return nil
+}
+
+// cederVolumen cambia dueño y modo de un volumen por su descriptor, sin
+// seguir enlaces (volumes/ es de root, pero así un enlace que aparezca ahí no
+// le da a otro fichero el dueño del VMM). Solo toca lo que no está ya bien:
+// cada chown cambia el ctime. Variable para los tests.
+var cederVolumen = func(ruta string, uid, gid int) error {
+	fd, err := syscall.Open(ruta, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(fd), ruta)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != uid || int(st.Gid) != gid {
+		if err := f.Chown(uid, gid); err != nil {
+			return err
+		}
+	}
+	if fi.Mode().Perm() != 0o640 {
+		return f.Chmod(0o640)
+	}
+	return nil
+}
+
+// escritorVolumenLocked dice si alguna máquina tiene vol en escritura: una
+// viva (como en volumeUsersLocked, una parada o fallida no cuenta) o una que
+// lo reservó en escritura y aún no está en byID. Las reservas sintéticas de
+// snapshot, clon o restauración no: el daemon copia como root y no le da el
+// disco a ningún VMM.
+func (m *Manager) escritorVolumenLocked(vol string) bool {
+	for _, mc := range m.byID {
+		if mc.State == api.StateStopped || mc.State == api.StateFailed {
+			continue
+		}
+		for _, v := range mc.Volumes {
+			if v.Name == vol && !v.ReadOnly {
+				return true
+			}
+		}
+	}
+	for _, r := range m.volReservas[vol] {
+		if _, ya := m.byID[r.maquina]; ya || r.soloLect || strings.HasPrefix(r.maquina, opPrefijo) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// ajustarDuenosLocked devuelve a root los volumes que ya no tiene nadie en
+// escritura (y deja del VMM los que sí). Se llama donde un escritor se va: al
+// soltar las reservas de un arranque que falló, al parar o borrar una máquina,
+// y al arrancar el daemon para lo que dejó uno anterior al morir. No es lo que
+// protege a un lector —eso lo hace reservarVolumenes al admitirlo—: es que el
+// VMM no se quede con la propiedad de un disco que ya no monta.
+func (m *Manager) ajustarDuenosLocked(vols []string) {
 	if m.priv == nil || !m.priv.Enabled {
 		return
 	}
-	_ = os.Lchown(ruta, m.priv.UID, m.priv.GID)
-	_ = os.Chmod(ruta, 0o640)
+	for _, vol := range vols {
+		if !reVolume.MatchString(vol) {
+			continue
+		}
+		err := m.duenoVolumen(m.volumePath(vol), m.escritorVolumenLocked(vol))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("volumes: %v", err)
+		}
+	}
+}
+
+// ajustarDuenosVolumenes es ajustarDuenosLocked sobre todos los volúmenes;
+// para el arranque del daemon, tras readoptar las máquinas vivas.
+func (m *Manager) ajustarDuenosVolumenes() {
+	entradas, err := os.ReadDir(m.volumesDir())
+	if err != nil {
+		return
+	}
+	var vols []string
+	for _, e := range entradas {
+		if n, ok := strings.CutSuffix(e.Name(), ".ext4"); ok && e.Type().IsRegular() {
+			vols = append(vols, n)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ajustarDuenosLocked(vols)
 }
 
 // barrerTmpVolumenes borra al arrancar los .tmp que dejó un daemon muerto a

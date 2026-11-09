@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -77,11 +78,75 @@ func nombreDebugfs(p string) error {
 
 func comillas(p string) string { return `"` + p + `"` }
 
-// debugfsCmd lanza debugfs con la salida en inglés: se analiza su texto.
-func (im imagenDebugfs) cmd(ctx context.Context, args ...string) *exec.Cmd {
-	c := exec.CommandContext(ctx, im.bin, append(args, im.file)...)
-	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
-	return c
+// cmd prepara debugfs sobre la imagen con la salida en inglés (se analiza su
+// texto, entornoE2fsck), y confinado como e2fsck (A1): la imagen o la capa
+// pudo escribirlas un invitado, y debugfs analiza sus metadatos con el mismo
+// código de e2fsprogs. Recibe el disco por descriptor (rutaE2fsck), abierto en
+// escritura solo con -w, y extra como 4, 5... (ver escribir). Devuelve la
+// orden y con qué cerrar, para después de que acabe.
+func (im imagenDebugfs) cmd(ctx context.Context, args []string, extra ...*os.File) (*exec.Cmd, func(), error) {
+	c := exec.CommandContext(ctx, im.bin, append(args, rutaE2fsck)...)
+	fin, err := confinarSobreDisco(c, im.file, slices.Contains(args, "-w"))
+	if err != nil {
+		return nil, nil, err
+	}
+	// Los descriptores extra, después del disco y ya con el usuario decidido.
+	for _, f := range extra {
+		g, soltar, err := fuenteParaConfinado(c, f, filepath.Dir(im.file))
+		if err != nil {
+			fin()
+			return nil, nil, err
+		}
+		c.ExtraFiles = append(c.ExtraFiles, g)
+		antes := fin
+		fin = func() { soltar(); antes() }
+	}
+	return c, fin, nil
+}
+
+// fuenteParaConfinado da a la orden confinada un fichero del host que tiene
+// que leer (el de un put). Si corre con otro usuario (Linux con el daemon
+// root), abrir /dev/fd/N vuelve a comprobar los permisos del inodo, y el
+// fichero del host no tiene por qué ser legible por ese usuario; darle el
+// original (chown o chmod) le abriría lo que no debe ver. Recibe una copia:
+// un temporal en dir (del daemon, de root), borrado nada más crearlo —no
+// tiene ruta que nadie pueda abrir— y cedido por descriptor a ese usuario,
+// 0400. Lo cedido es solo lo que va a acabar dentro de la imagen.
+//
+// Un pipe no vale: debugfs write necesita un fichero normal (lo mide con
+// fstat), y el de root nace 0600 de root. Sin cambio de usuario (macOS, donde
+// /dev/fd/N es un dup, o el daemon sin root) se pasa el original.
+func fuenteParaConfinado(c *exec.Cmd, f *os.File, dir string) (*os.File, func(), error) {
+	nada := func() {}
+	if c.SysProcAttr == nil || c.SysProcAttr.Credential == nil {
+		return f, nada, nil
+	}
+	cr := c.SysProcAttr.Credential
+	tmp, err := os.CreateTemp(dir, ".kling-put-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = os.Remove(tmp.Name())
+	fallo := func(err error) (*os.File, func(), error) {
+		tmp.Close()
+		return nil, nil, fmt.Errorf("copying %s for debugfs: %w", filepath.Base(f.Name()), err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fallo(err)
+	}
+	if _, err := io.Copy(tmp, f); err != nil {
+		return fallo(err)
+	}
+	if err := tmp.Chmod(0o400); err != nil {
+		return fallo(err)
+	}
+	if err := tmp.Chown(int(cr.Uid), int(cr.Gid)); err != nil {
+		return fallo(err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fallo(err)
+	}
+	return tmp, func() { tmp.Close() }, nil
 }
 
 // leer ejecuta un comando de solo lectura.
@@ -90,7 +155,12 @@ func (im imagenDebugfs) cmd(ctx context.Context, args ...string) *exec.Cmd {
 // enlace lento o un stat no se acercan. Lo que sí puede ser grande (el
 // contenido de un fichero) va por leerFichero o sha256De.
 func (im imagenDebugfs) leer(ctx context.Context, orden string) ([]byte, error) {
-	out, err := salidaAcotada(im.cmd(ctx, "-R", orden), maxSalidaDebugfs)
+	c, fin, err := im.cmd(ctx, []string{"-R", orden})
+	if err != nil {
+		return nil, fmt.Errorf("debugfs %s on %s: %w", orden, filepath.Base(im.file), err)
+	}
+	defer fin()
+	out, err := salidaAcotada(c, maxSalidaDebugfs)
 	if err != nil {
 		return nil, fmt.Errorf("debugfs %s on %s: %w", orden, filepath.Base(im.file), err)
 	}
@@ -220,21 +290,18 @@ func (im imagenDebugfs) libre(ctx context.Context) (int64, error) {
 	return libres * bs, nil
 }
 
-// escribir ejecuta órdenes con -w y falla si debugfs se queja de alguna.
-func (im imagenDebugfs) escribir(ctx context.Context, dir string, ordenes []string) error {
-	f, err := os.CreateTemp(dir, "kling-debugfs-*.cmd")
+// escribir ejecuta órdenes con -w y falla si debugfs se queja de alguna. Las
+// órdenes le llegan por la entrada estándar (-f -): confinado no puede leer un
+// guion del disco del host. Por lo mismo, un fichero del host que haya que
+// copiar dentro (la orden write) va en fuente, que recibe como rutaFuentePut.
+func (im imagenDebugfs) escribir(ctx context.Context, ordenes []string, fuente ...*os.File) error {
+	c, fin, err := im.cmd(ctx, []string{"-w", "-f", "-"}, fuente...)
 	if err != nil {
-		return err
+		return fmt.Errorf("debugfs -w on %s: %w", filepath.Base(im.file), err)
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(strings.Join(ordenes, "\n") + "\n"); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	out, err := im.cmd(ctx, "-w", "-f", f.Name()).CombinedOutput()
+	defer fin()
+	c.Stdin = strings.NewReader(strings.Join(ordenes, "\n") + "\n")
+	out, err := c.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("debugfs -w on %s: %s", filepath.Base(im.file), conSalida(err, out))
 	}
@@ -268,7 +335,12 @@ func (im imagenDebugfs) leerFichero(ctx context.Context, p string, max int64) ([
 	if err := nombreDebugfs(p); err != nil {
 		return nil, err
 	}
-	out, err := salidaAcotada(im.cmd(ctx, "-R", "cat "+comillas(p)), max)
+	c, fin, err := im.cmd(ctx, []string{"-R", "cat " + comillas(p)})
+	if err != nil {
+		return nil, fmt.Errorf("debugfs cat %s on %s: %w", p, filepath.Base(im.file), err)
+	}
+	defer fin()
+	out, err := salidaAcotada(c, max)
 	if errors.Is(err, errSalidaGrande) {
 		return nil, fmt.Errorf("%s is larger than the limit of %d bytes", p, max)
 	}
@@ -280,7 +352,11 @@ func (im imagenDebugfs) leerFichero(ctx context.Context, p string, max int64) ([
 
 // sha256De lee p de la imagen y devuelve su digest, sin cargarlo entero.
 func (im imagenDebugfs) sha256De(ctx context.Context, p string) (string, error) {
-	c := im.cmd(ctx, "-R", "cat "+comillas(p))
+	c, fin, err := im.cmd(ctx, []string{"-R", "cat " + comillas(p)})
+	if err != nil {
+		return "", fmt.Errorf("debugfs cat %s on %s: %w", p, filepath.Base(im.file), err)
+	}
+	defer fin()
 	out, err := c.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -408,15 +484,12 @@ func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quie
 		}
 	}
 
-	// Una ruta del host sin comillas ni barras invertidas; la de la raíz de
-	// macOS lleva espacios ("Application Support"), que las comillas cubren.
-	srcAbs, err := filepath.Abs(src)
+	// El fichero del host va abierto: debugfs, confinado, no llega a su ruta.
+	fuente, err := os.Open(src)
 	if err != nil {
 		return false, err
 	}
-	if err := nombreDebugfs(srcAbs); err != nil {
-		return false, err
-	}
+	defer fuente.Close()
 	dirDestino := path.Dir(destino)
 	tmp := nombre + ".nuevo"
 	tmpPath := path.Join(dirDestino, tmp)
@@ -437,16 +510,16 @@ func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quie
 	}
 	ordenes = append(ordenes,
 		"cd "+comillas(dirDestino),
-		"write "+comillas(srcAbs)+" "+comillas(tmp),
+		"write "+rutaFuentePut+" "+comillas(tmp),
 		fmt.Sprintf("sif %s mode 0%o", comillas(tmp), 0o100000|uint32(mode.Perm())),
 		"sif "+comillas(tmp)+" uid 0",
 		"sif "+comillas(tmp)+" gid 0",
 	)
-	if err := im.escribir(ctx, m.dirTemporalPut(), ordenes); err != nil {
+	if err := im.escribir(ctx, ordenes, fuente); err != nil {
 		return false, err
 	}
 	if got, err := im.sha256De(ctx, tmpPath); err != nil || got != quiero {
-		_ = im.escribir(ctx, m.dirTemporalPut(), []string{"rm " + comillas(tmpPath)})
+		_ = im.escribir(ctx, []string{"rm " + comillas(tmpPath)})
 		repairVolume(context.WithoutCancel(ctx), image)
 		if err == nil {
 			err = errors.New("the copy inside the image does not match the source")
@@ -460,7 +533,7 @@ func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quie
 		ordenes = append(ordenes, "rm "+comillas(nombre))
 	}
 	ordenes = append(ordenes, "ln "+comillas(tmp)+" "+comillas(nombre), "unlink "+comillas(tmp))
-	err = im.escribir(ctx, m.dirTemporalPut(), ordenes)
+	err = im.escribir(ctx, ordenes)
 	repairVolume(context.WithoutCancel(ctx), image)
 	if err != nil {
 		return false, fmt.Errorf("replacing %s: %w", limpio, err)
@@ -474,15 +547,6 @@ func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quie
 	return true, nil
 }
 
-// dirTemporalPut es donde van los guiones de debugfs: en la raíz del daemon
-// (build/), no en /tmp, que en macOS es de todos.
-func (m *Manager) dirTemporalPut() string {
-	if m.root == "" {
-		return os.TempDir()
-	}
-	d := filepath.Join(m.root, "build")
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return os.TempDir()
-	}
-	return d
-}
+// rutaFuentePut es el fichero del host que copia la orden write: el primer
+// descriptor que escribir le pasa después del disco (ExtraFiles[1]).
+const rutaFuentePut = "/dev/fd/4"

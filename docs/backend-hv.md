@@ -744,6 +744,22 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   dice (`server.ErrSinCapacidad`, `errCreate` en `hvvm_darwin.go`); antes era
   el `0x…` genérico de `TRY` y un 400. El daemon todavía no lo traduce a su
   507 ni recorta la admisión: su tope (`KLING_MAX_MACHINES`, 256) es mayor.
+- **64 MiB por tanda de disco y por petición**: mientras el hilo de un disco
+  atiende una tanda la VM no se puede pausar, y `khv_pause` solo espera 5 s.
+  Una tanda corta tras 64 MiB de datos, o entre petición y petición en cuanto
+  la VM se está pausando (`vblk_tanda_max` y `b_procesar` en `virtio.c`), y un
+  read o write de más de 64 MiB falla con IOERR sin tocar el disco. Linux no
+  manda más de unos MiB por petición salvo que se suba `max_sectors_kb` a mano
+  en el invitado.
+- **Informe de páginas libres a 1 GiB/s**: cada tramo informado cuesta un
+  `hv_vm_unmap`, un `mmap` y un `hv_vm_map` bajo el cerrojo del globo, y lo que
+  pasa de la cuota (cada tramo cuenta al menos 2 MiB) vuelve al driver sin
+  soltar (`informe_cobrar` en `balloon.c`). El driver de Linux informa cada 2 s
+  y no se acerca.
+- **Un MMIO sin ISV es un aborto en el invitado**: un acceso a un dispositivo
+  que `kling-hv` no puede decodificar (un `LDP`, o con *writeback*) recibe un
+  aborto externo síncrono en su EL y vector (`inyectar_sea` en `vm.c`), como en
+  una máquina física; antes terminaba la VM.
 - **Sin pantalla ni ventana**: una máquina con pantalla se rechaza
   (`kling-hv has no display device`). `KLING_VZ_GRAPHICS`, `KLING_VZ_WINDOW` y
   `KLING_VZ_DISK_CACHING`/`KLING_VZ_DISK_SYNC` pasan al entorno de `kling-hv`

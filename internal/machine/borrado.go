@@ -60,7 +60,13 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 		if murio {
 			live.PID = 0
 		}
+		vols := nombresVolumenes(live.Volumes)
 		live.Volumes, live.Shares, live.Forwards = nil, nil, nil
+		// Sus volúmenes de escritura vuelven a root (duenoVolumen), salvo que
+		// el VMM siga vivo: entonces se quedan hasta que lo limpie la tumba.
+		if murio {
+			m.ajustarDuenosLocked(vols)
+		}
 		live.Labels = nil
 		live.TTLSeconds, live.TTLAt, live.OnTTL = 0, nil, ""
 	}

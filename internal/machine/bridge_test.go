@@ -2,6 +2,7 @@ package machine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,6 +141,11 @@ func fakeDebugfs(t *testing.T, dir, contador string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
+	// Un guion de sh no pasa el encierro de e2fsprogs (solo deja ejecutar el
+	// binario, y escribir solo en su disco).
+	antes := confinarDisco
+	confinarDisco = func(*exec.Cmd, *os.File) (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { confinarDisco = antes })
 }
 
 // contarLlamadas cuenta las líneas que fakeDebugfs fue anotando.

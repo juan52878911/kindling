@@ -69,7 +69,11 @@ sin permisos y sin forma de recuperarlos. El TAP se crea ya a nombre de ese usua
 no necesite `CAP_NET_ADMIN` para abrirlo.
 
 Cada microVM solo posee su propio directorio y su overlay. Las imágenes base y los snapshots
-son de **solo lectura** para el VMM.
+son de **solo lectura** para el VMM. Un volumen es de root (grupo del VMM, 0640) salvo mientras
+una máquina lo tiene en escritura, que es en exclusiva: solo entonces es del usuario del VMM. Así
+el VMM de quien lo monta `ro` no puede abrirlo en escritura; el dueño se cede por descriptor al
+admitir al escritor y vuelve a root al pararlo, borrarlo, al fallar su arranque y al arrancar el
+daemon.
 
 ### 3. La microVM no alcanza la red privada
 
@@ -759,8 +763,12 @@ cambia:
   no deja red ni leer más que el sistema y Homebrew, ni escribir más que su descriptor; macOS no
   aplica RLIMIT_AS, así que ahí no hay tope de memoria. Sigue leyendo con nobody lo que nobody
   pueda leer del host (sin red para sacarlo, pero podría escribirlo en el disco del invitado);
-  con `-run-as` es el mismo usuario que ya tiene el VMM. Pendiente: `resize2fs` (al crecer la
-  imagen de un puente) y `debugfs` (el `put` sin montar de macOS) aún corren sin confinar.
+  con `-run-as` es el mismo usuario que ya tiene el VMM. `resize2fs` (al crecer la imagen de un
+  puente) y `debugfs` (inspeccionar imágenes y capas, el `put` sin montar de macOS, el
+  `lost+found` de un volumen nuevo) corren igual; `debugfs -w` recibe sus órdenes por la entrada
+  estándar y el fichero que copia dentro ya abierto (`/dev/fd/4`). En Linux, un `debugfs` que solo
+  lee una imagen legible por grupo corre como nobody con ese grupo, sin cederle el fichero: es una
+  base que otros VMM abren por grupo mientras tanto.
 - El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
   VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
   escribir en la copia de la que se clonan las demás instancias.

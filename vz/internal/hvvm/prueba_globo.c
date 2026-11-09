@@ -100,3 +100,35 @@ int khv_prueba_globo(uint64_t out[4]) {
   w(0x070, 0);  // el driver se va
   return 0;
 }
+
+// khv_prueba_globo_cuota: un invitado que informa n veces seguidas del mismo
+// bloque de 256 KiB, cada vez que se lo devuelven. out[0] son los tramos que
+// se pidió soltar (cada uno un hv_vm_unmap, un mmap y un hv_vm_map bajo el
+// cerrojo del globo) y out[1] los búferes devueltos, que tienen que ser todos.
+int khv_prueba_globo_cuota(int n, uint64_t out[2]) {
+  if (!g_ram) {
+    uint8_t *ram = mmap(NULL, G_RAM, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED) return -1;
+    g_ram = ram;
+    g_ram_size = G_RAM;
+  }
+  if (g_ram_size < G_RAM || vballoon_init(60, false) != 0) return -1;
+  memset(g_ram, 0, 0x10000);
+  w(0x070, 0);
+  w(0x070, 1 | 2);
+  w(0x024, 0);
+  w(0x020, 1u << 5);  // solo el informe: es la cola 2
+  w(0x070, 1 | 2 | 8);
+  cola(2, 0x6000, 8);
+  w(0x070, 1 | 2 | 4 | 8);
+  uint64_t c[KHV_BALLOON_NCUENTAS];
+  khv_balloon_cuentas(c);
+  uint64_t t0 = c[2];
+  desc(0x6000, 0, RAM_BASE + 0x40000, 0x40000, VIRTQ_DESC_F_WRITE, 0);
+  for (int i = 0; i < n; i++) ofrecer(2, 0x6000, 0);
+  khv_balloon_cuentas(c);
+  out[0] = c[2] - t0;
+  out[1] = usados(0x6000);
+  w(0x070, 0);
+  return 0;
+}

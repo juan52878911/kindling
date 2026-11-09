@@ -327,7 +327,11 @@ func initEntiendeCapas(ctx context.Context, im imagenDebugfs) (bool, error) {
 			p = path.Join(path.Dir(p), e.enlace)
 		}
 	}
-	c := im.cmd(ctx, "-R", "cat "+comillas(p))
+	c, fin, err := im.cmd(ctx, []string{"-R", "cat " + comillas(p)})
+	if err != nil {
+		return false, err
+	}
+	defer fin()
 	out, err := c.StdoutPipe()
 	if err != nil {
 		return false, err
