@@ -1007,8 +1007,19 @@ func (s *Server) setattr(p string, hf *os.File, valid, mode uint32, size, at, mt
 			m = mt
 		}
 		tv := []syscall.Timeval{syscall.NsecToTimeval(a), syscall.NsecToTimeval(m)}
-		if err := syscall.Futimes(int(f.Fd()), tv); err != nil {
+		// Por Control y no f.Fd(): un OpRelease del mismo handle puede cerrarlo
+		// a la vez, y el número suelto sería ya el de otro fichero. Control
+		// retiene el descriptor mientras dura (y no lo pasa a bloqueante).
+		rc, err := f.SyscallConn()
+		if err != nil {
 			return proto.Attr{}, Errno(err)
+		}
+		var ferr error
+		if err := rc.Control(func(fd uintptr) { ferr = syscall.Futimes(int(fd), tv) }); err != nil {
+			return proto.Attr{}, Errno(err)
+		}
+		if ferr != nil {
+			return proto.Attr{}, Errno(ferr)
 		}
 	}
 	fi, err := f.Stat()
