@@ -103,7 +103,7 @@ type Agent struct {
 func (a *Agent) Caps() []string {
 	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
 		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt, api.GuestCapEnv, api.GuestCapProcs, api.GuestCapCmd,
-		api.GuestCapVolumeWait, CapResyncClock}
+		api.GuestCapVolumeWait, CapResyncClock, api.GuestCapDropCaches}
 	if a.tardio {
 		caps = append(caps, api.GuestCapLateStart)
 	}
@@ -302,6 +302,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	mux.HandleFunc(api.GuestReadyPath, a.enArranque(ReadyHandler()))
 	mux.HandleFunc(api.GuestHooksPath, a.enArranque(HooksHandler()))
 	mux.HandleFunc(api.GuestMemInfoPath, MemInfoHandler())
+	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
+	// dorado (dropcaches.go).
+	mux.HandleFunc(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
 	mux.HandleFunc(api.GuestServicePath, a.enArranque(ServiceHandler()))
