@@ -123,6 +123,7 @@ type fakeFactory struct {
 	specs    []*spec.Spec
 	bootArgs []string
 	failNext string
+	errNext  error // lo devuelve el siguiente Create
 }
 
 func (f *fakeFactory) NewMachineID() (string, error) { return "bWFjaGluZS1pZA==", nil }
@@ -132,6 +133,10 @@ func (f *fakeFactory) Create(s *spec.Spec, bootArgs string, n Network) (VM, erro
 	defer f.mu.Unlock()
 	if s.Network != nil && n == nil {
 		return nil, errors.New("network missing")
+	}
+	if err := f.errNext; err != nil {
+		f.errNext = nil
+		return nil, err
 	}
 	vm := &fakeVM{stopped: make(chan error, 1), failNext: f.failNext}
 	f.failNext = ""

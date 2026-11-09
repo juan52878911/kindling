@@ -467,8 +467,11 @@ En macOS la QoS es la única palanca sobre el tipo de núcleo. Los vCPU van de
 base en `QOS_CLASS_UTILITY` y suben a `USER_INITIATED` con un override mientras
 tienen trabajo: en el acto cuando el host le manda algo al invitado (datos o una
 conexión por vsock, tramas de red) y, si gastan más de medio núcleo por su
-cuenta, en la vuelta lenta de un hilo vigilante (cada 2 s en reposo, 200 ms
-arriba); bajan tras 400 ms por debajo de una décima de núcleo. Los hilos de
+cuenta, cuando lo mide un hilo vigilante (cada 200 ms arriba; abajo no mira
+el reloj: lo despiertan 50 salidas del timer virtual, 0,2 s de tics de un vCPU
+ocupado, y solo cada 60 s como red de seguridad; hasta 2026-11 era una vuelta
+fija de 2 s, medio despertar por segundo por VM ociosa); bajan tras 400 ms por
+debajo de una décima de núcleo. Los hilos de
 disco, red y vsock van en `UTILITY`. Nunca `BACKGROUND`: eso lo pone el modo
 batería del daemon a todo el proceso, solo con la máquina ociosa.
 `KLING_HV_QOS=0` lo apaga. Medido (M4 con carga ~10 de otros procesos, n=15):
@@ -734,6 +737,13 @@ Lo que dejó la auditoría de estabilidad de noviembre de 2026, en el M4.
   núcleo en macOS, también para vz), `kling-hv` en `PUT /machine-config`
   (`hvvm.MaxVCPUs`) y `khv_create`. Más vCPU que núcleos no corre más y deja
   al invitado esperando a hilos que el host no atiende a la vez.
+- **Unas 127 VMs por Mac**: Hypervisor.framework tiene un cupo de VMs para
+  todo el sistema (127 medidas en un M4; kling-vz gasta del mismo, porque
+  Virtualization.framework va encima) y la siguiente falla en `hv_vm_create`
+  con `HV_NO_RESOURCES`. `kling-hv` lo contesta con 507 y un mensaje que lo
+  dice (`server.ErrSinCapacidad`, `errCreate` en `hvvm_darwin.go`); antes era
+  el `0x…` genérico de `TRY` y un 400. El daemon todavía no lo traduce a su
+  507 ni recorta la admisión: su tope (`KLING_MAX_MACHINES`, 256) es mayor.
 - **Sin pantalla ni ventana**: una máquina con pantalla se rechaza
   (`kling-hv has no display device`). `KLING_VZ_GRAPHICS`, `KLING_VZ_WINDOW` y
   `KLING_VZ_DISK_CACHING`/`KLING_VZ_DISK_SYNC` pasan al entorno de `kling-hv`

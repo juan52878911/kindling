@@ -180,7 +180,11 @@ var mcpCommands = []plugin.Command{
       [-keepwarm N]                                N popular services with their
                                                    primary running (persistent;
                                                    avoids cold start on Mac)
-      [-max-replicas 16]                           instances per service when
+      [-paused-mib 0] [-paused-for 0]              MiB of idle instances paused
+                                                   instead of frozen (~1 ms wake
+                                                   vs ~30 ms; -1 = from host
+                                                   memory; 0 = always freeze)
+      [-max-replicas 16]                          instances per service when
                                                    sessions scale out (0 =
                                                    unlimited); beyond it, 503
       [-session-ttl 30m]                           an isolated session unused this

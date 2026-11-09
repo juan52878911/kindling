@@ -33,6 +33,11 @@ type popularity struct {
 	mu   sync.Mutex
 	ema  map[string]float64 // servicio -> EMA de llegadas por ventana
 	pend map[string]int     // llegadas desde el último plegado
+	// visto es si alguna vez hubo historial (una llegada, o un fichero con
+	// datos al arrancar). Pegajoso a propósito: la EMA decae y poda a cero en
+	// unos minutos sin tráfico, y eso no debe devolver al prewarm al reparto a
+	// ciegas de un gateway recién nacido (ver conHistorial).
+	visto bool
 }
 
 func newPopularity(path string) *popularity {
@@ -68,6 +73,7 @@ func (p *popularity) observe(service string) {
 	}
 	p.mu.Lock()
 	p.pend[service]++
+	p.visto = true
 	p.mu.Unlock()
 }
 
@@ -125,7 +131,19 @@ func (p *popularity) load() {
 	m := map[string]float64{}
 	if json.Unmarshal(b, &m) == nil {
 		p.ema = m
+		p.visto = len(m) > 0
 	}
+}
+
+// conHistorial dice si ya se sabe algo del uso: desde entonces una puntuación 0
+// significa "nadie lo llama", no "aún no se sabe".
+func (p *popularity) conHistorial() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.visto
 }
 
 // save escribe el historial de forma atómica: un reinicio no debe poder leer

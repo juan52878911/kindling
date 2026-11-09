@@ -743,6 +743,18 @@ cambia:
   kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
   los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
   overlay en ext4.
+- **El e2fsck del arranque sí lee lo que escribió el invitado** (el ext4 del overlay y de cada
+  volumen rw, también en un `put` o al refrescar un puente), y es un parser en C: no corre con los
+  privilegios del daemon. Recibe el disco ya abierto (`/dev/fd/3`), sin el entorno del daemon y con
+  plazo. En Linux, con el daemon root, corre con el dueño del disco si no es root (el usuario del
+  VMM con `-run-as`) o con nobody (al que se le cede el fichero mientras dura y se le devuelve),
+  sin grupos ni capacidades, en namespaces nuevos de red, PID e IPC y con `prlimit --as` a 2 GiB
+  si hay `prlimit`. En macOS, con el usuario del daemon dentro de un perfil de `sandbox-exec` que
+  no deja red ni leer más que el sistema y Homebrew, ni escribir más que su descriptor; macOS no
+  aplica RLIMIT_AS, así que ahí no hay tope de memoria. Sigue leyendo con nobody lo que nobody
+  pueda leer del host (sin red para sacarlo, pero podría escribirlo en el disco del invitado);
+  con `-run-as` es el mismo usuario que ya tiene el VMM. Pendiente: `resize2fs` (al crecer la
+  imagen de un puente) y `debugfs` (el `put` sin montar de macOS) aún corren sin confinar.
 - El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
   VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
   escribir en la copia de la que se clonan las demás instancias.
@@ -1477,17 +1489,24 @@ el `SHA256SUMS` firmado de una release vieja no sirva para colar sus binarios en
 otra. Un fallo de red al pedir la firma es un error, no «release sin firma». Una
 release sin firma se acepta con un aviso solo antes de `v1.0.0`
 (`upgrade.FirmaObligatoriaDesde`): desde ahí la rechazan tanto un kling 1.x como
-cualquier kling que baje una release ≥ 1.0. `-from-dir` comprueba la firma si el
-directorio la trae y no la exige. `install.sh` la comprueba si hay `minisign`
-instalado; sin él, solo sha256 con un aviso. Homebrew solo comprueba sha256 (la
+cualquier kling que baje una release ≥ 1.0. Desde un kling 1.x, `-from-dir` también
+la exige: un directorio sin `SHA256SUMS.minisig` se rechaza salvo con `-insecure`
+(para binarios compilados por uno mismo; avisa y comprueba el `SHA256SUMS` si lo hay),
+y una firma inválida o de otra clave es un error también con `-insecure`.
+`kling plugin install` (y las extensiones que actualiza `kling upgrade`) sigue la
+misma regla con las claves de release: firma obligatoria desde 1.0.0, `-insecure`
+acepta un `SHA256SUMS` sin firma y una firma presente siempre se comprueba; `-file`
+instala un binario local sin firma. `install.sh` exige `minisign` desde v1.0.0
+(`KLING_INSECURE_NO_MINISIGN=1` lo salta, con aviso y solo sha256); antes, sin él,
+solo sha256 con un aviso. Homebrew solo comprueba sha256 (la
 fórmula sale del `SHA256SUMS` firmado). Detalles, rotación y verificación a mano
 en `docs/firmas.md`.
 
 Límites: quien tenga la clave privada (o pueda publicar en el environment
 `release`) firma lo que quiera hasta que se rote; no hay lista de revocación, así
 que una clave comprometida se retira sacándola de `clavesRelease` en la siguiente
-release, y los kling anteriores siguen fiándose de ella. `kling plugins install`
-todavía comprueba solo el sha256 del `SHA256SUMS`.
+release, y los kling anteriores siguen fiándose de ella. `-insecure` y `-file` dejan
+la integridad en manos de quien los usa.
 
 ## Lo que NO está resuelto
 

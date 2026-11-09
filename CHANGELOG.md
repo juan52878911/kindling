@@ -9,6 +9,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Added
 
 - `/metrics` measures resources: per-machine `kling_machine_wakeups_total{kind}` (macOS `pkg_idle`/`interrupt` from rusage, Linux `voluntary_switch` over all threads), `kling_machine_disk_bytes_total{op}`, `kling_machine_cpu_throttled_seconds_total` (cgroup `throttled_usec` on Linux, the kling-vz/kling-hv regulator on macOS); for the daemon itself `kling_daemon_footprint_mib`, `kling_daemon_rss_mib`, `kling_daemon_cpu_seconds_total`, `kling_daemon_wakeups_total`, `kling_daemon_goroutines`; `kling_battery_on`; and `kling_wake_phase_ms_total{kind,phase}`, the per-phase sum of successful thaws and resumes. `GET /procstats` carries the same per-machine figures. `GET /debug/pprof/` serves the daemon's Go profiles, admin only (capability `pprof`). See `docs/api.md#métricas-de-recursos`.
+- `kling mcp serve -paused-mib N|-1` and `-paused-for`: idle persistent instances can be paused instead of frozen (~1 ms resume vs ~30 ms thaw); off by default (`docs/despertar.md`).
 - Per-volume sync mode on macOS: `-volume name:/mount:sync=barrier|none` (API `VolumeAttachment.sync`). `full` (default) keeps `F_FULLFSYNC` on every guest flush; `barrier` uses `F_BARRIERFSYNC` (kling-vz: `fsync`), 300 guest fsyncs ~1.7 s → ~0.1 s; `none` skips flushes (~10 ms) and can leave the volume's ext4 broken if the Mac goes down. Writable volumes only; accepted and ignored on Firecracker.
 - kling-hv: virtio-blk `DISCARD` and `WRITE_ZEROES` on writable disks (`F_PUNCHHOLE`, unaligned edges written as zeros): `fstrim` in the guest gives the space back to the host (216 → 16 MiB after deleting 200 MiB).
 - kling-hv: os_signpost intervals (subsystem `dev.kindling.hv`) for the cold boot, restore and freeze phases, plus events for the first guest instruction, the agent's first vsock answer and slow vCPU exits; free when nobody traces. `KLING_HV_TRACE=1` also logs a one-line breakdown per boot, restore and freeze (`docs/backend-hv.md`).
@@ -31,6 +32,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
 - macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
+- Ephemeral MCP pool: once the gateway has seen traffic, services with no calls get no prewarmed instance (it used to be destroyed and recreated every 2 × idle, forever).
+- Prewarm and keep-warm budgets charge each copy its measured footprint (PSS / `phys_footprint`, capped at `mem_mib`) instead of the full `mem_mib`, and fall back to a fixed 1 GiB when the daemon gives no memory figure (it used to be unlimited).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
 - A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
@@ -48,9 +51,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
 - Service output reaches the console (`kling logs`) only for the first 64 KiB of each start, then a notice; `kling logs -service` still has all of it.
 - The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
+- kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
+- kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 
 ### Security
 
+- `e2fsck` on guest-written disks (overlay and rw volumes before a start, `put`, bridge refresh) no longer runs with the daemon's privileges: it gets the disk as an open descriptor and a minimal environment. Linux (daemon as root): the disk's non-root owner (the VMM user with `-run-as`) or `nobody`, no groups, new net/PID/IPC namespaces, `prlimit --as` 2 GiB when `prlimit` exists; a root-owned disk is handed to `nobody` for the check and given back. macOS: a minimal `sandbox-exec` profile (no network, reads limited to the system and Homebrew). `resize2fs` and `debugfs` are not confined yet.
 - A read-write live share could fill the host's disk: writes, `truncate` and new files had no limit. The daemon now keeps a per-share quota of net growth in bytes (`daemon.share_max_mib`, default 32 GiB) and new entries (`daemon.share_max_files`, default 1,000,000), and refuses writes and creates when the host filesystem drops below `daemon.share_min_free_mib` (default 1 GiB); going over returns `ENOSPC` and changes nothing. `-1` disables a limit; `KLING_SHARE_MAX_MIB`, `KLING_SHARE_MAX_FILES` and `KLING_SHARE_MIN_FREE_MIB` override the file. Applies to FUSE and virtio-fs (`docs/compartir.md#cuota-de-las-carpetas-rw`).
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
@@ -67,6 +73,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
 - `kling-mcp`: sessions are bound to the tenant that opened them; another tenant's key gets a 404 and can't delete them.
 - `kling mcp connect` and `migrate` no longer take `-token` (it ended up in argv and shell history): use `KLING_GATEWAY_TOKEN`, `-token-file` or `gateway.token`.
+- The daemon and the MCP gateway no longer follow HTTP redirects returned by the guest agent or bridge, so a compromised guest can't make them repeat a request against another machine or a host loopback service; the guest agent's `/volume/*` routes now require POST.
 
 ### Fixed
 
