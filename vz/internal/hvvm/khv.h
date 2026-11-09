@@ -155,6 +155,10 @@ void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *sm
 int khv_prueba_cpu_on(void);
 // khv_sysreg_iss: el hv_sys_reg_t del ISS de un MSR/MRS atrapado (EC 0x18).
 uint16_t khv_sysreg_iss(uint64_t iss);
+// khv_sea_destino: EL, vector, PSTATE y ESR del aborto externo que recibe el
+// invitado por un data abort sin ISV (vm.c).
+int khv_sea_destino(uint64_t cpsr, uint64_t hcr, bool el2, uint64_t syn, uint64_t *off, uint64_t *cpsr_nuevo,
+                    uint64_t *esr);
 
 // ---- interno ----
 
@@ -308,6 +312,11 @@ void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaura
 void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
 int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
+// Bytes de datos por tanda del hilo de un disco, y por petición IN/OUT (ver
+// b_procesar). Variable solo para que las pruebas lo bajen.
+extern uint64_t vblk_tanda_max;
+int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);  // 512 WRITE en una tanda (pruebas)
+uint32_t khv_prueba_rtc(int64_t offset, int64_t *guardado);    // RTC restaurado con offset (pruebas)
 
 // Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
 int khv_prueba(const uint8_t *datos, size_t n);

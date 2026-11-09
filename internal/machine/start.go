@@ -82,6 +82,9 @@ func (m *Manager) reclamarParada(id string) ([]resolvedVolume, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := m.adjudicarVolumenesLocked(vols); err != nil {
+			return nil, err
+		}
 	}
 	live.State = api.StateCreated
 	live.FailedAt = nil
@@ -300,6 +303,7 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 			live.PID = 0
 			delete(m.socket, mc.ID)
 			m.persist()
+			m.ajustarDuenosLocked(nombresVolumenes(live.Volumes))
 		}
 		m.mu.Unlock()
 		if conVolcado {

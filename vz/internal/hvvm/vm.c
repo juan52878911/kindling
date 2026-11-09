@@ -1128,6 +1128,62 @@ uint16_t khv_sysreg_iss(uint64_t iss) {
   return (uint16_t)(op0 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2);
 }
 
+// khv_sea_destino decide cómo entra en el invitado un aborto externo síncrono
+// (SEA) por un data abort que no se puede emular: con cpsr el PSTATE de la
+// instrucción, hcr su HCR_EL2 y el2 si la VM tiene EL2 (anidada). Devuelve el
+// EL que lo recibe (1 o 2) y deja en *off el desplazamiento en su tabla de
+// vectores, en *cpsr_nuevo el PSTATE de entrada (ELxh con DAIF enmascarado) y
+// en *esr el síndrome: EC de data abort del mismo EL o de uno inferior, IL y
+// WnR los del aborto original, DFSC 0x10 (externo, fuera de la tabla de
+// páginas) y FAR válido. Es lo que hace QEMU con un aborto de MMIO sin ISV.
+int khv_sea_destino(uint64_t cpsr, uint64_t hcr, bool el2, uint64_t syn, uint64_t *off, uint64_t *cpsr_nuevo,
+                    uint64_t *esr) {
+  bool a32 = (cpsr >> 4) & 1;
+  unsigned el = a32 ? 0 : (cpsr >> 2) & 3;
+  // Con EL2: lo de EL2 se queda en EL2, y lo de EL0 con TGE (el kernel con
+  // VHE) también. Sin EL2, en EL1 siempre.
+  unsigned dest = el2 && (el == 2 || (el == 0 && ((hcr >> 27) & 1))) ? 2 : 1;
+  if (el > dest) el = dest;  // EL2/EL3 sin EL2 en la VM: no ocurre
+  if (el == dest) {
+    *off = (cpsr & 1) ? 0x200 : 0x000;  // EL actual con SPx o con SP0
+  } else {
+    *off = a32 ? 0x600 : 0x400;  // EL inferior en AArch32 o AArch64
+  }
+  *cpsr_nuevo = 0x3c0 | (dest == 2 ? 0x9 : 0x5);
+  uint64_t ec = el == dest ? 0x25 : 0x24;
+  *esr = ec << 26 | (syn & (1u << 25)) | (syn & (1u << 6)) | 0x10;
+  return (int)dest;
+}
+
+// inyectar_sea entrega al invitado un SEA por el data abort sin ISV del vCPU
+// c (khv_sea_destino): el PC y el PSTATE de la instrucción van a ELR y SPSR
+// del EL que lo recibe, la dirección a FAR, y el vCPU sigue en su vector. Así
+// un MMIO que no se puede emular (un LDP o un acceso con writeback a una
+// región de dispositivos) es un fallo del invitado, como en una máquina
+// física, y no termina el VMM.
+static void inyectar_sea(struct cpu *c, uint64_t syn) {
+  uint64_t pc = 0, cpsr = 0, hcr = 0, vbar = 0, off, nuevo, esr;
+  VOK(hv_vcpu_get_reg(c->id, HV_REG_PC, &pc));
+  VOK(hv_vcpu_get_reg(c->id, HV_REG_CPSR, &cpsr));
+  if (anidada) VOK(hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_HCR_EL2, &hcr));
+  uint64_t far = c->exit->exception.virtual_address;
+  if (khv_sea_destino(cpsr, hcr, anidada, syn, &off, &nuevo, &esr) == 2) {
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ELR_EL2, pc));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_SPSR_EL2, cpsr));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ESR_EL2, esr));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_FAR_EL2, far));
+    VOK(hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_VBAR_EL2, &vbar));
+  } else {
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ELR_EL1, pc));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_SPSR_EL1, cpsr));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_ESR_EL1, esr));
+    VOK(hv_vcpu_set_sys_reg(c->id, HV_SYS_REG_FAR_EL1, far));
+    VOK(hv_vcpu_get_sys_reg(c->id, HV_SYS_REG_VBAR_EL1, &vbar));
+  }
+  VOK(hv_vcpu_set_reg(c->id, HV_REG_CPSR, nuevo));
+  VOK(hv_vcpu_set_reg(c->id, HV_REG_PC, (vbar & ~0x7ffULL) + off));
+}
+
 // sysreg_el2: en una VM con EL2, HVF devuelve al VMM algunos accesos del
 // kernel a registros de EL2 que él mismo lleva (medido en el M4 con macOS
 // 26.5: CNTHCTL_EL2, que el kernel escribe en init_el2). Se atienden con
@@ -1304,9 +1360,12 @@ static void *vcpu_hilo(void *arg) {
         switch (ec) {
           case 0x24: {  // data abort desde EL inferior: MMIO
             if (!(syn & (1u << 24))) {
-              volcar(c, "data abort without ISV");
-              fin_vm(1, "guest data abort without ISV");
-              return NULL;
+              // Sin ISV no se sabe qué registro ni qué tamaño: el invitado
+              // recibe un SEA (inyectar_sea) en vez de terminar la VM.
+              static int avisos_isv;
+              if (avisos_isv++ < 10) volcar(c, "data abort without ISV, injecting an external abort");
+              inyectar_sea(c, syn);
+              break;
             }
             int size = 1 << ((syn >> 22) & 3);
             mmio(c, c->exit->exception.physical_address, (syn >> 6) & 1, (syn >> 16) & 0x1f, size, (syn >> 21) & 1);

@@ -59,6 +59,31 @@ func TestDiscoVariosBuferes(t *testing.T) {
 	}
 }
 
+// TestDiscoTandaAcotada: un invitado con la cola llena (512 WRITE del disco
+// entero, 1016 KiB cada uno con búferes que aliasan la misma página) no tiene
+// al hilo del disco en una sola tanda de medio GiB, que no dejaba entrar a
+// khv_pause (espera a que acabe la tanda, con plazo). La tanda para en
+// vblk_tanda_max bytes, para tras la petición en curso si la VM se está
+// pausando, y una petición mayor que una tanda falla sin tocar el disco.
+func TestDiscoTandaAcotada(t *testing.T) {
+	const pet = 254 * 4096
+	hechas, e := tandaDisco(false, 0)
+	if hechas <= 0 || e != 0 {
+		t.Fatalf("one batch: %d requests, status %d; want some and 0", hechas, e)
+	}
+	if max := int((64<<20)/pet) + 1; hechas > max {
+		t.Fatalf("one batch answered %d whole-disk WRITEs (%d MiB); want at most %d", hechas, hechas*pet>>20, max)
+	}
+	if hechas, e = tandaDisco(true, 0); hechas != 1 || e != 0 {
+		t.Fatalf("batch with the VM pausing: %d requests, status %d; want 1 and 0", hechas, e)
+	}
+	// Con un tope menor que una petición: cada una falla, y la tanda se corta
+	// igual tras la primera.
+	if hechas, e = tandaDisco(false, 512<<10); hechas != 1 || e != 1 {
+		t.Fatalf("request larger than a batch: %d requests, status %d; want 1 and 1", hechas, e)
+	}
+}
+
 // segmentos codifica segmentos de DISCARD/WRITE_ZEROES {sector, num, flags}.
 func segmentos(s ...[3]uint64) []byte {
 	b := make([]byte, 16*len(s))

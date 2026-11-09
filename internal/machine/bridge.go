@@ -15,6 +15,7 @@ package machine
 // reconstruir una imagen es pedir demasiado.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -191,7 +193,20 @@ func crecerImagen(ctx context.Context, image string, extra int64) error {
 	}
 	// resize2fs se niega a tocar un ext4 que no venga de un fsck reciente.
 	repairVolume(ctx, image)
-	if out, err := e2fsCmd(ctx, "resize2fs", image).CombinedOutput(); err != nil {
+	// Como e2fsck (A1): la imagen pudo escribirla un invitado (un commit), y
+	// resize2fs analiza sus metadatos. Confinado, con plazo y el disco por
+	// descriptor.
+	ctx, cancel := context.WithTimeout(ctx, plazoE2fsck)
+	defer cancel()
+	c := e2fsCmd(ctx, "resize2fs", rutaE2fsck)
+	fin, err := confinarSobreDisco(c, image, true)
+	if err != nil {
+		return fmt.Errorf("resize2fs %s: %w", filepath.Base(image), err)
+	}
+	defer fin()
+	c.WaitDelay = 5 * time.Second
+	if out, err := c.CombinedOutput(); err != nil {
+		out = bytes.ReplaceAll(out, []byte(rutaE2fsck), []byte(filepath.Base(image)))
 		return fmt.Errorf("resize2fs %s: %s", filepath.Base(image), conSalida(err, out))
 	}
 	return nil
@@ -384,8 +399,11 @@ func hasFile(ctx context.Context, image, path string) (bool, error) {
 	if err := nombreDebugfs(path); err != nil {
 		return false, err
 	}
-	c := exec.CommandContext(ctx, bin, "-R", "stat "+comillas(path), image)
-	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	c, fin, err := imagenDebugfs{bin: bin, file: image}.cmd(ctx, []string{"-R", "stat " + comillas(path)})
+	if err != nil {
+		return false, fmt.Errorf("debugfs on %s: %w", image, err)
+	}
+	defer fin()
 	out, err := salidaAcotada(c, maxSalidaDebugfs)
 	if err != nil {
 		return false, fmt.Errorf("debugfs on %s: %s", image, conSalida(err, out))

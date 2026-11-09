@@ -302,6 +302,15 @@ static int64_t b_es(struct vblk *b, bool escribir, int n, uint64_t total, uint64
 #define B_SEGS 32  // los del DISCARD; WRITE_ZEROES, uno
 #define B_UNMAP 1u  // VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP, el único flag que existe
 
+// Bytes de datos que mueve como mucho una tanda del hilo del disco, y una
+// petición IN/OUT sola. Mientras dura la tanda la VM no se puede pausar
+// (vblk_quieto), y khv_pause solo espera PAUSA_PLAZO_NS: sin tope, un invitado
+// con la cola llena de WRITE del disco entero (búferes que aliasan la misma
+// RAM) escribía GiB por aviso y freeze y commit no entraban nunca. Linux no
+// manda peticiones de más de unos MiB (max_sectors_kb) si no se le sube a mano.
+#define B_TANDA_MAX (64ULL << 20)
+uint64_t vblk_tanda_max = B_TANDA_MAX;
+
 static const uint8_t b_cero[64 << 10];
 
 // b_ceros escribe len bytes a cero desde off; 0 si fue bien.
@@ -336,10 +345,11 @@ static int b_hueco(struct vblk *b, uint64_t off, uint64_t len, bool ceros_si_no)
 
 // b_descartar atiende un DISCARD (ceros = false) o un WRITE_ZEROES: sus nd
 // búferes de datos son segmentos {sector u64, num_sectors u32, flags u32}.
-// Devuelve el byte de estado. Primero copia (el invitado puede cambiar su
-// RAM mientras tanto) y valida TODOS los segmentos, como read/write validan
-// sus sectores: uno malo y no se toca nada.
-static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, int nd) {
+// Devuelve el byte de estado y suma a *bytes los ceros que escribe de verdad.
+// Primero copia (el invitado puede cambiar su RAM mientras tanto) y valida
+// TODOS los segmentos, como read/write validan sus sectores: uno malo y no se
+// toca nada.
+static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, int nd, uint64_t *bytes) {
   struct {
     uint64_t sector;
     uint32_t num, flags;
@@ -363,6 +373,7 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
   for (uint64_t i = 0; i < n; i++) {
     uint64_t off = seg[i].sector * 512, len = (uint64_t)seg[i].num * 512;
     if (len == 0) continue;
+    if (ceros) *bytes += len;
     // WRITE_ZEROES sin unmap: el invitado quiere los bloques asignados
     // (fallocate sin PUNCH_HOLE, REQ_NOUNMAP), ceros de verdad.
     int r = !ceros ? b_hueco(b, off, len, false)
@@ -392,6 +403,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
   if (!vq_ptrs(q, &avail, &used, &desc)) return false;
   bool hecho = false;
   uint16_t viejo = q->used_idx;
+  uint64_t bytes = 0;  // de datos en esta tanda (vblk_tanda_max)
   // Como mucho una vuelta a la cola por aviso (dos pasadas de vueltas
   // cuentan también las de volver a mirar tras pedir aviso): un invitado que
   // ponga el used encima del avail haría que cada respuesta añadiera una
@@ -406,6 +418,14 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
       break;
     }
     if (vueltas >= 2 * q->num) {
+      vq_pedir_aviso_ya(m, q, avail, used);
+      *quedan = true;
+      break;
+    }
+    // Entre petición y petición: si la VM se está pausando, o la tanda ya
+    // movió vblk_tanda_max, se corta aquí. El hilo vuelve en cuanto no haya
+    // pausa (quedan), y khv_pause solo espera a la petición en curso.
+    if (hecho && (g_pausa || bytes >= vblk_tanda_max)) {
       vq_pedir_aviso_ya(m, q, avail, used);
       *quedan = true;
       break;
@@ -451,6 +471,13 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
           total += ch[k].len;
           off += ch[k].len;
         }
+        // Una petición más grande que una tanda entera no se toca (ver
+        // B_TANDA_MAX).
+        if (total > vblk_tanda_max) {
+          ni = 0;
+          malo = true;
+        }
+        bytes += total;
         off = hdr.sector * 512;
         if (ni > 0 && hdr.type == 0) {
           // Lo que pase del final del fichero se lee como ceros.
@@ -479,7 +506,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         }
         if (malo) estado = 1;
       } else if (hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES) {
-        estado = b_descartar(b, hdr.type == B_T_WRITE_ZEROES, ch + 1, n - 2);
+        estado = b_descartar(b, hdr.type == B_T_WRITE_ZEROES, ch + 1, n - 2, &bytes);
       }
       bool hecha = hdr.type == 0 || hdr.type == 1 || hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES;
       for (int k = 1; k < n - 1 && estado == 0 && !hecha; k++) {
