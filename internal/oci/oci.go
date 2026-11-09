@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -556,7 +557,32 @@ func acquire(ctx context.Context, sem chan struct{}) bool {
 // final, es una segunda defensa contra una capa dañada en la caché después
 // de verificarla.
 func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
-	rc, err := OpenLayer(l)
+	err := unpackCon(ctx, l, dst, budget, max, OpenLayer)
+	var roto *errAyudanteRoto
+	if errors.As(err, &roto) && ctx.Err() == nil {
+		// kling-unpack murió sin que fuera por la capa: otra vez en Go, que
+		// es más lento pero no depende de él. Lo ya descontado del
+		// presupuesto se devuelve (es la misma capa).
+		log.Printf("warning: %v; retrying the layer in Go", roto)
+		if budget != nil {
+			budget.Add(roto.leído)
+		}
+		err = unpackCon(ctx, l, dst, budget, max, openLayerGo)
+	}
+	return err
+}
+
+// openLayerGo es OpenLayer para una capa comprimida, sin kling-unpack.
+func openLayerGo(l Layer) (io.ReadCloser, error) {
+	f, err := os.Open(l.Path)
+	if err != nil {
+		return nil, err
+	}
+	return decompressGo(f)
+}
+
+func unpackCon(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64, abrir func(Layer) (io.ReadCloser, error)) error {
+	rc, err := abrir(l)
 	if err != nil {
 		// Abrir el fichero es otra cosa; lo demás es la cabecera, que no se
 		// entiende (ni gzip ni zstd, o un gzip con la cabecera rota).
@@ -571,12 +597,16 @@ func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max 
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
+	n, err := io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		os.Remove(dst)
+		var roto *errAyudanteRoto
+		if errors.As(err, &roto) {
+			roto.leído = n
+		}
 		return fmt.Errorf("unpacking: %w", err)
 	}
 	return nil
@@ -646,7 +676,8 @@ func (u *unpackReader) Read(p []byte) (int, error) {
 	if u.left != nil && u.left.Add(-int64(n)) < 0 {
 		return n, fmt.Errorf("the image unpacks to more than %d MiB", u.max>>20)
 	}
-	if err != nil && err != io.EOF && u.ctx.Err() == nil {
+	var roto *errAyudanteRoto
+	if err != nil && err != io.EOF && u.ctx.Err() == nil && !errors.As(err, &roto) {
 		err = &errCapaDañada{err}
 	}
 	return n, err
