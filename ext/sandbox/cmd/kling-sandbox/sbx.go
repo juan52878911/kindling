@@ -77,7 +77,7 @@ const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
   sbx exec <id> [--] <cmd> [args...]           runs a command inside, streaming
   sbx shell <id>                               an interactive terminal inside
   sbx cp <local|-> <id>:<path> | <id>:<path> <local|->
-  sbx hosts                                    the daemons behind the gateway
+  sbx hosts                                    the daemons behind the gateway (admin token)
 
 The client commands talk to the gateway, not to a daemon:
   kling config set sandbox.url http://gateway:8090

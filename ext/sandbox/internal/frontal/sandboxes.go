@@ -168,7 +168,7 @@ func (s *Servidor) enCadaHost(ctx context.Context, f func(context.Context, *host
 			defer cancel()
 			out[i], errs[i] = f(ctx, h)
 			if errs[i] != nil {
-				errs[i] = fmt.Errorf("%s: %w", h.Nombre, errs[i])
+				errs[i] = deHost(h, errs[i])
 			}
 		}(i, h)
 	}
@@ -223,7 +223,7 @@ func (s *Servidor) buscar(ctx context.Context, t *Tenant, id string) (*hosts.Hos
 	}
 	ms, err := h.Cliente.Sandboxes(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", h.Nombre, err)
+		return nil, nil, deHost(h, err)
 	}
 	for _, mc := range ms {
 		if mc.ID == ref && esSandboxDe(mc, t) {
@@ -247,14 +247,6 @@ func (s *Servidor) handleListar(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Kindling-Partial", strings.Join(mensajes(errs), "; "))
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-func mensajes(errs []error) []string {
-	out := make([]string, len(errs))
-	for i, e := range errs {
-		out[i] = e.Error()
-	}
-	return out
 }
 
 // handleSandbox despacha /v1/sandboxes/{host}/{ref}[/acción].
@@ -309,7 +301,7 @@ func (s *Servidor) handleBorrar(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	if err := h.Cliente.RemoveSandbox(r.Context(), mc.ID); err != nil {
-		fail(w, http.StatusBadGateway, fmt.Errorf("%s: %w", h.Nombre, err))
+		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -336,7 +328,7 @@ func (s *Servidor) handleRenovar(w http.ResponseWriter, r *http.Request, id stri
 	}
 	out, err := h.Cliente.RenewSandbox(r.Context(), mc.ID, ttl)
 	if err != nil {
-		fail(w, http.StatusBadGateway, fmt.Errorf("%s: %w", h.Nombre, err))
+		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, vista(h, out))
@@ -415,12 +407,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		// Retry-After en vez del 502/503 genérico que daría un fallo cualquiera.
 		if pet.Template != "" && api.EsFalloTSC(err) {
 			w.Header().Set("Retry-After", retryAfterReconstruccion)
-			// %v y no %w: el mensaje se aprovecha, pero no se quiere que fail()
-			// encuentre un *api.StatusError más abajo en la cadena y nos pise el
-			// 503 con el código que trajera el daemon.
-			fail(w, http.StatusServiceUnavailable, fmt.Errorf(
+			// errPublico: el mensaje (con lo que contestó el daemon) sale tal
+			// cual y fail() no busca un *api.StatusError más abajo que nos pise
+			// el 503 con el código que trajera el daemon.
+			fail(w, http.StatusServiceUnavailable, &errPublico{err: err, msg: fmt.Sprintf(
 				"template %q can't be restored right now: a host restart invalidated its golden snapshot; "+
-					"rebuilding it in the background, try again shortly (%v)", pet.Template, err))
+					"rebuilding it in the background, try again shortly (%v)", pet.Template, err)})
 			return
 		}
 		fail(w, codigoCrear(err), err)
@@ -553,6 +545,14 @@ func (e *errCuotaSinContar) Error() string {
 	return "can't check the tenant's quota, a host did not answer: " + e.err.Error()
 }
 func (e *errCuotaSinContar) Unwrap() error { return e.err }
+
+// publico es lo que ve el tenant: qué hosts no contestaron, sin sus endpoints.
+func (e *errCuotaSinContar) publico() string {
+	if hs := hostsDe(e.err); len(hs) > 0 {
+		return "can't check the tenant's quota, host " + unir(hs) + " did not answer; try again later"
+	}
+	return "can't check the tenant's quota, a host did not answer; try again later"
+}
 
 // codigoReservar es el estado HTTP de un fallo de reservar.
 func codigoReservar(err error) int {

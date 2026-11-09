@@ -136,7 +136,7 @@ func (f *falso) rutas() http.Handler {
 			hay = hay || s == nombre
 		}
 		if !hay {
-			fail(w, 404, fmt.Errorf("no snapshot %q", nombre))
+			failDaemon(w, 404, fmt.Errorf("no snapshot %q", nombre))
 			return
 		}
 		writeJSON(w, 200, &api.Snapshot{Name: nombre, AllowExec: true, Annotations: f.snapAnot[nombre]})
@@ -144,7 +144,7 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("PUT /snapshots/{name}/annotations/{key}", func(w http.ResponseWriter, r *http.Request) {
 		var valor json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&valor); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		nombre, clave := r.PathValue("name"), r.PathValue("key")
@@ -165,7 +165,7 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("POST /machines", func(w http.ResponseWriter, r *http.Request) {
 		var req api.RunRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		b := make([]byte, 8)
@@ -182,7 +182,7 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("POST /machines/{ref}/commit", func(w http.ResponseWriter, r *http.Request) {
 		var req api.CommitRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		f.mu.Lock()
@@ -245,12 +245,12 @@ func (f *falso) rutas() http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.renewFalla {
-			fail(w, 500, fmt.Errorf("renew failed"))
+			failDaemon(w, 500, fmt.Errorf("renew failed"))
 			return
 		}
 		mc, ok := f.maquinas[r.PathValue("ref")]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no sandbox"))
+			failDaemon(w, 404, fmt.Errorf("no sandbox"))
 			return
 		}
 		ahora := time.Now()
@@ -262,7 +262,7 @@ func (f *falso) rutas() http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if _, ok := f.maquinas[r.PathValue("ref")]; !ok {
-			fail(w, 404, fmt.Errorf("no sandbox"))
+			failDaemon(w, 404, fmt.Errorf("no sandbox"))
 			return
 		}
 		delete(f.maquinas, r.PathValue("ref"))
@@ -275,7 +275,7 @@ func (f *falso) rutas() http.Handler {
 		defer f.mu.Unlock()
 		mc, ok := f.maquinas[r.PathValue("ref")]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no machine"))
+			failDaemon(w, 404, fmt.Errorf("no machine"))
 			return
 		}
 		mc.Labels = api.MergeLabels(mc.Labels, labels)
@@ -298,7 +298,7 @@ func (f *falso) existe(ref string) bool {
 func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 	var req api.SandboxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, 400, err)
+		failDaemon(w, 400, err)
 		return
 	}
 	f.mu.Lock()
@@ -309,7 +309,7 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 		// causa es un reinicio del host: api.EsFalloTSC lo reconoce por el
 		// token "TSC", y va en un 500 porque el daemon no tiene un código propio
 		// para esto (es la traducción, no un StatusError).
-		fail(w, 500, fmt.Errorf("Could not set TSC scaling within the snapshot: Invalid argument (os error 22)"))
+		failDaemon(w, 500, fmt.Errorf("Could not set TSC scaling within the snapshot: Invalid argument (os error 22)"))
 		return
 	}
 	if f.crearCodigo != 0 {
@@ -317,7 +317,7 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 		if f.crearCodigo == api.StatusMachineLimit {
 			msg = "machine limit reached"
 		}
-		fail(w, f.crearCodigo, fmt.Errorf("%s", msg))
+		failDaemon(w, f.crearCodigo, fmt.Errorf("%s", msg))
 		return
 	}
 	if req.From != "" {
@@ -326,7 +326,7 @@ func (f *falso) crear(w http.ResponseWriter, r *http.Request) {
 			ok = ok || s == req.From
 		}
 		if !ok {
-			fail(w, 404, fmt.Errorf("no snapshot %q", req.From))
+			failDaemon(w, 404, fmt.Errorf("no snapshot %q", req.From))
 			return
 		}
 	}
@@ -390,7 +390,7 @@ func (f *falso) maquina(id string) *api.Machine {
 
 func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 	if !f.existe(r.PathValue("ref")) {
-		fail(w, 404, fmt.Errorf("no machine"))
+		failDaemon(w, 404, fmt.Errorf("no machine"))
 		return
 	}
 	var req api.ExecRequest
@@ -428,7 +428,7 @@ func (f *falso) exec(w http.ResponseWriter, r *http.Request) {
 
 func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 	if !f.existe(r.PathValue("ref")) {
-		fail(w, 404, fmt.Errorf("no machine"))
+		failDaemon(w, 404, fmt.Errorf("no machine"))
 		return
 	}
 	q := r.URL.Query()
@@ -439,7 +439,7 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		b, ok := f.ficheros[clave]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no such file"))
+			failDaemon(w, 404, fmt.Errorf("no such file"))
 			return
 		}
 		if q.Get("stat") == "1" {
@@ -451,11 +451,11 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		b, err := io.ReadAll(io.LimitReader(r.Body, api.FileMaxUpload+1))
 		if err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		if int64(len(b)) > api.FileMaxUpload {
-			fail(w, 413, fmt.Errorf("too big"))
+			failDaemon(w, 413, fmt.Errorf("too big"))
 			return
 		}
 		f.ficheros[clave] = b
@@ -470,11 +470,11 @@ func (f *falso) files(w http.ResponseWriter, r *http.Request) {
 // una señal con un exit, y si shellIlegal manda antes un resize hacia fuera.
 func (f *falso) shell(w http.ResponseWriter, r *http.Request) {
 	if !f.existe(r.PathValue("ref")) {
-		fail(w, 404, fmt.Errorf("no machine"))
+		failDaemon(w, 404, fmt.Errorf("no machine"))
 		return
 	}
 	if !strings.EqualFold(r.Header.Get("Upgrade"), api.ShellProto) {
-		fail(w, 426, fmt.Errorf("upgrade required"))
+		failDaemon(w, 426, fmt.Errorf("upgrade required"))
 		return
 	}
 	// Como el daemon real: el cuerpo se consume ANTES de secuestrar, o sus
@@ -585,7 +585,7 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 		defer f.mu.Unlock()
 		v, ok := f.store[r.PathValue("ns")][r.PathValue("key")]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no key"))
+			failDaemon(w, 404, fmt.Errorf("no key"))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -594,7 +594,7 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 	m.HandleFunc("PUT /store/{ns}/{key}", func(w http.ResponseWriter, r *http.Request) {
 		var v json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		f.mu.Lock()
@@ -618,23 +618,23 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 	m.HandleFunc("POST /graphs", func(w http.ResponseWriter, r *http.Request) {
 		var req api.GraphRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		g := req.Graph
 		if err := api.ValidateGraph(&g); err != nil {
-			fail(w, 400, err)
+			failDaemon(w, 400, err)
 			return
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.grafoUpCodigo != 0 {
-			fail(w, f.grafoUpCodigo, fmt.Errorf("no room for the graph"))
+			failDaemon(w, f.grafoUpCodigo, fmt.Errorf("no room for the graph"))
 			return
 		}
 		for _, otro := range f.grafos {
 			if otro.Name == g.Name {
-				fail(w, 409, fmt.Errorf("graph %q already exists", g.Name))
+				failDaemon(w, 409, fmt.Errorf("graph %q already exists", g.Name))
 				return
 			}
 		}
@@ -674,7 +674,7 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 		defer f.mu.Unlock()
 		g, ok := f.grafos[r.PathValue("ref")]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no graph"))
+			failDaemon(w, 404, fmt.Errorf("no graph"))
 			return
 		}
 		writeJSON(w, 200, f.vistaGrafoLocked(g))
@@ -685,11 +685,11 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 			defer f.mu.Unlock()
 			g, ok := f.grafos[r.PathValue("ref")]
 			if !ok {
-				fail(w, 404, fmt.Errorf("no graph"))
+				failDaemon(w, 404, fmt.Errorf("no graph"))
 				return
 			}
 			if falla() {
-				fail(w, 500, fmt.Errorf("could not change the graph state"))
+				failDaemon(w, 500, fmt.Errorf("could not change the graph state"))
 				return
 			}
 			for _, n := range g.Nodes {
@@ -722,7 +722,7 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 		defer f.mu.Unlock()
 		g, ok := f.grafos[r.PathValue("ref")]
 		if !ok {
-			fail(w, 404, fmt.Errorf("no graph"))
+			failDaemon(w, 404, fmt.Errorf("no graph"))
 			return
 		}
 		for _, n := range g.Nodes {
@@ -768,4 +768,10 @@ func (f *falso) grafosVivos() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.grafos)
+}
+
+// failDaemon contesta como el daemon: el mensaje entero, sin el saneado que
+// fail aplica a los errores que van al tenant.
+func failDaemon(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, api.Error{Message: err.Error()})
 }

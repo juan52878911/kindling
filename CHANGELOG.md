@@ -78,6 +78,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
+- kling-sandbox: `/v1/hosts`, which returns the daemons' socket paths and addresses, needs an admin tenant (`KLING_SANDBOX_ADMINS=name,...`), and `/v1/metrics` only shows the caller's own per-tenant series unless the caller is an admin. Errors from a host that did not answer name the host but no longer include its endpoint or the network error (those go to the gateway log); the `X-Kindling-Partial` warning does the same.
 
 ### Fixed
 

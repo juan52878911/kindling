@@ -114,7 +114,8 @@ func crea(t *testing.T, srv *httptest.Server, token string, pet any) Sandbox {
 // ---- tests
 
 func TestHealthSinTokenYElRestoConToken(t *testing.T) {
-	srv, _ := montar(t, map[string]*falso{"a": nuevoFalso(t)})
+	srv, _ := montar(t, map[string]*falso{"a": nuevoFalso(t)},
+		Tenant{Nombre: "alice", Token: tokenAlice, Admin: true}, Tenant{Nombre: "bob", Token: tokenBob})
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/health", nil), 200)
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/hosts", nil), 401)
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/sandboxes", nil), 401)
@@ -551,7 +552,7 @@ func TestMetricasExponePorTenantYResultado(t *testing.T) {
 	f := nuevoFalso(t)
 	srv, _ := montar(t, map[string]*falso{"a": f},
 		Tenant{Nombre: "alice", Token: tokenAlice},
-		Tenant{Nombre: "bob", Token: tokenBob, MaxSandboxes: 1})
+		Tenant{Nombre: "bob", Token: tokenBob, MaxSandboxes: 1, Admin: true})
 
 	// Sin token, como el resto de rutas protegidas.
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/metrics", nil), 401)
