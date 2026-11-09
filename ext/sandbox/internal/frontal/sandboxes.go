@@ -35,6 +35,10 @@ import (
 // nadie pueda hacernos leer sin fin.
 const maxCuerpo = 64 << 10
 
+// prefijoReservado es el espacio de etiquetas del sistema (api.LabelOwner,
+// api.LabelDBPrefix y las que vengan): ningún cliente puede fijarlas.
+const prefijoReservado = "kling."
+
 // maxEtiquetas es cuántas etiquetas propias admite una petición. Van al
 // meta.json de la máquina en el daemon.
 const maxEtiquetas = 32
@@ -480,9 +484,11 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	for k := range p.Labels {
 		// Las reservadas las pone el frontal: dejar que el cliente las mande
 		// sería dejarle firmar como otro tenant.
-		// kling.db. es de ext/db: dejar que el cliente fije kling.db.owner o
-		// kling.db.state sería dejarle falsificar de quién es una base.
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, api.LabelDBPrefix) {
+		// Todo lo que empieza por kling. es del sistema: kling.db.* es de
+		// ext/db (falsificar de quién es una base) y kling.owner saca la
+		// máquina del frontal, que dejaría de contarla en la cuota, listarla,
+		// borrarla y limpiarla: creación ilimitada e invisible.
+		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
 			return fmt.Errorf("label %q is reserved", k)
 		}
 		if !api.KeyPattern.MatchString(k) {
