@@ -190,13 +190,24 @@ func (s *Service) Start(env []string) {
 	go s.loop(env)
 }
 
+// serviceConsoleMax es cuánto de la salida de cada arranque del servicio va
+// también a la consola.
+const serviceConsoleMax = 64 << 10
+
 func (s *Service) loop(env []string) {
 	defer close(s.done)
 	out := &rotatingLog{path: s.logPath, max: api.GuestServiceLogMax}
 	defer out.Close()
-	w := io.Writer(out)
+	// w lleva los avisos del agente: al log y a la consola, siempre. La
+	// salida del servicio va entera al log y a la consola solo su principio
+	// (consola): cada byte por el UART emulado es una salida al VMM, y un
+	// servicio que habla mucho costaba en el host CPU por duplicado.
+	w, salida := io.Writer(out), io.Writer(out)
+	var consola *consolaAcotada
 	if s.console != nil {
 		w = io.MultiWriter(out, s.console)
+		consola = &consolaAcotada{w: s.console, max: serviceConsoleMax}
+		salida = io.MultiWriter(out, consola)
 	}
 	// Los ulimits y sysctls, una vez y antes del primer arranque.
 	for _, w2 := range applyLimits(s.spec) {
@@ -205,7 +216,10 @@ func (s *Service) loop(env []string) {
 	backoff := time.Second
 	for {
 		t0 := time.Now()
-		err := s.runOnce(env, w)
+		if consola != nil {
+			consola.reset()
+		}
+		err := s.runOnce(env, salida)
 		s.mu.Lock()
 		stopping, again := s.stopping, s.restartReq
 		s.restartReq = false
@@ -901,6 +915,40 @@ func (l *rotatingLog) Write(p []byte) (int, error) {
 	// Siempre "todo escrito": un error aquí cortaría la copia a la consola
 	// (io.MultiWriter para en el primero que falla).
 	return escrito, nil
+}
+
+// consolaAcotada deja pasar a w los primeros max bytes desde el último reset
+// y, al llegar al tope, una línea que dice dónde sigue la salida. Nunca
+// falla: io.MultiWriter dejaría de escribir también en el log.
+type consolaAcotada struct {
+	mu      sync.Mutex
+	w       io.Writer
+	max, n  int
+	avisado bool
+}
+
+func (c *consolaAcotada) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if resta := c.max - c.n; resta > 0 {
+		q := p[:min(len(p), resta)]
+		_, _ = c.w.Write(q)
+		c.n += len(q)
+		if len(q) == len(p) {
+			return len(p), nil
+		}
+	}
+	if !c.avisado {
+		c.avisado = true
+		fmt.Fprintf(c.w, "\nkling-guest: service output past %d KiB goes only to %s (kling logs -service)\n", c.max>>10, api.GuestServiceLog)
+	}
+	return len(p), nil
+}
+
+func (c *consolaAcotada) reset() {
+	c.mu.Lock()
+	c.n, c.avisado = 0, false
+	c.mu.Unlock()
 }
 
 func (l *rotatingLog) Close() {
