@@ -86,11 +86,67 @@ func comillas(p string) string { return `"` + p + `"` }
 // orden y con qué cerrar, para después de que acabe.
 func (im imagenDebugfs) cmd(ctx context.Context, args []string, extra ...*os.File) (*exec.Cmd, func(), error) {
 	c := exec.CommandContext(ctx, im.bin, append(args, rutaE2fsck)...)
-	fin, err := confinarSobreDisco(c, im.file, slices.Contains(args, "-w"), extra...)
+	fin, err := confinarSobreDisco(c, im.file, slices.Contains(args, "-w"))
 	if err != nil {
 		return nil, nil, err
 	}
+	// Los descriptores extra, después del disco y ya con el usuario decidido.
+	for _, f := range extra {
+		g, soltar, err := fuenteParaConfinado(c, f, filepath.Dir(im.file))
+		if err != nil {
+			fin()
+			return nil, nil, err
+		}
+		c.ExtraFiles = append(c.ExtraFiles, g)
+		antes := fin
+		fin = func() { soltar(); antes() }
+	}
 	return c, fin, nil
+}
+
+// fuenteParaConfinado da a la orden confinada un fichero del host que tiene
+// que leer (el de un put). Si corre con otro usuario (Linux con el daemon
+// root), abrir /dev/fd/N vuelve a comprobar los permisos del inodo, y el
+// fichero del host no tiene por qué ser legible por ese usuario; darle el
+// original (chown o chmod) le abriría lo que no debe ver. Recibe una copia:
+// un temporal en dir (del daemon, de root), borrado nada más crearlo —no
+// tiene ruta que nadie pueda abrir— y cedido por descriptor a ese usuario,
+// 0400. Lo cedido es solo lo que va a acabar dentro de la imagen.
+//
+// Un pipe no vale: debugfs write necesita un fichero normal (lo mide con
+// fstat), y el de root nace 0600 de root. Sin cambio de usuario (macOS, donde
+// /dev/fd/N es un dup, o el daemon sin root) se pasa el original.
+func fuenteParaConfinado(c *exec.Cmd, f *os.File, dir string) (*os.File, func(), error) {
+	nada := func() {}
+	if c.SysProcAttr == nil || c.SysProcAttr.Credential == nil {
+		return f, nada, nil
+	}
+	cr := c.SysProcAttr.Credential
+	tmp, err := os.CreateTemp(dir, ".kling-put-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = os.Remove(tmp.Name())
+	fallo := func(err error) (*os.File, func(), error) {
+		tmp.Close()
+		return nil, nil, fmt.Errorf("copying %s for debugfs: %w", filepath.Base(f.Name()), err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fallo(err)
+	}
+	if _, err := io.Copy(tmp, f); err != nil {
+		return fallo(err)
+	}
+	if err := tmp.Chmod(0o400); err != nil {
+		return fallo(err)
+	}
+	if err := tmp.Chown(int(cr.Uid), int(cr.Gid)); err != nil {
+		return fallo(err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fallo(err)
+	}
+	return tmp, func() { tmp.Close() }, nil
 }
 
 // leer ejecuta un comando de solo lectura.
