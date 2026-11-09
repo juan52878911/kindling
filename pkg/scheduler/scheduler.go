@@ -13,13 +13,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -523,7 +526,66 @@ func (g *Scheduler) topeReplicas(service string) int {
 func proxyInvitado(target *url.URL) *httputil.ReverseProxy {
 	p := httputil.NewSingleHostReverseProxy(target)
 	sinCredencialDelGateway(p)
+	soloRespuestaPermitida(p)
 	return p
+}
+
+// cabecerasDelInvitado son las cabeceras de respuesta que el otro lado puede
+// imponer al cliente: las del protocolo MCP (Streamable HTTP) y las de HTTP que
+// hacen falta para leer el cuerpo. El resto (WWW-Authenticate, Set-Cookie,
+// CORS, Location, Alt-Svc...) se descarta: el cliente habla con el gateway, y
+// que el puente pidiera credenciales con su propio realm, plantara una cookie
+// en el origen del gateway o le mandara a otra ruta es suplantarlo.
+var cabecerasDelInvitado = map[string]bool{
+	"Mcp-Session-Id":       true,
+	"Mcp-Protocol-Version": true,
+	"Content-Type":         true,
+	"Content-Length":       true,
+	"Content-Encoding":     true,
+	"Cache-Control":        true,
+	"Date":                 true,
+	"Vary":                 true,
+	"Allow":                true,
+	"Retry-After":          true,
+	"X-Accel-Buffering":    true,
+}
+
+// soloRespuestaPermitida filtra lo que el otro lado del proxy devuelve. Un 3xx
+// se convierte en 502 sin Location ni cuerpo: con un 307 a /mcp/<otro>, un
+// invitado hostil reenviaría al cliente (con su token) a un servicio ajeno del
+// mismo gateway. Se reescribe la respuesta en vez de devolver un error para no
+// entrar en el ErrorHandler, que trata los fallos de conexión y reintenta.
+func soloRespuestaPermitida(p *httputil.ReverseProxy) {
+	p.ModifyResponse = func(res *http.Response) error {
+		if res.StatusCode == http.StatusSwitchingProtocols {
+			// La subida (WebSocket) necesita Upgrade y Connection para que
+			// ReverseProxy la complete; solo ocurre si el cliente la pidió.
+			filtrarCabeceras(res.Header, "Upgrade", "Connection", "Sec-Websocket-Accept", "Sec-Websocket-Protocol")
+			return nil
+		}
+		if res.StatusCode >= 300 && res.StatusCode < 400 {
+			_ = res.Body.Close()
+			msg := fmt.Sprintf("the upstream answered %d (a redirect): the gateway does not forward redirects\n", res.StatusCode)
+			res.StatusCode, res.Status = http.StatusBadGateway, "502 Bad Gateway"
+			res.Header = http.Header{"Content-Type": {"text/plain; charset=utf-8"}}
+			res.Body = io.NopCloser(strings.NewReader(msg))
+			res.ContentLength = int64(len(msg))
+			res.Header.Set("Content-Length", strconv.Itoa(len(msg)))
+			res.Trailer = nil
+			return nil
+		}
+		filtrarCabeceras(res.Header)
+		filtrarCabeceras(res.Trailer)
+		return nil
+	}
+}
+
+func filtrarCabeceras(h http.Header, extra ...string) {
+	for k := range h {
+		if !cabecerasDelInvitado[http.CanonicalHeaderKey(k)] && !slices.Contains(extra, http.CanonicalHeaderKey(k)) {
+			delete(h, k)
+		}
+	}
 }
 
 func sinCredencialDelGateway(p *httputil.ReverseProxy) {
