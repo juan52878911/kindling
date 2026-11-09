@@ -17,7 +17,9 @@ package machine
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,11 +48,46 @@ func maxMemPressure() float64 {
 // puedan fingir un host bajo presión.
 var psiMemoria = "/proc/pressure/memory"
 
+// psiEsperado dice si este sistema debería tener PSI: en Linux, que falte
+// apaga una comprobación y se avisa; en macOS no existe y no hay nada que
+// decir. Variable para los tests.
+var psiEsperado = runtime.GOOS == "linux"
+
+// avisosAdmision recuerda qué comprobaciones de admisión se apagaron solas y
+// ya se dijo en el log: una vez, no en cada petición.
+var avisosAdmision sync.Map
+
+// avisarAdmision escribe en el log, solo la primera vez por clave, que una
+// comprobación de admisión está apagada.
+func avisarAdmision(clave, format string, a ...any) {
+	if _, ya := avisosAdmision.LoadOrStore(clave, true); !ya {
+		log.Printf(format, a...)
+	}
+}
+
+// statfsAdmision es statfsRaiz para la admisión: si falla, la comprobación se
+// salta (no bloquea nada), pero se dice en el log; y si vuelve a funcionar,
+// el próximo fallo se dirá otra vez.
+func statfsAdmision(root string, st *syscall.Statfs_t) error {
+	err := statfsRaiz(root, st)
+	if err != nil {
+		avisarAdmision("statfs", "WARNING: admission: statfs %s: %v: the disk checks are off until it works "+
+			"(machines are admitted without looking at free disk)", root, err)
+		return err
+	}
+	avisosAdmision.Delete("statfs")
+	return nil
+}
+
 // memPressure devuelve "some avg10" de /proc/pressure/memory, o -1 si el kernel
 // no lo expone (PSI desactivado, o no es Linux).
 func memPressure() float64 {
 	f, err := os.Open(psiMemoria)
 	if err != nil {
+		if psiEsperado && maxMemPressure() > 0 {
+			avisarAdmision("psi", "WARNING: admission: can't read %s (%v): the memory-pressure check is off "+
+				"(enable PSI in the kernel, psi=1, or set KLING_MAX_MEM_PRESSURE=0 to silence this)", psiMemoria, err)
+		}
 		return -1
 	}
 	defer f.Close()
@@ -103,6 +140,10 @@ func minFreeDiskMiB() int64 {
 	return minDiscoLibrePlataforma
 }
 
+// MinFreeDiskMiB es minFreeDiskMiB para el daemon, que avisa al arrancar si
+// el disco ya está cerca de ese mínimo.
+func MinFreeDiskMiB() int64 { return minFreeDiskMiB() }
+
 // maxDiskMiB es el tope de RunRequest.DiskMiB: KLING_MAX_DISK_MIB, que solo
 // puede bajarlo (entre minOverlayMiB y maxOverlayMiB).
 func maxDiskMiB() int {
@@ -119,7 +160,7 @@ func maxDiskMiB() int {
 // dejaría al host sin disco.
 func (m *Manager) checkDiskParaOverlay(diskMiB int) error {
 	var st syscall.Statfs_t
-	if err := statfsRaiz(m.root, &st); err != nil {
+	if err := statfsAdmision(m.root, &st); err != nil {
 		return nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
@@ -181,7 +222,7 @@ func (m *Manager) checkDisk() error {
 		return nil
 	}
 	var st syscall.Statfs_t
-	if err := statfsRaiz(m.root, &st); err != nil {
+	if err := statfsAdmision(m.root, &st); err != nil {
 		return nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20
@@ -220,7 +261,7 @@ var statfsRaiz = syscall.Statfs
 // (o de fallar).
 func (m *Manager) reservarDiscoParaVolcado(memMiB int, que string) (func(), error) {
 	var st syscall.Statfs_t
-	if err := statfsRaiz(m.root, &st); err != nil {
+	if err := statfsAdmision(m.root, &st); err != nil {
 		return func() {}, nil // sin poder medirlo no se bloquea nada
 	}
 	libre := int64(st.Bavail) * int64(st.Bsize) >> 20

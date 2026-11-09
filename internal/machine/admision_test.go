@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -100,5 +102,51 @@ func TestEsVirtualSegunDMI(t *testing.T) {
 		if got := esVirtualSegunDMI(dmi); got != want {
 			t.Errorf("%q: %v, quería %v", dmi, got, want)
 		}
+	}
+}
+
+// Una comprobación de admisión que se apaga sola (sin PSI en Linux, statfs
+// que falla) lo dice en el log, una vez y no en cada petición; y si vuelve a
+// fallar después de funcionar, otra vez.
+func TestAdmisionApagadaLoDice(t *testing.T) {
+	buf := capturarLog(t)
+	avisosAdmision = sync.Map{}
+	t.Cleanup(func() { avisosAdmision = sync.Map{} })
+
+	viejoPSI, viejoLinux := psiMemoria, psiEsperado
+	psiMemoria, psiEsperado = filepath.Join(t.TempDir(), "no-existe"), true
+	t.Cleanup(func() { psiMemoria, psiEsperado = viejoPSI, viejoLinux })
+	t.Setenv("KLING_MAX_MEM_PRESSURE", "")
+	for range 3 {
+		if err := checkPressure(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "memory-pressure check is off"); n != 1 {
+		t.Errorf("%d avisos de PSI, quería 1:\n%s", n, buf)
+	}
+
+	m := newTestManager(t)
+	t.Setenv("KLING_MIN_FREE_DISK_MIB", "")
+	viejo := statfsRaiz
+	t.Cleanup(func() { statfsRaiz = viejo })
+	statfsRaiz = func(string, *syscall.Statfs_t) error { return syscall.EIO }
+	buf.Reset()
+	for range 3 {
+		if err := m.checkDisk(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "disk checks are off"); n != 1 {
+		t.Errorf("%d avisos de statfs, quería 1:\n%s", n, buf)
+	}
+	// Vuelve a funcionar y vuelve a fallar: se dice otra vez.
+	statfsRaiz = viejo
+	m.checkDisk()
+	statfsRaiz = func(string, *syscall.Statfs_t) error { return syscall.EIO }
+	buf.Reset()
+	m.checkDisk()
+	if !strings.Contains(buf.String(), "disk checks are off") {
+		t.Errorf("el segundo fallo no se dijo:\n%s", buf)
 	}
 }

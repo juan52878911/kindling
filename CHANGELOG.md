@@ -19,12 +19,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db up` with no template uses `pg` and builds it from `postgres:16-alpine` the first time (`-from-oci REF` for a named template that is missing); `-json` prints what is needed to connect (password only with `-dsn`), `-dsn` prints the URL. On an M4, zero to the first query in one command and 14.9 s, download included; then ~0.1 s per copy.
 - `kling db sql <copy> "SQL" [-json]`: SQL from the host without psql, as the app role or `-role`; JSON gives columns, rows (NULL as null) and command tags.
 - `kling try -image` takes a Docker reference (imported the first time, like `run -image`), and `kling try -json` prints one object with `exit_code`, `stdout`, `stderr`, `ready_ms` and `duration_ms`.
+- The daemon log says more: authz denials with uid, tenant, method and path (at most one per caller and route a minute, with a count of the rest), a startup warning when the disk is at or near the admission minimum, and a warning when admission turns a check off because PSI is missing or `statfs` fails.
 - `-json` on `save`, `freeze`, `thaw`, `pause`, `stop`, `rm`, `start`, `cp` and `machine squeeze|resize|secret|credential`: they print what they left, one line per ref. With `-json` an error is one `{"error","code","try"}` line on stderr. The conventions (stdout/stderr, keys, codes, flags) are in `docs/guide.md#cli-conventions-output-json-flags`.
 - `kling doctor` checks the daemon's socket and its free disk against the admission minimum; `/info` reports `disk_free_bytes` (admin view).
 - Hints from the daemon's error codes: `disk_full` and `insufficient_memory` say what to do; a missing kernel points to `kling up -check`, an invalid name gives the naming rules, and `kling db` without the extension says what to install.
 
 ### Changed
 
+- `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
+- A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
 - The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
 - kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
@@ -61,6 +64,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The daemon sweeps, before it starts listening, what builds and downloads cut short by a crash left behind: `<name>.NNNN` work directories and `imagefile-*` under `<root>/build/`, `.part` temporaries in the OCI blob cache and `.tmp-*` in the verified caches. They used to be removed only by the build's own `defer`.
 - When `kling-unpack` starts and then dies with a status other than 1 (a signal, the OOM killer, a Rust panic), the layer is decompressed again in Go instead of failing the build, and streaming readers get the error with a `KLING_UNPACK=0` hint.
 - OCI pulls follow at most 3 chained image indexes before the manifest; a registry could chain as many as it liked, one request each.
+- `kling upgrade` checks free space in every destination before stopping the daemon (the new binaries plus 64 MiB); running out halfway also broke the rollback and left the daemon stopped.
+- An unreadable `publish.json` is moved to `publish.json.corrupt-<ns>` instead of being overwritten with an empty list.
+- `kling upgrade` explains a release signed with a rotated key (go through the intermediate release), warns about extensions it could not upgrade instead of skipping them, and reads `SHA256SUMS` in memory instead of through `os.TempDir()`.
+- The warm pool no longer stays empty until a restart after a transient failure (a 507): refills retry with backoff, and a claim on an empty pool starts a new one.
 - A bad flag is a usage error (exit 2, `error:` and `try: kling help <cmd>`) instead of the flag package's raw usage; unknown subcommands exit 2 instead of 1, and `ps`, `top`, `events`, `topo`, `version`, `status` and `doctor` refuse extra arguments.
 - `kling save` with no daemon reports the connection error instead of a guest that is not serving.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.

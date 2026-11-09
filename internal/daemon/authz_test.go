@@ -102,6 +102,11 @@ func sembrar(t *testing.T, root string) {
 		{ID: "bbbb000000000001", Name: "caja-b", State: api.StateWarm, Labels: etq(api.LabelOwner, "b", api.LabelKind, api.KindSandbox)},
 		{ID: "dddd000000000001", Name: "del-admin", State: api.StateWarm},
 	}
+	// Con FrozenAt, /metrics saca series por máquina (TestMetricsPorRol).
+	desde := time.Now().Add(-time.Minute)
+	for _, m := range maquinas {
+		m.FrozenAt = &desde
+	}
 	b, _ := json.Marshal(maquinas)
 	if err := os.WriteFile(filepath.Join(root, "state.json"), b, 0o600); err != nil {
 		t.Fatal(err)
@@ -863,5 +868,54 @@ func TestAuthzPorElSocket(t *testing.T) {
 	t.Setenv(api.AuthzTokenEnv, "")
 	if _, err := api.NewClient("unix://" + sock).List(ctx); err == nil {
 		t.Fatal("sin peercred debía negarse")
+	}
+}
+
+// Las denegaciones quedan en el log del daemon con quién, qué y por qué; y un
+// cliente que repite un token inválido no lo inunda.
+func TestAuthzDenegacionesEnElLog(t *testing.T) {
+	buf := conLog(t)
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := conStubs(s)
+
+	// Sin rol.
+	como(t, h, uidNadie, "GET", "/machines", "")
+	// Con rol, sobre algo que no es suyo.
+	como(t, h, uidA, "DELETE", "/machines/caja-b", "")
+	out := buf.String()
+	for _, s := range []string{
+		fmt.Sprintf("uid %d", uidNadie), `GET "/machines"`,
+		fmt.Sprintf("uid %d", uidA), `tenant "a"`, `DELETE "/machines/caja-b"`,
+	} {
+		if !strings.Contains(out, s) {
+			t.Errorf("log sin %q:\n%s", s, out)
+		}
+	}
+
+	// Un token inválido mil veces: una línea, y la siguiente que pase dice
+	// cuántas se callaron.
+	buf.Reset()
+	for range 1000 {
+		req := httptest.NewRequest("GET", "/machines", nil)
+		req = req.WithContext(context.WithValue(req.Context(), claveLlamante{}, Llamante{UID: uidNadie, Conocido: true}))
+		req.Header.Set("Authorization", "Bearer no-vale")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("token inválido = %d", rr.Code)
+		}
+	}
+	if n := strings.Count(buf.String(), "authz: denied"); n != 1 {
+		t.Fatalf("%d líneas por 1000 tokens inválidos, quería 1:\n%.2000s", n, buf.String())
+	}
+	s.authz.negados.ahora = func() time.Time { return time.Now().Add(time.Hour) }
+	buf.Reset()
+	como(t, h, uidNadie, "GET", "/machines", "")
+	req := httptest.NewRequest("GET", "/machines", nil)
+	req = req.WithContext(context.WithValue(req.Context(), claveLlamante{}, Llamante{UID: uidNadie, Conocido: true}))
+	req.Header.Set("Authorization", "Bearer no-vale")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if !strings.Contains(buf.String(), "999 more like it") {
+		t.Errorf("no dice cuántas se callaron:\n%s", buf.String())
 	}
 }

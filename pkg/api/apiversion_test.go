@@ -90,6 +90,10 @@ func TestDaemonDemasiadoViejoEsUnErrorClaro(t *testing.T) {
 		if !strings.Contains(err.Error(), "update the daemon") || strings.HasPrefix(err.Error(), "Get ") {
 			t.Fatalf("mensaje poco claro: %q", err)
 		}
+		// La salida vale en Linux y en macOS: kling upgrade, no systemctl.
+		if !strings.Contains(err.Error(), "sudo kling upgrade") || strings.Contains(err.Error(), "systemctl") {
+			t.Fatalf("mensaje sin salida en macOS: %q", err)
+		}
 	}
 }
 

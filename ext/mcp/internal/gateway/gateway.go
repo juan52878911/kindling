@@ -62,6 +62,12 @@ type Gateway struct {
 
 	aisl isolationCache // qué servicios dan una microVM a cada sesión
 
+	// duenos: clave de sesión acuñada -> nombre del tenant que la abrió. La
+	// ruta del scheduler no sabe de tenants, y sin esto cualquier token válido
+	// que conociera la clave de otro podía usar (o cerrar) su sesión. Se poda
+	// en OnTick junto con las rutas que ya no existen.
+	duenos sync.Map
+
 	// Último estado de salud escrito por servicio, para no repetir la escritura
 	// en cada petición. Ver anotarSalud.
 	saludMu    sync.Mutex
@@ -112,7 +118,10 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	// Una instancia que no contesta marca la salud del servicio.
 	g.OnProxyError = g.anotarFallo
 	// Las sesiones del agregador viven más que las instancias: son baratas.
-	g.OnTick = func(ctx context.Context) { g.agg.reap(ctx, g.Idle()*4) }
+	g.OnTick = func(ctx context.Context) {
+		g.agg.reap(ctx, g.Idle()*4)
+		g.podarDuenos()
+	}
 	return g
 }
 
@@ -335,7 +344,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// que siga funcionando.
 	if ext := r.Header.Get(SessionHeader); ext != "" {
 		rt := g.Route(ext)
-		if rt == nil || rt.Service() != service {
+		if rt == nil || rt.Service() != service || !g.esDe(ext, tnt.Name()) {
 			// Id desconocido, caducado, inventado o de otro servicio: NO se
 			// reenvía al invitado —que podría tener una sesión con ese id, de
 			// otro cliente—. 404 es lo que pide el transporte Streamable HTTP
@@ -607,7 +616,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			var berr error
 			for i := 0; i < 3; i++ {
 				ext = scheduler.NewSessionKey()
-				if berr = g.BindGuest(ext, guestSID, service, e); berr == nil {
+				if berr = g.fijarSesion(ext, guestSID, service, e, tnt.Name()); berr == nil {
 					break
 				}
 			}
@@ -884,4 +893,31 @@ func buscarLink(ls []*mcp.Link, service string) *mcp.Link {
 		}
 	}
 	return nil
+}
+
+// fijarSesion fija la ruta de una sesión nueva y apunta qué tenant la abrió.
+func (g *Gateway) fijarSesion(key, guestSID, service string, e *scheduler.Instance, tenant string) error {
+	if err := g.BindGuest(key, guestSID, service, e); err != nil {
+		return err
+	}
+	g.duenos.Store(key, tenant)
+	return nil
+}
+
+// esDe dice si la sesión key la abrió el tenant. Una clave sin dueño apuntado
+// no es de nadie: falla cerrado.
+func (g *Gateway) esDe(key, tenant string) bool {
+	v, ok := g.duenos.Load(key)
+	return ok && v.(string) == tenant
+}
+
+// podarDuenos olvida los dueños de sesiones cuya ruta ya no existe (Forget,
+// caducidad, máquina destruida).
+func (g *Gateway) podarDuenos() {
+	g.duenos.Range(func(k, _ any) bool {
+		if g.Route(k.(string)) == nil {
+			g.duenos.Delete(k)
+		}
+		return true
+	})
 }

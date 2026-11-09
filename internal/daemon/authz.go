@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -40,6 +41,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -162,6 +165,8 @@ type Politica struct {
 	// grupos resuelve los grupos suplementarios de un uid cuando la conexión
 	// no los trae (Linux). Variable para los tests.
 	grupos func(uid int) []int
+	// negados limita cuántas denegaciones se escriben en el log.
+	negados limitadorNegadas
 }
 
 // resolutor traduce nombres de usuario y de grupo a ids. Los tests pasan uno
@@ -544,7 +549,7 @@ const (
 	// AccionGrafo: todo lo que actúa sobre el grafo {ref}: tiene que ser suyo.
 	AccionGrafo Accion = "graph"
 	// AccionAdmin: solo admin (imágenes, volúmenes, store, carpetas del host,
-	// métricas del host).
+	// /procstats). /metrics es AccionListar: los inquilinos ven las del host.
 	AccionAdmin Accion = "admin"
 )
 
@@ -562,6 +567,87 @@ func errAuthz(code int, format string, a ...any) error {
 	return &api.StatusError{Code: code, Message: fmt.Sprintf(format, a...)}
 }
 
+// limiteNegadas es cada cuánto se escribe, como mucho, una denegación con la
+// misma huella (uid, inquilino, método, ruta): un cliente que repite un token
+// inválido en bucle no debe inundar el log. maxHuellasNegadas acota la
+// memoria cuando las huellas cambian (rutas al azar).
+const (
+	limiteNegadas     = time.Minute
+	maxHuellasNegadas = 1024
+)
+
+// limitadorNegadas recuerda la última vez que se escribió cada huella y
+// cuántas se callaron desde entonces. El valor cero sirve.
+type limitadorNegadas struct {
+	mu     sync.Mutex
+	visto  map[string]*huellaNegada
+	sobran int // las calladas porque no cabían más huellas
+	ahora  func() time.Time
+}
+
+type huellaNegada struct {
+	ultima   time.Time
+	calladas int
+}
+
+// pasa dice si se escribe la denegación con esa huella y cuántas parecidas
+// se callaron antes de ella.
+func (l *limitadorNegadas) pasa(huella string) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ahora := time.Now()
+	if l.ahora != nil {
+		ahora = l.ahora()
+	}
+	if l.visto == nil {
+		l.visto = map[string]*huellaNegada{}
+	}
+	h := l.visto[huella]
+	if h != nil && ahora.Sub(h.ultima) < limiteNegadas {
+		h.calladas++
+		return false, 0
+	}
+	if h == nil {
+		if len(l.visto) >= maxHuellasNegadas {
+			for k, v := range l.visto {
+				if ahora.Sub(v.ultima) >= limiteNegadas {
+					l.sobran += v.calladas
+					delete(l.visto, k)
+				}
+			}
+		}
+		if len(l.visto) >= maxHuellasNegadas {
+			l.sobran++
+			return false, 0
+		}
+		h = &huellaNegada{}
+		l.visto[huella] = h
+	}
+	calladas := h.calladas + l.sobran
+	h.ultima, h.calladas, l.sobran = ahora, 0, 0
+	return true, calladas
+}
+
+// logNegada deja en el log del daemon una petición que la política negó:
+// quién (uid del socket e inquilino, si lo tiene), qué y por qué.
+func (p *Politica) logNegada(r *http.Request, tenant string, err error) {
+	uid := "unknown"
+	if ll := llamanteDe(r.Context()); ll.Conocido {
+		uid = strconv.Itoa(ll.UID)
+	}
+	ruta := r.URL.Path
+	huella := uid + "\x00" + tenant + "\x00" + r.Method + "\x00" + ruta + "\x00" + strconv.Itoa(statusDe(err))
+	ok, calladas := p.negados.pasa(huella)
+	if !ok {
+		return
+	}
+	mas := ""
+	if calladas > 0 {
+		mas = fmt.Sprintf(" (%d more like it not logged in the last %s)", calladas, limiteNegadas)
+	}
+	log.Printf("authz: denied %s %q to uid %s (tenant %q): %v%s", r.Method, ruta, uid, tenant, err, mas)
+}
+
 // autorizar envuelve el handler de rt con la decisión de la política.
 func (s *Server) autorizar(rt ruta) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -574,6 +660,7 @@ func (s *Server) autorizar(rt ruta) http.HandlerFunc {
 		// suyo): es lo que deja a `kling doctor` decir por qué se le niega
 		// todo lo demás. Un token inválido es un error también ahí.
 		if err != nil && (rt.accion != AccionInfo || statusDe(err) == http.StatusUnauthorized) {
+			s.authz.logNegada(r, "", err)
 			fail(w, http.StatusForbidden, err)
 			return
 		}
@@ -583,6 +670,7 @@ func (s *Server) autorizar(rt ruta) http.HandlerFunc {
 			return
 		}
 		if err := s.permitir(r, rt, rol.Tenant); err != nil {
+			s.authz.logNegada(r, rol.Tenant, err)
 			fail(w, http.StatusForbidden, err)
 			return
 		}

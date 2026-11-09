@@ -34,7 +34,7 @@ GET /machines/{ref}/egress  machine
 GET /machines/{ref}/files  machine
 GET /machines/{ref}/logs  machine
 GET /machines/{ref}/ready  machine
-GET /metrics  admin
+GET /metrics  list
 GET /oci/blobs/{digest}  admin
 GET /procstats  admin
 GET /publish  list
