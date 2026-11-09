@@ -201,3 +201,25 @@ func TestMetaConPuertosAlteradosNoPasaLaFirma(t *testing.T) {
 		t.Fatalf("kling.ports alterado en meta.json pasó la firma: %v", err)
 	}
 }
+
+// Etiquetas y entorno vacíos (no nil) al firmar vuelven como nil de meta.json
+// (omitempty): la firma tiene que seguir valiendo tras la vuelta.
+func TestFirmaV2VacioYAusenteFirmanIgual(t *testing.T) {
+	m := newTestManager(t)
+	s := snapDePrueba()
+	s.Labels, s.EnvKeys = map[string]string{}, []string{}
+	if err := m.firmar(s); err != nil {
+		t.Fatal(err)
+	}
+	b, err := codificarMeta(s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leido, _, err := decodificarMeta("meta.json", b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.comprobarFirma(leido); err != nil {
+		t.Fatalf("vacío firmado, nil leído: %v", err)
+	}
+}

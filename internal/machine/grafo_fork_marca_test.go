@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,5 +71,52 @@ func TestGraphForkMarcaAntesDelMeta(t *testing.T) {
 	dir = volcar(context.Background(), "tienda-api-1")
 	if _, err := os.Stat(filepath.Join(dir, forkMarca)); !os.IsNotExist(err) {
 		t.Errorf("el volcado de un GraphSnapshot quedó marcado como fork: %v", err)
+	}
+}
+
+// La plantilla temporal de un GraphFork pasa su propia firma v2 al leerla de
+// disco. Un nodo de grafo solo lleva etiquetas de grafo, que el commit quita:
+// quedaba un mapa vacío, firmado como {} y leído de meta.json (omitempty)
+// como null, y la restauración daba "snapshot signature does not match".
+func TestGraphForkFirmaV2SobreviveAlMeta(t *testing.T) {
+	if _, err := exec.LookPath("fallocate"); err != nil && !volcadoEnLaMaquina {
+		t.Skip("sin fallocate no se puede perforar el volcado")
+	}
+	m := newTestManager(t)
+	const id = "c0aa170000000105"
+	const nombre = "gfork-3db338ace26a-web-6e690f63"
+	falso := plantillaSinProceso(t, m, id)
+	if err := os.WriteFile(m.KernelPath(), []byte("vmlinux de prueba"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.byID[id].State = api.StatePaused
+	m.byID[id].Labels = map[string]string{api.LabelGraph: "3db338ace26a", api.LabelGraphNode: "web"}
+	m.byID[id].EnvKeys = []string{}
+	m.mu.Unlock()
+
+	dir := m.snapDir(nombre)
+	snapTmp, memTmp := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+	if volcadoEnLaMaquina {
+		snapTmp, memTmp = filepath.Join(m.dir(id), volcadoTmpSnap), filepath.Join(m.dir(id), volcadoTmpMem)
+	}
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(snapTmp, []byte("estado"), 0o644)
+			_ = os.WriteFile(memTmp, make([]byte, 1<<20), 0o644)
+		}
+	})
+	if err := volcarNodoPausado(conCommitDeFork(context.Background()), m, id, nombre); err != nil {
+		t.Fatalf("volcado: %v", err)
+	}
+	snap, err := m.loadSnapshot(nombre)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(snap.Signature, firmaV2) {
+		t.Fatalf("la plantilla del fork no va en v2: %q", snap.Signature)
+	}
+	if err := m.comprobarFirma(snap); err != nil {
+		t.Fatalf("la plantilla del fork no pasa su propia firma: %v", err)
 	}
 }

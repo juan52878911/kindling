@@ -156,7 +156,21 @@ const firmaV2 = "v2:"
 // Los mapas se serializan con las claves en orden (encoding/json), así que
 // las etiquetas firman lo mismo se lean como se lean. El campo V separa los
 // dominios: ningún contenido v1 coincide con uno v2.
+//
+// Vacío y ausente firman igual: meta.json los guarda con omitempty, así que
+// un mapa o una lista vacíos al hacer commit vuelven como nil al leerlo, y
+// firmar {} y comprobar null rompía la firma del propio host. Pasaba con todo
+// nodo de grafo, cuyas etiquetas son solo de grafo y el commit las quita
+// (sinEtiquetasGrafo deja un mapa vacío). No debilita nada: el fichero no
+// puede distinguir los dos casos, y ninguno de los dos decide algo distinto.
 func contenidoFirmadoV2(s *api.Snapshot) []byte {
+	labels, envKeys := s.Labels, s.EnvKeys
+	if len(labels) == 0 {
+		labels = nil
+	}
+	if len(envKeys) == 0 {
+		envKeys = nil
+	}
 	b, _ := json.Marshal(struct {
 		V           int
 		V1          json.RawMessage
@@ -166,8 +180,8 @@ func contenidoFirmadoV2(s *api.Snapshot) []byte {
 		CPUPctFixed bool
 		EnvKeys     []string
 		MemDigest   string
-	}{2, contenidoFirmado(s), s.Labels, s.MemMaxMiB, s.CPUPct, s.CPUPctFixed,
-		s.EnvKeys, s.MemDigest})
+	}{2, contenidoFirmado(s), labels, s.MemMaxMiB, s.CPUPct, s.CPUPctFixed,
+		envKeys, s.MemDigest})
 	return b
 }
 
