@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Errores de uso: comando, flag o argumentos que no valen.
@@ -119,12 +122,18 @@ var errAyudaDada = &errConCodigo{code: 0, err: errors.New("")}
 // no el Usage del paquete flag por stderr seguido de os.Exit(2). Con -h
 // imprime la lista de flags (lo que lee plugin.FlagHelp) y devuelve
 // errAyudaDada.
+//
+// Si el comando tiene -json y se pidió, los errores que siga habiendo salen
+// en JSON (printError), también el del propio parseo.
 func parseFlags(fs *flag.FlagSet, args []string) error {
 	fs.Usage = func() {}
 	out := fs.Output()
 	fs.SetOutput(io.Discard)
 	err := fs.Parse(args)
 	fs.SetOutput(out)
+	if pideJSON(fs, args) {
+		salidaJSON.Store(true)
+	}
 	switch {
 	case err == nil:
 		return nil
@@ -171,4 +180,60 @@ func sinPosicionales(fs *flag.FlagSet, args []string) error {
 		}
 	}
 	return nil
+}
+
+// salidaJSON es que el comando en curso se pidió con -json: sus errores
+// salen como errorJSON y no como "error:"/"try:".
+var salidaJSON atomic.Bool
+
+// pideJSON dice si el comando de fs tiene -json y se pidió: puesto tras el
+// parseo, o en los argumentos aunque el parseo fallara antes de llegar a él.
+func pideJSON(fs *flag.FlagSet, args []string) bool {
+	f := fs.Lookup("json")
+	if f == nil {
+		return false
+	}
+	if f.Value.String() == "true" {
+		return true
+	}
+	for _, a := range args {
+		switch a {
+		case "--":
+			return false
+		case "-json", "--json", "-json=true", "--json=true":
+			return true
+		}
+	}
+	return false
+}
+
+// errorJSON es un error con -json, en una línea por stderr: error para
+// personas, code para programas (estable) y try, la pista, si la hay.
+type errorJSON struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+	Try   string `json:"try,omitempty"`
+}
+
+// codigoDeError es el code de errorJSON: el api.ErrorCode del daemon si lo
+// mandó, y si no uno del CLI con el mismo criterio que el código de salida.
+func codigoDeError(err error) string {
+	var viejo *api.ErrDaemonTooOld
+	var sinCap *errAgenteSinCapacidad
+	switch {
+	case interrumpido.Load():
+		return "interrupted"
+	case esUso(err):
+		return "usage"
+	case errors.As(err, &viejo):
+		return "daemon_too_old"
+	case api.IsStaleGolden(err):
+		return string(api.CodeStaleGolden)
+	case errors.As(err, &sinCap):
+		return "agent_capability"
+	}
+	if c := api.CodeOf(err); c != "" {
+		return string(c)
+	}
+	return "error"
 }

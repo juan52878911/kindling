@@ -127,27 +127,27 @@ var coreTree = []section{
   logs -service [-t] [-f] [-tail N] <ref>          the image's service output instead
                                                    (-t: when each line arrived)
 `},
-		{Name: "freeze", Summary: "freezes into a snapshot: 0 RAM, thaws in ms", MachineArgs: []string{""}, Usage: `  freeze <ref>...                                  dumps it to a snapshot -> frozen
+		{Name: "freeze", Summary: "freezes into a snapshot: 0 RAM, thaws in ms", MachineArgs: []string{""}, Usage: `  freeze [-json] <ref>...                          dumps it to a snapshot -> frozen
                                                    (no CPU, no RAM; thaw ~30 ms)
 `},
-		{Name: "thaw", Summary: "restores a frozen or paused machine", MachineArgs: []string{""}, Usage: `  thaw <ref>...                                    restores from its snapshot (~ms),
+		{Name: "thaw", Summary: "restores a frozen or paused machine", MachineArgs: []string{""}, Usage: `  thaw [-json] <ref>...                            restores from its snapshot (~ms),
                                                    or resumes a paused one
 `},
-		{Name: "pause", Summary: "pauses it without dumping memory", MachineArgs: []string{""}, Usage: `  pause <ref>...                                   pauses it keeping its RAM (thaw
+		{Name: "pause", Summary: "pauses it without dumping memory", MachineArgs: []string{""}, Usage: `  pause [-json] <ref>...                           pauses it keeping its RAM (thaw
                                                    resumes it in ~1 ms)
 `},
-		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop <ref>...                                    terminates the machine; its disk
+		{Name: "stop", Summary: "terminates the machine", MachineArgs: []string{""}, Usage: `  stop [-json] <ref>...                            terminates the machine; its disk
                                                    stays (start), its memory goes
 `},
-		{Name: "start", Summary: "boots a stopped machine again from its disk", MachineArgs: []string{""}, Usage: `  start [-e K=V] [-env-file F] <ref>...            boots a stopped machine again, cold,
+		{Name: "start", Summary: "boots a stopped machine again from its disk", MachineArgs: []string{""}, Usage: `  start [-e K=V] [-env-file F] [-json] <ref>...    boots a stopped machine again, cold,
                                                    on its own disk; -e/-env-file must
                                                    give again the keys it ran with
 `},
-		{Name: "rm", Summary: "removes machine and snapshot", MachineArgs: []string{""}, Usage: `  rm [-f] <ref>...                                 removes machine and snapshot
+		{Name: "rm", Summary: "removes machine and snapshot", MachineArgs: []string{""}, Usage: `  rm [-f] [-json] <ref>...                         removes machine and snapshot
                                                    (asks first for several; -f: no)
 `},
 		{Name: "save", Summary: "turns a machine into a template", MachineArgs: []string{""}, Usage: `  save [-replace] [-force] <ref> <name>            freezes a machine as a reusable
-      [-wait 2m] [-warm=false]                     template: run -from <name>; waits
+      [-wait 2m] [-warm=false] [-json]             template: run -from <name>; waits
                                                    up to -wait until the guest serves
                                                    and is ready by its image's probe
                                                    (-force: no); -warm=false: smaller,
@@ -166,7 +166,7 @@ var coreTree = []section{
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [-env-file F] [--] [cmd [args...]]           (Ctrl-C reaches the program)
 `},
-		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] <local|-> <ref>:<path>           copies a file into a machine
+		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp [-mode 0644] [-json] <local|-> <ref>:<path>   copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it
 `},
 		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "fork", "rm"}, MachineArgs: []string{"renew", "fork", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
@@ -345,13 +345,13 @@ var coreTree = []section{
 `},
 	}},
 	{title: "ADVANCED", advanced: true, cmds: []plugin.Command{
-		{Name: "machine", Summary: "resize, squeeze, secrets, readiness", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
+		{Name: "machine", Summary: "resize, squeeze, secrets, readiness", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, Usage: `  machine resize <ref> -mem 512M [-json]           changes its memory without
                                                    restarting, up to its -mem-max
-  machine squeeze [-force] <ref>...                balloon: returns the guest's free
+  machine squeeze [-force] [-json] <ref>...        balloon: returns the guest's free
                                                    memory to the host (-force: also a
                                                    copy sharing its template's memory)
   machine secret <ref> [-f store.json] [-hooks]    injects secrets via MMDS (shared by all sessions)
-      [-hooks-wait 1m]                             (stdin if no -f); it can no longer
+      [-hooks-wait 1m] [-json]                     (stdin if no -f); it can no longer
                                                    be frozen. -hooks: then runs the
                                                    image's post-restore hooks; after
                                                    that, '{}' empties it and lifts
@@ -366,7 +366,7 @@ var coreTree = []section{
                                                    (/etc/kindling/post-restore.d)
   machine credential <ref> -domain D -env VAR      hands an API key to the credential
       [-allow-request 'GET /v1/x']...              proxy: the guest only sees a
-      [-f keyfile] [-rm]                           placeholder in VAR, swapped for the
+      [-f keyfile] [-rm] [-json]                   placeholder in VAR, swapped for the
                                                    key on requests to http://D (needs
                                                    -egress allowlist; stdin if no -f;
                                                    repeat -env to rotate the key)

@@ -888,6 +888,7 @@ func cmdSave(args []string) error {
 	// guarda ni quita nada (ver save_audit.go).
 	audit := fs.Bool("audit", false, "report the files never seen open or mapped on this machine (for what to trim); saves nothing")
 	auditFor := fs.Duration("audit-for", 5*time.Second, "with -audit: how long to sample what is in use")
+	asJSON := fs.Bool("json", false, "print the template as JSON (name, mem_bytes, warnings...) for scripts and agents")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -913,7 +914,7 @@ func cmdSave(args []string) error {
 		// nada que esperar: la espera solo agotaba el plazo entero.
 		sinServicio, nadaQueEsperar := sinServicioQueEsperar(ctx, c, fs.Arg(0))
 		if sinServicio {
-			fmt.Printf("note: %s's image declares no service; not waiting for one to serve\n", fs.Arg(0))
+			fmt.Fprintf(os.Stderr, "note: %s's image declares no service; not waiting for one to serve\n", fs.Arg(0))
 			skipReady = nadaQueEsperar
 		} else if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
 			return err
@@ -928,6 +929,9 @@ func cmdSave(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(snap)
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
 	for _, w := range snap.Warnings {
@@ -983,9 +987,9 @@ func sinServicioQueEsperar(ctx context.Context, c *api.Client, ref string) (sinS
 // puente (HTTP nativo) el /reset no existe y no es un fallo — el puerto abierto
 // es cuanto se puede comprobar.
 func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration, warm bool) error {
-	fmt.Printf("checking the guest is serving before freezing... ")
+	fmt.Fprintf(os.Stderr, "checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
-		fmt.Println("✗")
+		fmt.Fprintln(os.Stderr, "✗")
 		if api.IsNotFound(err) {
 			// No hay máquina: ni puerto ni plazo que explicar (fallaba en
 			// milisegundos diciendo "not serving ... after 2m0s").
@@ -1008,11 +1012,11 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: ruta, Method: "POST"})
 	switch {
 	case err == nil && resp.Status == 204 && warm:
-		fmt.Println("✓ (serving, session state reset, runtime prewarmed)")
+		fmt.Fprintln(os.Stderr, "✓ (serving, session state reset, runtime prewarmed)")
 	case err == nil && resp.Status == 204:
-		fmt.Println("✓ (serving, session state reset, no prewarm)")
+		fmt.Fprintln(os.Stderr, "✓ (serving, session state reset, no prewarm)")
 	default:
-		fmt.Println("✓ (serving)")
+		fmt.Fprintln(os.Stderr, "✓ (serving)")
 	}
 	return nil
 }
@@ -1232,6 +1236,7 @@ func cmdLifecycle(op string, args []string) error {
 	if op == "rm" {
 		force = fs.Bool("f", false, "do not ask for confirmation")
 	}
+	asJSON := fs.Bool("json", false, "one JSON line per machine: the machine as it is now (rm: its id, name and state \"removed\")")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1246,17 +1251,33 @@ func cmdLifecycle(op string, args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 
-	return runLifecycle(ctx, c, op, fs.Args(), os.Stdout, os.Stderr)
+	return runLifecycle(ctx, c, op, fs.Args(), *asJSON, os.Stdout, os.Stderr)
+}
+
+// maquinaBorrada es lo que `kling rm -json` dice de cada una.
+type maquinaBorrada struct {
+	ID    string `json:"id"`
+	Name  string `json:"name,omitempty"`
+	State string `json:"state"` // "removed"
 }
 
 // runLifecycle aplica op a cada ref. Como docker, un fallo no detiene el
 // resto: el error de cada uno va a stderr y al final se sale con 1. Con una
 // sola ref se devuelve su error tal cual, para que conserve pista y código.
-func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, out, errw io.Writer) error {
+// Con asJSON, una línea JSON por máquina en out.
+func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, asJSON bool, out, errw io.Writer) error {
 	fallos := 0
+	enc := json.NewEncoder(out)
 	for _, ref := range refs {
 		var mc *api.Machine
 		var err error
+		borrada := maquinaBorrada{ID: ref, State: "removed"}
+		if op == "rm" && asJSON {
+			// Para dar su id y su nombre, que la respuesta del rm no trae.
+			if antes, gerr := c.Get(ctx, ref); gerr == nil {
+				borrada.ID, borrada.Name = antes.ID, antes.Name
+			}
+		}
 		switch op {
 		case "freeze":
 			mc, err = c.Freeze(ctx, ref)
@@ -1281,6 +1302,14 @@ func runLifecycle(ctx context.Context, c *api.Client, op string, refs []string, 
 			continue
 		}
 		switch {
+		case asJSON && op == "rm":
+			if err := enc.Encode(borrada); err != nil {
+				return err
+			}
+		case asJSON:
+			if err := enc.Encode(mc); err != nil {
+				return err
+			}
 		case op == "rm":
 			fmt.Fprintln(out, ref)
 		case op == "freeze":
@@ -1307,6 +1336,7 @@ func cmdStart(args []string) error {
 	host := hostFlag(fs)
 	var ef envFlags
 	ef.register(fs)
+	asJSON := fs.Bool("json", false, "one JSON line per machine: the machine as it is now")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1340,6 +1370,12 @@ func cmdStart(args []string) error {
 			}
 			return err
 		}
+		if *asJSON {
+			if err := json.NewEncoder(os.Stdout).Encode(mc); err != nil {
+				return err
+			}
+			continue
+		}
 		if !arrancoAhora(antes, mc) {
 			fmt.Printf("%s  %s  (already running, nothing to start)\n", mc.ID[:12], mc.State)
 			continue
@@ -1367,6 +1403,7 @@ func cmdSqueeze(args []string) error {
 	fs := flag.NewFlagSet("squeeze", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("force", false, "squeeze also a copy that shares memory with its template (Firecracker): usually makes the host use MORE memory")
+	asJSON := fs.Bool("json", false, "one JSON line per machine: what was returned (id, reclaimed_mib...)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1380,6 +1417,12 @@ func cmdSqueeze(args []string) error {
 		res, err := c.SqueezeWith(ctx, ref, *force)
 		if err != nil {
 			return err
+		}
+		if *asJSON {
+			if err := json.NewEncoder(os.Stdout).Encode(res); err != nil {
+				return err
+			}
+			continue
 		}
 		fmt.Printf("%s  ~%d MiB returned to the host  (guest free %d MiB, RSS now %d MiB)\n",
 			res.ID[:12], res.ReclaimedMiB, res.GuestFreeMiB, res.RSSMiB)
@@ -1410,6 +1453,7 @@ func cmdMMDS(args []string) error {
 	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
 	hooks := fs.Bool("hooks", false, "then run the image's post-restore hooks and wait for them (they read the secret)")
 	hooksWait := fs.Duration("hooks-wait", time.Minute, "with -hooks, how long to wait for them")
+	asJSON := fs.Bool("json", false, "print the machine as JSON (has_secrets says whether it can be frozen)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1455,7 +1499,12 @@ func cmdMMDS(args []string) error {
 			}
 			return fmt.Errorf("%s: post-restore hooks did not finish (%s)%s", mc.Name, res.Ready, detalle)
 		}
-		fmt.Printf("%s  post-restore hooks done in %d ms\n", mc.ID[:12], res.WaitedMS)
+		if !*asJSON {
+			fmt.Printf("%s  post-restore hooks done in %d ms\n", mc.ID[:12], res.WaitedMS)
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	if !mc.HasSecrets {
 		fmt.Printf("%s  MMDS store emptied (no secrets: it can be frozen)\n", mc.ID[:12])
@@ -1481,6 +1530,7 @@ func cmdCredential(args []string) error {
 	host := hostFlag(fs)
 	cf := credentialFlags(fs)
 	rm := fs.Bool("rm", false, "withdraw the credential in -env from the machine (its placeholder stops working; open postgres sessions that used it are cut)")
+	asJSON := fs.Bool("json", false, "print the machine as JSON")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1493,6 +1543,9 @@ func cmdCredential(args []string) error {
 		mc, err := api.NewClient(hostOf(*host)).RemoveCredential(ctx, fs.Arg(0), *cf.env, "")
 		if err != nil {
 			return err
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(mc)
 		}
 		fmt.Printf("%s  %s withdrawn from the credential proxy\n", mc.ID[:12], *cf.env)
 		return nil
@@ -1515,6 +1568,9 @@ func cmdCredential(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	if spec.Type == credproxy.KindPostgres || spec.Type == credproxy.KindMySQL {
 		fmt.Printf("%s  %s now holds a placeholder; the password only goes to %s through the proxy\n",
@@ -1813,6 +1869,7 @@ func cmdResize(args []string) error {
 	fs := flag.NewFlagSet("machine resize", flag.ContinueOnError)
 	host := hostFlag(fs)
 	mem := units.MiBVar(fs, "mem", 0, "new memory: 512M, 2G (bare number = MiB)")
+	asJSON := fs.Bool("json", false, "print the machine as JSON")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1824,6 +1881,9 @@ func cmdResize(args []string) error {
 	mc, err := api.NewClient(hostOf(*host)).Resize(ctx, fs.Arg(0), *mem)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(mc)
 	}
 	fmt.Printf("%s  %d MiB (ceiling %d)\n", mc.Name, mc.MemMiB, mc.MemMaxMiB)
 	return nil

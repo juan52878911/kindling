@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -120,9 +121,14 @@ func containsAll(s string, parts []string) bool {
 
 // printError es como main informa de un fallo: "error: …" y, si la hay, la
 // pista en una segunda línea que empieza por "try:", fácil de ver y de buscar.
+// Si el comando se pidió con -json, una línea JSON {"error","code","try"}.
 func printError(w io.Writer, err error) {
 	if err.Error() == "" {
 		return // el comando ya lo contó (doctor): solo cuenta el código de salida
+	}
+	if salidaJSON.Load() {
+		_ = json.NewEncoder(w).Encode(errorJSON{Error: err.Error(), Code: codigoDeError(err), Try: hintFor(err)})
+		return
 	}
 	fmt.Fprintln(w, "error:", err)
 	if h := hintFor(err); h != "" {

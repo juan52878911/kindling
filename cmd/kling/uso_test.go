@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -104,6 +105,38 @@ func TestArgumentosSobrantes(t *testing.T) {
 		if codigoDeSalida(err) != salidaUso || hintFor(err) != "kling help "+nombre {
 			t.Errorf("%s sobra: %v (código %d, pista %q)", nombre, err, codigoDeSalida(err), hintFor(err))
 		}
+	}
+}
+
+// Con -json el error también es JSON: una línea {"error","code","try"} por
+// stderr, con el mismo código de salida, y nada en stdout.
+func TestErroresJSON(t *testing.T) {
+	hermetic(t)
+	for _, c := range []struct {
+		args       []string
+		exit       int
+		code, try  string
+		contieneEn string
+	}{
+		{[]string{"freeze", "-json", "m1"}, 1, "error", "kling doctor", "cannot talk to the daemon"},
+		{[]string{"ps", "-json", "-x"}, 2, "usage", "kling help ps", "flag provided but not defined"},
+		{[]string{"ps", "-x", "-json"}, 2, "usage", "kling help ps", "flag provided but not defined"},
+		{[]string{"cp", "-json", "m1:/etc/hosts", "-"}, 2, "usage", "kling help cp", "-json needs a destination"},
+	} {
+		out, errOut, code := correrKling(t, nil, c.args...)
+		var e errorJSON
+		if err := json.Unmarshal([]byte(errOut), &e); err != nil || strings.Count(errOut, "\n") != 1 {
+			t.Errorf("kling %v: stderr no es una línea JSON (%v):\n%s", c.args, err, errOut)
+			continue
+		}
+		if code != c.exit || e.Code != c.code || e.Try != c.try || !strings.Contains(e.Error, c.contieneEn) || out != "" {
+			t.Errorf("kling %v: salida %d, %+v, stdout %q", c.args, code, e, out)
+		}
+	}
+	// Sin -json, el texto de siempre.
+	_, errOut, _ := correrKling(t, nil, "freeze", "m1")
+	if !strings.HasPrefix(errOut, "error: ") || !strings.Contains(errOut, "\ntry: kling doctor") {
+		t.Errorf("sin -json: %q", errOut)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -33,6 +34,22 @@ var comandosJSON = [][]string{
 	{"sandbox", "ls", "-json"},
 	{"status", "-json"},
 	{"version", "-json"},
+	{"context", "ls", "-json"},
+	// Los que cambian algo dicen con -json qué dejaron (docs/guide.md, "JSON
+	// output"). @fichero es uno local que crea el test.
+	{"freeze", "-json", "m1"},
+	{"thaw", "-json", "m1"},
+	{"pause", "-json", "m1"},
+	{"stop", "-json", "m1"},
+	{"rm", "-json", "m1"},
+	{"start", "-json", "m1"},
+	{"save", "-force", "-json", "m1", "tpl"},
+	{"machine", "squeeze", "-json", "m1"},
+	{"machine", "resize", "-json", "-mem", "512M", "m1"},
+	{"machine", "secret", "-json", "-f", "@store", "m1"},
+	{"machine", "credential", "-json", "-rm", "m1", "-env", "K"},
+	{"cp", "-json", "@local", "m1:/tmp/x"},
+	{"plugin", "ls", "-json"},
 }
 
 // La salida -json de los comandos principales, contra un daemon falso que
@@ -47,10 +64,20 @@ func TestContratoJSON(t *testing.T) {
 	sock := daemonRelleno(t)
 	t.Setenv("KLING_HOST", "unix://"+sock)
 
-	var lineas []string
-	for _, argv := range comandosJSON {
+	locales := map[string]string{"@store": t.TempDir() + "/store.json", "@local": t.TempDir() + "/x"}
+	os.WriteFile(locales["@store"], []byte(`{"env":{"A":"1"}}`), 0o600)
+	os.WriteFile(locales["@local"], []byte("hola"), 0o600)
+
+	var lineas, formaMaquina []string
+	for _, original := range comandosJSON {
+		nombre := strings.Join(original, " ")
+		argv := slices.Clone(original)
+		for i, a := range argv {
+			if l, ok := locales[a]; ok {
+				argv[i] = l
+			}
+		}
 		out, err := capturarStdout(t, func() error { return ejecutar(argv) })
-		nombre := strings.Join(argv, " ")
 		if err != nil {
 			t.Fatalf("kling %s: %v", nombre, err)
 		}
@@ -58,7 +85,17 @@ func TestContratoJSON(t *testing.T) {
 		if err := json.Unmarshal(out, &v); err != nil {
 			t.Fatalf("kling %s no da JSON: %v\n%s", nombre, err, out)
 		}
-		for _, l := range aplanar("", v) {
+		forma := aplanar("", v)
+		// La máquina entera ya la fija `kling inspect`: los que la devuelven
+		// tal cual la citan en una línea, y si un día cambian, salen enteros.
+		if nombre != "inspect m1" && slices.Equal(forma, formaMaquina) {
+			lineas = append(lineas, "kling "+nombre+":  = kling inspect m1")
+			continue
+		}
+		if nombre == "inspect m1" {
+			formaMaquina = forma
+		}
+		for _, l := range forma {
 			lineas = append(lineas, "kling "+nombre+":  "+l)
 		}
 	}
@@ -95,6 +132,20 @@ func ejecutar(argv []string) error {
 		return cmdStatus(argv[1:])
 	case "version":
 		return cmdVersion(argv[1:])
+	case "context":
+		return cmdContext(argv[1:])
+	case "freeze", "thaw", "pause", "stop", "rm":
+		return cmdLifecycle(argv[0], argv[1:])
+	case "start":
+		return cmdStart(argv[1:])
+	case "save":
+		return cmdSave(argv[1:])
+	case "machine":
+		return cmdMachine(argv[1:])
+	case "cp":
+		return cmdCp(argv[1:])
+	case "plugin":
+		return cmdPlugins(argv[1:])
 	}
 	return fmt.Errorf("comando %q sin enrutar en el test", argv[0])
 }
@@ -127,6 +178,14 @@ func daemonRelleno(t *testing.T) string {
 	pub := relleno[api.Publication]()
 	pub.Machine = maquina.ID // ps las casa por id
 	servir("GET /publish", []api.Publication{pub})
+	for _, op := range []string{"freeze", "thaw", "pause", "stop", "start", "resize", "mmds", "credentials"} {
+		servir("POST /machines/{ref}/"+op, &maquina)
+	}
+	servir("DELETE /machines/{ref}", struct{}{})
+	servir("DELETE /machines/{ref}/credentials/{env}", &maquina)
+	servir("POST /machines/{ref}/squeeze", relleno[api.SqueezeResult]())
+	servir("POST /machines/{ref}/commit", punteroA(relleno[api.Snapshot]()))
+	servir("PUT /machines/{ref}/files", relleno[api.FileStat]())
 
 	dir, err := os.MkdirTemp("/tmp", "kt")
 	if err != nil {

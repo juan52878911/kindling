@@ -41,5 +41,6 @@ func hermetic(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("KLING_CONFIG", t.TempDir()+"/config.json")
 	extOnce, extReg = sync.Once{}, nil
-	t.Cleanup(func() { extOnce, extReg = sync.Once{}, nil })
+	salidaJSON.Store(false)
+	t.Cleanup(func() { extOnce, extReg = sync.Once{}, nil; salidaJSON.Store(false) })
 }

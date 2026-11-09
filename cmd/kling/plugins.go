@@ -72,9 +72,14 @@ func cmdPlugins(args []string) error {
 
 // pluginRow es una extensión tal como la enseña `plugins ls`.
 type pluginRow struct {
-	Name      string   `json:"name"`
-	Version   string   `json:"version,omitempty"`
-	Status    string   `json:"status"` // ok | disabled | error: ...
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	// State es el estado con la clave de todo -json (docs/guide.md): ok,
+	// disabled o error (el porqué va en error, el aviso en warning).
+	State string `json:"state"`
+	// Status es lo que sale en la tabla (ok | disabled | error: ...); en JSON
+	// se queda por los scripts de 1.x y lo sustituye state.
+	Status    string   `json:"status"`
 	Path      string   `json:"path,omitempty"`
 	Builtin   bool     `json:"builtin"`
 	Disabled  bool     `json:"disabled"`
@@ -99,7 +104,7 @@ func pluginRows(reg *plugin.Registry, daemonAPI int) []pluginRow {
 	out := []pluginRow{}
 	for _, p := range reg.Plugins {
 		r := pluginRow{Name: p.Name, Path: p.Path, Builtin: p.Builtin != nil, Disabled: p.Disabled,
-			Shadowed: p.Shadowed, Status: "ok"}
+			Shadowed: p.Shadowed, State: "ok", Status: "ok"}
 		if p.Manifest != nil {
 			r.Version, r.Hooks = p.Manifest.Version, p.Manifest.Hooks
 			for _, c := range p.Manifest.Commands {
@@ -110,9 +115,9 @@ func pluginRows(reg *plugin.Registry, daemonAPI int) []pluginRow {
 		}
 		switch {
 		case p.Disabled:
-			r.Status = "disabled"
+			r.State, r.Status = "disabled", "disabled"
 		case p.Err != nil:
-			r.Status, r.Error = "error: "+p.Err.Error(), p.Err.Error()
+			r.State, r.Status, r.Error = "error", "error: "+p.Err.Error(), p.Err.Error()
 		case p.Manifest != nil && daemonAPI > 0:
 			if w := p.Manifest.APIWarning(daemonAPI); w != "" {
 				r.Status, r.Warning = "ok (see warning)", w

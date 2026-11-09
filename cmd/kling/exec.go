@@ -168,6 +168,7 @@ func cmdCp(args []string) error {
 	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
 	host := hostFlag(fs)
 	mode := fs.String("mode", "", "permissions of the copied file inside the machine (octal, default 0644)")
+	asJSON := fs.Bool("json", false, "print what was copied as JSON (machine, path, size; dest when copying out)")
 	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -175,6 +176,9 @@ func cmdCp(args []string) error {
 		return errUso("usage: kling cp [-mode 0755] <local|-> <machine>:<path>\n       kling cp <machine>:<path> <local|->")
 	}
 	src, dst := fs.Arg(0), fs.Arg(1)
+	if *asJSON && dst == "-" {
+		return errUsoDe("cp", errors.New("-json needs a destination file: with - the file itself goes to stdout"))
+	}
 	srcRef, srcPath, srcRemote := splitRemote(src)
 	dstRef, dstPath, dstRemote := splitRemote(dst)
 	if srcRemote == dstRemote {
@@ -219,6 +223,9 @@ func cmdCp(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(copiaJSON{Machine: dstRef, Path: st.Path, Size: st.Size, Mode: st.Mode})
+		}
 		fmt.Fprintf(os.Stderr, "%s:%s  %s  %s\n", dstRef, st.Path, human(st.Size), st.Mode)
 		return nil
 	}
@@ -240,8 +247,21 @@ func cmdCp(args []string) error {
 		defer f.Close()
 		w = f
 	}
-	_, err = io.Copy(w, rc)
-	return err
+	n, err := io.Copy(w, rc)
+	if err != nil || !*asJSON {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(copiaJSON{Machine: srcRef, Path: srcPath, Size: n, Dest: dst})
+}
+
+// copiaJSON es lo que `kling cp -json` dice de una copia: la máquina y la ruta
+// de dentro, el tamaño y, al sacar un fichero, dónde quedó.
+type copiaJSON struct {
+	Machine string `json:"machine"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	Mode    string `json:"mode,omitempty"`
+	Dest    string `json:"dest,omitempty"`
 }
 
 // splitRemote separa "máquina:/ruta". Una ruta local con ':' se escribe con ./
