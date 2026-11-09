@@ -289,6 +289,37 @@ Agente (`pkg/guest`):
   `compose` piden al crearla. Es el techo de lectura y escritura secuencial de una
   carpeta viva allí.
 
+### Cuota de las carpetas rw
+
+Una carpeta `rw` escribe en el disco del host, así que el daemon le pone una
+cuota (`internal/share/quota.go`); sin ella el invitado podía llenarlo
+escribiendo, alargando ficheros con `truncate` o creando ficheros sin fin.
+
+- **Bytes** (`daemon.share_max_mib`, 32 GiB por defecto): el crecimiento neto
+  de la carpeta. Suma lo que alarga un fichero (escribir más allá del final,
+  `truncate` hacia arriba); resta lo que lo encoge (`truncate` hacia abajo,
+  `O_TRUNC`) y lo que se borra, cuando es el último nombre y ya nadie lo tiene
+  abierto por la carpeta (si está abierto, al último `close`, que es cuando el
+  host libera el disco). Nunca baja de cero: borrar lo que ya estaba en la
+  carpeta no da presupuesto para escribir más. Cuenta el tamaño aparente: un
+  fichero disperso cuenta entero.
+- **Entradas** (`daemon.share_max_files`, 1 000 000): ficheros, directorios y
+  enlaces nuevos, netos de los que se borran.
+- **Mínimo libre** (`daemon.share_min_free_mib`, 1 GiB): si el sistema de
+  ficheros del host baja de ahí, escribir o crear da `ENOSPC` aunque quede
+  cuota. Cubre lo que la cuenta no ve (rellenar huecos de un fichero disperso
+  que ya existía, otras carpetas, el propio host). `statfs` se lee como mucho
+  cada 250 ms.
+
+Pasarse da `ENOSPC` («No space left on device») y la operación no hace nada:
+el fichero no crece. Con la escritura diferida el error sale en el siguiente
+`write`, `fsync` o `close` de ese fichero. La cuenta es de la carpeta en este
+arranque de la máquina: la comparten las reconexiones (cortar y volver a
+conectar no la pone a cero), y empieza de cero al parar y arrancar, al
+descongelar o al reiniciar el daemon. Un `rename` que pisa otro fichero no
+devuelve lo que ocupaba el pisado. Las carpetas `ro` no llevan cuota. Lo mismo
+por FUSE que por virtio-fs (kling-hv): las dos acaban en el mismo servidor.
+
 ### Cambios hechos en el host
 
 Un `node --watch`, nodemon, vite o webpack del invitado vigilan con inotify, y
@@ -406,6 +437,7 @@ ficheros) en la carpeta, 20 s en el laboratorio y 3 s en macOS.
 ```
 kling config set daemon.share_roots /srv/src,/home/juan/code   # quién se puede servir en vivo
 kling config set daemon.share_copy_max_mib 2048               # tope de una copia
+kling config set daemon.share_max_mib 65536                   # cuota de bytes de una carpeta rw
 ```
 
 - `daemon.share_roots` (o `KLING_SHARE_ROOTS`, separada por comas): directorios
@@ -415,6 +447,11 @@ kling config set daemon.share_copy_max_mib 2048               # tope de una copi
   kindling. Lo lee el daemon en cada petición: no hace falta reiniciarlo.
 - `daemon.share_copy_max_mib` (o `KLING_SHARE_COPY_MAX_MIB`): tope del contenido
   de una subida en modo `copy`.
+- `daemon.share_max_mib`, `daemon.share_max_files` y `daemon.share_min_free_mib`
+  (o `KLING_SHARE_MAX_MIB`, `KLING_SHARE_MAX_FILES`, `KLING_SHARE_MIN_FREE_MIB`):
+  la cuota de cada carpeta `rw` ([arriba](#cuota-de-las-carpetas-rw)). 0 = el
+  valor por defecto (32768 MiB, 1 000 000 entradas, 1024 MiB libres); -1 = sin
+  ese tope. Se leen al arrancar la máquina.
 
 En un Linux con systemd el daemon corre como root y lee la configuración de
 root: `sudo kling config set …`, o `Environment=KLING_SHARE_ROOTS=…` en la

@@ -719,6 +719,12 @@ intenta otra vez, como con la presión; si no, 507.
     nombre y hacer que una escritura futura del host caiga en algo que no es
     un fichero regular.
   - `ro` se impone en el daemon (`EROFS`), no en el montaje del invitado.
+  - Una carpeta `rw` lleva cuota en el daemon: crecimiento neto en bytes
+    (`daemon.share_max_mib`, 32 GiB), entradas nuevas (`daemon.share_max_files`,
+    1 000 000) y un mínimo libre en el disco del host
+    (`daemon.share_min_free_mib`, 1 GiB); pasarse da `ENOSPC` sin tocar nada.
+    Sin ella el invitado llenaba el disco del host con escrituras, `truncate` o
+    ficheros nuevos (ver docs/compartir.md, «Cuota de las carpetas rw»).
   - Para el invitado todo es de root; no ve uid/gid del host, `chown` no hace
     nada y los modos se recortan a `0777` (sin setuid/setgid/sticky). Lo que crea
     se entrega al dueño de la carpeta.
