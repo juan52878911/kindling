@@ -12,6 +12,8 @@
 ;;           aristas de grafo, de kling db attach y del upstream en el
 ;;           loopback de una credencial (pkg/linkbroker)
 ;;   GFX     "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
+;;   FWD     "1" si puede abrir reenvíos (escuchar en el loopback): solo
+;;           cuando el núcleo no los pidió antes de crear la VM (uno anterior)
 ;;   NL NE   cuántos ficheros L y E hay (hasta 16 de cada)
 ;;   L0..    ficheros que solo lee: kernel, discos de solo lectura, el estado
 ;;           que restaura (su dorado o su congelación)
@@ -49,8 +51,7 @@
 (cada-uno "E" (string->number (param "NE")) (lambda (f) (allow file-read* file-write* file-ioctl (literal f))))
 
 ;; Red: su API (socket Unix en el directorio de la máquina) y sus reenvíos,
-;; que escuchan en 127.0.0.1 (cualquier puerto: escuchar no da acceso a nada
-;; de otra máquina, conectar sí, y eso sigue cerrado); el socket del broker del
+;; que escuchan en 127.0.0.1; el socket del broker del
 ;; daemon y ningún otro socket Unix de fuera; y salida al exterior solo si la
 ;; máquina la tiene. Nunca al loopback del Mac (0.0.0.0 incluido, que en macOS
 ;; llega a él), donde están los reenvíos de las demás máquinas y su agente
@@ -60,7 +61,15 @@
 ;; rango de los reenvíos: 1000 reglas eran ~20 ms de compilar el perfil en
 ;; cada arranque y cada restauración.
 (allow network-bind network-inbound (local unix-socket (subpath (param "MDIR"))))
-(allow network-bind network-inbound (local ip "localhost:*"))
+;; Los reenvíos los abre antes de confinarse (el núcleo los pide antes de
+;; crear la VM, server.reservarLocked), así que confinado no escucha en ningún
+;; puerto TCP: ni en el reenvío vivo de otra máquina ni en el puerto libre de
+;; un -upstream del loopback (un Postgres parado), donde el proxy de otra
+;; máquina entregaría su clave. SBPL no tiene rangos de puertos, y 1000 reglas
+;; del rango reservado eran ~36 ms más de sandbox_init. Con un núcleo anterior
+;; (FWD=1) sigue escuchando en cualquier puerto del loopback, como antes.
+(if (string=? (param "FWD") "1")
+  (allow network-bind network-inbound (local ip "localhost:*")))
 (allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))

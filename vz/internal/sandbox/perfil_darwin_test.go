@@ -32,10 +32,14 @@ type orden struct {
 	Perfil  string
 	Pares   []string
 	Pruebas []prueba
+	// Escuchas son direcciones en las que el hijo escucha ANTES de
+	// confinarse, como los reenvíos que kling-vz abre antes de crear la VM.
+	Escuchas []string
 }
 
 // prueba: Op "bind" (escuchar en Addr), "connect" (conectar a Addr por TCP),
-// "unix" (conectar al socket Unix Addr), "read" o "write" (el fichero Addr).
+// "unix" (conectar al socket Unix Addr), "read" o "write" (el fichero Addr),
+// "accept" (aceptar, ya confinado, en la escucha previa Addr).
 type prueba struct{ Op, Addr string }
 
 // resultado: cuánto tardó sandbox_init y, por prueba, "ok", "denied" (EPERM:
@@ -58,6 +62,15 @@ func hijo(s string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
+	previas := map[string]net.Listener{}
+	for _, a := range o.Escuchas {
+		l, err := net.Listen("tcp4", a)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		previas[a] = l
+	}
 	t0 := time.Now()
 	if err := Aplicar(o.Perfil, o.Pares); err != nil {
 		fmt.Fprintln(os.Stderr, "sandbox_init:", err)
@@ -71,6 +84,13 @@ func hijo(s string) int {
 			var l net.Listener
 			if l, err = net.Listen("tcp", p.Addr); err == nil {
 				l.Close()
+			}
+		case "accept":
+			l := previas[p.Addr].(*net.TCPListener)
+			_ = l.SetDeadline(time.Now().Add(5 * time.Second))
+			var c net.Conn
+			if c, err = l.Accept(); err == nil {
+				c.Close()
 			}
 		case "read":
 			var b []byte
@@ -256,6 +276,61 @@ func TestPerfilRed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Con los reenvíos ya abiertos antes de confinarse (ReenviosAbiertos, lo
+// normal con un núcleo actual), el perfil no deja escuchar en ningún puerto
+// TCP, ni del rango reservado (el reenvío de otra máquina que se libere) ni
+// fuera (el puerto libre de un -upstream del loopback, o el 80); pero los
+// reenvíos abiertos antes siguen aceptando conexiones.
+func TestPerfilSinEscuchar(t *testing.T) {
+	fmin, fmax := credproxy.ForwardPortMin, credproxy.ForwardPortMax
+	addr := func(p int) string { return "127.0.0.1:" + strconv.Itoa(p) }
+	previa := addr(puertoLibre(t, fmin+200, fmax))
+	bindRango := addr(puertoLibre(t, fmin+100, fmin+199))
+	bindFuera := addr(puertoLibre(t, 41000, 41999))
+	pruebas := []prueba{{"bind", bindRango}, {"bind", bindFuera}, {"bind", "127.0.0.1:80"}, {"bind", "0.0.0.0:0"}, {"accept", previa}}
+	quiere := []string{"denied", "denied", "denied", "denied", "ok"}
+	for nombre, perfil := range perfiles(t) {
+		t.Run(nombre, func(t *testing.T) {
+			root := Real(t.TempDir())
+			mdir := filepath.Join(root, "machines", "m")
+			if err := os.MkdirAll(mdir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Parametros(root, mdir, "", server.Confinamiento{ConRed: true, ReenviosAbiertos: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Quien conecta al reenvío desde fuera: hasta que el hijo escuche.
+			hecho := make(chan struct{})
+			defer close(hecho)
+			go func() {
+				for {
+					select {
+					case <-hecho:
+						return
+					case <-time.After(20 * time.Millisecond):
+					}
+					if c, err := net.DialTimeout("tcp4", previa, 200*time.Millisecond); err == nil {
+						c.Close()
+						return
+					}
+				}
+			}()
+			r := encerrado(t, orden{Perfil: perfil, Pares: p, Pruebas: pruebas, Escuchas: []string{previa}})
+			for i, x := range r.Res {
+				// Un bind fuera del sandbox (EADDRINUSE, EACCES del 80 sin
+				// privilegios) no es lo que se prueba: solo EPERM es denegar.
+				if x != "denied" && x != "ok" {
+					r.Res[i] = "otro: " + x
+				}
+			}
+			if !slices.Equal(r.Res, quiere) {
+				t.Fatalf("pruebas %v\n got  %v\n want %v", pruebas, r.Res, quiere)
+			}
+		})
 	}
 }
 

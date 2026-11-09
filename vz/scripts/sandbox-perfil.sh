@@ -72,13 +72,14 @@ awk '{ print } /^\(import "system.sb"\)/ {
 
 fallos=0
 # dentro NET ALLOWLIST -- orden...: ejecuta orden en el perfil con los
-# parámetros de m1. ALLOWLIST ya no cambia el perfil (el loopback del Mac lo
+# parámetros de m1 (FWD, en el entorno: 1 = puede abrir reenvíos, como con
+# un núcleo anterior; 0 = ya los abrió antes de confinarse, lo normal). ALLOWLIST ya no cambia el perfil (el loopback del Mac lo
 # marca el daemon por el broker); se deja para que las pruebas lo digan.
 dentro() {
 	net=$1
 	shift 2
 	sandbox-exec -f "$T/perfil.sb" \
-		-D ROOT="$R" -D MDIR="$M" -D NET="$net" -D GFX=0 \
+		-D ROOT="$R" -D MDIR="$M" -D NET="$net" -D GFX=0 -D FWD="${FWD:-1}" \
 		-D BROKER=/dev/null/kling-vz-no-broker -D NL=3 -D NE=2 \
 		-D L0="$R/images/vmlinux" -D L1="$R/images/base.ext4" -D L2="$R/snapshots/suyo/mem.file" \
 		-D E0="$M/overlay.ext4" -D E1="$R/volumes/suyo.ext4" \
@@ -125,6 +126,12 @@ prueba DENEGADO "allowlist: 0.0.0.0:$REENVIO" 1 1 perl -e "$conecta" 0.0.0.0 "$R
 prueba DENEGADO "allowlist: 127.0.0.1:$OTRO (el -upstream del loopback lo marca el daemon)" 1 1 perl -e "$conecta" 127.0.0.1 "$OTRO"
 prueba PERMITIDO "escuchar en 127.0.0.1:$BIND (su reenvío, en el rango)" 0 0 perl -e "$escucha" "$BIND"
 prueba PERMITIDO "escuchar en 127.0.0.1:$((OTRO + 1)) (cualquier puerto del loopback, como kling-hv)" 0 0 perl -e "$escucha" "$((OTRO + 1))"
+echo "--- red, con los reenvíos abiertos antes de confinarse (FWD=0)"
+FWD=0
+prueba DENEGADO "escuchar en 127.0.0.1:$BIND (un puerto del rango: el reenvío de otra máquina)" 0 0 perl -e "$escucha" "$BIND"
+prueba DENEGADO "escuchar en 127.0.0.1:$((OTRO + 1)) (el puerto libre de un -upstream del loopback)" 0 0 perl -e "$escucha" "$((OTRO + 1))"
+prueba DENEGADO "escuchar en 127.0.0.1:80" 0 0 perl -e "$escucha" 80
+FWD=1
 
 echo
 if [ $fallos -eq 0 ]; then
