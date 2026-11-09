@@ -97,6 +97,11 @@ prueba() {
 	fi
 	printf '%-4s %-10s (debe %-10s) %s\n' "$marca" "$hubo" "$debe" "$que"
 }
+# mach SERVICIO: bootstrap_look_up del servicio de la sesión del usuario.
+mach='import ctypes,sys
+l=ctypes.CDLL(None); p=ctypes.c_uint(0)
+bp=ctypes.c_uint.in_dll(l,"bootstrap_port")
+sys.exit(0 if l.bootstrap_look_up(bp, sys.argv[1].encode(), ctypes.byref(p)) == 0 else 1)'
 conecta='use IO::Socket::INET; IO::Socket::INET->new(PeerAddr=>$ARGV[0], PeerPort=>$ARGV[1], Timeout=>2) or exit 1'
 escucha='use IO::Socket::INET; IO::Socket::INET->new(LocalAddr=>"127.0.0.1", LocalPort=>$ARGV[0], Listen=>1, ReuseAddr=>1) or exit 1'
 
@@ -110,6 +115,8 @@ prueba DENEGADO "escribir snapshots/suyo/mem.file (ni el suyo)" 0 0 sh -c "print
 prueba DENEGADO "crear snapshots/nuevo.file" 0 0 sh -c "printf x >'$R/snapshots/nuevo.file'"
 prueba DENEGADO "escribir volumes/otro.ext4 (volumen de otra máquina)" 0 0 sh -c "printf x >>'$R/volumes/otro.ext4'"
 prueba DENEGADO "escribir machines/m2/ (otra máquina)" 0 0 sh -c "printf x >'$R/machines/m2/x'"
+prueba DENEGADO "ver si machines/m2/credentials.enc existe y su tamaño (stat)" 0 0 stat "$R/machines/m2/credentials.enc"
+prueba PERMITIDO "stat de su overlay" 0 0 stat "$M/overlay.ext4"
 prueba PERMITIDO "leer su kernel" 0 0 cat "$R/images/vmlinux"
 prueba PERMITIDO "leer su dorado (el estado que restaura)" 0 0 cat "$R/snapshots/suyo/mem.file"
 prueba PERMITIDO "escribir su overlay" 0 0 sh -c "printf x >>'$M/overlay.ext4'"
@@ -132,6 +139,11 @@ prueba DENEGADO "escuchar en 127.0.0.1:$BIND (un puerto del rango: el reenvío d
 prueba DENEGADO "escuchar en 127.0.0.1:$((OTRO + 1)) (el puerto libre de un -upstream del loopback)" 0 0 perl -e "$escucha" "$((OTRO + 1))"
 prueba DENEGADO "escuchar en 127.0.0.1:80" 0 0 perl -e "$escucha" 80
 FWD=1
+echo "--- servicios de la sesión (mach-lookup)"
+prueba DENEGADO "com.apple.pasteboard.1 (el portapapeles)" 0 0 /usr/bin/python3 -I -c "$mach" com.apple.pasteboard.1
+prueba DENEGADO "com.apple.SecurityServer (securityd, el llavero)" 0 0 /usr/bin/python3 -I -c "$mach" com.apple.SecurityServer
+prueba DENEGADO "com.apple.tccd (permisos de privacidad)" 1 1 /usr/bin/python3 -I -c "$mach" com.apple.tccd
+prueba PERMITIDO "com.apple.trustd.agent (system.sb: verificar TLS)" 1 1 /usr/bin/python3 -I -c "$mach" com.apple.trustd.agent
 
 echo
 if [ $fallos -eq 0 ]; then
