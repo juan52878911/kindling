@@ -873,7 +873,11 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		w.Header().Del("Content-Length")
 	}
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(red, origenVigilado{r: resp.Body, v: v}); err != nil {
+	// Un io.EOF con el contexto ya cancelado también es un corte: al cerrar la
+	// conexión TLS el close_notify sale antes que el cierre del socket, y un
+	// proveedor que lo vea a tiempo cierra su respuesta limpia y el transporte
+	// aún lee el chunk final (TestProxyCorteConFinLimpioDelProveedor).
+	if _, err := io.Copy(red, origenVigilado{r: resp.Body, v: v}); err != nil || ctx.Err() != nil {
 		// Cortada a medias (inactividad, techo, el proveedor se fue): se aborta
 		// la conexión en vez de cerrar el chunked limpio, para que el SDK del
 		// invitado vea un error y no una respuesta truncada que parece entera.
