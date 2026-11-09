@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -35,11 +36,27 @@ func ext4Prueba(t *testing.T, tamMiB int, ordenes ...string) (*Manager, imagenDe
 	m := &Manager{root: dir}
 	im := imagenDebugfs{bin: bin, file: img}
 	if len(ordenes) > 0 {
-		if err := im.escribir(ctx, dir, ordenes); err != nil {
-			t.Fatal(err)
-		}
+		escribirSinConfinar(t, im, ordenes)
 	}
 	return m, im
+}
+
+// escribirSinConfinar llena una imagen de prueba con debugfs sin confinar:
+// sus órdenes write copian ficheros del host por ruta, que el debugfs
+// confinado de escribir no alcanza (por eso put le pasa la fuente abierta).
+// Solo para construir las imágenes de las pruebas.
+func escribirSinConfinar(t *testing.T, im imagenDebugfs, ordenes []string) {
+	t.Helper()
+	c := exec.Command(im.bin, "-w", "-f", "-", im.file)
+	c.Stdin = strings.NewReader(strings.Join(ordenes, "\n") + "\n")
+	c.Env = entornoE2fsck
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("debugfs -w: %v: %s", err, out)
+	}
+	if q := quejasDebugfs(out); len(q) > 0 {
+		t.Fatalf("debugfs -w: %s", strings.Join(q, "; "))
+	}
 }
 
 func fichero(t *testing.T, contenido string) (string, string) {

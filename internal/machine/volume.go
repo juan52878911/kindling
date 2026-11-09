@@ -651,9 +651,13 @@ func quitarLostFound(ctx context.Context, path string) {
 	if bin == "" {
 		return
 	}
+	im := imagenDebugfs{bin: bin, file: path}
 	run := func(orden string) string {
-		c := exec.CommandContext(ctx, bin, "-w", "-R", orden, path)
-		c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+		c, fin, err := im.cmd(ctx, []string{"-w", "-R", orden})
+		if err != nil {
+			return err.Error()
+		}
+		defer fin()
 		out, _ := c.CombinedOutput()
 		return string(out)
 	}
@@ -782,20 +786,43 @@ var entornoE2fsck = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "
 // con los privilegios del daemon sino confinado (confinarE2fs), con el disco
 // por descriptor.
 var ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", rutaE2fsck)
+	fin, err := confinarSobreDisco(c, path, true)
 	if err != nil {
 		return nil, nil, err
 	}
-	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", rutaE2fsck)
+	return c, fin, nil
+}
+
+// confinarSobreDisco prepara c, una orden de e2fsprogs (e2fsck, resize2fs,
+// debugfs) que recibe el disco como rutaE2fsck, para correr confinada sobre
+// path: lo abre (en escritura si escribir), se lo pasa como descriptor 3,
+// seguido de extra (4, 5...), le deja el entorno mínimo (entornoE2fsck) y la
+// encierra (confinarE2fs). Todas leen un ext4 que pudo escribir un invitado
+// (A1). Devuelve con qué deshacer lo que se tocó del disco y cerrarlo, para
+// después de que la orden acabe.
+func confinarSobreDisco(c *exec.Cmd, path string, escribir bool, extra ...*os.File) (func(), error) {
+	flag := os.O_RDONLY
+	if escribir {
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, flag, 0)
+	if err != nil {
+		return nil, err
+	}
 	c.Env = entornoE2fsck
-	c.ExtraFiles = []*os.File{f}
-	deshacer, err := confinarE2fs(c, f)
+	c.ExtraFiles = append([]*os.File{f}, extra...)
+	deshacer, err := confinarDisco(c, f)
 	if err != nil {
 		f.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	return c, func() { deshacer(); f.Close() }, nil
+	return func() { deshacer(); f.Close() }, nil
 }
+
+// confinarDisco es confinarE2fs; variable para que las pruebas con un debugfs
+// de mentira (un guion de sh) lo dejen correr sin el encierro.
+var confinarDisco = confinarE2fs
 
 // revisarExt4 pasa e2fsck por path con plazo (plazoE2fsck) y traduce su
 // código de salida, que es una máscara de bits (e2fsck(8)): 0 sin errores, 1
