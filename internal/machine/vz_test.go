@@ -309,6 +309,16 @@ func indice(ls []string, pre string) int {
 	return -1
 }
 
+// ultimo es como indice, pero la última línea que empieza por pre.
+func ultimo(ls []string, pre string) int {
+	for i := len(ls) - 1; i >= 0; i-- {
+		if strings.HasPrefix(ls[i], pre) {
+			return i
+		}
+	}
+	return -1
+}
+
 func matarVMM(pid int) {
 	if pid > 0 {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
@@ -341,9 +351,12 @@ func TestVZBootMandaRedAntesDeArrancarYReenviaDespues(t *testing.T) {
 	}
 
 	ls := llamadas(t, logPath)
-	red, start, fwd := indice(ls, "PUT /kling/network"), indice(ls, "PUT /actions"), indice(ls, "PUT /kling/forwards")
-	if red < 0 || start < 0 || fwd < 0 || !(red < start && start < fwd) {
-		t.Fatalf("orden de llamadas incorrecto (red=%d start=%d forwards=%d):\n%s", red, start, fwd, strings.Join(ls, "\n"))
+	// Los reenvíos dos veces: antes de arrancar, para que kling-vz los abra
+	// mientras aún puede escuchar (reservarReenvios), y después.
+	red, start, fwd := indice(ls, "PUT /kling/network"), indice(ls, "PUT /actions"), ultimo(ls, "PUT /kling/forwards")
+	pre := indice(ls, "PUT /kling/forwards")
+	if red < 0 || start < 0 || fwd < 0 || !(red < pre && pre < start && start < fwd) {
+		t.Fatalf("orden de llamadas incorrecto (red=%d forwards antes=%d start=%d forwards=%d):\n%s", red, pre, start, fwd, strings.Join(ls, "\n"))
 	}
 	if !strings.HasSuffix(ls[red], "egress=internet") {
 		t.Fatalf("la política de salida no viajó: %q", ls[red])
@@ -421,9 +434,10 @@ func TestVZThawMandaRedAntesDeCargarYReenviaDespues(t *testing.T) {
 		t.Fatalf("thaw: %v", err)
 	}
 	ls := llamadas(t, logPath)
-	red, load, fwd := indice(ls, "PUT /kling/network"), indice(ls, "PUT /snapshot/load"), indice(ls, "PUT /kling/forwards")
-	if red < 0 || load < 0 || fwd < 0 || !(red < load && load < fwd) {
-		t.Fatalf("orden de llamadas incorrecto (red=%d load=%d forwards=%d):\n%s", red, load, fwd, strings.Join(ls, "\n"))
+	red, load, fwd := indice(ls, "PUT /kling/network"), indice(ls, "PUT /snapshot/load"), ultimo(ls, "PUT /kling/forwards")
+	pre := indice(ls, "PUT /kling/forwards")
+	if red < 0 || load < 0 || fwd < 0 || !(red < pre && pre < load && load < fwd) {
+		t.Fatalf("orden de llamadas incorrecto (red=%d forwards antes=%d load=%d forwards=%d):\n%s", red, pre, load, fwd, strings.Join(ls, "\n"))
 	}
 	if out.State != api.StateRunning || out.Addr(api.GuestPort) != puertoFalso(api.GuestPort) {
 		t.Fatalf("thaw devolvió %+v", out)

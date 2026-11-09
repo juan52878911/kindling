@@ -153,7 +153,7 @@ jobs:
           # release que instala 94.
           CGO_ENABLED=0 go -C ext/db build -trimpath -ldflags "$lf" -o "$RUNNER_TEMP/kling-db" ./cmd/kling-db
           ( cd "$out" && sha256sum -- * > SHA256SUMS )
-          "$out/kling-linux-amd64" version | head -1
+          "$out/kling-linux-amd64" version | sed -n 1p
           echo "dir=$out" >> "$GITHUB_OUTPUT"
 
       - name: caché del kernel

@@ -303,6 +303,44 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 			return err
 		}
 	}
+	return m.reservarReenvios(ctx, c, id)
+}
+
+// reservarReenvios pide los reenvíos ANTES de que el invitado corra: kling-vz
+// los abre mientras aún puede escuchar y se confina sin poder escuchar en
+// ningún puerto TCP más (kling-vz.sb). Estas direcciones vienen de un proceso
+// que todavía no ha procesado nada del invitado, y abrirReenvios exige que
+// las de después de arrancar sean las mismas: un kling-vz tomado no puede
+// anunciar como suyo el reenvío de otra máquina. Un kling-vz anterior no
+// sabe reservarlos sin red ("not up yet"): se sigue como antes, con los de
+// después de arrancar y sin esa garantía.
+func (m *Manager) reservarReenvios(ctx context.Context, c *fc.Client, id string) error {
+	m.reenviosPrevios.Delete(id)
+	m.mu.RLock()
+	mc := m.byID[id]
+	var puertos []int
+	if mc != nil {
+		puertos = mc.ExposedPorts()
+	}
+	m.mu.RUnlock()
+	if mc == nil {
+		return fmt.Errorf("machine %s no longer exists", shortID(id))
+	}
+	fwd, err := c.KlingForwards(ctx, puertos)
+	if err != nil {
+		log.Printf("%s: kling-vz did not open its port forwards before booting (%v): rebuild kling-vz so it confines without listening on the loopback", shortID(id), err)
+		return nil
+	}
+	if err := validarReenvios(fwd); err != nil {
+		return err
+	}
+	m.mu.RLock()
+	err = m.reenvioDeOtraLocked(id, fwd)
+	m.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	m.reenviosPrevios.Store(id, fwd)
 	return nil
 }
 
@@ -439,7 +477,21 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 	if err := validarReenvios(fwd); err != nil {
 		return err
 	}
+	// Los de antes de arrancar mandan (reservarReenvios): ya puede haber
+	// corrido el invitado, y un kling-vz tomado contestaría lo que quisiera.
+	if v, ok := m.reenviosPrevios.LoadAndDelete(id); ok {
+		if err := mismosReenvios(v.(map[string]string), fwd); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
+	// El reenvío vivo de otra máquina nunca: el daemon marcaría a su invitado
+	// creyendo llegar a este (broker.go, direccionCopiaLocked). Con m.mu
+	// tomado hasta guardarlo, para que dos arranques no se lo queden a la vez.
+	if err := m.reenvioDeOtraLocked(id, fwd); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	pct := 0
 	if cur := m.byID[id]; cur != nil {
 		pct = techoDelDaemon(cur.VCPUs)

@@ -302,6 +302,12 @@ type Manager struct {
 	// (presion_memoria.go).
 	pres presionMemoria
 
+	// reenviosPrevios: en macOS, los reenvíos que kling-vz abrió antes de que
+	// el invitado corriera, por id de máquina (map[string]string). Son las
+	// direcciones buenas: las de después de arrancar tienen que coincidir
+	// (plataforma_vz.go, reservarReenvios).
+	reenviosPrevios sync.Map
+
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
 	// carga (ver avisarAnyDatabase).
@@ -325,6 +331,10 @@ type Manager struct {
 	// pasan los dos, y juntos no caben — el OOM del anfitrión que el check existe
 	// para impedir. Se toca bajo mu.
 	pendingMiB int
+	// pendingDeclMiB es lo mismo pero lo DECLARADO (mem_mib entero, sin el
+	// descuento de un dorado compartido): lo que suma la admisión por memoria
+	// declarada (memoria_declarada.go). Se toca bajo mu.
+	pendingDeclMiB int
 
 	// volcandoMiB es el disco que tienen reservado los volcados en curso
 	// (freeze, save, el thaw de un diferencial sin reflink) y que aún no han

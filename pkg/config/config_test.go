@@ -547,3 +547,21 @@ func TestSetIdleFreeze(t *testing.T) {
 		t.Fatal("daemon.idle_freeze no sale en Keys")
 	}
 }
+
+func TestSetDaemonCuotaCarpetas(t *testing.T) {
+	c := &Config{}
+	for _, k := range []string{"share_max_mib", "share_max_files", "share_min_free_mib"} {
+		if err := c.Set("daemon."+k, "-2"); err == nil {
+			t.Errorf("daemon.%s -2 se acepta", k)
+		}
+		if err := c.Set("daemon."+k, "-1"); err != nil {
+			t.Errorf("daemon.%s -1 (sin tope): %v", k, err)
+		}
+	}
+	if err := c.Set("daemon.share_max_mib", "4096"); err != nil || c.Daemon.ShareMaxMiB != 4096 {
+		t.Fatalf("share_max_mib 4096: %v (%d)", err, c.Daemon.ShareMaxMiB)
+	}
+	if c.Daemon.ShareMaxFiles != -1 || c.Daemon.ShareMinFreeMiB != -1 {
+		t.Fatalf("files %d, min free %d", c.Daemon.ShareMaxFiles, c.Daemon.ShareMinFreeMiB)
+	}
+}
