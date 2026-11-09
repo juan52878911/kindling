@@ -1471,17 +1471,24 @@ el `SHA256SUMS` firmado de una release vieja no sirva para colar sus binarios en
 otra. Un fallo de red al pedir la firma es un error, no «release sin firma». Una
 release sin firma se acepta con un aviso solo antes de `v1.0.0`
 (`upgrade.FirmaObligatoriaDesde`): desde ahí la rechazan tanto un kling 1.x como
-cualquier kling que baje una release ≥ 1.0. `-from-dir` comprueba la firma si el
-directorio la trae y no la exige. `install.sh` la comprueba si hay `minisign`
-instalado; sin él, solo sha256 con un aviso. Homebrew solo comprueba sha256 (la
+cualquier kling que baje una release ≥ 1.0. Desde un kling 1.x, `-from-dir` también
+la exige: un directorio sin `SHA256SUMS.minisig` se rechaza salvo con `-insecure`
+(para binarios compilados por uno mismo; avisa y comprueba el `SHA256SUMS` si lo hay),
+y una firma inválida o de otra clave es un error también con `-insecure`.
+`kling plugin install` (y las extensiones que actualiza `kling upgrade`) sigue la
+misma regla con las claves de release: firma obligatoria desde 1.0.0, `-insecure`
+acepta un `SHA256SUMS` sin firma y una firma presente siempre se comprueba; `-file`
+instala un binario local sin firma. `install.sh` exige `minisign` desde v1.0.0
+(`KLING_INSECURE_NO_MINISIGN=1` lo salta, con aviso y solo sha256); antes, sin él,
+solo sha256 con un aviso. Homebrew solo comprueba sha256 (la
 fórmula sale del `SHA256SUMS` firmado). Detalles, rotación y verificación a mano
 en `docs/firmas.md`.
 
 Límites: quien tenga la clave privada (o pueda publicar en el environment
 `release`) firma lo que quiera hasta que se rote; no hay lista de revocación, así
 que una clave comprometida se retira sacándola de `clavesRelease` en la siguiente
-release, y los kling anteriores siguen fiándose de ella. `kling plugins install`
-todavía comprueba solo el sha256 del `SHA256SUMS`.
+release, y los kling anteriores siguen fiándose de ella. `-insecure` y `-file` dejan
+la integridad en manos de quien los usa.
 
 ## Lo que NO está resuelto
 
