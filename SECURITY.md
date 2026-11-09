@@ -666,6 +666,13 @@ marcha no lo destraba hasta reiniciarlo. Solo afecta a arranques **nuevos**
 se ve afectada, ni tampoco los comandos de solo lectura (`ps`, `logs`, …). macOS/`kling-vz`
 no usa jailer y no se ve afectado por nada de esto.
 
+Tener el binario y correr como root **no basta**: sin el usuario de servicio, jailer
+lanzaría Firecracker con `--uid 0`, y como root el VMM puede escribir, a través de los
+enlaces duros del jail, sobre el kernel, las bases y los dorados que comparten todas las
+microVMs. Antes se arrancaba así con un aviso; ahora es un bloqueo más, con el comando
+para crear el usuario. `KLING_JAILER=1` sigue forzando ese modo para quien lo acepte, y
+deja un «SECURITY WARNING» en el log de arranque.
+
 ### 12. Admisión por disco y por presión de memoria
 
 El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
