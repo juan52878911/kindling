@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 const cuerpoNotif = `{"jsonrpc":"2.0","method":"notifications/initialized"}`
@@ -122,5 +124,45 @@ func TestRouterSueltaLasAisladas(t *testing.T) {
 	r.agg.reap(t.Context(), 0)
 	if n := vivas(); n != 0 {
 		t.Fatalf("tras segar quedan %d máquinas aisladas", n)
+	}
+}
+
+// Una clave de sesión es de quien la abrió: otro token válido (otro tenant) que
+// la conozca no puede usarla ni cerrarla. Antes solo se comprobaba el servicio.
+func TestSesionLigadaAlTenant(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 4)
+	d := &daemonAislado{service: "notas", invitados: addrs, compartido: true}
+	gw := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "")
+	gw.SetTenants([]scheduler.TenantLimit{{Name: "ana", Token: "tok-ana"}, {Name: "bea", Token: "tok-bea"}})
+	h := gw.Handler("")
+	con := func(tok, metodo, ruta, sid, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(metodo, ruta, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if sid != "" {
+			req.Header.Set(SessionHeader, sid)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, ruta := range []string{"/mcp/notas", "/mcp/_all"} {
+		rec := con("tok-ana", "POST", ruta, "", cuerpoInit)
+		sid := rec.Header().Get(SessionHeader)
+		if rec.Code != 200 || sid == "" {
+			t.Fatalf("%s initialize de ana: %d %s", ruta, rec.Code, rec.Body)
+		}
+		ping := `{"jsonrpc":"2.0","id":3,"method":"ping"}`
+		if rec := con("tok-bea", "POST", ruta, sid, ping); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: bea usó la sesión de ana: %d %s", ruta, rec.Code, rec.Body)
+		}
+		if rec := con("tok-bea", "DELETE", ruta, sid, ""); rec.Code == http.StatusNoContent && ruta == "/mcp/notas" {
+			t.Fatalf("%s: bea cerró la sesión de ana", ruta)
+		}
+		if rec := con("tok-ana", "POST", ruta, sid, ping); rec.Code != 200 {
+			t.Fatalf("%s: ana perdió su sesión: %d %s", ruta, rec.Code, rec.Body)
+		}
 	}
 }

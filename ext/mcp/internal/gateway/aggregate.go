@@ -66,7 +66,10 @@ func (a *aggregator) serviceLock(service string) *sync.Mutex {
 }
 
 type aggSession struct {
-	id       string
+	id string
+	// tenant es el nombre del tenant que abrió la conversación: solo él puede
+	// usarla o cerrarla con su id.
+	tenant   string
 	services []string
 	mode     mode
 	// Sesiones abiertas contra los servicios de detrás: se reutilizan para que
@@ -95,7 +98,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 // handleAggregate atiende el endpoint virtual /mcp/_all.
 func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
-		g.agg.drop(r.Context(), r.Header.Get(SessionHeader))
+		g.agg.drop(r.Context(), r.Header.Get(SessionHeader), scheduler.TenantFrom(r.Context()).Name())
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -739,9 +742,12 @@ var errSesionDesconocida = errors.New("unknown or expired MCP session; start a n
 //	/mcp/_all?services=eco,files       solo esos dos
 //	/mcp/_all?mode=expand              catálogo completo aplanado
 func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession, bool, error) {
+	tenant := scheduler.TenantFrom(ctx).Name()
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		a.mu.Lock()
 		s, ok := a.sessions[sid]
+		// La de otro tenant es, para este, una sesión que no existe.
+		ok = ok && s.tenant == tenant
 		if ok {
 			s.lastUse = time.Now()
 		}
@@ -785,7 +791,7 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 	}
 
 	s := &aggSession{
-		id: newSessionID(), services: services, mode: m,
+		id: newSessionID(), tenant: tenant, services: services, mode: m,
 		backing: map[string]string{}, lastUse: time.Now(),
 	}
 	a.mu.Lock()
@@ -813,10 +819,16 @@ func (a *aggregator) backedOn(machineID string) int {
 	return n
 }
 
-func (a *aggregator) drop(ctx context.Context, sid string) {
+// drop cierra la conversación sid si es del tenant; la de otro no se toca.
+func (a *aggregator) drop(ctx context.Context, sid, tenant string) {
 	a.mu.Lock()
 	s := a.sessions[sid]
-	delete(a.sessions, sid)
+	if s != nil && s.tenant != tenant {
+		s = nil
+	}
+	if s != nil {
+		delete(a.sessions, sid)
+	}
 	a.mu.Unlock()
 	if s != nil {
 		a.soltarAisladas(ctx, s)
