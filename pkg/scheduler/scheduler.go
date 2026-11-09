@@ -348,6 +348,15 @@ type entry struct {
 	// herramienta en paralelo. Se fija al crear la instancia y no cambia.
 	maxSessions int
 
+	// reservas son las sesiones nuevas que pickInstance/scaleOut entregaron
+	// aquí y que aún no tienen ruta: el initialize va en camino. Cuentan para
+	// maxSessions; sin ellas, N initialize concurrentes leían todos el mismo
+	// hueco y elegían la misma instancia (y el puente rechazaba a N-1). Se
+	// sueltan en end —el initialize acaba antes de fijar la sesión— o al
+	// vencer reservaPlazo, por si quien la pidió no llega a usarla. Se toca
+	// con g.mu.
+	reservas []time.Time
+
 	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
 	memMiB int
 
@@ -380,6 +389,12 @@ func (g *Scheduler) end(e *entry) {
 	if e.inflight > 0 {
 		e.inflight--
 	}
+	// La petición que acaba puede no ser la que reservó (no llevan nombre),
+	// pero soltar antes de tiempo solo deja pasar a otra al puente, que la
+	// rechaza y el gateway escala: lo de antes, nunca una fuga.
+	if len(e.reservas) > 0 {
+		e.reservas = e.reservas[1:]
+	}
 	e.lastUse = time.Now()
 	g.mu.Unlock()
 }
@@ -409,12 +424,17 @@ type sessionRoute struct {
 // elegida si hay una con hueco de sesión y sin saturar de trabajo; si todas las
 // que tienen hueco están saturadas, devuelve nil y la menos cargada de ellas
 // (libre), por si no se puede escalar. Pura, para poder probarla sin daemon.
+//
+// Las reservas (sesiones con el initialize en camino) cuentan para elegir,
+// pero no para libre: si no se puede escalar, compartir con una sesión que
+// quizá no llegue es mejor que rechazar. Se llama con g.mu tomado.
 func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight int) (elegida, libre *entry) {
 	for _, e := range entries {
-		if sesiones(e.machineID) >= e.maxSessions {
+		n := sesiones(e.machineID)
+		if n >= e.maxSessions {
 			continue
 		}
-		if maxInflight <= 0 || e.inflight < maxInflight {
+		if n+e.reservasLocked() < e.maxSessions && (maxInflight <= 0 || e.inflight < maxInflight) {
 			return e, nil
 		}
 		if libre == nil || e.inflight < libre.inflight {
@@ -424,12 +444,36 @@ func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight in
 	return nil, libre
 }
 
+// reservaPlazo es lo que dura una reserva de sesión que nadie suelta.
+const reservaPlazo = 30 * time.Second
+
+// reservarLocked apunta en e una sesión nueva en camino. Con g.mu tomado.
+func (e *entry) reservarLocked() {
+	e.reservas = append(e.reservas, time.Now())
+}
+
+// reservasLocked cuenta las reservas vigentes de e, olvidando las vencidas.
+// Con g.mu tomado.
+func (e *entry) reservasLocked() int {
+	i := 0
+	for i < len(e.reservas) && time.Since(e.reservas[i]) > reservaPlazo {
+		i++
+	}
+	e.reservas = e.reservas[i:]
+	return len(e.reservas)
+}
+
 func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenant) (*entry, error) {
 	if _, err := g.ensure(ctx, service); err != nil {
 		return nil, err
 	}
+	// La elegida se reserva con el mismo candado con que se eligió: soltarlo
+	// antes dejaba a N initialize concurrentes leer el mismo hueco.
 	g.mu.Lock()
 	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	if elegida != nil {
+		elegida.reservarLocked()
+	}
 	g.mu.Unlock()
 	if elegida != nil {
 		return elegida, nil
@@ -442,6 +486,9 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	// es mejor que una rechazada.
 	e, err := g.scaleOut(ctx, service, tnt)
 	if err != nil && libre != nil {
+		g.mu.Lock()
+		libre.reservarLocked()
+		g.mu.Unlock()
 		return libre, nil
 	}
 	return e, err
@@ -1053,6 +1100,7 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
 	g.soltarCuotaLocked(e)
+	e.reservarLocked() // nace para la sesión que la pidió (ver pickInstance)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
 	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)

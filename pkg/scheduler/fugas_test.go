@@ -3,8 +3,10 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,6 +159,62 @@ func TestElSegadorNoBorraLaRutaDeUnaLlamadaEnVuelo(t *testing.T) {
 	}
 	if g.routes["ociosa"] != nil {
 		t.Error("la ruta ociosa de verdad debía caducar")
+	}
+}
+
+// N initialize concurrentes contra instancias de una sesión: cada uno tiene
+// que acabar en una instancia distinta. Sin reservar el hueco al elegir, todos
+// leían "0 sesiones < 1" de la misma y el puente rechazaba a N-1.
+func TestPickInstanceReservaElHueco(t *testing.T) {
+	const n = 8
+	var creadas atomic.Int64
+	g := &Scheduler{
+		services:    map[string]*entry{},
+		extra:       map[string][]*entry{},
+		routes:      map[string]*sessionRoute{},
+		MaxReplicas: n,
+	}
+	g.services["svc"] = &entry{machineID: "m-0", maxSessions: 1, checkedAt: time.Now(), lastUse: time.Now()}
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		id := creadas.Add(1)
+		time.Sleep(5 * time.Millisecond) // lo que tarda un restore
+		return &entry{machineID: fmt.Sprintf("m-%d", id), maxSessions: 1, lastUse: time.Now()}, nil
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	por := map[string]int{}
+	inicio := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-inicio
+			e, err := g.pickInstance(context.Background(), "svc", tenantFrom(context.Background()))
+			if err != nil {
+				t.Errorf("pickInstance: %v", err)
+				return
+			}
+			mu.Lock()
+			por[e.machineID]++
+			mu.Unlock()
+		}()
+	}
+	close(inicio)
+	wg.Wait()
+	for id, k := range por {
+		if k > 1 {
+			t.Errorf("%d initialize concurrentes fueron a %s, que solo admite una sesión", k, id)
+		}
+	}
+
+	// La reserva se suelta al acabar la petición: la instancia vuelve a
+	// admitir una sesión si el initialize no llegó a fijarla.
+	e := g.services["svc"]
+	g.begin(e)
+	g.end(e)
+	if got, err := g.pickInstance(context.Background(), "svc", tenantFrom(context.Background())); err != nil || got != e {
+		t.Errorf("tras soltar la reserva, pickInstance = %v, %v; quería la primaria", got, err)
 	}
 }
 
