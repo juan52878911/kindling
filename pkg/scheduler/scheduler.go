@@ -1925,6 +1925,26 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	g.mu.Unlock()
 
+	// El latido va ANTES de dormir y de enfriar las pausadas: congelar varias
+	// tarda segundos (cada freeze vuelca la memoria), y una instancia con el
+	// TTL al límite podía vencer en el daemon mientras esperaba su turno.
+	for _, r := range renovar {
+		err := g.renovarTTL(ctx, r.e.machineID)
+		g.mu.Lock()
+		switch {
+		case err == nil:
+			r.e.renewedAt = time.Now()
+		case renovacionRechazada(err):
+			// Ya no existe o no está en marcha (el daemon la congeló o la
+			// borró por debajo): se descarta, y el siguiente ensure la
+			// reconstruye o la descongela. Solo si sigue siendo esa entrada.
+			if g.entryByMachineLocked(r.service, r.e.machineID) == r.e {
+				log.Printf("%s: dropping instance %s, its TTL can't be renewed: %v", r.service, short(r.e.machineID), err)
+				g.removeEntryLocked(r.service, r.e.machineID)
+			}
+		}
+		g.mu.Unlock()
+	}
 	// Antes de dormirlas, con el invitado aún corriendo: así el cierre de sus
 	// conexiones ociosas llega a él y el volcado no guarda conexiones a medias
 	// que al despertar el host ya no reconoce.
@@ -1949,23 +1969,6 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		}
 	})
 	g.enfriarPausadas(ctx)
-	for _, r := range renovar {
-		err := g.renovarTTL(ctx, r.e.machineID)
-		g.mu.Lock()
-		switch {
-		case err == nil:
-			r.e.renewedAt = time.Now()
-		case renovacionRechazada(err):
-			// Ya no existe o no está en marcha (el daemon la congeló o la
-			// borró por debajo): se descarta, y el siguiente ensure la
-			// reconstruye o la descongela. Solo si sigue siendo esa entrada.
-			if g.entryByMachineLocked(r.service, r.e.machineID) == r.e {
-				log.Printf("%s: dropping instance %s, its TTL can't be renewed: %v", r.service, short(r.e.machineID), err)
-				g.removeEntryLocked(r.service, r.e.machineID)
-			}
-		}
-		g.mu.Unlock()
-	}
 	for _, a := range caducadas {
 		g.destruirAislada(ctx, a, "expired")
 	}

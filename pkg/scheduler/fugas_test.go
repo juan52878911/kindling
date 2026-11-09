@@ -244,6 +244,36 @@ func TestInfoCaidoNoDaPorRenovado(t *testing.T) {
 	}
 }
 
+// El latido del TTL no espera a que el segador acabe de congelar: cada freeze
+// tarda, y la instancia viva con el TTL al límite vencía mientras tanto.
+func TestElLatidoVaAntesDeDormir(t *testing.T) {
+	viva, ociosa := instanciaVieja("m-viva"), instanciaVieja("m-ociosa")
+	viva.State, ociosa.State = api.StateRunning, api.StateRunning
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m-viva": viva, "m-ociosa": ociosa}}
+	g := conDaemonFalso(t, d)
+	hace := time.Now().Add(-time.Hour)
+	g.services["svc"] = &entry{machineID: "m-viva", lastUse: time.Now(), renewedAt: hace, maxSessions: 1}
+	g.services["otro"] = &entry{machineID: "m-ociosa", lastUse: hace, renewedAt: time.Now(), maxSessions: 1}
+	renovadaAlCongelar := -1
+	g.freezeFn = func(id string) error {
+		renovadaAlCongelar = d.visto("POST /machines/m-viva/renew")
+		_, err := g.client.Freeze(context.Background(), id)
+		return err
+	}
+
+	g.reapOnce(context.Background())
+
+	if renovadaAlCongelar < 0 {
+		t.Fatal("el segador no congeló la ociosa")
+	}
+	if renovadaAlCongelar != 1 {
+		t.Errorf("al congelar la ociosa, la viva llevaba %d renovaciones; el latido tenía que ir antes", renovadaAlCongelar)
+	}
+	if d.visto("POST /machines/m-viva/renew") != 1 {
+		t.Errorf("la viva se renovó %d veces; quería 1", d.visto("POST /machines/m-viva/renew"))
+	}
+}
+
 // Una máquina despierta cuya herramienta no llega a escuchar no se queda viva
 // sin dueño: con MachineTTL negativo nadie más la pararía. La recién
 // restaurada se borra; la adoptada o descongelada se congela.
