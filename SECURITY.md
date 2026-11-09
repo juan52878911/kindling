@@ -1255,8 +1255,8 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     Virtualization.framework no pide más, y un `kling-vz` tomado ya no llega al
     portapapeles, a securityd (el llavero) ni a tccd. Con pantalla (`GFX`) se mantienen
     IOKit y la memoria compartida, que usa el scanout por IOSurface (no medido sin
-    ellos). Tampoco ve los metadatos (nombres, tamaños) de los ficheros de las demás
-    máquinas. `sandbox-perfil.sh` comprueba las tres búsquedas como denegadas.
+    ellos). Ni `kling-vz` ni `kling-hv` ven ya los metadatos (nombres, tamaños) de los
+    ficheros de las demás máquinas. `sandbox-perfil.sh` comprueba las tres búsquedas como denegadas.
   - **Memoria**: Darwin no deja ponerle techo de memoria a un proceso sin privilegios:
     `setrlimit(RLIMIT_AS)` y `RLIMIT_DATA` dan `EINVAL` por debajo del espacio de
     direcciones que el proceso ya reserva (medido en macOS 26.5: 8 y 64 GiB rechazados)
