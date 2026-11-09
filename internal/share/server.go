@@ -114,6 +114,9 @@ type Server struct {
 	machineID string
 	budget    *machineBudget
 
+	// quota es la cuota de la carpeta rw (quota.go); nil = sin cuota.
+	quota *Quota
+
 	// hostRoots son las rutas absolutas con las que el host puede nombrar la
 	// raíz de la carpeta (tal cual y con los enlaces resueltos: en macOS /tmp es
 	// /private/tmp). Sirven para traducir enlaces absolutos que apuntan dentro.
@@ -434,7 +437,7 @@ func (ss *session) closeAll() {
 		ss.watch = nil
 	}
 	for id, h := range ss.files {
-		_ = h.f.Close()
+		ss.srv.closeFile(h.f)
 		<-ss.srv.budget.slots
 		<-globalFDs
 		delete(ss.files, id)
@@ -590,10 +593,10 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		if !hd.write {
 			return errReply(id, proto.EBADF)
 		}
-		n, err := hd.f.WriteAt(data, int64(off))
+		n, e := s.writeAt(hd.f, data, int64(off))
 		ss.watcher().touched(hd.path)
-		if err != nil && n == 0 {
-			return errReply(id, Errno(err))
+		if e != 0 {
+			return errReply(id, e)
 		}
 		r := ok()
 		r.U32(uint32(n))
@@ -794,19 +797,25 @@ func (ss *session) put(f *os.File, write bool, path string) (uint64, uint32) {
 		_ = f.Close()
 		return 0, proto.EMFILE
 	}
+	if q := ss.srv.quota; q != nil {
+		if e := q.abrir(f); e != 0 {
+			_ = f.Close()
+			return 0, e
+		}
+	}
 	// Primero el presupuesto de la máquina (S-03): una máquina hostil se queda
 	// sin descriptores ella sola mucho antes de tocar el respaldo global.
 	select {
 	case ss.srv.budget.slots <- struct{}{}:
 	default:
-		_ = f.Close()
+		ss.srv.closeFile(f)
 		return 0, proto.EMFILE
 	}
 	select {
 	case globalFDs <- struct{}{}:
 	default:
 		<-ss.srv.budget.slots
-		_ = f.Close()
+		ss.srv.closeFile(f)
 		return 0, proto.EMFILE
 	}
 	ss.next++
@@ -823,10 +832,18 @@ func (ss *session) release(h uint64) {
 	delete(ss.files, h)
 	ss.mu.Unlock()
 	if hd != nil {
-		_ = hd.f.Close()
+		ss.srv.closeFile(hd.f)
 		<-ss.srv.budget.slots
 		<-globalFDs
 	}
+}
+
+// closeFile cierra un fichero que se apuntó en la cuota (put).
+func (s *Server) closeFile(f *os.File) {
+	if s.quota != nil {
+		s.quota.cerrar(f)
+	}
+	_ = f.Close()
 }
 
 // ── operaciones sobre el disco ───────────────────────────────────────────────
@@ -880,11 +897,24 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 	// O_APPEND no pasa al host: el kernel del invitado ya manda cada escritura
 	// con su offset, y con O_APPEND Linux ignoraría ese offset en pwrite.
 
-	var f *os.File
-	var err error
+	// Con cuota, O_TRUNC encoge el fichero: lo que medía vuelve, con los
+	// tamaños quietos como en un SetSize (quota.go).
 	if create {
+		// Antes que q.size: remove y rename van en ese orden (ns, luego size).
 		s.ns.RLock()
 		defer s.ns.RUnlock()
+	}
+	q := s.quota
+	var antes int64
+	if q != nil && of&os.O_TRUNC != 0 {
+		q.size.Lock()
+		defer q.size.Unlock()
+	}
+
+	var f *os.File
+	var err error
+	var creado bool
+	if create {
 		// Antes de abrir, igual que en la ruta sin create: mirar qué hay ahí
 		// (Lstat). Si ya existe y no es un fichero regular (FIFO, dispositivo,
 		// socket), se rechaza sin tocarlo: abrir un FIFO existente bloquearía,
@@ -900,8 +930,19 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 			case flags&proto.FlagExcl != 0:
 				return nil, false, proto.EEXIST
 			}
+			antes = fi.Size()
 		} else if !errors.Is(lerr, fs.ErrNotExist) {
 			return nil, false, Errno(lerr)
+		} else if q != nil {
+			// Va a crear una entrada: se cobra antes y vuelve si no la crea.
+			if e := q.reservarEntrada(s); e != 0 {
+				return nil, false, e
+			}
+			defer func() {
+				if !creado {
+					devolver(&q.files, 1)
+				}
+			}()
 		}
 		// O_EXCL en la apertura real, se haya pedido o no: si entre el Lstat de
 		// arriba y aquí alguien puso un FIFO o un enlace en su sitio, el open
@@ -910,6 +951,7 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 		// no pedía exclusividad, se reintenta una vez como apertura normal; el
 		// chequeo de después de abrir descarta lo que no sea un fichero regular.
 		f, err = s.root.OpenFile(p, of|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
+		creado = err == nil
 		if errors.Is(err, fs.ErrExist) && flags&proto.FlagExcl == 0 {
 			f, err = s.root.OpenFile(p, of|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
 		}
@@ -928,6 +970,7 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 		case !fi.Mode().IsRegular():
 			return nil, false, proto.EACCES
 		}
+		antes = fi.Size()
 		// O_NONBLOCK por si entre la comprobación y la apertura alguien cambió
 		// el fichero por un FIFO: no bloquea al daemon, y la comprobación de
 		// después lo descarta.
@@ -943,6 +986,9 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 			return nil, false, Errno(err)
 		}
 		return nil, false, proto.EACCES
+	}
+	if q != nil && of&os.O_TRUNC != 0 && !creado {
+		devolver(&q.bytes, antes)
 	}
 	if create {
 		s.chown(f)
@@ -1004,8 +1050,8 @@ func (s *Server) setattr(p string, hf *os.File, valid, mode uint32, size, at, mt
 		f = opened
 	}
 	if valid&proto.SetSize != 0 {
-		if err := f.Truncate(size); err != nil {
-			return proto.Attr{}, Errno(err)
+		if e := s.truncate(f, size); e != 0 {
+			return proto.Attr{}, e
 		}
 	}
 	if valid&proto.SetMode != 0 {
@@ -1066,7 +1112,15 @@ func (s *Server) mkdir(p string, mode uint32) (proto.Attr, uint32) {
 	}
 	s.ns.RLock()
 	defer s.ns.RUnlock()
+	if q := s.quota; q != nil {
+		if e := q.reservarEntrada(s); e != 0 {
+			return proto.Attr{}, e
+		}
+	}
 	if err := s.root.Mkdir(p, fs.FileMode(mode&0o777)); err != nil {
+		if s.quota != nil {
+			devolver(&s.quota.files, 1)
+		}
 		return proto.Attr{}, Errno(err)
 	}
 	f, err := s.root.Open(p)
@@ -1097,19 +1151,30 @@ func (s *Server) remove(p string, dir bool) uint32 {
 		s.ns.RLock()
 		defer s.ns.RUnlock()
 	}
-	fi, err := s.root.Lstat(p)
-	if err != nil {
-		return Errno(err)
-	}
-	switch {
-	case dir && !fi.IsDir():
-		return proto.ENOTDIR
-	case !dir && fi.IsDir():
-		return proto.EISDIR
+	lstat := func() (fs.FileInfo, error) { return s.root.Lstat(p) }
+	check := func(fi fs.FileInfo) uint32 {
+		switch {
+		case dir && !fi.IsDir():
+			return proto.ENOTDIR
+		case !dir && fi.IsDir():
+			return proto.EISDIR
+		}
+		return 0
 	}
 	// Remove de os.Root es unlinkat sobre el padre: no sigue el último
 	// componente, así que borrar un enlace borra el enlace.
-	if err := s.root.Remove(p); err != nil {
+	rm := func() error { return s.root.Remove(p) }
+	if s.quota != nil {
+		return s.quota.borrar(lstat, check, rm)
+	}
+	fi, err := lstat()
+	if err != nil {
+		return Errno(err)
+	}
+	if e := check(fi); e != 0 {
+		return e
+	}
+	if err := rm(); err != nil {
 		return Errno(err)
 	}
 	return 0
