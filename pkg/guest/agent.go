@@ -171,6 +171,7 @@ func NewDeferred() (*Agent, error) {
 func newAgent(diferido bool) (*Agent, error) {
 	a := &Agent{Reaper: DefaultReaper, Volumes: volumeState, diferido: diferido}
 	go a.Reaper.Run()
+	ajustarLimiteMemoria()
 
 	// Best-effort: si nadie usa secretos por MMDS es inocuo, y si se usan es
 	// esta ruta la que los hace legibles. Diferido, la pone FinishBoot.
