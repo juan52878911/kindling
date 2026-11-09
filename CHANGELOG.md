@@ -36,6 +36,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
+- Linux allowlist DNS: queries go upstream with a TXID drawn from `crypto/rand` instead of the one the guest chose, and the answer must carry it; the guest gets its own TXID back. A guest knowing the TXID only had to guess the port to plant a spoofed answer that seeds the ipset.
 
 ### Fixed
 

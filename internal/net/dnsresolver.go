@@ -48,7 +48,9 @@ package net
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	stdnet "net"
@@ -490,8 +492,8 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		return respondError(query, 2) // SERVFAIL
 	}
 	if !responseMatches(query, resp) {
-		// N-02: el txid o la pregunta no casan con esta consulta. Con el socket
-		// UDP conectado (forwardUDP) esto ya limita el spoofing a on-path, pero
+		// N-02: la pregunta no casa con esta consulta (el txid propio ya lo
+		// comprobó forward). Con el socket UDP conectado esto ya limita el spoofing a on-path, pero
 		// verificarlo aquí es gratis y evita sembrar el ipset con basura si el
 		// upstream (o alguien en camino) devuelve una respuesta que no pedimos.
 		return respondError(query, 2) // SERVFAIL
@@ -601,7 +603,11 @@ func (r *dnsResolver) forwardUDP(query []byte) ([]byte, error) {
 	defer c.Close()
 	defer r.cortarAlParar(c)()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Write(query); err != nil {
+	salida, propio, err := conTxidPropio(query)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.Write(salida); err != nil {
 		return nil, err
 	}
 	buf := make([]byte, 4096)
@@ -609,7 +615,7 @@ func (r *dnsResolver) forwardUDP(query []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buf[:nread], nil
+	return devolverTxid(buf[:nread], query, propio)
 }
 
 func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
@@ -620,12 +626,16 @@ func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
 	defer c.Close()
 	defer r.cortarAlParar(c)()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	salida, propio, err := conTxidPropio(query)
+	if err != nil {
+		return nil, err
+	}
 	var l [2]byte
-	binary.BigEndian.PutUint16(l[:], uint16(len(query)))
+	binary.BigEndian.PutUint16(l[:], uint16(len(salida)))
 	if _, err := c.Write(l[:]); err != nil {
 		return nil, err
 	}
-	if _, err := c.Write(query); err != nil {
+	if _, err := c.Write(salida); err != nil {
 		return nil, err
 	}
 	if _, err := io.ReadFull(c, l[:]); err != nil {
@@ -635,6 +645,36 @@ func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
 	if _, err := io.ReadFull(c, resp); err != nil {
 		return nil, err
 	}
+	return devolverTxid(resp, query, propio)
+}
+
+// errTxidAjeno: la respuesta del upstream no trae el TXID que pusimos nosotros.
+var errTxidAjeno = errors.New("dns: la respuesta no trae nuestro txid")
+
+// conTxidPropio copia query con un TXID nuevo sacado de crypto/rand. El TXID
+// del invitado no sale del host: si lo reenviáramos tal cual, quien controla
+// el invitado conoce el TXID de cada consulta al upstream y solo le falta
+// acertar el puerto para colar una respuesta falsa que siembre el ipset.
+func conTxidPropio(query []byte) ([]byte, uint16, error) {
+	if len(query) < 12 {
+		return nil, 0, errors.New("dns: consulta demasiado corta")
+	}
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, 0, err
+	}
+	salida := append([]byte(nil), query...)
+	copy(salida[0:2], b[:])
+	return salida, binary.BigEndian.Uint16(b[:]), nil
+}
+
+// devolverTxid comprueba que resp trae el TXID propio y le vuelve a poner el
+// del invitado, para que responseMatches y el invitado vean su propio TXID.
+func devolverTxid(resp, query []byte, propio uint16) ([]byte, error) {
+	if len(resp) < 12 || binary.BigEndian.Uint16(resp[0:2]) != propio {
+		return nil, errTxidAjeno
+	}
+	copy(resp[0:2], query[0:2])
 	return resp, nil
 }
 
