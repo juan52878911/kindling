@@ -39,6 +39,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Gateway scheduler leaks: a paused instance whose thaw fails stays registered (and is frozen later) instead of holding RAM with no owner; a machine whose tool never starts listening is removed (fresh restore) or frozen (adopted/thawed) instead of running forever with `MachineTTL<0`; a prewarmed instance whose `Remove` fails no longer counts as evicted and is retried.
+- Gateway scheduler: session routes of an instance with requests in flight no longer expire mid-call (404 on the next request); `PickInstance` reserves the session slot it hands out, so concurrent `initialize` calls don't all land on one instance; a failed `/info` probe counts as a failed TTL renewal and is retried; the reaper renews TTLs before freezing idle instances; pruning isolated-session locks can no longer give one key two owners.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
 - A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.
