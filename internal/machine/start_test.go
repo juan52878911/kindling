@@ -53,7 +53,9 @@ func paradaParaStart(t *testing.T, m *Manager, id string) (*api.Machine, *[]stri
 	// TestStartRevisaSuDiscoAntesDeArrancar).
 	orden := ordenE2fsck
 	t.Cleanup(func() { ordenE2fsck = orden })
-	ordenE2fsck = func(ctx context.Context, _ string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
+	ordenE2fsck = func(ctx context.Context, _ string) (*exec.Cmd, func(), error) {
+		return exec.CommandContext(ctx, "true"), nil, nil
+	}
 
 	parada := time.Now().Add(-time.Minute)
 	mc := &api.Machine{ID: id, Name: "parada-" + id[:4], Image: img, State: api.StateStopped,
@@ -242,9 +244,9 @@ func TestStartRevisaSuDiscoAntesDeArrancar(t *testing.T) {
 
 	var revisados []string
 	codigo := "0"
-	ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
+	ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
 		revisados = append(revisados, path)
-		return exec.CommandContext(ctx, "sh", "-c", "echo e2fsck dijo algo; exit "+codigo)
+		return exec.CommandContext(ctx, "sh", "-c", "echo e2fsck dijo algo; exit "+codigo), nil, nil
 	}
 	// Sano: se revisa y el arranque sigue (y falla luego, sin VMM).
 	if _, err := m.Start(context.Background(), mc.ID, nil); err == nil || strings.Contains(err.Error(), "checking its disk") {

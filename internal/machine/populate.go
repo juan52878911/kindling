@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -109,7 +110,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 // waitGuest espera a que el puente conteste dentro de la microVM.
 func waitGuest(ctx context.Context, base string, limit time.Duration) error {
 	deadline := time.Now().Add(limit)
-	cli := &http.Client{Timeout: 2 * time.Second, Transport: listoClient.Transport}
+	cli := guesthttp.New(listoClient.Transport, 2*time.Second)
 	var last error
 	for time.Now().Before(deadline) {
 		select {

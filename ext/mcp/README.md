@@ -294,6 +294,10 @@ Everything except `tools/call` can be paid up front or afterwards:
 
 - **`-prewarm N`** keeps N instances already restored and **with their MCP session open**.
   The call skips restoring, waiting for the network and initializing.
+  The pool goes to the most used services first and is sized by the measured footprint
+  of each copy (PSS, or `phys_footprint` on macOS; `mem_mib` until one is measured).
+  Once the gateway has seen traffic, a service nobody calls gets no pool: its first call
+  pays the restore, and the refill after it brings the pool back.
 - **Destruction is asynchronous.** It used to sit in a `defer`, so the client waited for
   the namespace teardown and the file deletion: 100 ms on top of a 2 ms call. The machine
   dies all the same; the client just no longer waits for it to happen.
