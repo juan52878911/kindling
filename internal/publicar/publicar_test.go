@@ -341,6 +341,44 @@ func TestBarridoQuitaLasDeMaquinasIdas(t *testing.T) {
 	}
 }
 
+// Sin nada publicado el barrido no se arma: el daemon en reposo no despierta
+// cada 2 s para nada. Al publicar se arma, y al quitar la última vuelve a
+// dormir.
+func TestBarridoSoloConPublicaciones(t *testing.T) {
+	srv := eco(t)
+	f := &maquinasFalsas{ms: map[string]*api.Machine{
+		"a": {ID: "a", Name: "a", State: api.StateRunning, Forwards: map[string]string{"80": srv.Addr().String()}, Labels: map[string]string{api.LabelPorts: "80"}},
+	}}
+	p := New(f, "", t.Logf)
+	p.barrido = 5 * time.Millisecond
+	var vueltas atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Arrancar(ctx, func() time.Duration { vueltas.Add(1); return 0 })
+	time.Sleep(100 * time.Millisecond)
+	if n := vueltas.Load(); n != 0 {
+		t.Fatalf("sin publicaciones el barrido dio %d vueltas; quería 0", n)
+	}
+	ma, _ := f.Get("a")
+	if _, err := p.Publicar(ma, []api.PortPublish{{Host: 0, Guest: 80}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for vueltas.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("tras publicar el barrido no se armó")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	p.Quitar("a")
+	time.Sleep(30 * time.Millisecond) // la vuelta en curso, si la hay
+	n := vueltas.Load()
+	time.Sleep(100 * time.Millisecond)
+	if m := vueltas.Load(); m != n {
+		t.Fatalf("sin publicaciones el barrido siguió: %d vueltas más", m-n)
+	}
+}
+
 // Un servicio que no escucha: quien conecta recibe un RST cuando vence el
 // plazo, no un cierre limpio.
 func TestServicioQueNoEscuchaDaRST(t *testing.T) {
