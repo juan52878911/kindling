@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -72,12 +73,17 @@ const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
   sbx gateway [-listen :8090]                  serves the sandbox API
   sbx template apply -f tpl.json               builds the recipe into a golden snapshot
   sbx template ls | rebuild <name>             what is built, and rebuild it
-  sbx new -template T [-ttl 10m] [-q]          a sandbox from that template
-  sbx ls | rm <id>... | renew <id> [-ttl D]    the ones you own
+  sbx new -template T [-ttl 10m] [-q|-json]    a sandbox from that template
+  sbx ls | rm [-json] <id>... | renew <id> [-ttl D]
+                                               the ones you own
   sbx exec <id> [--] <cmd> [args...]           runs a command inside, streaming
   sbx shell <id>                               an interactive terminal inside
   sbx cp <local|-> <id>:<path> | <id>:<path> <local|->
   sbx hosts                                    the daemons behind the gateway (admin token)
+
+Gateway errors keep their HTTP status and Retry-After ("... (HTTP 429, retry
+after 30s)"); with -json, new and rm print them as {"error": {"status": 429,
+"message": "...", "retry_after": 30}}.
 
 The client commands talk to the gateway, not to a daemon:
   kling config set sandbox.url http://gateway:8090
@@ -151,12 +157,65 @@ func (c *cliente) llamar(ctx context.Context, metodo, ruta string, cuerpo, out a
 				e.Message = resp.Status
 			}
 		}
-		return errors.New(e.Message)
+		return &errFrontal{Status: resp.StatusCode, Message: e.Message,
+			RetryAfter: retryAfter(resp.Header.Get("Retry-After"))}
 	}
 	if out == nil {
 		return nil
 	}
 	return json.Unmarshal(b, out)
+}
+
+// errFrontal es una respuesta de error del frontal. Conserva el código y el
+// Retry-After: sin ellos un agente no distingue "espera y reintenta" (429,
+// 503) de "no existe" (404).
+type errFrontal struct {
+	Status     int    `json:"status"`
+	Message    string `json:"message"`
+	RetryAfter int    `json:"retry_after,omitempty"` // segundos; 0 = no lo dijo
+}
+
+func (e *errFrontal) Error() string {
+	s := fmt.Sprintf("%s (HTTP %d", e.Message, e.Status)
+	if e.RetryAfter > 0 {
+		s += fmt.Sprintf(", retry after %ds", e.RetryAfter)
+	}
+	return s + ")"
+}
+
+// retryAfter lee la cabecera en segundos, tanto en su forma de número como en
+// la de fecha HTTP.
+func retryAfter(v string) int {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return int((d + time.Second - 1) / time.Second)
+		}
+	}
+	return 0
+}
+
+// errorJSON es la forma de un error con -json: {"error": {...}}. Si no viene
+// del frontal (red, uso), solo lleva el mensaje.
+func errorJSON(err error) map[string]any {
+	var ef *errFrontal
+	if errors.As(err, &ef) {
+		return map[string]any{"error": ef}
+	}
+	return map[string]any{"error": map[string]any{"message": err.Error()}}
+}
+
+// imprimirJSON escribe v en stdout, con sangría.
+func imprimirJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 // sandbox es lo que devuelve el frontal. Se declara aquí y no se importa de
@@ -188,6 +247,7 @@ func sbxNew(args []string) error {
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist")
 	mem := fs.Int("mem", 0, "memory in MiB")
 	quiet := fs.Bool("q", false, "print only the id")
+	comoJSON := fs.Bool("json", false, "print the sandbox (or the error, with its status and retry_after) as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -223,6 +283,16 @@ func sbxNew(args []string) error {
 	ctx, stop := ctxSenales()
 	defer stop()
 	inicio := time.Now()
+	if *comoJSON {
+		// La respuesta tal cual: lleva campos (etiquetas, recursos) que el
+		// tipo de aquí no conoce.
+		var crudo json.RawMessage
+		if err := c.llamar(ctx, http.MethodPost, "/v1/sandboxes", cuerpo, &crudo); err != nil {
+			_ = imprimirJSON(errorJSON(err))
+			return err
+		}
+		return imprimirJSON(crudo)
+	}
 	var sb sandbox
 	if err := c.llamar(ctx, http.MethodPost, "/v1/sandboxes", cuerpo, &sb); err != nil {
 		return err
@@ -279,8 +349,14 @@ func sbxLs(args []string) error {
 }
 
 func sbxRm(args []string) error {
+	fs := flag.NewFlagSet("sbx rm", flag.ExitOnError)
+	comoJSON := fs.Bool("json", false, "print one result per id as JSON, with the error's status")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) == 0 {
-		return errors.New("usage: kling sbx rm <id>...")
+		return errors.New("usage: kling sbx rm [-json] <id>...")
 	}
 	c, err := nuevoCliente()
 	if err != nil {
@@ -289,13 +365,31 @@ func sbxRm(args []string) error {
 	ctx, stop := ctxSenales()
 	defer stop()
 	var fallos int
+	resultados := []map[string]any{}
 	for _, id := range args {
-		if err := c.llamar(ctx, http.MethodDelete, "/v1/sandboxes/"+id, nil, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", id, err)
+		err := c.llamar(ctx, http.MethodDelete, "/v1/sandboxes/"+id, nil, nil)
+		if *comoJSON {
+			r := map[string]any{"id": id, "removed": err == nil}
+			if err != nil {
+				r["error"] = errorJSON(err)["error"]
+			}
+			resultados = append(resultados, r)
+		}
+		if err != nil {
+			if !*comoJSON {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", id, err)
+			}
 			fallos++
 			continue
 		}
-		fmt.Println(id)
+		if !*comoJSON {
+			fmt.Println(id)
+		}
+	}
+	if *comoJSON {
+		if err := imprimirJSON(resultados); err != nil {
+			return err
+		}
 	}
 	if fallos > 0 {
 		return fmt.Errorf("%d sandbox(es) not removed", fallos)
