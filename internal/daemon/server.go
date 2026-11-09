@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/publicar"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -146,7 +147,9 @@ func (p *progressBody) Close() error { return p.body.Close() }
 // —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
 // CABECERAS, que es lo que separa "está trabajando" de "no hay nadie"; una vez
 // que llegan, wrapGuestBody acota por su cuenta el progreso del CUERPO.
-var guestClient = &http.Client{Transport: guestTransports}
+//
+// Sale de guesthttp.New: no sigue las redirecciones del invitado.
+var guestClient = guesthttp.New(guestTransports, 0)
 
 // guestTransports da un transporte por dirección de invitado, para poder
 // soltar las conexiones de UNO cuando su red se desmonta (forgetIP) sin tocar

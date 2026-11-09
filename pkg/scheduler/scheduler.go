@@ -1667,29 +1667,40 @@ func (g *Scheduler) PrewarmAll(ctx context.Context) {
 	})
 
 	// Presupuesto de memoria. Se consulta la memoria disponible del anfitrión (la
-	// misma que mira el guard del daemon) menos el margen. La estimación del coste
-	// es conservadora —mem_mib entero por copia, sin descontar la compartición de
-	// páginas entre instancias del mismo snapshot— para pecar de precavido; el 507
-	// limpio de reserveMemory sigue siendo la última red si aun así nos pasamos.
-	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
+	// misma que mira el guard del daemon) menos el margen, y cada copia cuesta su
+	// huella medida (ver prewarmBudget); el 507 limpio de reserveMemory sigue
+	// siendo la última red si aun así nos pasamos.
+	budget, coste := g.prewarmBudget(ctx)
 	ready := g.pool.stats()
 
+	// Con historial, una puntuación 0 es "nadie lo llama": no se le da fondo.
+	// Antes sí, y en efímero eso era churn para siempre: su copia caducaba por
+	// edad (evictStale, 2 × idle) y la pasada siguiente la recreaba —restore e
+	// initialize cíclicos— por cada servicio ocioso. Al primer uso vuelve a
+	// puntuar y la reposición tras la llamada lo rellena; sin historial
+	// (gateway recién nacido) se sigue rellenando todo, como siempre.
+	conHistorial := g.pop.conHistorial()
+
 	for _, c := range cands {
+		if conHistorial && g.pop.score(c.svc) <= 0 {
+			// El orden es por puntuación descendente: de aquí en adelante, todo 0.
+			break
+		}
 		faltan := g.pool.size - ready[c.svc]
 		if faltan <= 0 {
 			continue
 		}
-		if budget >= 0 && c.mem > 0 {
-			if budget < c.mem {
+		if mem := coste(c.snap, c.mem); mem > 0 {
+			if budget < mem {
 				// No cabe ni una instancia más: se acabó el presupuesto y el resto
 				// —menos popular, por el orden— se queda sin fondo hasta que se
 				// libere memoria.
 				break
 			}
-			if c.mem*faltan > budget {
-				faltan = budget / c.mem
+			if mem*faltan > budget {
+				faltan = budget / mem
 			}
-			budget -= c.mem * faltan
+			budget -= mem * faltan
 		}
 		g.pool.fillN(ctx, c.svc, c.snap, faltan)
 	}
@@ -1731,8 +1742,8 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 	}
 
 	type cand struct {
-		svc string
-		mem int
+		svc, snap string
+		mem       int
 	}
 	var cands []cand
 	for _, s := range snaps {
@@ -1745,13 +1756,13 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 		if n := s.Service(); n != "" {
 			svc = n
 		}
-		cands = append(cands, cand{svc: svc, mem: s.MemMiB})
+		cands = append(cands, cand{svc: svc, snap: s.Name, mem: s.MemMiB})
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
 		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
 	})
 
-	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
+	budget, coste := g.prewarmBudget(ctx)
 	warmed := 0
 	for _, c := range cands {
 		if warmed >= g.KeepWarm {
@@ -1776,15 +1787,15 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 			warmed++
 			continue
 		}
-		// Presupuesto: no despertar una primaria nueva si no cabe. La estimación es
-		// conservadora (mem_mib entero, sin descontar páginas compartidas), igual que
-		// en PrewarmAll; el 507 del daemon sigue siendo la última red.
-		if budget >= 0 && c.mem > 0 {
-			if budget < c.mem {
+		// Presupuesto: no despertar una primaria nueva si no cabe. Con la misma
+		// estimación que PrewarmAll (huella medida, o mem_mib); el 507 del daemon
+		// sigue siendo la última red.
+		if mem := coste(c.snap, c.mem); mem > 0 {
+			if budget < mem {
 				g.keepwarmListo(c.svc)
 				break
 			}
-			budget -= c.mem
+			budget -= mem
 		}
 		// ensure() hace todo el trabajo pesado: candado por servicio, buildEntry y
 		// registro en g.services. En una goroutine para no bloquear el segador ~16 s
@@ -1835,20 +1846,59 @@ func (g *Scheduler) keepwarmListo(service string) {
 	g.mu.Unlock()
 }
 
+// prewarmPresupuestoDef es el presupuesto del prewarm cuando el daemon no da
+// su memoria: antes era "sin límite", y un fallo de /procstats dejaba al fondo
+// rellenarlo todo con el 507 como única red. Caben dos copias de 512 MiB.
+const prewarmPresupuestoDef = 1024
+
 // prewarmBudget es cuánta memoria del anfitrión se puede dedicar a precalentar,
-// en MiB. Devuelve -1 si no se puede medir (p. ej. un daemon en macOS sin /proc):
-// en ese caso no se limita y se cae al comportamiento de rellenarlo todo, con el
-// 507 del daemon como única red.
-func (g *Scheduler) prewarmBudget(ctx context.Context) int {
+// en MiB, y cuánto cuesta cada copia de un snapshot (coste). Si el daemon no da
+// su memoria (error, o un daemon sin ella) el presupuesto es el fijo
+// prewarmPresupuestoDef.
+//
+// El coste es la huella real (PSS en Linux, phys_footprint en macOS) media de
+// las copias de ese snapshot que corren ahora, sin pasar de mem_mib; sin
+// ninguna medida, mem_mib entero. Antes era siempre mem_mib, que en Linux es
+// muy conservador —un MCP de 512 MiB ocioso ronda los 100-150 de PSS, y las
+// copias de un mismo dorado comparten páginas—: el fondo se quedaba corto con
+// RAM de sobra. Es la misma medida con la que reparte el nivel pausada
+// (presupuestoDeHost).
+func (g *Scheduler) prewarmBudget(ctx context.Context) (budget int, coste func(snap string, memMiB int) int) {
+	porMem := func(_ string, memMiB int) int { return memMiB }
 	ps, err := g.client.ProcStats(ctx)
 	if err != nil || ps.AvailableMiB <= 0 {
-		return -1
+		return prewarmPresupuestoDef, porMem
 	}
 	b := int(ps.AvailableMiB) - prewarmMarginMiB
 	if b < 0 {
 		b = 0
 	}
-	return b
+	type acum struct{ suma, n int64 }
+	huella := map[string]*acum{}
+	for _, m := range ps.Machines {
+		if m.From == "" || m.State != api.StateRunning || m.PSSMiB <= 0 {
+			continue
+		}
+		a := huella[m.From]
+		if a == nil {
+			a = &acum{}
+			huella[m.From] = a
+		}
+		a.suma += m.PSSMiB
+		a.n++
+	}
+	return b, func(snap string, memMiB int) int {
+		a := huella[snap]
+		if a == nil {
+			return memMiB
+		}
+		// Redondeo hacia arriba: mejor pasarse un MiB que meter una copia de más.
+		media := int((a.suma + a.n - 1) / a.n)
+		if memMiB > 0 && media > memMiB {
+			return memMiB
+		}
+		return media
+	}
 }
 
 // Drain destruye las instancias pre-calentadas y las máquinas de las sesiones
