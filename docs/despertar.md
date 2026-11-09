@@ -102,7 +102,10 @@ popularidad / `mem_mib`; de mayor a menor, se pausan mientras la suma de
 durante `PausedFor` (por defecto 10 × idle) se congela de verdad, y con el host
 sin memoria `evictLRU` congela las pausadas antes que nada despierto. `kling ai
 serve -paused-mib 256` por defecto: caben dos tareas Chispa de 128 MiB y ningún
-VON (1,5 GiB); `-paused-mib 0` vuelve a congelarlo todo.
+VON (1,5 GiB); `-paused-mib 0` vuelve a congelarlo todo. El gateway MCP
+(`kling mcp serve`) tiene la misma opción, apagada por defecto (`0`): con
+`-paused-mib N` o `-1` (derivado de la memoria del host) sus servicios
+persistentes ociosos se pausan en vez de congelarse.
 
 **En macOS (backend `vz`)** el presupuesto por defecto no es fijo: sin
 `-paused-mib`, `kling ai serve` ve en `/info` que el daemon es `vz` y lo deriva

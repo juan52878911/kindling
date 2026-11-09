@@ -1,6 +1,28 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// -paused-mib y -paused-for se validan antes de hablar con ningún daemon: un
+// valor imposible falla al instante. (Sin la opción, el FlagSet con
+// ExitOnError mataba el proceso al no conocerla.)
+func TestGatewayValidaElNivelPausada(t *testing.T) {
+	t.Setenv("KLING_CONFIG", t.TempDir()+"/config.json")
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-paused-mib", "-2"}, "-paused-mib"},
+		{[]string{"-paused-for", "-1s"}, "-paused-for"},
+	} {
+		err := cmdGateway(append(c.args, "-listen", "127.0.0.1:0", "-no-auth"))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("cmdGateway(%v) = %v, quería un error de %s", c.args, err, c.want)
+		}
+	}
+}
 
 // parseHosts es lo único de -hosts/mcp.hosts que se puede probar sin un
 // daemon: el resto (levantar un Gateway por host, construir el Router) lo

@@ -68,6 +68,8 @@ func cmdGateway(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "one microVM per action, destroyed when it's done (maximum isolation, stateless)")
 	prewarm := fs.Int("prewarm", 1, "pre-warmed instances per service (0 = disabled; -ephemeral only)")
 	keepwarm := fs.Int("keepwarm", 0, "N popular services with their primary warm in persistent mode (0 = disabled; avoids cold start, useful on Mac)")
+	pausedMiB := fs.Int("paused-mib", 0, "MiB of idle instances kept paused instead of frozen, small and popular first: waking one is a resume (~1 ms) instead of a thaw (~30 ms), at the cost of the RAM it keeps (0 = always freeze; -1 = derived from host memory; docs/despertar.md)")
+	pausedFor := fs.Duration("paused-for", 0, "how long a paused instance waits before it is frozen (0 = 10 × -idle)")
 	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
 	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
@@ -92,6 +94,12 @@ func cmdGateway(args []string) error {
 	// cuántos segundos de CPU consume /debug/pprof/profile.
 	if *maxReplicas < 0 {
 		return fmt.Errorf("-max-replicas must be >= 0 (0 = unlimited), got %d", *maxReplicas)
+	}
+	if *pausedMiB < -1 {
+		return fmt.Errorf("-paused-mib must be >= -1 (0 = always freeze, -1 = derived from host memory), got %d", *pausedMiB)
+	}
+	if *pausedFor < 0 {
+		return fmt.Errorf("-paused-for must be >= 0 (0 = 10 × -idle), got %s", *pausedFor)
 	}
 	if *pprofOn && !scheduler.IsLoopback(addr) {
 		return fmt.Errorf("-pprof requires listening on loopback, and %q is not.\n"+
@@ -160,6 +168,11 @@ func cmdGateway(args []string) error {
 		}
 		gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 		gw.KeepWarm = *keepwarm
+		// El nivel pausada (pkg/scheduler/pausa.go). Apagado por defecto: una
+		// pausada retiene su RAM, y en un host justo eso es decisión del
+		// operador. Con -1 cada host deriva el suyo de su propia memoria.
+		gw.PausedMiB = *pausedMiB
+		gw.PausedFor = *pausedFor
 		gw.MaxReplicas = *maxReplicas
 		gw.SessionTTL = *sessionTTL
 		if len(tenants) > 0 {
@@ -258,6 +271,12 @@ func cmdGateway(args []string) error {
 	}
 	if *keepwarm > 0 {
 		fmt.Printf("  keep-warm:    %d popular service(s) with their primary warm (no cold start)\n", *keepwarm)
+	}
+	switch {
+	case *pausedMiB < 0:
+		fmt.Printf("  paused:       idle instances paused instead of frozen, budget derived from host memory\n")
+	case *pausedMiB > 0:
+		fmt.Printf("  paused:       up to %d MiB of idle instances paused instead of frozen\n", *pausedMiB)
 	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
