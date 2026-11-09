@@ -646,6 +646,38 @@ func (g *Scheduler) olvidarRutasLocked(service, machineID string) {
 	}
 }
 
+// soltarSinEscuchar se deshace de una máquina ya despierta cuya herramienta no
+// llegó a escuchar: no queda registrada como instancia, así que el segador no
+// la ve, y con MachineTTL negativo nada más la pararía nunca. Una recién
+// restaurada se borra, como hace el fondo (no guarda nada de nadie); una
+// adoptada o descongelada se congela: conserva su estado, que en una sesión
+// aislada es la sesión, y queda para el siguiente acquire.
+func (g *Scheduler) soltarSinEscuchar(ctx context.Context, service, id, how string) {
+	// Sin el ctx de quien llama: puede ser justo el que venció esperando.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var err error
+	hecho := "frozen"
+	switch {
+	case how == "restore":
+		hecho = "removed"
+		if g.removeFn != nil {
+			err = g.removeFn(rctx, id)
+		} else {
+			err = g.client.Remove(rctx, id)
+		}
+	case g.freezeFn != nil:
+		err = g.freezeFn(id)
+	default:
+		_, err = g.client.Freeze(rctx, id)
+	}
+	if err != nil && !api.IsNotFound(err) {
+		log.Printf("%s: machine %s never listened and could not be %s: %v", service, short(id), hecho, err)
+		return
+	}
+	log.Printf("%s: machine %s never listened; %s", service, short(id), hecho)
+}
+
 // buildEntry despierta o crea UNA instancia del servicio y la devuelve montada
 // (con su proxy), SIN registrarla: quien llama decide si es la primaria
 // (g.services) o una réplica de scale-out (g.extra). Aplica siempre la cuota de
@@ -746,6 +778,7 @@ func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *ten
 	// proxy ya reintentan con otra.
 	if how != "resume" {
 		if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
+			g.soltarSinEscuchar(ctx, service, mc.ID, how)
 			return nil, fmt.Errorf("tool did not start listening: %w", err)
 		}
 	}

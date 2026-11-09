@@ -64,3 +64,56 @@ func TestThawFallidoNoPierdeLaPausada(t *testing.T) {
 		})
 	}
 }
+
+// Una máquina despierta cuya herramienta no llega a escuchar no se queda viva
+// sin dueño: con MachineTTL negativo nadie más la pararía. La recién
+// restaurada se borra; la adoptada o descongelada se congela.
+func TestMaquinaQueNoEscuchaNoQuedaSinDueno(t *testing.T) {
+	for _, how := range []string{"restore", "thaw", "adopt"} {
+		t.Run(how, func(t *testing.T) {
+			mc := instanciaVieja("m1")
+			mc.State = api.StateRunning
+			// Con reenvíos esperarListo pregunta al daemon, y el falso no
+			// sabe sondear: falla al momento, como una herramienta muda.
+			mc.Forwards = map[string]string{"8080": "127.0.0.1:1"}
+			d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": mc}}
+			g := conDaemonFalso(t, d)
+			g.MachineTTL = -1
+			var borradas []string
+			g.removeFn = func(_ context.Context, id string) error { borradas = append(borradas, id); return nil }
+
+			_, err := g.buildEntryWith(context.Background(), "svc", tenantFrom(context.Background()),
+				func(*WakeTrace) (*api.Machine, string, error) {
+					g.mu.Lock()
+					if g.adquiriendo == nil {
+						g.adquiriendo = map[string]bool{}
+					}
+					g.adquiriendo["m1"] = true
+					g.mu.Unlock()
+					c := *mc
+					return &c, how, nil
+				})
+			if err == nil {
+				t.Fatal("la herramienta no escucha y buildEntry no dio error")
+			}
+			switch how {
+			case "restore":
+				if len(borradas) != 1 || borradas[0] != "m1" {
+					t.Errorf("la restaurada que no escucha no se borró (borradas %v)", borradas)
+				}
+			default:
+				if st := d.estado("m1"); st != api.StateWarm {
+					t.Errorf("la %s que no escucha quedó %q; quería congelada", how, st)
+				}
+				if len(borradas) != 0 {
+					t.Errorf("se borró una máquina %s que guarda estado (%v)", how, borradas)
+				}
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if g.adquiriendo["m1"] {
+				t.Error("m1 quedó marcada en adquiriendo")
+			}
+		})
+	}
+}
