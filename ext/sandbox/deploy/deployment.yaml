@@ -23,7 +23,10 @@ spec:
         - name: operator
           # El tag tiene que coincidir con la versión de kindling desplegada
           # en el clúster (operador y frontal viajan juntos en el release
-          # unificado).
+          # unificado). La de aquí es solo de ejemplo: el
+          # kindling-operator-deploy.tar.gz de cada release la lleva cambiada
+          # por la suya (release.yml), así que desplegar desde el tar no pide
+          # tocarla.
           image: ghcr.io/juan52878911/kindling-operator:v0.13.0
           # Sin flags: dentro del clúster, KUBERNETES_SERVICE_HOST/PORT y la
           # cuenta de servicio ya dan todo lo que hace falta para hablar con

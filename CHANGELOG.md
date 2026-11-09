@@ -38,6 +38,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling ps` prints its disk footer and machine warnings on stderr, as do `kling save`'s progress lines and `kling context ls`'s notes; check marks follow `NO_COLOR` everywhere, and `kling top -watch` only clears the screen on a terminal without `NO_COLOR`.
 - `kling plugin ls -json` gains `state` (`ok`, `disabled`, `error`); `status` stays for 1.x scripts.
 - Linux: `-egress allowlist` boots faster. Seed domains resolve in parallel within 500 ms in total, the rules go in one `iptables-restore`, and the DNS resolver adds IPs to the ipset over netlink instead of forking `ip netns exec ipset` per IP. Measured on the lab (CT 108, `kling run` of node22): 5 domains 485-501 → 148-151 ms, 1 domain 196 → 143-150 ms, one domain whose DNS never answers 6.4 s → 0.59 s.
+- Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
+- A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
+- `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
 
 ### Security
 
@@ -75,6 +78,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The warm pool no longer stays empty until a restart after a transient failure (a 507): refills retry with backoff, and a claim on an empty pool starts a new one.
 - Gateway scheduler leaks: a paused instance whose thaw fails stays registered (and is frozen later) instead of holding RAM with no owner; a machine whose tool never starts listening is removed (fresh restore) or frozen (adopted/thawed) instead of running forever with `MachineTTL<0`; a prewarmed instance whose `Remove` fails no longer counts as evicted and is retried.
 - Gateway scheduler: session routes of an instance with requests in flight no longer expire mid-call (404 on the next request); `PickInstance` reserves the session slot it hands out, so concurrent `initialize` calls don't all land on one instance; a failed `/info` probe counts as a failed TTL renewal and is retried; the reaper renews TTLs before freezing idle instances; pruning isolated-session locks can no longer give one key two owners.
+- `kindling-operator-deploy.tar.gz` points `deployment.yaml` at the release's operator image, not `v0.13.0`.
+- The nightly Linux e2e tests `kling db` and live shares instead of skipping them and passing.
 - A bad flag is a usage error (exit 2, `error:` and `try: kling help <cmd>`) instead of the flag package's raw usage; unknown subcommands exit 2 instead of 1, and `ps`, `top`, `events`, `topo`, `version`, `status` and `doctor` refuse extra arguments.
 - `kling save` with no daemon reports the connection error instead of a guest that is not serving.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.

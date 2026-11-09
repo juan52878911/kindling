@@ -122,7 +122,10 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `make deploy` | — | `scp` | sí, `restart` | no |
 | `kling up` | no baja nada | — | `enable --now` (**no reinicia uno vivo**) | — |
 
-`SHA256SUMS` no está firmado. `kling upgrade` cambia también `kling-guest` y
+`SHA256SUMS` va firmado desde v1.0.0 (`SHA256SUMS.minisig`, minisign con las
+claves compiladas en `internal/upgrade/firma.go`; [`firmas.md`](firmas.md)):
+`kling upgrade`, `kling up` e `install.sh` comprueban la firma antes que los
+sha256, y una release ≥ 1.0 sin firma se rechaza. `kling upgrade` cambia también `kling-guest` y
 `kling-chispa` en el `KLING_LIB_DIR` del daemon (Linux) y `kling-vz`/`kling-hv`
 junto a `kling` (Mac), pero eso solo afecta a las imágenes que se construyan
 después: las que ya existen llevan su agente dentro. Los constructores y las

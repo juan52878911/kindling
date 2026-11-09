@@ -3,8 +3,11 @@
 # desde un checkout limpio: compila kling, kling-guest (linux/arm64), kling-db,
 # kling-hv y kling-vz de este árbol, sellados con git describe; prepara vmlinux
 # y min.ext4; corre 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv y, si los
-# dos pasan sobre un árbol sin cambios, imprime la línea `export
-# KLING_E2E_HV=...` que pide scripts/release.sh.
+# dos pasan sobre un árbol sin cambios, publica en GitHub un commit status
+# (e2e-mac/kling-hv, success) sobre ese commit e imprime la línea `export
+# KLING_E2E_HV=...`. scripts/release.sh acepta cualquiera de las dos como
+# prueba; el status es lo que queda a la vista mientras e2e-mac.yml no tenga
+# runner (KLING_E2E_STATUS=0 no lo publica).
 #
 #   scripts/e2e-mac-release.sh
 #   E2E=95 scripts/e2e-mac-release.sh        solo uno (92 o 95)
@@ -26,7 +29,8 @@
 # KLING_E2E_CACHE/passed, así que 95 puede correr después con E2E=95 y la
 # línea sale entonces.
 #
-# Variables: E2E ("92 95"), KEEP_WORK, KLING_E2E_DATA, KLING_E2E_CACHE y lo que
+# Variables: E2E ("92 95"), KEEP_WORK, KLING_E2E_DATA, KLING_E2E_CACHE,
+# KLING_E2E_STATUS (1), KLING_E2E_REPO (juan52878911/kindling) y lo que
 # entienden 92 (MEM, BURST, KLING_MIN_FREE_DISK_MIB...) y 95 (OLD_TAG, OLD_DIR,
 # GITHUB_TOKEN). bash 3.2.
 set -uo pipefail
@@ -176,8 +180,29 @@ if [ -z "$SUCIO" ]; then
   [ "$R92" = 0 ] && : > "$HECHO/$SHA.92"
   [ "$R95" = 0 ] && : > "$HECHO/$SHA.95"
 fi
+# El rastro en GitHub: un commit status sobre el commit entero, con el mismo
+# contexto que busca scripts/release.sh (si cambia, en los dos). Necesita gh
+# autenticado con escritura en el repo y el commit ya empujado; si no se
+# puede, lo dice y la línea de export sigue valiendo.
+CONTEXTO="e2e-mac/kling-hv"
+publicar_estado() {
+  if [ "${KLING_E2E_STATUS:-1}" = 0 ]; then echo "KLING_E2E_STATUS=0: no commit status on GitHub"; return 0; fi
+  command -v gh >/dev/null || { echo "gh is missing: no commit status on GitHub" >&2; return 1; }
+  local full repo mac
+  full=$(git -C "$TOP" rev-parse HEAD) || return 1
+  repo="${KLING_E2E_REPO:-juan52878911/kindling}"
+  mac="macOS $(sw_vers -productVersion 2>/dev/null), $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+  if gh api -X POST "repos/$repo/statuses/$full" -f state=success -f context="$CONTEXTO" \
+       -f description="92 and 95 passed with VMM=hv ($mac)" >/dev/null; then
+    echo "commit status $CONTEXTO=success on $repo@$SHA"
+  else
+    echo "could not publish the commit status on $repo@$SHA (pushed? gh auth with write access?)" >&2
+    return 1
+  fi
+}
 if [ -f "$HECHO/$SHA.92" ] && [ -f "$HECHO/$SHA.95" ] && [ -z "$SUCIO" ]; then
   echo
+  publicar_estado || echo "release.sh still takes the export line below" >&2
   echo "92 and 95 passed with VMM=hv on $SHA:"
   echo "export KLING_E2E_HV=$SHA"
   exit 0

@@ -217,6 +217,16 @@ jobs:
           # Como en build: la toolchain parcheada, no el mínimo de vz/go.mod.
           go-version: '1.27.3'
           cache-dependency-path: vz/go.sum
+      # vz/ es un módulo aparte con cgo que la matriz de test (ubuntu) no ve:
+      # sus tests, como el job vz de ci.yml, antes de compilar lo publicado.
+      # No arrancan ninguna VM (el VMM es un doble).
+      - name: gofmt, vet y go test -race de vz/
+        working-directory: vz
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          GOOS=linux go vet ./...
+          go test -race -count=1 ./...
       - name: build y firma
         shell: bash
         env:
@@ -299,9 +309,34 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Las microVMs de verdad (Firecracker con KVM) sobre el commit de la
+  # etiqueta: 90-e2e.sh con kling db y carpetas vivas, el congelado
+  # diferencial y `kling upgrade` de la release anterior a esta (94). Es
+  # e2e-linux.yml entero (unos 5 min con el kernel en la caché que llena el
+  # nocturno, más la imagen pg16 y su plantilla de la parte db); con require_kvm, un runner sin /dev/kvm falla en vez de avisar.
+  # Lo del Mac (92 y 95 con kling-hv) lo exige scripts/release.sh antes de
+  # crear la etiqueta (docs/releases.md, paso 3c).
+  e2e:
+    name: e2e Linux
+    needs: [test, lint]
+    uses: ./.github/workflows/e2e-linux.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+      require_kvm: true
+
+  # Los kernels Android del prototipo: artefactos de este run que el job
+  # release publica con todo lo demás (lista de assets, SHA256SUMS, firma y
+  # atestación).
+  android:
+    name: android kernels
+    needs: [test, lint]
+    uses: ./.github/workflows/android-kernels.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   release:
     name: release
-    needs: [build, vz, imagenes]
+    needs: [build, vz, imagenes, e2e, android]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
     # Corre en el environment protegido `release`, el único con el secreto
@@ -347,13 +382,29 @@ jobs:
       # el repo. Las rutas dentro de cada tar son las mismas que tenían en los
       # repos kindling-mcp y kindling-sandbox (scripts/, packaging/, deploy/),
       # así que las recetas que ya los desempaquetaban siguen valiendo.
+      #
+      # deployment.yaml lleva en el repo una etiqueta de la imagen del
+      # operador que no es la de esta release: en el tar va la de esta (la
+      # que empuja el job imagen), sobre una copia, y si la línea no está el
+      # paso falla en vez de empaquetar la vieja.
       - name: tar del host y del operador
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -eu
           tar -czf release/kindling-mcp-host.tar.gz -C ext/mcp \
             scripts/80-mcp-image.sh scripts/builders/mcp packaging/
           tar -czf release/kindling-sandbox-host.tar.gz -C ext/sandbox packaging/
-          tar -czf release/kindling-operator-deploy.tar.gz -C ext/sandbox deploy/
+          op="$RUNNER_TEMP/operador"
+          mkdir -p "$op" && cp -R ext/sandbox/deploy "$op/"
+          img=ghcr.io/juan52878911/kindling-operator
+          sed -E "s#(image: $img):[^[:space:]]+#\1:$VERSION#" ext/sandbox/deploy/deployment.yaml > "$op/deploy/deployment.yaml"
+          grep -Eq "^ +image: $img:$VERSION\$" "$op/deploy/deployment.yaml" \
+            || { echo "deployment.yaml has no image: $img line to set to $VERSION" >&2; exit 1; }
+          if grep -n "$img:" "$op/deploy/"*.yaml | grep -v ":$VERSION\$"; then
+            echo "an operator image in deploy/ is not $VERSION" >&2; exit 1
+          fi
+          tar -czf release/kindling-operator-deploy.tar.gz -C "$op" deploy/
 
       # La lista del contrato de assets, escrita una vez: si un binario falta
       # (un paso que no compiló, un nombre cambiado) la release no sale a
@@ -375,6 +426,12 @@ jobs:
           done
           for arch in amd64 arm64; do
             want+=("vmlinux-$arch.zst" "min-$arch.ext4.zst")
+          done
+          # Los kernels Android (job android): el nombre del K1 de esa
+          # arquitectura con -android, y su .sha256, .config y .buildinfo.
+          for arch in amd64 arm64; do
+            k="$(TARGET_ARCH="$arch" bash scripts/builders/kernel/build.sh --print-name)-android"
+            want+=("$k" "$k.sha256" "$k.config" "$k.buildinfo")
           done
           want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
@@ -454,19 +511,87 @@ jobs:
           scripts/release-notes.sh "$VERSION" CHANGELOG.md > notes.md
           cat notes.md
 
-      - name: create GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ steps.ver.outputs.version }}
-          name: ${{ steps.ver.outputs.version }}
-          body_path: notes.md
-          prerelease: ${{ steps.ver.outputs.prerelease }}
-          make_latest: ${{ steps.ver.outputs.prerelease == 'true' && 'false' || 'true' }}
-          fail_on_unmatched_files: true
-          # La lista ya se comprobó arriba contra el contrato.
-          files: release/*
+      # Atómica: la release se crea como BORRADOR con todos los assets, se
+      # comprueba que GitHub tiene exactamente los de release/ (nombre, tamaño,
+      # estado y sha256) y solo entonces se publica. Antes se creaba publicada
+      # y después se subían los assets uno a uno: un fallo a medias dejaba una
+      # release visible (y `releases/latest`, la que pide `kling upgrade`) sin
+      # la mitad de sus ficheros. Un borrador no lo ve nadie más que quien
+      # puede escribir en el repo; repetir el job borra el de un intento
+      # anterior y empieza de nuevo. Una release YA publicada con esta etiqueta
+      # no se toca nunca.
+      - name: crear la release como borrador
+        id: borrador
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+          # Por la lista y no por releases/tags/<tag>: esa no ve los borradores.
+          # VERSION ya pasó la forma vX.Y.Z del job build: cabe en la cadena de jq.
+          de_la_tag() { gh api --paginate "repos/$R/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$VERSION\") | \"\(.id) \(.draft)\""; }
+          previas=$(de_la_tag)
+          while read -r id draft; do
+            [ -n "$id" ] || continue
+            [ "$draft" = true ] || { echo "::error::$VERSION is already published (release $id): nothing is touched"; exit 1; }
+            echo "deleting draft $id left by a previous attempt"
+            gh api -X DELETE "repos/$R/releases/$id"
+          done <<< "$previas"
+          pre=(); [ "$PRERELEASE" = true ] && pre=(--prerelease)
+          gh release create "$VERSION" --repo "$R" --draft --verify-tag \
+            --title "$VERSION" --notes-file notes.md "${pre[@]}" release/*
+          id=$(de_la_tag | awk '$2 == "true" {print $1}')
+          [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error::cannot find the one draft of $VERSION (got: $id)"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: comprobar los assets del borrador
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ID: ${{ steps.borrador.outputs.id }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C   # sort y join con el mismo orden
+          # Lo que tiene que haber: el contrato (want.txt) y lo que este job
+          # le añade (SHA256SUMS, la fórmula y, si se firmó, la firma).
+          { cat want.txt; echo SHA256SUMS; echo kling.rb
+            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi; } | sort > final.txt
+          (cd release && ls -1) | sort > local.txt
+          diff -u final.txt local.txt || { echo "::error::release/ is not the expected list (- missing, + extra)"; exit 1; }
+          # Y lo que GitHub dice tener, fichero a fichero: nombre, tamaño y
+          # estado; el sha256 (digest) cuando la API lo da.
+          (cd release && for f in *; do printf '%s %s uploaded %s\n' "$f" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"; done) \
+            | sort > local-assets.txt
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$ID/assets?per_page=100" \
+            --jq '.[] | "\(.name) \(.size) \(.state) \((.digest // "") | ltrimstr("sha256:"))"' | sort > remote-assets.txt
+          if ! diff -u <(cut -d' ' -f1-3 local-assets.txt) <(cut -d' ' -f1-3 remote-assets.txt); then
+            echo "::error::the draft's assets are not the files in release/ (- local, + on GitHub)"; exit 1
+          fi
+          malos=$(join local-assets.txt remote-assets.txt | awk '$7 != "" && $4 != $7 {print $1}')
+          [ -z "$malos" ] || { echo "::error::sha256 on GitHub differs from release/ for: $malos"; exit 1; }
+          sin=$(awk '$4 == "" {n++} END {print n+0}' remote-assets.txt)
+          [ "$sin" = 0 ] || echo "::warning::$sin assets came without a digest from the API: checked by name, size and state only"
+          echo "$(wc -l < remote-assets.txt) assets on the draft, all as in release/"
+
+      - name: publicar la release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ID: ${{ steps.borrador.outputs.id }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # Una prerelease no pasa a latest: `kling upgrade` pregunta por
+          # releases/latest y no debe tomarla.
+          latest=true; [ "$PRERELEASE" = true ] && latest=false
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false -f make_latest="$latest" --jq '.html_url'
+          d=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" --jq '.draft')
+          [ "$d" = false ] || { echo "::error::$VERSION is still a draft"; exit 1; }
 
   # La imagen del operador en GHCR, para las dos arquitecturas: es la que
   # referencia ext/sandbox/deploy/deployment.yaml. La ruta no cambia con la
