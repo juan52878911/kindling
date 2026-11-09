@@ -354,6 +354,15 @@ func (c *Client) PatchBalloon(ctx context.Context, amountMiB int) error {
 	return c.do(ctx, http.MethodPatch, "/balloon", map[string]int{"amount_mib": amountMiB})
 }
 
+// PatchBalloonStatsInterval cambia en caliente cada cuántos segundos reporta
+// el invitado sus estadísticas. Firecracker no deja pasar de 0 a otro valor ni
+// al revés (las estadísticas se activan al configurar el globo), y al cambiarlo
+// le pide al invitado un informe en el acto: tras el PATCH, las estadísticas
+// son frescas en cuanto el driver contesta, sin esperar al intervalo.
+func (c *Client) PatchBalloonStatsInterval(ctx context.Context, sec int) error {
+	return c.do(ctx, http.MethodPatch, "/balloon/statistics", map[string]int{"stats_polling_interval_s": sec})
+}
+
 // BalloonStats son las estadísticas del globo. Los campos de memoria van en
 // BYTES. Solo existen si el globo se configuró con statsPollingSec>0.
 type BalloonStats struct {
@@ -362,6 +371,11 @@ type BalloonStats struct {
 	FreeMemory      int64 `json:"free_memory"`
 	AvailableMemory int64 `json:"available_memory"`
 	TotalMemory     int64 `json:"total_memory"`
+	// Contadores acumulados del invitado: cambian en cada informe, así que
+	// sirven para saber si las cifras de arriba son de un informe nuevo.
+	MinorFaults int64 `json:"minor_faults"`
+	MajorFaults int64 `json:"major_faults"`
+	DiskCaches  int64 `json:"disk_caches"`
 }
 
 // SetMMDS configura el metadata service (MMDS) de Firecracker: qué versión y por

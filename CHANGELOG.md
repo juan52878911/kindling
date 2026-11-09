@@ -27,6 +27,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
 - A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
