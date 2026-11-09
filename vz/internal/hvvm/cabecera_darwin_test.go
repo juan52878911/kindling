@@ -18,7 +18,8 @@ import (
 // causaFormatoVolcado) lee la magia y la versión con las mismas constantes.
 const (
 	magiaFijada   = 0x4b4c4e4748563032 // "KLNGHV02"
-	versionFijada = 6                  // la 4 o la 5 con la sección de virtio-fs detrás
+	versionFijada = 7                  // la 6 con la sección siempre: invitado con MRG_RXBUF
+	v6Fijada      = 6                  // la 4 o la 5 con la sección de virtio-fs detrás
 	v5Fijada      = 5                  // la 4 con los vCPU de más de 8 detrás
 	v4Fijada      = 4
 	hdrFijada     = 11776 // la cabecera de la versión 4 (el globo con la cola del informe de libres)
@@ -115,7 +116,7 @@ func escribirMem(t testing.TB, m memSpec) string {
 	if m.hdrLen > offGICHdr {
 		binary.LittleEndian.PutUint64(h[offGICHdr:], m.gicHdr)
 	}
-	if m.version == 6 {
+	if m.version == 6 || m.version == 7 {
 		base := uint64(hdrFijada)
 		if m.ncpus > cpusV4Fijado {
 			base = hdrV5(uint64(m.ncpus))
@@ -178,7 +179,7 @@ func TestRestaurarMemRecortado(t *testing.T) {
 // (explicarRestauracion en internal/machine/meta.go). Una cabecera buena pasa
 // de ahí y falla al compararla con la máquina (aquí no hay ninguna).
 func TestRestaurarCabeceraKLNGHV(t *testing.T) {
-	const lee = "this kling-hv reads up to 6"
+	const lee = "this kling-hv reads up to 7"
 	casos := []struct {
 		nombre  string
 		magia   uint64
@@ -211,8 +212,9 @@ func TestRestaurarCabeceraKLNGHV(t *testing.T) {
 		// sección de virtio-fs con sus dispositivos; sola o con los vCPU de más.
 		{"v6 con 1 virtio-fs", magiaFijada, versionFijada, 2, hdrV6(2, 1), "does not match the configured machine"},
 		{"v6 con 8 virtio-fs", magiaFijada, versionFijada, 2, hdrV6(2, 8), "does not match the configured machine"},
-		{"v6 con 10 vCPU y 2 virtio-fs", magiaFijada, versionFijada, 10, hdrV6(10, 2), "does not match the configured machine"},
-		{"v6 sin virtio-fs", magiaFijada, versionFijada, 2, hdrFijada + vfsCabFijada, "is not a kling-hv memory file"},
+		{"v6 con 10 vCPU y 2 virtio-fs", magiaFijada, v6Fijada, 10, hdrV6(10, 2), "does not match the configured machine"},
+		{"v6 sin virtio-fs", magiaFijada, v6Fijada, 2, hdrFijada + vfsCabFijada, "snapshot state version 6"},
+		{"v7 sin virtio-fs", magiaFijada, versionFijada, 2, hdrFijada + vfsCabFijada, "does not match the configured machine"},
 		{"v6 con 9 virtio-fs", magiaFijada, versionFijada, 2, hdrV6(2, 9), "is not a kling-hv memory file"},
 		{"v6 sin un dispositivo entero", magiaFijada, versionFijada, 2, hdrV6(2, 2) - 8, "is not a kling-hv memory file"},
 		{"v6 con la cabecera de otros vCPU", magiaFijada, versionFijada, 10, hdrV6(9, 2), lee},

@@ -223,6 +223,13 @@ struct cpu_state {
 // La 6 es la 4 (o la 5, con más de SNAP_CPUS_V4 vCPU) con la sección de
 // virtio-fs detrás (struct snap_vfs, abajo). Solo la escribe una máquina con
 // carpetas por virtio-fs: las demás siguen siendo 4 o 5, igual que antes.
+//
+// La 7 es la 6 con la sección de virtio-fs siempre, aunque no haya carpetas
+// (nvfs = 0), y la escribe solo una máquina cuyo invitado aceptó
+// VIRTIO_NET_F_MRG_RXBUF (ver rx_una_mrg en net.c). Un kling-hv anterior
+// pondría cada trama en un solo búfer de rx, y con los pequeños que pone el
+// invitado tiraría las grandes: la red quedaría a medias sin decir nada. Con
+// la 7 la rechaza y `kling upgrade -rollback` lo ve antes de volver atrás.
 #define SNAP_VERSION KHV_SNAP_VERSION
 #define SNAP_CPUS_V4 8
 struct snap_hdr {
@@ -294,7 +301,7 @@ static size_t snap_hdr_len(uint32_t v, uint32_t n) {
   if (v == 5) return n > SNAP_CPUS_V4 ? SNAP_HDR_V5(n) : 0;
   // La 6: la cabecera de la 4 o de la 5, según los vCPU; la sección de
   // virtio-fs va aparte (SNAP_VFS_LEN).
-  if (v == 6) return n > SNAP_CPUS_V4 ? SNAP_HDR_V5(n) : SNAP_HDR_V4;
+  if (v == 6 || v == 7) return n > SNAP_CPUS_V4 ? SNAP_HDR_V5(n) : SNAP_HDR_V4;
   if (n > SNAP_CPUS_V4) return 0;
   switch (v) {
     case 1: return SNAP_HDR_V1;
@@ -325,7 +332,7 @@ static bool snap_forma(uint64_t len) {
   for (int n = SNAP_CPUS_V4; n <= MAX_CPUS; n++) {
     uint64_t base = n == SNAP_CPUS_V4 ? SNAP_HDR_V4 : SNAP_HDR_V5(n);
     if (len == base) return true;
-    if (len > base && len - base >= SNAP_VFS_LEN(1) && len - base <= SNAP_VFS_LEN(KHV_MAX_VFS) &&
+    if (len > base && len - base >= SNAP_VFS_LEN(0) && len - base <= SNAP_VFS_LEN(KHV_MAX_VFS) &&
         (len - base - SNAP_VFS_CAB) % sizeof(struct vvfs_state) == 0)
       return true;
   }
@@ -1530,6 +1537,8 @@ int khv_create(const struct khv_config *c) {
   qos_activa = !(q && strcmp(q, "0") == 0);
   const char *e = getenv("KLING_HV_EVENT_IDX");
   if (e && strcmp(e, "0") == 0) khv_event_idx = 0;  // para comparar: sin VIRTIO_RING_F_EVENT_IDX
+  const char *mrg = getenv("KLING_HV_MRG_RXBUF");
+  if (mrg && strcmp(mrg, "0") == 0) khv_mrg_rxbuf = 0;  // para comparar: búferes de rx del tamaño de la MTU
   g_ram_size = c->mem_size;
   ndisks = c->ndisks;
   hay_red = c->net_fd >= 0;
@@ -1881,9 +1890,9 @@ int khv_restore(const char *mem_path) {
   size_t cab = snap_hdr_len(h.version, h.ncpus);
   static struct snap_vfs sv;
   memset(&sv, 0, sizeof sv);
-  if (h.version == 6 && cab > 0) {
+  if ((h.version == 6 || h.version == 7) && cab > 0) {
     uint64_t resto = pie.hdr_len > cab ? pie.hdr_len - cab : 0;
-    if (resto < SNAP_VFS_LEN(1) || resto > SNAP_VFS_LEN(KHV_MAX_VFS) ||
+    if (resto < SNAP_VFS_LEN(h.version == 7 ? 0 : 1) || resto > SNAP_VFS_LEN(KHV_MAX_VFS) ||
         (resto - SNAP_VFS_CAB) % sizeof(struct vvfs_state) != 0 ||
         leer_todo(fd, &sv, resto, (off_t)(pie.hdr_off + cab)) != 0 || SNAP_VFS_LEN(sv.nvfs) != resto ||
         (memset(&h, 0, sizeof h), leer_todo(fd, &h, cab, (off_t)pie.hdr_off)) != 0) {
@@ -2251,6 +2260,9 @@ int khv_snapshot(const char *mem_out) {
   sv.nvfs = (uint32_t)nvfs;
   for (int i = 0; i < nvfs; i++) vvfs_get(i, &sv.vfs[i]);
   if (nvfs > 0) h.version = 6;
+  // MRG_RXBUF aceptado: la 7 (ver SNAP_VERSION), para que no lo restaure un
+  // kling-hv que no lo sabe atender.
+  if (hay_red && ((h.vnet.m.drv_features >> 15) & 1)) h.version = 7;
   // Un CPU_ON pendiente (on_pend, on_entry, on_ctx) no va en la cabecera:
   // se guarda como si ya hubiera entrado, con el estado que le pone el hilo
   // del vCPU al atenderlo (estado_cpu_on). Así el formato no cambia y el vCPU
@@ -2345,7 +2357,7 @@ int khv_snapshot(const char *mem_out) {
   // La cabecera de la 4 (o de la 5, con más vCPU) tal cual y, con virtio-fs
   // (la 6), su sección detrás.
   size_t hl = snap_hdr_len(h.version, h.ncpus);
-  size_t vl = nvfs > 0 ? SNAP_VFS_LEN(nvfs) : 0;
+  size_t vl = h.version >= 6 ? SNAP_VFS_LEN(nvfs) : 0;
   struct snap_pie pie = {.magic = SNAP_MAGIC, .ram_size = g_ram_size, .hdr_off = g_ram_size, .hdr_len = hl + vl};
   if (escribir_todo(fd, &h, hl, (off_t)g_ram_size) != 0 ||
       (vl > 0 && escribir_todo(fd, &sv, vl, (off_t)(g_ram_size + hl)) != 0) ||

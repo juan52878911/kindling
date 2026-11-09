@@ -20,9 +20,17 @@
 // más la cabecera Ethernet. Con 65536 justos, a MTU 65535 el invitado mandaba
 // tramas de 65549 bytes que tx_mandar tiraba, y TCP se quedaba parado.
 #define TRAMA_MAX (65535 + 14)
+// VIRTIO_NET_F_MRG_RXBUF: el invitado pone búferes de rx pequeños (el
+// virtio_net de Linux, del tamaño medio de lo que le llega, ~1,5 KiB) y una
+// trama ocupa los que haga falta, con su número en num_buffers. Sin él, con
+// la MTU de 16 KiB (spec.DefaultMTU) reservaba cada búfer del tamaño de la
+// MTU: ~2 MiB de RAM del invitado ensuciada por VM (docs/backend-hv.md).
+#define VIRTIO_NET_F_MRG_RXBUF 15
 
 static struct vnet_state s;
 static int fd = -1;
+// khv_mrg_rxbuf: el bit que se ofrece (0 con KLING_HV_MRG_RXBUF=0, ver khv_create).
+uint64_t khv_mrg_rxbuf = 1u << VIRTIO_NET_F_MRG_RXBUF;
 static uint32_t intid;
 static uint8_t mac[6];
 // MTU que se anuncia al invitado (VIRTIO_NET_F_MTU), la misma con la que se
@@ -148,6 +156,109 @@ static bool rx_hay_buf(void) {
 // más corta que la trama, no recibe media trama (ni media cabecera): el
 // búfer vuelve con 0 bytes y la trama se pierde entera, que es lo que un
 // driver espera de un paquete que no le cabe.
+// rx_mrg: el driver aceptó VIRTIO_NET_F_MRG_RXBUF. Lo dice drv_features, que
+// va en el snapshot: una máquina restaurada de un dorado de antes sigue con
+// un búfer por trama.
+static bool rx_mrg(void) { return (s.m.drv_features >> VIRTIO_NET_F_MRG_RXBUF) & 1; }
+
+// rx_push_varios pone en used las k entradas de una trama repartida y publica
+// el índice una sola vez: el driver lee num_buffers en la primera y espera
+// tener ya las demás (si no, la tira con "buffers out of N missing").
+static void rx_push_varios(struct vq *q, uint8_t *used, const uint16_t *heads, const uint32_t *lens, int k) {
+  uint16_t uidx = q->used_idx;
+  for (int i = 0; i < k; i++) {
+    uint32_t *e = (uint32_t *)(used + 4 + 8 * ((uint16_t)(uidx + i) % q->num));
+    e[0] = heads[i];
+    e[1] = lens[i];
+  }
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  q->used_idx = (uint16_t)(uidx + k);
+  *(volatile uint16_t *)(used + 2) = q->used_idx;
+}
+
+// rx_una_mrg es rx_una con VIRTIO_NET_F_MRG_RXBUF: junta búferes seguidos de
+// avail (sin gastarlos) hasta que quepa la trama más grande del enlace (la
+// MTU más la cabecera Ethernet y una VLAN) o se acaben, recibe en ellos con
+// un solo recvmsg y gasta solo los que llenó. La cabecera va en el primero,
+// con num_buffers. Si no caben (el invitado no repuso a tiempo y la trama es
+// grande), MSG_TRUNC: el primero vuelve con 0 bytes y la trama se pierde,
+// como sin MRG_RXBUF. Con mu, como rx_una; head es el primero, ya leído.
+static int rx_una_mrg(int *err, struct vq *q, uint16_t *avail, uint8_t *used, struct vdesc *desc) {
+  static struct iovec iov[QMAX], datos[QMAX];
+  static uint16_t heads[QMAX];
+  static uint32_t caps[QMAX], lens[QMAX];
+  static int niov[QMAX];
+  static uint8_t tirar[TRAMA_MAX];
+  uint64_t tope = HDR + (uint64_t)(mtu ? mtu : 1500) + 14 + 4;
+  if (tope > HDR + TRAMA_MAX) tope = HDR + TRAMA_MAX;
+  uint16_t hay = (uint16_t)(*(volatile uint16_t *)&avail[1] - q->last_avail);
+  if (hay > q->num) hay = (uint16_t)q->num;  // un índice de avail imposible
+  if (hay == 0) return RX_SIN_BUF;
+  uint16_t head0 = avail[2 + q->last_avail % q->num];
+  int k = 0, n = 0;
+  uint64_t cap = 0;
+  while (k < hay && cap < tope && n < QMAX) {
+    uint16_t head = k == 0 ? head0 : avail[2 + (uint16_t)(q->last_avail + k) % q->num];
+    uint64_t c = 0;
+    int m = vq_iov(q, desc, head, true, iov + n, QMAX - n, &c);
+    // La cabecera entera en el primero (el driver de Linux la lee de ahí).
+    if (m <= 0 || c == 0 || c > UINT32_MAX || (k == 0 && c <= HDR)) break;
+    heads[k] = head;
+    caps[k] = (uint32_t)c;
+    niov[k] = m;
+    n += m;
+    cap += c;
+    k++;
+  }
+  struct msghdr msg = {0};
+  struct iovec t = {.iov_base = tirar, .iov_len = sizeof tirar};
+  bool vale = k > 0;
+  if (vale) {
+    uint64_t sitio = cap - HDR < TRAMA_MAX ? cap - HDR : TRAMA_MAX;
+    msg.msg_iov = datos;
+    msg.msg_iovlen = iov_tramo(iov, n, HDR, sitio, datos);
+  } else {
+    msg.msg_iov = &t;  // el primero no vale: se recibe para tirarla
+    msg.msg_iovlen = 1;
+  }
+  rx_en_curso = true;
+  pthread_mutex_unlock(&mu);
+  ssize_t r = recvmsg(fd, &msg, MSG_DONTWAIT);
+  int e = errno;
+  pthread_mutex_lock(&mu);
+  rx_en_curso = false;
+  pthread_cond_broadcast(&cv_rx);
+  if (r < 0 && e == EINVAL && vale) {  // ver rx_una
+    (void)!recv(fd, tirar, sizeof tirar, MSG_DONTWAIT);
+    r = 0;
+    vale = false;
+  }
+  if (r < 0) {
+    *err = e;
+    return e == EAGAIN ? RX_VACIO : RX_ERROR;
+  }
+  if (!vale || (msg.msg_flags & MSG_TRUNC)) {
+    // La cola es la misma que antes de soltar mu (ver rx_una).
+    q->last_avail++;
+    vq_push(q, used, head0, 0);
+    return RX_PUESTA;
+  }
+  // Los búferes que llenó la trama, en orden: el último, a medias.
+  uint64_t queda = HDR + (uint64_t)r;
+  int usados = 0;
+  for (; usados < k && queda > 0; usados++) {
+    lens[usados] = queda < caps[usados] ? (uint32_t)queda : caps[usados];
+    queda -= lens[usados];
+  }
+  uint8_t cab[HDR] = {0};
+  cab[10] = (uint8_t)usados;  // num_buffers, le16
+  cab[11] = (uint8_t)(usados >> 8);
+  iov_poner(iov, niov[0], cab, HDR);
+  q->last_avail = (uint16_t)(q->last_avail + usados);
+  rx_push_varios(q, used, heads, lens, usados);
+  return RX_PUESTA;
+}
+
 static int rx_una(int *err) {
   static struct iovec iov[QMAX], datos[QMAX];
   static uint8_t tirar[TRAMA_MAX];
@@ -169,6 +280,7 @@ static int rx_una(int *err) {
   // Sin búferes: con EVENT_IDX se pide el aviso del siguiente (mientras los
   // haya, el driver repone sin avisar) y se vuelve a mirar.
   if (q->last_avail == *(volatile uint16_t *)&avail[1] && !vq_pedir_aviso(&s.m, q, avail, used)) return RX_SIN_BUF;
+  if (rx_mrg()) return rx_una_mrg(err, q, avail, used, desc);
   uint16_t head = avail[2 + q->last_avail % q->num];
   uint64_t cap = 0;
   int n = vq_iov(q, desc, head, true, iov, QMAX, &cap);
@@ -452,11 +564,12 @@ bool vnet_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   uint32_t cola = 0;
   // VIRTIO_NET_F_MAC (5), VIRTIO_NET_F_STATUS (16) y, con una MTU mayor que
   // 1500, VIRTIO_NET_F_MTU (3): el virtio_net de Linux la adopta solo, como con
-  // el adjunto de vz. Sin VIRTIO_NET_F_MRG_RXBUF el invitado reserva búferes
-  // del tamaño de la MTU (ver spec.DefaultMTU).
+  // el adjunto de vz. VIRTIO_NET_F_MRG_RXBUF (15): búferes de rx pequeños que
+  // una trama grande junta (ver rx_una_mrg); sin él el invitado los reservaba
+  // del tamaño de la MTU (ver spec.DefaultMTU). KLING_HV_MRG_RXBUF=0 lo quita.
   // VIRTIO_RING_F_EVENT_IDX (29): avisos e interrupciones solo cuando hacen
   // falta (ver vq_interrumpir y vq_pedir_aviso en virtio.c).
-  uint64_t feat = (1u << 5) | (1u << 16) | khv_event_idx | (mtu ? (1u << 3) : 0);
+  uint64_t feat = (1u << 5) | (1u << 16) | khv_event_idx | (mtu ? (1u << 3) : 0) | khv_mrg_rxbuf;
   // Notify e ISR ya se atendieron arriba.
   if (vmmio_acceso(&s.m, s.q, 2, 1, feat, off, escribir, val, &cola) == VM_RESET) {
     uint8_t nivel = s.m.nivel;

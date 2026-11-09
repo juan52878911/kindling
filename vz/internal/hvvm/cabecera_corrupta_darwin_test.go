@@ -58,8 +58,9 @@ var volcadosBuenos = []struct {
 	version, ncpus uint32
 	hdrLen         uint64
 }{
-	{"v6", versionFijada, 2, hdrV6(2, 1)},
-	{"v6 con 10 vCPU", versionFijada, 10, hdrV6(10, 2)},
+	{"v6", v6Fijada, 2, hdrV6(2, 1)},
+	{"v6 con 10 vCPU", v6Fijada, 10, hdrV6(10, 2)},
+	{"v7", versionFijada, 2, hdrV6(2, 0)},
 	{"v5", v5Fijada, 10, hdrV5(10)},
 	{"v4", v4Fijada, 2, hdrFijada},
 	{"v3", 3, 1, hdrV3Fijada},
@@ -123,6 +124,12 @@ func TestRestaurarCabeceraBitsCambiados(t *testing.T) {
 				// La versión 3 con la cabecera de otra versión: hueco
 				// conocido, lo vigila TestRestaurarVersionConOtraCabecera.
 				if off == hdr+8 && uint32(b[off]) == v4Fijada && v.version != v4Fijada {
+					continue
+				}
+				// La 6 y la 7 tienen la misma forma (la 7 solo dice que la red
+				// del invitado aceptó MRG_RXBUF): pasar de una a otra no lo ve
+				// la cabecera, lo ve la máquina.
+				if off == hdr+8 && (v.version == 6 && b[off] == 7 || v.version == 7 && b[off] == 6) {
 					continue
 				}
 				if vigilado(off) && strings.Contains(err.Error(), errMaquina) {

@@ -449,3 +449,88 @@ int khv_prueba_poll_vsock(void) {
   if (preparar() != 0) return -100;
   return khv_vsock_prueba_poll();
 }
+
+// khv_prueba_red_mrg: VIRTIO_NET_F_MRG_RXBUF con búferes de rx de 1536 B,
+// como los del virtio_net de Linux. Con mrg, una trama de 4000 B ocupa tres
+// (1536, 1536 y 940 con la cabecera), num_buffers dice 3 y los datos siguen
+// en orden; una de 100 B, uno; una mayor que la MTU, ninguno (el primero
+// vuelve con 0 bytes y la trama se tira). Sin mrg, la de 4000 B no cabe en un
+// búfer y se tira. 0 si va bien; si no, el paso que falló (negativo).
+int khv_prueba_red_mrg(int mrg) {
+  if (preparar() != 0) return -100;
+  memset(g_ram, 0, g_ram_size);
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) return -100;
+  int grande = 64 << 10;
+  setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &grande, sizeof grande);
+  setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &grande, sizeof grande);
+  enum { NB = 16, BUF = 1536 };
+  const uint64_t d0 = RAM_BASE, av0 = RAM_BASE + 0x1000, us0 = RAM_BASE + 0x2000, b0 = RAM_BASE + 0x4000;
+  w(vnet_mmio, 0x070, 0);
+  w(vnet_mmio, 0x024, 0);
+  w(vnet_mmio, 0x020, (1u << 5) | (1u << 16) | (mrg ? 1u << 15 : 0));
+  w(vnet_mmio, 0x024, 1);
+  w(vnet_mmio, 0x020, 1);  // VERSION_1
+  w(vnet_mmio, 0x030, 0);
+  w(vnet_mmio, 0x038, NB);
+  w(vnet_mmio, 0x080, (uint32_t)d0);
+  w(vnet_mmio, 0x090, (uint32_t)av0);
+  w(vnet_mmio, 0x0a0, (uint32_t)us0);
+  w(vnet_mmio, 0x084, 0);
+  w(vnet_mmio, 0x094, 0);
+  w(vnet_mmio, 0x0a4, 0);
+  w(vnet_mmio, 0x044, 1);
+  w(vnet_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, NB * sizeof *d);
+  for (int i = 0; i < NB; i++) d[i] = (struct vdesc){b0 + 0x800 * (uint64_t)i, BUF, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(av0, 6 + 2 * NB);
+  for (int i = 0; i < NB; i++) av[2 + i] = (uint16_t)i;
+  av[1] = NB;
+  volatile uint16_t *uidx = gpa_ptr(us0 + 2, 2);
+  uint32_t *anillo = gpa_ptr(us0 + 4, 8 * NB);
+  uint8_t *buf = gpa_ptr(b0, 0x800 * NB);
+  static uint8_t trama[20000];
+  for (size_t i = 0; i < sizeof trama; i++) trama[i] = (uint8_t)(i * 7 + 3);
+  int r = 0;
+  // Una trama de 4000 B.
+  if (send(sv[1], trama, 4000, 0) != 4000) r = -101;
+  if (!r) vnet_prueba_rx(sv[0]);
+  if (!r && !mrg) {
+    if (*uidx != 1 || anillo[0] != 0 || anillo[1] != 0) r = -1;
+  } else if (!r) {
+    uint32_t want[3] = {BUF, BUF, 12 + 4000 - 2 * BUF};
+    if (*uidx != 3) r = -2;
+    for (int i = 0; !r && i < 3; i++)
+      if (anillo[2 * i] != (uint32_t)i || anillo[2 * i + 1] != want[i]) r = -3;
+    if (!r && (buf[10] != 3 || buf[11] != 0)) r = -4;
+    // Los datos: tras la cabecera en el primero y seguidos en los otros.
+    for (int i = 0, o = 12; !r && i < 4000; i++, o++) {
+      int b = o / BUF, x = o % BUF;
+      if (buf[0x800 * b + x] != trama[i]) r = -5;
+    }
+  }
+  // Una de 100 B: un búfer, num_buffers 1.
+  uint16_t antes = *uidx;
+  if (!r && send(sv[1], trama, 100, 0) != 100) r = -102;
+  if (!r) vnet_prueba_rx(sv[0]);
+  if (!r) {
+    uint32_t *e = anillo + 2 * (antes % NB);
+    uint8_t *p = buf + 0x800 * e[0];
+    if (*uidx != (uint16_t)(antes + 1) || e[0] != antes || e[1] != 112 || p[10] != 1 || memcmp(p + 12, trama, 100) != 0)
+      r = -6;
+  }
+  // Una mayor que la MTU (16384, la de preparar): cabría en los búferes que
+  // quedan, pero no se juntan más de los que pide la MTU; se tira gastando
+  // uno, con 0 bytes.
+  antes = *uidx;
+  if (!r && mrg) {
+    if (send(sv[1], trama, 17000, 0) != 17000) r = -103;
+    if (!r) vnet_prueba_rx(sv[0]);
+    uint32_t *e = anillo + 2 * (antes % NB);
+    if (!r && (*uidx != (uint16_t)(antes + 1) || e[0] != antes || e[1] != 0)) r = -7;
+  }
+  w(vnet_mmio, 0x070, 0);
+  close(sv[0]);
+  close(sv[1]);
+  return r;
+}

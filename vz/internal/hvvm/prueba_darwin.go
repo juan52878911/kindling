@@ -161,3 +161,12 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 // red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
+
+// redMrg: ver khv_prueba_red_mrg en prueba.c.
+func redMrg(mrg bool) int {
+	m := 0
+	if mrg {
+		m = 1
+	}
+	return int(C.khv_prueba_red_mrg(C.int(m)))
+}

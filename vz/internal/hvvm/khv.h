@@ -39,7 +39,7 @@
 // La lee Go (hvvm.VersionVolcado) para `kling-hv -snapshot-formats`: `kling
 // upgrade` la pregunta al kling-hv viejo antes de volver atrás con lo que el
 // nuevo congeló.
-#define KHV_SNAP_VERSION 6
+#define KHV_SNAP_VERSION 7
 #define RAM_BASE 0x80000000ULL
 
 // Tope de vCPU de kling-hv. Hypervisor.framework da 64 en el M4
@@ -281,6 +281,8 @@ void vmmio_irq(struct vmmio *m, uint32_t intid);  // pasa al GIC el nivel de isr
 #define VIRTIO_RING_F_EVENT_IDX 29
 // khv_event_idx: el bit que ofrecen red y discos (0 con KLING_HV_EVENT_IDX=0).
 extern uint64_t khv_event_idx;
+// khv_mrg_rxbuf: VIRTIO_NET_F_MRG_RXBUF, que ofrece la red (0 con KLING_HV_MRG_RXBUF=0).
+extern uint64_t khv_mrg_rxbuf;
 bool vq_interrumpir(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint16_t viejo, uint16_t nuevo);
 bool vq_pedir_aviso(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used);
 // vq_pedir_aviso_ya: con EVENT_IDX, que el siguiente añadido avise aunque
@@ -329,6 +331,7 @@ void vnet_parar(void);  // saca y espera al hilo de recepción (ver net.c)
 void vnet_despertar(void);
 int vnet_prueba_rx(int red);
 int khv_prueba_poll_red(void);
+int khv_prueba_red_mrg(int mrg);  // VIRTIO_NET_F_MRG_RXBUF en rx (prueba.c)
 int khv_prueba_poll_vsock(void);  // un EAGAIN de poll no mata el hilo de rx (prueba.c)  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
 // rng
