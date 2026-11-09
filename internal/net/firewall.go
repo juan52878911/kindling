@@ -200,7 +200,27 @@ func (n *Net) egressRules(e Egress) [][]string {
 	for _, cidr := range blocked {
 		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
 	}
+	rules = append(rules, topeNuevas())
 	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
+}
+
+// topeNuevasPorSegundo es cuántos paquetes NEW por segundo y por IP destino
+// deja salir una microVM (internet y allowlist). Para UDP, todo lo que el
+// invitado manda sin respuesta sigue siendo NEW: sin este tope, un invitado
+// podía usar el host para inundar una IP permitida (o cualquiera, en
+// internet) a todo lo que dé el limitador de Firecracker.
+const topeNuevasPorSegundo = 300
+
+// topeNuevas es el DROP de lo que pase de topeNuevasPorSegundo, delante del
+// ACCEPT de las conexiones nuevas. La ráfaga es la misma cifra: un npm install
+// que abre decenas de conexiones de golpe al mismo registro no pierde SYN
+// (con la ráfaga por defecto, 5, el resto esperaría al reintento de 1 s). La
+// tabla del hashlimit es por netns, así que el nombre puede ser fijo.
+func topeNuevas() []string {
+	tope := strconv.Itoa(topeNuevasPorSegundo)
+	return []string{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "NEW",
+		"-m", "hashlimit", "--hashlimit-above", tope + "/s", "--hashlimit-burst", tope,
+		"--hashlimit-mode", "dstip", "--hashlimit-name", "kl-nuevas", "-j", "DROP"}
 }
 
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
@@ -382,7 +402,9 @@ func (n *Net) reglasAllowlist() [][]string {
 			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"})
 	}
 	sinIptables(n.credForwardRules())
-	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
+	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas, con
+	//      el tope de topeNuevas delante.
+	rules = append(rules, topeNuevas())
 	rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
 		"-m", "conntrack", "--ctstate", "NEW",
 		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"})

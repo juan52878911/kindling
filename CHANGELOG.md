@@ -38,6 +38,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
 - Linux allowlist DNS: queries go upstream with a TXID drawn from `crypto/rand` instead of the one the guest chose, and the answer must carry it; the guest gets its own TXID back. A guest knowing the TXID only had to guess the port to plant a spoofed answer that seeds the ipset.
 - Linux allowlist: the per-machine ipset has `maxelem 8192`, at most 16 A records per DNS answer are seeded, seeded TTLs are capped at 3600 s, and a full set (or any other error the kernel answers over netlink) no longer falls back to forking `ipset` on every query; only a missing netlink path does.
+- Linux: in `internet` and `allowlist` egress, new packets from a machine are capped at 300/s per destination IP (`hashlimit`, burst 300; needs the `xt_hashlimit` module), so a guest can't flood an allowed IP through the host; a one-way UDP flood counts as new packets. The Firecracker network rate limiter also caps frames per second (`ops`: the bandwidth over 512 bytes, at least 8192; 32768/s at the default 16 MiB/s), so small packets can't reach hundreds of thousands per second within the byte budget.
 
 ### Fixed
 
