@@ -32,7 +32,8 @@ import (
 //
 // Los FLAGS se sacan del propio comando (`... -h`) en otro proceso, porque los
 // FlagSet salen con os.Exit al ver -h; FlagHelpEnv le dice a ese proceso que
-// no intercepte el -h otra vez.
+// no intercepte el -h otra vez. Una extensión hecha con Main no ejecuta nada
+// en ese proceso: imprime los flags de HelpFlags.
 
 // FlagHelpEnv se exporta al proceso que imprime los flags de un comando, para
 // que sepa que no debe volver a interceptar el -h.

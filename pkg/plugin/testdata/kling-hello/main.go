@@ -3,6 +3,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,11 @@ import (
 )
 
 func main() {
+	plugin.HelpFlags("hello", func() *flag.FlagSet {
+		fs := flag.NewFlagSet("hello", flag.ContinueOnError)
+		fs.Bool("loud", false, "shout it")
+		return fs
+	})
 	plugin.Main(plugin.Manifest{
 		Name:    "hello",
 		Version: "1.2.3",
@@ -26,6 +32,10 @@ func main() {
 		Hooks:  []string{plugin.HookStatus, plugin.HookUp},
 	}, map[string]func([]string) error{
 		"hello": func(args []string) error {
+			// Deja rastro de que se ejecutó (la ayuda no debe ejecutarlo).
+			if p := os.Getenv("HELLO_MARK"); p != "" {
+				os.WriteFile(p, nil, 0o644)
+			}
 			fmt.Printf("hola %s api=%s config=%s\n", strings.Join(args, " "),
 				os.Getenv("KLING_PLUGIN_API"), os.Getenv("KLING_CONFIG"))
 			return nil
