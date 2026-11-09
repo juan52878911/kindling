@@ -73,6 +73,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling-mcp`: sessions are bound to the tenant that opened them; another tenant's key gets a 404 and can't delete them.
 - `kling mcp connect` and `migrate` no longer take `-token` (it ended up in argv and shell history): use `KLING_GATEWAY_TOKEN`, `-token-file` or `gateway.token`.
 - The daemon and the MCP gateway no longer follow HTTP redirects returned by the guest agent or bridge, so a compromised guest can't make them repeat a request against another machine or a host loopback service; the guest agent's `/volume/*` routes now require POST.
+- Guest-sourced text the CLI prints as a message (errors from the guest agent or the service, the `why` of `kling machine ready`, `kling save` warnings) and the text report of `kling db` have their control characters escaped, as `kling logs` already did, so a guest can't send terminal escape sequences (clipboard, title, screen clearing) to the operator. `-json` output and the raw stream of `kling exec`/`shell` are unchanged.
+- `kling-mcp` gateway: a redirect from a guest bridge or a linked server reaches the client as a 502 without `Location`, and only the response headers MCP needs pass through (`WWW-Authenticate`, `Set-Cookie`, CORS and the rest are dropped).
+- `kling mcp import`, `add` and `link` refuse service names with a dot: in `/mcp/_all` the dot separates service and tool, so service `a` could publish tools under service `a.b`'s names. Existing dotted services are left out of `/mcp/_all` (with a log line); their `/mcp/<service>` route still works. Rename them by importing again under a dot-free name.
 
 ### Fixed
 

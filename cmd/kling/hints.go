@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -130,7 +131,9 @@ func printError(w io.Writer, err error) {
 		_ = json.NewEncoder(w).Encode(errorJSON{Error: err.Error(), Code: codigoDeError(err), Try: hintFor(err)})
 		return
 	}
-	fmt.Fprintln(w, "error:", err)
+	// El mensaje puede traer texto del invitado (el agente, la sonda, el
+	// servicio): sin escapar, un ESC escribiría en la terminal de quien lo lee.
+	fmt.Fprintln(w, "error:", saneado.Texto(err.Error()))
 	if h := hintFor(err); h != "" {
 		fmt.Fprintln(w, "try:", h)
 	}

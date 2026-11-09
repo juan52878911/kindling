@@ -22,6 +22,21 @@ const (
 
 var validLinkName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// validServiceName es validLinkName sin el punto: en /mcp/_all una herramienta
+// se llama servicio.herramienta y se parte por el PRIMER punto, así que un
+// servicio "a.b" no se distinguiría de la herramienta "b.c" del servicio "a"
+// (las dos serían a.b.c): "a" podría publicar herramientas en nombre de "a.b".
+var validServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// ValidServiceName dice si name sirve como nombre de servicio MCP: letras,
+// dígitos, guion y guion bajo, sin punto (es el separador de /mcp/_all).
+func ValidServiceName(name string) error {
+	if !validServiceName.MatchString(name) {
+		return fmt.Errorf("invalid service name %q: letters, digits, '-' and '_' (up to 64, no '.': it separates service and tool in /mcp/_all)", name)
+	}
+	return nil
+}
+
 // linksMu serializa el leer-modificar-escribir de mcp/links. Es UN documento y
 // el store del daemon no tiene versión ni ETag: sin cerrojo, ocho SetLink a la
 // vez dejaban dos (cada uno escribía su copia leída antes que las demás).
@@ -64,6 +79,9 @@ func Links(ctx context.Context, c *api.Client) ([]*Link, error) {
 func SetLink(ctx context.Context, c *api.Client, l *Link) (*Link, error) {
 	if !validLinkName.MatchString(l.Name) {
 		return nil, fmt.Errorf("invalid name: %q", l.Name)
+	}
+	if err := ValidServiceName(l.Service()); err != nil {
+		return nil, err
 	}
 	if l.URL == "" {
 		return nil, fmt.Errorf("missing MCP server URL")
