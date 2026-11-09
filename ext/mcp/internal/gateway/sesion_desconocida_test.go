@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,5 +71,56 @@ func TestRouterAllSidDesconocidoDa404(t *testing.T) {
 	}
 	if rec := pedir(t, h, "POST", "/mcp/_all", sid, `{"jsonrpc":"2.0","id":3,"method":"ping"}`); rec.Code != 200 {
 		t.Fatalf("ping con sesión válida: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// El modo router crea microVMs aisladas por conversación (forward con
+// claveAislada de su sesión sombra), así que cerrar o segar la conversación
+// del router tiene que destruirlas, igual que hace un solo host.
+func TestRouterSueltaLasAisladas(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 6)
+	d := &daemonAislado{service: "notas", invitados: addrs}
+	r := NewRouter([]RouterHost{{Name: "uno", GW: New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "")}})
+	h := r.Handler("")
+	vivas := func() int {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.maquinas)
+	}
+	conversar := func() string {
+		t.Helper()
+		rec := pedir(t, h, "POST", "/mcp/_all?mode=expand", "", cuerpoInit)
+		sid := rec.Header().Get(SessionHeader)
+		if rec.Code != 200 || sid == "" {
+			t.Fatalf("initialize: %d %s", rec.Code, rec.Body)
+		}
+		rec = pedir(t, h, "POST", "/mcp/_all", sid,
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"notas.echo","arguments":{}}}`)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "soy") {
+			t.Fatalf("tools/call: %d %s", rec.Code, rec.Body)
+		}
+		return sid
+	}
+
+	// DELETE de la conversación.
+	sid := conversar()
+	if vivas() != 1 {
+		t.Fatalf("tras la llamada hay %d máquinas; quería 1 (la de la conversación)", vivas())
+	}
+	if rec := pedir(t, h, "DELETE", "/mcp/_all", sid, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: %d", rec.Code)
+	}
+	if n := vivas(); n != 0 {
+		t.Fatalf("tras el DELETE quedan %d máquinas aisladas", n)
+	}
+
+	// Segador.
+	conversar()
+	if vivas() != 1 {
+		t.Fatalf("segunda conversación: %d máquinas", vivas())
+	}
+	r.agg.reap(t.Context(), 0)
+	if n := vivas(); n != 0 {
+		t.Fatalf("tras segar quedan %d máquinas aisladas", n)
 	}
 }

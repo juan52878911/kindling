@@ -144,7 +144,7 @@ func (r *Router) Reap(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.agg.reap(idle * 4)
+			r.agg.reap(ctx, idle*4)
 			r.olvidarFijadas(idle * 4)
 		}
 	}
@@ -371,7 +371,7 @@ func newRouterAgg(r *Router) *routerAgg {
 
 func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodDelete {
-		ra.drop(req.Header.Get(SessionHeader))
+		ra.drop(req.Context(), req.Header.Get(SessionHeader))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -446,21 +446,48 @@ func (ra *routerAgg) session(req *http.Request) (*routerSession, string, bool) {
 	return s, sid, true
 }
 
-func (ra *routerAgg) drop(sid string) {
+func (ra *routerAgg) drop(ctx context.Context, sid string) {
 	if sid == "" {
 		return
 	}
 	ra.mu.Lock()
-	defer ra.mu.Unlock()
+	s := ra.sessions[sid]
 	delete(ra.sessions, sid)
+	ra.mu.Unlock()
+	if s != nil {
+		ra.soltarAisladas(ctx, s)
+	}
 }
 
-func (ra *routerAgg) reap(idle time.Duration) {
+func (ra *routerAgg) reap(ctx context.Context, idle time.Duration) {
+	var muertas []*routerSession
 	ra.mu.Lock()
-	defer ra.mu.Unlock()
 	for id, s := range ra.sessions {
 		if time.Since(s.lastUse) > idle {
 			delete(ra.sessions, id)
+			muertas = append(muertas, s)
+		}
+	}
+	ra.mu.Unlock()
+	for _, s := range muertas {
+		ra.soltarAisladas(ctx, s)
+	}
+}
+
+// soltarAisladas destruye las microVMs aisladas que la conversación abrió en
+// cada host. forward las crea con la clave de la sesión sombra de ese host, y
+// sin esto ni el DELETE ni el segador del router las tocaban: quedaban vivas
+// hasta el SessionTTL del daemon. Se llama fuera de ra.mu: habla con daemons.
+func (ra *routerAgg) soltarAisladas(ctx context.Context, s *routerSession) {
+	ra.mu.Lock()
+	subs := make(map[string]*aggSession, len(s.perHost))
+	for name, sub := range s.perHost {
+		subs[name] = sub
+	}
+	ra.mu.Unlock()
+	for name, sub := range subs {
+		if h := ra.r.hostByName(name); h != nil {
+			h.GW.agg.soltarAisladas(ctx, sub)
 		}
 	}
 }
