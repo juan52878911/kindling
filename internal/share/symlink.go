@@ -89,7 +89,15 @@ func (s *Server) symlink(p, target string) (proto.Attr, uint32) {
 		return proto.Attr{}, e
 	}
 	defer dir.Close()
+	if q := s.quota; q != nil {
+		if e := q.reservarEntrada(s); e != 0 {
+			return proto.Attr{}, e
+		}
+	}
 	if err := symlinkat(target, dir, base); err != nil {
+		if s.quota != nil {
+			devolver(&s.quota.files, 1)
+		}
 		return proto.Attr{}, Errno(err)
 	}
 	return s.stat(p)

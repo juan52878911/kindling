@@ -137,3 +137,30 @@ func TestBrokerRenuevaIdleFreeze(t *testing.T) {
 		t.Fatalf("la conexión entregada no renovó el TTL: %v", relojTTL(e.m, apiID))
 	}
 }
+
+// El Recheck del proxy de enlace de Linux: lo resuelto vale mientras la
+// máquina siga en marcha con esa dirección; congelada, borrada o con otra
+// dirección, no.
+func TestDestinoEnlaceVigente(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(false))
+	web, apiID := e.maquina(g.ID, "web"), e.maquina(g.ID, "api")
+	addr, id, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
+	if err != nil || id != apiID {
+		t.Fatalf("resolverArista = %q %q %v", addr, id, err)
+	}
+	vigente := e.m.destinoEnlaceVigente(8081)
+	if err := vigente(addr, id); err != nil {
+		t.Fatalf("recién resuelto: %v", err)
+	}
+	if vigente("172.30.9.9:8081", id) == nil {
+		t.Error("otra dirección pasó")
+	}
+	if vigente(addr, "no-existe") == nil {
+		t.Error("una máquina que no existe pasó")
+	}
+	envejecerTTL(e.m, apiID, api.StateWarm, time.Now())
+	if vigente(addr, id) == nil {
+		t.Error("una máquina congelada pasó")
+	}
+}

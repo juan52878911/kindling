@@ -366,7 +366,8 @@ func (s *Server) SetAuthz(p *Politica) {
 }
 
 // SetShareConfig fija de dónde lee el daemon su configuración de carpetas
-// compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en
+// compartidas (daemon.share_roots, daemon.share_copy_max_mib y la cuota de las
+// rw, daemon.share_max_mib/share_max_files/share_min_free_mib). Se consulta en
 // cada petición: cambiarla no pide reiniciar.
 func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
 

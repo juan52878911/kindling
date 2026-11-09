@@ -859,6 +859,7 @@ func (m *Manager) especRedGrafoLocked(mc *api.Machine) (knet.GraphSpec, bool) {
 				Port:    e.Port,
 				Target:  idVirtual(gid, e.To),
 				Resolve: m.resolverEnlace(mc.ID, gid, nodo, e.To, e.Port),
+				Recheck: m.destinoEnlaceVigente(e.Port),
 			})
 			hay = true
 		case api.GraphEdgeCredential:

@@ -105,9 +105,10 @@ necesita cgo: el binario vive en el módulo `vz/`, no en el núcleo, que sigue s
 (allow network-outbound (remote ip "*:*"))
 ```
 
-Frente a `kling-vz.sb`: sin `iokit-open` ni Virtualization.framework, sin lectura de
+Frente a `kling-vz.sb`: sin Virtualization.framework, sin lectura de
 la raíz de kindling (kernel, imágenes, dorados, snapshots, volúmenes), sin
-`mach-lookup` general (hoy `kling-vz` lo tiene abierto), sin loopback de entrada.
+loopback de entrada (`kling-vz` tampoco tiene ya `mach-lookup` general, ni IOKit
+sin pantalla).
 La salida sigue siendo `*:*`: el sandbox no filtra por dominio, eso lo hace el propio
 proxy (su `Lookup` con `egress.PublicIPv4` y `upstream.go`), igual que hoy.
 

@@ -35,6 +35,44 @@ func validarReenvios(fwd map[string]string) error {
 	return nil
 }
 
+// reenvioDeOtraLocked rechaza un reenvío de la máquina id que ya es el reenvío
+// vivo de otra. kling-vz elige sus puertos y el daemon se fía de lo que dice;
+// uno tomado por su invitado podría anunciar como suyo el puerto de otra
+// máquina (lo encuentra probando a escuchar), y el daemon marcaría a aquel
+// invitado al conectar con este: el broker de las aristas, las credenciales
+// con UpstreamMachine y la auditoría, con el nombre equivocado. Con m.mu
+// tomado.
+func (m *Manager) reenvioDeOtraLocked(id string, fwd map[string]string) error {
+	for _, mc := range m.byID {
+		if mc.ID == id || len(mc.Forwards) == 0 {
+			continue
+		}
+		suyos := make(map[string]bool, len(mc.Forwards))
+		for _, a := range mc.Forwards {
+			suyos[a] = true
+		}
+		for guest, addr := range fwd {
+			if suyos[addr] {
+				return fmt.Errorf("kling-vz forwarded guest port %s at %s, which is machine %s's live forward: refusing it",
+					guest, addr, mc.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// mismosReenvios exige que los reenvíos de después de arrancar (despues) sean
+// los que kling-vz abrió antes de que corriera el invitado (antes).
+func mismosReenvios(antes, despues map[string]string) error {
+	for guest, addr := range despues {
+		if a, ok := antes[guest]; ok && a != addr {
+			return fmt.Errorf("kling-vz moved the forward of guest port %s from %s to %s after the guest started: refusing it",
+				guest, a, addr)
+		}
+	}
+	return nil
+}
+
 // puertosReenviadosLocked son los puertos del loopback en los que alguna
 // máquina expone a su invitado, con el nombre de la máquina. Con m.mu tomado.
 func (m *Manager) puertosReenviadosLocked() map[int]string {
