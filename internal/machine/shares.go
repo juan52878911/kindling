@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	hostshare "github.com/juan52878911/kindling/internal/share"
 	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -937,10 +938,10 @@ func (m *Manager) shareLoop(ctx context.Context, drain <-chan struct{}, id strin
 
 // shareClient hace los attach. Sin reutilizar conexiones: cada una la secuestra
 // su sesión.
-var shareClient = &http.Client{Transport: &http.Transport{
+var shareClient = guesthttp.New(&http.Transport{
 	DisableKeepAlives:     true,
 	ResponseHeaderTimeout: 30 * time.Second,
-}}
+}, 0)
 
 // attachOnce conecta la carpeta s con el agente de mc y la sirve hasta que la
 // sesión se corta. nil = se sirvió y se cortó (hay que reconectar).
