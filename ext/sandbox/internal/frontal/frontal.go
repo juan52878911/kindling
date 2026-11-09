@@ -102,12 +102,15 @@ type Servidor struct {
 	log      *log.Logger
 	mux      *http.ServeMux
 
-	// mu protege enVuelo y serializa la reclamación de precalentadas. Las
+	// mu protege enVuelo y reclamos, y aparta las precalentadas que se reclaman. Las
 	// cuotas se cuentan contra lo que el daemon tiene vivo, y una creación tarda
 	// segundos en aparecer ahí: sin contar las que están en camino, N peticiones
 	// simultáneas pasarían todas la cuota.
 	mu      sync.Mutex
 	enVuelo map[string]int
+	// reclamos son las precalentadas que se están reclamando o se reclamaron
+	// hace poco (ver reclamarPrecalentada); también bajo mu.
+	reclamos map[string]reclamo
 
 	// shells cuenta las sesiones de shell abiertas por tenant AHORA MISMO. Sirve
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la

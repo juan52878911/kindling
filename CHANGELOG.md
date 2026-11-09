@@ -79,6 +79,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
 
+### Fixed
+
+- kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

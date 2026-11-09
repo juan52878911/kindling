@@ -55,6 +55,16 @@ func (l *logT) Write(p []byte) (int, error) {
 // pide hace una petición con token y devuelve la respuesta.
 func pide(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Response {
 	t.Helper()
+	resp, err := http.DefaultClient.Do(peticion(t, srv, token, method, path, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// peticion arma la petición de pide sin mandarla.
+func peticion(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Request {
+	t.Helper()
 	var rd io.Reader
 	switch b := body.(type) {
 	case nil:
@@ -73,11 +83,7 @@ func pide(t *testing.T, srv *httptest.Server, token, method, path string, body a
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
+	return req
 }
 
 func decodifica[T any](t *testing.T, resp *http.Response) T {
@@ -726,5 +732,86 @@ func TestListaSigueConUnHostCaido(t *testing.T) {
 	}
 	if l := decodifica[[]Sandbox](t, resp); len(l) != 1 || l[0].ID != sb.ID {
 		t.Fatalf("list: %+v", l)
+	}
+}
+
+// Un host colgado al reclamar una precalentada no para a los demás: la
+// reclamación habla con el daemon FUERA de s.mu, que también toman todas las
+// creaciones para apuntarse en vuelo.
+func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	f.sandboxesEspera, f.sandboxesEmpezado = make(chan struct{}), make(chan struct{})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	t.Cleanup(func() { close(f.sandboxesEspera) })
+
+	go func() {
+		resp, err := http.DefaultClient.Do(peticion(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-f.sandboxesEmpezado:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the claim never reached GET /sandboxes")
+	}
+
+	hecho := make(chan *http.Response, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(peticion(t, srv, tokenBob, "POST", "/v1/sandboxes", CrearPeticion{Image: "base"}))
+		if err != nil {
+			hecho <- nil
+			return
+		}
+		hecho <- resp
+	}()
+	select {
+	case resp := <-hecho:
+		if resp == nil {
+			t.Fatal("bob's request failed")
+		}
+		esperaCodigo(t, resp, http.StatusCreated)
+	case <-time.After(3 * time.Second):
+		t.Fatal("bob's sandbox waited on alice's hung claim")
+	}
+}
+
+// Sin el candado durante la E/S, varias reclamaciones a la vez siguen sin
+// llevarse la misma precalentada.
+func TestReclamacionesALaVezNoCompartenPrecalentada(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+
+	const n = 8
+	ids := make(chan string, n)
+	for i := 0; i < n; i++ {
+		tok := tokenAlice
+		if i%2 == 1 {
+			tok = tokenBob
+		}
+		go func() {
+			resp, err := http.DefaultClient.Do(peticion(t, srv, tok, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}))
+			if err != nil {
+				ids <- ""
+				return
+			}
+			defer resp.Body.Close()
+			var sb Sandbox
+			json.NewDecoder(resp.Body).Decode(&sb)
+			ids <- sb.ID
+		}()
+	}
+	suyas := 0
+	for i := 0; i < n; i++ {
+		if <-ids == "a/"+pre.ID {
+			suyas++
+		}
+	}
+	if suyas != 1 {
+		t.Fatalf("the prewarmed machine was handed out %d times", suyas)
 	}
 }

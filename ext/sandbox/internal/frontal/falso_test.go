@@ -73,6 +73,12 @@ type falso struct {
 	thawEmpezado chan struct{}
 	// grafosUp cuenta los POST /graphs aceptados.
 	grafosUp int
+	// sandboxesEspera, si no es nil, para todo GET /sandboxes hasta que se
+	// cierre (o la petición se cancele); el primero cierra sandboxesEmpezado.
+	// Es un host colgado.
+	sandboxesEspera   chan struct{}
+	sandboxesEmpezado chan struct{}
+	sandboxesUnaVez   sync.Once
 }
 
 // nuevoFalso arranca un daemon falso en un socket Unix corto (macOS limita
@@ -204,6 +210,14 @@ func (f *falso) rutas() http.Handler {
 	})
 	m.HandleFunc("POST /sandboxes", f.crear)
 	m.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, r *http.Request) {
+		if f.sandboxesEspera != nil {
+			f.sandboxesUnaVez.Do(func() { close(f.sandboxesEmpezado) })
+			select {
+			case <-f.sandboxesEspera:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		f.mu.Lock()
 		out := []*api.Machine{}
 		for _, mc := range f.maquinas {
