@@ -8,6 +8,7 @@ package hvvm
 int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, uint8_t *datos, int malo,
                   uint32_t *usado);
 uint32_t khv_prueba_cfg(uint32_t off);
+int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 */
 import "C"
@@ -17,11 +18,17 @@ import "unsafe"
 // probarColas pasa data por los dispositivos virtio como lo haría un invitado
 // hostil (prueba.c), sin VM. Solo para las pruebas: usa la RAM de mentira de
 // prueba.c y no puede convivir con una VM de verdad en el mismo proceso.
-func probarColas(data []byte) {
+// Devuelve el errno con el que habría muerto el hilo de recepción de la red
+// (0 si sigue vivo).
+func probarColas(data []byte) int {
 	if len(data) == 0 {
-		return
+		return 0
 	}
-	C.khv_prueba((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	r := int(C.khv_prueba((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data))))
+	if r < 0 {
+		return 0 // no se pudo montar el banco: como antes, no es un fallo del invitado
+	}
+	return r
 }
 
 // cadena llama a vq_cadena con una tabla de descriptores (addr, len, flags,
@@ -146,3 +153,11 @@ func mpidrIdx(aff uint64, n int) int { return int(C.khv_mpidr_idx(C.uint64_t(aff
 
 // maxVCPUsC es khv_max_vcpus (no crea ninguna VM).
 func maxVCPUsC() int { return int(C.khv_max_vcpus()) }
+
+// usedDelDispositivo: ver khv_prueba_used en prueba.c.
+func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
+
+// pollRed y pollVsock: un poll que falla con EAGAIN no mata el hilo de la
+// red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
+func pollRed() int   { return int(C.khv_prueba_poll_red()) }
+func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }

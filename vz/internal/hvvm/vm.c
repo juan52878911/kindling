@@ -196,6 +196,10 @@ struct cpu_state {
 struct snap_hdr {
   uint64_t magic;
   uint32_t version, ncpus, ndisks;
+  // flags va en el relleno que había delante de ram_size: los ficheros de
+  // antes lo tienen a cero (la cabecera se escribe tras un memset) y un
+  // kling-hv anterior no lo mira.
+  uint32_t flags;
   uint64_t ram_size;
   uint32_t uart_intid, rtc_intid, virtio_intid[VIRTIO_MAX];
   uint8_t disk_ro[KHV_MAX_DISKS];
@@ -219,6 +223,14 @@ struct snap_hdr {
   struct cpu_state cpu_mas[MAX_CPUS - SNAP_CPUS_V4];
 };
 #define SNAP_HDR_V1 offsetof(struct snap_hdr, hay_vsock)
+_Static_assert(offsetof(struct snap_hdr, ram_size) == 24, "flags must stay in the old padding");
+// SNAP_F_USED_IDX: cada struct vq de la cabecera lleva su used_idx (en su
+// relleno de antes, ver khv.h). Sin él (ficheros de antes de que el
+// dispositivo llevara la cuenta), used_idx se toma del anillo used de la
+// RAM del snapshot, que es lo que el dispositivo había publicado. Como la
+// forma no cambia, la versión tampoco: un kling-hv anterior lee el fichero
+// igual (y toma used.idx de la RAM, como hacía).
+#define SNAP_F_USED_IDX 1u
 // La 4 acaba donde empieza cpu_mas: los dos van alineados a 16 (cpu_state),
 // y es el sizeof(struct snap_hdr) que tenía (lo comprueba el _Static_assert).
 #define SNAP_HDR_V4 offsetof(struct snap_hdr, cpu_mas)
@@ -1699,6 +1711,21 @@ static int escribir_todo(int fd, const void *b, size_t n, off_t off) {
   return 0;
 }
 
+// used_de_ram pone el used_idx de cada cola de la cabecera desde su anillo
+// used en la RAM ya mapeada (snapshots sin SNAP_F_USED_IDX). Las colas de los
+// dispositivos que la máquina no tiene quedan como vengan: no se usan.
+static void used_de_ram(struct snap_hdr *h, struct snap_vfs *sv) {
+#define USED_DE_RAM(qs) \
+  for (size_t k = 0; k < sizeof(qs) / sizeof(struct vq); k++) vq_used_de_ram(&((struct vq *)&(qs))[k])
+  for (int i = 0; i < ndisks; i++) USED_DE_RAM(h->vblk[i].q);
+  if (hay_red) USED_DE_RAM(h->vnet.q);
+  if (hay_rng) USED_DE_RAM(h->vrng.q);
+  if (hay_vsock) USED_DE_RAM(h->vsock.q);
+  if (hay_globo) USED_DE_RAM(h->globo.q);
+  for (int i = 0; i < nvfs; i++) USED_DE_RAM(sv->vfs[i].q);
+#undef USED_DE_RAM
+}
+
 int khv_restore(const char *mem_path) {
   if (anidada) {
     fallo(ERR_SNAP_ANIDADA);
@@ -1825,6 +1852,7 @@ int khv_restore(const char *mem_path) {
   }
   khv_traza_acaba(KHV_F_RAM, tr);
   tr = khv_traza_empieza(KHV_F_DISP_ESTADO);
+  if (h.version < 4 || !(h.flags & SNAP_F_USED_IDX)) used_de_ram(&h, &sv);
   uart_set(&h.uart);
   rtc_set(&h.rtc);
   for (int i = 0; i < ndisks; i++) vblk_set(i, &h.vblk[i]);
@@ -2069,6 +2097,7 @@ int khv_snapshot(const char *mem_out) {
   uint64_t tr = khv_traza_empieza(KHV_F_SNAP_ESTADO);
   memset(&h, 0, sizeof h);
   h.magic = SNAP_MAGIC;
+  h.flags = SNAP_F_USED_IDX;
   // La versión más vieja que lo dice todo: la 4 hasta SNAP_CPUS_V4 vCPU.
   h.version = ncpus > SNAP_CPUS_V4 ? 5 : 4;
   h.ncpus = (uint32_t)ncpus;

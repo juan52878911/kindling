@@ -90,12 +90,31 @@ uint32_t vq_escribir(const struct vq *q, const struct vdesc *desc, uint16_t head
 }
 
 void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len) {
-  uint16_t uidx = *(volatile uint16_t *)(used + 2);
+  uint16_t uidx = q->used_idx;
   uint32_t *e = (uint32_t *)(used + 4 + 8 * (uidx % q->num));
   e[0] = head;
   e[1] = len;
   __atomic_thread_fence(__ATOMIC_RELEASE);
-  *(volatile uint16_t *)(used + 2) = uidx + 1;
+  q->used_idx = (uint16_t)(uidx + 1);
+  *(volatile uint16_t *)(used + 2) = q->used_idx;
+}
+
+int khv_poll_fallos[KHV_POLL_N];
+
+int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo) {
+  int f = __atomic_load_n(&khv_poll_fallos[quien], __ATOMIC_ACQUIRE);
+  if (f > 0 && __atomic_compare_exchange_n(&khv_poll_fallos[quien], &f, f - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    errno = EAGAIN;
+    return -1;
+  }
+  return poll(pf, n, plazo);
+}
+
+void vq_used_de_ram(struct vq *q) {
+  uint16_t *avail;
+  uint8_t *used;
+  struct vdesc *desc;
+  q->used_idx = vq_ptrs(q, &avail, &used, &desc) ? *(volatile uint16_t *)(used + 2) : 0;
 }
 
 void vmmio_irq(struct vmmio *m, uint32_t intid) {
@@ -170,7 +189,12 @@ int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_
       // de 16 bits del driver y los del dispositivo se desencajan al dar la
       // vuelta en 65536, y el anillo queda a medias.
       case 0x038: if (q && v && v <= QMAX && (v & (v - 1)) == 0) q->num = v; break;
-      case 0x044: if (q) q->ready = v & 1; break;
+      case 0x044:
+        // Al armar la cola el driver deja used a cero (virtio 2.7.8): el
+        // índice del dispositivo empieza ahí.
+        if (q && !q->ready && (v & 1)) q->used_idx = 0;
+        if (q) q->ready = v & 1;
+        break;
       case 0x050:
         *cola = v;
         return VM_NOTIFY;
@@ -358,8 +382,8 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
 // puede escribir los registros de la cola mientras tanto (sin mu de este
 // hilo), y un QueueNum que creciera a mitad de tanda haría que
 // vq_pedir_aviso escribiera el avail_event más allá de lo que vq_ptrs
-// comprobó, hasta 2 KiB fuera de la RAM. Quien llama vuelca q->last_avail en
-// b->s.q bajo b->mu al acabar.
+// comprobó, hasta 2 KiB fuera de la RAM. Quien llama vuelca q->last_avail y
+// q->used_idx en b->s.q bajo b->mu al acabar.
 static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool *irq, bool *quedan) {
   uint16_t *avail;
   uint8_t *used;
@@ -367,7 +391,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
   *irq = *quedan = false;
   if (!vq_ptrs(q, &avail, &used, &desc)) return false;
   bool hecho = false;
-  uint16_t viejo = *(volatile uint16_t *)(used + 2);
+  uint16_t viejo = q->used_idx;
   // Como mucho una vuelta a la cola por aviso (dos pasadas de vueltas
   // cuentan también las de volver a mirar tras pedir aviso): un invitado que
   // ponga el used encima del avail haría que cada respuesta añadiera una
@@ -500,7 +524,7 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
     vq_push(q, used, head, sp ? escrito + 1 : 0);
     hecho = true;
   }
-  *irq = hecho && vq_interrumpir(m, q, avail, viejo, *(volatile uint16_t *)(used + 2));
+  *irq = hecho && vq_interrumpir(m, q, avail, viejo, q->used_idx);
   return hecho;
 }
 
@@ -519,6 +543,7 @@ static void *vblk_hilo(void *a) {
     b_procesar(b, &q, &m, &irq, &quedan);
     pthread_mutex_lock(&b->mu);
     b->s.q.last_avail = q.last_avail;
+    b->s.q.used_idx = q.used_idx;
     b->ocupado = false;
     if (irq) {
       __atomic_fetch_add(&khv_avisos[KHV_N_BLK_IRQ], 1, __ATOMIC_RELAXED);
@@ -545,6 +570,7 @@ void vblk_prueba(int idx) {
   b_procesar(b, &q, &m, &irq, &quedan);
   pthread_mutex_lock(&b->mu);
   b->s.q.last_avail = q.last_avail;
+  b->s.q.used_idx = q.used_idx;
   b->ocupado = false;
   pthread_cond_broadcast(&b->cv);
   pthread_mutex_unlock(&b->mu);
