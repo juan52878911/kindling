@@ -36,6 +36,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
+- `kling plugin install` (and the extensions `kling upgrade` updates) checks `SHA256SUMS.minisig` with the release keys, under the same rule as `kling upgrade`: required from 1.0.0, a warning before. `-insecure` accepts an unsigned `SHA256SUMS`; a signature that is there is always checked. `-file` without a signature still works.
+- `kling help <ext> <cmd>` no longer runs the command to list its flags: an extension prints the ones it registers with `plugin.HelpFlags`, or none.
+- Extensions that run kling again can no longer nest without end: `KLING_PLUGIN_DEPTH` grows per level and from 8 kling discovers no extensions.
 
 ### Fixed
 
