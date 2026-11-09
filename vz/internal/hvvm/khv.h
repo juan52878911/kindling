@@ -308,6 +308,10 @@ void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaura
 void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
 int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
+// Bytes de datos por tanda del hilo de un disco, y por petición IN/OUT (ver
+// b_procesar). Variable solo para que las pruebas lo bajen.
+extern uint64_t vblk_tanda_max;
+int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);  // 512 WRITE en una tanda (pruebas)
 
 // Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
 int khv_prueba(const uint8_t *datos, size_t n);

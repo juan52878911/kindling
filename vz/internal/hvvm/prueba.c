@@ -315,6 +315,55 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
   return e;
 }
 
+// khv_prueba_tanda deja en la cola del disco 0 (256 entradas) 512 WRITE del
+// disco entero (1016 KiB: 254 búferes de 4 KiB que aliasan la misma página) y
+// atiende UNA tanda, con g_pausa = pausa y el tope de bytes por tanda en tope
+// (0: el de siempre). Devuelve cuántas peticiones respondió (-1 si no se pudo
+// preparar) y en *estado el byte de estado de la última. Sin tope, un
+// invitado así tenía al hilo del disco escribiendo medio GiB por aviso, y
+// khv_pause (que espera a que acabe la tanda, vblk_quieto) no llegaba.
+int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado) {
+  if (preparar() != 0) return -1;
+  const uint64_t d0 = RAM_BASE, av = RAM_BASE + 0x1000, us = RAM_BASE + 0x2000;
+  const uint64_t cab = RAM_BASE + 0x3000, est = RAM_BASE + 0x4000, buf = RAM_BASE + 0x10000;
+  memset(g_ram, 0, g_ram_size);
+  w(blk_mmio, 0x070, 0);
+  w(blk_mmio, 0x030, 0);
+  w(blk_mmio, 0x038, QMAX);
+  w(blk_mmio, 0x080, (uint32_t)d0);
+  w(blk_mmio, 0x090, (uint32_t)av);
+  w(blk_mmio, 0x0a0, (uint32_t)us);
+  w(blk_mmio, 0x084, 0);
+  w(blk_mmio, 0x094, 0);
+  w(blk_mmio, 0x0a4, 0);
+  w(blk_mmio, 0x044, 1);
+  w(blk_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, QMAX * sizeof *d);
+  struct {
+    uint32_t type, reserved;
+    uint64_t sector;
+  } h = {1, 0, 0};
+  memcpy(gpa_ptr(cab, sizeof h), &h, sizeof h);
+  d[0] = (struct vdesc){cab, sizeof h, VIRTQ_DESC_F_NEXT, 1};
+  for (int i = 1; i < QMAX - 1; i++) d[i] = (struct vdesc){buf, 4096, VIRTQ_DESC_F_NEXT, (uint16_t)(i + 1)};
+  d[QMAX - 1] = (struct vdesc){est, 1, VIRTQ_DESC_F_WRITE, 0};
+  *(uint8_t *)gpa_ptr(est, 1) = 0xff;
+  uint16_t *a = gpa_ptr(av, 6 + 2 * QMAX);
+  for (int i = 0; i < QMAX; i++) a[2 + i] = 0;  // todas la misma cadena
+  __atomic_store_n(&a[1], (uint16_t)(2 * QMAX), __ATOMIC_RELEASE);
+  bool pausa_antes = g_pausa;
+  uint64_t tope_antes = vblk_tanda_max;
+  g_pausa = pausa;
+  if (tope) vblk_tanda_max = tope;
+  vblk_prueba(0);
+  g_pausa = pausa_antes;
+  vblk_tanda_max = tope_antes;
+  int hechas = *(volatile uint16_t *)gpa_ptr(us + 2, 2);
+  *estado = *(volatile uint8_t *)gpa_ptr(est, 1);
+  w(blk_mmio, 0x070, 0);
+  return hechas;
+}
+
 // ---- used.idx es del dispositivo, no del invitado ----
 
 static bool rng_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vrng_mmio(off, escribir, val, size); }

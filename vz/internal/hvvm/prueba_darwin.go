@@ -10,6 +10,7 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
 uint32_t khv_prueba_cfg(uint32_t off);
 int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
+int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);
 */
 import "C"
 
@@ -87,6 +88,16 @@ func esDisco(tipo uint32, sector uint64, lens []uint32, datos []byte, malo int) 
 	}
 	e := C.khv_prueba_es(C.uint32_t(tipo), C.uint64_t(sector), pl, C.int(len(lens)), pd, C.int(malo), &u)
 	return int(e), uint32(u)
+}
+
+// tandaDisco llena la cola del disco de pruebas con 512 WRITE del disco
+// entero y atiende una tanda (khv_prueba_tanda) con la VM pausándose o no y
+// con el tope de bytes tope (0: el de siempre). Devuelve cuántas respondió y
+// el estado de la última.
+func tandaDisco(pausa bool, tope uint64) (hechas, estado int) {
+	var e C.int
+	h := C.khv_prueba_tanda(C.bool(pausa), C.uint64_t(tope), &e)
+	return int(h), int(e)
 }
 
 // cfgDisco lee 4 bytes de los registros o la configuración (desde 0x100)
