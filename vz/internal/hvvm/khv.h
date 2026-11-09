@@ -516,5 +516,9 @@ void khv_qos_dispositivo(void);
 void khv_qos_impulso(void);
 int khv_prueba_qos(int ocupado, int plazo_ms);  // el vigilante sin VM (pruebas, vm.c)
 int khv_prueba_qos_lenta_ms(void);
+// khv_sin_recursos: la creación falló con HV_NO_RESOURCES (el cupo de VMs de
+// Hypervisor.framework del Mac está lleno). khv_prueba_sin_recursos: pruebas.
+bool khv_sin_recursos(void);
+bool khv_prueba_sin_recursos(int r);
 
 #endif

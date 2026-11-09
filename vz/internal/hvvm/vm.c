@@ -69,15 +69,47 @@ void khv_error_copia(char *buf, size_t n) {
   pthread_mutex_unlock(&err_mu);
 }
 
+// sin_recursos: la preparación falló con HV_NO_RESOURCES. Es del Mac entero,
+// no del proceso: hay un cupo de VMs de Hypervisor.framework para todo el
+// sistema (127 medidas en un M4, compartido con kling-vz), y la VM 128 lo da
+// en hv_vm_create. khv_sin_recursos lo dice para que el error sea de
+// capacidad y no uno genérico.
+static bool sin_recursos;
+bool khv_sin_recursos(void) { return sin_recursos; }
+
+static void fallo_hv(const char *que, hv_return_t r) {
+  if (r == HV_NO_RESOURCES) {
+    sin_recursos = true;
+    fallo("%s failed: 0x%x (HV_NO_RESOURCES: this Mac has no room for another Hypervisor.framework VM)", que,
+          (unsigned)r);
+    return;
+  }
+  fallo("%s failed: 0x%x", que, (unsigned)r);
+}
+
 // TRY: llamada a Hypervisor.framework en la preparación (devuelve -1).
 #define TRY(x)                                                \
   do {                                                        \
     hv_return_t _r = (x);                                     \
     if (_r != HV_SUCCESS) {                                   \
-      fallo("%s failed: 0x%x", #x, (unsigned)_r);             \
+      fallo_hv(#x, _r);                                       \
       return -1;                                              \
     }                                                         \
   } while (0)
+
+// khv_prueba_sin_recursos (pruebas, sin VM): un TRY que falla con r; dice si
+// quedó marcado como falta de recursos (y lo desmarca).
+static int prueba_try(hv_return_t r) {
+  TRY(r);
+  return 0;
+}
+bool khv_prueba_sin_recursos(int r) {
+  sin_recursos = false;
+  prueba_try((hv_return_t)r);
+  bool v = sin_recursos;
+  sin_recursos = false;
+  return v;
+}
 
 // VOK: lo mismo en un hilo de vCPU: un fallo termina la VM.
 #define VOK(x)                                                \
@@ -1538,7 +1570,7 @@ int khv_create(const struct khv_config *c) {
     if (r == HV_SUCCESS) r = hv_vm_create(vc);
     os_release(vc);
     if (r != HV_SUCCESS) {
-      fallo("hv_vm_create with EL2 (nested virtualization) failed: 0x%x", (unsigned)r);
+      fallo_hv("hv_vm_create with EL2 (nested virtualization)", r);
       return -1;
     }
   } else {

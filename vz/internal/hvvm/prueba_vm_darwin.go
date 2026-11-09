@@ -46,5 +46,9 @@ func pruebaQoS(ocupado bool, plazoMs int) int {
 	return int(C.khv_prueba_qos(C.int(o), C.int(plazoMs)))
 }
 
+// pruebaSinRecursos es khv_prueba_sin_recursos (vm.c): si un TRY que falla
+// con r queda marcado como falta de recursos del Mac.
+func pruebaSinRecursos(r uint32) bool { return bool(C.khv_prueba_sin_recursos(C.int(int32(r)))) }
+
 // qosLentaMs es QOS_LENTA_MS (vm.c), la vuelta de reposo del vigilante.
 func qosLentaMs() int { return int(C.khv_prueba_qos_lenta_ms()) }

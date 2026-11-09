@@ -80,6 +80,19 @@ func errC(op string) error {
 	return fmt.Errorf("%s: %s", op, ultimoError())
 }
 
+// errCreate es el error de un khv_create fallido. Con HV_NO_RESOURCES (el
+// cupo de VMs de Hypervisor.framework del Mac, unas 127 entre kling-hv y
+// kling-vz) envuelve server.ErrSinCapacidad, que el servidor contesta con
+// 507, y dice qué hacer; antes era el "0x…" genérico de TRY.
+func errCreate(sinRecursos bool, motivo string) error {
+	if sinRecursos {
+		return fmt.Errorf("creating the VM: %w (%s).\n"+
+			"macOS admits about 127 Hypervisor.framework VMs at once, counting kling-hv and kling-vz ones.\n"+
+			"Freeze or remove idle machines (`kling ps`) and try again", server.ErrSinCapacidad, motivo)
+	}
+	return fmt.Errorf("creating the VM: %s", motivo)
+}
+
 // FinMotivo dice por qué terminó la VM de este proceso, en una línea para el
 // log ("" mientras sigue): el invitado se apagó o se reinició, la paró el
 // host, o el fallo que la terminó (un vCPU que salió con una excepción que
@@ -247,7 +260,7 @@ func (f *Factory) Create(s *spec.Spec, _ string, n server.Network) (server.VM, e
 	}
 
 	if C.khv_create(&cfg) != 0 {
-		err := errC("creating the VM")
+		err := errCreate(bool(C.khv_sin_recursos()), ultimoError())
 		if C.khv_vm_tocada() {
 			f.creada = true
 			f.inservible(err)
