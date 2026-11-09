@@ -1612,7 +1612,19 @@ func (g *Scheduler) PrewarmAll(ctx context.Context) {
 	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
 	ready := g.pool.stats()
 
+	// Con historial, una puntuación 0 es "nadie lo llama": no se le da fondo.
+	// Antes sí, y en efímero eso era churn para siempre: su copia caducaba por
+	// edad (evictStale, 2 × idle) y la pasada siguiente la recreaba —restore e
+	// initialize cíclicos— por cada servicio ocioso. Al primer uso vuelve a
+	// puntuar y la reposición tras la llamada lo rellena; sin historial
+	// (gateway recién nacido) se sigue rellenando todo, como siempre.
+	conHistorial := g.pop.conHistorial()
+
 	for _, c := range cands {
+		if conHistorial && g.pop.score(c.svc) <= 0 {
+			// El orden es por puntuación descendente: de aquí en adelante, todo 0.
+			break
+		}
 		faltan := g.pool.size - ready[c.svc]
 		if faltan <= 0 {
 			continue
