@@ -360,6 +360,28 @@ func TestFreezeConPausaFallidaReanudaYLimpia(t *testing.T) {
 	}
 }
 
+// Con el volcado del último thaw aún en disco, una pausa fallida deja la
+// marca: sin ella ni sello, ese volcado viejo pasaba por anterior a los sellos
+// y reconcile la daba por warm sobre un disco que ya se había escrito.
+func TestFreezeConPausaFallidaNoValidaUnVolcadoViejo(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "f1ee2e0000000005"
+	falso, _ := maquinaCorriendo(t, m, id)
+	dir := m.dir(id)
+	volcadoSellado(t, dir)
+	if err := retirarSello(dir); err != nil { // lo que deja el thaw
+		t.Fatal(err)
+	}
+	falso.fallar(http.MethodPatch, "/vm", http.StatusBadRequest, "pause timed out")
+	if _, err := m.Freeze(context.Background(), id); err == nil {
+		t.Fatal("Freeze con la pausa rota no devolvió error")
+	}
+	if volcadoValido(dir, nil) == nil {
+		t.Fatal("tras la pausa fallida, el volcado del thaw anterior vuelve a valer")
+	}
+}
+
 // Freeze no suelta los volúmenes (solo los vacía): si el volcado falla y la
 // máquina se reanuda, los sigue teniendo montados y no hay nada que pedirle a
 // su agente. Pedírselo era un viaje de hasta 50 s con el cerrojo tomado, y

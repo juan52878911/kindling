@@ -34,8 +34,24 @@ func (m *Manager) interfazRed(id string) fc.NetworkInterface {
 	bps := m.caudalRedDe(id)
 	return fc.NetworkInterface{
 		IfaceID: "eth0", HostDevName: knet.TapName, GuestMAC: knet.GuestMAC,
-		RxLimiter: fc.Limit(bps), TxLimiter: fc.Limit(bps),
+		RxLimiter: fc.LimitOps(bps, opsRed(bps)), TxLimiter: fc.LimitOps(bps, opsRed(bps)),
 	}
+}
+
+// bytesPorTramaMin es el tamaño medio de trama que el tope de tramas por
+// segundo supone: con el caudal por defecto (16 MiB/s), 32768 tramas/s. Una
+// transferencia normal va en tramas de 1,5 KiB o más (con TSO, hasta 64 KiB)
+// y no lo toca; una inundación de paquetes de 64 bytes, que en bytes cabría
+// a 260 000 por segundo, se queda en eso.
+const bytesPorTramaMin = 512
+
+// opsRedMin es el suelo del tope de tramas, para los caudales pequeños: el
+// tráfico interactivo (ACK, DNS) no debería notarlo nunca.
+const opsRedMin = 8192
+
+// opsRed es el tope de tramas por segundo para un caudal de bps bytes/s.
+func opsRed(bps int64) int64 {
+	return max(bps/bytesPorTramaMin, opsRedMin)
 }
 
 // caudalRedDe es el caudal (bytes/s, en cada sentido) para la máquina id.

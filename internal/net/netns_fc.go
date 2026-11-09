@@ -32,6 +32,12 @@ func nsIP(third, fourth int) string {
 // domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
 // que se deja salir. En los demás modos se ignora.
 func (n *Net) Setup(egress Egress, domains []string, owner int) error {
+	// Antes de abrir la salida a otra máquina, las reglas INPUT del host:
+	// si un reload del cortafuegos las borró, se reponen; si no se puede,
+	// la máquina no arranca con el host abierto.
+	if err := asegurarHostInput(); err != nil {
+		return fmt.Errorf("host INPUT rules: %w", err)
+	}
 	// Restos de una ejecución anterior se derriban; lo de otro daemon, no. Si
 	// el veth existe con otra IP, no es un resto nuestro: es la red de otra
 	// máquina (otro daemon con un id que empieza igual), y Teardown la dejaría

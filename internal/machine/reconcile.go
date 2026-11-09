@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -158,6 +159,37 @@ func (m *Manager) reconciliarEstado() {
 			m.releaseCPU(mc.ID)
 
 		case api.StateWarm, api.StateStopped, api.StateFailed:
+			// Una warm sin volcado que valga no se descongela nunca: el caso
+			// real es un thaw que retiró el sello (el invitado ya corrió) y un
+			// daemon que murió antes de escribir el running. Seguir warm la
+			// dejaba varada, con un thaw que siempre falla; es lo mismo que una
+			// running sin proceso, y va a stopped (o a failed, si su overlay
+			// desechable pudo quedar a medias). El volcado, que ya no carga
+			// nadie, se retira como en Stop; uno de un kling más nuevo no se
+			// toca (no está roto, este no lo sabe leer).
+			//
+			// Solo si el volcado ESTÁ y no vale (sello retirado, volcado a
+			// medias): una warm sin snap.file ni mem.file no es ese caso, y
+			// sigue como siempre (el thaw dice qué falta).
+			dir := m.dir(mc.ID)
+			hayVolcado := existe(filepath.Join(dir, "snap.file")) && existe(filepath.Join(dir, "mem.file"))
+			if mc.State == api.StateWarm && hayVolcado {
+				if err := volcadoValido(dir, mc.FrozenAt); err != nil && !esquema.EsMasNuevo(err) {
+					ahora := time.Now()
+					if fallidaTrasCorte(mc, arranque, conArranque) {
+						log.Printf("reconcile: %s (%s) is warm without a usable memory dump and its disposable overlay may be incomplete: failed",
+							mc.Name, shortID(mc.ID))
+						mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errOverlaySinAsentar, &ahora
+					} else {
+						log.Printf("reconcile: %s (%s) is warm without a usable memory dump (%v): stopped, its disk is kept",
+							mc.Name, shortID(mc.ID), err)
+						mc.State = api.StateStopped
+						mc.LastErr = "its memory dump could not be used (" + err.Error() + "); it was stopped with its disk intact, kling start boots it cold"
+					}
+					mc.FrozenAt = nil
+					m.borrarVolcado(mc.ID)
+				}
+			}
 			// Sin proceso: ni namespace ni cgroup hacen nada. Se recrean al
 			// arrancarla o descongelarla.
 			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -476,80 +508,112 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 			t.Reset(esperaAlineada(time.Now(), m.intervaloVigilante(every)))
-			// Una vuelta entera por iteracion: si cualquiera de estas tareas
-			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
-			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
-			// y eso es peor que caerse.
-			panico.Contener("machine.watch", func() {
-				vmms := m.sweep()
-				// Procesos de firecracker que ya no son de nadie, con el mismo
-				// escaneo que acaba de usar sweep. Hasta ahora esto solo corría
-				// al arrancar el daemon, así que un VMM huérfano —cada
-				// restauración fallida dejaba uno— retenía su RAM hasta el
-				// siguiente reinicio, invisible para `kling ps` y para la
-				// contabilidad de memoria que decide si cabe la siguiente
-				// microVM. Justo detrás de sweep y no al final de la vuelta: el
-				// PID que mata tiene que ser de un escaneo reciente.
-				m.barrerHuerfanos(vmms)
-				// Las que un volcado fallido dejó en pausa sin poder
-				// reanudarlas (reanudar_pendiente.go).
-				m.reanudarPendientes()
-				// Y las borradas cuyo VMM no murió al primer SIGKILL (M4).
-				m.reintentarTumbas()
-				// Las carpetas vivas de las máquinas que corren y no tienen
-				// conexión (tras reiniciar el daemon, sobre todo).
-				m.ensureShares()
-				m.gcUploads()
-				m.expireTTL(ctx)
-				// Recoger los cadáveres: una failed conserva su motivo un tiempo
-				// para poder diagnosticarla, y después se recoge sola. Sin esto se
-				// acumulaban indefinidamente, una por intento fallido.
-				m.gcFailed()
-				// La red que Freeze dejó montada, en las que llevan mucho
-				// tiempo congeladas (ver red.go).
-				m.soltarRedesDormidas()
-				// Errores de disco que el invitado vio (errores_disco.go),
-				// antes de rotar: si no, se perderían.
-				m.revisarErroresDisco()
-				// Consolas serie que se han pasado de consolaMaxBytes (M-07): un
-				// invitado hostil escribiendo a /dev/ttyS0 sin tope llenaría el
-				// disco y degradaría a las demás microVMs (SECURITY.md §4).
-				m.rotarConsolas()
-				// Barrer directorios huérfanos también en marcha: no solo aparecen
-				// al arrancar. Bajo el lock, como reconcile.
-				m.mu.Lock()
-				m.sweepMachineDirs()
-				m.sweepSnapshotLeftovers()
-				m.mu.Unlock()
-				// Los snapshots temporales de fork sin copias (ver fork.go).
-				m.barrerForks()
-				// Los snapshots por imagen que ya no valen o no caben en su
-				// tope (snapshot_imagen.go).
-				m.podarSnapshotsImagen(topeSnapshotsImagen())
-				m.barrerPrepImagen()
-				m.vaciarPapelera()
-				// Overlays del almacén de discos sin máquina, y bases de
-				// dorados que ya no existen (ver cow.go).
-				m.barrerAlmacen()
-				// Los enlaces cortos a sockets de máquinas que ya no existen
-				// (macOS, rutas largas: ver fc.BarrerEnlaces).
-				fc.BarrerEnlaces(m.root)
-				// Y, si el disco aprieta, recuperar espacio eliminando instancias
-				// dormidas que se pueden recrear desde su snapshot.
-				m.gcDisk(ctx)
-				// El disco se recalcula aquí y no en List(): así `kling ps` no paga
-				// un recorrido por máquina, y el dato sigue fresco para las que
-				// están escribiendo.
-				m.refreshDiskUsage()
-				// Si el host durmió, la hora de los invitados que corren; y
-				// el modo batería (bateria.go).
-				m.revisarSueno(ctx)
-				m.vueltaBateria(ctx)
-				// Y la presión de memoria: apretar o congelar ociosas antes
-				// de que jetsam (o el OOM killer) mate VMMs.
-				m.vigilarPresion(ctx)
-			})
+			m.vueltaVigilante(ctx)
 		}
+	}
+}
+
+// pasoVigilante es una tarea de la vuelta del vigilante.
+type pasoVigilante struct {
+	nombre string
+	f      func()
+}
+
+// vueltaVigilante es una vuelta del vigilante, paso a paso.
+//
+// Cada paso va bajo su propio Contener: si uno entra en pánico se pierde ESE
+// paso, no el vigilante ni el resto de la vuelta. Antes iba todo bajo uno
+// solo, y un pánico en sweep (el primero) se llevaba por delante el TTL, el
+// gc y la presión de memoria de todas las máquinas, vuelta tras vuelta. Un
+// daemon que sigue vivo pero ha dejado de reconciliar no da ningún síntoma, y
+// eso es peor que caerse.
+func (m *Manager) vueltaVigilante(ctx context.Context) {
+	// El escaneo de sweep, para barrerHuerfanos. Si sweep cae, nil: sin
+	// escaneo reciente no se mata a nadie (barrerHuerfanos no tiene a quién).
+	var vmms map[string]int
+	pasos := []pasoVigilante{
+		{"sweep", func() { vmms = m.sweep() }},
+		// Procesos de firecracker que ya no son de nadie, con el mismo escaneo
+		// que acaba de usar sweep. Hasta ahora esto solo corría al arrancar el
+		// daemon, así que un VMM huérfano —cada restauración fallida dejaba
+		// uno— retenía su RAM hasta el siguiente reinicio, invisible para
+		// `kling ps` y para la contabilidad de memoria que decide si cabe la
+		// siguiente microVM. Justo detrás de sweep y no al final de la vuelta:
+		// el PID que mata tiene que ser de un escaneo reciente.
+		{"barrerHuerfanos", func() {
+			if vmms != nil {
+				m.barrerHuerfanos(vmms)
+			}
+		}},
+		// Las que un volcado fallido dejó en pausa sin poder reanudarlas
+		// (reanudar_pendiente.go).
+		{"reanudarPendientes", m.reanudarPendientes},
+		// Y las borradas cuyo VMM no murió al primer SIGKILL (M4).
+		{"reintentarTumbas", m.reintentarTumbas},
+		// Las carpetas vivas de las máquinas que corren y no tienen conexión
+		// (tras reiniciar el daemon, sobre todo).
+		{"ensureShares", m.ensureShares},
+		{"gcUploads", m.gcUploads},
+		// En segundo plano y de dos en dos (expireTTLEnSegundoPlano): un
+		// freeze de varios GiB no retiene la vuelta.
+		{"ttl", func() { m.expireTTLEnSegundoPlano(ctx) }},
+		// Recoger los cadáveres: una failed conserva su motivo un tiempo para
+		// poder diagnosticarla, y después se recoge sola. Sin esto se
+		// acumulaban indefinidamente, una por intento fallido.
+		{"gcFailed", m.gcFailed},
+		// La red que Freeze dejó montada, en las que llevan mucho tiempo
+		// congeladas (ver red.go).
+		{"soltarRedesDormidas", m.soltarRedesDormidas},
+		// Errores de disco que el invitado vio (errores_disco.go), antes de
+		// rotar: si no, se perderían.
+		{"revisarErroresDisco", m.revisarErroresDisco},
+		// Consolas serie que se han pasado de consolaMaxBytes (M-07): un
+		// invitado hostil escribiendo a /dev/ttyS0 sin tope llenaría el disco
+		// y degradaría a las demás microVMs (SECURITY.md §4).
+		{"rotarConsolas", m.rotarConsolas},
+		// Barrer directorios huérfanos también en marcha: no solo aparecen al
+		// arrancar. Bajo el lock, como reconcile.
+		{"sweepDirs", func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.sweepMachineDirs()
+			m.sweepSnapshotLeftovers()
+		}},
+		// Los snapshots temporales de fork sin copias (ver fork.go).
+		{"barrerForks", m.barrerForks},
+		// Los snapshots por imagen que ya no valen o no caben en su tope
+		// (snapshot_imagen.go).
+		{"podarSnapshotsImagen", func() { m.podarSnapshotsImagen(topeSnapshotsImagen()) }},
+		{"barrerPrepImagen", m.barrerPrepImagen},
+		{"vaciarPapelera", m.vaciarPapelera},
+		// Overlays del almacén de discos sin máquina, y bases de dorados que
+		// ya no existen (ver cow.go).
+		{"barrerAlmacen", m.barrerAlmacen},
+		// Los enlaces cortos a sockets de máquinas que ya no existen (macOS,
+		// rutas largas: ver fc.BarrerEnlaces).
+		{"barrerEnlaces", func() { fc.BarrerEnlaces(m.root) }},
+		// Y, si el disco aprieta, recuperar espacio eliminando instancias
+		// dormidas que se pueden recrear desde su snapshot.
+		{"gcDisk", func() { m.gcDisk(ctx) }},
+		// El disco se recalcula aquí y no en List(): así `kling ps` no paga un
+		// recorrido por máquina, y el dato sigue fresco para las que están
+		// escribiendo.
+		{"refreshDiskUsage", m.refreshDiskUsage},
+		// Si el host durmió, la hora de los invitados que corren; y el modo
+		// batería (bateria.go).
+		{"revisarSueno", func() { m.revisarSueno(ctx) }},
+		{"vueltaBateria", func() { m.vueltaBateria(ctx) }},
+		// Y la presión de memoria: apretar o congelar ociosas antes de que
+		// jetsam (o el OOM killer) mate VMMs.
+		{"presion", func() { m.vigilarPresion(ctx) }},
+	}
+	for _, p := range pasos {
+		panico.Contener("machine.watch: "+p.nombre, func() {
+			if m.pruebasPasoVigilante != nil && !m.pruebasPasoVigilante(p.nombre) {
+				return
+			}
+			p.f()
+		})
 	}
 }
 
@@ -817,12 +881,63 @@ func (m *Manager) vmmSigue(vmms map[string]int, id string, pid int) bool {
 func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	// Las máquinas readoptadas al arrancar recuperan sus carpetas vivas ya, no
 	// a la primera vuelta del vigilante.
-	go m.ensureShares()
-	go m.watch(ctx, every)
-	go m.vigilarAlmacen(ctx)
+	m.lanzarVigilante(ctx, func(context.Context) { m.ensureShares() })
+	m.lanzarVigilante(ctx, func(ctx context.Context) { m.watch(ctx, every) })
+	m.lanzarVigilante(ctx, m.vigilarAlmacen)
 	// macOS: pausar las máquinas antes de que el Mac duerma (energia.go).
-	go m.vigilarEnergia(ctx)
+	m.lanzarVigilante(ctx, m.vigilarEnergia)
 }
+
+// lanzarVigilante corre f en su goroutine, con un ctx que Close cancela, y
+// contada en vigWG para que Close la espere. Tras Close no lanza nada y
+// devuelve false.
+//
+// Desde dentro de otro vigilante (vigilarPresion) el Add es legal aunque
+// Close ya esté esperando: el contador no está a cero, lo sostiene quien
+// llama.
+func (m *Manager) lanzarVigilante(ctx context.Context, f func(context.Context)) bool {
+	m.vigMu.Lock()
+	if m.cerrando.Load() {
+		m.vigMu.Unlock()
+		return false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.vigCancel = append(m.vigCancel, cancel)
+	m.vigWG.Add(1)
+	m.vigMu.Unlock()
+	go func() {
+		defer m.vigWG.Done()
+		defer cancel()
+		f(ctx)
+	}()
+	return true
+}
+
+// pararVigilantes cancela los vigilantes y espera a que acaben, hasta plazo.
+// cerrando ya está puesto: no se lanza ninguno más.
+func (m *Manager) pararVigilantes(plazo time.Duration) {
+	m.vigMu.Lock()
+	cancelar := m.vigCancel
+	m.vigCancel = nil
+	m.vigMu.Unlock()
+	for _, c := range cancelar {
+		c()
+	}
+	hecho := make(chan struct{})
+	go func() { m.vigWG.Wait(); close(hecho) }()
+	select {
+	case <-hecho:
+	case <-time.After(plazo):
+		log.Printf("shutdown: background watchers still running after %s; what they finish later may not be saved", plazo)
+	}
+}
+
+// cerrandose dice si Close ya empezó: lo que corre en segundo plano no
+// empieza nada nuevo (freezeSi, removeSi).
+func (m *Manager) cerrandose() bool { return m.cerrando.Load() || m.cerrado() }
+
+// errCerrando es la respuesta de una operación que llega con Close en curso.
+var errCerrando = errors.New("the daemon is shutting down")
 
 // ttlDesde es cuándo empezó a contar el TTL de mc.
 //
@@ -844,32 +959,75 @@ func ttlDesde(mc *api.Machine) time.Time {
 // Congelar, no matar: es la diferencia entre serverless y apagar cosas. La
 // herramienta deja de costar CPU y RAM, pero vuelve en ~30 ms cuando haga falta.
 func (m *Manager) expireTTL(ctx context.Context) {
+	// Hasta ttlParalelo a la vez: un freeze que vuelca GiB, o una máquina
+	// cuyo cerrojo tiene otro, no retiene a las demás vencidas. Más no: cada
+	// freeze es E/S de disco del tamaño de la RAM, y en serie no competían.
+	sem := make(chan struct{}, ttlParalelo)
+	var wg sync.WaitGroup
 	for _, id := range m.ttlVencidas() {
-		// Con on_ttl=remove la máquina se destruye en vez de congelarse: es lo
-		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
-		// seguir existiendo, y congelarlo guardaría en disco una memoria que
-		// nadie va a volver a usar.
-		//
-		// La decisión se tomó con una foto; freezeSi y removeSi vuelven a mirar
-		// el plazo con el cerrojo de la máquina tomado, que es también el de
-		// Renew. Un renew que llegó entre medias gana.
-		vence := func(mc *api.Machine) bool { return ttlVence(mc, time.Now()) }
-		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
-			if err := m.removeSi(id, vence); err != nil && !errors.Is(err, errYaNoToca) {
-				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
-			}
-			continue
+		if ctx.Err() != nil {
+			break
 		}
-		if _, err := m.freezeSi(ctx, id, vence); err != nil {
-			if errors.Is(err, errYaNoToca) {
-				m.clearFreezeFailures(id)
-				continue
-			}
-			m.handleFreezeFailure(id, err)
-			continue
-		}
-		m.clearFreezeFailures(id)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Un pánico con una máquina no se lleva el TTL de las otras.
+			panico.Contener("ttl "+shortID(id), func() { m.aplicarTTL(ctx, id) })
+		}()
 	}
+	wg.Wait()
+}
+
+// ttlParalelo es cuántas máquinas atiende expireTTL a la vez.
+const ttlParalelo = 2
+
+// expireTTLEnSegundoPlano es expireTTL fuera de la vuelta del vigilante, de
+// una en una vuelta: si la anterior aún no acabó, esta no lanza otra (las que
+// queden vencidas las verá la siguiente). Antes iba dentro de la vuelta, en
+// serie, y un freeze lento de una máquina dejaba sin vigilante a todas.
+func (m *Manager) expireTTLEnSegundoPlano(ctx context.Context) {
+	if !m.ttlEnCurso.CompareAndSwap(false, true) {
+		return
+	}
+	if !m.lanzarVigilante(ctx, func(ctx context.Context) {
+		defer m.ttlEnCurso.Store(false)
+		m.expireTTL(ctx)
+	}) {
+		m.ttlEnCurso.Store(false)
+	}
+}
+
+// aplicarTTL aplica el TTL vencido de la máquina id.
+func (m *Manager) aplicarTTL(ctx context.Context, id string) {
+	// Con on_ttl=remove la máquina se destruye en vez de congelarse: es lo
+	// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué seguir
+	// existiendo, y congelarlo guardaría en disco una memoria que nadie va a
+	// volver a usar.
+	//
+	// La decisión se tomó con una foto; freezeSi y removeSi vuelven a mirar el
+	// plazo con el cerrojo de la máquina tomado, que es también el de Renew.
+	// Un renew que llegó entre medias gana.
+	vence := func(mc *api.Machine) bool { return ttlVence(mc, time.Now()) }
+	if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
+		if err := m.removeSi(id, vence); err != nil && !errors.Is(err, errYaNoToca) && !errors.Is(err, errCerrando) {
+			log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
+		}
+		return
+	}
+	if _, err := m.freezeSi(ctx, id, vence); err != nil {
+		if errors.Is(err, errYaNoToca) {
+			m.clearFreezeFailures(id)
+			return
+		}
+		if errors.Is(err, errCerrando) {
+			return
+		}
+		m.handleFreezeFailure(id, err)
+		return
+	}
+	m.clearFreezeFailures(id)
 }
 
 // ttlVence dice si a mc le toca ya aplicar su TTL: running o pausada con el

@@ -36,9 +36,18 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
+- Linux allowlist DNS: queries go upstream with a TXID drawn from `crypto/rand` instead of the one the guest chose, and the answer must carry it; the guest gets its own TXID back. A guest knowing the TXID only had to guess the port to plant a spoofed answer that seeds the ipset.
+- Linux allowlist: the per-machine ipset has `maxelem 8192`, at most 16 A records per DNS answer are seeded, seeded TTLs are capped at 3600 s, and a full set (or any other error the kernel answers over netlink) no longer falls back to forking `ipset` on every query; only a missing netlink path does.
+- Linux: in `internet` and `allowlist` egress, new packets from a machine are capped at 300/s per destination IP (`hashlimit`, burst 300; needs the `xt_hashlimit` module), so a guest can't flood an allowed IP through the host; a one-way UDP flood counts as new packets. The Firecracker network rate limiter also caps frames per second (`ops`: the bandwidth over 512 bytes, at least 8192; 32768/s at the default 16 MiB/s), so small packets can't reach hundreds of thousands per second within the byte budget.
+- Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
 
 ### Fixed
 
+- macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
+- The watcher contains panics per step: a panic in one task (say `sweep`) no longer skips the TTL, gc and memory-pressure steps of every round. TTL expiry runs in the background, two machines at a time, so a slow freeze no longer stalls the watcher for everyone.
+- Daemon shutdown waits for the background watchers (and the memory-pressure work they start) before returning, so a late TTL freeze or removal no longer rewrites `state.json` after `Close`; background freezes and removals don't start once shutdown begins, and the last state write is retried for up to 2 s instead of once.
+- A warm machine whose memory dump is on disk but doesn't validate (its seal was retired by a thaw, or the freeze was interrupted) is moved to `stopped` at daemon start, with the reason in `LastErr` and its disk kept, instead of staying warm with a thaw that always fails. The thaw error no longer says to remove it: `kling stop X && kling start X` boots it cold on the same disk.
+- A thaw that can't retire its memory dump's seal (full disk) now fails before loading it: the seal used to be deleted before writing the in-progress mark, so on ENOSPC the stale dump looked pre-seal and a later thaw loaded old RAM over a disk that had already been written. The seal is now renamed into the mark (durable rename, no new inode) before `LoadSnapshot`, and restored if the VMM rejects the load. A failed pause no longer drops the mark either.
 - OCI cache: two builds downloading the same blob at once (always possible on macOS, where builds aren't serialised) no longer share a fixed `<hex>.part`: the first could publish a file with a hole of zeros as verified, and since cached blobs are trusted by size the gzip CRC error came back on every build. Each download gets its own temporary, and a layer that fails to decompress is removed from the cache.
 - The five copies of "temporary + sha256 + fsync + rename" (OCI blob downloads, `imagen.FetchVerified`, both daemon blob uploads and the builder's verified-cache copy) are now one, `durable.Recibir`/`durable.EscribirVerificado`, with the same guarantees everywhere: a temporary of its own, size and hash checked before publishing, contents on disk before the rename and the directory after it. `imagen.FetchVerified` used to rename without fsync.
 - The daemon sweeps, before it starts listening, what builds and downloads cut short by a crash left behind: `<name>.NNNN` work directories and `imagefile-*` under `<root>/build/`, `.part` temporaries in the OCI blob cache and `.tmp-*` in the verified caches. They used to be removed only by the build's own `defer`.
@@ -79,6 +88,17 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - `db-golden.sh build` with no `-migrations` or `-seed` failed on macOS (bash 3.2, `files[@]: unbound variable`).
+
+### Security
+
+- kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
+- kling-sandbox: `/v1/hosts`, which returns the daemons' socket paths and addresses, needs an admin tenant (`KLING_SANDBOX_ADMINS=name,...`), and `/v1/metrics` only shows the caller's own per-tenant series unless the caller is an admin. Errors from a host that did not answer name the host but no longer include its endpoint or the network error (those go to the gateway log); the `X-Kindling-Partial` warning does the same.
+
+### Fixed
+
+- kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
+- kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
+- `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
 
 ## [1.0.0] - 2026-11-05
 

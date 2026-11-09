@@ -75,3 +75,41 @@ func TestInterfazRedLlegaAFirecracker(t *testing.T) {
 		}
 	}
 }
+
+// eth0 lleva además un tope de tramas por segundo en los dos sentidos: con
+// solo bytes, una inundación de paquetes pequeños cabía en el caudal.
+func TestInterfazRedLlevaTopeDeTramas(t *testing.T) {
+	m := newTestManager(t)
+	m.SetNetMiBps(func() int { return 0 }) // el de siempre: 16 MiB/s
+	m.mu.Lock()
+	m.byID["aaaa000000000003"] = &api.Machine{ID: "aaaa000000000003"}
+	m.mu.Unlock()
+	b, err := json.Marshal(m.interfazRed("aaaa000000000003"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ni struct {
+		Rx struct {
+			Ops *struct {
+				Size       int64 `json:"size"`
+				RefillTime int64 `json:"refill_time"`
+			} `json:"ops"`
+		} `json:"rx_rate_limiter"`
+		Tx struct {
+			Ops *struct {
+				Size       int64 `json:"size"`
+				RefillTime int64 `json:"refill_time"`
+			} `json:"ops"`
+		} `json:"tx_rate_limiter"`
+	}
+	if err := json.Unmarshal(b, &ni); err != nil {
+		t.Fatal(err)
+	}
+	quiere := int64(defaultNetMiBps<<20) / bytesPorTramaMin
+	if ni.Rx.Ops == nil || ni.Tx.Ops == nil || ni.Tx.Ops.Size != quiere || ni.Rx.Ops.Size != quiere || ni.Tx.Ops.RefillTime != 1000 {
+		t.Fatalf("eth0 = %s, quería ops de %d/s en rx y tx", b, quiere)
+	}
+	if got := opsRed(1 << 20); got != opsRedMin {
+		t.Fatalf("1 MiB/s: %d tramas/s, quería el suelo %d", got, opsRedMin)
+	}
+}
