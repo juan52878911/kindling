@@ -512,6 +512,11 @@ type Manager struct {
 	vigCancel []context.CancelFunc
 	vigWG     sync.WaitGroup
 	cerrando  atomic.Bool
+	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
+	ttlEnCurso atomic.Bool
+	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la
+	// vuelta del vigilante; si devuelve false, el paso no corre.
+	pruebasPasoVigilante func(nombre string) bool
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
