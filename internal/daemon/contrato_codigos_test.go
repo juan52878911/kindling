@@ -131,6 +131,7 @@ var casosCodigos = []casoCodigo{
 	{"GET", "/events", ""},
 	{"GET", "/metrics", ""},
 	{"GET", "/procstats", ""},
+	{"GET", "/debug/pprof/", ""},
 	{"POST", "/cow/store/grow", `{`},
 	{"POST", "/machines/nadie/publish", `{}`},
 	{"DELETE", "/machines/nadie/publish", ""},

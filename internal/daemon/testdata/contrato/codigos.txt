@@ -22,6 +22,7 @@ DELETE /snapshots/{name}/annotations/{key}  ←  DELETE /snapshots/nada/annotati
 DELETE /store/{ns}/{key}  ←  DELETE /store/ns/nada  →  204 -
 DELETE /volumes/{name}  ←  DELETE /volumes/nada  →  404 not_found
 DELETE /volumes/{name}/snapshots/{snap}  ←  DELETE /volumes/nada/snapshots/s1  →  404 not_found
+GET /debug/pprof/  ←  GET /debug/pprof/  →  200 -
 GET /events  ←  GET /events  →  200 -
 GET /graphs  ←  GET /graphs  →  200 -
 GET /graphs/{ref}  ←  GET /graphs/nada  →  404 not_found

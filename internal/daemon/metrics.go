@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -70,6 +71,49 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	escribirPorMaquina(w, ps, time.Now())
 	escribirTelemetria(w, s.mgr.Telemetria(), s.bus.Descartados())
+	escribirDaemon(w, machine.RecursosDaemon(), runtime.NumGoroutine(), s.mgr.EnBateria())
+}
+
+// escribirDaemon escribe lo que gasta el propio daemon y si va con batería:
+// con qué medir que un vigilante menos o un intervalo más largo se nota.
+func escribirDaemon(w io.Writer, r machine.RecursosProceso, goroutines int, bateria bool) {
+	fmt.Fprintln(w, "# HELP kling_daemon_footprint_mib Memory of the daemon process, in MiB (macOS: phys_footprint; Linux: PSS).")
+	fmt.Fprintln(w, "# TYPE kling_daemon_footprint_mib gauge")
+	fmt.Fprintf(w, "kling_daemon_footprint_mib %d\n", r.HuellaMiB)
+	fmt.Fprintln(w, "# HELP kling_daemon_rss_mib Resident memory of the daemon process, in MiB.")
+	fmt.Fprintln(w, "# TYPE kling_daemon_rss_mib gauge")
+	fmt.Fprintf(w, "kling_daemon_rss_mib %d\n", r.RSSMiB)
+	fmt.Fprintln(w, "# HELP kling_daemon_cpu_seconds_total CPU time used by the daemon process since it started.")
+	fmt.Fprintln(w, "# TYPE kling_daemon_cpu_seconds_total counter")
+	fmt.Fprintf(w, "kling_daemon_cpu_seconds_total %.3f\n", r.CPU.Seconds())
+	if r.ConDespertares {
+		fmt.Fprintln(w, "# HELP kling_daemon_wakeups_total Wakeups of the daemon process since it started (macOS: kind pkg_idle and interrupt, from rusage; Linux: kind voluntary_switch, voluntary context switches of all its threads).")
+		fmt.Fprintln(w, "# TYPE kling_daemon_wakeups_total counter")
+		escribirDespertares(w, "kling_daemon_wakeups_total", "", r.DespReposo, r.DespInterrupcion, r.CambiosVoluntarios)
+	}
+	fmt.Fprintln(w, "# HELP kling_daemon_goroutines Goroutines alive in the daemon.")
+	fmt.Fprintln(w, "# TYPE kling_daemon_goroutines gauge")
+	fmt.Fprintf(w, "kling_daemon_goroutines %d\n", goroutines)
+	fmt.Fprintln(w, "# HELP kling_battery_on 1 while the daemon's battery mode is in force (on battery power with daemon.battery=auto, or daemon.battery=on), else 0.")
+	fmt.Fprintln(w, "# TYPE kling_battery_on gauge")
+	b := 0
+	if bateria {
+		b = 1
+	}
+	fmt.Fprintf(w, "kling_battery_on %d\n", b)
+}
+
+// escribirDespertares escribe una línea por clase de despertar que la
+// plataforma da: pkg_idle e interrupt en macOS, voluntary_switch en Linux.
+// etiquetas va delante de kind (`id="…",name="…",` o vacío).
+func escribirDespertares(w io.Writer, serie, etiquetas string, reposo, interrupcion, voluntarios uint64) {
+	if reposo > 0 || interrupcion > 0 {
+		fmt.Fprintf(w, "%s{%skind=\"pkg_idle\"} %d\n", serie, etiquetas, reposo)
+		fmt.Fprintf(w, "%s{%skind=\"interrupt\"} %d\n", serie, etiquetas, interrupcion)
+	}
+	if voluntarios > 0 {
+		fmt.Fprintf(w, "%s{%skind=\"voluntary_switch\"} %d\n", serie, etiquetas, voluntarios)
+	}
 }
 
 // escribirPorMaquina escribe lo que hace /metrics útil también en macOS (5.1),
@@ -121,6 +165,31 @@ func escribirPorMaquina(w io.Writer, ps api.ProcStats, ahora time.Time) {
 		}
 	}
 
+	fmt.Fprintln(w, "# HELP kling_machine_wakeups_total Wakeups of each live microVM's VMM since it started (macOS: kind pkg_idle and interrupt, with Apple's helper and children; Linux: kind voluntary_switch, voluntary context switches of all its threads).")
+	fmt.Fprintln(w, "# TYPE kling_machine_wakeups_total counter")
+	for _, mc := range vivas {
+		escribirDespertares(w, "kling_machine_wakeups_total", fmt.Sprintf("id=%q,name=%q,", mc.ID, esc(mc.Name)),
+			mc.WakeupsPkgIdle, mc.WakeupsInterrupt, mc.VoluntarySwitches)
+	}
+
+	fmt.Fprintln(w, "# HELP kling_machine_disk_bytes_total Bytes each live microVM's VMM read from or wrote to disk since it started (not counting what the page cache served).")
+	fmt.Fprintln(w, "# TYPE kling_machine_disk_bytes_total counter")
+	for _, mc := range vivas {
+		if mc.DiskReadBytes == 0 && mc.DiskWriteBytes == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "kling_machine_disk_bytes_total{id=%q,name=%q,op=\"read\"} %d\n", mc.ID, esc(mc.Name), mc.DiskReadBytes)
+		fmt.Fprintf(w, "kling_machine_disk_bytes_total{id=%q,name=%q,op=\"write\"} %d\n", mc.ID, esc(mc.Name), mc.DiskWriteBytes)
+	}
+
+	fmt.Fprintln(w, "# HELP kling_machine_cpu_throttled_seconds_total Time each live microVM has been held back by its CPU cap (Linux: throttled_usec of its cgroup; macOS: kling-vz/kling-hv regulator, only machines with a cap on kling-hv).")
+	fmt.Fprintln(w, "# TYPE kling_machine_cpu_throttled_seconds_total counter")
+	for _, mc := range vivas {
+		if mc.CPUThrottledSeconds != nil {
+			fmt.Fprintf(w, "kling_machine_cpu_throttled_seconds_total{id=%q,name=%q} %.3f\n", mc.ID, esc(mc.Name), *mc.CPUThrottledSeconds)
+		}
+	}
+
 	fmt.Fprintln(w, "# HELP kling_machine_state_seconds How long each machine has been in its current state, in seconds.")
 	fmt.Fprintln(w, "# TYPE kling_machine_state_seconds gauge")
 	for _, mc := range todas {
@@ -167,6 +236,16 @@ func escribirTelemetria(w io.Writer, t machine.Telemetria, descartados int64) {
 		fmt.Fprintf(w, "kling_operation_duration_ms_bucket{kind=%q,le=\"+Inf\"} %d\n", k, h.Cuenta)
 		fmt.Fprintf(w, "kling_operation_duration_ms_sum{kind=%q} %d\n", k, h.Suma)
 		fmt.Fprintf(w, "kling_operation_duration_ms_count{kind=%q} %d\n", k, h.Cuenta)
+	}
+
+	// La suma por fase de los despertares que salieron bien: dividida por
+	// kling_operation_duration_ms_count de su clase, la media de cada fase.
+	fmt.Fprintln(w, "# HELP kling_wake_phase_ms_total Time spent in each phase of successful wakes, in ms (kind thaw: from a snapshot on disk; resume: from paused). Divide by kling_operation_duration_ms_count of the same kind for the mean per wake.")
+	fmt.Fprintln(w, "# TYPE kling_wake_phase_ms_total counter")
+	for _, k := range []string{machine.DurThaw, machine.DurResume} {
+		for _, f := range machine.FasesDespertar {
+			fmt.Fprintf(w, "kling_wake_phase_ms_total{kind=%q,phase=%q} %.3f\n", k, f, t.FasesMS[k][f])
+		}
 	}
 
 	fmt.Fprintln(w, "# HELP kling_gc_evictions_total Dormant instances removed by the disk GC to free space.")

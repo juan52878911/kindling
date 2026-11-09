@@ -202,11 +202,14 @@ func (c *Client) KlingCPU(ctx context.Context, pct int) error {
 
 // KlingCPUEstado es lo que da GET /kling/cpu: el techo, la CPU que lleva
 // gastada la VM (CPUMS, -1 si kling-vz no lo sabe) y el pid del auxiliar de
-// Apple donde corren sus vCPU (0 si no lo da).
+// Apple donde corren sus vCPU (0 si no lo da). ThrottledMS es lo que el
+// regulador lleva frenada la VM para cumplir el techo (el throttled_usec del
+// cpu.stat de Linux), en ms.
 type KlingCPUEstado struct {
-	Pct       int   `json:"pct"`
-	CPUMS     int64 `json:"cpu_ms"`
-	HelperPID int   `json:"helper_pid"`
+	Pct         int   `json:"pct"`
+	CPUMS       int64 `json:"cpu_ms"`
+	HelperPID   int   `json:"helper_pid"`
+	ThrottledMS int64 `json:"throttled_ms"`
 }
 
 // KlingCPUState pregunta a kling-vz por su CPU (ver KlingCPUEstado). Un

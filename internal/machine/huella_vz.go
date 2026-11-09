@@ -36,25 +36,16 @@ const (
 	rusageInfoV6    = 6
 	offUserTime     = 16  // ri_user_time (ticks de Mach)
 	offSystemTime   = 24  // ri_system_time
+	offPkgIdleWkups = 32  // ri_pkg_idle_wkups
+	offInterrWkups  = 40  // ri_interrupt_wkups
+	offResidentSize = 64  // ri_resident_size
+	offDiskioRead   = 144 // ri_diskio_bytesread (v2)
+	offDiskioWrite  = 152 // ri_diskio_byteswritten
 	offUserPTime    = 304 // ri_user_ptime: la parte en núcleos P
 	offSystemPTime  = 312 // ri_system_ptime
 	offEnergyNJ     = 336 // ri_energy_nj
 	tamRusageInfoV6 = 400 // rusage_info_v6 entero, con sus reservados
 )
-
-// usoCPU es lo que gastó un proceso (o varios sumados).
-type usoCPU struct {
-	total, p   time.Duration // CPU total y la de núcleos de rendimiento
-	energiaNJ  uint64
-	conNucleos bool // el kernel dio el reparto P/E (rusage v6)
-}
-
-func (u *usoCPU) sumar(o usoCPU) {
-	u.total += o.total
-	u.p += o.p
-	u.energiaNJ += o.energiaNJ
-	u.conNucleos = u.conNucleos || o.conNucleos
-}
 
 // ticksPorSegundo es la frecuencia de los ticks de Mach (hw.tbfrequency: 24
 // MHz en Apple Silicon, 1 GHz en Intel, donde un tick es un ns).
@@ -74,7 +65,8 @@ func ticksADuracion(t uint64) time.Duration {
 	return time.Duration(float64(t) / float64(f) * float64(time.Second))
 }
 
-// cpuProceso lee con proc_pid_rusage (v6) la CPU y la energía de pid.
+// cpuProceso lee con proc_pid_rusage (v6) la CPU, la energía, los
+// despertares y la E/S de disco de pid. Todo sale de la misma llamada.
 func cpuProceso(pid int) (usoCPU, bool) {
 	if pid <= 0 {
 		return usoCPU{}, false
@@ -91,6 +83,13 @@ func cpuProceso(pid int) (usoCPU, bool) {
 		p:          ticksADuracion(u64(offUserPTime) + u64(offSystemPTime)),
 		energiaNJ:  u64(offEnergyNJ),
 		conNucleos: true,
+
+		despReposo:       u64(offPkgIdleWkups),
+		despInterrupcion: u64(offInterrWkups),
+		conDespertares:   true,
+		leidos:           u64(offDiskioRead),
+		escritos:         u64(offDiskioWrite),
+		conDisco:         true,
 	}, true
 }
 
@@ -111,6 +110,9 @@ func cpuVMM(pid int, sock string) (usoCPU, bool) {
 			if a, ok := cpuProceso(e.HelperPID); ok {
 				u.sumar(a)
 			}
+		}
+		if err == nil {
+			u.frenado, u.conFrenado = time.Duration(e.ThrottledMS)*time.Millisecond, true
 		}
 	}
 	for _, h := range hijosDe(pid) {
@@ -164,4 +166,36 @@ func huellaHijosBytes(pid int) int64 {
 		n += huellaBytes(h)
 	}
 	return n
+}
+
+// recursosVMM completa lo que cpuVMM no trae: con kling-hv, lo que el
+// regulador lleva frenada la máquina. Solo si tiene techo (cpuPct > 0): sin
+// él no hay nada que frenar, y memoriaVMM ya se ahorra por lo mismo el viaje
+// HTTP por máquina en cada lectura de métricas. Con kling-vz lo trajo cpuVMM
+// en la misma pregunta que el pid del auxiliar.
+func (m *Manager) recursosVMM(_ string, _ int, sock string, cpuPct int, u *usoCPU) {
+	if u.conFrenado || sock == "" || backendVMM != BackendHV || cpuPct <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	e, err := fc.New(sock).KlingCPUState(ctx)
+	cancel()
+	if err == nil {
+		u.frenado, u.conFrenado = time.Duration(e.ThrottledMS)*time.Millisecond, true
+	}
+}
+
+// usoPropio es la CPU y los despertares del daemon (pid es el suyo).
+func usoPropio(pid int) (usoCPU, bool) { return cpuProceso(pid) }
+
+// memoriaPropia es la huella y la memoria residente de pid, en MiB.
+func memoriaPropia(pid int) (huella, rss int64) {
+	var buf [256]byte
+	_, _, e := syscall.Syscall6(syscall.SYS_PROC_INFO, procInfoCallPIDRusage, uintptr(pid), rusageInfoV0, 0,
+		uintptr(unsafe.Pointer(&buf[0])), 0)
+	if e != 0 {
+		return 0, 0
+	}
+	aMiB := func(off int) int64 { return int64((binary.LittleEndian.Uint64(buf[off:]) + 1<<19) >> 20) }
+	return aMiB(offPhysFootprint), aMiB(offResidentSize)
 }

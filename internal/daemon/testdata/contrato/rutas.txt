@@ -18,6 +18,7 @@ DELETE /snapshots/{name}/annotations/{key}  snapshot.write
 DELETE /store/{ns}/{key}  admin
 DELETE /volumes/{name}  admin
 DELETE /volumes/{name}/snapshots/{snap}  admin
+GET /debug/pprof/  admin
 GET /events  list
 GET /graphs  list
 GET /graphs/{ref}  graph
