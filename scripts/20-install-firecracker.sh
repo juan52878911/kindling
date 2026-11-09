@@ -48,7 +48,10 @@ fi
 TAG="$FC_VERSION"
 echo "instalando Firecracker $TAG ($ARCH)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-curl -sfL "https://github.com/firecracker-microvm/firecracker/releases/download/${TAG}/firecracker-${TAG}-${ARCH}.tgz" \
+# Con reintentos: un 502 o un corte de GitHub tumbaba el e2e nocturno entero.
+# --retry-all-errors (curl 7.71+) reintenta también los 4xx/5xx de -f.
+curl -sSfL --connect-timeout 20 --retry 5 --retry-delay 3 --retry-all-errors \
+  "https://github.com/firecracker-microvm/firecracker/releases/download/${TAG}/firecracker-${TAG}-${ARCH}.tgz" \
   -o "$tmp/fc.tgz"
 got="$(sha256_de "$tmp/fc.tgz")"
 [ "$got" = "$FC_SHA256" ] || {
