@@ -79,6 +79,17 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `db-golden.sh build` with no `-migrations` or `-seed` failed on macOS (bash 3.2, `files[@]: unbound variable`).
 
+### Security
+
+- kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
+- kling-sandbox: `/v1/hosts`, which returns the daemons' socket paths and addresses, needs an admin tenant (`KLING_SANDBOX_ADMINS=name,...`), and `/v1/metrics` only shows the caller's own per-tenant series unless the caller is an admin. Errors from a host that did not answer name the host but no longer include its endpoint or the network error (those go to the gateway log); the `X-Kindling-Partial` warning does the same.
+
+### Fixed
+
+- kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
+- kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
+- `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
+
 ## [1.0.0] - 2026-11-05
 
 kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API version 1 with contract goldens, on-disk formats read from N-1, and signed releases (`kling upgrade` refuses an unsigned one). kling-hv is the stable macOS VMM, with a performance round on the Mac (thaw p90 2 s → 39 ms, `fork -n 3` p90 6.4 s → 0.3 s). Images built before this release keep their old guest agent; rebuild them for the Go init and for `kling run -e` reaching a debian image's `service`. A kling-hv template with 2 or more vCPUs saved by an older build may not restore; rebuild it. Upgrade with `kling upgrade`.

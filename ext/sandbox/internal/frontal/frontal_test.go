@@ -55,6 +55,16 @@ func (l *logT) Write(p []byte) (int, error) {
 // pide hace una petición con token y devuelve la respuesta.
 func pide(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Response {
 	t.Helper()
+	resp, err := http.DefaultClient.Do(peticion(t, srv, token, method, path, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// peticion arma la petición de pide sin mandarla.
+func peticion(t *testing.T, srv *httptest.Server, token, method, path string, body any) *http.Request {
+	t.Helper()
 	var rd io.Reader
 	switch b := body.(type) {
 	case nil:
@@ -73,11 +83,7 @@ func pide(t *testing.T, srv *httptest.Server, token, method, path string, body a
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
+	return req
 }
 
 func decodifica[T any](t *testing.T, resp *http.Response) T {
@@ -108,7 +114,8 @@ func crea(t *testing.T, srv *httptest.Server, token string, pet any) Sandbox {
 // ---- tests
 
 func TestHealthSinTokenYElRestoConToken(t *testing.T) {
-	srv, _ := montar(t, map[string]*falso{"a": nuevoFalso(t)})
+	srv, _ := montar(t, map[string]*falso{"a": nuevoFalso(t)},
+		Tenant{Nombre: "alice", Token: tokenAlice, Admin: true}, Tenant{Nombre: "bob", Token: tokenBob})
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/health", nil), 200)
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/hosts", nil), 401)
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/sandboxes", nil), 401)
@@ -163,8 +170,14 @@ func TestCrearConImagen(t *testing.T) {
 	for _, k := range []string{"kling.db.owner", "kling.db.state", "kling.db.x"} {
 		esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{k: "x"}}), 400)
 	}
+	// Todo el espacio kling. es del sistema: kling.owner saca la máquina del
+	// frontal (ni cuota, ni lista, ni borrado, ni limpieza) y kling.dbx podría
+	// chocar con lo que venga.
+	for _, k := range []string{api.LabelOwner, "kling.dbx", "kling.x"} {
+		esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{k: "x"}}), 400)
+	}
 	// Una etiqueta parecida pero sin el prefijo sigue valiendo.
-	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{"kling.dbx": "x"}}), 201)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{"klingx.owner": "x"}}), 201)
 	// Cuerpo con campos desconocidos.
 	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", `{"image":"base","foo":1}`), 400)
 	// on_ttl y egress inválidos.
@@ -539,7 +552,7 @@ func TestMetricasExponePorTenantYResultado(t *testing.T) {
 	f := nuevoFalso(t)
 	srv, _ := montar(t, map[string]*falso{"a": f},
 		Tenant{Nombre: "alice", Token: tokenAlice},
-		Tenant{Nombre: "bob", Token: tokenBob, MaxSandboxes: 1})
+		Tenant{Nombre: "bob", Token: tokenBob, MaxSandboxes: 1, Admin: true})
 
 	// Sin token, como el resto de rutas protegidas.
 	esperaCodigo(t, pide(t, srv, "", "GET", "/v1/metrics", nil), 401)
@@ -720,5 +733,120 @@ func TestListaSigueConUnHostCaido(t *testing.T) {
 	}
 	if l := decodifica[[]Sandbox](t, resp); len(l) != 1 || l[0].ID != sb.ID {
 		t.Fatalf("list: %+v", l)
+	}
+}
+
+// Un host colgado al reclamar una precalentada no para a los demás: la
+// reclamación habla con el daemon FUERA de s.mu, que también toman todas las
+// creaciones para apuntarse en vuelo.
+func TestReclamarConUnHostColgadoNoParaALosDemas(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	f.sandboxesEspera, f.sandboxesEmpezado = make(chan struct{}), make(chan struct{})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+	t.Cleanup(func() { close(f.sandboxesEspera) })
+
+	go func() {
+		resp, err := http.DefaultClient.Do(peticion(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-f.sandboxesEmpezado:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the claim never reached GET /sandboxes")
+	}
+
+	hecho := make(chan *http.Response, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(peticion(t, srv, tokenBob, "POST", "/v1/sandboxes", CrearPeticion{Image: "base"}))
+		if err != nil {
+			hecho <- nil
+			return
+		}
+		hecho <- resp
+	}()
+	select {
+	case resp := <-hecho:
+		if resp == nil {
+			t.Fatal("bob's request failed")
+		}
+		esperaCodigo(t, resp, http.StatusCreated)
+	case <-time.After(3 * time.Second):
+		t.Fatal("bob's sandbox waited on alice's hung claim")
+	}
+}
+
+// Sin el candado durante la E/S, varias reclamaciones a la vez siguen sin
+// llevarse la misma precalentada.
+func TestReclamacionesALaVezNoCompartenPrecalentada(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	srv, _ := montar(t, map[string]*falso{"a": f})
+
+	const n = 8
+	ids := make(chan string, n)
+	for i := 0; i < n; i++ {
+		tok := tokenAlice
+		if i%2 == 1 {
+			tok = tokenBob
+		}
+		go func() {
+			resp, err := http.DefaultClient.Do(peticion(t, srv, tok, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}))
+			if err != nil {
+				ids <- ""
+				return
+			}
+			defer resp.Body.Close()
+			var sb Sandbox
+			json.NewDecoder(resp.Body).Decode(&sb)
+			ids <- sb.ID
+		}()
+	}
+	suyas := 0
+	for i := 0; i < n; i++ {
+		if <-ids == "a/"+pre.ID {
+			suyas++
+		}
+	}
+	if suyas != 1 {
+		t.Fatalf("the prewarmed machine was handed out %d times", suyas)
+	}
+}
+
+// Si el cliente se va en mitad de la reclamación, la precalentada etiquetada
+// se borra igual: con el contexto de la petición ya cancelado, el borrado no
+// salía y la máquina se quedaba a medio reclamar contando en la cuota.
+func TestReclamarConElClienteIdoBorraLaMediaReclamada(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	empezado := make(chan struct{})
+	f.renewEmpezado = empezado
+	srv, _ := montar(t, map[string]*falso{"a": f})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := peticion(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}).WithContext(ctx)
+	go func() {
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-empezado:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the claim never reached renew")
+	}
+	cancel()
+	limite := time.Now().Add(3 * time.Second)
+	for f.existe(pre.ID) {
+		if time.Now().After(limite) {
+			t.Fatalf("the half-claimed machine is still there with labels %v", f.maquina(pre.ID).Labels)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
