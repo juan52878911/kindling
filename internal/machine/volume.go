@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -694,23 +695,49 @@ func sinLostFoundCreado(out []byte) (resto []byte, ok bool) {
 	return []byte(strings.Join(ls, "\n")), ok
 }
 
-// plazoE2fsck es cuánto se deja a e2fsck. Corre como root sobre imágenes y
-// volúmenes que escribe un invitado, y sin plazo un ext4 hecho a propósito
-// para que tarde (o un e2fsck que se cuelga) dejaba colgado para siempre
-// quien lo llamó: un arranque, un put, el desmontaje tras un put. -f sobre un
-// volumen sano de varios GiB son segundos; esto es para lo que no lo es.
+// plazoE2fsck es cuánto se deja a e2fsck. Corre sobre imágenes y volúmenes
+// que escribe un invitado, y sin plazo un ext4 hecho a propósito para que
+// tarde (o un e2fsck que se cuelga) dejaba colgado para siempre quien lo
+// llamó: un arranque, un put, el desmontaje tras un put. -f sobre un volumen
+// sano de varios GiB son segundos; esto es para lo que no lo es.
 // Variable para los tests.
 var plazoE2fsck = 5 * time.Minute
 
-// ordenE2fsck prepara la orden; variable para que los tests pongan otra.
+// rutaE2fsck es el disco tal como lo ve e2fsck: el descriptor 3 que le pasa
+// abierto el daemon (ExtraFiles[0]). Así no necesita poder llegar a la ruta,
+// que vive en directorios solo de root, y confinarE2fs puede quitarle todo lo
+// demás.
+const rutaE2fsck = "/dev/fd/3"
+
+// entornoE2fsck es todo el entorno que recibe: nada del daemon (que lleva
+// tokens), y en inglés (LC_ALL=C) porque su salida se analiza
+// (soloResumenE2fsck, reLostFoundCreado).
+var entornoE2fsck = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "LANG=C"}
+
+// ordenE2fsck prepara la orden y lo que hay que deshacer al acabar (puede ser
+// nil); variable para que los tests pongan otra.
 // -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría preguntas
 // a un stdin que no existe y se quedaría colgado.
-// En inglés (LC_ALL=C): su salida se analiza (soloResumenE2fsck,
-// reLostFoundCreado).
-var ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
-	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
-	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
-	return c
+//
+// e2fsck analiza un ext4 que escribió el invitado (hallazgo A1 de la revisión
+// de escapes): un superbloque o un árbol de extents hecho a mano es la entrada
+// de un parser en C con historial de corrupción de memoria. Por eso no corre
+// con los privilegios del daemon sino confinado (confinarE2fs), con el disco
+// por descriptor.
+var ordenE2fsck = func(ctx context.Context, path string) (*exec.Cmd, func(), error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := e2fsCmd(ctx, "e2fsck", "-p", "-f", rutaE2fsck)
+	c.Env = entornoE2fsck
+	c.ExtraFiles = []*os.File{f}
+	deshacer, err := confinarE2fs(c, f)
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return c, func() { deshacer(); f.Close() }, nil
 }
 
 // revisarExt4 pasa e2fsck por path con plazo (plazoE2fsck) y traduce su
@@ -723,11 +750,19 @@ var ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
 func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, err error) {
 	ctx, cancel := context.WithTimeout(ctx, plazoE2fsck)
 	defer cancel()
-	cmd := ordenE2fsck(ctx, path)
+	cmd, deshacer, err := ordenE2fsck(ctx, path)
+	if err != nil {
+		return false, nil, fmt.Errorf("e2fsck %s: %w", filepath.Base(path), err)
+	}
+	if deshacer != nil {
+		defer deshacer()
+	}
 	// Si un hijo heredara la salida, CombinedOutput esperaría a que cerrase
 	// aunque e2fsck ya estuviera muerto.
 	cmd.WaitDelay = 5 * time.Second
 	out, err = cmd.CombinedOutput()
+	// Lo que dice lo dice de /dev/fd/3; en los avisos, mejor el nombre.
+	out = bytes.ReplaceAll(out, []byte(rutaE2fsck), []byte(filepath.Base(path)))
 	if ctx.Err() == context.DeadlineExceeded {
 		return false, out, fmt.Errorf("e2fsck %s did not finish in %s", filepath.Base(path), plazoE2fsck)
 	}

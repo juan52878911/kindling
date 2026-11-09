@@ -81,3 +81,27 @@ func TestRegisterRutasDelAgente(t *testing.T) {
 		}
 	}
 }
+
+// Las rutas de volúmenes mutan: solo con POST. Un GET (el que repite un cliente
+// que sigue un 303, por ejemplo) no puede desmontar nada.
+func TestVolumenesSoloPost(t *testing.T) {
+	vols := &Volumes{mounted: []VolumeSpec{{device: "/dev/vdz", mount: t.TempDir()}}}
+	a := &Agent{Reaper: DefaultReaper, Volumes: vols}
+	mux := http.NewServeMux()
+	a.Register(mux)
+	for _, ruta := range []string{"/volume/sync", "/volume/release", "/volume/acquire"} {
+		for _, metodo := range []string{"GET", "HEAD", "PUT", "DELETE"} {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(metodo, ruta, nil))
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s: %d, quería 405", metodo, ruta, rr.Code)
+			}
+			if rr.Header().Get("Allow") != http.MethodPost {
+				t.Errorf("%s %s: Allow %q", metodo, ruta, rr.Header().Get("Allow"))
+			}
+		}
+	}
+	if n := len(vols.Specs()); n != 1 {
+		t.Fatalf("un GET soltó el volumen: quedan %d montados", n)
+	}
+}

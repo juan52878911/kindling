@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -222,6 +223,80 @@ func perforarHuecos(ctx context.Context, path string) ([]byte, error) {
 // siempre.
 func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, nombre, args...)
+}
+
+// uidNadieE2fsck es el usuario con el que corre e2fsck sobre un disco que es
+// de root: nobody/nogroup en casi todo Linux. Variable para los tests.
+var uidNadieE2fsck = 65534
+
+// memE2fsck es el tope de espacio de direcciones de e2fsck (RLIMIT_AS). Un
+// superbloque que dice tener millones de grupos le haría reservar lo que
+// pidiera; las tablas de un volumen sano de 1 TiB son unos cientos de MiB.
+const memE2fsck = 2 << 30
+
+// confinarE2fs quita a una orden de e2fsprogs que va a leer un disco escrito
+// por el invitado (f, ya abierto, que la orden recibe como /dev/fd/3) todo lo
+// que no necesita para eso:
+//
+//   - el uid 0: corre con el dueño del disco si no es root (el usuario del
+//     VMM, que ya puede escribirlo: con -run-as el overlay y los volúmenes
+//     son suyos), o con nobody. A un disco de root se le cede el dueño (por
+//     descriptor) mientras dura y se le devuelve después: abrir /dev/fd/3
+//     vuelve a comprobar permisos sobre el inodo, así que el descriptor solo
+//     no basta. Sin grupos suplementarios, y al dejar de ser root pierde
+//     todas las capacidades.
+//   - la red, y la vista de los procesos e IPC del host (namespaces nuevos de
+//     red, PID e IPC).
+//   - memoria sin tope: prlimit (util-linux, como setpriv) le pone memE2fsck.
+//
+// El plazo lo pone quien la lanza (plazoE2fsck). Con el daemon sin root no se
+// cambia de usuario (ya no es root) ni de namespaces (harían falta los de
+// usuario, que hay distribuciones que bloquean): solo el tope de memoria.
+// Devuelve con qué deshacer lo que tocó del disco.
+func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
+	nada := func() {}
+	if c.Err != nil {
+		return nada, nil
+	}
+	if bin, err := exec.LookPath("prlimit"); err == nil {
+		c.Args = append([]string{bin, "--as=" + strconv.Itoa(memE2fsck), "--", c.Path}, c.Args[1:]...)
+		c.Path = bin
+	}
+	if os.Geteuid() != 0 {
+		return nada, nil
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("stat %s: no owner", f.Name())
+	}
+	uid, gid := int(st.Uid), int(st.Gid)
+	var deshacer []func()
+	if uid == 0 {
+		uid, gid = uidNadieE2fsck, uidNadieE2fsck
+		if err := f.Chown(uid, gid); err != nil {
+			return nil, fmt.Errorf("handing %s to e2fsck: %w", filepath.Base(f.Name()), err)
+		}
+		deshacer = append(deshacer, func() { _ = f.Chown(int(st.Uid), int(st.Gid)) })
+	}
+	// e2fsck -p escribe: el dueño necesita rw aunque el modo no lo diera.
+	if modo := fi.Mode().Perm(); modo&0o600 != 0o600 {
+		if err := f.Chmod(modo | 0o600); err == nil {
+			deshacer = append(deshacer, func() { _ = f.Chmod(modo) })
+		}
+	}
+	c.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}},
+		Cloneflags: syscall.CLONE_NEWNET | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC,
+	}
+	return func() {
+		for i := len(deshacer) - 1; i >= 0; i-- {
+			deshacer[i]()
+		}
+	}, nil
 }
 
 // checkPresionPlataforma no añade nada en Linux: allí la presión la mide PSI

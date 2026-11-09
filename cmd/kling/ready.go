@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -94,11 +95,11 @@ func printReady(out io.Writer, res *api.ReadyResult, asJSON bool) error {
 			fmt.Fprintf(out, "  hooks  %s/*  %s\n", api.GuestPostRestoreDir, estado)
 		}
 		if g.Detail != "" && !g.Ready {
-			fmt.Fprintf(out, "  why    %s\n", g.Detail)
+			fmt.Fprintf(out, "  why    %s\n", saneado.Texto(g.Detail))
 		}
 	}
 	if res.Detail != "" && (res.Guest == nil || res.Guest.Detail == "") {
-		fmt.Fprintf(out, "  why    %s\n", res.Detail)
+		fmt.Fprintf(out, "  why    %s\n", saneado.Texto(res.Detail))
 	}
 	if !res.OK() {
 		return &errConCodigo{code: 1, err: fmt.Errorf("%s is not ready", res.Name)}

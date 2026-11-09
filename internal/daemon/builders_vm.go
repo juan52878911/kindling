@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
@@ -319,6 +320,11 @@ type invitadoHTTP struct {
 	cli  *http.Client
 }
 
+// nuevoInvitadoHTTP: sin conexiones guardadas y sin seguir redirecciones.
+func nuevoInvitadoHTTP(base string) invitadoHTTP {
+	return invitadoHTTP{base: base, cli: guesthttp.New(nil, 0)}
+}
+
 func (g invitadoHTTP) filesURL(path string, q url.Values) string {
 	if q == nil {
 		q = url.Values{}
@@ -489,7 +495,7 @@ func (s *Server) aplanarEnVM(ctx context.Context, req api.BuildImageRequest, wor
 		return err
 	}
 	var rec bytes.Buffer
-	g := invitadoHTTP{base: base, cli: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}}
+	g := nuevoInvitadoHTTP(base)
 	log, err := aplanarEnInvitado(ctx, g, cargaVM{Name: req.Name, Request: rb, Agent: agent, Plan: plan, Caches: caches,
 		MaxImage: int64(maxMB) << 23, Log: func(format string, a ...any) { fmt.Fprintf(salida, "isolate: "+format+"\n", a...) }}, f, &rec)
 	if cerr := f.Close(); err == nil {
@@ -520,7 +526,7 @@ func (s *Server) aplanarEnVM(ctx context.Context, req api.BuildImageRequest, wor
 
 // esperarInvitado espera a que el agente conteste /healthz.
 func esperarInvitado(ctx context.Context, base string, limit time.Duration) error {
-	cli := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	cli := guesthttp.New(nil, 2*time.Second)
 	deadline := time.Now().Add(limit)
 	var last error
 	for time.Now().Before(deadline) {

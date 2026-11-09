@@ -301,6 +301,10 @@ Todo salvo `tools/call` puede pagarse antes o después:
 
 - **`-prewarm N`** mantiene N instancias ya restauradas y **con su sesión MCP abierta**.
   La llamada se salta restaurar, esperar la red e inicializar.
+  El fondo va primero a los servicios más usados y se mide por la huella real de cada
+  copia (PSS, o `phys_footprint` en macOS; `mem_mib` mientras no haya ninguna medida).
+  En cuanto el gateway ha visto tráfico, un servicio que nadie llama se queda sin fondo:
+  su primera llamada paga el restore, y la reposición de después lo devuelve.
 - **La destrucción es asíncrona.** Antes iba en un `defer`, así que el cliente esperaba
   el desmontaje del namespace y el borrado de ficheros: 100 ms sobre una llamada de 2 ms.
   La máquina muere igual; el cliente simplemente ya no espera a que ocurra.

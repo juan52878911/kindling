@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -80,7 +81,7 @@ var (
 // el servicio, vaciar y montar volúmenes, poblar): una conexión guardada a la
 // IP de una máquina parada la heredaba el siguiente VMM con la misma IP (kling
 // start la conserva), y la petición se comía un RST del invitado nuevo.
-var listoClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+var listoClient = guesthttp.New(nil, 0)
 
 // consultarListo pregunta GET /ready al agente de la máquina id.
 func (m *Manager) consultarListo(ctx context.Context, id string) (api.GuestReady, error) {

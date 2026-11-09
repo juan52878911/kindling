@@ -408,9 +408,20 @@ func (f *faultRecorder) Write(b []byte) (int, error) {
 
 // --- utilidades ---
 
+// ErrSinCapacidad lo envuelve el VMM cuando el Mac no admite otra VM (en
+// kling-hv, HV_NO_RESOURCES de hv_vm_create: el cupo de VMs de
+// Hypervisor.framework es de todo el sistema). fault lo contesta con 507,
+// como la falta de memoria, y no con el 400 de una configuración mala: no es
+// culpa de la petición y vale otra vez cuando se pare o congele una VM.
+var ErrSinCapacidad = errors.New("this Mac has no room for another VM")
+
 func fault(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
+	if errors.Is(err, ErrSinCapacidad) {
+		w.WriteHeader(http.StatusInsufficientStorage)
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"fault_message": err.Error()})
 }
 
