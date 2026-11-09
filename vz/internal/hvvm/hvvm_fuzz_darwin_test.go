@@ -118,13 +118,42 @@ func semillas() [][]byte {
 		s = append(s, cola(dev, 4, 0, 0, 0, ciclo))
 		s = append(s, cola(dev, 256, 0x100000-16, 0x100000-6, 0x100000-6, ciclo))
 	}
+	s = append(s, rxSolapada())
 	return s
+}
+
+// rxSolapada es una cadena de rx de 256 descriptores escribibles que se
+// solapan sobre la misma RAM (la grande, de 16 MiB) y suman casi 4 GiB. El
+// recvmsg de Darwin rechaza con EINVAL una suma de iov_len mayor que
+// INT_MAX, y con eso moría el hilo de recepción: el invitado se quedaba sin
+// red para siempre.
+func rxSolapada() []byte {
+	const num = 256
+	descs := make([][4]uint64, num)
+	for i := range descs {
+		flags, next := uint64(3), uint64(i+1) // NEXT | WRITE
+		if i == num-1 {
+			flags, next = 2, 0
+		}
+		descs[i] = [4]uint64{ramBase + 0x4000, 16<<20 - 0x4000, flags, next}
+	}
+	b := cola(1, num, 0, 0x1000, 0x2000, ramCon(descs, 0))
+	b[1] = 1 // la RAM grande (prueba.c)
+	return b
+}
+
+func TestRxCadenaDeMasDe2GiB(t *testing.T) {
+	if e := probarColas(rxSolapada()); e != 0 {
+		t.Fatalf("the rx thread would stop with errno %d: the guest would lose its network", e)
+	}
 }
 
 // Las semillas corren siempre, también sin -fuzz.
 func TestColasHostiles(t *testing.T) {
-	for _, s := range semillas() {
-		probarColas(s)
+	for i, s := range semillas() {
+		if e := probarColas(s); e != 0 {
+			t.Errorf("seed %d: the rx thread would stop with errno %d", i, e)
+		}
 	}
 }
 
@@ -135,7 +164,9 @@ func FuzzColas(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		probarColas(data)
+		if e := probarColas(data); e != 0 {
+			t.Fatalf("the rx thread would stop with errno %d", e)
+		}
 	})
 }
 
@@ -182,5 +213,48 @@ func TestColaCambiaDeTamanoAMitad(t *testing.T) {
 func TestFlushDelDisco(t *testing.T) {
 	if e := flushDisco(); e != 0 {
 		t.Fatalf("FLUSH status = %d, want 0", e)
+	}
+}
+
+// used.idx lo escribe solo el dispositivo (virtio 2.7.8): uno que lo leía de
+// la RAM seguía desde donde lo dejara el invitado, y el estado del
+// dispositivo dependía de lo que escribiera él.
+func TestUsedIdxEsDelDispositivo(t *testing.T) {
+	switch r := usedDelDispositivo(); r {
+	case 0:
+	case -1:
+		t.Fatal("the first request did not land in used entry 0")
+	case -2:
+		t.Fatal("after the guest overwrote used.idx, the device followed it instead of its own counter")
+	case -3:
+		t.Fatal("the snapshot state does not carry used_idx, or restore followed the guest RAM")
+	case -4:
+		t.Fatal("an old snapshot (no used_idx in its state) did not take used.idx from its RAM")
+	case -5:
+		t.Fatal("re-arming the queue did not reset used_idx")
+	default:
+		t.Fatalf("step %d failed", r)
+	}
+}
+
+// poll de Darwin puede fallar con EAGAIN (no pudo reservar memoria) y otra
+// llamada ir bien. El hilo de recepción de la red y el del vsock terminaban
+// con cualquier error que no fuera EINTR: el invitado se quedaba sin red, o
+// sin agente, para siempre.
+func TestPollEAGAINNoMataLaRed(t *testing.T) {
+	switch r := pollRed(); {
+	case r == -100:
+		t.Fatal("could not set up the test")
+	case r != 0:
+		t.Fatal("after poll failed with EAGAIN, no frame reached the guest: the rx thread stopped")
+	}
+}
+
+func TestPollEAGAINNoMataElVsock(t *testing.T) {
+	switch r := pollVsock(); {
+	case r == -100:
+		t.Fatal("could not set up the test")
+	case r != 0:
+		t.Fatal("after poll failed with EAGAIN, the vsock thread stopped")
 	}
 }

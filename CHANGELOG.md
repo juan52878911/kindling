@@ -22,6 +22,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
+- The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
 - kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
@@ -45,6 +47,27 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Scheduler: the reaper no longer freezes an idle instance underneath a concurrent acquire that adopts it (502 on its first request); victims are held with the waker's lock and the in-acquire mark until frozen, and one that fails to freeze goes back to the map.
 - Scheduler: `ensure` drops a dead primary through the normal removal path and forgets the sessions bound to it when the rebuilt one is a different machine.
 - Scheduler: a failed TTL renewal is no longer taken as done; the reaper retries it on its next pass and drops the instance when the daemon rejects it (404/409), and a running machine whose renewal is rejected is not adopted.
+- `exec ?wait=1` caps each stream at 8 MiB (`api.ExecWaitMaxOutput`) and marks the result `truncated`; the NDJSON stream still allows 64 MiB.
+- Run, sandbox, fork and `PUT /machines/{ref}/labels` reject more than 64 labels or 4 KiB of labels, and run and sandbox more than 256 `allow_domains`, with a 400.
+
+### Fixed
+
+- Blob uploads (`PUT /images/{name}/blob`, `PUT /oci/blobs/{digest}`) are cut after 2 minutes without data; a stalled client kept an FD, a temp file and, for OCI, the cache lock that sweeps and other uploads need.
+- Errors seen by non-admin callers of `logs`, `credaudit` and `guest` no longer include host paths or the guest's internal address; the detail goes to the daemon log.
+- The daemon removes its socket on exit only if it is still the one it created.
+- A sandbox whose agent never answered and that could not be removed is logged, and the error names its ID.
+
+### Fixed
+
+- kling-hv: the network receive thread no longer stops for good when the guest offers an rx chain whose buffers add up to more than 2 GiB (overlapping descriptors); Darwin's `recvmsg` rejected it with `EINVAL` and the guest lost its network. The chain is capped to the largest frame, and an `EINVAL` drops the frame and returns the buffer empty.
+- kling-hv: virtqueues keep their own used index instead of reading `used.idx` back from guest RAM, as the virtio spec requires, so what the guest writes there no longer moves the device. Memory-file state keeps its shape and version (the index lives in former padding, flagged in the header): older snapshots restore by taking it from their RAM, and older kling-hv builds still read new files.
+- kling-hv: a transient `EAGAIN` from `poll` (Darwin returns it when it cannot allocate its internal structures) no longer stops the network receive thread or the vsock thread for good; they retry after 1 ms. The vsock thread also logs why it stops instead of dying silently.
+
+### Security
+
+- `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
+- `sudo kling upgrade -cli` keeps its download and backups in root's home (from the user database, not `HOME` or `XDG_STATE_HOME`, which sudo passes on macOS), and every upgrade run as root refuses a working directory that someone other than root can change, so the user can't swap the verified binary before root installs it.
+- The CLI warns when `config.json` holds `gateway.token` or `gateway.tokens` and is readable by group or others, as `kling ai` already does for its registry (`chmod 600` it).
 - `db-golden.sh build` runs `initdb -N` and keeps `fsync=off` only while building (reset with `ALTER SYSTEM RESET` and a `sync` before the freeze): 8.2 → 1.8 s on an M4. The script also ships inside `kling-db`, so `kling db golden` works without a checkout (other engines still need one, and say so).
 - `kling run -image <ref>` reuses the image a plain `kling image import <ref>` left (same options) instead of importing it again under another name.
 

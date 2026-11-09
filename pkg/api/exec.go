@@ -32,6 +32,11 @@ const (
 	// corriendo, no se le corta la tubería.
 	ExecDefaultOutput = 8 << 20
 	ExecMaxOutput     = 64 << 20
+	// Con ?wait=1 el daemon junta la salida en memoria antes de contestar, y
+	// caben 64 exec por máquina: ahí el tope por flujo es este aunque se pida
+	// más, con Truncated si se pasa. El flujo NDJSON no acumula y admite
+	// ExecMaxOutput.
+	ExecWaitMaxOutput = 8 << 20
 	ExecMaxStdin      = 1 << 20
 
 	FileMaxUpload   = 64 << 20

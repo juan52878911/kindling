@@ -177,7 +177,7 @@ sin pasar por el disco del Mac, y el destino verifica el sha256 antes de
 renombrar; nunca sustituye una imagen en uso por un contenido distinto.
 
 `-to` es opcional: por defecto, el daemon de siempre (`-H`, `$KLING_HOST`, el
-contexto activo o el socket local). Si tienes un contexto activo que apunta al
+contexto activo, `$KLING_SOCKET` o el socket local). Si tienes un contexto activo que apunta al
 host Linux, di el destino explícitamente o desactívalo:
 
 ```sh

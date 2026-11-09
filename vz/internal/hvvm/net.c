@@ -88,7 +88,7 @@ static void tx(void) {
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   bool hecho = false;
-  uint16_t viejo = *(volatile uint16_t *)(used + 2);
+  uint16_t viejo = q->used_idx;
   for (uint32_t vueltas = 0;; vueltas++) {  // ver b_procesar en virtio.c
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if (q->last_avail == *(volatile uint16_t *)&avail[1]) {
@@ -108,7 +108,7 @@ static void tx(void) {
   }
   // Con EVENT_IDX el driver de Linux pide la interrupción de tx solo cuando
   // le hace falta liberar (napi_tx), no por cada trama.
-  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
+  if (hecho && vq_interrumpir(&s.m, q, avail, viejo, q->used_idx)) interrumpir();
 }
 
 // rx_avisar interrumpe al invitado, si lo pide, por las tramas puestas desde
@@ -120,17 +120,11 @@ static void rx_avisar(uint16_t viejo) {
   struct vdesc *desc;
   if (!vq_ptrs(q, &avail, &used, &desc)) return;
   // En NAPI el driver no quiere una interrupción por trama: la pide al acabar.
-  if (vq_interrumpir(&s.m, q, avail, viejo, *(volatile uint16_t *)(used + 2))) interrumpir();
+  if (vq_interrumpir(&s.m, q, avail, viejo, q->used_idx)) interrumpir();
 }
 
-// used_idx es el índice de used ahora (0 sin driver).
-static uint16_t used_idx(void) {
-  struct vq *q = &s.q[0];
-  uint16_t *avail;
-  uint8_t *used;
-  struct vdesc *desc;
-  return vq_ptrs(q, &avail, &used, &desc) ? *(volatile uint16_t *)(used + 2) : 0;
-}
+// used_idx es el índice de used de rx ahora (el del dispositivo).
+static uint16_t used_idx(void) { return s.q[0].used_idx; }
 
 enum { RX_PUESTA, RX_VACIO, RX_SIN_BUF, RX_ERROR };
 
@@ -180,8 +174,11 @@ static int rx_una(int *err) {
   int n = vq_iov(q, desc, head, true, iov, QMAX, &cap);
   bool vale = n > 0 && cap > HDR;
   if (vale) {
+    // Una trama no pasa de TRAMA_MAX: más búfer no sirve, y una cadena de
+    // descriptores solapados sobre la misma RAM puede sumar más de INT_MAX
+    // bytes, que recvmsg de Darwin rechaza con EINVAL.
     m.msg_iov = datos;
-    m.msg_iovlen = iov_tramo(iov, n, HDR, cap - HDR, datos);
+    m.msg_iovlen = iov_tramo(iov, n, HDR, cap - HDR < TRAMA_MAX ? cap - HDR : TRAMA_MAX, datos);
   } else {
     m.msg_iov = &t;  // se recibe para tirarla
     m.msg_iovlen = 1;
@@ -193,6 +190,14 @@ static int rx_una(int *err) {
   pthread_mutex_lock(&mu);
   rx_en_curso = false;
   pthread_cond_broadcast(&cv_rx);
+  if (r < 0 && e == EINVAL && vale) {
+    // El búfer del invitado no le vale a recvmsg (con el tope de arriba no
+    // debería pasar): la trama se tira y el búfer vuelve con 0 bytes, como
+    // una cadena que no vale. Terminar el hilo dejaba al invitado sin red.
+    (void)!recv(fd, tirar, sizeof tirar, MSG_DONTWAIT);
+    r = 0;
+    vale = false;
+  }
   if (r < 0) {
     *err = e;
     return e == EAGAIN ? RX_VACIO : RX_ERROR;
@@ -312,10 +317,16 @@ static void *rx_hilo(void *a) {
   khv_qos_dispositivo();
   for (;;) {
     struct pollfd pf[2] = {{.fd = fd, .events = POLLIN}, {.fd = rx_desp[0], .events = POLLIN}};
-    int r = poll(pf, 2, -1);
+    int r = khv_poll(KHV_POLL_RED, pf, 2, -1);
     if (__atomic_load_n(&rx_parar, __ATOMIC_ACQUIRE)) return NULL;
     if (r < 0) {
       if (errno == EINTR) continue;
+      // EAGAIN: poll no pudo reservar memoria y otra llamada puede ir bien.
+      // Terminar dejaba al invitado sin red para siempre.
+      if (errno == EAGAIN) {
+        usleep(1000);
+        continue;
+      }
       rx_errorf("poll", errno);
       return NULL;
     }
@@ -508,4 +519,21 @@ void vnet_set(const struct vnet_state *i) {
   todo_bloquear();
   s = *i;
   todo_soltar();
+}
+
+// ---------- solo para las pruebas (prueba.c) ----------
+
+// vnet_prueba_rx mete en la cola 0 las tramas que haya en el socket red, como
+// el hilo de recepción pero aquí mismo y sin esperar búferes (un fuzz no
+// puede dormir 1 s por entrada). Devuelve 0, o el errno con el que el hilo de
+// recepción habría terminado y dejado al invitado sin red.
+int vnet_prueba_rx(int red) {
+  pthread_mutex_lock(&mu);
+  int propio = fd, err = 0, r;
+  fd = red;
+  for (int n = 0; (r = rx_una(&err)) == RX_PUESTA && n < 2 * QMAX; n++) {
+  }
+  fd = propio;
+  pthread_mutex_unlock(&mu);
+  return r == RX_ERROR && err != EINTR ? err : 0;
 }

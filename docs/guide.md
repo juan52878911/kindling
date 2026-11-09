@@ -329,7 +329,7 @@ The file lives at `~/.config/kling/config.json` — on macOS too: `UserConfigDir
 put it under `~/Library/Application Support`, which is right for desktop apps but
 surprising for a CLI.
 
-**Precedence:** `-H` > `$KLING_HOST` > active context > local socket. The flag always
+**Precedence:** `-H` > `$KLING_HOST` > active context > `$KLING_SOCKET` > local socket. The flag always
 wins, so a one-off invocation doesn't force you to switch contexts.
 
 Shell completion ships with the binary: `source <(kling completion bash)` or

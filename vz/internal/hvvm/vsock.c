@@ -580,6 +580,10 @@ static void tras_poll(const struct pollfd *pf, const int *idx, int n, bool *list
   sondear_cerradas();
 }
 
+// vs_vueltas cuenta las vueltas de vs_hilo (para ver en las pruebas que sigue
+// vivo).
+static unsigned vs_vueltas;
+
 static void *vs_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
@@ -595,8 +599,20 @@ static void *vs_hilo(void *a) {
     pf[1] = (struct pollfd){.fd = kq, .events = POLLIN};  // sin kq (-1), poll lo salta
     int n = armar_poll(pf + 2, idx, &plazo) + 2;
     pthread_mutex_unlock(&mu);
-    int r = poll(pf, (nfds_t)n, plazo);
-    if (r < 0 && errno != EINTR) return NULL;
+    __atomic_fetch_add(&vs_vueltas, 1, __ATOMIC_RELEASE);
+    int r = khv_poll(KHV_POLL_VSOCK, pf, (nfds_t)n, plazo);
+    if (r < 0 && errno == EAGAIN) {
+      // poll no pudo reservar memoria; otra llamada puede ir bien. Terminar
+      // dejaba al invitado sin agente (y sin canal) para siempre.
+      usleep(1000);
+      continue;
+    }
+    if (r < 0 && errno != EINTR) {
+      // Que no se pierda en silencio, como en net.c.
+      uart_flush();
+      dprintf(2, "kling-hv: vsock: the device thread stops (poll: %s); the guest gets no more packets\n", strerror(errno));
+      return NULL;
+    }
     if (pf[0].revents & POLLIN) {
       char b[64];
       while (read(despertador[0], b, sizeof b) > 0) {
@@ -1105,4 +1121,33 @@ int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int 
   pthread_mutex_unlock(&mu);
   munmap(ram, tam);
   return ret;
+}
+
+// khv_vsock_prueba_poll: un poll que falla con EAGAIN (khv_poll) no puede
+// matar a vs_hilo. 0 si el hilo sigue dando vueltas después.
+int khv_vsock_prueba_poll(void) {
+  pthread_mutex_lock(&mu);
+  bool pausa_antes = g_pausa;
+  g_pausa = false;  // sin VM empieza en pausa: vs_hilo no daría vueltas
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 1, __ATOMIC_RELEASE);
+  despertar_hilo();
+  // El fallo se gasta en un poll; luego otro aviso tiene que dar otra vuelta.
+  int r = -1;
+  for (int i = 0; i < 1000 && r; i++) {
+    if (!__atomic_load_n(&khv_poll_fallos[KHV_POLL_VSOCK], __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE) - antes >= 3)
+      r = 0;
+    else {
+      despertar_hilo();
+      usleep(1000);
+    }
+  }
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 0, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&mu);
+  g_pausa = pausa_antes;
+  pthread_mutex_unlock(&mu);
+  return r;
 }

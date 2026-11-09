@@ -110,9 +110,14 @@ if [ -n "${KLING_UPGRADE_REPO:-}" ]; then
   FROM="release $NEWTAG of $KLING_UPGRADE_REPO"; NUEVO=(-tag "$NEWTAG")
 elif [ -f "$NEW_DIR/SHA256SUMS" ]; then
   FROM="$NEW_DIR"; NUEVO=(-from-dir "$NEW_DIR")
+  # Desde v1.0.0 un -from-dir sin SHA256SUMS.minisig se rechaza: los
+  # binarios del e2e son de una compilación local, sin firma de release.
+  # -insecure solo salta la firma; el SHA256SUMS se sigue comprobando.
+  [ -f "$NEW_DIR/SHA256SUMS.minisig" ] || NUEVO+=(-insecure)
 else
-  # Sin -insecure: una copia con su SHA256SUMS (paso 0, ya con $BASE hecho).
-  FROM="$BASE/new"; NUEVO=(-from-dir "$BASE/new")
+  # Una copia con su SHA256SUMS hecho aquí (paso 0, ya con $BASE hecho):
+  # upgrade lo comprueba, y -insecure solo salta la firma, que no hay.
+  FROM="$BASE/new"; NUEVO=(-from-dir "$BASE/new" -insecure)
 fi
 
 our_procs() { pgrep -f -- "$ROOT/" | wc -l | tr -d ' '; }

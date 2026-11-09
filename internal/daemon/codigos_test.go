@@ -213,3 +213,37 @@ func TestCodigosCicloHostYPeticion(t *testing.T) {
 		}
 	}
 }
+
+// Con ?wait=1 el daemon junta la salida en memoria antes de contestar: ahí el
+// tope por flujo es api.ExecWaitMaxOutput aunque la petición pida más, y lo
+// que sobra se marca como truncado.
+func TestExecWaitTopaLaSalida(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/exec/stream", guest.StreamExecHandler(nil))
+	g := httptest.NewServer(mux)
+	defer g.Close()
+
+	req := api.ExecRequest{
+		Cmd:            []string{"head", "-c", "9437184", "/dev/zero"},
+		MaxOutputBytes: api.ExecMaxOutput,
+	}
+	_, maxOut, err := req.Limits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := topeSalidaExec(maxOut, false); got != api.ExecMaxOutput {
+		t.Fatalf("en flujo el tope es %d, quería el pedido (%d)", got, api.ExecMaxOutput)
+	}
+	body, code, err := openGuestExec(context.Background(), g.URL, req)
+	if err != nil {
+		t.Fatalf("%d %v", code, err)
+	}
+	defer body.Close()
+	res, err := aggregateExec(readExecEvents(body, topeSalidaExec(maxOut, true)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Stdout) != api.ExecWaitMaxOutput || !res.Truncated {
+		t.Fatalf("stdout = %d bytes (truncated=%v), quería %d y truncado", len(res.Stdout), res.Truncated, api.ExecWaitMaxOutput)
+	}
+}

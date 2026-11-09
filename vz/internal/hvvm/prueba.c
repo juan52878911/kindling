@@ -11,11 +11,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "khv.h"
 
 #define PRUEBA_RAM (1ULL << 20)
+// La RAM grande deja cadenas de 256 descriptores solapados de casi 16 MiB:
+// más de INT_MAX bytes en una sola cadena, que recvmsg de Darwin rechaza con
+// EINVAL (ver rx_una en net.c).
+#define PRUEBA_RAM_GRANDE (16ULL << 20)
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -65,10 +70,34 @@ static int preparar(void) {
   return 0;
 }
 
+// ram_grande cambia la RAM de mentira por una de PRUEBA_RAM_GRANDE, también
+// con su página de guarda detrás. preparar vuelve a la pequeña.
+static int ram_grande(void) {
+  static uint8_t *grande;
+  if (!grande) {
+    size_t pag = (size_t)getpagesize();
+    uint8_t *ram = mmap(NULL, PRUEBA_RAM_GRANDE + pag, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (ram == MAP_FAILED || mprotect(ram + PRUEBA_RAM_GRANDE, pag, PROT_NONE) != 0) return -1;
+    grande = ram;
+  }
+  g_ram = grande;
+  g_ram_size = PRUEBA_RAM_GRANDE;
+  return 0;
+}
+
+// red_prueba: el otro extremo de la red de mentira (un par de datagramas,
+// como el socket que le da Go) por el que llega una trama a cada prueba de
+// la red; red[0] hace de socket del VMM.
+static int red[2] = {-1, -1};
+
+// Devuelve 0, o el errno con el que habría muerto el hilo de recepción de la
+// red (y el invitado se habría quedado sin red para siempre).
 int khv_prueba(const uint8_t *d, size_t n) {
   if (preparar() != 0) return -1;
   // Las primeras 64 B programan el dispositivo; el resto es la RAM.
   if (n < 64) return 0;
+  // El bit 0 del byte 1: la RAM grande.
+  if ((d[1] & 1) && ram_grande() != 0) return -1;
   memset(g_ram, 0, g_ram_size);
   size_t l = n - 64 < g_ram_size ? n - 64 : g_ram_size;
   memcpy(g_ram, d + 64, l);
@@ -101,6 +130,17 @@ int khv_prueba(const uint8_t *d, size_t n) {
     f(rd16(a) % 0x200, a[1] & 4, &v, sz);
   }
   for (int q = 0; q < ncolas[k]; q++) w(f, 0x050, (uint64_t)q);
+  int rx = 0;
+  if (k == 1) {
+    // Una trama llega por la red y se mete en la cola 0 como lo haría el
+    // hilo de recepción; lo que no entre se tira para la siguiente prueba.
+    if (red[0] < 0 && socketpair(AF_UNIX, SOCK_DGRAM, 0, red) != 0) return -1;
+    uint8_t trama[60] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    (void)!send(red[1], trama, sizeof trama, MSG_DONTWAIT);
+    rx = vnet_prueba_rx(red[0]);
+    while (recv(red[0], trama, sizeof trama, MSG_DONTWAIT) >= 0) {
+    }
+  }
   if (k == 0) vblk_prueba(0);
   if (k == 4) vballoon_objetivo(rd32(d + 60));
   // virtio-fs: lo que Go contestaría, con tamaños de los datos (a veces más
@@ -108,7 +148,7 @@ int khv_prueba(const uint8_t *d, size_t n) {
   if (k == 5) vvfs_prueba(0, d + 40, 6);
   w(f, 0x064, 0xff);  // InterruptACK
   w(f, 0x070, 0);
-  return 0;
+  return rx;
 }
 
 // ---- carrera de los registros de la cola contra el hilo del disco ----
@@ -273,4 +313,139 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
   int e = *(volatile uint8_t *)gpa_ptr(est, 1);
   w(blk_mmio, 0x070, 0);
   return e;
+}
+
+// ---- used.idx es del dispositivo, no del invitado ----
+
+static bool rng_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vrng_mmio(off, escribir, val, size); }
+
+// khv_prueba_used: un invitado que escribe used.idx (que es del dispositivo)
+// entre dos peticiones al virtio-rng. La segunda tiene que ir a la entrada 1
+// del anillo used y dejar used.idx en 2, no seguir desde lo que puso el
+// invitado. 0 si va bien; si no, el paso que falló (negativo).
+int khv_prueba_used(void) {
+  if (preparar() != 0) return -100;
+  memset(g_ram, 0, g_ram_size);
+  const uint64_t d0 = RAM_BASE, av0 = RAM_BASE + 0x1000, us0 = RAM_BASE + 0x2000;
+  w(rng_mmio, 0x070, 0);
+  w(rng_mmio, 0x030, 0);
+  w(rng_mmio, 0x038, 4);
+  w(rng_mmio, 0x080, (uint32_t)d0);
+  w(rng_mmio, 0x090, (uint32_t)av0);
+  w(rng_mmio, 0x0a0, (uint32_t)us0);
+  w(rng_mmio, 0x084, 0);
+  w(rng_mmio, 0x094, 0);
+  w(rng_mmio, 0x0a4, 0);
+  w(rng_mmio, 0x044, 1);
+  w(rng_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, 4 * sizeof *d);
+  for (int i = 0; i < 4; i++) d[i] = (struct vdesc){RAM_BASE + 0x3000 + 0x100 * (uint64_t)i, 16, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(av0, 6 + 2 * 4);
+  volatile uint16_t *uidx = gpa_ptr(us0 + 2, 2);
+  uint32_t *anillo = gpa_ptr(us0 + 4, 8 * 4);
+  int r = 0;
+  // Una petición: entra en la entrada 0 y used.idx pasa a 1.
+  av[2] = 0;
+  av[1] = 1;
+  w(rng_mmio, 0x050, 0);
+  if (*uidx != 1 || anillo[0] != 0 || anillo[1] != 16) r = -1;
+  // El invitado pisa used.idx; la siguiente sigue donde iba el dispositivo.
+  if (!r) {
+    *uidx = 0x1235;
+    av[3] = 1;
+    av[1] = 2;
+    w(rng_mmio, 0x050, 0);
+    if (*uidx != 2 || anillo[2] != 1 || anillo[3] != 16) r = -2;
+  }
+  // Snapshot y restauración: el estado lleva el contador, y lo que haya en
+  // la RAM al restaurar no cuenta.
+  struct vrng_state st;
+  if (!r) {
+    vrng_get(&st);
+    if (st.q.used_idx != 2) r = -3;
+    *uidx = 0x777;
+    vrng_set(&st);
+    av[4] = 2;
+    av[1] = 3;
+    w(rng_mmio, 0x050, 0);
+    if (!r && (*uidx != 3 || anillo[4] != 2)) r = -3;
+  }
+  // Un snapshot de antes (sin SNAP_F_USED_IDX): used_idx a cero en el
+  // fichero y el bueno en el anillo used de su RAM.
+  if (!r) {
+    vrng_get(&st);
+    st.q.used_idx = 0;
+    vq_used_de_ram(&st.q);
+    if (st.q.used_idx != 3) r = -4;
+    vrng_set(&st);
+    av[5] = 3;
+    av[1] = 4;
+    w(rng_mmio, 0x050, 0);
+    if (!r && (*uidx != 4 || anillo[6] != 3)) r = -4;
+  }
+  // Una cola que se vuelve a armar empieza en 0 (el driver deja used a cero).
+  if (!r) {
+    w(rng_mmio, 0x044, 0);
+    w(rng_mmio, 0x044, 1);
+    vrng_get(&st);
+    if (st.q.used_idx != 0) r = -5;
+  }
+  w(rng_mmio, 0x070, 0);
+  return r;
+}
+
+// khv_prueba_poll_red: el hilo de recepción de verdad, sobre un par de
+// datagramas, con el primer poll fallando con EAGAIN (khv_poll). Después una
+// trama tiene que llegar a la cola 0. 0 si llega.
+int khv_prueba_poll_red(void) {
+  if (preparar() != 0) return -100;
+  memset(g_ram, 0, g_ram_size);
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) return -100;
+  const uint64_t d0 = RAM_BASE, av0 = RAM_BASE + 0x1000, us0 = RAM_BASE + 0x2000;
+  w(vnet_mmio, 0x070, 0);
+  w(vnet_mmio, 0x030, 0);
+  w(vnet_mmio, 0x038, 4);
+  w(vnet_mmio, 0x080, (uint32_t)d0);
+  w(vnet_mmio, 0x090, (uint32_t)av0);
+  w(vnet_mmio, 0x0a0, (uint32_t)us0);
+  w(vnet_mmio, 0x084, 0);
+  w(vnet_mmio, 0x094, 0);
+  w(vnet_mmio, 0x0a4, 0);
+  w(vnet_mmio, 0x044, 1);
+  w(vnet_mmio, 0x070, 0xf);
+  struct vdesc *d = gpa_ptr(d0, 4 * sizeof *d);
+  for (int i = 0; i < 4; i++) d[i] = (struct vdesc){RAM_BASE + 0x4000 + 0x800 * (uint64_t)i, 0x800, VIRTQ_DESC_F_WRITE, 0};
+  uint16_t *av = gpa_ptr(av0, 6 + 2 * 4);
+  for (int i = 0; i < 4; i++) av[2 + i] = (uint16_t)i;
+  av[1] = 4;
+  volatile uint16_t *uidx = gpa_ptr(us0 + 2, 2);
+  static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
+  // Sin VM todo empieza en pausa, y el hilo esperaría a que corriera.
+  bool pausa_antes = g_pausa;
+  g_pausa = false;
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 1, __ATOMIC_RELEASE);
+  vnet_init(sv[0], mac, 16384, 49);
+  for (int i = 0; i < 1000 && __atomic_load_n(&khv_poll_fallos[KHV_POLL_RED], __ATOMIC_ACQUIRE); i++) usleep(1000);
+  uint8_t trama[60] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  int r = send(sv[1], trama, sizeof trama, 0) == (ssize_t)sizeof trama ? -1 : -100;
+  for (int i = 0; r == -1 && i < 2000; i++) {
+    if (*uidx == 1) r = 0;
+    else usleep(1000);
+  }
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 0, __ATOMIC_RELEASE);
+  vnet_parar();
+  g_pausa = pausa_antes;
+  w(vnet_mmio, 0x070, 0);
+  vnet_init(-1, mac, 16384, 49);
+  close(sv[0]);
+  close(sv[1]);
+  return r;
+}
+
+// khv_prueba_poll_vsock: khv_vsock_prueba_poll con los dispositivos de
+// prueba ya puestos (vsock_init arranca vs_hilo).
+int khv_prueba_poll_vsock(void) {
+  if (preparar() != 0) return -100;
+  return khv_vsock_prueba_poll();
 }

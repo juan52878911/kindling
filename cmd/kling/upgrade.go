@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -41,7 +42,7 @@ func cmdUpgrade(args []string) error {
 	tag := fs.String("tag", "", "release to upgrade to, vX.Y.Z (default: the latest)")
 	fs.StringVar(tag, "version", "", "same as -tag")
 	fromDir := fs.String("from-dir", "", "take the binaries from this directory (release names or plain ones, checked against its SHA256SUMS) instead of downloading them")
-	inseguro := fs.Bool("insecure", false, "with -from-dir: install the binaries even if the directory has no SHA256SUMS to check them against")
+	inseguro := fs.Bool("insecure", false, "with -from-dir: install the binaries even if the directory has no SHA256SUMS, or no SHA256SUMS.minisig, to check them against")
 	dry := fs.Bool("dry-run", false, "download, verify and print the plan; change nothing")
 	check := fs.Bool("check", false, "same as -dry-run")
 	rollback := fs.Bool("rollback", false, "go back to the binaries (and migrated files) saved by the last upgrade")
@@ -215,9 +216,25 @@ func ejecutableReal() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
+// geteuidCLI es os.Geteuid; los tests lo cambian para probar el camino de root.
+var geteuidCLI = os.Geteuid
+
 // dirEstadoUsuario es ~/.local/state/kling/upgrade: donde van las copias de
 // una actualización del CLI, que no tiene raíz de daemon.
+//
+// Como root (sudo kling upgrade -cli) es el ~ de root según la base de
+// usuarios, no el HOME ni el XDG_STATE_HOME del entorno: sudo en macOS
+// conserva HOME, y un directorio del usuario le dejaría cambiar el binario
+// verificado antes de que root lo instale (upgrade.bloquear lo rechaza).
+// Sin ~ de root, un directorio temporal de root, como el del daemon en su
+// raíz; entonces un -rollback no encontrará esas copias.
 func dirEstadoUsuario() (string, error) {
+	if geteuidCLI() == 0 {
+		if u, err := user.LookupId("0"); err == nil && filepath.IsAbs(u.HomeDir) && u.HomeDir != "/" {
+			return filepath.Join(u.HomeDir, ".local", "state", "kling", "upgrade"), nil
+		}
+		return os.MkdirTemp("", "kling-upgrade-cli-")
+	}
 	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
 		return filepath.Join(d, "kling", "upgrade"), nil
 	}
