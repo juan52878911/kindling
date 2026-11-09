@@ -37,6 +37,10 @@ type Registry struct {
 	// cuántas hubo a la vez como mucho (para ver las descargas en paralelo).
 	BlobDelay   time.Duration
 	MaxInFlight int
+	// BlobTrickle, si no es 0, sirve los blobs a trozos de 16 KiB con esta
+	// pausa entre trozo y trozo: una descarga lenta, para que dos a la vez del
+	// mismo blob se solapen de verdad.
+	BlobTrickle time.Duration
 	inFlight    int
 	// User y Pass, si User no está vacío, son las credenciales que exige: el
 	// servicio de tokens no da uno sin ellas (Basic) o, con Basic, cada
@@ -149,7 +153,7 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		r.inFlight++
 		r.MaxInFlight = max(r.MaxInFlight, r.inFlight)
-		delay := r.BlobDelay
+		delay, trickle := r.BlobDelay, r.BlobTrickle
 		r.mu.Unlock()
 		time.Sleep(delay)
 		defer func() {
@@ -157,6 +161,19 @@ func (r *Registry) serve(w http.ResponseWriter, req *http.Request) {
 			r.inFlight--
 			r.mu.Unlock()
 		}()
+		if trickle > 0 {
+			w.Header().Set("Content-Length", fmt.Sprint(len(b)))
+			for len(b) > 0 {
+				n := min(len(b), 16<<10)
+				if _, err := w.Write(b[:n]); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+				b = b[n:]
+				time.Sleep(trickle)
+			}
+			return
+		}
 	}
 	if mt != "" && strings.Contains(req.URL.Path, "/manifests/") {
 		w.Header().Set("Content-Type", mt)

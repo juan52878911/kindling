@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
 	"github.com/juan52878911/kindling/internal/oci"
@@ -55,7 +56,7 @@ func (b *builder) prepareFiles() ([]inputFile, error) {
 			if st.Mode()&0o111 != 0 {
 				mode = 0o755
 			}
-			if sum, err = imagen.SHA256File(src); err != nil {
+			if sum, err = digest.File(src); err != nil {
 				return nil, err
 			}
 			n.Size, n.Data = st.Size(), ext4.HostFile{Path: src}

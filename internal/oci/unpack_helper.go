@@ -121,9 +121,33 @@ func (h *helperReader) wait() {
 		if msg == "" {
 			msg = err.Error()
 		}
+		// kling-unpack sale con 1 ante una capa que no descomprime (y ante un
+		// EPIPE, que aquí no llega: es Close). Cualquier otro final —una
+		// señal, el OOM killer, el 101 de un pánico de Rust— es del ayudante,
+		// no de la capa.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() != 1 {
+			h.err = &errAyudanteRoto{msg: msg, err: err}
+			return
+		}
 		h.err = fmt.Errorf("decompressing layer: %s", msg)
 	}
 }
+
+// errAyudanteRoto es el de un kling-unpack que arrancó y murió a mitad sin
+// ser por la capa: unpack la reintenta en Go, y quien lee en flujo (y no
+// puede) recibe la pista de apagarlo.
+type errAyudanteRoto struct {
+	msg   string
+	err   error
+	leído int64 // lo que se llegó a escribir (y a descontar del presupuesto)
+}
+
+func (e *errAyudanteRoto) Error() string {
+	return fmt.Sprintf("decompressing layer: kling-unpack died (%v): %s; KLING_UNPACK=0 decompresses in Go instead", e.err, e.msg)
+}
+
+func (e *errAyudanteRoto) Unwrap() error { return e.err }
 
 // Close para el ayudante si no ha acabado (quien lee lo deja a medias: otra
 // capa falló o se canceló) y cierra la capa.
