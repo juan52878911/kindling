@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ func enUnaConfigTemporal(t *testing.T) string {
 	p := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("KLING_CONFIG", p)
 	t.Setenv("KLING_HOST", "")
+	t.Setenv("KLING_SOCKET", "")
 	return p
 }
 
@@ -86,6 +88,82 @@ func TestHostRespetaBanderaEntornoYFichero(t *testing.T) {
 	}
 }
 
+// Un config.json con tokens del gateway que otros pueden leer (escrito a mano,
+// copiado con cp o de antes de durable) avisa al cargarlo, como hace
+// `kling ai` con su registro; sin tokens, o con 0600, calla.
+func TestAvisoConfigConTokensLegible(t *testing.T) {
+	p := enUnaConfigTemporal(t)
+	var avisos bytes.Buffer
+	viejo := Avisos
+	Avisos = &avisos
+	defer func() { Avisos = viejo }()
+
+	escribir := func(contenido string, modo os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(contenido), modo); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, modo); err != nil {
+			t.Fatal(err)
+		}
+		avisos.Reset()
+		if _, err := Load(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escribir(`{"gateway":{"token":"secreto"}}`, 0o644)
+	if !strings.Contains(avisos.String(), "chmod 600") {
+		t.Errorf("token en un 0644 sin aviso: %q", avisos.String())
+	}
+	// Una sola vez por orden, aunque se cargue varias veces.
+	avisos.Reset()
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if avisos.Len() != 0 {
+		t.Errorf("aviso repetido: %q", avisos.String())
+	}
+	escribir(`{"gateway":{"tokens":[{"name":"a","token":"secreto"}]}}`, 0o640)
+	if !strings.Contains(avisos.String(), "chmod 600") {
+		t.Errorf("tokens en un 0640 sin aviso: %q", avisos.String())
+	}
+	escribir(`{"gateway":{"token":"secreto"}}`, 0o600)
+	if avisos.Len() != 0 {
+		t.Errorf("0600 con aviso: %q", avisos.String())
+	}
+	escribir(`{"defaults":{"image":"min"}}`, 0o644)
+	if avisos.Len() != 0 {
+		t.Errorf("sin tokens con aviso: %q", avisos.String())
+	}
+}
+
+// KLING_SOCKET es el último escalón: el socket de un daemon privado
+// (KLING_SOCKET=... kling daemon) lo encuentra el cliente con la misma
+// variable, pero un contexto activo o KLING_HOST mandan sobre él.
+func TestHostKlingSocketUltimoEscalon(t *testing.T) {
+	enUnaConfigTemporal(t)
+	t.Setenv("KLING_HOST", "")
+	t.Setenv("KLING_SOCKET", "/run/privado/kling.sock")
+	c, _ := Load()
+	c.CurrentContext = ""
+	if got := c.Host(""); got != "unix:///run/privado/kling.sock" {
+		t.Errorf("solo KLING_SOCKET: %q", got)
+	}
+	t.Setenv("KLING_SOCKET", "unix:///run/privado/kling.sock")
+	if got := c.Host(""); got != "unix:///run/privado/kling.sock" {
+		t.Errorf("KLING_SOCKET con unix://: %q", got)
+	}
+	c.CurrentContext = "pruebas"
+	c.Contexts["pruebas"] = &Context{Host: "unix:///del/fichero.sock"}
+	if got := c.Host(""); got != "unix:///del/fichero.sock" {
+		t.Errorf("el contexto debería ganar a KLING_SOCKET: %q", got)
+	}
+	t.Setenv("KLING_HOST", "ssh://del-entorno")
+	if got := c.Host(""); got != "ssh://del-entorno" {
+		t.Errorf("KLING_HOST debería ganar a KLING_SOCKET: %q", got)
+	}
+}
+
 // Un valor invalido tiene que RECHAZARSE, no guardarse a medias: una egress
 // desconocida en la configuracion se arrastraria a cada microVM creada.
 func TestSetRechazaLoQueNoEntiende(t *testing.T) {
@@ -105,6 +183,41 @@ func TestSetRechazaLoQueNoEntiende(t *testing.T) {
 	// Y lo válido sí entra.
 	if err := c.Set("defaults.egress", "internet"); err != nil {
 		t.Errorf("un valor válido se rechazó: %v", err)
+	}
+}
+
+// defaults.* numéricos: 0 es «el de siempre» (como daemon.*), un negativo o un
+// valor absurdo se rechaza en Set en vez de llegar a cada `kling run`.
+func TestSetDefaultsNumericosEnRango(t *testing.T) {
+	enUnaConfigTemporal(t)
+	c, _ := Load()
+	for _, mal := range [][2]string{
+		{"defaults.mem_mib", "-1"},
+		{"defaults.mem_mib", "8"},
+		{"defaults.mem_mib", "2000000"},
+		{"defaults.vcpus", "-2"},
+		{"defaults.vcpus", "1000"},
+		{"defaults.cpu_pct", "-50"},
+		{"defaults.cpu_pct", "30000"},
+		{"defaults.ttl_seconds", "-1"},
+		{"defaults.ttl_seconds", "99999999999"},
+	} {
+		if err := c.Set(mal[0], mal[1]); err == nil {
+			t.Errorf("Set(%q, %q) se aceptó", mal[0], mal[1])
+		}
+	}
+	if c.Defaults.MemMiB != 0 || c.Defaults.VCPUs != 0 || c.Defaults.CPUPct != 0 || c.Defaults.TTL != 0 {
+		t.Errorf("un valor rechazado quedó guardado: %+v", c.Defaults)
+	}
+	for _, bien := range [][2]string{
+		{"defaults.mem_mib", "0"}, {"defaults.mem_mib", "512"},
+		{"defaults.vcpus", "0"}, {"defaults.vcpus", "4"},
+		{"defaults.cpu_pct", "0"}, {"defaults.cpu_pct", "200"},
+		{"defaults.ttl_seconds", "0"}, {"defaults.ttl_seconds", "3600"},
+	} {
+		if err := c.Set(bien[0], bien[1]); err != nil {
+			t.Errorf("Set(%q, %q): %v", bien[0], bien[1], err)
+		}
 	}
 }
 

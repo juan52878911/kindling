@@ -58,9 +58,11 @@ type Fuente struct {
 	Repo   string // vacío = Repo
 	Dir    string
 	Client *http.Client
-	// SinVerificar acepta un Dir sin SHA256SUMS (el -insecure de `kling
-	// upgrade`). Sin él, un Dir sin sumas es un error: el binario acaba
-	// ejecutándose como root y "ya está en esta máquina" no dice quién lo dejó.
+	// SinVerificar acepta un Dir sin SHA256SUMS, o con él pero sin
+	// SHA256SUMS.minisig (el -insecure de `kling upgrade`). Sin él, un Dir sin
+	// sumas es un error, y desde FirmaObligatoriaDesde también uno sin firma: el
+	// binario acaba ejecutándose como root y "ya está en esta máquina" no dice
+	// quién lo dejó.
 	SinVerificar bool
 
 	// VersionPropia es la versión del kling que baja (main.Version). Desde

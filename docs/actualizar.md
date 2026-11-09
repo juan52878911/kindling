@@ -330,7 +330,7 @@ mentira); `cmd/kling/upgrade.go`, lo de cada sistema.
 sudo kling upgrade                     # Linux: el daemon de kling.service
 kling upgrade                          # Mac: el agente de launchd de docs/mac.md
 kling upgrade -tag v0.18.0             # -version es lo mismo
-kling upgrade -from-dir ./dist         # sin bajar nada; exige ./dist/SHA256SUMS (o -insecure)
+kling upgrade -from-dir ./dist         # sin bajar nada; exige ./dist/SHA256SUMS y, desde v1.0.0, SHA256SUMS.minisig (o -insecure)
 kling upgrade -dry-run                 # -check es lo mismo
 kling upgrade -rollback
 kling upgrade -cli                     # solo este binario: un CLI sin daemon

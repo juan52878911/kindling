@@ -413,3 +413,28 @@ func TestUpgradeSeNiegaConBrew(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Bajo sudo (macOS conserva HOME, y XDG_STATE_HOME se hereda) el estado de
+// `upgrade -cli` no puede ir al directorio del usuario.
+func TestDirEstadoUsuarioComoRoot(t *testing.T) {
+	home, xdg := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", xdg)
+	viejo := geteuidCLI
+	geteuidCLI = func() int { return 0 }
+	defer func() { geteuidCLI = viejo }()
+	d, err := dirEstadoUsuario()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == "" || strings.HasPrefix(d, home) || strings.HasPrefix(d, xdg) {
+		t.Fatalf("como root, dir de estado %q bajo HOME %s o XDG_STATE_HOME %s", d, home, xdg)
+	}
+	// Sin root, el de siempre.
+	geteuidCLI = viejo
+	if os.Geteuid() != 0 {
+		if d, _ := dirEstadoUsuario(); d != filepath.Join(xdg, "kling", "upgrade") {
+			t.Fatalf("sin root: %q", d)
+		}
+	}
+}

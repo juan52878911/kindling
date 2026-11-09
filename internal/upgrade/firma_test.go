@@ -222,10 +222,31 @@ func TestFirmaEnDirectorio(t *testing.T) {
 		t.Fatal(err)
 	}
 	var avisos bytes.Buffer
-	// Sin firma: se acepta con aviso, también desde un kling 1.x.
+	// Sin firma desde un kling 1.x: error. Un directorio con binarios
+	// troyanizados y su propio SHA256SUMS no puede llegar a Sondear.
 	f := &Fuente{Dir: dir, Avisos: &avisos, VersionPropia: "v1.0.0", claves: []ClavePublica{pa}}
-	if _, err := f.sumas(context.Background(), ""); err != nil || !strings.Contains(avisos.String(), "warning:") {
-		t.Fatalf("sin firma: %v %q", err, avisos.String())
+	if _, err := f.sumas(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "-insecure") {
+		t.Fatalf("sin firma desde v1.0.0 aceptado: %v", err)
+	}
+	// Ni aunque la etiqueta pedida sea 0.x: cuenta este kling.
+	if _, err := f.sumas(context.Background(), "v0.20.0"); err == nil {
+		t.Fatal("sin firma con -tag 0.x desde v1.0.0 aceptado")
+	}
+	// Con -insecure: aviso y solo el SHA256SUMS.
+	fi := &Fuente{Dir: dir, SinVerificar: true, Avisos: &avisos, VersionPropia: "v1.0.0", claves: []ClavePublica{pa}}
+	if _, err := fi.sumas(context.Background(), ""); err != nil || !strings.Contains(avisos.String(), "warning:") {
+		t.Fatalf("sin firma con -insecure: %v %q", err, avisos.String())
+	}
+	// Desde un kling anterior a la 1.0: aviso, como antes.
+	avisos.Reset()
+	f0 := &Fuente{Dir: dir, Avisos: &avisos, VersionPropia: "v0.20.1", claves: []ClavePublica{pa}}
+	if _, err := f0.sumas(context.Background(), ""); err != nil || !strings.Contains(avisos.String(), "warning:") {
+		t.Fatalf("sin firma desde v0.20.1: %v %q", err, avisos.String())
+	}
+	// Con claves vacías (kling sin claves compiladas): sin firma, también error.
+	fv := &Fuente{Dir: dir, Avisos: &avisos, VersionPropia: "v1.0.0", claves: []ClavePublica{}}
+	if _, err := fv.sumas(context.Background(), ""); err == nil {
+		t.Fatal("sin claves desde v1.0.0 aceptado")
 	}
 	// Con firma válida (sin comprobar etiqueta: un directorio no la tiene).
 	firma, err := Firmar(ka, sumas, "tag:v0.30.0")

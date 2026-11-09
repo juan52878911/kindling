@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
@@ -391,6 +393,12 @@ func Path() string {
 	return filepath.Join(base, "kling", "config.json")
 }
 
+// Avisos recibe lo que Load acepta con reparos (un fichero con tokens que
+// otros pueden leer); nil = os.Stderr. Los tests lo cambian.
+var Avisos io.Writer
+
+var avisados sync.Map
+
 // Load lee la configuración. Un fichero ausente no es un error: se devuelve una
 // configuración vacía y utilizable.
 func Load() (*Config, error) {
@@ -408,12 +416,37 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
 	c.path = p
+	avisarSiTokensLegibles(p, c)
 	c.desconocidas = clavesDesconocidas(b, reflect.TypeOf(Config{}))
 	if c.Contexts == nil {
 		c.Contexts = map[string]*Context{}
 	}
 	liftLegacyMemory(c, b)
 	return c, nil
+}
+
+// avisarSiTokensLegibles avisa si p lleva tokens del gateway y otros pueden
+// leerlo, como `kling ai` con su registro (allí es un error: el gateway de IA
+// arranca con él; aquí basta un aviso para no dejar sin CLI a nadie). Save
+// escribe 0600, pero un fichero editado o copiado a mano puede no serlo.
+func avisarSiTokensLegibles(p string, c *Config) {
+	if c.Gateway.Token == "" && len(c.Gateway.Tokens) == 0 {
+		return
+	}
+	st, err := os.Stat(p)
+	if err != nil || st.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	// Una vez por fichero y modo: el CLI carga la configuración varias veces
+	// en una misma orden.
+	if _, ya := avisados.LoadOrStore(fmt.Sprintf("%s %v", p, st.Mode().Perm()), true); ya {
+		return
+	}
+	w := Avisos
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "warning: %s holds gateway tokens and is readable by others (%v): chmod 600 it\n", p, st.Mode().Perm())
 }
 
 // legacyMemory es la sección "memory" de v0.5 y anteriores. Era de kindling-mcp
@@ -568,10 +601,13 @@ func mezclarDesconocidas(b []byte, desc map[string]json.RawMessage) ([]byte, err
 
 // Host resuelve a qué daemon hablar, por orden de precedencia:
 //
-//	-H  >  $KLING_HOST  >  contexto activo  >  socket local
+//	-H  >  $KLING_HOST  >  contexto activo  >  $KLING_SOCKET  >  socket local
 //
 // El flag gana siempre para que una invocación puntual no obligue a cambiar de
-// contexto ni a tocar el fichero.
+// contexto ni a tocar el fichero. KLING_SOCKET es el socket en el que escucha
+// `kling daemon`: con él puesto, un daemon privado y su cliente se encuentran
+// con la misma variable, pero cede ante un contexto o KLING_HOST, que se
+// ponen a propósito para el cliente.
 func (c *Config) Host(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -581,6 +617,12 @@ func (c *Config) Host(flagValue string) string {
 	}
 	if ctx, ok := c.Contexts[c.CurrentContext]; ok && ctx.Host != "" {
 		return ctx.Host
+	}
+	if v := os.Getenv("KLING_SOCKET"); v != "" {
+		if strings.HasPrefix(v, "unix://") {
+			return v
+		}
+		return "unix://" + v
 	}
 	return ""
 }
@@ -624,11 +666,17 @@ func (c *Config) Set(key, value string) error {
 			if err != nil {
 				return err
 			}
+			if n != 0 && (n < 16 || n > 1048576) {
+				return fmt.Errorf("defaults.mem_mib must be 0 (the default, 256) or 16-1048576 MiB, not %d", n)
+			}
 			c.Defaults.MemMiB = n
 		case "vcpus":
 			n, err := atoi()
 			if err != nil {
 				return err
+			}
+			if n != 0 && (n < 1 || n > 256) {
+				return fmt.Errorf("defaults.vcpus must be 0 (the default, 1) or 1-256, not %d", n)
 			}
 			c.Defaults.VCPUs = n
 		case "cpu_pct":
@@ -636,11 +684,17 @@ func (c *Config) Set(key, value string) error {
 			if err != nil {
 				return err
 			}
+			if n != 0 && (n < 1 || n > 25600) {
+				return fmt.Errorf("defaults.cpu_pct must be 0 (the default) or 1-25600 (100 = one core), not %d", n)
+			}
 			c.Defaults.CPUPct = n
 		case "ttl_seconds":
 			n, err := atoi()
 			if err != nil {
 				return err
+			}
+			if n != 0 && (n < 1 || n > 31536000) {
+				return fmt.Errorf("defaults.ttl_seconds must be 0 (never) or 1-31536000 (a year), not %d", n)
 			}
 			c.Defaults.TTL = n
 		default:

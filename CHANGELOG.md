@@ -19,6 +19,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
+- The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
 - kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
@@ -57,6 +59,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: the network receive thread no longer stops for good when the guest offers an rx chain whose buffers add up to more than 2 GiB (overlapping descriptors); Darwin's `recvmsg` rejected it with `EINVAL` and the guest lost its network. The chain is capped to the largest frame, and an `EINVAL` drops the frame and returns the buffer empty.
 - kling-hv: virtqueues keep their own used index instead of reading `used.idx` back from guest RAM, as the virtio spec requires, so what the guest writes there no longer moves the device. Memory-file state keeps its shape and version (the index lives in former padding, flagged in the header): older snapshots restore by taking it from their RAM, and older kling-hv builds still read new files.
 - kling-hv: a transient `EAGAIN` from `poll` (Darwin returns it when it cannot allocate its internal structures) no longer stops the network receive thread or the vsock thread for good; they retry after 1 ms. The vsock thread also logs why it stops instead of dying silently.
+
+### Security
+
+- `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
+- `sudo kling upgrade -cli` keeps its download and backups in root's home (from the user database, not `HOME` or `XDG_STATE_HOME`, which sudo passes on macOS), and every upgrade run as root refuses a working directory that someone other than root can change, so the user can't swap the verified binary before root installs it.
+- The CLI warns when `config.json` holds `gateway.token` or `gateway.tokens` and is readable by group or others, as `kling ai` already does for its registry (`chmod 600` it).
 
 ## [1.0.0] - 2026-11-05
 

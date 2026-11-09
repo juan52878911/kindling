@@ -232,7 +232,7 @@ del 6 para no chocar con los del núcleo.
 
 `KLING_HOST`, `KLING_SOCKET` y el flag `-H` los resuelve la extensión con
 `pkg/config`, con la misma precedencia que el núcleo:
-`-H > $KLING_HOST > contexto activo > socket local`.
+`-H > $KLING_HOST > contexto activo > $KLING_SOCKET > socket local`.
 
 ### Ganchos
 
