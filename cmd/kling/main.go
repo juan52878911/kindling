@@ -438,6 +438,9 @@ func cmdDaemon(args []string) error {
 	srv.SetBuildUser(*buildAs)
 	srv.SetBuildCache(buildCacheConfig)
 	srv.SetIdleFreeze(idleFreezeConfig())
+	// Antes de atender nada: lo que dejaron las construcciones y descargas
+	// cortadas con el daemon anterior ya no es de nadie.
+	srv.BarrerTemporales()
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)

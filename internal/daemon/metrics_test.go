@@ -105,3 +105,31 @@ func TestMetricsPorMaquina(t *testing.T) {
 		t.Errorf("Linux:\n%s", out)
 	}
 }
+
+// Con política, /metrics lo lee cualquier rol válido (un inquilino que
+// monitoriza su uso del host), pero las series por máquina, con nombres e ID
+// de todos, solo el admin. Sin rol, nada.
+func TestMetricsPorRol(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := s.routes()
+	admin := como(t, h, uidAdmin, "GET", "/metrics", "")
+	if admin.Code != 200 || !strings.Contains(admin.Body.String(), `kling_machine_state_seconds{id="bbbb000000000001"`) {
+		t.Fatalf("admin: %d\n%s", admin.Code, admin.Body)
+	}
+	inq := como(t, h, uidA, "GET", "/metrics", "")
+	if inq.Code != 200 {
+		t.Fatalf("inquilino: %d %s", inq.Code, inq.Body)
+	}
+	body := inq.Body.String()
+	if !strings.Contains(body, `kling_machines{state="frozen"}`) || !strings.Contains(body, "kling_admission_rejections_total") {
+		t.Errorf("inquilino sin las series del host:\n%s", body)
+	}
+	for _, id := range []string{"aaaa000000000001", "bbbb000000000001", "dddd000000000001"} {
+		if strings.Contains(body, id) {
+			t.Errorf("inquilino ve la máquina %s:\n%s", id, body)
+		}
+	}
+	if rr := como(t, h, uidNadie, "GET", "/metrics", ""); rr.Code != 403 {
+		t.Errorf("sin rol: %d", rr.Code)
+	}
+}

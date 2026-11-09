@@ -51,6 +51,11 @@ func decompress(f *os.File) (io.ReadCloser, error) {
 		// No arrancó: f sigue sin leer, Go lo abre desde el principio.
 		warnHelper(h, err)
 	}
+	return decompressGo(f)
+}
+
+// decompressGo es decompress sin kling-unpack.
+func decompressGo(f *os.File) (io.ReadCloser, error) {
 	br := bufio.NewReaderSize(f, 1<<20)
 	m, _ := br.Peek(4)
 	var r io.Reader

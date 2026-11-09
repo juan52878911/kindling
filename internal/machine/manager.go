@@ -496,13 +496,28 @@ type Manager struct {
 	marcarBrokerPrueba func(ctx context.Context, addr string) (net.Conn, error)
 
 	// Clave de firma de snapshots (firma.go), cargada una vez.
-	firmaOnce  sync.Once
+	// firmaMu guarda firmaClave, que se rellena al primer claveFirma que
+	// funciona (firma.go).
+	firmaMu    sync.Mutex
 	firmaClave []byte
-	firmaErr   error
 	wake       chan struct{}
 	quit       chan struct{}
 	quitOnce   sync.Once
 	persistWG  sync.WaitGroup
+
+	// Los vigilantes (Watch) y lo que lanzan en segundo plano (la presión de
+	// memoria): Close los cancela con vigCancel y espera a vigWG, para que
+	// ninguno escriba state.json después de que Close vuelva. cerrando se
+	// pone al empezar Close: freezeSi y removeSi no empiezan nada después.
+	vigMu     sync.Mutex
+	vigCancel []context.CancelFunc
+	vigWG     sync.WaitGroup
+	cerrando  atomic.Bool
+	// ttlEnCurso: hay una ronda de expireTTL en segundo plano.
+	ttlEnCurso atomic.Bool
+	// pruebasPasoVigilante, en los tests, se llama antes de cada paso de la
+	// vuelta del vigilante; si devuelve false, el paso no corre.
+	pruebasPasoVigilante func(nombre string) bool
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -981,9 +996,34 @@ func (m *Manager) persistLoop() {
 			if timer != nil {
 				timer.Stop()
 			}
-			panico.Contener("persistLoop (cierre)", func() { _ = m.writePending() })
+			// La última: nadie más la va a escribir, así que un fallo pasajero
+			// (un EIO, un disco lleno que alguien está vaciando) se reintenta un
+			// rato en vez de perder la última transición. Con tope: un apagado
+			// no se cuelga de un disco que no vuelve.
+			panico.Contener("persistLoop (cierre)", func() { m.ultimaEscritura(ultimaEscrituraMax) })
 			return
 		}
+	}
+}
+
+// ultimaEscrituraMax es lo que el cierre reintenta la última escritura.
+const ultimaEscrituraMax = 2 * time.Second
+
+// ultimaEscritura es writePending reintentado hasta plazo.
+func (m *Manager) ultimaEscritura(plazo time.Duration) {
+	fin := time.Now().Add(plazo)
+	espera := 20 * time.Millisecond
+	for {
+		err := m.writePending()
+		if err == nil {
+			return
+		}
+		if time.Now().Add(espera).After(fin) {
+			log.Printf("shutdown: the last state write failed for %s; giving up: %v", plazo, err)
+			return
+		}
+		time.Sleep(espera)
+		espera = min(espera*2, 500*time.Millisecond)
 	}
 }
 
@@ -1121,6 +1161,14 @@ const cierreOperacionesMax = 30 * time.Second
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Primero, que no empiece nada nuevo en segundo plano, y que los
+		// vigilantes acaben lo que tengan entre manos (con plazo, como las
+		// operaciones de abajo): antes seguían solos, y uno que terminaba
+		// tarde reescribía state.json después de Close (trasCierre).
+		m.cerrando.Store(true)
+		// Un solo plazo para las dos esperas: el apagado no tarda más que antes.
+		fin := time.Now().Add(cierreOperacionesMax)
+		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
@@ -1128,7 +1176,7 @@ func (m *Manager) Close() {
 		// arranque siguiente ve una máquina "running" que ya es un volcado.
 		// Con plazo: un apagado no puede quedarse colgado de un volcado que no
 		// termina. Lo que acabe después aún se escribe (ver trasCierre).
-		if !m.lifecycle.esperarLibres(cierreOperacionesMax) {
+		if !m.lifecycle.esperarLibres(max(time.Until(fin), time.Second)) {
 			log.Printf("shutdown: lifecycle operations still running after %s; their last state may not be saved", cierreOperacionesMax)
 		}
 		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
@@ -2400,6 +2448,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
+	// Con Close en curso no se empieza: su trasCierre escribiría el estado
+	// después del cierre.
+	if m.cerrandose() {
+		return nil, errCerrando
+	}
 
 	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
 	// congelarla otro, borrarla, o terminar de arrancar (Run lo tiene desde que
@@ -2611,8 +2664,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// pudo llegar al VMM aunque la respuesta no (un ctx cortado): sin
 		// reanudar, se quedaba pausada figurando como running, como tras un
 		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
-		// así que ese fallo solo se apunta.
-		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		// así que ese fallo solo se apunta. La marca se retira solo si no hay
+		// volcado que proteger: el que hubiera (el del último thaw, que se
+		// queda para medir el diferencial) no describe este disco, y sin marca
+		// ni sello pasaría por anterior a los sellos.
+		if !existe(filepath.Join(dir, "snap.file")) && !existe(filepath.Join(dir, "mem.file")) {
+			_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		}
 		if rerr := c.Resume(ctx); rerr != nil {
 			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
 		}
@@ -3493,8 +3551,12 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := volcadoValido(dir, mc.FrozenAt); esquema.EsMasNuevo(err) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 	} else if err != nil {
-		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
-			mc.Name, err, mc.Name)
+		// Sin volcado no hay RAM que cargar, pero el disco sigue: kling stop
+		// retira el volcado y kling start arranca en frío sobre ese disco.
+		// Antes se decía «kling rm», que se lo lleva.
+		return nil, fmt.Errorf("machine %q can't be thawed: %w. Its disk is intact: stop it and boot it cold "+
+			"(kling stop %s && kling start %s); the memory of the freeze is lost",
+			mc.Name, err, mc.Name, mc.Name)
 	}
 	// El sello, leído una vez para todo el thaw (VMM, arquitectura, kernel,
 	// base del diferencial, sin agente): antes se leía y se parseaba en cada
@@ -3709,10 +3771,28 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return abortar(err)
 	}
 	crono.marca(&crono.p.NetMS)
+	// El volcado deja de valer ANTES de cargarlo: en cuanto el invitado
+	// reanude, escribe en su disco. Antes se retiraba después y un fallo solo
+	// se avisaba: con el disco lleno el sello se borraba sin dejar la marca, y
+	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
+	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
+	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
+	if err := retirarSello(dir); err != nil {
+		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
+	}
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
 	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
+		// Si el VMM contestó con un error, no cargó: el invitado no corrió y el
+		// volcado sigue describiendo su disco, así que recupera su sello. Sin
+		// respuesta (un plazo, el socket cortado) no se sabe si reanudó y se
+		// queda sin sello: falla cerrado.
+		if errorDelVMM(err) {
+			if rerr := restaurarSello(dir); rerr != nil {
+				log.Printf("warning: thaw: %s: couldn't restore the seal of its memory dump after a failed load: %v", mc.Name, rerr)
+			}
+		}
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
@@ -3721,15 +3801,6 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
-	// Reanudado: el volcado ya no describe su disco. Se retira el sello antes
-	// de nada más, y no tras persistir el running: si el daemon muere con su
-	// VMM entre medias, state.json aún dice warm (o running, y reconcile la
-	// pasa a warm si el sello sigue) y el siguiente thaw cargaría aquella
-	// memoria sobre el disco ya escrito. Sin sello, falla cerrado. Si no se
-	// puede retirar, abortar no lo arreglaría (el invitado ya corrió): se avisa.
-	if err := retirarSello(dir); err != nil {
-		log.Printf("warning: thaw: %s: couldn't retire the seal of the memory dump it was thawed from: %v", mc.Name, err)
-	}
 	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
@@ -4005,6 +4076,10 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 			soltar()
 		}
 	}()
+	// Como en freezeSi: con Close en curso no se empieza nada.
+	if m.cerrandose() {
+		return errCerrando
+	}
 	// Releer con el cerrojo: si estaba arrancando, Run lo tenía y la copia de
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {

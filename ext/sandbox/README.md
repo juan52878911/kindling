@@ -75,7 +75,7 @@ kling sbx exec <id> -- tsc --version
 kling sbx shell <id>          # una terminal de verdad dentro
 kling sbx rm <id>
 
-kling sbx hosts       # qué daemons hay detrás y cuánto les queda
+kling sbx hosts       # qué daemons hay detrás y cuánto les queda (token de admin)
 ```
 
 Inquilinos, con sus cuotas, se dan de alta por entorno antes de arrancar el
@@ -83,14 +83,16 @@ gateway:
 
 ```sh
 export KLING_SANDBOX_TENANTS="ana:tok1:10:5,bob:tok2:5"   # nombre:token[:max sandboxes[:max shells]]
+export KLING_SANDBOX_ADMINS="ana"                         # quién ve los hosts y las métricas de todos
 kling sbx gateway
 ```
 
-Y lo que ve un operador, con cualquier token:
+Y lo que ve un operador:
 
 ```sh
-curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/metrics    # Prometheus
+curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/metrics    # Prometheus (sin admin, solo las series propias)
 curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/templates  # qué hay construido, y dónde
+curl -H "Authorization: Bearer $ADMIN" http://gateway:8090/v1/hosts    # los daemons y sus endpoints (solo admin)
 ```
 
 ## Grafos precalentados

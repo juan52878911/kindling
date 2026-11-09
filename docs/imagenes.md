@@ -495,7 +495,11 @@ está, Go descomprime igual que siempre.
   tar por stdout, sin argumentos ni entorno. Solo cuenta si sale con 0, que es
   cuando comprobó el CRC32 de cada miembro gzip y el xxhash64 de cada marco zstd
   que lo lleve. Si muere a mitad, la lectura falla: lo que dio antes no pasa por
-  la capa entera. La capa ya llega verificada por sha256.
+  la capa entera. La capa ya llega verificada por sha256. Con 1 es la capa
+  (que además sale de la caché de blobs: `cached()` solo mira el tamaño); con
+  cualquier otro final (una señal, el OOM killer, el 101 de un pánico) es el
+  ayudante, y la capa se descomprime otra vez en Go. Quien lee en flujo y no
+  puede reintentar recibe el error con la pista `KLING_UNPACK=0`.
 - **Mismos límites que Go.** Ventana de zstd de 128 MiB como mucho, gzip
   multimiembro, y falla donde falla Go: `TestUnpackHelperIgualQueGo` compara
   los dos con capas buenas, truncadas, con el CRC roto, basura y ventanas

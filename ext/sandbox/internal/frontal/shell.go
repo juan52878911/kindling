@@ -78,7 +78,7 @@ func (s *Servidor) handleShell(w http.ResponseWriter, r *http.Request, id string
 		if errors.Is(err, api.ErrShellUnsupported) {
 			code = http.StatusNotImplemented
 		}
-		fail(w, code, fmt.Errorf("%s: %w", h.Nombre, err))
+		fail(w, code, deHost(h, err))
 		return
 	}
 	// Shell avisa: cancelar el contexto NO cierra la conexión. Se cierra aquí

@@ -12,6 +12,8 @@ package net
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"strconv"
 	"syscall"
 )
@@ -19,15 +21,40 @@ import (
 // anadirIPSet mete ip en el set del netns ns, con timeout segundos de vida
 // (0: la del set, que en el del allowlist es permanente). Como `-exist`: si ya
 // está, renueva su timeout en vez de fallar.
+//
+// Al comando solo se cae si netlink no está (otro sistema, sin setns, un
+// netns que no se abre). Si el kernel ya contestó por netlink (el set está
+// lleno, HASH_FULL, o no existe), el comando daría el mismo error con un
+// fork de más: un invitado que llena su set haría un fork por consulta.
 func anadirIPSet(ns, set, ip string, timeout int) error {
-	if err := anadirNetlink(ns, set, ip, timeout); err == nil {
+	err := anadirNetlink(ns, set, ip, timeout)
+	if err == nil {
 		return nil
+	}
+	var rechazo *rechazoIPSet
+	if errors.As(err, &rechazo) {
+		return err
 	}
 	args := []string{"ip", "netns", "exec", ns, "ipset", "add", set, ip}
 	if timeout > 0 {
 		args = append(args, "timeout", strconv.Itoa(timeout))
 	}
 	return ejecutar(append(args, "-exist")...)
+}
+
+// ipsetMaxElem es el maxelem del set de cada allowlist: 8192 IP es mucho más
+// de lo que usa un invitado legítimo y acota lo que uno hostil puede ocupar.
+const ipsetMaxElem = 8192
+
+// rechazoIPSet es un error que el kernel contestó por netlink a un add: la
+// vía netlink funciona y no tiene sentido repetirlo con el comando.
+type rechazoIPSet struct {
+	set   string
+	errno int32
+}
+
+func (e *rechazoIPSet) Error() string {
+	return fmt.Sprintf("ipset netlink add %s: error %d", e.set, e.errno)
 }
 
 // anadirNetlink es la vía rápida de anadirIPSet (ipset_nl_linux.go). Variable

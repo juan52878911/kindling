@@ -51,7 +51,10 @@ func anadirIPSetNetlink(ns, set, ip string, timeout int) error {
 		return err
 	}
 	if err := c.anadir(set, [4]byte(v4), timeout); err != nil {
-		cerrarIPSet(ns) // la siguiente vuelve a abrir
+		var rechazo *rechazoIPSet
+		if !errors.As(err, &rechazo) {
+			cerrarIPSet(ns) // la conexión falló: la siguiente vuelve a abrir
+		}
 		return err
 	}
 	return nil
@@ -205,7 +208,7 @@ func (c *conexionIPSet) anadir(set string, ip [4]byte, timeout int) error {
 				return nil
 			}
 			// Los de ipset (4096+) no son errno del sistema.
-			return fmt.Errorf("ipset netlink add %s: error %d", set, errno)
+			return &rechazoIPSet{set: set, errno: errno}
 		}
 	}
 }

@@ -108,9 +108,7 @@ func (c *Client) Resolve(ctx context.Context, ref ImageRef) (string, error) {
 	}
 	dst := c.BlobPath(digest)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err == nil {
-		if os.WriteFile(dst+".part", body, 0o644) == nil {
-			_ = os.Rename(dst+".part", dst)
-		}
+		guardarBlob(dst, body)
 	}
 	c.logf("%s is %s", ref, digest)
 	return digest, nil

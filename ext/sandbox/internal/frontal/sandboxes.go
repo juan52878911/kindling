@@ -35,6 +35,10 @@ import (
 // nadie pueda hacernos leer sin fin.
 const maxCuerpo = 64 << 10
 
+// prefijoReservado es el espacio de etiquetas del sistema (api.LabelOwner,
+// api.LabelDBPrefix y las que vengan): ningún cliente puede fijarlas.
+const prefijoReservado = "kling."
+
 // maxEtiquetas es cuántas etiquetas propias admite una petición. Van al
 // meta.json de la máquina en el daemon.
 const maxEtiquetas = 32
@@ -164,7 +168,7 @@ func (s *Servidor) enCadaHost(ctx context.Context, f func(context.Context, *host
 			defer cancel()
 			out[i], errs[i] = f(ctx, h)
 			if errs[i] != nil {
-				errs[i] = fmt.Errorf("%s: %w", h.Nombre, errs[i])
+				errs[i] = deHost(h, errs[i])
 			}
 		}(i, h)
 	}
@@ -219,7 +223,7 @@ func (s *Servidor) buscar(ctx context.Context, t *Tenant, id string) (*hosts.Hos
 	}
 	ms, err := h.Cliente.Sandboxes(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", h.Nombre, err)
+		return nil, nil, deHost(h, err)
 	}
 	for _, mc := range ms {
 		if mc.ID == ref && esSandboxDe(mc, t) {
@@ -243,14 +247,6 @@ func (s *Servidor) handleListar(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Kindling-Partial", strings.Join(mensajes(errs), "; "))
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-func mensajes(errs []error) []string {
-	out := make([]string, len(errs))
-	for i, e := range errs {
-		out[i] = e.Error()
-	}
-	return out
 }
 
 // handleSandbox despacha /v1/sandboxes/{host}/{ref}[/acción].
@@ -305,7 +301,7 @@ func (s *Servidor) handleBorrar(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	if err := h.Cliente.RemoveSandbox(r.Context(), mc.ID); err != nil {
-		fail(w, http.StatusBadGateway, fmt.Errorf("%s: %w", h.Nombre, err))
+		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -332,7 +328,7 @@ func (s *Servidor) handleRenovar(w http.ResponseWriter, r *http.Request, id stri
 	}
 	out, err := h.Cliente.RenewSandbox(r.Context(), mc.ID, ttl)
 	if err != nil {
-		fail(w, http.StatusBadGateway, fmt.Errorf("%s: %w", h.Nombre, err))
+		fail(w, http.StatusBadGateway, deHost(h, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, vista(h, out))
@@ -411,12 +407,12 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		// Retry-After en vez del 502/503 genérico que daría un fallo cualquiera.
 		if pet.Template != "" && api.EsFalloTSC(err) {
 			w.Header().Set("Retry-After", retryAfterReconstruccion)
-			// %v y no %w: el mensaje se aprovecha, pero no se quiere que fail()
-			// encuentre un *api.StatusError más abajo en la cadena y nos pise el
-			// 503 con el código que trajera el daemon.
-			fail(w, http.StatusServiceUnavailable, fmt.Errorf(
+			// errPublico: el mensaje (con lo que contestó el daemon) sale tal
+			// cual y fail() no busca un *api.StatusError más abajo que nos pise
+			// el 503 con el código que trajera el daemon.
+			fail(w, http.StatusServiceUnavailable, &errPublico{err: err, msg: fmt.Sprintf(
 				"template %q can't be restored right now: a host restart invalidated its golden snapshot; "+
-					"rebuilding it in the background, try again shortly (%v)", pet.Template, err))
+					"rebuilding it in the background, try again shortly (%v)", pet.Template, err)})
 			return
 		}
 		fail(w, codigoCrear(err), err)
@@ -480,9 +476,11 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	for k := range p.Labels {
 		// Las reservadas las pone el frontal: dejar que el cliente las mande
 		// sería dejarle firmar como otro tenant.
-		// kling.db. es de ext/db: dejar que el cliente fije kling.db.owner o
-		// kling.db.state sería dejarle falsificar de quién es una base.
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, api.LabelDBPrefix) {
+		// Todo lo que empieza por kling. es del sistema: kling.db.* es de
+		// ext/db (falsificar de quién es una base) y kling.owner saca la
+		// máquina del frontal, que dejaría de contarla en la cuota, listarla,
+		// borrarla y limpiarla: creación ilimitada e invisible.
+		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
 			return fmt.Errorf("label %q is reserved", k)
 		}
 		if !api.KeyPattern.MatchString(k) {
@@ -547,6 +545,14 @@ func (e *errCuotaSinContar) Error() string {
 	return "can't check the tenant's quota, a host did not answer: " + e.err.Error()
 }
 func (e *errCuotaSinContar) Unwrap() error { return e.err }
+
+// publico es lo que ve el tenant: qué hosts no contestaron, sin sus endpoints.
+func (e *errCuotaSinContar) publico() string {
+	if hs := hostsDe(e.err); len(hs) > 0 {
+		return "can't check the tenant's quota, host " + unir(hs) + " did not answer; try again later"
+	}
+	return "can't check the tenant's quota, a host did not answer; try again later"
+}
 
 // codigoReservar es el estado HTTP de un fallo de reservar.
 func codigoReservar(err error) int {
@@ -711,20 +717,42 @@ func puedeReclamar(p CrearPeticion) bool {
 	return p.Egress == "none" && p.OnTTL == api.OnTTLFreeze && p.MemMiB == 0 && p.VCPUs == 0
 }
 
+// plazoDaemon acota cada llamada al daemon que hace una reclamación: sin él,
+// un host colgado dejaba la petición esperando lo que tardara el cliente en
+// rendirse.
+const plazoDaemon = 10 * time.Second
+
+// reclamo apunta una precalentada que este proceso está reclamando (fin cero)
+// o reclamó (fin, cuándo acabó). Una lista del host tomada ANTES de ese fin
+// puede enseñarla aún sin dueño, y no sirve para reclamarla.
+type reclamo struct{ fin time.Time }
+
+// vidaReclamo es cuánto se recuerda un reclamo acabado, y vidaLista cuánto se
+// fía reclamarPrecalentada de una lista: con vidaLista < vidaReclamo, ninguna
+// lista en uso es anterior a un reclamo ya olvidado.
+const (
+	vidaReclamo = 5 * time.Minute
+	vidaLista   = time.Minute
+)
+
 // reclamarPrecalentada busca, en los hosts que sirven y por orden de hueco,
 // una instancia de la plantilla sin dueño y la hace del tenant.
 //
 // La reclamación es etiquetar (tenant=...) y renovar (el TTL pedido, contando
-// desde ahora). Va bajo s.mu porque entre listar y etiquetar otra petición de
-// este mismo proceso podría elegir la misma máquina. Dos FRONTALES distintos
-// sobre el mismo daemon sí podrían chocar: SetLabels es un merge y el último
-// gana; por eso tras etiquetar se relee y, si el dueño no somos nosotros, se
-// deja estar y se crea una nueva.
+// desde ahora). Entre listar y etiquetar otra petición de este mismo proceso
+// podría elegir la misma máquina; por eso cada una se marca en s.reclamos
+// bajo s.mu antes de tocarla. Las llamadas al daemon van FUERA del candado y
+// con plazo propio: un host colgado no para las demás creaciones (todas pasan
+// por s.mu para apuntarse en vuelo). Dos FRONTALES distintos sobre el mismo
+// daemon sí podrían chocar: SetLabels es un merge y el último gana; por eso
+// tras etiquetar se relee y, si el dueño no somos nosotros, se deja estar y
+// se crea una nueva.
 func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, sirve func(*hosts.Host) bool) (*hosts.Host, *api.Machine) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
-		ms, err := h.Cliente.Sandboxes(ctx)
+		listada := time.Now()
+		lctx, cancel := context.WithTimeout(ctx, plazoDaemon)
+		ms, err := h.Cliente.Sandboxes(lctx)
+		cancel()
 		if err != nil {
 			continue
 		}
@@ -732,32 +760,81 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 			if !esPrecalentadaDe(mc, p.Template) {
 				continue
 			}
-			if err := h.Cliente.SetLabels(ctx, mc.ID, etiquetas); err != nil {
-				s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
+			if time.Since(listada) > vidaLista {
+				break // la lista es vieja: el siguiente host trae la suya
+			}
+			clave := h.Nombre + "/" + mc.ID
+			if !s.marcarReclamo(clave, listada) {
 				continue
 			}
-			out, err := h.Cliente.RenewSandbox(ctx, mc.ID, p.TTLSeconds)
-			if err != nil {
-				// Ya lleva la etiqueta del tenant pero no se le va a entregar:
-				// dejarla así la sacaba del pool y le contaba al tenant en su
-				// cuota (y en su lista) un sandbox que nunca pidió, hasta que la
-				// limpieza por abandono se la llevara. Se destruye; el pool la
-				// repone. No se le quitan las etiquetas: llevaría las del cliente
-				// a la siguiente que la reclamara.
-				s.log.Printf("frontal: claiming %s/%s: renew: %v; removing it", h.Nombre, mc.ID, err)
-				if rerr := h.Cliente.RemoveSandbox(ctx, mc.ID); rerr != nil {
-					s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, mc.ID, rerr)
-				}
-				continue
+			out, ok := s.reclamarUna(ctx, h, mc, t, p, etiquetas)
+			s.acabarReclamo(clave)
+			if ok {
+				return h, out
 			}
-			if !esSandboxDe(out, t) {
-				// Otro frontal la etiquetó después (el último gana): es suya.
-				continue
-			}
-			return h, out
 		}
 	}
 	return nil, nil
+}
+
+// marcarReclamo aparta la máquina para esta petición si nadie de este proceso
+// la está reclamando ni la reclamó después de listada.
+func (s *Servidor) marcarReclamo(clave string, listada time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reclamos == nil {
+		s.reclamos = map[string]reclamo{}
+	}
+	for k, r := range s.reclamos {
+		if !r.fin.IsZero() && time.Since(r.fin) > vidaReclamo {
+			delete(s.reclamos, k)
+		}
+	}
+	if r, ok := s.reclamos[clave]; ok && (r.fin.IsZero() || !listada.After(r.fin)) {
+		return false
+	}
+	s.reclamos[clave] = reclamo{}
+	return true
+}
+
+func (s *Servidor) acabarReclamo(clave string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reclamos[clave] = reclamo{fin: time.Now()}
+}
+
+// reclamarUna etiqueta y renueva una precalentada ya apartada.
+func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machine, t *Tenant, p CrearPeticion, etiquetas map[string]string) (*api.Machine, bool) {
+	ctx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	defer cancel()
+	if err := h.Cliente.SetLabels(ctx, mc.ID, etiquetas); err != nil {
+		s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
+		return nil, false
+	}
+	out, err := h.Cliente.RenewSandbox(ctx, mc.ID, p.TTLSeconds)
+	if err != nil {
+		// Ya lleva la etiqueta del tenant pero no se le va a entregar:
+		// dejarla así la sacaba del pool y le contaba al tenant en su
+		// cuota (y en su lista) un sandbox que nunca pidió, hasta que la
+		// limpieza por abandono se la llevara. Se destruye; el pool la
+		// repone. No se le quitan las etiquetas: llevaría las del cliente
+		// a la siguiente que la reclamara.
+		// Sin la cancelación de la petición: si el fallo es que el cliente se
+		// fue, borrar con su contexto fallaba también y la máquina se quedaba
+		// a medio reclamar (como soltarGrafo).
+		s.log.Printf("frontal: claiming %s/%s: renew: %v; removing it", h.Nombre, mc.ID, err)
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
+		defer rcancel()
+		if rerr := h.Cliente.RemoveSandbox(rctx, mc.ID); rerr != nil {
+			s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, mc.ID, rerr)
+		}
+		return nil, false
+	}
+	if !esSandboxDe(out, t) {
+		// Otro frontal la etiquetó después (el último gana): es suya.
+		return nil, false
+	}
+	return out, true
 }
 
 // esPrecalentadaDe es el contrato con el pool del paquete plantilla: una

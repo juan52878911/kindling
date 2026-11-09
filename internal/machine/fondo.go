@@ -306,11 +306,19 @@ func (m *Manager) rellenarFondo(name string) {
 	}()
 }
 
+// esperasFondo son las esperas entre reintentos cuando reponer falla por algo
+// pasajero (un 507 con el host apretado, un disco que se libera): sin ellas,
+// un fallo dejaba el fondo vacío hasta reiniciar el daemon. Agotadas, la
+// reposición se rinde, y el próximo reclamo sobre el fondo vacío la relanza.
+// Variable para los tests.
+var esperasFondo = []time.Duration{time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}
+
 // reponerFondo crea copias una a una hasta llegar al tamaño. La decisión de
 // parar y el desmarcado de llenando van bajo el mismo candado que mira cuánto
 // falta: un reclamo que llegue justo ahora ve llenando=false y lanza otra
 // reposición, o la ve este bucle en su siguiente vuelta; no se pierde ninguno.
 func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
+	reintentos := 0
 	for {
 		m.fondoMu.Lock()
 		if f.ctx.Err() != nil || len(f.todas) >= f.size {
@@ -332,19 +340,35 @@ func (m *Manager) reponerFondo(name string, f *fondoPlantilla) {
 				// pasajero, y reintentar no lo arregla.
 				obsoleto, fallo = m.causaFondo(name), ""
 			}
+			reintentar := obsoleto == "" && reintentos < len(esperasFondo) && f.ctx.Err() == nil
 			if f.ctx.Err() == nil {
-				if obsoleto != "" {
+				switch {
+				case obsoleto != "":
 					log.Printf("pool %s: golden is stale (%s): the pool stays empty until it is re-saved:\n%s", name, obsoleto, remedioDorado(name))
-				} else {
-					log.Printf("pool %s: could not pre-warm a copy: %v", name, err)
+				case reintentar:
+					log.Printf("pool %s: could not pre-warm a copy: %v (retrying in %s)", name, err, esperasFondo[reintentos])
+				default:
+					log.Printf("pool %s: could not pre-warm a copy: %v (giving up until the next claim on it)", name, err)
 				}
 			}
 			m.fondoMu.Lock()
-			f.llenando = false
 			f.obsoleto, f.fallo = obsoleto, fallo
+			if !reintentar {
+				f.llenando = false
+				m.fondoMu.Unlock()
+				return
+			}
 			m.fondoMu.Unlock()
-			return
+			// llenando sigue a true durante la espera: los reclamos no lanzan
+			// otra reposición, y apagar (ctx) la corta.
+			select {
+			case <-f.ctx.Done():
+			case <-time.After(esperasFondo[reintentos]):
+			}
+			reintentos++
+			continue
 		}
+		reintentos = 0
 		m.fondoMu.Lock()
 		f.obsoleto, f.fallo = "", ""
 		if f.ctx.Err() != nil || len(f.todas) >= f.size {
@@ -435,8 +459,14 @@ func (m *Manager) reclamarFondo(ctx context.Context, req api.RunRequest) (*api.M
 	m.fondoMu.Lock()
 	f := m.fondos[req.From]
 	vacio := f == nil || len(f.listas) == 0
+	// Vacío porque la reposición se rindió (un fallo pasajero): se relanza.
+	// Con el dorado obsoleto no, que reintentarlo no lo arregla.
+	relanzar := vacio && f != nil && f.obsoleto == ""
 	m.fondoMu.Unlock()
 	if vacio {
+		if relanzar {
+			m.rellenarFondo(req.From)
+		}
 		return nil, false
 	}
 	snap, _, err := m.loadSnapshotCached(req.From)
@@ -449,7 +479,11 @@ func (m *Manager) reclamarFondo(ctx context.Context, req api.RunRequest) (*api.M
 		m.fondoMu.Lock()
 		f := m.fondos[req.From]
 		if f == nil || len(f.listas) == 0 {
+			relanzar := f != nil && f.obsoleto == ""
 			m.fondoMu.Unlock()
+			if relanzar {
+				m.rellenarFondo(req.From)
+			}
 			return nil, false
 		}
 		id := f.listas[0]

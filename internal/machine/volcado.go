@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -87,11 +88,36 @@ type sello struct {
 	Arch string `json:"arch,omitempty"`
 }
 
+// Las dos operaciones de disco de las marcas, como variables para que un test
+// simule un disco lleno (ENOSPC) sin llenar ninguno.
+var (
+	renombrarMarca = durable.Renombrar
+	escribirMarca  = durable.Escribir
+)
+
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
 // anterior: a partir de aquí, lo que hubiera en disco deja de valer.
+//
+// O lo consigue o no toca nada. Antes borraba el sello y después creaba la
+// marca, que necesita un inodo nuevo: con el disco lleno (ENOSPC) lo segundo
+// fallaba tras lo primero, y sin ninguna de las dos volcadoValido lo tomaba por
+// un volcado anterior a los sellos y lo daba por bueno. Si quien llamaba seguía
+// (el thaw solo lo avisaba), el siguiente cargaba RAM vieja sobre un disco ya
+// escrito. Ahora, con sello, el sello SE CONVIERTE en la marca: un rename, sin
+// inodo nuevo, y con el fsync del directorio (durable.Renombrar) para que
+// llegue al disco antes que nada de lo que venga después. Sin sello (ya estaba
+// en curso, o un volcado anterior a los sellos) se escribe la marca como
+// siempre; si eso falla, el error vuelve y no se ha borrado nada.
 func volcadoEnCurso(dir string) error {
-	_ = os.Remove(filepath.Join(dir, marcaOK))
-	return durable.Escribir(filepath.Join(dir, marcaEnCurso), []byte(time.Now().Format(time.RFC3339Nano)+"\n"), 0o600)
+	ok, enCurso := filepath.Join(dir, marcaOK), filepath.Join(dir, marcaEnCurso)
+	err := renombrarMarca(ok, enCurso)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Stat(enCurso); err == nil {
+		return nil
+	}
+	return escribirMarca(enCurso, []byte(time.Now().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
 // retirarSello quita el sello del volcado de dir porque ya no vale: el
@@ -106,6 +132,30 @@ func volcadoEnCurso(dir string) error {
 // hasta que el siguiente Freeze lo selle o un Stop lo borre. Es durable: la
 // marca llega al disco antes de que el invitado vacíe el suyo.
 func retirarSello(dir string) error { return volcadoEnCurso(dir) }
+
+// restaurarSello deshace retirarSello cuando el volcado no llegó a cargarse
+// (el VMM rechazó el LoadSnapshot): la marca en curso que dejó el rename ES el
+// sello de antes, y vuelve a su sitio. Si la marca no lleva un sello (el
+// volcado era anterior a los sellos), se retira y queda como estaba.
+func restaurarSello(dir string) error {
+	ok, enCurso := filepath.Join(dir, marcaOK), filepath.Join(dir, marcaEnCurso)
+	raw, err := os.ReadFile(enCurso)
+	if err != nil {
+		return err
+	}
+	var s sello
+	if json.Unmarshal(raw, &s) != nil || s.Schema == 0 {
+		return os.Remove(enCurso)
+	}
+	return renombrarMarca(enCurso, ok)
+}
+
+// errorDelVMM dice si err es la respuesta de error del VMM (fc.Client los
+// escribe todos como "firecracker MÉTODO RUTA: …"), y no un fallo de
+// transporte o un plazo, tras el que no se sabe qué llegó a hacer.
+func errorDelVMM(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "firecracker ")
+}
 
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
 // y en su sitio, y retira la marca de volcado en curso. kernelSHA es el

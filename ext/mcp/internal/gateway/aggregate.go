@@ -66,7 +66,10 @@ func (a *aggregator) serviceLock(service string) *sync.Mutex {
 }
 
 type aggSession struct {
-	id       string
+	id string
+	// tenant es el nombre del tenant que abrió la conversación: solo él puede
+	// usarla o cerrarla con su id.
+	tenant   string
 	services []string
 	mode     mode
 	// Sesiones abiertas contra los servicios de detrás: se reutilizan para que
@@ -95,7 +98,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 // handleAggregate atiende el endpoint virtual /mcp/_all.
 func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
-		g.agg.drop(r.Context(), r.Header.Get(SessionHeader))
+		g.agg.drop(r.Context(), r.Header.Get(SessionHeader), scheduler.TenantFrom(r.Context()).Name())
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -118,7 +121,18 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// Una notificación sin sesión no abre conversación: nadie volverá con un id
+	// que nunca recibió, y acuñarla solo dejaba basura hasta el segador.
+	notificacion := len(req.ID) == 0 || string(req.ID) == "null"
+	if notificacion && r.Header.Get(SessionHeader) == "" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	s, created, err := g.agg.session(ctx, r)
+	if errors.Is(err, errSesionDesconocida) {
+		api.HTTPError(w, err.Error(), http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		writeRPCError(w, req.ID, -32000, err.Error())
 		return
@@ -127,7 +141,7 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(SessionHeader, s.id)
 	}
 	// Notificación: sin id, sin respuesta.
-	if len(req.ID) == 0 || string(req.ID) == "null" {
+	if notificacion {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -719,22 +733,33 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 // ── sesiones del agregador ────────────────────────────────────────────────────
 
+// errSesionDesconocida: el cliente trae un Mcp-Session-Id que no es nuestro.
+var errSesionDesconocida = errors.New("unknown or expired MCP session; start a new one with initialize")
+
 // session resuelve la sesión, tomando la selección de servicios de la URL.
 //
 //	/mcp/_all                          todos, con meta-herramientas
 //	/mcp/_all?services=eco,files       solo esos dos
 //	/mcp/_all?mode=expand              catálogo completo aplanado
 func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession, bool, error) {
+	tenant := scheduler.TenantFrom(ctx).Name()
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		a.mu.Lock()
 		s, ok := a.sessions[sid]
+		// La de otro tenant es, para este, una sesión que no existe.
+		ok = ok && s.tenant == tenant
 		if ok {
 			s.lastUse = time.Now()
 		}
 		a.mu.Unlock()
-		if ok {
-			return s, false, nil
+		if !ok {
+			// Id que no conocemos (reinicio, segada, inventado): 404 y el
+			// cliente rehace el initialize, como pide Streamable HTTP. Acuñar
+			// otra en silencio dejaba backing vacío, y cada tools/call
+			// arrancaba otro initialize y otro proceso en la microVM.
+			return nil, false, errSesionDesconocida
 		}
+		return s, false, nil
 	}
 
 	q := r.URL.Query()
@@ -766,7 +791,7 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 	}
 
 	s := &aggSession{
-		id: newSessionID(), services: services, mode: m,
+		id: newSessionID(), tenant: tenant, services: services, mode: m,
 		backing: map[string]string{}, lastUse: time.Now(),
 	}
 	a.mu.Lock()
@@ -794,10 +819,16 @@ func (a *aggregator) backedOn(machineID string) int {
 	return n
 }
 
-func (a *aggregator) drop(ctx context.Context, sid string) {
+// drop cierra la conversación sid si es del tenant; la de otro no se toca.
+func (a *aggregator) drop(ctx context.Context, sid, tenant string) {
 	a.mu.Lock()
 	s := a.sessions[sid]
-	delete(a.sessions, sid)
+	if s != nil && s.tenant != tenant {
+		s = nil
+	}
+	if s != nil {
+		delete(a.sessions, sid)
+	}
 	a.mu.Unlock()
 	if s != nil {
 		a.soltarAisladas(ctx, s)

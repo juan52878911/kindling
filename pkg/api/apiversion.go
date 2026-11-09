@@ -80,8 +80,8 @@ func (e *ErrDaemonTooOld) Error() string {
 		v = "older than v0.18"
 	}
 	return fmt.Sprintf("the daemon is %s (API %d) and this kling needs API %d or newer: "+
-		"update the daemon on its host (scripts/install.sh, then restart it: "+
-		"`sudo systemctl restart kling`)", v, e.API, MinDaemonAPI)
+		"update the daemon on its host with `sudo kling upgrade` (it restarts it, "+
+		"on Linux and on macOS)", v, e.API, MinDaemonAPI)
 }
 
 // CheckAPI compara el API de un daemon con la de este cliente: aviso si el

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
@@ -357,7 +358,7 @@ func buildOCI(ctx context.Context, dir string, log io.Writer) error {
 			agent = a
 		}
 	}
-	agentSum, err := imagen.SHA256File(agent)
+	agentSum, err := digest.File(agent)
 	if err != nil {
 		return fmt.Errorf("guest agent: %w (%s)", err, pistaAgente())
 	}

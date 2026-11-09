@@ -210,6 +210,44 @@ func TestActualizarExtensiones(t *testing.T) {
 	}
 }
 
+// Lo que impide actualizar las extensiones se dice: un directorio que no se
+// puede leer o un kling-<n>.json roto no pueden quedar en silencio, porque la
+// extensión se queda en la versión vieja con el núcleo ya nuevo.
+func TestActualizarExtensionesNoCallaLosFallos(t *testing.T) {
+	base := t.TempDir()
+	// Un fichero donde debería haber un directorio: ReadDir falla.
+	noDir := filepath.Join(base, "no-es-dir")
+	os.WriteFile(noDir, nil, 0o644)
+	out, _ := salida(t, func() error {
+		actualizarExtensionesEn(noDir, base, "1.1.0", "", plugin.InstallOptions{})
+		return nil
+	})
+	if !strings.Contains(out, "warning: extensions not upgraded") {
+		t.Errorf("unreadable dir said nothing: %q", out)
+	}
+	// Sin directorio de extensiones no hay nada que decir.
+	out, _ = salida(t, func() error {
+		actualizarExtensionesEn(filepath.Join(base, "no-existe"), base, "1.1.0", "", plugin.InstallOptions{})
+		return nil
+	})
+	if out != "" {
+		t.Errorf("a missing dir is not a failure: %q", out)
+	}
+	// Un kling-<n>.json roto.
+	dir := filepath.Join(base, "plugins")
+	os.Mkdir(dir, 0o755)
+	ext := filepath.Join(dir, "kling-demo")
+	os.WriteFile(ext, extFalsa("1.0.0"), 0o755)
+	os.WriteFile(plugin.SidecarPath(ext), []byte(`{"name":"de`), 0o644)
+	out, _ = salida(t, func() error {
+		actualizarExtensionesEn(dir, base, "1.1.0", "", plugin.InstallOptions{})
+		return nil
+	})
+	if !strings.Contains(out, "warning: extension demo not upgraded") {
+		t.Errorf("a broken sidecar said nothing: %q", out)
+	}
+}
+
 // Sin daemon que conteste, -rollback saca la raíz y el socket de cómo lo
 // arranca su unidad, igual que cmdDaemon: -root/-socket, si no el entorno
 // (el fichero manda sobre Environment=), si no los de siempre.

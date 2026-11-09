@@ -210,3 +210,37 @@ func TestUnpackHelperIgualQueGo(t *testing.T) {
 		}
 	}
 }
+
+// Un ayudante que arranca y muere con otro estado que 1 (una señal, el OOM
+// killer, un pánico de Rust con 101) no dice nada de la capa: unpack la
+// reintenta en Go en vez de fallar la construcción, y quien lee en flujo (y
+// no puede reintentar) recibe la pista de KLING_UNPACK=0.
+func TestUnpackHelperMuereSeReintentaEnGo(t *testing.T) {
+	soloUnix(t)
+	dir := t.TempDir()
+	layer := escribe(t, dir, "l.gz", gz(t, []byte("hello")), 0o644)
+	l := Layer{Descriptor: Descriptor{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip"}, Path: layer}
+	for _, sh := range []string{
+		"printf partial\necho 'thread main panicked' >&2\nexit 101\n",
+		"printf partial\nkill -9 $$\n",
+	} {
+		h := escribe(t, dir, "h", []byte("#!/bin/sh\n"+sh), 0o755)
+		t.Setenv("KLING_UNPACK", h)
+		if _, err := abre(t, layer); err == nil || !strings.Contains(err.Error(), "KLING_UNPACK=0") {
+			t.Errorf("%q: a streaming read has to fail with the KLING_UNPACK=0 hint: %v", sh, err)
+		}
+		dst := filepath.Join(t.TempDir(), "l.tar")
+		if err := unpack(t.Context(), l, dst, nil, 0); err != nil {
+			t.Errorf("%q: unpack has to retry in Go: %v", sh, err)
+		} else if b, _ := os.ReadFile(dst); string(b) != "hello" {
+			t.Errorf("%q: unpacked %q", sh, b)
+		}
+	}
+	// Con 1 (lo que hace kling-unpack ante una capa dañada) no se reintenta:
+	// Go fallaría igual.
+	h := escribe(t, dir, "h", []byte("#!/bin/sh\necho 'kling-unpack: crc mismatch' >&2\nexit 1\n"), 0o755)
+	t.Setenv("KLING_UNPACK", h)
+	if err := unpack(t.Context(), l, filepath.Join(t.TempDir(), "l.tar"), nil, 0); err == nil || !strings.Contains(err.Error(), "crc mismatch") {
+		t.Errorf("exit 1 has to fail with the helper's message: %v", err)
+	}
+}
