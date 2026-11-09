@@ -940,6 +940,14 @@ estadísticas del globo, `squeeze` pregunta `GET /meminfo` al agente y reclama l
 disponible menos un cuarto de la RAM, nunca por debajo de la mitad (antes, la
 mitad a ciegas: un Android de 1 GiB se quedaba con 4 MiB disponibles).
 
+**Estadísticas del globo.** En Firecracker el invitado reporta su memoria cada
+10 s (antes, cada segundo: un despertar por segundo y máquina que nadie leía).
+`squeeze`, el apretón al estar lista y el de antes de volcar bajan el intervalo
+a 1 s con `PATCH /balloon/statistics`, que hace que el invitado reporte en el
+acto, y reclaman con esas cifras; al acabar vuelve a 10 s. Un dorado o un
+volcado anterior trae 1 s grabado y se deja en 10 s al restaurarlo. Si el
+invitado no contesta en 250 ms, se aprieta con su último informe.
+
 ## Códigos de estado por ruta
 
 Lo que contesta cada ruta, sacado de `internal/daemon`. El golden

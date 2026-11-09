@@ -316,14 +316,21 @@ func TestFreezeFallidaPeroReanudadaSigueRunning(t *testing.T) {
 	llamadas := falso.todas()
 	var orden []string
 	for _, l := range llamadas {
+		// Las lecturas repetidas de las estadísticas (esperando el informe
+		// fresco, globo_ritmo.go) cuentan como una.
+		if l.Metodo+" "+l.Ruta == "GET /balloon/statistics" && len(orden) > 0 && orden[len(orden)-1] == "GET /balloon/statistics" {
+			continue
+		}
 		orden = append(orden, l.Metodo+" "+l.Ruta)
 	}
 	// La consulta al globo de antes del volcado (apreton_volcado.go) solo se
-	// hace donde el apretón está encendido; el falso contesta todo a cero y
+	// hace donde el apretón está encendido: se pide un informe fresco bajando
+	// el intervalo y se vuelve al de reposo; el falso contesta todo a cero y
 	// no se infla nada.
 	want := []string{"PATCH /vm", "PUT /snapshot/create", "PATCH /vm"}
 	if !globoSinEstadisticas {
-		want = append([]string{"GET /balloon/statistics"}, want...)
+		want = append([]string{"GET /balloon/statistics", "PATCH /balloon/statistics",
+			"GET /balloon/statistics", "PATCH /balloon/statistics"}, want...)
 	}
 	if strings.Join(orden, ",") != strings.Join(want, ",") {
 		t.Errorf("llamadas = %v, quería %v", orden, want)

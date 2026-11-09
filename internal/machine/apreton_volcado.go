@@ -46,10 +46,13 @@ func apretarAntesDeVolcar(ctx context.Context, c *fc.Client, mc *api.Machine) in
 	if globoSinEstadisticas || os.Getenv("KLING_SQUEEZE_BEFORE_DUMP") == "0" {
 		return 0
 	}
-	stats, err := c.BalloonStats(ctx)
+	// Con un informe recién pedido, y de vuelta al ritmo de reposo antes de
+	// volcar: el intervalo viaja en el snapshot (globo_ritmo.go).
+	stats, volverAlReposo, err := estadisticasFrescas(ctx, c)
 	if err != nil {
 		return 0 // sin globo (imagen anterior a él): el volcado de siempre
 	}
+	defer volverAlReposo()
 	reclaim := int(stats.FreeMemory >> 20)
 	if avail := int(stats.AvailableMemory >> 20); avail > reclaim {
 		reclaim = avail

@@ -28,6 +28,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Ephemeral MCP pool: once the gateway has seen traffic, services with no calls get no prewarmed instance (it used to be destroyed and recreated every 2 × idle, forever).
 - Prewarm and keep-warm budgets charge each copy its measured footprint (PSS / `phys_footprint`, capped at `mem_mib`) instead of the full `mem_mib`, and fall back to a fixed 1 GiB when the daemon gives no memory figure (it used to be unlimited).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
