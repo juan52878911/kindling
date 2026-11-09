@@ -415,6 +415,14 @@ func (f *Fuente) comprobarFirma(ctx context.Context, etiqueta string, sumas []by
 		return nil
 	}
 	comentario, err := VerificarFirma(sumas, firma, claves)
+	if errors.Is(err, ErrClaveDesconocida) && f.Dir == "" {
+		// Lo normal es que se rotara la clave (docs/firmas.md §Rotar): este
+		// kling es anterior a la release que añadió la nueva.
+		return fmt.Errorf("%s: %s: %w; the release key was probably rotated after this kling: "+
+			"go through the intermediate release that trusts both keys first (kling upgrade -tag <that release>, "+
+			"then kling upgrade again) or reinstall with install.sh (docs/firmas.md, \"Rotar la clave\")",
+			donde, NombreFirma, err)
+	}
 	if err != nil {
 		return fmt.Errorf("%s: %s: %w", donde, NombreFirma, err)
 	}

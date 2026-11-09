@@ -12,6 +12,7 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -227,19 +228,14 @@ func (f *Fuente) sumas(ctx context.Context, etiqueta string) (map[string]string,
 	if !EtiquetaValida(etiqueta) {
 		return nil, fmt.Errorf("invalid release tag %q", etiqueta)
 	}
-	tmp, err := os.CreateTemp("", "kling-sums-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-	if _, err := f.descargar(ctx, f.urlAsset(etiqueta, "SHA256SUMS"), tmp, maxSums); err != nil {
+	// En memoria (maxSums lo acota): un fichero en el /tmp compartido es otra
+	// cosa que vigilar entre bajarlo y leerlo, y un TMPDIR roto no debe
+	// impedir actualizar.
+	var buf bytes.Buffer
+	if _, err := f.descargar(ctx, f.urlAsset(etiqueta, "SHA256SUMS"), &buf, maxSums); err != nil {
 		return nil, fmt.Errorf("SHA256SUMS: %v", err)
 	}
-	b, err := os.ReadFile(tmp.Name())
-	if err != nil {
-		return nil, err
-	}
+	b := buf.Bytes()
 	if err := f.comprobarFirma(ctx, etiqueta, b); err != nil {
 		return nil, err
 	}

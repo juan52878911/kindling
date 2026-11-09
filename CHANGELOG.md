@@ -19,9 +19,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db up` with no template uses `pg` and builds it from `postgres:16-alpine` the first time (`-from-oci REF` for a named template that is missing); `-json` prints what is needed to connect (password only with `-dsn`), `-dsn` prints the URL. On an M4, zero to the first query in one command and 14.9 s, download included; then ~0.1 s per copy.
 - `kling db sql <copy> "SQL" [-json]`: SQL from the host without psql, as the app role or `-role`; JSON gives columns, rows (NULL as null) and command tags.
 - `kling try -image` takes a Docker reference (imported the first time, like `run -image`), and `kling try -json` prints one object with `exit_code`, `stdout`, `stderr`, `ready_ms` and `duration_ms`.
+- The daemon log says more: authz denials with uid, tenant, method and path (at most one per caller and route a minute, with a count of the rest), a startup warning when the disk is at or near the admission minimum, and a warning when admission turns a check off because PSI is missing or `statfs` fails.
 
 ### Changed
 
+- `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
+- A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
 - The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
 - kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
@@ -36,6 +39,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
+- Live shares: a directory inside kindling's data root (e.g. `<root>/volumes`) can't be shared even when `daemon.share_roots` covers its parent.
+- Live shares: every attach, thaw or daemon restart checks that the directory it opens has the device/inode that was validated; a share swapped for a symlink (`mv proj proj.old; ln -s /etc proj`) is refused instead of served.
 - `kling plugin install` (and the extensions `kling upgrade` updates) checks `SHA256SUMS.minisig` with the release keys, under the same rule as `kling upgrade`: required from 1.0.0, a warning before. `-insecure` accepts an unsigned `SHA256SUMS`; a signature that is there is always checked. `-file` without a signature still works.
 - `kling help <ext> <cmd>` no longer runs the command to list its flags: an extension prints the ones it registers with `plugin.HelpFlags`, or none.
 - Extensions that run kling again can no longer nest without end: `KLING_PLUGIN_DEPTH` grows per level and from 8 kling discovers no extensions.
@@ -46,6 +51,20 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
+- The watcher contains panics per step: a panic in one task (say `sweep`) no longer skips the TTL, gc and memory-pressure steps of every round. TTL expiry runs in the background, two machines at a time, so a slow freeze no longer stalls the watcher for everyone.
+- Daemon shutdown waits for the background watchers (and the memory-pressure work they start) before returning, so a late TTL freeze or removal no longer rewrites `state.json` after `Close`; background freezes and removals don't start once shutdown begins, and the last state write is retried for up to 2 s instead of once.
+- A warm machine whose memory dump is on disk but doesn't validate (its seal was retired by a thaw, or the freeze was interrupted) is moved to `stopped` at daemon start, with the reason in `LastErr` and its disk kept, instead of staying warm with a thaw that always fails. The thaw error no longer says to remove it: `kling stop X && kling start X` boots it cold on the same disk.
+- A thaw that can't retire its memory dump's seal (full disk) now fails before loading it: the seal used to be deleted before writing the in-progress mark, so on ENOSPC the stale dump looked pre-seal and a later thaw loaded old RAM over a disk that had already been written. The seal is now renamed into the mark (durable rename, no new inode) before `LoadSnapshot`, and restored if the VMM rejects the load. A failed pause no longer drops the mark either.
+- OCI cache: two builds downloading the same blob at once (always possible on macOS, where builds aren't serialised) no longer share a fixed `<hex>.part`: the first could publish a file with a hole of zeros as verified, and since cached blobs are trusted by size the gzip CRC error came back on every build. Each download gets its own temporary, and a layer that fails to decompress is removed from the cache.
+- The five copies of "temporary + sha256 + fsync + rename" (OCI blob downloads, `imagen.FetchVerified`, both daemon blob uploads and the builder's verified-cache copy) are now one, `durable.Recibir`/`durable.EscribirVerificado`, with the same guarantees everywhere: a temporary of its own, size and hash checked before publishing, contents on disk before the rename and the directory after it. `imagen.FetchVerified` used to rename without fsync.
+- The daemon sweeps, before it starts listening, what builds and downloads cut short by a crash left behind: `<name>.NNNN` work directories and `imagefile-*` under `<root>/build/`, `.part` temporaries in the OCI blob cache and `.tmp-*` in the verified caches. They used to be removed only by the build's own `defer`.
+- When `kling-unpack` starts and then dies with a status other than 1 (a signal, the OOM killer, a Rust panic), the layer is decompressed again in Go instead of failing the build, and streaming readers get the error with a `KLING_UNPACK=0` hint.
+- OCI pulls follow at most 3 chained image indexes before the manifest; a registry could chain as many as it liked, one request each.
+- `kling upgrade` checks free space in every destination before stopping the daemon (the new binaries plus 64 MiB); running out halfway also broke the rollback and left the daemon stopped.
+- An unreadable `publish.json` is moved to `publish.json.corrupt-<ns>` instead of being overwritten with an empty list.
+- `kling upgrade` explains a release signed with a rotated key (go through the intermediate release), warns about extensions it could not upgrade instead of skipping them, and reads `SHA256SUMS` in memory instead of through `os.TempDir()`.
+- The warm pool no longer stays empty until a restart after a transient failure (a 507): refills retry with backoff, and a claim on an empty pool starts a new one.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
 - A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.
@@ -56,6 +75,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Scheduler: a failed TTL renewal is no longer taken as done; the reaper retries it on its next pass and drops the instance when the daemon rejects it (404/409), and a running machine whose renewal is rejected is not adopted.
 - `exec ?wait=1` caps each stream at 8 MiB (`api.ExecWaitMaxOutput`) and marks the result `truncated`; the NDJSON stream still allows 64 MiB.
 - Run, sandbox, fork and `PUT /machines/{ref}/labels` reject more than 64 labels or 4 KiB of labels, and run and sandbox more than 256 `allow_domains`, with a 400.
+- Live shares: a `setattr` with times racing a `release` of the same handle can no longer set the times of another file that reused the descriptor.
+- Linux: live shares use at most half of `fs.inotify.max_user_instances` (a per-uid limit) daemon-wide; sessions beyond it watch host changes by polling every 2 s instead of starving other processes of inotify.
+- Live shares: a read reply is built in one buffer (1 MiB read: 3.2 → 1.06 MB allocated, ~4.5 → ~10 GB/s in `BenchmarkLectura` on an M4).
 
 ### Fixed
 

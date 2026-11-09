@@ -257,3 +257,36 @@ func TestRegistroConCertificadoDesconocido(t *testing.T) {
 		t.Errorf("tardó %s: reintentó un error de certificado", d)
 	}
 }
+
+// Un índice puede apuntar a otro índice (se ve en algunos registros), pero
+// no sin fin: cada nivel es una petición, y un registro hostil podía encadenar
+// tantos como quisiera. Uno o dos niveles pasan; muchos, no, y sin pedirlos
+// todos.
+func TestPullIndicesAnidadosConTope(t *testing.T) {
+	r := ocitest.New()
+	defer r.Close()
+	layer := ocitest.TarGz([]ocitest.File{{Name: "a", Body: "x"}})
+	_, idx := r.Image("arm64", nil, layer)
+	encadenar := func(d string, n int) string {
+		for range n {
+			b, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+				"manifests": []map[string]any{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": d,
+					"size": len(r.Blob(d)), "platform": map[string]string{"os": "linux", "architecture": "arm64"}}}})
+			d = r.Put(b, "application/vnd.oci.image.index.v1+json")
+		}
+		return d
+	}
+	ref := r.Host() + "/x/y"
+	if _, err := (&oci.Client{Cache: t.TempDir()}).Pull(context.Background(), ref, encadenar(idx, 1), "arm64"); err != nil {
+		t.Fatalf("an index of an index: %v", err)
+	}
+	hondo := encadenar(idx, 50)
+	hits := r.Hits
+	_, err := (&oci.Client{Cache: t.TempDir()}).Pull(context.Background(), ref, hondo, "arm64")
+	if err == nil || !strings.Contains(err.Error(), "nested") {
+		t.Fatalf("50 nested indexes: %v", err)
+	}
+	if n := r.Hits - hits; n > 10 {
+		t.Fatalf("it fetched %d manifests before giving up", n)
+	}
+}

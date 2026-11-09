@@ -1249,3 +1249,59 @@ func TestVersionVolcadoHV(t *testing.T) {
 		t.Error("a missing file must be an error")
 	}
 }
+
+// Una release firmada con una clave que este kling no conoce (la rotaron) dice
+// la salida: pasar por la release intermedia que trae las dos.
+func TestClaveRotadaDiceLaSalida(t *testing.T) {
+	m := nuevoMontaje(t)
+	_, pb := claveTest(t, "b")
+	m.claves = []ClavePublica{pb} // la release va firmada con A
+	_, err := Actualizar(context.Background(), m.opciones())
+	if !errors.Is(err, ErrClaveDesconocida) {
+		t.Fatalf("err = %v, want ErrClaveDesconocida", err)
+	}
+	for _, s := range []string{"intermediate release", "kling upgrade -tag", "docs/firmas.md"} {
+		if !strings.Contains(err.Error(), s) {
+			t.Errorf("err = %v, missing %q", err, s)
+		}
+	}
+	m.noTocado(t)
+}
+
+// El SHA256SUMS no pasa por el directorio temporal compartido: se lee en
+// memoria, con su tope. Con un TMPDIR inservible la actualización sigue.
+func TestSumasNoPasanPorTMPDIR(t *testing.T) {
+	m := nuevoMontaje(t)
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "no-existe"))
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+}
+
+// Sin sitio para los binarios nuevos se falla antes de parar el daemon: con
+// ENOSPC a media instalación, volver atrás tampoco cabría.
+func TestSinEspacioNoPara(t *testing.T) {
+	m := nuevoMontaje(t)
+	antes := libreEn
+	t.Cleanup(func() { libreEn = antes })
+	var dirs []string
+	libreEn = func(dir string) (uint64, uint64, error) {
+		dirs = append(dirs, dir)
+		return 10 << 20, 1, nil // 10 MiB, todas las piezas en el mismo
+	}
+	_, err := Actualizar(context.Background(), m.opciones())
+	if err == nil || !strings.Contains(err.Error(), "MiB in "+filepath.Dir(m.bin)) ||
+		!strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v, want free N MiB in %s (nothing was changed)", err, filepath.Dir(m.bin))
+	}
+	if len(dirs) != 2 {
+		t.Errorf("statfs on %v, want both destination dirs", dirs)
+	}
+	m.noTocado(t)
+
+	// Con sitio de sobra sigue adelante.
+	libreEn = func(string) (uint64, uint64, error) { return 1 << 40, 1, nil }
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+}

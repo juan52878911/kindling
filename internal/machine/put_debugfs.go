@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -301,7 +302,47 @@ func (im imagenDebugfs) sha256De(ctx context.Context, p string) (string, error) 
 // intentarPutDebugfs es intentarPut sin montar la imagen. Mismo contrato:
 // (cambió, error), errNoBridge si el fichero no está y create es false, y
 // errSinHueco si no cabe al lado del viejo.
+//
+// La imagen no se edita en su sitio: debugfs no tiene rename, así que
+// reemplazar es rm + ln, y un corte entre los dos (o un debugfs a medias) la
+// dejaba sin el fichero; si era kling-bridge, un invitado sin PID 1. Se
+// edita un clon (clonefile, sin copiar bloques) y, entero y comprobado,
+// sustituye a la imagen con un rename durable: tras un corte queda la vieja
+// entera o la nueva entera. Sin clon (otro sistema de ficheros), en su sitio,
+// como antes.
 func (m *Manager) intentarPutDebugfs(ctx context.Context, image, dentroPath, src, quiero string, mode os.FileMode, create bool) (bool, error) {
+	if debugfsBin() == "" {
+		return false, ErrNoDebugfs
+	}
+	tmp := clonImagenPut(image)
+	if tmp == "" {
+		return m.putDebugfsEn(ctx, image, dentroPath, src, quiero, mode, create)
+	}
+	publicado := false
+	defer func() {
+		if !publicado {
+			_ = os.Remove(tmp)
+		}
+	}()
+	cambio, err := m.putDebugfsEn(ctx, tmp, dentroPath, src, quiero, mode, create)
+	if err != nil || !cambio {
+		return cambio, err
+	}
+	// El modo de la imagen, no el del clon (clonarADestino lo deja en 0600).
+	if fi, err := os.Stat(image); err == nil {
+		if err := os.Chmod(tmp, fi.Mode().Perm()); err != nil {
+			return false, err
+		}
+	}
+	if err := durable.Renombrar(tmp, image); err != nil {
+		return false, fmt.Errorf("replacing %s with its edited copy: %w", filepath.Base(image), err)
+	}
+	publicado = true
+	return true, nil
+}
+
+// putDebugfsEn es intentarPutDebugfs sobre el fichero image tal cual.
+func (m *Manager) putDebugfsEn(ctx context.Context, image, dentroPath, src, quiero string, mode os.FileMode, create bool) (bool, error) {
 	bin := debugfsBin()
 	if bin == "" {
 		return false, ErrNoDebugfs
