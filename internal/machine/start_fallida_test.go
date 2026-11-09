@@ -46,8 +46,8 @@ func TestStartFallidoDeUnaFailedConservaSuVolcado(t *testing.T) {
 	m.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
 	mc, _ := paradaParaStart(t, m, "5a5a00000000000f")
 	cuando := fallidaConVolcado(t, m, mc)
-	ordenE2fsck = func(ctx context.Context, _ string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", "echo roto; exit 4")
+	ordenE2fsck = func(ctx context.Context, _ string) (*exec.Cmd, func(), error) {
+		return exec.CommandContext(ctx, "sh", "-c", "echo roto; exit 4"), nil, nil
 	}
 
 	_, err := m.Start(context.Background(), mc.ID, nil)

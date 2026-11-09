@@ -56,6 +56,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `e2fsck` on guest-written disks (overlay and rw volumes before a start, `put`, bridge refresh) no longer runs with the daemon's privileges: it gets the disk as an open descriptor and a minimal environment. Linux (daemon as root): the disk's non-root owner (the VMM user with `-run-as`) or `nobody`, no groups, new net/PID/IPC namespaces, `prlimit --as` 2 GiB when `prlimit` exists; a root-owned disk is handed to `nobody` for the check and given back. macOS: a minimal `sandbox-exec` profile (no network, reads limited to the system and Homebrew). `resize2fs` and `debugfs` are not confined yet.
 - `kling db clone` / `slice`: the read-only check of the source role runs from the host (kling-db connects to the source with the proxy's TLS policy) before the builder starts and before the credential reaches the proxy; the builder's own answer no longer counts. The source must now be reachable from where `kling db clone` runs, at the same address as from the daemon (`docs/db.md`).
 - `kling db clone` / `slice`: the masked dump is copied to the host with a size cap (`-max-dump`, default 8G) and a one-hour deadline.
 - kling-sandbox: two frontals on the same daemon no longer mix labels and TTL when they claim the same prewarmed sandbox: claims go in two phases with a nonce and only one wins. The sandbox view also hides reserved `kling.*` labels.
