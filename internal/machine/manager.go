@@ -302,6 +302,12 @@ type Manager struct {
 	// (presion_memoria.go).
 	pres presionMemoria
 
+	// reenviosPrevios: en macOS, los reenvíos que kling-vz abrió antes de que
+	// el invitado corriera, por id de máquina (map[string]string). Son las
+	// direcciones buenas: las de después de arrancar tienen que coincidir
+	// (plataforma_vz.go, reservarReenvios).
+	reenviosPrevios sync.Map
+
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
 	// carga (ver avisarAnyDatabase).
