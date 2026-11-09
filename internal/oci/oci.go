@@ -327,6 +327,16 @@ func ParseRef(ref string) (registry, repo string) {
 // entrada elegida se comprueba con el digest que declara el índice ya
 // verificado).
 func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, error) {
+	return c.pull(ctx, ref, digest, arch, 0)
+}
+
+// maxIndices es cuántos índices puede haber encadenados delante del
+// manifiesto: lo normal es uno, alguno anida otro. Sin tope, un registro
+// hostil encadenaba tantos como quisiera, cada uno una petición.
+const maxIndices = 4
+
+// pull es Pull con los índices que ya se atravesaron.
+func (c *Client) pull(ctx context.Context, ref, digest, arch string, indices int) (*Image, error) {
 	if !reDigest.MatchString(digest) {
 		return nil, fmt.Errorf("invalid digest %q (want sha256:<64 hex>)", digest)
 	}
@@ -371,8 +381,11 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		if pick == nil {
 			return nil, errSinPlataforma(ref, digest, arch, m.Manifests)
 		}
+		if indices+1 >= maxIndices {
+			return nil, fmt.Errorf("index %s: more than %d nested indexes", digest, maxIndices-1)
+		}
 		c.logf("index %s: linux/%s is %s", short(digest), arch, pick.Digest)
-		return c.Pull(ctx, ref, pick.Digest, arch)
+		return c.pull(ctx, ref, pick.Digest, arch, indices+1)
 	}
 	if len(m.Layers) == 0 {
 		return nil, fmt.Errorf("manifest %s has no layers (media type %s)", digest, m.MediaType)
