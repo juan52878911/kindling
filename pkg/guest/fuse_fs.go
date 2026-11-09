@@ -12,6 +12,7 @@ package guest
 import (
 	"hash/fnv"
 	"log"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -96,6 +97,11 @@ type fuseFS struct {
 
 	// afterInit corre tras contestar INIT (setReadahead; nil en los tests).
 	afterInit func(mount string)
+
+	// panics cuenta las peticiones que acabaron en panic y se contestaron con
+	// EIO (guarded). onReq corre al empezar handle: solo lo ponen los tests.
+	panics atomic.Uint64
+	onReq  func(req fuseReq)
 }
 
 // cacheKey es la versión de un fichero a efectos de la caché de páginas.
@@ -299,47 +305,78 @@ func (fs *fuseFS) serve() {
 			log.Printf("share %s: %v", fs.mount, err)
 			continue
 		}
-		switch req.opcode {
-		case opInit:
-			fs.write(fs.init(req))
-			if fs.afterInit != nil {
-				fs.afterInit(fs.mount)
-			}
-			continue
-		case opForget:
-			if len(req.arg) >= 8 {
-				fs.nodes.forget(req.nodeid, le.Uint64(req.arg))
-			}
-			continue
-		case opBatchForget:
-			fs.batchForget(req.arg)
-			continue
-		case opInterrupt:
-			// Sin respuesta: la operación interrumpida contestará sola, con su
-			// resultado o con EIO, y el kernel lo acepta en cualquier orden.
-			continue
-		case opDestroy:
-			fs.write(reply(req.unique, 0))
-			continue
-		}
-		// Un write diferible se contesta aquí mismo, sin goroutine: en una
-		// carpeta que recibe miles de escrituras pequeñas, el cambio de hilo
-		// pesaba tanto como la propia escritura. Si tendría que esperar, va
-		// por el camino normal.
-		if req.opcode == opWrite {
-			if out, ok := fs.write1(req, false); ok {
+		if out, done := fs.guarded(req, fs.inline); done {
+			if out != nil {
 				fs.write(out)
-				continue
 			}
+			continue
 		}
 		fs.inflight <- struct{}{}
 		go func() {
 			defer func() { <-fs.inflight }()
-			if out := fs.handle(req); out != nil {
+			out, _ := fs.guarded(req, func(req fuseReq) ([]byte, bool) { return fs.handle(req), true })
+			if out != nil {
 				fs.write(out)
 			}
 		}()
 	}
+}
+
+// inline atiende en el propio bucle lo que no merece goroutine. done dice si
+// la petición quedó atendida (out es nil si no lleva respuesta o ya se dio).
+func (fs *fuseFS) inline(req fuseReq) (out []byte, done bool) {
+	switch req.opcode {
+	case opInit:
+		fs.write(fs.init(req))
+		if fs.afterInit != nil {
+			fs.afterInit(fs.mount)
+		}
+		return nil, true
+	case opForget:
+		if len(req.arg) >= 8 {
+			fs.nodes.forget(req.nodeid, le.Uint64(req.arg))
+		}
+		return nil, true
+	case opBatchForget:
+		fs.batchForget(req.arg)
+		return nil, true
+	case opInterrupt:
+		// Sin respuesta: la operación interrumpida contestará sola, con su
+		// resultado o con EIO, y el kernel lo acepta en cualquier orden.
+		return nil, true
+	case opDestroy:
+		return reply(req.unique, 0), true
+	case opWrite:
+		// Un write diferible se contesta aquí mismo, sin goroutine: en una
+		// carpeta que recibe miles de escrituras pequeñas, el cambio de hilo
+		// pesaba tanto como la propia escritura. Si tendría que esperar, va
+		// por el camino normal.
+		return fs.write1(req, false)
+	}
+	return nil, false
+}
+
+// guarded corre f y convierte un panic en EIO. Servido por virtio-fs
+// (fuse_host.go) este código corre en el proceso del VMM de kling-hv, y un
+// fallo ante una petición rara del invitado no puede tumbar la VM entera: se
+// cuenta, se deja en el log y la petición falla sola.
+func (fs *fuseFS) guarded(req fuseReq, f func(fuseReq) ([]byte, bool)) (out []byte, done bool) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		fs.panics.Add(1)
+		log.Printf("share %s: panic serving FUSE op %d: %v\n%s", fs.mount, req.opcode, r, debug.Stack())
+		out, done = nil, true
+		switch req.opcode {
+		case opForget, opBatchForget, opInterrupt:
+			// No llevan respuesta.
+		default:
+			out = reply(req.unique, share.EIO)
+		}
+	}()
+	return f(req)
 }
 
 func (fs *fuseFS) write(b []byte) {
@@ -407,6 +444,9 @@ func (fs *fuseFS) batchForget(arg []byte) {
 func (fs *fuseFS) handle(req fuseReq) []byte {
 	u := req.unique
 	fail := func(errno uint32) []byte { return reply(u, errno) }
+	if fs.onReq != nil {
+		fs.onReq(req)
+	}
 
 	// Todo lo que sigue opera sobre un nodo que tiene que existir.
 	n := fs.nodes.get(req.nodeid)
