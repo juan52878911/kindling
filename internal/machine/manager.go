@@ -503,6 +503,15 @@ type Manager struct {
 	quit       chan struct{}
 	quitOnce   sync.Once
 	persistWG  sync.WaitGroup
+
+	// Los vigilantes (Watch) y lo que lanzan en segundo plano (la presión de
+	// memoria): Close los cancela con vigCancel y espera a vigWG, para que
+	// ninguno escriba state.json después de que Close vuelva. cerrando se
+	// pone al empezar Close: freezeSi y removeSi no empiezan nada después.
+	vigMu     sync.Mutex
+	vigCancel []context.CancelFunc
+	vigWG     sync.WaitGroup
+	cerrando  atomic.Bool
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -981,9 +990,34 @@ func (m *Manager) persistLoop() {
 			if timer != nil {
 				timer.Stop()
 			}
-			panico.Contener("persistLoop (cierre)", func() { _ = m.writePending() })
+			// La última: nadie más la va a escribir, así que un fallo pasajero
+			// (un EIO, un disco lleno que alguien está vaciando) se reintenta un
+			// rato en vez de perder la última transición. Con tope: un apagado
+			// no se cuelga de un disco que no vuelve.
+			panico.Contener("persistLoop (cierre)", func() { m.ultimaEscritura(ultimaEscrituraMax) })
 			return
 		}
+	}
+}
+
+// ultimaEscrituraMax es lo que el cierre reintenta la última escritura.
+const ultimaEscrituraMax = 2 * time.Second
+
+// ultimaEscritura es writePending reintentado hasta plazo.
+func (m *Manager) ultimaEscritura(plazo time.Duration) {
+	fin := time.Now().Add(plazo)
+	espera := 20 * time.Millisecond
+	for {
+		err := m.writePending()
+		if err == nil {
+			return
+		}
+		if time.Now().Add(espera).After(fin) {
+			log.Printf("shutdown: the last state write failed for %s; giving up: %v", plazo, err)
+			return
+		}
+		time.Sleep(espera)
+		espera = min(espera*2, 500*time.Millisecond)
 	}
 }
 
@@ -1121,6 +1155,14 @@ const cierreOperacionesMax = 30 * time.Second
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Primero, que no empiece nada nuevo en segundo plano, y que los
+		// vigilantes acaben lo que tengan entre manos (con plazo, como las
+		// operaciones de abajo): antes seguían solos, y uno que terminaba
+		// tarde reescribía state.json después de Close (trasCierre).
+		m.cerrando.Store(true)
+		// Un solo plazo para las dos esperas: el apagado no tarda más que antes.
+		fin := time.Now().Add(cierreOperacionesMax)
+		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
 		// Stop o Remove a medias escribe su transición AL ACABAR, y si la
@@ -1128,7 +1170,7 @@ func (m *Manager) Close() {
 		// arranque siguiente ve una máquina "running" que ya es un volcado.
 		// Con plazo: un apagado no puede quedarse colgado de un volcado que no
 		// termina. Lo que acabe después aún se escribe (ver trasCierre).
-		if !m.lifecycle.esperarLibres(cierreOperacionesMax) {
+		if !m.lifecycle.esperarLibres(max(time.Until(fin), time.Second)) {
 			log.Printf("shutdown: lifecycle operations still running after %s; their last state may not be saved", cierreOperacionesMax)
 		}
 		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
@@ -2400,6 +2442,11 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		return nil, noExiste(ref)
 	}
 	defer m.lock(mc.ID)()
+	// Con Close en curso no se empieza: su trasCierre escribiría el estado
+	// después del cierre.
+	if m.cerrandose() {
+		return nil, errCerrando
+	}
 
 	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
 	// congelarla otro, borrarla, o terminar de arrancar (Run lo tiene desde que
@@ -4023,6 +4070,10 @@ func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 			soltar()
 		}
 	}()
+	// Como en freezeSi: con Close en curso no se empieza nada.
+	if m.cerrandose() {
+		return errCerrando
+	}
 	// Releer con el cerrojo: si estaba arrancando, Run lo tenía y la copia de
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {

@@ -849,12 +849,61 @@ func (m *Manager) vmmSigue(vmms map[string]int, id string, pid int) bool {
 func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	// Las máquinas readoptadas al arrancar recuperan sus carpetas vivas ya, no
 	// a la primera vuelta del vigilante.
-	go m.ensureShares()
-	go m.watch(ctx, every)
-	go m.vigilarAlmacen(ctx)
+	m.lanzarVigilante(ctx, func(context.Context) { m.ensureShares() })
+	m.lanzarVigilante(ctx, func(ctx context.Context) { m.watch(ctx, every) })
+	m.lanzarVigilante(ctx, m.vigilarAlmacen)
 	// macOS: pausar las máquinas antes de que el Mac duerma (energia.go).
-	go m.vigilarEnergia(ctx)
+	m.lanzarVigilante(ctx, m.vigilarEnergia)
 }
+
+// lanzarVigilante corre f en su goroutine, con un ctx que Close cancela, y
+// contada en vigWG para que Close la espere. Tras Close no lanza nada.
+//
+// Desde dentro de otro vigilante (vigilarPresion) el Add es legal aunque
+// Close ya esté esperando: el contador no está a cero, lo sostiene quien
+// llama.
+func (m *Manager) lanzarVigilante(ctx context.Context, f func(context.Context)) {
+	m.vigMu.Lock()
+	if m.cerrando.Load() {
+		m.vigMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.vigCancel = append(m.vigCancel, cancel)
+	m.vigWG.Add(1)
+	m.vigMu.Unlock()
+	go func() {
+		defer m.vigWG.Done()
+		defer cancel()
+		f(ctx)
+	}()
+}
+
+// pararVigilantes cancela los vigilantes y espera a que acaben, hasta plazo.
+// cerrando ya está puesto: no se lanza ninguno más.
+func (m *Manager) pararVigilantes(plazo time.Duration) {
+	m.vigMu.Lock()
+	cancelar := m.vigCancel
+	m.vigCancel = nil
+	m.vigMu.Unlock()
+	for _, c := range cancelar {
+		c()
+	}
+	hecho := make(chan struct{})
+	go func() { m.vigWG.Wait(); close(hecho) }()
+	select {
+	case <-hecho:
+	case <-time.After(plazo):
+		log.Printf("shutdown: background watchers still running after %s; what they finish later may not be saved", plazo)
+	}
+}
+
+// cerrandose dice si Close ya empezó: lo que corre en segundo plano no
+// empieza nada nuevo (freezeSi, removeSi).
+func (m *Manager) cerrandose() bool { return m.cerrando.Load() || m.cerrado() }
+
+// errCerrando es la respuesta de una operación que llega con Close en curso.
+var errCerrando = errors.New("the daemon is shutting down")
 
 // ttlDesde es cuándo empezó a contar el TTL de mc.
 //
