@@ -652,6 +652,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	m.iniciarBroker()
 	m.reconcile()
 	m.recuperarTumbas()
+	// Tras readoptar: un volumen solo es del VMM si alguna máquina viva lo
+	// tiene en escritura; lo demás (los de un daemon que murió con escritores,
+	// los de versiones en que eran siempre del VMM) vuelve a root.
+	m.ajustarDuenosVolumenes()
 	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
 	// se quedó con el techo de arranque (ver arranque_cpu.go).
@@ -3460,6 +3464,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.thawFallida(mc); err != nil {
 			return nil, err
 		}
+		// Una failed no cuenta como usuaria de sus volúmenes, y al fallar
+		// volvieron a root (ajustarDuenosLocked): su VMM los necesita otra vez.
+		if err := m.readmitirVolumenes(mc); err != nil {
+			return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+		}
 	} else if mc.State != api.StateWarm {
 		return nil, estadoInvalido("only a warm, paused or failed machine can be thawed (it is %s)", mc.State)
 	}
@@ -4048,6 +4057,8 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	live.HooksPending = ""
 	m.ganchosPendientes.Delete(mc.ID)
 	delete(m.socket, mc.ID)
+	// Parada no escribe: sus volúmenes vuelven a root (duenoVolumen).
+	m.ajustarDuenosLocked(nombresVolumenes(live.Volumes))
 	m.persist()
 	out := *live
 	m.mu.Unlock()

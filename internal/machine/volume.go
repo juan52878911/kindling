@@ -253,6 +253,9 @@ func (m *Manager) reservarVolumenes(req api.RunRequest, id, nombre string) ([]re
 	if err != nil {
 		return nil, err
 	}
+	if err := m.adjudicarVolumenesLocked(vols); err != nil {
+		return nil, err
+	}
 	if m.volReservas == nil {
 		m.volReservas = map[string][]reservaVolumen{}
 	}
@@ -274,6 +277,7 @@ func (m *Manager) soltarReservas(id string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var soltados []string
 	for nombre, rs := range m.volReservas {
 		quedan := rs[:0]
 		for _, r := range rs {
@@ -281,12 +285,65 @@ func (m *Manager) soltarReservas(id string) {
 				quedan = append(quedan, r)
 			}
 		}
+		if len(quedan) < len(rs) {
+			soltados = append(soltados, nombre)
+		}
 		if len(quedan) == 0 {
 			delete(m.volReservas, nombre)
 		} else {
 			m.volReservas[nombre] = quedan
 		}
 	}
+	// Un arranque que falló no deja el disco en manos del VMM; uno que llegó
+	// a byID lo conserva, porque ahí ya cuenta como escritor.
+	m.ajustarDuenosLocked(soltados)
+}
+
+// readmitirVolumenes vuelve a admitir los volúmenes de una máquina failed que
+// se va a descongelar de su volcado, como reclamarParada los de una parada:
+// nadie más puede tenerlos en escritura (ni leerlos, si ella escribe), y
+// recuperan el dueño que les toca.
+func (m *Manager) readmitirVolumenes(mc *api.Machine) error {
+	if len(mc.Volumes) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	vols, err := comprobarVolumenes(m, api.RunRequest{Volumes: mc.Volumes}, m.volumeUsersLocked())
+	if err != nil {
+		return err
+	}
+	return m.adjudicarVolumenesLocked(vols)
+}
+
+// nombresVolumenes son los nombres de unos volúmenes montados.
+func nombresVolumenes(vs []api.VolumeAttachment) []string {
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, v.Name)
+	}
+	return out
+}
+
+// adjudicarVolumenesLocked da a cada volumen admitido el dueño que le toca
+// (duenoVolumen): el usuario del VMM al que lo monta en escritura, que es el
+// único que lo tiene; root a uno que se monta de solo lectura, aunque lo haya
+// dejado del VMM un escritor que murió sin pasar por aquí. Es lo que impide
+// que el VMM de un lector lo abra en escritura (M2). Si no se puede, no se
+// admite: arrancar sin ello sería montar «ro» un disco que el VMM puede
+// escribir. Deshace lo que ya hubiera cedido.
+func (m *Manager) adjudicarVolumenesLocked(vols []resolvedVolume) error {
+	for i, v := range vols {
+		if err := m.duenoVolumen(v.path, !v.readOnly); err != nil {
+			for _, w := range vols[:i] {
+				if !w.readOnly {
+					_ = m.duenoVolumen(w.path, false)
+				}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // RemoveVolume borra un volumen, salvo que alguien lo esté usando.
