@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -455,6 +456,35 @@ func WriteFrame(w io.Writer, body []byte) error {
 	return err
 }
 
+// FrameHead es lo que ocupa la cabecera de una trama.
+const FrameHead = 4
+
+// ResponseFrame es Response con el hueco de la cabecera de la trama delante y
+// sitio para extra bytes más: lo que se escriba cabe sin crecer, y
+// WriteFramed lo manda sin copiarlo. Es para las respuestas grandes (OpRead),
+// que si no pasaban por tres búferes del tamaño de la lectura.
+func ResponseFrame(id uint64, errno uint32, extra int) *Enc {
+	e := &Enc{B: make([]byte, FrameHead, FrameHead+12+extra)}
+	e.U64(id)
+	e.U32(errno)
+	return e
+}
+
+// WriteFramed escribe una trama hecha con ResponseFrame: rellena la cabecera
+// en su hueco y la manda en una sola escritura, como WriteFrame.
+func WriteFramed(w io.Writer, frame []byte) error {
+	if len(frame) < FrameHead {
+		return errors.New("frame without room for its header")
+	}
+	n := len(frame) - FrameHead
+	if n > MaxFrame {
+		return fmt.Errorf("frame of %d bytes; the limit is %d", n, MaxFrame)
+	}
+	binary.BigEndian.PutUint32(frame, uint32(n))
+	_, err := w.Write(frame)
+	return err
+}
+
 // ReadFrame lee una trama. El tope no es una cortesía: sin él, el otro extremo
 // decide cuánta memoria reservamos.
 func ReadFrame(r io.Reader) ([]byte, error) {
@@ -503,6 +533,19 @@ func (e *Enc) Str(s string) {
 func (e *Enc) Bytes(b []byte) {
 	e.U32(uint32(len(b)))
 	e.B = append(e.B, b...)
+}
+
+// BytesFrom escribe un bloque de hasta n bytes que fill rellena en su sitio,
+// sin búfer intermedio (un ReadAt). fill devuelve cuántos escribió; su error
+// se devuelve tal cual, con el bloque ya cerrado con lo escrito.
+func (e *Enc) BytesFrom(n int, fill func([]byte) (int, error)) error {
+	at := len(e.B)
+	e.B = slices.Grow(e.B, 4+n)[:at+4+n]
+	k, err := fill(e.B[at+4:])
+	k = min(max(k, 0), n)
+	binary.BigEndian.PutUint32(e.B[at:], uint32(k))
+	e.B = e.B[:at+4+k]
+	return err
 }
 
 // Dec lee un cuerpo con comprobación de límites. El primer error se queda

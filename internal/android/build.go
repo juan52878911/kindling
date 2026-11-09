@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/internal/imagen"
@@ -134,7 +135,7 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	agentSum, err := imagen.SHA256File(b.agent)
+	agentSum, err := digest.File(b.agent)
 	if err != nil {
 		return fmt.Errorf("guest agent: %w (set KLING_GUEST_AGENT or install it with make deploy)", err)
 	}
