@@ -133,6 +133,33 @@ func TestDrainReintentaLasPendientes(t *testing.T) {
 	}
 }
 
+// Una llamada más larga que idle deja vieja la ruta de su sesión (lastUse es
+// cuándo llegó), pero sigue en vuelo: el segador no puede borrarla, o la
+// siguiente petición de esa sesión daría 404.
+func TestElSegadorNoBorraLaRutaDeUnaLlamadaEnVuelo(t *testing.T) {
+	g := &Scheduler{
+		idle:     time.Minute,
+		services: map[string]*entry{},
+		extra:    map[string][]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	hace := time.Now().Add(-5 * time.Minute)
+	g.services["svc"] = &entry{machineID: "m1", lastUse: hace, renewedAt: time.Now(), inflight: 1}
+	g.routes["larga"] = &sessionRoute{service: "svc", machineID: "m1", lastUse: hace}
+	g.routes["ociosa"] = &sessionRoute{service: "svc", machineID: "m-otra", lastUse: hace}
+
+	g.reapOnce(context.Background())
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.routes["larga"] == nil {
+		t.Error("el segador borró la ruta de una sesión con una llamada en vuelo")
+	}
+	if g.routes["ociosa"] != nil {
+		t.Error("la ruta ociosa de verdad debía caducar")
+	}
+}
+
 // Una máquina despierta cuya herramienta no llega a escuchar no se queda viva
 // sin dueño: con MachineTTL negativo nadie más la pararía. La recién
 // restaurada se borra; la adoptada o descongelada se congela.

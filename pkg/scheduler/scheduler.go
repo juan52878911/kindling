@@ -1815,6 +1815,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		if _, aislada := g.aisladas[sid]; aislada {
 			continue
 		}
+		// lastUse es cuándo LLEGÓ la última petición: una llamada de cinco
+		// minutos la deja vieja mientras sigue corriendo, y borrar la ruta
+		// daba 404 a la siguiente de esa sesión. Su instancia con trabajo en
+		// vuelo no se congela (arriba), así que su sesión sigue valiendo.
+		if e := g.entryByMachineLocked(rt.service, rt.machineID); e != nil && e.inflight > 0 {
+			continue
+		}
 		if time.Since(rt.lastUse) > g.idle {
 			delete(g.routes, sid)
 		}
