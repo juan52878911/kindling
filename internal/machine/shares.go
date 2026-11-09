@@ -36,10 +36,39 @@ type ShareConfig struct {
 	Roots []string
 	// CopyMaxBytes acota el contenido de una subida en modo copy.
 	CopyMaxBytes int64
+	// Cuota de cada carpeta rw (daemon.share_max_mib, share_max_files y
+	// share_min_free_mib): 0 = el valor por defecto, negativo = sin tope.
+	MaxBytes, MaxFiles, MinFreeBytes int64
 }
 
 // DefaultShareCopyMax es el tope por defecto de una copia.
 const DefaultShareCopyMax = 1 << 30
+
+// Cuota por defecto de una carpeta rw (M5): de sobra para un repositorio con
+// sus dependencias y lo que compila, y lejos de llenar el disco de un portátil.
+const (
+	DefaultShareMaxBytes = 32 << 30
+	DefaultShareMaxFiles = 1_000_000
+	DefaultShareMinFree  = 1 << 30
+)
+
+// shareLimits son los topes de la cuota de una carpeta rw según c.
+func (c ShareConfig) shareLimits() hostshare.Limits {
+	tope := func(v, def int64) int64 {
+		switch {
+		case v == 0:
+			return def
+		case v < 0:
+			return 0 // sin tope
+		}
+		return v
+	}
+	return hostshare.Limits{
+		MaxBytes: tope(c.MaxBytes, DefaultShareMaxBytes),
+		MaxFiles: tope(c.MaxFiles, DefaultShareMaxFiles),
+		MinFree:  tope(c.MinFreeBytes, DefaultShareMinFree),
+	}
+}
 
 // Errores con código propio en el API.
 var (
@@ -600,6 +629,9 @@ type shareTag struct {
 	first     chan struct{}
 	firstOnce sync.Once
 	permErr   error
+	// quota es la cuota de la carpeta si es rw: de este arranque de la
+	// máquina, la comparten todas las reconexiones.
+	quota *hostshare.Quota
 }
 
 func (t *shareTag) set(status string) {
@@ -675,11 +707,15 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &shareRun{cancel: cancel, done: make(chan struct{}), drain: make(chan struct{})}
+	lim := m.shareConfig().shareLimits()
 	for tag, s := range mc.Shares {
 		if !s.Live() {
 			continue
 		}
 		t := &shareTag{tag: tag, status: "detached", first: make(chan struct{})}
+		if s.Mode == share.ModeRW {
+			t.quota = hostshare.NewQuota(lim)
+		}
 		run.tags = append(run.tags, t)
 		run.wg.Add(1)
 		go func(s api.ShareAttachment) {
@@ -954,6 +990,7 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 		return fmt.Errorf("opening %s: %w", s.Source, err)
 	}
 	defer srv.Close()
+	srv.SetQuota(t.quota)
 	if err := m.comprobarCarpeta(s, srv); err != nil {
 		return errPermanente{err}
 	}
