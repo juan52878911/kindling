@@ -382,13 +382,29 @@ jobs:
       # el repo. Las rutas dentro de cada tar son las mismas que tenían en los
       # repos kindling-mcp y kindling-sandbox (scripts/, packaging/, deploy/),
       # así que las recetas que ya los desempaquetaban siguen valiendo.
+      #
+      # deployment.yaml lleva en el repo una etiqueta de la imagen del
+      # operador que no es la de esta release: en el tar va la de esta (la
+      # que empuja el job imagen), sobre una copia, y si la línea no está el
+      # paso falla en vez de empaquetar la vieja.
       - name: tar del host y del operador
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -eu
           tar -czf release/kindling-mcp-host.tar.gz -C ext/mcp \
             scripts/80-mcp-image.sh scripts/builders/mcp packaging/
           tar -czf release/kindling-sandbox-host.tar.gz -C ext/sandbox packaging/
-          tar -czf release/kindling-operator-deploy.tar.gz -C ext/sandbox deploy/
+          op="$RUNNER_TEMP/operador"
+          mkdir -p "$op" && cp -R ext/sandbox/deploy "$op/"
+          img=ghcr.io/juan52878911/kindling-operator
+          sed -E "s#(image: $img):[^[:space:]]+#\1:$VERSION#" ext/sandbox/deploy/deployment.yaml > "$op/deploy/deployment.yaml"
+          grep -Eq "^ +image: $img:$VERSION\$" "$op/deploy/deployment.yaml" \
+            || { echo "deployment.yaml has no image: $img line to set to $VERSION" >&2; exit 1; }
+          if grep -n "$img:" "$op/deploy/"*.yaml | grep -v ":$VERSION\$"; then
+            echo "an operator image in deploy/ is not $VERSION" >&2; exit 1
+          fi
+          tar -czf release/kindling-operator-deploy.tar.gz -C "$op" deploy/
 
       # La lista del contrato de assets, escrita una vez: si un binario falta
       # (un paso que no compiló, un nombre cambiado) la release no sale a
