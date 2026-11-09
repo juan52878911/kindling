@@ -737,6 +737,18 @@ cambia:
   kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
   los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
   overlay en ext4.
+- **El e2fsck del arranque sí lee lo que escribió el invitado** (el ext4 del overlay y de cada
+  volumen rw, también en un `put` o al refrescar un puente), y es un parser en C: no corre con los
+  privilegios del daemon. Recibe el disco ya abierto (`/dev/fd/3`), sin el entorno del daemon y con
+  plazo. En Linux, con el daemon root, corre con el dueño del disco si no es root (el usuario del
+  VMM con `-run-as`) o con nobody (al que se le cede el fichero mientras dura y se le devuelve),
+  sin grupos ni capacidades, en namespaces nuevos de red, PID e IPC y con `prlimit --as` a 2 GiB
+  si hay `prlimit`. En macOS, con el usuario del daemon dentro de un perfil de `sandbox-exec` que
+  no deja red ni leer más que el sistema y Homebrew, ni escribir más que su descriptor; macOS no
+  aplica RLIMIT_AS, así que ahí no hay tope de memoria. Sigue leyendo con nobody lo que nobody
+  pueda leer del host (sin red para sacarlo, pero podría escribirlo en el disco del invitado);
+  con `-run-as` es el mismo usuario que ya tiene el VMM. Pendiente: `resize2fs` (al crecer la
+  imagen de un puente) y `debugfs` (el `put` sin montar de macOS) aún corren sin confinar.
 - El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
   VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
   escribir en la copia de la que se clonan las demás instancias.
