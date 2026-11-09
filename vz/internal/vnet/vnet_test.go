@@ -196,6 +196,55 @@ func newRigWith(t *testing.T, dialTo string, cred http.Handler) *rig {
 	return r
 }
 
+// Un reenvío abierto antes de montar la red (ListenReservado) y adoptado
+// llega al invitado igual que uno de Forward, y Forward da su dirección.
+func TestAdoptarReenvio(t *testing.T) {
+	pre, err := ListenReservado()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, "")
+	l, err := gonet.ListenTCP(r.g.s, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: 8080}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(c, "hola")
+			c.Close()
+		}
+	}()
+	if err := r.n.Adoptar(8080, pre); err != nil {
+		t.Fatal(err)
+	}
+	if addr, _ := r.n.Forward(8080); addr != pre.Addr().String() {
+		t.Fatalf("Forward tras Adoptar = %s, quería %s", addr, pre.Addr())
+	}
+	c, err := net.DialTimeout("tcp", pre.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(c)
+	c.Close()
+	if string(got) != "hola" {
+		t.Fatalf("por el reenvío adoptado: %q", got)
+	}
+	// Otro para el mismo puerto se cierra: manda el primero.
+	otro, err := ListenReservado()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.n.Adoptar(8080, otro)
+	if _, err := otro.Accept(); err == nil {
+		t.Fatal("el segundo reservado del mismo puerto debía cerrarse")
+	}
+}
+
 func TestForwardReachesGuest(t *testing.T) {
 	r := newRig(t, "")
 	l, err := gonet.ListenTCP(r.g.s, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: 8080}, ipv4.ProtocolNumber)

@@ -12,6 +12,8 @@
 ;;           aristas de grafo, de kling db attach y del upstream en el
 ;;           loopback de una credencial (pkg/linkbroker)
 ;;   GFX     "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
+;;   FWD     "1" si puede abrir reenvíos (escuchar en el loopback): solo
+;;           cuando el núcleo no los pidió antes de crear la VM (uno anterior)
 ;;   NL NE   cuántos ficheros L y E hay (hasta 16 de cada)
 ;;   L0..    ficheros que solo lee: kernel, discos de solo lectura, el estado
 ;;           que restaura (su dorado o su congelación)
@@ -22,16 +24,24 @@
 (import "system.sb")
 
 ;; Lo que el proceso y Virtualization.framework necesitan para funcionar.
+;; Ni mach-lookup, ni iokit-open, ni memoria compartida POSIX más allá de lo
+;; que ya da system.sb (trustd, cfprefsd, logd...): medido en macOS 26.5 con
+;; una VM de verdad (arranque, exec, freeze, thaw, stop y start; egress none,
+;; internet y allowlist con una credencial cuyo proxy verifica TLS), el
+;; framework no pide nada más, y un kling-vz tomado por su invitado no llega
+;; al portapapeles, a securityd ni a tccd. Con pantalla (GFX) sí se dejan
+;; IOKit y la memoria compartida: el scanout va por IOSurface (ver abajo).
 (allow process-info* (target self))
 (allow process-info-listpids)
 (allow process-info-pidinfo)
 (allow process-info-pidfdinfo)
 (allow process-info-rusage)
 (allow sysctl-read)
-(allow mach-lookup)
-(allow iokit-open)
-(allow ipc-posix-shm-read* ipc-posix-shm-write-data)
 (allow file-read-metadata)
+;; Los metadatos de las demás máquinas tampoco (qué ficheros tienen y de qué
+;; tamaño): de machines/ solo el directorio y el suyo (más abajo, MDIR).
+(deny file-read-metadata (subpath (string-append (param "ROOT") "/machines")))
+(allow file-read-metadata (literal (string-append (param "ROOT") "/machines")) (subpath (param "MDIR")))
 
 (define (si-hay nombre regla)
   (if (not (string=? (param nombre) "")) (regla (param nombre))))
@@ -45,12 +55,14 @@
 ;; kling commit (snapshots/<nombre>/) no lo escribe este proceso: lo vuelca en
 ;; su directorio y lo publica el daemon (internal/machine/publicar_volcado.go).
 (allow file-read* file-write* file-ioctl (subpath (param "MDIR")))
-(cada-uno "L" (string->number (param "NL")) (lambda (f) (allow file-read* (literal f))))
-(cada-uno "E" (string->number (param "NE")) (lambda (f) (allow file-read* file-write* file-ioctl (literal f))))
+;; file-read-metadata a mano: un file-read* no gana al deny de metadatos de
+;; machines/ de arriba (medido), y un disco de solo lectura puede vivir en el
+;; directorio de otra máquina.
+(cada-uno "L" (string->number (param "NL")) (lambda (f) (allow file-read* file-read-metadata (literal f))))
+(cada-uno "E" (string->number (param "NE")) (lambda (f) (allow file-read* file-write* file-ioctl file-read-metadata (literal f))))
 
 ;; Red: su API (socket Unix en el directorio de la máquina) y sus reenvíos,
-;; que escuchan en 127.0.0.1 (cualquier puerto: escuchar no da acceso a nada
-;; de otra máquina, conectar sí, y eso sigue cerrado); el socket del broker del
+;; que escuchan en 127.0.0.1; el socket del broker del
 ;; daemon y ningún otro socket Unix de fuera; y salida al exterior solo si la
 ;; máquina la tiene. Nunca al loopback del Mac (0.0.0.0 incluido, que en macOS
 ;; llega a él), donde están los reenvíos de las demás máquinas y su agente
@@ -60,7 +72,15 @@
 ;; rango de los reenvíos: 1000 reglas eran ~20 ms de compilar el perfil en
 ;; cada arranque y cada restauración.
 (allow network-bind network-inbound (local unix-socket (subpath (param "MDIR"))))
-(allow network-bind network-inbound (local ip "localhost:*"))
+;; Los reenvíos los abre antes de confinarse (el núcleo los pide antes de
+;; crear la VM, server.reservarLocked), así que confinado no escucha en ningún
+;; puerto TCP: ni en el reenvío vivo de otra máquina ni en el puerto libre de
+;; un -upstream del loopback (un Postgres parado), donde el proxy de otra
+;; máquina entregaría su clave. SBPL no tiene rangos de puertos, y 1000 reglas
+;; del rango reservado eran ~36 ms más de sandbox_init. Con un núcleo anterior
+;; (FWD=1) sigue escuchando en cualquier puerto del loopback, como antes.
+(if (string=? (param "FWD") "1")
+  (allow network-bind network-inbound (local ip "localhost:*")))
 (allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))
@@ -72,7 +92,10 @@
 ;; extension". Solo con pantalla. Medido en macOS 26.5: basta
 ;; generic-issue-extension (ni iokit-, ni file-, ni mach-issue-extension solos).
 (if (string=? (param "GFX") "1")
-  (allow generic-issue-extension))
+  (begin
+    (allow generic-issue-extension)
+    (allow iokit-open)
+    (allow ipc-posix-shm-read* ipc-posix-shm-write-data)))
 
 ;; Por si un fichero de la VM apuntara ahí (un disco o un estado mal
 ;; reapuntado por el daemon): secrets/ nunca, y los dorados nunca para

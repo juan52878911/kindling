@@ -57,6 +57,8 @@ type LinkSpec struct {
 	Target string
 	// Resolve se llama en cada conexión.
 	Resolve credproxy.ResolveLinkFunc
+	// Recheck se llama tras marcar (credproxy.LinkOptions).
+	Recheck func(addr, machine string) error
 }
 
 // GraphSpec es lo que SetGraph monta en el netns de un nodo.
@@ -204,6 +206,7 @@ func SetGraph(n *Net, spec GraphSpec) error {
 			Name:     k,
 			Target:   l.Target,
 			Resolve:  l.Resolve,
+			Recheck:  l.Recheck,
 			MaxConns: maxConnsEnlace,
 			Auditor:  p.proxy.Auditor(),
 			// Sin Logf: cada fallo ya queda en la auditoría de la máquina, y

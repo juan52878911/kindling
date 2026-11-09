@@ -26,6 +26,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -466,7 +467,28 @@ func shareConfig() machine.ShareConfig {
 			mib = n
 		}
 	}
-	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+	// La cuota de las carpetas rw: 0 = por defecto, -1 = sin tope (docs/compartir.md).
+	cuota := func(fichero int, env string) int64 {
+		if v := os.Getenv(env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= -1 {
+				return int64(n)
+			}
+			log.Printf("warning: %s=%q is not -1, 0 or a positive number (ignored)", env, v)
+		}
+		return int64(fichero)
+	}
+	enBytes := func(mib int64) int64 {
+		if mib > 0 {
+			return mib << 20
+		}
+		return mib
+	}
+	return machine.ShareConfig{
+		Roots: roots, CopyMaxBytes: int64(mib) << 20,
+		MaxBytes:     enBytes(cuota(cfg.Daemon.ShareMaxMiB, "KLING_SHARE_MAX_MIB")),
+		MaxFiles:     cuota(cfg.Daemon.ShareMaxFiles, "KLING_SHARE_MAX_FILES"),
+		MinFreeBytes: enBytes(cuota(cfg.Daemon.ShareMinFreeMiB, "KLING_SHARE_MIN_FREE_MIB")),
+	}
 }
 
 // netMiBpsConfig lee daemon.net_mibps; KLING_NET_MIBPS manda sobre el fichero.
@@ -939,7 +961,7 @@ func cmdSave(args []string) error {
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
 	for _, w := range snap.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", saneado.Texto(w))
 	}
 	next("kling run -from %s", snap.Name)
 	return nil

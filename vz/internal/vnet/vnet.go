@@ -695,7 +695,7 @@ func (n *Net) Forward(port int) (string, error) {
 	if l, ok := n.forwards[port]; ok {
 		return l.Addr().String(), nil
 	}
-	l, err := listenReservado()
+	l, err := ListenReservado()
 	if err != nil {
 		return "", err
 	}
@@ -704,12 +704,32 @@ func (n *Net) Forward(port int) (string, error) {
 	return l.Addr().String(), nil
 }
 
-// listenReservado abre 127.0.0.1:<p> con p del rango reservado a los
+// Adoptar hace de l el reenvío del puerto port del invitado: un puerto que
+// kling-vz abrió (ListenReservado) antes de montar la red, cuando aún podía
+// escuchar; ya confinado no puede (ver kling-vz.sb). Si el puerto ya tiene
+// reenvío, o la red está cerrada, l se cierra.
+func (n *Net) Adoptar(port int, l net.Listener) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		l.Close()
+		return errors.New("network is closed")
+	}
+	if _, ok := n.forwards[port]; ok {
+		l.Close()
+		return nil
+	}
+	n.forwards[port] = l
+	go n.acceptForward(l, uint16(port))
+	return nil
+}
+
+// ListenReservado abre 127.0.0.1:<p> con p del rango reservado a los
 // reenvíos. Empieza en un punto al azar para que varios kling-vz arrancando a
 // la vez no se peleen por el mismo puerto, y salta los ocupados (de otra
 // máquina o de cualquier otro programa). Sin hueco, error: nunca se cae a un
 // puerto fuera del rango.
-func listenReservado() (net.Listener, error) {
+func ListenReservado() (net.Listener, error) {
 	n := credproxy.ForwardPortMax - credproxy.ForwardPortMin + 1
 	inicio := rand.IntN(n)
 	for i := 0; i < n; i++ {

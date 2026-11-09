@@ -162,6 +162,8 @@ type fakeNet struct {
 	// soloTCP: lo último que dijo SetGuestDialer, y lo que contesta
 	// GuestOnlyTCP.
 	soloTCP bool
+	// adoptados: los reenvíos reservados antes de montar la red (Adoptar).
+	adoptados []net.Listener
 }
 
 func (n *fakeNet) VMFile() *os.File { return nil }
@@ -187,6 +189,20 @@ func (n *fakeNet) Forward(p int) (string, error) {
 	return a, nil
 }
 func (n *fakeNet) Close() { n.closed = true }
+
+// Adoptar: el doble se queda con la dirección del reservado (y lo cierra al
+// cerrarse la prueba, como la red de verdad al cerrarse).
+func (n *fakeNet) Adoptar(p int, l net.Listener) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, ok := n.fwd[p]; ok {
+		l.Close()
+		return nil
+	}
+	n.fwd[p] = l.Addr().String()
+	n.adoptados = append(n.adoptados, l)
+	return nil
+}
 
 type rig struct {
 	t    *testing.T
@@ -336,7 +352,6 @@ func TestErrorsAndUnknownRoutes(t *testing.T) {
 	r.mustFail("PUT", "/snapshot/create", `{"snapshot_path":"/a","mem_file_path":"/b"}`, "must be paused")
 	r.mustFail("PUT", "/snapshot/create", `{"snapshot_type":"Diff","snapshot_path":"/a","mem_file_path":"/b"}`, "Full")
 	r.mustFail("PUT", "/kling/network", `{"egress":"everything"}`, "unknown egress policy")
-	r.mustFail("PUT", "/kling/forwards", `{"ports":[8080]}`, "not up yet")
 }
 
 // Una VM anidada (kling_nested) no tiene snapshot: se niega antes de mirar

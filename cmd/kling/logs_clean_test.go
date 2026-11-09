@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // La consola del invitado no llega en crudo al terminal: ni OSC 52 (el
@@ -37,5 +42,40 @@ func TestFollowLogsLimpio(t *testing.T) {
 	}
 	if strings.ContainsRune(buf.String(), 0x1b) || !strings.Contains(buf.String(), "línea") {
 		t.Errorf("salida = %q", buf.String())
+	}
+}
+
+// Un error o el «why» de ready con texto del invitado no lleva secuencias de
+// escape crudas a la terminal; con -json el texto va tal cual (JSON ya escapa
+// el ESC como \u001b).
+func TestTextoDelInvitadoEscapado(t *testing.T) {
+	const osc = "\x1b]52;c;ZXZpbA==\x07"
+	var buf bytes.Buffer
+	printError(&buf, fmt.Errorf("guest agent: %s\rerror: fake", osc))
+	if strings.ContainsAny(buf.String(), "\x1b\x07\r") || !strings.Contains(buf.String(), `\x1b]52`) {
+		t.Errorf("printError = %q", buf.String())
+	}
+
+	buf.Reset()
+	res := &api.ReadyResult{Name: "m", ID: "0123456789abcdef", Ready: api.ReadyWaiting,
+		Guest: &api.GuestReady{Probe: true, Detail: "probe: " + osc}}
+	_ = printReady(&buf, res, false)
+	if strings.ContainsRune(buf.String(), 0x1b) || !strings.Contains(buf.String(), `why    probe: \x1b]52`) {
+		t.Errorf("printReady = %q", buf.String())
+	}
+	buf.Reset()
+	res.Guest, res.Detail = nil, osc
+	_ = printReady(&buf, res, false)
+	if strings.ContainsRune(buf.String(), 0x1b) {
+		t.Errorf("printReady sin agente = %q", buf.String())
+	}
+
+	buf.Reset()
+	salidaJSON.Store(true)
+	defer salidaJSON.Store(false)
+	printError(&buf, errors.New(osc))
+	var e errorJSON
+	if err := json.Unmarshal(buf.Bytes(), &e); err != nil || e.Error != osc {
+		t.Errorf("printError -json = %q (%v)", buf.String(), err)
 	}
 }

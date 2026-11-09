@@ -291,6 +291,12 @@ func (g *Scheduler) AuthHandler(h http.Handler, token string) http.Handler {
 // servidor externo enlazado— no tiene por qué verlo.
 func WithoutGatewayCredential(p *httputil.ReverseProxy) { sinCredencialDelGateway(p) }
 
+// FilterUpstreamResponse hace que p no deje al otro lado imponer nada al
+// cliente: un 3xx sale como 502 sin Location y solo pasan las cabeceras del
+// protocolo MCP y las necesarias para leer el cuerpo (no WWW-Authenticate,
+// Set-Cookie, CORS...). Los proxies hacia invitados ya lo llevan.
+func FilterUpstreamResponse(p *httputil.ReverseProxy) { soloRespuestaPermitida(p) }
+
 // ---- utilidades de red
 
 // Alive dice si algo acepta conexiones en ip:port ahora mismo.
