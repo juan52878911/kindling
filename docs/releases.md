@@ -202,7 +202,9 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    sobre el commit de la etiqueta, con `require_kvm` (un runner sin `/dev/kvm`
    falla en vez de avisar): microVMs de verdad con Firecracker, `90-e2e.sh`
    con `kling db` y carpetas vivas, `e2e-diff-freeze.sh` y `94-e2e-upgrade.sh`
-   desde la release anterior. Unos 5 min con el kernel en la caché del nocturno.
+   desde la release anterior. Unos 5 min con el kernel en la caché del
+   nocturno, más lo que tarde la parte db en construir la imagen pg16 y su
+   plantilla.
 6. **android** (tras test y lint): `android-kernels.yml` como `workflow_call`,
    los kernels Android del prototipo (arm64 y amd64) con su sha256, su
    `.config` y su `.buildinfo`, como artefactos de este run.

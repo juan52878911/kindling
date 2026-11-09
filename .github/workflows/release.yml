@@ -313,7 +313,7 @@ jobs:
   # etiqueta: 90-e2e.sh con kling db y carpetas vivas, el congelado
   # diferencial y `kling upgrade` de la release anterior a esta (94). Es
   # e2e-linux.yml entero (unos 5 min con el kernel en la caché que llena el
-  # nocturno); con require_kvm, un runner sin /dev/kvm falla en vez de avisar.
+  # nocturno, más la imagen pg16 y su plantilla de la parte db); con require_kvm, un runner sin /dev/kvm falla en vez de avisar.
   # Lo del Mac (92 y 95 con kling-hv) lo exige scripts/release.sh antes de
   # crear la etiqueta (docs/releases.md, paso 3c).
   e2e:
