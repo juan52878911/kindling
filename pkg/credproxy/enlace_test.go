@@ -355,3 +355,53 @@ func TestEnlaceMotivos(t *testing.T) {
 		}
 	}
 }
+
+// Tras marcar se vuelve a mirar que el destino sigue siendo el resuelto (lo
+// que hace el broker de macOS): si entre Resolve y el dial la máquina se
+// borró y otra heredó su dirección, la conexión marcada se cierra sin que
+// pase un byte, y la auditoría dice invalidated.
+func TestEnlaceRecompruebaTrasMarcar(t *testing.T) {
+	destino, aceptadas := ecoTCP(t)
+	var cambiada atomic.Bool
+	var vistos atomic.Value
+	e, addr, audPath := enlaceDePrueba(t, LinkOptions{
+		Resolve: func(context.Context) (string, string, error) { return destino, "b000000000000001", nil },
+		Recheck: func(a, maquina string) error {
+			vistos.Store(a + " " + maquina)
+			if cambiada.Load() {
+				return errors.New("machine b0000000 changed while connecting to it")
+			}
+			return nil
+		},
+	})
+	if got, err := ecoEnlace(t, addr, "hola"); err != nil || got != "hola" {
+		t.Fatalf("con el destino vigente: %q %v", got, err)
+	}
+	if v, _ := vistos.Load().(string); v != destino+" b000000000000001" {
+		t.Fatalf("Recheck recibió %q", v)
+	}
+	cambiada.Store(true)
+	if got, err := ecoEnlace(t, addr, "hola"); err == nil {
+		t.Fatalf("con el destino cambiado la conexión pasó: %q", got)
+	}
+	// El eco cuenta en su goroutine: puede ir detrás del cierre que ve el
+	// cliente.
+	for i := 0; i < 200 && aceptadas.Load() < 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := aceptadas.Load(); n != 2 {
+		t.Fatalf("el destino aceptó %d conexiones, esperaba 2 (la segunda se cierra tras marcar)", n)
+	}
+	var invalidadas int
+	for _, r := range registrosEnlace(t, e, audPath) {
+		if r.Reason == ReasonInvalidated {
+			invalidadas++
+			if r.ReqBytes != 0 {
+				t.Errorf("la invalidada pasó %d bytes", r.ReqBytes)
+			}
+		}
+	}
+	if invalidadas != 1 {
+		t.Fatalf("%d registros invalidated, esperaba 1", invalidadas)
+	}
+}

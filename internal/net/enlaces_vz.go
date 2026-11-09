@@ -19,6 +19,7 @@ type LinkSpec struct {
 	Port    int
 	Target  string
 	Resolve credproxy.ResolveLinkFunc
+	Recheck func(addr, machine string) error
 }
 
 // GraphSpec: ver enlaces_fc.go.
