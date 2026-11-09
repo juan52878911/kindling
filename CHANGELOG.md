@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `/metrics` measures resources: per-machine `kling_machine_wakeups_total{kind}` (macOS `pkg_idle`/`interrupt` from rusage, Linux `voluntary_switch` over all threads), `kling_machine_disk_bytes_total{op}`, `kling_machine_cpu_throttled_seconds_total` (cgroup `throttled_usec` on Linux, the kling-vz/kling-hv regulator on macOS); for the daemon itself `kling_daemon_footprint_mib`, `kling_daemon_rss_mib`, `kling_daemon_cpu_seconds_total`, `kling_daemon_wakeups_total`, `kling_daemon_goroutines`; `kling_battery_on`; and `kling_wake_phase_ms_total{kind,phase}`, the per-phase sum of successful thaws and resumes. `GET /procstats` carries the same per-machine figures. `GET /debug/pprof/` serves the daemon's Go profiles, admin only (capability `pprof`). See `docs/api.md#métricas-de-recursos`.
 - Per-volume sync mode on macOS: `-volume name:/mount:sync=barrier|none` (API `VolumeAttachment.sync`). `full` (default) keeps `F_FULLFSYNC` on every guest flush; `barrier` uses `F_BARRIERFSYNC` (kling-vz: `fsync`), 300 guest fsyncs ~1.7 s → ~0.1 s; `none` skips flushes (~10 ms) and can leave the volume's ext4 broken if the Mac goes down. Writable volumes only; accepted and ignored on Firecracker.
 - kling-hv: virtio-blk `DISCARD` and `WRITE_ZEROES` on writable disks (`F_PUNCHHOLE`, unaligned edges written as zeros): `fstrim` in the guest gives the space back to the host (216 → 16 MiB after deleting 200 MiB).
 - kling-hv: os_signpost intervals (subsystem `dev.kindling.hv`) for the cold boot, restore and freeze phases, plus events for the first guest instruction, the agent's first vsock answer and slow vCPU exits; free when nobody traces. `KLING_HV_TRACE=1` also logs a one-line breakdown per boot, restore and freeze (`docs/backend-hv.md`).
@@ -23,9 +24,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `-json` on `save`, `freeze`, `thaw`, `pause`, `stop`, `rm`, `start`, `cp` and `machine squeeze|resize|secret|credential`: they print what they left, one line per ref. With `-json` an error is one `{"error","code","try"}` line on stderr. The conventions (stdout/stderr, keys, codes, flags) are in `docs/guide.md#cli-conventions-output-json-flags`.
 - `kling doctor` checks the daemon's socket and its free disk against the admission minimum; `/info` reports `disk_free_bytes` (admin view).
 - Hints from the daemon's error codes: `disk_full` and `insufficient_memory` say what to do; a missing kernel points to `kling up -check`, an invalid name gives the naming rules, and `kling db` without the extension says what to install.
+- Guest agent: `POST /drop-caches` syncs and drops the guest page cache, returning `Cached` before and after (capability `drop-caches`, control path). The host does not call it yet.
 
 ### Changed
 
+- Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
 - A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
@@ -41,6 +44,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
 - A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
 - `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
+- Service output reaches the console (`kling logs`) only for the first 64 KiB of each start, then a notice; `kling logs -service` still has all of it.
+- The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
 - kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 
@@ -64,6 +69,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `/exec` no longer holds 3-5x its output in guest memory: the output is escaped straight into the response (16 MiB of output: 80 → 17 MiB allocated).
+- Pending write-behind on live shares is capped at 16 MiB across all files, not just 4 MiB per file.
 - macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
 - The watcher contains panics per step: a panic in one task (say `sweep`) no longer skips the TTL, gc and memory-pressure steps of every round. TTL expiry runs in the background, two machines at a time, so a slow freeze no longer stalls the watcher for everyone.
 - Daemon shutdown waits for the background watchers (and the memory-pressure work they start) before returning, so a late TTL freeze or removal no longer rewrites `state.json` after `Close`; background freezes and removals don't start once shutdown begins, and the last state write is retried for up to 2 s instead of once.

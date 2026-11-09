@@ -84,6 +84,23 @@ type telemetria struct {
 	presionAprieta     atomic.Int64
 	presionCongela     atomic.Int64
 	presionDevueltaMiB atomic.Int64
+
+	// fases suma, por clase de despertar (DurThaw, DurResume) y fase de
+	// FasesDespertar, lo que tardó esa fase en todos los que salieron bien,
+	// en µs. Con la cuenta del histograma de la clase da la media por fase:
+	// dónde se va el despertar, no solo cuánto dura.
+	fases map[string]*[len(FasesDespertar)]atomic.Int64
+}
+
+// FasesDespertar son las fases de api.WakePhases que se suman en /metrics,
+// en el orden en que ocurren.
+var FasesDespertar = [...]string{"wait", "check", "store", "mirror", "memory", "net", "spawn", "socket",
+	"load", "forwards", "resync", "cgroup", "finish"}
+
+// msFases son los campos de f en el orden de FasesDespertar.
+func msFases(f *api.WakePhases) [len(FasesDespertar)]float64 {
+	return [...]float64{f.WaitMS, f.CheckMS, f.StoreMS, f.MirrorMS, f.MemoryMS, f.NetMS, f.SpawnMS, f.SocketMS,
+		f.LoadMS, f.ForwardsMS, f.ResyncMS, f.CgroupMS, f.FinishMS}
 }
 
 // Los mapas se rellenan una vez y después solo se leen: los valores son
@@ -91,7 +108,8 @@ type telemetria struct {
 // managers de prueba hechos a mano no tengan que acordarse de inicializarla;
 // en el daemon hay un solo Manager.
 var tel = func() *telemetria {
-	t := &telemetria{ops: map[string]*contadorOp{}, dur: map[string]*histograma{}, rechazos: map[int]*atomic.Int64{}}
+	t := &telemetria{ops: map[string]*contadorOp{}, dur: map[string]*histograma{}, rechazos: map[int]*atomic.Int64{},
+		fases: map[string]*[len(FasesDespertar)]atomic.Int64{DurThaw: {}, DurResume: {}}}
 	for _, o := range opsTelemetria {
 		t.ops[o] = &contadorOp{}
 	}
@@ -115,6 +133,11 @@ func (t *telemetria) exito(op, dur string, ms int64) {
 // 110-300 en el lab), que no era lo que el histograma dice medir.
 func (t *telemetria) despertar(dur string, f *api.WakePhases) {
 	t.exito(OpThaw, dur, int64(f.TotalMS))
+	if s := t.fases[dur]; s != nil {
+		for i, ms := range msFases(f) {
+			s[i].Add(int64(max(ms, 0) * 1000))
+		}
+	}
 }
 
 // fin clasifica el error con el que acabó una operación. Sin error no hace
@@ -163,6 +186,9 @@ type Telemetria struct {
 	PresionApretones     int64
 	PresionCongelaciones int64
 	PresionDevueltaMiB   int64
+	// FasesMS es, por clase de despertar (DurThaw, DurResume) y fase
+	// (FasesDespertar), lo que sumaron todos los que salieron bien, en ms.
+	FasesMS map[string]map[string]float64
 }
 
 // Telemetria toma la foto de los contadores, el disco libre y la memoria
@@ -185,6 +211,14 @@ func (m *Manager) Telemetria() Telemetria {
 	}
 	for c, n := range tel.rechazos {
 		out.Rechazos[c] = n.Load()
+	}
+	out.FasesMS = map[string]map[string]float64{}
+	for d, s := range tel.fases {
+		por := make(map[string]float64, len(FasesDespertar))
+		for i, f := range FasesDespertar {
+			por[f] = float64(s[i].Load()) / 1000
+		}
+		out.FasesMS[d] = por
 	}
 	for d, h := range tel.dur {
 		hh := Histograma{Cubos: make([]int64, len(h.cubos)), Suma: h.suma.Load(), Cuenta: h.cuenta.Load()}

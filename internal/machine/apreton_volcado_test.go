@@ -21,12 +21,28 @@ type globoFalso struct {
 	mu      sync.Mutex
 	stats   *fc.BalloonStats // nil: sin globo (404)
 	patches []int
+	// fresco, si no es nil, es el informe que el invitado manda al cambiar el
+	// intervalo (PATCH /balloon/statistics), como hace Firecracker; hasta
+	// entonces se contesta stats, el de hace un intervalo.
+	fresco     *fc.BalloonStats
+	intervalos []int
 }
 
 func (g *globoFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	switch {
+	case r.Method == http.MethodPatch && r.URL.Path == "/balloon/statistics":
+		var p struct {
+			Sec int `json:"stats_polling_interval_s"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &p)
+		g.intervalos = append(g.intervalos, p.Sec)
+		if g.fresco != nil {
+			g.stats, g.fresco = g.fresco, nil
+		}
+		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/balloon/statistics":
 		if g.stats == nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -52,6 +68,13 @@ func (g *globoFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func nuevoGloboFalso(t *testing.T, stats *fc.BalloonStats) (*globoFalso, *fc.Client) {
 	t.Helper()
+	g, sock := nuevoGloboFalsoEn(t, stats)
+	return g, fc.New(sock)
+}
+
+// nuevoGloboFalsoEn es nuevoGloboFalso, devolviendo la ruta del socket.
+func nuevoGloboFalsoEn(t *testing.T, stats *fc.BalloonStats) (*globoFalso, string) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "kglobo")
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +89,7 @@ func nuevoGloboFalso(t *testing.T, stats *fc.BalloonStats) (*globoFalso, *fc.Cli
 	srv := &http.Server{Handler: g}
 	go srv.Serve(ln)
 	t.Cleanup(func() { _ = srv.Close() })
-	return g, fc.New(sock)
+	return g, sock
 }
 
 // Antes de volcar, el invitado entrega lo que tiene disponible (libre más
