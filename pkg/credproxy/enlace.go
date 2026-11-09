@@ -211,8 +211,11 @@ func (e *Enlace) Serve(ln net.Listener) error {
 		select {
 		case e.sem <- struct{}{}:
 		default:
-			_ = c.Close()
+			// Primero el registro y luego el cierre: quien vea el cierre ya lo
+			// encuentra en la cola del auditor. Al revés, un Close del auditor
+			// entre los dos (justo tras ver el cierre) lo perdía.
 			e.auditar(Record{Kind: KindLink, Host: e.o.Name, Reason: ReasonBusy})
+			_ = c.Close()
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), e.o.ResolveTimeout)
