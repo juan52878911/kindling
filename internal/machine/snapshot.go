@@ -1864,6 +1864,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		}
 		return abortar(err)
 	}
+	// Un dorado de antes de globo_ritmo.go trae las estadísticas del globo
+	// cada 1 s; la copia, al de reposo.
+	ritmoGloboReposo(ctx, c)
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al

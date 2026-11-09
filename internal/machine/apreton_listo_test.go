@@ -72,8 +72,22 @@ func TestApretonAlPasarLaSonda(t *testing.T) {
 				plazo = 2*4*pasoListo + 200*time.Millisecond
 			}
 			n := esperarLlamadas(falso, "/balloon/statistics", plazo)
-			if c.quiero && n != 1 {
-				t.Fatalf("el globo se miró %d veces al pasar la sonda; quería un apretón", n)
+			if c.quiero {
+				// Cada apretón lee las estadísticas varias veces (esperando el
+				// informe fresco, globo_ritmo.go) pero baja el intervalo una.
+				time.Sleep(plazoEstadisticasFrescas + 200*time.Millisecond)
+				apretones := 0
+				for _, l := range falso.llamadasA(http.MethodPatch, "/balloon/statistics") {
+					var p struct {
+						Sec int `json:"stats_polling_interval_s"`
+					}
+					if json.Unmarshal(l.Cuerpo, &p) == nil && p.Sec == balloonStatsPollSecApreton {
+						apretones++
+					}
+				}
+				if n == 0 || apretones != 1 {
+					t.Fatalf("al pasar la sonda: %d lecturas del globo y %d apretones; quería un apretón", n, apretones)
+				}
 			}
 			if !c.quiero && n != 0 {
 				t.Fatalf("se apretó %d veces y no tocaba", n)
