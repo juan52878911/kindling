@@ -51,6 +51,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- Linux: with the jailer present but no unprivileged service user, the daemon now refuses to start machines instead of jailing Firecracker as root (as root the VMM could write through the jail's hardlinks to shared kernel, base and golden files). Create the `kindling` user in the `kvm` group, or set `KLING_JAILER=1` to keep the old behaviour, which now logs a startup security warning.
+- Snapshot signature v2 also covers labels (`kling.ports`, `kling.owner`), `mem_max_mib`, `cpu_pct`, env key names and a new `mem_digest` of `mem.file` (sparse-aware tree hash, checked on first restore like the overlay). v1-signed goldens still restore as before; `kling save` upgrades them. `meta.json` is now schema 3: an older kling refuses goldens written by this one, so rolling back means recommitting them.
+- Linux: the Firecracker API socket is opened without following symlinks, and for jailed VMMs the peer (`SO_PEERCRED`) must be rooted in that machine's own jail, so a compromised VMM that swaps its socket for a link can't steer the daemon's calls to another machine's VMM.
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
