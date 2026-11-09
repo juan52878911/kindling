@@ -282,3 +282,42 @@ func setMemoryConfig(cfg *config.Config, enabled bool, service string) error {
 	}
 	return nil
 }
+
+// errTokenEnArgv: el token no viaja por la línea de comandos, que cualquier
+// usuario del host lee en ps o /proc. Es la misma regla que ya aplica el
+// gateway (ver resolveGatewayToken).
+var errTokenEnArgv = fmt.Errorf("-token is not accepted: the command line is visible to every user on the host.\n" +
+	"Pass the token in $KLING_GATEWAY_TOKEN, with -token-file <file>, or keep it in gateway.token")
+
+// tokenFlags registra -token-file y un -token que solo sirve para rechazarse
+// con un mensaje claro (en vez del «flag provided but not defined»).
+func tokenFlags(fs *flag.FlagSet) *string {
+	fs.Func("token", "not accepted (visible in ps): use $KLING_GATEWAY_TOKEN or -token-file",
+		func(string) error { return errTokenEnArgv })
+	return fs.String("token-file", "",
+		"read the gateway token from this file (TOKEN or KEY=TOKEN); default: $KLING_GATEWAY_TOKEN, then gateway.token")
+}
+
+// clientToken resuelve el token con el que un cliente habla con el gateway:
+// -token-file, luego $KLING_GATEWAY_TOKEN, luego gateway.token. Nunca argv.
+func clientToken(file string, cfg *config.Config) (string, error) {
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("-token-file: %w", err)
+		}
+		t := strings.TrimSpace(string(b))
+		// Admite el formato de gateway.env: KLING_GATEWAY_TOKEN=xxx.
+		if _, v, ok := strings.Cut(t, "="); ok {
+			t = strings.TrimSpace(v)
+		}
+		if t == "" {
+			return "", fmt.Errorf("-token-file %s is empty", file)
+		}
+		return t, nil
+	}
+	if t := os.Getenv("KLING_GATEWAY_TOKEN"); t != "" {
+		return t, nil
+	}
+	return cfg.Gateway.Token, nil
+}

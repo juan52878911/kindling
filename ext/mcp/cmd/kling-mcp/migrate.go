@@ -33,7 +33,7 @@ func cmdMigrate(args []string) error {
 	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
 	service := fs.String("service", "", "service name in kindling, if it differs from the MCP name")
 	install := fs.String("install", "", "write the configuration: "+clientNames()+", or `all`")
-	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
+	tokenFile := tokenFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -46,7 +46,10 @@ func cmdMigrate(args []string) error {
 
 	cfg := loadConfig()
 	gw := config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host)))
-	token := config.Or(*tokenFlag, cfg.Gateway.Token)
+	token, err := clientToken(*tokenFile, cfg)
+	if err != nil {
+		return err
+	}
 
 	entryName, url := migrateTarget(mcp, *service, gw)
 	svc := config.Or(*service, mcp)
