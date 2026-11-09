@@ -76,6 +76,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-hv: freeing a vsock connection (a guest RST, a dial that times out) no longer closes its socket while the device thread is polling it; that close could hang forever in the kernel, freezing the vCPU and the whole vsock device.
+- Credential proxy links: the `busy` audit record of a connection rejected by `MaxConns` is queued before the connection is closed, so a shutdown right after can no longer drop it.
 - `/exec` no longer holds 3-5x its output in guest memory: the output is escaped straight into the response (16 MiB of output: 80 → 17 MiB allocated).
 - Pending write-behind on live shares is capped at 16 MiB across all files, not just 4 MiB per file.
 - macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
