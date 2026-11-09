@@ -141,7 +141,14 @@ func TestPullCachedNotRehashed(t *testing.T) {
 	if _, err := cu.Pull(context.Background(), ref, man, "amd64"); err == nil || !strings.Contains(err.Error(), "unpacking") {
 		t.Fatalf("damaged cached gzip unpacked: %v", err)
 	}
+	// Y la saca de la caché: si no, el mismo CRC volvería en cada import.
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("the damaged cached gzip is still there: %v", err)
+	}
 	// Escribible por el grupo: no se confía, se hashea, no cuadra y se baja.
+	if err := os.WriteFile(p, flipped, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(p, 0o664); err != nil {
 		t.Fatal(err)
 	}

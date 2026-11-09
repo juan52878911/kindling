@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -324,6 +327,16 @@ func ParseRef(ref string) (registry, repo string) {
 // entrada elegida se comprueba con el digest que declara el índice ya
 // verificado).
 func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, error) {
+	return c.pull(ctx, ref, digest, arch, 0)
+}
+
+// maxIndices es cuántos índices puede haber encadenados delante del
+// manifiesto: lo normal es uno, alguno anida otro. Sin tope, un registro
+// hostil encadenaba tantos como quisiera, cada uno una petición.
+const maxIndices = 4
+
+// pull es Pull con los índices que ya se atravesaron.
+func (c *Client) pull(ctx context.Context, ref, digest, arch string, indices int) (*Image, error) {
 	if !reDigest.MatchString(digest) {
 		return nil, fmt.Errorf("invalid digest %q (want sha256:<64 hex>)", digest)
 	}
@@ -349,10 +362,7 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 			return nil, fmt.Errorf("manifest %s: sha256 mismatch (got %s)", digest, got)
 		}
 		if err := os.MkdirAll(filepath.Dir(c.BlobPath(digest)), 0o755); err == nil {
-			tmp := c.BlobPath(digest) + ".part"
-			if os.WriteFile(tmp, body, 0o644) == nil {
-				_ = os.Rename(tmp, c.BlobPath(digest))
-			}
+			guardarBlob(c.BlobPath(digest), body)
 		}
 	}
 	c.usar(digest)
@@ -371,8 +381,11 @@ func (c *Client) Pull(ctx context.Context, ref, digest, arch string) (*Image, er
 		if pick == nil {
 			return nil, errSinPlataforma(ref, digest, arch, m.Manifests)
 		}
+		if indices+1 >= maxIndices {
+			return nil, fmt.Errorf("index %s: more than %d nested indexes", digest, maxIndices-1)
+		}
 		c.logf("index %s: linux/%s is %s", short(digest), arch, pick.Digest)
-		return c.Pull(ctx, ref, pick.Digest, arch)
+		return c.pull(ctx, ref, pick.Digest, arch, indices+1)
 	}
 	if len(m.Layers) == 0 {
 		return nil, fmt.Errorf("manifest %s has no layers (media type %s)", digest, m.MediaType)
@@ -460,7 +473,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 		budget.Store(c.MaxBytes * maxUnpackRatio)
 	}
 	// Una descarga por digest: una imagen puede repetir una capa (las vacías)
-	// y dos descargas a la vez al mismo .part se pisarían.
+	// y no hace falta bajarla dos veces.
 	type fetch struct {
 		once sync.Once
 		path string
@@ -523,6 +536,7 @@ func (c *Client) layers(ctx context.Context, registry, repo string, ds []Descrip
 					<-zs
 				}
 				if err != nil {
+					c.desalojar(l, err)
 					fail(fmt.Errorf("layer %s: %w", d.Digest, err))
 					return
 				}
@@ -556,8 +570,39 @@ func acquire(ctx context.Context, sem chan struct{}) bool {
 // final, es una segunda defensa contra una capa dañada en la caché después
 // de verificarla.
 func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64) error {
-	rc, err := OpenLayer(l)
+	err := unpackCon(ctx, l, dst, budget, max, OpenLayer)
+	var roto *errAyudanteRoto
+	if errors.As(err, &roto) && ctx.Err() == nil {
+		// kling-unpack murió sin que fuera por la capa: otra vez en Go, que
+		// es más lento pero no depende de él. Lo ya descontado del
+		// presupuesto se devuelve (es la misma capa).
+		log.Printf("warning: %v; retrying the layer in Go", roto)
+		if budget != nil {
+			budget.Add(roto.leído)
+		}
+		err = unpackCon(ctx, l, dst, budget, max, openLayerGo)
+	}
+	return err
+}
+
+// openLayerGo es OpenLayer para una capa comprimida, sin kling-unpack.
+func openLayerGo(l Layer) (io.ReadCloser, error) {
+	f, err := os.Open(l.Path)
 	if err != nil {
+		return nil, err
+	}
+	return decompressGo(f)
+}
+
+func unpackCon(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max int64, abrir func(Layer) (io.ReadCloser, error)) error {
+	rc, err := abrir(l)
+	if err != nil {
+		// Abrir el fichero es otra cosa; lo demás es la cabecera, que no se
+		// entiende (ni gzip ni zstd, o un gzip con la cabecera rota).
+		var pe *fs.PathError
+		if !errors.As(err, &pe) {
+			err = &errCapaDañada{err}
+		}
 		return err
 	}
 	defer rc.Close()
@@ -565,15 +610,65 @@ func unpack(ctx context.Context, l Layer, dst string, budget *atomic.Int64, max 
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
+	n, err := io.Copy(f, &unpackReader{ctx: ctx, r: rc, left: budget, max: max})
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		os.Remove(dst)
+		var roto *errAyudanteRoto
+		if errors.As(err, &roto) {
+			roto.leído = n
+		}
 		return fmt.Errorf("unpacking: %w", err)
 	}
 	return nil
+}
+
+// errCapaDañada envuelve un fallo del descompresor (un CRC32 de gzip, un
+// xxhash64 de zstd, un flujo que no se entiende): lo que está en la caché no
+// es la capa que se verificó, aunque mida lo mismo.
+type errCapaDañada struct{ err error }
+
+func (e *errCapaDañada) Error() string { return e.err.Error() }
+func (e *errCapaDañada) Unwrap() error { return e.err }
+
+// desalojar saca de la caché propia el blob de una capa que no descomprime:
+// cached() solo mira el tamaño y nunca rehashea, así que sin esto el mismo
+// error volvía en cada construcción. Solo la caché de c (las verificadas son
+// de root y no se tocan desde aquí) y solo si l.Path es de verdad ese blob.
+func (c *Client) desalojar(l Layer, err error) {
+	var d *errCapaDañada
+	if !errors.As(err, &d) || l.Path != c.BlobPath(l.Digest) {
+		return
+	}
+	if os.Remove(l.Path) == nil {
+		c.logf("removed %s from the cache: it does not decompress (%v)", short(l.Digest), d.err)
+	}
+}
+
+// guardarBlob deja en la caché un blob pequeño ya verificado (un
+// manifiesto) con un temporal propio y rename. Es solo una caché: si no se
+// puede, no pasa nada.
+func guardarBlob(dst string, body []byte) {
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".part-*")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	_, err = f.Write(body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
 }
 
 // unpackReader para si se cancela ctx (otra capa falló) y, con left, descuenta
@@ -593,6 +688,10 @@ func (u *unpackReader) Read(p []byte) (int, error) {
 	n, err := u.r.Read(p)
 	if u.left != nil && u.left.Add(-int64(n)) < 0 {
 		return n, fmt.Errorf("the image unpacks to more than %d MiB", u.max>>20)
+	}
+	var roto *errAyudanteRoto
+	if err != nil && err != io.EOF && u.ctx.Err() == nil && !errors.As(err, &roto) {
+		err = &errCapaDañada{err}
 	}
 	return n, err
 }
@@ -864,44 +963,38 @@ func (c *Client) download(ctx context.Context, registry, repo string, d Descript
 		return err
 	}
 	defer resp.Body.Close()
-	tmp := dst + ".part"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	defer f.Close()
 	t0 := time.Now()
 	timer := time.AfterFunc(stall, cancel)
 	defer timer.Stop()
-	h := sha256.New()
 	limit := d.Size
 	if limit <= 0 {
 		limit = 64 << 30
 	}
-	n, err := io.Copy(io.MultiWriter(f, h), &stallReader{r: io.LimitReader(resp.Body, limit+1), t: timer})
+	// Un temporal propio por descarga (durable.Recibir): con uno
+	// fijo (<hex>.part y O_TRUNC), dos construcciones que bajaban el mismo
+	// blob a la vez se lo truncaban la una a la otra, y la primera publicaba
+	// un fichero con un hueco de ceros dándolo por verificado (su hash era el
+	// de su flujo, no el del fichero). Acaba en .part-*: el barrido del
+	// arranque los reconoce.
+	t, err := durable.Recibir(filepath.Dir(dst), &stallReader{r: resp.Body, t: timer}, durable.Opciones{
+		SHA256: d.Digest, Size: d.Size, Max: limit, Patron: filepath.Base(dst) + ".part-*"})
 	if err != nil {
-		if ctx.Err() != nil {
+		var et *durable.ErrTamaño
+		var eh *durable.ErrSHA256
+		switch {
+		case ctx.Err() != nil:
 			return fmt.Errorf("download stalled (no data for %s)", stall)
+		case errors.As(err, &et):
+			return fmt.Errorf("size %d, manifest says %d", et.N, et.Quiero)
+		case errors.As(err, &eh):
+			return fmt.Errorf("sha256 mismatch: got sha256:%s", eh.Got)
 		}
 		return err
 	}
-	if d.Size > 0 && n != d.Size {
-		return fmt.Errorf("size %d, manifest says %d", n, d.Size)
-	}
-	if got := "sha256:" + hex.EncodeToString(h.Sum(nil)); got != d.Digest {
-		return fmt.Errorf("sha256 mismatch: got %s", got)
-	}
-	if err := f.Sync(); err != nil {
+	if err := t.Publicar(dst); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	c.logf("downloaded %s (%d MiB in %.1f s), sha256 verified", short(d.Digest), n>>20, time.Since(t0).Seconds())
+	c.logf("downloaded %s (%d MiB in %.1f s), sha256 verified", short(d.Digest), t.N>>20, time.Since(t0).Seconds())
 	return nil
 }
 

@@ -8,12 +8,71 @@ package share
 
 import (
 	"errors"
+	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
+
+// Presupuesto de instancias de inotify de todo el daemon. Hay una por sesión,
+// y el kernel no las cuenta por proceso sino por uid
+// (fs.inotify.max_user_instances, 128 por defecto): sin tope, unas decenas de
+// carpetas dejaban sin inotify al resto de procesos del mismo usuario (root,
+// si el daemon es root). Pasado el tope, la sesión vigila por sondeo
+// (pollBackend), como el presupuesto watchFDs de macOS pero sin quedarse sin
+// avisos.
+var inotifyBudget struct {
+	sync.Mutex
+	used, max int // max 0: aún sin calcular (maxInotifyInstances)
+}
+
+// pollLogged: se dice una vez que se vigila por sondeo.
+var pollLogged atomic.Bool
+
+// maxInotifyInstances es la mitad de max_user_instances, entre 1 y 512 (64
+// si no se puede leer): la otra mitad queda para los demás procesos del uid.
+func maxInotifyInstances() int {
+	b, err := os.ReadFile("/proc/sys/fs/inotify/max_user_instances")
+	if err != nil {
+		return 64
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 64
+	}
+	return min(max(n/2, 1), 512)
+}
+
+func takeInotify() bool {
+	inotifyBudget.Lock()
+	defer inotifyBudget.Unlock()
+	if inotifyBudget.max == 0 {
+		inotifyBudget.max = maxInotifyInstances()
+	}
+	if inotifyBudget.used >= inotifyBudget.max {
+		return false
+	}
+	inotifyBudget.used++
+	return true
+}
+
+func releaseInotify() {
+	inotifyBudget.Lock()
+	inotifyBudget.used--
+	inotifyBudget.Unlock()
+}
+
+// pollFallback es la vigilancia por sondeo cuando no queda inotify.
+func pollFallback(why string, emit func(rawEvent)) watchBackend {
+	if pollLogged.CompareAndSwap(false, true) {
+		log.Printf("share: %s; host changes reach the guest by polling every %s (logged once)", why, pollInterval)
+	}
+	return newPollBackend(emit)
+}
 
 const (
 	inDirMask = syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM | syscall.IN_MOVED_TO | syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR
@@ -42,8 +101,16 @@ type inWatch struct {
 }
 
 func newWatchBackend(root *os.Root, emit func(rawEvent)) (watchBackend, error) {
+	if !takeInotify() {
+		return pollFallback("the daemon's inotify budget is used up", emit), nil
+	}
 	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
 	if err != nil {
+		releaseInotify()
+		if errors.Is(err, syscall.EMFILE) {
+			// max_user_instances: otros procesos del uid se las llevaron.
+			return pollFallback("no inotify instances left for this user (fs.inotify.max_user_instances)", emit), nil
+		}
 		return nil, err
 	}
 	// No bloqueante y por os.File: el lector espera en el poller de Go y
@@ -108,6 +175,7 @@ func (b *inBackend) close() {
 	}
 	b.closed = true
 	_ = b.f.Close()
+	releaseInotify()
 }
 
 func (b *inBackend) loop() {
