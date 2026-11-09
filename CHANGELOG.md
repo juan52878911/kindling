@@ -41,6 +41,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
 - A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
 - `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
+- kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
+- kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 
 ### Security
 
