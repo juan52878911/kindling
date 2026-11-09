@@ -82,6 +82,13 @@ type falso struct {
 	sandboxesEspera   chan struct{}
 	sandboxesEmpezado chan struct{}
 	sandboxesUnaVez   sync.Once
+	// etiquetasEspera, si no es nil, para el PRIMER PUT labels (antes de
+	// aplicarlo) hasta que se cierre; antes cierra etiquetasEmpezado.
+	etiquetasEspera   chan struct{}
+	etiquetasEmpezado chan struct{}
+	etiquetasUnaVez   sync.Once
+	// etiquetasLentas retrasa cada PUT labels que pone un tenant.
+	etiquetasLentas time.Duration
 }
 
 // nuevoFalso arranca un daemon falso en un socket Unix corto (macOS limita
@@ -268,9 +275,32 @@ func (f *falso) rutas() http.Handler {
 		delete(f.maquinas, r.PathValue("ref"))
 		w.WriteHeader(204)
 	})
+	m.HandleFunc("GET /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		mc, ok := f.maquinas[r.PathValue("ref")]
+		if !ok {
+			failDaemon(w, 404, fmt.Errorf("no machine"))
+			return
+		}
+		c := *mc
+		c.Labels = api.MergeLabels(nil, mc.Labels)
+		writeJSON(w, 200, &c)
+	})
 	m.HandleFunc("PUT /machines/{ref}/labels", func(w http.ResponseWriter, r *http.Request) {
 		var labels map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&labels)
+		if f.etiquetasEspera != nil {
+			// Solo la PRIMERA espera: es un frontal lento frente a otro.
+			primera := false
+			f.etiquetasUnaVez.Do(func() { primera = true; close(f.etiquetasEmpezado) })
+			if primera {
+				<-f.etiquetasEspera
+			}
+		}
+		if _, conTenant := labels[LabelTenant]; conTenant && f.etiquetasLentas > 0 {
+			time.Sleep(f.etiquetasLentas)
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		mc, ok := f.maquinas[r.PathValue("ref")]

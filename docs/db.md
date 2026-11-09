@@ -795,7 +795,12 @@ contraseña se rechaza (acabaría en `ps` y en el historial).
 3. **Postgres de preparación en RAM.** Un segundo cluster con su directorio de datos en
    un **tmpfs** del invitado (`/run/klingclone`), solo por socket local (sin TCP) y sin
    fsync. Si el invitado tuviera swap, se niega.
-4. **Comprobación del rol.** Por el proxy: si el rol es superusuario, se para; si puede
+4. **Comprobación del rol.** La hace `kling-db` desde el host, conectando al servidor de
+   la URL (mismo TLS que el proxy), **antes del paso 1**: ni se arranca la máquina ni la
+   credencial llega al proxy si no pasa, y lo que diga el invitado no cuenta. Por eso el
+   servidor tiene que ser alcanzable, con esa dirección, desde donde corre `kling db
+   clone` (con un daemon remoto, `-H ssh://…`, ejecútalo en un sitio que llegue igual que
+   el daemon). Si el rol es superusuario, se para; si puede
    escribir (`INSERT`, `UPDATE`, `DELETE` o `TRUNCATE`) en alguna tabla, se para salvo
    `-allow-writer`. También se para si el servidor es más nuevo que Postgres 16 (el
    `pg_dump` de la imagen no sabría volcarlo).
@@ -813,7 +818,9 @@ contraseña se rechaza (acabaría en `ps` y en el historial).
    viejo. Si una regla no cabe en su columna (un correo en un entero), si choca una
    restricción única o si queda un valor viejo, la transacción se deshace y **no queda
    golden**.
-8. **El golden es otra máquina.** Se vuelca el cluster ya enmascarado, la máquina de
+8. **El golden es otra máquina.** Se vuelca el cluster ya enmascarado y se trae al host
+   con un tope (`-max-dump`, 8G por defecto) y un plazo de una hora: un volcado mayor o
+   una copia que no acaba paran la construcción. La máquina de
    construcción se destruye y `db-golden.sh build -seed <volcado>` construye el golden
    en una máquina **nueva** con `egress none`, como cualquier otro golden (rol `app`,
    base `appdb`, clave solo en el host). El golden nunca ha visto un dato sin

@@ -16,6 +16,8 @@ package frontal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,7 +123,7 @@ func vista(h *hosts.Host, mc *api.Machine) Sandbox {
 		}
 	}
 	for k, v := range mc.Labels {
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate {
+		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
 			continue
 		}
 		if sb.Labels == nil {
@@ -745,8 +747,7 @@ const (
 // con plazo propio: un host colgado no para las demás creaciones (todas pasan
 // por s.mu para apuntarse en vuelo). Dos FRONTALES distintos sobre el mismo
 // daemon sí podrían chocar: SetLabels es un merge y el último gana; por eso
-// tras etiquetar se relee y, si el dueño no somos nosotros, se deja estar y
-// se crea una nueva.
+// reclamarUna va en dos fases con un nonce y solo uno pone etiquetas y TTL.
 func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearPeticion, etiquetas map[string]string, sirve func(*hosts.Host) bool) (*hosts.Host, *api.Machine) {
 	for _, h := range s.reg.Candidatos(ctx, sirve) {
 		listada := time.Now()
@@ -803,12 +804,71 @@ func (s *Servidor) acabarReclamo(clave string) {
 	s.reclamos[clave] = reclamo{fin: time.Now()}
 }
 
-// reclamarUna etiqueta y renueva una precalentada ya apartada.
+// esperaReclamo es la pausa entre las dos fases de reclamarUna. Tiene que ser
+// la misma en todos los frontales de un daemon: cada uno comprueba que su
+// propia segunda fase tardó menos que la pausa de los demás.
+const esperaReclamo = 50 * time.Millisecond
+
+// reclamarUna reclama una precalentada ya apartada en este proceso. El daemon
+// no tiene compare-and-swap de etiquetas (PUT labels es un merge y el último
+// gana), así que contra OTROS frontales sobre el mismo daemon va en dos fases,
+// al estilo del algoritmo de Fischer:
+//
+//  1. Se escribe solo LabelReclamo=<nonce> y se espera esperaReclamo.
+//  2. Se relee: si el nonce ya no es el nuestro, o la máquina ya tiene dueño,
+//     otro frontal ganó y nos vamos sin haber tocado ni sus etiquetas ni su
+//     TTL. Si sigue siendo nuestro, se ponen las etiquetas del tenant y se
+//     renueva.
+//
+// Quien llega tarde a la fase 1 relee DESPUÉS de su pausa, y para entonces la
+// fase 2 del ganador ya ha caído (se comprueba que tardó menos que la pausa;
+// si no, la máquina se destruye: no se sabe si otro también pasó). Así solo
+// uno pone etiquetas y TTL, y nadie mezcla los suyos con los de otro.
 func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machine, t *Tenant, p CrearPeticion, etiquetas map[string]string) (*api.Machine, bool) {
-	ctx, cancel := context.WithTimeout(ctx, plazoDaemon)
+	espera := s.esperaReclamo
+	if espera <= 0 {
+		espera = esperaReclamo
+	}
+	ctx, cancel := context.WithTimeout(ctx, plazoDaemon+espera)
 	defer cancel()
-	if err := h.Cliente.SetLabels(ctx, mc.ID, etiquetas); err != nil {
+	nonce, err := nuevoNonce()
+	if err != nil {
 		s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
+		return nil, false
+	}
+	if err := h.Cliente.SetLabels(ctx, mc.ID, map[string]string{LabelReclamo: nonce}); err != nil {
+		s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
+		return nil, false
+	}
+	select {
+	case <-time.After(espera):
+	case <-ctx.Done():
+		return nil, false
+	}
+	leida := time.Now()
+	cur, err := h.Cliente.Get(ctx, mc.ID)
+	if err != nil {
+		s.log.Printf("frontal: claiming %s/%s: %v", h.Nombre, mc.ID, err)
+		return nil, false
+	}
+	if cur.Labels[LabelReclamo] != nonce || !esPrecalentadaDe(cur, p.Template) {
+		// Otro frontal la está reclamando o ya es suya: no se toca.
+		return nil, false
+	}
+
+	fase2 := make(map[string]string, len(etiquetas)+1)
+	for k, v := range etiquetas {
+		fase2[k] = v
+	}
+	fase2[LabelReclamo] = nonce
+	if err := h.Cliente.SetLabels(ctx, mc.ID, fase2); err != nil {
+		s.soltarMediaReclamada(ctx, h, mc.ID, fmt.Sprintf("labels: %v", err))
+		return nil, false
+	}
+	if d := time.Since(leida); d >= esperaReclamo || d >= espera {
+		// Demasiado lenta: otro frontal pudo releer antes de que cayera y
+		// pasar también. No se entrega.
+		s.soltarMediaReclamada(ctx, h, mc.ID, fmt.Sprintf("second phase took %s", d.Round(time.Millisecond)))
 		return nil, false
 	}
 	out, err := h.Cliente.RenewSandbox(ctx, mc.ID, p.TTLSeconds)
@@ -819,22 +879,44 @@ func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machi
 		// limpieza por abandono se la llevara. Se destruye; el pool la
 		// repone. No se le quitan las etiquetas: llevaría las del cliente
 		// a la siguiente que la reclamara.
-		// Sin la cancelación de la petición: si el fallo es que el cliente se
-		// fue, borrar con su contexto fallaba también y la máquina se quedaba
-		// a medio reclamar (como soltarGrafo).
-		s.log.Printf("frontal: claiming %s/%s: renew: %v; removing it", h.Nombre, mc.ID, err)
-		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
-		defer rcancel()
-		if rerr := h.Cliente.RemoveSandbox(rctx, mc.ID); rerr != nil {
-			s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, mc.ID, rerr)
-		}
+		s.soltarMediaReclamada(ctx, h, mc.ID, fmt.Sprintf("renew: %v", err))
 		return nil, false
 	}
 	if !esSandboxDe(out, t) {
-		// Otro frontal la etiquetó después (el último gana): es suya.
+		// Un frontal anterior a las dos fases la etiquetó después (el
+		// último gana): es suya.
 		return nil, false
 	}
+	for k, v := range etiquetas {
+		if out.Labels[k] != v {
+			// Es nuestra pero alguien mezcló etiquetas: no se entrega.
+			s.soltarMediaReclamada(ctx, h, mc.ID, "labels changed under the claim")
+			return nil, false
+		}
+	}
 	return out, true
+}
+
+// soltarMediaReclamada destruye una precalentada que se empezó a etiquetar y
+// no se va a entregar. Sin la cancelación de la petición: si el fallo es que
+// el cliente se fue, borrar con su contexto fallaba también y la máquina se
+// quedaba a medio reclamar (como soltarGrafo).
+func (s *Servidor) soltarMediaReclamada(ctx context.Context, h *hosts.Host, id, motivo string) {
+	s.log.Printf("frontal: claiming %s/%s: %s; removing it", h.Nombre, id, motivo)
+	rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
+	defer rcancel()
+	if rerr := h.Cliente.RemoveSandbox(rctx, id); rerr != nil {
+		s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, id, rerr)
+	}
+}
+
+// nuevoNonce son 128 bits de crypto/rand en hexadecimal.
+func nuevoNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // esPrecalentadaDe es el contrato con el pool del paquete plantilla: una
