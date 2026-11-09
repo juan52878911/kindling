@@ -720,9 +720,33 @@ const detalleAdoptado = "re-adopted, no exit status"
 // él tomado y lo sueltan con el estado ya cambiado (stopped, warm, borrada).
 // Con el cerrojo en la mano, si sigue running o pausada y su VMM no está, es
 // que murió solo.
+//
+// Tras Close no hace nada: el aviso llega asíncrono (cmd.Wait, kqueue, pidfd)
+// y, al soltar el cerrojo con el Manager cerrado, trasCierre reescribía
+// state.json después de que Close dijese que ya no se escribe (en las
+// pruebas, encima del RemoveAll de su TempDir). Un VMM que muere con el
+// daemon apagándose lo verá reconcile en el siguiente arranque.
 func (m *Manager) vmmTermino(id, detalle string) {
-	defer m.lock(id)()
+	if m.cerrado() {
+		return
+	}
+	soltar := m.lifecycle.tomar(id)
+	defer soltar()
+	// Close pudo llegar mientras se esperaba el cerrojo.
+	if m.cerrado() {
+		return
+	}
 	m.comprobarVMMLocked(id, detalle)
+}
+
+// cerrado dice si Close ya paró la escritura del estado.
+func (m *Manager) cerrado() bool {
+	select {
+	case <-m.quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // comprobarVMMLocked marca failed la máquina id si figura running o pausada
