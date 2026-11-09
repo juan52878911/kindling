@@ -320,3 +320,27 @@ func TestCatalogo(t *testing.T) {
 		t.Fatal("garbage accepted")
 	}
 }
+
+// Los nombres del informe vienen de la base de origen (y del invitado que la
+// sirve): ni un ESC ni un salto de línea llegan crudos a la terminal, y cada
+// columna sigue en su fila. El JSON los lleva tal cual.
+func TestReportTextEscapado(t *testing.T) {
+	const osc = "\x1b]52;c;ZXZpbA==\x07"
+	rep := &Report{Golden: "g" + osc, Source: "s\r", Tables: 1, Rows: 1,
+		Masked:     []MaskedColumn{{Column: "public.t.a" + osc, Kind: "email"}},
+		Kept:       []string{"public.t.b\nfake: row"},
+		Suspicious: []SuspiciousCol{{Column: "public.t.c\t" + osc, Reason: "name " + osc, Action: ActMasked, Kind: "email"}},
+		Unmasked:   []string{}}
+	var txt bytes.Buffer
+	if err := rep.WriteText(&txt); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(txt.String(), "\x1b\x07\r") || strings.Contains(txt.String(), "\nfake") ||
+		!strings.Contains(txt.String(), `public.t.a\x1b]52`) {
+		t.Fatalf("WriteText:\n%s", txt.String())
+	}
+	var js bytes.Buffer
+	if err := rep.WriteJSON(&js); err != nil || !strings.Contains(js.String(), `\u001b]52`) {
+		t.Fatalf("WriteJSON: %v\n%s", err, js.String())
+	}
+}
