@@ -485,3 +485,20 @@ func TestExecCalladoNoVenceLasCabeceras(t *testing.T) {
 		t.Fatalf("exec callado = %+v, %v; quería exit 0", res, err)
 	}
 }
+
+// Si el sandbox no llega a tener agente y además no se puede borrar, el fallo
+// queda en el log y el cliente recibe el ID para borrarlo él: antes se
+// ignoraba y quedaba una máquina huérfana que nadie sabía que existía.
+func TestAbandonarSandboxQueNoSeBorra(t *testing.T) {
+	s, _ := servidorBlobs(t)
+	logd := conLog(t)
+	// No está en el manager: Remove falla.
+	mc := &api.Machine{ID: "dddd00000000dead", Name: "sb"}
+	err := s.abandonarSandbox(mc, errors.New("dial timeout"))
+	if err == nil || !strings.Contains(err.Error(), mc.ID) || !strings.Contains(err.Error(), "dial timeout") {
+		t.Fatalf("el cliente no recibe el ID ni la causa: %v", err)
+	}
+	if !strings.Contains(logd.String(), mc.ID) {
+		t.Fatalf("el fallo al borrar no quedó en el log: %q", logd)
+	}
+}

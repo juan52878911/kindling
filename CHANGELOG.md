@@ -42,6 +42,15 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Scheduler: the reaper no longer freezes an idle instance underneath a concurrent acquire that adopts it (502 on its first request); victims are held with the waker's lock and the in-acquire mark until frozen, and one that fails to freeze goes back to the map.
 - Scheduler: `ensure` drops a dead primary through the normal removal path and forgets the sessions bound to it when the rebuilt one is a different machine.
 - Scheduler: a failed TTL renewal is no longer taken as done; the reaper retries it on its next pass and drops the instance when the daemon rejects it (404/409), and a running machine whose renewal is rejected is not adopted.
+- `exec ?wait=1` caps each stream at 8 MiB (`api.ExecWaitMaxOutput`) and marks the result `truncated`; the NDJSON stream still allows 64 MiB.
+- Run, sandbox, fork and `PUT /machines/{ref}/labels` reject more than 64 labels or 4 KiB of labels, and run and sandbox more than 256 `allow_domains`, with a 400.
+
+### Fixed
+
+- Blob uploads (`PUT /images/{name}/blob`, `PUT /oci/blobs/{digest}`) are cut after 2 minutes without data; a stalled client kept an FD, a temp file and, for OCI, the cache lock that sweeps and other uploads need.
+- Errors seen by non-admin callers of `logs`, `credaudit` and `guest` no longer include host paths or the guest's internal address; the detail goes to the daemon log.
+- The daemon removes its socket on exit only if it is still the one it created.
+- A sandbox whose agent never answered and that could not be removed is logged, and the error names its ID.
 
 ### Fixed
 

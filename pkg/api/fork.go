@@ -52,6 +52,9 @@ const (
 // ValidateForkLabels comprueba las etiquetas que se piden para las copias de
 // un fork. nil y vacío valen.
 func ValidateForkLabels(labels map[string]string) error {
+	if err := ValidateLabels(labels); err != nil {
+		return err
+	}
 	if len(labels) > forkMaxLabels {
 		return fmt.Errorf("too many labels (%d); the limit is %d", len(labels), forkMaxLabels)
 	}
