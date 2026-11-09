@@ -64,6 +64,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
 - `kling-mcp`: sessions are bound to the tenant that opened them; another tenant's key gets a 404 and can't delete them.
 - `kling mcp connect` and `migrate` no longer take `-token` (it ended up in argv and shell history): use `KLING_GATEWAY_TOKEN`, `-token-file` or `gateway.token`.
+- The daemon and the MCP gateway no longer follow HTTP redirects returned by the guest agent or bridge, so a compromised guest can't make them repeat a request against another machine or a host loopback service; the guest agent's `/volume/*` routes now require POST.
 
 ### Fixed
 
