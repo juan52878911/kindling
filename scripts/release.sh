@@ -28,7 +28,8 @@
 #      (scripts/release-notes.sh, el mismo que usa el workflow)
 #   4. Verifica que todos los checks de CI de ese commit acabaron en verde y,
 #      desde v1.0.0, que el e2e de kling-hv pasó en un Apple Silicon (el job
-#      de e2e-mac.yml, o a mano con KLING_E2E_HV=<sha>; docs/releases.md)
+#      de e2e-mac.yml, el commit status que publica scripts/e2e-mac-release.sh,
+#      o a mano con KLING_E2E_HV=<sha>; docs/releases.md)
 #   5. Crea un tag anotado vX.Y.Z con mensaje corto SOBRE ESE COMMIT
 #   6. Push del tag → activa .github/workflows/release.yml
 #   7. (Opcional) espera a ESE run del workflow y abre la release en el browser
@@ -211,8 +212,11 @@ fi
 # kling-hv es estable desde 1.0 con una condición (compatibilidad.md): cada
 # release pasa 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv en un Apple
 # Silicon. Vale el job de e2e-mac.yml en verde sobre este commit (skipped no
-# vale: es lo que sale sin runner) o, a mano, KLING_E2E_HV=<sha de COMMIT>
-# tras correrlos (releases.md, paso 3b).
+# vale: es lo que sale sin runner), el commit status e2e-mac/kling-hv en
+# success que publica scripts/e2e-mac-release.sh cuando pasan los dos, o, a
+# mano, KLING_E2E_HV=<sha de COMMIT> tras correrlos (releases.md, paso 3c).
+# El contexto es el de e2e-mac-release.sh: si cambia, en los dos.
+E2E_HV_CONTEXTO="e2e-mac/kling-hv"
 e2e_hv_hecho() {
     if [ -n "${KLING_E2E_HV:-}" ]; then
         case "$COMMIT" in
@@ -225,8 +229,13 @@ e2e_hv_hecho() {
         C=$(gh api "repos/$REPO/commits/$COMMIT/check-runs?per_page=100" \
             --jq '[.check_runs[] | select(.name == "microVMs (kling-hv, Hypervisor.framework)" and .conclusion == "success")] | length' 2>/dev/null || echo 0)
         if [ "${C:-0}" -gt 0 ]; then echo "kling-hv e2e green on the Apple Silicon runner"; return 0; fi
+        # El combinado da el último status de cada contexto: uno en failure
+        # posterior a un success no cuenta.
+        S=$(gh api "repos/$REPO/commits/$COMMIT/status" \
+            --jq "[.statuses[] | select(.context == \"$E2E_HV_CONTEXTO\" and .state == \"success\")] | length" 2>/dev/null || echo 0)
+        if [ "${S:-0}" -gt 0 ]; then echo "kling-hv e2e passed on an Apple Silicon Mac (commit status $E2E_HV_CONTEXTO)"; return 0; fi
     fi
-    echo "kling-hv e2e not run on $COMMIT: run 92-e2e-mac.sh and 95-e2e-upgrade-mac.sh with VMM=hv on an Apple Silicon Mac, then KLING_E2E_HV=$(printf '%.12s' "$COMMIT") (docs/releases.md)" >&2
+    echo "kling-hv e2e not run on $COMMIT: run scripts/e2e-mac-release.sh on an Apple Silicon Mac (it publishes the $E2E_HV_CONTEXTO commit status), or KLING_E2E_HV=$(printf '%.12s' "$COMMIT") after 92 and 95 with VMM=hv (docs/releases.md)" >&2
     return 1
 }
 case "${VERSION#v}" in
