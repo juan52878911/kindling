@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/durable"
@@ -283,6 +284,12 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 		res.EnSeco = true
 		o.printf("\n(dry run: nothing was changed)\n")
 		return res, nil
+	}
+
+	// 4b. Sitio para los binarios nuevos, antes de parar nada: con ENOSPC a
+	// media instalación, restaurar tampoco cabría y el daemon quedaría parado.
+	if err := hayEspacio(o.Piezas, bajados); err != nil {
+		return nil, err
 	}
 
 	// 5. Copia de lo de antes.
@@ -802,6 +809,68 @@ func bakNuevos(c *copia) []string {
 		}
 	}
 	return out
+}
+
+// margenEspacio es lo que se pide libre además de los binarios nuevos: el
+// temporal de colocar y lo que el sistema escriba mientras tanto.
+const margenEspacio = 64 << 20
+
+// libreEn dice los bytes libres (para quien no es root) del sistema de
+// ficheros de dir y un identificador de ese sistema, para sumar las piezas
+// que caen en el mismo. Los tests lo cambian.
+var libreEn = func(dir string) (libre, disp uint64, err error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, 0, err
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	if s, ok := fi.Sys().(*syscall.Stat_t); ok {
+		disp = uint64(s.Dev)
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), disp, nil
+}
+
+// hayEspacio comprueba que cada sistema de ficheros de destino tiene sitio
+// para la suma de los assets que caen en él más margenEspacio.
+func hayEspacio(piezas []Pieza, bajados map[string]string) error {
+	type fs struct {
+		dir         string
+		libre, pide uint64
+	}
+	var orden []uint64
+	porDisp := map[uint64]*fs{}
+	for _, p := range piezas {
+		src, ok := bajados[p.Asset.Nombre]
+		if !ok {
+			continue
+		}
+		st, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("%v (nothing was changed)", err)
+		}
+		dir := filepath.Dir(p.Destino)
+		libre, disp, err := libreEn(dir)
+		if err != nil {
+			return fmt.Errorf("checking free space in %s: %v (nothing was changed)", dir, err)
+		}
+		f := porDisp[disp]
+		if f == nil {
+			f = &fs{dir: dir, libre: libre, pide: margenEspacio}
+			porDisp[disp] = f
+			orden = append(orden, disp)
+		}
+		f.pide += uint64(st.Size())
+	}
+	for _, d := range orden {
+		if f := porDisp[d]; f.libre < f.pide {
+			falta := (f.pide - f.libre + 1<<20 - 1) >> 20
+			return fmt.Errorf("free %d MiB in %s (nothing was changed)", falta, f.dir)
+		}
+	}
+	return nil
 }
 
 // colocar deja una copia de src en dst sin que dst exista a medias en ningún

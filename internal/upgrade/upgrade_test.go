@@ -1249,3 +1249,31 @@ func TestVersionVolcadoHV(t *testing.T) {
 		t.Error("a missing file must be an error")
 	}
 }
+
+// Sin sitio para los binarios nuevos se falla antes de parar el daemon: con
+// ENOSPC a media instalación, volver atrás tampoco cabría.
+func TestSinEspacioNoPara(t *testing.T) {
+	m := nuevoMontaje(t)
+	antes := libreEn
+	t.Cleanup(func() { libreEn = antes })
+	var dirs []string
+	libreEn = func(dir string) (uint64, uint64, error) {
+		dirs = append(dirs, dir)
+		return 10 << 20, 1, nil // 10 MiB, todas las piezas en el mismo
+	}
+	_, err := Actualizar(context.Background(), m.opciones())
+	if err == nil || !strings.Contains(err.Error(), "MiB in "+filepath.Dir(m.bin)) ||
+		!strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v, want free N MiB in %s (nothing was changed)", err, filepath.Dir(m.bin))
+	}
+	if len(dirs) != 2 {
+		t.Errorf("statfs on %v, want both destination dirs", dirs)
+	}
+	m.noTocado(t)
+
+	// Con sitio de sobra sigue adelante.
+	libreEn = func(string) (uint64, uint64, error) { return 1 << 40, 1, nil }
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+}
