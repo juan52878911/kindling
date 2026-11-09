@@ -30,51 +30,78 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // claveFirma es la clave del host. Se crea la primera vez, 32 bytes aleatorios,
 // en $KLING_ROOT/secrets/snapshot.key con permisos 0600.
+//
+// Se cachea la clave, no el fallo: antes un sync.Once guardaba también el
+// error, y un disco lleno o un permiso al primer intento dejaba al daemon sin
+// firmar ni verificar dorados hasta reiniciarlo.
+//
+// La clave llega al disco antes de publicarse (durable.Escribir a un
+// temporal y un enlace duro al nombre definitivo): sin el fsync, un corte
+// podía dejar snapshot.key vacío, y O_EXCL fallaba sobre él para siempre. El
+// enlace hace lo que hacía O_EXCL: si dos daemons la crean a la vez, gana uno
+// y el otro lee la suya. Un fichero de menos de 32 bytes no firmó nada nunca
+// (no se acepta como clave): es una clave a medias y se rehace.
 func (m *Manager) claveFirma() ([]byte, error) {
-	m.firmaOnce.Do(func() {
-		dir := filepath.Join(m.root, "secrets")
-		ruta := filepath.Join(dir, "snapshot.key")
-		if b, err := os.ReadFile(ruta); err == nil && len(b) >= 32 {
-			m.firmaClave = b
-			return
+	m.firmaMu.Lock()
+	defer m.firmaMu.Unlock()
+	if m.firmaClave != nil {
+		return m.firmaClave, nil
+	}
+	k, err := crearOLeerClave(filepath.Join(m.root, "secrets"))
+	if err != nil {
+		return nil, err
+	}
+	m.firmaClave = k
+	return k, nil
+}
+
+// crearOLeerClave lee la clave de dir/snapshot.key o la crea.
+func crearOLeerClave(dir string) ([]byte, error) {
+	ruta := filepath.Join(dir, "snapshot.key")
+	leer := func() ([]byte, bool) {
+		b, err := os.ReadFile(ruta)
+		return b, err == nil && len(b) >= 32
+	}
+	if b, ok := leer(); ok {
+		return b, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	// Una a medias (ver arriba) se retira; si otro la está rehaciendo a la
+	// vez, el enlace de abajo decide quién gana.
+	if fi, err := os.Stat(ruta); err == nil && fi.Size() < 32 {
+		_ = os.Remove(ruta)
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	// Un temporal por clave (de su propio contenido): dos que crean a la vez
+	// no se pisan el temporal, y el enlace publica justo los bytes que se
+	// devuelven.
+	tmp := filepath.Join(dir, "snapshot.key."+hex.EncodeToString(b[:8])+".tmp")
+	if err := durable.Escribir(tmp, b, 0o600); err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, ruta); err != nil {
+		if b2, ok := leer(); ok {
+			return b2, nil
 		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			m.firmaErr = err
-			return
-		}
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			m.firmaErr = err
-			return
-		}
-		// O_EXCL: si dos daemons arrancan a la vez, que gane uno y el otro lea
-		// la suya, en vez de firmar cada uno con una clave distinta.
-		f, err := os.OpenFile(ruta, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			if b2, rerr := os.ReadFile(ruta); rerr == nil && len(b2) >= 32 {
-				m.firmaClave = b2
-				return
-			}
-			m.firmaErr = err
-			return
-		}
-		if _, err := f.Write(b); err != nil {
-			f.Close()
-			m.firmaErr = err
-			return
-		}
-		if err := f.Close(); err != nil {
-			m.firmaErr = err
-			return
-		}
-		m.firmaClave = b
-	})
-	return m.firmaClave, m.firmaErr
+		return nil, err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return b, nil
 }
 
 // contenidoFirmado es lo que cubre la firma, en un orden fijo.

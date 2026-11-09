@@ -39,6 +39,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- macOS: putting a file into an image with debugfs (the `kling-bridge` refresh) edits an APFS clone and swaps it in with a durable rename, so a power cut between debugfs's `rm` and `ln` can no longer leave the image without its bridge. The golden-image signing key is written with fsync before it is published (a torn empty key is rebuilt instead of failing forever), and a failure to create it is no longer cached until the daemon restarts.
 - The watcher contains panics per step: a panic in one task (say `sweep`) no longer skips the TTL, gc and memory-pressure steps of every round. TTL expiry runs in the background, two machines at a time, so a slow freeze no longer stalls the watcher for everyone.
 - Daemon shutdown waits for the background watchers (and the memory-pressure work they start) before returning, so a late TTL freeze or removal no longer rewrites `state.json` after `Close`; background freezes and removals don't start once shutdown begins, and the last state write is retried for up to 2 s instead of once.
 - A warm machine whose memory dump is on disk but doesn't validate (its seal was retired by a thaw, or the freeze was interrupted) is moved to `stopped` at daemon start, with the reason in `LastErr` and its disk kept, instead of staying warm with a thaw that always fails. The thaw error no longer says to remove it: `kling stop X && kling start X` boots it cold on the same disk.

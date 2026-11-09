@@ -496,9 +496,10 @@ type Manager struct {
 	marcarBrokerPrueba func(ctx context.Context, addr string) (net.Conn, error)
 
 	// Clave de firma de snapshots (firma.go), cargada una vez.
-	firmaOnce  sync.Once
+	// firmaMu guarda firmaClave, que se rellena al primer claveFirma que
+	// funciona (firma.go).
+	firmaMu    sync.Mutex
 	firmaClave []byte
-	firmaErr   error
 	wake       chan struct{}
 	quit       chan struct{}
 	quitOnce   sync.Once
