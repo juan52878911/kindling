@@ -231,13 +231,20 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		g.adquiriendo = map[string]bool{}
 	}
 	g.adquiriendo[id] = true
-	delete(g.pausadas, id)
 	g.mu.Unlock()
+	// Sale del registro de pausadas solo al despertarla: si el thaw falla sigue
+	// pausada en el daemon y el registro es lo único que la acaba congelando.
 	fallo := func(err error) (*api.Machine, string, error) {
 		g.mu.Lock()
 		delete(g.adquiriendo, id)
 		g.mu.Unlock()
 		return nil, "", err
+	}
+	despierta := func(mc *api.Machine, how string) (*api.Machine, string, error) {
+		g.mu.Lock()
+		delete(g.pausadas, id)
+		g.mu.Unlock()
+		return mc, how, nil
 	}
 
 	switch mc.State {
@@ -250,7 +257,7 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		if err := g.renovarTTL(ctx, id); renovacionRechazada(err) {
 			return fallo(err)
 		}
-		return mc, "adopt", nil
+		return despierta(mc, "adopt")
 	case api.StatePaused, api.StateWarm:
 		// Igual que acquire: el TTL se renueva ANTES del thaw, o el vigilante
 		// del daemon podría volver a congelarla entre medias.
@@ -270,7 +277,7 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 		if mc.State == api.StatePaused {
 			how = "resume"
 		}
-		return th, how, nil
+		return despierta(th, how)
 	}
 	return fallo(fmt.Errorf("machine %s of the isolated session is %s", short(id), mc.State))
 }

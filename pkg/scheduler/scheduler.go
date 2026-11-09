@@ -1130,20 +1130,25 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		return m, "adopt", nil
 	}
 	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
+	//
+	// Sale del registro de pausadas solo si el thaw sale bien: si falla, sigue
+	// pausada en el daemon, y fuera del registro nadie la congelaría (RAM sin
+	// dueño). Mientras dura el thaw la aparta g.adquiriendo.
 	if m := pick(api.StatePaused); m != nil {
-		g.mu.Lock()
-		delete(g.pausadas, m.ID)
-		g.mu.Unlock()
 		t := time.Now()
 		th, err := g.client.Thaw(ctx, m.ID)
 		tr.Wake += time.Since(t)
 		if th != nil {
 			tr.Daemon = th.Wake
 		}
-		if err != nil {
-			g.mu.Lock()
+		g.mu.Lock()
+		if err == nil {
+			delete(g.pausadas, m.ID)
+		} else {
 			delete(g.adquiriendo, m.ID)
-			g.mu.Unlock()
+		}
+		g.mu.Unlock()
+		if err != nil {
 			return nil, "", err
 		}
 		// El TTL se renueva después y en segundo plano: una pausada cuenta como
