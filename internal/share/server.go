@@ -269,6 +269,15 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 			_ = conn.Close()
 		}
 	}
+	// replyFrame manda una trama que ya trae el hueco de su cabecera (readFrame).
+	replyFrame := func(frame []byte) {
+		wmu.Lock()
+		err := proto.WriteFramed(conn, frame)
+		wmu.Unlock()
+		if err != nil {
+			_ = conn.Close()
+		}
+	}
 	sess.push = reply
 	slots := make(chan struct{}, maxInflight)
 	big := make(chan struct{}, maxBigInflight)
@@ -332,6 +341,10 @@ func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.
 				<-slots
 				wg.Done()
 			}()
+			if op == proto.OpRead {
+				replyFrame(sess.readFrame(id, d))
+				return
+			}
 			reply(sess.dispatch(id, op, d))
 		}()
 	}
@@ -435,6 +448,34 @@ func (ss *session) closeAll() {
 // errReply es una respuesta de error.
 func errReply(id uint64, errno uint32) []byte { return proto.Response(id, errno).B }
 
+// readFrame contesta un OpRead con la trama entera (proto.ResponseFrame): un
+// solo búfer con el hueco de la cabecera delante y ReadAt directo en la cola.
+// Antes eran tres del tamaño de la lectura: el de ReadAt, el cuerpo y la copia
+// de WriteFrame.
+func (ss *session) readFrame(id uint64, d *proto.Dec) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("share: panic serving a read: %v", r)
+			out = proto.ResponseFrame(id, proto.EIO, 0).B
+		}
+	}()
+	fail := func(errno uint32) []byte { return proto.ResponseFrame(id, errno, 0).B }
+	h, off, size := d.U64(), d.U64(), d.U32()
+	if d.Done() != nil || int64(size) > ss.maxIO.Load() || int64(off) < 0 || int64(off)+int64(size) < 0 {
+		return fail(proto.EINVAL)
+	}
+	hd := ss.get(h)
+	if hd == nil {
+		return fail(proto.ESTALE)
+	}
+	r := proto.ResponseFrame(id, 0, 4+int(size))
+	err := r.BytesFrom(int(size), func(b []byte) (int, error) { return hd.f.ReadAt(b, int64(off)) })
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fail(Errno(err))
+	}
+	return r.B
+}
+
 // dispatch ejecuta una operación y devuelve la respuesta ya codificada.
 func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 	defer func() {
@@ -530,22 +571,9 @@ func (ss *session) dispatch(id uint64, op byte, d *proto.Dec) (out []byte) {
 		return r.B
 
 	case proto.OpRead:
-		h, off, size := d.U64(), d.U64(), d.U32()
-		if d.Done() != nil || int64(size) > ss.maxIO.Load() || int64(off) < 0 || int64(off)+int64(size) < 0 {
-			return errReply(id, proto.EINVAL)
-		}
-		hd := ss.get(h)
-		if hd == nil {
-			return errReply(id, proto.ESTALE)
-		}
-		buf := make([]byte, size)
-		n, err := hd.f.ReadAt(buf, int64(off))
-		if err != nil && !errors.Is(err, io.EOF) {
-			return errReply(id, Errno(err))
-		}
-		r := ok()
-		r.Bytes(buf[:n])
-		return r.B
+		// ServeDrain la manda por readFrame; esto queda para quien llame a
+		// dispatch a secas.
+		return ss.readFrame(id, d)[proto.FrameHead:]
 
 	case proto.OpWrite:
 		h, off, data := d.U64(), d.U64(), d.Bytes(int(ss.maxIO.Load()))
