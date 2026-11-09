@@ -687,6 +687,7 @@ func cmdRun(args []string) error {
 		return err
 	}
 	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
+	avisarAllow(os.Stderr, allowReq)
 	// Una referencia de Docker en -image se importa sola (run_docker.go). El
 	// entorno de -e es de la máquina, no de la imagen: viaja en el cuerpo de
 	// la petición y el daemon se lo da al invitado por MMDS

@@ -90,6 +90,7 @@ func cmdTry(args []string) (int, error) {
 		Image: *image, From: *from, MemMiB: *mem, VCPUs: *cpus,
 		Egress: *egress, AllowDomains: splitDomains(allow.String()), TTLSeconds: int(ttl.Seconds()),
 	}}
+	avisarAllow(os.Stderr, o.req.AllowDomains)
 	porDefecto := o.req.Image == "" && o.req.From == ""
 	if porDefecto {
 		o.req.Image = tryDefaultImage
