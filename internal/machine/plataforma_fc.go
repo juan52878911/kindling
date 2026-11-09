@@ -274,8 +274,21 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 		return nil, fmt.Errorf("stat %s: no owner", f.Name())
 	}
 	uid, gid := int(st.Uid), int(st.Gid)
+	soloLectura := descriptorSoloLectura(f)
+	modo := fi.Mode().Perm()
 	var deshacer []func()
-	if uid == 0 {
+	// Quien solo lee (debugfs sin -w) no necesita que se le ceda el disco si
+	// ya lo puede leer nobody, por los demás o por un grupo que no sea el de
+	// root: así no se toca el dueño de una imagen base que otros VMM abren
+	// por grupo mientras tanto (darLecturaVMM).
+	switch {
+	case uid != 0:
+		// El dueño (el usuario del VMM): ya puede con él.
+	case soloLectura && modo&0o004 != 0:
+		uid, gid = uidNadieE2fsck, uidNadieE2fsck
+	case soloLectura && modo&0o040 != 0 && gid != 0:
+		uid = uidNadieE2fsck
+	default:
 		uid, gid = uidNadieE2fsck, uidNadieE2fsck
 		if err := f.Chown(uid, gid); err != nil {
 			return nil, fmt.Errorf("handing %s to e2fsck: %w", filepath.Base(f.Name()), err)
@@ -283,7 +296,7 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 		deshacer = append(deshacer, func() { _ = f.Chown(int(st.Uid), int(st.Gid)) })
 	}
 	// e2fsck -p escribe: el dueño necesita rw aunque el modo no lo diera.
-	if modo := fi.Mode().Perm(); modo&0o600 != 0o600 {
+	if !soloLectura && modo&0o600 != 0o600 {
 		if err := f.Chmod(modo | 0o600); err == nil {
 			deshacer = append(deshacer, func() { _ = f.Chmod(modo) })
 		}
@@ -297,6 +310,23 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 			deshacer[i]()
 		}
 	}, nil
+}
+
+// descriptorSoloLectura dice si f se abrió O_RDONLY. Ante la duda, no: se
+// trata como si fuera a escribir.
+func descriptorSoloLectura(f *os.File) bool {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	flags := -1
+	_ = rc.Control(func(fd uintptr) {
+		r, _, e := syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETFL, 0)
+		if e == 0 {
+			flags = int(r)
+		}
+	})
+	return flags >= 0 && flags&syscall.O_ACCMODE == syscall.O_RDONLY
 }
 
 // checkPresionPlataforma no añade nada en Linux: allí la presión la mide PSI

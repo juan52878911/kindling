@@ -32,9 +32,7 @@ func crearExt4(t *testing.T, ruta string, ordenes ...string) imagenDebugfs {
 	}
 	im := imagenDebugfs{bin: bin, file: ruta}
 	if len(ordenes) > 0 {
-		if err := im.escribir(ctx, filepath.Dir(ruta), ordenes); err != nil {
-			t.Fatal(err)
-		}
+		escribirSinConfinar(t, im, ordenes)
 	}
 	return im
 }
