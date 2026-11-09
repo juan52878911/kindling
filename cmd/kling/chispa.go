@@ -69,7 +69,7 @@ func cmdChispa(args []string) error {
 	case "rm", "remove":
 		return cmdChispaRm(args[1:])
 	}
-	return fmt.Errorf("unknown chispa command %q\n\n%s", args[0], chispaUsage)
+	return errUsoDe("ai chispa", fmt.Errorf("unknown chispa command %q\n\n%s", args[0], chispaUsage))
 }
 
 // readJSONL lee ejemplos de un fichero (con topes, ver chispa.ReadExamples) y
@@ -89,7 +89,7 @@ func readJSONL(path string, needLabel bool) ([]chispa.Example, string, error) {
 }
 
 func cmdChispaTrain(args []string) error {
-	fs := flag.NewFlagSet("chispa train", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa train", flag.ContinueOnError)
 	data := fs.String("data", "", "training JSONL (required)")
 	valid := fs.String("valid", "", "validation JSONL for early stopping, calibration and τ (default: hold out -valid-frac of -data)")
 	test := fs.String("test", "", "optional test JSONL: evaluated after training")
@@ -111,11 +111,11 @@ func cmdChispaTrain(args []string) error {
 	minSupport := fs.Int("min-support", 10, "confident validation predictions needed to trust a class threshold")
 	ovr := fs.String("one-vs-rest", "", "train a binary LABEL-vs-rest model from multi-class data")
 	verbose := fs.Bool("v", false, "print the loss of every epoch")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *data == "" || *out == "" {
-		return errors.New("usage: kling ai chispa train -data train.jsonl -o model.chispa [options]")
+		return errUso("usage: kling ai chispa train -data train.jsonl -o model.chispa [options]")
 	}
 	if *bucketsLog < 4 || *bucketsLog > 22 {
 		return errors.New("-buckets must be between 4 and 22 (log2)")
@@ -199,15 +199,15 @@ func cmdChispaTrain(args []string) error {
 }
 
 func cmdChispaEval(args []string) error {
-	fs := flag.NewFlagSet("chispa eval", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa eval", flag.ContinueOnError)
 	model := fs.String("model", "", "model file (required)")
 	data := fs.String("data", "", "labelled JSONL (required)")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *model == "" || *data == "" {
-		return errors.New("usage: kling ai chispa eval -model m.chispa -data test.jsonl [-json]")
+		return errUso("usage: kling ai chispa eval -model m.chispa -data test.jsonl [-json]")
 	}
 	m, err := chispa.LoadFile(*model)
 	if err != nil {
@@ -234,17 +234,17 @@ func cmdChispaEval(args []string) error {
 }
 
 func cmdChispaPredict(args []string) error {
-	fs := flag.NewFlagSet("chispa predict", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa predict", flag.ContinueOnError)
 	model := fs.String("model", "", "model file (required)")
 	text := fs.String("text", "", "text to classify; without it, JSONL inputs are read from stdin")
 	fieldsJSON := fs.String("fields", "", `structured fields as a JSON object, e.g. '{"level":"error"}'`)
 	top := fs.Int("top", 5, "evidence: features that push the predicted label the most (0 = none)")
 	asJSON := fs.Bool("json", false, "JSON output for -text (stdin mode always writes JSON lines)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *model == "" {
-		return errors.New("usage: kling ai chispa predict -model m.chispa [-text T] [-fields JSON] [-top N] [-json]")
+		return errUso("usage: kling ai chispa predict -model m.chispa [-text T] [-fields JSON] [-top N] [-json]")
 	}
 	m, err := chispa.LoadFile(*model)
 	if err != nil {
@@ -311,13 +311,13 @@ func fmtTau(t float64) string {
 }
 
 func cmdChispaInspect(args []string) error {
-	fs := flag.NewFlagSet("chispa inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("chispa inspect", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling ai chispa inspect <model.chispa> [-json]")
+		return errUso("usage: kling ai chispa inspect <model.chispa> [-json]")
 	}
 	path := fs.Arg(0)
 	m, err := chispa.LoadFile(path)

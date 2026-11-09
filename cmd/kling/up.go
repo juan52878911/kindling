@@ -51,12 +51,12 @@ const buildAsDefault = "kindling-build"
 // ── kling up ──────────────────────────────────────────────────────────────────
 
 func cmdUp(args []string) error {
-	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	host := hostFlag(fs)
 	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
 	install := fs.Bool("install", false, "macOS: write the launchd agent (~/Library/LaunchAgents/"+launchAgentLabel+".plist) so the daemon starts at login, and start it")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *install && (runtime.GOOS != "darwin" || *checkOnly) {
@@ -776,13 +776,16 @@ func lineasVMMSinDaemon(goos, endpoint string) []string {
 // No devuelve error cuando algo está caído: la respuesta ES el informe. Un
 // diagnóstico que aborta en la primera línea rota es justo el que no sirve.
 func cmdStatus(args []string) error {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output (the daemon, plus what each extension reports)")
 	verbose := fs.Bool("v", false, "daemon details: root, backend, capabilities, share roots (what `kling status -v` printed)")
 	// Los flags que no son del núcleo (p. ej. -gateway, de la extensión MCP)
 	// se ignoran aquí y llegan intactos a los ganchos.
-	if err := fs.Parse(knownFlags(fs, reorderFor(fs, args))); err != nil {
+	if err := parseFlags(fs, knownFlags(fs, reorderFor(fs, args))); err != nil {
+		return err
+	}
+	if err := sinPosicionales(fs, args); err != nil {
 		return err
 	}
 

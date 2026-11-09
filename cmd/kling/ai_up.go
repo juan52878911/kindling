@@ -22,11 +22,11 @@ import (
 const aiUpListen = "127.0.0.1:8080"
 
 func aiUp(args []string) error {
-	fs := flag.NewFlagSet("ai up", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai up", flag.ContinueOnError)
 	host := hostFlag(fs)
 	cfgFlag := fs.String("config", "", "model and task registry (default: ./ai.json, then "+aiDefault("ai.json")+")")
 	listen := fs.String("listen", aiUpListen, "TCP address to listen on (always with a token)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {

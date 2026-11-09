@@ -47,10 +47,13 @@ func splitDomains(s string) []string {
 // 404 en un comando nuevo; así se ve antes. Un daemon que no contesta no es
 // un error aquí: `kling version` tiene que funcionar sin daemon.
 func cmdVersion(args []string) error {
-	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 	c := api.NewClient(hostOf(*host))

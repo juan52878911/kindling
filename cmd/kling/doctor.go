@@ -69,10 +69,13 @@ type doctorInput struct {
 }
 
 func cmdDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 

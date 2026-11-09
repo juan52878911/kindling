@@ -23,18 +23,18 @@ import (
 // adaptador que convierte cada registro en una línea y la vuelve a pintar.
 
 func cmdCredAudit(args []string) error {
-	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N records (0 = all the daemon keeps)")
 	follow := fs.Bool("f", false, "keep printing new records until Ctrl-C or until the machine stops")
 	denied := fs.Bool("denied", false, "only requests denied by policy (no credential, -allow-request, ambiguous path)")
 	since := fs.String("since", "", "only records since an RFC 3339 time or a duration back from now (10m, 2h)")
 	asJSON := fs.Bool("json", false, "one JSON record per line")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *tail < 0 {
-		return fmt.Errorf("usage: kling machine audit <ref> [-f] [-denied] [-since 10m|RFC3339] [-tail N] [-json]")
+		return errUso("usage: kling machine audit <ref> [-f] [-denied] [-since 10m|RFC3339] [-tail N] [-json]")
 	}
 	q := api.CredAuditQuery{Tail: *tail, Denied: *denied}
 	if *since != "" {

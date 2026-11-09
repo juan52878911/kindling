@@ -17,10 +17,10 @@ const BuildToolsImage = "kling-build-tools"
 // /usr/local/lib/kindling/kling en el daemon (from_host): tiene que ser el del
 // propio daemon, o el constructor de dentro y el de fuera no harían lo mismo.
 func imagesBuildTools(args []string) error {
-	fs := flag.NewFlagSet("image build-tools", flag.ExitOnError)
+	fs := flag.NewFlagSet("image build-tools", flag.ContinueOnError)
 	host := hostFlag(fs)
 	name := fs.String("as", BuildToolsImage, "image name")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()

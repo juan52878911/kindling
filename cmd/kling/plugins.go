@@ -64,7 +64,7 @@ func cmdPlugins(args []string) error {
 			return pluginsEnable(args[1:], false)
 		}
 		if !strings.HasPrefix(args[0], "-") {
-			return fmt.Errorf("unknown plugins subcommand %q: use ls, install, rm, enable or disable", args[0])
+			return errUsoDe("plugin", fmt.Errorf("unknown plugins subcommand %q: use ls, install, rm, enable or disable", args[0]))
 		}
 	}
 	return pluginsLs(args)
@@ -139,9 +139,9 @@ func pluginRows(reg *plugin.Registry, daemonAPI int) []pluginRow {
 // pluginsLs lista las extensiones: qué aportan, de dónde salen y por qué no se
 // pueden usar si es el caso.
 func pluginsLs(args []string) error {
-	fs := flag.NewFlagSet("plugin ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("plugin ls", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	rows := pluginRows(extensions(), daemonAPIFor(hostOf("")))

@@ -27,7 +27,7 @@ import (
 
 func cmdRegistry(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling registry [login|logout|ls|import]")
+		return errUso("usage: kling registry [login|logout|ls|import]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -40,7 +40,7 @@ func cmdRegistry(args []string) error {
 	case "import":
 		return registryImport(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use login, logout, ls or import", sub)
+		return errUsoDe("registry", fmt.Errorf("unknown subcommand %q: use login, logout, ls or import", sub))
 	}
 }
 
@@ -55,14 +55,14 @@ func errSinRegistros(err error) error {
 }
 
 func registryLogin(args []string) error {
-	fs := flag.NewFlagSet("registry login", flag.ExitOnError)
+	fs := flag.NewFlagSet("registry login", flag.ContinueOnError)
 	host := hostFlag(fs)
 	user := fs.String("u", "", "username (a token-only registry accepts any)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling registry login <registry> [-u user]   (the password or token is read from stdin)")
+		return errUso("usage: kling registry login <registry> [-u user]   (the password or token is read from stdin)")
 	}
 	reg, err := oci.CredentialKey(fs.Arg(0))
 	if err != nil {
@@ -145,13 +145,13 @@ func leerSecreto(in *os.File, tty bool, aviso string) (string, error) {
 }
 
 func registryLogout(args []string) error {
-	fs := flag.NewFlagSet("registry logout", flag.ExitOnError)
+	fs := flag.NewFlagSet("registry logout", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling registry logout <registry>...")
+		return errUso("usage: kling registry logout <registry>...")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -170,10 +170,10 @@ func registryLogout(args []string) error {
 }
 
 func registryList(args []string) error {
-	fs := flag.NewFlagSet("registry ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("registry ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -287,10 +287,10 @@ func slicesHasPrefix(l []string, p string) bool {
 }
 
 func registryImport(args []string) error {
-	fs := flag.NewFlagSet("registry import", flag.ExitOnError)
+	fs := flag.NewFlagSet("registry import", flag.ContinueOnError)
 	host := hostFlag(fs)
 	path := fs.String("config", "", "Docker config file (default ~/.docker/config.json, or $DOCKER_CONFIG/config.json)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if *path == "" {

@@ -19,7 +19,8 @@ func TestCodigosDeSalida(t *testing.T) {
 	}{
 		{nil, 0},
 		{errors.New("boom"), salidaError},
-		{fmt.Errorf("usage: kling start <ref>..."), salidaUso},
+		{errUso("usage: kling start <ref>..."), salidaUso},
+		{errUsoDe("machine", errors.New("unknown subcommand \"x\"")), salidaUso},
 		{&errConCodigo{code: 7, err: errors.New("x")}, 7},
 		{fmt.Errorf("get: %w", &api.ErrDaemonTooOld{Version: "0.17.0", API: 0}), salidaDaemonViejo},
 		{&api.StatusError{Code: 409, Message: "x", ErrorCode: api.CodeStaleGolden}, salidaDoradoObsoleto},

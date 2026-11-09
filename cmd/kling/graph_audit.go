@@ -16,7 +16,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -139,18 +138,18 @@ func escribirAuditoriaGrafo(out, errOut io.Writer, recs []registroGrafo, asJSON 
 }
 
 func graphAudit(args []string) error {
-	fs := flag.NewFlagSet("graph audit", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph audit", flag.ContinueOnError)
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N records of the whole graph (0 = all the daemon keeps)")
 	denied := fs.Bool("denied", false, "only connections denied by policy")
 	since := fs.String("since", "", "only records since an RFC 3339 time or a duration back from now (10m, 2h)")
 	all := fs.Bool("all", false, "also the nodes' other credential proxy traffic, not only their edges")
 	asJSON := fs.Bool("json", false, "one JSON record per line, with its node")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *tail < 0 {
-		return errors.New("usage: kling graph audit <graph> [-since 10m|RFC3339] [-denied] [-all] [-tail N] [-json]")
+		return errUso("usage: kling graph audit <graph> [-since 10m|RFC3339] [-denied] [-all] [-tail N] [-json]")
 	}
 	q := api.CredAuditQuery{Denied: *denied}
 	if *since != "" {

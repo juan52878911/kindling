@@ -29,13 +29,9 @@ type forkOptions struct {
 	asJSON bool
 }
 
-// parseSandboxFork interpreta los argumentos. handling es flag.ExitOnError en
-// el CLI y flag.ContinueOnError en los tests.
-func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, error) {
-	fs := flag.NewFlagSet("sandbox fork", handling)
-	if handling == flag.ContinueOnError {
-		fs.SetOutput(io.Discard)
-	}
+// parseSandboxFork interpreta los argumentos.
+func parseSandboxFork(args []string) (forkOptions, error) {
+	fs := flag.NewFlagSet("sandbox fork", flag.ContinueOnError)
 	host := hostFlag(fs)
 	n := fs.Int("n", 1, fmt.Sprintf("how many copies (1-%d)", api.ForkMax))
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime of each copy: 10m, 1h (bare number = seconds; default: the original's)")
@@ -45,7 +41,7 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 	quiet := fs.Bool("q", false, "print only the ids of the copies")
 	asJSON := fs.Bool("json", false, "JSON output: the snapshot and the copies")
 	skipReady := fs.Bool("skip-ready", false, "don't wait for the sandbox (and each copy) to be ready by its image's probe and hooks")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return forkOptions{}, err
 	}
 	if fs.NArg() != 1 {
@@ -73,7 +69,7 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 }
 
 func sandboxFork(args []string) error {
-	o, err := parseSandboxFork(args, flag.ExitOnError)
+	o, err := parseSandboxFork(args)
 	if err != nil {
 		return err
 	}

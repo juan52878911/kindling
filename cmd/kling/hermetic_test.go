@@ -10,6 +10,13 @@ import (
 // todo el paquete, también en los tests que no son herméticos y en los kling
 // que lanzan: ninguno escribe en su ~/.local/state.
 func TestMain(m *testing.M) {
+	// El binario de test hace también de kling (correrKling): así se prueba
+	// el main de verdad, con su os.Exit, sin compilar otro binario.
+	if os.Getenv(envComoKling) == "1" {
+		os.Unsetenv(envComoKling)
+		main()
+		os.Exit(0)
+	}
 	d, err := os.MkdirTemp("", "kling-state-")
 	if err != nil {
 		panic(err)

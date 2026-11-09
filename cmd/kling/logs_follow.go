@@ -33,18 +33,18 @@ const (
 )
 
 func cmdLogs(args []string) error {
-	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N lines (0 = all)")
 	follow := fs.Bool("f", false, "keep printing new lines until Ctrl-C or until the machine stops running")
 	service := fs.Bool("service", false, "the output of the image's service (the ENTRYPOINT of a Docker image) instead of the serial console")
 	raw := fs.Bool("raw", false, "print the console as is, escape sequences included (by default, on a terminal, control characters are shown escaped)")
 	stamps := fs.Bool("t", false, "with -service, show the time each line arrived (RFC 3339, UTC), as docker logs -t")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling logs [-f] [-service [-t]] <ref> [-tail N]")
+		return errUso("usage: kling logs [-f] [-service [-t]] <ref> [-tail N]")
 	}
 	if *stamps && !*service {
 		// La consola serie no guarda horas; las del kernel ([   1.234]) son

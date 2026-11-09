@@ -27,7 +27,7 @@ import (
 
 func cmdModels(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai model <ls|add|ask|embed|rm> [...]")
+		return errUso("usage: kling ai model <ls|add|ask|embed|rm> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -41,17 +41,17 @@ func cmdModels(args []string) error {
 	case "rm", "remove":
 		return modelsRm(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, add, ask, embed or rm", args[0])
+		return errUsoDe("ai model", fmt.Errorf("unknown subcommand %q: use ls, add, ask, embed or rm", args[0]))
 	}
 }
 
 // modelsList enseña el catálogo y los modelos ya servibles en el daemon (los
 // snapshots con la etiqueta von.model).
 func modelsList(args []string) error {
-	fs := flag.NewFlagSet("models ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("models ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -112,7 +112,7 @@ func modelsList(args []string) error {
 
 // modelsAdd construye la imagen (si hace falta) y el dorado de un modelo.
 func modelsAdd(args []string) error {
-	fs := flag.NewFlagSet("models add", flag.ExitOnError)
+	fs := flag.NewFlagSet("models add", flag.ContinueOnError)
 	host := hostFlag(fs)
 	model := fs.String("model", "", "catalog model ("+strings.Join(von.IDs(), ", ")+")")
 	quant := fs.String("quant", "", "quantization (default q8_0)")
@@ -133,11 +133,11 @@ func modelsAdd(args []string) error {
 	cacheRAM := fs.Int("cache-ram", -1, fmt.Sprintf("MiB of llama-server's prompt cache, added to the memory (default %d; 0 = off)", von.DefaultCacheRAM))
 	var prefixes stringsFlag
 	fs.Var(&prefixes, "prefix", "file with a task's system prompt to leave evaluated in the golden snapshot (repeatable)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai model add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
+		return errUso("usage: kling ai model add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
@@ -361,7 +361,7 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 // que da llama-server. Va por el proxy del daemon, así que funciona igual en
 // local y por SSH.
 func modelsAsk(args []string) error {
-	fs := flag.NewFlagSet("models ask", flag.ExitOnError)
+	fs := flag.NewFlagSet("models ask", flag.ContinueOnError)
 	host := hostFlag(fs)
 	maxTokens := fs.Int("max-tokens", 256, "maximum tokens to generate")
 	temp := fs.Float64("temperature", -1, "sampling temperature (default: the server's)")
@@ -369,11 +369,11 @@ func modelsAsk(args []string) error {
 	system := fs.String("system", "", "system prompt")
 	wait := fs.Duration("wait", 0, "wait this long for the model to load first (a cold-booted machine)")
 	asJSON := fs.Bool("json", false, "print the full response and the wall time as JSON")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling ai model ask <machine> [-max-tokens N] <prompt...>")
+		return errUso("usage: kling ai model ask <machine> [-max-tokens N] <prompt...>")
 	}
 	ref, prompt := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
 
@@ -419,14 +419,14 @@ func modelsAsk(args []string) error {
 // enseña su tamaño, su norma y lo que tardó: para comprobar una réplica, no
 // para usar los vectores (eso es internal/codificador).
 func modelsEmbed(args []string) error {
-	fs := flag.NewFlagSet("models embed", flag.ExitOnError)
+	fs := flag.NewFlagSet("models embed", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "print the full response and the wall time as JSON")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling ai model embed <machine> <text...>")
+		return errUso("usage: kling ai model embed <machine> <text...>")
 	}
 	ref, text := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
 	ctx, stop := ctxWithSignals()
@@ -452,14 +452,14 @@ func modelsEmbed(args []string) error {
 // modelsRm quita el dorado y la imagen de un modelo. Las réplicas vivas lo
 // impiden (el daemon se niega a borrar un snapshot con instancias).
 func modelsRm(args []string) error {
-	fs := flag.NewFlagSet("models rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("models rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	keepImage := fs.Bool("keep-image", false, "remove only the golden snapshot")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai model rm <name> [-keep-image]")
+		return errUso("usage: kling ai model rm <name> [-keep-image]")
 	}
 	name := fs.Arg(0)
 	ctx, stop := ctxWithSignals()

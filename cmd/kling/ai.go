@@ -37,7 +37,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <up|serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback|model|chispa> [...]")
+		return errUso("usage: kling ai <up|serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback|model|chispa> [...]")
 	}
 	switch args[0] {
 	case "up":
@@ -73,7 +73,7 @@ func cmdAI(args []string) error {
 		// Clasificadores (antes `kling chispa`).
 		return cmdChispa(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use up, serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain, rollback, model or chispa", args[0])
+		return errUsoDe("ai", fmt.Errorf("unknown subcommand %q: use up, serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain, rollback, model or chispa", args[0]))
 	}
 }
 
@@ -83,7 +83,7 @@ func aiDir() string { return filepath.Dir(config.Path()) }
 func aiDefault(name string) string { return filepath.Join(aiDir(), name) }
 
 func aiServe(args []string) error {
-	fs := flag.NewFlagSet("ai serve", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai serve", flag.ContinueOnError)
 	host := hostFlag(fs)
 	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry")
 	socket := fs.String("socket", envOr("KLING_AI_SOCKET", aiDefault("ai.sock")), "Unix socket to listen on (mode 0600)")
@@ -100,7 +100,7 @@ func aiServe(args []string) error {
 	pausedFor := fs.Duration("paused-for", 0, "how long a paused replica waits before it is frozen (0 = 10 × -idle)")
 	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -378,11 +378,11 @@ func (c *aiClient) do(method, path string, in, out any) error {
 }
 
 func aiList(args []string) error {
-	fs := flag.NewFlagSet("ai ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai ls", flag.ContinueOnError)
 	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	cfg, err := aigw.LoadConfig(*cfgPath)
@@ -472,18 +472,18 @@ func sortedNames[V any](m map[string]V) []string {
 }
 
 func aiTest(args []string) error {
-	fs := flag.NewFlagSet("ai test", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai test", flag.ContinueOnError)
 	mode := fs.String("mode", "", "cascade (default: Chispa, and VON where it is unsure if the task's cascade is on) or chispa")
 	fields := fs.String("fields", "", `structured fields as JSON, e.g. {"service":"api"}`)
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
 	explain := fs.Bool("explain", false, "include Chispa's evidence also when it answers")
 	fs.String("lang", "", "language of an intent task's command (es, en…; default auto)")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling ai test <task> [-mode M] [-fields JSON] <text...>")
+		return errUso("usage: kling ai test <task> [-mode M] [-fields JSON] <text...>")
 	}
 	lang := fs.Lookup("lang").Value.String()
 	req := aigw.ClassifyRequest{Task: fs.Arg(0), Text: strings.Join(fs.Args()[1:], " "), Mode: *mode, Explain: *explain}
@@ -550,17 +550,17 @@ func aiTest(args []string) error {
 }
 
 func aiCalibrate(args []string) error {
-	fs := flag.NewFlagSet("ai calibrate", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai calibrate", flag.ContinueOnError)
 	target := fs.Float64("target", 0, "agreement with VON to promise (default: the task's precision, the model's, or 0.95)")
 	minSupport := fs.Int("min-support", 10, "confident samples a class needs before it gets a threshold")
 	dry := fs.Bool("dry-run", false, "report only; never write the model")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling ai calibrate <task> [-target P] [-dry-run]")
+		return errUso("usage: kling ai calibrate <task> [-target P] [-dry-run]")
 	}
 	c, err := mk()
 	if err != nil {
@@ -608,18 +608,18 @@ func aiCalibrate(args []string) error {
 }
 
 func aiGenerate(args []string) error {
-	fs := flag.NewFlagSet("ai generate", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai generate", flag.ContinueOnError)
 	var vars kvFlag
 	fs.Var(&vars, "var", "template variable name=value (repeatable)")
 	maxTokens := fs.Int("max-tokens", 0, "at most the task's max_tokens")
 	temp := fs.Float64("temperature", -1, "sampling temperature (default: the task's)")
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling ai generate <task> [-var k=v] <input...>   (no input: read stdin)")
+		return errUso("usage: kling ai generate <task> [-var k=v] <input...>   (no input: read stdin)")
 	}
 	input := strings.Join(fs.Args()[1:], " ")
 	if fs.NArg() == 1 {
@@ -669,7 +669,7 @@ func (k *kvFlag) Set(v string) error {
 // aiEval pasa un conjunto etiquetado por Chispa solo y por la cascada, y guarda
 // el resultado con la tarea: es lo que decide si escalate_to se puede activar.
 func aiEval(args []string) error {
-	fs := flag.NewFlagSet("ai eval", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai eval", flag.ContinueOnError)
 	data := fs.String("data", "", "labelled JSONL ({\"text\", \"fields\", \"label\"}) NOT used to train the Chispa model")
 	vonModel := fs.String("von", "", "candidate von model (default: the task's escalate_to)")
 	conc := fs.Int("concurrency", 1, "escalations in flight at once (more wakes more replicas)")
@@ -677,11 +677,11 @@ func aiEval(args []string) error {
 	dry := fs.Bool("dry-run", false, "report only; don't store the record")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *data == "" {
-		return fmt.Errorf("usage: kling ai eval <task> -data test.jsonl [-von <model>] [-concurrency N] [-von-alone] [-dry-run]")
+		return errUso("usage: kling ai eval <task> -data test.jsonl [-von <model>] [-concurrency N] [-von-alone] [-dry-run]")
 	}
 	c, err := mk()
 	if err != nil {
@@ -780,9 +780,9 @@ func tau(v float64) string {
 }
 
 func aiReload(args []string) error {
-	fs := flag.NewFlagSet("ai reload", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai reload", flag.ContinueOnError)
 	mk := aiClientFlags(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	c, err := mk()
@@ -815,13 +815,13 @@ func aiReload(args []string) error {
 // del dorado dice con qué prefijos se hizo, así que repetirlo sin cambios no
 // hace nada.
 func aiPrime(args []string) error {
-	fs := flag.NewFlagSet("ai prime", flag.ExitOnError)
+	fs := flag.NewFlagSet("ai prime", flag.ContinueOnError)
 	host := hostFlag(fs)
 	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry")
 	dryRun := fs.Bool("dry-run", false, "only say what would be done")
 	force := fs.Bool("force", false, "remake the golden snapshot even if its prefixes are up to date")
 	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	cfg, err := aigw.LoadConfig(*cfgPath)

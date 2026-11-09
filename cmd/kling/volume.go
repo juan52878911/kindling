@@ -25,7 +25,7 @@ import (
 //	kling volume clone notas notas-prueba
 func cmdVolume(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling volume [create|ls|rm|populate|snapshot|snapshots|restore|clone]")
+		return errUso("usage: kling volume [create|ls|rm|populate|snapshot|snapshots|restore|clone]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -46,19 +46,19 @@ func cmdVolume(args []string) error {
 	case "clone", "cp":
 		return volumeClone(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, populate, snapshot, snapshots, restore, or clone", sub)
+		return errUsoDe("volume", fmt.Errorf("unknown subcommand %q: use create, ls, rm, populate, snapshot, snapshots, restore, or clone", sub))
 	}
 }
 
 func volumeCreate(args []string) error {
-	fs := flag.NewFlagSet("volume create", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume create", flag.ContinueOnError)
 	host := hostFlag(fs)
 	size := fs.String("size", "1G", "logical size: 512M, 2G, 10G")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling volume create <name> [-size 2G]")
+		return errUso("usage: kling volume create <name> [-size 2G]")
 	}
 	mib, err := parseSizeMiB(*size)
 	if err != nil {
@@ -81,11 +81,11 @@ func volumeCreate(args []string) error {
 }
 
 func volumeList(args []string) error {
-	fs := flag.NewFlagSet("volume ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume ls", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only names (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -127,15 +127,15 @@ func volumeList(args []string) error {
 // explica por qué, salvo con -copy, que copia entero: el usuario tiene que
 // elegir esperar, no descubrirlo.
 func volumeClone(args []string) error {
-	fs := flag.NewFlagSet("volume clone", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume clone", flag.ContinueOnError)
 	host := hostFlag(fs)
 	allowCopy := fs.Bool("copy", false, "if the host filesystem cannot clone (ext4), make a full copy instead")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: kling volume clone <source> <new-name> [-copy]")
+		return errUso("usage: kling volume clone <source> <new-name> [-copy]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -178,15 +178,15 @@ func orUnknown(s string) string {
 }
 
 func volumeRemove(args []string) error {
-	fs := flag.NewFlagSet("volume rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume rm", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
 	snaps := fs.Bool("snapshots", false, "also remove the volume's snapshots (refused otherwise)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling volume rm [-snapshots] <name>... | <name>@<snapshot>...")
+		return errUso("usage: kling volume rm [-snapshots] <name>... | <name>@<snapshot>...")
 	}
 	// Se valida todo antes de borrar nada: un argumento mal escrito al final
 	// no puede dejar la mitad borrada.
@@ -234,14 +234,14 @@ func splitVolumeSnapshot(a string) (vol, snap string, err error) {
 
 // volumeSnapshot copia un volumen sin escritores.
 func volumeSnapshot(args []string) error {
-	fs := flag.NewFlagSet("volume snapshot", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume snapshot", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return fmt.Errorf("usage: kling volume snapshot <volume> [name]   (default name: UTC time, 20260928-153012)")
+		return errUso("usage: kling volume snapshot <volume> [name]   (default name: UTC time, 20260928-153012)")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -263,15 +263,15 @@ func volumeSnapshot(args []string) error {
 
 // volumeSnapshots lista los snapshots de un volumen.
 func volumeSnapshots(args []string) error {
-	fs := flag.NewFlagSet("volume snapshots", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume snapshots", flag.ContinueOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	quiet := fs.Bool("q", false, "print only names (for scripting)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling volume snapshots <volume> [-q] [-json]")
+		return errUso("usage: kling volume snapshots <volume> [-q] [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -309,15 +309,15 @@ func volumeSnapshots(args []string) error {
 // volumeRestore devuelve un volumen a un snapshot. Lo que había queda en
 // <vol>@undo, así que se deshace con `kling volume restore <vol> undo`.
 func volumeRestore(args []string) error {
-	fs := flag.NewFlagSet("volume restore", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume restore", flag.ContinueOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: kling volume restore <volume> <snapshot> [-f]")
+		return errUso("usage: kling volume restore <volume> <snapshot> [-f]")
 	}
 	vol, snap := fs.Arg(0), fs.Arg(1)
 	if !*force && !confirm(fmt.Sprintf("replace the contents of %s with %s@%s? (the current state is kept in %s@undo)",
@@ -370,7 +370,7 @@ func parseSizeMiB(s string) (int, error) {
 // levanta contradice la razón de ser del proyecto. La máquina se destruye al
 // terminar, salga bien o mal.
 func volumePopulate(args []string) error {
-	fs := flag.NewFlagSet("volume populate", flag.ExitOnError)
+	fs := flag.NewFlagSet("volume populate", flag.ContinueOnError)
 	host := hostFlag(fs)
 	image := fs.String("image", ToolchainImage, "image that provides the installer (npm, pip...)")
 	mount := fs.String("mount", "/data", "where the volume is mounted inside the microVM")
@@ -389,11 +389,11 @@ func volumePopulate(args []string) error {
 			break
 		}
 	}
-	if err := fs.Parse(reorderFor(fs, nuestros)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, nuestros)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || len(cmd) == 0 {
-		return fmt.Errorf("usage: kling volume populate <name> [-image IMG] -- <command>\n" +
+		return errUso("usage: kling volume populate <name> [-image IMG] -- <command>\n" +
 			"  e.g.:  kling volume populate libs -- \\\n" +
 			"             npm install --prefix /data --ignore-scripts lodash zod\n" +
 			"  (uses the `toolchain` image by default: build it with `kling image toolchain`)")

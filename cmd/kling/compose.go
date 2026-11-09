@@ -68,7 +68,7 @@ func cmdCompose(args []string) error {
 		switch k {
 		case "f", "file", "p", "project-name":
 		default:
-			return &errWithHint{err: fmt.Errorf("unknown flag %s before the command", args[0]), hint: composeUsage}
+			return errUsoDe("compose", &errWithHint{err: fmt.Errorf("unknown flag %s before the command", args[0]), hint: composeUsage})
 		}
 		if !conValor {
 			if len(args) < 2 {
@@ -100,7 +100,7 @@ func cmdCompose(args []string) error {
 	case "stop", "start", "restart":
 		return composeCiclo(g, args[0], args[1:])
 	}
-	return &errWithHint{err: fmt.Errorf("unknown subcommand %q", args[0]), hint: composeUsage}
+	return errUsoDe("compose", &errWithHint{err: fmt.Errorf("unknown subcommand %q", args[0]), hint: composeUsage})
 }
 
 // flagsCompose son -f y -p de un subcomando (además de los de delante) y
@@ -321,7 +321,7 @@ func shellWords(s string) ([]string, error) {
 }
 
 func composeUp(g globalesCompose, args []string) error {
-	fs := flag.NewFlagSet("compose up", flag.ExitOnError)
+	fs := flag.NewFlagSet("compose up", flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, true)
 	detach := fs.Bool("d", false, "leave the project up and return: the daemon keeps its ports published (kling compose down removes it)")
 	fs.BoolVar(detach, "detach", false, "same as -d")
@@ -330,7 +330,7 @@ func composeUp(g globalesCompose, args []string) error {
 	stamps := fs.Bool("t", false, "show the time of each line of the services' output (RFC 3339, UTC)")
 	fs.BoolVar(stamps, "timestamps", false, "same as -t")
 	fresh := fs.Bool("fresh", false, "rebuild the services' warm templates (after re-pulling an image tag, say)")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	if fs.NArg() != 0 {
 		return errors.New(composeUsage)
 	}
@@ -593,11 +593,11 @@ func quitarHuerfanasDe(ctx context.Context, c *api.Client, t *traduccionCompose,
 }
 
 func composeDown(g globalesCompose, args []string) error {
-	fs := flag.NewFlagSet("compose down", flag.ExitOnError)
+	fs := flag.NewFlagSet("compose down", flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, true)
 	vols := fs.Bool("v", false, "also remove the project's named volumes")
 	fs.BoolVar(vols, "volumes", false, "same as -v")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	proyecto, abs, t, err := proyectoDe(*file, *name)
 	if err != nil {
 		return err
@@ -671,9 +671,9 @@ func serviciosDe(ctx context.Context, c *api.Client, proyecto string, args []str
 }
 
 func composePS(g globalesCompose, args []string) error {
-	fs := flag.NewFlagSet("compose ps", flag.ExitOnError)
+	fs := flag.NewFlagSet("compose ps", flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, true)
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	proyecto, _, _, err := proyectoDe(*file, *name)
 	if err != nil {
 		return err
@@ -727,14 +727,14 @@ func composePS(g globalesCompose, args []string) error {
 }
 
 func composeLogs(g globalesCompose, args []string) error {
-	fs := flag.NewFlagSet("compose logs", flag.ExitOnError)
+	fs := flag.NewFlagSet("compose logs", flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, false)
 	follow := fs.Bool("f", false, "follow the output")
 	fs.BoolVar(follow, "follow", false, "same as -f")
 	stamps := fs.Bool("t", false, "show the time of each line (RFC 3339, UTC)")
 	fs.BoolVar(stamps, "timestamps", false, "same as -t")
 	tail := fs.Int("tail", 100, "lines of each service to show first (0: all)")
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	proyecto, _, _, err := proyectoDe(*file, *name)
 	if err != nil {
 		return err
@@ -776,7 +776,7 @@ func composeLogs(g globalesCompose, args []string) error {
 // la entrada estándar si no es una terminal o si se pide con -i (ver
 // modoComposeExec).
 func composeExec(g globalesCompose, args []string) error {
-	fs := flag.NewFlagSet("compose exec", flag.ExitOnError)
+	fs := flag.NewFlagSet("compose exec", flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, false)
 	sinTTY := fs.Bool("T", false, "no terminal (kling exec): for scripts and pipes")
 	fs.BoolVar(sinTTY, "no-tty", false, "same as -T")
@@ -788,12 +788,12 @@ func composeExec(g globalesCompose, args []string) error {
 	fs.Var(&env, "e", "KEY=value for the command (repeatable)")
 	fs.Var(&env, "env", "same as -e")
 	// Sin reordenar: lo que va tras el servicio es el comando, con sus flags.
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return errors.New("usage: kling compose exec [-T] [-i] [-w DIR] [-e K=V] <service> <cmd> [args...]")
+		return errUso("usage: kling compose exec [-T] [-i] [-w DIR] [-e K=V] <service> <cmd> [args...]")
 	}
 	servicio, cmd := rest[0], rest[1:]
 	if cmd[0] == "--" {
@@ -889,9 +889,9 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 // memoria, no reinicia el proceso como docker start) y restart la para y la
 // arranca en frío sobre su disco, con el entorno del compose.
 func composeCiclo(g globalesCompose, que string, args []string) error {
-	fs := flag.NewFlagSet("compose "+que, flag.ExitOnError)
+	fs := flag.NewFlagSet("compose "+que, flag.ContinueOnError)
 	host, file, name := flagsCompose(fs, g, true)
-	_ = fs.Parse(reorderFor(fs, args))
+	_ = parseFlags(fs, reorderFor(fs, args))
 	proyecto, _, t, err := proyectoDe(*file, *name)
 	if err != nil {
 		return err

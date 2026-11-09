@@ -27,11 +27,14 @@ import (
 // El %CPU es la CPU que gastó cada VMM entre dos fotos: en -watch, entre una
 // pantalla y la anterior; en una foto suelta, se toman dos a un segundo.
 func cmdTop(args []string) error {
-	fs := flag.NewFlagSet("top", flag.ExitOnError)
+	fs := flag.NewFlagSet("top", flag.ContinueOnError)
 	host := hostFlag(fs)
 	watch := fs.Duration("watch", 0, "refresh every interval (e.g. 2s); 0 = a single snapshot")
 	asJSON := fs.Bool("json", false, "JSON output (a single snapshot; ignores -watch)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if err := sinArgumentos(fs); err != nil {
 		return err
 	}
 

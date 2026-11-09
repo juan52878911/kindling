@@ -55,6 +55,10 @@ func hintFor(err error) string {
 	if errors.As(err, &wh) {
 		return wh.hint
 	}
+	var uso *errorUso
+	if errors.As(err, &uso) {
+		return uso.hint()
+	}
 	// 429 guest_busy: el agente está vivo pero lleno (64 exec o 8 shells a la
 	// vez). Sale con 1, como cualquier error; la pista dice que no es una
 	// caída y que basta con reintentar.
