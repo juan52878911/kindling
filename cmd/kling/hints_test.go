@@ -73,3 +73,55 @@ func TestMovedError(t *testing.T) {
 		t.Fatal("tabla de comandos movidos")
 	}
 }
+
+// Los códigos estables del daemon deciden la pista antes que el texto: un
+// disco o una memoria que no alcanzan no tenían ninguna.
+func TestPistasPorCodigo(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&api.StatusError{Code: 503, Message: "only 900 MiB of disk left under /var/lib/kindling", ErrorCode: api.CodeDiskFull}, "kling template ls"},
+		{&api.StatusError{Code: 507, Message: "not enough memory for 2048 MiB", ErrorCode: api.CodeInsufficientMemory}, "kling freeze"},
+		// El código manda sobre una regla de texto que también casaría.
+		{&api.StatusError{Code: 503, Message: `image "x" does not exist`, ErrorCode: api.CodeDiskFull}, "kling template ls"},
+		// Un mensaje que ya dice qué teclear no recibe otra.
+		{&api.StatusError{Code: 507, Message: "under memory pressure. Freeze idle instances (`kling ps`)", ErrorCode: api.CodeInsufficientMemory}, ""},
+		{&api.StatusError{Code: 500, Message: "missing kernel at /var/lib/kindling/images/vmlinux"}, "kling up -check"},
+		{&api.StatusError{Code: 400, Message: `invalid image name "a b"`}, "letters, digits"},
+		{&api.StatusError{Code: 400, Message: `invalid name "-x"`}, "letters, digits"},
+		{&api.StatusError{Code: 400, Message: `invalid volume name "V"`}, "lowercase letters"},
+		{&api.StatusError{Code: 400, Message: `invalid volume name "V": lowercase letters, digits, hyphen and underscore`}, ""},
+	} {
+		got := hintFor(c.err)
+		if c.want == "" && got != "" || c.want != "" && !strings.Contains(got, c.want) {
+			t.Errorf("hintFor(%q) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
+// `kling db` sin la extensión dice cuál instalar.
+func TestDBMovidoAExtension(t *testing.T) {
+	if movedToExtension["db"] != "db" {
+		t.Fatal("db no está en movedToExtension")
+	}
+	if h := hintFor(movedError("db", "db")); h != "kling plugin install db" {
+		t.Fatalf("pista %q", h)
+	}
+}
+
+// `kling save` sin daemon dice que no hay daemon, no que el invitado no
+// sirve: el error de transporte sale tal cual, con su pista.
+func TestSaveSinDaemon(t *testing.T) {
+	hermetic(t)
+	t.Setenv("KLING_HOST", "unix:///nonexistent/kling.sock")
+	var err error
+	salida, _ := capturarStdout(t, func() error { err = cmdSave([]string{"m1", "tpl"}); return err })
+	if err == nil || strings.Contains(err.Error(), "not serving") {
+		t.Fatalf("save sin daemon: %v", err)
+	}
+	if h := hintFor(err); h != "kling doctor" {
+		t.Fatalf("pista %q (error %v)", h, err)
+	}
+	_ = salida
+}

@@ -991,6 +991,12 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 			// milisegundos diciendo "not serving ... after 2m0s").
 			return fmt.Errorf("%s: %w", ref, err)
 		}
+		var se *api.StatusError
+		if !errors.As(err, &se) {
+			// No contestó el daemon (no hay socket, el ssh no llega): el
+			// invitado no tiene nada que ver, y la pista es la del transporte.
+			return err
+		}
 		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
 	}
 	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que
