@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/guesthttp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
@@ -75,7 +76,7 @@ func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snap
 // resyncClient no reutiliza conexiones: cada llamada va a una microVM recién
 // restaurada, y una conexión ociosa guardada hacia ella solo retendría un
 // descriptor hasta que el invitado muera.
-var resyncClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+var resyncClient = guesthttp.New(nil, 0)
 
 // resultadoResync es lo que dio resyncGuest: cuánto tardó, si el agente lo
 // aplicó, lo que contestó de su "listo" (nil si nada), y si falló con un
