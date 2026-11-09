@@ -511,19 +511,87 @@ jobs:
           scripts/release-notes.sh "$VERSION" CHANGELOG.md > notes.md
           cat notes.md
 
-      - name: create GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ steps.ver.outputs.version }}
-          name: ${{ steps.ver.outputs.version }}
-          body_path: notes.md
-          prerelease: ${{ steps.ver.outputs.prerelease }}
-          make_latest: ${{ steps.ver.outputs.prerelease == 'true' && 'false' || 'true' }}
-          fail_on_unmatched_files: true
-          # La lista ya se comprobó arriba contra el contrato.
-          files: release/*
+      # Atómica: la release se crea como BORRADOR con todos los assets, se
+      # comprueba que GitHub tiene exactamente los de release/ (nombre, tamaño,
+      # estado y sha256) y solo entonces se publica. Antes se creaba publicada
+      # y después se subían los assets uno a uno: un fallo a medias dejaba una
+      # release visible (y `releases/latest`, la que pide `kling upgrade`) sin
+      # la mitad de sus ficheros. Un borrador no lo ve nadie más que quien
+      # puede escribir en el repo; repetir el job borra el de un intento
+      # anterior y empieza de nuevo. Una release YA publicada con esta etiqueta
+      # no se toca nunca.
+      - name: crear la release como borrador
+        id: borrador
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+          # Por la lista y no por releases/tags/<tag>: esa no ve los borradores.
+          # VERSION ya pasó la forma vX.Y.Z del job build: cabe en la cadena de jq.
+          de_la_tag() { gh api --paginate "repos/$R/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$VERSION\") | \"\(.id) \(.draft)\""; }
+          previas=$(de_la_tag)
+          while read -r id draft; do
+            [ -n "$id" ] || continue
+            [ "$draft" = true ] || { echo "::error::$VERSION is already published (release $id): nothing is touched"; exit 1; }
+            echo "deleting draft $id left by a previous attempt"
+            gh api -X DELETE "repos/$R/releases/$id"
+          done <<< "$previas"
+          pre=(); [ "$PRERELEASE" = true ] && pre=(--prerelease)
+          gh release create "$VERSION" --repo "$R" --draft --verify-tag \
+            --title "$VERSION" --notes-file notes.md "${pre[@]}" release/*
+          id=$(de_la_tag | awk '$2 == "true" {print $1}')
+          [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error::cannot find the one draft of $VERSION (got: $id)"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: comprobar los assets del borrador
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ID: ${{ steps.borrador.outputs.id }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C   # sort y join con el mismo orden
+          # Lo que tiene que haber: el contrato (want.txt) y lo que este job
+          # le añade (SHA256SUMS, la fórmula y, si se firmó, la firma).
+          { cat want.txt; echo SHA256SUMS; echo kling.rb
+            if [ -f release/SHA256SUMS.minisig ]; then echo SHA256SUMS.minisig; fi; } | sort > final.txt
+          (cd release && ls -1) | sort > local.txt
+          diff -u final.txt local.txt || { echo "::error::release/ is not the expected list (- missing, + extra)"; exit 1; }
+          # Y lo que GitHub dice tener, fichero a fichero: nombre, tamaño y
+          # estado; el sha256 (digest) cuando la API lo da.
+          (cd release && for f in *; do printf '%s %s uploaded %s\n' "$f" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"; done) \
+            | sort > local-assets.txt
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$ID/assets?per_page=100" \
+            --jq '.[] | "\(.name) \(.size) \(.state) \((.digest // "") | ltrimstr("sha256:"))"' | sort > remote-assets.txt
+          if ! diff -u <(cut -d' ' -f1-3 local-assets.txt) <(cut -d' ' -f1-3 remote-assets.txt); then
+            echo "::error::the draft's assets are not the files in release/ (- local, + on GitHub)"; exit 1
+          fi
+          malos=$(join local-assets.txt remote-assets.txt | awk '$7 != "" && $4 != $7 {print $1}')
+          [ -z "$malos" ] || { echo "::error::sha256 on GitHub differs from release/ for: $malos"; exit 1; }
+          sin=$(awk '$4 == "" {n++} END {print n+0}' remote-assets.txt)
+          [ "$sin" = 0 ] || echo "::warning::$sin assets came without a digest from the API: checked by name, size and state only"
+          echo "$(wc -l < remote-assets.txt) assets on the draft, all as in release/"
+
+      - name: publicar la release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ID: ${{ steps.borrador.outputs.id }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # Una prerelease no pasa a latest: `kling upgrade` pregunta por
+          # releases/latest y no debe tomarla.
+          latest=true; [ "$PRERELEASE" = true ] && latest=false
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false -f make_latest="$latest" --jq '.html_url'
+          d=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" --jq '.draft')
+          [ "$d" = false ] || { echo "::error::$VERSION is still a draft"; exit 1; }
 
   # La imagen del operador en GHCR, para las dos arquitecturas: es la que
   # referencia ext/sandbox/deploy/deployment.yaml. La ruta no cambia con la
