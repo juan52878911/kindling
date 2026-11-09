@@ -26,8 +26,13 @@ type cloneFake struct {
 	removed []string
 	// templates que "existen".
 	templates map[string]bool
-	// probe es la línea que contesta la comprobación del rol.
-	probe string
+	// probe es la línea que contesta la comprobación del rol (desde el host);
+	// probeErr la hace fallar. probeSaw es la contraseña con la que se hizo.
+	probe    string
+	probeErr error
+	probeSaw string
+	// guestAsked dice si se le preguntó el rol al invitado.
+	guestAsked bool
 	// catalog es el JSON del catálogo.
 	catalog string
 	// maskOut y maskErr son la salida y el error del enmascarado.
@@ -93,8 +98,11 @@ func (f *cloneFake) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		switch {
 		case strings.Contains(s, "kling-db:clone-setup"):
 			return nil, nil
-		case strings.Contains(s, "kling-db:clone-probe"):
-			return []byte(f.probe), nil
+		case strings.Contains(s, "rolsuper"):
+			// Un invitado que miente: si alguien le pregunta por el rol, dice
+			// que es de solo lectura. Nadie tiene que preguntarle.
+			f.guestAsked = true
+			return []byte("probe|f|0|160004\n"), nil
 		case strings.Contains(s, "kling-db:clone-dump"):
 			return nil, f.dumpErr
 		case strings.Contains(s, sliceDiscoverMarker):
@@ -144,7 +152,12 @@ func newCloneTest(t *testing.T) *cloneTest {
 	t.Setenv("KLING_DB_STATE", t.TempDir())
 	ct := &cloneTest{f: newCloneFake(), out: &bytes.Buffer{}, tmp: t.TempDir()}
 	a := &app{k: ct.f, stdout: ct.out, stderr: ct.out, stdin: strings.NewReader(""), sleep: func(time.Duration) {}}
-	ct.c = &cloner{a: a, tmpDir: ct.tmp, buildGolden: func(_ context.Context, args []string) error {
+	ct.c = &cloner{a: a, tmpDir: ct.tmp, probe: func(_ context.Context, o cloneOpts) ([]byte, error) {
+		ct.f.mu.Lock()
+		defer ct.f.mu.Unlock()
+		ct.f.probeSaw = o.password
+		return []byte(ct.f.probe), ct.f.probeErr
+	}, buildGolden: func(_ context.Context, args []string) error {
 		ct.golden = append(ct.golden, args)
 		// El seed existe mientras se construye, y es 0600.
 		seed := args[2]
@@ -403,7 +416,7 @@ func TestCloneURL(t *testing.T) {
 
 func TestCloneScripts(t *testing.T) {
 	s := &cloneSource{host: "h", port: "5432", user: "o'brien", db: "shop"}
-	for _, sc := range []string{cloneProbeScript(s), cloneDumpScript(s)} {
+	for _, sc := range []string{cloneDumpScript(s)} {
 		if !strings.Contains(sc, `U='o'\''brien'`) {
 			t.Fatalf("user not quoted:\n%s", sc)
 		}

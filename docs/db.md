@@ -795,7 +795,12 @@ contraseña se rechaza (acabaría en `ps` y en el historial).
 3. **Postgres de preparación en RAM.** Un segundo cluster con su directorio de datos en
    un **tmpfs** del invitado (`/run/klingclone`), solo por socket local (sin TCP) y sin
    fsync. Si el invitado tuviera swap, se niega.
-4. **Comprobación del rol.** Por el proxy: si el rol es superusuario, se para; si puede
+4. **Comprobación del rol.** La hace `kling-db` desde el host, conectando al servidor de
+   la URL (mismo TLS que el proxy), **antes del paso 1**: ni se arranca la máquina ni la
+   credencial llega al proxy si no pasa, y lo que diga el invitado no cuenta. Por eso el
+   servidor tiene que ser alcanzable, con esa dirección, desde donde corre `kling db
+   clone` (con un daemon remoto, `-H ssh://…`, ejecútalo en un sitio que llegue igual que
+   el daemon). Si el rol es superusuario, se para; si puede
    escribir (`INSERT`, `UPDATE`, `DELETE` o `TRUNCATE`) en alguna tabla, se para salvo
    `-allow-writer`. También se para si el servidor es más nuevo que Postgres 16 (el
    `pg_dump` de la imagen no sabría volcarlo).

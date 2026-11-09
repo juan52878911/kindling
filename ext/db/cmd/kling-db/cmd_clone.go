@@ -8,8 +8,9 @@ package main
 //     credenciales de Postgres del host (pkg/credproxy) de una máquina de
 //     construcción con -egress allowlist: el invitado recibe un marcador y el
 //     proxy entra en producción con la clave real, por TLS verify-full por
-//     defecto. El rol tiene que ser de solo lectura: se comprueba antes de
-//     volcar y, si puede escribir, no se sigue.
+//     defecto. El rol tiene que ser de solo lectura: kling-db lo comprueba
+//     desde el host, contra el servidor, antes de arrancar la máquina y de
+//     darle la credencial al proxy; si puede escribir, no se sigue.
 //
 //  2. El volcado sin enmascarar NUNCA toca el disco del host. pg_dump corre
 //     DENTRO de la máquina de construcción y su salida va por una tubería a un
@@ -38,6 +39,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +53,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbmask"
+	"github.com/juan52878911/kindling/ext/db/internal/pgmini"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
@@ -251,7 +254,7 @@ func (f *cloneFlags) newCloner() (*cloner, error) {
 		return nil, err
 	}
 	host, script := *f.host, *f.script
-	return &cloner{a: a, buildGolden: func(ctx context.Context, args []string) error {
+	return &cloner{a: a, probe: hostProbe, buildGolden: func(ctx context.Context, args []string) error {
 		// La salida del script va a stderr: stdout es del informe.
 		return runGoldenScript(ctx, script, host, args, nil, os.Stderr, os.Stderr)
 	}}, nil
@@ -313,6 +316,10 @@ type cloner struct {
 	tmpDir string
 	// sliceRes es lo que cargó un slice (con cloneOpts.slice).
 	sliceRes *sliceResult
+	// probe consulta el rol en el servidor de origen desde el host y devuelve
+	// la línea "probe|super|tablas escribibles|versión" (hostProbe; sustituible
+	// en los tests). nil: no se construye.
+	probe func(ctx context.Context, o cloneOpts) ([]byte, error)
 }
 
 func (c *cloner) logf(format string, a ...any) {
@@ -382,6 +389,23 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		}
 	}
 
+	// El rol se comprueba desde aquí, conectando kling-db al servidor con la
+	// misma dirección, usuario, base y TLS que usará el proxy, ANTES de arrancar
+	// la máquina de construcción y de darle la credencial al proxy. Lo que diga
+	// el invitado no cuenta: un builder hostil imprimiría lo que quisiera.
+	c.logf("checking the role %s on the source (from this host)", o.source.user)
+	if c.probe == nil {
+		return nil, errors.New("this kling db cannot check the source role")
+	}
+	out, err := c.probe(ctx, o)
+	if err != nil {
+		return nil, fmt.Errorf("checking the source role from this host (it must reach %s as the daemon does): %w",
+			net.JoinHostPort(o.source.host, o.source.port), err)
+	}
+	if err := checkProbe(out, o.allowWriter); err != nil {
+		return nil, err
+	}
+
 	builder := o.golden + "-clone-" + randomSuffix()
 	c.logf("starting the builder %s (egress only to the credential proxy)", builder)
 	runArgs := []string{"run", "-name", builder, "-egress", "allowlist", "-allow-exec",
@@ -431,15 +455,6 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 	c.logf("preparing a Postgres in the builder's RAM (tmpfs)")
 	if _, err := c.a.k.Run(ctx, strings.NewReader(cloneSetupScript), "exec", "-i", "-timeout", "5m", builder, "--", "sh", "-s"); err != nil {
 		return nil, fmt.Errorf("preparing the builder: %w", err)
-	}
-
-	c.logf("checking the role %s on the source", o.source.user)
-	out, err := c.a.k.Run(ctx, strings.NewReader(cloneProbeScript(o.source)), "exec", "-i", "-timeout", "2m", builder, "--", "sh", "-s")
-	if err != nil {
-		return nil, fmt.Errorf("connecting to the source through the proxy: %w", err)
-	}
-	if err := checkProbe(out, o.allowWriter); err != nil {
-		return nil, err
 	}
 
 	if o.slice != nil {
@@ -654,22 +669,55 @@ M=$(mmds GET / "X-metadata-token: $T" 'Accept: application/json' | tr -d '\n' \
 export PGPASSWORD="$M" PGSSLMODE=disable PGCONNECT_TIMEOUT=20 PGAPPNAME=kling-db-clone
 `
 
-// cloneProbeScript comprueba el rol en producción: si es superusuario, en
+// cloneProbeSQL comprueba el rol en producción: si es superusuario, en
 // cuántas tablas puede escribir y la versión del servidor. Solo lee.
-func cloneProbeScript(s *cloneSource) string {
-	return "# kling-db:clone-probe\nset -eu\n" + cloneMarkerSnippet +
-		"U=" + shq(s.user) + "\nD=" + shq(s.db) + "\n" +
-		`psql -X -At -v ON_ERROR_STOP=1 -h ` + cloneDomain + ` -p 5432 -U "$U" -d "$D" <<'SQL'
-SELECT 'probe', r.rolsuper,
+const cloneProbeSQL = `SELECT 'probe', r.rolsuper,
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND n.nspname NOT LIKE 'pg\_toast%'
       AND (has_table_privilege(c.oid, 'INSERT') OR has_table_privilege(c.oid, 'UPDATE')
         OR has_table_privilege(c.oid, 'DELETE') OR has_table_privilege(c.oid, 'TRUNCATE'))),
   current_setting('server_version_num')
-FROM pg_roles r WHERE r.rolname = current_user;
-SQL
-`
+FROM pg_roles r WHERE r.rolname = current_user`
+
+// hostProbe corre cloneProbeSQL desde el host, directo contra el servidor de
+// origen, con la misma política que el proxy de credenciales: TLS verify-full
+// (raíces del sistema más -ca, nombre de -tls-server-name o el host) o, con
+// sslmode=disable, sin TLS y solo SCRAM (nada de contraseña en claro).
+func hostProbe(ctx context.Context, o cloneOpts) ([]byte, error) {
+	cfg := pgmini.Config{
+		Addr: net.JoinHostPort(o.source.host, o.source.port),
+		User: o.source.user, Password: o.password, Database: o.source.db,
+		Timeout: 30 * time.Second,
+	}
+	if o.source.tls == "disable" {
+		cfg.NoCleartext = true
+	} else {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if o.caPEM != "" && !pool.AppendCertsFromPEM([]byte(o.caPEM)) {
+			return nil, errors.New("the -ca file is not a PEM certificate")
+		}
+		cfg.TLSMode, cfg.RootCAs = pgmini.TLSVerifyFull, pool
+		cfg.TLSServerName = orDefault(o.tlsServerName, o.source.host)
+	}
+	conn, err := pgmini.Dial(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	rows, err := conn.Query(ctx, cloneProbeSQL)
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	for _, r := range rows {
+		b.WriteString(strings.Join(r, "|"))
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
 }
 
 // cloneDumpScript vuelca producción DENTRO de la máquina y lo restaura en el
