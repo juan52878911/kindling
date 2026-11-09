@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +64,72 @@ func TestThawFallidoNoPierdeLaPausada(t *testing.T) {
 				t.Error("m1 quedó marcada en adquiriendo")
 			}
 		})
+	}
+}
+
+// Un Remove fallido no cuenta como desalojo: la máquina sigue viva. evictOne
+// lo dice (false), y la máquina no se olvida: evictStale y drain la vuelven a
+// intentar hasta borrarla.
+func TestElFondoNoDaPorBorradaUnaQueSigueViva(t *testing.T) {
+	var mu sync.Mutex
+	fallar := true
+	vivas := map[string]bool{"a-vieja": true, "a-nueva": true}
+	p := &pool{
+		size:  2,
+		ready: map[string][]*warmVM{},
+		removeFn: func(_ context.Context, id string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if fallar {
+				return errors.New("daemon busy")
+			}
+			delete(vivas, id)
+			return nil
+		},
+	}
+	ahora := time.Now()
+	p.ready["a"] = []*warmVM{{id: "a-vieja", born: ahora.Add(-time.Hour)}, {id: "a-nueva", born: ahora}}
+
+	if p.evictOne(t.Context()) {
+		t.Fatal("evictOne dio por retirada una máquina cuyo Remove falló")
+	}
+	// Ya no se entrega a nadie: se iba a destruir.
+	if vm := p.take("a"); vm == nil || vm.id != "a-nueva" {
+		t.Fatalf("take = %+v; quería a-nueva (a-vieja ya salió del fondo)", vm)
+	}
+
+	mu.Lock()
+	fallar = false
+	mu.Unlock()
+	p.evictStale(t.Context(), time.Hour*24)
+	mu.Lock()
+	defer mu.Unlock()
+	if vivas["a-vieja"] {
+		t.Error("el Remove fallido no se reintentó: a-vieja sigue viva sin que nadie la recuerde")
+	}
+}
+
+// drain también reintenta las pendientes: al apagar no puede quedar ninguna.
+func TestDrainReintentaLasPendientes(t *testing.T) {
+	falladas := 0
+	var quitadas []string
+	p := &pool{
+		size:  1,
+		ready: map[string][]*warmVM{},
+		removeFn: func(_ context.Context, id string) error {
+			if falladas == 0 {
+				falladas++
+				return errors.New("daemon busy")
+			}
+			quitadas = append(quitadas, id)
+			return nil
+		},
+	}
+	p.ready["a"] = []*warmVM{{id: "m1", born: time.Now().Add(-time.Hour)}}
+	p.evictStale(t.Context(), time.Minute)
+	p.drain(t.Context())
+	if len(quitadas) != 1 || quitadas[0] != "m1" {
+		t.Fatalf("quitadas = %v; quería [m1] reintentada en drain", quitadas)
 	}
 }
 
