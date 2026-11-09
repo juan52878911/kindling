@@ -155,6 +155,32 @@ func Open(dir string, readOnly bool, machineID string) (*Server, error) {
 	return s, nil
 }
 
+// Ident identifica un directorio del host por dispositivo e inodo.
+type Ident struct{ Dev, Ino uint64 }
+
+// IdentOf es la identidad de fi; false si el sistema no la da.
+func IdentOf(fi fs.FileInfo) (Ident, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return Ident{}, false
+	}
+	return Ident{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, true
+}
+
+// Ident es la identidad de lo que s abrió de verdad: OpenRoot sigue enlaces,
+// así que puede no ser lo que se validó con ese nombre.
+func (s *Server) Ident() (Ident, error) {
+	fi, err := s.root.Stat(".")
+	if err != nil {
+		return Ident{}, err
+	}
+	id, ok := IdentOf(fi)
+	if !ok {
+		return Ident{}, errors.New("no device/inode for the shared directory")
+	}
+	return id, nil
+}
+
 // Close suelta la carpeta y el presupuesto de descriptores de su máquina.
 func (s *Server) Close() error {
 	releaseMachineBudget(s.machineID)

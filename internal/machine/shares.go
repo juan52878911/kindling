@@ -311,6 +311,9 @@ func (m *Manager) resolveShares(ctx context.Context, req api.RunRequest, vols []
 			if carpetaDeGrafo(ctx, s.Source) {
 				// La del grafo: ya es absoluta, limpia y del daemon.
 				rs.att.Source = s.Source
+				if fi, err := os.Stat(s.Source); err == nil {
+					recordarIdent(s.Source, fi)
+				}
 				break
 			}
 			if cfg == nil {
@@ -399,7 +402,8 @@ func (m *Manager) liveSource(src string, roots []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("share source %s: %w", src, err)
 	}
-	fi, err := os.Stat(real)
+	// Lstat: real ya no lleva enlaces; si ahora es uno, se ha cambiado.
+	fi, err := os.Lstat(real)
 	if err != nil {
 		return "", err
 	}
@@ -422,11 +426,69 @@ func (m *Manager) liveSource(src string, roots []string) (string, error) {
 			continue
 		}
 		if within(real, rr) {
+			recordarIdent(real, fi)
 			return real, nil
 		}
 	}
 	return "", fmt.Errorf("%s is not under any allowed share root (daemon.share_roots: %s)",
 		src, strings.Join(roots, ", "))
+}
+
+// identCarpetas guarda, por ruta, el dev/ino del directorio que se validó al
+// pedir la carpeta. attachOnce vuelve a abrirla en cada attach, thaw o
+// reinicio, y os.OpenRoot sigue enlaces: sin comparar, un
+// `mv proj proj.old; ln -s /etc proj` servía /etc. Vive lo que el daemon: tras
+// reiniciarlo, el primer attach revalida la ruta (ver comprobarCarpeta).
+var identCarpetas sync.Map // ruta -> hostshare.Ident
+
+func recordarIdent(ruta string, fi os.FileInfo) {
+	if id, ok := hostshare.IdentOf(fi); ok {
+		identCarpetas.Store(ruta, id)
+	}
+}
+
+// comprobarCarpeta dice si lo que srv abrió para s es el directorio que se
+// validó. Sin identidad guardada (el daemon se reinició) vuelve a pasar la
+// política: las carpetas de grafo están en la raíz de datos y las demás, bajo
+// share_roots y fuera de ella; y lo abierto tiene que ser lo que hay ahora en
+// la ruta resuelta.
+func (m *Manager) comprobarCarpeta(s api.ShareAttachment, srv *hostshare.Server) error {
+	got, err := srv.Ident()
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", s.Source, err)
+	}
+	if v, ok := identCarpetas.Load(s.Source); ok {
+		if v.(hostshare.Ident) != got {
+			return fmt.Errorf("%s is no longer the directory that was shared (it was replaced or turned into a symlink); "+
+				"run the machine again to share what is there now", s.Source)
+		}
+		return nil
+	}
+	real, err := filepath.EvalSymlinks(s.Source)
+	if err != nil {
+		return fmt.Errorf("share source %s: %w", s.Source, err)
+	}
+	dataRoot, err := filepath.EvalSymlinks(m.root)
+	if err != nil {
+		return err
+	}
+	if within(s.Source, m.root) || within(s.Source, dataRoot) {
+		// De un grafo: la creó el daemon y tiene que seguir dentro.
+		if !within(real, dataRoot) {
+			return fmt.Errorf("%s now points outside kindling's data root (%s)", s.Source, real)
+		}
+	} else if real, err = m.liveSource(s.Source, m.shareConfig().Roots); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(real)
+	if err != nil {
+		return err
+	}
+	if id, ok := hostshare.IdentOf(fi); !ok || id != got || !fi.IsDir() {
+		return fmt.Errorf("%s changed while it was being opened", s.Source)
+	}
+	identCarpetas.Store(s.Source, got)
+	return nil
 }
 
 // within dice si p es dir o está dentro de dir (rutas ya resueltas).
@@ -892,6 +954,9 @@ func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api
 		return fmt.Errorf("opening %s: %w", s.Source, err)
 	}
 	defer srv.Close()
+	if err := m.comprobarCarpeta(s, srv); err != nil {
+		return errPermanente{err}
+	}
 
 	// Por virtio-fs (kling-hv) el agente monta y contesta 200, y la sesión va
 	// a kling-hv; si no puede, 501 con HeaderTransport y se repite por FUSE.
