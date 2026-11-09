@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"reflect"
@@ -82,6 +83,29 @@ func TestAlmacenDeCredenciales(t *testing.T) {
 	}
 	if back, err := m.cargarCredenciales("m1"); err != nil || back != nil {
 		t.Fatalf("sin fichero: %v, %v", back, err)
+	}
+}
+
+// kling machine credential en egress none o internet es un error de la
+// petición (400) y no deja nada: en none, el netns tiene resolver propio (el
+// que contesta NXDOMAIN) y knet.SetCredentials lo aceptaría, pero no hay DNAT
+// hacia el proxy y el invitado se quedaría con un marcador sin ruta.
+func TestSetCredentialsSinAllowlistEsPeticionInvalida(t *testing.T) {
+	m := newTestManager(t)
+	for _, e := range []knet.Egress{knet.EgressNone, knet.EgressInternet} {
+		mc := m.addForTest("m-" + string(e))
+		m.mu.Lock()
+		mc.Egress = string(e)
+		m.mu.Unlock()
+		_, err := m.SetCredentials(context.Background(), mc.ID, []api.CredentialSpec{
+			{Domain: "api.example.com", Env: "KEY", Secret: credSecreto},
+		})
+		if !errors.Is(err, ErrRunRequest) || !strings.Contains(err.Error(), "-egress allowlist") {
+			t.Errorf("%s: %v, quería un error de la petición que pida allowlist", e, err)
+		}
+		if _, err := os.Stat(m.credPath(mc.ID)); !os.IsNotExist(err) {
+			t.Errorf("%s: quedó un almacén de credenciales: %v", e, err)
+		}
 	}
 }
 
