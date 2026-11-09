@@ -296,6 +296,7 @@ func NewHostFSFromState(dev FuseDev, name string, readOnly bool, state []byte) (
 			}
 			ch := &wbChunk{h: h, off: c.Off, data: c.Data}
 			w.bytes += len(c.Data)
+			wbGlobal.force(len(c.Data))
 			if c.Cur {
 				// Puede solaparse con uno de los que vuelan: no sale con ellos.
 				w.cur = ch

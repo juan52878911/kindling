@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -28,6 +29,23 @@ import (
 // sino en una pausa limpia del VMM. Si el vigía no arranca (un VMM anterior
 // sin el modo, Linux), queda lo de siempre: resincronizar al despertar.
 
+// LA FUENTE DE ALIMENTACIÓN. El vigía también dice de dónde come el Mac
+// ("power battery" / "power ac") al arrancar y en cada cambio
+// (IOPSCreateLimitedPowerNotification). Mientras viva, el modo batería en auto
+// se cree eso y no lanza pmset cada minuto (enBateriaSO); si muere, o es un
+// vigía anterior que no lo dice, vuelve a preguntar a pmset.
+
+// fuenteVigia es lo último que dijo el vigía de la fuente: fuenteNoSe,
+// fuenteCorriente o fuenteBateria. Del proceso y no del Manager porque
+// enBateriaSO no tiene Manager; el daemon tiene uno solo.
+var fuenteVigia atomic.Int32
+
+const (
+	fuenteNoSe = iota
+	fuenteCorriente
+	fuenteBateria
+)
+
 // plazoPausaSueno es lo que se dedica a pausar antes de contestar al vigía,
 // que deja dormir al Mac a los 10 s con o sin respuesta.
 const plazoPausaSueno = 7 * time.Second
@@ -38,6 +56,8 @@ const plazoPausaSueno = 7 * time.Second
 func (m *Manager) atenderEnergia(ctx context.Context, r io.Reader, w io.Writer) {
 	var pausadas []string
 	defer func() { m.reanudarTrasSueno(ctx, pausadas) }()
+	// Sin vigía no hay quien avise del cambio: que se vuelva a preguntar.
+	defer fuenteVigia.Store(fuenteNoSe)
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		linea := sc.Text()
@@ -48,12 +68,34 @@ func (m *Manager) atenderEnergia(ctx context.Context, r io.Reader, w io.Writer) 
 			if _, err := fmt.Fprintf(w, "ack %s\n", id); err != nil {
 				return
 			}
+		case linea == "power battery" || linea == "power ac":
+			m.anotarFuente(linea == "power battery")
 		case linea == "wake":
 			m.reanudarTrasSueno(ctx, pausadas)
 			pausadas = nil
 			m.revisarSueno(ctx)
 		}
 	}
+}
+
+// anotarFuente apunta lo que dijo el vigía de la fuente y lo pone ya en la
+// lectura cacheada del modo batería: el cambio vale desde ahora, no desde que
+// caduque la lectura anterior.
+func (m *Manager) anotarFuente(bat bool) {
+	v := int32(fuenteCorriente)
+	if bat {
+		v = fuenteBateria
+	}
+	if fuenteVigia.Swap(v) != v {
+		donde := "AC power"
+		if bat {
+			donde = "battery"
+		}
+		log.Printf("power: running on %s", donde)
+	}
+	m.bat.mu.Lock()
+	m.bat.enBat, m.bat.leidaT = bat, m.bat.now()
+	m.bat.mu.Unlock()
 }
 
 // pausarParaDormir pausa las máquinas que corren y devuelve cuáles pausó.
