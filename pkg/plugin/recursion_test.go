@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +32,43 @@ func TestManifestNoRecursivo(t *testing.T) {
 	t.Setenv(EnvManifest, path)
 	if r := Discover(context.Background(), Options{Version: "1.0.0", Path: []string{d}}); len(r.Plugins) != 0 {
 		t.Fatalf("a kling answering --kling-manifest discovered %d extensions; it must discover none", len(r.Plugins))
+	}
+}
+
+// Una extensión que vuelve a lanzar kling (un `kling foo` dentro de foo, un
+// gancho de status que llama a `kling status`) no puede anidarse sin fin: cada
+// nivel lleva EnvDepth+1 y, al llegar a MaxDepth, Discover ya no descubre.
+func TestProfundidadCortaLaRecursion(t *testing.T) {
+	d := t.TempDir()
+	script := "#!/bin/sh\necho '{\"manifest_version\":1,\"name\":\"eco\",\"version\":\"1.0.0\",\"commands\":[{\"name\":\"eco\"}]}'\n"
+	if err := os.WriteFile(filepath.Join(d, "kling-eco"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nivel := func() string {
+		for _, kv := range Env("") {
+			if v, ok := strings.CutPrefix(kv, EnvDepth+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	t.Setenv(EnvDepth, "")
+	if got := nivel(); got != "1" {
+		t.Fatalf("%s for an extension launched by a top-level kling = %q, want 1", EnvDepth, got)
+	}
+	t.Setenv(EnvDepth, strconv.Itoa(MaxDepth-1))
+	if got := nivel(); got != strconv.Itoa(MaxDepth) {
+		t.Fatalf("%s one level down from %d = %q, want %d", EnvDepth, MaxDepth-1, got, MaxDepth)
+	}
+	if r := Discover(context.Background(), Options{Version: "1.0.0", Path: []string{d}}); find(r, "eco") == nil {
+		t.Fatalf("at depth %d kling-eco must still be discovered", MaxDepth-1)
+	}
+	t.Setenv(EnvDepth, strconv.Itoa(MaxDepth))
+	if r := Discover(context.Background(), Options{Version: "1.0.0", Path: []string{d}}); len(r.Plugins) != 0 {
+		t.Fatalf("at depth %d Discover found %d extensions; it must find none", MaxDepth, len(r.Plugins))
+	}
+	t.Setenv(EnvDepth, "basura")
+	if got := nivel(); got != "1" {
+		t.Fatalf("%s from an unreadable value = %q, want 1", EnvDepth, got)
 	}
 }

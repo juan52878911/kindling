@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -149,9 +150,29 @@ func SearchPath() []string {
 // 382 a la vez y carga 50 en un M4 con una sola copia).
 const EnvManifest = "KLING_MANIFEST_OF"
 
+// EnvDepth cuenta cuántas extensiones hay por encima de este proceso: Env lo
+// sube en uno para cada extensión que se lanza. Una extensión que vuelve a
+// llamar a kling (un `kling foo` dentro de foo, un gancho de status que lanza
+// `kling status`) se anidaría sin fin; a partir de MaxDepth, Discover no
+// descubre nada y la cadena acaba en «unknown command».
+const EnvDepth = "KLING_PLUGIN_DEPTH"
+
+// MaxDepth deja anidar lo que hace una extensión normal (una que usa otra) y
+// corta mucho antes de llenar la máquina de procesos.
+const MaxDepth = 8
+
+// depth es el EnvDepth de este proceso; lo que no se lee es 0.
+func depth() int {
+	n, err := strconv.Atoi(os.Getenv(EnvDepth))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func Discover(ctx context.Context, o Options) *Registry {
 	r := &Registry{owner: map[string]*Plugin{}}
-	if os.Getenv(EnvManifest) != "" {
+	if os.Getenv(EnvManifest) != "" || depth() >= MaxDepth {
 		return r
 	}
 	core := map[string]bool{}
@@ -483,6 +504,7 @@ func Env(configPath string) []string {
 		env = append(env, k+"="+v)
 	}
 	set("KLING_PLUGIN_API", APIVersion)
+	set(EnvDepth, strconv.Itoa(depth()+1))
 	if exe, err := os.Executable(); err == nil {
 		set("KLING_BIN", exe)
 	}

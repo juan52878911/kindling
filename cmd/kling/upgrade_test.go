@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -134,20 +135,42 @@ func extFalsa(version string) []byte {
 // binario diga X.Y.Z, como lo construye release.yml), las extensiones
 // instaladas pasan a esa release con sus compañeros, y lo de antes queda en
 // la copia: -rollback lo devuelve también.
+// kling pone el verificador de firmas de internal/upgrade a las extensiones:
+// sin él, pkg/plugin rechazaría toda descarga.
+func TestExtensionesConVerificadorDeFirma(t *testing.T) {
+	if plugin.DefaultSumsVerifier == nil {
+		t.Fatal("plugin.DefaultSumsVerifier is not set: kling plugin install would not check SHA256SUMS.minisig")
+	}
+}
+
 func TestActualizarExtensiones(t *testing.T) {
 	sum := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 	asset := func(n string) string { return n + "-" + runtime.GOOS + "-" + runtime.GOARCH }
 	nueva, ayudaNueva := extFalsa("1.1.0"), []byte("#!/bin/sh\necho helper 1.1.0\n")
 	rel := map[string][]byte{asset("kling-demo"): nueva, asset("kling-demo-helper"): ayudaNueva}
+	// Desde la 1.0.0 el SHA256SUMS de las extensiones va firmado; aquí con una
+	// clave de prueba.
+	var sumas strings.Builder
+	for a, b := range rel {
+		fmt.Fprintf(&sumas, "%s  %s\n", sum(b), a)
+	}
+	clave, err := upgrade.GenerarClave(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firma, err := upgrade.Firmar(clave, []byte(sumas.String()), "timestamp:1\tfile:SHA256SUMS\ttag:v1.1.0\thashed")
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n, ok := strings.CutPrefix(r.URL.Path, "/v1.1.0/")
 		switch {
 		case !ok:
 			http.NotFound(w, r)
 		case n == "SHA256SUMS":
-			for a, b := range rel {
-				fmt.Fprintf(w, "%s  %s\n", sum(b), a)
-			}
+			w.Write([]byte(sumas.String()))
+		case n == plugin.SigName:
+			w.Write(firma)
 		case rel[n] != nil:
 			w.Write(rel[n])
 		default:
@@ -184,7 +207,8 @@ func TestActualizarExtensiones(t *testing.T) {
 
 	var hechas []string
 	out, _ := salida(t, func() error {
-		hechas = actualizarExtensionesEn(dir, o.Dir, res.Hacia, "", plugin.InstallOptions{Client: srv.Client(), ReleaseURL: srv.URL})
+		hechas = actualizarExtensionesEn(dir, o.Dir, res.Hacia, "", plugin.InstallOptions{Client: srv.Client(), ReleaseURL: srv.URL,
+			VerifySums: upgrade.VerificadorDeSumas([]upgrade.ClavePublica{clave.Publica()})})
 		return nil
 	})
 	if strings.Join(hechas, ",") != "demo" {
