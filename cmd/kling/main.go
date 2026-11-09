@@ -26,6 +26,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/internal/saneado"
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -938,7 +939,7 @@ func cmdSave(args []string) error {
 	}
 	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
 	for _, w := range snap.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", saneado.Texto(w))
 	}
 	next("kling run -from %s", snap.Name)
 	return nil
