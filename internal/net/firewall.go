@@ -6,9 +6,11 @@ import (
 	"log"
 	stdnet "net"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
@@ -105,7 +107,7 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 	return nil
 }
 
-// forwardBase son las dos primeras reglas del FORWARD del netns en los tres
+// forwardBase son las primeras reglas del FORWARD del netns en los tres
 // modos, como argumentos de iptables:
 //
 //  1. DROP de lo que conntrack marca INVALID (un TCP con solo RST o FIN y
@@ -113,6 +115,7 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 //     casan, así que sin esta regla caía en la política ACCEPT del FORWARD:
 //     en none era un canal de salida y, falsificando el origen hacia el NSIP
 //     de otra microVM, un canal entre microVMs.
+//
 //  2. ACCEPT de las respuestas a conexiones ya establecidas. Sin esto se rompe
 //     el acceso host->microVM, porque nuestra propia red de enlace
 //     (172.30.0.0/16) cae DENTRO de 172.16.0.0/12, que está en la lista de
@@ -120,13 +123,59 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 //     hacia una red privada es ctstate NEW y sigue cayendo en los DROP de
 //     después.
 //
+//  3. DROP hacia cada IPv4 del host (reglasIPsHost). El host ya las corta en
+//     su INPUT (HostInputRules), pero un `ufw reload` o un `firewalld
+//     --reload` borra esas reglas y, hasta que el daemon las repone, la IP
+//     pública del host quedaba a un SYN del invitado.
+//
 // Las que reglasGrafo y reglasEnlace insertan con -I FORWARD 1 quedan delante
 // de estas: van todas a n.HostIP, el lado host del propio veth.
 func (n *Net) forwardBase() [][]string {
-	return [][]string{
+	return append([][]string{
 		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
 		{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+	}, n.reglasIPsHost()...)
+}
+
+// reglasIPsHost son los DROP de lo que entre por tap0 hacia una IPv4 del
+// host, una por dirección, en orden. Quedan fuera n.HostIP (el resolver y los
+// proxies de esta máquina viven ahí), el loopback (un invitado no lo enruta)
+// y las demás del rango de enlaces: son las HostIP de otras máquinas, que ya
+// cortan el 172.16.0.0/12 del modo internet y el ipset (que no admite
+// privadas) del allowlist, y que irían y vendrían con cada máquina.
+//
+// Se leen en cada Setup: una dirección que el host gane después (DHCP) no la
+// cubre esta regla, sino la de INPUT.
+func (n *Net) reglasIPsHost() [][]string {
+	var ips []string
+	for _, ip := range ipsDelHost() {
+		ip4 := ip.To4()
+		if ip4 == nil || ip4[0] == 127 || IndiceDe(ip4) != 0 || ip4.String() == n.HostIP {
+			continue
+		}
+		ips = append(ips, ip4.String())
 	}
+	slices.Sort(ips)
+	var rules [][]string
+	for _, ip := range slices.Compact(ips) {
+		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", ip, "-j", "DROP"})
+	}
+	return rules
+}
+
+// ipsDelHost son las IPv4 de las interfaces del host. Variable para los
+// tests: las reglas no deben depender de la máquina que los corre.
+var ipsDelHost = func() []stdnet.IP {
+	dirs, err := DireccionesHost()
+	if err != nil {
+		log.Printf("net: WARNING: couldn't list the host addresses: %v", err)
+		return nil
+	}
+	ips := make([]stdnet.IP, 0, len(dirs))
+	for _, d := range dirs {
+		ips = append(ips, d.IP)
+	}
+	return ips
 }
 
 // forwardCierre es la última regla del FORWARD del netns en none y allowlist:
@@ -200,7 +249,27 @@ func (n *Net) egressRules(e Egress) [][]string {
 	for _, cidr := range blocked {
 		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
 	}
+	rules = append(rules, topeNuevas())
 	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
+}
+
+// topeNuevasPorSegundo es cuántos paquetes NEW por segundo y por IP destino
+// deja salir una microVM (internet y allowlist). Para UDP, todo lo que el
+// invitado manda sin respuesta sigue siendo NEW: sin este tope, un invitado
+// podía usar el host para inundar una IP permitida (o cualquiera, en
+// internet) a todo lo que dé el limitador de Firecracker.
+const topeNuevasPorSegundo = 300
+
+// topeNuevas es el DROP de lo que pase de topeNuevasPorSegundo, delante del
+// ACCEPT de las conexiones nuevas. La ráfaga es la misma cifra: un npm install
+// que abre decenas de conexiones de golpe al mismo registro no pierde SYN
+// (con la ráfaga por defecto, 5, el resto esperaría al reintento de 1 s). La
+// tabla del hashlimit es por netns, así que el nombre puede ser fijo.
+func topeNuevas() []string {
+	tope := strconv.Itoa(topeNuevasPorSegundo)
+	return []string{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "NEW",
+		"-m", "hashlimit", "--hashlimit-above", tope + "/s", "--hashlimit-burst", tope,
+		"--hashlimit-mode", "dstip", "--hashlimit-name", "kl-nuevas", "-j", "DROP"}
 }
 
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
@@ -297,7 +366,10 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	// entrada). El resolver dinámico añade cada IP con "timeout <ttl-real>", así
 	// que caduca sola cuando expira el registro. El sembrado estático de abajo va
 	// sin timeout (permanente): es la red de seguridad.
-	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "-exist"); err != nil {
+	// maxelem acota la memoria del set en el kernel (por defecto 65536): un
+	// invitado que llena el set recibe HASH_FULL y no siembra más, sin afectar
+	// a las demás máquinas.
+	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "maxelem", strconv.Itoa(ipsetMaxElem), "-exist"); err != nil {
 		return err
 	}
 
@@ -379,7 +451,9 @@ func (n *Net) reglasAllowlist() [][]string {
 			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"})
 	}
 	sinIptables(n.credForwardRules())
-	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
+	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas, con
+	//      el tope de topeNuevas delante.
+	rules = append(rules, topeNuevas())
 	rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
 		"-m", "conntrack", "--ctstate", "NEW",
 		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"})
@@ -678,6 +752,40 @@ func SetupHost() error {
 			return err
 		}
 	}
+	if err := setupHostInput(); err != nil {
+		return err
+	}
+	inputMontado.Store(true)
+	return nil
+}
+
+// inputMontado dice que SetupHost puso las reglas INPUT: desde entonces, cada
+// Setup comprueba que siguen ahí (asegurarHostInput).
+var inputMontado atomic.Bool
+
+// inputMu evita que dos Setup a la vez repongan las reglas los dos.
+var inputMu sync.Mutex
+
+// asegurarHostInput repone HostInputRules si un `ufw reload` o un `firewalld
+// --reload` las borró después de SetupHost: sin ellas, un invitado con salida
+// llega a los servicios del host por su IP pública. Comprueba solo el DROP
+// final, con un `iptables -C` (un proceso por montaje): un reload que vacía
+// INPUT se lo lleva, y si falta se reinstala el juego entero en orden.
+func asegurarHostInput() error {
+	if !inputMontado.Load() {
+		return nil // SetupHost no corrió (o falló): no hay nada que reponer
+	}
+	reglas := HostInputRules()
+	drop := sinPosicion(reglas[len(reglas)-1], "-C")
+	if comprobarRegla(drop) {
+		return nil
+	}
+	inputMu.Lock()
+	defer inputMu.Unlock()
+	if comprobarRegla(drop) {
+		return nil // otro Setup acaba de reponerlas
+	}
+	log.Printf("net: the host INPUT rules for the machines are gone (a firewall reload?); reinstalling them")
 	return setupHostInput()
 }
 
