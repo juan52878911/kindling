@@ -31,8 +31,10 @@ func New(socketPath string) *Client {
 		// ciclos pause/resume sobre el MISMO proceso rechazaba la siguiente
 		// ("write: broken pipe"). Conectar a un socket Unix cuesta µs.
 		Transport: &http.Transport{
+			// Cada petición vuelve a abrir la ruta: en Linux sin seguir
+			// enlaces y comprobando quién atiende (M3, ver par.go).
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialUnix(ctx, socketPath)
+				return dialVMM(ctx, socketPath)
 			},
 			DisableKeepAlives: true,
 		},

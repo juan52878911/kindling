@@ -181,7 +181,9 @@ func (m *Manager) jailPath(id, hostPath string) string {
 }
 
 // jailSock es el socket de la API dentro del jail, visto desde el anfitrión.
-// jailer lo crea en <root>/run/firecracker.socket.
+// jailer lo crea en <root>/run/firecracker.socket. internal/fc reconoce esa
+// forma (run/firecracker.socket) y exige que quien atiende esté enjaulado en
+// <root> (M3, internal/fc/par.go): no cambiarla sin cambiar aquello.
 func (m *Manager) jailSock(id string) string {
 	return filepath.Join(m.jailRoot(id), "run", "firecracker.socket")
 }

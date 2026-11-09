@@ -643,6 +643,14 @@ además manipulación —cambiar el overlay y su hash a la vez, o encender exec 
 `meta.json`— y snapshots traídos de otro host. Los anteriores a esto no llevan
 firma y se aceptan, salvo con `KLING_REQUIRE_SIGNED=1`.
 
+Desde la firma v2 (`v2:<hex>` en `meta.json`, `schema: 3`) también cubre las etiquetas
+(`kling.ports`, `kling.owner`), `mem_max_mib`, `cpu_pct`, los nombres del entorno y el
+digest del `mem.file` (`mem_digest`, en árbol: no lee los huecos de la memoria
+perforada), que se comprueba como el del overlay la primera vez que se restaura el
+dorado tras arrancar el daemon. Las credenciales de una plantilla no van en la firma:
+viven en su almacén sellado con AEAD. Los dorados con firma v1 se siguen aceptando con lo
+que la v1 cubría; rehacerlos (`kling save`) los pasa a v2.
+
 ### 10. El proxy al invitado solo llega al puerto del agente
 
 `POST /machines/{ref}/guest` solo alcanza el puerto 8080 del invitado, salvo los
@@ -672,6 +680,11 @@ enlaces duros del jail, sobre el kernel, las bases y los dorados que comparten t
 microVMs. Antes se arrancaba así con un aviso; ahora es un bloqueo más, con el comando
 para crear el usuario. `KLING_JAILER=1` sigue forzando ese modo para quien lo acepte, y
 deja un «SECURITY WARNING» en el log de arranque.
+
+El daemon habla con cada VMM por `<jaula>/run/firecracker.socket`, y `run/` es del VMM.
+En cada conexión abre el socket sin seguir enlaces y exige, por `SO_PEERCRED`, que el
+proceso que atiende tenga por raíz esa misma jaula: un VMM que cambiara su socket por
+un enlace al de otra máquina no recibe las órdenes de esa otra.
 
 ### 12. Admisión por disco y por presión de memoria
 

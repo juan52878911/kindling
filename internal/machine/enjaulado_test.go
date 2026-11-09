@@ -7,7 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/fc"
 )
+
+// sinComprobarJaula apaga, mientras dura el test, la comprobación de fc sobre
+// el socket de una jaula (M3): aquí el VMM es un servidor falso sin jaula,
+// enlazado en la ruta del socket del chroot.
+func sinComprobarJaula(t *testing.T) {
+	fc.ComprobarJaula = false
+	t.Cleanup(func() { fc.ComprobarJaula = true })
+}
 
 // jailFalso deja en raiz/<c1> un enlace simbólico a fuera, como el que
 // plantaría un VMM en la raíz de su chroot (que es suya), y devuelve la ruta
@@ -149,6 +159,7 @@ func TestCommitJailedNoSigueEnlacesDelChroot(t *testing.T) {
 	id := "c0aa1700000000e1"
 	falso, _ := plantillaParaCommit(t, m, id)
 	m.jailerJailed = true
+	sinComprobarJaula(t)
 	if err := os.MkdirAll(filepath.Dir(m.jailSock(id)), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +292,7 @@ func TestCommitJailedNoRecuperaUnEnlaceComoVolcado(t *testing.T) {
 	id := "c0aa1700000000e2"
 	falso, _ := plantillaParaCommit(t, m, id)
 	m.jailerJailed = true
+	sinComprobarJaula(t)
 	if err := os.MkdirAll(filepath.Dir(m.jailSock(id)), 0o755); err != nil {
 		t.Fatal(err)
 	}
