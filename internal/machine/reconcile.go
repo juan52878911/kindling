@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -158,6 +159,37 @@ func (m *Manager) reconciliarEstado() {
 			m.releaseCPU(mc.ID)
 
 		case api.StateWarm, api.StateStopped, api.StateFailed:
+			// Una warm sin volcado que valga no se descongela nunca: el caso
+			// real es un thaw que retiró el sello (el invitado ya corrió) y un
+			// daemon que murió antes de escribir el running. Seguir warm la
+			// dejaba varada, con un thaw que siempre falla; es lo mismo que una
+			// running sin proceso, y va a stopped (o a failed, si su overlay
+			// desechable pudo quedar a medias). El volcado, que ya no carga
+			// nadie, se retira como en Stop; uno de un kling más nuevo no se
+			// toca (no está roto, este no lo sabe leer).
+			//
+			// Solo si el volcado ESTÁ y no vale (sello retirado, volcado a
+			// medias): una warm sin snap.file ni mem.file no es ese caso, y
+			// sigue como siempre (el thaw dice qué falta).
+			dir := m.dir(mc.ID)
+			hayVolcado := existe(filepath.Join(dir, "snap.file")) && existe(filepath.Join(dir, "mem.file"))
+			if mc.State == api.StateWarm && hayVolcado {
+				if err := volcadoValido(dir, mc.FrozenAt); err != nil && !esquema.EsMasNuevo(err) {
+					ahora := time.Now()
+					if fallidaTrasCorte(mc, arranque, conArranque) {
+						log.Printf("reconcile: %s (%s) is warm without a usable memory dump and its disposable overlay may be incomplete: failed",
+							mc.Name, shortID(mc.ID))
+						mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errOverlaySinAsentar, &ahora
+					} else {
+						log.Printf("reconcile: %s (%s) is warm without a usable memory dump (%v): stopped, its disk is kept",
+							mc.Name, shortID(mc.ID), err)
+						mc.State = api.StateStopped
+						mc.LastErr = "its memory dump could not be used (" + err.Error() + "); it was stopped with its disk intact, kling start boots it cold"
+					}
+					mc.FrozenAt = nil
+					m.borrarVolcado(mc.ID)
+				}
+			}
 			// Sin proceso: ni namespace ni cgroup hacen nada. Se recrean al
 			// arrancarla o descongelarla.
 			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)

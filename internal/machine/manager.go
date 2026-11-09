@@ -3498,8 +3498,12 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := volcadoValido(dir, mc.FrozenAt); esquema.EsMasNuevo(err) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 	} else if err != nil {
-		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
-			mc.Name, err, mc.Name)
+		// Sin volcado no hay RAM que cargar, pero el disco sigue: kling stop
+		// retira el volcado y kling start arranca en frío sobre ese disco.
+		// Antes se decía «kling rm», que se lo lleva.
+		return nil, fmt.Errorf("machine %q can't be thawed: %w. Its disk is intact: stop it and boot it cold "+
+			"(kling stop %s && kling start %s); the memory of the freeze is lost",
+			mc.Name, err, mc.Name, mc.Name)
 	}
 	// El sello, leído una vez para todo el thaw (VMM, arquitectura, kernel,
 	// base del diferencial, sin agente): antes se leía y se parseaba en cada

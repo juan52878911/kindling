@@ -39,6 +39,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A warm machine whose memory dump is on disk but doesn't validate (its seal was retired by a thaw, or the freeze was interrupted) is moved to `stopped` at daemon start, with the reason in `LastErr` and its disk kept, instead of staying warm with a thaw that always fails. The thaw error no longer says to remove it: `kling stop X && kling start X` boots it cold on the same disk.
 - A thaw that can't retire its memory dump's seal (full disk) now fails before loading it: the seal used to be deleted before writing the in-progress mark, so on ENOSPC the stale dump looked pre-seal and a later thaw loaded old RAM over a disk that had already been written. The seal is now renamed into the mark (durable rename, no new inode) before `LoadSnapshot`, and restored if the VMM rejects the load. A failed pause no longer drops the mark either.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
