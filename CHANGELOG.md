@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling mcp serve -paused-mib N|-1` and `-paused-for`: idle persistent instances can be paused instead of frozen (~1 ms resume vs ~30 ms thaw); off by default (`docs/despertar.md`).
 - Per-volume sync mode on macOS: `-volume name:/mount:sync=barrier|none` (API `VolumeAttachment.sync`). `full` (default) keeps `F_FULLFSYNC` on every guest flush; `barrier` uses `F_BARRIERFSYNC` (kling-vz: `fsync`), 300 guest fsyncs ~1.7 s → ~0.1 s; `none` skips flushes (~10 ms) and can leave the volume's ext4 broken if the Mac goes down. Writable volumes only; accepted and ignored on Firecracker.
 - kling-hv: virtio-blk `DISCARD` and `WRITE_ZEROES` on writable disks (`F_PUNCHHOLE`, unaligned edges written as zeros): `fstrim` in the guest gives the space back to the host (216 → 16 MiB after deleting 200 MiB).
 - kling-hv: os_signpost intervals (subsystem `dev.kindling.hv`) for the cold boot, restore and freeze phases, plus events for the first guest instruction, the agent's first vsock answer and slow vCPU exits; free when nobody traces. `KLING_HV_TRACE=1` also logs a one-line breakdown per boot, restore and freeze (`docs/backend-hv.md`).
@@ -26,6 +27,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Ephemeral MCP pool: once the gateway has seen traffic, services with no calls get no prewarmed instance (it used to be destroyed and recreated every 2 × idle, forever).
+- Prewarm and keep-warm budgets charge each copy its measured footprint (PSS / `phys_footprint`, capped at `mem_mib`) instead of the full `mem_mib`, and fall back to a fixed 1 GiB when the daemon gives no memory figure (it used to be unlimited).
 - `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
 - A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
 - `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
