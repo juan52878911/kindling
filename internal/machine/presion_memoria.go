@@ -452,5 +452,6 @@ func (m *Manager) vigilarPresion(ctx context.Context) {
 	if plan.vacio() {
 		return
 	}
-	go m.aplicarPresion(ctx, plan)
+	// Contada como vigilante: Close la espera (ver lanzarVigilante).
+	m.lanzarVigilante(ctx, func(ctx context.Context) { m.aplicarPresion(ctx, plan) })
 }
