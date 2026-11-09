@@ -7,8 +7,13 @@
 #      raíz $BASE/root, socket /run/kt-ci/kling.sock), con KillMode=process
 #      para que reiniciarlo no se lleve las microVMs, como el de verdad;
 #   2. construye la imagen toolchain con ese daemon (la que usa 90-e2e.sh);
+#   2b. parte db: la imagen pg16 y la plantilla Postgres (scripts/db-golden.sh)
+#      con ese daemon, y la extensión kling-db de DB_BIN;
 #   3. scripts/90-e2e.sh contra él (lo opcional se salta solo; sin salida a
-#      HTTPBIN, KLING_E2E_OFFLINE=1);
+#      HTTPBIN, KLING_E2E_OFFLINE=1). Lo que este script prepara NO es
+#      opcional: si 90 se salta las carpetas vivas (daemon.share_roots va en
+#      la configuración del daemon) o, con la parte db, la sección de kling
+#      db, la parte falla aunque 90 salga con 0;
 #   4. lo para y corre scripts/e2e-diff-freeze.sh (levanta sus daemons);
 #   5. scripts/94-e2e-upgrade.sh: de la release anterior publicada a esta.
 #
@@ -22,9 +27,11 @@
 #             con su SHA256SUMS; kling tiene que decir una versión de release
 #             (v0.21.0-e2e.<sha>) para el modo de descarga de 94
 #   IMAGES    vmlinux y min.ext4
+#   DB_BIN    kling-db (linux, de este commit) para la parte db
 #   BASE      raíz de todo (por defecto /srv/kt-ci; mejor en XFS o btrfs, para
 #             que el modo almacen de diff-freeze tenga reflink)
-#   PARTS     qué correr, de "e2e diff upgrade" (por defecto todo)
+#   PARTS     qué correr, de "e2e db diff upgrade" (por defecto todo; db va
+#             con e2e: la sección 7e de 90 es la que la prueba)
 #   KLING_E2E_HTTPBIN  el httpbin del proxy de credenciales (httpbin.org)
 #
 # Sale distinto de cero si falla alguna parte; corre todas aunque una falle.
@@ -33,7 +40,7 @@ set -uo pipefail
 NEW_DIR="${NEW_DIR:?NEW_DIR: directory with the new binaries}"
 IMAGES="${IMAGES:?IMAGES: directory with vmlinux and min.ext4}"
 BASE="${BASE:-/srv/kt-ci}"
-PARTS="${PARTS:-e2e diff upgrade}"
+PARTS="${PARTS:-e2e db diff upgrade}"
 UNIT=kt-ci
 RUN="/run/$UNIT"
 SOCK="$RUN/kling.sock"
@@ -63,9 +70,21 @@ id kindling-build >/dev/null 2>&1 || useradd --system --no-create-home --shell /
 
 failed=""
 parte() { echo "$PARTS" | tr ' ' '\n' | grep -qx "$1"; }
+for p in $PARTS; do case "$p" in e2e|db|diff|upgrade) ;; *) die "PARTS: e2e, db, diff and/or upgrade, not \"$p\"";; esac; done
+if parte db; then
+  parte e2e || die "PARTS: db needs e2e (section 7e of 90-e2e.sh is what tests it)"
+  DB_BIN="${DB_BIN:?DB_BIN: kling-db for the db part}"
+  [ -f "$DB_BIN" ] || die "no kling-db at $DB_BIN"
+fi
+# La plantilla Postgres de la parte db, y dónde deja db-golden.sh su estado
+# (el $HOME del que corre esto, el mismo que lee 90-e2e.sh).
+DBG=kt-ci-pg
+DBSTATE="$HOME/.local/state/kling-db/$DBG"
+# Las carpetas vivas de 90 (sección 6): bajo daemon.share_roots o se saltan.
+export SHARE_ROOT="$BASE/shares"
 
 arrancar() {
-  systemd-run --unit "$UNIT" --collect -p KillMode=process \
+  systemd-run --unit "$UNIT" --collect -p KillMode=process -E "KLING_CONFIG=$KLING_CONFIG" \
     -E "KLING_LIB_DIR=$LIB" -E "KLING_BUILDERS_DIR=$BASE/builders" -E "KLING_SOCKET_USER=$SOCKET_USER" -E "KLING_MIN_FREE_DISK_MIB=1024" \
     "$BASE/bin/kling" daemon -root "$ROOT" -socket "$SOCK" >/dev/null || return 1
   for _ in $(seq 1 60); do "$BASE/bin/kling" ps >/dev/null 2>&1 && return 0; sleep 0.5; done
@@ -80,7 +99,7 @@ parar() {
 limpiar() {
   parar
   systemctl reset-failed "$UNIT" >/dev/null 2>&1
-  [ "${KEEP:-0}" = 1 ] || rm -rf "$BASE" "$RUN"
+  [ "${KEEP:-0}" = 1 ] || rm -rf "$BASE" "$RUN" "$DBSTATE"
 }
 trap limpiar EXIT
 
@@ -90,9 +109,11 @@ export KLING_CONFIG="$BASE/config.json"
 
 if parte e2e; then
   step "private daemon $UNIT ($ROOT)"
-  mkdir -p "$BASE/bin" "$LIB" "$ROOT/images" "$RUN"
+  mkdir -p "$BASE/bin" "$LIB" "$ROOT/images" "$RUN" "$SHARE_ROOT"
   chmod 755 "$BASE" "$ROOT"   # el usuario del VMM tiene que poder atravesarla
-  echo '{}' > "$KLING_CONFIG"
+  # La del daemon y la del CLI son la misma (arrancar le pasa KLING_CONFIG):
+  # con '{}' no había share_roots y 90 se saltaba las carpetas vivas en verde.
+  printf '{"daemon":{"share_roots":["%s"]}}\n' "$SHARE_ROOT" > "$KLING_CONFIG"
   install -m755 "$KLING_BIN" "$BASE/bin/kling"
   install -m755 "$GUEST_BIN" "$LIB/kling-guest"
   # `image toolchain` usa el constructor "base", que corre como root: el
@@ -126,6 +147,25 @@ if parte e2e; then
     echo "::warning::kling image toolchain failed; 90-e2e.sh runs what it can with min"
   fi
 
+  if parte db; then
+    step "kling db: pg16 image and the $DBG golden (db-golden.sh)"
+    # La extensión, de root y sin escritura de otros (pkg/plugin la exige así).
+    install -d -m755 "$BASE/plugins"
+    install -m755 "$DB_BIN" "$BASE/plugins/kling-db"
+    export KLING_PLUGIN_PATH="$BASE/plugins"
+    t0=$(date +%s)
+    if KLING="$BASE/bin/kling" bash "$SCRIPTS/db-golden.sh" image \
+       && KLING="$BASE/bin/kling" bash "$SCRIPTS/db-golden.sh" build "$DBG"; then
+      echo "pg16 and $DBG built in $(( $(date +%s) - t0 )) s"
+      export KLING_E2E_DB_GOLDEN="$DBG"
+    else
+      # Sin plantilla 90 se saltaría 7e y saldría verde: falla aquí, y 90
+      # corre igual para que se vea el resto.
+      echo "::error::the $DBG golden could not be built: the db part fails"
+      failed="$failed db-golden"
+    fi
+  fi
+
   step "90-e2e.sh"
   if [ "${KLING_E2E_OFFLINE:-}" = "" ]; then
     if ! curl -fsS --max-time 15 -o /dev/null "https://${KLING_E2E_HTTPBIN:-httpbin.org}/get"; then
@@ -133,8 +173,23 @@ if parte e2e; then
       export KLING_E2E_OFFLINE=1
     fi
   fi
+  log90="$BASE/90-e2e.log"
   KLING="$BASE/bin/kling" KLING_E2E_RESTART="systemctl restart $UNIT && sleep 1" \
-    bash "$SCRIPTS/90-e2e.sh" || failed="$failed 90-e2e"
+    bash "$SCRIPTS/90-e2e.sh" 2>&1 | tee "$log90"
+  [ "${PIPESTATUS[0]}" = 0 ] || failed="$failed 90-e2e"
+  # Lo que 90 se salta diciendo «skip» y este host sí tiene preparado: aquí
+  # saltarlo es un fallo (obligatorio <parte> <texto de 90 al saltarlo>).
+  obligatorio() {
+    if grep -qF -- "$2" "$log90"; then
+      echo "::error::90-e2e.sh skipped what this host set up ($1): $2"
+      failed="$failed $1-skipped"
+    fi
+  }
+  obligatorio shares "live shares skipped"
+  if parte db && [ -n "${KLING_E2E_DB_GOLDEN:-}" ]; then
+    obligatorio db "KLING_E2E_DB_GOLDEN no está"
+    obligatorio db "el plugin kling-db no está instalado"
+  fi
   parar
 fi
 

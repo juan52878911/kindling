@@ -11,6 +11,10 @@
 # Todo se construye en el job (kernel, min, binarios): los dorados no son
 # portables entre CPUs, así que nada viene de otra máquina. El kernel se
 # guarda en caché por el hash de sus fuentes fijadas.
+#
+# release.yml lo llama (workflow_call) sobre el commit de la etiqueta y su job
+# release depende de él: ahí no hay aviso que valga, sin /dev/kvm falla
+# (require_kvm).
 name: e2e-linux
 
 on:
@@ -19,11 +23,27 @@ on:
   workflow_dispatch:
     inputs:
       parts:
-        description: 'qué correr (e2e diff upgrade)'
-        default: 'e2e diff upgrade'
+        description: 'qué correr (e2e db diff upgrade)'
+        default: 'e2e db diff upgrade'
       httpbin:
         description: 'httpbin con IP pública para el proxy de credenciales'
         default: 'httpbin.org'
+  workflow_call:
+    inputs:
+      ref:
+        description: 'commit o etiqueta que probar (vacío: el del evento)'
+        type: string
+        default: ''
+      parts:
+        type: string
+        default: 'e2e db diff upgrade'
+      httpbin:
+        type: string
+        default: 'httpbin.org'
+      require_kvm:
+        description: 'sin /dev/kvm, fallar en vez de avisar y no hacer nada'
+        type: boolean
+        default: false
   # En un PR solo si toca lo que estas pruebas ven: tardan ~1 h.
   pull_request:
     paths:
@@ -42,15 +62,20 @@ on:
       - 'scripts/e2e-diff-freeze.sh'
       - 'scripts/70-build-minimal-image.sh'
       - 'scripts/20-install-firecracker.sh'
+      - 'scripts/db-golden.sh'
+      - 'scripts/recipes/pg16.recipe.json'
       - 'scripts/builders/kernel/**'
       - '.github/workflows/e2e-linux.yml'
 
 permissions:
   contents: read
 
+# En un PR, el push nuevo cancela al viejo. Llamado desde release.yml, el
+# github.ref es el de la release (la etiqueta) y no se cancela nunca: un e2e
+# a medias no puede dar paso a una release.
 concurrency:
-  group: e2e-linux-${{ github.ref }}
-  cancel-in-progress: true
+  group: e2e-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   e2e:
@@ -63,8 +88,14 @@ jobs:
     steps:
       - name: /dev/kvm
         id: kvm
+        env:
+          REQUIRE_KVM: ${{ inputs.require_kvm || false }}
         run: |
           if [ ! -e /dev/kvm ]; then
+            if [ "$REQUIRE_KVM" = true ]; then
+              echo "::error title=no KVM::this runner has no /dev/kvm and the caller needs the microVM e2e (release.yml): nothing is published without it"
+              exit 1
+            fi
             echo "::warning title=no KVM::this runner has no /dev/kvm: the microVM e2e cannot run here. Use a self-hosted runner with KVM (the lab, CT 108) with the same scripts/93-e2e-linux-ci.sh."
             echo "ok=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -83,6 +114,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: steps.kvm.outputs.ok == 'true'
         with:
+          ref: ${{ inputs.ref || github.ref }}
           # Las etiquetas: la versión de los binarios sale de la última.
           fetch-depth: 0
 
@@ -97,7 +129,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            build-essential flex bison bc libelf-dev xz-utils curl e2fsprogs zstd xfsprogs openssl python3 ipset
+            build-essential flex bison bc libelf-dev xz-utils curl e2fsprogs zstd xfsprogs openssl python3 ipset postgresql-client
 
       - name: Firecracker (fijado, con su sha256)
         if: steps.kvm.outputs.ok == 'true'
@@ -117,6 +149,9 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-linux-amd64" ./cmd/kling
           CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-guest-linux-amd64" ./cmd/kling-guest
           CGO_ENABLED=0 go -C ext/mcp build -trimpath -ldflags "$lf" -o "$RUNNER_TEMP/kling-bridge" ./cmd/kling-bridge
+          # La extensión de `kling db` (parte db): fuera de NEW_DIR, que es la
+          # release que instala 94.
+          CGO_ENABLED=0 go -C ext/db build -trimpath -ldflags "$lf" -o "$RUNNER_TEMP/kling-db" ./cmd/kling-db
           ( cd "$out" && sha256sum -- * > SHA256SUMS )
           "$out/kling-linux-amd64" version | head -1
           echo "dir=$out" >> "$GITHUB_OUTPUT"
@@ -160,18 +195,19 @@ jobs:
           sudo mkdir -p /srv
           sudo mount -o loop /mnt/srv.img /srv
 
-      - name: e2e (90-e2e, e2e-diff-freeze, 94-e2e-upgrade)
+      - name: e2e (90-e2e con kling db, e2e-diff-freeze, 94-e2e-upgrade)
         if: steps.kvm.outputs.ok == 'true'
         env:
           NEW_DIR: ${{ steps.bin.outputs.dir }}
           IMAGES: ${{ steps.img.outputs.dir }}
-          PARTS: ${{ inputs.parts || 'e2e diff upgrade' }}
+          DB_BIN: ${{ runner.temp }}/kling-db
+          PARTS: ${{ inputs.parts || 'e2e db diff upgrade' }}
           KLING_E2E_HTTPBIN: ${{ inputs.httpbin || 'httpbin.org' }}
           # 94 pregunta al API cuál es la release anterior: con el token no
           # choca con el límite de peticiones anónimas.
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sudo --preserve-env=NEW_DIR,IMAGES,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
+          sudo --preserve-env=NEW_DIR,IMAGES,DB_BIN,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
             bash scripts/93-e2e-linux-ci.sh
 
       # Los tests de Go que se saltan sin root (montajes, loop, chown): aquí
