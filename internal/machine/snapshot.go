@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -542,9 +543,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// Digests de integridad del rootfs dorado y del volcado de estado.
 	//
 	// Se calculan aquí, con los ficheros ya en su forma final (el overlay copiado,
-	// el snap volcado, la memoria perforada). El mem.file se deja fuera a
-	// propósito: es el grande y volver a leerlo entero en cada restauración mataría
-	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
+	// el snap volcado, la memoria perforada). El mem.file también (B2), en
+	// árbol: perforado, solo se leen sus páginas con datos, y se comprueba una
+	// vez por dorado y arranque del daemon, no en cada thaw (verifyIntegrity).
 	//
 	// DECISIÓN — el snapshot temporal de un fork no graba el digest de su
 	// overlay. Son 512 MiB nominales que sha256 lee enteros (los huecos pasan
@@ -556,10 +557,14 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// quedan copias (barrerForks). Sin digest se trata como un dorado antiguo
 	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
 	// pequeño, se sigue grabando y comprobando.
-	var rootfsDigest string
+	// El de la memoria, por lo mismo que el del overlay, tampoco en un fork.
+	var rootfsDigest, memDigest string
 	if !deFork {
 		if rootfsDigest, err = digest.Tree(goldOverlay); err != nil {
 			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
+		}
+		if memDigest, err = digest.Tree(memPath); err != nil {
+			return nil, fmt.Errorf("computing digest of the memory dump: %w", err)
 		}
 	}
 	snapSHA, err := digest.File(snapPath)
@@ -610,6 +615,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		EnvKeys:        mc.EnvKeys,
 		ShareWait:      mc.ShareWait,
 		RootfsDigest:   rootfsDigest,
+		MemDigest:      memDigest,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
 		GuestIPv6Off:   guestIPv6Off,
@@ -886,11 +892,14 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 //
 // DECISIÓN — qué se hashea y qué no:
 //
-//	overlay.ext4 (rootfs) y snap.file  -> SÍ, la PRIMERA vez.
-//	mem.file                           -> NO aquí.
+//	overlay.ext4 (rootfs), snap.file y mem.file -> SÍ, la PRIMERA vez.
 //
 // El fichero de memoria es el grande —cientos de MiB— y restaurar promete ~30 ms;
-// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra.
+// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra. Por eso
+// estuvo fuera hasta B2: sin su hash, quien reescribiera el mem.file de un
+// dorado conservando tamaño y fecha cambiaba la RAM de todas sus copias sin
+// que nada lo viera. Ahora va en árbol (los huecos de la perforación no se
+// leen) y, como los otros dos, una sola vez por dorado (abajo).
 //
 // CORRECCIÓN, medida: la versión anterior de esta nota daba por hecho que "el
 // rootfs y el snap.file son pequeños". No lo son. El overlay dorado son 512 MiB
@@ -910,7 +919,7 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 // Los snapshots anteriores a esta comprobación no tienen digests grabados: se
 // saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
 func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
-	if snap.RootfsSHA256 == "" && snap.RootfsDigest == "" && snap.SnapSHA256 == "" {
+	if snap.RootfsSHA256 == "" && snap.RootfsDigest == "" && snap.SnapSHA256 == "" && snap.MemDigest == "" {
 		return nil // snapshot legacy: no hay digests que comprobar
 	}
 	if m.integridadYaVista(snap.Name, snapDir) {
@@ -923,6 +932,7 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 	for _, chk := range []struct{ file, want string }{
 		{"overlay.ext4", rootfs},
 		{"snap.file", snap.SnapSHA256},
+		{"mem.file", snap.MemDigest}, // vacío en los dorados de antes de B2
 	} {
 		if chk.want == "" {
 			continue
@@ -951,18 +961,26 @@ func digestCorto(d string) string {
 }
 
 // huellaSnapshot describe los ficheros verificados sin leerlos: tamaño y fecha de
-// los dos que se hashean. Basta para saber si el dorado sigue siendo el mismo, y
-// cuesta dos stat en vez de 512 MiB de sha256.
+// los tres que se hashean. Basta para saber si el dorado sigue siendo el mismo, y
+// cuesta tres stat en vez de cientos de MiB de sha256. Un mem.file que no está
+// (no pasa en un dorado de verdad) cuenta como tamaño y fecha 0.
+//
+// No se mira ctime, que root no puede falsear: cada restauración con jailer
+// hace un enlace duro al dorado, y eso lo cambia. Contra quien conserve tamaño
+// y fecha a propósito protege la verificación tras reiniciar el daemon.
 type huellaSnapshot struct {
-	tam   [2]int64
-	fecha [2]int64
+	tam   [3]int64
+	fecha [3]int64
 }
 
 func huellaDe(snapDir string) (huellaSnapshot, bool) {
 	var h huellaSnapshot
-	for i, f := range [2]string{"overlay.ext4", "snap.file"} {
+	for i, f := range [3]string{"overlay.ext4", "snap.file", "mem.file"} {
 		st, err := os.Stat(filepath.Join(snapDir, f))
 		if err != nil {
+			if i == 2 && errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return h, false
 		}
 		h.tam[i] = st.Size()

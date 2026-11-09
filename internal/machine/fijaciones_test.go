@@ -114,10 +114,17 @@ func TestFijacionesMeta(t *testing.T) {
 			if v, _ := esquema.Version(b); v != metaSchema {
 				t.Fatalf("schema = %d", v)
 			}
-			if _, err := os.Stat(esquema.RutaRespaldo(ruta, 2)); err == nil {
+			// Uno de una versión anterior se respalda (.v<N>.bak) al subirlo;
+			// uno que ya estaba en la de ahora, no.
+			vOrig, _ := esquema.Version(original)
+			_, err = os.Stat(esquema.RutaRespaldo(ruta, vOrig))
+			if vOrig == metaSchema && err == nil {
 				t.Fatal("copió un meta que ya estaba en su versión")
+			} else if vOrig < metaSchema && err != nil {
+				t.Fatalf("subió un meta v%d sin respaldarlo: %v", vOrig, err)
 			}
-			conservaCampos(t, "meta.json", original, b)
+			// Todo salvo schema, que sube a la de ahora (comprobado arriba).
+			conservaCampos(t, "meta.json", sin, b)
 		})
 	}
 }

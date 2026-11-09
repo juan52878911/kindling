@@ -940,15 +940,19 @@ type Snapshot struct {
 	// que lo tocó— antes de despertar una microVM en un estado que ya no es el que
 	// se congeló, y que sin esto no daría una sola señal.
 	//
-	// El mem.file NO se hashea a propósito: es el fichero grande y restaurar
-	// promete ~30 ms; leerlo entero por sha256 en cada thaw mataría esa cifra.
-	// Ver Manager.verifyIntegrity.
+	// El mem.file no va aquí: ver MemDigest.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
 	// RootfsDigest sustituye a RootfsSHA256 desde meta.json v2: el overlay en
 	// árbol de sha256 (internal/digest.Tree, "sha256-tree-4m:<hex>"), en paralelo y
 	// sin leer los huecos. Un dorado lleva uno de los dos.
 	RootfsDigest string `json:"rootfs_digest,omitempty"`
+	// MemDigest es el digest en árbol del mem.file (internal/digest.Tree, con
+	// su prefijo): la RAM del invitado, perforada, así que hashearlo solo lee
+	// las páginas con datos. Se calcula al hacer commit y se comprueba la
+	// primera vez que se restaura (Manager.verifyIntegrity), y lo cubre la
+	// firma v2. Los dorados de antes no lo llevan y no se comprueba.
+	MemDigest string `json:"mem_digest,omitempty"`
 
 	// KernelSHA256 es el sha256 del vmlinux con el que se congeló el snapshot.
 	// Campo nuevo y opcional: los snapshots anteriores a K1 (kernel propio) no

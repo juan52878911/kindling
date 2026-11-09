@@ -45,7 +45,11 @@ import (
 // v2: el overlay va en rootfs_digest (sha256 en árbol, internal/digest.Tree) y no
 // en rootfs_sha256. Un kling de v1 no lo comprobaría y su firma no casaría:
 // por eso sube la versión, y ese kling se niega diciendo cuál encontró.
-const metaSchema = 2
+//
+// v3: la firma v2 (firma.go, B2), que cubre también etiquetas, topes, nombres
+// del entorno y mem_digest. Un kling anterior no la entiende: la daría por
+// manipulada. Igual que con la v2, se niega antes diciendo la versión.
+const metaSchema = 3
 
 // ErrDoradoObsoleto es que el dorado se hizo con un VMM que el de ahora no
 // sabe restaurar: hay que rehacerlo.
