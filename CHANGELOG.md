@@ -45,6 +45,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux allowlist: the per-machine ipset has `maxelem 8192`, at most 16 A records per DNS answer are seeded, seeded TTLs are capped at 3600 s, and a full set (or any other error the kernel answers over netlink) no longer falls back to forking `ipset` on every query; only a missing netlink path does.
 - Linux: in `internet` and `allowlist` egress, new packets from a machine are capped at 300/s per destination IP (`hashlimit`, burst 300; needs the `xt_hashlimit` module), so a guest can't flood an allowed IP through the host; a one-way UDP flood counts as new packets. The Firecracker network rate limiter also caps frames per second (`ops`: the bandwidth over 512 bytes, at least 8192; 32768/s at the default 16 MiB/s), so small packets can't reach hundreds of thousands per second within the byte budget.
 - Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
+- `kling-mcp`: sessions are bound to the tenant that opened them; another tenant's key gets a 404 and can't delete them.
+- `kling mcp connect` and `migrate` no longer take `-token` (it ended up in argv and shell history): use `KLING_GATEWAY_TOKEN`, `-token-file` or `gateway.token`.
 
 ### Fixed
 
@@ -75,6 +77,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Live shares: a `setattr` with times racing a `release` of the same handle can no longer set the times of another file that reused the descriptor.
 - Linux: live shares use at most half of `fs.inotify.max_user_instances` (a per-uid limit) daemon-wide; sessions beyond it watch host changes by polling every 2 s instead of starving other processes of inotify.
 - Live shares: a read reply is built in one buffer (1 MiB read: 3.2 → 1.06 MB allocated, ~4.5 → ~10 GB/s in `BenchmarkLectura` on an M4).
+- `kling-mcp`: the gateway answers 404 to an unknown `Mcp-Session-Id` on `/mcp/_all` instead of minting a new session (and a new server process), so clients re-initialize.
+- `kling-mcp`: router mode destroys a conversation's isolated microVMs on DELETE and when the session is reaped.
+- `kling-bridge` answers 404 for a lost session; tool results share one 16 MiB cap in the bridge and the gateway.
 
 ### Fixed
 
