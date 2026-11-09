@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -81,5 +82,19 @@ func TestReclamoConSegundaFaseLentaNoSeEntrega(t *testing.T) {
 	}
 	if f.existe(pre.ID) {
 		t.Fatal("the half-claimed machine is still there")
+	}
+}
+
+// Lo que ve el cliente no trae las etiquetas reservadas del daemon ni del
+// frontal (kling.*): ni el nonce de la reclamación ni las de red o dueño.
+func TestVistaSinEtiquetasReservadas(t *testing.T) {
+	h := &hosts.Host{Nombre: "a"}
+	mc := &api.Machine{ID: "m1", Labels: map[string]string{
+		api.LabelKind: api.KindSandbox, LabelTenant: "alice", LabelTemplate: "node",
+		LabelReclamo: "abc", api.LabelPorts: "8080", "k": "v",
+	}}
+	sb := vista(h, mc)
+	if len(sb.Labels) != 1 || sb.Labels["k"] != "v" {
+		t.Fatalf("labels shown to the client: %v", sb.Labels)
 	}
 }

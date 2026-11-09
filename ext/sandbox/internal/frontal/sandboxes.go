@@ -123,7 +123,7 @@ func vista(h *hosts.Host, mc *api.Machine) Sandbox {
 		}
 	}
 	for k, v := range mc.Labels {
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate {
+		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, prefijoReservado) {
 			continue
 		}
 		if sb.Labels == nil {
