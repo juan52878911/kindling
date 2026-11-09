@@ -1,12 +1,17 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // Al confinarse, kling-vz pide solo los ficheros de SU VM: el kernel y los
@@ -116,5 +121,65 @@ func TestSnapshotPorDestino(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
 			t.Fatalf("temporal %s olvidado tras un fallo", e.Name())
 		}
+	}
+}
+
+// Los reenvíos pedidos antes de crear la VM se abren ya, en el rango
+// reservado y mientras kling-vz aún puede escuchar; la red los adopta con la
+// misma dirección, y el confinamiento lo sabe (ReenviosAbiertos: el perfil no
+// deja escuchar en TCP). Sin pedirlos antes, como con un núcleo anterior,
+// ReenviosAbiertos queda a false y el perfil sigue dejando escuchar.
+func TestReenviosAntesDeCrear(t *testing.T) {
+	direcciones := func(out string) map[string]string {
+		var fw struct {
+			Forwards map[string]string `json:"forwards"`
+		}
+		if err := json.Unmarshal([]byte(out), &fw); err != nil {
+			t.Fatalf("forwards = %s: %v", out, err)
+		}
+		return fw.Forwards
+	}
+	r := newRig(t)
+	var got []Confinamiento
+	r.srv.d.Confine = func(c Confinamiento) error { got = append(got, c); return nil }
+	r.configure(t.TempDir())
+	r.must("PUT", "/kling/network", `{"egress":"none"}`)
+	antes := direcciones(r.must("PUT", "/kling/forwards", `{"ports":[8080, 22]}`))
+	for p, a := range antes {
+		_, port, _ := net.SplitHostPort(a)
+		if n, err := strconv.Atoi(port); err != nil || !credproxy.PuertoReservado(n) {
+			t.Fatalf("reenvío %s en %s, fuera del rango reservado", p, a)
+		}
+		c, err := net.Dial("tcp4", a)
+		if err != nil {
+			t.Fatalf("el reenvío reservado %s no escucha: %v", a, err)
+		}
+		c.Close()
+	}
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if len(got) != 1 || !got[0].ReenviosAbiertos {
+		t.Fatalf("Confine = %+v, quería ReenviosAbiertos", got)
+	}
+	n := r.nets[len(r.nets)-1]
+	t.Cleanup(func() {
+		for _, l := range n.adoptados {
+			l.Close()
+		}
+	})
+	if len(n.adoptados) != 2 {
+		t.Fatalf("la red adoptó %d reenvíos, quería 2", len(n.adoptados))
+	}
+	despues := direcciones(r.must("PUT", "/kling/forwards", `{"ports":[8080, 22]}`))
+	if despues["8080"] != antes["8080"] || despues["22"] != antes["22"] {
+		t.Fatalf("tras arrancar, %v; antes %v: deben ser los mismos", despues, antes)
+	}
+
+	r2 := newRig(t)
+	var got2 []Confinamiento
+	r2.srv.d.Confine = func(c Confinamiento) error { got2 = append(got2, c); return nil }
+	r2.configure(t.TempDir())
+	r2.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if len(got2) != 1 || got2[0].ReenviosAbiertos {
+		t.Fatalf("sin reenvíos previos, Confine = %+v: ReenviosAbiertos debe ser false", got2)
 	}
 }

@@ -136,10 +136,14 @@ func (m *Manager) reserveMemory(wantMiB int, shareKey string) (release func(), e
 			effMiB = 1
 		}
 	}
+	if err := m.checkMemoriaDeclaradaLocked(wantMiB); err != nil {
+		return nil, err
+	}
 	if err := checkHostMemory(effMiB+m.pendingMiB, m.hotMemFilesMiBLocked()); err != nil {
 		return nil, err
 	}
 	m.pendingMiB += effMiB
+	m.pendingDeclMiB += wantMiB
 	if shareKey != "" {
 		m.snapPending[shareKey]++
 	}
@@ -150,6 +154,9 @@ func (m *Manager) reserveMemory(wantMiB int, shareKey string) (release func(), e
 			m.pendingMiB -= effMiB
 			if m.pendingMiB < 0 {
 				m.pendingMiB = 0
+			}
+			if m.pendingDeclMiB -= wantMiB; m.pendingDeclMiB < 0 {
+				m.pendingDeclMiB = 0
 			}
 			if shareKey != "" {
 				if m.snapPending[shareKey]--; m.snapPending[shareKey] <= 0 {
