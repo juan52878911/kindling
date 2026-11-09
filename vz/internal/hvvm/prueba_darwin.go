@@ -10,6 +10,7 @@ int khv_prueba_es(uint32_t tipo, uint64_t sector, const uint32_t *lens, int nd, 
 uint32_t khv_prueba_cfg(uint32_t off);
 int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
+int khv_vsock_prueba_fd_en_poll(void);
 */
 import "C"
 
@@ -122,6 +123,11 @@ func vsockTx(enviado []byte) (leido []byte, usoPend bool, ret int) {
 	}
 	return out[:r], p != 0, 0
 }
+
+// vsockFdEnPoll libera una conexión cuyo fd espera vs_hilo en poll
+// (khv_vsock_prueba_fd_en_poll): 0 si no se cerró desde este hilo y Go vio
+// el fin cuando lo cerró el hilo.
+func vsockFdEnPoll() int { return int(C.khv_vsock_prueba_fd_en_poll()) }
 
 // construirFDT llama a fdt_build con una VM de mentira (ncpus vCPU, 256 MiB,
 // un virtio) y devuelve el DTB, o nil si no se pudo construir.
