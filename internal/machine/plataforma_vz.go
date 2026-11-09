@@ -537,6 +537,56 @@ func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// sandboxExec es el de macOS. Apple lo da por obsoleto pero sigue en cada
+// versión y es lo que hay para encerrar un proceso sin firmarlo con
+// entitlements. Variable para los tests.
+var sandboxExec = "/usr/bin/sandbox-exec"
+
+// confinarE2fs encierra una orden de e2fsprogs que va a leer un disco escrito
+// por el invitado (f, que recibe abierto como /dev/fd/3) en un perfil de
+// sandbox mínimo (perfilE2fs): sin red, sin leer más que el sistema, las
+// bibliotecas de Homebrew y su propio binario, y sin escribir más que el
+// descriptor que se le pasa. En macOS /dev/fd/N es un dup del descriptor y
+// no vuelve a mirar permisos, así que no necesita llegar a la ruta.
+//
+// El usuario no cambia: el daemon ya es el del usuario, sin privilegios que
+// quitar. Tampoco hay tope de memoria: macOS acepta RLIMIT_AS pero no lo
+// aplica; queda el plazo (plazoE2fsck). Sin sandbox-exec, la orden sigue como
+// estaba.
+func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
+	nada := func() {}
+	if c.Err != nil || !filepath.IsAbs(c.Path) {
+		return nada, nil
+	}
+	if _, err := os.Stat(sandboxExec); err != nil {
+		return nada, nil
+	}
+	bin, err := filepath.EvalSymlinks(c.Path)
+	if err != nil {
+		return nil, err
+	}
+	c.Args = append([]string{sandboxExec, "-p", perfilE2fs(bin), bin}, c.Args[1:]...)
+	c.Path = sandboxExec
+	return nada, nil
+}
+
+// perfilE2fs es el perfil de sandbox de e2fsck: todo prohibido salvo
+// ejecutar bin, leer lo que carga dyld (el sistema, Homebrew y bin) y su
+// configuración, y leer y escribir los descriptores que trae (/dev/fd).
+func perfilE2fs(bin string) string {
+	return `(version 1)
+(deny default)
+(allow process-exec (literal ` + strconv.Quote(bin) + `))
+(allow file-read* (literal ` + strconv.Quote(bin) + `) (literal "/")
+  (subpath "/usr/lib") (subpath "/System") (subpath "/private/var/db/dyld")
+  (subpath "/opt/homebrew") (subpath "/usr/local")
+  (literal "/private/etc/e2fsck.conf") (literal "/private/etc/mke2fs.conf")
+  (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* file-write* (subpath "/dev/fd") (literal "/dev/null"))
+(allow sysctl-read)
+`
+}
+
 // checkPresionPlataforma rechaza con 507 cuando macOS dice que le queda poca
 // memoria. PSI no existe aquí; kern.memorystatus_level es lo que usa el
 // propio sistema para decidir cuándo avisar y cuándo matar procesos.

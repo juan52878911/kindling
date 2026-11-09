@@ -56,6 +56,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `e2fsck` on guest-written disks (overlay and rw volumes before a start, `put`, bridge refresh) no longer runs with the daemon's privileges: it gets the disk as an open descriptor and a minimal environment. Linux (daemon as root): the disk's non-root owner (the VMM user with `-run-as`) or `nobody`, no groups, new net/PID/IPC namespaces, `prlimit --as` 2 GiB when `prlimit` exists; a root-owned disk is handed to `nobody` for the check and given back. macOS: a minimal `sandbox-exec` profile (no network, reads limited to the system and Homebrew). `resize2fs` and `debugfs` are not confined yet.
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
@@ -71,6 +72,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: each machine's netns drops what the guest sends to any IPv4 address of the host (other than its own veth's), and every network setup checks that the host INPUT rules are still there and puts them back in order if a `ufw reload` or `firewalld --reload` removed them; until then a guest with egress reached the host's services on its public IP.
 - `kling-mcp`: sessions are bound to the tenant that opened them; another tenant's key gets a 404 and can't delete them.
 - `kling mcp connect` and `migrate` no longer take `-token` (it ended up in argv and shell history): use `KLING_GATEWAY_TOKEN`, `-token-file` or `gateway.token`.
+- The daemon and the MCP gateway no longer follow HTTP redirects returned by the guest agent or bridge, so a compromised guest can't make them repeat a request against another machine or a host loopback service; the guest agent's `/volume/*` routes now require POST.
 - kling-hv: a guest can no longer keep freeze, commit or squeeze out. A virtio-blk batch stops after 64 MiB of data or, between requests, as soon as the VM is pausing, and a single read or write over 64 MiB fails with an I/O error (Linux sends a few MiB unless `max_sectors_kb` is raised by hand). Balloon free page reports are capped at 1 GiB/s; the excess is returned unreleased.
 - kling-hv: a panic in the virtio-fs FUSE server answers that request with `EIO` and is logged instead of killing the VMM; a data abort the VMM cannot decode (no ISV) is injected into the guest as an external abort instead of ending the VM; a restored RTC offset is clamped so it can't overflow.
 
