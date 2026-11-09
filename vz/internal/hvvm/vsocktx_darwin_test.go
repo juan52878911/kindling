@@ -30,3 +30,22 @@ func TestVsockTxDesdeLosBuferes(t *testing.T) {
 		t.Fatal("the bytes Go read are not the ones the guest sent")
 	}
 }
+
+// TestVsockLiberarNoCierraEnPoll: liberar (un RST del invitado en el vCPU,
+// un dial que vence, el final de la prueba de tx) no cierra el fd que vs_hilo
+// espera en poll: ese close se quedaba a veces colgado en el kernel para
+// siempre (TestVsockTxDesdeLosBuferes, 10 min en CI). Lo cierra el hilo al
+// salir de poll, y Go ve el fin igual.
+func TestVsockLiberarNoCierraEnPoll(t *testing.T) {
+	switch r := vsockFdEnPoll(); r {
+	case 0:
+	case 1:
+		t.Fatal("liberar closed the fd while the vsock thread was polling it")
+	case 2:
+		t.Fatal("Go did not see EOF after the vsock thread left poll")
+	case 3:
+		t.Fatal("the vsock thread never polled the connection")
+	default:
+		t.Fatalf("could not prepare: %d", r)
+	}
+}
