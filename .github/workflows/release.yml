@@ -324,9 +324,19 @@ jobs:
       ref: ${{ inputs.tag || github.ref }}
       require_kvm: true
 
+  # Los kernels Android del prototipo: artefactos de este run que el job
+  # release publica con todo lo demás (lista de assets, SHA256SUMS, firma y
+  # atestación).
+  android:
+    name: android kernels
+    needs: [test, lint]
+    uses: ./.github/workflows/android-kernels.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   release:
     name: release
-    needs: [build, vz, imagenes, e2e]
+    needs: [build, vz, imagenes, e2e, android]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
     # Corre en el environment protegido `release`, el único con el secreto
@@ -400,6 +410,12 @@ jobs:
           done
           for arch in amd64 arm64; do
             want+=("vmlinux-$arch.zst" "min-$arch.ext4.zst")
+          done
+          # Los kernels Android (job android): el nombre del K1 de esa
+          # arquitectura con -android, y su .sha256, .config y .buildinfo.
+          for arch in amd64 arm64; do
+            k="$(TARGET_ARCH="$arch" bash scripts/builders/kernel/build.sh --print-name)-android"
+            want+=("$k" "$k.sha256" "$k.config" "$k.buildinfo")
           done
           want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt

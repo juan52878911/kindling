@@ -1,8 +1,15 @@
-# Publica en cada release los kernels Android del prototipo (arm64 para vz en
-# Apple Silicon, amd64 para Firecracker en x86_64), con su sha256, su .config,
-# su .buildinfo y una atestación de procedencia firmada (Sigstore) de cada uno.
-# Así nadie necesita una VM Linux para compilar el kernel: se baja de la
-# release y se comprueba (prototypes/android/docs/constructor.md, "Kernels").
+# Construye los kernels Android del prototipo (arm64 para vz en Apple Silicon,
+# amd64 para Firecracker en x86_64), con su sha256, su .config y su
+# .buildinfo. Así nadie necesita una VM Linux para compilar el kernel: se baja
+# de la release y se comprueba (prototypes/android/docs/constructor.md,
+# "Kernels").
+#
+# Lo llama release.yml (workflow_call) y deja los ficheros como artefactos del
+# run: el job release los mete en la lista de assets esperados, en
+# SHA256SUMS (y su firma) y en la atestación de procedencia, como todo lo
+# demás. Antes escuchaba `release: published`, pero una release creada con el
+# GITHUB_TOKEN no dispara workflows: no corrió nunca. A mano
+# (workflow_dispatch) solo construye, para probar el kernel sin publicar nada.
 #
 # El tarball de kernel.org se comprueba contra la lista sha256sums.asc FIRMADA
 # (claves de Linus, Greg y el autosigner de kernel.org, por WKD) antes de
@@ -10,13 +17,13 @@
 name: android-kernels
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      tag:
-        description: 'release a la que subir los kernels (ej. v0.17.0); tiene que existir'
+      ref:
+        description: 'commit o etiqueta de la que construir'
+        type: string
         required: true
+  workflow_dispatch:
 
 # Lectura por defecto; la escritura, solo en el job que la necesita.
 permissions:
@@ -26,20 +33,14 @@ jobs:
   kernel:
     name: kernel android ${{ matrix.arch }}
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write     # subir a la release
-      id-token: write     # firmar la atestación (Sigstore, sin claves)
-      attestations: write
     strategy:
       fail-fast: false
       matrix:
         arch: [arm64, amd64]
-    env:
-      TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: toolchain
         run: |
@@ -52,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           . scripts/builders/kernel/kernel.pin
-          curl -fsSLo sha256sums.asc "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/sha256sums.asc"
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o sha256sums.asc "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/sha256sums.asc"
           GNUPGHOME="$(mktemp -d)"
           export GNUPGHOME
           gpg --batch --quiet --auto-key-locate clear,wkd --locate-keys \
@@ -73,16 +74,13 @@ jobs:
           OUT: ${{ github.workspace }}/dist
         run: prototypes/android/kernel/build.sh
 
-      - name: attest
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+      # Sin --clobber ni subida aquí: release.yml los publica con el resto.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          subject-path: dist/vmlinux-*-android
-
-      - name: upload to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ls -la dist
-          gh release upload "$TAG" dist/vmlinux-*-android dist/vmlinux-*-android.sha256 \
-            dist/vmlinux-*-android.config dist/vmlinux-*-android.buildinfo --clobber
+          name: android-kernel-${{ matrix.arch }}
+          path: |
+            dist/vmlinux-*-android
+            dist/vmlinux-*-android.sha256
+            dist/vmlinux-*-android.config
+            dist/vmlinux-*-android.buildinfo
+          if-no-files-found: error
