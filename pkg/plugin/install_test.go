@@ -78,6 +78,10 @@ func demoRelease() *release {
 	}}
 }
 
+// acceptSums da por buena cualquier firma: estos tests son del sha256. La
+// firma, con internal/upgrade y una clave de prueba, en firma_test.go.
+func acceptSums(SumsCheck) error { return nil }
+
 func install(t *testing.T, rel *release, o InstallOptions) (*Installed, string, error) {
 	t.Helper()
 	ManifestTimeout = 10 * time.Second
@@ -94,6 +98,9 @@ func install(t *testing.T, rel *release, o InstallOptions) (*Installed, string, 
 	}
 	o.Client = srv.Client()
 	o.ReleaseURL = srv.URL
+	if o.VerifySums == nil {
+		o.VerifySums = acceptSums
+	}
 	if o.From != "" {
 		o.From = srv.URL + o.From
 	}
@@ -265,7 +272,7 @@ func TestSoloHTTPS(t *testing.T) {
 		t.Fatalf("una release por http también: %v", err)
 	}
 	// Solo la opción interna de los tests lo deja pasar.
-	o.allowHTTP = true
+	o.allowHTTP, o.VerifySums = true, acceptSums
 	if _, err := Install(context.Background(), o); err != nil {
 		t.Fatalf("con allowHTTP: %v", err)
 	}

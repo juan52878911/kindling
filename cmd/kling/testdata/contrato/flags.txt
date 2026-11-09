@@ -203,6 +203,7 @@ kling plugin ls:  -json
 kling plugins install:  -dir
 kling plugins install:  -file
 kling plugins install:  -from
+kling plugins install:  -insecure
 kling plugins install:  -sha256
 kling plugins rm:  -dir
 kling ps:  -H
