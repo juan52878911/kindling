@@ -82,6 +82,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
+- kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
 
 ## [1.0.0] - 2026-11-05
 

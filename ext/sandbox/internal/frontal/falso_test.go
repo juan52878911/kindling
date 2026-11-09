@@ -58,6 +58,9 @@ type falso struct {
 	creadas int
 	// renewFalla hace fallar POST /sandboxes/{ref}/renew con un 500.
 	renewFalla bool
+	// renewEmpezado, si no es nil, se cierra en el siguiente renew, que se
+	// queda sin contestar hasta que el frontal cancele la llamada.
+	renewEmpezado chan struct{}
 
 	// grafos por id, y el store (espacio -> clave -> valor).
 	grafos map[string]*api.Graph
@@ -232,6 +235,13 @@ func (f *falso) rutas() http.Handler {
 	m.HandleFunc("POST /sandboxes/{ref}/renew", func(w http.ResponseWriter, r *http.Request) {
 		var req api.RenewRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if f.renewEmpezado != nil {
+			// Avisa y no contesta hasta que el frontal se rinda.
+			close(f.renewEmpezado)
+			f.renewEmpezado = nil
+			<-r.Context().Done()
+			return
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.renewFalla {

@@ -819,8 +819,13 @@ func (s *Servidor) reclamarUna(ctx context.Context, h *hosts.Host, mc *api.Machi
 		// limpieza por abandono se la llevara. Se destruye; el pool la
 		// repone. No se le quitan las etiquetas: llevaría las del cliente
 		// a la siguiente que la reclamara.
+		// Sin la cancelación de la petición: si el fallo es que el cliente se
+		// fue, borrar con su contexto fallaba también y la máquina se quedaba
+		// a medio reclamar (como soltarGrafo).
 		s.log.Printf("frontal: claiming %s/%s: renew: %v; removing it", h.Nombre, mc.ID, err)
-		if rerr := h.Cliente.RemoveSandbox(ctx, mc.ID); rerr != nil {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), plazoDaemon)
+		defer rcancel()
+		if rerr := h.Cliente.RemoveSandbox(rctx, mc.ID); rerr != nil {
 			s.log.Printf("frontal: removing half-claimed %s/%s: %v", h.Nombre, mc.ID, rerr)
 		}
 		return nil, false

@@ -815,3 +815,37 @@ func TestReclamacionesALaVezNoCompartenPrecalentada(t *testing.T) {
 		t.Fatalf("the prewarmed machine was handed out %d times", suyas)
 	}
 }
+
+// Si el cliente se va en mitad de la reclamación, la precalentada etiquetada
+// se borra igual: con el contexto de la petición ya cancelado, el borrado no
+// salía y la máquina se quedaba a medio reclamar contando en la cuota.
+func TestReclamarConElClienteIdoBorraLaMediaReclamada(t *testing.T) {
+	f := nuevoFalso(t)
+	f.snapshots = []string{"sbx-node"}
+	pre := f.sembrar(&api.Machine{From: "sbx-node", Labels: map[string]string{LabelTemplate: "node"}})
+	empezado := make(chan struct{})
+	f.renewEmpezado = empezado
+	srv, _ := montar(t, map[string]*falso{"a": f})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := peticion(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Template: "node"}).WithContext(ctx)
+	go func() {
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-empezado:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the claim never reached renew")
+	}
+	cancel()
+	limite := time.Now().Add(3 * time.Second)
+	for f.existe(pre.ID) {
+		if time.Now().After(limite) {
+			t.Fatalf("the half-claimed machine is still there with labels %v", f.maquina(pre.ID).Labels)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
