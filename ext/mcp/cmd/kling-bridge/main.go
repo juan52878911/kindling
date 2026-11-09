@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -42,6 +43,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/panico"
 
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
@@ -483,6 +485,13 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 	// `initialize` abre sesión; el resto la exige. Es lo que permite al gateway
 	// enrutar cada conversación a la misma instancia.
 	s, created, err := b.resolve(sid, isInit)
+	if errors.Is(err, errSesionPerdida) {
+		// 404, no 400: es lo que pide Streamable HTTP para que el cliente
+		// rehaga el initialize. El texto se conserva («unknown or expired»)
+		// para los gateways viejos que miraban el cuerpo de un 400.
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -673,6 +682,9 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 // paraba todas las peticiones de todas las sesiones, el GET SSE y la cosecha.
 // Se reserva la plaza bajo candado (spawning), se lanza sin él, y se registra
 // al volver, igual que hace replenishWarm con el hijo caliente.
+// errSesionPerdida: la sesión que trae el cliente ya no existe en el puente.
+var errSesionPerdida = errors.New("unknown or expired")
+
 func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 	b.mu.Lock()
 	if sid != "" {
@@ -684,7 +696,7 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 		}
 		if !isInit {
 			b.mu.Unlock()
-			return nil, false, fmt.Errorf("session %q unknown or expired", sid)
+			return nil, false, fmt.Errorf("session %q %w", sid, errSesionPerdida)
 		}
 	}
 	if !isInit {
@@ -839,7 +851,8 @@ func (b *bridge) spawn() (*session, error) {
 // stdio en MCP es JSON delimitado por saltos de línea: un mensaje por línea.
 func (s *session) readLoop(stdout io.Reader) {
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64<<10), 16<<20) // respuestas grandes son normales
+	// Respuestas grandes son normales; el tope es el mismo que el del gateway.
+	sc.Buffer(make([]byte, 0, 64<<10), mcp.MaxToolResult)
 
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
