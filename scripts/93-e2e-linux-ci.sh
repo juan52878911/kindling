@@ -67,6 +67,14 @@ SOCKET_USER="${SUDO_USER:-root}"
 # Los constructores del daemon no corren como root (internal/daemon,
 # builders_sinroot): sin este usuario, `image toolchain` se niega.
 id kindling-build >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kindling-build
+# El usuario sin privilegios del jailer (lo que pide `kling up`): sin él, con
+# el jailer instalado, el daemon se niega a arrancar máquinas (internal/machine,
+# decidirJailer) en vez de correr Firecracker como root.
+if ! id kindling >/dev/null 2>&1; then
+  getent group kvm >/dev/null || groupadd --system kvm
+  useradd --system --no-create-home --shell /usr/sbin/nologin -G kvm kindling
+fi
+id -nG kindling | tr ' ' '\n' | grep -qx kvm || usermod -aG kvm kindling
 
 failed=""
 parte() { echo "$PARTS" | tr ' ' '\n' | grep -qx "$1"; }
