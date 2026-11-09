@@ -53,6 +53,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `-egress allowlist` filters by IP, so a domain on a CDN or shared hosting also reaches other sites on the same addresses. `kling run`, `sandbox` and `try` now warn (and the daemon logs it) when an `-allow` domain is a public or multi-tenant suffix such as `github.io` or `amazonaws.com`, or sits under one; nothing is blocked. SECURITY.md documents the limit and its mitigations; `docs/egress-sni.md` sketches an optional SNI-filtering mode (design only).
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
