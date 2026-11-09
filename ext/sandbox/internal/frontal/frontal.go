@@ -53,6 +53,10 @@ const (
 	LabelTenant = "tenant"
 	// LabelTemplate es la plantilla de la que nació el sandbox.
 	LabelTemplate = "template"
+	// LabelReclamo es el nonce de la reclamación en curso de una precalentada
+	// (ver reclamarUna). Va en el espacio reservado: un cliente no la pone ni
+	// la ve.
+	LabelReclamo = "kling.sandbox.claim"
 )
 
 // Tenant es un token con nombre y sus límites.
@@ -115,6 +119,9 @@ type Servidor struct {
 	// reclamos son las precalentadas que se están reclamando o se reclamaron
 	// hace poco (ver reclamarPrecalentada); también bajo mu.
 	reclamos map[string]reclamo
+	// esperaReclamo es la pausa entre las dos fases de una reclamación (0:
+	// esperaReclamo del paquete). Solo la cambian los tests.
+	esperaReclamo time.Duration
 
 	// shells cuenta las sesiones de shell abiertas por tenant AHORA MISMO. Sirve
 	// dos propósitos con el mismo número: la cuota de Tenant.MaxShells y la
