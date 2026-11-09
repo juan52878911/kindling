@@ -1854,12 +1854,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 		var l *sync.Mutex
 		switch {
 		case e.aislada != "":
-			l = g.aisladaLock(e.aislada)
+			if l = g.probarAislada(e.aislada); l == nil {
+				continue
+			}
 		case g.services[v.service] == e:
-			l = g.ensureLock(v.service)
-		}
-		if l != nil && !l.TryLock() {
-			continue
+			if l = g.ensureLock(v.service); !l.TryLock() {
+				continue
+			}
 		}
 		if g.adquiriendo == nil {
 			g.adquiriendo = map[string]bool{}
@@ -2106,13 +2107,15 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
 		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
 		// de SU servicio, y un Lock aquí podría cruzarse con él.
-		vlock := g.ensureLock(elegido)
+		var vlock *sync.Mutex
 		if victima != nil && victima.aislada != "" {
 			// La de una sesión aislada se despierta bajo SU candado, no el
 			// del servicio (ver isolatedSession).
-			vlock = g.aisladaLock(victima.aislada)
+			vlock = g.probarAislada(victima.aislada)
+		} else if l := g.ensureLock(elegido); l.TryLock() {
+			vlock = l
 		}
-		if !vlock.TryLock() {
+		if vlock == nil {
 			devolver()
 			continue // esa esta ocupada; se prueba otra
 		}

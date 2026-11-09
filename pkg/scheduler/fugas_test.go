@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -272,6 +273,58 @@ func TestElLatidoVaAntesDeDormir(t *testing.T) {
 	if d.visto("POST /machines/m-viva/renew") != 1 {
 		t.Errorf("la viva se renovó %d veces; quería 1", d.visto("POST /machines/m-viva/renew"))
 	}
+}
+
+// El barrido poda los candados libres de claves sin sesión, pero uno libre
+// puede tenerlo ya en la mano quien va a tomarlo: si lo toma después de la
+// poda, el siguiente crea otro y hay dos dueños de la misma clave a la vez.
+// Se fuerza la intercalación con muchas vueltas de los dos lados.
+func TestPodarCandadosNoRompeLaExclusion(t *testing.T) {
+	g := &Scheduler{}
+	var dentro, choques atomic.Int32
+	fin := make(chan struct{})
+	podado := make(chan struct{})
+	go func() {
+		defer close(podado)
+		for {
+			select {
+			case <-fin:
+				return
+			default:
+			}
+			g.mu.Lock()
+			g.podarCandadosLocked()
+			g.mu.Unlock()
+		}
+	}()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				l := g.bloquearAislada("k")
+				if dentro.Add(1) > 1 {
+					choques.Add(1)
+				}
+				runtime.Gosched()
+				dentro.Add(-1)
+				l.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	close(fin)
+	<-podado
+	if n := choques.Load(); n > 0 {
+		t.Fatalf("%d veces hubo dos dueños del candado de la misma sesión", n)
+	}
+	// Y probarAislada respeta al dueño del candado vigente.
+	l := g.bloquearAislada("k")
+	if g.probarAislada("k") != nil {
+		t.Error("probarAislada tomó un candado que ya tenía otro")
+	}
+	l.Unlock()
 }
 
 // Una máquina despierta cuya herramienta no llega a escuchar no se queda viva
