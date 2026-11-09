@@ -71,6 +71,23 @@ func (m *Manager) resolverEnlace(origen, gid, desde, hacia string, port int) cre
 	}
 }
 
+// destinoEnlaceVigente es el Recheck del proxy de una arista link al puerto
+// port: lo marcado tiene que seguir siendo el destino, la misma máquina, en
+// marcha y con la misma dirección para ese puerto. Lo mismo que mira
+// abrirDestinoBroker en macOS tras marcar.
+func (m *Manager) destinoEnlaceVigente(port int) func(addr, id string) error {
+	return func(addr, id string) error {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		if dest := m.byID[id]; dest != nil && dest.State == api.StateRunning {
+			if a, err := direccionCopiaLocked(dest, port); err == nil && a == addr {
+				return nil
+			}
+		}
+		return fmt.Errorf("machine %s changed while connecting to it", shortID(id))
+	}
+}
+
 // aristaVirtual dice si id (el UpstreamMachine de una credencial de la
 // máquina agente, con dueño owner) es el ID de un nodo del grafo del agente,
 // y de cuál: el grafo, el nodo del agente y el destino.
