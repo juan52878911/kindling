@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -37,6 +38,16 @@ func splitDomains(s string) []string {
 		}
 	}
 	return out
+}
+
+// avisarAllow escribe en w un aviso por cada dominio de -allow que sea un
+// sufijo público o multiinquilino (internal/net/multiinquilino.go): la
+// allowlist filtra por IP y ahí abre la puerta a sitios de terceros. Solo
+// avisa; el daemon lo repite en su log.
+func avisarAllow(w io.Writer, domains []string) {
+	for _, a := range knet.AvisosAllowMultiinquilino(domains) {
+		fmt.Fprintf(w, "warning: %s\n", a)
+	}
 }
 
 // ── kling version ─────────────────────────────────────────────────────────────

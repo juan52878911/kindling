@@ -1691,6 +1691,25 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   ipset y las reglas son solo IPv4, y el invitado no puede usar IPv6 porque
   `applyIPv6Barrier` lo apaga en su namespace antes de que el resolver entre en juego;
   un servicio solo accesible por IPv6 no se alcanza en `allowlist`.
+- **`allowlist` filtra por IP, no por nombre: un CDN o un hosting compartido abre a sus
+  otros inquilinos.** El resolver siembra en el ipset (en macOS, en el conjunto de
+  `vz/internal/egress`) las IPs que resuelve un dominio permitido, y desde ahí cualquier
+  conexión a esas IPs sale, diga lo que diga su SNI o su `Host`. Si el dominio lo sirve
+  Cloudflare, CloudFront, Fastly, GitHub Pages o S3, esas direcciones atienden también
+  a sitios de terceros, y un invitado hostil puede hablar con uno suyo alojado en la
+  misma infraestructura, con TLS válido. Peor aún si se permite el propio sufijo
+  (`github.io`, `amazonaws.com`, `herokuapp.com`): la regla de subdominios deja entrar
+  a cualquier inquilino. `kling run`, `sandbox` y `try` avisan (y el daemon lo apunta en
+  su log al montar la red) cuando un dominio de `-allow` es un sufijo público o
+  multiinquilino o cuelga de uno (`internal/net/multiinquilino.go`, una lista corta y
+  no exhaustiva); no bloquean, y un dominio propio detrás de un CDN no avisa porque eso
+  solo se ve resolviendo. Hoy se mitiga así: para una API con clave, una credencial
+  (`kling machine credential`) en vez de `-allow`, porque el dominio resuelve a la IP
+  del proxy, la real nunca entra en el ipset y el proxy rechaza cualquier otro `Host`;
+  para el resto, `-egress none` y un proxy de salida propio (alcanzable por una arista
+  o un puerto publicado) que filtre por nombre. El diseño de un modo L7 opcional que
+  cierre esto sin MITM (proxy SNI passthrough) está en
+  [`docs/egress-sni.md`](docs/egress-sni.md); no está implementado.
 - **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
   silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
   este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del

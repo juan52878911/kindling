@@ -43,6 +43,14 @@ func (m *Manager) montarRed(n *knet.Net, id string, egress knet.Egress, domains 
 	// La reserva del índice (asignarRed, redParaRehacer) se suelta al acabar:
 	// desde ahí la ocupa la dirección del veth (ver internal/net/subredes.go).
 	defer n.SoltarReserva()
+	// Aquí pasan run, sandbox, fork, grafos y start, con los dos VMM: un -allow
+	// con un sufijo multiinquilino deja constancia en el log aunque la petición
+	// no viniera de la CLI (internal/net/multiinquilino.go).
+	if egress == knet.EgressAllowlist {
+		for _, a := range knet.AvisosAllowMultiinquilino(domains) {
+			log.Printf("warning: machine %s: %s", id, a)
+		}
+	}
 	uid := 0
 	if m.priv != nil {
 		uid = m.priv.UID

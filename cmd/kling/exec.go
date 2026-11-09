@@ -341,6 +341,7 @@ func sandboxCreate(args []string) error {
 	req := api.SandboxRequest{Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
 		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(allow.String()),
 		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes), Shares: shareSpecs, WaitReady: *waitReady}
+	avisarAllow(os.Stderr, req.AllowDomains)
 	mc, err := client.CreateSandbox(ctx, req)
 	if err != nil {
 		return err
