@@ -299,9 +299,24 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Las microVMs de verdad (Firecracker con KVM) sobre el commit de la
+  # etiqueta: 90-e2e.sh con kling db y carpetas vivas, el congelado
+  # diferencial y `kling upgrade` de la release anterior a esta (94). Es
+  # e2e-linux.yml entero (unos 5 min con el kernel en la caché que llena el
+  # nocturno); con require_kvm, un runner sin /dev/kvm falla en vez de avisar.
+  # Lo del Mac (92 y 95 con kling-hv) lo exige scripts/release.sh antes de
+  # crear la etiqueta (docs/releases.md, paso 3c).
+  e2e:
+    name: e2e Linux
+    needs: [test, lint]
+    uses: ./.github/workflows/e2e-linux.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+      require_kvm: true
+
   release:
     name: release
-    needs: [build, vz, imagenes]
+    needs: [build, vz, imagenes, e2e]
     runs-on: ubuntu-latest
     # El único job que escribe en el repo: crea la release y sube los assets.
     # Corre en el environment protegido `release`, el único con el secreto
