@@ -433,7 +433,7 @@ func (f *Fuente) comprobarFirma(ctx context.Context, etiqueta string, sumas []by
 // FirmaObligatoriaDesde (la release o este kling) salvo Insecure (-insecure), y si no,
 // aviso.
 func VerificadorDeSumas(claves []ClavePublica) plugin.SumsVerifier {
-	return func(c plugin.SumsCheck) error {
+	return plugin.SumsVerifierFunc(func(c plugin.SumsCheck) error {
 		ks := claves
 		if ks == nil {
 			ks = ClavesRelease()
@@ -468,7 +468,7 @@ func VerificadorDeSumas(claves []ClavePublica) plugin.SumsVerifier {
 			}
 		}
 		return nil
-	}
+	})
 }
 
 // firmaObligatoria: la release o este kling llegan a FirmaObligatoriaDesde.

@@ -167,8 +167,17 @@ type SumsCheck struct {
 // SumsVerifier decide si un SHA256SUMS se acepta según su firma. Es el de
 // internal/upgrade (la misma regla que `kling upgrade`), que este paquete no
 // puede importar porque lo usan las extensiones: el núcleo lo pone en
-// DefaultSumsVerifier.
-type SumsVerifier func(SumsCheck) error
+// DefaultSumsVerifier. Es una interfaz y no un func para que InstallOptions
+// siga siendo comparable (apidiff).
+type SumsVerifier interface {
+	Verify(SumsCheck) error
+}
+
+// SumsVerifierFunc hace de una función un SumsVerifier.
+type SumsVerifierFunc func(SumsCheck) error
+
+// Verify llama a f.
+func (f SumsVerifierFunc) Verify(c SumsCheck) error { return f(c) }
 
 // DefaultSumsVerifier es el SumsVerifier de Install cuando las opciones no
 // traen uno. nil = sin forma de comprobar firmas: lo de fuera se rechaza
@@ -496,7 +505,7 @@ func (s *source) checkSig(ctx context.Context, sums []byte) error {
 		}
 		return fmt.Errorf("%s: this build of kling cannot check %s, refusing it", where, SigName)
 	}
-	return v(SumsCheck{Sums: sums, Sig: sig, Tag: s.tag, CoreVersion: s.o.CoreVersion,
+	return v.Verify(SumsCheck{Sums: sums, Sig: sig, Tag: s.tag, CoreVersion: s.o.CoreVersion,
 		Where: where, Insecure: s.o.Insecure, Warn: warn})
 }
 

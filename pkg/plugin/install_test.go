@@ -99,7 +99,7 @@ func install(t *testing.T, rel *release, o InstallOptions) (*Installed, string, 
 	o.Client = srv.Client()
 	o.ReleaseURL = srv.URL
 	if o.VerifySums == nil {
-		o.VerifySums = acceptSums
+		o.VerifySums = SumsVerifierFunc(acceptSums)
 	}
 	if o.From != "" {
 		o.From = srv.URL + o.From
@@ -272,7 +272,7 @@ func TestSoloHTTPS(t *testing.T) {
 		t.Fatalf("una release por http también: %v", err)
 	}
 	// Solo la opción interna de los tests lo deja pasar.
-	o.allowHTTP, o.VerifySums = true, acceptSums
+	o.allowHTTP, o.VerifySums = true, SumsVerifierFunc(acceptSums)
 	if _, err := Install(context.Background(), o); err != nil {
 		t.Fatalf("con allowHTTP: %v", err)
 	}
