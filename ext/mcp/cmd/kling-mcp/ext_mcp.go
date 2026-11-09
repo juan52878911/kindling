@@ -238,8 +238,8 @@ var mcpCommands = []plugin.Command{
                                                    Claude Code, opencode, Cursor,
                                                    VS Code, Windsurf, Cline and Zed
   connect ... -install <client>                    just that one
-  connect ... -token T                             uses that token instead of
-                                                   gateway.token
+  connect ... -token-file F                        reads the token from F instead of
+                                                   $KLING_GATEWAY_TOKEN or gateway.token
 `,
 	},
 }

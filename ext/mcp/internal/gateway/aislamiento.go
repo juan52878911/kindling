@@ -105,7 +105,7 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 	guestSID := rec.Header().Get(SessionHeader)
 	ext := ""
 	if guestSID != "" && rec.Code < 400 {
-		if err := g.BindGuest(key, guestSID, service, e); err != nil {
+		if err := g.fijarSesion(key, guestSID, service, e, tnt.Name()); err != nil {
 			g.ReleaseIsolated(ctx, key)
 			api.HTTPError(w, fmt.Sprintf("could not register the session for %q: %v", service, err),
 				http.StatusInternalServerError)

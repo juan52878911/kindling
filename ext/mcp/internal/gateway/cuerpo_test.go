@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,12 +10,12 @@ import (
 )
 
 // Un invitado que responde sin fin no hace que el gateway lo guarde entero:
-// pasado maxProxyBody la llamada falla (antes se leía todo a memoria).
+// pasado mcp.MaxToolResult la llamada falla (antes se leía todo a memoria).
 func TestMcpCallAtConTope(t *testing.T) {
 	trozo := []byte(strings.Repeat("x", 64<<10))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		for i := 0; i < (maxProxyBody/len(trozo))+4; i++ {
+		for i := 0; i < (mcp.MaxToolResult/len(trozo))+4; i++ {
 			if _, err := w.Write(trozo); err != nil {
 				return
 			}

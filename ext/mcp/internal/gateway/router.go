@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // RouterHost es un daemon con nombre, tal como lo declaran -hosts o mcp.hosts.
@@ -144,7 +145,7 @@ func (r *Router) Reap(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.agg.reap(idle * 4)
+			r.agg.reap(ctx, idle*4)
 			r.olvidarFijadas(idle * 4)
 		}
 	}
@@ -356,7 +357,8 @@ type routerAgg struct {
 }
 
 type routerSession struct {
-	mode mode
+	mode   mode
+	tenant string // quien la abrió: solo él la usa o la cierra
 	// perHost: nombre de host -> sesión sombra abierta contra el *aggregator
 	// de ese host. Se crea la primera vez que la conversación necesita hablar
 	// con ese host, y se reutiliza después para que backing (la sesión MCP de
@@ -371,7 +373,7 @@ func newRouterAgg(r *Router) *routerAgg {
 
 func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodDelete {
-		ra.drop(req.Header.Get(SessionHeader))
+		ra.drop(req.Context(), req.Header.Get(SessionHeader), scheduler.TenantFrom(req.Context()).Name())
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -394,11 +396,20 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	ctx := req.Context()
+	notificacion := len(rpc.ID) == 0 || string(rpc.ID) == "null"
+	if notificacion && req.Header.Get(SessionHeader) == "" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	s, sid, created := ra.session(req)
+	if s == nil {
+		api.HTTPError(w, errSesionDesconocida.Error(), http.StatusNotFound)
+		return
+	}
 	if created {
 		w.Header().Set(SessionHeader, sid)
 	}
-	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
+	if notificacion {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -412,44 +423,80 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 }
 
 func (ra *routerAgg) session(req *http.Request) (*routerSession, string, bool) {
+	tenant := scheduler.TenantFrom(req.Context()).Name()
 	if sid := req.Header.Get(SessionHeader); sid != "" {
 		ra.mu.Lock()
 		s, ok := ra.sessions[sid]
+		ok = ok && s.tenant == tenant
 		if ok {
 			s.lastUse = time.Now()
 		}
 		ra.mu.Unlock()
-		if ok {
-			return s, sid, false
+		if !ok {
+			// Lo mismo que en un solo host (ver aggregator.session): 404.
+			return nil, "", false
 		}
+		return s, sid, false
 	}
 	m := modeProxy
 	if mode(req.URL.Query().Get("mode")) == modeExpand {
 		m = modeExpand
 	}
 	sid := newSessionID()
-	s := &routerSession{mode: m, perHost: map[string]*aggSession{}, lastUse: time.Now()}
+	s := &routerSession{mode: m, tenant: tenant, perHost: map[string]*aggSession{}, lastUse: time.Now()}
 	ra.mu.Lock()
 	ra.sessions[sid] = s
 	ra.mu.Unlock()
 	return s, sid, true
 }
 
-func (ra *routerAgg) drop(sid string) {
+func (ra *routerAgg) drop(ctx context.Context, sid, tenant string) {
 	if sid == "" {
 		return
 	}
 	ra.mu.Lock()
-	defer ra.mu.Unlock()
-	delete(ra.sessions, sid)
+	s := ra.sessions[sid]
+	if s != nil && s.tenant != tenant {
+		s = nil
+	}
+	if s != nil {
+		delete(ra.sessions, sid)
+	}
+	ra.mu.Unlock()
+	if s != nil {
+		ra.soltarAisladas(ctx, s)
+	}
 }
 
-func (ra *routerAgg) reap(idle time.Duration) {
+func (ra *routerAgg) reap(ctx context.Context, idle time.Duration) {
+	var muertas []*routerSession
 	ra.mu.Lock()
-	defer ra.mu.Unlock()
 	for id, s := range ra.sessions {
 		if time.Since(s.lastUse) > idle {
 			delete(ra.sessions, id)
+			muertas = append(muertas, s)
+		}
+	}
+	ra.mu.Unlock()
+	for _, s := range muertas {
+		ra.soltarAisladas(ctx, s)
+	}
+}
+
+// soltarAisladas destruye las microVMs aisladas que la conversación abrió en
+// cada host. forward las crea con la clave de la sesión sombra de ese host, y
+// sin esto ni el DELETE ni el segador del router las tocaban: quedaban vivas
+// hasta el SessionTTL del daemon. Se llama fuera de ra.mu: habla con daemons.
+func (ra *routerAgg) soltarAisladas(ctx context.Context, s *routerSession) {
+	ra.mu.Lock()
+	subs := make(map[string]*aggSession, len(s.perHost))
+	for name, sub := range s.perHost {
+		subs[name] = sub
+	}
+	ra.mu.Unlock()
+	for name, sub := range subs {
+		if h := ra.r.hostByName(name); h != nil {
+			h.GW.agg.soltarAisladas(ctx, sub)
 		}
 	}
 }
@@ -725,7 +772,7 @@ func (ra *routerAgg) subSession(s *routerSession, h *RouterHost, service string)
 	sub, ok := s.perHost[h.Name]
 	if !ok {
 		sub = &aggSession{
-			id: newSessionID(), mode: modeProxy,
+			id: newSessionID(), tenant: s.tenant, mode: modeProxy,
 			backing: map[string]string{}, lastUse: time.Now(),
 		}
 		s.perHost[h.Name] = sub
