@@ -2611,8 +2611,13 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		// pudo llegar al VMM aunque la respuesta no (un ctx cortado): sin
 		// reanudar, se quedaba pausada figurando como running, como tras un
 		// volcado fallido. Una pausa que no llegó no tiene nada que reanudar,
-		// así que ese fallo solo se apunta.
-		_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		// así que ese fallo solo se apunta. La marca se retira solo si no hay
+		// volcado que proteger: el que hubiera (el del último thaw, que se
+		// queda para medir el diferencial) no describe este disco, y sin marca
+		// ni sello pasaría por anterior a los sellos.
+		if !existe(filepath.Join(dir, "snap.file")) && !existe(filepath.Join(dir, "mem.file")) {
+			_ = os.Remove(filepath.Join(dir, marcaEnCurso))
+		}
 		if rerr := c.Resume(ctx); rerr != nil {
 			log.Printf("freeze %s: resume after a failed pause: %v", mc.Name, rerr)
 		}
@@ -3709,10 +3714,28 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return abortar(err)
 	}
 	crono.marca(&crono.p.NetMS)
+	// El volcado deja de valer ANTES de cargarlo: en cuanto el invitado
+	// reanude, escribe en su disco. Antes se retiraba después y un fallo solo
+	// se avisaba: con el disco lleno el sello se borraba sin dejar la marca, y
+	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
+	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
+	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
+	if err := retirarSello(dir); err != nil {
+		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
+	}
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
 	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshotTracking(ctx, snapPath, memPath, true, base != ""); err != nil {
+		// Si el VMM contestó con un error, no cargó: el invitado no corrió y el
+		// volcado sigue describiendo su disco, así que recupera su sello. Sin
+		// respuesta (un plazo, el socket cortado) no se sabe si reanudó y se
+		// queda sin sello: falla cerrado.
+		if errorDelVMM(err) {
+			if rerr := restaurarSello(dir); rerr != nil {
+				log.Printf("warning: thaw: %s: couldn't restore the seal of its memory dump after a failed load: %v", mc.Name, rerr)
+			}
+		}
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
@@ -3721,15 +3744,6 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
-	// Reanudado: el volcado ya no describe su disco. Se retira el sello antes
-	// de nada más, y no tras persistir el running: si el daemon muere con su
-	// VMM entre medias, state.json aún dice warm (o running, y reconcile la
-	// pasa a warm si el sello sigue) y el siguiente thaw cargaría aquella
-	// memoria sobre el disco ya escrito. Sin sello, falla cerrado. Si no se
-	// puede retirar, abortar no lo arreglaría (el invitado ya corrió): se avisa.
-	if err := retirarSello(dir); err != nil {
-		log.Printf("warning: thaw: %s: couldn't retire the seal of the memory dump it was thawed from: %v", mc.Name, err)
-	}
 	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
