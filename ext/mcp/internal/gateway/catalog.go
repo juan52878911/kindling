@@ -94,6 +94,9 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 			continue
 		}
 		n := s.Service()
+		if !servicioAgregable(n) {
+			continue
+		}
 		if !seen[n] {
 			seen[n] = true
 			out = append(out, n)
@@ -105,7 +108,7 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	// cuáles son VMs y cuáles no; sin esa pista, el modelo llama a engram.*
 	// esperando una microVM que no existe.
 	for _, l := range c.gw.links(ctx) {
-		if n := l.Service(); !seen[n] {
+		if n := l.Service(); servicioAgregable(n) && !seen[n] {
 			seen[n] = true
 			out = append(out, n)
 		}
@@ -113,6 +116,24 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+// servicioAgregable dice si el servicio cabe en /mcp/_all: allí una
+// herramienta es servicio.herramienta y se parte por el primer punto, así que
+// un servicio con punto (importado antes de validarlo, o con la etiqueta
+// service puesta a mano) se confundiría con otro: "a" con la herramienta "b.c"
+// pasaría por la c de "a.b". Se deja fuera, avisando una vez; su ruta propia
+// /mcp/<servicio> sigue igual.
+func servicioAgregable(n string) bool {
+	if mcp.ValidServiceName(n) == nil {
+		return true
+	}
+	if _, ya := avisadoNoAgregable.LoadOrStore(n, true); !ya {
+		log.Printf("service %q left out of /mcp/_all: %v", n, mcp.ValidServiceName(n))
+	}
+	return false
+}
+
+var avisadoNoAgregable sync.Map
 
 // esServicioMCP dice si un snapshot es un servicio MCP: importado con la
 // etiqueta service y que no sea un modelo de IA (von.*, chispa.task), que

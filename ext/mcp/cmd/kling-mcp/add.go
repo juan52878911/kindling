@@ -287,6 +287,10 @@ func addOne(ctx context.Context, rc *registry.Client, host, want string, o addOp
 	if service == "" {
 		service = serviceName(srv.Name)
 	}
+	// Antes de construir nada: import lo rechazaría después de la imagen.
+	if err := mcp.ValidServiceName(service); err != nil {
+		return err
+	}
 
 	// El comando dado a mano gana sobre el inferido, y ni siquiera se consulta a
 	// PyPI: es la salida para los paquetes que no traen ejecutable.
