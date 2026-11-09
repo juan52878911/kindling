@@ -406,10 +406,15 @@ func (m *Manager) liveSource(src string, roots []string) (string, error) {
 	if !fi.IsDir() {
 		return "", fmt.Errorf("share source %s is not a directory", src)
 	}
-	// Nada que contenga la raíz de datos de kindling: ahí están los volúmenes,
-	// los snapshots y las máquinas de todos.
-	if dataRoot, err := filepath.EvalSymlinks(m.root); err == nil && within(dataRoot, real) {
-		return "", fmt.Errorf("%s contains kindling's data root (%s) and cannot be shared", src, m.root)
+	// Nada que contenga la raíz de datos de kindling ni esté dentro de ella:
+	// ahí están los volúmenes, los snapshots y las máquinas de todos.
+	if dataRoot, err := filepath.EvalSymlinks(m.root); err == nil {
+		if within(dataRoot, real) {
+			return "", fmt.Errorf("%s contains kindling's data root (%s) and cannot be shared", src, m.root)
+		}
+		if within(real, dataRoot) {
+			return "", fmt.Errorf("%s is inside kindling's data root (%s) and cannot be shared", src, m.root)
+		}
 	}
 	for _, r := range roots {
 		rr, err := filepath.EvalSymlinks(r)
