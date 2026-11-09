@@ -131,6 +131,9 @@ type watcher struct {
 	timer     *time.Timer
 	// resync: se perdieron eventos; el próximo flush lo repasa todo.
 	resync bool
+	// polling: vigila por sondeo (pollBackend); el repaso es lo normal y no
+	// se avisa de eventos perdidos.
+	polling bool
 }
 
 // newWatcher arranca la vigilancia de s para una sesión. push manda una trama
@@ -146,6 +149,7 @@ func newWatcher(s *Server, push func([]byte)) (*watcher, error) {
 		return nil, err
 	}
 	w.be = be
+	_, w.polling = be.(*pollBackend)
 	return w, nil
 }
 
@@ -386,7 +390,7 @@ func (w *watcher) flush() {
 // solo avisa de lo que difiera), los ficheros si su huella no es la de antes, y
 // lo que ya no existe como borrado.
 func (w *watcher) resyncLocked(pend map[string]rawEvent) {
-	if overflowLogged.CompareAndSwap(false, true) {
+	if !w.polling && overflowLogged.CompareAndSwap(false, true) {
 		log.Printf("share %s: the host lost change events; rescanning the %d watched paths (logged once)", w.srv.dir, len(w.entries))
 	}
 	for r, e := range w.entries {

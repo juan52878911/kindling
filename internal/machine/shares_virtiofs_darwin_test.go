@@ -131,6 +131,8 @@ func TestAttachNegociaTransporte(t *testing.T) {
 			mc := &api.Machine{ID: "m1", Name: "m1", PID: 1, State: api.StateRunning,
 				Forwards: map[string]string{strconv.Itoa(api.GuestPort): strings.TrimPrefix(ts.URL, "http://")}}
 			s := api.ShareAttachment{Source: t.TempDir(), Mount: "/w", Mode: share.ModeRW, Transport: c.transporte}
+			// attachOnce revalida la carpeta contra share_roots.
+			m.SetShareConfig(func() ShareConfig { return ShareConfig{Roots: []string{s.Source}} })
 			tg := &shareTag{tag: 2, status: "detached", first: make(chan struct{})}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()

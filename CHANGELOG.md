@@ -36,6 +36,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
 - Linux: network setup refuses a `kl-<id>` netns whose veth has another address (another daemon's machine with the same id prefix) instead of tearing it down.
+- Live shares: a directory inside kindling's data root (e.g. `<root>/volumes`) can't be shared even when `daemon.share_roots` covers its parent.
+- Live shares: every attach, thaw or daemon restart checks that the directory it opens has the device/inode that was validated; a share swapped for a symlink (`mv proj proj.old; ln -s /etc proj`) is refused instead of served.
 - Linux allowlist DNS: queries go upstream with a TXID drawn from `crypto/rand` instead of the one the guest chose, and the answer must carry it; the guest gets its own TXID back. A guest knowing the TXID only had to guess the port to plant a spoofed answer that seeds the ipset.
 - Linux allowlist: the per-machine ipset has `maxelem 8192`, at most 16 A records per DNS answer are seeded, seeded TTLs are capped at 3600 s, and a full set (or any other error the kernel answers over netlink) no longer falls back to forking `ipset` on every query; only a missing netlink path does.
 - Linux: in `internet` and `allowlist` egress, new packets from a machine are capped at 300/s per destination IP (`hashlimit`, burst 300; needs the `xt_hashlimit` module), so a guest can't flood an allowed IP through the host; a one-way UDP flood counts as new packets. The Firecracker network rate limiter also caps frames per second (`ops`: the bandwidth over 512 bytes, at least 8192; 32768/s at the default 16 MiB/s), so small packets can't reach hundreds of thousands per second within the byte budget.
@@ -63,6 +65,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Scheduler: a failed TTL renewal is no longer taken as done; the reaper retries it on its next pass and drops the instance when the daemon rejects it (404/409), and a running machine whose renewal is rejected is not adopted.
 - `exec ?wait=1` caps each stream at 8 MiB (`api.ExecWaitMaxOutput`) and marks the result `truncated`; the NDJSON stream still allows 64 MiB.
 - Run, sandbox, fork and `PUT /machines/{ref}/labels` reject more than 64 labels or 4 KiB of labels, and run and sandbox more than 256 `allow_domains`, with a 400.
+- Live shares: a `setattr` with times racing a `release` of the same handle can no longer set the times of another file that reused the descriptor.
+- Linux: live shares use at most half of `fs.inotify.max_user_instances` (a per-uid limit) daemon-wide; sessions beyond it watch host changes by polling every 2 s instead of starving other processes of inotify.
+- Live shares: a read reply is built in one buffer (1 MiB read: 3.2 → 1.06 MB allocated, ~4.5 → ~10 GB/s in `BenchmarkLectura` on an M4).
 
 ### Fixed
 
