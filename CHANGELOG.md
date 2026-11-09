@@ -19,6 +19,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db up` with no template uses `pg` and builds it from `postgres:16-alpine` the first time (`-from-oci REF` for a named template that is missing); `-json` prints what is needed to connect (password only with `-dsn`), `-dsn` prints the URL. On an M4, zero to the first query in one command and 14.9 s, download included; then ~0.1 s per copy.
 - `kling db sql <copy> "SQL" [-json]`: SQL from the host without psql, as the app role or `-role`; JSON gives columns, rows (NULL as null) and command tags.
 - `kling try -image` takes a Docker reference (imported the first time, like `run -image`), and `kling try -json` prints one object with `exit_code`, `stdout`, `stderr`, `ready_ms` and `duration_ms`.
+- `-json` on `save`, `freeze`, `thaw`, `pause`, `stop`, `rm`, `start`, `cp` and `machine squeeze|resize|secret|credential`: they print what they left, one line per ref. With `-json` an error is one `{"error","code","try"}` line on stderr. The conventions (stdout/stderr, keys, codes, flags) are in `docs/guide.md#cli-conventions-output-json-flags`.
+- `kling doctor` checks the daemon's socket and its free disk against the admission minimum; `/info` reports `disk_free_bytes` (admin view).
+- Hints from the daemon's error codes: `disk_full` and `insufficient_memory` say what to do; a missing kernel points to `kling up -check`, an invalid name gives the naming rules, and `kling db` without the extension says what to install.
 
 ### Changed
 
@@ -28,6 +31,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+- `kling doctor -json` lists each `kling up -check` check in `checks[]` (`runtime <check>`) instead of its text in `runtime_report`, which is gone.
+- `kling ps` prints its disk footer and machine warnings on stderr, as do `kling save`'s progress lines and `kling context ls`'s notes; check marks follow `NO_COLOR` everywhere, and `kling top -watch` only clears the screen on a terminal without `NO_COLOR`.
+- `kling plugin ls -json` gains `state` (`ok`, `disabled`, `error`); `status` stays for 1.x scripts.
 - Linux: `-egress allowlist` boots faster. Seed domains resolve in parallel within 500 ms in total, the rules go in one `iptables-restore`, and the DNS resolver adds IPs to the ipset over netlink instead of forking `ip netns exec ipset` per IP. Measured on the lab (CT 108, `kling run` of node22): 5 domains 485-501 → 148-151 ms, 1 domain 196 → 143-150 ms, one domain whose DNS never answers 6.4 s → 0.59 s.
 
 ### Security
@@ -43,6 +49,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- A bad flag is a usage error (exit 2, `error:` and `try: kling help <cmd>`) instead of the flag package's raw usage; unknown subcommands exit 2 instead of 1, and `ps`, `top`, `events`, `topo`, `version`, `status` and `doctor` refuse extra arguments.
+- `kling save` with no daemon reports the connection error instead of a guest that is not serving.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
 - A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.
