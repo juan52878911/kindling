@@ -1359,10 +1359,20 @@ func (g *Scheduler) ttlSeconds() int {
 func (g *Scheduler) renovarTTL(ctx context.Context, id string) error {
 	// Sin TTL (MachineTTL negativo) no hay reloj que renovar: renovar con 0
 	// solo le costaría al daemon una llamada por instancia en cada vuelta.
-	if g.client == nil || g.ttlSeconds() == 0 || !g.sabeRenovar(ctx) {
+	if g.client == nil || g.ttlSeconds() == 0 {
 		return nil
 	}
-	_, err := g.client.Renew(ctx, id, g.ttlSeconds())
+	// Si el daemon no contesta ni a /info, la renovación tampoco se hizo: es
+	// un fallo como cualquier otro (a g.sinRenovar), no un "no hay nada que
+	// renovar". Tratarlo como lo segundo dejaba sin latido a la instancia
+	// hasta que tocara por umbral, y al adoptarla, sin renovar.
+	sabe, err := g.sabeRenovar(ctx)
+	if err == nil && !sabe {
+		return nil
+	}
+	if err == nil {
+		_, err = g.client.Renew(ctx, id, g.ttlSeconds())
+	}
 	g.mu.Lock()
 	if err != nil {
 		if g.sinRenovar == nil {
@@ -1410,7 +1420,12 @@ func renovacionRechazada(err error) bool {
 // sin la capacidad "renew" no hace nada, como renovarTTL.
 func (g *Scheduler) mantenerTTL(ctx context.Context, id string) (release func()) {
 	nada := func() {}
-	if g.client == nil || !g.sabeRenovar(ctx) {
+	if g.client == nil {
+		return nada
+	}
+	// Sin saber si renueva (/info falló) se intenta igual: un daemon sin la
+	// capacidad contesta 404 y se queda en nada, como si se supiera.
+	if sabe, err := g.sabeRenovar(ctx); err == nil && !sabe {
 		return nada
 	}
 	mc, err := g.client.Renew(ctx, id, 0)
@@ -1456,26 +1471,27 @@ func (g *Scheduler) mantenerTTL(ctx context.Context, id string) (release func())
 }
 
 // sabeRenovar pregunta UNA vez al daemon si anuncia la capacidad "renew". Si no
-// contesta, no se apunta nada y se vuelve a preguntar la próxima vez.
-func (g *Scheduler) sabeRenovar(ctx context.Context) bool {
+// contesta, no se apunta nada, devuelve el error y se vuelve a preguntar la
+// próxima vez: un fallo pasajero no es "no sabe".
+func (g *Scheduler) sabeRenovar(ctx context.Context) (bool, error) {
 	switch g.renewCap.Load() {
 	case 1:
-		return true
+		return true, nil
 	case 2:
-		return false
+		return false, nil
 	}
 	info, err := g.client.Info(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if info.Has("renew") {
 		g.renewCap.Store(1)
-		return true
+		return true, nil
 	}
 	if g.renewCap.CompareAndSwap(0, 2) {
 		log.Printf("the daemon can't renew machine TTLs (no \"renew\" capability): an instance may be frozen by its TTL while in use; upgrade kindling")
 	}
-	return false
+	return false, nil
 }
 
 func (g *Scheduler) snapshotFor(ctx context.Context, service string) (*api.Snapshot, error) {

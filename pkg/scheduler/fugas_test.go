@@ -218,6 +218,32 @@ func TestPickInstanceReservaElHueco(t *testing.T) {
 	}
 }
 
+// Un fallo pasajero de /info no es "el daemon no sabe renovar": la renovación
+// no se hizo, así que cuenta como fallida (g.sinRenovar) y la siguiente vuelta
+// la reintenta.
+func TestInfoCaidoNoDaPorRenovado(t *testing.T) {
+	mc := instanciaVieja("m1")
+	mc.State = api.StateRunning
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": mc}, fallarInfo: 1}
+	g := conDaemonFalso(t, d)
+
+	if err := g.renovarTTL(context.Background(), "m1"); err == nil {
+		t.Fatal("/info falló y renovarTTL dio la renovación por buena")
+	}
+	g.mu.Lock()
+	pendiente := g.sinRenovar["m1"]
+	g.mu.Unlock()
+	if !pendiente {
+		t.Fatal("la renovación que no se hizo no quedó para reintentar")
+	}
+	if err := g.renovarTTL(context.Background(), "m1"); err != nil {
+		t.Fatalf("con /info de vuelta: %v", err)
+	}
+	if d.visto("POST /machines/m1/renew") != 1 {
+		t.Errorf("renovaciones = %d; quería 1", d.visto("POST /machines/m1/renew"))
+	}
+}
+
 // Una máquina despierta cuya herramienta no llega a escuchar no se queda viva
 // sin dueño: con MachineTTL negativo nadie más la pararía. La recién
 // restaurada se borra; la adoptada o descongelada se congela.
