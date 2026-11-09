@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // consolaMaxBytes es el tamaño de firecracker.log a partir del cual el
@@ -91,19 +93,38 @@ func abrirConsolaExistente(ruta string, flag int) (*os.File, error) {
 	return f, nil
 }
 
-// rotarConsolas rota, si hace falta, la consola de cada máquina conocida. La
-// llama el vigilante (watch, en reconcile.go) en cada vuelta.
+// rotarConsolas rota, si hace falta, la consola de cada máquina cuyo VMM puede
+// estar escribiendo en ella. La llama el vigilante (watch, en reconcile.go) en
+// cada vuelta.
+//
+// Solo las que tienen VMM (creada arrancando, running, pausada) y, una última
+// vez, las que lo tenían en la vuelta anterior: lo que escribieron entre las
+// dos vueltas también cuenta. Una congelada o parada no escribe, y abrir y
+// mirar la consola de cada una cada 10 s era trabajo (y despertares del
+// disco) para nada.
 //
 // Recoge los directorios bajo m.mu y rota fuera del candado: rotarConsola solo
 // toca ficheros, no el estado en memoria, y un invitado escribiendo a toda
 // velocidad no debe bloquear ps/run/stop mientras el vigilante la revisa.
 func (m *Manager) rotarConsolas() {
-	m.mu.RLock()
-	dirs := make([]string, 0, len(m.byID))
-	for id := range m.byID {
+	m.mu.Lock()
+	vivas := map[string]bool{}
+	for id, mc := range m.byID {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused || mc.State == api.StateCreated {
+			vivas[id] = true
+		}
+	}
+	dirs := make([]string, 0, len(vivas)+len(m.consolasVivas))
+	for id := range vivas {
 		dirs = append(dirs, m.dir(id))
 	}
-	m.mu.RUnlock()
+	for id := range m.consolasVivas {
+		if _, sigue := m.byID[id]; sigue && !vivas[id] {
+			dirs = append(dirs, m.dir(id))
+		}
+	}
+	m.consolasVivas = vivas
+	m.mu.Unlock()
 
 	for _, dir := range dirs {
 		if err := rotarConsola(dir); err != nil {

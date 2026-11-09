@@ -353,6 +353,10 @@ type Manager struct {
 	// con la máquina que está naciendo.
 	orphanSeen map[string]int
 
+	// consolasVivas son las máquinas cuyo VMM podía escribir en su consola en
+	// la vuelta anterior del vigilante (ver rotarConsolas). Bajo mu.
+	consolasVivas map[string]bool
+
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
