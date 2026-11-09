@@ -100,6 +100,14 @@ func tandaDisco(pausa bool, tope uint64) (hechas, estado int) {
 	return int(h), int(e)
 }
 
+// rtcRestaurado restaura el RTC con offset (khv_prueba_rtc) y devuelve lo que
+// lee el invitado en DR y el offset con el que quedó.
+func rtcRestaurado(offset int64) (dr uint32, guardado int64) {
+	var g C.int64_t
+	d := C.khv_prueba_rtc(C.int64_t(offset), &g)
+	return uint32(d), int64(g)
+}
+
 // cfgDisco lee 4 bytes de los registros o la configuración (desde 0x100)
 // del disco de pruebas.
 func cfgDisco(off uint32) uint32 { return uint32(C.khv_prueba_cfg(C.uint32_t(off))) }

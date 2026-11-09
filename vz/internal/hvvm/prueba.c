@@ -364,6 +364,22 @@ int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado) {
   return hechas;
 }
 
+// khv_prueba_rtc restaura el RTC con offset (como khv_restore con un
+// snapshot), lee DR y deja en *guardado el offset con el que quedó.
+uint32_t khv_prueba_rtc(int64_t offset, int64_t *guardado) {
+  struct rtc_state st;
+  rtc_init();
+  rtc_get(&st);
+  st.offset = offset;
+  rtc_set(&st);
+  uint64_t v = 0;
+  rtc_mmio(0x000, false, &v, 4);
+  rtc_get(&st);
+  *guardado = st.offset;
+  rtc_init();
+  return (uint32_t)v;
+}
+
 // ---- used.idx es del dispositivo, no del invitado ----
 
 static bool rng_mmio(uint64_t off, bool escribir, uint64_t *val, int size) { return vrng_mmio(off, escribir, val, size); }

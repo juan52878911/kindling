@@ -229,8 +229,15 @@ void rtc_get(struct rtc_state *s) {
   pthread_mutex_unlock(&r_mu);
 }
 
+// Lo más lejos que el offset puede estar de la hora del host: el invitado
+// escribe LR con 32 bits, así que nunca pasa de 2^33 s. Un snapshot con otro
+// valor se satura a esto; sin ello time(NULL) + offset desbordaba con signo.
+#define RTC_OFFSET_MAX (1LL << 40)
+
 void rtc_set(const struct rtc_state *s) {
   pthread_mutex_lock(&r_mu);
   rtc = *s;
+  if (rtc.offset > RTC_OFFSET_MAX) rtc.offset = RTC_OFFSET_MAX;
+  if (rtc.offset < -RTC_OFFSET_MAX) rtc.offset = -RTC_OFFSET_MAX;
   pthread_mutex_unlock(&r_mu);
 }

@@ -316,6 +316,7 @@ int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del 
 // b_procesar). Variable solo para que las pruebas lo bajen.
 extern uint64_t vblk_tanda_max;
 int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);  // 512 WRITE en una tanda (pruebas)
+uint32_t khv_prueba_rtc(int64_t offset, int64_t *guardado);    // RTC restaurado con offset (pruebas)
 
 // Pruebas (prueba.c): un invitado hostil contra los dispositivos, sin VM.
 int khv_prueba(const uint8_t *datos, size_t n);
