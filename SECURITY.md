@@ -676,6 +676,12 @@ El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
 cuando el host está bajo presión de memoria según PSI, antes de arrancarlas. Un
 invitado no puede llenar el disco del host a base de que se creen máquinas.
 
+En macOS, donde una VM solo ocupa lo que su invitado toca y la presión llega tarde,
+además se acota lo **declarado**: la suma de `mem_mib` (o `mem_max_mib`) de las
+máquinas con VMM vivo y de las que arrancan no pasa de `KLING_MEM_OVERCOMMIT` veces la
+RAM física (4 por defecto; 0 lo apaga). Al pasarse, el daemon congela ociosas e
+intenta otra vez, como con la presión; si no, 507.
+
 ### 13. Carpetas compartidas: el host sirve, el invitado es hostil
 
 `kling run -share` mete un directorio del host dentro de una microVM (diseño en
@@ -717,6 +723,12 @@ invitado no puede llenar el disco del host a base de que se creen máquinas.
     nombre y hacer que una escritura futura del host caiga en algo que no es
     un fichero regular.
   - `ro` se impone en el daemon (`EROFS`), no en el montaje del invitado.
+  - Una carpeta `rw` lleva cuota en el daemon: crecimiento neto en bytes
+    (`daemon.share_max_mib`, 32 GiB), entradas nuevas (`daemon.share_max_files`,
+    1 000 000) y un mínimo libre en el disco del host
+    (`daemon.share_min_free_mib`, 1 GiB); pasarse da `ENOSPC` sin tocar nada.
+    Sin ella el invitado llenaba el disco del host con escrituras, `truncate` o
+    ficheros nuevos (ver docs/compartir.md, «Cuota de las carpetas rw»).
   - Para el invitado todo es de root; no ve uid/gid del host, `chown` no hace
     nada y los modos se recortan a `0777` (sin setuid/setgid/sticky). Lo que crea
     se entrega al dueño de la carpeta.
@@ -1226,10 +1238,18 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     existe, y lo que se escriba después en el origen no llega al dorado. Hasta la
     v0.18 lo hacía un proceso custodio por máquina, confinado en su propio perfil;
     `kling-vz` y `kling-hv` siguen sin poder escribir en `snapshots/`.
-  - **Red**: escucha en `127.0.0.1` (sus reenvíos, del rango 29000-29999; ahora el
-    perfil no lo acota por puerto, como el de `kling-hv`: una regla por puerto
-    eran ~40 ms de `sandbox_init` en cada arranque y restauración, y escuchar no da
-    acceso a otra máquina); sale al exterior solo con egress distinto de none; y nunca
+  - **Red**: no escucha en ningún puerto TCP. Sus reenvíos (del rango 29000-29999) los
+    pide el daemon antes de crear o restaurar la VM, `kling-vz` los abre aún sin
+    confinar y el perfil no le deja abrir otro (`FWD=0`; SBPL no tiene rangos de
+    puertos y 1000 reglas eran ~36 ms más de `sandbox_init`). Un `kling-vz` tomado no
+    puede ocupar el reenvío que suelte otra máquina ni el puerto libre del `-upstream`
+    del loopback de una credencial ajena (un Postgres parado), donde el proxy de esa
+    otra máquina le habría entregado su clave. El daemon se queda con las direcciones
+    de antes de que corriera el invitado, exige que las de después sean las mismas y
+    rechaza el reenvío vivo de otra máquina: anunciarlo como suyo desviaría las aristas,
+    las credenciales con `UpstreamMachine` y la auditoría a otro invitado. Con un
+    daemon anterior, que pide los reenvíos tras arrancar, el perfil sigue dejando
+    escuchar en el loopback (`FWD=1`). Sale al exterior solo con egress distinto de none; y nunca
     al loopback del Mac (que para el sandbox incluye `0.0.0.0`). El `-upstream
     127.0.0.1:5432` de una credencial lo marca el daemon, que solo acepta el puerto de
     una credencial de esa máquina, fuera del rango de los reenvíos y que no sea el de
@@ -1242,6 +1262,21 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     conectar a un reenvío ajeno en los tres modos, también por `0.0.0.0`); con el nuevo,
     ninguna. Y de extremo a extremo en un M4 (macOS 26.5): exec, volumen, freeze/thaw,
     commit a un dorado, arrancar otra máquina de él, egress none/internet/allowlist.
+  - **Servicios del Mac**: ni `mach-lookup`, ni `iokit-open`, ni memoria compartida POSIX
+    más allá de lo que da `system.sb` (trustd, cfprefsd, logd...). Medido con una VM de
+    verdad en macOS 26.5 (arranque, exec, freeze/thaw, stop/start, `save` y `run -from`;
+    egress none, internet y allowlist con una credencial cuyo proxy verifica TLS):
+    Virtualization.framework no pide más, y un `kling-vz` tomado ya no llega al
+    portapapeles, a securityd (el llavero) ni a tccd. Con pantalla (`GFX`) se mantienen
+    IOKit y la memoria compartida, que usa el scanout por IOSurface (no medido sin
+    ellos). Ni `kling-vz` ni `kling-hv` ven ya los metadatos (nombres, tamaños) de los
+    ficheros de las demás máquinas. `sandbox-perfil.sh` comprueba las tres búsquedas como denegadas.
+  - **Memoria**: Darwin no deja ponerle techo de memoria a un proceso sin privilegios:
+    `setrlimit(RLIMIT_AS)` y `RLIMIT_DATA` dan `EINVAL` por debajo del espacio de
+    direcciones que el proceso ya reserva (medido en macOS 26.5: 8 y 64 GiB rechazados)
+    y el límite de jetsam (`memorystatus_control`) da `EPERM`. Lo que hay es la admisión
+    por memoria declarada (§12) y, con `cpu_pct`, el freno de CPU, que aplica el propio
+    `kling-vz` y que uno tomado puede dejar de aplicar.
   - Lo que queda: su propio directorio es suyo (el daemon lee de ahí el volcado de una
     congelación y el registro de auditoría), y con egress internet o allowlist sale a
     lo que la red del Mac alcance, filtrado por la política en el propio proceso.

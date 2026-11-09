@@ -438,6 +438,15 @@ kling config set daemon.memory_pressure auto   # auto (defecto) u off
 
 `KLING_MEMORY_PRESSURE` manda sobre el fichero; se lee al arrancar el daemon.
 
+Y antes de arrancar, un techo a lo **prometido**: la suma de `mem_mib` (o
+`mem_max_mib`) de las máquinas que corren o están en pausa, más las que están
+arrancando, no pasa de 4 veces la RAM física. Una VM del Mac ocupa solo lo que
+su invitado toca, así que sin esto siempre parece que cabe otra, hasta que los
+invitados usan lo suyo. Si no cabe, el daemon congela ociosas y reintenta, y
+si aun así no, contesta 507. `KLING_MEM_OVERCOMMIT` (en el entorno del daemon)
+cambia el factor; `0` lo apaga. En Linux no aplica: el cgroup de cada VM ya
+la acota.
+
 Ociosa es lo del modo batería, más estricto: ninguna petición en curso (exec,
 shell, ficheros, `logs -f`) ni terminada hace menos de 2 minutos (ni arrancada
 hace menos), ninguna sesión del broker de aristas, y su VMM gastando menos del

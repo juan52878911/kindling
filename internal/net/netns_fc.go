@@ -8,6 +8,7 @@ package net
 
 import (
 	"fmt"
+	"log"
 	stdnet "net"
 	"os"
 	"os/exec"
@@ -121,6 +122,13 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := ns("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward; "+
 		"echo 50 > /proc/sys/net/ipv4/neigh/"+TapName+"/retrans_time_ms"); err != nil {
 		return err
+	}
+	// Endurecimiento (firewall.go/sysctlsNetns), después de ip_forward, que
+	// reescribe accept_redirects. Un solo proceso y no fatal: sysctl aplica
+	// las demás claves aunque una falle (un kernel sin conntrack cargado no
+	// tiene net.netfilter), y la máquina arranca con lo que se pudo.
+	if err := ns(append([]string{"sysctl", "-q", "-w"}, sysctlsNetns(n.NSIf)...)...); err != nil {
+		log.Printf("net: WARNING: some hardening sysctls failed in %s: %v", n.NS, err)
 	}
 
 	// Barrera IPv6 (firewall.go): va AQUÍ, antes de la rama rápida de

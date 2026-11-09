@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+
+	"github.com/juan52878911/kindling/internal/saneado"
 )
 
 // Report es el informe final de una construcción. A propósito no tiene ni un
@@ -75,18 +77,20 @@ func (rep *Report) WriteJSON(w io.Writer) error {
 	return e.Encode(rep)
 }
 
-// WriteText escribe el informe para una persona.
+// WriteText escribe el informe para una persona. Los nombres vienen de la
+// base de origen: salen con saneado.Linea, para que ni un ESC llegue a la
+// terminal ni un salto de línea o un tabulador desalinee las filas.
 func (rep *Report) WriteText(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "golden %s from %s: %d tables, %d rows\n", rep.Golden, rep.Source, rep.Tables, rep.Rows)
+	fmt.Fprintf(tw, "golden %s from %s: %d tables, %d rows\n", saneado.Linea(rep.Golden), saneado.Linea(rep.Source), rep.Tables, rep.Rows)
 	fmt.Fprintf(tw, "\nmasked columns (%d):\n", len(rep.Masked))
 	for _, m := range rep.Masked {
-		fmt.Fprintf(tw, "  %s\t%s\t%d of %d rows\n", m.Column, m.Kind, m.Values, m.Rows)
+		fmt.Fprintf(tw, "  %s\t%s\t%d of %d rows\n", saneado.Linea(m.Column), saneado.Linea(string(m.Kind)), m.Values, m.Rows)
 	}
 	if len(rep.Kept) > 0 {
 		fmt.Fprintf(tw, "\nkept on purpose (keep rule, %d):\n", len(rep.Kept))
 		for _, k := range rep.Kept {
-			fmt.Fprintf(tw, "  %s\n", k)
+			fmt.Fprintf(tw, "  %s\n", saneado.Linea(k))
 		}
 	}
 	fmt.Fprintf(tw, "\nsuspicious columns (%d):\n", len(rep.Suspicious))
@@ -94,7 +98,7 @@ func (rep *Report) WriteText(w io.Writer) error {
 		what := string(s.Action)
 		switch s.Action {
 		case ActMasked:
-			what = "masked (" + string(s.Kind) + ")"
+			what = "masked (" + saneado.Linea(string(s.Kind)) + ")"
 		case ActKept:
 			what = "kept (keep rule)"
 		case ActUnmasked:
@@ -102,7 +106,7 @@ func (rep *Report) WriteText(w io.Writer) error {
 		case ActGenerated:
 			what = "generated column: recomputed from its inputs"
 		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\n", s.Column, s.Reason, what)
+		fmt.Fprintf(tw, "  %s\t%s\t%s\n", saneado.Linea(s.Column), saneado.Linea(s.Reason), saneado.Linea(what))
 	}
 	if len(rep.Unmasked) > 0 {
 		fmt.Fprintf(tw, "\nWARNING: %d suspicious column(s) were copied as they are\n", len(rep.Unmasked))

@@ -117,6 +117,9 @@ func mcpImport(args []string) error {
 		return fmt.Errorf("-isolation %q: use %s or %s", *isolation, mcp.IsolationService, mcp.IsolationSession)
 	}
 	service := fs.Arg(0)
+	if err := mcp.ValidServiceName(service); err != nil {
+		return err
+	}
 	img := config.Or(*image, service)
 
 	ctx, stop := ctxWithSignals()

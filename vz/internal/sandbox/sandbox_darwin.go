@@ -65,6 +65,7 @@ func Parametros(root, mdir, broker string, c server.Confinamiento) ([]string, er
 			len(c.Lectura), len(c.Escritura), MaxFicheros)
 	}
 	pares := []string{"ROOT", root, "MDIR", mdir, "NET", uno(c.ConRed), "BROKER", broker, "GFX", uno(c.Graphics),
+		"FWD", uno(!c.ReenviosAbiertos),
 		"NL", strconv.Itoa(len(c.Lectura)), "NE", strconv.Itoa(len(c.Escritura))}
 	// Solo los que hay: el perfil recorre NL y NE, no los 16 (~1 ms menos de
 	// sandbox_init con los 4-5 ficheros de una VM normal).

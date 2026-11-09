@@ -803,6 +803,9 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *mcp
 	// token del gateway seria filtrar la credencial de todo el sistema a un host
 	// que no controlamos.
 	scheduler.WithoutGatewayCredential(proxy)
+	// Tampoco decide adónde va el cliente ni qué credenciales le pide: sus
+	// redirecciones salen como 502 y sus cabeceras pasan por la lista blanca.
+	scheduler.FilterUpstreamResponse(proxy)
 	proxy.ServeHTTP(w, r)
 }
 

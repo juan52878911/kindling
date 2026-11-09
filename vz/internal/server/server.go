@@ -29,6 +29,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/mmds"
 	"github.com/juan52878911/kindling/vz/internal/spec"
+	"github.com/juan52878911/kindling/vz/internal/vnet"
 )
 
 // VM es lo que el servidor necesita de una máquina virtual.
@@ -67,6 +68,12 @@ type VsockDialer interface {
 type GuestDialerSetter interface {
 	SetGuestDialer(port int, dial func(ctx context.Context) (net.Conn, error), soloTCP bool)
 	GuestOnlyTCP(port int) bool
+}
+
+// Adoptador es la red que acepta como reenvío un puerto ya abierto
+// (vnet.Net.Adoptar): los que kling-vz reservó antes de montarla.
+type Adoptador interface {
+	Adoptar(port int, l net.Listener) error
 }
 
 // Network es la red de espacio de usuario de la máquina.
@@ -188,6 +195,11 @@ type Confinamiento struct {
 	// credencial de base de datos).
 	Loopback bool
 	Graphics bool
+	// ReenviosAbiertos: los reenvíos del invitado ya están abiertos (el
+	// núcleo los pidió antes de crear la VM), así que el proceso confinado no
+	// necesita escuchar en ningún puerto TCP más. Sin ellos (un núcleo
+	// anterior), el perfil sigue dejando escuchar en el loopback.
+	ReenviosAbiertos bool
 	// Lectura: ficheros que solo lee (kernel, discos de solo lectura, el
 	// estado que restaura). Escritura: los que lee y escribe (discos de
 	// lectura y escritura).
@@ -250,6 +262,11 @@ type Server struct {
 
 	// confinado: ya se aplicó Deps.Confine; confinadoConRed, con qué red.
 	confinado, confinadoConRed bool
+	// reservas son los reenvíos pedidos antes de que hubiera red (putForwards
+	// antes de InstanceStart o snapshot/load): abiertos ya, la red los adopta
+	// al montarse. reenviosAntes: hubo reenvíos antes de confinar.
+	reservas      map[int]net.Listener
+	reenviosAntes bool
 
 	// Tope de CPU (cpu.go). regulando: la VM está en una pausa del regulador,
 	// que el núcleo no ve (para él sigue running). cpuListo: el agente ya
@@ -318,6 +335,7 @@ func (s *Server) finish(err error) {
 func (s *Server) Shutdown() {
 	s.mu.Lock()
 	s.soltarFreno()
+	s.soltarReservasLocked()
 	vm, n := s.vm, s.net
 	s.vm, s.net = nil, nil
 	s.st = stStopped
@@ -1252,11 +1270,23 @@ func (s *Server) putForwards(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	n := s.net
-	s.mu.Unlock()
 	if n == nil {
-		fault(w, errors.New("the network is not up yet (configure a network interface and start or load the microVM first)"))
+		// Antes de crear la VM: se abren ya, mientras este proceso aún puede
+		// escuchar, y la red los adopta al montarse (ensureNet). Ya confinado
+		// sin red no hay nada que hacer.
+		out, err := s.reservarLocked(f.Ports)
+		s.mu.Unlock()
+		if err != nil {
+			fault(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"forwards": out})
 		return
 	}
+	if !s.confinado {
+		s.reenviosAntes = true
+	}
+	s.mu.Unlock()
 	out := map[string]string{}
 	for _, p := range f.Ports {
 		addr, err := n.Forward(p)
@@ -1267,6 +1297,66 @@ func (s *Server) putForwards(w http.ResponseWriter, r *http.Request) {
 		out[strconv.Itoa(p)] = addr
 	}
 	writeJSON(w, map[string]any{"forwards": out})
+}
+
+// reservarLocked abre, sin red todavía, un puerto del rango reservado por
+// cada puerto del invitado (vnet.ListenReservado) y lo guarda en s.reservas.
+// Es lo que deja confinar a kling-vz sin permiso para escuchar en TCP: los
+// reenvíos ya están abiertos cuando el invitado empieza a correr, y el núcleo
+// se queda con estas direcciones, que da un proceso que aún no ha procesado
+// nada del invitado. Con s.mu tomado.
+func (s *Server) reservarLocked(ports []int) (map[string]string, error) {
+	if s.confinado {
+		return nil, errors.New("the network is not up yet (configure a network interface and start or load the microVM first)")
+	}
+	if s.reservas == nil {
+		s.reservas = map[int]net.Listener{}
+	}
+	out := map[string]string{}
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return nil, fmt.Errorf("forwarding port %d: invalid port", p)
+		}
+		l, ok := s.reservas[p]
+		if !ok {
+			var err error
+			if l, err = vnet.ListenReservado(); err != nil {
+				return nil, fmt.Errorf("forwarding port %d: %w", p, err)
+			}
+			s.reservas[p] = l
+		}
+		out[strconv.Itoa(p)] = l.Addr().String()
+	}
+	s.reenviosAntes = true
+	return out, nil
+}
+
+// adoptarReservasLocked da a la red recién montada los reenvíos reservados.
+// Una red que no sabe adoptarlos (las de las pruebas) los pierde: se cierran,
+// y putForwards abrirá otros. Con s.mu tomado.
+func (s *Server) adoptarReservasLocked() {
+	a, ok := s.net.(Adoptador)
+	for p, l := range s.reservas {
+		if !ok {
+			l.Close()
+			continue
+		}
+		if err := a.Adoptar(p, l); err != nil {
+			s.d.Logf("forward to guest port %d: %v", p, err)
+		}
+	}
+	s.reservas = nil
+	if !ok {
+		s.reenviosAntes = false
+	}
+}
+
+// soltarReservasLocked cierra los reservados que ninguna red adoptó.
+func (s *Server) soltarReservasLocked() {
+	for _, l := range s.reservas {
+		l.Close()
+	}
+	s.reservas = nil
 }
 
 // probeTimeout es cuánto espera un sondeo a que el invitado conteste al SYN.
@@ -1371,6 +1461,7 @@ func (s *Server) ensureNet() error {
 		return fmt.Errorf("setting up the network: %w", err)
 	}
 	s.net = n
+	s.adoptarReservasLocked()
 	return nil
 }
 
@@ -1445,6 +1536,9 @@ func (s *Server) confinamiento() Confinamiento {
 		ConRed:   modo != egress.None,
 		Loopback: modo == egress.Allowlist,
 		Graphics: s.spec.Graphics != nil,
+		// Solo si TODOS están abiertos ya: el núcleo pide los mismos tras
+		// arrancar, y uno que faltara no se podría abrir confinado.
+		ReenviosAbiertos: s.reenviosAntes,
 	}
 	if s.spec.BootSource != nil && s.spec.BootSource.KernelImagePath != "" {
 		c.Lectura = append(c.Lectura, s.spec.BootSource.KernelImagePath)

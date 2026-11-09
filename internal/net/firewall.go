@@ -244,13 +244,14 @@ func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
 func (n *Net) egressRules(e Egress) [][]string {
 	rules := n.forwardBase()
 	if e == EgressNone {
-		return append(rules, forwardCierre())
+		return append(rules, forwardCierre(), topeTotalNuevas())
 	}
 	for _, cidr := range blocked {
 		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
 	}
 	rules = append(rules, topeNuevas())
-	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
+	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"},
+		topeTotalNuevas())
 }
 
 // topeNuevasPorSegundo es cuántos paquetes NEW por segundo y por IP destino
@@ -270,6 +271,63 @@ func topeNuevas() []string {
 	return []string{"-A", "FORWARD", "-i", TapName, "-m", "conntrack", "--ctstate", "NEW",
 		"-m", "hashlimit", "--hashlimit-above", tope + "/s", "--hashlimit-burst", tope,
 		"--hashlimit-mode", "dstip", "--hashlimit-name", "kl-nuevas", "-j", "DROP"}
+}
+
+// topeTotalNuevasPorSegundo es cuántas conexiones nuevas por segundo, a
+// cualquier destino, deja abrir una microVM en total; la ráfaga es el doble.
+// topeNuevas cuenta por IP destino y no acota nada si cada paquete va a una IP
+// distinta: con UDP de un byte a miles de IPs, cada uno es una entrada de
+// conntrack en el kernel del host. Con este tope y los plazos de
+// sysctlsNetns, una máquina tiene a lo sumo unas 30 000 entradas a medio abrir
+// (~10 MiB), en vez de cientos de miles.
+const topeTotalNuevasPorSegundo = 1000
+
+// topeTotalNuevas es el DROP de lo que pase de topeTotalNuevasPorSegundo, en
+// los tres modos. En mangle PREROUTING y no en FORWARD: conntrack ya ha
+// clasificado el paquete (va antes que mangle) pero no ha confirmado la
+// entrada, así que lo descartado no llega a ocupar la tabla; y queda delante
+// de los DNAT (DNS, proxies), de los -I FORWARD 1 de reglasGrafo y de lo que
+// va al INPUT del netns. Sin --hashlimit-mode: un solo cubo para toda la
+// máquina, aunque el invitado falsifique el origen. Usa xt_hashlimit, que
+// topeNuevas ya exige.
+func topeTotalNuevas() []string {
+	return []string{"-t", "mangle", "-A", "PREROUTING", "-i", TapName, "-m", "conntrack", "--ctstate", "NEW",
+		"-m", "hashlimit", "--hashlimit-above", strconv.Itoa(topeTotalNuevasPorSegundo) + "/s",
+		"--hashlimit-burst", strconv.Itoa(2 * topeTotalNuevasPorSegundo),
+		"--hashlimit-name", "kl-total", "-j", "DROP"}
+}
+
+// sysctlsNetns son los sysctl de endurecimiento del netns de una microVM, como
+// argumentos de `sysctl -w`. Setup los aplica DESPUÉS de ip_forward=1: activar
+// el reenvío reescribe accept_redirects en todas las interfaces.
+//
+//   - rp_filter=1 (estricto): lo que entre por tap0 con un origen que no se
+//     enrutaría de vuelta por tap0 (origen falsificado) se descarta antes de
+//     enrutarlo.
+//   - accept_source_route=0, accept_redirects=0, send_redirects=0: el netns
+//     es un enrutador de dos patas y no tiene por qué obedecer ni emitir
+//     redirecciones ni rutas de origen.
+//   - arp_ignore=1: solo se contesta ARP por una IP de la interfaz que lo
+//     recibe; el invitado no descubre por tap0 la IP del veth.
+//   - nf_conntrack_udp_timeout=10 y nf_conntrack_tcp_timeout_syn_sent=30: lo
+//     que el invitado manda sin respuesta (UDP a mil IPs, SYN a destinos
+//     muertos) ocupa la tabla de conntrack, que es memoria del kernel del host
+//     fuera de mem_mib, 30 s y 120 s por defecto. Con topeTotalNuevas acotan
+//     las entradas vivas por máquina. Son por netns. nf_conntrack_max no: fuera
+//     del netns inicial el kernel lo deja de solo lectura.
+//
+// "all" y la interfaz concreta, porque el kernel combina los dos (máximo en
+// rp_filter y arp_ignore, Y u O lógico en el resto); "default" para cualquier
+// interfaz que se cree después en el netns.
+func sysctlsNetns(nsIf string) []string {
+	var s []string
+	for _, iface := range []string{"all", "default", TapName, nsIf} {
+		p := "net.ipv4.conf." + iface + "."
+		s = append(s, p+"rp_filter=1", p+"accept_source_route=0", p+"accept_redirects=0",
+			p+"send_redirects=0", p+"arp_ignore=1")
+	}
+	return append(s, "net.netfilter.nf_conntrack_udp_timeout=10",
+		"net.netfilter.nf_conntrack_tcp_timeout_syn_sent=30")
 }
 
 // restoreRules añade reglas dentro del namespace con un solo iptables-restore
@@ -464,7 +522,8 @@ func (n *Net) reglasAllowlist() [][]string {
 
 	// El host enmascara hacia internet y vuelve a bloquear las redes privadas como
 	// segunda barrera (HostEgressRules), igual que en modo internet.
-	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
+	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"},
+		topeTotalNuevas())
 }
 
 // credNATRules son los DNAT del proxy de credenciales, en orden (el primero que
