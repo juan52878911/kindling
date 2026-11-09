@@ -369,9 +369,13 @@ kling config set daemon.battery_pause_after_seconds 60 # 0 = 60; -1 = no pausar
 ```
 
 `KLING_BATTERY_MODE` y `KLING_BATTERY_PAUSE_AFTER` mandan sobre el fichero; se
-leen al arrancar el daemon. En `auto` el daemon pregunta a `pmset -g ps` si el
-Mac va con batería, como mucho una vez por minuto (sin cgo no hay
-`IOPSCopyPowerSourcesInfo`). Con batería:
+leen al arrancar el daemon. En `auto` el daemon se entera de si el Mac va con
+batería por el vigía de energía (`kling-vz --power-events` o `kling-hv
+--power-events`, el mismo que avisa del sueño), que lo dice al arrancar y en
+cada cambio de corriente a batería o al revés (`IOPSCreateLimitedPowerNotification`):
+el cambio vale en el acto y no se lanza ningún proceso. Si el vigía no arranca
+o es de un VMM anterior que no lo dice, pregunta él a `pmset -g ps`, como mucho
+una vez por minuto (sin cgo no hay `IOPSCopyPowerSourcesInfo`). Con batería:
 
 1. **Baja la QoS** (`PRIO_DARWIN_BG`, lo de `taskpolicy -b`: núcleos de
    eficiencia, E/S en segundo plano) del `kling-vz` y del auxiliar de Apple de

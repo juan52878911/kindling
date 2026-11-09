@@ -29,10 +29,17 @@ func qosProceso(pid int, baja bool) error {
 	return syscall.Setpriority(prioDarwinProcess, pid, v)
 }
 
-// enBateriaSO dice si el Mac va con batería, según pmset. Sin cgo no hay
-// IOPSCopyPowerSourcesInfo; un proceso por minuto como mucho (fuenteCache) no
-// se nota, y solo con daemon.battery_mode en auto.
+// enBateriaSO dice si el Mac va con batería: lo que dijo el vigía de energía
+// (energia.go), que se entera por aviso, y si no hay vigía, pmset. Sin cgo no
+// hay IOPSCopyPowerSourcesInfo; pmset es un proceso por minuto como mucho
+// (fuenteCache), y solo con daemon.battery_mode en auto.
 func enBateriaSO() (bool, error) {
+	switch fuenteVigia.Load() {
+	case fuenteBateria:
+		return true, nil
+	case fuenteCorriente:
+		return false, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "/usr/bin/pmset", "-g", "ps").Output()
