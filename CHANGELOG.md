@@ -56,6 +56,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `kling db clone` / `slice`: the read-only check of the source role runs from the host (kling-db connects to the source with the proxy's TLS policy) before the builder starts and before the credential reaches the proxy; the builder's own answer no longer counts. The source must now be reachable from where `kling db clone` runs, at the same address as from the daemon (`docs/db.md`).
+- `kling db clone` / `slice`: the masked dump is copied to the host with a size cap (`-max-dump`, default 8G) and a one-hour deadline.
+- kling-sandbox: two frontals on the same daemon no longer mix labels and TTL when they claim the same prewarmed sandbox: claims go in two phases with a nonce and only one wins. The sandbox view also hides reserved `kling.*` labels.
 - Linux: a machine only reaches the host-side services (allowlist DNS, credential, Postgres and MySQL proxies, graph edges) on its own veth (`-m addrtype --limit-iface-in`); a process in another machine's netns, like a compromised Firecracker without the jailer, reached them through that machine's HostIP. The old INPUT rules are removed on startup.
 - Linux: under the jailer, Firecracker runs in its own PID namespace (`--new-pid-ns`); the daemon tracks its host PID from the jailer's pid file and watches it by pidfd.
 - Linux: ownership and modes of trees the VMM can write (snapshot directories) are set by descriptor inside an `os.Root`, so a symlink swapped in between the check and the `chmod` can't redirect it. `EnsureWritable`, unused, is gone.
