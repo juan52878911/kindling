@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
@@ -39,7 +40,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "cow-grow", "ready", api.CapabilityMachineEnv, api.CapabilityMachineCmd, api.CapabilityGraphHealth, api.CapabilityVolumeWait, api.CapabilityStart, api.CapabilityDisk, api.CapabilityRegistryAuth, api.CapabilityOCIBlobs, "volume-clone", api.CapabilityPool, api.CapabilityEgressBlocked, api.CapabilityErrorCodes, api.CapabilityHostPorts, api.CapabilityImageSnapshots, api.CapabilityNested, "pprof"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -520,10 +521,33 @@ func (s *Server) rutas() []ruta {
 		// Cualquier rol válido; las series por máquina, solo el admin (ver handleMetrics).
 		{"GET /metrics", AccionListar, nil, s.handleMetrics},
 		{"GET /procstats", AccionAdmin, nil, s.handleProcStats},
+		// Perfiles de Go del daemon, solo para el admin: ver handlePprof.
+		{"GET /debug/pprof/", AccionAdmin, nil, s.handlePprof},
 		{"POST /cow/store/grow", AccionAdmin, nil, s.handleGrowCoWStore},
 		{"POST /machines/{ref}/publish", AccionMaquina, nil, s.handlePublish},
 		{"DELETE /machines/{ref}/publish", AccionMaquina, nil, s.handleUnpublish},
 		{"GET /publish", AccionListar, nil, s.handlePublications},
+	}
+}
+
+// handlePprof sirve /debug/pprof del propio daemon (goroutines, heap, CPU,
+// traza), para medir lo que gasta: goroutines vivas durante un kling cp,
+// asignaciones de un vigilante. Una sola ruta que reparte como el mux de
+// net/http/pprof; solo el admin, que ya puede todo lo demás, porque un
+// volcado de goroutines enseña rutas y argumentos de todas las máquinas y
+// /debug/pprof/profile deja a quien llama elegir cuántos segundos perfilar.
+func (s *Server) handlePprof(w http.ResponseWriter, r *http.Request) {
+	switch strings.TrimPrefix(r.URL.Path, "/debug/pprof/") {
+	case "cmdline":
+		pprof.Cmdline(w, r)
+	case "profile":
+		pprof.Profile(w, r)
+	case "symbol":
+		pprof.Symbol(w, r)
+	case "trace":
+		pprof.Trace(w, r)
+	default:
+		pprof.Index(w, r)
 	}
 }
 

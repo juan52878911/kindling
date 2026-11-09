@@ -23,6 +23,8 @@ func (m *Manager) ProcStats() api.ProcStats {
 	// El socket de cada VMM, en el mismo orden que stats: en macOS la memoria
 	// se le pregunta al ayudante por él (ver memoriaVMM).
 	socks := make([]string, 0, len(m.byID))
+	// Y su techo de CPU: con kling-hv, sin techo no se pregunta lo frenado.
+	techos := make([]int, 0, len(m.byID))
 	byState := make(map[string]int, 5)
 	for _, mc := range m.byID {
 		byState[string(mc.State)]++
@@ -32,6 +34,7 @@ func (m *Manager) ProcStats() api.ProcStats {
 			StateSince: estadoDesde(mc),
 		})
 		socks = append(socks, m.socket[mc.ID])
+		techos = append(techos, mc.CPUPct)
 	}
 	m.mu.RUnlock()
 
@@ -48,7 +51,7 @@ func (m *Manager) ProcStats() api.ProcStats {
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(st *api.ProcStat, sock string) {
+		go func(st *api.ProcStat, sock string, techo int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			mem := make(chan int64, 1)
@@ -59,12 +62,20 @@ func (m *Manager) ProcStats() api.ProcStats {
 				st.FootprintMiB = st.PSSMiB
 			}
 			if ok {
+				m.recursosVMM(st.ID, st.PID, sock, techo, &u)
 				st.CPUSeconds = u.total.Seconds()
 				st.CPUPSeconds = u.p.Seconds()
 				st.CoreSplit = u.conNucleos
 				st.EnergyJoules = float64(u.energiaNJ) / 1e9
+				st.WakeupsPkgIdle, st.WakeupsInterrupt = u.despReposo, u.despInterrupcion
+				st.VoluntarySwitches = u.cambiosVoluntarios
+				st.DiskReadBytes, st.DiskWriteBytes = u.leidos, u.escritos
+				if u.conFrenado {
+					f := u.frenado.Seconds()
+					st.CPUThrottledSeconds = &f
+				}
 			}
-		}(&stats[i], socks[i])
+		}(&stats[i], socks[i], techos[i])
 	}
 	wg.Wait()
 	var total int64
