@@ -320,26 +320,26 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
 	// con él: el volumen perdería justo lo más reciente.
-	mux.HandleFunc("/volume/sync", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/volume/sync", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Sync()
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 	// /volume/release DESMONTA antes de congelar un snapshot dorado: la memoria
 	// que se vuelca no puede llevar un ext4 montado, porque cada instancia
 	// restaurada arrancaría con metadatos viejos sobre un disco que ya divergió.
-	mux.HandleFunc("/volume/release", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/volume/release", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Release()
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 	// /volume/acquire vuelve a montar tras restaurar. 500 y no un log: sin el
 	// volumen, lo que se escriba acabaría en el overlay y se perdería en silencio.
-	mux.HandleFunc("/volume/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/volume/acquire", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		if err := a.Volumes.Acquire(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	}))
 
 	// /share/attach la abre el daemon para cada carpeta compartida en vivo
 	// (docs/compartir.md). No depende de kling.exec: montar una carpeta no da
@@ -354,6 +354,20 @@ func (a *Agent) Register(mux *http.ServeMux) {
 		mux.HandleFunc("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
 		mux.HandleFunc("/files", a.enArranque(FilesHandler()))
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
+	}
+}
+
+// soloPost deja pasar solo POST. Las rutas que cambian algo lo exigen: con
+// cualquier método, un GET que llegara por otro camino (un cliente que sigue
+// una redirección, un enlace) desmontaba o sincronizaba igual.
+func soloPost(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		h(w, r)
 	}
 }
 
