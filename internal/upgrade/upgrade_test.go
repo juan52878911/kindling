@@ -1268,6 +1268,16 @@ func TestClaveRotadaDiceLaSalida(t *testing.T) {
 	m.noTocado(t)
 }
 
+// El SHA256SUMS no pasa por el directorio temporal compartido: se lee en
+// memoria, con su tope. Con un TMPDIR inservible la actualización sigue.
+func TestSumasNoPasanPorTMPDIR(t *testing.T) {
+	m := nuevoMontaje(t)
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "no-existe"))
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("%v\n%s", err, m.out.String())
+	}
+}
+
 // Sin sitio para los binarios nuevos se falla antes de parar el daemon: con
 // ENOSPC a media instalación, volver atrás tampoco cabría.
 func TestSinEspacioNoPara(t *testing.T) {
