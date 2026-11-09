@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // FetchVerified deja en dst el fichero de url con ese sha256 (y tamaño, si
@@ -18,7 +21,7 @@ func FetchVerified(ctx context.Context, url, want string, size int64, dst string
 	if len(want) != 64 {
 		return fmt.Errorf("%s: no sha256 to check it against", url)
 	}
-	if got, err := SHA256File(dst); err == nil && got == want {
+	if got, err := digest.File(dst); err == nil && got == want {
 		return nil
 	}
 	return fetch(ctx, url, want, size, dst)
@@ -48,50 +51,34 @@ func fetch(ctx context.Context, url, want string, size int64, dst string) error 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	tmp := dst + ".part"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	defer f.Close()
 	limit := size
 	if limit <= 0 {
 		limit = 1 << 30
 	}
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return err
+	// Temporal propio, sha256 y tamaño comprobados, en disco antes del rename
+	// (antes no había fsync: un corte dejaba el nombre bueno con medio fichero,
+	// que el siguiente FetchVerified rehasheaba, pero los pins sin hash no).
+	o := durable.Opciones{SHA256: want, Max: limit, Patron: filepath.Base(dst) + ".part-*"}
+	if want != "" {
+		// Sin hash, size es solo un tope (los índices del resolver).
+		o.Size = size
 	}
-	if want == "" {
-		if n > limit {
+	t, err := durable.Recibir(filepath.Dir(dst), resp.Body, o)
+	if err != nil {
+		var et *durable.ErrTamaño
+		var eh *durable.ErrSHA256
+		var ed *durable.ErrDemasiado
+		switch {
+		case errors.As(err, &ed):
 			return fmt.Errorf("%s: over %d bytes", url, limit)
+		case errors.As(err, &et):
+			return fmt.Errorf("%s: %d bytes, expected %d", url, et.N, et.Quiero)
+		case errors.As(err, &eh):
+			return fmt.Errorf("%s: sha256 mismatch (got %s)", url, eh.Got)
 		}
-	} else if size > 0 && n != size {
-		return fmt.Errorf("%s: %d bytes, expected %d", url, n, size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); want != "" && got != want {
-		return fmt.Errorf("%s: sha256 mismatch (got %s)", url, got)
-	}
-	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
-}
-
-// SHA256File es el sha256 de un fichero, en hexadecimal.
-func SHA256File(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return t.Publicar(dst)
 }
 
 // SHA256Hex es el sha256 de b, en hexadecimal.

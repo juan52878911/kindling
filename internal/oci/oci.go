@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -918,54 +919,38 @@ func (c *Client) download(ctx context.Context, registry, repo string, d Descript
 		return err
 	}
 	defer resp.Body.Close()
-	// Un temporal propio por descarga: con uno fijo (<hex>.part y O_TRUNC),
-	// dos construcciones que bajaban el mismo blob a la vez se lo truncaban
-	// la una a la otra, y la primera publicaba un fichero con un hueco de
-	// ceros dándolo por verificado (su hash era el de su flujo, no el del
-	// fichero). Acaba en .part-*: el barrido del arranque los reconoce.
-	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".part-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	defer f.Close()
-	// CreateTemp lo crea 0600; la caché es legible (cached() solo pide que no
-	// lo escriban grupo ni otros).
-	if err := f.Chmod(0o644); err != nil {
-		return err
-	}
 	t0 := time.Now()
 	timer := time.AfterFunc(stall, cancel)
 	defer timer.Stop()
-	h := sha256.New()
 	limit := d.Size
 	if limit <= 0 {
 		limit = 64 << 30
 	}
-	n, err := io.Copy(io.MultiWriter(f, h), &stallReader{r: io.LimitReader(resp.Body, limit+1), t: timer})
+	// Un temporal propio por descarga (durable.Recibir): con uno
+	// fijo (<hex>.part y O_TRUNC), dos construcciones que bajaban el mismo
+	// blob a la vez se lo truncaban la una a la otra, y la primera publicaba
+	// un fichero con un hueco de ceros dándolo por verificado (su hash era el
+	// de su flujo, no el del fichero). Acaba en .part-*: el barrido del
+	// arranque los reconoce.
+	t, err := durable.Recibir(filepath.Dir(dst), &stallReader{r: resp.Body, t: timer}, durable.Opciones{
+		SHA256: d.Digest, Size: d.Size, Max: limit, Patron: filepath.Base(dst) + ".part-*"})
 	if err != nil {
-		if ctx.Err() != nil {
+		var et *durable.ErrTamaño
+		var eh *durable.ErrSHA256
+		switch {
+		case ctx.Err() != nil:
 			return fmt.Errorf("download stalled (no data for %s)", stall)
+		case errors.As(err, &et):
+			return fmt.Errorf("size %d, manifest says %d", et.N, et.Quiero)
+		case errors.As(err, &eh):
+			return fmt.Errorf("sha256 mismatch: got sha256:%s", eh.Got)
 		}
 		return err
 	}
-	if d.Size > 0 && n != d.Size {
-		return fmt.Errorf("size %d, manifest says %d", n, d.Size)
-	}
-	if got := "sha256:" + hex.EncodeToString(h.Sum(nil)); got != d.Digest {
-		return fmt.Errorf("sha256 mismatch: got %s", got)
-	}
-	if err := f.Sync(); err != nil {
+	if err := t.Publicar(dst); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	c.logf("downloaded %s (%d MiB in %.1f s), sha256 verified", short(d.Digest), n>>20, time.Since(t0).Seconds())
+	c.logf("downloaded %s (%d MiB in %.1f s), sha256 verified", short(d.Digest), t.N>>20, time.Since(t0).Seconds())
 	return nil
 }
 

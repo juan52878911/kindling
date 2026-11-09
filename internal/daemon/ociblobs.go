@@ -27,11 +27,8 @@ package daemon
 // es un 503. Se barre también después de cada construcción.
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -39,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
@@ -187,62 +185,40 @@ func (s *Server) handlePutOCIBlob(w http.ResponseWriter, r *http.Request) {
 	body := cuerpoSubida(w, r)
 	// Un temporal propio por subida (dos a la vez del mismo blob no se pisan),
 	// en el mismo directorio para que el renombrado sea atómico, y acabado en
-	// .part como los de las descargas: nadie lo toma por un blob.
-	var rnd [6]byte
-	_, _ = rand.Read(rnd[:])
-	tmp := p + "." + hex.EncodeToString(rnd[:]) + ".part"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	// .part-* como los de las descargas: nadie lo toma por un blob, y el
+	// barrido del arranque lo reconoce. De root y de nadie más, 0600: el
+	// constructor lo recibe en la verificada del archivo que lo nombra
+	// (enlazarArchivo).
+	rec, err := durable.Recibir(filepath.Dir(p), body, durable.Opciones{
+		SHA256: digest, Size: size, Perm: 0o600, Patron: filepath.Base(p) + ".part-*",
+		Preparar: func(f *os.File) error {
+			if os.Geteuid() == 0 {
+				return f.Chown(0, 0)
+			}
+			return nil
+		}})
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	limpiar := func() { f.Close(); _ = os.Remove(tmp) }
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, size+1))
-	if err != nil {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("receiving blob %s: %w", digest, err))
-		return
-	}
-	if n != size {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("blob %s: got %d bytes, Content-Length says %d", digest, n, size))
-		return
-	}
-	if got := "sha256:" + hex.EncodeToString(h.Sum(nil)); got != digest {
-		limpiar()
-		fail(w, http.StatusBadRequest, fmt.Errorf("blob %s: sha256 mismatch (the content is %s)", digest, got))
-		return
-	}
-	// Durable antes de renombrar: un corte no deja el nombre con medio blob.
-	if err := f.Sync(); err != nil {
-		limpiar()
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	// De root y de nadie más: el constructor lo recibe en la verificada del
-	// archivo que lo nombra (enlazarArchivo).
-	if os.Geteuid() == 0 {
-		if err := os.Lchown(tmp, 0, 0); err != nil {
-			_ = os.Remove(tmp)
+		var (
+			el *durable.ErrLectura
+			et *durable.ErrTamaño
+			eh *durable.ErrSHA256
+		)
+		switch {
+		case errors.As(err, &el):
+			fail(w, http.StatusBadRequest, fmt.Errorf("receiving blob %s: %w", digest, el.Err))
+		case errors.As(err, &et):
+			fail(w, http.StatusBadRequest, fmt.Errorf("blob %s: got %d bytes, Content-Length says %d", digest, et.N, size))
+		case errors.As(err, &eh):
+			fail(w, http.StatusBadRequest, fmt.Errorf("blob %s: sha256 mismatch (the content is sha256:%s)", digest, eh.Got))
+		default:
 			fail(w, http.StatusInternalServerError, err)
-			return
 		}
+		return
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	if err := rec.Publicar(p); err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
+	n := rec.N
 	writeJSON(w, http.StatusCreated, api.OCIBlob{Digest: digest, Size: n})
 }
