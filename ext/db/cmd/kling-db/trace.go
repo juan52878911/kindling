@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -100,6 +101,20 @@ type tracedBackend struct {
 func (b tracedBackend) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	defer b.t.span(traceName(args))()
 	return b.backend.Run(ctx, stdin, args...)
+}
+
+// RunTo es Run con la salida a w, si el backend lo sabe hacer (klingc.CLI).
+func (b tracedBackend) RunTo(ctx context.Context, w io.Writer, args ...string) error {
+	defer b.t.span(traceName(args))()
+	if s, ok := b.backend.(klingc.Streamer); ok {
+		return s.RunTo(ctx, w, args...)
+	}
+	out, err := b.backend.Run(ctx, nil, args...)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(out)
+	return err
 }
 
 func (b tracedBackend) List(ctx context.Context) ([]*api.Machine, error) {

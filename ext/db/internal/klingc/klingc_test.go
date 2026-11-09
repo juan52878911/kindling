@@ -139,3 +139,23 @@ func TestMachinerPorElAPI(t *testing.T) {
 		t.Errorf("requests %v, want %v", got, want)
 	}
 }
+
+// RunTo escribe la salida al writer; si el writer corta, RunTo falla y el
+// hijo no se queda colgado escribiendo.
+func TestRunToCorta(t *testing.T) {
+	c := &CLI{Bin: fakeBin(t), Host: "ssh://lab"}
+	var b strings.Builder
+	if err := c.RunTo(context.Background(), &b, "cp", "m:/x", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(b.String(), "args=cp m:/x -\nhost=ssh://lab\n") {
+		t.Fatalf("got %q", b.String())
+	}
+	if err := c.RunTo(context.Background(), cortaWriter{}, "cp", "m:/x", "-"); err == nil {
+		t.Fatal("a failing writer did not fail RunTo")
+	}
+}
+
+type cortaWriter struct{}
+
+func (cortaWriter) Write([]byte) (int, error) { return 0, errors.New("over the limit") }

@@ -1008,8 +1008,11 @@ enmascarado mal hecho filtra datos. Qué garantiza:
   credenciales de Postgres de la máquina de construcción por el cuerpo de una petición
   al daemon (§7) y el invitado solo recibe un marcador. Hacia el servidor, TLS
   verify-full por defecto; sin TLS (`sslmode=disable`), solo SCRAM-SHA-256.
-- **Solo lectura.** Antes de volcar se comprueba el rol por el proxy: un superusuario se
-  rechaza siempre y un rol que puede escribir en alguna tabla, salvo `-allow-writer`.
+- **Solo lectura.** Antes de arrancar la máquina de construcción y de dar la credencial
+  al proxy, `kling-db` comprueba el rol desde el host, conectando él mismo al servidor
+  con la misma dirección y el mismo TLS (no se fía de lo que diga el invitado; el proxy
+  solo fija rol y base): un superusuario se rechaza siempre y un rol que puede escribir
+  en alguna tabla, salvo `-allow-writer`.
   `pg_dump` además lee en una transacción `READ ONLY`.
 - **Lo sin enmascarar no toca el disco del host.** `pg_dump` corre dentro de la máquina
   de construcción y se restaura por una tubería en un Postgres cuyo directorio de datos

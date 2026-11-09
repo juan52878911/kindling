@@ -8,8 +8,9 @@ package main
 //     credenciales de Postgres del host (pkg/credproxy) de una máquina de
 //     construcción con -egress allowlist: el invitado recibe un marcador y el
 //     proxy entra en producción con la clave real, por TLS verify-full por
-//     defecto. El rol tiene que ser de solo lectura: se comprueba antes de
-//     volcar y, si puede escribir, no se sigue.
+//     defecto. El rol tiene que ser de solo lectura: kling-db lo comprueba
+//     desde el host, contra el servidor, antes de arrancar la máquina y de
+//     darle la credencial al proxy; si puede escribir, no se sigue.
 //
 //  2. El volcado sin enmascarar NUNCA toca el disco del host. pg_dump corre
 //     DENTRO de la máquina de construcción y su salida va por una tubería a un
@@ -38,6 +39,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +53,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbmask"
+	"github.com/juan52878911/kindling/ext/db/internal/klingc"
+	"github.com/juan52878911/kindling/ext/db/internal/pgmini"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
@@ -69,6 +73,12 @@ const (
 	maxPasswordBytes = 4096
 	// maxCAPEM acota el -ca.
 	maxCAPEM = 1 << 20
+	// defaultMaxDump es el tope por defecto del volcado enmascarado que se trae
+	// al host (-max-dump): el invitado no llena el disco del host.
+	defaultMaxDump = 8 << 30
+	// cloneCopyTimeout acota esa copia: un FIFO o un fichero que no acaba no
+	// deja a kling db colgado.
+	cloneCopyTimeout = time.Hour
 	// pgDumpMaxServer es la versión más nueva que puede volcar el pg_dump 16
 	// de la imagen pg16.
 	pgDumpMaxServer = 169999
@@ -167,6 +177,8 @@ type cloneOpts struct {
 	image, from   string
 	mem           string
 	jsonOut       bool
+	// maxDump es el tope en bytes del volcado enmascarado (0: defaultMaxDump).
+	maxDump int64
 	// slice, si no es nil, cambia el volcado entero por una tabla y sus filas
 	// relacionadas (kling db slice, cmd_slice.go).
 	slice *sliceSpec
@@ -174,7 +186,7 @@ type cloneOpts struct {
 
 // cloneFlags son los flags que comparten clone y slice.
 type cloneFlags struct {
-	host, mask, golden, ca, serverName, image, from, mem, script *string
+	host, mask, golden, ca, serverName, image, from, mem, script, maxDump *string
 
 	allowUnmasked, strict, allowWriter, pwStdin, replace, asSuper, jsonOut *bool
 }
@@ -197,6 +209,7 @@ func addCloneFlags(fs *flag.FlagSet) *cloneFlags {
 		mem:           fs.String("mem", "2G", "memory of the builder: the unmasked copy lives in its RAM"),
 		script:        fs.String("script", "", "path of scripts/db-golden.sh (default: $"+goldenScriptEnv+", or installed next to kling-db)"),
 		jsonOut:       fs.Bool("json", false, "print the report as JSON"),
+		maxDump:       fs.String("max-dump", "8G", "largest masked dump copied to the host (MiB, or with M/G); bigger fails"),
 	}
 }
 
@@ -214,6 +227,9 @@ func (f *cloneFlags) opts(rawURL string) (cloneOpts, error) {
 		mask:        dbmask.Options{AllowUnmasked: *f.allowUnmasked, Strict: *f.strict},
 		allowWriter: *f.allowWriter, replace: *f.replace, asSuper: *f.asSuper,
 		image: *f.image, from: *f.from, mem: *f.mem, jsonOut: *f.jsonOut}
+	if o.maxDump, err = parseSizeMG(*f.maxDump); err != nil {
+		return cloneOpts{}, usageErr("-max-dump: %v", err)
+	}
 	data, err := readLimited(*f.mask, 1<<20+1)
 	if err != nil {
 		return cloneOpts{}, err
@@ -251,7 +267,7 @@ func (f *cloneFlags) newCloner() (*cloner, error) {
 		return nil, err
 	}
 	host, script := *f.host, *f.script
-	return &cloner{a: a, buildGolden: func(ctx context.Context, args []string) error {
+	return &cloner{a: a, probe: hostProbe, buildGolden: func(ctx context.Context, args []string) error {
 		// La salida del script va a stderr: stdout es del informe.
 		return runGoldenScript(ctx, script, host, args, nil, os.Stderr, os.Stderr)
 	}}, nil
@@ -313,6 +329,12 @@ type cloner struct {
 	tmpDir string
 	// sliceRes es lo que cargó un slice (con cloneOpts.slice).
 	sliceRes *sliceResult
+	// copyTimeout acota la copia del volcado al host (0: cloneCopyTimeout).
+	copyTimeout time.Duration
+	// probe consulta el rol en el servidor de origen desde el host y devuelve
+	// la línea "probe|super|tablas escribibles|versión" (hostProbe; sustituible
+	// en los tests). nil: no se construye.
+	probe func(ctx context.Context, o cloneOpts) ([]byte, error)
 }
 
 func (c *cloner) logf(format string, a ...any) {
@@ -382,6 +404,23 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		}
 	}
 
+	// El rol se comprueba desde aquí, conectando kling-db al servidor con la
+	// misma dirección, usuario, base y TLS que usará el proxy, ANTES de arrancar
+	// la máquina de construcción y de darle la credencial al proxy. Lo que diga
+	// el invitado no cuenta: un builder hostil imprimiría lo que quisiera.
+	c.logf("checking the role %s on the source (from this host)", o.source.user)
+	if c.probe == nil {
+		return nil, errors.New("this kling db cannot check the source role")
+	}
+	out, err := c.probe(ctx, o)
+	if err != nil {
+		return nil, fmt.Errorf("checking the source role from this host (it must reach %s as the daemon does): %w",
+			net.JoinHostPort(o.source.host, o.source.port), err)
+	}
+	if err := checkProbe(out, o.allowWriter); err != nil {
+		return nil, err
+	}
+
 	builder := o.golden + "-clone-" + randomSuffix()
 	c.logf("starting the builder %s (egress only to the credential proxy)", builder)
 	runArgs := []string{"run", "-name", builder, "-egress", "allowlist", "-allow-exec",
@@ -431,15 +470,6 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 	c.logf("preparing a Postgres in the builder's RAM (tmpfs)")
 	if _, err := c.a.k.Run(ctx, strings.NewReader(cloneSetupScript), "exec", "-i", "-timeout", "5m", builder, "--", "sh", "-s"); err != nil {
 		return nil, fmt.Errorf("preparing the builder: %w", err)
-	}
-
-	c.logf("checking the role %s on the source", o.source.user)
-	out, err := c.a.k.Run(ctx, strings.NewReader(cloneProbeScript(o.source)), "exec", "-i", "-timeout", "2m", builder, "--", "sh", "-s")
-	if err != nil {
-		return nil, fmt.Errorf("connecting to the source through the proxy: %w", err)
-	}
-	if err := checkProbe(out, o.allowWriter); err != nil {
-		return nil, err
 	}
 
 	if o.slice != nil {
@@ -515,9 +545,7 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		"pg_dump -h "+cloneDir+" -p "+clonePort+" -d staging --no-owner --no-privileges -f "+cloneDir+"/masked.sql"); err != nil {
 		return nil, fmt.Errorf("dumping the masked copy: %w", err)
 	}
-	// kling cp escribe con os.Create: sobre un fichero que ya existe conserva
-	// su modo (0600).
-	if _, err := c.a.k.Run(ctx, nil, "cp", builder+":"+cloneDir+"/masked.sql", seed); err != nil {
+	if err := c.copyOut(ctx, builder+":"+cloneDir+"/masked.sql", seed, o.maxDump); err != nil {
 		return nil, fmt.Errorf("copying the masked dump: %w", err)
 	}
 	// La máquina de construcción sobra ya: se destruye ANTES de construir el
@@ -539,6 +567,82 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		return nil, fmt.Errorf("building the golden %s: %w", o.golden, err)
 	}
 	return dbmask.NewReport(o.golden, o.source.String(), plan, res), nil
+}
+
+// parseSizeMG lee un tamaño como -mem: MiB, o con sufijo M o G.
+func parseSizeMG(v string) (int64, error) {
+	if !memPattern.MatchString(v) {
+		return 0, fmt.Errorf("invalid size %q", v)
+	}
+	mul := int64(1 << 20)
+	switch v[len(v)-1] {
+	case 'G':
+		mul, v = 1<<30, v[:len(v)-1]
+	case 'M':
+		v = v[:len(v)-1]
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)/mul {
+		return 0, fmt.Errorf("invalid size %q", v)
+	}
+	return n * mul, nil
+}
+
+// copyOut trae src (<máquina>:<ruta>) a dst, que ya existe (0600), con un
+// tope de bytes y un plazo: lo que haya en esa ruta lo decide el invitado (un
+// FIFO que no acaba, un fichero enorme) y no puede colgar a kling db ni
+// llenar el disco del host.
+func (c *cloner) copyOut(ctx context.Context, src, dst string, max int64) error {
+	if max <= 0 {
+		max = defaultMaxDump
+	}
+	timeout := c.copyTimeout
+	if timeout <= 0 {
+		timeout = cloneCopyTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	lw := &cappedWriter{w: f, left: max}
+	args := []string{"cp", src, "-"}
+	if s, ok := c.a.k.(klingc.Streamer); ok {
+		err = s.RunTo(ctx, lw, args...)
+	} else {
+		var out []byte
+		if out, err = c.a.k.Run(ctx, nil, args...); err == nil {
+			_, err = lw.Write(out)
+		}
+	}
+	switch {
+	case lw.over:
+		return fmt.Errorf("the dump is over %d bytes (-max-dump)", max)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("no end after %s", timeout)
+	case err != nil:
+		return err
+	}
+	return f.Close()
+}
+
+// cappedWriter escribe hasta left bytes; el siguiente falla.
+type cappedWriter struct {
+	w    io.Writer
+	left int64
+	over bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.left {
+		w.over = true
+		return 0, errors.New("over the limit")
+	}
+	n, err := w.w.Write(p)
+	w.left -= int64(n)
+	return n, err
 }
 
 func countUpdates(p *dbmask.Plan) int {
@@ -654,22 +758,55 @@ M=$(mmds GET / "X-metadata-token: $T" 'Accept: application/json' | tr -d '\n' \
 export PGPASSWORD="$M" PGSSLMODE=disable PGCONNECT_TIMEOUT=20 PGAPPNAME=kling-db-clone
 `
 
-// cloneProbeScript comprueba el rol en producción: si es superusuario, en
+// cloneProbeSQL comprueba el rol en producción: si es superusuario, en
 // cuántas tablas puede escribir y la versión del servidor. Solo lee.
-func cloneProbeScript(s *cloneSource) string {
-	return "# kling-db:clone-probe\nset -eu\n" + cloneMarkerSnippet +
-		"U=" + shq(s.user) + "\nD=" + shq(s.db) + "\n" +
-		`psql -X -At -v ON_ERROR_STOP=1 -h ` + cloneDomain + ` -p 5432 -U "$U" -d "$D" <<'SQL'
-SELECT 'probe', r.rolsuper,
+const cloneProbeSQL = `SELECT 'probe', r.rolsuper,
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND n.nspname NOT LIKE 'pg\_toast%'
       AND (has_table_privilege(c.oid, 'INSERT') OR has_table_privilege(c.oid, 'UPDATE')
         OR has_table_privilege(c.oid, 'DELETE') OR has_table_privilege(c.oid, 'TRUNCATE'))),
   current_setting('server_version_num')
-FROM pg_roles r WHERE r.rolname = current_user;
-SQL
-`
+FROM pg_roles r WHERE r.rolname = current_user`
+
+// hostProbe corre cloneProbeSQL desde el host, directo contra el servidor de
+// origen, con la misma política que el proxy de credenciales: TLS verify-full
+// (raíces del sistema más -ca, nombre de -tls-server-name o el host) o, con
+// sslmode=disable, sin TLS y solo SCRAM (nada de contraseña en claro).
+func hostProbe(ctx context.Context, o cloneOpts) ([]byte, error) {
+	cfg := pgmini.Config{
+		Addr: net.JoinHostPort(o.source.host, o.source.port),
+		User: o.source.user, Password: o.password, Database: o.source.db,
+		Timeout: 30 * time.Second,
+	}
+	if o.source.tls == "disable" {
+		cfg.NoCleartext = true
+	} else {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if o.caPEM != "" && !pool.AppendCertsFromPEM([]byte(o.caPEM)) {
+			return nil, errors.New("the -ca file is not a PEM certificate")
+		}
+		cfg.TLSMode, cfg.RootCAs = pgmini.TLSVerifyFull, pool
+		cfg.TLSServerName = orDefault(o.tlsServerName, o.source.host)
+	}
+	conn, err := pgmini.Dial(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	rows, err := conn.Query(ctx, cloneProbeSQL)
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	for _, r := range rows {
+		b.WriteString(strings.Join(r, "|"))
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
 }
 
 // cloneDumpScript vuelca producción DENTRO de la máquina y lo restaura en el
