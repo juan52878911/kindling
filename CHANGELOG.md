@@ -29,6 +29,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
 - kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
 - Linux: `-egress allowlist` boots faster. Seed domains resolve in parallel within 500 ms in total, the rules go in one `iptables-restore`, and the DNS resolver adds IPs to the ipset over netlink instead of forking `ip netns exec ipset` per IP. Measured on the lab (CT 108, `kling run` of node22): 5 domains 485-501 → 148-151 ms, 1 domain 196 → 143-150 ms, one domain whose DNS never answers 6.4 s → 0.59 s.
+- Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
+- A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
+- `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
 
 ### Security
 
@@ -39,6 +42,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- `kindling-operator-deploy.tar.gz` points `deployment.yaml` at the release's operator image, not `v0.13.0`.
+- The nightly Linux e2e tests `kling db` and live shares instead of skipping them and passing.
 - `kling stop` no longer reports a machine as stopped while its VMM survives `SIGKILL` (e.g. stuck in D state): it returns an error and keeps the PID and network, so `kling start` can't launch a second VMM on the same overlay.
 - A failed `state.json` write is no longer dropped: the snapshot is kept and retried with backoff, and `run`, `run -from` and `start` don't launch a VMM until its machine is on disk.
 - A thawed machine's memory dump is invalidated as soon as the guest resumes, so a daemon or host crash can't thaw that stale memory over the disk it has since written.
