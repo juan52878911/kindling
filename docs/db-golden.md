@@ -23,6 +23,17 @@ siguientes.
 
 No hay código Go nuevo: todo usa `kling image build`, `run`, `exec`, `cp` y `save`.
 
+`kling-db` lleva dentro una copia de `db-golden.sh` (idéntica a la de `scripts/`, lo
+comprueba un test): instalado sin checkout, `kling db golden -from-oci <imagen> build` y
+`kling db up` sin plantilla funcionan igual. Los scripts de otros motores y `golden image`
+siguen necesitando el checkout (`-script <checkout>/scripts/db-golden.sh`), y lo dicen.
+
+La construcción hace `initdb -N` y deja `fsync = off` en `postgresql.auto.conf` mientras
+dura; antes de congelar, `ALTER SYSTEM RESET fsync`, espera a que una sesión nueva vea el
+valor de `postgresql.conf` y `sync`. Las copias nacen con `fsync` encendido y el
+`postgresql.auto.conf` vacío. En un Mac M4 con kling-hv el build pasa de 8,2 s a 1,8 s
+(initdb 4,2 → 0,3 s; el CHECKPOINT, 1,4 s → ~0,1 s).
+
 ## Construir la imagen
 
 En un host Linux con el daemon (el mismo donde se instalaron `make deploy` y la imagen

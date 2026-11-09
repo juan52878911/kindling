@@ -67,9 +67,13 @@ var coreTree = []section{
 		{Name: "try", Summary: "runs a command in a throwaway microVM and removes it", MachineArgs: nil, Usage: `  try [-image I | -from T] [-mem 256M] [-cpus N]   runs a command in a throwaway
       [-egress none|internet|allowlist]            microVM and removes it (no
       [-allow dom1,dom2] [-keep] [-ttl 10m]        command: a shell); exits with
-      [--] [cmd [args...]]                         the command's exit code; -ttl:
-                                                   its lifetime if kling dies, or
-                                                   with -keep
+      [-json] [--] [cmd [args...]]                 the command's exit code; -image
+                                                   takes a Docker reference too
+                                                   (alpine:3.20: imported the first
+                                                   time); -json: one object with
+                                                   exit_code, stdout and stderr;
+                                                   -ttl: its lifetime if kling
+                                                   dies, or with -keep
 `},
 		{Name: "help", Summary: "help for one command, with its flags", Subcommands: []string{"all"}, Usage: `  help [<command> [<subcommand>]] | all            help for one command, with its
                                                    flags; all: every command
@@ -591,6 +595,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "kling %s — Firecracker microVMs that wake in milliseconds\n\n", shortVersion())
 	fmt.Fprint(w, `START HERE
   kling try -- uname -a        run a command in a throwaway microVM
+  kling try -image alpine:3.20 the same in a Docker image (-json: one object to parse)
+  kling db up -dsn             a Postgres ready to use, and its URL; kling db sql <copy> "..."
   kling mcp add <server>       host an MCP server as a frozen service
   kling connect                plug your agent (Claude Code, opencode, Cursor…) into it
 

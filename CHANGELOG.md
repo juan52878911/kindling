@@ -16,6 +16,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Image snapshots: `kling run -image X` restores a snapshot of `X` instead of booting cold. The first run with given parameters boots cold and the daemon saves one in the background from a separate machine that carries nothing of any run (no env, command, volumes, shares, secrets or network) and whose agent waits before starting the service; each copy is resynced and then gets its own env and command, so its service starts fresh. Measured on kling-hv (M4, small Alpine image): ~150 → ~45 ms until the agent answers. `-fresh` and `KLING_IMAGE_SNAPSHOTS=0` opt out; skipped with volumes, shares, kling-vz and agents that cannot wait. LRU-pruned under `KLING_IMAGE_SNAPSHOT_MIB` (1 GiB on macOS, 4 GiB on Linux), removed with `kling image rm`; `kling image snapshots [ls|prune]`, a line in `kling status` and `kling image ls`, `GET`/`DELETE /image-snapshots` (`docs/snapshot-imagen.md`).
 - kling-hv: live shares can go over virtio-fs, opt-in per share: `-share SRC:DST:ro|rw:virtiofs` (API `ShareSpec.transport`). The guest kernel talks FUSE to the same Go server the agent used, now inside kling-hv, with the same `internal/share` session and `os.Root` in the daemon. On an M4: metadata 3-5x faster (1000 creates 1.5 s → 0.3 s), sequential I/O ~2x (reads ~0.7 → 1.45 GB/s, writes ~0.5-0.6 → 1.2-1.4 GB/s); freeze/thaw keeps open files and pending writes. The trade-off: host changes are seen after the 1 s cache and don't wake watchers in the guest (`node --watch`, vite), so shares stay on FUSE unless asked. `KLING_HV_VIRTIOFS=1` makes virtio-fs the daemon default (`:fuse` opts a share out), `=0` forbids it. Templates (`-share-wait`, `compose up`), kling-vz, older agents and kernels without virtio-fs use FUSE; Linux rejects `:virtiofs`. `docs/compartir.md`.
 - arm64 guest kernel: `CONFIG_VIRTIO_FS=y` (required by `scripts/check-kernel-config.sh`).
+- `kling db up` with no template uses `pg` and builds it from `postgres:16-alpine` the first time (`-from-oci REF` for a named template that is missing); `-json` prints what is needed to connect (password only with `-dsn`), `-dsn` prints the URL. On an M4, zero to the first query in one command and 14.9 s, download included; then ~0.1 s per copy.
+- `kling db sql <copy> "SQL" [-json]`: SQL from the host without psql, as the app role or `-role`; JSON gives columns, rows (NULL as null) and command tags.
+- `kling try -image` takes a Docker reference (imported the first time, like `run -image`), and `kling try -json` prints one object with `exit_code`, `stdout`, `stderr`, `ready_ms` and `duration_ms`.
 
 ### Changed
 
@@ -65,6 +68,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling upgrade -from-dir` from a kling 1.x refuses a directory whose `SHA256SUMS` has no `SHA256SUMS.minisig`, as downloads already did: that `SHA256SUMS` sits next to the binaries, which upgrade runs and installs as root. `-insecure` still installs binaries you built yourself (with a warning; a `SHA256SUMS` present is still checked, a bad signature is still an error). The upgrade e2e scripts pass `-insecure` for their local builds (`docs/firmas.md`).
 - `sudo kling upgrade -cli` keeps its download and backups in root's home (from the user database, not `HOME` or `XDG_STATE_HOME`, which sudo passes on macOS), and every upgrade run as root refuses a working directory that someone other than root can change, so the user can't swap the verified binary before root installs it.
 - The CLI warns when `config.json` holds `gateway.token` or `gateway.tokens` and is readable by group or others, as `kling ai` already does for its registry (`chmod 600` it).
+- `db-golden.sh build` runs `initdb -N` and keeps `fsync=off` only while building (reset with `ALTER SYSTEM RESET` and a `sync` before the freeze): 8.2 → 1.8 s on an M4. The script also ships inside `kling-db`, so `kling db golden` works without a checkout (other engines still need one, and say so).
+- `kling run -image <ref>` reuses the image a plain `kling image import <ref>` left (same options) instead of importing it again under another name.
+
+### Fixed
+
+- `db-golden.sh build` with no `-migrations` or `-seed` failed on macOS (bash 3.2, `files[@]: unbound variable`).
 
 ## [1.0.0] - 2026-11-05
 

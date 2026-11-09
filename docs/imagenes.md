@@ -101,6 +101,32 @@ que `-wait-ready` se rinde. La capa nunca se monta sin verificar.
 
 ## Imágenes de Docker: el constructor `oci`
 
+### En un comando
+
+```sh
+kling try -image alpine:3.20 -- uname -a          # se importa la primera vez; sale con el código del comando
+kling try -json -image python:3.12-slim -- python -c 'print(1)'
+#   {"sandbox": "...", "image": "...", "exit_code": 0, "stdout": "1\n", "stderr": "",
+#    "ready_ms": 52, "duration_ms": 98, "messages": "kling: sandbox ... ready in 52ms"}
+kling run -image redis:7-alpine -wait-ready -json  # un servicio que se queda; kling exec <id> -- ...
+```
+
+`try` y `run` aceptan una referencia de Docker en `-image` y la importan la primera vez;
+después reutilizan la importación (también la de un `kling image import <ref>` hecho antes
+con las mismas opciones: no se baja dos veces). `try -json` separa la salida del comando de
+lo que cuenta kling. Medido en un Mac M4 (kling-hv, daemon privado, 2026-11-07):
+
+| camino | antes | ahora |
+|---|---|---|
+| `try -image alpine:3.20 -- cmd`, sin nada | falla: `try` no aceptaba referencias | 3,4 s (descarga incluida) |
+| lo mismo, con la imagen ya importada | — | ~100 ms (restauración del snapshot por imagen) |
+| `image import alpine:3.20` y luego `run -image alpine:3.20` | el `run` importaba otra vez (1,1 s y la imagen dos veces en disco) | reutiliza la importada: 0,2 s |
+
+La primera descarga la limita la red: los 103 MiB de la capa grande de `postgres:16-alpine`
+tardan 12 s con `kling` y 9,4 s con `curl` en la misma línea; en paralelo por rangos, más.
+
+### Paso a paso
+
 Una imagen de Docker/OCI tal cual, sin Docker en el host:
 
 ```sh

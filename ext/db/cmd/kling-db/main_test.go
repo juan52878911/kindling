@@ -61,7 +61,6 @@ func TestManifiesto(t *testing.T) {
 
 func TestUsoIncorrecto(t *testing.T) {
 	for _, args := range [][]string{
-		{"up"},
 		{"up", "a", "b"},
 		{"connect", "c", "-dsn", "-psql"},
 		{"doctor"},

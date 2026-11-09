@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -25,17 +28,37 @@ import (
 // exec) y además node y python, lo que suele querer probar quien llega.
 const tryDefaultImage = "toolchain"
 
-// tryOptions es lo que try pasa al daemon y cómo termina.
+// tryOptions es lo que try pasa al daemon y cómo termina. msgs recibe lo que
+// cuenta kling (sandbox listo, borrado, avisos); nil = el stderr del comando.
 type tryOptions struct {
 	req  api.SandboxRequest
 	cmd  []string
 	keep bool
+	msgs io.Writer
+}
+
+// tryJSON es lo que imprime try -json: el comando, su salida y su código, y
+// cuánto tardó cada parte. Un programa (o un agente) no tiene que separar la
+// salida del comando de lo que cuenta kling.
+type tryJSON struct {
+	Sandbox    string `json:"sandbox"`
+	Image      string `json:"image,omitempty"`
+	From       string `json:"from,omitempty"`
+	ExitCode   int    `json:"exit_code"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	ReadyMS    int64  `json:"ready_ms"`
+	DurationMS int64  `json:"duration_ms"`
+	Kept       bool   `json:"kept,omitempty"`
+	Messages   string `json:"messages,omitempty"`
 }
 
 func cmdTry(args []string) (int, error) {
 	fs := flag.NewFlagSet("try", flag.ExitOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", "", "image with the guest agent (default: "+tryDefaultImage+")")
+	image := fs.String("image", "", "image with the guest agent, or a Docker reference (alpine:3.20, imported the first time; default: "+tryDefaultImage+")")
 	from := fs.String("from", "", "snapshot made from a machine with -allow-exec (~300 ms instead of a cold boot)")
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default 256)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
@@ -44,6 +67,7 @@ func cmdTry(args []string) (int, error) {
 	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime if kling dies before removing it, or with -keep: 10m, 1h (bare number = seconds; default 10m)")
 	keep := fs.Bool("keep", false, "keep the sandbox afterwards and print its id")
+	asJSON := fs.Bool("json", false, "print {sandbox, exit_code, stdout, stderr, ready_ms, duration_ms} instead of streaming (needs a command)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: kling try [-image I | -from T] [-mem 256M] [-egress none|internet|allowlist] [-keep] [--] [cmd [args...]]")
 		fmt.Fprintln(os.Stderr, "  creates a throwaway sandbox, runs cmd (or opens a shell) and removes it")
@@ -59,6 +83,9 @@ func cmdTry(args []string) (int, error) {
 	if *image != "" && *from != "" {
 		return 2, errors.New("pass -image or -from, not both")
 	}
+	if *asJSON && len(cmd) == 0 {
+		return 2, errors.New("-json needs a command: kling try -json -image alpine:3.20 -- uname -a")
+	}
 	o := tryOptions{keep: *keep, cmd: cmd, req: api.SandboxRequest{
 		Image: *image, From: *from, MemMiB: *mem, VCPUs: *cpus,
 		Egress: *egress, AllowDomains: splitDomains(allow.String()), TTLSeconds: int(ttl.Seconds()),
@@ -70,6 +97,21 @@ func cmdTry(args []string) (int, error) {
 
 	endpoint := hostOf(*host)
 	c := api.NewClient(endpoint)
+	// Una referencia de Docker se importa la primera vez, como en run -image.
+	if esRefDocker(o.req.Image) {
+		ctx, stop := ctxWithSignals()
+		name, err := asegurarImagenDocker(ctx, c, o.req.Image)
+		stop()
+		if err != nil {
+			return 1, err
+		}
+		o.req.Image = name
+	}
+	if *asJSON {
+		ctx, stop := ctxWithSignals()
+		defer stop()
+		return runTryJSON(ctx, c, o, os.Stdout)
+	}
 	if porDefecto {
 		ctx, stop := ctxWithSignals()
 		err := imagenTryDisponible(ctx, c)
@@ -103,11 +145,32 @@ func cmdTry(args []string) (int, error) {
 // runTry crea el sandbox, ejecuta o.cmd con la salida en streaming y lo borra.
 // Devuelve el código del comando: un 1 de grep no es un fallo de kling.
 func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.Writer) (int, error) {
-	mc, err := tryCreate(ctx, c, o.req, stderr)
-	if err != nil {
-		return 1, err
+	r, err := runTryCon(ctx, c, o, stdout, stderr)
+	return r.code, err
+}
+
+// tryRun es lo que pasó en un try: el código, lo que contestó el exec (nil
+// si no llegó a ejecutarse), el sandbox y cuánto tardó en estar listo.
+type tryRun struct {
+	code  int
+	res   *api.ExecResult
+	mc    *api.Machine
+	ready time.Duration
+}
+
+// runTryCon es runTry con todo lo que pasó (para -json).
+func runTryCon(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.Writer) (tryRun, error) {
+	msgs := o.msgs
+	if msgs == nil {
+		msgs = stderr
 	}
-	defer tryCleanup(c, mc, o.keep, stderr)
+	start := time.Now()
+	mc, err := tryCreate(ctx, c, o.req, msgs)
+	if err != nil {
+		return tryRun{code: 1}, err
+	}
+	r := tryRun{mc: mc, ready: time.Since(start)}
+	defer tryCleanup(c, mc, o.keep, msgs)
 
 	res, err := c.Exec(ctx, mc.ID, api.ExecRequest{Cmd: o.cmd}, func(stream string, data []byte) error {
 		var err error
@@ -120,24 +183,57 @@ func runTry(ctx context.Context, c *api.Client, o tryOptions, stdout, stderr io.
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			return 130, errors.New("interrupted")
+			r.code = 130
+			return r, errors.New("interrupted")
 		}
-		avisarEgressA(ctx, stderr, c, mc.ID)
-		return 1, err
+		avisarEgressA(ctx, msgs, c, mc.ID)
+		r.code = 1
+		return r, err
 	}
 	if res.TimedOut {
-		fmt.Fprintf(stderr, "kling: killed after %s (timeout)\n", time.Duration(res.DurationMS)*time.Millisecond)
+		fmt.Fprintf(msgs, "kling: killed after %s (timeout)\n", time.Duration(res.DurationMS)*time.Millisecond)
 	}
 	if res.Truncated {
-		fmt.Fprintln(stderr, "kling: output truncated at the limit")
+		fmt.Fprintln(msgs, "kling: output truncated at the limit")
 	}
 	if res.ExitCode != 0 {
 		// Antes del borrado (diferido): después ya no hay máquina a la que
 		// preguntar. Un npx que no llega al registro con egress none falla
 		// con un error de red que no nombra el egress.
-		avisarEgressA(ctx, stderr, c, mc.ID)
+		avisarEgressA(ctx, msgs, c, mc.ID)
 	}
-	return res.ExitCode, nil
+	r.code, r.res = res.ExitCode, res
+	return r, nil
+}
+
+// runTryJSON es try -json: el comando corre con su salida en memoria y al
+// final sale un solo objeto. El código de salida es el del comando, como sin
+// -json; un fallo de kling sale como error (y JSON vacío no).
+func runTryJSON(ctx context.Context, c *api.Client, o tryOptions, w io.Writer) (int, error) {
+	var out, errb, msgs bytes.Buffer
+	o.msgs = &msgs
+	start := time.Now()
+	r, err := runTryCon(ctx, c, o, &out, &errb)
+	if err != nil {
+		if msgs.Len() > 0 {
+			os.Stderr.Write(msgs.Bytes())
+		}
+		return r.code, err
+	}
+	j := tryJSON{
+		Sandbox: shortID(r.mc.ID), Image: r.mc.Image, From: r.mc.From, ExitCode: r.code,
+		Stdout: out.String(), Stderr: errb.String(), Kept: o.keep,
+		TimedOut: r.res.TimedOut, Truncated: r.res.Truncated,
+		ReadyMS:    r.ready.Milliseconds(),
+		DurationMS: time.Since(start).Milliseconds(),
+		Messages:   strings.TrimSpace(msgs.String()),
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(j); err != nil {
+		return 1, err
+	}
+	return r.code, nil
 }
 
 // imagenTryDisponible comprueba, antes de crear nada, que la imagen por

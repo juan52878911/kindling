@@ -147,6 +147,16 @@ func asegurarImagenDockerPlataforma(ctx context.Context, c *api.Client, ref, pla
 			return name, nil
 		}
 	}
+	// La que dejó `kling image import <ref>` (sin -name, con las mismas
+	// opciones) vale igual: sin esto, import y luego run -image bajaban y
+	// guardaban la misma imagen dos veces, con dos nombres.
+	if platform == "" {
+		if plano := imageNameFor(r); plano != name {
+			if ok, err := existingImport(ctx, c, plano, spec); err == nil && ok {
+				return plano, nil
+			}
+		}
+	}
 	sb, _ := json.Marshal(spec)
 	fmt.Fprintf(os.Stderr, "importing %s as %s (the first time downloads it)...\n", r, name)
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Builder: "oci", Spec: sb})

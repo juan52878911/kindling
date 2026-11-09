@@ -185,3 +185,29 @@ func TestTryAvisaDelEgressAlFallar(t *testing.T) {
 		}
 	}
 }
+
+// try -json: un solo objeto con la salida del comando separada de lo que
+// cuenta kling, el código del comando, y el sandbox borrado igual.
+func TestTryJSON(t *testing.T) {
+	d := &tryDaemon{exit: 3}
+	c := fakeDaemon(t, d.mux())
+	var out bytes.Buffer
+	o := tryOptions{cmd: []string{"echo", "hi"}, req: api.SandboxRequest{Image: "alpine-3-20"}}
+	code, err := runTryJSON(context.Background(), c, o, &out)
+	if err != nil || code != 3 {
+		t.Fatalf("%d %v", code, err)
+	}
+	var j tryJSON
+	if err := json.Unmarshal(out.Bytes(), &j); err != nil {
+		t.Fatalf("%v: %s", err, out.String())
+	}
+	if j.ExitCode != 3 || j.Stdout != "hello\n" || j.Stderr != "warn\n" || j.Sandbox != "0123456789ab" || j.Image != "alpine-3-20" {
+		t.Fatalf("json %+v", j)
+	}
+	if !strings.Contains(j.Messages, "ready in") || strings.Contains(j.Stderr, "ready in") {
+		t.Fatalf("kling's lines must not mix with the command's stderr: %+v", j)
+	}
+	if len(d.removed) != 1 {
+		t.Fatalf("the sandbox was not removed: %v", d.removed)
+	}
+}
