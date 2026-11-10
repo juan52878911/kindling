@@ -29,6 +29,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
 - macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
