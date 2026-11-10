@@ -1,5 +1,10 @@
 # Modelo de amenaza
 
+> **Reporting a vulnerability:** report it privately from the repository's **Security**
+> tab → **Report a vulnerability** (GitHub Private Vulnerability Reporting), not in a
+> public issue. The threat model below is written in Spanish; its last section,
+> [«Reportar una vulnerabilidad»](#reportar-una-vulnerabilidad), says the same.
+
 kindling existe para alojar **servidores MCP de terceros** invocados por un modelo. No se
 sabe de antemano qué código va dentro, así que la premisa es:
 
