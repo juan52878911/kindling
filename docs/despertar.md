@@ -87,7 +87,10 @@ máquina congelada reciente — kilobytes de memoria del kernel.
 (≤ 128 MiB asignados) para dejarlo en la caché de página, y suelta el de las
 grandes como antes. Thaw, además, lee en segundo plano el de cualquiera de
 hasta 512 MiB por si la caché se perdió. Es memoria reclamable: el kernel la
-suelta bajo presión.
+suelta bajo presión. En macOS igual (salvo soltar la de las grandes, que no
+tiene `POSIX_FADV_DONTNEED`): con el `mem.file` fuera de la caché, en un M4 con
+alpine de 256 MiB, el resync bajó de 80 a 2,3 ms (mediana de 7) y el despertar
+de 114 a 48 ms.
 
 **Nivel pausada.** `POST /machines/{ref}/pause` (capacidad `pause`, `kling
 pause`) deja el VMM vivo con los vCPU parados, estado `paused`; `thaw` sobre una
