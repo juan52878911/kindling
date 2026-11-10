@@ -414,6 +414,9 @@ func validarNodo(name string, n *GraphNode) error {
 	default:
 		return fmt.Errorf("node %s: egress %q: use none, internet or allowlist", name, n.Egress)
 	}
+	if err := ValidateAllowDomains(n.AllowDomains); err != nil {
+		return fmt.Errorf("node %s: %w", name, err)
+	}
 	if n.VCPUs < 0 || n.MemMiB < 0 || n.IdleFreezeSeconds < 0 {
 		return fmt.Errorf("node %s: vcpus, mem_mib and idle_freeze can't be negative", name)
 	}
