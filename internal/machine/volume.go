@@ -196,7 +196,9 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 	out := map[string]volumeUse{}
 	for _, mc := range m.byID {
-		if mc.State == api.StateStopped || mc.State == api.StateFailed {
+		// Una tumba con PID es un rm cuyo VMM sobrevivió al SIGKILL: sigue
+		// escribiendo en sus volúmenes aunque figure stopped (borrado.go, M5).
+		if (mc.State == api.StateStopped || mc.State == api.StateFailed) && !(esTumba(mc) && mc.PID != 0) {
 			continue
 		}
 		for _, v := range mc.Volumes {

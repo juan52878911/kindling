@@ -64,12 +64,15 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 			// tumba lo apunta para rematarlo (limpiarTumba).
 			live.PID = v.(int)
 		}
-		vols := nombresVolumenes(live.Volumes)
-		live.Volumes, live.Shares, live.Forwards = nil, nil, nil
-		// Sus volúmenes de escritura vuelven a root (duenoVolumen), salvo que
-		// el VMM siga vivo: entonces se quedan hasta que lo limpie la tumba.
-		if murio {
-			m.ajustarDuenosLocked(vols)
+		live.Shares, live.Forwards = nil, nil
+		// Sus volúmenes vuelven a root (duenoVolumen) y quedan libres, salvo
+		// que el VMM siga vivo (M5): entonces la tumba los conserva, y sigue
+		// contando como quien los usa (volumeUsersLocked), hasta que
+		// limpiarTumba lo vea morir. Soltarlos ya dejaba que otro run montase
+		// en escritura un ext4 que ese VMM seguía escribiendo.
+		if live.PID == 0 {
+			m.ajustarDuenosLocked(nombresVolumenes(live.Volumes))
+			live.Volumes = nil
 		}
 		live.Labels = nil
 		live.TTLSeconds, live.TTLAt, live.OnTTL = 0, nil, ""
@@ -167,6 +170,9 @@ func (m *Manager) limpiarTumba(id string) error {
 			m.mu.Lock()
 			if live := m.byID[id]; live != nil && live.PID == mc.PID {
 				live.PID = 0
+				// Muerto el VMM, sus volúmenes quedan libres (M5).
+				m.ajustarDuenosLocked(nombresVolumenes(live.Volumes))
+				live.Volumes = nil
 			}
 			m.mu.Unlock()
 			mc.PID = 0

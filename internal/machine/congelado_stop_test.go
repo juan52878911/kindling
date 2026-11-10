@@ -82,3 +82,34 @@ func TestRemoveDeUnaWarmApuntaElVMMDeSuCongelado(t *testing.T) {
 		t.Fatalf("tumba = %+v; quería que conservara el pid %d", tumba, pid)
 	}
 }
+
+// M5: un rm cuyo VMM sobrevive al SIGKILL no suelta sus volúmenes: otro run
+// montaría en escritura un ext4 que ese VMM sigue escribiendo.
+func TestRemoveConElVMMVivoConservaSusVolumenes(t *testing.T) {
+	m := conVolumen(t, "datos")
+	m.bus = events.New()
+	id := "a1a1000000000004"
+	maquinaCorriendo(t, m, id)
+	m.mu.Lock()
+	m.byID[id].Volumes = []api.VolumeAttachment{{Name: "datos", Mount: "/data"}}
+	m.mu.Unlock()
+	prevSenal, prevPlazo := senalMatar, plazoMuerte
+	senalMatar, plazoMuerte = func(int) {}, 20*time.Millisecond
+	t.Cleanup(func() { senalMatar, plazoMuerte = prevSenal, prevPlazo })
+
+	if err := m.Remove(id); err != nil {
+		t.Fatal(err)
+	}
+	m.EsperarBorrados(5 * time.Second)
+	req := api.RunRequest{Volume: "datos"}
+	if _, err := m.reservarVolumenes(req, newID(), "otra"); err == nil {
+		t.Fatal("otro run tomó en escritura el volumen de un rm cuyo VMM sigue vivo")
+	}
+
+	// Muerto el VMM, la tumba se limpia y el volumen queda libre.
+	senalMatar, plazoMuerte = prevSenal, prevPlazo
+	m.reintentarTumbas()
+	if _, err := m.reservarVolumenes(req, newID(), "otra"); err != nil {
+		t.Fatalf("con el VMM ya muerto el volumen debería estar libre: %v", err)
+	}
+}
