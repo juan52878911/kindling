@@ -151,17 +151,17 @@ anidada:
 
 func TestParseYAMLRechaza(t *testing.T) {
 	casos := map[string]string{
-		"tabulador":        "a:\n\tb: 1\n",
-		"ancla":            "a: &x 1\n",
-		"alias":            "a: *x\n",
-		"bloque literal":   "a: |\n  texto\n",
-		"dos documentos":   "a: 1\n---\nb: 2\n",
-		"sangría rara":     "a: 1\n  b: 2\n",
-		"clave repetida":   "a: 1\na: 2\n",
-		"flujo sin cerrar": "a: [1, 2\n",
-		"comilla abierta":  "a: \"x\n",
-		"sin dos puntos":   "a: 1\nb\n",
-		"vacío":            "# nada\n",
+		"tabulador":          "a:\n\tb: 1\n",
+		"ancla":              "a: &x 1\n",
+		"alias":              "a: *x\n",
+		"cabecera de bloque": "a: |x\n  texto\n",
+		"dos documentos":     "a: 1\n---\nb: 2\n",
+		"sangría rara":       "a: 1\n  b: 2\n",
+		"clave repetida":     "a: 1\na: 2\n",
+		"flujo sin cerrar":   "a: [1, 2\n",
+		"comilla abierta":    "a: \"x\n",
+		"sin dos puntos":     "a: 1\nb\n",
+		"vacío":              "# nada\n",
 	}
 	for nombre, doc := range casos {
 		if _, err := parseYAML([]byte(doc)); err == nil {
