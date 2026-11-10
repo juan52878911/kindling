@@ -24,6 +24,12 @@ package machine
 //     EIO, no siempre.
 //  3. Si aun así el invitado ve errores de disco, se anotan en la máquina
 //     (errores_disco.go) y lo dicen `kling ps` y `kling db doctor`.
+//
+// Sin almacén (macOS siempre; Linux sin daemon.cow) no hay cuota del núcleo
+// sobre el overlay de cada instancia, y un VMM comprometido podía alargarlo
+// (ftruncate, escribir más allá del final) hasta llenar el disco del host. Ahí
+// el vigilante es otro (vigilarOverlays): mira el fichero de cada máquina en
+// marcha y para la que pasa de lo que su invitado puede direccionar.
 
 import (
 	"context"
@@ -110,6 +116,7 @@ func (v *vigia) espera() time.Duration {
 // vigilarAlmacen es el bucle del vigilante del almacén (ver arriba).
 func (m *Manager) vigilarAlmacen(ctx context.Context) {
 	if m.alm == nil {
+		m.vigilarOverlays(ctx)
 		return
 	}
 	v := &vigia{}
@@ -303,4 +310,106 @@ func (m *Manager) quitarHold(id string) {
 		live.Hold = ""
 		m.persist()
 	}
+}
+
+// vigiaOverlaysCada es cada cuánto mira vigilarOverlays los overlays. Un
+// stat por máquina: nada. Entre dos vueltas un VMM que escribe a lo que da
+// el disco gana unos GiB, que es lo más que se le escapa.
+const vigiaOverlaysCada = time.Second
+
+// topeOverlay es lo que puede ocupar el overlay de una máquina en la ejecución
+// que empezó en desde.
+type topeOverlay struct {
+	desde time.Time
+	tope  int64
+}
+
+// vigilarOverlays es el vigilante de los overlays sin almacén (ver arriba).
+func (m *Manager) vigilarOverlays(ctx context.Context) {
+	topes := map[string]topeOverlay{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(vigiaOverlaysCada):
+			m.vueltaVigiaOverlays(topes)
+		}
+	}
+}
+
+// vueltaVigiaOverlays es una vuelta de vigilarOverlays: para las máquinas en
+// marcha (o pausadas: su VMM sigue vivo) cuyo overlay, en tamaño o en bloques,
+// pasa de cuotaInstancia de su disco, y devuelve sus nombres.
+//
+// Parar y no pausar, como hace el almacén lleno: pausar se lo pide al propio
+// VMM, que es justo quien no se porta bien; parar mata el proceso y deja el
+// disco como está (lo de más allá del tamaño lógico el invitado no lo ve).
+//
+// El tamaño lógico es el de la máquina (DiskMiB, o el de siempre). Si al
+// empezar a vigilar una ejecución el overlay ya es mayor (un disco que vino así
+// de un snapshot, o lo que creciera con otro daemon), el tope sale de lo que
+// mide entonces: no se para lo que ya estaba, pero tampoco crece más.
+func (m *Manager) vueltaVigiaOverlays(topes map[string]topeOverlay) []string {
+	type vigilada struct {
+		id, name string
+		desde    time.Time
+		logico   int64
+	}
+	m.mu.RLock()
+	var vs []vigilada
+	for id, mc := range m.byID {
+		if (mc.State != api.StateRunning && mc.State != api.StatePaused) || m.transicion[id] != "" {
+			continue
+		}
+		mib := mc.DiskMiB
+		if mib <= 0 {
+			mib = defaultOverlayMiB
+		}
+		v := vigilada{id: id, name: mc.Name, logico: int64(mib) << 20}
+		if mc.StartedAt != nil {
+			v.desde = *mc.StartedAt
+		}
+		vs = append(vs, v)
+	}
+	m.mu.RUnlock()
+
+	vivas := map[string]bool{}
+	var paradas []string
+	for _, v := range vs {
+		vivas[v.id] = true
+		ruta := filepath.Join(m.root, "machines", v.id, "overlay.ext4")
+		fi, err := os.Stat(ruta)
+		if err != nil {
+			continue
+		}
+		mide := max(fi.Size(), allocatedBytes(ruta))
+		t, ok := topes[v.id]
+		if !ok || !t.desde.Equal(v.desde) {
+			t = topeOverlay{desde: v.desde, tope: cuotaInstancia(v.logico)}
+			if mide > t.tope {
+				log.Printf("%s: its disk file is already %d MiB, more than its %d MiB disk; it may not grow past %d MiB",
+					v.name, mide>>20, v.logico>>20, cuotaInstancia(mide)>>20)
+				t.tope = cuotaInstancia(mide)
+			}
+			topes[v.id] = t
+		}
+		if mide <= t.tope {
+			continue
+		}
+		log.Printf("warning: %s: its disk file grew to %d MiB, past the %d MiB its guest can use; stopping it so it can't fill the host disk (its VMM may be compromised)",
+			v.name, mide>>20, t.tope>>20)
+		if _, err := m.Stop(v.id); err != nil {
+			log.Printf("warning: %s: couldn't stop it: %v", v.name, err)
+			continue
+		}
+		delete(topes, v.id)
+		paradas = append(paradas, v.name)
+	}
+	for id := range topes {
+		if !vivas[id] {
+			delete(topes, id)
+		}
+	}
+	sort.Strings(paradas)
+	return paradas
 }

@@ -220,6 +220,15 @@ aplicar a una instancia, esa instancia va a copia completa en lugar de al almac�
 instancias creadas antes de la cuota siguen sin ella. Los tests con un almacén de verdad
 (`TestCuotaXFSDeVerdad`, `TestCuotaBtrfsDeVerdad`) necesitan root y `KLING_TEST_MOUNTS=1`.
 
+**Sin almacén** (macOS siempre, Linux sin `daemon.cow`) no hay cuota del núcleo. Ahí el
+daemon mira cada segundo el overlay de cada máquina en marcha o pausada y, si su tamaño o
+sus bloques pasan del mismo límite (tamaño lógico más la holgura), **la para** y lo dice en
+el log: pausar se lo pediría al VMM, que es quien se porta mal. El disco se queda como
+está; `kling start` la vuelve a arrancar. Un overlay que ya era mayor cuando el daemon
+empezó a vigilar esa ejecución (venía así de otro daemon) se toma como base: no se para,
+pero no puede crecer más. Entre dos vueltas se escapa como mucho lo que el VMM escriba en
+un segundo.
+
 ### copy
 
 La copia completa y dispersa de siempre (`cp --sparse=always`; en macOS `cp -c`, que
