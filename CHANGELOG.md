@@ -43,6 +43,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Changed
 
+- `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
 - macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
@@ -116,6 +117,11 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Fixed
 
+- MCP gateway: an open SSE stream (session GET) kept its microVM awake forever and held a slot of the tenant's in-flight quota. Streams no longer count as in-flight work and are closed when the instance sleeps.
+- MCP gateway: `/mcp/_all` and linked services now apply the tenant in-flight quota, and `call_tool` counts towards prewarm popularity.
+- MCP gateway: the reaper could freeze an instance just picked for a new session, so its `initialize` got a 502.
+- MCP gateway: requests for services without a snapshot left a lock behind per name.
+- `kling mcp` no longer follows redirects when it talks to an MCP URL directly.
 - Credential proxy: a stream cut by the absolute cap or the idle timeout is always aborted towards the guest. If the provider closed its response cleanly on seeing the TLS close_notify, the proxy finished the chunked body normally and the guest took a truncated response as complete (also behind the flaky `TestProxyTechoAbsoluto`).
 - kling-hv: freeing a vsock connection (a guest RST, a dial that times out) no longer closes its socket while the device thread is polling it; that close could hang forever in the kernel, freezing the vCPU and the whole vsock device.
 - Credential proxy links: the `busy` audit record of a connection rejected by `MaxConns` is queued before the connection is closed, so a shutdown right after can no longer drop it.
