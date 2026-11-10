@@ -73,10 +73,19 @@ kling sbx new -template node -ttl 30m
 kling sbx ls
 kling sbx exec <id> -- tsc --version
 kling sbx shell <id>          # una terminal de verdad dentro
+kling sbx cp ./a.ts <id>:/work/a.ts   # y kling sbx cp <id>:/work/out.json . de vuelta
+kling sbx renew <id> -ttl 1h  # otro plazo de inactividad desde ahora
 kling sbx rm <id>
+
+kling sbx template rebuild node   # rehace el dorado con la receta que guardó (-host H: solo uno)
 
 kling sbx hosts       # qué daemons hay detrás y cuánto les queda (token de admin)
 ```
+
+En `kling sbx new`, `-ttl` es tiempo de **inactividad** y al vencer el sandbox se
+congela (`-on-ttl freeze`, el defecto): el siguiente `exec` lo despierta en ms.
+`-on-ttl remove` lo destruye. Es el defecto contrario al de `kling sandbox create`
+del núcleo, que destruye salvo que se pida `-on-ttl freeze`.
 
 Inquilinos, con sus cuotas, se dan de alta por entorno antes de arrancar el
 gateway:

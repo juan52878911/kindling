@@ -290,17 +290,18 @@ igual.
 
 ### Alias de los nombres de antes
 
-Hasta 0.13 kling-mcp añadía verbos sueltos (`kling add`, `kling gateway`…) y
-`models` y `chispa` eran extensiones aparte. Los nombres viejos siguen
-funcionando como **alias** (no salen en la ayuda ni en el completado): `add search gateway export memory migrate` → `mcp …`, `models` →
-`ai model`, `chispa` → `ai chispa`, `commit` → `save`, `snapshots` →
-`template`, `rmi` → `template rm`, `images` → `image`, `plugins` → `plugin`,
-`info` → `status -v`, `resize squeeze mmds` → `machine …`. Los de kling-mcp
-solo se traducen si ninguna extensión instalada sirve ya esa palabra: una
-kling-mcp de 0.13 (manifiesto v1) sigue recibiéndolos tal cual. Fueron silenciosos
-hasta 0.17; ahora avisan una vez por proceso en stderr, y los de extensiones se
-retirarán en una versión que anunciará el CHANGELOG. `commit`, `snapshots` y `plugins`
-se quedan para siempre, en silencio.
+Hasta 0.13 kling-mcp añadía verbos sueltos (`add`, `gateway`…) y `models` y
+`chispa` eran extensiones aparte. Esos nombres avisaron desde 0.18 y se
+retiraron en 1.0: salen con código 2 y dicen el nombre nuevo (`add search
+gateway export memory migrate` → `mcp …`, `models` → `ai model`, `chispa` →
+`ai chispa`, `rmi` → `template rm`, `images` → `image`, `volumes` → `volume`,
+`sandboxes` → `sandbox`, `info` → `status -v`, `resize squeeze mmds` →
+`machine …`). Siguen reservados al núcleo, para que ninguna extensión los coja
+con otro significado; los de kling-mcp son la excepción: una kling-mcp de 0.13
+(manifiesto v1) sigue recibiéndolos tal cual, y solo cuando nadie los sirve se
+dice el nombre nuevo. `commit` → `save`, `snapshots` → `template` y `plugins`
+→ `plugin` se quedan para siempre como **alias** silenciosos (no salen en la
+ayuda ni en el completado).
 
 ## 5. Publicarla para `kling plugin install` (5 minutos)
 
