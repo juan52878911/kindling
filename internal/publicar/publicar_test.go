@@ -382,7 +382,9 @@ func TestBarridoSoloConPublicaciones(t *testing.T) {
 // Un servicio que no escucha: quien conecta recibe un RST cuando vence el
 // plazo, no un cierre limpio.
 func TestServicioQueNoEscuchaDaRST(t *testing.T) {
-	cerrado := puertoLibre(t)
+	// El 1 nunca escucha: un puerto recién liberado lo puede coger otro test
+	// en paralelo y el dial conectaría (fallo intermitente del CI).
+	cerrado := 1
 	f := &maquinasFalsas{ms: map[string]*api.Machine{
 		"a": {ID: "a", Name: "a", State: api.StateRunning, Forwards: map[string]string{"80": "127.0.0.1:" + strconv.Itoa(cerrado)}, Labels: map[string]string{api.LabelPorts: "80"}},
 	}}
