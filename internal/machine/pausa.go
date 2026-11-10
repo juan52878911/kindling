@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -57,6 +58,7 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	start := time.Now()
 	apretado := m.apretarAntesDePausar(ctx, cur)
 	if err := fc.New(sock).Pause(ctx); err != nil {
+		m.reanudarTrasPausaFallida(ctx, cur, sock, err)
 		return nil, fmt.Errorf("pausing: %w", err)
 	}
 
@@ -80,6 +82,37 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name, Message: msg})
 	return &out, nil
+}
+
+// reanudarTrasPausaFallida reanuda mc tras un Pause que devolvió error (M4),
+// como Freeze: la pausa pudo llegar al VMM aunque la respuesta no (un ctx
+// cortado, un plazo), y sin esto la máquina quedaba en pausa figurando como
+// running, sin que el vigilante lo viera porque el proceso vive. Sin el ctx
+// de quien pidió la pausa, que puede ser justo lo que se cortó. Si tampoco
+// se puede reanudar y no se sabe si la pausa llegó (no la rechazó el VMM),
+// queda pendiente para el vigilante con la transición freezing, como tras un
+// volcado fallido (reanudar_pendiente.go).
+func (m *Manager) reanudarTrasPausaFallida(ctx context.Context, mc *api.Machine, sock string, causa error) {
+	rerr := fc.New(sock).ConPlazo(plazoReintento).Resume(context.WithoutCancel(ctx))
+	if rerr == nil || errorDelVMM(causa) {
+		return
+	}
+	log.Printf("pause %s failed (%v) and resuming it failed too (%v): the watcher will retry", mc.Name, causa, rerr)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reanudaciones == nil {
+		m.reanudaciones = map[string]reanudacion{}
+	}
+	if m.transicion == nil {
+		m.transicion = map[string]string{}
+	}
+	pid := mc.PID
+	if live := m.byID[mc.ID]; live != nil {
+		pid = live.PID
+	}
+	m.reanudaciones[mc.ID] = reanudacion{pid: pid, desde: time.Now(),
+		causa: fmt.Sprintf("pause failed (%v) and could not resume it either: %v", causa, rerr)}
+	m.transicion[mc.ID] = api.TransitionFreezing
 }
 
 // reanudarLocked despierta una pausada: Resume y, en el caso normal, nada más
