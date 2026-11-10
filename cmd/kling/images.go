@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -21,7 +23,9 @@ func cmdImages(args []string) error {
 	switch args[0] {
 	case "ls", "list":
 		return imagesList(args[1:])
-	case "refresh", "refresh-bridge":
+	case "refresh":
+		return imagesRefresh(args[1:])
+	case "refresh-bridge":
 		// El puente es de kindling-mcp y su recambio también.
 		return fmt.Errorf("the bridge belongs to kindling-mcp now: kling mcp refresh-bridge [image...]")
 	case "toolchain":
@@ -344,8 +348,143 @@ func mayorMenor(v string) (int, int, bool) {
 	return a, i, err1 == nil && err2 == nil
 }
 
-// pistaRehacer es cómo se rehace una imagen para que lleve el agente nuevo.
-const pistaRehacer = "rebuild it: kling image import -replace <ref> (or compose up -fresh, kling mcp import -force)"
+// pistaRehacer es cómo se pone el agente nuevo en una imagen: cambiarlo dentro
+// sin reconstruirla, o reconstruirla.
+const pistaRehacer = "put the current agent in it: kling image refresh <image> " +
+	"(or rebuild it: kling image import -replace <ref>, compose up -fresh, kling mcp import -force)"
+
+// imagesRefresh pone el kling-guest del daemon (el de su directorio lib, el
+// que deja kling upgrade) en las imágenes que ya llevan uno, sin
+// reconstruirlas: un agente viejo sigue funcionando, degradado, y esto lo pone
+// al día. Es el gemelo de `kling mcp refresh-bridge` para el agente del
+// núcleo, con la misma API (PUT /images/{name}/files con from_host).
+func imagesRefresh(args []string) error {
+	fs := flag.NewFlagSet("image refresh", flag.ContinueOnError)
+	host := hostFlag(fs)
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	res, err := refreshAgents(ctx, c, fs.Args())
+	if err != nil {
+		return err
+	}
+	if len(res) == 0 {
+		fmt.Println("no images built yet")
+		return nil
+	}
+	var hechas, saltadas, fallos int
+	var cambiadas []string
+	for _, r := range res {
+		switch {
+		case r.Error != "" && r.Skipped:
+			fmt.Printf("  -  %-24s %s\n", r.Image, r.Error)
+			saltadas++
+		case r.Error != "":
+			fmt.Printf("  x  %-24s %s\n", r.Image, r.Error)
+			fallos++
+		case r.Updated:
+			fmt.Printf("  ok %-24s guest agent updated\n", r.Image)
+			hechas++
+			cambiadas = append(cambiadas, r.Image)
+		default:
+			fmt.Printf("     %-24s already up to date\n", r.Image)
+		}
+	}
+	fmt.Printf("\n%d updated, %d up to date, %d skipped, %d failed\n",
+		hechas, len(res)-hechas-saltadas-fallos, saltadas, fallos)
+	// Un dorado se congeló con el agente viejo en memoria: sigue con él.
+	if tpls := doradosDe(ctx, c, cambiadas); len(tpls) > 0 {
+		fmt.Printf("\nThese templates were frozen with the old agent and keep it until rebuilt: %s\n", recortarLista(tpls, 8))
+	}
+	if fallos > 0 {
+		return fmt.Errorf("%d image(s) failed to update", fallos)
+	}
+	return nil
+}
+
+// refreshAgents pone el agente del daemon en las imágenes names (todas si no
+// hay ninguna). Solo reemplaza: una imagen sin /usr/local/bin/kling-guest —una
+// capa, que lo toma de su base— sale saltada. Tampoco toca una imagen cuyo
+// agente es de otra arquitectura que la del daemon: el de su lib la dejaría sin
+// arrancar.
+func refreshAgents(ctx context.Context, c *api.Client, names []string) ([]api.ImageFileResult, error) {
+	info, err := c.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		imgs, err := c.Images(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range imgs {
+			names = append(names, i.Name)
+		}
+	}
+	out := make([]api.ImageFileResult, 0, len(names))
+	for _, name := range names {
+		if arch := archDelAgente(ctx, c, name); arch != "" && info.Arch != "" && arch != info.Arch {
+			out = append(out, api.ImageFileResult{Image: name, Skipped: true,
+				Error: fmt.Sprintf("its agent is %s and the daemon's is %s: rebuild it (kling image import -replace <ref>)", arch, info.Arch)})
+			continue
+		}
+		r, err := c.PutImageFile(ctx, name, api.PutImageFileRequest{
+			Path: "/usr/local/bin/kling-guest", Mode: "0755", FromHost: "kling-guest",
+		})
+		switch {
+		case err != nil:
+			out = append(out, api.ImageFileResult{Image: name, Error: err.Error()})
+		case r.Skipped:
+			r.Error = "has no guest agent of its own (a layer takes it from its base: refresh the base)"
+			out = append(out, *r)
+		default:
+			out = append(out, *r)
+		}
+	}
+	return out, nil
+}
+
+// archDelAgente es la arquitectura del agente que lleva la imagen según su
+// receta (built.agent_arch en una emulada, si no built.arch), o "" si no
+// consta: entonces es la del host que la construyó, la del daemon.
+func archDelAgente(ctx context.Context, c *api.Client, name string) string {
+	rec, err := c.ImageRecipe(ctx, name)
+	if err != nil || rec == nil || len(rec.Built) == 0 {
+		return ""
+	}
+	var b struct {
+		Arch      string `json:"arch"`
+		AgentArch string `json:"agent_arch"`
+	}
+	if json.Unmarshal(rec.Built, &b) != nil {
+		return ""
+	}
+	if b.AgentArch != "" {
+		return b.AgentArch
+	}
+	return b.Arch
+}
+
+// doradosDe son los dorados hechos de alguna de las imágenes.
+func doradosDe(ctx context.Context, c *api.Client, imgs []string) []string {
+	if len(imgs) == 0 {
+		return nil
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, s := range snaps {
+		if s != nil && slices.Contains(imgs, s.Image) {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
 
 // imagesRecipe enseña cómo se construyó una imagen.
 //

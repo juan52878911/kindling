@@ -75,7 +75,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 |---|---|---|---|
 | `images/<n>.ext4`, `.layer.ext4`, `vmlinux` | `internal/machine/layer.go` | ninguna; la forma se deduce de qué ficheros hay | nada que migrar. Una base sin `kling.layer` se detecta (`baseSupportsLayers`) |
 | `images/<n>.recipe.json` | `api.ImageRecipe` | ninguna; `kling_version` es informativo | lectura laxa: ilegible es base `min` y sin techo de CPU. El de Android se escribe sin `durable` |
-| `kling-guest` dentro de la imagen | `cmd/kling/builder*.go`, `internal/android` | desde v0.18, `/healthz` con `Accept: application/json` da `agent`, `version` y `caps`; el daemon lo guarda en `api.Machine.Agent` | un agente anterior contesta `ok` y se sigue detectando por sondeo: 404/405 en `/resync`, `/ready`, `/hooks`, o sin cabecera `X-Kling-Share`. Actualizarlo es reconstruir la imagen; solo MCP tiene `refresh-bridge`. En una imagen de Docker sin `sh` es también el init (`/sbin/overlay-init` enlaza a él, `built.init` = `go` en la receta): lo mismo, se reconstruye |
+| `kling-guest` dentro de la imagen | `cmd/kling/builder*.go`, `internal/android` | desde v0.18, `/healthz` con `Accept: application/json` da `agent`, `version` y `caps`; el daemon lo guarda en `api.Machine.Agent` | un agente anterior contesta `ok` y se sigue detectando por sondeo: 404/405 en `/resync`, `/ready`, `/hooks`, o sin cabecera `X-Kling-Share`. Actualizarlo sin reconstruir la imagen es `kling image refresh [imagen…]`, que pone el `kling-guest` del lib del daemon (el que deja `kling upgrade`) con `PUT /images/{n}/files`; MCP tiene además `refresh-bridge` para su puente. Una capa lo toma de su base, y un dorado sigue con el agente con que se congeló hasta rehacerlo. En una imagen de Docker sin `sh` es también el init (`/sbin/overlay-init` enlaza a él, `built.init` = `go` en la receta): lo mismo, se reconstruye |
 | caché OCI (`cache/oci`, `cache/builder/oci`, `cache/verified/oci`) | `internal/oci`, `internal/daemon/builders_cache.go` | direccionada por contenido | sin riesgo: la verificada se crea y se llena sola en la primera construcción sin root; un kling anterior no la lee y rehashea como siempre. Se puede borrar entera. Lo que sube `image import -archive` vive ahí también: una receta con `source: archive` solo se rehace mientras sus blobs sigan en la caché (si no, hay que volver a importar el archivo); un daemon sin la capacidad `oci-blobs` no la entiende y el CLI lo dice antes de subir nada |
 | volúmenes y sus snapshots | `volumes/*.ext4`, `internal/machine/volume*.go` | sin metadatos | sin riesgo mientras sean ext4 |
 
@@ -205,8 +205,10 @@ sigamos en 0.x:
   viejo dentro sigue funcionando con lo que tuviera (degradación, no fallo),
   salvo tres casos que hoy dan la máquina por fallida con "reimport the
   image": `-e` con un agente sin `env` (v0.18), `cmd`/`entrypoint` sin `cmd` y
-  `volume_wait` sin `volume-wait` (v0.19). Que `kling doctor` avise y
-  `kling image ls` marque los agentes viejos **no está hecho**.
+  `volume_wait` sin `volume-wait` (v0.19). `kling doctor` avisa y
+  `kling image ls` marca los agentes viejos (más de una MINOR por detrás,
+  contando 1.0 como la que sigue a 0.20), y `kling image refresh` los pone al
+  día sin reconstruir.
 
 **Dorados obsoletos.** El meta guarda lo que los ata al host: la versión de
 Firecracker (o de kling-vz y de macOS), el `kernel_sha256` que ya hay y la

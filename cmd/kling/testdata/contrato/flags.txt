@@ -163,6 +163,7 @@ kling image import:  -warm
 kling image ls:  -H
 kling image ls:  -json
 kling image ls:  -q
+kling image refresh:  -H
 kling image rm:  -H
 kling image rm:  -f
 kling images build:  -H

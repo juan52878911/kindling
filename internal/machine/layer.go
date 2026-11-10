@@ -205,6 +205,33 @@ func (m *Manager) agenteEnReceta(image string, ag *api.GuestAgent) {
 	if ag == nil || !validName.MatchString(image) {
 		return
 	}
+	m.escribirAgenteEnReceta(image, ag, false)
+}
+
+// OlvidarAgenteDeImagen apunta en la receta de image, y en la de sus capas,
+// que su agente es kling-guest de versión desconocida: se acaba de cambiar
+// (kling image refresh) y lo que decía ya no es cierto. La primera máquina que
+// arranque lo anuncia y agenteEnReceta lo completa. Hasta entonces doctor e
+// image ls no lo juzgan.
+func (m *Manager) OlvidarAgenteDeImagen(image string) {
+	if !validName.MatchString(image) {
+		return
+	}
+	desconocido := &api.GuestAgent{Agent: "kling-guest"}
+	m.escribirAgenteEnReceta(image, desconocido, true)
+	for _, otra := range m.Images() {
+		if otra == image {
+			continue
+		}
+		if base, capa := m.ImageBase(otra); capa && base == image {
+			m.escribirAgenteEnReceta(otra, desconocido, true)
+		}
+	}
+}
+
+// escribirAgenteEnReceta pone ag en la clave "agent" de la receta de image.
+// Sin siempre, solo si no tenía uno con capacidades (agenteEnReceta).
+func (m *Manager) escribirAgenteEnReceta(image string, ag *api.GuestAgent, siempre bool) {
 	ruta := m.recipePath(image)
 	m.recetaMu.Lock()
 	defer m.recetaMu.Unlock()
@@ -220,7 +247,7 @@ func (m *Manager) agenteEnReceta(image string, ag *api.GuestAgent) {
 	if raw, ok := claves["agent"]; ok {
 		_ = json.Unmarshal(raw, &previo)
 	}
-	if previo != nil && (previo.Caps != nil || ag.Caps == nil) {
+	if !siempre && previo != nil && (previo.Caps != nil || ag.Caps == nil) {
 		return
 	}
 	nb, err := json.Marshal(ag)

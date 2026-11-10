@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,5 +61,64 @@ func TestCheckAgentesViejos(t *testing.T) {
 	// que "funciona" se contradice.
 	if strings.Contains(c.Detail, "it works") || !strings.Contains(c.Detail, "outside compatibility") {
 		t.Fatalf("detalle contradictorio: %q", c.Detail)
+	}
+	if !strings.Contains(c.Fix, "kling image refresh") {
+		t.Fatalf("el arreglo no ofrece refrescar el agente: %q", c.Fix)
+	}
+}
+
+// kling image refresh pone el kling-guest del lib del daemon en cada imagen
+// (solo reemplazando), salta la de un agente de otra arquitectura sin
+// tocarla, y dice cuándo una capa lo toma de su base.
+func TestRefreshAgents(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"1.0.0","arch":"arm64"}`))
+	})
+	mux.HandleFunc("GET /images", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"name":"vieja"},{"name":"emulada"},{"name":"capa","base":"vieja"}]`))
+	})
+	mux.HandleFunc("GET /images/{name}/recipe", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("name") {
+		case "emulada":
+			_, _ = w.Write([]byte(`{"name":"emulada","built":{"arch":"amd64","emulated":true,"agent_arch":"amd64"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"name":"` + r.PathValue("name") + `","built":{"arch":"arm64"}}`))
+		}
+	})
+	var puestas []string
+	mux.HandleFunc("PUT /images/{name}/files", func(w http.ResponseWriter, r *http.Request) {
+		var req api.PutImageFileRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Path != "/usr/local/bin/kling-guest" || req.FromHost != "kling-guest" || req.Create {
+			t.Errorf("petición inesperada: %+v", req)
+		}
+		n := r.PathValue("name")
+		puestas = append(puestas, n)
+		if n == "capa" {
+			_, _ = w.Write([]byte(`{"image":"capa","path":"/usr/local/bin/kling-guest","skipped":true,"error":"x"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"image":"` + n + `","path":"/usr/local/bin/kling-guest","updated":true}`))
+	})
+	res, err := refreshAgents(t.Context(), fakeDaemon(t, mux), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	por := map[string]api.ImageFileResult{}
+	for _, r := range res {
+		por[r.Image] = r
+	}
+	if !por["vieja"].Updated {
+		t.Errorf("vieja: %+v", por["vieja"])
+	}
+	if e := por["emulada"]; !e.Skipped || !strings.Contains(e.Error, "amd64") {
+		t.Errorf("emulada: %+v", e)
+	}
+	if c := por["capa"]; !c.Skipped || !strings.Contains(c.Error, "base") {
+		t.Errorf("capa: %+v", c)
+	}
+	if slices.Contains(puestas, "emulada") {
+		t.Error("le puso a una imagen amd64 el agente arm64 del daemon")
 	}
 }
