@@ -318,12 +318,13 @@ And defaults, so you don't repeat the same options on every `run`:
 kling config set defaults.image min
 kling config set defaults.ttl_seconds 600
 kling config set gateway.idle 5m
-kling config set daemon.vmm vz        # the local daemon's VMM: firecracker (Linux) or vz (macOS)
+kling config set daemon.vmm hv        # the local daemon's VMM: firecracker (Linux); auto, hv or vz (macOS)
 kling config show
 ```
 
 `daemon.vmm` is read by the daemon running as that user; empty means the platform's
-(`vz` on macOS, `firecracker` on Linux), and it is validated against the machine it
+(`auto` on macOS, which picks `hv` when `kling-hv` passes its probe and `vz` otherwise;
+`firecracker` on Linux; see [`mac.md`](mac.md)), and it is validated against the machine it
 runs on. `KLING_VMM` overrides it with a backend name or a binary path.
 
 The file lives at `~/.config/kling/config.json` — on macOS too: `UserConfigDir()` would

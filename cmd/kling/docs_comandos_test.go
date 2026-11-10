@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 // Los `kling <sub>` que cita docs/ tienen que existir: un comando que se
@@ -36,6 +38,9 @@ var docsHistoricos = map[string]bool{
 // comprueba la palabra siguiente (toma argumentos libres).
 type nodoCmd struct {
 	subs map[string]*nodoCmd
+	// claves son, en la raíz, las de `kling config set`: las del núcleo y
+	// las que declaran las extensiones (sandbox.listen).
+	claves map[string]bool
 }
 
 func (n *nodoCmd) hijo(nombre string) *nodoCmd {
@@ -53,7 +58,10 @@ func (n *nodoCmd) hijo(nombre string) *nodoCmd {
 // arbolConocido arma el árbol de todo lo que `kling` entiende.
 func arbolConocido(t *testing.T) *nodoCmd {
 	t.Helper()
-	raiz := &nodoCmd{}
+	raiz := &nodoCmd{claves: map[string]bool{}}
+	for _, k := range (&config.Config{}).Keys() {
+		raiz.claves[k[0]] = true
+	}
 	for _, s := range coreTree {
 		for _, c := range s.cmds {
 			n := raiz.hijo(c.Name)
@@ -68,6 +76,9 @@ func arbolConocido(t *testing.T) *nodoCmd {
 		raiz.subs[alias] = raiz.subs[strings.Fields(a)[0]]
 	}
 	for _, b := range builtinExtensions() {
+		for _, k := range b.Manifest.Config {
+			raiz.claves[b.Manifest.Name+"."+k.Key] = true
+		}
 		ns := raiz.hijo(b.Manifest.Name)
 		for _, c := range b.Manifest.Commands {
 			n := ns.hijo(c.Name)
@@ -130,6 +141,7 @@ func extensionDelFuente(t *testing.T, raiz *nodoCmd, dir string) string {
 	}
 	var ns string
 	var cmds []cmdFuente
+	var claves []string
 	for _, p := range pkgs {
 		for _, f := range p.Files {
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -146,6 +158,20 @@ func extensionDelFuente(t *testing.T, raiz *nodoCmd, dir string) string {
 					return true
 				}
 				at, ok := cl.Type.(*ast.ArrayType)
+				if ok && esPlugin(at.Elt, "ConfigKey") {
+					for _, e := range cl.Elts {
+						el, ok := e.(*ast.CompositeLit)
+						if !ok {
+							continue
+						}
+						for _, kv := range el.Elts {
+							if kv, ok := kv.(*ast.KeyValueExpr); ok && kv.Key.(*ast.Ident).Name == "Key" {
+								claves = append(claves, cadena(kv.Value))
+							}
+						}
+					}
+					return true
+				}
 				if !ok || !esPlugin(at.Elt, "Command") {
 					return true
 				}
@@ -185,6 +211,9 @@ func extensionDelFuente(t *testing.T, raiz *nodoCmd, dir string) string {
 	if ns == "" || len(cmds) == 0 {
 		return ""
 	}
+	for _, k := range claves {
+		raiz.claves[ns+"."+k] = true
+	}
 	for _, c := range cmds {
 		padre := raiz.hijo(ns)
 		if c.topLevel {
@@ -208,6 +237,7 @@ var (
 	reInline   = regexp.MustCompile("`[^`\n]+`")
 	reAsignar  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=\S*$`)
 	reRetirado = regexp.MustCompile(`(?i)retir|removed`)
+	reClave    = regexp.MustCompile(`^[a-z_]+\.[a-z_0-9]+$`)
 )
 
 // llamadasEn devuelve lo que sigue a cada «kling» de frag que está en
@@ -292,6 +322,18 @@ func comprobarLlamada(raiz *nodoCmd, args string) string {
 	return ""
 }
 
+// claveCitada es la clave de un «kling config set|get <clave>», o "".
+func claveCitada(args string) string {
+	f := strings.Fields(args)
+	if len(f) < 3 || f[0] != "config" || f[1] != "set" && f[1] != "get" {
+		return ""
+	}
+	if !reClave.MatchString(f[2]) {
+		return ""
+	}
+	return f[2]
+}
+
 // inexistentes son las llamadas de md que no existen, como "fichero:línea: ruta".
 func inexistentes(raiz *nodoCmd, nombre, md string) []string {
 	lineas := strings.Split(md, "\n")
@@ -311,6 +353,10 @@ func inexistentes(raiz *nodoCmd, nombre, md string) []string {
 					out = append(out, nombre+":"+strconv.Itoa(l)+": kling "+f[0]+" (alias de kling "+a+")")
 					continue
 				}
+			}
+			if k := claveCitada(args); k != "" && !raiz.claves[k] && !ejemplosDeDocs[strings.Split(k, ".")[0]] {
+				out = append(out, nombre+":"+strconv.Itoa(l)+": kling config "+k+" (clave desconocida)")
+				continue
 			}
 			mal := comprobarLlamada(raiz, args)
 			if mal == "" || ejemplosDeDocs[mal] {
@@ -360,6 +406,9 @@ func TestDocsComandosDetectaInexistentes(t *testing.T) {
 		{"```\n$ sudo KLING_HOST=x kling sbx nope\n```", "sbx nope"},
 		{"```\nkling ps | kling frobnicate\n```", "frobnicate"},
 		{"```\nkling db brnch ls\n```", "db brnch"},
+		{"```\nkling config set daemon.no_existe 1\n```", "config daemon.no_existe (clave desconocida)"},
+		{"`kling config set daemon.net_mibps 64`", ""},
+		{"`kling config set sandbox.listen 0.0.0.0:8090`", ""},
 		{"`kling squeeze` se retiró en 1.0", ""},
 		{"```\nkling machine squeeze web\n```", ""},
 		{"```\nkling db branch ls\n```", ""},
