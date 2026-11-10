@@ -292,3 +292,53 @@ func TestReleaseObligatoriosSonLosJobsDeCI(t *testing.T) {
 		t.Errorf("jobsCI del test se ha separado de ci.yml:\n ci.yml %q\n test   %q", deCI, jobsCI)
 	}
 }
+
+// El job del e2e del Mac (e2e-mac.yml) que release.sh acepta en success.
+const e2eMacJob = "microVMs (kling-hv, Hypervisor.framework)"
+
+// Sin runner del Mac, e2e-mac.yml deja el e2e de kling-hv saltado y su aviso
+// (sin-runner) en verde: ninguno de los dos abre la puerta de una 1.x.
+func TestReleaseE2EMacSinRunnerBloquea(t *testing.T) {
+	out, ok := correrRelease(t, escenario{runs: runsVerdes(
+		checkRun{e2eMacJob, "completed", "skipped"},
+		checkRun{"microVMs (kling-hv) not run", "completed", "success"},
+	)})
+	if ok {
+		t.Fatalf("el e2e del Mac saltado contó como hecho:\n%s", out)
+	}
+	if !strings.Contains(out, "kling-hv e2e not run") {
+		t.Errorf("no dice qué falta:\n%s", out)
+	}
+	// Y el mismo job en success sí la abre.
+	if out, ok := correrRelease(t, escenario{runs: runsVerdes(checkRun{e2eMacJob, "completed", "success"})}); !ok {
+		t.Fatalf("el e2e del Mac en verde no abrió la puerta:\n%s", out)
+	}
+}
+
+// release.sh busca el job del e2e del Mac por su nombre: si e2e-mac.yml lo
+// renombra, la puerta solo se abriría con el commit status, nunca con el job
+// en verde.
+func TestReleaseNombreDelE2EMacEsElDelWorkflow(t *testing.T) {
+	wf, err := os.ReadFile("../.github/workflows/e2e-mac.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := os.ReadFile("release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(string(wf), "\n  e2e:\n")
+	if i < 0 {
+		t.Fatal("e2e-mac.yml sin job e2e")
+	}
+	m := regexp.MustCompile(`(?m)^    name: (.+)$`).FindStringSubmatch(string(wf[i:]))
+	if m == nil {
+		t.Fatal("el job e2e de e2e-mac.yml sin name:")
+	}
+	if m[1] != e2eMacJob {
+		t.Errorf("el job e2e de e2e-mac.yml se llama %q, y este test espera %q", m[1], e2eMacJob)
+	}
+	if !strings.Contains(string(rel), `select(.name == "`+m[1]+`" and .conclusion == "success")`) {
+		t.Errorf("release.sh no busca el job %q de e2e-mac.yml en success", m[1])
+	}
+}
