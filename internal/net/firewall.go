@@ -422,8 +422,8 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	// hash:ip con la opción timeout ACTIVADA (el "timeout 0" del create solo fija
 	// el defecto en "permanente"; lo que importa es que habilita el timeout por
 	// entrada). El resolver dinámico añade cada IP con "timeout <ttl-real>", así
-	// que caduca sola cuando expira el registro. El sembrado estático de abajo va
-	// sin timeout (permanente): es la red de seguridad.
+	// que caduca sola cuando expira el registro. El sembrado estático de abajo es
+	// la red de seguridad, con semillaTTL (ver sembrarSemillas).
 	// maxelem acota la memoria del set en el kernel (por defecto 65536): un
 	// invitado que llena el set recibe HASH_FULL y no siembra más, sin afectar
 	// a las demás máquinas.
@@ -455,15 +455,31 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string, previas
 	if errReglas != nil {
 		return errReglas
 	}
-	for _, ip := range ips {
-		_ = anadirIPSet(n.NS, set, ip, 0)
-	}
+	sembrarSemillas(n.NS, set, ips)
 
 	// Arrancar el resolver dinámico del host para este netns. Debe quedar vivo
 	// ANTES de devolver: es quien siembra el ipset con las IP reales (y su TTL) que
 	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
 	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
 	return startDNSResolver(n, domains)
+}
+
+// semillaTTL (segundos) es la vida de una IP del sembrado estático: la del
+// techo del resolver (dnsMaxTTL). Antes iban sin timeout, y una IP que el
+// dominio dejaba de usar (un CDN que rota, un dominio que cambia de dueño)
+// seguía abierta toda la vida del netns. Si el invitado la sigue usando, la
+// renueva al preguntar por el dominio: el resolver la añade con su TTL real.
+// Lo ya establecido no depende del set (ESTABLISHED, forwardBase).
+const semillaTTL = dnsMaxTTL
+
+// anadirSemilla es anadirIPSet; una variable para los tests.
+var anadirSemilla = anadirIPSet
+
+// sembrarSemillas mete en el set las IPs resueltas al arrancar, con semillaTTL.
+func sembrarSemillas(ns, set string, ips []string) {
+	for _, ip := range ips {
+		_ = anadirSemilla(ns, set, ip, semillaTTL)
+	}
 }
 
 // reglasAllowlist son las reglas del modo allowlist como argumentos de
