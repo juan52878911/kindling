@@ -886,6 +886,7 @@ func actualizarExtensionesEn(dir, dirCopia, version, fromDir string, base plugin
 		}
 		op := base
 		op.Name, op.Dir, op.CoreVersion = n, dir, strings.TrimPrefix(version, "v")
+		op.AllowDowngrade = true // sigue al núcleo, que ya pasó su comprobación
 		if fromDir != "" {
 			op.File = filepath.Join(fromDir, "kling-"+n+"-"+runtime.GOOS+"-"+runtime.GOARCH)
 			if !fileExists(op.File) {
