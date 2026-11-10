@@ -313,10 +313,14 @@ escribiendo, alargando ficheros con `truncate` o creando ficheros sin fin.
 
 Pasarse da `ENOSPC` («No space left on device») y la operación no hace nada:
 el fichero no crece. Con la escritura diferida el error sale en el siguiente
-`write`, `fsync` o `close` de ese fichero. La cuenta es de la carpeta en este
-arranque de la máquina: la comparten las reconexiones (cortar y volver a
-conectar no la pone a cero), y empieza de cero al parar y arrancar, al
-descongelar o al reiniciar el daemon. Un `rename` que pisa otro fichero no
+`write`, `fsync` o `close` de ese fichero. La cuenta es de la carpeta en esa
+máquina: la comparten las reconexiones, y el daemon la guarda al congelar,
+parar o apagarse, así que descongelar, arrancar otra vez o reiniciar el daemon
+siguen desde donde iba (antes empezaba de cero, y cada congelación por
+inactividad regalaba la cuota entera otra vez). Lo que lleva gastado sale en
+`kling inspect` como `used_bytes` y `used_files` de cada carpeta. Si el daemon
+muere de golpe, se pierde lo escrito desde la última vez que la guardó. Un
+`rename` que pisa otro fichero no
 devuelve lo que ocupaba el pisado. Las carpetas `ro` no llevan cuota. Lo mismo
 por FUSE que por virtio-fs (kling-hv): las dos acaban en el mismo servidor.
 

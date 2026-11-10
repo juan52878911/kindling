@@ -49,6 +49,13 @@ type ShareAttachment struct {
 	// dónde va la sesión de verdad (un agente anterior o un kernel sin
 	// virtio-fs caen a FUSE).
 	Transport string `json:"transport,omitempty"`
+	// UsedBytes y UsedFiles son lo que lleva gastado de su cuota una carpeta
+	// rw (crecimiento neto en bytes y entradas nuevas, ver docs/compartir.md).
+	// Se guardan al congelar, parar o apagar el daemon y la cuenta sigue desde
+	// ahí: antes volvía a cero en cada thaw. Con la máquina en marcha, la
+	// respuesta trae lo de ese momento.
+	UsedBytes int64 `json:"used_bytes,omitempty"`
+	UsedFiles int64 `json:"used_files,omitempty"`
 	// Status es el estado de una carpeta viva: "attached", "detached" (sin
 	// sesión ahora mismo: la máquina está congelada o reconectando) o
 	// "error: ...". No se guarda: lo calcula el daemon al responder.

@@ -2,11 +2,11 @@ package share
 
 // Cuota de una carpeta rw (M5): sin ella el invitado llena el disco del host
 // escribiendo, alargando ficheros con SetSize o creando ficheros sin fin. Se
-// cuenta el crecimiento NETO desde que el daemon empezó a servir la carpeta en
-// este arranque de la máquina: lo que alarga un fichero (WriteAt más allá del
-// final, SetSize hacia arriba) suma; lo que lo encoge (SetSize hacia abajo,
-// O_TRUNC) o lo borra (unlink del último nombre, ya cerrado) resta, sin bajar
-// nunca de cero: borrar lo que ya estaba en la carpeta no da presupuesto para
+// cuenta el crecimiento NETO desde que la máquina empezó a usar la carpeta (el
+// daemon guarda la cuenta al congelar, parar o apagarse: ver SetUsage): lo que
+// alarga un fichero (WriteAt más allá del final, SetSize hacia arriba) suma;
+// lo que lo encoge (SetSize hacia abajo, O_TRUNC) o lo borra (unlink del
+// último nombre, ya cerrado) resta, sin bajar nunca de cero: borrar lo que ya estaba en la carpeta no da presupuesto para
 // escribir más. Ver docs/compartir.md, «Cuota de las carpetas rw».
 //
 // Se cuenta el tamaño aparente, no los bloques: un fichero disperso cuenta
@@ -69,6 +69,13 @@ type Quota struct {
 
 // NewQuota crea la cuenta de una carpeta con los topes l.
 func NewQuota(l Limits) *Quota { return &Quota{lim: l, abiertos: map[Ident]int{}} }
+
+// SetUsage pone la cuenta en bytes y files, lo que llevaba la carpeta en un
+// arranque anterior (el daemon lo guarda al congelar o parar). Antes de servir.
+func (q *Quota) SetUsage(bytes, files int64) {
+	q.bytes.Store(max(bytes, 0))
+	q.files.Store(max(files, 0))
+}
 
 // Usage devuelve los bytes y las entradas netas que lleva la carpeta.
 func (q *Quota) Usage() (bytes, files int64) { return q.bytes.Load(), q.files.Load() }
