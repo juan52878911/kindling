@@ -325,6 +325,10 @@ valida; baja los `companions` del mismo sitio con el mismo control; y deja al
 lado `kling-<nombre>.json` con `{name, version, url, sha256, installed}`, que es
 lo que `kling plugin ls` enseña como origen.
 
+Instalar una versión más vieja que la instalada es un error: para volver atrás,
+`kling plugin rm <nombre>` y luego el `install`. `kling upgrade` sí las baja,
+porque lleva las extensiones a la versión del núcleo.
+
 Para publicar una extensión propia fuera de este repo basta con reproducir esa
 forma en cualquier servidor HTTPS:
 
