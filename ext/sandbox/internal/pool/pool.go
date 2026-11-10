@@ -76,8 +76,9 @@ func (r *Rellenador) Vigilar(ctx context.Context) {
 	}()
 }
 
-// Vuelta mira cada host y crea lo que falte. Nunca destruye: si sobran
-// precalentadas —porque bajó el pool de la plantilla— las recoge su TTL.
+// Vuelta mira cada host y crea lo que falte. Solo destruye las precalentadas
+// rotas (failed, stopped); si sobran sanas —porque bajó el pool de la
+// plantilla— las recoge su TTL.
 func (r *Rellenador) Vuelta(ctx context.Context) {
 	// Una vuelta cada vez: si una tarda más que el periodo, encadenar otra solo
 	// dispararía arranques simultáneos contra el mismo host.
@@ -111,9 +112,21 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 		}
 		hay := 0
 		for _, mc := range vivas {
-			if mc.Labels[LabelTemplate] == nombre && mc.Labels[LabelTenant] == "" && plantilla.DelFrontal(mc.Labels) {
-				hay++
+			if mc.Labels[LabelTemplate] != nombre || mc.Labels[LabelTenant] != "" || !plantilla.DelFrontal(mc.Labels) {
+				continue
 			}
+			// Una rota no la reclama el frontal (esPrecalentadaDe): contarla
+			// dejaría la plaza ocupada para siempre y cada create caería al
+			// restore. Se borra y se fabrica otra.
+			if rota(mc) {
+				if err := h.Cliente.Remove(ctx, mc.ID); err != nil {
+					r.log.Printf("pool %s/%s: removing the %s prewarmed %s: %v", h.Nombre, nombre, mc.State, shortID(mc.ID), err)
+				} else {
+					r.log.Printf("pool %s/%s: removed the %s prewarmed %s", h.Nombre, nombre, mc.State, shortID(mc.ID))
+				}
+				continue
+			}
+			hay++
 		}
 		for i := hay; i < quiere; i++ {
 			if ctx.Err() != nil {
@@ -138,6 +151,19 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 			r.log.Printf("pool %s/%s: prewarmed %s (%d/%d)", h.Nombre, nombre, mc.ID[:12], i+1, quiere)
 		}
 	}
+}
+
+// rota dice si una precalentada ya no sirve: ni corre ni duerme, y no va a
+// volver sola a ninguno de los dos.
+func rota(mc *api.Machine) bool {
+	return mc.State == api.StateFailed || mc.State == api.StateStopped
+}
+
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 // DeseoDe saca de la anotación del snapshot cuántas precalentadas quiere esa
