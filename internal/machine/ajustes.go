@@ -64,6 +64,7 @@ func (m *Manager) Ajustes() map[string]string {
 		"KLING_GC_DISK_TARGET":      strconv.Itoa(gcDiskTargetPct(high)),
 		"KLING_FAILED_RETENTION":    failedRetention().String(),
 		"KLING_JAILER":              jailer,
+		"KLING_REQUIRE_SIGNED":      onOff(firmaExigida()),
 		"KLING_DIFF_FREEZE":         onOff(congelarEnDiff()),
 		"KLING_SQUEEZE_BEFORE_DUMP": onOff(!globoSinEstadisticas && os.Getenv("KLING_SQUEEZE_BEFORE_DUMP") != "0"),
 		"KLING_READY_BOOST":         boost,

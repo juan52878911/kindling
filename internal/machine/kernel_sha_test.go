@@ -149,7 +149,7 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 // snapshot de la prueba no tiene ficheros reales, así que runFrom falla más
 // adelante; lo que importa es que no sea por el kernel.
 func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	// Sin RootfsSHA256/SnapSHA256 la integridad se salta y runFrom llega hasta
 	// el aviso de F2 (GuestIPv6Off, "no consta" aquí), que publica en el bus.
@@ -168,7 +168,7 @@ func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
 // Un snapshot SIN kernel_sha256 (anterior a K2, o congelado antes de K1) sigue
 // restaurándose: la comprobación se salta, no falla.
 func TestRunFromAceptaSnapshotSinKernelSHA256(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	escribirKernel(t, m, "kernel actual, da igual cuál")
 
