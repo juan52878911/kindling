@@ -3734,9 +3734,17 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
 		if pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			// Esperando a que muera, como start.devolver (M3): sin esperar, un
+			// reintento inmediato veía el VMM moribundo en liveVMs, lo
+			// readoptaba ("was already running") y acababa failed al morir.
+			senalMatar(pid)
+			if !waitGone(pid, plazoMuerte) {
+				log.Printf("thaw %s: the VMM of the failed thaw (pid %d) is still alive %s after SIGKILL", mc.Name, pid, plazoMuerte)
+			}
 		}
 		m.desmontarRed(netcfg, mc.ID)
+		// Y su techo de CPU, que no hace nada sin proceso (como en Stop).
+		m.releaseCPU(mc.ID)
 		if base != "" {
 			// El mem.full de este despertar (diff_volcado.go): el siguiente
 			// lo rehace, y mientras tanto ocuparía lo que el diff.
@@ -3896,11 +3904,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// matarlo AQUI: dejarlo seria un firecracker huerfano reteniendo la RAM
 		// de su invitado, que no aparece en `kling ps` y que nadie contabiliza al
 		// decidir si cabe la siguiente microVM.
-		if pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		m.desmontarRed(netcfg, mc.ID)
-		return nil, retiradaDurante(mc.Name, "thawed")
+		return abortar(retiradaDurante(mc.Name, "thawed"))
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
