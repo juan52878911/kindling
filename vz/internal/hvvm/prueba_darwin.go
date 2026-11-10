@@ -191,6 +191,15 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
 
+// clonRAM: el modo con el que queda out, clon de base como la RAM de una
+// congelación (khv_prueba_clon_ram), o -errno.
+func clonRAM(base, out string) int {
+	cb, co := C.CString(base), C.CString(out)
+	defer C.free(unsafe.Pointer(cb))
+	defer C.free(unsafe.Pointer(co))
+	return int(C.khv_prueba_clon_ram(cb, co))
+}
+
 // irqNivelSinGIC: el nivel que deja vmmio_irq cuando el GIC no cambia la
 // línea (khv_prueba_irq_nivel).
 func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }

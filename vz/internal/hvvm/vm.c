@@ -2258,6 +2258,46 @@ int khv_resume(unsigned bit) {
   return parar ? -1 : 0;
 }
 
+// clonar_ram crea mem_out con los datos de base: un clon APFS si se puede y,
+// en otro volumen o sin clones, una copia. 0600 los dos: lleva toda la RAM
+// del invitado (secretos ya leídos incluidos), y el clon hereda el modo de su
+// base (un dorado 0644 daba una congelación 0644). Devuelve el fd, o -1 con
+// errno y sin dejar el fichero; *copiando dice si falló la copia.
+static int clonar_ram(int base, const char *mem_out, bool *copiando) {
+  *copiando = false;
+  int fd;
+  if (fclonefileat(base, AT_FDCWD, mem_out, 0) == 0) {
+    fd = open(mem_out, O_RDWR);
+    if (fd >= 0 && fchmod(fd, 0600) == 0) return fd;
+  } else {
+    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return -1;
+    if (fcopyfile(base, fd, NULL, COPYFILE_DATA) == 0) return fd;
+    *copiando = true;
+  }
+  int e = errno;
+  if (fd >= 0) close(fd);
+  unlink(mem_out);
+  errno = e;
+  return -1;
+}
+
+// khv_prueba_clon_ram: el modo con el que clonar_ram deja out, clonado de
+// base, o -errno (pruebas).
+int khv_prueba_clon_ram(const char *base, const char *out) {
+  int b = open(base, O_RDONLY);
+  if (b < 0) return -errno;
+  bool copiando;
+  int fd = clonar_ram(b, out, &copiando);
+  int e = errno;
+  close(b);
+  if (fd < 0) return -e;
+  struct stat st;
+  int r = fstat(fd, &st) == 0 ? (int)(st.st_mode & 07777) : -errno;
+  close(fd);
+  return r;
+}
+
 int khv_snapshot(const char *mem_out) {
   if (anidada) {
     fallo(ERR_SNAP_ANIDADA);
@@ -2340,19 +2380,11 @@ int khv_snapshot(const char *mem_out) {
 
   // Memoria: clon del fichero que respalda la RAM + las páginas que el
   // invitado cambió (copiadas por el CoW de MAP_PRIVATE). mincore da el mapa.
-  if (fclonefileat(base_fd, AT_FDCWD, mem_out, 0) == 0) {
-    fd = open(mem_out, O_RDWR);
-  } else {
-    // Otro volumen o sin clones: copia de los datos. 0600: lleva toda la RAM
-    // del invitado (secretos ya leídos incluidos), como el clon.
-    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0 && fcopyfile(base_fd, fd, NULL, COPYFILE_DATA) != 0) {
-      fallo("copying the RAM file to %s: %s", mem_out, strerror(errno));
-      goto fin;
-    }
-  }
+  bool copiando;
+  fd = clonar_ram(base_fd, mem_out, &copiando);
   if (fd < 0) {
-    fallo("creating %s: %s", mem_out, strerror(errno));
+    if (copiando) fallo("copying the RAM file to %s: %s", mem_out, strerror(errno));
+    else fallo("creating %s: %s", mem_out, strerror(errno));
     goto fin;
   }
   // Lo que hubiera detrás de la RAM es el estado del snapshot anterior.

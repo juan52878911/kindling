@@ -342,6 +342,7 @@ int vnet_prueba_rx(int red);
 int khv_prueba_poll_red(void);
 int khv_prueba_vsock_muerto(int64_t *dial_ns);
 int khv_prueba_irq_nivel(void);
+int khv_prueba_clon_ram(const char *base, const char *out);
 int khv_prueba_poll_vsock(void);  // un EAGAIN de poll no mata el hilo de rx (prueba.c)  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
 // rng
