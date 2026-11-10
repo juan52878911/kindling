@@ -24,9 +24,11 @@ import (
 // mismos bytes en réplicas independientes, y con ellos los mismos ids de sesión,
 // nonces y claves efímeras.
 //
-// Quién puede llamarla: solo quien alcanza el puerto del agente, que es el host
-// (el daemon, y los clientes de su socket, que ya son root). El gateway MCP NO
-// debe reenviarle esta ruta a sus clientes: ver IsControlPath. Aun así, lo que
+// Quién puede llamarla: solo el host (el daemon, y los clientes de su socket,
+// que ya son root). El puerto del agente también lo alcanza un proceso del
+// propio invitado, por loopback o por su IP: Register la envuelve en soloHost,
+// que se lo niega. El gateway MCP NO debe reenviarle esta ruta a sus clientes:
+// ver IsControlPath. Aun así, lo que
 // entra se valida: tamaño acotado, entropía dentro de límites y una hora
 // plausible. Mezclar bytes conocidos en el pool no resta entropía —el kernel
 // los combina con un hash—, así que lo peor que puede hacer un llamante con
@@ -109,6 +111,12 @@ func ResyncHandler() http.HandlerFunc {
 		var renewed []string
 		if req.Restore == api.ResyncInstance {
 			renewed = renewMachineID(machineIDFiles)
+			// Los exec que corrían al volcar el dorado no son de esta copia
+			// (cortarExecs). Al descongelar la misma máquina no se tocan: su
+			// petición puede seguir viva, y la red los corta si no.
+			if n := cortarExecs(); n > 0 {
+				log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
+			}
 		}
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
