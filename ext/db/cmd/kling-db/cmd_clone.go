@@ -252,11 +252,12 @@ func (f *cloneFlags) opts(rawURL string) (cloneOpts, error) {
 		o.password = strings.TrimRight(string(b), "\r\n")
 	} else {
 		o.password = os.Getenv("PGPASSWORD")
-		// Desde aquí solo la tiene el proxy de credenciales: ningún proceso que
-		// lance kling db (kling, db-golden.sh, bash) la hereda del entorno.
-		os.Unsetenv("PGPASSWORD")
-		os.Unsetenv("PGPASSFILE")
 	}
+	// Desde aquí solo la tiene el proxy de credenciales: ningún proceso que
+	// lance kling db (kling, db-golden.sh, bash) la hereda del entorno, venga
+	// la contraseña de donde venga.
+	os.Unsetenv("PGPASSWORD")
+	os.Unsetenv("PGPASSFILE")
 	return o, nil
 }
 
@@ -482,6 +483,18 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		if _, err := c.a.k.Run(ctx, strings.NewReader(cloneDumpScript(o.source)), "exec", "-i", "-timeout", "1h", builder, "--", "sh", "-s"); err != nil {
 			return nil, fmt.Errorf("dumping the source: %w", err)
 		}
+	}
+
+	// Los event triggers del origen, fuera antes de nada: pg_dump los deja al
+	// final del volcado, así que aún no se ha disparado ninguno, pero el
+	// siguiente DDL (el del enmascarado, la siguiente migración de quien use
+	// el golden) los lanzaría como superusuario.
+	out, err = c.stagingPsql(ctx, builder, dropEventTriggersSQL, "1m")
+	if err != nil {
+		return nil, fmt.Errorf("dropping the event triggers of the source: %w", err)
+	}
+	if strings.TrimSpace(string(out)) != "evt|0" {
+		return nil, errors.New("nothing was built: event triggers of the source survived DROP EVENT TRIGGER")
 	}
 
 	out, err = c.stagingPsql(ctx, builder, dbmask.CatalogSQL, "10m")
@@ -808,6 +821,20 @@ func hostProbe(ctx context.Context, o cloneOpts) ([]byte, error) {
 	}
 	return []byte(b.String()), nil
 }
+
+// dropEventTriggersMarker distingue la orden en los tests.
+const dropEventTriggersMarker = "-- kling-db:drop-event-triggers"
+
+// dropEventTriggersSQL borra todos los event triggers de staging (un DROP
+// EVENT TRIGGER no dispara event triggers) y cuenta los que quedan.
+const dropEventTriggersSQL = dropEventTriggersMarker + `
+DO $$DECLARE r record; BEGIN
+  FOR r IN SELECT evtname FROM pg_event_trigger LOOP
+    EXECUTE format('DROP EVENT TRIGGER %I', r.evtname);
+  END LOOP;
+END$$;
+SELECT 'evt|' || count(*) FROM pg_event_trigger;
+`
 
 // cloneDumpScript vuelca producción DENTRO de la máquina y lo restaura en el
 // Postgres del tmpfs, por una tubería: el volcado sin enmascarar no se

@@ -478,3 +478,16 @@ LINE 2: FROM productos p`, "the relation productos does not exist", true},
 		t.Fatalf("repairPrompt = %q", p)
 	}
 }
+
+// readOnlyQuery no se fía del validador: ni barra invertida ni \r (que cierra
+// un comentario -- en Postgres) llegan al psql del rol ro.
+func TestReadOnlyQueryRechazaEscapes(t *testing.T) {
+	for _, sql := range []string{"SELECT 1 \\! id", "SELECT 1 --\r, pg_sleep(30)", "SELECT 1\x00"} {
+		if _, err := readOnlyQuery("ro", sql, 10, time.Second); err == nil {
+			t.Errorf("readOnlyQuery(%q) accepted", sql)
+		}
+	}
+	if _, err := readOnlyQuery("ro", "SELECT 1\n-- fin", 10, time.Second); err != nil {
+		t.Errorf("readOnlyQuery rejected a plain query: %v", err)
+	}
+}
