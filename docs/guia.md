@@ -468,7 +468,17 @@ $ kling logs <ref> -tail 50        # consola serie: la única ventana hacia dent
 - **`-cpu-pct`** acota el uso de CPU con su propio cgroup (50% de un core por defecto).
 - **Reconciliación al arrancar**: el daemon compara su estado guardado con la realidad
   del host, readopta las microVMs que siguen vivas y limpia namespaces y cgroups
-  huérfanos.
+  huérfanos. Antes de readoptar una le pregunta a su VMM en qué estado está: si el
+  reinicio cortó un `freeze` o un `pause` y el invitado quedó en pausa figurando
+  `running`, la reanuda (o, si su volcado ya estaba sellado, la deja `warm`); si cortó un
+  `commit` con el disco de la plantilla apuntando al del snapshot, mata su VMM y la deja
+  `failed` (su disco propio queda como estaba en la pausa; `kling start` la arranca).
+- **`kling rm` con el VMM vivo**: si el VMM sobrevive al SIGKILL, la máquina borrada
+  (`~rm-<id>`) conserva sus volúmenes hasta que muere, y otro `run` que los pida en
+  escritura se niega («volume is mounted by ~rm-…») en vez de montar un ext4 que ese VMM
+  sigue escribiendo.
+- **`state.json` y `fondos.json` son 0600**: guardan el inventario (IPs, reenvíos,
+  dueños). Solo los lee el daemon.
 - **Guardián continuo**: cada 10 s comprueba que lo que dice estar `running` corre de
   verdad. Una máquina cuyo proceso desapareció pasa a `failed` y libera sus recursos.
 - **Los bucles de fondo contienen sus pánicos.** Cada iteración del reconciliador, el
