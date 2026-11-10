@@ -70,6 +70,9 @@ type doctorInput struct {
 	// socket es el socket Unix del daemon visto desde aquí (sondearSocket);
 	// nil si el endpoint no es un socket local (ssh://).
 	socket *socketProbe
+	// bridge es el LaunchAgent com.kindling.bridge (nil si no hay): un
+	// programa que ya no existe lo tumba en cada arranque.
+	bridge *servicioPuente
 }
 
 func cmdDoctor(args []string) error {
@@ -125,6 +128,7 @@ func cmdDoctor(args []string) error {
 	cancel()
 
 	in.socket = sondearSocket(endpoint)
+	in.bridge = sondearServicioPuente()
 	checks := doctorChecks(in)
 	if *asJSON {
 		checks = append(deRuntime, checks...)
@@ -303,10 +307,18 @@ func doctorChecks(in doctorInput) []doctorCheck {
 	case len(in.companions) > 0 && !inDirs(in.extDir, in.pathDirs):
 		// kling encuentra las extensiones igual, y nadie llama a sus
 		// compañeros por su nombre: kling-mcp busca kling-bridge a su lado y
-		// el LaunchAgent lleva la ruta absoluta. Solo se dice.
+		// el LaunchAgent lleva la ruta absoluta. Solo se dice; el aviso
+		// distraía del servicio roto de verdad (checkServicioPuente).
 		dir.Detail += fmt.Sprintf(" (searched by kling; not on PATH, so %s cannot be run by name by hand)", strings.Join(in.companions, ", "))
 	}
 	out = append(out, dir)
+	mcp := false
+	for _, p := range in.plugins {
+		mcp = mcp || (p.Name == "mcp" && p.Err == nil && !p.Disabled)
+	}
+	if c, ok := checkServicioPuente(in.bridge, mcp); ok {
+		out = append(out, c)
+	}
 	return out
 }
 
