@@ -550,9 +550,16 @@ binary is always installed, though, so turning it on is one command rather than 
 ```sh
 kling mcp memory status            # whether it is on and against what
 kling mcp memory install-service   # leaves the local bridge as a permanent service (macOS)
+kling mcp memory install-service -repair   # points that service at the current bridge
 kling mcp memory enable            # uses engram; -service <svc> for another one
 kling mcp memory disable
 ```
+
+`-repair` rewrites the installed LaunchAgent with the `kling-bridge` that sits next to
+`kling-mcp` now, keeping its `-listen` and command: for when the bridge moved (an old
+`make install` left it in `~/.local/bin`) and launchd exits with 78 on every try.
+`kling plugin install mcp` and `kling upgrade -cli` run it themselves when the service
+points at a bridge that is gone, and `kling doctor` flags it.
 
 When it is on, the gateway records in the memory service which tool resolved each request,
 and uses that history to rank subsequent searches better:

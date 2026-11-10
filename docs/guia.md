@@ -559,6 +559,13 @@ vez (`kling run -allow-exec`, instala lo que haga falta, `kling save`) y cada sa
 creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
 0,57 s en el laboratorio.
 
+`-ttl` es su vida y `-on-ttl` lo que pasa cuando se acaba: `remove` (por defecto) lo
+destruye; `freeze` convierte el ttl en tiempo de inactividad, cada exec lo renueva, y el
+siguiente tras vencer despierta el sandbox en ms. `kling sandbox renew sb -ttl 10m` lo
+alarga. `kling sbx new`, el del gateway, tiene el defecto contrario (`freeze`;
+`-on-ttl remove` para destruirlo), porque sus sandboxes están pensados para esperar
+ociosos entre turnos de un agente.
+
 La ejecución es **opt-in al arrancar**: viaja en la línea de comandos del kernel, que
 solo escribe el host, y se congela con la memoria. Una microVM de servicio nunca la
 tiene, y un snapshot sin ella no puede convertirse en sandbox. Guía:
@@ -589,7 +596,9 @@ kling completion install         # recarga el completado tras instalar una
 tu `kling`, **lo verifica contra el `SHA256SUMS` de la release antes de escribirlo**,
 comprueba su manifiesto y lo deja en `~/.local/share/kling/plugins` (o en el primer
 directorio de `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` y `-file RUTA` eligen
-otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incorporada**
+otro origen; `kling plugin rm <nombre>` la quita. Instalar una versión más vieja que la
+instalada se rechaza (para volver atrás, quitarla antes); `kling upgrade` sí las baja a
+la versión del núcleo. `ai` es una **extensión incorporada**
 (`kling ai model`, `kling ai chispa`, el gateway de IA): vive dentro del binario de
 `kling`, pero se lista, se documenta y se apaga igual.
 
@@ -633,6 +642,11 @@ Kubernetes ([`docs/kubernetes.md`](kubernetes.md)).
 ```sh
 kling plugin install sandbox
 ```
+
+`kling sbx gateway` escucha en `127.0.0.1:8090`. Fuera del loopback no arranca sin TLS
+(`-tls-cert`/`-tls-key`, o `sandbox.tls_cert`/`sandbox.tls_key`) o `-insecure-listen`,
+que acepta a sabiendas que los tokens de los inquilinos viajen en claro (detrás de un
+proxy que termina TLS). Detalles en [`ext/sandbox/README.md`](../ext/sandbox/README.md).
 
 ## Escribir una extensión
 
@@ -1342,7 +1356,7 @@ incluido **lo que no está resuelto** — está en [SECURITY.md](../SECURITY.md)
 | Daemon inalcanzable por red | Solo socket Unix; acceso remoto exclusivamente por SSH |
 | VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo el grupo `kvm` |
 | Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas); cgroup de CPU por máquina; tope de 256 |
+| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas; solo Firecracker, se lee en cada arranque en frío sin reiniciar el daemon, y las copias de un dorado conservan el límite congelado en él); cgroup de CPU por máquina; tope de 256 |
 | Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
 | Sin secretos en snapshots | los secretos se inyectan vía MMDS (comunes a todas las sesiones de la máquina), solo en la máquina viva |
 

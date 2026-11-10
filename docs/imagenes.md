@@ -785,6 +785,26 @@ importa en 0,69 s y nginx responde, del mismo tamaño que con las capas gzip.
   tampoco quita sus condiciones (la de Timescale no permite ofrecerla como base
   de datos gestionada). No publiques imágenes convertidas.
 
+### Poner al día el agente sin reconstruir (`kling image refresh`)
+
+Una imagen guarda el `kling-guest` con el que se construyó; `kling upgrade` solo
+cambia el del directorio lib del daemon. Un agente viejo sigue funcionando con
+lo que tuviera (degradado), y `kling image ls` y `kling doctor` lo marcan.
+`kling image refresh [imagen...]` (todas si no se nombra ninguna) mete el
+agente del daemon en cada una por la misma API que `kling image put`
+(`PUT /images/{nombre}/files` con `from_host`), sin reconstruirla:
+
+- una **capa** no lleva agente propio, lo toma de su base: sale saltada, y hay
+  que refrescar la base;
+- una imagen cuyo agente es de **otra arquitectura** que el del daemon (una
+  emulada) también se salta: el de lib la dejaría sin arrancar; esa se
+  reconstruye (`kling image import -replace <ref>`);
+- los **dorados** hechos de una imagen refrescada se congelaron con el agente
+  viejo en memoria y lo conservan hasta rehacerlos; el comando los nombra.
+
+Sale con error si alguna imagen falló. Es el gemelo de `kling mcp
+refresh-bridge`, que hace lo mismo con el puente de kling-mcp.
+
 ### El constructor `oci` no corre como root
 
 Baja de internet y parsea tars que no son de fiar, y no necesita root para

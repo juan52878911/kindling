@@ -544,6 +544,12 @@ process group on `-timeout`. Prepare a template once
 created with `-from` starts in **~300 ms** with it already inside — five in parallel took
 0.57 s in the lab.
 
+`-ttl` is its lifetime and `-on-ttl` what happens when it runs out: `remove` (the default)
+destroys it; `freeze` turns the ttl into idle time, each exec renews it, and the next one
+after it ran out wakes the sandbox in ms. `kling sandbox renew sb -ttl 10m` extends it.
+The gateway's `kling sbx new` has the opposite default (`freeze`; `-on-ttl remove` to
+destroy), because its sandboxes are meant to be idle between an agent's turns.
+
 Exec is **opt-in at boot**: it travels in the kernel command line that only the host
 writes, and it is frozen with the memory. A service microVM never has it, and a snapshot
 without it cannot become a sandbox. Guide: [`docs/exec-sandbox.md`](exec-sandbox.md).
@@ -573,7 +579,9 @@ kling completion install         # reload completion after installing one
 your `kling`, **verifies it against the release's `SHA256SUMS` before writing it**, checks
 its manifest and drops it in `~/.local/share/kling/plugins` (or the first directory of
 `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` and `-file PATH` pick another source;
-`kling plugin rm <name>` removes it. `ai` is a **built-in extension** (`kling ai model`,
+`kling plugin rm <name>` removes it. Installing an older version than the installed one
+is refused (remove it first to go back); `kling upgrade` does take extensions down to
+the core's version. `ai` is a **built-in extension** (`kling ai model`,
 `kling ai chispa`, the AI gateway): it lives inside the `kling` binary but is listed,
 documented and switched off the same way.
 
@@ -617,6 +625,11 @@ thing from Kubernetes ([`docs/kubernetes.md`](kubernetes.md)).
 ```sh
 kling plugin install sandbox
 ```
+
+`kling sbx gateway` listens on `127.0.0.1:8090`. Off loopback it refuses to start without
+TLS (`-tls-cert`/`-tls-key`, or `sandbox.tls_cert`/`sandbox.tls_key`) or
+`-insecure-listen`, which knowingly lets tenant tokens travel in clear (behind a proxy
+that terminates TLS). Details in [`ext/sandbox/README.md`](../ext/sandbox/README.md).
 
 ## Writing an extension
 
@@ -1307,7 +1320,7 @@ The guest is third-party code: assume it is hostile. The full threat model — i
 | Daemon unreachable over the network | Unix socket only; remote access exclusively over SSH |
 | Unprivileged VMM | `setpriv` to a service user: **CapEff 0**, `no_new_privs`, only the `kvm` group |
 | No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
-| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares); CPU cgroup per machine; cap of 256 |
+| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares; Firecracker only, read on each cold boot without restarting the daemon, and a template's copies keep the limit frozen in it); CPU cgroup per machine; cap of 256 |
 | No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
 | No secrets in snapshots | secrets are injected via MMDS (shared by every session of the machine), into the live machine only |
 

@@ -561,9 +561,16 @@ proyecto.
 ```sh
 kling mcp memory status        # si está activa y contra qué
 kling mcp memory install-service # deja el puente local como servicio permanente (macOS)
+kling mcp memory install-service -repair # apunta ese servicio al puente de ahora
 kling mcp memory enable        # usa engram; -service <svc> para otro
 kling mcp memory disable
 ```
+
+`-repair` reescribe el LaunchAgent instalado con el `kling-bridge` que está ahora junto a
+`kling-mcp`, conservando su `-listen` y su orden: para cuando el puente cambió de sitio
+(un `make install` antiguo lo dejaba en `~/.local/bin`) y launchd sale con 78 en cada
+intento. `kling plugin install mcp` y `kling upgrade -cli` lo hacen solos cuando el
+servicio apunta a un puente que ya no está, y `kling doctor` lo señala.
 
 Cuando está activa, el gateway anota en el servicio de memoria qué herramienta resolvió
 cada petición, y usa ese historial para ordenar mejor las búsquedas siguientes:
