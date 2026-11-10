@@ -129,6 +129,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
 - kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
+- `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
 
 ### Removed
 
@@ -294,6 +295,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-sandbox: claiming a prewarmed sandbox no longer talks to the daemon while holding the frontal's lock, and each call has a 10 s timeout; one hung host serialized every tenant's creations behind it.
 - kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
 - `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
+- CI: the GC lock tests in `internal/machine` re-signal their FIFO until the read returns and fail after 10 s instead of hanging the macOS job for 10 minutes.
 
 ## [0.20.1] - 2026-10-28
 
