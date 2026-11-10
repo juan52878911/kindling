@@ -103,7 +103,9 @@ func (c *conSondeo) ProbeGuestPort(context.Context, string, int) (bool, bool) {
 // Si el sondeo dice que escucha pero marcar sigue fallando, se vuelve a
 // esperar: nada de un bucle caliente de sondeos y diales hasta el plazo.
 func TestSondeoQueMienteNoDaBucleCaliente(t *testing.T) {
-	cerrado := puertoLibre(t)
+	// El 1 nunca escucha: un puerto recién liberado lo puede coger otro test
+	// en paralelo y el dial conectaría (fallo intermitente del CI).
+	cerrado := 1
 	f := &conSondeo{maquinasFalsas: &maquinasFalsas{ms: map[string]*api.Machine{
 		"a": {ID: "a", Name: "a", State: api.StateRunning, Forwards: map[string]string{"80": "127.0.0.1:" + strconv.Itoa(cerrado)}, Labels: map[string]string{api.LabelPorts: "80"}},
 	}}}
