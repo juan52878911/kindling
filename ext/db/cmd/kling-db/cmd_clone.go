@@ -252,11 +252,12 @@ func (f *cloneFlags) opts(rawURL string) (cloneOpts, error) {
 		o.password = strings.TrimRight(string(b), "\r\n")
 	} else {
 		o.password = os.Getenv("PGPASSWORD")
-		// Desde aquí solo la tiene el proxy de credenciales: ningún proceso que
-		// lance kling db (kling, db-golden.sh, bash) la hereda del entorno.
-		os.Unsetenv("PGPASSWORD")
-		os.Unsetenv("PGPASSFILE")
 	}
+	// Desde aquí solo la tiene el proxy de credenciales: ningún proceso que
+	// lance kling db (kling, db-golden.sh, bash) la hereda del entorno, venga
+	// la contraseña de donde venga.
+	os.Unsetenv("PGPASSWORD")
+	os.Unsetenv("PGPASSFILE")
 	return o, nil
 }
 

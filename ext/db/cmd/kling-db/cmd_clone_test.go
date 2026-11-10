@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -466,6 +468,47 @@ func TestCloneUsoIncorrecto(t *testing.T) {
 		}
 		if strings.Contains(out, clonePW) {
 			t.Errorf("%v: the password was printed", args)
+		}
+	}
+}
+
+// Con -password-stdin, un PGPASSWORD que viniera en el entorno tampoco lo
+// heredan db-golden.sh ni los kling que lance: se borra igual que sin el flag.
+func TestPasswordStdinLimpiaPGPASSWORD(t *testing.T) {
+	t.Setenv("PGPASSWORD", "del-entorno")
+	t.Setenv("PGPASSFILE", "/tmp/pgpass")
+	dir := t.TempDir()
+	mask := filepath.Join(dir, "mask.yaml")
+	if err := os.WriteFile(mask, []byte(cloneRules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(dir, "pw")
+	if err := os.WriteFile(in, []byte("por-stdin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.Open(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
+	f := addCloneFlags(fs)
+	if err := fs.Parse([]string{"-password-stdin", "-mask", mask}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.opts("postgres://ro@db.example.com/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.password != "por-stdin" {
+		t.Fatalf("password = %q", o.password)
+	}
+	for _, k := range []string{"PGPASSWORD", "PGPASSFILE"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s still set: %q", k, v)
 		}
 	}
 }
