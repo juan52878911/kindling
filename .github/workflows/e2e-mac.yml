@@ -8,7 +8,14 @@
 # posterior, con las etiquetas `self-hosted, macOS, ARM64`. Sin runner, el job
 # no se encola: solo corre si la variable del repo KLING_MAC_RUNNER vale
 # 'true' (Settings → Secrets and variables → Actions → Variables). Si no, sale
-# como saltado y no deja nada esperando para siempre.
+# como saltado y no deja nada esperando para siempre, y en su lugar corre
+# `sin-runner`, que lo dice en el resumen y en un aviso del commit: un saltado
+# en gris se confunde con «no hacía falta». No es rojo a propósito (cada PR
+# que toque internal/machine saldría en rojo sin culpa); la puerta está en
+# scripts/release.sh, que solo acepta este job en success o el commit status
+# e2e-mac/kling-hv (scripts/e2e-mac-release.sh), así que saltado bloquea.
+# Corre también en cada push a main: el commit que se etiqueta tiene así a la
+# vista su estado del e2e del Mac, corrido o no.
 #
 # El runner tiene que ser una cuenta de usuario PROPIA, con su sesión abierta
 # (el runner como LaunchAgent, no como LaunchDaemon): 95 instala y quita un
@@ -26,6 +33,8 @@ name: e2e-mac
 on:
   schedule:
     - cron: '41 4 * * *'
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       parts:
@@ -51,6 +60,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Lo contrario de la condición de `e2e`: corre justo cuando aquel se salta.
+  # Unos segundos en ubuntu; no prueba nada, deja constancia de que no se probó.
+  sin-runner:
+    name: microVMs (kling-hv) not run
+    if: >-
+      !(vars.KLING_MAC_RUNNER == 'true' &&
+        (github.event_name != 'pull_request' ||
+         github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: kling-hv e2e not run
+        env:
+          RUNNER: ${{ vars.KLING_MAC_RUNNER }}
+        run: |
+          if [ "$RUNNER" = true ]; then
+            motivo="this pull request comes from a fork, and its code does not run on the self-hosted Mac"
+          else
+            motivo="there is no self-hosted Apple Silicon runner (repository variable KLING_MAC_RUNNER is not 'true')"
+          fi
+          msg="kling-hv e2e (92-e2e-mac.sh, 95-e2e-upgrade-mac.sh) NOT run on $GITHUB_SHA: $motivo. scripts/release.sh blocks a 1.x tag on this commit until scripts/e2e-mac-release.sh passes on an Apple Silicon Mac and publishes the e2e-mac/kling-hv commit status."
+          echo "::warning title=kling-hv e2e not run::$msg"
+          {
+            echo "## kling-hv e2e: not run"
+            echo
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   e2e:
     name: microVMs (kling-hv, Hypervisor.framework)
     # Además, nunca el PR de un fork: correría su código en el Mac del runner.

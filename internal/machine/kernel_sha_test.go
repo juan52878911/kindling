@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,9 +108,7 @@ func TestAvisoKernel(t *testing.T) {
 }
 
 func TestCommitGrabaElKernelSHA256(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c2aa170000000001"
 	falso, _ := plantillaParaCommit(t, m, id)
@@ -121,8 +118,7 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
 			// Lo que escribiría Firecracker.
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 
