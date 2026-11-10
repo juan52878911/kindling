@@ -344,6 +344,16 @@ type entry struct {
 	// Se toca siempre con g.mu tomado, igual que lastUse.
 	inflight int
 
+	// streams son los GET SSE de sesión abiertos AHORA sobre la instancia, con
+	// la función que los corta. NO cuentan en inflight: un stream es una
+	// conversación a la espera de notificaciones, no trabajo, y el cliente lo
+	// deja abierto toda la sesión. Contado como trabajo, la microVM no se
+	// congelaba nunca y retenía un hueco de la cuota del tenant por stream
+	// ocioso. Al salir la instancia del mapa (congelada, desalojada, retirada)
+	// se cortan: el cliente ve el fin del stream en vez de colgarse contra un
+	// invitado pausado. Se toca con g.mu.
+	streams map[uint64]context.CancelFunc
+
 	// maxSessions es cuántas sesiones (procesos servidor) caben en ESTA instancia,
 	// derivado de su memoria con la misma fórmula que el puente (ver gwMaxSessions).
 	// Cuando las sesiones de un servicio superan la capacidad de una instancia, el
@@ -400,6 +410,37 @@ func (g *Scheduler) end(e *entry) {
 	}
 	e.lastUse = time.Now()
 	g.mu.Unlock()
+}
+
+// streamSeq numera los streams para poder soltarlos sin buscar por función.
+var streamSeq atomic.Uint64
+
+// beginStream apunta un GET SSE abierto sobre e y devuelve con qué soltarlo.
+// No toca inflight ni lastUse (ver entry.streams): un stream abierto no impide
+// congelar la instancia. Si e ya no está en el mapa, cortar no sirve de nada y
+// se corta al momento.
+func (g *Scheduler) beginStream(e *entry, cortar context.CancelFunc) (end func()) {
+	id := streamSeq.Add(1)
+	g.mu.Lock()
+	if e.streams == nil {
+		e.streams = map[uint64]context.CancelFunc{}
+	}
+	e.streams[id] = cortar
+	g.mu.Unlock()
+	return func() {
+		g.mu.Lock()
+		delete(e.streams, id)
+		g.mu.Unlock()
+	}
+}
+
+// cortarStreamsLocked corta los streams abiertos sobre e. Cancelar un contexto
+// no ejecuta código ajeno en esta goroutine, así que vale con g.mu tomado.
+func (e *entry) cortarStreamsLocked() {
+	for id, cortar := range e.streams {
+		cortar()
+		delete(e.streams, id)
+	}
 }
 
 // sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
@@ -1104,12 +1145,14 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 	if e := g.services[service]; e != nil && e.machineID == machineID {
 		delete(g.services, service)
 		e.cerrarConexiones()
+		e.cortarStreamsLocked()
 		return
 	}
 	es := g.extra[service]
 	for i, e := range es {
 		if e.machineID == machineID {
 			e.cerrarConexiones()
+			e.cortarStreamsLocked()
 			g.extra[service] = append(es[:i], es[i+1:]...)
 			if len(g.extra[service]) == 0 {
 				delete(g.extra, service)
