@@ -4206,6 +4206,28 @@ func (m *Manager) olvidarVMMDeCongelado(id string) {
 	_ = os.Remove(filepath.Join(m.dir(id), ficheroVMMCongelado))
 }
 
+// matarVMMDeCongelado mata el VMM que el último Freeze de id dejó vivo, si
+// lo hay y sigue siendo de id (liveVMs lo reconoce: un PID reutilizado es de
+// otro proceso), y dice si ya no existe. Sin marca no cuesta nada.
+func (m *Manager) matarVMMDeCongelado(id string) bool {
+	v, ok := m.vmmDeCongelado.Load(id)
+	if !ok {
+		return true
+	}
+	pid := v.(int)
+	if m.liveVMs()[id] != pid {
+		m.olvidarVMMDeCongelado(id)
+		return true
+	}
+	log.Printf("%s: killing the VMM its last freeze left alive (pid %d)", shortID(id), pid)
+	senalMatar(pid)
+	if !waitGone(pid, plazoMuerte) {
+		return false
+	}
+	m.olvidarVMMDeCongelado(id)
+	return true
+}
+
 // vmmCongeladoEnDisco dice si pid, vivo y de la máquina id, es el VMM que su
 // último Freeze dejó vivo según la marca guardada en disco. Lo usa reconcile
 // al arrancar el daemon: si lo es, la marca vuelve a la memoria (Thaw lo
@@ -4263,7 +4285,10 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool)
 	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
-		return true
+		// Sin PID puede quedar el VMM que un Freeze dejó vivo (M1): una warm
+		// tiene PID 0 aunque su VMM siga ahí. Darlo por muerto dejaba que el
+		// Start de después lanzase otro sobre el mismo overlay.
+		return m.matarVMMDeCongelado(id)
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.

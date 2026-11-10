@@ -256,6 +256,11 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 			return nil, fmt.Errorf("machine %q can't be started: %w", mc.Name, err)
 		}
 	}
+	// Lo mismo con el VMM que dejó vivo su último Freeze (M1), si sigue ahí.
+	if !m.matarVMMDeCongelado(mc.ID) {
+		return nil, fmt.Errorf("machine %q can't be started: the VMM of its last freeze is still alive %s after SIGKILL",
+			mc.Name, plazoMuerte)
+	}
 	vols, err := m.reclamarParada(mc.ID)
 	if err != nil {
 		return nil, err

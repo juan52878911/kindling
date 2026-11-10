@@ -59,6 +59,10 @@ func (m *Manager) borrarEnSegundoPlano(mc *api.Machine, soltar func()) {
 		// limpieza no suelta nada mientras siga vivo (M4).
 		if murio {
 			live.PID = 0
+		} else if v, ok := m.vmmDeCongelado.Load(id); ok && live.PID == 0 {
+			// El que sobrevivió es el VMM que dejó vivo un Freeze (M1): la
+			// tumba lo apunta para rematarlo (limpiarTumba).
+			live.PID = v.(int)
 		}
 		vols := nombresVolumenes(live.Volumes)
 		live.Volumes, live.Shares, live.Forwards = nil, nil, nil
