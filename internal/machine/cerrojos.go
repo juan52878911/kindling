@@ -108,6 +108,15 @@ func (c *cerrojos) intentar(id string) (func(), bool) {
 	}, true
 }
 
+// ocupado dice si alguien tiene (o espera) el cerrojo de id: hay una
+// operación de ciclo de vida en curso sobre esa máquina.
+func (c *cerrojos) ocupado(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.m[id]
+	return e != nil && e.refs > 0
+}
+
 // vivos dice cuantas entradas hay. Solo para pruebas y diagnostico: si esto
 // crece sin parar, algo no esta soltando.
 func (c *cerrojos) vivos() int {

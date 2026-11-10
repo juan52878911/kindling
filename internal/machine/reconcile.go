@@ -43,6 +43,9 @@ func (m *Manager) reconciliarEstado() {
 	// techo de CPU a máquinas que están funcionando, y en el peor caso arrancar
 	// un segundo firecracker sobre el mismo overlay.
 	live := m.liveVMs()
+	// Y a cada VMM vivo, en qué estado está su invitado (A7), también fuera
+	// del lock: es una petición HTTP por VMM.
+	estados := m.estadosVMM(live)
 	// Para las que corrían con el overlay sin sincronizar (fallidaTrasCorte).
 	arranque, conArranque := arranqueHost()
 
@@ -80,6 +83,14 @@ func (m *Manager) reconciliarEstado() {
 			delete(live, mc.ID)
 		} else if !alive {
 			_ = os.Remove(filepath.Join(m.dir(mc.ID), ficheroVMMCongelado))
+			// La marca de un commit cortado solo se retira con su VMM ya
+			// muerto: antes, otro reinicio lo readoptaría con el disco dorado.
+			quitarMarcaCommit(m.dir(mc.ID))
+		}
+		// Un VMM vivo que no se puede readoptar tal cual (A7): un commit que el
+		// reinicio cortó, o un invitado en pausa que figura despierto.
+		if pid, alive := live[mc.ID]; alive && !m.readoptable(mc, pid, estados[mc.ID]) {
+			delete(live, mc.ID)
 		}
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.
@@ -293,6 +304,15 @@ func (m *Manager) barrerHuerfanos(live map[string]int) {
 		if m.reserved[id] > 0 {
 			continue
 		}
+		// Con una operación de ciclo de vida en curso (su cerrojo tomado), lo
+		// que diga el estado puede ser el de antes (M2): el thaw de una failed
+		// la deja failed hasta que su VMM nuevo termina de cargar el volcado,
+		// y matarlo a la segunda vuelta era cortarle el LoadSnapshot. Quien
+		// tiene el cerrojo decide; si deja un huérfano, la vuelta siguiente lo ve.
+		if m.lifecycle.ocupado(id) {
+			delete(m.orphanSeen, id)
+			continue
+		}
 		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused ||
 			mc.State == api.StateCreated || mc.State == api.StateWarm) {
 			delete(m.orphanSeen, id)
@@ -470,6 +490,137 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// marcaCommit es la marca de un commit con el disco de la plantilla
+// reapuntado al overlay dorado (snapshot.go): se escribe, durable, antes de
+// reapuntarlo y se retira en cuanto la plantilla recupera el suyo. Si el
+// daemon muere en medio, el VMM sigue vivo y en pausa, y si alguien lo
+// reanuda escribe en el overlay del dorado y no en el suyo. reconcile, al
+// verla con el VMM vivo, no lo readopta: lo mata y la deja failed.
+const marcaCommit = "commit.en-curso"
+
+// errCommitCortado es el LastErr de una plantilla cuyo commit cortó un
+// reinicio del daemon.
+const errCommitCortado = "the daemon restarted in the middle of a commit, with the machine paused and its disk " +
+	"pointed at the snapshot's copy; its VMM was stopped so it could not write there. Its own disk is " +
+	"as it was at the pause: kling start boots it again"
+
+// marcarCommitEnCurso deja la marca en dir, en disco antes de seguir.
+func marcarCommitEnCurso(dir, nombre string) error {
+	return escribirMarca(filepath.Join(dir, marcaCommit), []byte(nombre+"\n"), 0o600)
+}
+
+// quitarMarcaCommit la retira, si estaba.
+func quitarMarcaCommit(dir string) { _ = os.Remove(filepath.Join(dir, marcaCommit)) }
+
+// conPID dice si la máquina id sigue registrada con un VMM (PID != 0).
+func (m *Manager) conPID(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	mc := m.byID[id]
+	return mc != nil && mc.PID != 0
+}
+
+// plazoEstadoVMM es lo que espera reconcile a que cada VMM diga su estado.
+// Uno que no contesta en esto se readopta como siempre: no se sabe más.
+const plazoEstadoVMM = 3 * time.Second
+
+// estadosVMM pregunta a cada VMM vivo en qué estado está su invitado (GET /:
+// "Running", "Paused"…), a todos a la vez. Los que no contestan no salen.
+func (m *Manager) estadosVMM(live map[string]int) map[string]string {
+	out := make(map[string]string, len(live))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for id, pid := range live {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+			defer cancel()
+			st, err := m.clienteReconcile(id, pid).State(ctx)
+			if err != nil || st == "" {
+				return
+			}
+			mu.Lock()
+			out[id] = st
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// clienteReconcile es el cliente del VMM vivo de id que usa reconcile.
+func (m *Manager) clienteReconcile(id string, pid int) *fc.Client {
+	if m.pruebasSocketVMM != nil {
+		if s := m.pruebasSocketVMM(id); s != "" {
+			return fc.New(s)
+		}
+	}
+	return fc.New(m.socketDe(id, pid))
+}
+
+// readoptable decide, con m.mu, si el VMM vivo pid de mc se readopta (A7).
+// Antes se readoptaba sin preguntarle nada, y un reinicio del daemon a mitad
+// de un Freeze o de un Commit (que pausan el invitado y persisten running)
+// dejaba una máquina running con el invitado en pausa: el gateway le enrutaba
+// peticiones que nadie contestaba, y la de un Commit, si alguien la reanudaba,
+// escribía en el overlay del dorado. Ahora:
+//
+//   - con la marca de commit: no. Queda failed y killOrphanVMMs mata el VMM.
+//   - en pausa figurando despierta, con su volcado sellado (un Freeze que
+//     selló y no llegó a escribir warm, o un Thaw cortado antes de retirar
+//     el sello): no. reconcile la deja warm y el VMM muere; reanudarlo
+//     haría divergir el disco de un volcado que sigue valiendo.
+//   - en pausa figurando despierta, sin volcado que valga (un Freeze o una
+//     pausa cortados): se reanuda. Si no contesta, queda pendiente como
+//     tras un volcado fallido (reanudar_pendiente.go).
+//   - despierta figurando en pausa (un Resume cortado antes de persistir):
+//     pasa a running.
+func (m *Manager) readoptable(mc *api.Machine, pid int, estado string) bool {
+	dir := m.dir(mc.ID)
+	if existe(filepath.Join(dir, marcaCommit)) {
+		log.Printf("reconcile: %s (%s): its VMM (pid %d) was in the middle of a commit; stopping it: failed",
+			mc.Name, shortID(mc.ID), pid)
+		ahora := time.Now()
+		mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errCommitCortado, &ahora
+		mc.PID = 0
+		return false
+	}
+	switch {
+	case estado == "Paused" && mc.State != api.StatePaused:
+		if existe(filepath.Join(dir, marcaOK)) && volcadoValido(dir, mc.FrozenAt) == nil {
+			log.Printf("reconcile: %s (%s): its VMM (pid %d) is paused and its memory dump is sealed; not re-adopting it",
+				mc.Name, shortID(mc.ID), pid)
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+		err := m.clienteReconcile(mc.ID, pid).Resume(ctx)
+		cancel()
+		if err == nil {
+			log.Printf("reconcile: %s (%s) was paused although its state said %q; resumed it",
+				mc.Name, shortID(mc.ID), mc.State)
+			return true
+		}
+		// Running con la transición freezing: el planificador no le enruta
+		// nada mientras el vigilante reintenta (reanudarPendientes).
+		log.Printf("reconcile: %s (%s) is paused and resuming it failed (%v): the watcher will retry",
+			mc.Name, shortID(mc.ID), err)
+		if m.reanudaciones == nil {
+			m.reanudaciones = map[string]reanudacion{}
+		}
+		if m.transicion == nil {
+			m.transicion = map[string]string{}
+		}
+		m.reanudaciones[mc.ID] = reanudacion{pid: pid, desde: time.Now(),
+			causa: fmt.Sprintf("the daemon restarted with the machine paused, and resuming it failed: %v", err)}
+		m.transicion[mc.ID] = api.TransitionFreezing
+	case estado == "Running" && mc.State == api.StatePaused:
+		log.Printf("reconcile: %s (%s) is running although its state said paused", mc.Name, shortID(mc.ID))
+		mc.State = api.StateRunning
+	}
+	return true
 }
 
 // hasSnapshot dice si una máquina tiene un congelado completo en disco.

@@ -71,6 +71,32 @@ func TestRespaldarNoPisaLaPrimera(t *testing.T) {
 
 // PrepararEscritura guarda la copia de una versión anterior, se niega ante
 // una del futuro y no estorba si no hay fichero o es ilegible.
+// M8: el respaldo se publica con durable.Renombrar (fsync del directorio), no
+// con un os.Rename que tras un corte podía no haber llegado al disco.
+func TestRespaldarPublicaConRenombrarDurable(t *testing.T) {
+	dir := t.TempDir()
+	ruta := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(ruta, []byte(`{"schema":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var visto []string
+	prev := renombrar
+	renombrar = func(tmp, dst string) error {
+		visto = append(visto, dst)
+		return prev(tmp, dst)
+	}
+	t.Cleanup(func() { renombrar = prev })
+	if err := Respaldar(ruta, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(visto) != 1 || visto[0] != RutaRespaldo(ruta, 1) {
+		t.Fatalf("renombrar = %v; quería el respaldo una vez", visto)
+	}
+	if b, err := os.ReadFile(RutaRespaldo(ruta, 1)); err != nil || string(b) != `{"schema":1}` {
+		t.Fatalf("respaldo = %q, %v", b, err)
+	}
+}
+
 func TestPrepararEscritura(t *testing.T) {
 	dir := t.TempDir()
 	ruta := filepath.Join(dir, "f.json")

@@ -422,6 +422,9 @@ type Manager struct {
 	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
 	// antes de escanear los procesos. Para las pruebas.
 	pruebasEscaneoHuerfanos func()
+	// pruebasSocketVMM, si no es nil y devuelve algo, es el socket con el que
+	// reconcile pregunta su estado al VMM vivo de id (A7). Para las pruebas.
+	pruebasSocketVMM func(id string) string
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
@@ -1135,7 +1138,9 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
 	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
 	// mal en el otro, que es lo que pasaba con links.json.
-	if err := escribirEstado(m.statePath(), b, 0o644); err != nil {
+	// 0600: es el inventario entero (IPs, reenvíos, dueños, nombres de
+	// variables), y solo lo lee el daemon (M8).
+	if err := escribirEstado(m.statePath(), b, 0o600); err != nil {
 		return fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
@@ -3731,9 +3736,17 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
 		if pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			// Esperando a que muera, como start.devolver (M3): sin esperar, un
+			// reintento inmediato veía el VMM moribundo en liveVMs, lo
+			// readoptaba ("was already running") y acababa failed al morir.
+			senalMatar(pid)
+			if !waitGone(pid, plazoMuerte) {
+				log.Printf("thaw %s: the VMM of the failed thaw (pid %d) is still alive %s after SIGKILL", mc.Name, pid, plazoMuerte)
+			}
 		}
 		m.desmontarRed(netcfg, mc.ID)
+		// Y su techo de CPU, que no hace nada sin proceso (como en Stop).
+		m.releaseCPU(mc.ID)
 		if base != "" {
 			// El mem.full de este despertar (diff_volcado.go): el siguiente
 			// lo rehace, y mientras tanto ocuparía lo que el diff.
@@ -3893,11 +3906,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// matarlo AQUI: dejarlo seria un firecracker huerfano reteniendo la RAM
 		// de su invitado, que no aparece en `kling ps` y que nadie contabiliza al
 		// decidir si cabe la siguiente microVM.
-		if pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		m.desmontarRed(netcfg, mc.ID)
-		return nil, retiradaDurante(mc.Name, "thawed")
+		return abortar(retiradaDurante(mc.Name, "thawed"))
 	}
 	now := time.Now()
 	cur.State = api.StateRunning
@@ -4203,6 +4212,28 @@ func (m *Manager) olvidarVMMDeCongelado(id string) {
 	_ = os.Remove(filepath.Join(m.dir(id), ficheroVMMCongelado))
 }
 
+// matarVMMDeCongelado mata el VMM que el último Freeze de id dejó vivo, si
+// lo hay y sigue siendo de id (liveVMs lo reconoce: un PID reutilizado es de
+// otro proceso), y dice si ya no existe. Sin marca no cuesta nada.
+func (m *Manager) matarVMMDeCongelado(id string) bool {
+	v, ok := m.vmmDeCongelado.Load(id)
+	if !ok {
+		return true
+	}
+	pid := v.(int)
+	if m.liveVMs()[id] != pid {
+		m.olvidarVMMDeCongelado(id)
+		return true
+	}
+	log.Printf("%s: killing the VMM its last freeze left alive (pid %d)", shortID(id), pid)
+	senalMatar(pid)
+	if !waitGone(pid, plazoMuerte) {
+		return false
+	}
+	m.olvidarVMMDeCongelado(id)
+	return true
+}
+
 // vmmCongeladoEnDisco dice si pid, vivo y de la máquina id, es el VMM que su
 // último Freeze dejó vivo según la marca guardada en disco. Lo usa reconcile
 // al arrancar el daemon: si lo es, la marca vuelve a la memoria (Thaw lo
@@ -4260,7 +4291,10 @@ func (m *Manager) killMachine(id string, flush, conservaDisco bool) (murio bool)
 	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
-		return true
+		// Sin PID puede quedar el VMM que un Freeze dejó vivo (M1): una warm
+		// tiene PID 0 aunque su VMM siga ahí. Darlo por muerto dejaba que el
+		// Start de después lanzase otro sobre el mismo overlay.
+		return m.matarVMMDeCongelado(id)
 	}
 	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.

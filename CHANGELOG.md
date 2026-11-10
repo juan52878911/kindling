@@ -135,6 +135,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
 - Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
 - `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
+- `state.json` and `fondos.json` are written 0600 (were 0644): only the daemon reads them.
+- `kling rm` of a machine whose VMM survives SIGKILL keeps its volumes until the VMM exits; a `run` asking for them read-write is refused meanwhile.
 - `allow_domains` (run, sandbox, graph nodes) rejects entries the allowlist could never match: wildcards (`*.a.com`; `a.com` already covers its subdomains), IP addresses and non-punycode international names. They used to be accepted and the guest got `REFUSED` with no hint.
 - The quota of an rw share now carries over freeze/thaw, stop/start and daemon restarts instead of starting at zero each time; `kling inspect` shows `used_bytes` and `used_files` per share.
 - The rw share free-space minimum (`daemon.share_min_free_mib`) no longer blocks rewriting a file without holes in place, and the daemon logs when a share crosses it.
@@ -329,6 +331,10 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
 - `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.
 - `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
+- A daemon restart in the middle of `freeze`, `pause` or `commit` no longer re-adopts a paused guest as running: reconcile asks the VMM, resumes it (or keeps it warm if its dump is sealed), and marks failed a template whose commit was cut with its disk pointed at the snapshot's copy.
+- `stop`, `rm` and `start` of a warm machine kill the VMM its freeze could not see die, instead of starting a second one on the same overlay.
+- `pause` resumes the guest when the pause request fails; a failed thaw waits for its VMM to die before returning; the orphan sweep no longer kills the VMM of a thaw from `failed` that takes longer than two rounds.
+- The `.vN.bak` copy made before a schema migration is renamed durably.
 - Shares with write-behind: a deferred write error goes to the file descriptor that wrote the data. With two descriptors on the same file, closing the other one first took the error and the writer closed cleanly.
 
 ## [0.20.1] - 2026-10-28

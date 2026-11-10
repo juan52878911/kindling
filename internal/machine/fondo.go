@@ -149,7 +149,8 @@ func (m *Manager) escribirFondos(foto fotoFondos) error {
 	if err := esquema.PrepararEscritura(m.fondosPath(), versionFondos, versionFondos); err != nil {
 		return err
 	}
-	if err := escribirFondosEn(m.fondosPath(), b, 0o644); err != nil {
+	// 0600, como state.json: solo lo lee el daemon (M8).
+	if err := escribirFondosEn(m.fondosPath(), b, 0o600); err != nil {
 		return err
 	}
 	m.fondosEscritoGen = foto.gen
