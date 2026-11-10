@@ -173,7 +173,7 @@ func probarJaula() error {
 	defer os.Remove(raiz)
 	c := exec.Command("/proc/self/exe")
 	c.Args = ordenJaula{modo: modoSonda, uid: uidNadieE2fsck, gid: uidNadieE2fsck, mem: memE2fsck,
-		raiz: raiz, argv: []string{"/bin/true"}}.args()
+		raiz: raiz, argv: []string{"-"}}.args()
 	c.Env = entornoE2fsck
 	c.SysProcAttr = &syscall.SysProcAttr{Cloneflags: nsJaula}
 	out, err := c.CombinedOutput()
@@ -211,6 +211,9 @@ func hijoJaulaE2fs(a []string) error {
 	bin := o.argv[0]
 	switch o.modo {
 	case modoJaula, modoSonda:
+		if o.modo == modoSonda {
+			bin = ""
+		}
 		if bin, err = montarJaula(o.raiz, bin); err != nil {
 			return err
 		}
@@ -294,14 +297,18 @@ func montarJaula(raiz, bin string) (string, error) {
 		montados = append(montados, d)
 	}
 	// El binario: si no está bajo lo de arriba (/usr/local/sbin sí; una
-	// instalación en /opt no), su directorio también, en solo lectura.
-	real, err := filepath.EvalSymlinks(bin)
-	if err != nil {
-		return "", fmt.Errorf("resolving %s: %w", bin, err)
-	}
-	if dir := filepath.Dir(real); !bajoAlguno(dir, montados) {
-		if err := enlazarSoloLectura(dir, filepath.Join(raiz, dir), true); err != nil {
-			return "", err
+	// instalación en /opt no), su directorio también, en solo lectura. La
+	// sonda no ejecuta nada (bin vacío).
+	real := ""
+	if bin != "" {
+		var err error
+		if real, err = filepath.EvalSymlinks(bin); err != nil {
+			return "", fmt.Errorf("resolving %s: %w", bin, err)
+		}
+		if dir := filepath.Dir(real); !bajoAlguno(dir, montados) {
+			if err := enlazarSoloLectura(dir, filepath.Join(raiz, dir), true); err != nil {
+				return "", err
+			}
 		}
 	}
 	if err := os.Mkdir(filepath.Join(raiz, "etc"), 0o755); err != nil {
