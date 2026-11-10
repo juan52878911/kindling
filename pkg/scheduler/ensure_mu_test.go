@@ -60,3 +60,25 @@ func TestEnsureSinSnapshotNoDejaCandado(t *testing.T) {
 		t.Fatalf("ensureMu guarda %d candados de servicios sin snapshot", n)
 	}
 }
+
+// M22: una instancia ociosa que pickInstance acaba de reservar para una sesión
+// nueva no se congela antes de que llegue su initialize.
+func TestReservaRecienteNoSeCongela(t *testing.T) {
+	g, _, congeladas := gwPausas(0)
+	g.MachineTTL = -1
+	e := &entry{machineID: "m-res", ip: "10.0.0.2", lastUse: time.Now().Add(-time.Hour), maxSessions: 4}
+	g.services["a"] = e
+	g.mu.Lock()
+	elegida, _ := elegirInstancia(g.entriesLocked("a"), g.sessionCountLocked, 0)
+	if elegida != e {
+		g.mu.Unlock()
+		t.Fatal("no eligió la instancia ociosa")
+	}
+	elegida.reservarLocked()
+	g.mu.Unlock()
+
+	g.reapOnce(context.Background())
+	if congeladas["m-res"] {
+		t.Fatal("el segador congeló una instancia con una sesión reservada en camino")
+	}
+}

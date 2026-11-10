@@ -492,8 +492,15 @@ func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight in
 const reservaPlazo = 30 * time.Second
 
 // reservarLocked apunta en e una sesión nueva en camino. Con g.mu tomado.
+//
+// Refresca lastUse: entre elegir la instancia y que llegue el initialize (que
+// es cuando begin la marca en vuelo) el segador podía congelar una instancia
+// que llevaba más de idle ociosa, y el initialize daba en un invitado pausado:
+// 502 en la primera petición de la sesión.
 func (e *entry) reservarLocked() {
-	e.reservas = append(e.reservas, time.Now())
+	ahora := time.Now()
+	e.reservas = append(e.reservas, ahora)
+	e.lastUse = ahora
 }
 
 // reservasLocked cuenta las reservas vigentes de e, olvidando las vencidas.
