@@ -122,11 +122,23 @@ void vq_used_de_ram(struct vq *q) {
 void vmmio_irq(struct vmmio *m, uint32_t intid) {
   uint8_t n = m->isr != 0;
   if (n != m->nivel) {
-    m->nivel = n;
-    hv_gic_set_spi(intid, n);
+    // nivel es lo que la línea tiene de verdad: si el GIC no la cambió, el
+    // siguiente aviso lo vuelve a intentar. Antes quedaba alto sin que lo
+    // estuviera la línea, y ningún aviso más la subía: el invitado esperaba
+    // su disco o su red para siempre.
+    if (hv_gic_set_spi(intid, n) == HV_SUCCESS) m->nivel = n;
     // Un vCPU dormido en el WFI de respaldo (vm.c) no se entera solo.
     if (n) vcpu_kick_all();
   }
+}
+
+// khv_prueba_irq_nivel: sin VM no hay GIC y hv_gic_set_spi falla; nivel no
+// puede quedar alto (pruebas).
+int khv_prueba_irq_nivel(void) {
+  struct vmmio m = {0};
+  m.isr = 1;
+  vmmio_irq(&m, 40);
+  return m.nivel;
 }
 
 uint64_t khv_avisos[KHV_N_MAX];

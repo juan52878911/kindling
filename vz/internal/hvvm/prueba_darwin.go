@@ -191,6 +191,10 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
 
+// irqNivelSinGIC: el nivel que deja vmmio_irq cuando el GIC no cambia la
+// línea (khv_prueba_irq_nivel).
+func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }
+
 // vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
 // (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró y cuánto tuvo mu.
 func vsockTandaRx(pausa bool) (lleno, movido uint64, d time.Duration, r int) {

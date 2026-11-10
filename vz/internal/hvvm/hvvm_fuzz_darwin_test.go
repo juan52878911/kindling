@@ -260,6 +260,14 @@ func TestPollEAGAINNoMataElVsock(t *testing.T) {
 	}
 }
 
+// Si hv_gic_set_spi no sube la línea, vmmio_irq no puede apuntarla como
+// alta: ningún aviso posterior la volvería a subir.
+func TestIrqNivelSoloSiElGICLoCambia(t *testing.T) {
+	if n := irqNivelSinGIC(); n != 0 {
+		t.Fatalf("hv_gic_set_spi failed (no VM) and the device still records the line as %d", n)
+	}
+}
+
 // Si el hilo del vsock muere (un poll que falla sin remedio), el dispositivo
 // queda muerto: un dial tiene que fallar al momento con -ENODEV. Antes el
 // dispositivo seguía activo y cada dial esperaba su plazo entero (2 s, y el
