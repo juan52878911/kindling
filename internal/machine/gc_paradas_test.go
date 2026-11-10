@@ -102,7 +102,11 @@ func TestGCNoBorraLaParadaQueArrancaronEntreMedias(t *testing.T) {
 	m.byID[id].StoppedAt = nil
 	m.mu.Unlock()
 	soltar()
-	<-hecho
+	select {
+	case <-hecho:
+	case <-time.After(10 * time.Second):
+		t.Fatal("la recogida no acabó 10 s después de soltar el cerrojo")
+	}
 
 	if got := vivaDe(t, m, id).State; got != api.StateRunning {
 		t.Fatalf("estado = %s; el GC borró o tocó una máquina que ya corría", got)
@@ -111,17 +115,39 @@ func TestGCNoBorraLaParadaQueArrancaronEntreMedias(t *testing.T) {
 
 // fifoQueEspera deja en path una tubería con nombre: quien la abra para leer
 // se queda esperando hasta que el test abra el otro extremo (soltar).
-func fifoQueEspera(t *testing.T, path string) (soltar func()) {
+//
+// soltar no se fía de un único open+write+close: en el job de APFS el lector
+// leyó el byte y se quedó en read() para siempre (no le llegó el EOF; la
+// hipótesis es una carrera entre el close del escritor y el final del open del
+// lector), y el test murió por el plazo de 10 minutos de go test. Ahora abre
+// en no bloqueante (ENXIO mientras no haya lector), cierra y repite hasta que
+// la recogida acabe; cada close sin escritores vuelve a avisar del EOF. Con
+// plazo: si no acaba, falla en segundos y dice por qué.
+func fifoQueEspera(t *testing.T, path string) (soltar func(hecho <-chan struct{})) {
 	t.Helper()
 	_ = os.Remove(path)
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
 		t.Skipf("sin mkfifo: %v", err)
 	}
-	return func() {
-		f, err := os.OpenFile(path, os.O_WRONLY, 0)
-		if err == nil {
-			_, _ = f.Write([]byte("x"))
-			f.Close()
+	return func(hecho <-chan struct{}) {
+		t.Helper()
+		plazo := time.After(10 * time.Second)
+		escrito := false
+		for {
+			if f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				if !escrito {
+					_, _ = f.Write([]byte("x"))
+					escrito = true
+				}
+				f.Close()
+			}
+			select {
+			case <-hecho:
+				return
+			case <-plazo:
+				t.Fatalf("la recogida sigue leyendo %s 10 s después de soltarla (llegó a abrirla: %v)", path, escrito)
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	}
 }
@@ -173,8 +199,7 @@ func TestGCFailedLeeElDiscoSinElCandado(t *testing.T) {
 		close(hecho)
 	}()
 	esperarCandadoLibre(t, m, hecho)
-	soltar()
-	<-hecho
+	soltar(hecho)
 }
 
 // gcDisk leía el meta.json del dorado de cada candidata (loadSnapshot, sin
@@ -205,6 +230,5 @@ func TestGCDiskLeeElDoradoSinElCandado(t *testing.T) {
 		close(hecho)
 	}()
 	esperarCandadoLibre(t, m, hecho)
-	soltar()
-	<-hecho
+	soltar(hecho)
 }
