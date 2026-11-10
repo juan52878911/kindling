@@ -1338,8 +1338,8 @@ so there are no wildcards: `*.github.com` is an error that says what to write in
 addresses are rejected too (what opens is what DNS resolves), and so are non-ASCII names
 not written in punycode (`xn--...`). Such entries used to be accepted and never matched,
 so the guest got `REFUSED` with no hint; `run`, `sandbox` and `graph up` now reject them.
-A bare top-level domain (`com`) opens everything under it. The IPs the daemon seeds at
-start expire within an hour at most, like the ones learned from DNS: an IP that no longer
+A bare top-level domain (`com`) opens everything under it. On Linux, the IPs the daemon
+seeds at start expire within an hour at most, like the ones learned from DNS: an IP that no longer
 belongs to the domain doesn't stay open forever.
 
 ### Linux with Docker: the FORWARD policy

@@ -1370,8 +1370,8 @@ así que no hay comodines: `*.github.com` es un error que dice qué escribir. Ta
 IPs (se abre lo que resuelve el DNS) ni nombres con acentos sin pasar a punycode
 (`xn--...`). Antes estas entradas se aceptaban y no casaban nunca: el invitado recibía
 `REFUSED` sin más pista; ahora `run`, `sandbox` y `graph up` las rechazan. Un dominio de
-primer nivel suelto (`com`) abre todo lo que cuelga de él. Las IPs que el daemon siembra
-al arrancar caducan como mucho en una hora, como las que aprende del DNS: una IP que ya
+primer nivel suelto (`com`) abre todo lo que cuelga de él. En Linux, las IPs que el daemon
+siembra al arrancar caducan como mucho en una hora, como las que aprende del DNS: una IP que ya
 no es del dominio no se queda abierta para siempre.
 
 ### Linux con Docker: la política del FORWARD
