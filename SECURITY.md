@@ -680,16 +680,24 @@ host y solo lee root (`$KLING_ROOT/secrets/snapshot.key`), sobre los hashes de s
 ficheros y la política con la que nacen las instancias: exec, red, dominios
 permitidos y volúmenes. Los sha256 solos detectaban corrupción; la firma detecta
 además manipulación —cambiar el overlay y su hash a la vez, o encender exec en el
-`meta.json`— y snapshots traídos de otro host. Los anteriores a esto no llevan
-firma y se aceptan, salvo con `KLING_REQUIRE_SIGNED=1`.
+`meta.json`— y snapshots traídos de otro host. La firma se exige por defecto: un
+dorado sin firma (de antes de las firmas, copiado de otro sitio o con la firma y los
+digests quitados del `meta.json`) no se restaura, y el error dice cómo rehacerlo.
+`daemon.require_signed off` (o `KLING_REQUIRE_SIGNED=0`) vuelve a aceptarlos;
+`KLING_REQUIRE_SIGNED=1` manda sobre la configuración. Un dorado firmado sin ningún
+digest se trata como corrupto.
 
 Desde la firma v2 (`v2:<hex>` en `meta.json`, `schema: 3`) también cubre las etiquetas
 (`kling.ports`, `kling.owner`), `mem_max_mib`, `cpu_pct`, los nombres del entorno y el
 digest del `mem.file` (`mem_digest`, en árbol: no lee los huecos de la memoria
 perforada), que se comprueba como el del overlay la primera vez que se restaura el
 dorado tras arrancar el daemon. Las credenciales de una plantilla no van en la firma:
-viven en su almacén sellado con AEAD. Los dorados con firma v1 se siguen aceptando con lo
-que la v1 cubría; rehacerlos (`kling save`) los pasa a v2. Un kling anterior rechaza los
+viven en su almacén sellado con AEAD. Al arrancar, el daemon re-firma en v2 los dorados
+con firma v1 cuya firma y digests siguen cuadrando (calcula entonces el `mem_digest`, que la
+v1 no tenía) y deja `secrets/signatures-v2`; desde entonces una firma v1 se rechaza: es un
+`meta.json` viejo puesto de vuelta, y la v1 no cubre etiquetas ni topes. Lo que se cambió
+en un dorado v1 antes de migrarlo (sus etiquetas, o su `mem.file`) no se puede ver: la v1
+no lo cubría. Con `require_signed off` una v1 se sigue comprobando como antes. Un kling anterior rechaza los
 `meta.json` de schema 3: volver a una versión vieja obliga a rehacer esos dorados.
 
 ### 10. El proxy al invitado solo llega al puerto del agente
@@ -865,14 +873,19 @@ cambia:
 - **El e2fsck del arranque sí lee lo que escribió el invitado** (el ext4 del overlay y de cada
   volumen rw, también en un `put` o al refrescar un puente), y es un parser en C: no corre con los
   privilegios del daemon. Recibe el disco ya abierto (`/dev/fd/3`), sin el entorno del daemon y con
-  plazo. En Linux, con el daemon root, corre con el dueño del disco si no es root (el usuario del
-  VMM con `-run-as`) o con nobody (al que se le cede el fichero mientras dura y se le devuelve),
-  sin grupos ni capacidades, en namespaces nuevos de red, PID e IPC y con `prlimit --as` a 2 GiB
-  si hay `prlimit`. En macOS, con el usuario del daemon dentro de un perfil de `sandbox-exec` que
-  no deja red ni leer más que el sistema y Homebrew, ni escribir más que su descriptor; macOS no
-  aplica RLIMIT_AS, así que ahí no hay tope de memoria. Sigue leyendo con nobody lo que nobody
-  pueda leer del host (sin red para sacarlo, pero podría escribirlo en el disco del invitado);
-  con `-run-as` es el mismo usuario que ya tiene el VMM. `resize2fs` (al crecer la imagen de un
+  plazo. En Linux, con el daemon root, el daemon se vuelve a ejecutar como ayudante en namespaces
+  nuevos de montajes, red, PID e IPC; monta una raíz de solo lectura con `/usr`, `/lib*`, `/bin` y
+  `/sbin` del host, un `/proc` de su propio namespace de PID y `/dev/fd`, hace chroot en ella, baja
+  a nobody sin grupos ni capacidades (al que se le cede el disco mientras dura y se le devuelve),
+  se pone RLIMIT_AS a 2 GiB y `no_new_privs`, y ejecuta e2fsck. Antes corría con el dueño del disco,
+  que con `-run-as` es el usuario del VMM y alcanza los discos de todas las máquinas. Donde la
+  jaula no se puede montar (un contenedor sin `CAP_SYS_ADMIN`, AppArmor), se avisa al primer uso,
+  `kling doctor` lo dice (`e2fs_confinement`) y corre como nobody en los namespaces de red, PID e
+  IPC sin chroot. Sin root, con el usuario del daemon y el tope de memoria. En macOS, con el usuario
+  del daemon dentro de un perfil de `sandbox-exec` que no deja red ni leer más que el sistema y
+  Homebrew, ni escribir más que su descriptor; macOS no aplica RLIMIT_AS, así que ahí no hay tope de
+  memoria. Sin `sandbox-exec` se avisa, `kling doctor` lo dice y, con el daemon como root, se niega
+  a correrlo. `resize2fs` (al crecer la imagen de un
   puente) y `debugfs` (inspeccionar imágenes y capas, el `put` sin montar de macOS, el
   `lost+found` de un volumen nuevo) corren igual; `debugfs -w` recibe sus órdenes por la entrada
   estándar y el fichero que copia dentro ya abierto (`/dev/fd/4`). En Linux, un `debugfs` que solo
