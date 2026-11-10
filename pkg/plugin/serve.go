@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -48,6 +49,10 @@ func serve(m Manifest, cmds map[string]func([]string) error, hooks map[string]fu
 	if m.ManifestVersion == 0 {
 		m.ManifestVersion = ManifestVersion
 	}
+	if m.Version == "" || m.Version == "dev" {
+		// Sin -ldflags: la del módulo (go install …@vX.Y.Z) o la revisión.
+		m.Version = buildver.Version(m.Version)
+	}
 	if m.MaxAPI == 0 {
 		// El API que conoce el pkg/api con el que se compiló: el de sus
 		// llamadas al daemon.
@@ -63,6 +68,11 @@ func serve(m Manifest, cmds map[string]func([]string) error, hooks map[string]fu
 		if len(args) == 0 {
 			return 2
 		}
+		return 0
+	}
+	if args[0] == "--version" || (args[0] == "version" && cmds["version"] == nil) {
+		// Toda extensión dice su versión igual, sin que cada una lo programe.
+		fmt.Fprintln(stdout, m.Version)
 		return 0
 	}
 	switch args[0] {

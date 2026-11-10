@@ -105,6 +105,11 @@ func TestDoctorVersionesDistintas(t *testing.T) {
 	if v := findCheck(cs, "versions"); v.State != doctorOK {
 		t.Fatalf("un kling de desarrollo no se compara: %+v", v)
 	}
+	// Ni uno que lleva su revisión (buildver).
+	cs = doctorChecks(doctorInput{cliVersion: "dev+01234567.dirty", info: &api.Info{Version: "dev+89abcdef"}, completion: true})
+	if v := findCheck(cs, "versions"); v.State != doctorOK {
+		t.Fatalf("un kling de desarrollo con revisión no se compara: %+v", v)
+	}
 }
 
 func TestExtensionsDir(t *testing.T) {

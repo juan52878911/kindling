@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/saneado"
@@ -35,8 +36,11 @@ import (
 	"github.com/juan52878911/kindling/pkg/units"
 )
 
-// Version se fija al compilar:  -ldflags "-X main.Version=..."
+// Version se fija al compilar:  -ldflags "-X main.Version=..."; sin eso, la
+// del módulo o la revisión de git (buildver), no un "dev" que no dice nada.
 var Version = "dev"
+
+func init() { Version = buildver.Version(Version) }
 
 func main() {
 	if len(os.Args) < 2 {

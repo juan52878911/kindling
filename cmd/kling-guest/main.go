@@ -29,12 +29,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 )
 
-// Version se fija al compilar:  -ldflags "-X main.Version=..."
+// Version se fija al compilar:  -ldflags "-X main.Version=..."; sin eso, la
+// del módulo o la revisión de git (buildver).
 var Version = "dev"
+
+func init() { Version = buildver.Version(Version) }
 
 func main() {
 	if filepath.Base(os.Args[0]) == "overlay-init" {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/internal/oci"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -402,7 +403,7 @@ func existingImport(ctx context.Context, c *api.Client, name string, spec OCISpe
 // de desarrollo, o sin saber la del daemon, no se compara (como doctor).
 func alreadyImportedLine(name, ref, builtBy, daemon string) string {
 	b, d := strings.TrimPrefix(builtBy, "v"), strings.TrimPrefix(daemon, "v")
-	if d == "" || d == "dev" || b == "dev" || b == d {
+	if buildver.IsDev(d) || (b != "" && buildver.IsDev(b)) || b == d {
 		return fmt.Sprintf("image %s: already imported from %s (-replace re-resolves the tag and rebuilds it)", name, ref)
 	}
 	by := "an earlier kling"

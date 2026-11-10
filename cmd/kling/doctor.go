@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
@@ -197,7 +198,7 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		v := doctorCheck{Name: "versions"}
 		cli, dmn := strings.TrimPrefix(in.cliVersion, "v"), strings.TrimPrefix(in.info.Version, "v")
 		switch {
-		case cli == "dev" || dmn == "dev" || cli == "" || dmn == "":
+		case buildver.IsDev(cli) || buildver.IsDev(dmn):
 			v.State, v.Detail = doctorOK, fmt.Sprintf("CLI %s, daemon %s (development build: not compared)", in.cliVersion, in.info.Version)
 		case cli == dmn:
 			v.State, v.Detail = doctorOK, "CLI and daemon are both "+in.cliVersion
