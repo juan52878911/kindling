@@ -74,9 +74,13 @@ type falso struct {
 	// SCRAM-SHA-256-PLUS. mec y gs2 son lo que el cliente eligió.
 	tlsCfg *tls.Config
 	plus   bool
-	mu     sync.Mutex
-	mec    string
-	gs2    string
+	// impostor salta pasos del SCRAM como haría quien no conoce la clave:
+	// "sin-continue" (OK tras el primer mensaje), "sin-final" (OK sin
+	// SASLFinal) o "sin-ok" (ReadyForQuery sin AuthenticationOk).
+	impostor string
+	mu       sync.Mutex
+	mec      string
+	gs2      string
 }
 
 func (f *falso) eleccion() (string, string) {
@@ -168,6 +172,9 @@ func (f *falso) atender(c net.Conn) {
 		}
 		c.Write(auth(10, mecs+"\x00"))
 		p := leerP()
+		if f.impostor == "sin-continue" {
+			break
+		}
 		i := strings.Index(string(p), "\x00")
 		cf := string(p[i+1+4:]) // tras el mecanismo y la longitud
 		partes := strings.SplitN(cf, ",", 3)
@@ -186,6 +193,9 @@ func (f *falso) atender(c net.Conn) {
 		sf := "r=" + nonce + ",s=" + base64.StdEncoding.EncodeToString(sal) + ",i=4096"
 		c.Write(auth(11, sf))
 		fin := string(leerP())
+		if f.impostor == "sin-final" {
+			break
+		}
 		sinPrueba := "c=" + base64.StdEncoding.EncodeToString([]byte(cbind)) + ",r=" + nonce
 		salted, _ := pbkdf2.Key(sha256.New, f.pass, sal, 4096, 32)
 		ck := hmacSHA256(salted, "Client Key")
@@ -203,7 +213,9 @@ func (f *falso) atender(c net.Conn) {
 		srv := hmacSHA256(hmacSHA256(salted, "Server Key"), authMsg)
 		c.Write(auth(12, "v="+base64.StdEncoding.EncodeToString(srv)))
 	}
-	c.Write(auth(0, ""))
+	if f.impostor != "sin-ok" {
+		c.Write(auth(0, ""))
+	}
 	c.Write(msg('S', []byte("server_version\x0016.0\x00")))
 	c.Write(msg('Z', []byte("I")))
 	for {
@@ -488,5 +500,26 @@ func TestTLSModoDesconocido(t *testing.T) {
 	if c, err := dialTLS(t, f, Config{TLSMode: "prefer"}); err == nil {
 		c.Close()
 		t.Fatal("aceptó un modo desconocido")
+	}
+}
+
+// Quien se hace pasar por el servidor sin conocer la clave no puede mandar un
+// SASLFinal válido: un AuthenticationOk (o un ReadyForQuery) que se lo salte
+// no abre la conexión, o recibiría todas las consultas.
+func TestImpostorSinSASLFinal(t *testing.T) {
+	for _, imp := range []string{"sin-continue", "sin-final", "sin-ok"} {
+		f := nuevoFalso(t, "scram", "secreto")
+		f.impostor = imp
+		c, err := dial(t, f, "secreto")
+		if err == nil {
+			c.Close()
+			t.Errorf("%s: Dial aceptó al impostor", imp)
+		}
+	}
+	f := nuevoFalso(t, "trust", "")
+	f.impostor = "sin-ok"
+	if c, err := dial(t, f, ""); err == nil {
+		c.Close()
+		t.Error("trust sin AuthenticationOk: Dial lo aceptó")
 	}
 }

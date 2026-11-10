@@ -894,7 +894,8 @@ quien no quiere que una columna `summary` con texto libre pase sin que nadie la 
   un nombre neutro (`summary`) y correos dentro pasa sin tratar salvo con `-strict`. Tampoco se miran dentro los JSON:
   a una columna JSON solo le valen `null`, `keep` o `fixed`.
 - **No se vuelcan** objetos grandes (`--no-blobs`), publicaciones, suscripciones,
-  etiquetas de seguridad ni tablespaces. Las políticas de RLS que nombran roles de
+  etiquetas de seguridad ni tablespaces. Los event triggers del origen se borran
+  nada más restaurar, antes del enmascarado, y no llegan al golden. Las políticas de RLS que nombran roles de
   producción no se restauran (el rol no existe) y paran la construcción. Un rol sujeto a
   RLS necesita `BYPASSRLS` para volcar entero.
 - **Tamaño y tiempo.** Todo lo sin enmascarar vive en la RAM de la máquina de

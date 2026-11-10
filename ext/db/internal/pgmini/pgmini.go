@@ -244,7 +244,12 @@ func (c *Conn) arranque(cfg Config) error {
 	if err := c.escribir(0, b); err != nil {
 		return err
 	}
+	// Empezado el SCRAM, solo un SASLFinal verificado demuestra que al otro
+	// lado está quien conoce la clave: un AuthenticationOk antes es un
+	// impostor que recibiría todas las consultas. Y sin AuthenticationOk no
+	// hay ReadyForQuery que valga.
 	var sc *scram
+	verificado, autenticado := false, false
 	for {
 		t, body, err := c.leer()
 		if err != nil {
@@ -259,6 +264,10 @@ func (c *Conn) arranque(cfg Config) error {
 			}
 			switch binary.BigEndian.Uint32(body) {
 			case 0: // AuthenticationOk
+				if sc != nil && !verificado {
+					return errors.New("postgres: AuthenticationOk without a verified SASLFinal")
+				}
+				autenticado = true
 			case 3: // contraseña en claro
 				if cfg.NoCleartext {
 					return errors.New("postgres: the server asks for a cleartext password; refused")
@@ -302,10 +311,14 @@ func (c *Conn) arranque(cfg Config) error {
 				if err := sc.verificar(body[4:]); err != nil {
 					return err
 				}
+				verificado = true
 			default:
 				return fmt.Errorf("postgres: unsupported authentication method %d", binary.BigEndian.Uint32(body))
 			}
 		case 'Z':
+			if !autenticado {
+				return errors.New("postgres: ReadyForQuery before AuthenticationOk")
+			}
 			return nil
 		}
 		// 'S' (ParameterStatus), 'K' (BackendKeyData), 'N' (Notice): se ignoran.

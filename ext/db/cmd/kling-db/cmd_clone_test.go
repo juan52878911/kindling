@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +49,9 @@ type cloneFake struct {
 	discover string
 	fillErr  error
 	fixup    string
+	// evtLeft es lo que contesta el borrado de event triggers ("evt|0": no
+	// queda ninguno).
+	evtLeft string
 }
 
 func newCloneFake() *cloneFake {
@@ -62,6 +67,7 @@ func newCloneFake() *cloneFake {
 			`{"schema":"public","table":"orders","column":"total","type":"numeric","category":"N","generated":false}]}`,
 		// orders (customer_email), users (email, full_name)
 		maskOut:     "kc|0|2|2|0\nkc|1|3|3,3|0,0\n",
+		evtLeft:     "evt|0\n",
 		seedContent: "-- masked dump\n",
 	}
 }
@@ -119,6 +125,8 @@ func (f *cloneFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 			return nil, f.fillErr
 		case strings.Contains(s, sliceFixupMarker):
 			return []byte(f.fixup), nil
+		case strings.Contains(s, dropEventTriggersMarker):
+			return []byte(f.evtLeft), nil
 		case strings.Contains(s, dbmask.CatalogMarker):
 			return []byte(f.catalog), nil
 		case strings.Contains(s, dbmask.MaskMarker):
@@ -467,5 +475,78 @@ func TestCloneUsoIncorrecto(t *testing.T) {
 		if strings.Contains(out, clonePW) {
 			t.Errorf("%v: the password was printed", args)
 		}
+	}
+}
+
+// Con -password-stdin, un PGPASSWORD que viniera en el entorno tampoco lo
+// heredan db-golden.sh ni los kling que lance: se borra igual que sin el flag.
+func TestPasswordStdinLimpiaPGPASSWORD(t *testing.T) {
+	t.Setenv("PGPASSWORD", "del-entorno")
+	t.Setenv("PGPASSFILE", "/tmp/pgpass")
+	dir := t.TempDir()
+	mask := filepath.Join(dir, "mask.yaml")
+	if err := os.WriteFile(mask, []byte(cloneRules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := filepath.Join(dir, "pw")
+	if err := os.WriteFile(in, []byte("por-stdin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.Open(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
+	f := addCloneFlags(fs)
+	if err := fs.Parse([]string{"-password-stdin", "-mask", mask}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.opts("postgres://ro@db.example.com/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.password != "por-stdin" {
+		t.Fatalf("password = %q", o.password)
+	}
+	for _, k := range []string{"PGPASSWORD", "PGPASSFILE"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s still set: %q", k, v)
+		}
+	}
+}
+
+// Un event trigger del origen (CREATE EVENT TRIGGER ... ON ddl_command_end)
+// se dispararía como superusuario en la construcción y viajaría al golden en
+// el volcado enmascarado: se borran todos nada más restaurar, antes del
+// catálogo y del enmascarado, y si queda alguno no se construye nada.
+func TestCloneBorraEventTriggers(t *testing.T) {
+	ct := newCloneTest(t)
+	if _, err := ct.c.run(context.Background(), ct.opts(t, cloneRules)); err != nil {
+		t.Fatalf("%v\n%s", err, ct.out)
+	}
+	pos := func(marker string) int {
+		for i, c := range ct.f.calls {
+			if strings.Contains(c.stdin, marker) {
+				return i
+			}
+		}
+		return -1
+	}
+	dump, drop, cat := pos("kling-db:clone-dump"), pos(dropEventTriggersMarker), pos(dbmask.CatalogMarker)
+	if dump < 0 || drop < 0 || cat < 0 || !(dump < drop && drop < cat) {
+		t.Fatalf("order dump=%d drop=%d catalog=%d", dump, drop, cat)
+	}
+
+	ct = newCloneTest(t)
+	ct.f.evtLeft = "evt|1\n"
+	if _, err := ct.c.run(context.Background(), ct.opts(t, cloneRules)); err == nil || !strings.Contains(err.Error(), "event trigger") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(ct.golden) != 0 {
+		t.Fatalf("golden built: %v", ct.golden)
 	}
 }

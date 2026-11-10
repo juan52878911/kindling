@@ -353,6 +353,11 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling run -image <ref>` reuses the image a plain `kling image import <ref>` left (same options) instead of importing it again under another name.
 - kling-sandbox: labels starting with `kling.` are reserved. A tenant could set `kling.owner`, which took the sandbox out of the frontal: it stopped counting toward the quota and was no longer listed, removed or swept, so creation was unlimited and invisible.
 - kling-sandbox: `/v1/hosts`, which returns the daemons' socket paths and addresses, needs an admin tenant (`KLING_SANDBOX_ADMINS=name,...`), and `/v1/metrics` only shows the caller's own per-tenant series unless the caller is an admin. Errors from a host that did not answer name the host but no longer include its endpoint or the network error (those go to the gateway log); the `X-Kindling-Partial` warning does the same.
+- `kling db ask`: the SQL validator ends a `--` comment at a carriage return, as Postgres does, and rejects a bare `\r`; CRLF answers from the model are normalised.
+- `kling db`: the Postgres client requires a verified SCRAM `SASLFinal` before `AuthenticationOk`, and `AuthenticationOk` before `ReadyForQuery`.
+- `kling db clone`: event triggers of the source are dropped right after the restore in the builder and never reach the golden; `-password-stdin` also clears `PGPASSWORD`/`PGPASSFILE` from the environment.
+- `kling db` with Garage: the copy's S3 secret goes to the daemon in the exec request body instead of the argv of a host `kling exec`.
+- `kling db rotate`: when a failed rotation cannot confirm the old password, the advice is to rotate again (keeps the data) instead of `reset`.
 
 ### Fixed
 

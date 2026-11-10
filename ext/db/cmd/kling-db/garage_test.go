@@ -6,26 +6,38 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 )
 
 // fakeGarage es un Kling que imita la CLI de Garage de una copia: guarda las
-// claves y registra cada orden.
+// claves y registra cada orden. argv es lo que habría ido en el argv de un
+// `kling` del host (lo ve cualquiera con ps); Exec va por el API.
 type fakeGarage struct {
-	backend // solo Run se usa
+	backend // solo Run y Exec se usan
 	keys    []string
 	calls   []string
+	argv    []string
 	fail    string // subcomando que falla ("key import", ...)
 }
 
 func (f *fakeGarage) Run(_ context.Context, _ io.Reader, args ...string) ([]byte, error) {
+	f.argv = append(f.argv, strings.Join(args, " "))
 	// exec -timeout 60s ID -- /garage -c /etc/garage.toml <cmd...>
 	i := 0
 	for i < len(args) && args[i] != "--" {
 		i++
 	}
-	cmd := args[i+4:]
+	return f.do(args[i+1:])
+}
+
+func (f *fakeGarage) Exec(_ context.Context, _ string, cmd []string, _ time.Duration) ([]byte, error) {
+	return f.do(cmd)
+}
+
+func (f *fakeGarage) do(argv []string) ([]byte, error) {
+	cmd := argv[3:] // /garage -c /etc/garage.toml <cmd...>
 	f.calls = append(f.calls, strings.Join(cmd, " "))
 	sub := cmd[0] + " " + cmd[1]
 	if sub == f.fail {
@@ -92,6 +104,12 @@ func TestSetGarageKeyRota(t *testing.T) {
 	}
 	if len(f.keys) != 1 || f.keys[0] != dbstate.S3AccessKey(pw2) {
 		t.Fatalf("claves tras la segunda rotación: %v", f.keys)
+	}
+	// El secreto nunca va en el argv de un kling del host.
+	for _, a := range f.argv {
+		if strings.Contains(a, pw) || strings.Contains(a, pw2) {
+			t.Fatalf("secret in host argv: %q", a)
+		}
 	}
 
 	f = &fakeGarage{keys: []string{golden}, fail: "key import"}

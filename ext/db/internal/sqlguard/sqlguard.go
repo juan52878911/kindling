@@ -122,7 +122,9 @@ func Validate(sql string) error {
 			// orden) y E'...' la usa para escapes: ninguna de las dos hace
 			// falta para preguntar.
 			return reject("backslashes are not allowed")
-		case r == '\t' || r == '\n' || r == '\r':
+		case r == '\t' || r == '\n':
+		// \r suelto, no: Postgres y psql cierran con él un comentario --, y
+		// aquí se leería como blanco. Extract ya normaliza los \r\n.
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
 			return reject("control characters are not allowed")
 		}
@@ -203,7 +205,8 @@ func tokenize(s string) ([]token, error) {
 			glued = false
 			continue
 		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			j := strings.IndexByte(s[i:], '\n')
+			// Como el lexer de Postgres: el comentario acaba en \n o en \r.
+			j := strings.IndexAny(s[i:], "\n\r")
 			if j < 0 {
 				i = len(s)
 			} else {
@@ -306,7 +309,7 @@ var ErrNoSQL = errors.New("the model did not return a SQL statement")
 // ```sql ... ``` si lo hay, o el texto entero. Quita UN punto y coma final
 // (los modelos lo ponen por costumbre); cualquier otro lo rechaza Validate.
 func Extract(answer string) (string, error) {
-	s := answer
+	s := strings.ReplaceAll(answer, "\r\n", "\n")
 	if i := strings.Index(s, "```"); i >= 0 {
 		rest := s[i+3:]
 		// La etiqueta del bloque (sql, postgresql...) hasta el salto de línea.

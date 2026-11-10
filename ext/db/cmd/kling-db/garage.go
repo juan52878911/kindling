@@ -9,18 +9,22 @@ package main
 // contraseña de la copia; el identificador sale de él, dbstate.S3AccessKey),
 // y la clave del dorado se borra de la copia antes de entregarla. El secreto
 // sí entra en el invitado (en argv de `garage key import`, que solo se ve
-// dentro de la copia): no hay forma de dar a Garage solo un verificador.
+// dentro de la copia): no hay forma de dar a Garage solo un verificador. Esa
+// orden va por el API del daemon (klingc.Execer), no por `kling exec`: en el
+// host el secreto no aparece en ningún argv.
 //
 // La imagen es scratch (sin sh): todo va por argv directo a /garage, con la
 // configuración en /etc/garage.toml.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -42,6 +46,16 @@ var reBucket = lazyre.New(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 func (a *app) garageExec(ctx context.Context, id string, args ...string) ([]byte, error) {
 	full := append([]string{"exec", "-timeout", "60s", id, "--"}, garageCLI...)
 	return a.k.Run(ctx, nil, append(full, args...)...)
+}
+
+// garageExecSecret es garageExec para una orden con un secreto en args: va
+// por el API del daemon, no por el argv de un kling del host.
+func (a *app) garageExecSecret(ctx context.Context, id string, args ...string) ([]byte, error) {
+	ex, ok := a.k.(klingc.Execer)
+	if !ok {
+		return nil, errors.New("this backend cannot exec through the daemon API")
+	}
+	return ex.Exec(ctx, id, append(append([]string(nil), garageCLI...), args...), 60*time.Second)
 }
 
 // waitGarage espera a que el servidor de la copia conteste a su CLI.
@@ -93,7 +107,7 @@ func (a *app) setGarageKey(ctx context.Context, id, user, bucket, pw string) err
 	if err != nil {
 		return fail("key list")
 	}
-	if _, err := a.garageExec(ctx, id, "key", "import", "--yes", "-n", user, ak, pw); err != nil {
+	if _, err := a.garageExecSecret(ctx, id, "key", "import", "--yes", "-n", user, ak, pw); err != nil {
 		return fail("key import")
 	}
 	if _, err := a.garageExec(ctx, id, "bucket", "allow", "--read", "--write", "--owner", bucket, "--key", ak); err != nil {
