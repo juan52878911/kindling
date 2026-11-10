@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -411,5 +414,47 @@ func TestGoldenInfoMotores(t *testing.T) {
 func TestRedisAdminIgualQueDoctor(t *testing.T) {
 	if redisAdmin != doctor.RedisAdminClient {
 		t.Fatalf("kling db y el doctor usan clientes distintos:\n%s\n%s", redisAdmin, doctor.RedisAdminClient)
+	}
+}
+
+// failKling falla en toda orden: la base no contesta.
+type failKling struct{ backend }
+
+func (failKling) Run(context.Context, io.Reader, ...string) ([]byte, error) {
+	return nil, errors.New("boom")
+}
+
+// Si ni la clave nueva ni la vieja se pueden confirmar, el consejo es volver
+// a rotar (lo pone en la base desde el administrador, sin pedir la vieja), no
+// reset, que tira los datos de la copia.
+func TestRotateFallidoAconsejaRotarNoReset(t *testing.T) {
+	mc := &api.Machine{ID: "0123456789abcdef", Name: "r1", Labels: map[string]string{labelEngine: engineRedis}}
+	err := (&app{k: failKling{}}).keepOld(mc, "app", "vieja", errors.New("cause"))
+	if err == nil || !strings.Contains(err.Error(), "kling db rotate r1") || strings.Contains(err.Error(), "reset") {
+		t.Fatalf("keepOld = %v", err)
+	}
+}
+
+// Una rotación muerta entre la base y el host deja password.new: la
+// siguiente rotación la pisa y deja la base y el host de acuerdo.
+func TestRotateTrasRotacionInterrumpida(t *testing.T) {
+	ta := testAppMotores(t)
+	mc, err := ta.up(ctx, "rd", "r1", 0, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbstate.StagePassword(mc.ID, "huerfana"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ta.rotateCopy(ctx, "r1", "local"); err != nil {
+		t.Fatal(err)
+	}
+	nueva := password(t, mc.ID)
+	if nueva == "huerfana" || ta.f.verifier[mc.ID] != redisHash(nueva) {
+		t.Fatal("the base and the host disagree after resuming")
+	}
+	dir, _ := dbstate.CopyDir(mc.ID)
+	if _, err := os.Stat(filepath.Join(dir, "password.new")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("password.new left: %v", err)
 	}
 }

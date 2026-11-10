@@ -43,6 +43,38 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Changed
 
+- Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
+- Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
+- macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
+- Ephemeral MCP pool: once the gateway has seen traffic, services with no calls get no prewarmed instance (it used to be destroyed and recreated every 2 × idle, forever).
+- Prewarm and keep-warm budgets charge each copy its measured footprint (PSS / `phys_footprint`, capped at `mem_mib`) instead of the full `mem_mib`, and fall back to a fixed 1 GiB when the daemon gives no memory figure (it used to be unlimited).
+- `GET /metrics` is open to any valid authz role; tenants get the host-wide series without the per-machine ones (`docs/authz.md`).
+- A daemon too old for this kling points at `sudo kling upgrade` (Linux and macOS) instead of `install.sh` and `systemctl`.
+- `kling config set defaults.mem_mib|vcpus|cpu_pct|ttl_seconds` rejects negative and out-of-range values; 0 still means the default (or, for `ttl_seconds`, never), as with `daemon.*`.
+- The CLI reads `KLING_SOCKET` as the last step before the default socket (`-H` > `KLING_HOST` > active context > `KLING_SOCKET`), so a private `KLING_SOCKET=… kling daemon` and its client meet on the same variable; `kling context ls` says when it applies or is overridden.
+- kling-hv: machines can have up to 64 vCPUs (what Hypervisor.framework allows, 64 on an M4), never more than the host's cores; the daemon rejects more vCPUs than cores on macOS before launching the VMM. Snapshots of machines with more than 8 vCPUs use memory-file state version 5; machines with up to 8 are still saved as version 4, which older kling-hv builds restore.
+- `kling run -nested` (kling-hv only, Apple M3 or later with macOS 15+): the guest boots at EL2 with a separate KVM kernel (`images/vmlinux-nested`, built with `VARIANT=nested TARGET_ARCH=arm64 scripts/builders/kernel/build.sh`) and can run Firecracker inside. Nested machines can't be frozen, saved or forked; kling-vz and Firecracker refuse the option.
+- kling-hv memory file state v6 (v4, or v5 with more than 8 vCPUs, plus a virtio-fs section) and snapshot format `kling_vz` 4 (virtio-fs server state), written only by machines with virtio-fs shares; everything else still writes v4/v5 and `kling_vz` ≤ 3.
+- kling-hv: a virtqueue whose rings lack the alignment virtio requires is not serviced (it was undefined behaviour in C, found by fuzzing under UBSan).
+- `kling doctor -json` lists each `kling up -check` check in `checks[]` (`runtime <check>`) instead of its text in `runtime_report`, which is gone.
+- `kling ps` prints its disk footer and machine warnings on stderr, as do `kling save`'s progress lines and `kling context ls`'s notes; check marks follow `NO_COLOR` everywhere, and `kling top -watch` only clears the screen on a terminal without `NO_COLOR`.
+- `kling plugin ls -json` gains `state` (`ok`, `disabled`, `error`); `status` stays for 1.x scripts.
+- Linux: `-egress allowlist` boots faster. Seed domains resolve in parallel within 500 ms in total, the rules go in one `iptables-restore`, and the DNS resolver adds IPs to the ipset over netlink instead of forking `ip netns exec ipset` per IP. Measured on the lab (CT 108, `kling run` of node22): 5 domains 485-501 → 148-151 ms, 1 domain 196 → 143-150 ms, one domain whose DNS never answers 6.4 s → 0.59 s.
+- Releases are created as a draft, checked asset by asset (name, size, sha256) and only then published.
+- A release needs the Linux microVM e2e and the `vz/` tests, and ships the Android kernels in `SHA256SUMS`.
+- `scripts/e2e-mac-release.sh` posts an `e2e-mac/kling-hv` commit status, which `scripts/release.sh` accepts.
+- Service output reaches the console (`kling logs`) only for the first 64 KiB of each start, then a notice; `kling logs -service` still has all of it.
+- The guest agent sets a Go soft memory limit (a quarter of guest RAM, 32-128 MiB) unless `GOMEMLIMIT` is set.
+- kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
+- kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
+
+### Security
+
+- `kling db ask`: the SQL validator ends a `--` comment at a carriage return, as Postgres does, and rejects a bare `\r`; CRLF answers from the model are normalised.
+- `kling db`: the Postgres client requires a verified SCRAM `SASLFinal` before `AuthenticationOk`, and `AuthenticationOk` before `ReadyForQuery`.
+- `kling db clone`: event triggers of the source are dropped right after the restore in the builder and never reach the golden; `-password-stdin` also clears `PGPASSWORD`/`PGPASSFILE` from the environment.
+- `kling db` with Garage: the copy's S3 secret goes to the daemon in the exec request body instead of the argv of a host `kling exec`.
+- `kling db rotate`: when a failed rotation cannot confirm the old password, the advice is to rotate again (keeps the data) instead of `reset`.
 - macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.

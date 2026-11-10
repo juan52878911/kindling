@@ -108,6 +108,11 @@ func TestRechazaBateriaAdversaria(t *testing.T) {
 		"SELECT 1\x1b[2J",
 		"SELECT '\xff'",
 		"SELECT '" + strings.Repeat("a", MaxLen) + "'",
+		// Postgres y psql cierran el comentario -- también en \r: lo que
+		// va detrás no puede escaparse al validador.
+		"SELECT 1 --\r, pg_sleep(30)",
+		"SELECT 1 --\r; DELETE FROM t --",
+		"SELECT 1\r",
 	} {
 		err := Validate(sql)
 		if err == nil {
@@ -130,6 +135,8 @@ func TestExtract(t *testing.T) {
 		"```\nSELECT 3\n```\nthanks":                "SELECT 3",
 		// solo UN punto y coma final: el resto lo rechaza Validate
 		"SELECT 1;;": "SELECT 1;",
+		// los finales de línea de Windows se normalizan
+		"```sql\r\nSELECT 4\r\nFROM t;\r\n```": "SELECT 4\nFROM t",
 	} {
 		got, err := Extract(in)
 		if err != nil || got != want {
