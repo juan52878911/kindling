@@ -128,6 +128,15 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	// La misma cuota de peticiones en vuelo que /mcp/<servicio>. Este es el
+	// camino de los clientes reales (call_tool), y sin ella un tenant con
+	// MaxInflight no tenía tope aquí.
+	tnt := scheduler.TenantFrom(ctx)
+	if !g.TenantBegin(tnt) {
+		escribirCuotaTenant(w, tnt)
+		return
+	}
+	defer g.TenantEnd(tnt)
 	s, created, err := g.agg.session(ctx, r)
 	if errors.Is(err, errSesionDesconocida) {
 		api.HTTPError(w, err.Error(), http.StatusNotFound)
@@ -552,6 +561,12 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	if l := a.gw.linkFor(ctx, t.Service); l != nil {
 		return a.callLink(ctx, s, l, t, args)
 	}
+
+	// A partir de aquí la llamada despierta una microVM: se cuenta para el
+	// prewarm por popularidad, como en handleProxy. Sin esto los servicios que
+	// solo se usan por call_tool parecían fríos y su fondo se precalentaba el
+	// último.
+	a.gw.Observe(t.Service)
 
 	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
 	//
