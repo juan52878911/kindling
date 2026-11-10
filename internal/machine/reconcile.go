@@ -904,6 +904,8 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	// a la primera vuelta del vigilante.
 	m.lanzarVigilante(ctx, func(context.Context) { m.ensureShares() })
 	m.lanzarVigilante(ctx, func(ctx context.Context) { m.watch(ctx, every) })
+	// Los dorados con la firma v1 pasan a la v2, una vez por host (firma.go).
+	m.lanzarVigilante(ctx, m.MigrarFirmas)
 	m.lanzarVigilante(ctx, m.vigilarAlmacen)
 	// macOS: pausar las máquinas antes de que el Mac duerma (energia.go).
 	m.lanzarVigilante(ctx, m.vigilarEnergia)

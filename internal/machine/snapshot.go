@@ -918,8 +918,15 @@ func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, err
 //
 // Los snapshots anteriores a esta comprobación no tienen digests grabados: se
 // saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
+// Solo los que tampoco tienen firma (y esos ya solo se restauran con
+// daemon.require_signed off, comprobarFirma): uno firmado sin ningún digest
+// no lo escribió kindling (A2).
 func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 	if snap.RootfsSHA256 == "" && snap.RootfsDigest == "" && snap.SnapSHA256 == "" && snap.MemDigest == "" {
+		if snap.Signature != "" {
+			return marcado(errCorrupto, "template %q is signed but has no digests to verify it against; recreate it:\n%s",
+				snap.Name, remedioDorado(snap.Name))
+		}
 		return nil // snapshot legacy: no hay digests que comprobar
 	}
 	if m.integridadYaVista(snap.Name, snapDir) {
@@ -942,7 +949,7 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 			return fmt.Errorf("couldn't read %s to verify its integrity: %w", chk.file, err)
 		}
 		if !ok {
-			return fmt.Errorf("snapshot %q is corrupt: %s doesn't match what was frozen "+
+			return marcado(errCorrupto, "snapshot %q is corrupt: %s doesn't match what was frozen "+
 				"(sha256 expected %s…, found %s…). Reimport it with `kling mcp import %s -force`",
 				snap.Name, chk.file, digestCorto(chk.want), digestCorto(got), snap.Name)
 		}
@@ -950,6 +957,10 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 	m.anotarIntegridad(snap.Name, snapDir)
 	return nil
 }
+
+// errCorrupto marca que un dorado no está como se congeló (verifyIntegrity):
+// no es algo pasajero que se arregle reintentando.
+var errCorrupto = errors.New("corrupt golden snapshot")
 
 // digestCorto da los 12 primeros caracteres del hex de un digest, con o sin
 // prefijo de algoritmo.

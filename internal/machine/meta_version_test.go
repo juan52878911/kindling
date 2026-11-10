@@ -212,7 +212,7 @@ func TestCausaObsoleto(t *testing.T) {
 // listado y en inspect, y runFrom se niega con la orden para rehacerlo en vez
 // de llegar al VMM.
 func TestDoradoObsoletoSeMarcaYNoSeRestaura(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := annotTestManager(t)
 	escribirSnapshot(t, m, "viejo", api.Snapshot{VMM: "firecracker 1.12.0"})
 	escribirSnapshot(t, m, "parche", api.Snapshot{VMM: "firecracker 1.17.0"})

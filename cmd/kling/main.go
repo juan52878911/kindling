@@ -426,6 +426,7 @@ func cmdDaemon(args []string) error {
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
 	machine.SetCredAuditConfig(credAuditConfig())
+	machine.FijarFirmaExigida(requireSignedConfig())
 	srv, err := daemon.New(*socket, *root, vmm, *sockUser, *runAs)
 	if err != nil {
 		return err
@@ -612,6 +613,18 @@ func cowConfig() machine.CoWConfig {
 		}
 	}
 	return c
+}
+
+// requireSignedConfig lee daemon.require_signed (por defecto on). Un valor
+// que no se entiende se avisa y se queda en on. KLING_REQUIRE_SIGNED manda
+// sobre esto en el propio manager (machine.firmaExigida).
+func requireSignedConfig() bool {
+	v := loadConfig().Daemon.RequireSigned
+	if err := config.ValidateRequireSigned(v); err != nil {
+		log.Printf("warning: %v (using on)", err)
+		return true
+	}
+	return v != "off"
 }
 
 // envVMM es KLING_VMM para buscar el binario: "auto" no es un binario, es

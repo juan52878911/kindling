@@ -359,6 +359,7 @@ func TestCredencialesDePlantilla(t *testing.T) {
 // credenciales de la plantilla debe listar sus dominios concretos, no un
 // "<its domains>" que obligue a ir a buscarlos a otro sitio.
 func TestRunFromCredencialesErrorListaDominios(t *testing.T) {
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	capturarRegistro(t)
 	escribirSnapshot(t, m, "svc-al", api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}})
