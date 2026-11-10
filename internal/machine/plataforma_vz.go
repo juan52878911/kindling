@@ -1080,3 +1080,7 @@ func versionMacOS() string {
 	}
 	return v
 }
+
+// usuarioConfinado: en macOS la orden encerrada corre con el usuario del
+// daemon (y /dev/fd/N es un dup, sin volver a mirar permisos).
+func usuarioConfinado(*exec.Cmd) *syscall.Credential { return nil }
