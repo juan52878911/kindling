@@ -82,6 +82,12 @@
 (if (string=? (param "FWD") "1")
   (allow network-bind network-inbound (local ip "localhost:*")))
 (allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
+;; Con salida, a cualquier IP: SBPL solo admite "*" o "localhost" como host
+;; de una dirección (con una IP o una red, sandbox_init falla: "host must be *
+;; or localhost", medido en macOS 26.5), así que ni el allowlist de dominios
+;; ni los rangos privados caben aquí. Los aplica la pila de red de este mismo
+;; proceso antes de abrir cada socket (vz/internal/egress, Policy.AllowConn:
+;; nunca a redes privadas, enlace local, CGNAT ni a las IPs del Mac).
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))
 (deny network-outbound (remote ip "localhost:*"))

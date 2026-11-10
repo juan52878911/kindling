@@ -4,7 +4,9 @@ package hvvm
 
 import (
 	"encoding/binary"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // cola arma una entrada para probarColas: el dispositivo dev y sus colas de
@@ -257,4 +259,48 @@ func TestPollEAGAINNoMataElVsock(t *testing.T) {
 	case r != 0:
 		t.Fatal("after poll failed with EAGAIN, the vsock thread stopped")
 	}
+}
+
+// Las esperas con plazo de los dispositivos y los vCPU van con un plazo
+// relativo en el reloj monótono, no con una hora de CLOCK_REALTIME: un salto
+// del reloj de pared no puede alargarlas. Aquí, que khv_esperar_hasta cumple
+// el plazo y que uno ya vencido vuelve sin esperar.
+func TestEsperarHastaCumplePlazo(t *testing.T) {
+	d, r := esperarHasta(20 * time.Millisecond)
+	if r != int(syscall.ETIMEDOUT) || d < 20*time.Millisecond || d > 500*time.Millisecond {
+		t.Fatalf("a 20 ms wait took %v and returned %d", d, r)
+	}
+	if d, r := esperarHasta(0); r != int(syscall.ETIMEDOUT) || d > 5*time.Millisecond {
+		t.Fatalf("an expired wait took %v and returned %d", d, r)
+	}
+}
+
+// Si hv_gic_set_spi no sube la línea, vmmio_irq no puede apuntarla como
+// alta: ningún aviso posterior la volvería a subir.
+func TestIrqNivelSoloSiElGICLoCambia(t *testing.T) {
+	if n := irqNivelSinGIC(); n != 0 {
+		t.Fatalf("hv_gic_set_spi failed (no VM) and the device still records the line as %d", n)
+	}
+}
+
+// Si el hilo del vsock muere (un poll que falla sin remedio), el dispositivo
+// queda muerto: un dial tiene que fallar al momento con -ENODEV. Antes el
+// dispositivo seguía activo y cada dial esperaba su plazo entero (2 s, y el
+// daemon tardaba tres fallos, ~30 s, en darse cuenta).
+func TestVsockMuertoFallaAlMomento(t *testing.T) {
+	r, d := vsockMuerto()
+	switch r {
+	case -100:
+		t.Fatal("could not set up the test")
+	case 1:
+		t.Fatal("the injected poll failure was never consumed")
+	case 2:
+		t.Fatalf("after the vsock thread stopped, a dial did not fail with ENODEV (took %v)", d)
+	case 3:
+		t.Fatal("vsock_init did not start the vsock thread again")
+	}
+	if d > 50*time.Millisecond {
+		t.Fatalf("a dial to a dead vsock took %v", d)
+	}
+	t.Logf("dial to a dead vsock: %v", d)
 }
