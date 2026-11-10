@@ -212,8 +212,9 @@ aquí y su fila de la matriz pasa a **sí**.
 - e2e con microVMs en un runner Apple Silicon, incluido el de `kling upgrade`
   desde la release anterior (`95-e2e-upgrade-mac.sh`): `e2e-mac.yml` ya está
   escrito y se enciende con la variable `KLING_MAC_RUNNER=true`. Mientras no
-  lo haya, se corren a mano antes de cada release (`release.sh` lo exige con
-  `KLING_E2E_HV`). El de Linux con KVM ya corre en `e2e-linux.yml`, también
+  lo haya, se corren a mano antes de cada release con
+  `scripts/e2e-mac-release.sh`, que publica el commit status
+  `e2e-mac/kling-hv` que exige `release.sh`. El de Linux con KVM ya corre en `e2e-linux.yml`, también
   el de upgrade desde la release anterior.
 - Notarización de los binarios de macOS.
 - El tap de Homebrew que publique la fórmula que ya genera `release.yml`.

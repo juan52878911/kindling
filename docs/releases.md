@@ -151,23 +151,24 @@ OLD_DIR=<kling y kling-vz de la anterior> NEW_DIR=<los de HEAD> IMAGES_DIR=<vmli
 #     VMM=hv en un Apple Silicon, sobre el commit que se va a etiquetar. Sin el
 #     runner de e2e-mac.yml, a mano, y release.sh lo exige: el commit status
 #     e2e-mac/kling-hv que publica el script (con gh autenticado y el commit
-#     empujado) o KLING_E2E_HV.
+#     empujado). La línea KLING_E2E_HV ya no vale.
 #     Un solo comando en un Mac pelado (sin Linux ni Lima): compila todo de
 #     HEAD, clona vmlinux y min.ext4 del kindling instalado (o los baja de la
 #     última release), construye la imagen de 92 con el constructor debian
 #     (e2e-tools, en caché en ~/.cache/kling-e2e), baja la release anterior
-#     para 95 y, si pasan los dos, imprime la línea de export. 95 necesita
+#     para 95 y, si pasan los dos, publica el status. 95 necesita
 #     que tu dev.kindling.daemon esté parado: si no, corre 92, dice cómo
 #     pararlo y se puede seguir con E2E=95 (la marca de 92 se guarda por commit)
 scripts/e2e-mac-release.sh
-export KLING_E2E_HV=<lo que imprime: el sha de 12 de HEAD>   # solo si no pudo publicar el status
 
 # 4. la etiqueta dispara el workflow
 ./scripts/release.sh vX.Y.Z --wait
 ```
 
-`scripts/release.sh` se niega a etiquetar sin ese bloque, `--dry-run` enseña
-las notas que saldrán y `--wait` espera al workflow y abre la release. A mano:
+`scripts/release.sh` se niega a etiquetar sin ese bloque o con algo bajo
+`[Unreleased]`, y no da por verde un job de `ci.yml` saltado. `--dry-run` (`-n`)
+enseña las notas que saldrán y sale con 1 si algo pararía la release, y
+`--wait` espera al workflow y abre la release. A mano:
 
 ```sh
 scripts/release-notes.sh vX.Y.Z   # las notas, como las publicará el workflow
