@@ -447,7 +447,7 @@ func delMismoVMM(snaps []*api.Snapshot, info *api.Info) []*api.Snapshot {
 }
 
 // checkAgentesViejos avisa de las imágenes cuyo agente de invitado es viejo
-// para este daemon (agenteViejo): siguen funcionando, degradadas.
+// para este daemon (agenteViejo): degradadas, o fuera de la compatibilidad.
 func checkAgentesViejos(imgs []api.Image, kling string) (doctorCheck, bool) {
 	var names []string
 	var por string
@@ -464,9 +464,11 @@ func checkAgentesViejos(imgs []api.Image, kling string) (doctorCheck, bool) {
 	if len(shown) > 5 {
 		shown = append(shown[:5:5], fmt.Sprintf("and %d more", len(names)-5))
 	}
-	detail := fmt.Sprintf("%d with an old guest agent (they work, without what it lacks): %s", len(names), strings.Join(shown, ", "))
+	// El motivo ya dice cuánto se degrada: "funciona" no vale para uno
+	// anterior a v0.18, que está fuera de la compatibilidad.
+	detail := fmt.Sprintf("%d with an old guest agent, degraded: %s", len(names), strings.Join(shown, ", "))
 	if len(names) == 1 {
-		detail = fmt.Sprintf("%s: %s (it works, without what it lacks)", names[0], por)
+		detail = fmt.Sprintf("%s: %s", names[0], por)
 	}
 	return doctorCheck{Name: "images", State: doctorWarn, Detail: detail,
 		Fix: "kling image ls says which; " + pistaRehacer}, true

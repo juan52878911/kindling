@@ -267,8 +267,10 @@ func imagesToolchain(args []string) error {
 // `image ls` lo marca), o "" si no lo es o no se sabe. Viejo es:
 //
 //   - anterior a v0.18 (no anuncia capacidades, y un parámetro nuevo de la
-//     línea del kernel podía tumbar su PID 1): fuera de la compatibilidad;
-//   - más de una MINOR por detrás del daemon.
+//     línea del kernel podía tumbar su PID 1): fuera de la compatibilidad, y
+//     degradado (docs/compatibilidad.md);
+//   - más de una release MINOR por detrás del daemon, contando 1.0 como la que
+//     sigue a 0.20 (ordinalRelease).
 //
 // Solo se juzga kling-guest (o lo que no dice su nombre: una receta de
 // antes): otro agente (kling-bridge de kindling-mcp) lleva su versión.
@@ -280,7 +282,7 @@ func agenteViejo(ag *api.GuestAgent, kling string) string {
 	// Uno que contestó sin decir nada de sí mismo (lo apuntó el daemon al
 	// arrancar una máquina de la imagen) es anterior a v0.18.
 	if ag.Agent == "" && ag.Version == "" && ag.Caps == nil {
-		return "guest agent announces nothing about itself (older than v0.18): it is outside compatibility"
+		return "guest agent announces nothing about itself (older than v0.18): " + fueraDeCompat
 	}
 	ma, mi, ok := mayorMenor(ag.Version)
 	ka, ki, kok := mayorMenor(kling)
@@ -289,13 +291,46 @@ func agenteViejo(ag *api.GuestAgent, kling string) string {
 	}
 	desc := "v" + strings.TrimPrefix(ag.Version, "v")
 	if ma == 0 && mi < 18 {
-		return fmt.Sprintf("guest agent %s is older than v0.18: it announces no capabilities and is outside compatibility", desc)
+		return fmt.Sprintf("guest agent %s is older than v0.18: %s", desc, fueraDeCompat)
+	}
+	kv := strings.TrimPrefix(kling, "v")
+	a, aok := ordinalRelease(ma, mi)
+	k, kok := ordinalRelease(ka, ki)
+	if !aok || !kok {
+		// Sin saber cuántas MINOR tuvo una MAJOR, solo se ve que es de otra.
+		if ma < ka {
+			return fmt.Sprintf("guest agent %s is from an older MAJOR than kling v%s: it works, degraded", desc, kv)
+		}
+		return ""
 	}
 	// Una MINOR "por detrás" cuenta igual a través de una MAJOR (0.20 → 1.0).
-	if (ka*1000+ki)-(ma*1000+mi) > 1 {
-		return fmt.Sprintf("guest agent %s is more than one minor behind kling v%s", desc, strings.TrimPrefix(kling, "v"))
+	if k-a > 1 {
+		return fmt.Sprintf("guest agent %s is more than one minor behind kling v%s: it works, degraded", desc, kv)
 	}
 	return ""
+}
+
+// fueraDeCompat es lo que le pasa a un agente anterior a v0.18: arranca, pero
+// sin resync, ready, hooks ni carpetas, y -e, cmd y volume_wait fallan.
+const fueraDeCompat = "outside compatibility, degraded (no resync, ready, hooks or shares; run -e fails)"
+
+// ultimaMenor es la última MINOR de cada MAJOR ya cerrada: 1.0 sigue a 0.20.
+// Al sacar la 2.0 hay que apuntar aquí la última 1.x.
+var ultimaMenor = map[int]int{0: 20}
+
+// ordinalRelease numera las releases MINOR seguidas a través de las MAJOR
+// (0.20 → 20, 1.0 → 21, 1.1 → 22): la distancia entre dos es cuántas MINOR
+// hay entre ellas. false si una MAJOR anterior no consta en ultimaMenor.
+func ordinalRelease(mayor, menor int) (int, bool) {
+	n := 0
+	for m := 0; m < mayor; m++ {
+		u, ok := ultimaMenor[m]
+		if !ok {
+			return 0, false
+		}
+		n += u + 1
+	}
+	return n + menor, true
 }
 
 // mayorMenor lee MAJOR y MINOR de "v0.19.2" / "0.19.2-rc1".

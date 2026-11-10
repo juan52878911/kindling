@@ -18,9 +18,19 @@ func TestAgenteViejo(t *testing.T) {
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.21.0"}, "0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.3"}, "v0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.19.0"}, "0.21.0", "more than one minor"},
-		{&api.GuestAgent{Version: "v0.17.0"}, "0.18.0", "older than v0.18"},
-		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.0"}, "1.0.0", "more than one minor"},
+		{&api.GuestAgent{Version: "v0.17.0"}, "0.18.0", "older than v0.18: outside compatibility, degraded"},
+		// 1.0 es la MINOR que sigue a 0.20: una por detrás, dentro.
+		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.0"}, "1.0.0", ""},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.3"}, "v1.0.1", ""},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "0.19.0"}, "1.0.0", "more than one minor"},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "0.20.0"}, "1.1.0", "more than one minor"},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "1.0.0"}, "1.1.0", ""},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "1.0.0"}, "1.2.0", "more than one minor"},
+		// Una MAJOR cuya última MINOR no consta: se juzga por la MAJOR.
+		{&api.GuestAgent{Agent: "kling-guest", Version: "1.4.0"}, "2.0.0", "older MAJOR"},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "1.1.0"}, "1.0.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "dev"}, "0.21.0", ""},
+		{&api.GuestAgent{Agent: "kling-guest", Version: "dev+1a2b3c4d"}, "0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.19.0"}, "dev", ""},
 		{&api.GuestAgent{Agent: "kling-bridge", Version: "0.1.0"}, "0.21.0", ""},
 		{&api.GuestAgent{Agent: "kling-guest", Version: "0.21.0-rc1"}, "0.22.0", ""},
@@ -43,5 +53,10 @@ func TestCheckAgentesViejos(t *testing.T) {
 	}, "0.21.0")
 	if !ok || c.State != doctorWarn || !strings.Contains(c.Detail, "vieja") || !strings.Contains(c.Fix, "image import -replace") {
 		t.Fatalf("check = %+v", c)
+	}
+	// Uno anterior a v0.18 está fuera de la compatibilidad: decir además
+	// que "funciona" se contradice.
+	if strings.Contains(c.Detail, "it works") || !strings.Contains(c.Detail, "outside compatibility") {
+		t.Fatalf("detalle contradictorio: %q", c.Detail)
 	}
 }
