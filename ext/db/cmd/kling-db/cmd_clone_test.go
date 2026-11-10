@@ -49,6 +49,9 @@ type cloneFake struct {
 	discover string
 	fillErr  error
 	fixup    string
+	// evtLeft es lo que contesta el borrado de event triggers ("evt|0": no
+	// queda ninguno).
+	evtLeft string
 }
 
 func newCloneFake() *cloneFake {
@@ -64,6 +67,7 @@ func newCloneFake() *cloneFake {
 			`{"schema":"public","table":"orders","column":"total","type":"numeric","category":"N","generated":false}]}`,
 		// orders (customer_email), users (email, full_name)
 		maskOut:     "kc|0|2|2|0\nkc|1|3|3,3|0,0\n",
+		evtLeft:     "evt|0\n",
 		seedContent: "-- masked dump\n",
 	}
 }
@@ -121,6 +125,8 @@ func (f *cloneFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 			return nil, f.fillErr
 		case strings.Contains(s, sliceFixupMarker):
 			return []byte(f.fixup), nil
+		case strings.Contains(s, dropEventTriggersMarker):
+			return []byte(f.evtLeft), nil
 		case strings.Contains(s, dbmask.CatalogMarker):
 			return []byte(f.catalog), nil
 		case strings.Contains(s, dbmask.MaskMarker):
@@ -510,5 +516,37 @@ func TestPasswordStdinLimpiaPGPASSWORD(t *testing.T) {
 		if v, ok := os.LookupEnv(k); ok {
 			t.Errorf("%s still set: %q", k, v)
 		}
+	}
+}
+
+// Un event trigger del origen (CREATE EVENT TRIGGER ... ON ddl_command_end)
+// se dispararía como superusuario en la construcción y viajaría al golden en
+// el volcado enmascarado: se borran todos nada más restaurar, antes del
+// catálogo y del enmascarado, y si queda alguno no se construye nada.
+func TestCloneBorraEventTriggers(t *testing.T) {
+	ct := newCloneTest(t)
+	if _, err := ct.c.run(context.Background(), ct.opts(t, cloneRules)); err != nil {
+		t.Fatalf("%v\n%s", err, ct.out)
+	}
+	pos := func(marker string) int {
+		for i, c := range ct.f.calls {
+			if strings.Contains(c.stdin, marker) {
+				return i
+			}
+		}
+		return -1
+	}
+	dump, drop, cat := pos("kling-db:clone-dump"), pos(dropEventTriggersMarker), pos(dbmask.CatalogMarker)
+	if dump < 0 || drop < 0 || cat < 0 || !(dump < drop && drop < cat) {
+		t.Fatalf("order dump=%d drop=%d catalog=%d", dump, drop, cat)
+	}
+
+	ct = newCloneTest(t)
+	ct.f.evtLeft = "evt|1\n"
+	if _, err := ct.c.run(context.Background(), ct.opts(t, cloneRules)); err == nil || !strings.Contains(err.Error(), "event trigger") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(ct.golden) != 0 {
+		t.Fatalf("golden built: %v", ct.golden)
 	}
 }
