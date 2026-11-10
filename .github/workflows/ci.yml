@@ -315,8 +315,8 @@ jobs:
   # (cmd/kling, internal/share, internal/transport, internal/durable,
   # pkg/plugin, el terminal de kling-sandbox) no corren en ningún otro sitio;
   # antes solo internal/machine e internal/daemon. No arrancan ninguna VM (el
-  # VMM es un doble), así que valen en un runner sin virtualización. Unos 4 min
-  # en el M4 con -p 2; el job vz, en paralelo, tarda más.
+  # VMM es un doble), así que valen en un runner sin virtualización. En
+  # macos-15, unos 7,5 min (antes 2), algo más que el job vz en paralelo.
   clon-apfs:
     name: clon real (apfs)
     runs-on: macos-15
