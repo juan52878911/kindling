@@ -811,7 +811,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if h == nil {
 			return fail(share.EBADF)
 		}
-		if e := fs.drain(h.node, true); e != 0 {
+		if e := fs.drainHandle(h, true); e != 0 {
 			return fail(e)
 		}
 		errno, _ := fs.handleCall(h, share.OpFsync, nil)
@@ -819,7 +819,12 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 
 	case opFlush:
 		// close(2): lo diferido llega al host antes de volver, y su error, si
-		// lo hubo, es el de close.
+		// lo hubo, es el de close: el de las escrituras de ESTE handle.
+		if len(a) >= 8 {
+			if h := fs.file(le.Uint64(a[0:])); h != nil {
+				return fail(fs.drainHandle(h, true))
+			}
+		}
 		return fail(fs.drain(n, true))
 
 	case opOpendir:
@@ -899,7 +904,7 @@ func (fs *fuseFS) write1(req fuseReq, wait bool) ([]byte, bool) {
 	} else {
 		// Con un daemon anterior (o tras cambiar de sesión a uno), lo que
 		// quedara diferido va primero.
-		if e := fs.drain(h.node, true); e != 0 {
+		if e := fs.drainHandle(h, true); e != 0 {
 			return fail(e)
 		}
 		var errno uint32

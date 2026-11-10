@@ -20,7 +20,10 @@ package guest
 // atributos, truncar, abrir, fsync, flush, release, buscarlo por nombre— espera
 // antes a que lleguen (drain): nadie ve el fichero sin lo que ya se escribió.
 // Un error de un trozo ya contestado se guarda y lo recibe el siguiente write,
-// flush o fsync de ese nodo, como en NFS: close(2) sigue devolviendo el error.
+// flush o fsync del MISMO handle, como en NFS: close(2) sigue devolviendo el
+// error. Era del nodo, y con dos descriptores del mismo fichero el primero que
+// cerraba se llevaba el error del otro, que cerraba limpio y perdía sus datos
+// sin enterarse.
 //
 // Por qué no FUSE_WRITEBACK_CACHE del kernel, que haría lo mismo con la caché
 // de páginas: con él, Linux da por buenos su tamaño y su mtime de cada fichero
@@ -136,7 +139,61 @@ type wbState struct {
 	cur    *wbChunk   // acumulándose, aún sin mandar
 	flying []*wbChunk // mandados, sin respuesta
 	bytes  int        // cur + flying
-	err    uint32     // primer error de un trozo ya contestado al kernel
+	// errs es el primer error de un trozo ya contestado al kernel, por el
+	// handle que lo escribió; sinDueño, uno que vino sin handle (el estado
+	// restaurado de kling-hv guarda uno por nodo): se lo lleva el primero que
+	// pregunte, como antes. err es uno de los dos, el que guarda el estado
+	// (fuse_host.go); no se toca a mano: espejo.
+	errs     map[*fileHandle]uint32
+	sinDueño uint32
+	err      uint32
+}
+
+// adoptar toma como sin dueño un err puesto desde fuera (al restaurar).
+func (st *wbState) adoptar() {
+	if len(st.errs) == 0 && st.sinDueño == 0 && st.err != 0 {
+		st.sinDueño = st.err
+	}
+}
+
+// espejo deja en err uno de los errores pendientes (o ninguno).
+func (st *wbState) espejo() {
+	st.err = st.sinDueño
+	for _, e := range st.errs {
+		st.err = e
+		break
+	}
+}
+
+// apuntarErr guarda el error de un trozo de h, si h no tenía ya uno.
+func (st *wbState) apuntarErr(h *fileHandle, errno uint32) {
+	st.adoptar()
+	if st.errs == nil {
+		st.errs = map[*fileHandle]uint32{}
+	}
+	if st.errs[h] == 0 {
+		st.errs[h] = errno
+	}
+	st.espejo()
+}
+
+// tomarErr es el error pendiente que le toca a h: el suyo o, si no tiene, uno
+// sin dueño. El de otro handle, nunca. Con take, lo consume.
+func (st *wbState) tomarErr(h *fileHandle, take bool) uint32 {
+	st.adoptar()
+	if e := st.errs[h]; e != 0 {
+		if take {
+			delete(st.errs, h)
+			st.espejo()
+		}
+		return e
+	}
+	e := st.sinDueño
+	if take && e != 0 {
+		st.sinDueño = 0
+		st.espejo()
+	}
+	return e
 }
 
 // wbOf devuelve el estado de escritura diferida de n, creándolo.
@@ -176,8 +233,7 @@ func (fs *fuseFS) writeBehind(h *fileHandle, off uint64, data []byte, wait bool)
 	st := wbOf(h.node)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if e := st.err; e != 0 {
-		st.err = 0
+	if e := st.tomarErr(h, true); e != 0 {
 		return e, true
 	}
 	// Cada espera suelta el cerrojo y otro puede haber cambiado st.cur: se
@@ -261,8 +317,8 @@ func (fs *fuseFS) wbFly(st *wbState, c *wbChunk) {
 		}
 	}
 	st.bytes -= len(c.data)
-	if errno != 0 && st.err == 0 {
-		st.err = errno
+	if errno != 0 {
+		st.apuntarErr(c.h, errno)
 	}
 	// Lo que se acumuló mientras volaba este sale ya (group commit); y uno
 	// lleno que esperaba plaza, también.
@@ -317,10 +373,21 @@ func (fs *fuseFS) writeSync(h *fileHandle, off uint64, data []byte) (uint32, uin
 
 // drain espera a que llegue al host lo que estaba pendiente de n al llamarla
 // (lo que se escriba mientras espera ya no: un escritor continuo no la deja
-// esperando para siempre). take dice si se consume el error pendiente (flush y
-// fsync lo devuelven; leer o pedir atributos no son quien para recibir el
-// error de una escritura).
-func (fs *fuseFS) drain(n *node, take bool) uint32 {
+// esperando para siempre). Devuelve el error pendiente sin dueño, si lo hay, y
+// take dice si se consume: el de un handle lo recibe ese handle (drainHandle).
+func (fs *fuseFS) drain(n *node, take bool) uint32 { return fs.drainDe(n, nil, take) }
+
+// drainHandle es drain del nodo de h, devolviendo el error pendiente de h
+// (flush y fsync lo devuelven; leer o pedir atributos no son quien para
+// recibir el error de una escritura).
+func (fs *fuseFS) drainHandle(h *fileHandle, take bool) uint32 {
+	if h == nil {
+		return 0
+	}
+	return fs.drainDe(h.node, h, take)
+}
+
+func (fs *fuseFS) drainDe(n *node, h *fileHandle, take bool) uint32 {
 	if n == nil {
 		return 0
 	}
@@ -343,11 +410,7 @@ func (fs *fuseFS) drain(n *node, take bool) uint32 {
 			st.cond.Wait()
 		}
 	}
-	e := st.err
-	if take {
-		st.err = 0
-	}
-	return e
+	return st.tomarErr(h, take)
 }
 
 // pending dice si c aún no ha llegado al host.
