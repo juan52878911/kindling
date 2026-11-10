@@ -210,14 +210,17 @@ jobs:
           sudo --preserve-env=NEW_DIR,IMAGES,DB_BIN,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
             bash scripts/93-e2e-linux-ci.sh
 
-      # Los tests de Go que se saltan sin root (montajes, loop, chown): aquí
-      # hay root y KVM. KLING_TEST_MOUNTS=1 los pide.
+      # Los tests de Go que se saltan sin root (montajes, loop, chown, el ipset
+      # por netlink de internal/net): aquí hay root, KVM e ipset.
+      # KLING_TEST_MOUNTS=1 pide los de montajes. internal/upgrade e
+      # internal/durable no van: sus tests de permisos se saltan como root y
+      # ya corren sin él en ci.yml.
       - name: tests de Go como root
         if: steps.kvm.outputs.ok == 'true'
         run: |
           sudo env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
             GOWORK=off GOTOOLCHAIN=local KLING_TEST_MOUNTS=1 \
-            go test -count=1 ./cmd/kling/ ./internal/daemon/ ./internal/machine/ ./pkg/guest/
+            go test -count=1 ./cmd/kling/ ./internal/daemon/ ./internal/machine/ ./pkg/guest/ ./internal/net/
 
       - name: registros del daemon
         if: failure() && steps.kvm.outputs.ok == 'true'
