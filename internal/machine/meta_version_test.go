@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -274,9 +273,7 @@ func TestThawSeNiegaConOtroVMM(t *testing.T) {
 
 // El commit graba con qué se hizo el dorado y en v1.
 func TestCommitGrabaElOrigen(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	m.FijarOrigen("0.18.0", "Firecracker v1.12.0")
 	id := "c2aa170000000002"
@@ -285,8 +282,7 @@ func TestCommitGrabaElOrigen(t *testing.T) {
 	dir := m.snapDir("dorado")
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 	if _, err := m.Commit(context.Background(), id, "dorado", false); err != nil {
