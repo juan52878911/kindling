@@ -201,6 +201,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Fixed
 
+- Docs: commands that no longer exist (`kling squeeze`, `machine credaudit`, `renew`, `fork`, `secrets export`) and old aliases are gone from `docs/`, the READMEs and `SECURITY.md`; a test checks every cited `kling` command and `config set` key against the command tree and the extension manifests, and that `guide.md` and `guia.md` keep the same sections and commands.
 - kling-hv: when the vsock device thread stops, dials fail at once with `ENODEV` instead of each waiting its full timeout; a vsock receive round moves at most 1 MiB and stops when the VM pauses; a virtio interrupt line is recorded as raised only if the GIC accepted it; timed waits no longer follow wall-clock steps; the RAM file of a freeze is always 0600 (an APFS clone kept the mode of its golden).
 - kling-hv guests ran without KASLR. The FDT now carries `kaslr-seed` and `rng-seed` on every cold boot, and the guest kernel trusts the bootloader seed. Clones never boot again, so they don't reuse a seed.
 - kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
