@@ -141,7 +141,20 @@ func TestPullZstdParallel(t *testing.T) {
 		now[k]++
 		peak[k] = max(peak[k], now[k])
 		mu.Unlock()
-		time.Sleep(30 * time.Millisecond)
+		// Hasta que se hayan visto tres gzip a la vez (o 2 s), cada capa se
+		// queda dentro: con un sueño fijo de 30 ms, en un runner de 3 núcleos
+		// cargado y con -race la tercera llegaba tarde y el pico salía 2
+		// (falló en macos-15). Si el código limitara las gzip a menos de 3,
+		// el plazo vence con el pico por debajo y el test falla igual.
+		for fin := time.Now().Add(2 * time.Second); time.Now().Before(fin); {
+			mu.Lock()
+			n := peak[0]
+			mu.Unlock()
+			if n >= 3 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		return func() { mu.Lock(); now[k]--; mu.Unlock() }
 	})
 	defer oci.SetUnpackHook(nil)
