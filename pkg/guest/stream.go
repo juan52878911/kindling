@@ -60,7 +60,9 @@ func handleStreamExec(env []string, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	out := newEmitter(w)
 
-	res := runStreaming(r.Context(), env, req, timeout, maxOut, out)
+	ctx, quitar := contextoExec(r.Context())
+	defer quitar()
+	res := runStreaming(ctx, env, req, timeout, maxOut, out)
 	out.emit(res)
 }
 

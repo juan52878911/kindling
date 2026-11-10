@@ -111,6 +111,12 @@ func ResyncHandler() http.HandlerFunc {
 		var renewed []string
 		if req.Restore == api.ResyncInstance {
 			renewed = renewMachineID(machineIDFiles)
+			// Los exec que corrían al volcar el dorado no son de esta copia
+			// (cortarExecs). Al descongelar la misma máquina no se tocan: su
+			// petición puede seguir viva, y la red los corta si no.
+			if n := cortarExecs(); n > 0 {
+				log.Printf("resync: stopped %d command(s) left running in the snapshot", n)
+			}
 		}
 		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
 		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
