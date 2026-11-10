@@ -19,10 +19,12 @@ const ext = "sandbox"
 type ajustes struct {
 	Listen string
 	URL    string
-	Token  string
-	Hosts  map[string]string
-	Idle   time.Duration
-	Reap   time.Duration
+	// TLSCert y TLSKey sirven el gateway por HTTPS (sandbox.tls_cert/tls_key).
+	TLSCert, TLSKey string
+	Token           string
+	Hosts           map[string]string
+	Idle            time.Duration
+	Reap            time.Duration
 }
 
 // leerAjustes saca la configuración con sus valores por defecto.
@@ -32,14 +34,18 @@ func leerAjustes() (ajustes, error) {
 		return ajustes{}, err
 	}
 	a := ajustes{
-		Listen: cfg.ExtensionValue(ext, "listen", "string"),
-		URL:    cfg.ExtensionValue(ext, "url", "string"),
-		Token:  cfg.ExtensionValue(ext, "token", "secret"),
-		Idle:   5 * time.Minute,
-		Reap:   24 * time.Hour,
+		Listen:  cfg.ExtensionValue(ext, "listen", "string"),
+		URL:     cfg.ExtensionValue(ext, "url", "string"),
+		Token:   cfg.ExtensionValue(ext, "token", "secret"),
+		TLSCert: cfg.ExtensionValue(ext, "tls_cert", "string"),
+		TLSKey:  cfg.ExtensionValue(ext, "tls_key", "string"),
+		Idle:    5 * time.Minute,
+		Reap:    24 * time.Hour,
 	}
 	if a.Listen == "" {
-		a.Listen = ":8090"
+		// Solo loopback por defecto: fuera de ella el gateway pide TLS (o
+		// -insecure-listen), y un servicio que no arranca no es un buen defecto.
+		a.Listen = "127.0.0.1:8090"
 	}
 	if a.URL == "" {
 		a.URL = "http://127.0.0.1:8090"

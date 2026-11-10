@@ -33,7 +33,7 @@ func extension() *plugin.Builtin {
 				TopLevel: true,
 				Group:    "SANDBOX FLEET",
 				Summary:  "sandboxes served by a gateway (templates, tenants, several hosts)",
-				Usage: "  sbx gateway [-listen :8090]                      serves the sandbox API\n" +
+				Usage: "  sbx gateway [-listen ADDR] [-tls-cert/-tls-key]  serves the sandbox API\n" +
 					"  sbx template apply -f tpl.json | ls | rebuild N  recipes that become golden snapshots\n" +
 					"  sbx new -template T [-ttl 10m] | ls | rm ID      sandboxes through the gateway\n" +
 					"  sbx exec ID -- cmd... | shell ID | cp ...        work inside one\n" +
@@ -41,7 +41,9 @@ func extension() *plugin.Builtin {
 				Subcommands: []string{"gateway", "template", "new", "ls", "rm", "renew", "exec", "shell", "cp", "hosts"},
 			}},
 			Config: []plugin.ConfigKey{
-				{Key: "listen", Type: "string", Help: "address the gateway listens on (default :8090)"},
+				{Key: "listen", Type: "string", Help: "address the gateway listens on (default 127.0.0.1:8090; off loopback it needs TLS or -insecure-listen)"},
+				{Key: "tls_cert", Type: "string", Help: "TLS certificate (PEM) the gateway serves HTTPS with"},
+				{Key: "tls_key", Type: "string", Help: "private key (PEM) of sandbox.tls_cert"},
 				{Key: "url", Type: "string", Help: "gateway the client commands talk to (default http://127.0.0.1:8090)"},
 				{Key: "token", Type: "secret", Help: "token the client commands send"},
 				{Key: "hosts", Type: "string", Help: "kindling daemons behind the gateway: name=endpoint, comma separated"},
