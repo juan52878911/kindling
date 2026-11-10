@@ -487,7 +487,7 @@ func TestWall(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := newWall(a, 2)
-	h := w.handler(true)
+	h := w.handler(true, "/sec/")
 	do := func(method, path string, hdr map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
 		req.Host = "127.0.0.1:8765"
@@ -498,36 +498,36 @@ func TestWall(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		return rec
 	}
-	if r := do("GET", "/", nil); r.Code != 200 || !strings.Contains(r.Body.String(), "Muro de teléfonos") {
+	if r := do("GET", "/sec/", nil); r.Code != 200 || !strings.Contains(r.Body.String(), "Muro de teléfonos") {
 		t.Fatalf("page: %d", r.Code)
 	}
-	r := do("GET", "/api/phones", nil)
+	r := do("GET", "/sec/api/phones", nil)
 	var ps []map[string]any
 	_ = json.Unmarshal(r.Body.Bytes(), &ps)
 	if len(ps) != 2 || ps[0]["name"] != "phone-1" || ps[1]["name"] != "phone-2" {
 		t.Fatalf("phones: %s", r.Body)
 	}
-	if r := do("GET", "/shot/phone-2", nil); r.Code != 200 || !bytes.Equal(r.Body.Bytes(), fakePNG) {
+	if r := do("GET", "/sec/shot/phone-2", nil); r.Code != 200 || !bytes.Equal(r.Body.Bytes(), fakePNG) {
 		t.Fatalf("shot: %d", r.Code)
 	}
 	// Sin la cabecera (lo que puede mandar otra web): nada.
-	if r := do("POST", "/tap/phone-1?x=10&y=20", nil); r.Code != 403 {
+	if r := do("POST", "/sec/tap/phone-1?x=10&y=20", nil); r.Code != 403 {
 		t.Fatalf("tap without header: %d", r.Code)
 	}
-	if r := do("POST", "/tap/phone-1?x=10&y=20", map[string]string{wallHeader: "1"}); r.Code != 200 {
+	if r := do("POST", "/sec/tap/phone-1?x=10&y=20", map[string]string{wallHeader: "1"}); r.Code != 200 {
 		t.Fatalf("tap: %d %s", r.Code, r.Body)
 	}
-	if r := do("POST", "/key/phone-1?k=RECENTS", map[string]string{wallHeader: "1"}); r.Code != 200 {
+	if r := do("POST", "/sec/key/phone-1?k=RECENTS", map[string]string{wallHeader: "1"}); r.Code != 200 {
 		t.Fatalf("key: %d", r.Code)
 	}
-	if r := do("POST", "/swipe/phone-1?x1=1&y1=2&x2=3&y2=4&ms=100", map[string]string{wallHeader: "1"}); r.Code != 200 {
+	if r := do("POST", "/sec/swipe/phone-1?x1=1&y1=2&x2=3&y2=4&ms=100", map[string]string{wallHeader: "1"}); r.Code != 200 {
 		t.Fatalf("swipe: %d", r.Code)
 	}
 	p := f.phoneOf("phone-1")
 	if len(p.taps) != 1 || p.taps[0] != [2]int{10, 20} || len(p.keys) != 1 || p.keys[0] != "APP_SWITCH" {
 		t.Fatalf("phone-1 got taps %v keys %v", p.taps, p.keys)
 	}
-	if r := do("POST", "/tap/phone-9?x=1&y=1", map[string]string{wallHeader: "1"}); r.Code != 404 {
+	if r := do("POST", "/sec/tap/phone-9?x=1&y=1", map[string]string{wallHeader: "1"}); r.Code != 404 {
 		t.Fatalf("unknown phone: %d", r.Code)
 	}
 	req := httptest.NewRequest("GET", "/api/phones", nil)
@@ -537,11 +537,20 @@ func TestWall(t *testing.T) {
 	if rec.Code != 403 {
 		t.Fatalf("foreign host: %d", rec.Code)
 	}
+	// Sin el camino secreto, nada: ni la página, ni las capturas, ni los
+	// toques, aunque el Host sea de loopback (lo pone cualquiera con curl).
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/"}, {"GET", "/api/phones"}, {"GET", "/shot/phone-2"}, {"POST", "/tap/phone-1?x=1&y=1"}, {"GET", "/sec"}, {"GET", "/otro/shot/phone-2"},
+	} {
+		if r := do(c.method, c.path, map[string]string{wallHeader: "1"}); r.Code != 404 {
+			t.Errorf("%s %s without the secret: %d", c.method, c.path, r.Code)
+		}
+	}
 	// Un teléfono pausado no sale en el muro.
 	m, _ := a.phone(ctx, "2")
 	_, _ = f.Pause(ctx, m.ID)
 	w.listAt = time.Time{}
-	r = do("GET", "/api/phones", nil)
+	r = do("GET", "/sec/api/phones", nil)
 	ps = nil
 	_ = json.Unmarshal(r.Body.Bytes(), &ps)
 	if len(ps) != 1 {
