@@ -112,8 +112,12 @@ func (a *app) keepOld(mc *api.Machine, role, oldPw string, cause error) error {
 	defer cancel()
 	err := a.setPassword(ctx, mc, role, oldPw)
 	if err != nil {
+		// rotate otra vez pone la clave desde el administrador del invitado,
+		// sin pedir la vieja, y deja base y host de acuerdo: reset tiraría los
+		// datos de la copia. Vale también tras una rotación muerta a medias
+		// (el password.new que quede lo pisa la siguiente).
 		return fmt.Errorf("%w; could not confirm the previous password is still in force (%v): "+
-			"if connect stops working, kling db reset %s", cause, err, mc.Name)
+			"if connect stops working, run kling db rotate %s again (it keeps the data)", cause, err, mc.Name)
 	}
 	return fmt.Errorf("%w; the previous password is unchanged", cause)
 }
