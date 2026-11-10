@@ -94,9 +94,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling mcp import`, `add` and `link` refuse service names with a dot: in `/mcp/_all` the dot separates service and tool, so service `a` could publish tools under service `a.b`'s names. Existing dotted services are left out of `/mcp/_all` (with a log line); their `/mcp/<service>` route still works. Rename them by importing again under a dot-free name.
 - kling-hv: a guest can no longer keep freeze, commit or squeeze out. A virtio-blk batch stops after 64 MiB of data or, between requests, as soon as the VM is pausing, and a single read or write over 64 MiB fails with an I/O error (Linux sends a few MiB unless `max_sectors_kb` is raised by hand). Balloon free page reports are capped at 1 GiB/s; the excess is returned unreleased.
 - kling-hv: a panic in the virtio-fs FUSE server answers that request with `EIO` and is logged instead of killing the VMM; a data abort the VMM cannot decode (no ISV) is injected into the guest as an external abort instead of ending the VM; a restored RTC offset is clamped so it can't overflow.
+- `kling sbx gateway` serves HTTPS with `-tls-cert`/`-tls-key` (or `sandbox.tls_cert`/`sandbox.tls_key`) and refuses plain HTTP off loopback unless `-insecure-listen` is given. **The default listen address is now `127.0.0.1:8090`** (was `:8090`): a gateway reached from the network needs `sandbox.listen` plus a certificate, or `-insecure-listen`.
+- `kling phone view` serves the wall under a random path (`/<secret>/`, printed at start), like `kling phone mcp`; `-secret-path=false` restores `/`.
 
 ### Fixed
 
+- `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
 - Credential proxy: a stream cut by the absolute cap or the idle timeout is always aborted towards the guest. If the provider closed its response cleanly on seeing the TLS close_notify, the proxy finished the chunked body normally and the guest took a truncated response as complete (also behind the flaky `TestProxyTechoAbsoluto`).
 - kling-hv: freeing a vsock connection (a guest RST, a dial that times out) no longer closes its socket while the device thread is polling it; that close could hang forever in the kernel, freezing the vCPU and the whole vsock device.
 - Credential proxy links: the `busy` audit record of a connection rejected by `MaxConns` is queued before the connection is closed, so a shutdown right after can no longer drop it.
