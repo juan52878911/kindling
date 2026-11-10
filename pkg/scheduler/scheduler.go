@@ -708,7 +708,7 @@ func (g *Scheduler) forget(sid string) {
 //  1. ya hay una caliente          -> 0 ms
 //  2. hay una congelada            -> ~30 ms de thaw
 //  3. no hay ninguna               -> se instancia del snapshot dorado
-func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) {
+func (g *Scheduler) ensure(ctx context.Context, service string) (_ *entry, err error) {
 	// Serializado POR SERVICIO. Sin esto, N llamadas concurrentes que llegan
 	// antes de existir la instancia entran todas en acquire() y cada una crea la
 	// suya: ocho peticiones paralelas levantaban ocho microVMs del mismo servicio
@@ -717,9 +717,17 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 	//
 	// Es el mismo patrón que ya protegía la creación de sesión, aplicado un nivel
 	// más arriba: quien llega segundo debe esperar y reutilizar, no duplicar.
-	lock := g.ensureLock(service)
-	lock.Lock()
+	lock := g.lockEnsure(service)
 	defer lock.Unlock()
+	// Un nombre sin snapshot no deja su candado en ensureMu: la ruta
+	// /mcp/<servicio> admite cualquier nombre de quien tenga token, y cada uno
+	// dejaba un mutex que nunca se podaba. Se quita con el candado tomado;
+	// quien esperaba en él lo nota en lockEnsure y toma el nuevo.
+	defer func() {
+		if errors.Is(err, errNoSnapshot) {
+			g.ensureMu.CompareAndDelete(service, lock)
+		}
+	}()
 
 	tnt := tenantFrom(ctx)
 
@@ -1609,8 +1617,12 @@ func (g *Scheduler) snapshotFor(ctx context.Context, service string) (*api.Snaps
 			return s, nil
 		}
 	}
-	return nil, fmt.Errorf("no snapshot for service %q", service)
+	return nil, fmt.Errorf("%w for service %q", errNoSnapshot, service)
 }
+
+// errNoSnapshot: el servicio no tiene snapshot del que restaurar. El texto es
+// el de siempre ("no snapshot for service ..."), que el gateway reconoce.
+var errNoSnapshot = errors.New("no snapshot")
 
 // alive comprueba que una instancia concreta sigue viva. Usa Get(id), no
 // List(): List recorre el disco de TODAS las máquinas del daemon para
@@ -2137,6 +2149,21 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 func (g *Scheduler) ensureLock(service string) *sync.Mutex {
 	v, _ := g.ensureMu.LoadOrStore(service, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// lockEnsure toma el candado de aprovisionamiento del servicio y comprueba,
+// ya tomado, que sigue siendo el del mapa: ensure lo quita al ver que el
+// servicio no tiene snapshot, y quien esperaba en el viejo no debe seguir con
+// él mientras otro toma el nuevo.
+func (g *Scheduler) lockEnsure(service string) *sync.Mutex {
+	for {
+		l := g.ensureLock(service)
+		l.Lock()
+		if v, ok := g.ensureMu.Load(service); ok && v == l {
+			return l
+		}
+		l.Unlock()
+	}
 }
 
 // evictLRU congela la instancia ociosa más antigua para liberar memoria.
