@@ -15,6 +15,44 @@ func modo(t *testing.T, ruta string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
+// M8: state.json y fondos.json son el inventario (IPs, reenvíos, dueños,
+// nombres de variables) y los escribía 0644: legibles por cualquier cuenta.
+func TestEstadoYFondosSoloLosLeeElDaemon(t *testing.T) {
+	var permisos []os.FileMode
+	prevE, prevF := escribirEstado, escribirFondosEn
+	espia := func(prev func(string, []byte, os.FileMode) error) func(string, []byte, os.FileMode) error {
+		return func(ruta string, datos []byte, perm os.FileMode) error {
+			permisos = append(permisos, perm)
+			return prev(ruta, datos, perm)
+		}
+	}
+	escribirEstado, escribirFondosEn = espia(prevE), espia(prevF)
+	t.Cleanup(func() { escribirEstado, escribirFondosEn = prevE, prevF })
+
+	m := newTestManager(t)
+	m.addForTest("e8e8000000000001")
+	if err := m.persistirYa(); err != nil {
+		t.Fatal(err)
+	}
+	if got := modo(t, m.statePath()); got != 0o600 {
+		t.Errorf("state.json %v; quería 0600", got)
+	}
+	if err := m.guardarFondos(); err != nil {
+		t.Fatal(err)
+	}
+	if got := modo(t, m.fondosPath()); got != 0o600 {
+		t.Errorf("fondos.json %v; quería 0600", got)
+	}
+	if len(permisos) < 2 {
+		t.Fatalf("solo %d escrituras vistas; quería state.json y fondos.json", len(permisos))
+	}
+	for _, p := range permisos {
+		if p != 0o600 {
+			t.Errorf("se escribió con %v; quería 0600", p)
+		}
+	}
+}
+
 // Firecracker crea mem.file y snap.file 0644: cualquier cuenta del host leía
 // la RAM de una máquina congelada. cerrarVolcado les quita la lectura ajena.
 func TestCerrarVolcadoQuitaLaLecturaAjena(t *testing.T) {

@@ -1138,7 +1138,9 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
 	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
 	// mal en el otro, que es lo que pasaba con links.json.
-	if err := escribirEstado(m.statePath(), b, 0o644); err != nil {
+	// 0600: es el inventario entero (IPs, reenvíos, dueños, nombres de
+	// variables), y solo lo lee el daemon (M8).
+	if err := escribirEstado(m.statePath(), b, 0o600); err != nil {
 		return fmt.Errorf("could not persist it: %w", err)
 	}
 	m.escritoGen = gen
