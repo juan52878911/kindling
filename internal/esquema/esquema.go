@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // Cabecera se incrusta en el struct de un fichero versionado para que el campo
@@ -136,12 +138,19 @@ func Respaldar(ruta string, v int) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	// Con el fsync del directorio (durable.Renombrar): sin él, tras un corte
+	// el nombre .bak podía no existir aunque su contenido sí, y es la copia
+	// que permite volver a la versión anterior (M8).
+	if err := renombrar(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	return nil
 }
+
+// renombrar publica el respaldo; variable para que un test vea que pasa por
+// durable.Renombrar.
+var renombrar = durable.Renombrar
 
 // PrepararEscritura es lo que hace el dueño de un fichero versionado justo
 // antes de escribir la versión nueva encima de ruta:

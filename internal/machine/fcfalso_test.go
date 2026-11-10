@@ -60,6 +60,9 @@ type fcFalso struct {
 	// PATCH /balloon le pone ActualMiB a lo pedido, como si el invitado lo
 	// entregara al instante.
 	globo *fc.BalloonStats
+	// estado, si no está vacío, es lo que contesta GET / ("Running",
+	// "Paused"), y un PATCH /vm que no falle lo cambia como en Firecracker.
+	estado string
 
 	srv *http.Server
 }
@@ -111,6 +114,15 @@ func (f *fcFalso) atender(w http.ResponseWriter, r *http.Request) {
 		}
 		globo = *f.globo
 	}
+	estado := f.estado
+	if estado != "" && !hayFallo && r.Method == http.MethodPatch && r.URL.Path == "/vm" {
+		switch {
+		case strings.Contains(string(cuerpo), `"Paused"`):
+			f.estado = "Paused"
+		case strings.Contains(string(cuerpo), `"Resumed"`):
+			f.estado = "Running"
+		}
+	}
 	f.mu.Unlock()
 
 	// Fuera del lock: el hook puede tardar (por ejemplo, esperar a que el test
@@ -128,6 +140,10 @@ func (f *fcFalso) atender(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if estado != "" && r.Method == http.MethodGet && r.URL.Path == "/" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "anonymous-instance", "state": estado})
+		return
+	}
 	if r.URL.Path == "/balloon/statistics" {
 		// Sin un cuerpo, BalloonStats no tiene JSON que decodificar. Todo a
 		// cero vale como "el invitado aún no ha reportado" (ver
@@ -152,6 +168,20 @@ func (f *fcFalso) dejarDeFallar(metodo, ruta string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.fallos, metodo+" "+ruta)
+}
+
+// ponerEstado fija lo que contesta GET / (ver fcFalso.estado).
+func (f *fcFalso) ponerEstado(st string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.estado = st
+}
+
+// verEstado es el estado del invitado que lleva el falso.
+func (f *fcFalso) verEstado() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.estado
 }
 
 // enGancho instala el hook, o lo retira con nil.
