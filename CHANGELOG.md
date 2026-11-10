@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling image refresh [image...]` puts the daemon's `kling-guest` into images that carry an older one, without rebuilding them (layers take it from their base; images whose agent is another architecture are skipped). `kling mcp memory install-service -repair` points the bridge LaunchAgent at the current bridge, keeping its arguments.
 - `/metrics` measures resources: per-machine `kling_machine_wakeups_total{kind}` (macOS `pkg_idle`/`interrupt` from rusage, Linux `voluntary_switch` over all threads), `kling_machine_disk_bytes_total{op}`, `kling_machine_cpu_throttled_seconds_total` (cgroup `throttled_usec` on Linux, the kling-vz/kling-hv regulator on macOS); for the daemon itself `kling_daemon_footprint_mib`, `kling_daemon_rss_mib`, `kling_daemon_cpu_seconds_total`, `kling_daemon_wakeups_total`, `kling_daemon_goroutines`; `kling_battery_on`; and `kling_wake_phase_ms_total{kind,phase}`, the per-phase sum of successful thaws and resumes. `GET /procstats` carries the same per-machine figures. `GET /debug/pprof/` serves the daemon's Go profiles, admin only (capability `pprof`). See `docs/api.md#métricas-de-recursos`.
 - `kling mcp serve -paused-mib N|-1` and `-paused-for`: idle persistent instances can be paused instead of frozen (~1 ms resume vs ~30 ms thaw); off by default (`docs/despertar.md`).
 - Per-volume sync mode on macOS: `-volume name:/mount:sync=barrier|none` (API `VolumeAttachment.sync`). `full` (default) keeps `F_FULLFSYNC` on every guest flush; `barrier` uses `F_BARRIERFSYNC` (kling-vz: `fsync`), 300 guest fsyncs ~1.7 s → ~0.1 s; `none` skips flushes (~10 ms) and can leave the volume's ext4 broken if the Mac goes down. Writable volumes only; accepted and ignored on Firecracker.
@@ -29,6 +30,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Changed
 
+- Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
+- `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
 - Firecracker: guests report balloon stats every 10 s instead of every second; squeeze (and the squeezes on ready and before a dump) asks for a fresh report first, so it reclaims the same. Restored machines are switched to 10 s too (`docs/api.md`).
 - Fewer wakeups of an idle daemon: the port publisher only sweeps while something is published, the watcher rotates consoles only of machines with a live VMM and, with no VM running, scans host processes for orphans once a minute instead of every 10 s. Measured on an M4 with no VMs: ~8 context switches/s instead of 18-30.
 - macOS: in `battery_mode` auto the daemon learns AC/battery changes from the power watcher (`kling-vz`/`kling-hv --power-events`, `IOPSCreateLimitedPowerNotification`) instead of running `pmset` every minute; a change applies at once. With an older VMM it falls back to `pmset` (`docs/mac.md`).
@@ -97,6 +100,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Guest agents of v0.20 are no longer flagged as more than one minor behind a 1.0 daemon (1.0 is the minor after 0.20). The doctor line for an agent older than v0.18 no longer says it works.
+- macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
+- `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.
 - Credential proxy: a stream cut by the absolute cap or the idle timeout is always aborted towards the guest. If the provider closed its response cleanly on seeing the TLS close_notify, the proxy finished the chunked body normally and the guest took a truncated response as complete (also behind the flaky `TestProxyTechoAbsoluto`).
 - kling-hv: freeing a vsock connection (a guest RST, a dial that times out) no longer closes its socket while the device thread is polling it; that close could hang forever in the kernel, freezing the vCPU and the whole vsock device.
 - Credential proxy links: the `busy` audit record of a connection rejected by `MaxConns` is queued before the connection is closed, so a shutdown right after can no longer drop it.
