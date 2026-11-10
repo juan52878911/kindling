@@ -1081,7 +1081,8 @@ lo detecta si el daemon ya sabe que el destino cambió.
 
 **El puerto del agente de invitado (8080) nunca es destino de una arista.** El agente no
 autentica (confía en que solo el host le habla) y sirve `exec`, ficheros y volúmenes; el
-proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se rechaza
+proxy de enlace marca desde el host. Desde dentro del propio invitado (loopback, sus
+direcciones, un CID de vsock que no sea el 2) todo salvo `/healthz` contesta 403. Una arista `link` o `credential` al 8080 se rechaza
 en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
 conexión (grafos guardados antes de la validación); en macOS, además, en el broker y en
 `kling-vz` al recibir las aristas. Encontrado por el e2e real.

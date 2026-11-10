@@ -303,6 +303,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
 - `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
 - CI: the GC lock tests in `internal/machine` re-signal their FIFO until the read returns and fail after 10 s instead of hanging the macOS job for 10 minutes.
+- Guest agent: every route except `/healthz` answers 403 to requests from inside the guest (loopback, the guest's own addresses, a vsock CID other than the host's). A process in the guest could run commands as root despite the image's `USER`, write restore hooks or move the clock; the host reaches the agent from outside and is not affected.
+- Guest agent: commands still running when a golden was saved no longer survive in every copy holding their exec slot; `/resync` of an instance stops them (thaw and resume leave them alone).
 
 ## [0.20.1] - 2026-10-28
 
