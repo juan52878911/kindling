@@ -251,8 +251,10 @@ type hijacked struct {
 
 func (h *hijacked) Read(p []byte) (int, error) { return h.r.Read(p) }
 
-// requestFromGuest dice si r viene de dentro: por loopback, o desde la propia
-// IP del invitado (misma dirección en los dos extremos).
+// requestFromGuest dice si r viene de dentro: por loopback, desde la propia
+// IP del invitado (misma dirección en los dos extremos) o desde otra de sus
+// direcciones (un proceso que se ata a la IP de otra interfaz del invitado
+// antes de conectar). Por vsock, todo CID que no sea el del host.
 func requestFromGuest(r *http.Request) bool {
 	rh, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -273,6 +275,32 @@ func requestFromGuest(r *http.Request) bool {
 			if lip := net.ParseIP(lh); lip != nil && lip.Equal(rip) {
 				return true
 			}
+		}
+	}
+	return esDireccionPropia(rip)
+}
+
+// direccionesPropias da las IPs de las interfaces del invitado (variable para
+// los tests). Un error deja la lista vacía: lo de arriba ya cubre loopback y
+// la IP por la que entró la conexión, que es el caso de siempre.
+var direccionesPropias = func() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			ips = append(ips, n.IP)
+		}
+	}
+	return ips
+}
+
+func esDireccionPropia(ip net.IP) bool {
+	for _, p := range direccionesPropias() {
+		if p.Equal(ip) {
+			return true
 		}
 	}
 	return false

@@ -24,9 +24,11 @@ import (
 // mismos bytes en réplicas independientes, y con ellos los mismos ids de sesión,
 // nonces y claves efímeras.
 //
-// Quién puede llamarla: solo quien alcanza el puerto del agente, que es el host
-// (el daemon, y los clientes de su socket, que ya son root). El gateway MCP NO
-// debe reenviarle esta ruta a sus clientes: ver IsControlPath. Aun así, lo que
+// Quién puede llamarla: solo el host (el daemon, y los clientes de su socket,
+// que ya son root). El puerto del agente también lo alcanza un proceso del
+// propio invitado, por loopback o por su IP: Register la envuelve en soloHost,
+// que se lo niega. El gateway MCP NO debe reenviarle esta ruta a sus clientes:
+// ver IsControlPath. Aun así, lo que
 // entra se valida: tamaño acotado, entropía dentro de límites y una hora
 // plausible. Mezclar bytes conocidos en el pool no resta entropía —el kernel
 // los combina con un hash—, así que lo peor que puede hacer un llamante con
