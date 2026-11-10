@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -304,8 +307,12 @@ func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
 	listen := fs.String("listen", "127.0.0.1:9100", "where to listen")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap (quotes group words; or give it after --)")
+	repair := fs.Bool("repair", false, "rewrite the installed service with the current bridge, keeping its -listen and command")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
+	}
+	if *repair {
+		return memoryRepairService()
 	}
 	// El comando como lista: tras `--` va tal cual, argumento a argumento; con
 	// -cmd se parte respetando comillas. strings.Fields partía "a b" en dos.
@@ -347,16 +354,7 @@ func memoryInstallService(args []string) error {
 		return fmt.Errorf("can't find %q in PATH: install it or provide the full path with -cmd", parts[0])
 	}
 
-	body := launchAgentPlist(home, append([]string{bin, "-listen", *listen, "--"}, parts...))
-
-	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
-		return err
-	}
-	_ = exec.Command("launchctl", "unload", plist).Run()
-	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load: %v: %s", err, out)
-	}
-	if err := waitForStart(bin); err != nil {
+	if err := loadService(plist, home, append([]string{bin, "-listen", *listen, "--"}, parts...)); err != nil {
 		return err
 	}
 	warnIfExposed(*listen)
@@ -368,6 +366,105 @@ func memoryInstallService(args []string) error {
 	fmt.Printf("Starts automatically at login. To remove it:\n")
 	fmt.Printf("  launchctl unload %s && rm %s\n", plist, plist)
 	return nil
+}
+
+// loadService escribe el plist con argv y lo (re)carga en launchd, y espera a
+// que arranque.
+func loadService(plist, home string, argv []string) error {
+	if err := os.WriteFile(plist, []byte(launchAgentPlist(home, argv)), 0o644); err != nil {
+		return err
+	}
+	_ = exec.Command("launchctl", "unload", plist).Run()
+	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl load: %v: %s", err, out)
+	}
+	return waitForStart(argv[0])
+}
+
+// memoryRepairService rehace el servicio ya instalado con el puente de ahora
+// (bridgePath), conservando lo demás de su línea de órdenes. Es para cuando el
+// puente cambió de sitio —antes lo dejaba make install en ~/.local/bin; kling
+// plugin install mcp lo deja junto a kling-mcp— y launchd sale con 78 en cada
+// intento. Lo lanzan kling plugin install mcp y kling upgrade -cli.
+func memoryRepairService() error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("-repair is for the macOS LaunchAgent")
+	}
+	home, _ := os.UserHomeDir()
+	plist := filepath.Join(home, "Library", "LaunchAgents", "com.kindling.bridge.plist")
+	b, err := os.ReadFile(plist)
+	if err != nil {
+		return fmt.Errorf("no service to repair: %w (install it with kling mcp memory install-service)", err)
+	}
+	argv, err := plistArgs(b)
+	if err != nil {
+		return fmt.Errorf("%s: %w", plist, err)
+	}
+	bin := bridgePath()
+	if bin == "" {
+		return fmt.Errorf("can't find kling-bridge: kling plugin install mcp")
+	}
+	argv, err = withBridge(argv, bin)
+	if err != nil {
+		return fmt.Errorf("%s: %w", plist, err)
+	}
+	if err := loadService(plist, home, argv); err != nil {
+		return err
+	}
+	fmt.Printf("Service repaired: %s now runs %s\n", plist, bin)
+	return nil
+}
+
+// withBridge cambia el programa de argv (el puente) por bin y deja lo demás:
+// -listen y el servidor que envuelve.
+func withBridge(argv []string, bin string) ([]string, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("it has no ProgramArguments")
+	}
+	return append([]string{bin}, argv[1:]...), nil
+}
+
+// plistArgs lee el ProgramArguments de un plist de launchd.
+func plistArgs(b []byte) ([]string, error) {
+	d := xml.NewDecoder(bytes.NewReader(b))
+	d.Strict = false
+	var key string
+	inArgs := false
+	var out []string
+	for {
+		tok, err := d.Token()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch el := tok.(type) {
+		case xml.StartElement:
+			switch el.Name.Local {
+			case "key":
+				var k string
+				if err := d.DecodeElement(&k, &el); err != nil {
+					return nil, err
+				}
+				key = strings.TrimSpace(k)
+			case "array":
+				inArgs = key == "ProgramArguments"
+			case "string":
+				var v string
+				if err := d.DecodeElement(&v, &el); err != nil {
+					return nil, err
+				}
+				if inArgs {
+					out = append(out, v)
+				}
+			}
+		case xml.EndElement:
+			if el.Name.Local == "array" && inArgs {
+				return out, nil
+			}
+		}
+	}
 }
 
 // xmlText escapa s para un nodo de texto del plist (& < > y comillas).

@@ -841,6 +841,9 @@ func actualizarExtensiones(dirCopia, version, fromDir string) {
 	if len(hechas) > 0 {
 		fmt.Printf("extensions upgraded to %s: %s (services they run keep the old binary until restarted)\n", version, strings.Join(hechas, ", "))
 	}
+	// Con o sin versión nueva de mcp: un LaunchAgent del puente que apunta a
+	// uno que ya no existe se regenera con el de ahora.
+	repararServicioPuenteTras(dir)
 }
 
 // actualizarExtensionesEn es el bucle de actualizarExtensiones sobre el

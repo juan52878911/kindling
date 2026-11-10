@@ -78,7 +78,9 @@ func TestDoctorProblemas(t *testing.T) {
 		t.Fatalf("instalado en el rc: %+v", c)
 	}
 	in.completionRC = false
-	if c := findCheck(cs, "extensions dir"); c.State != doctorWarn || !strings.Contains(c.Fix, `export PATH="/h/p:$PATH"`) {
+	// Fuera del PATH es informativo: nadie llama a kling-bridge por su nombre
+	// (kling-mcp lo busca a su lado, el plist lleva la ruta absoluta).
+	if c := findCheck(cs, "extensions dir"); c.State != doctorOK || !strings.Contains(c.Detail, "not on PATH") || c.Fix != "" {
 		t.Fatalf("%+v", c)
 	}
 	var b bytes.Buffer
@@ -104,6 +106,11 @@ func TestDoctorVersionesDistintas(t *testing.T) {
 	cs = doctorChecks(doctorInput{cliVersion: "dev", info: &api.Info{Version: "0.12.0"}, completion: true})
 	if v := findCheck(cs, "versions"); v.State != doctorOK {
 		t.Fatalf("un kling de desarrollo no se compara: %+v", v)
+	}
+	// Ni uno que lleva su revisión (buildver).
+	cs = doctorChecks(doctorInput{cliVersion: "dev+01234567.dirty", info: &api.Info{Version: "dev+89abcdef"}, completion: true})
+	if v := findCheck(cs, "versions"); v.State != doctorOK {
+		t.Fatalf("un kling de desarrollo con revisión no se compara: %+v", v)
 	}
 }
 

@@ -242,7 +242,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "IMAGES (rootfs)", cmds: []plugin.Command{
-		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "rm", "copy", "toolchain", "build-tools", "snapshots"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
+		{Name: "image", Summary: "rootfs images: build, inspect, copy between daemons", Subcommands: []string{"ls", "build", "import", "recipe", "cat", "put", "refresh", "rm", "copy", "toolchain", "build-tools", "snapshots"}, Usage: `  image ls [-q] [-json]                            lists built rootfs images
   image build <name> -builder B [-spec f.json]     builds it with a builder installed
       [-base IMAGE] [-grow MiB]                    on the daemon (extensions ship them)
   image import <ref> [-name N] [-replace] [-json]  imports a Docker/OCI image, without
@@ -272,6 +272,9 @@ var coreTree = []section{
   image cat <image> <path> [-stat]                 prints a file inside an image
   image put <image> <path> (-file F|-from-host N)  puts a file inside a built image
       [-mode 0755] [-create]
+  image refresh [image...]                         puts the daemon's guest agent in images
+                                                   that carry an older one, without
+                                                   rebuilding them (all if none given)
   image rm [-f] <image>...                         removes it (refuses if a layer, a
                                                    template or a machine uses it)
   image copy <image> -from H [-to H]               streams an image (and its kernel

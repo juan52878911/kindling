@@ -52,3 +52,19 @@ func TestPutImageFileValida(t *testing.T) {
 		t.Fatalf("quedó el temporal: %v", left)
 	}
 }
+
+// En macOS el daemon guarda kling-guest en el lib/ de su raíz: from_host lo
+// busca ahí si KLING_LIB_DIR no dice otra cosa; en Linux, donde siempre.
+func TestLibDirDe(t *testing.T) {
+	t.Setenv("KLING_LIB_DIR", "")
+	if got := libDirDe("darwin", "/raiz"); got != filepath.Join("/raiz", "lib") {
+		t.Errorf("darwin: %s", got)
+	}
+	if got := libDirDe("linux", "/raiz"); got != "/usr/local/lib/kindling" {
+		t.Errorf("linux: %s", got)
+	}
+	t.Setenv("KLING_LIB_DIR", "/otro")
+	if got := libDirDe("darwin", "/raiz"); got != "/otro" {
+		t.Errorf("KLING_LIB_DIR no manda: %s", got)
+	}
+}

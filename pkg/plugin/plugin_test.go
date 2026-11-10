@@ -260,6 +260,13 @@ func TestServe(t *testing.T) {
 	if code := serve(m, cmds, nil, []string{"--kling-hook", "status"}, &out, &errb); code != 2 {
 		t.Fatalf("gancho no implementado: %d", code)
 	}
+	// La versión, sin que la extensión programe un comando para ello.
+	for _, a := range []string{"version", "--version"} {
+		out.Reset()
+		if code := serve(m, cmds, nil, []string{a}, &out, &errb); code != 0 || out.String() != "1\n" {
+			t.Fatalf("%s: %d %q", a, code, out.String())
+		}
+	}
 }
 
 // `kling help <ext> <cmd>` lanza `kling-ext cmd -h` con FlagHelpEnv para sacar

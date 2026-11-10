@@ -116,6 +116,11 @@ func pluginsInstall(args []string) error {
 	if len(taken) > 0 {
 		fmt.Printf("  ignored %s (core commands always win)\n", strings.Join(taken, " "))
 	}
+	if name == "mcp" {
+		// Su puente pudo moverse de sitio (antes ~/.local/bin): un
+		// LaunchAgent que apunta al de antes sale con 78 en cada arranque.
+		repararServicioPuenteTras(filepath.Dir(res.Path))
+	}
 	if !inSearchPath(filepath.Dir(res.Path)) {
 		fmt.Printf("\nnote: %s is not where kling looks for extensions; add it to $KLING_PLUGIN_PATH\n", filepath.Dir(res.Path))
 	}
