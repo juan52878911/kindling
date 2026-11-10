@@ -295,10 +295,15 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 				// para siempre. Mejor muerta y dicho que viva y corrupta.
 				err = fmt.Errorf("returning overlay to machine: %w", err)
 				m.fail(mc, fmt.Errorf("commit could not give the template its own disk back: %w", err))
+				// La marca se queda mientras viva el VMM con el disco dorado.
+				if !m.conPID(mc.ID) {
+					quitarMarcaCommit(m.dir(mc.ID))
+				}
 				reapuntado, pausaPedida, pausada, soltados = false, false, false, false
 				return err
 			}
 			reapuntado = false
+			quitarMarcaCommit(m.dir(mc.ID))
 		}
 		if pausaPedida {
 			if err := lento.Resume(limpio); err != nil {
@@ -462,6 +467,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// se elimina la plantilla, restaurar falla con "No such file or directory"
 	// sobre un overlay que ya no existe. El snapshot dorado tiene que ser
 	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
+	// Antes de reapuntarlo, la marca en disco: si el daemon muere con el disco
+	// en el dorado, reconcile no readopta el VMM (A7, readoptable).
+	if err := marcarCommitEnCurso(m.dir(mc.ID), name); err != nil {
+		return nil, fmt.Errorf("marking the commit as in progress: %w", err)
+	}
 	reapuntado = true
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
 		return nil, fmt.Errorf("repointing overlay to golden copy: %w", err)

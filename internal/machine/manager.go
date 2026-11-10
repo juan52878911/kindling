@@ -422,6 +422,9 @@ type Manager struct {
 	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
 	// antes de escanear los procesos. Para las pruebas.
 	pruebasEscaneoHuerfanos func()
+	// pruebasSocketVMM, si no es nil y devuelve algo, es el socket con el que
+	// reconcile pregunta su estado al VMM vivo de id (A7). Para las pruebas.
+	pruebasSocketVMM func(id string) string
 
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.

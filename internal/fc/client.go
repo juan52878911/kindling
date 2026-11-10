@@ -123,6 +123,29 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// State pregunta al VMM en qué estado está la instancia (GET /): "Running",
+// "Paused" o "Not started" en Firecracker, y lo mismo en kling-vz y kling-hv.
+// Un VMM que contesta sin cuerpo (o sin el campo) da "" sin error: no se sabe.
+func (c *Client) State(ctx context.Context) (string, error) {
+	var out struct {
+		State string `json:"state"`
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("firecracker GET /: %s", resp.Status)
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out)
+	return out.State, nil
+}
+
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
 	BootArgs        string `json:"boot_args"`
