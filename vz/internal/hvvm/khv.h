@@ -248,9 +248,11 @@ void vq_used_de_ram(struct vq *q);
 // khv_poll es poll(2) para los hilos de los dispositivos, con un fallo que
 // pueden inyectar las pruebas: con khv_poll_fallos[quien] > 0 lo descuenta y
 // devuelve -1 con EAGAIN, que es lo que da poll en Darwin cuando no puede
-// reservar sus estructuras internas (y otra llamada puede ir bien).
+// reservar sus estructuras internas (y otra llamada puede ir bien), o con
+// khv_poll_errno[quien] si no es 0 (un fallo del que no se sale).
 enum { KHV_POLL_RED, KHV_POLL_VSOCK, KHV_POLL_N };
 extern int khv_poll_fallos[KHV_POLL_N];
+extern int khv_poll_errno[KHV_POLL_N];
 int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo);
 // Cadenas de descriptores, con todos los topes: vq_cadena copia la cadena de
 // head en out (como mucho max) y devuelve cuántos tiene, o -1 si es inválida
@@ -338,6 +340,7 @@ void vnet_parar(void);  // saca y espera al hilo de recepción (ver net.c)
 void vnet_despertar(void);
 int vnet_prueba_rx(int red);
 int khv_prueba_poll_red(void);
+int khv_prueba_vsock_muerto(int64_t *dial_ns);
 int khv_prueba_poll_vsock(void);  // un EAGAIN de poll no mata el hilo de rx (prueba.c)  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
 // rng
@@ -371,6 +374,7 @@ int khv_vsock_dial(uint32_t port, int plazo_ms);
 int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
+int khv_vsock_prueba_muerto(int64_t *dial_ns);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {

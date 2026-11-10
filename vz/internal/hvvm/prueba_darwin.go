@@ -15,7 +15,10 @@ int khv_vsock_prueba_fd_en_poll(void);
 */
 import "C"
 
-import "unsafe"
+import (
+	"time"
+	"unsafe"
+)
 
 // probarColas pasa data por los dispositivos virtio como lo haría un invitado
 // hostil (prueba.c), sin VM. Solo para las pruebas: usa la RAM de mentira de
@@ -186,3 +189,11 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 // red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
+
+// vsockMuerto: un poll que falla sin remedio termina el hilo del vsock; lo
+// que tarda después un dial (khv_vsock_prueba_muerto).
+func vsockMuerto() (int, time.Duration) {
+	var ns C.int64_t
+	r := int(C.khv_prueba_vsock_muerto(&ns))
+	return r, time.Duration(ns)
+}

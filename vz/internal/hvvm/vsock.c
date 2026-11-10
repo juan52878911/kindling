@@ -79,7 +79,9 @@ struct vconn {
 
 static struct vvsock_state s;
 static uint32_t intid;
-static bool activo;
+// activo: el dispositivo atiende (lo pone vsock_init; lo quita vs_hilo si
+// muere). hilo_vivo: vs_hilo corre. Con mu.
+static bool activo, hilo_vivo;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;  // quien marca espera aquí; también la reanudación
 static int despertador[2] = {-1, -1};
@@ -614,6 +616,8 @@ static void tras_poll(const struct pollfd *pf, const int *idx, int n, bool *list
 // vivo).
 static unsigned vs_vueltas;
 
+static void cerrar_todas(void);
+
 static void *vs_hilo(void *a) {
   (void)a;
   khv_qos_dispositivo();
@@ -643,6 +647,15 @@ static void *vs_hilo(void *a) {
       continue;
     }
     if (r < 0 && e != EINTR) {
+      // Sin este hilo no sale nada hacia el invitado: el dispositivo queda
+      // muerto. Se sueltan las conexiones (quien espera un dial se entera ya)
+      // y los dials siguientes fallan con -ENODEV al momento; antes cada uno
+      // esperaba su plazo entero (2 s) a un hilo que no iba a contestar.
+      // vsock_init lo vuelve a arrancar.
+      activo = false;
+      hilo_vivo = false;
+      cerrar_todas();
+      pthread_cond_broadcast(&cv);
       pthread_mutex_unlock(&mu);
       // Que no se pierda en silencio, como en net.c.
       uart_flush();
@@ -681,13 +694,16 @@ void vsock_init(uint32_t id) {
     conns[i].estado = C_LIBRE;
   }
   if (kq < 0) kq = kqueue();  // un kqueue no pasa a los hijos: no hace falta FD_CLOEXEC
-  activo = true;
   // Un hilo por proceso: las pruebas llaman a vsock_init más de una vez, y
-  // un segundo vs_hilo con su propio poll dejaba diferidos sin cerrar.
-  static bool hilo;
-  if (hilo) return;
-  hilo = true;
-  if (pipe(despertador) == 0) {
+  // un segundo vs_hilo con su propio poll dejaba diferidos sin cerrar. Otro
+  // solo si el anterior murió (vs_hilo).
+  pthread_mutex_lock(&mu);
+  activo = true;
+  bool arrancar = !hilo_vivo;
+  hilo_vivo = true;
+  pthread_mutex_unlock(&mu);
+  if (!arrancar) return;
+  if (despertador[0] < 0 && pipe(despertador) == 0) {
     for (int i = 0; i < 2; i++) {
       fcntl(despertador[i], F_SETFL, O_NONBLOCK);
       fcntl(despertador[i], F_SETFD, FD_CLOEXEC);
@@ -797,6 +813,10 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
   // (rechazo, RST, reinicio) y quizá ya es de otro dial.
   int ret = -ETIMEDOUT;
   for (;;) {
+    if (!activo) {  // vs_hilo murió: ya soltó el slot
+      ret = -ENODEV;
+      break;
+    }
     if (c->gen != gen || c->estado != C_CONECTANDO) {
       ret = c->gen == gen && c->estado == C_ABIERTA ? sv[1] : -ECONNREFUSED;
       break;
@@ -1186,6 +1206,55 @@ int khv_vsock_prueba_poll(void) {
     }
   }
   __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 0, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&mu);
+  g_pausa = pausa_antes;
+  pthread_mutex_unlock(&mu);
+  return r;
+}
+
+// khv_vsock_prueba_muerto: un poll que falla sin remedio (EBADF) termina
+// vs_hilo, y el vsock se da por muerto: un dial devuelve -ENODEV al momento
+// (lo que tarda, en *dial_ns), no tras su plazo. Luego vsock_init vuelve a
+// arrancar el hilo. 0 si cuadra; 1 si el fallo no llegó a inyectarse; 2 si
+// el dial no dio -ENODEV; 3 si el hilo no volvió a dar vueltas. No puede
+// convivir con una VM.
+int khv_vsock_prueba_muerto(int64_t *dial_ns) {
+  *dial_ns = -1;
+  if (!activo) vsock_init(53);
+  pthread_mutex_lock(&mu);
+  bool pausa_antes = g_pausa;
+  g_pausa = false;  // sin VM empieza en pausa: vs_hilo no daría vueltas
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  __atomic_store_n(&khv_poll_errno[KHV_POLL_VSOCK], EBADF, __ATOMIC_RELEASE);
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 1, __ATOMIC_RELEASE);
+  int r = 1;
+  for (int i = 0; i < 1000 && r; i++) {
+    if (!__atomic_load_n(&khv_poll_fallos[KHV_POLL_VSOCK], __ATOMIC_ACQUIRE)) r = 0;
+    else {
+      despertar_hilo();
+      usleep(1000);
+    }
+  }
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_VSOCK], 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&khv_poll_errno[KHV_POLL_VSOCK], 0, __ATOMIC_RELEASE);
+  if (r == 0) {
+    usleep(10000);  // que el hilo acabe de salir
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    int fd = khv_vsock_dial(PRUEBA_PUERTO + 7, 300);
+    *dial_ns = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+    if (fd != -ENODEV) r = 2;
+    if (fd >= 0) close(fd);
+  }
+  vsock_init(53);
+  unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
+  bool vuelve = false;
+  for (int i = 0; i < 1000 && !vuelve; i++) {
+    despertar_hilo();
+    usleep(1000);
+    vuelve = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE) - antes >= 2;
+  }
+  if (r == 0 && !vuelve) r = 3;
   pthread_mutex_lock(&mu);
   g_pausa = pausa_antes;
   pthread_mutex_unlock(&mu);

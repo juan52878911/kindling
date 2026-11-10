@@ -5,6 +5,7 @@ package hvvm
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 // cola arma una entrada para probarColas: el dispositivo dev y sus colas de
@@ -257,4 +258,26 @@ func TestPollEAGAINNoMataElVsock(t *testing.T) {
 	case r != 0:
 		t.Fatal("after poll failed with EAGAIN, the vsock thread stopped")
 	}
+}
+
+// Si el hilo del vsock muere (un poll que falla sin remedio), el dispositivo
+// queda muerto: un dial tiene que fallar al momento con -ENODEV. Antes el
+// dispositivo seguía activo y cada dial esperaba su plazo entero (2 s, y el
+// daemon tardaba tres fallos, ~30 s, en darse cuenta).
+func TestVsockMuertoFallaAlMomento(t *testing.T) {
+	r, d := vsockMuerto()
+	switch r {
+	case -100:
+		t.Fatal("could not set up the test")
+	case 1:
+		t.Fatal("the injected poll failure was never consumed")
+	case 2:
+		t.Fatalf("after the vsock thread stopped, a dial did not fail with ENODEV (took %v)", d)
+	case 3:
+		t.Fatal("vsock_init did not start the vsock thread again")
+	}
+	if d > 50*time.Millisecond {
+		t.Fatalf("a dial to a dead vsock took %v", d)
+	}
+	t.Logf("dial to a dead vsock: %v", d)
 }
