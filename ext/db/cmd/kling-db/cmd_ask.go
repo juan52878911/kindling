@@ -460,8 +460,9 @@ func (a *app) readSchema(ctx context.Context, mc *api.Machine, db, ro string) (s
 // La sentencia va entre saltos de línea para que un comentario -- final no se
 // coma el paréntesis que cierra.
 func readOnlyQuery(ro, sql string, limit int, timeout time.Duration) (string, error) {
-	if strings.ContainsAny(sql, "\\\x00") {
-		return "", errors.New("rejected SQL: backslashes are not allowed")
+	// \r tampoco: Postgres cierra con él un comentario --.
+	if strings.ContainsAny(sql, "\\\x00\r") {
+		return "", errors.New("rejected SQL: backslashes and carriage returns are not allowed")
 	}
 	return fmt.Sprintf(readOnlyPrelude, ro, timeout.Milliseconds()) +
 		"SELECT * FROM (\n" + sql + "\n) q LIMIT " + fmt.Sprint(limit) + ";\nROLLBACK;\n", nil
