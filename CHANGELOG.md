@@ -56,6 +56,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- `kling db ask`: the SQL validator ends a `--` comment at a carriage return, as Postgres does, and rejects a bare `\r`; CRLF answers from the model are normalised.
+- `kling db`: the Postgres client requires a verified SCRAM `SASLFinal` before `AuthenticationOk`, and `AuthenticationOk` before `ReadyForQuery`.
+- `kling db clone`: event triggers of the source are dropped right after the restore in the builder and never reach the golden; `-password-stdin` also clears `PGPASSWORD`/`PGPASSFILE` from the environment.
+- `kling db` with Garage: the copy's S3 secret goes to the daemon in the exec request body instead of the argv of a host `kling exec`.
+- `kling db rotate`: when a failed rotation cannot confirm the old password, the advice is to rotate again (keeps the data) instead of `reset`.
 - `SECURITY.md` documents known limits: with `KLING_JAILER=0` every VMM runs as the same user and can reach the other machines' VMMs and disks; `kling.ports` is an ordinary label that exposes that machine's own ports; guest symlinks in rw shares are accepted under rules; hairpin NAT through the router's public IP isn't filtered. `docs/guia.md` explains how to create the `kindling` user now that the jailer refuses to run as root.
 - macOS: kling-vz and kling-hv open their port forwards before the VM is created and then confine without permission to listen on any TCP port; the daemon keeps the addresses reported before the guest ran, requires the same ones after boot and refuses another machine's live forward. A compromised VMM could otherwise claim another machine's forward (redirecting graph edges, `UpstreamMachine` credentials and their audit) or take the free port of another machine's loopback `-upstream`. With an older daemon the profiles still allow listening on the loopback.
 - macOS: the kling-vz profile no longer allows `mach-lookup`, `iokit-open` or POSIX shared memory beyond `system.sb` (kept with a display); neither it nor kling-hv can read metadata of other machines' files. Verified with real VMs on macOS 26.5.
