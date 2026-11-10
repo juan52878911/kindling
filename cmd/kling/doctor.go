@@ -301,12 +301,10 @@ func doctorChecks(in doctorInput) []doctorCheck {
 	case !in.extDirOK:
 		dir.Detail += " (does not exist yet; kling plugin install creates it)"
 	case len(in.companions) > 0 && !inDirs(in.extDir, in.pathDirs):
-		// kling encuentra las extensiones igual; lo que no se encuentra son los
-		// ejecutables que las acompañan (kling-bridge) si alguien los llama a
-		// mano. Sin compañeros ahí no hay nada que avisar.
-		dir.State = doctorWarn
-		dir.Detail += fmt.Sprintf(" (searched by kling, but not on PATH: %s installed there cannot be run by name)", strings.Join(in.companions, ", "))
-		dir.Fix = fmt.Sprintf(`export PATH="%s:$PATH"`, in.extDir)
+		// kling encuentra las extensiones igual, y nadie llama a sus
+		// compañeros por su nombre: kling-mcp busca kling-bridge a su lado y
+		// el LaunchAgent lleva la ruta absoluta. Solo se dice.
+		dir.Detail += fmt.Sprintf(" (searched by kling; not on PATH, so %s cannot be run by name by hand)", strings.Join(in.companions, ", "))
 	}
 	out = append(out, dir)
 	return out
