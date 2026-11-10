@@ -73,6 +73,7 @@ func (m *Manager) Ajustes() map[string]string {
 		"KLING_COW_STORE_GIB":       cowGiB,
 		"KLING_IMAGE_SNAPSHOTS":     imgSnaps,
 		"KLING_IMAGE_SNAPSHOT_MIB":  strconv.FormatInt(topeSnapshotsImagen()>>20, 10),
+		"e2fs_confinement":          confinamientoE2fs(),
 		"cow":                       cow,
 	}
 }
