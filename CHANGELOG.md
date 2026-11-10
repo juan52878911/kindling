@@ -56,6 +56,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- Guest agent: every route except `/healthz` answers 403 to requests from inside the guest (loopback, the guest's own addresses, a vsock CID other than the host's). A process in the guest could run commands as root despite the image's `USER`, write restore hooks or move the clock; the host reaches the agent from outside and is not affected.
 - `SECURITY.md` documents known limits: with `KLING_JAILER=0` every VMM runs as the same user and can reach the other machines' VMMs and disks; `kling.ports` is an ordinary label that exposes that machine's own ports; guest symlinks in rw shares are accepted under rules; hairpin NAT through the router's public IP isn't filtered. `docs/guia.md` explains how to create the `kindling` user now that the jailer refuses to run as root.
 - macOS: kling-vz and kling-hv open their port forwards before the VM is created and then confine without permission to listen on any TCP port; the daemon keeps the addresses reported before the guest ran, requires the same ones after boot and refuses another machine's live forward. A compromised VMM could otherwise claim another machine's forward (redirecting graph edges, `UpstreamMachine` credentials and their audit) or take the free port of another machine's loopback `-upstream`. With an older daemon the profiles still allow listening on the loopback.
 - macOS: the kling-vz profile no longer allows `mach-lookup`, `iokit-open` or POSIX shared memory beyond `system.sb` (kept with a display); neither it nor kling-hv can read metadata of other machines' files. Verified with real VMs on macOS 26.5.
@@ -97,6 +98,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Guest agent: commands still running when a golden was saved no longer survive in every copy holding their exec slot; `/resync` of an instance stops them (thaw and resume leave them alone).
 - Credential proxy: a stream cut by the absolute cap or the idle timeout is always aborted towards the guest. If the provider closed its response cleanly on seeing the TLS close_notify, the proxy finished the chunked body normally and the guest took a truncated response as complete (also behind the flaky `TestProxyTechoAbsoluto`).
 - kling-hv: freeing a vsock connection (a guest RST, a dial that times out) no longer closes its socket while the device thread is polling it; that close could hang forever in the kernel, freezing the vCPU and the whole vsock device.
 - Credential proxy links: the `busy` audit record of a connection rejected by `MaxConns` is queued before the connection is closed, so a shutdown right after can no longer drop it.
