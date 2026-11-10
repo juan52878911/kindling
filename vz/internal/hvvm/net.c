@@ -291,14 +291,11 @@ static bool rx_vaciar(int *err) {
       }
       intentos = 0;
     } else {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_nsec += 50000000;
-      if (ts.tv_nsec >= 1000000000) ts.tv_sec++, ts.tv_nsec -= 1000000000;
+      uint64_t fin = khv_ahora_ns() + 50000000ULL;
       // En bucle sobre la condición: un broadcast de cv puede ser de otra
       // cosa (pausa, parar), y uno anterior a esta espera ya no llega.
       while (!rx_hay_buf() && !rx_parar && !g_pausa) {
-        if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) break;
+        if (khv_esperar_hasta(&cv, &mu, fin) == ETIMEDOUT) break;
       }
     }
     viejo = used_idx();

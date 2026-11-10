@@ -269,9 +269,7 @@ func TestCommitEsperaAlCerrojoYReleeLaMaquina(t *testing.T) {
 // hace, la plantilla recupera su disco y se reanuda UNA vez, y queda un
 // snapshot con meta.json que se puede listar.
 func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c0aa170000000006"
 	falso, muerto := plantillaParaCommit(t, m, id)
@@ -279,8 +277,7 @@ func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
 			// Lo que escribiría Firecracker.
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 

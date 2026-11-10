@@ -12,10 +12,14 @@ int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);
 int khv_vsock_prueba_fd_en_poll(void);
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns);
 */
 import "C"
 
-import "unsafe"
+import (
+	"time"
+	"unsafe"
+)
 
 // probarColas pasa data por los dispositivos virtio como lo haría un invitado
 // hostil (prueba.c), sin VM. Solo para las pruebas: usa la RAM de mentira de
@@ -186,3 +190,40 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 // red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
+
+// clonRAM: el modo con el que queda out, clon de base como la RAM de una
+// congelación (khv_prueba_clon_ram), o -errno.
+func clonRAM(base, out string) int {
+	cb, co := C.CString(base), C.CString(out)
+	defer C.free(unsafe.Pointer(cb))
+	defer C.free(unsafe.Pointer(co))
+	return int(C.khv_prueba_clon_ram(cb, co))
+}
+
+// esperarHasta: lo que dura khv_esperar_hasta sin aviso, y su resultado.
+func esperarHasta(d time.Duration) (time.Duration, int) {
+	var r C.int
+	ns := C.khv_prueba_esperar(C.uint64_t(d), &r)
+	return time.Duration(ns), int(r)
+}
+
+// irqNivelSinGIC: el nivel que deja vmmio_irq cuando el GIC no cambia la
+// línea (khv_prueba_irq_nivel).
+func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }
+
+// vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
+// (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró y cuánto tuvo mu.
+func vsockTandaRx(pausa bool) (lleno, movido uint64, d time.Duration, r int) {
+	var l, m C.uint64_t
+	var ns C.int64_t
+	r = int(C.khv_vsock_prueba_tanda_rx(C.bool(pausa), &l, &m, &ns))
+	return uint64(l), uint64(m), time.Duration(ns), r
+}
+
+// vsockMuerto: un poll que falla sin remedio termina el hilo del vsock; lo
+// que tarda después un dial (khv_vsock_prueba_muerto).
+func vsockMuerto() (int, time.Duration) {
+	var ns C.int64_t
+	r := int(C.khv_prueba_vsock_muerto(&ns))
+	return r, time.Duration(ns)
+}

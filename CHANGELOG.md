@@ -130,6 +130,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 - `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
+- CI: the macOS job runs the tests of the whole core and `ext/sandbox` (before, only `internal/machine` and `internal/daemon`), and 42 more `internal/machine` tests (commit, fork, freeze, VMM process tracking) now run on macOS instead of skipping; the Linux e2e runs the `internal/net` ipset tests as root; `go.work` is checked against `vz/go.mod`; without an Apple Silicon runner, `e2e-mac` shows a "not run" job on every push to `main`, which `scripts/release.sh` does not accept as the kling-hv e2e.
 
 ### Removed
 
@@ -193,6 +194,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Fixed
 
+- kling-hv: when the vsock device thread stops, dials fail at once with `ENODEV` instead of each waiting its full timeout; a vsock receive round moves at most 1 MiB and stops when the VM pauses; a virtio interrupt line is recorded as raised only if the GIC accepted it; timed waits no longer follow wall-clock steps; the RAM file of a freeze is always 0600 (an APFS clone kept the mode of its golden).
 - kling-hv guests ran without KASLR. The FDT now carries `kaslr-seed` and `rng-seed` on every cold boot, and the guest kernel trusts the bootloader seed. Clones never boot again, so they don't reuse a seed.
 - kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
 - The OCI builder now fsyncs the ext4 before renaming it into place.
@@ -303,6 +305,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-sandbox: a prewarmed sandbox whose claim failed because the client went away is still removed, instead of staying half-claimed and counted in the tenant's quota.
 - `kling sbx`: gateway errors keep their HTTP status and `Retry-After` (`... (HTTP 429, retry after 30s)`) instead of being flattened to the message, and `kling sbx new -json` and `kling sbx rm -json` print the sandbox, or the error with its `status` and `retry_after`, as JSON.
 - CI: the GC lock tests in `internal/machine` re-signal their FIFO until the read returns and fail after 10 s instead of hanging the macOS job for 10 minutes.
+- Guest agent: every route except `/healthz` answers 403 to requests from inside the guest (loopback, the guest's own addresses, a vsock CID other than the host's). A process in the guest could run commands as root despite the image's `USER`, write restore hooks or move the clock; the host reaches the agent from outside and is not affected.
+- Guest agent: commands still running when a golden was saved no longer survive in every copy holding their exec slot; `/resync` of an instance stops them (thaw and resume leave them alone).
 - `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
 
 ## [0.20.1] - 2026-10-28

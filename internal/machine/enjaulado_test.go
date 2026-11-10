@@ -3,7 +3,6 @@ package machine
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -285,9 +284,7 @@ func TestRecuperarDelJail(t *testing.T) {
 // lo perforaba (fallocate como root, a través del enlace), lo hasheaba y lo
 // daba por bueno.
 func TestCommitJailedNoRecuperaUnEnlaceComoVolcado(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c0aa1700000000e2"
 	falso, _ := plantillaParaCommit(t, m, id)

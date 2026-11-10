@@ -514,3 +514,10 @@ int khv_prueba_poll_vsock(void) {
   if (preparar() != 0) return -100;
   return khv_vsock_prueba_poll();
 }
+
+// khv_prueba_vsock_muerto: khv_vsock_prueba_muerto con los dispositivos de
+// prueba ya puestos.
+int khv_prueba_vsock_muerto(int64_t *dial_ns) {
+  if (preparar() != 0) return -100;
+  return khv_vsock_prueba_muerto(dial_ns);
+}

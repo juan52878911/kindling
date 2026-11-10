@@ -293,47 +293,51 @@ func (a *Agent) recalcularBiblioteca() {
 // siendo alcanzada.
 func (a *Agent) Register(mux *http.ServeMux) {
 	mux.HandleFunc(api.GuestHealthPath, a.enPreparado(a.handleHealthz))
-	mux.HandleFunc("/dns", DNSHandler)
+	// Todo lo demás es solo del host (soloHost): un proceso del invitado sin
+	// privilegios (el servicio con USER, un agente de IA engañado) no debe
+	// poder ejecutar como root, escribir ganchos, mover el reloj ni desmontar.
+	ruta := func(p string, h http.HandlerFunc) { mux.HandleFunc(p, soloHost(h)) }
+	ruta("/dns", DNSHandler)
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
-	mux.HandleFunc(api.GuestResyncPath, ResyncHandler())
+	ruta(api.GuestResyncPath, ResyncHandler())
 	// /ready y /hooks: la sonda y los ganchos que declara la imagen. Sin
 	// kling.exec: ejecutan lo que la imagen trae, nunca lo que pida quien llama.
-	mux.HandleFunc(api.GuestReadyPath, a.enArranque(ReadyHandler()))
-	mux.HandleFunc(api.GuestHooksPath, a.enArranque(HooksHandler()))
-	mux.HandleFunc(api.GuestMemInfoPath, MemInfoHandler())
+	ruta(api.GuestReadyPath, a.enArranque(ReadyHandler()))
+	ruta(api.GuestHooksPath, a.enArranque(HooksHandler()))
+	ruta(api.GuestMemInfoPath, MemInfoHandler())
 	// /drop-caches: el host la pide antes de apretar, congelar o guardar un
 	// dorado (dropcaches.go).
-	mux.HandleFunc(api.GuestDropCachesPath, DropCachesHandler())
+	ruta(api.GuestDropCachesPath, DropCachesHandler())
 	// /service: el servicio que declara la imagen (service.go), sin kling.exec:
 	// solo lee su estado y su salida.
-	mux.HandleFunc(api.GuestServicePath, a.enArranque(ServiceHandler()))
-	mux.HandleFunc(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
+	ruta(api.GuestServicePath, a.enArranque(ServiceHandler()))
+	ruta(api.GuestServiceStopPath, a.enArranque(ServiceStopHandler()))
 	// /procs: los procesos vivos, para que `kling save` avise de los que el
 	// dorado copiaría con sus aleatorios en memoria (procs.go).
-	mux.HandleFunc(api.GuestProcsPath, a.enPreparado(ProcsHandler()))
+	ruta(api.GuestProcsPath, a.enPreparado(ProcsHandler()))
 	// /machine/start: solo en una máquina que espera al host.
 	if a.tardio {
-		mux.HandleFunc(api.GuestStartPath, a.handleStart)
+		ruta(api.GuestStartPath, a.handleStart)
 	}
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere
 	// con él: el volumen perdería justo lo más reciente.
-	mux.HandleFunc("/volume/sync", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/sync", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Sync()
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	// /volume/release DESMONTA antes de congelar un snapshot dorado: la memoria
 	// que se vuelca no puede llevar un ext4 montado, porque cada instancia
 	// restaurada arrancaría con metadatos viejos sobre un disco que ya divergió.
-	mux.HandleFunc("/volume/release", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/release", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		a.Volumes.Release()
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	// /volume/acquire vuelve a montar tras restaurar. 500 y no un log: sin el
 	// volumen, lo que se escriba acabaría en el overlay y se perdería en silencio.
-	mux.HandleFunc("/volume/acquire", soloPost(func(w http.ResponseWriter, r *http.Request) {
+	ruta("/volume/acquire", soloPost(func(w http.ResponseWriter, r *http.Request) {
 		if err := a.Volumes.Acquire(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -344,16 +348,32 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// /share/attach la abre el daemon para cada carpeta compartida en vivo
 	// (docs/compartir.md). No depende de kling.exec: montar una carpeta no da
 	// a nadie una forma de ejecutar nada dentro.
-	mux.HandleFunc(share.AttachPath, shareState.AttachHandler())
+	ruta(share.AttachPath, shareState.AttachHandler())
 
 	if ExecEnabled() {
 		// El entorno de cada exec se lee al llegar: con VolumeWait cambia al
 		// montarse los volúmenes.
-		mux.HandleFunc("/exec", a.enArranque(ExecHandlerFunc(a.Entorno)))
-		mux.HandleFunc("/exec/stream", a.enArranque(StreamExecHandlerFunc(a.Entorno)))
-		mux.HandleFunc("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
-		mux.HandleFunc("/files", a.enArranque(FilesHandler()))
+		ruta("/exec", a.enArranque(ExecHandlerFunc(a.Entorno)))
+		ruta("/exec/stream", a.enArranque(StreamExecHandlerFunc(a.Entorno)))
+		ruta("/exec/pty", a.enArranque(ShellHandlerFunc(a.Entorno)))
+		ruta("/files", a.enArranque(FilesHandler()))
 		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
+	}
+}
+
+// soloHost contesta 403 a lo que llega desde dentro del invitado (ver
+// requestFromGuest). El agente no autentica: confía en que solo el host le
+// habla, y escucha en todas las interfaces, así que un proceso del invitado
+// también lo alcanza por loopback o por su propia IP. El host llega siempre
+// por fuera: la tap (172.16.0.1, o la del veth), la pila de usuario de
+// kling-vz/kling-hv (su pasarela) o vsock con el CID 2.
+func soloHost(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requestFromGuest(r) {
+			http.Error(w, "this route is only for the host", http.StatusForbidden)
+			return
+		}
+		h(w, r)
 	}
 }
 

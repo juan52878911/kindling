@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -104,9 +103,7 @@ func esperarCanal(t *testing.T, c <-chan struct{}, msg string) {
 // ve. Antes Fork la escribía después de commit, y un corte entre las dos
 // dejaba un dorado temporal que no recogía nadie.
 func TestCommitDeForkMarcaAntesDelMeta(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil && !volcadoEnLaMaquina {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	const id = "c0aa170000000103"
 	falso := plantillaSinProceso(t, m, id)
