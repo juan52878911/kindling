@@ -257,6 +257,47 @@ func TestCuotaMinimoLibre(t *testing.T) {
 	}
 }
 
+// Por debajo del mínimo libre, reescribir en su sitio un fichero sin huecos
+// no gasta disco y no da ENOSPC (una base de datos que reescribe sus páginas
+// con el disco casi lleno); rellenar un hueco sí lo gasta y sigue parándose.
+func TestCuotaMinimoLibreReescribirEnSitio(t *testing.T) {
+	dir := t.TempDir()
+	q := NewQuota(Limits{MinFree: 1 << 62}) // más de lo que tiene cualquier disco
+	c := servirConCuota(t, dir, q)
+	denso := filepath.Join(dir, "denso")
+	if err := os.WriteFile(denso, make([]byte, 64<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e, h := c.open("denso", proto.FlagWrite)
+	if e != 0 {
+		t.Fatalf("open: %d", e)
+	}
+	if e := c.write(h, 4096, []byte("página nueva")); e != 0 {
+		t.Fatalf("rewriting a file with no holes in place = %d, want 0", e)
+	}
+	if e := c.write(h, 64<<10-1, []byte("xx")); e != proto.ENOSPC {
+		t.Fatalf("growing it = %d, want ENOSPC", e)
+	}
+	c.release(h)
+
+	disperso := filepath.Join(dir, "disperso")
+	f, err := os.Create(disperso)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	e, h = c.open("disperso", proto.FlagWrite)
+	if e != 0 {
+		t.Fatalf("open: %d", e)
+	}
+	if e := c.write(h, 4096, []byte("x")); e != proto.ENOSPC {
+		t.Fatalf("filling a hole under the host's free minimum = %d, want ENOSPC", e)
+	}
+}
+
 // O_TRUNC devuelve lo que medía el fichero.
 func TestCuotaOTrunc(t *testing.T) {
 	dir := t.TempDir()

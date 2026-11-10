@@ -12,10 +12,15 @@ package share
 // Se cuenta el tamaño aparente, no los bloques: un fichero disperso cuenta
 // entero. Escribir en un hueco de un fichero que ya existía no lo alarga y no
 // se cuenta; para eso (y para lo que escriba el propio host) está el mínimo
-// libre del sistema de ficheros, que se mira en cada escritura.
+// libre del sistema de ficheros, que se mira en lo que alarga, en lo que crea
+// entradas y en lo que escribe dentro de un fichero disperso. Reescribir en su
+// sitio un fichero sin huecos no gasta disco y no se para por el mínimo: con
+// el disco del host casi lleno, una base de datos que reescribe sus páginas
+// seguía recibiendo ENOSPC sin haber pedido ni un bloque más.
 
 import (
 	"io/fs"
+	"log"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -65,6 +70,9 @@ type Quota struct {
 	fmu    sync.Mutex
 	freeAt time.Time
 	free   int64
+	// bajo: la última vez se negó algo por el mínimo libre. Para avisar en el
+	// log al cruzarlo (en los dos sentidos) y no en cada escritura.
+	bajo bool
 }
 
 // NewQuota crea la cuenta de una carpeta con los topes l.
@@ -105,10 +113,27 @@ func (q *Quota) libre(s *Server, n int64) bool {
 		q.free, q.freeAt = int64(st.Bavail)*int64(st.Bsize), now
 	}
 	if q.free-n < q.lim.MinFree {
+		if !q.bajo {
+			q.bajo = true
+			log.Printf("share %s: the host file system is below its free minimum (%d MiB free, daemon.share_min_free_mib = %d): writes that need disk get ENOSPC",
+				s.dir, q.free>>20, q.lim.MinFree>>20)
+		}
 		return false
+	}
+	if q.bajo {
+		q.bajo = false
+		log.Printf("share %s: the host file system has room again (%d MiB free)", s.dir, q.free>>20)
 	}
 	q.free -= n
 	return true
+}
+
+// lleno dice si fi no tiene huecos: sus bloques cubren su tamaño. Reescribir
+// dentro de un fichero así no pide disco nuevo. Sin el dato (otro sistema),
+// no: se mira el mínimo libre como siempre.
+func lleno(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int64(st.Blocks)*512 >= fi.Size()
 }
 
 // reservar cobra n bytes de crecimiento; ENOSPC si no caben. Con q.size en
@@ -171,8 +196,8 @@ func (s *Server) writeAt(f *os.File, data []byte, off int64) (int, uint32) {
 	q.size.RLock()
 	fi, err := f.Stat()
 	if err == nil && end <= fi.Size() {
-		// No alarga: solo el mínimo libre (puede rellenar un hueco).
-		if !q.libre(s, 0) {
+		// No alarga: solo el mínimo libre, y solo si puede rellenar un hueco.
+		if !lleno(fi) && !q.libre(s, 0) {
 			q.size.RUnlock()
 			return 0, proto.ENOSPC
 		}
