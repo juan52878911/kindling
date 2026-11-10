@@ -338,7 +338,7 @@ func TestReserveDirCuentaLasReservas(t *testing.T) {
 }
 
 // escribirSnapshot deja en disco un snapshot con su meta.json (sin firmar: se
-// aceptan salvo con KLING_REQUIRE_SIGNED=1).
+// aceptan con KLING_REQUIRE_SIGNED=0).
 func escribirSnapshot(t *testing.T, m *Manager, name string, s api.Snapshot) string {
 	t.Helper()
 	dir := m.snapDir(name)
@@ -382,7 +382,7 @@ func TestRemoveSnapshotPropioRespetaLasReservasAjenas(t *testing.T) {
 // verificando la integridad del overlay dorado, que es un FIFO que nadie
 // escribe todavía), RemoveSnapshot se niega; en cuanto termina, lo borra.
 func TestRemoveSnapshotSeNiegaDuranteRunFrom(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	dir := escribirSnapshot(t, m, "dorado", api.Snapshot{
 		RootfsSHA256: strings.Repeat("a", 64),

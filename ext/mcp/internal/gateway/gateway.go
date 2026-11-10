@@ -272,6 +272,17 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// respondía 502 "no hay snapshot" porque ensure() lo buscaba en el catálogo
 	// de VMs y no lo encontraba.
 	if l := g.linkFor(r.Context(), service); l != nil {
+		// La cuota del tenant es por petición, vaya donde vaya: sin ella un
+		// cliente en bucle contra un enlace acaparaba el gateway igual. El GET
+		// (stream SSE) no cuenta, como en el camino de las microVMs.
+		if r.Method != http.MethodGet {
+			tnt := scheduler.TenantFrom(r.Context())
+			if !g.TenantBegin(tnt) {
+				escribirCuotaTenant(w, tnt)
+				return
+			}
+			defer g.TenantEnd(tnt)
+		}
 		g.handleLinkProxy(w, r, l)
 		return
 	}
@@ -314,13 +325,19 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// begin/end, así que basta contabilizar aquí una vez.
 	tnt := scheduler.TenantFrom(r.Context())
 	if !g.TenantBegin(tnt) {
-		api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota, fmt.Sprintf(
-			"429: tenant %q has reached its quota of %d in-flight requests.\n"+
-				"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
-			tnt.Name(), tnt.MaxInflight()))
+		escribirCuotaTenant(w, tnt)
 		return
 	}
-	defer g.TenantEnd(tnt)
+	// El hueco se suelta al acabar, o antes si la petición resulta ser un
+	// stream SSE (ver más abajo): un stream ocioso no es trabajo en vuelo.
+	cuota := true
+	soltarCuota := func() {
+		if cuota {
+			cuota = false
+			g.TenantEnd(tnt)
+		}
+	}
+	defer soltarCuota()
 
 	// Sesión ya conocida: directo a su instancia.
 	//
@@ -419,9 +436,24 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		r.Header.Set(SessionHeader, guestSIDOf(rt, ext))
+		// GET con sesión: el stream SSE de la conversación. El cliente lo deja
+		// abierto mientras dure la sesión, esperando notificaciones; contarlo
+		// como petición en vuelo dejaba la microVM despierta para siempre (el
+		// segador no congela con trabajo en vuelo, evictLRU la saltaba) y
+		// retenía un hueco de la cuota del tenant por stream: N streams, 429
+		// para el resto. Se apunta aparte y se corta si la instancia se
+		// congela; la sesión, si sigue enrutable, sobrevive al despertar.
+		if r.Method == http.MethodGet {
+			soltarCuota()
+			ctx, cortar := context.WithCancel(r.Context())
+			defer cortar()
+			defer g.BeginStream(e, cortar)()
+			rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r.WithContext(ctx))
+			return
+		}
 		g.Begin(e)
 		defer g.End(e)
-		r.Header.Set(SessionHeader, guestSIDOf(rt, ext))
 		// DELETE de una sesión aislada: su máquina se destruye ANTES de que
 		// salga la respuesta, y con ella su overlay. Quien recibe el 204 sabe
 		// que su capa ya no existe. Por eso la respuesta del invitado (una
@@ -461,6 +493,14 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Sesión NUEVA (initialize): se coloca en una instancia con hueco, escalando a
 	// una réplica si todas están llenas. Es lo que permite el uso en paralelo.
 	g.serveNewSession(w, r, service, tnt)
+}
+
+// escribirCuotaTenant contesta el 429 de la cuota de peticiones en vuelo.
+func escribirCuotaTenant(w http.ResponseWriter, tnt *scheduler.Tenant) {
+	api.WriteError(w, http.StatusTooManyRequests, api.CodeTenantQuota, fmt.Sprintf(
+		"429: tenant %q has reached its quota of %d in-flight requests.\n"+
+			"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
+		tnt.Name(), tnt.MaxInflight()))
 }
 
 // guestSIDOf es el id que el INVITADO dio a la sesión ext. Una ruta fijada con

@@ -418,3 +418,27 @@ func TestCompanionsEnElManifiesto(t *testing.T) {
 		}
 	}
 }
+
+// M22: instalar una versión más vieja que la instalada es un error salvo con
+// AllowDowngrade (lo usa kling upgrade). Antes se cambiaba en silencio.
+func TestInstalarMasViejaSeRechaza(t *testing.T) {
+	_, dir, err := install(t, demoRelease(), InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vieja := strings.Replace(demoManifest, `"2.0.0"`, `"1.5.0"`, 1)
+	rel := &release{files: map[string][]byte{
+		asset("kling-demo"):        script(vieja),
+		asset("kling-demo-helper"): []byte("#!/bin/sh\necho helper\n"),
+	}}
+	if _, _, err := install(t, rel, InstallOptions{Dir: dir}); err == nil || !strings.Contains(err.Error(), "older than the installed 2.0.0") {
+		t.Fatalf("instalar 1.5.0 sobre 2.0.0: %v; quería el rechazo", err)
+	}
+	if sc, err := ReadSidecar(filepath.Join(dir, "kling-demo")); err != nil || sc.Version != "2.0.0" {
+		t.Fatalf("el rechazo tocó la instalada: %+v %v", sc, err)
+	}
+	res, _, err := install(t, rel, InstallOptions{Dir: dir, AllowDowngrade: true})
+	if err != nil || res.Sidecar.Version != "1.5.0" || res.Replaced == nil || res.Replaced.Version != "2.0.0" {
+		t.Fatalf("con AllowDowngrade: %+v %v", res, err)
+	}
+}

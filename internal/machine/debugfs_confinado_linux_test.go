@@ -45,7 +45,9 @@ func TestConfinarE2fsSoloLecturaNoCambiaElDueno(t *testing.T) {
 	if u, g := dueno(); u != 0 || g != grupoVMM {
 		t.Errorf("leer cambió el dueño de la imagen a %d:%d", u, g)
 	}
-	if cr := c.SysProcAttr.Credential; cr.Uid != uint32(uidNadieE2fsck) || cr.Gid != grupoVMM {
+	if cr := usuarioConfinado(c); cr == nil {
+		t.Errorf("debugfs de lectura sin cambio de usuario")
+	} else if cr.Uid != uint32(uidNadieE2fsck) || cr.Gid != grupoVMM {
 		t.Errorf("debugfs de lectura con %d:%d; quería %d:%d", cr.Uid, cr.Gid, uidNadieE2fsck, grupoVMM)
 	}
 	deshacer()

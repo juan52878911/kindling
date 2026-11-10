@@ -67,7 +67,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `snap.file` de kling-vz y kling-hv | `vz/internal/spec/spec.go` (los dos lo escriben) | **`kling_vz`**: se escribe la más baja que lo describe: 1 de base, 2 con `graphics` (v0.18), **3 con vsock o MTU** (v0.19), **4 con carpetas por virtio-fs** (kling-hv, tras v1.0). Como v0.19 arranca con vsock y MTU 16384, casi todo lo congelado desde entonces es 3. `Decode` lee 1 a 4, y `kling-vz -snapshot-formats` dice cuáles | uno ≤ v0.17 lee la 1; uno de v0.18 la 1 y la 2; lo que haya que despertar con un kling-vz anterior lo recongela `kling upgrade` (§3.4). Uno de una versión futura se rechaza diciendo que se actualice kling-vz |
 | `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
 | `mem.file` de kling-hv | `vz/internal/hvvm/vm.c`, cabecera C con la magia `KLNGHV02` al final del fichero | **`SNAP_VERSION` 6**: 2 vsock y globo (v0.19), 3 la cola de estadísticas del globo, 4 la de páginas libres (v1.0), 5 los vCPU de más de 8, 6 la sección de virtio-fs (tras v1.0). Lee 1 a 6, cada una con su longitud de cabecera; escribe la 4 salvo en una máquina de más de 8 vCPU (5) o con carpetas por virtio-fs (6) | uno anterior no lee la 4 y se rechaza diciendo que se actualice. `explicarRestauracion` traduce el error a "rehazlo" y `kling upgrade` comprueba esta versión antes de volver atrás (`versionHVMax`, ver `TestFormatosCasanConVZ`) |
-| firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
+| firma de dorados | `secrets/snapshot.key`, `secrets/signatures-v2`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe. Desde v1.0 se exige (`daemon.require_signed`, por defecto on): al arrancar, el daemon re-firma en v2 los dorados con firma v1 que cuadran (deja `meta.json.v2.bak` y la marca `secrets/signatures-v2`) y desde entonces rechaza una v1. Uno sin firma, o con una v1 que no cuadra, no se restaura: hay que rehacerlo (`kling save -replace <máquina> <dorado>`, `kling mcp import <servicio> -force`) o aceptarlos con `kling config set daemon.require_signed off` y reiniciar el daemon |
 
 ### Imágenes y volúmenes
 
@@ -144,6 +144,10 @@ unidades del host solo se actualizan con `make deploy`.
    PR 2: el meta lo guarda y salen `stale`; los de antes no lo guardan.*
 3. **`snapshot.key`**: todo lo firmado y cifrado depende de 32 bytes sin copia.
    Una reinstalación que la regenere deja inservibles dorados y credenciales.
+   *Desde v1.0 la firma se exige: los dorados sin firma (de antes de v0.18, o
+   copiados de otro host) dejan de restaurarse al actualizar, con un error que
+   dice cómo rehacerlos o cómo aceptarlos (`daemon.require_signed off`); los
+   firmados en v1 se re-firman solos al arrancar el daemon nuevo.*
 4. **`kling-guest` horneado sin handshake**: nadie sabe qué agente lleva cada
    imagen, y el caso del puente viejo es un pánico, no un error.
    *Desde el PR 4 (v0.18) el agente anuncia `version` y `caps` y se ignoran

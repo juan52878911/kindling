@@ -225,8 +225,8 @@ func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, nombre, args...)
 }
 
-// uidNadieE2fsck es el usuario con el que corre e2fsck sobre un disco que es
-// de root: nobody/nogroup en casi todo Linux. Variable para los tests.
+// uidNadieE2fsck es el usuario con el que corre e2fsck: nobody/nogroup en
+// casi todo Linux. Variable para los tests.
 var uidNadieE2fsck = 65534
 
 // memE2fsck es el tope de espacio de direcciones de e2fsck (RLIMIT_AS). Un
@@ -236,33 +236,36 @@ const memE2fsck = 2 << 30
 
 // confinarE2fs quita a una orden de e2fsprogs que va a leer un disco escrito
 // por el invitado (f, ya abierto, que la orden recibe como /dev/fd/3) todo lo
-// que no necesita para eso:
+// que no necesita para eso. La encierra el propio daemon, vuelto a ejecutar
+// como hijo de la jaula (e2fs_jaula_linux.go):
 //
-//   - el uid 0: corre con el dueño del disco si no es root (el usuario del
-//     VMM, que ya puede escribirlo: con -run-as el overlay y los volúmenes
-//     son suyos), o con nobody. A un disco de root se le cede el dueño (por
-//     descriptor) mientras dura y se le devuelve después: abrir /dev/fd/3
-//     vuelve a comprobar permisos sobre el inodo, así que el descriptor solo
-//     no basta. Sin grupos suplementarios, y al dejar de ser root pierde
-//     todas las capacidades.
+//   - el uid 0 y el del VMM: corre con nobody, sin grupos suplementarios, y
+//     al dejar de ser root pierde todas las capacidades. Antes, a un disco que
+//     no era de root (los overlays y volúmenes, que son del usuario del VMM)
+//     se le dejaba correr con su dueño, que puede con los discos de todas las
+//     máquinas (A1). Ahora el disco se le cede a nobody (por descriptor)
+//     mientras dura y se le devuelve después: abrir /dev/fd/3 vuelve a
+//     comprobar permisos sobre el inodo, así que el descriptor solo no basta.
+//   - los ficheros del host: chroot en una raíz mínima de solo lectura en su
+//     propio namespace de montajes (montarJaula), donde no hay ruta a ningún
+//     disco, capa ni secreto.
 //   - la red, y la vista de los procesos e IPC del host (namespaces nuevos de
 //     red, PID e IPC).
-//   - memoria sin tope: prlimit (util-linux, como setpriv) le pone memE2fsck.
+//   - memoria sin tope: RLIMIT_AS a memE2fsck, que pone el hijo (sin prlimit).
 //
 // El plazo lo pone quien la lanza (plazoE2fsck). Con el daemon sin root no se
 // cambia de usuario (ya no es root) ni de namespaces (harían falta los de
 // usuario, que hay distribuciones que bloquean): solo el tope de memoria.
-// Devuelve con qué deshacer lo que tocó del disco.
+// Donde la jaula no se puede montar (sondaJaulaE2fs) se avisa y se sigue sin
+// chroot. Devuelve con qué deshacer lo que tocó del disco.
 func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	nada := func() {}
 	if c.Err != nil {
 		return nada, nil
 	}
-	if bin, err := exec.LookPath("prlimit"); err == nil {
-		c.Args = append([]string{bin, "--as=" + strconv.Itoa(memE2fsck), "--", c.Path}, c.Args[1:]...)
-		c.Path = bin
-	}
+	o := ordenJaula{modo: modoSimple, uid: -1, gid: -1, mem: memE2fsck}
 	if os.Geteuid() != 0 {
+		envolverEnJaula(c, o)
 		return nada, nil
 	}
 	fi, err := f.Stat()
@@ -273,7 +276,7 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	if !ok {
 		return nil, fmt.Errorf("stat %s: no owner", f.Name())
 	}
-	uid, gid := int(st.Uid), int(st.Gid)
+	uid, gid := uidNadieE2fsck, uidNadieE2fsck
 	soloLectura := descriptorSoloLectura(f)
 	modo := fi.Mode().Perm()
 	var deshacer []func()
@@ -282,14 +285,11 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	// root: así no se toca el dueño de una imagen base que otros VMM abren
 	// por grupo mientras tanto (darLecturaVMM).
 	switch {
-	case uid != 0:
-		// El dueño (el usuario del VMM): ya puede con él.
+	case int(st.Uid) == uidNadieE2fsck && int(st.Gid) == uidNadieE2fsck:
 	case soloLectura && modo&0o004 != 0:
-		uid, gid = uidNadieE2fsck, uidNadieE2fsck
-	case soloLectura && modo&0o040 != 0 && gid != 0:
-		uid = uidNadieE2fsck
+	case soloLectura && modo&0o040 != 0 && st.Gid != 0:
+		gid = int(st.Gid)
 	default:
-		uid, gid = uidNadieE2fsck, uidNadieE2fsck
 		if err := f.Chown(uid, gid); err != nil {
 			return nil, fmt.Errorf("handing %s to e2fsck: %w", filepath.Base(f.Name()), err)
 		}
@@ -301,10 +301,21 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 			deshacer = append(deshacer, func() { _ = f.Chmod(modo) })
 		}
 	}
-	c.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}},
-		Cloneflags: syscall.CLONE_NEWNET | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC,
+	o.uid, o.gid = uid, gid
+	c.SysProcAttr = &syscall.SysProcAttr{Cloneflags: nsSinMontajes}
+	if sondaJaulaE2fs() == nil {
+		raiz, err := dirRaizJaula()
+		if err != nil {
+			for i := len(deshacer) - 1; i >= 0; i-- {
+				deshacer[i]()
+			}
+			return nil, err
+		}
+		deshacer = append([]func(){func() { _ = os.Remove(raiz) }}, deshacer...)
+		o.modo, o.raiz = modoJaula, raiz
+		c.SysProcAttr.Cloneflags = nsJaula
 	}
+	envolverEnJaula(c, o)
 	return func() {
 		for i := len(deshacer) - 1; i >= 0; i-- {
 			deshacer[i]()

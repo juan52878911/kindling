@@ -118,10 +118,10 @@ func (im imagenDebugfs) cmd(ctx context.Context, args []string, extra ...*os.Fil
 // /dev/fd/N es un dup, o el daemon sin root) se pasa el original.
 func fuenteParaConfinado(c *exec.Cmd, f *os.File, dir string) (*os.File, func(), error) {
 	nada := func() {}
-	if c.SysProcAttr == nil || c.SysProcAttr.Credential == nil {
+	cr := usuarioConfinado(c)
+	if cr == nil {
 		return f, nada, nil
 	}
-	cr := c.SysProcAttr.Credential
 	tmp, err := os.CreateTemp(dir, ".kling-put-*")
 	if err != nil {
 		return nil, nil, err

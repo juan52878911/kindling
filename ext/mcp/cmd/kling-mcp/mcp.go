@@ -880,9 +880,16 @@ func directPost(ctx context.Context, url string) poster {
 	// dentro tarda bastante más que un eco—. Lo que sí se acota es la espera a
 	// las cabeceras, que separa "está pensando" de "no hay nadie", y por encima
 	// manda el contexto de quien llama (-wait).
-	c := &http.Client{Transport: &http.Transport{
-		ResponseHeaderTimeout: 4 * time.Minute,
-	}}
+	//
+	// Tampoco sigue redirecciones: un 307/308 repite el POST, con su cuerpo y
+	// su Mcp-Session-Id, en el host y esquema que diga el servidor (http
+	// incluido). Un endpoint MCP no redirige; si lo hace, que se diga.
+	c := &http.Client{
+		Transport: &http.Transport{ResponseHeaderTimeout: 4 * time.Minute},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("%s redirects to %s: refusing to follow it, point at the final MCP URL", via[0].URL.Redacted(), req.URL.Redacted())
+		},
+	}
 	return func(sid, body string) (string, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 		if err != nil {

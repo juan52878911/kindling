@@ -132,6 +132,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 - `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
 - CI: the macOS job runs the tests of the whole core and `ext/sandbox` (before, only `internal/machine` and `internal/daemon`), and 42 more `internal/machine` tests (commit, fork, freeze, VMM process tracking) now run on macOS instead of skipping; the Linux e2e runs the `internal/net` ipset tests as root; `go.work` is checked against `vz/go.mod`; without an Apple Silicon runner, `e2e-mac` shows a "not run" job on every push to `main`, which `scripts/release.sh` does not accept as the kling-hv e2e.
+- `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
 - Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
 - `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
 
@@ -192,6 +193,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling db clone`: event triggers of the source are dropped right after the restore in the builder and never reach the golden; `-password-stdin` also clears `PGPASSWORD`/`PGPASSFILE` from the environment.
 - `kling db` with Garage: the copy's S3 secret goes to the daemon in the exec request body instead of the argv of a host `kling exec`.
 - `kling db rotate`: when a failed rotation cannot confirm the old password, the advice is to rotate again (keeps the data) instead of `reset`.
+- Template signatures are required by default: an unsigned template (made before signing, copied from another host, or with its signature and digests stripped from `meta.json`) no longer restores, and the error says how to recreate it. On startup the daemon re-signs in v2 every v1-signed template whose signature and digests still match, then rejects v1 signatures (they don't cover labels, limits or the memory dump). `daemon.require_signed off` (or `KLING_REQUIRE_SIGNED=0`) accepts both as before. See `docs/actualizar.md`.
+- Linux: e2fsck, resize2fs and debugfs no longer run as the VMM user. The daemon re-executes itself into new mount, network, PID and IPC namespaces, chroots into a minimal read-only root, drops to nobody with `RLIMIT_AS` and `no_new_privs`, and hands the disk over by descriptor; the memory cap no longer needs `prlimit`. Where the jail can't be mounted it warns and runs without chroot. macOS: a missing `sandbox-exec` is warned about and refused when the daemon is root. `kling doctor` shows `e2fs_confinement` and `KLING_REQUIRE_SIGNED`.
 
 ### Fixed
 
@@ -308,6 +311,11 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - CI: the GC lock tests in `internal/machine` re-signal their FIFO until the read returns and fail after 10 s instead of hanging the macOS job for 10 minutes.
 - Guest agent: every route except `/healthz` answers 403 to requests from inside the guest (loopback, the guest's own addresses, a vsock CID other than the host's). A process in the guest could run commands as root despite the image's `USER`, write restore hooks or move the clock; the host reaches the agent from outside and is not affected.
 - Guest agent: commands still running when a golden was saved no longer survive in every copy holding their exec slot; `/resync` of an instance stops them (thaw and resume leave them alone).
+- MCP gateway: an open SSE stream (session GET) kept its microVM awake forever and held a slot of the tenant's in-flight quota. Streams no longer count as in-flight work and are closed when the instance sleeps.
+- MCP gateway: `/mcp/_all` and linked services now apply the tenant in-flight quota, and `call_tool` counts towards prewarm popularity.
+- MCP gateway: the reaper could freeze an instance just picked for a new session, so its `initialize` got a 502.
+- MCP gateway: requests for services without a snapshot left a lock behind per name.
+- `kling mcp` no longer follows redirects when it talks to an MCP URL directly.
 - Guest agents of v0.20 are no longer flagged as more than one minor behind a 1.0 daemon (1.0 is the minor after 0.20). The doctor line for an agent older than v0.18 no longer says it works.
 - macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
 - `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.

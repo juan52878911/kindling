@@ -603,14 +603,24 @@ var sandboxExec = "/usr/bin/sandbox-exec"
 //
 // El usuario no cambia: el daemon ya es el del usuario, sin privilegios que
 // quitar. Tampoco hay tope de memoria: macOS acepta RLIMIT_AS pero no lo
-// aplica; queda el plazo (plazoE2fsck). Sin sandbox-exec, la orden sigue como
-// estaba.
+// aplica; queda el plazo (plazoE2fsck).
+//
+// Sin sandbox-exec (M6) la orden correría sin encierro. Antes pasaba en
+// silencio; ahora se avisa una vez, Ajustes() lo dice (e2fs_confinement) y,
+// con el daemon como root, se niega: ahí un e2fsck explotado sería root.
 func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	nada := func() {}
 	if c.Err != nil || !filepath.IsAbs(c.Path) {
 		return nada, nil
 	}
 	if _, err := os.Stat(sandboxExec); err != nil {
+		if os.Geteuid() == 0 {
+			return nil, fmt.Errorf("refusing to run %s unconfined as root: %s is missing", filepath.Base(c.Path), sandboxExec)
+		}
+		avisoSinSandboxE2fs.Do(func() {
+			log.Printf("warning: %s is missing: e2fsck, resize2fs and debugfs run unconfined, "+
+				"with the daemon's user, over disks the guest wrote", sandboxExec)
+		})
 		return nada, nil
 	}
 	bin, err := filepath.EvalSymlinks(c.Path)
@@ -621,6 +631,25 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	c.Path = sandboxExec
 	return nada, nil
 }
+
+// avisoSinSandboxE2fs avisa una sola vez de que falta sandbox-exec.
+var avisoSinSandboxE2fs sync.Once
+
+// confinamientoE2fs dice cómo corren e2fsck y compañía en este daemon (para
+// Ajustes y kling doctor).
+func confinamientoE2fs() string {
+	if _, err := os.Stat(sandboxExec); err != nil {
+		if os.Geteuid() == 0 {
+			return "blocked (" + sandboxExec + " missing, daemon is root)"
+		}
+		return "none (" + sandboxExec + " missing)"
+	}
+	return "sandbox-exec"
+}
+
+// usuarioConfinado: en macOS la orden encerrada corre con el usuario del
+// daemon (y /dev/fd/N es un dup, sin volver a mirar permisos).
+func usuarioConfinado(*exec.Cmd) *syscall.Credential { return nil }
 
 // perfilE2fs es el perfil de sandbox de e2fsck: todo prohibido salvo
 // ejecutar bin, leer lo que carga dyld (el sistema, Homebrew y bin) y su

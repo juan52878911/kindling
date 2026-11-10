@@ -101,6 +101,14 @@ func (g *Scheduler) PickInstance(ctx context.Context, service string, t *Tenant)
 func (g *Scheduler) Begin(e *Instance) { g.begin(e) }
 func (g *Scheduler) End(e *Instance)   { g.end(e) }
 
+// BeginStream apunta un stream SSE abierto sobre la instancia: no la mantiene
+// despierta, y cortar se llama si la instancia sale del mapa (congelada,
+// desalojada) para que el stream acabe en vez de colgarse. Hay que llamar a la
+// función devuelta al cerrarse el stream.
+func (g *Scheduler) BeginStream(e *Instance, cortar context.CancelFunc) (end func()) {
+	return g.beginStream(e, cortar)
+}
+
 // Instance busca la instancia de un servicio que corre en machineID.
 func (g *Scheduler) Instance(service, machineID string) *Instance {
 	g.mu.Lock()

@@ -117,6 +117,11 @@ type InstallOptions struct {
 	VerifySums SumsVerifier
 	// Warnings recibe los avisos. nil = os.Stderr.
 	Warnings io.Writer
+	// AllowDowngrade deja instalar una versión más vieja que la instalada.
+	// Sin ella es un error: `kling plugin install x@v0.19` sobre la v0.20 la
+	// cambiaba en silencio. La pone `kling upgrade`, que lleva las extensiones
+	// a la versión del núcleo y ya decidió si se puede volver atrás.
+	AllowDowngrade bool
 
 	// allowHTTP deja descargar por http:// en los tests del paquete. No se
 	// puede activar desde fuera a propósito: fuera de un test, http es un
@@ -318,6 +323,12 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 		return nil, fmt.Errorf("%s %s needs kling %s or newer (this is %s)", o.Name, m.Version, m.MinKling, o.CoreVersion)
 	}
 
+	old, errOld := ReadSidecar(final)
+	if errOld == nil && !o.AllowDowngrade && !VersionAtLeast(m.Version, old.Version) {
+		return nil, fmt.Errorf("%s %s is older than the installed %s: to go back, remove it first (kling plugin rm %s)",
+			o.Name, m.Version, old.Version, o.Name)
+	}
+
 	// Los compañeros se bajan y verifican todos antes de mover nada a su
 	// sitio: una instalación a medias sería una extensión que falla al usarse.
 	type pending struct{ tmp, final string }
@@ -343,7 +354,7 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 	}
 
 	res := &Installed{Path: final, Manifest: m}
-	if old, err := ReadSidecar(final); err == nil {
+	if errOld == nil {
 		res.Replaced = old
 	}
 	for _, c := range comps {

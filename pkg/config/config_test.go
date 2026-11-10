@@ -565,3 +565,16 @@ func TestSetDaemonCuotaCarpetas(t *testing.T) {
 		t.Fatalf("files %d, min free %d", c.Daemon.ShareMaxFiles, c.Daemon.ShareMinFreeMiB)
 	}
 }
+
+// daemon.require_signed: on, off o vacío (on).
+func TestSetRequireSigned(t *testing.T) {
+	c := &Config{}
+	for _, v := range []string{"on", "off", ""} {
+		if err := c.Set("daemon.require_signed", v); err != nil || c.Daemon.RequireSigned != v {
+			t.Fatalf("require_signed %q: %v", v, err)
+		}
+	}
+	if err := c.Set("daemon.require_signed", "yes"); err == nil {
+		t.Fatal("require_signed yes aceptado")
+	}
+}

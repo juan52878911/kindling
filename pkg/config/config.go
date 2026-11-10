@@ -212,6 +212,22 @@ type Daemon struct {
 	// "90s"); "0" = nunca; vacío = 10m en macOS y nunca en Linux.
 	// KLING_IDLE_FREEZE lo sustituye. Ver docs/desarrollo-local.md.
 	IdleFreeze string `json:"idle_freeze,omitempty"`
+
+	// RequireSigned es daemon.require_signed: "on" (vacío) u "off". Con on,
+	// el daemon no restaura una plantilla sin firma, ni una con la firma v1
+	// cuando ya migró las suyas a la v2 (docs/actualizar.md). Off acepta las
+	// dos, como antes de v1.0. KLING_REQUIRE_SIGNED (1/0) lo sustituye. Se
+	// lee al arrancar el daemon.
+	RequireSigned string `json:"require_signed,omitempty"`
+}
+
+// ValidateRequireSigned comprueba daemon.require_signed.
+func ValidateRequireSigned(v string) error {
+	switch v {
+	case "", "on", "off":
+		return nil
+	}
+	return fmt.Errorf("daemon.require_signed must be on or off, not %q", v)
 }
 
 // ParseIdleFreeze interpreta daemon.idle_freeze ("0" o una duración de Go de
@@ -794,6 +810,11 @@ func (c *Config) Set(key, value string) error {
 				return err
 			}
 			c.Daemon.IdleFreeze = value
+		case "require_signed":
+			if err := ValidateRequireSigned(value); err != nil {
+				return err
+			}
+			c.Daemon.RequireSigned = value
 		case "battery_pause_after_seconds":
 			n, err := atoi()
 			if err != nil {
@@ -944,6 +965,7 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.net_mibps", itoa(c.Daemon.NetMiBps)},
 		{"daemon.idle_freeze", c.Daemon.IdleFreeze},
 		{"daemon.memory_pressure", c.Daemon.MemoryPressure},
+		{"daemon.require_signed", c.Daemon.RequireSigned},
 	}
 }
 

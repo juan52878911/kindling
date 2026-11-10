@@ -156,7 +156,7 @@ func TestAvisoIPv6Invitado(t *testing.T) {
 // basta con que el snapshot pase la comprobación de integridad (sin digests
 // grabados, se salta) para llegar hasta ahí.
 func TestRunFromAvisaIPv6UnaVezPorDorado(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	m.bus = events.New()
 	escribirSnapshot(t, m, "dorado", api.Snapshot{}) // GuestIPv6Off por defecto: false ("no consta")
@@ -188,7 +188,7 @@ func TestRunFromAvisaIPv6UnaVezPorDorado(t *testing.T) {
 
 // Un dorado con GuestIPv6Off no publica nada.
 func TestRunFromNoAvisaSiGuestIPv6Off(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	m.bus = events.New()
 	escribirSnapshot(t, m, "dorado", api.Snapshot{GuestIPv6Off: true})
