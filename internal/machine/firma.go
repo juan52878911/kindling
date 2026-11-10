@@ -22,6 +22,7 @@ package machine
 // (ver el comentario de KernelSHA256 en pkg/api/types.go).
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -29,10 +30,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
+	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -209,33 +214,213 @@ func (m *Manager) firmar(s *api.Snapshot) error {
 // errFirma es que la firma no cuadra.
 var errFirma = errors.New("snapshot signature does not match")
 
-// comprobarFirma exige que el snapshot lo firmara este host. Uno sin firma es
-// anterior a esto: se acepta, salvo con KLING_REQUIRE_SIGNED=1.
+// firmaNoExigida es daemon.require_signed off (FijarFirmaExigida). El cero
+// vale exigirla.
+var firmaNoExigida atomic.Bool
+
+// FijarFirmaExigida dice si un dorado sin firma, o con la v1 tras migrar, se
+// puede restaurar (daemon.require_signed; por defecto sí se exige). El
+// daemon lo llama al arrancar, antes de crear el manager.
+func FijarFirmaExigida(exigir bool) { firmaNoExigida.Store(!exigir) }
+
+// firmaExigida es la política efectiva: KLING_REQUIRE_SIGNED (1/0) manda
+// sobre daemon.require_signed.
+func firmaExigida() bool {
+	switch os.Getenv("KLING_REQUIRE_SIGNED") {
+	case "1", "on", "true":
+		return true
+	case "0", "off", "false":
+		return false
+	}
+	return !firmaNoExigida.Load()
+}
+
+// marcaFirmasV2 es el fichero (junto a la clave) que dice que este host ya
+// pasó sus dorados de la firma v1 a la v2 (MigrarFirmas). Desde entonces una
+// v1 no se re-firma: un meta.json con ella es uno viejo que alguien volvió a
+// poner (una copia de seguridad, un meta.json.v2.bak), y la v1 no cubre las
+// etiquetas ni los topes que pudo cambiar.
+const marcaFirmasV2 = "signatures-v2"
+
+func (m *Manager) firmasMigradas() bool {
+	_, err := os.Stat(filepath.Join(m.root, "secrets", marcaFirmasV2))
+	return err == nil
+}
+
+// comprobarFirma exige que el snapshot lo firmara este host, en v2 (A2 de la
+// segunda revisión):
 //
-// Una firma v1 (hex sin prefijo, los dorados de antes de B2) se comprueba
-// como siempre, sobre contenidoFirmado: sigue valiendo, y sigue sin cubrir lo
-// que añade la v2. Rehacer el dorado (kling save) lo pasa a v2. Una v2 no se
-// puede rebajar a v1: la v1 de ese contenido no la calculó nadie, y sin la
-// clave no se puede calcular.
+//   - Sin firma: es de antes de las firmas, de otro sitio, o alguien le quitó
+//     la firma (y con ella los digests, para que verifyIntegrity lo diera por
+//     antiguo). Se rechaza salvo con daemon.require_signed off.
+//   - Firma v1 (hex sin prefijo, los dorados de antes de B2): no cubre las
+//     etiquetas (kling.owner, kling.ports), los topes ni el mem.file. Si
+//     este host todavía no migró sus dorados, este se re-firma ahora en v2
+//     (migrarFirmaV1) si la v1 y sus digests cuadran; si ya los migró, se
+//     rechaza (salvo con require_signed off, que la comprueba como siempre).
+//   - Firma v2: tiene que cuadrar, y lleva al menos el digest del snap.file.
+//
+// Una v2 no se puede rebajar a v1: la v1 de ese contenido no la calculó
+// nadie, y sin la clave no se puede calcular. Si migra, s queda con la firma
+// nueva.
 func (m *Manager) comprobarFirma(s *api.Snapshot) error {
+	exigir := firmaExigida()
 	if s.Signature == "" {
-		if os.Getenv("KLING_REQUIRE_SIGNED") == "1" {
-			return fmt.Errorf("%w: snapshot %q is not signed and KLING_REQUIRE_SIGNED=1; recommit it", errFirma, s.Name)
+		if exigir {
+			return fmt.Errorf("%w: template %q is not signed. It predates template signing, was copied from "+
+				"another host, or its meta.json was edited. Recreate it on this host:\n%s\n"+
+				"or, if you trust it as it is, accept unsigned templates with "+
+				"`kling config set daemon.require_signed off` and restart the daemon", errFirma, s.Name, remedioDorado(s.Name))
 		}
 		return nil
 	}
-	contenido, firma := contenidoFirmado(s), s.Signature
-	if resto, ok := strings.CutPrefix(firma, firmaV2); ok {
-		contenido, firma = contenidoFirmadoV2(s), resto
+	if !strings.HasPrefix(s.Signature, firmaV2) {
+		if err := m.comprobarFirmaV1(s); err != nil || !exigir {
+			return err
+		}
+		if m.firmasMigradas() {
+			return fmt.Errorf("%w: template %q has an old v1 signature, which does not cover its labels and limits, "+
+				"and this host already moved its templates to v2: its meta.json was put back from a copy. Recreate it:\n%s",
+				errFirma, s.Name, remedioDorado(s.Name))
+		}
+		nuevo, err := m.migrarFirmaV1(s.Name, s.Signature)
+		if err != nil {
+			return err
+		}
+		s.Signature, s.MemDigest = nuevo.Signature, nuevo.MemDigest
+		return nil
 	}
-	esperada, err := m.macDe(contenido)
+	esperada, err := m.macDe(contenidoFirmadoV2(s))
 	if err != nil {
 		return err
 	}
-	got, err := hex.DecodeString(firma)
+	got, err := hex.DecodeString(strings.TrimPrefix(s.Signature, firmaV2))
 	if err != nil || !hmac.Equal(got, esperada) {
-		return fmt.Errorf("%w: %q was modified outside kindling, or was made on another host. "+
-			"Snapshots are bound to the host that made them; recommit it here", errFirma, s.Name)
+		return errFirmaNoCuadra(s.Name)
+	}
+	// Todo dorado firmado lleva el digest del snap.file (los de fork no
+	// llevan el del overlay ni el de la memoria, pero este sí). Sin él, la
+	// firma cubriría un dorado que verifyIntegrity no comprueba.
+	if s.SnapSHA256 == "" {
+		return fmt.Errorf("%w: template %q is signed but has no state digest; recreate it:\n%s", errFirma, s.Name, remedioDorado(s.Name))
 	}
 	return nil
+}
+
+func errFirmaNoCuadra(name string) error {
+	return fmt.Errorf("%w: %q was modified outside kindling, or was made on another host. "+
+		"Snapshots are bound to the host that made them; recommit it here", errFirma, name)
+}
+
+// comprobarFirmaV1 comprueba una firma v1 sobre contenidoFirmado.
+func (m *Manager) comprobarFirmaV1(s *api.Snapshot) error {
+	esperada, err := m.macDe(contenidoFirmado(s))
+	if err != nil {
+		return err
+	}
+	got, err := hex.DecodeString(s.Signature)
+	if err != nil || !hmac.Equal(got, esperada) {
+		return errFirmaNoCuadra(s.Name)
+	}
+	return nil
+}
+
+// errYaMigrada corta editMeta cuando otro ya re-firmó el dorado.
+var errYaMigrada = errors.New("already signed in v2")
+
+// migrarFirmaV1 re-firma en v2 el dorado name, que llevaba la firma v1 firma.
+// Solo si es de este host y está como se congeló: la v1 cuadra y los digests
+// que tiene también (verifyIntegrity). El del mem.file, que la v1 no tenía,
+// se calcula ahora sobre el que hay (salvo en un snapshot de fork, que no lo
+// lleva nunca). Devuelve el snapshot re-firmado.
+func (m *Manager) migrarFirmaV1(name, firma string) (*api.Snapshot, error) {
+	s, err := m.loadSnapshot(name)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(s.Signature, firmaV2) {
+		return s, nil
+	}
+	if s.Signature != firma {
+		return nil, errFirmaNoCuadra(name)
+	}
+	if err := m.comprobarFirmaV1(s); err != nil {
+		return nil, err
+	}
+	dir := m.snapDir(name)
+	if err := m.verifyIntegrity(s, dir); err != nil {
+		return nil, err
+	}
+	memDigest := s.MemDigest
+	if _, err := os.Stat(filepath.Join(dir, forkMarca)); memDigest == "" && errors.Is(err, fs.ErrNotExist) {
+		if memDigest, err = digest.Tree(filepath.Join(dir, "mem.file")); err != nil {
+			return nil, fmt.Errorf("template %q: digest of its memory dump: %w", name, err)
+		}
+	}
+	nuevo, err := m.editMeta(name, func(s *api.Snapshot) (string, error) {
+		if strings.HasPrefix(s.Signature, firmaV2) {
+			return "", errYaMigrada
+		}
+		if s.Signature != firma {
+			return "", errFirmaNoCuadra(name)
+		}
+		s.MemDigest = memDigest
+		return "signature moved to v2", m.firmar(s)
+	})
+	if errors.Is(err, errYaMigrada) {
+		return m.loadSnapshot(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("template %s: signature moved to v2 (it now covers labels, limits and the memory dump)", name)
+	return nuevo, nil
+}
+
+// MigrarFirmas pasa a la firma v2 todos los dorados de este host que llevan
+// la v1 y cuadran, y deja la marca (marcaFirmasV2) para que desde entonces
+// una v1 se rechace. Una vez por host: con la marca puesta no hace nada. Si
+// alguno no se pudo re-firmar por algo pasajero (un disco lleno), no deja la
+// marca y se reintenta en el próximo arranque; los que no cuadran (firma o
+// digests) se quedan como están y no se restauran. Los que no tienen firma
+// tampoco se pueden re-firmar (no hay con qué saber que son de aquí): se
+// avisa. El daemon lo llama al arrancar, en segundo plano.
+func (m *Manager) MigrarFirmas(ctx context.Context) {
+	if m.firmasMigradas() {
+		return
+	}
+	metas, _ := filepath.Glob(filepath.Join(m.root, "snapshots", "*", "meta.json"))
+	pendiente := false
+	var sinFirma []string
+	for _, p := range metas {
+		if ctx.Err() != nil {
+			return
+		}
+		name := filepath.Base(filepath.Dir(p))
+		s, err := m.loadSnapshot(name)
+		if err != nil {
+			continue // no es un dorado que se pueda restaurar de todos modos
+		}
+		switch {
+		case s.Signature == "":
+			sinFirma = append(sinFirma, name)
+		case !strings.HasPrefix(s.Signature, firmaV2):
+			if _, err := m.migrarFirmaV1(name, s.Signature); err != nil {
+				log.Printf("warning: template %s keeps its v1 signature and won't restore: %v", name, err)
+				if !errors.Is(err, errFirma) && !errors.Is(err, errCorrupto) {
+					pendiente = true
+				}
+			}
+		}
+	}
+	if len(sinFirma) > 0 && firmaExigida() {
+		log.Printf("warning: %d template(s) are not signed and won't restore (daemon.require_signed is on): %s; "+
+			"recreate them, or set daemon.require_signed off", len(sinFirma), strings.Join(sinFirma, ", "))
+	}
+	if pendiente {
+		return
+	}
+	if err := durable.Escribir(filepath.Join(m.root, "secrets", marcaFirmasV2), []byte("1\n"), 0o600); err != nil {
+		log.Printf("warning: marking the templates as migrated to signature v2: %v", err)
+	}
 }

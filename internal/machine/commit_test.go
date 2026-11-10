@@ -269,9 +269,7 @@ func TestCommitEsperaAlCerrojoYReleeLaMaquina(t *testing.T) {
 // hace, la plantilla recupera su disco y se reanuda UNA vez, y queda un
 // snapshot con meta.json que se puede listar.
 func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c0aa170000000006"
 	falso, muerto := plantillaParaCommit(t, m, id)
@@ -279,8 +277,7 @@ func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
 			// Lo que escribiría Firecracker.
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 
@@ -341,7 +338,7 @@ func TestReserveDirCuentaLasReservas(t *testing.T) {
 }
 
 // escribirSnapshot deja en disco un snapshot con su meta.json (sin firmar: se
-// aceptan salvo con KLING_REQUIRE_SIGNED=1).
+// aceptan con KLING_REQUIRE_SIGNED=0).
 func escribirSnapshot(t *testing.T, m *Manager, name string, s api.Snapshot) string {
 	t.Helper()
 	dir := m.snapDir(name)
@@ -385,7 +382,7 @@ func TestRemoveSnapshotPropioRespetaLasReservasAjenas(t *testing.T) {
 // verificando la integridad del overlay dorado, que es un FIFO que nadie
 // escribe todavía), RemoveSnapshot se niega; en cuanto termina, lo borra.
 func TestRemoveSnapshotSeNiegaDuranteRunFrom(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	dir := escribirSnapshot(t, m, "dorado", api.Snapshot{
 		RootfsSHA256: strings.Repeat("a", 64),

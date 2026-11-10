@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -81,9 +80,7 @@ func TestCommitSinPoderDevolverLosVolumenesMarcaFallida(t *testing.T) {
 // Lo mismo en el camino feliz: el dorado vale (se volcó con los volúmenes
 // soltados) y el commit acaba bien, pero la plantilla queda fallida.
 func TestCommitCompletoSinVolumenesDevueltosConservaElDorado(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c0aa170000000012"
 	falso, muerto := plantillaParaCommit(t, m, id)
@@ -92,8 +89,7 @@ func TestCommitCompletoSinVolumenesDevueltosConservaElDorado(t *testing.T) {
 	dir := m.snapDir("dorado")
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 	snap, err := m.Commit(context.Background(), id, "dorado", false)

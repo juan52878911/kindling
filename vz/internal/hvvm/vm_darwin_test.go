@@ -3,9 +3,32 @@
 package hvvm
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// La RAM de una congelación es un clon APFS del fichero que la respalda (el
+// dorado o la congelación anterior), y un clon hereda su modo: de un dorado
+// 0644 salía una congelación 0644 con toda la RAM del invitado. La rama de
+// copia ya la creaba 0600.
+func TestClonRAMEs0600(t *testing.T) {
+	dir := t.TempDir()
+	base, out := filepath.Join(dir, "mem.base"), filepath.Join(dir, "mem.file")
+	if err := os.WriteFile(base, make([]byte, 1<<16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o644); err != nil { // sin la umask
+		t.Fatal(err)
+	}
+	switch m := clonRAM(base, out); {
+	case m < 0:
+		t.Fatalf("cloning the RAM file: errno %d", -m)
+	case m != 0o600:
+		t.Fatalf("the frozen RAM file is %#o, want 0600", m)
+	}
+}
 
 // Issue #183: en el M4 HVF anuncia sve2/svei8mm/svebf16 en ID_AA64ZFR0_EL1 sin
 // SVE, y OpenSSL moría con SIGILL. Al invitado no le llega nada de SVE ni de

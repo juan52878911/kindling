@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -246,9 +245,7 @@ func managerConAlmacen(t *testing.T, id, snap string) (*Manager, *almacenFalso) 
 	if !congelarEnDiff() {
 		t.Skip("sin congelado diferencial en esta plataforma")
 	}
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	t.Setenv("KLING_MIN_FREE_DISK_MIB", "0")
 	f := &almacenFalso{}

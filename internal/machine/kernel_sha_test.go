@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,9 +108,7 @@ func TestAvisoKernel(t *testing.T) {
 }
 
 func TestCommitGrabaElKernelSHA256(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c2aa170000000001"
 	falso, _ := plantillaParaCommit(t, m, id)
@@ -121,8 +118,7 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
 			// Lo que escribiría Firecracker.
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 
@@ -149,7 +145,7 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 // snapshot de la prueba no tiene ficheros reales, así que runFrom falla más
 // adelante; lo que importa es que no sea por el kernel.
 func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	// Sin RootfsSHA256/SnapSHA256 la integridad se salta y runFrom llega hasta
 	// el aviso de F2 (GuestIPv6Off, "no consta" aquí), que publica en el bus.
@@ -168,7 +164,7 @@ func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
 // Un snapshot SIN kernel_sha256 (anterior a K2, o congelado antes de K1) sigue
 // restaurándose: la comprobación se salta, no falla.
 func TestRunFromAceptaSnapshotSinKernelSHA256(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	escribirKernel(t, m, "kernel actual, da igual cuál")
 

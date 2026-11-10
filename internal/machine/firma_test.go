@@ -1,7 +1,6 @@
 package machine
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -80,7 +79,6 @@ func TestFirmaDeSnapshots(t *testing.T) {
 	}
 }
 
-// Los snapshots anteriores a las firmas siguen restaurándose, salvo que se exija.
 // Sin RootfsDigest (los dorados de antes de meta.json v2) se firma byte a
 // byte lo mismo que antes de existir el campo: sus firmas siguen valiendo.
 func TestContenidoFirmadoSinDigestEnArbol(t *testing.T) {
@@ -88,18 +86,6 @@ func TestContenidoFirmadoSinDigestEnArbol(t *testing.T) {
 		`"Allow":"","Vols":"","AllowExec":false,"VCPUs":1,"MemMiB":256}`
 	if got := string(contenidoFirmado(snapDePrueba())); got != want {
 		t.Fatalf("signed content changed for old goldens:\n got %s\nwant %s", got, want)
-	}
-}
-
-func TestSnapshotSinFirma(t *testing.T) {
-	m := newTestManager(t)
-	s := snapDePrueba()
-	if err := m.comprobarFirma(s); err != nil {
-		t.Fatalf("sin firma y sin exigirla: %v", err)
-	}
-	t.Setenv("KLING_REQUIRE_SIGNED", "1")
-	if err := m.comprobarFirma(s); !errors.Is(err, errFirma) {
-		t.Fatalf("exigiendo firma: %v", err)
 	}
 }
 
@@ -149,27 +135,6 @@ func TestFirmaV2CubreEtiquetasTopesEntornoYMemoria(t *testing.T) {
 	c.CredentialDomains = []string{"api.example.com"}
 	if err := m.comprobarFirma(&c); err != nil {
 		t.Errorf("las credenciales invalidaron la firma: %v", err)
-	}
-}
-
-// Los dorados firmados en v1 siguen valiendo, con lo que la v1 cubría: no hay
-// que rehacer los dorados de nadie para actualizar.
-func TestFirmaV1SigueValiendo(t *testing.T) {
-	m := newTestManager(t)
-	s := snapDePrueba()
-	s.Labels = map[string]string{api.LabelPorts: "8080"}
-	sum, err := m.macDe(contenidoFirmado(s))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Signature = hex.EncodeToString(sum) // como la escribía firmar() antes de B2
-	if err := m.comprobarFirma(s); err != nil {
-		t.Fatalf("una firma v1 dejó de valer: %v", err)
-	}
-	c := *s
-	c.AllowExec = true
-	if err := m.comprobarFirma(&c); !errors.Is(err, errFirma) {
-		t.Errorf("la v1 dejó de cubrir la política: %v", err)
 	}
 }
 

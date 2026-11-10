@@ -16,6 +16,7 @@ package guest
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -108,6 +110,49 @@ const maxExecs = 64
 
 var execLim = &slotLimiter{max: maxExecs}
 
+// execsVivos son los /exec y /exec/stream en curso, para cortarlos todos en
+// el /resync de una copia (cortarExecs).
+var execsVivos = struct {
+	mu  sync.Mutex
+	sig uint64
+	m   map[uint64]context.CancelFunc
+}{m: map[uint64]context.CancelFunc{}}
+
+// contextoExec da el contexto de un exec: el de la petición, que además corta
+// cortarExecs. quitar lo da de baja; quien llama lo difiere.
+func contextoExec(padre context.Context) (ctx context.Context, quitar func()) {
+	ctx, cancel := context.WithCancel(padre)
+	execsVivos.mu.Lock()
+	execsVivos.sig++
+	id := execsVivos.sig
+	execsVivos.m[id] = cancel
+	execsVivos.mu.Unlock()
+	return ctx, func() {
+		execsVivos.mu.Lock()
+		delete(execsVivos.m, id)
+		execsVivos.mu.Unlock()
+		cancel()
+	}
+}
+
+// cortarExecs cancela los exec en curso (cmd.Cancel mata su grupo) y dice
+// cuántos eran. Sus plazas se sueltan cuando cada manejador acaba, no aquí.
+//
+// Lo llama el /resync de una copia de un dorado: un exec que corría al volcar
+// despierta en cada copia, pero su petición era la de otra máquina y nadie la
+// espera. Su contexto es el de una conexión congelada que la copia no cierra
+// (por vsock, nunca; por TCP, cuando el keepalive se rinde), y mientras tanto
+// retiene su plaza de execLim: un dorado con 64 así dejaba todas sus copias
+// contestando 429.
+func cortarExecs() int {
+	execsVivos.mu.Lock()
+	defer execsVivos.mu.Unlock()
+	for _, cancel := range execsVivos.m {
+		cancel()
+	}
+	return len(execsVivos.m)
+}
+
 // takeExec ocupa una plaza de exec o contesta 429. Si devuelve true, quien
 // llama la suelta con execLim.give.
 func takeExec(w http.ResponseWriter) bool {
@@ -146,7 +191,9 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.CommandContext(r.Context(), req.Cmd[0], req.Cmd[1:]...)
+	ctx, quitar := contextoExec(r.Context())
+	defer quitar()
+	cmd := exec.CommandContext(ctx, req.Cmd[0], req.Cmd[1:]...)
 	cmd.Dir = req.Dir
 	// El mismo entorno que reciben los servidores MCP, con NODE_PATH y
 	// PYTHONPATH ya apuntando a los volúmenes: instalar en un volumen y luego

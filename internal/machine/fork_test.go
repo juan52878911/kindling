@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,9 +26,7 @@ import (
 // se esté creando (su nombre es aleatorio: se busca por el prefijo).
 func origenParaFork(t *testing.T, m *Manager, id string) (*fcFalso, <-chan struct{}) {
 	t.Helper()
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	falso, muerto := plantillaParaCommit(t, m, id)
 	m.mu.Lock()
 	viva := m.byID[id]
@@ -45,8 +42,7 @@ func origenParaFork(t *testing.T, m *Manager, id string) (*fcFalso, <-chan struc
 		}
 		dirs, _ := filepath.Glob(filepath.Join(m.root, "snapshots", "fork-*"))
 		for _, d := range dirs {
-			_ = os.WriteFile(filepath.Join(d, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(d, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, d)
 		}
 	})
 	return falso, muerto

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -33,8 +32,7 @@ func TestCommitMarcaGuestIPv6OffEnArranqueEnFrio(t *testing.T) {
 	dir := m.snapDir("dorado")
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 
@@ -72,8 +70,7 @@ func TestCommitMarcaGuestIPv6StackSiLaRecetaLaPide(t *testing.T) {
 	dir := m.snapDir("dorado")
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 	snap, err := m.Commit(context.Background(), id, "dorado", false)
@@ -116,8 +113,7 @@ func TestCommitHeredaGuestIPv6OffDeLaCadena(t *testing.T) {
 			dir := m.snapDir("fork")
 			falso.enGancho(func(metodo, ruta string) {
 				if ruta == "/snapshot/create" {
-					_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-					_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+					volcadoFalso(m, id, dir)
 				}
 			})
 
@@ -160,7 +156,7 @@ func TestAvisoIPv6Invitado(t *testing.T) {
 // basta con que el snapshot pase la comprobación de integridad (sin digests
 // grabados, se salta) para llegar hasta ahí.
 func TestRunFromAvisaIPv6UnaVezPorDorado(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	m.bus = events.New()
 	escribirSnapshot(t, m, "dorado", api.Snapshot{}) // GuestIPv6Off por defecto: false ("no consta")
@@ -192,7 +188,7 @@ func TestRunFromAvisaIPv6UnaVezPorDorado(t *testing.T) {
 
 // Un dorado con GuestIPv6Off no publica nada.
 func TestRunFromNoAvisaSiGuestIPv6Off(t *testing.T) {
-	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	t.Setenv("KLING_REQUIRE_SIGNED", "0") // dorado de prueba sin firma
 	m := newTestManager(t)
 	m.bus = events.New()
 	escribirSnapshot(t, m, "dorado", api.Snapshot{GuestIPv6Off: true})
