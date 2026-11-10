@@ -36,6 +36,13 @@
 #define VS_BUF (256u * 1024)    // crédito que se anuncia al invitado por conexión
 #define VS_PAYLOAD (64u * 1024) // tope de un paquete en cualquier sentido
 #define VS_RST_COLA 32
+// Lo más que mete en el invitado una vuelta de bombear, con mu tomado: el
+// vCPU que notifica espera en vsock_mmio, y la pausa en vsock_quieto. El
+// crédito lo da el invitado (buf_alloc, hasta 4 GiB por conexión) y puede
+// reponer búferes sin avisar, así que sin tope la vuelta dura lo que el
+// escritor del host quiera. Lo que quede sale en la vuelta siguiente: el fd
+// sigue legible y poll vuelve al momento.
+#define VS_TANDA_MAX (1u << 20)
 
 enum { OP_REQUEST = 1, OP_RESPONSE, OP_RST, OP_SHUTDOWN, OP_RW, OP_CREDIT_UPDATE, OP_CREDIT_REQUEST };
 #define TYPE_STREAM 1
@@ -415,9 +422,16 @@ static bool evento_reset(void) {
 }
 
 // Manda lo que haya: el reset, los RST sueltos, los paquetes de control de
-// cada conexión y los datos de las legibles (listo[i]). Devuelve si puso algo.
+// cada conexión y los datos de las legibles (listo[i]), hasta VS_TANDA_MAX
+// bytes de datos o hasta que llegue una pausa. Devuelve si puso algo.
+// bombear_desde es la conexión por la que empieza: la siguiente a la que
+// agotó la tanda, para que una que siempre tiene datos no deje sin turno a
+// las de detrás.
+static int bombear_desde;
+
 static bool bombear(const bool *listo) {
   bool puesto = false;
+  uint64_t tanda = 0;
   if (reset_pend && evento_reset()) {
     reset_pend = false;
     puesto = true;
@@ -436,7 +450,8 @@ static bool bombear(const bool *listo) {
     memmove(rst_cola, rst_cola + 1, sizeof rst_cola[0] * (size_t)(--n_rst));
   }
   static struct iovec datos[QMAX];
-  for (int i = 0; i < VS_MAXCONN; i++) {
+  for (int k = 0; k < VS_MAXCONN; k++) {
+    int i = (bombear_desde + k) % VS_MAXCONN;
     struct vconn *c = &conns[i];
     if (c->estado == C_LIBRE) continue;
     if (c->p_rst) {
@@ -478,6 +493,11 @@ static bool bombear(const bool *listo) {
       rx_cerrar(&h);
       c->tx_cnt += (uint32_t)r;
       puesto = true;
+      tanda += (uint64_t)r;
+      if (tanda >= VS_TANDA_MAX || g_pausa) {
+        bombear_desde = (i + 1) % VS_MAXCONN;
+        return puesto;
+      }
     }
     if (c->p_shut) {
       // Con el host sin leer ni escribir (nuestro extremo cerrado del todo,
@@ -1210,6 +1230,95 @@ int khv_vsock_prueba_poll(void) {
   g_pausa = pausa_antes;
   pthread_mutex_unlock(&mu);
   return r;
+}
+
+// khv_vsock_prueba_tanda_rx: con una conexión que tiene en su socket varios
+// MiB del host, crédito de sobra y 256 búferes de rx del invitado, una vuelta
+// de bombear mete como mucho VS_TANDA_MAX (más un paquete), o un solo paquete
+// si la VM está en pausa. *lleno dice cuánto había en el socket, *movido
+// cuánto entró en esa vuelta y *ns lo que tuvo mu. 0, o negativo si no se
+// pudo preparar. Con su propia RAM, y lo deja todo como estaba. No puede
+// convivir con una VM.
+#define PRUEBA_RX_N 256
+#define PRUEBA_RX_BUF (VS_HDR + VS_PAYLOAD)
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns) {
+  *lleno = *movido = 0;
+  *ns = -1;
+  if (!activo) vsock_init(53);
+  const uint64_t base = 0x10000, tam = base + (uint64_t)PRUEBA_RX_N * PRUEBA_RX_BUF;
+  uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (ram == MAP_FAILED) return -ENOMEM;
+  // Los búferes de rx (cola 0): tabla en +0, avail en +0x1000, used en
+  // +0x2000, y los datos detrás.
+  struct vdesc *d = (struct vdesc *)ram;
+  uint16_t *av = (uint16_t *)(ram + 0x1000);
+  for (int i = 0; i < PRUEBA_RX_N; i++) {
+    d[i] = (struct vdesc){RAM_BASE + base + (uint64_t)i * PRUEBA_RX_BUF, PRUEBA_RX_BUF, VIRTQ_DESC_F_WRITE, 0};
+    av[2 + i] = (uint16_t)i;
+  }
+  av[1] = PRUEBA_RX_N;
+  pthread_mutex_lock(&mu);
+  uint8_t *ram_antes = g_ram;
+  uint64_t tam_antes = g_ram_size;
+  bool pausa_antes = g_pausa;
+  g_ram = ram;
+  g_ram_size = tam;
+  g_pausa = true;  // vs_hilo no bombea mientras se prepara
+  pthread_mutex_unlock(&mu);
+  prueba_w(0x070, 0);
+  prueba_w(0x030, 0);
+  prueba_w(0x038, PRUEBA_RX_N);
+  prueba_w(0x080, (uint32_t)RAM_BASE);
+  prueba_w(0x090, (uint32_t)(RAM_BASE + 0x1000));
+  prueba_w(0x0a0, (uint32_t)(RAM_BASE + 0x2000));
+  prueba_w(0x084, 0);
+  prueba_w(0x094, 0);
+  prueba_w(0x0a4, 0);
+  prueba_w(0x044, 1);
+  prueba_w(0x070, 0xf);
+
+  pthread_mutex_lock(&mu);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 8, sv, &gen, &err);
+  int ret = c ? 0 : (err ? err : -EBUSY);
+  if (c) {
+    c->estado = C_ABIERTA;
+    c->p_request = false;
+    c->peer_buf = 64u << 20;
+    // El host llena el socket, con mu tomado: vs_hilo no lo vacía antes.
+    int grande = 4 << 20;
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &grande, sizeof grande);
+    setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &grande, sizeof grande);
+    fcntl(sv[1], F_SETFL, O_NONBLOCK);
+    static uint8_t trozo[64 * 1024];
+    for (;;) {
+      ssize_t w = write(sv[1], trozo, sizeof trozo);
+      if (w <= 0) break;
+      *lleno += (uint64_t)w;
+    }
+    g_pausa = pausa;
+    bool listo[VS_MAXCONN] = {0};
+    listo[c - conns] = true;
+    uint32_t antes = c->tx_cnt;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    bombear(listo);
+    *ns = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+    *movido = c->tx_cnt - antes;
+    g_pausa = true;
+    liberar(c);
+    close(sv[1]);
+  }
+  pthread_mutex_unlock(&mu);
+  prueba_w(0x070, 0);
+  pthread_mutex_lock(&mu);
+  g_ram = ram_antes;
+  g_ram_size = tam_antes;
+  g_pausa = pausa_antes;
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  munmap(ram, tam);
+  return ret;
 }
 
 // khv_vsock_prueba_muerto: un poll que falla sin remedio (EBADF) termina

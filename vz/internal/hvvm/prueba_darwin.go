@@ -12,6 +12,7 @@ int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);
 int khv_vsock_prueba_fd_en_poll(void);
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns);
 */
 import "C"
 
@@ -189,6 +190,15 @@ func usedDelDispositivo() int { return int(C.khv_prueba_used()) }
 // red ni el del vsock (khv_prueba_poll_red, khv_vsock_prueba_poll).
 func pollRed() int   { return int(C.khv_prueba_poll_red()) }
 func pollVsock() int { return int(C.khv_prueba_poll_vsock()) }
+
+// vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
+// (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró y cuánto tuvo mu.
+func vsockTandaRx(pausa bool) (lleno, movido uint64, d time.Duration, r int) {
+	var l, m C.uint64_t
+	var ns C.int64_t
+	r = int(C.khv_vsock_prueba_tanda_rx(C.bool(pausa), &l, &m, &ns))
+	return uint64(l), uint64(m), time.Duration(ns), r
+}
 
 // vsockMuerto: un poll que falla sin remedio termina el hilo del vsock; lo
 // que tarda después un dial (khv_vsock_prueba_muerto).

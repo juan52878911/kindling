@@ -375,6 +375,7 @@ int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
 int khv_vsock_prueba_muerto(int64_t *dial_ns);
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {

@@ -49,3 +49,29 @@ func TestVsockLiberarNoCierraEnPoll(t *testing.T) {
 		t.Fatalf("could not prepare: %d", r)
 	}
 }
+
+// Una vuelta de bombear (rx hacia el invitado) se hace con el cerrojo del
+// vsock: el vCPU que notifica y la pausa la esperan. El crédito lo pone el
+// invitado y puede reponer búferes sin avisar, así que sin tope una conexión
+// con el host escribiendo sin parar la alargaba sin fin. Ahora mete como
+// mucho VS_TANDA_MAX (1 MiB) y, con la VM en pausa, un solo paquete.
+func TestVsockRxTandaAcotada(t *testing.T) {
+	const tope, paquete = 1 << 20, 64 << 10
+	for _, c := range []struct {
+		pausa bool
+		max   uint64
+	}{{false, tope + paquete}, {true, paquete}} {
+		lleno, movido, d, r := vsockTandaRx(c.pausa)
+		if r != 0 {
+			t.Fatalf("could not set up the test: %d", r)
+		}
+		if lleno < 2*tope {
+			t.Skipf("the host socket only took %d bytes: not enough to see the cap", lleno)
+		}
+		if movido > c.max {
+			t.Errorf("pause=%v: one round moved %d of %d bytes to the guest (at most %d), holding the lock %v",
+				c.pausa, movido, lleno, c.max, d)
+		}
+		t.Logf("pause=%v: %d of %d bytes in one round, lock held %v", c.pausa, movido, lleno, d)
+	}
+}
