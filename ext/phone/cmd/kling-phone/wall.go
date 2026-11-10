@@ -30,6 +30,9 @@ import (
 // de loopback (contra el rebinding de DNS) y una cabecera propia en los POST
 // (una web ajena no puede ponerla sin que el navegador pregunte antes, y el
 // muro no contesta a esa pregunta): ninguna página de fuera toca un teléfono.
+// Contra los demás procesos del host (que ponen el Host y la cabecera que
+// quieran) sirve bajo un camino aleatorio, /<secreto>/, como el servidor MCP:
+// sin él no se ve ni se toca nada.
 
 //go:embed wall.html
 var wallPage []byte
@@ -229,7 +232,8 @@ func loopbackHost(h string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (w *wall) handler(checkHost bool) http.Handler {
+// handler sirve el muro bajo prefix ("/" o "/<secreto>/"); fuera de él, 404.
+func (w *wall) handler(checkHost bool, prefix string) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if checkHost && !loopbackHost(r.Host) {
 			http.Error(rw, "the wall only answers on a loopback host name", http.StatusForbidden)
@@ -237,13 +241,18 @@ func (w *wall) handler(checkHost bool) http.Handler {
 		}
 		rw.Header().Set("Cache-Control", "no-store")
 		ctx := r.Context()
-		if r.Method == http.MethodGet && r.URL.Path == "/" {
+		if !strings.HasPrefix(r.URL.Path, prefix) {
+			writeJSONErr(rw, http.StatusNotFound, errors.New("not found"))
+			return
+		}
+		p := "/" + strings.TrimPrefix(r.URL.Path, prefix)
+		if r.Method == http.MethodGet && p == "/" {
 			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 			rw.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
 			_, _ = rw.Write(wallPage)
 			return
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/phones" {
+		if r.Method == http.MethodGet && p == "/api/phones" {
 			ps, err := w.running(ctx)
 			if err != nil {
 				writeJSONErr(rw, http.StatusBadGateway, err)
@@ -266,7 +275,7 @@ func (w *wall) handler(checkHost bool) http.Handler {
 			writeJSON(rw, http.StatusOK, out)
 			return
 		}
-		mm := reWallPath.FindStringSubmatch(r.URL.Path)
+		mm := reWallPath.FindStringSubmatch(p)
 		if mm == nil {
 			writeJSONErr(rw, http.StatusNotFound, errors.New("not found"))
 			return
@@ -370,6 +379,7 @@ func cmdView(args []string) error {
 	listen := fs.String("listen", "127.0.0.1:8765", "where the wall listens (keep it on loopback: touching a phone controls it)")
 	open := fs.Bool("open", false, "open it in the browser")
 	par := fs.Int("par", 6, "screenshots at a time")
+	secretPath := fs.Bool("secret-path", true, "serve under a random path (/<secret>/): other local processes can't guess it")
 	if _, err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -385,14 +395,18 @@ func cmdView(args []string) error {
 	}
 	w := newWall(a, max(1, *par))
 	go w.healthLoop(ctx)
-	srv := &http.Server{Handler: w.handler(true), ReadHeaderTimeout: 10 * time.Second}
+	prefix := "/"
+	if *secretPath {
+		prefix = "/" + newSessionID() + "/"
+	}
+	srv := &http.Server{Handler: w.handler(true, prefix), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	u := "http://" + ln.Addr().String() + "/"
+	u := "http://" + ln.Addr().String() + prefix
 	fmt.Fprintf(a.out, "wall: %s (Ctrl-C to stop)\n", u)
 	if *open {
 		opener := "xdg-open"

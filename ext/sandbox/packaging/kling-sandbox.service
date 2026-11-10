@@ -20,6 +20,9 @@ Group=@KLING_GROUP@
 # El token va por entorno y no por flag: /proc/<pid>/cmdline lo lee cualquiera
 # del host, y un secreto no debe viajar por ahí. Lo genera `make deploy` una vez.
 EnvironmentFile=-/etc/kling/sandbox.env
+# Escucha en 127.0.0.1:8090. Hacia la red, con TLS: kling config set
+# sandbox.listen 0.0.0.0:8090, sandbox.tls_cert y sandbox.tls_key (o
+# -insecure-listen en ExecStart, que deja los tokens en claro en la red).
 ExecStart=/usr/local/bin/kling-sandbox sbx gateway
 
 Restart=on-failure

@@ -84,15 +84,23 @@ gateway:
 ```sh
 export KLING_SANDBOX_TENANTS="ana:tok1:10:5,bob:tok2:5"   # nombre:token[:max sandboxes[:max shells]]
 export KLING_SANDBOX_ADMINS="ana"                         # quién ve los hosts y las métricas de todos
-kling sbx gateway
+kling sbx gateway                                         # 127.0.0.1:8090, HTTP
+kling sbx gateway -listen 0.0.0.0:8090 -tls-cert gw.pem -tls-key gw.key   # hacia la red, HTTPS
 ```
+
+Los tokens van en cada petición, así que el gateway solo sirve HTTP en claro por
+loopback (el defecto es `127.0.0.1:8090`). Para escuchar en otra interfaz necesita
+certificado (`-tls-cert`/`-tls-key`, o `sandbox.tls_cert`/`sandbox.tls_key`) o
+`-insecure-listen`, que acepta a sabiendas que los tokens viajen en claro (detrás de un
+proxy TLS en la misma red de confianza, por ejemplo). Los clientes usan entonces
+`kling config set sandbox.url https://gateway:8090`, con un certificado en el que confíen.
 
 Y lo que ve un operador:
 
 ```sh
-curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/metrics    # Prometheus (sin admin, solo las series propias)
-curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/templates  # qué hay construido, y dónde
-curl -H "Authorization: Bearer $ADMIN" http://gateway:8090/v1/hosts    # los daemons y sus endpoints (solo admin)
+curl -H "Authorization: Bearer $TOK" https://gateway:8090/v1/metrics    # Prometheus (sin admin, solo las series propias)
+curl -H "Authorization: Bearer $TOK" https://gateway:8090/v1/templates  # qué hay construido, y dónde
+curl -H "Authorization: Bearer $ADMIN" https://gateway:8090/v1/hosts    # los daemons y sus endpoints (solo admin)
 ```
 
 ## Grafos precalentados
@@ -112,12 +120,12 @@ JSON
 kling sbx template apply -f agente-pg.json   # la guarda en el store de cada host
 kling sbx template ls                        # INSTANCES = instancias libres
 
-curl -H "Authorization: Bearer $TOK" -d '{"template":"agente-pg"}' http://gateway:8090/v1/graphs
+curl -H "Authorization: Bearer $TOK" -d '{"template":"agente-pg"}' https://gateway:8090/v1/graphs
 # {"id":"h1/5f0c…","template":"agente-pg","state":"running",
 #  "nodes":{"agent":{"id":"h1/9a3e…"},"db":{"id":"h1/77b1…","ports":[5432]}}}
 curl -H "Authorization: Bearer $TOK" -d '{"cmd":["psql","-h","db.graph","-c","select 1"]}' \
-  "http://gateway:8090/v1/sandboxes/h1/9a3e…/exec?wait=1"
-curl -H "Authorization: Bearer $TOK" -X DELETE http://gateway:8090/v1/graphs/h1/5f0c…
+  "https://gateway:8090/v1/sandboxes/h1/9a3e…/exec?wait=1"
+curl -H "Authorization: Bearer $TOK" -X DELETE https://gateway:8090/v1/graphs/h1/5f0c…
 ```
 
 - **Fondo.** El gateway levanta cada instancia con `POST /graphs` del daemon y la

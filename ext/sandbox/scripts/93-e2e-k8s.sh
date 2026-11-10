@@ -178,7 +178,7 @@ else
   FRONTAL_URL="http://$HOST_IP:$FRONTAL_PORT"
   FRONTAL_TOKEN="e2ek8stok$$"
   KLING_SANDBOX_TENANTS="e2ek8s:$FRONTAL_TOKEN:50:20" \
-    "$KLING_SANDBOX" sbx gateway -listen "$HOST_IP:$FRONTAL_PORT" -image "$IMAGE" >"$TMP/frontal.log" 2>&1 &
+    "$KLING_SANDBOX" sbx gateway -listen "$HOST_IP:$FRONTAL_PORT" -insecure-listen -image "$IMAGE" >"$TMP/frontal.log" 2>&1 &
   FRONTAL_PID=$!
   SELF_FRONTAL=1
   listo=0
@@ -444,7 +444,7 @@ else
   fi
 
   KLING_SANDBOX_TENANTS="e2ek8s:$FRONTAL_TOKEN:50:20" \
-    "$KLING_SANDBOX" sbx gateway -listen "$HOST_IP:$FRONTAL_PORT" -image "$IMAGE" \
+    "$KLING_SANDBOX" sbx gateway -listen "$HOST_IP:$FRONTAL_PORT" -insecure-listen -image "$IMAGE" \
     >"$TMP/frontal2.log" 2>&1 &
   FRONTAL_PID=$!
   listo=0

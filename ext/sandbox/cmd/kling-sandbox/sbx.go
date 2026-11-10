@@ -70,7 +70,9 @@ func cmdSbx(args []string) error {
 
 const ayuda = `kling sbx — sandboxes for code agents, served by a gateway
 
-  sbx gateway [-listen :8090]                  serves the sandbox API
+  sbx gateway [-listen 127.0.0.1:8090] [-tls-cert C -tls-key K] [-insecure-listen]
+                                               serves the sandbox API (HTTPS, or plain
+                                               HTTP only on loopback unless -insecure-listen)
   sbx template apply -f tpl.json               builds the recipe into a golden snapshot
   sbx template ls | rebuild <name>             what is built, and rebuild it
   sbx new -template T [-ttl 10m] [-q|-json]    a sandbox from that template
@@ -86,7 +88,7 @@ after 30s)"); with -json, new and rm print them as {"error": {"status": 429,
 "message": "...", "retry_after": 30}}.
 
 The client commands talk to the gateway, not to a daemon:
-  kling config set sandbox.url http://gateway:8090
+  kling config set sandbox.url https://gateway:8090
   kling config set sandbox.token <token>`
 
 // cliente es el cliente HTTP del frontal. Plazo largo: al otro lado puede haber

@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,9 +29,63 @@ import (
 	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 )
 
+// escuchar abre el puerto del gateway. Los tokens de inquilino y de admin
+// viajan en cada petición: con certificado se sirve HTTPS; sin él, solo en
+// loopback, salvo que se pida en claro a sabiendas (-insecure-listen).
+func escuchar(addr, cert, key string, insecure bool) (net.Listener, error) {
+	if (cert == "") != (key == "") {
+		return nil, errors.New("-tls-cert and -tls-key go together")
+	}
+	var cfg *tls.Config
+	if cert != "" {
+		par, err := tls.LoadX509KeyPair(cert, key)
+		if err != nil {
+			return nil, fmt.Errorf("loading the TLS certificate: %w", err)
+		}
+		cfg = &tls.Config{Certificates: []tls.Certificate{par}, MinVersion: tls.VersionTLS12}
+	} else if !insecure && !soloLoopback(addr) {
+		return nil, fmt.Errorf("refusing to serve tokens over plain HTTP on %s: give -tls-cert and -tls-key, "+
+			"listen on 127.0.0.1, or pass -insecure-listen", addr)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		return tls.NewListener(ln, cfg), nil
+	}
+	return ln, nil
+}
+
+// soloLoopback dice si addr solo se alcanza desde esta máquina: una IP de
+// loopback o un nombre que solo resuelve a loopback. Sin host (":8090"),
+// 0.0.0.0 o :: son todas las interfaces.
+func soloLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("sbx gateway", flag.ExitOnError)
-	listen := fs.String("listen", "", "address to listen on (default sandbox.listen, or :8090)")
+	listen := fs.String("listen", "", "address to listen on (default sandbox.listen, or 127.0.0.1:8090)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate (PEM) to serve HTTPS (default sandbox.tls_cert)")
+	tlsKey := fs.String("tls-key", "", "private key (PEM) of -tls-cert (default sandbox.tls_key)")
+	insecure := fs.Bool("insecure-listen", false, "allow plain HTTP on a non-loopback address (tokens travel in the clear)")
 	imagen := fs.String("image", "", "image used when a request brings neither template nor image")
 	abandono := fs.Duration("abandon", 0, "how long a sandbox may sit unused before it is destroyed (default 24h)")
 	if err := fs.Parse(args); err != nil {
@@ -45,6 +100,9 @@ func cmdGateway(args []string) error {
 	}
 	if *abandono > 0 {
 		a.Reap = *abandono
+	}
+	if *tlsCert != "" || *tlsKey != "" {
+		a.TLSCert, a.TLSKey = *tlsCert, *tlsKey
 	}
 
 	tenants, err := leerTenants()
@@ -71,7 +129,7 @@ func cmdGateway(args []string) error {
 	// plantilla popular cueste una llamada HTTP en vez de un thaw.
 	pool.Nuevo(reg, 30*time.Second, log.New(os.Stderr, "", log.LstdFlags)).Vigilar(ctx)
 
-	ln, err := net.Listen("tcp", a.Listen)
+	ln, err := escuchar(a.Listen, a.TLSCert, a.TLSKey, *insecure)
 	if err != nil {
 		return err
 	}

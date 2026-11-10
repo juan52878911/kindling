@@ -29,7 +29,7 @@ es uno por daemon).
 |---|---|
 | `up [-n N] [-golden G]` | N clones del dorado (lo construye si falta). Cada uno: `run -from -wait-ready`, un token de la API nuevo, la identidad por MMDS con los ganchos de la imagen (`android_id`, serie, SSAID, claves de adb, el sha256 del token) y la comprobación por la API **con ese token** de que la serie y el `android_id` son los que se le dieron |
 | `ls [-json]` | nombre, estado, dirección de adb (el reenvío del Mac o la IP de la VM), salud de la API (`ok`, `locked`: sin token, `unhealthy`), dorado y fondo. Poda los tokens de máquinas que ya no existen |
-| `view [-listen 127.0.0.1:8765] [-open]` | el muro (el `wall.py` del prototipo, en Go y por la API): capturas con caché de 250 ms y una en curso por teléfono, tocar, deslizar, BACK/HOME/RECENTS y la salud cada 15 s |
+| `view [-listen 127.0.0.1:8765] [-open] [-secret-path=false]` | el muro (el `wall.py` del prototipo, en Go y por la API): capturas con caché de 250 ms y una en curso por teléfono, tocar, deslizar, BACK/HOME/RECENTS y la salud cada 15 s. Sirve bajo un camino aleatorio (`http://127.0.0.1:8765/<secreto>/`, lo imprime al arrancar), como `mcp`: sin él, otro proceso del host no ve ni toca nada |
 | `adb <tel> [args]` | resuelve la dirección de adb y ejecuta `adb -s`; sin args la imprime |
 | `api <tel> MÉTODO ruta [fichero\|-]` | una llamada a `kling-phoned` con el token; `/v1/screen` sale en PNG y un APK a `/v1/install` va en base64 solo. `-no-token`: lo que ve una arista sin él |
 | `pause`/`resume <tel>...` | pausa en RAM / reanuda (o descongela) y espera a la API |

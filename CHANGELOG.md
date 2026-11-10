@@ -196,6 +196,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - Template signatures are required by default: an unsigned template (made before signing, copied from another host, or with its signature and digests stripped from `meta.json`) no longer restores, and the error says how to recreate it. On startup the daemon re-signs in v2 every v1-signed template whose signature and digests still match, then rejects v1 signatures (they don't cover labels, limits or the memory dump). `daemon.require_signed off` (or `KLING_REQUIRE_SIGNED=0`) accepts both as before. See `docs/actualizar.md`.
 - Linux: e2fsck, resize2fs and debugfs no longer run as the VMM user. The daemon re-executes itself into new mount, network, PID and IPC namespaces, chroots into a minimal read-only root, drops to nobody with `RLIMIT_AS` and `no_new_privs`, and hands the disk over by descriptor; the memory cap no longer needs `prlimit`. Where the jail can't be mounted it warns and runs without chroot. macOS: a missing `sandbox-exec` is warned about and refused when the daemon is root. `kling doctor` shows `e2fs_confinement` and `KLING_REQUIRE_SIGNED`.
 - macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
+- `kling sbx gateway` serves HTTPS with `-tls-cert`/`-tls-key` (or `sandbox.tls_cert`/`sandbox.tls_key`) and refuses plain HTTP off loopback unless `-insecure-listen` is given. **The default listen address is now `127.0.0.1:8090`** (was `:8090`): a gateway reached from the network needs `sandbox.listen` plus a certificate, or `-insecure-listen`.
+- `kling phone view` serves the wall under a random path (`/<secret>/`, printed at start), like `kling phone mcp`; `-secret-path=false` restores `/`.
 
 ### Fixed
 
@@ -320,6 +322,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - Guest agents of v0.20 are no longer flagged as more than one minor behind a 1.0 daemon (1.0 is the minor after 0.20). The doctor line for an agent older than v0.18 no longer says it works.
 - macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
 - `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.
+- `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
 
 ## [0.20.1] - 2026-10-28
 
