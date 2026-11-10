@@ -59,6 +59,16 @@ type Machiner interface {
 	Thaw(ctx context.Context, ref string) (*api.Machine, error)
 }
 
+// Execer lanza una orden dentro de la máquina por el API del daemon y
+// devuelve su salida estándar; un código de salida distinto de 0 es un error
+// (sin la salida: puede citar el argv). Es para la orden que tiene que llevar
+// un secreto en su argv dentro del invitado (garage key import: la imagen no
+// tiene shell que lo lea de stdin): así viaja en el cuerpo de la petición al
+// daemon y no en el argv de un kling del host, que ve cualquiera con ps.
+type Execer interface {
+	Exec(ctx context.Context, ref string, cmd []string, timeout time.Duration) ([]byte, error)
+}
+
 // CLI es la implementación de verdad.
 type CLI struct {
 	// Bin es el ejecutable de kling. Vacío: Resolve.
@@ -221,6 +231,21 @@ func (c *CLI) List(ctx context.Context) ([]*api.Machine, error) {
 // Thaw implementa Machiner.
 func (c *CLI) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	return c.client().Thaw(ctx, ref)
+}
+
+// Exec implementa Execer.
+func (c *CLI) Exec(ctx context.Context, ref string, cmd []string, timeout time.Duration) ([]byte, error) {
+	res, err := c.client().Exec(ctx, ref, api.ExecRequest{Cmd: cmd, TimeoutSeconds: int(timeout / time.Second)}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.TimedOut {
+		return nil, fmt.Errorf("exec in %s: timed out after %s", ref, timeout)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("exec in %s: exit status %d", ref, res.ExitCode)
+	}
+	return res.Stdout, nil
 }
 
 // SetLabels implementa Labeler contra el API del daemon.

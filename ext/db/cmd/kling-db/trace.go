@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -101,6 +102,16 @@ type tracedBackend struct {
 func (b tracedBackend) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	defer b.t.span(traceName(args))()
 	return b.backend.Run(ctx, stdin, args...)
+}
+
+// Exec implementa klingc.Execer si el backend lo sabe hacer (klingc.CLI).
+func (b tracedBackend) Exec(ctx context.Context, ref string, cmd []string, timeout time.Duration) ([]byte, error) {
+	ex, ok := b.backend.(klingc.Execer)
+	if !ok {
+		return nil, errors.New("this backend cannot exec through the daemon API")
+	}
+	defer b.t.span("exec")()
+	return ex.Exec(ctx, ref, cmd, timeout)
 }
 
 // RunTo es Run con la salida a w, si el backend lo sabe hacer (klingc.CLI).
