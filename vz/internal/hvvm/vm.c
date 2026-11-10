@@ -2073,7 +2073,6 @@ int khv_restore(const char *mem_path) {
   if (hay_vsock) vsock_reafirmar();
   if (hay_globo) vballoon_reafirmar();
   for (int i = 0; i < nvfs; i++) vvfs_reafirmar(i);
-  for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
   khv_traza_acaba(KHV_F_GIC, tr);
   for (int i = 0; i < ncpus; i++) cpus[i].st = *hdr_cpu(&h, i);
   snap_t_pausa = h.t_pausa;
