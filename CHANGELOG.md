@@ -130,6 +130,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 - `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
+- CI: the macOS job runs the tests of the whole core and `ext/sandbox` (before, only `internal/machine` and `internal/daemon`), and 42 more `internal/machine` tests (commit, fork, freeze, VMM process tracking) now run on macOS instead of skipping; the Linux e2e runs the `internal/net` ipset tests as root; `go.work` is checked against `vz/go.mod`; without an Apple Silicon runner, `e2e-mac` shows a "not run" job on every push to `main`, which `scripts/release.sh` does not accept as the kling-hv e2e.
 - `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
 
 ### Removed

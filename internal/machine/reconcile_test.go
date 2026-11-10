@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -346,7 +345,8 @@ func TestElSegadorNoTocaLoQueYaNoCorre(t *testing.T) {
 	}
 }
 
-// esperarCmdline aguarda a que /proc/<pid>/cmdline contenga lo que se busca.
+// esperarCmdline aguarda a que la línea de órdenes de pid (la que lee liveVMs:
+// /proc en Linux, kern.procargs2 en macOS) contenga lo que se busca.
 //
 // exec.Cmd.Start() devuelve cuando el fork terminó, no cuando el exec sustituyó
 // la imagen del proceso: entre ambos momentos el cmdline todavía es el del padre.
@@ -354,8 +354,8 @@ func TestElSegadorNoTocaLoQueYaNoCorre(t *testing.T) {
 func esperarCmdline(t *testing.T, pid int, quiero string) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
-		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
-		if err == nil && strings.Contains(string(b), quiero) {
+		l, err := lineaDeProceso(pid)
+		if err == nil && strings.Contains(l, quiero) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

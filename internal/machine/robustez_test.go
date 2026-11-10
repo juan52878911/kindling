@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -13,7 +12,8 @@ import (
 )
 
 // vmmFalso deja corriendo un proceso cuya línea de comandos imita la de
-// firecracker para la máquina id, que es lo que liveVMs busca en /proc.
+// la del VMM para la máquina id, que es lo que liveVMs busca (en /proc en
+// Linux, en kern.procargs2 en macOS: así estos tests corren también en Mac).
 //
 // Devuelve su pid y un canal que se cierra cuando muere DE VERDAD. Hace falta el
 // canal y no vale `kill(pid, 0)`: al matar un hijo de este proceso queda un
@@ -21,9 +21,6 @@ import (
 // estuviera vivo. El test se creía que el barrido no había matado nada.
 func vmmFalso(t *testing.T, m *Manager, id string) (int, <-chan struct{}) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("liveVMs lee /proc; solo aplica en Linux")
-	}
 	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
 		t.Fatal(err)
 	}
