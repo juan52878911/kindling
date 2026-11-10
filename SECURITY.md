@@ -68,7 +68,9 @@ NoNewPrivs:  1
 sin permisos y sin forma de recuperarlos. El TAP se crea ya a nombre de ese usuario, para que
 no necesite `CAP_NET_ADMIN` para abrirlo.
 
-Cada microVM solo posee su propio directorio y su overlay. Las imágenes base y los snapshots
+Cada microVM solo posee su propio directorio y su overlay. Lo que separa una de otra es la
+jaula del jailer (11): todos los VMM comparten usuario, y con `KLING_JAILER=0` ese usuario
+alcanza los directorios de todas. Las imágenes base y los snapshots
 son de **solo lectura** para el VMM. Un volumen es de root (grupo del VMM, 0640) salvo mientras
 una máquina lo tiene en escritura, que es en exclusiva: solo entonces es del usuario del VMM. Así
 el VMM de quien lo monta `ro` no puede abrirlo en escritura; el dueño se cede por descriptor al
@@ -96,7 +98,31 @@ invitado que repitiera una consulta A miles de veces por segundo hacía que el h
 igual número de sockets y forkeara igual número de procesos — un DoS del host, no de la
 microVM. La respuesta del upstream también se valida (id de transacción y pregunta) antes de
 sembrar el ipset con ella, para que una respuesta falsificada no abra una ruta que nadie
-declaró.
+declaró. En Linux el id que va al upstream lo saca el host de `crypto/rand`, no es el que
+eligió el invitado (que lo recibe de vuelta en su respuesta): conocer el id ya no ayuda a
+colar una respuesta falsa.
+
+Lo que siembra el resolver también está acotado, y el reparto de la red con las demás
+máquinas (Linux):
+
+- El ipset de cada máquina tiene `maxelem 8192`; de cada respuesta se siembran como mucho
+  16 registros A, con el TTL recortado a 3600 s. Un set lleno, o cualquier otro error que
+  el kernel conteste por netlink, no cae a lanzar `ipset` por cada consulta.
+- Con `internet` y `allowlist`, los paquetes nuevos de una máquina hacia una misma IP se
+  cortan por encima de 300/s (`hashlimit`, módulo `xt_hashlimit`); en cualquier modo, una
+  máquina abre como mucho 1000 conexiones nuevas por segundo en total (ráfaga 2000), y su
+  netns acorta los plazos de conntrack de UDP sin respuesta y de `SYN_SENT` (10 y 30 s),
+  para que un invitado no llene la tabla de conntrack del host.
+- Los servicios del lado host (resolver de la allowlist, proxies de credenciales, de
+  Postgres y MySQL, aristas de grafo) solo se alcanzan por el veth de **esa** máquina
+  (`-m addrtype --limit-iface-in`): desde el netns de otra, no.
+- El netns de cada máquina descarta lo que el invitado mande a cualquier IPv4 del host
+  salvo la de su veth, y cada arranque de red comprueba que las reglas INPUT del host
+  siguen ahí y las repone si un `ufw reload` o un `firewalld --reload` las quitó. La lista
+  de IPs del host se lee en cada arranque de red: una dirección que el host gane después
+  (DHCP) la cubre solo la regla de INPUT. En macOS, `kling-vz` relee las IPs del Mac cada
+  30 s, así que tras cambiar de red hay una ventana de hasta 30 s en la que la dirección
+  nueva no está en la lista.
 
 Bloqueado siempre, incluso con `internet`:
 
@@ -123,6 +149,16 @@ RESULTADO 1.1.1.1:       ALCANZABLE
 > microVM: ese tráfico nunca pasa por `tap0` y por tanto no toca las reglas. La única prueba
 > válida es ejecutar el comando **dentro del invitado**, por la consola serie. Nos costó dos
 > falsos positivos aprenderlo.
+
+**Lo que esta lista no ve: el NAT de vuelta del router (hairpin).** Con `internet`, la IP
+pública de la red donde está el host es una dirección pública más: no está en ningún rango
+de arriba ni es una IP de las interfaces del host (vive en el router). Si el router hace
+NAT de vuelta y tiene puertos redirigidos hacia la LAN, el invitado alcanza esos servicios
+por la IP pública como los alcanzaría cualquiera desde internet, aunque la LAN esté
+bloqueada. Con `allowlist` pasa lo mismo si un dominio permitido resuelve a esa IP. Lo
+mitiga no publicar en el router nada que no deba ver internet (es lo mismo que ya se le
+expone), apagar el NAT de vuelta del router, o usar `none` o `allowlist` sin dominios que
+apunten a la red propia. kindling no intenta descubrir la IP pública del host.
 
 **IPv6: cerrado, no solo ausente.** Todo lo de arriba (ipset, iptables, resolver dinámico)
 es IPv4. Durante un diagnóstico en el lab real comprobamos que hoy no hay fuga v6 posible,
@@ -653,7 +689,8 @@ digest del `mem.file` (`mem_digest`, en árbol: no lee los huecos de la memoria
 perforada), que se comprueba como el del overlay la primera vez que se restaura el
 dorado tras arrancar el daemon. Las credenciales de una plantilla no van en la firma:
 viven en su almacén sellado con AEAD. Los dorados con firma v1 se siguen aceptando con lo
-que la v1 cubría; rehacerlos (`kling save`) los pasa a v2.
+que la v1 cubría; rehacerlos (`kling save`) los pasa a v2. Un kling anterior rechaza los
+`meta.json` de schema 3: volver a una versión vieja obliga a rehacer esos dorados.
 
 ### 10. El proxy al invitado solo llega al puerto del agente
 
@@ -661,6 +698,25 @@ que la v1 cubría; rehacerlos (`kling save`) los pasa a v2.
 que la máquina declare en su etiqueta `kling.ports`. Antes llegaba a cualquier
 puerto, y con él a servicios internos de la microVM que nadie había decidido
 exponer.
+
+`kling.ports` es una etiqueta corriente, no una reservada del daemon: la pone quien crea
+la máquina (`run -p`, `-label`, las plantillas y extensiones que la llevan) o la
+reetiqueta (`PUT /machines/{ref}/labels`); con política de autorización, el inquilino
+dueño de esa máquina, en ella y en ninguna otra. Lo que abre un puerto ahí:
+
+- el proxy al invitado (`POST /machines/{ref}/guest`) llega a ese puerto;
+- en macOS, `kling-vz`/`kling-hv` abren su reenvío en `127.0.0.1` del Mac, que solo acepta
+  procesos del mismo usuario (§22);
+- las aristas de grafo y las credenciales de `kling db` con `upstream_machine` solo
+  marcan a un puerto que el destino declare ahí.
+
+Siempre hacia la IP de esa misma máquina: declarar un puerto no da paso a otra máquina ni
+al host, solo expone lo que el propio invitado sirve a quien ya puede hablar con él. Un
+servicio interno del invitado sin autenticación (un panel, un depurador) queda al alcance
+de quien llegue al proxy o al reenvío en cuanto su puerto está en la lista, así que
+publicar un puerto es decidir que ese servicio se expone. En un dorado, `kling.ports` va
+en la firma v2 (§9): editar el `meta.json` para exponer más no pasa la verificación.
+Reetiquetar `kling.ports` corta las sesiones de proxy que dependían de la lista anterior.
 
 ### 11. Jailer obligatorio por defecto en Linux
 
@@ -690,6 +746,20 @@ En cada conexión abre el socket sin seguir enlaces y exige, por `SO_PEERCRED`, 
 proceso que atiende tenga por raíz esa misma jaula: un VMM que cambiara su socket por
 un enlace al de otra máquina no recibe las órdenes de esa otra.
 
+**Con `KLING_JAILER=0` las microVMs dejan de estar separadas entre sí, no solo del
+host.** Sin jailer todos los Firecracker corren con `setpriv` bajo el **mismo** usuario de
+servicio (§2), sin chroot. Ese usuario es dueño del directorio de cada máquina, y en él
+está el socket de la API de su VMM (`machines/<id>/fc.sock`). Un VMM que escape
+de su invitado tiene, por tanto, lo que tendría el daemon frente a cualquier otra
+microVM: puede controlar su VMM por la API (pausarla, volcar su memoria, cambiar sus
+discos) y leer o escribir sus overlays, volúmenes en escritura y volcados. La comprobación
+de `SO_PEERCRED` del párrafo anterior exige una jaula y no se aplica sin ella. Siguen en
+pie el `no_new_privs`, las cero capacidades y lo que es de root (bases, dorados,
+`secrets/`), pero el radio de un escape pasa de una máquina a todas las del host. Por eso
+`KLING_JAILER=0` es una salida temporal para un host de una sola persona, no un modo para
+mezclar cargas de distinta confianza, y con política de autorización equivale a quitar la
+separación entre inquilinos.
+
 ### 12. Admisión por disco y por presión de memoria
 
 El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
@@ -718,16 +788,35 @@ intenta otra vez, como con la presión; si no, 507.
   corre dentro, así que la frontera es el daemon (`internal/share`):
   - Solo se sirve lo que el operador permitió: `daemon.share_roots` vacío (el
     defecto) desactiva las carpetas vivas; la ruta se compara resuelta, y nunca
-    una que contenga la raíz de datos de kindling.
+    una que contenga la raíz de datos de kindling ni que esté dentro de ella
+    (`<root>/volumes`, aunque `share_roots` cubra su padre). Cada enganche,
+    descongelación o reinicio del daemon comprueba que el directorio que abre
+    tiene el dispositivo e inodo que se validó: una carpeta cambiada por un
+    enlace simbólico se rechaza en vez de servirse.
   - Todo acceso al disco va por `os.Root` (`openat`): ni `..` ni un enlace
     simbólico sacan una operación de la carpeta. Unlink, rmdir, rename y readlink
     trabajan con `*at` sobre el directorio padre abierto por `os.Root`, sin seguir
     el último componente; `open` exige que lo abierto sea un fichero regular. Los
     enlaces del host se leen, pero el host no los sigue nunca: los resuelve el
     kernel del invitado dentro de su propio árbol.
-  - Dispositivos, FIFOs y sockets del host no existen para el invitado. SYMLINK,
-    LINK y MKNOD se rechazan: un enlace plantado por el invitado sería un arma
-    contra lo que el host haga luego con esa carpeta.
+  - Dispositivos, FIFOs y sockets del host no existen para el invitado. LINK y
+    MKNOD no existen en el protocolo: el invitado no crea enlaces duros ni
+    dispositivos.
+  - SYMLINK se acepta, con reglas (`internal/share/symlink.go`), porque sin él
+    `npm install` falla en la carpeta (`node_modules/.bin`). Solo vale un enlace
+    con destino **relativo** que, resuelto léxicamente desde donde está, quede
+    dentro de la carpeta, sin atravesar otro enlace por el camino y creado en un
+    directorio cuya ruta tampoco atraviesa enlaces (la regla de los enlaces de
+    una copia). Comprobar y crear se ordenan frente a rename y rmdir de la misma
+    carpeta, y un rename revalida: un enlace movido se comprueba en su sitio nuevo,
+    y un directorio que sube de nivel se recorre (hasta 20 000 entradas) buscando
+    enlaces que dejarían de valer; si alguno no vale o es demasiado grande para
+    mirarlo, `EXDEV`, y `mv` cae a copiar y borrar, que vuelve a pasar cada enlace
+    por la comprobación. Un enlace que no cumple da `EPERM`. Lo que esto no cubre:
+    un enlace válido sigue siendo un enlace en el disco del host. El servidor no lo
+    sigue nunca, pero una herramienta del host que recorra la carpeta siguiendo
+    enlaces llega a donde apunte, que es dentro de la carpeta pero no
+    necesariamente donde espera (otro fichero del mismo proyecto).
   - Cada campo se valida: rutas (relativas, limpias, componente ≤ 255, total ≤
     4096), tamaños (lectura y escritura ≤ 128 KiB, tramas ≤ 144 KiB), offsets,
     handles (con la época de su sesión). Por sesión, 16 operaciones en vuelo y
@@ -1060,6 +1149,11 @@ Qué **no** garantiza:
   internos, no como públicos.
 - **El volcado enmascarado pasa por el disco del host** (0600, en un directorio 0700,
   borrado al terminar) mientras `db-golden.sh` lo carga: lo mismo que acaba en el golden.
+  La copia al host lleva tope de tamaño (`-max-dump`, 8G por defecto) y un plazo de una
+  hora: una máquina de construcción que no pare de escribir no llena el disco del host.
+- **La comprobación de solo lectura necesita alcanzar el origen desde donde corre
+  `kling db clone`.** La hace `kling-db`, no el invitado (su respuesta sobre el rol ya no
+  cuenta), así que un origen que no se alcance desde ahí no se puede clonar.
 - **La RAM del invitado es memoria del host.** El tmpfs vive en la memoria del proceso
   del VMM; con swap en el host, el sistema operativo podría llevarla a disco. Un host
   para esto: sin swap o con swap cifrada.
@@ -1321,6 +1415,14 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
   200/s con ráfagas de 400 (por encima, SERVFAIL sin tocar la red), también para las
   búsquedas del proxy de credenciales. Una respuesta del upstream con otro id o con otra
   pregunta no se entrega ni siembra la allowlist (como `responseMatches` en Linux).
+- **`kling-hv`: el invitado no retiene la VM fuera de freeze, commit ni squeeze**
+  (`vz/internal/hvvm`). Un lote de virtio-blk se corta tras 64 MiB de datos o, entre
+  peticiones, en cuanto la VM se está pausando, y una sola lectura o escritura de más de
+  64 MiB falla con un error de E/S (Linux manda unos pocos MiB por petición salvo que se
+  suba `max_sectors_kb` a mano). Los informes de páginas libres del balón van acotados.
+  Un pánico en el servidor FUSE de virtio-fs contesta `EIO` a esa petición y se apunta en
+  vez de tumbar el VMM; un aborto de datos que el VMM no sabe decodificar se inyecta en el
+  invitado en vez de terminar la VM, y el desfase del RTC restaurado se acota.
 - **El DNS del invitado va a `1.1.1.1`, no al resolver del Mac** (`vz/internal/egress`).
   Se reenviaba al primer `nameserver` de `/etc/resolv.conf`, que en un Mac suele ser
   privado (el router, una VPN, el DNS de la empresa): con egress internet el invitado
@@ -1575,7 +1677,12 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **Jailer con salida explícita.** Desde este cambio es obligatorio por defecto en Linux
   (ver 11): arrancar sin él exige `KLING_JAILER=0` a propósito, y eso deja un aviso en el
   log. Quien lo pone y no lo lee sigue corriendo el VMM con el sistema de ficheros del
-  host y los permisos de su usuario.
+  host y los permisos de su usuario, que es el mismo para todas las microVMs: un VMM
+  comprometido controla los VMM y los discos de las demás (ver 11). `KLING_JAILER=1` sin
+  usuario de servicio jailea como root, con el riesgo que 11 explica.
+- **El NAT de vuelta del router (hairpin) no se filtra.** Con `internet`, la IP pública de
+  la propia red no está en ningún rango bloqueado, y los puertos que el router redirija a
+  la LAN se alcanzan por ella (ver 3).
 - **Cuota de disco por overlay, no por host.** Cada overlay es disperso y de tamaño
   lógico fijo al nacer: 512 MiB por defecto, de 64 MiB a 256 GiB con `run -disk`
   (`KLING_MAX_DISK_MIB` baja el máximo). La admisión por disco (ver 12) rechaza una
