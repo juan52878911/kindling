@@ -630,8 +630,9 @@ type shareTag struct {
 	first     chan struct{}
 	firstOnce sync.Once
 	permErr   error
-	// quota es la cuota de la carpeta si es rw: de este arranque de la
-	// máquina, la comparten todas las reconexiones.
+	// quota es la cuota de la carpeta si es rw: la comparten todas las
+	// reconexiones, y empieza en lo que se guardó la última vez
+	// (guardarUsoShares).
 	quota *hostshare.Quota
 }
 
@@ -716,6 +717,7 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		t := &shareTag{tag: tag, status: "detached", first: make(chan struct{})}
 		if s.Mode == share.ModeRW {
 			t.quota = hostshare.NewQuota(lim)
+			t.quota.SetUsage(s.UsedBytes, s.UsedFiles)
 		}
 		run.tags = append(run.tags, t)
 		run.wg.Add(1)
@@ -750,6 +752,7 @@ func (m *Manager) drainSharesOf(id string) {
 	}
 	run.cancel()
 	run.wg.Wait()
+	m.guardarUsoShares(id, run)
 }
 
 // stopShares corta las conexiones de id y espera a que terminen. Lo que el
@@ -765,6 +768,7 @@ func (m *Manager) stopShares(id string) {
 	}
 	run.cancel()
 	run.wg.Wait()
+	m.guardarUsoShares(id, run)
 }
 
 // shareDrainWait es lo más que se espera a que las carpetas vivas cierren
@@ -782,12 +786,20 @@ func (m *Manager) drainShares(wait time.Duration) {
 	sup := m.sup()
 	sup.mu.Lock()
 	sup.drained = true
-	runs := make([]*shareRun, 0, len(sup.runs))
-	for _, r := range sup.runs {
+	runs := make(map[string]*shareRun, len(sup.runs))
+	for id, r := range sup.runs {
 		r.startDrain()
-		runs = append(runs, r)
+		runs[id] = r
 	}
 	sup.mu.Unlock()
+	// La cuenta de las cuotas se guarda pase lo que pase: el daemon siguiente
+	// sigue desde ahí. Lo que se escriba después de guardarla (una sesión que
+	// no cerró a tiempo) no cuenta: como mucho lo de shareDrainWait.
+	defer func() {
+		for id, r := range runs {
+			m.guardarUsoShares(id, r)
+		}
+	}()
 	limite := time.After(wait)
 	for _, r := range runs {
 		select {
@@ -796,6 +808,38 @@ func (m *Manager) drainShares(wait time.Duration) {
 			log.Printf("shutdown: live shares did not close in %s; the guest may see EIO", wait)
 			return
 		}
+	}
+}
+
+// guardarUsoShares apunta en la máquina lo que lleva gastado la cuota de cada
+// carpeta rw de run, para que la ejecución siguiente (al descongelar, arrancar
+// o con otro daemon) siga desde ahí: si no, cada thaw daba la cuota entera
+// otra vez, y el gateway congela por inactividad. Copia el slice: Shares no se
+// modifica en su sitio (doc.go).
+func (m *Manager) guardarUsoShares(id string, run *shareRun) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mc := m.byID[id]
+	if mc == nil {
+		return
+	}
+	var nuevo []api.ShareAttachment
+	for _, t := range run.tags {
+		if t.quota == nil || t.tag < 0 || t.tag >= len(mc.Shares) {
+			continue
+		}
+		b, f := t.quota.Usage()
+		if s := mc.Shares[t.tag]; s.UsedBytes == b && s.UsedFiles == f {
+			continue
+		}
+		if nuevo == nil {
+			nuevo = append([]api.ShareAttachment(nil), mc.Shares...)
+		}
+		nuevo[t.tag].UsedBytes, nuevo[t.tag].UsedFiles = b, f
+	}
+	if nuevo != nil {
+		mc.Shares = nuevo
+		m.persist()
 	}
 }
 
@@ -872,6 +916,24 @@ func (m *Manager) shareStatus(id string) map[int]string {
 	return out
 }
 
+// shareUso es lo que lleva cada carpeta rw de id ahora, por tag.
+func (m *Manager) shareUso(id string) map[int][2]int64 {
+	m.sup().mu.Lock()
+	run := m.sup().runs[id]
+	m.sup().mu.Unlock()
+	out := map[int][2]int64{}
+	if run == nil {
+		return out
+	}
+	for _, t := range run.tags {
+		if t.quota != nil {
+			b, f := t.quota.Usage()
+			out[t.tag] = [2]int64{b, f}
+		}
+	}
+	return out
+}
+
 // shareVias es por dónde va cada carpeta viva de id ahora (shareTag.via).
 func (m *Manager) shareVias(id string) map[int]string {
 	m.sup().mu.Lock()
@@ -893,9 +955,9 @@ func (m *Manager) decorarShares(out *api.Machine) {
 	if len(out.Shares) == 0 {
 		return
 	}
-	st, via := map[int]string{}, map[int]string{}
+	st, via, uso := map[int]string{}, map[int]string{}, map[int][2]int64{}
 	if out.State == api.StateRunning && hasLiveShares(out) {
-		st, via = m.shareStatus(out.ID), m.shareVias(out.ID)
+		st, via, uso = m.shareStatus(out.ID), m.shareVias(out.ID), m.shareUso(out.ID)
 	}
 	sh := make([]api.ShareAttachment, len(out.Shares))
 	copy(sh, out.Shares)
@@ -910,6 +972,9 @@ func (m *Manager) decorarShares(out *api.Machine) {
 			// diera el dispositivo.
 			if sh[i].Status == "attached" {
 				sh[i].Transport = via[i]
+			}
+			if u, ok := uso[i]; ok {
+				sh[i].UsedBytes, sh[i].UsedFiles = u[0], u[1]
 			}
 		}
 	}

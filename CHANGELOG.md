@@ -137,6 +137,9 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
 - `state.json` and `fondos.json` are written 0600 (were 0644): only the daemon reads them.
 - `kling rm` of a machine whose VMM survives SIGKILL keeps its volumes until the VMM exits; a `run` asking for them read-write is refused meanwhile.
+- `allow_domains` (run, sandbox, graph nodes) rejects entries the allowlist could never match: wildcards (`*.a.com`; `a.com` already covers its subdomains), IP addresses and non-punycode international names. They used to be accepted and the guest got `REFUSED` with no hint.
+- The quota of an rw share now carries over freeze/thaw, stop/start and daemon restarts instead of starting at zero each time; `kling inspect` shows `used_bytes` and `used_files` per share.
+- The rw share free-space minimum (`daemon.share_min_free_mib`) no longer blocks rewriting a file without holes in place, and the daemon logs when a share crosses it.
 
 ### Removed
 
@@ -200,6 +203,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
 - `kling sbx gateway` serves HTTPS with `-tls-cert`/`-tls-key` (or `sandbox.tls_cert`/`sandbox.tls_key`) and refuses plain HTTP off loopback unless `-insecure-listen` is given. **The default listen address is now `127.0.0.1:8090`** (was `:8090`): a gateway reached from the network needs `sandbox.listen` plus a certificate, or `-insecure-listen`.
 - `kling phone view` serves the wall under a random path (`/<secret>/`, printed at start), like `kling phone mcp`; `-secret-path=false` restores `/`.
+- Without a copy-on-write store (macOS, or Linux without `daemon.cow`), the daemon stops a machine whose overlay file grows past its disk size, so a misbehaving VMM can't fill the host disk.
+- Linux allowlist: the IPs seeded at start expire within an hour, like the ones learned from DNS, instead of staying allowed for the life of the machine.
 
 ### Fixed
 
@@ -330,6 +335,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `stop`, `rm` and `start` of a warm machine kill the VMM its freeze could not see die, instead of starting a second one on the same overlay.
 - `pause` resumes the guest when the pause request fails; a failed thaw waits for its VMM to die before returning; the orphan sweep no longer kills the VMM of a thaw from `failed` that takes longer than two rounds.
 - The `.vN.bak` copy made before a schema migration is renamed durably.
+- Shares with write-behind: a deferred write error goes to the file descriptor that wrote the data. With two descriptors on the same file, closing the other one first took the error and the writer closed cleanly.
 
 ## [0.20.1] - 2026-10-28
 

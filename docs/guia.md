@@ -1394,6 +1394,15 @@ sigue bloqueado. Un valor de egress desconocido es un **error**, no una caída a
 permisivo. La política viaja con el snapshot del servicio, así que un servicio curado o
 reimportado la conserva.
 
+Cada dominio permite también todos sus subdominios (`github.com` deja `api.github.com`),
+así que no hay comodines: `*.github.com` es un error que dice qué escribir. Tampoco valen
+IPs (se abre lo que resuelve el DNS) ni nombres con acentos sin pasar a punycode
+(`xn--...`). Antes estas entradas se aceptaban y no casaban nunca: el invitado recibía
+`REFUSED` sin más pista; ahora `run`, `sandbox` y `graph up` las rechazan. Un dominio de
+primer nivel suelto (`com`) abre todo lo que cuelga de él. En Linux, las IPs que el daemon
+siembra al arrancar caducan como mucho en una hora, como las que aprende del DNS: una IP que ya
+no es del dominio no se queda abierta para siempre.
+
 ### Linux con Docker: la política del FORWARD
 
 kindling solo **añade** reglas `DROP` al `FORWARD` del host (las barreras de las redes

@@ -1348,6 +1348,15 @@ blocked. An unknown egress value is an **error**, not a fall-through to the most
 permissive mode. The policy travels with the service's snapshot, so a healed or
 re-imported service keeps it.
 
+Each domain also allows all its subdomains (`github.com` lets `api.github.com` through),
+so there are no wildcards: `*.github.com` is an error that says what to write instead. IP
+addresses are rejected too (what opens is what DNS resolves), and so are non-ASCII names
+not written in punycode (`xn--...`). Such entries used to be accepted and never matched,
+so the guest got `REFUSED` with no hint; `run`, `sandbox` and `graph up` now reject them.
+A bare top-level domain (`com`) opens everything under it. On Linux, the IPs the daemon
+seeds at start expire within an hour at most, like the ones learned from DNS: an IP that no longer
+belongs to the domain doesn't stay open forever.
+
 ### Linux with Docker: the FORWARD policy
 
 kindling only **adds** `DROP` rules to the host's `FORWARD` chain (the private-range
