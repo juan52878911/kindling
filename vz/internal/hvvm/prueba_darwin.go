@@ -200,6 +200,13 @@ func clonRAM(base, out string) int {
 	return int(C.khv_prueba_clon_ram(cb, co))
 }
 
+// esperarHasta: lo que dura khv_esperar_hasta sin aviso, y su resultado.
+func esperarHasta(d time.Duration) (time.Duration, int) {
+	var r C.int
+	ns := C.khv_prueba_esperar(C.uint64_t(d), &r)
+	return time.Duration(ns), int(r)
+}
+
 // irqNivelSinGIC: el nivel que deja vmmio_irq cuando el GIC no cambia la
 // línea (khv_prueba_irq_nivel).
 func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }

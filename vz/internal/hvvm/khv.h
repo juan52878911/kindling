@@ -254,6 +254,15 @@ enum { KHV_POLL_RED, KHV_POLL_VSOCK, KHV_POLL_N };
 extern int khv_poll_fallos[KHV_POLL_N];
 extern int khv_poll_errno[KHV_POLL_N];
 int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo);
+// Esperas con plazo: pthread_cond_timedwait compara con CLOCK_REALTIME, y un
+// salto del reloj de pared (NTP, la hora cambiada a mano) las alargaba o las
+// acortaba: un dial al vsock que esperaba 2 s podía esperar una hora.
+// khv_esperar_hasta espera en cv (con mu tomado) hasta fin, en el reloj de
+// khv_ahora_ns (CLOCK_UPTIME_RAW, el de mach_absolute_time), con un plazo
+// relativo. Devuelve 0 o ETIMEDOUT, como pthread_cond_timedwait.
+uint64_t khv_ahora_ns(void);
+int khv_esperar_hasta(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t fin);
+int64_t khv_prueba_esperar(uint64_t plazo_ns, int *r);
 // Cadenas de descriptores, con todos los topes: vq_cadena copia la cadena de
 // head en out (como mucho max) y devuelve cuántos tiene, o -1 si es inválida
 // (índice fuera de la tabla, más larga que la cola, indirecta). vq_leer junta

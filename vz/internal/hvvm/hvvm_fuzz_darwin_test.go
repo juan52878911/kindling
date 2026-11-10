@@ -4,6 +4,7 @@ package hvvm
 
 import (
 	"encoding/binary"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -257,6 +258,20 @@ func TestPollEAGAINNoMataElVsock(t *testing.T) {
 		t.Fatal("could not set up the test")
 	case r != 0:
 		t.Fatal("after poll failed with EAGAIN, the vsock thread stopped")
+	}
+}
+
+// Las esperas con plazo de los dispositivos y los vCPU van con un plazo
+// relativo en el reloj monótono, no con una hora de CLOCK_REALTIME: un salto
+// del reloj de pared no puede alargarlas. Aquí, que khv_esperar_hasta cumple
+// el plazo y que uno ya vencido vuelve sin esperar.
+func TestEsperarHastaCumplePlazo(t *testing.T) {
+	d, r := esperarHasta(20 * time.Millisecond)
+	if r != int(syscall.ETIMEDOUT) || d < 20*time.Millisecond || d > 500*time.Millisecond {
+		t.Fatalf("a 20 ms wait took %v and returned %d", d, r)
+	}
+	if d, r := esperarHasta(0); r != int(syscall.ETIMEDOUT) || d > 5*time.Millisecond {
+		t.Fatalf("an expired wait took %v and returned %d", d, r)
 	}
 }
 

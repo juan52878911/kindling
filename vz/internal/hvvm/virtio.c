@@ -9,6 +9,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "khv.h"
@@ -110,6 +111,29 @@ int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo) {
     return -1;
   }
   return poll(pf, n, plazo);
+}
+
+uint64_t khv_ahora_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+int khv_esperar_hasta(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t fin) {
+  uint64_t ahora = khv_ahora_ns();
+  if (ahora >= fin) return ETIMEDOUT;
+  uint64_t d = fin - ahora;
+  struct timespec ts = {.tv_sec = (time_t)(d / 1000000000ULL), .tv_nsec = (long)(d % 1000000000ULL)};
+  return pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
+
+// khv_prueba_esperar: lo que dura khv_esperar_hasta sin que nadie avise, con
+// su resultado en *r (pruebas).
+int64_t khv_prueba_esperar(uint64_t plazo_ns, int *r) {
+  static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+  static pthread_cond_t c = PTHREAD_COND_INITIALIZER;
+  pthread_mutex_lock(&m);
+  uint64_t t0 = khv_ahora_ns();
+  *r = khv_esperar_hasta(&c, &m, t0 + plazo_ns);
+  int64_t d = (int64_t)(khv_ahora_ns() - t0);
+  pthread_mutex_unlock(&m);
+  return d;
 }
 
 void vq_used_de_ram(struct vq *q) {

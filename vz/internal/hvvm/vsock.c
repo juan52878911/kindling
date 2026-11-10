@@ -824,11 +824,7 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
     return err;
   }
   despertar_hilo();
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + (uint64_t)plazo_ms * 1000000ULL;
-  ts.tv_sec = (time_t)(fin / 1000000000ULL);
-  ts.tv_nsec = (long)(fin % 1000000000ULL);
+  uint64_t fin = khv_ahora_ns() + (uint64_t)plazo_ms * 1000000ULL;
   // El slot es nuestro mientras su generación sea gen: si cambia, se liberó
   // (rechazo, RST, reinicio) y quizá ya es de otro dial.
   int ret = -ETIMEDOUT;
@@ -841,7 +837,7 @@ int khv_vsock_dial(uint32_t port, int plazo_ms) {
       ret = c->gen == gen && c->estado == C_ABIERTA ? sv[1] : -ECONNREFUSED;
       break;
     }
-    if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) {
+    if (khv_esperar_hasta(&cv, &mu, fin) == ETIMEDOUT) {
       if (c->gen == gen && c->estado == C_CONECTANDO) {
         // El slot se suelta ya. Antes quedaba con p_rst esperando un búfer
         // de rx para mandar el RST: con un invitado que no repone (colgado,

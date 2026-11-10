@@ -967,14 +967,9 @@ static void *qos_vigilante(void *a) {
   for (;;) {
     bool estaba = qos_alta;
     if (!estaba && !midiendo) __atomic_store_n(&qos_tics, 0, __ATOMIC_RELAXED);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
-                   (uint64_t)(estaba || midiendo ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
-    ts.tv_sec = (time_t)(fin / 1000000000ULL);
-    ts.tv_nsec = (long)(fin % 1000000000ULL);
+    uint64_t fin = khv_ahora_ns() + (uint64_t)(estaba || midiendo ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
     // Un impulso o los tics en reposo despiertan antes: la ventana empieza ahí.
-    int r = pthread_cond_timedwait(&qos_cv, &qos_mu, &ts);
+    int r = khv_esperar_hasta(&qos_cv, &qos_mu, fin);
     if (parar) break;
     __atomic_add_fetch(&qos_vueltas, 1, __ATOMIC_RELAXED);
     uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dw = ahora - t_antes, max = 0;
@@ -1095,13 +1090,9 @@ static void wfi(struct cpu *c) {
     uint64_t ns = (uint64_t)((vence - ahora) * tb.numer / tb.denom);
     if (ns < tope_ns) tope_ns = ns;
   }
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + tope_ns;
-  ts.tv_sec = (time_t)(fin / 1000000000ULL);
-  ts.tv_nsec = (long)(fin % 1000000000ULL);
+  uint64_t fin = khv_ahora_ns() + tope_ns;
   pthread_mutex_lock(&mu);
-  if (!c->kick && !pausa_pedida && !parar) pthread_cond_timedwait(&cv, &mu, &ts);
+  if (!c->kick && !pausa_pedida && !parar) khv_esperar_hasta(&cv, &mu, fin);
   c->kick = false;
   pthread_mutex_unlock(&mu);
 }
@@ -1515,13 +1506,9 @@ static bool dispositivos_quietos_plazo(uint64_t plazo_ns) {
   }
   uint64_t n = ++q_pedidas;
   pthread_cond_broadcast(&q_cv);
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += (time_t)(plazo_ns / 1000000000ULL);
-  ts.tv_nsec += (long)(plazo_ns % 1000000000ULL);
-  if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
+  uint64_t fin = khv_ahora_ns() + plazo_ns;
   while (q_hechas < n)
-    if (pthread_cond_timedwait(&q_cv, &q_mu, &ts) == ETIMEDOUT) break;
+    if (khv_esperar_hasta(&q_cv, &q_mu, fin) == ETIMEDOUT) break;
   bool ok = q_hechas >= n;
   pthread_mutex_unlock(&q_mu);
   return ok;
@@ -2186,11 +2173,7 @@ int khv_pause(unsigned bit) {
       a_tiempo = false;
       break;
     }
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 1000000;
-    if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
-    if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) resacar_vcpus_locked();
+    if (khv_esperar_hasta(&cv, &mu, khv_ahora_ns() + 1000000ULL) == ETIMEDOUT) resacar_vcpus_locked();
   }
   if (!a_tiempo) {
     int faltan = ncpus - n_pausados;
