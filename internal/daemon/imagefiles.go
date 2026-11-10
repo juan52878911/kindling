@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -30,24 +31,35 @@ func libDir() string {
 	return "/usr/local/lib/kindling"
 }
 
-// resolveFromHost convierte un from_host relativo en una ruta dentro de libDir,
-// sin dejar que salga de él.
-func resolveFromHost(rel string) (string, error) {
-	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") || strings.ContainsRune(rel, 0) {
-		return "", fmt.Errorf("from_host must be a path relative to %s: %q", libDir(), rel)
+// libDirDe es el libDir de un daemon con raíz root en goos: en macOS, sin
+// KLING_LIB_DIR, el lib/ de la raíz de datos, que es donde make install y
+// kling upgrade dejan kling-guest (cmd/kling libPorDefecto). Con
+// /usr/local/lib/kindling, que en un Mac no existe, ningún from_host servía.
+func libDirDe(goos, root string) string {
+	if d := os.Getenv("KLING_LIB_DIR"); d == "" && goos == "darwin" && root != "" {
+		return filepath.Join(root, "lib")
 	}
-	p := filepath.Join(libDir(), filepath.Clean(rel))
-	// Por os.Root: un enlace simbólico de libDir puede apuntar dentro de él,
+	return libDir()
+}
+
+// resolveFromHost convierte un from_host relativo en una ruta dentro de lib,
+// sin dejar que salga de él.
+func resolveFromHost(lib, rel string) (string, error) {
+	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") || strings.ContainsRune(rel, 0) {
+		return "", fmt.Errorf("from_host must be a path relative to %s: %q", lib, rel)
+	}
+	p := filepath.Join(lib, filepath.Clean(rel))
+	// Por os.Root: un enlace simbólico de lib puede apuntar dentro de él,
 	// pero no llevar a un fichero cualquiera del host (que acabaría copiado
 	// en la imagen).
-	root, err := os.OpenRoot(libDir())
+	root, err := os.OpenRoot(lib)
 	if err != nil {
 		return "", fmt.Errorf("from_host: %w", err)
 	}
 	defer root.Close()
 	st, err := root.Stat(filepath.Clean(rel))
 	if err != nil || !st.Mode().IsRegular() {
-		return "", fmt.Errorf("from_host %q is not a file in %s", rel, libDir())
+		return "", fmt.Errorf("from_host %q is not a file in %s", rel, lib)
 	}
 	return p, nil
 }
@@ -159,7 +171,7 @@ func (s *Server) imageFileSource(req api.PutImageFileRequest) (string, func(), i
 	case req.FromHost != "" && req.ContentB64 != "":
 		return "", nada, http.StatusBadRequest, fmt.Errorf("use from_host or content_b64, not both")
 	case req.FromHost != "":
-		p, err := resolveFromHost(req.FromHost)
+		p, err := resolveFromHost(libDirDe(runtime.GOOS, s.root), req.FromHost)
 		if err != nil {
 			return "", nada, http.StatusBadRequest, err
 		}
