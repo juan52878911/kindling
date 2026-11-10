@@ -93,7 +93,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
 | `manifests.json` | `pkg/plugin/cache.go` | **`format: 1`**, y cada entrada con la versión de kling y la API | caché: una versión distinta la tira entera y la rehace. Correcto: es regenerable |
-| manifiesto de extensión | `pkg/plugin/manifest.go` | **`ManifestVersion` 2** (acepta 1–2), `min_kling`, `max_api` (v0.18) | fuera de rango: la extensión sale con error en la lista, sin tumbar nada. Un `max_api` menor que el API del daemon es un aviso en `kling plugins` |
+| manifiesto de extensión | `pkg/plugin/manifest.go` | **`ManifestVersion` 2** (acepta 1–2), `min_kling`, `max_api` (v0.18) | fuera de rango: la extensión sale con error en la lista, sin tumbar nada. Un `max_api` menor que el API del daemon es un aviso en `kling plugin ls` |
 | sidecar `.json` de cada extensión | `pkg/plugin/install.go` | ninguna | versión, url, sha256, fecha |
 | `~/.config/kling/config.json` | `pkg/config/config.go` | ninguna | claves desconocidas se ignoran al leer y **se pierden al guardar** (`kling config set`). Desde v0.19 `daemon.vmm` vale `auto` por defecto en macOS: un daemon ≤ v0.18 con una configuración que diga `auto` o `hv` no arranca |
 | `/etc/default/kling`, `/etc/kling/gateway.env` | `Makefile`, `ext/mcp/Makefile` | ninguna | se crean si no existen y **no se tocan nunca más**: una variable nueva no llega a un host viejo |
@@ -219,7 +219,7 @@ Firecracker (o de kling-vz y de macOS), el `kernel_sha256` que ya hay y la
 versión de kling que lo hizo. Al restaurar, si el VMM no es el mismo:
 
 - se marca `stale` con la causa (`firecracker 1.12 → 1.17`), visible en
-  `kling snapshots` y en `doctor`;
+  `kling template ls` y en `doctor`;
 - **no se intenta** restaurar a ciegas: el fallo crudo de Firecracker al
   despertar es justo el síntoma desfasado de la causa que hay que evitar;
 - `kling upgrade` los recongela solo al final si se puede (dorados de MCP y de
@@ -271,8 +271,8 @@ Mezclar versiones queda así:
 |---|---|
 | CLI nuevo, daemon viejo | funciona con lo que el daemon anuncie; lo que no, "actualiza el daemon" |
 | CLI viejo, daemon nuevo | funciona mientras `api` sea la misma |
-| extensión fuera de `min_kling` | sale con error en `kling plugins`, no se ejecuta |
-| extensión con `max_api` menor que el API del daemon | aviso en `kling plugins` y en sus propias peticiones; se ejecuta |
+| extensión fuera de `min_kling` | sale con error en `kling plugin ls`, no se ejecuta |
+| extensión con `max_api` menor que el API del daemon | aviso en `kling plugin ls` y en sus propias peticiones; se ejecuta |
 | invitado viejo | funciona sin las `caps` que le falten, salvo los tres fallos de §3.2; `doctor` todavía no lo cuenta |
 | kling-vz de otra versión | sin aviso (la versión no se compara); error si falta un `credential_kind` o el `kling_vz` no casa |
 
@@ -538,7 +538,7 @@ su prueba para siempre.
 | **P1** | `schema` en el almacén (`store`) para `mcp/links`, `phone/*` y grafos | los dueños son nuestras extensiones; poner la convención antes de que haya extensiones de otros |
 | **P2** | quitar `migrateLinks` y `liftV04` | **hecho** (PR 11), con el alias `warm`: lo de esa época se rechaza diciendo que se pase por v0.17 |
 | **P2** | recetas de Android con `durable.Escribir` | lo único que escribe estado sin la escritura segura |
-| **P2** | `snapshot.key`: aviso en `doctor` si no hay copia y `kling secrets export` | no rompe formato, pero es el único fichero cuya pérdida no tiene arreglo |
+| **P2** | `snapshot.key`: aviso en `doctor` si no hay copia y un comando para exportarla (no existe todavía) | no rompe formato, pero es el único fichero cuya pérdida no tiene arreglo |
 
 Lo que **no** hace falta romper: la API del daemon sin `/v1` (las capacidades
 bastan), el formato de las imágenes (no tiene metadatos que versionar) y
@@ -557,7 +557,7 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0`), `macos` y `kling_version` en el meta; `stale` con causa en `kling template ls`/`inspect` y en `kling doctor`; `run -from` y `thaw` se niegan con la orden; conservar claves desconocidas en `editMeta` | M — **hecho** |
 | 3 | `credentials.enc` con byte de versión | `KLCS` + `0x01` delante del nonce, también en plantillas y secretos de grafo; sin él es v0 y se reescribe (con copia) en el siguiente sellado; un byte mayor se rechaza sin tocar el fichero | S — **hecho** |
 | 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge` (y las opciones de volumen que no conocen: solo lectura); `/healthz` JSON si se pide con `Accept`; versión y `caps` del agente en la máquina (`api.Machine.Agent`), no en la receta: construir no arranca el invitado | M — **hecho** |
-| 5 | `api` en `/info` y `max_api` en extensiones | `api` en `/info` y `X-Kling-API` en cada respuesta, que `pkg/api` compara (aviso si el daemon es más nuevo, error si es más viejo que el mínimo); `kling plugins` avisa de las que no casan; `kling_vz` a 2 | S — **hecho** |
+| 5 | `api` en `/info` y `max_api` en extensiones | `api` en `/info` y `X-Kling-API` en cada respuesta, que `pkg/api` compara (aviso si el daemon es más nuevo, error si es más viejo que el mínimo); `kling plugin ls` avisa de las que no casan; `kling_vz` a 2 | S — **hecho** |
 | 6 | guarda de structs persistidos | `TestCamposPersistidos` compara nombre JSON y tipo de los campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` y `api.CredentialSpec` (y de los structs del módulo que cuelgan de ellos) con `internal/machine/testdata/esquema/campos-persistidos.txt`, que también apunta la versión de cada fichero. Quitar o cambiar de tipo un campo sin subir la versión falla y `-update` se niega; añadir uno se registra con `-update` | S — **hecho** |
 | 7 | fijaciones de `testdata/` | `internal/machine/testdata/esquema/v0.17/`: `state.json`, `meta.json` y `recipe.json` con todos los campos de v0.17.0 (generados con su `pkg/api`); `fijaciones_v017_test.go` comprueba que se leen, que migran con su `.v0.bak` y que ningún campo se pierde ni cambia, tanto en el fichero reescrito como al leerlo al struct. `credentials.v0.enc` ya estaba (PR 3) | S — **hecho** |
 | 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L — **hecho** (las unidades no se tocan: §3.4) |

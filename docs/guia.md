@@ -107,6 +107,7 @@ enlazadas:
 · [Memoria: real vs caché](#memoria-qué-es-real-y-qué-es-caché)
 
 **Referencia**
+· [Convenciones del CLI: salida, JSON, flags](#convenciones-del-cli-salida-json-flags)
 · [Códigos de salida](#códigos-de-salida)
 · [Requisitos](#requisitos)
 · [Scripts](#scripts)
@@ -336,12 +337,13 @@ Y valores por defecto, para no repetir las mismas opciones en cada `run`:
 kling config set defaults.image min
 kling config set defaults.ttl_seconds 600
 kling config set gateway.idle 5m
-kling config set daemon.vmm vz        # el VMM del daemon local: firecracker (Linux) o vz (macOS)
+kling config set daemon.vmm hv        # el VMM del daemon local: firecracker (Linux); auto, hv o vz (macOS)
 kling config show
 ```
 
 `daemon.vmm` lo lee el daemon que corre con ese usuario; vacío es el de la plataforma
-(`vz` en macOS, `firecracker` en Linux), y se valida contra la máquina en la que corre.
+(`auto` en macOS, que elige `hv` si `kling-hv` pasa su sonda y si no `vz`;
+`firecracker` en Linux; ver [`mac.md`](mac.md)), y se valida contra la máquina en la que corre.
 `KLING_VMM` lo sustituye con un nombre de backend o la ruta de un binario.
 
 El fichero vive en `~/.config/kling/config.json` — también en macOS: `UserConfigDir()`
@@ -557,6 +559,13 @@ vez (`kling run -allow-exec`, instala lo que haga falta, `kling save`) y cada sa
 creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
 0,57 s en el laboratorio.
 
+`-ttl` es su vida y `-on-ttl` lo que pasa cuando se acaba: `remove` (por defecto) lo
+destruye; `freeze` convierte el ttl en tiempo de inactividad, cada exec lo renueva, y el
+siguiente tras vencer despierta el sandbox en ms. `kling sandbox renew sb -ttl 10m` lo
+alarga. `kling sbx new`, el del gateway, tiene el defecto contrario (`freeze`;
+`-on-ttl remove` para destruirlo), porque sus sandboxes están pensados para esperar
+ociosos entre turnos de un agente.
+
 La ejecución es **opt-in al arrancar**: viaja en la línea de comandos del kernel, que
 solo escribe el host, y se congela con la memoria. Una microVM de servicio nunca la
 tiene, y un snapshot sin ella no puede convertirse en sandbox. Guía:
@@ -587,12 +596,15 @@ kling completion install         # recarga el completado tras instalar una
 tu `kling`, **lo verifica contra el `SHA256SUMS` de la release antes de escribirlo**,
 comprueba su manifiesto y lo deja en `~/.local/share/kling/plugins` (o en el primer
 directorio de `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` y `-file RUTA` eligen
-otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incorporada**
+otro origen; `kling plugin rm <nombre>` la quita. Instalar una versión más vieja que la
+instalada se rechaza (para volver atrás, quitarla antes); `kling upgrade` sí las baja a
+la versión del núcleo. `ai` es una **extensión incorporada**
 (`kling ai model`, `kling ai chispa`, el gateway de IA): vive dentro del binario de
 `kling`, pero se lista, se documenta y se apaga igual.
 
 Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp add`,
-`kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
+`kling mcp serve`, `kling db up`. Solo `connect` (de kling-mcp) y `sbx` (de
+kling-sandbox, porque `kling sandbox` es del núcleo) están en primer nivel. Los verbos sueltos
 que avisaban desde 0.18 se retiraron en 1.0 y salen con código 2 diciendo el nombre nuevo:
 `kling mcp add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`,
 `ai model`, `ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`,
@@ -630,6 +642,11 @@ Kubernetes ([`docs/kubernetes.md`](kubernetes.md)).
 ```sh
 kling plugin install sandbox
 ```
+
+`kling sbx gateway` escucha en `127.0.0.1:8090`. Fuera del loopback no arranca sin TLS
+(`-tls-cert`/`-tls-key`, o `sandbox.tls_cert`/`sandbox.tls_key`) o `-insecure-listen`,
+que acepta a sabiendas que los tokens de los inquilinos viajen en claro (detrás de un
+proxy que termina TLS). Detalles en [`ext/sandbox/README.md`](../ext/sandbox/README.md).
 
 ## Escribir una extensión
 
@@ -1050,6 +1067,8 @@ kling db tenant-check t1                      # ejercita RLS: cada inquilino ve 
 kling db ask t1 "¿cuántos clientes hay por país?"   # un modelo escribe la SQL; tú la confirmas; solo lectura
 kling db ask-web t1                           # lo mismo en una página web local (loopback, URL de un uso)
 kling db diff t1 t2                           # qué cambió entre dos copias: esquema y filas, sin datos
+kling db class -n 30 -prefix student pg       # una copia por alumno; class reset / ls / rm
+kling db report add weekly -golden pg -every 1w -question "clientes nuevos esta semana"   # lánzalo desde cron
 kling db env up shop-app -golden pg           # app + base como grafo (Linux); la app nunca ve la contraseña
 kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
   'postgres://readonly@db.prod.example.com:5432/shop'   # una copia enmascarada de producción
@@ -1337,7 +1356,7 @@ incluido **lo que no está resuelto** — está en [SECURITY.md](../SECURITY.md)
 | Daemon inalcanzable por red | Solo socket Unix; acceso remoto exclusivamente por SSH |
 | VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo el grupo `kvm` |
 | Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas); cgroup de CPU por máquina; tope de 256 |
+| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina (`daemon.net_mibps` o `KLING_NET_MIBPS`, hasta 10240; 256 en una máquina con carpetas; solo Firecracker, se lee en cada arranque en frío sin reiniciar el daemon, y las copias de un dorado conservan el límite congelado en él); cgroup de CPU por máquina; tope de 256 |
 | Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
 | Sin secretos en snapshots | los secretos se inyectan vía MMDS (comunes a todas las sesiones de la máquina), solo en la máquina viva |
 
@@ -1658,6 +1677,68 @@ permite que N instancias compartan páginas.
 ---
 
 # Referencia
+
+## Convenciones del CLI: salida, JSON, flags
+
+`kling` está escrito para que lo manejen personas y programas (scripts, CI, agentes de
+IA) con los mismos comandos. Estas reglas valen para todos los comandos del núcleo y las
+comprueba `TestConvencionCLI` (`cmd/kling/convencion_test.go`) contra la versión inglesa
+de esta sección ([`guide.md`](guide.md)); las formas de `-json` están fijadas en
+[`cmd/kling/testdata/contrato/json.txt`](../cmd/kling/testdata/contrato/json.txt).
+
+**stdout son datos; stderr, todo lo demás.** Una tabla, un id o un documento JSON van a
+stdout; el progreso (`checking the guest is serving...`), las notas, los avisos (`! m1:
+on hold`, `NOTE: $KLING_HOST ...`), la línea `next:` y los errores van a stderr. `kling
+ps -q | xargs kling rm` y `kling ps -json | jq` solo ven filas.
+
+**`-json`.** Todos los listados (`ps`, `image ls`, `template ls`, `volume ls`, `graph
+ls`, `sandbox ls`, `context ls`, `plugin ls`, `status`, `version`, `top`, `events`,
+`doctor`) y todos los comandos que cambian algo (`run`, `save`, `freeze`, `thaw`,
+`pause`, `stop`, `rm`, `start`, `cp`, `machine squeeze|resize|secret|credential`) aceptan
+`-json`, una flag booleana sin más. Un comando que actúa sobre varias refs imprime una
+línea JSON por ref (JSON Lines). Qué imprime cada uno:
+
+| Comando | JSON |
+|---|---|
+| `run`, `freeze`, `thaw`, `pause`, `stop`, `start`, `machine resize\|secret\|credential` | la máquina, como la enseña `kling inspect` |
+| `rm` | `{"id", "name", "state": "removed"}` |
+| `save` | la plantilla (un elemento de `kling template ls -json`) |
+| `machine squeeze` | `{"id", "reclaimed_mib", "guest_free_mib", "rss_mib"}` |
+| `cp` | `{"machine", "path", "size"}` más `mode` al entrar y `dest` al salir (`-json` pide un fichero, no `-`) |
+| `doctor` | `{"ok", "checks": [{"name", "state", "detail", "fix"}]}`, una entrada por comprobación, incluidas las de `kling up -check` |
+
+**Claves.** Un objeto que es una cosa lleva `id` (el id completo; las tablas enseñan 12
+caracteres) y/o `name`; su condición es `state` (`running`, `frozen`, `ok`, `warn`,
+`fail`, `removed`...), nunca `status` (`plugin ls` aún imprime `status` junto a `state`
+para los scripts de 1.x). Los tamaños llevan la unidad en la clave (`mem_mib`, `size`,
+`disk_free_bytes`) y las fechas son RFC 3339.
+
+**Errores.** Sin `-json`, un error es `error: <qué>` y, cuando hay un siguiente paso
+claro, una segunda línea `try: <comando>`. Con `-json`, es una línea en stderr:
+
+```json
+{"error":"cannot talk to the daemon at /run/kling.sock: ...","code":"error","try":"kling doctor"}
+```
+
+`error` es para personas y puede cambiar de redacción; `code` es estable: el código de
+error del daemon cuando lo mandó (`not_found`, `name_taken`, `disk_full`,
+`insufficient_memory`, la lista de `pkg/api/errorcodes.go`) o uno propio del CLI:
+`usage`, `daemon_too_old`, `stale_golden`, `agent_capability`, `interrupted`, `error`.
+`try` se omite cuando no hay pista. El código de salida es el mismo con o sin `-json`.
+
+**Flags.** Las flags van antes o después de los argumentos (`kling rm m1 -f`), salvo
+detrás de `--` o del comando de `exec`, `shell` y `compose exec`. Una flag que no existe,
+un valor malo o un argumento que falta es un error de uso: código de salida `2`, `error:`
+y `try: kling help <comando>`, nunca la lista cruda del paquete flag. `-h` imprime la
+ayuda del comando. Significados comunes: `-json` salida JSON, `-q` solo ids, `-a` incluir
+las paradas, `-f` no preguntar (o seguir, en `logs` y `audit`), `-H` el endpoint del
+daemon (socket o `ssh://usuario@host`; si no, `$KLING_HOST`, el contexto activo, el
+socket local), `-e K=V` entorno, `-w DIR` directorio de trabajo, `-force` saltarse una
+comprobación de seguridad.
+
+**Marcas y color.** `✓`, `!` y `✗` pasan a `ok`, `!!` y `xx` con `NO_COLOR` puesto, y
+`kling top -watch` solo limpia la pantalla con secuencias de escape en un terminal sin
+`NO_COLOR`.
 
 ## Códigos de salida
 

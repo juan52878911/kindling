@@ -110,7 +110,7 @@ la clave: llegan después.
 
 En `snapshots/` de la raíz del daemon, como los dorados, con un fichero
 `image-of` (la clave, y su fecha es el último uso) que los aparta de
-`kling snapshots`. Se ven en:
+`kling template ls`. Se ven en:
 
 ```
 $ kling image snapshots
