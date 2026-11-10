@@ -4,10 +4,9 @@
 # kling-hv y kling-vz de este árbol, sellados con git describe; prepara vmlinux
 # y min.ext4; corre 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv y, si los
 # dos pasan sobre un árbol sin cambios, publica en GitHub un commit status
-# (e2e-mac/kling-hv, success) sobre ese commit e imprime la línea `export
-# KLING_E2E_HV=...`. scripts/release.sh acepta cualquiera de las dos como
-# prueba; el status es lo que queda a la vista mientras e2e-mac.yml no tenga
-# runner (KLING_E2E_STATUS=0 no lo publica).
+# (e2e-mac/kling-hv, success) sobre ese commit. Es la prueba que pide
+# scripts/release.sh mientras e2e-mac.yml no tenga runner (la línea a mano
+# KLING_E2E_HV ya no vale); KLING_E2E_STATUS=0 no lo publica.
 #
 #   scripts/e2e-mac-release.sh
 #   E2E=95 scripts/e2e-mac-release.sh        solo uno (92 o 95)
@@ -25,9 +24,9 @@
 # 95 instala su propio agente de launchd con la etiqueta dev.kindling.daemon
 # (la que reinicia `kling upgrade`) y se niega si el usuario ya tiene uno. Este
 # script no lo quita nunca: si está, corre 92, explica qué hacer y termina sin
-# la línea de KLING_E2E_HV. Cada prueba que pasa deja una marca por commit en
-# KLING_E2E_CACHE/passed, así que 95 puede correr después con E2E=95 y la
-# línea sale entonces.
+# publicar el status. Cada prueba que pasa deja una marca por commit en
+# KLING_E2E_CACHE/passed, así que 95 puede correr después con E2E=95 y el
+# status se publica entonces.
 #
 # Variables: E2E ("92 95"), KEEP_WORK, KLING_E2E_DATA, KLING_E2E_CACHE,
 # KLING_E2E_STATUS (1), KLING_E2E_REPO (juan52878911/kindling) y lo que
@@ -183,7 +182,7 @@ fi
 # El rastro en GitHub: un commit status sobre el commit entero, con el mismo
 # contexto que busca scripts/release.sh (si cambia, en los dos). Necesita gh
 # autenticado con escritura en el repo y el commit ya empujado; si no se
-# puede, lo dice y la línea de export sigue valiendo.
+# puede, lo dice y sale con error: sin el status, release.sh no etiqueta.
 CONTEXTO="e2e-mac/kling-hv"
 publicar_estado() {
   if [ "${KLING_E2E_STATUS:-1}" = 0 ]; then echo "KLING_E2E_STATUS=0: no commit status on GitHub"; return 0; fi
@@ -202,11 +201,10 @@ publicar_estado() {
 }
 if [ -f "$HECHO/$SHA.92" ] && [ -f "$HECHO/$SHA.95" ] && [ -z "$SUCIO" ]; then
   echo
-  publicar_estado || echo "release.sh still takes the export line below" >&2
-  echo "92 and 95 passed with VMM=hv on $SHA:"
-  echo "export KLING_E2E_HV=$SHA"
+  echo "92 and 95 passed with VMM=hv on $SHA"
+  publicar_estado || { echo "without the commit status release.sh will not tag $SHA: push it, check gh auth and run E2E=95 scripts/e2e-mac-release.sh again" >&2; exit 1; }
   exit 0
 fi
-[ -n "$SUCIO" ] && echo "the tree has uncommitted changes: nothing counts for KLING_E2E_HV; commit and run it again" >&2
-for p in 92 95; do [ -f "$HECHO/$SHA.$p" ] || echo "KLING_E2E_HV needs $p passed on $SHA (E2E=$p scripts/e2e-mac-release.sh)" >&2; done
+[ -n "$SUCIO" ] && echo "the tree has uncommitted changes: nothing counts for the release; commit and run it again" >&2
+for p in 92 95; do [ -f "$HECHO/$SHA.$p" ] || echo "the release needs $p passed on $SHA (E2E=$p scripts/e2e-mac-release.sh)" >&2; done
 exit 1
