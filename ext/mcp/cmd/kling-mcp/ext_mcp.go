@@ -216,8 +216,9 @@ var mcpCommands = []plugin.Command{
 		Usage: `  mcp memory status                                whether it's active and on what
   mcp memory enable [-service N]                   enables it; uses engram by default
   mcp memory disable                               disables it
-  mcp memory install-service                       installs the local bridge as a
-                                                   permanent service (macOS)
+  mcp memory install-service [-repair]             installs the local bridge as a
+                                                   permanent service (macOS); -repair
+                                                   points it at the current bridge
 `,
 	},
 	{

@@ -43,6 +43,25 @@ func TestLaunchAgentPlist(t *testing.T) {
 	}
 }
 
+// install-service -repair lee el plist que escribió y solo cambia el puente:
+// -listen y el servidor que envuelve quedan (el puente se movió de sitio y
+// launchd salía con 78).
+func TestRepairKeepsArgs(t *testing.T) {
+	argv := []string{"/Users/a/.local/bin/kling-bridge", "-listen", "127.0.0.1:9100", "--",
+		"/opt/bin/srv", "--name=a b", "q=1&r=<2>"}
+	got, err := plistArgs([]byte(launchAgentPlist("/Users/a", argv)))
+	if err != nil || !reflect.DeepEqual(got, argv) {
+		t.Fatalf("plistArgs = %q, %v; want %q", got, err, argv)
+	}
+	nuevo, err := withBridge(got, "/Users/a/.local/share/kling/plugins/kling-bridge")
+	if err != nil || nuevo[0] != "/Users/a/.local/share/kling/plugins/kling-bridge" || !reflect.DeepEqual(nuevo[1:], argv[1:]) {
+		t.Fatalf("withBridge = %q, %v", nuevo, err)
+	}
+	if _, err := withBridge(nil, "/x"); err == nil {
+		t.Fatal("a plist without ProgramArguments was accepted")
+	}
+}
+
 // -cmd se parte respetando comillas (strings.Fields no admitía argumentos con espacios).
 func TestSplitArgs(t *testing.T) {
 	for in, want := range map[string][]string{
