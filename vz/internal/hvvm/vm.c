@@ -967,14 +967,9 @@ static void *qos_vigilante(void *a) {
   for (;;) {
     bool estaba = qos_alta;
     if (!estaba && !midiendo) __atomic_store_n(&qos_tics, 0, __ATOMIC_RELAXED);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
-                   (uint64_t)(estaba || midiendo ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
-    ts.tv_sec = (time_t)(fin / 1000000000ULL);
-    ts.tv_nsec = (long)(fin % 1000000000ULL);
+    uint64_t fin = khv_ahora_ns() + (uint64_t)(estaba || midiendo ? QOS_RAPIDA_MS : QOS_LENTA_MS) * 1000000ULL;
     // Un impulso o los tics en reposo despiertan antes: la ventana empieza ahí.
-    int r = pthread_cond_timedwait(&qos_cv, &qos_mu, &ts);
+    int r = khv_esperar_hasta(&qos_cv, &qos_mu, fin);
     if (parar) break;
     __atomic_add_fetch(&qos_vueltas, 1, __ATOMIC_RELAXED);
     uint64_t ahora = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dw = ahora - t_antes, max = 0;
@@ -1095,13 +1090,9 @@ static void wfi(struct cpu *c) {
     uint64_t ns = (uint64_t)((vence - ahora) * tb.numer / tb.denom);
     if (ns < tope_ns) tope_ns = ns;
   }
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  uint64_t fin = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + tope_ns;
-  ts.tv_sec = (time_t)(fin / 1000000000ULL);
-  ts.tv_nsec = (long)(fin % 1000000000ULL);
+  uint64_t fin = khv_ahora_ns() + tope_ns;
   pthread_mutex_lock(&mu);
-  if (!c->kick && !pausa_pedida && !parar) pthread_cond_timedwait(&cv, &mu, &ts);
+  if (!c->kick && !pausa_pedida && !parar) khv_esperar_hasta(&cv, &mu, fin);
   c->kick = false;
   pthread_mutex_unlock(&mu);
 }
@@ -1515,13 +1506,9 @@ static bool dispositivos_quietos_plazo(uint64_t plazo_ns) {
   }
   uint64_t n = ++q_pedidas;
   pthread_cond_broadcast(&q_cv);
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += (time_t)(plazo_ns / 1000000000ULL);
-  ts.tv_nsec += (long)(plazo_ns % 1000000000ULL);
-  if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
+  uint64_t fin = khv_ahora_ns() + plazo_ns;
   while (q_hechas < n)
-    if (pthread_cond_timedwait(&q_cv, &q_mu, &ts) == ETIMEDOUT) break;
+    if (khv_esperar_hasta(&q_cv, &q_mu, fin) == ETIMEDOUT) break;
   bool ok = q_hechas >= n;
   pthread_mutex_unlock(&q_mu);
   return ok;
@@ -2073,7 +2060,6 @@ int khv_restore(const char *mem_path) {
   if (hay_vsock) vsock_reafirmar();
   if (hay_globo) vballoon_reafirmar();
   for (int i = 0; i < nvfs; i++) vvfs_reafirmar(i);
-  for (int i = 0; i < ncpus; i++) cpus[i].st = h.cpu[i];
   khv_traza_acaba(KHV_F_GIC, tr);
   for (int i = 0; i < ncpus; i++) cpus[i].st = *hdr_cpu(&h, i);
   snap_t_pausa = h.t_pausa;
@@ -2187,11 +2173,7 @@ int khv_pause(unsigned bit) {
       a_tiempo = false;
       break;
     }
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 1000000;
-    if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
-    if (pthread_cond_timedwait(&cv, &mu, &ts) == ETIMEDOUT) resacar_vcpus_locked();
+    if (khv_esperar_hasta(&cv, &mu, khv_ahora_ns() + 1000000ULL) == ETIMEDOUT) resacar_vcpus_locked();
   }
   if (!a_tiempo) {
     int faltan = ncpus - n_pausados;
@@ -2256,6 +2238,46 @@ int khv_resume(unsigned bit) {
   if (despertar) dispositivos_despertar();
   pthread_mutex_unlock(&op_mu);
   return parar ? -1 : 0;
+}
+
+// clonar_ram crea mem_out con los datos de base: un clon APFS si se puede y,
+// en otro volumen o sin clones, una copia. 0600 los dos: lleva toda la RAM
+// del invitado (secretos ya leídos incluidos), y el clon hereda el modo de su
+// base (un dorado 0644 daba una congelación 0644). Devuelve el fd, o -1 con
+// errno y sin dejar el fichero; *copiando dice si falló la copia.
+static int clonar_ram(int base, const char *mem_out, bool *copiando) {
+  *copiando = false;
+  int fd;
+  if (fclonefileat(base, AT_FDCWD, mem_out, 0) == 0) {
+    fd = open(mem_out, O_RDWR);
+    if (fd >= 0 && fchmod(fd, 0600) == 0) return fd;
+  } else {
+    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return -1;
+    if (fcopyfile(base, fd, NULL, COPYFILE_DATA) == 0) return fd;
+    *copiando = true;
+  }
+  int e = errno;
+  if (fd >= 0) close(fd);
+  unlink(mem_out);
+  errno = e;
+  return -1;
+}
+
+// khv_prueba_clon_ram: el modo con el que clonar_ram deja out, clonado de
+// base, o -errno (pruebas).
+int khv_prueba_clon_ram(const char *base, const char *out) {
+  int b = open(base, O_RDONLY);
+  if (b < 0) return -errno;
+  bool copiando;
+  int fd = clonar_ram(b, out, &copiando);
+  int e = errno;
+  close(b);
+  if (fd < 0) return -e;
+  struct stat st;
+  int r = fstat(fd, &st) == 0 ? (int)(st.st_mode & 07777) : -errno;
+  close(fd);
+  return r;
 }
 
 int khv_snapshot(const char *mem_out) {
@@ -2340,19 +2362,11 @@ int khv_snapshot(const char *mem_out) {
 
   // Memoria: clon del fichero que respalda la RAM + las páginas que el
   // invitado cambió (copiadas por el CoW de MAP_PRIVATE). mincore da el mapa.
-  if (fclonefileat(base_fd, AT_FDCWD, mem_out, 0) == 0) {
-    fd = open(mem_out, O_RDWR);
-  } else {
-    // Otro volumen o sin clones: copia de los datos. 0600: lleva toda la RAM
-    // del invitado (secretos ya leídos incluidos), como el clon.
-    fd = open(mem_out, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0 && fcopyfile(base_fd, fd, NULL, COPYFILE_DATA) != 0) {
-      fallo("copying the RAM file to %s: %s", mem_out, strerror(errno));
-      goto fin;
-    }
-  }
+  bool copiando;
+  fd = clonar_ram(base_fd, mem_out, &copiando);
   if (fd < 0) {
-    fallo("creating %s: %s", mem_out, strerror(errno));
+    if (copiando) fallo("copying the RAM file to %s: %s", mem_out, strerror(errno));
+    else fallo("creating %s: %s", mem_out, strerror(errno));
     goto fin;
   }
   // Lo que hubiera detrás de la RAM es el estado del snapshot anterior.

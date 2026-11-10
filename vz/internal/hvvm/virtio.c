@@ -9,6 +9,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "khv.h"
@@ -100,14 +101,39 @@ void vq_push(struct vq *q, uint8_t *used, uint16_t head, uint32_t len) {
 }
 
 int khv_poll_fallos[KHV_POLL_N];
+int khv_poll_errno[KHV_POLL_N];
 
 int khv_poll(int quien, struct pollfd *pf, nfds_t n, int plazo) {
   int f = __atomic_load_n(&khv_poll_fallos[quien], __ATOMIC_ACQUIRE);
   if (f > 0 && __atomic_compare_exchange_n(&khv_poll_fallos[quien], &f, f - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    errno = EAGAIN;
+    int e = __atomic_load_n(&khv_poll_errno[quien], __ATOMIC_ACQUIRE);
+    errno = e ? e : EAGAIN;
     return -1;
   }
   return poll(pf, n, plazo);
+}
+
+uint64_t khv_ahora_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+int khv_esperar_hasta(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t fin) {
+  uint64_t ahora = khv_ahora_ns();
+  if (ahora >= fin) return ETIMEDOUT;
+  uint64_t d = fin - ahora;
+  struct timespec ts = {.tv_sec = (time_t)(d / 1000000000ULL), .tv_nsec = (long)(d % 1000000000ULL)};
+  return pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
+
+// khv_prueba_esperar: lo que dura khv_esperar_hasta sin que nadie avise, con
+// su resultado en *r (pruebas).
+int64_t khv_prueba_esperar(uint64_t plazo_ns, int *r) {
+  static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+  static pthread_cond_t c = PTHREAD_COND_INITIALIZER;
+  pthread_mutex_lock(&m);
+  uint64_t t0 = khv_ahora_ns();
+  *r = khv_esperar_hasta(&c, &m, t0 + plazo_ns);
+  int64_t d = (int64_t)(khv_ahora_ns() - t0);
+  pthread_mutex_unlock(&m);
+  return d;
 }
 
 void vq_used_de_ram(struct vq *q) {
@@ -120,11 +146,23 @@ void vq_used_de_ram(struct vq *q) {
 void vmmio_irq(struct vmmio *m, uint32_t intid) {
   uint8_t n = m->isr != 0;
   if (n != m->nivel) {
-    m->nivel = n;
-    hv_gic_set_spi(intid, n);
+    // nivel es lo que la línea tiene de verdad: si el GIC no la cambió, el
+    // siguiente aviso lo vuelve a intentar. Antes quedaba alto sin que lo
+    // estuviera la línea, y ningún aviso más la subía: el invitado esperaba
+    // su disco o su red para siempre.
+    if (hv_gic_set_spi(intid, n) == HV_SUCCESS) m->nivel = n;
     // Un vCPU dormido en el WFI de respaldo (vm.c) no se entera solo.
     if (n) vcpu_kick_all();
   }
+}
+
+// khv_prueba_irq_nivel: sin VM no hay GIC y hv_gic_set_spi falla; nivel no
+// puede quedar alto (pruebas).
+int khv_prueba_irq_nivel(void) {
+  struct vmmio m = {0};
+  m.isr = 1;
+  vmmio_irq(&m, 40);
+  return m.nivel;
 }
 
 uint64_t khv_avisos[KHV_N_MAX];

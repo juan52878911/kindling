@@ -357,12 +357,8 @@ int khv_balloon_stats(uint64_t out[KHV_BALLOON_NSTATS], uint32_t *actual, int es
       s.m.isr |= 1;
       irq();
     }
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += (long)espera_ms * 1000000L;
-    ts.tv_sec += ts.tv_nsec / 1000000000L;
-    ts.tv_nsec %= 1000000000L;
-    while (esperar && stats_gen == gen && !g_pausa && pthread_cond_timedwait(&cv, &mu, &ts) == 0) {
+    uint64_t fin = khv_ahora_ns() + (uint64_t)(espera_ms > 0 ? espera_ms : 0) * 1000000ULL;
+    while (esperar && stats_gen == gen && !g_pausa && khv_esperar_hasta(&cv, &mu, fin) == 0) {
     }
   }
   memcpy(out, stats, sizeof stats);
