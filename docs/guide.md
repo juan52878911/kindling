@@ -318,12 +318,13 @@ And defaults, so you don't repeat the same options on every `run`:
 kling config set defaults.image min
 kling config set defaults.ttl_seconds 600
 kling config set gateway.idle 5m
-kling config set daemon.vmm vz        # the local daemon's VMM: firecracker (Linux) or vz (macOS)
+kling config set daemon.vmm hv        # the local daemon's VMM: firecracker (Linux); auto, hv or vz (macOS)
 kling config show
 ```
 
 `daemon.vmm` is read by the daemon running as that user; empty means the platform's
-(`vz` on macOS, `firecracker` on Linux), and it is validated against the machine it
+(`auto` on macOS, which picks `hv` when `kling-hv` passes its probe and `vz` otherwise;
+`firecracker` on Linux; see [`mac.md`](mac.md)), and it is validated against the machine it
 runs on. `KLING_VMM` overrides it with a backend name or a binary path.
 
 The file lives at `~/.config/kling/config.json` — on macOS too: `UserConfigDir()` would
@@ -543,6 +544,12 @@ process group on `-timeout`. Prepare a template once
 created with `-from` starts in **~300 ms** with it already inside — five in parallel took
 0.57 s in the lab.
 
+`-ttl` is its lifetime and `-on-ttl` what happens when it runs out: `remove` (the default)
+destroys it; `freeze` turns the ttl into idle time, each exec renews it, and the next one
+after it ran out wakes the sandbox in ms. `kling sandbox renew sb -ttl 10m` extends it.
+The gateway's `kling sbx new` has the opposite default (`freeze`; `-on-ttl remove` to
+destroy), because its sandboxes are meant to be idle between an agent's turns.
+
 Exec is **opt-in at boot**: it travels in the kernel command line that only the host
 writes, and it is frozen with the memory. A service microVM never has it, and a snapshot
 without it cannot become a sandbox. Guide: [`docs/exec-sandbox.md`](exec-sandbox.md).
@@ -572,12 +579,15 @@ kling completion install         # reload completion after installing one
 your `kling`, **verifies it against the release's `SHA256SUMS` before writing it**, checks
 its manifest and drops it in `~/.local/share/kling/plugins` (or the first directory of
 `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` and `-file PATH` pick another source;
-`kling plugin rm <name>` removes it. `ai` is a **built-in extension** (`kling ai model`,
+`kling plugin rm <name>` removes it. Installing an older version than the installed one
+is refused (remove it first to go back); `kling upgrade` does take extensions down to
+the core's version. `ai` is a **built-in extension** (`kling ai model`,
 `kling ai chispa`, the AI gateway): it lives inside the `kling` binary but is listed,
 documented and switched off the same way.
 
 Since 0.14 an extension's commands live **under its name**: `kling mcp add`, `kling mcp
-serve`, `kling sbx ls`. Only `connect` is promoted to the top level. The old loose verbs
+serve`, `kling db up`. Only `connect` (from kling-mcp) and `sbx` (from kling-sandbox,
+because `kling sandbox` belongs to the core) are promoted to the top level. The old loose verbs
 that warned since 0.18 were removed in 1.0 and exit 2 naming the new command: `kling mcp
 add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`, `ai model`,
 `ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`, `machine resize`,
@@ -615,6 +625,11 @@ thing from Kubernetes ([`docs/kubernetes.md`](kubernetes.md)).
 ```sh
 kling plugin install sandbox
 ```
+
+`kling sbx gateway` listens on `127.0.0.1:8090`. Off loopback it refuses to start without
+TLS (`-tls-cert`/`-tls-key`, or `sandbox.tls_cert`/`sandbox.tls_key`) or
+`-insecure-listen`, which knowingly lets tenant tokens travel in clear (behind a proxy
+that terminates TLS). Details in [`ext/sandbox/README.md`](../ext/sandbox/README.md).
 
 ## Writing an extension
 
@@ -1305,7 +1320,7 @@ The guest is third-party code: assume it is hostile. The full threat model — i
 | Daemon unreachable over the network | Unix socket only; remote access exclusively over SSH |
 | Unprivileged VMM | `setpriv` to a service user: **CapEff 0**, `no_new_privs`, only the `kvm` group |
 | No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
-| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares); CPU cgroup per machine; cap of 256 |
+| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine (`daemon.net_mibps` or `KLING_NET_MIBPS`, up to 10240; 256 for a machine with shares; Firecracker only, read on each cold boot without restarting the daemon, and a template's copies keep the limit frozen in it); CPU cgroup per machine; cap of 256 |
 | No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
 | No secrets in snapshots | secrets are injected via MMDS (shared by every session of the machine), into the live machine only |
 
@@ -1434,6 +1449,19 @@ response headers, 120 s of **inactivity** (renewed by every byte in either direc
 a hard ceiling of 15 min per request. An LLM streaming SSE for five minutes gets through.
 A stalled one, or a guest dripping bytes to hold a slot, is cut off and sees an error, not
 a response that looks complete.
+
+A Docker image with a supervised service (Hindsight, an API) reads its environment once,
+at boot. The placeholder enters the machine's environment on every `kling start`, so with
+the service already running it is enough to stop and start the machine after adding the
+credential (`kling stop` and `kling start`, with the usual `-e`: the credential's variable
+is not needed).
+
+```sh
+kling run -image hindsight -name memory -egress allowlist -allow api.minimax.io -e ...
+kling machine credential memory -domain api.minimax.io -env HINDSIGHT_API_LLM_API_KEY -f key.txt \
+  -allow-request 'POST /v1/chat/completions'
+kling stop memory && kling start memory -e ...     # the service boots with the placeholder
+```
 
 The placeholder is not a secret: the capability is being inside that machine's network,
 not knowing the string. So a machine with credentials **can be frozen**, wakes up with

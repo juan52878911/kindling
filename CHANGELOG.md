@@ -44,9 +44,6 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Changed
 
-- `allow_domains` (run, sandbox, graph nodes) rejects entries the allowlist could never match: wildcards (`*.a.com`; `a.com` already covers its subdomains), IP addresses and non-punycode international names. They used to be accepted and the guest got `REFUSED` with no hint.
-- The quota of an rw share now carries over freeze/thaw, stop/start and daemon restarts instead of starting at zero each time; `kling inspect` shows `used_bytes` and `used_files` per share.
-- The rw share free-space minimum (`daemon.share_min_free_mib`) no longer blocks rewriting a file without holes in place, and the daemon logs when a share crosses it.
 - Faster on macOS:
   - kling-hv restores no longer wait for the host's memory level: it maps memory lazily, and on a busy Mac that wait turned ~1 in 3 thaws/forks from ~40 ms into 1-2 s.
   - `fork -n N` restores up to 8 copies at once on kling-hv.
@@ -138,6 +135,9 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
 - Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
 - `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
+- `allow_domains` (run, sandbox, graph nodes) rejects entries the allowlist could never match: wildcards (`*.a.com`; `a.com` already covers its subdomains), IP addresses and non-punycode international names. They used to be accepted and the guest got `REFUSED` with no hint.
+- The quota of an rw share now carries over freeze/thaw, stop/start and daemon restarts instead of starting at zero each time; `kling inspect` shows `used_bytes` and `used_files` per share.
+- The rw share free-space minimum (`daemon.share_min_free_mib`) no longer blocks rewriting a file without holes in place, and the daemon logs when a share crosses it.
 
 ### Removed
 
@@ -146,8 +146,6 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Security
 
-- Without a copy-on-write store (macOS, or Linux without `daemon.cow`), the daemon stops a machine whose overlay file grows past its disk size, so a misbehaving VMM can't fill the host disk.
-- Linux allowlist: the IPs seeded at start expire within an hour, like the ones learned from DNS, instead of staying allowed for the life of the machine.
 - `SECURITY.md` documents known limits: with `KLING_JAILER=0` every VMM runs as the same user and can reach the other machines' VMMs and disks; `kling.ports` is an ordinary label that exposes that machine's own ports; guest symlinks in rw shares are accepted under rules; hairpin NAT through the router's public IP isn't filtered. `docs/guia.md` explains how to create the `kindling` user now that the jailer refuses to run as root.
 - macOS: kling-vz and kling-hv open their port forwards before the VM is created and then confine without permission to listen on any TCP port; the daemon keeps the addresses reported before the guest ran, requires the same ones after boot and refuses another machine's live forward. A compromised VMM could otherwise claim another machine's forward (redirecting graph edges, `UpstreamMachine` credentials and their audit) or take the free port of another machine's loopback `-upstream`. With an older daemon the profiles still allow listening on the loopback.
 - macOS: the kling-vz profile no longer allows `mach-lookup`, `iokit-open` or POSIX shared memory beyond `system.sb` (kept with a display); neither it nor kling-hv can read metadata of other machines' files. Verified with real VMs on macOS 26.5.
@@ -203,10 +201,12 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
 - `kling sbx gateway` serves HTTPS with `-tls-cert`/`-tls-key` (or `sandbox.tls_cert`/`sandbox.tls_key`) and refuses plain HTTP off loopback unless `-insecure-listen` is given. **The default listen address is now `127.0.0.1:8090`** (was `:8090`): a gateway reached from the network needs `sandbox.listen` plus a certificate, or `-insecure-listen`.
 - `kling phone view` serves the wall under a random path (`/<secret>/`, printed at start), like `kling phone mcp`; `-secret-path=false` restores `/`.
+- Without a copy-on-write store (macOS, or Linux without `daemon.cow`), the daemon stops a machine whose overlay file grows past its disk size, so a misbehaving VMM can't fill the host disk.
+- Linux allowlist: the IPs seeded at start expire within an hour, like the ones learned from DNS, instead of staying allowed for the life of the machine.
 
 ### Fixed
 
-- Shares with write-behind: a deferred write error goes to the file descriptor that wrote the data. With two descriptors on the same file, closing the other one first took the error and the writer closed cleanly.
+- Docs: commands that no longer exist (`kling squeeze`, `machine credaudit`, `renew`, `fork`, `secrets export`) and old aliases are gone from `docs/`, the READMEs and `SECURITY.md`; a test checks every cited `kling` command and `config set` key against the command tree and the extension manifests, and that `guide.md` and `guia.md` keep the same sections and commands.
 - kling-hv: when the vsock device thread stops, dials fail at once with `ENODEV` instead of each waiting its full timeout; a vsock receive round moves at most 1 MiB and stops when the VM pauses; a virtio interrupt line is recorded as raised only if the GIC accepted it; timed waits no longer follow wall-clock steps; the RAM file of a freeze is always 0600 (an APFS clone kept the mode of its golden).
 - kling-hv guests ran without KASLR. The FDT now carries `kaslr-seed` and `rng-seed` on every cold boot, and the guest kernel trusts the bootloader seed. Clones never boot again, so they don't reuse a seed.
 - kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
@@ -329,6 +329,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
 - `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.
 - `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
+- Shares with write-behind: a deferred write error goes to the file descriptor that wrote the data. With two descriptors on the same file, closing the other one first took the error and the writer closed cleanly.
 
 ## [0.20.1] - 2026-10-28
 

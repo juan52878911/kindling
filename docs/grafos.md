@@ -166,7 +166,7 @@ sirve de plantilla (apunta al disco de esa máquina), por eso se despierta. Cues
 `thaw` y un `freeze` por nodo congelado. Si algo falla, también vuelven a congelarse.
 
 **Volúmenes.** Un nodo con volúmenes los **suelta** antes de la pausa, con el invitado
-aún en marcha (lo mismo que `kling commit` de una máquina: la caché de ext4 no puede
+aún en marcha (lo mismo que `kling save` de una máquina: la caché de ext4 no puede
 ir en la memoria volcada de un disco que no viaja con ella), y los recupera tras
 reanudarse. Entre soltarlos y la pausa (milisegundos), el servicio del nodo no ve su
 volumen. Las plantillas llevan el volumen apuntado, como las de `commit`. Dos casos
@@ -263,7 +263,7 @@ carpeta `/data` **de `files`**. De quién es la carpeta:
 
 **Snapshot y fork de un grafo con `share`: no en esta versión (409).** La memoria
 volcada de un nodo lleva montada su carpeta viva y cada instancia restaurada despertaría
-con un montaje que no le corresponde; es el mismo motivo por el que `kling commit` no
+con un montaje que no le corresponde; es el mismo motivo por el que `kling save` no
 toma una máquina con `-share`. `freeze` y `thaw` sí funcionan: la carpeta se vuelve a
 enganchar al despertar. Cuando se levante, lo definido es que cada copia de un fork
 tenga **su propia copia** de la carpeta, nunca la del original: igual que sus nodos, las
@@ -308,7 +308,7 @@ congelar solo tras N segundos sin conexiones nuevas, no N segundos después de a
 - Cuenta el **comienzo** de cada conexión, no su duración: una conexión abierta más de N
   segundos sin que llegue otra se corta al congelarse el nodo, como siempre. Para
   conexiones largas, un `idle_freeze` mayor que su duración.
-- `kling renew` sobre la máquina del nodo sigue funcionando igual.
+- `kling sandbox renew` sobre la máquina del nodo sigue funcionando igual.
 
 ## Cómo llega un nodo a otro (macOS)
 

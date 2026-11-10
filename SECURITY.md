@@ -1,5 +1,10 @@
 # Modelo de amenaza
 
+> **Reporting a vulnerability:** report it privately from the repository's **Security**
+> tab → **Report a vulnerability** (GitHub Private Vulnerability Reporting), not in a
+> public issue. The threat model below is written in Spanish; its last section,
+> [«Reportar una vulnerabilidad»](#reportar-una-vulnerabilidad), says the same.
+
 kindling existe para alojar **servidores MCP de terceros** invocados por un modelo. No se
 sabe de antemano qué código va dentro, así que la premisa es:
 
@@ -1361,7 +1366,7 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     `snapshots/` (dos reglas al final del perfil, por si el daemon le pasara ahí un
     disco). `kling-vz` no necesita ninguna clave de disco: las credenciales le llegan ya
     en claro por su API.
-  - **Dorados**: `kling commit` pide el volcado en el directorio de la máquina y el
+  - **Dorados**: `kling save` pide el volcado en el directorio de la máquina y el
     daemon, que creó `snapshots/<nombre>/`, lo clona (`fclonefileat`) a su sitio. No se
     fía de `kling-vz`: abre el directorio de la máquina y el volcado sin seguir enlaces,
     exige un fichero regular, suyo y con un solo enlace (un hardlink a algo que el VMM
@@ -1844,8 +1849,8 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   (`guest_ipv6_off` en su meta; ausente en los anteriores a este cambio, que se leen como
   "no consta", nunca como "confirmado sin ella"). La primera vez que se instancia un
   dorado sin esa marca, el daemon avisa una vez (log y evento `snapshot.guest_ipv6`) con
-  cómo rehacerlo, y `kling snapshots` / `kling template inspect <nombre>` lo señalan. Un
-  dorado nuevo, o uno recongelado tras este cambio (`kling commit -replace <máquina>
+  cómo rehacerlo, y `kling template ls` / `kling template inspect <nombre>` lo señalan. Un
+  dorado nuevo, o uno recongelado tras este cambio (`kling save -replace <máquina>
   <nombre>`), ya arranca con el módulo descargado y no vuelve a avisar.
 
 ## Ante un incidente

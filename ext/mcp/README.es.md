@@ -27,8 +27,8 @@ release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-kling plugins install mcp     # o: install.sh --with mcp
-kling plugins ls              # debería salir mcp con estado ok
+kling plugin install mcp      # o: install.sh --with mcp
+kling plugin ls               # debería salir mcp con estado ok
 ```
 
 Eso instala `kling-mcp` y su compañero `kling-bridge` en tu máquina, los dos verificados
@@ -129,7 +129,7 @@ arrancando veinte máquinas.
 Con `mcp import`, el catálogo vive en disco junto al snapshot:
 
 ```sh
-kling mcp list -v          # cada herramienta, sin arrancar nada
+kling mcp ls -v            # cada herramienta, sin arrancar nada
 kling mcp refresh <svc>    # recaptura tras actualizar el servidor
 ```
 
@@ -168,7 +168,7 @@ sudo ./scripts/80-mcp-image.sh stdio files -p "nodejs npm" -- \
      npx -y @modelcontextprotocol/server-filesystem /data
 
 kling run -name files-tmpl -image files -service files
-kling commit files-tmpl files && kling stop files-tmpl
+kling save files-tmpl files && kling stop files-tmpl
 ```
 
 ### Servidores que ya hablan HTTP
@@ -561,9 +561,16 @@ proyecto.
 ```sh
 kling mcp memory status        # si está activa y contra qué
 kling mcp memory install-service # deja el puente local como servicio permanente (macOS)
+kling mcp memory install-service -repair # apunta ese servicio al puente de ahora
 kling mcp memory enable        # usa engram; -service <svc> para otro
 kling mcp memory disable
 ```
+
+`-repair` reescribe el LaunchAgent instalado con el `kling-bridge` que está ahora junto a
+`kling-mcp`, conservando su `-listen` y su orden: para cuando el puente cambió de sitio
+(un `make install` antiguo lo dejaba en `~/.local/bin`) y launchd sale con 78 en cada
+intento. `kling plugin install mcp` y `kling upgrade -cli` lo hacen solos cuando el
+servicio apunta a un puente que ya no está, y `kling doctor` lo señala.
 
 Cuando está activa, el gateway anota en el servicio de memoria qué herramienta resolvió
 cada petición, y usa ese historial para ordenar mejor las búsquedas siguientes:

@@ -307,7 +307,7 @@ kling exec agente -- wget -qO- http://host.kindling.internal:11434/api/tags
   la pide por el broker de enlaces (como las aristas de los grafos y el
   `-upstream 127.0.0.1` del proxy de credenciales), y el daemon comprueba que
   ese puerto es de esa máquina. Queda una línea por conexión en su registro de
-  auditoría (`kling machine credaudit`, `kind: link`, `host.kindling.internal:PUERTO`)
+  auditoría (`kling machine audit`, `kind: link`, `host.kindling.internal:PUERTO`)
   y, mientras dura, cuenta como uso: una máquina con una petición al modelo en
   curso no es ociosa para la [presión de memoria](#presión-de-memoria).
 - No valen como puerto del invitado el 53, el 80 ni el 443 (DNS y proxy de
@@ -426,7 +426,7 @@ también hace sitio con las que corren. En cada vuelta del vigilante (cada
 10 s; 30 s en batería) lee `kern.memorystatus_vm_pressure_level` (un sysctl,
 sin cgo ni procesos: 1 normal, 2 aviso, 4 crítico) y:
 
-- **en aviso**, aprieta el globo (`kling squeeze`) de las máquinas ociosas:
+- **en aviso**, aprieta el globo (`kling machine squeeze`) de las máquinas ociosas:
   devuelve al Mac la RAM que su invitado tiene libre o en caché, sin parar
   nada;
 - **en crítico**, además congela (`kling freeze`) la ociosa que más ocupa: su
@@ -455,7 +455,7 @@ sin pasar por el daemon (puertos publicados, servicios del planificador,
 fondos, grafos, `kling db`, carpetas vivas): esas las duerme
 `daemon.idle_freeze` o el planificador con su propio plazo. Las copias de un
 dorado que comparten su memoria no se aprietan (subiría la memoria del host,
-ver `kling squeeze`), pero sí se pueden congelar. Antes de congelar se vuelve a
+ver `kling machine squeeze`), pero sí se pueden congelar. Antes de congelar se vuelve a
 mirar con el cerrojo de la máquina tomado: si entre medias le llegó una
 petición, no se toca.
 
