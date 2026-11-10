@@ -163,7 +163,7 @@ Cómo viaja, y dónde **no** está:
 Lo que sí queda: el entorno del proceso del servicio (como en Docker, legible
 por su usuario y por root en `/proc/<pid>/environ`) y, por tanto, la memoria
 de la máquina. Todo lo que vuelca la RAM a disco la lleva: `kling freeze`
-(también el de `on_ttl`, que por defecto congela), `kling fork` y `kling save`.
+(también el de `on_ttl`, que por defecto congela), `kling sandbox fork` y `kling save`.
 A diferencia de los secretos de sesión (`kling machine secret`, que marcan la
 máquina y no dejan congelarla), el entorno se trata como configuración: se
 congela con ella, en ficheros 0600 del daemon. **`kling save` congela esa memoria**: una plantilla lleva el

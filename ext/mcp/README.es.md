@@ -27,8 +27,8 @@ release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-kling plugins install mcp     # o: install.sh --with mcp
-kling plugins ls              # debería salir mcp con estado ok
+kling plugin install mcp      # o: install.sh --with mcp
+kling plugin ls               # debería salir mcp con estado ok
 ```
 
 Eso instala `kling-mcp` y su compañero `kling-bridge` en tu máquina, los dos verificados
@@ -129,7 +129,7 @@ arrancando veinte máquinas.
 Con `mcp import`, el catálogo vive en disco junto al snapshot:
 
 ```sh
-kling mcp list -v          # cada herramienta, sin arrancar nada
+kling mcp ls -v            # cada herramienta, sin arrancar nada
 kling mcp refresh <svc>    # recaptura tras actualizar el servidor
 ```
 
@@ -168,7 +168,7 @@ sudo ./scripts/80-mcp-image.sh stdio files -p "nodejs npm" -- \
      npx -y @modelcontextprotocol/server-filesystem /data
 
 kling run -name files-tmpl -image files -service files
-kling commit files-tmpl files && kling stop files-tmpl
+kling save files-tmpl files && kling stop files-tmpl
 ```
 
 ### Servidores que ya hablan HTTP

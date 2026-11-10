@@ -577,7 +577,8 @@ its manifest and drops it in `~/.local/share/kling/plugins` (or the first direct
 documented and switched off the same way.
 
 Since 0.14 an extension's commands live **under its name**: `kling mcp add`, `kling mcp
-serve`, `kling sbx ls`. Only `connect` is promoted to the top level. The old loose verbs
+serve`, `kling db up`. Only `connect` (from kling-mcp) and `sbx` (from kling-sandbox,
+because `kling sandbox` belongs to the core) are promoted to the top level. The old loose verbs
 that warned since 0.18 were removed in 1.0 and exit 2 naming the new command: `kling mcp
 add`, `mcp search`, `mcp serve`, `mcp export`, `mcp memory`, `mcp migrate`, `ai model`,
 `ai chispa`, `template rm`, `image`, `volume`, `sandbox`, `status -v`, `machine resize`,
@@ -1425,6 +1426,19 @@ response headers, 120 s of **inactivity** (renewed by every byte in either direc
 a hard ceiling of 15 min per request. An LLM streaming SSE for five minutes gets through.
 A stalled one, or a guest dripping bytes to hold a slot, is cut off and sees an error, not
 a response that looks complete.
+
+A Docker image with a supervised service (Hindsight, an API) reads its environment once,
+at boot. The placeholder enters the machine's environment on every `kling start`, so with
+the service already running it is enough to stop and start the machine after adding the
+credential (`kling stop` and `kling start`, with the usual `-e`: the credential's variable
+is not needed).
+
+```sh
+kling run -image hindsight -name memory -egress allowlist -allow api.minimax.io -e ...
+kling machine credential memory -domain api.minimax.io -env HINDSIGHT_API_LLM_API_KEY -f key.txt \
+  -allow-request 'POST /v1/chat/completions'
+kling stop memory && kling start memory -e ...     # the service boots with the placeholder
+```
 
 The placeholder is not a secret: the capability is being inside that machine's network,
 not knowing the string. So a machine with credentials **can be frozen**, wakes up with

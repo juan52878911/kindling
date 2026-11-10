@@ -40,7 +40,7 @@ En macOS el sitio natural es `kling-vz`: ya termina cada flujo TCP del invitado 
 pila gVisor, así que puede leer el ClientHello en el reenviador sin DNAT ni listener
 aparte. En Linux, una regla DNAT del namespace manda `HostIP:443` al proxy, que puede
 vivir en el mismo proceso que el de credenciales; las dos funciones comparten el
-resolver y el registro de auditoría (`kling egress` enseñaría el SNI rechazado).
+resolver y el registro de auditoría (`kling machine audit` enseñaría el SNI rechazado).
 
 ## Lo que no es TLS sobre TCP
 
