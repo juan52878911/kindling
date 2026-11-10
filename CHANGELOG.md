@@ -40,6 +40,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling doctor` checks the daemon's socket and its free disk against the admission minimum; `/info` reports `disk_free_bytes` (admin view).
 - Hints from the daemon's error codes: `disk_full` and `insufficient_memory` say what to do; a missing kernel points to `kling up -check`, an invalid name gives the naming rules, and `kling db` without the extension says what to install.
 - Guest agent: `POST /drop-caches` syncs and drops the guest page cache, returning `Cached` before and after (capability `drop-caches`, control path). The host does not call it yet.
+- `kling image refresh [image...]` puts the daemon's `kling-guest` into images that carry an older one, without rebuilding them (layers take it from their base; images whose agent is another architecture are skipped). `kling mcp memory install-service -repair` points the bridge LaunchAgent at the current bridge, keeping its arguments.
 
 ### Changed
 
@@ -132,6 +133,8 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
 - CI: the macOS job runs the tests of the whole core and `ext/sandbox` (before, only `internal/machine` and `internal/daemon`), and 42 more `internal/machine` tests (commit, fork, freeze, VMM process tracking) now run on macOS instead of skipping; the Linux e2e runs the `internal/net` ipset tests as root; `go.work` is checked against `vz/go.mod`; without an Apple Silicon runner, `e2e-mac` shows a "not run" job on every push to `main`, which `scripts/release.sh` does not accept as the kling-hv e2e.
 - `kling plugin install x@vOLD` refuses to replace a newer installed version; remove it first to go back. `kling upgrade` still moves extensions with the core.
+- Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
+- `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
 
 ### Removed
 
@@ -316,6 +319,9 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - MCP gateway: the reaper could freeze an instance just picked for a new session, so its `initialize` got a 502.
 - MCP gateway: requests for services without a snapshot left a lock behind per name.
 - `kling mcp` no longer follows redirects when it talks to an MCP URL directly.
+- Guest agents of v0.20 are no longer flagged as more than one minor behind a 1.0 daemon (1.0 is the minor after 0.20). The doctor line for an agent older than v0.18 no longer says it works.
+- macOS: `from_host` (`kling image put -from-host`, `kling mcp refresh-bridge`) looks in the data root's `lib/` instead of `/usr/local/lib/kindling`, which does not exist there.
+- `kling doctor` fails when the `com.kindling.bridge` LaunchAgent runs a program that no longer exists (launchd exit 78), and `kling plugin install mcp` / `kling upgrade` regenerate it with the bridge they installed.
 - `kling sbx` prewarm pool: a failed or stopped prewarmed sandbox no longer holds a pool slot forever (each create then fell back to a restore); it is removed and replaced.
 
 ## [0.20.1] - 2026-10-28

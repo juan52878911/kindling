@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -21,7 +23,9 @@ func cmdImages(args []string) error {
 	switch args[0] {
 	case "ls", "list":
 		return imagesList(args[1:])
-	case "refresh", "refresh-bridge":
+	case "refresh":
+		return imagesRefresh(args[1:])
+	case "refresh-bridge":
 		// El puente es de kindling-mcp y su recambio también.
 		return fmt.Errorf("the bridge belongs to kindling-mcp now: kling mcp refresh-bridge [image...]")
 	case "toolchain":
@@ -267,8 +271,10 @@ func imagesToolchain(args []string) error {
 // `image ls` lo marca), o "" si no lo es o no se sabe. Viejo es:
 //
 //   - anterior a v0.18 (no anuncia capacidades, y un parámetro nuevo de la
-//     línea del kernel podía tumbar su PID 1): fuera de la compatibilidad;
-//   - más de una MINOR por detrás del daemon.
+//     línea del kernel podía tumbar su PID 1): fuera de la compatibilidad, y
+//     degradado (docs/compatibilidad.md);
+//   - más de una release MINOR por detrás del daemon, contando 1.0 como la que
+//     sigue a 0.20 (ordinalRelease).
 //
 // Solo se juzga kling-guest (o lo que no dice su nombre: una receta de
 // antes): otro agente (kling-bridge de kindling-mcp) lleva su versión.
@@ -280,7 +286,7 @@ func agenteViejo(ag *api.GuestAgent, kling string) string {
 	// Uno que contestó sin decir nada de sí mismo (lo apuntó el daemon al
 	// arrancar una máquina de la imagen) es anterior a v0.18.
 	if ag.Agent == "" && ag.Version == "" && ag.Caps == nil {
-		return "guest agent announces nothing about itself (older than v0.18): it is outside compatibility"
+		return "guest agent announces nothing about itself (older than v0.18): " + fueraDeCompat
 	}
 	ma, mi, ok := mayorMenor(ag.Version)
 	ka, ki, kok := mayorMenor(kling)
@@ -289,13 +295,46 @@ func agenteViejo(ag *api.GuestAgent, kling string) string {
 	}
 	desc := "v" + strings.TrimPrefix(ag.Version, "v")
 	if ma == 0 && mi < 18 {
-		return fmt.Sprintf("guest agent %s is older than v0.18: it announces no capabilities and is outside compatibility", desc)
+		return fmt.Sprintf("guest agent %s is older than v0.18: %s", desc, fueraDeCompat)
+	}
+	kv := strings.TrimPrefix(kling, "v")
+	a, aok := ordinalRelease(ma, mi)
+	k, kok := ordinalRelease(ka, ki)
+	if !aok || !kok {
+		// Sin saber cuántas MINOR tuvo una MAJOR, solo se ve que es de otra.
+		if ma < ka {
+			return fmt.Sprintf("guest agent %s is from an older MAJOR than kling v%s: it works, degraded", desc, kv)
+		}
+		return ""
 	}
 	// Una MINOR "por detrás" cuenta igual a través de una MAJOR (0.20 → 1.0).
-	if (ka*1000+ki)-(ma*1000+mi) > 1 {
-		return fmt.Sprintf("guest agent %s is more than one minor behind kling v%s", desc, strings.TrimPrefix(kling, "v"))
+	if k-a > 1 {
+		return fmt.Sprintf("guest agent %s is more than one minor behind kling v%s: it works, degraded", desc, kv)
 	}
 	return ""
+}
+
+// fueraDeCompat es lo que le pasa a un agente anterior a v0.18: arranca, pero
+// sin resync, ready, hooks ni carpetas, y -e, cmd y volume_wait fallan.
+const fueraDeCompat = "outside compatibility, degraded (no resync, ready, hooks or shares; run -e fails)"
+
+// ultimaMenor es la última MINOR de cada MAJOR ya cerrada: 1.0 sigue a 0.20.
+// Al sacar la 2.0 hay que apuntar aquí la última 1.x.
+var ultimaMenor = map[int]int{0: 20}
+
+// ordinalRelease numera las releases MINOR seguidas a través de las MAJOR
+// (0.20 → 20, 1.0 → 21, 1.1 → 22): la distancia entre dos es cuántas MINOR
+// hay entre ellas. false si una MAJOR anterior no consta en ultimaMenor.
+func ordinalRelease(mayor, menor int) (int, bool) {
+	n := 0
+	for m := 0; m < mayor; m++ {
+		u, ok := ultimaMenor[m]
+		if !ok {
+			return 0, false
+		}
+		n += u + 1
+	}
+	return n + menor, true
 }
 
 // mayorMenor lee MAJOR y MINOR de "v0.19.2" / "0.19.2-rc1".
@@ -309,8 +348,143 @@ func mayorMenor(v string) (int, int, bool) {
 	return a, i, err1 == nil && err2 == nil
 }
 
-// pistaRehacer es cómo se rehace una imagen para que lleve el agente nuevo.
-const pistaRehacer = "rebuild it: kling image import -replace <ref> (or compose up -fresh, kling mcp import -force)"
+// pistaRehacer es cómo se pone el agente nuevo en una imagen: cambiarlo dentro
+// sin reconstruirla, o reconstruirla.
+const pistaRehacer = "put the current agent in it: kling image refresh <image> " +
+	"(or rebuild it: kling image import -replace <ref>, compose up -fresh, kling mcp import -force)"
+
+// imagesRefresh pone el kling-guest del daemon (el de su directorio lib, el
+// que deja kling upgrade) en las imágenes que ya llevan uno, sin
+// reconstruirlas: un agente viejo sigue funcionando, degradado, y esto lo pone
+// al día. Es el gemelo de `kling mcp refresh-bridge` para el agente del
+// núcleo, con la misma API (PUT /images/{name}/files con from_host).
+func imagesRefresh(args []string) error {
+	fs := flag.NewFlagSet("image refresh", flag.ContinueOnError)
+	host := hostFlag(fs)
+	if err := parseFlags(fs, reorderFor(fs, args)); err != nil {
+		return err
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	res, err := refreshAgents(ctx, c, fs.Args())
+	if err != nil {
+		return err
+	}
+	if len(res) == 0 {
+		fmt.Println("no images built yet")
+		return nil
+	}
+	var hechas, saltadas, fallos int
+	var cambiadas []string
+	for _, r := range res {
+		switch {
+		case r.Error != "" && r.Skipped:
+			fmt.Printf("  -  %-24s %s\n", r.Image, r.Error)
+			saltadas++
+		case r.Error != "":
+			fmt.Printf("  x  %-24s %s\n", r.Image, r.Error)
+			fallos++
+		case r.Updated:
+			fmt.Printf("  ok %-24s guest agent updated\n", r.Image)
+			hechas++
+			cambiadas = append(cambiadas, r.Image)
+		default:
+			fmt.Printf("     %-24s already up to date\n", r.Image)
+		}
+	}
+	fmt.Printf("\n%d updated, %d up to date, %d skipped, %d failed\n",
+		hechas, len(res)-hechas-saltadas-fallos, saltadas, fallos)
+	// Un dorado se congeló con el agente viejo en memoria: sigue con él.
+	if tpls := doradosDe(ctx, c, cambiadas); len(tpls) > 0 {
+		fmt.Printf("\nThese templates were frozen with the old agent and keep it until rebuilt: %s\n", recortarLista(tpls, 8))
+	}
+	if fallos > 0 {
+		return fmt.Errorf("%d image(s) failed to update", fallos)
+	}
+	return nil
+}
+
+// refreshAgents pone el agente del daemon en las imágenes names (todas si no
+// hay ninguna). Solo reemplaza: una imagen sin /usr/local/bin/kling-guest —una
+// capa, que lo toma de su base— sale saltada. Tampoco toca una imagen cuyo
+// agente es de otra arquitectura que la del daemon: el de su lib la dejaría sin
+// arrancar.
+func refreshAgents(ctx context.Context, c *api.Client, names []string) ([]api.ImageFileResult, error) {
+	info, err := c.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		imgs, err := c.Images(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range imgs {
+			names = append(names, i.Name)
+		}
+	}
+	out := make([]api.ImageFileResult, 0, len(names))
+	for _, name := range names {
+		if arch := archDelAgente(ctx, c, name); arch != "" && info.Arch != "" && arch != info.Arch {
+			out = append(out, api.ImageFileResult{Image: name, Skipped: true,
+				Error: fmt.Sprintf("its agent is %s and the daemon's is %s: rebuild it (kling image import -replace <ref>)", arch, info.Arch)})
+			continue
+		}
+		r, err := c.PutImageFile(ctx, name, api.PutImageFileRequest{
+			Path: "/usr/local/bin/kling-guest", Mode: "0755", FromHost: "kling-guest",
+		})
+		switch {
+		case err != nil:
+			out = append(out, api.ImageFileResult{Image: name, Error: err.Error()})
+		case r.Skipped:
+			r.Error = "has no guest agent of its own (a layer takes it from its base: refresh the base)"
+			out = append(out, *r)
+		default:
+			out = append(out, *r)
+		}
+	}
+	return out, nil
+}
+
+// archDelAgente es la arquitectura del agente que lleva la imagen según su
+// receta (built.agent_arch en una emulada, si no built.arch), o "" si no
+// consta: entonces es la del host que la construyó, la del daemon.
+func archDelAgente(ctx context.Context, c *api.Client, name string) string {
+	rec, err := c.ImageRecipe(ctx, name)
+	if err != nil || rec == nil || len(rec.Built) == 0 {
+		return ""
+	}
+	var b struct {
+		Arch      string `json:"arch"`
+		AgentArch string `json:"agent_arch"`
+	}
+	if json.Unmarshal(rec.Built, &b) != nil {
+		return ""
+	}
+	if b.AgentArch != "" {
+		return b.AgentArch
+	}
+	return b.Arch
+}
+
+// doradosDe son los dorados hechos de alguna de las imágenes.
+func doradosDe(ctx context.Context, c *api.Client, imgs []string) []string {
+	if len(imgs) == 0 {
+		return nil
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, s := range snaps {
+		if s != nil && slices.Contains(imgs, s.Image) {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
 
 // imagesRecipe enseña cómo se construyó una imagen.
 //

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
@@ -69,6 +70,9 @@ type doctorInput struct {
 	// socket es el socket Unix del daemon visto desde aquí (sondearSocket);
 	// nil si el endpoint no es un socket local (ssh://).
 	socket *socketProbe
+	// bridge es el LaunchAgent com.kindling.bridge (nil si no hay): un
+	// programa que ya no existe lo tumba en cada arranque.
+	bridge *servicioPuente
 }
 
 func cmdDoctor(args []string) error {
@@ -124,6 +128,7 @@ func cmdDoctor(args []string) error {
 	cancel()
 
 	in.socket = sondearSocket(endpoint)
+	in.bridge = sondearServicioPuente()
 	checks := doctorChecks(in)
 	if *asJSON {
 		checks = append(deRuntime, checks...)
@@ -197,7 +202,7 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		v := doctorCheck{Name: "versions"}
 		cli, dmn := strings.TrimPrefix(in.cliVersion, "v"), strings.TrimPrefix(in.info.Version, "v")
 		switch {
-		case cli == "dev" || dmn == "dev" || cli == "" || dmn == "":
+		case buildver.IsDev(cli) || buildver.IsDev(dmn):
 			v.State, v.Detail = doctorOK, fmt.Sprintf("CLI %s, daemon %s (development build: not compared)", in.cliVersion, in.info.Version)
 		case cli == dmn:
 			v.State, v.Detail = doctorOK, "CLI and daemon are both "+in.cliVersion
@@ -300,14 +305,20 @@ func doctorChecks(in doctorInput) []doctorCheck {
 	case !in.extDirOK:
 		dir.Detail += " (does not exist yet; kling plugin install creates it)"
 	case len(in.companions) > 0 && !inDirs(in.extDir, in.pathDirs):
-		// kling encuentra las extensiones igual; lo que no se encuentra son los
-		// ejecutables que las acompañan (kling-bridge) si alguien los llama a
-		// mano. Sin compañeros ahí no hay nada que avisar.
-		dir.State = doctorWarn
-		dir.Detail += fmt.Sprintf(" (searched by kling, but not on PATH: %s installed there cannot be run by name)", strings.Join(in.companions, ", "))
-		dir.Fix = fmt.Sprintf(`export PATH="%s:$PATH"`, in.extDir)
+		// kling encuentra las extensiones igual, y nadie llama a sus
+		// compañeros por su nombre: kling-mcp busca kling-bridge a su lado y
+		// el LaunchAgent lleva la ruta absoluta. Solo se dice; el aviso
+		// distraía del servicio roto de verdad (checkServicioPuente).
+		dir.Detail += fmt.Sprintf(" (searched by kling; not on PATH, so %s cannot be run by name by hand)", strings.Join(in.companions, ", "))
 	}
 	out = append(out, dir)
+	mcp := false
+	for _, p := range in.plugins {
+		mcp = mcp || (p.Name == "mcp" && p.Err == nil && !p.Disabled)
+	}
+	if c, ok := checkServicioPuente(in.bridge, mcp); ok {
+		out = append(out, c)
+	}
 	return out
 }
 
@@ -447,7 +458,7 @@ func delMismoVMM(snaps []*api.Snapshot, info *api.Info) []*api.Snapshot {
 }
 
 // checkAgentesViejos avisa de las imágenes cuyo agente de invitado es viejo
-// para este daemon (agenteViejo): siguen funcionando, degradadas.
+// para este daemon (agenteViejo): degradadas, o fuera de la compatibilidad.
 func checkAgentesViejos(imgs []api.Image, kling string) (doctorCheck, bool) {
 	var names []string
 	var por string
@@ -464,9 +475,11 @@ func checkAgentesViejos(imgs []api.Image, kling string) (doctorCheck, bool) {
 	if len(shown) > 5 {
 		shown = append(shown[:5:5], fmt.Sprintf("and %d more", len(names)-5))
 	}
-	detail := fmt.Sprintf("%d with an old guest agent (they work, without what it lacks): %s", len(names), strings.Join(shown, ", "))
+	// El motivo ya dice cuánto se degrada: "funciona" no vale para uno
+	// anterior a v0.18, que está fuera de la compatibilidad.
+	detail := fmt.Sprintf("%d with an old guest agent, degraded: %s", len(names), strings.Join(shown, ", "))
 	if len(names) == 1 {
-		detail = fmt.Sprintf("%s: %s (it works, without what it lacks)", names[0], por)
+		detail = fmt.Sprintf("%s: %s", names[0], por)
 	}
 	return doctorCheck{Name: "images", State: doctorWarn, Detail: detail,
 		Fix: "kling image ls says which; " + pistaRehacer}, true

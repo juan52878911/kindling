@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
@@ -149,7 +150,7 @@ func writeVersion(w io.Writer, cli, endpoint string, info *api.Info, agentes []s
 	if len(agentes) > 0 {
 		fmt.Fprintf(w, "agent:  %s (as announced by its machines)\n", strings.Join(agentes, ", "))
 	}
-	if a, b := strings.TrimPrefix(cli, "v"), strings.TrimPrefix(info.Version, "v"); a != b && a != "dev" && b != "dev" {
+	if a, b := strings.TrimPrefix(cli, "v"), strings.TrimPrefix(info.Version, "v"); a != b && !buildver.IsDev(a) && !buildver.IsDev(b) {
 		fmt.Fprintln(w, "note: CLI and daemon differ; upgrade the older one (kling doctor)")
 	}
 	return nil

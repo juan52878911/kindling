@@ -23,7 +23,7 @@ func TestImageSubcommandsHaveHelp(t *testing.T) {
 	}
 	for _, m := range caseRe.FindAllStringSubmatch(string(src), -1) {
 		sub := m[1]
-		if sub == "refresh" { // solo redirige a kling mcp refresh-bridge
+		if sub == "refresh-bridge" { // solo redirige a kling mcp refresh-bridge
 			continue
 		}
 		if !slices.Contains(img.Subcommands, sub) {

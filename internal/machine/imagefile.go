@@ -204,5 +204,9 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 		return res, ErrNotInImage
 	}
 	res.Updated = updated
+	if err == nil && p == "/"+guestAgentPath {
+		// El agente de la receta era el de antes: que no se siga juzgando.
+		m.OlvidarAgenteDeImagen(image)
+	}
 	return res, err
 }
