@@ -284,9 +284,25 @@ dejar que un instalador toque nftables y cree usuarios de sistema por su cuenta 
 una confianza que no hace falta pedir. El kernel y la imagen base van dentro del binario,
 así que no hay ningún script que correr antes.
 
-Los dos fallos silenciosos que caza — los que cuestan una tarde si se cuelan — son un
-`nft` ausente (las microVMs arrancan sin red) y un usuario `kindling` ausente
-(Firecracker acaba corriendo como root).
+Los dos fallos que caza — los que cuestan una tarde si se cuelan — son un `nft` ausente
+(las microVMs arrancan sin red) y un usuario `kindling` ausente. Lo segundo ya no es
+silencioso: con el `jailer` instalado y sin ese usuario, el daemon **se niega a arrancar
+máquinas** (`refusing to start: jailer would run Firecracker as ROOT ...`) en vez de
+jailear Firecracker como root, como hacía antes con un aviso (por qué, en
+[SECURITY.md §11](../SECURITY.md#11-jailer-obligatorio-por-defecto-en-linux)). Para
+migrar un host que venía arrancando así:
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kindling
+sudo usermod -aG kvm kindling
+sudo systemctl restart kling     # la decisión se toma al arrancar el daemon
+```
+
+Si el usuario del VMM tiene otro nombre, pásalo con `-run-as` (o `KLING_RUN_AS`); tiene
+que estar en el grupo `kvm`. `KLING_JAILER=1` sigue arrancando con el modo viejo (jailer
+como root) para quien lo acepte, con un «SECURITY WARNING» en el log de arranque; y
+`KLING_JAILER=0` arranca sin jailer. Ninguno de los dos es una migración: son salidas
+explícitas que dejan el VMM con más poder del necesario.
 
 ## Conexión
 
