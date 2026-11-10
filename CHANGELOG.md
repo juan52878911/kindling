@@ -192,6 +192,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - `kling db rotate`: when a failed rotation cannot confirm the old password, the advice is to rotate again (keeps the data) instead of `reset`.
 - Template signatures are required by default: an unsigned template (made before signing, copied from another host, or with its signature and digests stripped from `meta.json`) no longer restores, and the error says how to recreate it. On startup the daemon re-signs in v2 every v1-signed template whose signature and digests still match, then rejects v1 signatures (they don't cover labels, limits or the memory dump). `daemon.require_signed off` (or `KLING_REQUIRE_SIGNED=0`) accepts both as before. See `docs/actualizar.md`.
 - Linux: e2fsck, resize2fs and debugfs no longer run as the VMM user. The daemon re-executes itself into new mount, network, PID and IPC namespaces, chroots into a minimal read-only root, drops to nobody with `RLIMIT_AS` and `no_new_privs`, and hands the disk over by descriptor; the memory cap no longer needs `prlimit`. Where the jail can't be mounted it warns and runs without chroot. macOS: a missing `sandbox-exec` is warned about and refused when the daemon is root. `kling doctor` shows `e2fs_confinement` and `KLING_REQUIRE_SIGNED`.
+- macOS: thaw reads a frozen machine's `mem.file` (up to 512 MiB) in the background, as Linux already did. With the file out of the cache, resync 80 → 2.3 ms and wake 114 → 48 ms (M4, kling-hv, Alpine 256 MiB, median of 7).
 
 ### Fixed
 
