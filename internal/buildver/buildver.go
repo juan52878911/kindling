@@ -12,6 +12,9 @@ import (
 // debug.ReadBuildInfo: "X.Y.Z" de una etiqueta limpia, o "dev+<8 de la
 // revisión>[.dirty]". Sin nada de eso, v tal cual.
 func Version(v string) string {
+	if v != "" && v != "dev" {
+		return v
+	}
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return v
