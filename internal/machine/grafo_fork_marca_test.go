@@ -3,7 +3,6 @@ package machine
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,9 +16,7 @@ import (
 // con la marca después, un corte entre las dos dejaba una plantilla válida que
 // no recogían ni el barrido de restos ni barrerForks.
 func TestGraphForkMarcaAntesDelMeta(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil && !volcadoEnLaMaquina {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	const id = "c0aa170000000104"
 	falso := plantillaSinProceso(t, m, id)
@@ -79,9 +76,7 @@ func TestGraphForkMarcaAntesDelMeta(t *testing.T) {
 // quedaba un mapa vacío, firmado como {} y leído de meta.json (omitempty)
 // como null, y la restauración daba "snapshot signature does not match".
 func TestGraphForkFirmaV2SobreviveAlMeta(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil && !volcadoEnLaMaquina {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	const id = "c0aa170000000105"
 	const nombre = "gfork-3db338ace26a-web-6e690f63"

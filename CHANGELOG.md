@@ -131,6 +131,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 - kling-hv: an idle machine no longer wakes its QoS watcher every 2 s; the watcher is woken by the guest's virtual-timer exits (50 of them, 0.2 s of a busy vCPU) and otherwise only every 60 s.
 - kling-hv: when the Mac runs out of Hypervisor.framework VMs (`HV_NO_RESOURCES`, about 127 per Mac counting kling-vz), kling-hv answers 507 with a message that says so instead of a 400 with a bare `0x…` code.
 - `scripts/release.sh`: a `ci.yml` job that was skipped or is missing no longer counts as green; `KLING_E2E_HV` is no longer accepted (the proof is the `e2e-mac/kling-hv` commit status that `scripts/e2e-mac-release.sh` publishes); it refuses to tag while `[Unreleased]` has entries; `-n` is `--dry-run`, which now exits 1 when the release would be stopped.
+- CI: the macOS job runs the tests of the whole core and `ext/sandbox` (before, only `internal/machine` and `internal/daemon`), and 42 more `internal/machine` tests (commit, fork, freeze, VMM process tracking) now run on macOS instead of skipping; the Linux e2e runs the `internal/net` ipset tests as root; `go.work` is checked against `vz/go.mod`; without an Apple Silicon runner, `e2e-mac` shows a "not run" job on every push to `main`, which `scripts/release.sh` does not accept as the kling-hv e2e.
 - Binaries built without `-ldflags` report the module version (`go install ...@v1.0.0`) or `dev+<commit>[.dirty]` instead of `dev`; `make -C ext/db build` stamps the version like ext/mcp. Extensions built on `pkg/plugin` answer `--version`.
 - `kling doctor`: the extensions directory being off `PATH` is information, not a warning.
 
@@ -194,6 +195,7 @@ kindling 1.0. From this release on, `docs/compatibilidad.md` is a promise: API v
 
 ### Fixed
 
+- kling-hv: when the vsock device thread stops, dials fail at once with `ENODEV` instead of each waiting its full timeout; a vsock receive round moves at most 1 MiB and stops when the VM pauses; a virtio interrupt line is recorded as raised only if the GIC accepted it; timed waits no longer follow wall-clock steps; the RAM file of a freeze is always 0600 (an APFS clone kept the mode of its golden).
 - kling-hv guests ran without KASLR. The FDT now carries `kaslr-seed` and `rng-seed` on every cold boot, and the guest kernel trusts the bootloader seed. Clones never boot again, so they don't reuse a seed.
 - kling-hv with `KLING_VZ_MTU=65535` dropped every full-size frame and TCP stalled.
 - The OCI builder now fsyncs the ext4 before renaming it into place.

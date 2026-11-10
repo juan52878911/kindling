@@ -169,6 +169,17 @@ jobs:
       # comprueba que sus sumas estén en go.work.sum.
       - run: go build ./... ./ext/db/... ./ext/mcp/... ./ext/phone/... ./ext/sandbox/...
       - run: go vet ./ext/db/... ./ext/mcp/... ./ext/phone/... ./ext/sandbox/...
+      # La directiva go del go.work es la de vz/go.mod (lo dice su comentario):
+      # si vz sube la suya y el go.work no, `go build` en local con el
+      # workspace se niega o baja otra toolchain.
+      - name: go.work declara la versión de Go de vz/go.mod
+        run: |
+          want=$(grep -E '^go [0-9]' vz/go.mod)
+          got=$(grep -E '^go [0-9]' go.work)
+          [ "$got" = "$want" ] || {
+            echo "go.work: '$got', y vz/go.mod declara '$want'" >&2
+            exit 1
+          }
 
   # El clon de volúmenes (reflink) no se puede probar sobre el ext4 del runner:
   # ahí solo se ejercita el rechazo. Este job monta un XFS y un btrfs en loop y
@@ -299,10 +310,13 @@ jobs:
           fi
 
   # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que
-  # aquí el clon es de verdad. Además corren enteros internal/machine e
-  # internal/daemon: los tests _vz, _darwin y con //go:build darwin no corren
-  # en ningún otro sitio. No arrancan ninguna VM (el VMM es un doble), así que
-  # valen en un runner sin virtualización.
+  # aquí el clon es de verdad. Además corren enteros el núcleo y ext/sandbox:
+  # los tests _vz, _darwin, con //go:build darwin y las ramas GOOS == "darwin"
+  # (cmd/kling, internal/share, internal/transport, internal/durable,
+  # pkg/plugin, el terminal de kling-sandbox) no corren en ningún otro sitio;
+  # antes solo internal/machine e internal/daemon. No arrancan ninguna VM (el
+  # VMM es un doble), así que valen en un runner sin virtualización. En
+  # macos-15, unos 7,5 min (antes 2), algo más que el job vz en paralelo.
   clon-apfs:
     name: clon real (apfs)
     runs-on: macos-15
@@ -319,7 +333,8 @@ jobs:
           set -o pipefail
           go test -count=1 -v -run 'Clon|Clone|Sonda' ./internal/machine/ ./internal/daemon/ | tee clon.log
           grep -q 'clon real con clonefile' clon.log
-      - run: go test -race -count=1 ./internal/machine/ ./internal/daemon/
+      - run: go test -race -count=1 ./...
+      - run: go -C ext/sandbox test -race -count=1 ./...
 
   # Lo que no es un test pero caza fallos: vulnerabilidades conocidas en lo que
   # se llama de verdad (govulncheck), análisis estático (staticcheck, con la

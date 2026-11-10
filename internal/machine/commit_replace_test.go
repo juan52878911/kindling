@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,9 +72,7 @@ func TestCommitReplaceFallidoConservaElDoradoViejo(t *testing.T) {
 
 // Con éxito, el nuevo ocupa el nombre y el viejo desaparece.
 func TestCommitReplaceCompletoSustituyeAlViejo(t *testing.T) {
-	if _, err := exec.LookPath("fallocate"); err != nil {
-		t.Skip("sin fallocate no se puede perforar el volcado")
-	}
+	puedePerforar(t)
 	m := newTestManager(t)
 	id := "c0aa170000000012"
 	falso := plantillaSinProceso(t, m, id)
@@ -85,8 +82,7 @@ func TestCommitReplaceCompletoSustituyeAlViejo(t *testing.T) {
 	dir := escribirSnapshot(t, m, "dorado", api.Snapshot{Image: "vieja"})
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {
-			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
-			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+			volcadoFalso(m, id, dir)
 		}
 	})
 	if _, err := m.Commit(context.Background(), id, "dorado", true); err != nil {
