@@ -304,6 +304,15 @@ func (m *Manager) barrerHuerfanos(live map[string]int) {
 		if m.reserved[id] > 0 {
 			continue
 		}
+		// Con una operación de ciclo de vida en curso (su cerrojo tomado), lo
+		// que diga el estado puede ser el de antes (M2): el thaw de una failed
+		// la deja failed hasta que su VMM nuevo termina de cargar el volcado,
+		// y matarlo a la segunda vuelta era cortarle el LoadSnapshot. Quien
+		// tiene el cerrojo decide; si deja un huérfano, la vuelta siguiente lo ve.
+		if m.lifecycle.ocupado(id) {
+			delete(m.orphanSeen, id)
+			continue
+		}
 		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused ||
 			mc.State == api.StateCreated || mc.State == api.StateWarm) {
 			delete(m.orphanSeen, id)

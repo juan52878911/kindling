@@ -83,6 +83,38 @@ func TestRemoveDeUnaWarmApuntaElVMMDeSuCongelado(t *testing.T) {
 	}
 }
 
+// M2: el thaw de una failed la deja failed hasta que su VMM nuevo termina de
+// cargar el volcado. Con su cerrojo tomado, el barrido de huérfanos no lo
+// mata aunque lo vea dos vueltas seguidas.
+func TestBarridoNoMataElVMMDeUnaFailedConSuCerrojoTomado(t *testing.T) {
+	m := newTestManager(t)
+	id := "a2a2000000000001"
+	m.addForTest(id)
+	m.mu.Lock()
+	m.byID[id].State = api.StateFailed
+	m.mu.Unlock()
+	_, fin := vmmVivoDe(t, m, id)
+
+	soltar := m.lock(id) // el thaw en curso
+	for i := 0; i < 3; i++ {
+		m.barrerHuerfanos(m.liveVMs())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !sigueVivo(fin) {
+		t.Fatal("el barrido mató el VMM de un thaw en curso")
+	}
+	soltar()
+
+	// Sin nadie con el cerrojo, una failed con VMM sí es un huérfano.
+	m.barrerHuerfanos(m.liveVMs())
+	m.barrerHuerfanos(m.liveVMs())
+	select {
+	case <-fin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sin cerrojo, el huérfano sigue vivo")
+	}
+}
+
 // M5: un rm cuyo VMM sobrevive al SIGKILL no suelta sus volúmenes: otro run
 // montaría en escritura un ext4 que ese VMM sigue escribiendo.
 func TestRemoveConElVMMVivoConservaSusVolumenes(t *testing.T) {
