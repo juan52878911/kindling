@@ -142,11 +142,26 @@ jobs:
           set -euo pipefail
           # Una versión de release (internal/upgrade la exige para -tag):
           # la última etiqueta con un sufijo de prerelease de este commit.
+          # Si la etiqueta ya es una prerelease (v1.0.0-rc.1), el sufijo va con
+          # punto: reEtiqueta no admite un segundo guion (1.0.0-rc.1-e2e.x).
           base=$(git describe --tags --abbrev=0)
-          ver="${base#v}-e2e.$(git rev-parse --short=8 HEAD)"
+          sha=$(git rev-parse --short=8 HEAD)
+          case "$base" in
+            *-*) ver="${base#v}.e2e.$sha" ;;
+            *)   ver="${base#v}-e2e.$sha" ;;
+          esac
           out="$RUNNER_TEMP/new"; mkdir -p "$out"
           lf="-s -w -X main.Version=$ver"
-          CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-linux-amd64" ./cmd/kling
+          # Desde v1.0.0 kling upgrade solo instala releases firmadas: el kling
+          # del e2e se compila con una clave de usar y tirar (-tags e2etest,
+          # internal/upgrade/clave_e2e.go) y 94 firma con ella la release local
+          # que sirve. Ni la clave ni ese kling salen de este runner.
+          fd="$RUNNER_TEMP/firma-e2e"
+          go run ./internal/upgrade/firmar genkey -dir "$fd" >/dev/null
+          pub=$(grep -v '^untrusted comment:' "$fd/kling-release.pub" | head -n 1)
+          lfk="-X github.com/juan52878911/kindling/internal/upgrade.claveE2E=$pub"
+          CGO_ENABLED=0 go build -tags e2etest -ldflags "$lfk" -o "$fd/firmar" ./internal/upgrade/firmar
+          CGO_ENABLED=0 go build -trimpath -tags e2etest -ldflags "$lf $lfk" -o "$out/kling-linux-amd64" ./cmd/kling
           CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-guest-linux-amd64" ./cmd/kling-guest
           CGO_ENABLED=0 go -C ext/mcp build -trimpath -ldflags "$lf" -o "$RUNNER_TEMP/kling-bridge" ./cmd/kling-bridge
           # La extensión de `kling db` (parte db): fuera de NEW_DIR, que es la
@@ -155,6 +170,7 @@ jobs:
           ( cd "$out" && sha256sum -- * > SHA256SUMS )
           "$out/kling-linux-amd64" version | sed -n 1p
           echo "dir=$out" >> "$GITHUB_OUTPUT"
+          echo "firma=$fd" >> "$GITHUB_OUTPUT"
 
       - name: caché del kernel
         if: steps.kvm.outputs.ok == 'true'
@@ -199,6 +215,7 @@ jobs:
         if: steps.kvm.outputs.ok == 'true'
         env:
           NEW_DIR: ${{ steps.bin.outputs.dir }}
+          KLING_E2E_FIRMA: ${{ steps.bin.outputs.firma }}
           IMAGES: ${{ steps.img.outputs.dir }}
           DB_BIN: ${{ runner.temp }}/kling-db
           PARTS: ${{ inputs.parts || 'e2e db diff upgrade' }}
@@ -207,7 +224,7 @@ jobs:
           # choca con el límite de peticiones anónimas.
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sudo --preserve-env=NEW_DIR,IMAGES,DB_BIN,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
+          sudo --preserve-env=NEW_DIR,KLING_E2E_FIRMA,IMAGES,DB_BIN,PARTS,KLING_E2E_HTTPBIN,GITHUB_TOKEN \
             bash scripts/93-e2e-linux-ci.sh
 
       # Los tests de Go que se saltan sin root (montajes, loop, chown, el ipset
