@@ -197,6 +197,15 @@ if [ "$FROM" = download ]; then
     [ -f "$src" ] && cp "$src" "$WWW/$g-linux-$ARCH"
   done
   ( cd "$WWW" && sha256sum -- * > SHA256SUMS )
+  # Desde v1.0.0 una release sin SHA256SUMS.minisig no se instala, y con
+  # descarga no hay -insecure. KLING_E2E_FIRMA (lo prepara e2e-linux.yml) trae
+  # un firmar y una clave de usar y tirar que el kling nuevo conoce porque se
+  # compiló con -tags e2etest; sin ella, una versión >= 1.0 fallará al bajar.
+  if [ -n "${KLING_E2E_FIRMA:-}" ]; then
+    KLING_RELEASE_SIGNING_KEY=$(cat "$KLING_E2E_FIRMA/kling-release.key") \
+      "$KLING_E2E_FIRMA/firmar" sign -tag "$NEWTAG" -in "$WWW/SHA256SUMS" >/dev/null \
+      || die "could not sign the local release with $KLING_E2E_FIRMA"
+  fi
   servir_release "$BASE/www" "$NEWTAG" "$BASE" || die "could not start the local https release server ($BASE/server.log)"
   export KLING_UPGRADE_REPO="$SRV_URL" SSL_CERT_FILE="$BASE/cert.pem"
   NUEVO=(-tag "$NEWTAG")

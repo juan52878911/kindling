@@ -79,7 +79,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox: one hung host no longer serialises claims; failed prewarmed sandboxes are replaced.
 - OCI cache, builds, `state.json` and `kling upgrade` are crash- and disk-full-safe.
 - Compose/graph YAML block scalars work; the credential proxy no longer passes truncated streams as complete.
-- The release e2e accepts a prerelease tag; v1.0.0-rc.1 was tagged but never published.
+- The release upgrade e2e handles prerelease tags and signed 1.x releases; v1.0.0-rc.1 was tagged but never published.
 - Internal: docs commands checked by a test, wider macOS CI, `release.sh` fixes, fewer allocations and wakeups.
 
 ## [0.20.1] - 2026-10-28
