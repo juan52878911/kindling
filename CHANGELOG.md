@@ -6,6 +6,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Fixed
+
+- The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
+
 ## [1.0.0-rc.2] - 2026-11-10
 
 ### Upgrading
