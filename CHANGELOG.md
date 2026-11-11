@@ -6,7 +6,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
-## [1.0.0-rc.1] - 2026-11-10
+## [1.0.0-rc.2] - 2026-11-10
 
 ### Upgrading
 
@@ -32,7 +32,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Changed
 
 - Templates must be signed: unsigned ones no longer restore (`daemon.require_signed off` opts out).
-- Signed releases are required from 1.0.0-rc.1: `upgrade` (also `-from-dir`), `plugin install` and `install.sh` refuse unsigned ones without `-insecure`.
+- Signed releases are required from 1.0 (release candidates included): `upgrade` (also `-from-dir`), `plugin install` and `install.sh` refuse unsigned ones without `-insecure`.
 - `kling sbx gateway` listens on `127.0.0.1:8090` by default; off loopback it needs TLS or `-insecure-listen`.
 - kling-sandbox reserves `kling.*` labels and `/v1/hosts` needs an admin; `kling phone view` serves under a random path.
 - Admission: Linux jailer without a `kindling` user refuses machines; macOS caps declared memory at 4× RAM (`KLING_MEM_OVERCOMMIT`).
@@ -79,6 +79,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-sandbox: one hung host no longer serialises claims; failed prewarmed sandboxes are replaced.
 - OCI cache, builds, `state.json` and `kling upgrade` are crash- and disk-full-safe.
 - Compose/graph YAML block scalars work; the credential proxy no longer passes truncated streams as complete.
+- The release e2e accepts a prerelease tag; v1.0.0-rc.1 was tagged but never published.
 - Internal: docs commands checked by a test, wider macOS CI, `release.sh` fixes, fewer allocations and wakeups.
 
 ## [0.20.1] - 2026-10-28
@@ -544,8 +545,8 @@ On-disk formats changed: upgrade with `kling upgrade`, which keeps a backup and 
 
 - Stateful snapshots no longer break restores
 
-[Unreleased]: https://github.com/juan52878911/kindling/compare/v1.0.0-rc.1...HEAD
-[1.0.0-rc.1]: https://github.com/juan52878911/kindling/releases/tag/v1.0.0-rc.1
+[Unreleased]: https://github.com/juan52878911/kindling/compare/v1.0.0-rc.2...HEAD
+[1.0.0-rc.2]: https://github.com/juan52878911/kindling/releases/tag/v1.0.0-rc.2
 [0.20.1]: https://github.com/juan52878911/kindling/releases/tag/v0.20.1
 [0.20.0]: https://github.com/juan52878911/kindling/releases/tag/v0.20.0
 [0.19.0]: https://github.com/juan52878911/kindling/releases/tag/v0.19.0

@@ -142,8 +142,14 @@ jobs:
           set -euo pipefail
           # Una versión de release (internal/upgrade la exige para -tag):
           # la última etiqueta con un sufijo de prerelease de este commit.
+          # Si la etiqueta ya es una prerelease (v1.0.0-rc.1), el sufijo va con
+          # punto: reEtiqueta no admite un segundo guion (1.0.0-rc.1-e2e.x).
           base=$(git describe --tags --abbrev=0)
-          ver="${base#v}-e2e.$(git rev-parse --short=8 HEAD)"
+          sha=$(git rev-parse --short=8 HEAD)
+          case "$base" in
+            *-*) ver="${base#v}.e2e.$sha" ;;
+            *)   ver="${base#v}-e2e.$sha" ;;
+          esac
           out="$RUNNER_TEMP/new"; mkdir -p "$out"
           lf="-s -w -X main.Version=$ver"
           CGO_ENABLED=0 go build -trimpath -ldflags "$lf" -o "$out/kling-linux-amd64" ./cmd/kling

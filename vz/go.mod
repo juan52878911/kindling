@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/Code-Hex/vz/v3 v3.7.1
-	github.com/juan52878911/kindling v1.0.0-rc.1
+	github.com/juan52878911/kindling v1.0.0-rc.2
 	golang.org/x/sys v0.43.0
 	gvisor.dev/gvisor v0.0.0-20260923023802-c84204b5f2fd
 )
