@@ -18,6 +18,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - `kling db`: with a password set, the Postgres client refuses a server that accepts the login without asking for it.
+- `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
