@@ -205,7 +205,9 @@ func TestCredproxyAparte(t *testing.T) {
 		t.Fatalf("the VMM was not pointed at the proxy: %q", ls)
 	}
 	cp := lineasCon(ls, "CP ")
-	want := []string{"CP START", "CP GET /kling/info", "CP PUT /kling/network egress=allowlist", "CP PUT /kling/credentials n=2 api.example.com+secret db.example.com+secret"}
+	// Dos GET /kling/info: el de la espera tras lanzarlo (que conteste, no
+	// solo que acepte) y el de sus tipos de credencial.
+	want := []string{"CP START", "CP GET /kling/info", "CP GET /kling/info", "CP PUT /kling/network egress=allowlist", "CP PUT /kling/credentials n=2 api.example.com+secret db.example.com+secret"}
 	if len(cp) < len(want) {
 		t.Fatalf("proxy calls: %q", cp)
 	}
@@ -250,6 +252,10 @@ func TestCredproxyQueNoContestaSeCambia(t *testing.T) {
 	creds := []credproxy.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	// El que no contesta se espera hasta plazoCredproxy antes de matarlo.
+	prev := plazoCredproxy
+	plazoCredproxy = 500 * time.Millisecond
+	t.Cleanup(func() { plazoCredproxy = prev })
 	t.Setenv(envFakeCPRechaza, "1")
 	if err := registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, creds, m.credAuditPath(id), nil, "allowlist"); err == nil {
 		t.Fatal("a proxy that does not answer took the credentials")

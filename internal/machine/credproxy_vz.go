@@ -155,7 +155,12 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 		conn, _, err := dialCredproxy(ctx, api, bin, vmmPID)
 		if err == nil {
 			conn.Close()
-			return cp, nil
+			// Conectar no basta: tiene que contestar. Con -race en un runner
+			// cargado, la primera petición tras el cambio de proceso llegó a
+			// dar EOF (TestCredproxyQueNoContestaSeCambia, job de APFS).
+			if _, err = cp.ConPlazo(time.Second).KlingInfo(ctx); err == nil {
+				return cp, nil
+			}
 		}
 		if errors.Is(err, errCredproxyAjeno) || ctx.Err() != nil || time.Now().After(limite) {
 			msg := "launching kling-credproxy: it did not answer: %w"
