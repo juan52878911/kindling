@@ -156,10 +156,19 @@ func TestPlanBloqueaSospechosasSinRegla(t *testing.T) {
 
 func TestPlanStrict(t *testing.T) {
 	rs := mustRules(t, reglasBuenas)
-	if _, err := NewPlan(catalogo(), rs, Options{}); err != nil {
+	p, err := NewPlan(catalogo(), rs, Options{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewPlan(catalogo(), rs, Options{Strict: true})
+	// Sin -strict, users.summary pasa, pero se cuenta y el informe lo dice.
+	if p.Unreviewed != 1 {
+		t.Fatalf("unreviewed = %d, want 1", p.Unreviewed)
+	}
+	var txt bytes.Buffer
+	if err := NewReport("g", "ro@db:5432/app", p, nil).WriteText(&txt); err != nil || !strings.Contains(txt.String(), "1 text, JSON, XML, bytea or array column(s) without a rule") {
+		t.Fatalf("report: %v\n%s", err, txt.String())
+	}
+	_, err = NewPlan(catalogo(), rs, Options{Strict: true})
 	var ue *UnmaskedError
 	if !errors.As(err, &ue) || len(ue.Columns) != 1 || ue.Columns[0].Key() != "public.users.summary" {
 		t.Fatalf("strict should flag only users.summary: %v", err)
@@ -167,6 +176,9 @@ func TestPlanStrict(t *testing.T) {
 	rs = mustRules(t, reglasBuenas+"users.summary: text\n")
 	if _, err := NewPlan(catalogo(), rs, Options{Strict: true}); err != nil {
 		t.Fatal(err)
+	}
+	if p, err := NewPlan(catalogo(), rs, Options{}); err != nil || p.Unreviewed != 0 {
+		t.Fatalf("with a rule: unreviewed = %v, %v", p, err)
 	}
 }
 

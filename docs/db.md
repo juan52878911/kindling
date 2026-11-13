@@ -887,6 +887,7 @@ informe las marca `LEFT UNMASKED`). Es una heurística que se equivoca hacia el 
 bloquear (`product_name` es sospechosa). `-strict` hace sospechosa además toda columna de
 texto, XML, `bytea`, array o tipo de extensión, se llame como se llame: la opción para
 quien no quiere que una columna `summary` con texto libre pase sin que nadie la mire.
+Sin `-strict`, el informe cuenta esas columnas sin regla (`unreviewed` en `-json`).
 
 ### Límites
 

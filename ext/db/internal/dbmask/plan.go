@@ -375,6 +375,10 @@ type Plan struct {
 	// TableCount y RowCount son del catálogo entero (tablas con datos propios).
 	TableCount int
 	RowCount   int64
+	// Unreviewed cuenta, sin -strict, las columnas de texto, JSON, XML, bytea
+	// o array sin regla ni hallazgo: se copian tal cual sin que nadie las haya
+	// mirado. Con -strict cada una exige su regla.
+	Unreviewed int
 }
 
 // ErrUnmasked es el error de un plan con columnas sospechosas sin regla.
@@ -455,6 +459,11 @@ func NewPlan(cat *Catalog, rules *Rules, o Options) (*Plan, error) {
 		}
 		reason := columnReason(c, o)
 		if reason == "" {
+			if !c.Generated && strictType(c) {
+				if _, ok := rules.Get(c.Schema, c.Table, c.Column); !ok {
+					p.Unreviewed++
+				}
+			}
 			continue
 		}
 		f := Finding{Schema: c.Schema, Table: c.Table, Column: c.Column, Reason: reason}
