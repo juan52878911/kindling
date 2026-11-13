@@ -18,9 +18,11 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/buildver"
 )
 
-// ReleaseURL es de dónde baja `kling plugins install` por defecto: las
+// ReleaseURL es de dónde baja `kling plugin install` por defecto: las
 // releases del propio repo de kindling. Los assets se llaman
 // kling-<nombre>-<os>-<arch> y cada release publica un único SHA256SUMS.
 const ReleaseURL = "https://github.com/juan52878911/kindling/releases/download"
@@ -33,7 +35,7 @@ const (
 	maxSidecar    = 64 << 10
 )
 
-// InstallDir es donde `kling plugins install` deja las extensiones: el primer
+// InstallDir es donde `kling plugin install` deja las extensiones: el primer
 // directorio de $KLING_PLUGIN_PATH; si no, $XDG_DATA_HOME/kling/plugins; si
 // no, ~/.local/share/kling/plugins. Todos están en SearchPath, así que lo que
 // se instala ahí se descubre sin tocar el PATH.
@@ -140,12 +142,9 @@ type Installed struct {
 
 // DevVersion dice si v no sirve como etiqueta de release: "dev", o lo que da
 // `git describe` fuera de una etiqueta exacta ("v0.12.0-5-gabc", "-dirty").
+// Una pre-release ("v1.0.0-rc.2") sí es una release.
 func DevVersion(v string) bool {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if _, ok := parseVersion(v); !ok {
-		return true
-	}
-	return strings.ContainsAny(v, "-+ ")
+	return !buildver.IsRelease(v)
 }
 
 // SigName es la firma minisign del SHA256SUMS, al lado de él.
@@ -276,7 +275,7 @@ func Install(ctx context.Context, o InstallOptions) (*Installed, error) {
 		if tag == "" {
 			if DevVersion(o.CoreVersion) {
 				return nil, fmt.Errorf("this kling (%s) is not a release build, so there is no release to match: "+
-					"say which one (kling plugins install %s@v0.13.0), or use -from URL or -file PATH", o.CoreVersion, o.Name)
+					"say which one (kling plugin install %s@vX.Y.Z), or use -from URL or -file PATH", o.CoreVersion, o.Name)
 			}
 			tag = "v" + strings.TrimPrefix(o.CoreVersion, "v")
 		}

@@ -14,6 +14,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- Pre-release versions compare as semver (`1.0.0-rc.2` < `1.0.0`, `rc.2` < `rc.10`): a release candidate no longer meets `min_kling 1.0.0`, and `kling plugin install` without `@tag` works on one.
+- `kling upgrade` without `-tag` on a release candidate no longer downloads an older latest stable release only to refuse it; it says so and points to `-tag`.
+- `go install …@v1.0.0-rc.N` reports its version instead of `dev`.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

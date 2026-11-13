@@ -33,9 +33,11 @@ func resolver(v string, bi *debug.BuildInfo) string {
 	if (v != "" && v != "dev") || bi == nil {
 		return v
 	}
-	// Una etiqueta limpia (go install …@v1.0.0) es una release. Una
-	// pseudoversión o con +dirty (go build desde Go 1.24) no: su revisión.
-	if mv := bi.Main.Version; strings.HasPrefix(mv, "v") && !strings.ContainsAny(mv, "-+") && strings.Count(mv, ".") == 2 {
+	// Una etiqueta limpia (go install …@v1.0.0, o @v1.0.0-rc.2) es una
+	// release. Una pseudoversión o con +dirty (go build desde Go 1.24) no: su
+	// revisión.
+	if mv := bi.Main.Version; strings.HasPrefix(mv, "v") && strings.Count(strings.SplitN(mv, "-", 2)[0], ".") == 2 &&
+		IsRelease(mv) && !pseudo(mv) {
 		return strings.TrimPrefix(mv, "v")
 	}
 	var rev, sucio string

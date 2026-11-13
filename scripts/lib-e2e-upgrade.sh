@@ -10,16 +10,31 @@
 # con NUEVA = 0.20.0 (el commit etiquetado), la anterior a ella. Es la N-1
 # que promete docs/actualizar.md. Usa el API de GitHub (GITHUB_TOKEN, si lo
 # hay, para no chocar con su límite) y vacío si no puede preguntar.
+#
+# Con KLING_E2E_PRERELEASE=1 también cuentan las prereleases, ordenadas como
+# semver (internal/buildver.Compare: rc.2 < rc.10 < la final): con NUEVA =
+# 1.0.0 la base es la última rc, para probar el camino rc → final. Para una
+# base concreta, OLD_TAG=v1.0.0-rc.2 en 94/95.
 ultima_release_anterior() {
   local repo="${KLING_E2E_REPO:-juan52878911/kindling}"
   # shellcheck disable=SC2086 # la cabecera va entera o no va
   curl -fsSL --max-time 30 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
     "https://api.github.com/repos/$repo/releases?per_page=50" 2>/dev/null \
-  | python3 -c '
-import json, re, sys
+  | KLING_E2E_PRERELEASE="${KLING_E2E_PRERELEASE:-0}" python3 -c '
+import json, os, re, sys
+pre = os.environ.get("KLING_E2E_PRERELEASE") == "1"
 def num(t):
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", t)
-    return tuple(int(x) for x in m.groups()) if m else None
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", t)
+    if not m:
+        return None
+    v = tuple(int(x) for x in m.groups()[:3])
+    if not pre:
+        return v
+    # semver: sin pre-release va después; los campos numéricos, por valor y
+    # antes que los alfanuméricos.
+    if m.group(4) is None:
+        return v + ((1,),)
+    return v + ((0,) + tuple((0, int(x)) if x.isdigit() else (1, x) for x in m.group(4).split(".")),)
 nueva = sys.argv[1].lstrip("v")
 n = num(nueva)
 mejor = None
@@ -30,7 +45,7 @@ except ValueError:
 for r in rels if isinstance(rels, list) else []:
     t = r.get("tag_name", "")
     v = num(t)
-    if r.get("draft") or r.get("prerelease") or v is None or n is None:
+    if r.get("draft") or (r.get("prerelease") and not pre) or v is None or n is None:
         continue
     if t.lstrip("v") == nueva or v > n:
         continue
