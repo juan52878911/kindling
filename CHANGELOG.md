@@ -35,6 +35,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db rotate -resume` finishes a rotation that died after changing the database; `connect` and `sql` warn about it.
 - `kling image refresh` and `kling image put` refuse (409) to change an image a template was saved from, and say how to rebuild it; images already up to date still report so.
 - `kling mcp import -force` (and `kling mcp heal`) replace the template instead of deleting it first, so its template credentials survive and a failed import keeps the old one.
+- Without a copy-on-write store, a machine's disk file cap is recorded once instead of being re-measured after each thaw or resume, and the watcher only stops the run it measured.
+- The usage of read-write shares is saved every 2 s while the machine runs, so a daemon killed without draining no longer hands that quota back.
+- `install.sh --skip-kling`: a prerelease kling (1.0.0-rc.2) no longer meets an extension's `min_kling` 1.0.0.
+- On Linux, a failed probe of the e2fsprogs jail is retried after a minute instead of leaving e2fsck without a chroot until the daemon restarts.
+- The example operator Deployment runs as non-root with a read-only root filesystem, no capabilities and no privilege escalation, and its image's base images are pinned by digest.
 
 ### Security
 
