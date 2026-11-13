@@ -141,16 +141,24 @@ func TestPullZstdParallel(t *testing.T) {
 		now[k]++
 		peak[k] = max(peak[k], now[k])
 		mu.Unlock()
-		// Hasta que se hayan visto tres gzip a la vez (o 2 s), cada capa se
-		// queda dentro: con un sueño fijo de 30 ms, en un runner de 3 núcleos
-		// cargado y con -race la tercera llegaba tarde y el pico salía 2
-		// (falló en macos-15). Si el código limitara las gzip a menos de 3,
-		// el plazo vence con el pico por debajo y el test falla igual.
+		// Cada capa se queda dentro hasta que se ha visto el pico que su tipo
+		// tiene que poder alcanzar: tres gzip a la vez, o dos zstd (o 2 s).
+		// Con un sueño fijo de 30 ms, en un runner de 3 núcleos cargado y con
+		// -race la tercera gzip llegaba tarde (falló en macos-15). Y las zstd
+		// no esperan a las gzip: las dos comparten los turnos de CPU, así que
+		// con 3 núcleos dos zstd retenidas dejaban sitio a una sola gzip y el
+		// pico de gzip salía 2 (falló en el job de APFS). Si el código limitara
+		// las gzip a menos de 3, o dejara pasar más de 2 zstd, el test falla
+		// igual.
+		objetivo := 3
+		if zst {
+			objetivo = 2
+		}
 		for fin := time.Now().Add(2 * time.Second); time.Now().Before(fin); {
 			mu.Lock()
-			n := peak[0]
+			n := peak[k]
 			mu.Unlock()
-			if n >= 3 {
+			if n >= objetivo {
 				break
 			}
 			time.Sleep(time.Millisecond)
