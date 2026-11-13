@@ -66,6 +66,9 @@ const (
 	// firmarlo (la firma va antes de los datos). Los clientes usan de 8 KiB a
 	// 1 MiB.
 	maxTrozoSigV4 = 4 << 20
+	// maxLineasTrailer acota las cabeceras del trailer de aws-chunked (los
+	// clientes mandan una o dos sumas de control y la firma).
+	maxLineasTrailer = 32
 )
 
 var reNombreSigV4 = lazyre.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -77,6 +80,13 @@ func validarSigV4(c *Credential) error {
 	d := c.Domain
 	if !reAccessKey.MatchString(c.AccessKeyID) {
 		return fmt.Errorf("credential for %s: the access key id must be 8-128 letters and digits", d)
+	}
+	// Una clave temporal de STS (ASIA…) solo vale con su session token en
+	// X-Amz-Security-Token, que el proxy no guarda ni manda: se registraría y
+	// el servidor rechazaría cada petición. Mejor decirlo al darla de alta.
+	if strings.HasPrefix(strings.ToUpper(c.AccessKeyID), "ASIA") {
+		return fmt.Errorf("credential for %s: temporary credentials (access key id ASIA…) are not supported: "+
+			"they need a session token the proxy does not send; use a long-term access key (AKIA…)", d)
 	}
 	if c.Service == "" {
 		c.Service = "s3"
@@ -332,8 +342,15 @@ func (f firmador) firmarPeticion(out *http.Request, invitado *firmaInvitado, has
 			}
 			pq = append(pq, p)
 		}
-		firmadas := invitado.firmadas
-		sort.Strings(firmadas)
+		// Las cabeceras firmadas son las del invitado que siguen en out (las de
+		// un solo salto ya no van): firmar una ausente daría un 403 sin pista.
+		// X-Amz-SignedHeaders se reescribe para que diga lo mismo.
+		firmadas := cabecerasPrefirmada(invitado.firmadas, out.Header)
+		for i := range pq {
+			if pq[i].k == "X-Amz-SignedHeaders" {
+				pq[i].v = strings.Join(firmadas, ";")
+			}
+		}
 		canon := peticionCanonica(out.Method, rutaCan, queryCanonica(pq), out.Header, out.Host, firmadas, hash)
 		sig := f.firmaDe(fecha, canon)
 		out.URL.RawQuery = queryCanonica(pq) + "&X-Amz-Signature=" + sig
@@ -353,6 +370,25 @@ func (f firmador) firmarPeticion(out *http.Request, invitado *firmaInvitado, has
 	out.Header.Set("Authorization", fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
 		algoSigV4, f.accessKey, f.ambito(ahora), strings.Join(firmadas, ";"), sig))
 	return resultadoFirma{semilla: sig, fecha: ahora}, nil
+}
+
+// cabecerasPrefirmada es el juego de cabeceras firmadas de una URL
+// prefirmada: las del invitado presentes en h, más host, sin duplicados y
+// ordenadas. A diferencia de cabecerasAFirmar no añade x-amz-date: en una
+// prefirmada la fecha va en la query.
+func cabecerasPrefirmada(invitado []string, h http.Header) []string {
+	vistas := map[string]bool{"host": true}
+	for _, n := range invitado {
+		if n != "" && len(h.Values(n)) > 0 {
+			vistas[n] = true
+		}
+	}
+	out := make([]string, 0, len(vistas))
+	for n := range vistas {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Re-firma de trozos aws-chunked ---------------------------------------------
@@ -458,7 +494,10 @@ func (r *resignador) siguiente() error {
 // firma recalculada (x-amz-trailer-signature).
 func (r *resignador) trailerFirmado() ([]byte, error) {
 	var canon, out strings.Builder
-	for {
+	for n := 0; ; n++ {
+		if n > maxLineasTrailer {
+			return nil, errTrozo
+		}
 		l, err := r.linea()
 		if err != nil {
 			return nil, err
@@ -503,6 +542,11 @@ var ahoraSigV4 = time.Now
 type errPeticionSigV4 string
 
 func (e errPeticionSigV4) Error() string { return string(e) }
+
+// errSinHashGrande es un cuerpo de más de MaxSwapBody sin x-amz-content-sha256:
+// para firmarlo hay que calcular su hash, y el proxy lo hace en memoria (413).
+var errSinHashGrande = errors.New("request body over 1 MiB without x-amz-content-sha256: " +
+	"the proxy hashes such a body in memory to sign it; send x-amz-content-sha256 (the body's SHA-256 or UNSIGNED-PAYLOAD)")
 
 // buscarSigV4 dice si r viene firmada con el marcador de alguna credencial
 // sigv4 de cs y cuál. (nil, -1, nil) es que no: la petición sigue por el
@@ -568,7 +612,7 @@ func cuerpoSigV4(r *http.Request, src io.Reader, f *firmaInvitado, servicio stri
 			return nil, 0, "", nil, err
 		}
 		if len(b) > MaxSwapBody {
-			return nil, 0, "", nil, &http.MaxBytesError{Limit: MaxSwapBody}
+			return nil, 0, "", nil, errSinHashGrande
 		}
 		return strings.NewReader(string(b)), int64(len(b)), hexSHA256(b), nil, nil
 	case hash == hashSinFirmar, hash == hashSinFirmarTr, hashHex(hash):

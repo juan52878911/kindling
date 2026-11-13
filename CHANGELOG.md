@@ -8,7 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
-- `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS, MinIO, Garage) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
+- `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
 ### Fixed
 
@@ -21,6 +21,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
 - With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
+||||||| c4bc2038
+- `-type sigv4`: temporary STS keys (`ASIA…`) are rejected with a clear error instead of failing on every request.
+- Credential proxy, SigV4: objects stored with a `Content-Encoding` (gzip, br…) reach the guest byte for byte instead of decompressed or as a 502.
+- Credential proxy, SigV4: a body over 1 MiB without `x-amz-content-sha256` gets a 413 that says why.
+- Credential proxy, SigV4: a presigned URL only signs the headers that are still sent, and an aws-chunked trailer is capped at 32 lines.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

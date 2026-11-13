@@ -1714,7 +1714,8 @@ type CredentialSpec struct {
 	UpstreamMachine string `json:"upstream_machine,omitempty"`
 	UpstreamOwner   string `json:"upstream_owner,omitempty"`
 	// AccessKeyID, Region y Service (solo sigv4): el access key id real, y la
-	// región y el servicio con los que firma el proxy.
+	// región y el servicio con los que firma el proxy. Una clave temporal de
+	// STS (ASIA…) se rechaza: necesitaría un session token que no hay.
 	AccessKeyID string `json:"access_key_id,omitempty"`
 	Region      string `json:"region,omitempty"`
 	Service     string `json:"service,omitempty"`
