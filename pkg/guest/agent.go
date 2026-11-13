@@ -364,9 +364,10 @@ func (a *Agent) Register(mux *http.ServeMux) {
 // soloHost contesta 403 a lo que llega desde dentro del invitado (ver
 // requestFromGuest). El agente no autentica: confía en que solo el host le
 // habla, y escucha en todas las interfaces, así que un proceso del invitado
-// también lo alcanza por loopback o por su propia IP. El host llega siempre
-// por fuera: la tap (172.16.0.1, o la del veth), la pila de usuario de
-// kling-vz/kling-hv (su pasarela) o vsock con el CID 2.
+// también lo alcanza por loopback, por su propia IP o desde un contenedor
+// con red puente. Solo pasa lo que llega por fuera (origen_host.go): el veth
+// del host por la ruta por defecto (Firecracker), la pasarela de la pila de
+// usuario de kling-vz/kling-hv o vsock con el CID 2.
 func soloHost(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requestFromGuest(r) {

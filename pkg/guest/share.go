@@ -251,10 +251,12 @@ type hijacked struct {
 
 func (h *hijacked) Read(p []byte) (int, error) { return h.r.Read(p) }
 
-// requestFromGuest dice si r viene de dentro: por loopback, desde la propia
-// IP del invitado (misma dirección en los dos extremos) o desde otra de sus
-// direcciones (un proceso que se ata a la IP de otra interfaz del invitado
-// antes de conectar). Por vsock, todo CID que no sea el del host.
+// requestFromGuest dice si r NO viene del host. Es una lista positiva: por
+// TCP solo cuenta como host quien llega por la ruta por defecto del invitado
+// (ver llegaPorLaPasarela); todo lo demás —loopback, la propia IP, otra de sus
+// direcciones, un contenedor con red puente o cualquier red que el invitado
+// tenga conectada directamente— es de dentro. Por vsock, todo CID que no sea
+// el del host.
 func requestFromGuest(r *http.Request) bool {
 	rh, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -277,7 +279,12 @@ func requestFromGuest(r *http.Request) bool {
 			}
 		}
 	}
-	return esDireccionPropia(rip)
+	// Una dirección propia sin ruta en la tabla principal (una /32 en una
+	// interfaz dummy) caería en la ruta por defecto: se descarta antes.
+	if esDireccionPropia(rip) {
+		return true
+	}
+	return !llegaPorLaPasarela(rip)
 }
 
 // direccionesPropias da las IPs de las interfaces del invitado (variable para
