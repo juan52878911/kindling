@@ -44,6 +44,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: a vsock connection whose control packet waited behind a busy one no longer stalls until something else wakes the device thread (a new dial could time out).
 - kling-hv: when a net or vsock device thread stops, `/kling/stats` reports it in `devices_dead` instead of the VM staying `running` silently.
 - kling-hv: every interrupt line update checks the GIC result; the UART no longer records a line as raised when it was not, and failures are logged.
+||||||| c4bc2038
+- A restored copy of a golden snapshot frees the slots of commands and shells left running in it, even when their connection never closes.
+
+### Security
+
+- The guest agent's host-only routes accept TCP only from the host side (the default gateway or the default route); a container on a bridge network inside the guest gets 403.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

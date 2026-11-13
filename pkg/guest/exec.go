@@ -110,47 +110,74 @@ const maxExecs = 64
 
 var execLim = &slotLimiter{max: maxExecs}
 
-// execsVivos son los /exec y /exec/stream en curso, para cortarlos todos en
-// el /resync de una copia (cortarExecs).
+// execsVivos son los /exec, /exec/stream y shells en curso, para cortarlos
+// todos en el /resync de una copia (cortarExecs).
 var execsVivos = struct {
 	mu  sync.Mutex
 	sig uint64
-	m   map[uint64]context.CancelFunc
-}{m: map[uint64]context.CancelFunc{}}
+	m   map[uint64]enCurso
+}{m: map[uint64]enCurso{}}
 
-// contextoExec da el contexto de un exec: el de la petición, que además corta
-// cortarExecs. quitar lo da de baja; quien llama lo difiere.
-func contextoExec(padre context.Context) (ctx context.Context, quitar func()) {
-	ctx, cancel := context.WithCancel(padre)
+// enCurso es una entrada de execsVivos: cortar lo detiene y soltar devuelve su
+// plaza del limitador (una sola vez, ver unaVez).
+type enCurso struct{ cortar, soltar func() }
+
+// unaVez envuelve la devolución de una plaza: la suelta quien llegue antes,
+// el manejador al acabar o cortarExecs, y nunca dos veces.
+func unaVez(f func()) func() {
+	var o sync.Once
+	return func() { o.Do(f) }
+}
+
+// registrarVivo apunta algo que cortarExecs debe cortar. quitar lo da de
+// baja y suelta su plaza; quien llama lo difiere.
+func registrarVivo(cortar, soltar func()) (quitar func()) {
 	execsVivos.mu.Lock()
 	execsVivos.sig++
 	id := execsVivos.sig
-	execsVivos.m[id] = cancel
+	execsVivos.m[id] = enCurso{cortar: cortar, soltar: soltar}
 	execsVivos.mu.Unlock()
-	return ctx, func() {
+	return func() {
 		execsVivos.mu.Lock()
 		delete(execsVivos.m, id)
 		execsVivos.mu.Unlock()
+		soltar()
+	}
+}
+
+// contextoExec da el contexto de un exec: el de la petición, que además corta
+// cortarExecs. soltar es la devolución de su plaza (unaVez). quitar lo da de
+// baja; quien llama lo difiere.
+func contextoExec(padre context.Context, soltar func()) (ctx context.Context, quitar func()) {
+	ctx, cancel := context.WithCancel(padre)
+	baja := registrarVivo(cancel, soltar)
+	return ctx, func() {
+		baja()
 		cancel()
 	}
 }
 
-// cortarExecs cancela los exec en curso (cmd.Cancel mata su grupo) y dice
-// cuántos eran. Sus plazas se sueltan cuando cada manejador acaba, no aquí.
+// cortarExecs cancela los exec en curso (cmd.Cancel mata su grupo), cierra
+// las shells, suelta sus plazas y dice cuántos eran.
 //
 // Lo llama el /resync de una copia de un dorado: un exec que corría al volcar
 // despierta en cada copia, pero su petición era la de otra máquina y nadie la
-// espera. Su contexto es el de una conexión congelada que la copia no cierra
-// (por vsock, nunca; por TCP, cuando el keepalive se rinde), y mientras tanto
-// retiene su plaza de execLim: un dorado con 64 así dejaba todas sus copias
-// contestando 429.
+// espera. Su conexión quedó congelada y la copia no la cierra (por vsock,
+// nunca; por TCP, cuando el keepalive se rinde). La plaza se suelta aquí y no
+// al acabar el manejador: muerto el comando, el manejador aún escribe su
+// respuesta en esa conexión, y por vsock esa escritura puede no volver
+// nunca. Sin esto, un dorado con 64 así dejaba todas sus copias contestando
+// 429 (8 con las shells).
 func cortarExecs() int {
 	execsVivos.mu.Lock()
-	defer execsVivos.mu.Unlock()
-	for _, cancel := range execsVivos.m {
-		cancel()
+	vivos := execsVivos.m
+	execsVivos.m = map[uint64]enCurso{}
+	execsVivos.mu.Unlock()
+	for _, v := range vivos {
+		v.cortar()
+		v.soltar()
 	}
-	return len(execsVivos.m)
+	return len(vivos)
 }
 
 // takeExec ocupa una plaza de exec o contesta 429. Si devuelve true, quien
@@ -174,7 +201,8 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 	if !takeExec(w) {
 		return
 	}
-	defer execLim.give()
+	soltar := unaVez(execLim.give)
+	defer soltar()
 	r.Body = http.MaxBytesReader(w, r.Body, execMaxBody)
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -191,7 +219,7 @@ func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, quitar := contextoExec(r.Context())
+	ctx, quitar := contextoExec(r.Context(), soltar)
 	defer quitar()
 	cmd := exec.CommandContext(ctx, req.Cmd[0], req.Cmd[1:]...)
 	cmd.Dir = req.Dir

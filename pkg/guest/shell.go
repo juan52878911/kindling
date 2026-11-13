@@ -107,7 +107,8 @@ func handleShell(env []string, lim *slotLimiter, w http.ResponseWriter, r *http.
 		http.Error(w, fmt.Sprintf("too many shells open in this microVM (limit %d)", maxShells), http.StatusTooManyRequests)
 		return
 	}
-	defer lim.give()
+	soltar := unaVez(lim.give)
+	defer soltar()
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -120,6 +121,9 @@ func handleShell(env []string, lim *slotLimiter, w http.ResponseWriter, r *http.
 		return
 	}
 	defer conn.Close()
+	// El /resync de una copia de un dorado la cierra (cortarExecs): la shell
+	// era de otra máquina y su conexión quedó congelada.
+	defer registrarVivo(func() { _ = conn.Close() }, soltar)()
 	// Sin plazos: una shell puede estar horas sin escribir una tecla. El hijack
 	// ya los borra, pero dejarlo explícito evita que un cambio futuro en el
 	// servidor los reintroduzca por la puerta de atrás.
