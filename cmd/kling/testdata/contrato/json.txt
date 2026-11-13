@@ -115,6 +115,7 @@ kling inspect m1:  nested bool
 kling inspect m1:  net_index number
 kling inspect m1:  net_mibps number
 kling inspect m1:  on_ttl string
+kling inspect m1:  overlay_max_bytes number
 kling inspect m1:  pid number
 kling inspect m1:  published[].guest number
 kling inspect m1:  published[].host number
@@ -220,6 +221,7 @@ kling ps -a -json:  [].nested bool
 kling ps -a -json:  [].net_index number
 kling ps -a -json:  [].net_mibps number
 kling ps -a -json:  [].on_ttl string
+kling ps -a -json:  [].overlay_max_bytes number
 kling ps -a -json:  [].pid number
 kling ps -a -json:  [].published[].guest number
 kling ps -a -json:  [].published[].host number
@@ -314,6 +316,7 @@ kling sandbox ls -json:  [].nested bool
 kling sandbox ls -json:  [].net_index number
 kling sandbox ls -json:  [].net_mibps number
 kling sandbox ls -json:  [].on_ttl string
+kling sandbox ls -json:  [].overlay_max_bytes number
 kling sandbox ls -json:  [].pid number
 kling sandbox ls -json:  [].published[].guest number
 kling sandbox ls -json:  [].published[].host number

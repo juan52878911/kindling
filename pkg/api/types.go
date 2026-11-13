@@ -58,6 +58,11 @@ type Machine struct {
 	// DiskMiB es el tamaño lógico de su disco escribible, si no es el de
 	// siempre (ver RunRequest.DiskMiB).
 	DiskMiB int `json:"disk_mib,omitempty"`
+	// OverlayMaxBytes es lo más que puede ocupar su overlay sin almacén
+	// copy-on-write (vigilarOverlays): se apunta la primera vez que el
+	// vigilante la ve y no se vuelve a medir en cada arranque o thaw. 0: aún
+	// sin apuntar.
+	OverlayMaxBytes int64 `json:"overlay_max_bytes,omitempty"`
 	// DiffBase, en una copia de un dorado que corre con seguimiento de
 	// páginas sucias, es el mem.file del dorado respecto al que se congelará
 	// en diferencial (solo lo que cambió). Vacío: el siguiente freeze vuelca

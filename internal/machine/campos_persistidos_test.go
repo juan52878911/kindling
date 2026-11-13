@@ -113,6 +113,8 @@ var clasesCampos = map[string]claseCampo{
 	"state.json api.Machine image_snapshot": {porque: "an older kling sees the copy as cold-booted: it only loses the shared-memory " +
 		"estimate and the guard that keeps the image snapshot while the copy runs; the copy keeps the files it opened, and its " +
 		"freezes never depend on the snapshot (no diff freeze)"},
+	"state.json api.Machine overlay_max_bytes": {porque: "an older kling never reads it; the next daemon that lacks it takes the cap " +
+		"from the disk size, or from the file as it is then, as before"},
 	"state.json api.Machine published": {porque: "never persisted with the machine: the daemon fills it in responses; publish.json keeps the ports"},
 	"state.json api.PortPublish guest": {porque: "only inside published (see above)"},
 	"state.json api.PortPublish host":  {porque: "only inside published (see above)"},

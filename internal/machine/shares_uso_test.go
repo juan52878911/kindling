@@ -2,6 +2,7 @@ package machine
 
 import (
 	"testing"
+	"time"
 
 	share "github.com/juan52878911/kindling/internal/shareproto"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -74,5 +75,47 @@ func TestCuotaShareSobreviveCongelarYParar(t *testing.T) {
 	m.drainShares(0) // apagar el daemon
 	if s := m.byID["m1"].Shares[1]; s.UsedBytes != 990 || s.UsedFiles != 5 {
 		t.Fatalf("al apagar el daemon se guardó %d/%d; quería 990/5", s.UsedBytes, s.UsedFiles)
+	}
+}
+
+// Lo gastado se apunta también mientras la máquina corre, no solo al drenar:
+// con 900 MiB gastados de 1000, un daemon que muere sin drenar (kill -9, un
+// corte) no le devuelve al siguiente esos 900 MiB, y 200 MiB más no caben.
+func TestCuotaShareSobreviveAUnDaemonMuerto(t *testing.T) {
+	antes := cadaPuntoControlCuota
+	cadaPuntoControlCuota = 5 * time.Millisecond
+	t.Cleanup(func() { cadaPuntoControlCuota = antes })
+
+	const tope = 1000 << 20
+	cfg := func() ShareConfig { return ShareConfig{MaxBytes: tope, MinFreeBytes: -1} }
+	m := &Manager{byID: map[string]*api.Machine{
+		"m1": {ID: "m1", Name: "m1", State: api.StateRunning,
+			Shares: []api.ShareAttachment{{Source: t.TempDir(), Mount: "/w", Mode: share.ModeRW}}},
+	}, shareCfg: cfg}
+	t.Cleanup(func() { m.stopShares("m1") })
+	m.startShares("m1")
+	cuotaDe(t, m, "m1", 0).SetUsage(900<<20, 7)
+
+	// Sin drenar: lo apuntado en la máquina es lo que leería de state.json
+	// el daemon siguiente.
+	var guardada *api.Machine
+	for plazo := time.Now().Add(5 * time.Second); ; {
+		m.mu.RLock()
+		guardada = m.byID["m1"].Clone()
+		m.mu.RUnlock()
+		if guardada.Shares[0].UsedBytes == 900<<20 || time.Now().After(plazo) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if u := guardada.Shares[0]; u.UsedBytes != 900<<20 || u.UsedFiles != 7 {
+		t.Fatalf("sin drenar quedó apuntado %d/%d; quería %d/7", u.UsedBytes, u.UsedFiles, 900<<20)
+	}
+
+	m2 := &Manager{byID: map[string]*api.Machine{"m1": guardada}, shareCfg: cfg}
+	t.Cleanup(func() { m2.stopShares("m1") })
+	m2.startShares("m1")
+	if b, _ := cuotaDe(t, m2, "m1", 0).Usage(); b+200<<20 <= tope {
+		t.Fatalf("el daemon siguiente empieza en %d MiB: 200 MiB más cabrían en los %d MiB de la cuota", b>>20, tope>>20)
 	}
 }
