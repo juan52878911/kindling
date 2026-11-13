@@ -8,10 +8,15 @@ package guest
 // existe (upstream lo arregló en 6.10, «arm64: Filter out SVE hwcaps when
 // FEAT_SVE isn't implemented», y no llegó a 6.1.y). OpenSSL ve HWCAP2_SVE2,
 // ejecuta sus rutas SVE2 y el proceso muere con SIGILL: medido con la rueda
-// de cryptography de pip en python:3.12-slim. El arreglo de verdad es el
-// kernel; hasta entonces el agente da a sus servicios y a exec
-// OPENSSL_armcap=0x7d (NEON, AES, SHA-1, SHA-256, PMULL y SHA-512: las
-// aceleraciones que sí hay, sin SVE), salvo que la imagen ya ponga uno.
+// de cryptography de pip en python:3.12-slim.
+//
+// El arreglo está en el kernel: scripts/builders/kernel/patches lleva ese
+// parche portado a 6.1, y kling-hv además oculta ZFR0 al invitado
+// (vz/internal/hvvm). Con un kernel parcheado cpuinfo no trae ni sve ni sve2 y
+// esto no hace nada. Queda para un vmlinux anterior bajo kling-vz: ahí el
+// agente da a sus servicios y a exec OPENSSL_armcap=0x7d (NEON, AES, SHA-1,
+// SHA-256, PMULL y SHA-512: las aceleraciones que sí hay, sin SVE), salvo que
+// la imagen ya ponga uno.
 
 import (
 	"bufio"
