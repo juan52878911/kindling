@@ -144,6 +144,11 @@ var clasesCampos = map[string]claseCampo{
 	"credentials.enc credproxy.Credential AccessKeyID": {efecto: true, version: 2, porque: "a kling <= v0.18 would use a sigv4 credential as HTTP and drop it"},
 	"credentials.enc credproxy.Credential Region":      {efecto: true, version: 2, porque: "as AccessKeyID"},
 	"credentials.enc credproxy.Credential Service":     {efecto: true, version: 2, porque: "as AccessKeyID"},
+	// Las de plantilla (api.CredentialSpec) suben a la v3 con una sigv4
+	// (versionAlmacenPlantillaSigV4): la v2 la abre un kling <= v1.0.0-rc.2.
+	"credentials.enc api.CredentialSpec access_key_id": {efecto: true, version: 3, porque: "a kling <= v1.0.0-rc.2 would hand a template's sigv4 credential out without its access key id"},
+	"credentials.enc api.CredentialSpec region":        {efecto: true, version: 3, porque: "as access_key_id"},
+	"credentials.enc api.CredentialSpec service":       {efecto: true, version: 3, porque: "as access_key_id"},
 }
 
 // camposDe lista "<fichero> <tipo> <campo json> <tipo go>" de cada campo que

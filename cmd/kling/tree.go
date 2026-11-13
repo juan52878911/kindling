@@ -235,6 +235,9 @@ var coreTree = []section{
       [-ca-file ca.pem] [-upstream H:P]
       [-upstream-tls verify-full|disable]
       [-tls-server-name N] -env PGPASSWORD [-f file]
+  template credential <name> -type sigv4           the same for an S3 secret key
+      -domain D -access-key-id AK -region R        (see machine credential)
+      [-service s3] -env AWS_ACCESS_KEY_ID [-f file]
   template pool <name> [-n N]                      keeps N awake copies: run -from claims
                                                    one in ms (-n 0 turns it off; off by
                                                    default; the copies count as machines)
@@ -404,6 +407,12 @@ var coreTree = []section{
                                                    logs in with the real password;
                                                    disable: native or caching_sha2
                                                    fast path only (see docs/mysql.md)
+  machine credential <ref> -type sigv4             an S3 (or R2, GCS, MinIO, Garage)
+      -domain D -access-key-id AK -region R        secret key: the guest signs with a
+      [-service s3] [-allow-request 'GET /b/**']   placeholder access key id in VAR and
+      -env AWS_ACCESS_KEY_ID [-f secretfile]       the proxy signs again with the real
+                                                   pair (path-style, http://D; see
+                                                   docs/s3-sigv4.md)
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials

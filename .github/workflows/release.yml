@@ -44,7 +44,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: ${{ matrix.dir }}/go.mod
       - name: make test
@@ -74,7 +74,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       - name: claves de release (firmar check)
         env:
@@ -137,7 +137,7 @@ jobs:
         with:
           # La toolchain con la que se compila lo publicado, no el mínimo de los
           # go.mod (go 1.24): la stdlib va dentro del binario y sus CVE con ella.
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: |
             go.mod
@@ -215,7 +215,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # Como en build: la toolchain parcheada, no el mínimo de vz/go.mod.
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache-dependency-path: vz/go.sum
       # vz/ es un módulo aparte con cgo que la matriz de test (ubuntu) no ve:
       # sus tests, como el job vz de ci.yml, antes de compilar lo publicado.
@@ -467,7 +467,7 @@ jobs:
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
 
       # Firma el SHA256SUMS ya completo (con kling.rb) en el formato de

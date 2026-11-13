@@ -91,6 +91,7 @@ func snapshotsCredential(args []string) error {
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
 		return errUso("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
+			"       kling template credential <template> -type sigv4 -domain s3.eu-west-1.amazonaws.com -access-key-id AKIA... -region eu-west-1 [-service s3] [-allow-request 'GET /bucket/**']... -env AWS_ACCESS_KEY_ID [-f secretkeyfile]\n" +
 			"       kling template credential <template> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
 	}
@@ -120,6 +121,14 @@ func snapshotsCredential(args []string) error {
 		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
 		return nil
 	}
+	if spec.Type == credproxy.KindSigV4 {
+		fmt.Printf("%s  every new instance gets a placeholder access key id in %s; requests to https://%s are signed again with the real key\n",
+			s.Name, spec.Env, strings.ToLower(spec.Domain))
+		fmt.Printf("      %s\n", describirAllow(spec.Allow))
+		fmt.Printf("      %s\n", svConexion(spec))
+		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
+		return nil
+	}
 	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
 		s.Name, spec.Env, strings.ToLower(spec.Domain))
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
@@ -139,6 +148,7 @@ type credFlags struct {
 	domain, env, file, typ, user, database, caFile *string
 	anyDatabase, query, body                       *bool
 	upstream, upstreamTLS, tlsServerName           *string
+	accessKeyID, region, service                   *string
 	port                                           *int
 	allow, headers                                 *stringsFlag
 }
@@ -148,7 +158,7 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.domain = fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com (postgres/mysql: the database server)")
 	c.env = fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY (postgres: PGPASSWORD, mysql: MYSQL_PWD)")
 	c.file = fs.String("f", "", "file with the key or password (default: stdin)")
-	c.typ = fs.String("type", "http", "http, or postgres or mysql for a database password")
+	c.typ = fs.String("type", "http", "http, postgres or mysql for a database password, or sigv4 for an S3 (or compatible) secret key")
 	c.port = fs.Int("port", 0, "postgres/mysql: the server's port (default 5432 or 3306)")
 	c.user = fs.String("user", "", "postgres/mysql: the role or user the password belongs to (the guest must connect as it)")
 	c.database = fs.String("database", "", "postgres/mysql: the only database the guest may connect to (required unless -any-database; in mysql it is the default database, the GRANTs are the boundary)")
@@ -157,6 +167,9 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.upstream = fs.String("upstream", "", "postgres/mysql: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
 	c.upstreamTLS = fs.String("upstream-tls", "", "postgres/mysql: verify-full (default) or disable (only with -upstream; queries travel unencrypted; postgres: SCRAM-SHA-256 only; mysql: only methods that do not send the password)")
 	c.tlsServerName = fs.String("tls-server-name", "", "postgres/mysql: name the server certificate is verified against (default: -domain)")
+	c.accessKeyID = fs.String("access-key-id", "", "sigv4: the real access key id (the secret key goes in -f or stdin; the guest only sees a placeholder access key id in -env)")
+	c.region = fs.String("region", "", "sigv4: the region requests are signed for (us-east-1, auto for R2, garage…)")
+	c.service = fs.String("service", "", "sigv4: the signing service (default s3)")
 	fs.Var(c.allow, "allow-request", allowRequestHelp)
 	fs.Var(c.headers, "header", "http: also swap the placeholder in this request header (repeatable; Authorization and X-Api-Key always)")
 	c.query = fs.Bool("query", false, "http: also swap the placeholder in the query string (?key=)")
@@ -169,7 +182,22 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 // valida todo igualmente.
 func (c *credFlags) spec() (api.CredentialSpec, error) {
 	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow, Headers: *c.headers, Query: *c.query, Body: *c.body}
+	if *c.typ != credproxy.KindSigV4 && (*c.accessKeyID != "" || *c.region != "" || *c.service != "") {
+		return s, errors.New("-access-key-id, -region and -service are only for -type sigv4")
+	}
 	switch *c.typ {
+	case credproxy.KindSigV4:
+		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
+			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
+			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres or mysql")
+		}
+		if len(*c.headers) > 0 || *c.query || *c.body {
+			return s, errors.New("-header, -query and -body are not for -type sigv4: the proxy signs the request again, it does not swap the placeholder")
+		}
+		if *c.accessKeyID == "" || *c.region == "" {
+			return s, errors.New("-type sigv4 needs -access-key-id and -region (the secret key goes in -f or stdin)")
+		}
+		s.Type, s.AccessKeyID, s.Region, s.Service = credproxy.KindSigV4, *c.accessKeyID, *c.region, *c.service
 	case "", "http":
 		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
 			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
@@ -228,7 +256,7 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 			s.CAPEM = string(b)
 		}
 	default:
-		return s, fmt.Errorf("unknown -type %q (http, postgres or mysql)", *c.typ)
+		return s, fmt.Errorf("unknown -type %q (http, postgres, mysql or sigv4)", *c.typ)
 	}
 	secret, err := leerClave(*c.file)
 	if err != nil {
@@ -282,6 +310,13 @@ func pgConexion(s api.CredentialSpec) string {
 	}
 	return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (sslmode disable or prefer, channel_binding not require: the proxy handles the server side)",
 		strings.ToLower(s.Domain), s.User, db, s.Env)
+}
+
+// svConexion dice cómo tiene que configurar su cliente de S3 el invitado con
+// una credencial sigv4.
+func svConexion(s api.CredentialSpec) string {
+	return fmt.Sprintf("use endpoint http://%s, path-style addressing, region %s, AWS_ACCESS_KEY_ID=$%s and any non-empty secret key: the proxy signs again with the real one and adds TLS",
+		strings.ToLower(s.Domain), strings.ToLower(s.Region), s.Env)
 }
 
 // allowRequestHelp es la ayuda de -allow-request, igual en machine y template.

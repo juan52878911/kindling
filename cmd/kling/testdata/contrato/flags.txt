@@ -68,6 +68,7 @@ kling cp:  -H
 kling cp:  -json
 kling cp:  -mode
 kling credential:  -H
+kling credential:  -access-key-id
 kling credential:  -allow-request
 kling credential:  -any-database
 kling credential:  -body
@@ -80,7 +81,9 @@ kling credential:  -header
 kling credential:  -json
 kling credential:  -port
 kling credential:  -query
+kling credential:  -region
 kling credential:  -rm
+kling credential:  -service
 kling credential:  -tls-server-name
 kling credential:  -type
 kling credential:  -upstream
@@ -307,6 +310,7 @@ kling status:  -H
 kling status:  -json
 kling status:  -v
 kling template credential:  -H
+kling template credential:  -access-key-id
 kling template credential:  -allow-request
 kling template credential:  -any-database
 kling template credential:  -body
@@ -319,6 +323,8 @@ kling template credential:  -f
 kling template credential:  -header
 kling template credential:  -port
 kling template credential:  -query
+kling template credential:  -region
+kling template credential:  -service
 kling template credential:  -tls-server-name
 kling template credential:  -type
 kling template credential:  -upstream

@@ -183,3 +183,52 @@ func TestCredentialFlagsMySQL(t *testing.T) {
 		t.Errorf("sin -database: %v", err)
 	}
 }
+
+// -type sigv4: el access key id y la región van en banderas, la secret key en
+// -f; lo que es de otro tipo (o lo que la re-firma no usa) se rechaza.
+func TestCredentialFlagsSigV4(t *testing.T) {
+	dir := t.TempDir()
+	clave := filepath.Join(dir, "sk")
+	if err := os.WriteFile(clave, []byte("secreto-real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parse := func(args ...string) (*credFlags, error) {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		cf := credentialFlags(fs)
+		return cf, fs.Parse(append([]string{"-f", clave}, args...))
+	}
+	cf, _ := parse("-type", "sigv4", "-domain", "s3.eu-west-1.amazonaws.com", "-env", "AWS_ACCESS_KEY_ID",
+		"-access-key-id", "AKIAEXAMPLE1234", "-region", "eu-west-1", "-allow-request", "GET /bucket/**")
+	s, err := cf.spec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Type != "sigv4" || s.AccessKeyID != "AKIAEXAMPLE1234" || s.Region != "eu-west-1" || s.Service != "" ||
+		s.Secret != "secreto-real" || len(s.Allow) != 1 {
+		t.Fatalf("spec %+v", s)
+	}
+	if got := svConexion(s); !strings.Contains(got, "http://s3.eu-west-1.amazonaws.com") ||
+		!strings.Contains(got, "path-style") || !strings.Contains(got, "$AWS_ACCESS_KEY_ID") ||
+		strings.Contains(got, "AKIAEXAMPLE1234") {
+		t.Errorf("svConexion: %q", got)
+	}
+
+	base := []string{"-type", "sigv4", "-domain", "s3.example.com", "-env", "AWS_ACCESS_KEY_ID"}
+	for nombre, args := range map[string][]string{
+		"sin access key":  append(append([]string(nil), base...), "-region", "auto"),
+		"sin region":      append(append([]string(nil), base...), "-access-key-id", "AKIAEXAMPLE1234"),
+		"con rol":         append(append([]string(nil), base...), "-access-key-id", "AKIAEXAMPLE1234", "-region", "auto", "-user", "a"),
+		"con cabecera":    append(append([]string(nil), base...), "-access-key-id", "AKIAEXAMPLE1234", "-region", "auto", "-header", "X-A"),
+		"con body":        append(append([]string(nil), base...), "-access-key-id", "AKIAEXAMPLE1234", "-region", "auto", "-body"),
+		"http con region": {"-domain", "api.example.com", "-env", "K", "-region", "auto"},
+		"pg con access":   {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a", "-database", "d", "-access-key-id", "AKIAEXAMPLE1234"},
+	} {
+		cf, err := parse(args...)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", nombre, err)
+		}
+		if _, err := cf.spec(); err == nil {
+			t.Errorf("%s: spec aceptado", nombre)
+		}
+	}
+}

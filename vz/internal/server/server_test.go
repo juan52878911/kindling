@@ -761,7 +761,7 @@ func TestKlingCredentials(t *testing.T) {
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
 	// El daemon lo pregunta antes de mandar una credencial Postgres.
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","sigv4"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
@@ -811,6 +811,23 @@ func TestKlingCredentials(t *testing.T) {
 	if !r.srv.d.Credentials.MySQLActivo() || r.srv.d.Credentials.PGActivo() {
 		t.Fatal("the mysql credential did not reach the proxy as mysql")
 	}
+	// Y una sigv4: access_key_id, region y service llegan al proxy (sin
+	// ellos la rechaza), que firma de nuevo una petición con el marcador.
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"AWS_ACCESS_KEY_ID","domain":"s3.example.com","placeholder":"kling-cred-sv","secret":"sk-clave-de-prueba","kind":"sigv4","region":"auto"}]}`, "access key id")
+	const credSV = `{"credentials":[{"env":"AWS_ACCESS_KEY_ID","domain":"s3.example.com","placeholder":"kling-cred-sv","secret":"sk-clave-de-prueba","kind":"sigv4","access_key_id":"AKIAEXAMPLE1234","region":"auto","allow":["GET /bucket/**"]}]}`
+	if out := r.must("PUT", "/kling/credentials", credSV); !strings.Contains(out, `"domains":["s3.example.com"]`) {
+		t.Fatalf("PUT /kling/credentials (sigv4) = %s", out)
+	}
+	// Una firma con el marcador y un algoritmo que la re-firma no admite: el
+	// proxy la reconoce como suya y contesta 400 sin salir.
+	req = httptest.NewRequest(http.MethodGet, "http://s3.example.com/bucket/x", nil)
+	req.Host = "s3.example.com"
+	req.Header.Set("Authorization", "AWS4-ECDSA-P256-SHA256 Credential=kling-cred-sv/20261112/auto/s3/aws4_request, SignedHeaders=host, Signature=00")
+	rec = httptest.NewRecorder()
+	r.srv.d.Credentials.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unsupported signature algorithm") {
+		t.Fatalf("sigv4 con algoritmo no admitido: %d %s", rec.Code, rec.Body)
+	}
 	r.must("PUT", "/kling/credentials", credPG)
 
 	// La red nace con el proxy, en sus dos papeles.
@@ -850,7 +867,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
 		return nil, errors.New("no daemon in this test")
 	}, nil, nil)
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","graph-link","host-ports"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","sigv4","graph-link","host-ports"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")

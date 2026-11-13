@@ -2,7 +2,7 @@
 # (internal/machine/campos_persistidos_test.go): léelo antes de tocarlo.
 version state.json 4
 version meta.json 3
-version credentials.enc 2
+version credentials.enc 3
 state.json api.GuestAgent agent string
 state.json api.GuestAgent caps []string
 state.json api.GuestAgent version string
@@ -145,6 +145,7 @@ meta.json api.VolumeAttachment mount string
 meta.json api.VolumeAttachment name string
 meta.json api.VolumeAttachment read_only bool
 meta.json api.VolumeAttachment sync string ignorable
+credentials.enc api.CredentialSpec access_key_id string effect:3
 credentials.enc api.CredentialSpec allow []string
 credentials.enc api.CredentialSpec any_database bool
 credentials.enc api.CredentialSpec body bool
@@ -155,7 +156,9 @@ credentials.enc api.CredentialSpec env string
 credentials.enc api.CredentialSpec headers []string
 credentials.enc api.CredentialSpec port int
 credentials.enc api.CredentialSpec query bool
+credentials.enc api.CredentialSpec region string effect:3
 credentials.enc api.CredentialSpec secret string
+credentials.enc api.CredentialSpec service string effect:3
 credentials.enc api.CredentialSpec tls_server_name string
 credentials.enc api.CredentialSpec type string
 credentials.enc api.CredentialSpec upstream string

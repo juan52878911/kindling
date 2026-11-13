@@ -45,7 +45,7 @@ jobs:
       - name: set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: ${{ matrix.dir }}/go.mod
 
@@ -142,7 +142,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       - run: cargo fmt --check --manifest-path rust/kling-unpack/Cargo.toml
       - run: cargo clippy --locked --manifest-path rust/kling-unpack/Cargo.toml -- -D warnings
@@ -162,7 +162,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # La de release; go.work declara la mínima que exige vz/go.mod.
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       # vz queda fuera del build: es cgo y solo de macOS (lo compila el job vz).
       # Su go.mod sí entra en el grafo del workspace, así que de paso se
@@ -238,7 +238,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache-dependency-path: vz/go.sum
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
@@ -357,7 +357,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # La de release: govulncheck mira la stdlib de esta toolchain.
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       - name: herramientas
         run: |

@@ -6,9 +6,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ## [Unreleased]
 
+### Added
+
+- `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS, MinIO, Garage) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
+
 ### Fixed
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
+- Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
 
 ## [1.0.0-rc.2] - 2026-11-10
 

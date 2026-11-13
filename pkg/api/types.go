@@ -1668,6 +1668,12 @@ func IsInsufficientMemory(err error) bool {
 // UpstreamMachine. En MySQL, Database es la base con la que arranca la
 // sesión, no una frontera: lo que acota es el GRANT del usuario. Ver
 // docs/mysql.md.
+//
+// Type "sigv4" (pkg/credproxy, sigv4.go) es una clave de S3 o compatible
+// (R2, GCS en modo S3, MinIO, Garage): el invitado firma con el marcador como
+// access key id y el proxy descarta esa firma y firma de nuevo con
+// AccessKeyID y Secret (la secret key), en Region y Service ("s3" por
+// defecto). Solo admite además Allow. Ver docs/s3-sigv4.md.
 type CredentialSpec struct {
 	Domain string   `json:"domain"`
 	Env    string   `json:"env"`
@@ -1707,6 +1713,11 @@ type CredentialSpec struct {
 	// "disable" y database, y excluye upstream.
 	UpstreamMachine string `json:"upstream_machine,omitempty"`
 	UpstreamOwner   string `json:"upstream_owner,omitempty"`
+	// AccessKeyID, Region y Service (solo sigv4): el access key id real, y la
+	// región y el servicio con los que firma el proxy.
+	AccessKeyID string `json:"access_key_id,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Service     string `json:"service,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de

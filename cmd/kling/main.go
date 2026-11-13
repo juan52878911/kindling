@@ -1599,6 +1599,7 @@ func cmdCredential(args []string) error {
 		return errUso("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-header X-Name]... [-query] [-body] [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling machine credential <ref> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
+			"       kling machine credential <ref> -type sigv4 -domain s3.eu-west-1.amazonaws.com -access-key-id AKIA... -region eu-west-1 [-service s3] [-allow-request 'GET /bucket/**']... -env AWS_ACCESS_KEY_ID [-f secretkeyfile]\n" +
 			"       kling machine credential -rm <ref> -env NAME")
 	}
 	spec, err := cf.spec()
@@ -1622,6 +1623,14 @@ func cmdCredential(args []string) error {
 			mc.ID[:12], spec.Env, pgDestino(spec))
 		fmt.Printf("      %s\n", pgConexion(spec))
 		fmt.Printf("      the password survives freeze/thaw and daemon restarts\n")
+		return nil
+	}
+	if spec.Type == credproxy.KindSigV4 {
+		fmt.Printf("%s  %s now holds a placeholder access key id; requests to https://%s are signed again with the real key\n",
+			mc.ID[:12], spec.Env, strings.ToLower(spec.Domain))
+		fmt.Printf("      %s\n", describirAllow(spec.Allow))
+		fmt.Printf("      %s\n", svConexion(spec))
+		fmt.Printf("      the key survives freeze/thaw and daemon restarts\n")
 		return nil
 	}
 	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
