@@ -1,0 +1,6 @@
+norep-frozen-n1-m10-prime: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1334 ms
+  ttfr        n=10    p50   1153.4  p95   1251.9  p99   1251.9  max   1251.9 ms
+  initialize  n=10    p50   1044.2  p95   1148.1  p99   1148.1  max   1148.1 ms
+  first call  n=10    p50     85.1  p95    178.0  p99    178.0  max    178.0 ms
+  delete      n=10    p50     42.8  p95    128.9  p99    128.9  max    128.9 ms
+  host: not sampled (no daemon socket)

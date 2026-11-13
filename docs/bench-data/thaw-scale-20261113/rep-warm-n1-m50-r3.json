@@ -1,0 +1,98 @@
+{
+  "label": "rep-warm-n1-m50-r3",
+  "started": "2026-11-13T03:00:47.23291083Z",
+  "host": {
+    "hostname": "kling-ascci",
+    "kernel": "7.0.14-12-pve",
+    "cpu": "Intel(R) Core(TM) i3-3220 CPU @ 3.30GHz",
+    "cpus": 4,
+    "mem_total_mib": 10240,
+    "nested": false,
+    "container": "lxc",
+    "kling_version": "1.0.0-rc.2-5-gc4bc2038",
+    "firecracker": "Firecracker v1.17.0",
+    "backend": "firecracker",
+    "arch": "amd64",
+    "git_sha": "c4bc20385031",
+    "psi_limit": "20 (daemon default)"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:18180",
+    "services": [
+      "tb-r0"
+    ],
+    "n_services": 1,
+    "sessions": 50,
+    "calls": 5,
+    "timeout": "1m0s",
+    "tool": "echo"
+  },
+  "sessions_ok": 16,
+  "sessions_failed": 34,
+  "error_rate_pct": 68,
+  "status": "DEGRADED",
+  "errors": {
+    "init:http_503": 34
+  },
+  "error_samples": [
+    "tb-r0: init: http_503 ({\"message\":\"could not place session for \\\"tb-r0\\\": all replicas full (at the replica cap: service \\\"tb-r0\\\" has 16 instance(s) awake or starting (max 16))\",\"code\":\"unavailable\"})",
+    "tb-r0: init: http_503 ({\"message\":\"could not place session for \\\"tb-r0\\\": all replicas full (at the replica cap: service \\\"tb-r0\\\" has 16 instance(s) awake or starting (max 16))\",\"code\":\"unavailable\"})",
+    "tb-r0: init: http_503 ({\"message\":\"could not place session for \\\"tb-r0\\\": all replicas full (at the replica cap: service \\\"tb-r0\\\" has 16 instance(s) awake or starting (max 16))\",\"code\":\"unavailable\"})",
+    "tb-r0: init: http_503 ({\"message\":\"could not place session for \\\"tb-r0\\\": all replicas full (at the replica cap: service \\\"tb-r0\\\" has 16 instance(s) awake or starting (max 16))\",\"code\":\"unavailable\"})",
+    "tb-r0: init: http_503 ({\"message\":\"could not place session for \\\"tb-r0\\\": all replicas full (at the replica cap: service \\\"tb-r0\\\" has 16 instance(s) awake or starting (max 16))\",\"code\":\"unavailable\"})"
+  ],
+  "wall_ms": 247.47,
+  "latency_ms": {
+    "ttfr": {
+      "n": 16,
+      "p50": 122.99,
+      "p95": 142.05,
+      "p99": 142.05,
+      "max": 142.05,
+      "mean": 123.06
+    },
+    "init": {
+      "n": 16,
+      "p50": 77.49,
+      "p95": 105.27,
+      "p99": 105.27,
+      "max": 105.27,
+      "mean": 77.97
+    },
+    "first_call": {
+      "n": 16,
+      "p50": 21.03,
+      "p95": 35.94,
+      "p99": 35.94,
+      "max": 35.94,
+      "mean": 21.48
+    },
+    "steady": {
+      "n": 80,
+      "p50": 14.17,
+      "p95": 31.86,
+      "p99": 37.81,
+      "max": 37.81,
+      "mean": 16.34
+    },
+    "delete": {
+      "n": 16,
+      "p50": 22.87,
+      "p95": 35,
+      "p99": 35,
+      "max": 35,
+      "mean": 23.83
+    }
+  },
+  "host_metrics": {
+    "samples": 2,
+    "sample_errors": 0,
+    "peak_live": 16,
+    "distinct_machines": 16,
+    "peak_target_pss_mib": 243,
+    "peak_total_pss_mib": 243,
+    "min_available_mib": 9805,
+    "max_psi_some_avg10": 0,
+    "time_to_zero_ms": null
+  }
+}

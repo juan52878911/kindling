@@ -1,0 +1,7 @@
+rep-frozen-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 712 ms
+  ttfr        n=1     p50    700.7  p95    700.7  p99    700.7  max    700.7 ms
+  initialize  n=1     p50    697.3  p95    697.3  p99    697.3  max    697.3 ms
+  first call  n=1     p50      2.0  p95      2.0  p99      2.0  max      2.0 ms
+  steady      n=5     p50      1.5  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      3.0  p95      3.0  p99      3.0  max      3.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 156), min available 9922 MiB, PSI some avg10 max 0.0, time to zero 13.5 s (4 samples)

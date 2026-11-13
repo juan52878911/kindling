@@ -1,0 +1,12 @@
+norep-warm-n1-m50-r3: 50 sessions over 1 service(s), 46/50 ok (8.00% failed) — DEGRADED, wall 812 ms
+  ttfr        n=46    p50    418.5  p95    549.9  p99    552.9  max    552.9 ms
+  initialize  n=46    p50    332.6  p95    502.7  p99    513.0  max    513.0 ms
+  first call  n=46    p50     27.9  p95    130.1  p99    199.8  max    199.8 ms
+  steady      n=230   p50     16.6  p95     94.3  p99    103.7  max    126.6 ms
+  delete      n=46    p50     42.6  p95    102.9  p99    202.3  max    202.3 ms
+  errors: init:http_503=4
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+  host: live peak 16, 16 distinct machine(s), PSS peak 467 MiB (all: 467), min available 9593 MiB, PSI some avg10 max 0.0 (5 samples)

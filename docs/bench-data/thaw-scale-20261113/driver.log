@@ -1,0 +1,961 @@
+02:27:05  output: /var/lib/kindling/kt-thaw/tb/thaw-scale-20261113-022704
+02:27:05  host: 4 CPU, MemAvailable 9952 MiB, disk free 598641 MiB, PSI 0.00, PSI limit 20 (daemon default)
+02:27:05  building image tb-echo
+02:27:06  importing tb-0 (mem 1024M)
+02:27:10  importing tb-1 (mem 1024M)
+02:27:14  importing tb-2 (mem 1024M)
+02:27:17  importing tb-3 (mem 1024M)
+02:27:21  importing tb-4 (mem 1024M)
+02:27:24  importing tb-5 (mem 1024M)
+02:27:28  importing tb-6 (mem 1024M)
+02:27:31  importing tb-7 (mem 1024M)
+02:27:34  importing tb-8 (mem 1024M)
+02:27:37  importing tb-9 (mem 1024M)
+02:27:40  importing tb-10 (mem 1024M)
+02:27:43  importing tb-11 (mem 1024M)
+02:27:47  importing tb-12 (mem 1024M)
+02:27:50  importing tb-13 (mem 1024M)
+02:27:53  importing tb-14 (mem 1024M)
+02:27:56  importing tb-15 (mem 1024M)
+02:28:00  importing tb-16 (mem 1024M)
+02:28:03  importing tb-17 (mem 1024M)
+02:28:07  importing tb-18 (mem 1024M)
+02:28:10  importing tb-19 (mem 1024M)
+02:28:14  importing tb-20 (mem 1024M)
+02:28:17  importing tb-21 (mem 1024M)
+02:28:21  importing tb-22 (mem 1024M)
+02:28:24  importing tb-23 (mem 1024M)
+02:28:28  importing tb-24 (mem 1024M)
+02:28:32  importing tb-25 (mem 1024M)
+02:28:36  importing tb-26 (mem 1024M)
+02:28:40  importing tb-27 (mem 1024M)
+02:28:43  importing tb-28 (mem 1024M)
+02:28:46  importing tb-29 (mem 1024M)
+02:28:50  importing tb-30 (mem 1024M)
+02:28:53  importing tb-31 (mem 1024M)
+02:28:57  importing tb-32 (mem 1024M)
+02:29:00  importing tb-33 (mem 1024M)
+02:29:03  importing tb-34 (mem 1024M)
+02:29:07  importing tb-35 (mem 1024M)
+02:29:10  importing tb-36 (mem 1024M)
+02:29:13  importing tb-37 (mem 1024M)
+02:29:16  importing tb-38 (mem 1024M)
+02:29:20  importing tb-39 (mem 1024M)
+02:29:23  importing tb-40 (mem 1024M)
+02:29:27  importing tb-41 (mem 1024M)
+02:29:30  importing tb-42 (mem 1024M)
+02:29:34  importing tb-43 (mem 1024M)
+02:29:37  importing tb-44 (mem 1024M)
+02:29:40  importing tb-45 (mem 1024M)
+02:29:43  importing tb-46 (mem 1024M)
+02:29:47  importing tb-47 (mem 1024M)
+02:29:50  importing tb-48 (mem 1024M)
+02:29:53  importing tb-49 (mem 1024M)
+02:29:56  importing tb-r0 (mem 256M)
+02:29:59  importing tb-r1 (mem 256M)
+02:30:01  importing tb-r2 (mem 256M)
+02:30:04  importing tb-r3 (mem 256M)
+02:30:06  importing tb-r4 (mem 256M)
+02:30:08  importing tb-r5 (mem 256M)
+02:30:11  importing tb-r6 (mem 256M)
+02:30:13  importing tb-r7 (mem 256M)
+02:30:15  importing tb-r8 (mem 256M)
+02:30:18  importing tb-r9 (mem 256M)
+02:30:20  importing tb-r10 (mem 256M)
+02:30:22  importing tb-r11 (mem 256M)
+02:30:25  importing tb-r12 (mem 256M)
+02:30:27  importing tb-r13 (mem 256M)
+02:30:29  importing tb-r14 (mem 256M)
+02:30:32  importing tb-r15 (mem 256M)
+02:30:34  importing tb-r16 (mem 256M)
+02:30:37  importing tb-r17 (mem 256M)
+02:30:39  importing tb-r18 (mem 256M)
+02:30:42  importing tb-r19 (mem 256M)
+02:30:44  importing tb-r20 (mem 256M)
+02:30:46  importing tb-r21 (mem 256M)
+02:30:49  importing tb-r22 (mem 256M)
+02:30:51  importing tb-r23 (mem 256M)
+02:30:54  importing tb-r24 (mem 256M)
+02:30:56  importing tb-r25 (mem 256M)
+02:30:59  importing tb-r26 (mem 256M)
+02:31:01  importing tb-r27 (mem 256M)
+02:31:03  importing tb-r28 (mem 256M)
+02:31:06  importing tb-r29 (mem 256M)
+02:31:08  importing tb-r30 (mem 256M)
+02:31:11  importing tb-r31 (mem 256M)
+02:31:13  importing tb-r32 (mem 256M)
+02:31:15  importing tb-r33 (mem 256M)
+02:31:17  importing tb-r34 (mem 256M)
+02:31:20  importing tb-r35 (mem 256M)
+02:31:22  importing tb-r36 (mem 256M)
+02:31:25  importing tb-r37 (mem 256M)
+02:31:27  importing tb-r38 (mem 256M)
+02:31:30  importing tb-r39 (mem 256M)
+02:31:32  importing tb-r40 (mem 256M)
+02:31:35  importing tb-r41 (mem 256M)
+02:31:37  importing tb-r42 (mem 256M)
+02:31:40  importing tb-r43 (mem 256M)
+02:31:42  importing tb-r44 (mem 256M)
+02:31:45  importing tb-r45 (mem 256M)
+02:31:47  importing tb-r46 (mem 256M)
+02:31:50  importing tb-r47 (mem 256M)
+02:31:52  importing tb-r48 (mem 256M)
+02:31:55  importing tb-r49 (mem 256M)
+02:31:57  gateway on http://127.0.0.1:18180 (idle 10s, max-replicas 16)
+02:31:57  norep-frozen-n1-m1 r1: priming (1 session(s) over 1 service(s))
+02:32:15  norep-frozen-n1-m1 r1: measuring
+norep-frozen-n1-m1-r1: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 541 ms
+  ttfr        n=1     p50    526.3  p95    526.3  p99    526.3  max    526.3 ms
+  initialize  n=1     p50    517.1  p95    517.1  p99    517.1  max    517.1 ms
+  first call  n=1     p50      7.5  p95      7.5  p99      7.5  max      7.5 ms
+  steady      n=5     p50      1.7  p95      3.1  p99      3.1  max      3.1 ms
+  delete      n=1     p50      4.1  p95      4.1  p99      4.1  max      4.1 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 17 MiB (all: 89), min available 9925 MiB, PSI some avg10 max 0.0, time to zero 14.0 s (4 samples)
+02:32:31  norep-frozen-n1-m1 r2: priming (1 session(s) over 1 service(s))
+02:32:48  norep-frozen-n1-m1 r2: measuring
+norep-frozen-n1-m1-r2: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 579 ms
+  ttfr        n=1     p50    564.8  p95    564.8  p99    564.8  max    564.8 ms
+  initialize  n=1     p50    555.2  p95    555.2  p99    555.2  max    555.2 ms
+  first call  n=1     p50      7.3  p95      7.3  p99      7.3  max      7.3 ms
+  steady      n=5     p50      1.7  p95      2.1  p99      2.1  max      2.1 ms
+  delete      n=1     p50      4.9  p95      4.9  p99      4.9  max      4.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 17 MiB (all: 89), min available 9922 MiB, PSI some avg10 max 0.0, time to zero 13.7 s (4 samples)
+02:33:05  norep-frozen-n1-m1 r3: priming (1 session(s) over 1 service(s))
+02:33:21  norep-frozen-n1-m1 r3: measuring
+norep-frozen-n1-m1-r3: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 667 ms
+  ttfr        n=1     p50    594.0  p95    594.0  p99    594.0  max    594.0 ms
+  initialize  n=1     p50    587.6  p95    587.6  p99    587.6  max    587.6 ms
+  first call  n=1     p50      4.8  p95      4.8  p99      4.8  max      4.8 ms
+  steady      n=5     p50      2.2  p95      3.3  p99      3.3  max      3.3 ms
+  delete      n=1     p50     61.8  p95     61.8  p99     61.8  max     61.8 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 90), min available 9923 MiB, PSI some avg10 max 0.0, time to zero 13.8 s (4 samples)
+02:33:38  norep-warm-n1-m1 r1: priming (1 session(s) over 1 service(s))
+02:33:39  norep-warm-n1-m1 r1: measuring
+norep-warm-n1-m1-r1: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 92 ms
+  ttfr        n=1     p50     75.7  p95     75.7  p99     75.7  max     75.7 ms
+  initialize  n=1     p50     70.9  p95     70.9  p99     70.9  max     70.9 ms
+  first call  n=1     p50      3.2  p95      3.2  p99      3.2  max      3.2 ms
+  steady      n=5     p50      1.6  p95      1.9  p99      1.9  max      1.9 ms
+  delete      n=1     p50      8.0  p95      8.0  p99      8.0  max      8.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 21 MiB (all: 21), min available 9932 MiB, PSI some avg10 max 0.0 (2 samples)
+02:33:53  norep-warm-n1-m1 r2: priming (1 session(s) over 1 service(s))
+02:33:54  norep-warm-n1-m1 r2: measuring
+norep-warm-n1-m1-r2: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 83 ms
+  ttfr        n=1     p50     69.9  p95     69.9  p99     69.9  max     69.9 ms
+  initialize  n=1     p50     66.3  p95     66.3  p99     66.3  max     66.3 ms
+  first call  n=1     p50      2.1  p95      2.1  p99      2.1  max      2.1 ms
+  steady      n=5     p50      1.7  p95      2.2  p99      2.2  max      2.2 ms
+  delete      n=1     p50      4.0  p95      4.0  p99      4.0  max      4.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 20 MiB (all: 20), min available 9936 MiB, PSI some avg10 max 0.0 (2 samples)
+02:34:08  norep-warm-n1-m1 r3: priming (1 session(s) over 1 service(s))
+02:34:09  norep-warm-n1-m1 r3: measuring
+norep-warm-n1-m1-r3: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 29 ms
+  ttfr        n=1     p50     17.0  p95     17.0  p99     17.0  max     17.0 ms
+  initialize  n=1     p50     13.5  p95     13.5  p99     13.5  max     13.5 ms
+  first call  n=1     p50      1.8  p95      1.8  p99      1.8  max      1.8 ms
+  steady      n=5     p50      1.6  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      3.6  p95      3.6  p99      3.6  max      3.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 26 MiB (all: 26), min available 9928 MiB, PSI some avg10 max 0.0 (2 samples)
+02:34:23  norep-frozen-n1-m10 r1: priming (10 session(s) over 1 service(s))
+02:34:41  norep-frozen-n1-m10 r1: measuring
+norep-frozen-n1-m10-r1: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1290 ms
+  ttfr        n=10    p50    984.6  p95   1000.4  p99   1000.4  max   1000.4 ms
+  initialize  n=10    p50    875.3  p95    973.7  p99    973.7  max    973.7 ms
+  first call  n=10    p50     17.7  p95     84.2  p99     84.2  max     84.2 ms
+  steady      n=50    p50     17.5  p95     75.5  p99     92.4  max     92.4 ms
+  delete      n=10    p50     84.6  p95    109.6  p99    109.6  max    109.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 35 MiB (all: 92), min available 9915 MiB, PSI some avg10 max 0.0, time to zero 14.0 s (7 samples)
+02:34:58  norep-frozen-n1-m10 r2: priming (10 session(s) over 1 service(s))
+02:35:13  norep-frozen-n1-m10 r2: measuring
+norep-frozen-n1-m10-r2: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 905 ms
+  ttfr        n=10    p50    605.8  p95    799.8  p99    799.8  max    799.8 ms
+  initialize  n=10    p50    571.5  p95    777.5  p99    777.5  max    777.5 ms
+  first call  n=10    p50      8.1  p95     74.5  p99     74.5  max     74.5 ms
+  steady      n=50    p50      7.1  p95     83.5  p99     98.4  max     98.4 ms
+  delete      n=10    p50     26.1  p95    105.6  p99    105.6  max    105.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 31 MiB (all: 93), min available 9915 MiB, PSI some avg10 max 0.0, time to zero 15.1 s (5 samples)
+02:35:32  norep-frozen-n1-m10 r3: priming (10 session(s) over 1 service(s))
+02:35:47  norep-frozen-n1-m10 r3: measuring
+norep-frozen-n1-m10-r3: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1133 ms
+  ttfr        n=10    p50    838.1  p95    932.3  p99    932.3  max    932.3 ms
+  initialize  n=10    p50    819.4  p95    858.7  p99    858.7  max    858.7 ms
+  first call  n=10    p50     11.5  p95     71.1  p99     71.1  max     71.1 ms
+  steady      n=50    p50     10.1  p95     70.6  p99     81.8  max     81.8 ms
+  delete      n=10    p50     84.0  p95    100.6  p99    100.6  max    100.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 30 MiB (all: 93), min available 9914 MiB, PSI some avg10 max 0.0, time to zero 13.6 s (6 samples)
+02:36:04  norep-warm-n1-m10 r1: priming (10 session(s) over 1 service(s))
+02:36:05  norep-warm-n1-m10 r1: measuring
+norep-warm-n1-m10-r1: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 485 ms
+  ttfr        n=10    p50    276.5  p95    386.7  p99    386.7  max    386.7 ms
+  initialize  n=10    p50    261.9  p95    374.8  p99    374.8  max    374.8 ms
+  first call  n=10    p50      7.9  p95     30.9  p99     30.9  max     30.9 ms
+  steady      n=50    p50      5.3  p95     75.6  p99     76.6  max     76.6 ms
+  delete      n=10    p50     25.9  p95     97.4  p99     97.4  max     97.4 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 46 MiB (all: 46), min available 9906 MiB, PSI some avg10 max 0.0 (3 samples)
+02:36:20  norep-warm-n1-m10 r2: priming (10 session(s) over 1 service(s))
+02:36:21  norep-warm-n1-m10 r2: measuring
+norep-warm-n1-m10-r2: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 584 ms
+  ttfr        n=10    p50    356.8  p95    459.8  p99    459.8  max    459.8 ms
+  initialize  n=10    p50    267.2  p95    452.5  p99    452.5  max    452.5 ms
+  first call  n=10    p50      9.9  p95     84.0  p99     84.0  max     84.0 ms
+  steady      n=50    p50      4.3  p95     65.7  p99     71.9  max     71.9 ms
+  delete      n=10    p50    101.8  p95    192.9  p99    192.9  max    192.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 45 MiB (all: 45), min available 9910 MiB, PSI some avg10 max 0.0 (4 samples)
+02:36:38  norep-warm-n1-m10 r3: priming (10 session(s) over 1 service(s))
+02:36:39  norep-warm-n1-m10 r3: measuring
+norep-warm-n1-m10-r3: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 510 ms
+  ttfr        n=10    p50    286.7  p95    410.7  p99    410.7  max    410.7 ms
+  initialize  n=10    p50    212.8  p95    393.5  p99    393.5  max    393.5 ms
+  first call  n=10    p50      9.1  p95     89.8  p99     89.8  max     89.8 ms
+  steady      n=50    p50      3.9  p95     75.7  p99     93.3  max     93.3 ms
+  delete      n=10    p50     91.9  p95    100.9  p99    100.9  max    100.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 45 MiB (all: 45), min available 9903 MiB, PSI some avg10 max 0.0 (4 samples)
+02:36:54  norep-frozen-n1-m50 r1: priming (50 session(s) over 1 service(s))
+02:37:35  norep-frozen-n1-m50 r1: measuring
+norep-frozen-n1-m50-r1: 50 sessions over 1 service(s), 27/50 ok (46.00% failed) — DEGRADED, wall 2777 ms
+  ttfr        n=27    p50   1472.5  p95   2642.8  p99   2704.0  max   2704.0 ms
+  initialize  n=27    p50   1440.9  p95   2638.8  p99   2699.7  max   2699.7 ms
+  first call  n=27    p50      9.9  p95    137.0  p99    148.4  max    148.4 ms
+  steady      n=135   p50      8.1  p95     79.8  p99     86.7  max     92.5 ms
+  delete      n=27    p50     39.5  p95    150.8  p99    152.3  max    152.3 ms
+  errors: init:http_503=23
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:38:17  norep-frozen-n1-m50 r2: priming (50 session(s) over 1 service(s))
+02:38:59  norep-frozen-n1-m50 r2: measuring
+norep-frozen-n1-m50-r2: 50 sessions over 1 service(s), 27/50 ok (46.00% failed) — DEGRADED, wall 3125 ms
+  ttfr        n=27    p50   1490.6  p95   2966.6  p99   3069.2  max   3069.2 ms
+  initialize  n=27    p50   1394.6  p95   2960.7  p99   3063.0  max   3063.0 ms
+  first call  n=27    p50     18.3  p95    103.7  p99    114.9  max    114.9 ms
+  steady      n=135   p50     14.3  p95    103.0  p99    118.7  max    149.4 ms
+  delete      n=27    p50     45.5  p95    137.3  p99    144.3  max    144.3 ms
+  errors: init:http_503=23
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:39:42  norep-frozen-n1-m50 r3: priming (50 session(s) over 1 service(s))
+02:40:26  norep-frozen-n1-m50 r3: measuring
+norep-frozen-n1-m50-r3: 50 sessions over 1 service(s), 27/50 ok (46.00% failed) — DEGRADED, wall 2977 ms
+  ttfr        n=27    p50   1466.1  p95   2799.5  p99   2956.0  max   2956.0 ms
+  initialize  n=27    p50   1345.6  p95   2793.0  p99   2950.4  max   2950.4 ms
+  first call  n=27    p50     49.6  p95    165.5  p99    177.2  max    177.2 ms
+  steady      n=135   p50      8.7  p95    247.8  p99    291.3  max    292.9 ms
+  delete      n=27    p50     54.2  p95    183.5  p99    198.6  max    198.6 ms
+  errors: init:http_503=23
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:41:08  norep-warm-n1-m50 r1: priming (50 session(s) over 1 service(s))
+02:41:11  norep-warm-n1-m50 r1: measuring
+norep-warm-n1-m50-r1: 50 sessions over 1 service(s), 47/50 ok (6.00% failed) — DEGRADED, wall 792 ms
+  ttfr        n=47    p50    488.1  p95    587.8  p99    600.6  max    600.6 ms
+  initialize  n=47    p50    378.7  p95    513.6  p99    567.4  max    567.4 ms
+  first call  n=47    p50     52.0  p95    129.9  p99    170.1  max    170.1 ms
+  steady      n=235   p50     29.3  p95     80.7  p99    125.8  max    127.6 ms
+  delete      n=47    p50     55.4  p95    102.7  p99    106.8  max    106.8 ms
+  errors: init:http_503=3
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:41:49  norep-warm-n1-m50 r2: priming (50 session(s) over 1 service(s))
+02:41:52  norep-warm-n1-m50 r2: measuring
+norep-warm-n1-m50-r2: 50 sessions over 1 service(s), 47/50 ok (6.00% failed) — DEGRADED, wall 776 ms
+  ttfr        n=47    p50    448.6  p95    587.3  p99    597.7  max    597.7 ms
+  initialize  n=47    p50    376.6  p95    551.3  p99    553.1  max    553.1 ms
+  first call  n=47    p50     21.1  p95     80.5  p99     84.2  max     84.2 ms
+  steady      n=235   p50     21.4  p95     84.9  p99    156.8  max    158.8 ms
+  delete      n=47    p50     68.1  p95     89.4  p99     96.2  max     96.2 ms
+  errors: init:http_503=3
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:42:30  norep-warm-n1-m50 r3: priming (50 session(s) over 1 service(s))
+02:42:33  norep-warm-n1-m50 r3: measuring
+norep-warm-n1-m50-r3: 50 sessions over 1 service(s), 46/50 ok (8.00% failed) — DEGRADED, wall 812 ms
+  ttfr        n=46    p50    418.5  p95    549.9  p99    552.9  max    552.9 ms
+  initialize  n=46    p50    332.6  p95    502.7  p99    513.0  max    513.0 ms
+  first call  n=46    p50     27.9  p95    130.1  p99    199.8  max    199.8 ms
+  steady      n=230   p50     16.6  p95     94.3  p99    103.7  max    126.6 ms
+  delete      n=46    p50     42.6  p95    102.9  p99    202.3  max    202.3 ms
+  errors: init:http_503=4
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:42:34  SKIP norep-frozen-n1-m200: estimated 16 machine(s) × 1024 MiB = 16384 MiB; available 9600 MiB (70% = 6720), disk free 596727 MiB
+02:42:34  SKIP norep-warm-n1-m200: estimated 16 machine(s) × 1024 MiB = 16384 MiB; available 9600 MiB (70% = 6720), disk free 596727 MiB
+02:43:14  norep-frozen-n10-m1 r1: priming (1 session(s) over 10 service(s))
+02:43:31  norep-frozen-n10-m1 r1: measuring
+norep-frozen-n10-m1-r1: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 645 ms
+  ttfr        n=1     p50    626.6  p95    626.6  p99    626.6  max    626.6 ms
+  initialize  n=1     p50    621.5  p95    621.5  p99    621.5  max    621.5 ms
+  first call  n=1     p50      2.9  p95      2.9  p99      2.9  max      2.9 ms
+  steady      n=5     p50      2.4  p95      2.8  p99      2.8  max      2.8 ms
+  delete      n=1     p50      6.4  p95      6.4  p99      6.4  max      6.4 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 96), min available 9912 MiB, PSI some avg10 max 0.0, time to zero 13.6 s (4 samples)
+02:43:48  norep-frozen-n10-m1 r2: priming (1 session(s) over 10 service(s))
+02:44:05  norep-frozen-n10-m1 r2: measuring
+norep-frozen-n10-m1-r2: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 544 ms
+  ttfr        n=1     p50    526.5  p95    526.5  p99    526.5  max    526.5 ms
+  initialize  n=1     p50    517.0  p95    517.0  p99    517.0  max    517.0 ms
+  first call  n=1     p50      7.8  p95      7.8  p99      7.8  max      7.8 ms
+  steady      n=5     p50      2.1  p95      3.7  p99      3.7  max      3.7 ms
+  delete      n=1     p50      4.6  p95      4.6  p99      4.6  max      4.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 96), min available 9907 MiB, PSI some avg10 max 0.0, time to zero 13.7 s (4 samples)
+02:44:21  norep-frozen-n10-m1 r3: priming (1 session(s) over 10 service(s))
+02:44:38  norep-frozen-n10-m1 r3: measuring
+norep-frozen-n10-m1-r3: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 636 ms
+  ttfr        n=1     p50    618.8  p95    618.8  p99    618.8  max    618.8 ms
+  initialize  n=1     p50    610.5  p95    610.5  p99    610.5  max    610.5 ms
+  first call  n=1     p50      6.9  p95      6.9  p99      6.9  max      6.9 ms
+  steady      n=5     p50      1.8  p95      3.2  p99      3.2  max      3.2 ms
+  delete      n=1     p50      6.3  p95      6.3  p99      6.3  max      6.3 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 96), min available 9908 MiB, PSI some avg10 max 0.0, time to zero 13.9 s (4 samples)
+02:44:55  norep-warm-n10-m1 r1: priming (1 session(s) over 10 service(s))
+02:44:55  norep-warm-n10-m1 r1: measuring
+norep-warm-n10-m1-r1: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 193 ms
+  ttfr        n=1     p50    104.5  p95    104.5  p99    104.5  max    104.5 ms
+  initialize  n=1     p50     70.0  p95     70.0  p99     70.0  max     70.0 ms
+  first call  n=1     p50     31.0  p95     31.0  p99     31.0  max     31.0 ms
+  steady      n=5     p50      3.7  p95     68.9  p99     68.9  max     68.9 ms
+  delete      n=1     p50      6.4  p95      6.4  p99      6.4  max      6.4 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 26 MiB (all: 26), min available 9915 MiB, PSI some avg10 max 0.0 (2 samples)
+02:45:10  norep-warm-n10-m1 r2: priming (1 session(s) over 10 service(s))
+02:45:10  norep-warm-n10-m1 r2: measuring
+norep-warm-n10-m1-r2: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 152 ms
+  ttfr        n=1     p50     80.0  p95     80.0  p99     80.0  max     80.0 ms
+  initialize  n=1     p50     72.4  p95     72.4  p99     72.4  max     72.4 ms
+  first call  n=1     p50      5.7  p95      5.7  p99      5.7  max      5.7 ms
+  steady      n=5     p50      2.4  p95      2.9  p99      2.9  max      2.9 ms
+  delete      n=1     p50     59.5  p95     59.5  p99     59.5  max     59.5 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 20 MiB (all: 20), min available 9924 MiB, PSI some avg10 max 0.0 (2 samples)
+02:45:25  norep-warm-n10-m1 r3: priming (1 session(s) over 10 service(s))
+02:45:25  norep-warm-n10-m1 r3: measuring
+norep-warm-n10-m1-r3: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 90 ms
+  ttfr        n=1     p50     76.7  p95     76.7  p99     76.7  max     76.7 ms
+  initialize  n=1     p50     70.0  p95     70.0  p99     70.0  max     70.0 ms
+  first call  n=1     p50      5.1  p95      5.1  p99      5.1  max      5.1 ms
+  steady      n=5     p50      1.8  p95      2.6  p99      2.6  max      2.6 ms
+  delete      n=1     p50      4.0  p95      4.0  p99      4.0  max      4.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 21 MiB (all: 21), min available 9920 MiB, PSI some avg10 max 0.0 (2 samples)
+02:45:25  SKIP norep-frozen-n10-m10: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9921 MiB (70% = 6944), disk free 596731 MiB
+02:45:25  SKIP norep-warm-n10-m10: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9921 MiB (70% = 6944), disk free 596731 MiB
+02:45:25  SKIP norep-frozen-n10-m50: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB
+02:45:25  SKIP norep-warm-n10-m50: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB
+02:45:25  SKIP norep-frozen-n10-m200: estimated 20 machine(s) × 1024 MiB = 20480 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB
+02:45:25  SKIP norep-warm-n10-m200: estimated 20 machine(s) × 1024 MiB = 20480 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB
+02:45:42  norep-frozen-n50-m1 r1: priming (1 session(s) over 50 service(s))
+02:45:56  norep-frozen-n50-m1 r1: measuring
+norep-frozen-n50-m1-r1: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 704 ms
+  ttfr        n=1     p50    689.9  p95    689.9  p99    689.9  max    689.9 ms
+  initialize  n=1     p50    685.1  p95    685.1  p99    685.1  max    685.1 ms
+  first call  n=1     p50      3.1  p95      3.1  p99      3.1  max      3.1 ms
+  steady      n=5     p50      1.6  p95      1.8  p99      1.8  max      1.8 ms
+  delete      n=1     p50      6.1  p95      6.1  p99      6.1  max      6.1 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 95), min available 9909 MiB, PSI some avg10 max 0.0, time to zero 12.0 s (4 samples)
+02:46:11  norep-frozen-n50-m1 r2: priming (1 session(s) over 50 service(s))
+02:46:26  norep-frozen-n50-m1 r2: measuring
+norep-frozen-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 346 ms
+  ttfr        n=1     p50    333.4  p95    333.4  p99    333.4  max    333.4 ms
+  initialize  n=1     p50    324.8  p95    324.8  p99    324.8  max    324.8 ms
+  first call  n=1     p50      7.0  p95      7.0  p99      7.0  max      7.0 ms
+  steady      n=5     p50      1.8  p95      2.8  p99      2.8  max      2.8 ms
+  delete      n=1     p50      3.0  p95      3.0  p99      3.0  max      3.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 95), min available 9912 MiB, PSI some avg10 max 0.0, time to zero 12.4 s (3 samples)
+02:46:41  norep-frozen-n50-m1 r3: priming (1 session(s) over 50 service(s))
+02:46:56  norep-frozen-n50-m1 r3: measuring
+norep-frozen-n50-m1-r3: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 697 ms
+  ttfr        n=1     p50    682.2  p95    682.2  p99    682.2  max    682.2 ms
+  initialize  n=1     p50    673.6  p95    673.6  p99    673.6  max    673.6 ms
+  first call  n=1     p50      2.6  p95      2.6  p99      2.6  max      2.6 ms
+  steady      n=5     p50      1.7  p95      2.4  p99      2.4  max      2.4 ms
+  delete      n=1     p50      5.6  p95      5.6  p99      5.6  max      5.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 18 MiB (all: 95), min available 9912 MiB, PSI some avg10 max 0.0, time to zero 12.6 s (4 samples)
+02:47:12  norep-warm-n50-m1 r1: priming (1 session(s) over 50 service(s))
+02:47:12  norep-warm-n50-m1 r1: measuring
+norep-warm-n50-m1-r1: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 88 ms
+  ttfr        n=1     p50     70.3  p95     70.3  p99     70.3  max     70.3 ms
+  initialize  n=1     p50     66.8  p95     66.8  p99     66.8  max     66.8 ms
+  first call  n=1     p50      2.0  p95      2.0  p99      2.0  max      2.0 ms
+  steady      n=5     p50      1.6  p95      2.6  p99      2.6  max      2.6 ms
+  delete      n=1     p50      7.9  p95      7.9  p99      7.9  max      7.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 21 MiB (all: 21), min available 9923 MiB, PSI some avg10 max 0.0 (2 samples)
+02:47:27  norep-warm-n50-m1 r2: priming (1 session(s) over 50 service(s))
+02:47:27  norep-warm-n50-m1 r2: measuring
+norep-warm-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 88 ms
+  ttfr        n=1     p50     25.9  p95     25.9  p99     25.9  max     25.9 ms
+  initialize  n=1     p50     22.7  p95     22.7  p99     22.7  max     22.7 ms
+  first call  n=1     p50      1.6  p95      1.6  p99      1.6  max      1.6 ms
+  steady      n=5     p50      1.6  p95     52.7  p99     52.7  max     52.7 ms
+  delete      n=1     p50      3.3  p95      3.3  p99      3.3  max      3.3 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 27 MiB (all: 27), min available 9920 MiB, PSI some avg10 max 0.0 (2 samples)
+02:47:44  norep-warm-n50-m1 r3: priming (1 session(s) over 50 service(s))
+02:47:44  norep-warm-n50-m1 r3: measuring
+norep-warm-n50-m1-r3: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 99 ms
+  ttfr        n=1     p50     83.4  p95     83.4  p99     83.4  max     83.4 ms
+  initialize  n=1     p50     24.3  p95     24.3  p99     24.3  max     24.3 ms
+  first call  n=1     p50     57.8  p95     57.8  p99     57.8  max     57.8 ms
+  steady      n=5     p50      1.7  p95      2.6  p99      2.6  max      2.6 ms
+  delete      n=1     p50      6.6  p95      6.6  p99      6.6  max      6.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 21 MiB (all: 21), min available 9924 MiB, PSI some avg10 max 0.0 (2 samples)
+02:47:45  SKIP norep-frozen-n50-m10: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB
+02:47:45  SKIP norep-warm-n50-m10: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB
+02:47:45  SKIP norep-frozen-n50-m50: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB
+02:47:45  SKIP norep-warm-n50-m50: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB
+02:47:45  SKIP norep-frozen-n50-m200: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9925 MiB (70% = 6947), disk free 596731 MiB
+02:47:45  SKIP norep-warm-n50-m200: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9925 MiB (70% = 6947), disk free 596731 MiB
+02:48:01  rep-frozen-n1-m1 r1: priming (1 session(s) over 1 service(s))
+02:48:16  rep-frozen-n1-m1 r1: measuring
+rep-frozen-n1-m1-r1: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 543 ms
+  ttfr        n=1     p50    531.1  p95    531.1  p99    531.1  max    531.1 ms
+  initialize  n=1     p50    527.7  p95    527.7  p99    527.7  max    527.7 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.5  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      4.3  p95      4.3  p99      4.3  max      4.3 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 13 MiB (all: 112), min available 9927 MiB, PSI some avg10 max 0.0, time to zero 12.0 s (4 samples)
+02:48:31  rep-frozen-n1-m1 r2: priming (1 session(s) over 1 service(s))
+02:48:46  rep-frozen-n1-m1 r2: measuring
+rep-frozen-n1-m1-r2: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 590 ms
+  ttfr        n=1     p50    579.3  p95    579.3  p99    579.3  max    579.3 ms
+  initialize  n=1     p50    576.1  p95    576.1  p99    576.1  max    576.1 ms
+  first call  n=1     p50      1.8  p95      1.8  p99      1.8  max      1.8 ms
+  steady      n=5     p50      1.6  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      2.9  p95      2.9  p99      2.9  max      2.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 136), min available 9927 MiB, PSI some avg10 max 0.0, time to zero 12.2 s (4 samples)
+02:49:01  rep-frozen-n1-m1 r3: priming (1 session(s) over 1 service(s))
+02:49:18  rep-frozen-n1-m1 r3: measuring
+rep-frozen-n1-m1-r3: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 576 ms
+  ttfr        n=1     p50    562.4  p95    562.4  p99    562.4  max    562.4 ms
+  initialize  n=1     p50    559.4  p95    559.4  p99    559.4  max    559.4 ms
+  first call  n=1     p50      1.8  p95      1.8  p99      1.8  max      1.8 ms
+  steady      n=5     p50      1.4  p95      1.6  p99      1.6  max      1.6 ms
+  delete      n=1     p50      6.4  p95      6.4  p99      6.4  max      6.4 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 152), min available 9925 MiB, PSI some avg10 max 0.0, time to zero 13.7 s (4 samples)
+02:49:34  rep-warm-n1-m1 r1: priming (1 session(s) over 1 service(s))
+02:49:35  rep-warm-n1-m1 r1: measuring
+rep-warm-n1-m1-r1: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 22 ms
+  ttfr        n=1     p50     10.6  p95     10.6  p99     10.6  max     10.6 ms
+  initialize  n=1     p50      7.7  p95      7.7  p99      7.7  max      7.7 ms
+  first call  n=1     p50      1.5  p95      1.5  p99      1.5  max      1.5 ms
+  steady      n=5     p50      1.4  p95      1.6  p99      1.6  max      1.6 ms
+  delete      n=1     p50      4.2  p95      4.2  p99      4.2  max      4.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9930 MiB, PSI some avg10 max 0.0 (2 samples)
+02:49:50  rep-warm-n1-m1 r2: priming (1 session(s) over 1 service(s))
+02:49:50  rep-warm-n1-m1 r2: measuring
+rep-warm-n1-m1-r2: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 21 ms
+  ttfr        n=1     p50     10.6  p95     10.6  p99     10.6  max     10.6 ms
+  initialize  n=1     p50      7.5  p95      7.5  p99      7.5  max      7.5 ms
+  first call  n=1     p50      1.7  p95      1.7  p99      1.7  max      1.7 ms
+  steady      n=5     p50      1.5  p95      1.5  p99      1.5  max      1.5 ms
+  delete      n=1     p50      2.7  p95      2.7  p99      2.7  max      2.7 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9931 MiB, PSI some avg10 max 0.0 (2 samples)
+02:50:04  rep-warm-n1-m1 r3: priming (1 session(s) over 1 service(s))
+02:50:05  rep-warm-n1-m1 r3: measuring
+rep-warm-n1-m1-r3: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 25 ms
+  ttfr        n=1     p50     15.5  p95     15.5  p99     15.5  max     15.5 ms
+  initialize  n=1     p50     12.6  p95     12.6  p99     12.6  max     12.6 ms
+  first call  n=1     p50      1.6  p95      1.6  p99      1.6  max      1.6 ms
+  steady      n=5     p50      1.4  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      2.6  p95      2.6  p99      2.6  max      2.6 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9930 MiB, PSI some avg10 max 0.0 (2 samples)
+02:50:19  rep-frozen-n1-m10 r1: priming (10 session(s) over 1 service(s))
+02:50:43  rep-frozen-n1-m10 r1: measuring
+rep-frozen-n1-m10-r1: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1259 ms
+  ttfr        n=10    p50    830.4  p95   1240.5  p99   1240.5  max   1240.5 ms
+  initialize  n=10    p50    825.4  p95   1237.1  p99   1237.1  max   1237.1 ms
+  first call  n=10    p50      2.5  p95      5.2  p99      5.2  max      5.2 ms
+  steady      n=50    p50      2.3  p95     32.2  p99     47.4  max     47.4 ms
+  delete      n=10    p50      6.2  p95     40.7  p99     40.7  max     40.7 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 131 MiB (all: 276), min available 9874 MiB, PSI some avg10 max 0.0, time to zero 27.2 s (6 samples)
+02:51:14  rep-frozen-n1-m10 r2: priming (10 session(s) over 1 service(s))
+02:51:48  rep-frozen-n1-m10 r2: measuring
+rep-frozen-n1-m10-r2: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1441 ms
+  ttfr        n=10    p50   1010.2  p95   1428.5  p99   1428.5  max   1428.5 ms
+  initialize  n=10    p50   1001.0  p95   1425.0  p99   1425.0  max   1425.0 ms
+  first call  n=10    p50      3.1  p95      7.2  p99      7.2  max      7.2 ms
+  steady      n=50    p50      2.5  p95     21.5  p99     42.5  max     42.5 ms
+  delete      n=10    p50      5.7  p95     48.5  p99     48.5  max     48.5 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 145 MiB (all: 294), min available 9860 MiB, PSI some avg10 max 0.0, time to zero 31.1 s (7 samples)
+02:52:23  rep-frozen-n1-m10 r3: priming (10 session(s) over 1 service(s))
+02:52:55  rep-frozen-n1-m10 r3: measuring
+rep-frozen-n1-m10-r3: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 1462 ms
+  ttfr        n=10    p50    994.1  p95   1448.2  p99   1448.2  max   1448.2 ms
+  initialize  n=10    p50    988.5  p95   1444.9  p99   1444.9  max   1444.9 ms
+  first call  n=10    p50      2.9  p95      5.0  p99      5.0  max      5.0 ms
+  steady      n=50    p50      2.4  p95      9.5  p99     42.5  max     42.5 ms
+  delete      n=10    p50      7.7  p95     43.8  p99     43.8  max     43.8 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 142 MiB (all: 289), min available 9856 MiB, PSI some avg10 max 0.0, time to zero 29.0 s (7 samples)
+02:53:28  rep-warm-n1-m10 r1: priming (10 session(s) over 1 service(s))
+02:53:29  rep-warm-n1-m10 r1: measuring
+rep-warm-n1-m10-r1: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 140 ms
+  ttfr        n=10    p50     64.0  p95     81.4  p99     81.4  max     81.4 ms
+  initialize  n=10    p50     41.7  p95     63.1  p99     63.1  max     63.1 ms
+  first call  n=10    p50     10.5  p95     13.6  p99     13.6  max     13.6 ms
+  steady      n=50    p50      7.4  p95     20.1  p99     21.6  max     21.6 ms
+  delete      n=10    p50     10.8  p95     25.8  p99     25.8  max     25.8 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 149 MiB (all: 149), min available 9858 MiB, PSI some avg10 max 0.0 (2 samples)
+02:54:02  rep-warm-n1-m10 r2: priming (10 session(s) over 1 service(s))
+02:54:04  rep-warm-n1-m10 r2: measuring
+rep-warm-n1-m10-r2: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 145 ms
+  ttfr        n=10    p50     62.1  p95     82.5  p99     82.5  max     82.5 ms
+  initialize  n=10    p50     40.9  p95     52.5  p99     52.5  max     52.5 ms
+  first call  n=10    p50     12.6  p95     23.2  p99     23.2  max     23.2 ms
+  steady      n=50    p50      8.4  p95     17.8  p99     28.3  max     28.3 ms
+  delete      n=10    p50     12.4  p95     27.5  p99     27.5  max     27.5 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 149 MiB (all: 149), min available 9864 MiB, PSI some avg10 max 0.0 (2 samples)
+02:54:34  rep-warm-n1-m10 r3: priming (10 session(s) over 1 service(s))
+02:54:36  rep-warm-n1-m10 r3: measuring
+rep-warm-n1-m10-r3: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 134 ms
+  ttfr        n=10    p50     65.0  p95     77.2  p99     77.2  max     77.2 ms
+  initialize  n=10    p50     39.0  p95     58.6  p99     58.6  max     58.6 ms
+  first call  n=10    p50      6.0  p95     34.7  p99     34.7  max     34.7 ms
+  steady      n=50    p50      9.7  p95     15.2  p99     18.6  max     18.6 ms
+  delete      n=10    p50     12.2  p95     21.1  p99     21.1  max     21.1 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 149 MiB (all: 149), min available 9857 MiB, PSI some avg10 max 0.0 (2 samples)
+02:55:08  rep-frozen-n1-m50 r1: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+02:55:47  rep-frozen-n1-m50 r1: measuring
+rep-frozen-n1-m50-r1: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 2196 ms
+  ttfr        n=16    p50   1573.5  p95   2177.9  p99   2177.9  max   2177.9 ms
+  initialize  n=16    p50   1570.0  p95   2175.1  p99   2175.1  max   2175.1 ms
+  first call  n=16    p50      2.7  p95      8.0  p99      8.0  max      8.0 ms
+  steady      n=80    p50      2.2  p95     23.3  p99     51.1  max     51.1 ms
+  delete      n=16    p50      8.7  p95     50.9  p99     50.9  max     50.9 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:56:30  rep-frozen-n1-m50 r2: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+02:57:13  rep-frozen-n1-m50 r2: measuring
+rep-frozen-n1-m50-r2: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 2039 ms
+  ttfr        n=16    p50   1433.4  p95   2020.9  p99   2020.9  max   2020.9 ms
+  initialize  n=16    p50   1428.4  p95   2017.8  p99   2017.8  max   2017.8 ms
+  first call  n=16    p50      2.9  p95      6.5  p99      6.5  max      6.5 ms
+  steady      n=80    p50      2.4  p95      9.3  p99     50.1  max     50.1 ms
+  delete      n=16    p50      7.8  p95     51.7  p99     51.7  max     51.7 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:57:58  rep-frozen-n1-m50 r3: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+02:58:39  rep-frozen-n1-m50 r3: measuring
+rep-frozen-n1-m50-r3: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 2153 ms
+  ttfr        n=16    p50   1439.8  p95   2137.4  p99   2137.4  max   2137.4 ms
+  initialize  n=16    p50   1430.5  p95   2134.3  p99   2134.3  max   2134.3 ms
+  first call  n=16    p50      2.7  p95     40.7  p99     40.7  max     40.7 ms
+  steady      n=80    p50      2.2  p95     14.4  p99     38.7  max     38.7 ms
+  delete      n=16    p50      7.0  p95     49.5  p99     49.5  max     49.5 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+02:59:20  rep-warm-n1-m50 r1: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+02:59:22  rep-warm-n1-m50 r1: measuring
+rep-warm-n1-m50-r1: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 277 ms
+  ttfr        n=16    p50    142.9  p95    176.6  p99    176.6  max    176.6 ms
+  initialize  n=16    p50    107.7  p95    118.8  p99    118.8  max    118.8 ms
+  first call  n=16    p50     22.4  p95     42.2  p99     42.2  max     42.2 ms
+  steady      n=80    p50     14.3  p95     33.0  p99     51.0  max     51.0 ms
+  delete      n=16    p50     17.0  p95     43.2  p99     43.2  max     43.2 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:00:01  rep-warm-n1-m50 r2: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:00:03  rep-warm-n1-m50 r2: measuring
+rep-warm-n1-m50-r2: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 233 ms
+  ttfr        n=16    p50    116.4  p95    133.5  p99    133.5  max    133.5 ms
+  initialize  n=16    p50     72.8  p95     94.8  p99     94.8  max     94.8 ms
+  first call  n=16    p50     17.5  p95     26.8  p99     26.8  max     26.8 ms
+  steady      n=80    p50     14.2  p95     24.3  p99     28.0  max     28.0 ms
+  delete      n=16    p50     21.4  p95     36.5  p99     36.5  max     36.5 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:00:44  rep-warm-n1-m50 r3: priming (50 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:00:47  rep-warm-n1-m50 r3: measuring
+rep-warm-n1-m50-r3: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 247 ms
+  ttfr        n=16    p50    123.0  p95    142.1  p99    142.1  max    142.1 ms
+  initialize  n=16    p50     77.5  p95    105.3  p99    105.3  max    105.3 ms
+  first call  n=16    p50     21.0  p95     35.9  p99     35.9  max     35.9 ms
+  steady      n=80    p50     14.2  p95     31.9  p99     37.8  max     37.8 ms
+  delete      n=16    p50     22.9  p95     35.0  p99     35.0  max     35.0 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:01:28  rep-frozen-n1-m200 r1: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:02:09  rep-frozen-n1-m200 r1: measuring
+rep-frozen-n1-m200-r1: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 2295 ms
+  ttfr        n=16    p50   1678.9  p95   2280.3  p99   2280.3  max   2280.3 ms
+  initialize  n=16    p50   1671.8  p95   2276.8  p99   2276.8  max   2276.8 ms
+  first call  n=16    p50      2.9  p95     52.1  p99     52.1  max     52.1 ms
+  steady      n=80    p50      2.2  p95      4.2  p99     43.3  max     43.3 ms
+  delete      n=16    p50      7.0  p95     46.4  p99     46.4  max     46.4 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:02:50  rep-frozen-n1-m200 r2: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:03:31  rep-frozen-n1-m200 r2: measuring
+rep-frozen-n1-m200-r2: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 2363 ms
+  ttfr        n=16    p50   1752.3  p95   2340.2  p99   2340.2  max   2340.2 ms
+  initialize  n=16    p50   1742.0  p95   2336.6  p99   2336.6  max   2336.6 ms
+  first call  n=16    p50      2.6  p95      6.7  p99      6.7  max      6.7 ms
+  steady      n=80    p50      2.1  p95      4.2  p99     18.6  max     18.6 ms
+  delete      n=16    p50      7.5  p95     49.0  p99     49.0  max     49.0 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:04:17  rep-frozen-n1-m200 r3: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:05:00  rep-frozen-n1-m200 r3: measuring
+rep-frozen-n1-m200-r3: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 2192 ms
+  ttfr        n=16    p50   1570.0  p95   2163.4  p99   2163.4  max   2163.4 ms
+  initialize  n=16    p50   1564.4  p95   2160.1  p99   2160.1  max   2160.1 ms
+  first call  n=16    p50      2.7  p95      4.9  p99      4.9  max      4.9 ms
+  steady      n=80    p50      2.2  p95      3.8  p99     24.2  max     24.2 ms
+  delete      n=16    p50      8.1  p95     51.6  p99     51.6  max     51.6 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:05:42  rep-warm-n1-m200 r1: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:05:45  rep-warm-n1-m200 r1: measuring
+rep-warm-n1-m200-r1: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 351 ms
+  ttfr        n=16    p50    196.3  p95    278.1  p99    278.1  max    278.1 ms
+  initialize  n=16    p50    112.2  p95    142.8  p99    142.8  max    142.8 ms
+  first call  n=16    p50     25.5  p95     52.0  p99     52.0  max     52.0 ms
+  steady      n=80    p50     12.9  p95     38.3  p99    120.9  max    120.9 ms
+  delete      n=16    p50     17.7  p95     47.3  p99     47.3  max     47.3 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:06:26  rep-warm-n1-m200 r2: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:06:28  rep-warm-n1-m200 r2: measuring
+rep-warm-n1-m200-r2: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 369 ms
+  ttfr        n=16    p50    234.4  p95    298.0  p99    298.0  max    298.0 ms
+  initialize  n=16    p50    167.2  p95    280.2  p99    280.2  max    280.2 ms
+  first call  n=16    p50     19.9  p95     55.9  p99     55.9  max     55.9 ms
+  steady      n=80    p50     12.9  p95     36.2  p99     46.4  max     46.4 ms
+  delete      n=16    p50     25.9  p95     91.6  p99     91.6  max     91.6 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:07:09  rep-warm-n1-m200 r3: priming (200 session(s) over 1 service(s)) (capped at 16 replicas: expect 503s)
+03:07:12  rep-warm-n1-m200 r3: measuring
+rep-warm-n1-m200-r3: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 398 ms
+  ttfr        n=16    p50    235.3  p95    318.6  p99    318.6  max    318.6 ms
+  initialize  n=16    p50    100.7  p95    296.7  p99    296.7  max    296.7 ms
+  first call  n=16    p50     45.8  p95     83.6  p99     83.6  max     83.6 ms
+  steady      n=80    p50     16.9  p95     53.8  p99     63.9  max     63.9 ms
+  delete      n=16    p50     16.6  p95     46.2  p99     46.2  max     46.2 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+03:07:51  rep-frozen-n10-m1 r1: priming (1 session(s) over 10 service(s))
+03:08:08  rep-frozen-n10-m1 r1: measuring
+rep-frozen-n10-m1-r1: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 586 ms
+  ttfr        n=1     p50    567.8  p95    567.8  p99    567.8  max    567.8 ms
+  initialize  n=1     p50    564.2  p95    564.2  p99    564.2  max    564.2 ms
+  first call  n=1     p50      2.2  p95      2.2  p99      2.2  max      2.2 ms
+  steady      n=5     p50      2.0  p95      2.2  p99      2.2  max      2.2 ms
+  delete      n=1     p50      8.2  p95      8.2  p99      8.2  max      8.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 158), min available 9909 MiB, PSI some avg10 max 0.0, time to zero 14.2 s (4 samples)
+03:08:25  rep-frozen-n10-m1 r2: priming (1 session(s) over 10 service(s))
+03:08:41  rep-frozen-n10-m1 r2: measuring
+rep-frozen-n10-m1-r2: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 667 ms
+  ttfr        n=1     p50    653.0  p95    653.0  p99    653.0  max    653.0 ms
+  initialize  n=1     p50    649.5  p95    649.5  p99    649.5  max    649.5 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.5  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      6.2  p95      6.2  p99      6.2  max      6.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 162), min available 9918 MiB, PSI some avg10 max 0.0, time to zero 13.6 s (4 samples)
+03:08:58  rep-frozen-n10-m1 r3: priming (1 session(s) over 10 service(s))
+03:09:15  rep-frozen-n10-m1 r3: measuring
+rep-frozen-n10-m1-r3: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 556 ms
+  ttfr        n=1     p50    536.9  p95    536.9  p99    536.9  max    536.9 ms
+  initialize  n=1     p50    533.6  p95    533.6  p99    533.6  max    533.6 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.5  p95      1.8  p99      1.8  max      1.8 ms
+  delete      n=1     p50     11.0  p95     11.0  p99     11.0  max     11.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 167), min available 9917 MiB, PSI some avg10 max 0.0, time to zero 13.7 s (4 samples)
+03:09:31  rep-warm-n10-m1 r1: priming (1 session(s) over 10 service(s))
+03:09:32  rep-warm-n10-m1 r1: measuring
+rep-warm-n10-m1-r1: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 28 ms
+  ttfr        n=1     p50     13.8  p95     13.8  p99     13.8  max     13.8 ms
+  initialize  n=1     p50     10.8  p95     10.8  p99     10.8  max     10.8 ms
+  first call  n=1     p50      1.6  p95      1.6  p99      1.6  max      1.6 ms
+  steady      n=5     p50      1.5  p95      1.6  p99      1.6  max      1.6 ms
+  delete      n=1     p50      6.2  p95      6.2  p99      6.2  max      6.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9922 MiB, PSI some avg10 max 0.0 (2 samples)
+03:09:48  rep-warm-n10-m1 r2: priming (1 session(s) over 10 service(s))
+03:09:48  rep-warm-n10-m1 r2: measuring
+rep-warm-n10-m1-r2: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 22 ms
+  ttfr        n=1     p50     12.0  p95     12.0  p99     12.0  max     12.0 ms
+  initialize  n=1     p50      8.9  p95      8.9  p99      8.9  max      8.9 ms
+  first call  n=1     p50      1.7  p95      1.7  p99      1.7  max      1.7 ms
+  steady      n=5     p50      1.4  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      2.8  p95      2.8  p99      2.8  max      2.8 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9922 MiB, PSI some avg10 max 0.0 (2 samples)
+03:10:05  rep-warm-n10-m1 r3: priming (1 session(s) over 10 service(s))
+03:10:05  rep-warm-n10-m1 r3: measuring
+rep-warm-n10-m1-r3: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 28 ms
+  ttfr        n=1     p50     12.8  p95     12.8  p99     12.8  max     12.8 ms
+  initialize  n=1     p50     10.1  p95     10.1  p99     10.1  max     10.1 ms
+  first call  n=1     p50      1.4  p95      1.4  p99      1.4  max      1.4 ms
+  steady      n=5     p50      1.5  p95      2.0  p99      2.0  max      2.0 ms
+  delete      n=1     p50      6.3  p95      6.3  p99      6.3  max      6.3 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9922 MiB, PSI some avg10 max 0.0 (2 samples)
+03:10:19  rep-frozen-n10-m10 r1: priming (10 session(s) over 10 service(s))
+03:10:50  rep-frozen-n10-m10 r1: measuring
+rep-frozen-n10-m10-r1: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 1117 ms
+  ttfr        n=10    p50    760.0  p95   1104.3  p99   1104.3  max   1104.3 ms
+  initialize  n=10    p50    756.2  p95   1101.4  p99   1101.4  max   1101.4 ms
+  first call  n=10    p50      2.0  p95      2.9  p99      2.9  max      2.9 ms
+  steady      n=50    p50      1.9  p95      3.5  p99     34.0  max     34.0 ms
+  delete      n=10    p50      7.7  p95     40.1  p99     40.1  max     40.1 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 133 MiB (all: 251), min available 9868 MiB, PSI some avg10 max 0.0, time to zero 25.9 s (6 samples)
+03:11:17  rep-frozen-n10-m10 r2: priming (10 session(s) over 10 service(s))
+03:11:47  rep-frozen-n10-m10 r2: measuring
+rep-frozen-n10-m10-r2: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 1184 ms
+  ttfr        n=10    p50    779.4  p95   1124.0  p99   1124.0  max   1124.0 ms
+  initialize  n=10    p50    775.4  p95   1120.0  p99   1120.0  max   1120.0 ms
+  first call  n=10    p50      2.4  p95      4.3  p99      4.3  max      4.3 ms
+  steady      n=50    p50      2.1  p95     25.3  p99     44.2  max     44.2 ms
+  delete      n=10    p50      5.3  p95     51.7  p99     51.7  max     51.7 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 144 MiB (all: 262), min available 9855 MiB, PSI some avg10 max 0.0, time to zero 30.3 s (6 samples)
+03:12:21  rep-frozen-n10-m10 r3: priming (10 session(s) over 10 service(s))
+03:12:53  rep-frozen-n10-m10 r3: measuring
+rep-frozen-n10-m10-r3: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 1350 ms
+  ttfr        n=10    p50    989.5  p95   1330.0  p99   1330.0  max   1330.0 ms
+  initialize  n=10    p50    984.5  p95   1326.2  p99   1326.2  max   1326.2 ms
+  first call  n=10    p50      2.6  p95      4.5  p99      4.5  max      4.5 ms
+  steady      n=50    p50      2.0  p95      7.6  p99     53.0  max     53.0 ms
+  delete      n=10    p50      7.1  p95     52.9  p99     52.9  max     52.9 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 142 MiB (all: 253), min available 9854 MiB, PSI some avg10 max 0.0, time to zero 25.9 s (7 samples)
+03:13:23  rep-warm-n10-m10 r1: priming (10 session(s) over 10 service(s))
+03:13:24  rep-warm-n10-m10 r1: measuring
+rep-warm-n10-m10-r1: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 142 ms
+  ttfr        n=10    p50     59.8  p95     70.9  p99     70.9  max     70.9 ms
+  initialize  n=10    p50     32.6  p95     43.6  p99     43.6  max     43.6 ms
+  first call  n=10    p50     13.8  p95     20.6  p99     20.6  max     20.6 ms
+  steady      n=50    p50      9.7  p95     20.7  p99     23.0  max     23.0 ms
+  delete      n=10    p50     17.5  p95     28.3  p99     28.3  max     28.3 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 148 MiB (all: 148), min available 9857 MiB, PSI some avg10 max 0.0 (2 samples)
+03:13:57  rep-warm-n10-m10 r2: priming (10 session(s) over 10 service(s))
+03:13:59  rep-warm-n10-m10 r2: measuring
+rep-warm-n10-m10-r2: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 138 ms
+  ttfr        n=10    p50     55.2  p95     81.1  p99     81.1  max     81.1 ms
+  initialize  n=10    p50     34.9  p95     52.8  p99     52.8  max     52.8 ms
+  first call  n=10    p50      9.7  p95     18.0  p99     18.0  max     18.0 ms
+  steady      n=50    p50      8.6  p95     18.3  p99     37.8  max     37.8 ms
+  delete      n=10    p50     11.2  p95     22.9  p99     22.9  max     22.9 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 150 MiB (all: 150), min available 9872 MiB, PSI some avg10 max 0.0 (2 samples)
+03:14:29  rep-warm-n10-m10 r3: priming (10 session(s) over 10 service(s))
+03:14:31  rep-warm-n10-m10 r3: measuring
+rep-warm-n10-m10-r3: 10 sessions over 10 service(s), 10/10 ok (0.00% failed) — OK, wall 149 ms
+  ttfr        n=10    p50     61.8  p95     74.5  p99     74.5  max     74.5 ms
+  initialize  n=10    p50     36.6  p95     40.9  p99     40.9  max     40.9 ms
+  first call  n=10    p50     11.5  p95     23.9  p99     23.9  max     23.9 ms
+  steady      n=50    p50     10.7  p95     20.4  p99     26.8  max     26.8 ms
+  delete      n=10    p50     13.6  p95     20.7  p99     20.7  max     20.7 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 150 MiB (all: 150), min available 9863 MiB, PSI some avg10 max 0.0 (2 samples)
+03:14:31  SKIP rep-frozen-n10-m50: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB
+03:14:31  SKIP rep-warm-n10-m50: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB
+03:14:31  SKIP rep-frozen-n10-m200: estimated 160 machine(s) × 256 MiB = 40960 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB
+03:14:31  SKIP rep-warm-n10-m200: estimated 160 machine(s) × 256 MiB = 40960 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB
+03:15:03  rep-frozen-n50-m1 r1: priming (1 session(s) over 50 service(s))
+03:15:20  rep-frozen-n50-m1 r1: measuring
+rep-frozen-n50-m1-r1: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 760 ms
+  ttfr        n=1     p50    743.2  p95    743.2  p99    743.2  max    743.2 ms
+  initialize  n=1     p50    739.8  p95    739.8  p99    739.8  max    739.8 ms
+  first call  n=1     p50      2.0  p95      2.0  p99      2.0  max      2.0 ms
+  steady      n=5     p50      1.7  p95      2.7  p99      2.7  max      2.7 ms
+  delete      n=1     p50      6.8  p95      6.8  p99      6.8  max      6.8 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 156), min available 9922 MiB, PSI some avg10 max 0.0, time to zero 14.5 s (5 samples)
+03:15:38  rep-frozen-n50-m1 r2: priming (1 session(s) over 50 service(s))
+03:15:55  rep-frozen-n50-m1 r2: measuring
+rep-frozen-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 712 ms
+  ttfr        n=1     p50    700.7  p95    700.7  p99    700.7  max    700.7 ms
+  initialize  n=1     p50    697.3  p95    697.3  p99    697.3  max    697.3 ms
+  first call  n=1     p50      2.0  p95      2.0  p99      2.0  max      2.0 ms
+  steady      n=5     p50      1.5  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      3.0  p95      3.0  p99      3.0  max      3.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 156), min available 9922 MiB, PSI some avg10 max 0.0, time to zero 13.5 s (4 samples)
+03:16:11  rep-frozen-n50-m1 r3: priming (1 session(s) over 50 service(s))
+03:16:26  rep-frozen-n50-m1 r3: measuring
+rep-frozen-n50-m1-r3: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 822 ms
+  ttfr        n=1     p50    807.6  p95    807.6  p99    807.6  max    807.6 ms
+  initialize  n=1     p50    804.6  p95    804.6  p99    804.6  max    804.6 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.5  p95      1.8  p99      1.8  max      1.8 ms
+  delete      n=1     p50      6.4  p95      6.4  p99      6.4  max      6.4 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 157), min available 9923 MiB, PSI some avg10 max 0.0, time to zero 12.2 s (5 samples)
+03:16:41  rep-warm-n50-m1 r1: priming (1 session(s) over 50 service(s))
+03:16:42  rep-warm-n50-m1 r1: measuring
+rep-warm-n50-m1-r1: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 22 ms
+  ttfr        n=1     p50     11.8  p95     11.8  p99     11.8  max     11.8 ms
+  initialize  n=1     p50      9.3  p95      9.3  p99      9.3  max      9.3 ms
+  first call  n=1     p50      1.5  p95      1.5  p99      1.5  max      1.5 ms
+  steady      n=5     p50      1.4  p95      1.6  p99      1.6  max      1.6 ms
+  delete      n=1     p50      3.2  p95      3.2  p99      3.2  max      3.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9928 MiB, PSI some avg10 max 0.0 (2 samples)
+03:16:56  rep-warm-n50-m1 r2: priming (1 session(s) over 50 service(s))
+03:16:57  rep-warm-n50-m1 r2: measuring
+rep-warm-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 24 ms
+  ttfr        n=1     p50     12.8  p95     12.8  p99     12.8  max     12.8 ms
+  initialize  n=1     p50      9.9  p95      9.9  p99      9.9  max      9.9 ms
+  first call  n=1     p50      1.7  p95      1.7  p99      1.7  max      1.7 ms
+  steady      n=5     p50      1.6  p95      1.8  p99      1.8  max      1.8 ms
+  delete      n=1     p50      3.2  p95      3.2  p99      3.2  max      3.2 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9927 MiB, PSI some avg10 max 0.0 (2 samples)
+03:17:10  rep-warm-n50-m1 r3: priming (1 session(s) over 50 service(s))
+03:17:11  rep-warm-n50-m1 r3: measuring
+rep-warm-n50-m1-r3: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 24 ms
+  ttfr        n=1     p50     12.4  p95     12.4  p99     12.4  max     12.4 ms
+  initialize  n=1     p50      9.3  p95      9.3  p99      9.3  max      9.3 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.6  p95      1.7  p99      1.7  max      1.7 ms
+  delete      n=1     p50      3.9  p95      3.9  p99      3.9  max      3.9 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 15 MiB (all: 15), min available 9928 MiB, PSI some avg10 max 0.0 (2 samples)
+03:17:25  rep-frozen-n50-m10 r1: priming (10 session(s) over 50 service(s))
+03:17:58  rep-frozen-n50-m10 r1: measuring
+rep-frozen-n50-m10-r1: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 1510 ms
+  ttfr        n=10    p50   1019.8  p95   1460.8  p99   1460.8  max   1460.8 ms
+  initialize  n=10    p50   1015.6  p95   1456.6  p99   1456.6  max   1456.6 ms
+  first call  n=10    p50      2.6  p95      4.3  p99      4.3  max      4.3 ms
+  steady      n=50    p50      2.3  p95      3.2  p99      6.3  max      6.3 ms
+  delete      n=10    p50      9.2  p95     46.4  p99     46.4  max     46.4 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 143 MiB (all: 260), min available 9867 MiB, PSI some avg10 max 0.0, time to zero 30.5 s (8 samples)
+03:18:32  rep-frozen-n50-m10 r2: priming (10 session(s) over 50 service(s))
+03:19:04  rep-frozen-n50-m10 r2: measuring
+rep-frozen-n50-m10-r2: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 2490 ms
+  ttfr        n=10    p50   1329.3  p95   2478.3  p99   2478.3  max   2478.3 ms
+  initialize  n=10    p50   1326.0  p95   2475.2  p99   2475.2  max   2475.2 ms
+  first call  n=10    p50      2.1  p95     19.2  p99     19.2  max     19.2 ms
+  steady      n=50    p50      1.7  p95      2.0  p99      2.2  max      2.2 ms
+  delete      n=10    p50      5.5  p95      8.1  p99      8.1  max      8.1 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 147 MiB (all: 277), min available 9867 MiB, PSI some avg10 max 0.0, time to zero 29.5 s (11 samples)
+03:19:38  rep-frozen-n50-m10 r3: priming (10 session(s) over 50 service(s))
+03:20:11  rep-frozen-n50-m10 r3: measuring
+rep-frozen-n50-m10-r3: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 2331 ms
+  ttfr        n=10    p50   1230.1  p95   2315.3  p99   2315.3  max   2315.3 ms
+  initialize  n=10    p50   1227.0  p95   2312.0  p99   2312.0  max   2312.0 ms
+  first call  n=10    p50      1.9  p95      4.1  p99      4.1  max      4.1 ms
+  steady      n=50    p50      1.7  p95      2.7  p99      4.6  max      4.6 ms
+  delete      n=10    p50      4.4  p95     50.2  p99     50.2  max     50.2 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 144 MiB (all: 290), min available 9866 MiB, PSI some avg10 max 0.0, time to zero 28.7 s (11 samples)
+03:20:44  rep-warm-n50-m10 r1: priming (10 session(s) over 50 service(s))
+03:20:46  rep-warm-n50-m10 r1: measuring
+rep-warm-n50-m10-r1: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 149 ms
+  ttfr        n=10    p50     54.6  p95     96.3  p99     96.3  max     96.3 ms
+  initialize  n=10    p50     35.5  p95     78.7  p99     78.7  max     78.7 ms
+  first call  n=10    p50     11.2  p95     26.1  p99     26.1  max     26.1 ms
+  steady      n=50    p50      8.4  p95     23.9  p99     28.4  max     28.4 ms
+  delete      n=10    p50     10.7  p95     24.4  p99     24.4  max     24.4 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 150 MiB (all: 150), min available 9862 MiB, PSI some avg10 max 0.0 (2 samples)
+03:21:19  rep-warm-n50-m10 r2: priming (10 session(s) over 50 service(s))
+03:21:21  rep-warm-n50-m10 r2: measuring
+rep-warm-n50-m10-r2: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 162 ms
+  ttfr        n=10    p50     73.6  p95     97.8  p99     97.8  max     97.8 ms
+  initialize  n=10    p50     36.0  p95     71.0  p99     71.0  max     71.0 ms
+  first call  n=10    p50     11.6  p95     35.1  p99     35.1  max     35.1 ms
+  steady      n=50    p50     10.2  p95     19.1  p99     25.8  max     25.8 ms
+  delete      n=10    p50     17.8  p95     29.7  p99     29.7  max     29.7 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 150 MiB (all: 150), min available 9862 MiB, PSI some avg10 max 0.0 (2 samples)
+03:21:54  rep-warm-n50-m10 r3: priming (10 session(s) over 50 service(s))
+03:21:56  rep-warm-n50-m10 r3: measuring
+rep-warm-n50-m10-r3: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 163 ms
+  ttfr        n=10    p50     58.5  p95    100.7  p99    100.7  max    100.7 ms
+  initialize  n=10    p50     32.3  p95     74.6  p99     74.6  max     74.6 ms
+  first call  n=10    p50     14.9  p95     25.1  p99     25.1  max     25.1 ms
+  steady      n=50    p50      7.5  p95     25.2  p99     44.2  max     44.2 ms
+  delete      n=10    p50     17.3  p95     49.5  p99     49.5  max     49.5 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 151 MiB (all: 151), min available 9855 MiB, PSI some avg10 max 0.0 (2 samples)
+03:21:56  SKIP rep-frozen-n50-m50: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB
+03:21:56  SKIP rep-warm-n50-m50: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB
+03:21:56  SKIP rep-frozen-n50-m200: estimated 200 machine(s) × 256 MiB = 51200 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB
+03:21:56  SKIP rep-warm-n50-m200: estimated 200 machine(s) × 256 MiB = 51200 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB
+
+# Thaw at scale — 20261113-022704
+
+NS="1 10 50" MS="1 10 50 200" MODES="frozen warm" REPS="norep rep" R=3 CALLS=5 TIMEOUT=60s
+IDLE=10s SETTLE=120s MAXREP=16 PSI_MAX=5 MEM_NOREP=1024M MEM_REP=256M
+
+| cell | N | M | ok | TTFR p50 | p95 | p99 | max | steady p50 | p99 | live peak | machines | PSS peak MiB | min avail MiB | PSI max | t→0 s | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| norep-frozen-n1-m1-r1 | 1 | 1 | 1/1 | 526 | 526 | 526 | 526 | 1.7 | 3.1 | 1 | 1 | 17 | 9925 | 0.0 | 14.0 | OK |
+| norep-frozen-n1-m1-r2 | 1 | 1 | 1/1 | 565 | 565 | 565 | 565 | 1.7 | 2.1 | 1 | 1 | 17 | 9922 | 0.0 | 13.7 | OK |
+| norep-frozen-n1-m1-r3 | 1 | 1 | 1/1 | 594 | 594 | 594 | 594 | 2.2 | 3.3 | 1 | 1 | 18 | 9923 | 0.0 | 13.8 | OK |
+| norep-warm-n1-m1-r1 | 1 | 1 | 1/1 | 76 | 76 | 76 | 76 | 1.6 | 1.9 | 1 | 1 | 21 | 9932 | 0.0 | n/a | OK |
+| norep-warm-n1-m1-r2 | 1 | 1 | 1/1 | 70 | 70 | 70 | 70 | 1.7 | 2.2 | 1 | 1 | 20 | 9936 | 0.0 | n/a | OK |
+| norep-warm-n1-m1-r3 | 1 | 1 | 1/1 | 17 | 17 | 17 | 17 | 1.6 | 1.7 | 1 | 1 | 26 | 9928 | 0.0 | n/a | OK |
+| norep-frozen-n1-m10-r1 | 1 | 10 | 10/10 | 985 | 1000 | 1000 | 1000 | 17.5 | 92.4 | 1 | 1 | 35 | 9915 | 0.0 | 14.0 | OK |
+| norep-frozen-n1-m10-r2 | 1 | 10 | 10/10 | 606 | 800 | 800 | 800 | 7.1 | 98.4 | 1 | 1 | 31 | 9915 | 0.0 | 15.1 | OK |
+| norep-frozen-n1-m10-r3 | 1 | 10 | 10/10 | 838 | 932 | 932 | 932 | 10.1 | 81.8 | 1 | 1 | 30 | 9914 | 0.0 | 13.6 | OK |
+| norep-warm-n1-m10-r1 | 1 | 10 | 10/10 | 276 | 387 | 387 | 387 | 5.3 | 76.6 | 1 | 1 | 46 | 9906 | 0.0 | n/a | OK |
+| norep-warm-n1-m10-r2 | 1 | 10 | 10/10 | 357 | 460 | 460 | 460 | 4.3 | 71.9 | 1 | 1 | 45 | 9910 | 0.0 | n/a | OK |
+| norep-warm-n1-m10-r3 | 1 | 10 | 10/10 | 287 | 411 | 411 | 411 | 3.9 | 93.3 | 1 | 1 | 45 | 9903 | 0.0 | n/a | OK |
+| norep-frozen-n1-m50-r1 | 1 | 50 | 27/50 | 1473 | 2643 | 2704 | 2704 | 8.1 | 86.7 | 16 | 16 | 350 | 9714 | 0.0 | 36.7 | DEGRADED |
+| norep-frozen-n1-m50-r2 | 1 | 50 | 27/50 | 1491 | 2967 | 3069 | 3069 | 14.3 | 118.7 | 16 | 16 | 415 | 9642 | 0.0 | 37.1 | DEGRADED |
+| norep-frozen-n1-m50-r3 | 1 | 50 | 27/50 | 1466 | 2800 | 2956 | 2956 | 8.7 | 291.3 | 16 | 16 | 407 | 9646 | 0.0 | 37.3 | DEGRADED |
+| norep-warm-n1-m50-r1 | 1 | 50 | 47/50 | 488 | 588 | 601 | 601 | 29.3 | 125.8 | 16 | 16 | 468 | 9596 | 0.0 | n/a | DEGRADED |
+| norep-warm-n1-m50-r2 | 1 | 50 | 47/50 | 449 | 587 | 598 | 598 | 21.4 | 156.8 | 16 | 16 | 459 | 9602 | 0.0 | n/a | DEGRADED |
+| norep-warm-n1-m50-r3 | 1 | 50 | 46/50 | 418 | 550 | 553 | 553 | 16.6 | 103.7 | 16 | 16 | 467 | 9593 | 0.0 | n/a | DEGRADED |
+| norep-frozen-n1-m200 | 1 | 200 | skipped | | | | | | | | 16 (est) | | 9600 | | | skipped: estimated 16 machine(s) × 1024 MiB = 16384 MiB; available 9600 MiB (70% = 6720), disk free 596727 MiB |
+| norep-warm-n1-m200 | 1 | 200 | skipped | | | | | | | | 16 (est) | | 9600 | | | skipped: estimated 16 machine(s) × 1024 MiB = 16384 MiB; available 9600 MiB (70% = 6720), disk free 596727 MiB |
+| norep-frozen-n10-m1-r1 | 10 | 1 | 1/1 | 627 | 627 | 627 | 627 | 2.4 | 2.8 | 1 | 1 | 18 | 9912 | 0.0 | 13.6 | OK |
+| norep-frozen-n10-m1-r2 | 10 | 1 | 1/1 | 526 | 526 | 526 | 526 | 2.1 | 3.7 | 1 | 1 | 18 | 9907 | 0.0 | 13.7 | OK |
+| norep-frozen-n10-m1-r3 | 10 | 1 | 1/1 | 619 | 619 | 619 | 619 | 1.8 | 3.2 | 1 | 1 | 18 | 9908 | 0.0 | 13.9 | OK |
+| norep-warm-n10-m1-r1 | 10 | 1 | 1/1 | 104 | 104 | 104 | 104 | 3.7 | 68.9 | 1 | 1 | 26 | 9915 | 0.0 | n/a | OK |
+| norep-warm-n10-m1-r2 | 10 | 1 | 1/1 | 80 | 80 | 80 | 80 | 2.4 | 2.9 | 1 | 1 | 20 | 9924 | 0.0 | n/a | OK |
+| norep-warm-n10-m1-r3 | 10 | 1 | 1/1 | 77 | 77 | 77 | 77 | 1.8 | 2.6 | 1 | 1 | 21 | 9920 | 0.0 | n/a | OK |
+| norep-frozen-n10-m10 | 10 | 10 | skipped | | | | | | | | 10 (est) | | 9921 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9921 MiB (70% = 6944), disk free 596731 MiB |
+| norep-warm-n10-m10 | 10 | 10 | skipped | | | | | | | | 10 (est) | | 9921 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9921 MiB (70% = 6944), disk free 596731 MiB |
+| norep-frozen-n10-m50 | 10 | 50 | skipped | | | | | | | | 10 (est) | | 9922 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB |
+| norep-warm-n10-m50 | 10 | 50 | skipped | | | | | | | | 10 (est) | | 9922 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB |
+| norep-frozen-n10-m200 | 10 | 200 | skipped | | | | | | | | 20 (est) | | 9922 | | | skipped: estimated 20 machine(s) × 1024 MiB = 20480 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB |
+| norep-warm-n10-m200 | 10 | 200 | skipped | | | | | | | | 20 (est) | | 9922 | | | skipped: estimated 20 machine(s) × 1024 MiB = 20480 MiB; available 9922 MiB (70% = 6945), disk free 596731 MiB |
+| norep-frozen-n50-m1-r1 | 50 | 1 | 1/1 | 690 | 690 | 690 | 690 | 1.6 | 1.8 | 1 | 1 | 18 | 9909 | 0.0 | 12.0 | OK |
+| norep-frozen-n50-m1-r2 | 50 | 1 | 1/1 | 333 | 333 | 333 | 333 | 1.8 | 2.8 | 1 | 1 | 18 | 9912 | 0.0 | 12.4 | OK |
+| norep-frozen-n50-m1-r3 | 50 | 1 | 1/1 | 682 | 682 | 682 | 682 | 1.7 | 2.4 | 1 | 1 | 18 | 9912 | 0.0 | 12.6 | OK |
+| norep-warm-n50-m1-r1 | 50 | 1 | 1/1 | 70 | 70 | 70 | 70 | 1.6 | 2.6 | 1 | 1 | 21 | 9923 | 0.0 | n/a | OK |
+| norep-warm-n50-m1-r2 | 50 | 1 | 1/1 | 26 | 26 | 26 | 26 | 1.6 | 52.7 | 1 | 1 | 27 | 9920 | 0.0 | n/a | OK |
+| norep-warm-n50-m1-r3 | 50 | 1 | 1/1 | 83 | 83 | 83 | 83 | 1.7 | 2.6 | 1 | 1 | 21 | 9924 | 0.0 | n/a | OK |
+| norep-frozen-n50-m10 | 50 | 10 | skipped | | | | | | | | 10 (est) | | 9926 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB |
+| norep-warm-n50-m10 | 50 | 10 | skipped | | | | | | | | 10 (est) | | 9926 | | | skipped: estimated 10 machine(s) × 1024 MiB = 10240 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB |
+| norep-frozen-n50-m50 | 50 | 50 | skipped | | | | | | | | 50 (est) | | 9926 | | | skipped: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB |
+| norep-warm-n50-m50 | 50 | 50 | skipped | | | | | | | | 50 (est) | | 9926 | | | skipped: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9926 MiB (70% = 6948), disk free 596731 MiB |
+| norep-frozen-n50-m200 | 50 | 200 | skipped | | | | | | | | 50 (est) | | 9925 | | | skipped: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9925 MiB (70% = 6947), disk free 596731 MiB |
+| norep-warm-n50-m200 | 50 | 200 | skipped | | | | | | | | 50 (est) | | 9925 | | | skipped: estimated 50 machine(s) × 1024 MiB = 51200 MiB; available 9925 MiB (70% = 6947), disk free 596731 MiB |
+| rep-frozen-n1-m1-r1 | 1 | 1 | 1/1 | 531 | 531 | 531 | 531 | 1.5 | 1.7 | 1 | 1 | 13 | 9927 | 0.0 | 12.0 | OK |
+| rep-frozen-n1-m1-r2 | 1 | 1 | 1/1 | 579 | 579 | 579 | 579 | 1.6 | 1.7 | 1 | 1 | 14 | 9927 | 0.0 | 12.2 | OK |
+| rep-frozen-n1-m1-r3 | 1 | 1 | 1/1 | 562 | 562 | 562 | 562 | 1.4 | 1.6 | 1 | 1 | 14 | 9925 | 0.0 | 13.7 | OK |
+| rep-warm-n1-m1-r1 | 1 | 1 | 1/1 | 11 | 11 | 11 | 11 | 1.4 | 1.6 | 1 | 1 | 15 | 9930 | 0.0 | n/a | OK |
+| rep-warm-n1-m1-r2 | 1 | 1 | 1/1 | 11 | 11 | 11 | 11 | 1.5 | 1.5 | 1 | 1 | 15 | 9931 | 0.0 | n/a | OK |
+| rep-warm-n1-m1-r3 | 1 | 1 | 1/1 | 15 | 15 | 15 | 15 | 1.4 | 1.7 | 1 | 1 | 15 | 9930 | 0.0 | n/a | OK |
+| rep-frozen-n1-m10-r1 | 1 | 10 | 10/10 | 830 | 1241 | 1241 | 1241 | 2.3 | 47.4 | 10 | 10 | 131 | 9874 | 0.0 | 27.2 | OK |
+| rep-frozen-n1-m10-r2 | 1 | 10 | 10/10 | 1010 | 1428 | 1428 | 1428 | 2.5 | 42.5 | 10 | 10 | 145 | 9860 | 0.0 | 31.1 | OK |
+| rep-frozen-n1-m10-r3 | 1 | 10 | 10/10 | 994 | 1448 | 1448 | 1448 | 2.4 | 42.5 | 10 | 10 | 142 | 9856 | 0.0 | 29.0 | OK |
+| rep-warm-n1-m10-r1 | 1 | 10 | 10/10 | 64 | 81 | 81 | 81 | 7.4 | 21.6 | 10 | 10 | 149 | 9858 | 0.0 | n/a | OK |
+| rep-warm-n1-m10-r2 | 1 | 10 | 10/10 | 62 | 83 | 83 | 83 | 8.4 | 28.3 | 10 | 10 | 149 | 9864 | 0.0 | n/a | OK |
+| rep-warm-n1-m10-r3 | 1 | 10 | 10/10 | 65 | 77 | 77 | 77 | 9.7 | 18.6 | 10 | 10 | 149 | 9857 | 0.0 | n/a | OK |
+| rep-frozen-n1-m50-r1 | 1 | 50 | 16/50 | 1573 | 2178 | 2178 | 2178 | 2.2 | 51.1 | 16 | 16 | 227 | 9812 | 0.0 | 38.8 | DEGRADED |
+| rep-frozen-n1-m50-r2 | 1 | 50 | 16/50 | 1433 | 2021 | 2021 | 2021 | 2.4 | 50.1 | 16 | 16 | 230 | 9830 | 0.0 | 40.0 | DEGRADED |
+| rep-frozen-n1-m50-r3 | 1 | 50 | 16/50 | 1440 | 2137 | 2137 | 2137 | 2.2 | 38.7 | 16 | 16 | 230 | 9830 | 0.0 | 37.1 | DEGRADED |
+| rep-warm-n1-m50-r1 | 1 | 50 | 16/50 | 143 | 177 | 177 | 177 | 14.3 | 51.0 | 16 | 16 | 241 | 9826 | 0.0 | n/a | DEGRADED |
+| rep-warm-n1-m50-r2 | 1 | 50 | 16/50 | 116 | 133 | 133 | 133 | 14.2 | 28.0 | 16 | 16 | 242 | 9828 | 0.0 | n/a | DEGRADED |
+| rep-warm-n1-m50-r3 | 1 | 50 | 16/50 | 123 | 142 | 142 | 142 | 14.2 | 37.8 | 16 | 16 | 243 | 9805 | 0.0 | n/a | DEGRADED |
+| rep-frozen-n1-m200-r1 | 1 | 200 | 16/200 | 1679 | 2280 | 2280 | 2280 | 2.2 | 43.3 | 16 | 16 | 236 | 9811 | 0.0 | 36.2 | DEGRADED |
+| rep-frozen-n1-m200-r2 | 1 | 200 | 16/200 | 1752 | 2340 | 2340 | 2340 | 2.1 | 18.6 | 16 | 16 | 237 | 9789 | 0.0 | 41.6 | DEGRADED |
+| rep-frozen-n1-m200-r3 | 1 | 200 | 16/200 | 1570 | 2163 | 2163 | 2163 | 2.2 | 24.2 | 16 | 16 | 236 | 9811 | 0.0 | 37.8 | DEGRADED |
+| rep-warm-n1-m200-r1 | 1 | 200 | 16/200 | 196 | 278 | 278 | 278 | 12.9 | 120.9 | 16 | 16 | 248 | 9779 | 0.0 | n/a | DEGRADED |
+| rep-warm-n1-m200-r2 | 1 | 200 | 16/200 | 234 | 298 | 298 | 298 | 12.9 | 46.4 | 16 | 16 | 247 | 9798 | 0.0 | n/a | DEGRADED |
+| rep-warm-n1-m200-r3 | 1 | 200 | 16/200 | 235 | 319 | 319 | 319 | 16.9 | 63.9 | 16 | 16 | 252 | 9794 | 0.0 | n/a | DEGRADED |
+| rep-frozen-n10-m1-r1 | 10 | 1 | 1/1 | 568 | 568 | 568 | 568 | 2.0 | 2.2 | 1 | 1 | 14 | 9909 | 0.0 | 14.2 | OK |
+| rep-frozen-n10-m1-r2 | 10 | 1 | 1/1 | 653 | 653 | 653 | 653 | 1.5 | 1.7 | 1 | 1 | 14 | 9918 | 0.0 | 13.6 | OK |
+| rep-frozen-n10-m1-r3 | 10 | 1 | 1/1 | 537 | 537 | 537 | 537 | 1.5 | 1.8 | 1 | 1 | 14 | 9917 | 0.0 | 13.7 | OK |
+| rep-warm-n10-m1-r1 | 10 | 1 | 1/1 | 14 | 14 | 14 | 14 | 1.5 | 1.6 | 1 | 1 | 15 | 9922 | 0.0 | n/a | OK |
+| rep-warm-n10-m1-r2 | 10 | 1 | 1/1 | 12 | 12 | 12 | 12 | 1.4 | 1.7 | 1 | 1 | 15 | 9922 | 0.0 | n/a | OK |
+| rep-warm-n10-m1-r3 | 10 | 1 | 1/1 | 13 | 13 | 13 | 13 | 1.5 | 2.0 | 1 | 1 | 15 | 9922 | 0.0 | n/a | OK |
+| rep-frozen-n10-m10-r1 | 10 | 10 | 10/10 | 760 | 1104 | 1104 | 1104 | 1.9 | 34.0 | 10 | 10 | 133 | 9868 | 0.0 | 25.9 | OK |
+| rep-frozen-n10-m10-r2 | 10 | 10 | 10/10 | 779 | 1124 | 1124 | 1124 | 2.1 | 44.2 | 10 | 10 | 144 | 9855 | 0.0 | 30.3 | OK |
+| rep-frozen-n10-m10-r3 | 10 | 10 | 10/10 | 990 | 1330 | 1330 | 1330 | 2.0 | 53.0 | 10 | 10 | 142 | 9854 | 0.0 | 25.9 | OK |
+| rep-warm-n10-m10-r1 | 10 | 10 | 10/10 | 60 | 71 | 71 | 71 | 9.7 | 23.0 | 10 | 10 | 148 | 9857 | 0.0 | n/a | OK |
+| rep-warm-n10-m10-r2 | 10 | 10 | 10/10 | 55 | 81 | 81 | 81 | 8.6 | 37.8 | 10 | 10 | 150 | 9872 | 0.0 | n/a | OK |
+| rep-warm-n10-m10-r3 | 10 | 10 | 10/10 | 62 | 75 | 75 | 75 | 10.7 | 26.8 | 10 | 10 | 150 | 9863 | 0.0 | n/a | OK |
+| rep-frozen-n10-m50 | 10 | 50 | skipped | | | | | | | | 50 (est) | | 9874 | | | skipped: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB |
+| rep-warm-n10-m50 | 10 | 50 | skipped | | | | | | | | 50 (est) | | 9874 | | | skipped: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB |
+| rep-frozen-n10-m200 | 10 | 200 | skipped | | | | | | | | 160 (est) | | 9874 | | | skipped: estimated 160 machine(s) × 256 MiB = 40960 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB |
+| rep-warm-n10-m200 | 10 | 200 | skipped | | | | | | | | 160 (est) | | 9874 | | | skipped: estimated 160 machine(s) × 256 MiB = 40960 MiB; available 9874 MiB (70% = 6911), disk free 596200 MiB |
+| rep-frozen-n50-m1-r1 | 50 | 1 | 1/1 | 743 | 743 | 743 | 743 | 1.7 | 2.7 | 1 | 1 | 15 | 9922 | 0.0 | 14.5 | OK |
+| rep-frozen-n50-m1-r2 | 50 | 1 | 1/1 | 701 | 701 | 701 | 701 | 1.5 | 1.7 | 1 | 1 | 14 | 9922 | 0.0 | 13.5 | OK |
+| rep-frozen-n50-m1-r3 | 50 | 1 | 1/1 | 808 | 808 | 808 | 808 | 1.5 | 1.8 | 1 | 1 | 14 | 9923 | 0.0 | 12.2 | OK |
+| rep-warm-n50-m1-r1 | 50 | 1 | 1/1 | 12 | 12 | 12 | 12 | 1.4 | 1.6 | 1 | 1 | 15 | 9928 | 0.0 | n/a | OK |
+| rep-warm-n50-m1-r2 | 50 | 1 | 1/1 | 13 | 13 | 13 | 13 | 1.6 | 1.8 | 1 | 1 | 15 | 9927 | 0.0 | n/a | OK |
+| rep-warm-n50-m1-r3 | 50 | 1 | 1/1 | 12 | 12 | 12 | 12 | 1.6 | 1.7 | 1 | 1 | 15 | 9928 | 0.0 | n/a | OK |
+| rep-frozen-n50-m10-r1 | 50 | 10 | 10/10 | 1020 | 1461 | 1461 | 1461 | 2.3 | 6.3 | 10 | 10 | 143 | 9867 | 0.0 | 30.5 | OK |
+| rep-frozen-n50-m10-r2 | 50 | 10 | 10/10 | 1329 | 2478 | 2478 | 2478 | 1.7 | 2.2 | 10 | 10 | 147 | 9867 | 0.0 | 29.5 | OK |
+| rep-frozen-n50-m10-r3 | 50 | 10 | 10/10 | 1230 | 2315 | 2315 | 2315 | 1.7 | 4.6 | 10 | 10 | 144 | 9866 | 0.0 | 28.7 | OK |
+| rep-warm-n50-m10-r1 | 50 | 10 | 10/10 | 55 | 96 | 96 | 96 | 8.4 | 28.4 | 10 | 10 | 150 | 9862 | 0.0 | n/a | OK |
+| rep-warm-n50-m10-r2 | 50 | 10 | 10/10 | 74 | 98 | 98 | 98 | 10.2 | 25.8 | 10 | 10 | 150 | 9862 | 0.0 | n/a | OK |
+| rep-warm-n50-m10-r3 | 50 | 10 | 10/10 | 58 | 101 | 101 | 101 | 7.5 | 44.2 | 10 | 10 | 151 | 9855 | 0.0 | n/a | OK |
+| rep-frozen-n50-m50 | 50 | 50 | skipped | | | | | | | | 50 (est) | | 9858 | | | skipped: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB |
+| rep-warm-n50-m50 | 50 | 50 | skipped | | | | | | | | 50 (est) | | 9858 | | | skipped: estimated 50 machine(s) × 256 MiB = 12800 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB |
+| rep-frozen-n50-m200 | 50 | 200 | skipped | | | | | | | | 200 (est) | | 9858 | | | skipped: estimated 200 machine(s) × 256 MiB = 51200 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB |
+| rep-warm-n50-m200 | 50 | 200 | skipped | | | | | | | | 200 (est) | | 9858 | | | skipped: estimated 200 machine(s) × 256 MiB = 51200 MiB; available 9858 MiB (70% = 6900), disk free 596187 MiB |
+
+03:21:56  78 measured run(s), 18 DEGRADED, 22 skipped cell(s), 0 bench error(s)
+03:21:56  raw JSON and logs in /var/lib/kindling/kt-thaw/tb/thaw-scale-20261113-022704
+
+03:21:56  cleaning up...
+03:22:04  baseline ok: no tb- leftovers, MemAvailable 9955 MiB (was 9952)
+exit 0

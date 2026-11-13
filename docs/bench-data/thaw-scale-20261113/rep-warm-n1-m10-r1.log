@@ -1,0 +1,7 @@
+rep-warm-n1-m10-r1: 10 sessions over 1 service(s), 10/10 ok (0.00% failed) — OK, wall 140 ms
+  ttfr        n=10    p50     64.0  p95     81.4  p99     81.4  max     81.4 ms
+  initialize  n=10    p50     41.7  p95     63.1  p99     63.1  max     63.1 ms
+  first call  n=10    p50     10.5  p95     13.6  p99     13.6  max     13.6 ms
+  steady      n=50    p50      7.4  p95     20.1  p99     21.6  max     21.6 ms
+  delete      n=10    p50     10.8  p95     25.8  p99     25.8  max     25.8 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 149 MiB (all: 149), min available 9858 MiB, PSI some avg10 max 0.0 (2 samples)

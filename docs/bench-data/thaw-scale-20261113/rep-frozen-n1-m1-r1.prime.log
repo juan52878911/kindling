@@ -1,0 +1,6 @@
+rep-frozen-n1-m1-prime: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 989 ms
+  ttfr        n=1     p50    918.4  p95    918.4  p99    918.4  max    918.4 ms
+  initialize  n=1     p50    911.5  p95    911.5  p99    911.5  max    911.5 ms
+  first call  n=1     p50      5.2  p95      5.2  p99      5.2  max      5.2 ms
+  delete      n=1     p50     70.9  p95     70.9  p99     70.9  max     70.9 ms
+  host: not sampled (no daemon socket)

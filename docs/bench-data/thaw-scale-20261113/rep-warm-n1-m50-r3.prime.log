@@ -1,0 +1,12 @@
+rep-warm-n1-m50-prime: 50 sessions over 1 service(s), 16/50 ok (68.00% failed) — DEGRADED, wall 2358 ms
+  ttfr        n=16    p50   1756.7  p95   2350.9  p99   2350.9  max   2350.9 ms
+  initialize  n=16    p50   1752.6  p95   2347.3  p99   2347.3  max   2347.3 ms
+  first call  n=16    p50      2.8  p95     39.8  p99     39.8  max     39.8 ms
+  delete      n=16    p50      5.5  p95     47.1  p99     47.1  max     47.1 ms
+  errors: init:http_503=34
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+  host: not sampled (no daemon socket)

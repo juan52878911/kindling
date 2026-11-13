@@ -1,0 +1,11 @@
+norep-warm-n1-m50-r2: 50 sessions over 1 service(s), 47/50 ok (6.00% failed) — DEGRADED, wall 776 ms
+  ttfr        n=47    p50    448.6  p95    587.3  p99    597.7  max    597.7 ms
+  initialize  n=47    p50    376.6  p95    551.3  p99    553.1  max    553.1 ms
+  first call  n=47    p50     21.1  p95     80.5  p99     84.2  max     84.2 ms
+  steady      n=235   p50     21.4  p95     84.9  p99    156.8  max    158.8 ms
+  delete      n=47    p50     68.1  p95     89.4  p99     96.2  max     96.2 ms
+  errors: init:http_503=3
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-0: init: http_503 ({"message":"could not place session for \"tb-0\": all replicas full (at the replica cap: service \"tb-0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+  host: live peak 16, 16 distinct machine(s), PSS peak 459 MiB (all: 459), min available 9602 MiB, PSI some avg10 max 0.0 (5 samples)

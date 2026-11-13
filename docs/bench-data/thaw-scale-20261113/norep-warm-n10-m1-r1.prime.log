@@ -1,0 +1,6 @@
+norep-warm-n10-m1-prime: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 582 ms
+  ttfr        n=1     p50    576.3  p95    576.3  p99    576.3  max    576.3 ms
+  initialize  n=1     p50    566.5  p95    566.5  p99    566.5  max    566.5 ms
+  first call  n=1     p50      7.6  p95      7.6  p99      7.6  max      7.6 ms
+  delete      n=1     p50      5.3  p95      5.3  p99      5.3  max      5.3 ms
+  host: not sampled (no daemon socket)
