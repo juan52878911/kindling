@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -56,14 +57,13 @@ func TestVigiaOverlaysParaLaQueCrece(t *testing.T) {
 	overlayDe(t, m, "grande", 4*logico) // ya venía así: se vigila desde ahí
 	overlayDe(t, m, "disco2g", 2048<<20)
 
-	topes := map[string]topeOverlay{}
-	if p := m.vueltaVigiaOverlays(topes); len(p) != 0 {
+	if p := m.vueltaVigiaOverlays(); len(p) != 0 {
 		t.Fatalf("primera vuelta paró %v; no quería ninguna", p)
 	}
 
 	overlayDe(t, m, "inflada", 64<<30) // ftruncate de un VMM comprometido
 	overlayDe(t, m, "normal", logico+1<<20)
-	if p := m.vueltaVigiaOverlays(topes); !slices.Equal(p, []string{"inflada"}) {
+	if p := m.vueltaVigiaOverlays(); !slices.Equal(p, []string{"inflada"}) {
 		t.Fatalf("paró %v; quería [inflada]", p)
 	}
 	if st := estadoVigia(m, "inflada"); st == api.StateRunning {
@@ -76,7 +76,85 @@ func TestVigiaOverlaysParaLaQueCrece(t *testing.T) {
 	}
 
 	overlayDe(t, m, "grande", 8*logico)
-	if p := m.vueltaVigiaOverlays(topes); !slices.Equal(p, []string{"grande"}) {
+	if p := m.vueltaVigiaOverlays(); !slices.Equal(p, []string{"grande"}) {
 		t.Fatalf("la que ya era grande creció más y se paró %v; quería [grande]", p)
+	}
+}
+
+// El tope se apunta la primera vez y no se vuelve a medir: un invitado que
+// alarga su overlay justo después de un thaw (StartedAt nuevo), antes del
+// primer vistazo, ya no fija su propia línea base; ni tampoco después de que
+// el daemon se reinicie.
+func TestVigiaOverlaysNoReMideTrasThaw(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	antes := time.Now().Add(-time.Minute)
+	for _, id := range []string{"thaw", "reinicio"} {
+		mc := m.addForTest(id)
+		m.mu.Lock()
+		mc.StartedAt, mc.PID = &antes, 100
+		m.mu.Unlock()
+		overlayDe(t, m, id, int64(defaultOverlayMiB)<<20)
+	}
+	if p := m.vueltaVigiaOverlays(); len(p) != 0 {
+		t.Fatalf("primera vuelta paró %v; no quería ninguna", p)
+	}
+
+	// Thaw: ejecución nueva, y el fichero crece antes del primer vistazo.
+	ahora := time.Now()
+	m.mu.Lock()
+	m.byID["thaw"].StartedAt, m.byID["thaw"].PID = &ahora, 200
+	m.mu.Unlock()
+	overlayDe(t, m, "thaw", 10<<30)
+	if p := m.vueltaVigiaOverlays(); !slices.Equal(p, []string{"thaw"}) {
+		t.Fatalf("tras el thaw paró %v; quería [thaw]", p)
+	}
+	if st := estadoVigia(m, "thaw"); st != api.StateStopped {
+		t.Fatalf("thaw quedó %s; quería stopped", st)
+	}
+
+	// Reinicio del daemon: otro Manager con lo que quedó en state.json.
+	m.Close()
+	var guardada *api.Machine
+	for _, mc := range readState(t, m) {
+		if mc.ID == "reinicio" {
+			guardada = mc.Clone()
+		}
+	}
+	if guardada == nil || guardada.OverlayMaxBytes == 0 {
+		t.Fatalf("el tope de reinicio no quedó en state.json: %+v", guardada)
+	}
+	m2 := newTestManager(t)
+	m2.bus = events.New()
+	m2.mu.Lock()
+	m2.byID[guardada.ID] = guardada
+	m2.mu.Unlock()
+	overlayDe(t, m2, "reinicio", 10<<30)
+	if p := m2.vueltaVigiaOverlays(); !slices.Equal(p, []string{"reinicio"}) {
+		t.Fatalf("tras reiniciar el daemon paró %v; quería [reinicio]", p)
+	}
+}
+
+// stopSi no para la máquina si ya no está en la ejecución que se midió.
+func TestStopSiNoParaOtraEjecucion(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	ahora := time.Now()
+	mc := m.addForTest("m")
+	m.mu.Lock()
+	mc.StartedAt, mc.PID = &ahora, 300
+	m.mu.Unlock()
+	antes := ahora.Add(-time.Minute)
+	if _, err := m.stopSi("m", func(mc *api.Machine) bool { return mc.StartedAt.Equal(antes) }); !errors.Is(err, errOtraEjecucion) {
+		t.Fatalf("stopSi de otra ejecución: %v; quería errOtraEjecucion", err)
+	}
+	if st := estadoVigia(m, "m"); st != api.StateRunning {
+		t.Fatalf("quedó %s; quería running", st)
+	}
+	if _, err := m.stopSi("m", func(mc *api.Machine) bool { return mc.StartedAt.Equal(ahora) }); err != nil {
+		t.Fatal(err)
+	}
+	if st := estadoVigia(m, "m"); st != api.StateStopped {
+		t.Fatalf("quedó %s; quería stopped", st)
 	}
 }

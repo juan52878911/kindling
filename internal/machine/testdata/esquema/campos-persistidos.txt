@@ -51,6 +51,7 @@ state.json api.Machine nested bool effect:4
 state.json api.Machine net_index int
 state.json api.Machine net_mibps int effect:3
 state.json api.Machine on_ttl string
+state.json api.Machine overlay_max_bytes int64 ignorable
 state.json api.Machine pid int
 state.json api.Machine published []api.PortPublish ignorable
 state.json api.Machine ready string

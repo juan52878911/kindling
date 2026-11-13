@@ -727,7 +727,52 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		}(s)
 	}
 	go func() { run.wg.Wait(); close(run.done) }()
+	if hayCuota(run) {
+		go m.puntosControlCuota(id, run, cadaPuntoControlCuota)
+	}
 	sup.runs[id] = run
+}
+
+// cadaPuntoControlCuota es cada cuánto se apunta en la máquina lo que lleva
+// gastado la cuota de sus carpetas rw mientras corre. Variable para los tests.
+var cadaPuntoControlCuota = 2 * time.Second
+
+// hayCuota dice si alguna carpeta de run lleva cuota.
+func hayCuota(run *shareRun) bool {
+	for _, t := range run.tags {
+		if t.quota != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// puntosControlCuota apunta, una vez por intervalo cada, lo gastado en las
+// carpetas rw de run (guardarUsoShares, que solo persiste si cambió) hasta que
+// la ejecución acaba. Sin esto se apuntaba solo al drenar (congelar, parar,
+// apagar el daemon): un kill -9 del daemon o un corte de luz perdían todo lo
+// gastado desde entonces, y el daemon siguiente daba esa parte de la cuota otra
+// vez. Ahora lo más que se pierde es lo de un intervalo.
+func (m *Manager) puntosControlCuota(id string, run *shareRun, cada time.Duration) {
+	t := time.NewTicker(cada)
+	defer t.Stop()
+	for {
+		select {
+		case <-run.done:
+			return
+		case <-t.C:
+		}
+		// Una ejecución que ya no es la de id (la pararon y hay otra) no
+		// apunta: la nueva empezó desde lo último que dejó esta y sigue sola.
+		sup := m.sup()
+		sup.mu.Lock()
+		actual := sup.runs[id] == run
+		sup.mu.Unlock()
+		if !actual {
+			return
+		}
+		m.guardarUsoShares(id, run)
+	}
 }
 
 // drainSharesOf cierra en orden las conexiones de id (lo que está en vuelo

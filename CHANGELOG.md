@@ -14,6 +14,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- Without a copy-on-write store, a machine's disk file cap is recorded once instead of being re-measured after each thaw or resume, and the watcher only stops the run it measured.
+- The usage of read-write shares is saved every 2 s while the machine runs, so a daemon killed without draining no longer hands that quota back.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

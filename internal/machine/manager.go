@@ -3995,7 +3995,16 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 }
 
 // Stop termina la microVM sin borrar su directorio.
-func (m *Manager) Stop(ref string) (*api.Machine, error) {
+func (m *Manager) Stop(ref string) (*api.Machine, error) { return m.stopSi(ref, nil) }
+
+// errOtraEjecucion es lo que devuelve stopSi cuando la máquina ya no está en la
+// ejecución que se quería parar.
+var errOtraEjecucion = errors.New("it is no longer the run that was to be stopped")
+
+// stopSi es Stop, pero solo si sigue(máquina), mirado con el cerrojo de ciclo
+// de vida tomado: quien decidió parar sin el cerrojo (un vigilante) no para la
+// ejecución siguiente si entre medias la pararon y la arrancaron otra vez.
+func (m *Manager) stopSi(ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, noExiste(ref)
@@ -4014,6 +4023,9 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	cur, ok := m.get(mc.ID)
 	if !ok {
 		return nil, noExiste(ref)
+	}
+	if sigue != nil && !sigue(cur) {
+		return nil, errOtraEjecucion
 	}
 	mc = cur
 	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
