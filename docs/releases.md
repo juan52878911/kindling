@@ -183,7 +183,7 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
 
 1. **test** (ubuntu, matriz `.`, `ext/db`, `ext/mcp`, `ext/phone`,
    `ext/sandbox`, `fail-fast`): `make -C <dir> test` (gofmt, vet y
-   `go test -race -count=1`) sobre el commit de la etiqueta, con Go 1.27.3 y
+   `go test -race -count=1`) sobre el commit de la etiqueta, con Go 1.27.4 y
    `GOWORK=off`. Nada se publica sin pasarlo.
 2. **build** (tras test; matriz linux/darwin × amd64/arm64, `CGO_ENABLED=0`,
    `-trimpath -s -w -X main.Version=`): `kling`, `kling-mcp`, `kling-bridge`,
@@ -236,7 +236,7 @@ actions fijadas por SHA):
 
 | Job | Runner | Qué comprueba |
 |---|---|---|
-| **modulo** | ubuntu | `make -C <dir> test cross` para `.`, `ext/db`, `ext/mcp`, `ext/phone` y `ext/sandbox`, sin workspace y con la toolchain de la release (1.27.3) |
+| **modulo** | ubuntu | `make -C <dir> test cross` para `.`, `ext/db`, `ext/mcp`, `ext/phone` y `ext/sandbox`, sin workspace y con la toolchain de la release (1.27.4) |
 | **raiz-sin-deps** | ubuntu, Go 1.24 | el `go.mod` raíz sin `require` ni `replace`, `CGO_ENABLED=0 go build ./...` con la Go mínima que declaran los `go.mod`, que cada `ext/*` tenga su `replace … => ../..` y declare la misma `go` que el núcleo |
 | **kling-unpack** | ubuntu | `cargo fmt`, `clippy -D warnings` y `build --locked` del ayudante de Rust, y los tests de `internal/oci` que lo comparan con el camino de Go |
 | **workspace** | ubuntu | `go build` y `go vet` con el `go.work` (que `go.work.sum` no se quede atrás) |
