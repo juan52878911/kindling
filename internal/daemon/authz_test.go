@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -548,6 +549,9 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 		{"volumen", "POST", "/machines", `{"image":"min","volume":"datos"}`, 403, []string{"volumes"}},
 		{"volúmenes", "POST", "/sandboxes", `{"image":"min","volumes":[{"name":"datos"}]}`, 403, []string{"volumes"}},
 		{"carpetas", "POST", "/machines", `{"image":"min","shares":[{"source":"/etc","mount":"/x","mode":"ro"}]}`, 403, []string{"shares"}},
+		{"puertos del host", "POST", "/machines", `{"image":"min","host_ports":[{"port":11434}]}`, 403, []string{"host_ports is admin-only"}},
+		{"virtualización anidada", "POST", "/machines", `{"image":"min","nested":true}`, 403, []string{"nested is admin-only"}},
+		{"anidada apagada", "POST", "/machines", `{"image":"min","nested":false,"host_ports":[]}`, 299, nil},
 		{"plantilla ajena", "POST", "/machines", `{"from":"snap-b"}`, 404, []string{"does not exist"}},
 		{"plantilla sin compartir", "POST", "/sandboxes", `{"from":"privada"}`, 404, nil},
 		{"plantilla propia", "POST", "/sandboxes", `{"from":"snap-a"}`, 299, []string{`"kling.owner":"a"`}},
@@ -580,6 +584,16 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"b"}]}`, 403, nil},
 		{"credencial propia", "POST", "/machines/svc-a/credentials",
 			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"a"}]}`, 299, nil},
+		{"credencial propia con TLS apagado", "POST", "/machines/svc-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"a","upstream_tls":"disable"}]}`, 299, nil},
+		{"credencial con upstream", "POST", "/machines/svc-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream":"127.0.0.1:5432"}]}`, 403, []string{"admin-only"}},
+		{"credencial con upstream_tls", "POST", "/machines/svc-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_tls":"disable"}]}`, 403, []string{"admin-only"}},
+		{"credencial con tls_server_name", "POST", "/machines/svc-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","tls_server_name":"otro"}]}`, 403, []string{"admin-only"}},
+		{"plantilla: credencial con upstream", "PUT", "/snapshots/snap-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream":"127.0.0.1:5432"}]}`, 403, []string{"admin-only"}},
 		// Las credenciales de una plantilla pasan por la misma revisión que
 		// las de una máquina.
 		{"plantilla: credencial a máquina ajena", "PUT", "/snapshots/snap-a/credentials",
@@ -603,10 +617,56 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 			}
 		}
 	}
+	// Lo que es de admin, un admin lo pide.
+	for _, body := range []string{
+		`{"image":"min","host_ports":[{"port":11434}],"nested":true}`,
+	} {
+		if rr := como(t, h, uidAdmin, "POST", "/machines", body); rr.Code != 299 {
+			t.Errorf("admin %s: %d %s", body, rr.Code, rr.Body)
+		}
+	}
+	if rr := como(t, h, uidAdmin, "POST", "/machines/svc-a/credentials",
+		`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream":"127.0.0.1:5432","tls_server_name":"db"}]}`); rr.Code != 299 {
+		t.Errorf("admin upstream: %d %s", rr.Code, rr.Body)
+	}
 	// Un admin sí puede crear a nombre de un inquilino, y su cuerpo no se toca.
 	rr := como(t, h, uidAdmin, "POST", "/machines", `{"image":"min","labels":{"kling.owner":"b"}}`)
 	if rr.Code != 299 || !strings.Contains(rr.Body.String(), `"kling.owner":"b"`) {
 		t.Errorf("admin a nombre de b: %d %s", rr.Code, rr.Body)
+	}
+}
+
+// Cada campo de RunRequest tiene que estar clasificado en camposRun como de
+// inquilino o de admin: uno nuevo sin clasificar falla aquí antes de entrar
+// abierto (y, por si acaso, campoDeAdmin lo trata como de admin).
+func TestCamposRunClasificados(t *testing.T) {
+	rt := reflect.TypeOf(api.RunRequest{})
+	vistos := map[string]bool{}
+	for i := 0; i < rt.NumField(); i++ {
+		n := nombreJSON(rt.Field(i))
+		if n == "" {
+			continue
+		}
+		vistos[n] = true
+		if _, ok := camposRun[n]; !ok {
+			t.Errorf("RunRequest.%s (%q) sin clasificar en camposRun: ¿de inquilino o de admin?", rt.Field(i).Name, n)
+		}
+	}
+	for n := range camposRun {
+		if !vistos[n] {
+			t.Errorf("camposRun clasifica %q, que RunRequest ya no tiene", n)
+		}
+	}
+	// Sin clasificar es de admin.
+	type futuro struct {
+		Image string `json:"image"`
+		Nuevo int    `json:"nuevo"`
+	}
+	if c := campoDeAdmin(futuro{Image: "min", Nuevo: 1}, camposRun); c != "nuevo" {
+		t.Errorf("campo sin clasificar: %q, quería nuevo", c)
+	}
+	if c := campoDeAdmin(futuro{Image: "min"}, camposRun); c != "" {
+		t.Errorf("sin valor no cuenta: %q", c)
 	}
 }
 

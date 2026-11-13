@@ -15,6 +15,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
 - arm64 guest kernel: on an Apple M4 under kling-vz it no longer advertises `sve2`, `svei8mm` and `svebf16` without `sve`, so OpenSSL (and Python's `cryptography`) no longer die with `Illegal instruction`; SVE stays on hosts that have it. The kernel builder now applies `scripts/builders/kernel/patches/` (#183).
+- `scripts/e2e-mac-release.sh` publishes `failure`, not an earlier run's `success`, when a test fails.
+- The e2e-mac workflow fails when a manual run's `parts` names no test, instead of passing.
+
+### Security
+
+- With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
+- With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
