@@ -151,7 +151,7 @@ func (m *Manager) credSnapPath(name string) string {
 //	v2:               "KLCS" 0x02, igual que la v1, y el almacén lleva alguna
 //	                  credencial sigv4 (v0.19, con AccessKeyID, Region y Service).
 //	v3:               "KLCS" 0x03, igual, y es el almacén de una PLANTILLA con
-//	                  alguna credencial sigv4 (v1.0.0-rc.3: api.CredentialSpec
+//	                  alguna credencial sigv4 (v1.0.0: api.CredentialSpec
 //	                  con access_key_id, region y service).
 //
 // Por qué la v2 (y no "ignorable"): un kling ≤ v0.18 no conoce el tipo sigv4

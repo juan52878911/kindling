@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -340,5 +341,122 @@ func TestReleaseNombreDelE2EMacEsElDelWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(string(rel), `select(.name == "`+m[1]+`" and .conclusion == "success")`) {
 		t.Errorf("release.sh no busca el job %q de e2e-mac.yml en success", m[1])
+	}
+}
+
+// correrVeredicto corre el tramo de e2e-mac-release.sh que va de las pruebas
+// al final (marcas por commit y commit status), con 92 y 95 falsos que salen
+// con r92 y r95 y un gh falso que apunta cada llamada. Las marcas de previas
+// existen antes de empezar. Devuelve la salida, si salió con 0, lo que recibió
+// gh y el directorio de las marcas.
+func correrVeredicto(t *testing.T, r92, r95 int, previas ...string) (string, bool, string, string) {
+	t.Helper()
+	b, err := os.ReadFile("e2e-mac-release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(string(b), "\n# ── las pruebas")
+	if i < 0 {
+		t.Fatal("e2e-mac-release.sh sin el tramo «las pruebas»")
+	}
+	raiz := t.TempDir()
+	here := filepath.Join(raiz, "scripts")
+	falsos := filepath.Join(raiz, "bin")
+	cache := filepath.Join(raiz, "cache")
+	hecho := filepath.Join(cache, "passed")
+	for _, d := range []string{here, falsos, hecho, filepath.Join(raiz, "work")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const sha = "0123456789ab"
+	for _, p := range previas {
+		escribir(t, filepath.Join(hecho, sha+"."+p), "", 0o644)
+	}
+	escribir(t, filepath.Join(here, "92-e2e-mac.sh"), "exit "+strconv.Itoa(r92)+"\n", 0o755)
+	escribir(t, filepath.Join(here, "95-e2e-upgrade-mac.sh"), "exit "+strconv.Itoa(r95)+"\n", 0o755)
+	llamadas := filepath.Join(raiz, "gh.log")
+	escribir(t, filepath.Join(falsos, "gh"), "#!/bin/sh\necho \"$*\" >> \""+llamadas+"\"\n", 0o755)
+	// rev-parse HEAD del commit entero.
+	escribir(t, filepath.Join(falsos, "git"), "#!/bin/sh\necho "+sha+"cdef0123456789abcdef0123456789\n", 0o755)
+	preludio := `set -uo pipefail
+HERE=` + here + `; TOP=` + raiz + `; E2E="92 95"; KLING_E2E_CACHE=` + cache + `
+WORK=` + filepath.Join(raiz, "work") + `; BIN=$WORK/bin; IMGS=$WORK/images
+SHA=` + sha + `; SUCIO=""; AGENTE=0; LABEL=dev.kindling.daemon
+say() { :; }; explica_agente() { :; }
+`
+	escribir(t, filepath.Join(raiz, "veredicto.sh"), preludio+string(b[i:]), 0o755)
+	cmd := exec.Command("bash", filepath.Join(raiz, "veredicto.sh"))
+	cmd.Env = append(os.Environ(), "PATH="+falsos+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"HOME="+raiz, "KLING_E2E_STATUS=1")
+	out, err := cmd.CombinedOutput()
+	gh, _ := os.ReadFile(llamadas)
+	return string(out), err == nil, string(gh), hecho
+}
+
+// Las marcas de una pasada anterior sobre el mismo commit no tapan un 92 que
+// ahora falla: el commit no recibe success, recibe failure, y la marca de 92
+// desaparece.
+func TestE2EMacReleaseFalloConMarcasPreviasNoPublicaSuccess(t *testing.T) {
+	out, ok, gh, hecho := correrVeredicto(t, 1, 0, "92", "95")
+	if ok {
+		t.Errorf("salió con 0 con 92 fallado:\n%s", out)
+	}
+	if strings.Contains(gh, "state=success") {
+		t.Fatalf("publicó success con 92 fallado:\n%s\n%s", gh, out)
+	}
+	if !strings.Contains(gh, "state=failure") {
+		t.Errorf("no publicó failure con 92 fallado:\n%s\n%s", gh, out)
+	}
+	if _, err := os.Stat(filepath.Join(hecho, "0123456789ab.92")); err == nil {
+		t.Error("la marca de 92 sigue ahí tras un 92 fallado")
+	}
+}
+
+// Y con las dos en verde, success.
+func TestE2EMacReleaseDosVerdesPublicaSuccess(t *testing.T) {
+	out, ok, gh, _ := correrVeredicto(t, 0, 0)
+	if !ok || !strings.Contains(gh, "state=success") || strings.Contains(gh, "state=failure") {
+		t.Fatalf("92 y 95 en verde: ok=%v gh=%q\n%s", ok, gh, out)
+	}
+}
+
+// Un workflow_dispatch cuyo parts no nombra ninguna prueba falla en vez de
+// dejar el job en verde sin haber corrido nada.
+func TestE2EMacWorkflowPartsSinPruebasFalla(t *testing.T) {
+	wf, err := os.ReadFile("../.github/workflows/e2e-mac.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(wf)
+	i := strings.Index(s, "\n      - name: parts\n")
+	if i < 0 {
+		t.Fatal("e2e-mac.yml sin el paso parts")
+	}
+	const run = "        run: |\n"
+	j := strings.Index(s[i:], run)
+	if j < 0 {
+		t.Fatal("el paso parts sin run: |")
+	}
+	var guion []string
+	for _, l := range strings.Split(s[i+j+len(run):], "\n") {
+		if !strings.HasPrefix(l, "          ") {
+			break
+		}
+		guion = append(guion, strings.TrimPrefix(l, "          "))
+	}
+	for parts, quiere := range map[string]bool{
+		"e2e upgrade": true, "e2e": true, "upgrade": true, "nada": false, "92 95": false,
+	} {
+		cmd := exec.Command("bash", "-c", strings.Join(guion, "\n"))
+		cmd.Env = append(os.Environ(), "PARTS="+parts)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != quiere {
+			t.Errorf("parts %q: pasa=%v, se esperaba %v\n%s", parts, err == nil, quiere, out)
+		}
+	}
+	// Los pasos 92 y 95 usan el mismo valor por defecto que el paso parts.
+	if strings.Count(s, "inputs.parts || 'e2e upgrade'") != 3 {
+		t.Error("el valor por defecto de parts no es el mismo en el paso parts y en 92/95")
 	}
 }

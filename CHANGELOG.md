@@ -14,6 +14,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- `scripts/e2e-mac-release.sh` publishes `failure`, not an earlier run's `success`, when a test fails.
+- The e2e-mac workflow fails when a manual run's `parts` names no test, instead of passing.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
