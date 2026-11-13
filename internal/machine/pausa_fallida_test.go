@@ -3,7 +3,9 @@ package machine
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -49,9 +51,16 @@ func TestPauseFallidaSinPoderReanudarQuedaPendiente(t *testing.T) {
 	falso.fallar(http.MethodPatch, "/vm", http.StatusInternalServerError, "")
 	// Un plazo y no una respuesta del VMM: no se sabe si la pausa llegó.
 	ctx, cancel := context.WithCancel(context.Background())
+	var cortada sync.Once
 	falso.enGancho(func(metodo, ruta string) {
 		if metodo == http.MethodPatch && ruta == "/vm" {
-			cancel()
+			// Solo el Pause: tras cancelar se espera a que el cliente suelte
+			// la petición, para que vea el plazo y no el 500 (si el 500 gana
+			// la carrera, el VMM «contestó» y no queda nada pendiente).
+			cortada.Do(func() {
+				cancel()
+				time.Sleep(200 * time.Millisecond)
+			})
 		}
 	})
 
