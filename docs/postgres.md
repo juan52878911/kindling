@@ -217,7 +217,8 @@ Lo que pide al pgbouncer:
   con `options` y cualquier otro que el cliente mande.
 - **Protocolo 3.2**: un pgbouncer anterior a 1.25 corta el arranque en 3.2 con `08P01`
   ("bad packet header") en vez de negociar. El proxy lo ve, repite una vez en 3.0 y el
-  invitado sigue en 3.2 sin notarlo (el log del host lo avisa una vez por credencial).
+  invitado sigue en 3.2 sin notarlo (el log del host lo avisa una vez por credencial; si el `08P01` venía de otra cosa,
+  como un parámetro, el segundo intento falla igual y el invitado recibe el error).
   Un libpq 18 con `max_protocol_version=3.2` que vaya directo a ese pgbouncer no
   conecta; por el proxy, sí.
 

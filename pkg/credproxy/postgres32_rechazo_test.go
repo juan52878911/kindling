@@ -70,7 +70,7 @@ func TestPGServidorRechaza32RepiteEn30(t *testing.T) {
 		defer mu.Unlock()
 		n := 0
 		for _, l := range logs {
-			if strings.Contains(l, "rejected protocol 3.2 at startup") {
+			if strings.Contains(l, "answered the protocol 3.2 startup with SQLSTATE 08P01") {
 				n++
 			}
 		}

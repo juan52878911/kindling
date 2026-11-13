@@ -561,7 +561,7 @@ func (s *sesionPG) servir() {
 		// cambia la clave de cancelación a su longitud, como con un servidor
 		// anterior a PostgreSQL 18).
 		cred.v32.Do(func() {
-			p.logf("credential proxy postgres %s (%s): the server rejected protocol 3.%d at startup (SQLSTATE 08P01); retrying with 3.0", cred.Domain, cred.destinoPG(), minor)
+			p.logf("credential proxy postgres %s (%s): the server answered the protocol 3.%d startup with SQLSTATE 08P01 (a pooler without 3.2, such as pgbouncer before 1.25?); retrying with 3.0", cred.Domain, cred.destinoPG(), minor)
 		})
 		_ = up.Close()
 		if up, br = entrar(0); up == nil {
