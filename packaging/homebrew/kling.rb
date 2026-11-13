@@ -8,8 +8,23 @@
 # SHA256SUMS firmado de la release: quien quiera más, comprueba la firma y la
 # suma de kling.rb antes de instalarla (docs/firmas.md).
 #
+# formula.sh quita esta cabecera (hasta la línea de «van firmados»); el bloque
+# que la sigue sí se publica, en el asset y en el tap juan52878911/kindling.
+#
 # Los binarios son los de la release, no se compila nada: kling-vz y kling-hv
 # van firmados con su entitlement y una recompilación lo perdería.
+# kindling @VERSION@: binarios publicados en
+# https://github.com/juan52878911/kindling/releases/tag/v@VERSION@
+# Cada url se comprueba por su sha256, copiado del SHA256SUMS de la release.
+# Desde v1.0.0 ese SHA256SUMS va firmado con minisign; para comprobarlo:
+#   gh release download v@VERSION@ --repo juan52878911/kindling \
+#     -p SHA256SUMS -p SHA256SUMS.minisig
+#   minisign -V -P RWQ9r2LB7j2GE1A0GedCeER+ZFHmX4E1NPubT39GBQDho/awRnY6WpVN \
+#     -m SHA256SUMS -x SHA256SUMS.minisig   # "tag:v@VERSION@" en el comentario
+# y que los sha256 de esta fórmula sean los de ese SHA256SUMS (docs/firmas.md).
+# Es una fórmula y no un cask: brew no toca los binarios (no se recolocan ni se
+# vuelven a firmar, así kling-vz/kling-hv conservan su entitlement), no les pone
+# cuarentena, trae `brew services` y vale también para Linux.
 class Kling < Formula
   desc "Firecracker microVMs (Virtualization.framework on macOS) for agent tools"
   homepage "https://github.com/juan52878911/kindling"

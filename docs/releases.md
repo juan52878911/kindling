@@ -42,7 +42,7 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `kindling-operator-deploy.tar.gz` | los manifiestos de `ext/sandbox/deploy/` (CRD, RBAC, namespace, deployment) | — |
 | `vmlinux-<arch>.zst` | kernel de invitado (`scripts/builders/kernel`), comprimido; `kling up` lo baja en un Mac | linux |
 | `min-<arch>.ext4.zst` | imagen base `min` (`scripts/70-build-minimal-image.sh`, con el `kling-bridge` de la release) | linux |
-| `kling.rb` | fórmula de Homebrew con la versión y los sha256 de esta release (no se publica en ningún tap) | darwin/arm64, linux |
+| `kling.rb` | fórmula de Homebrew con la versión y los sha256 de esta release; si es final, el job `tap` la sube al tap `juan52878911/kindling` | darwin/arm64, linux |
 | `vmlinux-<versión>-kindling-<arch>-android` | kernel Android del prototipo (`prototypes/android/kernel`), con su `.sha256`, `.config` y `.buildinfo` | linux |
 | `SHA256SUMS` | **un** fichero con el sha256 de todo lo anterior | — |
 | `SHA256SUMS.minisig` | su firma ed25519 (minisign); obligatoria desde v1.0.0 ([`firmas.md`](firmas.md)) | — |
@@ -226,6 +226,14 @@ que ya exista), con permiso de solo lectura salvo en los dos jobs que publican:
    operador para linux/amd64 y linux/arm64 con `context: .` y
    `file: ext/sandbox/Dockerfile.operator` (el `replace ../..` necesita el
    núcleo en el contexto) y la empuja a GHCR con la etiqueta y `:latest`.
+9. **tap** (tras release, solo releases finales): sube el `kling.rb` de la
+   release, comprobado contra su `SHA256SUMS`, a `Formula/kling.rb` del tap
+   [`juan52878911/homebrew-kindling`](https://github.com/juan52878911/homebrew-kindling)
+   con la API de contenidos. Necesita el secreto de repositorio
+   `HOMEBREW_TAP_TOKEN`: un token fine-grained con `Contents: Read and write`
+   solo sobre el tap. Sin el secreto avisa y sale bien (el tap se queda como
+   estaba); una `-rc` no lo toca, y relanzar el workflow para una etiqueta más
+   vieja que la del tap tampoco.
 
 El e2e del Mac (92 y 95 con kling-hv) no está en el workflow mientras
 `e2e-mac.yml` no tenga runner: lo exige `scripts/release.sh` antes de crear la
@@ -291,7 +299,7 @@ Esas líneas son las notas de la release, tal cual.
   de procedencia de cada asset; los binarios sueltos no llevan firma propia
   (`kling-vz` y `kling-hv`, solo la ad hoc con su entitlement) y nada está
   notarizado.
-- **Tap de Homebrew, scoop, aur**: la fórmula va como asset (`kling.rb`); nadie
-  la empuja a un tap.
+- **scoop, aur**: no hay. Homebrew sí: el tap `juan52878911/kindling` (paso 9).
+  Las `-rc` solo tienen su `kling.rb` como asset.
 - **Binarios con símbolos**: se compila con `-trimpath -ldflags "-s -w"`; para
   depurar, `go build ./cmd/kling`.

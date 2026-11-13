@@ -45,12 +45,11 @@ brew install e2fsprogs
 kling up            # downloads the guest kernel and the `min` image from the release, verified
 ```
 
-Or with Homebrew, from the formula each release attaches (`kling.rb`; it pulls in e2fsprogs
-and `brew services start kling` runs the daemon):
+Or with Homebrew, from the [tap](https://github.com/juan52878911/homebrew-kindling) (latest
+stable release; it pulls in e2fsprogs and `brew services start kling` runs the daemon):
 
 ```sh
-curl -fsSLO https://github.com/juan52878911/kindling/releases/latest/download/kling.rb
-brew install --formula ./kling.rb
+brew install juan52878911/kindling/kling
 ```
 
 The script verifies every binary against the release's `SHA256SUMS`, installs to

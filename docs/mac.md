@@ -65,19 +65,33 @@ brew install e2fsprogs
 kling up -check
 ```
 
-Con **Homebrew**: cada release adjunta su fórmula (`kling.rb`, con la versión y
-el sha256 de cada binario). Instala los mismos binarios firmados (no compila
-nada), depende de e2fsprogs y trae un servicio que corre `kling daemon` como el
-agente de `kling up -install` (no instales los dos):
+Con **Homebrew**, desde el tap
+[`juan52878911/kindling`](https://github.com/juan52878911/homebrew-kindling),
+que sigue la última release final. Instala los mismos binarios firmados de la
+release (no compila nada; cada uno comprobado por su sha256), depende de
+e2fsprogs y trae un servicio que corre `kling daemon` como el agente de
+`kling up -install` (no instales los dos):
 
 ```sh
-curl -fsSLO https://github.com/juan52878911/kindling/releases/latest/download/kling.rb
-brew install --formula ./kling.rb
+brew install juan52878911/kindling/kling
+kling up -check
 brew services start kling     # o: kling up -install, sin brew services
 ```
 
-Así instalado, se actualiza con `brew upgrade kling`; `kling upgrade` lo detecta
-(binarios en el `Cellar`) y lo dice en vez de pisarlos.
+Instalar con el nombre completo (`juan52878911/kindling/kling`) deja la fórmula
+como de confianza para el Homebrew que lo exige, así que después basta
+`brew upgrade kling`; `kling upgrade` lo detecta (binarios en el `Cellar`) y lo
+dice en vez de pisarlos. Las `-rc` no llegan al tap: cada release adjunta su
+fórmula (`kling.rb`) para instalar esa versión concreta:
+
+```sh
+curl -fsSLO https://github.com/juan52878911/kindling/releases/download/v1.0.0-rc.2/kling.rb
+brew install --formula ./kling.rb
+```
+
+brew solo comprueba sha256. Desde v1.0.0 el `SHA256SUMS` de la release va
+firmado; comprobar la firma y que los sha256 de la fórmula salen de él se
+explica en [firmas.md](firmas.md) y en el README del tap.
 
 **El kernel y `min` vienen con la release** (desde v0.20): `kling up` los baja
 si faltan en `images/` (`vmlinux-arm64.zst` y `min-arm64.ext4.zst`),
