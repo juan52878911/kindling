@@ -38,6 +38,7 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -857,9 +858,78 @@ func recodificar[T any](b []byte, f func(*T) error) ([]byte, int, error) {
 	return nb, 0, nil
 }
 
+// camposRun clasifica cada campo de api.RunRequest por su nombre JSON: false
+// es de inquilino, true solo de admin (lo que toca el host: sus volúmenes, sus
+// carpetas, su loopback, su virtualización). TestCamposRunClasificados exige
+// que estén todos, y un campo que falte aquí se trata como de admin: un campo
+// nuevo no entra abierto.
+var camposRun = map[string]bool{
+	"name": false, "image": false, "from": false, "vcpus": false, "mem_mib": false,
+	"mem_max_mib": false, "disk_mib": false, "egress": false, "allow_domains": false,
+	"ttl_seconds": false, "cpu_pct": false, "cpu_pct_default": false, "net_mibps": false,
+	"wait_ready": false, "ready_timeout_seconds": false, "allow_exec": false,
+	"on_ttl": false, "labels": false, "env": false, "share_wait": false,
+	"publish": false, "entrypoint": false, "cmd": false, "fresh": false,
+	// Solo tienen efecto con un volumen, que ya es de admin.
+	"volume_mount": false, "volume_read_only": false, "volume_wait": false,
+
+	"volumes": true, "volume": true, "shares": true,
+	// Abren puertos del loopback del host al invitado, aunque egress sea none.
+	"host_ports": true,
+	// Virtualización anidada: el invitado corre su propio hipervisor.
+	"nested": true,
+}
+
+// campoDeAdmin devuelve el nombre JSON del primer campo de v (un struct) que
+// trae valor y es de admin según clasif (o no está clasificado), o "".
+func campoDeAdmin(v any, clasif map[string]bool) string {
+	rv := reflect.Indirect(reflect.ValueOf(v))
+	for i := 0; i < rv.NumField(); i++ {
+		nombre := nombreJSON(rv.Type().Field(i))
+		if nombre == "" || vacio(rv.Field(i)) {
+			continue
+		}
+		if admin, ok := clasif[nombre]; admin || !ok {
+			return nombre
+		}
+	}
+	return ""
+}
+
+// vacio: el valor cero, o una lista o un mapa sin elementos ("host_ports":[]
+// no pide nada).
+func vacio(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Map:
+		return v.Len() == 0
+	}
+	return v.IsZero()
+}
+
+// nombreJSON es el nombre con el que viaja un campo, o "" si no viaja.
+func nombreJSON(f reflect.StructField) string {
+	if !f.IsExported() {
+		return ""
+	}
+	nombre, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	switch nombre {
+	case "-":
+		return ""
+	case "":
+		return f.Name
+	}
+	return nombre
+}
+
 func revisarRun(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.RunRequest) error {
-		return s.revisarNacimiento(t, &req.Labels, req.From, len(req.Volumes) > 0 || req.Volume != "", len(req.Shares) > 0)
+		if err := s.revisarNacimiento(t, &req.Labels, req.From, len(req.Volumes) > 0 || req.Volume != "", len(req.Shares) > 0); err != nil {
+			return err
+		}
+		if c := campoDeAdmin(req, camposRun); c != "" {
+			return errAuthz(http.StatusForbidden, "%s is admin-only under the daemon's authz policy", c)
+		}
+		return nil
 	})
 }
 
@@ -931,11 +1001,17 @@ func revisarCommit(s *Server, t string, b []byte) ([]byte, int, error) {
 }
 
 // revisarCredenciales: una credencial que lleva a otra máquina (el attach de
-// kling db) solo puede llevar a una del mismo inquilino, y con su dueño. Vale
+// kling db) solo puede llevar a una del mismo inquilino, y con su dueño. A
+// dónde marca el proxy (upstream, que admite loopback y LAN) y cómo verifica
+// el TLS hacia allí lo fija el operador: un inquilino no los pone, salvo el
+// upstream_tls "disable" que exige upstream_machine (su propia copia). Vale
 // igual para las de una máquina y las de una plantilla.
 func revisarCredenciales(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.CredentialsRequest) error {
 		for _, c := range req.Credentials {
+			if c.Upstream != "" || c.TLSServerName != "" || (c.UpstreamTLS != "" && c.UpstreamMachine == "") {
+				return errAuthz(http.StatusForbidden, "upstream, upstream_tls and tls_server_name are admin-only under the daemon's authz policy")
+			}
 			if c.UpstreamMachine != "" {
 				if mc, ok := s.mgr.Get(c.UpstreamMachine); !ok || !esDe(mc.Labels, t) {
 					return errAuthz(http.StatusNotFound, "machine %q doesn't exist", c.UpstreamMachine)
