@@ -17,6 +17,7 @@
 #   $SOMBRA/scripts/builders/kernel/build.sh      copia literal del builder
 #   $SOMBRA/scripts/builders/kernel/kernel.pin    copia literal del pin
 #   $SOMBRA/scripts/builders/kernel/config-common copia literal
+#   $SOMBRA/scripts/builders/kernel/patches/      copia literal (parches del núcleo)
 #   $SOMBRA/scripts/builders/kernel/config-arm64  config-arm64 + config-android
 #   $SOMBRA/scripts/check-kernel-config.sh        envoltorio: el comprobador del
 #                                                 núcleo Y check-android-config.sh
@@ -88,6 +89,9 @@ trap 'rm -rf "$SOMBRA"' EXIT
 mkdir -p "$SOMBRA/scripts/builders/kernel"
 cp "$CORE_KDIR/build.sh" "$CORE_KDIR/kernel.pin" "$CORE_KDIR/config-common" \
    "$SOMBRA/scripts/builders/kernel/"
+# Los parches del núcleo (scripts/builders/kernel/patches, p. ej. el de SVE en
+# el M4, issue #183) los aplica la copia del builder desde su propio directorio.
+[ ! -d "$CORE_KDIR/patches" ] || cp -R "$CORE_KDIR/patches" "$SOMBRA/scripts/builders/kernel/"
 
 # ── parches ── (patches/*.patch, -p1 sobre el árbol del kernel). El builder del
 # núcleo no los admite, así que en la COPIA se mete una línea justo después de

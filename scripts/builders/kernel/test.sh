@@ -121,6 +121,26 @@ espera 2 "cannot read" "fichero inexistente" -- "$T/no-existe"
 # Entrada estándar.
 if out="$("$CHECK" - <"$T/amd64.config" 2>&1)"; then ok "lee de stdin"; else mal "lee de stdin"; echo "$out"; fi
 
+# ── patches/: cada parche dice de dónde sale ─────────────────────────────────
+# Sin fuentes no se puede probar que entren (eso lo hace build.sh, y corta si
+# no); aquí se comprueba que cada uno trae su origen upstream y la nota de por
+# qué está y qué se adaptó, y que solo toca rutas del árbol (-p1, sin "..").
+for p in "$HERE"/patches/*.patch; do
+  [ -f "$p" ] || continue
+  n="${p##*/}"
+  if grep -qE '^From [0-9a-f]{40} ' "$p" && grep -qF '[kindling:' "$p"; then
+    ok "patches/$n: origen y nota"
+  else
+    mal "patches/$n: falta la línea 'From <sha>' de upstream o la nota [kindling: ...]"
+  fi
+  if grep -E '^(---|\+\+\+) ' "$p" | grep -vqE '^(--- a/|\+\+\+ b/)[^ ]+$' ||
+     grep -E '^(---|\+\+\+) ' "$p" | grep -qF '..'; then
+    mal "patches/$n: rutas que no son a/… b/… del árbol"
+  else
+    ok "patches/$n: rutas -p1 del árbol"
+  fi
+done
+
 # ── build.sh contra un árbol falso ───────────────────────────────────────────
 # Un "kernel" cuyo Makefile escribe el .config a partir del fragmento, se deja
 # CONFIG_PVH por el camino (como haría una dependencia no satisfecha) y
@@ -144,13 +164,24 @@ allnoconfig:
 olddefconfig:
 	@true
 vmlinux:
-	@echo "kernel falso" >vmlinux
+	@cat parche.txt >vmlinux
 Image:
 	@mkdir -p arch/arm64/boot && echo "kernel falso" >arch/arm64/boot/Image
 MK
+  echo "sin parche" >"$T/src/linux-$V/parche.txt"
   tar -cJf "$T/mirror/v6.x/linux-$V.tar.xz" -C "$T/src" "linux-$V"
+  # Parches de prueba: uno que entra y cambia lo que "compila" el Makefile, y
+  # otro que no entra en este árbol.
+  mkdir -p "$T/parches" "$T/parches-malos" "$T/sin-parches"
+  printf '%s\n' '--- a/parche.txt' '+++ b/parche.txt' '@@ -1 +1 @@' '-sin parche' '+con parche' \
+    >"$T/parches/0001-prueba.patch"
+  printf '%s\n' '--- a/parche.txt' '+++ b/parche.txt' '@@ -1 +1 @@' '-otra cosa' '+con parche' \
+    >"$T/parches-malos/0001-no-entra.patch"
   SHA="$(sha256sum "$T/mirror/v6.x/linux-$V.tar.xz" | cut -d' ' -f1)"
   export KERNEL_MIRROR="file://$T/mirror" CACHE="$T/cache" OUT="$T/out" KERNEL_VERSION="$V" TARGET_ARCH=amd64
+  # Los parches de verdad (patches/) son para el árbol de kernel.org, no para
+  # este: cada prueba dice cuáles usa.
+  export KERNEL_PATCHES="$T/sin-parches"
   N="vmlinux-$V-kindling-amd64"
 
   # build <código> <texto> <desc> [VAR=valor...]
@@ -185,10 +216,18 @@ MK
     else
       mal "build.sh: salidas incompletas"; ls -la "$T/out"
     fi
+    grep -qx "sin parche" "$T/out/$N" && ok "build.sh: sin parches, el árbol tal cual" || mal "build.sh: sin parches: $(cat "$T/out/$N")"
+    build 0 "parche 0001-prueba.patch" "build.sh: aplica patches/" KERNEL_SHA256="$SHA" KERNEL_PATCHES="$T/parches"
+    grep -qx "con parche" "$T/out/$N" && ok "build.sh: el parche llega al kernel" || mal "build.sh: el parche no llegó: $(cat "$T/out/$N")"
+    grep -q "^patch=0001-prueba.patch $(sha256sum "$T/parches/0001-prueba.patch" | cut -d' ' -f1)\$" "$T/out/$N.buildinfo" \
+      && ok "build.sh: el .buildinfo apunta el parche" || mal "build.sh: el .buildinfo no apunta el parche"
   else
     echo "skip build.sh completo: falta libelf-dev"
   fi
-  unset KERNEL_MIRROR CACHE OUT KERNEL_VERSION TARGET_ARCH
+  build 0 "parche 0001-prueba.patch" "build.sh: aplica patches/ también con CONFIG_ONLY" KERNEL_SHA256="$SHA" CONFIG_ONLY=1 KERNEL_PATCHES="$T/parches"
+  build 1 "0001-no-entra.patch does not apply" "build.sh: un parche que no entra corta" KERNEL_SHA256="$SHA" CONFIG_ONLY=1 KERNEL_PATCHES="$T/parches-malos"
+  build 1 "is not a directory" "build.sh: KERNEL_PATCHES que no existe" KERNEL_SHA256="$SHA" CONFIG_ONLY=1 KERNEL_PATCHES="$T/no-existe"
+  unset KERNEL_MIRROR CACHE OUT KERNEL_VERSION TARGET_ARCH KERNEL_PATCHES
 fi
 
 if [ -r /proc/config.gz ]; then

@@ -106,6 +106,16 @@ jobs:
             exit 1
           fi
 
+      # El builder del kernel contra un árbol falso (sin fuentes ni red): la
+      # comprobación de config, los parches de patches/ y las salidas.
+      - name: builder del kernel (scripts/builders/kernel/test.sh)
+        # build.sh comprueba sus herramientas antes de nada: sin ellas, los
+        # casos que llegan a esa comprobación fallan por la razón equivocada.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev xz-utils curl patch >/dev/null
+          scripts/builders/kernel/test.sh
+
       - name: ext/* apuntan al núcleo del mismo commit
         run: |
           for m in ext/*/go.mod; do

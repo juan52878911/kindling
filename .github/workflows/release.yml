@@ -279,7 +279,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            build-essential flex bison bc libelf-dev xz-utils curl gcc-aarch64-linux-gnu e2fsprogs zstd
+            build-essential flex bison bc libelf-dev xz-utils curl patch gcc-aarch64-linux-gnu e2fsprogs zstd
       - name: kernel
         shell: bash
         run: |
