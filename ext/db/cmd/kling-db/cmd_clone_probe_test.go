@@ -126,7 +126,8 @@ func TestParseSizeMG(t *testing.T) {
 }
 
 // hostProbe habla de verdad con un servidor (falso, con trust) y devuelve la
-// línea que checkProbe lee.
+// línea que checkProbe lee. Sin contraseña: con ella, un servidor que no la
+// pide se rechaza (pgmini, TestOkSinRetoConContrasena).
 func TestHostProbeContraServidor(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -136,7 +137,7 @@ func TestHostProbeContraServidor(t *testing.T) {
 	gotSQL := make(chan string, 1)
 	go fakePGProbeServer(ln, gotSQL)
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	o := cloneOpts{source: &cloneSource{host: host, port: port, user: "reader", db: "shop", tls: "disable"}, password: clonePW}
+	o := cloneOpts{source: &cloneSource{host: host, port: port, user: "reader", db: "shop", tls: "disable"}}
 	out, err := hostProbe(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)

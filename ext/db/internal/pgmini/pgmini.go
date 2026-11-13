@@ -247,9 +247,10 @@ func (c *Conn) arranque(cfg Config) error {
 	// Empezado el SCRAM, solo un SASLFinal verificado demuestra que al otro
 	// lado está quien conoce la clave: un AuthenticationOk antes es un
 	// impostor que recibiría todas las consultas. Y sin AuthenticationOk no
-	// hay ReadyForQuery que valga.
+	// hay ReadyForQuery que valga. Con contraseña, además, un AuthenticationOk
+	// sin reto alguno tampoco vale: quien no pide la clave no demuestra nada.
 	var sc *scram
-	verificado, autenticado := false, false
+	verificado, autenticado, enClaro := false, false, false
 	for {
 		t, body, err := c.leer()
 		if err != nil {
@@ -267,6 +268,9 @@ func (c *Conn) arranque(cfg Config) error {
 				if sc != nil && !verificado {
 					return errors.New("postgres: AuthenticationOk without a verified SASLFinal")
 				}
+				if cfg.Password != "" && !verificado && !enClaro {
+					return errors.New("postgres: AuthenticationOk without an authentication exchange although a password is set")
+				}
 				autenticado = true
 			case 3: // contraseña en claro
 				if cfg.NoCleartext {
@@ -275,6 +279,7 @@ func (c *Conn) arranque(cfg Config) error {
 				if err := c.escribir('p', append([]byte(cfg.Password), 0)); err != nil {
 					return err
 				}
+				enClaro = true
 			case 10: // SASL: elegir SCRAM-SHA-256
 				// Con TLS y -PLUS ofrecido, se usa -PLUS (channel binding).
 				mec := "SCRAM-SHA-256"
