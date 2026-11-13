@@ -23,9 +23,10 @@ package machine
 //
 // Hay entornos donde montar no se puede (un contenedor sin CAP_SYS_ADMIN, un
 // perfil de AppArmor que prohíbe montar proc). La primera vez se prueba la
-// jaula entera (sondaJaulaE2fs); si falla, se avisa una vez, Ajustes() lo
-// dice ("e2fs_confinement") y se sigue con lo de antes de la jaula: nobody,
-// namespaces de red, PID e IPC y el tope, sin chroot.
+// jaula entera (sondaJaulaE2fs); si falla, se avisa, Ajustes() lo dice
+// ("e2fs_confinement") y se sigue con lo de antes de la jaula: nobody,
+// namespaces de red, PID e IPC y el tope, sin chroot. Un fallo se vuelve a
+// probar pasado un minuto: el éxito es lo único que se recuerda.
 
 import (
 	"errors"
@@ -39,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // argJaulaE2fs es el argv[0] con que el daemon se ejecuta a sí mismo para
@@ -153,17 +155,50 @@ func dirRaizJaula() (string, error) {
 	return os.MkdirTemp("", "kling-e2fs-")
 }
 
-// sondaJaulaE2fs monta una vez la jaula entera, sin ejecutar nada en ella, y
-// recuerda si se pudo. Variable para los tests.
-var sondaJaulaE2fs = sync.OnceValue(func() error {
-	err := probarJaula()
-	if err != nil {
+// Estado de la sonda. Solo el éxito se recuerda para siempre: un fallo puede
+// ser pasajero (sin memoria para el tmpfs, un fork que no salió, /tmp lleno),
+// y recordarlo dejaba el daemon sin chroot hasta reiniciarlo. Un fallo vale
+// reintentoSondaE2fs; pasado ese plazo, la siguiente orden vuelve a probar.
+var (
+	sondaE2fsMu     sync.Mutex
+	sondaE2fsOK     bool
+	sondaE2fsErr    error
+	sondaE2fsCuando time.Time
+)
+
+// reintentoSondaE2fs y probarJaulaE2fs son variables para los tests.
+var (
+	reintentoSondaE2fs = time.Minute
+	probarJaulaE2fs    = probarJaula
+)
+
+// sondaJaulaE2fs monta la jaula entera, sin ejecutar nada en ella, y dice si
+// se pudo. Avisa al primer fallo y cuando cambia el error, no en cada orden.
+func sondaJaulaE2fs() error {
+	sondaE2fsMu.Lock()
+	defer sondaE2fsMu.Unlock()
+	if sondaE2fsOK {
+		return nil
+	}
+	if sondaE2fsErr != nil && time.Since(sondaE2fsCuando) < reintentoSondaE2fs {
+		return sondaE2fsErr
+	}
+	err := probarJaulaE2fs()
+	if err == nil {
+		if sondaE2fsErr != nil {
+			log.Printf("e2fsck, resize2fs and debugfs are confined in a chroot again")
+		}
+		sondaE2fsOK, sondaE2fsErr = true, nil
+		return nil
+	}
+	if sondaE2fsErr == nil || sondaE2fsErr.Error() != err.Error() {
 		log.Printf("warning: e2fsck, resize2fs and debugfs can't be confined in a chroot here (%v): "+
 			"they run as nobody in their own network, PID and IPC namespaces but see the host's files; "+
-			"see SECURITY.md", err)
+			"retrying in %s; see SECURITY.md", err, reintentoSondaE2fs)
 	}
+	sondaE2fsErr, sondaE2fsCuando = err, time.Now()
 	return err
-})
+}
 
 func probarJaula() error {
 	raiz, err := dirRaizJaula()
