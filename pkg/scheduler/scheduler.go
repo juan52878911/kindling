@@ -528,40 +528,21 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 		g.mu.Unlock()
 		return elegida, nil
 	}
-	// Antes de crear otra réplica, la sesión se apunta a una que ya esté
-	// naciendo y tenga hueco. Sin esto, una ráfaga de M sesiones arrancaba una
-	// réplica por sesión hasta el tope (16 en vez de ceil(M/maxSessions) = 4
-	// en la matriz de thaw a escala) y las que no cabían recibían 503.
-	n := g.unirseANacienteLocked(service)
 	g.mu.Unlock()
-	if n != nil {
-		e, err := g.esperarNaciente(ctx, n)
-		if err == nil || ctx.Err() != nil {
-			return e, err
-		}
-		// La creó otra petición con SU contexto: si fue ese el que se canceló,
-		// esta sesión sigue viva y vuelve a empezar (se apuntará a otra
-		// naciente o creará la suya), en vez de heredar un fallo ajeno.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return g.pickInstance(ctx, service, tnt)
-		}
-		if libre == nil {
-			return nil, err
-		}
-		// La réplica no nació: como si la hubiera creado esta sesión.
-		g.mu.Lock()
-		libre.reservarLocked()
-		g.mu.Unlock()
-		return libre, nil
-	}
 
 	// Todas las que tienen hueco están saturadas de trabajo. Contar solo
 	// sesiones dejaba a una réplica con una sesión y veinte llamadas en vuelo
 	// sirviéndolo todo mientras sobraban recursos para otra. Se escala, con
 	// tope, y si no se puede se usa la menos cargada: una sesión atendida lenta
 	// es mejor que una rechazada.
-	e, err := g.scaleOut(ctx, service, tnt)
-	if err != nil && libre != nil {
+	//
+	// Antes de crear, la sesión se apunta a una réplica que ya esté naciendo
+	// y tenga hueco (ver scaleOutUniendo). Sin esto, una ráfaga de M sesiones
+	// arrancaba una réplica por sesión hasta el tope (16 en vez de
+	// ceil(M/maxSessions) = 4 en la matriz de thaw a escala) y las que no
+	// cabían recibían 503.
+	e, err := g.scaleOutUniendo(ctx, service, tnt, true)
+	if err != nil && ctx.Err() == nil && libre != nil {
 		g.mu.Lock()
 		libre.reservarLocked()
 		g.mu.Unlock()
@@ -607,6 +588,22 @@ func (g *Scheduler) unirseANacienteLocked(service string) *naciente {
 		}
 	}
 	return nil
+}
+
+// joinOrScaleOut es scaleOut para una sesión que el puente acaba de rechazar
+// por tope: si ya nace una réplica con hueco, se apunta a ella y la espera; si
+// no, crea la suya. Sin esto, cada sesión rechazada de una ráfaga arrancaba
+// una réplica para ella sola.
+func (g *Scheduler) joinOrScaleOut(ctx context.Context, service string, tnt *tenant) (*entry, error) {
+	return g.scaleOutUniendo(ctx, service, tnt, true)
+}
+
+// ajeno dice si el fallo de una naciente fue que se canceló el contexto de
+// la petición que la creó: la sesión que esperaba sigue viva y vuelve a
+// empezar (se apuntará a otra naciente o creará la suya), en vez de heredar
+// un fallo que no es suyo.
+func ajeno(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // esperarNaciente espera a que nazca la réplica a la que se apuntó la sesión.
@@ -1267,6 +1264,15 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 // a la suya. NO toma el candado por-servicio de ensure: queremos que varias
 // réplicas puedan nacer a la vez para sesiones concurrentes.
 func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (*entry, error) {
+	return g.scaleOutUniendo(ctx, service, tnt, false)
+}
+
+// scaleOutUniendo es scaleOut; con unirse, la sesión se apunta antes a una
+// réplica que ya esté naciendo con hueco y espera a que nazca, en vez de crear
+// otra. Mirar las nacientes y registrar la nueva van bajo el MISMO candado:
+// con dos pasos, dos sesiones de una ráfaga podían no ver ninguna naciente y
+// crear una cada una.
+func (g *Scheduler) scaleOutUniendo(ctx context.Context, service string, tnt *tenant, unirse bool) (*entry, error) {
 	// El tope se comprueba y la plaza se RESERVA con el mismo candado. Antes se
 	// contaban las instancias en pickInstance, se soltaba el candado y se
 	// creaba: N peticiones concurrentes leían todas "hay menos que el tope" y
@@ -1274,6 +1280,16 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 	// CI). Las que están naciendo cuentan como si ya existieran.
 	tope := g.topeReplicas(service) // fuera de g.mu: MaxReplicasFor es del producto
 	g.mu.Lock()
+	if unirse {
+		if n := g.unirseANacienteLocked(service); n != nil {
+			g.mu.Unlock()
+			e, err := g.esperarNaciente(ctx, n)
+			if err != nil && ctx.Err() == nil && ajeno(err) {
+				return g.scaleOutUniendo(ctx, service, tnt, true)
+			}
+			return e, err
+		}
+	}
 	actuales := len(g.entriesLocked(service)) + len(g.nacientes[service])
 	if tope > 0 && actuales >= tope {
 		g.mu.Unlock()

@@ -142,3 +142,43 @@ func TestNacienteCanceladaNoArrastraALasQueEsperan(t *testing.T) {
 		t.Fatalf("la que esperaba heredó el fallo: %v", err)
 	}
 }
+
+// Las sesiones que el puente rechaza por tope (el reintento del gateway) se
+// apuntan a la réplica que ya nace en vez de arrancar cada una la suya: con
+// 1024 MiB el gateway estima 13 sesiones y el puente, que ve algo menos de
+// memoria, admite 12, así que en una ráfaga sobra una por instancia.
+func TestRechazadasPorElPuenteEsperanALaQueNace(t *testing.T) {
+	g := &Scheduler{
+		services:    map[string]*entry{},
+		extra:       map[string][]*entry{},
+		routes:      map[string]*sessionRoute{},
+		MaxReplicas: 16,
+	}
+	g.services["svc"] = &entry{machineID: "m-0", maxSessions: 8, checkedAt: time.Now(), lastUse: time.Now()}
+	var creadas atomic.Int64
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		n := creadas.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		return &entry{machineID: fmt.Sprintf("m-%d", n), maxSessions: 8, lastUse: time.Now()}, nil
+	}
+	const rechazadas = 6
+	var wg sync.WaitGroup
+	errs := make(chan error, rechazadas)
+	for i := 0; i < rechazadas; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := g.joinOrScaleOut(context.Background(), "svc", tenantFrom(context.Background())); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("joinOrScaleOut: %v", err)
+	}
+	if n := creadas.Load(); n != 1 {
+		t.Fatalf("%d réplicas para %d sesiones rechazadas que caben en una; quería 1", n, rechazadas)
+	}
+}
