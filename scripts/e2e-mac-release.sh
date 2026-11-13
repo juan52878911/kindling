@@ -4,7 +4,8 @@
 # kling-hv y kling-vz de este árbol, sellados con git describe; prepara vmlinux
 # y min.ext4; corre 92-e2e-mac.sh y 95-e2e-upgrade-mac.sh con VMM=hv y, si los
 # dos pasan sobre un árbol sin cambios, publica en GitHub un commit status
-# (e2e-mac/kling-hv, success) sobre ese commit. Es la prueba que pide
+# (e2e-mac/kling-hv, success) sobre ese commit; si una falla, lo publica en
+# failure. Es la prueba que pide
 # scripts/release.sh mientras e2e-mac.yml no tenga runner (la línea a mano
 # KLING_E2E_HV ya no vale); KLING_E2E_STATUS=0 no lo publica.
 #
@@ -142,11 +143,18 @@ logs_de() { # logs_de <prueba> <código>
   rmdir "$d/crashes" 2>/dev/null
   echo "logs of $1 kept in $d"
 }
+# Cada prueba que pasa sobre un árbol sin cambios deja su marca por commit: 92
+# y 95 pueden correr en dos veces (95 pide parar el agente del usuario) y la
+# línea sale cuando el commit tiene las dos. La marca de una prueba se borra
+# antes de correrla: una pasada anterior no tapa una que ahora falla.
+HECHO="$KLING_E2E_CACHE/passed"
+borra_marca() { [ -z "$SUCIO" ] && rm -f "$HECHO/$SHA.$1"; }
 R92=-; R95=-
 for p in $E2E; do
   case "$p" in
     92)
       say "92-e2e-mac.sh (VMM=hv)"
+      borra_marca 92
       rm -rf "$LOGS/$SHA-92"
       VMM=hv KLING="$BIN/kling" KLING_DB="$WORK/plugins/kling-db" IMAGES_DIR="$IMGS" \
         ROOT="$WORK/92/Library/Application Support/kindling-e2e-a-deliberately-long-root" \
@@ -157,6 +165,7 @@ for p in $E2E; do
     95)
       if [ "$AGENTE" = 1 ]; then R95=agent; continue; fi
       say "95-e2e-upgrade-mac.sh (VMM=hv)"
+      borra_marca 95
       rm -rf "$LOGS/$SHA-95"
       VMM=hv NEW_DIR="$BIN" IMAGES_DIR="$IMGS" BASE="$WORK/95" KLING_E2E_CACHE="$KLING_E2E_CACHE" \
         KLING_E2E_LOGS="$LOGS/$SHA-95" bash "$HERE/95-e2e-upgrade-mac.sh"
@@ -170,10 +179,6 @@ say "result"
 res() { case "$2" in -) echo "$1: not run";; 0) echo "$1: passed";; agent) echo "$1: not run (your $LABEL is in the way)";; *) echo "$1: FAILED (exit $2)";; esac; }
 res 92-e2e-mac.sh "$R92"; res 95-e2e-upgrade-mac.sh "$R95"
 [ "$R95" = agent ] && explica_agente
-# Cada prueba que pasa sobre un árbol sin cambios deja su marca por commit: 92
-# y 95 pueden correr en dos veces (95 pide parar el agente del usuario) y la
-# línea sale cuando el commit tiene las dos.
-HECHO="$KLING_E2E_CACHE/passed"
 if [ -z "$SUCIO" ]; then
   mkdir -p "$HECHO"
   [ "$R92" = 0 ] && : > "$HECHO/$SHA.92"
@@ -184,25 +189,34 @@ fi
 # autenticado con escritura en el repo y el commit ya empujado; si no se
 # puede, lo dice y sale con error: sin el status, release.sh no etiqueta.
 CONTEXTO="e2e-mac/kling-hv"
-publicar_estado() {
+publicar_estado() { # publicar_estado <state> <description>
   if [ "${KLING_E2E_STATUS:-1}" = 0 ]; then echo "KLING_E2E_STATUS=0: no commit status on GitHub"; return 0; fi
   command -v gh >/dev/null || { echo "gh is missing: no commit status on GitHub" >&2; return 1; }
   local full repo mac
   full=$(git -C "$TOP" rev-parse HEAD) || return 1
   repo="${KLING_E2E_REPO:-juan52878911/kindling}"
   mac="macOS $(sw_vers -productVersion 2>/dev/null), $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
-  if gh api -X POST "repos/$repo/statuses/$full" -f state=success -f context="$CONTEXTO" \
-       -f description="92 and 95 passed with VMM=hv ($mac)" >/dev/null; then
-    echo "commit status $CONTEXTO=success on $repo@$SHA"
+  if gh api -X POST "repos/$repo/statuses/$full" -f state="$1" -f context="$CONTEXTO" \
+       -f description="$2 with VMM=hv ($mac)" >/dev/null; then
+    echo "commit status $CONTEXTO=$1 on $repo@$SHA"
   else
     echo "could not publish the commit status on $repo@$SHA (pushed? gh auth with write access?)" >&2
     return 1
   fi
 }
+# Una prueba que falla sobre un árbol limpio deja el commit en failure: un
+# success anterior en GitHub no puede quedar como la última palabra.
+fallo() { case "$1" in -|0|agent) return 1;; *) return 0;; esac; }
+if [ -z "$SUCIO" ] && { fallo "$R92" || fallo "$R95"; }; then
+  echo
+  echo "a test FAILED with VMM=hv on $SHA" >&2
+  publicar_estado failure "92: $R92, 95: $R95" || true
+  exit 1
+fi
 if [ -f "$HECHO/$SHA.92" ] && [ -f "$HECHO/$SHA.95" ] && [ -z "$SUCIO" ]; then
   echo
   echo "92 and 95 passed with VMM=hv on $SHA"
-  publicar_estado || { echo "without the commit status release.sh will not tag $SHA: push it, check gh auth and run E2E=95 scripts/e2e-mac-release.sh again" >&2; exit 1; }
+  publicar_estado success "92 and 95 passed" || { echo "without the commit status release.sh will not tag $SHA: push it, check gh auth and run E2E=95 scripts/e2e-mac-release.sh again" >&2; exit 1; }
   exit 0
 fi
 [ -n "$SUCIO" ] && echo "the tree has uncommitted changes: nothing counts for the release; commit and run it again" >&2

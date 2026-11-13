@@ -132,7 +132,11 @@ make -C ext/sandbox test cross
 git checkout main && git pull --rebase && git status
 
 # 2. CHANGELOG.md: "## [Unreleased]" pasa a "## [X.Y.Z] - AAAA-MM-DD"
-#    (y su enlace al final del fichero)
+#    (y su enlace al final del fichero). Si las notas de las -rc traen un
+#    bloque "### Upgrading", va también en la sección de la versión final:
+#    release-notes.sh extrae una sola sección y las notas saldrían sin él.
+#    En el mismo commit, el require de github.com/juan52878911/kindling de
+#    ext/*/go.mod y vz/go.mod pasa a vX.Y.Z (release.sh se niega si no).
 git commit -am "changelog: vX.Y.Z"
 
 # 3. Linux: lo corre el job e2e de release.yml sobre la etiqueta (90-e2e.sh con

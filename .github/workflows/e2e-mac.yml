@@ -101,6 +101,16 @@ jobs:
       GOWORK: 'off'
       VMM: hv
     steps:
+      # Los pasos 92 y 95 miran si parts contiene «e2e» o «upgrade»: un parts
+      # sin ninguna de las dos dejaría el job en verde sin haber probado nada.
+      - name: parts
+        env:
+          PARTS: ${{ inputs.parts || 'e2e upgrade' }}
+        run: |
+          case "$PARTS" in
+            *e2e*|*upgrade*) echo "parts: $PARTS" ;;
+            *) echo "::error::parts \"$PARTS\" runs no test: use e2e and/or upgrade"; exit 1 ;;
+          esac
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # git describe: 95 necesita una versión de release para el kling nuevo.
