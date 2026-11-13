@@ -44,7 +44,8 @@ func handleStreamExec(env []string, w http.ResponseWriter, r *http.Request) {
 	if !takeExec(w) {
 		return
 	}
-	defer execLim.give()
+	soltar := unaVez(execLim.give)
+	defer soltar()
 	var req api.ExecRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2*api.ExecMaxStdin+64<<10)).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid body: %v", err), http.StatusBadRequest)
@@ -60,7 +61,7 @@ func handleStreamExec(env []string, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	out := newEmitter(w)
 
-	ctx, quitar := contextoExec(r.Context())
+	ctx, quitar := contextoExec(r.Context(), soltar)
 	defer quitar()
 	res := runStreaming(ctx, env, req, timeout, maxOut, out)
 	out.emit(res)

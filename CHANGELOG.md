@@ -14,6 +14,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- A restored copy of a golden snapshot frees the slots of commands and shells left running in it, even when their connection never closes.
+
+### Security
+
+- The guest agent's host-only routes accept TCP only from the host side (the default gateway or the default route); a container on a bridge network inside the guest gets 403.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
