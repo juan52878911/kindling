@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -241,5 +243,108 @@ func TestMontajeDelPutEsPrivadoYSinSuid(t *testing.T) {
 	if mnt, err := m2.dirMontajePut(); err == nil {
 		os.Remove(mnt)
 		t.Fatal("dirMontajePut siguió un enlace en build/")
+	}
+}
+
+// Tampoco la de un dorado (M13): sus clones restauran RAM y overlay congelados
+// sobre ese disco. Se niega como con una máquina viva (Busy, que el daemon da
+// como 409) y dice qué hacer.
+func TestPutImageFileNoTocaLaImagenDeUnDorado(t *testing.T) {
+	m := newTestManager(t)
+	imgs := filepath.Join(m.root, "images")
+	if err := os.MkdirAll(imgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgs, "dorada.ext4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "plantilla", api.Snapshot{Image: "dorada"})
+	agente := filepath.Join(t.TempDir(), "agente")
+	if err := os.WriteFile(agente, []byte("binario"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := m.PutImageFile(t.Context(), "dorada", "/usr/local/bin/kling-guest", agente, 0o755, true)
+	if err == nil || !res.Busy {
+		t.Fatalf("iba a tocar la imagen de un dorado: res=%+v err=%v", res, err)
+	}
+	if res.Updated {
+		t.Error("dice que la actualizó pese a negarse")
+	}
+	for _, quiero := range []string{"plantilla", "kling template rm"} {
+		if !strings.Contains(err.Error(), quiero) {
+			t.Errorf("el error no dice %q: %v", quiero, err)
+		}
+	}
+}
+
+// Con un dorado encima, lo que ya está al día sigue diciéndolo (refresh es
+// idempotente) sin escribir en el ext4; lo que cambiaría, se niega.
+// Sin debugfs, el lector de ext4 en Go dice lo mismo: al día, distinto, no
+// está, o (con un ext4 que no entiende) "distinto", que es negarse.
+func TestSinTocarEsIgualSinDebugfs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	raiz := ext4.NewDir(0o755, 0, 0, now)
+	if err := raiz.Put("/bin/agente", &ext4.Node{Mode: ext4.ModeReg | 0o755, Size: 7, Data: ext4.Bytes("agente\n"), Mtime: now}, now); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(t.TempDir(), "img.ext4")
+	f, err := os.Create(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ext4.Write(f, raiz, nil, ext4.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	_, igual := fichero(t, "agente\n")
+	_, otro := fichero(t, "otro\n")
+
+	if e, ok := sinTocarEsIgualGo(img, "/bin/agente", igual); !e || !ok {
+		t.Errorf("al día: existe=%v igual=%v", e, ok)
+	}
+	if e, ok := sinTocarEsIgualGo(img, "/bin/agente", otro); !e || ok {
+		t.Errorf("distinto: existe=%v igual=%v", e, ok)
+	}
+	if e, ok := sinTocarEsIgualGo(img, "/bin/nada", igual); e || ok {
+		t.Errorf("no está: existe=%v igual=%v", e, ok)
+	}
+	basura := filepath.Join(t.TempDir(), "basura")
+	if err := os.WriteFile(basura, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := sinTocarEsIgualGo(basura, "/bin/agente", igual); !e || ok {
+		t.Errorf("ext4 ilegible: existe=%v igual=%v; quería negarse", e, ok)
+	}
+}
+
+func TestPutImageFileConDoradoAlDiaNoSeNiega(t *testing.T) {
+	actual, _ := fichero(t, "agente\n")
+	_, im := ext4Prueba(t, 16, "mkdir /bin", "cd /bin", "write "+comillas(actual)+" agente")
+	m := newTestManager(t)
+	if err := os.MkdirAll(filepath.Join(m.root, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(im.file, m.imagePath("dorada")); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "plantilla", api.Snapshot{Image: "dorada"})
+	antes, err := os.ReadFile(m.imagePath("dorada"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	igual, _ := fichero(t, "agente\n")
+	res, err := m.PutImageFile(t.Context(), "dorada", "/bin/agente", igual, 0o755, false)
+	if err != nil || res.Busy || res.Updated {
+		t.Fatalf("al día con un dorado: res=%+v err=%v", res, err)
+	}
+	if despues, _ := os.ReadFile(m.imagePath("dorada")); !bytes.Equal(antes, despues) {
+		t.Error("se escribió en la imagen del dorado aunque ya estaba al día")
+	}
+
+	nuevo, _ := fichero(t, "agente nuevo\n")
+	if res, err := m.PutImageFile(t.Context(), "dorada", "/bin/agente", nuevo, 0o755, false); err == nil || !res.Busy {
+		t.Fatalf("contenido nuevo con un dorado: res=%+v err=%v", res, err)
 	}
 }

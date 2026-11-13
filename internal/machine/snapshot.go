@@ -1187,13 +1187,22 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	if restos {
 		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
 	}
+	// Sus credenciales se van con ella (al borrar, no al reemplazar: un
+	// commit -replace las conserva). El almacén va sellado solo con el nombre,
+	// así que si se quedara, la siguiente plantilla con ese nombre las heredaría.
+	var errCred error
+	if !propio {
+		if errCred = m.borrarCredencialesPlantilla(name); errCred != nil {
+			errCred = fmt.Errorf("snapshot %q: removing its credentials: %w", name, errCred)
+		}
+	}
 	if rerr != nil {
 		// Sin papelera (otro sistema de ficheros, permisos): se borra en su
 		// sitio, como siempre. La ventana vuelve a existir, pero solo aquí.
 		log.Printf("snapshot %q: couldn't move it to the trash (%v); deleting it in place", name, rerr)
-		return os.RemoveAll(m.snapDir(name))
+		return errors.Join(os.RemoveAll(m.snapDir(name)), errCred)
 	}
-	return os.RemoveAll(destino)
+	return errors.Join(os.RemoveAll(destino), errCred)
 }
 
 // retirarSnapshot comprueba que nadie usa el snapshot name y lo quita de su

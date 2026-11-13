@@ -581,8 +581,11 @@ func (m *Manager) tryLock(id string) (func(), bool) {
 }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
+	// 0750, no 0755: el resto del host no tiene por qué listar el estado. El
+	// VMM (otro uid con el grupo del servicio) atraviesa la raíz y machines/
+	// cuando corre sin jailer; restringirRaiz les pone ese grupo.
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			return nil, err
 		}
 	}

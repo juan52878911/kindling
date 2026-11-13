@@ -58,6 +58,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - `kling db`: with a password set, the Postgres client refuses a server that accepts the login without asking for it.
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
+||||||| c4bc2038
+- `kling image refresh` and `kling image put` refuse (409) to change an image a template was saved from, and say how to rebuild it; images already up to date still report so.
+- `kling mcp import -force` (and `kling mcp heal`) replace the template instead of deleting it first, so its template credentials survive and a failed import keeps the old one.
+
+### Security
+
+- State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
+- `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

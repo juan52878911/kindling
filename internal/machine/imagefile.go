@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -195,6 +197,28 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 			res.Busy = true
 			return fmt.Errorf("image %q is in use by %d machine(s): %s", image, len(users), strings.Join(users, ", "))
 		}
+		// Ni bajo un dorado, como RemoveImage y la reescritura de blobs: su
+		// overlay y su RAM se congelaron sobre este ext4 (o sobre la capa que
+		// lo tiene de base), y cambiarlo debajo deja a sus clones con un disco
+		// que no casa con la caché de páginas que restauran.
+		//
+		// Sin escribir nada: si ya lleva ese contenido, está al día y no se
+		// monta ni se repara (las dos cosas escriben en el ext4), y si no lo
+		// lleva y no se pidió crearlo, se salta como siempre. Así refresh y
+		// refresh-bridge siguen siendo idempotentes con dorados.
+		if tpls := m.doradosSobre(image); len(tpls) > 0 {
+			switch existe, igual := sinTocarEsIgual(ctx, file, dentro, quiero); {
+			case igual:
+				return nil
+			case !existe && !create:
+				return errNoBridge
+			}
+			res.Busy = true
+			return fmt.Errorf("image %q is used by the golden snapshot(s) %s, which would restore over a changed disk: "+
+				"remove them first (kling template rm <name>), run this again, and re-create them "+
+				"(kling mcp import -force, compose up -fresh, or commit them again)",
+				image, strings.Join(tpls, ", "))
+		}
 		var err error
 		updated, err = m.putOne(ctx, file, dentro, src, quiero, mode, create)
 		return err
@@ -209,4 +233,86 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 		m.OlvidarAgenteDeImagen(image)
 	}
 	return res, err
+}
+
+// doradosSobre son los dorados cuyo disco descansa en image: los hechos de ella
+// y los hechos de una capa que la tiene de base.
+func (m *Manager) doradosSobre(image string) []string {
+	var out []string
+	for _, s := range m.Snapshots() {
+		if s.Image == image {
+			out = append(out, s.Name)
+		} else if b, ok := m.ImageBase(s.Image); ok && b == image {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
+
+// sinTocarEsIgual mira, en solo lectura, si dentro de file ya está y tiene el
+// digest quiero. Con debugfs (confinado como siempre) y, si no lo hay, con el
+// lector de ext4 en Go: en Linux put monta la imagen y no necesita debugfs, y
+// sin esta vía todo refresh con una plantilla encima se negaría aunque ya
+// estuviera al día. Ante cualquier duda (ruta rara, un whiteout, un enlace,
+// un ext4 que el lector no entiende) dice que existe y no es igual: lo
+// prudente con un dorado encima es negarse.
+func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, igual bool) {
+	limpio := path.Clean("/" + dentro)
+	if nombreDebugfs(limpio) != nil {
+		return true, false
+	}
+	bin := debugfsBin()
+	if bin == "" {
+		return sinTocarEsIgualGo(file, limpio, quiero)
+	}
+	im := imagenDebugfs{bin: bin, file: file}
+	e, err := im.stat(ctx, limpio)
+	if err != nil {
+		return true, false
+	}
+	if !e.existe {
+		return false, false
+	}
+	if e.tipo != "regular" || e.blanqueo {
+		return true, false
+	}
+	tengo, err := im.sha256De(ctx, limpio)
+	return true, err == nil && tengo == quiero
+}
+
+// sinTocarEsIgualGo es sinTocarEsIgual con internal/ext4. La imagen no es de
+// fiar: un pánico del lector se queda en "no es igual", no tumba el daemon.
+func sinTocarEsIgualGo(file, limpio, quiero string) (existe, igual bool) {
+	existe = true
+	defer func() {
+		if recover() != nil {
+			existe, igual = true, false
+		}
+	}()
+	f, err := os.Open(file)
+	if err != nil {
+		return true, false
+	}
+	defer f.Close()
+	raiz, err := ext4.Read(f)
+	if err != nil {
+		return true, false
+	}
+	n := raiz.Lookup(limpio)
+	if n == nil {
+		return false, false
+	}
+	if !n.IsReg() {
+		return true, false
+	}
+	rc, err := n.Open()
+	if err != nil {
+		return true, false
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return true, false
+	}
+	return true, hex.EncodeToString(h.Sum(nil)) == quiero
 }

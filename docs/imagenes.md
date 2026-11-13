@@ -799,8 +799,11 @@ agente del daemon en cada una por la misma API que `kling image put`
 - una imagen cuyo agente es de **otra arquitectura** que el del daemon (una
   emulada) también se salta: el de lib la dejaría sin arrancar; esa se
   reconstruye (`kling image import -replace <ref>`);
-- los **dorados** hechos de una imagen refrescada se congelaron con el agente
-  viejo en memoria y lo conservan hasta rehacerlos; el comando los nombra.
+- una imagen con **dorados** (plantillas) encima no se cambia: sus clones
+  restauran RAM y overlay congelados sobre ese disco. Si ya lleva el agente
+  del daemon sale al día; si no, falla (409) y dice cuáles son: bórralos
+  (`kling template rm <nombre>`), refresca y vuelve a crearlos
+  (`kling mcp import -force`, `compose up -fresh` o un commit nuevo).
 
 Sale con error si alguna imagen falló. Es el gemelo de `kling mcp
 refresh-bridge`, que hace lo mismo con el puente de kling-mcp.

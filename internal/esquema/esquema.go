@@ -115,13 +115,18 @@ func Respaldar(ruta string, v int) error {
 		return err
 	}
 	defer src.Close()
-	fi, err := src.Stat()
+	tmp := dst + ".tmp"
+	// 0600 fijo, no el modo del original: el respaldo de un state.json de una
+	// instalación vieja (0644) es el mismo inventario que ya solo lee el
+	// daemon. El Chmod cubre un .tmp que dejó un intento anterior con otro
+	// modo (O_TRUNC no lo cambia).
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
-	if err != nil {
+	if err := out.Chmod(0o600); err != nil {
+		out.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if _, err := io.Copy(out, src); err != nil {

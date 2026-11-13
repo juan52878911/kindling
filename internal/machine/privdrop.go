@@ -2,6 +2,7 @@ package machine
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -236,6 +237,31 @@ func restringirRaiz(root string, p *Privileges) {
 	if fi, err := os.Lstat(filepath.Join(root, "jails")); err == nil && fi.IsDir() {
 		_ = os.Chmod(filepath.Join(root, "jails"), 0o700)
 	}
+	cerrarRaiz(root, p, os.Geteuid())
+}
+
+// cerrarRaiz deja la raíz en 0750. El VMM sin jailer (KLING_JAILER=0) la
+// atraviesa con el grupo del servicio, así que con usuario de servicio primero
+// el grupo y, si no se puede poner, se deja como estaba para no dejarlo fuera.
+// Sin usuario de servicio todo corre con el uid del daemon y basta el modo.
+// Una raíz ajena (de otro dueño que euid, el uid del daemon) no se toca: quien
+// la preparó decidió su modo y su grupo.
+func cerrarRaiz(root string, p *Privileges, euid int) {
+	fi, err := os.Lstat(root)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm()&0o007 == 0 {
+		return
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != euid {
+		log.Printf("state root %s is %o and not owned by the daemon's user: leaving its mode and group as they are", root, fi.Mode().Perm())
+		return
+	}
+	if p.Enabled {
+		if err := os.Lchown(root, -1, p.GID); err != nil {
+			log.Printf("state root %s: couldn't give it the service group (%v): leaving it %o", root, err, fi.Mode().Perm())
+			return
+		}
+	}
+	_ = os.Chmod(root, 0o750)
 }
 
 // cerrarVolcado quita la lectura a los demás de un volcado recién escrito
