@@ -269,7 +269,7 @@ func (c *Conn) arranque(cfg Config) error {
 					return errors.New("postgres: AuthenticationOk without a verified SASLFinal")
 				}
 				if cfg.Password != "" && !verificado && !enClaro {
-					return errors.New("postgres: AuthenticationOk without an authentication exchange although a password is set")
+					return errors.New("postgres: the server accepted the login without asking for the password that was set; if it really is a trust server, connect without a password")
 				}
 				autenticado = true
 			case 3: // contraseña en claro
