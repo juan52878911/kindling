@@ -149,6 +149,9 @@ type credPG struct {
 	// claro hace que el aviso de contraseña en claro salga una vez por
 	// credencial (por juego de credenciales: una rotación lo repone).
 	claro *sync.Once
+	// v32 hace lo mismo con el aviso de un servidor que rechaza la 3.2 en el
+	// arranque (el proxy repite en 3.0; ver servir).
+	v32 *sync.Once
 }
 
 func compilarPG(c Credential) (credPG, error) {
@@ -167,7 +170,7 @@ func compilarPG(c Credential) (credPG, error) {
 		ServerName: nombre,
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
-	}, claro: new(sync.Once)}, nil
+	}, claro: new(sync.Once), v32: new(sync.Once)}, nil
 }
 
 // validarPostgres: ver ValidarTipo.
@@ -513,35 +516,60 @@ func (s *sesionPG) servir() {
 	_ = guest.SetDeadline(fin)
 	ctx, cancel := context.WithDeadline(s.ctx, fin)
 	defer cancel()
-	up, err := p.abrirPG(ctx, cred)
-	if err != nil {
-		s.rec.Reason = ReasonUpstreamTLS
-		switch {
-		case errors.Is(err, errMaquinaNoDisponible):
-			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
-		case !errors.Is(err, errTLSUpstream):
+	// entrar abre la conexión al servidor y le manda el arranque con la versión
+	// menor v. Si falla, ya contestó al invitado y devuelve nil.
+	entrar := func(v uint32) (net.Conn, *bufio.Reader) {
+		up, err := p.abrirPG(ctx, cred)
+		if err != nil {
+			s.rec.Reason = ReasonUpstreamTLS
+			switch {
+			case errors.Is(err, errMaquinaNoDisponible):
+				s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+			case !errors.Is(err, errTLSUpstream):
+				s.rec.Reason = ReasonUpstreamError
+			}
+			p.logf("credential proxy postgres %s (%s): %v", cred.Domain, cred.destinoPG(), err)
+			if s.rec.Reason == ReasonMachineUnavailable {
+				s.fatal("08006", "the database copy is not available (stopped, frozen, removed or not ready)")
+				return nil, nil
+			}
+			s.fatal("08006", "could not connect to the database server")
+			return nil, nil
+		}
+		if !s.ponerUp(up) {
+			return nil, nil
+		}
+		_ = up.SetDeadline(fin)
+		if _, err := up.Write(arranqueUpstream(pgProto30|v, cred.User, db, params)); err != nil {
 			s.rec.Reason = ReasonUpstreamError
+			s.fatal("08006", "could not connect to the database server")
+			return nil, nil
 		}
-		p.logf("credential proxy postgres %s (%s): %v", cred.Domain, cred.destinoPG(), err)
-		if s.rec.Reason == ReasonMachineUnavailable {
-			s.fatal("08006", "the database copy is not available (stopped, frozen, removed or not ready)")
-			return
-		}
-		s.fatal("08006", "could not connect to the database server")
-		return
+		return up, bufio.NewReader(up)
 	}
-	if !s.ponerUp(up) {
-		return
-	}
-	_ = up.SetDeadline(fin)
-	br := bufio.NewReader(up)
-	if _, err := up.Write(arranqueUpstream(pgProto30|minor, cred.User, db, params)); err != nil {
-		s.rec.Reason = ReasonUpstreamError
-		s.fatal("08006", "could not connect to the database server")
+	up, br := entrar(minor)
+	if up == nil {
 		return
 	}
 	upMinor := minor
 	metodo, codigo, err := autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable, &upMinor)
+	if errors.Is(err, errVersionRechazada) {
+		// Un servidor que no conoce la 3.2 y, en vez de NegotiateProtocolVersion,
+		// corta el arranque con 08P01 (pgbouncer anterior a 1.25: "bad packet
+		// header"). Aún no se ha mandado nada de la clave: se repite una vez en
+		// 3.0, en una conexión nueva, y el invitado sigue en la suya (relevo
+		// cambia la clave de cancelación a su longitud, como con un servidor
+		// anterior a PostgreSQL 18).
+		cred.v32.Do(func() {
+			p.logf("credential proxy postgres %s (%s): the server rejected protocol 3.%d at startup (SQLSTATE 08P01); retrying with 3.0", cred.Domain, cred.destinoPG(), minor)
+		})
+		_ = up.Close()
+		if up, br = entrar(0); up == nil {
+			return
+		}
+		upMinor = 0
+		metodo, codigo, err = autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable, &upMinor)
+	}
 	if err != nil {
 		s.rec.Reason = ReasonUpstreamAuth
 		if codigo != "" {
@@ -777,6 +805,10 @@ func (p *Proxy) abrirPG(ctx context.Context, cred credPG) (net.Conn, error) {
 // errSinTLSNecesitaSCRAM: sin TLS hacia el servidor solo vale SCRAM-SHA-256.
 var errSinTLSNecesitaSCRAM = errors.New("upstream without TLS requires SCRAM-SHA-256")
 
+// errVersionRechazada: a un arranque en 3.2 (o más) el servidor contestó, como
+// primer mensaje, un ErrorResponse 08P01 en lugar de NegotiateProtocolVersion.
+var errVersionRechazada = errors.New("the server rejected the protocol version at startup")
+
 // autenticarPG lleva la autenticación con el servidor hasta su
 // AuthenticationOk. Devuelve el método usado; con un ErrorResponse del
 // servidor, su SQLSTATE (nunca el texto). sinTLS (UpstreamTLS "disable")
@@ -799,6 +831,9 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG, sinTLS bool, minor
 		switch tipo {
 		case 'E':
 			c := sqlstate(msg)
+			if primero && *minor > 0 && c == "08P01" {
+				return "", c, errVersionRechazada
+			}
 			return "", c, errors.New("error response")
 		case 'N':
 			continue // NoticeResponse: no se reenvía
