@@ -162,6 +162,12 @@ func newRig(t *testing.T, dialTo string) *rig {
 // newRigWith es newRig con un proxy de credenciales en la pasarela.
 func newRigWith(t *testing.T, dialTo string, cred http.Handler) *rig {
 	t.Helper()
+	return newRigCon(t, dialTo, cred, nil)
+}
+
+// newRigCon es newRigWith con el reenvío al proxy aparte.
+func newRigCon(t *testing.T, dialTo string, cred http.Handler, split Split) *rig {
+	t.Helper()
 	r := &rig{policy: egress.NewPolicy(), store: mmds.NewStore()}
 	hostSide, guestSide := socketpair(t)
 	resolver := &egress.Resolver{Policy: r.policy, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
@@ -176,6 +182,7 @@ func newRigWith(t *testing.T, dialTo string, cred http.Handler) *rig {
 		Policy:      r.policy,
 		Resolver:    resolver,
 		Credentials: cred,
+		Split:       split,
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			r.mu.Lock()
 			r.dialed = append(r.dialed, network+" "+addr)
@@ -687,6 +694,67 @@ func TestPostgresOnGateway(t *testing.T) {
 	defer r.mu.Unlock()
 	if len(r.dialed) != 0 {
 		t.Fatalf("nothing should have been dialed on the host, got %v", r.dialed)
+	}
+}
+
+// splitFalso es un reenvío de mentira: contesta "split" y el puerto.
+type splitFalso struct {
+	activo, db atomic.Bool
+	vistas     atomic.Int32
+}
+
+func (f *splitFalso) Activo() bool { return f.activo.Load() }
+func (f *splitFalso) DB() bool     { return f.db.Load() }
+func (f *splitFalso) Forward(_ context.Context, c net.Conn, port int) {
+	defer c.Close()
+	f.vistas.Add(1)
+	_, _ = c.Write([]byte("split" + strconv.Itoa(port)))
+}
+
+// Con el proxy aparte encendido, el 80 de la pasarela va a él y no al proxy
+// propio; con DB, también el resto de puertos (antes que el proxy de bases de
+// datos propio). Apagado, todo sigue como antes.
+func TestSplitOnGateway(t *testing.T) {
+	sp := &splitFalso{}
+	propio := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "propio") })
+	r := newRigCon(t, "", propio, sp)
+	pg := &pgFalso{}
+	pg.activo.Store(true)
+	r.n.cfg.CredentialsPG = pg
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	leer := func(puerto string) string {
+		t.Helper()
+		conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":"+puerto)
+		if err != nil {
+			t.Fatalf("gateway:%s: %v", puerto, err)
+		}
+		defer conn.Close()
+		if puerto == "80" {
+			io.WriteString(conn, "GET / HTTP/1.0\r\nHost: x\r\n\r\n")
+		}
+		b, _ := io.ReadAll(conn)
+		return string(b)
+	}
+	if b := leer("80"); !strings.HasSuffix(b, "propio") {
+		t.Fatalf("apagado, el 80 contestó %q; quería el proxy propio", b)
+	}
+	if b := leer("5432"); b != "pg5432" {
+		t.Fatalf("apagado, el 5432 contestó %q", b)
+	}
+	sp.activo.Store(true)
+	if b := leer("80"); b != "split80" {
+		t.Fatalf("encendido, el 80 contestó %q", b)
+	}
+	if b := leer("5432"); b != "pg5432" {
+		t.Fatalf("sin DB, el 5432 contestó %q", b)
+	}
+	sp.db.Store(true)
+	if b := leer("3306"); b != "split3306" {
+		t.Fatalf("con DB, el 3306 contestó %q", b)
+	}
+	if sp.vistas.Load() != 2 {
+		t.Fatalf("el reenvío vio %d conexiones, quería 2", sp.vistas.Load())
 	}
 }
 

@@ -3,12 +3,15 @@
 package peercred
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -93,4 +96,137 @@ func (s *sameUser) avisar(uid int, err error) {
 		return
 	}
 	s.logf("API socket: rejected a connection from uid %d (only uid %d or root may connect); %d rejected so far", uid, s.uid, s.rechazos)
+}
+
+// PID es el proceso al otro lado de una conexión por socket Unix
+// (LOCAL_PEERPID, que también fija el kernel al conectar).
+func PID(c net.Conn) (int, error) {
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return -1, errors.New("not a unix socket")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return -1, err
+	}
+	var pid int
+	var serr error
+	if err := raw.Control(func(fd uintptr) {
+		pid, serr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+	}); err != nil {
+		return -1, err
+	}
+	if serr != nil {
+		return -1, serr
+	}
+	return pid, nil
+}
+
+// Ejecutable es la ruta del ejecutable del proceso pid (proc_pidpath).
+func Ejecutable(pid int) (string, error) {
+	buf := make([]byte, 4*1024) // PROC_PIDPATHINFO_MAXSIZE
+	// proc_info(PROC_INFO_CALL_PIDINFO, pid, PROC_PIDPATHINFO, 0, buf, len):
+	// lo que hace proc_pidpath de libproc; la ruta acaba en NUL.
+	_, _, e := unix.Syscall6(unix.SYS_PROC_INFO, 2, uintptr(pid), 11, 0,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if e != 0 {
+		return "", fmt.Errorf("proc_pidpath: %w", e)
+	}
+	n := bytes.IndexByte(buf, 0)
+	if n <= 0 {
+		return "", errors.New("proc_pidpath returned nothing")
+	}
+	return string(buf[:n]), nil
+}
+
+// MismoEjecutable dice si ruta (la de Ejecutable) es bin, tras resolver los
+// enlaces de bin.
+func MismoEjecutable(ruta, bin string) bool {
+	if ruta == "" || bin == "" || !filepath.IsAbs(bin) {
+		return false
+	}
+	if r, err := filepath.EvalSymlinks(bin); err == nil {
+		bin = r
+	}
+	return filepath.Clean(ruta) == filepath.Clean(bin)
+}
+
+// Solo envuelve un listener de socket Unix para que acepte únicamente
+// conexiones de este mismo usuario (o root) cuyo ejecutable sea uno de bins:
+// el API de kling-credproxy (solo el daemon) y su reenvío (solo el VMM de su
+// máquina). Las demás se cierran sin leerles nada; lo cuenta por logf como
+// mucho una vez por minuto.
+func Solo(l net.Listener, que string, bins []string, logf func(string, ...any)) net.Listener {
+	return &solo{Listener: l, que: que, bins: bins, uid: os.Geteuid(), logf: logf}
+}
+
+// SoloPID es Solo exigiendo además que al otro lado esté el proceso pid (el
+// reenvío de kling-credproxy: el VMM de su máquina y ningún otro).
+func SoloPID(l net.Listener, que string, bins []string, pid int, logf func(string, ...any)) net.Listener {
+	return &solo{Listener: l, que: que, bins: bins, pid: pid, uid: os.Geteuid(), logf: logf}
+}
+
+type solo struct {
+	net.Listener
+	que  string
+	bins []string
+	pid  int // 0: cualquiera
+	uid  int
+	logf func(string, ...any)
+
+	mu        sync.Mutex
+	rechazos  int
+	ultimoLog time.Time
+}
+
+// permitido dice por qué no se admite c, o nil.
+func (s *solo) permitido(c net.Conn) error {
+	uid, err := UID(c)
+	if err != nil {
+		return err
+	}
+	if uid != s.uid && uid != 0 {
+		return fmt.Errorf("uid %d", uid)
+	}
+	pid, err := PID(c)
+	if err != nil {
+		return err
+	}
+	if s.pid != 0 && pid != s.pid {
+		return fmt.Errorf("pid %d is not %d", pid, s.pid)
+	}
+	ruta, err := Ejecutable(pid)
+	if err != nil {
+		return err
+	}
+	for _, b := range s.bins {
+		if MismoEjecutable(ruta, b) {
+			return nil
+		}
+	}
+	return fmt.Errorf("pid %d runs %s", pid, ruta)
+}
+
+func (s *solo) Accept() (net.Conn, error) {
+	for {
+		c, err := s.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		perr := s.permitido(c)
+		if perr == nil {
+			return c, nil
+		}
+		_ = c.Close()
+		if errors.Is(perr, unix.ENOTCONN) {
+			continue // ya se fue (un sondeo de si escucha): nada que contar
+		}
+		s.mu.Lock()
+		s.rechazos++
+		if s.logf != nil && time.Since(s.ultimoLog) >= time.Minute {
+			s.ultimoLog = time.Now()
+			s.logf("%s: rejected a connection (%v); %d rejected so far", s.que, perr, s.rechazos)
+		}
+		s.mu.Unlock()
+	}
 }

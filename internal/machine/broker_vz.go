@@ -39,6 +39,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const (
@@ -153,11 +154,27 @@ func (m *Manager) identificarBroker(c *net.UnixConn) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// El VMM de una máquina, o el proxy de credenciales aparte de una
+	// (kling-credproxy, credproxy_vz.go), que pide lo mismo por ella: las
+	// conexiones de sus aristas credential y del upstream en el loopback.
+	// Del proxy, la máquina es la de su VMM, y su directorio tiene que ser
+	// el de esa máquina.
+	cpdir := ""
 	if err := m.esKlingVZ(pid); err != nil {
-		return "", err
+		vmm, dir, cerr := m.esCredproxy(pid)
+		if cerr != nil {
+			return "", err
+		}
+		pid, cpdir = vmm, dir
+	}
+	comprobar := func(id string) (string, error) {
+		if cpdir != "" && filepath.Clean(cpdir) != filepath.Join(m.dir(id), credproxy.SplitDir) {
+			return "", fmt.Errorf("the credential proxy of pid %d serves %s, not machine %s", pid, cpdir, shortID(id))
+		}
+		return id, nil
 	}
 	if id, n := m.maquinaDePID(pid); n == 1 {
-		return id, nil
+		return comprobar(id)
 	}
 	// Hay que esperar (o fallar): solo unas pocas a la vez.
 	select {
@@ -171,7 +188,7 @@ func (m *Manager) identificarBroker(c *net.UnixConn) (string, error) {
 		id, n := m.maquinaDePID(pid)
 		switch {
 		case n == 1:
-			return id, nil
+			return comprobar(id)
 		case n > 1:
 			return "", fmt.Errorf("pid %d is recorded for %d machines", pid, n)
 		case time.Now().After(limite):
@@ -211,6 +228,37 @@ func (m *Manager) esKlingVZ(pid int) error {
 		return fmt.Errorf("pid %d runs %s, not the VMM", pid, ruta)
 	}
 	return nil
+}
+
+// esCredproxy comprueba que el proceso pid es el kling-credproxy que el
+// daemon lanza (junto a su VMM, m.fcBin) y devuelve el PID del VMM y el
+// directorio que dice su línea de órdenes (--vmm-pid N --dir DIR, con --dir
+// el último: la ruta puede llevar espacios).
+func (m *Manager) esCredproxy(pid int) (vmm int, dir string, err error) {
+	ruta, err := rutaEjecutable(pid)
+	if err != nil {
+		return 0, "", fmt.Errorf("pid %d: %w", pid, err)
+	}
+	m.mu.RLock()
+	bin := m.fcBin
+	m.mu.RUnlock()
+	if filepath.IsAbs(bin) {
+		if r, err := filepath.EvalSymlinks(bin); err == nil {
+			bin = r
+		}
+	}
+	if !mismoEjecutable(ruta, filepath.Join(filepath.Dir(bin), credproxy.SplitBinary)) {
+		return 0, "", fmt.Errorf("pid %d runs %s, not the credential proxy", pid, ruta)
+	}
+	linea, err := lineaDeOrdenes(int32(pid), make([]byte, procArgsMax))
+	if err != nil {
+		return 0, "", fmt.Errorf("pid %d: %w", pid, err)
+	}
+	vmm, dir, ok := argsCredproxy(linea)
+	if !ok {
+		return 0, "", fmt.Errorf("pid %d: unexpected credential proxy command line", pid)
+	}
+	return vmm, dir, nil
 }
 
 // mismoEjecutable dice si ruta (la de proc_pidpath, ya resuelta) es bin.

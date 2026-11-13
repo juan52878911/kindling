@@ -103,10 +103,11 @@ say "build ($V)"
   go build -trimpath -ldflags "-X main.Version=${V#v}" -o "$BIN/kling" ./cmd/kling
   CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.Version=${V#v}" -o "$BIN/kling-guest" ./cmd/kling-guest
   (cd ext/db && go build -trimpath -ldflags "-X main.Version=${V#v}" -o "$WORK/plugins/kling-db" ./cmd/kling-db)
-  (cd vz && OUT="$BIN/kling-vz" VERSION="$V" ./build.sh && OUT="$BIN/kling-hv" VERSION="$V" ./build-hv.sh) >/dev/null
+  (cd vz && OUT="$BIN/kling-vz" VERSION="$V" ./build.sh && OUT="$BIN/kling-hv" VERSION="$V" ./build-hv.sh \
+    && OUT="$BIN/kling-credproxy" VERSION="$V" ./build-credproxy.sh) >/dev/null
   "$BIN/kling-hv" --probe >/dev/null
 ) || die "build failed"
-echo "kling, kling-guest, kling-db, kling-vz and kling-hv in $BIN"
+echo "kling, kling-guest, kling-db, kling-vz, kling-hv and kling-credproxy in $BIN"
 
 # ── vmlinux y min.ext4 ───────────────────────────────────────────────────────
 say "kernel and min image"

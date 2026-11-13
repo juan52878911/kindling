@@ -48,6 +48,10 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "unix", corto)
 }
 
+// DialUnix conecta al socket unix path, pasando por un enlace corto en el
+// directorio privado del usuario si la ruta no cabe en sun_path.
+func DialUnix(ctx context.Context, path string) (net.Conn, error) { return dialUnix(ctx, path) }
+
 // DirCorto devuelve (creándolo) el directorio privado de rutas cortas del
 // usuario, comprobado: solo nuestro y sin permisos para nadie más. Ahí
 // escucha también el broker de enlaces del daemon en macOS

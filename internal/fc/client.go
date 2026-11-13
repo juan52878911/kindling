@@ -21,6 +21,26 @@ import (
 type Client struct {
 	http *http.Client
 	sock string
+	// quien es cómo se nombra al otro lado en los errores de las rutas
+	// propias (kling.go): "kling-vz" si no se dice otra cosa.
+	quien string
+}
+
+// Socket es la ruta del socket al que habla c.
+func (c *Client) Socket() string { return c.sock }
+
+// NewConDial es un Client cuyas conexiones abre dial, que puede comprobar
+// quién está al otro lado antes de devolverla (el proxy de credenciales
+// aparte de macOS: el daemon solo le habla si es él). quien nombra a ese
+// proceso en los errores.
+func NewConDial(socketPath, quien string, dial func(ctx context.Context) (net.Conn, error)) *Client {
+	return &Client{sock: socketPath, quien: quien, http: &http.Client{
+		Transport: &http.Transport{
+			DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
+			DisableKeepAlives: true,
+		},
+		Timeout: plazoPorDefecto,
+	}}
 }
 
 func New(socketPath string) *Client {
@@ -59,7 +79,7 @@ const plazoPorDefecto = 30 * time.Second
 func (c *Client) ConPlazo(d time.Duration) *Client {
 	h := *c.http
 	h.Timeout = max(d, 0)
-	return &Client{http: &h, sock: c.sock}
+	return &Client{http: &h, sock: c.sock, quien: c.quien}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) error {

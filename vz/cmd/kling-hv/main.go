@@ -57,6 +57,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/hvvm"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
+	"github.com/juan52878911/kindling/vz/internal/reenvio"
 	"github.com/juan52878911/kindling/vz/internal/sandbox"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
@@ -255,6 +256,20 @@ func run() int {
 		}()
 	}
 
+	// El proxy aparte de la máquina (kling-credproxy): si el daemon lo usa,
+	// las conexiones a la pasarela van a su socket y las claves no pasan por
+	// aquí (docs/proxy-macos-separado.md del núcleo). Con un directorio de
+	// máquina largo, sun_path (104 bytes) no admite su ruta: este proceso
+	// trabaja desde el directorio de su máquina y conecta por nombre relativo.
+	largo := rutasLargas(*sock)
+	if largo {
+		if err := os.Chdir(filepath.Dir(*sock)); err != nil {
+			logf("cannot chdir to the machine directory: %v", err)
+			return 1
+		}
+	}
+	split := reenvio.New(rutaReenvio(*sock, largo), logf)
+
 	peers := peercred.New()
 	srv := server.New(server.Deps{
 		Factory: &hvvm.Factory{Console: stdout, Logf: logf, RAMDir: dirMaquina(*sock), Inservible: salirInservible},
@@ -274,6 +289,7 @@ func run() int {
 				Resolver:      c.Resolver,
 				Credentials:   c.Credentials,
 				CredentialsPG: pg,
+				Split:         c.Split,
 				Graph:         grafoDeRed(c.Graph),
 				Logf:          logf,
 				PeerAllowed:   peers.Allowed,
@@ -288,6 +304,7 @@ func run() int {
 		Resolver:    resolver,
 		Credentials: creds,
 		CredIP:      vnet.GatewayIP,
+		Split:       split,
 		CPUTime:     hvvm.CPUTime,
 		Freeze:      hvvm.Freeze,
 		Graph:       grafoMaq,
@@ -301,10 +318,8 @@ func run() int {
 	// sun_path admite 104 bytes: con una ruta larga se escucha por nombre
 	// relativo desde su directorio (el núcleo conecta por un enlace corto).
 	bindPath := *sock
-	if len(bindPath) > 103 {
-		if err := os.Chdir(filepath.Dir(bindPath)); err == nil {
-			bindPath = filepath.Base(bindPath)
-		}
+	if largo {
+		bindPath = filepath.Base(bindPath)
 	}
 	l, err := net.Listen("unix", bindPath)
 	if err != nil {
@@ -369,9 +384,23 @@ func dirMaquina(sock string) string {
 	return dir
 }
 
-// rutaAuditoria es el registro de auditoría del proxy, junto al socket.
+// rutaAuditoria es el registro de auditoría de lo que atiende este proceso,
+// junto al socket (ver el de kling-vz).
 func rutaAuditoria(sock string) string {
-	return filepath.Join(dirMaquina(sock), credproxy.AuditFile)
+	return filepath.Join(dirMaquina(sock), credproxy.AuditFileVMM)
+}
+
+// rutasLargas y rutaReenvio: como en kling-vz.
+func rutasLargas(sock string) bool {
+	return len(sock) > 103 || len(filepath.Join(filepath.Dir(sock), credproxy.SplitDir, credproxy.SplitFwdSock)) > 103
+}
+
+func rutaReenvio(sock string, largo bool) string {
+	r := filepath.Join(credproxy.SplitDir, credproxy.SplitFwdSock)
+	if largo {
+		return r
+	}
+	return filepath.Join(filepath.Dir(sock), r)
 }
 
 func grafoDeRed(g *grafo.Grafo) vnet.GraphLinks {

@@ -1000,7 +1000,7 @@ func (m *Manager) entregarCredencialesExactas(ctx context.Context, id string, cr
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return err
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(id), m.resolverCopia(id)); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(id), m.resolverCopia(id), cur.Egress); err != nil {
 		return err
 	}
 	m.anotarCredenciales(id, creds)

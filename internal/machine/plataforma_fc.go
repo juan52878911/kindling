@@ -61,6 +61,11 @@ const globoSinEstadisticas = false
 // solo para que los tests de macOS puedan probar también este camino.
 var auditoriaEnElDaemon = true
 
+// fuentesAuditoria: en Linux, el registro que escribe el daemon y nada más.
+func (m *Manager) fuentesAuditoria(id string) []fuenteAuditoria {
+	return []fuenteAuditoria{{ruta: m.credAuditPath(id)}}
+}
+
 // dirsE2fsExtra son directorios donde buscar e2fsprogs además del PATH, /sbin
 // y /usr/sbin. En Linux no hace falta ninguno.
 var dirsE2fsExtra []string
@@ -102,7 +107,7 @@ func fijarAuditoriaPlataforma(c credproxy.AuditConfig) { knet.SetCredAudit(c) }
 // registrarCredencialesPlataforma: en Linux el proxy y el resolver son del
 // daemon (internal/net); el VMM no interviene, así que c no se usa. El proxy
 // escribe su registro de auditoría en auditPath.
-func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential, auditPath string, resolve credproxy.ResolveMachineFunc) error {
+func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential, auditPath string, resolve credproxy.ResolveMachineFunc, _ string) error {
 	return knet.SetCredentials(n, creds, auditPath, resolve)
 }
 

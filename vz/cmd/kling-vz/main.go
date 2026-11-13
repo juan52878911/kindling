@@ -26,6 +26,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
+	"github.com/juan52878911/kindling/vz/internal/reenvio"
 	"github.com/juan52878911/kindling/vz/internal/sandbox"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/spec"
@@ -272,6 +273,20 @@ func run() int {
 	// crearlo y el chmod.
 	syscall.Umask(0o077)
 
+	// El proxy aparte de la máquina (kling-credproxy): si el daemon lo usa,
+	// las conexiones a la pasarela van a su socket y las claves no pasan por
+	// aquí (docs/proxy-macos-separado.md del núcleo). Con un directorio de
+	// máquina largo, sun_path (104 bytes) no admite su ruta: este proceso
+	// trabaja desde el directorio de su máquina y conecta por nombre relativo.
+	largo := rutasLargas(*sock)
+	if largo {
+		if err := os.Chdir(filepath.Dir(*sock)); err != nil {
+			logf("cannot chdir to the machine directory: %v", err)
+			return 1
+		}
+	}
+	split := reenvio.New(rutaReenvio(*sock, largo), logf)
+
 	peers := peercred.New()
 	// Encerrado, este proceso solo escribe en el directorio de su máquina; ver
 	// internal/sandbox y kling-vz.sb.
@@ -301,6 +316,7 @@ func run() int {
 				// Credentials: el proxy en la pasarela (ver vnet.Config).
 				Credentials:   c.Credentials,
 				CredentialsPG: pg,
+				Split:         c.Split,
 				Graph:         grafoDeRed(c.Graph),
 				Logf:          logf,
 				// Solo los procesos de este usuario llegan al agente del
@@ -317,6 +333,7 @@ func run() int {
 		// corre como el usuario; ver la sección 7 de SECURITY.md.
 		Credentials:   creds,
 		CredIP:        vnet.GatewayIP,
+		Split:         split,
 		Confine:       confine,
 		Destino:       destino,
 		CPUTime:       meter.CPUTime,
@@ -336,10 +353,8 @@ func run() int {
 	// relativo desde su directorio, que el kernel sí acepta; quien conecte
 	// tendrá que hacer lo mismo.
 	bindPath := *sock
-	if len(bindPath) > 103 {
-		if err := os.Chdir(filepath.Dir(bindPath)); err == nil {
-			bindPath = filepath.Base(bindPath)
-		}
+	if largo {
+		bindPath = filepath.Base(bindPath)
 	}
 	l, err := net.Listen("unix", bindPath)
 	if err != nil {
@@ -391,8 +406,10 @@ func run() int {
 	return code
 }
 
-// rutaAuditoria es el registro de auditoría del proxy: junto al socket de la
-// API, en el directorio de la máquina. Absoluta y sin enlaces antes de nada:
+// rutaAuditoria es el registro de auditoría de lo que atiende este proceso
+// (credproxy.AuditFileVMM: aristas link, puentes y las negativas de su proxy
+// propio; el del proxy aparte es otro, en su subdirectorio): junto al socket
+// de la API, en el directorio de la máquina. Absoluta y sin enlaces antes de nada:
 // con una ruta de socket larga el proceso cambia de directorio (ver más abajo),
 // y el sandbox compara rutas reales.
 func rutaAuditoria(sock string) string {
@@ -403,7 +420,24 @@ func rutaAuditoria(sock string) string {
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real
 	}
-	return filepath.Join(dir, credproxy.AuditFile)
+	return filepath.Join(dir, credproxy.AuditFileVMM)
+}
+
+// rutasLargas dice si alguno de los sockets de la máquina (el de la API o el
+// de reenvío del proxy aparte) no cabe en sun_path con su ruta absoluta.
+func rutasLargas(sock string) bool {
+	return len(sock) > 103 || len(filepath.Join(filepath.Dir(sock), credproxy.SplitDir, credproxy.SplitFwdSock)) > 103
+}
+
+// rutaReenvio es el socket de reenvío del proxy aparte: relativa al
+// directorio de la máquina si las rutas son largas (el proceso trabaja desde
+// él), absoluta si no.
+func rutaReenvio(sock string, largo bool) string {
+	r := filepath.Join(credproxy.SplitDir, credproxy.SplitFwdSock)
+	if largo {
+		return r
+	}
+	return filepath.Join(filepath.Dir(sock), r)
 }
 
 // grafoDeRed pasa las aristas a la red sin el puntero nil dentro de una

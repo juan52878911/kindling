@@ -61,7 +61,7 @@ install: build
 	@echo "instalado: $(PREFIX)/bin/$(BIN)  ($(VERSION))"
 	@# Los VMM de macOS que haya dejado `make vz`, junto a kling (donde los busca
 	@# el daemon). install copia el Mach-O con su firma ad-hoc y su entitlement.
-	@for v in kling-vz kling-hv; do \
+	@for v in kling-vz kling-hv kling-credproxy; do \
 		if [ "$$(uname -s)" = Darwin ] && [ -x vz/bin/$$v ]; then \
 			install -m755 vz/bin/$$v $(PREFIX)/bin/$$v 2>/dev/null || sudo install -m755 vz/bin/$$v $(PREFIX)/bin/$$v; \
 			echo "instalado: $(PREFIX)/bin/$$v"; \
@@ -246,7 +246,8 @@ deploy: daemon guest chispa-guest
 deploy-mac:
 	@$(MAKE) deploy GOARCH=arm64 HOST="$(HOST)"
 
-## vz — los VMM de macOS (kling-vz y kling-hv), junto al CLI.
+## vz — los VMM de macOS (kling-vz y kling-hv) y el proxy de credenciales
+## aparte (kling-credproxy), junto al CLI.
 ##
 ## Vive en vz/ como módulo Go APARTE (github.com/juan52878911/kindling/vz):
 ## necesita cgo y dependencias (Code-Hex/vz, gVisor) que el núcleo no tiene ni
@@ -260,7 +261,8 @@ vz:
 	@# El mínimo de macOS de cada uno (docs/mac.md): sin fijarlo, el binario
 	@# pediría la versión del SDK de este Mac y no cargaría en uno anterior.
 	cd vz && MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" ./build.sh \
-		&& MACOSX_DEPLOYMENT_TARGET=15.2 CGO_CFLAGS="-O2 -g -mmacosx-version-min=15.2" CGO_LDFLAGS="-mmacosx-version-min=15.2" ./build-hv.sh
+		&& MACOSX_DEPLOYMENT_TARGET=15.2 CGO_CFLAGS="-O2 -g -mmacosx-version-min=15.2" CGO_LDFLAGS="-mmacosx-version-min=15.2" ./build-hv.sh \
+		&& MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" ./build-credproxy.sh
 
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##

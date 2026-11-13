@@ -421,8 +421,8 @@ func TestLibPorDefecto(t *testing.T) {
 	}
 }
 
-// kling-hv se actualiza junto a kling-vz, y se instala si solo está kling-vz
-// (opcional: una release sin él no es un error). Sin kling-vz al lado no se
+// kling-hv y kling-credproxy se actualizan junto a kling-vz, y se instalan si
+// solo está kling-vz (opcionales: una release sin ellos no es un error). Sin kling-vz al lado no se
 // toca ninguno.
 func TestPiezasVMMMac(t *testing.T) {
 	dir := t.TempDir()
@@ -431,8 +431,9 @@ func TestPiezasVMMMac(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(dir, "kling-vz"), []byte("vz"), 0o755)
 	p := piezasVMMMac(dir, "arm64")
-	if len(p) != 2 || p[0].Asset.Nombre != "kling-vz-darwin-arm64" || p[0].Asset.Opcional ||
-		p[1].Asset.Nombre != "kling-hv-darwin-arm64" || !p[1].Asset.Opcional || p[1].Destino != filepath.Join(dir, "kling-hv") {
+	if len(p) != 3 || p[0].Asset.Nombre != "kling-vz-darwin-arm64" || p[0].Asset.Opcional ||
+		p[1].Asset.Nombre != "kling-hv-darwin-arm64" || !p[1].Asset.Opcional || p[1].Destino != filepath.Join(dir, "kling-hv") ||
+		p[2].Asset.Nombre != "kling-credproxy-darwin-arm64" || !p[2].Asset.Opcional || p[2].Destino != filepath.Join(dir, "kling-credproxy") {
 		t.Fatalf("with kling-vz: %+v", p)
 	}
 	if p := piezasVMMMac(dir, "amd64"); len(p) != 0 {

@@ -1522,7 +1522,8 @@ rota; el marcador se conserva y el proceso no tiene que reiniciarse.
 Cada petición que pasa por el proxy, y cada rechazo, queda anotada en un registro de la
 máquina (0600, rotado a 4 MiB guardando 3 generaciones —`daemon.credaudit_max_mib`,
 `daemon.credaudit_generations` o `KLING_CREDAUDIT=MIB:GENS`—; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
-llega; en macOS en su directorio, `credaudit.jsonl`):
+llega; en macOS en el directorio de su proxy aparte, `credproxy/credaudit.jsonl`, donde el
+VMM no escribe):
 
 ```sh
 kling machine audit pagos            # TIME METHOD HOST PATH STATUS CREDS MS RESULT
