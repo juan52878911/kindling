@@ -119,6 +119,8 @@ ANDROID_EXTRA_ARGS="androidboot.use_redroid_stream=1 androidboot.use_redroid_vnc
 ANDROID_NET='isolated'
 
 ANDROID_ADB_SECURE=1
+ANDROID_GPU_MODE=host
+ANDROID_GPU_NODE=/dev/dri/renderD128
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -127,15 +129,20 @@ ANDROID_ADB_SECURE=1
 	if err := c.apply(kv); err != nil {
 		t.Fatal(err)
 	}
-	if c.Net != "isolated" || len(c.ExtraArgs) != 2 || !c.AdbSecure || c.Root != "/android" || c.Listen != ":8091" {
+	if c.Net != "isolated" || len(c.ExtraArgs) != 2 || !c.AdbSecure || c.Root != "/android" || c.Listen != ":8091" ||
+		c.GPUMode != "host" || c.GPUNode != "/dev/dri/renderD128" {
 		t.Fatalf("%+v", c)
 	}
 	for _, bad := range []map[string]string{{"ANDROID_NET": "bridge"}, {"ANDROID_DATA_MODE": "zram"},
-		{"ANDROID_PORTS": "5555 x"}, {"ANDROID_ROOT": "android"}} {
+		{"ANDROID_PORTS": "5555 x"}, {"ANDROID_ROOT": "android"},
+		{"ANDROID_GPU_MODE": "virgl"}, {"ANDROID_GPU_NODE": "/tmp/renderD128"}} {
 		c := defaultConfig()
 		if err := c.apply(bad); err == nil {
 			t.Fatalf("accepted %v", bad)
 		}
+	}
+	if c := defaultConfig(); c.GPUMode != "guest" || c.GPUNode != "" {
+		t.Fatalf("default GPU: %q %q", c.GPUMode, c.GPUNode)
 	}
 	if _, err := parseShellConf(strings.NewReader("no equals here\n")); err == nil {
 		t.Fatal("garbage accepted")

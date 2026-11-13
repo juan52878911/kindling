@@ -242,13 +242,15 @@ stage2() {
     "androidboot.redroid_height=$ANDROID_HEIGHT"
     "androidboot.redroid_dpi=$ANDROID_DPI"
     "androidboot.redroid_fps=$ANDROID_FPS"
-    # sin GPU: SwiftShader en CPU
-    "androidboot.redroid_gpu_mode=guest"
+    # guest = SwiftShader en CPU (por defecto); host = Mesa sobre la GPU del
+    # invitado (virtio-gpu con virgl en QEMU, docs/gpu.md "Prueba de concepto")
+    "androidboot.redroid_gpu_mode=${ANDROID_GPU_MODE:-guest}"
     # 6.1 no tiene ashmem
     "androidboot.use_memfd=true"
     # AOSP sin asistente de configuración que bloquee la primera pantalla
     "ro.setupwizard.mode=DISABLED"
   )
+  [ -n "${ANDROID_GPU_NODE:-}" ] && args+=("androidboot.redroid_gpu_node=$ANDROID_GPU_NODE")
   # shellcheck disable=SC2206 # separar por espacios es lo buscado
   [ -n "${ANDROID_EXTRA_ARGS:-}" ] && args+=($ANDROID_EXTRA_ARGS)
   # shellcheck disable=SC2206

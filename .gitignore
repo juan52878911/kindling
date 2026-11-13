@@ -34,6 +34,7 @@ bench-*.json
 *.html
 !examples/**/*.html
 !ext/db/cmd/kling-db/web/*.html
+!prototypes/android/gpu/*.html
 
 # Restos de herramientas ajenas
 .utm-workspace/
