@@ -3,6 +3,7 @@ package machine
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,10 @@ func TestCredAuditLeeLoQueEscribeElProxy(t *testing.T) {
 	m := newTestManager(t)
 	m.addForTest("m1")
 	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// El directorio del registro (en macOS, el del proxy aparte).
+	if err := os.MkdirAll(filepath.Dir(m.credAuditPath("m1")), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// Sin registro todavía: vacío, no error.
@@ -97,6 +102,10 @@ func TestCredAuditNoSigueEnlaces(t *testing.T) {
 	m := newTestManager(t)
 	m.addForTest("m1")
 	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// El directorio del registro (en macOS, el del proxy aparte).
+	if err := os.MkdirAll(filepath.Dir(m.credAuditPath("m1")), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	ajeno := m.dir("m1") + "/ajeno"

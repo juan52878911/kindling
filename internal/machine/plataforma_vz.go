@@ -44,10 +44,32 @@ const putSinMontar = true
 // crear el Manager.
 var backendVMM = BackendVZ
 
-// auditoriaEnElDaemon: en macOS el registro lo escribe el kling-vz de la
-// máquina junto a su socket, el único sitio en que su sandbox le deja
-// escribir; el daemon solo lo lee (ver credaudit.go).
+// auditoriaEnElDaemon: en macOS el registro lo escribe el proxy aparte de la
+// máquina (kling-credproxy) en su subdirectorio; el daemon solo lo lee (ver
+// credaudit.go).
 var auditoriaEnElDaemon = false
+
+// fuentesAuditoria: el registro del proxy aparte, el del VMM (lo que atiende
+// él) y el que dejaban los VMM anteriores, que tenían las claves. Los dos
+// últimos los puede escribir el VMM: desde que existe el proxy aparte (su
+// directorio lo crea el daemon al lanzarlo), una línea suya que diga haber
+// usado una credencial no vale (ver credaudit.go).
+func (m *Manager) fuentesAuditoria(id string) []fuenteAuditoria {
+	if auditoriaEnElDaemon {
+		return []fuenteAuditoria{{ruta: m.credAuditPath(id)}}
+	}
+	var corte time.Time
+	if fi, err := os.Lstat(filepath.Join(m.dir(id), credproxy.SplitDir)); err == nil && fi.IsDir() {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			corte = time.Unix(st.Birthtimespec.Unix())
+		}
+	}
+	return []fuenteAuditoria{
+		{ruta: m.credAuditPath(id)},
+		{ruta: filepath.Join(m.dir(id), credproxy.AuditFileVMM), delVMM: true, corte: corte},
+		{ruta: filepath.Join(m.dir(id), credproxy.AuditFile), delVMM: true, corte: corte},
+	}
+}
 
 // Las aristas de un grafo y kling db attach (una credencial Postgres con
 // UpstreamMachine) llegan a la otra máquina por el broker (broker.go): el
@@ -299,7 +321,7 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 		return err
 	}
 	if len(creds) > 0 && (red.Egress == string(knet.EgressAllowlist) || todasAMaquina(creds)) {
-		if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil); err != nil {
+		if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil, red.Egress); err != nil {
 			return err
 		}
 	}
@@ -359,15 +381,28 @@ func todasAMaquina(creds []credproxy.Credential) bool {
 	return true
 }
 
-// registrarCredencialesPlataforma manda el juego completo al kling-vz de la
-// máquina, que sirve el proxy en la pasarela y desvía los dominios en su DNS.
-// La clave sale del daemon y se queda en la memoria de ese proceso (SECURITY.md
-// §7). Con c nil (el daemon se reinició y la máquina siguió viva) no hay nada
-// que hacer: el kling-vz es el mismo y conserva lo que se le dio. auditPath no
-// viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
-// directorio de la máquina (ver vz/cmd/kling-vz).
-func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
+// registrarCredencialesPlataforma manda el juego completo al proxy de la
+// máquina. Con un VMM que anuncia credproxy.CapSplit, las claves van al proxy
+// aparte de la máquina (kling-credproxy, credproxy_vz.go), que el daemon
+// lanza si no corre, con el modo de salida de la máquina; el VMM recibe solo
+// los dominios que su DNS desvía a la pasarela y le pasa las conexiones
+// (docs/proxy-macos-separado.md). Con uno anterior, al propio VMM, que sirve el
+// proxy en la pasarela y guarda las claves en su memoria (el modelo de antes,
+// SECURITY.md §7). Con c nil (el daemon se reinició y la máquina siguió viva)
+// no hay nada que entregar: el VMM y su proxy son los mismos y conservan lo
+// que se les dio; solo se comprueba que el proxy aparte sigue ahí.
+//
+// auditPath es el registro del proxy aparte (credAuditPath): su directorio es
+// el del proxy, y el de encima el de la máquina.
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, auditPath string, _ credproxy.ResolveMachineFunc, egress string) error {
+	cpdir := ""
+	if auditPath != "" {
+		cpdir = filepath.Dir(auditPath)
+	}
 	if c == nil {
+		if cpdir != "" && len(creds) > 0 {
+			readoptarCredproxy(cpdir)
+		}
 		return nil
 	}
 	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
@@ -390,11 +425,12 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
 		}
 	}
-	// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde ahí no
-	// llega al resolver del Mac: un upstream con nombre lo resuelve aquí el
-	// daemon, con las mismas comprobaciones que haría al marcar, y kling-vz
-	// recibe la IP (que vuelve a comprobar). Antes de hablar con kling-vz: un
-	// nombre que no resuelve o que da un destino prohibido no le llega.
+	// El proxy corre confinado (kling-credproxy.sb, o kling-vz.sb con uno
+	// anterior) y desde ahí no llega al resolver del Mac: un upstream con
+	// nombre lo resuelve aquí el daemon, con las mismas comprobaciones que
+	// haría al marcar, y el proxy recibe la IP (que vuelve a comprobar).
+	// Antes de hablar con nadie: un nombre que no resuelve o que da un
+	// destino prohibido no le llega.
 	upstreams := make([]string, len(creds))
 	for i, cr := range creds {
 		upstreams[i] = cr.Upstream
@@ -407,30 +443,59 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 		upstreams[i] = ip
 	}
-	if pg || my || httpc || sv {
-		info, err := c.KlingInfo(ctx)
+
+	// Quién es el VMM (su PID y su ejecutable, del otro lado de su socket) y
+	// si sabe pasarle las conexiones al proxy aparte.
+	vmm, vc := pidPorSocket(c)
+	info, err := vc.KlingInfo(ctx)
+	if err != nil {
+		if len(creds) == 0 {
+			// Como antes: quitarlas no necesita saber qué tipos entiende.
+			if err := c.SetKlingCredentials(ctx, nil); err != nil {
+				return fmt.Errorf("handing the credentials to kling-vz: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+	}
+	split := slices.Contains(info.CredentialKinds, credproxy.CapSplit) && cpdir != ""
+	quien, kinds := "kling-vz", info.CredentialKinds
+	var cp *fc.Client
+	if split {
+		// Sin credenciales y sin proxy aparte vivo no hace falta lanzarlo:
+		// basta con apagar el reenvío.
+		cp, err = credproxyDe(ctx, cpdir, vmm, len(creds) > 0)
 		if err != nil {
-			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+			return err
 		}
-		if httpc && !slices.Contains(info.CredentialKinds, credproxy.CapHTTPPlaces) {
-			return errors.New("this kling-vz would put the key in every request body and query, not only where the credential says: rebuild kling-vz")
+		if cp != nil {
+			ci, err := cp.KlingInfo(ctx)
+			if err != nil {
+				return fmt.Errorf("asking kling-credproxy for its credential kinds: %w", err)
+			}
+			quien, kinds = "kling-credproxy", ci.CredentialKinds
 		}
-		if pg && !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
-			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+	}
+	if len(creds) > 0 {
+		if httpc && !slices.Contains(kinds, credproxy.CapHTTPPlaces) {
+			return fmt.Errorf("this %s would put the key in every request body and query, not only where the credential says: rebuild %s", quien, quien)
 		}
-		if my && !slices.Contains(info.CredentialKinds, credproxy.KindMySQL) {
-			return errors.New("this kling-vz does not support mysql credentials: rebuild kling-vz")
+		if pg && !slices.Contains(kinds, credproxy.KindPostgres) {
+			return fmt.Errorf("this %s does not support postgres credentials: rebuild %s", quien, quien)
 		}
-		if sv && !slices.Contains(info.CredentialKinds, credproxy.KindSigV4) {
-			return errors.New("this kling-vz does not support sigv4 credentials: rebuild kling-vz")
+		if my && !slices.Contains(kinds, credproxy.KindMySQL) {
+			return fmt.Errorf("this %s does not support mysql credentials: rebuild %s", quien, quien)
 		}
-		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
-			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
+		if sv && !slices.Contains(kinds, credproxy.KindSigV4) {
+			return fmt.Errorf("this %s does not support sigv4 credentials: rebuild %s", quien, quien)
+		}
+		if upstream && !slices.Contains(kinds, credproxy.CapPostgresUpstream) {
+			return fmt.Errorf("this %s does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild %s", quien, quien)
 		}
 		// Uno que no pide conexiones al daemon trataría upstream_machine
 		// como si no estuviera y marcaría el dominio: ninguna le llega.
-		if maquina && !slices.Contains(info.CredentialKinds, credproxy.CapGraphLink) {
-			return errors.New("this kling-vz can't reach other machines (graph credential edges, kling db attach): rebuild kling-vz")
+		if maquina && !slices.Contains(kinds, credproxy.CapGraphLink) {
+			return fmt.Errorf("this %s can't reach other machines (graph credential edges, kling db attach): rebuild %s", quien, quien)
 		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
@@ -445,12 +510,32 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			AccessKeyID: cr.AccessKeyID, Region: cr.Region, Service: cr.Service,
 		})
 	}
-	if err := c.SetKlingCredentials(ctx, out); err != nil {
-		// Un kling-vz anterior no conoce la ruta: que el error diga qué hacer.
-		if strings.Contains(err.Error(), "does not implement") {
-			return fmt.Errorf("%w: rebuild kling-vz to use credentials on macOS", err)
+	if !split {
+		if err := c.SetKlingCredentials(ctx, out); err != nil {
+			// Un kling-vz anterior no conoce la ruta: que el error diga qué hacer.
+			if strings.Contains(err.Error(), "does not implement") {
+				return fmt.Errorf("%w: rebuild kling-vz to use credentials on macOS", err)
+			}
+			return fmt.Errorf("handing the credentials to kling-vz: %w", err)
 		}
-		return fmt.Errorf("handing the credentials to kling-vz: %w", err)
+		return nil
+	}
+	// Con el proxy aparte: primero el modo de salida (lo dice el daemon, no
+	// el VMM), después las claves, y al final, al VMM, qué desviar.
+	var doms []string
+	if cp != nil {
+		if egress == "" {
+			egress = string(knet.EgressNone)
+		}
+		if err := cp.SetKlingNetwork(ctx, fc.KlingNetwork{Egress: egress}); err != nil {
+			return fmt.Errorf("setting the egress mode of the credential proxy: %w", err)
+		}
+		if doms, err = cp.PutKlingCredentials(ctx, out); err != nil {
+			return fmt.Errorf("handing the credentials to kling-credproxy: %w", err)
+		}
+	}
+	if err := vc.SetKlingCredproxy(ctx, fc.KlingCredproxy{Domains: doms, DB: pg || my, MachinesOnly: len(creds) > 0 && todasAMaquina(creds)}); err != nil {
+		return fmt.Errorf("pointing kling-vz at the credential proxy: %w", err)
 	}
 	return nil
 }

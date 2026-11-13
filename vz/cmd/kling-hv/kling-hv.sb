@@ -97,3 +97,17 @@
 ;; escribir. Van al final para ganar a cualquier regla anterior.
 (deny file-read* file-write* (subpath (string-append (param "ROOT") "/secrets")))
 (deny file-write* (subpath (string-append (param "ROOT") "/snapshots")))
+
+;; El proxy de credenciales aparte (kling-credproxy, docs/proxy-macos-separado.md
+;; del núcleo) vive en MDIR/credproxy: sus dos sockets, su registro de
+;; auditoría y los cuerpos que derrama (con la clave dentro). Este proceso
+;; solo conecta a su socket de reenvío; no escribe nada ahí (ni plantar un
+;; socket falso donde el daemon entrega las claves, ni tocar el registro, ni
+;; crear el directorio antes que el daemon) ni lee lo derramado.
+(allow network-outbound (remote unix-socket (path-literal (string-append (param "MDIR") "/credproxy/fwd.sock"))))
+(deny network-bind (local unix-socket (subpath (string-append (param "MDIR") "/credproxy"))))
+(deny file-write* (subpath (string-append (param "MDIR") "/credproxy")))
+(deny file-read* (subpath (string-append (param "MDIR") "/credproxy/tmp")))
+;; El registro que escribían los VMM anteriores (el daemon aún lo lee): este
+;; no lo toca. El suyo es MDIR/vmmaudit.jsonl.
+(deny file-write* (literal (string-append (param "MDIR") "/credaudit.jsonl")))

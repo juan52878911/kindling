@@ -35,6 +35,11 @@ class Kling < Formula
         url "https://github.com/juan52878911/kindling/releases/download/v@VERSION@/kling-hv-darwin-arm64"
         sha256 "@SHA256_kling-hv-darwin-arm64@"
       end
+
+      resource "kling-credproxy" do
+        url "https://github.com/juan52878911/kindling/releases/download/v@VERSION@/kling-credproxy-darwin-arm64"
+        sha256 "@SHA256_kling-credproxy-darwin-arm64@"
+      end
     end
   end
 
@@ -66,6 +71,8 @@ class Kling < Formula
       # Al lado de kling, que es donde el daemon busca su VMM.
       resource("kling-vz").stage { bin.install Dir["kling-vz-*"].first => "kling-vz" }
       resource("kling-hv").stage { bin.install Dir["kling-hv-*"].first => "kling-hv" }
+      # El proxy de credenciales aparte de cada máquina, también al lado.
+      resource("kling-credproxy").stage { bin.install Dir["kling-credproxy-*"].first => "kling-credproxy" }
     else
       # El agente que el daemon mete en las imágenes de Docker (KLING_LIB_DIR).
       resource("kling-guest").stage { (libexec/"kindling").install Dir["kling-guest-*"].first => "kling-guest" }

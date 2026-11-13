@@ -1,0 +1,48 @@
+;; Perfil de sandbox de kling-credproxy, el proxy de credenciales aparte de una
+;; máquina (docs/proxy-macos-separado.md del núcleo). Lo aplica el propio
+;; proceso al arrancar, después de abrir sus dos sockets y antes de atender
+;; nada. Es el único proceso que tiene las claves de la máquina: recibe bytes
+;; del invitado (por el VMM) y habla con el proveedor. Parámetros:
+;;   DIR     su directorio (MDIR/credproxy): sus sockets, su registro de
+;;           auditoría y los cuerpos que derrama
+;;   BROKER  el socket del daemon por el que pide las conexiones a otras
+;;           máquinas (aristas credential, kling db attach) y al upstream en
+;;           el loopback del Mac de una credencial (pkg/linkbroker)
+(version 1)
+(deny default)
+(import "system.sb")
+
+;; Su propia información, sysctl, y saber quién está al otro lado de sus
+;; sockets (LOCAL_PEERPID + la ruta del ejecutable con proc_pidpath): el API
+;; solo admite al daemon y el reenvío solo al VMM de su máquina.
+(allow process-info* (target self))
+(allow process-info-pidinfo)
+(allow sysctl-read)
+
+;; Verificar los certificados del proveedor: crypto/x509 llama a
+;; Security.framework, que pregunta a trustd (y lee los almacenes del
+;; sistema). system.sb ya deja hablar con trustd; aquí, por si una versión de
+;; macOS lo quitara, los nombres exactos y nada más de mach-lookup.
+(allow mach-lookup (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent"))
+(allow file-read*
+  (subpath "/System/Library/Keychains")
+  (subpath "/Library/Keychains")
+  (subpath "/private/var/db/mds")
+  (literal "/private/etc/localtime")
+  (subpath "/usr/share/zoneinfo")
+  (subpath "/var/db/timezone"))
+(allow file-read-metadata)
+
+;; Su directorio, y nada más del disco: ni la raíz de kindling (kernel,
+;; imágenes, dorados, snapshots, volúmenes, secrets/), ni el resto del
+;; directorio de la máquina (discos, memoria del invitado).
+(allow file-read* file-write* (subpath (param "DIR")))
+(allow network-bind network-inbound (local unix-socket (subpath (param "DIR"))))
+
+;; Salida: el broker del daemon y el exterior. El sandbox no filtra por
+;; dominio (solo admite "*" o "localhost"): lo hace el propio proxy (su Lookup
+;; con egress.PublicIPv4 y la barrera de upstream.go), como cuando vivía en el
+;; VMM. Al loopback del Mac nunca: un -upstream 127.0.0.1 lo marca el daemon.
+(allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
+(allow network-outbound (remote ip "*:*"))
+(deny network-outbound (remote ip "localhost:*"))

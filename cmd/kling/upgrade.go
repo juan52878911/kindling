@@ -32,6 +32,7 @@ import (
 	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/internal/upgrade"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
@@ -537,7 +538,7 @@ func prepararLaunchd(o *upgrade.Opciones, c *api.Client, arch string) error {
 }
 
 // piezasVMMMac son los VMM de macOS que se actualizan junto a kling (en dir):
-// kling-vz si está, y kling-hv si está o si está kling-vz (una instalación de
+// kling-vz si está, kling-credproxy como kling-hv, y kling-hv si está o si está kling-vz (una instalación de
 // install.sh anterior a kling-hv lo gana al actualizar; una release sin él, la
 // de una vuelta a una versión anterior, no es un error y lo deja como está:
 // Opcional). Un kling sin kling-vz al lado (compilado a mano, el
@@ -556,6 +557,15 @@ func piezasVMMMac(dir, arch string) []upgrade.Pieza {
 		a := assetDe("kling-hv", "darwin", "arm64")
 		a.Opcional = true
 		out = append(out, upgrade.Pieza{Asset: a, Destino: hv})
+	}
+	// El proxy de credenciales aparte (docs/proxy-macos-separado.md), igual
+	// que kling-hv: lo gana quien tenga un VMM al lado, y una release sin él
+	// no es un error.
+	cp := filepath.Join(dir, credproxy.SplitBinary)
+	if fileExists(cp) || fileExists(vz) || fileExists(hv) {
+		a := assetDe(credproxy.SplitBinary, "darwin", "arm64")
+		a.Opcional = true
+		out = append(out, upgrade.Pieza{Asset: a, Destino: cp})
 	}
 	return out
 }

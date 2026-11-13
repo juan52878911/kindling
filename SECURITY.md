@@ -360,8 +360,9 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   patrones se validan al guardar: tienen que estar limpios, `*` no cruza `/` y `**` solo
   puede ir como último segmento. Con la lista vacía todo está permitido, igual que
   antes; un almacén cifrado sin `Allow` se sigue leyendo así. `Allow` viaja igual en
-  macOS: `PUT /kling/credentials` lo lleva y `kling-vz` lo aplica con el mismo
-  `pkg/credproxy`, no una reimplementación aparte.
+  macOS: `PUT /kling/credentials` lo lleva y `kling-credproxy` (o, con un `kling-vz`
+  anterior, el propio `kling-vz`) lo aplica con el mismo `pkg/credproxy`, no una
+  reimplementación aparte.
   El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
   muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
 - **Rutas ambiguas, rechazadas antes de normalizar.** Con alguna credencial del dominio
@@ -418,11 +419,15 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   podía tocar. También borra los registros de máquinas que ya no existen, y `rm` borra
   el de la suya. Si `<root>/audit` no se puede preparar (un enlace o un fichero en su
   sitio, otro dueño), el proxy no escribe registro y el daemon lo avisa: nunca vuelve
-  al directorio del VMM. En macOS lo escribe el `kling-vz` de la máquina junto a su
-  socket (`machines/<id>/credaudit.jsonl`, el único directorio en que su sandbox le deja
-  escribir) y lo lee el daemon, sin seguir enlaces y solo con un único enlace; ahí el
-  que escribe es el mismo proceso que atiende al invitado, así que moverlo no
-  protegería nada (ver el plan de `docs/proxy-macos-separado.md`).
+  al directorio del VMM. En macOS lo escribe el proxy aparte de la máquina
+  (`kling-credproxy`, ver abajo) en su propio subdirectorio
+  (`machines/<id>/credproxy/credaudit.jsonl`), donde el perfil de `kling-vz` le niega
+  escribir, y lo lee el daemon, sin seguir enlaces y solo con un único enlace. Lo que
+  atiende el propio `kling-vz` (aristas link, puentes al host y las negativas de su
+  proxy sin claves) va a `machines/<id>/vmmaudit.jsonl`, y el daemon mezcla los dos
+  por hora; de ese (y del `credaudit.jsonl` que dejaban los `kling-vz` anteriores),
+  una línea que diga haber usado una credencial después de que la máquina tuviera el
+  proxy aparte no se cuenta: quien usa las claves desde entonces es el proxy.
   El rechazo fuera de allowlist en macOS es ahora del propio proxy
   (`credproxy.Options.Enabled`), para que también quede en el registro.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
@@ -436,41 +441,62 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   dominios. Tras un reinicio del daemon `reconcile` rehace proxy y resolver desde el
   almacén; tras un thaw se rehacen y se reponen los marcadores en MMDS. Verificado
   desde dentro del invitado en el lab (`scripts/90-e2e.sh`, secciones 7 y 7b).
-- **En macOS (backend vz) el proxy vive en `kling-vz`, y la clave con él.** No hay
-  veth ni resolver en el host: el mismo `pkg/credproxy` lo sirve cada `kling-vz` dentro
-  de la pila de red gVisor de su máquina. Su DNS contesta el dominio con credencial con
-  la pasarela (172.16.0.1, TTL 30) sin reenviar ni sembrar la IP real, y AAAA vacío; un
-  listener en pasarela:80 recoge la conexión antes de la política de salida (que
-  rechazaría 172.16/12); el 443 de la pasarela no tiene listener y muere con un RST. El
-  proxy solo atiende en allowlist (403 en otro modo aunque el invitado conecte a mano;
-  lo decide el propio proxy, así que el rechazo queda en su registro de auditoría),
-  y su lookup usa el mismo upstream que el invitado y descarta además lo que la red del
-  Mac nunca deja alcanzar: 0.0.0.0/8 (que en macOS llega a localhost), multicast,
-  reservadas y las IPs del propio Mac.
-  **Cambia el modelo de confianza**, y se acepta a sabiendas: en Linux la clave no sale
-  del daemon; en macOS el daemon (que ya corre como el usuario, sin root) se la manda al
-  `kling-vz` de esa máquina por su socket de API (`PUT /kling/credentials`; un socket Unix 0600 en
-  el directorio de la máquina) y queda en la
-  memoria de ese proceso, que corre como el mismo usuario. Lo que eso significa:
-  - Ningún usuario nuevo puede leerla: quien es ese usuario ya leía el almacén cifrado y
-    la clave maestra del daemon.
-  - `kling-vz` es el proceso que termina el tráfico del invitado (pila TCP, DNS, MMDS).
-    Un invitado que encontrara un fallo explotable ahí tendría la clave en la misma
-    memoria; antes de este cambio, ese mismo fallo le daba un proceso sin claves. El
-    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca (solo
-    los de su máquina, §22), pero no protege la memoria del propio proceso.
-  - La memoria del invitado vive en otro proceso (el auxiliar de Apple), así que la clave
-    no entra en su volcado de estado ni en un snapshot. `kling-vz` no la escribe a disco
-    ni a su log.
-  - Un reinicio del daemon no la pierde (el `kling-vz` sigue vivo con ella). Un thaw
-    arranca un `kling-vz` nuevo: el daemon se la entrega tras `PUT /kling/network` y
-    antes de cargar el estado, así que el invitado despierta con el proxy listo.
-  Verificado desde dentro del invitado en un Mac M4 (`scripts/92-e2e-mac.sh`, sección
-  6c, con `kling-vz` confinado en su perfil): solo ve el marcador, el dominio resuelve
-  a la pasarela, el proveedor recibe la clave real (basic-auth 200), eco y eco de
-  `Basic` redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no
-  aparece en el log del daemon ni en el de `kling-vz`, y sigue funcionando tras
-  freeze/thaw y tras reiniciar el daemon.
+- **En macOS (backend vz) el proxy vive en un proceso aparte por máquina,
+  `kling-credproxy`, y la clave solo en él** (#80, `docs/proxy-macos-separado.md`). No
+  hay veth ni resolver en el host: el DNS lo contesta cada `kling-vz` dentro de la pila
+  de red gVisor de su máquina, con la pasarela (172.16.0.1, TTL 30) para el dominio con
+  credencial, sin reenviar ni sembrar la IP real, y AAAA vacío. Cada conexión del
+  invitado a pasarela:80 (y, con credenciales de base de datos, a sus otros puertos) la
+  recoge `kling-vz` antes de la política de salida y la pasa por un socket Unix al
+  `kling-credproxy` de su máquina, con una cabecera fija de 4 bytes (versión y puerto);
+  el 443 de la pasarela no tiene listener y muere con un RST. El proxy (el mismo
+  `pkg/credproxy`) solo atiende en allowlist o con todas las credenciales hacia otra
+  máquina, y ese modo **se lo dice el daemon, no `kling-vz`** (403 en otro modo aunque
+  el invitado conecte a mano, y queda en su registro); su lookup usa el mismo upstream
+  que el invitado y descarta lo que la red del Mac nunca deja alcanzar: 0.0.0.0/8 (que
+  en macOS llega a localhost), multicast, reservadas y las IPs del propio Mac.
+  - **Un proceso por máquina con credenciales**, que lanza el daemon al entregarlas
+    (`internal/machine/credproxy_vz.go`); las máquinas sin credenciales no tienen. Vive
+    lo que su VMM: lo vigila con kqueue y sale en cuanto muere, así que stop, freeze y
+    rm se lo llevan también con el daemon caído; tras un thaw o un start el daemon
+    lanza otro y le vuelve a dar las claves antes de que el invitado corra. Un reinicio
+    del daemon no lo toca: lo readopta por su socket.
+  - **Dos sockets 0600 en `machines/<id>/credproxy/`** (un directorio 0700 que crea el
+    daemon). `api.sock`: el daemon le da el modo de salida y las credenciales; el proxy
+    solo acepta al ejecutable del daemon (`LOCAL_PEERCRED`/`LOCAL_PEERPID` + la ruta de
+    su ejecutable), y el daemon, en cada conexión, comprueba que al otro lado está el
+    `kling-credproxy` junto al VMM y el de ESE VMM (`--vmm-pid` de su línea de
+    órdenes): a un socket plantado no le da nada. `fwd.sock`: solo el ejecutable del
+    VMM. `kling-vz` recibe solo `{dominios, si hay base de datos, si todas van a otra
+    máquina}` por `PUT /kling/credproxy`; los marcadores ya los pone el daemon en MMDS.
+  - **Confinado en `kling-credproxy.sb`** antes de atender nada: su directorio y nada
+    más del disco (ni la raíz de kindling, ni los discos ni la memoria de la máquina),
+    salida a `*:*` salvo el loopback del Mac (el filtro por dominio lo hace el propio
+    proxy, como antes), el socket del broker y trustd para verificar TLS. El perfil de
+    `kling-vz` le niega escribir en `machines/<id>/credproxy/` (ni sockets falsos, ni
+    el registro, ni el directorio) y leer los cuerpos que el proxy derrama a disco.
+  - **Firmado con hardened runtime y sin `get-task-allow`**: medido en el M4, un proceso
+    del mismo usuario sin sandbox no consigue su `task_for_pid` (`(os/kern) failure`);
+    el mismo testigo con `get-task-allow` sí lo consigue. `build-credproxy.sh` falla si
+    la firma no lo dice.
+  - Las conexiones de sus aristas credential (`kling db attach`) y de un `-upstream`
+    en el loopback del Mac las pide al broker del daemon, que lo reconoce como el
+    proxy de la máquina de su VMM (`broker_vz.go`).
+  - **Compatibilidad**: con un `kling-vz` que no anuncia `credproxy-split` en
+    `/kling/info` (uno anterior), el daemon sigue con el modelo de antes y le da las
+    claves a él (`PUT /kling/credentials`). Con uno que lo anuncia y sin
+    `kling-credproxy` a su lado, no da ninguna: falla y dice qué instalar.
+  Lo que sigue igual: el proceso corre como el usuario del daemon, que ya leía el
+  almacén cifrado y la clave maestra; la memoria del invitado vive en otro proceso, así
+  que la clave no entra en su volcado de estado ni en un snapshot; ni el proxy ni
+  `kling-vz` la escriben a disco ni a su log. Verificado desde dentro del invitado en
+  un Mac M4 con kling-hv (la sección 6c de `scripts/92-e2e-mac.sh` y una prueba
+  centrada, ver el informe del doc): solo ve el marcador, el dominio resuelve a la
+  pasarela, el proveedor recibe la clave real sobre TLS verificado desde dentro del
+  perfil (basic-auth 200), eco y eco de `Basic` redactados, HTTPS directo rechazado al
+  momento, otro Host 403, la clave no aparece en el log del daemon, de `kling-hv` ni del
+  proxy, y sigue funcionando tras reiniciar el daemon (proxy readoptado),
+  freeze/thaw y stop/start (proxy nuevo), con el proxy muerto tras stop, freeze y rm.
 - **Proxy de credenciales de Postgres** (`kling machine credential -type postgres`,
   `pkg/credproxy/postgres.go`, sin publicar). El mismo modelo con una contraseña de base
   de datos: el invitado recibe el marcador (en `PGPASSWORD`, por ejemplo), su resolver
@@ -1364,8 +1390,8 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
     kernel, los discos de solo lectura y el estado que restaura, para leer; su overlay y
     sus volúmenes, para leer y escribir. Nunca `secrets/`, nunca escribir en
     `snapshots/` (dos reglas al final del perfil, por si el daemon le pasara ahí un
-    disco). `kling-vz` no necesita ninguna clave de disco: las credenciales le llegan ya
-    en claro por su API.
+    disco). `kling-vz` no necesita ninguna clave de disco, y las credenciales ya no le
+    llegan: las recibe `kling-credproxy` (ver 7).
   - **Dorados**: `kling save` pide el volcado en el directorio de la máquina y el
     daemon, que creó `snapshots/<nombre>/`, lo clona (`fclonefileat`) a su sitio. No se
     fía de `kling-vz`: abre el directorio de la máquina y el volcado sin seguir enlaces,
@@ -1733,8 +1759,8 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   esté en esa lista —una convención propia de un framework concreto, por ejemplo—, y ahí
   sigue valiendo usar patrones exactos mejor que `/**`. La redacción del eco es defensa
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
-  vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
-  mismas reglas antes de reenviar.
+  vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-credproxy` aplica
+  las mismas reglas antes de reenviar.
 - **MySQL: sin prueba del servidor y sin cancelación.** Con `-upstream-tls disable` el
   servidor no prueba que conoce la clave (MySQL no tiene nada como la firma de SCRAM),
   `KILL QUERY` con el id del saludo no cancela nada, la base de la credencial no es una
@@ -1777,22 +1803,27 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **El registro de auditoría es observabilidad, no prueba.** En Linux vive en
   `<root>/audit`, fuera del alcance del VMM (ver 7), pero lo migrado desde versiones
   anteriores estuvo en un directorio que el VMM podía tocar. En macOS lo escribe
-  `kling-vz`, el proceso que termina el tráfico del invitado, en el directorio de la
-  máquina: un `kling-vz` comprometido puede borrarlo o reescribirlo. No hay fsync: lo que estaba en el búfer al caer el host se
-  pierde (lo escrito sobrevive a que maten el proceso, que es como el daemon para a
-  `kling-vz`). Si se necesita un registro a prueba de manipulación, hay que sacarlo del
+  `kling-credproxy` en su directorio, donde `kling-vz` no escribe; pero `kling-vz`
+  escribe el suyo (aristas link, puentes, sus negativas) y el daemon los mezcla: uno
+  comprometido puede añadir líneas falsas de lo que atiende él, no borrar ni cambiar
+  las del proxy, y una suya que diga haber usado una credencial no se cuenta. Corre
+  como el usuario, como el daemon: otro proceso de ese usuario sí puede tocarlo. No
+  hay fsync: lo que estaba en el búfer al caer el host se pierde (lo escrito
+  sobrevive a que maten el proceso). Si se necesita un registro a prueba de manipulación, hay que sacarlo del
   host (`kling machine audit -f -json` a un colector).
-- **En macOS la clave vive en un proceso que el invitado alcanza por la red.** Es el
-  `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
-  fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
-  daría ahora la de esa máquina (solo la de esa: cada máquina tiene su `kling-vz`). En
-  Linux la clave nunca sale del daemon. **Plan** (#80, diseñado, sin implementar):
-  sacar el proxy a un proceso propio por máquina (`kling-credproxy`), confinado en un
-  perfil sin Virtualization.framework, sin disco salvo su registro y con la red justa;
-  el daemon le entrega las claves a él y `kling-vz` solo recibe dominios y marcadores,
-  y le pasa cada conexión de la pasarela por un socket Unix. Un fallo en la pila de red
-  de `kling-vz` dejaría de dar la clave; uno en el propio proxy, no. Proceso, perfil,
-  IPC, coste y qué falta para hacerlo en
+- **En macOS la clave vive en un proceso que recibe bytes del invitado.** Desde #80
+  ya no es `kling-vz` (que termina su TCP, su DNS y MMDS, y habla con el framework)
+  sino `kling-credproxy`, un proceso por máquina confinado en su propio perfil y sin
+  `get-task-allow` (ver 7). Un fallo explotable en la pila de red, el DNS, MMDS,
+  virtio o las carpetas compartidas de `kling-vz` da un proceso sin claves que solo
+  puede hacer lo que ya puede el invitado: hablar con el proxy. Un fallo en el propio
+  proxy (el parser HTTP de `net/http`, los protocolos de Postgres o MySQL de
+  `pkg/credproxy`) sigue dando la clave de esa máquina: es la misma superficie que en
+  Linux, donde además corre como root en el daemon. Y otro proceso del usuario con
+  privilegios de depuración, o root, la lee, como lee la clave maestra del daemon. Con
+  un `kling-vz` anterior (sin `credproxy-split`) el daemon sigue dándosela a él.
+  Coste medido en el M4 (~16–21 MiB de RSS por máquina con credenciales, +0,06–0,19 ms
+  por conexión, +10–60 ms en el thaw) y qué se cambió del diseño, en
   [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md).
 - **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
   sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el

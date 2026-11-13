@@ -25,6 +25,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/linkbroker"
+	"github.com/juan52878911/kindling/vz/internal/credapi"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/mmds"
@@ -107,9 +108,21 @@ type NetConfig struct {
 	// papel de Postgres y MySQL (el resto de puertos TCP de la pasarela).
 	Credentials   http.Handler
 	CredentialsPG *credproxy.Proxy
+	// Split, si no es nil, reenvía al proxy aparte (kling-credproxy) las
+	// conexiones a la pasarela cuando el daemon lo usa (ver Deps.Split).
+	Split vnet.Split
 	// Graph son las aristas link del nodo; nil si este proceso no tiene a
 	// quién pedir las conexiones (sin KLING_VZ_BROKER).
 	Graph *grafo.Grafo
+}
+
+// SplitProxy es el reenvío al proxy aparte visto desde el servidor: lo que
+// usa la red y cómo encenderlo (vz/internal/reenvio).
+type SplitProxy interface {
+	vnet.Split
+	// Fijar dice si el proxy aparte tiene credenciales (activo) y alguna de
+	// base de datos (db).
+	Fijar(activo, db bool)
 }
 
 type Deps struct {
@@ -134,6 +147,11 @@ type Deps struct {
 	// dominios. Con Credentials nil, PUT /kling/credentials se rechaza.
 	Credentials *credproxy.Proxy
 	CredIP      netip.Addr
+	// Split, si no es nil, es el reenvío al proxy aparte de la máquina
+	// (kling-credproxy, docs/proxy-macos-separado.md del núcleo): con él se
+	// anuncia credproxy.CapSplit y PUT /kling/credproxy recibe solo los
+	// dominios a desviar; las claves no pasan por este proceso.
+	Split SplitProxy
 	// Confine, si no es nil, encierra el proceso en su perfil de sandbox con
 	// lo que necesita la VM que va a crear (ver Confinamiento). Se llama UNA
 	// vez, justo antes de crear o restaurar la VM, que es cuando ya se saben
@@ -373,6 +391,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kling/info", s.getInfo)
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
 	mux.HandleFunc("PUT /kling/credentials", s.putKlingCredentials)
+	mux.HandleFunc("PUT /kling/credproxy", s.putKlingCredproxy)
 	mux.HandleFunc("PUT /kling/graph", s.putKlingGraph)
 	mux.HandleFunc("PUT /kling/host-ports", s.putKlingHostPorts)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
@@ -1048,13 +1067,9 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 
 // --- rutas propias ---
 
-// credentialKinds son los tipos de credencial que entiende este kling-vz. El
-// daemon lo pregunta antes de mandarle una credencial Postgres o MySQL: uno
-// anterior ignoraría el tipo y la serviría como HTTP. "postgres-upstream"
-// dice que entiende además Upstream, UpstreamTLS y TLSServerName (también en
-// las MySQL, que nacieron con ellos). "sigv4" dice que lee AccessKeyID,
-// Region y Service y firma de nuevo en vez de cambiar el marcador.
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces, credproxy.KindSigV4}
+// credentialKinds son los tipos de credencial que entiende este kling-vz (ver
+// credapi.Kinds).
+var credentialKinds = credapi.Kinds
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
@@ -1064,6 +1079,10 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 		if s.d.Graph != nil {
 			// Y los puentes al host (-host-port), que también pide al daemon.
 			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink, grafo.CapPuentes)
+		}
+		// Sabe pasar las conexiones al proxy aparte (PUT /kling/credproxy).
+		if s.d.Split != nil {
+			kinds = append(append([]string(nil), kinds...), credproxy.CapSplit)
 		}
 		info["credential_kinds"] = kinds
 	}
@@ -1189,39 +1208,7 @@ func (s *Server) putKlingNetwork(w http.ResponseWriter, r *http.Request) {
 // (su memoria vive en otro proceso, el auxiliar de Apple). Es la ruta que en
 // Linux no hace falta porque el proxy es una goroutine del propio daemon.
 func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Credentials []struct {
-			Env         string   `json:"env"`
-			Domain      string   `json:"domain"`
-			Placeholder string   `json:"placeholder"`
-			Secret      string   `json:"secret"`
-			Allow       []string `json:"allow,omitempty"`
-			Headers     []string `json:"headers,omitempty"`
-			Query       bool     `json:"query,omitempty"`
-			Body        bool     `json:"body,omitempty"`
-			Kind        string   `json:"kind,omitempty"`
-			Port        int      `json:"port,omitempty"`
-			User        string   `json:"user,omitempty"`
-			Database    string   `json:"database,omitempty"`
-			AnyDatabase bool     `json:"any_database,omitempty"`
-			CAPEM       string   `json:"ca_pem,omitempty"`
-			// Upstream fijado por el operador (ver pkg/credproxy/upstream.go):
-			// el proxy marca desde la pila de red del Mac, así que 127.0.0.1
-			// es el loopback del Mac, donde Docker Desktop publica.
-			Upstream      string `json:"upstream,omitempty"`
-			UpstreamTLS   string `json:"upstream_tls,omitempty"`
-			TLSServerName string `json:"tls_server_name,omitempty"`
-			// Otra máquina de kindling (arista credential, kling db attach):
-			// la conexión se pide al daemon en cada sesión (vz/internal/grafo).
-			UpstreamMachine string `json:"upstream_machine,omitempty"`
-			UpstreamOwner   string `json:"upstream_owner,omitempty"`
-			// S3 y compatibles (Kind "sigv4"): el proxy firma de nuevo con
-			// AccessKeyID y Secret (ver pkg/credproxy/sigv4.go).
-			AccessKeyID string `json:"access_key_id,omitempty"`
-			Region      string `json:"region,omitempty"`
-			Service     string `json:"service,omitempty"`
-		} `json:"credentials"`
-	}
+	var body credapi.Cuerpo
 	if err := decode(r, maxCredBody, &body); err != nil {
 		fault(w, err)
 		return
@@ -1238,15 +1225,7 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		soloMaquinas = soloMaquinas && c.UpstreamMachine != ""
-		creds = append(creds, credproxy.Credential{
-			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
-			Allow:   c.Allow,
-			Headers: c.Headers, Query: c.Query, Body: c.Body,
-			Kind: c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
-			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
-			UpstreamMachine: c.UpstreamMachine, UpstreamOwner: c.UpstreamOwner,
-			AccessKeyID: c.AccessKeyID, Region: c.Region, Service: c.Service,
-		})
+		creds = append(creds, c.Credential())
 	}
 	// Como en Linux: el desvío lo hace el DNS propio de allowlist. En otro
 	// modo el invitado resolvería por su cuenta (internet) o no tendría salida
@@ -1263,6 +1242,62 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		fault(w, err)
 		return
 	}
+	// Con las claves aquí (el modelo de antes), nada va al proxy aparte.
+	if s.d.Split != nil {
+		s.d.Split.Fijar(false, false)
+	}
+	s.d.Policy.SetCredHosts(doms, s.d.CredIP)
+	writeJSON(w, map[string]any{"domains": doms})
+}
+
+// putKlingCredproxy es PUT /kling/credentials con el proxy aparte: el daemon
+// le da las claves a kling-credproxy y aquí solo llegan los dominios que el
+// DNS desvía a la pasarela, si alguna es de base de datos (para pasarle
+// también el resto de puertos de la pasarela) y si todas van a otra máquina
+// (las aristas credential, que valen fuera de allowlist). Las conexiones del
+// invitado a la pasarela van al socket del proxy (vz/internal/reenvio), y las
+// claves que pudiera tener el proxy propio de este proceso se borran: no
+// debe quedar ninguna aquí.
+func (s *Server) putKlingCredproxy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Domains      []string `json:"domains"`
+		DB           bool     `json:"db,omitempty"`
+		MachinesOnly bool     `json:"machines_only,omitempty"`
+	}
+	if err := decode(r, maxConfigBody, &body); err != nil {
+		fault(w, err)
+		return
+	}
+	if s.d.Split == nil || !s.d.CredIP.IsValid() {
+		fault(w, errors.New("this kling-vz can't forward to a separate credential proxy"))
+		return
+	}
+	doms := make([]string, 0, len(body.Domains))
+	for _, d := range body.Domains {
+		n, err := credproxy.ValidarDominio(d)
+		if err != nil {
+			fault(w, err)
+			return
+		}
+		doms = append(doms, n)
+	}
+	if body.MachinesOnly && s.d.Graph == nil {
+		fault(w, errors.New("credentials to other machines need the link broker (the daemon did not set KLING_VZ_BROKER)"))
+		return
+	}
+	// Como en PUT /kling/credentials: fuera de allowlist solo las que van
+	// todas a otra máquina.
+	if mode := s.d.Policy.Mode(); len(doms) > 0 && mode != egress.Allowlist && !body.MachinesOnly {
+		fault(w, fmt.Errorf("credentials need egress allowlist (this machine has %s)", mode))
+		return
+	}
+	if s.d.Credentials != nil {
+		if _, err := s.d.Credentials.SetCredentials(nil); err != nil {
+			fault(w, err)
+			return
+		}
+	}
+	s.d.Split.Fijar(len(doms) > 0, len(doms) > 0 && body.DB)
 	s.d.Policy.SetCredHosts(doms, s.d.CredIP)
 	writeJSON(w, map[string]any{"domains": doms})
 }
@@ -1455,6 +1490,9 @@ func (s *Server) ensureNet() error {
 	if s.d.Credentials != nil {
 		cfg.Credentials = s.d.Credentials
 		cfg.CredentialsPG = s.d.Credentials
+	}
+	if s.d.Split != nil {
+		cfg.Split = s.d.Split
 	}
 	cfg.Graph = s.d.Graph
 	if c := s.spec.MMDSConfig; c != nil {

@@ -569,9 +569,10 @@ fi
 k rm "$S" >/dev/null 2>&1
 
 # ── 6c. proxy de credenciales ────────────────────────────────────────────────
-# Lo mismo que la sección 7 de 90-e2e.sh, en el Mac: aquí el proxy y el DNS los
-# sirve cada kling-vz en la pasarela (172.16.0.1) de su pila de red, y la clave
-# viaja del daemon al ayudante. httpbin.org/basic-auth/<usuario>/<clave>
+# Lo mismo que la sección 7 de 90-e2e.sh, en el Mac: aquí el DNS lo sirve cada
+# kling-vz en la pasarela (172.16.0.1) de su pila de red, y le pasa las
+# conexiones al proxy aparte de la máquina (kling-credproxy, junto al VMM), que
+# es el único que recibe la clave (docs/proxy-macos-separado.md). httpbin.org/basic-auth/<usuario>/<clave>
 # contesta 200 solo si la cabecera Basic trae ESA clave: prueba que al
 # proveedor le llegó la real. Necesita salida a internet desde el Mac.
 step "6c. credential proxy (httpbin.org)"
@@ -614,7 +615,10 @@ print("OTHER", s.recv(20).decode().split(" ")[1])
 CRED_OK=0
 if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -allow example.org >/dev/null 2>&1; then
   out=$(printf '%s' "$CRED_PASS" | k machine credential "$CR" -domain httpbin.org -env E2E_KEY 2>&1)
-  contiene "$out" "placeholder" && ok "machine credential: the key goes to the proxy in kling-vz" || bad "machine credential" "placeholder" "$out"
+  contiene "$out" "placeholder" && ok "machine credential: the key goes to kling-credproxy" || bad "machine credential" "placeholder" "$out"
+  CR_ID=$(machine_field "$CR" id)
+  cpp=$(pgrep -f "kling-credproxy --vmm-pid [0-9]+ --dir $ROOT/machines/$CR_ID/credproxy" | head -1)
+  [ -n "$cpp" ] && ok "its kling-credproxy runs (pid $cpp)" || bad "credential proxy process" "a kling-credproxy for $CR_ID" "$(pgrep -fl kling-credproxy)"
   out=$(k exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$CRED_PASS" 2>&1)
   CRED_PH=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
   contiene "$out" "MMDS PLACEHOLDER" && ok "the guest only sees the placeholder" || bad "MMDS" "MMDS PLACEHOLDER" "$out"
@@ -632,11 +636,21 @@ if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -al
     *) bad "proxy bypass" "HTTPS 0" "$out" ;;
   esac
   contiene "$out" "OTHER 403" && ok "the proxy refuses another domain (403)" || bad "other domain" "OTHER 403" "$out"
-  # Ni el log del daemon ni el de kling-vz deben llevar la clave.
+  # Ni el log del daemon, ni el de kling-vz, ni el del proxy deben llevar la clave.
   vlog="$ROOT/machines/$(machine_field "$CR" id)/firecracker.log"
-  if [ ! -f "$vlog" ] || [ ! -f "$LOG" ]; then bad "logs" "daemon and kling-vz logs to search" "missing $LOG or $vlog"
-  elif grep -qF "$CRED_PASS" "$LOG" "$vlog"; then bad "logs" "no key" "the key is in $LOG or $vlog"
-  else ok "the key is in neither the daemon log nor the kling-vz log"; fi
+  cplog="$ROOT/machines/$(machine_field "$CR" id)/credproxy.log"
+  if [ ! -f "$vlog" ] || [ ! -f "$LOG" ] || [ ! -f "$cplog" ]; then bad "logs" "daemon, kling-vz and kling-credproxy logs to search" "missing $LOG, $vlog or $cplog"
+  elif grep -qF "$CRED_PASS" "$LOG" "$vlog" "$cplog"; then bad "logs" "no key" "the key is in $LOG, $vlog or $cplog"
+  else ok "the key is in none of the daemon, kling-vz and kling-credproxy logs"; fi
+  # El proxy, en su perfil (kling-credproxy.sb), verifica el TLS del
+  # proveedor (el AUTH 200 de arriba) y nadie del mismo usuario le pide el
+  # task port: firmado con hardened runtime y sin get-task-allow.
+  contiene "$(cat "$cplog" 2>/dev/null)" "confined in" && ok "kling-credproxy confined in its sandbox profile" \
+    || bad "credential proxy sandbox" "confined in ..." "$(cat "$cplog" 2>/dev/null | tail -3)"
+  cpbin="$(dirname "$KLING")/kling-credproxy"
+  firma=$(codesign -dv "$cpbin" 2>&1); ents=$(codesign -d --entitlements - "$cpbin" 2>&1)
+  if contiene "$firma" "(adhoc,runtime)" && ! contiene "$ents" "get-task-allow"; then ok "kling-credproxy: hardened runtime, no get-task-allow"
+  else bad "credential proxy signature" "runtime flag and no get-task-allow" "$firma $ents"; fi
   # Y todo lo anterior con kling-vz dentro de su perfil de sandbox (TLS al
   # proveedor incluido): si no, el resultado no vale para producción.
   vzl=$(cat "$vlog" 2>/dev/null)
@@ -653,10 +667,11 @@ if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -al
   contiene "$out" "AUTH 200" && [ "$CRED_PH" = "$ph2" ] && ok "after freeze/thaw the credential works with the same placeholder" \
     || bad "credential after thaw" "AUTH 200, same placeholder" "$out"
 
-  # Registro de auditoría: lo escribe cada kling-vz en el directorio de la
-  # máquina, y el daemon lo lee. El freeze mata al primer kling-vz con SIGKILL:
-  # sus líneas (la primera sonda: /anything) tienen que seguir ahí, junto a las
-  # del kling-vz nuevo. Nunca la clave, el marcador ni la query.
+  # Registro de auditoría: lo escribe cada kling-credproxy en su directorio
+  # (machines/<id>/credproxy, donde kling-vz no escribe), y el daemon lo lee.
+  # El freeze mata al primer kling-vz con SIGKILL y su proxy sale con él: sus
+  # líneas (la primera sonda: /anything) tienen que seguir ahí, junto a las
+  # del proxy nuevo. Nunca la clave, el marcador ni la query.
   out=$(k machine audit "$CR" -tail 0 -json 2>&1)
   contiene "$out" '"path":"/anything"' && contiene "$out" '"creds":["E2E_KEY"]' \
     && ok "audit: the requests from before the freeze (SIGKILLed kling-vz) are still there" \
@@ -671,7 +686,7 @@ if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -al
   else
     ok "audit: neither the key nor the placeholder"
   fi
-  alog="$ROOT/machines/$(machine_field "$CR" id)/credaudit.jsonl"
+  alog="$ROOT/machines/$(machine_field "$CR" id)/credproxy/credaudit.jsonl"
   perm=$(stat -f %Lp "$alog" 2>&1)
   [ "$perm" = 600 ] && ok "audit: $alog is 0600" || bad "audit file mode" 600 "$perm"
   out=$(k machine audit "$CR" -tail 5 2>&1)

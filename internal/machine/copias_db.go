@@ -266,7 +266,7 @@ func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachin
 					Message: "warning: could not remove the placeholder of " + env + " from MMDS: " + err.Error()})
 			}
 		}
-		if err := registrarCredenciales(ctx, c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(cur.ID), m.resolverCopia(cur.ID)); err != nil {
+		if err := registrarCredenciales(ctx, c, knet.Plan(cur.NetIndex, cur.ID), creds, m.credAuditPath(cur.ID), m.resolverCopia(cur.ID), cur.Egress); err != nil {
 			return nil, fmt.Errorf("the credential is gone from the store, but the proxy still has it until the next thaw: %w", err)
 		}
 	}

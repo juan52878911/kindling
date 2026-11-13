@@ -249,12 +249,19 @@ jobs:
           codesign -d --entitlements - dist/kling-hv-darwin-arm64 2>&1 | grep -q com.apple.security.hypervisor
           minos dist/kling-hv-darwin-arm64 15.2
           dist/kling-hv-darwin-arm64 --version
+          # El proxy de credenciales aparte: hardened runtime y sin
+          # get-task-allow (build-credproxy.sh lo comprueba al firmar).
+          MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+            OUT=dist/kling-credproxy-darwin-arm64 VERSION="$VERSION" ./build-credproxy.sh
+          minos dist/kling-credproxy-darwin-arm64 14.0
+          dist/kling-credproxy-darwin-arm64 --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vmm-darwin-arm64
           path: |
             vz/dist/kling-vz-darwin-arm64
             vz/dist/kling-hv-darwin-arm64
+            vz/dist/kling-credproxy-darwin-arm64
           if-no-files-found: error
 
   # El kernel de invitado y la imagen min de las dos arquitecturas: un Mac sin
@@ -433,7 +440,7 @@ jobs:
             k="$(TARGET_ARCH="$arch" bash scripts/builders/kernel/build.sh --print-name)-android"
             want+=("$k" "$k.sha256" "$k.config" "$k.buildinfo")
           done
-          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
+          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-credproxy-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
           (cd release && ls -1) | sort > have.txt
           if ! diff -u want.txt have.txt; then

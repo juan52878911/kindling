@@ -192,7 +192,7 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 		e.mu.Unlock()
 		return nil
 	}
-	registrarCredenciales = func(context.Context, *fc.Client, *knet.Net, []credproxy.Credential, string, credproxy.ResolveMachineFunc) error {
+	registrarCredenciales = func(context.Context, *fc.Client, *knet.Net, []credproxy.Credential, string, credproxy.ResolveMachineFunc, string) error {
 		return nil
 	}
 	invalidarEnlaces = func(...string) int { return 0 }

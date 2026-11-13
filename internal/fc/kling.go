@@ -119,15 +119,23 @@ func (c *Client) doOut(ctx context.Context, method, path string, body, out any) 
 			FaultMessage string `json:"fault_message"`
 		}
 		_ = json.NewDecoder(lr).Decode(&e)
-		return fmt.Errorf("kling-vz %s %s: %s: %s", method, path, resp.Status, e.FaultMessage)
+		return fmt.Errorf("%s %s %s: %s: %s", c.nombre(), method, path, resp.Status, e.FaultMessage)
 	}
 	if out == nil {
 		return nil
 	}
 	if err := json.NewDecoder(lr).Decode(out); err != nil {
-		return fmt.Errorf("kling-vz %s %s: unreadable response: %w", method, path, err)
+		return fmt.Errorf("%s %s %s: unreadable response: %w", c.nombre(), method, path, err)
 	}
 	return nil
+}
+
+// nombre es cómo se llama al otro lado en los errores.
+func (c *Client) nombre() string {
+	if c.quien != "" {
+		return c.quien
+	}
+	return "kling-vz"
 }
 
 // KlingInfo pregunta al ayudante qué es y qué versión tiene.
@@ -152,6 +160,41 @@ func (c *Client) SetKlingCredentials(ctx context.Context, creds []KlingCredentia
 		creds = []KlingCredential{}
 	}
 	return c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, nil)
+}
+
+// PutKlingCredentials es SetKlingCredentials devolviendo los dominios que el
+// proxy desvía (normalizados y sin repetir).
+func (c *Client) PutKlingCredentials(ctx context.Context, creds []KlingCredential) ([]string, error) {
+	if creds == nil {
+		creds = []KlingCredential{}
+	}
+	var out struct {
+		Domains []string `json:"domains"`
+	}
+	if err := c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, &out); err != nil {
+		return nil, err
+	}
+	return out.Domains, nil
+}
+
+// KlingCredproxy es lo que un VMM con el proxy aparte necesita saber de las
+// credenciales de su máquina (PUT /kling/credproxy): qué dominios desviar a
+// la pasarela, si alguna es de base de datos (para pasarle también el resto
+// de puertos) y si todas van a otra máquina (valen fuera de allowlist). Ni
+// claves ni marcadores: las claves las tiene kling-credproxy.
+type KlingCredproxy struct {
+	Domains      []string `json:"domains"`
+	DB           bool     `json:"db,omitempty"`
+	MachinesOnly bool     `json:"machines_only,omitempty"`
+}
+
+// SetKlingCredproxy enciende (o apaga, sin dominios) el reenvío del VMM al
+// proxy de credenciales aparte de su máquina.
+func (c *Client) SetKlingCredproxy(ctx context.Context, k KlingCredproxy) error {
+	if k.Domains == nil {
+		k.Domains = []string{}
+	}
+	return c.doOut(ctx, http.MethodPut, "/kling/credproxy", k, nil)
 }
 
 // KlingHostPort es un puente al host (PUT /kling/host-ports): el puerto Host
