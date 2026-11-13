@@ -37,6 +37,11 @@ type config struct {
 	DataSize  string
 	Net       string // veth | isolated | shared
 	ExtraArgs []string
+	// GPUMode es androidboot.redroid_gpu_mode: guest (SwiftShader, por
+	// defecto) o host (Mesa sobre GPUNode: el virtio-gpu del invitado con
+	// virgl, docs/gpu.md "Prueba de concepto").
+	GPUMode string
+	GPUNode string
 	// AdbSecure pide ro.adb.secure=1 a /init: adb con claves (las de cada clon
 	// llegan por MMDS, identity.go).
 	AdbSecure bool
@@ -54,6 +59,7 @@ func defaultConfig() config {
 	return config{
 		Root: "/android", Width: "720", Height: "1280", DPI: "320", FPS: "15",
 		DataMode: "overlay", DataSize: "2G", Net: "veth",
+		GPUMode:  "guest",
 		Ports:    []int{5555},
 		VethHost: "10.88.0.1", VethAndroid: "10.88.0.2",
 		Listen: ":8091",
@@ -94,6 +100,8 @@ func (c *config) apply(kv map[string]string) error {
 	set(&c.DataMode, "ANDROID_DATA_MODE")
 	set(&c.DataSize, "ANDROID_DATA_SIZE")
 	set(&c.Net, "ANDROID_NET")
+	set(&c.GPUMode, "ANDROID_GPU_MODE")
+	set(&c.GPUNode, "ANDROID_GPU_NODE")
 	set(&c.VethHost, "ANDROID_VETH_HOST")
 	set(&c.VethAndroid, "ANDROID_VETH_ANDROID")
 	set(&c.Listen, "PHONED_LISTEN")
@@ -114,6 +122,14 @@ func (c *config) apply(kv map[string]string) error {
 	case "overlay", "tmpfs":
 	default:
 		return fmt.Errorf("ANDROID_DATA_MODE must be overlay or tmpfs, not %q", c.DataMode)
+	}
+	switch c.GPUMode {
+	case "guest", "host":
+	default:
+		return fmt.Errorf("ANDROID_GPU_MODE must be guest or host, not %q", c.GPUMode)
+	}
+	if c.GPUNode != "" && !strings.HasPrefix(c.GPUNode, "/dev/") {
+		return fmt.Errorf("ANDROID_GPU_NODE must be under /dev: %q", c.GPUNode)
 	}
 	switch c.Net {
 	case "veth", "isolated", "shared":
