@@ -12,7 +12,7 @@ int khv_prueba_used(void);
 int khv_vsock_prueba_tx(uint8_t *out, uint32_t cap, const uint8_t *enviado, int *uso_pend);
 int khv_prueba_tanda(bool pausa, uint64_t tope, int *estado);
 int khv_vsock_prueba_fd_en_poll(void);
-int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns);
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control);
 */
 import "C"
 
@@ -211,13 +211,23 @@ func esperarHasta(d time.Duration) (time.Duration, int) {
 // línea (khv_prueba_irq_nivel).
 func irqNivelSinGIC() int { return int(C.khv_prueba_irq_nivel()) }
 
+// uartNivelSinGIC: el nivel que deja la UART cuando el GIC no cambia su línea
+// (khv_prueba_uart_nivel).
+func uartNivelSinGIC() int { return int(C.khv_prueba_uart_nivel()) }
+
+// redMuerta: un poll que falla sin remedio termina el hilo de recepción de la
+// red, que queda marcada como muerta (khv_prueba_red_muerta).
+func redMuerta() int { return int(C.khv_prueba_red_muerta()) }
+
 // vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
-// (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró y cuánto tuvo mu.
-func vsockTandaRx(pausa bool) (lleno, movido uint64, d time.Duration, r int) {
+// (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró, cuánto tuvo mu y
+// qué pasó con el control de la conexión de detrás (ver vsock.c).
+func vsockTandaRx(pausa bool) (lleno, movido uint64, d time.Duration, control, r int) {
 	var l, m C.uint64_t
 	var ns C.int64_t
-	r = int(C.khv_vsock_prueba_tanda_rx(C.bool(pausa), &l, &m, &ns))
-	return uint64(l), uint64(m), time.Duration(ns), r
+	var ctl C.int
+	r = int(C.khv_vsock_prueba_tanda_rx(C.bool(pausa), &l, &m, &ns, &ctl))
+	return uint64(l), uint64(m), time.Duration(ns), int(ctl), r
 }
 
 // vsockMuerto: un poll que falla sin remedio termina el hilo del vsock; lo

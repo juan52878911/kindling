@@ -349,6 +349,25 @@ func (m *machine) Stop() error {
 // devices.c).
 func ConsoleDropped() uint64 { return uint64(C.uart_perdidos()) }
 
+// DeadDevices dice qué dispositivos se quedaron sin su hilo ("net", "vsock"):
+// la VM sigue running pero el invitado ya no recibe tramas o paquetes de
+// vsock. Vacío si todos viven. Lo enseña /kling/stats (devices_dead).
+func DeadDevices() []string {
+	m := int(C.khv_dispositivos_muertos())
+	out := []string{}
+	if m&C.KHV_MUERTO_RED != 0 {
+		out = append(out, "net")
+	}
+	if m&C.KHV_MUERTO_VSOCK != 0 {
+		out = append(out, "vsock")
+	}
+	return out
+}
+
+// IRQFailures son las veces que el GIC no cambió una línea de interrupción
+// que pidió un dispositivo (khv_spi).
+func IRQFailures() uint64 { return uint64(C.khv_spi_fallos()) }
+
 // SaveState escribe el fichero de memoria del snapshot (RAM + estado) en path.
 func (m *machine) SaveState(path string) error {
 	p := C.CString(path)
@@ -456,6 +475,9 @@ func Balloon() BalloonCounters {
 // EndReason dice por qué terminó la VM (FinMotivo): "" mientras corre; tras
 // recibir de Stopped, siempre el motivo.
 func (m *machine) EndReason() string { return FinMotivo() }
+
+// DeadDevices: ver DeadDevices (server.DeviceHealth).
+func (m *machine) DeadDevices() []string { return DeadDevices() }
 
 // VersionVolcado es la versión del estado que escribe (y la más nueva que
 // lee) este kling-hv en el pie de mem.file: la cabecera KLNGHV02 de vm.c.

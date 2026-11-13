@@ -5,6 +5,7 @@
 // La red está en net.c.
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -143,6 +144,29 @@ void vq_used_de_ram(struct vq *q) {
   q->used_idx = vq_ptrs(q, &avail, &used, &desc) ? *(volatile uint16_t *)(used + 2) : 0;
 }
 
+static uint64_t spi_fallos;
+
+bool khv_spi(uint32_t intid, bool nivel) {
+  hv_return_t r = hv_gic_set_spi(intid, nivel);
+  if (r == HV_SUCCESS) return true;
+  // Sin uart_flush: se llama con u_mu tomado (devices.c).
+  if (__atomic_fetch_add(&spi_fallos, 1, __ATOMIC_RELAXED) == 0)
+    dprintf(2, "kling-hv: the GIC did not set SPI %u to %d (0x%x); counting further failures silently\n", intid,
+            (int)nivel, (unsigned)r);
+  return false;
+}
+
+uint64_t khv_spi_fallos(void) { return __atomic_load_n(&spi_fallos, __ATOMIC_RELAXED); }
+
+static int muertos;
+
+void khv_dispositivo_muerto(int bit, bool muerto) {
+  if (muerto) __atomic_fetch_or(&muertos, bit, __ATOMIC_RELEASE);
+  else __atomic_fetch_and(&muertos, ~bit, __ATOMIC_RELEASE);
+}
+
+int khv_dispositivos_muertos(void) { return __atomic_load_n(&muertos, __ATOMIC_ACQUIRE); }
+
 void vmmio_irq(struct vmmio *m, uint32_t intid) {
   uint8_t n = m->isr != 0;
   if (n != m->nivel) {
@@ -150,7 +174,7 @@ void vmmio_irq(struct vmmio *m, uint32_t intid) {
     // siguiente aviso lo vuelve a intentar. Antes quedaba alto sin que lo
     // estuviera la línea, y ningún aviso más la subía: el invitado esperaba
     // su disco o su red para siempre.
-    if (hv_gic_set_spi(intid, n) == HV_SUCCESS) m->nivel = n;
+    if (khv_spi(intid, n)) m->nivel = n;
     // Un vCPU dormido en el WFI de respaldo (vm.c) no se entera solo.
     if (n) vcpu_kick_all();
   }
@@ -761,7 +785,7 @@ void vblk_get(int idx, struct vblk_state *s) {
 
 void vblk_reafirmar(int idx) {
   pthread_mutex_lock(&blks[idx].mu);
-  hv_gic_set_spi(blks[idx].intid, blks[idx].s.m.nivel);
+  (void)khv_spi(blks[idx].intid, blks[idx].s.m.nivel);
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
@@ -849,7 +873,7 @@ void vrng_get(struct vrng_state *s) {
 
 void vrng_reafirmar(void) {
   pthread_mutex_lock(&r_mu);
-  hv_gic_set_spi(r_intid, rs.m.nivel);
+  (void)khv_spi(r_intid, rs.m.nivel);
   pthread_mutex_unlock(&r_mu);
 }
 

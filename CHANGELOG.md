@@ -14,6 +14,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- kling-hv: a vsock connection whose control packet waited behind a busy one no longer stalls until something else wakes the device thread (a new dial could time out).
+- kling-hv: when a net or vsock device thread stops, `/kling/stats` reports it in `devices_dead` instead of the VM staying `running` silently.
+- kling-hv: every interrupt line update checks the GIC result; the UART no longer records a line as raised when it was not, and failures are logged.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

@@ -54,19 +54,33 @@ func TestVsockLiberarNoCierraEnPoll(t *testing.T) {
 // vsock: el vCPU que notifica y la pausa la esperan. El crédito lo pone el
 // invitado y puede reponer búferes sin avisar, así que sin tope una conexión
 // con el host escribiendo sin parar la alargaba sin fin. Ahora mete como
-// mucho VS_TANDA_MAX (1 MiB) y, con la VM en pausa, un solo paquete.
+// mucho VS_TANDA_MAX (1 MiB) y, con la VM en pausa, un solo paquete. El
+// control de las conexiones de detrás (aquí un CREDIT_UPDATE) que la vuelta
+// cortada no atiende tiene que salir en la siguiente: el hilo queda avisado.
+// Antes el aviso ya se había leído y esperaba a que otra cosa lo despertara.
 func TestVsockRxTandaAcotada(t *testing.T) {
 	const tope, paquete = 1 << 20, 64 << 10
 	for _, c := range []struct {
 		pausa bool
 		max   uint64
 	}{{false, tope + paquete}, {true, paquete}} {
-		lleno, movido, d, r := vsockTandaRx(c.pausa)
+		lleno, movido, d, control, r := vsockTandaRx(c.pausa)
 		if r != 0 {
 			t.Fatalf("could not set up the test: %d", r)
 		}
 		if lleno < 2*tope {
 			t.Skipf("the host socket only took %d bytes: not enough to see the cap", lleno)
+		}
+		switch control {
+		case 0:
+		case 1:
+			t.Errorf("pause=%v: the round stopped at the cap and left the vsock thread without a wake-up for the connection behind", c.pausa)
+		case 2:
+			t.Errorf("pause=%v: the next round did not send the pending credit update of the connection behind", c.pausa)
+		case 3:
+			t.Errorf("pause=%v: the round did not stop before the connection behind (moved %d of %d bytes)", c.pausa, movido, lleno)
+		default:
+			t.Errorf("pause=%v: unexpected control result %d", c.pausa, control)
 		}
 		if movido > c.max {
 			t.Errorf("pause=%v: one round moved %d of %d bytes to the guest (at most %d), holding the lock %v",
