@@ -29,7 +29,7 @@ type KlingInfo struct {
 	Backend string `json:"backend"`
 	Version string `json:"version"`
 	// CredentialKinds son los tipos de credencial que su proxy entiende
-	// ("http", "postgres", "mysql"). Un kling-vz anterior no lo manda: solo
+	// ("http", "postgres", "mysql", "sigv4"). Un kling-vz anterior no lo manda: solo
 	// HTTP.
 	CredentialKinds []string `json:"credential_kinds,omitempty"`
 }
@@ -73,6 +73,12 @@ type KlingCredential struct {
 	// credproxy.CapGraphLink.
 	UpstreamMachine string `json:"upstream_machine,omitempty"`
 	UpstreamOwner   string `json:"upstream_owner,omitempty"`
+	// AccessKeyID, Region y Service (Kind "sigv4"): ver credproxy.Credential.
+	// Solo a un kling-vz que anuncia credproxy.KindSigV4: uno anterior la
+	// serviría como HTTP y cambiaría el marcador por la secret key.
+	AccessKeyID string `json:"access_key_id,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Service     string `json:"service,omitempty"`
 }
 
 // KlingGraphLink es una arista link saliente de un nodo.

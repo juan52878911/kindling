@@ -379,9 +379,10 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	// así que sin "postgres-upstream" no se le da ninguna que lo use.
 	// Y con las HTTP: uno sin "http-places" cambiaría el marcador también en el
 	// cuerpo y la query de toda petición, lo que la credencial no pidió.
-	var pg, my, upstream, maquina, httpc bool
+	var pg, my, upstream, maquina, httpc, sv bool
 	for _, cr := range creds {
 		maquina = maquina || cr.UpstreamMachine != ""
+		sv = sv || cr.Kind == credproxy.KindSigV4
 		httpc = httpc || cr.Kind == "" || cr.Kind == credproxy.KindHTTP
 		if cr.Kind == credproxy.KindPostgres || cr.Kind == credproxy.KindMySQL {
 			pg = pg || cr.Kind == credproxy.KindPostgres
@@ -406,7 +407,7 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 		upstreams[i] = ip
 	}
-	if pg || my || httpc {
+	if pg || my || httpc || sv {
 		info, err := c.KlingInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
@@ -419,6 +420,9 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 		if my && !slices.Contains(info.CredentialKinds, credproxy.KindMySQL) {
 			return errors.New("this kling-vz does not support mysql credentials: rebuild kling-vz")
+		}
+		if sv && !slices.Contains(info.CredentialKinds, credproxy.KindSigV4) {
+			return errors.New("this kling-vz does not support sigv4 credentials: rebuild kling-vz")
 		}
 		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
 			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
@@ -438,6 +442,7 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			Kind: cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
 			Upstream: upstreams[i], UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 			UpstreamMachine: cr.UpstreamMachine, UpstreamOwner: cr.UpstreamOwner,
+			AccessKeyID: cr.AccessKeyID, Region: cr.Region, Service: cr.Service,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {

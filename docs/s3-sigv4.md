@@ -16,9 +16,40 @@ secret key da igual, el proxy no la usa.
 | `Region`, `Service` | con qué se firma (`Service` es `s3` por defecto). Son los de la regla: el alcance (scope) que escriba el invitado se ignora |
 | `Allow` | igual que en HTTP: `"GET /bucket/**"`… |
 
-No admite `Headers`, `Query`, `Body` ni `Upstream`. Hoy el proxy solo existe a nivel de
-paquete: la API, `kling machine credential -type sigv4` y la persistencia del daemon
-(`internal/machine`, `pkg/api`) están por enchufar.
+No admite `Headers`, `Query`, `Body` ni `Upstream`.
+
+## Cómo se da de alta
+
+La secret key va por `-f` o por stdin, nunca en una bandera; el access key id real, en
+`-access-key-id`. La máquina necesita egress allowlist, como con cualquier credencial.
+
+```sh
+kling machine credential agente -type sigv4 -domain s3.eu-west-1.amazonaws.com \
+  -access-key-id AKIA… -region eu-west-1 -allow-request 'GET /mi-bucket/**' \
+  -env AWS_ACCESS_KEY_ID -f secret-key.txt
+```
+
+`kling template credential <plantilla> -type sigv4 …` hace lo mismo para cada instancia
+que nazca de la plantilla. En la API son los campos `type: "sigv4"`, `access_key_id`,
+`region` y `service` de `CredentialSpec` (`POST /machines/{ref}/credentials`,
+`PUT /snapshots/{name}/credentials`). Una rotación (misma `-env`) sustituye el par entero
+y conserva el marcador.
+
+Dentro del invitado, el cliente usa:
+
+- endpoint `http://<dominio>` (el proxy pone el TLS hacia fuera);
+- direccionamiento **path-style** (`aws configure set default.s3.addressing_style path`,
+  `force_path_style = true` en rclone): con virtual-hosted el host sería
+  `<bucket>.<dominio>`, que no es el de la credencial;
+- la región de la credencial;
+- `AWS_ACCESS_KEY_ID` con el marcador, y cualquier `AWS_SECRET_ACCESS_KEY` no vacía: el
+  proxy no la usa.
+
+El almacén de una máquina con una sigv4 se sella en la versión 2 y el de una plantilla
+en la 3 (`internal/machine/credenciales.go`): un kling anterior que los abriera perdería
+el access key id, así que se niega. En macOS hace falta un kling-vz/kling-hv que anuncie
+`sigv4` en `credential_kinds`; con uno anterior, el daemon rechaza la credencial en vez de
+mandársela.
 
 ## Qué cubre
 

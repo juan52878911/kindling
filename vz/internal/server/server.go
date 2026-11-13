@@ -1052,8 +1052,9 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 // daemon lo pregunta antes de mandarle una credencial Postgres o MySQL: uno
 // anterior ignoraría el tipo y la serviría como HTTP. "postgres-upstream"
 // dice que entiende además Upstream, UpstreamTLS y TLSServerName (también en
-// las MySQL, que nacieron con ellos).
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces}
+// las MySQL, que nacieron con ellos). "sigv4" dice que lee AccessKeyID,
+// Region y Service y firma de nuevo en vez de cambiar el marcador.
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces, credproxy.KindSigV4}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": s.backend(), "version": s.d.Version}
@@ -1214,6 +1215,11 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			// la conexión se pide al daemon en cada sesión (vz/internal/grafo).
 			UpstreamMachine string `json:"upstream_machine,omitempty"`
 			UpstreamOwner   string `json:"upstream_owner,omitempty"`
+			// S3 y compatibles (Kind "sigv4"): el proxy firma de nuevo con
+			// AccessKeyID y Secret (ver pkg/credproxy/sigv4.go).
+			AccessKeyID string `json:"access_key_id,omitempty"`
+			Region      string `json:"region,omitempty"`
+			Service     string `json:"service,omitempty"`
 		} `json:"credentials"`
 	}
 	if err := decode(r, maxCredBody, &body); err != nil {
@@ -1239,6 +1245,7 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Kind: c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
 			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
 			UpstreamMachine: c.UpstreamMachine, UpstreamOwner: c.UpstreamOwner,
+			AccessKeyID: c.AccessKeyID, Region: c.Region, Service: c.Service,
 		})
 	}
 	// Como en Linux: el desvío lo hace el DNS propio de allowlist. En otro

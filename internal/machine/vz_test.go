@@ -162,6 +162,8 @@ func servirVZFalso(sock, logPath string) {
 					UpstreamTLS          string `json:"upstream_tls"`
 					UpstreamMachine      string `json:"upstream_machine"`
 					TLSServerName        string `json:"tls_server_name"`
+					AccessKeyID          string `json:"access_key_id"`
+					Region, Service      string
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -194,6 +196,9 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if cr.TLSServerName != "" {
 					linea += "+tls_server_name=" + cr.TLSServerName
+				}
+				if cr.AccessKeyID != "" {
+					linea += "+access_key_id=" + cr.AccessKeyID + "+region=" + cr.Region + "+service=" + cr.Service
 				}
 			}
 		case "/kling/graph":
@@ -847,6 +852,53 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 				return
 			}
 			if err != nil || i < 0 || !strings.Contains(ls[i], "+kind=postgres") {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+		})
+	}
+}
+
+// Una credencial sigv4 solo va a un kling-vz que anuncie "sigv4": uno
+// anterior la serviría como HTTP y cambiaría el marcador (el access key id de
+// la firma) por la secret key. Con la capacidad, sus campos viajan.
+func TestVZCredencialSigV4ExigeCapacidad(t *testing.T) {
+	for _, kinds := range []string{"http,postgres,postgres-upstream,mysql,http-places", "http,postgres,postgres-upstream,mysql,http-places,sigv4"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			id := "aa11bb22cc33dd67"
+			dir := m.dir(id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet"}
+			base := filepath.Join(m.root, "base.ext4")
+			overlay := filepath.Join(dir, "overlay.ext4")
+			for _, f := range []string{base, overlay} {
+				if err := os.WriteFile(f, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false, nil, 0)
+			defer matarVMM(pid)
+			if err != nil {
+				t.Fatalf("boot: %v", err)
+			}
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "AWS_ACCESS_KEY_ID", Domain: "s3.example.com", Placeholder: "kling-cred-sv", Secret: "sk-clave-de-prueba",
+					Kind: credproxy.KindSigV4, AccessKeyID: "AKIAEXAMPLE1234", Region: "auto", Service: "s3"},
+			}, "", nil)
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if !strings.Contains(kinds, credproxy.KindSigV4) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") || i >= 0 {
+					t.Fatalf("un kling-vz sin sigv4 recibió la credencial: err=%v llamadas=%q", err, ls)
+				}
+				return
+			}
+			if err != nil || i < 0 || !strings.Contains(ls[i], "+kind=sigv4+access_key_id=AKIAEXAMPLE1234+region=auto+service=s3") {
 				t.Fatalf("err=%v llamadas=%q", err, ls)
 			}
 		})

@@ -120,7 +120,8 @@ func TestAlmacenDePlantillaV0(t *testing.T) {
 func TestAlmacenMasNuevoNoSeToca(t *testing.T) {
 	m := managerConClaveDePrueba(t)
 	ruta := m.credPath("m1")
-	futuro := append([]byte("KLCS\x03"), bytes.Repeat([]byte{0xaa}, 64)...)
+	futuro := append([]byte("KLCS"), byte(versionAlmacenMax+1))
+	futuro = append(futuro, bytes.Repeat([]byte{0xaa}, 64)...)
 	if err := os.MkdirAll(filepath.Dir(ruta), 0o700); err != nil {
 		t.Fatal(err)
 	}

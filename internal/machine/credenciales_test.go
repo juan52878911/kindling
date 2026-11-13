@@ -853,3 +853,77 @@ func TestEntornoConMarcadores(t *testing.T) {
 		t.Errorf("sin credenciales el entorno no cambia: %v", got)
 	}
 }
+
+// Una credencial sigv4 viaja de la API al proxy y al almacén con su access key
+// id, región y servicio por defecto, y sella el almacén en la v2; en una
+// plantilla, en la v3, y cada instancia la recibe entera.
+func TestSetCredentialsSigV4(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	got := capturarRegistro(t)
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest("m1")
+	m.mu.Lock()
+	mc.Egress = string(knet.EgressAllowlist)
+	m.socket["m1"] = falso.Sock
+	m.mu.Unlock()
+	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	spec := api.CredentialSpec{Domain: "S3.eu-west-1.amazonaws.com", Env: "AWS_ACCESS_KEY_ID", Secret: credSecreto,
+		Type: "sigv4", AccessKeyID: "AKIAEXAMPLE1234", Region: "EU-West-1", Allow: []string{"get /bucket/**"}}
+
+	malo := spec
+	malo.User = "app"
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{malo}); err == nil {
+		t.Error("una sigv4 con rol debería rechazarse")
+	}
+	sinAK := spec
+	sinAK.AccessKeyID = ""
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{sinAK}); err == nil {
+		t.Error("una sigv4 sin access key id debería rechazarse")
+	}
+	if len(*got) != 0 {
+		t.Fatalf("un rechazo no debe llegar al proxy: %+v", *got)
+	}
+
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{spec}); err != nil {
+		t.Fatal(err)
+	}
+	c := (*got)[0][0]
+	if c.Kind != "sigv4" || c.AccessKeyID != "AKIAEXAMPLE1234" || c.Region != "eu-west-1" || c.Service != "s3" ||
+		c.Domain != "s3.eu-west-1.amazonaws.com" || c.Secret != credSecreto || c.Placeholder == "" {
+		t.Fatalf("al proxy llegó %+v", c)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || len(back) != 1 || back[0].AccessKeyID != "AKIAEXAMPLE1234" || back[0].Service != "s3" {
+		t.Fatalf("almacén: %+v, %v", back, err)
+	}
+	b, err := os.ReadFile(m.credPath("m1"))
+	if err != nil || versionSellada(b) != versionAlmacenSigV4 {
+		t.Fatalf("almacén de máquina: versión %d, %v", versionSellada(b), err)
+	}
+
+	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{spec}, false); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(m.credSnapPath("svc"))
+	if err != nil || versionSellada(b) != versionAlmacenPlantillaSigV4 {
+		t.Fatalf("almacén de plantilla: versión %d, %v", versionSellada(b), err)
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || specs[0].AccessKeyID != "AKIAEXAMPLE1234" || specs[0].Service != "s3" {
+		t.Fatalf("plantilla: %+v, %v", specs, err)
+	}
+	if err := os.MkdirAll(m.dir("i1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.entregarCredenciales(ctx, "i1", knet.Plan(1, "i1"), falso.cliente(), specs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if c := (*got)[len(*got)-1][0]; c.Kind != "sigv4" || c.AccessKeyID != "AKIAEXAMPLE1234" || c.Region != "eu-west-1" {
+		t.Errorf("la instancia recibió %+v", c)
+	}
+}

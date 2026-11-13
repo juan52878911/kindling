@@ -150,6 +150,9 @@ func (m *Manager) credSnapPath(name string) string {
 //	v1:               "KLCS" 0x01 | nonce(12) | AES-GCM(json) aad = cabecera + dueño
 //	v2:               "KLCS" 0x02, igual que la v1, y el almacén lleva alguna
 //	                  credencial sigv4 (v0.19, con AccessKeyID, Region y Service).
+//	v3:               "KLCS" 0x03, igual, y es el almacén de una PLANTILLA con
+//	                  alguna credencial sigv4 (v1.0.0-rc.3: api.CredentialSpec
+//	                  con access_key_id, region y service).
 //
 // Por qué la v2 (y no "ignorable"): un kling ≤ v0.18 no conoce el tipo sigv4
 // y no valida al descifrar, así que la usaría como una credencial HTTP —
@@ -161,6 +164,11 @@ func (m *Manager) credSnapPath(name string) string {
 // la sigv4 se quita). El coste: v0.19 y v0.20, que sí la entienden, tampoco
 // abren uno v2; volver a ellas es `kling upgrade -rollback` (.v1.bak).
 //
+// La v3 es lo mismo para las plantillas: hasta v1.0.0-rc.2 la API no tenía
+// cómo atar una sigv4 a una plantilla, y un kling de entonces leería la spec
+// sin access_key_id, region ni service (la v2 sí la abre) y al reescribir el
+// almacén las perdería. Los almacenes de máquina siguen en la v2.
+//
 // La magia es de cuatro bytes y no uno solo porque el v0 empieza por un nonce
 // aleatorio: con un byte, uno de cada 256 almacenes viejos parecería llevar
 // versión. Con cuatro, el caso es de uno en 2^32, y aun así se cubre: una
@@ -168,12 +176,14 @@ func (m *Manager) credSnapPath(name string) string {
 var magiaAlmacen = []byte("KLCS")
 
 // versionAlmacen es la versión que escribe sellar si nada pide más;
-// versionAlmacenSigV4, la de un almacén con alguna credencial sigv4, y
+// versionAlmacenSigV4, la de un almacén de máquina con alguna credencial
+// sigv4; versionAlmacenPlantillaSigV4, la de uno de plantilla con alguna, y
 // versionAlmacenMax la más nueva que este binario sabe abrir.
 const (
-	versionAlmacen      = 1
-	versionAlmacenSigV4 = 2
-	versionAlmacenMax   = versionAlmacenSigV4
+	versionAlmacen               = 1
+	versionAlmacenSigV4          = 2
+	versionAlmacenPlantillaSigV4 = 3
+	versionAlmacenMax            = versionAlmacenPlantillaSigV4
 )
 
 // cabeceraAlmacen es lo que va delante del nonce en la versión ver.
@@ -182,12 +192,20 @@ func cabeceraAlmacen(ver int) []byte {
 }
 
 // versionParaSellar es la versión más baja que describe v: la de sigv4 si
-// es un juego de credenciales de máquina con alguna, versionAlmacen si no.
+// es un juego de credenciales de máquina con alguna, la de plantilla con
+// sigv4 si es el de una plantilla con alguna, versionAlmacen si no.
 func versionParaSellar(v any) int {
-	if creds, ok := v.([]credproxy.Credential); ok {
+	switch creds := v.(type) {
+	case []credproxy.Credential:
 		for _, c := range creds {
 			if c.Kind == credproxy.KindSigV4 {
 				return versionAlmacenSigV4
+			}
+		}
+	case []api.CredentialSpec:
+		for _, s := range creds {
+			if s.Type == credproxy.KindSigV4 {
+				return versionAlmacenPlantillaSigV4
 			}
 		}
 	}
@@ -452,6 +470,7 @@ func validarSpecs(specs []api.CredentialSpec) error {
 		}
 		s.Port = c.Port
 		s.Upstream, s.UpstreamTLS, s.TLSServerName = c.Upstream, c.UpstreamTLS, c.TLSServerName
+		s.Region, s.Service = c.Region, c.Service
 	}
 	return nil
 }
@@ -474,7 +493,8 @@ func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 		Headers: s.Headers, Query: s.Query, Body: s.Body,
 		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
 		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName,
-		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner}
+		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner,
+		AccessKeyID: s.AccessKeyID, Region: s.Region, Service: s.Service}
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
