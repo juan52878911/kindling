@@ -66,7 +66,7 @@ func cmdMigrate(args []string) error {
 		fmt.Printf("Status:    ✗ %v\n\n", err)
 		fmt.Println("Is the service imported and the gateway running on the daemon's host?")
 		fmt.Printf("  kling mcp import %s -image %s\n", svc, svc)
-		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080")
+		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080 -tls-cert <cert> -tls-key <key>")
 		if *install == "" {
 			return nil
 		}

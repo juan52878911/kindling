@@ -33,6 +33,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Pre-release versions compare as semver (`1.0.0-rc.2` < `1.0.0`, `rc.2` < `rc.10`): a release candidate no longer meets `min_kling 1.0.0`, and `kling plugin install` without `@tag` works on one.
 - `kling upgrade` without `-tag` on a release candidate no longer downloads an older latest stable release only to refuse it; it says so and points to `-tag`.
 - `go install …@v1.0.0-rc.N` reports its version instead of `dev`.
+||||||| c4bc2038
+- MCP gateway: one SSE stream per session; the stream GET no longer wakes an instance or keeps an isolated session alive.
+- MCP gateway: `/mcp/_all` only opens a session on `initialize`, and unknown service names no longer enter the saved popularity.
+
+### Security
+
+- MCP gateway: `-tls-cert`/`-tls-key` serve HTTPS, and plain HTTP outside loopback is refused unless `-insecure-listen` is given. The packaged systemd unit passes `-insecure-listen` to keep working.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

@@ -274,7 +274,7 @@ func mcpStatusHook(args []string, w io.Writer) error {
 	fmt.Fprintf(w, "gateway:      %s\n", gw)
 	if err := httpOK(gw + "/healthz"); err != nil {
 		fmt.Fprintf(w, "  health:     ✗ not responding (%v)\n", err)
-		fmt.Fprintf(w, "              start it on the daemon's host:  kling mcp serve -listen 0.0.0.0:8080\n")
+		fmt.Fprintf(w, "              start it on the daemon's host:  kling mcp serve -listen 0.0.0.0:8080 -tls-cert <cert> -tls-key <key>\n")
 	} else {
 		fmt.Fprintf(w, "  health:     ✓ alive\n")
 		fmt.Fprintf(w, "  services:   %s\n", servicesLine(gw+"/services", cfg.Gateway.Token))
