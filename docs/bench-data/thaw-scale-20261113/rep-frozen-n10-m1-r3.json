@@ -1,0 +1,98 @@
+{
+  "label": "rep-frozen-n10-m1-r3",
+  "started": "2026-11-13T03:09:15.154025171Z",
+  "host": {
+    "hostname": "kling-ascci",
+    "kernel": "7.0.14-12-pve",
+    "cpu": "Intel(R) Core(TM) i3-3220 CPU @ 3.30GHz",
+    "cpus": 4,
+    "mem_total_mib": 10240,
+    "nested": false,
+    "container": "lxc",
+    "kling_version": "1.0.0-rc.2-5-gc4bc2038",
+    "firecracker": "Firecracker v1.17.0",
+    "backend": "firecracker",
+    "arch": "amd64",
+    "git_sha": "c4bc20385031",
+    "psi_limit": "20 (daemon default)"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:18180",
+    "services": [
+      "tb-r0",
+      "tb-r1",
+      "tb-r2",
+      "tb-r3",
+      "tb-r4",
+      "tb-r5",
+      "tb-r6",
+      "tb-r7",
+      "tb-r8",
+      "tb-r9"
+    ],
+    "n_services": 10,
+    "sessions": 1,
+    "calls": 5,
+    "timeout": "1m0s",
+    "tool": "echo"
+  },
+  "sessions_ok": 1,
+  "sessions_failed": 0,
+  "error_rate_pct": 0,
+  "status": "OK",
+  "errors": {},
+  "wall_ms": 556.04,
+  "latency_ms": {
+    "ttfr": {
+      "n": 1,
+      "p50": 536.86,
+      "p95": 536.86,
+      "p99": 536.86,
+      "max": 536.86,
+      "mean": 536.86
+    },
+    "init": {
+      "n": 1,
+      "p50": 533.56,
+      "p95": 533.56,
+      "p99": 533.56,
+      "max": 533.56,
+      "mean": 533.56
+    },
+    "first_call": {
+      "n": 1,
+      "p50": 1.94,
+      "p95": 1.94,
+      "p99": 1.94,
+      "max": 1.94,
+      "mean": 1.94
+    },
+    "steady": {
+      "n": 5,
+      "p50": 1.51,
+      "p95": 1.84,
+      "p99": 1.84,
+      "max": 1.84,
+      "mean": 1.61
+    },
+    "delete": {
+      "n": 1,
+      "p50": 10.99,
+      "p95": 10.99,
+      "p99": 10.99,
+      "max": 10.99,
+      "mean": 10.99
+    }
+  },
+  "host_metrics": {
+    "samples": 4,
+    "sample_errors": 0,
+    "peak_live": 1,
+    "distinct_machines": 1,
+    "peak_target_pss_mib": 14,
+    "peak_total_pss_mib": 167,
+    "min_available_mib": 9917,
+    "max_psi_some_avg10": 0,
+    "time_to_zero_ms": 13698.3
+  }
+}

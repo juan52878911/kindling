@@ -184,7 +184,7 @@ func TestRutaAuditoria(t *testing.T) {
 	if err := os.Symlink(real, enlace); err != nil {
 		t.Fatal(err)
 	}
-	quiero := filepath.Join(real, credproxy.AuditFile)
+	quiero := filepath.Join(real, credproxy.AuditFileVMM)
 	if got := rutaAuditoria(filepath.Join(enlace, "api.sock")); got != quiero {
 		t.Errorf("por un enlace: %q, quiero %q", got, quiero)
 	}
@@ -198,7 +198,7 @@ func TestRutaAuditoria(t *testing.T) {
 		t.Errorf("relativa: %q, quiero %q", got, quiero)
 	}
 	// Un directorio que aún no existe se queda como está, pero absoluto.
-	if got := rutaAuditoria(filepath.Join(real, "no", "api.sock")); got != filepath.Join(real, "no", credproxy.AuditFile) {
+	if got := rutaAuditoria(filepath.Join(real, "no", "api.sock")); got != filepath.Join(real, "no", credproxy.AuditFileVMM) {
 		t.Errorf("sin directorio: %q", got)
 	}
 }

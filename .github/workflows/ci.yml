@@ -106,6 +106,16 @@ jobs:
             exit 1
           fi
 
+      # El builder del kernel contra un árbol falso (sin fuentes ni red): la
+      # comprobación de config, los parches de patches/ y las salidas.
+      - name: builder del kernel (scripts/builders/kernel/test.sh)
+        # build.sh comprueba sus herramientas antes de nada: sin ellas, los
+        # casos que llegan a esa comprobación fallan por la razón equivocada.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev xz-utils curl patch >/dev/null
+          scripts/builders/kernel/test.sh
+
       - name: ext/* apuntan al núcleo del mismo commit
         run: |
           for m in ext/*/go.mod; do
@@ -286,6 +296,15 @@ jobs:
       - run: codesign -d --entitlements - bin/kling-hv 2>&1 | grep -q com.apple.security.hypervisor
       - run: otool -l bin/kling-hv | grep -A4 LC_BUILD_VERSION | grep -q 'minos 15.2$'
       - run: bin/kling-hv --version
+      # El proxy de credenciales aparte: build-credproxy.sh falla si la firma
+      # no lleva hardened runtime o lleva get-task-allow.
+      - run: ./build-credproxy.sh
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+          CGO_CFLAGS: -O2 -g -mmacosx-version-min=14.0
+          CGO_LDFLAGS: -mmacosx-version-min=14.0
+      - run: otool -l bin/kling-credproxy | grep -A4 LC_BUILD_VERSION | grep -q 'minos 14.0$'
+      - run: bin/kling-credproxy --version
       # La sonda que mira `daemon.vmm auto`. Los runners de GitHub son VMs sin
       # virtualización anidada (kern.hv_support 0): ahí hv_vm_create no puede
       # ir bien, y lo que se comprueba es que la sonda conteste con su código

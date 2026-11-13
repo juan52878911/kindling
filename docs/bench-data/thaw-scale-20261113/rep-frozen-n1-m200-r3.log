@@ -1,0 +1,13 @@
+rep-frozen-n1-m200-r3: 200 sessions over 1 service(s), 16/200 ok (92.00% failed) — DEGRADED, wall 2192 ms
+  ttfr        n=16    p50   1570.0  p95   2163.4  p99   2163.4  max   2163.4 ms
+  initialize  n=16    p50   1564.4  p95   2160.1  p99   2160.1  max   2160.1 ms
+  first call  n=16    p50      2.7  p95      4.9  p99      4.9  max      4.9 ms
+  steady      n=80    p50      2.2  p95      3.8  p99     24.2  max     24.2 ms
+  delete      n=16    p50      8.1  p95     51.6  p99     51.6  max     51.6 ms
+  errors: init:http_503=184
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+    tb-r0: init: http_503 ({"message":"could not place session for \"tb-r0\": all replicas full (at the replica cap: service \"tb-r0\" has 16 instance(s) awake or starting (max 16))","code":"unavailable"})
+  host: live peak 16, 16 distinct machine(s), PSS peak 236 MiB (all: 413), min available 9811 MiB, PSI some avg10 max 0.0, time to zero 37.8 s (10 samples)

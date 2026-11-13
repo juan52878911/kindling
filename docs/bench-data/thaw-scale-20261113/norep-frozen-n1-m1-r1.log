@@ -1,0 +1,7 @@
+norep-frozen-n1-m1-r1: 1 sessions over 1 service(s), 1/1 ok (0.00% failed) — OK, wall 541 ms
+  ttfr        n=1     p50    526.3  p95    526.3  p99    526.3  max    526.3 ms
+  initialize  n=1     p50    517.1  p95    517.1  p99    517.1  max    517.1 ms
+  first call  n=1     p50      7.5  p95      7.5  p99      7.5  max      7.5 ms
+  steady      n=5     p50      1.7  p95      3.1  p99      3.1  max      3.1 ms
+  delete      n=1     p50      4.1  p95      4.1  p99      4.1  max      4.1 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 17 MiB (all: 89), min available 9925 MiB, PSI some avg10 max 0.0, time to zero 14.0 s (4 samples)

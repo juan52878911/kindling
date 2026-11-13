@@ -1473,7 +1473,7 @@ placeholder stays, so the running process needs no restart.
 Every request through the proxy, and every refusal, is logged per machine (0600, rotated
 at 4 MiB keeping 3 generations — `daemon.credaudit_max_mib`, `daemon.credaudit_generations` or
 `KLING_CREDAUDIT=MIB:GENS`; on Linux in `<root>/audit/<id>.jsonl`, out of the VMM's reach; on macOS in the
-machine's directory, `credaudit.jsonl`):
+directory of the machine's credential proxy, `credproxy/credaudit.jsonl`, where the VMM can't write):
 
 ```sh
 kling machine audit payments            # TIME METHOD HOST PATH STATUS CREDS MS RESULT

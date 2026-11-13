@@ -249,12 +249,19 @@ jobs:
           codesign -d --entitlements - dist/kling-hv-darwin-arm64 2>&1 | grep -q com.apple.security.hypervisor
           minos dist/kling-hv-darwin-arm64 15.2
           dist/kling-hv-darwin-arm64 --version
+          # El proxy de credenciales aparte: hardened runtime y sin
+          # get-task-allow (build-credproxy.sh lo comprueba al firmar).
+          MACOSX_DEPLOYMENT_TARGET=14.0 CGO_CFLAGS="-O2 -g -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+            OUT=dist/kling-credproxy-darwin-arm64 VERSION="$VERSION" ./build-credproxy.sh
+          minos dist/kling-credproxy-darwin-arm64 14.0
+          dist/kling-credproxy-darwin-arm64 --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vmm-darwin-arm64
           path: |
             vz/dist/kling-vz-darwin-arm64
             vz/dist/kling-hv-darwin-arm64
+            vz/dist/kling-credproxy-darwin-arm64
           if-no-files-found: error
 
   # El kernel de invitado y la imagen min de las dos arquitecturas: un Mac sin
@@ -279,7 +286,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            build-essential flex bison bc libelf-dev xz-utils curl gcc-aarch64-linux-gnu e2fsprogs zstd
+            build-essential flex bison bc libelf-dev xz-utils curl patch gcc-aarch64-linux-gnu e2fsprogs zstd
       - name: kernel
         shell: bash
         run: |
@@ -433,7 +440,7 @@ jobs:
             k="$(TARGET_ARCH="$arch" bash scripts/builders/kernel/build.sh --print-name)-android"
             want+=("$k" "$k.sha256" "$k.config" "$k.buildinfo")
           done
-          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
+          want+=(kling-vz-darwin-arm64 kling-hv-darwin-arm64 kling-credproxy-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
           printf '%s\n' "${want[@]}" | sort > want.txt
           (cd release && ls -1) | sort > have.txt
           if ! diff -u want.txt have.txt; then
@@ -452,7 +459,8 @@ jobs:
           cat SHA256SUMS
 
       # La fórmula de Homebrew con la versión y los sha256 de esta release,
-      # como un asset más (no se publica en ningún tap). Va después de
+      # como un asset más (el job tap la sube después al tap, solo si la
+      # release es final). Va después de
       # SHA256SUMS porque sale de él, y su propia suma se añade al final.
       - name: fórmula de Homebrew
         env:
@@ -645,3 +653,59 @@ jobs:
           # la misma versión venga de donde venga.
           build-args: VERSION=${{ steps.ver.outputs.ldver }}
           tags: ${{ steps.ver.outputs.tags }}
+
+  # La fórmula de la release (el asset kling.rb) al tap juan52878911/homebrew-kindling,
+  # para `brew install juan52878911/kindling/kling`. Solo releases finales: una
+  # -rc no llega a quien instala con brew, igual que no pasa a latest. El token
+  # es HOMEBREW_TAP_TOKEN (fine-grained, contents:write solo en el tap); sin él
+  # el job avisa y sale bien, y el tap se queda como estaba (docs/releases.md).
+  tap:
+    name: homebrew tap
+    needs: release
+    if: needs.release.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: subir kling.rb al tap
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+          TAP: juan52878911/homebrew-kindling
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set: $TAP keeps its current formula"
+            exit 0
+          fi
+          path=Formula/kling.rb
+          sha=""; cur=""
+          if GH_TOKEN="$TAP_TOKEN" gh api "repos/$TAP/contents/$path" > cur.json 2>/dev/null; then
+            sha=$(jq -r .sha cur.json)
+            jq -r .content cur.json | base64 -d > cur.rb
+            cur=$(sed -n 's|.*releases/download/v\([^/]*\)/.*|\1|p' cur.rb | head -n1)
+          fi
+          new="${VERSION#v}"
+          # Relanzar el workflow para una etiqueta vieja no baja el tap.
+          if [ -n "$cur" ] && [ "$cur" != "$new" ] &&
+             [ "$(printf '%s\n%s\n' "$cur" "$new" | sort -V | tail -n1)" = "$cur" ]; then
+            echo "::notice::$TAP is at $cur, newer than $VERSION: not touching it"
+            exit 0
+          fi
+
+          # La fórmula publicada, comprobada contra el SHA256SUMS (firmado desde
+          # v1.0.0) de la misma release: al tap va lo mismo que al asset.
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p kling.rb -p SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          grep -q "releases/download/$VERSION/" kling.rb || { echo "::error::kling.rb is not for $VERSION"; exit 1; }
+
+          export GH_TOKEN="$TAP_TOKEN"
+          if [ -n "$sha" ] && cmp -s cur.rb kling.rb; then
+            echo "$TAP already has the formula of $VERSION"
+            exit 0
+          fi
+          args=(-f message="kling $new" -f content="$(base64 -w0 kling.rb)")
+          [ -z "$sha" ] || args+=(-f sha="$sha")
+          gh api -X PUT "repos/$TAP/contents/$path" "${args[@]}" --jq '.commit.html_url'

@@ -106,8 +106,20 @@ func credAuditConfig() credproxy.AuditConfig {
 //
 // resolve es el ResolveMachine del proxy de ESTA máquina (m.resolverCopia):
 // solo lo usa el proxy de Linux, en cada conexión de una credencial con
-// UpstreamMachine.
+// UpstreamMachine. egress es el modo de salida de la máquina, que en macOS se
+// le dice al proxy aparte (el VMM no es quien lo decide).
 var registrarCredenciales = registrarCredencialesPlataforma
+
+// egresoDe es el modo de salida de la máquina id ("" si no existe). Toma
+// m.mu: no se llama con él tomado.
+func (m *Manager) egresoDe(id string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if mc := m.byID[id]; mc != nil {
+		return mc.Egress
+	}
+	return ""
+}
 
 // reEnvCredencial es el nombre de la variable de entorno que recibe el marcador.
 var reEnvCredencial = lazyre.New(`^[A-Z_][A-Z0-9_]{0,63}$`)
@@ -125,13 +137,14 @@ func (m *Manager) credPath(id string) string { return filepath.Join(m.dir(id), c
 
 // credAuditPath es el registro de auditoría del proxy de la máquina (ver
 // credaudit.go). En Linux lo escribe el proxy del daemon en <root>/audit, un
-// directorio solo de root; en macOS, el kling-vz de la máquina, que lo deja
-// junto a su socket, en el directorio de la máquina.
+// directorio solo de root; en macOS, el proxy aparte de la máquina
+// (kling-credproxy), en su subdirectorio del de la máquina, donde el VMM no
+// escribe (docs/proxy-macos-separado.md).
 func (m *Manager) credAuditPath(id string) string {
 	if auditoriaEnElDaemon {
 		return filepath.Join(m.dirAuditoria(), id+".jsonl")
 	}
-	return filepath.Join(m.dir(id), credproxy.AuditFile)
+	return filepath.Join(m.dir(id), credproxy.SplitDir, credproxy.AuditFile)
 }
 
 // credSnapPath es el almacén de una plantilla. Bajo secrets/, no bajo el
@@ -584,7 +597,7 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id)); err != nil {
+	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id), m.egresoDe(id)); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -719,7 +732,7 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID)); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID), mc.Egress); err != nil {
 		return 0, err
 	}
 	return len(creds), nil

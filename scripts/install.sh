@@ -290,7 +290,7 @@ if [ "$DRY_RUN" = "1" ]; then
     info "$BASE/SHA256SUMS.minisig (si la release lo trae)"
     if [ "$SKIP_KLING" != "1" ]; then
         info "$BASE/$BIN_NAME"
-        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (si la release lo trae)"
+        [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64" && info "$BASE/kling-hv-darwin-arm64 (si la release lo trae)" && info "$BASE/kling-credproxy-darwin-arm64 (si la release lo trae)"
     fi
     for e in $EXTS; do
         info "$BASE/kling-${e}-${PLAT}  ->  $PLUGIN_DIR/kling-$e"
@@ -398,6 +398,13 @@ if [ "$SKIP_KLING" != "1" ]; then
             get "kling-hv-darwin-arm64"
             HV_NAME="kling-hv-darwin-arm64"
         fi
+        # kling-credproxy (el proxy de credenciales aparte de cada máquina)
+        # llega después de v1.0.0-rc.2: sin él, el daemon no da credenciales
+        # a un kling-vz que sabe reenviarlas y lo dice.
+        if grep -Eq '[ *]kling-credproxy-darwin-arm64$' "$WORK/SHA256SUMS"; then
+            get "kling-credproxy-darwin-arm64"
+            CP_NAME="kling-credproxy-darwin-arm64"
+        fi
     fi
 fi
 for e in $EXTS; do
@@ -487,6 +494,13 @@ if [ "$SKIP_KLING" != "1" ]; then
             xattr -d com.apple.quarantine "$WORK/$HV_NAME" 2>/dev/null || true
             place "$WORK/$HV_NAME" "$PREFIX/kling-hv" || fail "no puedo escribir en $PREFIX"
             ok "instalado en $PREFIX/kling-hv (backend hv de macOS)"
+        fi
+        # kling-credproxy, igual. Firmado con hardened runtime: place no lo
+        # toca más que para copiarlo.
+        if [ -n "${CP_NAME:-}" ]; then
+            xattr -d com.apple.quarantine "$WORK/$CP_NAME" 2>/dev/null || true
+            place "$WORK/$CP_NAME" "$PREFIX/kling-credproxy" || fail "no puedo escribir en $PREFIX"
+            ok "instalado en $PREFIX/kling-credproxy (proxy de credenciales aparte)"
         fi
     fi
 fi

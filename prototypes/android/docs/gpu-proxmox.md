@@ -9,6 +9,16 @@ al final (consultadas el 2026-09-29).
 
 ## 0. Resumen
 
+> **2026-11-12: fase 0 hecha, con QEMU `microvm` en vez de crosvm.** Un
+> teléfono con virgl en una VM: UI a 60 fps con 0,25 núcleos (0.3 ✓), WebGL a
+> 60 fps (✓), pero 1,8–2,2 GiB por teléfono (0.4 pedía ≤ 1,6 GiB: **no se
+> cumple**, ~5–7 teléfonos por host) y `savevm` bloqueado por virgl (0.6, como
+> se esperaba). Por el criterio de parada de abajo, una VM con GPU solo
+> compensa si la frontera de VM es requisito. Si lo es: como QEMU `microvm` usa
+> virtio-mmio, sirven la imagen y el kernel de siempre sin PCI, y el ayudante
+> pasa a ser `kling-qemu` en vez de `kling-cvm`. Cifras, fallos y esfuerzo: [`gpu.md`](gpu.md), "Prueba de
+> concepto". El resto de este documento es el diseño previo.
+
 - **Ningún camino con frontera de VM y GPU 3D conserva los dorados hoy.** crosvm
   solo sabe hacer snapshot de virtio-gpu en modo 2D ("3D is WIP" en su código),
   Cuttlefish solo admite snapshot con `guest_swiftshader`, y QEMU bloquea
@@ -288,7 +298,8 @@ En el **CT 106** (ya tiene `/dev/kvm` y `/dev/dri`) o en un CT desechable como e
 | 0.6 | snapshot de crosvm con GPU 3D (y el dorado "antes de SurfaceFlinger" de §4.3) | se anota si funciona; que falle no para el plan |
 | 0.7 | (si el usuario acepta §6.1) venus con ANV en el CT | Vulkan `virtio` en `dumpsys`; mismos criterios que 0.3–0.5 |
 
-**Salida**: una sección nueva en este documento con las cifras. **Se para si**
+**Salida**: hecha en [`gpu.md`](gpu.md), "Prueba de concepto" (con QEMU; 0.5 y
+0.7 quedan pendientes). **Se para si**
 0.3 o 0.4 no se cumplen: el contenedor (A) y Firecracker (I) cubren entonces los
 dos extremos mejor que una VM con GPU.
 

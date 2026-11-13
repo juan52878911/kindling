@@ -1,0 +1,7 @@
+norep-warm-n50-m1-r2: 1 sessions over 50 service(s), 1/1 ok (0.00% failed) — OK, wall 88 ms
+  ttfr        n=1     p50     25.9  p95     25.9  p99     25.9  max     25.9 ms
+  initialize  n=1     p50     22.7  p95     22.7  p99     22.7  max     22.7 ms
+  first call  n=1     p50      1.6  p95      1.6  p99      1.6  max      1.6 ms
+  steady      n=5     p50      1.6  p95     52.7  p99     52.7  max     52.7 ms
+  delete      n=1     p50      3.3  p95      3.3  p99      3.3  max      3.3 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 27 MiB (all: 27), min available 9920 MiB, PSI some avg10 max 0.0 (2 samples)

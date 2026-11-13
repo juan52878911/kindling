@@ -38,6 +38,7 @@ type orden struct {
 }
 
 // prueba: Op "bind" (escuchar en Addr), "connect" (conectar a Addr por TCP),
+// "bindunix" (escuchar en el socket Unix Addr), "remove" y "mkdir" (Addr),
 // "unix" (conectar al socket Unix Addr), "read" o "write" (el fichero Addr),
 // "accept" (aceptar, ya confinado, en la escucha previa Addr).
 type prueba struct{ Op, Addr string }
@@ -101,6 +102,15 @@ func hijo(s string) int {
 			if f, err = os.OpenFile(p.Addr, os.O_WRONLY|os.O_CREATE, 0o600); err == nil {
 				f.Close()
 			}
+		case "bindunix":
+			var l net.Listener
+			if l, err = net.Listen("unix", p.Addr); err == nil {
+				l.Close()
+			}
+		case "remove":
+			err = os.Remove(p.Addr)
+		case "mkdir":
+			err = os.Mkdir(p.Addr, 0o700)
 		case "connect", "unix":
 			red := "tcp"
 			if p.Op == "unix" {

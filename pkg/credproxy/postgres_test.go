@@ -100,6 +100,11 @@ type servidorPG struct {
 	// negociaMal es el NegotiateProtocolVersion (cuerpo) que manda en vez del
 	// bueno, para probar los que el proxy rechaza.
 	negociaMal []byte
+	// rechaza32: a un arranque que no sea 3.0 contesta ErrorResponse 08P01 y
+	// cierra, sin NegotiateProtocolVersion (pgbouncer anterior a 1.25). rechaza
+	// hace lo mismo con cualquier versión (un parámetro de arranque que no
+	// conoce, por ejemplo).
+	rechaza32, rechaza bool
 	// claveMal es la clave que manda en BackendKeyData (claveMalVeces veces)
 	// en vez de la que toca a la versión.
 	claveMal      []byte
@@ -189,6 +194,10 @@ func (s *servidorPG) atender(raw net.Conn) {
 	}
 	s.versiones = append(s.versiones, code)
 	s.mu.Unlock()
+	if s.rechaza || s.rechaza32 && code != pgProto30 {
+		c.Write(errorResponsePG("08P01", "bad packet header"))
+		return
+	}
 	// La versión: 3.0 siempre; 3.2 si v32; lo demás se negocia a la baja.
 	minor := code & 0xffff
 	if !s.v32 {

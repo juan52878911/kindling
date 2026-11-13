@@ -217,4 +217,6 @@ aquí y su fila de la matriz pasa a **sí**.
   `e2e-mac/kling-hv` que exige `release.sh`. El de Linux con KVM ya corre en `e2e-linux.yml`, también
   el de upgrade desde la release anterior.
 - Notarización de los binarios de macOS.
-- El tap de Homebrew que publique la fórmula que ya genera `release.yml`.
+- El secreto `HOMEBREW_TAP_TOKEN`: el tap `juan52878911/kindling` y el job
+  `tap` de `release.yml` ya están, pero sin el secreto el job no sube la
+  fórmula de una release nueva ([releases.md](releases.md), paso 9).

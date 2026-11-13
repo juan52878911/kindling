@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,11 @@ func TestMain(m *testing.M) {
 	// m.Run() porque este proceso recibe "--api-sock", que el paquete testing
 	// no entiende.
 	if log := os.Getenv(envFakeVZ); log != "" {
+		// Relanzado como kling-credproxy (credproxy_vz_test.go).
+		if slices.Contains(os.Args, "--vmm-pid") {
+			servirCredproxyFalso(os.Args, log)
+			os.Exit(0)
+		}
 		for i, a := range os.Args {
 			if a == "--api-sock" && i+1 < len(os.Args) {
 				servirVZFalso(os.Args[i+1], log)
@@ -793,7 +799,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 			err = registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
 				{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba", Allow: []string{"GET /v1/balance"},
 					Headers: []string{"X-Goog-Api-Key"}, Body: true},
-			}, "", nil)
+			}, "", nil, "")
 			if !strings.Contains(kinds, credproxy.CapHTTPPlaces) {
 				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") {
 					t.Fatalf("sin http-places: %v", err)
@@ -842,7 +848,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
-			}, "", nil)
+			}, "", nil, "")
 			ls := llamadas(t, logPath)
 			i := indice(ls, "PUT /kling/credentials")
 			if kinds == "" {
@@ -889,7 +895,7 @@ func TestVZCredencialSigV4ExigeCapacidad(t *testing.T) {
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "AWS_ACCESS_KEY_ID", Domain: "s3.example.com", Placeholder: "kling-cred-sv", Secret: "sk-clave-de-prueba",
 					Kind: credproxy.KindSigV4, AccessKeyID: "AKIAEXAMPLE1234", Region: "auto", Service: "s3"},
-			}, "", nil)
+			}, "", nil, "")
 			ls := llamadas(t, logPath)
 			i := indice(ls, "PUT /kling/credentials")
 			if !strings.Contains(kinds, credproxy.KindSigV4) {
@@ -937,7 +943,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
 					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
-			}, "", nil)
+			}, "", nil, "")
 			ls := llamadas(t, logPath)
 			i := indice(ls, "PUT /kling/credentials")
 			if !strings.Contains(kinds, credproxy.CapPostgresUpstream) {
@@ -966,7 +972,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432", TLSServerName: "db.lan"},
-			}, "", nil)
+			}, "", nil, "")
 			ls = llamadas(t, logPath)
 			if err != nil || len(ls) == 0 {
 				t.Fatalf("upstream con nombre en macOS: err=%v llamadas=%q", err, ls)
@@ -983,7 +989,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 						Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: up},
-				}, "", nil)
+				}, "", nil, "")
 				if err == nil {
 					t.Fatalf("%s: se aceptó", up)
 				}
@@ -999,7 +1005,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 // nadie: el kling-vz es el mismo y conserva las claves.
 func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
-		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s-clave-de-prueba"}}, "", nil); err != nil {
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s-clave-de-prueba"}}, "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1045,7 +1051,7 @@ func TestVZCredencialMaquinaExigeGraphLink(t *testing.T) {
 				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb",
 					UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable},
-			}, "", nil)
+			}, "", nil, "")
 			ls := llamadas(t, logPath)
 			i := indice(ls, "PUT /kling/credentials")
 			if !strings.Contains(kinds, credproxy.CapGraphLink) {

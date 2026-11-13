@@ -15,7 +15,10 @@
 # Pasos:
 #   1. descarga linux-$KERNEL_VERSION.tar.xz de kernel.org (versión y sha256
 #      fijados en kernel.pin) a una cache y comprueba el sha256;
-#   2. lo extrae limpio en un directorio temporal;
+#   2. lo extrae limpio en un directorio temporal y le aplica, por orden de
+#      nombre, los parches de patches/*.patch (-p1; KERNEL_PATCHES=<dir> usa
+#      otro directorio). Un parche que no entra corta el build: al subir de
+#      versión hay que revisarlos (quitar los que ya trae upstream);
 #   3. aplica config-common + config-$TARGET_ARCH (+ config-$TARGET_ARCH-$VARIANT
 #      si hay VARIANT) con `allnoconfig` y después
 #      `olddefconfig`; avisa de cada opción pedida que no llegó al .config
@@ -29,6 +32,7 @@
 #   vmlinux-<versión>-kindling-<arch>.config      el .config final
 #   vmlinux-<versión>-kindling-<arch>.sha256
 #   vmlinux-<versión>-kindling-<arch>.buildinfo   toolchain, hashes de entrada
+#                                                 (parches incluidos)
 #
 # REPRODUCIBLE: fecha, usuario, host y número de build fijos (KBUILD_BUILD_*),
 # SOURCE_DATE_EPOCH sacado del propio tarball, sin información de depuración ni
@@ -101,7 +105,7 @@ STRICT_FRAGMENT="${STRICT_FRAGMENT:-0}"
 
 # ── herramientas ─────────────────────────────────────────────────────────────
 falta=()
-for c in curl tar xz sha256sum make gcc flex bison bc perl; do
+for c in curl tar xz sha256sum make gcc flex bison bc perl patch; do
   command -v "$c" >/dev/null || falta+=("$c")
 done
 if [ "$CONFIG_ONLY" != 1 ]; then
@@ -113,7 +117,7 @@ if [ ${#falta[@]} -gt 0 ]; then
   cruzado=""
   [ -z "$CROSS_COMPILE" ] || cruzado=" gcc-${CROSS_COMPILE%-}"
   echo "missing: ${falta[*]}" >&2
-  echo "  apt install build-essential flex bison bc libelf-dev xz-utils curl${cruzado}" >&2
+  echo "  apt install build-essential flex bison bc libelf-dev xz-utils curl patch${cruzado}" >&2
   exit 1
 fi
 
@@ -155,6 +159,27 @@ else
 fi
 tar -xJf "$CACHE/$TARBALL" -C "$WORK"
 SRC="$WORK/linux-${KERNEL_VERSION}"
+
+# Parches sobre el tarball fijado (la cabecera de cada uno dice de dónde sale
+# y por qué). --forward: uno que ya esté aplicado (porque upstream lo trae) no se
+# revierte, falla, y obliga a quitarlo de patches/.
+PATCH_DIR="${KERNEL_PATCHES:-$HERE/patches}"
+if [ -n "${KERNEL_PATCHES:-}" ] && [ ! -d "$KERNEL_PATCHES" ]; then
+  echo "KERNEL_PATCHES=$KERNEL_PATCHES is not a directory" >&2; exit 1
+fi
+PARCHES=()
+if [ -d "$PATCH_DIR" ]; then
+  for p in "$PATCH_DIR"/*.patch; do
+    if [ -f "$p" ]; then PARCHES+=("$p"); fi
+  done
+fi
+for p in ${PARCHES[@]+"${PARCHES[@]}"}; do
+  echo "  parche ${p##*/}"
+  if ! patch -d "$SRC" -p1 --batch --forward --no-backup-if-mismatch -s <"$p"; then
+    echo "patch ${p##*/} does not apply to linux-$KERNEL_VERSION; update or drop it ($PATCH_DIR)" >&2
+    exit 1
+  fi
+done
 
 # Reproducibilidad: la fecha sale del tarball, no del reloj.
 SOURCE_DATE_EPOCH="$(stat -c %Y "$SRC/Makefile")"
@@ -219,6 +244,9 @@ cp "$SRC/$IMG" "$OUT/$NAME"
   echo "target_arch=$TARGET_ARCH"
   [ -z "$VARIANT" ] || echo "variant=$VARIANT"
   echo "fragment_sha256=$(sha256sum "$FRAG" | cut -d' ' -f1)"
+  for p in ${PARCHES[@]+"${PARCHES[@]}"}; do
+    echo "patch=${p##*/} $(sha256sum "$p" | cut -d' ' -f1)"
+  done
   echo "source_date_epoch=$SOURCE_DATE_EPOCH"
   echo "compiler=$("${CROSS_COMPILE}gcc" --version | head -1)"
   echo "binutils=$("${CROSS_COMPILE}ld" --version | head -1)"

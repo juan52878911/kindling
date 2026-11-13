@@ -13,10 +13,16 @@ package machine
 //     alcance, lo que queda escrito lo ha escrito el daemon. Los registros de
 //     versiones anteriores se migran al arrancar (prepararAuditoria), y rm
 //     borra el de la máquina (borrarAuditoria).
-//   - En macOS, el kling-vz de la máquina, junto a su socket
-//     (machines/<id>/credaudit.jsonl): es el único sitio en que su sandbox le
-//     deja escribir, y el que escribe es el mismo proceso que sirve el proxy,
-//     así que sacarlo de ahí no protegería nada (docs/proxy-macos-separado.md).
+//   - En macOS, el proxy aparte de la máquina (kling-credproxy), en su
+//     subdirectorio (machines/<id>/credproxy/credaudit.jsonl), donde el VMM no
+//     escribe (docs/proxy-macos-separado.md). El VMM deja lo que atiende él
+//     (aristas link, puentes al host, las negativas de su proxy sin claves) en
+//     machines/<id>/vmmaudit.jsonl, y los VMM anteriores lo dejaban todo en
+//     machines/<id>/credaudit.jsonl: se leen los tres y se mezclan por hora.
+//     De los dos que el VMM puede escribir, una línea que dice haber usado
+//     una credencial solo vale si es de antes de que la máquina tuviera el
+//     proxy aparte: después, quien usa las claves es él, y lo apunta en el
+//     suyo (fuentesAuditoria).
 //
 // Aquí se lee, y por eso funciona igual con la máquina corriendo, congelada o
 // parada. Ni Commit ni Fork lo copian (copian ficheros concretos del
@@ -36,8 +42,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
@@ -56,9 +64,41 @@ func (m *Manager) CredAudit(ref string, q api.CredAuditQuery) ([]api.CredAuditRe
 	if !ok {
 		return nil, &api.StatusError{Code: 404, Message: fmt.Sprintf("machine %q does not exist", ref)}
 	}
-	// Del fichero actual hacia atrás por las generaciones, hasta el tope: lo
-	// más reciente es lo que no debe faltar.
-	ficheros := credproxy.AuditFiles(m.credAuditPath(mc.ID))
+	var out []api.CredAuditRecord
+	fuentes := m.fuentesAuditoria(mc.ID)
+	for _, f := range fuentes {
+		recs, err := leerFuenteAuditoria(f, q)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, recs...)
+	}
+	// Cada fuente va en orden; mezcladas, por hora (estable: dentro de una
+	// fuente, lo que se escribió antes sigue antes).
+	if len(fuentes) > 1 {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].TS.Before(out[j].TS) })
+	}
+	if q.Tail > 0 && len(out) > q.Tail {
+		out = out[len(out)-q.Tail:]
+	}
+	return out, nil
+}
+
+// fuenteAuditoria es un registro (con sus rotaciones) que lee CredAudit.
+type fuenteAuditoria struct {
+	ruta string
+	// delVMM: lo puede escribir el VMM de la máquina. Si no es cero, de ahí
+	// solo vale una línea con credenciales usadas (Creds) anterior a corte:
+	// desde entonces las claves las tiene el proxy aparte, no el VMM.
+	delVMM bool
+	corte  time.Time
+}
+
+// leerFuenteAuditoria lee las líneas de f que pasan el filtro q, en orden: del
+// fichero actual hacia atrás por las generaciones, hasta el tope (lo más
+// reciente es lo que no debe faltar).
+func leerFuenteAuditoria(f fuenteAuditoria, q api.CredAuditQuery) ([]api.CredAuditRecord, error) {
+	ficheros := credproxy.AuditFiles(f.ruta)
 	trozos := make([][]byte, len(ficheros))
 	resto := int64(credAuditMaxBytes)
 	for i := len(ficheros) - 1; i >= 0 && resto > 0; i-- {
@@ -69,7 +109,6 @@ func (m *Manager) CredAudit(ref string, q api.CredAuditQuery) ([]api.CredAuditRe
 		trozos[i] = b
 		resto -= int64(len(b))
 	}
-
 	var out []api.CredAuditRecord
 	for _, datos := range trozos {
 		sc := bufio.NewScanner(bytes.NewReader(datos))
@@ -79,6 +118,9 @@ func (m *Manager) CredAudit(ref string, q api.CredAuditQuery) ([]api.CredAuditRe
 			// Una línea a medias (el escritor murió a mitad) o ajena no para
 			// la lectura: se salta.
 			if json.Unmarshal(sc.Bytes(), &r) != nil {
+				continue
+			}
+			if f.delVMM && !f.corte.IsZero() && len(r.Creds) > 0 && !r.TS.Before(f.corte) {
 				continue
 			}
 			if !q.Since.IsZero() && r.TS.Before(q.Since) {
@@ -91,9 +133,6 @@ func (m *Manager) CredAudit(ref string, q api.CredAuditQuery) ([]api.CredAuditRe
 			}
 			out = append(out, r)
 		}
-	}
-	if q.Tail > 0 && len(out) > q.Tail {
-		out = out[len(out)-q.Tail:]
 	}
 	return out, nil
 }

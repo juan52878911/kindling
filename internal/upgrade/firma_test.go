@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -311,6 +312,24 @@ func TestClavesInstallSHIgualesQueLasDeKling(t *testing.T) {
 		t.Fatalf("install.sh %v, clavesRelease %v", sh, clavesRelease)
 	}
 	_ = ClavesRelease() // y que se leen
+}
+
+// La fórmula de Homebrew enseña con qué clave comprobar SHA256SUMS: tiene que
+// ser una de clavesRelease, o el tap mandaría a comprobar con una que no firma.
+func TestClaveDeLaFormulaEsDeKling(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "packaging", "homebrew", "kling.rb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := regexp.MustCompile(`minisign -V -P (\S+)`).FindAllSubmatch(b, -1)
+	if len(ms) == 0 {
+		t.Fatal("kling.rb no dice con qué clave comprobar (minisign -V -P …)")
+	}
+	for _, m := range ms {
+		if !slices.Contains(clavesRelease, string(m[1])) {
+			t.Errorf("kling.rb usa %s, que no está en clavesRelease %v", m[1], clavesRelease)
+		}
+	}
 }
 
 // Antes de etiquetar (firmar check, en release.sh y release.yml): desde v1.0.0

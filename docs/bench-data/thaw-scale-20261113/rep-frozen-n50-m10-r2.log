@@ -1,0 +1,7 @@
+rep-frozen-n50-m10-r2: 10 sessions over 50 service(s), 10/10 ok (0.00% failed) — OK, wall 2490 ms
+  ttfr        n=10    p50   1329.3  p95   2478.3  p99   2478.3  max   2478.3 ms
+  initialize  n=10    p50   1326.0  p95   2475.2  p99   2475.2  max   2475.2 ms
+  first call  n=10    p50      2.1  p95     19.2  p99     19.2  max     19.2 ms
+  steady      n=50    p50      1.7  p95      2.0  p99      2.2  max      2.2 ms
+  delete      n=10    p50      5.5  p95      8.1  p99      8.1  max      8.1 ms
+  host: live peak 10, 10 distinct machine(s), PSS peak 147 MiB (all: 277), min available 9867 MiB, PSI some avg10 max 0.0, time to zero 29.5 s (11 samples)

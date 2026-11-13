@@ -130,6 +130,11 @@ type Config struct {
 	// puerto, pero solo si DBActivo (allowlist y alguna credencial de base de
 	// datos); si no, se rechaza como antes. Es el DNAT HostIP:* de Linux.
 	CredentialsPG PGProxy
+	// Split, si no es nil, es el reenvío al proxy de credenciales aparte
+	// (kling-credproxy, ver vz/internal/reenvio): mientras está Activo, las
+	// conexiones al 80 de la pasarela van a él en vez de a Credentials, y
+	// con DB también las del resto de puertos (en vez de a CredentialsPG).
+	Split Split
 	// Graph, si no es nil, son las aristas link del nodo (vz/internal/grafo):
 	// una conexión TCP del invitado a la pasarela en un puerto de arista va a
 	// Graph.Serve, que pide al daemon la conexión con el destino. Va antes
@@ -171,6 +176,17 @@ type conexionInvitado struct {
 }
 
 func (c *conexionInvitado) Abort() { c.ep.Abort() }
+
+// Split es el reenvío de las conexiones de la pasarela al proxy aparte.
+type Split interface {
+	// Activo: el proxy aparte tiene credenciales; el 80 de la pasarela va a él.
+	Activo() bool
+	// DB: alguna es de base de datos; el resto de puertos también.
+	DB() bool
+	// Forward atiende UNA conexión del invitado a la pasarela en port: la
+	// pasa al proxy y la cierra al terminar.
+	Forward(ctx context.Context, c net.Conn, port int)
+}
 
 // PGProxy es lo que la red necesita del proxy de bases de datos
 // (*credproxy.Proxy): si tiene algo que hacer y atender una conexión dado el
@@ -384,13 +400,68 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 			return nil, fmt.Errorf("credential proxy listener: %w", err)
 		}
 		n.cred = credproxy.NewServer(cfg.Credentials)
-		go func() { _ = n.cred.Serve(l) }()
+		var ln net.Listener = l
+		if cfg.Split != nil {
+			ln = n.desviar(l)
+		}
+		go func() { _ = n.cred.Serve(ln) }()
 	}
 
 	n.wg.Add(2)
 	go n.rxLoop()
 	go n.txLoop()
 	return n, nil
+}
+
+// desviar envuelve el listener del 80 de la pasarela: mientras el proxy
+// aparte está activo, cada conexión va a él (Split.Forward); si no, al proxy
+// propio (n.cred), como siempre. Se decide al aceptar, así que una conexión
+// abierta antes de que el daemon encendiera el proxy aparte sigue donde
+// estaba.
+func (n *Net) desviar(l net.Listener) net.Listener {
+	d := &desvio{Listener: l, ch: make(chan net.Conn), done: make(chan struct{})}
+	go func() {
+		defer close(d.done)
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				d.err = err
+				return
+			}
+			if n.cfg.Split.Activo() {
+				go n.cfg.Split.Forward(n.ctx, c, 80)
+				continue
+			}
+			select {
+			case d.ch <- c:
+			case <-n.ctx.Done():
+				_ = c.Close()
+				return
+			}
+		}
+	}()
+	return d
+}
+
+// desvio es el listener que ve el proxy propio: solo las conexiones que no
+// se llevó el proxy aparte.
+type desvio struct {
+	net.Listener
+	ch   chan net.Conn
+	done chan struct{}
+	err  error
+}
+
+func (d *desvio) Accept() (net.Conn, error) {
+	select {
+	case c := <-d.ch:
+		return c, nil
+	case <-d.done:
+		if d.err != nil {
+			return nil, d.err
+		}
+		return nil, net.ErrClosed
+	}
 }
 
 // VMFile es el extremo del socketpair que se entrega al framework.
@@ -507,6 +578,17 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 			r.Complete(false)
 			return &conexionInvitado{TCPConn: gonet.NewTCPConn(&wq, ep), ep: ep}, nil
 		}, func() { r.Complete(true) })
+		return
+	}
+	if dst == GatewayIP && n.cfg.Split != nil && n.cfg.Split.DB() {
+		var wq waiter.Queue
+		ep, err := r.CreateEndpoint(&wq)
+		if err != nil {
+			r.Complete(true)
+			return
+		}
+		r.Complete(false)
+		n.cfg.Split.Forward(n.ctx, gonet.NewTCPConn(&wq, ep), int(id.LocalPort))
 		return
 	}
 	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.DBActivo() {

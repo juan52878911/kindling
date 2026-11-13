@@ -177,13 +177,18 @@ func initArgs(cfg config, netArgs []string) []string {
 		"androidboot.redroid_height="+cfg.Height,
 		"androidboot.redroid_dpi="+cfg.DPI,
 		"androidboot.redroid_fps="+cfg.FPS,
-		"androidboot.redroid_gpu_mode=guest", // SwiftShader en CPU
-		"androidboot.use_memfd=true",         // 6.1 no tiene ashmem
+		// guest = SwiftShader en CPU; host = Mesa sobre la GPU del invitado
+		// (virtio-gpu con virgl), ANDROID_GPU_MODE en android.conf.
+		"androidboot.redroid_gpu_mode="+cfg.GPUMode,
+		"androidboot.use_memfd=true", // 6.1 no tiene ashmem
 		"ro.setupwizard.mode=DISABLED",
 		// La serie de fábrica: la de cada clon la pone identity.go en su sitio
 		// (misma longitud máxima que cualquier valor: 91 bytes).
 		"androidboot.serialno="+goldenSerial,
 	)
+	if cfg.GPUNode != "" {
+		args = append(args, "androidboot.redroid_gpu_node="+cfg.GPUNode)
+	}
 	if cfg.AdbSecure {
 		args = append(args, "ro.adb.secure=1")
 	}

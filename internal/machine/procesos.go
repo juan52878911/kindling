@@ -35,6 +35,35 @@ func vmmDeLinea(linea, prefix string) string {
 	return id
 }
 
+// argsCredproxy lee la línea de órdenes de un kling-credproxy (macOS,
+// credproxy_vz.go): "<bin> --vmm-pid N --dir DIR", con --dir el último porque
+// DIR puede llevar espacios. ok es false si no tiene esa forma.
+func argsCredproxy(linea string) (vmm int, dir string, ok bool) {
+	const marcaPID, marcaDir = " --vmm-pid ", " --dir "
+	i := strings.Index(linea, marcaPID)
+	if i < 0 {
+		return 0, "", false
+	}
+	resto := linea[i+len(marcaPID):]
+	num, dir, ok := strings.Cut(resto, marcaDir)
+	if !ok || num == "" || dir == "" || !strings.HasPrefix(dir, "/") {
+		return 0, "", false
+	}
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return 0, "", false
+		}
+		vmm = vmm*10 + int(c-'0')
+		if vmm > 1<<30 {
+			return 0, "", false
+		}
+	}
+	if vmm == 0 {
+		return 0, "", false
+	}
+	return vmm, dir, true
+}
+
 // vmmsDeTabla es liveVMs sobre una tabla ya leída: id de máquina -> pid.
 func vmmsDeTabla(tabla map[int]string, prefix string) map[string]int {
 	out := map[string]int{}
