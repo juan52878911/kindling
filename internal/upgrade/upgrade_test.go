@@ -416,11 +416,42 @@ func TestMismaVersionYAnterior(t *testing.T) {
 
 	m = nuevoMontaje(t)
 	m.d.version = "v1.2.0"
-	_, err = Actualizar(context.Background(), m.opciones())
+	o = m.opciones()
+	o.Etiqueta = "v1.1.0"
+	_, err = Actualizar(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "older") {
 		t.Fatalf("downgrade without -force: %v", err)
 	}
 	m.noTocado(t)
+}
+
+// Desde una pre-release, /releases/latest (que no las cuenta) puede ser más
+// vieja: sin -tag no se baja nada y se dice que no hay una estable más nueva.
+func TestLatestMasViejaQueLaRCNoBajaNada(t *testing.T) {
+	m := nuevoMontaje(t)
+	m.d.version = "v1.0.0-rc.2"
+	m.rel.etiqueta = "v0.20.1"
+	res, err := Actualizar(context.Background(), m.opciones())
+	if err != nil || !res.AlDia {
+		t.Fatalf("latest older than the rc: %v %+v", err, res)
+	}
+	if strings.Join(m.rel.pedidos, " ") != "/releases/latest" {
+		t.Errorf("downloaded something: %v", m.rel.pedidos)
+	}
+	if out := m.out.String(); !strings.Contains(out, "no stable release is newer") || !strings.Contains(out, "-tag") {
+		t.Errorf("output: %q", out)
+	}
+	m.noTocado(t)
+
+	// La final sí es más nueva que su rc: se actualiza.
+	m = nuevoMontaje(t)
+	m.d.version = "v1.1.0-rc.2"
+	if _, err := Actualizar(context.Background(), m.opciones()); err != nil {
+		t.Fatalf("rc.2 -> final: %v", err)
+	}
+	if leer(t, m.bin) != string(m.nuevo) {
+		t.Error("the final release was not installed over its rc")
+	}
 }
 
 func TestEnSecoNoCambiaNada(t *testing.T) {

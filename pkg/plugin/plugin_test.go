@@ -314,7 +314,7 @@ func TestMaxAPI(t *testing.T) {
 	if w := got.APIWarning(got.MaxAPI); w != "" {
 		t.Fatalf("aviso con el mismo API: %q", w)
 	}
-	if w := got.APIWarning(got.MaxAPI + 1); !strings.Contains(w, "kling plugins install x") {
+	if w := got.APIWarning(got.MaxAPI + 1); !strings.Contains(w, "kling plugin install x") {
 		t.Fatalf("sin aviso, o sin decir qué hacer, con un daemon más nuevo: %q", w)
 	}
 	// Una extensión anterior al campo se escribió para el API 1.
@@ -340,6 +340,11 @@ func TestVersionAtLeast(t *testing.T) {
 		{"1.0", "0.9.9", true},
 		{"dev", "9.9.9", true}, // compilado a mano: no se le bloquea
 		{"0.1.0", "", true},
+		// Una pre-release va antes que su versión.
+		{"v1.0.0-rc.2", "1.0.0", false},
+		{"1.0.0", "1.0.0-rc.2", true},
+		{"1.0.0-rc.10", "1.0.0-rc.2", true},
+		{"1.0.0-rc.2", "1.0.0-rc.10", false},
 	}
 	for _, c := range casos {
 		if got := VersionAtLeast(c.have, c.want); got != c.ok {

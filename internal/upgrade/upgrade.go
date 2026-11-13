@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
 // Pieza es un binario instalado que se cambia por un asset de la release.
@@ -183,6 +183,14 @@ func Actualizar(ctx context.Context, o Opciones) (*Resultado, error) {
 			return nil, err
 		}
 		etiqueta = t
+		// /releases/latest no apunta a pre-releases: desde una rc puede ser
+		// más vieja que la que corre. Bajarla solo serviría para negarse.
+		if anterior(etiqueta, res.Desde) && !o.Forzar {
+			res.Hacia, res.AlDia = etiqueta, true
+			o.printf("no stable release is newer than %s (the latest is %s): nothing to do; "+
+				"pick a release with -tag vX.Y.Z\n", res.Desde, etiqueta)
+			return res, nil
+		}
 	}
 	if etiqueta != "" && mismaVersion(etiqueta, res.Desde) && !o.Forzar {
 		res.Hacia, res.AlDia = etiqueta, true
@@ -985,10 +993,12 @@ func mismaVersion(a, b string) bool {
 	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
 }
 
-// anterior dice si a es una versión estrictamente anterior a b por sus tres
-// números. Un build de desarrollo de la misma (v0.17.0-12-gabc) no lo es.
+// anterior dice si a es una versión estrictamente anterior a b como semver
+// (buildver.Compare): 1.0.0-rc.2 es anterior a 1.0.0. Un build de desarrollo
+// de la misma (v0.17.0-12-gabc) no lo es, ni una que no se puede leer ("dev").
 func anterior(a, b string) bool {
-	return plugin.VersionAtLeast(b, a) && !plugin.VersionAtLeast(a, b)
+	c, ok := buildver.Compare(a, b)
+	return ok && c < 0
 }
 
 // ---- verificación
