@@ -926,3 +926,35 @@ func TestKlingGraph(t *testing.T) {
 		t.Fatal("the network was not given the graph")
 	}
 }
+
+// Los errores se registran con el principio de su cuerpo (faultRecorder):
+// una credencial rechazada no puede dejar su clave en `kling logs`, ni con el
+// proxy apagado, ni con un campo que no valida, ni con un JSON roto.
+func TestErroresDeCredencialesNoRegistranLaClave(t *testing.T) {
+	r := newRig(t)
+	var log strings.Builder
+	r.srv.d.Logf = func(format string, args ...any) { fmt.Fprintf(&log, format+"\n", args...) }
+	const sk = "sk-SECRETO-que-no-debe-salir-0123456789"
+	const ak = "AKIAREALQUENODEBESALIR"
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"K","domain":"api.example.com","placeholder":"kling-cred-a","secret":"`+sk+`"}]}`, "no credential proxy")
+	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
+	r.srv.d.CredIP = netip.MustParseAddr("172.16.0.1")
+	r.must("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["other.org"]}`)
+	for _, body := range []string{
+		`{"credentials":[{"env":"K","domain":"*.example.com","placeholder":"kling-cred-a","secret":"` + sk + `"}]}`,
+		`{"credentials":[{"env":"K","domain":"api.example.com","placeholder":"nope","secret":"` + sk + `"}]}`,
+		`{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"` + sk + `","kind":"postgres"}]}`,
+		`{"credentials":[{"env":"AWS_ACCESS_KEY_ID","domain":"s3.example.com","placeholder":"kling-cred-sv","secret":"` + sk + `","kind":"sigv4","access_key_id":"` + ak + `","region":"NO VALE"}]}`,
+		`{"credentials":[{"env":"K","domain":"api.example.com","placeholder":"kling-cred-a","secret":"` + sk + `",}]}`,
+	} {
+		if code, _ := r.call("PUT", "/kling/credentials", body); code < 400 {
+			t.Fatalf("aceptó una credencial inválida: %s", body)
+		}
+	}
+	if log.Len() == 0 {
+		t.Fatal("no se registró ningún error: la prueba no mira nada")
+	}
+	if s := log.String(); strings.Contains(s, sk) || strings.Contains(s, ak) {
+		t.Fatalf("una clave acabó en el registro de errores:\n%s", s)
+	}
+}
