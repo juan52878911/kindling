@@ -17,6 +17,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
 - arm64 guest kernel: on an Apple M4 under kling-vz it no longer advertises `sve2`, `svei8mm` and `svebf16` without `sve`, so OpenSSL (and Python's `cryptography`) no longer die with `Illegal instruction`; SVE stays on hosts that have it. The kernel builder now applies `scripts/builders/kernel/patches/` (#183).

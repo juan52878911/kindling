@@ -184,8 +184,63 @@ con acceso público restringido a una IP): desde una microVM del laboratorio, co
 marcador, el proxy entra con **SCRAM-SHA-256-PLUS** (channel binding sobre TLS verificado
 con el paquete regional de CAs de RDS), consulta y cancela `pg_sleep`; sin `-ca-file` el
 proxy se niega (`upstream_tls`: la CA de RDS no está entre las raíces del sistema), así
-que la contraseña nunca sale; un marcador inventado se rechaza sin tocar RDS. Neon,
-Supabase y pgbouncer siguen sin probar de verdad (#63).
+que la contraseña nunca sale; un marcador inventado se rechaza sin tocar RDS. Neon y
+Supabase siguen sin probar de verdad (#63); pgbouncer, sí (ver abajo).
+
+### pgbouncer
+
+pgbouncer es un servidor más para el proxy: se le da como `-upstream` (o sin
+`-upstream` si tiene IP pública y un certificado para su nombre), con TLS verificado y
+SCRAM-SHA-256. Un pgbouncer con su CA propia, en el host o en la LAN:
+
+```sh
+printf '%s' "$PGPASS" | kling machine credential agente -type postgres \
+  -domain db.internal -user app -database appdb \
+  -upstream 10.0.3.30:6432 -ca-file pgbouncer-ca.pem -tls-server-name pgbouncer.lan \
+  -env PGPASSWORD
+```
+
+Lo que pide al pgbouncer:
+
+- `auth_type = scram-sha-256`. En `auth_file` vale el secreto SCRAM del rol (la columna
+  `rolpassword` de `pg_authid`, `SCRAM-SHA-256$4096:…`): pgbouncer entra con él en el
+  servidor porque el proxy se autentica con SCRAM. `md5` no sirve (el proxy no lo
+  admite).
+- Para TLS, `client_tls_sslmode` (`prefer` o `require`) con `client_tls_key_file` y
+  `client_tls_cert_file`. pgbouncer no ofrece SCRAM-SHA-256-PLUS: la auditoría anota
+  `scram-sha-256` (sin channel binding), que es lo esperado. Con `-upstream-tls disable`
+  (sin TLS, solo SCRAM) también entra.
+- **Parámetros de arranque**: pgbouncer rechaza los que no conoce, y el proxy los pasa
+  tal cual. JDBC manda `extra_float_digits`: sin
+  `ignore_startup_parameters = extra_float_digits` en el pgbouncer, el invitado recibe
+  `08006` con `upstream SQLSTATE 08P01` (el texto del servidor no se reenvía). Lo mismo
+  con `options` y cualquier otro que el cliente mande.
+- **Protocolo 3.2**: un pgbouncer anterior a 1.25 corta el arranque en 3.2 con `08P01`
+  ("bad packet header") en vez de negociar. El proxy lo ve, repite una vez en 3.0 y el
+  invitado sigue en 3.2 sin notarlo (el log del host lo avisa una vez por credencial; si el `08P01` venía de otra cosa,
+  como un parámetro, el segundo intento falla igual y el invitado recibe el error).
+  Un libpq 18 con `max_protocol_version=3.2` que vaya directo a ese pgbouncer no
+  conecta; por el proxy, sí.
+
+**Modo `transaction`**: el proxy no añade nada al modo del pool. Tras autenticarse pasa
+los bytes y no mira el SQL, así que vale lo mismo que sin proxy: lo que dependa de la
+sesión del servidor (`SET` fuera de una transacción, `PREPARE` y sentencias preparadas
+del protocolo extendido, `LISTEN`, bloqueos consultivos, tablas temporales) no está
+garantizado de una transacción a la siguiente, porque cada una puede ir a otra conexión
+del servidor. Es la limitación de pgbouncer, no del proxy; en modo `session` todo eso
+funciona. La cancelación funciona en los dos modos: el proxy cambia la clave falsa por
+la que dio pgbouncer, y pgbouncer la lleva a la conexión del servidor que esté
+ejecutando la consulta.
+
+**Probado de verdad** (2026-11-13, laboratorio, pgbouncer 1.18.0 y PostgreSQL 15.19 de
+Debian 12, daemon Linux de `main`): la sección 7d de `scripts/90-e2e.sh` pasa entera
+(10/10) contra pgbouncer en modo `session` y en modo `transaction`, cada uno con TLS
+verify-full con CA propia (`-ca-file`, verificando por el nombre y por la IP con
+`-tls-server-name`) y con `-upstream-tls disable`. Además, en los dos modos: un
+`pg_sleep` cancelado (57014) y la conexión sigue viva; seis conexiones a la vez sobre un
+pool de dos conexiones del servidor; sin `-ca-file` el proxy se niega (`upstream_tls`) y
+la clave no sale; un parámetro desconocido da `08P01` como arriba; y un arranque en 3.2
+entra tras repetir en 3.0 (antes de este arreglo, fallaba con `08P01`).
 
 ## El cliente dentro de la microVM
 
@@ -238,8 +293,10 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
   `NegotiateProtocolVersion` con 3.0 o 3.2. Al servidor se le pide la misma: uno
   anterior a PostgreSQL 18 contesta 3.0 y el proxy sigue en 3.0 con él sin que el
   cliente lo note (la clave falsa del cliente tiene la longitud de su versión, 4 o 32
-  bytes; la real, la del servidor). Las opciones `_pq_.` no se pasan: se contestan con
-  `NegotiateProtocolVersion`.
+  bytes; la real, la del servidor). Un servidor que, en vez de negociar, corta el
+  arranque en 3.2 con `08P01` (pgbouncer anterior a 1.25) recibe un segundo intento en
+  3.0, en otra conexión y antes de mandar nada de la clave. Las opciones `_pq_.` no se
+  pasan: se contestan con `NegotiateProtocolVersion`.
 - La contraseña, ASCII imprimible. 32 conexiones a la vez por máquina, 10 s para que el
   invitado mande arranque y contraseña, 15 s para toda la autenticación. Sin
   conexiones de replicación.
