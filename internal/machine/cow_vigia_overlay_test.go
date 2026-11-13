@@ -92,7 +92,7 @@ func TestVigiaOverlaysNoReMideTrasThaw(t *testing.T) {
 	for _, id := range []string{"thaw", "reinicio"} {
 		mc := m.addForTest(id)
 		m.mu.Lock()
-		mc.StartedAt, mc.PID = &antes, 100
+		mc.StartedAt = &antes
 		m.mu.Unlock()
 		overlayDe(t, m, id, int64(defaultOverlayMiB)<<20)
 	}
@@ -103,7 +103,7 @@ func TestVigiaOverlaysNoReMideTrasThaw(t *testing.T) {
 	// Thaw: ejecución nueva, y el fichero crece antes del primer vistazo.
 	ahora := time.Now()
 	m.mu.Lock()
-	m.byID["thaw"].StartedAt, m.byID["thaw"].PID = &ahora, 200
+	m.byID["thaw"].StartedAt = &ahora
 	m.mu.Unlock()
 	overlayDe(t, m, "thaw", 10<<30)
 	if p := m.vueltaVigiaOverlays(); !slices.Equal(p, []string{"thaw"}) {
@@ -136,13 +136,17 @@ func TestVigiaOverlaysNoReMideTrasThaw(t *testing.T) {
 }
 
 // stopSi no para la máquina si ya no está en la ejecución que se midió.
+//
+// Las máquinas de estos tests no tienen VMM (PID 0): un PID inventado puede ser
+// un proceso real del host, y Stop le mandaría la señal. La ejecución se
+// distingue por StartedAt.
 func TestStopSiNoParaOtraEjecucion(t *testing.T) {
 	m := newTestManager(t)
 	m.bus = events.New()
 	ahora := time.Now()
 	mc := m.addForTest("m")
 	m.mu.Lock()
-	mc.StartedAt, mc.PID = &ahora, 300
+	mc.StartedAt = &ahora
 	m.mu.Unlock()
 	antes := ahora.Add(-time.Minute)
 	if _, err := m.stopSi("m", func(mc *api.Machine) bool { return mc.StartedAt.Equal(antes) }); !errors.Is(err, errOtraEjecucion) {
