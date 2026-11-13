@@ -178,6 +178,22 @@ func TestRespaldoDelEstadoSoloLoLeeElDaemon(t *testing.T) {
 	}
 }
 
+// Una raíz de otro dueño que el daemon no se toca: ni modo ni grupo.
+func TestRaizAjenaNoSeToca(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cerrarRaiz(root, &Privileges{}, os.Geteuid()+1)
+	if m := modo(t, root); m != 0o755 {
+		t.Errorf("raíz ajena = %o, quería 0755 intacta", m)
+	}
+	cerrarRaiz(root, &Privileges{}, os.Geteuid())
+	if m := modo(t, root); m != 0o750 {
+		t.Errorf("raíz propia = %o, quería 0750", m)
+	}
+}
+
 // NewManager crea la raíz, machines/ e images/ cerradas a los demás.
 func TestNewManagerCreaLosDirectoriosCerrados(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "kindling")

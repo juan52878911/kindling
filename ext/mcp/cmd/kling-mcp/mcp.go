@@ -391,11 +391,22 @@ func mcpImport(args []string) error {
 		// Las que el gateway despertó del snapshot viejo mientras se importaba.
 		retirarInstancias(mc.ID)
 	}
-	if _, err := c.Commit(ctx, mc.ID, service, *force); err != nil {
+	_, err = c.Commit(ctx, mc.ID, service, *force)
+	if err != nil && *force && enUsoAlReemplazar(err) {
+		// El gateway despertó otra justo entre la retirada y el commit: una
+		// vez más.
+		retirarInstancias(mc.ID)
+		_, err = c.Commit(ctx, mc.ID, service, true)
+	}
+	if err != nil {
 		fmt.Println("✗")
 		cleanup()
 		if strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("service %q already exists; use -force to replace it", service)
+		}
+		if *force && enUsoAlReemplazar(err) {
+			return fmt.Errorf("couldn't replace %q: instances woke up from the old snapshot while importing (%w); "+
+				"the old one is still there: run the same import again", service, err)
 		}
 		return fmt.Errorf("couldn't freeze it: %w", err)
 	}
@@ -1126,4 +1137,10 @@ func mcpInspect(args []string) error {
 		fmt.Printf("  %-32s %s\n", t.Name, d)
 	}
 	return nil
+}
+
+// enUsoAlReemplazar dice si un commit -replace se negó porque el snapshot viejo
+// tiene instancias vivas o está en uso: un 409 que no es "already exists".
+func enUsoAlReemplazar(err error) bool {
+	return isConflict(err) && !strings.Contains(err.Error(), "already exists")
 }

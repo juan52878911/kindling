@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/digest"
+	"github.com/juan52878911/kindling/internal/ext4"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -247,15 +249,21 @@ func (m *Manager) doradosSobre(image string) []string {
 	return out
 }
 
-// sinTocarEsIgual mira con debugfs, en solo lectura, si dentro de file ya está
-// y tiene el digest quiero. Ante cualquier duda (sin debugfs, ruta rara, un
-// whiteout, un enlace) dice que existe y no es igual: lo prudente con un
-// dorado encima es negarse.
+// sinTocarEsIgual mira, en solo lectura, si dentro de file ya está y tiene el
+// digest quiero. Con debugfs (confinado como siempre) y, si no lo hay, con el
+// lector de ext4 en Go: en Linux put monta la imagen y no necesita debugfs, y
+// sin esta vía todo refresh con una plantilla encima se negaría aunque ya
+// estuviera al día. Ante cualquier duda (ruta rara, un whiteout, un enlace,
+// un ext4 que el lector no entiende) dice que existe y no es igual: lo
+// prudente con un dorado encima es negarse.
 func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, igual bool) {
-	bin := debugfsBin()
 	limpio := path.Clean("/" + dentro)
-	if bin == "" || nombreDebugfs(limpio) != nil {
+	if nombreDebugfs(limpio) != nil {
 		return true, false
+	}
+	bin := debugfsBin()
+	if bin == "" {
+		return sinTocarEsIgualGo(file, limpio, quiero)
 	}
 	im := imagenDebugfs{bin: bin, file: file}
 	e, err := im.stat(ctx, limpio)
@@ -270,4 +278,41 @@ func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, 
 	}
 	tengo, err := im.sha256De(ctx, limpio)
 	return true, err == nil && tengo == quiero
+}
+
+// sinTocarEsIgualGo es sinTocarEsIgual con internal/ext4. La imagen no es de
+// fiar: un pánico del lector se queda en "no es igual", no tumba el daemon.
+func sinTocarEsIgualGo(file, limpio, quiero string) (existe, igual bool) {
+	existe = true
+	defer func() {
+		if recover() != nil {
+			existe, igual = true, false
+		}
+	}()
+	f, err := os.Open(file)
+	if err != nil {
+		return true, false
+	}
+	defer f.Close()
+	raiz, err := ext4.Read(f)
+	if err != nil {
+		return true, false
+	}
+	n := raiz.Lookup(limpio)
+	if n == nil {
+		return false, false
+	}
+	if !n.IsReg() {
+		return true, false
+	}
+	rc, err := n.Open()
+	if err != nil {
+		return true, false
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return true, false
+	}
+	return true, hex.EncodeToString(h.Sum(nil)) == quiero
 }
