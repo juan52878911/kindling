@@ -642,6 +642,11 @@ gateway **never forwards its own token** to guests or third-party URLs — a com
 MCP server must not walk away with the aggregator's credential. When one token is shared
 by several tenants, **per-token quotas** keep one of them from starving the rest.
 
+The token travels with every request, so outside loopback the gateway **only serves
+HTTPS**: give it `-tls-cert cert.pem -tls-key key.pem`. Listening on a LAN address without
+them is refused; `-insecure-listen` allows plain HTTP knowingly (on a trusted network, or
+behind a proxy that terminates TLS).
+
 Measured end to end with a real MCP server inside the microVM:
 
 | Path | Latency |
@@ -682,7 +687,8 @@ imported. `-hosts` (or the `mcp.hosts` config key, same format) points one gatew
 several of them instead of one:
 
 ```sh
-kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080 \
+  -tls-cert /etc/kling/gateway.crt -tls-key /etc/kling/gateway.key
 ```
 
 `/mcp/<service>` goes to the host that has it in its catalog; if more than one does, to

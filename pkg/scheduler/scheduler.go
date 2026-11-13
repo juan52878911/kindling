@@ -353,6 +353,9 @@ type entry struct {
 	// se cortan: el cliente ve el fin del stream en vez de colgarse contra un
 	// invitado pausado. Se toca con g.mu.
 	streams map[uint64]context.CancelFunc
+	// streamDe es el stream de cada sesión (clave de sesión -> id en streams):
+	// uno por sesión como mucho, ver beginStream. Se toca con g.mu.
+	streamDe map[string]uint64
 
 	// maxSessions es cuántas sesiones (procesos servidor) caben en ESTA instancia,
 	// derivado de su memoria con la misma fórmula que el puente (ver gwMaxSessions).
@@ -419,19 +422,62 @@ var streamSeq atomic.Uint64
 // No toca inflight ni lastUse (ver entry.streams): un stream abierto no impide
 // congelar la instancia. Si e ya no está en el mapa, cortar no sirve de nada y
 // se corta al momento.
-func (g *Scheduler) beginStream(e *entry, cortar context.CancelFunc) (end func()) {
+//
+// sesion es la conversación del stream: cada una tiene como mucho UNO, y el
+// nuevo sustituye al anterior (que se corta). Un cliente que reconecta sin
+// haber cerrado el de antes, o uno que abre GET en bucle, no acumula streams ni
+// goroutines. Vacío = sin conversación conocida, sin tope por sesión.
+func (g *Scheduler) beginStream(e *entry, sesion string, cortar context.CancelFunc) (end func()) {
 	id := streamSeq.Add(1)
 	g.mu.Lock()
+	if !g.enMapaLocked(e) {
+		g.mu.Unlock()
+		cortar()
+		return func() {}
+	}
 	if e.streams == nil {
 		e.streams = map[uint64]context.CancelFunc{}
+	}
+	if sesion != "" {
+		if e.streamDe == nil {
+			e.streamDe = map[string]uint64{}
+		}
+		if prev, ok := e.streamDe[sesion]; ok {
+			if c := e.streams[prev]; c != nil {
+				c()
+			}
+			delete(e.streams, prev)
+		}
+		e.streamDe[sesion] = id
 	}
 	e.streams[id] = cortar
 	g.mu.Unlock()
 	return func() {
 		g.mu.Lock()
 		delete(e.streams, id)
+		if sesion != "" && e.streamDe[sesion] == id {
+			delete(e.streamDe, sesion)
+		}
 		g.mu.Unlock()
 	}
+}
+
+// enMapaLocked dice si e sigue siendo una instancia del gateway (primaria o
+// réplica de algún servicio). Se llama con g.mu tomado.
+func (g *Scheduler) enMapaLocked(e *entry) bool {
+	for _, p := range g.services {
+		if p == e {
+			return true
+		}
+	}
+	for _, es := range g.extra {
+		for _, x := range es {
+			if x == e {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cortarStreamsLocked corta los streams abiertos sobre e. Cancelar un contexto
@@ -441,6 +487,7 @@ func (e *entry) cortarStreamsLocked() {
 		cortar()
 		delete(e.streams, id)
 	}
+	e.streamDe = nil
 }
 
 // sessionRoute recuerda a qué instancia pertenece cada sesión MCP.

@@ -75,6 +75,9 @@ func cmdGateway(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
 	sessionTTL := fs.Duration("session-ttl", 0, "an isolated session (mcp isolation session) unused this long is closed and its microVM destroyed (default 30m)")
 	maxReplicas := fs.Int("max-replicas", defaultMaxReplicas, "max instances per service when scaling out for parallel sessions (0 = unlimited; extra sessions get 503)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate (PEM) to serve HTTPS; required to listen outside loopback")
+	tlsKey := fs.String("tls-key", "", "private key (PEM) of -tls-cert")
+	insecure := fs.Bool("insecure-listen", false, "allow plain HTTP on a non-loopback address (tokens travel in the clear)")
 	hostsFlag := fs.String("hosts", "", "several daemons instead of one: name=endpoint,name2=endpoint2 (default: mcp.hosts, or one host, the active context)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -104,6 +107,12 @@ func cmdGateway(args []string) error {
 	if *pprofOn && !scheduler.IsLoopback(addr) {
 		return fmt.Errorf("-pprof requires listening on loopback, and %q is not.\n"+
 			"Diagnose over a tunnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
+	}
+
+	// Fuera de loopback los tokens solo viajan cifrados, salvo -insecure-listen.
+	tlsCfg, err := configEscucha(addr, *tlsCert, *tlsKey, *insecure)
+	if err != nil {
+		return err
 	}
 
 	// El token se resuelve aquí, con el resto de la validación de argumentos y
@@ -234,9 +243,16 @@ func cmdGateway(args []string) error {
 
 	// El gateway escucha en red; el daemon no. Por defecto solo en loopback:
 	// abrirlo al mundo debe ser una decisión consciente.
-	fmt.Printf("gateway at http://%s\n", *listen)
-	fmt.Printf("  tool:         http://%s/mcp/<service>\n", *listen)
-	fmt.Printf("  inventory:    http://%s/services\n", *listen)
+	esquema := "http"
+	if tlsCfg != nil {
+		esquema = "https"
+	}
+	fmt.Printf("gateway at %s://%s\n", esquema, *listen)
+	fmt.Printf("  tool:         %s://%s/mcp/<service>\n", esquema, *listen)
+	fmt.Printf("  inventory:    %s://%s/services\n", esquema, *listen)
+	if tlsCfg == nil && !scheduler.IsLoopback(*listen) {
+		fmt.Printf("  WARNING:      plain HTTP outside loopback (-insecure-listen): tokens travel in the clear\n")
+	}
 	fmt.Printf("  idle:         %s before freezing\n", *idle)
 	if len(routerHosts) > 1 {
 		fmt.Printf("  hosts:        %d\n", len(routerHosts))
@@ -253,7 +269,7 @@ func cmdGateway(args []string) error {
 		fmt.Printf("  auth:         Authorization: Bearer <token>  ·  /healthz open\n")
 	}
 	if *pprofOn {
-		fmt.Printf("  pprof:        ACTIVE at http://%s/debug/pprof/ (behind the token) — turn it off when done\n", *listen)
+		fmt.Printf("  pprof:        ACTIVE at %s://%s/debug/pprof/ (behind the token) — turn it off when done\n", esquema, *listen)
 	}
 	if memSvc != "" {
 		fmt.Printf("  memory:       active on %q — ranks searches by what already worked\n", memSvc)
@@ -279,7 +295,11 @@ func cmdGateway(args []string) error {
 		fmt.Printf("  paused:       up to %d MiB of idle instances paused instead of frozen\n", *pausedMiB)
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := escuchar(*listen, tlsCfg)
+	if err != nil {
+		return err
+	}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil

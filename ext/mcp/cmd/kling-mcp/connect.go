@@ -109,7 +109,7 @@ func cmdConnect(args []string) error {
 	if info, tools, err := probeMCP(url, token); err != nil {
 		fmt.Printf("Status:    ✗ %v\n\n", err)
 		fmt.Println("Start the gateway on the daemon host:")
-		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080")
+		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080 -tls-cert <cert> -tls-key <key>")
 	} else {
 		fmt.Printf("Status:    ✓ %s · %d tool(s): %s\n", info, len(tools), strings.Join(tools, ", "))
 	}
@@ -446,7 +446,7 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 	}
 	fmt.Printf("\nGateway: %s\n", gw)
 	fmt.Println("  If it's not running yet, on the daemon host:")
-	fmt.Println("    kling mcp serve -listen 0.0.0.0:8080")
+	fmt.Println("    kling mcp serve -listen 0.0.0.0:8080 -tls-cert <cert> -tls-key <key>")
 	if list := detectedClients(); len(list) > 0 {
 		fmt.Printf("\nAgents detected here: %s\n", labels(list))
 	}

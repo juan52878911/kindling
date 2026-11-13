@@ -128,6 +128,13 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	// Solo el initialize abre conversación. Cualquier otra petición sin sesión
+	// dejaba una acuñada por cada POST, que nadie iba a usar y que ocupaba
+	// memoria hasta el segador. Streamable HTTP pide 400 en ese caso.
+	if r.Header.Get(SessionHeader) == "" && req.Method != "initialize" {
+		api.HTTPError(w, "no MCP session: start one with initialize", http.StatusBadRequest)
+		return
+	}
 	// La misma cuota de peticiones en vuelo que /mcp/<servicio>. Este es el
 	// camino de los clientes reales (call_tool), y sin ella un tenant con
 	// MaxInflight no tenía tope aquí.
