@@ -236,6 +236,18 @@ func restringirRaiz(root string, p *Privileges) {
 	if fi, err := os.Lstat(filepath.Join(root, "jails")); err == nil && fi.IsDir() {
 		_ = os.Chmod(filepath.Join(root, "jails"), 0o700)
 	}
+	// La raíz, 0750: el VMM sin jailer (KLING_JAILER=0) la atraviesa con el
+	// grupo del servicio, así que con usuario de servicio primero el grupo y,
+	// si no se puede poner, se deja como estaba para no dejarlo fuera. Sin
+	// usuario de servicio todo corre con el uid del daemon y basta el modo.
+	if fi, err := os.Lstat(root); err == nil && fi.IsDir() && fi.Mode().Perm()&0o007 != 0 {
+		if p.Enabled {
+			if os.Lchown(root, -1, p.GID) != nil {
+				return
+			}
+		}
+		_ = os.Chmod(root, 0o750)
+	}
 }
 
 // cerrarVolcado quita la lectura a los demás de un volcado recién escrito

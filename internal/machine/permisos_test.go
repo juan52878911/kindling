@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/esquema"
+	"github.com/juan52878911/kindling/internal/events"
 )
 
 func modo(t *testing.T, ruta string) os.FileMode {
@@ -87,8 +90,15 @@ func TestArranqueCierraDirectoriosYVolcadosExistentes(t *testing.T) {
 	if err := os.WriteFile(mem, []byte("ram"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	restringirRaiz(root, &Privileges{})
 	cerrarVolcadosExistentes(root)
+
+	if m := modo(t, root); m != 0o750 {
+		t.Errorf("raíz = %o, quería 0750", m)
+	}
 
 	for _, d := range []string{"machines", "snapshots", "volumes", "images", "jails"} {
 		if m := modo(t, filepath.Join(root, d)); m&0o007 != 0 {
@@ -151,5 +161,34 @@ func TestDarLecturaVMMRespetaLoSuyo(t *testing.T) {
 	darLecturaVMM(f, &Privileges{Enabled: true, UID: os.Getuid(), GID: os.Getgid()})
 	if m := modo(t, f); m != 0o600 {
 		t.Errorf("overlay del VMM = %o, no debía cambiar", m)
+	}
+}
+
+// El respaldo .vN.bak de un state.json de una instalación vieja (0644) es el
+// mismo inventario que state.json: 0600, no el modo del original.
+func TestRespaldoDelEstadoSoloLoLeeElDaemon(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.WriteFile(m.statePath(), []byte(`[]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.load()
+	bak := esquema.RutaRespaldo(m.statePath(), 0)
+	if got := modo(t, bak); got != 0o600 {
+		t.Errorf("%s = %v; quería 0600", filepath.Base(bak), got)
+	}
+}
+
+// NewManager crea la raíz, machines/ e images/ cerradas a los demás.
+func TestNewManagerCreaLosDirectoriosCerrados(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "kindling")
+	m, err := NewManager(root, "firecracker", "", events.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
+		if got := modo(t, d); got&0o007 != 0 {
+			t.Errorf("%s = %o, quería cerrado a los demás", d, got)
+		}
 	}
 }

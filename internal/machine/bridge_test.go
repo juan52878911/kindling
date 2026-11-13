@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,5 +242,70 @@ func TestMontajeDelPutEsPrivadoYSinSuid(t *testing.T) {
 	if mnt, err := m2.dirMontajePut(); err == nil {
 		os.Remove(mnt)
 		t.Fatal("dirMontajePut siguió un enlace en build/")
+	}
+}
+
+// Tampoco la de un dorado (M13): sus clones restauran RAM y overlay congelados
+// sobre ese disco. Se niega como con una máquina viva (Busy, que el daemon da
+// como 409) y dice qué hacer.
+func TestPutImageFileNoTocaLaImagenDeUnDorado(t *testing.T) {
+	m := newTestManager(t)
+	imgs := filepath.Join(m.root, "images")
+	if err := os.MkdirAll(imgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgs, "dorada.ext4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "plantilla", api.Snapshot{Image: "dorada"})
+	agente := filepath.Join(t.TempDir(), "agente")
+	if err := os.WriteFile(agente, []byte("binario"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := m.PutImageFile(t.Context(), "dorada", "/usr/local/bin/kling-guest", agente, 0o755, true)
+	if err == nil || !res.Busy {
+		t.Fatalf("iba a tocar la imagen de un dorado: res=%+v err=%v", res, err)
+	}
+	if res.Updated {
+		t.Error("dice que la actualizó pese a negarse")
+	}
+	for _, quiero := range []string{"plantilla", "kling template rm"} {
+		if !strings.Contains(err.Error(), quiero) {
+			t.Errorf("el error no dice %q: %v", quiero, err)
+		}
+	}
+}
+
+// Con un dorado encima, lo que ya está al día sigue diciéndolo (refresh es
+// idempotente) sin escribir en el ext4; lo que cambiaría, se niega.
+func TestPutImageFileConDoradoAlDiaNoSeNiega(t *testing.T) {
+	actual, _ := fichero(t, "agente\n")
+	_, im := ext4Prueba(t, 16, "mkdir /bin", "cd /bin", "write "+comillas(actual)+" agente")
+	m := newTestManager(t)
+	if err := os.MkdirAll(filepath.Join(m.root, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(im.file, m.imagePath("dorada")); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "plantilla", api.Snapshot{Image: "dorada"})
+	antes, err := os.ReadFile(m.imagePath("dorada"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	igual, _ := fichero(t, "agente\n")
+	res, err := m.PutImageFile(t.Context(), "dorada", "/bin/agente", igual, 0o755, false)
+	if err != nil || res.Busy || res.Updated {
+		t.Fatalf("al día con un dorado: res=%+v err=%v", res, err)
+	}
+	if despues, _ := os.ReadFile(m.imagePath("dorada")); !bytes.Equal(antes, despues) {
+		t.Error("se escribió en la imagen del dorado aunque ya estaba al día")
+	}
+
+	nuevo, _ := fichero(t, "agente nuevo\n")
+	if res, err := m.PutImageFile(t.Context(), "dorada", "/bin/agente", nuevo, 0o755, false); err == nil || !res.Busy {
+		t.Fatalf("contenido nuevo con un dorado: res=%+v err=%v", res, err)
 	}
 }

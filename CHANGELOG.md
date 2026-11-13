@@ -14,6 +14,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
+- `kling image refresh` and `kling image put` refuse (409) to change an image a template was saved from, and say how to rebuild it; images already up to date still report so.
+- `kling mcp import -force` (and `kling mcp heal`) replace the template instead of deleting it first, so its template credentials survive and a failed import keeps the old one.
+
+### Security
+
+- State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
+- `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

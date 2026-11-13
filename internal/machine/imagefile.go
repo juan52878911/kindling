@@ -195,6 +195,28 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 			res.Busy = true
 			return fmt.Errorf("image %q is in use by %d machine(s): %s", image, len(users), strings.Join(users, ", "))
 		}
+		// Ni bajo un dorado, como RemoveImage y la reescritura de blobs: su
+		// overlay y su RAM se congelaron sobre este ext4 (o sobre la capa que
+		// lo tiene de base), y cambiarlo debajo deja a sus clones con un disco
+		// que no casa con la caché de páginas que restauran.
+		//
+		// Sin escribir nada: si ya lleva ese contenido, está al día y no se
+		// monta ni se repara (las dos cosas escriben en el ext4), y si no lo
+		// lleva y no se pidió crearlo, se salta como siempre. Así refresh y
+		// refresh-bridge siguen siendo idempotentes con dorados.
+		if tpls := m.doradosSobre(image); len(tpls) > 0 {
+			switch existe, igual := sinTocarEsIgual(ctx, file, dentro, quiero); {
+			case igual:
+				return nil
+			case !existe && !create:
+				return errNoBridge
+			}
+			res.Busy = true
+			return fmt.Errorf("image %q is used by the golden snapshot(s) %s, which would restore over a changed disk: "+
+				"remove them first (kling template rm <name>), run this again, and re-create them "+
+				"(kling mcp import -force, compose up -fresh, or commit them again)",
+				image, strings.Join(tpls, ", "))
+		}
 		var err error
 		updated, err = m.putOne(ctx, file, dentro, src, quiero, mode, create)
 		return err
@@ -209,4 +231,43 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 		m.OlvidarAgenteDeImagen(image)
 	}
 	return res, err
+}
+
+// doradosSobre son los dorados cuyo disco descansa en image: los hechos de ella
+// y los hechos de una capa que la tiene de base.
+func (m *Manager) doradosSobre(image string) []string {
+	var out []string
+	for _, s := range m.Snapshots() {
+		if s.Image == image {
+			out = append(out, s.Name)
+		} else if b, ok := m.ImageBase(s.Image); ok && b == image {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
+
+// sinTocarEsIgual mira con debugfs, en solo lectura, si dentro de file ya está
+// y tiene el digest quiero. Ante cualquier duda (sin debugfs, ruta rara, un
+// whiteout, un enlace) dice que existe y no es igual: lo prudente con un
+// dorado encima es negarse.
+func sinTocarEsIgual(ctx context.Context, file, dentro, quiero string) (existe, igual bool) {
+	bin := debugfsBin()
+	limpio := path.Clean("/" + dentro)
+	if bin == "" || nombreDebugfs(limpio) != nil {
+		return true, false
+	}
+	im := imagenDebugfs{bin: bin, file: file}
+	e, err := im.stat(ctx, limpio)
+	if err != nil {
+		return true, false
+	}
+	if !e.existe {
+		return false, false
+	}
+	if e.tipo != "regular" || e.blanqueo {
+		return true, false
+	}
+	tengo, err := im.sha256De(ctx, limpio)
+	return true, err == nil && tengo == quiero
 }

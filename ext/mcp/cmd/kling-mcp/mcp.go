@@ -133,15 +133,19 @@ func mcpImport(args []string) error {
 
 	// Reimportar es lo normal cuando cambia la versión del servidor MCP, así que
 	// hay que poder reemplazar: primero se retiran sus instancias, que son las
-	// que impiden borrar el snapshot.
-	if *force {
+	// que impiden reemplazar el snapshot. El snapshot no se borra: el commit lo
+	// reemplaza (-replace), que conserva sus credenciales de plantilla; borrarlo
+	// se las lleva (template rm), y si la importación falla sigue el de antes.
+	retirarInstancias := func(salvo string) {
 		machines, _ := c.List(ctx)
 		for _, m := range machines {
-			if m.From == service || m.Service() == service {
+			if m.ID != salvo && (m.From == service || m.Service() == service) {
 				_ = c.Remove(ctx, m.ID)
 			}
 		}
-		_ = c.RemoveSnapshot(ctx, service)
+	}
+	if *force {
+		retirarInstancias("")
 	}
 
 	// Capacidades de la imagen: detectadas al construirla del árbol de deps. Si
@@ -383,7 +387,11 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
-	if _, err := c.Commit(ctx, mc.ID, service, false); err != nil {
+	if *force {
+		// Las que el gateway despertó del snapshot viejo mientras se importaba.
+		retirarInstancias(mc.ID)
+	}
+	if _, err := c.Commit(ctx, mc.ID, service, *force); err != nil {
 		fmt.Println("✗")
 		cleanup()
 		if strings.Contains(err.Error(), "already exists") {
