@@ -62,3 +62,24 @@ func DiscardStaged(id string) {
 		_ = os.Remove(filepath.Join(dir, "password.new"))
 	}
 }
+
+// ReadStaged lee la contraseña a medias (password.new) con las mismas
+// comprobaciones que ReadPassword; ErrNoPassword si no hay ninguna. La deja
+// una rotación que murió entre cambiar la base y confirmar el fichero.
+func ReadStaged(id string) (string, error) {
+	dir, err := CopyDir(id)
+	if err != nil {
+		return "", err
+	}
+	return readSecret(filepath.Join(dir, "password.new"))
+}
+
+// HasStaged dice si la copia tiene una contraseña a medias.
+func HasStaged(id string) bool {
+	dir, err := CopyDir(id)
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(dir, "password.new"))
+	return err == nil
+}

@@ -15,6 +15,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
 - `kling db clone` reports how many text, JSON, XML, bytea or array columns without a rule were copied unchecked (`-strict` blocks them).
+- `kling db rotate -resume` finishes a rotation that died after changing the database; `connect` and `sql` warn about it.
 
 ### Security
 

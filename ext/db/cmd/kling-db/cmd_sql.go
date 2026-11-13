@@ -86,6 +86,7 @@ func (a *app) sql(ctx context.Context, ref, owner, extraRole, sql string, asJSON
 	if err := checkReady(mc, owner); err != nil {
 		return err
 	}
+	a.warnInterruptedRotate(mc)
 	if engine := engineOf(mc.Labels); engine != enginePostgres {
 		return fmt.Errorf("%s is a %s copy: kling db sql only speaks Postgres; use kling db connect %s -%s", mc.Name, engine, mc.Name, clientMode(engine))
 	}
