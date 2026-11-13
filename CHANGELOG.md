@@ -16,54 +16,34 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
 - `scripts/e2e-mac-release.sh` publishes `failure`, not an earlier run's `success`, when a test fails.
 - The e2e-mac workflow fails when a manual run's `parts` names no test, instead of passing.
-
-### Security
-
-- With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
-- With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
-||||||| c4bc2038
 - `-type sigv4`: temporary STS keys (`ASIA…`) are rejected with a clear error instead of failing on every request.
 - Credential proxy, SigV4: objects stored with a `Content-Encoding` (gzip, br…) reach the guest byte for byte instead of decompressed or as a 502.
 - Credential proxy, SigV4: a body over 1 MiB without `x-amz-content-sha256` gets a 413 that says why.
 - Credential proxy, SigV4: a presigned URL only signs the headers that are still sent, and an aws-chunked trailer is capped at 32 lines.
-||||||| c4bc2038
 - A commit cut by a daemon restart no longer gets a machine started or thawed afterwards killed on the next restart.
 - A pause that times out and whose resume the VMM rejects leaves the machine running instead of failing it ten minutes later.
-||||||| c4bc2038
 - Pre-release versions compare as semver (`1.0.0-rc.2` < `1.0.0`, `rc.2` < `rc.10`): a release candidate no longer meets `min_kling 1.0.0`, and `kling plugin install` without `@tag` works on one.
 - `kling upgrade` without `-tag` on a release candidate no longer downloads an older latest stable release only to refuse it; it says so and points to `-tag`.
 - `go install …@v1.0.0-rc.N` reports its version instead of `dev`.
-||||||| c4bc2038
 - MCP gateway: one SSE stream per session; the stream GET no longer wakes an instance or keeps an isolated session alive.
 - MCP gateway: `/mcp/_all` only opens a session on `initialize`, and unknown service names no longer enter the saved popularity.
-
-### Security
-
-- MCP gateway: `-tls-cert`/`-tls-key` serve HTTPS, and plain HTTP outside loopback is refused unless `-insecure-listen` is given. The packaged systemd unit passes `-insecure-listen` to keep working.
-||||||| c4bc2038
 - kling-hv: a vsock connection whose control packet waited behind a busy one no longer stalls until something else wakes the device thread (a new dial could time out).
 - kling-hv: when a net or vsock device thread stops, `/kling/stats` reports it in `devices_dead` instead of the VM staying `running` silently.
 - kling-hv: every interrupt line update checks the GIC result; the UART no longer records a line as raised when it was not, and failures are logged.
-||||||| c4bc2038
 - A restored copy of a golden snapshot frees the slots of commands and shells left running in it, even when their connection never closes.
-
-### Security
-
-- The guest agent's host-only routes accept TCP only from the host side (the default gateway or the default route); a container on a bridge network inside the guest gets 403.
-||||||| c4bc2038
 - `kling db clone` reports how many text, JSON, XML, bytea or array columns without a rule were copied unchecked (`-strict` blocks them).
 - `kling db rotate -resume` finishes a rotation that died after changing the database; `connect` and `sql` warn about it.
-
-### Security
-
-- `kling db`: with a password set, the Postgres client refuses a server that accepts the login without asking for it.
-- `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
-||||||| c4bc2038
 - `kling image refresh` and `kling image put` refuse (409) to change an image a template was saved from, and say how to rebuild it; images already up to date still report so.
 - `kling mcp import -force` (and `kling mcp heal`) replace the template instead of deleting it first, so its template credentials survive and a failed import keeps the old one.
 
 ### Security
 
+- With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
+- With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
+- MCP gateway: `-tls-cert`/`-tls-key` serve HTTPS, and plain HTTP outside loopback is refused unless `-insecure-listen` is given. The packaged systemd unit passes `-insecure-listen` to keep working.
+- The guest agent's host-only routes accept TCP only from the host side (the default gateway or the default route); a container on a bridge network inside the guest gets 403.
+- `kling db`: with a password set, the Postgres client refuses a server that accepts the login without asking for it.
+- `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
 
