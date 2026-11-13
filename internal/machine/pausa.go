@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
@@ -94,7 +95,13 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 // volcado fallido (reanudar_pendiente.go).
 func (m *Manager) reanudarTrasPausaFallida(ctx context.Context, mc *api.Machine, sock string, causa error) {
 	rerr := fc.New(sock).ConPlazo(plazoReintento).Resume(context.WithoutCancel(ctx))
-	if rerr == nil || errorDelVMM(causa) {
+	// Despierta seguro: se reanudó, el VMM rechazó la pausa (no llegó a
+	// pausar) o rechazó la reanudación (M2). Un VMM que contesta y rechaza
+	// el Resume como petición inválida no está en pausa: en pausa lo habría
+	// aceptado. Antes solo se miraba causa, y un Pause cortado por plazo
+	// seguido de ese rechazo dejaba pendiente a una máquina sana, que a los
+	// diez minutos pasaba a failed.
+	if rerr == nil || errorDelVMM(causa) || rechazoDelVMM(rerr) {
 		return
 	}
 	log.Printf("pause %s failed (%v) and resuming it failed too (%v): the watcher will retry", mc.Name, causa, rerr)
@@ -162,4 +169,16 @@ func (m *Manager) reanudarLocked(ctx context.Context, mc *api.Machine, crono *cr
 		m.resyncTrasReanudar(mc.ID)
 	}
 	return &out, nil
+}
+
+// rechazoDelVMM dice si err es una respuesta 4xx del VMM: contestó y no
+// aceptó la petición. Un 5xx o un error de transporte no dicen en qué estado
+// quedó el invitado.
+func rechazoDelVMM(err error) bool {
+	if !errorDelVMM(err) {
+		return false
+	}
+	// "firecracker METODO RUTA: 400 Bad Request[: motivo]" (fc.errorDeFirecracker).
+	partes := strings.SplitN(err.Error(), ": ", 3)
+	return len(partes) >= 2 && len(partes[1]) >= 3 && partes[1][0] == '4'
 }

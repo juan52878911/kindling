@@ -469,7 +469,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
 	// Antes de reapuntarlo, la marca en disco: si el daemon muere con el disco
 	// en el dorado, reconcile no readopta el VMM (A7, readoptable).
-	if err := marcarCommitEnCurso(m.dir(mc.ID), name); err != nil {
+	if err := marcarCommitEnCurso(m.dir(mc.ID), name, mc.PID); err != nil {
 		return nil, fmt.Errorf("marking the commit as in progress: %w", err)
 	}
 	reapuntado = true

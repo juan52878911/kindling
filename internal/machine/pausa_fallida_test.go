@@ -66,3 +66,37 @@ func TestPauseFallidaSinPoderReanudarQuedaPendiente(t *testing.T) {
 		t.Fatalf("pendiente %v, transición %q; quería pendiente y freezing", pendiente, tr)
 	}
 }
+
+// M2: un Pause cortado por plazo sin llegar al VMM, y un Resume que el VMM
+// rechaza porque no estaba en pausa: la máquina sigue despierta y no queda
+// pendiente para el vigilante.
+func TestPauseCortadaConResumeRechazadoSigueRunning(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "a4a4000000000003"
+	falso, _ := maquinaCorriendo(t, m, id)
+	falso.ponerEstado("Running")
+	falso.fallar(http.MethodPatch, "/vm", http.StatusBadRequest, "The requested operation is not supported in the current state")
+	ctx, cancel := context.WithCancel(context.Background())
+	primera := true
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo == http.MethodPatch && ruta == "/vm" && primera {
+			primera = false
+			cancel()
+		}
+	})
+
+	if _, err := m.Pause(ctx, id); err == nil {
+		t.Fatal("Pause cortada no devolvió error")
+	}
+	m.mu.RLock()
+	_, pendiente := m.reanudaciones[id]
+	tr := m.transicion[id]
+	m.mu.RUnlock()
+	if pendiente || tr != "" {
+		t.Fatalf("pendiente %v, transición %q; quería ni pendiente ni transición", pendiente, tr)
+	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning {
+		t.Fatalf("estado %s; quería running", viva.State)
+	}
+}
