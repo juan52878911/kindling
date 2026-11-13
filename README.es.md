@@ -47,6 +47,13 @@ kling up -check
 kling image copy min -from ssh://usuario@host-linux-arm64   # las imágenes se construyen en Linux
 ```
 
+O con Homebrew, desde el [tap](https://github.com/juan52878911/homebrew-kindling) (última
+release final; trae e2fsprogs y `brew services start kling` arranca el daemon):
+
+```sh
+brew install juan52878911/kindling/kling
+```
+
 El script verifica cada binario contra el `SHA256SUMS` de la release, instala en
 `~/.local/bin` sin sudo y acepta `--with mcp,sandbox`, `--tag vX.Y.Z` y `--prefix DIR`.
 Para actualizar después: `kling upgrade` (`sudo` en Linux) cambia los binarios, reinicia

@@ -452,7 +452,8 @@ jobs:
           cat SHA256SUMS
 
       # La fórmula de Homebrew con la versión y los sha256 de esta release,
-      # como un asset más (no se publica en ningún tap). Va después de
+      # como un asset más (el job tap la sube después al tap, solo si la
+      # release es final). Va después de
       # SHA256SUMS porque sale de él, y su propia suma se añade al final.
       - name: fórmula de Homebrew
         env:
@@ -645,3 +646,59 @@ jobs:
           # la misma versión venga de donde venga.
           build-args: VERSION=${{ steps.ver.outputs.ldver }}
           tags: ${{ steps.ver.outputs.tags }}
+
+  # La fórmula de la release (el asset kling.rb) al tap juan52878911/homebrew-kindling,
+  # para `brew install juan52878911/kindling/kling`. Solo releases finales: una
+  # -rc no llega a quien instala con brew, igual que no pasa a latest. El token
+  # es HOMEBREW_TAP_TOKEN (fine-grained, contents:write solo en el tap); sin él
+  # el job avisa y sale bien, y el tap se queda como estaba (docs/releases.md).
+  tap:
+    name: homebrew tap
+    needs: release
+    if: needs.release.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: subir kling.rb al tap
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+          TAP: juan52878911/homebrew-kindling
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set: $TAP keeps its current formula"
+            exit 0
+          fi
+          path=Formula/kling.rb
+          sha=""; cur=""
+          if GH_TOKEN="$TAP_TOKEN" gh api "repos/$TAP/contents/$path" > cur.json 2>/dev/null; then
+            sha=$(jq -r .sha cur.json)
+            jq -r .content cur.json | base64 -d > cur.rb
+            cur=$(sed -n 's|.*releases/download/v\([^/]*\)/.*|\1|p' cur.rb | head -n1)
+          fi
+          new="${VERSION#v}"
+          # Relanzar el workflow para una etiqueta vieja no baja el tap.
+          if [ -n "$cur" ] && [ "$cur" != "$new" ] &&
+             [ "$(printf '%s\n%s\n' "$cur" "$new" | sort -V | tail -n1)" = "$cur" ]; then
+            echo "::notice::$TAP is at $cur, newer than $VERSION: not touching it"
+            exit 0
+          fi
+
+          # La fórmula publicada, comprobada contra el SHA256SUMS (firmado desde
+          # v1.0.0) de la misma release: al tap va lo mismo que al asset.
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p kling.rb -p SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          grep -q "releases/download/$VERSION/" kling.rb || { echo "::error::kling.rb is not for $VERSION"; exit 1; }
+
+          export GH_TOKEN="$TAP_TOKEN"
+          if [ -n "$sha" ] && cmp -s cur.rb kling.rb; then
+            echo "$TAP already has the formula of $VERSION"
+            exit 0
+          fi
+          args=(-f message="kling $new" -f content="$(base64 -w0 kling.rb)")
+          [ -z "$sha" ] || args+=(-f sha="$sha")
+          gh api -X PUT "repos/$TAP/contents/$path" "${args[@]}" --jq '.commit.html_url'
