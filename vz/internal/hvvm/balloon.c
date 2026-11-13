@@ -509,7 +509,7 @@ void vballoon_get(struct vballoon_state *o) {
 
 void vballoon_reafirmar(void) {
   pthread_mutex_lock(&mu);
-  hv_gic_set_spi(intid, s.m.nivel);
+  (void)khv_spi(intid, s.m.nivel);
   pthread_mutex_unlock(&mu);
 }
 

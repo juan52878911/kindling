@@ -96,10 +96,9 @@ void uart_flush(void) {
 
 static void u_irq(void) {
   uint8_t n = (u.ier & 0x02) && u.thr_pend;  // sin entrada: solo THRI
-  if (n != u.nivel) {
-    u.nivel = n;
-    hv_gic_set_spi(u_intid, n);
-  }
+  // Como vmmio_irq: nivel es lo que la línea tiene de verdad, y si el GIC no
+  // la cambió el siguiente acceso lo vuelve a intentar.
+  if (n != u.nivel && khv_spi(u_intid, n)) u.nivel = n;
 }
 
 static void u_out(uint8_t c) {
@@ -167,7 +166,7 @@ void uart_get(struct uart_state *s) {
 
 void uart_reafirmar(void) {
   pthread_mutex_lock(&u_mu);
-  hv_gic_set_spi(u_intid, u.nivel);
+  (void)khv_spi(u_intid, u.nivel);
   pthread_mutex_unlock(&u_mu);
 }
 

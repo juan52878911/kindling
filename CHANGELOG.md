@@ -40,6 +40,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - MCP gateway: `-tls-cert`/`-tls-key` serve HTTPS, and plain HTTP outside loopback is refused unless `-insecure-listen` is given. The packaged systemd unit passes `-insecure-listen` to keep working.
+||||||| c4bc2038
+- kling-hv: a vsock connection whose control packet waited behind a busy one no longer stalls until something else wakes the device thread (a new dial could time out).
+- kling-hv: when a net or vsock device thread stops, `/kling/stats` reports it in `devices_dead` instead of the VM staying `running` silently.
+- kling-hv: every interrupt line update checks the GIC result; the UART no longer records a line as raised when it was not, and failures are logged.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

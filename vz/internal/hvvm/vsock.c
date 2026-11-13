@@ -496,6 +496,11 @@ static bool bombear(const bool *listo) {
       tanda += (uint64_t)r;
       if (tanda >= VS_TANDA_MAX || g_pausa) {
         bombear_desde = (i + 1) % VS_MAXCONN;
+        // Las de detrás pueden tener control pendiente (un REQUEST de un
+        // dial, un CREDIT_UPDATE, un RST) y el aviso que lo pedía ya se
+        // leyó del despertador: sin otro, esperaban a que algo más
+        // despertara al hilo (un dial agotaba su plazo).
+        despertar_hilo();
         return puesto;
       }
     }
@@ -674,6 +679,7 @@ static void *vs_hilo(void *a) {
       // vsock_init lo vuelve a arrancar.
       activo = false;
       hilo_vivo = false;
+      khv_dispositivo_muerto(KHV_MUERTO_VSOCK, true);
       cerrar_todas();
       pthread_cond_broadcast(&cv);
       pthread_mutex_unlock(&mu);
@@ -721,6 +727,7 @@ void vsock_init(uint32_t id) {
   activo = true;
   bool arrancar = !hilo_vivo;
   hilo_vivo = true;
+  khv_dispositivo_muerto(KHV_MUERTO_VSOCK, false);
   pthread_mutex_unlock(&mu);
   if (!arrancar) return;
   if (despertador[0] < 0 && pipe(despertador) == 0) {
@@ -881,7 +888,7 @@ void vsock_get(struct vvsock_state *o) {
 
 void vsock_reafirmar(void) {
   pthread_mutex_lock(&mu);
-  hv_gic_set_spi(intid, s.m.nivel);
+  (void)khv_spi(intid, s.m.nivel);
   pthread_mutex_unlock(&mu);
 }
 
@@ -1232,14 +1239,19 @@ int khv_vsock_prueba_poll(void) {
 // MiB del host, crédito de sobra y 256 búferes de rx del invitado, una vuelta
 // de bombear mete como mucho VS_TANDA_MAX (más un paquete), o un solo paquete
 // si la VM está en pausa. *lleno dice cuánto había en el socket, *movido
-// cuánto entró en esa vuelta y *ns lo que tuvo mu. 0, o negativo si no se
-// pudo preparar. Con su propia RAM, y lo deja todo como estaba. No puede
-// convivir con una VM.
+// cuánto entró en esa vuelta y *ns lo que tuvo mu. Detrás de la grande hay
+// otra conexión con un CREDIT_UPDATE pendiente, que la vuelta cortada no
+// atiende: *control es 0 si el hilo queda avisado para otra vuelta y esa
+// vuelta lo manda; 1 si no queda aviso en el despertador; 2 si la vuelta
+// siguiente no lo manda; 3 si se mandó en la misma vuelta (no hubo corte
+// antes). 0, o negativo si no se pudo preparar. Con su propia RAM, y lo deja
+// todo como estaba. No puede convivir con una VM.
 #define PRUEBA_RX_N 256
 #define PRUEBA_RX_BUF (VS_HDR + VS_PAYLOAD)
-int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns) {
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control) {
   *lleno = *movido = 0;
   *ns = -1;
+  *control = -1;
   if (!activo) vsock_init(53);
   const uint64_t base = 0x10000, tam = base + (uint64_t)PRUEBA_RX_N * PRUEBA_RX_BUF;
   uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -1274,11 +1286,22 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
   prueba_w(0x070, 0xf);
 
   pthread_mutex_lock(&mu);
-  int sv[2], err = 0;
+  int sv[2], sv2[2] = {-1, -1}, err = 0;
   uint32_t gen;
   struct vconn *c = reservar(PRUEBA_PUERTO + 8, sv, &gen, &err);
-  int ret = c ? 0 : (err ? err : -EBUSY);
-  if (c) {
+  struct vconn *c2 = c ? reservar(PRUEBA_PUERTO + 9, sv2, &gen, &err) : NULL;
+  int ret = c2 ? 0 : (err ? err : -EBUSY);
+  if (c && !c2) {
+    liberar(c);
+    close(sv[1]);
+  }
+  if (c2) {
+    // La de detrás: abierta, sin datos y con un CREDIT_UPDATE por mandar.
+    c2->estado = C_ABIERTA;
+    c2->p_request = false;
+    c2->p_credit = true;
+    c2->peer_buf = 64u << 20;
+    bombear_desde = (int)(c - conns);  // la grande primero; c2 va detrás
     c->estado = C_ABIERTA;
     c->p_request = false;
     c->peer_buf = 64u << 20;
@@ -1293,6 +1316,11 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
       if (w <= 0) break;
       *lleno += (uint64_t)w;
     }
+    // vs_hilo solo lee el despertador con mu, que tenemos: lo que haya en
+    // él tras bombear lo puso bombear.
+    char b[64];
+    while (read(despertador[0], b, sizeof b) > 0) {
+    }
     g_pausa = pausa;
     bool listo[VS_MAXCONN] = {0};
     listo[c - conns] = true;
@@ -1301,9 +1329,24 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
     bombear(listo);
     *ns = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
     *movido = c->tx_cnt - antes;
+    if (!c2->p_credit) *control = 3;
+    else {
+      struct pollfd pd = {.fd = despertador[0], .events = POLLIN};
+      if (poll(&pd, 1, 0) != 1) *control = 1;
+      else {
+        // La vuelta siguiente (la que haría vs_hilo al despertar), sin
+        // datos nuevos: tiene que mandar el control de la de detrás.
+        g_pausa = false;
+        bool nada[VS_MAXCONN] = {0};
+        bombear(nada);
+        *control = c2->p_credit ? 2 : 0;
+      }
+    }
     g_pausa = true;
     liberar(c);
+    liberar(c2);
     close(sv[1]);
+    close(sv2[1]);
   }
   pthread_mutex_unlock(&mu);
   prueba_w(0x070, 0);
@@ -1321,8 +1364,9 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
 // vs_hilo, y el vsock se da por muerto: un dial devuelve -ENODEV al momento
 // (lo que tarda, en *dial_ns), no tras su plazo. Luego vsock_init vuelve a
 // arrancar el hilo. 0 si cuadra; 1 si el fallo no llegó a inyectarse; 2 si
-// el dial no dio -ENODEV; 3 si el hilo no volvió a dar vueltas. No puede
-// convivir con una VM.
+// el dial no dio -ENODEV; 3 si el hilo no volvió a dar vueltas; 4 si el vsock
+// no quedó marcado como muerto (khv_dispositivos_muertos); 5 si vsock_init
+// no borró la marca. No puede convivir con una VM.
 int khv_vsock_prueba_muerto(int64_t *dial_ns) {
   *dial_ns = -1;
   if (!activo) vsock_init(53);
@@ -1350,8 +1394,10 @@ int khv_vsock_prueba_muerto(int64_t *dial_ns) {
     *dial_ns = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
     if (fd != -ENODEV) r = 2;
     if (fd >= 0) close(fd);
+    if (r == 0 && !(khv_dispositivos_muertos() & KHV_MUERTO_VSOCK)) r = 4;
   }
   vsock_init(53);
+  if (r == 0 && (khv_dispositivos_muertos() & KHV_MUERTO_VSOCK)) r = 5;
   unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
   bool vuelve = false;
   for (int i = 0; i < 1000 && !vuelve; i++) {

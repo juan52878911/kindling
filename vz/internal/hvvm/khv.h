@@ -285,6 +285,20 @@ enum { VM_NADA, VM_NOTIFY, VM_RESET, VM_ISR };
 int vmmio_acceso(struct vmmio *m, struct vq *qs, int nq, uint32_t devid, uint64_t feat_lo, uint64_t off,
                  bool escribir, uint64_t *val, uint32_t *cola);
 void vmmio_irq(struct vmmio *m, uint32_t intid);  // pasa al GIC el nivel de isr si cambió
+// khv_spi pone la línea intid del GIC a nivel y dice si el GIC la cambió. Si
+// no, lo cuenta (khv_spi_fallos) y lo deja en stderr la primera vez: una línea
+// que no sube deja al invitado esperando su disco, su red o su consola. Es
+// lo que deben usar todos los que llaman a hv_gic_set_spi.
+bool khv_spi(uint32_t intid, bool nivel);
+uint64_t khv_spi_fallos(void);
+
+// Hilos de dispositivo muertos: un hilo que termina sin remedio (un poll o un
+// recv que falla) deja la VM corriendo sin ese dispositivo. Cada uno marca su
+// bit al morir y lo borra su init al arrancar de nuevo; /kling/stats lo dice
+// (devices_dead).
+enum { KHV_MUERTO_RED = 1, KHV_MUERTO_VSOCK = 2 };
+void khv_dispositivo_muerto(int bit, bool muerto);
+int khv_dispositivos_muertos(void);
 
 // Supresión de avisos (virtio 1.x, 2.7.7 y 2.7.10): VIRTIO_RING_F_EVENT_IDX,
 // que ofrecen la red y los discos. vq_interrumpir dice si hay que interrumpir
@@ -351,6 +365,8 @@ int vnet_prueba_rx(int red);
 int khv_prueba_poll_red(void);
 int khv_prueba_vsock_muerto(int64_t *dial_ns);
 int khv_prueba_irq_nivel(void);
+int khv_prueba_red_muerta(void);
+int khv_prueba_uart_nivel(void);
 int khv_prueba_clon_ram(const char *base, const char *out);
 int khv_prueba_poll_vsock(void);  // un EAGAIN de poll no mata el hilo de rx (prueba.c)  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
@@ -386,7 +402,7 @@ int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
 int khv_vsock_prueba_muerto(int64_t *dial_ns);
-int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns);
+int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control);
 
 // balloon (virtio-balloon; ver balloon.c)
 struct vballoon_state {

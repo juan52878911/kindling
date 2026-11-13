@@ -224,8 +224,10 @@ static void esperar_rx(void) {
 
 // rx_errorf deja en stderr por qué termina el hilo de recepción: sin él la
 // red del invitado se quedaba muda sin rastro. Antes vacía la consola, como
-// los diagnósticos de vm.c, para no partirle una línea.
+// los diagnósticos de vm.c, para no partirle una línea. Y marca la red como
+// muerta: /kling/stats lo dice (devices_dead) mientras la VM sigue running.
 static void rx_errorf(const char *que, int e) {
+  khv_dispositivo_muerto(KHV_MUERTO_RED, true);
   uart_flush();
   dprintf(2, "kling-hv: net: the receive thread stops (%s: %s); the guest gets no more frames\n", que, strerror(e));
 }
@@ -358,6 +360,7 @@ void vnet_init(int net_fd, const uint8_t m[6], int mtu_enlace, uint32_t id) {
   mtu = mtu_enlace > 1500 && mtu_enlace <= 65535 ? (uint16_t)mtu_enlace : 0;
   intid = id;
   rx_parar = false;
+  khv_dispositivo_muerto(KHV_MUERTO_RED, false);
   if (fd < 0) return;
   if (rx_desp[0] < 0 && pipe(rx_desp) == 0) {
     for (int i = 0; i < 2; i++) {
@@ -508,7 +511,7 @@ void vnet_get(struct vnet_state *o) {
 
 void vnet_reafirmar(void) {
   pthread_mutex_lock(&mu_irq);
-  hv_gic_set_spi(intid, s.m.nivel);
+  (void)khv_spi(intid, s.m.nivel);
   pthread_mutex_unlock(&mu_irq);
 }
 

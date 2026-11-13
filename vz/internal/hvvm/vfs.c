@@ -475,7 +475,7 @@ void vvfs_reafirmar(int idx) {
   struct vvfs *v = vfs_de(idx);
   if (!v) return;
   pthread_mutex_lock(&v->mu);
-  hv_gic_set_spi(v->intid, v->s.m.nivel);
+  (void)khv_spi(v->intid, v->s.m.nivel);
   pthread_mutex_unlock(&v->mu);
 }
 
