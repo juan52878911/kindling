@@ -79,7 +79,7 @@ func manifest() plugin.Manifest {
 				Usage:       usage("rehearse <copy|template> -migrations DIR", "timings, lock waits and size per file"),
 				MachineArgs: []string{""}},
 			{Name: "rotate", Group: "OPERATE", Summary: "gives a copy a new password",
-				Usage:       usage("rotate <copy>", "new password; the old one stays if it fails"),
+				Usage:       usage("rotate [-resume] <copy>", "new password; the old one stays if it fails; -resume finishes an interrupted one"),
 				MachineArgs: []string{""}},
 			{Name: "snapshot", Group: "OPERATE", Summary: "saves a copy as a restore point",
 				Usage:       usage("snapshot [-rm] <copy> <name>", "a restore point of a live copy"),

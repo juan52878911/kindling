@@ -16,9 +16,15 @@ package main
 // Si el paso 2 falla o queda en duda (un plazo vencido puede haberse aplicado),
 // se devuelve a la base el verificador de la clave anterior, que sigue en el
 // host. Si el paso 3 falla, igual.
+//
+// Si el proceso muere entre el paso 2 y el 3, la base tiene la clave de
+// password.new y el host sigue con la anterior. kling db rotate otra vez lo
+// arregla con una clave nueva; kling db rotate -resume termina la rotación
+// interrumpida con la de password.new. connect y sql lo avisan.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,12 +34,13 @@ import (
 
 func cmdRotate(args []string) error {
 	fs, host, owner := newFlags("rotate")
+	resume := fs.Bool("resume", false, "finish an interrupted rotation with the password it left staged, instead of a new one")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageErr("usage: kling db rotate <copy>")
+		return usageErr("usage: kling db rotate [-resume] <copy>")
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -41,7 +48,11 @@ func cmdRotate(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
-	mc, err := a.rotateCopy(ctx, pos[0], *owner)
+	rotate := a.rotateCopy
+	if *resume {
+		rotate = a.resumeRotate
+	}
+	mc, err := rotate(ctx, pos[0], *owner)
 	if err != nil {
 		return err
 	}
@@ -57,22 +68,64 @@ func passwordPathOrID(id string) string {
 	return id
 }
 
-// rotateCopy es la operación completa sobre una copia lista y propia.
-func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, error) {
+// rotateTarget es la copia lista y propia que se va a rotar, y su rol.
+func (a *app) rotateTarget(ctx context.Context, ref, owner string) (*api.Machine, string, error) {
 	if err := validOwner(owner); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	mc, err := a.inspect(ctx, ref)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis, engineFerret, engineClickHouse, engineGarage); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := checkReady(mc, owner); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	role, _, err := roleDB(mc.Labels)
+	if err != nil {
+		return nil, "", err
+	}
+	return mc, role, nil
+}
+
+// resumeRotate termina una rotación interrumpida: vuelve a poner en la base
+// la clave de password.new (desde el administrador del invitado, sin pedir la
+// anterior; repetirlo no hace daño) y solo entonces la confirma en el host.
+// Si falla, password.new se queda para otro intento.
+func (a *app) resumeRotate(ctx context.Context, ref, owner string) (*api.Machine, error) {
+	mc, role, err := a.rotateTarget(ctx, ref, owner)
+	if err != nil {
+		return nil, err
+	}
+	pw, err := dbstate.ReadStaged(mc.ID)
+	if errors.Is(err, dbstate.ErrNoPassword) {
+		return nil, fmt.Errorf("%s has no interrupted rotation to resume (kling db rotate %s makes a new password)", mc.Name, mc.Name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := a.setPassword(ctx, mc, role, pw); err != nil {
+		return nil, fmt.Errorf("resuming the rotation of %s: %w; nothing changed on this host: retry, or kling db rotate %s for a new password", mc.Name, err, mc.Name)
+	}
+	if err := dbstate.CommitStaged(mc.ID); err != nil {
+		return nil, fmt.Errorf("storing the new password of %s: %w; retry kling db rotate -resume %s", mc.Name, err, mc.Name)
+	}
+	return mc, nil
+}
+
+// warnInterruptedRotate avisa de una rotación que murió a medias: la base
+// puede tener ya la clave nueva y el host la anterior.
+func (a *app) warnInterruptedRotate(mc *api.Machine) {
+	if hasPassword(engineOf(mc.Labels)) && dbstate.HasStaged(mc.ID) {
+		fmt.Fprintf(a.stderr, "warning: a kling db rotate of %s was interrupted; if the password is refused, run kling db rotate -resume %s (it keeps the data)\n", mc.Name, mc.Name)
+	}
+}
+
+// rotateCopy es la operación completa sobre una copia lista y propia.
+func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, error) {
+	mc, role, err := a.rotateTarget(ctx, ref, owner)
 	if err != nil {
 		return nil, err
 	}

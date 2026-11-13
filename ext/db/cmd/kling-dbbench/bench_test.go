@@ -208,6 +208,14 @@ func pgFalso(t *testing.T, count string) string {
 					return
 				}
 				io.CopyN(io.Discard, r, int64(binary.BigEndian.Uint32(l[:]))-4)
+				// Pide la contraseña (en claro): con contraseña, pgmini no
+				// acepta un AuthenticationOk sin reto.
+				c.Write(msg('R', []byte{0, 0, 0, 3}))
+				var h [5]byte
+				if _, err := io.ReadFull(r, h[:]); err != nil || h[0] != 'p' {
+					return
+				}
+				io.CopyN(io.Discard, r, int64(binary.BigEndian.Uint32(h[1:]))-4)
 				c.Write(msg('R', []byte{0, 0, 0, 0}))
 				c.Write(msg('Z', []byte("I")))
 				for {

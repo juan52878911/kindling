@@ -253,9 +253,13 @@ func dial(t *testing.T, f *falso, pass string) (*Conn, error) {
 func TestQueryContraServidorFalso(t *testing.T) {
 	for _, auth := range []string{"trust", "clear", "scram"} {
 		t.Run(auth, func(t *testing.T) {
-			f := nuevoFalso(t, auth, "s3cret")
+			pass := "s3cret"
+			if auth == "trust" {
+				pass = "" // con contraseña, trust se rechaza (TestOkSinRetoConContrasena)
+			}
+			f := nuevoFalso(t, auth, pass)
 			f.filas = []string{"42", "NULL"}
-			c, err := dial(t, f, "s3cret")
+			c, err := dial(t, f, pass)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,6 +337,33 @@ func TestMensajeGigante(t *testing.T) {
 	c := &Conn{nc: c1, r: bufio.NewReader(c1)}
 	if _, _, err := c.leer(); err == nil {
 		t.Fatal("un mensaje de 2 GiB se aceptó")
+	}
+}
+
+// Con contraseña, un servidor que contesta AuthenticationOk sin pedir nada no
+// ha demostrado conocer la clave: Dial no abre la conexión.
+func TestOkSinRetoConContrasena(t *testing.T) {
+	for _, pass := range []string{"secreto", ""} {
+		c1, c2 := net.Pipe()
+		go func() {
+			defer c2.Close()
+			var l [4]byte
+			if _, err := io.ReadFull(c2, l[:]); err != nil {
+				return
+			}
+			io.CopyN(io.Discard, c2, int64(binary.BigEndian.Uint32(l[:]))-4)
+			c2.Write(append(auth(0, ""), msg('Z', []byte("I"))...))
+			io.Copy(io.Discard, c2)
+		}()
+		c := &Conn{nc: c1, r: bufio.NewReader(c1)}
+		err := c.arranque(Config{User: "u", Database: "d", Password: pass})
+		c1.Close()
+		if pass != "" && err == nil {
+			t.Error("con contraseña, AuthenticationOk sin reto se aceptó")
+		}
+		if pass == "" && err != nil {
+			t.Errorf("sin contraseña (trust): %v", err)
+		}
 	}
 }
 

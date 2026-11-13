@@ -88,6 +88,11 @@ func ReadPassword(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return readSecret(p)
+}
+
+// readSecret lee un fichero de clave con las comprobaciones de ReadPassword.
+func readSecret(p string) (string, error) {
 	st, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", ErrNoPassword

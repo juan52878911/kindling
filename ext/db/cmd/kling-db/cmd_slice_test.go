@@ -313,6 +313,13 @@ func TestSliceScriptsSintaxis(t *testing.T) {
 			t.Errorf("%s carries the password", name)
 		}
 	}
+	// La comprobación de triggers ALWAYS/REPLICA va entre el esquema y la
+	// primera fila.
+	fill := sliceFillScript(src, loads)
+	schema, always, rows := strings.Index(fill, "--schema-only"), strings.Index(fill, alwaysTriggersMarker), strings.Index(fill, "BEGIN ISOLATION LEVEL")
+	if schema < 0 || always < 0 || rows < 0 || !(schema < always && always < rows) || !strings.Contains(fill, `"$a" != "always|0|0"`) {
+		t.Errorf("always check: schema=%d always=%d rows=%d", schema, always, rows)
+	}
 	fix := sliceFixupSQL(loads)
 	for _, want := range []string{"NOT VALID", "setval", "SELECT 'sl|rows|3|' || count(*) FROM ONLY public.\"Audit Log\";", "SELECT 'sl|rows|2|' || count(*) FROM public.order_items;"} {
 		if !strings.Contains(fix, want) {

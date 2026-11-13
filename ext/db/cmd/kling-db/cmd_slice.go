@@ -454,7 +454,19 @@ if [ "$rc" -ne 0 ]; then
   grep -E 'ERROR: +[0-9A-Z]{5}$' "$C/restore.err" | head -n 5 >&2 || true
   exit 1
 fi
-rm -f "$C"/slice-ok-* "$C/load.err"
+`)
+	// Con el esquema ya cargado y antes de la primera fila: los triggers y
+	// las reglas ENABLE ALWAYS / ENABLE REPLICA se disparan aunque la carga
+	// vaya con session_replication_role = replica.
+	b.WriteString(`a=$(su -s /bin/sh postgres -c "psql -X -q -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -h $C -p ` + clonePort + ` -d staging" <<'KLINGEOF'
+` + alwaysTriggersSQL + `KLINGEOF
+)
+if [ "$a" != "always|0|0" ]; then
+  echo "nothing was built: the source has triggers or rules set to ENABLE ALWAYS or ENABLE REPLICA, which would run while loading; set them back to ENABLE or DISABLE in the source" >&2
+  exit 1
+fi
+`)
+	b.WriteString(`rm -f "$C"/slice-ok-* "$C/load.err"
 cat > "$C/slice-load.sh" <<'KLINGEOF'
 set -eu
 case "${1:-}" in ''|*[!0-9]*) exit 2 ;; esac

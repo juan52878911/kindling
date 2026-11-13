@@ -50,6 +50,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Security
 
 - The guest agent's host-only routes accept TCP only from the host side (the default gateway or the default route); a container on a bridge network inside the guest gets 403.
+||||||| c4bc2038
+- `kling db clone` reports how many text, JSON, XML, bytea or array columns without a rule were copied unchecked (`-strict` blocks them).
+- `kling db rotate -resume` finishes a rotation that died after changing the database; `connect` and `sql` warn about it.
+
+### Security
+
+- `kling db`: with a password set, the Postgres client refuses a server that accepts the login without asking for it.
+- `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

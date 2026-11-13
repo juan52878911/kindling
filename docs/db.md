@@ -78,7 +78,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño, ttl y pertenencia (`kling.db.class`, `kling.db.repo`, `kling.db.branch`) |
 | `rm <copia>...` | borra la máquina, después su contraseña, y sus puntos de restauración (`snapshot`). Si una falla sigue con las demás y al final dice cuáles no se borraron (sale con 1) |
 | `rehearse <copia\|golden> -migrations DIR \| -step CMD -agent T [-workdir DIR] [-env-file F] [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones en una copia desechable: tiempos, esperas por locks, **locks fuertes** (los vistos en `pg_locks` y las sentencias que los piden) y tamaño; con `-step`, un programa (alembic...) en un agente con la copia por `attach`, con la observación encendida: el informe agrupa las sentencias que lanzó (sin literales) y marca las que piden un lock fuerte; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
-| `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
+| `rotate [-resume] <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo; `-resume` termina una rotación interrumpida |
 | `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
 | `doctor <copia> \| -url postgres://... [-all]` | diagnóstico de seguridad (reglas DB001-DB055, `ext/db/internal/doctor`; DB055: errores de disco del invitado o copia retenida por el almacén lleno). El rol de la aplicación sale de la etiqueta `kling.db.role` de la copia (también en un golden guardado con `kling save`, sin `conn.env`). Lo que una regla repite tabla a tabla sale en una línea con el recuento, un ejemplo y los objetos (`-all`: uno a uno); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `tenant-check <copia> [-role R] [-column tenant_id] [-setting app.tenant_id] [-max 5] [-json]` | prueba que cada inquilino solo ve sus filas y que sin inquilino no ve ninguna; sale con 1 si algo falla. Ver [Aislamiento entre inquilinos](#aislamiento-entre-inquilinos-tenant-check) |
@@ -520,6 +520,11 @@ pasa a ser `password`. Si algo falla, el fichero no cambia y se devuelve a la
 base el verificador de la clave anterior. Las sesiones abiertas siguen hasta
 que reconectan.
 
+Si `rotate` muere entre cambiar la base y confirmar el fichero, queda
+`password.new` y `connect`/`sql` lo avisan. `kling db rotate -resume <copia>`
+termina esa rotación con la clave de `password.new`; un `rotate` normal también
+lo arregla, con otra clave nueva. Ninguno toca los datos.
+
 ### `kling db snapshot <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]`
 
 Un punto de guardado es una plantilla propia (`kling save` de la máquina viva)
@@ -887,6 +892,7 @@ informe las marca `LEFT UNMASKED`). Es una heurística que se equivoca hacia el 
 bloquear (`product_name` es sospechosa). `-strict` hace sospechosa además toda columna de
 texto, XML, `bytea`, array o tipo de extensión, se llame como se llame: la opción para
 quien no quiere que una columna `summary` con texto libre pase sin que nadie la mire.
+Sin `-strict`, el informe cuenta esas columnas sin regla (`unreviewed` en `-json`).
 
 ### Límites
 
