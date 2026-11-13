@@ -1,6 +1,6 @@
 # S3 y compatibles con el proxy de credenciales (re-firma SigV4)
 
-Las peticiones a S3, R2, GCS en modo S3, MinIO o Garage van firmadas (SigV4, HMAC): no
+Las peticiones a S3, R2, GCS en modo S3 y demás compatibles van firmadas (SigV4, HMAC): no
 basta con cambiar un marcador en una cabecera. Una credencial `Kind: "sigv4"` hace que
 el proxy (`pkg/credproxy/sigv4.go`) **descarte la firma del invitado y firme de nuevo con
 la clave real**. El invitado solo conoce un access key id marcador (`Placeholder`); su
@@ -16,7 +16,14 @@ secret key da igual, el proxy no la usa.
 | `Region`, `Service` | con qué se firma (`Service` es `s3` por defecto). Son los de la regla: el alcance (scope) que escriba el invitado se ignora |
 | `Allow` | igual que en HTTP: `"GET /bucket/**"`… |
 
-No admite `Headers`, `Query`, `Body` ni `Upstream`.
+No admite `Headers`, `Query`, `Body`, `Port` ni `Upstream`: el proxy sale siempre por HTTPS
+al puerto 443 del dominio, y su dialer descarta las IP privadas a propósito (un DNS
+envenenado no debe llevar la clave a la LAN). Un MinIO o Garage propio en la LAN o en otro
+puerto no se alcanza; uno publicado en un dominio público por HTTPS en el 443, sí.
+
+Las claves temporales de STS (access key id `ASIA…`) se rechazan al darlas de alta: solo
+valen con su session token en `X-Amz-Security-Token`, y el proxy no lo guarda ni lo manda.
+Hace falta una clave de larga duración (`AKIA…`).
 
 ## Cómo se da de alta
 
@@ -55,7 +62,8 @@ mandársela.
 
 - **Cuerpo con hash** (`x-amz-content-sha256` en hex) y `UNSIGNED-PAYLOAD`: el cuerpo pasa
   sin tocar y se firma con el mismo hash. Sin la cabecera (otros servicios) el proxy
-  calcula el hash, con el cuerpo en memoria (hasta 1 MiB).
+  calcula el hash, con el cuerpo en memoria (hasta 1 MiB; con más, 413 con un mensaje que
+  pide mandar `x-amz-content-sha256`).
 - **`aws-chunked` firmado** (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, con o sin `-TRAILER`):
   una firma por trozo encadenada con la anterior, empezando por la de la petición. Se
   reescriben en flujo, un trozo en memoria cada vez (máx. 4 MiB). Las firmas miden lo
@@ -67,6 +75,10 @@ mandársela.
 - En una petición con `Authorization`, `x-amz-date` se pone con el reloj del proxy: la
   deriva de la hora de la microVM no rompe la firma.
 - SigV4a (`AWS4-ECDSA-P256-SHA256`) no se admite: 400.
+
+Hacia el servidor va `Accept-Encoding: identity`: el proxy no pide gzip ni descomprime. Un
+objeto guardado con `Content-Encoding` (gzip, br…) llega al invitado con sus bytes y sus
+cabeceras tal cual.
 
 La respuesta conserva su `Content-Length` (los clientes de S3 lo exigen en un GET). Si el
 redactor tuviera que cambiar algo en el cuerpo (la secret key dentro de un objeto), la

@@ -407,7 +407,7 @@ var coreTree = []section{
                                                    logs in with the real password;
                                                    disable: native or caching_sha2
                                                    fast path only (see docs/mysql.md)
-  machine credential <ref> -type sigv4             an S3 (or R2, GCS, MinIO, Garage)
+  machine credential <ref> -type sigv4             an S3, R2 or GCS (public :443)
       -domain D -access-key-id AK -region R        secret key: the guest signs with a
       [-service s3] [-allow-request 'GET /b/**']   placeholder access key id in VAR and
       -env AWS_ACCESS_KEY_ID [-f secretfile]       the proxy signs again with the real

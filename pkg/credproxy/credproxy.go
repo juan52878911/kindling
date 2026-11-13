@@ -746,6 +746,11 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 			http.Error(w, "kindling credential proxy: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if errors.Is(err, errSinHashGrande) {
+			rec.Reason = ReasonBodyTooLarge
+			http.Error(w, "kindling credential proxy: "+err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
 	} else {
 		body, length, cerrar, err = cuerpoSaliente(r, sw, cs, usadas, v, pl, p.tempDir)
 	}
@@ -819,6 +824,13 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	// la viera. Sin él, el transporte de Go pide gzip por su cuenta y lo
 	// descomprime antes de que el cuerpo pase por el redactor.
 	out.Header.Del("Accept-Encoding")
+	if firma != nil {
+		// Con SigV4, identity: así el transporte de Go no pide gzip ni
+		// descomprime. Un objeto guardado comprimido (Content-Encoding en sus
+		// metadatos) lo devuelve S3 tal cual se pida lo que se pida, y tiene
+		// que llegar al invitado con sus bytes y su Content-Length.
+		out.Header.Set("Accept-Encoding", "identity")
+	}
 	out.Host = host
 	if firma != nil {
 		c := cs[isv]
@@ -846,8 +858,12 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	// Go quita Content-Encoding cuando descomprime el gzip que pidió él. Si
 	// queda otra codificación, el proveedor la impuso sin que nadie se la
-	// pidiera y el redactor no vería una clave dentro: no se entrega.
-	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+	// pidiera y el redactor no vería una clave dentro: no se entrega. Salvo la
+	// respuesta correcta de una petición SigV4: con identity pedido, esa
+	// codificación es la del objeto guardado, y la clave secreta nunca viaja
+	// (solo entra en el HMAC), así que no puede volver dentro.
+	objetoSigV4 := firma != nil && resp.StatusCode < 300
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") && !objetoSigV4 {
 		rec.Reason = ReasonBadEncoding
 		http.Error(w, "kindling credential proxy: upstream replied with Content-Encoding "+enc+
 			", which the proxy can't inspect for the key", http.StatusBadGateway)
