@@ -94,7 +94,7 @@ func TestReconcileNoReadoptaUnCommitCortado(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000003"
 	falso, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
-	if err := marcarCommitEnCurso(m.dir(id), "dorado"); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,7 +124,7 @@ func TestReconcileNoReadoptaUnCommitCortadoDeUnaPausada(t *testing.T) {
 	m := newTestManager(t)
 	id := "a7a7000000000004"
 	_, fin := vmmEnPausaTrasReinicio(t, m, id, api.StatePaused)
-	if err := marcarCommitEnCurso(m.dir(id), "dorado"); err != nil {
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", 0); err != nil {
 		t.Fatal(err)
 	}
 	m.reconcile()
@@ -202,5 +202,91 @@ func TestCommitMarcaElReapuntadoAlDorado(t *testing.T) {
 	}
 	if existe(marca) {
 		t.Fatal("la marca sigue tras devolverle el disco a la plantilla")
+	}
+}
+
+// A3: la marca de un commit cortado es del VMM que lo hacía. reconcile la
+// atiende con ese VMM vivo; con otro, arrancado después (kling start, como
+// pide el error), la retira y readopta la máquina. Antes la marca sobrevivía
+// y el siguiente reinicio del daemon mataba a una máquina sana.
+func TestMarcaDeCommitNoMataAlVMMDeUnArranquePosterior(t *testing.T) {
+	m := newTestManager(t)
+	id := "a7a7000000000008"
+	_, fin := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+	m.mu.RLock()
+	pidCommit := m.byID[id].PID
+	m.mu.RUnlock()
+	if err := marcarCommitEnCurso(m.dir(id), "dorado", pidCommit); err != nil {
+		t.Fatal(err)
+	}
+	m.reconcile()
+	if viva := vivaDe(t, m, id); viva.State != api.StateFailed {
+		t.Fatalf("con el VMM del commit vivo: estado %s; quería failed", viva.State)
+	}
+	select {
+	case <-fin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("killOrphanVMMs no mató el VMM del commit cortado")
+	}
+
+	// Otro VMM, de un arranque posterior, con la marca aún en disco.
+	falso, _ := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+	falso.ponerEstado("Running")
+	m.reconcile()
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning || !readoptada(m, id) {
+		t.Fatalf("con un VMM nuevo: estado %s (%q), readoptada %v; quería running readoptada",
+			viva.State, viva.LastErr, readoptada(m, id))
+	}
+	if existe(filepath.Join(m.dir(id), marcaCommit)) {
+		t.Fatal("la marca de otro VMM sigue en disco")
+	}
+}
+
+// Las marcas sin PID (las de antes, aún en disco) siguen valiendo para
+// cualquier VMM: es lo seguro con un disco que pudo quedar en el dorado.
+func TestMarcaDeCommitSinPIDSigueValiendo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, marcaCommit), []byte("dorado\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hay, pid := marcaCommitDe(dir); !hay || pid != 0 {
+		t.Fatalf("marca vieja: hay %v, pid %d; quería hay sin PID", hay, pid)
+	}
+	if err := marcarCommitEnCurso(dir, "dorado", 4321); err != nil {
+		t.Fatal(err)
+	}
+	if hay, pid := marcaCommitDe(dir); !hay || pid != 4321 {
+		t.Fatalf("marca nueva: hay %v, pid %d; quería 4321", hay, pid)
+	}
+}
+
+// Start y el thaw de una failed retiran la marca una vez muerto el VMM viejo.
+func TestStartYThawRetiranLaMarcaDeCommit(t *testing.T) {
+	m := newTestManager(t)
+	m.fcBin = filepath.Join(t.TempDir(), "no-hay-vmm")
+	mc, _ := paradaParaStart(t, m, "a7a7000000000009")
+	fallidaConVolcado(t, m, mc)
+	marca := filepath.Join(m.dir(mc.ID), marcaCommit)
+
+	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0); err != nil {
+		t.Fatal(err)
+	}
+	viva := vivaDe(t, m, mc.ID)
+	if err := m.thawFallida(&viva); err != nil {
+		t.Fatalf("thawFallida: %v", err)
+	}
+	if existe(marca) {
+		t.Fatal("el thaw de una failed dejó la marca de commit")
+	}
+
+	if err := marcarCommitEnCurso(m.dir(mc.ID), "dorado", 0); err != nil {
+		t.Fatal(err)
+	}
+	// Sin VMM que lanzar: el arranque falla, pero después de matar al viejo.
+	if _, err := m.Start(t.Context(), mc.ID, nil); err == nil {
+		t.Fatal("Start sin VMM no devolvió error")
+	}
+	if existe(marca) {
+		t.Fatal("Start dejó la marca de commit")
 	}
 }

@@ -26,6 +26,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Credential proxy, SigV4: objects stored with a `Content-Encoding` (gzip, br…) reach the guest byte for byte instead of decompressed or as a 502.
 - Credential proxy, SigV4: a body over 1 MiB without `x-amz-content-sha256` gets a 413 that says why.
 - Credential proxy, SigV4: a presigned URL only signs the headers that are still sent, and an aws-chunked trailer is capped at 32 lines.
+||||||| c4bc2038
+- A commit cut by a daemon restart no longer gets a machine started or thawed afterwards killed on the next restart.
+- A pause that times out and whose resume the VMM rejects leaves the machine running instead of failing it ten minutes later.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

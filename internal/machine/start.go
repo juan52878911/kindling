@@ -261,6 +261,10 @@ func (m *Manager) start(ctx context.Context, ref string, envKV []string) (*api.M
 		return nil, fmt.Errorf("machine %q can't be started: the VMM of its last freeze is still alive %s after SIGKILL",
 			mc.Name, plazoMuerte)
 	}
+	// Muerto el VMM viejo, la marca de un commit cortado ya no protege nada,
+	// y si se quedaba, el siguiente reinicio del daemon tomaba por aquel
+	// commit al VMM que arranca ahora y lo mataba (A3).
+	quitarMarcaCommit(m.dir(mc.ID))
 	vols, err := m.reclamarParada(mc.ID)
 	if err != nil {
 		return nil, err
@@ -519,7 +523,13 @@ func (m *Manager) thawFallida(mc *api.Machine) error {
 		return fmt.Errorf("machine %q is failed (%s) and %v: thawing it would corrupt it; "+
 			"kling start boots it from its disk", mc.Name, mc.LastErr, err)
 	}
-	return m.matarVMMDeFallida(mc)
+	if err := m.matarVMMDeFallida(mc); err != nil {
+		return err
+	}
+	// Sin VMM ya, la marca de un commit cortado sobra: si se quedaba, el
+	// siguiente reinicio del daemon mataba al VMM de este thaw (A3).
+	quitarMarcaCommit(dir)
+	return nil
 }
 
 // diskSinTocarDesdeVolcado falla si el overlay de dir se modificó después de
