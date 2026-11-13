@@ -199,7 +199,9 @@ func run() int {
 	go func() { apiErr <- hs.Serve(peercred.Solo(apiL, "API socket", []string{daemonBin}, logf)) }()
 	split := credproxy.NewSplitServer(p)
 	fwdErr := make(chan error, 1)
-	go func() { fwdErr <- split.Serve(peercred.Solo(fwdL, "forward socket", []string{vmmBin}, logf)) }()
+	go func() {
+		fwdErr <- split.Serve(peercred.SoloPID(fwdL, "forward socket", []string{vmmBin}, *vmmPID, logf))
+	}()
 	logf("version %s serving %s (VMM pid %d)", version, dir, *vmmPID)
 
 	sigs := make(chan os.Signal, 2)

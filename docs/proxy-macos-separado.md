@@ -181,28 +181,28 @@ No evita:
 ## Coste medido
 
 En un Mac M4 (macOS 26.5), kling-hv, una máquina de 256 MiB con la imagen e2e-tools,
-dos pasadas de la prueba centrada (abajo). "Antes" es el `kling-hv` de main con el
+tres pasadas de la prueba centrada (abajo). "Antes" es el `kling-hv` de main con el
 mismo daemon (cae al modelo anterior).
 
 | | antes (proxy en el VMM) | con `kling-credproxy` |
 |---|---|---|
-| RSS del proxy | — | 16,4–20,0 MiB recién usado, 20,2–21,4 MiB tras ~520 conexiones más |
-| RSS de `kling-hv` con la máquina | 138–139 MiB | 122–132 MiB |
-| invitado → proxy, una conexión por petición (403 sin proveedor), mediana / p90 | 0,12–0,14 / 0,18–0,23 ms | 0,18–0,34 / 0,28–1,03 ms |
-| thaw con credenciales (`kling thaw`) | 132–147 ms | 156–190 ms |
+| RSS del proxy | — | 16,4–20,0 MiB recién usado, 20,2–23,6 MiB tras ~520 conexiones más |
+| RSS de `kling-hv` con la máquina | 137–139 MiB | 111–132 MiB |
+| invitado → proxy, una conexión por petición (403 sin proveedor), mediana / p90 | 0,12–0,14 / 0,14–0,23 ms | 0,18–0,34 / 0,27–1,03 ms |
+| thaw con credenciales (`kling thaw`) | 132–147 ms | 156–235 ms |
 | primera `machine credential` (lanza el proxy) | — | 153–513 ms |
 | `sandbox_init` del perfil | — | ~10 ms |
 
-- **Memoria**: un proceso Go más por máquina *con credenciales*: ~16–21 MiB de RSS, por
+- **Memoria**: un proceso Go más por máquina *con credenciales*: ~16–24 MiB de RSS, por
   encima de los 8–15 estimados (el runtime, TLS y Security.framework, parte de él
   compartido entre procesos). Las máquinas sin credenciales no pagan nada. Con una
-  máquina restaurada en ~350 MiB (`docs/vz-mac-prototipo.md`), un +5–6 %.
+  máquina restaurada en ~350 MiB (`docs/vz-mac-prototipo.md`), un +5–7 %.
 - **Latencia**: un salto Unix, la comprobación del otro extremo y dos copias más por
-  conexión: +0,06–0,19 ms de mediana por conexión nueva, frente a los milisegundos del
+  conexión: +0,05–0,19 ms de mediana por conexión nueva, frente a los milisegundos del
   proveedor. Las conexiones de Postgres/MySQL son largas: el coste es por byte, no por
   consulta.
 - **Arranque**: el thaw lanza y confina el proxy antes de cargar el estado, en serie
-  (no en paralelo como se propuso): +10–60 ms en el thaw de una máquina con
+  (no en paralelo como se propuso): +10–90 ms en el thaw de una máquina con
   credenciales, que no estaba en el camino crítico de una sin ellas.
 - **Complejidad**: un binario más que firmar y distribuir (release, `install.sh`,
   Homebrew, `kling upgrade`), su perfil, su readopción, el broker y una capacidad de
@@ -234,7 +234,8 @@ En el M4, lo que un falso no prueba (una VM a la vez, bajo `/tmp/kling-vm.lock`,
 daemon privado y `KLING_VMM=hv`):
 
 - La sección 6c de `scripts/92-e2e-mac.sh` (proxy contra httpbin.org), con la misma
-  sonda en el invitado, en una prueba centrada que añade lo de abajo: 44 de 44.
+  sonda en el invitado, en una prueba centrada que añade lo de abajo: 44 de 44, tres
+  veces.
 - x509 verifica dentro del perfil: basic-auth 200 con la clave real sobre HTTPS.
 - `task_for_pid` contra el proxy desde un proceso del mismo usuario **sin** sandbox:
   `(os/kern) failure`. Testigos: un binario ad-hoc con `get-task-allow`, éxito; sin él

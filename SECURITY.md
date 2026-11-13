@@ -1822,8 +1822,8 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   Linux, donde además corre como root en el daemon. Y otro proceso del usuario con
   privilegios de depuración, o root, la lee, como lee la clave maestra del daemon. Con
   un `kling-vz` anterior (sin `credproxy-split`) el daemon sigue dándosela a él.
-  Coste medido en el M4 (~16–21 MiB de RSS por máquina con credenciales, +0,06–0,19 ms
-  por conexión, +10–60 ms en el thaw) y qué se cambió del diseño, en
+  Coste medido en el M4 (~16–24 MiB de RSS por máquina con credenciales, +0,05–0,19 ms
+  por conexión, +10–90 ms en el thaw) y qué se cambió del diseño, en
   [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md).
 - **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
   sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el

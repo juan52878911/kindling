@@ -145,7 +145,8 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 	if err := prepararDirCredproxy(cpdir); err != nil {
 		return nil, err
 	}
-	if err := lanzarCredproxy(bin, cpdir, vmmPID, vmmExe); err != nil {
+	nuevo, err := lanzarCredproxy(bin, cpdir, vmmPID, vmmExe)
+	if err != nil {
 		return nil, err
 	}
 	limite := time.Now().Add(plazoCredproxy)
@@ -161,6 +162,9 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 			if l := ultimaLinea(filepath.Join(filepath.Dir(cpdir), credproxy.SplitLog)); l != "" {
 				msg += "; last line of its log: " + l
 			}
+			// Uno lanzado que no contesta no se queda colgado hasta que
+			// muera su VMM.
+			matarYEsperar(nuevo)
 			return nil, fmt.Errorf(msg, err)
 		}
 		time.Sleep(espera)
@@ -253,16 +257,16 @@ func prepararDirCredproxy(dir string) error {
 // entorno justo: el del VMM (entornoProceso, sin KLING_TOKEN ni nada de la
 // sesión) más quién es el daemon, quién el VMM, el broker y el tamaño del
 // registro.
-func lanzarCredproxy(bin, cpdir string, vmmPID int, vmmExe string) error {
+func lanzarCredproxy(bin, cpdir string, vmmPID int, vmmExe string) (int, error) {
 	mdir := filepath.Dir(cpdir)
 	logf, err := os.OpenFile(filepath.Join(mdir, credproxy.SplitLog), os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return fmt.Errorf("credential proxy log: %w", err)
+		return 0, fmt.Errorf("credential proxy log: %w", err)
 	}
 	defer logf.Close()
 	daemon, err := os.Executable()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if r, err := filepath.EvalSymlinks(daemon); err == nil {
 		daemon = r
@@ -280,7 +284,7 @@ func lanzarCredproxy(bin, cpdir string, vmmPID int, vmmExe string) error {
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("launching kling-credproxy: %w", err)
+		return 0, fmt.Errorf("launching kling-credproxy: %w", err)
 	}
 	id := filepath.Base(mdir)
 	log.Printf("%s: credential proxy started (kling-credproxy pid %d, VMM pid %d)", shortID(id), cmd.Process.Pid, vmmPID)
@@ -291,7 +295,7 @@ func lanzarCredproxy(bin, cpdir string, vmmPID int, vmmExe string) error {
 			log.Printf("%s: kling-credproxy (pid %d) exited while its VMM is alive (%v): the machine's credentials don't work until the next thaw or credential change", shortID(id), cmd.Process.Pid, err)
 		}
 	}()
-	return nil
+	return cmd.Process.Pid, nil
 }
 
 // readoptarCredproxy: el daemon se reinició y la máquina siguió viva. Su
@@ -301,7 +305,7 @@ func lanzarCredproxy(bin, cpdir string, vmmPID int, vmmExe string) error {
 // credenciales). Corre con m.mu tomado (reconcile): no toca el manager.
 func readoptarCredproxy(cpdir string) {
 	id := filepath.Base(filepath.Dir(cpdir))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	conn, err := fc.DialUnix(ctx, filepath.Join(cpdir, credproxy.SplitAPISock))
 	if err != nil {

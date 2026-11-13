@@ -160,10 +160,17 @@ func Solo(l net.Listener, que string, bins []string, logf func(string, ...any)) 
 	return &solo{Listener: l, que: que, bins: bins, uid: os.Geteuid(), logf: logf}
 }
 
+// SoloPID es Solo exigiendo además que al otro lado esté el proceso pid (el
+// reenvío de kling-credproxy: el VMM de su máquina y ningún otro).
+func SoloPID(l net.Listener, que string, bins []string, pid int, logf func(string, ...any)) net.Listener {
+	return &solo{Listener: l, que: que, bins: bins, pid: pid, uid: os.Geteuid(), logf: logf}
+}
+
 type solo struct {
 	net.Listener
 	que  string
 	bins []string
+	pid  int // 0: cualquiera
 	uid  int
 	logf func(string, ...any)
 
@@ -184,6 +191,9 @@ func (s *solo) permitido(c net.Conn) error {
 	pid, err := PID(c)
 	if err != nil {
 		return err
+	}
+	if s.pid != 0 && pid != s.pid {
+		return fmt.Errorf("pid %d is not %d", pid, s.pid)
 	}
 	ruta, err := Ejecutable(pid)
 	if err != nil {

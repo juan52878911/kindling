@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,8 +42,10 @@ type hijo struct {
 	fin chan struct{}
 }
 
-// lanzar arranca el proxy con un «VMM» (un sleep) y espera a sus sockets.
-func lanzar(t *testing.T, conSandbox bool) *hijo {
+// lanzar arranca el proxy y espera a sus sockets. Su «VMM» es este proceso
+// (el reenvío solo admite al VMM, y el que reenvía aquí es el test) o, con
+// conVMM, un sleep que se puede matar.
+func lanzar(t *testing.T, conSandbox, conVMM bool) *hijo {
 	t.Helper()
 	base, err := os.MkdirTemp("/tmp", "kcp") // corto: sun_path
 	if err != nil {
@@ -53,18 +56,23 @@ func lanzar(t *testing.T, conSandbox bool) *hijo {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	vmm := exec.Command("/bin/sleep", "60")
-	if err := vmm.Start(); err != nil {
-		t.Fatal(err)
+	vmmPID := os.Getpid()
+	var vmm *exec.Cmd
+	if conVMM {
+		vmm = exec.Command("/bin/sleep", "60")
+		if err := vmm.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { vmm.Process.Kill(); vmm.Wait() })
+		vmmPID = vmm.Process.Pid
 	}
-	t.Cleanup(func() { vmm.Process.Kill(); vmm.Wait() })
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(exe, "-test.run=^$")
 	cmd.Env = append(os.Environ(),
-		envHijo+"="+strings.Join([]string{"--vmm-pid", strconv.Itoa(vmm.Process.Pid), "--dir", dir}, "\x1f"),
+		envHijo+"="+strings.Join([]string{"--vmm-pid", strconv.Itoa(vmmPID), "--dir", dir}, "\x1f"),
 		"KLING_CREDPROXY_DAEMON="+exe, "KLING_CREDPROXY_VMM="+exe, "KLING_VZ_BROKER=")
 	if !conSandbox {
 		cmd.Env = append(cmd.Env, "KLING_VZ_NO_SANDBOX=1")
@@ -129,7 +137,7 @@ func (h *hijo) reenviar(t *testing.T, host string) int {
 }
 
 func TestProcesoEntero(t *testing.T) {
-	h := lanzar(t, os.Getenv("KLING_CREDPROXY_TEST_NOSB") == "")
+	h := lanzar(t, os.Getenv("KLING_CREDPROXY_TEST_NOSB") == "", false)
 	code, out := h.api(t, "GET", "/kling/info", "")
 	var info struct {
 		Backend string   `json:"backend"`
@@ -165,12 +173,12 @@ func TestProcesoEntero(t *testing.T) {
 		t.Fatalf("curl reached the API: %v %s", err, out2)
 	}
 
-	// Muere su VMM: sale él también.
-	h.vmm.Process.Kill()
+	// Al pararlo, el registro llega al disco y se van sus sockets.
+	h.cmd.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-h.fin:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the proxy outlived its VMM")
+		t.Fatal("the proxy did not stop on SIGTERM")
 	}
 	b, err := os.ReadFile(filepath.Join(h.dir, credproxy.AuditFile))
 	if err != nil || !strings.Contains(string(b), `"reason":"no_credential"`) || !strings.Contains(string(b), `"reason":"disabled"`) || strings.Contains(string(b), "sk-1-clave") {
@@ -183,6 +191,30 @@ func TestProcesoEntero(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(h.dir, s)); err == nil {
 			t.Errorf("%s is still there", s)
 		}
+	}
+}
+
+// El reenvío solo admite al VMM de su máquina (este test no lo es), y el
+// proxy sale cuando muere su VMM.
+func TestSaleConSuVMM(t *testing.T) {
+	h := lanzar(t, true, true)
+	c, err := net.Dial("unix", filepath.Join(h.dir, credproxy.SplitFwdSock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cab, _ := credproxy.SplitHeader(80)
+	c.Write(cab[:])
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n")
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, _ := c.Read(make([]byte, 1)); n != 0 {
+		t.Fatal("another process than its VMM got an answer on the forward socket")
+	}
+	c.Close()
+	h.vmm.Process.Kill()
+	select {
+	case <-h.fin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the proxy outlived its VMM")
 	}
 }
 
