@@ -1,0 +1,98 @@
+{
+  "label": "rep-warm-n10-m1-r2",
+  "started": "2026-11-13T03:09:48.767074501Z",
+  "host": {
+    "hostname": "kling-ascci",
+    "kernel": "7.0.14-12-pve",
+    "cpu": "Intel(R) Core(TM) i3-3220 CPU @ 3.30GHz",
+    "cpus": 4,
+    "mem_total_mib": 10240,
+    "nested": false,
+    "container": "lxc",
+    "kling_version": "1.0.0-rc.2-5-gc4bc2038",
+    "firecracker": "Firecracker v1.17.0",
+    "backend": "firecracker",
+    "arch": "amd64",
+    "git_sha": "c4bc20385031",
+    "psi_limit": "20 (daemon default)"
+  },
+  "config": {
+    "gateway": "http://127.0.0.1:18180",
+    "services": [
+      "tb-r0",
+      "tb-r1",
+      "tb-r2",
+      "tb-r3",
+      "tb-r4",
+      "tb-r5",
+      "tb-r6",
+      "tb-r7",
+      "tb-r8",
+      "tb-r9"
+    ],
+    "n_services": 10,
+    "sessions": 1,
+    "calls": 5,
+    "timeout": "1m0s",
+    "tool": "echo"
+  },
+  "sessions_ok": 1,
+  "sessions_failed": 0,
+  "error_rate_pct": 0,
+  "status": "OK",
+  "errors": {},
+  "wall_ms": 22.26,
+  "latency_ms": {
+    "ttfr": {
+      "n": 1,
+      "p50": 11.96,
+      "p95": 11.96,
+      "p99": 11.96,
+      "max": 11.96,
+      "mean": 11.96
+    },
+    "init": {
+      "n": 1,
+      "p50": 8.93,
+      "p95": 8.93,
+      "p99": 8.93,
+      "max": 8.93,
+      "mean": 8.93
+    },
+    "first_call": {
+      "n": 1,
+      "p50": 1.72,
+      "p95": 1.72,
+      "p99": 1.72,
+      "max": 1.72,
+      "mean": 1.72
+    },
+    "steady": {
+      "n": 5,
+      "p50": 1.4,
+      "p95": 1.73,
+      "p99": 1.73,
+      "max": 1.73,
+      "mean": 1.47
+    },
+    "delete": {
+      "n": 1,
+      "p50": 2.76,
+      "p95": 2.76,
+      "p99": 2.76,
+      "max": 2.76,
+      "mean": 2.76
+    }
+  },
+  "host_metrics": {
+    "samples": 2,
+    "sample_errors": 0,
+    "peak_live": 1,
+    "distinct_machines": 1,
+    "peak_target_pss_mib": 15,
+    "peak_total_pss_mib": 15,
+    "min_available_mib": 9922,
+    "max_psi_some_avg10": 0,
+    "time_to_zero_ms": null
+  }
+}

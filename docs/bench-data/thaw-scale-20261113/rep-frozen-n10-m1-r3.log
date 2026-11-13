@@ -1,0 +1,7 @@
+rep-frozen-n10-m1-r3: 1 sessions over 10 service(s), 1/1 ok (0.00% failed) — OK, wall 556 ms
+  ttfr        n=1     p50    536.9  p95    536.9  p99    536.9  max    536.9 ms
+  initialize  n=1     p50    533.6  p95    533.6  p99    533.6  max    533.6 ms
+  first call  n=1     p50      1.9  p95      1.9  p99      1.9  max      1.9 ms
+  steady      n=5     p50      1.5  p95      1.8  p99      1.8  max      1.8 ms
+  delete      n=1     p50     11.0  p95     11.0  p99     11.0  max     11.0 ms
+  host: live peak 1, 1 distinct machine(s), PSS peak 14 MiB (all: 167), min available 9917 MiB, PSI some avg10 max 0.0, time to zero 13.7 s (4 samples)
