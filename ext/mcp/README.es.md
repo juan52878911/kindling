@@ -655,6 +655,11 @@ MCP comprometido no debe llevarse la credencial del agregador. Cuando un mismo t
 comparten varios tenants, las **cuotas por token** evitan que uno mate de hambre al
 resto.
 
+El token viaja en cada petición, así que fuera de loopback el gateway **solo sirve
+HTTPS**: dale `-tls-cert cert.pem -tls-key key.pem`. Escuchar en una dirección de la LAN
+sin ellos se rechaza; `-insecure-listen` permite HTTP en claro a sabiendas (en una red de
+confianza, o detrás de un proxy que termina el TLS).
+
 Medido de punta a punta con un servidor MCP real dentro de la microVM:
 
 | Camino | Latencia |
@@ -695,7 +700,8 @@ Un snapshot no viaja entre daemons: un servicio vive en el host donde se import�
 varios a la vez, en vez de a uno solo:
 
 ```sh
-kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080 \
+  -tls-cert /etc/kling/gateway.crt -tls-key /etc/kling/gateway.key
 ```
 
 `/mcp/<servicio>` va al host que lo tiene en su catálogo; si lo tienen varios, al que

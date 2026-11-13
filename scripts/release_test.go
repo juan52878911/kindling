@@ -38,6 +38,7 @@ var jobsCI = []string{
 	"núcleo sin dependencias ni cgo", "kling-unpack (Rust)", "go.work",
 	"clon real (xfs)", "clon real (btrfs)", "kling-vz and kling-hv (macOS)",
 	"clon real (apfs)", "lint (govulncheck, staticcheck, shellcheck, apidiff)",
+	"operator image (docker build)",
 }
 
 type checkRun struct {
@@ -212,8 +213,13 @@ func TestReleaseJobObligatorioSaltadoNoEsVerde(t *testing.T) {
 	if ok {
 		t.Fatalf("sin \"make test cross (.)\" la puerta se abrió:\n%s", out)
 	}
-	runs = runsVerdes()
-	out, ok = correrRelease(t, escenario{runs: runs[:len(runs)-1], statusHV: "success"})
+	runs = nil
+	for _, r := range runsVerdes() {
+		if !strings.HasPrefix(r.Name, "lint") {
+			runs = append(runs, r)
+		}
+	}
+	out, ok = correrRelease(t, escenario{runs: runs, statusHV: "success"})
 	if ok || !strings.Contains(out, "lint") {
 		t.Fatalf("sin lint la puerta se abrió (ok=%v):\n%s", ok, out)
 	}

@@ -109,10 +109,12 @@ func (g *Scheduler) End(e *Instance)   { g.end(e) }
 
 // BeginStream apunta un stream SSE abierto sobre la instancia: no la mantiene
 // despierta, y cortar se llama si la instancia sale del mapa (congelada,
-// desalojada) para que el stream acabe en vez de colgarse. Hay que llamar a la
-// función devuelta al cerrarse el stream.
-func (g *Scheduler) BeginStream(e *Instance, cortar context.CancelFunc) (end func()) {
-	return g.beginStream(e, cortar)
+// desalojada) para que el stream acabe en vez de colgarse. Si ya no está en el
+// mapa, cortar se llama al momento. Cada sesión tiene un stream como mucho: el
+// nuevo corta el anterior. Hay que llamar a la función devuelta al cerrarse el
+// stream.
+func (g *Scheduler) BeginStream(e *Instance, session string, cortar context.CancelFunc) (end func()) {
+	return g.beginStream(e, session, cortar)
 }
 
 // Instance busca la instancia de un servicio que corre en machineID.
@@ -205,6 +207,15 @@ func (rt *sessionRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) { rt.p
 // Route devuelve a qué instancia está fijada la sesión key, o nil. Cuenta como
 // uso de la sesión y de su instancia.
 func (g *Scheduler) Route(key string) *Route { return g.route(key) }
+
+// PeekRoute es Route sin contar como uso: ni la sesión ni su instancia
+// refrescan lastUse. Es para el GET del stream SSE, que no es trabajo y no debe
+// impedir que la sesión caduque o su microVM se congele.
+func (g *Scheduler) PeekRoute(key string) *Route {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.routes[key]
+}
 
 // Bind fija la sesión key a la instancia e del servicio. La clave es el id que
 // dio el propio invitado. Si key ya está fijada a OTRA instancia no la mueve

@@ -91,6 +91,7 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 		g.newSessionError(w, r, service, err)
 		return
 	}
+	g.Observe(service)
 	rec := &grabadorAcotado{ResponseRecorder: httptest.NewRecorder(), max: maxProxyBody}
 	g.Begin(e)
 	e.Proxy().ServeHTTP(rec, r)

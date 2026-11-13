@@ -917,6 +917,27 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	return m.Snapshot(name)
 }
 
+// borrarCredencialesPlantilla quita el almacén de la plantilla name, sus
+// copias .vN.bak y los marcadores apuntados: lo que `template rm` deja atrás
+// lo heredaría la siguiente plantilla con ese nombre. Que no existan no es
+// un error.
+func (m *Manager) borrarCredencialesPlantilla(name string) error {
+	m.credPlantillaMu.Lock()
+	defer m.credPlantillaMu.Unlock()
+	// name ya viene validado (sin metacaracteres de Glob).
+	rutas := []string{m.credSnapPath(name), m.marcadoresDoradoPath(name)}
+	if baks, err := filepath.Glob(m.credSnapPath(name) + ".v*.bak"); err == nil {
+		rutas = append(rutas, baks...)
+	}
+	var errs []error
+	for _, p := range rutas {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // anotarCredencialesPlantilla rellena s.CredentialDomains desde el almacén de
 // la plantilla. Se lee al vuelo y no se guarda en meta.json: el almacén es la
 // única fuente, y así no hay dos sitios que puedan discrepar.

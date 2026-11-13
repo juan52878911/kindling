@@ -7,11 +7,13 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/juan52878911/kindling/internal/esquema"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -352,6 +354,53 @@ func TestCredencialesDePlantilla(t *testing.T) {
 	}
 	if _, err := os.Stat(m.credSnapPath("svc-al")); !os.IsNotExist(err) {
 		t.Error("clear debería borrar el almacén")
+	}
+}
+
+// M14: `template rm` se lleva las credenciales de la plantilla. Una nueva con
+// el mismo nombre nace sin ellas; reemplazarla (commit -replace) las conserva.
+func TestBorrarPlantillaSeLlevaSusCredenciales(t *testing.T) {
+	m := newTestManager(t)
+	al := api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}}
+	escribirSnapshot(t, m, "svc", al)
+	spec := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: credSecreto}}
+	if _, err := m.SetSnapshotCredentials("svc", spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.marcadoresDoradoPath("svc"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(esquema.RutaRespaldo(m.credSnapPath("svc"), 1), []byte("copia"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reemplazar no las toca.
+	if err := m.removeSnapshot("svc", true); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "svc", al)
+	if s, err := m.Snapshot("svc"); err != nil || len(s.CredentialDomains) != 1 {
+		t.Fatalf("tras reemplazar: %+v, %v; quería sus credenciales", s, err)
+	}
+
+	if err := m.RemoveSnapshot("svc"); err != nil {
+		t.Fatal(err)
+	}
+	escribirSnapshot(t, m, "svc", al)
+	s, err := m.Snapshot("svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.CredentialDomains) != 0 {
+		t.Errorf("la plantilla nueva heredó las credenciales de la borrada: %v", s.CredentialDomains)
+	}
+	if specs, err := m.cargarCredencialesPlantilla("svc"); err != nil || len(specs) != 0 {
+		t.Errorf("almacén tras rm: %+v, %v", specs, err)
+	}
+	for _, p := range []string{m.credSnapPath("svc"), m.marcadoresDoradoPath("svc"), esquema.RutaRespaldo(m.credSnapPath("svc"), 1)} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s sigue ahí tras rm (%v)", filepath.Base(p), err)
+		}
 	}
 }
 

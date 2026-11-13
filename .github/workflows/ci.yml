@@ -403,3 +403,23 @@ jobs:
         run: shellcheck --version | head -2 && shellcheck -x -S warning scripts/*.sh
       - name: apidiff (pkg/api, pkg/plugin, pkg/config)
         run: bash scripts/apidiff.sh
+
+  # La imagen del operador solo se construía en release.yml, al publicar: un
+  # Dockerfile roto (lo que pasó con v1.0.0-rc.2, que salió sin imagen) se
+  # descubría con la etiqueta ya puesta. Aquí se construye en cada push, sin
+  # publicarla, y se arranca con las mismas restricciones que pide
+  # ext/sandbox/deploy/deployment.yaml (raíz de solo lectura, sin capacidades,
+  # sin escalar privilegios) para ver que el binario corre dentro. Solo amd64:
+  # la multiarquitectura la hace release.yml con buildx.
+  imagen-operador:
+    name: operator image (docker build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: docker build
+        run: docker build -f ext/sandbox/Dockerfile.operator --build-arg VERSION=ci -t kindling-operator:ci .
+      - name: arranca con el securityContext del deployment
+        run: |
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user 65532:65532 kindling-operator:ci -h 2>&1 | tee "$RUNNER_TEMP/h.txt"
+          grep -q -- '-kube-url' "$RUNNER_TEMP/h.txt"

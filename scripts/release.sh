@@ -215,7 +215,8 @@ clon real (xfs)
 clon real (btrfs)
 kling-vz and kling-hv (macOS)
 clon real (apfs)
-lint (govulncheck, staticcheck, shellcheck, apidiff)'
+lint (govulncheck, staticcheck, shellcheck, apidiff)
+operator image (docker build)'
 ci_verde() {
     command -v gh >/dev/null 2>&1 || { echo "gh CLI not found: cannot check CI for $COMMIT" >&2; return 1; }
     # La lista va dentro del filtro como un array de jq: gh --jq no tiene --arg.

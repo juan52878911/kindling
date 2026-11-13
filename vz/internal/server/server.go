@@ -1442,7 +1442,20 @@ func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
 		fault(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"footprint_mib": int((b + (1<<20 - 1)) >> 20)})
+	out := map[string]any{"footprint_mib": int((b + (1<<20 - 1)) >> 20)}
+	s.mu.Lock()
+	vm := s.vm
+	s.mu.Unlock()
+	if h, ok := vm.(DeviceHealth); ok {
+		out["devices_dead"] = h.DeadDevices()
+	}
+	writeJSON(w, out)
+}
+
+// DeviceHealth lo implementa una VM cuyos dispositivos tienen hilos propios
+// (hvvm): DeadDevices dice cuáles se quedaron sin él, con la VM aún running.
+type DeviceHealth interface {
+	DeadDevices() []string
 }
 
 // Screenshotter lo implementa una VM con ventana (vzvm con KLING_VZ_WINDOW=1).

@@ -2,6 +2,7 @@ package credproxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -241,6 +242,9 @@ type verificadorS3 struct {
 	vistas  []string // «MÉTODO ruta?query -> resultado»
 	cuerpos map[string][]byte
 	firmas  []string // las firmas que recibió (las que emitió el proxy)
+	// responder, si no es nil, contesta una petición bien firmada en lugar
+	// del «ok» de siempre.
+	responder func(w http.ResponseWriter, r *http.Request)
 }
 
 func (v *verificadorS3) manejar(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -264,6 +268,10 @@ func (v *verificadorS3) manejar(t *testing.T, w http.ResponseWriter, r *http.Req
 	// Eco del access key id real y del secreto: el redactor tiene que
 	// quitarlos si hace falta.
 	w.Header().Set("X-Eco", r.Header.Get("Authorization"))
+	if v.responder != nil {
+		v.responder(w, r)
+		return
+	}
 	io.WriteString(w, "ok")
 }
 
@@ -763,6 +771,7 @@ func TestSigV4ValidacionDeLaCredencial(t *testing.T) {
 		"con -body":         func(c *Credential) { c.Body = true },
 		"con upstream":      func(c *Credential) { c.Upstream = "127.0.0.1:3900" },
 		"servicio raro":     func(c *Credential) { c.Service = "s3/../x" },
+		"temporal (ASIA)":   func(c *Credential) { c.AccessKeyID = "ASIAIOSFODNN7EXAMPLE" },
 	}
 	for n, mod := range malas {
 		c := ok
@@ -857,5 +866,131 @@ func TestSigV4PrefirmadaErrorDeRedNoReflejaLaURL(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "conexión rechazada") {
 		t.Errorf("el 502 debía conservar la causa: %s", b)
+	}
+}
+
+// Una clave temporal de STS se rechaza al darla de alta, con un error que dice
+// por qué, en vez de registrarse y fallar en cada petición.
+func TestSigV4ClaveTemporalSeRechaza(t *testing.T) {
+	for _, ak := range []string{"ASIAIOSFODNN7EXAMPLE", "asiaIOSFODNN7EXAMPLE"} {
+		c := Credential{Domain: "example.com", Placeholder: svMarcAK, Secret: svRealSK, Kind: KindSigV4, AccessKeyID: ak, Region: "us-east-1"}
+		err := ValidarTipo(&c)
+		if err == nil || !strings.Contains(err.Error(), "temporary credentials") || !strings.Contains(err.Error(), "session token") {
+			t.Errorf("%s: %v", ak, err)
+		}
+	}
+	c := Credential{Domain: "example.com", Placeholder: svMarcAK, Secret: svRealSK, Kind: KindSigV4, AccessKeyID: "AKIAIOSFODNN7EXAMPLE", Region: "us-east-1"}
+	if err := ValidarTipo(&c); err != nil {
+		t.Errorf("una AKIA debía valer: %v", err)
+	}
+}
+
+// Un objeto guardado comprimido llega al invitado tal cual: mismos bytes, mismo
+// Content-Encoding y mismo Content-Length, y al servidor se le pide identity.
+func TestSigV4ObjetoComprimidoIntacto(t *testing.T) {
+	for _, enc := range []string{"gzip", "br"} {
+		t.Run(enc, func(t *testing.T) {
+			m := nuevoMontajeS3(t)
+			var gz bytes.Buffer
+			zw := gzip.NewWriter(&gz)
+			zw.Write([]byte("contenido comprimido del objeto"))
+			zw.Close()
+			guardado := gz.Bytes()
+			var pedido []string
+			var mu sync.Mutex
+			m.ver.responder = func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				pedido = r.Header.Values("Accept-Encoding")
+				mu.Unlock()
+				w.Header().Set("Content-Encoding", enc)
+				w.Header().Set("Content-Type", "text/plain")
+				w.Header().Set("Content-Length", strconv.Itoa(len(guardado)))
+				w.Write(guardado)
+			}
+			// Accept-Encoding explícito: el cliente de Go del test no descomprime.
+			resp, b := m.peticionInvitado(t, "GET", "/mi-cubo/obj.txt", "", hashSinFirmar, nil, map[string]string{"Accept-Encoding": "gzip"})
+			if resp.StatusCode != 200 {
+				t.Fatalf("%d %s (servidor: %v)", resp.StatusCode, b, m.ver.vistas)
+			}
+			if !bytes.Equal(b, guardado) {
+				t.Errorf("cuerpo alterado: %q", b)
+			}
+			if got := resp.Header.Get("Content-Encoding"); got != enc {
+				t.Errorf("Content-Encoding %q, quería %q", got, enc)
+			}
+			if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(guardado)) {
+				t.Errorf("Content-Length %q, quería %d", got, len(guardado))
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(pedido, []string{"identity"}) {
+				t.Errorf("Accept-Encoding hacia el servidor: %q", pedido)
+			}
+		})
+	}
+}
+
+// Sin x-amz-content-sha256 el cuerpo se hashea en memoria: por encima de 1 MiB
+// el 413 explica el porqué y qué cabecera mandar.
+func TestSigV4CuerpoGrandeSinHashExplicaElLimite(t *testing.T) {
+	m := nuevoMontajeS3(t)
+	resp, b := m.peticionInvitado(t, "PUT", "/mi-cubo/grande", "", "", bytes.Repeat([]byte("x"), MaxSwapBody+1), nil)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(string(b), "without x-amz-content-sha256") {
+		t.Errorf("mensaje: %s", b)
+	}
+}
+
+// Una prefirmada que firmó una cabecera de un solo salto (que el proxy no
+// reenvía) sale firmando solo lo que se manda, y X-Amz-SignedHeaders lo dice.
+func TestSigV4PrefirmadaSoloFirmaLoQueSeManda(t *testing.T) {
+	m := nuevoMontajeS3(t)
+	ahora := time.Now().UTC()
+	q := url.Values{
+		"X-Amz-Algorithm":     {algoSigV4},
+		"X-Amz-Credential":    {svMarcAK + "/" + firmaInv.ambito(ahora)},
+		"X-Amz-Date":          {ahora.Format(formatoFecha)},
+		"X-Amz-Expires":       {"300"},
+		"X-Amz-SignedHeaders": {"host;keep-alive"},
+	}
+	req, _ := http.NewRequest("GET", m.srv.URL+"/mi-cubo/k?"+q.Encode()+"&X-Amz-Signature="+strings.Repeat("0", 64), nil)
+	req.Host = svHost
+	req.Header.Set("Keep-Alive", "timeout=5")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("%d %s (servidor: %v)", resp.StatusCode, b, m.ver.vistas)
+	}
+	m.ver.mu.Lock()
+	defer m.ver.mu.Unlock()
+	if len(m.ver.vistas) != 1 || !strings.Contains(m.ver.vistas[0], "X-Amz-SignedHeaders=host&") {
+		t.Errorf("el servidor vio %v", m.ver.vistas)
+	}
+}
+
+// El trailer de aws-chunked tiene un tope de líneas.
+func TestSigV4TrailerConTopeDeLineas(t *testing.T) {
+	f := firmador{accessKey: vecAK, secret: vecSK, region: "r", service: "s3"}
+	res := resultadoFirma{semilla: strings.Repeat("a", 64), fecha: tVec}
+	cuerpo := func(lineas int) []byte {
+		var b bytes.Buffer
+		b.WriteString("0;chunk-signature=" + strings.Repeat("b", 64) + "\r\n")
+		for i := 0; i < lineas; i++ {
+			fmt.Fprintf(&b, "x-amz-meta-%d:v\r\n", i)
+		}
+		b.WriteString("x-amz-trailer-signature:" + strings.Repeat("c", 64) + "\r\n\r\n")
+		return b.Bytes()
+	}
+	if _, err := io.ReadAll(nuevoResignador(bytes.NewReader(cuerpo(2)), f, res, true)); err != nil {
+		t.Fatalf("un trailer corto debía valer: %v", err)
+	}
+	if _, err := io.ReadAll(nuevoResignador(bytes.NewReader(cuerpo(maxLineasTrailer+8)), f, res, true)); err == nil {
+		t.Error("un trailer de más de maxLineasTrailer líneas debía fallar")
 	}
 }

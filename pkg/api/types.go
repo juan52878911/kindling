@@ -58,6 +58,11 @@ type Machine struct {
 	// DiskMiB es el tamaño lógico de su disco escribible, si no es el de
 	// siempre (ver RunRequest.DiskMiB).
 	DiskMiB int `json:"disk_mib,omitempty"`
+	// OverlayMaxBytes es lo más que puede ocupar su overlay sin almacén
+	// copy-on-write (vigilarOverlays): se apunta la primera vez que el
+	// vigilante la ve y no se vuelve a medir en cada arranque o thaw. 0: aún
+	// sin apuntar.
+	OverlayMaxBytes int64 `json:"overlay_max_bytes,omitempty"`
 	// DiffBase, en una copia de un dorado que corre con seguimiento de
 	// páginas sucias, es el mem.file del dorado respecto al que se congelará
 	// en diferencial (solo lo que cambió). Vacío: el siguiente freeze vuelca
@@ -1714,7 +1719,8 @@ type CredentialSpec struct {
 	UpstreamMachine string `json:"upstream_machine,omitempty"`
 	UpstreamOwner   string `json:"upstream_owner,omitempty"`
 	// AccessKeyID, Region y Service (solo sigv4): el access key id real, y la
-	// región y el servicio con los que firma el proxy.
+	// región y el servicio con los que firma el proxy. Una clave temporal de
+	// STS (ASIA…) se rechaza: necesitaría un session token que no hay.
 	AccessKeyID string `json:"access_key_id,omitempty"`
 	Region      string `json:"region,omitempty"`
 	Service     string `json:"service,omitempty"`

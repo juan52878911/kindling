@@ -458,3 +458,51 @@ func TestRotateTrasRotacionInterrumpida(t *testing.T) {
 		t.Fatalf("password.new left: %v", err)
 	}
 }
+
+// Una rotación muerta después de cambiar la base deja la clave nueva en
+// password.new y la anterior en password: connect lo avisa y rotate -resume la
+// termina con la clave de password.new, sin tocar los datos.
+func TestRotateResume(t *testing.T) {
+	ta := testAppMotores(t)
+	mc, err := ta.up(ctx, "rd", "r1", 0, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ta.resumeRotate(ctx, "r1", "local"); err == nil || !strings.Contains(err.Error(), "no interrupted rotation") {
+		t.Fatalf("resume sin rotación a medias: %v", err)
+	}
+	vieja := password(t, mc.ID)
+	if err := dbstate.StagePassword(mc.ID, "pendiente"); err != nil {
+		t.Fatal(err)
+	}
+	ta.f.verifier[mc.ID] = redisHash("pendiente") // la base ya la tiene
+	if err := ta.connect(ctx, "r1", "local", "redis"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ta.err.String(), "kling db rotate -resume r1") {
+		t.Fatalf("connect no avisa:\n%s", ta.err)
+	}
+	if password(t, mc.ID) != vieja {
+		t.Fatal("connect tocó la clave")
+	}
+
+	// Si la base no contesta, password.new se queda para otro intento.
+	ta.f.failRotation = ta.f.rotations + 1
+	if _, err := ta.resumeRotate(ctx, "r1", "local"); err == nil {
+		t.Fatal("resume con la base caída no falló")
+	}
+	if !dbstate.HasStaged(mc.ID) || password(t, mc.ID) != vieja {
+		t.Fatal("un resume fallido perdió password.new o cambió la vigente")
+	}
+
+	if _, err := ta.resumeRotate(ctx, "r1", "local"); err != nil {
+		t.Fatal(err)
+	}
+	if password(t, mc.ID) != "pendiente" || ta.f.verifier[mc.ID] != redisHash("pendiente") || dbstate.HasStaged(mc.ID) {
+		t.Fatal("tras -resume la base y el host no coinciden")
+	}
+	ta.err.Reset()
+	if err := ta.connect(ctx, "r1", "local", "redis"); err != nil || strings.Contains(ta.err.String(), "interrupted") {
+		t.Fatalf("aviso tras terminar: %v\n%s", err, ta.err)
+	}
+}

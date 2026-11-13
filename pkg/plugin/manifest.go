@@ -24,9 +24,8 @@ package plugin
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
+	"github.com/juan52878911/kindling/internal/buildver"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
@@ -83,7 +82,7 @@ type Manifest struct {
 	HelpGroup string `json:"group,omitempty"`
 
 	// Companions son otros ejecutables que la extensión necesita a su lado
-	// (p. ej. "kling-bridge" para mcp). `kling plugins install` los baja de la
+	// (p. ej. "kling-bridge" para mcp). `kling plugin install` los baja de la
 	// misma release con el mismo control de sha256 y `kling plugins rm` los
 	// quita; el descubrimiento no los trata como extensiones.
 	Companions []string `json:"companions,omitempty"`
@@ -251,7 +250,7 @@ func (m *Manifest) APIWarning(daemonAPI int) string {
 		return ""
 	}
 	return fmt.Sprintf("built for daemon API %d or older and the daemon speaks API %d: "+
-		"update it (kling plugins install %s)", max, daemonAPI, m.Name)
+		"update it (kling plugin install %s)", max, daemonAPI, m.Name)
 }
 
 // HasHook dice si la extensión declara el gancho h.
@@ -284,46 +283,16 @@ func (m *Manifest) ConfigKey(key string) *ConfigKey {
 	return nil
 }
 
-// VersionAtLeast compara versiones "vX.Y.Z[-algo]" por sus tres números. Una
-// versión que no se puede leer ("dev", la de un binario compilado a mano) se
-// considera suficiente: quien compila a mano sabe lo que hace, y bloquearle por
-// no tener etiqueta solo estorbaría.
+// VersionAtLeast dice si have ≥ want como semver (buildver.Compare): una
+// pre-release va antes que su versión (1.0.0-rc.2 no cumple un min_kling
+// 1.0.0) y un build de desarrollo cuenta como su etiqueta. Una versión que no
+// se puede leer ("dev", la de un binario compilado a mano) se considera
+// suficiente: quien compila a mano sabe lo que hace, y bloquearle por no tener
+// etiqueta solo estorbaría.
 func VersionAtLeast(have, want string) bool {
 	if want == "" {
 		return true
 	}
-	h, ok := parseVersion(have)
-	if !ok {
-		return true
-	}
-	w, ok := parseVersion(want)
-	if !ok {
-		return true
-	}
-	for i := 0; i < 3; i++ {
-		if h[i] != w[i] {
-			return h[i] > w[i]
-		}
-	}
-	return true
-}
-
-func parseVersion(v string) ([3]int, bool) {
-	var out [3]int
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if i := strings.IndexAny(v, "-+ "); i >= 0 {
-		v = v[:i]
-	}
-	parts := strings.Split(v, ".")
-	if len(parts) == 0 || len(parts) > 3 || parts[0] == "" {
-		return out, false
-	}
-	for i, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
-			return out, false
-		}
-		out[i] = n
-	}
-	return out, true
+	c, ok := buildver.Compare(have, want)
+	return !ok || c >= 0
 }

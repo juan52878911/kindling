@@ -28,17 +28,23 @@ func sumOf(b []byte) string {
 
 func asset(bin string) string { return bin + "-" + runtime.GOOS + "-" + runtime.GOARCH }
 
-// release sirve una release falsa en /v1.0.0/: los assets que se le den y un
-// SHA256SUMS con sus hashes. sums permite estropear o quitar entradas.
+// release sirve una release falsa en /<tag>/ (/v1.0.0/ si no se dice): los
+// assets que se le den y un SHA256SUMS con sus hashes. sums permite estropear
+// o quitar entradas.
 type release struct {
 	files map[string][]byte
 	sums  map[string]string // nombre -> hash; nil = los reales
 	noSum bool              // sin SHA256SUMS (404)
+	tag   string
 }
 
 func (rel *release) handler() http.Handler {
+	tag := rel.tag
+	if tag == "" {
+		tag = "v1.0.0"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name, ok := strings.CutPrefix(r.URL.Path, "/v1.0.0/")
+		name, ok := strings.CutPrefix(r.URL.Path, "/"+tag+"/")
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -343,8 +349,21 @@ func TestSinEtiquetaEnDesarrollo(t *testing.T) {
 			t.Errorf("%q: %v", v, err)
 		}
 	}
-	if DevVersion("v0.13.0") || DevVersion("0.13.0") {
+	if DevVersion("v0.13.0") || DevVersion("0.13.0") || DevVersion("v1.0.0-rc.2") {
 		t.Error("una versión de release sirve de etiqueta")
+	}
+}
+
+// En una pre-release, install sin @tag baja de la release de esa misma rc.
+func TestInstalarEnUnaPreRelease(t *testing.T) {
+	rel := demoRelease()
+	rel.tag = "v1.0.0-rc.2"
+	res, _, err := install(t, rel, InstallOptions{CoreVersion: "v1.0.0-rc.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(res.Sidecar.URL, "/v1.0.0-rc.2/"+asset("kling-demo")) {
+		t.Fatalf("URL: %s", res.Sidecar.URL)
 	}
 }
 

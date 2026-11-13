@@ -1546,6 +1546,10 @@ kling mcp import stripe -egress allowlist -allow api.stripe.com
 kling template credential stripe -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt
 ```
 
+Reimportar (`kling mcp import -force`, `kling mcp heal`) o `commit -replace` las conserva;
+`kling template rm` las borra con la plantilla, y una nueva con el mismo nombre nace sin
+credenciales.
+
 Lo mismo vale para una **contraseña de Postgres**. El invitado conecta en claro al nombre
 de la base con el marcador como contraseña; el proxy entra en el servidor real con la
 contraseña real, por TLS verificado (SCRAM-SHA-256, `-PLUS` si se ofrece):

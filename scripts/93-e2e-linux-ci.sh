@@ -13,7 +13,13 @@
 #      HTTPBIN, KLING_E2E_OFFLINE=1). Lo que este script prepara NO es
 #      opcional: si 90 se salta las carpetas vivas (daemon.share_roots va en
 #      la configuración del daemon) o, con la parte db, la sección de kling
-#      db, la parte falla aunque 90 salga con 0;
+#      db, la parte falla aunque 90 salga con 0. Lo que pide algo que este
+#      host no tiene sí se salta, y cada salto sale como aviso y en el
+#      resumen del job: el proxy de Postgres (KLING_E2E_PG_URL), el clon de
+#      un Postgres de origen (KLING_E2E_CLONE_ADMIN_URL), MariaDB
+#      (KLING_E2E_MYSQL_GOLDEN), Redis y SQLite (KLING_E2E_*_GOLDEN), la
+#      autorización por inquilino (KLING_E2E_AUTHZ y sus tokens), `ask` con
+#      un proveedor real y, sin salida a HTTPBIN, el proxy de credenciales;
 #   4. lo para y corre scripts/e2e-diff-freeze.sh (levanta sus daemons);
 #   5. scripts/94-e2e-upgrade.sh: de la release anterior publicada a esta.
 #
@@ -197,6 +203,20 @@ if parte e2e; then
   if parte db && [ -n "${KLING_E2E_DB_GOLDEN:-}" ]; then
     obligatorio db "KLING_E2E_DB_GOLDEN no está"
     obligatorio db "el plugin kling-db no está instalado"
+  fi
+  # El resto de lo que 90 se salta lo pide algo que este host no prepara (ver
+  # la cabecera): no es un fallo, pero tampoco se ha probado. Se cuenta y se
+  # lista en el resumen del job para que el verde no lo esconda.
+  mapfile -t saltos < <(sed 's/\x1b\[[0-9;]*m//g' "$log90" | sed -n 's/^ *skip  *//p')
+  if [ "${#saltos[@]}" -gt 0 ]; then
+    echo "::warning::90-e2e.sh skipped ${#saltos[@]} section(s) this host does not set up (listed in the job summary)"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      {
+        echo "### 90-e2e.sh: ${#saltos[@]} skipped section(s)"
+        echo
+        printf -- '- %s\n' "${saltos[@]}"
+      } >> "$GITHUB_STEP_SUMMARY"
+    fi
   fi
   parar
 fi

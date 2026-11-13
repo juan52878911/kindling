@@ -497,6 +497,13 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		return nil, errors.New("nothing was built: event triggers of the source survived DROP EVENT TRIGGER")
 	}
 
+	// session_replication_role = replica (el del enmascarado) no apaga los
+	// triggers ni las reglas ENABLE ALWAYS / ENABLE REPLICA: correrían como
+	// superusuario con cada UPDATE. Con alguno, no se enmascara nada.
+	if err := c.checkAlwaysTriggers(ctx, builder); err != nil {
+		return nil, err
+	}
+
 	out, err = c.stagingPsql(ctx, builder, dbmask.CatalogSQL, "10m")
 	if err != nil {
 		return nil, fmt.Errorf("reading the catalog: %w", err)
@@ -553,6 +560,11 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		return nil, err
 	}
 	f.Close()
+	// Otra vez antes del volcado: nada de lo que salga al golden puede llevar
+	// un trigger o una regla que se dispare en replica.
+	if err := c.checkAlwaysTriggers(ctx, builder); err != nil {
+		return nil, err
+	}
 	c.logf("dumping the masked copy")
 	if _, err := c.a.k.Run(ctx, nil, "exec", "-timeout", "1h", builder, "--", "su", "-s", "/bin/sh", "postgres", "-c",
 		"pg_dump -h "+cloneDir+" -p "+clonePort+" -d staging --no-owner --no-privileges -f "+cloneDir+"/masked.sql"); err != nil {
@@ -835,6 +847,38 @@ DO $$DECLARE r record; BEGIN
 END$$;
 SELECT 'evt|' || count(*) FROM pg_event_trigger;
 `
+
+// alwaysTriggersMarker distingue la orden en los tests.
+const alwaysTriggersMarker = "-- kling-db:always-triggers"
+
+// alwaysTriggersSQL cuenta los triggers (de usuario) y las reglas de staging
+// que se disparan aunque session_replication_role sea replica.
+const alwaysTriggersSQL = alwaysTriggersMarker + `
+SELECT 'always|' || (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled IN ('A', 'R'))
+  || '|' || (SELECT count(*) FROM pg_rewrite WHERE ev_enabled IN ('A', 'R'));
+`
+
+// checkAlwaysTriggers falla si staging tiene triggers o reglas ENABLE ALWAYS
+// o ENABLE REPLICA, o si la respuesta no se entiende.
+func (c *cloner) checkAlwaysTriggers(ctx context.Context, builder string) error {
+	out, err := c.stagingPsql(ctx, builder, alwaysTriggersSQL, "1m")
+	if err != nil {
+		return fmt.Errorf("nothing was built: checking the triggers of the source: %w", err)
+	}
+	f := strings.Split(strings.TrimSpace(string(out)), "|")
+	if len(f) != 3 || f[0] != "always" {
+		return errors.New("nothing was built: unexpected reply checking the triggers of the source")
+	}
+	trg, err1 := strconv.Atoi(f[1])
+	rul, err2 := strconv.Atoi(f[2])
+	if err1 != nil || err2 != nil {
+		return errors.New("nothing was built: unexpected reply checking the triggers of the source")
+	}
+	if trg != 0 || rul != 0 {
+		return fmt.Errorf("nothing was built: the source has %d trigger(s) and %d rule(s) set to ENABLE ALWAYS or ENABLE REPLICA, which would run while masking; set them back to ENABLE or DISABLE in the source", trg, rul)
+	}
+	return nil
+}
 
 // cloneDumpScript vuelca producción DENTRO de la máquina y lo restaura en el
 // Postgres del tmpfs, por una tubería: el volcado sin enmascarar no se

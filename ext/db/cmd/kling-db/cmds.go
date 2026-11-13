@@ -593,6 +593,7 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 	if err := checkReady(mc, owner); err != nil {
 		return err
 	}
+	a.warnInterruptedRotate(mc)
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err

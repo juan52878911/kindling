@@ -77,3 +77,54 @@ func TestResyncCopiaMataExecsDelDorado(t *testing.T) {
 		}
 	}
 }
+
+// escrituraColgada es la conexión congelada de una copia por vsock: lo que se
+// escribe en ella no vuelve hasta que se suelta.
+type escrituraColgada struct {
+	h     http.Header
+	libre chan struct{}
+}
+
+func (e *escrituraColgada) Header() http.Header { return e.h }
+func (e *escrituraColgada) WriteHeader(int)     {}
+func (e *escrituraColgada) Write(p []byte) (int, error) {
+	<-e.libre
+	return len(p), nil
+}
+
+// Aunque el manejador se quede colgado escribiendo la respuesta en la
+// conexión congelada, el /resync de una copia suelta las plazas.
+func TestResyncCopiaSueltaPlazasConEscrituraColgada(t *testing.T) {
+	falsos(t, nil, nil)
+	esperarOcupadas(t, 0, 5*time.Second)
+
+	nueva := func() *escrituraColgada {
+		return &escrituraColgada{h: http.Header{}, libre: make(chan struct{})}
+	}
+	w1, w2 := nueva(), nueva()
+	hechos := make(chan struct{}, 2)
+	t.Cleanup(func() {
+		close(w1.libre)
+		close(w2.libre)
+		for range 2 {
+			<-hechos
+		}
+	})
+	go func() {
+		b, _ := json.Marshal(execRequest{Cmd: []string{"sleep", "100"}})
+		handleExec(nil, w1, httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader(b)))
+		hechos <- struct{}{}
+	}()
+	go func() {
+		b, _ := json.Marshal(api.ExecRequest{Cmd: []string{"sleep", "100"}})
+		handleStreamExec(nil, w2, httptest.NewRequest(http.MethodPost, "/exec/stream", bytes.NewReader(b)))
+		hechos <- struct{}{}
+	}()
+	esperarOcupadas(t, 2, 5*time.Second)
+
+	rr := postResync(t, cuerpoKind(t, time.Now().UnixNano(), api.ResyncInstance))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resync instance: %d %s", rr.Code, rr.Body)
+	}
+	esperarOcupadas(t, 0, 5*time.Second)
+}

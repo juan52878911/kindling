@@ -11,7 +11,10 @@
 # privilegios, y nada más que se pueda explotar.
 # La misma Go que CI y release (1.27.4): con 1.24 el binario llevaba una
 # biblioteca estándar con CVEs. go.mod sigue en 1.24, que es el mínimo.
-FROM golang:1.27.4 AS build
+# Las bases van por digest (el índice multiarquitectura): un tag se puede mover
+# debajo y la imagen publicada dejaría de ser la que se revisó. Al subir de
+# versión se cambian tag y digest a la vez.
+FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS build
 WORKDIR /src
 # Sin workspace: go.work cita ./vz y ./ext/mcp, que no se copian. El replace
 # ../.. basta. Y sin bajarse otra toolchain por su cuenta.
@@ -29,7 +32,7 @@ ARG VERSION=dev
 RUN go -C ext/sandbox build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
       -o /kindling-operator ./cmd/kindling-operator
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 COPY --from=build /kindling-operator /kindling-operator
 USER nonroot:nonroot
 ENTRYPOINT ["/kindling-operator"]

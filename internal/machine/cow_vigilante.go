@@ -317,43 +317,31 @@ func (m *Manager) quitarHold(id string) {
 // el disco gana unos GiB, que es lo más que se le escapa.
 const vigiaOverlaysCada = time.Second
 
-// topeOverlay es lo que puede ocupar el overlay de una máquina en la ejecución
-// que empezó en desde.
-type topeOverlay struct {
-	desde time.Time
-	tope  int64
-}
-
 // vigilarOverlays es el vigilante de los overlays sin almacén (ver arriba).
 func (m *Manager) vigilarOverlays(ctx context.Context) {
-	topes := map[string]topeOverlay{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(vigiaOverlaysCada):
-			m.vueltaVigiaOverlays(topes)
+			m.vueltaVigiaOverlays()
 		}
 	}
 }
 
 // vueltaVigiaOverlays es una vuelta de vigilarOverlays: para las máquinas en
 // marcha (o pausadas: su VMM sigue vivo) cuyo overlay, en tamaño o en bloques,
-// pasa de cuotaInstancia de su disco, y devuelve sus nombres.
+// pasa de su tope (topeOverlayDe), y devuelve sus nombres.
 //
 // Parar y no pausar, como hace el almacén lleno: pausar se lo pide al propio
 // VMM, que es justo quien no se porta bien; parar mata el proceso y deja el
 // disco como está (lo de más allá del tamaño lógico el invitado no lo ve).
-//
-// El tamaño lógico es el de la máquina (DiskMiB, o el de siempre). Si al
-// empezar a vigilar una ejecución el overlay ya es mayor (un disco que vino así
-// de un snapshot, o lo que creciera con otro daemon), el tope sale de lo que
-// mide entonces: no se para lo que ya estaba, pero tampoco crece más.
-func (m *Manager) vueltaVigiaOverlays(topes map[string]topeOverlay) []string {
+func (m *Manager) vueltaVigiaOverlays() []string {
 	type vigilada struct {
 		id, name string
 		desde    time.Time
-		logico   int64
+		pid      int
+		tope     int64
 	}
 	m.mu.RLock()
 	var vs []vigilada
@@ -361,11 +349,7 @@ func (m *Manager) vueltaVigiaOverlays(topes map[string]topeOverlay) []string {
 		if (mc.State != api.StateRunning && mc.State != api.StatePaused) || m.transicion[id] != "" {
 			continue
 		}
-		mib := mc.DiskMiB
-		if mib <= 0 {
-			mib = defaultOverlayMiB
-		}
-		v := vigilada{id: id, name: mc.Name, logico: int64(mib) << 20}
+		v := vigilada{id: id, name: mc.Name, pid: mc.PID, tope: topeOverlayDe(mc)}
 		if mc.StartedAt != nil {
 			v.desde = *mc.StartedAt
 		}
@@ -373,43 +357,89 @@ func (m *Manager) vueltaVigiaOverlays(topes map[string]topeOverlay) []string {
 	}
 	m.mu.RUnlock()
 
-	vivas := map[string]bool{}
 	var paradas []string
 	for _, v := range vs {
-		vivas[v.id] = true
 		ruta := filepath.Join(m.root, "machines", v.id, "overlay.ext4")
 		fi, err := os.Stat(ruta)
 		if err != nil {
 			continue
 		}
 		mide := max(fi.Size(), allocatedBytes(ruta))
-		t, ok := topes[v.id]
-		if !ok || !t.desde.Equal(v.desde) {
-			t = topeOverlay{desde: v.desde, tope: cuotaInstancia(v.logico)}
-			if mide > t.tope {
-				log.Printf("%s: its disk file is already %d MiB, more than its %d MiB disk; it may not grow past %d MiB",
-					v.name, mide>>20, v.logico>>20, cuotaInstancia(mide)>>20)
-				t.tope = cuotaInstancia(mide)
-			}
-			topes[v.id] = t
+		if v.tope == 0 {
+			// Primera vez que se la ve: se apunta su tope y ya no se vuelve
+			// a medir (ni al reanudarla, ni al descongelarla, ni con otro
+			// daemon).
+			v.tope = m.apuntarTopeOverlay(v.id, v.name, mide)
 		}
-		if mide <= t.tope {
+		if v.tope == 0 || mide <= v.tope {
 			continue
 		}
 		log.Printf("warning: %s: its disk file grew to %d MiB, past the %d MiB its guest can use; stopping it so it can't fill the host disk (its VMM may be compromised)",
-			v.name, mide>>20, t.tope>>20)
-		if _, err := m.Stop(v.id); err != nil {
-			log.Printf("warning: %s: couldn't stop it: %v", v.name, err)
+			v.name, mide>>20, v.tope>>20)
+		// Solo si sigue en la ejecución que se midió: si entre medias la
+		// pararon y la arrancaron otra vez, esta vuelta no la para.
+		misma := func(mc *api.Machine) bool {
+			return (mc.State == api.StateRunning || mc.State == api.StatePaused) &&
+				mc.PID == v.pid && mc.StartedAt != nil && mc.StartedAt.Equal(v.desde)
+		}
+		if _, err := m.stopSi(v.id, misma); err != nil {
+			if !errors.Is(err, errOtraEjecucion) {
+				log.Printf("warning: %s: couldn't stop it: %v", v.name, err)
+			}
 			continue
 		}
-		delete(topes, v.id)
 		paradas = append(paradas, v.name)
-	}
-	for id := range topes {
-		if !vivas[id] {
-			delete(topes, id)
-		}
 	}
 	sort.Strings(paradas)
 	return paradas
+}
+
+// topeOverlayDe es lo que puede ocupar el overlay de mc: lo que su invitado
+// puede direccionar (DiskMiB, o el de siempre) más el margen de cuotaInstancia,
+// o el tope que se le apuntó si es mayor. 0 si aún no se le ha apuntado
+// ninguno (lo apunta la primera vuelta que la ve).
+func topeOverlayDe(mc *api.Machine) int64 {
+	if mc.OverlayMaxBytes <= 0 {
+		return 0
+	}
+	return max(mc.OverlayMaxBytes, cuotaInstancia(logicoOverlay(mc)))
+}
+
+// logicoOverlay es el tamaño lógico del disco escribible de mc.
+func logicoOverlay(mc *api.Machine) int64 {
+	mib := mc.DiskMiB
+	if mib <= 0 {
+		mib = defaultOverlayMiB
+	}
+	return int64(mib) << 20
+}
+
+// apuntarTopeOverlay fija y persiste el tope del overlay de id, que mide mide
+// la primera vez que el vigilante lo ve. Si ya es mayor que su disco (un disco
+// que vino así de un snapshot, o lo que creciera con un daemon anterior), el
+// tope sale de lo que mide: no se para lo que ya estaba, pero tampoco crece
+// más. Como queda apuntado, eso pasa una sola vez: lo que el invitado alargue
+// el fichero antes de un vistazo posterior (tras un thaw, una reanudación o un
+// reinicio del daemon) ya no le sube el tope. Devuelve el tope (0 si la
+// máquina ya no está).
+func (m *Manager) apuntarTopeOverlay(id, name string, mide int64) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mc := m.byID[id]
+	if mc == nil {
+		return 0
+	}
+	if mc.OverlayMaxBytes > 0 {
+		return topeOverlayDe(mc) // lo apuntó otra vuelta entre medias
+	}
+	logico := logicoOverlay(mc)
+	tope := cuotaInstancia(logico)
+	if mide > tope {
+		log.Printf("%s: its disk file is already %d MiB, more than its %d MiB disk; it may not grow past %d MiB",
+			name, mide>>20, logico>>20, cuotaInstancia(mide)>>20)
+		tope = cuotaInstancia(mide)
+	}
+	mc.OverlayMaxBytes = tope
+	m.persist()
+	return tope
 }

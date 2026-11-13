@@ -7,6 +7,7 @@
 // hvvm_fuzz_darwin_test.go: nada de esto debe colgar ni romper el proceso.
 // Sin VM, hv_gic_set_spi falla sin más (no hay GIC) y el globo no puede
 // remapear (no hay fichero de RAM): los caminos de las colas son los mismos.
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -506,6 +507,59 @@ int khv_prueba_poll_red(void) {
   close(sv[0]);
   close(sv[1]);
   return r;
+}
+
+// khv_prueba_red_muerta: el hilo de recepción de verdad con un poll que falla
+// sin remedio (EBADF) termina, y la red queda marcada como muerta
+// (khv_dispositivos_muertos) hasta el siguiente vnet_init. 0 si cuadra; 1 si
+// el fallo no llegó a inyectarse; 2 si no quedó marcada; 3 si vnet_init no
+// borró la marca.
+int khv_prueba_red_muerta(void) {
+  if (preparar() != 0) return -100;
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) return -100;
+  static const uint8_t mac[6] = {6, 0, 0xac, 0x10, 0, 2};
+  __atomic_store_n(&khv_poll_errno[KHV_POLL_RED], EBADF, __ATOMIC_RELEASE);
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 1, __ATOMIC_RELEASE);
+  vnet_init(sv[0], mac, 16384, 49);
+  int r = 1;
+  for (int i = 0; i < 1000 && r; i++) {
+    if (!__atomic_load_n(&khv_poll_fallos[KHV_POLL_RED], __ATOMIC_ACQUIRE)) r = 0;
+    else usleep(1000);
+  }
+  __atomic_store_n(&khv_poll_fallos[KHV_POLL_RED], 0, __ATOMIC_RELEASE);
+  if (r == 0) {
+    r = 2;
+    for (int i = 0; i < 1000 && r; i++) {
+      if (khv_dispositivos_muertos() & KHV_MUERTO_RED) r = 0;
+      else usleep(1000);
+    }
+  }
+  // Después: el hilo lee el errno tras descontar el fallo.
+  __atomic_store_n(&khv_poll_errno[KHV_POLL_RED], 0, __ATOMIC_RELEASE);
+  vnet_parar();
+  vnet_init(-1, mac, 16384, 49);
+  if (r == 0 && (khv_dispositivos_muertos() & KHV_MUERTO_RED)) r = 3;
+  close(sv[0]);
+  close(sv[1]);
+  return r;
+}
+
+// khv_prueba_uart_nivel: sin VM no hay GIC; habilitar THRI con el
+// transmisor vacío pide subir la línea de la UART, el GIC no la cambia y el
+// nivel que guarda la UART no puede quedar alto. Devuelve ese nivel; deja la
+// UART como estaba.
+int khv_prueba_uart_nivel(void) {
+  struct uart_state antes;
+  uart_get(&antes);
+  struct uart_state cero = {0};
+  uart_set(&cero);
+  uint64_t v = 0x02;
+  uart_mmio(1, true, &v);
+  struct uart_state st;
+  uart_get(&st);
+  uart_set(&antes);
+  return st.nivel;
 }
 
 // khv_prueba_poll_vsock: khv_vsock_prueba_poll con los dispositivos de

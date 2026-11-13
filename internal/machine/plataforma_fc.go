@@ -232,6 +232,12 @@ func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 
 // uidNadieE2fsck es el usuario con el que corre e2fsck: nobody/nogroup en
 // casi todo Linux. Variable para los tests.
+//
+// Es un uid compartido: mientras dura una revisión el disco es de nobody, y
+// otro proceso del host que corra como nobody y llegue a su ruta podría
+// abrirlo. Un uid propio (o uno por invocación) lo cerraría, pero pide crear
+// y reservar usuarios en cada host (packaging, kling up, los e2e); hasta
+// entonces queda acotado a la ventana de la revisión y está en SECURITY.md.
 var uidNadieE2fsck = 65534
 
 // memE2fsck es el tope de espacio de direcciones de e2fsck (RLIMIT_AS). Un

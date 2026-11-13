@@ -313,10 +313,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A partir de aquí es un servicio respaldado por microVM. Se cuenta la llegada
-	// para que el prewarm por popularidad sepa qué se usa de verdad y priorice su
-	// fondo antes que el de servicios que nadie llama.
-	g.Observe(service)
+	// A partir de aquí es un servicio respaldado por microVM. La llegada se
+	// cuenta para el prewarm por popularidad (g.Observe) solo cuando el nombre
+	// del servicio está validado —una sesión suya o un ensure con éxito—: el
+	// historial se persiste, y un nombre inventado no debe quedarse en él.
 
 	// Cuota de peticiones en vuelo del tenant. Es reparto justo, NO seguridad
 	// (ver quota.go): un solo cliente en bucle no debe acaparar todas las
@@ -360,7 +360,17 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sesión del puente SOBREVIVE: basta con descongelar la misma instancia para
 	// que siga funcionando.
 	if ext := r.Header.Get(SessionHeader); ext != "" {
-		rt := g.Route(ext)
+		// El GET de la sesión es el stream SSE: no es trabajo, así que no
+		// cuenta como uso (ni de la sesión ni de su instancia) y nunca despierta
+		// una microVM. Si contara, un cliente que reconecta el stream mantenía
+		// viva para siempre una sesión aislada que nadie usa.
+		esStream := r.Method == http.MethodGet
+		var rt *scheduler.Route
+		if esStream {
+			rt = g.PeekRoute(ext)
+		} else {
+			rt = g.Route(ext)
+		}
 		if rt == nil || rt.Service() != service || !g.esDe(ext, tnt.Name()) {
 			// Id desconocido, caducado, inventado o de otro servicio: NO se
 			// reenvía al invitado —que podría tener una sesión con ese id, de
@@ -369,6 +379,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			api.HTTPError(w, "unknown or expired MCP session; start a new one with initialize",
 				http.StatusNotFound)
 			return
+		}
+		if !esStream {
+			g.Observe(service)
 		}
 		// La instancia de la sesión puede ser la primaria O una réplica de
 		// scale-out: se busca por machineID entre todas, no solo la primaria
@@ -386,6 +399,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// espera la respuesta hasta ResponseHeaderTimeout (minutos), que es el
 		// cuelgue de arriba. TestSesionAisladaCongeladaPorDebajo lo fija.
 		vivo := e != nil && scheduler.AliveAddr(rt.Addr(GuestPort))
+		if !vivo && esStream {
+			// Instancia dormida o retirada: el stream no la despierta. 405 es lo
+			// que pide Streamable HTTP cuando no se ofrece stream; el cliente
+			// sigue por POST, que sí la despierta, y la sesión no se pierde.
+			w.Header().Set("Allow", "POST, DELETE")
+			api.HTTPError(w, "the session's instance is asleep: no SSE stream until the next POST",
+				http.StatusMethodNotAllowed)
+			return
+		}
 		if !vivo && g.IsIsolated(ext) {
 			// Sesión aislada: solo SU máquina sirve, congelada o no. Ver
 			// aislamiento.go.
@@ -444,11 +466,14 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// retenía un hueco de la cuota del tenant por stream: N streams, 429
 		// para el resto. Se apunta aparte y se corta si la instancia se
 		// congela; la sesión, si sigue enrutable, sobrevive al despertar.
-		if r.Method == http.MethodGet {
+		//
+		// Un stream por sesión: el GET nuevo corta el anterior, y si la
+		// instancia salió del mapa entre tanto se corta al momento.
+		if esStream {
 			soltarCuota()
 			ctx, cortar := context.WithCancel(r.Context())
 			defer cortar()
-			defer g.BeginStream(e, cortar)()
+			defer g.BeginStream(e, ext, cortar)()
 			rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r.WithContext(ctx))
 			return
 		}
@@ -590,6 +615,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, r, service, err)
 			return
 		}
+		g.Observe(service)
 		g.Begin(e)
 		defer g.End(e)
 		// El codigo se mira DESPUES de servir: anotar el exito por haber
@@ -617,6 +643,9 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		if err != nil {
 			g.newSessionError(w, r, service, err)
 			return
+		}
+		if try == 0 {
+			g.Observe(service)
 		}
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b

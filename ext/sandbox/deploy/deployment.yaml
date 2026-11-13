@@ -19,15 +19,24 @@ spec:
         app: kindling-operator
     spec:
       serviceAccountName: kindling-operator
+      # El operador no escribe en disco ni necesita privilegio alguno: solo
+      # lee el token de la cuenta de servicio y habla HTTP. 65532 es el
+      # usuario nonroot de distroless/static (Dockerfile.operator).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: operator
           # El tag tiene que coincidir con la versión de kindling desplegada
           # en el clúster (operador y frontal viajan juntos en el release
-          # unificado). La de aquí es solo de ejemplo: el
+          # unificado). La de aquí es la última release al escribirla: el
           # kindling-operator-deploy.tar.gz de cada release la lleva cambiada
           # por la suya (release.yml), así que desplegar desde el tar no pide
           # tocarla.
-          image: ghcr.io/juan52878911/kindling-operator:v0.13.0
+          image: ghcr.io/juan52878911/kindling-operator:v1.0.0-rc.2
           # Sin flags: dentro del clúster, KUBERNETES_SERVICE_HOST/PORT y la
           # cuenta de servicio ya dan todo lo que hace falta para hablar con
           # el API de Kubernetes. La URL y el token del frontal SÍ van por
@@ -40,6 +49,11 @@ spec:
                 secretKeyRef:
                   name: kindling-operator-frontal
                   key: token
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 10m

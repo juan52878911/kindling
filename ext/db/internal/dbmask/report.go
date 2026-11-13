@@ -24,6 +24,9 @@ type Report struct {
 	Suspicious []SuspiciousCol `json:"suspicious"`
 	// Unmasked son las sospechosas que quedaron sin tratar (-allow-unmasked).
 	Unmasked []string `json:"unmasked"`
+	// Unreviewed: columnas de texto, JSON, XML, bytea o array sin regla que
+	// no se miraron (sin -strict).
+	Unreviewed int `json:"unreviewed"`
 }
 
 // MaskedColumn es una columna tratada.
@@ -45,7 +48,8 @@ type SuspiciousCol struct {
 // NewReport junta plan y resultado.
 func NewReport(golden, source string, p *Plan, r *Result) *Report {
 	rep := &Report{Golden: golden, Source: source, Tables: p.TableCount, Rows: p.RowCount,
-		Masked: []MaskedColumn{}, Kept: []string{}, Suspicious: []SuspiciousCol{}, Unmasked: []string{}}
+		Masked: []MaskedColumn{}, Kept: []string{}, Suspicious: []SuspiciousCol{}, Unmasked: []string{},
+		Unreviewed: p.Unreviewed}
 	for i, t := range p.Tables {
 		for j, u := range t.Updates {
 			mc := MaskedColumn{Column: t.Schema + "." + t.Table + "." + u.Column, Kind: u.Kind}
@@ -110,6 +114,9 @@ func (rep *Report) WriteText(w io.Writer) error {
 	}
 	if len(rep.Unmasked) > 0 {
 		fmt.Fprintf(tw, "\nWARNING: %d suspicious column(s) were copied as they are\n", len(rep.Unmasked))
+	}
+	if rep.Unreviewed > 0 {
+		fmt.Fprintf(tw, "\nnote: %d text, JSON, XML, bytea or array column(s) without a rule were copied unchecked; -strict requires a rule for each\n", rep.Unreviewed)
 	}
 	return tw.Flush()
 }

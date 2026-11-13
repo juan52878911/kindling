@@ -283,6 +283,40 @@ func TestIrqNivelSoloSiElGICLoCambia(t *testing.T) {
 	}
 }
 
+// La UART tampoco puede dar por subida una línea que el GIC no subió, y cada
+// fallo del GIC queda contado (khv_spi), también al reafirmar tras restaurar.
+func TestUartNivelSoloSiElGICLoCambia(t *testing.T) {
+	antes := IRQFailures()
+	if n := uartNivelSinGIC(); n != 0 {
+		t.Fatalf("hv_gic_set_spi failed (no VM) and the UART still records the line as %d", n)
+	}
+	if IRQFailures() == antes {
+		t.Fatal("a failed hv_gic_set_spi from the UART was not counted")
+	}
+}
+
+// Si el hilo de recepción de la red muere, la VM sigue running sin red: tiene
+// que quedar dicho (DeadDevices, /kling/stats) y borrarse al volver a iniciar
+// la red.
+func TestRedMuertaSeVe(t *testing.T) {
+	switch r := redMuerta(); r {
+	case 0:
+	case -100:
+		t.Fatal("could not set up the test")
+	case 1:
+		t.Fatal("the injected poll failure was never consumed")
+	case 2:
+		t.Fatal("the net receive thread stopped and the device was not reported dead")
+	case 3:
+		t.Fatal("vnet_init did not clear the dead mark")
+	default:
+		t.Fatalf("unexpected result %d", r)
+	}
+	if d := DeadDevices(); len(d) != 0 {
+		t.Fatalf("dead devices after restarting: %v", d)
+	}
+}
+
 // Si el hilo del vsock muere (un poll que falla sin remedio), el dispositivo
 // queda muerto: un dial tiene que fallar al momento con -ENODEV. Antes el
 // dispositivo seguía activo y cada dial esperaba su plazo entero (2 s, y el
@@ -298,6 +332,10 @@ func TestVsockMuertoFallaAlMomento(t *testing.T) {
 		t.Fatalf("after the vsock thread stopped, a dial did not fail with ENODEV (took %v)", d)
 	case 3:
 		t.Fatal("vsock_init did not start the vsock thread again")
+	case 4:
+		t.Fatal("the vsock thread stopped and the device was not reported dead")
+	case 5:
+		t.Fatal("vsock_init did not clear the dead mark")
 	}
 	if d > 50*time.Millisecond {
 		t.Fatalf("a dial to a dead vsock took %v", d)

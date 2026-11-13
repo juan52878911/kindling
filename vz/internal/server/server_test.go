@@ -38,6 +38,14 @@ type fakeVM struct {
 	corrido  time.Duration
 
 	vsock []uint32 // puertos pedidos a DialVsock (vsock_test.go)
+
+	dead []string // lo que contesta DeadDevices
+}
+
+func (v *fakeVM) DeadDevices() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.dead
 }
 
 func (v *fakeVM) marcha(on bool) {
@@ -581,6 +589,21 @@ func TestBalloonStatsAndFootprint(t *testing.T) {
 	}
 	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"backend":"vz"`) || !strings.Contains(out, "9.9.9") {
 		t.Fatalf("info = %s", out)
+	}
+}
+
+// Un hilo de dispositivo muerto deja la VM running sin red o sin vsock:
+// /kling/stats tiene que decirlo.
+func TestStatsDeadDevices(t *testing.T) {
+	r := newRig(t)
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	v := r.f.vms[0]
+	v.mu.Lock()
+	v.dead = []string{"vsock"}
+	v.mu.Unlock()
+	if out := r.must("GET", "/kling/stats", ""); !strings.Contains(out, `"devices_dead":["vsock"]`) {
+		t.Fatalf("stats = %s (must list the dead devices)", out)
 	}
 }
 

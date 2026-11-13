@@ -133,15 +133,19 @@ func mcpImport(args []string) error {
 
 	// Reimportar es lo normal cuando cambia la versión del servidor MCP, así que
 	// hay que poder reemplazar: primero se retiran sus instancias, que son las
-	// que impiden borrar el snapshot.
-	if *force {
+	// que impiden reemplazar el snapshot. El snapshot no se borra: el commit lo
+	// reemplaza (-replace), que conserva sus credenciales de plantilla; borrarlo
+	// se las lleva (template rm), y si la importación falla sigue el de antes.
+	retirarInstancias := func(salvo string) {
 		machines, _ := c.List(ctx)
 		for _, m := range machines {
-			if m.From == service || m.Service() == service {
+			if m.ID != salvo && (m.From == service || m.Service() == service) {
 				_ = c.Remove(ctx, m.ID)
 			}
 		}
-		_ = c.RemoveSnapshot(ctx, service)
+	}
+	if *force {
+		retirarInstancias("")
 	}
 
 	// Capacidades de la imagen: detectadas al construirla del árbol de deps. Si
@@ -383,11 +387,26 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
-	if _, err := c.Commit(ctx, mc.ID, service, false); err != nil {
+	if *force {
+		// Las que el gateway despertó del snapshot viejo mientras se importaba.
+		retirarInstancias(mc.ID)
+	}
+	_, err = c.Commit(ctx, mc.ID, service, *force)
+	if err != nil && *force && enUsoAlReemplazar(err) {
+		// El gateway despertó otra justo entre la retirada y el commit: una
+		// vez más.
+		retirarInstancias(mc.ID)
+		_, err = c.Commit(ctx, mc.ID, service, true)
+	}
+	if err != nil {
 		fmt.Println("✗")
 		cleanup()
 		if strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("service %q already exists; use -force to replace it", service)
+		}
+		if *force && enUsoAlReemplazar(err) {
+			return fmt.Errorf("couldn't replace %q: instances woke up from the old snapshot while importing (%w); "+
+				"the old one is still there: run the same import again", service, err)
 		}
 		return fmt.Errorf("couldn't freeze it: %w", err)
 	}
@@ -1118,4 +1137,10 @@ func mcpInspect(args []string) error {
 		fmt.Printf("  %-32s %s\n", t.Name, d)
 	}
 	return nil
+}
+
+// enUsoAlReemplazar dice si un commit -replace se negó porque el snapshot viejo
+// tiene instancias vivas o está en uso: un 409 que no es "already exists".
+func enUsoAlReemplazar(err error) bool {
+	return isConflict(err) && !strings.Contains(err.Error(), "already exists")
 }

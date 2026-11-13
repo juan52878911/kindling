@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -506,9 +507,34 @@ const errCommitCortado = "the daemon restarted in the middle of a commit, with t
 	"pointed at the snapshot's copy; its VMM was stopped so it could not write there. Its own disk is " +
 	"as it was at the pause: kling start boots it again"
 
-// marcarCommitEnCurso deja la marca en dir, en disco antes de seguir.
-func marcarCommitEnCurso(dir, nombre string) error {
-	return escribirMarca(filepath.Join(dir, marcaCommit), []byte(nombre+"\n"), 0o600)
+// marcarCommitEnCurso deja la marca en dir, en disco antes de seguir, con el
+// PID del VMM que tiene el disco reapuntado (0 si no se sabe). Con el PID,
+// reconcile solo hace caso a la marca si el VMM vivo es ese: una marca que
+// sobrevivió a su VMM no tumba al siguiente (A3).
+func marcarCommitEnCurso(dir, nombre string, pid int) error {
+	contenido := nombre + "\n"
+	if pid > 0 {
+		contenido += strconv.Itoa(pid) + "\n"
+	}
+	return escribirMarca(filepath.Join(dir, marcaCommit), []byte(contenido), 0o600)
+}
+
+// marcaCommitDe dice si dir tiene marca de commit y de qué VMM es. pid 0:
+// marca sin PID (las de antes de A3), que vale para cualquier VMM.
+func marcaCommitDe(dir string) (hay bool, pid int) {
+	raw, err := os.ReadFile(filepath.Join(dir, marcaCommit))
+	if err != nil {
+		// Una que existe y no se puede leer cuenta como marca sin PID: mejor
+		// matar un VMM de más que readoptar uno que escribe en el dorado.
+		return existe(filepath.Join(dir, marcaCommit)), 0
+	}
+	lineas := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lineas) >= 2 {
+		if n, err := strconv.Atoi(strings.TrimSpace(lineas[1])); err == nil && n > 0 {
+			return true, n
+		}
+	}
+	return true, 0
 }
 
 // quitarMarcaCommit la retira, si estaba.
@@ -580,7 +606,16 @@ func (m *Manager) clienteReconcile(id string, pid int) *fc.Client {
 //     pasa a running.
 func (m *Manager) readoptable(mc *api.Machine, pid int, estado string) bool {
 	dir := m.dir(mc.ID)
-	if existe(filepath.Join(dir, marcaCommit)) {
+	hay, pidMarca := marcaCommitDe(dir)
+	if hay && pidMarca > 0 && pidMarca != pid {
+		// La marca es de un VMM que ya no está (el del commit cortado, que
+		// murió): este es otro, arrancado después. Sobra.
+		log.Printf("reconcile: %s (%s): dropping the mark of a cut commit from VMM pid %d; its VMM now is pid %d",
+			mc.Name, shortID(mc.ID), pidMarca, pid)
+		quitarMarcaCommit(dir)
+		hay = false
+	}
+	if hay {
 		log.Printf("reconcile: %s (%s): its VMM (pid %d) was in the middle of a commit; stopping it: failed",
 			mc.Name, shortID(mc.ID), pid)
 		ahora := time.Now()

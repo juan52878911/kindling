@@ -52,6 +52,10 @@ type cloneFake struct {
 	// evtLeft es lo que contesta el borrado de event triggers ("evt|0": no
 	// queda ninguno).
 	evtLeft string
+	// always son las respuestas sucesivas a la comprobación de triggers
+	// ALWAYS/REPLICA; agotadas, "always|0|0". alwaysCalls las cuenta.
+	always      []string
+	alwaysCalls int
 }
 
 func newCloneFake() *cloneFake {
@@ -127,6 +131,14 @@ func (f *cloneFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 			return []byte(f.fixup), nil
 		case strings.Contains(s, dropEventTriggersMarker):
 			return []byte(f.evtLeft), nil
+		case strings.Contains(s, alwaysTriggersMarker):
+			f.alwaysCalls++
+			if len(f.always) > 0 {
+				r := f.always[0]
+				f.always = f.always[1:]
+				return []byte(r), nil
+			}
+			return []byte("always|0|0\n"), nil
 		case strings.Contains(s, dbmask.CatalogMarker):
 			return []byte(f.catalog), nil
 		case strings.Contains(s, dbmask.MaskMarker):
@@ -548,5 +560,51 @@ func TestCloneBorraEventTriggers(t *testing.T) {
 	}
 	if len(ct.golden) != 0 {
 		t.Fatalf("golden built: %v", ct.golden)
+	}
+}
+
+// session_replication_role = replica no apaga los triggers ni las reglas
+// ENABLE ALWAYS / ENABLE REPLICA: con alguno en el origen no se enmascara ni
+// se vuelca nada. La comprobación se repite antes del volcado enmascarado.
+func TestCloneAbortaConTriggersAlways(t *testing.T) {
+	ct := newCloneTest(t)
+	if _, err := ct.c.run(context.Background(), ct.opts(t, cloneRules)); err != nil {
+		t.Fatalf("%v\n%s", err, ct.out)
+	}
+	if ct.f.alwaysCalls != 2 {
+		t.Fatalf("always checks = %d, want 2", ct.f.alwaysCalls)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		replies []string
+		masked  bool
+	}{
+		{"trigger", []string{"always|1|0\n"}, false},
+		{"regla", []string{"always|0|2\n"}, false},
+		{"basura", []string{"???\n"}, false},
+		{"antes-del-volcado", []string{"always|0|0\n", "always|1|0\n"}, true},
+	} {
+		ct := newCloneTest(t)
+		ct.f.always = tc.replies
+		_, err := ct.c.run(context.Background(), ct.opts(t, cloneRules))
+		if err == nil || !strings.Contains(err.Error(), "nothing was built") {
+			t.Errorf("%s: err = %v", tc.name, err)
+		}
+		if len(ct.golden) != 0 {
+			t.Errorf("%s: golden built: %v", tc.name, ct.golden)
+		}
+		masked, dumped := false, false
+		for _, c := range ct.f.calls {
+			if strings.Contains(c.stdin, dbmask.MaskMarker) {
+				masked = true
+			}
+			if strings.Contains(strings.Join(c.args, " "), "masked.sql") {
+				dumped = true
+			}
+		}
+		if masked != tc.masked || dumped {
+			t.Errorf("%s: masked=%v dumped=%v", tc.name, masked, dumped)
+		}
 	}
 }

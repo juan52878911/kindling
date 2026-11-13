@@ -912,7 +912,10 @@ cambia:
   que con `-run-as` es el usuario del VMM y alcanza los discos de todas las máquinas. Donde la
   jaula no se puede montar (un contenedor sin `CAP_SYS_ADMIN`, AppArmor), se avisa al primer uso,
   `kling doctor` lo dice (`e2fs_confinement`) y corre como nobody en los namespaces de red, PID e
-  IPC sin chroot. Sin root, con el usuario del daemon y el tope de memoria. En macOS, con el usuario
+  IPC sin chroot; la prueba se repite pasado un minuto, así que un fallo pasajero no deja el daemon
+  sin chroot hasta reiniciarlo. nobody es un uid compartido: mientras dura la revisión, otro proceso
+  del host que corra como nobody y llegue a la ruta del disco podría abrirlo (un uid propio para
+  e2fsck está pendiente). Sin root, con el usuario del daemon y el tope de memoria. En macOS, con el usuario
   del daemon dentro de un perfil de `sandbox-exec` que no deja red ni leer más que el sistema y
   Homebrew, ni escribir más que su descriptor; macOS no aplica RLIMIT_AS, así que ahí no hay tope de
   memoria. Sin `sandbox-exec` se avisa, `kling doctor` lo dice y, con el daemon como root, se niega

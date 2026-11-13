@@ -422,6 +422,25 @@ version_ge() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$2" ]
 }
 
+# ¿Versión $1 >= $2? Como version_ge, pero con prerelease: una 1.0.0-rc.2 es
+# menor que la 1.0.0 final (quitarle el sufijo la daba por buena ante un
+# min_kling 1.0.0). Entre dos prereleases de la misma base compara el sufijo
+# por campos (rc.9 < rc.10). El +build no cuenta.
+semver_ge() {
+    SA="${1#v}"; SA="${SA%%+*}"
+    SB="${2#v}"; SB="${SB%%+*}"
+    SA_PRE=""; case "$SA" in *-*) SA_PRE="${SA#*-}" ;; esac
+    SB_PRE=""; case "$SB" in *-*) SB_PRE="${SB#*-}" ;; esac
+    SA="${SA%%-*}"; SB="${SB%%-*}"
+    if [ "$SA" != "$SB" ]; then
+        version_ge "$SA" "$SB"
+        return
+    fi
+    [ -n "$SA_PRE" ] || return 0
+    [ -n "$SB_PRE" ] || return 1
+    [ "$(printf '%s\n%s\n' "$SB_PRE" "$SA_PRE" | sort -t. -k1,1 -k2,2n -k3,3n | head -n1)" = "$SB_PRE" ]
+}
+
 # Con --skip-kling el kling que ya hay puede ser más viejo que la extensión: se
 # compara con el min_kling de su manifiesto, como hacía el instalador de
 # kindling-mcp. Si kling viene de esta misma release no hace falta.
@@ -433,10 +452,10 @@ check_min_kling() {
         return 0
     fi
     [ -n "$MIN" ] || return 0
-    HAVE="$(KLING_HOST=unix:///nonexistent/kling-install.sock kling version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//; s/[-+].*//')"
+    HAVE="$(KLING_HOST=unix:///nonexistent/kling-install.sock kling version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//')"
     case "$HAVE" in
         [0-9]*.[0-9]*)
-            version_ge "$HAVE" "$MIN" || fail "tu kling es $HAVE y $(basename "$1") necesita >= $MIN. Quita --skip-kling para actualizarlo." ;;
+            semver_ge "$HAVE" "$MIN" || fail "tu kling es $HAVE y $(basename "$1") necesita >= $MIN. Quita --skip-kling para actualizarlo." ;;
         *) warn "no sé leer la versión de kling (\"$HAVE\"); sigo sin comprobar el mínimo ($MIN)" ;;
     esac
 }
