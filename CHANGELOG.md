@@ -23,6 +23,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - arm64 guest kernel: on an Apple M4 under kling-vz it no longer advertises `sve2`, `svei8mm` and `svebf16` without `sve`, so OpenSSL (and Python's `cryptography`) no longer die with `Illegal instruction`; SVE stays on hosts that have it. The kernel builder now applies `scripts/builders/kernel/patches/` (#183).
 - `scripts/e2e-mac-release.sh` publishes `failure`, not an earlier run's `success`, when a test fails.
 - The e2e-mac workflow fails when a manual run's `parts` names no test, instead of passing.
+- MCP gateway: a burst of simultaneous sessions starts ceil(M / sessions per replica) replicas and waits for them, instead of one replica per session up to the cap and 503 for the rest (#318).
 
 ### Security
 

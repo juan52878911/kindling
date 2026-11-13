@@ -610,9 +610,9 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		if try == 0 {
 			e, err = g.PickInstance(r.Context(), service, tnt)
 		} else {
-			// El intento anterior chocó con el tope de una instancia: se fuerza una
-			// réplica nueva para esta sesión.
-			e, err = g.ScaleOut(r.Context(), service, tnt)
+			// El intento anterior chocó con el tope de una instancia: va a una
+			// réplica que ya esté naciendo con hueco, o a una nueva.
+			e, err = g.JoinOrScaleOut(r.Context(), service, tnt)
 		}
 		if err != nil {
 			g.newSessionError(w, r, service, err)

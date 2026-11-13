@@ -90,6 +90,12 @@ func (g *Scheduler) ScaleOut(ctx context.Context, service string, t *Tenant) (*I
 	return g.scaleOut(ctx, service, t)
 }
 
+// JoinOrScaleOut da a una sesión que el puente rechazó por tope una réplica
+// que ya está naciendo y tiene hueco, o crea una más si no la hay.
+func (g *Scheduler) JoinOrScaleOut(ctx context.Context, service string, t *Tenant) (*Instance, error) {
+	return g.joinOrScaleOut(ctx, service, t)
+}
+
 // PickInstance devuelve una instancia con hueco para una sesión más, creando
 // una réplica si todas están llenas.
 func (g *Scheduler) PickInstance(ctx context.Context, service string, t *Tenant) (*Instance, error) {
