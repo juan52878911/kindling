@@ -560,6 +560,9 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
   return 0;
 }
 
+// vblk_sincs: los F_FULLFSYNC/F_BARRIERFSYNC que mandaron los FLUSH (pruebas).
+static uint64_t vblk_sincs;
+
 // Atiende las peticiones pendientes de la cola. Solo desde el hilo del disco,
 // con ocupado puesto. *irq: hay que interrumpir al invitado (hubo respuestas y
 // el driver las quiere, ver vq_interrumpir); *quedan: la tanda se cortó con
@@ -571,6 +574,7 @@ static uint8_t b_descartar(struct vblk *b, bool ceros, const struct vdesc *d, in
 // vq_pedir_aviso escribiera el avail_event más allá de lo que vq_ptrs
 // comprobó, hasta 2 KiB fuera de la RAM. Quien llama vuelca q->last_avail y
 // q->used_idx en b->s.q bajo b->mu al acabar.
+
 static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool *irq, bool *quedan) {
   uint16_t *avail;
   uint8_t *used;
@@ -707,7 +711,11 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         }
         if (r < 0) estado = 1;
       }
-      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE) {
+      // Un disco ro no tiene nada que asentar: el FLUSH se contesta sin tocar
+      // el fichero (F_FULLFSYNC vacía la caché del SSD entero, de todo el
+      // Mac, y un invitado puede pedirlo en bucle).
+      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE && !b->ro) {
+        __atomic_fetch_add(&vblk_sincs, 1, __ATOMIC_RELAXED);
         // full, F_FULLFSYNC: el fsync de macOS deja los datos en la caché del
         // SSD, y un corte se los lleva aunque el invitado ya oyó que estaban.
         // Es lo que hace kling-vz (VZDiskImageSynchronizationModeFull).
@@ -778,6 +786,8 @@ void vblk_prueba(int idx) {
   pthread_cond_broadcast(&b->cv);
   pthread_mutex_unlock(&b->mu);
 }
+
+uint64_t vblk_prueba_sincs(void) { return __atomic_load_n(&vblk_sincs, __ATOMIC_RELAXED); }
 
 // vblk_prueba_modo cambia ro y sinc del disco idx (solo pruebas, con la cola
 // quieta).

@@ -7,6 +7,7 @@ package hvvm
 
 int khv_prueba_globo(uint64_t out[4]); // prueba_globo.c
 int khv_prueba_globo_cuota(int n, uint64_t out[2]);
+int khv_prueba_globo_inflado(uint64_t out[2]);
 */
 import "C"
 
@@ -27,6 +28,17 @@ func pruebaGlobo() (inflar, informe, devueltos, desinflar uint64, ok bool) {
 func pruebaGloboCuota(n int) (tramos, devueltos uint64, ok bool) {
 	var out [2]C.uint64_t
 	if C.khv_prueba_globo_cuota(C.int(n), &out[0]) != 0 {
+		return 0, 0, false
+	}
+	return uint64(out[0]), uint64(out[1]), true
+}
+
+// pruebaGloboInflado es khv_prueba_globo_inflado: los tramos que suelta un
+// notify de inflado de páginas sueltas con la cuota bajada, y los que suelta
+// después el núcleo.
+func pruebaGloboInflado() (notify, despues uint64, ok bool) {
+	var out [2]C.uint64_t
+	if C.khv_prueba_globo_inflado(&out[0]) != 0 {
 		return 0, 0, false
 	}
 	return uint64(out[0]), uint64(out[1]), true

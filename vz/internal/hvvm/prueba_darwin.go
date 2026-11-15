@@ -121,6 +121,9 @@ func cfgDisco(off uint32) uint32 { return uint32(C.khv_prueba_cfg(C.uint32_t(off
 // sincronización (C.KHV_SINC_*).
 func modoDisco(ro bool, sinc int) { C.vblk_prueba_modo(0, C.bool(ro), C.int(sinc)) }
 
+// sincsDisco: las sincronizaciones con el SSD que mandaron los FLUSH.
+func sincsDisco() uint64 { return uint64(C.vblk_prueba_sincs()) }
+
 // Los modos de sincronización de khv.h, para las pruebas.
 const (
 	sincFull    = int(C.KHV_SINC_FULL)
@@ -231,6 +234,19 @@ func spiReintento() int { return int(C.khv_prueba_spi_reintento()) }
 // redMuerta: un poll que falla sin remedio termina el hilo de recepción de la
 // red, que queda marcada como muerta (khv_prueba_red_muerta).
 func redMuerta() int { return int(C.khv_prueba_red_muerta()) }
+
+// vsockSinRx es khv_vsock_prueba_sin_rx: las vueltas de vs_hilo en 200 ms
+// con datos del host y la cola 0 sin búferes, y lo que llega al publicar uno.
+func vsockSinRx() (vueltas uint, llego uint32, r int) {
+	var v C.unsigned
+	var l C.uint32_t
+	r = int(C.khv_vsock_prueba_sin_rx(&v, &l))
+	return uint(v), uint32(l), r
+}
+
+// vsockHostCierra es khv_vsock_prueba_host_cierra: 0 si el cierre de Go de
+// una conexión sin crédito se ve y libera su slot para un dial nuevo.
+func vsockHostCierra() int { return int(C.khv_vsock_prueba_host_cierra()) }
 
 // vsockTandaRx: una vuelta de bombear del vsock con el socket del host lleno
 // (khv_vsock_prueba_tanda_rx): cuánto había, cuánto entró, cuánto tuvo mu y

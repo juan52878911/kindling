@@ -47,3 +47,21 @@ func TestGloboCuotaInforme(t *testing.T) {
 		t.Errorf("%d reports of the same block in a burst: %d runs released, want some but at most %d", n, tramos, n/2)
 	}
 }
+
+// F8: el inflado lo dispara el invitado y cada tramo (páginas sueltas) es un
+// hv_vm_unmap, un mmap y un hv_vm_map bajo el cerrojo del globo y en el hilo
+// del vCPU; sin cuota, un notify pedía decenas de miles y hacía vencer la
+// pausa. Ahora se cobran de la cuota del informe; lo que no cabe queda
+// pendiente y lo suelta el núcleo (aquí, vaciar).
+func TestGloboCuotaInflado(t *testing.T) {
+	notify, despues, ok := pruebaGloboInflado()
+	if !ok {
+		t.Fatal("khv_prueba_globo_inflado: no fake RAM")
+	}
+	if notify > 4 {
+		t.Errorf("one inflate notify released %d scattered runs over a 4-run quota", notify)
+	}
+	if notify+despues != 16 {
+		t.Errorf("released %d runs in the notify and %d after, want 16 in all", notify, despues)
+	}
+}

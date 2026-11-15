@@ -364,6 +364,7 @@ void vblk_quieto(int idx);     // espera a que el hilo del disco no toque la RAM
 void vblk_despertar(int idx);  // vuelve a mirar la cola (tras pausar o restaurar)
 void vblk_prueba(int idx);     // atiende la cola aquí mismo (pruebas)
 void vblk_prueba_modo(int idx, bool ro, int sinc);  // cambia ro y sinc del disco (pruebas)
+uint64_t vblk_prueba_sincs(void);                    // sincronizaciones de los FLUSH (pruebas)
 int64_t vblk_prueba_bloques(int idx);              // st_blocks del fichero del disco (pruebas)
 // Bytes de datos por tanda del hilo de un disco, y por petición IN/OUT (ver
 // b_procesar). Variable solo para que las pruebas lo bajen.
@@ -431,6 +432,8 @@ int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
 int khv_vsock_prueba_muerto(int64_t *dial_ns);
+int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego);
+int khv_vsock_prueba_host_cierra(void);
 int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control);
 
 // balloon (virtio-balloon; ver balloon.c)

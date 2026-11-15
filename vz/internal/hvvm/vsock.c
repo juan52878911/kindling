@@ -36,6 +36,9 @@
 #define VS_BUF (256u * 1024)    // crédito que se anuncia al invitado por conexión
 #define VS_PAYLOAD (64u * 1024) // tope de un paquete en cualquier sentido
 #define VS_RST_COLA 32
+// Lo que espera una conexión que Go ya cerró a que el invitado le dé crédito
+// para lo que quede en el socket; luego, RST.
+#define VS_ATASCO_MS 30000
 // Lo más que mete en el invitado una vuelta de bombear, con mu tomado: el
 // vCPU que notifica espera en vsock_mmio, y la pausa en vsock_quieto. El
 // crédito lo da el invitado (buf_alloc, hasta 4 GiB por conexión) y puede
@@ -78,6 +81,11 @@ struct vconn {
   int resultado;      // para quien marca: 0 esperando, 1 abierta, -1 rechazada
   uint64_t t_cierre;  // mach_absolute_time() del SHUTDOWN completo que se mandó
   bool vigilada;      // su cierre completo lo avisa kq (ver vigilar)
+  // Go cerró del todo su extremo mientras el poll no miraba el fd (crédito 0
+  // o sin búferes de rx): lo vio kq o sondear_cerradas. t_atasco es desde
+  // cuándo, sin crédito, no avanza (0 si avanza).
+  bool host_cerrado;
+  uint64_t t_atasco;
   // gen sube al liberar el slot y al tomarlo: quien marca reconoce así su
   // conexión. El fd no basta: liberar lo cierra y el dial siguiente que tome
   // el slot puede recibir el mismo número.
@@ -103,6 +111,11 @@ static struct {
 } rst_cola[VS_RST_COLA];
 static int n_rst;
 static bool reset_pend;  // mandar TRANSPORT_RESET en cuanto haya un búfer de eventos
+// sin_rx: la cola 0 se quedó sin búferes con datos del host por mandar. Hasta
+// que el invitado la avise (o un reset, o una restauración) no se pide POLLIN:
+// el fd seguiría listo, poll volvería al momento y bombear no podría poner
+// nada, con el hilo girando al 100 % y tomando mu en cada vuelta. Con mu.
+static bool sin_rx;
 static mach_timebase_info_data_t tb;
 
 static void irq(void) { vmmio_irq(&s.m, intid); }
@@ -473,7 +486,10 @@ static bool bombear(const bool *listo) {
     // socket directamente en el búfer del invitado, detrás de la cabecera.
     while (listo[i] && !c->host_eof && !c->guest_sordo) {
       uint32_t cr = credito(c);
-      if (!rx_mirar() || rxb.cap <= VS_HDR) return puesto;
+      if (!rx_mirar() || rxb.cap <= VS_HDR) {
+        sin_rx = true;
+        return puesto;
+      }
       if (cr == 0) break;
       uint64_t n = rxb.cap - VS_HDR;
       if (n > cr) n = cr;
@@ -563,11 +579,33 @@ static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
     struct vconn *c = &conns[i];
     if (c->estado != C_ABIERTA) continue;
     short ev = 0;
-    if (!c->host_eof && !c->guest_sordo && credito(c) > 0) ev |= POLLIN;
+    bool lee = !c->host_eof && !c->guest_sordo;
+    uint32_t cr = credito(c);
+    if (lee && cr > 0 && !sin_rx) ev |= POLLIN;
     if (c->npend) ev |= POLLOUT;
     if (c->t_cierre) *plazo = 500;
+    if (cr > 0) c->t_atasco = 0;
+    else if (c->host_cerrado && !c->t_atasco) c->t_atasco = mach_absolute_time();
+    if (c->t_atasco && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+    // Con algo que leer pero sin POLLIN (crédito 0, sin búferes de rx), el
+    // poll no ve que Go cierre su extremo: lo vigila kq (o la sonda). Antes
+    // no lo miraba nadie y el slot quedaba ocupado mientras el invitado no
+    // diera crédito: con 64 así no había exec ni health.
+    if (lee && !(ev & POLLIN) && !c->host_cerrado && !vigilar(c, i) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+    if ((ev & POLLIN) && c->vigilada && kq >= 0) {
+      // Vuelve a tener crédito: el poll ya ve su cierre, y kq avisaría de cada
+      // lectura de Go.
+      struct kevent kd;
+      EV_SET(&kd, (uintptr_t)c->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+      (void)kevent(kq, &kd, 1, NULL, 0, NULL);
+      c->vigilada = false;
+    }
     if (!ev) {
-      if (por_cerrar(c) && !vigilar(c, i) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+      if (por_cerrar(c)) {
+        // El aviso de kq ya llegó cuando estaba atascada (EV_CLEAR no lo repite).
+        if (c->host_cerrado) c->p_shut |= SHUT_SEND_F | SHUT_RCV_F, *plazo = 0;
+        else if (!vigilar(c, i) && (*plazo < 0 || *plazo > 1000)) *plazo = 1000;
+      }
       continue;
     }
     idx[n] = i;
@@ -587,13 +625,27 @@ static int armar_poll(struct pollfd *pf, int *idx, int *plazo) {
 // Antes esas conexiones no se miraban y, si el invitado tampoco mandaba RST,
 // el slot y el fd quedaban ocupados para siempre: 64 así y ya no había exec.
 // Con mu.
+// atascada: abierta, con algo que leer del host, pero sin que el poll mire su
+// fd (crédito 0 o sin búferes de rx). Con mu.
+static bool atascada(const struct vconn *c) {
+  return c->estado == C_ABIERTA && !c->host_eof && !c->guest_sordo && (credito(c) == 0 || sin_rx);
+}
+
+// cerrada_por_host: Go cerró del todo su extremo de c. Si ya no queda nada que
+// leer, se le pide al invitado el cierre completo; si está atascada, se apunta
+// (lo que quede en el socket aún puede llegar si el invitado da crédito; si
+// no, la quita reservar o el plazo de vs_hilo). Con mu.
+static void cerrada_por_host(struct vconn *c) {
+  if (por_cerrar(c)) c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+  else if (atascada(c)) c->host_cerrado = true;
+}
+
 static void sondear_cerradas(void) {
   for (int i = 0; i < VS_MAXCONN; i++) {
     struct vconn *c = &conns[i];
-    if (!por_cerrar(c) || c->vigilada) continue;
+    if (!(por_cerrar(c) || (atascada(c) && !c->host_cerrado)) || c->vigilada) continue;
     struct pollfd pf = {.fd = c->fd, .events = POLLOUT};
-    if (poll(&pf, 1, 0) > 0 && (pf.revents & (POLLHUP | POLLERR)) && !(pf.revents & POLLOUT))
-      c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+    if (poll(&pf, 1, 0) > 0 && (pf.revents & (POLLHUP | POLLERR)) && !(pf.revents & POLLOUT)) cerrada_por_host(c);
   }
 }
 
@@ -613,8 +665,8 @@ static void atender_kq(void) {
       intptr_t i = (intptr_t)evs[k].udata;
       if (i < 0 || i >= VS_MAXCONN || !(evs[k].flags & EV_EOF)) continue;
       struct vconn *c = &conns[i];
-      if (!c->vigilada || c->fd < 0 || (uintptr_t)c->fd != evs[k].ident || !por_cerrar(c)) continue;
-      c->p_shut |= SHUT_SEND_F | SHUT_RCV_F;
+      if (!c->vigilada || c->fd < 0 || (uintptr_t)c->fd != evs[k].ident) continue;
+      cerrada_por_host(c);
     }
     if (n < 16) return;
   }
@@ -699,7 +751,8 @@ static void *vs_hilo(void *a) {
     // Un cierre al que el invitado no contesta con RST en 2 s se da por hecho.
     uint64_t ahora = mach_absolute_time();
     for (int i = 0; i < VS_MAXCONN; i++)
-      if (conns[i].estado != C_LIBRE && conns[i].t_cierre && ahora - conns[i].t_cierre > ms_abs(2000))
+      if (conns[i].estado != C_LIBRE && ((conns[i].t_cierre && ahora - conns[i].t_cierre > ms_abs(2000)) ||
+                                         (conns[i].t_atasco && ahora - conns[i].t_atasco > ms_abs(VS_ATASCO_MS))))
         conns[i].p_rst = true;
     if (activo && bombear(listo)) {
       s.m.isr |= 1;
@@ -715,6 +768,7 @@ void vsock_init(uint32_t id) {
   intid = id;
   mach_timebase_info(&tb);
   memset(&s, 0, sizeof s);
+  sin_rx = false;
   for (int i = 0; i < VS_MAXCONN; i++) {
     conns[i].fd = -1;
     conns[i].estado = C_LIBRE;
@@ -762,7 +816,10 @@ bool vsock_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
   switch (vmmio_acceso(&s.m, s.q, 3, 19, 0, off, escribir, val, &cola)) {
     case VM_NOTIFY:
       if (cola == 1) tx();
-      else despertar_hilo();  // búferes nuevos de rx o de eventos
+      else {
+        if (cola == 0) sin_rx = false;
+        despertar_hilo();  // búferes nuevos de rx o de eventos
+      }
       break;
     case VM_ISR: irq(); break;
     case VM_RESET: {
@@ -771,6 +828,7 @@ bool vsock_mmio(uint64_t off, bool escribir, uint64_t *val, int size) {
       memset(&s, 0, sizeof s);
       s.m.nivel = nivel;
       reset_pend = false;
+      sin_rx = false;
       irq();
       break;
     }
@@ -786,6 +844,15 @@ static struct vconn *reservar(uint32_t port, int sv[2], uint32_t *gen, int *err)
   struct vconn *c = NULL;
   for (int i = 0; i < VS_MAXCONN && !c; i++)
     if (conns[i].estado == C_LIBRE) c = &conns[i];
+  // Sin sitio, una que Go ya cerró y el invitado no lee deja el suyo: RST al
+  // invitado y fuera. Antes esperaban crédito para siempre y el dial fallaba.
+  for (int i = 0; i < VS_MAXCONN && !c; i++)
+    if (conns[i].estado == C_ABIERTA && conns[i].host_cerrado) {
+      encolar_rst(conns[i].lport, conns[i].gport);
+      liberar(&conns[i]);
+      despertar_hilo();
+      c = &conns[i];
+    }
   if (!c) {
     *err = -EMFILE;
     return NULL;
@@ -899,6 +966,7 @@ void vsock_set(const struct vvsock_state *i) {
   cerrar_todas();
   s = *i;
   reset_pend = (s.m.status & 4) != 0;  // DRIVER_OK: hay un driver que lo espera
+  sin_rx = false;
   pthread_mutex_unlock(&mu);
 }
 
@@ -1358,6 +1426,150 @@ int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int
   pthread_mutex_unlock(&mu);
   munmap(ram, tam);
   return ret;
+}
+
+// khv_vsock_prueba_sin_rx (R1): una conexión abierta con crédito y 4 KiB del
+// host en su socket, y la cola 0 sin búferes. En 200 ms vs_hilo tiene que dar
+// pocas vueltas (*vueltas; antes giraba miles), y al publicar un búfer y
+// avisar la cola 0 el dato tiene que llegar (*llego, en bytes). 0, o negativo
+// si no se pudo preparar. No puede convivir con una VM.
+int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego) {
+  *vueltas = 0;
+  *llego = 0;
+  if (!activo) vsock_init(53);
+  const uint64_t base = 0x10000, tam = base + PRUEBA_RX_BUF;
+  uint8_t *ram = mmap(NULL, tam, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (ram == MAP_FAILED) return -ENOMEM;
+  struct vdesc *d = (struct vdesc *)ram;
+  uint16_t *av = (uint16_t *)(ram + 0x1000);
+  d[0] = (struct vdesc){RAM_BASE + base, PRUEBA_RX_BUF, VIRTQ_DESC_F_WRITE, 0};
+  av[2] = 0;
+  av[1] = 0;  // ningún búfer publicado todavía
+  pthread_mutex_lock(&mu);
+  uint8_t *ram_antes = g_ram;
+  uint64_t tam_antes = g_ram_size;
+  bool pausa_antes = g_pausa;
+  g_ram = ram;
+  g_ram_size = tam;
+  g_pausa = true;
+  pthread_mutex_unlock(&mu);
+  prueba_w(0x070, 0);
+  prueba_w(0x030, 0);
+  prueba_w(0x038, 8);
+  prueba_w(0x080, (uint32_t)RAM_BASE);
+  prueba_w(0x090, (uint32_t)(RAM_BASE + 0x1000));
+  prueba_w(0x0a0, (uint32_t)(RAM_BASE + 0x2000));
+  prueba_w(0x084, 0);
+  prueba_w(0x094, 0);
+  prueba_w(0x0a4, 0);
+  prueba_w(0x044, 1);
+  prueba_w(0x070, 0xf);
+
+  pthread_mutex_lock(&mu);
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 10, sv, &gen, &err);
+  int ret = c ? 0 : (err ? err : -EBUSY);
+  static uint8_t trozo[4096];
+  if (c) {
+    c->estado = C_ABIERTA;
+    c->p_request = false;
+    c->peer_buf = 64u << 10;
+    (void)!write(sv[1], trozo, sizeof trozo);
+    g_pausa = false;
+    pthread_cond_broadcast(&cv);
+  }
+  pthread_mutex_unlock(&mu);
+  if (c) {
+    despertar_hilo();
+    usleep(20000);  // la primera vuelta ve el socket listo y la cola vacía
+    unsigned antes = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE);
+    usleep(200000);
+    *vueltas = __atomic_load_n(&vs_vueltas, __ATOMIC_ACQUIRE) - antes;
+    // El invitado publica un búfer y avisa la cola 0.
+    __atomic_store_n(&av[1], 1, __ATOMIC_RELEASE);
+    prueba_w(0x050, 0);
+    for (int i = 0; i < 100 && *llego < sizeof trozo; i++) {
+      usleep(10000);
+      pthread_mutex_lock(&mu);
+      *llego = c->tx_cnt;
+      pthread_mutex_unlock(&mu);
+    }
+    pthread_mutex_lock(&mu);
+    g_pausa = true;
+    liberar(c);
+    close(sv[1]);
+    pthread_mutex_unlock(&mu);
+  }
+  prueba_w(0x070, 0);
+  pthread_mutex_lock(&mu);
+  g_ram = ram_antes;
+  g_ram_size = tam_antes;
+  g_pausa = pausa_antes;
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  munmap(ram, tam);
+  return ret;
+}
+
+// khv_vsock_prueba_host_cierra (F6): una conexión abierta sin crédito (el
+// invitado no lee) con datos del host; Go cierra su extremo. Devuelve 0 si
+// vs_hilo se entera (host_cerrado) y, con todos los slots ocupados, un dial
+// nuevo recupera el suyo (reservar); 1 si no se enteró en 1 s; 2 si el dial
+// no encontró sitio; negativo si no se pudo preparar. No puede convivir con
+// una VM.
+int khv_vsock_prueba_host_cierra(void) {
+  if (!activo) vsock_init(53);
+  pthread_mutex_lock(&mu);
+  bool pausa_antes = g_pausa;
+  int sv[2], err = 0;
+  uint32_t gen;
+  struct vconn *c = reservar(PRUEBA_PUERTO + 11, sv, &gen, &err);
+  if (!c) {
+    pthread_mutex_unlock(&mu);
+    return err ? err : -EBUSY;
+  }
+  c->estado = C_ABIERTA;
+  c->p_request = false;
+  c->peer_buf = 0;  // crédito 0
+  static uint8_t trozo[4096];
+  (void)!write(sv[1], trozo, sizeof trozo);
+  g_pausa = false;  // sin VM empieza a true (vm.c): vs_hilo no pasaría del poll
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  despertar_hilo();
+  usleep(20000);
+  close(sv[1]);  // Go cierra del todo
+  int r = 1;
+  for (int i = 0; i < 100 && r; i++) {
+    usleep(10000);
+    pthread_mutex_lock(&mu);
+    if (c->host_cerrado) r = 0;
+    pthread_mutex_unlock(&mu);
+  }
+  pthread_mutex_lock(&mu);
+  g_pausa = true;
+  if (r == 0) {
+    // Todos los demás slots ocupados (sin fd: el poll se los salta).
+    bool mios[VS_MAXCONN] = {0};
+    for (int i = 0; i < VS_MAXCONN; i++)
+      if (conns[i].estado == C_LIBRE) conns[i].estado = C_CONECTANDO, mios[i] = true;
+    int sv2[2] = {-1, -1};
+    struct vconn *n = reservar(PRUEBA_PUERTO + 12, sv2, &gen, &err);
+    if (!n) r = 2;
+    else {
+      liberar(n);
+      close(sv2[1]);
+    }
+    for (int i = 0; i < VS_MAXCONN; i++)
+      if (mios[i]) conns[i].estado = C_LIBRE;
+    n_rst = 0;
+  }
+  if (c->estado != C_LIBRE && c->gport == PRUEBA_PUERTO + 11) liberar(c);
+  g_pausa = pausa_antes;
+  pthread_cond_broadcast(&cv);
+  pthread_mutex_unlock(&mu);
+  return r;
 }
 
 // khv_vsock_prueba_muerto: un poll que falla sin remedio (EBADF) termina

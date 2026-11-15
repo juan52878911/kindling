@@ -13,6 +13,14 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
+- kling-hv: the frozen RAM file is cloned in a private directory and moved into place already 0600, so it is never readable with the golden image's mode.
+- kling-hv: a snapshot that fails after writing the memory file no longer leaves that file behind.
+- kling-hv: an interrupt line the GIC rejects is retried on the next vCPU exit, instead of waiting for another access from a device the guest is no longer touching.
+- kling-hv: the vsock thread no longer spins at 100% when the host has data and the guest has no receive buffers.
+- kling-hv: a vsock connection the host closed while the guest gave it no credit gives up its slot, so 64 of them no longer leave the VM without exec.
+- kling-hv: a FLUSH to a read-only disk no longer issues `F_FULLFSYNC`.
+- kling-hv: releasing balloon pages the guest inflates is rate-limited like the free page report, so one notify can no longer hold the balloon lock long enough to make a pause time out.
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
@@ -56,6 +64,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+
+### Changed
+
+- kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
 
 ## [1.0.0-rc.2] - 2026-11-10
 

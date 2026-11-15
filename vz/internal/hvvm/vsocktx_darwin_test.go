@@ -5,7 +5,9 @@ package hvvm
 import (
 	"bytes"
 	"math/rand"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestVsockTxDesdeLosBuferes: lo que manda el invitado llega a Go entero y
@@ -87,5 +89,42 @@ func TestVsockRxTandaAcotada(t *testing.T) {
 				c.pausa, movido, lleno, c.max, d)
 		}
 		t.Logf("pause=%v: %d of %d bytes in one round, lock held %v", c.pausa, movido, lleno, d)
+	}
+}
+
+// R1: con datos del host y la cola de rx sin búferes, vs_hilo no puede girar
+// en vacío (poll listo, bombear sin sitio, otra vez): un núcleo del host por
+// VM fuera del tope de CPU. Espera al aviso de la cola 0, y entonces el dato
+// llega.
+func TestVsockSinBuferesDeRxNoGira(t *testing.T) {
+	var ru0, ru1 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
+	vueltas, llego, r := vsockSinRx()
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
+	cpu := time.Duration(ru1.Utime.Nano() + ru1.Stime.Nano() - ru0.Utime.Nano() - ru0.Stime.Nano())
+	t.Logf("process CPU over the ~250 ms of the test: %v", cpu)
+	if r != 0 {
+		t.Fatalf("setting up: %d", r)
+	}
+	if vueltas > 5 {
+		t.Fatalf("vs_hilo looped %d times in 200 ms with no rx buffers", vueltas)
+	}
+	if llego != 4096 {
+		t.Fatalf("after publishing an rx buffer %d of 4096 bytes reached the guest", llego)
+	}
+	t.Logf("%d loops in 200 ms with no rx buffers", vueltas)
+}
+
+// F6: si Go cierra una conexión a la que el invitado no da crédito, el slot
+// no puede quedarse ocupado para siempre: con 64 así no había exec ni health.
+func TestVsockCierreDelHostSinCredito(t *testing.T) {
+	switch r := vsockHostCierra(); r {
+	case 0:
+	case 1:
+		t.Fatal("the host closed a connection with no credit and vs_hilo did not notice")
+	case 2:
+		t.Fatal("with every slot taken, a closed connection with no credit did not give up its slot")
+	default:
+		t.Fatalf("setting up: %d", r)
 	}
 }
