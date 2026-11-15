@@ -289,6 +289,23 @@ func managerVZ(t *testing.T, largo ...bool) (*Manager, string) {
 	}
 	logPath := filepath.Join(root, "calls.log")
 	t.Setenv(envFakeVZ, logPath)
+	// El reenvío del puerto del agente, a un puerto nuestro que cierra cada
+	// conexión, como kling-vz cuando en el invitado nadie escucha. Sin esto
+	// era 127.0.0.1:29080 (puertoFalso), y lo que hubiera ahí —el reenvío de
+	// una microVM de verdad del kindling del Mac, el de otra prueba— recibía
+	// /healthz, /resync y /volume/sync, y cambiaba el camino de la prueba.
+	agente := escucharReservado(t)
+	t.Cleanup(func() { agente.Close() })
+	go func() {
+		for {
+			c, err := agente.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	t.Setenv(envFakeVZGuest, agente.Addr().String())
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
