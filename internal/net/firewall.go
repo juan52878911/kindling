@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	stdnet "net"
+	"os"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -244,14 +245,14 @@ func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
 func (n *Net) egressRules(e Egress) [][]string {
 	rules := n.forwardBase()
 	if e == EgressNone {
-		return append(rules, forwardCierre(), topeTotalNuevas())
+		return append(rules, forwardCierre(), topeTotalNuevas(), topeConexiones())
 	}
 	for _, cidr := range blocked {
 		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
 	}
 	rules = append(rules, topeNuevas())
 	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"},
-		topeTotalNuevas())
+		topeTotalNuevas(), topeConexiones())
 }
 
 // topeNuevasPorSegundo es cuántos paquetes NEW por segundo y por IP destino
@@ -295,6 +296,51 @@ func topeTotalNuevas() []string {
 		"-m", "hashlimit", "--hashlimit-above", strconv.Itoa(topeTotalNuevasPorSegundo) + "/s",
 		"--hashlimit-burst", strconv.Itoa(2 * topeTotalNuevasPorSegundo),
 		"--hashlimit-name", "kl-total", "-j", "DROP"}
+}
+
+// topeConexionesVivas es cuántas conexiones a la vez (entradas de conntrack)
+// deja tener abiertas una microVM, a cualquier destino y en los tres modos.
+// topeTotalNuevas acota el ritmo, no el total: una conexión TCP establecida
+// que el invitado deja abierta vive 5 días en conntrack, así que a 1000 por
+// segundo una sola máquina llenaba nf_conntrack_max (262 144 en un host de
+// 16 GiB) en unos minutos, y con la tabla llena el kernel tira las conexiones
+// nuevas de todas las máquinas y del propio host. Además el host rastrea cada
+// flujo otra vez, con sus plazos por defecto (los de sysctlsNetns solo valen
+// en el netns): con este tope, lo que una máquina deja en la tabla del host
+// queda en unas 16 000 entradas en el peor caso (SYN a destinos muertos, que
+// el host guarda 120 s y el netns 30 s). Un npm install o un navegador abren
+// decenas o pocos cientos.
+const topeConexionesVivas = 4096
+
+// topeConexiones es el DROP de lo NEW cuando la máquina ya tiene
+// topeConexionesVivas entradas en el conntrack de su netns. Junto a
+// topeTotalNuevas en mangle PREROUTING, por lo mismo: va antes que cualquier
+// ACCEPT del FORWARD y que los DNAT, y lo descartado no llega a confirmarse
+// en la tabla. --connlimit-mask 0: un solo contador para la máquina, aunque
+// el invitado falsifique el origen.
+func topeConexiones() []string {
+	return []string{"-t", "mangle", "-A", "PREROUTING", "-i", TapName, "-m", "conntrack", "--ctstate", "NEW",
+		"-m", "connlimit", "--connlimit-above", strconv.Itoa(topeConexionesVivas), "--connlimit-mask", "0",
+		"-j", "DROP"}
+}
+
+// conntrackMinimo es el nf_conntrack_max por debajo del cual SetupHost avisa:
+// con menos, cuatro máquinas en su tope (topeConexiones, con los plazos más
+// largos del host) llenan la tabla del host.
+const conntrackMinimo = 4 * 4 * topeConexionesVivas
+
+// avisoConntrack es el aviso de SetupHost si nf_conntrack_max (contenido de
+// /proc/sys/net/netfilter/nf_conntrack_max) no da para varias máquinas en su
+// tope, o "" si da o no se puede leer.
+func avisoConntrack(contenido string) string {
+	max, err := strconv.Atoi(strings.TrimSpace(contenido))
+	if err != nil || max >= conntrackMinimo {
+		return ""
+	}
+	return fmt.Sprintf("net: WARNING: nf_conntrack_max is %d: a few machines at their limit of %d connections "+
+		"can fill the host's connection tracking table and new connections would be dropped for everyone; "+
+		"raise it to at least %d (sysctl -w net.netfilter.nf_conntrack_max=%d)",
+		max, topeConexionesVivas, conntrackMinimo, conntrackMinimo)
 }
 
 // sysctlsNetns son los sysctl de endurecimiento del netns de una microVM, como
@@ -539,7 +585,7 @@ func (n *Net) reglasAllowlist() [][]string {
 	// El host enmascara hacia internet y vuelve a bloquear las redes privadas como
 	// segunda barrera (HostEgressRules), igual que en modo internet.
 	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"},
-		topeTotalNuevas())
+		topeTotalNuevas(), topeConexiones())
 }
 
 // credNATRules son los DNAT del proxy de credenciales, en orden (el primero que
@@ -705,6 +751,11 @@ func HostEgressRules(bridge string) [][]string {
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-o", "vh-+", "-j", "DROP"},
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "!", "-s", HostSubnet, "-j", "DROP"},
 		{"iptables", "-A", "FORWARD", "-i", "vh-+", "-m", "conntrack", "--ctstate", "INVALID", "-j", "DROP"},
+		// El agente desde fuera del host (un vecino de la LAN que enrute
+		// HostSubnet por aquí, un contenedor con red puente): no lo abre nadie
+		// legítimo, solo el daemon desde el propio host (ver reglasAcceso).
+		{"iptables", "-A", "FORWARD", "!", "-i", "vh-+", "-o", "vh-+", "-p", "tcp", "--dport", strconv.Itoa(puertoAgente),
+			"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"},
 	}
 	for _, cidr := range blocked {
 		destinos := []string{cidr}
@@ -733,6 +784,115 @@ const (
 
 // HostSubnet es el rango que kindling usa para los enlaces con los namespaces.
 const HostSubnet = hostPrefix + ".0.0/16"
+
+// puertoAgente es el puerto del agente del invitado (api.GuestPort; aquí
+// aparte para no depender de pkg/api, y un test comprueba que coinciden).
+const puertoAgente = 8080
+
+// cadenaAcceso es la cadena del OUTPUT del host que decide qué procesos del
+// host abren conexiones hacia las máquinas (reglasAcceso).
+const cadenaAcceso = "KL-ACCESO"
+
+// AccesoAgente son, además del propio daemon (su uid y su gid efectivos), los
+// usuarios y grupos que pueden abrir conexiones al agente de las máquinas
+// desde el host: los del socket del daemon cuando se cede (socketOwner).
+type AccesoAgente struct {
+	UIDs, GIDs []int
+}
+
+// reglasAcceso son las reglas de cadenaAcceso y el salto a ella desde OUTPUT.
+//
+// El agente no autentica (pkg/guest/origen_host.go): da por host lo que le
+// llega por su ruta por defecto, y en Linux todo proceso del host llega así a
+// 172.30.X.2:8080 por la DNAT del netns. Un usuario local sin acceso al
+// socket ejecutaba como root en cualquier máquina con exec sin pasar por el
+// daemon ni por su autorización. Lo mismo valía para el lado host de cada
+// veth (172.30.X.1): las reglas INPUT solo miran lo que entra por un veth, y
+// un proceso local llegaba a los proxies de las aristas de grafo (que pueden
+// apuntar al agente de otra máquina), al resolver y a los proxies de
+// credenciales.
+//
+// Ahora, hacia cualquier destino de HostSubnet:
+//   - root, el daemon y quien puede usar su socket (los uids y gids de a,
+//     estos con --suppl-groups) abren lo que quieran: ya mandan sobre el
+//     daemon, así que llegar al agente no les da nada que no tengan. El
+//     gateway de ext/mcp y el CLI entran por ahí;
+//   - cualquier otro llega a los puertos de servicio de la IP de cada máquina
+//     (los de `kling db`, `kling.ports`), cuya frontera no es la red sino la
+//     clave de cada servicio (docs/db.md); al agente (8080) y a las
+//     direcciones del propio host en HostSubnet (los lados host de los veth),
+//     no: REJECT.
+//
+// Las respuestas no se tocan (solo --ctstate NEW): un servicio del host que
+// contesta a un invitado no abre una conexión nueva.
+func reglasAcceso(a AccesoAgente, euid, egid int) (permisos, cierre [][]string, salto []string) {
+	uids := append([]int{0, euid}, a.UIDs...)
+	gids := append([]int{egid}, a.GIDs...)
+	slices.Sort(uids)
+	slices.Sort(gids)
+	for _, u := range slices.Compact(uids) {
+		permisos = append(permisos, []string{"iptables", "-I", cadenaAcceso, "1",
+			"-m", "owner", "--uid-owner", strconv.Itoa(u), "-j", "RETURN"})
+	}
+	for _, g := range slices.Compact(gids) {
+		permisos = append(permisos, []string{"iptables", "-I", cadenaAcceso, "1",
+			"-m", "owner", "--gid-owner", strconv.Itoa(g), "--suppl-groups", "-j", "RETURN"})
+	}
+	// REJECT con su ICMP por defecto y no tcp-reset: en OUTPUT el RST sale
+	// hacia la máquina en vez de volver al socket local, y el connect esperaba
+	// a su plazo (visto en el lab); el ICMP sí le llega y falla al momento.
+	cierre = [][]string{
+		{"iptables", "-A", cadenaAcceso, "-p", "tcp", "--dport", strconv.Itoa(puertoAgente),
+			"-m", "conntrack", "--ctstate", "NEW", "-j", "REJECT"},
+		{"iptables", "-A", cadenaAcceso, "-m", "addrtype", "--dst-type", "LOCAL",
+			"-m", "conntrack", "--ctstate", "NEW", "-j", "REJECT"},
+	}
+	salto = []string{"iptables", "-I", "OUTPUT", "1", "-d", HostSubnet, "-j", cadenaAcceso}
+	return permisos, cierre, salto
+}
+
+// setupAcceso monta reglasAcceso sin quitar nada: en un host con dos daemons
+// (uno de systemd y otro privado, cada uno con el dueño de su socket) la
+// cadena es de los dos, así que cada uno añade lo suyo si falta y ninguno la
+// vacía. Los permisos van con -I 1, delante de los REJECT.
+func setupAcceso(a AccesoAgente, euid, egid int) error {
+	permisos, cierre, salto := reglasAcceso(a, euid, egid)
+	if !comprobarRegla([]string{"iptables", "-n", "-L", cadenaAcceso}) {
+		if err := ejecutar("iptables", "-N", cadenaAcceso); err != nil {
+			return err
+		}
+	}
+	for _, r := range permisos {
+		if !comprobarRegla(sinPosicion(r, "-C")) {
+			if err := ejecutar(r...); err != nil {
+				return err
+			}
+		}
+	}
+	for _, r := range cierre {
+		if !comprobarRegla(aComprobar(r)) {
+			if err := ejecutar(r...); err != nil {
+				return err
+			}
+		}
+	}
+	if !comprobarRegla(sinPosicion(salto, "-C")) {
+		return ejecutar(salto...)
+	}
+	return nil
+}
+
+// aComprobar es la regla con -A convertida en -C.
+func aComprobar(r []string) []string {
+	out := append([]string{}, r...)
+	for i, x := range out {
+		if x == "-A" {
+			out[i] = "-C"
+			break
+		}
+	}
+	return out
+}
 
 // HostInputRules son las reglas de la cadena INPUT del host para lo que llega
 // desde los namespaces (por los veth vh-*), en el orden en que tienen que
@@ -765,7 +925,7 @@ func HostInputRules() [][]string { return hostInputRules(true) }
 // de cualquier máquina a todas las demás.
 func reglasInputViejas() [][]string {
 	r := hostInputRules(false)
-	return r[1 : len(r)-1] // las respuestas y el DROP no han cambiado
+	return r[1 : len(r)-2] // las respuestas y los dos DROP no han cambiado
 }
 
 func hostInputRules(soloSuVeth bool) [][]string {
@@ -789,6 +949,11 @@ func hostInputRules(soloSuVeth bool) [][]string {
 		// lado host de cada veth.
 		servicio("tcp", fmt.Sprintf("%d:%d", linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1)),
 		regla("-j", "DROP"),
+		// Los lados host de los veth desde fuera del host (la LAN, un
+		// contenedor): nada legítimo llega así. Lo del propio host entra por
+		// lo con origen local, y eso lo filtra reglasAcceso en OUTPUT.
+		{"iptables", "-I", "INPUT", "1", "!", "-i", "vh-+", "-d", HostSubnet,
+			"-m", "addrtype", "!", "--src-type", "LOCAL", "-j", "DROP"},
 	}
 }
 
@@ -808,7 +973,9 @@ func sinPosicion(r []string, accion string) []string {
 }
 
 // SetupHost prepara el host una sola vez: reenvío y reglas de barrera.
-func SetupHost() error {
+// acceso son los usuarios y grupos que, además del daemon, pueden abrir
+// conexiones al agente de las máquinas (reglasAcceso).
+func SetupHost(acceso AccesoAgente) error {
 	if err := run("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"); err != nil {
 		return err
 	}
@@ -830,9 +997,22 @@ func SetupHost() error {
 	if err := setupHostInput(); err != nil {
 		return err
 	}
+	if err := setupAcceso(acceso, os.Geteuid(), os.Getegid()); err != nil {
+		return err
+	}
+	accesoMontado.Store(&acceso)
 	inputMontado.Store(true)
+	if b, err := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_max"); err == nil {
+		if aviso := avisoConntrack(string(b)); aviso != "" {
+			log.Print(aviso)
+		}
+	}
 	return nil
 }
+
+// accesoMontado es el AccesoAgente con el que SetupHost montó reglasAcceso,
+// para reponerlas igual (asegurarHostInput).
+var accesoMontado atomic.Pointer[AccesoAgente]
 
 // inputMontado dice que SetupHost puso las reglas INPUT: desde entonces, cada
 // Setup comprueba que siguen ahí (asegurarHostInput).
@@ -852,16 +1032,28 @@ func asegurarHostInput() error {
 	}
 	reglas := HostInputRules()
 	drop := sinPosicion(reglas[len(reglas)-1], "-C")
-	if comprobarRegla(drop) {
+	acceso := AccesoAgente{}
+	if a := accesoMontado.Load(); a != nil {
+		acceso = *a
+	}
+	_, _, salto := reglasAcceso(acceso, os.Geteuid(), os.Getegid())
+	salto = sinPosicion(salto, "-C")
+	if comprobarRegla(drop) && comprobarRegla(salto) {
 		return nil
 	}
 	inputMu.Lock()
 	defer inputMu.Unlock()
-	if comprobarRegla(drop) {
-		return nil // otro Setup acaba de reponerlas
+	if !comprobarRegla(drop) {
+		log.Printf("net: the host INPUT rules for the machines are gone (a firewall reload?); reinstalling them")
+		if err := setupHostInput(); err != nil {
+			return err
+		}
 	}
-	log.Printf("net: the host INPUT rules for the machines are gone (a firewall reload?); reinstalling them")
-	return setupHostInput()
+	if !comprobarRegla(salto) {
+		log.Printf("net: the host OUTPUT rules for the machines are gone (a firewall reload?); reinstalling them")
+		return setupAcceso(acceso, os.Geteuid(), os.Getegid())
+	}
+	return nil
 }
 
 // setupHostInput instala HostInputRules al principio de INPUT, delante de lo

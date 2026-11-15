@@ -44,6 +44,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `install.sh --skip-kling`: a prerelease kling (1.0.0-rc.2) no longer meets an extension's `min_kling` 1.0.0.
 - On Linux, a failed probe of the e2fsprogs jail is retried after a minute instead of leaving e2fsck without a chroot until the daemon restarts.
 - The example operator Deployment runs as non-root with a read-only root filesystem, no capabilities and no privilege escalation, and its image's base images are pinned by digest.
+- Linux: each machine keeps at most 4096 open connections, so one guest can no longer fill the host's conntrack table; the daemon warns when `nf_conntrack_max` is too low for a few machines at that limit.
+- Linux: listing the host's addresses (three times per create, once under the network lock) takes one netlink dump instead of one per interface: 155 ms to 6.7 ms with 500 interfaces.
 
 ### Security
 
@@ -56,6 +58,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- Linux: only root, the daemon and whoever can use its socket can open connections from the host to a machine's guest agent (port 8080) or to the host side of its link; other local users get a refusal, and the agent is closed to forwarded traffic from outside the host.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

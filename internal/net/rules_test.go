@@ -14,24 +14,26 @@ import (
 func TestEgressRulesOrden(t *testing.T) {
 	n := Plan(1, "abcdef0123")
 	none := n.egressRules(EgressNone)
-	if len(none) != 4 || strings.Join(none[0], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
+	if len(none) != 5 || strings.Join(none[0], " ") != "-A FORWARD -i tap0 -m conntrack --ctstate INVALID -j DROP" ||
 		!strings.Contains(strings.Join(none[1], " "), "ESTABLISHED,RELATED -j ACCEPT") ||
 		strings.Join(none[2], " ") != "-A FORWARD -i tap0 -j DROP" ||
-		strings.Join(none[3], " ") != strings.Join(topeTotalNuevas(), " ") {
+		strings.Join(none[3], " ") != strings.Join(topeTotalNuevas(), " ") ||
+		strings.Join(none[4], " ") != strings.Join(topeConexiones(), " ") {
 		t.Fatalf("none = %v", none)
 	}
 	inet := n.egressRules(EgressInternet)
-	if len(inet) != 5+len(blocked) {
+	if len(inet) != 6+len(blocked) {
 		t.Fatalf("internet: %d reglas", len(inet))
 	}
-	if strings.Join(inet[len(inet)-3], " ") != strings.Join(topeNuevas(), " ") {
-		t.Errorf("la última del FORWARD de internet debe ser el tope de nuevas: %v", inet[len(inet)-3])
+	if strings.Join(inet[len(inet)-4], " ") != strings.Join(topeNuevas(), " ") {
+		t.Errorf("la última del FORWARD de internet debe ser el tope de nuevas: %v", inet[len(inet)-4])
 	}
-	if strings.Join(inet[len(inet)-2], " ") != "-t nat -A POSTROUTING -o vg-abcdef01 -j MASQUERADE" {
-		t.Errorf("tras el FORWARD de internet va el MASQUERADE: %v", inet[len(inet)-2])
+	if strings.Join(inet[len(inet)-3], " ") != "-t nat -A POSTROUTING -o vg-abcdef01 -j MASQUERADE" {
+		t.Errorf("tras el FORWARD de internet va el MASQUERADE: %v", inet[len(inet)-3])
 	}
-	if strings.Join(inet[len(inet)-1], " ") != strings.Join(topeTotalNuevas(), " ") {
-		t.Errorf("la última de internet debe ser el tope total: %v", inet[len(inet)-1])
+	if strings.Join(inet[len(inet)-2], " ") != strings.Join(topeTotalNuevas(), " ") ||
+		strings.Join(inet[len(inet)-1], " ") != strings.Join(topeConexiones(), " ") {
+		t.Errorf("las últimas de internet deben ser el tope total y el de conexiones: %v", inet[len(inet)-2:])
 	}
 	for i, cidr := range blocked {
 		if got := strings.Join(inet[2+i], " "); got != "-A FORWARD -i tap0 -d "+cidr+" -j DROP" {
@@ -405,10 +407,13 @@ func TestRafagaDeNuevasSeCorta(t *testing.T) {
 // los tres modos: ahí conntrack ya clasificó el paquete pero aún no confirmó
 // la entrada, así que lo descartado no ocupa la tabla de conntrack del host.
 // Va delante de los DNAT y de los ACCEPT que reglasGrafo inserta en FORWARD,
-// y cubre también lo que va al INPUT del netns.
+// y cubre también lo que va al INPUT del netns. Detrás, el tope de
+// conexiones vivas (connlimit): sin él, una máquina que deja abiertas las que
+// abre llenaba el conntrack del host al ritmo del tope total.
 func TestTopeTotalDeNuevasEnLosTresModos(t *testing.T) {
 	n := Plan(1, "abcdef0123")
-	quiero := "*mangle\n-A PREROUTING -i tap0 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 1000/s --hashlimit-burst 2000 --hashlimit-name kl-total -j DROP\nCOMMIT\n"
+	quiero := "*mangle\n-A PREROUTING -i tap0 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 1000/s --hashlimit-burst 2000 --hashlimit-name kl-total -j DROP\n" +
+		"-A PREROUTING -i tap0 -m conntrack --ctstate NEW -m connlimit --connlimit-above 4096 --connlimit-mask 0 -j DROP\nCOMMIT\n"
 	for nombre, reglas := range map[string][][]string{
 		"none":      n.egressRules(EgressNone),
 		"internet":  n.egressRules(EgressInternet),
@@ -439,5 +444,19 @@ func TestSysctlsNetns(t *testing.T) {
 	}
 	if strings.Contains(got, "nf_conntrack_max") {
 		t.Errorf("nf_conntrack_max no es por netns: %s", got)
+	}
+}
+
+// SetupHost avisa si nf_conntrack_max no da para unas pocas máquinas en su
+// tope de conexiones; con el valor de un host normal, o sin conntrack, calla.
+func TestAvisoConntrack(t *testing.T) {
+	if a := avisoConntrack("16384\n"); !strings.Contains(a, "nf_conntrack_max is 16384") ||
+		!strings.Contains(a, strconv.Itoa(conntrackMinimo)) {
+		t.Errorf("con 16384 = %q", a)
+	}
+	for _, c := range []string{"262144\n", strconv.Itoa(conntrackMinimo), "", "x"} {
+		if a := avisoConntrack(c); a != "" {
+			t.Errorf("con %q avisa: %q", c, a)
+		}
 	}
 }

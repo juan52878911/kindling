@@ -156,15 +156,20 @@ func TestHostInputRulesAceptanLoLegitimoYDescartanElResto(t *testing.T) {
 	if len(reglas) == 0 {
 		t.Fatal("sin reglas de INPUT")
 	}
-	for _, r := range reglas {
+	for _, r := range reglas[:len(reglas)-1] {
 		l := strings.Join(r, " ")
 		if !strings.Contains(l, "-I INPUT 1 -i vh-+ -s "+HostSubnet) {
 			t.Errorf("regla sin acotar a los veth y al rango de kindling: %s", l)
 		}
 	}
+	if drop := strings.Join(reglas[len(reglas)-2], " "); !strings.HasSuffix(drop, "-s "+HostSubnet+" -j DROP") {
+		t.Errorf("tras los ACCEPT va el DROP de lo que entra por los veth: %s", drop)
+	}
+	// La última, el DROP de lo que llega a HostSubnet de fuera del host sin
+	// pasar por un veth (la LAN, un contenedor).
 	ultima := strings.Join(reglas[len(reglas)-1], " ")
-	if !strings.HasSuffix(ultima, "-j DROP") {
-		t.Errorf("la última regla tiene que ser el DROP: %s", ultima)
+	if ultima != "iptables -I INPUT 1 ! -i vh-+ -d "+HostSubnet+" -m addrtype ! --src-type LOCAL -j DROP" {
+		t.Errorf("la última regla tiene que ser el DROP de lo que no viene de un veth ni del host: %s", ultima)
 	}
 	junto := ""
 	for _, r := range reglas[:len(reglas)-1] {
@@ -313,27 +318,70 @@ func TestReglasEnlaceSobrantes(t *testing.T) {
 	}
 }
 
-// iptablesFalso simula la cadena INPUT para setupHostInput: -C, -D e -I 1.
-type iptablesFalso struct{ input []string }
+// iptablesFalso simula las cadenas de la tabla filter para setupHostInput y
+// setupAcceso: -C, -D, -I 1, -A, -N y el -n -L que dice si una cadena existe.
+// INPUT y OUTPUT existen siempre; las demás, tras su -N.
+type iptablesFalso struct {
+	input []string
+	otras map[string][]string
+}
+
+func (f *iptablesFalso) cadena(nombre string) ([]string, bool) {
+	if nombre == "INPUT" {
+		return f.input, true
+	}
+	c, ok := f.otras[nombre]
+	return c, ok || nombre == "OUTPUT"
+}
+
+func (f *iptablesFalso) poner(nombre string, c []string) {
+	if nombre == "INPUT" {
+		f.input = c
+		return
+	}
+	if f.otras == nil {
+		f.otras = map[string][]string{}
+	}
+	f.otras[nombre] = c
+}
 
 func (f *iptablesFalso) clave(args []string) string {
-	return strings.Join(args[3:], " ") // tras "iptables -X INPUT"
+	return strings.Join(args[3:], " ") // tras "iptables -X CADENA"
 }
 
 func (f *iptablesFalso) comprobar(args []string) bool {
-	return slices.Contains(f.input, f.clave(args))
+	if args[1] == "-n" && args[2] == "-L" {
+		_, ok := f.cadena(args[3])
+		return ok
+	}
+	c, _ := f.cadena(args[2])
+	return slices.Contains(c, f.clave(args))
 }
 
 func (f *iptablesFalso) ejecutar(args ...string) error {
+	if args[1] == "-N" {
+		if _, ok := f.cadena(args[2]); ok {
+			return errors.New("ya existe")
+		}
+		f.poner(args[2], []string{})
+		return nil
+	}
+	c, ok := f.cadena(args[2])
+	if !ok {
+		return fmt.Errorf("no existe la cadena %s", args[2])
+	}
 	switch args[1] {
 	case "-D":
-		if i := slices.Index(f.input, f.clave(args)); i >= 0 {
-			f.input = slices.Delete(f.input, i, i+1)
+		if i := slices.Index(c, f.clave(args)); i >= 0 {
+			f.poner(args[2], slices.Delete(c, i, i+1))
 			return nil
 		}
 		return errors.New("no existe")
 	case "-I":
-		f.input = slices.Insert(f.input, 0, strings.Join(args[4:], " "))
+		f.poner(args[2], slices.Insert(c, 0, strings.Join(args[4:], " ")))
+		return nil
+	case "-A":
+		f.poner(args[2], append(c, f.clave(args)))
 		return nil
 	}
 	return fmt.Errorf("inesperado: %v", args)
@@ -357,7 +405,8 @@ func TestHostInputSoloAlcanzaSuPropioVeth(t *testing.T) {
 // dejando pasar a todos.
 func TestSetupHostInputQuitaLasReglasViejas(t *testing.T) {
 	f := &iptablesFalso{}
-	viejas := append(append([][]string{HostInputRules()[0]}, reglasInputViejas()...), HostInputRules()[len(HostInputRules())-1])
+	// La versión anterior no tenía la última regla: su DROP es la penúltima.
+	viejas := append(append([][]string{HostInputRules()[0]}, reglasInputViejas()...), HostInputRules()[len(HostInputRules())-2])
 	for i := len(viejas) - 1; i >= 0; i-- {
 		_ = f.ejecutar(viejas[i]...)
 	}
@@ -394,7 +443,7 @@ func TestSetupHostInputReordenaTrasOtraVersion(t *testing.T) {
 	}
 	// Lo que hace el setupHostInput de la versión anterior.
 	nuevas := HostInputRules()
-	viejas := append(append([][]string{nuevas[0]}, reglasInputViejas()...), nuevas[len(nuevas)-1])
+	viejas := append(append([][]string{nuevas[0]}, reglasInputViejas()...), nuevas[len(nuevas)-2])
 	for _, r := range viejas {
 		for f.comprobar(sinPosicion(r, "-C")) {
 			_ = f.ejecutar(sinPosicion(r, "-D")...)
