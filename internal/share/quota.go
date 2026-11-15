@@ -52,14 +52,20 @@ const statfsCache = 250 * time.Millisecond
 type Quota struct {
 	lim Limits
 
-	// size ordena los cambios de tamaño: una escritura que no alarga el
-	// fichero va con RLock (en paralelo con las demás), y las que alargan, los
-	// SetSize y los O_TRUNC, con Lock. Sin él, entre el Stat y el WriteAt otro
-	// podía encoger el fichero (y cobrar la devolución) y la escritura lo
-	// alargaba sin contar.
+	// size ordena los cambios de tamaño: las escrituras van con RLock (en
+	// paralelo con las demás), y los SetSize, los O_TRUNC, los borrados y los
+	// renombrados, con Lock. Sin él, entre el Stat y el WriteAt otro podía
+	// encoger el fichero (y cobrar la devolución) y la escritura lo alargaba
+	// sin contar. Las escrituras que alargan un fichero toman además el
+	// candado de ESE fichero (candados): dos que alargan el mismo van en fila,
+	// pero las de ficheros distintos ya no esperan unas a otras con el
+	// WriteAt dentro. La reserva de bytes es un CAS (reservar).
 	size  sync.RWMutex
 	bytes atomic.Int64
 	files atomic.Int64
+
+	lmu      sync.Mutex
+	candados map[Ident]*candado
 
 	// abiertos cuenta los handles vivos de cada fichero: un unlink de algo
 	// abierto no libera el disco hasta el último cierre, y es entonces cuando
@@ -75,14 +81,62 @@ type Quota struct {
 	bajo bool
 }
 
+// candado es el de un fichero que alguien está alargando; n, cuántos lo
+// esperan o lo tienen (al llegar a cero se suelta del mapa).
+type candado struct {
+	mu sync.Mutex
+	n  int
+}
+
 // NewQuota crea la cuenta de una carpeta con los topes l.
-func NewQuota(l Limits) *Quota { return &Quota{lim: l, abiertos: map[Ident]int{}} }
+func NewQuota(l Limits) *Quota {
+	return &Quota{lim: l, abiertos: map[Ident]int{}, candados: map[Ident]*candado{}}
+}
+
+// lockFile toma el candado del fichero id y devuelve con qué soltarlo.
+func (q *Quota) lockFile(id Ident) func() {
+	q.lmu.Lock()
+	if q.candados == nil {
+		q.candados = map[Ident]*candado{}
+	}
+	c := q.candados[id]
+	if c == nil {
+		c = &candado{}
+		q.candados[id] = c
+	}
+	c.n++
+	q.lmu.Unlock()
+	c.mu.Lock()
+	return func() {
+		c.mu.Unlock()
+		q.lmu.Lock()
+		if c.n--; c.n == 0 {
+			delete(q.candados, id)
+		}
+		q.lmu.Unlock()
+	}
+}
 
 // SetUsage pone la cuenta en bytes y files, lo que llevaba la carpeta en un
 // arranque anterior (el daemon lo guarda al congelar o parar). Antes de servir.
 func (q *Quota) SetUsage(bytes, files int64) {
 	q.bytes.Store(max(bytes, 0))
 	q.files.Store(max(files, 0))
+}
+
+// RaiseUsage sube la cuenta a bytes y files si lleva menos: otra máquina que
+// monta la misma carpeta guardó un total mayor. Se puede llamar sirviendo.
+func (q *Quota) RaiseUsage(bytes, files int64) {
+	subir := func(c *atomic.Int64, n int64) {
+		for {
+			v := c.Load()
+			if v >= n || c.CompareAndSwap(v, n) {
+				return
+			}
+		}
+	}
+	subir(&q.bytes, bytes)
+	subir(&q.files, files)
 }
 
 // Usage devuelve los bytes y las entradas netas que lleva la carpeta.
@@ -136,19 +190,26 @@ func lleno(fi fs.FileInfo) bool {
 	return ok && int64(st.Blocks)*512 >= fi.Size()
 }
 
-// reservar cobra n bytes de crecimiento; ENOSPC si no caben. Con q.size en
-// exclusiva.
+// reservar cobra n bytes de crecimiento; ENOSPC si no caben. Atómico frente a
+// otras reservas: con q.size en exclusiva, o compartido y con el candado del
+// fichero que crece.
 func (q *Quota) reservar(s *Server, n int64) uint32 {
 	if n <= 0 {
 		return 0
 	}
-	if q.lim.MaxBytes > 0 && q.bytes.Load()+n > q.lim.MaxBytes {
-		return proto.ENOSPC
+	for {
+		v := q.bytes.Load()
+		if q.lim.MaxBytes > 0 && v+n > q.lim.MaxBytes {
+			return proto.ENOSPC
+		}
+		if q.bytes.CompareAndSwap(v, v+n) {
+			break
+		}
 	}
 	if !q.libre(s, n) {
+		devolver(&q.bytes, n)
 		return proto.ENOSPC
 	}
-	q.bytes.Add(n)
 	return 0
 }
 
@@ -194,24 +255,33 @@ func (s *Server) writeAt(f *os.File, data []byte, off int64) (int, uint32) {
 	}
 	end := off + int64(len(data))
 	q.size.RLock()
+	defer q.size.RUnlock()
 	fi, err := f.Stat()
-	if err == nil && end <= fi.Size() {
+	if err != nil {
+		return 0, Errno(err)
+	}
+	if end <= fi.Size() {
 		// No alarga: solo el mínimo libre, y solo si puede rellenar un hueco.
 		if !lleno(fi) && !q.libre(s, 0) {
-			q.size.RUnlock()
 			return 0, proto.ENOSPC
 		}
 		n, err := f.WriteAt(data, off)
-		q.size.RUnlock()
 		if err != nil && n == 0 {
 			return 0, Errno(err)
 		}
 		return n, 0
 	}
-	q.size.RUnlock()
-
-	q.size.Lock()
-	defer q.size.Unlock()
+	// Alarga: con el candado de este fichero, nadie más lo alarga entre el
+	// Stat y el WriteAt; encogerlo o borrarlo necesita q.size en exclusiva.
+	id, ok := IdentOf(fi)
+	if !ok {
+		// Sin identidad no hay candado por fichero: en exclusiva, como antes.
+		q.size.RUnlock()
+		q.size.Lock()
+		defer func() { q.size.Unlock(); q.size.RLock() }()
+	} else {
+		defer q.lockFile(id)()
+	}
 	fi, err = f.Stat()
 	if err != nil {
 		return 0, Errno(err)
@@ -334,6 +404,15 @@ func (q *Quota) borrar(lstat func() (fs.FileInfo, error), check func(fs.FileInfo
 	if err := rm(); err != nil {
 		return Errno(err)
 	}
+	q.liberarLocked(fi)
+	return 0
+}
+
+// liberarLocked devuelve lo que libera quitar el nombre fi (borrarlo, o
+// renombrar otra cosa encima): la entrada si era el último nombre, y su tamaño
+// si además nadie lo tiene abierto (si no, al último cierre). Con q.size y
+// q.amu tomados, y fi leído con ellos.
+func (q *Quota) liberarLocked(fi fs.FileInfo) {
 	switch {
 	case fi.IsDir():
 		devolver(&q.files, 1)
@@ -342,10 +421,30 @@ func (q *Quota) borrar(lstat func() (fs.FileInfo, error), check func(fs.FileInfo
 		devolver(&q.files, 1)
 	default:
 		if id, ok := IdentOf(fi); ok && q.abiertos[id] > 0 {
-			return 0
+			return
 		}
 		devolver(&q.bytes, fi.Size())
 		devolver(&q.files, 1)
+	}
+}
+
+// renombrar hace rn (un rename que puede sustituir newp) con los tamaños
+// quietos y devuelve lo que libera el sustituido, como borrar. Sin esto el
+// guardado atómico de un editor, git o npm (escribir aparte y renombrar
+// encima) cobraba cada versión y acababa en un ENOSPC falso.
+func (q *Quota) renombrar(lstatOld, lstatNew func() (fs.FileInfo, error), rn func() error) uint32 {
+	q.size.Lock()
+	defer q.size.Unlock()
+	q.amu.Lock()
+	defer q.amu.Unlock()
+	viejo, oerr := lstatOld()
+	dst, derr := lstatNew()
+	if err := rn(); err != nil {
+		return Errno(err)
+	}
+	// Dos nombres del mismo fichero: rename no hace nada y no se libera nada.
+	if derr == nil && (oerr != nil || !os.SameFile(viejo, dst)) {
+		q.liberarLocked(dst)
 	}
 	return 0
 }

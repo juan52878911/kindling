@@ -11,6 +11,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
+### Changed
+
+- rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
+
 ### Fixed
 
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
@@ -58,6 +62,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The signature migration at daemon start retries on the next start when a template's meta.json could not be read, instead of marking the host as migrated.
 - `kling volume rm` refuses (409) a volume that a stopped machine still has attached.
 - The overlay watcher no longer wakes every second when no machine is running.
+- rw shares: saving a file atomically (write a temporary file, rename it over the old one) gives the replaced file's bytes back to the quota, so editors, `git` and `npm` no longer end up in a false `ENOSPC`.
+- rw shares: creating a file that already exists without `O_EXCL` no longer changes its mode and owner.
 
 ### Security
 
@@ -87,6 +93,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
 - A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.
 - Image file uploads from the daemon's lib directory (`from_host`) copy the file opened once and checked, instead of checking a path and reopening it.
+- Live shares: the directory listings kept to report host changes are capped per session and shared between names of the same directory, so a guest can no longer grow the daemon's heap through a rw share.
+- Machines that mount the same host folder rw (graph `share` edges, or two `-share` of one directory) now spend one quota instead of one each.
+- The Firecracker balloon statistics are read with a 64 KiB limit.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
