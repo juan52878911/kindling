@@ -12,10 +12,6 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
-### Changed
-
-- rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
-
 ### Fixed
 
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
@@ -125,6 +121,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway with `-no-auth`: requests whose `Host` or `Origin` is not loopback get a 403, so a web page can't reach it through DNS rebinding or a cross-origin POST.
 - MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
 - MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
+- rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
