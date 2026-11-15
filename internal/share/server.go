@@ -990,7 +990,9 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 	if q != nil && of&os.O_TRUNC != 0 && !creado {
 		devolver(&q.bytes, antes)
 	}
-	if create {
+	if creado {
+		// Solo lo que se acaba de crear: abrir con O_CREAT algo que ya existía
+		// no le cambia ni el dueño ni el modo (POSIX).
 		s.chown(f)
 		// El modo pedido, recortado: sin setuid ni setgid, aunque el umask del
 		// daemon hubiera dejado otra cosa.
@@ -1241,7 +1243,12 @@ func (s *Server) rename(oldp, newp string, flags uint32) uint32 {
 	if !s.renameKeepsLinks(oldp, newp) {
 		return proto.EXDEV
 	}
-	if err := renameat(of, ob, nf, nb); err != nil {
+	rn := func() error { return renameat(of, ob, nf, nb) }
+	if q := s.quota; q != nil {
+		return q.renombrar(func() (fs.FileInfo, error) { return s.root.Lstat(oldp) },
+			func() (fs.FileInfo, error) { return s.root.Lstat(newp) }, rn)
+	}
+	if err := rn(); err != nil {
 		return Errno(err)
 	}
 	return 0

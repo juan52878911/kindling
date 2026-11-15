@@ -482,8 +482,10 @@ func (c *Client) BalloonStats(ctx context.Context) (*BalloonStats, error) {
 	if resp.StatusCode >= 300 {
 		return nil, errorDeFirecracker(http.MethodGet, "/balloon/statistics", resp)
 	}
+	// Con tope, como el resto de lecturas de la API: unos cientos de bytes de
+	// verdad, y un VMM roto o comprometido no decide cuánto heap gasta el daemon.
 	var s BalloonStats
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&s); err != nil {
 		return nil, err
 	}
 	return &s, nil

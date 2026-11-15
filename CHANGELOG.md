@@ -11,6 +11,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
+### Changed
+
+- rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
+
 ### Fixed
 
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
@@ -44,6 +48,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `install.sh --skip-kling`: a prerelease kling (1.0.0-rc.2) no longer meets an extension's `min_kling` 1.0.0.
 - On Linux, a failed probe of the e2fsprogs jail is retried after a minute instead of leaving e2fsck without a chroot until the daemon restarts.
 - The example operator Deployment runs as non-root with a read-only root filesystem, no capabilities and no privilege escalation, and its image's base images are pinned by digest.
+- rw shares: saving a file atomically (write a temporary file, rename it over the old one) gives the replaced file's bytes back to the quota, so editors, `git` and `npm` no longer end up in a false `ENOSPC`.
+- rw shares: creating a file that already exists without `O_EXCL` no longer changes its mode and owner.
 
 ### Security
 
@@ -56,6 +62,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- Live shares: the directory listings kept to report host changes are capped per session and shared between names of the same directory, so a guest can no longer grow the daemon's heap through a rw share.
+- Machines that mount the same host folder rw (graph `share` edges, or two `-share` of one directory) now spend one quota instead of one each.
+- The Firecracker balloon statistics are read with a 64 KiB limit.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
