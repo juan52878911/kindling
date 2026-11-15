@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -288,5 +289,79 @@ func TestStartYThawRetiranLaMarcaDeCommit(t *testing.T) {
 	}
 	if existe(marca) {
 		t.Fatal("Start dejó la marca de commit")
+	}
+}
+
+// reconcile reanuda el VMM en pausa sin tener m.mu: el Resume (hasta
+// plazoEstadoVMM por VMM) y el digest del sello son E/S, y con m.mu tomado
+// hacían esperar a todo lo que ya corre al arrancar el daemon.
+func TestReconcileReanudaSinTenerElCandado(t *testing.T) {
+	m := newTestManager(t)
+	id := "a7a7000000000011"
+	falso, _ := vmmEnPausaTrasReinicio(t, m, id, api.StateRunning)
+	if err := volcadoEnCurso(m.dir(id)); err != nil {
+		t.Fatal(err)
+	}
+	var libre, visto atomic.Bool
+	falso.enGancho(func(metodo, ruta string) {
+		if metodo != http.MethodPatch || ruta != "/vm" {
+			return
+		}
+		visto.Store(true)
+		if m.mu.TryLock() {
+			m.mu.Unlock()
+			libre.Store(true)
+		}
+	})
+
+	m.reconcile()
+
+	if !visto.Load() {
+		t.Fatal("reconcile no reanudó el VMM")
+	}
+	if !libre.Load() {
+		t.Fatal("reconcile tenía m.mu tomado mientras esperaba el Resume del VMM")
+	}
+	if viva := vivaDe(t, m, id); viva.State != api.StateRunning || !readoptada(m, id) {
+		t.Fatalf("estado %s, readoptada %v; quería running readoptada", viva.State, readoptada(m, id))
+	}
+}
+
+// Un thaw cortado después de retirar el sello y cargar el volcado: la
+// máquina sigue warm en disco y su VMM vive, con el invitado despierto o en
+// pausa. reconcile la readopta y le manda el resync del thaw, que no llegó a
+// hacerse: si no, seguía con el reloj y la entropía del volcado.
+func TestReconcileThawCortadoPasaPorElResync(t *testing.T) {
+	for i, invitado := range []string{"Running", "Paused"} {
+		t.Run(invitado, func(t *testing.T) {
+			m := newTestManager(t)
+			id := "a7a700000000001" + string(rune('2'+i))
+			congeladaParaThaw(t, m, id, 64)
+			falso, _ := vmmEnPausaTrasReinicio(t, m, id, api.StateWarm)
+			falso.ponerEstado(invitado)
+			if err := retirarSello(m.dir(id)); err != nil {
+				t.Fatal(err)
+			}
+			agente, pedidos := agenteReloj(t, nil)
+			m.mu.Lock()
+			mc := m.byID[id]
+			mc.Forwards = map[string]string{"8080": strings.TrimPrefix(agente.URL, "http://")}
+			mc.Agent = &api.GuestAgent{Caps: []string{api.GuestCapResync}}
+			m.mu.Unlock()
+
+			m.reconcile()
+
+			if viva := vivaDe(t, m, id); viva.State != api.StateRunning || !readoptada(m, id) {
+				t.Fatalf("estado %s, readoptada %v; quería running readoptada", viva.State, readoptada(m, id))
+			}
+			select {
+			case req := <-pedidos:
+				if req.Restore != api.ResyncThaw {
+					t.Fatalf("Restore = %q; quería %q", req.Restore, api.ResyncThaw)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("la máquina readoptada a medio thaw no pasó por el resync")
+			}
+		})
 	}
 }
