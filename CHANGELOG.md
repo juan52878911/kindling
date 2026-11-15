@@ -58,6 +58,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- macOS: connections to MMDS and to the credential proxy on the gateway count toward the guest's 512 TCP flows; past that they get a RST instead of holding VMM memory without a limit.
+- macOS: DNS queries forwarded upstream carry a random transaction ID instead of the guest's, as on Linux.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
