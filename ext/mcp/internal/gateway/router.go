@@ -43,6 +43,10 @@ type Router struct {
 
 	PprofEnabled bool // igual que Gateway.PprofEnabled; lo decide quien compone el servidor
 
+	// MaxSesiones acota las conversaciones de /mcp/_all que un tenant tiene
+	// abiertas en el router, como Gateway.MaxSesiones. 0 = defaultMaxSesiones.
+	MaxSesiones int
+
 	agg *routerAgg
 
 	// sessionHost fija una sesión MCP al host que la abrió, igual que un
@@ -401,7 +405,17 @@ func (ra *routerAgg) handle(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	// Como en un solo host: solo el initialize abre conversación.
+	if req.Header.Get(SessionHeader) == "" && rpc.Method != "initialize" {
+		api.HTTPError(w, "no MCP session: start one with initialize", http.StatusBadRequest)
+		return
+	}
 	s, sid, created := ra.session(req)
+	if s == nil && req.Header.Get(SessionHeader) == "" {
+		// Sin cabecera, ra.session solo falla por el tope del tenant.
+		escribirTopeSesiones(w, scheduler.TenantFrom(ctx).Name(), ra.tope())
+		return
+	}
 	if s == nil {
 		api.HTTPError(w, errSesionDesconocida.Error(), http.StatusNotFound)
 		return
@@ -444,10 +458,28 @@ func (ra *routerAgg) session(req *http.Request) (*routerSession, string, bool) {
 	}
 	sid := newSessionID()
 	s := &routerSession{mode: m, tenant: tenant, perHost: map[string]*aggSession{}, lastUse: time.Now()}
+	tope := ra.tope()
 	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	n := 0
+	for _, o := range ra.sessions {
+		if o.tenant == tenant {
+			n++
+		}
+	}
+	if n >= tope {
+		// Tope de conversaciones del tenant: ni sesión ni id.
+		return nil, "", false
+	}
 	ra.sessions[sid] = s
-	ra.mu.Unlock()
 	return s, sid, true
+}
+
+func (ra *routerAgg) tope() int {
+	if ra.r.MaxSesiones > 0 {
+		return ra.r.MaxSesiones
+	}
+	return defaultMaxSesiones
 }
 
 func (ra *routerAgg) drop(ctx context.Context, sid, tenant string) {

@@ -149,6 +149,10 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if errors.Is(err, errTopeSesiones) {
+		escribirTopeSesiones(w, tnt.Name(), g.topeSesiones())
+		return
+	}
 	if err != nil {
 		writeRPCError(w, req.ID, -32000, err.Error())
 		return
@@ -816,10 +820,35 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 		id: newSessionID(), tenant: tenant, services: services, mode: m,
 		backing: map[string]string{}, lastUse: time.Now(),
 	}
+	// Las directas se cuentan fuera de a.mu (duenos tiene su propio cerrojo);
+	// las del agregador, dentro, junto con el alta: dos initialize a la vez no
+	// comparten el último hueco.
+	directas := a.gw.sesionesDirectas(tenant)
 	a.mu.Lock()
+	if directas+a.deTenantLocked(tenant) >= a.gw.topeSesiones() {
+		a.mu.Unlock()
+		return nil, false, errTopeSesiones
+	}
 	a.sessions[s.id] = s
 	a.mu.Unlock()
 	return s, true, nil
+}
+
+// deTenant cuenta las conversaciones del agregador abiertas por el tenant.
+func (a *aggregator) deTenant(tenant string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.deTenantLocked(tenant)
+}
+
+func (a *aggregator) deTenantLocked(tenant string) int {
+	n := 0
+	for _, s := range a.sessions {
+		if s.tenant == tenant {
+			n++
+		}
+	}
+	return n
 }
 
 // backedOn cuenta las conversaciones del agregador con una sesión abierta en el
