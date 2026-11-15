@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/origen"
 )
 
 func cmdSbx(args []string) error {
@@ -114,7 +116,7 @@ func nuevoCliente() (*cliente, error) {
 		return nil, errors.New("no gateway token: kling config set sandbox.token - < token-file (or $KLING_SANDBOX_TOKEN)")
 	}
 	return &cliente{url: strings.TrimSuffix(a.URL, "/"), token: a.Token,
-		http: &http.Client{Timeout: 0}}, nil
+		http: &http.Client{Timeout: 0, CheckRedirect: origen.SoloMismoOrigen}}, nil
 }
 
 func (c *cliente) peticion(ctx context.Context, metodo, ruta string, cuerpo any) (*http.Request, error) {

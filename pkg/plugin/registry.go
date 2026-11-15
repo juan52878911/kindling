@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -304,7 +305,15 @@ func runManifest(ctx context.Context, path string) ([]byte, error) {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("--kling-manifest took more than %s", ManifestTimeout)
 		}
-		return nil, fmt.Errorf("--kling-manifest failed: %v", err)
+		// ErrWaitDelay es que la extensión SALIÓ BIEN pero su salida siguió
+		// abierta en otro proceso: un nieto que dejó en marcha, o un hijo que
+		// este mismo kling estaba lanzando a la vez (entre fork y exec hereda
+		// todos los descriptores, también la tubería de esta). Lo leído hasta
+		// ahí se acepta si es un manifiesto válido, que parseManifest decide;
+		// cortado a medias no lo es.
+		if !errors.Is(err, exec.ErrWaitDelay) {
+			return nil, fmt.Errorf("--kling-manifest failed: %v", err)
+		}
 	}
 	if out.over {
 		return nil, fmt.Errorf("--kling-manifest printed more than %d bytes", maxManifestBytes)

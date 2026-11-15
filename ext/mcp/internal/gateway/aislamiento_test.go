@@ -400,6 +400,7 @@ func TestDeleteAisladoDestruyeAntesDeContestar(t *testing.T) {
 	h := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "").Handler("")
 	sa := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit).Header().Get(SessionHeader)
 	req := httptest.NewRequest("DELETE", "/mcp/notas", nil)
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set(SessionHeader, sa)
 	w := &escritorQueMira{ResponseRecorder: httptest.NewRecorder(), d: d, id: "m1"}
 	h.ServeHTTP(w, req)

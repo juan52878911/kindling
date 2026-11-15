@@ -160,6 +160,10 @@ func TestBranchForkDelPadre(t *testing.T) {
 	if child.Labels[labelBranch] != branchKey("feat/x") || child.Labels[labelRepo] != parent.Labels[labelRepo] {
 		t.Errorf("child labels %v", child.Labels)
 	}
+	// El fork tiene el mismo nombre determinista que una copia del golden.
+	if want := branchMachineName(child.Labels[labelRepo], branchKey("feat/x")); child.Name != want {
+		t.Errorf("child name %q, want %q", child.Name, want)
+	}
 	if parent.State != api.StateWarm {
 		t.Errorf("parent is %s, want frozen again", parent.State)
 	}
@@ -182,6 +186,26 @@ func TestBranchForkDelPadre(t *testing.T) {
 	// La copia hija tiene clave propia en el host.
 	if password(t, child.ID) == password(t, parent.ID) {
 		t.Error("child shares the parent's password")
+	}
+}
+
+// Con un kling anterior a `sandbox fork -name`, la rama sale igual del padre
+// (con el nombre que ponga el daemon).
+func TestBranchForkConKlingSinName(t *testing.T) {
+	ta, dir := branchTestApp(t)
+	ctx := context.Background()
+	if err := ta.branch(ctx, "", "", "pg", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	parent := ta.copyOf(t, "main")
+	ta.f.sinForkName = true
+	gitT(t, dir, "checkout", "-q", "-b", "feat/y")
+	if err := ta.branch(ctx, "", "", "", defaultOwner); err != nil {
+		t.Fatal(err)
+	}
+	child := ta.copyOf(t, "feat/y")
+	if child == nil || child.ID == parent.ID || child.Labels[labelBranch] != branchKey("feat/y") {
+		t.Fatalf("child copy: %+v", child)
 	}
 }
 

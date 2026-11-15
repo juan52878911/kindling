@@ -138,6 +138,7 @@ func TestSesionLigadaAlTenant(t *testing.T) {
 	con := func(tok, metodo, ruta, sid, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(metodo, ruta, strings.NewReader(body))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if sid != "" {

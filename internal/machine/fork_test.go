@@ -207,6 +207,39 @@ func TestForkRespetaTTLDeLaPeticion(t *testing.T) {
 	}
 }
 
+// Name da nombre a la copia; un nombre ocupado, inválido o con Count > 1 se
+// rechaza antes de pausar el original.
+func TestForkConNombre(t *testing.T) {
+	m := newTestManager(t)
+	falso, _ := origenParaFork(t, m, "f0aa170000000009")
+	pedidas := copiasFalsas(t, m, 0)
+
+	_, copias, err := m.Fork(context.Background(), "caja", ForkOptions{Name: "db-rama"})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if len(copias) != 1 || copias[0].Name != "db-rama" || pedidas()[0].Name != "db-rama" {
+		t.Fatalf("copias = %+v", copias)
+	}
+	pausas := len(falso.llamadasA(http.MethodPatch, "/vm"))
+	for _, c := range []struct {
+		opt  ForkOptions
+		want error
+	}{
+		{ForkOptions{Name: "db-rama"}, ErrNameTaken},
+		{ForkOptions{Name: "caja"}, ErrNameTaken},
+		{ForkOptions{Name: "no/vale"}, ErrInvalidName},
+		{ForkOptions{Name: "otra", Count: 2}, ErrFork},
+	} {
+		if _, _, err := m.Fork(context.Background(), "caja", c.opt); !errors.Is(err, c.want) {
+			t.Errorf("%+v: err = %v, quería %v", c.opt, err, c.want)
+		}
+	}
+	if n := len(falso.llamadasA(http.MethodPatch, "/vm")); n != pausas {
+		t.Errorf("un fork rechazado pausó el original (%d PATCH /vm más)", n-pausas)
+	}
+}
+
 // Todo o nada: si la segunda copia no se restaura, la primera se elimina,
 // también la entrada failed de la segunda, y el snapshot temporal desaparece.
 // El original sigue corriendo.

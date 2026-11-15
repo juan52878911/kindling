@@ -389,12 +389,13 @@ func cmdFork(args []string) error {
 // fork ramifica una copia lista en n copias listas. Todo o nada: si una no se
 // puede preparar, se borran todas las creadas.
 func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api.Machine, error) {
-	return a.forkWith(ctx, src, n, owner, nil)
+	return a.forkWith(ctx, src, n, owner, "", nil)
 }
 
 // forkWith es fork con etiquetas extra que nacen con las copias (pisan las
-// heredadas del origen: kling db branch pone así su repo y su rama).
-func (a *app) forkWith(ctx context.Context, src string, n int, owner string, extra [][2]string) ([]*api.Machine, error) {
+// heredadas del origen: kling db branch pone así su repo y su rama). name, con
+// n 1, es el nombre de la copia; vacío, el que ponga el daemon.
+func (a *app) forkWith(ctx context.Context, src string, n int, owner, name string, extra [][2]string) ([]*api.Machine, error) {
 	if n < 1 || n > api.ForkMax {
 		return nil, fmt.Errorf("-n must be between 1 and %d", api.ForkMax)
 	}
@@ -427,7 +428,16 @@ func (a *app) forkWith(ctx context.Context, src string, n int, owner string, ext
 	for _, l := range extra {
 		forkArgs = append(forkArgs, "-label", l[0]+"="+l[1])
 	}
-	out, err := a.k.Run(ctx, nil, append(forkArgs, "-json")...)
+	conNombre := forkArgs
+	if name != "" {
+		conNombre = append(append([]string(nil), forkArgs...), "-name", name)
+	}
+	out, err := a.k.Run(ctx, nil, append(conNombre, "-json")...)
+	if err != nil && name != "" && strings.Contains(err.Error(), "flag provided but not defined: -name") {
+		// Un kling anterior a -name (min_kling es más viejo): la copia la
+		// nombra el daemon, y se reconoce igual por sus etiquetas.
+		out, err = a.k.Run(ctx, nil, append(forkArgs, "-json")...)
+	}
 	if err != nil {
 		// El daemon deshace el fork entero si una copia falla.
 		return nil, err

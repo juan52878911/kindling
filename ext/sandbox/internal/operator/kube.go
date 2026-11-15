@@ -17,7 +17,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/origen"
 )
 
 const (
@@ -33,6 +36,11 @@ type KubeConfig struct {
 	BaseURL string
 	// Token del bearer. Puede ir vacío contra un kubectl proxy sin auth.
 	Token string
+	// TokenFile, si no es vacío, es de donde se relee el token: el de la
+	// ServiceAccount es proyectado y kubelet lo rota. Se relee cada minuto y
+	// tras un 401 (que se reintenta una vez con el nuevo). Token es entonces
+	// solo el primero.
+	TokenFile string
 	// TLSClientConfig es opcional: solo hace falta para el CA del clúster.
 	TLSClientConfig *tls.Config
 }
@@ -68,15 +76,22 @@ func InClusterKubeConfig() (*KubeConfig, error) {
 	return &KubeConfig{
 		BaseURL:         base,
 		Token:           strings.TrimSpace(string(tok)),
+		TokenFile:       saTokenFile,
 		TLSClientConfig: &tls.Config{RootCAs: pool},
 	}, nil
 }
 
 // KubeClient habla con el API de Kubernetes para el recurso Sandbox.
 type KubeClient struct {
-	base  string
-	token string
-	http  *http.Client
+	base string
+	http *http.Client
+
+	// tokMu protege token y leido; tokenFile no cambia.
+	tokMu     sync.Mutex
+	token     string
+	leido     time.Time
+	tokenFile string
+
 	// watchHTTP es igual que http pero sin Timeout: un watch es una petición
 	// larga a propósito, y un cliente con Timeout la cortaría a mitad.
 	watchHTTP *http.Client
@@ -86,13 +101,79 @@ type KubeClient struct {
 // (dentro del clúster o por flags, ver InClusterKubeConfig y las flags
 // -kube-url/-kube-token de main).
 func NewKubeClient(c *KubeConfig) *KubeClient {
-	transport := &http.Transport{TLSClientConfig: c.TLSClientConfig}
-	return &KubeClient{
+	k := &KubeClient{
 		base:      strings.TrimSuffix(c.BaseURL, "/"),
 		token:     c.Token,
-		http:      &http.Client{Transport: transport, Timeout: 30 * time.Second},
-		watchHTTP: &http.Client{Transport: transport},
+		leido:     time.Now(),
+		tokenFile: c.TokenFile,
 	}
+	transport := &conToken{base: &http.Transport{TLSClientConfig: c.TLSClientConfig}, k: k}
+	k.http = &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: origen.SoloMismoOrigen}
+	k.watchHTTP = &http.Client{Transport: transport, CheckRedirect: origen.SoloMismoOrigen}
+	return k
+}
+
+// releerToken es cada cuánto se relee TokenFile sin que haya un 401. kubelet
+// rota el token proyectado con margen (al 80 % de su vida), así que un minuto
+// basta para no usar nunca uno caducado.
+const releerToken = time.Minute
+
+// tokenActual devuelve el token, releyendo el fichero si toca o si forzar.
+// Si el fichero no se puede leer se sigue con el último token.
+func (k *KubeClient) tokenActual(forzar bool) string {
+	k.tokMu.Lock()
+	defer k.tokMu.Unlock()
+	if k.tokenFile != "" && (forzar || time.Since(k.leido) > releerToken) {
+		if b, err := os.ReadFile(k.tokenFile); err == nil {
+			if t := strings.TrimSpace(string(b)); t != "" {
+				k.token = t
+			}
+		}
+		k.leido = time.Now()
+	}
+	return k.token
+}
+
+// conToken pone el Bearer en cada petición y, ante un 401 con el token leído
+// de fichero, lo relee y reintenta una vez si cambió.
+type conToken struct {
+	base http.RoundTripper
+	k    *KubeClient
+}
+
+func (c *conToken) RoundTrip(req *http.Request) (*http.Response, error) {
+	tok := c.k.tokenActual(false)
+	resp, err := c.base.RoundTrip(conBearer(req, tok))
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || c.k.tokenFile == "" {
+		return resp, err
+	}
+	nuevo := c.k.tokenActual(true)
+	if nuevo == tok || (req.Body != nil && req.GetBody == nil) {
+		return resp, nil
+	}
+	r2 := req
+	if req.GetBody != nil {
+		b, gerr := req.GetBody()
+		if gerr != nil {
+			return resp, nil
+		}
+		r2 = req.Clone(req.Context())
+		r2.Body = b
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	resp.Body.Close()
+	return c.base.RoundTrip(conBearer(r2, nuevo))
+}
+
+// conBearer es req con Authorization: Bearer tok (sin tocar req: un
+// RoundTripper no debe modificar la petición que le pasan).
+func conBearer(req *http.Request, tok string) *http.Request {
+	if tok == "" {
+		return req
+	}
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+tok)
+	return r
 }
 
 func (k *KubeClient) sandboxesURL() string {
@@ -111,9 +192,6 @@ func (k *KubeClient) newRequest(ctx context.Context, method, url, contentType st
 	req, err := http.NewRequestWithContext(ctx, method, url, r)
 	if err != nil {
 		return nil, err
-	}
-	if k.token != "" {
-		req.Header.Set("Authorization", "Bearer "+k.token)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)

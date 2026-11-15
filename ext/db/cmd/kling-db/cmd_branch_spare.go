@@ -218,7 +218,7 @@ func (a *app) settleSpare(ctx context.Context, ri *repoInfo, owner string) error
 
 	fmt.Fprintf(a.stderr, "preparing a spare copy of %s for the next new branch\n", parent.Name)
 	extra := [][2]string{{labelRepo, ri.repo}, {labelBranch, ""}, {labelSpare, key}, {labelSpareFP, fp}}
-	cs, err := a.forkWith(ctx, parent.ID, 1, owner, extra)
+	cs, err := a.forkWith(ctx, parent.ID, 1, owner, "", extra)
 	if err != nil {
 		return err
 	}

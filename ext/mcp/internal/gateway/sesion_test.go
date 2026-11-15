@@ -142,6 +142,7 @@ func daemonDosMaquinas(t *testing.T, service string, addrs ...string) string {
 func pedir(t *testing.T, h http.Handler, metodo, ruta, sid, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(metodo, ruta, strings.NewReader(body))
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	req.Header.Set("Content-Type", "application/json")
 	if sid != "" {
 		req.Header.Set(SessionHeader, sid)

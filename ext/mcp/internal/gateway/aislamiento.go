@@ -79,9 +79,15 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 	// Solo un POST (el initialize) puede abrir sesión. Un DELETE o un GET sin
 	// sesión caían en la primaria compartida, que un servicio aislado no debe
 	// tener: se contesta sin despertar nada.
-	if r.Method != http.MethodPost || r.GetBody == nil {
+	// Y solo un initialize: cualquier otro POST sin sesión creaba una microVM
+	// que, si el invitado devolvía un id, quedaba fijada como sesión.
+	if r.Method != http.MethodPost || !esInitialize(r) {
 		api.HTTPError(w, "this service isolates each session: start one with initialize (POST)",
 			http.StatusBadRequest)
+		return
+	}
+	if !g.hayHuecoSesion(tnt.Name()) {
+		escribirTopeSesiones(w, tnt.Name(), g.topeSesiones())
 		return
 	}
 	ctx := r.Context()

@@ -169,6 +169,7 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 		engramHits.Store(0) // reset por si otros subtests tocaron el servidor
 		req := httptest.NewRequest(http.MethodPost, "/mcp/engram",
 			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		rec := httptest.NewRecorder()

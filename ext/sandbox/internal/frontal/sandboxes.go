@@ -383,6 +383,10 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := dentroDeLimites(t, pet); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 
 	// Cuota. Se cuenta lo vivo en los daemons más lo que este proceso tiene en
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
@@ -492,6 +496,19 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	return nil
 }
 
+// dentroDeLimites rechaza un sandbox más grande de lo que el tenant puede pedir.
+// mem_mib o vcpus a 0 son "lo de la plantilla o la imagen", que fija el
+// operador, así que no se acotan aquí.
+func dentroDeLimites(t *Tenant, p CrearPeticion) error {
+	if t.MaxMemMiB > 0 && p.MemMiB > t.MaxMemMiB {
+		return fmt.Errorf("mem_mib %d is over the limit of tenant %s (%d)", p.MemMiB, t.Nombre, t.MaxMemMiB)
+	}
+	if t.MaxVCPUs > 0 && p.VCPUs > t.MaxVCPUs {
+		return fmt.Errorf("vcpus %d is over the limit of tenant %s (%d)", p.VCPUs, t.Nombre, t.MaxVCPUs)
+	}
+	return nil
+}
+
 // clave de contabilidad por plantilla.
 func clavePlantilla(t *Tenant, plantilla string) string { return t.Nombre + "\x00" + plantilla }
 
@@ -504,6 +521,16 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 		s.mu.Unlock()
 		return nil
 	}
+	// Contar, comprobar y apuntar van bajo el cerrojo del tenant, que también
+	// toma liberar. Sin él, una creación que acababa (y se desapuntaba de
+	// enVuelo) mientras otra contaba no salía en ninguna de las dos cuentas: la
+	// lista se había leído antes de que existiera, y el contador ya no la
+	// tenía. N peticiones a la vez superaban MaxSandboxes en tanto como N.
+	// Contar de más es posible (la recién creada en la lista y aún en
+	// enVuelo), que es el lado seguro.
+	ct := s.cerrojoDe(t.Nombre)
+	ct.Lock()
+	defer ct.Unlock()
 	// Falla CERRADO si algún host no contesta. Contar solo los que sí
 	// responden dejaba crear de más: con un host caído sus sandboxes no
 	// contaban, y al volver el tenant tenía más de los que su cuota permite.
@@ -511,6 +538,9 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	grafos, errsG := s.grafosDe(ctx, t)
 	if errs = append(errs, errsG...); len(errs) > 0 {
 		return &errCuotaSinContar{errors.Join(errs...)}
+	}
+	if s.trasContar != nil {
+		s.trasContar()
 	}
 	total, dePlantilla := len(vivos)+len(grafos), 0
 	for _, sb := range vivos {
@@ -536,6 +566,21 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	s.enVuelo[t.Nombre]++
 	s.enVuelo[clavePlantilla(t, plantilla)]++
 	return nil
+}
+
+// cerrojoDe es el cerrojo de cuota del tenant nombre.
+func (s *Servidor) cerrojoDe(nombre string) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cerrojos == nil {
+		s.cerrojos = map[string]*sync.Mutex{}
+	}
+	c := s.cerrojos[nombre]
+	if c == nil {
+		c = &sync.Mutex{}
+		s.cerrojos[nombre] = c
+	}
+	return c
 }
 
 // errCuotaSinContar es que reservar no pudo contar lo que el tenant ya tiene
@@ -566,6 +611,9 @@ func codigoReservar(err error) int {
 }
 
 func (s *Servidor) liberar(t *Tenant, plantilla string) {
+	ct := s.cerrojoDe(t.Nombre)
+	ct.Lock()
+	defer ct.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bajarEnVueloLocked(t.Nombre)

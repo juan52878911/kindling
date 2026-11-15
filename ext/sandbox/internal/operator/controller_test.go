@@ -275,6 +275,9 @@ type fakeFrontal struct {
 	// down simula el frontal caído: get y renew contestan 503 mientras esté a
 	// true, para probar que status.message se pone y se limpia después.
 	down bool
+	// tardaCrear retrasa la respuesta de create DESPUÉS de crear el sandbox:
+	// el cliente vence su plazo y no se entera de que ya existe.
+	tardaCrear time.Duration
 }
 
 func (f *fakeFrontal) setDown(v bool) {
@@ -294,6 +297,7 @@ func newFakeFrontal(t *testing.T) *fakeFrontal {
 	f := &fakeFrontal{t: t, sandboxes: map[string]*frontal.Sandbox{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sandboxes", f.create)
+	mux.HandleFunc("GET /v1/sandboxes", f.list)
 	mux.HandleFunc("GET /v1/sandboxes/{id}", f.get)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", f.del)
 	mux.HandleFunc("POST /v1/sandboxes/{id}/renew", f.renew)
@@ -326,11 +330,29 @@ func (f *fakeFrontal) create(w http.ResponseWriter, r *http.Request) {
 	exp := time.Now().Add(time.Duration(ttl) * time.Second)
 	sb := &frontal.Sandbox{
 		ID: id, Host: "host1", Template: pet.Template, Image: pet.Image,
-		State: api.StateRunning, TTLSeconds: ttl, ExpiresAt: &exp,
+		State: api.StateRunning, TTLSeconds: ttl, ExpiresAt: &exp, Labels: pet.Labels,
 	}
 	f.sandboxes[id] = sb
+	tarda := f.tardaCrear
 	f.mu.Unlock()
+	time.Sleep(tarda)
 	writeTestJSON(w, http.StatusCreated, sb)
+}
+
+func (f *fakeFrontal) list(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	out := make([]frontal.Sandbox, 0, len(f.sandboxes))
+	for _, sb := range f.sandboxes {
+		out = append(out, *sb)
+	}
+	f.mu.Unlock()
+	writeTestJSON(w, http.StatusOK, out)
+}
+
+func (f *fakeFrontal) vivos() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sandboxes)
 }
 
 func (f *fakeFrontal) get(w http.ResponseWriter, r *http.Request) {
@@ -549,7 +571,7 @@ func TestReconcile_DeleteCallsFrontalAndRemovesFinalizer(t *testing.T) {
 
 	// Un sandbox ya creado, con dueño en el frontal, al que le acaban de
 	// pedir borrarse (deletionTimestamp puesto, como haría `kubectl delete`).
-	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300})
+	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +665,7 @@ func TestReconcile_TTLChangeRenews(t *testing.T) {
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
-	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300})
+	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +702,7 @@ func TestReconcile_MessageClearsAfterFrontalRecovers(t *testing.T) {
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
-	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300})
+	created, err := fr.client().Create(testCtx(t), SandboxSpec{Template: "node", TTLSeconds: 300}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

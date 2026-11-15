@@ -59,6 +59,9 @@ func TestForkSandboxHandler(t *testing.T) {
 		{"label inválida", "/sandboxes/caja/fork", `{"labels":{"Mal":"x"}}`, 400, "label"},
 		{"label reservada", "/sandboxes/caja/fork", `{"labels":{"kling.fork-of":"x"}}`, 400, "reserved"},
 		{"json roto", "/sandboxes/caja/fork", `{`, 400, ""},
+		{"nombre con varias", "/sandboxes/caja/fork", `{"count":2,"name":"x"}`, 400, "count 1"},
+		{"nombre inválido", "/sandboxes/caja/fork", `{"name":"no/vale"}`, 400, "invalid machine name"},
+		{"nombre ocupado", "/sandboxes/caja/fork", `{"name":"svc"}`, 409, "taken"},
 		// Válida, pero el sandbox duerme: se dice, y no se toca nada.
 		{"dormido", "/sandboxes/caja/fork", `{"count":2}`, 409, "thaw it first"},
 		{"dormido sin cuerpo", "/sandboxes/caja/fork", "", 409, "running"},
@@ -88,6 +91,8 @@ func TestForkStatus(t *testing.T) {
 		{fmt.Errorf("x: %w", machine.ErrNoMachine), http.StatusNotFound},
 		{fmt.Errorf("x: %w", machine.ErrNotRunning), http.StatusConflict},
 		{fmt.Errorf("x: %w", machine.ErrFork), http.StatusConflict},
+		{fmt.Errorf("x: %w", machine.ErrNameTaken), http.StatusConflict},
+		{fmt.Errorf("x: %w", machine.ErrInvalidName), http.StatusBadRequest},
 		{fmt.Errorf("forking caja: %w", machine.ErrSharesCommit), http.StatusConflict},
 		{fmt.Errorf("fork 1 of 2: %w", machine.ErrExecNotInSnapshot), http.StatusConflict},
 		{fmt.Errorf("no space left on device"), http.StatusInternalServerError},

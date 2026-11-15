@@ -8,6 +8,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
@@ -33,6 +34,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: thawing a warm machine no longer scans all of `/proc`; it checks the known PID and the VMM socket first (0.64 ms to 0.02 ms per thaw with ~110 processes).
 - `run -from` and fork: a copy whose guest agent fails the resync is retried once and then not handed over, instead of running with the snapshot's clock and random state.
 - The memory of snapshots known to have no guest agent drops expired entries instead of growing with every fork.
+- An extension that prints its manifest and exits 0 is no longer rejected (`WaitDelay expired`) because another process still held its output open, such as a child kling was starting at the same moment.
+- `kling db branch` names a branch copy forked from its parent like one started from the golden (`db-<repo>-<branch>`), so two runs at once can't leave two copies; with an older kling it falls back to the daemon's name.
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).
@@ -105,6 +108,16 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Machines that mount the same host folder rw (graph `share` edges, or two `-share` of one directory) now spend one quota instead of one each.
 - The Firecracker balloon statistics are read with a 64 KiB limit.
 - Linux: only root, the daemon and whoever can use its socket can open connections from the host to a machine's guest agent (port 8080) or to the host side of its link; other local users get a refusal, and the agent is closed to forwarded traffic from outside the host.
+- Sandbox gateway: a sandbox can't ask for more `mem_mib` or `vcpus` than its tenant's limit (`KLING_SANDBOX_TENANTS` fields 5 and 6; otherwise `-max-mem-mib` 4096 and `-max-vcpus` 4).
+- `kling sbx` and kindling-operator no longer send their Bearer token along a redirect to another origin.
+- Sandbox gateway: concurrent creations can no longer exceed a tenant's `max_sandboxes` when one finishes while another is counting.
+- kindling-operator: a create whose answer is lost no longer leaves a second sandbox; each one carries the object's UID (`k8s-uid`) and is adopted, and deleting an object whose status was never written removes its sandbox.
+- kindling-operator: the projected ServiceAccount token is re-read every minute and after a 401, so a rotated token no longer means 401s until the pod restarts.
+- `kling db ask`: a number glued to a keyword (`1INTO`) is rejected instead of hiding the keyword from the filter.
+- MCP gateway: `/mcp/<service>` (and the multi-host router's `/mcp/_all`) only opens a session on `initialize`, and a tenant can hold at most 256 open sessions (429 beyond that).
+- MCP gateway with `-no-auth`: requests whose `Host` or `Origin` is not loopback get a 403, so a web page can't reach it through DNS rebinding or a cross-origin POST.
+- MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
+- MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
