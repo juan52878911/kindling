@@ -222,6 +222,14 @@ type Manager struct {
 	// (K2): se pide en cada Commit y en cada runFrom, y el vmlinux no cambia
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
+	// discosBase cachea, como kernelSHA, el digest de cada ext4 de imagen
+	// (ruta → huellaKernel) que los dorados llevan en image_digest y
+	// base_digest. Ver digestDiscoBase.
+	discosBase sync.Map
+	// vigiaOverlays despierta a vigilarOverlays cuando duerme sin máquinas
+	// en marcha: persist avisa en cada cambio. Ver canalVigiaOverlays.
+	vigiaOverlays     chan struct{}
+	vigiaOverlaysOnce sync.Once
 
 	// origen es con qué trabaja este daemon (versión de kling, VMM, macOS):
 	// se graba en cada dorado y se compara con el de los que ya hay. Lo fija
@@ -969,6 +977,11 @@ func (m *Manager) persist() uint64 {
 	case m.wake <- struct{}{}:
 	default:
 	}
+	// Y al vigilante de overlays, que duerme mientras no hay nada en marcha.
+	select {
+	case m.canalVigiaOverlays() <- struct{}{}:
+	default:
+	}
 	return gen
 }
 
@@ -1284,6 +1297,10 @@ func (m *Manager) touchDisk(id string) int64 {
 // mayoría— era E/S sin ningún dato nuevo. Las que no corren se miden una vez
 // por cambio de estado (discoMedido), que es cuando su disco cambia: al
 // congelarse aparece el mem.file, al pararse deja de crecer.
+// trasMedirDiscos, si no es nil, corre en refreshDiskUsage entre medir (sin
+// cerrojo) y anotar. Solo para los tests.
+var trasMedirDiscos func()
+
 func (m *Manager) refreshDiskUsage() {
 	type medir struct {
 		id     string
@@ -1305,6 +1322,9 @@ func (m *Manager) refreshDiskUsage() {
 	sizes := make([]int64, len(cuales))
 	for i, c := range cuales {
 		sizes[i] = diskUsage(m.dir(c.id))
+	}
+	if trasMedirDiscos != nil {
+		trasMedirDiscos()
 	}
 
 	m.mu.Lock()
@@ -1873,6 +1893,9 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		EnvKeys:   api.MachineEnvKeys(env),
 		ShareWait: shareWaitDe(req.ShareWait, shareAtts),
 		NetMiBps:  req.NetMiBps,
+		// El tope del overlay, con el disco recién hecho y antes de que lo
+		// toque ningún VMM (cow_vigilante.go).
+		OverlayMaxBytes: topeOverlayAlCrear(overlay, req.DiskMiB),
 	}
 	if comando != nil {
 		mc.Entrypoint, mc.Cmd = comando.Entrypoint, comando.Cmd

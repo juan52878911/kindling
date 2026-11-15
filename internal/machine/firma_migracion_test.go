@@ -217,6 +217,34 @@ func TestMigrarFirmasV1(t *testing.T) {
 	}
 }
 
+// Un meta.json que no se pudo leer puede ser una v1 que cuadra: la migración
+// no deja la marca (que la rechazaría para siempre) y se reintenta.
+func TestMigrarFirmasNoMarcaSiNoPudoLeerUnMeta(t *testing.T) {
+	t.Setenv("KLING_REQUIRE_SIGNED", "")
+	m := annotTestManager(t)
+	doradoEnDisco(t, m, "svc", "v1")
+	// Un meta que no se puede leer: un directorio en su sitio da EISDIR,
+	// también como root (un permiso 000 no).
+	roto := filepath.Join(m.snapDir("roto"), "meta.json")
+	if err := os.MkdirAll(roto, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.MigrarFirmas(context.Background())
+	if m.firmasMigradas() {
+		t.Fatal("dejó la marca de migrados sin haber podido leer un meta")
+	}
+	if s, err := m.loadSnapshot("svc"); err != nil || !strings.HasPrefix(s.Signature, firmaV2) {
+		t.Fatalf("el que sí se leía no se migró: %v", err)
+	}
+	if err := os.Remove(roto); err != nil {
+		t.Fatal(err)
+	}
+	m.MigrarFirmas(context.Background())
+	if !m.firmasMigradas() {
+		t.Fatal("leídos todos, sigue sin la marca")
+	}
+}
+
 // Antes de que corra la migración (un runFrom que llega primero, o un
 // manager sin vigilantes), una v1 que cuadra se re-firma en el momento.
 func TestFirmaV1SeMigraAlRestaurar(t *testing.T) {

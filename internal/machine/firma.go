@@ -151,6 +151,8 @@ const firmaV2 = "v2:"
 //   - EnvKeys: qué variables hay que volver a pedir al arrancarla.
 //   - MemDigest: el mem.file, que es la RAM (y el kernel) del invitado. Sin él
 //     la firma cubría el estado de los vCPU pero no la memoria que restauran.
+//   - ImageDigest y BaseDigest (meta.json v4): el contenido del disco de solo
+//     lectura sobre el que se congeló, no solo su nombre (disco_base.go).
 //
 // CredentialDomains y CredentialAnyDatabase NO: no se guardan en meta.json
 // (anotarCredencialesPlantilla los rellena al leer, desde el almacén sellado
@@ -185,8 +187,13 @@ func contenidoFirmadoV2(s *api.Snapshot) []byte {
 		CPUPctFixed bool
 		EnvKeys     []string
 		MemDigest   string
+		// omitempty: los dorados de antes de meta.json v4 (y los de fork) no
+		// los llevan y firman lo mismo que antes de existir. Uno que los
+		// lleva no puede perderlos sin que deje de cuadrar.
+		ImageDigest string `json:",omitempty"`
+		BaseDigest  string `json:",omitempty"`
 	}{2, contenidoFirmado(s), labels, s.MemMaxMiB, s.CPUPct, s.CPUPctFixed,
-		envKeys, s.MemDigest})
+		envKeys, s.MemDigest, s.ImageDigest, s.BaseDigest})
 	return b
 }
 
@@ -380,8 +387,8 @@ func (m *Manager) migrarFirmaV1(name, firma string) (*api.Snapshot, error) {
 // MigrarFirmas pasa a la firma v2 todos los dorados de este host que llevan
 // la v1 y cuadran, y deja la marca (marcaFirmasV2) para que desde entonces
 // una v1 se rechace. Una vez por host: con la marca puesta no hace nada. Si
-// alguno no se pudo re-firmar por algo pasajero (un disco lleno), no deja la
-// marca y se reintenta en el próximo arranque; los que no cuadran (firma o
+// alguno no se pudo leer o re-firmar por algo pasajero (un disco lleno), no
+// deja la marca y se reintenta en el próximo arranque; los que no cuadran (firma o
 // digests) se quedan como están y no se restauran. Los que no tienen firma
 // tampoco se pueden re-firmar (no hay con qué saber que son de aquí): se
 // avisa. El daemon lo llama al arrancar, en segundo plano.
@@ -397,9 +404,17 @@ func (m *Manager) MigrarFirmas(ctx context.Context) {
 			return
 		}
 		name := filepath.Base(filepath.Dir(p))
+		// Un meta que no se pudo LEER (un error de disco, un permiso) puede
+		// ser una v1 que cuadra: con la marca puesta ya no se re-firmaría y
+		// se rechazaría para siempre. Se deja sin marca y se reintenta.
+		if _, err := os.ReadFile(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("warning: template %s: reading its meta.json to move its signature to v2: %v; will retry on the next start", name, err)
+			pendiente = true
+			continue
+		}
 		s, err := m.loadSnapshot(name)
 		if err != nil {
-			continue // no es un dorado que se pueda restaurar de todos modos
+			continue // ilegible o de un kling más nuevo: no se restaura de todos modos
 		}
 		switch {
 		case s.Signature == "":

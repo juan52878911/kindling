@@ -59,9 +59,9 @@ type Machine struct {
 	// siempre (ver RunRequest.DiskMiB).
 	DiskMiB int `json:"disk_mib,omitempty"`
 	// OverlayMaxBytes es lo más que puede ocupar su overlay sin almacén
-	// copy-on-write (vigilarOverlays): se apunta la primera vez que el
-	// vigilante la ve y no se vuelve a medir en cada arranque o thaw. 0: aún
-	// sin apuntar.
+	// copy-on-write (vigilarOverlays): se apunta al crear su disco (o, en
+	// una máquina de antes, la primera vez que el vigilante la ve) y no se
+	// vuelve a medir en cada arranque o thaw. 0: aún sin apuntar.
 	OverlayMaxBytes int64 `json:"overlay_max_bytes,omitempty"`
 	// DiffBase, en una copia de un dorado que corre con seguimiento de
 	// páginas sucias, es el mem.file del dorado respecto al que se congelará
@@ -958,6 +958,16 @@ type Snapshot struct {
 	// primera vez que se restaura (Manager.verifyIntegrity), y lo cubre la
 	// firma v2. Los dorados de antes no lo llevan y no se comprueba.
 	MemDigest string `json:"mem_digest,omitempty"`
+	// ImageDigest y BaseDigest son el disco de solo lectura sobre el que se
+	// congeló (internal/digest.Tree, con su prefijo): ImageDigest el ext4 de
+	// la imagen, o su capa si va por capas, y BaseDigest la base de esa capa
+	// (vacío en una monolítica). El overlay y la RAM del dorado solo valen
+	// sobre ese disco: si cambia por debajo, sus copias restauran una caché de
+	// páginas que no casa con él. Los cubre la firma v2 y se comprueban al
+	// restaurar (meta.json v4); los dorados de antes y los de fork no los
+	// llevan y no se comprueba.
+	ImageDigest string `json:"image_digest,omitempty"`
+	BaseDigest  string `json:"base_digest,omitempty"`
 
 	// KernelSHA256 es el sha256 del vmlinux con el que se congeló el snapshot.
 	// Campo nuevo y opcional: los snapshots anteriores a K1 (kernel propio) no

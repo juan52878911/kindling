@@ -44,6 +44,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `install.sh --skip-kling`: a prerelease kling (1.0.0-rc.2) no longer meets an extension's `min_kling` 1.0.0.
 - On Linux, a failed probe of the e2fsprogs jail is retried after a minute instead of leaving e2fsck without a chroot until the daemon restarts.
 - The example operator Deployment runs as non-root with a read-only root filesystem, no capabilities and no privilege escalation, and its image's base images are pinned by digest.
+- A template is verified again on its next restore if one of its files changed while its integrity was being checked.
+- The signature migration at daemon start retries on the next start when a template's meta.json could not be read, instead of marking the host as migrated.
+- `kling volume rm` refuses (409) a volume that a stopped machine still has attached.
+- The overlay watcher no longer wakes every second when no machine is running.
 
 ### Security
 
@@ -56,6 +60,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
+- A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.
+- Image file uploads from the daemon's lib directory (`from_host`) copy the file opened once and checked, instead of checking a path and reopening it.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
