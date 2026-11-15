@@ -959,7 +959,8 @@ var camposNodo = map[string]bool{
 }
 
 var camposFork = map[string]bool{
-	"count": false, "ttl_seconds": false, "on_ttl": false, "labels": false,
+	// name, como en camposSandbox: el inquilino ya nombra lo que crea.
+	"name": false, "count": false, "ttl_seconds": false, "on_ttl": false, "labels": false,
 	"skip_ready": false, "ready_timeout_seconds": false,
 }
 
