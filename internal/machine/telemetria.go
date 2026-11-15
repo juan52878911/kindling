@@ -95,12 +95,12 @@ type telemetria struct {
 // FasesDespertar son las fases de api.WakePhases que se suman en /metrics,
 // en el orden en que ocurren.
 var FasesDespertar = [...]string{"wait", "check", "store", "mirror", "memory", "net", "spawn", "socket",
-	"load", "forwards", "resync", "cgroup", "finish"}
+	"creds", "load", "forwards", "resync", "cgroup", "finish"}
 
 // msFases son los campos de f en el orden de FasesDespertar.
 func msFases(f *api.WakePhases) [len(FasesDespertar)]float64 {
 	return [...]float64{f.WaitMS, f.CheckMS, f.StoreMS, f.MirrorMS, f.MemoryMS, f.NetMS, f.SpawnMS, f.SocketMS,
-		f.LoadMS, f.ForwardsMS, f.ResyncMS, f.CgroupMS, f.FinishMS}
+		f.CredsMS, f.LoadMS, f.ForwardsMS, f.ResyncMS, f.CgroupMS, f.FinishMS}
 }
 
 // Los mapas se rellenan una vez y después solo se leen: los valores son

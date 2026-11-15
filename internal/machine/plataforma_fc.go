@@ -83,6 +83,9 @@ const puenteHostSoportado = false
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
 
+// precalentarCredproxy no hace nada en Linux: el proxy es del daemon.
+func (m *Manager) precalentarCredproxy(id string, pid int) {}
+
 // transporteCarpeta: en Linux no hay virtio-fs, y pedirlo es un error (sin
 // pedirlo, FUSE como siempre).
 func transporteCarpeta(pedido string) (string, error) {

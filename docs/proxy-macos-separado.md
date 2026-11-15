@@ -53,7 +53,16 @@ invitado ──TCP──▶ kling-vz (gVisor) ──socket Unix, por conexión�
   daemon caído, que es justo cuando un `kill` del daemon no llegaría. El daemon solo
   mata a uno que siga vivo con otro VMM (no debería pasar). Tras un thaw o un start el
   VMM es otro y el daemon lanza otro proxy al devolverle las claves
-  (`redAntesDeArrancar`, `reentregarCredenciales`), antes de que el invitado corra.
+  (`redAntesDeArrancar`, `reentregarCredenciales`), antes de que el invitado corra. En
+  el thaw lo lanza en cuanto vuelve `spawn` (`precalentarCredproxy`), con el PID del hijo
+  que acaba de lanzar y su ejecutable comparado con el VMM del daemon, a la vez que el
+  VMM arranca; la entrega espera a ese lanzamiento y lo encuentra corriendo. Si la
+  entrega de antes de cargar fue bien, la de después solo repone los marcadores de MMDS;
+  si falló (un `-upstream` que no resuelve, el binario ausente), el thaw sigue sin
+  credenciales, el dominio falla cerrado y la de después lo intenta otra vez.
+- **Solo junto al VMM del daemon**: el binario del proxy se busca en el directorio del
+  ejecutable del VMM, y ese ejecutable (el de quien contesta en el socket de la máquina)
+  tiene que ser el VMM con el que el daemon lanza las máquinas, como en el broker.
 - **Readopción**: sobrevive a un reinicio del daemon. Al reconciliar, el daemon
   comprueba que el socket del proxy lo atiende un `kling-credproxy` y lo dice
   (`credential proxy readopted`); la siguiente entrega de credenciales usa ese mismo
@@ -203,7 +212,35 @@ mismo daemon (cae al modelo anterior).
   consulta.
 - **Arranque**: el thaw lanza y confina el proxy antes de cargar el estado, en serie
   (no en paralelo como se propuso): +10–90 ms en el thaw de una máquina con
-  credenciales, que no estaba en el camino crítico de una sin ellas.
+  credenciales, que no estaba en el camino crítico de una sin ellas. Ya no es así: ver
+  abajo.
+
+### Thaw con credenciales, antes y después de solapar el lanzamiento
+
+Antes, el proxy se lanzaba dentro de la entrega previa a cargar, después de esperar al
+socket del VMM y en serie, y tras cargar se repetía la entrega entera. Ahora se lanza en
+cuanto vuelve `spawn`, a la vez que el VMM arranca; la entrega lo encuentra corriendo,
+no repite el `GET /kling/info`, y después de cargar solo van los marcadores de MMDS. La
+fase `creds` del despertar (`kling inspect`, `/metrics`) es esa entrega, que antes iba
+dentro de `net`.
+
+Mac M4 (macOS 26.5), kling-hv, un daemon privado, una máquina de 256 MiB con la imagen
+e2e-tools y una credencial HTTP (allowlist), 12 `freeze` + `thaw` tras uno de
+calentamiento, dos pasadas de cada lado; la máquina sin credenciales es la misma
+prueba sin `machine credential`. Mediana / p95 en ms; "daemon" es `wake.total_ms`,
+"pared" lo que tarda `kling thaw` en volver.
+
+| | daemon | net + creds | pared |
+|---|---|---|---|
+| con credenciales, antes | 46,7–48,9 / 55,2 | 16,7 / 17,4–18,6 | 122,0–122,5 / 134–135 |
+| con credenciales, después | 40,7–40,8 / 41,8 | 9,1–9,3 / 9,7–10,7 | 115,5–116,0 / 117–119 |
+| sin credenciales (igual antes y después) | 31,6–32,2 / 32,8–33,4 | 0,5–0,6 / 0,6–0,8 | 106,0 / 107–109 |
+
+Lo que añaden las credenciales al thaw baja de ~16 a ~9 ms de mediana, y el p95 de ~23
+a ~10. Lo que queda es la entrega en sí (proxy y VMM por sus sockets) y la parte del
+arranque del proxy que no cabe bajo los ~7 ms de esperar al socket del VMM. Tras los 12
+thaws la credencial sigue funcionando (httpbin basic-auth 200) y el invitado solo ve
+el marcador.
 - **Complejidad**: un binario más que firmar y distribuir (release, `install.sh`,
   Homebrew, `kling upgrade`), su perfil, su readopción, el broker y una capacidad de
   compatibilidad.

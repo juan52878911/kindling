@@ -75,6 +75,7 @@ func notaFases(p *api.WakePhases) string {
 	add("net", p.NetMS)
 	add("spawn", p.SpawnMS)
 	add("socket", p.SocketMS)
+	add("creds", p.CredsMS)
 	add("load", p.LoadMS)
 	add("forwards", p.ForwardsMS)
 	add("resync", p.ResyncMS)

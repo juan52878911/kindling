@@ -724,8 +724,8 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 
 // Una máquina con credenciales que despierta: su kling-vz es nuevo, así que la
 // clave le llega ANTES de cargar el estado (el invitado despierta con el
-// dominio cacheado en la pasarela) y otra vez en la reentrega, con los
-// marcadores de vuelta en MMDS.
+// dominio cacheado en la pasarela). Después de cargar solo vuelven los
+// marcadores a MMDS: la entrega entera ya está hecha (antes se repetía).
 func TestVZThawEntregaLasCredencialesAlAyudante(t *testing.T) {
 	t.Setenv(envFakeVZKinds, "http,"+credproxy.CapHTTPPlaces)
 	m, logPath := managerVZ(t)
@@ -776,8 +776,8 @@ func TestVZThawEntregaLasCredencialesAlAyudante(t *testing.T) {
 			tras++
 		}
 	}
-	if tras != 1 || indice(ls[load:], "PATCH /mmds") < 0 {
-		t.Fatalf("tras cargar: %d entregas y MMDS %d; quería la reentrega con marcadores:\n%s",
+	if tras != 0 || indice(ls[load:], "PATCH /mmds") < 0 {
+		t.Fatalf("tras cargar: %d entregas y MMDS %d; quería solo los marcadores:\n%s",
 			tras, indice(ls[load:], "PATCH /mmds"), strings.Join(ls, "\n"))
 	}
 }
@@ -813,7 +813,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 				t.Fatalf("boot: %v", err)
 			}
 			c := fc.New(m.socket[id])
-			err = registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
+			err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), c, nil, []credproxy.Credential{
 				{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba", Allow: []string{"GET /v1/balance"},
 					Headers: []string{"X-Goog-Api-Key"}, Body: true},
 			}, "", nil, "")
@@ -862,7 +862,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("boot: %v", err)
 			}
-			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+			err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
 			}, "", nil, "")
@@ -909,7 +909,7 @@ func TestVZCredencialSigV4ExigeCapacidad(t *testing.T) {
 			if err != nil {
 				t.Fatalf("boot: %v", err)
 			}
-			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+			err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "AWS_ACCESS_KEY_ID", Domain: "s3.example.com", Placeholder: "kling-cred-sv", Secret: "sk-clave-de-prueba",
 					Kind: credproxy.KindSigV4, AccessKeyID: "AKIAEXAMPLE1234", Region: "auto", Service: "s3"},
 			}, "", nil, "")
@@ -956,7 +956,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			if err != nil {
 				t.Fatalf("boot: %v", err)
 			}
-			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+			err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
 					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
@@ -986,7 +986,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				}
 				return nil, errors.New("no such host")
 			}
-			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+			err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432", TLSServerName: "db.lan"},
 			}, "", nil, "")
@@ -1003,7 +1003,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			// Un nombre que no resuelve, o con una IP prohibida entre sus
 			// respuestas, no le llega a kling-vz.
 			for _, up := range []string{"meta.lan:5432", "nadie.lan:5432"} {
-				err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				err = registrarCredencialesPlataforma(m.ctxCredenciales(ctx), fc.New(m.socket[id]), nil, []credproxy.Credential{
 					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 						Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: up},
 				}, "", nil, "")

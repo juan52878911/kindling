@@ -35,7 +35,7 @@ func TestDespertarSumaLasFases(t *testing.T) {
 // campo nuevo en WakePhases que no se sume aquí no aparecería en /metrics.
 func TestFasesDespertarCubreWakePhases(t *testing.T) {
 	f := api.WakePhases{WaitMS: 1, CheckMS: 2, StoreMS: 3, MirrorMS: 4, MemoryMS: 5, NetMS: 6, SpawnMS: 7,
-		SocketMS: 8, LoadMS: 9, ForwardsMS: 10, ResyncMS: 11, CgroupMS: 12, FinishMS: 13}
+		SocketMS: 8, CredsMS: 9, LoadMS: 10, ForwardsMS: 11, ResyncMS: 12, CgroupMS: 13, FinishMS: 14}
 	for i, v := range msFases(&f) {
 		if v != float64(i+1) {
 			t.Fatalf("fase %s = %v, quería %d", FasesDespertar[i], v, i+1)

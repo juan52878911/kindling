@@ -316,6 +316,11 @@ type Manager struct {
 	// (plataforma_vz.go, reservarReenvios).
 	reenviosPrevios sync.Map
 
+	// credsPrevias: en macOS, cómo fue la entrega de credenciales antes de
+	// que el invitado corriera, por id de máquina (entregaPrevia;
+	// plataforma_vz.go, credencialesAntesDeArrancar). La consume el thaw.
+	credsPrevias sync.Map
+
 	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
 	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
 	// carga (ver avisarAnyDatabase).
@@ -1203,13 +1208,20 @@ const cierreOperacionesMax = 30 * time.Second
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
-		// Primero, que no empiece nada nuevo en segundo plano, y que los
-		// vigilantes acaben lo que tengan entre manos (con plazo, como las
-		// operaciones de abajo): antes seguían solos, y uno que terminaba
-		// tarde reescribía state.json después de Close (trasCierre).
-		m.cerrando.Store(true)
-		// Un solo plazo para las dos esperas: el apagado no tarda más que antes.
+		// Un solo plazo para todas las esperas: el apagado no tarda más que antes.
 		fin := time.Now().Add(cierreOperacionesMax)
+		// Antes de marcar el cierre, la preparación de un snapshot por imagen
+		// en curso: se cancela y se espera a que borre su máquina, que con el
+		// cierre marcado ya no podría (Remove lo rechaza). Sin esto su VMM
+		// sobrevivía al daemon como una máquina que no es de nadie.
+		if !m.pararPrepImagen(cierrePrepImagenMax) {
+			log.Printf("shutdown: the image snapshot preparation did not stop in %s; its %s* machine is removed when the daemon starts again", cierrePrepImagenMax, prefijoPrepImagen)
+		}
+		// Que no empiece nada nuevo en segundo plano, y que los vigilantes
+		// acaben lo que tengan entre manos (con plazo, como las operaciones de
+		// abajo): antes seguían solos, y uno que terminaba tarde reescribía
+		// state.json después de Close (trasCierre).
+		m.cerrando.Store(true)
 		m.pararVigilantes(cierreOperacionesMax)
 		m.pararFondos()
 		// Lo primero, las operaciones de ciclo de vida en curso: un Freeze,
@@ -1227,7 +1239,32 @@ func (m *Manager) Close() {
 		close(m.quit)
 		m.cerrarBroker()
 		m.persistWG.Wait()
+		m.avisarVMMQueSiguen()
 	})
+}
+
+// cierrePrepImagenMax es cuánto espera Close a la preparación de un snapshot
+// por imagen: cancelada, solo le queda parar y borrar su máquina.
+const cierrePrepImagenMax = 10 * time.Second
+
+// avisarVMMQueSiguen dice al cerrar cuántas máquinas siguen con su VMM vivo.
+// Es a propósito (el daemon siguiente con esta misma raíz las readopta, ver
+// internal/upgrade), pero nadie más las recoge: ni caducan (el TTL lo aplica
+// el daemon) ni las ve otro daemon con otra raíz. Un daemon privado o de
+// pruebas que se para para no volver tiene que pararlas antes (kling stop o
+// kling rm); este aviso es lo que le queda en el registro si no lo hizo.
+func (m *Manager) avisarVMMQueSiguen() {
+	m.mu.RLock()
+	n := 0
+	for _, mc := range m.byID {
+		if mc.PID > 0 && (mc.State == api.StateRunning || mc.State == api.StatePaused || mc.State == api.StateCreated) {
+			n++
+		}
+	}
+	m.mu.RUnlock()
+	if n > 0 {
+		log.Printf("shutdown: %d machine(s) keep their VMM running; the next daemon on %s readopts them. If no daemon will come back on this root, stop them first (kling stop or kling rm)", n, m.root)
+	}
 }
 
 // ── consultas ─────────────────────────────────────────────────────────────────
@@ -2350,6 +2387,8 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
 		return pid, err
 	}
+	// Cómo fue su entrega de credenciales solo lo usa el thaw.
+	m.credsPrevias.Delete(id)
 	// Y las carpetas vivas por virtio-fs, si el VMM lo tiene (kling-hv).
 	m.carpetasAntesDeArrancar(ctx, c, id)
 	if err := c.Start(ctx); err != nil {
@@ -3830,6 +3869,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return abortar(err)
 		}
 		crono.marca(&crono.p.SpawnMS)
+		// macOS: su proxy de credenciales, si tiene, a la vez que el VMM
+		// arranca (credproxy_vz.go). En Linux no hace nada.
+		m.precalentarCredproxy(mc.ID, pid)
 		c = fc.New(sock)
 		if err := m.waitSocket(ctx, c, mc.ID, pid); err != nil {
 			return abortar(err)
@@ -3842,6 +3884,15 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return abortar(err)
 	}
 	crono.marca(&crono.p.NetMS)
+	// Lo que de eso fue entregar las credenciales (macOS), en su fase. Si fue
+	// bien, después de cargar solo faltan sus marcadores en MMDS.
+	credsPrevia := false
+	if v, ok := m.credsPrevias.LoadAndDelete(mc.ID); ok {
+		e := v.(entregaPrevia)
+		credsPrevia = e.ok
+		crono.p.CredsMS += e.ms
+		crono.p.NetMS = max(crono.p.NetMS-e.ms, 0)
+	}
 	// El volcado deja de valer ANTES de cargarlo: en cuanto el invitado
 	// reanude, escribe en su disco. Antes se retiraba después y un fallo solo
 	// se avisaba: con el disco lleno el sello se borraba sin dejar la marca, y
@@ -3891,10 +3942,18 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// restaurar (POST /hooks), se lanza después, con las dos terminadas. Y la
 	// máquina no se da por running hasta que acaban las dos. Escribe en mc
 	// (CredentialAnyDatabase), que nadie más toca hasta esperarla.
+	//
+	// En macOS, si la entrega de antes de cargar fue bien, el VMM y su proxy
+	// ya tienen todo: solo faltan los marcadores (antes se repetía la entrega
+	// entera, DNS de los -upstream incluido).
 	credsHechas := make(chan struct{})
 	go func() {
 		defer close(credsHechas)
-		if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
+		entregar := m.reentregarCredenciales
+		if credsPrevia {
+			entregar = m.marcadoresCredenciales
+		}
+		if _, err := entregar(ctx, mc, c); err != nil {
 			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
 		}
 	}()

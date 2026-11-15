@@ -1220,6 +1220,11 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	if restos {
 		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
 	}
+	// Y su veredicto de integridad: ya no describe nada, y sin borrarlo el
+	// mapa crecía con cada nombre que llegó a existir.
+	m.mu.Lock()
+	delete(m.integridad, name)
+	m.mu.Unlock()
 	// Sus credenciales se van con ella (al borrar, no al reemplazar: un
 	// commit -replace las conserva). El almacén va sellado solo con el nombre,
 	// así que si se quedara, la siguiente plantilla con ese nombre las heredaría.
@@ -1922,6 +1927,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
 		return abortar(err)
 	}
+	m.credsPrevias.Delete(id) // solo la usa el thaw
 	fases.marca("vmm")
 	start := time.Now()
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
