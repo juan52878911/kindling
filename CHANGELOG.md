@@ -64,6 +64,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: `/mcp/<service>` (and the multi-host router's `/mcp/_all`) only opens a session on `initialize`, and a tenant can hold at most 256 open sessions (429 beyond that).
 - MCP gateway with `-no-auth`: requests whose `Host` or `Origin` is not loopback get a 403, so a web page can't reach it through DNS rebinding or a cross-origin POST.
 - MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
+- MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
