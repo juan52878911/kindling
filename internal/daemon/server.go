@@ -347,8 +347,12 @@ type Server struct {
 
 	// pub publica los puertos de las máquinas (publicar.go); idleFreeze es
 	// daemon.idle_freeze (nil o 0 = nunca).
-	pub        *publicar.Publicador
-	pubUna     sync.Once
+	pub    *publicar.Publicador
+	pubUna sync.Once
+	// eventosDe cuenta los GET /events abiertos de cada inquilino (bajo
+	// eventosMu): ver handleEvents.
+	eventosMu  sync.Mutex
+	eventosDe  map[string]int
 	idleFreeze func() time.Duration
 }
 
@@ -1516,18 +1520,38 @@ func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 
 // handleEvents emite NDJSON: un evento por línea, vaciando el buffer en cada uno
 // para que el CLI los vea llegar en tiempo real.
+//
+// Cada suscripción es una conexión y un canal abiertos: hay un tope en total
+// (maxSuscriptoresEventos) y otro por inquilino (maxEventosInquilino), y
+// cada escritura tiene plazo (eventosEscritura), para que quien abre muchas o
+// deja de leer no agote los descriptores del daemon.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, http.StatusInternalServerError, errors.New("streaming not supported"))
 		return
 	}
+	if t, filtra := inquilinoDe(r); filtra {
+		soltar, ok := s.tomarEventosInquilino(t)
+		if !ok {
+			fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open for this tenant (limit %d)", maxEventosInquilino))
+			return
+		}
+		defer soltar()
+	}
+	ch, unsub, ok := s.bus.SubscribeHasta(maxSuscriptoresEventos)
+	if !ok {
+		fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open (limit %d)", maxSuscriptoresEventos))
+		return
+	}
+	defer unsub()
+
+	rc := http.NewResponseController(w)
+	plazo := func() { _ = rc.SetWriteDeadline(time.Now().Add(eventosEscritura)) }
 	w.Header().Set("Content-Type", "application/x-ndjson")
+	plazo()
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	ch, unsub := s.bus.Subscribe()
-	defer unsub()
 
 	enc := json.NewEncoder(w)
 	ping := time.NewTicker(30 * time.Second)
@@ -1551,18 +1575,48 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			} else if !s.eventoVisible(r, ev) {
 				continue
 			}
-			if enc.Encode(ev) != nil {
+			plazo()
+			if enc.Encode(ev) != nil || rc.Flush() != nil {
 				return
 			}
-			flusher.Flush()
 		case <-ping.C:
 			// Línea vacía como latido: detecta clientes muertos al otro lado del SSH.
-			if _, err := w.Write([]byte("\n")); err != nil {
+			plazo()
+			if _, err := w.Write([]byte("\n")); err != nil || rc.Flush() != nil {
 				return
 			}
-			flusher.Flush()
 		}
 	}
+}
+
+// Topes de GET /events (handleEvents). eventosEscritura es variable para los
+// tests.
+const (
+	maxSuscriptoresEventos = 256
+	maxEventosInquilino    = 16
+)
+
+var eventosEscritura = time.Minute
+
+// tomarEventosInquilino aparta uno de los maxEventosInquilino flujos de
+// eventos de t; false si ya los tiene todos.
+func (s *Server) tomarEventosInquilino(t string) (func(), bool) {
+	s.eventosMu.Lock()
+	defer s.eventosMu.Unlock()
+	if s.eventosDe == nil {
+		s.eventosDe = map[string]int{}
+	}
+	if s.eventosDe[t] >= maxEventosInquilino {
+		return nil, false
+	}
+	s.eventosDe[t]++
+	return func() {
+		s.eventosMu.Lock()
+		defer s.eventosMu.Unlock()
+		if s.eventosDe[t]--; s.eventosDe[t] <= 0 {
+			delete(s.eventosDe, t)
+		}
+	}, true
 }
 
 // handleGuest habla con el servidor que corre dentro de una microVM y devuelve

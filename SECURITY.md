@@ -915,7 +915,10 @@ cambia:
   IPC sin chroot; la prueba se repite pasado un minuto, así que un fallo pasajero no deja el daemon
   sin chroot hasta reiniciarlo. nobody es un uid compartido: mientras dura la revisión, otro proceso
   del host que corra como nobody y llegue a la ruta del disco podría abrirlo (un uid propio para
-  e2fsck está pendiente). Sin root, con el usuario del daemon y el tope de memoria. En macOS, con el usuario
+  e2fsck está pendiente). Sin root, con el usuario del daemon y el tope de memoria. Con
+  `kling config set daemon.require_e2fs_jail on` (por defecto off) no se sigue con menos: sin la
+  jaula entera (sin chroot, sin root o, en macOS, sin `sandbox-exec`) la orden falla y `kling
+  doctor` dice `blocked`. En macOS, con el usuario
   del daemon dentro de un perfil de `sandbox-exec` que no deja red ni leer más que el sistema y
   Homebrew, ni escribir más que su descriptor; macOS no aplica RLIMIT_AS, así que ahí no hay tope de
   memoria. Sin `sandbox-exec` se avisa, `kling doctor` lo dice y, con el daemon como root, se niega

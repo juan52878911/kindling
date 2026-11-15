@@ -268,7 +268,8 @@ const memE2fsck = 2 << 30
 // cambia de usuario (ya no es root) ni de namespaces (harían falta los de
 // usuario, que hay distribuciones que bloquean): solo el tope de memoria.
 // Donde la jaula no se puede montar (sondaJaulaE2fs) se avisa y se sigue sin
-// chroot. Devuelve con qué deshacer lo que tocó del disco.
+// chroot, salvo con daemon.require_e2fs_jail, que entonces (o sin root) se
+// niega a correrla. Devuelve con qué deshacer lo que tocó del disco.
 func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	nada := func() {}
 	if c.Err != nil {
@@ -276,8 +277,17 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	}
 	o := ordenJaula{modo: modoSimple, uid: -1, gid: -1, mem: memE2fsck}
 	if os.Geteuid() != 0 {
+		if jaulaE2fsExigida.Load() {
+			return nil, errSinJaulaE2fs(c.Path, "the daemon is not root")
+		}
 		envolverEnJaula(c, o)
 		return nada, nil
+	}
+	// La sonda antes de ceder el disco: con daemon.require_e2fs_jail, sin
+	// jaula no se toca nada.
+	sinJaula := sondaJaulaE2fs()
+	if sinJaula != nil && jaulaE2fsExigida.Load() {
+		return nil, errSinJaulaE2fs(c.Path, sinJaula.Error())
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -314,7 +324,7 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 	}
 	o.uid, o.gid = uid, gid
 	c.SysProcAttr = &syscall.SysProcAttr{Cloneflags: nsSinMontajes}
-	if sondaJaulaE2fs() == nil {
+	if sinJaula == nil {
 		raiz, err := dirRaizJaula()
 		if err != nil {
 			for i := len(deshacer) - 1; i >= 0; i-- {

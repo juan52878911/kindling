@@ -51,16 +51,15 @@ func (s *Server) arrancarPublicador(ctx context.Context) {
 	s.publicador().Arrancar(ctx, s.idleFreeze)
 }
 
-// comprobarPuertoBajo: con política de autorización, un inquilino no publica
-// puertos privilegiados del host (el daemon corre como root en Linux).
-func comprobarPuertoBajo(r *http.Request, ps []api.PortPublish) error {
-	if _, filtra := inquilinoDe(r); !filtra {
-		return nil
-	}
-	for _, p := range ps {
-		if p.Host != 0 && p.Host < 1024 {
-			return fmt.Errorf("host port %d: below 1024 only an admin can publish", p.Host)
-		}
+// publicarSoloAdmin: con política de autorización, publicar es de admin. Un
+// puerto publicado se abre en el loopback del host, que no es de ningún
+// inquilino: con él uno podía quedarse con el puerto que espera un servicio
+// del host (o uno privilegiado: el daemon corre como root en Linux). Es lo
+// mismo que host_ports en camposRun. Quitar una publicación sigue siendo de
+// quien manda en la máquina: solo libera.
+func publicarSoloAdmin(r *http.Request) error {
+	if _, filtra := inquilinoDe(r); filtra {
+		return errAuthz(http.StatusForbidden, "publish is admin-only under the daemon's authz policy: it opens ports on the host's loopback")
 	}
 	return nil
 }
@@ -92,7 +91,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, errors.New("no ports to publish"))
 		return
 	}
-	if err := comprobarPuertoBajo(r, req.Ports); err != nil {
+	if err := publicarSoloAdmin(r); err != nil {
 		fail(w, http.StatusForbidden, err)
 		return
 	}
@@ -164,7 +163,7 @@ func (s *Server) conPublicacion(h http.HandlerFunc) http.HandlerFunc {
 			h(w, r)
 			return
 		}
-		if err := comprobarPuertoBajo(r, pide.Publish); err != nil {
+		if err := publicarSoloAdmin(r); err != nil {
 			fail(w, http.StatusForbidden, err)
 			return
 		}

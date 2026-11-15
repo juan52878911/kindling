@@ -578,3 +578,16 @@ func TestSetRequireSigned(t *testing.T) {
 		t.Fatal("require_signed yes aceptado")
 	}
 }
+
+// daemon.require_e2fs_jail: on, off o vacío (off).
+func TestSetRequireE2fsJail(t *testing.T) {
+	c := &Config{}
+	for _, v := range []string{"on", "off", ""} {
+		if err := c.Set("daemon.require_e2fs_jail", v); err != nil || c.Daemon.RequireE2fsJail != v {
+			t.Fatalf("require_e2fs_jail %q: %v", v, err)
+		}
+	}
+	if err := c.Set("daemon.require_e2fs_jail", "yes"); err == nil {
+		t.Fatal("require_e2fs_jail yes aceptado")
+	}
+}
