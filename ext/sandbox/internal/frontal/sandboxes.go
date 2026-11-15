@@ -521,6 +521,16 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 		s.mu.Unlock()
 		return nil
 	}
+	// Contar, comprobar y apuntar van bajo el cerrojo del tenant, que también
+	// toma liberar. Sin él, una creación que acababa (y se desapuntaba de
+	// enVuelo) mientras otra contaba no salía en ninguna de las dos cuentas: la
+	// lista se había leído antes de que existiera, y el contador ya no la
+	// tenía. N peticiones a la vez superaban MaxSandboxes en tanto como N.
+	// Contar de más es posible (la recién creada en la lista y aún en
+	// enVuelo), que es el lado seguro.
+	ct := s.cerrojoDe(t.Nombre)
+	ct.Lock()
+	defer ct.Unlock()
 	// Falla CERRADO si algún host no contesta. Contar solo los que sí
 	// responden dejaba crear de más: con un host caído sus sandboxes no
 	// contaban, y al volver el tenant tenía más de los que su cuota permite.
@@ -528,6 +538,9 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	grafos, errsG := s.grafosDe(ctx, t)
 	if errs = append(errs, errsG...); len(errs) > 0 {
 		return &errCuotaSinContar{errors.Join(errs...)}
+	}
+	if s.trasContar != nil {
+		s.trasContar()
 	}
 	total, dePlantilla := len(vivos)+len(grafos), 0
 	for _, sb := range vivos {
@@ -553,6 +566,21 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 	s.enVuelo[t.Nombre]++
 	s.enVuelo[clavePlantilla(t, plantilla)]++
 	return nil
+}
+
+// cerrojoDe es el cerrojo de cuota del tenant nombre.
+func (s *Servidor) cerrojoDe(nombre string) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cerrojos == nil {
+		s.cerrojos = map[string]*sync.Mutex{}
+	}
+	c := s.cerrojos[nombre]
+	if c == nil {
+		c = &sync.Mutex{}
+		s.cerrojos[nombre] = c
+	}
+	return c
 }
 
 // errCuotaSinContar es que reservar no pudo contar lo que el tenant ya tiene
@@ -583,6 +611,9 @@ func codigoReservar(err error) int {
 }
 
 func (s *Servidor) liberar(t *Tenant, plantilla string) {
+	ct := s.cerrojoDe(t.Nombre)
+	ct.Lock()
+	defer ct.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bajarEnVueloLocked(t.Nombre)

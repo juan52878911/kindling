@@ -129,6 +129,12 @@ type Servidor struct {
 	// simultáneas pasarían todas la cuota.
 	mu      sync.Mutex
 	enVuelo map[string]int
+	// cerrojos: uno por tenant (la lista es fija desde Nuevo), que serializa
+	// la cuenta de la cuota con el fin de cada creación (ver reservar). Bajo mu.
+	cerrojos map[string]*sync.Mutex
+	// trasContar, si no es nil, se llama en reservar entre contar y
+	// comprobar. Solo lo usan los tests.
+	trasContar func()
 	// reclamos son las precalentadas que se están reclamando o se reclamaron
 	// hace poco (ver reclamarPrecalentada); también bajo mu.
 	reclamos map[string]reclamo
