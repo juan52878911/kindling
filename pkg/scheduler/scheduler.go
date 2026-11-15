@@ -609,6 +609,39 @@ type naciente struct {
 	listo      chan struct{} // se cierra al nacer o fallar; entonces e/err son definitivos
 	e          *entry
 	err        error
+	inquilino  string // de quien la creó: su cuota no es la de los demás
+	// cancelada: falló porque se canceló el contexto de quien la creó. Lo
+	// decide ctx.Err() de la creadora, no el error: un timeout de red del
+	// invitado también cumple errors.Is(err, context.DeadlineExceeded).
+	cancelada bool
+}
+
+// errNacienteRota es lo que heredan las sesiones apuntadas a una réplica cuyo
+// build entró en pánico: la naciente se cierra igual y nadie espera para siempre.
+var errNacienteRota = errors.New("the replica being created aborted")
+
+// maxReintentosNaciente acota cuántas veces vuelve a empezar una sesión cuyas
+// réplicas nacientes fallaron por algo ajeno; después crea la suya.
+const maxReintentosNaciente = 3
+
+// ajenaPara dice si el fallo de la naciente no es de la sesión del inquilino
+// tnt: se canceló la petición que la creó, o la creadora chocó con la cuota de
+// SU inquilino, que no es el de tnt. La sesión sigue viva y vuelve a empezar
+// (se apuntará a otra naciente o creará la suya) en vez de heredar un fallo
+// que no es suyo. Cualquier otro fallo (el invitado no levanta, el VMM falla)
+// lo hereda: reintentarlo solo encadena réplicas que fallarán igual.
+func (n *naciente) ajenaPara(tnt *tenant) bool {
+	if n.err == nil {
+		return false
+	}
+	return n.cancelada || (errors.Is(n.err, errTenantInstances) && nombreInquilino(tnt) != n.inquilino)
+}
+
+func nombreInquilino(tnt *tenant) string {
+	if tnt == nil {
+		return ""
+	}
+	return tnt.name
 }
 
 // capacidadNacienteLocked estima cuántas sesiones cabrán en una réplica que
@@ -643,14 +676,6 @@ func (g *Scheduler) unirseANacienteLocked(service string) *naciente {
 // una réplica para ella sola.
 func (g *Scheduler) joinOrScaleOut(ctx context.Context, service string, tnt *tenant) (*entry, error) {
 	return g.scaleOutUniendo(ctx, service, tnt, true)
-}
-
-// ajeno dice si el fallo de una naciente fue que se canceló el contexto de
-// la petición que la creó: la sesión que esperaba sigue viva y vuelve a
-// empezar (se apuntará a otra naciente o creará la suya), en vez de heredar
-// un fallo que no es suyo.
-func ajeno(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // esperarNaciente espera a que nazca la réplica a la que se apuntó la sesión.
@@ -1320,6 +1345,19 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 // con dos pasos, dos sesiones de una ráfaga podían no ver ninguna naciente y
 // crear una cada una.
 func (g *Scheduler) scaleOutUniendo(ctx context.Context, service string, tnt *tenant, unirse bool) (*entry, error) {
+	// Bucle con tope y no recursión: cada vuelta es una naciente que falló por
+	// algo ajeno a esta sesión; tras maxReintentosNaciente, crea la suya.
+	for intento := 0; ; intento++ {
+		e, otra, err := g.scaleOutIntento(ctx, service, tnt, unirse && intento < maxReintentosNaciente)
+		if !otra {
+			return e, err
+		}
+	}
+}
+
+// scaleOutIntento es una vuelta de scaleOutUniendo; otra dice que la naciente a
+// la que se apuntó falló por algo ajeno y hay que volver a empezar.
+func (g *Scheduler) scaleOutIntento(ctx context.Context, service string, tnt *tenant, unirse bool) (*entry, bool, error) {
 	// El tope se comprueba y la plaza se RESERVA con el mismo candado. Antes se
 	// contaban las instancias en pickInstance, se soltaba el candado y se
 	// creaba: N peticiones concurrentes leían todas "hay menos que el tope" y
@@ -1331,22 +1369,23 @@ func (g *Scheduler) scaleOutUniendo(ctx context.Context, service string, tnt *te
 		if n := g.unirseANacienteLocked(service); n != nil {
 			g.mu.Unlock()
 			e, err := g.esperarNaciente(ctx, n)
-			if err != nil && ctx.Err() == nil && ajeno(err) {
-				return g.scaleOutUniendo(ctx, service, tnt, true)
+			if err != nil && ctx.Err() == nil && n.ajenaPara(tnt) {
+				return nil, true, nil
 			}
-			return e, err
+			return e, false, err
 		}
 	}
 	actuales := len(g.entriesLocked(service)) + len(g.nacientes[service])
 	if tope > 0 && actuales >= tope {
 		g.mu.Unlock()
-		return nil, fmt.Errorf("%w: service %q has %d instance(s) awake or starting (max %d)",
+		return nil, false, fmt.Errorf("%w: service %q has %d instance(s) awake or starting (max %d)",
 			ErrMaxReplicas, service, actuales, tope)
 	}
 	if g.nacientes == nil {
 		g.nacientes = map[string][]*naciente{}
 	}
-	n := &naciente{capacidad: g.capacidadNacienteLocked(service), pendientes: 1, listo: make(chan struct{})}
+	n := &naciente{capacidad: g.capacidadNacienteLocked(service), pendientes: 1, listo: make(chan struct{}),
+		inquilino: nombreInquilino(tnt)}
 	g.nacientes[service] = append(g.nacientes[service], n)
 	g.mu.Unlock()
 
@@ -1354,16 +1393,30 @@ func (g *Scheduler) scaleOutUniendo(ctx context.Context, service string, tnt *te
 	if g.buildFn != nil {
 		build = g.buildFn
 	}
+	// Si build entra en pánico, la naciente se quita y se cierra igual: si no,
+	// seguiría contando para el tope y sus apuntadas esperarían para siempre.
+	terminada := false
+	defer func() {
+		if !terminada {
+			g.mu.Lock()
+			g.quitarNacienteLocked(service, n)
+			n.err = errNacienteRota
+			close(n.listo)
+			g.mu.Unlock()
+		}
+	}()
 	e, err := build(ctx, service, tnt, true)
+	terminada = true
 	g.mu.Lock()
 	// La plaza reservada pasa a ser la instancia registrada (o se libera si no
 	// nació) en el mismo paso, para que nadie la vea contada dos veces ni cero.
 	g.quitarNacienteLocked(service, n)
 	n.e, n.err = e, err
+	n.cancelada = err != nil && ctx.Err() != nil
 	close(n.listo)
 	if err != nil {
 		g.mu.Unlock()
-		return nil, err
+		return nil, false, err
 	}
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
@@ -1376,7 +1429,7 @@ func (g *Scheduler) scaleOutUniendo(ctx context.Context, service string, tnt *te
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
 	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
-	return e, nil
+	return e, false, nil
 }
 
 // quitarNacienteLocked saca n de las nacientes del servicio. Con g.mu tomado.

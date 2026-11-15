@@ -99,6 +99,9 @@ const (
 	pgPreAuth   = 10 * time.Second
 	pgAuthTotal = 15 * time.Second
 	pgKeepAlive = 30 * time.Second
+	// pgRechazo32TTL es cuánto se recuerda que un upstream cortó el arranque
+	// en 3.2 (ver rechazos32): pasado, se vuelve a probar, por si se actualizó.
+	pgRechazo32TTL = 10 * time.Minute
 
 	pgMaxStartup  = 10000
 	pgMaxPassword = 1024
@@ -152,6 +155,45 @@ type credPG struct {
 	// v32 hace lo mismo con el aviso de un servidor que rechaza la 3.2 en el
 	// arranque (el proxy repite en 3.0; ver servir).
 	v32 *sync.Once
+}
+
+// rechazos32 recuerda, por upstream (destinoPG), hasta cuándo se da por hecho
+// que el servidor corta con 08P01 un arranque en 3.2. Sin esto, cada conexión
+// de un invitado 3.2 (libpq 18) contra un pooler sin 3.2 marcaba dos veces,
+// con dos TLS, y doblaba las conexiones que entran al pooler. Es por upstream y
+// no por credencial: es una propiedad del servidor, y sobrevive a SetCredentials.
+type rechazos32 struct {
+	mu    sync.Mutex
+	hasta map[string]time.Time
+}
+
+// recordar apunta que destino rechazó la 3.2 y poda lo caducado (hay tantos
+// destinos como credenciales Postgres, así que recorrerlos es barato).
+func (r *rechazos32) recordar(destino string) {
+	ahora := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hasta == nil {
+		r.hasta = map[string]time.Time{}
+	}
+	for d, t := range r.hasta {
+		if !ahora.Before(t) {
+			delete(r.hasta, d)
+		}
+	}
+	r.hasta[destino] = ahora.Add(pgRechazo32TTL)
+}
+
+// rechaza dice si destino rechazó la 3.2 hace menos de su caducidad.
+func (r *rechazos32) rechaza(destino string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.hasta[destino]
+	if ok && !time.Now().Before(t) {
+		delete(r.hasta, destino)
+		return false
+	}
+	return ok
 }
 
 func compilarPG(c Credential) (credPG, error) {
@@ -547,11 +589,16 @@ func (s *sesionPG) servir() {
 		}
 		return up, bufio.NewReader(up)
 	}
-	up, br := entrar(minor)
+	// Si este upstream ya cortó la 3.2 hace poco, se empieza por la 3.0: una
+	// marcación y un TLS en vez de dos.
+	upMinor := minor
+	if upMinor > 0 && p.pg32.rechaza(cred.destinoPG()) {
+		upMinor = 0
+	}
+	up, br := entrar(upMinor)
 	if up == nil {
 		return
 	}
-	upMinor := minor
 	metodo, codigo, err := autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable, &upMinor)
 	if errors.Is(err, errVersionRechazada) {
 		// Un servidor que no conoce la 3.2 y, en vez de NegotiateProtocolVersion,
@@ -560,6 +607,7 @@ func (s *sesionPG) servir() {
 		// 3.0, en una conexión nueva, y el invitado sigue en la suya (relevo
 		// cambia la clave de cancelación a su longitud, como con un servidor
 		// anterior a PostgreSQL 18).
+		p.pg32.recordar(cred.destinoPG())
 		cred.v32.Do(func() {
 			p.logf("credential proxy postgres %s (%s): the server answered the protocol 3.%d startup with SQLSTATE 08P01 (a pooler without 3.2, such as pgbouncer before 1.25?); retrying with 3.0", cred.Domain, cred.destinoPG(), minor)
 		})

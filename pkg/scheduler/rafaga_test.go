@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -180,5 +181,175 @@ func TestRechazadasPorElPuenteEsperanALaQueNace(t *testing.T) {
 	}
 	if n := creadas.Load(); n != 1 {
 		t.Fatalf("%d réplicas para %d sesiones rechazadas que caben en una; quería 1", n, rechazadas)
+	}
+}
+
+// nacienteDePrueba deja un scheduler con la primaria llena (k sesiones) para
+// que cada joinOrScaleOut se apunte a una naciente o cree la suya.
+func nacienteDePrueba(k int) *Scheduler {
+	g := &Scheduler{
+		services: map[string]*entry{},
+		extra:    map[string][]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	g.services["svc"] = &entry{machineID: "m-0", maxSessions: k, checkedAt: time.Now(), lastUse: time.Now()}
+	for i := 0; i < k; i++ {
+		g.routes[fmt.Sprintf("s%d", i)] = &sessionRoute{service: "svc", machineID: "m-0"}
+	}
+	return g
+}
+
+// esperarPendientes espera a que la primera naciente del servicio tenga p
+// sesiones apuntadas.
+func esperarPendientes(t *testing.T, g *Scheduler, p int) {
+	t.Helper()
+	plazo := time.Now().Add(5 * time.Second)
+	for {
+		g.mu.Lock()
+		n := 0
+		if l := g.nacientes["svc"]; len(l) > 0 {
+			n = l[0].pendientes
+		}
+		g.mu.Unlock()
+		if n == p {
+			return
+		}
+		if time.Now().After(plazo) {
+			t.Fatalf("la naciente no llegó a %d pendientes (tiene %d)", p, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Un fallo real de la réplica (el invitado no levanta y waitReadyAddr vence con
+// un timeout de red) lo heredan las que esperaban: un timeout de red también
+// cumple errors.Is(err, context.DeadlineExceeded), y tomarlo por «ajeno» hacía
+// reintentar a todas, con una réplica fallida nueva por ronda.
+func TestNacienteConTimeoutDeRedNoReintentaEnCadena(t *testing.T) {
+	vencido, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, errRed := (&net.Dialer{}).DialContext(vencido, "tcp", "127.0.0.1:1")
+	var opErr *net.OpError
+	if !errors.As(errRed, &opErr) || !errors.Is(errRed, context.DeadlineExceeded) {
+		t.Fatalf("precondición: quería un *net.OpError que cumpla DeadlineExceeded; err = %v", errRed)
+	}
+
+	const esperando = 8
+	g := nacienteDePrueba(esperando + 1)
+	var builds atomic.Int64
+	soltar := make(chan struct{})
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		builds.Add(1)
+		<-soltar
+		return nil, fmt.Errorf("replica not ready: %w", errRed)
+	}
+	errs := make(chan error, esperando+1)
+	pedir := func() {
+		_, err := g.joinOrScaleOut(context.Background(), "svc", tenantFrom(context.Background()))
+		errs <- err
+	}
+	go pedir()
+	esperarPendientes(t, g, 1)
+	for i := 0; i < esperando; i++ {
+		go pedir()
+	}
+	esperarPendientes(t, g, esperando+1)
+	close(soltar)
+	for i := 0; i < esperando+1; i++ {
+		if err := <-errs; !errors.Is(err, errRed) {
+			t.Errorf("err = %v; quería el fallo de la réplica", err)
+		}
+	}
+	if n := builds.Load(); n != 1 {
+		t.Fatalf("%d réplicas creadas; quería 1 (las que esperaban heredan el fallo)", n)
+	}
+}
+
+// Un pánico en build no deja la naciente registrada: las que esperaban
+// reciben un error en vez de colgarse y deja de contar para el tope.
+func TestNacienteConPanicoSeCierra(t *testing.T) {
+	g := nacienteDePrueba(2)
+	soltar := make(chan struct{})
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		<-soltar
+		panic("build roto")
+	}
+	panico := make(chan any, 1)
+	go func() {
+		defer func() { panico <- recover() }()
+		_, _ = g.joinOrScaleOut(context.Background(), "svc", tenantFrom(context.Background()))
+	}()
+	esperarPendientes(t, g, 1)
+	espera := make(chan error, 1)
+	go func() {
+		_, err := g.joinOrScaleOut(context.Background(), "svc", tenantFrom(context.Background()))
+		espera <- err
+	}()
+	esperarPendientes(t, g, 2)
+	close(soltar)
+	if r := <-panico; r == nil {
+		t.Fatal("el pánico de build no llegó a quien la creó")
+	}
+	select {
+	case err := <-espera:
+		if !errors.Is(err, errNacienteRota) {
+			t.Fatalf("err = %v; quería errNacienteRota", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("la que esperaba se quedó colgada en una naciente que nunca se cierra")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := len(g.nacientes["svc"]); n != 0 {
+		t.Fatalf("quedan %d nacientes registradas", n)
+	}
+}
+
+// La cuota de instancias del inquilino que creó la réplica no es la de los
+// demás: una sesión de otro inquilino vuelve a empezar (y acaba servida), y una
+// del mismo inquilino hereda el rechazo.
+func TestNacienteCuotaDeOtroInquilino(t *testing.T) {
+	g := nacienteDePrueba(3)
+	a, b := &tenant{name: "a"}, &tenant{name: "b"}
+	var builds atomic.Int64
+	soltar := make(chan struct{})
+	g.buildFn = func(_ context.Context, _ string, tnt *tenant, _ bool) (*entry, error) {
+		n := builds.Add(1)
+		<-soltar
+		if tnt == a {
+			return nil, fmt.Errorf("%w: %q", errTenantInstances, tnt.name)
+		}
+		return &entry{machineID: fmt.Sprintf("m-%d", n), maxSessions: 3, lastUse: time.Now()}, nil
+	}
+	type res struct {
+		quien string
+		err   error
+	}
+	out := make(chan res, 3)
+	pedir := func(quien string, tnt *tenant) {
+		_, err := g.joinOrScaleOut(context.Background(), "svc", tnt)
+		out <- res{quien, err}
+	}
+	go pedir("a1", a)
+	esperarPendientes(t, g, 1)
+	go pedir("a2", a)
+	go pedir("b", b)
+	esperarPendientes(t, g, 3)
+	close(soltar)
+	for i := 0; i < 3; i++ {
+		r := <-out
+		switch r.quien {
+		case "a1", "a2":
+			if !errors.Is(r.err, errTenantInstances) {
+				t.Errorf("%s: err = %v; quería la cuota de su inquilino", r.quien, r.err)
+			}
+		case "b":
+			if r.err != nil {
+				t.Errorf("b heredó la cuota de otro inquilino: %v", r.err)
+			}
+		}
+	}
+	if n := builds.Load(); n != 2 {
+		t.Fatalf("%d réplicas creadas; quería 2 (la fallida de a y la de b)", n)
 	}
 }

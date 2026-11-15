@@ -416,6 +416,7 @@ type Proxy struct {
 	pgPre, pgAuth time.Duration
 	cancelMu      sync.Mutex
 	cancelaciones map[claveCancel]destinoCancel
+	pg32          rechazos32 // upstreams que cortan la 3.2 (postgres.go)
 
 	// MySQL (mysql.go): credenciales (con su TLS, como las de Postgres) y
 	// conexiones a la vez. Comparte con Postgres dialers y plazos.
