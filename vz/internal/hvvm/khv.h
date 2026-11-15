@@ -153,6 +153,9 @@ void khv_filtrar_id(uint64_t *pfr0, uint64_t *pfr1, uint64_t *zfr0, uint64_t *sm
 // un CPU_ON pendiente (vm.c): 0 si cuadra, o el número de la comprobación
 // que falló.
 int khv_prueba_cpu_on(void);
+// khv_prueba_guardar_cpu: cuántos registros sin remedio dice guardar_cpu que
+// no pudo leer de un vCPU que no existe (vm.c, sin VM).
+int khv_prueba_guardar_cpu(void);
 // khv_sysreg_iss: el hv_sys_reg_t del ISS de un MSR/MRS atrapado (EC 0x18).
 uint16_t khv_sysreg_iss(uint64_t iss);
 // khv_sea_destino: EL, vector, PSTATE y ESR del aborto externo que recibe el
@@ -289,8 +292,18 @@ void vmmio_irq(struct vmmio *m, uint32_t intid);  // pasa al GIC el nivel de isr
 // no, lo cuenta (khv_spi_fallos) y lo deja en stderr la primera vez: una línea
 // que no sube deja al invitado esperando su disco, su red o su consola. Es
 // lo que deben usar todos los que llaman a hv_gic_set_spi.
+//
+// Una línea que el GIC no cambió queda pendiente con su nivel y se reintenta
+// (khv_spi_reintentar, en cada salida de un vCPU, y tras la siguiente llamada
+// que sí entre) hasta que entre o se pida otro nivel: quien llama apunta el
+// nivel que pidió aunque devuelva false.
 bool khv_spi(uint32_t intid, bool nivel);
+void khv_spi_reintentar(void);
+int khv_spi_pendientes(void);
 uint64_t khv_spi_fallos(void);
+int khv_prueba_spi_reintento(void);
+void khv_prueba_spi_limpiar(void);  // borra las pendientes (pruebas sin VM)
+uint32_t uart_linea(void);          // la SPI de la UART
 
 // Hilos de dispositivo muertos: un hilo que termina sin remedio (un poll o un
 // recv que falla) deja la VM corriendo sin ese dispositivo. Cada uno marca su
@@ -317,8 +330,23 @@ bool vq_pedir_aviso(const struct vmmio *m, const struct vq *q, uint16_t *avail, 
 void vq_pedir_aviso_ya(const struct vmmio *m, const struct vq *q, uint16_t *avail, uint8_t *used);
 
 // Contadores de avisos (pruebas y medidas): notify del invitado e
-// interrupciones al invitado, por dispositivo.
-enum { KHV_N_NET_TX, KHV_N_NET_RX, KHV_N_NET_IRQ, KHV_N_BLK, KHV_N_BLK_IRQ, KHV_N_MAX };
+// interrupciones al invitado, por dispositivo. Detrás, las salidas de los
+// vCPU a espacio de usuario: todas, las del timer virtual y los WFI que
+// atrapa el framework (el WFI de respaldo de vm.c; con el GIC de HVF debería
+// quedarse en 0) y cuántos de ellos durmieron hasta el tope y no hasta un
+// aviso o el timer.
+enum {
+  KHV_N_NET_TX,
+  KHV_N_NET_RX,
+  KHV_N_NET_IRQ,
+  KHV_N_BLK,
+  KHV_N_BLK_IRQ,
+  KHV_N_SALIDAS,
+  KHV_N_VTIMER,
+  KHV_N_WFI,
+  KHV_N_WFI_TOPE,
+  KHV_N_MAX
+};
 extern uint64_t khv_avisos[KHV_N_MAX];
 void khv_contadores(uint64_t out[KHV_N_MAX]);
 
@@ -368,6 +396,7 @@ int khv_prueba_irq_nivel(void);
 int khv_prueba_red_muerta(void);
 int khv_prueba_uart_nivel(void);
 int khv_prueba_clon_ram(const char *base, const char *out);
+int khv_prueba_clon_ventana(const char *base, const char *out);
 int khv_prueba_poll_vsock(void);  // un EAGAIN de poll no mata el hilo de rx (prueba.c)  // rx sin hilo sobre el socket red (pruebas, ver net.c)
 
 // rng

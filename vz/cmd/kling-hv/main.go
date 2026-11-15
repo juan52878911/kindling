@@ -246,12 +246,14 @@ func run() int {
 		Sock: *sock, Broker: broker, Logf: logf})
 
 	// KLING_HV_AVISOS=1: los contadores de notify e interrupciones de la red y
-	// los discos en el registro cada 5 s (para medir la supresión de avisos).
+	// los discos, y los de salidas de los vCPU (timer, WFI), en el registro
+	// cada 5 s (para medir la supresión de avisos y el reposo).
 	if os.Getenv("KLING_HV_AVISOS") == "1" {
 		go func() {
 			for range time.Tick(5 * time.Second) {
 				a := hvvm.Avisos()
-				logf("notifications: net tx %d rx %d irq %d, blk %d irq %d", a[0], a[1], a[2], a[3], a[4])
+				logf("notifications: net tx %d rx %d irq %d, blk %d irq %d; vcpu exits %d vtimer %d wfi %d wfi-cap %d",
+					a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8])
 			}
 		}()
 	}

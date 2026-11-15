@@ -146,17 +146,122 @@ void vq_used_de_ram(struct vq *q) {
 
 static uint64_t spi_fallos;
 
-bool khv_spi(uint32_t intid, bool nivel) {
-  hv_return_t r = hv_gic_set_spi(intid, nivel);
-  if (r == HV_SUCCESS) return true;
+// Líneas que el GIC no cambió y siguen pendientes, con el nivel que les toca
+// (1 bajar, 2 subir; 0 nada): khv_spi_reintentar las vuelve a mandar hasta
+// que el GIC las acepte o el dispositivo pida otro nivel. Antes solo se
+// reintentaba en el siguiente aviso o acceso del dispositivo, y con un
+// invitado que espera justo esa interrupción no había siguiente. spi_mu
+// también ordena las llamadas al GIC: un reintento no pisa un nivel más nuevo.
+#define SPI_TABLA 1024
+static pthread_mutex_t spi_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t spi_pend[SPI_TABLA];
+static int spi_n_pend;  // entradas no nulas de spi_pend (atómico para leerlo sin spi_mu)
+static hv_return_t (*spi_poner)(uint32_t, bool) = hv_gic_set_spi;  // pruebas: khv_prueba_spi_reintento
+
+// Con spi_mu.
+static bool spi_mandar(uint32_t intid, bool nivel) {
+  hv_return_t r = spi_poner(intid, nivel);
+  uint8_t *p = intid < SPI_TABLA ? &spi_pend[intid] : NULL;
+  if (r == HV_SUCCESS) {
+    if (p && *p) *p = 0, __atomic_fetch_sub(&spi_n_pend, 1, __ATOMIC_RELAXED);
+    return true;
+  }
+  if (p && !*p) __atomic_fetch_add(&spi_n_pend, 1, __ATOMIC_RELAXED);
+  if (p) *p = nivel ? 2 : 1;
   // Sin uart_flush: se llama con u_mu tomado (devices.c).
   if (__atomic_fetch_add(&spi_fallos, 1, __ATOMIC_RELAXED) == 0)
-    dprintf(2, "kling-hv: the GIC did not set SPI %u to %d (0x%x); counting further failures silently\n", intid,
-            (int)nivel, (unsigned)r);
+    dprintf(2, "kling-hv: the GIC did not set SPI %u to %d (0x%x); retrying, counting further failures silently\n",
+            intid, (int)nivel, (unsigned)r);
   return false;
 }
 
+// Con spi_mu.
+static void spi_reintentar_todas(void) {
+  for (uint32_t i = 0; i < SPI_TABLA && __atomic_load_n(&spi_n_pend, __ATOMIC_RELAXED) > 0; i++)
+    if (spi_pend[i]) (void)spi_mandar(i, spi_pend[i] == 2);
+}
+
+bool khv_spi(uint32_t intid, bool nivel) {
+  pthread_mutex_lock(&spi_mu);
+  bool ok = spi_mandar(intid, nivel);
+  if (ok && __atomic_load_n(&spi_n_pend, __ATOMIC_RELAXED) > 0) spi_reintentar_todas();
+  pthread_mutex_unlock(&spi_mu);
+  return ok;
+}
+
+void khv_spi_reintentar(void) {
+  if (__atomic_load_n(&spi_n_pend, __ATOMIC_RELAXED) == 0) return;  // lo normal: ni un cerrojo
+  pthread_mutex_lock(&spi_mu);
+  spi_reintentar_todas();
+  pthread_mutex_unlock(&spi_mu);
+}
+
 uint64_t khv_spi_fallos(void) { return __atomic_load_n(&spi_fallos, __ATOMIC_RELAXED); }
+
+int khv_spi_pendientes(void) { return __atomic_load_n(&spi_n_pend, __ATOMIC_RELAXED); }
+
+// khv_prueba_spi_reintento (pruebas, sin VM): un GIC de mentira que rechaza
+// las primeras `rechazos` llamadas. Sube la línea de la UART (THRI) y mira que
+// quede pendiente y que la suba un reintento sin ningún acceso más de la UART.
+// Devuelve 0 si cuadra, o el número de la comprobación que falló.
+static int prueba_rechazos;
+static int prueba_linea[SPI_TABLA];
+static hv_return_t prueba_poner(uint32_t intid, bool nivel) {
+  if (prueba_rechazos > 0) {
+    prueba_rechazos--;
+    return HV_ERROR;
+  }
+  if (intid < SPI_TABLA) prueba_linea[intid] = nivel;
+  return HV_SUCCESS;
+}
+int khv_prueba_spi_reintento(void) {
+  uint32_t uart_intid = uart_linea();
+  if (uart_intid >= SPI_TABLA) return 1;
+  khv_prueba_spi_limpiar();
+  int res = 0;
+  pthread_mutex_lock(&spi_mu);
+  spi_poner = prueba_poner;
+  prueba_rechazos = 1;
+  memset(prueba_linea, 0, sizeof prueba_linea);
+  pthread_mutex_unlock(&spi_mu);
+  struct uart_state antes;
+  uart_get(&antes);
+  struct uart_state cero = {0};
+  uart_set(&cero);
+  uint64_t v = 0x02;  // IER con THRI y el transmisor vacío: pide subir la línea
+  uart_mmio(1, true, &v);
+  if (prueba_linea[uart_intid] != 0) res = 2;              // el GIC lo rechazó
+  else if (khv_spi_pendientes() != 1) res = 3;             // y queda pendiente
+  if (!res) {
+    khv_spi_reintentar();                                   // lo que hace el vCPU al salir
+    if (prueba_linea[uart_intid] != 1) res = 4;
+    else if (khv_spi_pendientes() != 0) res = 5;
+  }
+  if (!res) {
+    // Un nivel nuevo manda sobre el pendiente: rechazado al bajar, el
+    // reintento baja la línea, no la vuelve a subir.
+    prueba_rechazos = 1;
+    v = 0;
+    uart_mmio(1, true, &v);
+    khv_spi_reintentar();
+    if (prueba_linea[uart_intid] != 0) res = 6;
+    else if (khv_spi_pendientes() != 0) res = 7;
+  }
+  uart_set(&antes);
+  pthread_mutex_lock(&spi_mu);
+  spi_poner = hv_gic_set_spi;
+  prueba_rechazos = 0;
+  pthread_mutex_unlock(&spi_mu);
+  khv_prueba_spi_limpiar();
+  return res;
+}
+
+void khv_prueba_spi_limpiar(void) {
+  pthread_mutex_lock(&spi_mu);
+  memset(spi_pend, 0, sizeof spi_pend);
+  spi_n_pend = 0;
+  pthread_mutex_unlock(&spi_mu);
+}
 
 static int muertos;
 
@@ -170,23 +275,32 @@ int khv_dispositivos_muertos(void) { return __atomic_load_n(&muertos, __ATOMIC_A
 void vmmio_irq(struct vmmio *m, uint32_t intid) {
   uint8_t n = m->isr != 0;
   if (n != m->nivel) {
-    // nivel es lo que la línea tiene de verdad: si el GIC no la cambió, el
-    // siguiente aviso lo vuelve a intentar. Antes quedaba alto sin que lo
-    // estuviera la línea, y ningún aviso más la subía: el invitado esperaba
-    // su disco o su red para siempre.
-    if (khv_spi(intid, n)) m->nivel = n;
+    // nivel es el que le toca a la línea: si el GIC no la cambió, khv_spi la
+    // deja pendiente y la reintenta (en cada salida de un vCPU y en la
+    // siguiente llamada que sí entre), sin esperar a otro aviso de este
+    // dispositivo. Antes, con el nivel apuntado sin más, ningún aviso la
+    // subía y el invitado esperaba su disco o su red para siempre.
+    (void)khv_spi(intid, n);
+    m->nivel = n;
     // Un vCPU dormido en el WFI de respaldo (vm.c) no se entera solo.
     if (n) vcpu_kick_all();
   }
 }
 
-// khv_prueba_irq_nivel: sin VM no hay GIC y hv_gic_set_spi falla; nivel no
-// puede quedar alto (pruebas).
+// khv_prueba_irq_nivel: sin VM no hay GIC y hv_gic_set_spi falla; la línea
+// tiene que quedar pendiente de reintento. Devuelve las pendientes y las
+// borra (pruebas).
 int khv_prueba_irq_nivel(void) {
+  khv_prueba_spi_limpiar();  // lo que dejaran otras pruebas sin VM (el fuzz)
   struct vmmio m = {0};
   m.isr = 1;
   vmmio_irq(&m, 40);
-  return m.nivel;
+  pthread_mutex_lock(&spi_mu);
+  int n = spi_n_pend;
+  int linea = spi_pend[40];
+  pthread_mutex_unlock(&spi_mu);
+  khv_prueba_spi_limpiar();
+  return n == 1 && linea == 2 ? 1 : 0;
 }
 
 uint64_t khv_avisos[KHV_N_MAX];

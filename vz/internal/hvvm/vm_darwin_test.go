@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -27,6 +28,40 @@ func TestClonRAMEs0600(t *testing.T) {
 		t.Fatalf("cloning the RAM file: errno %d", -m)
 	case m != 0o600:
 		t.Fatalf("the frozen RAM file is %#o, want 0600", m)
+	}
+}
+
+// Y sin ventana: mientras el clon aún tiene el modo de la base, no está en su
+// ruta (se hace en un directorio 0700 aparte y se mueve ya en 0600). Antes
+// había un momento en el que la RAM entera era legible por cualquiera.
+func TestClonRAMSinVentana(t *testing.T) {
+	dir := t.TempDir()
+	base, out := filepath.Join(dir, "mem.base"), filepath.Join(dir, "mem.file")
+	if err := os.WriteFile(base, make([]byte, 1<<16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	switch m := clonVentana(base, out); {
+	case m == 1:
+		t.Skip("this volume does not clone: the copy is created 0600 directly")
+	case m == -int(syscall.ENOENT), m == 0o600:
+	case m < 0:
+		t.Fatalf("cloning the RAM file: errno %d", -m)
+	default:
+		t.Fatalf("right after the clone %s is already there with mode %#o", out, m)
+	}
+	if fi, err := os.Stat(out); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("after the clone: %v %v, want 0600", fi, err)
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 2 {
+		t.Fatalf("leftovers in the machine directory: %v", ents)
+	}
+	// RENAME_EXCL: no pisa una RAM que ya esté (como fclonefileat).
+	if m := clonRAM(base, out); m != -int(syscall.EEXIST) {
+		t.Fatalf("cloning over an existing file = %d, want -EEXIST", m)
 	}
 }
 
@@ -58,6 +93,16 @@ func TestFiltrarIDQuitaSVEySME(t *testing.T) {
 func TestCPUOnPendienteEnElSnapshot(t *testing.T) {
 	if r := pruebaCPUOn(); r != 0 {
 		t.Fatalf("khv_prueba_cpu_on failed check %d", r)
+	}
+}
+
+// Un registro que HVF no deja leer al congelar no puede quedarse en silencio:
+// el snapshot llevaría ceros (o lo del guardado anterior) y restauraría otra
+// máquina. guardar_cpu lo cuenta y khv_snapshot se niega (st_mal).
+func TestGuardarCPUDiceLosFallos(t *testing.T) {
+	// 31 generales, PC, CPSR, FPCR, FPSR, 32 SIMD, offset y máscara del timer.
+	if n := pruebaGuardarCPU(); n != 31+4+32+2 {
+		t.Fatalf("guardar_cpu on a vCPU that does not exist reported %d unreadable registers, want %d", n, 31+4+32+2)
 	}
 }
 

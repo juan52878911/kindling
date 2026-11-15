@@ -546,20 +546,21 @@ int khv_prueba_red_muerta(void) {
 }
 
 // khv_prueba_uart_nivel: sin VM no hay GIC; habilitar THRI con el
-// transmisor vacío pide subir la línea de la UART, el GIC no la cambia y el
-// nivel que guarda la UART no puede quedar alto. Devuelve ese nivel; deja la
-// UART como estaba.
+// transmisor vacío pide subir la línea de la UART, el GIC no la cambia y la
+// línea tiene que quedar pendiente de reintento. Devuelve las pendientes; deja
+// la UART como estaba y borra las pendientes.
 int khv_prueba_uart_nivel(void) {
+  khv_prueba_spi_limpiar();
   struct uart_state antes;
   uart_get(&antes);
   struct uart_state cero = {0};
   uart_set(&cero);
   uint64_t v = 0x02;
   uart_mmio(1, true, &v);
-  struct uart_state st;
-  uart_get(&st);
+  int n = khv_spi_pendientes();
   uart_set(&antes);
-  return st.nivel;
+  khv_prueba_spi_limpiar();
+  return n;
 }
 
 // khv_prueba_poll_vsock: khv_vsock_prueba_poll con los dispositivos de
