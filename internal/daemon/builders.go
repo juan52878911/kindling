@@ -306,7 +306,6 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	}
 	out := filepath.Join(work, "out")
 	var salida bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &salida, &salida
 	// La caché de blobs de root, cerrada a las demás cuentas antes de que un
 	// constructor como root (debian, android, oci sin usuario) la cree con su
 	// umask, y sin barrer mientras alguno la usa (builders_cache.go).
@@ -315,7 +314,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 	s.muCacheOCI.RLock()
-	err = cmd.Run()
+	err = correrConstructor(cmd, &salida)
 	s.muCacheOCI.RUnlock()
 	if err != nil {
 		fail(w, http.StatusInternalServerError,

@@ -935,9 +935,49 @@ func revisarRun(s *Server, t string, b []byte) ([]byte, int, error) {
 	})
 }
 
+// camposSandbox, camposNodo y camposFork son camposRun para api.SandboxRequest,
+// api.GraphNode y api.ForkRequest: un campo nuevo sin clasificar entra como
+// de admin (TestCamposClasificados). Volúmenes y carpetas ya los rechaza
+// revisarNacimiento, que va antes y da su propio mensaje.
+var camposSandbox = map[string]bool{
+	"name": false, "image": false, "from": false, "vcpus": false, "mem_mib": false,
+	"ttl_seconds": false, "on_ttl": false, "egress": false, "allow_domains": false,
+	"cpu_pct": false, "labels": false, "wait_ready": false, "ready_timeout_seconds": false,
+
+	"volumes": true, "shares": true,
+}
+
+var camposNodo = map[string]bool{
+	"from": false, "image": false, "vcpus": false, "mem_mib": false, "egress": false,
+	"allow_domains": false, "ports": false, "wake": false, "idle_freeze": false,
+	"labels": false, "allow_exec": false,
+
+	"volumes": true, "shares": true,
+	// Los pone el daemon al responder; en una petición de inquilino no
+	// vienen a cuento, y machine_id nombraría una máquina que no es suya.
+	"machine_id": true, "state": true,
+}
+
+var camposFork = map[string]bool{
+	"count": false, "ttl_seconds": false, "on_ttl": false, "labels": false,
+	"skip_ready": false, "ready_timeout_seconds": false,
+}
+
+// errCampoDeAdmin es el rechazo de un campo de admin en una petición de
+// inquilino.
+func errCampoDeAdmin(c string) error {
+	return errAuthz(http.StatusForbidden, "%s is admin-only under the daemon's authz policy", c)
+}
+
 func revisarSandbox(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.SandboxRequest) error {
-		return s.revisarNacimiento(t, &req.Labels, req.From, len(req.Volumes) > 0, len(req.Shares) > 0)
+		if err := s.revisarNacimiento(t, &req.Labels, req.From, len(req.Volumes) > 0, len(req.Shares) > 0); err != nil {
+			return err
+		}
+		if c := campoDeAdmin(req, camposSandbox); c != "" {
+			return errCampoDeAdmin(c)
+		}
+		return nil
 	})
 }
 
@@ -952,6 +992,9 @@ func revisarGrafo(s *Server, t string, b []byte) ([]byte, int, error) {
 		for nombre, n := range req.Graph.Nodes {
 			if err := s.revisarNacimiento(t, &n.Labels, n.From, len(n.Volumes) > 0, len(n.Shares) > 0); err != nil {
 				return errAuthz(statusDe(err), "node %s: %v", nombre, err)
+			}
+			if c := campoDeAdmin(n, camposNodo); c != "" {
+				return errAuthz(http.StatusForbidden, "node %s: %s is admin-only under the daemon's authz policy", nombre, c)
 			}
 			req.Graph.Nodes[nombre] = n
 		}
@@ -969,6 +1012,9 @@ func revisarFork(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.ForkRequest) error {
 		if err := etiquetasDeInquilino(t, req.Labels); err != nil {
 			return err
+		}
+		if c := campoDeAdmin(req, camposFork); c != "" {
+			return errCampoDeAdmin(c)
 		}
 		if req.Labels == nil {
 			req.Labels = map[string]string{}

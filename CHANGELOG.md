@@ -60,6 +60,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - An interactive shell whose client stops reading is cut after 2 minutes, in the daemon and in the guest agent, instead of holding one of the guest's 8 shell slots.
 - `kling-phone view -open` hands the browser a private redirect file instead of putting the wall's secret URL in the opener's argv.
 - With an authz policy, publishing ports (`publish` on a new machine and `POST /machines/{ref}/publish`) is admin-only.
+- An image builder that leaves a background process holding its output, or hits the 15-minute limit, no longer holds the build locks until the daemon restarts: its whole process group is killed, and only the last MiB of its output is kept.
+- `GET /events` is capped at 256 streams (16 per tenant, 429 beyond) and cuts a client that stops reading after a minute.
+- With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 
 ## [1.0.0-rc.2] - 2026-11-10

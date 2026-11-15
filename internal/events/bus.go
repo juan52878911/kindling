@@ -43,8 +43,19 @@ func New() *Bus {
 
 // Subscribe devuelve un canal de eventos y la función para darse de baja.
 func (b *Bus) Subscribe() (<-chan api.Event, func()) {
+	ch, baja, _ := b.SubscribeHasta(0)
+	return ch, baja
+}
+
+// SubscribeHasta es Subscribe con un tope de suscriptores: si ya hay max (y
+// max > 0), no suscribe y devuelve false. Es para quien suscribe en nombre
+// de un cliente (GET /events): cada uno es un canal y una conexión abierta.
+func (b *Bus) SubscribeHasta(max int) (<-chan api.Event, func(), bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if max > 0 && len(b.subs) >= max {
+		return nil, func() {}, false
+	}
 
 	id := b.next
 	b.next++
@@ -58,7 +69,7 @@ func (b *Bus) Subscribe() (<-chan api.Event, func()) {
 			delete(b.subs, id)
 			close(c.ch)
 		}
-	}
+	}, true
 }
 
 // Publish entrega el evento a quien esté escuchando. No bloquea.
