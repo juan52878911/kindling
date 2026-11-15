@@ -343,6 +343,27 @@ func TestCacheConcurrente(t *testing.T) {
 	counting(t, d, "1")
 	hello, _ := os.ReadFile(filepath.Join(dir, "kling-hello"))
 	os.WriteFile(filepath.Join(d, "kling-hello"), hello, 0o755)
+	// El plazo de siempre, no el que dejó otro test del paquete (discover()
+	// lo baja a 1 s y no lo restaura: con -count, la segunda vuelta heredaba
+	// ese segundo).
+	viejo := ManifestTimeout
+	ManifestTimeout = 2 * time.Second
+	t.Cleanup(func() { ManifestTimeout = viejo })
+	// Una ejecución de cada binario ANTES de la parte concurrente. En macOS la
+	// primera ejecución de un Mach-O recién escrito paga la validación de su
+	// firma (medido: 16 copias nuevas a la vez, 3,7 s; la segunda vez, 24 ms),
+	// y las 16 goroutines esperaban a la vez detrás de ella: con carga, más de
+	// ManifestTimeout y "--kling-manifest took more than 2s". Lo que se prueba
+	// aquí es la caché bajo concurrencia, no lo que tarda el sistema en
+	// validar un binario nuevo.
+	// Con plazo holgado: con el disco ocupado, esa validación sola pasa de 2 s.
+	ManifestTimeout = time.Minute
+	for _, b := range []string{"kling-cnt", "kling-hello"} {
+		if _, err := runManifest(context.Background(), filepath.Join(d, b)); err != nil {
+			t.Fatalf("%s: %v", b, err)
+		}
+	}
+	ManifestTimeout = 2 * time.Second
 	var wg sync.WaitGroup
 	errs := make(chan string, 64)
 	for i := 0; i < 16; i++ {
@@ -352,10 +373,10 @@ func TestCacheConcurrente(t *testing.T) {
 			for j := 0; j < 4; j++ {
 				r := Discover(context.Background(), Options{Version: "0.5.0", Path: []string{d}, ManifestCache: cache})
 				if p := find(r, "cnt"); p == nil || p.Err != nil || p.Manifest.Version != "1" {
-					errs <- "kling-cnt mal"
+					errs <- fmt.Sprintf("kling-cnt: %+v", p)
 				}
 				if p := find(r, "hello"); p == nil || p.Err != nil || p.Manifest.Version != "1.2.3" {
-					errs <- "kling-hello mal"
+					errs <- fmt.Sprintf("kling-hello: %+v", p)
 				}
 			}
 		}()
