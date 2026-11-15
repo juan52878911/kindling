@@ -36,6 +36,10 @@ func TestParseSandboxFork(t *testing.T) {
 		t.Fatalf("-ttl en segundos y -json: %+v %v", o, err)
 	}
 
+	if o, err = parseSandboxFork([]string{"caja", "-name", "db-rama"}); err != nil || o.req.Name != "db-rama" || o.req.Count != 1 {
+		t.Fatalf("-name: %+v %v", o.req, err)
+	}
+
 	// -label repetido, validado con las reglas de la API.
 	o, err = parseSandboxFork([]string{"caja", "-label", "kling.db.state=preparing", "-label", "a=b"})
 	if err != nil || !reflect.DeepEqual(o.req.Labels, map[string]string{"kling.db.state": "preparing", "a": "b"}) {
@@ -53,6 +57,7 @@ func TestParseSandboxFork(t *testing.T) {
 		"on-ttl":           {"caja", "-on-ttl", "explode"},
 		"ttl inválido":     {"caja", "-ttl", "mucho"},
 		"flag extraño":     {"caja", "-x"},
+		"nombre con -n 2":  {"caja", "-name", "x", "-n", "2"},
 	}
 	for nombre, args := range malos {
 		if _, err := parseSandboxFork(args); err == nil {

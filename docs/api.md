@@ -671,7 +671,9 @@ opcional:
 en la que exista sin ellas; van con `-label k=v` (repetible) en `kling sandbox fork`. Las
 claves siguen `^[a-z0-9][a-z0-9._-]{0,63}$`, como mucho 32 etiquetas de 256 bytes de
 valor, y `kind` y `kling.fork-of` están reservadas (`400`). Un cuerpo sin `labels` se
-comporta como siempre. Una máquina con credenciales del proxy se rechaza con `409`:
+comporta como siempre. `name` (`-name` en `kling sandbox fork`) da nombre a la copia,
+solo con `count` 1: con más, `400`; ocupado, `409` antes de pausar el original. Sin él, la
+copia se llama como el original con un sufijo al azar. Una máquina con credenciales del proxy se rechaza con `409`:
 arranca otra instancia con `run -from <plantilla>` en vez de ramificarla.
 
 ### `allow_exec` y `on_ttl` en `POST /machines`

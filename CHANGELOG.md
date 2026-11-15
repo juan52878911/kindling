@@ -8,11 +8,13 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Added
 
+- `kling sandbox fork -name` (and `name` in `POST /sandboxes/{ref}/fork`) names the copy; only with `-n 1`, and a taken name fails before the original is paused.
 - Homebrew tap: `brew install juan52878911/kindling/kling`. Each final release updates it (release candidates don't); the release workflow needs a `HOMEBREW_TAP_TOKEN` secret for that.
 - `kling machine credential -type sigv4` and `kling template credential -type sigv4`: hand an S3 (or R2, GCS) key to the credential proxy, which signs the guest's requests again with it; the guest only sees a placeholder access key id. Also on macOS, with a kling-vz or kling-hv from this release.
 
 ### Fixed
 
+- `kling db branch` names a branch copy forked from its parent like one started from the golden (`db-<repo>-<branch>`), so two runs at once can't leave two copies; with an older kling it falls back to the daemon's name.
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).

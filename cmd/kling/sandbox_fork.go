@@ -18,7 +18,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/units"
 )
 
-const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N] [-ttl 10m] [-on-ttl remove|freeze] [-label k=v]... [-skip-ready] [-q] [-json]"
+const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N | -name NAME] [-ttl 10m] [-on-ttl remove|freeze] [-label k=v]... [-skip-ready] [-q] [-json]"
 
 // forkOptions es `kling sandbox fork` ya interpretado.
 type forkOptions struct {
@@ -34,6 +34,7 @@ func parseSandboxFork(args []string) (forkOptions, error) {
 	fs := flag.NewFlagSet("sandbox fork", flag.ContinueOnError)
 	host := hostFlag(fs)
 	n := fs.Int("n", 1, fmt.Sprintf("how many copies (1-%d)", api.ForkMax))
+	name := fs.String("name", "", "name of the copy (only with -n 1; default: the original's name and a random suffix)")
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime of each copy: 10m, 1h (bare number = seconds; default: the original's)")
 	onTTL := fs.String("on-ttl", "", "when a copy's ttl runs out: remove or freeze (default: the original's)")
 	var labels labelFlag
@@ -50,6 +51,9 @@ func parseSandboxFork(args []string) (forkOptions, error) {
 	if *n < 1 || *n > api.ForkMax {
 		return forkOptions{}, fmt.Errorf("-n must be between 1 and %d", api.ForkMax)
 	}
+	if *name != "" && *n != 1 {
+		return forkOptions{}, errors.New("-name only works with -n 1")
+	}
 	if *ttl < 0 || (*ttl > 0 && *ttl < time.Second) {
 		return forkOptions{}, errors.New("-ttl must be at least 1s")
 	}
@@ -63,7 +67,7 @@ func parseSandboxFork(args []string) (forkOptions, error) {
 	}
 	return forkOptions{
 		host: *host, ref: fs.Arg(0), quiet: *quiet, asJSON: *asJSON,
-		req: api.ForkRequest{Count: *n, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Labels: map[string]string(labels),
+		req: api.ForkRequest{Count: *n, Name: *name, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Labels: map[string]string(labels),
 			SkipReady: *skipReady},
 	}, nil
 }

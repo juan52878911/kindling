@@ -27,7 +27,9 @@ func forkStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrNoMachine):
 		return http.StatusNotFound
-	case errors.Is(err, machine.ErrNotRunning), errors.Is(err, machine.ErrFork), errors.Is(err, machine.ErrNotReady),
+	case errors.Is(err, machine.ErrInvalidName):
+		return http.StatusBadRequest
+	case errors.Is(err, machine.ErrNotRunning), errors.Is(err, machine.ErrFork), errors.Is(err, machine.ErrNameTaken), errors.Is(err, machine.ErrNotReady),
 		errors.Is(err, machine.ErrSharesCommit), errors.Is(err, machine.ErrExecNotInSnapshot):
 		return http.StatusConflict
 	}
@@ -51,6 +53,9 @@ func (e *errAgenteCallado) Unwrap() error { return e.err }
 func validarFork(req api.ForkRequest) error {
 	if req.Count < 0 || req.Count > api.ForkMax {
 		return fmt.Errorf("count must be between 1 and %d", api.ForkMax)
+	}
+	if req.Name != "" && req.Count > 1 {
+		return errors.New("name only works with count 1")
 	}
 	if req.TTLSeconds < 0 || req.TTLSeconds > api.SandboxMaxTTL {
 		return fmt.Errorf("ttl_seconds must be between 1 and %d", api.SandboxMaxTTL)
@@ -87,7 +92,7 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	espera := time.Duration(req.ReadyTimeoutSeconds) * time.Second
 	snap, forks, err := s.mgr.Fork(r.Context(), src.ID, machine.ForkOptions{
-		Count: req.Count, TTLSeconds: req.TTLSeconds, OnTTL: req.OnTTL, Labels: req.Labels,
+		Count: req.Count, Name: req.Name, TTLSeconds: req.TTLSeconds, OnTTL: req.OnTTL, Labels: req.Labels,
 		SkipReady: req.SkipReady, ReadyWait: espera,
 		// Como al crear un sandbox: se devuelven cuando el agente ya escucha,
 		// porque quien las pide va a ejecutar algo en ellas acto seguido. Y,
