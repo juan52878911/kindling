@@ -64,6 +64,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - The overlay watcher no longer wakes every second when no machine is running.
 - rw shares: saving a file atomically (write a temporary file, rename it over the old one) gives the replaced file's bytes back to the quota, so editors, `git` and `npm` no longer end up in a false `ENOSPC`.
 - rw shares: creating a file that already exists without `O_EXCL` no longer changes its mode and owner.
+- Linux: each machine keeps at most 4096 open connections, so one guest can no longer fill the host's conntrack table; the daemon warns when `nf_conntrack_max` is too low for a few machines at that limit.
+- Linux: listing the host's addresses (three times per create, once under the network lock) takes one netlink dump instead of one per interface: 155 ms to 6.7 ms with 500 interfaces.
 
 ### Security
 
@@ -96,6 +98,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Live shares: the directory listings kept to report host changes are capped per session and shared between names of the same directory, so a guest can no longer grow the daemon's heap through a rw share.
 - Machines that mount the same host folder rw (graph `share` edges, or two `-share` of one directory) now spend one quota instead of one each.
 - The Firecracker balloon statistics are read with a 64 KiB limit.
+- Linux: only root, the daemon and whoever can use its socket can open connections from the host to a machine's guest agent (port 8080) or to the host side of its link; other local users get a refusal, and the agent is closed to forwarded traffic from outside the host.
 
 ## [1.0.0-rc.2] - 2026-11-10
 

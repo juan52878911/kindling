@@ -62,9 +62,17 @@ type DireccionHost struct {
 
 // DireccionesHost lista las direcciones IPv4 de las interfaces del host.
 // Variable para que los tests simulen un host compartido por dos daemons.
+//
+// En Linux es direccionesHost de subredes_linux.go: un solo volcado de netlink
+// para todas. direccionesPorInterfaz, la forma portable, pide a cada interfaz
+// sus direcciones, y en Linux cada Addrs() es un volcado RTM_GETADDR de todas
+// las del host: con N máquinas (un veth cada una), N volcados de N
+// direcciones, tres veces por create y uno de ellos bajo netMu.
 var DireccionesHost = direccionesHost
 
-func direccionesHost() ([]DireccionHost, error) {
+// direccionesPorInterfaz es DireccionesHost con lo que da la biblioteca
+// estándar, interfaz a interfaz.
+func direccionesPorInterfaz() ([]DireccionHost, error) {
 	ifs, err := stdnet.Interfaces()
 	if err != nil {
 		return nil, err
