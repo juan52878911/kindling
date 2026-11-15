@@ -10,14 +10,39 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// vmmVivoDe es el VMM vivo de id según liveVMs (0 si no hay). En Linux se
-// escanea /proc entero como siempre: con el jailer el socket está en el
-// chroot y las pistas no ahorran nada que importe. pistas son para macOS.
-func (m *Manager) vmmVivoDe(id string, _ ...int) int { return m.liveVMs()[id] }
+// vmmVivoDe es el VMM vivo de id (0 si no hay). Antes escaneaba /proc entero
+// en cada thaw: un ReadDir y un cmdline por proceso del host, con el cerrojo
+// de la máquina tomado, y en una ráfaga de thaws eso por cada uno. Ahora,
+// como en macOS (procesos_vz.go): primero los PID que ya se conocen (pistas:
+// el apuntado en el estado, el que dejó vivo su freeze); si ninguno es su VMM
+// y en sus sockets (el de su directorio y el del chroot del jailer) no
+// escucha nadie, no hay VMM suyo vivo: todo VMM nuestro escucha en el suyo
+// desde que arranca hasta que sale. Si algo contesta, o no se sabe, se
+// escanea /proc como antes.
+func (m *Manager) vmmVivoDe(id string, pistas ...int) int {
+	prefix := filepath.Join(m.root, "machines") + "/"
+	for _, pid := range pistas {
+		if pid <= 0 {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+		if err == nil && m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix) == id {
+			return pid
+		}
+	}
+	if nadieEscuchaEn(m.dir(id)+"/fc.sock") && nadieEscuchaEn(m.jailSock(id)) {
+		return 0
+	}
+	return m.liveVMs()[id]
+}
+
+// escaneosProc cuenta los escaneos de /proc de liveVMs (para las pruebas).
+var escaneosProc atomic.Int64
 
 // liveVMs escanea /proc y devuelve qué microVM posee cada firecracker vivo.
 //
@@ -25,6 +50,7 @@ func (m *Manager) vmmVivoDe(id string, _ ...int) int { return m.liveVMs()[id] }
 // "¿qué está corriendo ahí fuera?". Esa vuelta es lo que permite reconciliar sin
 // creerse el fichero de estado.
 func (m *Manager) liveVMs() map[string]int {
+	escaneosProc.Add(1)
 	out := map[string]int{}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -41,29 +67,37 @@ func (m *Manager) liveVMs() map[string]int {
 		if err != nil {
 			continue // murió mientras mirábamos, o no es nuestro
 		}
-		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-		for i, arg := range args {
-			// Camino normal: el socket lleva el prefijo de machines/, y es el
-			// argumento de --api-sock (ver vmmDeLinea: un curl --unix-socket
-			// al mismo socket no es un VMM).
-			if rest, ok := strings.CutPrefix(arg, prefix); ok && i > 0 && args[i-1] == argSocketVMM {
-				if id, ok := strings.CutSuffix(rest, "/fc.sock"); ok && id != "" && !strings.Contains(id, "/") {
-					out[id] = pid
-				}
-				continue
+		if id := m.vmmDeArgs(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"), prefix); id != "" {
+			out[id] = pid
+		}
+	}
+	return out
+}
+
+// vmmDeArgs es la máquina cuyo VMM es el proceso de línea de órdenes args, o
+// "" si no es un VMM nuestro. prefix es machines/ bajo la raíz.
+func (m *Manager) vmmDeArgs(args []string, prefix string) string {
+	for i, arg := range args {
+		// Camino normal: el socket lleva el prefijo de machines/, y es el
+		// argumento de --api-sock (ver vmmDeLinea: un curl --unix-socket
+		// al mismo socket no es un VMM).
+		if rest, ok := strings.CutPrefix(arg, prefix); ok && i > 0 && args[i-1] == argSocketVMM {
+			if id, ok := strings.CutSuffix(rest, "/fc.sock"); ok && id != "" && !strings.Contains(id, "/") {
+				return id
 			}
-			// Camino con jail: jailer lleva "--id <id>" y el socket es relativo
-			// al chroot, sin el prefijo. Se reconoce por el argumento --id.
-			if arg == "--id" && i+1 < len(args) {
-				if id := args[i+1]; id != "" && !strings.Contains(id, "/") {
-					if _, err := os.Stat(m.jailSock(id)); err == nil {
-						out[id] = pid
-					}
+			continue
+		}
+		// Camino con jail: jailer lleva "--id <id>" y el socket es relativo
+		// al chroot, sin el prefijo. Se reconoce por el argumento --id.
+		if arg == "--id" && i+1 < len(args) {
+			if id := args[i+1]; id != "" && !strings.Contains(id, "/") {
+				if _, err := os.Stat(m.jailSock(id)); err == nil {
+					return id
 				}
 			}
 		}
 	}
-	return out
+	return ""
 }
 
 // adopt comprueba si el proceso de una microVM sigue vivo y es realmente suyo.

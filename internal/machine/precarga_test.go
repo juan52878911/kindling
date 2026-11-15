@@ -13,7 +13,13 @@ import (
 // trozo y no sigue leyendo un volcado que ya nadie va a cargar.
 func TestPrecargarParaConElCtx(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mem.file")
-	if err := os.WriteFile(path, make([]byte, 8*precargaTrozo), 0o600); err != nil {
+	// Sin ceros: ZFS con compresión guarda los bloques de ceros como huecos,
+	// y precargar no los lee.
+	datos := make([]byte, 8*precargaTrozo)
+	for i := range datos {
+		datos[i] = byte(i) | 1
+	}
+	if err := os.WriteFile(path, datos, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if n := precargar(context.Background(), path); n != 8*precargaTrozo {

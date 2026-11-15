@@ -16,6 +16,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Thaw: at most 4 memory preloads run at once, and a failed thaw stops its preload; in a storm of 16 thaws, preloads now read 256 MiB from disk instead of 1.4 GiB.
 - Daemon restart: re-adopting a paused VMM resumes it and checks its dump seal without holding the manager lock.
 - Daemon restart: a machine re-adopted in the middle of a thaw now gets the clock and entropy resync the thaw never sent.
+- Linux: thawing a warm machine no longer scans all of `/proc`; it checks the known PID and the VMM socket first (0.64 ms to 0.02 ms per thaw with ~110 processes).
+- `run -from` and fork: a copy whose guest agent fails the resync is retried once and then not handed over, instead of running with the snapshot's clock and random state.
+- The memory of snapshots known to have no guest agent drops expired entries instead of growing with every fork.
 - Postgres credential proxy: a guest asking for protocol 3.2 now connects through pgbouncer older than 1.25, which rejects 3.2 with `08P01` instead of negotiating; the proxy retries once with 3.0. On macOS, with a kling-vz or kling-hv from this release.
 - The kindling-operator container image builds again; it was not published for v1.0.0-rc.2.
 - Built with Go 1.27.4, which fixes GO-2026-6859 (an HTTP/1 server crash in `net/http`).

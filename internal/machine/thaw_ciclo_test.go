@@ -152,6 +152,7 @@ func TestThawQueReadoptaReaplicaElTechoDeCPU(t *testing.T) {
 	m.bus = events.New()
 	id := "a1a1000000000003"
 	pid, _ := vmmFalso(t, m, id)
+	escucharComoVMM(t, filepath.Join(m.dir(id), "fc.sock"))
 	m.cgroupRoot = t.TempDir()
 	m.addForTest(id)
 	m.mu.Lock()
