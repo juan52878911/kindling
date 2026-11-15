@@ -25,6 +25,7 @@ func TestPprofQuedaDetrasDelToken(t *testing.T) {
 	}
 	for _, ruta := range rutas {
 		r := httptest.NewRequest(http.MethodGet, ruta, nil)
+		r.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != http.StatusUnauthorized {
@@ -34,6 +35,7 @@ func TestPprofQuedaDetrasDelToken(t *testing.T) {
 
 	// Y con el token sí responde: el guard no puede ser que esté roto.
 	r := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	r.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	r.Header.Set("Authorization", "Bearer s3cr3t")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -47,6 +49,7 @@ func TestPprofQuedaDetrasDelToken(t *testing.T) {
 func TestSinPprofNoHayRutas(t *testing.T) {
 	g := &Gateway{Scheduler: &scheduler.Scheduler{}, PprofEnabled: false}
 	r := httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil)
+	r.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	r.Header.Set("Authorization", "Bearer s3cr3t")
 	w := httptest.NewRecorder()
 	g.Handler("s3cr3t").ServeHTTP(w, r)

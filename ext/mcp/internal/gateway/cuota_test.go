@@ -47,6 +47,7 @@ func TestAgregadorAplicaCuotaYPopularidad(t *testing.T) {
 	h := gw.Handler("")
 	con := func(sid, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/mcp/_all", strings.NewReader(body))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer tok-ana")
 		if sid != "" {
@@ -114,6 +115,7 @@ func TestEnlaceAplicaCuotaDelTenant(t *testing.T) {
 	h := gw.Handler("")
 	con := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/mcp/fuera", strings.NewReader(cuerpoCall))
+		req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer tok-ana")
 		rec := httptest.NewRecorder()

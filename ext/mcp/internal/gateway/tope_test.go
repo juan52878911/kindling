@@ -19,6 +19,7 @@ func TestTopeDeReplicasEs503YNoAnotaFallo(t *testing.T) {
 	g := New(nil, 0, false, 0, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/mcp/echo", nil)
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	err := fmt.Errorf("%w: service %q has 16 instance(s) awake or starting (max 16)", scheduler.ErrMaxReplicas, "echo")
 	g.newSessionError(rec, req, "echo", err)
 
@@ -49,6 +50,7 @@ func TestTopeDeReplicasEs503YNoAnotaFallo(t *testing.T) {
 func TestErroresDelGatewayLlevanCodeEstable(t *testing.T) {
 	g := New(nil, 0, false, 0, "")
 	req := httptest.NewRequest(http.MethodPost, "/mcp/echo", nil)
+	req.Host = "127.0.0.1" // sin token, el gateway solo atiende a loopback
 	for _, c := range []struct {
 		err    error
 		status int

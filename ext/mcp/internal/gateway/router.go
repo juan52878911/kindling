@@ -127,7 +127,8 @@ func (r *Router) Handler(token string) http.Handler {
 		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	}
 
-	return logging(r.hosts[0].GW.AuthHandler(mux, token))
+	gw := r.hosts[0].GW
+	return logging(conLoopback(gw.Scheduler, gw.AuthHandler(mux, token), token))
 }
 
 // Reap libera las sesiones del agregador combinado que llevan ociosas más de

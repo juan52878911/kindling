@@ -17,7 +17,11 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -100,7 +104,8 @@ func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
 		}})
 	}
 
-	// Sin ningún token: autenticación desactivada, handler sin envolver.
+	// Sin ningún token: autenticación desactivada, handler sin envolver (el
+	// gateway MCP lo envuelve en SoloLoopback; ver AuthDisabled).
 	if len(reg) == 0 {
 		return h
 	}
@@ -136,6 +141,57 @@ func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
 }
 
 // authFail responde el 401 con la pista de cómo autenticarse.
+// AuthDisabled dice si AuthHandler(h, token) dejaría pasar sin token: ni token
+// único ni tenants con secreto.
+func (g *Scheduler) AuthDisabled(token string) bool {
+	if token != "" {
+		return false
+	}
+	for _, tl := range g.extraTenants {
+		if tl.Token != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// SoloLoopback rechaza (403) una petición cuyo Host u Origin no son de
+// loopback: localhost (y *.localhost), 127.0.0.0/8 o ::1. Es para un servidor
+// sin token: escuchar en loopback no basta, porque una página web puede hacer
+// que el navegador le hable a 127.0.0.1 con su propio nombre (DNS rebinding) o
+// mandarle un POST desde otro origen.
+func SoloLoopback(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !esLoopback(r.Host) {
+			api.HTTPError(w, "without a token the gateway only answers requests addressed to loopback (Host "+
+				strconv.Quote(r.Host)+")", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || !esLoopback(u.Host) {
+				api.HTTPError(w, "without a token the gateway refuses requests from another origin ("+
+					strconv.Quote(o)+")", http.StatusForbidden)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// esLoopback dice si host (con o sin puerto) nombra loopback.
+func esLoopback(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func authFail(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kindling"`)
 	api.HTTPError(w, "missing Authorization header: Bearer <token>, or the token is invalid.\n"+
