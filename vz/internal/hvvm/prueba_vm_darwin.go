@@ -20,6 +20,10 @@ func filtrarID(pfr0, pfr1, zfr0, smfr0 uint64) (uint64, uint64, uint64, uint64) 
 // pendiente cuadra.
 func pruebaCPUOn() int { return int(C.khv_prueba_cpu_on()) }
 
+// pruebaGuardarCPU es khv_prueba_guardar_cpu: los registros que guardar_cpu
+// no pudo leer de un vCPU que no existe.
+func pruebaGuardarCPU() int { return int(C.khv_prueba_guardar_cpu()) }
+
 // trazaPrueba hace un arranque de mentira para traza.c (khv_traza_prueba) y
 // devuelve su resumen.
 func trazaPrueba() string {

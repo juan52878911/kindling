@@ -293,3 +293,29 @@ func TestFlushModos(t *testing.T) {
 		t.Logf("%s: 300 × (4 KiB + FLUSH) in %v on the host", m.nombre, time.Since(t0))
 	}
 }
+
+// P7: un FLUSH a un disco de solo lectura se contesta bien y sin
+// F_FULLFSYNC: no hay nada que asentar, y vaciar la caché del SSD (la de todo
+// el Mac) en bucle es lo que puede pedir un invitado.
+func TestFlushDiscoRoSinSincronizar(t *testing.T) {
+	defer modoDisco(false, sincFull)
+	cfgDisco(0)
+	modoDisco(true, sincFull)
+	antes := sincsDisco()
+	t0 := time.Now()
+	for i := 0; i < 300; i++ {
+		if e := flushDisco(); e != 0 {
+			t.Fatalf("FLUSH on a read-only disk: status %d, want 0", e)
+		}
+	}
+	d := time.Since(t0)
+	if n := sincsDisco() - antes; n != 0 {
+		t.Fatalf("300 FLUSH on a read-only disk synced the file %d times, want 0", n)
+	}
+	t.Logf("read-only: 300 × FLUSH in %v on the host", d)
+	modoDisco(false, sincFull)
+	antes = sincsDisco()
+	if e := flushDisco(); e != 0 || sincsDisco()-antes != 1 {
+		t.Fatalf("FLUSH on a writable full disk: status %d, %d syncs, want 0 and 1", e, sincsDisco()-antes)
+	}
+}

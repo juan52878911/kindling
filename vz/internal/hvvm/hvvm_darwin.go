@@ -504,11 +504,13 @@ func Footprint() (uint64, error) {
 
 // Avisos son los contadores de avisos del invitado (notify) e interrupciones
 // hacia él de la red y los discos, acumulados desde que arrancó el proceso:
-// tx, rx, irq de red, notify de disco, irq de disco.
-func Avisos() [5]uint64 {
+// tx, rx, irq de red, notify de disco, irq de disco; y las salidas de los
+// vCPU: todas, del timer virtual, WFI atrapados y WFI que durmieron hasta el
+// tope (khv.h).
+func Avisos() [9]uint64 {
 	var v [C.KHV_N_MAX]C.uint64_t
 	C.khv_contadores(&v[0])
-	var out [5]uint64
+	var out [9]uint64
 	for i := range out {
 		out[i] = uint64(v[i])
 	}
