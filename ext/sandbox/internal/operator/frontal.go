@@ -90,8 +90,15 @@ func (f *FrontalClient) do(ctx context.Context, method, path string, body any, o
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// Create pide un sandbox nuevo a partir de spec.
-func (f *FrontalClient) Create(ctx context.Context, spec SandboxSpec) (*frontal.Sandbox, error) {
+// LabelK8sUID es la etiqueta con el UID del objeto Sandbox de Kubernetes que
+// pidió el sandbox. Es la clave de idempotencia del Create: un sandbox creado
+// cuya respuesta se perdió (plazo vencido, status sin escribir) se encuentra
+// por ella y se adopta en vez de crear otro.
+const LabelK8sUID = "k8s-uid"
+
+// Create pide un sandbox nuevo a partir de spec, etiquetado con uid (si no es
+// vacío) para poder encontrarlo después con ByUID.
+func (f *FrontalClient) Create(ctx context.Context, spec SandboxSpec, uid string) (*frontal.Sandbox, error) {
 	pet := frontal.CrearPeticion{
 		Template:   spec.Template,
 		Image:      spec.Image,
@@ -100,11 +107,48 @@ func (f *FrontalClient) Create(ctx context.Context, spec SandboxSpec) (*frontal.
 		Egress:     spec.Egress,
 		MemMiB:     spec.MemMiB,
 	}
+	if uid != "" {
+		pet.Labels = map[string]string{LabelK8sUID: uid}
+	}
 	var sb frontal.Sandbox
 	if err := f.do(ctx, http.MethodPost, "/v1/sandboxes", pet, &sb); err != nil {
 		return nil, err
 	}
 	return &sb, nil
+}
+
+// ByUID devuelve los sandboxes del tenant etiquetados con uid. Falla cerrado:
+// si algún host no contestó (lista parcial), es un error, porque "no está"
+// llevaría a crear otro.
+func (f *FrontalClient) ByUID(ctx context.Context, uid string) ([]frontal.Sandbox, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+"/v1/sandboxes", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	resp, err := f.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return nil, &frontalError{Code: resp.StatusCode, Message: string(b)}
+	}
+	if p := resp.Header.Get("X-Kindling-Partial"); p != "" {
+		return nil, fmt.Errorf("frontal: partial sandbox list (%s)", p)
+	}
+	var todos []frontal.Sandbox
+	if err := json.NewDecoder(resp.Body).Decode(&todos); err != nil {
+		return nil, err
+	}
+	var out []frontal.Sandbox
+	for _, sb := range todos {
+		if sb.Labels[LabelK8sUID] == uid {
+			out = append(out, sb)
+		}
+	}
+	return out, nil
 }
 
 // Get trae el estado actual de un sandbox por su id compuesto ("host/máquina").
