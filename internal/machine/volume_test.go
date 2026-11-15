@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,12 +152,19 @@ func TestNoSeBorraUnVolumenEnUso(t *testing.T) {
 		t.Error("el fichero se borró pese al error")
 	}
 
-	// Una máquina parada no lo retiene: su volumen ya no está montado.
+	// Parada no lo tiene montado, pero lo lleva puesto y su start lo
+	// necesita (TestRemoveVolumeRespetaLasParadas); borrada, ya no.
 	m.mu.Lock()
 	m.byID["a"].State = api.StateStopped
 	m.mu.Unlock()
+	if err := m.RemoveVolume("notas", false); !errors.Is(err, ErrVolumenEnUso) {
+		t.Errorf("con la máquina parada = %v; quería ErrVolumenEnUso", err)
+	}
+	m.mu.Lock()
+	delete(m.byID, "a")
+	m.mu.Unlock()
 	if err := m.RemoveVolume("notas", false); err != nil {
-		t.Errorf("con la máquina parada debería poder borrarse: %v", err)
+		t.Errorf("sin la máquina debería poder borrarse: %v", err)
 	}
 }
 
@@ -629,22 +639,39 @@ func TestElModoGrabadoEnElSnapshotNoSePuedeCambiar(t *testing.T) {
 // Salió en un soak de ocho horas: 130 de 260 congelaciones, el 100% de las de
 // servicios con volumen.
 func TestCongelarNoPideNadaAUnInvitadoPausado(t *testing.T) {
+	// Un agente de mentira que apunta cada petición que le llega.
+	var peticiones atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peticiones.Add(1)
+	}))
+	defer srv.Close()
+	// Un VMM "vivo" que no se mata de verdad: el PID de este proceso, y una
+	// señal que no se manda.
+	prevSenal, prevPlazo := senalMatar, plazoMuerte
+	senalMatar, plazoMuerte = func(int) {}, 10*time.Millisecond
+	t.Cleanup(func() { senalMatar, plazoMuerte = prevSenal, prevPlazo })
+
 	m := newTestManager(t)
 	m.mu.Lock()
-	m.byID["p"] = &api.Machine{
-		ID: "p", Name: "pausada", State: api.StateRunning, PID: 0,
-		IP:      "172.30.9.9",
-		Volumes: []api.VolumeAttachment{{Name: "v", Mount: "/data"}},
+	for _, id := range []string{"p", "k"} {
+		m.byID[id] = &api.Machine{
+			ID: id, Name: id, State: api.StateRunning, PID: os.Getpid(),
+			Forwards: map[string]string{strconv.Itoa(api.GuestPort): strings.TrimPrefix(srv.URL, "http://")},
+			Volumes:  []api.VolumeAttachment{{Name: "v", Mount: "/data"}},
+		}
 	}
 	m.mu.Unlock()
 
-	// Con PID 0 ninguna de las dos hace nada, que es lo que se quiere aquí: lo
-	// que se fija es que existan las DOS variantes y que Freeze use la que no
-	// habla con el invitado.
-	inicio := time.Now()
+	// El control: kill sí le pide al invitado que vacíe. Sin esto, un agente
+	// al que no llegase nada haría pasar la comprobación de abajo.
+	m.kill("k")
+	if peticiones.Load() == 0 {
+		t.Fatal("kill no habló con el invitado: la prueba no mide nada")
+	}
+	peticiones.Store(0)
 	m.killPaused("p")
-	if d := time.Since(inicio); d > time.Second {
-		t.Errorf("killPaused tardó %v: está hablando con el invitado", d)
+	if n := peticiones.Load(); n != 0 {
+		t.Errorf("killPaused le hizo %d petición(es) al invitado pausado", n)
 	}
 }
 
@@ -825,5 +852,32 @@ func TestSyncDeVolumen(t *testing.T) {
 	b, _ := json.Marshal(fc.Drive{DriveID: "volume0", PathOnHost: "/x"})
 	if strings.Contains(string(b), "kling_sync") {
 		t.Fatalf("un drive sin modo no debe llevar kling_sync: %s", b)
+	}
+}
+
+// RemoveVolume no borra el volumen de una máquina parada: su próximo start lo
+// necesita, y sus datos se perdían sin una palabra. El de una tumba sí.
+func TestRemoveVolumeRespetaLasParadas(t *testing.T) {
+	m := newTestManager(t)
+	escribirVolumen(t, m, "datos", "v1")
+	m.mu.Lock()
+	m.byID["aa01"] = &api.Machine{ID: "aa01", Name: "parada", State: api.StateStopped,
+		Volumes: []api.VolumeAttachment{{Name: "datos", Mount: "/data"}}}
+	m.byID["aa02"] = &api.Machine{ID: "aa02", Name: nombreTumba("aa02"), State: api.StateStopped,
+		Volumes: []api.VolumeAttachment{{Name: "datos", Mount: "/data"}}}
+	m.mu.Unlock()
+
+	err := m.RemoveVolume("datos", false)
+	if !errors.Is(err, ErrVolumenEnUso) || !strings.Contains(err.Error(), "parada") {
+		t.Fatalf("RemoveVolume con una parada que lo lleva = %v; quería ErrVolumenEnUso nombrándola", err)
+	}
+	if _, err := os.Stat(m.volumePath("datos")); err != nil {
+		t.Fatalf("borró el volumen igualmente: %v", err)
+	}
+	m.mu.Lock()
+	delete(m.byID, "aa01")
+	m.mu.Unlock()
+	if err := m.RemoveVolume("datos", false); err != nil {
+		t.Fatalf("sin la parada (solo la tumba) = %v; quería borrarlo", err)
 	}
 }

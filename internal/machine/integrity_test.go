@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,5 +207,39 @@ func TestVerifyIntegrityCubreMemFile(t *testing.T) {
 	os.Truncate(mem, 32<<20)
 	if err := m.verifyIntegrity(snap, dir); err == nil {
 		t.Fatal("the remembered verdict hid a different mem.file")
+	}
+}
+
+// La huella que se anota es la de los ficheros que se hashearon: si uno
+// cambia mientras se verifica, el veredicto no le vale al fichero nuevo y la
+// siguiente restauración lo vuelve a verificar (y lo pilla).
+func TestVerifyIntegrityHuellaDeAntesDeHashear(t *testing.T) {
+	dir := t.TempDir()
+	overlay := filepath.Join(dir, "overlay.ext4")
+	snapFile := filepath.Join(dir, "snap.file")
+	for p, s := range map[string]string{overlay: "rootfs dorado", snapFile: "volcado"} {
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootfsSHA, _ := digest.File(overlay)
+	snapSHA, _ := digest.File(snapFile)
+	snap := &api.Snapshot{Name: "svc", RootfsSHA256: rootfsSHA, SnapSHA256: snapSHA}
+
+	// Entre hashear y anotar, alguien lo cambia (otro tamaño: la huella difiere
+	// aunque la fecha no avance).
+	trasHashearIntegridad = func() {
+		if err := os.WriteFile(overlay, []byte("rootfs CAMBIADO a medias"), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	m := &Manager{}
+	err := m.verifyIntegrity(snap, dir)
+	trasHashearIntegridad = nil
+	if err != nil {
+		t.Fatalf("lo que se hasheó estaba íntegro: %v", err)
+	}
+	if err := m.verifyIntegrity(snap, dir); !errors.Is(err, errCorrupto) {
+		t.Fatalf("el overlay cambiado durante la verificación pasó sin volver a hashearse: %v", err)
 	}
 }

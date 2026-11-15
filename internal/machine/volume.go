@@ -379,6 +379,16 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 		return marcado(ErrVolumenEnUso, "volume %q is used by %d machine(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
+	// Las paradas también: no lo están usando, pero lo llevan puesto y su
+	// próximo `kling start` lo necesita. Borrarlo debajo de ellas perdía sus
+	// datos sin una palabra y dejaba la máquina sin poder arrancar. Las
+	// plantillas no: congelan con los volúmenes desmontados (Commit), y el
+	// flujo de compose (down -v y up) los vuelve a crear vacíos debajo de las
+	// suyas.
+	if paradas := m.paradasConVolumenLocked(name); len(paradas) > 0 {
+		return marcado(ErrVolumenEnUso, "volume %q is attached to %d stopped machine(s), which need it to start again: %s. "+
+			"Remove them first (kling rm <name>)", name, len(paradas), strings.Join(paradas, ", "))
+	}
 	if n := m.contarSnapshots(name); n > 0 && !conSnapshots {
 		return &api.StatusError{Code: http.StatusConflict, Message: fmt.Sprintf(
 			"volume %q has %d snapshot(s): remove them first (kling volume rm %s@<snapshot>)\n"+
@@ -403,6 +413,26 @@ func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 		return &api.StatusError{Code: http.StatusNotFound, Message: fmt.Sprintf("volume %q not found", name)}
 	}
 	return nil
+}
+
+// paradasConVolumenLocked son las máquinas paradas (o fallidas) que llevan el
+// volumen name: las que volumeUsersLocked no cuenta porque no lo usan ahora.
+// Las tumbas no: es un rm que ya no va a arrancar. Con m.mu tomado.
+func (m *Manager) paradasConVolumenLocked(name string) []string {
+	var out []string
+	for _, mc := range m.byID {
+		if (mc.State != api.StateStopped && mc.State != api.StateFailed) || esTumba(mc) {
+			continue
+		}
+		for _, v := range mc.Volumes {
+			if v.Name == name {
+				out = append(out, mc.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolvedVolume es un volumen ya validado y listo para engancharse.

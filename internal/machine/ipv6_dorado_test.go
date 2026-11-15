@@ -67,6 +67,9 @@ func TestCommitMarcaGuestIPv6StackSiLaRecetaLaPide(t *testing.T) {
 	if err := os.WriteFile(m.recipePath(img), []byte(`{"name":"android13","cmd":[],"guest_ipv6_stack":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(m.imagePath(img), []byte("ext4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	dir := m.snapDir("dorado")
 	falso.enGancho(func(metodo, ruta string) {
 		if ruta == "/snapshot/create" {

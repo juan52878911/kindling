@@ -568,8 +568,16 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
 	// pequeño, se sigue grabando y comprobando.
 	// El de la memoria, por lo mismo que el del overlay, tampoco en un fork.
-	var rootfsDigest, memDigest string
+	var rootfsDigest, memDigest, imgDigest, baseDigest string
 	if !deFork {
+		// El disco de solo lectura sobre el que se congela (disco_base.go):
+		// cacheado, solo se lee la primera vez que se usa la imagen. Sin
+		// imagen (solo en los tests: Run la exige) no hay disco que cubrir.
+		if mc.Image != "" {
+			if imgDigest, baseDigest, err = m.digestsDeImagen(mc.Image); err != nil {
+				return nil, fmt.Errorf("computing digest of image %q: %w", mc.Image, err)
+			}
+		}
 		if rootfsDigest, err = digest.Tree(goldOverlay); err != nil {
 			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
 		}
@@ -626,6 +634,8 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		ShareWait:      mc.ShareWait,
 		RootfsDigest:   rootfsDigest,
 		MemDigest:      memDigest,
+		ImageDigest:    imgDigest,
+		BaseDigest:     baseDigest,
 		SnapSHA256:     snapSHA,
 		KernelSHA256:   kernelSHA,
 		GuestIPv6Off:   guestIPv6Off,
@@ -939,7 +949,16 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 		}
 		return nil // snapshot legacy: no hay digests que comprobar
 	}
-	if m.integridadYaVista(snap.Name, snapDir) {
+	// El disco de solo lectura, en cada restauración: son dos stat con la
+	// caché caliente, y una imagen se puede reemplazar sin tocar el dorado.
+	if err := m.comprobarDiscoBase(snap); err != nil {
+		return err
+	}
+	// La huella se toma ANTES de hashear: es la de los ficheros que se van a
+	// leer. Tomada después, un cambio a medio hashear quedaba anotado como
+	// verificado y ya no se volvía a mirar mientras viviera el daemon.
+	huella, hayHuella := huellaDe(snapDir)
+	if hayHuella && m.integridadVista(snap.Name, huella) {
 		return nil
 	}
 	rootfs := snap.RootfsDigest // v2: en árbol; los dorados de antes, sha256 plano
@@ -964,9 +983,18 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 				snap.Name, chk.file, digestCorto(chk.want), digestCorto(got), snap.Name)
 		}
 	}
-	m.anotarIntegridad(snap.Name, snapDir)
+	if trasHashearIntegridad != nil {
+		trasHashearIntegridad()
+	}
+	if hayHuella {
+		m.anotarHuella(snap.Name, huella)
+	}
 	return nil
 }
+
+// trasHashearIntegridad, si no es nil, corre entre hashear un dorado y anotar
+// su veredicto (verifyIntegrity). Solo para los tests.
+var trasHashearIntegridad func()
 
 // errCorrupto marca que un dorado no está como se congeló (verifyIntegrity):
 // no es algo pasajero que se arregle reintentando.
@@ -1016,9 +1044,11 @@ func huellaDe(snapDir string) (huellaSnapshot, bool) {
 // una corrupción ocurrida mientras estaba parado.
 func (m *Manager) integridadYaVista(name, snapDir string) bool {
 	h, ok := huellaDe(snapDir)
-	if !ok {
-		return false
-	}
+	return ok && m.integridadVista(name, h)
+}
+
+// integridadVista dice si la huella h de name es la que pasó la verificación.
+func (m *Manager) integridadVista(name string, h huellaSnapshot) bool {
 	m.mu.RLock()
 	visto, hay := m.integridad[name]
 	m.mu.RUnlock()
@@ -1026,10 +1056,13 @@ func (m *Manager) integridadYaVista(name, snapDir string) bool {
 }
 
 func (m *Manager) anotarIntegridad(name, snapDir string) {
-	h, ok := huellaDe(snapDir)
-	if !ok {
-		return
+	if h, ok := huellaDe(snapDir); ok {
+		m.anotarHuella(name, h)
 	}
+}
+
+// anotarHuella apunta h como la huella verificada de name.
+func (m *Manager) anotarHuella(name string, h huellaSnapshot) {
 	m.mu.Lock()
 	if m.integridad == nil {
 		m.integridad = map[string]huellaSnapshot{}
@@ -1723,6 +1756,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 		Labels:    etiquetas,
 		CreatedAt: creada,
 		TTLAt:     &creada,
+		// El tope del overlay, ya con el disco recién copiado y antes de que
+		// lo toque ningún VMM (cow_vigilante.go).
+		OverlayMaxBytes: topeOverlayAlCrear(overlay, discoMiB),
 	}
 	if ai != nil {
 		// Lo suyo, como en frío: sus nombres de variables y su comando.
