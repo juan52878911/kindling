@@ -1039,7 +1039,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 |---|---|---|
 | `GET /info` | 200 | — |
 | `GET /machines` | 200 | — |
-| `POST /machines` | 201 | `413`/`400` cuerpo; `400` etiquetas `kling.graph*`; `runStatus`; `409`/`429`/`503`/`507` de admisión. Con `publish`: `403` puerto < 1024 (inquilino), `409` ocupado, `501`, `400`; si no se puede publicar, la máquina se borra |
+| `POST /machines` | 201 | `413`/`400` cuerpo; `400` etiquetas `kling.graph*`; `runStatus`; `409`/`429`/`503`/`507` de admisión. Con `publish`: `403` inquilino (con authz publicar es de admin), `409` ocupado, `501`, `400`; si no se puede publicar, la máquina se borra |
 | `GET /machines/{ref}` | 200 | `404` |
 | `POST /machines/{ref}/freeze` · `thaw` · `pause` · `stop` | 200 | `cicloStatus`; admisión al despertar |
 | `POST /machines/{ref}/squeeze` | 200 | `cicloStatus`; `409` con `mem_shared` sin `force` |
@@ -1114,7 +1114,7 @@ de `cicloStatus`: `400` lo que la petición trae mal, `404` lo que no existe,
 | `GET /events` | 200 NDJSON | `500` sin flusher |
 | `GET /metrics` · `GET /procstats` · `GET /debug/pprof/` | 200 | — |
 | `POST /cow/store/grow` | 200 | `413`/`400` cuerpo; `cicloStatus` (`400` tamaño que no vale); `501` sin almacén en esta plataforma |
-| `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` puerto < 1024 (inquilino); `publicarStatus` |
+| `POST /machines/{ref}/publish` | 200 | `404`; `413`/`400` cuerpo; `400` sin puertos; `403` inquilino (con authz publicar es de admin); `publicarStatus` |
 | `DELETE /machines/{ref}/publish` | 204 | `404` sin máquina o sin publicación; `400` `host` |
 | `GET /publish` | 200 | — |
 

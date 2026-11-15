@@ -707,6 +707,9 @@ func confinarE2fs(c *exec.Cmd, f *os.File) (func(), error) {
 		if os.Geteuid() == 0 {
 			return nil, fmt.Errorf("refusing to run %s unconfined as root: %s is missing", filepath.Base(c.Path), sandboxExec)
 		}
+		if jaulaE2fsExigida.Load() {
+			return nil, errSinJaulaE2fs(c.Path, sandboxExec+" is missing")
+		}
 		avisoSinSandboxE2fs.Do(func() {
 			log.Printf("warning: %s is missing: e2fsck, resize2fs and debugfs run unconfined, "+
 				"with the daemon's user, over disks the guest wrote", sandboxExec)
@@ -731,6 +734,9 @@ func confinamientoE2fs() string {
 	if _, err := os.Stat(sandboxExec); err != nil {
 		if os.Geteuid() == 0 {
 			return "blocked (" + sandboxExec + " missing, daemon is root)"
+		}
+		if jaulaE2fsExigida.Load() {
+			return "blocked (" + sandboxExec + " missing; daemon.require_e2fs_jail is on)"
 		}
 		return "none (" + sandboxExec + " missing)"
 	}

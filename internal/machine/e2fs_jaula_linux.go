@@ -225,9 +225,15 @@ func probarJaula() error {
 // Ajustes y kling doctor).
 func confinamientoE2fs() string {
 	if os.Geteuid() != 0 {
+		if jaulaE2fsExigida.Load() {
+			return "blocked (daemon without root; daemon.require_e2fs_jail is on)"
+		}
 		return "rlimit (daemon without root: same user, no namespaces)"
 	}
 	if err := sondaJaulaE2fs(); err != nil {
+		if jaulaE2fsExigida.Load() {
+			return "blocked (" + err.Error() + "; daemon.require_e2fs_jail is on)"
+		}
 		return "nobody+namespaces, no chroot (" + err.Error() + ")"
 	}
 	return "chroot+nobody+namespaces"

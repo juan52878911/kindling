@@ -237,6 +237,13 @@ func versionSellada(b []byte) int {
 // sellar cifra v con la clave del almacén; aad ata el resultado a su dueño.
 // Escribe la versión más baja que describe v (versionParaSellar).
 func (m *Manager) sellar(v any, aad string) ([]byte, error) {
+	return m.sellarEn(v, aad, versionParaSellar(v))
+}
+
+// sellarEn cifra v en la versión ver del almacén: la 0 no lleva cabecera (y
+// su dato autenticado es solo aad), como la escribía un kling ≤ v0.17. Lo
+// usa refrescarRespaldos para reescribir las copias .vN.bak en su versión.
+func (m *Manager) sellarEn(v any, aad string, ver int) ([]byte, error) {
 	key, err := m.claveCredenciales()
 	if err != nil {
 		return nil, err
@@ -249,13 +256,90 @@ func (m *Manager) sellar(v any, aad string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cab := cabeceraAlmacen(versionParaSellar(v))
+	var cab []byte
+	if ver > 0 {
+		cab = cabeceraAlmacen(ver)
+	}
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
 	out := append(cab, nonce...)
-	return aead.Seal(out, nonce, plain, append(cab, aad...)), nil
+	return aead.Seal(out, nonce, plain, append(append([]byte(nil), cab...), aad...)), nil
+}
+
+// guardarAlmacen sella v (no vacío) con el dueño aad, lo escribe en ruta
+// (escribirSellado) y refresca sus copias .vN.bak (refrescarRespaldos).
+func (m *Manager) guardarAlmacen(ruta string, v any, aad string) error {
+	sellado, err := m.sellar(v, aad)
+	if err != nil {
+		return err
+	}
+	if err := escribirSellado(ruta, sellado); err != nil {
+		return err
+	}
+	return m.refrescarRespaldos(ruta, v, aad)
+}
+
+// refrescarRespaldos reescribe cada copia <ruta>.vN.bak que haya con el
+// contenido de ahora en su versión N. La copia es la que `kling upgrade
+// -rollback` devuelve a su nombre, y si se quedase con el contenido de
+// cuando se migró, volver atrás resucitaría las credenciales que se han
+// rotado o quitado desde entonces. Lo que la versión N no sabe representar
+// (las sigv4 por debajo de su versión) no entra: tras volver atrás faltan, y
+// hay que darlas otra vez, que es fallar cerrado.
+//
+// Va después de escribir el almacén: si se corta entre los dos, la copia
+// vieja sigue hasta la siguiente escritura, pero nunca hay una copia más
+// nueva que el almacén al que respalda.
+func (m *Manager) refrescarRespaldos(ruta string, v any, aad string) error {
+	for ver := 0; ver < versionAlmacenMax; ver++ {
+		bak := esquema.RutaRespaldo(ruta, ver)
+		if _, err := os.Lstat(bak); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		sellado, err := m.sellarEn(representableEn(v, ver), aad, ver)
+		if err != nil {
+			return err
+		}
+		if err := escribirSellado(bak, sellado); err != nil {
+			return fmt.Errorf("refreshing the credential store backup: %w", err)
+		}
+	}
+	return nil
+}
+
+// representableEn es lo de v que cabe en un almacén de versión ver: sin las
+// credenciales que piden una versión mayor (versionParaSellar).
+func representableEn(v any, ver int) any {
+	switch creds := v.(type) {
+	case []credproxy.Credential:
+		if ver >= versionAlmacenSigV4 {
+			return creds
+		}
+		out := []credproxy.Credential{}
+		for _, c := range creds {
+			if c.Kind != credproxy.KindSigV4 {
+				out = append(out, c)
+			}
+		}
+		return out
+	case []api.CredentialSpec:
+		if ver >= versionAlmacenPlantillaSigV4 {
+			return creds
+		}
+		out := []api.CredentialSpec{}
+		for _, s := range creds {
+			if s.Type != credproxy.KindSigV4 {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return v
 }
 
 // abrir descifra lo que selló sellar con el mismo aad, de la versión que sea:
@@ -383,11 +467,7 @@ func (m *Manager) guardarCredenciales(id string, creds []credproxy.Credential) e
 	if len(creds) == 0 {
 		return escribirSellado(m.credPath(id), nil)
 	}
-	sellado, err := m.sellar(creds, id)
-	if err != nil {
-		return err
-	}
-	return escribirSellado(m.credPath(id), sellado)
+	return m.guardarAlmacen(m.credPath(id), creds, id)
 }
 
 // cargarCredenciales lee y descifra el almacén de la máquina id. Sin fichero
@@ -907,11 +987,7 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	if err := credproxy.ValidarPuertosDB(credencialesDeSpecs(todas)); err != nil {
 		return nil, comoPeticion(err)
 	}
-	sellado, err := m.sellar(todas, "snapshot:"+name)
-	if err != nil {
-		return nil, err
-	}
-	if err := escribirSellado(m.credSnapPath(name), sellado); err != nil {
+	if err := m.guardarAlmacen(m.credSnapPath(name), todas, "snapshot:"+name); err != nil {
 		return nil, err
 	}
 	return m.Snapshot(name)

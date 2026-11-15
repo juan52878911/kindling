@@ -7,9 +7,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -373,6 +376,44 @@ func writeJSONErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
 
+// lanzarNavegador arranca el programa que abre el navegador; variable para
+// que los tests vean su argv sin abrir nada.
+var lanzarNavegador = func(nombre string, args ...string) error {
+	return exec.Command(nombre, args...).Start()
+}
+
+// abrirMuro abre u en el navegador sin ponerla en el argv: lo que va en él lo
+// ve cualquier usuario del host con `ps`, y el camino secreto de u es lo
+// único que separa el muro de otro proceso local. El navegador recibe un
+// fichero 0600 en un directorio 0700 propio que redirige a u, y el fichero se
+// borra cuando el navegador ya ha tenido tiempo de leerlo.
+func abrirMuro(u string) error {
+	dir, err := os.MkdirTemp("", "kling-phone-wall-")
+	if err != nil {
+		return err
+	}
+	ruta := filepath.Join(dir, "wall.html")
+	pagina := "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=\"0;url=" +
+		html.EscapeString(u) + "\"><title>kling-phone wall</title>\n"
+	if err := os.WriteFile(ruta, []byte(pagina), 0o600); err != nil {
+		os.RemoveAll(dir)
+		return err
+	}
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	if err := lanzarNavegador(opener, ruta); err != nil {
+		os.RemoveAll(dir)
+		return err
+	}
+	time.AfterFunc(abrirMuroPlazo, func() { os.RemoveAll(dir) })
+	return nil
+}
+
+// abrirMuroPlazo es lo que vive la página de redirección.
+var abrirMuroPlazo = 30 * time.Second
+
 func cmdView(args []string) error {
 	fs := flag.NewFlagSet("view", flag.ContinueOnError)
 	host := hostFlag(fs)
@@ -409,11 +450,9 @@ func cmdView(args []string) error {
 	u := "http://" + ln.Addr().String() + prefix
 	fmt.Fprintf(a.out, "wall: %s (Ctrl-C to stop)\n", u)
 	if *open {
-		opener := "xdg-open"
-		if runtime.GOOS == "darwin" {
-			opener = "open"
+		if err := abrirMuro(u); err != nil {
+			fmt.Fprintf(a.errw, "warning: could not open the browser: %v\n", err)
 		}
-		_ = exec.Command(opener, u).Start()
 	}
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

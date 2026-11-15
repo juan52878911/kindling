@@ -56,6 +56,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `kling db clone` and `kling db slice` stop before masking when the source has triggers or rules set to `ENABLE ALWAYS` or `ENABLE REPLICA`.
 - State backups (`.vN.bak`) are written 0600, and the state root, `machines/` and `images/` are no longer readable by other users (0750).
 - `kling template rm` deletes the template's credentials; a new template with the same name no longer inherits them.
+- Rotating or removing a credential also rewrites the credential store's `.vN.bak` copies, so `kling upgrade -rollback` no longer brings back the old one.
+- An interactive shell whose client stops reading is cut after 2 minutes, in the daemon and in the guest agent, instead of holding one of the guest's 8 shell slots.
+- `kling-phone view -open` hands the browser a private redirect file instead of putting the wall's secret URL in the opener's argv.
+- With an authz policy, publishing ports (`publish` on a new machine and `POST /machines/{ref}/publish`) is admin-only.
+- `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 
 ## [1.0.0-rc.2] - 2026-11-10
 

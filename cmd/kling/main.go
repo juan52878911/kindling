@@ -431,6 +431,7 @@ func cmdDaemon(args []string) error {
 	daemon.Version = strings.TrimPrefix(Version, "v")
 	machine.SetCredAuditConfig(credAuditConfig())
 	machine.FijarFirmaExigida(requireSignedConfig())
+	machine.FijarJaulaE2fsExigida(requireE2fsJailConfig())
 	srv, err := daemon.New(*socket, *root, vmm, *sockUser, *runAs)
 	if err != nil {
 		return err
@@ -617,6 +618,18 @@ func cowConfig() machine.CoWConfig {
 		}
 	}
 	return c
+}
+
+// requireE2fsJailConfig lee daemon.require_e2fs_jail (por defecto off). Un
+// valor que no se entiende se avisa y vale on: quien lo escribió quería algo
+// distinto de lo de siempre, y lo seguro es la jaula.
+func requireE2fsJailConfig() bool {
+	v := loadConfig().Daemon.RequireE2fsJail
+	if err := config.ValidateRequireE2fsJail(v); err != nil {
+		log.Printf("warning: %v (using on)", err)
+		return true
+	}
+	return v == "on"
 }
 
 // requireSignedConfig lee daemon.require_signed (por defecto on). Un valor

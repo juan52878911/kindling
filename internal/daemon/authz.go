@@ -869,13 +869,15 @@ var camposRun = map[string]bool{
 	"ttl_seconds": false, "cpu_pct": false, "cpu_pct_default": false, "net_mibps": false,
 	"wait_ready": false, "ready_timeout_seconds": false, "allow_exec": false,
 	"on_ttl": false, "labels": false, "env": false, "share_wait": false,
-	"publish": false, "entrypoint": false, "cmd": false, "fresh": false,
+	"entrypoint": false, "cmd": false, "fresh": false,
 	// Solo tienen efecto con un volumen, que ya es de admin.
 	"volume_mount": false, "volume_read_only": false, "volume_wait": false,
 
 	"volumes": true, "volume": true, "shares": true,
 	// Abren puertos del loopback del host al invitado, aunque egress sea none.
 	"host_ports": true,
+	// Lo mismo, en 127.0.0.1 del host (publicarSoloAdmin).
+	"publish": true,
 	// Virtualización anidada: el invitado corre su propio hipervisor.
 	"nested": true,
 }
