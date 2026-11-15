@@ -88,6 +88,7 @@ state.json api.VolumeAttachment read_only bool
 state.json api.VolumeAttachment sync string ignorable
 state.json api.WakePhases cgroup_ms float64
 state.json api.WakePhases check_ms float64
+state.json api.WakePhases creds_ms float64 ignorable
 state.json api.WakePhases finish_ms float64
 state.json api.WakePhases forwards_ms float64
 state.json api.WakePhases load_ms float64

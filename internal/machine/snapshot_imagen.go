@@ -186,6 +186,17 @@ type estadoImagen struct {
 	// marcas: la marca que commit escribe antes del meta.json de cada
 	// snapshot por imagen en curso.
 	marcas map[string][]byte
+	// en curso: las preparaciones lanzadas que aún no han vuelto (con el
+	// borrado de su máquina). Close las para y las espera (pararPrepImagen):
+	// antes las cancelaba sin esperar, y el borrado de la máquina de
+	// preparación llegaba con el cierre empezado (que lo rechaza) o competía
+	// con la salida del proceso, y su VMM se quedaba sin dueño.
+	enCurso sync.WaitGroup
+	// parar se cierra al empezar Close; cerrado impide lanzar otra.
+	parar   chan struct{}
+	cerrado bool
+	// probar, en los tests, sustituye a prepararImagen.
+	probar func(ctx context.Context, req api.RunRequest, c claveImagen) error
 }
 
 type noImagen struct {
@@ -197,6 +208,32 @@ func (e *estadoImagen) iniciar() {
 	if e.preparando == nil {
 		e.preparando, e.no, e.prep, e.marcas = map[string]bool{}, map[string]noImagen{}, map[string]bool{}, map[string][]byte{}
 		e.uno = make(chan struct{}, 1)
+		e.parar = make(chan struct{})
+	}
+}
+
+// pararPrepImagen para la preparación en curso y espera, como mucho plazo, a
+// que vuelva con su máquina borrada; después no empieza ninguna más. Lo llama
+// Close antes de marcar el cierre: con el cierre marcado, Remove se niega.
+// Dice si acabó a tiempo.
+func (m *Manager) pararPrepImagen(plazo time.Duration) bool {
+	m.img.mu.Lock()
+	m.img.iniciar()
+	if !m.img.cerrado {
+		m.img.cerrado = true
+		close(m.img.parar)
+	}
+	m.img.mu.Unlock()
+	hecho := make(chan struct{})
+	go func() {
+		m.img.enCurso.Wait()
+		close(hecho)
+	}()
+	select {
+	case <-hecho:
+		return true
+	case <-time.After(plazo):
+		return false
 	}
 }
 
@@ -443,7 +480,7 @@ func (m *Manager) quizaPrepararImagen(req api.RunRequest, c claveImagen) {
 	nombre := c.nombre()
 	m.img.mu.Lock()
 	m.img.iniciar()
-	if m.img.preparando[nombre] {
+	if m.img.cerrado || m.img.preparando[nombre] {
 		m.img.mu.Unlock()
 		return
 	}
@@ -458,9 +495,17 @@ func (m *Manager) quizaPrepararImagen(req api.RunRequest, c claveImagen) {
 		return // otra en marcha: la próxima run lo intentará
 	}
 	m.img.preparando[nombre] = true
+	// Bajo m.img.mu, como cerrado: Close no puede empezar a esperar entre
+	// mirar cerrado y apuntarla.
+	m.img.enCurso.Add(1)
+	parar, preparar := m.img.parar, m.prepararImagen
+	if m.img.probar != nil {
+		preparar = m.img.probar
+	}
 	m.img.mu.Unlock()
 
 	go func() {
+		defer m.img.enCurso.Done()
 		defer func() {
 			m.img.mu.Lock()
 			delete(m.img.preparando, nombre)
@@ -471,13 +516,15 @@ func (m *Manager) quizaPrepararImagen(req api.RunRequest, c claveImagen) {
 		defer cancel()
 		go func() {
 			select {
+			case <-parar:
+				cancel()
 			case <-m.quit:
 				cancel()
 			case <-ctx.Done():
 			}
 		}()
 		t0 := time.Now()
-		err := m.prepararImagen(ctx, req, c)
+		err := preparar(ctx, req, c)
 		if err != nil {
 			hasta := time.Now().Add(reintentoPrepImagen)
 			var inc *errImagenIncompatible

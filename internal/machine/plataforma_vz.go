@@ -309,23 +309,46 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	if err := enviarPuentesVZ(ctx, c, puentes); err != nil {
 		return err
 	}
-	// Las credenciales que la máquina ya tuviera (un thaw o un reinicio), al
-	// kling-vz nuevo ANTES de que el invitado corra: despierta con el dominio
-	// cacheado apuntando a la pasarela, y así la primera petición ya encuentra
-	// el proxy con su clave. La reentrega de después (reentregarCredenciales)
-	// repite lo mismo, y además los marcadores en MMDS.
-	// Fuera de allowlist solo puede tener las de sus aristas credential, que
-	// van todas a otra máquina (entregarCredencialesNodo).
-	creds, err := m.cargarCredenciales(id)
-	if err != nil {
-		return err
-	}
-	if len(creds) > 0 && (red.Egress == string(knet.EgressAllowlist) || todasAMaquina(creds)) {
-		if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil, red.Egress); err != nil {
-			return err
-		}
-	}
+	m.credencialesAntesDeArrancar(ctx, c, id, red.Egress)
 	return m.reservarReenvios(ctx, c, id)
+}
+
+// credencialesAntesDeArrancar da las credenciales que la máquina ya tuviera
+// (un thaw o un reinicio) al VMM nuevo y a su proxy ANTES de que el invitado
+// corra: despierta con el dominio cacheado apuntando a la pasarela, y así la
+// primera petición ya encuentra el proxy con su clave. Fuera de allowlist
+// solo puede tener las de sus aristas credential, que van todas a otra
+// máquina (entregarCredencialesNodo).
+//
+// Un fallo no impide arrancar (F5), como en la reentrega de después: antes
+// abortaba el thaw entero, y una máquina con un -upstream con nombre no se
+// descongelaba sin DNS aunque no fuera a usar la base. El VMM es nuevo y no
+// ha recibido nada, así que el dominio con credencial no se desvía a ningún
+// proxy: falla cerrado, y queda dicho en el log. La reentrega de después lo
+// intenta otra vez.
+//
+// Deja en m.credsPrevias si entregó y cuánto tardó: el thaw lo usa para no
+// repetir la entrega entera después de cargar (solo los marcadores de MMDS) y
+// para separar este tiempo de la red en sus fases.
+func (m *Manager) credencialesAntesDeArrancar(ctx context.Context, c *fc.Client, id, egress string) {
+	m.credsPrevias.Delete(id)
+	t0 := time.Now()
+	creds, err := m.cargarCredenciales(id)
+	if err == nil && (len(creds) == 0 || (egress != string(knet.EgressAllowlist) && !todasAMaquina(creds))) {
+		return
+	}
+	if err == nil {
+		// Un reenvío de otra máquina pudo abrirse en el puerto de un
+		// -upstream desde la última entrega: lo mismo que mira la de después.
+		err = m.comprobarUpstreams(creds)
+	}
+	if err == nil {
+		err = registrarCredenciales(m.ctxCredenciales(ctx), c, nil, creds, m.credAuditPath(id), nil, egress)
+	}
+	m.credsPrevias.Store(id, entregaPrevia{ok: err == nil, ms: msDesde(time.Since(t0))})
+	if err != nil {
+		log.Printf("%s: its credentials were not handed over before it runs (%v): it starts without them, and the domains with a credential fail closed until they are", shortID(id), err)
+	}
 }
 
 // reservarReenvios pide los reenvíos ANTES de que el invitado corra: kling-vz
@@ -462,18 +485,25 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	quien, kinds := "kling-vz", info.CredentialKinds
 	var cp *fc.Client
 	if split {
+		// El proxy se lanza desde el directorio del ejecutable que contesta en
+		// el socket de la máquina: tiene que ser el VMM del daemon (S9), como
+		// en el broker (esKlingVZ). Si no, quien escuchara en ese socket
+		// elegiría qué programa recibe las claves.
+		vmmPID, vmmExe := vmm.datos()
+		if bin := binVMMDe(ctx); !mismoEjecutable(vmmExe, bin) {
+			return fmt.Errorf("the process on the machine's VMM socket (pid %d) runs %q, not the daemon's VMM %q: not launching a credential proxy for it", vmmPID, vmmExe, bin)
+		}
 		// Sin credenciales y sin proxy aparte vivo no hace falta lanzarlo:
-		// basta con apagar el reenvío.
-		cp, err = credproxyDe(ctx, cpdir, vmm, len(creds) > 0)
+		// basta con apagar el reenvío. Si el thaw ya lo está lanzando
+		// (precalentarCredproxy), se espera a ese en vez de lanzar otro.
+		esperarCredproxyEnCurso(ctx, cpdir)
+		var ck []string
+		cp, ck, err = credproxyDe(ctx, cpdir, vmmPID, vmmExe, len(creds) > 0)
 		if err != nil {
 			return err
 		}
 		if cp != nil {
-			ci, err := cp.KlingInfo(ctx)
-			if err != nil {
-				return fmt.Errorf("asking kling-credproxy for its credential kinds: %w", err)
-			}
-			quien, kinds = "kling-credproxy", ci.CredentialKinds
+			quien, kinds = "kling-credproxy", ck
 		}
 	}
 	if len(creds) > 0 {

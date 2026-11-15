@@ -110,6 +110,25 @@ func credAuditConfig() credproxy.AuditConfig {
 // le dice al proxy aparte (el VMM no es quien lo decide).
 var registrarCredenciales = registrarCredencialesPlataforma
 
+// claveBinVMM lleva en el ctx de registrarCredenciales el ejecutable con el
+// que el daemon lanza los VMM (m.fcBin). En macOS, el proxy aparte se lanza
+// desde el directorio del VMM que contesta en el socket de la máquina, y sin
+// compararlo con este, quien escuchara ahí decidía qué binario recibe las
+// claves (credproxy_vz.go). En Linux no se usa.
+type claveBinVMM struct{}
+
+// ctxCredenciales es ctx con m.fcBin para registrarCredenciales. Sin candado,
+// como spawn: fcBin no cambia en producción, y quien llama puede tener m.mu.
+func (m *Manager) ctxCredenciales(ctx context.Context) context.Context {
+	return context.WithValue(ctx, claveBinVMM{}, m.fcBin)
+}
+
+// binVMMDe es el ejecutable de los VMM que puso ctxCredenciales, o "".
+func binVMMDe(ctx context.Context) string {
+	s, _ := ctx.Value(claveBinVMM{}).(string)
+	return s
+}
+
 // egresoDe es el modo de salida de la máquina id ("" si no existe). Toma
 // m.mu: no se llama con él tomado.
 func (m *Manager) egresoDe(id string) string {
@@ -677,7 +696,7 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id), m.egresoDe(id)); err != nil {
+	if err := registrarCredenciales(m.ctxCredenciales(ctx), c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id), m.egresoDe(id)); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -812,7 +831,29 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID), mc.Egress); err != nil {
+	if err := registrarCredenciales(m.ctxCredenciales(ctx), c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID), mc.Egress); err != nil {
+		return 0, err
+	}
+	return len(creds), nil
+}
+
+// entregaPrevia es cómo fue la entrega de credenciales antes de que el
+// invitado corriera (macOS, Manager.credsPrevias): si entregó y en cuántos ms.
+type entregaPrevia struct {
+	ok bool
+	ms float64
+}
+
+// marcadoresCredenciales es reentregarCredenciales cuando el VMM nuevo y su
+// proxy ya recibieron el juego antes de cargar (macOS, thaw): solo repone los
+// marcadores en MMDS y anota CredentialAnyDatabase.
+func (m *Manager) marcadoresCredenciales(ctx context.Context, mc *api.Machine, c *fc.Client) (int, error) {
+	creds, err := m.cargarCredenciales(mc.ID)
+	if err != nil || len(creds) == 0 {
+		return 0, err
+	}
+	mc.CredentialAnyDatabase = anyDatabaseDe(creds)
+	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return 0, err
 	}
 	return len(creds), nil

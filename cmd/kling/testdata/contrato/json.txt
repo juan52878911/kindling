@@ -148,6 +148,7 @@ kling inspect m1:  volumes[].read_only bool
 kling inspect m1:  volumes[].sync string
 kling inspect m1:  wake.cgroup_ms number
 kling inspect m1:  wake.check_ms number
+kling inspect m1:  wake.creds_ms number
 kling inspect m1:  wake.finish_ms number
 kling inspect m1:  wake.forwards_ms number
 kling inspect m1:  wake.load_ms number
@@ -254,6 +255,7 @@ kling ps -a -json:  [].volumes[].read_only bool
 kling ps -a -json:  [].volumes[].sync string
 kling ps -a -json:  [].wake.cgroup_ms number
 kling ps -a -json:  [].wake.check_ms number
+kling ps -a -json:  [].wake.creds_ms number
 kling ps -a -json:  [].wake.finish_ms number
 kling ps -a -json:  [].wake.forwards_ms number
 kling ps -a -json:  [].wake.load_ms number
@@ -349,6 +351,7 @@ kling sandbox ls -json:  [].volumes[].read_only bool
 kling sandbox ls -json:  [].volumes[].sync string
 kling sandbox ls -json:  [].wake.cgroup_ms number
 kling sandbox ls -json:  [].wake.check_ms number
+kling sandbox ls -json:  [].wake.creds_ms number
 kling sandbox ls -json:  [].wake.finish_ms number
 kling sandbox ls -json:  [].wake.forwards_ms number
 kling sandbox ls -json:  [].wake.load_ms number

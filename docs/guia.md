@@ -490,6 +490,14 @@ $ kling logs <ref> -tail 50        # consola serie: la única ventana hacia dent
 **Reiniciar el daemon no mata las microVMs.** La unidad lleva `KillMode=process`; sin
 eso systemd arrastra el cgroup entero y se lleva por delante las máquinas en marcha.
 
+La otra cara: solo las recoge un daemon que vuelva **con la misma raíz**. Un daemon
+privado o de pruebas que se para para no volver (y cuya raíz se borra) deja sus VMM
+vivos con su RAM, su red y sus ficheros abiertos, y no caducan, porque el TTL lo aplica
+el daemon. Antes de pararlo, `kling stop` o `kling rm` de sus máquinas; si no se hizo,
+el registro del cierre dice cuántas siguen. La máquina de preparación de un snapshot
+por imagen (`kling-imgprep-*`) no se queda: el cierre la cancela y espera a que se
+borre.
+
 ### Medido con 8 instancias
 
 ```

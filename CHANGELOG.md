@@ -75,6 +75,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - rw shares: creating a file that already exists without `O_EXCL` no longer changes its mode and owner.
 - Linux: each machine keeps at most 4096 open connections, so one guest can no longer fill the host's conntrack table; the daemon warns when `nf_conntrack_max` is too low for a few machines at that limit.
 - Linux: listing the host's addresses (three times per create, once under the network lock) takes one netlink dump instead of one per interface: 155 ms to 6.7 ms with 500 interfaces.
+- macOS: thawing a machine with credentials launches `kling-credproxy` while the VMM starts and no longer repeats the whole hand-over after loading; on an M4 the daemon's thaw goes from 47–49 to 41 ms (median), and its credential part has its own `creds` wake phase.
+- macOS: a thaw whose credentials can't be handed over before loading (an `-upstream` name that does not resolve, a missing `kling-credproxy`) no longer fails; the machine wakes up without them and the credential domains fail closed, as when the later hand-over fails.
+- Daemon shutdown cancels an image snapshot preparation and waits for it to remove its `kling-imgprep-*` machine, which used to survive with its VMM; it also logs how many machines keep their VMM running.
+- macOS: `credproxy.log` is rotated like the console log.
+- macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
+- Removing a template forgets its integrity verdict.
 
 ### Security
 
@@ -97,6 +103,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - `GET /events` is capped at 256 streams (16 per tenant, 429 beyond) and cuts a client that stops reading after a minute.
 - With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
+- macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
 
 ### Changed
 

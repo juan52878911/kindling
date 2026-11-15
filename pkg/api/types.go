@@ -302,6 +302,9 @@ type WakePhases struct {
 	SpawnMS float64 `json:"spawn_ms"`
 	// SocketMS es esperar a que su socket de API conteste.
 	SocketMS float64 `json:"socket_ms"`
+	// CredsMS es dar sus credenciales al VMM y a su proxy aparte antes de
+	// cargar (solo macOS, con credenciales); va fuera de NetMS.
+	CredsMS float64 `json:"creds_ms,omitempty"`
 	// LoadMS es LoadSnapshot con reanudación (lo que siempre midió ThawMS), o
 	// el Resume de una pausada.
 	LoadMS float64 `json:"load_ms"`

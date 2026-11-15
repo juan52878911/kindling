@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
+	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
@@ -94,13 +95,14 @@ func (v *vmmDeSocket) datos() (int, string) {
 }
 
 // credproxyDe devuelve un cliente del API del proxy aparte de la máquina
-// (cpdir es su directorio) cuyo VMM es el proceso vmm. Si no corre, lo lanza
-// cuando lanzar; si no, devuelve nil sin error. Cada conexión del cliente
-// comprueba de nuevo quién está al otro lado (dialCredproxy).
-func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar bool) (*fc.Client, error) {
-	vmmPID, vmmExe := vmm.datos()
+// (cpdir es su directorio) cuyo VMM es el proceso vmmPID, que ejecuta vmmExe
+// (ya comprobado contra el VMM del daemon), y los tipos de credencial que
+// dice entender. Si no corre, lo lanza cuando lanzar; si no, devuelve nil sin
+// error. Cada conexión del cliente comprueba de nuevo quién está al otro lado
+// (dialCredproxy).
+func credproxyDe(ctx context.Context, cpdir string, vmmPID int, vmmExe string, lanzar bool) (*fc.Client, []string, error) {
 	if vmmPID <= 0 || vmmExe == "" {
-		return nil, errors.New("cannot tell which process is the machine's VMM (LOCAL_PEERPID on its socket)")
+		return nil, nil, errors.New("cannot tell which process is the machine's VMM (LOCAL_PEERPID on its socket)")
 	}
 	bin := filepath.Join(filepath.Dir(vmmExe), credproxy.SplitBinary)
 	api := filepath.Join(cpdir, credproxy.SplitAPISock)
@@ -116,12 +118,12 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 		// ejecutable con el que lo lanzaron, y uno actualizado en otra ruta
 		// (Homebrew cambia de Cellar) es otro. No guarda nada que no se le
 		// pueda volver a dar: se cambia por uno nuevo.
-		_, ierr := cp.ConPlazo(2 * time.Second).KlingInfo(ctx)
+		info, ierr := cp.ConPlazo(2 * time.Second).KlingInfo(ctx)
 		if ierr == nil {
-			return cp, nil
+			return cp, info.CredentialKinds, nil
 		}
 		if pid <= 0 {
-			return nil, fmt.Errorf("the credential proxy does not answer: %w", ierr)
+			return nil, nil, fmt.Errorf("the credential proxy does not answer: %w", ierr)
 		}
 		log.Printf("%s: the credential proxy (pid %d) does not answer this daemon (%v): replacing it", shortID(filepath.Base(filepath.Dir(cpdir))), pid, ierr)
 		matarYEsperar(pid)
@@ -134,20 +136,29 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 		// socket (ni con unas claves que ya no son de nadie).
 		matarYEsperar(otro.pid)
 	case errors.Is(err, errCredproxyAjeno):
-		return nil, err
+		return nil, nil, err
+	case errors.Is(err, errCredproxySinIdentificar):
+		// Alguien escucha pero cerró antes de poder preguntar quién es: lo
+		// que hace un proxy que no admite a este daemon. Sin esto el nuevo le
+		// quitaba el socket y el viejo seguía vivo, con sus claves, hasta que
+		// muriera el VMM. Se busca por su línea de órdenes (--dir) y su
+		// ejecutable, de este usuario.
+		for _, p := range credproxiesDeDir(cpdir, bin) {
+			matarYEsperar(p)
+		}
 	}
 	if !lanzar {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if fi, err := os.Stat(bin); err != nil || fi.IsDir() {
-		return nil, fmt.Errorf("%s not found next to %s: on macOS the credential proxy runs in its own process; reinstall kindling (or `make vz install`)", credproxy.SplitBinary, vmmExe)
+		return nil, nil, fmt.Errorf("%s not found next to %s: on macOS the credential proxy runs in its own process; reinstall kindling (or `make vz install`)", credproxy.SplitBinary, vmmExe)
 	}
 	if err := prepararDirCredproxy(cpdir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	nuevo, err := lanzarCredproxy(bin, cpdir, vmmPID, vmmExe)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	limite := time.Now().Add(plazoCredproxy)
 	espera := time.Millisecond
@@ -158,8 +169,9 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 			// Conectar no basta: tiene que contestar. Con -race en un runner
 			// cargado, la primera petición tras el cambio de proceso llegó a
 			// dar EOF (TestCredproxyQueNoContestaSeCambia, job de APFS).
-			if _, err = cp.ConPlazo(time.Second).KlingInfo(ctx); err == nil {
-				return cp, nil
+			var info *fc.KlingInfo
+			if info, err = cp.ConPlazo(time.Second).KlingInfo(ctx); err == nil {
+				return cp, info.CredentialKinds, nil
 			}
 		}
 		if errors.Is(err, errCredproxyAjeno) || ctx.Err() != nil || time.Now().After(limite) {
@@ -170,11 +182,79 @@ func credproxyDe(ctx context.Context, cpdir string, vmm *vmmDeSocket, lanzar boo
 			// Uno lanzado que no contesta no se queda colgado hasta que
 			// muera su VMM.
 			matarYEsperar(nuevo)
-			return nil, fmt.Errorf(msg, err)
+			return nil, nil, fmt.Errorf(msg, err)
 		}
 		time.Sleep(espera)
 		espera = min(2*espera, 20*time.Millisecond)
 	}
+}
+
+// credproxyEnCurso: los lanzamientos adelantados (precalentarCredproxy) que
+// aún no han acabado, por directorio del proxy, con un canal que se cierra al
+// acabar. La entrega de credenciales espera al de su máquina antes de mirar si
+// el proxy corre: si no, lanzaría otro a la vez.
+var credproxyEnCurso sync.Map // cpdir -> chan struct{}
+
+// esperarCredproxyEnCurso espera, si lo hay, al lanzamiento adelantado del
+// proxy de cpdir (o a que ctx se acabe).
+func esperarCredproxyEnCurso(ctx context.Context, cpdir string) {
+	if v, ok := credproxyEnCurso.Load(cpdir); ok {
+		select {
+		case <-v.(chan struct{}):
+		case <-ctx.Done():
+		}
+	}
+}
+
+// precalentarCredproxy lanza el proxy aparte de la máquina id en cuanto su
+// VMM existe (pid, recién salido de spawn), a la vez que el VMM arranca y que
+// el daemon espera a su socket y le da la red: antes se lanzaba después, en
+// serie, dentro de la entrega previa a cargar el estado (P1, medido en
+// docs/proxy-macos-separado.md). Solo si la máquina tiene credenciales que
+// irían a él. No entrega nada: las claves las da después la entrega previa
+// (redAntesDeArrancar), que espera a este lanzamiento y encuentra el proxy
+// corriendo; si aquí algo falla, ella lo intenta otra vez y dice por qué.
+//
+// El PID es el del hijo que acaba de lanzar el daemon (no el de quien
+// conteste en un socket) y su ejecutable se compara con el VMM del daemon:
+// el proxy vigila ese PID y solo acepta en su reenvío a ese ejecutable.
+func (m *Manager) precalentarCredproxy(id string, pid int) {
+	cpdir := filepath.Dir(m.credAuditPath(id))
+	hecho := make(chan struct{})
+	credproxyEnCurso.Store(cpdir, hecho)
+	go func() {
+		defer func() {
+			credproxyEnCurso.CompareAndDelete(cpdir, hecho)
+			close(hecho)
+		}()
+		m.mu.RLock()
+		mc := m.byID[id]
+		egress := ""
+		if mc != nil {
+			egress = mc.Egress
+		}
+		m.mu.RUnlock()
+		if mc == nil {
+			return
+		}
+		creds, err := m.cargarCredenciales(id)
+		if err != nil || len(creds) == 0 || (egress != string(knet.EgressAllowlist) && !todasAMaquina(creds)) {
+			return
+		}
+		exe, err := rutaEjecutable(pid)
+		if err != nil || !mismoEjecutable(exe, m.fcBin) {
+			return // la entrega previa lo dirá
+		}
+		// Sin saber aún si el VMM sabe pasarle las conexiones (CapSplit): eso
+		// lo pregunta la entrega, por su socket. Un kling-credproxy junto a un
+		// VMM que no lo sabe sería de otra instalación a medias; si se lanza,
+		// no recibe nada y muere con el VMM.
+		ctx, cancel := context.WithTimeout(context.Background(), plazoCredproxy+2*time.Second)
+		defer cancel()
+		if _, _, err := credproxyDe(ctx, cpdir, pid, exe, true); err != nil {
+			log.Printf("%s: launching its credential proxy early: %v (retrying when handing over the credentials)", shortID(id), err)
+		}
+	}()
 }
 
 // matarYEsperar manda SIGKILL a pid y espera (poco) a que deje de existir,
@@ -197,9 +277,45 @@ func dialCredproxy(ctx context.Context, api, bin string, vmmPID int) (net.Conn, 
 	pid, err := comprobarCredproxy(conn, bin, vmmPID)
 	if err != nil {
 		conn.Close()
+		var otro *credproxyDeOtroVMM
+		if !errors.Is(err, errCredproxyAjeno) && !errors.As(err, &otro) {
+			err = fmt.Errorf("%w: %v", errCredproxySinIdentificar, err)
+		}
 		return nil, 0, err
 	}
 	return conn, pid, nil
+}
+
+// errCredproxySinIdentificar: algo acepta en el socket del proxy, pero no se
+// pudo saber quién (LOCAL_PEERPID falla en cuanto el otro extremo cierra, y
+// un proxy que no admite a este daemon cierra en el acto).
+var errCredproxySinIdentificar = errors.New("could not identify the process on the credential proxy socket")
+
+// credproxiesDeDir son los kling-credproxy de este usuario (el ejecutable
+// bin) cuya línea de órdenes dice --dir cpdir.
+func credproxiesDeDir(cpdir, bin string) []int {
+	pids, err := pidsVivos()
+	if err != nil {
+		return nil
+	}
+	var out []int
+	buf := make([]byte, procArgsMax)
+	for _, p := range pids {
+		if int(p) == os.Getpid() {
+			continue
+		}
+		linea, err := lineaDeOrdenes(p, buf)
+		if err != nil {
+			continue
+		}
+		if _, dir, ok := argsCredproxy(linea); !ok || dir != cpdir {
+			continue
+		}
+		if ruta, err := rutaEjecutable(int(p)); err == nil && mismoEjecutable(ruta, bin) {
+			out = append(out, int(p))
+		}
+	}
+	return out
 }
 
 func comprobarCredproxy(conn net.Conn, bin string, vmmPID int) (int, error) {
