@@ -574,7 +574,6 @@ static uint64_t vblk_sincs;
 // vq_pedir_aviso escribiera el avail_event más allá de lo que vq_ptrs
 // comprobó, hasta 2 KiB fuera de la RAM. Quien llama vuelca q->last_avail y
 // q->used_idx en b->s.q bajo b->mu al acabar.
-
 static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool *irq, bool *quedan) {
   uint16_t *avail;
   uint8_t *used;
