@@ -2868,7 +2868,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 	if allocatedBytes(memPath) > cacheTibiaMaxBytes {
 		dropCache(memPath)
 	} else {
-		precargar(memPath)
+		precargar(context.Background(), memPath)
 	}
 
 	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
@@ -3673,9 +3673,16 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		memPath = full
 		crono.marcaMemoria(tm)
 	}
+	// La precarga de abajo, que se corta si el thaw falla (soltarFull y
+	// abortar): leer un volcado que ya nadie va a cargar solo quita disco al
+	// resto. Sin el ctx de la petición: tras un thaw que sale bien, la
+	// precarga sigue mientras el invitado despierta, aunque quien lo pidió ya
+	// tenga su respuesta.
+	ctxPrecarga, cortarPrecarga := context.WithCancel(context.WithoutCancel(ctx))
 	// El mem.full de este despertar, si algo falla antes de abortar (que lo
 	// retira igual): GiB por copia en ext4 hasta el siguiente thaw.
 	soltarFull := func() {
+		cortarPrecarga()
 		if base != "" {
 			_ = os.Remove(filepath.Join(dir, memFull))
 			m.borrarMemoriaAlmacen(mc.ID)
@@ -3684,9 +3691,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
 	// invitado no toca todo al despertar, y leerla entera competiría con el
-	// resto del host por el disco.
+	// resto del host por el disco. Y solo si hay turno (precargasMax).
 	if allocatedBytes(memPath) <= precargaMaxBytes {
-		go precargar(memPath)
+		precargarEnFondo(ctxPrecarga, memPath)
 	}
 
 	// Puerta de arranque: descongelar es cargar un snapshot en KVM —mapear su
@@ -3761,6 +3768,7 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// enrutaba a una microVM vacía que no contesta nunca, y sweep() no lo
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
+		cortarPrecarga()
 		if pid > 0 {
 			// Esperando a que muera, como start.devolver (M3): sin esperar, un
 			// reintento inmediato veía el VMM moribundo en liveVMs, lo

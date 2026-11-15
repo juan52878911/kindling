@@ -3,6 +3,7 @@
 package machine
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -107,7 +108,7 @@ func TestPrecargarDarwinLeeLosDatosYSaltaLosHuecos(t *testing.T) {
 			t.Skipf("first hole at %d, want %d: the filesystem doesn't report holes", h, mib)
 		}
 	}
-	precargar(path)
+	precargar(context.Background(), path)
 
 	for _, off := range []int64{0, 6 * mib} {
 		if r := residentes(t, path, off, mib); r != mib {

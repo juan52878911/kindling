@@ -56,6 +56,23 @@ const resyncReintento = 250 * time.Millisecond
 //     cargado, y saltarse el resync ahí sería repartir el mismo CSPRNG.
 const resyncSinAgenteTTL = 10 * time.Minute
 
+// recordarSinAgente apunta que la restauración de clave no tiene agente
+// hasta ahora+resyncSinAgenteTTL, y de paso retira las claves de snapshot
+// caducadas. Antes no se borraban nunca: una por dorado sin agente, y cada
+// fork es un dorado nuevo, así que el mapa crecía con la vida del daemon.
+// Las de thaw (claveThaw, sin caducidad) las gestionan Freeze, Thaw y rm.
+func (m *Manager) recordarSinAgente(clave string, ahora time.Time) {
+	m.resyncSinAgente.Range(func(k, v any) bool {
+		if c, _ := k.(string); strings.HasPrefix(c, "s:") {
+			if hasta, ok := v.(time.Time); ok && !ahora.Before(hasta) {
+				m.resyncSinAgente.Delete(k)
+			}
+		}
+		return true
+	})
+	m.resyncSinAgente.Store(clave, ahora.Add(resyncSinAgenteTTL))
+}
+
 // claveThaw y claveSnapshot son las claves de resyncSinAgente.
 func claveThaw(id string) string { return "m:" + id }
 func claveSnapshot(s *api.Snapshot) string {
@@ -71,6 +88,26 @@ func (m *Manager) resyncInstancia(ctx context.Context, id string, snap *api.Snap
 		return resultadoResync{}
 	}
 	return m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
+}
+
+// resyncCopia es el resync de una copia recién restaurada de snap (run -from,
+// fork). Un agente que debía contestar y no lo hizo (un plazo, un 5xx: un
+// host cargado en una tanda de forks) dejaba antes la copia entregada igual,
+// con el reloj, el machine-id y la generación del dorado, y en macOS (sin
+// VMGenID) el CSPRNG de sus hermanas; solo quedaba un aviso en el log. Ahora
+// se reintenta una vez y, si vuelve a fallar, error: quien restaura no la
+// entrega, como con un snapshot por imagen. Un agente anterior o una imagen
+// sin agente no son fallo (resultadoResync.fallo).
+func (m *Manager) resyncCopia(ctx context.Context, id string, snap *api.Snapshot) (resultadoResync, error) {
+	res := m.resyncInstancia(ctx, id, snap)
+	if !res.fallo {
+		return res, nil
+	}
+	log.Printf("%s: the resync after restoring from %s failed; retrying it once", shortID(id), snap.Name)
+	if res = m.resyncInstancia(ctx, id, snap); res.fallo {
+		return res, errors.New("the guest agent did not resync after the restore, so this copy would keep the clock and random state of the snapshot")
+	}
+	return res, nil
 }
 
 // resyncClient no reutiliza conexiones: cada llamada va a una microVM recién
@@ -142,7 +179,7 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) resul
 	}
 	if err != nil {
 		if clave != "" && errors.Is(err, errResyncNadie) {
-			m.resyncSinAgente.Store(clave, time.Now().Add(resyncSinAgenteTTL))
+			m.recordarSinAgente(clave, time.Now())
 		}
 		m.avisarResync(image, name, err)
 		// Un agente anterior o nadie escuchando no tienen ganchos que lanzar;

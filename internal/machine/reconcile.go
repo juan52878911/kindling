@@ -29,13 +29,14 @@ import (
 // vivas. Sin esto, kling afirmaría cosas falsas: máquinas "running" cuyo proceso
 // murió, o namespaces de máquinas que ya no existen.
 func (m *Manager) reconcile() {
-	m.reconciliarEstado()
+	m.resyncTrasReconcile(m.reconciliarEstado())
 	// Fuera de m.mu: escanea los procesos (ver killOrphanVMMs).
 	m.killOrphanVMMs()
 }
 
-// reconciliarEstado es reconcile salvo la caza de VMMs huérfanos.
-func (m *Manager) reconciliarEstado() {
+// reconciliarEstado es reconcile salvo la caza de VMMs huérfanos. Devuelve
+// las máquinas readoptadas que necesitan un resync (un thaw cortado).
+func (m *Manager) reconciliarEstado() (resyncPendientes []string) {
 	// Lo primero es MIRAR, y hacerlo fuera del lock porque lee /proc.
 	//
 	// El estado en disco no es la verdad: se escribe con debounce y fuera del
@@ -47,6 +48,12 @@ func (m *Manager) reconciliarEstado() {
 	// Y a cada VMM vivo, en qué estado está su invitado (A7), también fuera
 	// del lock: es una petición HTTP por VMM.
 	estados := m.estadosVMM(live)
+	// Y lo que readoptable necesita de disco y del VMM (el sello del volcado,
+	// el Resume de un invitado en pausa), también fuera: un digest por
+	// volcado y hasta plazoEstadoVMM por VMM, que con m.mu tomado hacían
+	// esperar a todo lo que ya corre (el broker de kling-vz, los vigilantes
+	// de los adoptados).
+	previas := m.prepararReadopcion(live, estados)
 	// Para las que corrían con el overlay sin sincronizar (fallidaTrasCorte).
 	arranque, conArranque := arranqueHost()
 
@@ -90,10 +97,18 @@ func (m *Manager) reconciliarEstado() {
 		}
 		// Un VMM vivo que no se puede readoptar tal cual (A7): un commit que el
 		// reinicio cortó, o un invitado en pausa que figura despierto.
-		if pid, alive := live[mc.ID]; alive && !m.readoptable(mc, pid, estados[mc.ID]) {
+		if pid, alive := live[mc.ID]; alive && !m.readoptable(mc, pid, estados[mc.ID], previas[mc.ID]) {
 			delete(live, mc.ID)
 		}
 		if pid, alive := live[mc.ID]; alive {
+			// Un thaw cortado tras cargar el volcado (el sello ya retirado, la
+			// máquina aún warm en disco): su invitado corre, o corre ahora que
+			// readoptable lo reanudó, con el reloj y la entropía del volcado.
+			// Pasa por el resync que el thaw no llegó a hacer, en segundo
+			// plano y tras soltar m.mu (resyncTrasReconcile).
+			if mc.State == api.StateWarm || mc.State == api.StateFailed {
+				resyncPendientes = append(resyncPendientes, mc.ID)
+			}
 			// Está viva: se readopta y NO se toca nada suyo.
 			m.socket[mc.ID] = m.socketDe(mc.ID, pid)
 			// Una pausada sigue pausada: su VMM vive, pero el invitado no
@@ -218,6 +233,7 @@ func (m *Manager) reconciliarEstado() {
 
 	m.sweepMachineDirs()
 	fc.BarrerEnlaces(m.root)
+	return resyncPendientes
 }
 
 // killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
@@ -604,7 +620,10 @@ func (m *Manager) clienteReconcile(id string, pid int) *fc.Client {
 //     tras un volcado fallido (reanudar_pendiente.go).
 //   - despierta figurando en pausa (un Resume cortado antes de persistir):
 //     pasa a running.
-func (m *Manager) readoptable(mc *api.Machine, pid int, estado string) bool {
+//
+// Lo que eso pide de disco y del VMM (el sello y el Resume) ya viene hecho en
+// previa, de prepararReadopcion, fuera de m.mu.
+func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa previaReadopcion) bool {
 	dir := m.dir(mc.ID)
 	hay, pidMarca := marcaCommitDe(dir)
 	if hay && pidMarca > 0 && pidMarca != pid {
@@ -625,14 +644,17 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string) bool {
 	}
 	switch {
 	case estado == "Paused" && mc.State != api.StatePaused:
-		if existe(filepath.Join(dir, marcaOK)) && volcadoValido(dir, mc.FrozenAt) == nil {
+		if previa.sellado {
 			log.Printf("reconcile: %s (%s): its VMM (pid %d) is paused and its memory dump is sealed; not re-adopting it",
 				mc.Name, shortID(mc.ID), pid)
 			return false
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
-		err := m.clienteReconcile(mc.ID, pid).Resume(ctx)
-		cancel()
+		err := previa.errReanudar
+		if !previa.reanudado {
+			// No se intentó (no debería pasar: prepararReadopcion mira todas
+			// las de este caso). Sin E/S aquí: lo reintenta el vigilante.
+			err = errors.New("not attempted while reconciling")
+		}
 		if err == nil {
 			log.Printf("reconcile: %s (%s) was paused although its state said %q; resumed it",
 				mc.Name, shortID(mc.ID), mc.State)
@@ -656,6 +678,106 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string) bool {
 		mc.State = api.StateRunning
 	}
 	return true
+}
+
+// previaReadopcion es lo que readoptable necesita saber de un VMM en pausa
+// que figura despierto, mirado antes de tomar m.mu (prepararReadopcion).
+type previaReadopcion struct {
+	// sellado: su volcado sigue sellado y vale; no se reanuda.
+	sellado bool
+	// reanudado: se le pidió el Resume, con el resultado en errReanudar.
+	reanudado   bool
+	errReanudar error
+}
+
+// prepararReadopcion hace, fuera de m.mu, la E/S de readoptable para cada VMM
+// vivo cuyo invitado está en pausa sin que la máquina figure en pausa:
+// comprobar el sello del volcado (un digest) y, si no vale, reanudarlo (hasta
+// plazoEstadoVMM por VMM, todos a la vez como estadosVMM). Se salta lo que
+// reconcile no va a reanudar: el VMM que dejó vivo un Freeze
+// (vmmCongeladoEnDisco) y el de un commit cortado (marcaCommitDe). Al
+// arrancar el daemon nadie más cambia las máquinas, así que lo leído aquí
+// sigue valiendo cuando reconcile toma m.mu.
+func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]string) map[string]previaReadopcion {
+	type candidata struct {
+		id, dir   string
+		pid       int
+		congelada *time.Time
+	}
+	var cands []candidata
+	m.mu.RLock()
+	for id, pid := range live {
+		mc := m.byID[id]
+		if mc == nil || estados[id] != "Paused" || mc.State == api.StatePaused {
+			continue
+		}
+		var congelada *time.Time
+		if mc.FrozenAt != nil {
+			t := *mc.FrozenAt
+			congelada = &t
+		}
+		cands = append(cands, candidata{id: id, dir: m.dir(id), pid: pid, congelada: congelada})
+	}
+	m.mu.RUnlock()
+
+	out := make(map[string]previaReadopcion, len(cands))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, c := range cands {
+		if pidCongeladoApuntado(c.dir) == c.pid {
+			continue
+		}
+		if hay, pidMarca := marcaCommitDe(c.dir); hay && (pidMarca <= 0 || pidMarca == c.pid) {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var p previaReadopcion
+			if existe(filepath.Join(c.dir, marcaOK)) && volcadoValido(c.dir, c.congelada) == nil {
+				p.sellado = true
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), plazoEstadoVMM)
+				p.errReanudar = m.clienteReconcile(c.id, c.pid).Resume(ctx)
+				cancel()
+				p.reanudado = true
+			}
+			mu.Lock()
+			out[c.id] = p
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// pidCongeladoApuntado es el PID que guarda la marca de VMM vivo de un Freeze
+// (ficheroVMMCongelado) en dir, o 0. Solo lee: vmmCongeladoEnDisco, con m.mu,
+// es quien decide y limpia.
+func pidCongeladoApuntado(dir string) int {
+	b, err := os.ReadFile(filepath.Join(dir, ficheroVMMCongelado))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// resyncTrasReconcile manda, en segundo plano, el resync de un thaw a las
+// máquinas ids que reconcile readoptó a medio despertar (un thaw cortado
+// tras cargar el volcado): sin él seguían con el reloj de cuando se
+// congelaron y el CSPRNG del volcado. Como resyncTrasReanudar, atado a la
+// ejecución readoptada: si para entonces es otra, no se manda.
+func (m *Manager) resyncTrasReconcile(ids []string) {
+	for _, id := range ids {
+		if ej, ok := m.ejecucionDe(id); ok {
+			log.Printf("reconcile: %s: re-adopted in the middle of a thaw; resyncing its clock and entropy", shortID(id))
+			go m.resyncEnFondo(id, ej, api.ResyncThaw)
+		}
+	}
 }
 
 // hasSnapshot dice si una máquina tiene un congelado completo en disco.

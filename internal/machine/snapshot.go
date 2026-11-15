@@ -2006,7 +2006,12 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
 	fases.marca("resume")
-	resync := m.resyncInstancia(ctx, id, snap)
+	// Si el agente debía contestar y no lo hace, la copia no se entrega
+	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
+	resync, err := m.resyncCopia(ctx, id, snap)
+	if err != nil {
+		return abortar(fmt.Errorf("snapshot %s: %w", req.From, err))
+	}
 	fases.marca("resync")
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
 	// agente lanza el servicio. Sin resync no: sus procesos nacerían con el
