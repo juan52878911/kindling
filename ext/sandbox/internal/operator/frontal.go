@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/origen"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -32,7 +33,7 @@ type FrontalClient struct {
 // KLING_SANDBOX_URL y KLING_SANDBOX_TOKEN (por entorno, nunca por flag: son
 // secretos y la URL del tenant, no parámetros de arranque del proceso).
 func NewFrontalClient(baseURL, token string) *FrontalClient {
-	return &FrontalClient{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second}}
+	return &FrontalClient{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: origen.SoloMismoOrigen}}
 }
 
 // frontalError es un error del frontal con su código HTTP, para que el que

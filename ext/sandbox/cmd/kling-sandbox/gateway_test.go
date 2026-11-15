@@ -117,6 +117,21 @@ func TestLeerTenantsConAdmins(t *testing.T) {
 		t.Fatalf("tenants: %+v", ts)
 	}
 
+	// Los campos 5 y 6 son los máximos de mem_mib y vcpus por sandbox.
+	t.Setenv("KLING_SANDBOX_ADMINS", "")
+	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:2048:2,bob:tok2::::8")
+	ts, err = leerTenants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts[0].MaxMemMiB != 2048 || ts[0].MaxVCPUs != 2 || ts[1].MaxMemMiB != 0 || ts[1].MaxVCPUs != 8 {
+		t.Fatalf("limits: %+v", ts)
+	}
+	t.Setenv("KLING_SANDBOX_TENANTS", "ana:tok1:10:5:mucho")
+	if _, err := leerTenants(); err == nil {
+		t.Fatal("expected an error for a bad max_mem_mib")
+	}
+
 	// Un admin que no es ningún tenant es una errata, no un permiso que se ignora.
 	t.Setenv("KLING_SANDBOX_ADMINS", "opss")
 	if _, err := leerTenants(); err == nil {

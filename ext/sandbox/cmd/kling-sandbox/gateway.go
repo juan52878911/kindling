@@ -88,6 +88,8 @@ func cmdGateway(args []string) error {
 	insecure := fs.Bool("insecure-listen", false, "allow plain HTTP on a non-loopback address (tokens travel in the clear)")
 	imagen := fs.String("image", "", "image used when a request brings neither template nor image")
 	abandono := fs.Duration("abandon", 0, "how long a sandbox may sit unused before it is destroyed (default 24h)")
+	maxMem := fs.Int("max-mem-mib", 0, "largest mem_mib a sandbox may ask for, for tenants without their own (default 4096)")
+	maxCPU := fs.Int("max-vcpus", 0, "largest vcpus a sandbox may ask for, for tenants without their own (default 4)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -116,6 +118,8 @@ func cmdGateway(args []string) error {
 		Tenants:          tenants,
 		ImagenPorDefecto: *imagen,
 		Abandono:         a.Reap,
+		MaxMemMiB:        *maxMem,
+		MaxVCPUs:         *maxCPU,
 		Log:              log.New(os.Stderr, "", log.LstdFlags),
 	})
 	if err != nil {
@@ -183,7 +187,7 @@ func nombres(m map[string]string) []string {
 // de kindling-mcp a su token.
 //
 //	KLING_SANDBOX_TOKEN=xxx                              un inquilino "default", sin tope
-//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máximo de sandboxes[:máximo de shells]]
+//	KLING_SANDBOX_TENANTS=ana:tok1:10:5,bob:tok2:5       nombre:token[:máx. sandboxes[:máx. shells[:máx. mem_mib[:máx. vcpus]]]]
 //	KLING_SANDBOX_ADMINS=ana                             tenants que ven /v1/hosts y las métricas de todos
 func leerTenants() ([]frontal.Tenant, error) {
 	var out []frontal.Tenant
@@ -199,8 +203,8 @@ func leerTenants() ([]frontal.Tenant, error) {
 		// sandboxes) no se mueven de sitio, así que una configuración escrita
 		// antes de que existiera el máximo de shells se sigue leyendo igual.
 		partes := strings.Split(t, ":")
-		if len(partes) < 2 || len(partes) > 4 || partes[0] == "" || partes[1] == "" {
-			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells]]", t)
+		if len(partes) < 2 || len(partes) > 6 || partes[0] == "" || partes[1] == "" {
+			return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q is not name:token[:max_sandboxes[:max_shells[:max_mem_mib[:max_vcpus]]]]", t)
 		}
 		te := frontal.Tenant{Nombre: partes[0], Token: partes[1]}
 		if len(partes) > 2 && partes[2] != "" {
@@ -216,6 +220,20 @@ func leerTenants() ([]frontal.Tenant, error) {
 				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_shells has to be a number", t)
 			}
 			te.MaxShells = n
+		}
+		if len(partes) > 4 && partes[4] != "" {
+			n, err := strconv.Atoi(partes[4])
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_mem_mib has to be a number", t)
+			}
+			te.MaxMemMiB = n
+		}
+		if len(partes) > 5 && partes[5] != "" {
+			n, err := strconv.Atoi(partes[5])
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("KLING_SANDBOX_TENANTS: %q: max_vcpus has to be a number", t)
+			}
+			te.MaxVCPUs = n
 		}
 		out = append(out, te)
 	}

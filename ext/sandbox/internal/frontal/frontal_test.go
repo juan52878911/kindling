@@ -370,6 +370,36 @@ func TestLimitesRechazanCon429(t *testing.T) {
 	crea(t, srv, tokenBob, CrearPeticion{Image: "base"})
 }
 
+func TestLimitesDeMemoriaYVCPUsPorTenant(t *testing.T) {
+	f := nuevoFalso(t)
+	srv, _ := montar(t, map[string]*falso{"a": f},
+		Tenant{Nombre: "alice", Token: tokenAlice, MaxMemMiB: 1024, MaxVCPUs: 2},
+		Tenant{Nombre: "bob", Token: tokenBob})
+
+	// Por encima del máximo propio: 400 y nada nace en el daemon.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", MemMiB: 1025}), 400)
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", VCPUs: 3}), 400)
+	f.mu.Lock()
+	n := len(f.maquinas)
+	f.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d machines created over the limit", n)
+	}
+	// En el máximo, y sin pedir nada (lo de la imagen), pasa.
+	crea(t, srv, tokenAlice, CrearPeticion{Image: "base", MemMiB: 1024, VCPUs: 2})
+	crea(t, srv, tokenAlice, CrearPeticion{Image: "base"})
+
+	// Bob no trae máximos: le tocan los del frontal.
+	esperaCodigo(t, pide(t, srv, tokenBob, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", MemMiB: MaxMemMiBPorDefecto + 1}), 400)
+	esperaCodigo(t, pide(t, srv, tokenBob, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", VCPUs: MaxVCPUsPorDefecto + 1}), 400)
+	crea(t, srv, tokenBob, CrearPeticion{Image: "base", MemMiB: MaxMemMiBPorDefecto, VCPUs: MaxVCPUsPorDefecto})
+
+	// Un máximo negativo no arranca.
+	if _, err := Nuevo(Opciones{Hosts: hosts.Nuevo(nil), Tenants: []Tenant{{Nombre: "x", Token: "t", MaxMemMiB: -1}}}); err == nil {
+		t.Fatal("negative mem_mib limit accepted")
+	}
+}
+
 func TestExecEnStreamingYConWait(t *testing.T) {
 	f := nuevoFalso(t)
 	f.execLibera = make(chan struct{})

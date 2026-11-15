@@ -72,6 +72,13 @@ type Tenant struct {
 	// sandbox nuevo, pero sí un proceso del daemon y una conexión que este
 	// frontal mantiene en pie, y ambos son un recurso que un tenant puede acaparar.
 	MaxShells int
+	// MaxMemMiB y MaxVCPUs acotan lo que un sandbox de este tenant puede pedir
+	// (mem_mib y vcpus de la petición). 0 = el máximo por defecto del frontal
+	// (Opciones.MaxMemMiB / Opciones.MaxVCPUs). Sin ellos, un solo token pide una
+	// máquina del tamaño del host y deja sin memoria a los demás tenants aunque
+	// MaxSandboxes sea 1.
+	MaxMemMiB int
+	MaxVCPUs  int
 	// Admin ve lo que es del operador y no de un tenant: /v1/hosts (los
 	// endpoints de los daemons) y las métricas de TODOS los tenants. Sin él,
 	// /v1/hosts es un 403 y /v1/metrics solo enseña las series del que llama.
@@ -88,6 +95,12 @@ type Opciones struct {
 	ImagenPorDefecto string
 	// TTLPorDefecto en segundos; 0 = api.SandboxDefaultTTL.
 	TTLPorDefecto int
+
+	// MaxMemMiB y MaxVCPUs son el máximo de mem_mib y vcpus por sandbox para
+	// los tenants que no traen el suyo. 0 = MaxMemMiBPorDefecto /
+	// MaxVCPUsPorDefecto.
+	MaxMemMiB int
+	MaxVCPUs  int
 
 	// Abandono es cuánto puede llevar un sandbox sin usarse antes de que la
 	// limpieza lo borre. Es el segundo plazo, distinto del TTL: el TTL lo
@@ -146,6 +159,14 @@ type Servidor struct {
 // visibles ("host/máquina"), así que ni barras ni espacios ni vacíos.
 var nombreValido = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// Máximos por sandbox cuando ni el tenant ni el frontal dicen otro. Holgados
+// para un agente que compila o corre tests, y pequeños frente a un host: un
+// tenant necesita muchos sandboxes, no uno enorme, para acaparar la máquina.
+const (
+	MaxMemMiBPorDefecto = 4096
+	MaxVCPUsPorDefecto  = 4
+)
+
 // Nuevo construye el frontal. Falla si no hay ningún tenant con token: este
 // servidor se expone a la red y sin token sería el daemon a pelo.
 func Nuevo(o Opciones) (*Servidor, error) {
@@ -156,6 +177,16 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		if !nombreValido.MatchString(h.Nombre) {
 			return nil, fmt.Errorf("host name %q is not valid (letters, digits, '.', '_', '-')", h.Nombre)
 		}
+	}
+	if o.MaxMemMiB < 0 || o.MaxVCPUs < 0 {
+		return nil, errors.New("default mem_mib and vcpus limits can't be negative")
+	}
+	maxMem, maxCPU := o.MaxMemMiB, o.MaxVCPUs
+	if maxMem == 0 {
+		maxMem = MaxMemMiBPorDefecto
+	}
+	if maxCPU == 0 {
+		maxCPU = MaxVCPUsPorDefecto
 	}
 	vistos := map[string]bool{}
 	var tenants []Tenant
@@ -172,8 +203,14 @@ func Nuevo(o Opciones) (*Servidor, error) {
 		if t.Token == "" {
 			return nil, fmt.Errorf("tenant %q has an empty token", t.Nombre)
 		}
-		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 {
+		if t.MaxSandboxes < 0 || t.MaxPorPlantilla < 0 || t.MaxShells < 0 || t.MaxMemMiB < 0 || t.MaxVCPUs < 0 {
 			return nil, fmt.Errorf("tenant %q: limits can't be negative", t.Nombre)
+		}
+		if t.MaxMemMiB == 0 {
+			t.MaxMemMiB = maxMem
+		}
+		if t.MaxVCPUs == 0 {
+			t.MaxVCPUs = maxCPU
 		}
 		tenants = append(tenants, t)
 	}

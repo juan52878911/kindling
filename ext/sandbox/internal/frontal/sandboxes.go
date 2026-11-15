@@ -383,6 +383,10 @@ func (s *Servidor) handleCrear(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := dentroDeLimites(t, pet); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 
 	// Cuota. Se cuenta lo vivo en los daemons más lo que este proceso tiene en
 	// camino, y se reserva el hueco ANTES de crear para que dos peticiones a la
@@ -488,6 +492,19 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 		if !api.KeyPattern.MatchString(k) {
 			return fmt.Errorf("label %q is not valid (lowercase letters, digits, '.', '_', '-')", k)
 		}
+	}
+	return nil
+}
+
+// dentroDeLimites rechaza un sandbox más grande de lo que el tenant puede pedir.
+// mem_mib o vcpus a 0 son "lo de la plantilla o la imagen", que fija el
+// operador, así que no se acotan aquí.
+func dentroDeLimites(t *Tenant, p CrearPeticion) error {
+	if t.MaxMemMiB > 0 && p.MemMiB > t.MaxMemMiB {
+		return fmt.Errorf("mem_mib %d is over the limit of tenant %s (%d)", p.MemMiB, t.Nombre, t.MaxMemMiB)
+	}
+	if t.MaxVCPUs > 0 && p.VCPUs > t.MaxVCPUs {
+		return fmt.Errorf("vcpus %d is over the limit of tenant %s (%d)", p.VCPUs, t.Nombre, t.MaxVCPUs)
 	}
 	return nil
 }

@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/ext/sandbox/internal/origen"
 )
 
 const (
@@ -90,8 +92,8 @@ func NewKubeClient(c *KubeConfig) *KubeClient {
 	return &KubeClient{
 		base:      strings.TrimSuffix(c.BaseURL, "/"),
 		token:     c.Token,
-		http:      &http.Client{Transport: transport, Timeout: 30 * time.Second},
-		watchHTTP: &http.Client{Transport: transport},
+		http:      &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: origen.SoloMismoOrigen},
+		watchHTTP: &http.Client{Transport: transport, CheckRedirect: origen.SoloMismoOrigen},
 	}
 }
 

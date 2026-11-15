@@ -260,9 +260,12 @@ func tokenize(s string) ([]token, error) {
 			toks = append(toks, token{k: word, text: strings.ToUpper(s[i:j]), glued: glued})
 			i = j
 		case c >= '0' && c <= '9':
-			j := i
-			for j < len(s) && (isIdentChar(s[j]) || s[j] == '.') {
-				j++
+			j := endNumber(s, i)
+			// Un número pegado a una palabra ("1INTO") es "trailing junk" en
+			// Postgres 15+, pero antes se lee como el número y LA PALABRA: si
+			// el número se la tragara, la palabra no pasaría por las listas.
+			if j < len(s) && isIdentChar(s[j]) {
+				return nil, reject("a number glued to a word (%q)", s[i:min(j+16, len(s))])
 			}
 			toks = append(toks, token{k: symbol, text: "0", glued: glued})
 			i = j
@@ -273,6 +276,46 @@ func tokenize(s string) ([]token, error) {
 		glued = true
 	}
 	return toks, nil
+}
+
+// endNumber devuelve el índice justo después del literal numérico que empieza
+// en s[i]: entero con '_' entre dígitos, 0x/0o/0b, decimal y exponente.
+func endNumber(s string, i int) int {
+	digitos := func(j int, es func(byte) bool) int {
+		for j < len(s) && (es(s[j]) || (s[j] == '_' && j+1 < len(s) && es(s[j+1]))) {
+			j++
+		}
+		return j
+	}
+	dec := func(c byte) bool { return c >= '0' && c <= '9' }
+	if s[i] == '0' && i+2 < len(s) {
+		var es func(byte) bool
+		switch s[i+1] {
+		case 'x', 'X':
+			es = func(c byte) bool { return dec(c) || (c|0x20 >= 'a' && c|0x20 <= 'f') }
+		case 'o', 'O':
+			es = func(c byte) bool { return c >= '0' && c <= '7' }
+		case 'b', 'B':
+			es = func(c byte) bool { return c == '0' || c == '1' }
+		}
+		if es != nil && es(s[i+2]) {
+			return digitos(i+2, es)
+		}
+	}
+	j := digitos(i, dec)
+	if j < len(s) && s[j] == '.' && !(j+1 < len(s) && s[j+1] == '.') {
+		j = digitos(j+1, dec)
+	}
+	if j < len(s) && (s[j] == 'e' || s[j] == 'E') {
+		k := j + 1
+		if k < len(s) && (s[k] == '+' || s[k] == '-') {
+			k++
+		}
+		if k < len(s) && dec(s[k]) {
+			j = digitos(k, dec)
+		}
+	}
+	return j
 }
 
 // closeQuote devuelve el índice justo después de la comilla que cierra la que
