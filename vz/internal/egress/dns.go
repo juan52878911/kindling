@@ -417,7 +417,11 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 		return nil, err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	plazo := time.Now().Add(5 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(plazo) {
+		plazo = d
+	}
+	_ = c.SetDeadline(plazo)
 	salida, propio, err := conTxidPropio(query)
 	if err != nil {
 		return nil, err
@@ -427,12 +431,21 @@ func exchange(ctx context.Context, upstream string, query []byte, viaTCP bool) (
 		if _, err := c.Write(salida); err != nil {
 			return nil, err
 		}
+		// Un datagrama con otro TXID (la respuesta tardía de una consulta
+		// anterior que reusó el puerto, o una falsa) se ignora y se sigue
+		// esperando la nuestra hasta el plazo, como hace el resolver de Go.
+		// Antes daba error al momento y el invitado recibía SERVFAIL (F13).
 		buf := make([]byte, 4096)
-		n, err := c.Read(buf)
-		if err != nil {
-			return nil, err
+		for {
+			n, err := c.Read(buf)
+			if err != nil {
+				return nil, err
+			}
+			if n >= 12 && binary.BigEndian.Uint16(buf[0:2]) == propio {
+				resp = buf[:n]
+				break
+			}
 		}
-		resp = buf[:n]
 	} else {
 		if err := WriteTCPMsg(c, salida); err != nil {
 			return nil, err

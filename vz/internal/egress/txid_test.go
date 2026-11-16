@@ -14,8 +14,10 @@ import (
 type upstreamFalso struct {
 	addr string
 	fijo uint16
-	mu   sync.Mutex
-	vist []uint16
+	// previo: por UDP, antes de la respuesta manda otra con un TXID ajeno.
+	previo bool
+	mu     sync.Mutex
+	vist   []uint16
 }
 
 func (u *upstreamFalso) responder(q []byte) []byte {
@@ -50,7 +52,16 @@ func nuevoUpstream(t *testing.T, fijo uint16) *upstreamFalso {
 			if err != nil {
 				return
 			}
-			_, _ = pc.WriteTo(u.responder(buf[:n]), from)
+			resp := u.responder(buf[:n])
+			u.mu.Lock()
+			previo := u.previo
+			u.mu.Unlock()
+			if previo {
+				viejo := append([]byte(nil), resp...)
+				viejo[0] ^= 0xff
+				_, _ = pc.WriteTo(viejo, from)
+			}
+			_, _ = pc.WriteTo(resp, from)
 		}
 	}()
 	go func() {
@@ -108,12 +119,37 @@ func TestExchangeTxidPropio(t *testing.T) {
 		binary.BigEndian.PutUint16(q[0:2], delInvitado)
 		ok := 0
 		for i := 0; i < n; i++ {
-			if _, err := exchange(ctx, ajeno.addr, q, viaTCP); err == nil {
+			// Por UDP se espera la buena hasta el plazo: que sea corto.
+			corto, fin := context.WithTimeout(ctx, 200*time.Millisecond)
+			if _, err := exchange(corto, ajeno.addr, q, viaTCP); err == nil {
 				ok++
 			}
+			fin()
 		}
 		if ok == n {
 			t.Fatalf("tcp=%v: una respuesta con el TXID del invitado se aceptó %d veces", viaTCP, n)
+		}
+	}
+}
+
+// F13: por UDP, un datagrama con un TXID ajeno que llega antes que la
+// respuesta (una tardía de otra consulta) no la tapa: se ignora y se espera
+// la buena. Antes el invitado recibía SERVFAIL.
+func TestExchangeIgnoraDatagramaAjeno(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	u := nuevoUpstream(t, 0)
+	u.mu.Lock()
+	u.previo = true
+	u.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		q := BuildQuery("example.com", 1)
+		resp, err := exchange(ctx, u.addr, q, false)
+		if err != nil {
+			t.Fatalf("a datagram with another txid before the answer: %v", err)
+		}
+		if !ResponseMatches(q, resp) {
+			t.Fatal("the answer does not carry the guest's txid")
 		}
 	}
 }

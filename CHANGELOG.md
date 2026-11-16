@@ -79,6 +79,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Removing a template forgets its integrity verdict.
 - kling-hv: the vsock thread no longer spins at 100% when a control packet is waiting for a receive buffer and another connection has data.
 - kling-hv: a FLUSH with no writes since the previous one no longer issues `F_FULLFSYNC` (300 of them: about 1.2 s to 2.5 ms on the host).
+- macOS DNS: a UDP answer with another transaction id is ignored while waiting for the right one, instead of answering the guest with SERVFAIL.
+- kling-hv: stale `.khv-clon-*` directories left by a killed snapshot (each holding a full copy of guest RAM) are removed by the next snapshot.
 
 ### Security
 
