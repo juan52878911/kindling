@@ -423,6 +423,12 @@ struct vblk {
   int fd;
   bool ro;
   int sinc;       // KHV_SINC_*: qué hace un FLUSH del invitado
+  // sucio: hubo escrituras (OUT, DISCARD, WRITE_ZEROES) desde el último
+  // FLUSH asentado. Sin ellas un FLUSH no tiene nada que asentar y no llama a
+  // F_FULLFSYNC (P11). Empieza a true: lo escrito antes de este proceso (el
+  // dorado de un clon, otro kling-hv) puede seguir en la caché. Solo desde el
+  // hilo del disco.
+  bool sucio;
   uint32_t alin;  // sectores por bloque del sistema de ficheros del host (F_PUNCHHOLE)
   uint64_t sectores;
   uint32_t intid;
@@ -681,11 +687,17 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
           // overlay lleno, EINTR) con r >= 0 se daba por bueno y el sistema
           // de ficheros del invitado creía escritos sectores que no lo
           // estaban.
-          if (b->ro || b_es(b, true, ni, total, off) != (int64_t)total) estado = 1;
+          if (b->ro) estado = 1;
+          else {
+            // También si se quedó corta: lo que llegó a escribir se asienta.
+            b->sucio = true;
+            if (b_es(b, true, ni, total, off) != (int64_t)total) estado = 1;
+          }
         }
         if (malo) estado = 1;
       } else if (hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES) {
         estado = b_descartar(b, hdr.type == B_T_WRITE_ZEROES, ch + 1, n - 2, &bytes);
+        if (!b->ro) b->sucio = true;
       }
       bool hecha = hdr.type == 0 || hdr.type == 1 || hdr.type == B_T_DISCARD || hdr.type == B_T_WRITE_ZEROES;
       for (int k = 1; k < n - 1 && estado == 0 && !hecha; k++) {
@@ -710,10 +722,12 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         }
         if (r < 0) estado = 1;
       }
-      // Un disco ro no tiene nada que asentar: el FLUSH se contesta sin tocar
-      // el fichero (F_FULLFSYNC vacía la caché del SSD entero, de todo el
-      // Mac, y un invitado puede pedirlo en bucle).
-      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE && !b->ro) {
+      // Un disco ro, o uno sin escrituras desde el último FLUSH, no tiene nada
+      // que asentar: el FLUSH se contesta sin tocar el fichero (F_FULLFSYNC
+      // vacía la caché del SSD entero, de todo el Mac, y un invitado puede
+      // pedirlo en bucle).
+      if (hdr.type == 4 && estado == 0 && b->sinc != KHV_SINC_NONE && !b->ro && b->sucio) {
+        b->sucio = false;
         __atomic_fetch_add(&vblk_sincs, 1, __ATOMIC_RELAXED);
         // full, F_FULLFSYNC: el fsync de macOS deja los datos en la caché del
         // SSD, y un corte se los lleva aunque el invitado ya oyó que estaban.
@@ -727,7 +741,10 @@ static bool b_procesar(struct vblk *b, struct vq *q, const struct vmmio *m, bool
         // none de vz; el núcleo lo asienta antes de conservar el disco,
         // internal/machine/desechable.go) o un volumen que se pidió así.
         int op = b->sinc == KHV_SINC_BARRIER ? F_BARRIERFSYNC : F_FULLFSYNC;
-        if (fcntl(b->fd, op) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) estado = 1;
+        if (fcntl(b->fd, op) != 0 && (errno != ENOTSUP || fsync(b->fd) != 0)) {
+          estado = 1;
+          b->sucio = true;  // el siguiente FLUSH lo vuelve a intentar
+        }
       }
     }
     if (sp) *sp = estado;  // sin byte de estado (cadena inválida) no hay dónde decirlo
@@ -789,11 +806,12 @@ void vblk_prueba(int idx) {
 uint64_t vblk_prueba_sincs(void) { return __atomic_load_n(&vblk_sincs, __ATOMIC_RELAXED); }
 
 // vblk_prueba_modo cambia ro y sinc del disco idx (solo pruebas, con la cola
-// quieta).
+// quieta); el disco queda sucio, como recién abierto.
 void vblk_prueba_modo(int idx, bool ro, int sinc) {
   pthread_mutex_lock(&blks[idx].mu);
   blks[idx].ro = ro;
   blks[idx].sinc = sinc;
+  blks[idx].sucio = true;
   pthread_mutex_unlock(&blks[idx].mu);
 }
 
@@ -815,6 +833,7 @@ int vblk_init(int idx, const char *ruta, bool ro, int sinc, uint32_t intid) {
   fstat(b->fd, &st);
   b->sectores = (uint64_t)st.st_size / 512;
   b->ro = ro;
+  b->sucio = true;
   b->sinc = ro || sinc < KHV_SINC_FULL || sinc > KHV_SINC_NONE ? KHV_SINC_FULL : sinc;
   // F_PUNCHHOLE solo admite bloques enteros del sistema de ficheros (4 KiB
   // en APFS): es la alineación que se anuncia al invitado.
