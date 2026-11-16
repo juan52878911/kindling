@@ -12,7 +12,6 @@ import (
 	"io"
 	"log"
 	"mime"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,11 +61,26 @@ type mcpServer struct {
 	ttl     time.Duration
 	pool    int
 	claimMu sync.Mutex
+	// maxSessions es cuántas sesiones a la vez (0 = sin tope). Cada una acaba
+	// en una microVM Android: sin tope, un cliente que repite initialize llena
+	// el host.
+	maxSessions int
 
 	mu       sync.Mutex
 	sessions map[string]*mcpSession
 	filling  bool
+	// pendientes son teléfonos de sesiones cerradas que no se pudieron borrar:
+	// reap lo reintenta, en vez de dejarlos vivos para siempre.
+	pendientes []*api.Machine
 }
+
+// maxCuerpoSinSesion acota lo que se lee de una petición sin Mcp-Session-Id
+// (solo puede ser un initialize). Con sesión el tope es maxCuerpo, que da para
+// un APK en base64.
+const (
+	maxCuerpoSinSesion = 64 << 10
+	maxCuerpo          = 64 << 20
+)
 
 type mcpSession struct {
 	id string
@@ -157,7 +171,7 @@ func toolError(err error) map[string]any {
 
 func (s *mcpServer) handler(path string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !loopbackHost(r.Host) {
+		if !soloLoopback(r) {
 			http.Error(w, "loopback host names only", http.StatusForbidden)
 			return
 		}
@@ -187,9 +201,26 @@ func (s *mcpServer) handler(path string) http.Handler {
 			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		// La sesión se mira ANTES de leer el cuerpo: sin ella no se leen 64 MiB
+		// de nadie.
+		limite := int64(maxCuerpoSinSesion)
+		if sid != "" {
+			s.mu.Lock()
+			conocida := s.sessions[sid] != nil
+			s.mu.Unlock()
+			if !conocida {
+				http.Error(w, "unknown or expired Mcp-Session-Id", http.StatusNotFound)
+				return
+			}
+			limite = maxCuerpo
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, limite+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > limite {
+			http.Error(w, fmt.Sprintf("body over %d bytes", limite), http.StatusRequestEntityTooLarge)
 			return
 		}
 		var req rpcReq
@@ -200,6 +231,11 @@ func (s *mcpServer) handler(path string) http.Handler {
 		if req.Method == "initialize" {
 			ns := &mcpSession{id: newSessionID(), lastUse: time.Now()}
 			s.mu.Lock()
+			if s.maxSessions > 0 && len(s.sessions) >= s.maxSessions {
+				s.mu.Unlock()
+				http.Error(w, fmt.Sprintf("%d sessions already open (-max-sessions); close one first", s.maxSessions), http.StatusServiceUnavailable)
+				return
+			}
 			s.sessions[ns.id] = ns
 			s.mu.Unlock()
 			w.Header().Set("Mcp-Session-Id", ns.id)
@@ -467,15 +503,34 @@ func (s *mcpServer) release(ctx context.Context, sess *mcpSession, why string) {
 		return
 	}
 	if err := s.a.rm(ctx, sess.phone); err != nil {
-		log.Printf("session %s: removing %s: %v", sess.id[:8], sess.phone.Name, err)
+		log.Printf("session %s: removing %s: %v; retrying later", sess.id[:8], sess.phone.Name, err)
+		s.mu.Lock()
+		s.pendientes = append(s.pendientes, sess.phone)
+		s.mu.Unlock()
+		sess.phone = nil
 		return
 	}
 	log.Printf("session %s: %s removed (%s)", sess.id[:8], sess.phone.Name, why)
 	sess.phone = nil
 }
 
-// reap pausa los teléfonos ociosos y cierra las sesiones caducadas.
+// reap pausa los teléfonos ociosos, cierra las sesiones caducadas y reintenta
+// borrar los teléfonos que quedaron de sesiones cerradas.
 func (s *mcpServer) reap(ctx context.Context) {
+	s.mu.Lock()
+	pend := s.pendientes
+	s.pendientes = nil
+	s.mu.Unlock()
+	for _, m := range pend {
+		if err := s.a.rm(ctx, m); err != nil {
+			log.Printf("removing %s (left by a closed session): %v", m.Name, err)
+			s.mu.Lock()
+			s.pendientes = append(s.pendientes, m)
+			s.mu.Unlock()
+			continue
+		}
+		log.Printf("%s removed (left by a closed session)", m.Name)
+	}
 	now := time.Now()
 	s.mu.Lock()
 	var expired, idle []*mcpSession
@@ -537,6 +592,31 @@ func (s *mcpServer) refill() {
 	}()
 }
 
+// barrerHuerfanos borra los teléfonos que un servidor MCP anterior en esta
+// misma dirección dejó con dueño (se cayó, o no pudo borrarlos): ninguna sesión
+// viva es suya, porque dos servidores no escuchan a la vez en la misma
+// dirección. Los de otros servidores (otra dirección) no se tocan.
+func (s *mcpServer) barrerHuerfanos(ctx context.Context) {
+	if s.fixed != "" || s.a.mcpKey == "" {
+		return
+	}
+	ps, err := s.a.phones(ctx)
+	if err != nil {
+		log.Printf("looking for phones left by a previous run: %v", err)
+		return
+	}
+	for _, m := range ps {
+		if m.Labels[labelMCP] != s.a.mcpKey || !strings.HasPrefix(m.Labels[labelOwner], "mcp-") {
+			continue
+		}
+		if err := s.a.rm(ctx, m); err != nil {
+			log.Printf("removing %s (left by a previous run): %v", m.Name, err)
+			continue
+		}
+		log.Printf("%s removed (left by a previous run)", m.Name)
+	}
+}
+
 func (s *mcpServer) shutdown(ctx context.Context) {
 	s.mu.Lock()
 	all := make([]*mcpSession, 0, len(s.sessions))
@@ -560,14 +640,18 @@ func cmdMCP(args []string) error {
 	ttl := fs.Duration("session-ttl", 15*time.Minute, "a session unused this long is closed and its phone removed")
 	pool := fs.Int("pool", 0, "keep N paused spare phones for new sessions (kling phone pool)")
 	secretPath := fs.Bool("secret-path", true, "serve under a random path (/<secret>/mcp): other local processes can't guess it")
+	maxSessions := fs.Int("max-sessions", 4, "sessions open at a time, each with its own phone (0 = no limit)")
 	if _, err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *maxSessions < 0 {
+		return errors.New("-max-sessions can't be negative")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	a := newApp(*host)
 	s := &mcpServer{a: a, golden: or(*golden, a.s.Golden), fixed: *fixed, idle: *idle, ttl: *ttl, pool: *pool,
-		sessions: map[string]*mcpSession{}}
+		maxSessions: *maxSessions, sessions: map[string]*mcpSession{}}
 	if s.fixed != "" {
 		if _, err := a.phone(ctx, s.fixed); err != nil {
 			return err
@@ -579,10 +663,14 @@ func cmdMCP(args []string) error {
 	if *secretPath {
 		path = "/" + newSessionID() + "/mcp"
 	}
-	ln, err := net.Listen("tcp", *listen)
+	ln, err := escucharLoopback(*listen)
 	if err != nil {
 		return err
 	}
+	// Con la dirección ya tomada, lo que quedó con su marca es de un servidor
+	// anterior aquí mismo.
+	a.mcpKey = ln.Addr().String()
+	s.barrerHuerfanos(ctx)
 	srv := &http.Server{Handler: s.handler(path), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		t := time.NewTicker(15 * time.Second)

@@ -38,6 +38,7 @@ const (
 	labelPool   = "kindling.phone.pool"   // warming | spare | claimed (kling phone pool, mcp)
 	labelPooled = "kindling.phone.pooled" // segundos unix de cuando quedó de repuesto
 	labelOwner  = "kindling.phone.owner"  // quién lo usa ("mcp:<sesión>")
+	labelMCP    = "kindling.phone.mcp"    // dirección del servidor MCP que lo reclamó
 
 	poolWarming = "warming"
 	poolSpare   = "spare"
@@ -143,6 +144,10 @@ type app struct {
 	reserved map[string]bool
 	// tokenDir sustituye al directorio local de tokens (pruebas).
 	tokenDir string
+	// mcpKey es la dirección del servidor MCP de este proceso: va en labelMCP
+	// de los teléfonos que reclama, para barrer al arrancar los que dejó una
+	// ejecución anterior en esa misma dirección.
+	mcpKey string
 }
 
 func newApp(host string) *app {
