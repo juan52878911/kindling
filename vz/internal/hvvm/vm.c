@@ -24,6 +24,7 @@
 // estado. Restaurarlo es mapearlo: nadie lo escribe después, así que todas las
 // réplicas comparten sus páginas limpias.
 #include <copyfile.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
@@ -2278,6 +2279,43 @@ int khv_resume(unsigned bit) {
 // dejar el fichero; *copiando dice si falló la copia.
 static void (*prueba_tras_clon)(const char *mem_out);  // pruebas: justo tras el clon
 
+// CLON_HUERFANO_S: un .khv-clon-* más viejo que esto es de un kling-hv que
+// murió (SIGKILL, un corte) entre el clon y el rename: el clon tarda
+// milisegundos. Más corto que esto podría ser el de otro snapshot en marcha.
+#define CLON_HUERFANO_S 600
+
+// barrer_clones quita del directorio dir (ld bytes de pd) los .khv-clon-*
+// huérfanos: cada uno guarda una RAM entera del invitado (F16). Con 0700 no
+// los lee nadie más, pero ocupan disco y no los iba a borrar nadie. Solo los
+// que tienen la forma que deja clonar_ram (un directorio con, como mucho,
+// mem).
+static void barrer_clones(const char *pd, int ld) {
+  char ruta[PATH_MAX];
+  if (snprintf(ruta, sizeof ruta, "%.*s", ld, pd) >= (int)sizeof ruta) return;
+  int dfd = open(ruta, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dfd < 0) return;
+  DIR *d = fdopendir(dfd);
+  if (!d) {
+    close(dfd);
+    return;
+  }
+  time_t ahora = time(NULL);
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (strncmp(e->d_name, ".khv-clon-", 10) != 0) continue;
+    struct stat st;
+    if (fstatat(dfd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid() || ahora - st.st_mtime < CLON_HUERFANO_S)
+      continue;
+    int sub = openat(dfd, e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (sub < 0) continue;
+    (void)unlinkat(sub, "mem", 0);
+    close(sub);
+    (void)unlinkat(dfd, e->d_name, AT_REMOVEDIR);  // si queda otra cosa dentro, no se toca
+  }
+  closedir(d);
+}
+
 static int clonar_ram(int base, const char *mem_out, bool *copiando) {
   *copiando = false;
   char dir[PATH_MAX], tmp[PATH_MAX];
@@ -2285,6 +2323,7 @@ static int clonar_ram(int base, const char *mem_out, bool *copiando) {
   int ld = barra ? (int)(barra - mem_out) : 1;
   const char *pd = barra ? mem_out : ".";
   if (barra && ld == 0) pd = "/", ld = 1;
+  barrer_clones(pd, ld);
   if (snprintf(dir, sizeof dir, "%.*s/.khv-clon-XXXXXX", ld, pd) < (int)sizeof dir && mkdtemp(dir)) {
     snprintf(tmp, sizeof tmp, "%s/mem", dir);
     if (fclonefileat(base, AT_FDCWD, tmp, 0) == 0) {
