@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -163,6 +164,23 @@ func TestSesionesGuestPorInquilino(t *testing.T) {
 	if total, _ := s.sesionesGuest.enUso("a"); total != 0 {
 		t.Fatalf("quedaron %d sesiones apartadas", total)
 	}
+}
+
+// Un cuerpo declarado que cabe justo no falla al leer su EOF: leído lo
+// declarado, no se aparta otro trozo para la última lectura.
+func TestGuestDeclaradoJustoLeeElEOF(t *testing.T) {
+	const n = 200 << 10
+	topesGuest(t, factorMemoriaGuest*n, 0)
+	var c cupo
+	res := &reservaGuest{c: &c}
+	rd, err := res.lector(strings.NewReader(strings.Repeat("x", n)), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := io.ReadAll(rd); err != nil || len(b) != n {
+		t.Fatalf("ReadAll: %d bytes, %v", len(b), err)
+	}
+	res.soltar()
 }
 
 func TestCupoPorInquilino(t *testing.T) {

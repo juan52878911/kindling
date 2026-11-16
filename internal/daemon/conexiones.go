@@ -128,11 +128,11 @@ func (l *escuchaConTope) rechazar(c net.Conn, clave int) {
 	if avisar {
 		l.ultAvis = time.Now()
 	}
-	total := l.total
+	total, deUID := l.total, l.porUID[clave]
 	l.mu.Unlock()
 	if avisar {
 		if clave != sinUID {
-			log.Printf("refusing connections from uid %d: it has %d open (limit %d)", clave, maxConexionesUID, maxConexionesUID)
+			log.Printf("refusing connections from uid %d: it has %d open (limit %d)", clave, deUID, maxConexionesUID)
 		} else {
 			log.Printf("refusing connections: %d open (limit %d)", total, maxConexiones)
 		}

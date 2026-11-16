@@ -148,7 +148,7 @@ func (r *reservaGuest) lector(rd io.Reader, declarado int64) (io.Reader, error) 
 		if err := r.tomar(factorMemoriaGuest * declarado); err != nil {
 			return nil, err
 		}
-		l.pagado = declarado
+		l.pagado, l.declarado = declarado, true
 	}
 	return l, nil
 }
@@ -156,8 +156,10 @@ func (r *reservaGuest) lector(rd io.Reader, declarado int64) (io.Reader, error) 
 type lectorConReserva struct {
 	rd  io.Reader
 	res *reservaGuest
-	// pagado son los bytes ya apartados que aún no se han leído.
-	pagado int64
+	// pagado son los bytes ya apartados que aún no se han leído; declarado,
+	// que se apartó lo declarado al empezar.
+	pagado    int64
+	declarado bool
 }
 
 // trozoReserva es lo más que se lee de una vez sin haberlo apartado antes:
@@ -174,6 +176,19 @@ func (l *lectorConReserva) Read(p []byte) (int, error) {
 		}
 		n, err := l.rd.Read(p)
 		l.pagado -= int64(n)
+		return n, err
+	}
+	if l.declarado && len(p) > 0 {
+		// Leído lo declarado, lo que queda es el EOF: apartar otro trozo para
+		// él podía tumbar, con el presupuesto casi lleno, un cuerpo que ya
+		// había llegado entero. Se lee de byte en byte y se cuenta después
+		// (un byte de más como mucho).
+		n, err := l.rd.Read(p[:1])
+		if n > 0 {
+			if e := l.res.tomar(factorMemoriaGuest * int64(n)); e != nil {
+				return n, e
+			}
+		}
 		return n, err
 	}
 	if len(p) > trozoReserva {
