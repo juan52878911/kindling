@@ -197,6 +197,31 @@ func contenidoFirmadoV2(s *api.Snapshot) []byte {
 	return b
 }
 
+// firmaV3 es el prefijo de las firmas v3 (meta.json v5).
+const firmaV3 = "v3:"
+
+// contenidoFirmadoV3 es lo que cubre la firma v3: todo lo de la v2 y lo que
+// la v2 dejaba fuera y decide cómo nace una copia (M13):
+//
+//   - SinAgente: run -from se salta el resync. Fuera de la firma, quien
+//     pudiera escribir meta.json lo apagaba con la firma intacta.
+//   - ConAgente: lo contrario (S4): una copia sin resync no se entrega.
+//   - ShareWait: cuántas carpetas vivas espera el agente antes de lanzar el
+//     servicio, y por tanto cuántas acepta run -from.
+//
+// Con omitempty, como los digests de la v2: falso y cero firman lo mismo que
+// ausentes, que es lo que meta.json guarda.
+func contenidoFirmadoV3(s *api.Snapshot) []byte {
+	b, _ := json.Marshal(struct {
+		V         int
+		V2        json.RawMessage
+		SinAgente bool `json:",omitempty"`
+		ConAgente bool `json:",omitempty"`
+		ShareWait int  `json:",omitempty"`
+	}{3, contenidoFirmadoV2(s), s.SinAgente, s.ConAgente, s.ShareWait})
+	return b
+}
+
 // macDe calcula el HMAC de contenido con la clave del host.
 func (m *Manager) macDe(contenido []byte) ([]byte, error) {
 	clave, err := m.claveFirma()
@@ -208,13 +233,26 @@ func (m *Manager) macDe(contenido []byte) ([]byte, error) {
 	return mac.Sum(nil), nil
 }
 
-// firmar rellena s.Signature, siempre en v2.
+// firmar rellena s.Signature, siempre en v3.
 func (m *Manager) firmar(s *api.Snapshot) error {
-	sum, err := m.macDe(contenidoFirmadoV2(s))
+	sum, err := m.macDe(contenidoFirmadoV3(s))
 	if err != nil {
 		return err
 	}
-	s.Signature = firmaV2 + hex.EncodeToString(sum)
+	s.Signature = firmaV3 + hex.EncodeToString(sum)
+	return nil
+}
+
+// comprobarMAC dice si firma (el hex, sin prefijo) es el HMAC de contenido.
+func (m *Manager) comprobarMAC(nombre, firma string, contenido []byte) error {
+	esperada, err := m.macDe(contenido)
+	if err != nil {
+		return err
+	}
+	got, err := hex.DecodeString(firma)
+	if err != nil || !hmac.Equal(got, esperada) {
+		return errFirmaNoCuadra(nombre)
+	}
 	return nil
 }
 
@@ -254,6 +292,24 @@ func (m *Manager) firmasMigradas() bool {
 	return err == nil
 }
 
+// marcaFirmasV3 dice que este host ya pasó sus dorados a la firma v3, con
+// los digests de su imagen calculados (MigrarFirmas). Desde entonces una v2
+// se rechaza: es un meta.json viejo puesto de nuevo (un meta.json.v4.bak), y
+// la v2 no cubre sin_agente ni share_wait, ni obliga a llevar image_digest.
+const marcaFirmasV3 = "signatures-v3"
+
+func (m *Manager) firmasV3Migradas() bool {
+	_, err := os.Stat(filepath.Join(m.root, "secrets", marcaFirmasV3))
+	return err == nil
+}
+
+// esFork dice si el dorado name es el temporal de un fork, que no lleva los
+// digests del overlay, la memoria ni la imagen (ver la DECISIÓN en commit).
+func (m *Manager) esFork(name string) bool {
+	_, err := os.Stat(filepath.Join(m.snapDir(name), forkMarca))
+	return err == nil
+}
+
 // comprobarFirma exige que el snapshot lo firmara este host, en v2 (A2 de la
 // segunda revisión):
 //
@@ -281,29 +337,33 @@ func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 		}
 		return nil
 	}
-	if !strings.HasPrefix(s.Signature, firmaV2) {
-		if err := m.comprobarFirmaV1(s); err != nil || !exigir {
+	if !strings.HasPrefix(s.Signature, firmaV3) {
+		// Una v1 o una v2: se comprueba la que sea y, si este host aún no
+		// migró sus dorados a la v3, se re-firma ahora (migrarFirma).
+		if err := m.comprobarFirmaVieja(s); err != nil || !exigir {
 			return err
 		}
-		if m.firmasMigradas() {
+		v1 := !strings.HasPrefix(s.Signature, firmaV2)
+		if v1 && m.firmasMigradas() {
 			return fmt.Errorf("%w: template %q has an old v1 signature, which does not cover its labels and limits, "+
 				"and this host already moved its templates to v2: its meta.json was put back from a copy. Recreate it:\n%s",
 				errFirma, s.Name, remedioDorado(s.Name))
 		}
-		nuevo, err := m.migrarFirmaV1(s.Name, s.Signature)
+		if !v1 && m.firmasV3Migradas() {
+			return fmt.Errorf("%w: template %q has an old v2 signature, which does not cover how its copies resync, "+
+				"and this host already moved its templates to v3: its meta.json was put back from a copy. Recreate it:\n%s",
+				errFirma, s.Name, remedioDorado(s.Name))
+		}
+		nuevo, err := m.migrarFirma(s.Name, s.Signature)
 		if err != nil {
 			return err
 		}
 		s.Signature, s.MemDigest = nuevo.Signature, nuevo.MemDigest
+		s.ImageDigest, s.BaseDigest = nuevo.ImageDigest, nuevo.BaseDigest
 		return nil
 	}
-	esperada, err := m.macDe(contenidoFirmadoV2(s))
-	if err != nil {
+	if err := m.comprobarMAC(s.Name, strings.TrimPrefix(s.Signature, firmaV3), contenidoFirmadoV3(s)); err != nil {
 		return err
-	}
-	got, err := hex.DecodeString(strings.TrimPrefix(s.Signature, firmaV2))
-	if err != nil || !hmac.Equal(got, esperada) {
-		return errFirmaNoCuadra(s.Name)
 	}
 	// Todo dorado firmado lleva el digest del snap.file (los de fork no
 	// llevan el del overlay ni el de la memoria, pero este sí). Sin él, la
@@ -311,7 +371,19 @@ func (m *Manager) comprobarFirma(s *api.Snapshot) error {
 	if s.SnapSHA256 == "" {
 		return fmt.Errorf("%w: template %q is signed but has no state digest; recreate it:\n%s", errFirma, s.Name, remedioDorado(s.Name))
 	}
+	// El digest de la imagen no hace falta exigirlo aquí (M13): la v3 lo
+	// cubre, y solo la firman commit (que lo calcula salvo en un fork) y
+	// migrarFirma (que lo calcula si faltaba). Un meta con firma v2 o v1 que
+	// alguien vuelva a poner se rechaza tras la migración (marcaFirmasV3).
 	return nil
+}
+
+// comprobarFirmaVieja comprueba una firma v1 (hex a secas) o v2.
+func (m *Manager) comprobarFirmaVieja(s *api.Snapshot) error {
+	if strings.HasPrefix(s.Signature, firmaV2) {
+		return m.comprobarMAC(s.Name, strings.TrimPrefix(s.Signature, firmaV2), contenidoFirmadoV2(s))
+	}
+	return m.comprobarFirmaV1(s)
 }
 
 func errFirmaNoCuadra(name string) error {
@@ -321,58 +393,59 @@ func errFirmaNoCuadra(name string) error {
 
 // comprobarFirmaV1 comprueba una firma v1 sobre contenidoFirmado.
 func (m *Manager) comprobarFirmaV1(s *api.Snapshot) error {
-	esperada, err := m.macDe(contenidoFirmado(s))
-	if err != nil {
-		return err
-	}
-	got, err := hex.DecodeString(s.Signature)
-	if err != nil || !hmac.Equal(got, esperada) {
-		return errFirmaNoCuadra(s.Name)
-	}
-	return nil
+	return m.comprobarMAC(s.Name, s.Signature, contenidoFirmado(s))
 }
 
 // errYaMigrada corta editMeta cuando otro ya re-firmó el dorado.
-var errYaMigrada = errors.New("already signed in v2")
+var errYaMigrada = errors.New("already signed in v3")
 
-// migrarFirmaV1 re-firma en v2 el dorado name, que llevaba la firma v1 firma.
-// Solo si es de este host y está como se congeló: la v1 cuadra y los digests
-// que tiene también (verifyIntegrity). El del mem.file, que la v1 no tenía,
-// se calcula ahora sobre el que hay (salvo en un snapshot de fork, que no lo
-// lleva nunca). Devuelve el snapshot re-firmado.
-func (m *Manager) migrarFirmaV1(name, firma string) (*api.Snapshot, error) {
+// migrarFirma re-firma en v3 el dorado name, que llevaba la firma v1 o v2
+// firma. Solo si es de este host y está como se congeló: la firma cuadra y
+// los digests que tiene también (verifyIntegrity). Los que la firma vieja no
+// tenía se calculan ahora sobre lo que hay, salvo en un snapshot de fork, que
+// no los lleva nunca: el del mem.file (lo que la v1 no cubría) y los de su
+// imagen (image_digest y base_digest, que un dorado de meta.json v3 no
+// tenía: M13). Devuelve el snapshot re-firmado.
+func (m *Manager) migrarFirma(name, firma string) (*api.Snapshot, error) {
 	s, err := m.loadSnapshot(name)
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(s.Signature, firmaV2) {
+	if strings.HasPrefix(s.Signature, firmaV3) {
 		return s, nil
 	}
 	if s.Signature != firma {
 		return nil, errFirmaNoCuadra(name)
 	}
-	if err := m.comprobarFirmaV1(s); err != nil {
+	if err := m.comprobarFirmaVieja(s); err != nil {
 		return nil, err
 	}
 	dir := m.snapDir(name)
 	if err := m.verifyIntegrity(s, dir); err != nil {
 		return nil, err
 	}
-	memDigest := s.MemDigest
-	if _, err := os.Stat(filepath.Join(dir, forkMarca)); memDigest == "" && errors.Is(err, fs.ErrNotExist) {
-		if memDigest, err = digest.Tree(filepath.Join(dir, "mem.file")); err != nil {
-			return nil, fmt.Errorf("template %q: digest of its memory dump: %w", name, err)
+	memDigest, imgDigest, baseDigest := s.MemDigest, s.ImageDigest, s.BaseDigest
+	if !m.esFork(name) {
+		if memDigest == "" {
+			if memDigest, err = digest.Tree(filepath.Join(dir, "mem.file")); err != nil {
+				return nil, fmt.Errorf("template %q: digest of its memory dump: %w", name, err)
+			}
+		}
+		if imgDigest == "" && s.Image != "" {
+			if imgDigest, baseDigest, err = m.digestsDeImagen(s.Image); err != nil {
+				return nil, fmt.Errorf("template %q: digest of its image %q: %w", name, s.Image, err)
+			}
 		}
 	}
 	nuevo, err := m.editMeta(name, func(s *api.Snapshot) (string, error) {
-		if strings.HasPrefix(s.Signature, firmaV2) {
+		if strings.HasPrefix(s.Signature, firmaV3) {
 			return "", errYaMigrada
 		}
 		if s.Signature != firma {
 			return "", errFirmaNoCuadra(name)
 		}
-		s.MemDigest = memDigest
-		return "signature moved to v2", m.firmar(s)
+		s.MemDigest, s.ImageDigest, s.BaseDigest = memDigest, imgDigest, baseDigest
+		return "signature moved to v3", m.firmar(s)
 	})
 	if errors.Is(err, errYaMigrada) {
 		return m.loadSnapshot(name)
@@ -380,20 +453,20 @@ func (m *Manager) migrarFirmaV1(name, firma string) (*api.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("template %s: signature moved to v2 (it now covers labels, limits and the memory dump)", name)
+	log.Printf("template %s: signature moved to v3 (it now covers labels, limits, the memory dump, its image and how its copies resync)", name)
 	return nuevo, nil
 }
 
-// MigrarFirmas pasa a la firma v2 todos los dorados de este host que llevan
-// la v1 y cuadran, y deja la marca (marcaFirmasV2) para que desde entonces
-// una v1 se rechace. Una vez por host: con la marca puesta no hace nada. Si
+// MigrarFirmas pasa a la firma v3 todos los dorados de este host que llevan
+// la v1 o la v2 y cuadran, y deja las marcas (marcaFirmasV2, marcaFirmasV3)
+// para que desde entonces una v1 o una v2 se rechacen. Una vez por host: con la marca puesta no hace nada. Si
 // alguno no se pudo leer o re-firmar por algo pasajero (un disco lleno), no
 // deja la marca y se reintenta en el próximo arranque; los que no cuadran (firma o
 // digests) se quedan como están y no se restauran. Los que no tienen firma
 // tampoco se pueden re-firmar (no hay con qué saber que son de aquí): se
 // avisa. El daemon lo llama al arrancar, en segundo plano.
 func (m *Manager) MigrarFirmas(ctx context.Context) {
-	if m.firmasMigradas() {
+	if m.firmasV3Migradas() {
 		return
 	}
 	metas, _ := filepath.Glob(filepath.Join(m.root, "snapshots", "*", "meta.json"))
@@ -419,10 +492,11 @@ func (m *Manager) MigrarFirmas(ctx context.Context) {
 		switch {
 		case s.Signature == "":
 			sinFirma = append(sinFirma, name)
-		case !strings.HasPrefix(s.Signature, firmaV2):
-			if _, err := m.migrarFirmaV1(name, s.Signature); err != nil {
-				log.Printf("warning: template %s keeps its v1 signature and won't restore: %v", name, err)
-				if !errors.Is(err, errFirma) && !errors.Is(err, errCorrupto) {
+		case !strings.HasPrefix(s.Signature, firmaV3):
+			if _, err := m.migrarFirma(name, s.Signature); err != nil {
+				log.Printf("warning: template %s keeps its old signature and won't restore: %v", name, err)
+				// Sin su imagen tampoco se restauraría: no espera a nada.
+				if !errors.Is(err, errFirma) && !errors.Is(err, errCorrupto) && !errors.Is(err, ErrNoImage) {
 					pendiente = true
 				}
 			}
@@ -435,7 +509,10 @@ func (m *Manager) MigrarFirmas(ctx context.Context) {
 	if pendiente {
 		return
 	}
-	if err := durable.Escribir(filepath.Join(m.root, "secrets", marcaFirmasV2), []byte("1\n"), 0o600); err != nil {
-		log.Printf("warning: marking the templates as migrated to signature v2: %v", err)
+	for _, marca := range []string{marcaFirmasV2, marcaFirmasV3} {
+		if err := durable.Escribir(filepath.Join(m.root, "secrets", marca), []byte("1\n"), 0o600); err != nil {
+			log.Printf("warning: marking the templates as migrated to signature %s: %v", strings.TrimPrefix(marca, "signatures-"), err)
+			return
+		}
 	}
 }

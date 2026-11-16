@@ -72,16 +72,32 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 	// ¿Escucha el agente ahora? Si no, el dorado nace sin agente (o con el
 	// invitado a medio arrancar) y cada run -from pagaría el reintento entero
 	// del resync (~320 ms con "no route to host"): se recuerda como en Freeze.
-	sinAgente := false
+	// Y si escucha, el dorado lo dice (ConAgente): sus copias no se entregan
+	// sin resync (S4).
+	agente := agenteSinSondear
 	if mc, ok := m.Get(ref); ok && mc.Reachable() && mc.State == api.StateRunning {
-		sinAgente = !m.agenteEscucha(ctx, mc.ID)
+		agente = agenteNoEscuchaba
+		if m.agenteEscucha(ctx, mc.ID) {
+			agente = agenteEscuchaba
+		}
 	}
-	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, sinAgente)
+	snap, err := m.commit(ctx, ref, name, o.Replace, nil, false, false, agente)
 	if err == nil {
 		snap.Warnings = append(snap.Warnings, avisos...)
 	}
 	return snap, err
 }
+
+// agenteAlGuardar es lo que kling save sabe del agente de la plantilla al
+// congelarla: si no lo sondeó (un fork, un grafo, una plantilla sin red),
+// si escuchaba o si no.
+type agenteAlGuardar uint8
+
+const (
+	agenteSinSondear agenteAlGuardar = iota
+	agenteEscuchaba
+	agenteNoEscuchaba
+)
 
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
 // deja pausada: el snapshot de un grafo pausa todos sus nodos, vuelca uno a
@@ -90,7 +106,7 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 // pausarla (soltarlos pide hablar con el agente, y un invitado pausado no
 // contesta), y es también quien se los devuelve: aquí no se tocan.
 func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
-	return m.commit(ctx, ref, name, false, nil, true, false, false)
+	return m.commit(ctx, ref, name, false, nil, true, false, agenteSinSondear)
 }
 
 // commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
@@ -100,7 +116,7 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
 // Con deFork es el snapshot temporal de un fork: no se hashea su overlay (ver
 // la DECISIÓN junto a los digests).
-func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork, sinAgente bool) (snapOut *api.Snapshot, errOut error) {
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork bool, agente agenteAlGuardar) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, marcado(ErrInvalidName, "invalid snapshot name: %q", name)
 	}
@@ -650,7 +666,8 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		Volumes:   sinSync(mc.Volumes),
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
-		SinAgente: sinAgente,
+		SinAgente: agente == agenteNoEscuchaba,
+		ConAgente: agente == agenteEscuchaba,
 	}
 	// Con qué VMM, kling y macOS se hizo: lo que permite marcarlo obsoleto
 	// cuando cambien en vez de fallar al despertar (meta.go).

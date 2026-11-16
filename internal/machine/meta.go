@@ -55,7 +55,13 @@ import (
 // se niega antes diciendo la versión. Un v3 se lee igual (sin ellos no se
 // comprueba la imagen) y sube a v4 con meta.json.v3.bak al reescribirse; su
 // firma no cambia, porque los campos vacíos no entran en lo firmado.
-const metaSchema = 4
+//
+// v5: la firma v3 (firma.go, M13), que cubre también sin_agente, con_agente y
+// share_wait, y con ella con_agente (S4). Un kling anterior no la entiende: la
+// daría por manipulada; se niega antes diciendo la versión. Un v4 con firma
+// v2 se re-firma en v3 al arrancar el daemon (MigrarFirmas), con los digests
+// de su imagen si no los tenía, y sube a v5 con meta.json.v4.bak.
+const metaSchema = 5
 
 // ErrDoradoObsoleto es que el dorado se hizo con un VMM que el de ahora no
 // sabe restaurar: hay que rehacerlo.

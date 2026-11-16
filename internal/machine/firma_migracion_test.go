@@ -16,7 +16,9 @@ import (
 )
 
 // doradoEnDisco deja un dorado con sus tres ficheros y los digests que los
-// cubren. firma decide cómo va firmado: "v2" (como lo firma hoy un commit),
+// cubren, sobre la imagen toolchain (que crea si no está). firma decide cómo
+// va firmado: "v3" (como lo firma hoy un commit), "v2" (como lo firmaba un
+// kling anterior a M13, en un meta de schema 4, sin digests de la imagen),
 // "v1" (como lo firmaba un kling anterior a B2, en un meta de schema 2) o ""
 // (sin firma). Devuelve su directorio.
 func doradoEnDisco(t *testing.T, m *Manager, name, firma string) string {
@@ -39,15 +41,36 @@ func doradoEnDisco(t *testing.T, m *Manager, name, firma string) string {
 	if s.SnapSHA256, err = digest.File(filepath.Join(dir, "snap.file")); err != nil {
 		t.Fatal(err)
 	}
+	img := m.imagePath(s.Image)
+	if _, err := os.Stat(img); err != nil {
+		if err := os.MkdirAll(filepath.Dir(img), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(img, []byte("imagen"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	schema := metaSchema
 	switch firma {
-	case "v2":
+	case "v3":
 		if s.MemDigest, err = digest.Tree(filepath.Join(dir, "mem.file")); err != nil {
+			t.Fatal(err)
+		}
+		if s.ImageDigest, s.BaseDigest, err = m.digestsDeImagen(s.Image); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.firmar(s); err != nil {
 			t.Fatal(err)
 		}
+	case "v2":
+		if s.MemDigest, err = digest.Tree(filepath.Join(dir, "mem.file")); err != nil {
+			t.Fatal(err)
+		}
+		sum, err := m.macDe(contenidoFirmadoV2(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Signature, schema = firmaV2+hex.EncodeToString(sum), 4
 	case "v1":
 		sum, err := m.macDe(contenidoFirmado(s))
 		if err != nil {
@@ -94,7 +117,7 @@ func editarMetaAMano(t *testing.T, m *Manager, name string, edit func(map[string
 func TestFirmaVaciadaRunFromFalla(t *testing.T) {
 	t.Setenv("KLING_REQUIRE_SIGNED", "")
 	m := annotTestManager(t)
-	doradoEnDisco(t, m, "svc", "v2")
+	doradoEnDisco(t, m, "svc", "v3")
 	editarMetaAMano(t, m, "svc", func(meta map[string]any) {
 		for _, k := range []string{"signature", "rootfs_sha256", "rootfs_digest", "snap_sha256", "mem_digest"} {
 			delete(meta, k)
@@ -168,7 +191,7 @@ func TestMigrarFirmasV1(t *testing.T) {
 	t.Setenv("KLING_REQUIRE_SIGNED", "")
 	m := annotTestManager(t)
 	dir := doradoEnDisco(t, m, "svc", "v1")
-	doradoEnDisco(t, m, "nuevo", "v2")
+	doradoEnDisco(t, m, "nuevo", "v3")
 	doradoEnDisco(t, m, "suelto", "")
 	doradoEnDisco(t, m, "ajeno", "v1")
 	editarMetaAMano(t, m, "ajeno", func(meta map[string]any) { meta["allow_exec"] = true })
@@ -181,8 +204,9 @@ func TestMigrarFirmasV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(s.Signature, firmaV2) || s.MemDigest == "" {
-		t.Fatalf("no se re-firmó en v2 con el digest de la memoria: firma %q, mem %q", s.Signature, s.MemDigest)
+	if !strings.HasPrefix(s.Signature, firmaV3) || s.MemDigest == "" || s.ImageDigest == "" {
+		t.Fatalf("no se re-firmó en v3 con los digests de la memoria y la imagen: firma %q, mem %q, imagen %q",
+			s.Signature, s.MemDigest, s.ImageDigest)
 	}
 	if err := m.comprobarFirma(s); err != nil {
 		t.Fatalf("re-firmado no pasa: %v", err)
@@ -193,7 +217,7 @@ func TestMigrarFirmasV1(t *testing.T) {
 	if _, err := os.Stat(esquema.RutaRespaldo(filepath.Join(dir, "meta.json"), 2)); err != nil {
 		t.Fatalf("sin copia del meta v2 de antes: %v", err)
 	}
-	if a, _ := m.loadSnapshot("ajeno"); strings.HasPrefix(a.Signature, firmaV2) {
+	if a, _ := m.loadSnapshot("ajeno"); strings.HasPrefix(a.Signature, firmaV3) {
 		t.Fatal("se re-firmó un dorado cuya v1 no cuadra")
 	}
 
@@ -233,7 +257,7 @@ func TestMigrarFirmasNoMarcaSiNoPudoLeerUnMeta(t *testing.T) {
 	if m.firmasMigradas() {
 		t.Fatal("dejó la marca de migrados sin haber podido leer un meta")
 	}
-	if s, err := m.loadSnapshot("svc"); err != nil || !strings.HasPrefix(s.Signature, firmaV2) {
+	if s, err := m.loadSnapshot("svc"); err != nil || !strings.HasPrefix(s.Signature, firmaV3) {
 		t.Fatalf("el que sí se leía no se migró: %v", err)
 	}
 	if err := os.Remove(roto); err != nil {
@@ -258,7 +282,7 @@ func TestFirmaV1SeMigraAlRestaurar(t *testing.T) {
 	if err := m.comprobarFirma(s); err != nil {
 		t.Fatalf("v1 de este host sin migrar todavía: %v", err)
 	}
-	if !strings.HasPrefix(s.Signature, firmaV2) {
+	if !strings.HasPrefix(s.Signature, firmaV3) {
 		t.Fatalf("no quedó re-firmada: %q", s.Signature)
 	}
 	if d, _ := m.loadSnapshot("svc"); d.Signature != s.Signature {

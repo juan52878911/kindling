@@ -108,8 +108,8 @@ func TestGraphForkFirmaV2SobreviveAlMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(snap.Signature, firmaV2) {
-		t.Fatalf("la plantilla del fork no va en v2: %q", snap.Signature)
+	if !strings.HasPrefix(snap.Signature, firmaV3) {
+		t.Fatalf("la plantilla del fork no va en v3: %q", snap.Signature)
 	}
 	if err := m.comprobarFirma(snap); err != nil {
 		t.Fatalf("la plantilla del fork no pasa su propia firma: %v", err)
