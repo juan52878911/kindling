@@ -2020,6 +2020,9 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
 	}
+	// Cargada y reanudada: la compuerta, para la siguiente (P3). El resync
+	// (hasta 2 s, 4 s con su reintento) espera al invitado, no al host.
+	release()
 	// macOS: sin reenvíos el host no llega al invitado, y acquireVolumes de
 	// aquí abajo ya necesita hablarle.
 	if err := m.abrirReenvios(ctx, c, id); err != nil {

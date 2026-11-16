@@ -3748,6 +3748,9 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		soltarFull()
 		return nil, glErr
 	}
+	// Se suelta en cuanto la memoria está cargada (P3): lo pesado es el
+	// LoadSnapshot; el resync y las credenciales esperan al invitado, y
+	// reteniéndola una tanda de invitados lentos dejaba el host en ~1 thaw/s.
 	defer release()
 	crono.marca(&crono.p.WaitMS)
 
@@ -3799,6 +3802,11 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		defer cg.Close()
 	}
 	var enCg bool
+	// esperarSello es el resultado de retirar el sello del volcado (P2), que
+	// corre a la vez que el spawn; intentoCarga, si ya se pidió el
+	// LoadSnapshot (desde ahí, si el sello vuelve lo decide su error).
+	var esperarSello func() error
+	var intentoCarga bool
 
 	// abortar es la única salida de error a partir de aquí.
 	//
@@ -3811,6 +3819,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// detectaba porque el proceso existe de verdad.
 	abortar := func(err error) (*api.Machine, error) {
 		cortarPrecarga()
+		// Sin cargar nada, el volcado sigue valiendo: si el sello ya se
+		// retiró en paralelo con el spawn, vuelve a su sitio.
+		if esperarSello != nil && !intentoCarga && esperarSello() == nil {
+			if rerr := restaurarSello(dir); rerr != nil {
+				log.Printf("warning: thaw: %s: couldn't restore the seal of its memory dump: %v", mc.Name, rerr)
+			}
+		}
 		if pid > 0 {
 			// Esperando a que muera, como start.devolver (M3): sin esperar, un
 			// reintento inmediato veía el VMM moribundo en liveVMs, lo
@@ -3835,6 +3850,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if m.JailerBlocked != "" {
 		return abortar(errors.New(m.JailerBlocked))
 	}
+	// El sello del volcado se retira mientras arranca el VMM (P2): es un
+	// rename y un fsync del directorio (un F_FULLFSYNC, ~5 ms en el M4) que
+	// antes iban en serie justo antes de cargar. Se espera antes del
+	// LoadSnapshot: no se carga nada con el sello puesto.
+	selloRetirado := make(chan error, 1)
+	go func() { selloRetirado <- retirarSello(dir) }()
+	esperarSello = sync.OnceValue(func() error { return <-selloRetirado })
 	if m.jailerJailed {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
@@ -3902,9 +3924,10 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// si el daemon moría el volcado viejo pasaba por anterior a los sellos y el
 	// siguiente thaw cargaba aquella RAM sobre el disco ya escrito. Ahora es un
 	// rename durable (volcadoEnCurso) y, si no se puede, no se carga nada.
-	if err := retirarSello(dir); err != nil {
+	if err := esperarSello(); err != nil {
 		return abortar(fmt.Errorf("machine %q can't be thawed: couldn't retire the seal of its memory dump before loading it (is the disk full?): %w", mc.Name, err))
 	}
+	intentoCarga = true
 	start := time.Now()
 	// Con seguimiento otra vez si venía en diferencial: el siguiente freeze
 	// vuelca solo lo escrito desde ahora y lo funde con el diff que ya hay.
@@ -3927,6 +3950,8 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	elapsed := time.Since(start).Milliseconds()
 	crono.marca(&crono.p.LoadMS)
+	// Cargada y reanudada: la compuerta, para el siguiente (P3).
+	release()
 	// Un volcado de antes de globo_ritmo.go trae las estadísticas cada 1 s.
 	ritmoGloboReposo(ctx, c)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
