@@ -42,6 +42,11 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUpgradeRequired, fmt.Errorf("this endpoint speaks %s; ask for it with Upgrade", api.ShellProto))
 		return
 	}
+	soltar, ok := s.tomarSesionGuest(w, r)
+	if !ok {
+		return
+	}
+	defer soltar()
 	var req api.ShellRequest
 	if err := decodeJSONCon(w, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
 		fail(w, jsonBodyStatus(err), fmt.Errorf("invalid body: %w", err))

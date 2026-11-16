@@ -207,3 +207,27 @@ func failSinSitio(w http.ResponseWriter, err error) {
 	w.Header().Set("Retry-After", guestBusyRetryAfter)
 	fail(w, http.StatusTooManyRequests, err)
 }
+
+// ── exec, shell y ficheros ───────────────────────────────────────────────────
+
+// maxSesionesInquilino es cuántos exec, shell y llamadas a ficheros puede
+// tener abiertos a la vez un inquilino (R8). Cada uno es una goroutine y dos
+// conexiones en el daemon (con el cliente y con el agente), y el agente solo
+// acota los suyos por máquina: con muchas máquinas, un inquilino no tenía
+// techo. Los admin no lo tienen. Variable para los tests.
+var maxSesionesInquilino int64 = 64
+
+// tomarSesionGuest aparta una de las sesiones del inquilino de r; si no
+// quedan, contesta 429 y devuelve false. soltar la devuelve.
+func (s *Server) tomarSesionGuest(w http.ResponseWriter, r *http.Request) (soltar func(), ok bool) {
+	t, filtra := inquilinoDe(r)
+	if !filtra {
+		return func() {}, true
+	}
+	if !s.sesionesGuest.tomar(t, 1, 0, maxSesionesInquilino) {
+		w.Header().Set("Retry-After", guestBusyRetryAfter)
+		fail(w, http.StatusTooManyRequests, fmt.Errorf("this tenant has %d exec, shell or file calls open (the limit); retry when one ends", maxSesionesInquilino))
+		return nil, false
+	}
+	return func() { s.sesionesGuest.soltar(t, 1) }, true
+}

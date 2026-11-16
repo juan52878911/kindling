@@ -126,6 +126,45 @@ func TestGuestPresupuestoDeclarado(t *testing.T) {
 	}
 }
 
+// R8: un inquilino tiene un tope de exec, shell y ficheros abiertos a la vez;
+// el admin no. Cada uno devuelve el suyo al acabar.
+func TestSesionesGuestPorInquilino(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := s.routes()
+	exec := `{"cmd":["true"]}`
+	if !s.sesionesGuest.tomar("a", maxSesionesInquilino, 0, maxSesionesInquilino) {
+		t.Fatal("no se pudo llenar el cupo de a")
+	}
+	for _, c := range []struct {
+		uid          int
+		metodo, ruta string
+	}{
+		{uidA, "POST", "/machines/caja-a/exec"},
+		{uidA, "GET", "/machines/caja-a/files?path=/etc/hostname"},
+	} {
+		if rr := como(t, h, c.uid, c.metodo, c.ruta, exec); rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
+			t.Errorf("%s %s con el cupo lleno: %d %s", c.metodo, c.ruta, rr.Code, rr.Body)
+		}
+	}
+	// Lo de a no frena a b ni al admin (sus máquinas no arrancan aquí: basta
+	// con que no sea un 429).
+	for _, c := range []struct {
+		uid  int
+		ruta string
+	}{{uidB, "/machines/caja-b/exec"}, {uidAdmin, "/machines/caja-a/exec"}} {
+		if rr := como(t, h, c.uid, "POST", c.ruta, exec); rr.Code == http.StatusTooManyRequests {
+			t.Errorf("%s: 429 por el cupo de otro: %s", c.ruta, rr.Body)
+		}
+	}
+	s.sesionesGuest.soltar("a", maxSesionesInquilino)
+	if rr := como(t, h, uidA, "POST", "/machines/caja-a/exec", exec); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("con el cupo libre: %s", rr.Body)
+	}
+	if total, _ := s.sesionesGuest.enUso("a"); total != 0 {
+		t.Fatalf("quedaron %d sesiones apartadas", total)
+	}
+}
+
 func TestCupoPorInquilino(t *testing.T) {
 	var c cupo
 	if !c.tomar("a", 5, 10, 6) || c.tomar("a", 2, 10, 6) {

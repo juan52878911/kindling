@@ -484,6 +484,14 @@ type claveRol struct{}
 // conexión, quién está al otro lado. s.identificar lo sustituye en los tests
 // (un peercred falso).
 func (s *Server) conContexto(ctx context.Context, c net.Conn) context.Context {
+	// escuchaConTope ya la identificó al aceptarla.
+	if ci, ok := c.(*conIdentificada); ok {
+		ll := ci.ll
+		if !ci.llOK {
+			ll = Llamante{}
+		}
+		return context.WithValue(ctx, claveLlamante{}, ll)
+	}
 	id := s.identificar
 	if id == nil {
 		id = credencialesPar

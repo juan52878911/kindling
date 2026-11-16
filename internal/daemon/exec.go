@@ -219,6 +219,11 @@ func tooOldAgent(mc *api.Machine) error {
 // handleExec sirve POST /machines/{ref}/exec: NDJSON de api.ExecEvent, o con
 // ?wait=1 un api.ExecResult al terminar.
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	soltar, ok := s.tomarSesionGuest(w, r)
+	if !ok {
+		return
+	}
+	defer soltar()
 	var req api.ExecRequest
 	// El stdin viaja en base64 (4/3 del tamaño) y con su sobre JSON.
 	if err := decodeJSONCon(w, r, &req, 2*api.ExecMaxStdin+64<<10); err != nil {
@@ -466,6 +471,11 @@ func aggregateExec(events <-chan api.ExecEvent) (*api.ExecResult, error) {
 
 // handleFiles sirve GET/PUT/DELETE /machines/{ref}/files?path=...
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	soltar, ok := s.tomarSesionGuest(w, r)
+	if !ok {
+		return
+	}
+	defer soltar()
 	q := url.Values{}
 	for _, k := range []string{"path", "stat", "mode", "mkdir"} {
 		if v := r.URL.Query().Get(k); v != "" {

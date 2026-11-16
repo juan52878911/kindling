@@ -370,8 +370,10 @@ type Server struct {
 	// agente ya contestó (bajo agentesMu): ver agenteVisto.
 	agentesMu     sync.Mutex
 	agentesVistos map[string]string
-	// vueloGuest son los bytes de /guest en vuelo (vuelo.go).
-	vueloGuest cupo
+	// vueloGuest son los bytes de /guest en vuelo, y sesionesGuest los
+	// exec, shell y ficheros abiertos por inquilino (vuelo.go).
+	vueloGuest    cupo
+	sesionesGuest cupo
 	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
 	// ponen uno que cuenta).
 	sondearAgente func(context.Context, *api.Machine) error
@@ -793,7 +795,7 @@ func (s *Server) Listen(ctx context.Context) error {
 		log.Printf("no authz policy (%s): whoever reaches the socket controls everything", RutaAuthzPorDefecto)
 	}
 	log.Printf("kling daemon %s listening on %s (root=%s)", Version, s.socket, s.root)
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(s.escuchaConTope(ln)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 
