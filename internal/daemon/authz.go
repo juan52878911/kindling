@@ -958,6 +958,20 @@ var camposNodo = map[string]bool{
 	"machine_id": true, "state": true,
 }
 
+// camposGrafo y camposArista clasifican el resto de api.GraphRequest: lo de
+// arriba del grafo y cada arista. Lo que el daemon pone al responder (id,
+// estado, generación, fecha, de quién es fork) no lo trae un inquilino.
+var camposGrafo = map[string]bool{
+	"name": false, "nodes": false, "edges": false,
+
+	"id": true, "state": true, "generation": true, "created_at": true, "fork_of": true,
+}
+
+var camposArista = map[string]bool{
+	"from": false, "to": false, "kind": false, "port": false, "env": false, "user": false,
+	"database": false, "mount": false, "mode": false, "health": false,
+}
+
 var camposFork = map[string]bool{
 	// name, como en camposSandbox: el inquilino ya nombra lo que crea.
 	"name": false, "count": false, "ttl_seconds": false, "on_ttl": false, "labels": false,
@@ -989,7 +1003,21 @@ func revisarGrafo(s *Server, t string, b []byte) ([]byte, int, error) {
 		return nil, http.StatusBadRequest, err
 	}
 	return recodificar(b, func(req *api.GraphRequest) error {
-
+		if c := campoDeAdmin(&req.Graph, camposGrafo); c != "" {
+			return errCampoDeAdmin("graph " + c)
+		}
+		for i := range req.Graph.Edges {
+			if c := campoDeAdmin(&req.Graph.Edges[i], camposArista); c != "" {
+				return errCampoDeAdmin("edge " + c)
+			}
+		}
+		// Los nombres de grafo son un único espacio por daemon: uno ocupado
+		// por otro no se puede usar, pero la respuesta no dice más que eso
+		// (como revisarCommit). El 409 del manager nombra `kling graph rm`, que
+		// a un inquilino le confirmaba un grafo que no puede ver.
+		if g, err := s.mgr.Graph(req.Graph.Name); err == nil && g.Name == req.Graph.Name && dueñoGrafo(g) != t {
+			return errAuthz(http.StatusConflict, "graph name %q is taken: pick another name", req.Graph.Name)
+		}
 		for nombre, n := range req.Graph.Nodes {
 			if err := s.revisarNacimiento(t, &n.Labels, n.From, len(n.Volumes) > 0, len(n.Shares) > 0); err != nil {
 				return errAuthz(statusDe(err), "node %s: %v", nombre, err)

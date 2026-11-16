@@ -20,6 +20,8 @@ func TestCamposClasificados(t *testing.T) {
 		{api.SandboxRequest{}, camposSandbox, "camposSandbox"},
 		{api.GraphNode{}, camposNodo, "camposNodo"},
 		{api.ForkRequest{}, camposFork, "camposFork"},
+		{api.Graph{}, camposGrafo, "camposGrafo"},
+		{api.GraphEdge{}, camposArista, "camposArista"},
 	} {
 		rt := reflect.TypeOf(c.tipo)
 		vistos := map[string]bool{}
@@ -37,6 +39,34 @@ func TestCamposClasificados(t *testing.T) {
 			if !vistos[n] {
 				t.Errorf("%s clasifica %q, que %s ya no tiene", c.tabla, n, rt.Name())
 			}
+		}
+	}
+}
+
+// S19: el grafo y sus aristas también tienen tabla de campos, y lo que pone
+// el daemon (fork_of, id...) no lo trae un inquilino. Un nombre de grafo
+// ocupado por otro da el mismo 409 neutro que un snapshot ajeno, sin
+// confirmar que existe ni cómo borrarlo.
+func TestAuthzGrafoCamposYNombreAjeno(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := conStubs(s)
+	for _, c := range []struct{ cuerpo, campo string }{
+		{`{"graph":{"name":"g","fork_of":"grafo-b","nodes":{"n":{"image":"min"}}}}`, "graph fork_of is admin-only"},
+		{`{"graph":{"name":"g","id":"gb00000000000001","nodes":{"n":{"image":"min"}}}}`, "graph id is admin-only"},
+	} {
+		if rr := como(t, h, uidA, "POST", "/graphs", c.cuerpo); rr.Code != 403 || !strings.Contains(rr.Body.String(), c.campo) {
+			t.Errorf("%s: %d %s", c.cuerpo, rr.Code, rr.Body)
+		}
+	}
+	rr := como(t, h, uidA, "POST", "/graphs", `{"graph":{"name":"grafo-b","nodes":{"n":{"image":"min"}}}}`)
+	if rr.Code != 409 || !strings.Contains(rr.Body.String(), "is taken") || strings.Contains(rr.Body.String(), "graph rm") {
+		t.Fatalf("nombre de un grafo ajeno: %d %s", rr.Code, rr.Body)
+	}
+	// El propio pasa al manager, que dice lo de siempre; uno libre, también.
+	for _, n := range []string{"grafo-a", "libre"} {
+		cuerpo := `{"graph":{"name":"` + n + `","nodes":{"n":{"image":"min"}},"edges":[]}}`
+		if rr := como(t, h, uidA, "POST", "/graphs", cuerpo); rr.Code != 299 {
+			t.Errorf("%s: %d %s", n, rr.Code, rr.Body)
 		}
 	}
 }
