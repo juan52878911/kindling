@@ -79,6 +79,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Removing a template forgets its integrity verdict.
 - Sandbox gateway: idle keep-alive connections are closed after 2 minutes and request headers are capped at 64 KiB.
 - Sandbox pool: prewarmed sandboxes carry their snapshot version; after `sbx template rebuild` the old ones are removed instead of handed out, `sbx template rm` removes the free ones first, and one failing template no longer stops the refill of the others.
+- Kubernetes operator: a resync pass makes one sandbox list request instead of one request per object, and objects lock one by one instead of all together.
+- Kubernetes operator: with a host down, deleting an object whose sandbox is already resolved no longer stays in Terminating; the example Deployment uses `strategy: Recreate`.
 
 ### Security
 
@@ -104,6 +106,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
 - Sandbox gateway: the per-sandbox memory limit checks the effective size (the template snapshot when `mem_mib` is 0), and a tenant's live sandboxes have a total memory limit (`-max-mem-total-mib`, 7th field of `KLING_SANDBOX_TENANTS`, 16384 MiB by default).
 - Sandbox gateway: tenant tokens must be at least 16 characters and unique across tenants; `/v1/health` no longer reports the host count.
+- Kubernetes operator: it only renews or deletes the sandbox in `status.id` when it carries the object's UID, and rejects ids that are not `host/machine`.
 
 ### Changed
 

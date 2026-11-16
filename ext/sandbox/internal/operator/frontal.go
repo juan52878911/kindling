@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -117,44 +119,76 @@ func (f *FrontalClient) Create(ctx context.Context, spec SandboxSpec, uid string
 	return &sb, nil
 }
 
-// ByUID devuelve los sandboxes del tenant etiquetados con uid. Falla cerrado:
-// si algún host no contestó (lista parcial), es un error, porque "no está"
-// llevaría a crear otro.
-func (f *FrontalClient) ByUID(ctx context.Context, uid string) ([]frontal.Sandbox, error) {
+// List devuelve todos los sandboxes del tenant. completa es false si algún
+// host no contestó (X-Kindling-Partial): lo que falta puede existir, y quien
+// llama decide si le basta.
+func (f *FrontalClient) List(ctx context.Context) (sbs []frontal.Sandbox, completa bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+"/v1/sandboxes", nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	resp, err := f.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return nil, &frontalError{Code: resp.StatusCode, Message: string(b)}
+		return nil, false, &frontalError{Code: resp.StatusCode, Message: string(b)}
 	}
-	if p := resp.Header.Get("X-Kindling-Partial"); p != "" {
-		return nil, fmt.Errorf("frontal: partial sandbox list (%s)", p)
+	if err := json.NewDecoder(resp.Body).Decode(&sbs); err != nil {
+		return nil, false, err
 	}
-	var todos []frontal.Sandbox
-	if err := json.NewDecoder(resp.Body).Decode(&todos); err != nil {
-		return nil, err
+	return sbs, resp.Header.Get("X-Kindling-Partial") == "", nil
+}
+
+// ByUID devuelve los sandboxes del tenant etiquetados con uid. completa es
+// false si la lista del frontal vino parcial: "no está" no vale entonces para
+// crear otro.
+func (f *FrontalClient) ByUID(ctx context.Context, uid string) ([]frontal.Sandbox, bool, error) {
+	todos, completa, err := f.List(ctx)
+	if err != nil {
+		return nil, false, err
 	}
+	return conUID(todos, uid), completa, nil
+}
+
+// conUID filtra los de uid.
+func conUID(sbs []frontal.Sandbox, uid string) []frontal.Sandbox {
 	var out []frontal.Sandbox
-	for _, sb := range todos {
+	for _, sb := range sbs {
 		if sb.Labels[LabelK8sUID] == uid {
 			out = append(out, sb)
 		}
 	}
-	return out, nil
+	return out
+}
+
+// parteID es como el frontal nombra hosts y máquinas: ni barras, ni puntos al
+// principio, ni nada que haya que escapar.
+var parteID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+// rutaSandbox es /v1/sandboxes/<host>/<máquina> para un id "host/máquina".
+// status.id lo puede escribir cualquiera con permiso sobre sandboxes/status,
+// así que no se pega a la URL sin comprobar que es un id y nada más (con una
+// barra de más o un "..", la petición iría a otra ruta del frontal).
+func rutaSandbox(id string) (string, error) {
+	host, ref, ok := strings.Cut(id, "/")
+	if !ok || !parteID.MatchString(host) || !parteID.MatchString(ref) {
+		return "", fmt.Errorf("%q is not a sandbox id (host/machine)", id)
+	}
+	return "/v1/sandboxes/" + url.PathEscape(host) + "/" + url.PathEscape(ref), nil
 }
 
 // Get trae el estado actual de un sandbox por su id compuesto ("host/máquina").
 func (f *FrontalClient) Get(ctx context.Context, id string) (*frontal.Sandbox, error) {
+	ruta, err := rutaSandbox(id)
+	if err != nil {
+		return nil, err
+	}
 	var sb frontal.Sandbox
-	if err := f.do(ctx, http.MethodGet, "/v1/sandboxes/"+id, nil, &sb); err != nil {
+	if err := f.do(ctx, http.MethodGet, ruta, nil, &sb); err != nil {
 		return nil, err
 	}
 	return &sb, nil
@@ -162,8 +196,12 @@ func (f *FrontalClient) Get(ctx context.Context, id string) (*frontal.Sandbox, e
 
 // Renew cambia el TTL de un sandbox vivo (spec.ttlSeconds cambió).
 func (f *FrontalClient) Renew(ctx context.Context, id string, ttlSeconds int) (*frontal.Sandbox, error) {
+	ruta, err := rutaSandbox(id)
+	if err != nil {
+		return nil, err
+	}
 	var sb frontal.Sandbox
-	if err := f.do(ctx, http.MethodPost, "/v1/sandboxes/"+id+"/renew", frontal.RenovarPeticion{TTLSeconds: ttlSeconds}, &sb); err != nil {
+	if err := f.do(ctx, http.MethodPost, ruta+"/renew", frontal.RenovarPeticion{TTLSeconds: ttlSeconds}, &sb); err != nil {
 		return nil, err
 	}
 	return &sb, nil
@@ -174,7 +212,11 @@ func (f *FrontalClient) Renew(ctx context.Context, id string, ttlSeconds int) (*
 // como fallo dejaría un finalizer colgado para siempre por algo que la
 // limpieza por abandono del propio frontal ya resolvió.
 func (f *FrontalClient) Delete(ctx context.Context, id string) error {
-	err := f.do(ctx, http.MethodDelete, "/v1/sandboxes/"+id, nil, nil)
+	ruta, err := rutaSandbox(id)
+	if err != nil {
+		return err
+	}
+	err = f.do(ctx, http.MethodDelete, ruta, nil, nil)
 	if err != nil && IsFrontalNotFound(err) {
 		return nil
 	}

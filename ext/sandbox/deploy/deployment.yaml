@@ -1,8 +1,8 @@
-# Deployment de ejemplo. Una sola réplica: dos operadores reconciliando el
-# mismo Sandbox a la vez no rompen nada grave (crear es idempotente por
-# status.id, borrar tolera el 404), pero duplicarían trabajo sin motivo. Si
-# hace falta alta disponibilidad, esto pide un lease de liderazgo — que este
-# operador, a propósito, no trae: es fino y de un solo proceso.
+# Deployment de ejemplo. Una sola réplica, y nunca dos a la vez: dos
+# operadores reconciliando el mismo Sandbox pueden crear su sandbox dos veces
+# (la adopción por UID solo arregla el duplicado después). Si hace falta alta
+# disponibilidad, esto pide un lease de liderazgo — que este operador, a
+# propósito, no trae: es fino y de un solo proceso.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +10,11 @@ metadata:
   namespace: kindling-system
 spec:
   replicas: 1
+  # Recreate: un rolling update arrancaba el operador nuevo con el viejo aún
+  # vivo, y sin lease los dos podían crear a la vez el sandbox de un mismo
+  # objeto. Así el viejo para antes de que arranque el nuevo.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: kindling-operator
