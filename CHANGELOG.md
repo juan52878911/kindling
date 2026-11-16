@@ -15,6 +15,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 ### Fixed
 
 - `POST /machines/{ref}/guest` has a memory budget for bodies in flight (1 GiB, and a per-tenant share): calls that don't fit get 429 before reaching the guest instead of running the daemon out of memory (8 parallel 100 MiB calls: 1.6-3.1 GiB of heap before, 0.7 GiB now).
+- `GET /events`: a tenant's stream is filtered before its buffer, so other tenants' activity no longer makes it drop its own events; with an authz policy, admins can't hold the last 64 streams.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.

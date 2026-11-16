@@ -1173,6 +1173,24 @@ func (s *Server) eventoVisible(r *http.Request, ev api.Event) bool {
 	return ok && mc.ID == ev.ID && esDe(mc.Labels, t)
 }
 
+// dueñoDeEvento es de quién es la máquina de ev, para filtrar en el bus
+// (SubscribeFiltrado): el Owner que trae el evento (las borradas ya no están
+// en el manager), o el kling.owner de la máquina. "" si no es de una máquina.
+// Lee el manager con su candado de lectura: ningún Publish se hace con él
+// tomado.
+func (s *Server) dueñoDeEvento(ev api.Event) string {
+	if ev.Owner != "" {
+		return ev.Owner
+	}
+	if ev.ID == "" {
+		return ""
+	}
+	if mc, ok := s.mgr.Get(ev.ID); ok && mc.ID == ev.ID {
+		return mc.Labels[api.LabelOwner]
+	}
+	return ""
+}
+
 // infoAuthz es lo que GET /info cuenta de la autorización a quien pregunta.
 func (s *Server) infoAuthz(r *http.Request) *api.AuthzInfo {
 	out := &api.AuthzInfo{Enabled: s.authz != nil}

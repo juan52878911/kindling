@@ -354,6 +354,9 @@ type Server struct {
 	eventosMu  sync.Mutex
 	eventosDe  map[string]int
 	idleFreeze func() time.Duration
+	// dueñoEventosUna instala dueñoDeEvento en el bus la primera vez que un
+	// inquilino abre /events.
+	dueñoEventosUna sync.Once
 
 	// muestra es la última muestra de /metrics y cuándo se tomó (bajo
 	// muestraMu): ver muestraMetrics. muestrear es de dónde sale (nil =
@@ -1549,15 +1552,31 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, errors.New("streaming not supported"))
 		return
 	}
-	if t, filtra := inquilinoDe(r); filtra {
-		soltar, ok := s.tomarEventosInquilino(t)
+	t, filtra := inquilinoDe(r)
+	var filtro events.Filtro
+	switch {
+	case filtra:
+		soltar, ok := s.tomarEventos(t, maxEventosInquilino)
 		if !ok {
 			fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open for this tenant (limit %d)", maxEventosInquilino))
 			return
 		}
 		defer soltar()
+		// Solo lo de sus máquinas entra en su búfer (ver SubscribeFiltrado).
+		// eventoVisible sigue mirando cada uno al escribirlo.
+		s.dueñoEventosUna.Do(func() { s.bus.SetDueño(s.dueñoDeEvento) })
+		filtro = func(ev api.Event, dueño string) bool { return ev.ID != "" && t != "" && dueño == t }
+	case s.authz != nil:
+		// Con política, los que no son inquilinos (admin) no pueden quedarse
+		// con todos los flujos: los últimos eventosParaInquilinos son de ellos.
+		soltar, ok := s.tomarEventos(claveEventosAdmin, maxSuscriptoresEventos-eventosParaInquilinos)
+		if !ok {
+			fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open by admins (limit %d)", maxSuscriptoresEventos-eventosParaInquilinos))
+			return
+		}
+		defer soltar()
 	}
-	ch, unsub, ok := s.bus.SubscribeHasta(maxSuscriptoresEventos)
+	ch, unsub, ok := s.bus.SubscribeFiltrado(maxSuscriptoresEventos, filtro)
 	if !ok {
 		fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open (limit %d)", maxSuscriptoresEventos))
 		return
@@ -1612,19 +1631,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 const (
 	maxSuscriptoresEventos = 256
 	maxEventosInquilino    = 16
+	// eventosParaInquilinos son los flujos que, con política, los admin no
+	// pueden ocupar.
+	eventosParaInquilinos = 64
 )
+
+// claveEventosAdmin es la cuenta de los flujos de admin en eventosDe: no
+// puede ser un inquilino (los nombres de inquilino no llevan NUL).
+const claveEventosAdmin = "\x00admin"
 
 var eventosEscritura = time.Minute
 
-// tomarEventosInquilino aparta uno de los maxEventosInquilino flujos de
-// eventos de t; false si ya los tiene todos.
-func (s *Server) tomarEventosInquilino(t string) (func(), bool) {
+// tomarEventos aparta uno de los max flujos de eventos de clave (un
+// inquilino, o claveEventosAdmin); false si ya los tiene todos.
+func (s *Server) tomarEventos(t string, max int) (func(), bool) {
 	s.eventosMu.Lock()
 	defer s.eventosMu.Unlock()
 	if s.eventosDe == nil {
 		s.eventosDe = map[string]int{}
 	}
-	if s.eventosDe[t] >= maxEventosInquilino {
+	if s.eventosDe[t] >= max {
 		return nil, false
 	}
 	s.eventosDe[t]++

@@ -42,6 +42,40 @@ func TestEventosConTope(t *testing.T) {
 	}
 }
 
+// R8: con política, los admin no pueden quedarse con todos los flujos de
+// /events: los últimos eventosParaInquilinos son de los inquilinos.
+func TestEventosReservaParaInquilinos(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := s.routes()
+	s.eventosDe = map[string]int{claveEventosAdmin: maxSuscriptoresEventos - eventosParaInquilinos}
+	if rr := eventosComo(t, h, uidAdmin); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("admin por encima de su parte: %d %s", rr.Code, rr.Body)
+	}
+	// El inquilino sí entra (el flujo se abre y se corta al vencer el plazo).
+	if rr := eventosComo(t, h, uidA); rr.Code != http.StatusOK {
+		t.Fatalf("inquilino con los admin en su tope: %d %s", rr.Code, rr.Body)
+	}
+}
+
+// R8: las máquinas de b no le hacen perder eventos a a. El filtro va antes
+// del búfer, con el dueño de cada máquina sacado del manager.
+func TestEventosDeOtroInquilinoNoLlenanElBufer(t *testing.T) {
+	s := servidorAuthz(t, politicaDePrueba(t))
+	h := s.routes()
+	hecho := make(chan *httptest.ResponseRecorder)
+	go func() { hecho <- eventosComo(t, h, uidA) }()
+	time.Sleep(300 * time.Millisecond) // a que se suscriba
+	for range 1000 {
+		s.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: "bbbb000000000001", Name: "caja-b"})
+	}
+	s.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: "aaaa000000000001", Name: "caja-a"})
+	rr := <-hecho
+	cuerpo := rr.Body.String()
+	if !strings.Contains(cuerpo, "aaaa000000000001") || strings.Contains(cuerpo, "dropped") || strings.Contains(cuerpo, "bbbb") {
+		t.Fatalf("a debía ver su evento y nada más:\n%.500s", cuerpo)
+	}
+}
+
 // eventosComo es como() para GET /events, con un plazo: si el tope no
 // rechaza, el flujo se abre y se cerraría solo al cortar el cliente.
 func eventosComo(t *testing.T, h http.Handler, uid int) *httptest.ResponseRecorder {
