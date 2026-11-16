@@ -18,8 +18,8 @@ var procReaper = guest.DefaultReaper
 // sin hablar con la dirección de enlace local.
 var fetchMMDS = guest.FetchMMDS
 
-func enSuPropioGrupo(cmd *exec.Cmd) { guest.OwnGroup(cmd) }
-func matarGrupo(cmd *exec.Cmd)      { guest.KillGroup(cmd) }
+// El grupo propio lo pone procReaper.StartTracked (lanzarVigilado).
+func matarGrupo(cmd *exec.Cmd) { guest.KillGroup(cmd) }
 
 func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 	return guest.WaitFor(cmd, exitCh)
