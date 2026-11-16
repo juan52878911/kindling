@@ -16,8 +16,11 @@ package machine
 // misma base. Restaurar paga dos stat.
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/juan52878911/kindling/internal/digest"
 	"github.com/juan52878911/kindling/pkg/api"
@@ -26,23 +29,75 @@ import (
 // digestDiscoBase es el digest en árbol del ext4 path, cacheado por tamaño y
 // fecha. La huella se toma ANTES de hashear: si el fichero cambia mientras, la
 // siguiente llamada no casa y lo vuelve a leer.
+//
+// Uno solo por ruta a la vez (P5): tras arrancar el daemon, N run -from
+// simultáneos del mismo dorado hasheaban cada uno la imagen entera (con 8
+// hilos cada uno). Ahora el primero la lee y los demás esperan su resultado,
+// si es de la misma huella.
 func (m *Manager) digestDiscoBase(path string) (string, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return "", err
+	for {
+		st, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		tam, fecha := st.Size(), st.ModTime().UnixNano()
+		if v, ok := m.discosBase.Load(path); ok {
+			if h := v.(huellaKernel); h.tam == tam && h.fecha == fecha {
+				return h.hash, nil
+			}
+		}
+		v := &vueloDigest{hecho: make(chan struct{}), tam: tam, fecha: fecha}
+		if otro, enCurso := m.discosEnVuelo.LoadOrStore(path, v); enCurso {
+			o := otro.(*vueloDigest)
+			<-o.hecho
+			if o.tam == tam && o.fecha == fecha {
+				return o.hash, o.err
+			}
+			continue // era de otra huella: el fichero cambió entre medias
+		}
+		v.hash, v.err = digestArbol(path)
+		if v.err == nil {
+			m.discosBase.Store(path, huellaKernel{tam: tam, fecha: fecha, hash: v.hash})
+		}
+		m.discosEnVuelo.CompareAndDelete(path, v)
+		close(v.hecho)
+		return v.hash, v.err
 	}
-	tam, fecha := st.Size(), st.ModTime().UnixNano()
-	if v, ok := m.discosBase.Load(path); ok {
-		if h := v.(huellaKernel); h.tam == tam && h.fecha == fecha {
-			return h.hash, nil
+}
+
+// vueloDigest es un digestDiscoBase en curso: hecho se cierra con hash y err
+// ya puestos, de la huella tam y fecha.
+type vueloDigest struct {
+	hecho      chan struct{}
+	tam, fecha int64
+	hash       string
+	err        error
+}
+
+// digestArbol es digest.Tree; una variable para contar lecturas en las
+// pruebas.
+var digestArbol = digest.Tree
+
+// precalentarDiscosBase calcula en segundo plano los digests de las imágenes
+// sobre las que hay dorados (P5), de una en una (digest.Tree ya lee en
+// paralelo): el primer run -from tras arrancar el daemon ya no paga leer la
+// imagen entera, y si llega antes, espera a este en vez de leerla otra vez.
+func (m *Manager) precalentarDiscosBase(ctx context.Context) {
+	metas, _ := filepath.Glob(filepath.Join(m.root, "snapshots", "*", "meta.json"))
+	vistas := map[string]bool{}
+	for _, p := range metas {
+		if ctx.Err() != nil {
+			return
+		}
+		s, err := m.loadSnapshot(filepath.Base(filepath.Dir(p)))
+		if err != nil || s.ImageDigest == "" || vistas[s.Image] {
+			continue
+		}
+		vistas[s.Image] = true
+		if _, _, err := m.digestsDeImagen(s.Image); err != nil {
+			log.Printf("warning: precomputing the digest of image %q: %v", s.Image, err)
 		}
 	}
-	hash, err := digest.Tree(path)
-	if err != nil {
-		return "", err
-	}
-	m.discosBase.Store(path, huellaKernel{tam: tam, fecha: fecha, hash: hash})
-	return hash, nil
 }
 
 // digestsDeImagen son los digests del disco de solo lectura con que arranca

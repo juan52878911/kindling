@@ -464,8 +464,14 @@ func (m *Manager) migrarFirma(name, firma string) (*api.Snapshot, error) {
 // deja la marca y se reintenta en el próximo arranque; los que no cuadran (firma o
 // digests) se quedan como están y no se restauran. Los que no tienen firma
 // tampoco se pueden re-firmar (no hay con qué saber que son de aquí): se
-// avisa. El daemon lo llama al arrancar, en segundo plano.
+// avisa. El daemon lo llama al arrancar, en segundo plano; después calcula
+// los digests de las imágenes de los dorados (precalentarDiscosBase).
 func (m *Manager) MigrarFirmas(ctx context.Context) {
+	m.migrarFirmas(ctx)
+	m.precalentarDiscosBase(ctx)
+}
+
+func (m *Manager) migrarFirmas(ctx context.Context) {
 	if m.firmasV3Migradas() {
 		return
 	}

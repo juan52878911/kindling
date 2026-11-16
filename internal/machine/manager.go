@@ -226,6 +226,9 @@ type Manager struct {
 	// (ruta → huellaKernel) que los dorados llevan en image_digest y
 	// base_digest. Ver digestDiscoBase.
 	discosBase sync.Map
+	// discosEnVuelo: ruta → *vueloDigest del digest que alguien está
+	// calculando ahora; los demás lo esperan en vez de hashear lo mismo (P5).
+	discosEnVuelo sync.Map
 	// vigiaOverlays despierta a vigilarOverlays cuando duerme sin máquinas
 	// en marcha: persist avisa en cada cambio. Ver canalVigiaOverlays.
 	vigiaOverlays     chan struct{}
