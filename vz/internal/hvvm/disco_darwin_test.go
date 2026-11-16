@@ -294,6 +294,50 @@ func TestFlushModos(t *testing.T) {
 	}
 }
 
+// P11: en un disco rw, un FLUSH sin escrituras desde el anterior no asienta
+// nada (ni F_FULLFSYNC); tras un OUT o un DISCARD, sí.
+func TestFlushSinEscriturasNoSincroniza(t *testing.T) {
+	defer modoDisco(false, sincFull)
+	cfgDisco(0)
+	modoDisco(false, sincFull)
+	buf := make([]byte, 4096)
+	contar := func(paso string, quiero uint64, f func()) {
+		t.Helper()
+		antes := sincsDisco()
+		f()
+		if n := sincsDisco() - antes; n != quiero {
+			t.Fatalf("%s: %d syncs, want %d", paso, n, quiero)
+		}
+	}
+	flush := func() {
+		t.Helper()
+		if e := flushDisco(); e != 0 {
+			t.Fatalf("FLUSH: status %d", e)
+		}
+	}
+	contar("first FLUSH after opening", 1, flush)
+	t0 := time.Now()
+	contar("300 FLUSH with no writes", 0, func() {
+		for i := 0; i < 300; i++ {
+			flush()
+		}
+	})
+	t.Logf("rw, no writes: 300 × FLUSH in %v on the host", time.Since(t0))
+	contar("OUT + FLUSH", 1, func() {
+		if e, _ := esDisco(1, 0, []uint32{4096}, buf, -1); e != 0 {
+			t.Fatalf("OUT: status %d", e)
+		}
+		flush()
+		flush()
+	})
+	contar("DISCARD + FLUSH", 1, func() {
+		if e := descartar(t, 11, segmentos([3]uint64{0, 8, 0})); e != 0 {
+			t.Fatalf("DISCARD: status %d", e)
+		}
+		flush()
+	})
+}
+
 // P7: un FLUSH a un disco de solo lectura se contesta bien y sin
 // F_FULLFSYNC: no hay nada que asentar, y vaciar la caché del SSD (la de todo
 // el Mac) en bucle es lo que puede pedir un invitado.

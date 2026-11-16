@@ -524,10 +524,11 @@ var (
 	cpuEquiv footprint.Contador
 )
 
-// CPUTime es la CPU que llevan gastada los hilos de vCPU, con el tiempo en
-// núcleos de eficiencia cobrado a lo que vale en P, como el de kling-vz
-// (footprint/coste.go): sin eso, un vCPU que el planificador manda a los E
-// gasta el techo de CPU varias veces más deprisa por el mismo trabajo.
+// CPUTime es la CPU que lleva gastada el proceso entero (vCPU, dispositivos y
+// la pila de red), con el tiempo en núcleos de eficiencia cobrado a lo que
+// vale en P, como el de kling-vz (footprint/coste.go): sin eso, un vCPU que el
+// planificador manda a los E gasta el techo de CPU varias veces más deprisa
+// por el mismo trabajo.
 func CPUTime() (time.Duration, error) {
 	cpuMu.Lock()
 	defer cpuMu.Unlock()

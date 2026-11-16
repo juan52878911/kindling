@@ -108,3 +108,28 @@ func TestResolverCacheTope(t *testing.T) {
 		t.Fatalf("cache holds %d entries, cap is %d", n, MaxCacheEntries)
 	}
 }
+
+// R7: una respuesta de más de MaxCacheResp (por TCP llegan hasta 64 KiB) no
+// se guarda: con MaxCacheEntries así la caché retenía 32 MiB por VM.
+func TestResolverCacheNoGuardaGrandes(t *testing.T) {
+	p := NewPolicy()
+	p.Set(Internet, nil)
+	var subidas int
+	ips := make([]string, 300) // 300 × 16 B: más de 4 KiB
+	for i := range ips {
+		ips[i] = fmt.Sprintf("93.184.%d.%d", i/250, i%250+1)
+	}
+	r := &Resolver{Policy: p, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
+		subidas++
+		return answer(q, 60, ips...), nil
+	}}
+	q := BuildQuery("grande.example.com", 1)
+	for i := 0; i < 2; i++ {
+		if resp := r.Process(context.Background(), q, true); len(resp) <= MaxCacheResp {
+			t.Fatalf("answer of %d bytes, the test wants one over %d", len(resp), MaxCacheResp)
+		}
+	}
+	if subidas != 2 || len(r.cache) != 0 {
+		t.Fatalf("an answer over %d bytes was cached (%d upstream queries, %d entries)", MaxCacheResp, subidas, len(r.cache))
+	}
+}

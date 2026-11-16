@@ -126,7 +126,7 @@ int khv_snapshot(const char *mem_out);
 int khv_wait(void);  // bloquea hasta que la VM termina: 0 si el invitado se apagó o se reinició
 void khv_stop(void);
 uint64_t khv_footprint(void);
-void khv_cpu_lectura(uint64_t out[4]);  // CPU de los vCPU: total y en P (ns), instrucciones y en P
+void khv_cpu_lectura(uint64_t out[4]);  // CPU del proceso: total y en P (ns), instrucciones y en P
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms);
 // Disposición del mem.file (para TestCabeceraKLNGHV): magia, versión y
 // tamaños de la cabecera (la actual y la de la versión 1) y del pie.
@@ -432,7 +432,7 @@ int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
 int khv_vsock_prueba_muerto(int64_t *dial_ns);
-int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego);
+int khv_vsock_prueba_sin_rx(int ctl, unsigned *vueltas, uint32_t *llego);
 int khv_vsock_prueba_host_cierra(void);
 int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control);
 

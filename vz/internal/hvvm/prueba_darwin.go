@@ -237,10 +237,15 @@ func redMuerta() int { return int(C.khv_prueba_red_muerta()) }
 
 // vsockSinRx es khv_vsock_prueba_sin_rx: las vueltas de vs_hilo en 200 ms
 // con datos del host y la cola 0 sin búferes, y lo que llega al publicar uno.
-func vsockSinRx() (vueltas uint, llego uint32, r int) {
+// Con ctl hay además un paquete de control en cola delante (R5).
+func vsockSinRx(ctl bool) (vueltas uint, llego uint32, r int) {
 	var v C.unsigned
 	var l C.uint32_t
-	r = int(C.khv_vsock_prueba_sin_rx(&v, &l))
+	c := C.int(0)
+	if ctl {
+		c = 1
+	}
+	r = int(C.khv_vsock_prueba_sin_rx(c, &v, &l))
 	return uint(v), uint32(l), r
 }
 

@@ -96,10 +96,17 @@ func TestVsockRxTandaAcotada(t *testing.T) {
 // en vacío (poll listo, bombear sin sitio, otra vez): un núcleo del host por
 // VM fuera del tope de CPU. Espera al aviso de la cola 0, y entonces el dato
 // llega.
-func TestVsockSinBuferesDeRxNoGira(t *testing.T) {
+func TestVsockSinBuferesDeRxNoGira(t *testing.T) { vsockSinRxNoGira(t, false) }
+
+// R5: lo mismo con un paquete de control en cola delante de los datos.
+// bombear se paraba en él sin sitio en la cola 0 sin marcar sin_rx, y el poll
+// seguía pidiendo POLLIN del socket con datos: un núcleo al 100 %.
+func TestVsockSinBuferesDeRxConControlNoGira(t *testing.T) { vsockSinRxNoGira(t, true) }
+
+func vsockSinRxNoGira(t *testing.T, ctl bool) {
 	var ru0, ru1 syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
-	vueltas, llego, r := vsockSinRx()
+	vueltas, llego, r := vsockSinRx(ctl)
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
 	cpu := time.Duration(ru1.Utime.Nano() + ru1.Stime.Nano() - ru0.Utime.Nano() - ru0.Stime.Nano())
 	t.Logf("process CPU over the ~250 ms of the test: %v", cpu)

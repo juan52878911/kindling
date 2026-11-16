@@ -104,6 +104,12 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Kubernetes operator: a resync pass makes one sandbox list request instead of one request per object, and objects lock one by one instead of all together.
 - Kubernetes operator: with a host down, deleting an object whose sandbox is already resolved no longer stays in Terminating; the example Deployment uses `strategy: Recreate`.
 - `kling phone mcp`: at most `-max-sessions` (4) sessions at a time; a request without a session reads at most 64 KiB; a phone that could not be removed is retried, a spare whose resume fails is removed, and on start the server removes the phones a previous run on the same address left behind.
+- kling-hv: the vsock thread no longer spins at 100% when a control packet is waiting for a receive buffer and another connection has data.
+- kling-hv: a FLUSH with no writes since the previous one no longer issues `F_FULLFSYNC` (300 of them: about 1.2 s to 2.5 ms on the host).
+- macOS DNS: a UDP answer with another transaction id is ignored while waiting for the right one, instead of answering the guest with SERVFAIL.
+- kling-hv: stale `.khv-clon-*` directories left by a killed snapshot (each holding a full copy of guest RAM) are removed by the next snapshot.
+- macOS networking: the netstack TCP buffers of a VM share a 256 MiB budget (512 open connections could hold up to 7 GiB of host memory), and DNS answers over 4 KiB are not cached.
+- kling-hv: the CPU cap charges the whole process, not only the vCPU threads, so disk, network and vsock work count too (cpu_pct=10 with a direct-I/O read loop: 45% to 12% of a core).
 
 ### Security
 
