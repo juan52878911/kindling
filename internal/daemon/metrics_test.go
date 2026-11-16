@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +40,43 @@ func TestMetricsExponeLaTelemetria(t *testing.T) {
 		if !strings.Contains(body, serie) {
 			t.Errorf("falta la serie %s", serie)
 		}
+	}
+}
+
+// P6: /metrics muestreaba todas las máquinas en cada scrape, también los que
+// llegaban a la vez. Ahora una muestra sirve durante plazoMuestraMetrics y
+// los scrapes simultáneos esperan a la misma: 50 en paralelo cuestan una
+// muestra, no 50. Pasado el plazo, la siguiente vuelve a muestrear.
+func TestMetricsMuestraCompartida(t *testing.T) {
+	s, h := testServer(t)
+	var muestras atomic.Int32
+	s.muestrear = func() api.ProcStats {
+		muestras.Add(1)
+		time.Sleep(20 * time.Millisecond) // lo que tarda leer N smaps_rollup
+		return api.ProcStats{Machines: []api.ProcStat{{ID: "aaaa000000000001", Name: "m", PID: 1, PSSMiB: 7}}}
+	}
+	viejo := plazoMuestraMetrics
+	plazoMuestraMetrics = time.Hour
+	t.Cleanup(func() { plazoMuestraMetrics = viejo })
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if rr := call(t, h, "GET", "/metrics", ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), `kling_machine_pss_mib{id="aaaa000000000001"`) {
+				t.Errorf("GET /metrics = %d", rr.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := muestras.Load(); n != 1 {
+		t.Fatalf("50 scrapes simultáneos hicieron %d muestras; con la caché, 1", n)
+	}
+	plazoMuestraMetrics = 0
+	call(t, h, "GET", "/metrics", "")
+	if n := muestras.Load(); n != 2 {
+		t.Fatalf("pasado el plazo no volvió a muestrear: %d muestras", n)
 	}
 }
 

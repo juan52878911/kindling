@@ -354,6 +354,14 @@ type Server struct {
 	eventosMu  sync.Mutex
 	eventosDe  map[string]int
 	idleFreeze func() time.Duration
+
+	// muestra es la última muestra de /metrics y cuándo se tomó (bajo
+	// muestraMu): ver muestraMetrics. muestrear es de dónde sale (nil =
+	// mgr.ProcStats; los tests ponen una que cuenta).
+	muestraMu sync.Mutex
+	muestra   api.ProcStats
+	muestraEn time.Time
+	muestrear func() api.ProcStats
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
