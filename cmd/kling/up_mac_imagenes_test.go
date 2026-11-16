@@ -69,8 +69,12 @@ func TestBajarImagenesMac(t *testing.T) {
 			t.Errorf("%s: %d bytes, quería %d", nombre, len(b), len(want))
 		}
 	}
-	if ents, _ := os.ReadDir(filepath.Join(root, "images")); len(ents) != 2 {
+	// Las dos imágenes y la marca de su release (para doctor); nada más.
+	if ents, _ := os.ReadDir(filepath.Join(root, "images")); len(ents) != 4 {
 		t.Errorf("images/ tiene %d entradas (¿quedó el temporal?)", len(ents))
+	}
+	if got := imagenesDeRelease(filepath.Join(root, "images")); got["vmlinux"] != "v0.20.0" || got["min.ext4"] != "v0.20.0" {
+		t.Errorf("marcas de release: %v", got)
 	}
 	// Lo que ya está no se toca: ni se baja.
 	os.WriteFile(filepath.Join(root, "images", "min.ext4"), []byte("mía"), 0o644)
