@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -633,6 +634,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 			s.aisladas[t.Service] = true
 			a.mu.Unlock()
 		}
+	} else if r := a.instanciaRespaldada(s, t.Service); r != nil {
+		// La conversación ya tiene sesión en una instancia viva del servicio
+		// (la primaria o una réplica a la que escaló): se vuelve a ESA. Partir
+		// siempre de la primaria hacía que, con la primaria llena, cada
+		// tools/call creara otra réplica y la conversación perdiera el estado
+		// de su proceso MCP.
+		e = r
 	} else {
 		e, err = a.gw.Ensure(ctx, t.Service)
 	}
@@ -683,13 +691,27 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		a.mu.Lock()
 		sid = s.backing[bkey]
 		a.mu.Unlock()
+		if sid == "" && !aislado {
+			// Otra llamada de la conversación pudo abrir sesión en una réplica
+			// mientras esperábamos el candado: se usa esa en vez de escalar otra.
+			if r := a.instanciaRespaldada(s, t.Service); r != nil && r != e {
+				a.gw.Begin(r)
+				a.gw.End(e)
+				e, base = r, "http://"+r.Addr(GuestPort)
+				bkey = t.Service + "\x00" + e.MachineID()
+				a.mu.Lock()
+				sid = s.backing[bkey]
+				a.mu.Unlock()
+			}
+		}
 	}
 	if sid == "" {
 		newSid, ierr := mcpInit(ctx, base)
 		if errors.Is(ierr, errSessionLimit) && !aislado {
 			// La primaria está llena (sesiones directas, u otras conversaciones
-			// del agregador): como en el initialize directo, una réplica nueva.
-			e2, serr := a.gw.ScaleOut(ctx, t.Service, scheduler.TenantFrom(ctx))
+			// del agregador): como en el initialize directo, una réplica con
+			// hueco, la que ya esté naciendo si la hay.
+			e2, serr := a.gw.JoinOrScaleOut(ctx, t.Service, scheduler.TenantFrom(ctx))
 			if serr != nil {
 				log.Printf("%s: primary full and no replica for the aggregator: %v", t.Service, serr)
 			}
@@ -897,6 +919,64 @@ func (a *aggregator) backedOn(machineID string) int {
 	return n
 }
 
+// instanciaRespaldada devuelve una instancia viva del servicio en la que la
+// conversación s ya tiene sesión abierta, o nil. Si hay varias (la primaria se
+// reconstruyó y luego escaló), cualquiera vale: todas tienen sesión de s.
+func (a *aggregator) instanciaRespaldada(s *aggSession, service string) *scheduler.Instance {
+	pre := service + "\x00"
+	a.mu.Lock()
+	var maquinas []string
+	for k := range s.backing {
+		if mid, ok := strings.CutPrefix(k, pre); ok {
+			maquinas = append(maquinas, mid)
+		}
+	}
+	a.mu.Unlock()
+	for _, mid := range maquinas {
+		if e := a.gw.Instance(service, mid); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// cerrarRespaldos termina en el puente las sesiones que la conversación s
+// tenía abiertas en microVMs. Sin esto, cada conversación cerrada o segada
+// dejaba un proceso MCP huérfano por servicio hasta que el puente lo recogía
+// por inactividad. Las de máquinas que ya no están no cuestan nada.
+func (a *aggregator) cerrarRespaldos(ctx context.Context, s *aggSession) {
+	a.mu.Lock()
+	backing := make(map[string]string, len(s.backing))
+	for k, v := range s.backing {
+		backing[k] = v
+	}
+	aisladas := make(map[string]bool, len(s.aisladas))
+	for k, v := range s.aisladas {
+		aisladas[k] = v
+	}
+	a.mu.Unlock()
+	for k, sid := range backing {
+		svc, mid, ok := strings.Cut(k, "\x00")
+		if !ok || aisladas[svc] {
+			// Enlace externo (no es un proceso nuestro) o servicio aislado: su
+			// máquina entera se destruye en soltarAisladas.
+			continue
+		}
+		if e := a.gw.Instance(svc, mid); e != nil {
+			mcpClose(ctx, "http://"+e.Addr(GuestPort), sid)
+		}
+	}
+}
+
+// soltar libera lo que la conversación s retiene por detrás: sus microVMs
+// aisladas, antes de volver (quien recibe el 204 sabe que ya no existen), y sus
+// sesiones en los puentes compartidos, en segundo plano y con contexto propio:
+// quien cierra (un DELETE, el segador) no espera a un invitado lento.
+func (a *aggregator) soltar(ctx context.Context, s *aggSession) {
+	a.soltarAisladas(ctx, s)
+	go a.cerrarRespaldos(context.WithoutCancel(ctx), s)
+}
+
 // drop cierra la conversación sid si es del tenant; la de otro no se toca.
 func (a *aggregator) drop(ctx context.Context, sid, tenant string) {
 	a.mu.Lock()
@@ -909,7 +989,7 @@ func (a *aggregator) drop(ctx context.Context, sid, tenant string) {
 	}
 	a.mu.Unlock()
 	if s != nil {
-		a.soltarAisladas(ctx, s)
+		a.soltar(ctx, s)
 	}
 }
 
@@ -924,7 +1004,7 @@ func (a *aggregator) reap(ctx context.Context, idle time.Duration) {
 	}
 	a.mu.Unlock()
 	for _, s := range muertas {
-		a.soltarAisladas(ctx, s)
+		a.soltar(ctx, s)
 	}
 }
 
@@ -954,6 +1034,18 @@ func contains(xs []string, x string) bool {
 
 func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
 	w.Header().Set("Content-Type", "application/json")
+	// El resultado de un tools/call llega ya como JSON: se escribe tal cual,
+	// en trozos y sin copiarlo. Pasarlo por el Encoder lo compactaba en un
+	// búfer y lo volvía a copiar al suyo: dos copias más de hasta 16 MiB por
+	// llamada. Se valida igual (sin reservar memoria): es del invitado.
+	if raw, ok := result.(json.RawMessage); ok && json.Valid(id) && json.Valid(raw) {
+		_, _ = io.WriteString(w, `{"id":`)
+		_, _ = w.Write(id)
+		_, _ = io.WriteString(w, `,"jsonrpc":"2.0","result":`)
+		_, _ = w.Write(raw)
+		_, _ = io.WriteString(w, "}\n")
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"jsonrpc": "2.0", "id": id, "result": result,
 	})
