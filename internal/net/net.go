@@ -117,7 +117,7 @@ func quiet(args ...string) {
 // (-w) en vez de fallar en el acto. Con iptables-legacy y varios arranques a
 // la vez, el que lo encontraba tomado fallaba: un -C se leía como «la regla
 // no está» y un -I como un Setup roto. Con iptables-nft no hay cerrojo y -w
-// no hace nada.
+// no hace nada. -w con segundos es de la 1.6.0 (2015); antes no llevaba valor.
 const esperaXtables = "5"
 
 // conEspera añade -w a una llamada a iptables o ip6tables, también dentro de
