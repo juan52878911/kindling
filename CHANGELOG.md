@@ -81,6 +81,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Shares: when watching by polling, a directory without a snapshot is reported only when it changes, not every 2 s.
 - Shares on Linux: two names of the same file are both watched; unwatching one no longer silences the other.
 - Shares: change notices to a guest that does not read no longer pile up goroutines (at most one write waits), and on macOS one session watches at most 1024 paths so it cannot use up the daemon's 4096.
+- Shares: a size close to the 64-bit maximum no longer overflows the quota check; it gets ENOSPC.
 
 ### Security
 
