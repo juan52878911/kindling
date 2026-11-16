@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +88,7 @@ func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machin
 		if err != nil {
 			return nil, execStatus(err), err
 		}
-		err = s.waitAgent(ctx, mc)
+		err = s.esperarAgenteUnaVez(ctx, mc)
 		if err == nil {
 			return mc, 0, nil
 		}
@@ -95,6 +96,76 @@ func (s *Server) objetivoConAgente(ctx context.Context, ref string) (*api.Machin
 			return nil, http.StatusGatewayTimeout, err
 		}
 	}
+}
+
+// maxAgentesVistos acota agentesVistos: con más entradas se vacía entera (las
+// de máquinas borradas no se retiran una a una). Variable para los tests.
+var maxAgentesVistos = 4096
+
+// firmaAgente identifica la vida de VMM en la que se vio escuchar al agente
+// de mc: su PID y cuándo arrancó. Un freeze y thaw, un stop y start o un VMM
+// nuevo cambian el PID, y con él la firma. "" = no se sabe decir (sin PID o
+// sin arranque): entonces no se recuerda nada.
+func firmaAgente(mc *api.Machine) string {
+	if mc.PID <= 0 || mc.StartedAt == nil {
+		return ""
+	}
+	return strconv.Itoa(mc.PID) + "@" + strconv.FormatInt(mc.StartedAt.UnixNano(), 10)
+}
+
+// agenteVisto dice si el agente de mc ya contestó en esta misma vida de su
+// VMM. P8: cada exec, shell o fichero sondeaba el puerto del agente antes de
+// hablarle (un connect y close en Linux; en macOS un transporte HTTP y una
+// conexión unix nuevos con el ayudante), aunque el anterior acabara de
+// hablar con él. Un agente que muere sin que muera el VMM sigue siendo
+// posible; entonces la petición falla al hablarle, en vez de esperar 30 s a
+// que vuelva, y olvidarAgente hace que la siguiente vuelva a sondear.
+func (s *Server) agenteVisto(mc *api.Machine) bool {
+	f := firmaAgente(mc)
+	if f == "" {
+		return false
+	}
+	s.agentesMu.Lock()
+	defer s.agentesMu.Unlock()
+	return s.agentesVistos[mc.ID] == f
+}
+
+// marcarAgente recuerda que el agente de mc contestó.
+func (s *Server) marcarAgente(mc *api.Machine) {
+	f := firmaAgente(mc)
+	if f == "" {
+		return
+	}
+	s.agentesMu.Lock()
+	defer s.agentesMu.Unlock()
+	if s.agentesVistos == nil || len(s.agentesVistos) >= maxAgentesVistos {
+		s.agentesVistos = map[string]string{}
+	}
+	s.agentesVistos[mc.ID] = f
+}
+
+// esperarAgenteUnaVez es waitAgent salvo que el agente de mc ya contestara
+// en esta vida de su VMM (agenteVisto).
+func (s *Server) esperarAgenteUnaVez(ctx context.Context, mc *api.Machine) error {
+	if s.agenteVisto(mc) {
+		return nil
+	}
+	sondear := s.sondearAgente
+	if sondear == nil {
+		sondear = s.waitAgent
+	}
+	if err := sondear(ctx, mc); err != nil {
+		return err
+	}
+	s.marcarAgente(mc)
+	return nil
+}
+
+// olvidarAgente hace que la próxima petición a id vuelva a sondear su agente.
+func (s *Server) olvidarAgente(id string) {
+	s.agentesMu.Lock()
+	defer s.agentesMu.Unlock()
+	delete(s.agentesVistos, id)
 }
 
 // execInterrumpido explica por qué se cortó un exec en curso cuando fue porque
@@ -148,6 +219,11 @@ func tooOldAgent(mc *api.Machine) error {
 // handleExec sirve POST /machines/{ref}/exec: NDJSON de api.ExecEvent, o con
 // ?wait=1 un api.ExecResult al terminar.
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	soltar, ok := s.tomarSesionGuest(w, r)
+	if !ok {
+		return
+	}
+	defer soltar()
 	var req api.ExecRequest
 	// El stdin viaja en base64 (4/3 del tamaño) y con su sobre JSON.
 	if err := decodeJSONCon(w, r, &req, 2*api.ExecMaxStdin+64<<10); err != nil {
@@ -171,6 +247,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		if code == http.StatusNotImplemented {
 			err = tooOldAgent(mc)
 		} else if code == http.StatusBadGateway {
+			s.olvidarAgente(mc.ID)
 			// La conexión se cayó antes de las cabeceras: si es que la
 			// máquina se congeló o paró entretanto, se dice eso (409).
 			if e := s.execInterrumpido(mc.ID); e != nil {
@@ -394,6 +471,11 @@ func aggregateExec(events <-chan api.ExecEvent) (*api.ExecResult, error) {
 
 // handleFiles sirve GET/PUT/DELETE /machines/{ref}/files?path=...
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	soltar, ok := s.tomarSesionGuest(w, r)
+	if !ok {
+		return
+	}
+	defer soltar()
 	q := url.Values{}
 	for _, k := range []string{"path", "stat", "mode", "mkdir"} {
 		if v := r.URL.Query().Get(k); v != "" {
@@ -431,6 +513,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := guestClient.Do(greq)
 	if err != nil {
+		s.olvidarAgente(mc.ID)
 		fail(w, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err))
 		return
 	}

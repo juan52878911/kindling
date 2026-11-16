@@ -354,6 +354,29 @@ type Server struct {
 	eventosMu  sync.Mutex
 	eventosDe  map[string]int
 	idleFreeze func() time.Duration
+	// dueñoEventosUna instala dueñoDeEvento en el bus la primera vez que un
+	// inquilino abre /events.
+	dueñoEventosUna sync.Once
+
+	// muestra es la última muestra de /metrics y cuándo se tomó (bajo
+	// muestraMu): ver muestraMetrics. muestrear es de dónde sale (nil =
+	// mgr.ProcStats; los tests ponen una que cuenta).
+	muestraMu sync.Mutex
+	muestra   api.ProcStats
+	muestraEn time.Time
+	muestrear func() api.ProcStats
+
+	// agentesVistos es, por máquina, la firma de la vida de VMM en la que su
+	// agente ya contestó (bajo agentesMu): ver agenteVisto.
+	agentesMu     sync.Mutex
+	agentesVistos map[string]string
+	// vueloGuest son los bytes de /guest en vuelo, y sesionesGuest los
+	// exec, shell y ficheros abiertos por inquilino (vuelo.go).
+	vueloGuest    cupo
+	sesionesGuest cupo
+	// sondearAgente es cómo se espera al agente (nil = waitAgent; los tests
+	// ponen uno que cuenta).
+	sondearAgente func(context.Context, *api.Machine) error
 }
 
 // SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
@@ -772,7 +795,7 @@ func (s *Server) Listen(ctx context.Context) error {
 		log.Printf("no authz policy (%s): whoever reaches the socket controls everything", RutaAuthzPorDefecto)
 	}
 	log.Printf("kling daemon %s listening on %s (root=%s)", Version, s.socket, s.root)
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(s.escuchaConTope(ln)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 
@@ -1531,15 +1554,31 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, errors.New("streaming not supported"))
 		return
 	}
-	if t, filtra := inquilinoDe(r); filtra {
-		soltar, ok := s.tomarEventosInquilino(t)
+	t, filtra := inquilinoDe(r)
+	var filtro events.Filtro
+	switch {
+	case filtra:
+		soltar, ok := s.tomarEventos(t, maxEventosInquilino)
 		if !ok {
 			fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open for this tenant (limit %d)", maxEventosInquilino))
 			return
 		}
 		defer soltar()
+		// Solo lo de sus máquinas entra en su búfer (ver SubscribeFiltrado).
+		// eventoVisible sigue mirando cada uno al escribirlo.
+		s.dueñoEventosUna.Do(func() { s.bus.SetDueño(s.dueñoDeEvento) })
+		filtro = func(ev api.Event, dueño string) bool { return ev.ID != "" && t != "" && dueño == t }
+	case s.authz != nil:
+		// Con política, los que no son inquilinos (admin) no pueden quedarse
+		// con todos los flujos: los últimos eventosParaInquilinos son de ellos.
+		soltar, ok := s.tomarEventos(claveEventosAdmin, maxSuscriptoresEventos-eventosParaInquilinos)
+		if !ok {
+			fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open by admins (limit %d)", maxSuscriptoresEventos-eventosParaInquilinos))
+			return
+		}
+		defer soltar()
 	}
-	ch, unsub, ok := s.bus.SubscribeHasta(maxSuscriptoresEventos)
+	ch, unsub, ok := s.bus.SubscribeFiltrado(maxSuscriptoresEventos, filtro)
 	if !ok {
 		fail(w, http.StatusTooManyRequests, fmt.Errorf("too many event streams open (limit %d)", maxSuscriptoresEventos))
 		return
@@ -1594,19 +1633,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 const (
 	maxSuscriptoresEventos = 256
 	maxEventosInquilino    = 16
+	// eventosParaInquilinos son los flujos que, con política, los admin no
+	// pueden ocupar.
+	eventosParaInquilinos = 64
 )
+
+// claveEventosAdmin es la cuenta de los flujos de admin en eventosDe: no
+// puede ser un inquilino (los nombres de inquilino no llevan NUL).
+const claveEventosAdmin = "\x00admin"
 
 var eventosEscritura = time.Minute
 
-// tomarEventosInquilino aparta uno de los maxEventosInquilino flujos de
-// eventos de t; false si ya los tiene todos.
-func (s *Server) tomarEventosInquilino(t string) (func(), bool) {
+// tomarEventos aparta uno de los max flujos de eventos de clave (un
+// inquilino, o claveEventosAdmin); false si ya los tiene todos.
+func (s *Server) tomarEventos(t string, max int) (func(), bool) {
 	s.eventosMu.Lock()
 	defer s.eventosMu.Unlock()
 	if s.eventosDe == nil {
 		s.eventosDe = map[string]int{}
 	}
-	if s.eventosDe[t] >= maxEventosInquilino {
+	if s.eventosDe[t] >= max {
 		return nil, false
 	}
 	s.eventosDe[t]++
@@ -1626,8 +1672,24 @@ func (s *Server) tomarEventosInquilino(t string) (func(), bool) {
 // CLI conectado por SSH no tiene ruta hasta ellas, y sondearlas directamente se
 // queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
 func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
+	// Los cuerpos de ida y vuelta cuentan contra el presupuesto de /guest
+	// según se leen (vuelo.go): la petición, antes de llegar al invitado, así
+	// que lo que no cabe no ha llegado a ejecutarse.
+	clave, _ := inquilinoDe(r)
+	res := s.reservaGuest(clave)
+	defer res.soltar()
+	cuerpo, err := res.lectorCerrable(r.Body, min(r.ContentLength, guestRequestMaxBody+1))
+	if err != nil {
+		failSinSitio(w, err)
+		return
+	}
+	r.Body = cuerpo
 	var req api.GuestRequest
 	if err := decodeJSONCon(w, r, &req, guestRequestMaxBody); err != nil {
+		if errors.Is(err, errGuestSinSitio) {
+			failSinSitio(w, err)
+			return
+		}
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
@@ -1659,7 +1721,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	esperar := func(ctx context.Context, timeout time.Duration) error {
 		return s.esperarPuerto(ctx, mc, port, timeout)
 	}
-	out, code, err := proxyGuest(r.Context(), addr, req, esperar)
+	out, code, err := proxyGuestCon(r.Context(), addr, req, esperar, res)
 	if err != nil {
 		s.failGuest(w, r, code, err, addr, port, mc.Name)
 		return
@@ -1675,6 +1737,14 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 // dirección no basta en macOS, donde el reenvío acepta siempre (esperarPuerto).
 func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 	esperar func(context.Context, time.Duration) error) (api.GuestResponse, int, error) {
+	return proxyGuestCon(ctx, addr, req, esperar, nil)
+}
+
+// proxyGuestCon es proxyGuest contando la respuesta en res (nil = sin contar).
+// Si no cabe, la llamada YA llegó al invitado: el error lo dice, para que
+// nadie la repita creyendo que no se hizo.
+func proxyGuestCon(ctx context.Context, addr string, req api.GuestRequest,
+	esperar func(context.Context, time.Duration) error, res *reservaGuest) (api.GuestResponse, int, error) {
 	// El daemon no añade nada de ningún protocolo: ruta, cabeceras de ida y
 	// cuáles devolver las decide quien llama.
 	path := req.Path
@@ -1732,7 +1802,15 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 	// wrapGuestBodyCon (D-01) acota, además, el PROGRESO: un cuerpo que gotea
 	// un byte cada minuto no debe poder tener esto leyendo para siempre. Con
 	// guestProxyIdleTimeout y no guestProgressTimeout: ver su comentario.
-	body, err := api.LeerCuerpo(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), maxBody)
+	cuerpo, err := res.lector(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), min(resp.ContentLength, maxBody+1))
+	var body []byte
+	if err == nil {
+		body, err = api.LeerCuerpo(cuerpo, maxBody)
+	}
+	if errors.Is(err, errGuestSinSitio) {
+		return api.GuestResponse{}, http.StatusBadGateway,
+			fmt.Errorf("the guest answered (status %d), but its response does not fit: %w", resp.StatusCode, err)
+	}
 	if err != nil {
 		return api.GuestResponse{}, http.StatusBadGateway, err
 	}

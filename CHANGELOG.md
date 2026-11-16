@@ -26,6 +26,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-bridge: JSON bodies with line breaks are compacted before being written to a stdio server.
 - kling-bridge: the shared HTTP MCP server and the shared Chromium are restarted when they die, instead of failing until `/reset`; in http mode the server now gets the MMDS secrets.
 - Linux: after a firewall reload the daemon also restores the FORWARD rules and the `KL-ACCESO` rejects, waits for the xtables lock, and no longer takes a failed check for a missing rule.
+- `POST /machines/{ref}/guest` has a memory budget for bodies in flight (1 GiB, and a per-tenant share): calls that don't fit get 429 before reaching the guest instead of running the daemon out of memory (8 parallel 100 MiB calls: 1.6-3.1 GiB of heap before, 0.7 GiB now).
+- The daemon socket caps connections (4096 in total and, with an authz policy, 1024 per non-admin uid; extra ones get a 429), and a tenant can hold at most 64 exec, shell or file calls at once.
+- `GET /events`: a tenant's stream is filtered before its buffer, so other tenants' activity no longer makes it drop its own events; with an authz policy, admins can't hold the last 64 streams.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
@@ -118,6 +121,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Linux: the host drop of new connections to a machine's agent from outside the host (LAN, bridged containers) is now in mangle PREROUTING, ahead of the FORWARD accepts Docker, ufw or libvirt insert.
 - Linux: if the host firewall rules can't be installed (for example an iptables without `--suppl-groups`), machines don't get a network until they are; the daemon retries before each start instead of carrying on with a warning. Without `--suppl-groups`, only the primary group is allowed.
 - Linux: a root daemon no longer lets members of group 0 reach the machines' agent, and drops its own stale permissions from `KL-ACCESO` when the socket owner changes.
+- The pre-warmed pool labels (`kling.pool`, `kling.pool.ready`) are rejected in fork and graph nodes too, and on restart the daemon only re-adopts pool copies restored from that template with no owner.
+- With an authz policy, a tenant's graph can't carry daemon-set fields (`id`, `fork_of`, ...), and a graph name taken by someone else gets a neutral 409.
 - macOS: the credential proxy runs in its own sandboxed, hardened-runtime process per machine (`kling-credproxy`, installed next to `kling-vz`), so the real keys are no longer in the process that runs the guest's network stack; with an older `kling-vz` or `kling-hv` the daemon keeps the previous model (#80).
 - With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
 - With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.
@@ -153,6 +158,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway `/mcp/_all`: up to 16 idle connections per guest (was 2), so concurrent tool calls stop redialing, and tool results are written without being re-encoded.
 - Linux: setting up a machine's network runs 11 processes instead of 23 (`ip -batch`, one `sysctl`, no teardown when there is nothing): 46 to 20 ms in the lab.
 - `kling plugin install` streams the asset to disk while hashing it instead of holding it (up to 512 MiB) in memory.
+- exec, shell and file calls probe the guest agent once per VMM lifetime instead of on every call (a loopback connect is ~45 µs; the check that replaces it, ~40 ns); a failed call to the agent makes the next one probe again.
+- `/metrics` reuses a sample for 1 s, and concurrent scrapes share one (50 parallel scrapes: 50 samples before, 1 now).
 - kling-hv: `KLING_HV_AVISOS=1` also logs vCPU exits, timer exits and trapped WFIs (measured on an M4: none trapped while idle, so the 2 ms WFI fallback never runs).
 - Templates record and sign the digest of the image (and base layer) they were frozen over, and do not restore if it changed (`meta.json` schema 4; older klings refuse these templates).
 - A machine's overlay size cap is set when its disk is created, and a machine from an older daemon gets it from its disk size or its template instead of from what its overlay measures at the watcher's first look.

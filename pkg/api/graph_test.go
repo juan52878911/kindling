@@ -371,3 +371,25 @@ func TestEtiquetasDeGrafoReservadas(t *testing.T) {
 		}
 	}
 }
+
+// S6: las etiquetas del fondo precalentado las pone solo el daemon. Se
+// rechazaban en run, sandbox y PUT labels, pero no en fork ni en los nodos de
+// un grafo: por ahí una máquina cualquiera podía llevar el aspecto de una copia
+// del fondo.
+func TestEtiquetasDelFondoReservadas(t *testing.T) {
+	for _, k := range []string{LabelPool, LabelPoolReady} {
+		if !IsReservedLabel(k) || ValidateNoGraphLabels(map[string]string{k: "x"}) == nil {
+			t.Errorf("%s no está reservada", k)
+		}
+		if ValidateForkLabels(map[string]string{k: "x"}) == nil {
+			t.Errorf("fork acepta %s", k)
+		}
+		g := Graph{Name: "g", Nodes: map[string]GraphNode{"n": {Image: "min", Labels: map[string]string{k: "x"}}}}
+		if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("un nodo de grafo acepta %s: %v", k, err)
+		}
+	}
+	if IsReservedLabel("kling.pools") || IsReservedLabel("pool") {
+		t.Error("reserva de más")
+	}
+}
