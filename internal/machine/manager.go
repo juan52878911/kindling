@@ -3484,6 +3484,28 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 	return out, nil
 }
 
+// plazoCredencialesThaw acota cada intento de entregar sus credenciales a
+// una máquina que se descongela (MMDS y su proxy, y el DNS de los
+// -upstream).
+const plazoCredencialesThaw = 30 * time.Second
+
+// entregarSinPeticion prueba los intentos en orden hasta que uno sale bien,
+// cada uno con su plazo y sin la cancelación de ctx: lo que la máquina
+// necesita para servir no depende de que quien la despertó siga esperando.
+// Devuelve el error del último.
+func entregarSinPeticion(ctx context.Context, plazo time.Duration, intentos ...func(context.Context) error) error {
+	var err error
+	for _, intento := range intentos {
+		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), plazo)
+		err = intento(c)
+		cancel()
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, err := m.thaw(ctx, ref)
@@ -3981,7 +4003,13 @@ func (m *Manager) thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if credsPrevia {
 			entregar = m.marcadoresCredenciales
 		}
-		if _, err := entregar(ctx, mc, c); err != nil {
+		// Sin el ctx de la petición (F7), como el resync: si quien pidió el
+		// thaw se iba, la entrega se cortaba y la máquina quedaba running sin
+		// su proxy. Con su plazo, y una segunda entrega entera si falla.
+		err := entregarSinPeticion(ctx, plazoCredencialesThaw,
+			func(c2 context.Context) error { _, err := entregar(c2, mc, c); return err },
+			func(c2 context.Context) error { _, err := m.reentregarCredenciales(c2, mc, c); return err })
+		if err != nil {
 			log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
 		}
 	}()
