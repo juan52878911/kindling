@@ -11,12 +11,12 @@ import (
 	"time"
 )
 
-// fakeMCPArgv imita lo mínimo de un servidor MCP de stdio que el warmup
-// necesita: contesta el ping de calentamiento y después hace de eco (como los
-// tests de sesión, que usan `cat`: la respuesta llega con el id de la petición
-// y el readLoop la casa).
-var fakeMCPArgv = []string{"sh", "-c",
-	`read line; printf '{"jsonrpc":"2.0","id":"kling-warmup","result":{}}\n'; exec cat`}
+// fakeMCPArgv es el servidor MCP de stdio de los tests: TestMain
+// (mcpfalso_test.go) lo apunta al servidor falso, que contesta el ping de
+// calentamiento y cada petición con un result de su mismo id. El eco de `cat`
+// ya no vale: devuelve la petición con su method, y el puente lo toma, con
+// razón, por un mensaje que inicia el servidor.
+var fakeMCPArgv []string
 
 func testBridge(argv ...string) *bridge {
 	if len(argv) == 0 {

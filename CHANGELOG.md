@@ -14,6 +14,9 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- kling-bridge: requests a stdio MCP server sends mid-call (sampling, elicitation, roots) now reach the client over the call's SSE response or the session's GET stream, instead of being dropped or returned as the call's result.
+- kling-bridge: a session whose MCP server died answers 404 and is forgotten, instead of a 502 on every request.
+- kling-bridge: JSON bodies with line breaks are compacted before being written to a stdio server.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
