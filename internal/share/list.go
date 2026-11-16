@@ -50,7 +50,7 @@ type listCursor struct {
 func (ss *session) list(id uint64, p string, cookie uint64, max int) []byte {
 	c := ss.takeCursor(p, cookie)
 	if c == nil {
-		f, err := ss.srv.root.Open(rel(p))
+		f, err := openDir(ss.srv.root, rel(p))
 		if err != nil {
 			return errReply(id, Errno(err))
 		}

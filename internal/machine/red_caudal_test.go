@@ -76,6 +76,36 @@ func TestInterfazRedLlegaAFirecracker(t *testing.T) {
 	}
 }
 
+// Con carpetas y sin pedir caudal (lo que arranca por el API), eth0 lleva al
+// menos netMiBpsCarpetas, como pide el CLI; lo pedido y un daemon más alto
+// siguen mandando.
+func TestInterfazRedConCarpetas(t *testing.T) {
+	m := newTestManager(t)
+	daemon := 32
+	m.SetNetMiBps(func() int { return daemon })
+	carpeta := []api.ShareAttachment{{Source: "/src", Mount: "/src", Mode: "rw"}}
+	m.mu.Lock()
+	m.byID["aaaa000000000004"] = &api.Machine{ID: "aaaa000000000004", Shares: carpeta}
+	m.byID["aaaa000000000005"] = &api.Machine{ID: "aaaa000000000005", Shares: carpeta, NetMiBps: 8}
+	m.byID["aaaa000000000006"] = &api.Machine{ID: "aaaa000000000006"}
+	m.mu.Unlock()
+	for _, c := range []struct {
+		id     string
+		daemon int
+		mib    int64
+	}{
+		{"aaaa000000000004", 32, netMiBpsCarpetas},
+		{"aaaa000000000004", 1024, 1024},
+		{"aaaa000000000005", 32, 8},
+		{"aaaa000000000006", 32, 32},
+	} {
+		daemon = c.daemon
+		if got := m.caudalRedDe(c.id); got != c.mib<<20 {
+			t.Errorf("%s with daemon %d MiB/s: %d B/s, want %d MiB/s", c.id, c.daemon, got, c.mib)
+		}
+	}
+}
+
 // eth0 lleva además un tope de tramas por segundo en los dos sentidos: con
 // solo bytes, una inundación de paquetes pequeños cabía en el caudal.
 func TestInterfazRedLlevaTopeDeTramas(t *testing.T) {

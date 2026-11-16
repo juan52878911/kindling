@@ -1125,7 +1125,7 @@ func (s *Server) mkdir(p string, mode uint32) (proto.Attr, uint32) {
 		}
 		return proto.Attr{}, Errno(err)
 	}
-	f, err := s.root.Open(p)
+	f, err := openDir(s.root, p)
 	if err != nil {
 		return proto.Attr{}, Errno(err)
 	}
@@ -1182,6 +1182,15 @@ func (s *Server) remove(p string, dir bool) uint32 {
 	return 0
 }
 
+// openDir abre el directorio p de la carpeta. Sin O_NONBLOCK, un FIFO con ese
+// nombre (el invitado no puede crearlos, pero el host sí) dejaba la goroutine
+// y su hilo esperando a un escritor que no llega, y con ellos la parada y la
+// congelación de la máquina, que esperan a que acaben las operaciones. Con
+// O_DIRECTORY lo que no es un directorio da ENOTDIR sin abrirse.
+func openDir(root *os.Root, p string) (*os.File, error) {
+	return root.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+}
+
 // parent abre, dentro de la carpeta, el directorio padre de p y devuelve su
 // descriptor y el último componente. Las operaciones *at sobre ese descriptor
 // nunca siguen el último componente, y el descriptor no puede estar fuera.
@@ -1193,7 +1202,7 @@ func (s *Server) parent(p string) (*os.File, string, uint32) {
 			break
 		}
 	}
-	f, err := s.root.Open(rel(dir))
+	f, err := openDir(s.root, rel(dir))
 	if err != nil {
 		return nil, "", Errno(err)
 	}
@@ -1329,7 +1338,7 @@ func hostRoots(dir string) []string {
 }
 
 func (s *Server) statfs() (proto.Statfs, uint32) {
-	f, err := s.root.Open(".")
+	f, err := openDir(s.root, ".")
 	if err != nil {
 		return proto.Statfs{}, Errno(err)
 	}

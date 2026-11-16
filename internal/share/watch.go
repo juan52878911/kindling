@@ -42,8 +42,9 @@ import (
 )
 
 var (
-	// maxWatchesPerSession acota las rutas vigiladas por conexión.
-	maxWatchesPerSession = 4096
+	// maxWatchesPerSession acota las rutas vigiladas por conexión (pasado el
+	// tope se suelta la menos reciente).
+	maxWatchesPerSession = watchesPorSesion
 	// maxDirSnapshot: un directorio con más entradas no se compara entrada a
 	// entrada (se avisa del directorio, no de cada hijo).
 	maxDirSnapshot = 20000
@@ -121,8 +122,10 @@ type watchEntry struct {
 	cost  int64
 	id    Ident
 	hayID bool
-	fp    fingerprint // fichero: su huella al vigilarlo o al último aviso
-	el    *list.Element
+	// fp es su huella al vigilarlo o al último aviso; en un directorio sin
+	// foto, lo único con lo que el repaso sabe si cambió su lista.
+	fp fingerprint
+	el *list.Element
 }
 
 // snapEntryCost es lo que se estima que ocupa en el heap cada nombre de una
@@ -161,6 +164,10 @@ type watcher struct {
 	timer     *time.Timer
 	// resync: se perdieron eventos; el próximo flush lo repasa todo.
 	resync bool
+	// flushing: hay un flush en marcha; again, llegaron eventos mientras y
+	// toca otro al acabar. Sin esto, cada watchDebounce con eventos era una
+	// goroutine más esperando en la escritura a un invitado que no lee.
+	flushing, again bool
 	// polling: vigila por sondeo (pollBackend); el repaso es lo normal y no
 	// se avisa de eventos perdidos.
 	polling bool
@@ -225,10 +232,7 @@ func (w *watcher) note(rel string, dir bool) {
 		}
 		return
 	}
-	e := &watchEntry{rel: rel, dir: dir}
-	if !dir {
-		e.fp = w.fingerprint(rel)
-	}
+	e := &watchEntry{rel: rel, dir: dir, fp: w.fingerprint(rel)}
 	e.el = w.lru.PushFront(e)
 	w.entries[rel] = e
 	if !dir {
@@ -350,7 +354,7 @@ func (w *watcher) fingerprint(rel string) fingerprint {
 // y dice cuál es el directorio real que leyó (rel puede pasar por enlaces). Si
 // skip dice que ese directorio ya tiene foto, no lee los nombres.
 func (w *watcher) snapshot(rel string, skip func(Ident) bool) (map[string]bool, Ident, bool) {
-	f, err := w.srv.root.Open(relPath(rel))
+	f, err := openDir(w.srv.root, relPath(rel))
 	if err != nil {
 		return nil, Ident{}, false
 	}
@@ -412,6 +416,23 @@ func (w *watcher) flush() {
 		w.mu.Unlock()
 		return
 	}
+	if w.flushing {
+		// Otro flush sigue mandando (un invitado que no lee lo deja en la
+		// escritura): este no se suma, lo acumulado lo procesa aquel al acabar.
+		w.again = true
+		w.mu.Unlock()
+		return
+	}
+	w.flushing = true
+	defer func() {
+		w.mu.Lock()
+		w.flushing = false
+		if w.again && !w.closed {
+			w.again = false
+			w.timer.Reset(watchDebounce)
+		}
+		w.mu.Unlock()
+	}()
 	pend := w.pend
 	w.pend = map[string]rawEvent{}
 	if w.resync {
@@ -458,6 +479,9 @@ func (w *watcher) flush() {
 				add(proto.EventDelete, ev.rel)
 			}
 		case e.dir:
+			// La huella antes que la foto: lo que cambie entre medias se ve
+			// en el repaso siguiente.
+			e.fp = w.fingerprint(ev.rel)
 			now, id, hayID := w.snapshot(ev.rel, func(id Ident) bool { return w.otraFotoLocked(e, id) })
 			if e.snap == nil || now == nil {
 				// Sin foto con la que comparar (directorio enorme, presupuesto
@@ -511,6 +535,10 @@ func (w *watcher) resyncLocked(pend map[string]rawEvent) {
 		switch {
 		case err != nil || fi.IsDir() != e.dir:
 			pend[r] = rawEvent{rel: r, dir: e.dir, gone: true}
+		case e.dir && e.snap == nil && fingerprintOf(fi) == e.fp:
+			// Sin foto, flush avisaría del directorio entero: por sondeo, cada
+			// pollInterval y para siempre (vite o nodemon recompilando en
+			// bucle). Si su fecha y su tamaño no cambiaron, su lista tampoco.
 		case e.dir:
 			pend[r] = rawEvent{rel: r, dir: true}
 		case fingerprintOf(fi) != e.fp:

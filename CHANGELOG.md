@@ -84,6 +84,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: `credproxy.log` is rotated like the console log.
 - macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
 - Removing a template forgets its integrity verdict.
+- Shares: a FIFO on the host where a directory is expected no longer hangs listing, renaming or watching it, nor stopping or freezing the machine.
+- Shares: when watching by polling, a directory without a snapshot is reported only when it changes, not every 2 s.
+- Shares on Linux: two names of the same file are both watched; unwatching one no longer silences the other.
+- Shares: change notices to a guest that does not read no longer pile up goroutines (at most one write waits), and on macOS one session watches at most 1024 paths so it cannot use up the daemon's 4096.
+- Shares: a size close to the 64-bit maximum no longer overflows the quota check; it gets ENOSPC.
 
 ### Security
 
@@ -132,6 +137,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: the guest's answer to the DELETE of an isolated session is capped at 64 KiB and 30 s.
 - MCP gateway: a slow `initialize` in one `/mcp/_all` conversation no longer blocks every `tools/call` to that service from other conversations (the lock is per conversation now), and connecting to a guest times out after 3 s.
 - rw shares with a quota: writes that grow different files no longer wait for each other; only writes that grow the same file are serialized.
+- Machines with shares started through the API (gateway, sandbox) get at least 256 MiB/s of network, as `kling run -share` already did.
 
 ## [1.0.0-rc.2] - 2026-11-10
 
