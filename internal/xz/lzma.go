@@ -161,9 +161,12 @@ func (l *lenDec) decode(d *rangeDec, posState uint32) uint32 {
 	return lenLowSyms + lenMidSyms + d.tree(l.high[:], lenHighBits)
 }
 
-// window es el diccionario: los últimos size bytes descomprimidos.
+// window es el diccionario: los últimos size bytes descomprimidos. El búfer
+// crece según se escribe, hasta size: un bloque que declara 64 MiB y trae
+// cuatro bytes no reserva 64 MiB.
 type window struct {
 	buf  []byte
+	size int
 	pos  int
 	full bool
 	// total desde el último reinicio del diccionario (para pb y lp).
@@ -171,25 +174,48 @@ type window struct {
 }
 
 func (w *window) put(b byte) {
+	if w.pos == len(w.buf) {
+		w.grow()
+	}
 	w.buf[w.pos] = b
 	w.pos++
 	w.total++
-	if w.pos == len(w.buf) {
+	if w.pos == w.size {
 		w.pos = 0
 		w.full = true
 	}
 }
 
+// grow dobla el búfer (mínimo 64 KiB) sin pasar de size. Solo se llama con
+// la ventana sin dar la vuelta, así que lo escrito está en buf[:pos].
+func (w *window) grow() {
+	n := 2 * len(w.buf)
+	if n < 64<<10 {
+		n = 64 << 10
+	}
+	if n > w.size {
+		n = w.size
+	}
+	nb := make([]byte, n)
+	copy(nb, w.buf[:w.pos])
+	w.buf = nb
+}
+
 func (w *window) get(dist uint32) byte {
 	i := w.pos - int(dist) - 1
 	if i < 0 {
-		i += len(w.buf)
+		i += w.size
 	}
 	return w.buf[i]
 }
 
+// has dice si dist cae dentro de lo ya escrito. Con la ventana llena el tope
+// es su tamaño: una distancia mayor que el diccionario saldría del búfer.
 func (w *window) has(dist uint32) bool {
-	return w.full || int(dist) < w.pos
+	if w.full {
+		return int(dist) < w.size
+	}
+	return int(dist) < w.pos
 }
 
 type lzma2 struct {
@@ -218,11 +244,16 @@ type lzma2 struct {
 	out                      []byte
 }
 
-func newLZMA2(r io.ByteReader, dict int) *lzma2 {
+// newLZMA2 prepara el decodificador; buf es el búfer de la ventana del
+// bloque anterior, que se reutiliza (puede ser nil).
+func newLZMA2(r io.ByteReader, dict int, buf []byte) *lzma2 {
 	if dict < 4096 {
 		dict = 4096
 	}
-	return &lzma2{r: r, win: window{buf: make([]byte, dict)}, needDictReset: true, needProps: true}
+	if len(buf) > dict {
+		buf = buf[:dict]
+	}
+	return &lzma2{r: r, win: window{buf: buf, size: dict}, needDictReset: true, needProps: true}
 }
 
 func (z *lzma2) resetState() {
