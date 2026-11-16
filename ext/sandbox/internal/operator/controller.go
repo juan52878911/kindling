@@ -11,6 +11,7 @@ package operator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"sort"
@@ -42,13 +43,45 @@ type Controller struct {
 	// reconciliación en marcha de otro test pudiera leer a la vez.
 	BackoffBase time.Duration
 
-	// reconcileMu serializa TODA reconciliación (venga de un evento de watch
-	// o del resync): es lo único que impide crear dos veces el mismo sandbox
-	// si ambos caminos lo procesan casi a la vez.
-	reconcileMu sync.Mutex
+	// cerrojos serializa las reconciliaciones DE UN MISMO Sandbox (vengan de
+	// un evento de watch o del resync): es lo que impide crear dos veces su
+	// sandbox si ambos caminos lo procesan casi a la vez. Por objeto y no uno
+	// global: un frontal lento con un Sandbox no para a los demás.
+	cerrojos map[string]*cerrojoCR
 
 	mu    sync.Mutex
 	cache map[string]*Sandbox
+}
+
+// cerrojoCR es el cerrojo de un Sandbox y cuántos lo esperan o lo tienen, para
+// borrarlo del mapa cuando nadie lo usa.
+type cerrojoCR struct {
+	mu sync.Mutex
+	n  int
+}
+
+// bloquear toma el cerrojo del Sandbox key y devuelve cómo soltarlo.
+func (c *Controller) bloquear(key string) func() {
+	c.mu.Lock()
+	if c.cerrojos == nil {
+		c.cerrojos = map[string]*cerrojoCR{}
+	}
+	l := c.cerrojos[key]
+	if l == nil {
+		l = &cerrojoCR{}
+		c.cerrojos[key] = l
+	}
+	l.n++
+	c.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		c.mu.Lock()
+		if l.n--; l.n == 0 {
+			delete(c.cerrojos, key)
+		}
+		c.mu.Unlock()
+	}
 }
 
 // NewController construye el controlador. kube y frontal ya vienen
@@ -190,11 +223,81 @@ func (c *Controller) resyncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, sb := range c.snapshot() {
-				c.reconcile(ctx, sb)
-			}
+			c.resyncPasada(ctx)
 		}
 	}
+}
+
+// resyncPasada reconcilia todo lo que hay en caché con UNA lista del frontal.
+// Antes cada Sandbox hacía su GET (con 30 s de plazo) y su lista completa si
+// tenía que adoptar o borrar: con el frontal caído, 100 objetos eran 50 min de
+// pasada en serie. Si la lista falla, la pasada no puede hacer nada útil y se
+// salta entera; la siguiente lo vuelve a intentar.
+func (c *Controller) resyncPasada(ctx context.Context) {
+	v, err := c.tomarVista(ctx)
+	if err != nil {
+		c.Log.Printf("operator: resync: listing the frontal's sandboxes: %v", err)
+		return
+	}
+	for _, sb := range c.snapshot() {
+		if ctx.Err() != nil {
+			return
+		}
+		c.reconcileCon(ctx, sb, v)
+	}
+}
+
+// vistaFrontal es una foto de los sandboxes del tenant, tomada una vez por
+// pasada de resync.
+type vistaFrontal struct {
+	todos    []frontal.Sandbox
+	porID    map[string]frontal.Sandbox
+	completa bool // contestaron todos los hosts
+}
+
+func (c *Controller) tomarVista(ctx context.Context) (*vistaFrontal, error) {
+	todos, completa, err := c.Frontal.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v := &vistaFrontal{todos: todos, porID: make(map[string]frontal.Sandbox, len(todos)), completa: completa}
+	for _, sb := range todos {
+		v.porID[sb.ID] = sb
+	}
+	return v, nil
+}
+
+// ver trae el sandbox id: de la vista si está en ella, si no del frontal. Un
+// "no está" de la vista no se cree: la foto es del principio de la pasada, y
+// el camino del watch pudo crearlo después (o estar en un host que no
+// contestó). Se confirma con su GET, que es lo raro.
+func (c *Controller) ver(ctx context.Context, v *vistaFrontal, id string) (*frontal.Sandbox, error) {
+	if v != nil {
+		if sb, ok := v.porID[id]; ok {
+			return &sb, nil
+		}
+	}
+	return c.Frontal.Get(ctx, id)
+}
+
+// deUID son los sandboxes etiquetados con uid, y si la lista estaba completa.
+// Como en ver, un "ninguno" de la vista se confirma con una lista nueva.
+func (c *Controller) deUID(ctx context.Context, v *vistaFrontal, uid string) ([]frontal.Sandbox, bool, error) {
+	if v != nil {
+		if sbs := conUID(v.todos, uid); len(sbs) > 0 {
+			return sbs, v.completa, nil
+		}
+	}
+	return c.Frontal.ByUID(ctx, uid)
+}
+
+// esDe dice si sb es el sandbox que este operador creó para cur: lleva su UID.
+// status.id lo escribe quien tenga permiso sobre sandboxes/status, y el token
+// del frontal es uno para todos los namespaces, así que sin esto un objeto
+// que apunte su status.id al sandbox de otro lo renovaba y, al borrarse, se lo
+// llevaba por delante.
+func esDe(sb *frontal.Sandbox, cur *Sandbox) bool {
+	return sb.Labels[LabelK8sUID] == cur.Metadata.UID
 }
 
 // remember guarda sb en la caché, PERO solo si es al menos tan nuevo como lo
@@ -249,16 +352,20 @@ func (c *Controller) snapshot() []*Sandbox {
 
 // ---- reconciliación
 
-// reconcile decide y aplica UN paso para un Sandbox. Nunca muta sb (puede ser
-// el mismo puntero que vive en la caché mientras otra goroutine lo lee): todo
-// cambio se hace sobre una copia local que, si algo se escribió de verdad en
-// Kubernetes, se guarda de vuelta en la caché con remember. reconcileMu
-// asegura que dos llamadas (una de watch, una de resync) no se crucen, y sb
-// solo dice QUÉ Sandbox reconciliar: el estado se relee de la caché dentro
-// del candado.
-func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
-	c.reconcileMu.Lock()
-	defer c.reconcileMu.Unlock()
+// reconcile decide y aplica UN paso para un Sandbox, preguntando al frontal
+// por él (el camino del watch). Ver reconcileCon.
+func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) { c.reconcileCon(ctx, sb, nil) }
+
+// reconcileCon decide y aplica UN paso para un Sandbox. Nunca muta sb (puede
+// ser el mismo puntero que vive en la caché mientras otra goroutine lo lee):
+// todo cambio se hace sobre una copia local que, si algo se escribió de verdad
+// en Kubernetes, se guarda de vuelta en la caché con remember. El cerrojo del
+// objeto asegura que dos llamadas (una de watch, una de resync) no se crucen,
+// y sb solo dice QUÉ Sandbox reconciliar: el estado se relee de la caché
+// dentro del candado. v es la foto del frontal de la pasada de resync (nil:
+// se le pregunta).
+func (c *Controller) reconcileCon(ctx context.Context, sb *Sandbox, v *vistaFrontal) {
+	defer c.bloquear(sb.Key())()
 
 	// sb se leyó de la caché ANTES de tomar reconcileMu, y mientras se
 	// esperaba el candado otra reconciliación pudo avanzar este mismo
@@ -281,7 +388,7 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 	changed := false
 
 	if cur.Metadata.DeletionTimestamp != nil {
-		c.reconcileDeleting(ctx, &cur)
+		c.reconcileDeleting(ctx, &cur, v)
 		return
 	}
 
@@ -308,7 +415,7 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 	if cur.Status.ID == "" {
 		// Antes de crear, se busca uno ya creado para este objeto: un Create
 		// cuya respuesta se perdió, o un status que no llegó a escribirse.
-		out, err := c.adoptar(ctx, &cur)
+		out, err := c.adoptar(ctx, &cur, v)
 		if err != nil {
 			c.Log.Printf("operator: %s/%s: looking for its sandbox: %v", ns, name, err)
 			c.setMessage(ctx, &cur, err.Error())
@@ -345,33 +452,38 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 		return
 	}
 
-	// Ya existe: idempotente por construcción (el `if` de arriba ya lo cortó).
-	// Si spec cambió (hoy, solo ttlSeconds es mutable) se renueva.
-	if cur.Status.ObservedGeneration != cur.Metadata.Generation {
-		out, err := c.Frontal.Renew(ctx, cur.Status.ID, cur.Spec.TTLSeconds)
-		if err != nil {
-			c.Log.Printf("operator: %s/%s: renewing: %v", ns, name, err)
-			c.setMessage(ctx, &cur, err.Error())
-			return
-		}
-		cur.Status.State = string(out.State)
-		cur.Status.ExpiresAt = out.ExpiresAt
-		cur.Status.ObservedGeneration = cur.Metadata.Generation
-		cur.Status.Message = strPtr("")
-		changed = true
-	}
-
-	// Refresco periódico: lo que el frontal sabe manda. Si desapareció (lo
-	// borró la limpieza por abandono, o alguien a mano), se marca "gone" sin
-	// volver a crearlo: status.id ya no está vacío, y no se recrea nada solo
-	// porque el frontal lo olvidó.
-	out, err := c.Frontal.Get(ctx, cur.Status.ID)
+	// Ya existe. Refresco periódico: lo que el frontal sabe manda. Si
+	// desapareció (lo borró la limpieza por abandono, o alguien a mano), se
+	// marca "gone" sin volver a crearlo: status.id ya no está vacío, y no se
+	// recrea nada solo porque el frontal lo olvidó.
+	out, err := c.ver(ctx, v, cur.Status.ID)
 	switch {
+	case err == nil && !esDe(out, &cur):
+		// status.id apunta a un sandbox que no es de este objeto: no se
+		// renueva ni se borra nunca, y se dice.
+		msg := fmt.Sprintf("status.id %s is not this object's sandbox; ignoring it", cur.Status.ID)
+		c.Log.Printf("operator: %s/%s: %s", ns, name, msg)
+		c.setMessage(ctx, &cur, msg)
+		return
 	case err == nil:
 		if cur.Status.State != string(out.State) || !sameTime(cur.Status.ExpiresAt, out.ExpiresAt) || hasMessage(cur.Status.Message) {
 			cur.Status.State = string(out.State)
 			cur.Status.ExpiresAt = out.ExpiresAt
 			cur.Status.Host = out.Host
+			cur.Status.Message = strPtr("")
+			changed = true
+		}
+		// Si spec cambió (hoy, solo ttlSeconds es mutable) se renueva.
+		if cur.Status.ObservedGeneration != cur.Metadata.Generation {
+			out, err := c.Frontal.Renew(ctx, cur.Status.ID, cur.Spec.TTLSeconds)
+			if err != nil {
+				c.Log.Printf("operator: %s/%s: renewing: %v", ns, name, err)
+				c.setMessage(ctx, &cur, err.Error())
+				return
+			}
+			cur.Status.State = string(out.State)
+			cur.Status.ExpiresAt = out.ExpiresAt
+			cur.Status.ObservedGeneration = cur.Metadata.Generation
 			cur.Status.Message = strPtr("")
 			changed = true
 		}
@@ -382,6 +494,11 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 		}
 	default:
 		c.Log.Printf("operator: %s/%s: refreshing status: %v", ns, name, err)
+		if cur.Status.ObservedGeneration != cur.Metadata.Generation {
+			// Sin verlo no se sabe si es suyo: la renovación espera.
+			c.setMessage(ctx, &cur, err.Error())
+			return
+		}
 	}
 
 	if changed {
@@ -400,22 +517,40 @@ func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 // puesto a propósito — el próximo resync (o el próximo evento de watch)
 // vuelve a intentarlo, y así nunca se pierde un sandbox huérfano por un fallo
 // pasajero del frontal.
-func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox) {
+func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox, v *vistaFrontal) {
 	ns, name := cur.Metadata.Namespace, cur.Metadata.Name
 	if !cur.Metadata.HasFinalizer() {
 		return // nada que limpiar, Kubernetes ya puede borrarlo.
 	}
-	if cur.Status.ID != "" {
-		if err := c.Frontal.Delete(ctx, cur.Status.ID); err != nil {
-			c.Log.Printf("operator: %s/%s: deleting sandbox %s: %v", ns, name, cur.Status.ID, err)
-			return
+	if id := cur.Status.ID; id != "" {
+		// Solo se borra si es suyo (esDe): un status.id ajeno no se toca, y
+		// uno que ni es un id tampoco.
+		if _, err := rutaSandbox(id); err != nil {
+			c.Log.Printf("operator: %s/%s: not deleting %v", ns, name, err)
+		} else {
+			sb, err := c.ver(ctx, v, id)
+			switch {
+			case IsFrontalNotFound(err):
+			case err != nil:
+				c.Log.Printf("operator: %s/%s: looking at sandbox %s: %v", ns, name, id, err)
+				return
+			case !esDe(sb, cur):
+				c.Log.Printf("operator: %s/%s: status.id %s is not this object's sandbox; not deleting it", ns, name, id)
+			default:
+				if err := c.Frontal.Delete(ctx, id); err != nil {
+					c.Log.Printf("operator: %s/%s: deleting sandbox %s: %v", ns, name, id, err)
+					return
+				}
+			}
 		}
 	}
 	// Y los que lleven su UID sin estar en el status (un Create cuya respuesta
 	// se perdió): sin esto, un objeto borrado antes de escribir su status
-	// soltaba el finalizer y dejaba el sandbox vivo hasta el abandono.
+	// soltaba el finalizer y dejaba el sandbox vivo hasta el abandono. Con una
+	// lista nueva y no la de la pasada: antes de soltar el finalizer, nada que
+	// se haya creado después de la foto puede quedarse fuera.
 	if uid := cur.Metadata.UID; uid != "" {
-		sbs, err := c.Frontal.ByUID(ctx, uid)
+		sbs, completa, err := c.deUID(ctx, nil, uid)
 		if err != nil {
 			c.Log.Printf("operator: %s/%s: looking for its sandboxes: %v", ns, name, err)
 			return
@@ -425,6 +560,18 @@ func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox) {
 				c.Log.Printf("operator: %s/%s: deleting sandbox %s: %v", ns, name, sb.ID, err)
 				return
 			}
+		}
+		if !completa {
+			// Un host caído no deja colgados a todos los objetos en
+			// Terminating: el sandbox del status ya se resolvió arriba, y un
+			// duplicado en ese host (un Create perdido) lo acaba borrando la
+			// limpieza por abandono del frontal. Sin status.id no hay nada
+			// resuelto, y se espera a una lista completa.
+			if cur.Status.ID == "" {
+				c.Log.Printf("operator: %s/%s: partial sandbox list from the frontal; waiting for every host to answer", ns, name)
+				return
+			}
+			c.Log.Printf("operator: %s/%s: partial sandbox list; a duplicate on a host that did not answer is left to the frontal's cleanup", ns, name)
 		}
 	}
 	fin := removeFinalizer(cur.Metadata.Finalizers)
@@ -442,14 +589,23 @@ func (c *Controller) reconcileDeleting(ctx context.Context, cur *Sandbox) {
 // adoptar busca en el frontal el sandbox ya creado para cur (por su UID). Si
 // hay más de uno (duplicados de un operador anterior), se queda el primero y
 // borra el resto. nil sin error: no hay ninguno, hay que crearlo.
-func (c *Controller) adoptar(ctx context.Context, cur *Sandbox) (*frontal.Sandbox, error) {
+//
+// Falla cerrado: con una lista parcial y ninguno a la vista, el suyo puede
+// estar en el host que no contestó, y crear otro lo duplicaría.
+func (c *Controller) adoptar(ctx context.Context, cur *Sandbox, v *vistaFrontal) (*frontal.Sandbox, error) {
 	uid := cur.Metadata.UID
 	if uid == "" {
 		return nil, nil
 	}
-	sbs, err := c.Frontal.ByUID(ctx, uid)
-	if err != nil || len(sbs) == 0 {
+	sbs, completa, err := c.deUID(ctx, v, uid)
+	if err != nil {
 		return nil, err
+	}
+	if len(sbs) == 0 {
+		if !completa {
+			return nil, errors.New("frontal: partial sandbox list; not creating until every host answers")
+		}
+		return nil, nil
 	}
 	sort.Slice(sbs, func(i, j int) bool { return sbs[i].ID < sbs[j].ID })
 	for _, sobra := range sbs[1:] {

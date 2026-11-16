@@ -264,11 +264,11 @@ func (s *Servidor) handleCrearGrafo(w http.ResponseWriter, r *http.Request) {
 	// Un grafo cuenta como un sandbox en la cuota del tenant, y por su
 	// plantilla en MaxPorPlantilla.
 	clave := claveGrafo(pet.Template)
-	if err := s.reservar(r.Context(), t, clave); err != nil {
+	if err := s.reservar(r.Context(), t, clave, 0); err != nil {
 		fail(w, codigoReservar(err), err)
 		return
 	}
-	defer s.liberar(t, clave)
+	defer s.liberar(t, clave, 0)
 
 	h, in, err := s.crearGrafo(r.Context(), t, pet.Template)
 	if err != nil {

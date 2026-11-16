@@ -278,6 +278,12 @@ type fakeFrontal struct {
 	// tardaCrear retrasa la respuesta de create DESPUÉS de crear el sandbox:
 	// el cliente vence su plazo y no se entera de que ya existe.
 	tardaCrear time.Duration
+	// parcial hace que la lista lleve X-Kindling-Partial (un host no
+	// contestó); listas, gets y renews cuentan las peticiones de cada clase.
+	parcial bool
+	listas  int
+	gets    int
+	renews  int
 }
 
 func (f *fakeFrontal) setDown(v bool) {
@@ -298,9 +304,10 @@ func newFakeFrontal(t *testing.T) *fakeFrontal {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sandboxes", f.create)
 	mux.HandleFunc("GET /v1/sandboxes", f.list)
-	mux.HandleFunc("GET /v1/sandboxes/{id}", f.get)
-	mux.HandleFunc("DELETE /v1/sandboxes/{id}", f.del)
-	mux.HandleFunc("POST /v1/sandboxes/{id}/renew", f.renew)
+	// Los ids son "host/máquina", como los del frontal de verdad.
+	mux.HandleFunc("GET /v1/sandboxes/{host}/{ref}", f.get)
+	mux.HandleFunc("DELETE /v1/sandboxes/{host}/{ref}", f.del)
+	mux.HandleFunc("POST /v1/sandboxes/{host}/{ref}/renew", f.renew)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -321,7 +328,7 @@ func (f *fakeFrontal) create(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&pet)
 	f.mu.Lock()
 	f.seq++
-	id := fmt.Sprintf("sbx-%d", f.seq)
+	id := fmt.Sprintf("host1/sbx-%d", f.seq)
 	f.creates++
 	ttl := pet.TTLSeconds
 	if ttl == 0 {
@@ -341,9 +348,13 @@ func (f *fakeFrontal) create(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeFrontal) list(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
+	f.listas++
 	out := make([]frontal.Sandbox, 0, len(f.sandboxes))
 	for _, sb := range f.sandboxes {
 		out = append(out, *sb)
+	}
+	if f.parcial {
+		w.Header().Set("X-Kindling-Partial", "host2: down")
 	}
 	f.mu.Unlock()
 	writeTestJSON(w, http.StatusOK, out)
@@ -360,8 +371,9 @@ func (f *fakeFrontal) get(w http.ResponseWriter, r *http.Request) {
 		writeTestJSON(w, http.StatusServiceUnavailable, api.Error{Message: "frontal down"})
 		return
 	}
-	id := r.PathValue("id")
+	id := idDe(r)
 	f.mu.Lock()
+	f.gets++
 	sb, ok := f.sandboxes[id]
 	f.mu.Unlock()
 	if !ok {
@@ -372,7 +384,7 @@ func (f *fakeFrontal) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeFrontal) del(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := idDe(r)
 	f.mu.Lock()
 	_, ok := f.sandboxes[id]
 	delete(f.sandboxes, id)
@@ -389,10 +401,11 @@ func (f *fakeFrontal) renew(w http.ResponseWriter, r *http.Request) {
 		writeTestJSON(w, http.StatusServiceUnavailable, api.Error{Message: "frontal down"})
 		return
 	}
-	id := r.PathValue("id")
+	id := idDe(r)
 	var pet frontal.RenovarPeticion
 	_ = json.NewDecoder(r.Body).Decode(&pet)
 	f.mu.Lock()
+	f.renews++
 	sb, ok := f.sandboxes[id]
 	if ok {
 		sb.TTLSeconds = pet.TTLSeconds
@@ -406,6 +419,9 @@ func (f *fakeFrontal) renew(w http.ResponseWriter, r *http.Request) {
 	}
 	writeTestJSON(w, http.StatusOK, sb)
 }
+
+// idDe es el id compuesto de la ruta.
+func idDe(r *http.Request) string { return r.PathValue("host") + "/" + r.PathValue("ref") }
 
 // ---- helpers de test ----
 

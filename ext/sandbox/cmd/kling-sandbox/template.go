@@ -323,6 +323,15 @@ func tplRm(args []string) error {
 				fmt.Printf("  %-12s ✓ removed graph template %s and %d free instance(s)\n", h.Nombre, args[0], n)
 			}
 		}
+		// Su fondo sin dueño primero: el daemon no borra un snapshot con
+		// instancias vivas.
+		if n, err := plantilla.BorrarPrecalentadas(ctx, h.Cliente, args[0]); err != nil {
+			fmt.Printf("  %-12s ✗ removing its prewarmed sandboxes: %v\n", h.Nombre, err)
+			fallos++
+			continue
+		} else if n > 0 {
+			fmt.Printf("  %-12s ✓ removed %d prewarmed sandbox(es) of %s\n", h.Nombre, n, args[0])
+		}
 		if err := h.Cliente.RemoveSnapshot(ctx, snap); err != nil {
 			if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "doesn't exist") {
 				continue

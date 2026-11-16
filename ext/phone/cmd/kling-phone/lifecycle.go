@@ -708,12 +708,16 @@ func (a *app) poolFreeze(ctx context.Context, after time.Duration) error {
 // claim da un teléfono a un dueño: un repuesto del fondo si lo hay (resume de
 // ms), si no uno nuevo. Nunca uno que ya tenga dueño.
 func (a *app) claim(ctx context.Context, golden, owner string, mu *sync.Mutex) (*api.Machine, string, error) {
+	labels := map[string]string{labelPool: poolClaimed, labelOwner: owner}
+	if a.mcpKey != "" {
+		labels[labelMCP] = a.mcpKey
+	}
 	mu.Lock()
 	sp, err := a.spares(ctx, golden)
 	var pick *api.Machine
 	if err == nil && len(sp) > 0 {
 		pick = sp[0]
-		err = a.d.SetLabels(ctx, pick.ID, map[string]string{labelPool: poolClaimed, labelOwner: owner})
+		err = a.d.SetLabels(ctx, pick.ID, labels)
 	}
 	mu.Unlock()
 	if err != nil {
@@ -722,6 +726,11 @@ func (a *app) claim(ctx context.Context, golden, owner string, mu *sync.Mutex) (
 	if pick != nil {
 		m, err := a.resume(ctx, pick)
 		if err != nil {
+			// Ya lleva dueño: ni vuelve al fondo ni se lo queda nadie. Sin
+			// borrarlo quedaba vivo para siempre.
+			if rerr := a.rm(context.WithoutCancel(ctx), pick); rerr != nil {
+				err = errors.Join(err, fmt.Errorf("%s: removing it: %w", pick.Name, rerr))
+			}
 			return nil, "", err
 		}
 		return m, "spare", nil
@@ -730,7 +739,7 @@ func (a *app) claim(ctx context.Context, golden, owner string, mu *sync.Mutex) (
 	if err != nil {
 		return nil, "", err
 	}
-	r, err := a.newPhone(ctx, name, golden, map[string]string{labelPool: poolClaimed, labelOwner: owner})
+	r, err := a.newPhone(ctx, name, golden, labels)
 	if err != nil {
 		return nil, "", err
 	}

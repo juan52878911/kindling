@@ -453,6 +453,7 @@ func TestMCPRejectsForeignRequests(t *testing.T) {
 	h := s.handler("/sec/mcp")
 	req := httptest.NewRequest("POST", "/sec/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
 	req.Host = "127.0.0.1:8095"
+	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("Content-Type", "text/plain") // lo que manda un formulario de otra web
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -461,6 +462,7 @@ func TestMCPRejectsForeignRequests(t *testing.T) {
 	}
 	req = httptest.NewRequest("POST", "/sec/mcp", strings.NewReader(`{}`))
 	req.Host = "evil.example:8095" // rebinding de DNS
+	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -469,11 +471,22 @@ func TestMCPRejectsForeignRequests(t *testing.T) {
 	}
 	req = httptest.NewRequest("POST", "/mcp", strings.NewReader(`{}`))
 	req.Host = "127.0.0.1:8095"
+	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != 404 {
 		t.Fatalf("without the secret path: %d", w.Code)
+	}
+	// Desde la red con un Host de loopback falsificado: fuera.
+	req = httptest.NewRequest("POST", "/sec/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	req.Host = "127.0.0.1:8095"
+	req.RemoteAddr = "192.0.2.7:40000"
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("remote client with a loopback Host: %d", w.Code)
 	}
 }
 
@@ -491,6 +504,7 @@ func TestWall(t *testing.T) {
 	do := func(method, path string, hdr map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
 		req.Host = "127.0.0.1:8765"
+		req.RemoteAddr = "127.0.0.1:40000"
 		for k, v := range hdr {
 			req.Header.Set(k, v)
 		}
@@ -532,10 +546,20 @@ func TestWall(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/api/phones", nil)
 	req.Host = "attacker.example"
+	req.RemoteAddr = "127.0.0.1:40000"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 403 {
 		t.Fatalf("foreign host: %d", rec.Code)
+	}
+	// Un Host de loopback no basta si la conexión llega de la red.
+	req = httptest.NewRequest("GET", "/sec/api/phones", nil)
+	req.Host = "127.0.0.1:8765"
+	req.RemoteAddr = "192.0.2.7:40000"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("remote client with a loopback Host: %d", rec.Code)
 	}
 	// Sin el camino secreto, nada: ni la página, ni las capturas, ni los
 	// toques, aunque el Host sea de loopback (lo pone cualquiera con curl).

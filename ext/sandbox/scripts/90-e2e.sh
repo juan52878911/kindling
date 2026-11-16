@@ -48,8 +48,8 @@ need curl
 TMP=$(mktemp -d)
 TPL="e2e-sbx-$$"
 GATEWAY_PID=""
-TOKEN_A="tok-e2e-a-$$"
-TOKEN_B="tok-e2e-b-$$"
+TOKEN_A="tok-e2e-a-$$-0123456789"
+TOKEN_B="tok-e2e-b-$$-0123456789"
 URL="http://127.0.0.1:$PUERTO"
 SB=""
 
