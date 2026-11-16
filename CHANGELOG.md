@@ -77,6 +77,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - macOS: `credproxy.log` is rotated like the console log.
 - macOS: replacing a `kling-credproxy` that refuses this daemon no longer leaves the old one running with its keys when it closes the connection before the daemon can tell who it is.
 - Removing a template forgets its integrity verdict.
+- kling-hv: the vsock thread no longer spins at 100% when a control packet is waiting for a receive buffer and another connection has data.
 
 ### Security
 

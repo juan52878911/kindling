@@ -432,7 +432,7 @@ int khv_vsock_prueba_reuso(int *coincide_fd);
 int khv_vsock_prueba_cierre(int medio);
 int khv_vsock_prueba_poll(void);
 int khv_vsock_prueba_muerto(int64_t *dial_ns);
-int khv_vsock_prueba_sin_rx(unsigned *vueltas, uint32_t *llego);
+int khv_vsock_prueba_sin_rx(int ctl, unsigned *vueltas, uint32_t *llego);
 int khv_vsock_prueba_host_cierra(void);
 int khv_vsock_prueba_tanda_rx(bool pausa, uint64_t *lleno, uint64_t *movido, int64_t *ns, int *control);
 
