@@ -431,14 +431,24 @@ const dirGrace = 2 * time.Minute
 // disco sigue teniendo su entrada en memoria, y una que aún se está construyendo
 // tiene su id en reserved, así que ninguna de las dos es candidata.
 func (m *Manager) sweepMachineDirs() {
+	entries, _ := os.ReadDir(filepath.Join(m.root, "machines"))
+	m.sweepMachineDirsDe(entries)
+}
+
+// escanearBarrido lee, sin m.mu, lo que el barrido mira: las entradas de
+// machines/ y los snapshots que parecen un commit a medias.
+func (m *Manager) escanearBarrido() (maquinas, restos []os.DirEntry) {
+	maquinas, _ = os.ReadDir(filepath.Join(m.root, "machines"))
+	return maquinas, m.candidatosRestos()
+}
+
+// sweepMachineDirsDe es sweepMachineDirs sobre entries, las de machines/
+// leídas antes (con o sin m.mu). Se llama con m.mu tomado.
+func (m *Manager) sweepMachineDirsDe(entries []os.DirEntry) {
 	if m.barridoBloqueado() {
 		return
 	}
 	dir := filepath.Join(m.root, "machines")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -916,11 +926,18 @@ func (m *Manager) vueltaVigilante(ctx context.Context) {
 		{"rotarConsolas", m.rotarConsolas},
 		// Barrer directorios huérfanos también en marcha: no solo aparecen al
 		// arrancar. Bajo el lock, como reconcile.
+		// El escaneo (ReadDir de los dos y dos stat por snapshot) sin el
+		// cerrojo (P9): bajo él solo se decide y se mueve lo que el escaneo
+		// encontró, que casi nunca es nada.
 		{"sweepDirs", func() {
+			maquinas, restos := m.escanearBarrido()
+			if m.pruebasTrasEscaneo != nil {
+				m.pruebasTrasEscaneo()
+			}
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			m.sweepMachineDirs()
-			m.sweepSnapshotLeftovers()
+			m.sweepMachineDirsDe(maquinas)
+			m.sweepSnapshotLeftoversDe(restos)
 		}},
 		// Los snapshots temporales de fork sin copias (ver fork.go).
 		{"barrerForks", m.barrerForks},

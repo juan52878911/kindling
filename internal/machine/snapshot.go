@@ -2249,15 +2249,33 @@ func restosDeCommit(dir string) bool {
 // más de dirGrace sin tocarse y que nadie esté escribiendo. Solo mueve (rápido);
 // vaciarPapelera borra. Se llama con m.mu tomado.
 func (m *Manager) sweepSnapshotLeftovers() {
+	m.sweepSnapshotLeftoversDe(m.candidatosRestos())
+}
+
+// candidatosRestos son los directorios de snapshots/ que, al mirarlos, eran
+// un commit a medias (restosDeCommit). Sin m.mu: es la parte con E/S, dos
+// stat por snapshot; sweepSnapshotLeftoversDe lo vuelve a mirar, con el
+// cerrojo, solo en estos.
+func (m *Manager) candidatosRestos() []os.DirEntry {
 	base := filepath.Join(m.root, "snapshots")
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return
+		return nil
 	}
+	var out []os.DirEntry
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && restosDeCommit(filepath.Join(base, e.Name())) {
+			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// sweepSnapshotLeftoversDe es sweepSnapshotLeftovers sobre los candidatos
+// de candidatosRestos. Se llama con m.mu tomado.
+func (m *Manager) sweepSnapshotLeftoversDe(entries []os.DirEntry) {
+	base := filepath.Join(m.root, "snapshots")
+	for _, e := range entries {
 		if m.reserved[reservaSnapshot(e.Name())] > 0 || !restosDeCommit(filepath.Join(base, e.Name())) {
 			continue
 		}

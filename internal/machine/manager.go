@@ -436,6 +436,9 @@ type Manager struct {
 	// pruebasAntesDeResync, si no es nil, se llama en el thaw justo antes del
 	// resync del invitado (tests de B12).
 	pruebasAntesDeResync func()
+	// pruebasTrasEscaneo, si no es nil, se llama en el paso sweepDirs del
+	// vigilante entre el escaneo y la toma de m.mu (P9). Para las pruebas.
+	pruebasTrasEscaneo func()
 	// pruebasEscaneoHuerfanos, si no es nil, se llama en killOrphanVMMs justo
 	// antes de escanear los procesos. Para las pruebas.
 	pruebasEscaneoHuerfanos func()
