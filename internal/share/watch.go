@@ -42,8 +42,9 @@ import (
 )
 
 var (
-	// maxWatchesPerSession acota las rutas vigiladas por conexión.
-	maxWatchesPerSession = 4096
+	// maxWatchesPerSession acota las rutas vigiladas por conexión (pasado el
+	// tope se suelta la menos reciente).
+	maxWatchesPerSession = watchesPorSesion
 	// maxDirSnapshot: un directorio con más entradas no se compara entrada a
 	// entrada (se avisa del directorio, no de cada hijo).
 	maxDirSnapshot = 20000
@@ -163,6 +164,10 @@ type watcher struct {
 	timer     *time.Timer
 	// resync: se perdieron eventos; el próximo flush lo repasa todo.
 	resync bool
+	// flushing: hay un flush en marcha; again, llegaron eventos mientras y
+	// toca otro al acabar. Sin esto, cada watchDebounce con eventos era una
+	// goroutine más esperando en la escritura a un invitado que no lee.
+	flushing, again bool
 	// polling: vigila por sondeo (pollBackend); el repaso es lo normal y no
 	// se avisa de eventos perdidos.
 	polling bool
@@ -411,6 +416,23 @@ func (w *watcher) flush() {
 		w.mu.Unlock()
 		return
 	}
+	if w.flushing {
+		// Otro flush sigue mandando (un invitado que no lee lo deja en la
+		// escritura): este no se suma, lo acumulado lo procesa aquel al acabar.
+		w.again = true
+		w.mu.Unlock()
+		return
+	}
+	w.flushing = true
+	defer func() {
+		w.mu.Lock()
+		w.flushing = false
+		if w.again && !w.closed {
+			w.again = false
+			w.timer.Reset(watchDebounce)
+		}
+		w.mu.Unlock()
+	}()
 	pend := w.pend
 	w.pend = map[string]rawEvent{}
 	if w.resync {
