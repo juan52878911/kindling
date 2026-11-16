@@ -14,6 +14,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Fixed
 
+- MCP gateway: pruning session owners no longer counts as use, so direct sessions expire and their microVMs freeze again; a tenant could end up stuck at its session cap.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.

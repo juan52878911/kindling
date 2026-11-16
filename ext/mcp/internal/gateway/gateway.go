@@ -1089,7 +1089,9 @@ func (g *Gateway) esDe(key, tenant string) bool {
 // caducidad, máquina destruida).
 func (g *Gateway) podarDuenos() {
 	g.duenos.Range(func(k, _ any) bool {
-		if g.Route(k.(string)) == nil {
+		// PeekRoute y no Route: mirar no es usar. Con Route, cada tick
+		// refrescaba la sesión y su instancia, y ninguna caducaba.
+		if g.PeekRoute(k.(string)) == nil {
 			g.duenos.Delete(k)
 		}
 		return true

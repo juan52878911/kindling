@@ -91,3 +91,28 @@ func TestRouterSoloAcunaEnInitializeYConTope(t *testing.T) {
 		t.Fatalf("por encima del tope: %d sid=%q", rec.Code, rec.Header().Get(SessionHeader))
 	}
 }
+
+// Podar los dueños de sesiones acuñadas (en cada tick) mira las rutas sin
+// contarlo como uso: si no, ninguna sesión directa caducaba ni su microVM se
+// congelaba, y el tenant acababa en 429 al llegar a MaxSesiones.
+func TestPodarDuenosNoCuentaComoUso(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 2)
+	d := &daemonAislado{service: "notas", invitados: addrs, compartido: true}
+	gw := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "")
+	h := gw.Handler("")
+	if rec := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit); rec.Code != http.StatusOK || rec.Header().Get(SessionHeader) == "" {
+		t.Fatalf("initialize: %d %s", rec.Code, rec.Body)
+	}
+	time.Sleep(60 * time.Millisecond)
+	antes := gw.Status("notas").Idle
+	if antes < 50*time.Millisecond {
+		t.Fatalf("la instancia no estaba ociosa: %v", antes)
+	}
+	gw.podarDuenos()
+	if despues := gw.Status("notas").Idle; despues < antes {
+		t.Fatalf("podar los dueños refrescó el último uso: ociosa %v antes, %v después", antes, despues)
+	}
+	if n := gw.sesionesDirectas("default"); n != 1 {
+		t.Fatalf("podar quitó una sesión viva: quedan %d", n)
+	}
+}
