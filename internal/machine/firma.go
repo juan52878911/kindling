@@ -406,6 +406,11 @@ var errYaMigrada = errors.New("already signed in v3")
 // no los lleva nunca: el del mem.file (lo que la v1 no cubría) y los de su
 // imagen (image_digest y base_digest, que un dorado de meta.json v3 no
 // tenía: M13). Devuelve el snapshot re-firmado.
+//
+// Lo que la firma vieja no cubría (sin_agente y share_wait en la v2; las
+// etiquetas y los topes en la v1) se firma tal como esté al migrar: no hay
+// forma de saber si alguien lo cambió antes. Por eso la migración corre una
+// vez, al arrancar, y después la firma vieja se rechaza (las marcas).
 func (m *Manager) migrarFirma(name, firma string) (*api.Snapshot, error) {
 	s, err := m.loadSnapshot(name)
 	if err != nil {

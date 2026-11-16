@@ -17,6 +17,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -55,12 +56,19 @@ func (m *Manager) digestDiscoBase(path string) (string, error) {
 			}
 			continue // era de otra huella: el fichero cambió entre medias
 		}
-		v.hash, v.err = digestArbol(path)
-		if v.err == nil {
-			m.discosBase.Store(path, huellaKernel{tam: tam, fecha: fecha, hash: v.hash})
-		}
-		m.discosEnVuelo.CompareAndDelete(path, v)
-		close(v.hecho)
+		// En un defer: aunque el digest entrara en pánico, los que esperan
+		// no se quedan colgados.
+		func() {
+			defer func() {
+				m.discosEnVuelo.CompareAndDelete(path, v)
+				close(v.hecho)
+			}()
+			v.err = errors.New("digest interrupted")
+			v.hash, v.err = digestArbol(path)
+			if v.err == nil {
+				m.discosBase.Store(path, huellaKernel{tam: tam, fecha: fecha, hash: v.hash})
+			}
+		}()
 		return v.hash, v.err
 	}
 }
