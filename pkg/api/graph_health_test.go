@@ -46,3 +46,16 @@ func TestValidateGraphHealth(t *testing.T) {
 		t.Errorf("defaults: %s %s %d %s %s", iv, pl, re, ar, pa)
 	}
 }
+
+// F12: el paso entre intentos tiene un mínimo; con start_interval_ms: 1 el
+// daemon lanzaría un exec por milisegundo.
+func TestSaludPasoMinimo(t *testing.T) {
+	for _, ms := range []int{1, 50, 99} {
+		if _, _, _, _, pa := (GraphHealth{StartIntervalMS: ms}).Tiempos(); pa != GraphHealthMinStartInterval {
+			t.Errorf("start_interval_ms %d: paso %s", ms, pa)
+		}
+	}
+	if _, _, _, _, pa := (GraphHealth{StartIntervalMS: 1500}).Tiempos(); pa != 1500*time.Millisecond {
+		t.Errorf("start_interval_ms 1500: paso %s", pa)
+	}
+}

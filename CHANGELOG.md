@@ -93,6 +93,11 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - Shares on Linux: two names of the same file are both watched; unwatching one no longer silences the other.
 - Shares: change notices to a guest that does not read no longer pile up goroutines (at most one write waits), and on macOS one session watches at most 1024 paths so it cannot use up the daemon's 4096.
 - Shares: a size close to the 64-bit maximum no longer overflows the quota check; it gets ENOSPC.
+- kling compose: `up` no longer removes a machine of another project whose name collides (project `a` service `b-web` vs project `a-b` service `web`), and `up` and `down -v` refuse to go on when names collide.
+- Graph health checks wait at least 100 ms between attempts, so a tiny `start_interval_ms` no longer floods the guest with execs.
+- kling compose: a healthcheck over the daemon limits (Docker allows `retries: 120`) is capped with a warning instead of failing the whole compose.
+- kling compose up: images are imported before the running project is removed, so a failed pull leaves it up; only images that need `-replace` wait until after.
+- kling compose up: at most 8 imports and 4 template machines at a time, and the first failure stops the rest.
 
 ### Security
 
@@ -118,6 +123,8 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - With an authz policy, sandbox, graph node and fork requests classify every field like `RunRequest` does; an unclassified one is admin-only, and tenants can't set a node's `machine_id` or `state`.
 - `daemon.require_e2fs_jail on` makes e2fsck, resize2fs and debugfs fail instead of running without their full jail (default off).
 - macOS: the daemon only launches `kling-credproxy` next to its own VMM binary, not next to whatever program answers on the machine's VMM socket.
+- kling compose: variables are interpolated after parsing, per value, so a value with ` #`, `: ` or a newline no longer gets cut or adds keys; `image:` must be an image reference.
+- kling compose up: service environment values reach `kling image import` through a temporary `-env-file` instead of its command line.
 
 ### Changed
 
