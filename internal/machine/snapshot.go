@@ -2016,7 +2016,7 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// (resyncCopia): se quedaría con el reloj y el CSPRNG del dorado.
 	resync, err := m.resyncCopia(ctx, id, snap)
 	if err != nil {
-		return abortar(fmt.Errorf("snapshot %s: %w", req.From, err))
+		return m.descartarCopia(id, soltarCiclo, abortar, fmt.Errorf("snapshot %s: %w", req.From, err))
 	}
 	fases.marca("resync")
 	// Un snapshot por imagen: ya resincronizada, lo de ESTA máquina, y el
@@ -2024,7 +2024,8 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	// CSPRNG de la plantilla.
 	if ai != nil {
 		if !resync.ok {
-			return abortar(fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
+			return m.descartarCopia(id, soltarCiclo, abortar,
+				fmt.Errorf("image snapshot %s: the guest agent did not resync after the restore", req.From))
 		}
 		if err := m.entregarMaquina(ctx, id, ai); err != nil {
 			return abortar(fmt.Errorf("image snapshot %s: %w", req.From, err))
@@ -2122,6 +2123,19 @@ func (m *Manager) runFromCon(ctx context.Context, req api.RunRequest, ai *arranq
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name, Message: msg})
 	return &out, nil
+}
+
+// descartarCopia aborta una copia que no se resincronizó (F8) y la borra: un
+// fallo del invitado, no de la petición, así que quedarse failed con su nombre
+// solo hacía que el reintento con el mismo -name diera ErrNameTaken. Como el
+// camino de las carpetas compartidas: suelta el cerrojo de ciclo y Remove.
+func (m *Manager) descartarCopia(id string, soltarCiclo func(), abortar func(error) (*api.Machine, error), err error) (*api.Machine, error) {
+	_, err = abortar(err)
+	soltarCiclo()
+	if rerr := m.Remove(id); rerr != nil {
+		log.Printf("%s: removing the copy that did not resync: %v", shortID(id), rerr)
+	}
+	return nil, err
 }
 
 // writeMeta guarda el meta.json de un snapshot de forma atómica.

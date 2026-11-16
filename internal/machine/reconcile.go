@@ -517,6 +517,27 @@ func shortID(id string) string {
 // verla con el VMM vivo, no lo readopta: lo mata y la deja failed.
 const marcaCommit = "commit.en-curso"
 
+// errCopiaCortada es el LastErr de una copia de un dorado (run -from o un
+// snapshot por imagen) cuyo arranque cortó un reinicio del daemon.
+const errCopiaCortada = "the daemon restarted while this copy was starting from its snapshot, before it was resynced " +
+	"and handed its credentials and volumes; its VMM was stopped. Remove it and run it again"
+
+// copiaSinEntregar dice si mc es una copia de un dorado que runFrom publicó
+// (created) y nunca llegó a entregar: StartedAt solo se pone al entregarla, y
+// un Start posterior (que vuelve a created) arranca en frío con StartedAt ya
+// puesto.
+func copiaSinEntregar(mc *api.Machine) bool {
+	return mc.State == api.StateCreated && mc.StartedAt == nil && origenCopia(mc) != ""
+}
+
+// origenCopia es el snapshot del que se restauró mc, o "" si arrancó en frío.
+func origenCopia(mc *api.Machine) string {
+	if mc.From != "" {
+		return mc.From
+	}
+	return mc.ImageSnapshot
+}
+
 // errCommitCortado es el LastErr de una plantilla cuyo commit cortó un
 // reinicio del daemon.
 const errCommitCortado = "the daemon restarted in the middle of a commit, with the machine paused and its disk " +
@@ -642,6 +663,18 @@ func (m *Manager) readoptable(mc *api.Machine, pid int, estado string, previa pr
 		mc.PID = 0
 		return false
 	}
+	if copiaSinEntregar(mc) {
+		// S3: una copia de un dorado cuyo arranque cortó el reinicio. Su VMM
+		// puede haber reanudado ya el invitado, pero sin el resync (reloj y
+		// CSPRNG del dorado), sin credenciales y sin volúmenes: readoptarla
+		// como running la entregaría así. Se para y queda failed.
+		log.Printf("reconcile: %s (%s): a copy of %s whose start the restart cut (VMM pid %d); stopping it: failed",
+			mc.Name, shortID(mc.ID), origenCopia(mc), pid)
+		ahora := time.Now()
+		mc.State, mc.LastErr, mc.FailedAt = api.StateFailed, errCopiaCortada, &ahora
+		mc.PID = 0
+		return false
+	}
 	switch {
 	case estado == "Paused" && mc.State != api.StatePaused:
 		if previa.sellado {
@@ -708,7 +741,8 @@ func (m *Manager) prepararReadopcion(live map[string]int, estados map[string]str
 	m.mu.RLock()
 	for id, pid := range live {
 		mc := m.byID[id]
-		if mc == nil || estados[id] != "Paused" || mc.State == api.StatePaused {
+		// Una copia sin entregar no se reanuda: readoptable la para (S3).
+		if mc == nil || estados[id] != "Paused" || mc.State == api.StatePaused || copiaSinEntregar(mc) {
 			continue
 		}
 		var congelada *time.Time
