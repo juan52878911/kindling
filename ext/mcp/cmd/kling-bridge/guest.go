@@ -14,6 +14,10 @@ import (
 
 var procReaper = guest.DefaultReaper
 
+// fetchMMDS es guest.FetchMMDS; variable para que los tests pongan un almacén
+// sin hablar con la dirección de enlace local.
+var fetchMMDS = guest.FetchMMDS
+
 func enSuPropioGrupo(cmd *exec.Cmd) { guest.OwnGroup(cmd) }
 func matarGrupo(cmd *exec.Cmd)      { guest.KillGroup(cmd) }
 
@@ -47,7 +51,7 @@ func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 // sesiones (un secreto se inyecta después del boot, en la microVM ya viva), y una
 // caché lo dejaría sin ver justo lo recién inyectado.
 func (b *bridge) sessionEnv(id string) ([]string, bool) {
-	store, err := guest.FetchMMDS()
+	store, err := fetchMMDS()
 	if err != nil {
 		log.Printf("session %s: can't read MMDS, starting without its secrets: %v", id[:8], err)
 		return b.env, false

@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -347,7 +348,7 @@ type bridge struct {
 	// vive; bmu los protege. Ver browser.go.
 	browser *browserSpec
 	bmu     sync.Mutex
-	bproc   *exec.Cmd
+	bproc   *hijoVigilado
 
 	// Modo proxy HTTP (ver proxy.go). service es el marcador (nil = modo stdio);
 	// proxy reversa hacia el hijo ÚNICO y compartido; proxyChild es ese hijo y
@@ -356,7 +357,14 @@ type bridge struct {
 	service    *serviceSpec
 	proxy      *httputil.ReverseProxy
 	pmu        sync.Mutex
-	proxyChild *exec.Cmd
+	proxyChild *hijoVigilado
+	// proxyEnv es la huella del entorno con que se lanzó proxyChild (MMDS
+	// incluido) y proxyStopped dice que el apagado lo paró a propósito; ambos
+	// bajo pmu. proxyRestart serializa los relanzamientos (ver
+	// ensureProxyChild).
+	proxyEnv     string
+	proxyStopped bool
+	proxyRestart sync.Mutex
 
 	mu        sync.Mutex
 	sessions  map[string]*session
@@ -415,7 +423,13 @@ type session struct {
 	wmu     sync.Mutex
 	pending map[string]chan json.RawMessage // id JSON-RPC -> quien espera
 	notes   chan json.RawMessage            // mensajes que el servidor inicia
-	closed  bool
+	// flujos son las respuestas SSE de las peticiones POST en curso cuyo cliente
+	// acepta text/event-stream. Una petición que inicia el servidor
+	// (sampling/createMessage, elicitation/create, roots/list) a mitad de una
+	// llamada va por uno de ellos, como pide Streamable HTTP; si no hay ninguno,
+	// por notes (el GET SSE de la sesión). Bajo mu.
+	flujos []chan json.RawMessage
+	closed bool
 	// done se cierra al terminar la sesión. Es la señal para el flujo SSE, y
 	// sustituye a cerrar notes: un canal que solo se cierra no puede provocar
 	// el pánico de "send on closed channel" en el readLoop.
@@ -467,6 +481,15 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &msg); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	// stdio en MCP es un mensaje por línea. Un cuerpo con saltos de línea —JSON
+	// indentado, válido en HTTP— llegaba al servidor partido en varias líneas
+	// que no son JSON, y la petición se perdía hasta el tope de respuesta. Fuera
+	// de las cadenas (donde un salto va escapado) todo espacio sobra: compactar
+	// no cambia el mensaje. Ya se sabe que es JSON válido, así que no falla.
+	var compacto bytes.Buffer
+	if json.Compact(&compacto, body) == nil {
+		body = compacto.Bytes()
 	}
 
 	sid := r.Header.Get(SessionHeader)
@@ -521,7 +544,39 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.request(r.Context(), string(msg.ID), body)
+	// Si el cliente acepta SSE, las peticiones que el servidor inicie mientras
+	// contesta (sampling, elicitation) le llegan por la respuesta de ESTA
+	// petición. La respuesta solo se convierte en flujo SSE cuando llega la
+	// primera; sin ellas sigue siendo un application/json de siempre.
+	var push func(json.RawMessage) error
+	enFlujo := false
+	if flusher, ok := w.(http.Flusher); ok && aceptaSSE(r) {
+		push = func(m json.RawMessage) error {
+			if !enFlujo {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.WriteHeader(http.StatusOK)
+				enFlujo = true
+			}
+			if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", m); err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+	}
+
+	resp, err := s.requestStream(r.Context(), string(msg.ID), body, push)
+	if enFlujo {
+		// La cabecera 200 ya salió: un fallo del puente solo puede llegar como
+		// error JSON-RPC dentro del flujo, con el id de la petición.
+		if err != nil {
+			resp, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": msg.ID,
+				"error": map[string]any{"code": -32603, "message": err.Error()}})
+		}
+		_ = push(resp)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -530,11 +585,27 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp)
 }
 
+// aceptaSSE dice si el cliente ofrece text/event-stream en Accept, como exige
+// Streamable HTTP. Uno que solo acepta JSON no puede recibir un flujo.
+func aceptaSSE(r *http.Request) bool {
+	for _, v := range r.Header.Values("Accept") {
+		if strings.Contains(v, "text/event-stream") {
+			return true
+		}
+	}
+	return false
+}
+
 // handleGet abre el flujo SSE por el que el servidor envía mensajes propios.
 func (b *bridge) handleGet(w http.ResponseWriter, r *http.Request) {
 	sid := r.Header.Get(SessionHeader)
 	b.mu.Lock()
 	s, ok := b.sessions[sid]
+	if ok && s.isClosed() {
+		// Mismo criterio que resolve: una sesión muerta es una sesión perdida.
+		delete(b.sessions, sid)
+		ok = false
+	}
 	b.mu.Unlock()
 	if !ok {
 		http.Error(w, "unknown session", http.StatusNotFound)
@@ -688,7 +759,13 @@ var errSesionPerdida = errors.New("unknown or expired")
 func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 	b.mu.Lock()
 	if sid != "" {
-		if s, ok := b.sessions[sid]; ok {
+		if s, ok := b.sessions[sid]; ok && s.isClosed() {
+			// El servidor MCP de la sesión murió (o la cerró el readLoop): antes
+			// se devolvía igual y se le refrescaba lastUse, así que el cosechador
+			// no la quitaba nunca y el cliente recibía 502 eternos en vez del 404
+			// que le hace rehacer el initialize. Se olvida aquí mismo.
+			delete(b.sessions, sid)
+		} else if ok {
 			s.lastUse = time.Now()
 			s.inflight++
 			b.mu.Unlock()
@@ -862,9 +939,20 @@ func (s *session) readLoop(stdout io.Reader) {
 		raw := json.RawMessage(append([]byte(nil), line...))
 
 		var probe struct {
-			ID json.RawMessage `json:"id"`
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
 		}
 		_ = json.Unmarshal(raw, &probe)
+
+		// Con method es un mensaje que INICIA el servidor, lleve id o no. Antes
+		// solo se miraba el id: una petición del servidor (sampling, elicitation,
+		// roots) se descartaba, o, si su id coincidía con el de una petición del
+		// cliente en vuelo —los dos lados numeran desde 1—, se entregaba como la
+		// respuesta de esa llamada y la respuesta de verdad se perdía.
+		if probe.Method != "" {
+			s.deliverServerMessage(raw, probe.ID)
+			continue
+		}
 
 		if len(probe.ID) == 0 || string(probe.ID) == "null" {
 			// Sin id: el servidor habla por iniciativa propia. Va al flujo SSE, y
@@ -898,6 +986,14 @@ func (s *session) readLoop(stdout io.Reader) {
 	s.close()
 }
 
+// isClosed dice si la sesión ya terminó. Toma s.mu; se puede llamar con b.mu
+// tomado (el orden es siempre b.mu -> s.mu, nunca al revés).
+func (s *session) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
 func (s *session) send(msg []byte) error {
 	s.mu.Lock()
 	closed := s.closed
@@ -926,9 +1022,102 @@ func (s *session) send(msg []byte) error {
 	return nil
 }
 
+// deliverServerMessage reparte un mensaje que inicia el servidor (lleva method).
+//
+// Una PETICIÓN (con id) va, si la hay, por la respuesta SSE de una petición POST
+// en curso: la especificación pide que lo relacionado con una llamada viaje en
+// su propio flujo, y un sampling a mitad de un tools/call es justo eso. Por
+// stdio no viaja con qué petición del cliente está relacionada, así que con
+// varias en curso se usa la más antigua; el cliente la contesta con un POST
+// aparte sea cual sea el flujo por el que le llegó, así que la elección no
+// cambia el resultado. El id del servidor se deja tal cual: los dos lados
+// numeran por separado, y la respuesta del cliente vuelve con ese mismo id.
+//
+// Sin flujo POST, o si es una notificación, va a notes (el GET SSE).
+func (s *session) deliverServerMessage(raw, id json.RawMessage) {
+	if len(id) > 0 && string(id) != "null" {
+		s.mu.Lock()
+		if len(s.flujos) > 0 {
+			select {
+			case s.flujos[0] <- raw:
+				s.mu.Unlock()
+				return
+			default:
+			}
+		}
+		s.mu.Unlock()
+	}
+	s.toNotes(raw)
+}
+
+// toNotes deja un mensaje del servidor para el GET SSE de la sesión. Si el búfer
+// está lleno (nadie escucha) una notificación se descarta antes que bloquear al
+// servidor, como siempre. Una petición no se puede descartar sin más: el
+// servidor esperaría para siempre una respuesta, así que se le contesta con un
+// error JSON-RPC.
+func (s *session) toNotes(raw json.RawMessage) {
+	select {
+	case s.notes <- raw:
+		return
+	default:
+	}
+	var m struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(raw, &m) != nil || len(m.ID) == 0 || string(m.ID) == "null" {
+		return
+	}
+	rechazo, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": m.ID,
+		"error": map[string]any{"code": -32603,
+			"message": "kling-bridge: the client has no open stream to receive this request"},
+	})
+	// En su goroutine: send puede bloquear si el servidor no lee su stdin, y el
+	// readLoop no debe pararse nunca.
+	go func() { _ = s.send(rechazo) }()
+}
+
+// quitarFlujo retira un flujo de la sesión y devuelve lo que quedara en él. Tras
+// retirarlo bajo mu nadie más escribe en él, así que el drenaje no pierde nada.
+func (s *session) quitarFlujo(flujo chan json.RawMessage) []json.RawMessage {
+	if flujo == nil {
+		return nil
+	}
+	s.mu.Lock()
+	for i, f := range s.flujos {
+		if f == flujo {
+			s.flujos = append(s.flujos[:i], s.flujos[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+	var restos []json.RawMessage
+	for {
+		select {
+		case m := <-flujo:
+			restos = append(restos, m)
+		default:
+			return restos
+		}
+	}
+}
+
 // request envía un mensaje y espera la respuesta con el mismo id JSON-RPC.
 func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawMessage, error) {
+	return s.requestStream(ctx, id, msg, nil)
+}
+
+// requestStream es request con un canal de vuelta para las peticiones que el
+// servidor inicie mientras tanto. push las escribe en la respuesta (SSE) de esta
+// petición; nil = el cliente no acepta SSE y van por notes. Si push falla (el
+// cliente se fue), lo que quede también va por notes.
+func (s *session) requestStream(ctx context.Context, id string, msg []byte,
+	push func(json.RawMessage) error) (json.RawMessage, error) {
 	ch := make(chan json.RawMessage, 1)
+	var flujo chan json.RawMessage
+	if push != nil {
+		flujo = make(chan json.RawMessage, 16)
+	}
 
 	s.mu.Lock()
 	if s.closed {
@@ -953,12 +1142,35 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 			"JSON-RPC requires unique ids among unanswered requests", id)
 	}
 	s.pending[id] = ch
+	if flujo != nil {
+		s.flujos = append(s.flujos, flujo)
+	}
 	s.mu.Unlock()
+
+	// reenviar entrega un mensaje del servidor al cliente de esta petición, o al
+	// GET SSE si esta ya no puede.
+	reenviar := func(m json.RawMessage) {
+		if push != nil {
+			if push(m) == nil {
+				return
+			}
+			push = nil
+		}
+		s.toNotes(m)
+	}
+	// soltar retira el flujo y entrega lo que quedara en él. Va en todas las
+	// salidas: lo que el servidor mandó antes de su respuesta llega antes que ella.
+	soltar := func() {
+		for _, m := range s.quitarFlujo(flujo) {
+			reenviar(m)
+		}
+	}
 
 	if err := s.send(msg); err != nil {
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		soltar()
 		return nil, err
 	}
 
@@ -969,42 +1181,53 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 	if timeout <= 0 {
 		timeout = defaultRequestTimeout
 	}
+	// Un temporizador fuera del bucle: un time.After dentro reiniciaría el plazo
+	// con cada mensaje que el servidor iniciase.
+	tope := time.NewTimer(timeout)
+	defer tope.Stop()
 
-	select {
-	case resp, ok := <-ch:
-		// Recepción de DOS valores, no de uno. close() cierra los canales
-		// pendientes cuando muere el servidor MCP, y un canal cerrado entrega
-		// el valor cero sin bloquear: con `resp := <-ch` esto devolvía
-		// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
-		// error, que es la forma más cara de diagnosticar un proceso muerto.
-		if !ok {
-			s.mu.Lock()
-			motivo := s.scanErr
-			s.mu.Unlock()
-			if motivo != nil {
-				return nil, fmt.Errorf("could not read the MCP server's reply to message %s: %w.\n"+
-					"The server is fine: its response did not fit. Responses are read line by "+
-					"line with a %d MiB cap", id, motivo, 16)
+	for {
+		select {
+		case m := <-flujo: // nil sin push: nunca está listo
+			reenviar(m)
+		case resp, ok := <-ch:
+			soltar()
+			// Recepción de DOS valores, no de uno. close() cierra los canales
+			// pendientes cuando muere el servidor MCP, y un canal cerrado entrega
+			// el valor cero sin bloquear: con `resp := <-ch` esto devolvía
+			// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
+			// error, que es la forma más cara de diagnosticar un proceso muerto.
+			if !ok {
+				s.mu.Lock()
+				motivo := s.scanErr
+				s.mu.Unlock()
+				if motivo != nil {
+					return nil, fmt.Errorf("could not read the MCP server's reply to message %s: %w.\n"+
+						"The server is fine: its response did not fit. Responses are read line by "+
+						"line with a %d MiB cap", id, motivo, 16)
+				}
+				return nil, fmt.Errorf("MCP server died while handling message %s", id)
 			}
-			return nil, fmt.Errorf("MCP server died while handling message %s", id)
+			return resp, nil
+		case <-ctx.Done():
+			s.mu.Lock()
+			delete(s.pending, id)
+			s.mu.Unlock()
+			soltar()
+			return nil, ctx.Err()
+		case <-tope.C:
+			s.mu.Lock()
+			delete(s.pending, id)
+			s.mu.Unlock()
+			soltar()
+			// Se dice que SIGUE trabajando, no que esté roto: el proceso no se mata
+			// aquí, y confundir "tarda mucho" con "muerto" manda a quien depura al
+			// sitio equivocado. Ya pasó con un escaneo que topaba contra este plazo
+			// exacto y parecía un servidor caído.
+			return nil, fmt.Errorf("MCP server did not respond to message %s within %s; "+
+				"it's still working, this is the bridge's cap. Raise it with -request-timeout",
+				id, timeout)
 		}
-		return resp, nil
-	case <-ctx.Done():
-		s.mu.Lock()
-		delete(s.pending, id)
-		s.mu.Unlock()
-		return nil, ctx.Err()
-	case <-time.After(timeout):
-		s.mu.Lock()
-		delete(s.pending, id)
-		s.mu.Unlock()
-		// Se dice que SIGUE trabajando, no que esté roto: el proceso no se mata
-		// aquí, y confundir "tarda mucho" con "muerto" manda a quien depura al
-		// sitio equivocado. Ya pasó con un escaneo que topaba contra este plazo
-		// exacto y parecía un servidor caído.
-		return nil, fmt.Errorf("MCP server did not respond to message %s within %s; "+
-			"it's still working, this is the bridge's cap. Raise it with -request-timeout",
-			id, timeout)
 	}
 }
 

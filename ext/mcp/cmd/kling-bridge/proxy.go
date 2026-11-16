@@ -29,6 +29,8 @@ package main
 // aislar.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -38,6 +40,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -119,56 +122,49 @@ func (b *bridge) newReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // spawnProxyChild lanza el servidor MCP HTTP y espera a que su puerto acepte
 // conexiones. Si no llega a estar listo, lo mata y devuelve error: mejor fallar
 // aquí, donde se ve en la consola serie, que como un 502 más tarde.
+//
+// Con los secretos comunes de MMDS en el entorno, como cada sesión en modo
+// stdio: antes este hijo arrancaba solo con b.env y el servicio HTTP no veía
+// ninguna credencial inyectada.
 func (b *bridge) spawnProxyChild() error {
+	env, _ := b.sessionEnv("http-mode")
 	cmd := exec.Command(b.argv[0], b.argv[1:]...)
-	cmd.Env = b.env
+	cmd.Env = env
 	// La salida del servidor va a la consola serie de la microVM, igual que en
 	// stdio y que el navegador compartido.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	enSuPropioGrupo(cmd)
-	if err := cmd.Start(); err != nil {
+	h, err := lanzarVigilado(cmd, "http mode: MCP server")
+	if err != nil {
 		return fmt.Errorf("starting the HTTP MCP server: %w", err)
 	}
-	// No hacemos Wait: el servidor es de por vida. Si muere, el cosechador
-	// (procReaper, wait4 de PID 1) lo recoge como huérfano; en /reset lo matamos
-	// nosotros y arranca otro.
 	b.pmu.Lock()
-	b.proxyChild = cmd
+	b.proxyChild = h
+	b.proxyEnv = huellaEnv(env)
 	b.pmu.Unlock()
 	log.Printf("http mode: MCP server started (pid %d), waiting on %s", cmd.Process.Pid, b.childAddr())
 
-	if err := waitForPort(b.childAddr(), 40*time.Second); err != nil {
+	if err := waitForPortWhile(b.childAddr(), 40*time.Second, h.vivo); err != nil {
 		b.pmu.Lock()
-		if b.proxyChild == cmd {
+		if b.proxyChild == h {
 			b.proxyChild = nil
 		}
 		b.pmu.Unlock()
-		matarYEsperar(cmd)
+		h.matar()
 		return err
 	}
 	return nil
 }
 
-// esperaHijoProxy acota cuánto se espera a que el hijo HTTP muera tras el
-// SIGKILL. Siendo PID 1 puede que lo recoja antes el cosechador (Wait devuelve
-// ECHILD al momento); fuera de la microVM es este Wait quien lo recoge.
-const esperaHijoProxy = 2 * time.Second
-
-// matarYEsperar mata el grupo del hijo y espera, con plazo, a que salga: sin el
-// Wait quedaría como zombi fuera de la microVM, y sin el plazo un hijo que no
-// muere (D en un montaje colgado) bloquearía el apagado del puente.
-func matarYEsperar(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	matarGrupo(cmd)
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(esperaHijoProxy):
-	}
+// huellaEnv resume un entorno para saber si cambió sin guardar los secretos.
+func huellaEnv(env []string) string {
+	s := sha256.Sum256([]byte(strings.Join(env, "\x00")))
+	return hex.EncodeToString(s[:])
 }
+
+// esperaHijoProxy acota cuánto se espera a que un hijo de larga vida muera tras
+// el SIGKILL. Siendo PID 1 puede que lo recoja antes el cosechador; fuera de la
+// microVM lo recoge el waitFor de lanzarVigilado.
+const esperaHijoProxy = 2 * time.Second
 
 // restartProxyChild mata el servidor compartido y arranca otro limpio. Lo usa
 // /reset (ver handleReset): el snapshot dorado no debe congelarse con el
@@ -179,18 +175,74 @@ func (b *bridge) restartProxyChild() error {
 	old := b.proxyChild
 	b.proxyChild = nil
 	b.pmu.Unlock()
-	matarYEsperar(old)
+	old.matar()
 	return b.spawnProxyChild()
 }
 
 // stopProxyChild mata el servidor compartido, si corre. Lo llama el apagado del
 // puente: somos PID 1 y no debemos dejar el proceso suelto al morir la microVM.
+// Desde aquí ensureProxyChild ya no lo relanza.
 func (b *bridge) stopProxyChild() {
 	b.pmu.Lock()
 	c := b.proxyChild
 	b.proxyChild = nil
+	b.proxyStopped = true
 	b.pmu.Unlock()
-	matarYEsperar(c)
+	c.matar()
+}
+
+// ensureProxyChild relanza el servidor compartido si hace falta, antes de
+// reversarle una petición:
+//   - si murió: antes el puente seguía apuntando a un puerto muerto y cada
+//     petición era un 502 hasta un /reset que nadie iba a llamar;
+//   - en el primer initialize sin sesiones vivas, si los secretos de MMDS ya no
+//     son los de su entorno: tras despertar un dorado el hijo es el que se
+//     congeló, con el MMDS de entonces. Solo sin sesiones vivas, porque
+//     relanzarlo se lleva el estado de todas.
+//
+// Un candado propio serializa los relanzamientos: N peticiones a la vez contra
+// un hijo muerto lanzan uno, no N.
+func (b *bridge) ensureProxyChild(r *http.Request) error {
+	if len(b.argv) == 0 {
+		return nil // sin comando que lanzar (tests de ruteo): nada que vigilar
+	}
+	b.pmu.Lock()
+	h, parado, huella := b.proxyChild, b.proxyStopped, b.proxyEnv
+	b.pmu.Unlock()
+	if parado {
+		return nil
+	}
+	motivo := ""
+	if !h.vivo() {
+		motivo = "the HTTP MCP server is not running"
+	} else if r.Method == http.MethodPost && r.Header.Get(SessionHeader) == "" {
+		b.mu.Lock()
+		sinSesiones := len(b.proxySeen) == 0
+		b.mu.Unlock()
+		if sinSesiones {
+			if env, _ := b.sessionEnv("http-mode"); huellaEnv(env) != huella {
+				motivo = "its MMDS secrets changed"
+			}
+		}
+	}
+	if motivo == "" {
+		return nil
+	}
+
+	b.proxyRestart.Lock()
+	defer b.proxyRestart.Unlock()
+	b.pmu.Lock()
+	ahora := b.proxyChild
+	b.pmu.Unlock()
+	if ahora != h && ahora.vivo() {
+		return nil // otra petición lo relanzó mientras esperábamos
+	}
+	log.Printf("http mode: %s; starting it again", motivo)
+	// Las sesiones vivían en el proceso que se va: el rastro ya no vale.
+	b.mu.Lock()
+	b.proxySeen = map[string]time.Time{}
+	b.mu.Unlock()
+	return b.restartProxyChild()
 }
 
 // waitForPort espera a que algo acepte conexiones TCP en addr, o falla al
@@ -198,8 +250,17 @@ func (b *bridge) stopProxyChild() {
 // dormir un tiempo fijo, que o se queda corto en un arranque lento o alarga el
 // boot sin necesidad.
 func waitForPort(addr string, timeout time.Duration) error {
+	return waitForPortWhile(addr, timeout, func() bool { return true })
+}
+
+// waitForPortWhile es waitForPort que se rinde en cuanto vivo() dice que no:
+// un hijo que muere al arrancar no debe hacer esperar el plazo entero.
+func waitForPortWhile(addr string, timeout time.Duration, vivo func() bool) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if !vivo() {
+			return fmt.Errorf("the HTTP MCP server exited before opening %s", addr)
+		}
 		c, err := net.DialTimeout("tcp", addr, 1*time.Second)
 		if err == nil {
 			_ = c.Close()
@@ -225,6 +286,10 @@ func (b *bridge) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			defer b.forgetProxySession(sid)
 		}
+	}
+	if err := b.ensureProxyChild(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
 	}
 	b.proxy.ServeHTTP(w, r)
 }

@@ -21,6 +21,10 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - MCP gateway: closing or reaping a `/mcp/_all` conversation closes its bridge sessions instead of leaving an orphaned MCP process per service.
 - MCP gateway: a 404 from the bridge to a session's POST forgets the session, so it no longer counts against its instance and forces replicas.
 - MCP gateway with several hosts: `/mcp/_all` applies the tenant's in-flight request quota.
+- kling-bridge: requests a stdio MCP server sends mid-call (sampling, elicitation, roots) now reach the client over the call's SSE response or the session's GET stream, instead of being dropped or returned as the call's result.
+- kling-bridge: a session whose MCP server died answers 404 and is forgotten, instead of a 502 on every request.
+- kling-bridge: JSON bodies with line breaks are compacted before being written to a stdio server.
+- kling-bridge: the shared HTTP MCP server and the shared Chromium are restarted when they die, instead of failing until `/reset`; in http mode the server now gets the MMDS secrets.
 - Gateway scale-out bursts: when a replica that sessions were waiting for fails to start (including a network timeout), they get its error instead of each retrying and starting another failing replica; a panic while building no longer leaves the replica counted forever.
 - Postgres credential proxy: after a server rejects protocol 3.2, it is remembered per upstream for 10 minutes, so later connections dial once with 3.0 instead of twice.
 - kling-hv: a snapshot whose vCPU registers could not all be read now fails instead of saving a machine that restores wrong.
