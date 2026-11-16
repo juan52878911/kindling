@@ -1,7 +1,6 @@
 package net
 
 import (
-	"errors"
 	"fmt"
 	stdnet "net"
 	"os/exec"
@@ -138,9 +137,11 @@ func TestHostEgressRulesNieganLaRedPrivadaMenosElRangoPropio(t *testing.T) {
 		t.Errorf("falta el MASQUERADE: sin el, ninguna microVM sale a internet:\n%s", junto)
 	}
 	// Todas las reglas salen del rango de kindling o entran por sus veth, no
-	// de cualquier origen.
+	// de cualquier origen; la del agente, que es de cualquier origen, va
+	// acotada a su destino.
 	for _, r := range reglas {
-		if !strings.Contains(linea(r), "-s "+HostSubnet) && !strings.Contains(linea(r), "-i vh-+") {
+		if !strings.Contains(linea(r), "-s "+HostSubnet) && !strings.Contains(linea(r), "-i vh-+") &&
+			!strings.Contains(linea(r), "-d "+HostSubnet+" -p tcp --dport 8080 -j DROP") {
 			t.Errorf("regla sin acotar al rango de kindling: %s", linea(r))
 		}
 	}
@@ -193,37 +194,42 @@ func TestSinPosicionQuitaElNumeroDeLinea(t *testing.T) {
 	}
 }
 
-// applyIPv6Barrier es la defensa en profundidad de B1: el filtrado de este
-// fichero (ipset, iptables) es solo IPv4, así que sin ella un invitado con
-// salida v6 real se saltaría el allowlist entero, y en modo internet o none
-// tendría una salida que ningún DROP de aquí cubre. Se comprueba con un `ns`
-// de mentira: no hay netns real en un test.
-func TestApplyIPv6BarrierApagaSysctlEnLasInterfacesQueImportan(t *testing.T) {
+// La capa 1 de la barrera IPv6 es la defensa en profundidad de B1: el
+// filtrado de este fichero (ipset, iptables) es solo IPv4, así que sin ella un
+// invitado con salida v6 real se saltaría el allowlist entero, y en modo
+// internet o none tendría una salida que ningún DROP de aquí cubre. Va en el
+// único sysctl del netns, junto al reenvío y el endurecimiento. Se comprueba
+// con un `ns` de mentira: no hay netns real en un test.
+func TestAplicarSysctlsApagaIPv6EnLasInterfacesQueImportan(t *testing.T) {
 	n := Plan(1, "abcdef0123")
 	var llamadas [][]string
 	ns := func(args ...string) error {
 		llamadas = append(llamadas, append([]string(nil), args...))
 		return nil
 	}
-	if err := n.applyIPv6Barrier(ns); err != nil {
-		t.Fatalf("applyIPv6Barrier = %v", err)
+	if err := aplicarSysctls(ns, n.NS, n.NSIf); err != nil {
+		t.Fatalf("aplicarSysctls = %v", err)
 	}
-
-	junto := ""
-	for _, l := range llamadas {
-		junto += strings.Join(l, " ") + "\n"
+	if len(llamadas) != 1 || llamadas[0][0] != "sysctl" {
+		t.Fatalf("quería un solo sysctl, hubo %v", llamadas)
 	}
-	// Las cuatro claves de sysctl que cierran IPv6 dentro del namespace, sin
-	// depender de que exista ip6tables.
+	junto := strings.Join(llamadas[0], " ")
+	// Las cuatro claves que cierran IPv6 dentro del namespace, sin depender
+	// de que exista ip6tables; el reenvío antes que el endurecimiento.
 	for _, quiere := range []string{
-		"sysctl -w net.ipv6.conf.all.disable_ipv6=1",
-		"sysctl -w net.ipv6.conf.default.disable_ipv6=1",
-		"sysctl -w net.ipv6.conf." + TapName + ".disable_ipv6=1",
-		"sysctl -w net.ipv6.conf." + n.NSIf + ".disable_ipv6=1",
+		"net.ipv6.conf.all.disable_ipv6=1",
+		"net.ipv6.conf.default.disable_ipv6=1",
+		"net.ipv6.conf." + TapName + ".disable_ipv6=1",
+		"net.ipv6.conf." + n.NSIf + ".disable_ipv6=1",
+		"net.ipv4.neigh." + TapName + ".retrans_time_ms=50",
+		"net.ipv4.conf.all.accept_redirects=0",
 	} {
 		if !strings.Contains(junto, quiere) {
 			t.Errorf("falta %q:\n%s", quiere, junto)
 		}
+	}
+	if strings.Index(junto, "ip_forward=1") > strings.Index(junto, "accept_redirects") {
+		t.Errorf("ip_forward va después de accept_redirects y lo reescribe:\n%s", junto)
 	}
 }
 
@@ -241,19 +247,25 @@ func TestApplyIPv6BarrierNoFallaSinIp6tables(t *testing.T) {
 	}
 }
 
-// Un fallo de sysctl (namespace sin /proc/sys/net/ipv6, por ejemplo) tampoco
-// es fatal: la capa 2 (ip6tables) sigue en pie, y negarse a montar la red por
-// esto dejaría a la microVM sin arrancar por algo que no es su culpa.
-func TestApplyIPv6BarrierSiguePeseAUnSysctlQueFalla(t *testing.T) {
+// Un fallo de sysctl en una clave de endurecimiento o de IPv6 (namespace sin
+// /proc/sys/net/ipv6, kernel sin conntrack cargado) no es fatal: sysctl
+// aplica las demás, y negarse a montar la red por esto dejaría a la microVM
+// sin arrancar por algo que no es su culpa. Uno del reenvío sí lo es.
+func TestAplicarSysctlsSiguePeseAUnSysctlQueFalla(t *testing.T) {
 	n := Plan(3, "0011223344")
-	ns := func(args ...string) error {
-		if len(args) > 0 && args[0] == "sysctl" {
-			return fmt.Errorf("sysctl: no such file or directory")
+	imprescindibles := strings.Join(append([]string{"sysctl", "-q", "-w"}, sysctlsImprescindibles()...), " ")
+	soloFallaElLargo := func(args ...string) error {
+		if strings.Join(args, " ") != imprescindibles {
+			return fmt.Errorf("sysctl: cannot stat /proc/sys/net/ipv6/conf/all/disable_ipv6")
 		}
 		return nil
 	}
-	if err := n.applyIPv6Barrier(ns); err != nil {
-		t.Fatalf("un sysctl que falla no debe tumbar applyIPv6Barrier: %v", err)
+	if err := aplicarSysctls(soloFallaElLargo, n.NS, n.NSIf); err != nil {
+		t.Fatalf("un sysctl de endurecimiento que falla no debe tumbar el montaje: %v", err)
+	}
+	fallaTodo := func(args ...string) error { return fmt.Errorf("sysctl: permission denied") }
+	if err := aplicarSysctls(fallaTodo, n.NS, n.NSIf); err == nil {
+		t.Fatal("sin ip_forward en el netns la máquina no tiene red: aplicarSysctls tenía que fallar")
 	}
 }
 
@@ -318,75 +330,6 @@ func TestReglasEnlaceSobrantes(t *testing.T) {
 	}
 }
 
-// iptablesFalso simula las cadenas de la tabla filter para setupHostInput y
-// setupAcceso: -C, -D, -I 1, -A, -N y el -n -L que dice si una cadena existe.
-// INPUT y OUTPUT existen siempre; las demás, tras su -N.
-type iptablesFalso struct {
-	input []string
-	otras map[string][]string
-}
-
-func (f *iptablesFalso) cadena(nombre string) ([]string, bool) {
-	if nombre == "INPUT" {
-		return f.input, true
-	}
-	c, ok := f.otras[nombre]
-	return c, ok || nombre == "OUTPUT"
-}
-
-func (f *iptablesFalso) poner(nombre string, c []string) {
-	if nombre == "INPUT" {
-		f.input = c
-		return
-	}
-	if f.otras == nil {
-		f.otras = map[string][]string{}
-	}
-	f.otras[nombre] = c
-}
-
-func (f *iptablesFalso) clave(args []string) string {
-	return strings.Join(args[3:], " ") // tras "iptables -X CADENA"
-}
-
-func (f *iptablesFalso) comprobar(args []string) bool {
-	if args[1] == "-n" && args[2] == "-L" {
-		_, ok := f.cadena(args[3])
-		return ok
-	}
-	c, _ := f.cadena(args[2])
-	return slices.Contains(c, f.clave(args))
-}
-
-func (f *iptablesFalso) ejecutar(args ...string) error {
-	if args[1] == "-N" {
-		if _, ok := f.cadena(args[2]); ok {
-			return errors.New("ya existe")
-		}
-		f.poner(args[2], []string{})
-		return nil
-	}
-	c, ok := f.cadena(args[2])
-	if !ok {
-		return fmt.Errorf("no existe la cadena %s", args[2])
-	}
-	switch args[1] {
-	case "-D":
-		if i := slices.Index(c, f.clave(args)); i >= 0 {
-			f.poner(args[2], slices.Delete(c, i, i+1))
-			return nil
-		}
-		return errors.New("no existe")
-	case "-I":
-		f.poner(args[2], slices.Insert(c, 0, strings.Join(args[4:], " ")))
-		return nil
-	case "-A":
-		f.poner(args[2], append(c, f.clave(args)))
-		return nil
-	}
-	return fmt.Errorf("inesperado: %v", args)
-}
-
 // La HostIP de una máquina solo se alcanza por su propio veth: el ACCEPT de
 // cada servicio del host (DNS, credenciales, Postgres, MySQL, aristas) exige
 // que el destino sea del interfaz de entrada. Medido en el lab: con la regla
@@ -411,9 +354,9 @@ func TestSetupHostInputQuitaLasReglasViejas(t *testing.T) {
 		_ = f.ejecutar(viejas[i]...)
 	}
 	f.input = append(f.input, "-p tcp --dport 22 -j ACCEPT") // algo del administrador
-	oldC, oldE := comprobarRegla, ejecutar
-	t.Cleanup(func() { comprobarRegla, ejecutar = oldC, oldE })
-	comprobarRegla, ejecutar = f.comprobar, f.ejecutar
+	oldC, oldE := comprobarEstado, ejecutar
+	t.Cleanup(func() { comprobarEstado, ejecutar = oldC, oldE })
+	comprobarEstado, ejecutar = f.estado, f.ejecutar
 
 	if err := setupHostInput(); err != nil {
 		t.Fatal(err)
@@ -435,9 +378,9 @@ func TestSetupHostInputQuitaLasReglasViejas(t *testing.T) {
 // ordenar (visto en el lab: el DNS del invitado se quedó sin respuesta).
 func TestSetupHostInputReordenaTrasOtraVersion(t *testing.T) {
 	f := &iptablesFalso{}
-	oldC, oldE := comprobarRegla, ejecutar
-	t.Cleanup(func() { comprobarRegla, ejecutar = oldC, oldE })
-	comprobarRegla, ejecutar = f.comprobar, f.ejecutar
+	oldC, oldE := comprobarEstado, ejecutar
+	t.Cleanup(func() { comprobarEstado, ejecutar = oldC, oldE })
+	comprobarEstado, ejecutar = f.estado, f.ejecutar
 	if err := setupHostInput(); err != nil {
 		t.Fatal(err)
 	}
