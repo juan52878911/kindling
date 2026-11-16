@@ -34,6 +34,7 @@
 #include <string.h>
 #include <sys/clonefile.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -2527,72 +2528,35 @@ uint64_t khv_footprint(void) {
   return vi.phys_footprint;
 }
 
-// Contadores por hilo y por tipo de núcleo: PROC_PIDTHREADCOUNTS de
-// <sys/proc_info_private.h> (macOS 13+), que el SDK no publica. Una entrada
-// por nivel de rendimiento: la 0 son los núcleos P y la 1 los E. Los tiempos
-// van en unidades de mach_absolute_time.
-#define KHV_PROC_PIDTHREADCOUNTS 34
-struct khv_ptc_datos {
-  uint64_t instr, ciclos, user_mach, system_mach, energia_nj;
-};
-struct khv_ptc {
-  uint16_t niveles, reservado0;
-  uint32_t reservado1;
-  struct khv_ptc_datos c[];
-};
-
 static uint64_t mach_a_ns(uint64_t t) { return (uint64_t)((__uint128_t)t * tb.numer / tb.denom); }
 
-// khv_cpu_lectura da la CPU que han gastado los hilos de vCPU (dentro y fuera
-// del invitado), lo que el regulador de CPU cobra a la VM: out[0] el total en
-// ns, out[1] lo que corrió en núcleos P, out[2] las instrucciones y out[3] las
-// de P. Con eso footprint.Contador cobra el tiempo en E a lo que vale en P
-// (vz/internal/footprint/coste.go), como hace kling-vz con su auxiliar. Sin
-// los contadores por núcleo (un macOS que no los dé), out[1..3] van a 0 y se
-// cobra el tiempo tal cual; la elección se hace en la primera lectura y no
-// cambia, para que el total no salte entre una fuente y otra.
+// khv_cpu_lectura da la CPU que ha gastado el proceso entero, lo que el
+// regulador de CPU cobra a la VM: out[0] el total en ns, out[1] lo que corrió
+// en núcleos P, out[2] las instrucciones y out[3] las de P. Con eso
+// footprint.Contador cobra el tiempo en E a lo que vale en P
+// (vz/internal/footprint/coste.go), como hace kling-vz con su auxiliar.
+// Antes solo se contaban los hilos de vCPU (R6): los de los discos, la red,
+// vsock y la pila de red en Go trabajan para el invitado y quedaban fuera del
+// tope, con lo que una VM a cpu_pct=10 podía gastar varios núcleos en E/S. Es
+// lo mismo que cobra kling-vz: el auxiliar de Apple entero, con sus
+// dispositivos. Sin RUSAGE_INFO_V6 (un macOS que no la dé), out[1..3] van a 0
+// y se cobra el tiempo tal cual.
 void khv_cpu_lectura(uint64_t out[4]) {
-  static int por_nucleo = -1;  // -1: sin decidir
   out[0] = out[1] = out[2] = out[3] = 0;
-  pthread_mutex_lock(&mu);
-  int n = n_creados;
-  pthread_mutex_unlock(&mu);
-  for (int i = 0; i < n; i++) {
-    if (por_nucleo != 0) {
-      uint64_t tid = 0;
-      union {
-        struct khv_ptc p;
-        uint8_t b[sizeof(struct khv_ptc) + 4 * sizeof(struct khv_ptc_datos)];
-      } u;
-      int r = pthread_threadid_np(cpus[i].hilo, &tid) == 0
-                  ? proc_pidinfo(getpid(), KHV_PROC_PIDTHREADCOUNTS, tid, &u, sizeof u)
-                  : -1;
-      if (r >= (int)(sizeof(struct khv_ptc) + 2 * sizeof(struct khv_ptc_datos)) && u.p.niveles >= 2) {
-        por_nucleo = 1;
-        for (int k = 0; k < u.p.niveles && k < 4; k++) {
-          uint64_t t = mach_a_ns(u.p.c[k].user_mach + u.p.c[k].system_mach);
-          out[0] += t;
-          out[2] += u.p.c[k].instr;
-          if (k == 0) out[1] += t, out[3] += u.p.c[k].instr;
-        }
-        continue;
-      }
-      if (por_nucleo == -1) {
-        // La primera lectura decide: sin contadores por núcleo, a la cuenta
-        // de siempre para todos los hilos.
-        por_nucleo = 0;
-        khv_cpu_lectura(out);
-        return;
-      }
-      continue;  // un hilo que no se pudo leer esta vez (no debería pasar)
-    }
-    thread_basic_info_data_t bi;
-    mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
-    mach_port_t t = pthread_mach_thread_np(cpus[i].hilo);
-    if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) continue;
-    out[0] += (uint64_t)(bi.user_time.seconds + bi.system_time.seconds) * 1000000000ULL +
-              (uint64_t)(bi.user_time.microseconds + bi.system_time.microseconds) * 1000ULL;
+  if (tb.denom == 0) mach_timebase_info(&tb);  // sin VM todavía (pruebas)
+  struct rusage_info_v6 ri;
+  memset(&ri, 0, sizeof ri);
+  if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6, (rusage_info_t *)&ri) == 0) {
+    // proc_pid_rusage da los tiempos en ticks de mach_absolute_time.
+    out[0] = mach_a_ns(ri.ri_user_time + ri.ri_system_time);
+    out[1] = mach_a_ns(ri.ri_user_ptime + ri.ri_system_ptime);
+    out[2] = ri.ri_instructions;
+    out[3] = ri.ri_pinstructions;
+    return;
   }
+  struct rusage_info_v4 r4;
+  if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&r4) == 0)
+    out[0] = mach_a_ns(r4.ri_user_time + r4.ri_system_time);
 }
 
 void khv_tiempos(double *primer_run_ms, double *restaurado_ms) {
