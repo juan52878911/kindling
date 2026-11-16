@@ -143,7 +143,7 @@ func (b *bridge) spawnProxyChild() error {
 	b.pmu.Unlock()
 	log.Printf("http mode: MCP server started (pid %d), waiting on %s", cmd.Process.Pid, b.childAddr())
 
-	if err := waitForPort(b.childAddr(), 40*time.Second); err != nil {
+	if err := waitForPortWhile(b.childAddr(), 40*time.Second, h.vivo); err != nil {
 		b.pmu.Lock()
 		if b.proxyChild == h {
 			b.proxyChild = nil
@@ -250,8 +250,17 @@ func (b *bridge) ensureProxyChild(r *http.Request) error {
 // dormir un tiempo fijo, que o se queda corto en un arranque lento o alarga el
 // boot sin necesidad.
 func waitForPort(addr string, timeout time.Duration) error {
+	return waitForPortWhile(addr, timeout, func() bool { return true })
+}
+
+// waitForPortWhile es waitForPort que se rinde en cuanto vivo() dice que no:
+// un hijo que muere al arrancar no debe hacer esperar el plazo entero.
+func waitForPortWhile(addr string, timeout time.Duration, vivo func() bool) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if !vivo() {
+			return fmt.Errorf("the HTTP MCP server exited before opening %s", addr)
+		}
 		c, err := net.DialTimeout("tcp", addr, 1*time.Second)
 		if err == nil {
 			_ = c.Close()

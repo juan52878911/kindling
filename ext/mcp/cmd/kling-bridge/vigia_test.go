@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/guest"
 )
@@ -99,6 +100,23 @@ func TestProxyInyectaLosSecretosDeMMDS(t *testing.T) {
 	store = &guest.MMDSStore{Env: map[string]string{"SECRETO_FALSO": "dos"}}
 	if r := pedir(t, b, http.MethodPost); !strings.HasSuffix(r, " dos") {
 		t.Fatalf("tras cambiar MMDS sigue el entorno viejo: %q", r)
+	}
+}
+
+// Un servidor HTTP que muere al arrancar falla enseguida, no a los 40 s de
+// plazo del puerto.
+func TestProxyHijoQueMuereAlArrancarFallaYa(t *testing.T) {
+	var store *guest.MMDSStore
+	conMMDS(t, &store)
+	_, port := direccionLibre(t)
+	b := &bridge{argv: []string{"false"}, service: &serviceSpec{Transport: "http", Port: port},
+		sessions: map[string]*session{}}
+	t0 := time.Now()
+	if err := b.spawnProxyChild(); err == nil {
+		t.Fatal("un hijo que sale sin abrir el puerto no puede dar el arranque por bueno")
+	}
+	if d := time.Since(t0); d > 5*time.Second {
+		t.Fatalf("tardó %s en ver que el hijo había muerto", d)
 	}
 }
 
