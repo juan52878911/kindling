@@ -273,12 +273,14 @@ func (n *Net) soltarTCP() {
 // vivas, redondeadas a la potencia de dos de encima: solo se toca la pila al
 // cambiar de tramo, no en cada conexión.
 func (n *Net) ajustarBuffers() {
+	// Con el cerrojo: dos que cambian de tramo a la vez no pueden dejar
+	// puesto el del que leyó primero.
+	n.bufMu.Lock()
+	defer n.bufMu.Unlock()
 	tramo := 1
 	for tramo < len(n.tcpFlows) {
 		tramo <<= 1
 	}
-	n.bufMu.Lock()
-	defer n.bufMu.Unlock()
 	if tramo == n.bufTramo {
 		return
 	}
