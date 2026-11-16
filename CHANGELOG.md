@@ -81,6 +81,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 - kling-hv: a FLUSH with no writes since the previous one no longer issues `F_FULLFSYNC` (300 of them: about 1.2 s to 2.5 ms on the host).
 - macOS DNS: a UDP answer with another transaction id is ignored while waiting for the right one, instead of answering the guest with SERVFAIL.
 - kling-hv: stale `.khv-clon-*` directories left by a killed snapshot (each holding a full copy of guest RAM) are removed by the next snapshot.
+- macOS networking: the netstack TCP buffers of a VM share a 256 MiB budget (512 open connections could hold up to 7 GiB of host memory), and DNS answers over 4 KiB are not cached.
 
 ### Security
 
