@@ -80,6 +80,7 @@ Binaries for every release are on the [Releases](https://github.com/juan52878911
 
 ### Security
 
+- The pre-warmed pool labels (`kling.pool`, `kling.pool.ready`) are rejected in fork and graph nodes too, and on restart the daemon only re-adopts pool copies restored from that template with no owner.
 - macOS: the credential proxy runs in its own sandboxed, hardened-runtime process per machine (`kling-credproxy`, installed next to `kling-vz`), so the real keys are no longer in the process that runs the guest's network stack; with an older `kling-vz` or `kling-hv` the daemon keeps the previous model (#80).
 - With an authz policy, `host_ports` and `nested` are admin-only for new machines, like volumes and shares.
 - With an authz policy, tenants can no longer set `upstream`, `upstream_tls` or `tls_server_name` on a credential.

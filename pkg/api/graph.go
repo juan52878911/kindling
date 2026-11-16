@@ -38,15 +38,29 @@ func IsGraphLabel(k string) bool {
 	return k == LabelGraph || strings.HasPrefix(k, LabelGraph+".")
 }
 
+// IsReservedLabel dice si k es una etiqueta de estado que solo pone el
+// daemon: las de los grafos (IsGraphLabel) y las del fondo precalentado
+// (LabelPool, LabelPoolReady). Es la única lista: run, sandbox, PUT labels,
+// fork y los nodos de un grafo la consultan, y una entrada que faltara en uno
+// de ellos dejaría colar una máquina con aspecto de copia del fondo.
+func IsReservedLabel(k string) bool {
+	return IsGraphLabel(k) || k == LabelPool || k == LabelPoolReady
+}
+
+// errReservedLabel explica por qué k está reservada.
+func errReservedLabel(k string) error {
+	if IsGraphLabel(k) {
+		return fmt.Errorf("label %q is reserved: the daemon sets it on the machines of a graph", k)
+	}
+	return fmt.Errorf("label %q is reserved: the daemon sets it on the pre-warmed copies of a template", k)
+}
+
 // ValidateNoGraphLabels rechaza un juego de etiquetas que traiga alguna de
-// los grafos.
+// las reservadas al daemon (IsReservedLabel).
 func ValidateNoGraphLabels(labels map[string]string) error {
 	for k := range labels {
-		if IsGraphLabel(k) {
-			return fmt.Errorf("label %q is reserved: the daemon sets it on the machines of a graph", k)
-		}
-		if k == LabelPool || k == LabelPoolReady {
-			return fmt.Errorf("label %q is reserved: the daemon sets it on the pre-warmed copies of a template", k)
+		if IsReservedLabel(k) {
+			return errReservedLabel(k)
 		}
 	}
 	return nil
@@ -448,7 +462,7 @@ func validarNodo(name string, n *GraphNode) error {
 		if !KeyPattern.MatchString(k) {
 			return fmt.Errorf("node %s: label %q is not valid (lowercase letters, digits, '.', '_', '-')", name, k)
 		}
-		if IsGraphLabel(k) || k == LabelForkOf || k == LabelPorts {
+		if IsReservedLabel(k) || k == LabelForkOf || k == LabelPorts {
 			return fmt.Errorf("node %s: label %q is reserved (the daemon sets it; ports go in ports)", name, k)
 		}
 	}

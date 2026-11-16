@@ -308,3 +308,63 @@ func TestFondoVacioSeReponeAlReclamar(t *testing.T) {
 	}
 	esperar(t, "fondo repuesto al reclamar", func() bool { return m.InfoFondo("dorado").Ready == 1 })
 }
+
+// S6: al arrancar, reanudarFondos adoptaba cualquier máquina viva con las
+// etiquetas del fondo, sin mirar de qué plantilla salió ni de quién es. Una
+// máquina de inquilino que las llevara pasaba a entregarse al siguiente que
+// pidiera la plantilla. Ahora solo adopta las restauradas de esa plantilla y
+// sin dueño, y a las demás no las toca (ni las retira: no son del fondo).
+func TestFondoReanudarSoloAdoptaCopiasDeVerdad(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	escribirSnapshot(t, m, "dorado", api.Snapshot{})
+	var n atomic.Int32
+	m.altaFondo = altaFalsa(m, &n)
+	t.Cleanup(func() {
+		m.pararFondos()
+		m.fondoMu.Lock()
+		var hechos []chan struct{}
+		for _, f := range m.fondos {
+			if f.hecho != nil {
+				hechos = append(hechos, f.hecho)
+			}
+		}
+		m.fondoMu.Unlock()
+		for _, h := range hechos {
+			<-h
+		}
+	})
+	if err := m.escribirFondos(fotoFondos{tam: map[string]int{"dorado": 4}, gen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	fondo := map[string]string{api.LabelPool: "dorado", api.LabelPoolReady: "1"}
+	alta := func(id, from string, extra map[string]string) {
+		m.byID[id] = &api.Machine{ID: id, Name: "m-" + id, From: from, State: api.StateRunning,
+			CreatedAt: time.Now(), Labels: api.MergeLabels(fondo, extra)}
+	}
+	alta("aaaa000000000001", "dorado", nil)                                    // copia de verdad
+	alta("aaaa000000000002", "dorado", map[string]string{api.LabelOwner: "b"}) // de un inquilino
+	alta("aaaa000000000003", "otra", nil)                                      // de otra plantilla
+	m.reanudarFondos()
+
+	m.fondoMu.Lock()
+	adoptadas := map[string]bool{}
+	for id := range m.fondos["dorado"].todas {
+		adoptadas[id] = true
+	}
+	m.fondoMu.Unlock()
+	if !adoptadas["aaaa000000000001"] {
+		t.Error("no adoptó la copia de verdad")
+	}
+	for _, id := range []string{"aaaa000000000002", "aaaa000000000003"} {
+		if adoptadas[id] {
+			t.Errorf("adoptó %s, que no es del fondo", id)
+		}
+		m.mu.RLock()
+		_, sigue := m.byID[id]
+		m.mu.RUnlock()
+		if !sigue {
+			t.Errorf("retiró %s, que no es del fondo", id)
+		}
+	}
+}
