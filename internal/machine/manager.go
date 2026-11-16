@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -1137,13 +1138,8 @@ func (m *Manager) writePending() error {
 
 // escribirFoto serializa y escribe la foto gen. Se llama con escrituraMu.
 func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
-
 	schema := esquemaParaEscribir(list)
-	f := struct {
-		esquema.Cabecera
-		Machines []api.Machine `json:"machines"`
-	}{esquema.Cabecera{Schema: schema}, list}
-	b, err := json.MarshalIndent(f, "", "  ")
+	b, err := serializarFoto(list, schema)
 	if err != nil {
 		return fmt.Errorf("could not serialize it: %w", err)
 	}
@@ -1169,6 +1165,82 @@ func (m *Manager) escribirFoto(list []api.Machine, gen uint64) error {
 	}
 	m.escritoGen = gen
 	return nil
+}
+
+// serializarFoto es el state.json de la foto list con esquema schema: los
+// mismos bytes que json.MarshalIndent(..., "", "  ") de la cabecera y la
+// lista, pero cada máquina por su lado y, con muchas, en paralelo.
+//
+// Serializar las N máquinas en una sola pasada costaba ~1,7 ms con 1000 en
+// el M4 por cada escritura (P4), y persistirYa lo paga antes de lanzar cada
+// VMM. Cachear los bytes de las que no cambiaron no compensa: saber que no
+// cambiaron (reflect.DeepEqual con la copia escrita) cuesta lo mismo que
+// serializarlas. Repartirlas entre los núcleos sí: el mismo trabajo en la
+// mitad del tiempo de pared (0,8 ms con 1000; BenchmarkFotoEstado).
+func serializarFoto(list []api.Machine, schema int) ([]byte, error) {
+	var buf bytes.Buffer
+	// Como MarshalIndent de esquema.Cabecera (solo schema) y la lista.
+	fmt.Fprintf(&buf, "{\n  \"schema\": %d,\n  \"machines\": ", schema)
+	if list == nil {
+		buf.WriteString("null\n}")
+		return buf.Bytes(), nil
+	}
+	if len(list) == 0 {
+		buf.WriteString("[]\n}")
+		return buf.Bytes(), nil
+	}
+	// Cada tanda, sus máquinas separadas como en MarshalIndent; las tandas se
+	// unen igual.
+	const porTanda = 64
+	tanda := max(porTanda, (len(list)+runtime.GOMAXPROCS(0)-1)/runtime.GOMAXPROCS(0))
+	n := (len(list) + tanda - 1) / tanda
+	trozos := make([]bytes.Buffer, n)
+	errs := make([]error, n)
+	codificar := func(k int) {
+		t := &trozos[k]
+		enc := json.NewEncoder(t)
+		enc.SetIndent("    ", "  ")
+		for i := k * tanda; i < min((k+1)*tanda, len(list)); i++ {
+			if i > k*tanda {
+				t.WriteString(",\n    ")
+			}
+			if err := enc.Encode(&list[i]); err != nil {
+				errs[k] = err
+				return
+			}
+			t.Truncate(t.Len() - 1) // el "\n" que añade Encode
+		}
+	}
+	if n == 1 {
+		codificar(0)
+	} else {
+		var wg sync.WaitGroup
+		for k := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				codificar(k)
+			}()
+		}
+		wg.Wait()
+	}
+	total := 0
+	for k := range trozos {
+		if errs[k] != nil {
+			return nil, errs[k]
+		}
+		total += trozos[k].Len() + 8
+	}
+	buf.Grow(total + 8)
+	buf.WriteString("[\n    ")
+	for k := range trozos {
+		if k > 0 {
+			buf.WriteString(",\n    ")
+		}
+		buf.Write(trozos[k].Bytes())
+	}
+	buf.WriteString("\n  ]\n}")
+	return buf.Bytes(), nil
 }
 
 // persistirYa escribe el estado AHORA, sin esperar al debounce. Se llama SIN m.mu.
